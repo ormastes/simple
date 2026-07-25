@@ -1,0 +1,1081 @@
+//! Module resolver for the Simple language module system.
+//!
+//! This module handles resolving module paths to filesystem locations
+//! and managing directory manifests (__init__.spl files).
+//!
+//! ## Integration with dependency_tracker
+//!
+//! This module bridges the parser's AST types with the formally-verified
+//! types in `simple_dependency_tracker`. The formal models ensure:
+//!
+//! - Module resolution is unambiguous (no foo.spl + foo/__init__.spl conflicts)
+//! - Visibility is the intersection of item and ancestor visibility
+//! - Glob imports only include macros listed in `auto import`
+
+mod manifest;
+mod resolution;
+mod types;
+pub(crate) mod var_overlay;
+
+// Re-export public types
+pub use types::{
+    ChildModule, DirectoryManifest, ModuleLifecycle, ModuleResolver, ModuleState, ResolveResult, ResolvedModule,
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::create_test_project;
+    use simple_dependency_tracker::{
+        macro_import::{MacroExports, MacroSymbol, SymKind},
+        visibility::Visibility as TrackerVisibility,
+    };
+    use simple_parser::ast::{Capability, ModulePath, Visibility};
+    use std::fs;
+    use std::path::Path;
+
+    #[test]
+    fn test_resolver_creation() {
+        let dir = create_test_project();
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), dir.path().join("src"));
+        assert_eq!(resolver.project_root(), dir.path());
+        assert_eq!(resolver.source_root(), dir.path().join("src"));
+    }
+
+    #[test]
+    fn test_single_file_mode() {
+        let resolver = ModuleResolver::single_file(Path::new("/tmp/test.spl"));
+        assert_eq!(resolver.project_root(), Path::new("/tmp"));
+        assert_eq!(resolver.source_root(), Path::new("/tmp"));
+    }
+
+    #[test]
+    fn test_single_file_mode_with_project_hint_uses_hint_root() {
+        let dir = create_test_project();
+        let external = tempfile::tempdir().unwrap();
+        let external_file = external.path().join("probe.spl");
+        fs::write(&external_file, "fn main() -> i64:\n    0\n").unwrap();
+
+        let resolver = ModuleResolver::single_file_with_project_hint(&external_file, Some(dir.path()));
+
+        assert_eq!(resolver.project_root(), dir.path());
+        assert_eq!(resolver.source_root(), dir.path().join("src"));
+    }
+
+    #[test]
+    fn test_resolve_file_module() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+
+        // Create a module file
+        fs::write(src.join("utils.spl"), "fn helper(): 42").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+
+        let path = ModulePath::new(vec!["crate".into(), "utils".into()]);
+        let resolved = resolver.resolve(&path, &src.join("main.spl")).unwrap();
+
+        assert_eq!(resolved.path, src.join("utils.spl"));
+        assert!(!resolved.is_directory);
+    }
+
+    #[test]
+    fn test_resolve_file_module_before_same_name_package() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let driver_dir = src.join("driver");
+        fs::create_dir_all(&driver_dir).unwrap();
+        fs::write(src.join("driver.spl"), "fn compiler_driver_create(): 0").unwrap();
+        fs::write(driver_dir.join("__init__.spl"), "export use crate.driver.*").unwrap();
+        fs::write(driver_dir.join("incremental.spl"), "struct IncrementalCompiler:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+
+        let file_path = ModulePath::new(vec!["crate".into(), "driver".into()]);
+        let file_resolved = resolver.resolve(&file_path, &src.join("main.spl")).unwrap();
+        assert_eq!(file_resolved.path, src.join("driver.spl"));
+        assert!(!file_resolved.is_directory);
+
+        let nested_path = ModulePath::new(vec!["crate".into(), "driver".into(), "incremental".into()]);
+        let nested_resolved = resolver.resolve(&nested_path, &src.join("main.spl")).unwrap();
+        assert_eq!(nested_resolved.path, driver_dir.join("incremental.spl"));
+        assert!(!nested_resolved.is_directory);
+    }
+
+    #[test]
+    fn test_bare_compiler_namespace_prefers_project_compiler() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let app = src.join("app");
+        let compiler = src.join("compiler");
+        let seed_compiler = src.join("compiler_rust/lib/std/src/compiler");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&compiler).unwrap();
+        fs::create_dir_all(&seed_compiler).unwrap();
+        fs::write(compiler.join("__init__.spl"), "export compiler.driver.*\n").unwrap();
+        fs::write(seed_compiler.join("__init__.spl"), "export compiler.lexer.*\n").unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), app.clone());
+        let path = ModulePath::new(vec!["compiler".into()]);
+        let resolved = resolver.resolve(&path, &app.join("main.spl")).unwrap();
+
+        assert_eq!(resolved.path, compiler.join("__init__.spl"));
+    }
+
+    #[test]
+    fn test_resolve_directory_module() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let http = src.join("http");
+        fs::create_dir_all(&http).unwrap();
+
+        // Create __init__.spl
+        fs::write(http.join("__init__.spl"), "mod http\npub mod router").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+
+        let path = ModulePath::new(vec!["crate".into(), "http".into()]);
+        let resolved = resolver.resolve(&path, &src.join("main.spl")).unwrap();
+
+        assert_eq!(resolved.path, http.join("__init__.spl"));
+        assert!(resolved.is_directory);
+    }
+
+    #[test]
+    fn test_resolve_directory_mod_file_module() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let security = src.join("common").join("security");
+        fs::create_dir_all(&security).unwrap();
+
+        fs::write(security.join("mod.spl"), "pub use std.security.types").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+
+        let path = ModulePath::new(vec!["common".into(), "security".into()]);
+        let resolved = resolver.resolve(&path, &src.join("main.spl")).unwrap();
+
+        assert_eq!(resolved.path, security.join("mod.spl"));
+        assert!(resolved.is_directory);
+    }
+
+    #[test]
+    fn test_resolve_escaped_mod_file_module() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let header_gen = src.join("compiler").join("90.tools").join("header_gen");
+        fs::create_dir_all(&header_gen).unwrap();
+
+        fs::write(header_gen.join("mod.spl"), "struct HeaderGenerator:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec![
+            "compiler".into(),
+            "tools".into(),
+            "header_gen".into(),
+            "mod_".into(),
+        ]);
+        let resolved = resolver.resolve(&path, &header_gen.join("__init__.spl")).unwrap();
+
+        assert_eq!(resolved.path, header_gen.join("mod.spl"));
+        assert!(!resolved.is_directory);
+    }
+
+    #[test]
+    fn test_resolve_nested_module() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let http = src.join("sys").join("http");
+        fs::create_dir_all(&http).unwrap();
+
+        fs::write(http.join("router.spl"), "struct Router:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+
+        let path = ModulePath::new(vec!["crate".into(), "sys".into(), "http".into(), "router".into()]);
+        let resolved = resolver.resolve(&path, &src.join("main.spl")).unwrap();
+
+        assert_eq!(resolved.path, http.join("router.spl"));
+    }
+
+    #[test]
+    fn test_resolve_dotted_backend_module() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let app_ui = src.join("app").join("ui");
+        let app_ui_web = src.join("app").join("ui.web");
+        fs::create_dir_all(&app_ui).unwrap();
+        fs::create_dir_all(&app_ui_web).unwrap();
+
+        fs::write(app_ui.join("__init__.spl"), "mod ui").unwrap();
+        fs::write(app_ui_web.join("server.spl"), "fn run_web(): 0").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+
+        let path = ModulePath::new(vec![
+            "crate".into(),
+            "app".into(),
+            "ui".into(),
+            "web".into(),
+            "server".into(),
+        ]);
+        let resolved = resolver.resolve(&path, &src.join("main.spl")).unwrap();
+
+        assert_eq!(resolved.path, app_ui_web.join("server.spl"));
+    }
+
+    #[test]
+    fn test_resolve_compiler_alias_import_from_symlinked_frontend_file() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let compiler_root = src.join("compiler");
+        let numbered_frontend = compiler_root.join("10.frontend");
+        let alias_frontend = compiler_root.join("frontend");
+        let frontend_core = numbered_frontend.join("core");
+
+        fs::create_dir_all(&frontend_core).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("10.frontend", &alias_frontend).unwrap();
+
+        fs::write(frontend_core.join("tokens.spl"), "struct Token:").unwrap();
+        fs::write(frontend_core.join("lexer.spl"), "use compiler.core.tokens.{Token}").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), compiler_root.clone())
+            .with_extra_source_roots(vec![src.clone(), compiler_root.clone()]);
+
+        let path = ModulePath::new(vec!["compiler".into(), "core".into(), "tokens".into()]);
+        let from_file = alias_frontend.join("core").join("lexer.spl");
+        let resolved = resolver.resolve(&path, &from_file).unwrap();
+
+        assert_eq!(resolved.path, frontend_core.join("tokens.spl"));
+    }
+
+    #[test]
+    fn test_resolve_numbered_layer_alias_intermediate_segment() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let native = src.join("compiler").join("70.backend").join("backend").join("native");
+        fs::create_dir_all(&native).unwrap();
+        fs::write(native.join("mach_inst.spl"), "struct MachInst:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec![
+            "compiler".into(),
+            "backend".into(),
+            "native".into(),
+            "mach_inst".into(),
+        ]);
+        let resolved = resolver.resolve(&path, &src.join("compiler/main.spl")).unwrap();
+
+        assert_eq!(resolved.path, native.join("mach_inst.spl"));
+    }
+
+    #[test]
+    fn test_resolve_explicit_numbered_layer_segments() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let semantics = src.join("compiler").join("35.semantics");
+        fs::create_dir_all(&semantics).unwrap();
+        fs::write(semantics.join("resolve.spl"), "fn resolve(): 0").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec![
+            "compiler".into(),
+            "35".into(),
+            "semantics".into(),
+            "resolve".into(),
+        ]);
+        let resolved = resolver.resolve(&path, &src.join("compiler/main.spl")).unwrap();
+
+        assert_eq!(resolved.path, semantics.join("resolve.spl"));
+    }
+
+    #[test]
+    fn test_resolve_bare_compiler_module_from_numbered_layer() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let frontend = src.join("compiler").join("10.frontend");
+        let types = src.join("compiler").join("30.types").join("type_system");
+        fs::create_dir_all(&frontend).unwrap();
+        fs::create_dir_all(&types).unwrap();
+        fs::write(frontend.join("ast.spl"), "struct Node:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec!["ast".into()]);
+        let resolved = resolver.resolve(&path, &types.join("checker.spl")).unwrap();
+
+        assert_eq!(resolved.path, frontend.join("ast.spl"));
+    }
+
+    #[test]
+    fn test_resolve_compiler_shared_interpreter_alias() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let interpreter = src.join("compiler").join("95.interp").join("interpreter");
+        fs::create_dir_all(&interpreter).unwrap();
+        fs::write(interpreter.join("errors.spl"), "struct ErrorRegistry:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec!["compiler_shared".into(), "interpreter".into(), "errors".into()]);
+        let resolved = resolver
+            .resolve(&path, &src.join("compiler/common/error_explanations.spl"))
+            .unwrap();
+
+        assert_eq!(resolved.path, interpreter.join("errors.spl"));
+    }
+
+    #[test]
+    fn test_resolve_stdlib_package_aliases_from_family_root() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let family = src.join("lib").join("nogc_sync_mut");
+        let debug = family.join("debug");
+        let exp = family.join("src").join("exp");
+        let collections = family.join("src").join("collections");
+        let mcp_jj = family.join("mcp").join("jj");
+        let blink = src.join("lib").join("blink").join("dom");
+        let common_geometry = src.join("lib").join("common").join("geometry");
+        let common_rsa = src.join("lib").join("common").join("rsa");
+        fs::create_dir_all(&debug).unwrap();
+        fs::create_dir_all(&exp).unwrap();
+        fs::create_dir_all(&collections).unwrap();
+        fs::create_dir_all(&mcp_jj).unwrap();
+        fs::create_dir_all(&blink).unwrap();
+        fs::create_dir_all(&common_geometry).unwrap();
+        fs::create_dir_all(&common_rsa).unwrap();
+        fs::write(debug.join("coordinator.spl"), "struct DebugBackend:").unwrap();
+        fs::write(exp.join("config.spl"), "struct ExpConfig:").unwrap();
+        fs::write(collections.join("__init__.spl"), "struct List:").unwrap();
+        fs::write(mcp_jj.join("jj_runner.spl"), "struct JjRunner:").unwrap();
+        fs::write(blink.join("node.spl"), "struct DomNode:").unwrap();
+        fs::write(common_geometry.join("point.spl"), "struct Point:").unwrap();
+        fs::write(common_rsa.join("types.spl"), "struct RsaKey:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.join("lib"));
+        let from_file = family.join("debug").join("native_agent.spl");
+
+        let app_path = ModulePath::new(vec!["app".into(), "debug".into(), "coordinator".into()]);
+        let app_resolved = resolver.resolve(&app_path, &from_file).unwrap();
+        assert_eq!(app_resolved.path, debug.join("coordinator.spl"));
+
+        let mcp_jj_path = ModulePath::new(vec!["app".into(), "mcp_jj".into(), "jj_runner".into()]);
+        let mcp_jj_resolved = resolver
+            .resolve(&mcp_jj_path, &family.join("mcp/jj/helpers.spl"))
+            .unwrap();
+        assert_eq!(mcp_jj_resolved.path, mcp_jj.join("jj_runner.spl"));
+
+        let std_path = ModulePath::new(vec!["std".into(), "exp".into(), "config".into()]);
+        let std_resolved = resolver.resolve(&std_path, &from_file).unwrap();
+        assert_eq!(std_resolved.path, exp.join("config.spl"));
+
+        let core_path = ModulePath::new(vec!["core".into(), "collections".into()]);
+        let core_resolved = resolver.resolve(&core_path, &from_file).unwrap();
+        assert_eq!(core_resolved.path, collections.join("__init__.spl"));
+
+        let std_lib_path = ModulePath::new(vec![
+            "std".into(),
+            "lib".into(),
+            "blink".into(),
+            "dom".into(),
+            "node".into(),
+        ]);
+        let std_lib_resolved = resolver
+            .resolve(&std_lib_path, &src.join("lib/blink/dom/document.spl"))
+            .unwrap();
+        assert_eq!(std_lib_resolved.path, blink.join("node.spl"));
+
+        let std_common_path = ModulePath::new(vec!["std".into(), "common".into(), "geometry".into(), "point".into()]);
+        let std_common_resolved = resolver
+            .resolve(&std_common_path, &common_geometry.join("circle.spl"))
+            .unwrap();
+        assert_eq!(std_common_resolved.path, common_geometry.join("point.spl"));
+
+        let common_path = ModulePath::new(vec!["common".into(), "geometry".into(), "point".into()]);
+        let common_resolved = resolver
+            .resolve(&common_path, &common_geometry.join("__init__.spl"))
+            .unwrap();
+        assert_eq!(common_resolved.path, common_geometry.join("point.spl"));
+
+        let src_std_path = ModulePath::new(vec!["src".into(), "std".into(), "rsa".into(), "types".into()]);
+        let src_std_resolved = resolver
+            .resolve(&src_std_path, &common_rsa.join("encrypt.spl"))
+            .unwrap();
+        assert_eq!(src_std_resolved.path, common_rsa.join("types.spl"));
+    }
+
+    #[test]
+    fn test_resolve_bare_stdlib_common_package_import() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let aes = src.join("lib").join("common").join("aes");
+        fs::create_dir_all(&aes).unwrap();
+        fs::write(aes.join("types.spl"), "struct AesBlock:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.join("lib"));
+        let path = ModulePath::new(vec!["aes".into(), "types".into()]);
+        let resolved = resolver.resolve(&path, &aes.join("cipher.spl")).unwrap();
+
+        assert_eq!(resolved.path, aes.join("types.spl"));
+    }
+
+    #[test]
+    fn test_resolve_bare_canonical_std_module_import() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let compiler = src.join("compiler");
+        let verification = src
+            .join("compiler_rust")
+            .join("lib")
+            .join("std")
+            .join("src")
+            .join("verification")
+            .join("regenerate");
+        fs::create_dir_all(&compiler).unwrap();
+        fs::create_dir_all(&verification).unwrap();
+        fs::write(verification.join("__init__.spl"), "fn regenerate_all(): []").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), compiler.clone());
+        let path = ModulePath::new(vec!["verification".into(), "regenerate".into()]);
+        let resolved = resolver.resolve(&path, &compiler.join("verify.spl")).unwrap();
+
+        assert_eq!(resolved.path, verification.join("__init__.spl"));
+    }
+
+    #[test]
+    fn test_resolve_current_package_prefix_from_init() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let rules = src.join("compiler").join("90.tools").join("fix").join("rules");
+        let impl_dir = rules.join("impl");
+        fs::create_dir_all(&impl_dir).unwrap();
+        fs::write(rules.join("__init__.spl"), "export use rules.impl.*").unwrap();
+        fs::write(impl_dir.join("__init__.spl"), "export FixRule\nstruct FixRule:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec!["rules".into(), "impl".into()]);
+        let resolved = resolver.resolve(&path, &rules.join("__init__.spl")).unwrap();
+
+        assert_eq!(resolved.path, impl_dir.join("__init__.spl"));
+    }
+
+    #[test]
+    fn test_resolve_current_directory_relative_import() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let loader = src.join("compiler").join("99.loader").join("loader");
+        fs::create_dir_all(&loader).unwrap();
+        fs::write(loader.join("smf_cache.spl"), "struct SmfCache:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec![".".into(), "smf_cache".into()]);
+        let resolved = resolver.resolve(&path, &loader.join("smf_cache_manager.spl")).unwrap();
+
+        assert_eq!(resolved.path, loader.join("smf_cache.spl"));
+    }
+
+    #[test]
+    fn test_resolve_parent_directory_relative_import() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let loader = src.join("compiler").join("99.loader").join("loader");
+        let linker = src.join("compiler").join("99.loader").join("linker");
+        fs::create_dir_all(&loader).unwrap();
+        fs::create_dir_all(&linker).unwrap();
+        fs::write(linker.join("smf_reader.spl"), "struct SmfReaderImpl:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec!["..".into(), "linker".into(), "smf_reader".into()]);
+        let resolved = resolver.resolve(&path, &loader.join("smf_cache.spl")).unwrap();
+
+        assert_eq!(resolved.path, linker.join("smf_reader.spl"));
+    }
+
+    #[test]
+    fn test_resolve_grandparent_relative_import_through_numbered_layer() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let loader = src.join("compiler").join("99.loader").join("loader");
+        let monomorphize = src.join("compiler").join("40.mono").join("monomorphize");
+        fs::create_dir_all(&loader).unwrap();
+        fs::create_dir_all(&monomorphize).unwrap();
+        fs::write(monomorphize.join("note_sdn.spl"), "struct NoteSdnMetadata:").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec!["...".into(), "monomorphize".into(), "note_sdn".into()]);
+        let resolved = resolver.resolve(&path, &loader.join("smf_cache.spl")).unwrap();
+
+        assert_eq!(resolved.path, monomorphize.join("note_sdn.spl"));
+    }
+
+    #[test]
+    fn test_resolve_module_not_found() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+
+        let path = ModulePath::new(vec!["crate".into(), "nonexistent".into()]);
+        let result = resolver.resolve(&path, &src.join("main.spl"));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_bare_type_import_from_project_type_root() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let type_dir = dir.path().join("src").join("type").join("simple_lang");
+        fs::create_dir_all(&type_dir).unwrap();
+        fs::write(type_dir.join("I64.spl"), "type I64 = i64\nexport I64\n").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+
+        let path = ModulePath::new(vec!["I64".into()]);
+        let resolved = resolver.resolve(&path, &src.join("main.spl")).unwrap();
+
+        assert_eq!(resolved.path, type_dir.join("I64.spl"));
+        assert!(!resolved.is_directory);
+    }
+
+    #[test]
+    fn test_resolve_owned_domain_type_import_from_project_type_root() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let type_dir = dir.path().join("src").join("type").join("simple_lang");
+        fs::create_dir_all(&type_dir).unwrap();
+        fs::write(type_dir.join("I64.spl"), "type I64 = i64\nexport I64\n").unwrap();
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+
+        let path = ModulePath::new(vec!["simple-lang".into(), "I64".into()]);
+        let resolved = resolver.resolve(&path, &src.join("main.spl")).unwrap();
+
+        assert_eq!(resolved.path, type_dir.join("I64.spl"));
+        assert!(!resolved.is_directory);
+    }
+
+    #[test]
+    fn test_parse_manifest() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let http = src.join("http");
+        fs::create_dir_all(&http).unwrap();
+
+        let manifest_source = r#"
+#[no_gc]
+mod http
+
+pub mod router
+mod internal
+
+common use crate.core.base.*
+
+export use router.Router
+export use router.route
+
+auto import router.route
+"#;
+        fs::write(http.join("__init__.spl"), manifest_source).unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+
+        let manifest = resolver.load_manifest(&http).unwrap();
+
+        assert_eq!(manifest.name, "http");
+        assert_eq!(manifest.child_modules.len(), 2);
+        assert_eq!(manifest.child_modules[0].name, "router");
+        assert_eq!(manifest.child_modules[0].visibility, Visibility::Public);
+        assert_eq!(manifest.child_modules[1].name, "internal");
+        assert_eq!(manifest.child_modules[1].visibility, Visibility::Private);
+        assert_eq!(manifest.common_uses.len(), 1);
+        assert_eq!(manifest.exports.len(), 2);
+        assert_eq!(manifest.auto_imports.len(), 1);
+    }
+
+    #[test]
+    fn test_manifest_glob_export_exposes_public_child_modules() {
+        let dir = create_test_project();
+        let type_dir = dir.path().join("src").join("type").join("simple_lang");
+        fs::create_dir_all(&type_dir).unwrap();
+
+        let manifest_source = r#"
+mod simple_lang
+pub mod I64
+pub mod Text
+mod internal
+
+export use type.simple_lang.*
+"#;
+        fs::write(type_dir.join("__init__.spl"), manifest_source).unwrap();
+        fs::write(type_dir.join("I64.spl"), "type I64 = i64\nexport I64\n").unwrap();
+        fs::write(type_dir.join("Text.spl"), "type Text = text\nexport Text\n").unwrap();
+        fs::write(type_dir.join("internal.spl"), "type Hidden = i64\nexport Hidden\n").unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), dir.path().join("src"));
+        let path = ModulePath::new(vec!["type".into(), "simple_lang".into()]);
+        let resolved = resolver
+            .resolve(&path, &dir.path().join("src").join("main.spl"))
+            .unwrap();
+        let exports = resolver.get_exports(&resolved).unwrap();
+
+        assert!(exports.iter().any(|name| name == "I64"));
+        assert!(exports.iter().any(|name| name == "Text"));
+        assert!(!exports.iter().any(|name| name == "internal"));
+    }
+
+    #[test]
+    fn test_features() {
+        let dir = create_test_project();
+        let mut features = std::collections::HashSet::new();
+        features.insert("strict_null".into());
+
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), dir.path().join("src")).with_features(features);
+
+        assert!(resolver.is_feature_enabled("strict_null"));
+        assert!(!resolver.is_feature_enabled("other_feature"));
+    }
+
+    #[test]
+    fn test_effective_visibility_formal_model() {
+        // This test demonstrates the integration with the formal verification model
+        // from src/verification/visibility_export/
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let http = src.join("http");
+        fs::create_dir_all(&http).unwrap();
+
+        let manifest_source = r#"
+mod http
+pub mod router
+mod internal
+export use router.Router
+"#;
+        fs::write(http.join("__init__.spl"), manifest_source).unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+
+        let manifest = resolver.load_manifest(&http).unwrap();
+
+        // Public module + exported symbol = public effective visibility
+        let vis = resolver.effective_visibility(&manifest, "router", "Router", Visibility::Public);
+        assert_eq!(vis, TrackerVisibility::Public);
+
+        // Public module + unexported symbol = private effective visibility
+        let vis = resolver.effective_visibility(&manifest, "router", "helper", Visibility::Public);
+        assert_eq!(vis, TrackerVisibility::Private);
+
+        // Private module = private effective visibility
+        let vis = resolver.effective_visibility(&manifest, "internal", "Foo", Visibility::Public);
+        assert_eq!(vis, TrackerVisibility::Private);
+
+        // Private symbol = private effective visibility
+        let vis = resolver.effective_visibility(&manifest, "router", "Router", Visibility::Private);
+        assert_eq!(vis, TrackerVisibility::Private);
+    }
+
+    #[test]
+    fn test_macro_auto_import_formal_model() {
+        // This test demonstrates the integration with the formal verification model
+        // from src/verification/macro_auto_import/
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let http = src.join("http");
+        fs::create_dir_all(&http).unwrap();
+
+        let manifest_source = r#"
+mod http
+pub mod router
+auto import router.route
+"#;
+        fs::write(http.join("__init__.spl"), manifest_source).unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+
+        let manifest = resolver.load_manifest(&http).unwrap();
+
+        // Create mock exports
+        let mut exports = MacroExports::new();
+        exports.add_non_macro(MacroSymbol::value("router", "Router"));
+        exports.add_macro(MacroSymbol::macro_def("router", "route"));
+        exports.add_macro(MacroSymbol::macro_def("router", "get"));
+
+        // Glob import should include:
+        // - All non-macros (Router)
+        // - Only auto-imported macros (route, not get)
+        let result = resolver.filter_glob_import(&manifest, &exports);
+
+        assert_eq!(result.len(), 2); // Router + route
+        assert!(result
+            .iter()
+            .any(|s| s.name == "Router" && s.kind == SymKind::ValueOrType));
+        assert!(result.iter().any(|s| s.name == "route" && s.kind == SymKind::Macro));
+        assert!(!result.iter().any(|s| s.name == "get")); // Not in auto import
+    }
+
+    #[test]
+    fn test_circular_dependency_detection() {
+        use simple_dependency_tracker::graph::ImportKind;
+
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+
+        // Create a cycle: a -> b -> c -> a
+        resolver.record_import("crate.a", "crate.b", ImportKind::Use);
+        resolver.record_import("crate.b", "crate.c", ImportKind::Use);
+        resolver.record_import("crate.c", "crate.a", ImportKind::Use);
+
+        let result = resolver.check_circular_dependencies();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Circular dependency"));
+    }
+
+    // ========================================================================
+    // Capability Inheritance Tests
+    // ========================================================================
+
+    #[test]
+    fn test_capabilities_subset_unrestricted_parent() {
+        // Empty parent means unrestricted - child can declare anything
+        let manifest = DirectoryManifest {
+            capabilities: vec![Capability::Pure, Capability::Io],
+            ..Default::default()
+        };
+        let parent: Vec<Capability> = vec![];
+
+        assert!(manifest.capabilities_are_subset_of(&parent));
+    }
+
+    #[test]
+    fn test_capabilities_subset_inherit_from_parent() {
+        // Empty child inherits from parent - always valid
+        let manifest = DirectoryManifest {
+            capabilities: vec![],
+            ..Default::default()
+        };
+        let parent = vec![Capability::Pure, Capability::Io];
+
+        assert!(manifest.capabilities_are_subset_of(&parent));
+    }
+
+    #[test]
+    fn test_capabilities_subset_valid_restriction() {
+        // Child restricts to subset of parent - valid
+        let manifest = DirectoryManifest {
+            capabilities: vec![Capability::Pure],
+            ..Default::default()
+        };
+        let parent = vec![Capability::Pure, Capability::Io, Capability::Net];
+
+        assert!(manifest.capabilities_are_subset_of(&parent));
+    }
+
+    #[test]
+    fn test_capabilities_subset_invalid_expansion() {
+        // Child tries to add capability not in parent - invalid
+        let manifest = DirectoryManifest {
+            capabilities: vec![Capability::Pure, Capability::Net],
+            ..Default::default()
+        };
+        let parent = vec![Capability::Pure, Capability::Io];
+
+        assert!(!manifest.capabilities_are_subset_of(&parent));
+    }
+
+    #[test]
+    fn test_effective_capabilities_inherit() {
+        // Empty child inherits parent's capabilities
+        let manifest = DirectoryManifest {
+            capabilities: vec![],
+            ..Default::default()
+        };
+        let parent = vec![Capability::Pure, Capability::Io];
+
+        let effective = manifest.effective_capabilities(&parent);
+        assert_eq!(effective, parent);
+    }
+
+    #[test]
+    fn test_effective_capabilities_unrestricted_parent() {
+        // Unrestricted parent - child's capabilities become effective
+        let manifest = DirectoryManifest {
+            capabilities: vec![Capability::Pure],
+            ..Default::default()
+        };
+        let parent: Vec<Capability> = vec![];
+
+        let effective = manifest.effective_capabilities(&parent);
+        assert_eq!(effective, vec![Capability::Pure]);
+    }
+
+    #[test]
+    fn test_effective_capabilities_intersection() {
+        // Intersection of child and parent
+        let manifest = DirectoryManifest {
+            capabilities: vec![Capability::Pure, Capability::Io, Capability::Net],
+            ..Default::default()
+        };
+        let parent = vec![Capability::Pure, Capability::Io, Capability::Fs];
+
+        let effective = manifest.effective_capabilities(&parent);
+        assert_eq!(effective.len(), 2);
+        assert!(effective.contains(&Capability::Pure));
+        assert!(effective.contains(&Capability::Io));
+    }
+
+    #[test]
+    fn test_validate_effects_unrestricted() {
+        use simple_parser::ast::Effect;
+
+        // Unrestricted module allows all effects
+        let manifest = DirectoryManifest {
+            capabilities: vec![],
+            ..Default::default()
+        };
+
+        assert!(manifest
+            .validate_function_effects("test", &[Effect::Pure, Effect::Io, Effect::Net])
+            .is_ok());
+    }
+
+    #[test]
+    fn test_validate_effects_allowed() {
+        use simple_parser::ast::Effect;
+
+        // Module allows matching effects
+        let manifest = DirectoryManifest {
+            capabilities: vec![Capability::Pure, Capability::Io],
+            ..Default::default()
+        };
+
+        assert!(manifest.validate_function_effects("test", &[Effect::Pure]).is_ok());
+        assert!(manifest.validate_function_effects("test", &[Effect::Io]).is_ok());
+        assert!(manifest
+            .validate_function_effects("test", &[Effect::Pure, Effect::Io])
+            .is_ok());
+    }
+
+    #[test]
+    fn test_validate_effects_blocked() {
+        use simple_parser::ast::Effect;
+
+        // Module blocks effects not in capabilities
+        let manifest = DirectoryManifest {
+            capabilities: vec![Capability::Pure],
+            ..Default::default()
+        };
+
+        // @io is not allowed
+        let result = manifest.validate_function_effects("test", &[Effect::Io]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("'io' capability"));
+
+        // @net is not allowed
+        let result = manifest.validate_function_effects("test", &[Effect::Net]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("'net' capability"));
+    }
+
+    #[test]
+    fn test_validate_effects_async_always_allowed() {
+        use simple_parser::ast::Effect;
+
+        // @async is always allowed (execution model, not capability)
+        let manifest = DirectoryManifest {
+            capabilities: vec![Capability::Pure],
+            ..Default::default()
+        };
+
+        assert!(manifest.validate_function_effects("test", &[Effect::Async]).is_ok());
+        assert!(manifest
+            .validate_function_effects("test", &[Effect::Pure, Effect::Async])
+            .is_ok());
+    }
+
+    // ========================================================================
+    // Module Load with Capability Check Tests
+    // ========================================================================
+
+    #[test]
+    fn test_load_manifest_with_capability_check_unrestricted_parent() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let child = src.join("child");
+        fs::create_dir_all(&child).unwrap();
+
+        // Child module with [pure, io] capabilities
+        fs::write(child.join("__init__.spl"), "mod child\nrequires [pure, io]").unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+
+        // Unrestricted parent (empty) - child can declare anything
+        let parent_caps: Vec<Capability> = vec![];
+        let manifest = resolver
+            .load_manifest_with_capability_check(&child, &parent_caps)
+            .unwrap();
+
+        assert_eq!(manifest.capabilities.len(), 2);
+        assert!(manifest.capabilities.contains(&Capability::Pure));
+        assert!(manifest.capabilities.contains(&Capability::Io));
+    }
+
+    #[test]
+    fn test_load_manifest_with_capability_check_valid_subset() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let child = src.join("child");
+        fs::create_dir_all(&child).unwrap();
+
+        // Child restricts to [pure] which is a subset of parent's [pure, io]
+        fs::write(child.join("__init__.spl"), "mod child\nrequires [pure]").unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+
+        let parent_caps = vec![Capability::Pure, Capability::Io];
+        let manifest = resolver
+            .load_manifest_with_capability_check(&child, &parent_caps)
+            .unwrap();
+
+        assert_eq!(manifest.capabilities, vec![Capability::Pure]);
+    }
+
+    #[test]
+    fn test_load_manifest_with_capability_check_invalid_expansion() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let child = src.join("child");
+        fs::create_dir_all(&child).unwrap();
+
+        // Child tries [pure, net] but parent only allows [pure, io]
+        fs::write(child.join("__init__.spl"), "mod child\nrequires [pure, net]").unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+
+        let parent_caps = vec![Capability::Pure, Capability::Io];
+        let result = resolver.load_manifest_with_capability_check(&child, &parent_caps);
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("not a subset"));
+        assert!(err_msg.contains("pure, net"));
+        assert!(err_msg.contains("pure, io"));
+    }
+
+    #[test]
+    fn test_load_manifest_with_capability_check_empty_child() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let child = src.join("child");
+        fs::create_dir_all(&child).unwrap();
+
+        // Child has no requires statement - inherits from parent
+        fs::write(child.join("__init__.spl"), "mod child").unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+
+        let parent_caps = vec![Capability::Pure, Capability::Io];
+        let manifest = resolver
+            .load_manifest_with_capability_check(&child, &parent_caps)
+            .unwrap();
+
+        // Child inherits parent capabilities (empty means inherit)
+        assert!(manifest.capabilities.is_empty());
+        // Effective capabilities would be parent's
+        let effective = manifest.effective_capabilities(&parent_caps);
+        assert_eq!(effective, parent_caps);
+    }
+
+    #[test]
+    fn test_load_manifest_with_capability_check_no_manifest() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let child = src.join("child");
+        fs::create_dir_all(&child).unwrap();
+        // No __init__.spl - directory without manifest
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+
+        let parent_caps = vec![Capability::Pure];
+        let manifest = resolver
+            .load_manifest_with_capability_check(&child, &parent_caps)
+            .unwrap();
+
+        // Empty manifest with no capabilities (inherits parent)
+        assert!(manifest.capabilities.is_empty());
+    }
+
+    // =========================================================================
+    // is_bypass field tests
+    // =========================================================================
+
+    #[test]
+    fn test_manifest_is_bypass_default_false() {
+        let manifest = DirectoryManifest::default();
+        assert!(!manifest.is_bypass, "default manifest should not be bypass");
+    }
+
+    #[test]
+    fn test_manifest_bypass_parsed_from_init() {
+        use std::fs;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        let lib = src.join("lib");
+        fs::create_dir_all(&lib).unwrap();
+
+        // __init__.spl with #[bypass] on the directory header mod
+        fs::write(lib.join("__init__.spl"), "#[bypass]\nmod lib\n").unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+        let manifest = resolver.load_manifest(&lib).unwrap();
+
+        assert!(manifest.is_bypass, "manifest should have is_bypass = true");
+    }
+
+    #[test]
+    fn test_manifest_no_bypass_without_attribute() {
+        use std::fs;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        let pkg = src.join("pkg");
+        fs::create_dir_all(&pkg).unwrap();
+
+        fs::write(
+            pkg.join("__init__.spl"),
+            "mod pkg\npub mod router\nexport use router.Router\n",
+        )
+        .unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+        let manifest = resolver.load_manifest(&pkg).unwrap();
+
+        assert!(!manifest.is_bypass, "manifest without #[bypass] should not be bypass");
+    }
+
+    #[test]
+    fn test_manifest_bypass_with_child_modules() {
+        use std::fs;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        let lib = src.join("lib");
+        fs::create_dir_all(&lib).unwrap();
+
+        // bypass directory with child modules declared
+        fs::write(
+            lib.join("__init__.spl"),
+            "#[bypass]\nmod lib\npub mod http\npub mod db\n",
+        )
+        .unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+        let manifest = resolver.load_manifest(&lib).unwrap();
+
+        assert!(manifest.is_bypass);
+        assert_eq!(manifest.child_modules.len(), 2);
+        assert_eq!(manifest.child_modules[0].name, "http");
+        assert_eq!(manifest.child_modules[1].name, "db");
+    }
+}

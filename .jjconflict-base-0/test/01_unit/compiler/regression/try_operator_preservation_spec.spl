@@ -1,0 +1,72 @@
+# Regression spec: the Try operator `?` must keep working immediately after a
+# call expression's closing `)` — i.e. the exact character sequence `)?`.
+#
+# Mirrors Rust-seed fix 610b4572a32 ("stop bootstrap rewrite eating the ? Try
+# operator + harden erased-receiver builtin dispatch"). Root cause (bootstrap
+# compile pipeline only): under `SIMPLE_BOOTSTRAP=1`,
+# `apply_bootstrap_rewrite()` blindly stripped any `?` immediately following a
+# terminator (meant only for optional-type suffixes like `Type?`), which
+# silently deleted real Try operators such as `val resp = f(x)?` — the `?`
+# right after `)` is always a Try/call-result, never a type suffix. `resp`
+# then stayed the raw `Result<T,E>` wrapper instead of the unwrapped `T`, and
+# a later `.len()`/method call on it mis-dispatched.
+#
+# This spec pins plain language-level `?` behavior at the exact `)?`
+# boundary so the pattern never regresses, independent of which pipeline
+# stage (bootstrap rewrite, HIR lowering, interpreter) processes it.
+#
+# tag: unit
+
+# Bare `Ok`/`Err` constructors (not the qualified `Result.Ok` form covered by
+# qualified_result_option_no_import_spec.spl) so this spec isolates the `)?`
+# Try-operator behavior from the separate qualified-constructor-without-import
+# fix (86e56ca7867).
+fn tryop_inner(x: i64) -> Result<i64, text>:
+    if x < 0:
+        return Err("negative")
+    return Ok(x * 2)
+
+# `)?` immediately after the call's closing paren.
+fn tryop_outer_paren_then_try(x: i64) -> Result<i64, text>:
+    val r = tryop_inner(x)?
+    return Ok(r + 1)
+
+# `))?` — two closing parens immediately before `?` (a nested-parenthesized
+# argument), the shape most likely to confuse a naive backward text scan.
+fn tryop_double_paren_then_try(x: i64) -> Result<i64, text>:
+    val r = tryop_inner((x))?
+    return Ok(r)
+
+describe "Try operator `?` immediately after a call's closing `)`":
+    it "propagates Err when the wrapped call fails":
+        val result = tryop_outer_paren_then_try(-5)
+        match result:
+            case Err(msg):
+                expect(msg).to_equal("negative")
+            case Ok(_):
+                expect(false).to_equal(true)
+
+    it "unwraps Ok and continues past the `?` when the wrapped call succeeds":
+        val result = tryop_outer_paren_then_try(10)
+        match result:
+            case Ok(v):
+                expect(v).to_equal(21)
+            case Err(_):
+                expect(false).to_equal(true)
+
+describe "Try operator `?` immediately after a nested `))` closing sequence":
+    it "still propagates Err through the extra parens":
+        val result = tryop_double_paren_then_try(-1)
+        match result:
+            case Err(msg):
+                expect(msg).to_equal("negative")
+            case Ok(_):
+                expect(false).to_equal(true)
+
+    it "still unwraps Ok through the extra parens":
+        val result = tryop_double_paren_then_try(7)
+        match result:
+            case Ok(v):
+                expect(v).to_equal(14)
+            case Err(_):
+                expect(false).to_equal(true)

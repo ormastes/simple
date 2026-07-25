@@ -1,0 +1,108 @@
+#!/bin/sh
+# check_linux_loading_rv32.shs  (Lane OO — NEW additive gate, not in CI)
+#
+# Proves the rv32 FPGA *load path* end-to-end: a large deterministic payload is
+# preloaded into the core's data ROM via the same BRAM .mem mechanism the
+# bitstream uses on hardware, and a checksum computed BY THE CORE over the
+# loaded region equals the host-side checksum. This is a LOADING gate, not a
+# boot: rv32 has no MMU and the data ROM is 64 KB of BRAM, so "load a Linux
+# Image" means "carry a full-capacity payload through the real load path with
+# verified integrity", scoped honestly (see the results doc for the DRAM
+# blocker that caps this at 64 KB rather than 22 MB).
+#
+# All RTL is READ-ONLY and pinned to THIS worktree's origin copy (never
+# build/vhdl/rv32 or /tmp/laneKK). GHDL analyse/elaborate/run all happen from a
+# private work dir that holds the generated rv32_payload.mem + rv32_fat32.mem,
+# because the core opens those files by bare relative name.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+RTL="$ROOT_DIR/examples/09_embedded/fpga_riscv/rtl"
+PAY="$ROOT_DIR/examples/09_embedded/fpga_riscv/payload"
+WORK="$ROOT_DIR/build/ghdl/laneOO_loading"
+GCC="${RV32_GCC:-riscv64-unknown-elf-gcc}"
+OBJCOPY="${RV32_OBJCOPY:-riscv64-unknown-elf-objcopy}"
+# Full 64 KB data ROM = 16384 words. This is the largest payload the real rv32
+# FPGA load path physically carries (BRAM-bound, documented in the results doc).
+WORDCOUNT="${RV32_LOADING_WORDS:-16384}"
+
+fail() { echo "FAIL: $1"; echo "CHECK_LINUX_LOADING_RV32: FAIL"; exit 1; }
+
+command -v ghdl >/dev/null 2>&1 || fail "ghdl not found"
+command -v "$GCC" >/dev/null 2>&1 || fail "$GCC not found"
+command -v "$OBJCOPY" >/dev/null 2>&1 || fail "$OBJCOPY not found"
+
+rm -rf "$WORK"; mkdir -p "$WORK"
+
+echo "=== RV32 FPGA Linux-loading integrity gate ==="
+echo "payload words = $WORDCOUNT  (bytes = $((WORDCOUNT * 4)))"
+
+# --- 1. Deterministic blob -> data ROM (rv32_fat32.mem) + host golden sum -----
+# Park-Miller minimal-standard LCG: every product stays < 2^53 so awk (IEEE
+# double) computes each word and the running sum EXACTLY. The core reads the
+# same hex words and sums them with 32-bit wrap; (sum mod 2^32) is invariant to
+# where the modulus is applied, so host and core must agree byte-for-byte.
+GOLDEN="$(awk -v n="$WORDCOUNT" 'BEGIN{
+    seed=1; sum=0;
+    for(i=0;i<n;i++){
+        seed=(16807*seed)%2147483647;
+        printf "%08X\n", seed > "'"$WORK"'/rv32_fat32.mem";
+        sum=sum+seed;
+    }
+    printf "%08X", sum%4294967296;
+}')"
+[ -s "$WORK/rv32_fat32.mem" ] || fail "blob generation produced empty rv32_fat32.mem"
+echo "host_golden_checksum = $GOLDEN"
+
+# --- 2. Assemble the checksum payload -> code ROM (rv32_payload.mem) -----------
+sed "s/@WORDCOUNT@/$WORDCOUNT/g" "$PAY/checksum_rv32.s" > "$WORK/checksum.s"
+"$GCC" -march=rv32im -mabi=ilp32 -nostdlib -nostartfiles \
+    -Wl,-Ttext=0x80000000 -o "$WORK/checksum.elf" "$WORK/checksum.s" \
+    || fail "assemble checksum payload"
+"$OBJCOPY" -O binary "$WORK/checksum.elf" "$WORK/checksum.bin" || fail "objcopy"
+# Little-endian word-per-line hex = how the core fetches instructions.
+od -An -v -tx4 -w4 "$WORK/checksum.bin" | tr -d ' ' | awk 'NF{print}' > "$WORK/rv32_payload.mem"
+[ -s "$WORK/rv32_payload.mem" ] || fail "empty rv32_payload.mem"
+
+# --- 3. GHDL analyse / elaborate / run from the mem dir ------------------------
+ghdl -a --std=08 --workdir="$WORK" "$RTL/rv32_exec_core.vhd" 2>"$WORK/a1.log" \
+    || { cat "$WORK/a1.log"; fail "analyse rv32_exec_core"; }
+ghdl -a --std=08 --workdir="$WORK" "$PAY/tb_rv32_payload.vhd" 2>"$WORK/a2.log" \
+    || { cat "$WORK/a2.log"; fail "analyse tb"; }
+( cd "$WORK" && ghdl -e --std=08 --workdir="$WORK" tb_rv32_payload ) >"$WORK/e.log" 2>&1 \
+    || { cat "$WORK/e.log"; fail "elaborate tb"; }
+
+echo "=== running simulation ==="
+T0="$(date +%s)"
+# Sentinel fires ~0.34M cycles (~3.4ms sim); 15ms bounds a livelock to ~1.5M
+# cycles (~1 min wall) instead of running away.
+( cd "$WORK" && ghdl -r --std=08 --workdir="$WORK" tb_rv32_payload --stop-time=15ms ) \
+    >"$WORK/sim.log" 2>&1 || true
+T1="$(date +%s)"
+WALL=$((T1 - T0))
+
+# --- 4. Parse capture + verify -------------------------------------------------
+[ -f "$WORK/uart_capture.txt" ] || fail "no uart_capture.txt produced"
+CAP="$(tr -d '\r\n' < "$WORK/uart_capture.txt")"
+echo "uart_string = [$CAP]"
+CYCLES="$(sed -n 's/.*PAYLOAD_CYCLES=\([0-9][0-9]*\).*/\1/p' "$WORK/sim.log" | head -1)"
+[ -n "$CYCLES" ] || fail "no PAYLOAD_CYCLES (payload livelocked / no sentinel)"
+
+# Zero-garbage: the emitted string must be EXACTLY CS=<8 hex>~ and nothing else.
+CORE_SUM="$(printf '%s' "$CAP" | sed -n 's/^CS=\([0-9A-F]\{8\}\)~$/\1/p')"
+[ -n "$CORE_SUM" ] || fail "UART output not exactly CS=<8hex>~ (garbage): [$CAP]"
+echo "core_checksum = $CORE_SUM"
+
+[ "$CORE_SUM" = "$GOLDEN" ] || fail "checksum mismatch core=$CORE_SUM host=$GOLDEN"
+
+HZ="n/a"
+[ "$WALL" -gt 0 ] && HZ="$((CYCLES / WALL))"
+echo "--- metrics ---"
+echo "payload_bytes   = $((WORDCOUNT * 4))"
+echo "core_cycles     = $CYCLES"
+echo "wall_seconds    = $WALL"
+echo "effective_hz    = $HZ"
+echo "checksum        = $CORE_SUM (core) == $GOLDEN (host)"
+echo "CHECK_LINUX_LOADING_RV32: PASS"

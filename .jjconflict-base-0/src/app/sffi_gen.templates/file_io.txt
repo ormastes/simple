@@ -1,0 +1,107 @@
+//! File I/O FFI
+
+use std::ffi::{CStr, CString};
+use std::fs;
+use std::os::raw::c_char;
+
+/// Check if file exists
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_exists(path_ptr: *const c_char, path_len: usize) -> bool {
+    if path_ptr.is_null() {
+        return false;
+    }
+
+    let bytes = std::slice::from_raw_parts(path_ptr as *const u8, path_len);
+    let path = String::from_utf8_lossy(bytes);
+    std::path::Path::new(path.as_ref()).exists()
+}
+
+/// Read file as text
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_read_text(
+    path_ptr: *const c_char,
+    path_len: usize,
+) -> *mut c_char {
+    if path_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let bytes = std::slice::from_raw_parts(path_ptr as *const u8, path_len);
+    let path = String::from_utf8_lossy(bytes);
+
+    match fs::read_to_string(path.as_ref()) {
+        Ok(content) => match CString::new(content) {
+            Ok(c_str) => c_str.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Write text to file
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_write_text(
+    path_ptr: *const c_char,
+    path_len: usize,
+    content_ptr: *const c_char,
+    content_len: usize,
+) -> bool {
+    if path_ptr.is_null() || content_ptr.is_null() {
+        return false;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr as *const u8, path_len);
+    let path = String::from_utf8_lossy(path_bytes);
+
+    let content_bytes = std::slice::from_raw_parts(content_ptr as *const u8, content_len);
+    let content = String::from_utf8_lossy(content_bytes);
+
+    fs::write(path.as_ref(), content.as_ref()).is_ok()
+}
+
+/// Delete file
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_delete(path_ptr: *const c_char, path_len: usize) -> bool {
+    if path_ptr.is_null() {
+        return false;
+    }
+
+    let bytes = std::slice::from_raw_parts(path_ptr as *const u8, path_len);
+    let path = String::from_utf8_lossy(bytes);
+
+    fs::remove_file(path.as_ref()).is_ok()
+}
+
+/// Create directory
+#[no_mangle]
+pub unsafe extern "C" fn rt_dir_create(path_ptr: *const c_char, path_len: usize) -> bool {
+    if path_ptr.is_null() {
+        return false;
+    }
+
+    let bytes = std::slice::from_raw_parts(path_ptr as *const u8, path_len);
+    let path = String::from_utf8_lossy(bytes);
+
+    fs::create_dir(path.as_ref()).is_ok()
+}
+
+/// Create directory and all parents
+#[no_mangle]
+pub unsafe extern "C" fn rt_dir_create_all(path_ptr: *const c_char, path_len: usize) -> bool {
+    if path_ptr.is_null() {
+        return false;
+    }
+
+    let bytes = std::slice::from_raw_parts(path_ptr as *const u8, path_len);
+    let path = String::from_utf8_lossy(bytes);
+
+    fs::create_dir_all(path.as_ref()).is_ok()
+}
+
+/// Free string returned by FFI functions
+#[no_mangle]
+pub unsafe extern "C" fn rt_string_free(ptr: *mut c_char) {
+    if !ptr.is_null() {
+        drop(CString::from_raw(ptr));
+    }
+}

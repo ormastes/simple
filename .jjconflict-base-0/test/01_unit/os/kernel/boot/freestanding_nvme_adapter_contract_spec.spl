@@ -1,0 +1,84 @@
+use std.spec.{describe, it, expect}
+use os.kernel.boot.freestanding_nvme_adapter_contract.{
+    freestanding_nvme_adapter_block_probe_entry,
+    freestanding_nvme_adapter_contract,
+    freestanding_nvme_adapter_provider,
+    freestanding_nvme_adapter_ready,
+    freestanding_nvme_adapter_refusal_reason
+}
+use os.drivers.nvme.nvme_storage_model.{nvme_transfer_evidence}
+
+fn _ready_transfer() -> os.drivers.nvme.nvme_storage_model.NvmeTransferEvidence:
+    nvme_transfer_evidence(
+        "simple-driver",
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        "user-space-driver",
+        "raw-device-grant:tok=boot-nvme",
+        "non-secure-resource-namespace",
+        true,
+        true
+    )
+
+describe "freestanding pure NVMe adapter contract":
+    it "accepts only complete pure-Simple transfer evidence before boot probing":
+        val ready = _ready_transfer()
+        val contract = freestanding_nvme_adapter_contract(ready)
+        expect(contract.provider).to_equal("simple-driver")
+        expect(contract.pure_simple).to_equal(true)
+        expect(contract.block_probe_entry).to_equal("boot_fs_mount_from_device")
+        expect(contract.transfer_ready).to_equal(true)
+        expect(freestanding_nvme_adapter_ready(ready)).to_equal(true)
+        expect(freestanding_nvme_adapter_refusal_reason(ready)).to_equal("ready")
+
+    it "rejects C bridge and incomplete transfer evidence":
+        val bridge = nvme_transfer_evidence(
+            "c-boot-bridge",
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            "user-space-driver",
+            "raw-device-grant:tok=boot-nvme",
+            "non-secure-resource-namespace",
+            true,
+            true
+        )
+        expect(freestanding_nvme_adapter_ready(bridge)).to_equal(false)
+        expect(freestanding_nvme_adapter_refusal_reason(bridge)).to_equal("nvme-transfer-provider-not-simple:c-boot-bridge")
+
+        val missing_sector = nvme_transfer_evidence(
+            "simple-driver",
+            true,
+            true,
+            true,
+            true,
+            true,
+            false,
+            true,
+            true,
+            true,
+            "user-space-driver",
+            "raw-device-grant:tok=boot-nvme",
+            "non-secure-resource-namespace",
+            true,
+            true
+        )
+        expect(freestanding_nvme_adapter_ready(missing_sector)).to_equal(false)
+        expect(freestanding_nvme_adapter_refusal_reason(missing_sector)).to_equal("missing-nvme-sector-read")
+
+    it "publishes the provider and shared boot probe entry":
+        expect(freestanding_nvme_adapter_provider()).to_equal("simple-driver")
+        expect(freestanding_nvme_adapter_block_probe_entry()).to_equal("boot_fs_mount_from_device")

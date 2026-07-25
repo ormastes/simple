@@ -1,0 +1,190 @@
+# Physics2 — XPBD Solver for Soft Bodies
+#
+# Extended Position-Based Dynamics solver for cloth, deformable meshes,
+# and soft body simulation. Uses position-level constraint projection
+# with compliance (inverse stiffness) for stable soft constraints.
+#
+# Reference: Macklin & Muller, "XPBD: Position-Based Simulation of
+# Compliant Constrained Dynamics" (2016)
+
+use std.common.math.{math_sqrt}
+
+struct XpbdParticle:
+    pos_x: f64
+    pos_y: f64
+    pos_z: f64
+    prev_x: f64
+    prev_y: f64
+    prev_z: f64
+    vel_x: f64
+    vel_y: f64
+    vel_z: f64
+    inv_mass: f64
+
+struct XpbdDistanceConstraint:
+    particle_a: i64
+    particle_b: i64
+    rest_length: f64
+    compliance: f64
+    lambda: f64
+
+struct XpbdVolumeConstraint:
+    particles: [i64]
+    rest_volume: f64
+    compliance: f64
+    lambda: f64
+
+struct XpbdWorld:
+    particles: [XpbdParticle]
+    distance_constraints: [XpbdDistanceConstraint]
+    particle_count: i64
+    constraint_count: i64
+    gravity_x: f64
+    gravity_y: f64
+    gravity_z: f64
+    sub_steps: i64
+    damping: f64
+
+impl XpbdWorld:
+    static fn create(sub_steps: i64) -> XpbdWorld:
+        XpbdWorld(
+            particles: [],
+            distance_constraints: [],
+            particle_count: 0,
+            constraint_count: 0,
+            gravity_x: 0.0,
+            gravity_y: -9.81,
+            gravity_z: 0.0,
+            sub_steps: sub_steps,
+            damping: 0.99
+        )
+
+    me add_particle(x: f64, y: f64, z: f64, mass: f64) -> i64:
+        val idx = self.particle_count
+        val im = if mass > 0.0: 1.0 / mass else: 0.0
+        self.particles.push(XpbdParticle(
+            pos_x: x, pos_y: y, pos_z: z,
+            prev_x: x, prev_y: y, prev_z: z,
+            vel_x: 0.0, vel_y: 0.0, vel_z: 0.0,
+            inv_mass: im
+        ))
+        self.particle_count = self.particle_count + 1
+        idx
+
+    me add_fixed_particle(x: f64, y: f64, z: f64) -> i64:
+        self.add_particle(x, y, z, 0.0)
+
+    me add_distance_constraint(a: i64, b: i64, stiffness: f64):
+        val pa = self.particles[a]
+        val pb = self.particles[b]
+        val dx = pb.pos_x - pa.pos_x
+        val dy = pb.pos_y - pa.pos_y
+        val dz = pb.pos_z - pa.pos_z
+        val rest = math_sqrt(dx * dx + dy * dy + dz * dz)
+        val compliance = if stiffness > 0.0: 1.0 / stiffness else: 0.0
+        self.distance_constraints.push(XpbdDistanceConstraint(
+            particle_a: a,
+            particle_b: b,
+            rest_length: rest,
+            compliance: compliance,
+            lambda: 0.0
+        ))
+        self.constraint_count = self.constraint_count + 1
+
+    me step(dt: f64):
+        val sub_dt = dt / self.sub_steps.to_f64()
+        var sub = 0
+        while sub < self.sub_steps:
+            self.predict(sub_dt)
+            self.reset_lambdas()
+            self.solve_constraints(sub_dt)
+            self.update_velocities(sub_dt)
+            sub = sub + 1
+
+    me predict(dt: f64):
+        var i = 0
+        while i < self.particle_count:
+            var p = self.particles[i]
+            if p.inv_mass > 0.0:
+                p.prev_x = p.pos_x
+                p.prev_y = p.pos_y
+                p.prev_z = p.pos_z
+                p.vel_x = p.vel_x + self.gravity_x * dt
+                p.vel_y = p.vel_y + self.gravity_y * dt
+                p.vel_z = p.vel_z + self.gravity_z * dt
+                p.pos_x = p.pos_x + p.vel_x * dt
+                p.pos_y = p.pos_y + p.vel_y * dt
+                p.pos_z = p.pos_z + p.vel_z * dt
+                self.particles[i] = p
+            i = i + 1
+
+    me reset_lambdas():
+        var i = 0
+        while i < self.constraint_count:
+            var c = self.distance_constraints[i]
+            c.lambda = 0.0
+            self.distance_constraints[i] = c
+            i = i + 1
+
+    me solve_constraints(dt: f64):
+        val alpha_tilde_inv = 1.0 / (dt * dt)
+        var i = 0
+        while i < self.constraint_count:
+            var c = self.distance_constraints[i]
+            val pa = self.particles[c.particle_a]
+            val pb = self.particles[c.particle_b]
+            val dx = pb.pos_x - pa.pos_x
+            val dy = pb.pos_y - pa.pos_y
+            val dz = pb.pos_z - pa.pos_z
+            val len_sq = dx * dx + dy * dy + dz * dz
+            if len_sq < 0.000001:
+                i = i + 1
+                continue
+            val len = math_sqrt(len_sq)
+            val constraint_val = len - c.rest_length
+            val nx = dx / len
+            val ny = dy / len
+            val nz = dz / len
+            val w_sum = pa.inv_mass + pb.inv_mass
+            if w_sum == 0.0:
+                i = i + 1
+                continue
+            val alpha_tilde = c.compliance * alpha_tilde_inv
+            val delta_lambda = (-constraint_val - alpha_tilde * c.lambda) / (w_sum + alpha_tilde)
+            c.lambda = c.lambda + delta_lambda
+            self.distance_constraints[i] = c
+            val corr_a_x = -nx * delta_lambda * pa.inv_mass
+            val corr_a_y = -ny * delta_lambda * pa.inv_mass
+            val corr_a_z = -nz * delta_lambda * pa.inv_mass
+            val corr_b_x = nx * delta_lambda * pb.inv_mass
+            val corr_b_y = ny * delta_lambda * pb.inv_mass
+            val corr_b_z = nz * delta_lambda * pb.inv_mass
+            if pa.inv_mass > 0.0:
+                var pa_mut = self.particles[c.particle_a]
+                pa_mut.pos_x = pa_mut.pos_x + corr_a_x
+                pa_mut.pos_y = pa_mut.pos_y + corr_a_y
+                pa_mut.pos_z = pa_mut.pos_z + corr_a_z
+                self.particles[c.particle_a] = pa_mut
+            if pb.inv_mass > 0.0:
+                var pb_mut = self.particles[c.particle_b]
+                pb_mut.pos_x = pb_mut.pos_x + corr_b_x
+                pb_mut.pos_y = pb_mut.pos_y + corr_b_y
+                pb_mut.pos_z = pb_mut.pos_z + corr_b_z
+                self.particles[c.particle_b] = pb_mut
+            i = i + 1
+
+    me update_velocities(dt: f64):
+        val inv_dt = 1.0 / dt
+        var i = 0
+        while i < self.particle_count:
+            var p = self.particles[i]
+            if p.inv_mass > 0.0:
+                p.vel_x = (p.pos_x - p.prev_x) * inv_dt * self.damping
+                p.vel_y = (p.pos_y - p.prev_y) * inv_dt * self.damping
+                p.vel_z = (p.pos_z - p.prev_z) * inv_dt * self.damping
+                self.particles[i] = p
+            i = i + 1
+
+    me get_position(idx: i64) -> (f64, f64, f64):
+        val p = self.particles[idx]
+        (p.pos_x, p.pos_y, p.pos_z)

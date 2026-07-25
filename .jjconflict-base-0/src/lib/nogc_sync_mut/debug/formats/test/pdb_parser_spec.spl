@@ -1,0 +1,276 @@
+"""PDB parser specification tests.
+
+Tests _read_u32_at, _read_u16_at, _read_i32_at, _read_cstr_at,
+_parse_dbi_header, and _parse_module_infos helper functions from pdb_parser.
+"""
+
+use std.debug.formats.pdb_constants.{DBI_HEADER_SIZE}
+use std.debug.formats.pdb_parser.{
+    _read_u16_at, _read_u32_at, _read_i32_at,
+    _parse_dbi_header, _parse_module_infos,
+    DbiHeader, DbiModuleInfo,
+}
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn u16_le(v: i64) -> [u8]:
+    [(v & 0xff) as u8, ((v >> 8) & 0xff) as u8]
+
+fn u32_le(v: i64) -> [u8]:
+    [
+        (v & 0xff) as u8,
+        ((v >> 8) & 0xff) as u8,
+        ((v >> 16) & 0xff) as u8,
+        ((v >> 24) & 0xff) as u8,
+    ]
+
+fn concat(a: [u8], b: [u8]) -> [u8]:
+    var result = a
+    for byte in b:
+        result = result.push(byte)
+    result
+
+fn zeros(n: i64) -> [u8]:
+    var result: [u8] = []
+    var i = 0
+    while i < n:
+        result = result.push(0x00)
+        i = i + 1
+    result
+
+# Build a minimal DBI header (64 bytes).
+# Layout (from _parse_dbi_header source):
+#   [0..4)   version_signature  (i32)
+#   [4..8)   version_header     (u32)
+#   [8..12)  age                (u32)
+#   [12..14) global_stream_idx  (u16)
+#   [14..16) build_number       (u16)
+#   [16..18) public_stream_idx  (u16)
+#   [18..20) pdb_dll_version    (u16)
+#   [20..22) sym_record_stream  (u16)
+#   [22..24) padding
+#   [24..28) mod_info_size      (u32)
+#   [28..32) section_contribution_size (u32)
+#   [32..36) section_map_size   (u32)
+#   [36..40) source_info_size   (u32)
+#   [40..52) unused gap
+#   [52..56) debug_header_size  (u32)
+#   [56..64) padding
+fn make_dbi_header(
+    version_sig: i64,
+    version_hdr: i64,
+    age: i64,
+    global_idx: i64,
+    build_num: i64,
+    public_idx: i64,
+    dll_ver: i64,
+    sym_stream: i64,
+    mod_info_sz: i64,
+    sec_contrib_sz: i64,
+    sec_map_sz: i64,
+    src_info_sz: i64,
+    dbg_hdr_sz: i64,
+) -> [u8]:
+    var data: [u8] = []
+    # [0..4) version_signature
+    data = concat(data, u32_le(version_sig))
+    # [4..8) version_header
+    data = concat(data, u32_le(version_hdr))
+    # [8..12) age
+    data = concat(data, u32_le(age))
+    # [12..14) global_stream_index
+    data = concat(data, u16_le(global_idx))
+    # [14..16) build_number
+    data = concat(data, u16_le(build_num))
+    # [16..18) public_stream_index
+    data = concat(data, u16_le(public_idx))
+    # [18..20) pdb_dll_version
+    data = concat(data, u16_le(dll_ver))
+    # [20..22) sym_record_stream
+    data = concat(data, u16_le(sym_stream))
+    # [22..24) padding
+    data = concat(data, zeros(2))
+    # [24..28) mod_info_size
+    data = concat(data, u32_le(mod_info_sz))
+    # [28..32) section_contribution_size
+    data = concat(data, u32_le(sec_contrib_sz))
+    # [32..36) section_map_size
+    data = concat(data, u32_le(sec_map_sz))
+    # [36..40) source_info_size
+    data = concat(data, u32_le(src_info_sz))
+    # [40..52) unused
+    data = concat(data, zeros(12))
+    # [52..56) debug_header_size
+    data = concat(data, u32_le(dbg_hdr_sz))
+    # [56..64) padding to reach 64 bytes total
+    data = concat(data, zeros(8))
+    data
+
+# ============================================================================
+# _read_u16_at / _read_u32_at / _read_i32_at Tests
+# ============================================================================
+
+describe "_read_u16_at":
+    it "reads little-endian u16":
+        val data: [u8] = [0x34, 0x12]
+        expect(_read_u16_at(data, 0)).to_equal(0x1234)
+
+    it "returns 0 for out-of-bounds":
+        val data: [u8] = [0xff]
+        expect(_read_u16_at(data, 0)).to_equal(0)
+
+    it "reads at non-zero offset":
+        val data: [u8] = [0x00, 0x00, 0xab, 0xcd]
+        expect(_read_u16_at(data, 2)).to_equal(0xcdab)
+
+describe "_read_u32_at":
+    it "reads little-endian u32":
+        val data: [u8] = [0x78, 0x56, 0x34, 0x12]
+        expect(_read_u32_at(data, 0)).to_equal(0x12345678)
+
+    it "returns 0 for out-of-bounds":
+        val data: [u8] = [0x01, 0x02]
+        expect(_read_u32_at(data, 0)).to_equal(0)
+
+    it "returns 0 for empty data":
+        val data: [u8] = []
+        expect(_read_u32_at(data, 0)).to_equal(0)
+
+describe "_read_i32_at":
+    it "reads positive i32":
+        val data: [u8] = [0x01, 0x00, 0x00, 0x00]
+        expect(_read_i32_at(data, 0)).to_equal(1)
+
+    it "reads negative i32 (0xFFFFFFFF = -1)":
+        val data: [u8] = [0xff, 0xff, 0xff, 0xff]
+        expect(_read_i32_at(data, 0)).to_equal(-1)
+
+    it "reads -2 (0xFFFFFFFE)":
+        val data: [u8] = [0xfe, 0xff, 0xff, 0xff]
+        expect(_read_i32_at(data, 0)).to_equal(-2)
+
+    it "reads max positive (0x7FFFFFFF)":
+        val data: [u8] = [0xff, 0xff, 0xff, 0x7f]
+        expect(_read_i32_at(data, 0)).to_equal(0x7fffffff)
+
+    it "reads min negative (0x80000000)":
+        val data: [u8] = [0x00, 0x00, 0x00, 0x80]
+        expect(_read_i32_at(data, 0)).to_equal(-2147483648)
+
+# NOTE: _read_cstr_at tests are omitted because _read_cstr_at uses
+# text.from_char_code which is unavailable in interpreter mode.
+# String-reading tests require compiled mode.
+
+# ============================================================================
+# _parse_dbi_header Tests
+# ============================================================================
+
+describe "_parse_dbi_header":
+    it "returns Err for too-small data":
+        val data: [u8] = [0x01, 0x02, 0x03]
+        val result = _parse_dbi_header(data)
+        expect(result.is_err()).to_equal(true)
+        expect(result.err()!).to_equal("DBI stream too small")
+
+    it "returns Err for data shorter than DBI_HEADER_SIZE":
+        val data = zeros(DBI_HEADER_SIZE - 1)
+        val result = _parse_dbi_header(data)
+        expect(result.is_err()).to_equal(true)
+
+    it "parses a crafted DBI header":
+        val data = make_dbi_header(
+            version_sig: 0xffffffff,
+            version_hdr: 19990903,
+            age: 1,
+            global_idx: 7,
+            build_num: 14100,
+            public_idx: 8,
+            dll_ver: 0,
+            sym_stream: 10,
+            mod_info_sz: 200,
+            sec_contrib_sz: 100,
+            sec_map_sz: 50,
+            src_info_sz: 80,
+            dbg_hdr_sz: 40,
+        )
+        expect(data.len()).to_equal(DBI_HEADER_SIZE)
+
+        val result = _parse_dbi_header(data)
+        expect(result.is_ok()).to_equal(true)
+        val hdr = result.ok()!
+        expect(hdr.version_header).to_equal(19990903)
+        expect(hdr.age).to_equal(1)
+        expect(hdr.global_stream_index).to_equal(7)
+        expect(hdr.build_number).to_equal(14100)
+        expect(hdr.public_stream_index).to_equal(8)
+        expect(hdr.sym_record_stream).to_equal(10)
+        expect(hdr.mod_info_size).to_equal(200)
+        expect(hdr.section_contribution_size).to_equal(100)
+        expect(hdr.section_map_size).to_equal(50)
+        expect(hdr.source_info_size).to_equal(80)
+        expect(hdr.debug_header_size).to_equal(40)
+
+    it "parses header with negative version_signature":
+        val data = make_dbi_header(
+            version_sig: 0xffffffff,
+            version_hdr: 19990903,
+            age: 2,
+            global_idx: 0,
+            build_num: 0,
+            public_idx: 0,
+            dll_ver: 0,
+            sym_stream: 0,
+            mod_info_sz: 0,
+            sec_contrib_sz: 0,
+            sec_map_sz: 0,
+            src_info_sz: 0,
+            dbg_hdr_sz: 0,
+        )
+        val result = _parse_dbi_header(data)
+        expect(result.is_ok()).to_equal(true)
+        val hdr = result.ok()!
+        # _read_i32_at(0xffffffff) should yield -1
+        expect(hdr.version_signature).to_equal(-1)
+
+# ============================================================================
+# _parse_module_infos Tests
+# ============================================================================
+
+describe "_parse_module_infos":
+    it "returns empty for zero mod_info_size":
+        val data = make_dbi_header(
+            version_sig: 0, version_hdr: 0, age: 0,
+            global_idx: 0, build_num: 0, public_idx: 0,
+            dll_ver: 0, sym_stream: 0, mod_info_sz: 0,
+            sec_contrib_sz: 0, sec_map_sz: 0,
+            src_info_sz: 0, dbg_hdr_sz: 0,
+        )
+        val modules = _parse_module_infos(data, 0)
+        expect(modules.len()).to_equal(0)
+
+    # NOTE: Full module info parsing test is omitted because _parse_module_infos
+    # calls _read_cstr_at which uses text.from_char_code — unavailable in
+    # interpreter mode. Module info parsing tests require compiled mode.
+
+    it "returns empty when data is just header with no room for entries":
+        val data = make_dbi_header(
+            version_sig: 0, version_hdr: 0, age: 0,
+            global_idx: 0, build_num: 0, public_idx: 0,
+            dll_ver: 0, sym_stream: 0, mod_info_sz: 10,
+            sec_contrib_sz: 0, sec_map_sz: 0,
+            src_info_sz: 0, dbg_hdr_sz: 0,
+        )
+        # mod_info_size = 10, but data is only 64 bytes (just the header)
+        # pos + 64 <= end_pos check: 64 + 64 = 128 <= 64 + 10 = 74 is false
+        val modules = _parse_module_infos(data, 10)
+        expect(modules.len()).to_equal(0)
+
+# ============================================================================
+# DBI_HEADER_SIZE constant
+# ============================================================================
+
+describe "DBI constants":
+    it "DBI_HEADER_SIZE is 64":
+        expect(DBI_HEADER_SIZE).to_equal(64)

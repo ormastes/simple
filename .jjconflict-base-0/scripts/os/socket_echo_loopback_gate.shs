@@ -1,0 +1,152 @@
+#!/bin/sh
+# socket_echo_loopback_gate.shs — Lane H3 gate: libc sockets over the
+# SimpleOS netstack syscalls (socket/bind/listen/connect/accept/send/
+# recv/sendto/recvfrom), proven with a loopback TCP echo test.
+#
+# See examples/09_embedded/simpleos_hello_c/socket_echo_test.c for the
+# test itself and doc/03_plan/os/simpleos/host_os_completeness_plan.md
+# (H3) for the plan. Kernel-side wiring is in
+# src/os/kernel/abi/syscall_shim_net.spl (spl_handle_net_bind/listen/
+# connect/accept/send_to/recv_from -- previously all forwarded to
+# _forward_net_ipc(), which unconditionally returned -ENOSYS).
+#
+# This gate runs THREE tiers, each gating the next:
+#   1. hosted dual-mode: compiles socket_echo_test.c + simpleos_socket.c
+#      as a native Linux binary (simpleos_syscall() stubbed to force the
+#      Linux-raw-syscall fallback branch) and actually RUNS a full
+#      socket/bind/listen/connect/accept/send/recv/sendto loopback TCP
+#      echo. This is a REAL pass/fail, not a marker.
+#   2. freestanding structural build: rebuilds libsimpleos_c.a (make -C
+#      src/os/libc), reinstalls it + the new sys/socket.h /
+#      netinet/in.h / termios.h headers into build/os/sysroot, then
+#      compiles+links socket_echo_test.c against the SimpleOS cross
+#      target (x86_64-unknown-simpleos) to produce a real ELF. This
+#      proves the freestanding side compiles and links cleanly against
+#      the real syscall ABI.
+#   3. in-guest boot gate: OPTIONAL. Only attempted if
+#      SIMPLE_BUILD_COMPILER points at a proven self-hosted compiler
+#      (same requirement as scripts/os/build_fsexec_prod_ring3.shs,
+#      which this stage delegates to after patching the test ELF onto
+#      the FS-exec disk as /FSEXEC.ELF). Booting requires rebuilding a
+#      kernel image from the .spl sources this lane touched
+#      (src/os/kernel/abi/syscall_shim_net.spl), which in turn requires
+#      a working `bin/simple`/self-hosted compiler.
+#
+# STATUS AT AUTHORING TIME: tiers 1 and 2 PASS (see the ci-run transcript
+# this script prints). Tier 3 is BLOCKED: `bin/simple lint <any .spl
+# file>` fails with "error: semantic: unknown extern function:
+# rt_cli_arg_count" even on files this lane never touched (verified
+# against src/os/kernel/net/loopback_socket.spl, unmodified) -- a
+# pre-existing, cross-lane toolchain-redeploy-in-progress breakage (see
+# scripts/os/ssh_shell_rc_gate.shs's header for another lane hitting the
+# identical blocker the same day). There is no other proven self-hosted
+# compiler in this tree to pass as SIMPLE_BUILD_COMPILER. Re-run this
+# script once the toolchain is healthy; tier 3 will then either PASS or
+# raise a concrete, actionable FAIL.
+#
+# Env: SIMPLE_BUILD_COMPILER (tier 3 only, same contract as
+#      build_fsexec_prod_ring3.shs), FSEXEC_DISK (tier 3 base image).
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT"
+
+WORK="build/os/socket_test"
+TEST_SRC="examples/09_embedded/simpleos_hello_c/socket_echo_test.c"
+SR="build/os/sysroot"
+mkdir -p "$WORK"
+
+fail() { echo "[socket-echo-gate] FAIL: $*" >&2; exit 1; }
+blocked() { echo "[socket-echo-gate] BLOCKED: $*"; }
+
+echo "[socket-echo-gate] tier 1/3: hosted dual-mode (real Linux loopback TCP)"
+cc -ffreestanding -nostdlib -static -O0 \
+    -DSIMPLEOS_HOSTED_TEST -Isrc/os/libc/include \
+    "$TEST_SRC" src/os/libc/simpleos_socket.c \
+    -o "$WORK/socket_echo_test_host" \
+    || fail "hosted build failed"
+HOSTED_OUT="$("$WORK/socket_echo_test_host")" \
+    || fail "hosted run failed:\n$HOSTED_OUT"
+echo "$HOSTED_OUT"
+echo "$HOSTED_OUT" | grep -q "PASS full listen+accept+connect+send+recv loopback echo" \
+    || fail "hosted echo marker missing"
+echo "[socket-echo-gate] tier 1/3: PASS"
+
+echo "[socket-echo-gate] tier 2/3: freestanding structural build against SimpleOS sysroot"
+( cd src/os/libc && make clean >/dev/null && make ) \
+    || fail "libsimpleos_c.a build failed"
+cp src/os/libc/libsimpleos_c.a "$SR/lib/libsimpleos_c.a"
+cp src/os/libc/libsimpleos_c.a "$SR/lib/libm.a"
+mkdir -p "$SR/include/netinet"
+cp -R src/os/libc/include/* "$SR/include/"
+
+CLANG="build/os/llvm/cross-x86_64-unknown-simpleos/bin/clang"
+LLD="build/os/llvm/cross-x86_64-unknown-simpleos/bin/ld.lld"
+[ -x "$CLANG" ] || fail "missing cross clang: $CLANG"
+[ -x "$LLD" ] || fail "missing cross ld.lld: $LLD"
+
+"$CLANG" --target=x86_64-unknown-simpleos --sysroot="$SR" -ffreestanding \
+    -fno-stack-protector -nostdlib -static -O0 \
+    -c "$TEST_SRC" -o "$WORK/socket_echo_test.o" \
+    || fail "freestanding compile failed"
+
+# NOTE: linking straight against the canonical libsimpleos_c.a fails on
+# a PRE-EXISTING, unrelated gap: simpleos_libc.c's
+# simpleos_runtime_cli_get_args() references rt_array_len/rt_array_new/
+# rt_string_new/rt_array_push (the Simple-language runtime ABI), which
+# only exist when a program is built through the real `simple
+# native-build` pipeline, not a bare `clang + ld.lld` link. hello_fs.c
+# (examples/09_embedded/simpleos_hello_c/) sidesteps this by not linking
+# libsimpleos_c.a at all. Since this test DOES want to exercise the real
+# libc socket functions, rebuild a --gc-sections-eligible copy of the
+# archive here (same sources, +-ffunction-sections -fdata-sections) so
+# the linker can drop the unreferenced cli-args function instead of
+# needing those runtime symbols -- this is dead-code elimination, not a
+# behavior change; the canonical (non-sectioned) archive already built
+# above is left in the sysroot as the real deliverable.
+GC_WORK="$WORK/libc-gc"
+mkdir -p "$GC_WORK"
+( cd src/os/libc && make clean >/dev/null && make CFLAGS="-target x86_64-unknown-none-elf -ffreestanding -nostdlib -fno-builtin -mno-red-zone -fno-stack-protector -fno-exceptions -fno-unwind-tables -fno-asynchronous-unwind-tables -O2 -Wall -Wextra -Wno-unused-parameter -ffunction-sections -fdata-sections -I include" >/dev/null \
+    && cp libsimpleos_c.a "$ROOT/$GC_WORK/libsimpleos_c.a" \
+    && make clean >/dev/null && make >/dev/null ) \
+    || fail "libc --gc-sections rebuild failed"
+
+"$LLD" -T "$SR/share/simpleos/simpleos.ld" -e _start --gc-sections \
+    "$SR/lib/crt0.o" "$WORK/socket_echo_test.o" \
+    -L"$GC_WORK" -lsimpleos_c \
+    -o "$WORK/socket_echo_test.elf" \
+    || fail "freestanding link failed"
+file "$WORK/socket_echo_test.elf" | grep -q "ELF 64-bit" \
+    || fail "socket_echo_test.elf is not a valid ELF"
+echo "[socket-echo-gate] tier 2/3: PASS ($WORK/socket_echo_test.elf)"
+
+echo "[socket-echo-gate] tier 3/3: in-guest boot gate"
+COMPILER="${SIMPLE_BUILD_COMPILER:-}"
+if [ -z "$COMPILER" ] || [ ! -x "$COMPILER" ]; then
+    blocked "no SIMPLE_BUILD_COMPILER set (or not executable) -- see this script's header"
+    blocked "artifacts ready for a follow-up run: $WORK/socket_echo_test.elf, $SR/lib/libsimpleos_c.a"
+    exit 2
+fi
+PROVENANCE="$(SIMPLE_BOOTSTRAP_DRIVER="$COMPILER" "$COMPILER" --version 2>&1 || true)"
+case "$COMPILER:$PROVENANCE" in
+    *compiler_rust*|*simple_seed*|*"bootstrap seed only"*)
+        blocked "refusing Rust bootstrap seed: $COMPILER"
+        blocked "artifacts ready for a follow-up run: $WORK/socket_echo_test.elf, $SR/lib/libsimpleos_c.a"
+        exit 2
+        ;;
+esac
+
+# A proven compiler is available: patch the test ELF onto the FS-exec
+# disk as /FSEXEC.ELF and delegate to the proven ring-3 boot harness,
+# same pattern as scripts/os/build_clang_hello_ring3.shs.
+FSEXEC_DISK="${FSEXEC_DISK:-build/os/elfexec/fat32-fsexec.img}"
+[ -f "$FSEXEC_DISK" ] || fail "missing base FS-exec image: $FSEXEC_DISK"
+echo "[socket-echo-gate] proven compiler found ($COMPILER) -- delegating to build_fsexec_prod_ring3.shs"
+echo "[socket-echo-gate] NOTE: this still requires rebuilding the kernel with this"
+echo "[socket-echo-gate] lane's src/os/kernel/abi/syscall_shim_net.spl changes baked in"
+echo "[socket-echo-gate] (that .spl file is picked up automatically by the kernel build --"
+echo "[socket-echo-gate] no separate step needed once \$COMPILER can compile it)."
+SIMPLE_BUILD_COMPILER="$COMPILER" FSEXEC_DISK="$FSEXEC_DISK" \
+    sh scripts/os/build_fsexec_prod_ring3.shs \
+    || fail "in-guest boot gate failed -- see build/os/elfexec/prod_ring3_run.log"
+echo "[socket-echo-gate] tier 3/3: PASS"

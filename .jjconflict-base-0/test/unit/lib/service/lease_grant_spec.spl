@@ -1,0 +1,176 @@
+"""
+# Lease Grant Specification
+#
+# Tests exclusive/shared lease semantics, BUSY responses,
+# and basic lease lifecycle.
+"""
+
+use std.io_runtime
+
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_getpid() -> i64
+
+# --- Inline lease constants ---
+val LEASE_EXCLUSIVE = 0i64
+val LEASE_SHARED = 1i64
+
+# --- Inline LeaseEntry ---
+struct LeaseEntry:
+    lease_id: text
+    holder_pid: i64
+    kind: i64
+    ttl_ms: i64
+    granted_at_us: i64
+    expires_at_us: i64
+
+struct LeaseResult:
+    ok: bool
+    lease_id: text
+    busy_message: text
+
+struct LeaseManager:
+    leases: [LeaseEntry]
+    next_id: i64
+
+fn lease_manager_new() -> LeaseManager:
+    LeaseManager(leases: [], next_id: 1i64)
+
+fn _next_lease_id(mgr: LeaseManager) -> text:
+    val id = mgr.next_id
+    mgr.next_id = mgr.next_id + 1i64
+    "lease-{id}"
+
+fn _has_exclusive(mgr: LeaseManager) -> bool:
+    var i = 0i64
+    while i < mgr.leases.len():
+        val entry = mgr.leases[i]
+        if entry.kind == LEASE_EXCLUSIVE:
+            return true
+        i = i + 1i64
+    false
+
+fn try_acquire_exclusive(mgr: LeaseManager, pid: i64, ttl_ms: i64) -> LeaseResult:
+    if mgr.leases.len() > 0i64:
+        return LeaseResult(ok: false, lease_id: "", busy_message: "BUSY")
+    val now_us = rt_time_now_unix_micros()
+    val lease_id = _next_lease_id(mgr)
+    val entry = LeaseEntry(lease_id: lease_id, holder_pid: pid, kind: LEASE_EXCLUSIVE, ttl_ms: ttl_ms, granted_at_us: now_us, expires_at_us: now_us + (ttl_ms * 1000i64))
+    mgr.leases.push(entry)
+    LeaseResult(ok: true, lease_id: lease_id, busy_message: "")
+
+fn try_acquire_shared(mgr: LeaseManager, pid: i64, ttl_ms: i64) -> LeaseResult:
+    if _has_exclusive(mgr):
+        return LeaseResult(ok: false, lease_id: "", busy_message: "BUSY")
+    val now_us = rt_time_now_unix_micros()
+    val lease_id = _next_lease_id(mgr)
+    val entry = LeaseEntry(lease_id: lease_id, holder_pid: pid, kind: LEASE_SHARED, ttl_ms: ttl_ms, granted_at_us: now_us, expires_at_us: now_us + (ttl_ms * 1000i64))
+    mgr.leases.push(entry)
+    LeaseResult(ok: true, lease_id: lease_id, busy_message: "")
+
+fn release_lease(mgr: LeaseManager, lease_id: text) -> bool:
+    var kept: [LeaseEntry] = []
+    var found = false
+    var i = 0i64
+    while i < mgr.leases.len():
+        val entry = mgr.leases[i]
+        if entry.lease_id == lease_id:
+            found = true
+        else:
+            kept.push(entry)
+        i = i + 1i64
+    mgr.leases = kept
+    found
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Lease Grant - Exclusive Semantics":
+    it "grants exclusive lease when no leases are held":
+        val mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val result = try_acquire_exclusive(mgr, pid, 30000i64)
+        expect(result.ok).to_equal(true)
+        val lid = result.lease_id
+        expect(lid.len()).to_be_greater_than(0i64)
+
+    it "rejects second exclusive lease while first is held":
+        val mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val first = try_acquire_exclusive(mgr, pid, 30000i64)
+        val second = try_acquire_exclusive(mgr, pid, 30000i64)
+        expect(first.ok).to_equal(true)
+        expect(second.ok).to_equal(false)
+        val msg = second.busy_message
+        expect(msg).to_contain("BUSY")
+
+    it "grants exclusive after release":
+        val mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val first = try_acquire_exclusive(mgr, pid, 30000i64)
+        val released = release_lease(mgr, first.lease_id)
+        expect(released).to_equal(true)
+        val second = try_acquire_exclusive(mgr, pid, 30000i64)
+        expect(second.ok).to_equal(true)
+
+    it "generates unique lease IDs":
+        val mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val first = try_acquire_exclusive(mgr, pid, 30000i64)
+        release_lease(mgr, first.lease_id)
+        val second = try_acquire_exclusive(mgr, pid, 30000i64)
+        val fid = first.lease_id
+        val sid = second.lease_id
+        val same = fid == sid
+        expect(same).to_equal(false)
+
+describe "Lease Grant - Shared Semantics":
+    it "grants shared lease when no leases are held":
+        val mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val result = try_acquire_shared(mgr, pid, 5000i64)
+        expect(result.ok).to_equal(true)
+
+    it "grants multiple shared leases concurrently":
+        val mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val first = try_acquire_shared(mgr, pid, 5000i64)
+        val second = try_acquire_shared(mgr, pid, 5000i64)
+        expect(first.ok).to_equal(true)
+        expect(second.ok).to_equal(true)
+
+    it "rejects shared lease while exclusive is held":
+        val mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val excl = try_acquire_exclusive(mgr, pid, 30000i64)
+        val shared_result = try_acquire_shared(mgr, pid, 5000i64)
+        expect(excl.ok).to_equal(true)
+        expect(shared_result.ok).to_equal(false)
+        val msg = shared_result.busy_message
+        expect(msg).to_contain("BUSY")
+
+    it "rejects exclusive while shared is held":
+        val mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val shared_result = try_acquire_shared(mgr, pid, 5000i64)
+        val excl = try_acquire_exclusive(mgr, pid, 30000i64)
+        expect(shared_result.ok).to_equal(true)
+        expect(excl.ok).to_equal(false)
+
+    it "grants exclusive after all shared released":
+        val mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val s1 = try_acquire_shared(mgr, pid, 5000i64)
+        val s2 = try_acquire_shared(mgr, pid, 5000i64)
+        release_lease(mgr, s1.lease_id)
+        release_lease(mgr, s2.lease_id)
+        val excl = try_acquire_exclusive(mgr, pid, 30000i64)
+        expect(excl.ok).to_equal(true)
+
+    it "BUSY message contains text":
+        val mgr = lease_manager_new()
+        val pid = rt_getpid()
+        val excl = try_acquire_exclusive(mgr, pid, 30000i64)
+        val shared_result = try_acquire_shared(mgr, pid, 5000i64)
+        val msg = shared_result.busy_message
+        expect(msg).to_contain("BUSY")

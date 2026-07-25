@@ -1,0 +1,552 @@
+#!/bin/sh
+# Diagnostic Chrome-on-Vulkan RenderDoc target-control capture probe.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+. "$ROOT_DIR/scripts/lib/renderdoc-evidence-common.shs"
+
+BUILD_DIR="${BUILD_DIR:-build/renderdoc/chrome-target-control}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/renderdoc_chrome_target_control_$(date -u +%F).md}"
+HTML_PATH="${RDOC_HTML_PATH:-$ROOT_DIR/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html}"
+CHROME_BIN="${RDOC_CHROME:-/usr/bin/google-chrome}"
+RENDERDOC_HOME="${RDOC_HOME:-/opt/renderdoc}"
+QRENDERDOC_BIN="${RDOC_QRENDERDOC_BIN:-$RENDERDOC_HOME/bin/qrenderdoc}"
+TARGET_CLIENT="${RDOC_TARGET_CONTROL_CLIENT_BIN:-}"
+RENDERDOC_SOURCE_DIR="${RDOC_SOURCE_DIR:-build/tools/renderdoc-src}"
+WIDTH="${RDOC_CHROME_WIDTH:-900}"
+HEIGHT="${RDOC_CHROME_HEIGHT:-700}"
+WAIT_SECS="${RDOC_CHROME_TARGET_WAIT_SECS:-8}"
+CONTROL_TIMEOUT="${RDOC_TARGET_CONTROL_TIMEOUT_SECS:-20}"
+CONTROL_WAIT_API_SECS="${RDOC_TARGET_CONTROL_WAIT_API_SECS:-0}"
+USE_GPU_LAUNCHER="${RDOC_CHROME_TARGET_CONTROL_GPU_LAUNCHER:-0}"
+gpu_launcher_flag=""
+if [ "$USE_GPU_LAUNCHER" = "1" ]; then
+    gpu_launcher_flag="--gpu-launcher=$ROOT_DIR/scripts/tool/renderdoc-gpu-launcher.shs"
+fi
+
+mkdir -p "$BUILD_DIR/vulkan-layer.d" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH" "$BUILD_DIR/target-control.env" "$BUILD_DIR/rdc.list"
+
+status="fail"
+reason="not-run"
+capture_file=""
+capture_magic=""
+capture_file_status=""
+capture_file_reason=""
+gpu_pid=""
+chosen_window=""
+chosen_window_pid=""
+chosen_window_pid_matches_gpu_pid=""
+gpu_env_has_layer=""
+gpu_maps_has_renderdoc=""
+gpu_maps_has_vulkan=""
+gpu_launcher_log="$BUILD_DIR/gpu-launcher.log"
+gpu_launcher_invoked=""
+gpu_launcher_layer_only=""
+gpu_launcher_exported_capfile=""
+gpu_launcher_vk_instance_layers=""
+gpu_launcher_enable_vulkan_renderdoc_capture=""
+renderdoc_debug_log_file="$BUILD_DIR/renderdoc-layer.log"
+renderdoc_debug_log_file_status=""
+renderdoc_debug_log_loaded_status=""
+renderdoc_debug_log_vulkan_hooks_status=""
+renderdoc_debug_log_vulkan_instance_status=""
+chrome_launch_flags="$(rdoc_chrome_vulkan_flags)"
+target_status=""
+target_reason=""
+target_api=""
+target_pid=""
+target_capture_path=""
+target_ident_count=""
+target_idents=""
+target_chosen_ident=""
+target_message_count=""
+target_noop_count=""
+target_pretrigger_message_count=""
+target_pretrigger_noop_count=""
+target_api_message_count=""
+target_window_message_count=""
+target_last_api_name=""
+target_last_api_presenting=""
+target_last_api_supported=""
+target_last_window_count=""
+qrenderdoc_rc=""
+qrenderdoc_timed_out=""
+qrenderdoc_log_file_status=""
+target_client_rc=""
+target_client_timed_out=""
+target_client_build_status=""
+target_client_build_log="$BUILD_DIR/target-control-client-build.log"
+target_env_file_status=""
+
+value_of() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+file_link_count() {
+    path="$1"
+    if command -v stat >/dev/null 2>&1; then
+        count="$(stat -c '%h' "$path" 2>/dev/null || stat -f '%l' "$path" 2>/dev/null || true)"
+        case "$count" in
+            ''|*[!0-9]*) echo "" ;;
+            *) echo "$count" ;;
+        esac
+    else
+        echo ""
+    fi
+}
+
+capture_artifact_reason() {
+    path="$1"
+    if [ -z "$path" ]; then
+        echo missing
+        return
+    fi
+    if [ -L "$path" ]; then
+        echo symlink
+        return
+    fi
+    if [ ! -f "$path" ]; then
+        echo not-regular
+        return
+    fi
+    link_count="$(file_link_count "$path")"
+    if [ -n "$link_count" ] && [ "$link_count" -gt 1 ]; then
+        echo hardlink
+        return
+    fi
+    if [ ! -s "$path" ]; then
+        echo empty
+        return
+    fi
+    echo pass
+}
+
+capture_artifact_status() {
+    if [ "$1" = "pass" ]; then
+        echo pass
+    else
+        echo fail
+    fi
+}
+
+write_env() {
+    {
+        echo "rdoc_chrome_target_control_status=$status"
+        echo "rdoc_chrome_target_control_reason=$reason"
+        echo "rdoc_chrome_target_control_html_path=$HTML_PATH"
+        echo "rdoc_chrome_target_control_chrome=$CHROME_BIN"
+        echo "rdoc_chrome_target_control_renderdoc_home=$RENDERDOC_HOME"
+        echo "rdoc_chrome_target_control_renderdoc_source_dir=$RENDERDOC_SOURCE_DIR"
+        echo "rdoc_chrome_target_control_qrenderdoc_bin=$QRENDERDOC_BIN"
+        echo "rdoc_chrome_target_control_client_bin=$TARGET_CLIENT"
+        echo "rdoc_chrome_target_control_client_build_status=$target_client_build_status"
+        echo "rdoc_chrome_target_control_client_build_log=$target_client_build_log"
+        echo "rdoc_chrome_target_control_launch_flags=$chrome_launch_flags"
+        echo "rdoc_chrome_target_control_use_gpu_launcher=$USE_GPU_LAUNCHER"
+        echo "rdoc_chrome_target_control_gpu_launcher=$ROOT_DIR/scripts/tool/renderdoc-gpu-launcher.shs"
+        echo "rdoc_chrome_target_control_gpu_launcher_log=$gpu_launcher_log"
+        echo "rdoc_chrome_target_control_gpu_launcher_invoked=$gpu_launcher_invoked"
+        echo "rdoc_chrome_target_control_gpu_launcher_layer_only=$gpu_launcher_layer_only"
+        echo "rdoc_chrome_target_control_gpu_launcher_exported_capfile=$gpu_launcher_exported_capfile"
+        echo "rdoc_chrome_target_control_gpu_launcher_vk_instance_layers=$gpu_launcher_vk_instance_layers"
+        echo "rdoc_chrome_target_control_gpu_launcher_enable_vulkan_renderdoc_capture=$gpu_launcher_enable_vulkan_renderdoc_capture"
+        echo "rdoc_chrome_target_control_gpu_pid=$gpu_pid"
+        echo "rdoc_chrome_target_control_chosen_window=$chosen_window"
+        echo "rdoc_chrome_target_control_chosen_window_pid=$chosen_window_pid"
+        echo "rdoc_chrome_target_control_chosen_window_pid_matches_gpu_pid=$chosen_window_pid_matches_gpu_pid"
+        echo "rdoc_chrome_target_control_gpu_env_has_layer=$gpu_env_has_layer"
+        echo "rdoc_chrome_target_control_gpu_maps_has_renderdoc=$gpu_maps_has_renderdoc"
+        echo "rdoc_chrome_target_control_gpu_maps_has_vulkan=$gpu_maps_has_vulkan"
+        echo "rdoc_chrome_target_control_renderdoc_debug_log_file=$renderdoc_debug_log_file"
+        echo "rdoc_chrome_target_control_renderdoc_debug_log_file_status=$renderdoc_debug_log_file_status"
+        echo "rdoc_chrome_target_control_renderdoc_debug_log_loaded_status=$renderdoc_debug_log_loaded_status"
+        echo "rdoc_chrome_target_control_renderdoc_debug_log_vulkan_hooks_status=$renderdoc_debug_log_vulkan_hooks_status"
+        echo "rdoc_chrome_target_control_renderdoc_debug_log_vulkan_instance_status=$renderdoc_debug_log_vulkan_instance_status"
+        echo "rdoc_chrome_target_control_target_status=$target_status"
+        echo "rdoc_chrome_target_control_target_reason=$target_reason"
+        echo "rdoc_chrome_target_control_target_pid=$target_pid"
+        echo "rdoc_chrome_target_control_target_api=$target_api"
+        echo "rdoc_chrome_target_control_target_ident_count=$target_ident_count"
+        echo "rdoc_chrome_target_control_target_idents=$target_idents"
+        echo "rdoc_chrome_target_control_target_chosen_ident=$target_chosen_ident"
+        echo "rdoc_chrome_target_control_target_message_count=$target_message_count"
+        echo "rdoc_chrome_target_control_target_noop_count=$target_noop_count"
+        echo "rdoc_chrome_target_control_target_pretrigger_message_count=$target_pretrigger_message_count"
+        echo "rdoc_chrome_target_control_target_pretrigger_noop_count=$target_pretrigger_noop_count"
+        echo "rdoc_chrome_target_control_target_api_message_count=$target_api_message_count"
+        echo "rdoc_chrome_target_control_target_window_message_count=$target_window_message_count"
+        echo "rdoc_chrome_target_control_target_last_api_name=$target_last_api_name"
+        echo "rdoc_chrome_target_control_target_last_api_presenting=$target_last_api_presenting"
+        echo "rdoc_chrome_target_control_target_last_api_supported=$target_last_api_supported"
+        echo "rdoc_chrome_target_control_target_last_window_count=$target_last_window_count"
+        echo "rdoc_chrome_target_control_capture_path=$target_capture_path"
+        echo "rdoc_chrome_target_control_qrenderdoc_rc=$qrenderdoc_rc"
+        echo "rdoc_chrome_target_control_qrenderdoc_timed_out=$qrenderdoc_timed_out"
+        echo "rdoc_chrome_target_control_qrenderdoc_log_file_status=$qrenderdoc_log_file_status"
+        echo "rdoc_chrome_target_control_client_rc=$target_client_rc"
+        echo "rdoc_chrome_target_control_client_timed_out=$target_client_timed_out"
+        echo "rdoc_chrome_target_control_target_env_file_status=$target_env_file_status"
+        echo "rdoc_chrome_target_control_capture_file=$capture_file"
+        echo "rdoc_chrome_target_control_capture_file_status=$capture_file_status"
+        echo "rdoc_chrome_target_control_capture_file_reason=$capture_file_reason"
+        echo "rdoc_chrome_target_control_capture_magic=$capture_magic"
+        echo "rdoc_chrome_target_control_chrome_log=$BUILD_DIR/chrome.log"
+        echo "rdoc_chrome_target_control_discovery_log=$BUILD_DIR/discovery.log"
+        echo "rdoc_chrome_target_control_gpu_maps=$BUILD_DIR/gpu.maps"
+        echo "rdoc_chrome_target_control_qrenderdoc_log=$BUILD_DIR/qrenderdoc.log"
+        echo "rdoc_chrome_target_control_target_env=$BUILD_DIR/target-control.env"
+        echo "rdoc_chrome_target_control_required_magic=RDOC"
+        echo "rdoc_chrome_target_control_required_api=vulkan"
+        echo "rdoc_chrome_target_control_required_angle=vulkan"
+    } >"$OUT_ENV"
+    {
+        echo "# Chrome RenderDoc Target-Control Probe"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- gpu pid: $gpu_pid"
+        echo "- use gpu launcher: $USE_GPU_LAUNCHER"
+        echo "- gpu launcher invoked: $gpu_launcher_invoked"
+        echo "- gpu launcher layer only: $gpu_launcher_layer_only"
+        echo "- gpu launcher vk instance layers: $gpu_launcher_vk_instance_layers"
+        echo "- window pid: $chosen_window_pid"
+        echo "- window pid matches gpu pid: $chosen_window_pid_matches_gpu_pid"
+        echo "- RenderDoc debug log status: $renderdoc_debug_log_file_status"
+        echo "- RenderDoc loaded status: $renderdoc_debug_log_loaded_status"
+        echo "- RenderDoc Vulkan hooks status: $renderdoc_debug_log_vulkan_hooks_status"
+        echo "- RenderDoc Vulkan instance status: $renderdoc_debug_log_vulkan_instance_status"
+        echo "- target status: $target_status"
+        echo "- target api: $target_api"
+        echo "- target ident count: $target_ident_count"
+        echo "- target chosen ident: $target_chosen_ident"
+        echo "- target message count: $target_message_count"
+        echo "- target noop count: $target_noop_count"
+        echo "- target pretrigger message count: $target_pretrigger_message_count"
+        echo "- target pretrigger noop count: $target_pretrigger_noop_count"
+        echo "- target api message count: $target_api_message_count"
+        echo "- target last api: $target_last_api_name"
+        echo "- target last api presenting: $target_last_api_presenting"
+        echo "- target last api supported: $target_last_api_supported"
+        echo "- target last window count: $target_last_window_count"
+        echo "- qrenderdoc rc: $qrenderdoc_rc"
+        echo "- qrenderdoc timed out: $qrenderdoc_timed_out"
+        echo "- qrenderdoc log status: $qrenderdoc_log_file_status"
+        echo "- target client rc: $target_client_rc"
+        echo "- target client timed out: $target_client_timed_out"
+        echo "- target client build status: $target_client_build_status"
+        echo "- target env status: $target_env_file_status"
+        echo "- capture: $capture_file"
+        echo "- magic: $capture_magic"
+    } >"$REPORT_PATH"
+}
+
+if [ ! -x "$CHROME_BIN" ]; then
+    reason="missing-chrome"
+    write_env
+    cat "$OUT_ENV"
+    exit 1
+fi
+if [ "$TARGET_CLIENT" = "" ] && [ ! -x "$QRENDERDOC_BIN" ] &&
+   [ -s "$ROOT_DIR/scripts/tool/renderdoc-target-control-client.cpp" ] &&
+   [ -s "$ROOT_DIR/$RENDERDOC_SOURCE_DIR/renderdoc/api/replay/renderdoc_replay.h" ] &&
+   command -v c++ >/dev/null 2>&1; then
+    TARGET_CLIENT="$BUILD_DIR/renderdoc-target-control-client"
+    if [ ! -x "$TARGET_CLIENT" ] ||
+       [ "$ROOT_DIR/scripts/tool/renderdoc-target-control-client.cpp" -nt "$TARGET_CLIENT" ]; then
+        if c++ -std=c++17 -DRENDERDOC_PLATFORM_LINUX \
+            -I"$ROOT_DIR/$RENDERDOC_SOURCE_DIR/renderdoc" \
+            -I"$ROOT_DIR/$RENDERDOC_SOURCE_DIR/renderdoc/api/replay" \
+            -L"$RENDERDOC_HOME/lib" \
+            -Wl,-rpath,"$ROOT_DIR/$RENDERDOC_HOME/lib" \
+            -o "$TARGET_CLIENT" \
+            "$ROOT_DIR/scripts/tool/renderdoc-target-control-client.cpp" \
+            -lrenderdoc >"$target_client_build_log" 2>&1; then
+            target_client_build_status="pass"
+        else
+            target_client_build_status="fail"
+            TARGET_CLIENT=""
+        fi
+    else
+        target_client_build_status="cached"
+    fi
+fi
+if [ "$TARGET_CLIENT" = "" ] && [ ! -x "$QRENDERDOC_BIN" ]; then
+    reason="missing-qrenderdoc"
+    write_env
+    cat "$OUT_ENV"
+    exit 1
+fi
+if [ ! -s "$HTML_PATH" ]; then
+    reason="missing-html-fixture"
+    write_env
+    cat "$OUT_ENV"
+    exit 1
+fi
+if [ ! -s "$RENDERDOC_HOME/etc/vulkan/implicit_layer.d/renderdoc_capture.json" ]; then
+    reason="missing-renderdoc-vulkan-layer"
+    write_env
+    cat "$OUT_ENV"
+    exit 1
+fi
+
+sed "s#/io/dist/lib/librenderdoc.so#$RENDERDOC_HOME/lib/librenderdoc.so#g" \
+    "$RENDERDOC_HOME/etc/vulkan/implicit_layer.d/renderdoc_capture.json" \
+    >"$BUILD_DIR/vulkan-layer.d/renderdoc_capture.json"
+
+url="file://$HTML_PATH"
+LD_LIBRARY_PATH="$RENDERDOC_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+VK_LAYER_PATH="$ROOT_DIR/$BUILD_DIR/vulkan-layer.d" \
+VK_IMPLICIT_LAYER_PATH="$ROOT_DIR/$BUILD_DIR/vulkan-layer.d" \
+VK_INSTANCE_LAYERS=VK_LAYER_RENDERDOC_Capture \
+ENABLE_VULKAN_RENDERDOC_CAPTURE=1 \
+RENDERDOC_CAPFILE="$ROOT_DIR/$BUILD_DIR/chrome_target_control" \
+RENDERDOC_DEBUG_LOG_FILE="$ROOT_DIR/$renderdoc_debug_log_file" \
+RDOC_GPU_LAUNCHER_RENDERDOCCMD="$RENDERDOC_HOME/bin/renderdoccmd" \
+RDOC_GPU_LAUNCHER_CAPTURE_PREFIX="$ROOT_DIR/$BUILD_DIR/chrome_target_control_gpu" \
+RDOC_GPU_LAUNCHER_LOG="$ROOT_DIR/$gpu_launcher_log" \
+RDOC_GPU_LAUNCHER_DEBUG_LOG_FILE="$ROOT_DIR/$renderdoc_debug_log_file" \
+RDOC_GPU_LAUNCHER_LAYER_ONLY="$USE_GPU_LAUNCHER" \
+RDOC_GPU_LAUNCHER_CAPOPTS="${RDOC_CAPOPTS:-}" \
+"$CHROME_BIN" \
+    $chrome_launch_flags \
+    $gpu_launcher_flag \
+    --no-first-run \
+    --no-default-browser-check \
+    --disable-search-engine-choice-screen \
+    --disable-features=Translate,OptimizationHints,MediaRouter \
+    --disable-crash-reporter \
+    --disable-breakpad \
+    --user-data-dir="$ROOT_DIR/$BUILD_DIR/profile" \
+    --window-size="${WIDTH},${HEIGHT}" \
+    --app="$url" >"$BUILD_DIR/chrome.log" 2>&1 &
+chrome_pid=$!
+echo "$chrome_pid" >"$BUILD_DIR/chrome.pid"
+
+sleep "$WAIT_SECS"
+gpu_pid="$(pgrep -P "$chrome_pid" -af -- '--type=gpu-process' | awk 'NR==1 { print $1 }' || true)"
+if command -v xdotool >/dev/null 2>&1; then
+    chosen_window="$(xdotool search --pid "$chrome_pid" 2>/dev/null | tail -n 1 || true)"
+    if [ "$chosen_window" != "" ]; then
+        chosen_window_pid="$(xdotool getwindowpid "$chosen_window" 2>/dev/null || true)"
+    fi
+fi
+if [ "$chosen_window_pid" != "" ] && [ "$gpu_pid" != "" ]; then
+    if [ "$chosen_window_pid" = "$gpu_pid" ]; then
+        chosen_window_pid_matches_gpu_pid="1"
+    else
+        chosen_window_pid_matches_gpu_pid="0"
+    fi
+fi
+
+{
+    echo "parent=$chrome_pid"
+    echo "children:"
+    ps -o pid,ppid,stat,cmd --ppid "$chrome_pid" || true
+} >"$BUILD_DIR/discovery.log"
+
+if [ -s "$gpu_launcher_log" ]; then
+    gpu_launcher_invoked="1"
+    gpu_launcher_layer_only="$(value_of renderdoc_gpu_launcher_layer_only "$gpu_launcher_log")"
+    gpu_launcher_exported_capfile="$(value_of renderdoc_gpu_launcher_layer_only_exported_capfile "$gpu_launcher_log")"
+    gpu_launcher_vk_instance_layers="$(value_of renderdoc_gpu_launcher_layer_only_vk_instance_layers "$gpu_launcher_log")"
+    gpu_launcher_enable_vulkan_renderdoc_capture="$(value_of renderdoc_gpu_launcher_layer_only_exported_enable "$gpu_launcher_log")"
+else
+    gpu_launcher_invoked="0"
+fi
+
+if [ -s "$renderdoc_debug_log_file" ]; then
+    renderdoc_debug_log_file_status="pass"
+    if grep -q 'Loading into /opt/google/chrome/chrome' "$renderdoc_debug_log_file"; then
+        renderdoc_debug_log_loaded_status="pass"
+    else
+        renderdoc_debug_log_loaded_status="missing"
+    fi
+    if grep -q 'Registering Vulkan hooks' "$renderdoc_debug_log_file"; then
+        renderdoc_debug_log_vulkan_hooks_status="pass"
+    else
+        renderdoc_debug_log_vulkan_hooks_status="missing"
+    fi
+    if grep -q 'Initialised capture layer in Vulkan instance' "$renderdoc_debug_log_file"; then
+        renderdoc_debug_log_vulkan_instance_status="pass"
+    else
+        renderdoc_debug_log_vulkan_instance_status="missing"
+    fi
+else
+    renderdoc_debug_log_file_status="missing"
+    renderdoc_debug_log_loaded_status="missing"
+    renderdoc_debug_log_vulkan_hooks_status="missing"
+    renderdoc_debug_log_vulkan_instance_status="missing"
+fi
+
+if [ "$gpu_pid" != "" ] && [ -r "/proc/$gpu_pid/environ" ]; then
+    if tr '\0' '\n' <"/proc/$gpu_pid/environ" | grep -q '^VK_INSTANCE_LAYERS=VK_LAYER_RENDERDOC_Capture$'; then
+        gpu_env_has_layer="1"
+    else
+        gpu_env_has_layer="0"
+    fi
+fi
+if [ "$gpu_pid" != "" ] && [ -r "/proc/$gpu_pid/maps" ]; then
+    if grep -q 'librenderdoc' "/proc/$gpu_pid/maps"; then
+        gpu_maps_has_renderdoc="1"
+    else
+        gpu_maps_has_renderdoc="0"
+    fi
+    if grep -q 'libvulkan' "/proc/$gpu_pid/maps"; then
+        gpu_maps_has_vulkan="1"
+    else
+        gpu_maps_has_vulkan="0"
+    fi
+    cp "/proc/$gpu_pid/maps" "$BUILD_DIR/gpu.maps" 2>/dev/null || true
+fi
+
+if [ "$gpu_pid" = "" ]; then
+    reason="no-gpu-process"
+    write_env
+    kill "$chrome_pid" 2>/dev/null || true
+    cat "$OUT_ENV"
+    exit 1
+fi
+
+set +e
+qrenderdoc_timeout="$((CONTROL_WAIT_API_SECS + CONTROL_TIMEOUT + 10))"
+if [ "$TARGET_CLIENT" != "" ]; then
+    if command -v timeout >/dev/null 2>&1; then
+        LD_LIBRARY_PATH="$RENDERDOC_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        RDOC_TARGET_CONTROL_OUT="$ROOT_DIR/$BUILD_DIR/target-control.env" \
+        RDOC_TARGET_CONTROL_PID="$gpu_pid" \
+        RDOC_TARGET_CONTROL_TIMEOUT_SECS="$CONTROL_TIMEOUT" \
+        RDOC_TARGET_CONTROL_WAIT_API_SECS="$CONTROL_WAIT_API_SECS" \
+        RDOC_TARGET_CONTROL_CAPTURE_OUT="$ROOT_DIR/$BUILD_DIR/target_control_copy.rdc" \
+        timeout "$qrenderdoc_timeout" "$TARGET_CLIENT" >"$BUILD_DIR/qrenderdoc.log" 2>&1
+    else
+        LD_LIBRARY_PATH="$RENDERDOC_HOME/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        RDOC_TARGET_CONTROL_OUT="$ROOT_DIR/$BUILD_DIR/target-control.env" \
+        RDOC_TARGET_CONTROL_PID="$gpu_pid" \
+        RDOC_TARGET_CONTROL_TIMEOUT_SECS="$CONTROL_TIMEOUT" \
+        RDOC_TARGET_CONTROL_WAIT_API_SECS="$CONTROL_WAIT_API_SECS" \
+        RDOC_TARGET_CONTROL_CAPTURE_OUT="$ROOT_DIR/$BUILD_DIR/target_control_copy.rdc" \
+        "$TARGET_CLIENT" >"$BUILD_DIR/qrenderdoc.log" 2>&1
+    fi
+elif command -v timeout >/dev/null 2>&1; then
+    RDOC_TARGET_CONTROL_OUT="$ROOT_DIR/$BUILD_DIR/target-control.env" \
+    RDOC_TARGET_CONTROL_PID="$gpu_pid" \
+    RDOC_TARGET_CONTROL_TIMEOUT_SECS="$CONTROL_TIMEOUT" \
+    RDOC_TARGET_CONTROL_CAPTURE_OUT="$ROOT_DIR/$BUILD_DIR/target_control_copy.rdc" \
+    timeout "$qrenderdoc_timeout" "$QRENDERDOC_BIN" \
+        --ui-python "$ROOT_DIR/scripts/tool/renderdoc-target-control-trigger.py" \
+        >"$BUILD_DIR/qrenderdoc.log" 2>&1
+else
+    RDOC_TARGET_CONTROL_OUT="$ROOT_DIR/$BUILD_DIR/target-control.env" \
+    RDOC_TARGET_CONTROL_PID="$gpu_pid" \
+    RDOC_TARGET_CONTROL_TIMEOUT_SECS="$CONTROL_TIMEOUT" \
+    RDOC_TARGET_CONTROL_CAPTURE_OUT="$ROOT_DIR/$BUILD_DIR/target_control_copy.rdc" \
+    "$QRENDERDOC_BIN" \
+        --ui-python "$ROOT_DIR/scripts/tool/renderdoc-target-control-trigger.py" \
+        >"$BUILD_DIR/qrenderdoc.log" 2>&1
+fi
+control_rc=$?
+set -e
+qrenderdoc_rc="$control_rc"
+if [ "$control_rc" -eq 124 ]; then
+    qrenderdoc_timed_out="1"
+else
+    qrenderdoc_timed_out="0"
+fi
+if [ "$TARGET_CLIENT" != "" ]; then
+    target_client_rc="$control_rc"
+    target_client_timed_out="$qrenderdoc_timed_out"
+fi
+if [ -s "$BUILD_DIR/qrenderdoc.log" ]; then
+    qrenderdoc_log_file_status="pass"
+elif [ -f "$BUILD_DIR/qrenderdoc.log" ]; then
+    qrenderdoc_log_file_status="empty"
+else
+    qrenderdoc_log_file_status="missing"
+fi
+if [ -s "$BUILD_DIR/target-control.env" ]; then
+    target_env_file_status="pass"
+elif [ -f "$BUILD_DIR/target-control.env" ]; then
+    target_env_file_status="empty"
+else
+    target_env_file_status="missing"
+fi
+
+target_status="$(value_of rdoc_target_control_status "$BUILD_DIR/target-control.env")"
+target_reason="$(value_of rdoc_target_control_reason "$BUILD_DIR/target-control.env")"
+target_pid="$(value_of rdoc_target_control_chosen_pid "$BUILD_DIR/target-control.env")"
+target_api="$(value_of rdoc_target_control_chosen_api "$BUILD_DIR/target-control.env")"
+target_ident_count="$(value_of rdoc_target_control_ident_count "$BUILD_DIR/target-control.env")"
+target_idents="$(value_of rdoc_target_control_idents "$BUILD_DIR/target-control.env")"
+target_chosen_ident="$(value_of rdoc_target_control_chosen_ident "$BUILD_DIR/target-control.env")"
+target_message_count="$(value_of rdoc_target_control_message_count "$BUILD_DIR/target-control.env")"
+target_noop_count="$(value_of rdoc_target_control_noop_count "$BUILD_DIR/target-control.env")"
+target_pretrigger_message_count="$(value_of rdoc_target_control_pretrigger_message_count "$BUILD_DIR/target-control.env")"
+target_pretrigger_noop_count="$(value_of rdoc_target_control_pretrigger_noop_count "$BUILD_DIR/target-control.env")"
+target_api_message_count="$(value_of rdoc_target_control_api_message_count "$BUILD_DIR/target-control.env")"
+target_window_message_count="$(value_of rdoc_target_control_window_message_count "$BUILD_DIR/target-control.env")"
+target_last_api_name="$(value_of rdoc_target_control_last_api_name "$BUILD_DIR/target-control.env")"
+target_last_api_presenting="$(value_of rdoc_target_control_last_api_presenting "$BUILD_DIR/target-control.env")"
+target_last_api_supported="$(value_of rdoc_target_control_last_api_supported "$BUILD_DIR/target-control.env")"
+target_last_window_count="$(value_of rdoc_target_control_last_window_count "$BUILD_DIR/target-control.env")"
+target_capture_path="$(value_of rdoc_target_control_capture_path "$BUILD_DIR/target-control.env")"
+
+sleep 2
+find "$BUILD_DIR" -name '*.rdc' -print >"$BUILD_DIR/rdc.list"
+if [ -n "$target_capture_path" ] && { [ -e "$target_capture_path" ] || [ -L "$target_capture_path" ]; }; then
+    capture_file="$target_capture_path"
+else
+    capture_file="$(head -n 1 "$BUILD_DIR/rdc.list" || true)"
+fi
+capture_file_reason="$(capture_artifact_reason "$capture_file")"
+capture_file_status="$(capture_artifact_status "$capture_file_reason")"
+if [ "$capture_file_reason" = "pass" ]; then
+    capture_magic="$(dd if="$capture_file" bs=4 count=1 2>/dev/null || true)"
+fi
+
+kill "$chrome_pid" 2>/dev/null || true
+sleep 1
+
+if [ "$capture_magic" = "RDOC" ]; then
+    status="pass"
+    reason="pass"
+elif [ "$capture_file_reason" = "symlink" ]; then
+    status="fail"
+    reason="capture-symlink"
+elif [ "$capture_file_reason" = "hardlink" ]; then
+    status="fail"
+    reason="capture-hardlink"
+elif [ -n "$capture_file" ] && [ "$capture_file_reason" != "pass" ]; then
+    status="fail"
+    reason="capture-$capture_file_reason"
+elif [ "$target_status" = "" ]; then
+    status="fail"
+    if [ "$qrenderdoc_timed_out" = "1" ] && [ "$qrenderdoc_log_file_status" = "empty" ]; then
+        reason="qrenderdoc-ui-python-timeout-without-target-evidence"
+    elif [ "$renderdoc_debug_log_loaded_status" = "pass" ] && [ "$renderdoc_debug_log_vulkan_hooks_status" = "pass" ]; then
+        reason="target-control-no-evidence-renderdoc-layer-loaded"
+    else
+        reason="target-control-no-evidence"
+    fi
+elif [ "$control_rc" -ne 0 ]; then
+    status="fail"
+    if [ "$target_reason" = "no-new-capture-message" ] &&
+       [ "${target_api_message_count:-0}" = "0" ] &&
+       [ "$renderdoc_debug_log_vulkan_hooks_status" = "pass" ] &&
+       [ "$renderdoc_debug_log_vulkan_instance_status" = "missing" ]; then
+        reason="target-control-no-api-use-renderdoc-layer-not-in-vulkan-instance"
+    else
+        reason="${target_reason:-target-control-failed}"
+    fi
+else
+    status="fail"
+    reason="missing-rdc"
+fi
+
+write_env
+cat "$OUT_ENV"
+[ "$status" = "pass" ]

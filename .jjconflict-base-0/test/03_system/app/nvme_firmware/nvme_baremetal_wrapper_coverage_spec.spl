@@ -1,0 +1,59 @@
+"""
+NVMe baremetal wrapper coverage audit.
+
+The audit is not real boot evidence. It proves the wrapper-evidence surface:
+RV32 and RV64 have fail-closed fake-QEMU self-tests wired into their SSpecs.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+fn _run(cmd: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", cmd])
+
+fn _expect_no_fail_marker(out: text, label: text):
+    if out.contains("FAIL"):
+        fail(label + " printed a failure marker")
+
+describe "NVMe baremetal wrapper coverage audit":
+    """
+    The wrapper coverage audit must keep RV32 and RV64 fail-closed wrapper
+    evidence green.
+    """
+
+    it "reports RV32 and RV64 wrapper coverage in default mode":
+        step("Run the default NVMe baremetal wrapper coverage audit")
+        val (out, err, code) = _run("sh scripts/check/check-nvme-baremetal-wrapper-coverage.shs")
+        expect(code).to_equal(0)
+
+        step("The audit proves RV32 wrapper self-test coverage")
+        expect(out).to_contain("nvme_baremetal_wrapper_rv32_self_test=pass")
+        expect(out).to_contain("nvme_baremetal_wrapper_rv32_spec_status=pass")
+
+        step("The audit proves RV64 wrapper self-test coverage")
+        expect(out).to_contain("nvme_baremetal_wrapper_coverage_status=pass")
+        expect(out).to_contain("nvme_baremetal_wrapper_coverage_blockers=none")
+        expect(out).to_contain("nvme_baremetal_wrapper_rv64_self_test=pass")
+        expect(out).to_contain("nvme_baremetal_wrapper_rv64_spec_status=pass")
+        expect(out).to_contain("STATUS: PASS nvme-baremetal-wrapper-coverage status=pass blockers=none")
+        _expect_no_fail_marker(out, "default wrapper coverage audit")
+
+    it "passes strict mode when RV32 and RV64 wrapper coverage exists":
+        step("Run strict mode after both wrappers have fail-closed self-test coverage")
+        val (out, err, code) = _run("sh scripts/check/check-nvme-baremetal-wrapper-coverage.shs --strict")
+        expect(code).to_equal(0)
+
+        step("Strict mode reports a complete wrapper coverage pass")
+        expect(out).to_contain("nvme_baremetal_wrapper_coverage_status=pass")
+        expect(out).to_contain("nvme_baremetal_wrapper_coverage_blockers=none")
+        expect(out).to_contain("STATUS: PASS nvme-baremetal-wrapper-coverage status=pass blockers=none")
+        _expect_no_fail_marker(out, "strict wrapper coverage audit")
+
+    it "self-tests fake wrapper coverage failure modes":
+        step("Run the wrapper coverage fake-fixture self-test")
+        val (out, err, code) = _run("sh scripts/check/check-nvme-baremetal-wrapper-coverage.shs --self-test")
+        expect(code).to_equal(0)
+
+        step("The self-test proves fake missing RV64 and RV32 coverage fail closed")
+        expect(out).to_contain("STATUS: PASS nvme-baremetal-wrapper-coverage self-test")
+        _expect_no_fail_marker(out, "wrapper coverage self-test")

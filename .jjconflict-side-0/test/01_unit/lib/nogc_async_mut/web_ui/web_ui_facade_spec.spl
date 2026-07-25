@@ -1,0 +1,98 @@
+use std.spec
+use std.nogc_async_mut.web_ui.app.{AppConfig, WebUIApp}
+use std.nogc_async_mut.web_ui.bridge.{pack_rgba, RenderBridge}
+use std.nogc_async_mut.web_ui.command.{NATIVE_WEB_UI_INVOKE, CommandRegistry}
+use std.nogc_async_mut.web_ui.dom_backend.{EngineDomBackend, WebUiAttr}
+use std.nogc_async_mut.web_ui.event_bus.{EventBus}
+use std.nogc_async_mut.web_ui.input.{InputBridge, WebUIEvent}
+use std.nogc_async_mut.web_ui.plugin.{FsPlugin, PluginRegistry}
+use std.nogc_async_mut.web_ui.types.{Payload, CommandResult, AppState}
+use std.nogc_async_mut.web_ui.window.{WindowManager, WebUIWindow}
+
+"""
+# Web UI Facade Re-export Specification
+
+**Feature IDs:** #WEB-UI-FACADE-001
+**Category:** Web UI
+**Difficulty:** 2/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** N/A
+
+## Overview
+
+Verifies that the `nogc_async_mut.web_ui` facade exposes the pure application
+state, payload, command registry, event bus, input, plugin, bridge, DOM, and
+window helpers needed by native web UI integrations.
+
+## Syntax
+
+The spec constructs facade values directly and checks observable state rather
+than using tautological match arms.
+
+## Examples
+
+`Payload.empty()` creates a mutable payload map whose duplicate key updates keep
+the key count stable and return the latest value.
+"""
+
+describe "nogc_async_mut web_ui facade":
+
+    it "re-exports pure web_ui data and registry helpers":
+        var payload = Payload.empty()
+        payload.set("name", "simple")
+        payload.set("mode", "async")
+        payload.set("mode", "nogc")
+        expect(payload.len()).to_equal(2)
+        expect(payload.keys().len()).to_equal(2)
+        match payload.get("mode"):
+            Some(value): expect(value).to_equal("nogc")
+            nil: expect("").to_equal("nogc")
+
+        match CommandResult.Ok(value: "done"):
+            CommandResult.Ok(value): expect(value).to_equal("done")
+            CommandResult.Err(message): expect(message).to_equal("")
+        var app_state_name = "unexpected"
+        match AppState.Running:
+            AppState.Running: app_state_name = "running"
+            _: app_state_name = "not-running"
+        expect(app_state_name).to_equal("running")
+
+        var commands = CommandRegistry.create()
+        expect(commands.command_count()).to_equal(0)
+        expect(commands.has_command("missing")).to_equal(false)
+        expect(commands.js_invoke_shim().contains("__web_ui_invoke")).to_equal(true)
+        expect(NATIVE_WEB_UI_INVOKE).to_equal(-800)
+
+        var bus = EventBus.create()
+        expect(bus.listener_count()).to_equal(0)
+
+        var input = InputBridge.create()
+        expect(input.mouse_x).to_equal(0)
+        expect(input.mouse_down).to_equal(false)
+        var event_name = "unexpected"
+        match WebUIEvent.CloseRequested:
+            WebUIEvent.CloseRequested: event_name = "close-requested"
+            _: event_name = "not-close-requested"
+        expect(event_name).to_equal("close-requested")
+
+        var allowed_payload = Payload.empty()
+        allowed_payload.set("/tmp", "allowed")
+        val fs = FsPlugin.create(allowed_payload.keys())
+        expect(fs.is_path_allowed("/tmp/web-ui.txt")).to_equal(true)
+        expect(fs.is_path_allowed("/etc/passwd")).to_equal(false)
+        val plugins = PluginRegistry.create()
+        expect(plugins.plugin_count()).to_equal(0)
+
+        val config = AppConfig.default_config()
+        expect(config.title).to_equal("WebUI App")
+        expect(config.width).to_equal(800)
+        expect(config.target_fps).to_equal(60)
+
+        expect(pack_rgba(1, 2, 3, 4)).to_equal(16909060)
+
+        val attr = WebUiAttr.create("id", "root")
+        expect(attr.name).to_equal("id")
+        expect(attr.value).to_equal("root")

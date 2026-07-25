@@ -1,0 +1,338 @@
+# Office Macro API
+#
+# Simple IS the office suite's macro language (its "VBA"). A macro is a plain
+# Simple script that imports this module and drives documents, sheets, and
+# decks through a small, stable object model:
+#
+#     use app.office.office_api.{macro_open_sheet, macro_set_cell, macro_recalc,
+#                                macro_save_sheet, macro_export_html}
+#
+#     fn main() -> i64:
+#         var sh = macro_open_sheet("budget.csv")
+#         sh = macro_set_cell(sh, "D1", "=SUM(B1:C1)")
+#         sh = macro_recalc(sh)
+#         macro_save_sheet(sh, "budget_out.csv")
+#         macro_export_html("sheets", "budget_out.csv", "budget.html")
+#         0
+#
+# Run with `bin/simple run my_macro.spl` — no separate engine, no sandboxed
+# dialect: the full language, stdlib, and office model are the macro surface.
+# Every mutator RETURNS the updated object; callers must reassign (the
+# interpreter can pass aggregates by copy).
+
+use std.io_runtime.{read_file, write_file, file_exists}
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind}
+use app.office.file_formats.{parse_markdown_document, document_to_markdown, parse_csv_sheet, sheet_to_csv, recalculate_formula_cells, parse_inline_spans}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text}
+use app.office.slides.slide.{Slide, blank_slide, add_text_box}
+use app.office.slides.deck_format.{parse_deck, deck_to_text}
+use app.office.render_adapter.{office_render_source}
+use app.office.sheets.chart.{sheet_bar_chart_svg}
+use app.office.sheets.data_ops.{sheet_sort_range, sheet_filter_rows}
+use app.office.sheets.pivot.{pivot_build, pivot_to_sheet}
+use app.office.word.edit_ops.{document_find, document_replace, document_stats, document_word_count_new, document_character_count, document_paragraph_count}
+use app.office.word.mail_merge.{merge_fields, merge_all_markdown}
+use app.office.mail.message.{Email}
+use app.office.mail.rules.{parse_rules, apply_rules}
+use app.office.sheets.cond_format.{CondRule, cond_css_for_cell}
+use app.office.sheets.cell_format.{FormatSpec, SheetFormats, empty_sheet_formats, formats_set}
+use app.office.odf_ooxml.{sheet_to_xlsx_bytes_formatted}
+use app.office.odf_export.{sheet_to_fods_formatted}
+use std.nogc_sync_mut.sffi.io.{file_write_bytes}
+
+# =========================================================================
+# Writer documents (markdown-backed)
+# =========================================================================
+
+fn macro_open_document(path: text) -> RichDocument:
+    """Open a markdown document; a missing file yields an empty document."""
+    if not file_exists(path):
+        return RichDocument.new(path)
+    parse_markdown_document(read_file(path), path)
+
+fn macro_new_document(title: text) -> RichDocument:
+    RichDocument.new(title)
+
+fn _doc_push(doc: RichDocument, kind: BlockKind, content: text) -> RichDocument:
+    var d = doc
+    val r = parse_inline_spans(content, d.comments.len() + 1)
+    d.blocks.push(DocBlock(kind: kind, spans: r.spans))
+    for c in r.comments:
+        d.comments.push(c)
+    d
+
+fn macro_add_heading(doc: RichDocument, level: i32, content: text) -> RichDocument:
+    """Append a heading (level 1-3). Inline **bold**/*italic*/`code` parse."""
+    if level <= 1:
+        return _doc_push(doc, BlockKind.Heading1, content)
+    if level == 2:
+        return _doc_push(doc, BlockKind.Heading2, content)
+    _doc_push(doc, BlockKind.Heading3, content)
+
+fn macro_add_paragraph(doc: RichDocument, content: text) -> RichDocument:
+    _doc_push(doc, BlockKind.Paragraph, content)
+
+fn macro_add_bullet(doc: RichDocument, content: text) -> RichDocument:
+    _doc_push(doc, BlockKind.BulletItem, content)
+
+fn macro_save_document(doc: RichDocument, path: text) -> bool:
+    """Serialize the document to markdown and write it to disk."""
+    write_file(path, document_to_markdown(doc))
+
+# =========================================================================
+# Calc sheets (CSV-backed)
+# =========================================================================
+
+fn macro_open_sheet(path: text) -> Sheet:
+    """Open a CSV sheet (formulas compute); missing file yields an empty sheet."""
+    if not file_exists(path):
+        return Sheet.new(path)
+    parse_csv_sheet(read_file(path), path)
+
+fn macro_new_sheet(name: text) -> Sheet:
+    Sheet.new(name)
+
+fn macro_set_cell(sheet: Sheet, ref_str: text, value: text) -> Sheet:
+    """Set a cell ('=SUM(A1:A3)' formulas, numbers, text). Returns the sheet."""
+    var sh = sheet
+    sh.set_value(ref_str, value)
+    sh
+
+fn macro_get_cell(sheet: Sheet, ref_str: text) -> text:
+    """The display text of a cell (computed value for recalced formulas)."""
+    cell_display_text(sheet.get_cell(ref_str))
+
+fn macro_recalc(sheet: Sheet) -> Sheet:
+    """Recompute every formula cell. Reassign the result."""
+    recalculate_formula_cells(sheet)
+
+fn macro_save_sheet(sheet: Sheet, path: text) -> bool:
+    """Serialize the sheet's used range to CSV and write it to disk."""
+    write_file(path, sheet_to_csv(sheet))
+
+# =========================================================================
+# Impress decks (deck-format-backed)
+# =========================================================================
+
+fn macro_open_deck(path: text) -> [Slide]:
+    """Open a '---'-separated deck file; missing file yields an empty deck."""
+    if not file_exists(path):
+        return []
+    parse_deck(read_file(path))
+
+fn macro_add_slide(deck: [Slide], title: text, body: text) -> [Slide]:
+    """Append a slide with a title box and one body box. Returns the deck."""
+    var slides = deck
+    var s = blank_slide("slide{slides.len() + 1}")
+    s = add_text_box(s, "title", title, 60, 60, 840, 120)
+    if body != "":
+        s = add_text_box(s, "body1", body, 60, 220, 840, 80)
+    slides.push(s)
+    slides
+
+fn macro_save_deck(deck: [Slide], path: text) -> bool:
+    """Serialize the deck back to deck-format text and write it to disk."""
+    write_file(path, deck_to_text(deck))
+
+fn macro_chart_svg(sheet: Sheet, label_range: text, value_range: text, title: text) -> text:
+    """An SVG bar chart from two sheet ranges (labels, values)."""
+    sheet_bar_chart_svg(sheet, label_range, value_range, title)
+
+fn macro_export_chart(sheet: Sheet, label_range: text, value_range: text, title: text, out_path: text) -> bool:
+    """Write an SVG bar chart built from sheet ranges to disk."""
+    write_file(out_path, sheet_bar_chart_svg(sheet, label_range, value_range, title))
+
+fn macro_sort_range(sheet: Sheet, range_a1: text, key_col: i32, ascending: bool, has_header: bool) -> Sheet:
+    """Sort a range of cells by a key column. Returns the updated sheet.
+
+    Example macro: `sh = macro_sort_range(sh, "A1:C10", 0, true, true)`
+    """
+    sheet_sort_range(sheet, range_a1, key_col, ascending, has_header)
+
+fn macro_filter_rows(sheet: Sheet, range_a1: text, col: i32, criteria: text) -> [i64]:
+    """Filter rows in a range by criteria in a column. Returns 1-based row numbers.
+
+    Example macro: `rows = macro_filter_rows(sh, "A1:C10", 1, ">100")`
+    """
+    sheet_filter_rows(sheet, range_a1, col, criteria)
+
+fn macro_pivot(sheet: Sheet, range_a1: text, row_key_col: i32, col_key_col: i32, value_col: i32, agg: text) -> Sheet:
+    """Group a range by one or two key columns, aggregate a value column
+    (sum|count|average|min|max), and return the pivot result as a new Sheet
+    (via pivot_to_sheet) ready for macro_save_sheet/macro_export_html.
+    `col_key_col = -1` selects the one-dimensional form. A bad range/column/
+    agg fails closed to an empty Sheet (pivot_build returns `[]`).
+
+    Example macro: `piv = macro_pivot(sh, "A1:C6", 0, 1, 2, "sum")`
+    """
+    val result = pivot_build(sheet, range_a1, row_key_col, col_key_col, value_col, agg)
+    pivot_to_sheet(result, "pivot")
+
+fn macro_cond_css(sheet: Sheet, rules: [CondRule], cell_a1: text) -> text:
+    """Evaluate conditional formatting rules for a cell. Returns CSS string.
+
+    Example macro:
+    ```
+    val rule = CondRule(range: "A1:C10", kind: "cell_value", criteria: ">50",
+                        n: 0i64, css: "background:#fde7e9")
+    val css = macro_cond_css(sh, [rule], "A1")
+    ```
+    """
+    cond_css_for_cell(sheet, rules, cell_a1)
+
+# =========================================================================
+# Writer documents (extended)
+# =========================================================================
+
+fn macro_find(doc: RichDocument, needle: text) -> [text]:
+    """Search document for text. Returns hit locations as 'blockIndex:offset' strings.
+
+    Example macro: `hits = macro_find(doc, "invoice")`
+    """
+    document_find(doc, needle)
+
+fn macro_replace(doc: RichDocument, needle: text, replacement: text) -> RichDocument:
+    """Replace all occurrences of text in a document. Returns updated document.
+
+    Example macro: `doc = macro_replace(doc, "2025", "2026")`
+    """
+    document_replace(doc, needle, replacement)
+
+fn macro_word_count(doc: RichDocument) -> i64:
+    """Count words in a document (whitespace-separated tokens).
+
+    Example macro: `count = macro_word_count(doc)`
+    """
+    document_word_count_new(doc)
+
+fn macro_character_count(doc: RichDocument) -> i64:
+    """Count characters in a document (excluding newlines).
+
+    Example macro: `count = macro_character_count(doc)`
+    """
+    document_character_count(doc)
+
+fn macro_paragraph_count(doc: RichDocument) -> i64:
+    """Count paragraphs in a document (non-empty text blocks).
+
+    Example macro: `count = macro_paragraph_count(doc)`
+    """
+    document_paragraph_count(doc)
+
+fn macro_merge_fields(doc: RichDocument) -> [text]:
+    """Extract mail-merge field names ({{name}}) from document.
+
+    Example macro: `fields = macro_merge_fields(doc)`
+    """
+    merge_fields(doc)
+
+fn macro_merge_all_markdown(doc: RichDocument, sheet: Sheet) -> text:
+    """Merge document against all data rows in sheet, return markdown.
+
+    Example macro: `merged_text = macro_merge_all_markdown(doc, sheet_data)`
+    """
+    merge_all_markdown(doc, sheet)
+
+# =========================================================================
+# Mail rules
+# =========================================================================
+
+fn macro_mail_rules(emails: [Email], rules_text: text) -> [Email]:
+    """Parse a rules spec and apply it to a mailbox (first-matching-rule-wins
+    per email). Returns the NEW email list; reassign.
+
+    Example macro:
+        val rules_text = "ToArchive | from contains \"alex\" | move Archive"
+        var inbox = my_emails()
+        inbox = macro_mail_rules(inbox, rules_text)
+    """
+    val rules = parse_rules(rules_text)
+    apply_rules(emails, rules)
+
+# =========================================================================
+# Cell formats (styled exports)
+# =========================================================================
+
+fn macro_set_format(formats: SheetFormats, cell_a1: text, num_fmt: text, bold: bool, bg: text, fg: text) -> SheetFormats:
+    """Set one cell's display format. Returns the updated container; reassign.
+
+    Pass "" for num_fmt/bg/fg attributes you do not want to set.
+
+    Example macro:
+        var fmts = empty_sheet_formats()
+        fmts = macro_set_format(fmts, "B2", "0.00", true, "#ffe4b5", "#7a2e00")
+    """
+    val spec = FormatSpec(num_fmt: num_fmt, bold: bold, bg: bg, fg: fg)
+    formats_set(formats, cell_a1, spec)
+
+fn macro_parse_formats(spec_text: text) -> SheetFormats:
+    """Parse a plain-text format spec into a SheetFormats container.
+
+    One cell per line: an A1 ref followed by space-separated attributes —
+    `bold`, `num_fmt=<excel-fmt>`, `bg=<#rrggbb>`, `fg=<#rrggbb>`:
+
+        B2 num_fmt=0.00 bold bg=#ffe4b5 fg=#7a2e00
+        B3 num_fmt=0.0%
+
+    Blank lines and lines starting with '#' are skipped; unknown attributes
+    are ignored; a line needs a ref plus at least one attribute. This is the
+    format the CLI's `convert ... --styles <file>` flag reads.
+
+    Example macro: `val fmts = macro_parse_formats(read_file("fmt.txt"))`
+    """
+    var formats = empty_sheet_formats()
+    val lines = spec_text.split("\n")
+    var li = 0
+    while li < lines.len():
+        val line = lines[li].trim()
+        li = li + 1
+        if line != "" and not line.starts_with("#"):
+            val parts = line.split(" ")
+            if parts.len() >= 2:
+                var num_fmt = ""
+                var bold = false
+                var bg = ""
+                var fg = ""
+                var pi = 1
+                while pi < parts.len():
+                    val tok = parts[pi]
+                    if tok == "bold":
+                        bold = true
+                    elif tok.starts_with("num_fmt="):
+                        num_fmt = tok.substring(8)
+                    elif tok.starts_with("bg="):
+                        bg = tok.substring(3)
+                    elif tok.starts_with("fg="):
+                        fg = tok.substring(3)
+                    pi = pi + 1
+                val spec = FormatSpec(num_fmt: num_fmt, bold: bold, bg: bg, fg: fg)
+                formats = formats_set(formats, parts[0], spec)
+    formats
+
+fn macro_save_xlsx_formatted(sheet: Sheet, formats: SheetFormats, path: text) -> bool:
+    """Write the sheet as a styled .xlsx (number formats, bold, colors).
+
+    Example macro: `macro_save_xlsx_formatted(sh, fmts, "out.xlsx")`
+    """
+    val bytes = sheet_to_xlsx_bytes_formatted(sheet, formats)
+    file_write_bytes(path, bytes)
+
+fn macro_save_fods_formatted(sheet: Sheet, formats: SheetFormats, path: text) -> bool:
+    """Write the sheet as a styled flat-ODF .fods (automatic styles + data styles).
+
+    Example macro: `macro_save_fods_formatted(sh, fmts, "out.fods")`
+    """
+    val xml = sheet_to_fods_formatted(sheet, formats)
+    write_file(path, xml)
+
+# =========================================================================
+# Export
+# =========================================================================
+
+fn macro_export_html(surface: text, in_path: text, out_path: text) -> bool:
+    """Render a document/sheet/deck file to a styled HTML page on disk."""
+    if not file_exists(in_path):
+        return false
+    val result = office_render_source(surface, in_path, read_file(in_path))
+    write_file(out_path, result.html_output)

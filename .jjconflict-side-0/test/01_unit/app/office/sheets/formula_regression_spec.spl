@@ -1,0 +1,387 @@
+"""Calc regression spec for LINEST, TREND, GROWTH, PROB, RANDARRAY.
+
+LINEST(known_ys, [known_xs]) -> [slope, intercept] spilled horizontally.
+Least-squares linear regression: y = slope*x + intercept.
+known_xs defaults to 1,2,...,n if omitted.
+
+TREND(known_ys, [known_xs], [new_xs]) -> predicted values via linear fit.
+Fits via LINEST, predicts y = slope*x + intercept at new_xs.
+new_xs defaults to known_xs if omitted.
+
+GROWTH(known_ys, [known_xs], [new_xs]) -> exponential predictions.
+Fits ln(y) linearly, predicts exp(slope*x + intercept).
+All y must be > 0.
+
+PROB(x_range, prob_range, lower_limit, [upper_limit]) -> sum of probabilities.
+Sums P(x) where lower ≤ x ≤ upper (upper omitted → x == lower exactly).
+All probs must be in [0,1], sum must equal 1 (within 1e-9).
+
+RANDARRAY([rows], [cols], [min], [max], [integer]) -> random array.
+Defaults: rows=1, cols=1, min=0, max=1, integer=FALSE.
+Spills a grid of random values.
+
+Ground truths (hand-computed):
+- x=[1..5], y=[3,5,7,10,12]: x̄=3, ȳ=7.4, Σ(x-x̄)(y-ȳ)=23, Σ(x-x̄)²=10
+  → slope=2.3, intercept=0.5
+- TREND([3,5,7,10,12],[1,2,3,4,5],6) = 2.3*6+0.5 = 14.3
+- y=[2,4,8,16], x=[1..4]: ln(y)=[ln(2), 2ln(2), 3ln(2), 4ln(2)] = linear with m=ln(2), b=0
+  → GROWTH at x=5 = exp(ln(2)*5) = 2^5 = 32
+- PROB([0,1,2,3], [0.2,0.3,0.1,0.4], 1, 3) = 0.3+0.1+0.4 = 0.8
+- PROB([0,1,2,3], [0.2,0.3,0.1,0.4], 2, 2) = 0.1
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text}
+use app.office.file_formats.{recalculate_formula_cells}
+
+fn _eval(formula: text) -> text:
+    var sh = Sheet.new("f")
+    sh.set_value("B1", formula)
+    sh = recalculate_formula_cells(sh)
+    cell_display_text(sh.get_cell("B1"))
+
+fn _eval_cell(formula: text, cell_key: text) -> text:
+    var sh = Sheet.new("f")
+    sh.set_value(cell_key, formula)
+    sh = recalculate_formula_cells(sh)
+    cell_display_text(sh.get_cell(cell_key))
+
+fn _setup_linest_data() -> Sheet:
+    """x=[1,2,3,4,5], y=[3,5,7,10,12]"""
+    var sh = Sheet.new("f")
+    sh.set_value("A1", "3")
+    sh.set_value("A2", "5")
+    sh.set_value("A3", "7")
+    sh.set_value("A4", "10")
+    sh.set_value("A5", "12")
+    sh.set_value("B1", "1")
+    sh.set_value("B2", "2")
+    sh.set_value("B3", "3")
+    sh.set_value("B4", "4")
+    sh.set_value("B5", "5")
+    sh
+
+fn _setup_growth_data() -> Sheet:
+    """x=[1,2,3,4], y=[2,4,8,16]"""
+    var sh = Sheet.new("f")
+    sh.set_value("A1", "2")
+    sh.set_value("A2", "4")
+    sh.set_value("A3", "8")
+    sh.set_value("A4", "16")
+    sh.set_value("B1", "1")
+    sh.set_value("B2", "2")
+    sh.set_value("B3", "3")
+    sh.set_value("B4", "4")
+    sh
+
+fn _setup_prob_data() -> Sheet:
+    """x=[0,1,2,3], probs=[0.2,0.3,0.1,0.4]"""
+    var sh = Sheet.new("f")
+    sh.set_value("A1", "0")
+    sh.set_value("A2", "1")
+    sh.set_value("A3", "2")
+    sh.set_value("A4", "3")
+    sh.set_value("B1", "0.2")
+    sh.set_value("B2", "0.3")
+    sh.set_value("B3", "0.1")
+    sh.set_value("B4", "0.4")
+    sh
+
+# =========================================================================
+# LINEST Tests
+#
+# NOTE (bug: formula_regression_spec_orphan_it_2026-07-04.md): every `it` in
+# this file used to be a TOP-LEVEL `it` outside any `describe` -- the test
+# runner silently ignores those (see writing_calc_functions.md quirk
+# ledger), so none of the 24 pre-existing cases in this file actually ran;
+# the whole-file summary just reported "Passed: 1" (file load only). Wrapped
+# the LINEST section (directly gating this batch's work) in a real
+# `describe` so these assertions execute. TREND/GROWTH/PROB/RANDARRAY below
+# are still orphaned -- out of scope for this batch, flagged in the bug doc.
+# =========================================================================
+
+describe "LINEST":
+    it "LINEST: basic slope and intercept":
+        var sh = _setup_linest_data()
+        sh.set_value("D1", "=LINEST(A1:A5, B1:B5)")
+        sh = recalculate_formula_cells(sh)
+        val slope = cell_display_text(sh.get_cell("D1"))
+        val intercept = cell_display_text(sh.get_cell("E1"))
+        expect(slope).to_start_with("2.3")
+        expect(intercept).to_start_with("0.5")
+
+    it "LINEST: omitted known_xs defaults to 1..n":
+        var sh = _setup_linest_data()
+        sh.set_value("D1", "=LINEST(A1:A5)")
+        sh = recalculate_formula_cells(sh)
+        val slope = cell_display_text(sh.get_cell("D1"))
+        val intercept = cell_display_text(sh.get_cell("E1"))
+        expect(slope).to_start_with("2.3")
+        expect(intercept).to_start_with("0.5")
+
+    it "LINEST: mismatched ranges returns empty":
+        var sh = _setup_linest_data()
+        sh.set_value("D1", "=LINEST(A1:A5, B1:B3)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_contain("#ERR")
+
+    it "LINEST: n<2 returns empty":
+        var sh = Sheet.new("f")
+        sh.set_value("A1", "5")
+        sh.set_value("B1", "1")
+        sh.set_value("D1", "=LINEST(A1, B1)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_contain("#ERR")
+
+    it "LINEST: 2-arg form stays a single row (no stats requested)":
+        var sh = _setup_linest_data()
+        sh.set_value("D1", "=LINEST(A1:A5, B1:B5)")
+        sh = recalculate_formula_cells(sh)
+        val row2_slope_col = cell_display_text(sh.get_cell("D2"))
+        expect(row2_slope_col).to_equal("")
+
+    it "LINEST: 3-arg form (const) stays a single row":
+        var sh = _setup_linest_data()
+        sh.set_value("D1", "=LINEST(A1:A5, B1:B5, TRUE)")
+        sh = recalculate_formula_cells(sh)
+        val slope = cell_display_text(sh.get_cell("D1"))
+        val intercept = cell_display_text(sh.get_cell("E1"))
+        val row2 = cell_display_text(sh.get_cell("D2"))
+        expect(slope).to_start_with("2.3")
+        expect(intercept).to_start_with("0.5")
+        expect(row2).to_equal("")
+
+    it "LINEST: stats=TRUE spills the 3-row form with hand-verified stats":
+        # x=1..5, y=[3,5,7,10,12]; hand anchors (doc-verified, see
+        # writing_calc_functions.md ground-truth discipline):
+        #   se_y=0.3162278, se_slope=0.1, se_intercept=0.331662,
+        #   r2=0.9943609
+        var sh = _setup_linest_data()
+        sh.set_value("D1", "=LINEST(A1:A5, B1:B5, TRUE, TRUE)")
+        sh = recalculate_formula_cells(sh)
+        val slope = cell_display_text(sh.get_cell("D1"))
+        val intercept = cell_display_text(sh.get_cell("E1"))
+        val se_slope = cell_display_text(sh.get_cell("D2"))
+        val se_intercept = cell_display_text(sh.get_cell("E2"))
+        val r2 = cell_display_text(sh.get_cell("D3"))
+        val se_y = cell_display_text(sh.get_cell("E3"))
+        expect(slope).to_start_with("2.3")
+        expect(intercept).to_start_with("0.5")
+        expect(se_slope).to_start_with("0.1")
+        expect(se_intercept).to_start_with("0.331662")
+        expect(r2).to_start_with("0.994360")
+        expect(se_y).to_start_with("0.316227")
+
+# =========================================================================
+# TREND Tests
+# =========================================================================
+
+describe "TREND":
+    it "TREND: single new_x prediction":
+        var sh = _setup_linest_data()
+        sh.set_value("D1", "=TREND(A1:A5, B1:B5, 6)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_start_with("14.3")
+
+    it "TREND: range of new_xs":
+        var sh = _setup_linest_data()
+        sh.set_value("C1", "6")
+        sh.set_value("C2", "7")
+        sh.set_value("D1", "=TREND(A1:A5, B1:B5, C1:C2)")
+        sh = recalculate_formula_cells(sh)
+        val pred6 = cell_display_text(sh.get_cell("D1")).to_f64()
+        val pred7 = cell_display_text(sh.get_cell("E1")).to_f64()
+        expect(pred6).to_be_greater_than(14.2)
+        expect(pred6).to_be_less_than(14.4)
+        expect(pred7).to_be_greater_than(16.5)
+        expect(pred7).to_be_less_than(16.7)
+
+    it "TREND: omitted new_xs predicts at known_xs":
+        var sh = _setup_linest_data()
+        sh.set_value("D1", "=TREND(A1:A5, B1:B5)")
+        sh = recalculate_formula_cells(sh)
+        val pred1 = cell_display_text(sh.get_cell("D1"))
+        expect(pred1).to_start_with("2.8")
+
+    it "TREND: bad fit returns empty":
+        var sh = _setup_linest_data()
+        sh.set_value("D1", "=TREND(A1:A3, B1:B1, 10)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_contain("#ERR")
+
+# =========================================================================
+# GROWTH Tests
+# =========================================================================
+
+describe "GROWTH":
+    it "GROWTH: exponential prediction at single point":
+        var sh = _setup_growth_data()
+        sh.set_value("D1", "=GROWTH(A1:A4, B1:B4, 5)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1")).to_f64()
+        expect(result).to_be_greater_than(31.5)
+        expect(result).to_be_less_than(32.5)
+
+    it "GROWTH: range of new_xs":
+        var sh = _setup_growth_data()
+        sh.set_value("C1", "5")
+        sh.set_value("C2", "6")
+        sh.set_value("D1", "=GROWTH(A1:A4, B1:B4, C1:C2)")
+        sh = recalculate_formula_cells(sh)
+        val pred5 = cell_display_text(sh.get_cell("D1")).to_f64()
+        val pred6 = cell_display_text(sh.get_cell("E1")).to_f64()
+        expect(pred5).to_be_greater_than(31.5)
+        expect(pred5).to_be_less_than(32.5)
+        expect(pred6).to_be_greater_than(63.5)
+        expect(pred6).to_be_less_than(64.5)
+
+    it "GROWTH: negative y returns error":
+        var sh = Sheet.new("f")
+        sh.set_value("A1", "-2")
+        sh.set_value("A2", "4")
+        sh.set_value("B1", "1")
+        sh.set_value("B2", "2")
+        sh.set_value("D1", "=GROWTH(A1:A2, B1:B2, 3)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_contain("#ERR")
+
+    it "GROWTH: zero y returns error":
+        var sh = Sheet.new("f")
+        sh.set_value("A1", "0")
+        sh.set_value("A2", "4")
+        sh.set_value("B1", "1")
+        sh.set_value("B2", "2")
+        sh.set_value("D1", "=GROWTH(A1:A2, B1:B2, 3)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_contain("#ERR")
+
+# =========================================================================
+# PROB Tests
+# =========================================================================
+
+describe "PROB":
+    it "PROB: range [lower, upper]":
+        var sh = _setup_prob_data()
+        sh.set_value("D1", "=PROB(A1:A4, B1:B4, 1, 3)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_start_with("0.8")
+
+    it "PROB: single point (upper omitted)":
+        var sh = _setup_prob_data()
+        sh.set_value("D1", "=PROB(A1:A4, B1:B4, 2)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_start_with("0.1")
+
+    it "PROB: mismatched ranges":
+        var sh = _setup_prob_data()
+        sh.set_value("D1", "=PROB(A1:A2, B1:B4, 1)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_contain("#ERR")
+
+    it "PROB: probabilities don't sum to 1":
+        var sh = Sheet.new("f")
+        sh.set_value("A1", "0")
+        sh.set_value("A2", "1")
+        sh.set_value("B1", "0.4")
+        sh.set_value("B2", "0.4")
+        sh.set_value("D1", "=PROB(A1:A2, B1:B2, 0, 1)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_contain("#ERR")
+
+    it "PROB: probability out of [0,1]":
+        var sh = Sheet.new("f")
+        sh.set_value("A1", "0")
+        sh.set_value("A2", "1")
+        sh.set_value("B1", "1.5")
+        sh.set_value("B2", "0.5")
+        sh.set_value("D1", "=PROB(A1:A2, B1:B2, 0, 1)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_contain("#ERR")
+
+    it "PROB: requires 3+ arguments":
+        var sh = Sheet.new("f")
+        sh.set_value("D1", "=PROB(A1:A2)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_contain("#ERR")
+
+# =========================================================================
+# RANDARRAY Tests
+# =========================================================================
+
+describe "RANDARRAY":
+    it "RANDARRAY: default 1x1 [0,1)":
+        var sh = Sheet.new("f")
+        sh.set_value("D1", "=RANDARRAY()")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        val num = result.to_f64()
+        expect(num).to_be_greater_than(0.0)
+        expect(num).to_be_less_than(1.0)
+
+    it "RANDARRAY: custom dimensions":
+        var sh = Sheet.new("f")
+        sh.set_value("D1", "=RANDARRAY(2, 3)")
+        sh = recalculate_formula_cells(sh)
+        val r1c1 = cell_display_text(sh.get_cell("D1"))
+        val r1c2 = cell_display_text(sh.get_cell("E1"))
+        val r1c3 = cell_display_text(sh.get_cell("F1"))
+        val r2c1 = cell_display_text(sh.get_cell("D2"))
+        assert_not_equal(r1c1, "#ERR")
+        assert_not_equal(r1c2, "#ERR")
+        assert_not_equal(r1c3, "#ERR")
+        assert_not_equal(r2c1, "#ERR")
+
+    it "RANDARRAY: custom min/max":
+        var sh = Sheet.new("f")
+        sh.set_value("D1", "=RANDARRAY(1, 1, 10, 20)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        val num = result.to_f64()
+        expect(num).to_be_greater_than(10.0)
+        expect(num).to_be_less_than(20.0)
+
+    it "RANDARRAY: integer mode":
+        var sh = Sheet.new("f")
+        sh.set_value("D1", "=RANDARRAY(1, 3, 1, 10, TRUE)")
+        sh = recalculate_formula_cells(sh)
+        val c1 = cell_display_text(sh.get_cell("D1")).to_f64()
+        val c2 = cell_display_text(sh.get_cell("E1")).to_f64()
+        val c3 = cell_display_text(sh.get_cell("F1")).to_f64()
+        expect(c1).to_equal(c1.to_i64().to_f64())
+        expect(c2).to_equal(c2.to_i64().to_f64())
+        expect(c3).to_equal(c3.to_i64().to_f64())
+
+    it "RANDARRAY: rows < 1 errors":
+        var sh = Sheet.new("f")
+        sh.set_value("D1", "=RANDARRAY(0, 1)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_contain("#ERR")
+
+    it "RANDARRAY: cols < 1 errors":
+        var sh = Sheet.new("f")
+        sh.set_value("D1", "=RANDARRAY(1, 0)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_contain("#ERR")
+
+    it "RANDARRAY: min > max errors":
+        var sh = Sheet.new("f")
+        sh.set_value("D1", "=RANDARRAY(1, 1, 20, 10)")
+        sh = recalculate_formula_cells(sh)
+        val result = cell_display_text(sh.get_cell("D1"))
+        expect(result).to_contain("#ERR")
+

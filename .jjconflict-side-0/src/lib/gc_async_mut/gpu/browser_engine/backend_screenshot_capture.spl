@@ -1,0 +1,217 @@
+# Shared screenshot capture facade for rendering parity tests.
+
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.io.time_ops.{time_now_unix_micros}
+
+pub struct BackendCapture:
+    backend_name: text
+    pixels: [u32]
+    width: i32
+    height: i32
+    success: bool
+    error: text
+    pixel_checksum: i64
+    non_background_pixels: i32
+    unique_sampled_colors: i32
+    elapsed_us: i64
+
+pub struct BackendCapturePerfReport:
+    backend_name: text
+    iterations: i32
+    total_us: i64
+    pixels_per_iteration: i32
+    aggregate_checksum: i64
+    success: bool
+    error: text
+
+fn _safe_elapsed_us(start_us: i64, end_us: i64) -> i64:
+    val elapsed = end_us - start_us
+    if elapsed < 0: 0 else: elapsed
+
+fn _pixel_checksum(pixels: [u32]) -> i64:
+    var checksum: i64 = 146959810
+    var idx = 0
+    val pixel_count = pixels.len()
+    while idx < pixel_count:
+        checksum = (checksum * 16777619 + pixels[idx].to_i64() + idx.to_i64()) % 2147483647
+        idx = idx + 1
+    if checksum < 0: -checksum else: checksum
+
+fn _count_non_background(pixels: [u32], background: u32) -> i32:
+    var count = 0
+    for pixel in pixels:
+        if pixel != background:
+            count = count + 1
+    count
+
+fn _unique_sampled_colors(pixels: [u32], sample_step: i32) -> i32:
+    var step = sample_step
+    if step <= 0:
+        step = 1
+    val pixel_count = pixels.len()
+    if pixel_count == 0:
+        return 0
+    var seen: [u32] = [0u32; 256]
+    var seen_count = 0
+    var idx = 0
+    while idx < pixel_count:
+        val pixel = pixels[idx]
+        var found = false
+        var seen_idx = 0
+        while seen_idx < seen_count:
+            if seen[seen_idx] == pixel:
+                found = true
+                break
+            seen_idx = seen_idx + 1
+        if not found:
+            seen[seen_count] = pixel
+            seen_count = seen_count + 1
+            if seen_count >= 256:
+                return seen_count
+        idx = idx + step
+    seen_count
+
+fn _failed_capture(backend_name: text, width: i32, height: i32, error: text) -> BackendCapture:
+    BackendCapture(
+        backend_name: backend_name,
+        pixels: [],
+        width: width,
+        height: height,
+        success: false,
+        error: error,
+        pixel_checksum: 0,
+        non_background_pixels: 0,
+        unique_sampled_colors: 0,
+        elapsed_us: 0
+    )
+
+fn _valid_dimensions(width: i32, height: i32) -> bool:
+    width > 0 and height > 0
+
+fn _sdn_escape(value: text) -> text:
+    val slash_escaped = value.replace("\\", "\\\\")
+    slash_escaped.replace("\"", "\\\"")
+
+fn _bool_text(value: bool) -> text:
+    if value: "true" else: "false"
+
+pub fn backend_capture_ok(backend_name: text, pixels: [u32],
+                          width: i32, height: i32) -> BackendCapture:
+    val success = _valid_dimensions(width, height) and pixels.len() == width * height
+    val background = if pixels.len() > 0: pixels[0] else: 0u32
+    BackendCapture(
+        backend_name: backend_name,
+        pixels: pixels,
+        width: width,
+        height: height,
+        success: success,
+        error: if success: "" else: "pixel count does not match dimensions",
+        pixel_checksum: if success: _pixel_checksum(pixels) else: 0,
+        non_background_pixels: if success: _count_non_background(pixels, background) else: 0,
+        unique_sampled_colors: if success: _unique_sampled_colors(pixels, 17) else: 0,
+        elapsed_us: 0
+    )
+
+pub fn capture_with_backend(html: text, width: i32, height: i32,
+                            backend_name: text) -> BackendCapture:
+    if not _valid_dimensions(width, height):
+        return _failed_capture(backend_name, width, height, "invalid dimensions")
+    val start_us = time_now_unix_micros()
+    var renderer = BrowserRenderer.create_with_backend(width, height, backend_name)
+    val result = renderer.render_html_to_pixels(html)
+    val end_us = time_now_unix_micros()
+    if not result.ok:
+        return _failed_capture(renderer.backend_name(), width, height, result.error)
+    var capture = backend_capture_ok(renderer.backend_name(), result.pixel_data, width, height)
+    capture.elapsed_us = _safe_elapsed_us(start_us, end_us)
+    capture
+
+pub fn capture_with_effect_engine(html: text, width: i32, height: i32,
+                                  engine_kind: text) -> BackendCapture:
+    if engine_kind != "int" and engine_kind != "float":
+        return _failed_capture(engine_kind, width, height, "unknown effect engine")
+    capture_with_backend(html, width, height, "software")
+
+pub fn capture_engine2d_filled_rect(width: i32, height: i32,
+                                    backend_name: text,
+                                    background: u32,
+                                    rect_color: u32) -> BackendCapture:
+    if not _valid_dimensions(width, height):
+        return _failed_capture(backend_name, width, height, "invalid dimensions")
+    val start_us = time_now_unix_micros()
+    var engine = Engine2D.create_with_backend(width, height, backend_name)
+    engine.clear(background)
+    val rect_w = if width > 4: width - 4 else: width
+    val rect_h = if height > 4: height - 4 else: height
+    val rect_x = if width > 4: 2 else: 0
+    val rect_y = if height > 4: 2 else: 0
+    engine.draw_rect_filled(rect_x, rect_y, rect_w, rect_h, rect_color)
+    engine.present()
+    val pixels = engine.read_pixels()
+    val selected = engine.backend_name()
+    engine.shutdown()
+    val end_us = time_now_unix_micros()
+    var capture = backend_capture_ok(selected, pixels, width, height)
+    capture.elapsed_us = _safe_elapsed_us(start_us, end_us)
+    capture
+
+pub fn benchmark_engine2d_filled_rect_capture(width: i32, height: i32,
+                                              backend_name: text,
+                                              iterations: i32) -> BackendCapturePerfReport:
+    if iterations <= 0:
+        return BackendCapturePerfReport(
+            backend_name: backend_name,
+            iterations: iterations,
+            total_us: 0,
+            pixels_per_iteration: 0,
+            aggregate_checksum: 0,
+            success: false,
+            error: "iterations must be positive"
+        )
+    val start_us = time_now_unix_micros()
+    var aggregate: i64 = 0
+    var selected = backend_name
+    var pixels_per_iteration = 0
+    var idx = 0
+    while idx < iterations:
+        val capture = capture_engine2d_filled_rect(
+            width,
+            height,
+            backend_name,
+            0xFFFFFFFFu32,
+            0xFF2563EBu32
+        )
+        if not capture.success:
+            return BackendCapturePerfReport(
+                backend_name: capture.backend_name,
+                iterations: idx + 1,
+                total_us: _safe_elapsed_us(start_us, time_now_unix_micros()),
+                pixels_per_iteration: pixels_per_iteration,
+                aggregate_checksum: aggregate,
+                success: false,
+                error: capture.error
+            )
+        selected = capture.backend_name
+        pixels_per_iteration = capture.pixels.len()
+        aggregate = (aggregate + capture.pixel_checksum) % 2147483647
+        idx = idx + 1
+    BackendCapturePerfReport(
+        backend_name: selected,
+        iterations: iterations,
+        total_us: _safe_elapsed_us(start_us, time_now_unix_micros()),
+        pixels_per_iteration: pixels_per_iteration,
+        aggregate_checksum: aggregate,
+        success: true,
+        error: ""
+    )
+
+pub fn backend_capture_perf_report_sdn(report: BackendCapturePerfReport) -> text:
+    "(backend_capture_perf_report " +
+        "backend: \"" + _sdn_escape(report.backend_name) + "\" " +
+        "iterations: " + report.iterations.to_string() + " " +
+        "total_us: " + report.total_us.to_string() + " " +
+        "pixels_per_iteration: " + report.pixels_per_iteration.to_string() + " " +
+        "aggregate_checksum: " + report.aggregate_checksum.to_string() + " " +
+        "success: " + _bool_text(report.success) + " " +
+        "error: \"" + _sdn_escape(report.error) + "\")"

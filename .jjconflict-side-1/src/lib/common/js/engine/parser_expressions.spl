@@ -1,0 +1,612 @@
+# JS parser — expression parsing.
+# Extension block for JsParser covering the full Pratt precedence chain:
+# assignment, ternary, logical, bitwise, equality, comparison, arithmetic,
+# unary/postfix, call/member, primary literals, arrow functions, and templates.
+
+use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError}
+use std.js.types.pair.{Pair}
+use std.js.types.js_types.JsValue
+use std.js.types.ast_types.{JsExpression, JsStatement, SwitchCase, FnParam, DestructProp, ImportSpec, ExportSpec, JsAstFactory}
+use std.js.engine.parser.{JsParser}
+
+impl JsParser:
+
+    # ── Expressions (precedence climbing) ────────────────────────────────
+
+    me parse_expression() -> BrowserResult<JsExpression>:
+        self.parse_assignment()
+
+    # Assignment: x = expr, x += expr, etc.
+    me parse_assignment() -> BrowserResult<JsExpression>:
+        val left = self.parse_ternary()?
+
+        val kind = self.current_kind
+        if kind == "Eq":
+            self.advance()
+            val right = self.parse_assignment()?
+            return Ok(JsAstFactory.assignment(target: left, value: right))
+
+        if kind == "PlusEq":
+            self.advance()
+            val right = self.parse_assignment()?
+            val sum = JsAstFactory.binary(op: "+", left: left, right: right)
+            return Ok(JsAstFactory.assignment(target: left, value: sum))
+
+        if kind == "MinusEq":
+            self.advance()
+            val right = self.parse_assignment()?
+            val diff = JsAstFactory.binary(op: "-", left: left, right: right)
+            return Ok(JsAstFactory.assignment(target: left, value: diff))
+
+        if kind == "StarEq":
+            self.advance()
+            val right = self.parse_assignment()?
+            val prod = JsAstFactory.binary(op: "*", left: left, right: right)
+            return Ok(JsAstFactory.assignment(target: left, value: prod))
+
+        if kind == "SlashEq":
+            self.advance()
+            val right = self.parse_assignment()?
+            val quot = JsAstFactory.binary(op: "/", left: left, right: right)
+            return Ok(JsAstFactory.assignment(target: left, value: quot))
+
+        Ok(left)
+
+    # Ternary: cond ? then : else
+    me parse_ternary() -> BrowserResult<JsExpression>:
+        var expr = self.parse_nullish_coalescing()?
+
+        if self.match_token("Question"):
+            val then_expr = self.parse_assignment()?
+            self.expect("Colon")?
+            val else_expr = self.parse_assignment()?
+            expr = JsAstFactory.ternary(condition: expr, consequent: then_expr, alternate: else_expr)
+
+        Ok(expr)
+
+    # Nullish coalescing: a ?? b
+    me parse_nullish_coalescing() -> BrowserResult<JsExpression>:
+        var left = self.parse_or()?
+        while self.match_token("QuestionQuestion"):
+            val right = self.parse_or()?
+            left = JsAstFactory.binary(op: "??", left: left, right: right)
+        Ok(left)
+
+    # Logical OR: a || b
+    me parse_or() -> BrowserResult<JsExpression>:
+        var left = self.parse_and()?
+        while self.match_token("PipePipe"):
+            val right = self.parse_and()?
+            left = JsAstFactory.binary(op: "||", left: left, right: right)
+        Ok(left)
+
+    # Logical AND: a && b
+    me parse_and() -> BrowserResult<JsExpression>:
+        var left = self.parse_bitwise_or()?
+        while self.match_token("AmpersandAmpersand"):
+            val right = self.parse_bitwise_or()?
+            left = JsAstFactory.binary(op: "&&", left: left, right: right)
+        Ok(left)
+
+    # Bitwise OR: a | b
+    me parse_bitwise_or() -> BrowserResult<JsExpression>:
+        var left = self.parse_bitwise_xor()?
+        while self.match_token("Pipe"):
+            val right = self.parse_bitwise_xor()?
+            left = JsAstFactory.binary(op: "|", left: left, right: right)
+        Ok(left)
+
+    # Bitwise XOR: a ^ b
+    me parse_bitwise_xor() -> BrowserResult<JsExpression>:
+        var left = self.parse_bitwise_and()?
+        while self.match_token("Caret"):
+            val right = self.parse_bitwise_and()?
+            left = JsAstFactory.binary(op: "^", left: left, right: right)
+        Ok(left)
+
+    # Bitwise AND: a & b
+    me parse_bitwise_and() -> BrowserResult<JsExpression>:
+        var left = self.parse_equality()?
+        while self.match_token("Ampersand"):
+            val right = self.parse_equality()?
+            left = JsAstFactory.binary(op: "&", left: left, right: right)
+        Ok(left)
+
+    # Equality: == === != !==
+    me parse_equality() -> BrowserResult<JsExpression>:
+        var left = self.parse_comparison()?
+        while true:
+            val kind = self.current_kind
+            if kind == "EqEq":
+                self.advance()
+                val right = self.parse_comparison()?
+                left = JsAstFactory.binary(op: "==", left: left, right: right)
+            else if kind == "EqEqEq":
+                self.advance()
+                val right = self.parse_comparison()?
+                left = JsAstFactory.binary(op: "===", left: left, right: right)
+            else if kind == "BangEq":
+                self.advance()
+                val right = self.parse_comparison()?
+                left = JsAstFactory.binary(op: "!=", left: left, right: right)
+            else if kind == "BangEqEq":
+                self.advance()
+                val right = self.parse_comparison()?
+                left = JsAstFactory.binary(op: "!==", left: left, right: right)
+            else:
+                break
+        Ok(left)
+
+    # Comparison: < > <= >= instanceof in
+    me parse_comparison() -> BrowserResult<JsExpression>:
+        var left = self.parse_addition()?
+        while true:
+            val kind = self.current_kind
+            if kind == "Lt":
+                self.advance()
+                val right = self.parse_addition()?
+                left = JsAstFactory.binary(op: "<", left: left, right: right)
+            else if kind == "Gt":
+                self.advance()
+                val right = self.parse_addition()?
+                left = JsAstFactory.binary(op: ">", left: left, right: right)
+            else if kind == "LtEq":
+                self.advance()
+                val right = self.parse_addition()?
+                left = JsAstFactory.binary(op: "<=", left: left, right: right)
+            else if kind == "GtEq":
+                self.advance()
+                val right = self.parse_addition()?
+                left = JsAstFactory.binary(op: ">=", left: left, right: right)
+            else if kind == "Instanceof":
+                self.advance()
+                val right = self.parse_addition()?
+                left = JsAstFactory.instance_of(left: left, right: right)
+            else if kind == "In":
+                self.advance()
+                val right = self.parse_addition()?
+                left = JsAstFactory.in_expr(left: left, right: right)
+            else:
+                break
+        Ok(left)
+
+    # Addition / subtraction: + -
+    me parse_addition() -> BrowserResult<JsExpression>:
+        var left = self.parse_multiplication()?
+        while true:
+            val kind = self.current_kind
+            if kind == "Plus":
+                self.advance()
+                val right = self.parse_multiplication()?
+                left = JsAstFactory.binary(op: "+", left: left, right: right)
+            else if kind == "Minus":
+                self.advance()
+                val right = self.parse_multiplication()?
+                left = JsAstFactory.binary(op: "-", left: left, right: right)
+            else:
+                break
+        Ok(left)
+
+    # Multiplication / division / modulo: * / %
+    me parse_multiplication() -> BrowserResult<JsExpression>:
+        var left = self.parse_exponentiation()?
+        while true:
+            val kind = self.current_kind
+            if kind == "Star":
+                self.advance()
+                val right = self.parse_exponentiation()?
+                left = JsAstFactory.binary(op: "*", left: left, right: right)
+            else if kind == "Slash":
+                self.advance()
+                val right = self.parse_exponentiation()?
+                left = JsAstFactory.binary(op: "/", left: left, right: right)
+            else if kind == "Percent":
+                self.advance()
+                val right = self.parse_exponentiation()?
+                left = JsAstFactory.binary(op: "%", left: left, right: right)
+            else:
+                break
+        Ok(left)
+
+    # Exponentiation: ** (right-associative)
+    me parse_exponentiation() -> BrowserResult<JsExpression>:
+        val base = self.parse_unary()?
+        if self.match_token("StarStar"):
+            val exp = self.parse_exponentiation()?  # right-assoc recursion
+            return Ok(JsAstFactory.binary(op: "**", left: base, right: exp))
+        Ok(base)
+
+    # Unary: ! - + typeof void delete ~ ++x --x
+    me parse_unary() -> BrowserResult<JsExpression>:
+        val kind = self.current_kind
+
+        if kind == "Bang":
+            self.advance()
+            val operand = self.parse_unary()?
+            return Ok(JsAstFactory.unary(op: "!", operand: operand))
+
+        if kind == "Minus":
+            self.advance()
+            val operand = self.parse_unary()?
+            return Ok(JsAstFactory.unary(op: "-", operand: operand))
+
+        if kind == "Plus":
+            self.advance()
+            val operand = self.parse_unary()?
+            return Ok(JsAstFactory.unary(op: "+", operand: operand))
+
+        if kind == "Typeof":
+            self.advance()
+            val operand = self.parse_unary()?
+            return Ok(JsAstFactory.unary(op: "typeof", operand: operand))
+
+        if kind == "Void":
+            self.advance()
+            val operand = self.parse_unary()?
+            return Ok(JsAstFactory.unary(op: "void", operand: operand))
+
+        if kind == "Delete":
+            self.advance()
+            val operand = self.parse_unary()?
+            return Ok(JsAstFactory.delete_expr(expr: operand))
+
+        if kind == "Tilde":
+            self.advance()
+            val operand = self.parse_unary()?
+            return Ok(JsAstFactory.unary(op: "~", operand: operand))
+
+        if kind == "PlusPlus":
+            self.advance()
+            val operand = self.parse_unary()?
+            return Ok(JsAstFactory.unary(op: "++pre", operand: operand))
+
+        if kind == "MinusMinus":
+            self.advance()
+            val operand = self.parse_unary()?
+            return Ok(JsAstFactory.unary(op: "--pre", operand: operand))
+
+        self.parse_postfix()
+
+    # Postfix: x++ x--
+    me parse_postfix() -> BrowserResult<JsExpression>:
+        var expr = self.parse_call_expression()?
+
+        if self.current_kind == "PlusPlus":
+            self.advance()
+            expr = JsAstFactory.unary(op: "++post", operand: expr)
+
+        if self.current_kind == "MinusMinus":
+            self.advance()
+            expr = JsAstFactory.unary(op: "--post", operand: expr)
+
+        Ok(expr)
+
+    # Call / member / index: f(args), obj.prop, arr[idx], obj?.prop
+    me parse_call_expression() -> BrowserResult<JsExpression>:
+        var expr = self.parse_primary()?
+
+        while true:
+            val kind = self.current_kind
+
+            if kind == "OpenParen":
+                # Function call
+                self.advance()
+                var args: [JsExpression] = []
+                if not self.check("CloseParen"):
+                    val first_arg = self.parse_assignment()?
+                    args.push(first_arg)
+                    while self.match_token("Comma"):
+                        val arg = self.parse_assignment()?
+                        args.push(arg)
+                self.expect("CloseParen")?
+                expr = JsAstFactory.call(callee: expr, args: args)
+
+            else if kind == "Dot":
+                # Member access
+                self.advance()
+                val prop = self.expect_member_property_name()?
+                expr = JsAstFactory.member(object: expr, property: prop)
+
+            else if kind == "QuestionDot":
+                # Optional chaining
+                self.advance()
+                val prop = self.expect_member_property_name()?
+                expr = JsAstFactory.member(object: expr, property: prop)
+
+            else if kind == "OpenBracket":
+                # Index access: obj[expr]
+                self.advance()
+                val index_expr = self.parse_expression()?
+                self.expect("CloseBracket")?
+                # Encode computed member access as Call with special callee
+                expr = JsAstFactory.binary(op: "[]", left: expr, right: index_expr)
+
+            else:
+                break
+
+        Ok(expr)
+
+    # Primary: literals, identifiers, grouped, arrays, objects, arrow functions
+    me parse_primary() -> BrowserResult<JsExpression>:
+        val kind = self.current_kind
+
+        # Number literal
+        if kind == "Number":
+            val value = self.current_value
+            self.advance()
+            val num = value.parse_float() ?? 0.0
+            return Ok(JsAstFactory.literal(value: JsValue.Number(v: num)))
+
+        # String literal
+        if kind == "String":
+            val value = self.current_value
+            self.advance()
+            return Ok(JsAstFactory.literal(value: JsValue.String(v: value)))
+
+        # Template literal
+        if kind == "TemplateLiteral":
+            val value = self.current_value
+            self.advance()
+            return self._parse_template_parts(value)
+
+        # Boolean true
+        if kind == "TrueKw":
+            self.advance()
+            return Ok(JsAstFactory.literal(value: JsValue.Boolean(v: true)))
+
+        # Boolean false
+        if kind == "FalseKw":
+            self.advance()
+            return Ok(JsAstFactory.literal(value: JsValue.Boolean(v: false)))
+
+        # null
+        if kind == "NullKw":
+            self.advance()
+            return Ok(JsAstFactory.literal(value: JsValue.Null))
+
+        # undefined
+        if kind == "Undefined":
+            self.advance()
+            return Ok(JsAstFactory.literal(value: JsValue.Undefined))
+
+        # this
+        if kind == "This":
+            self.advance()
+            return Ok(JsAstFactory.identifier(name: "this"))
+
+        # new — e.g., new Foo(args)
+        if kind == "New":
+            self.advance()
+            val callee = self.parse_call_expression()?
+            return Ok(JsAstFactory.unary(op: "new", operand: callee))
+
+        # Identifier (or arrow function)
+        if kind == "Identifier":
+            # Check for single-param arrow: ident => expr
+            val ident_name = self.current_value
+            self.advance()
+            if self.check("Arrow"):
+                var single_param: [text] = []
+                single_param.push(ident_name)
+                return self.parse_arrow_body(single_param)
+            return Ok(JsAstFactory.identifier(name: ident_name))
+
+        # Grouped expression or arrow function params
+        if kind == "OpenParen":
+            return self.parse_grouped_or_arrow()
+
+        # Array literal [...]
+        if kind == "OpenBracket":
+            return self.parse_array_literal()
+
+        # Object literal {...}
+        if kind == "OpenBrace":
+            return self.parse_object_literal()
+
+        # function expression
+        if kind == "Function":
+            return self.parse_function_expression()
+
+        # Fallthrough — unexpected token
+        val bad_value = self.current_value
+        self.advance()
+        val msg = "Unexpected token '{bad_value}'"
+        self.logger.warn(msg)
+        Err(script_error(msg))
+
+    # Grouped expression (a + b) or arrow function (a, b) => ...
+    me parse_grouped_or_arrow() -> BrowserResult<JsExpression>:
+        self.advance()  # consume '('
+
+        # Empty parens => arrow with no params
+        if self.check("CloseParen"):
+            self.advance()
+            if self.check("Arrow"):
+                var no_params: [text] = []
+                return self.parse_arrow_body(no_params)
+            return Ok(JsAstFactory.literal(value: JsValue.Undefined))
+
+        # Parse first item as assignment (not full expression, to not consume commas)
+        val first = self.parse_assignment()?
+
+        # If comma follows, could be arrow params OR comma expression
+        if self.check("Comma"):
+            var items: [JsExpression] = []
+            items.push(first)
+            while self.match_token("Comma"):
+                val item = self.parse_assignment()?
+                items.push(item)
+            self.expect("CloseParen")?
+            # Check for arrow after close paren
+            if self.check("Arrow"):
+                var params: [text] = []
+                var pi = 0
+                while pi < items.len():
+                    val pname = self.ident_name(items.get(pi))
+                    if pname != "":
+                        params.push(pname)
+                    pi = pi + 1
+                return self.parse_arrow_body(params)
+            # Not arrow — comma expression, fold left
+            var result = items.get(0)
+            var ci = 1
+            while ci < items.len():
+                result = JsAstFactory.binary(op: ",", left: result, right: items.get(ci))
+                ci = ci + 1
+            return Ok(result)
+
+        self.expect("CloseParen")?
+
+        # Check for arrow after single-param parens: (x) => ...
+        val ident_name = self.ident_name(first)
+        if ident_name != "" and self.check("Arrow"):
+            var single_param: [text] = []
+            single_param.push(ident_name)
+            return self.parse_arrow_body(single_param)
+
+        Ok(first)
+
+    # Parse template literal parts — split raw string into quasis and ${...} expressions
+    me _parse_template_parts(raw: text) -> BrowserResult<JsExpression>:
+        var quasis: [text] = []
+        var exprs: [JsExpression] = []
+        var current = ""
+        var i = 0
+        val len = raw.len()
+        while i < len:
+            val c = raw[i]
+            if c == "$" and i + 1 < len and raw[i + 1] == "{":
+                quasis.push(current)
+                current = ""
+                i = i + 2
+                # Find matching closing brace
+                var depth = 1
+                var expr_text = ""
+                while i < len and depth > 0:
+                    val ec = raw[i]
+                    if ec == "{":
+                        depth = depth + 1
+                        expr_text = expr_text + ec
+                    if ec == "}":
+                        depth = depth - 1
+                        if depth > 0:
+                            expr_text = expr_text + ec
+                    if depth > 0 and ec != "{" and ec != "}":
+                        expr_text = expr_text + ec
+                    i = i + 1
+                # Parse the expression
+                var sub_parser = JsParser.create(expr_text, self.logger)
+                val expr = sub_parser.parse_expression()?
+                exprs.push(expr)
+            else:
+                current = current + c
+                i = i + 1
+        quasis.push(current)
+        if exprs.len() == 0:
+            return Ok(JsAstFactory.literal(value: JsValue.String(v: raw)))
+        Ok(JsAstFactory.template_literal(quasis: quasis, expressions: exprs))
+
+    # Parse arrow function body: => expr or => { stmts }
+    me parse_arrow_body(params: [text]) -> BrowserResult<JsExpression>:
+        self.expect("Arrow")?
+
+        if self.check("OpenBrace"):
+            val body = self.parse_block()?
+            return Ok(JsAstFactory.arrow_function(params: params, body: body))
+        else:
+            val body_expr = self.parse_assignment()?
+            # Wrap expression body as implicit return
+            var body: [JsStatement] = []
+            body.push(JsAstFactory.return_stmt(value: body_expr))
+            return Ok(JsAstFactory.arrow_function(params: params, body: body))
+
+    # Array literal: [1, 2, 3] with spread support: [1, ...arr, 3]
+    me parse_array_literal() -> BrowserResult<JsExpression>:
+        self.advance()  # consume '['
+        var elements: [JsExpression] = []
+        if not self.check("CloseBracket"):
+            if self.check("DotDotDot"):
+                self.advance()
+                val spread_expr = self.parse_assignment()?
+                elements.push(JsAstFactory.spread_element(argument: spread_expr))
+            else:
+                val first = self.parse_assignment()?
+                elements.push(first)
+            while self.match_token("Comma"):
+                if self.check("CloseBracket"):
+                    break  # trailing comma
+                if self.check("DotDotDot"):
+                    self.advance()
+                    val spread_expr = self.parse_assignment()?
+                    elements.push(JsAstFactory.spread_element(argument: spread_expr))
+                else:
+                    val elem = self.parse_assignment()?
+                    elements.push(elem)
+        self.expect("CloseBracket")?
+        Ok(JsAstFactory.array(elements: elements))
+
+    # Object literal: { key: value, ... }
+    me parse_object_literal() -> BrowserResult<JsExpression>:
+        self.advance()  # consume '{'
+        var properties: [Pair<text, JsExpression>] = []
+        if not self.check("CloseBrace"):
+            val first = self._parse_object_property()?
+            properties.push(first)
+            while self.match_token("Comma"):
+                if self.check("CloseBrace"):
+                    break  # trailing comma
+                val prop = self._parse_object_property()?
+                properties.push(prop)
+        self.expect("CloseBrace")?
+        Ok(JsAstFactory.object_expr(properties: properties))
+
+    # Parse a single object property: key: value
+    me _parse_object_property() -> BrowserResult<Pair<text, JsExpression>>:
+        var key = ""
+        val kind = self.current_kind
+        if kind == "Identifier":
+            key = self.current_value
+            self.advance()
+        else if kind == "String":
+            key = self.current_value
+            self.advance()
+        else if kind == "Number":
+            key = self.current_value
+            self.advance()
+        else:
+            key = self.current_value
+            self.advance()
+
+        # Shorthand: { x } means { x: x }
+        if not self.check("Colon"):
+            val shorthand = JsAstFactory.identifier(name: key)
+            return Ok(Pair(first: key, second: shorthand))
+
+        self.expect("Colon")?
+        val value = self.parse_assignment()?
+        Ok(Pair(first: key, second: value))
+
+    # Function expression: function(params) { body }
+    # Reuses ArrowFunction AST node — interpreter handles both the same way
+    me parse_function_expression() -> BrowserResult<JsExpression>:
+        self.advance()  # consume 'function'
+
+        var name = ""
+        if self.check("Identifier"):
+            name = self.current_value
+            self.advance()
+
+        self.expect("OpenParen")?
+        var params: [text] = []
+        if not self.check("CloseParen"):
+            val first = self.expect("Identifier")?
+            params.push(first)
+            while self.match_token("Comma"):
+                val param = self.expect("Identifier")?
+                params.push(param)
+        self.expect("CloseParen")?
+
+        val body = self.parse_block()?
+
+        # Use ArrowFunction node — interpreter registers it as a closure
+        Ok(JsAstFactory.arrow_function(params: params, body: body))

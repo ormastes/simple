@@ -1,0 +1,319 @@
+# SIMD opportunity lint - loop detection and safety-analysis helpers.
+use compiler.semantics.lint.simd_opportunity_lint.*
+# SIMD Opportunity Lint
+#
+# Source-level lint checks that detect scalar loops which could be
+# SIMDified but aren't, and emit concrete fix suggestions.
+# All checks are text-based (they scan raw .spl source lines) so they
+# run before the AST is formed — consistent with the other lint passes
+# in this directory.
+#
+# L-SIMD-001 (info):    element-wise add loop → FixedVec.add / ScalableVec.add
+# L-SIMD-002 (info):    scalar accumulator loop → FixedVec.reduce_sum
+# L-SIMD-003 (warning): byte-array XOR loop (hot inner loop) → FixedVec<u8,16>.xor
+# L-SIMD-004 (info):    element-wise max loop → FixedVec.max
+# L-SIMD-005 (note):    constant right-shift over loop → FixedVec.shr_logical
+# L-SIMD-006 (warning): memcpy loop out[i]=src[i] → FixedVec copy via from_array/to_array
+# L-SIMD-007 (info):    byte-mismatch scan loop → FixedVec.cmp_eq + reduce
+# L-SIMD-008 (warning): ASCII tolower loop → FixedVec mask_select + add
+# L-SIMD-009 (info):    ReLU loop max(a[i],0) → FixedVec.max(zero)
+# L-SIMD-010 (note):    byte-frequency histogram loop → byte_histogram_simd (if hot)
+# L-SIMD-011 (warning): key-XOR cipher loop out[i]=a[i]^key[i%keylen] → FixedVec.xor tiled
+# L-SIMD-012 (warning): ASCII validation loop byte>=0x80 → FixedVec.all_lt(0x80) / movemask
+# L-SIMD-013 (info):    byte-counting loop (conditional count) → FixedVec.cmp + popcount
+# L-SIMD-014 (info):    delimiter-scan loop byte==delim → FixedVec.cmp_eq + extract_positions
+#
+# Does NOT flag:
+# - Comment lines or docstrings
+# - Loops containing I/O calls (print, write, read, open, close, flush)
+# - Loops containing SFFI calls (extern fn calls detected via rt_ prefix)
+# - Loops containing function calls (any token ending in '(')
+# - Loops with early return or break (control flow divergence)
+# - Loops inside SFFI-annotated modules (@export("C") or @ffi)
+# - Loops that are already using FixedVec or ScalableVec
+#
+# Severity tiers:
+#   info    — definite but cosmetic; low confidence the loop is hot
+#   warning — high-confidence the loop is hot (e.g. XOR over bytes, hot inner loop)
+#   note    — suggestion-only; user may choose to ignore
+
+use compiler.semantics.lint.lint_text.{iter_code_lines, CodeLine}
+
+# ============================================================================
+# Warning Struct
+# ============================================================================
+
+pub struct SimdOpportunityWarning:
+    code: text        # L-SIMD-001, etc.
+    severity: text    # "info", "warning", "note"
+    message: text
+    hint: text
+    fix: text         # concrete replacement code snippet
+    line_num: i64
+    file_path: text
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.file_path}:{self.line_num} — {self.message} — {self.hint}"
+
+    fn fmt_with_fix() -> text:
+        "[{self.code}] {self.severity}: {self.file_path}:{self.line_num} — {self.message}\n  hint: {self.hint}\n  fix:  {self.fix}"
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _find_substr(haystack: text, needle: text) -> i64:
+    """Return index of first occurrence of needle in haystack, or -1."""
+    if needle.len() == 0:
+        return 0
+    if haystack.len() < needle.len():
+        return -1
+    var i = 0
+    val limit = haystack.len() - needle.len() + 1
+    while i < limit:
+        val chunk = haystack.slice(i, i + needle.len())
+        if chunk == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _is_for_range_loop(line: text) -> bool:
+    """Detect `for <ident> in 0..<expr>:` style range loops."""
+    val t = line.trim()
+    if not t.starts_with("for "):
+        return false
+    if _find_substr(t, "in 0..") >= 0:
+        return true
+    if _find_substr(t, "in 0 ..") >= 0:
+        return true
+    false
+
+fn _is_while_range_loop(line: text) -> bool:
+    """Detect `while <ident> < <expr>:` style range loops (canonical stdlib idiom)."""
+    val t = line.trim()
+    if not t.starts_with("while "):
+        return false
+    # Must contain `<var> < <expr>:` pattern — i.e. a comparison with <
+    if _find_substr(t, " < ") >= 0:
+        return true
+    false
+
+fn _extract_while_loop_var(line: text) -> text:
+    """Extract the loop variable from `while <var> < <expr>:`."""
+    val t = line.trim()
+    if not t.starts_with("while "):
+        return "i"
+    val rest = t.slice(6)  # skip "while "
+    var end = 0
+    while end < rest.len():
+        val ch = rest.slice(end, end + 1)
+        if ch == " " or ch == "<" or ch == ":":
+            break
+        end = end + 1
+    if end == 0:
+        return "i"
+    rest.slice(0, end).trim()
+
+fn _extract_while_range_n(line: text) -> text:
+    """Extract upper bound from `while <var> < <n>:`."""
+    val t = line.trim()
+    val lt_idx = _find_substr(t, " < ")
+    if lt_idx < 0:
+        return "n"
+    val rest = t.slice(lt_idx + 3)
+    var end = 0
+    while end < rest.len():
+        val ch = rest.slice(end, end + 1)
+        if ch == ":" or ch == " " or ch == ")":
+            break
+        end = end + 1
+    if end == 0:
+        return "n"
+    rest.slice(0, end).trim()
+
+fn _extract_loop_var_generic(line: text) -> text:
+    """Extract loop variable from either for or while range loop."""
+    val t = line.trim()
+    if t.starts_with("for "):
+        return _extract_loop_var(t)
+    if t.starts_with("while "):
+        return _extract_while_loop_var(t)
+    "i"
+
+fn _extract_range_n_generic(line: text) -> text:
+    """Extract upper bound from either for or while range loop."""
+    val t = line.trim()
+    if t.starts_with("for "):
+        return _extract_range_n(t)
+    if t.starts_with("while "):
+        return _extract_while_range_n(t)
+    "n"
+
+fn _has_io_call(line: text) -> bool:
+    """Detect I/O calls that make SIMD vectorisation unsafe."""
+    val t = line.trim()
+    if t.starts_with("#"):
+        return false
+    val io_tokens = ["print ", "print(", "println(", ".write(", ".read(", ".open(", ".close(", ".flush(", "file_read(", "file_write(", "rt_file_"]
+    var i = 0
+    while i < io_tokens.len():
+        if t.contains(io_tokens[i]):
+            return true
+        i = i + 1
+    false
+
+fn _has_sffi_call(line: text) -> bool:
+    """Detect SFFI runtime calls (rt_ prefix) that block vectorisation."""
+    val t = line.trim()
+    if t.starts_with("#"):
+        return false
+    _find_substr(t, "rt_") >= 0 and t.contains("(")
+
+fn _is_simd_safe_call(line: text, call_end: i64) -> bool:
+    """Return true if the function call ending at call_end (the '(' position) is in the
+    SIMD-safe allowlist: max, min, abs, clamp.  These are pure scalar math functions
+    whose SIMD equivalents exist in FixedVec — all others are conservatively rejected."""
+    # Walk backwards from call_end to find the start of the identifier
+    var start = call_end - 1
+    while start > 0:
+        val ch = line.slice(start - 1, start)
+        val is_ident = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_"
+        if not is_ident:
+            break
+        start = start - 1
+    val name = line.slice(start, call_end)
+    name == "max" or name == "min" or name == "abs" or name == "clamp"
+
+fn _has_function_call(line: text) -> bool:
+    """Detect any non-trivial function call inside a loop body.
+    Excludes array index access (contains '[') and method-chain on arrays.
+    Allowlist: max(, min(, abs(, clamp( are pure scalar math — safe for SIMD.
+    A 'call' is identified by an identifier followed immediately by '('.
+    """
+    val t = line.trim()
+    if t.starts_with("#"):
+        return false
+    # Skip lines that are pure array indexing or comparisons
+    if not t.contains("("):
+        return false
+    # Detect identifier( pattern — any letter/underscore followed by (
+    var i = 0
+    while i < t.len():
+        val ch = t.slice(i, i + 1)
+        if ch == "(":
+            # Check char before paren
+            if i > 0:
+                val prev = t.slice(i - 1, i)
+                val is_ident_char = (prev >= "a" and prev <= "z") or (prev >= "A" and prev <= "Z") or (prev >= "0" and prev <= "9") or prev == "_"
+                if is_ident_char:
+                    # Allow .push( (array mutation), and pure SIMD-safe math functions
+                    val at_push = i >= 5 and t.slice(i - 5, i + 1) == ".push("
+                    if not at_push and not _is_simd_safe_call(t, i):
+                        return true
+            i = i + 1
+        else:
+            i = i + 1
+    false
+
+fn _has_break_return(line: text) -> bool:
+    """Detect early exit that blocks vectorisation."""
+    val t = line.trim()
+    if t.starts_with("#"):
+        return false
+    t.starts_with("return") or t.starts_with("break") or t.starts_with("continue")
+
+fn _has_simd_already(line: text) -> bool:
+    """Return true if this line already uses FixedVec or ScalableVec."""
+    line.contains("FixedVec") or line.contains("ScalableVec") or line.contains("fixedvec_") or line.contains("scalablevec_")
+
+fn _loop_body_is_safe(lines: [CodeLine], loop_start: i64, loop_indent: i64) -> bool:
+    """Return true if the loop body has no calls, I/O, SFFI, or control flow
+    that would make SIMD rewriting unsafe.  Scans until dedent back to the
+    loop's indent level."""
+    var i = loop_start + 1
+    while i < lines.len():
+        val cl = lines[i]
+        val t = cl.trimmed
+        # Determine body indent: first non-empty non-comment line sets it
+        if t.len() == 0 or t.starts_with("#"):
+            i = i + 1
+            continue
+        # Count leading spaces of raw line
+        var indent = 0
+        var j = 0
+        while j < cl.raw.len():
+            val ch = cl.raw.slice(j, j + 1)
+            if ch == " ":
+                indent = indent + 1
+                j = j + 1
+            elif ch == "\t":
+                indent = indent + 4
+                j = j + 1
+            else:
+                break
+        # Back at or before loop's indent means we left the body
+        if indent <= loop_indent:
+            return true
+        # Unsafe patterns
+        if _has_io_call(t):
+            return false
+        if _has_sffi_call(t):
+            return false
+        if _has_break_return(t):
+            return false
+        if _has_simd_already(t):
+            return false
+        # Function calls (allowlisted: max, min, abs, clamp; .push( on array)
+        if _has_function_call(t):
+            return false
+        i = i + 1
+    true
+
+fn _loop_indent(line: text) -> i64:
+    """Count leading spaces of a raw line."""
+    var indent = 0
+    var i = 0
+    while i < line.len():
+        val ch = line.slice(i, i + 1)
+        if ch == " ":
+            indent = indent + 1
+            i = i + 1
+        elif ch == "\t":
+            indent = indent + 4
+            i = i + 1
+        else:
+            break
+    indent
+
+fn _extract_loop_var(line: text) -> text:
+    """Extract the loop variable from `for <var> in ...`."""
+    val t = line.trim()
+    if not t.starts_with("for "):
+        return "i"
+    val rest = t.slice(4)
+    var end = 0
+    while end < rest.len():
+        val ch = rest.slice(end, end + 1)
+        if ch == " " or ch == ":":
+            break
+        end = end + 1
+    if end == 0:
+        return "i"
+    rest.slice(0, end)
+
+fn _extract_range_n(line: text) -> text:
+    """Extract upper bound N from `for i in 0..N` or `for i in 0..n`."""
+    val t = line.trim()
+    val idx = _find_substr(t, "0..")
+    if idx < 0:
+        return "n"
+    val rest = t.slice(idx + 3)
+    var end = 0
+    while end < rest.len():
+        val ch = rest.slice(end, end + 1)
+        if ch == ":" or ch == " " or ch == ")":
+            break
+        end = end + 1
+    if end == 0:
+        return "n"
+    rest.slice(0, end)

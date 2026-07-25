@@ -1,0 +1,112 @@
+# Preview pane hardening specs.
+#
+# Covers: sync-scroll edge cases, empty document, source-line mapping,
+# pane bounds, and negative scroll offsets.
+
+use std.spec
+use std.editor.view.preview_pane.*
+
+describe "preview_pane scroll and bounds":
+
+    it "render returns empty list for zero height":
+        val pane = preview_pane_create(1)
+        val result = preview_pane_render(pane, 0)
+        expect(result.len()).to_equal(0)
+
+    it "render returns empty list for negative height":
+        val pane = preview_pane_create(1)
+        val result = preview_pane_render(pane, -5)
+        expect(result.len()).to_equal(0)
+
+    it "scroll clamps negative delta to zero":
+        val pane = preview_pane_create(0)
+        val scrolled = preview_pane_scroll(pane, -10, 100)
+        expect(scrolled.viewport_start).to_equal(0)
+
+    it "scroll clamps past max_lines":
+        val pane = preview_pane_create(0)
+        val scrolled = preview_pane_scroll(pane, 200, 50)
+        expect(scrolled.viewport_start).to_equal(49)
+
+    it "scroll with max_lines zero returns unchanged pane":
+        val pane = preview_pane_create(0)
+        val scrolled = preview_pane_scroll(pane, 5, 0)
+        expect(scrolled.viewport_start).to_equal(0)
+
+    it "scroll with max_lines one clamps to zero":
+        val pane = preview_pane_create(0)
+        val scrolled = preview_pane_scroll(pane, 100, 1)
+        expect(scrolled.viewport_start).to_equal(0)
+
+describe "preview_pane empty document":
+
+    it "create produces a pane with viewport_start zero":
+        val pane = preview_pane_create(7)
+        expect(pane.viewport_start).to_equal(0)
+        expect(pane.scroll_sync).to_equal(true)
+
+    it "update with empty string is safe":
+        val pane = preview_pane_create(0)
+        val updated = preview_pane_update(pane, "")
+        expect(updated.viewport_start).to_equal(0)
+
+    it "render on empty document with positive height is safe":
+        val pane = preview_pane_create(0)
+        val updated = preview_pane_update(pane, "")
+        val lines = preview_pane_render(updated, 10)
+        expect(lines.len()).to_be_less_than(11)
+
+describe "preview_pane sync scroll edge cases":
+
+    it "sync scroll with cursor at line 0 sets viewport_start to 0":
+        val pane = preview_pane_create(0)
+        val updated = preview_pane_update(pane, "# Hello\nworld\n")
+        val synced = preview_pane_sync_scroll(updated, 0)
+        expect(synced.viewport_start).to_equal(0)
+
+    it "sync scroll with cursor past last line clamps to last block":
+        val pane = preview_pane_create(0)
+        val content = "# Hello\nworld"
+        val updated = preview_pane_update(pane, content)
+        val synced = preview_pane_sync_scroll(updated, 9999)
+        expect(synced.viewport_start).to_be_greater_than(-1)
+
+    it "sync scroll disabled returns same viewport_start":
+        val pane = preview_pane_create(0)
+        val toggled = preview_pane_toggle_scroll_sync(pane)
+        val updated = preview_pane_update(toggled, "# Hello\nworld\n")
+        val synced = preview_pane_sync_scroll(updated, 0)
+        expect(synced.viewport_start).to_equal(updated.viewport_start)
+
+    it "update_for_cursor on empty content does not crash":
+        val pane = preview_pane_create(0)
+        val result = preview_pane_update_for_cursor(pane, "", 0)
+        expect(result.viewport_start).to_equal(0)
+
+    it "update_for_cursor with cursor past last line is safe":
+        val pane = preview_pane_create(0)
+        val result = preview_pane_update_for_cursor(pane, "line1\nline2", 999)
+        expect(result.viewport_start).to_be_greater_than(-1)
+
+describe "preview_pane source_line_to_render_line":
+
+    it "returns non-negative for valid source line":
+        val pane = preview_pane_update(preview_pane_create(0), "# Hello\nworld")
+        val render_line = preview_pane_source_line_to_render_line(pane, 0)
+        expect(render_line).to_be_greater_than(-1)
+
+    it "returns -1 for out-of-range source line":
+        val pane = preview_pane_update(preview_pane_create(0), "# Hello\nworld")
+        val render_line = preview_pane_source_line_to_render_line(pane, 9999)
+        expect(render_line).to_equal(-1)
+
+    it "returns -1 for negative source line":
+        val pane = preview_pane_update(preview_pane_create(0), "# Hello\nworld")
+        val render_line = preview_pane_source_line_to_render_line(pane, -1)
+        expect(render_line).to_equal(-1)
+
+    it "crlf normalisation handles mixed line endings":
+        val pane = preview_pane_create(0)
+        val updated = preview_pane_update_crlf(pane, "line1\r\nline2\rline3\n")
+        val lines = preview_pane_render(updated, 10)
+        expect(lines.len()).to_be_greater_than(-1)

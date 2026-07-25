@@ -1,0 +1,78 @@
+"""
+# Claude Full Clear Command
+
+Mirrors `tmp/claude/claude-code-main/src/commands/clear` for clear command
+metadata-free call behavior, cache preservation, and conversation reset effects.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.commands.clear.caches.{clearSessionCaches, clearSessionCachesSourceLinesModeled}
+use app.llm_caret.claude_full.commands.clear.clear.{call, clearCommandSourceLinesModeled}
+use app.llm_caret.claude_full.commands.clear.conversation.{ClearConversationInput, ClearTask, clearConversation, clearConversationSourceLinesModeled}
+
+describe "Claude full clear command":
+    it "clears request-keyed caches only when no agents are preserved":
+        step("Clear a plain session")
+        val plain = clearSessionCaches([])
+        expect(plain.hasPreservedAgents).to_equal(false)
+        expect(plain.resetPromptCacheBreakDetection).to_equal(true)
+        expect(plain.clearedPendingCallbacks).to_equal(true)
+        expect(plain.clearedDumpState).to_equal(true)
+        expect(plain.memoryLoadReason).to_equal("session_start")
+        expect(plain.clearedCacheNames).to_contain("commands")
+        expect(plain.asyncCacheNames).to_contain("web-fetch-url-cache")
+
+        step("Preserve request-keyed state when background agents survive clear")
+        val preserved = clearSessionCaches(["agent-1"])
+        expect(preserved.hasPreservedAgents).to_equal(true)
+        expect(preserved.resetPromptCacheBreakDetection).to_equal(false)
+        expect(preserved.clearedPendingCallbacks).to_equal(false)
+        expect(preserved.clearedDumpState).to_equal(false)
+        expect(preserved.preservedAgentIds[0]).to_equal("agent-1")
+        expect(clearSessionCachesSourceLinesModeled()).to_equal(144)
+
+    it "partitions foreground tasks from preserved agent tasks":
+        val tasks = [
+            ClearTask.new("fg-shell", "local_shell", "", true, false, "running"),
+            ClearTask.new("bg-agent", "local_agent", "agent-bg", true, true, "running"),
+            ClearTask.new("main-agent", "local_agent", "agent-main", false, false, "running"),
+            ClearTask.new("teammate", "in_process_teammate", "agent-team", true, true, "running"),
+            ClearTask.new("done-agent", "local_agent", "agent-done", true, true, "done"),
+        ]
+        val input = ClearConversationInput.new(2, tasks, true, false, true, true, "req-1", ["hook-message"], "wt-1", true, true, "ant", true)
+
+        step("Clear messages, app state, cache state, ids, and hooks")
+        val result = clearConversation(input)
+        expect(result.messagesCleared).to_equal(true)
+        expect(result.finalMessages[0]).to_equal("hook-message")
+        expect(result.contextBlockedReset).to_equal(true)
+        expect(result.conversationIdRegenerated).to_equal(true)
+        expect(result.cacheEvictionRequestId).to_equal("req-1")
+        expect(result.sessionIdRegenerated).to_equal(true)
+        expect(result.envSessionIdUpdated).to_equal(true)
+        expect(result.modePersisted).to_equal("coordinator")
+        expect(result.worktreeStateSaved).to_equal("wt-1")
+
+        step("Remove only foreground tasks and re-point running preserved local agents")
+        expect(result.killedTaskIds.len()).to_equal(1)
+        expect(result.killedTaskIds[0]).to_equal("fg-shell")
+        expect(result.taskOutputEvictions[0]).to_equal("fg-shell")
+        expect(result.preservedAgentIds.len()).to_equal(4)
+        expect(result.preservedAgentIds).to_contain("agent-bg")
+        expect(result.preservedAgentIds).to_contain("agent-main")
+        expect(result.preservedAgentIds).to_contain("agent-team")
+        expect(result.runningTaskOutputSymlinkIds.len()).to_equal(2)
+        expect(result.runningTaskOutputSymlinkIds).to_contain("bg-agent")
+        expect(result.runningTaskOutputSymlinkIds).to_contain("main-agent")
+        expect(result.cacheResult.clearedPendingCallbacks).to_equal(false)
+        expect(clearConversationSourceLinesModeled()).to_equal(251)
+
+    it "returns the clear command empty text result after clearing":
+        val input = ClearConversationInput.new(1, [], false, false, false, false, "", [], "", false, false, "", false)
+        val result = call(input)
+
+        expect(result.typeName).to_equal("text")
+        expect(result.value).to_equal("")
+        expect(result.conversation.messagesCleared).to_equal(true)
+        expect(result.conversation.finalMessages.len()).to_equal(0)
+        expect(clearCommandSourceLinesModeled()).to_equal(7)

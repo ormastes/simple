@@ -1,0 +1,91 @@
+# @cover src/os/apps/dbd/dbd_protocol.spl 90%
+"""
+# dbd protocol + durability (Lane C2)
+
+Proves the in-guest db daemon's protocol/journal/replay logic in-process,
+without a socket or a mounted disk, by driving the pure seam
+(src/os/apps/dbd/dbd_protocol.spl) that the freestanding transport
+(src/os/apps/dbd/dbd.spl) sits on top of.
+
+The db engine itself is the REAL Simple RESP server
+(std.nogc_sync_mut.redis.server.RedisServer) — the same engine
+src/app/redis_server/main.spl runs hosted. These specs assert the durability
+seam this lane adds: a write-ahead journal of mutating commands that,
+replayed through that same RedisServer.dispatch(), reconstructs the store —
+which is exactly the reboot-persistence guarantee (write journal, read it
+back after reboot, replay).
+"""
+
+use std.spec
+use os.apps.dbd.dbd_protocol.{
+    DbdEngine, dbd_command_is_mutating, dbd_encode_journal_line, dbd_decode_journal_line
+}
+
+describe "dbd protocol: mutation classification":
+    it "SET and DEL are mutating (case-insensitive)":
+        expect(dbd_command_is_mutating("SET")).to_equal(true)
+        expect(dbd_command_is_mutating("DEL")).to_equal(true)
+        expect(dbd_command_is_mutating("set")).to_equal(true)
+        expect(dbd_command_is_mutating("del")).to_equal(true)
+
+    it "reads are not mutating":
+        expect(dbd_command_is_mutating("GET")).to_equal(false)
+        expect(dbd_command_is_mutating("PING")).to_equal(false)
+        expect(dbd_command_is_mutating("EXISTS")).to_equal(false)
+
+describe "dbd protocol: journal encode/decode round-trip":
+    it "encodes args as a space-joined line":
+        expect(dbd_encode_journal_line(["SET", "k", "v"])).to_equal("SET k v")
+
+    it "rejects args containing a space (ambiguous journal line)":
+        expect(dbd_encode_journal_line(["SET", "k", "a b"])).to_equal("")
+
+    it "rejects args containing a newline (ambiguous journal line)":
+        expect(dbd_encode_journal_line(["SET", "k", "a\nb"])).to_equal("")
+
+    it "decodes a journal line back into args":
+        val args = dbd_decode_journal_line("SET k v")
+        expect(args.len()).to_equal(3u64)
+        expect(args[0]).to_equal("SET")
+        expect(args[1]).to_equal("k")
+        expect(args[2]).to_equal("v")
+
+    it "encode then decode is an identity for well-formed args":
+        val encoded = dbd_encode_journal_line(["DEL", "mykey"])
+        val decoded = dbd_decode_journal_line(encoded)
+        expect(decoded.len()).to_equal(2u64)
+        expect(decoded[0]).to_equal("DEL")
+        expect(decoded[1]).to_equal("mykey")
+
+describe "dbd engine: real RESP dispatch":
+    it "SET then GET returns the value via the real engine":
+        var eng = DbdEngine.new()
+        expect(eng.dispatch(["SET", "k", "v"])).to_equal("+OK\r\n")
+        expect(eng.dispatch(["GET", "k"])).to_equal("$1\r\nv\r\n")
+
+    it "GET on an unknown key returns RESP nil":
+        var eng = DbdEngine.new()
+        expect(eng.dispatch(["GET", "missing"])).to_equal("$-1\r\n")
+
+describe "dbd engine: journal replay = reboot persistence":
+    it "replaying a journal reconstructs the store through the real engine":
+        # Simulate the durable journal written across a previous boot.
+        val journal = "SET alpha 1\nSET beta 2\nSET alpha 9\nDEL beta"
+        var eng = DbdEngine.new()
+        val replayed = eng.replay_journal(journal)
+        expect(replayed).to_equal(4i64)
+        # alpha was overwritten to 9, beta was deleted.
+        expect(eng.dispatch(["GET", "alpha"])).to_equal("$1\r\n9\r\n")
+        expect(eng.dispatch(["GET", "beta"])).to_equal("$-1\r\n")
+
+    it "empty journal replays nothing":
+        var eng = DbdEngine.new()
+        expect(eng.replay_journal("")).to_equal(0i64)
+
+    it "post-replay writes coexist with replayed state (durability continuity)":
+        var eng = DbdEngine.new()
+        val replayed = eng.replay_journal("SET persisted yes")
+        expect(replayed).to_equal(1i64)
+        expect(eng.dispatch(["SET", "fresh", "no"])).to_equal("+OK\r\n")
+        expect(eng.dispatch(["GET", "persisted"])).to_equal("$3\r\nyes\r\n")
+        expect(eng.dispatch(["GET", "fresh"])).to_equal("$2\r\nno\r\n")

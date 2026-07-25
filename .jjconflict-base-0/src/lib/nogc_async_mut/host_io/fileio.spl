@@ -1,0 +1,142 @@
+# Host File I/O — thin async wrapper over sync facades
+#
+# This module is a THIN delegation layer. It adds no business logic,
+# caching, or policy. Sync operations delegate directly to
+# std.io_runtime (which re-exports std.nogc_sync_mut.io_runtime).
+# Async variants return HostFuture<T> that complete eagerly (the
+# underlying operation runs synchronously then the result is wrapped
+# in a Ready future). There is no true thread-offload in v1 because
+# the interpreter has no thread-pool exec, and HostRuntime.run_task
+# would need a stable work-stealing queue — that infrastructure
+# exists but is not reliably reachable from library code in interpreter
+# mode without a caller-managed runtime instance.
+#
+# EXECUTION MODEL (v1): eager-completing futures.
+# The async variants perform the blocking I/O call inline, then
+# return HostFuture.ready(result). This is still a valid HostFuture<T>
+# and can be composed with any code that polls futures, but there is
+# no actual concurrency in this version.
+#
+# TODO(async-fileio-v2): When the runtime scheduler is robustly
+# accessible from library code (not just from fn main / app entry
+# points), replace the eager HostFuture.ready(...) bodies with a
+# real worker-thread offload using HostPromise.new() + a spawned
+# closure that calls self.sync equivalent then promise.complete(v).
+#
+# Module path: std.nogc_async_mut.host_io.fileio
+# Import as:   use std.nogc_async_mut.host_io.fileio.{...}
+
+@no_gc
+
+use std.io_runtime.{
+    file_read,
+    file_write,
+    file_exists,
+    file_delete,
+    file_size,
+    file_read_bytes,
+    file_copy,
+    mkdir_p,
+    list_dir,
+    is_dir,
+    is_file,
+}
+use std.async_host.future.{HostFuture}
+
+# ============================================================================
+# Sync delegates — thin pass-through, no added logic
+# ============================================================================
+
+fn read_text(path: text) -> text:
+    """Read file as UTF-8 text. Returns empty string if not found."""
+    file_read(path)
+
+fn write_text(path: text, content: text) -> bool:
+    """Write text to file. Returns true on success."""
+    file_write(path, content)
+
+fn exists(path: text) -> bool:
+    """Return true if path exists."""
+    file_exists(path)
+
+fn delete(path: text) -> bool:
+    """Delete file. Returns true on success."""
+    file_delete(path)
+
+fn size(path: text) -> i64:
+    """Return file size in bytes, or 0 if not found."""
+    file_size(path)
+
+fn read_bytes(path: text) -> [u8]:
+    """Read file as raw bytes."""
+    file_read_bytes(path)
+
+fn copy(src: text, dst: text) -> bool:
+    """Copy file from src to dst."""
+    file_copy(src, dst)
+
+fn ensure_dir(path: text) -> bool:
+    """Create directory and parents. Returns true on success."""
+    mkdir_p(path)
+
+fn entries(path: text) -> [text]:
+    """List directory entries. Returns empty list if path is not a dir."""
+    list_dir(path)
+
+fn path_is_dir(path: text) -> bool:
+    """Return true if path is an existing directory."""
+    is_dir(path)
+
+fn path_is_file(path: text) -> bool:
+    """Return true if path is an existing file."""
+    is_file(path)
+
+# ============================================================================
+# Async variants — eager HostFuture<T> wrappers (v1 execution model)
+# See module-level comment for rationale and v2 migration path.
+# ============================================================================
+
+fn read_text_async(path: text) -> HostFuture<text>:
+    """Async read of file as UTF-8 text.
+    V1: eager — I/O runs synchronously, result wrapped in Ready future."""
+    val result = file_read(path)
+    HostFuture.ready(result)
+
+fn write_text_async(path: text, content: text) -> HostFuture<bool>:
+    """Async write text to file.
+    V1: eager — I/O runs synchronously, result wrapped in Ready future."""
+    val result = file_write(path, content)
+    HostFuture.ready(result)
+
+fn exists_async(path: text) -> HostFuture<bool>:
+    """Async existence check.
+    V1: eager — check runs synchronously, result wrapped in Ready future."""
+    val result = file_exists(path)
+    HostFuture.ready(result)
+
+fn delete_async(path: text) -> HostFuture<bool>:
+    """Async delete.
+    V1: eager — delete runs synchronously, result wrapped in Ready future."""
+    val result = file_delete(path)
+    HostFuture.ready(result)
+
+fn size_async(path: text) -> HostFuture<i64>:
+    """Async file size query.
+    V1: eager — stat runs synchronously, result wrapped in Ready future."""
+    val result = file_size(path)
+    HostFuture.ready(result)
+
+fn read_bytes_async(path: text) -> HostFuture<[u8]>:
+    """Async read of file as raw bytes.
+    V1: eager — I/O runs synchronously, result wrapped in Ready future."""
+    val result = file_read_bytes(path)
+    HostFuture.ready(result)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export read_text, write_text, exists, delete, size, read_bytes, copy,
+       ensure_dir, entries, path_is_dir, path_is_file,
+       read_text_async, write_text_async, exists_async, delete_async,
+       size_async, read_bytes_async

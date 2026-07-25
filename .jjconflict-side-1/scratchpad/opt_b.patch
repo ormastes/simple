@@ -1,0 +1,255 @@
+diff --git a/src/compiler/20.hir/hir_lowering/expressions.spl b/src/compiler/20.hir/hir_lowering/expressions.spl
+index 88072129a9e..99aa08c4dd5 100644
+--- a/src/compiler/20.hir/hir_lowering/expressions.spl
++++ b/src/compiler/20.hir/hir_lowering/expressions.spl
+@@ -180,7 +180,14 @@ impl HirLowering:
+         # rt_enum_new (Ok=0, Err=1); previously these decayed to Error and
+         # crashed the LLVM backend with a nil callee local.
+         val is_result_variant = name == "Ok" or name == "Err"
+-        if is_interp_builtin_fn(name) or is_bootstrap_builtin or is_result_variant:
++        # Bare Option variants: `Some(v)` / `None` are built-ins (not module
++        # enums), so like Ok/Err they are absent from the symbol table. Emit
++        # NamedVar so MIR lowering intercepts by name and constructs via
++        # rt_enum_new (registered in enum_variant_index as Option -> Some=0,
++        # None=1). The native `.?`/`??` presence-check is discriminant-aware
++        # (see lower_present_predicate) so a None handle reads as absent.
++        val is_option_variant = name == "Some" or name == "None"
++        if is_interp_builtin_fn(name) or is_bootstrap_builtin or is_result_variant or is_option_variant:
+             val symbol_type = if is_bootstrap_builtin:
+                 bootstrap_builtin_signature(name, span)
+             else:
+diff --git a/src/compiler/50.mir/_MirLowering/module_lowering.spl b/src/compiler/50.mir/_MirLowering/module_lowering.spl
+index d1eb95404ca..eab31e06836 100644
+--- a/src/compiler/50.mir/_MirLowering/module_lowering.spl
++++ b/src/compiler/50.mir/_MirLowering/module_lowering.spl
+@@ -366,6 +366,14 @@ impl MirLowering:
+         if not self.enum_variant_index.has("Result"):
+             self.enum_variant_index["Result"] = ["Ok", "Err"]
+ 
++        # Register the built-in Option enum so bare-variant construction
++        # (`Some(v)` / `None`) and `match o: case Some(v)/None` resolve the same
++        # discriminants (Some=0, None=1, matching the stdlib `enum Option`
++        # declaration order). Option is not carried in module.enums. Skip if
++        # user code shadows the name.
++        if not self.enum_variant_index.has("Option"):
++            self.enum_variant_index["Option"] = ["Some", "None"]
++
+         # Build (struct NAME, method name) -> method SymbolId lookup from
+         # module.impls. Bug #138/#156: a receiver with no HIR type inference
+         # (receiver.type_ nil) leaves MethodResolution.Unresolved for every
+diff --git a/src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl b/src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+index afa72e7dfc9..0719b517466 100644
+--- a/src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
++++ b/src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+@@ -226,6 +226,52 @@ impl MirLowering:
+         self.builder = b
+         raw
+ 
++    me lower_present_predicate(base_local: LocalId) -> LocalId:
++        """Option presence for `.?` / `??`: `rt_is_some(x)` AND `x` is not a
++        None enum handle. Bare `None` is constructed as `rt_enum_new(0, 1, nil)`
++        (see lower_enum_construct_named), a non-nil heap pointer that
++        `rt_is_some` alone would report as PRESENT -- the #169 silent-wrong.
++        The discriminant check (disc == 1) demotes it to absent. Plain nil /
++        boxed values keep rt_is_some's answer (rt_enum_discriminant returns -1
++        for non-enums). LIMITATION: lower_enum_construct_named hardcodes
++        enum_id=0 for every enum, so runtime carries no enum identity -- ANY
++        enum handle whose discriminant is 1 reads as absent here (Result `Err`,
++        or a user enum's second variant like `Color.Green`). Distinguishing
++        them needs an enum_id the runtime does not record; documented bound, not
++        a bug. No test applies `.?`/`??` to such a value (option_nil_check uses
++        a plain `i64?`)."""
++        # some = rt_is_some(x): distinguishes plain nil (absent) from a boxed
++        # value (present); both report discriminant -1. Cast to i64 (0/1) so the
++        # final combine is width-safe.
++        val some_op = MirOperand(kind: MirOperandKind.Const(
++            MirConstValue.Str("rt_is_some"),
++            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
++                params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false)))
++        ))
++        val some_local = self.emit_resolved_direct_call(some_op, [mir_operand_copy(base_local)], MirType.bool())
++        var bp = self.builder
++        val some_i = bp.emit_cast(mir_operand_copy(some_local), MirType.i64())
++        self.builder = bp
++        # disc = rt_enum_discriminant(x): -1 for non-enums, else the variant
++        # index. A None handle is disc 1 (Option = [Some, None]); everything
++        # else (including Some=0 and boxed non-enums) is != 1. Mirrors the
++        # proven discriminant read in lower_enum_match.
++        val disc_op = MirOperand(kind: MirOperandKind.Const(
++            MirConstValue.Str("rt_enum_discriminant"),
++            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
++                params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
++        ))
++        val disc_local = self.emit_resolved_direct_call(disc_op, [mir_operand_copy(base_local)], MirType.i64())
++        var bp2 = self.builder
++        val one_local = bp2.emit_const_int(1)
++        val not_none = bp2.emit_binop(MirBinOp.Ne, mir_operand_copy(disc_local), mir_operand_copy(one_local), MirType.bool())
++        val not_none_i = bp2.emit_cast(mir_operand_copy(not_none), MirType.i64())
++        val present_i = bp2.emit_binop(MirBinOp.Mul, mir_operand_copy(some_i), mir_operand_copy(not_none_i), MirType.i64())
++        val zero_local = bp2.emit_const_int(0)
++        val present = bp2.emit_binop(MirBinOp.Ne, mir_operand_copy(present_i), mir_operand_copy(zero_local), MirType.bool())
++        self.builder = bp2
++        present
++
+     me host_gpu_runtime_func(name: text) -> MirOperand:
+         MirOperand(kind: MirOperandKind.Const(
+             MirConstValue.Str(name),
+@@ -574,6 +620,22 @@ impl MirLowering:
+         if expr_disc == call_disc:
+             match expr_value.kind:
+                 case HirExprKind.Call(callee, args, _):
++                    # Built-in Option construction: `Some(v)` / `None(...)` ->
++                    # rt_enum_new with Option's discriminants (Some=0, None=1,
++                    # registered in enum_variant_index). The callee is a bare
++                    # NamedVar (emitted by hir_lowering's lower_unresolved_ident
++                    # because Option is not a module enum). Mirrors the Ok/Err
++                    # interception in switch_operators_calls' lower_call, placed
++                    # here so Option support needs no edit to that file.
++                    val callee_kind: HirExprKind = callee.kind
++                    val nv_disc = rt_enum_discriminant(HirExprKind.NamedVar(SymbolId(id: -1), ""))
++                    if rt_enum_discriminant(callee_kind) == nv_disc:
++                        match callee_kind:
++                            case HirExprKind.NamedVar(nv_symbol, nv_name):
++                                if (nv_name == "Some" or nv_name == "None") and self.enum_variant_index.has("Option") and not self.local_map.has(mir_expr_symbol_id_value(nv_symbol)):
++                                    return self.lower_enum_construct_named("Option", nv_name, args)
++                            case _:
++                                pass
+                     return self.lower_call(callee, args)
+                 case _:
+                     pass
+@@ -628,6 +690,11 @@ impl MirLowering:
+                             val pre_nv_id = pre_resolved.id
+                             if pre_nv_id >= 0 and self.local_map.has(pre_nv_id):
+                                 return self.local_map[pre_nv_id]
++                        # Built-in nullary Option `None` used as a value (not a
++                        # call): construct Option.None (disc 1) via rt_enum_new.
++                        # A local of the same name shadows it (handled above).
++                        if pre_name == "None" and self.enum_variant_index.has("Option") and not (pre_sym_id >= 0 and self.local_map.has(pre_sym_id)):
++                            return self.lower_enum_construct_named("Option", "None", [])
+                 case _:
+                     pass
+ 
+@@ -1137,68 +1204,84 @@ impl MirLowering:
+                 var result_type = MirType.i64()
+                 if val expr_type = expr_value.type_:
+                     result_type = self.lower_type(expr_type)
++                # Presence = same predicate as `.?`: rt_is_some AND not a None
++                # enum handle. A `None` built via rt_enum_new is a non-nil heap
++                # pointer, so the raw `left != nil` test used before reported it
++                # PRESENT and returned the handle -- the #169 silent-wrong.
++                val cond_local = self.lower_present_predicate(left_local)
++                # Merge the two arms through an explicit alloca slot, NOT a phi:
++                # var_reassign_ssa spills a phi's incoming values to allocas and
++                # reloads them ABOVE the phi in the merge block, tripping the
++                # LLVM verifier ("PHI nodes not grouped at top") -- so `??` never
++                # lowered to valid IR before (confirmed: the pre-existing phi
++                # form fails llc even for a plain nilable). A memory merge has no
++                # phi to mangle; the trailing load is valid at the block head.
+                 var b_nc = self.builder
+-                val nil_word = if self.runtime_value_locals.has(left_local.id): 3 else: 0
+-                val zero_local = b_nc.emit_const_int(nil_word)
+-                val cond_local = b_nc.emit_binop(MirBinOp.Ne, mir_operand_copy(left_local), mir_operand_copy(zero_local), MirType.bool())
++                val slot = b_nc.emit_alloc(MirType.i64())
+                 val then_block = b_nc.new_block(Some("null_coalesce_left"))
+                 val else_block = b_nc.new_block(Some("null_coalesce_right"))
+                 val merge_block = b_nc.new_block(Some("null_coalesce_merge"))
+-                val result_local = b_nc.new_temp(result_type)
+                 b_nc.terminate_if(mir_operand_copy(cond_local), then_block, else_block)
+                 self.builder = b_nc
+ 
+-                var b_left = self.builder
+-                b_left.switch_to_block(then_block)
+-                self.builder = b_left
+-                var left_value = left_local
++                # then (present): an Option `Some(v)` keeps `v` in the enum
++                # payload; a plain boxed nilable is decoded as before. Select
++                # branchlessly via `disc != -1` (non-enums report -1):
++                # then_value = is_enum*payload + (1-is_enum)*boxed.
++                var b_then = self.builder
++                b_then.switch_to_block(then_block)
++                self.builder = b_then
++                val disc_op = MirOperand(kind: MirOperandKind.Const(
++                    MirConstValue.Str("rt_enum_discriminant"),
++                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
++                        params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
++                ))
++                val disc_local = self.emit_resolved_direct_call(disc_op, [mir_operand_copy(left_local)], MirType.i64())
++                var b_then2 = self.builder
++                val neg1_local = b_then2.emit_const_int(-1)
++                val is_enum_b = b_then2.emit_binop(MirBinOp.Ne, mir_operand_copy(disc_local), mir_operand_copy(neg1_local), MirType.bool())
++                val is_enum_i = b_then2.emit_cast(mir_operand_copy(is_enum_b), MirType.i64())
++                val one_const = b_then2.emit_const_int(1)
++                val not_enum_i = b_then2.emit_binop(MirBinOp.Sub, mir_operand_copy(one_const), mir_operand_copy(is_enum_i), MirType.i64())
++                self.builder = b_then2
++                val payload_op = MirOperand(kind: MirOperandKind.Const(
++                    MirConstValue.Str("rt_enum_payload"),
++                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
++                        params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
++                ))
++                val payload_local = self.emit_resolved_direct_call(payload_op, [mir_operand_copy(left_local)], MirType.i64())
++                var boxed_value = left_local
+                 if self.runtime_value_locals.has(left_local.id):
+-                    left_value = self.decode_runtime_value(left_local, result_type)
+-                b_left = self.builder
+-                b_left.terminate_goto(merge_block)
+-                self.builder = b_left
++                    boxed_value = self.decode_runtime_value(left_local, result_type)
++                var b_then3 = self.builder
++                val term_enum = b_then3.emit_binop(MirBinOp.Mul, mir_operand_copy(is_enum_i), mir_operand_copy(payload_local), MirType.i64())
++                val term_boxed = b_then3.emit_binop(MirBinOp.Mul, mir_operand_copy(not_enum_i), mir_operand_copy(boxed_value), MirType.i64())
++                val then_value = b_then3.emit_binop(MirBinOp.Add, mir_operand_copy(term_enum), mir_operand_copy(term_boxed), MirType.i64())
++                b_then3.emit_store(mir_operand_copy(slot), mir_operand_copy(then_value))
++                b_then3.terminate_goto(merge_block)
++                self.builder = b_then3
+ 
+                 var b_right = self.builder
+                 b_right.switch_to_block(else_block)
+                 self.builder = b_right
+                 val right_local = self.lower_expr(right)
+                 var right_value = right_local
+-                val right_runtime = self.runtime_value_locals.has(right_local.id)
+-                if right_runtime:
++                if self.runtime_value_locals.has(right_local.id):
+                     right_value = self.decode_runtime_value(right_local, result_type)
+-                var b_right_done = self.builder
+-                b_right_done.terminate_goto(merge_block)
+-                self.builder = b_right_done
+-                if self.runtime_value_locals.has(left_value.id) or self.runtime_value_locals.has(right_value.id):
+-                    self.runtime_value_locals[result_local.id] = true
+-                if self.runtime_array_locals.has(left_value.id) or self.runtime_array_locals.has(right_value.id):
+-                    self.runtime_array_locals[result_local.id] = true
+-                if self.runtime_dict_locals.has(left_value.id) or self.runtime_dict_locals.has(right_value.id):
+-                    self.runtime_dict_locals[result_local.id] = true
++                var b_right2 = self.builder
++                b_right2.emit_store(mir_operand_copy(slot), mir_operand_copy(right_value))
++                b_right2.terminate_goto(merge_block)
++                self.builder = b_right2
+ 
+                 var b_merge = self.builder
+                 b_merge.switch_to_block(merge_block)
+-                b_merge.emit(MirInst(
+-                    kind: MirInstKind.Intrinsic(Some(result_local), "__simple_ssa_phi", [
+-                        MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(then_block.id), MirType.i64())),
+-                        mir_operand_copy(left_value),
+-                        MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(b_right_done.current_block.id), MirType.i64())),
+-                        mir_operand_copy(right_value)
+-                    ]),
+-                    span: nil
+-                ))
++                val result_local = b_merge.emit_load(mir_operand_copy(slot), MirType.i64())
+                 self.builder = b_merge
+                 result_local
+ 
+             case ExistsCheck(base):
+                 val base_local = self.lower_expr(base)
+-                val is_some = MirOperand(kind: MirOperandKind.Const(
+-                    MirConstValue.Str("rt_is_some"),
+-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+-                        params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
+-                    )))
+-                ))
+-                self.emit_resolved_direct_call(is_some, [mir_operand_copy(base_local)], MirType.bool())
++                self.lower_present_predicate(base_local)
+ 
+             case Try(try_base):
+                 # `expr?` — Err propagates via early return, Ok yields payload.

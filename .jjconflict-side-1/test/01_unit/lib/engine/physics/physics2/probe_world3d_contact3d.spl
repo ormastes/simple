@@ -1,0 +1,159 @@
+# Probe — PhysicsWorld3D 3D contact constraint / solver (C29 fix)
+#
+# Mirrors world3d_contact3d_spec.spl as a standalone `bin/simple run`
+# script (per-case PASS/FAIL + summary, nonzero rc on any failure).
+#
+# Counters are a class mutated via `me check(...)`, not a module-level
+# `var` mutated from a plain `fn` — the latter was verified NOT to persist
+# across a function-call boundary on the current binary (repro: a
+# module-level `var` bumped inside any `fn`, even one level of nesting
+# from the top-level call site, reads back unchanged after the call
+# returns). Filed as a landmine; routed around here since class-field
+# mutation via `me` methods (passed by reference through fn parameters) is
+# proven reliable throughout this codebase's own physics classes.
+
+use std.common.math.{math_abs}
+use std.common.engine.ids.{NodeId}
+use std.nogc_sync_mut.engine.physics.config.{default_physics_config_3d, PhysicsConfig3D, Vec3}
+use std.nogc_sync_mut.engine.physics.backend.{PhysicsBackend}
+use std.nogc_sync_mut.engine.physics.world3d.{PhysicsWorld3D}
+use std.nogc_sync_mut.engine.physics.events3d.{CONTACT_PHASE_BEGIN, CONTACT_PHASE_STAY, CONTACT_PHASE_END}
+
+extern fn rt_exit(code: i64)
+
+class ProbeCounters:
+    pass_count: i64
+    fail_count: i64
+
+impl ProbeCounters:
+    static fn create() -> ProbeCounters:
+        ProbeCounters(pass_count: 0, fail_count: 0)
+
+    me check(name: text, ok: bool):
+        if ok:
+            self.pass_count = self.pass_count + 1
+            print("PASS - " + name)
+        else:
+            self.fail_count = self.fail_count + 1
+            print("FAIL - " + name)
+
+fn make_node(idx: i64) -> NodeId:
+    NodeId(raw: idx)
+
+fn z_gravity_config() -> PhysicsConfig3D:
+    var config = default_physics_config_3d()
+    config.backend = PhysicsBackend.CpuScalar
+    config.gravity = Vec3(x: 0.0, y: 0.0, z: -9.81)
+    config
+
+fn case_z_axis_resolves(counters: ProbeCounters):
+    var world = PhysicsWorld3D.create(z_gravity_config())
+    val floor = make_node(0)
+    world.add_static_body(floor, 0.0, 0.0, 0.0)
+    world.add_box_collider(floor, 10.0, 10.0, 0.5)
+    val ball = make_node(1)
+    world.add_dynamic_body(ball, 0.0, 0.0, 2.0, 1.0)
+    world.add_sphere_collider(ball, 0.5)
+    var step = 0
+    while step < 200:
+        world.step(0.016)
+        step = step + 1
+    val pos = world.get_position(ball)
+    val vel = world.get_velocity(ball)
+    counters.check("z-fall: pos.z > -1.0 (did not fall through)", pos.z > -1.0)
+    counters.check("z-fall: |vel.z| < 5.0 (not still free-falling)", math_abs(vel.z) < 5.0)
+    world.destroy()
+
+fn case_oblique_impact_nonzero_angular(counters: ProbeCounters):
+    var world = PhysicsWorld3D.create(z_gravity_config())
+    val floor = make_node(0)
+    world.add_static_body(floor, 0.0, 0.0, 0.0)
+    world.add_box_collider(floor, 10.0, 10.0, 0.5)
+    val ball = make_node(1)
+    world.add_dynamic_body(ball, 0.0, 0.0, 2.0, 1.0)
+    world.add_sphere_collider(ball, 0.5)
+    var step = 0
+    while step < 200:
+        # Persistent sideways force: sliding contact on a z-normal floor
+        # produces friction torque about the Y axis (r along z, force
+        # along x -> r x F has a y component), never Z.
+        world.apply_force(ball, 3.0, 0.0, 0.0)
+        world.step(0.016)
+        step = step + 1
+    val pos = world.get_position(ball)
+    val ang = world.get_angular_velocity(ball)
+    counters.check("oblique: pos.z > -1.0 (resolved)", pos.z > -1.0)
+    counters.check("oblique: |ang.y| > 0.001 (non-z angular velocity)", math_abs(ang.y) > 0.001)
+    world.destroy()
+
+fn case_xy_plane_regression(counters: ProbeCounters):
+    var world = PhysicsWorld3D.create(default_physics_config_3d())
+    val floor = make_node(0)
+    world.add_static_body(floor, 0.0, 0.0, 0.0)
+    world.add_box_collider(floor, 10.0, 0.5, 10.0)
+    val ball = make_node(1)
+    world.add_dynamic_body(ball, 0.0, 2.0, 0.0, 1.0)
+    world.add_sphere_collider(ball, 0.5)
+    var step = 0
+    while step < 200:
+        world.step(0.016)
+        step = step + 1
+    val pos = world.get_position(ball)
+    counters.check("xy-plane regression: pos.y > -1.0", pos.y > -1.0)
+    counters.check("xy-plane regression: pos.x == 0.0", pos.x == 0.0)
+    counters.check("xy-plane regression: pos.z == 0.0", pos.z == 0.0)
+    world.destroy()
+
+fn case_begin_stay_end(counters: ProbeCounters):
+    var config = default_physics_config_3d()
+    config.backend = PhysicsBackend.CpuScalar
+    config.gravity = Vec3(x: 0.0, y: 0.0, z: 0.0)
+    config.fixed_timestep = 0.1
+    config.sub_steps = 1
+    config.velocity_iterations = 1
+    config.position_iterations = 1
+    config.baumgarte_factor = 0.0
+    config.slop = 0.0
+    config.restitution = 0.0
+    config.friction = 0.0
+    var world = PhysicsWorld3D.create(config)
+    val anchor = make_node(0)
+    world.add_static_body(anchor, 0.0, 0.0, 0.0)
+    world.add_sphere_collider(anchor, 0.5)
+    val mover = make_node(1)
+    world.add_dynamic_body(mover, 0.6, 0.0, 0.0, 1.0)
+    world.add_sphere_collider(mover, 0.5)
+
+    world.step(0.1)
+    val events1 = world.events()
+    counters.check("events: step1 len == 1", events1.len() == 1)
+    if events1.len() == 1:
+        counters.check("events: step1 phase == BEGIN", events1[0].phase == CONTACT_PHASE_BEGIN)
+
+    world.step(0.1)
+    val events2 = world.events()
+    counters.check("events: step2 len == 1", events2.len() == 1)
+    if events2.len() == 1:
+        counters.check("events: step2 phase == STAY", events2[0].phase == CONTACT_PHASE_STAY)
+
+    world.apply_force(mover, 100.0, 0.0, 0.0)
+    world.step(0.1)
+    val events3 = world.events()
+    counters.check("events: step3 len == 1", events3.len() == 1)
+    if events3.len() == 1:
+        counters.check("events: step3 phase == END", events3[0].phase == CONTACT_PHASE_END)
+
+    world.destroy()
+
+var counters = ProbeCounters.create()
+case_z_axis_resolves(counters)
+case_oblique_impact_nonzero_angular(counters)
+case_xy_plane_regression(counters)
+case_begin_stay_end(counters)
+
+print("---")
+print("SUMMARY: pass=" + counters.pass_count.to_text() + " fail=" + counters.fail_count.to_text())
+if counters.fail_count > 0:
+    rt_exit(1)
+else:
+    rt_exit(0)

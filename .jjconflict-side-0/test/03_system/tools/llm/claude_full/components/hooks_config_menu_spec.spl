@@ -1,0 +1,79 @@
+"""
+# Claude Full HooksConfigMenu Component
+
+Checks hook rows, enable-disable state, filters, prompt dialogs, summaries, validation, and loading/error/empty states.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.components.hooks.HooksConfigMenu.{HookConfig, HookConfigRow, HookConfigGroup, HookPromptDialog, HooksConfigMenuState, HooksConfigMenuModel, sampleHookConfigs, createHooksConfigMenu, openHooksConfigMenu, filterHookConfigs, sortHookConfigs, groupHookConfigRows, hookConfigRows, selectedHookConfig, toggleHookConfig, updateHookPrompt, renderHooksConfigMenu, renderHookConfigRow, hooksConfigSummary, validateHookConfig, hookEventOptions, hookModeOptions, hookMatcherOptions, hooksConfigModeledSourceFile, hooksConfigModeledStateHook, hooksConfigModeledHookRowsHelper, hooksConfigModeledPromptDialog, hooksConfigModeledLineCount}
+
+describe "Claude full HooksConfigMenu component":
+    it "opens and renders grouped hook rows":
+        step("Create menu and inspect default rows")
+        val hooks = sampleHookConfigs()
+        val closed = createHooksConfigMenu(hooks)
+        expect(closed.render()).to_equal("Hooks config menu closed")
+        val opened = closed.open()
+        expect(opened.state.isOpen).to_equal(true)
+        expect(opened.rows().len()).to_equal(4)
+        expect(opened.groups().len()).to_equal(4)
+        expect(opened.render()).to_contain("Hooks config 4/4")
+        expect(opened.render()).to_contain("> Run focused tests [Post tool use / Edit / User] enabled")
+
+    it "filters by event matcher mode and query":
+        step("Apply focused hook filters")
+        val hooks = sampleHookConfigs()
+        expect(filterHookConfigs(hooks, "focused", "PostToolUse", "Edit", "user").len()).to_equal(1)
+        expect(filterHookConfigs(hooks, "desktop", "Stop", "*", "local")[0].id).to_equal("notify-stop")
+        val model = openHooksConfigMenu(hooks).eventFilter("submit").matcherFilter("prompt").modeFilter("project")
+        expect(model.rows().len()).to_equal(1)
+        expect(model.rows()[0].hook.id).to_equal("submit-summary")
+        expect(model.state.selectedIndex).to_equal(0)
+
+    it "moves selection and toggles enabled state":
+        step("Navigate rows and toggle selected hook")
+        val hooks = sampleHookConfigs()
+        val model = openHooksConfigMenu(hooks).handleKey("down")
+        expect(model.state.selectedIndex).to_equal(1)
+        val selected = model.selectedHook()
+        if val hook = selected:
+            expect(hook.id).to_equal("pre-bash-format")
+        val toggled = model.toggleSelected()
+        val updated = filterHookConfigs(toggled.hooks, "Format", "all", "all", "all")
+        expect(updated[0].enabled).to_equal(false)
+        expect(toggled.state.lastAction).to_equal("toggle")
+
+    it "edits prompt through dialog and validates hooks":
+        step("Open prompt dialog and save non-empty prompt")
+        val hooks = sampleHookConfigs()
+        val model = openHooksConfigMenu(hooks).eventFilter("PostToolUse").openPromptForSelected()
+        expect(model.state.promptDialog.isOpen).to_equal(true)
+        expect(model.state.promptDialog.title).to_contain("Run focused tests")
+        val failed = model.updatePrompt(" ").applyPrompt()
+        expect(failed.state.promptDialog.error).to_equal("Prompt cannot be empty")
+        val saved = model.updatePrompt("Run one focused spec.").applyPrompt()
+        expect(saved.state.promptDialog.isOpen).to_equal(false)
+        expect(filterHookConfigs(saved.hooks, "one focused", "all", "all", "all").len()).to_equal(1)
+        val invalid = HookConfig.new("", "Broken", "PreToolUse", "Bash", "project", "", true, "project")
+        expect(validateHookConfig(invalid)).to_equal("Hook id is required")
+
+    it "renders loading error empty and summary states":
+        step("Check non-list states")
+        val hooks = sampleHookConfigs()
+        expect(openHooksConfigMenu(hooks).loading().render()).to_equal("Loading hooks configuration...")
+        expect(openHooksConfigMenu(hooks).fail("settings.json unreadable").render()).to_equal("Hooks config error: settings.json unreadable")
+        expect(openHooksConfigMenu([]).render()).to_equal("No hooks configured")
+        expect(openHooksConfigMenu(hooks).query("missing").render()).to_contain("No hooks match search \"missing\"")
+        expect(hooksConfigSummary(hooks, HooksConfigMenuState.closed().open())).to_contain("3 enabled")
+
+    it "exports source parity helpers":
+        step("Pin option helpers and modeled upstream names")
+        val hooks = sampleHookConfigs()
+        expect(hookEventOptions()).to_contain("PreToolUse")
+        expect(hookModeOptions()).to_contain("local")
+        expect(hookMatcherOptions(hooks)).to_contain("Bash")
+        expect(hooksConfigModeledSourceFile()).to_equal("src/components/hooks/HooksConfigMenu.tsx")
+        expect(hooksConfigModeledStateHook()).to_equal("useHooksConfigMenu")
+        expect(hooksConfigModeledHookRowsHelper()).to_equal("getHookRows")
+        expect(hooksConfigModeledPromptDialog()).to_equal("HookPromptDialog")
+        expect(hooksConfigModeledLineCount()).to_equal(577)

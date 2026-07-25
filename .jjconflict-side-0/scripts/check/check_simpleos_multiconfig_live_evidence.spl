@@ -1,0 +1,457 @@
+use std.nogc_sync_mut.io_runtime.{env_get, file_read, get_args}
+use os.simpleos_config_matrix.{
+    SimpleOsMulticonfigLiveEvidence,
+    default_blocked_simpleos_multiconfig_live_evidence,
+    fpga_riscv64_serial_profile,
+    qemu_riscv64_desktop_profile,
+    qemu_riscv64_desktop_http_endpoint,
+    qemu_riscv64_desktop_qemu_args,
+    qemu_riscv64_desktop_qemu_args_status,
+    qemu_riscv64_desktop_ssh_endpoint,
+    simpleos_multiconfig_goal_status,
+    simpleos_multiconfig_live_evidence_from_status_rows,
+    simpleos_multiconfig_live_required_evidence_keys,
+    simpleos_multiconfig_live_status,
+    simpleos_renderdoc_artifact_required_evidence_keys,
+    simpleos_wm_renderdoc_required_evidence_keys
+}
+
+fn join_text(values: [text], separator: text) -> text:
+    var result = ""
+    var i = 0
+    for value in values:
+        if i > 0:
+            result = result + separator
+        result = result + value
+        i = i + 1
+    result
+
+fn arg_value(args: [text], key: text) -> text:
+    var i = 0
+    while i + 1 < args.len():
+        if args[i] == key:
+            return args[i + 1]
+        i = i + 1
+    ""
+
+fn evidence_path(args: [text]) -> text:
+    val from_arg = arg_value(args, "--evidence")
+    if from_arg != "":
+        return from_arg
+    env_get("SIMPLEOS_MULTICONFIG_EVIDENCE") ?? ""
+
+fn line_value(line: text, key: text) -> text:
+    val clean_line = line.trim()
+    val prefix = key + "="
+    if clean_line.starts_with(prefix):
+        return clean_line.substring(prefix.len(), clean_line.len()).trim()
+    ""
+
+fn evidence_value(raw: text, key: text) -> text:
+    val lines = raw.split("\n")
+    for line in lines:
+        val value = line_value(line, key)
+        if value != "":
+            return value
+    ""
+
+fn status_or_default(raw: text, key: text, default_value: text) -> text:
+    val value = evidence_value(raw, key)
+    if value == "":
+        return default_value
+    value
+
+fn evidence_text_or(raw: text, key: text, default_value: text) -> text:
+    status_or_default(raw, key, default_value)
+
+fn evidence_positive_text(value: text) -> bool:
+    value != "" and value != "0" and not value.starts_with("-")
+
+fn evidence_gt_four_text(value: text) -> bool:
+    value != "" and value != "0" and value != "1" and value != "2" and value != "3" and value != "4" and not value.starts_with("-")
+
+fn derived_qemu_service_status(raw: text) -> text:
+    if evidence_text_or(raw, "simpleos_qemu_serial_console_status", "missing") != "pass":
+        return "blocked:missing-qemu-serial-console"
+    if evidence_text_or(raw, "simpleos_qemu_rv64_ssh_banner", "") == "":
+        return "blocked:missing-qemu-ssh-banner"
+    if evidence_text_or(raw, "simpleos_qemu_rv64_ssh_probe_status", "missing") != "pass":
+        return "blocked:missing-qemu-ssh-probe"
+    if evidence_text_or(raw, "simpleos_qemu_rv64_http_status_code", "0") != "200":
+        return "blocked:missing-qemu-http-200"
+    if evidence_text_or(raw, "simpleos_qemu_rv64_http_probe_status", "missing") != "pass":
+        return "blocked:missing-qemu-http-probe"
+    if evidence_text_or(raw, "simpleos_qemu_gpu_readback_status", "missing") != "pass":
+        return "blocked:missing-qemu-gpu-readback"
+    if evidence_text_or(raw, "simpleos_qemu_wm_marker_status", "missing") != "pass":
+        return "blocked:missing-qemu-wm-marker"
+    "pass"
+
+fn derived_fpga_serial_status(raw: text) -> text:
+    if evidence_text_or(raw, "simpleos_fpga_board_profile", "fpga-riscv64-serial") != "fpga-riscv64-serial":
+        return "blocked:wrong-fpga-profile"
+    if evidence_text_or(raw, "simpleos_fpga_uart_terminal_status", "missing") != "pass":
+        return "blocked:missing-fpga-uart-terminal"
+    if evidence_text_or(raw, "simpleos_fpga_serial_device", "") == "":
+        return "blocked:missing-fpga-serial-device"
+    if evidence_text_or(raw, "simpleos_fpga_serial_boot_marker", "") == "":
+        return "blocked:missing-fpga-serial-boot-marker"
+    if evidence_text_or(raw, "simpleos_fpga_toolchain_status", "missing") != "pass":
+        return "blocked:missing-fpga-toolchain"
+    if evidence_text_or(raw, "simpleos_fpga_bitstream_status", "missing") != "pass":
+        return "blocked:missing-fpga-bitstream"
+    if evidence_text_or(raw, "simpleos_fpga_ssh_status", "blocked") != "blocked":
+        return "blocked:fpga-ssh-must-remain-blocked"
+    if evidence_text_or(raw, "simpleos_fpga_http_status", "blocked") != "blocked":
+        return "blocked:fpga-http-must-remain-blocked"
+    if evidence_text_or(raw, "simpleos_fpga_gpu_status", "blocked") != "blocked":
+        return "blocked:fpga-gpu-must-remain-blocked"
+    if evidence_text_or(raw, "simpleos_fpga_wm_status", "blocked") != "blocked":
+        return "blocked:fpga-wm-must-remain-blocked"
+    if evidence_text_or(raw, "simpleos_fpga_vulkan_status", "blocked") != "blocked":
+        return "blocked:fpga-vulkan-must-remain-blocked"
+    if evidence_text_or(raw, "simpleos_fpga_renderdoc_status", "blocked") != "blocked":
+        return "blocked:fpga-renderdoc-must-remain-blocked"
+    "pass"
+
+fn derived_engine2d_vulkan_status(raw: text) -> text:
+    if evidence_text_or(raw, "simpleos_engine2d_runtime_backend", "missing") != "vulkan":
+        return "blocked:missing-engine2d-vulkan-backend"
+    if evidence_text_or(raw, "simpleos_engine2d_scene", "") != "vulkan-engine2d":
+        return "blocked:missing-engine2d-vulkan-scene"
+    if evidence_text_or(raw, "simpleos_simple2d_command_status", "missing") != "pass":
+        return "blocked:missing-simple2d-command-evidence"
+    if evidence_text_or(raw, "simpleos_engine2d_vulkan_device_name", "") == "":
+        return "blocked:missing-vulkan-device-name"
+    if not evidence_positive_text(evidence_text_or(raw, "simpleos_engine2d_viewport_width", "0")):
+        return "blocked:missing-engine2d-viewport-width"
+    if not evidence_positive_text(evidence_text_or(raw, "simpleos_engine2d_viewport_height", "0")):
+        return "blocked:missing-engine2d-viewport-height"
+    if evidence_text_or(raw, "simpleos_engine2d_readback_checksum", "") == "":
+        return "blocked:missing-engine2d-readback-checksum"
+    if evidence_text_or(raw, "simpleos_engine2d_readback_nonblank_status", "missing") != "pass":
+        return "blocked:missing-engine2d-nonblank-readback"
+    if evidence_text_or(raw, "simpleos_qemu_gpu_readback_status", "missing") != "pass":
+        return "blocked:missing-qemu-gpu-readback"
+    "pass"
+
+fn derived_engine2d_vulkan_bridge_status(raw: text) -> text:
+    if evidence_text_or(raw, "simpleos_engine2d_bridge_profile", "") != "qemu-riscv64-desktop":
+        return "blocked:missing-engine2d-bridge-profile"
+    if evidence_text_or(raw, "simpleos_engine2d_drawing_backend", "") != "virtio_gpu":
+        return "blocked:missing-qemu-virtio-gpu-drawing-backend"
+    if evidence_text_or(raw, "simpleos_engine2d_processing_backend", "") != "vulkan":
+        return "blocked:missing-engine2d-vulkan-processing-backend"
+    if evidence_text_or(raw, "simpleos_engine2d_qemu_gpu_device", "") != "virtio-gpu-pci,disable-modern=on,disable-legacy=off":
+        return "blocked:missing-qemu-virtio-gpu-device"
+    if evidence_text_or(raw, "simpleos_engine2d_scene", "") != "vulkan-engine2d":
+        return "blocked:missing-vulkan-engine2d-scene"
+    if evidence_text_or(raw, "simpleos_simple2d_command_path", "") != "draw_ir-to-engine2d":
+        return "blocked:missing-simple2d-engine2d-command-path"
+    if evidence_text_or(raw, "simpleos_engine2d_device_readback_required", "false") != "true":
+        return "blocked:missing-engine2d-device-readback-requirement"
+    if evidence_text_or(raw, "simpleos_qemu_qmp_screendump_required", "false") != "true":
+        return "blocked:missing-qemu-qmp-screendump-requirement"
+    if evidence_text_or(raw, "simpleos_renderdoc_capture_mode", "missing") != "capture-simple":
+        return "blocked:missing-renderdoc-capture-simple-mode"
+    if evidence_text_or(raw, "simpleos_wm_compare_scene", "") == "":
+        return "blocked:missing-wm-compare-scene"
+    "ready"
+
+fn derived_renderdoc_artifact_status(raw: text) -> text:
+    if evidence_text_or(raw, "simpleos_renderdoc_capture_mode", "missing") != "capture-simple":
+        return "blocked:missing-renderdoc-capture-simple-mode"
+    if evidence_text_or(raw, "simpleos_renderdoc_rdc_path", "") == "":
+        return "blocked:missing-simpleos-rdc-path"
+    if evidence_text_or(raw, "simpleos_renderdoc_rdc_magic_status", "missing") != "pass":
+        return "blocked:missing-simple-rdoc-magic"
+    if evidence_text_or(raw, "simpleos_renderdoc_rdc_magic", "") != "RDOC":
+        return "blocked:missing-simple-rdoc-magic"
+    if not evidence_gt_four_text(evidence_text_or(raw, "simpleos_renderdoc_rdc_size_bytes", "0")):
+        return "blocked:missing-simple-rdoc-payload"
+    if evidence_text_or(raw, "simpleos_renderdoc_capture_log_path", "") == "":
+        return "blocked:missing-renderdoc-capture-log-path"
+    if evidence_text_or(raw, "simpleos_renderdoc_capture_log_status", "missing") != "pass":
+        return "blocked:missing-renderdoc-capture-log"
+    if evidence_text_or(raw, "simpleos_renderdoc_simple_runtime_backend", "missing") != "vulkan":
+        return "blocked:missing-simple-vulkan-runtime"
+    if evidence_text_or(raw, "simpleos_renderdoc_simple_scene", "") != "vulkan-engine2d":
+        return "blocked:missing-engine2d-vulkan-scene"
+    if evidence_text_or(raw, "simpleos_renderdoc_helper_status", "missing") != "pass":
+        return "blocked:missing-renderdoc-helper-pass"
+    if evidence_text_or(raw, "simpleos_renderdoc_qemu_wm_log_path", "") == "":
+        return "blocked:missing-qemu-wm-renderdoc-log"
+    if evidence_text_or(raw, "simpleos_renderdoc_host_wm_log_path", "") == "":
+        return "blocked:missing-host-wm-renderdoc-log"
+    "pass"
+
+fn derived_wm_structured_compare_status(raw: text) -> text:
+    val qemu_scene = evidence_text_or(raw, "simpleos_wm_qemu_scene", "")
+    val host_scene = evidence_text_or(raw, "simpleos_wm_host_scene", "")
+    val qemu_count = evidence_text_or(raw, "simpleos_wm_qemu_window_count", "0")
+    val host_count = evidence_text_or(raw, "simpleos_wm_host_window_count", "0")
+    val qemu_focus = evidence_text_or(raw, "simpleos_wm_qemu_focus_id", "")
+    val host_focus = evidence_text_or(raw, "simpleos_wm_host_focus_id", "")
+    if qemu_scene == "":
+        return "blocked:missing-qemu-wm-scene"
+    if host_scene == "":
+        return "blocked:missing-host-wm-scene"
+    if qemu_scene != host_scene:
+        return "blocked:wm-scene-mismatch"
+    if not evidence_positive_text(qemu_count):
+        return "blocked:missing-qemu-window-count"
+    if not evidence_positive_text(host_count):
+        return "blocked:missing-host-window-count"
+    if qemu_count != host_count:
+        return "blocked:wm-window-count-mismatch"
+    if qemu_focus == "":
+        return "blocked:missing-qemu-focus"
+    if host_focus == "":
+        return "blocked:missing-host-focus"
+    if qemu_focus != host_focus:
+        return "blocked:wm-focus-mismatch"
+    if evidence_text_or(raw, "simpleos_wm_qemu_titlebar_status", "missing") != "pass":
+        return "blocked:missing-qemu-titlebar-controls"
+    if evidence_text_or(raw, "simpleos_wm_host_titlebar_status", "missing") != "pass":
+        return "blocked:missing-host-titlebar-controls"
+    if evidence_text_or(raw, "simpleos_wm_qemu_taskbar_status", "missing") != "pass":
+        return "blocked:missing-qemu-taskbar"
+    if evidence_text_or(raw, "simpleos_wm_host_taskbar_status", "missing") != "pass":
+        return "blocked:missing-host-taskbar"
+    if evidence_text_or(raw, "simpleos_wm_renderdoc_log_compare_status", "missing") != "pass":
+        return "blocked:missing-renderdoc-log-compare"
+    if evidence_text_or(raw, "simpleos_wm_argb_diff_status", "missing") != "pass":
+        return "blocked:missing-wm-argb-diff"
+    if evidence_text_or(raw, "simpleos_wm_argb_mismatch_count", "-1") != "0":
+        return "blocked:wm-argb-mismatch"
+    "pass"
+
+fn derived_wm_renderdoc_status(raw: text) -> text:
+    if evidence_text_or(raw, "simpleos_renderdoc_rdc_magic_status", "missing") != "pass":
+        return "blocked:missing-simple-rdoc-magic"
+    if evidence_text_or(raw, "simpleos_renderdoc_simple_runtime_backend", "missing") != "vulkan":
+        return "blocked:missing-simple-vulkan-runtime"
+    if evidence_text_or(raw, "simpleos_renderdoc_simple_scene", "") != "vulkan-engine2d":
+        return "blocked:missing-engine2d-vulkan-scene"
+    if evidence_text_or(raw, "simpleos_simple2d_readback_status", "missing") != "pass":
+        return "blocked:missing-simple2d-readback"
+    if evidence_text_or(raw, "simpleos_qemu_gpu_readback_status", "missing") != "pass":
+        return "blocked:missing-qemu-gpu-readback"
+    if evidence_text_or(raw, "simpleos_qemu_wm_evidence_status", "missing") != "pass":
+        return "blocked:missing-qemu-wm-evidence"
+    if evidence_text_or(raw, "simpleos_host_wm_evidence_status", "missing") != "pass":
+        return "blocked:missing-host-wm-evidence"
+    if evidence_text_or(raw, "simpleos_wm_qemu_host_compare_status", "missing") != "pass":
+        return "blocked:missing-structured-wm-compare"
+    "pass"
+
+fn live_evidence_from_file(path: text) -> SimpleOsMulticonfigLiveEvidence:
+    val defaults = default_blocked_simpleos_multiconfig_live_evidence()
+    if path == "":
+        return defaults
+    val raw = file_read(path)
+    if raw == "":
+        return defaults
+    simpleos_multiconfig_live_evidence_from_status_rows(
+        status_or_default(raw, "simpleos_qemu_service_evidence_status", derived_qemu_service_status(raw)),
+        status_or_default(raw, "simpleos_fpga_serial_evidence_status", derived_fpga_serial_status(raw)),
+        status_or_default(raw, "simpleos_engine2d_vulkan_evidence_status", derived_engine2d_vulkan_status(raw)),
+        status_or_default(raw, "simpleos_renderdoc_artifact_evidence_status", derived_renderdoc_artifact_status(raw)),
+        status_or_default(raw, "simpleos_wm_structured_compare_evidence_status", derived_wm_structured_compare_status(raw)),
+        status_or_default(raw, "simpleos_wm_renderdoc_evidence_status", derived_wm_renderdoc_status(raw))
+    )
+
+fn raw_evidence_from_file(path: text) -> text:
+    if path == "":
+        return ""
+    file_read(path)
+
+fn print_evidence_row_if_present(raw: text, key: text):
+    val value = evidence_value(raw, key)
+    if value != "":
+        print key + "=" + value
+
+fn main() -> i32:
+    val path = evidence_path(get_args())
+    val qemu = qemu_riscv64_desktop_profile()
+    val fpga = fpga_riscv64_serial_profile()
+    val evidence = live_evidence_from_file(path)
+    val live_status = simpleos_multiconfig_live_status(evidence)
+    val raw = raw_evidence_from_file(path)
+    val bridge_status = if raw == "": "blocked:missing-engine2d-bridge-profile" else: derived_engine2d_vulkan_bridge_status(raw)
+
+    print "simpleos_multiconfig_evidence_path=" + path
+    print "simpleos_multiconfig_profile_status=" + simpleos_multiconfig_goal_status()
+    print "simpleos_qemu_profile=" + qemu.name
+    print "simpleos_qemu_ssh_endpoint=" + qemu_riscv64_desktop_ssh_endpoint()
+    print "simpleos_qemu_http_endpoint=" + qemu_riscv64_desktop_http_endpoint()
+    print "simpleos_qemu_riscv64_desktop_qemu_args_status=" + qemu_riscv64_desktop_qemu_args_status(qemu_riscv64_desktop_qemu_args())
+    print "simpleos_fpga_profile=" + fpga.name
+    print "simpleos_fpga_terminal_kind=" + fpga.terminal_kind
+    print "simpleos_fpga_ssh_endpoint=" + fpga.ssh_endpoint()
+    print "simpleos_engine2d_vulkan_bridge_status=" + bridge_status
+    print "simpleos_multiconfig_live_required_evidence_keys=" + join_text(simpleos_multiconfig_live_required_evidence_keys(), ",")
+    print "simpleos_renderdoc_artifact_required_evidence_keys=" + join_text(simpleos_renderdoc_artifact_required_evidence_keys(), ",")
+    print "simpleos_wm_renderdoc_required_evidence_keys=" + join_text(simpleos_wm_renderdoc_required_evidence_keys(), ",")
+    print "simpleos_qemu_service_evidence_status=" + evidence.qemu_service_status
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_build_attempted")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_build_status")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_build_exit_code")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_native_build_exit_code")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_build_log_path")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_build_backend")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_nested_simple_binary")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_nested_simple_binary_source")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_build_cc")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_build_cc_source")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_disk_image_build_attempted")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_disk_image_build_status")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_disk_image_builder_compiler")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_disk_image_builder_path")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_disk_image_builder_compile_log_path")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_disk_image_builder_compile_stdout_path")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_disk_image_builder_run_log_path")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_disk_image_builder_run_stdout_path")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_canonical_kernel_status")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_canonical_image_status")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_live_boot_status")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_qemu_exit_status")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_blocker")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_stdout_path")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_stderr_path")
+    print_evidence_row_if_present(raw, "simpleos_qemu_rv64_process_output_status")
+    print "simpleos_fpga_serial_evidence_status=" + evidence.fpga_serial_status
+    print_evidence_row_if_present(raw, "simpleos_fpga_build_attempted")
+    print_evidence_row_if_present(raw, "simpleos_fpga_build_status")
+    print_evidence_row_if_present(raw, "simpleos_fpga_build_exit_code")
+    print_evidence_row_if_present(raw, "simpleos_fpga_build_log_path")
+    print_evidence_row_if_present(raw, "simpleos_fpga_expected_entry")
+    print_evidence_row_if_present(raw, "simpleos_fpga_expected_entry_status")
+    print_evidence_row_if_present(raw, "simpleos_fpga_expected_kernel_path")
+    print_evidence_row_if_present(raw, "simpleos_fpga_expected_kernel_status")
+    print_evidence_row_if_present(raw, "simpleos_fpga_uart_terminal_status")
+    print_evidence_row_if_present(raw, "simpleos_fpga_uart_terminal_reason")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_device_status")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_port_probe_attempted")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_port_probe_status")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_port_probe_count")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_port_probe_ports")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_port_probe_log_path")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_device_candidate_status")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_inventory_evidence_status")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_capture_attempted")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_capture_status")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_capture_reason")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_capture_timeout_seconds")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_capture_baud_rate")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_capture_bytes")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_capture_boot_marker_seen")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_log_status")
+    print_evidence_row_if_present(raw, "simpleos_fpga_serial_boot_marker_status")
+    print_evidence_row_if_present(raw, "simpleos_fpga_rv64_boot_marker_status")
+    print_evidence_row_if_present(raw, "simpleos_fpga_test_passed_marker_status")
+    print_evidence_row_if_present(raw, "simpleos_fpga_toolchain_status")
+    print_evidence_row_if_present(raw, "simpleos_fpga_bitstream_status")
+    print "simpleos_engine2d_vulkan_evidence_status=" + evidence.engine2d_vulkan_status
+    print_evidence_row_if_present(raw, "simpleos_engine2d_source_evidence_status")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_source_evidence_mode")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_source_simple_status")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_source_browser_backing_status")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_direct_readback_status")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_direct_readback_reason")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_direct_readback_exit_code")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_direct_readback_preflight_only")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_direct_readback_existing_simple_process_count")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_direct_readback_existing_simple_process_limit")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_source_evidence_usable_status")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_source_evidence_usable_reason")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_source_qemu_entry_status")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_source_baremetal_core_status")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_source_virtio_surface_status")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_source_vulkan_session_status")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_source_current_draw_path")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_source_target_processing_backend")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_source_bridge_audit_status")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_bridge_profile")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_drawing_backend")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_processing_backend")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_runtime_backend")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_runtime_backend_reason")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_vulkan_device_name")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_viewport_width")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_viewport_height")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_readback_checksum")
+    print_evidence_row_if_present(raw, "simpleos_engine2d_readback_nonblank_status")
+    print_evidence_row_if_present(raw, "simpleos_qemu_gpu_readback_status")
+    print_evidence_row_if_present(raw, "simpleos_qemu_gpu_readback_reason")
+    print_evidence_row_if_present(raw, "simpleos_qemu_gpu_readback_path")
+    print_evidence_row_if_present(raw, "simpleos_qemu_gpu_readback_width")
+    print_evidence_row_if_present(raw, "simpleos_qemu_gpu_readback_height")
+    print_evidence_row_if_present(raw, "simpleos_qemu_gpu_readback_dimensions_status")
+    print_evidence_row_if_present(raw, "simple_process_inventory_status")
+    print_evidence_row_if_present(raw, "simple_process_inventory_count")
+    print_evidence_row_if_present(raw, "simple_process_inventory_limit")
+    print_evidence_row_if_present(raw, "simple_process_inventory_over_limit")
+    print_evidence_row_if_present(raw, "simple_process_inventory_sample_pids")
+    print_evidence_row_if_present(raw, "simple_process_inventory_sample_age_minutes")
+    print_evidence_row_if_present(raw, "simple_process_inventory_kill_requested")
+    print_evidence_row_if_present(raw, "simple_process_inventory_kill_status")
+    print_evidence_row_if_present(raw, "simpleos_windows_vulkan_host_probe_attempted")
+    print_evidence_row_if_present(raw, "simpleos_windows_vulkaninfo_status")
+    print_evidence_row_if_present(raw, "simpleos_windows_vulkan_instance_version")
+    print_evidence_row_if_present(raw, "simpleos_windows_vulkan_device_name")
+    print_evidence_row_if_present(raw, "simpleos_windows_vulkan_sdk_tools_status")
+    print_evidence_row_if_present(raw, "simpleos_windows_glslang_validator_status")
+    print_evidence_row_if_present(raw, "simpleos_windows_spirv_as_status")
+    print_evidence_row_if_present(raw, "simpleos_windows_dxc_status")
+    print_evidence_row_if_present(raw, "simpleos_windows_chrome_status")
+    print_evidence_row_if_present(raw, "simpleos_windows_electron_status")
+    print_evidence_row_if_present(raw, "simpleos_windows_renderdoc_tool_status")
+    print_evidence_row_if_present(raw, "simpleos_windows_vulkan_host_readiness_status")
+    print_evidence_row_if_present(raw, "gui_web_2d_vulkan_browser_backing_status")
+    print_evidence_row_if_present(raw, "gui_web_2d_vulkan_browser_backing_reason")
+    print_evidence_row_if_present(raw, "gui_web_2d_vulkan_browser_backing_mode")
+    print "simpleos_renderdoc_artifact_evidence_status=" + evidence.renderdoc_artifact_status
+    print_evidence_row_if_present(raw, "simpleos_renderdoc_rdc_status")
+    print_evidence_row_if_present(raw, "simpleos_renderdoc_rdc_magic_status")
+    print_evidence_row_if_present(raw, "simpleos_renderdoc_artifact_blocker_reason")
+    print_evidence_row_if_present(raw, "simpleos_wm_renderdoc_log_compare_reason")
+    print "simpleos_wm_structured_compare_evidence_status=" + evidence.wm_structured_compare_status
+    print_evidence_row_if_present(raw, "simpleos_host_wm_capture_attempted")
+    print_evidence_row_if_present(raw, "simpleos_host_wm_capture_mode")
+    print_evidence_row_if_present(raw, "simpleos_host_wm_capture_status")
+    print_evidence_row_if_present(raw, "simpleos_host_wm_capture_exit_code")
+    print_evidence_row_if_present(raw, "simpleos_host_wm_capture_log_path")
+    print_evidence_row_if_present(raw, "simpleos_wm_qemu_ppm_width")
+    print_evidence_row_if_present(raw, "simpleos_wm_qemu_ppm_height")
+    print_evidence_row_if_present(raw, "simpleos_wm_qemu_capture_kind")
+    print_evidence_row_if_present(raw, "simpleos_wm_host_ppm_status")
+    print_evidence_row_if_present(raw, "simpleos_wm_host_ppm_reason")
+    print_evidence_row_if_present(raw, "simpleos_wm_host_ppm_width")
+    print_evidence_row_if_present(raw, "simpleos_wm_host_ppm_height")
+    print_evidence_row_if_present(raw, "simpleos_wm_host_capture_kind")
+    print_evidence_row_if_present(raw, "simpleos_wm_argb_diff_status")
+    print_evidence_row_if_present(raw, "simpleos_wm_argb_diff_reason")
+    print_evidence_row_if_present(raw, "simpleos_wm_argb_mismatch_count")
+    print_evidence_row_if_present(raw, "simpleos_wm_renderdoc_log_compare_status")
+    print_evidence_row_if_present(raw, "simpleos_wm_renderdoc_log_compare_reason")
+    print_evidence_row_if_present(raw, "simpleos_wm_renderdoc_log_compare_mode")
+    print_evidence_row_if_present(raw, "simpleos_wm_renderdoc_qemu_log_status")
+    print_evidence_row_if_present(raw, "simpleos_wm_renderdoc_host_log_status")
+    print_evidence_row_if_present(raw, "simpleos_wm_renderdoc_qemu_log_scene")
+    print_evidence_row_if_present(raw, "simpleos_wm_renderdoc_host_log_scene")
+    print_evidence_row_if_present(raw, "simpleos_wm_renderdoc_qemu_log_backend")
+    print_evidence_row_if_present(raw, "simpleos_wm_renderdoc_host_log_backend")
+    print "simpleos_wm_renderdoc_evidence_status=" + evidence.wm_renderdoc_status
+    print_evidence_row_if_present(raw, "simpleos_multiconfig_windows_wrapper")
+    print_evidence_row_if_present(raw, "simpleos_multiconfig_windows_wrapper_qemu_exit_code")
+    print_evidence_row_if_present(raw, "simpleos_multiconfig_windows_wrapper_fpga_exit_code")
+    print_evidence_row_if_present(raw, "simpleos_multiconfig_windows_wrapper_wm_exit_code")
+    print_evidence_row_if_present(raw, "simpleos_multiconfig_windows_wrapper_engine2d_exit_code")
+    print_evidence_row_if_present(raw, "simpleos_multiconfig_windows_wrapper_aggregate_status")
+    print_evidence_row_if_present(raw, "simpleos_multiconfig_windows_wrapper_aggregate_exit_code")
+    print "simpleos_multiconfig_live_status=" + live_status
+
+    if live_status == "pass":
+        return 0
+    1

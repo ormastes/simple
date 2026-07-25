@@ -1,0 +1,143 @@
+# =============================================================================
+# common/crypto/typed/asym.spl — Typed asymmetric-key wrappers (T3)
+# =============================================================================
+# ADDITIVE wrappers over existing [u8]-based cores.  Does NOT rewrite any core.
+#
+# Cores wrapped:
+#   os.crypto.ed25519       — pure Simple, interpreter-safe
+#   nogc_async_mut_noalloc.tls.x25519 — pure Simple Montgomery ladder with no
+#                                        host-runtime extern dependency
+#   std.common.crypto.ecdsa_p256      — wraps rt_ecdsa_p256_* externs;
+#                                        interpreter: runtime-only
+#
+# Key-exchange result struct (tuple-element corruption workaround):
+#   ed25519_keypair_from_seed returns (SecretKey, PublicKey) via a small struct
+#   Ed25519KeyPair because tuple .0/.1 cross-module access may corrupt under the
+#   interpreter (feedback_tuple4_element_corruption).  Filed:
+#   doc/08_tracking/bug/asym_typed_keypair_tuple_corruption_2026-06-15.md
+# =============================================================================
+
+use lib.common.bytes.span.{ByteSpan}
+use lib.common.crypto.typed.ctypes.{SecretKey, PublicKey, Signature, SharedSecret}
+use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_sign, ed25519_verify}
+use src.lib.nogc_async_mut_noalloc.tls.x25519.{x25519, x25519_pubkey}
+use std.common.crypto.ecdsa_p256.{ecdsa_p256_sign, ecdsa_p256_verify}
+
+# =============================================================================
+# Ed25519KeyPair — avoids tuple-element corruption on cross-module return
+# =============================================================================
+
+struct Ed25519KeyPair:
+    """Keypair from ed25519_keypair_from_seed.
+
+    Using a struct rather than a bare (SecretKey, PublicKey) tuple avoids the
+    known interpreter tuple-element corruption bug when the tuple is returned
+    across a module boundary (feedback_tuple4_element_corruption).
+    """
+    secret: SecretKey
+    public: PublicKey
+
+# =============================================================================
+# Ed25519 typed wrappers
+# =============================================================================
+
+fn ed25519_typed_keypair(seed: ByteSpan) -> Ed25519KeyPair:
+    """Derive an Ed25519 keypair from a 32-byte seed.
+
+    seed: ByteSpan over the 32-byte private seed.
+    Returns: Ed25519KeyPair with .secret (SecretKey) and .public (PublicKey).
+
+    Pure Simple implementation — runs under the seed interpreter.
+    """
+    val seed_bytes = seed.to_bytes()
+    val kp = ed25519_keypair_from_seed(seed_bytes)
+    val sk = SecretKey.new(kp.0)
+    val pk = PublicKey.new(kp.1)
+    Ed25519KeyPair(secret: sk, public: pk)
+
+fn ed25519_typed_sign(sk: SecretKey, pk: PublicKey, msg: ByteSpan) -> Signature:
+    """Sign msg with an Ed25519 secret key.
+
+    sk:  SecretKey wrapping the 32-byte private seed.
+    pk:  PublicKey wrapping the 32-byte public key.
+    msg: Message bytes (any length).
+    Returns: 64-byte Signature.
+
+    Pure Simple implementation — runs under the seed interpreter.
+    """
+    val sig_bytes = ed25519_sign(sk.bytes().to_bytes(), pk.bytes().to_bytes(), msg.to_bytes())
+    Signature.new(sig_bytes)
+
+fn ed25519_typed_verify(pk: PublicKey, msg: ByteSpan, sig: Signature) -> bool:
+    """Verify an Ed25519 signature.
+
+    pk:  PublicKey wrapping the 32-byte public key.
+    msg: Message bytes that were signed.
+    sig: 64-byte Signature.
+    Returns: true if valid, false otherwise.
+
+    Pure Simple implementation — runs under the seed interpreter.
+    """
+    ed25519_verify(pk.bytes().to_bytes(), msg.to_bytes(), sig.bytes().to_bytes())
+
+# =============================================================================
+# X25519 typed wrappers
+# =============================================================================
+# x25519.spl uses its pure-Simple Montgomery ladder directly. The former
+# unimplemented rt_tls13_x25519 fast path was removed; see the tracked bug.
+
+fn x25519_typed(sk: SecretKey, peer_pk: PublicKey) -> SharedSecret:
+    """X25519 Diffie-Hellman: shared_secret = sk * peer_pk.
+
+    sk:      SecretKey wrapping the 32-byte scalar (private key).
+    peer_pk: PublicKey wrapping the 32-byte peer u-coordinate (public key).
+    Returns: 32-byte SharedSecret.
+
+    Pure Simple implementation; no X25519 runtime extern is required.
+    """
+    val secret_bytes = x25519(sk.bytes().to_bytes(), peer_pk.bytes().to_bytes())
+    SharedSecret.new(secret_bytes)
+
+fn x25519_typed_pubkey(sk: SecretKey) -> PublicKey:
+    """Derive an X25519 public key from a secret key (multiply with base point 9).
+
+    sk: SecretKey wrapping the 32-byte scalar.
+    Returns: 32-byte PublicKey.
+
+    Pure Simple implementation; no X25519 runtime extern is required.
+    """
+    val pub_bytes = x25519_pubkey(sk.bytes().to_bytes())
+    PublicKey.new(pub_bytes)
+
+# =============================================================================
+# ECDSA P-256 typed wrappers
+# =============================================================================
+# NOTE: ecdsa_p256.spl wraps rt_ecdsa_p256_sign / rt_ecdsa_p256_verify externs.
+# These are RUNTIME-ONLY.  Under the seed interpreter they will fail with
+# "unknown extern function".
+
+fn ecdsa_p256_typed_sign(pkcs8_sk: SecretKey, msg: ByteSpan) -> Signature:
+    """Sign msg with ECDSA P-256 SHA-256.
+
+    pkcs8_sk: SecretKey wrapping PKCS#8 v1 DER-encoded P-256 private key.
+    msg:      Message bytes (hashed with SHA-256 internally).
+    Returns:  64-byte Signature (r||s, 32+32 big-endian).
+              Returns Signature.new([]) on error — caller must check .len() > 0.
+
+    RUNTIME-ONLY: requires rt_ecdsa_p256_sign extern.
+    Hosted-only: requires system CSPRNG in the runtime.
+    """
+    val sig_bytes = ecdsa_p256_sign(pkcs8_sk.bytes().to_bytes(), msg.to_bytes())
+    Signature.new(sig_bytes)
+
+fn ecdsa_p256_typed_verify(pk: PublicKey, msg: ByteSpan, sig: Signature) -> bool:
+    """Verify an ECDSA P-256 SHA-256 signature.
+
+    pk:  PublicKey wrapping DER-encoded ECDSA P-256 SubjectPublicKeyInfo (SPKI).
+    msg: Message bytes that were signed.
+    sig: 64-byte Signature (r||s fixed-width, NOT the SSH-wire mpint pair).
+    Returns: true if valid, false otherwise.
+
+    RUNTIME-ONLY: requires rt_ecdsa_p256_verify extern.
+    """
+    ecdsa_p256_verify(pk.bytes().to_bytes(), msg.to_bytes(), sig.bytes().to_bytes())

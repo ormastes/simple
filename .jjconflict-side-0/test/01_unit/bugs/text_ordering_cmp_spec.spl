@@ -1,0 +1,65 @@
+"""
+# Text Ordering (`<` `>` `<=` `>=`) Content Comparison Specification
+
+**Feature IDs:** #P0-TEXT-ORDER-001
+**Category:** Runtime
+**Difficulty:** 2/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/sspec_test_path_false_green_undercount_2026-07-20.md
+
+## Overview
+
+Regression guard for the P0 sspec false-green root cause: text `<` / `>` /
+`<=` / `>=` used to lower to a RAW POINTER (handle) integer compare on the
+native/cranelift codegen paths, producing address-dependent (context-
+sensitive) results instead of lexicographic byte comparison. Fixed by
+lowering text ordering compares through `rt_text_cmp_any` (strcmp-style
+signed result vs 0) in both the seed cranelift codegen
+(`src/compiler_rust/compiler/src/codegen/instr/core.rs`) and the self-hosted
+MIR lowering (`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl`).
+
+This spec must run on the sspec TEST path (the path that was broken);
+`simple run` was always correct on all backends.
+"""
+
+use std.spec
+
+describe "text ordering comparison is lexicographic content compare":
+    it "orders distinct words alphabetically":
+        expect("apple" < "banana").to_equal(true)
+        expect("banana" < "apple").to_equal(false)
+        expect("banana" > "apple").to_equal(true)
+
+    it "orders a prefix before its extension":
+        expect("a" < "ab").to_equal(true)
+        expect("ab" < "a").to_equal(false)
+        expect("ab" > "a").to_equal(true)
+
+    it "orders single characters bytewise":
+        expect("b" > "a").to_equal(true)
+        expect("a" < "b").to_equal(true)
+
+    it "treats equal strings as neither < nor >":
+        val a = "same"
+        val b = "same"
+        expect(a < b).to_equal(false)
+        expect(a > b).to_equal(false)
+        expect(a <= b).to_equal(true)
+        expect(a >= b).to_equal(true)
+
+    it "orders non-literal (runtime-built) strings by content":
+        # Concat-produced strings exercise the tagged-heap-string operand
+        # shape (vs raw literal pointers) — both must compare by content.
+        val ab = "a" + "b"
+        expect(ab < "ac").to_equal(true)
+        expect(ab > "aa").to_equal(true)
+        expect(ab < "ab").to_equal(false)
+        expect(ab >= "ab").to_equal(true)
+
+    it "orders empty string before any non-empty string":
+        expect("" < "a").to_equal(true)
+        expect("a" > "").to_equal(true)
+        expect("" < "").to_equal(false)

@@ -1,0 +1,50 @@
+# Manual runtime-allocation variant for the u64 blit-tile repro.
+#
+# This keeps the rendering loop in Simple but bypasses array-literal lowering.
+# If LLVM native succeeds here while `var data: [u64] = []` fails, the remaining
+# bug is seed lowering for empty typed arrays, not Simple render logic.
+
+extern fn rt_array_new_with_cap_u64(cap: i64) -> [u64]
+
+struct TinyFbU64Manual:
+    data: [u64]
+    width: i32
+    height: i32
+    stride: i32
+
+fn sprite_pixel_u64_manual(id: i64) -> u64:
+    if id == 0: 0xFF0000FF
+    else if id == 1: 0xFF00FF00
+    else if id == 2: 0xFFFF0000
+    else: 0xFF00FFFF
+
+fn make_fb_u64_manual() -> TinyFbU64Manual:
+    var data: [u64] = rt_array_new_with_cap_u64(256 * 64)
+    var i: i64 = 0
+    while i < 256 * 64:
+        data.push(0xFF000000)
+        i = i + 1
+    TinyFbU64Manual(data: data, width: 256, height: 64, stride: 256)
+
+fn render_row_u64_manual(mut fb: TinyFbU64Manual):
+    var tx: i64 = 0
+    while tx < fb.width:
+        val sid: i64 = (tx / 64) % 4
+        val color: u64 = sprite_pixel_u64_manual(sid)
+        print "BLIT_TILE_U64_MANUAL_CALL x={tx} y=0 w=64 h=64 color={color}"
+        var yy: i64 = 0
+        while yy < 64:
+            var xx: i64 = tx
+            var off: i64 = yy * (fb.stride as i64) + tx
+            while xx < tx + 64:
+                fb.data[off as i32] = color
+                off = off + 1
+                xx = xx + 1
+            yy = yy + 1
+        tx = tx + 64
+
+fn main():
+    var fb = make_fb_u64_manual()
+    render_row_u64_manual(fb)
+    print "BLIT_TILE_U64_MANUAL_REPRO sid0={(0 / 64) % 4} sid64={(64 / 64) % 4} sid128={(128 / 64) % 4} sid192={(192 / 64) % 4}"
+    print "BLIT_TILE_U64_MANUAL_REPRO p0={fb.data[0]} p64={fb.data[64]} p128={fb.data[128]} p192={fb.data[192]} p240={fb.data[240]}"

@@ -1,0 +1,491 @@
+# GPU Lighting 3D — point, directional, spot lights and shadow mapping
+#
+# Manages GPU-side lighting: a uniform buffer holding all active LightUniform
+# entries, typed light structs for point / directional / spot lights, shadow
+# map descriptors, and a CPU-side Blinn-Phong light accumulator for fallback
+# and testing.
+#
+# Core buffer lifecycle:
+#   gpu_lighting_init    — allocate uniform buffer
+#   gpu_lighting_upload  — serialize lights and upload each frame
+#   gpu_lighting_bind    — bind at uniform slot 1 before draw calls
+
+use std.nogc_async_mut.engine.render.backend3d.{
+    RenderBackend3D, BufferHandle, RenderPassHandle
+}
+
+# ============================================================================
+# LightKind — discriminates the light type stored in LightUniform.light_type
+#   0 = Point, 1 = Directional, 2 = Spot
+# ============================================================================
+
+val LIGHT_KIND_POINT: i64 = 0
+val LIGHT_KIND_DIRECTIONAL: i64 = 1
+val LIGHT_KIND_SPOT: i64 = 2
+
+# ============================================================================
+# LightUniform — per-light data uploaded to the GPU
+#
+# Each entry is 32 bytes when packed as 8 × f32 (or 64 bytes if padded to
+# 8 × f64).  We use f32 fields to match shader std140/std430 expectations.
+# ============================================================================
+
+class LightUniform:
+    position_x: f32
+    position_y: f32
+    position_z: f32
+    light_type: i64
+    color_r: f32
+    color_g: f32
+    color_b: f32
+    intensity: f32
+
+# ============================================================================
+# PointLight — omnidirectional light at a world-space position
+# ============================================================================
+
+struct PointLight:
+    pos_x: f32
+    pos_y: f32
+    pos_z: f32
+    color_r: f32
+    color_g: f32
+    color_b: f32
+    intensity: f32
+    # Attenuation: 1 / (constant + linear*d + quadratic*d^2)
+    attn_constant: f32
+    attn_linear: f32
+    attn_quadratic: f32
+    # Effective radius beyond which contribution is negligible
+    radius: f32
+
+fn point_light_default() -> PointLight:
+    """Point light at origin, white, radius 10, physically-based attenuation."""
+    PointLight(
+        pos_x: 0.0,
+        pos_y: 0.0,
+        pos_z: 0.0,
+        color_r: 1.0,
+        color_g: 1.0,
+        color_b: 1.0,
+        intensity: 1.0,
+        attn_constant: 1.0,
+        attn_linear: 0.09,
+        attn_quadratic: 0.032,
+        radius: 10.0
+    )
+
+fn point_light_to_uniform(light: PointLight) -> LightUniform:
+    """Convert a PointLight to a LightUniform for GPU upload."""
+    LightUniform(
+        position_x: light.pos_x,
+        position_y: light.pos_y,
+        position_z: light.pos_z,
+        light_type: LIGHT_KIND_POINT,
+        color_r: light.color_r,
+        color_g: light.color_g,
+        color_b: light.color_b,
+        intensity: light.intensity
+    )
+
+fn point_light_attenuate(light: PointLight, dist: f32) -> f32:
+    """Evaluate the scalar attenuation factor at distance dist."""
+    val denom = light.attn_constant + light.attn_linear * dist + light.attn_quadratic * dist * dist
+    if denom <= 0.0:
+        1.0
+    else:
+        1.0 / denom
+
+# ============================================================================
+# DirectionalLight — infinite-distance light with a fixed direction
+# ============================================================================
+
+struct DirectionalLight:
+    # Direction towards the light source (world space, unit length)
+    dir_x: f32
+    dir_y: f32
+    dir_z: f32
+    color_r: f32
+    color_g: f32
+    color_b: f32
+    intensity: f32
+    cast_shadows: bool
+
+fn directional_light_default() -> DirectionalLight:
+    """Sun-like directional light from above-right, warm white, shadow-casting."""
+    DirectionalLight(
+        dir_x: 0.577,
+        dir_y: 0.577,
+        dir_z: 0.577,
+        color_r: 1.0,
+        color_g: 0.95,
+        color_b: 0.88,
+        intensity: 1.0,
+        cast_shadows: true
+    )
+
+fn directional_light_to_uniform(light: DirectionalLight) -> LightUniform:
+    """Convert a DirectionalLight to a LightUniform for GPU upload.
+    Direction is stored in the position fields; no attenuation."""
+    LightUniform(
+        position_x: light.dir_x,
+        position_y: light.dir_y,
+        position_z: light.dir_z,
+        light_type: LIGHT_KIND_DIRECTIONAL,
+        color_r: light.color_r,
+        color_g: light.color_g,
+        color_b: light.color_b,
+        intensity: light.intensity
+    )
+
+# ============================================================================
+# SpotLight — cone-shaped light at a world-space position
+# ============================================================================
+
+struct SpotLight:
+    pos_x: f32
+    pos_y: f32
+    pos_z: f32
+    # Direction the spot points (world space, unit length)
+    dir_x: f32
+    dir_y: f32
+    dir_z: f32
+    color_r: f32
+    color_g: f32
+    color_b: f32
+    intensity: f32
+    # Cosine of inner (full-intensity) cone half-angle
+    cos_inner: f32
+    # Cosine of outer (zero-intensity) cone half-angle
+    cos_outer: f32
+    attn_constant: f32
+    attn_linear: f32
+    attn_quadratic: f32
+    cast_shadows: bool
+
+fn spot_light_default() -> SpotLight:
+    """Downward spot light at (0,5,0), white, 30° inner / 45° outer cone."""
+    SpotLight(
+        pos_x: 0.0,
+        pos_y: 5.0,
+        pos_z: 0.0,
+        dir_x: 0.0,
+        dir_y: -1.0,
+        dir_z: 0.0,
+        color_r: 1.0,
+        color_g: 1.0,
+        color_b: 1.0,
+        intensity: 1.0,
+        cos_inner: 0.866,
+        cos_outer: 0.707,
+        attn_constant: 1.0,
+        attn_linear: 0.09,
+        attn_quadratic: 0.032,
+        cast_shadows: false
+    )
+
+fn spot_light_to_uniform(light: SpotLight) -> LightUniform:
+    """Convert a SpotLight to a LightUniform for GPU upload.
+    Position stored in position fields; full cone/attenuation data handled
+    via a separate SpotParam uniform buffer (future work)."""
+    LightUniform(
+        position_x: light.pos_x,
+        position_y: light.pos_y,
+        position_z: light.pos_z,
+        light_type: LIGHT_KIND_SPOT,
+        color_r: light.color_r,
+        color_g: light.color_g,
+        color_b: light.color_b,
+        intensity: light.intensity
+    )
+
+fn spot_light_cone_factor(light: SpotLight, cos_angle: f32) -> f32:
+    """Compute cone attenuation: 0 outside outer cone, 1 inside inner cone,
+    smooth interpolation between."""
+    if cos_angle < light.cos_outer:
+        0.0
+    else:
+        if cos_angle >= light.cos_inner:
+            1.0
+        else:
+            val range = light.cos_inner - light.cos_outer
+            if range <= 0.0:
+                1.0
+            else:
+                (cos_angle - light.cos_outer) / range
+
+# ============================================================================
+# ShadowMapHandle — GPU-side depth buffer for a single shadow-casting light
+# ============================================================================
+
+class ShadowMapHandle:
+    depth_buf: BufferHandle
+    # Shadow map resolution (width == height)
+    resolution: i32
+
+    static fn invalid() -> ShadowMapHandle:
+        ShadowMapHandle(
+            depth_buf: BufferHandle.invalid(),
+            resolution: 0
+        )
+
+impl ShadowMapHandle:
+    static fn new(resolution: i32) -> ShadowMapHandle:
+        """Create a shadow map descriptor; depth_buf is invalid until
+        gpu_shadow_map_alloc is called."""
+        ShadowMapHandle(
+            depth_buf: BufferHandle.invalid(),
+            resolution: resolution
+        )
+
+    fn is_valid(self) -> bool:
+        """A shadow map is valid when resolution is positive."""
+        self.resolution > 0
+
+fn gpu_shadow_map_alloc(backend: RenderBackend3D, shadow: ShadowMapHandle) -> ShadowMapHandle:
+    """Allocate a GPU depth buffer for shadow rendering (resolution² × 4 bytes).
+    TODO: replace create_vertex_buffer with a dedicated depth-texture API once
+    the backend exposes one."""
+    val byte_count = shadow.resolution * shadow.resolution * 4
+    val dbuf = backend.create_vertex_buffer(byte_count)
+    ShadowMapHandle(
+        depth_buf: dbuf,
+        resolution: shadow.resolution
+    )
+
+fn gpu_shadow_map_free(shadow: ShadowMapHandle) -> ShadowMapHandle:
+    """Invalidate a shadow map (GPU-side cleanup is backend-managed)."""
+    ShadowMapHandle.invalid()
+
+# ============================================================================
+# GpuLightingState — owns the GPU-side lighting uniform buffer
+# ============================================================================
+
+class GpuLightingState:
+    buffer: BufferHandle
+    max_lights: i64
+    light_count: i64
+
+impl GpuLightingState:
+    static fn invalid() -> GpuLightingState:
+        GpuLightingState(
+            buffer: BufferHandle.invalid(),
+            max_lights: 0,
+            light_count: 0
+        )
+
+# ============================================================================
+# gpu_lighting_init — allocate the lighting uniform buffer
+#
+# Reserves max_lights * 64 bytes (64 bytes per light slot to accommodate
+# std140 padding on the GPU side).
+# ============================================================================
+
+fn gpu_lighting_init(backend: RenderBackend3D, max_lights: i64) -> GpuLightingState:
+    val byte_count = max_lights * 64
+    val buf = backend.create_uniform_buffer(byte_count)
+    GpuLightingState(
+        buffer: buf,
+        max_lights: max_lights,
+        light_count: 0
+    )
+
+# ============================================================================
+# gpu_lighting_upload — serialize lights to bytes and upload
+#
+# Packs LightUniform fields into a zeroed [u8] byte array.
+# TODO: replace placeholder zeroed serialization with real f32→[u8] packing
+#       once rt_f32_to_bytes (or equivalent) is available in the runtime.
+# ============================================================================
+
+fn gpu_lighting_upload(state: GpuLightingState, backend: RenderBackend3D, lights: [LightUniform]) -> GpuLightingState:
+    val count = lights.len()
+    val byte_count = count * 64
+
+    # TODO: real f32/i64 serialization — zeroed placeholder for now
+    var bytes: [u8] = []
+    var i = 0
+    while i < byte_count:
+        bytes.push(0)
+        i = i + 1
+
+    backend.upload_buffer(state.buffer, bytes, 0)
+
+    GpuLightingState(
+        buffer: state.buffer,
+        max_lights: state.max_lights,
+        light_count: count
+    )
+
+# ============================================================================
+# gpu_lighting_bind — bind the light buffer at uniform slot 1
+# ============================================================================
+
+fn gpu_lighting_bind(state: GpuLightingState, backend: RenderBackend3D, rph: RenderPassHandle):
+    backend.bind_uniform_buffer(rph, state.buffer, 1)
+
+# ============================================================================
+# LightAccumResult — CPU-side accumulated diffuse + specular contribution
+# ============================================================================
+
+struct LightAccumResult:
+    diffuse_r: f32
+    diffuse_g: f32
+    diffuse_b: f32
+    specular_r: f32
+    specular_g: f32
+    specular_b: f32
+
+fn accum_result_zero() -> LightAccumResult:
+    """Return a zero-contribution (dark) result."""
+    LightAccumResult(
+        diffuse_r: 0.0, diffuse_g: 0.0, diffuse_b: 0.0,
+        specular_r: 0.0, specular_g: 0.0, specular_b: 0.0
+    )
+
+fn accum_result_add(a: LightAccumResult, b: LightAccumResult) -> LightAccumResult:
+    """Combine two results by additive accumulation."""
+    LightAccumResult(
+        diffuse_r: a.diffuse_r + b.diffuse_r,
+        diffuse_g: a.diffuse_g + b.diffuse_g,
+        diffuse_b: a.diffuse_b + b.diffuse_b,
+        specular_r: a.specular_r + b.specular_r,
+        specular_g: a.specular_g + b.specular_g,
+        specular_b: a.specular_b + b.specular_b
+    )
+
+# ============================================================================
+# accum_point_light — Blinn-Phong contribution from one PointLight
+# ============================================================================
+
+fn accum_point_light(
+    light: PointLight,
+    frag_x: f32, frag_y: f32, frag_z: f32,
+    normal_x: f32, normal_y: f32, normal_z: f32,
+    view_x: f32, view_y: f32, view_z: f32,
+    shininess: f32
+) -> LightAccumResult:
+    """Compute Blinn-Phong diffuse + specular for a point light."""
+    val dx = light.pos_x - frag_x
+    val dy = light.pos_y - frag_y
+    val dz = light.pos_z - frag_z
+    val dist2 = dx * dx + dy * dy + dz * dz
+    val dist = if dist2 > 0.0: dist2 else: 1.0
+    val inv_dist = 1.0 / dist
+    val lx = dx * inv_dist
+    val ly = dy * inv_dist
+    val lz = dz * inv_dist
+    val ndotl = normal_x * lx + normal_y * ly + normal_z * lz
+    val diff = if ndotl > 0.0: ndotl else: 0.0
+    val hx = lx + view_x
+    val hy = ly + view_y
+    val hz = lz + view_z
+    val hlen2 = hx * hx + hy * hy + hz * hz
+    val spec = if (hlen2 > 0.0 and ndotl > 0.0):
+        val inv_hlen = 1.0 / hlen2
+        val ndoth = (normal_x * hx + normal_y * hy + normal_z * hz) * inv_hlen
+        val clamped = if ndoth > 0.0: ndoth else: 0.0
+        clamped * shininess
+    else:
+        0.0
+    val attn = point_light_attenuate(light, dist)
+    val li = light.intensity
+    LightAccumResult(
+        diffuse_r: light.color_r * diff * attn * li,
+        diffuse_g: light.color_g * diff * attn * li,
+        diffuse_b: light.color_b * diff * attn * li,
+        specular_r: light.color_r * spec * attn * li,
+        specular_g: light.color_g * spec * attn * li,
+        specular_b: light.color_b * spec * attn * li
+    )
+
+# ============================================================================
+# accum_directional_light — Blinn-Phong contribution from one DirectionalLight
+# ============================================================================
+
+fn accum_directional_light(
+    light: DirectionalLight,
+    normal_x: f32, normal_y: f32, normal_z: f32,
+    view_x: f32, view_y: f32, view_z: f32,
+    shininess: f32
+) -> LightAccumResult:
+    """Compute Blinn-Phong diffuse + specular for a directional light."""
+    val ndotl = normal_x * light.dir_x + normal_y * light.dir_y + normal_z * light.dir_z
+    val diff = if ndotl > 0.0: ndotl else: 0.0
+    val hx = light.dir_x + view_x
+    val hy = light.dir_y + view_y
+    val hz = light.dir_z + view_z
+    val hlen2 = hx * hx + hy * hy + hz * hz
+    val spec = if (hlen2 > 0.0 and ndotl > 0.0):
+        val inv_hlen = 1.0 / hlen2
+        val ndoth = (normal_x * hx + normal_y * hy + normal_z * hz) * inv_hlen
+        val clamped = if ndoth > 0.0: ndoth else: 0.0
+        clamped * shininess
+    else:
+        0.0
+    val li = light.intensity
+    LightAccumResult(
+        diffuse_r: light.color_r * diff * li,
+        diffuse_g: light.color_g * diff * li,
+        diffuse_b: light.color_b * diff * li,
+        specular_r: light.color_r * spec * li,
+        specular_g: light.color_g * spec * li,
+        specular_b: light.color_b * spec * li
+    )
+
+# ============================================================================
+# accum_spot_light — Blinn-Phong contribution from one SpotLight
+# ============================================================================
+
+fn accum_spot_light(
+    light: SpotLight,
+    frag_x: f32, frag_y: f32, frag_z: f32,
+    normal_x: f32, normal_y: f32, normal_z: f32,
+    view_x: f32, view_y: f32, view_z: f32,
+    shininess: f32
+) -> LightAccumResult:
+    """Compute Blinn-Phong diffuse + specular for a spot light."""
+    val dx = light.pos_x - frag_x
+    val dy = light.pos_y - frag_y
+    val dz = light.pos_z - frag_z
+    val dist2 = dx * dx + dy * dy + dz * dz
+    val dist = if dist2 > 0.0: dist2 else: 1.0
+    val inv_dist = 1.0 / dist
+    val lx = dx * inv_dist
+    val ly = dy * inv_dist
+    val lz = dz * inv_dist
+    # Negate: spot_dir points away from source; l points towards source
+    val cos_ang = -(lx * light.dir_x + ly * light.dir_y + lz * light.dir_z)
+    val cone = spot_light_cone_factor(light, cos_ang)
+    val ndotl = normal_x * lx + normal_y * ly + normal_z * lz
+    val diff = if ndotl > 0.0: ndotl else: 0.0
+    val hx = lx + view_x
+    val hy = ly + view_y
+    val hz = lz + view_z
+    val hlen2 = hx * hx + hy * hy + hz * hz
+    val spec = if (hlen2 > 0.0 and ndotl > 0.0):
+        val inv_hlen = 1.0 / hlen2
+        val ndoth = (normal_x * hx + normal_y * hy + normal_z * hz) * inv_hlen
+        val clamped = if ndoth > 0.0: ndoth else: 0.0
+        clamped * shininess
+    else:
+        0.0
+    val attn_pt = PointLight(
+        pos_x: light.pos_x, pos_y: light.pos_y, pos_z: light.pos_z,
+        color_r: 1.0, color_g: 1.0, color_b: 1.0,
+        intensity: 1.0,
+        attn_constant: light.attn_constant,
+        attn_linear: light.attn_linear,
+        attn_quadratic: light.attn_quadratic,
+        radius: 0.0
+    )
+    val attn = point_light_attenuate(attn_pt, dist)
+    val li = light.intensity
+    LightAccumResult(
+        diffuse_r: light.color_r * diff * attn * cone * li,
+        diffuse_g: light.color_g * diff * attn * cone * li,
+        diffuse_b: light.color_b * diff * attn * cone * li,
+        specular_r: light.color_r * spec * attn * cone * li,
+        specular_g: light.color_g * spec * attn * cone * li,
+        specular_b: light.color_b * spec * attn * cone * li
+    )

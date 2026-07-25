@@ -1,0 +1,99 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+QEMU_BIN="${QEMU_SYSTEM_AARCH64:-qemu-system-aarch64}"
+QEMU_TIMEOUT="${ARM64_WM_QEMU_READINESS_TIMEOUT:-3}"
+
+ENTRY="${ROOT_DIR}/examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"
+RAMFB="${ROOT_DIR}/src/os/kernel/arch/arm64/ramfb.spl"
+CONSOLE="${ROOT_DIR}/src/os/kernel/arch/arm64/console.spl"
+GUIDE="${ROOT_DIR}/doc/07_guide/platform/simpleos/simpleos_arm64_wm_qemu.md"
+
+status="ready"
+qemu_path=""
+machine_virt="false"
+ramfb_device="false"
+dry_run_parse="false"
+reason=""
+host_os="$(uname -s 2>/dev/null || echo unknown)"
+host_machine="$(uname -m 2>/dev/null || echo unknown)"
+accelerator="tcg"
+cpu="cortex-a57"
+if [ "$host_os" = "Darwin" ]; then
+    accelerator="hvf"
+    cpu="host"
+elif [ "$host_os" = "Linux" ] && [ "$host_machine" = "aarch64" ] && [ -e /dev/kvm ]; then
+    accelerator="kvm"
+    cpu="host"
+fi
+
+if [ ! -f "$ENTRY" ]; then
+    status="not-ready"
+    reason="missing ARM64 WM entry"
+elif [ ! -f "$RAMFB" ]; then
+    status="not-ready"
+    reason="missing ARM64 RAMFB architecture facade"
+elif [ ! -f "$CONSOLE" ]; then
+    status="not-ready"
+    reason="missing ARM64 console architecture facade"
+elif [ ! -f "$GUIDE" ]; then
+    status="not-ready"
+    reason="missing ARM64 WM QEMU guide"
+elif ! qemu_path="$(command -v "$QEMU_BIN" 2>/dev/null)"; then
+    status="not-ready"
+    reason="qemu-system-aarch64 not found"
+else
+    if "$QEMU_BIN" -machine help 2>/dev/null | grep -Eq '(^|[[:space:]])virt([[:space:],]|$)'; then
+        machine_virt="true"
+    fi
+    if "$QEMU_BIN" -device help 2>/dev/null | grep -Eq 'name "ramfb"'; then
+        ramfb_device="true"
+    fi
+    if [ "$machine_virt" != "true" ]; then
+        status="not-ready"
+        reason="qemu-system-aarch64 does not list virt machine"
+    elif [ "$ramfb_device" != "true" ]; then
+        status="not-ready"
+        reason="qemu-system-aarch64 does not list ramfb device"
+    else
+        set +e
+        dry_out="$(timeout "${QEMU_TIMEOUT}s" "$QEMU_BIN" \
+            -machine virt -cpu "$cpu" -accel "$accelerator" -m 384M \
+            -display none -serial none -monitor none \
+            -device ramfb -S 2>&1)"
+        dry_code=$?
+        set -e
+        if [ "$dry_code" -eq 124 ]; then
+            dry_run_parse="true"
+        elif printf '%s\n' "$dry_out" | grep -q 'gtk initialization failed'; then
+            dry_run_parse="true"
+        else
+            status="not-ready"
+            reason="qemu-system-aarch64 failed to parse virt/ramfb dry run: ${dry_out}"
+        fi
+    fi
+fi
+
+echo "arm64_wm_qemu_readiness: $status"
+echo "qemu_system: $QEMU_BIN"
+echo "qemu_path: ${qemu_path:-}"
+echo "machine_virt: $machine_virt"
+echo "ramfb_device: $ramfb_device"
+echo "dry_run_parse: $dry_run_parse"
+echo "host_os: $host_os"
+echo "host_machine: $host_machine"
+echo "accelerator: $accelerator"
+echo "cpu: $cpu"
+echo "entry: examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"
+echo "ramfb: src/os/kernel/arch/arm64/ramfb.spl"
+echo "console: src/os/kernel/arch/arm64/console.spl"
+echo "guide: doc/07_guide/platform/simpleos/simpleos_arm64_wm_qemu.md"
+if [ -n "$reason" ]; then
+    echo "reason: $reason"
+fi
+
+if [ "$status" = "ready" ]; then
+    exit 0
+fi
+exit 1

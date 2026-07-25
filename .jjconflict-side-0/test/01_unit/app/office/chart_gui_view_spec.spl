@@ -1,0 +1,231 @@
+"""Chart GUI view spec.
+
+chart_gui_view(sheet, chart_kind, value_range, labels_range, title, w, h)
+builds the chart GUI surface: a WidgetNode tree (rendered for real pixels by
+the CLI, one progress-bar widget per data point since the browser engine has
+no inline-SVG support) plus a plain-text pipe-separated dump (for testability
+without parsing HTML/widget trees). The dump's first line is
+"chart|<kind>|<title>"; each following line is
+"bar|<label>|<value>|<pct-of-max>". Ranges that are empty/unparseable or
+resolve to mismatched lengths fail closed with an "error|<reason>" line
+instead of crashing.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.file_formats.{recalculate_formula_cells}
+use app.office.gui.{chart_gui_view, chart_session_new, chart_session_view, chart_session_set_kind, chart_session_set_value_range, chart_gui_step}
+
+fn _dump_contains(haystack: text, needle: text) -> bool:
+    """Substring check via index_of's Option, matching sheet_gui_view_spec's
+    idiom (avoids a bare-boolean `==` assertion, which the test runner
+    silently no-ops)."""
+    val idx = haystack.index_of(needle)
+    match idx:
+        case Some(_):
+            return true
+        case _:
+            return false
+
+describe "chart_gui_view: header line":
+    """The dump always starts with a chart|<kind>|<title> header line."""
+
+    it "the first line carries the chart kind and title":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Q1")
+        sheet.set_value("B1", "5")
+        val view = chart_gui_view(sheet, "bar", "B1:B1", "A1:A1", "Sales", 80, 40)
+        val lines = view.text_dump.split("\n")
+        expect(lines[0]).to_equal("chart|bar|Sales")
+
+describe "chart_gui_view: per-point values":
+    """Each data point contributes one bar|<label>|<value>|<pct> line."""
+
+    it "each data point line carries its label, value, and pct-of-max":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        sheet.set_value("A2", "Gadget")
+        sheet.set_value("B2", "20")
+        val view = chart_gui_view(sheet, "bar", "B1:B2", "A1:A2", "T", 80, 40)
+        val lines = view.text_dump.split("\n")
+        expect(lines[1]).to_equal("bar|Widget|10|50")
+        expect(lines[2]).to_equal("bar|Gadget|20|100")
+
+    it "a formula cell's computed value appears, not the raw formula text":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Base")
+        sheet.set_value("B1", "10")
+        sheet.set_value("A2", "Sum")
+        sheet.set_value("B2", "=B1+5")
+        sheet = recalculate_formula_cells(sheet)
+        val view = chart_gui_view(sheet, "bar", "B1:B2", "A1:A2", "T", 80, 40)
+        expect(view.text_dump).to_contain("bar|Sum|15|100")
+        assert_false(_dump_contains(view.text_dump, "=B1+5"))
+
+describe "chart_gui_view: column kind":
+    """The "column" kind emits col|<label>|<value>|<pct-of-max> lines
+    (vertical bars whose HEIGHT is proportional to pct-of-max)."""
+
+    it "each column line carries its label, value, and pct-of-max":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        sheet.set_value("A2", "Gadget")
+        sheet.set_value("B2", "20")
+        val view = chart_gui_view(sheet, "column", "B1:B2", "A1:A2", "T", 80, 40)
+        val lines = view.text_dump.split("\n")
+        expect(lines[0]).to_equal("chart|column|T")
+        expect(lines[1]).to_equal("col|Widget|10|50")
+        expect(lines[2]).to_equal("col|Gadget|20|100")
+
+describe "chart_gui_view: pie kind":
+    """The "pie" kind emits pie|<label>|<value>|<share-of-total> lines
+    (a stacked strip whose segment WIDTHS are shares of the grand total)."""
+
+    it "each pie segment carries its label, value, and share-of-total":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        sheet.set_value("A2", "Gadget")
+        sheet.set_value("B2", "20")
+        val view = chart_gui_view(sheet, "pie", "B1:B2", "A1:A2", "T", 80, 40)
+        val lines = view.text_dump.split("\n")
+        expect(lines[0]).to_equal("chart|pie|T")
+        expect(lines[1]).to_equal("pie|Widget|10|33")
+        expect(lines[2]).to_equal("pie|Gadget|20|66")
+
+describe "chart_gui_view: pct-of-max":
+    """The point holding the max value always gets pct-of-max 100."""
+
+    it "the max value point gets exactly 100, others scale proportionally":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "a")
+        sheet.set_value("B1", "3")
+        sheet.set_value("A2", "b")
+        sheet.set_value("B2", "12")
+        sheet.set_value("A3", "c")
+        sheet.set_value("B3", "6")
+        val view = chart_gui_view(sheet, "bar", "B1:B3", "A1:A3", "T", 80, 40)
+        val lines = view.text_dump.split("\n")
+        expect(lines[1]).to_equal("bar|a|3|25")
+        expect(lines[2]).to_equal("bar|b|12|100")
+        expect(lines[3]).to_equal("bar|c|6|50")
+
+describe "chart_gui_view: empty range fails closed":
+    """An empty/unparseable range must not crash; it produces an error line."""
+
+    it "an unparseable value range produces an error line, no crash":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "x")
+        val view = chart_gui_view(sheet, "bar", "", "A1:A1", "T", 80, 40)
+        expect(view.text_dump).to_contain("error|empty-range")
+
+describe "chart_gui_view: mismatched range lengths fail closed":
+    """A labels range and value range of different lengths must not crash;
+    they produce an error line instead of misaligned data."""
+
+    it "a 2-cell labels range against a 1-cell value range produces an error line":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "x")
+        sheet.set_value("A2", "y")
+        sheet.set_value("B1", "10")
+        val view = chart_gui_view(sheet, "bar", "B1:B1", "A1:A2", "T", 80, 40)
+        expect(view.text_dump).to_contain("error|range-length-mismatch")
+
+describe "chart session":
+    """ChartGuiSession/chart_session_* (gui.spl) bring CHART GUI
+    INTERACTIVITY to the render-only chart_gui_view -- same session pattern
+    as PivotGuiSession: a value-type struct plus copy-return op functions.
+    chart_session_view is a thin wrapper over chart_gui_view (no render
+    duplication), so its dump shape is identical to chart_gui_view's own.
+    chart_gui_view never branches on its chart_kind argument (every point
+    always renders as one progress-bar widget), so "bar" is the only
+    chart_kind whose GUI rendering genuinely matches its name -- set_kind
+    honestly rejects every other kind (even ones chart.spl itself knows,
+    like "line") with last_error = "kind-not-in-gui" rather than silently
+    accepting a kind whose render would not match."""
+
+    it "chart_session_view renders the same dump as a direct chart_gui_view call":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        sheet.set_value("A2", "Gadget")
+        sheet.set_value("B2", "20")
+        val session = chart_session_new(sheet, "bar", "B1:B2", "A1:A2", "Sales")
+        val view = chart_session_view(session)
+        val direct = chart_gui_view(sheet, "bar", "B1:B2", "A1:A2", "Sales", 80, 40)
+        expect(view.text_dump).to_equal(direct.text_dump)
+
+    it "set_value_range changes the dump to the new column's hand-computed values/pcts":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        sheet.set_value("C1", "5")
+        sheet.set_value("A2", "Gadget")
+        sheet.set_value("B2", "20")
+        sheet.set_value("C2", "15")
+        var session = chart_session_new(sheet, "bar", "B1:B2", "A1:A2", "Sales")
+        session = chart_session_set_value_range(session, "C1:C2")
+        expect(session.last_error).to_equal("")
+        expect(session.value_range).to_equal("C1:C2")
+        val view = chart_session_view(session)
+        val lines = view.text_dump.split("\n")
+        # C1:C2 = 5,15 -> max=15: Widget=5/15*100=33 (int-truncated), Gadget=15/15*100=100
+        expect(lines[1]).to_equal("bar|Widget|5|33")
+        expect(lines[2]).to_equal("bar|Gadget|15|100")
+
+    it "set_value_range with an unparseable range leaves value_range unchanged and sets last_error":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        var session = chart_session_new(sheet, "bar", "B1:B1", "A1:A1", "Sales")
+        session = chart_session_set_value_range(session, "")
+        expect(session.value_range).to_equal("B1:B1")
+        expect(session.last_error).to_equal("empty-range")
+
+    it "set_kind with a chart.spl-known-but-GUI-unsupported kind leaves chart_kind unchanged and sets last_error":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        var session = chart_session_new(sheet, "bar", "B1:B1", "A1:A1", "Sales")
+        session = chart_session_set_kind(session, "line")
+        expect(session.chart_kind).to_equal("bar")
+        expect(session.last_error).to_equal("kind-not-in-gui")
+        session = chart_session_set_kind(session, "bar")
+        expect(session.chart_kind).to_equal("bar")
+        expect(session.last_error).to_equal("")
+
+    it "step key \"k\" cycles chart_kind through the GUI-supported kind list":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        val session = chart_session_new(sheet, "bar", "B1:B1", "A1:A1", "Sales")
+        val step1 = chart_gui_step(session, "k")
+        assert_false(step1.quit)
+        expect(step1.session.chart_kind).to_equal("column")
+        expect(step1.session.last_error).to_equal("")
+        val step2 = chart_gui_step(step1.session, "k")
+        expect(step2.session.chart_kind).to_equal("pie")
+        val step3 = chart_gui_step(step2.session, "k")
+        expect(step3.session.chart_kind).to_equal("bar")
+
+    it "step key \"t\" appends \"*\" to the title":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        val session = chart_session_new(sheet, "bar", "B1:B1", "A1:A1", "Sales")
+        val step = chart_gui_step(session, "t")
+        assert_false(step.quit)
+        expect(step.session.title).to_equal("Sales*")
+
+    it "step key \"q\" signals quit and leaves the session unchanged":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "Widget")
+        sheet.set_value("B1", "10")
+        val session = chart_session_new(sheet, "bar", "B1:B1", "A1:A1", "Sales")
+        val step = chart_gui_step(session, "q")
+        assert_true(step.quit)
+        expect(step.session.chart_kind).to_equal("bar")
+        expect(step.session.value_range).to_equal("B1:B1")
+        expect(step.session.title).to_equal("Sales")

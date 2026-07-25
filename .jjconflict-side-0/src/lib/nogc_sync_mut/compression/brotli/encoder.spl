@@ -1,0 +1,696 @@
+# brotli/encoder.spl — RFC 7932 brotli encoder
+#
+# Two emission paths:
+#   1. Uncompressed meta-block path (existing seed) — always works.
+#   2. Literal-only compressed meta-block path (new) — encodes when the input
+#      has 1..4 distinct byte values (NSYM<=4), allowing simple-prefix codes
+#      to encode each literal with a 0/1/2/3-bit codeword.
+#
+# Layout for the literal-only compressed path (single ISLAST=1 meta block):
+#   - WBITS=16 (1 bit, value 0)
+#   - ISLAST=1 (1 bit)            -- ISUNCOMPRESSED is omitted on last blocks
+#   - ISLASTEMPTY=0 (1 bit)       -- but we still need MNIBBLES + MLEN
+#   - MNIBBLES_code (2 bits)
+#   - MLEN-1 (mnibbles*4 bits, LSB-first)
+#   - NBLTYPESL=1 (VarLen 0): 1 bit "0"
+#   - NBLTYPESI=1: 1 bit "0"
+#   - NBLTYPESD=1: 1 bit "0"
+#   - NPOSTFIX=0 (2 bits "00"), NDIRECT=0 (4 bits "0000")
+#   - CMODE[0]=0 (2 bits "00")
+#   - NTREESL=1 (1 bit "0")
+#   - Literal simple-prefix code header (alphabet 256 -> 8-bit symbols)
+#   - Insert-and-copy simple-prefix code header (alphabet 704 -> 10-bit symbols)
+#   - NTREESD=1 (1 bit "0")
+#   - Distance simple-prefix code header (alphabet 64 -> 6-bit symbols)
+#   - One insert-and-copy command:
+#       * 0/1/2/3-bit ICP codeword (for the single ICP symbol we register)
+#       * (extra bits if the ICP symbol has insert/copy length extras)
+#       * insert_length literal codewords (each 0/1/2/3 bits)
+#       * COPY OMITTED per RFC §9.2 because total inserts == MLEN
+#   - <pad to byte>
+#
+# This produces a stream that the literal-only decoder can round-trip
+# byte-exactly, with no LZ77 backreference ever being executed.
+
+use std.nogc_sync_mut.compression.brotli.bit_writer.{
+    BrotliBitWriter,
+    brotli_bits_writer_init,
+    brotli_bits_write,
+    brotli_bits_pad_to_byte,
+    brotli_bits_write_bytes,
+    brotli_bits_writer_finish,
+    brotli_bits_write_huffman_code,
+    brotli_bits_write_simple_prefix,
+    brotli_bits_write_varlen_uint8,
+    brotli_bits_writer_byte_len
+}
+
+# Maximum payload bytes per uncompressed meta-block when MNIBBLES_code = 0
+# (MNIBBLES=4 nibbles = 16 bits for MLEN-1, so MLEN_max = 65536).
+val BROTLI_UNCOMPRESSED_BLOCK_MAX = 65536
+
+# Encode `data` as a brotli stream containing only uncompressed meta blocks.
+# Always succeeds for any input length; returns the byte buffer.
+fn brotli_encode_uncompressed(data: [u8]) -> [u8]:
+    var w = brotli_bits_writer_init()
+
+    # --- Stream header: WBITS = 16 (single 0 bit, RFC 7932 §9.1) ---
+    w = brotli_bits_write(w, 0, 1)
+
+    # --- Emit uncompressed meta blocks for the payload ---
+    val total = data.len()
+    var offset = 0
+    while offset < total:
+        val remaining = total - offset
+        var chunk = remaining
+        if chunk > BROTLI_UNCOMPRESSED_BLOCK_MAX:
+            chunk = BROTLI_UNCOMPRESSED_BLOCK_MAX
+        w = _emit_uncompressed_block(w, data, offset, chunk)
+        offset = offset + chunk
+
+    # --- Terminator: ISLAST=1, ISLASTEMPTY=1 ---
+    w = brotli_bits_write(w, 1, 1)  # ISLAST
+    w = brotli_bits_write(w, 1, 1)  # ISLASTEMPTY
+
+    brotli_bits_writer_finish(w)
+
+# Encode `data` using the smallest of:
+#   1. uncompressed meta block (always works)
+#   2. literal-only compressed meta block (when distinct <= 4)
+#   3. LZ77 single-backreference compressed meta block (when distinct <= 4
+#      AND the suffix data[p..n] is exactly a copy of data[p-d..n-d] for
+#      some short prefix p in 0..=7 and some distance d).
+fn brotli_encode(data: [u8]) -> [u8]:
+    val uncompressed = brotli_encode_uncompressed(data)
+    if data.len() == 0:
+        return uncompressed
+    var best = uncompressed
+    val literal_opt = _try_encode_literal_only(data)
+    match literal_opt:
+        None: pass_dn
+        Some(c):
+            if c.len() < best.len():
+                best = c
+    val lz77_opt = _try_encode_lz77(data)
+    match lz77_opt:
+        None: pass_dn
+        Some(c):
+            if c.len() < best.len():
+                best = c
+    best
+
+# Emit a single uncompressed meta block covering `data[offset..offset+chunk]`.
+# `chunk` must be in 1..=BROTLI_UNCOMPRESSED_BLOCK_MAX.
+fn _emit_uncompressed_block(w: BrotliBitWriter, data: [u8], offset: i64, chunk: i64) -> BrotliBitWriter:
+    var out = w
+    # ISLAST = 0
+    out = brotli_bits_write(out, 0, 1)
+    # MNIBBLES_code = 0 (⇒ MNIBBLES=4, 16-bit MLEN-1)
+    out = brotli_bits_write(out, 0, 2)
+    # MLEN-1 in 16 bits (LSB first), value range 0..65535
+    val mlen_m1 = chunk - 1
+    out = brotli_bits_write(out, mlen_m1, 16)
+    # ISUNCOMPRESSED = 1
+    out = brotli_bits_write(out, 1, 1)
+    # Pad to byte boundary (RFC 7932 §3.5)
+    out = brotli_bits_pad_to_byte(out)
+    # Copy the raw payload slice
+    val payload = _slice(data, offset, chunk)
+    out = brotli_bits_write_bytes(out, payload)
+    out
+
+# Helper: copy `len` bytes starting at `offset` out of `data` into a new [u8].
+# Uses rt_bytes_alloc for a preallocated buffer to avoid repeated push overhead.
+extern fn rt_bytes_alloc(len: i64) -> [u8]
+
+fn _slice(data: [u8], offset: i64, len: i64) -> [u8]:
+    var out = rt_bytes_alloc(len)
+    var i = 0
+    while i < len:
+        out[i] = data[offset + i]
+        i = i + 1
+    out
+
+# -------------------------------------------------------------------------
+# Literal-only compressed path
+# -------------------------------------------------------------------------
+
+# Try to emit `data` as a single ISLAST=1 compressed meta-block with simple
+# prefix codes.  Returns Some(bytes) on success, None when out of scope:
+#   - data.len() > 65536 (MLEN > MNIBBLES=4 capacity; we don't bother chunking)
+#   - data has more than 4 distinct byte values (NSYM>4 needs canonical Huffman)
+#   - data.len() > 22593 + 7 (ICP insert-length code overflow with our chosen ICP)
+#
+# We always pick the SAME insert-length code dynamically based on data.len().
+# We always pick the SAME copy-length code (CLC=0 -> base 2, no extra bits).
+# We always pick the SAME ICP "kind" = 4 (ins 0..7, cop 0..7, distance follows)
+# when ILC <= 7, kind = 6 when ILC in 8..15, kind = 8 when ILC in 16..23.
+fn _try_encode_literal_only(data: [u8]) -> Option<[u8]>:
+    val n = data.len()
+    if n == 0:
+        return None
+    if n > 65536:
+        return None
+    if n > 22593:
+        # Largest insert-length code 23 has base 22594 -- we'd need ILC>=23.
+        # Refuse; uncompressed path covers it.
+        return None
+
+    # Build distinct symbol set (sorted ascending).
+    var distinct: [i64] = []
+    var freq: [i64] = []
+    var k = 0
+    while k < 256:
+        freq.push(0)
+        k = k + 1
+    var i = 0
+    while i < n:
+        val b = data[i].to_i64()
+        if freq[b] == 0:
+            distinct.push(b)
+        freq[b] = freq[b] + 1
+        i = i + 1
+    if distinct.len() > 4:
+        return None
+    # Sort distinct ascending (small array, simple sort).
+    var a = 0
+    while a < distinct.len():
+        var b2 = a + 1
+        while b2 < distinct.len():
+            if distinct[a] > distinct[b2]:
+                val tmp = distinct[a]
+                distinct[a] = distinct[b2]
+                distinct[b2] = tmp
+            b2 = b2 + 1
+        a = a + 1
+
+    # Pick insert-length code so that base + extra fits n exactly.
+    val ilc_pick = _pick_insert_length_code(n)
+    if ilc_pick.code < 0:
+        return None
+    val ilc = ilc_pick.code
+    val ilc_extra_value = ilc_pick.extra_value
+    val ilc_extra_bits = _enc_insert_length_extra_bits(ilc)
+
+    # Copy-length code = 0: base 2, extra 0 bits.  This is just a placeholder
+    # because the copy is omitted per RFC §9.2.
+    val clc = 0
+    val cop_extra_bits = 0
+
+    # ICP kind: choose so (ins_kind, cop_kind, has_dist) covers our ILC range.
+    # ILC 0..7 -> ins_kind=0; 8..15 -> ins_kind=1; 16..23 -> ins_kind=2.
+    # CLC 0..7 -> cop_kind=0.  has_dist must be true so the decoder reads a
+    # distance code (which we provide).
+    var icp_kind = 0
+    if ilc <= 7:
+        icp_kind = 4              # ins 0..7, cop 0..7, has_dist
+    elif ilc <= 15:
+        icp_kind = 6              # ins 8..15, cop 0..7, has_dist
+    else:
+        icp_kind = 8              # ins 16..23, cop 0..7, has_dist
+    val ilc_low = ilc & 0x07
+    val clc_low = clc & 0x07
+    val icp_symbol = (icp_kind * 64) + (clc_low * 8) + ilc_low
+
+    # Distance code = 0 (placeholder, never executed).
+    val dist_symbol = 0
+
+    # --- Now emit the bitstream ---
+    var w = brotli_bits_writer_init()
+    # WBITS=16
+    w = brotli_bits_write(w, 0, 1)
+    # ISLAST=1, ISLASTEMPTY=0
+    w = brotli_bits_write(w, 1, 1)
+    w = brotli_bits_write(w, 0, 1)
+    # MNIBBLES_code=0 (4 nibbles = 16 bits for MLEN-1)
+    w = brotli_bits_write(w, 0, 2)
+    # MLEN-1 in 16 bits
+    w = brotli_bits_write(w, n - 1, 16)
+    # NBLTYPESL=1 (VarLen 0)
+    w = brotli_bits_write_varlen_uint8(w, 0)
+    w = brotli_bits_write_varlen_uint8(w, 0)
+    w = brotli_bits_write_varlen_uint8(w, 0)
+    # NPOSTFIX=0, NDIRECT=0, CMODE[0]=0
+    w = brotli_bits_write(w, 0, 2)
+    w = brotli_bits_write(w, 0, 4)
+    w = brotli_bits_write(w, 0, 2)
+    # NTREESL=1
+    w = brotli_bits_write_varlen_uint8(w, 0)
+    # Literal simple-prefix tree (8-bit alphabet)
+    w = brotli_bits_write_simple_prefix(w, 8, distinct)
+    # Insert-and-copy simple-prefix tree (10-bit alphabet, NSYM=1)
+    var icp_syms: [i64] = []
+    icp_syms.push(icp_symbol)
+    w = brotli_bits_write_simple_prefix(w, 10, icp_syms)
+    # NTREESD=1
+    w = brotli_bits_write_varlen_uint8(w, 0)
+    # Distance simple-prefix tree (6-bit alphabet, NSYM=1)
+    var dist_syms: [i64] = []
+    dist_syms.push(dist_symbol)
+    w = brotli_bits_write_simple_prefix(w, 6, dist_syms)
+
+    # --- Command emission ---
+    # ICP code: NSYM=1 -> 0-bit codeword (no bits emitted).
+    # Insert-length extra bits.
+    if ilc_extra_bits > 0:
+        w = brotli_bits_write(w, ilc_extra_value, ilc_extra_bits)
+    # Copy-length extra bits (ilc_extra_bits=0 always in our scheme).
+    if cop_extra_bits > 0:
+        w = brotli_bits_write(w, 0, cop_extra_bits)
+    # Insert literals: each via Huffman code from `distinct`.
+    val codeword = _build_lit_codes(distinct.len())
+    val codelen = _build_lit_lengths(distinct.len())
+    var j = 0
+    while j < n:
+        val byte = data[j].to_i64()
+        # Find index of byte in distinct (sorted ascending).
+        var idx = 0
+        var found = false
+        while idx < distinct.len():
+            if distinct[idx] == byte:
+                found = true
+                break
+            idx = idx + 1
+        if not found:
+            return None  # should never happen
+        w = brotli_bits_write_huffman_code(w, codeword[idx], codelen[idx])
+        j = j + 1
+    # Copy is omitted (out.len() == MLEN reached after inserts).
+    # No padding needed beyond writer-finish for a valid brotli stream.
+
+    Some(brotli_bits_writer_finish(w))
+
+# -------------------------------------------------------------------------
+# Insert-length code picker.
+#
+# Returns the ILC (0..23) whose base..base+(2^extra_bits)-1 covers `n`,
+# along with extra_value = n - base.  If no ILC fits (n > 22593+...), code=-1.
+# -------------------------------------------------------------------------
+struct _IlcPick:
+    code: i64
+    extra_value: i64
+
+fn _pick_insert_length_code(n: i64) -> _IlcPick:
+    val bases: [i64] = [
+        0, 1, 2, 3, 4, 5, 6, 8, 10, 14, 18, 26, 34, 50, 66, 98,
+        130, 194, 322, 578, 1090, 2114, 6210, 22594
+    ]
+    val extras: [i64] = [
+        0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5,
+        6, 7, 8, 9, 10, 12, 14, 24
+    ]
+    var c = 0
+    while c < 24:
+        val b = bases[c]
+        val e = extras[c]
+        val span = 1 << e
+        if n >= b and n < b + span:
+            return _IlcPick(code: c, extra_value: n - b)
+        c = c + 1
+    _IlcPick(code: -1, extra_value: 0)
+
+fn _enc_insert_length_extra_bits(code: i64) -> i64:
+    val extras: [i64] = [
+        0, 0, 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5,
+        6, 7, 8, 9, 10, 12, 14, 24
+    ]
+    extras[code]
+
+# -------------------------------------------------------------------------
+# Literal Huffman codes for NSYM in 1..4.
+# Codeword bits are MSB-first canonical; the writer reverses them for
+# byte-LSB-first emission.
+#
+# NSYM=1: lengths [0]; codes [0]
+# NSYM=2: lengths [1,1]; codes [0, 1] (smaller-symbol = code 0)
+# NSYM=3: lengths [1,2,2]; codes [0, 2 (10), 3 (11)]
+# NSYM=4: we use tree-select=0 (all 2-bit); lengths [2,2,2,2]; codes 0,1,2,3
+# -------------------------------------------------------------------------
+fn _build_lit_lengths(nsym: i64) -> [i64]:
+    if nsym == 1:
+        var v: [i64] = []
+        v.push(0)
+        return v
+    if nsym == 2:
+        var v: [i64] = []
+        v.push(1)
+        v.push(1)
+        return v
+    if nsym == 3:
+        var v: [i64] = []
+        v.push(1)
+        v.push(2)
+        v.push(2)
+        return v
+    var v: [i64] = []
+    v.push(2)
+    v.push(2)
+    v.push(2)
+    v.push(2)
+    v
+
+fn _build_lit_codes(nsym: i64) -> [i64]:
+    if nsym == 1:
+        var v: [i64] = []
+        v.push(0)
+        return v
+    if nsym == 2:
+        var v: [i64] = []
+        v.push(0)
+        v.push(1)
+        return v
+    if nsym == 3:
+        # LSB-first codeword for sequential simple-prefix decode:
+        #   idx 0: bit "0"           -> value 0, length 1
+        #   idx 1: bits "1","0"      -> bit0=1, bit1=0 = 1, length 2
+        #   idx 2: bits "1","1"      -> bit0=1, bit1=1 = 3, length 2
+        var v: [i64] = []
+        v.push(0)
+        v.push(1)
+        v.push(3)
+        return v
+    var v: [i64] = []
+    v.push(0)
+    v.push(1)
+    v.push(2)
+    v.push(3)
+    v
+
+# -------------------------------------------------------------------------
+# LZ77 single-backreference path (RFC 7932 §5/§7.3 + §4 distance code)
+#
+# Try to encode `data` as a single insert-and-copy command:
+#   - Insert literals: data[0..p]   (p in 0..=130 so we can reach ILC 16,
+#                                   the minimum insert bucket that unlocks
+#                                   the next decoder-supported copy bucket)
+#   - Copy:            data[p..n] from distance d   (no overlap detection)
+# For NSYM<=4 simple prefix codes we restrict to:
+#   - distinct(literals in data[0..p]) <= 4 (literal tree NSYM<=4)
+#   - ICP tree NSYM=1 (single command per meta block)
+#   - distance tree NSYM=1
+#   - kinds 4/5 for insert codes 0..7, kinds 6/7 for 8..15, kinds 8/9 for
+#     insert codes 16..23 with copy codes 0..15, and kind 10 for the next
+#     decoder-supported copy buckets (copy codes 16..19 -> copy lengths 70..261)
+# Returns Some(bytes) on success, None when no usable backreference found.
+# -------------------------------------------------------------------------
+
+# Encode a regular distance d (>= 1) into (distance_code, dextra_bits, dextra_value)
+# for NPOSTFIX=0, NDIRECT=0 per RFC 7932 §4.  Uses only "regular" codes 16..63
+# (we don't try the 0..15 ring-buffer optimization for the first command).
+struct _DistEnc:
+    code: i64
+    extra_bits: i64
+    extra_value: i64
+
+fn _encode_distance_regular(d: i64) -> Option<_DistEnc>:
+    # distance = ((2 + (hcode & 1)) << ndistbits) - 4 + dextra + 1
+    # where sym = 16 + hcode, ndistbits = 1 + (hcode >> 1).
+    # We try each sym in 16..63 and check if d falls in its range.
+    var sym = 16
+    while sym < 64:
+        val s16 = sym - 16
+        val ndistbits = 1 + (s16 >> 1)
+        val hcode = s16
+        val offset = ((2 + (hcode & 1)) << ndistbits) - 4
+        val span = 1 << ndistbits
+        # distance = offset + 1 + dextra, dextra in 0..span-1
+        val low = offset + 1
+        val high = offset + span
+        if d >= low and d <= high:
+            return Some(_DistEnc(code: sym, extra_bits: ndistbits, extra_value: d - low))
+        sym = sym + 1
+    None
+
+# Pick a copy-length code in the verified single-command subset.
+# Returns Some((cop_code, extra_bits, extra_value, cop_kind)) or None.
+struct _CopEnc:
+    code: i64
+    extra_bits: i64
+    extra_value: i64
+    cop_kind: i64
+
+fn _pick_copy_length_code(cop_len: i64) -> Option<_CopEnc>:
+    # Bases/extras for codes 0..18 in the verified subset:
+    #   cop_kind 0 covers codes 0..7   -> lengths 2..9
+    #   cop_kind 1 covers codes 8..15  -> lengths 10..69
+    #   cop_kind 2 covers codes 16..19 -> lengths 70..261 via ICP kind 10,
+    #                                     which in turn requires ins_code >= 16.
+    val bases: [i64] = [
+        2, 3, 4, 5, 6, 7, 8, 9,
+        10, 12, 14, 18, 22, 30, 38, 54, 70, 102, 134, 198
+    ]
+    val extras: [i64] = [
+        0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 5, 6
+    ]
+    var c = 0
+    while c < 20:
+        val b = bases[c]
+        val e = extras[c]
+        val span = 1 << e
+        if cop_len >= b and cop_len < b + span:
+            var kind = 0
+            if c >= 16:
+                kind = 2
+            elif c >= 8:
+                kind = 1
+            return Some(_CopEnc(code: c, extra_bits: e, extra_value: cop_len - b, cop_kind: kind))
+        c = c + 1
+    None
+
+fn _try_encode_lz77(data: [u8]) -> Option<[u8]>:
+    val n = data.len()
+    if n < 4:
+        return None
+    if n > 65536:
+        return None
+
+    # Distinct byte set (we need <= 4 for simple-prefix literal tree).
+    var distinct: [i64] = []
+    var freq: [i64] = []
+    var k = 0
+    while k < 256:
+        freq.push(0)
+        k = k + 1
+    var i = 0
+    while i < n:
+        val b = data[i].to_i64()
+        if freq[b] == 0:
+            distinct.push(b)
+        freq[b] = freq[b] + 1
+        i = i + 1
+    if distinct.len() > 4:
+        return None
+    # Sort distinct ascending.
+    var a = 0
+    while a < distinct.len():
+        var b2 = a + 1
+        while b2 < distinct.len():
+            if distinct[a] > distinct[b2]:
+                val tmp = distinct[a]
+                distinct[a] = distinct[b2]
+                distinct[b2] = tmp
+            b2 = b2 + 1
+        a = a + 1
+
+    # Find the smallest prefix length p (0..=130) and distance d (1..=p) such
+    # that data[p+i] == data[p+i-d] for all i in [0, n-p) AND cop_len = n-p
+    # is encodable in the verified copy subset (i.e. cop_len in 2..=261,
+    # where 70..261 additionally requires ins_code >= 16).
+    # We only use ordinary RFC §4 distances; among multiple matches this loop
+    # still prefers the earliest usable prefix, which keeps the emitted command
+    # bounded even when the first valid distance is larger than 7.
+    var best_p = -1
+    var best_d = 0
+    var p = 1
+    while p <= 130:
+        if p >= n:
+            break
+        val cop_len = n - p
+        if cop_len < 2:
+            p = p + 1
+            continue
+        if cop_len > 261:
+            p = p + 1
+            continue
+        var d = 1
+        while d <= p:
+            # Check data[p+i] == data[p+i-d] for all i in [0, cop_len)
+            var ok = true
+            var i2 = 0
+            while i2 < cop_len:
+                if data[p + i2] != data[p + i2 - d]:
+                    ok = false
+                    break
+                i2 = i2 + 1
+            if ok:
+                best_p = p
+                best_d = d
+                break
+            d = d + 1
+        if best_p >= 0:
+            break
+        p = p + 1
+    if best_p < 0:
+        return None
+
+    val ins_len = best_p
+    val cop_len = n - best_p
+    val dist = best_d
+
+    # Encode ICP using the single-command distance-following kinds the decoder
+    # already supports: 4/5 for ins 0..7, 6/7 for ins 8..15, 8/9 for ins 16..23
+    # with copy codes 0..15, and kind 10 for copy codes 16..19.
+    val ilc_pick = _pick_insert_length_code(ins_len)
+    if ilc_pick.code < 0:
+        return None
+    val ilc = ilc_pick.code
+    if ilc > 23:
+        return None
+    val ilc_extra_value = ilc_pick.extra_value
+    val ilc_extra_bits = _enc_insert_length_extra_bits(ilc)
+
+    # Encode copy length.
+    val cop_opt = _pick_copy_length_code(cop_len)
+    val cop_enc = match cop_opt:
+        None: return None
+        Some(c): c
+    val clc = cop_enc.code
+    val cop_extra_bits = cop_enc.extra_bits
+    val cop_extra_value = cop_enc.extra_value
+    val cop_kind = cop_enc.cop_kind
+
+    # Map (insert-kind, copy-kind) onto the RFC §5 kind groups we support.
+    var icp_kind = 4
+    if ilc <= 7:
+        if cop_kind == 1:
+            icp_kind = 5
+        elif cop_kind == 2:
+            return None
+    elif ilc <= 15:
+        icp_kind = 6
+        if cop_kind == 1:
+            icp_kind = 7
+        elif cop_kind == 2:
+            return None
+    else:
+        icp_kind = 8
+        if cop_kind == 1:
+            icp_kind = 9
+        elif cop_kind == 2:
+            icp_kind = 10
+    val ilc_low = ilc & 0x07
+    val clc_low = clc & 0x07
+    val icp_symbol = (icp_kind * 64) + (clc_low * 8) + ilc_low
+
+    # Encode distance.
+    val dist_opt = _encode_distance_regular(dist)
+    val dist_enc = match dist_opt:
+        None: return None
+        Some(d): d
+    val dist_symbol = dist_enc.code
+    val dist_extra_bits = dist_enc.extra_bits
+    val dist_extra_value = dist_enc.extra_value
+
+    # Build literal alphabet (only the literals in data[0..ins_len], <=4
+    # distinct).  We reuse the full distinct set so the prefix tree size is
+    # the same, but if ins_len == 0 we need a degenerate tree.  RFC §3.4
+    # requires NSYM >= 1 even if no literals are emitted; with NSYM=1 the
+    # codeword is 0 bits.
+    var lit_alphabet: [i64] = []
+    if ins_len == 0:
+        # Pick any byte (0) as the singleton — never written.
+        lit_alphabet.push(0)
+    else:
+        # Use only the bytes that actually appear in the insert prefix.
+        var lit_freq: [i64] = []
+        var z = 0
+        while z < 256:
+            lit_freq.push(0)
+            z = z + 1
+        var j = 0
+        while j < ins_len:
+            val b = data[j].to_i64()
+            if lit_freq[b] == 0:
+                lit_alphabet.push(b)
+            lit_freq[b] = lit_freq[b] + 1
+            j = j + 1
+        if lit_alphabet.len() > 4:
+            return None
+        # Sort ascending.
+        var x = 0
+        while x < lit_alphabet.len():
+            var y = x + 1
+            while y < lit_alphabet.len():
+                if lit_alphabet[x] > lit_alphabet[y]:
+                    val tmp = lit_alphabet[x]
+                    lit_alphabet[x] = lit_alphabet[y]
+                    lit_alphabet[y] = tmp
+                y = y + 1
+            x = x + 1
+
+    # --- Emit bitstream ---
+    var w = brotli_bits_writer_init()
+    # WBITS=16
+    w = brotli_bits_write(w, 0, 1)
+    # ISLAST=1, ISLASTEMPTY=0
+    w = brotli_bits_write(w, 1, 1)
+    w = brotli_bits_write(w, 0, 1)
+    # MNIBBLES_code=0 (4 nibbles = 16 bits for MLEN-1)
+    w = brotli_bits_write(w, 0, 2)
+    w = brotli_bits_write(w, n - 1, 16)
+    # NBLTYPESL=NBLTYPESI=NBLTYPESD=1 (VarLen 0)
+    w = brotli_bits_write_varlen_uint8(w, 0)
+    w = brotli_bits_write_varlen_uint8(w, 0)
+    w = brotli_bits_write_varlen_uint8(w, 0)
+    # NPOSTFIX=0, NDIRECT=0, CMODE[0]=0
+    w = brotli_bits_write(w, 0, 2)
+    w = brotli_bits_write(w, 0, 4)
+    w = brotli_bits_write(w, 0, 2)
+    # NTREESL=1
+    w = brotli_bits_write_varlen_uint8(w, 0)
+    # Literal simple-prefix tree
+    w = brotli_bits_write_simple_prefix(w, 8, lit_alphabet)
+    # Insert-and-copy simple-prefix tree (NSYM=1)
+    var icp_syms: [i64] = []
+    icp_syms.push(icp_symbol)
+    w = brotli_bits_write_simple_prefix(w, 10, icp_syms)
+    # NTREESD=1
+    w = brotli_bits_write_varlen_uint8(w, 0)
+    # Distance simple-prefix tree (NSYM=1)
+    var dist_syms: [i64] = []
+    dist_syms.push(dist_symbol)
+    w = brotli_bits_write_simple_prefix(w, 6, dist_syms)
+
+    # --- Command emission ---
+    # ICP: NSYM=1 -> 0-bit codeword.
+    # Insert-length extra bits.
+    if ilc_extra_bits > 0:
+        w = brotli_bits_write(w, ilc_extra_value, ilc_extra_bits)
+    # Copy-length extra bits.
+    if cop_extra_bits > 0:
+        w = brotli_bits_write(w, cop_extra_value, cop_extra_bits)
+    # Insert literals.
+    if ins_len > 0:
+        val codeword = _build_lit_codes(lit_alphabet.len())
+        val codelen = _build_lit_lengths(lit_alphabet.len())
+        var j = 0
+        while j < ins_len:
+            val byte = data[j].to_i64()
+            var idx = 0
+            var found = false
+            while idx < lit_alphabet.len():
+                if lit_alphabet[idx] == byte:
+                    found = true
+                    break
+                idx = idx + 1
+            if not found:
+                return None
+            w = brotli_bits_write_huffman_code(w, codeword[idx], codelen[idx])
+            j = j + 1
+    # Distance code (NSYM=1, 0 bits) + extras.
+    if dist_extra_bits > 0:
+        w = brotli_bits_write(w, dist_extra_value, dist_extra_bits)
+    # The copy itself is implicit (decoder walks the sliding window).
+
+    Some(brotli_bits_writer_finish(w))

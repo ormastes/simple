@@ -1,0 +1,38 @@
+"""Map validated PE images into an OS-backed Wine VM process space."""
+
+use common.pe_coff_header.{pe_entry_point_rva, pe_size_of_image}
+use common.wine_image_map.{wine_image_map_gate}
+use common.wine_vm_adapter.{
+    WineVmSpace,
+    wine_vm_allocate_thread_stack,
+    wine_vm_map_executable_image,
+    wine_vm_no_host_code_jump_gate
+}
+
+class WineImageVmMapResult:
+    ok: bool
+    state: text
+    space: WineVmSpace
+    entry_address: i64
+
+fn _result(ok: bool, state: text, space: WineVmSpace, entry_address: i64) -> WineImageVmMapResult:
+    WineImageVmMapResult(ok: ok, state: state, space: space, entry_address: entry_address)
+
+pub fn wine_image_map_into_vm_process(data: [u8], space: WineVmSpace, image_base: i64, stack_base: i64, stack_size: i64, guard_size: i64) -> WineImageVmMapResult:
+    val image_state = wine_image_map_gate(data)
+    if image_state != "ready":
+        return _result(false, image_state, space, 0)
+    val image_size = pe_size_of_image(data)
+    if image_size <= 0:
+        return _result(false, "bad-image-size", space, 0)
+    val image = wine_vm_map_executable_image(space, image_base, image_size)
+    if not image.ok:
+        return _result(false, image.state, space, 0)
+    val stack = wine_vm_allocate_thread_stack(image.space, stack_base, stack_size, guard_size)
+    if not stack.ok:
+        return _result(false, stack.state, image.space, 0)
+    val entry_address = image_base + pe_entry_point_rva(data)
+    val jump_state = wine_vm_no_host_code_jump_gate(stack.space, entry_address)
+    if jump_state != "ready":
+        return _result(false, jump_state, stack.space, entry_address)
+    _result(true, "mapped", stack.space, entry_address)

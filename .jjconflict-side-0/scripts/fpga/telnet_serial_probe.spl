@@ -1,0 +1,103 @@
+# Telnet probe client for serial-bridge system tests
+#
+# Connects to a telnet server (the telnet_serial_bridge), filters telnet IAC
+# negotiation with the bridge's own protocol filter, captures output for up
+# to CAPTURE_MS, and reports whether EXPECT appeared in the stream.
+#
+#   SIMPLE_EXECUTION_MODE=interpreter bin/simple run \
+#       scripts/fpga/telnet_serial_probe.spl 127.0.0.1 2326 20000 MARKER
+#
+# Markers on stdout: TELNET_PROBE_CONNECTED / TELNET_PROBE_RX_BEGIN/END /
+# TELNET_PROBE_STATUS=marker_seen|no_marker|connect_failed
+
+use std.nogc_sync_mut.io.telnet_serial_bridge.{bridge_filter_client_bytes}
+
+extern fn native_tcp_connect(addr: text) -> (i64, text, i64)
+extern fn native_tcp_read(handle: i64, max: i64) -> Result<[i64], text>
+extern fn native_tcp_write(handle: i64, data: [i64]) -> Result<i64, text>
+extern fn native_tcp_set_read_timeout(handle: i64, ms: i64) -> Result<i64, text>
+extern fn native_tcp_close(handle: i64) -> i64
+extern fn rt_bytes_to_text(data: [i64]) -> text
+extern fn rt_sleep_ms(ms: i64)
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_cli_get_args() -> [text]
+
+fn script_user_args(marker: text) -> [text]:
+    """Args after the script path — argv layout differs between
+    `bin/simple run script args...` and `simple_seed run script args...`."""
+    val raw = rt_cli_get_args()
+    var out: [text] = []
+    var seen_script = false
+    for a in raw:
+        if seen_script:
+            out.push(a)
+        else:
+            if a.contains(marker):
+                seen_script = true
+    out
+
+# NOTE: no explicit main() call — the interpreter auto-invokes fn main, and an
+# explicit module-level call makes it run twice.
+fn main():
+    val args = script_user_args("telnet_serial_probe.spl")
+    if args.len() < 4:
+        print("usage: telnet_serial_probe.spl HOST PORT CAPTURE_MS EXPECT")
+        return
+
+    val host = args[0]
+    val port = args[1]
+    val capture_ms = args[2].to_int()
+    val expect_text = args[3]
+    val addr = host + ":" + port
+
+    val (stream, local_addr, conn_err) = native_tcp_connect(addr)
+    if stream < 0:
+        print("TELNET_PROBE_STATUS=connect_failed addr={addr} code={conn_err}")
+        return
+
+    print("TELNET_PROBE_CONNECTED addr={addr}")
+    native_tcp_set_read_timeout(stream, 200)
+
+    # Wall-clock capture window: read timeouts can fire instantly in the
+    # interpreter (SO_RCVTIMEO not honored on all socket paths), so tick
+    # counting would expire the window too early.
+    val start_us = rt_time_now_unix_micros()
+    var received = ""
+    var waited = 0
+    var found = false
+    var closed = false
+    while (waited < capture_ms and
+           not found and
+           not closed):
+        val r = native_tcp_read(stream, 4096)
+        match r:
+            Ok(res):
+                val count = res[0]
+                if count == 0:
+                    closed = true
+                else:
+                    val payload = res[1]
+                    # Reuse the bridge filter to strip server IAC negotiation;
+                    # replies are not needed for a capture-only probe.
+                    val filtered = bridge_filter_client_bytes(payload)
+                    if filtered.clean.length() > 0:
+                        received = received + rt_bytes_to_text(filtered.clean)
+                        if received.contains(expect_text):
+                            found = true
+            Err(e):
+                # Read timeout tick — pace explicitly, measure by clock
+                rt_sleep_ms(100)
+        val now_us = rt_time_now_unix_micros()
+        waited = (now_us - start_us) / 1000
+
+    native_tcp_close(stream)
+    print("TELNET_PROBE_RX_BEGIN")
+    print(received)
+    print("TELNET_PROBE_RX_END")
+    if found:
+        print("TELNET_PROBE_STATUS=marker_seen")
+    else:
+        if closed:
+            print("TELNET_PROBE_STATUS=no_marker reason=server_closed")
+        else:
+            print("TELNET_PROBE_STATUS=no_marker waited_ms={waited}")

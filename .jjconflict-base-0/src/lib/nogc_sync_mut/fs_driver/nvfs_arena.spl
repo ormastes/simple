@@ -1,0 +1,358 @@
+# Stdlib-owned NVFS arena fixture surface.
+#
+# This keeps raw arena and BlockDevice-backed tests on std filesystem backend
+# contracts instead of importing the example NVFS package. It intentionally
+# covers the core arena verbs used by production-facing tests; richer
+# compression/dedup/example policy remains outside this std boundary.
+
+use std.fs_driver.block_device.{BlockDevice}
+use std.fs_driver.bytes_util.{alloc_zeroed_bytes}
+
+struct NvfsArenaMeta:
+    arena_id: i64
+    class_tag: i32
+    hint_bytes: i64
+    sealed: bool
+    discarded: bool
+    total_bytes: i64
+
+var _nvfs_arena_ids: [i64] = []
+var _nvfs_arena_metas: [NvfsArenaMeta] = []
+var _nvfs_arena_bufs: [[u8]] = []
+var _nvfs_arena_backend_kind: [i32] = []
+var _nvfs_arena_base_blocks: [i64] = []
+var _nvfs_arena_block_counts: [i64] = []
+var _nvfs_arena_next_id: i64 = 1
+var _nvfs_arena_dev_ready: bool = false
+var _nvfs_arena_dev_store: [BlockDevice] = []
+
+fn nvfs_arena_set_block_device(dev: BlockDevice):
+    if _nvfs_arena_dev_ready:
+        _nvfs_arena_dev_store[0] = dev
+    else:
+        _nvfs_arena_dev_store.push(dev)
+        _nvfs_arena_dev_ready = true
+
+fn nvfs_arena_has_block_device() -> bool:
+    _nvfs_arena_dev_ready
+
+fn _nvfs_arena_find_idx(arena_id: i64) -> i64:
+    var i: i64 = 0
+    while i < _nvfs_arena_ids.len() as i64:
+        if _nvfs_arena_ids[i as i32] == arena_id:
+            return i
+        i = i + 1
+    -1
+
+fn _nvfs_arena_is_nvme(idx: i64) -> bool:
+    if idx < 0 or idx >= _nvfs_arena_backend_kind.len() as i64:
+        return false
+    _nvfs_arena_backend_kind[idx as i32] == 1
+
+fn _nvfs_arena_sector_size() -> i64:
+    if not _nvfs_arena_dev_ready:
+        return 512
+    _nvfs_arena_dev_store[0].sector_size() as i64
+
+fn _nvfs_arena_data_lba(base_block: i64, byte_offset: i64, sector_size: i64) -> u64:
+    val data_start = base_block + 1
+    val sector_idx = byte_offset / sector_size
+    (data_start + sector_idx) as u64
+
+fn nvfs_raw_read_sector(lba: u64) -> [u8]:
+    if not _nvfs_arena_dev_ready:
+        return []
+    var dev = _nvfs_arena_dev_store[0]
+    val r = dev.read_sector(lba)
+    _nvfs_arena_dev_store[0] = dev
+    match r:
+        Ok(bytes):
+            bytes
+        Err(_):
+            []
+
+fn nvfs_raw_write_sector(lba: u64, data: [u8]) -> bool:
+    if not _nvfs_arena_dev_ready:
+        return false
+    var dev = _nvfs_arena_dev_store[0]
+    val r = dev.write_sector(lba, data)
+    _nvfs_arena_dev_store[0] = dev
+    r.is_ok()
+
+fn _nvfs_arena_append_nvme(idx: i64, data: [u8], total_so_far: i64) -> i64:
+    val base = _nvfs_arena_base_blocks[idx as i32]
+    val block_count = _nvfs_arena_block_counts[idx as i32]
+    val sector_size = _nvfs_arena_sector_size()
+    val max_data = (block_count - 1) * sector_size
+    val n = data.len() as i64
+    if total_so_far + n > max_data:
+        return -1
+
+    var src_idx: i64 = 0
+    while src_idx < n:
+        val sector_off = (total_so_far + src_idx) / sector_size
+        val intra = (total_so_far + src_idx) - sector_off * sector_size
+        val lba = _nvfs_arena_data_lba(base, sector_off * sector_size, sector_size)
+        var sec_buf = nvfs_raw_read_sector(lba)
+        if sec_buf.len() == 0:
+            sec_buf = alloc_zeroed_bytes(sector_size)
+        var pos = intra
+        while pos < sector_size and src_idx < n:
+            sec_buf[pos as i32] = data[src_idx as i32]
+            pos = pos + 1
+            src_idx = src_idx + 1
+        if not nvfs_raw_write_sector(lba, sec_buf):
+            return src_idx
+    n
+
+fn _nvfs_arena_read_nvme(idx: i64, off: i64, length: i64) -> [u8]:
+    val base = _nvfs_arena_base_blocks[idx as i32]
+    val sector_size = _nvfs_arena_sector_size()
+    val meta = _nvfs_arena_metas[idx as i32]
+    val avail = meta.total_bytes - off
+    if avail <= 0:
+        return []
+    val to_read = if length < avail: length else: avail
+    var out: [u8] = []
+    var dst: i64 = 0
+    while dst < to_read:
+        val sector_off = (off + dst) / sector_size
+        val intra = (off + dst) - sector_off * sector_size
+        val lba = _nvfs_arena_data_lba(base, sector_off * sector_size, sector_size)
+        val sec_buf = nvfs_raw_read_sector(lba)
+        if sec_buf.len() == 0:
+            return out
+        var pos = intra
+        while pos < sector_size and dst < to_read:
+            out.push(sec_buf[pos as i32])
+            pos = pos + 1
+            dst = dst + 1
+    out
+
+fn arena_create_impl(class_tag: i32, hint_bytes: i64) -> i64:
+    val arena_id = _nvfs_arena_next_id
+    _nvfs_arena_next_id = _nvfs_arena_next_id + 1
+    _nvfs_arena_ids.push(arena_id)
+    _nvfs_arena_metas.push(NvfsArenaMeta(
+        arena_id: arena_id,
+        class_tag: class_tag,
+        hint_bytes: hint_bytes,
+        sealed: false,
+        discarded: false,
+        total_bytes: 0
+    ))
+    _nvfs_arena_bufs.push([])
+    _nvfs_arena_backend_kind.push(0)
+    _nvfs_arena_base_blocks.push(-1)
+    _nvfs_arena_block_counts.push(0)
+    arena_id
+
+fn arena_create_nvme_impl(class_tag: i32, hint_bytes: i64, base_block: i64, block_count: i64) -> i64:
+    if not _nvfs_arena_dev_ready:
+        return -1
+    if block_count < 2:
+        return -1
+    val arena_id = arena_create_impl(class_tag, hint_bytes)
+    val idx = _nvfs_arena_find_idx(arena_id)
+    _nvfs_arena_backend_kind[idx as i32] = 1
+    _nvfs_arena_base_blocks[idx as i32] = base_block
+    _nvfs_arena_block_counts[idx as i32] = block_count
+    arena_id
+
+fn arena_append_impl(arena_id: i64, data: [u8], durability_tag: i32) -> i64:
+    val _durability_tag = durability_tag
+    val idx = _nvfs_arena_find_idx(arena_id)
+    if idx < 0:
+        return -1
+    val meta = _nvfs_arena_metas[idx as i32]
+    if meta.discarded:
+        return -3
+    if meta.sealed:
+        return -2
+
+    var written = data.len() as i64
+    if _nvfs_arena_is_nvme(idx):
+        written = _nvfs_arena_append_nvme(idx, data, meta.total_bytes)
+        if written < 0:
+            return -1
+    else:
+        var buf = _nvfs_arena_bufs[idx as i32]
+        for byte in data:
+            buf.push(byte)
+        _nvfs_arena_bufs[idx as i32] = buf
+
+    _nvfs_arena_metas[idx as i32] = NvfsArenaMeta(
+        arena_id: meta.arena_id,
+        class_tag: meta.class_tag,
+        hint_bytes: meta.hint_bytes,
+        sealed: meta.sealed,
+        discarded: meta.discarded,
+        total_bytes: meta.total_bytes + written
+    )
+    written
+
+fn arena_readv_impl(arena_id: i64, off: i64, buf_len: i64) -> [u8]:
+    val idx = _nvfs_arena_find_idx(arena_id)
+    if idx < 0:
+        return []
+    val meta = _nvfs_arena_metas[idx as i32]
+    if meta.discarded:
+        return []
+    if _nvfs_arena_is_nvme(idx):
+        return _nvfs_arena_read_nvme(idx, off, buf_len)
+    val src = _nvfs_arena_bufs[idx as i32]
+    val src_len = src.len() as i64
+    if off < 0 or off >= src_len:
+        return []
+    var end = off + buf_len
+    if end > src_len:
+        end = src_len
+    var out: [u8] = []
+    var i = off
+    while i < end:
+        out.push(src[i as i32])
+        i = i + 1
+    out
+
+fn arena_seal_impl(arena_id: i64, generation: i64) -> bool:
+    val _generation = generation
+    val idx = _nvfs_arena_find_idx(arena_id)
+    if idx < 0:
+        return false
+    val meta = _nvfs_arena_metas[idx as i32]
+    if meta.discarded:
+        return false
+    _nvfs_arena_metas[idx as i32] = NvfsArenaMeta(
+        arena_id: meta.arena_id,
+        class_tag: meta.class_tag,
+        hint_bytes: meta.hint_bytes,
+        sealed: true,
+        discarded: meta.discarded,
+        total_bytes: meta.total_bytes
+    )
+    true
+
+fn arena_discard_impl(arena_id: i64) -> bool:
+    val idx = _nvfs_arena_find_idx(arena_id)
+    if idx < 0:
+        return false
+    val meta = _nvfs_arena_metas[idx as i32]
+    _nvfs_arena_metas[idx as i32] = NvfsArenaMeta(
+        arena_id: meta.arena_id,
+        class_tag: meta.class_tag,
+        hint_bytes: meta.hint_bytes,
+        sealed: meta.sealed,
+        discarded: true,
+        total_bytes: meta.total_bytes
+    )
+    _nvfs_arena_bufs[idx as i32] = []
+    true
+
+fn arena_clone_range_impl(src: i64, src_off: i64, dst: i64, dst_off: i64, len: i64) -> i64:
+    val _dst_off = dst_off
+    val src_idx = _nvfs_arena_find_idx(src)
+    val dst_idx = _nvfs_arena_find_idx(dst)
+    if src_idx < 0 or dst_idx < 0:
+        return -1
+    val src_meta = _nvfs_arena_metas[src_idx as i32]
+    val dst_meta = _nvfs_arena_metas[dst_idx as i32]
+    if src_meta.discarded or dst_meta.discarded:
+        return -3
+    if dst_meta.sealed:
+        return -2
+    if src_off < 0 or src_off + len > src_meta.total_bytes:
+        return -4
+    val data = arena_readv_impl(src, src_off, len)
+    if data.len() as i64 != len:
+        return -4
+    arena_append_impl(dst, data, 0)
+
+fn arena_preferred_granule_impl(arena_id: i64) -> i64:
+    val idx = _nvfs_arena_find_idx(arena_id)
+    if idx < 0:
+        return -1
+    _nvfs_arena_sector_size()
+
+fn arena_total_bytes_impl(arena_id: i64) -> i64:
+    val idx = _nvfs_arena_find_idx(arena_id)
+    if idx < 0:
+        return -1
+    val meta = _nvfs_arena_metas[idx as i32]
+    if meta.discarded:
+        return -1
+    meta.total_bytes
+
+fn arena_is_sealed_impl(arena_id: i64) -> bool:
+    val idx = _nvfs_arena_find_idx(arena_id)
+    if idx < 0:
+        return false
+    _nvfs_arena_metas[idx as i32].sealed
+
+# --- Durability: persist the arena valid-length header on fsync ---
+#
+# The nvme data path (_nvfs_arena_append_nvme) already writes bytes THROUGH the
+# block device synchronously, so data is durable at append time. What was NOT
+# durable is the valid-length (`total_bytes`): it lived only in in-memory meta,
+# so a remount could not tell how many bytes of the region are real. The layout
+# already reserves LBA=base_block as a header sector (data starts at base_block+1
+# per _nvfs_arena_data_lba), but nothing was ever written there. fsync now commits
+# a magic + little-endian total_bytes into that reserved header sector, making the
+# length durable and recoverable via arena_durable_len_impl.
+#
+# ponytail: this only makes the ALREADY write-through nvme-backed arena's length
+# metadata durable. The default kind-0 in-memory arena stays volatile (making it
+# durable needs a block-allocation policy, out of scope), fsync is honestly false
+# there, and dbfs/vfs still do not route file writes through nvme arenas nor call
+# fsync. Full journaling / crash-consistent metadata is deferred.
+
+# Commit the arena valid-length into the reserved header sector (LBA=base_block).
+# Returns true only for a device-backed arena that was actually persisted.
+fn arena_fsync_impl(arena_id: i64) -> bool:
+    val idx = _nvfs_arena_find_idx(arena_id)
+    if idx < 0:
+        return false
+    val meta = _nvfs_arena_metas[idx as i32]
+    if meta.discarded:
+        return false
+    if not _nvfs_arena_is_nvme(idx):
+        return false
+    val base = _nvfs_arena_base_blocks[idx as i32]
+    if base < 0:
+        return false
+    val sector_size = _nvfs_arena_sector_size()
+    var hdr = alloc_zeroed_bytes(sector_size)
+    hdr[0] = 78
+    hdr[1] = 86
+    hdr[2] = 70
+    hdr[3] = 49
+    val total = meta.total_bytes
+    hdr[4] = (total & 0xFF) as u8
+    hdr[5] = ((total >> 8) & 0xFF) as u8
+    hdr[6] = ((total >> 16) & 0xFF) as u8
+    hdr[7] = ((total >> 24) & 0xFF) as u8
+    hdr[8] = ((total >> 32) & 0xFF) as u8
+    hdr[9] = ((total >> 40) & 0xFF) as u8
+    hdr[10] = ((total >> 48) & 0xFF) as u8
+    hdr[11] = ((total >> 56) & 0xFF) as u8
+    nvfs_raw_write_sector(base as u64, hdr)
+
+# Recover a durably-committed arena length from the device header sector.
+# Returns -1 when the header carries no valid magic (nothing was fsync'd yet).
+fn arena_durable_len_impl(base_block: i64) -> i64:
+    if base_block < 0:
+        return -1
+    val sec = nvfs_raw_read_sector(base_block as u64)
+    if (sec.len() as i64) < 12:
+        return -1
+    if sec[0].to_i64() != 78 or sec[1].to_i64() != 86 or sec[2].to_i64() != 70 or sec[3].to_i64() != 49:
+        return -1
+    var v: i64 = 0
+    v = v | (sec[4].to_i64() << 0)
+    v = v | (sec[5].to_i64() << 8)
+    v = v | (sec[6].to_i64() << 16)
+    v = v | (sec[7].to_i64() << 24)
+    v = v | (sec[8].to_i64() << 32)
+    v = v | (sec[9].to_i64() << 40)
+    v = v | (sec[10].to_i64() << 48)
+    v = v | (sec[11].to_i64() << 56)
+    v

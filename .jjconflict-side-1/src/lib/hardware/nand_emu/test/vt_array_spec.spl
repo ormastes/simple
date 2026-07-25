@@ -1,0 +1,287 @@
+#![allow(primitive_api)]
+
+# ============================================================================
+# nand_emu — vt_array spec (Vt byte array, per-cell seed, page/block meta)
+# ============================================================================
+#
+# Oracles are absolute: known indices/inputs are checked against known,
+# precomputed values (never modelA == modelA self-comparison). Every `it`
+# block is self-contained (fresh geometry/array per block) — no state is
+# shared across `it` blocks via describe-level locals.
+#
+# Source: doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md
+#   §3.1 Vt encoding, §3.3 per-cell seed, §4.1 Vt RAM sizing, Appendix A layout.
+# ============================================================================
+
+use std.nogc_sync_mut.spec.{describe, it, expect}
+use hardware.nand_emu.nand_types.{
+    NeProfile, NePageMeta, NeBlockMeta,
+    ne_vt_erase_mean, ne_page_meta_new, ne_block_meta_new
+}
+use hardware.nand_emu.geometry.{ne_profile_geometry, ne_make_geometry}
+use hardware.nand_emu.vt_array.{
+    ne_vt_ram_bytes, ne_vt_array_new, ne_vt_get, ne_vt_set,
+    ne_splitmix32, ne_cell_seed,
+    ne_page_meta_get, ne_page_meta_set, ne_block_meta_get, ne_block_meta_set
+}
+
+fn main():
+
+    # ------------------------------------------------------------------
+    # ne_vt_array_new — sizing + erased-mean fill
+    # ------------------------------------------------------------------
+    describe("ne_vt_array_new"):
+        it("allocates the exact S1 Vt RAM size, filled with the erased-mean code"):
+            """doc §4.1: S1 Vt RAM = 528 * 8 * 32 = 135168 bytes. doc §3.1: a
+            freshly-erased chip's cells sit at the erased-lobe mean, code 88
+            (-1.00 V). Every sampled cell -- first, an interior one, and the
+            very last -- must read exactly 88, never garbage or zero."""
+            val geo = ne_profile_geometry(NeProfile.S1)
+            val vt = ne_vt_array_new(geo)
+            expect(vt.len()).to_equal(135168)
+            expect(vt.len()).to_equal(ne_vt_ram_bytes(geo))
+            expect(ne_vt_get(vt, 0)).to_equal(88)
+            expect(ne_vt_get(vt, 1)).to_equal(88)
+            expect(ne_vt_get(vt, 64)).to_equal(88)
+            expect(ne_vt_get(vt, 70000)).to_equal(88)
+            expect(ne_vt_get(vt, 135167)).to_equal(88)
+            expect(ne_vt_get(vt, 88)).to_equal(ne_vt_erase_mean())
+
+        it("sizes a small custom geometry to page_bytes * 8 * total_pages"):
+            """8-byte pages * 8 bits/cell * 4 pages (2 pages/blk * 2 blocks)
+            = 256 cells -- checks ne_vt_array_new against a non-S1 geometry
+            too, not just the one profile table entry."""
+            val geo = ne_make_geometry(8, 1, 2, 2)
+            val vt = ne_vt_array_new(geo)
+            expect(vt.len()).to_equal(256)
+            expect(ne_vt_get(vt, 0)).to_equal(88)
+            expect(ne_vt_get(vt, 255)).to_equal(88)
+
+    # ------------------------------------------------------------------
+    # ne_vt_get / ne_vt_set — round-trip + neighbor isolation
+    # ------------------------------------------------------------------
+    describe("ne_vt_get / ne_vt_set round-trip"):
+        it("reads back exactly the code that was written, at the written index"):
+            """A cell programmed to code 200 must read back 200 -- not 88
+            (unwritten), not clamped, not off-by-one."""
+            val geo = ne_make_geometry(8, 1, 2, 2)
+            val vt = ne_vt_array_new(geo)
+            val written = ne_vt_set(vt, 10, 200)
+            expect(ne_vt_get(written, 10)).to_equal(200)
+
+        it("leaves neighboring cells untouched by a single-cell write"):
+            """Writing index 10 must not perturb index 9 or index 11 -- both
+            stay at the erased-mean 88."""
+            val geo = ne_make_geometry(8, 1, 2, 2)
+            val vt = ne_vt_array_new(geo)
+            val written = ne_vt_set(vt, 10, 200)
+            expect(ne_vt_get(written, 9)).to_equal(88)
+            expect(ne_vt_get(written, 11)).to_equal(88)
+
+        it("does not mutate the original array (arrays are value types)"):
+            """ne_vt_set must return a NEW array; the array passed in stays
+            at the erased-mean 88 at the written index."""
+            val geo = ne_make_geometry(8, 1, 2, 2)
+            val vt = ne_vt_array_new(geo)
+            val written = ne_vt_set(vt, 10, 200)
+            expect(ne_vt_get(vt, 10)).to_equal(88)
+            expect(ne_vt_get(written, 10)).to_equal(200)
+
+        it("wraps a code above the byte range (261 mod 256 = 5)"):
+            """A code of 261 (0x105) must wrap into the byte range: 261 & 0xFF
+            = 5, matching a real 8-bit storage cell's overflow behavior."""
+            val geo = ne_make_geometry(8, 1, 2, 2)
+            val vt = ne_vt_array_new(geo)
+            val written = ne_vt_set(vt, 0, 261)
+            expect(ne_vt_get(written, 0)).to_equal(5)
+
+    # ------------------------------------------------------------------
+    # Bounds-checked behavior — an absolute, documented contract
+    # ------------------------------------------------------------------
+    describe("bounds violation behavior"):
+        it("reads 0 for a negative index"):
+            val geo = ne_make_geometry(8, 1, 2, 2)
+            val vt = ne_vt_array_new(geo)
+            expect(ne_vt_get(vt, -1)).to_equal(0)
+
+        it("reads 0 for an index at (and past) the array length"):
+            """Length is 256, so valid indices are 0..255; 256 and 999 are
+            both out of bounds."""
+            val geo = ne_make_geometry(8, 1, 2, 2)
+            val vt = ne_vt_array_new(geo)
+            expect(ne_vt_get(vt, 256)).to_equal(0)
+            expect(ne_vt_get(vt, 999)).to_equal(0)
+
+        it("leaves the array unchanged when writing a negative index"):
+            val geo = ne_make_geometry(8, 1, 2, 2)
+            val vt = ne_vt_array_new(geo)
+            val written = ne_vt_set(vt, -1, 200)
+            expect(written.len()).to_equal(256)
+            expect(ne_vt_get(written, 0)).to_equal(88)
+            expect(ne_vt_get(written, 255)).to_equal(88)
+
+        it("leaves the array unchanged when writing past the array length"):
+            val geo = ne_make_geometry(8, 1, 2, 2)
+            val vt = ne_vt_array_new(geo)
+            val written = ne_vt_set(vt, 999, 200)
+            expect(written.len()).to_equal(256)
+            expect(ne_vt_get(written, 255)).to_equal(88)
+
+    # ------------------------------------------------------------------
+    # ne_splitmix32 — determinism + avalanche, absolute reference values
+    # ------------------------------------------------------------------
+    describe("ne_splitmix32"):
+        it("is deterministic: the same input always produces the same output"):
+            """doc §3.3: 'the same cell always gets the same intrinsic
+            offset' -- calling twice with input 12345 must yield the exact
+            same mixed value both times."""
+            val a = ne_splitmix32(12345)
+            val b = ne_splitmix32(12345)
+            expect(a).to_equal(b)
+            expect(a).to_equal(3283241497)
+
+        it("matches the canonical 32-bit splitmix reference at x=0"):
+            """Absolute oracle from an independent reference implementation
+            of the standard splitmix32 mixing function (golden-ratio add,
+            two xor-shift-multiply rounds, final xor-shift)."""
+            expect(ne_splitmix32(0)).to_equal(1684164658)
+
+        it("matches the canonical 32-bit splitmix reference at x=1"):
+            expect(ne_splitmix32(1)).to_equal(1580013426)
+
+        it("avalanches: adjacent inputs (0 and 1) produce very different outputs"):
+            """A one-bit change to the input must not produce a one-bit (or
+            small) change in the output -- that is the point of an avalanche
+            mixer. 1684164658 vs 1580013426 differ across many bit
+            positions, not just the low bit."""
+            val out0 = ne_splitmix32(0)
+            val out1 = ne_splitmix32(1)
+            assert_not_equal(out0, out1)
+
+        it("stays within the 32-bit unsigned domain for a large input"):
+            """Even a large i64 input must fold into [0, 2^32) -- doc §3.3
+            model is fixed at 32 bits."""
+            val out = ne_splitmix32(999999)
+            expect(out).to_equal(2485641282)
+            expect(out).to_be_greater_than(-1)
+            expect(out).to_be_less_than(4294967296)
+
+    # ------------------------------------------------------------------
+    # ne_cell_seed — doc §3.3 formula, absolute reference values
+    # ------------------------------------------------------------------
+    describe("ne_cell_seed"):
+        it("computes seed(cell) = splitmix32(row ^ (col << 3) ^ bit ^ chip_seed)"):
+            """doc §3.3 worked example: row=3, col=5, bit=2, chip_seed=0.
+            3 ^ (5 << 3) ^ 2 ^ 0 = 3 ^ 40 ^ 2 = 41, and splitmix32(41) is the
+            precomputed reference value below."""
+            expect(ne_cell_seed(3, 5, 2, 0)).to_equal(1910801865)
+            expect(ne_cell_seed(3, 5, 2, 0)).to_equal(ne_splitmix32(41))
+
+        it("is deterministic for the same cell address"):
+            """Same (row, col, bit, chip_seed) in -> same seed out, every time."""
+            val first = ne_cell_seed(3, 5, 2, 0)
+            val second = ne_cell_seed(3, 5, 2, 0)
+            expect(first).to_equal(second)
+
+        it("gives a different seed when only the bit index changes"):
+            """doc §3.3: per-cell variation is derived from the full
+            (row, col, bit, chip_seed) tuple, so two bits of the same byte
+            (bit=2 vs bit=3) must get distinct seeds."""
+            val seed_bit2 = ne_cell_seed(3, 5, 2, 0)
+            val seed_bit3 = ne_cell_seed(3, 5, 3, 0)
+            expect(seed_bit3).to_equal(3986536727)
+            assert_not_equal(seed_bit2, seed_bit3)
+
+        it("gives a different seed when only chip_seed changes ('a different die')"):
+            """doc §3.3: 'CHIP_SEED is a register: change it and you get a
+            different physical die with the same firmware.'"""
+            val seed_chip0 = ne_cell_seed(3, 5, 2, 0)
+            val seed_chip7 = ne_cell_seed(3, 5, 2, 7)
+            expect(seed_chip7).to_equal(3744497931)
+            assert_not_equal(seed_chip0, seed_chip7)
+
+    # ------------------------------------------------------------------
+    # Per-page metadata array — round-trip + bounds
+    # ------------------------------------------------------------------
+    describe("ne_page_meta_get / ne_page_meta_set"):
+        it("reads all-zero counters for a freshly-erased page's metadata"):
+            val metas = [ne_page_meta_new(), ne_page_meta_new(), ne_page_meta_new(), ne_page_meta_new()]
+            val m = ne_page_meta_get(metas, 1)
+            expect(m.rd_count).to_equal(0)
+            expect(m.pd_count).to_equal(0)
+            expect(m.nop_count).to_equal(0)
+            expect(m.flags).to_equal(0)
+
+        it("round-trips a written page meta at the target row"):
+            """doc §3.4: rd_count/pd_count drive lazy retention/disturb drift.
+            Writing row 1 to rd_count=42 must read back exactly 42 at row 1."""
+            val metas = [ne_page_meta_new(), ne_page_meta_new(), ne_page_meta_new(), ne_page_meta_new()]
+            val updated = NePageMeta(last_prog_time: 0, rd_count: 42, pd_count: 0, nop_count: 0, flags: 0)
+            val written = ne_page_meta_set(metas, 1, updated)
+            expect(ne_page_meta_get(written, 1).rd_count).to_equal(42)
+
+        it("leaves neighboring rows untouched by a single-row write"):
+            val metas = [ne_page_meta_new(), ne_page_meta_new(), ne_page_meta_new(), ne_page_meta_new()]
+            val updated = NePageMeta(last_prog_time: 0, rd_count: 42, pd_count: 0, nop_count: 0, flags: 0)
+            val written = ne_page_meta_set(metas, 1, updated)
+            expect(ne_page_meta_get(written, 0).rd_count).to_equal(0)
+            expect(ne_page_meta_get(written, 2).rd_count).to_equal(0)
+
+        it("reads a fresh all-zero meta for an out-of-bounds row"):
+            val metas = [ne_page_meta_new(), ne_page_meta_new(), ne_page_meta_new(), ne_page_meta_new()]
+            val m = ne_page_meta_get(metas, 999)
+            expect(m.rd_count).to_equal(0)
+            expect(m.nop_count).to_equal(0)
+
+        it("leaves the array unchanged when writing an out-of-bounds row"):
+            val metas = [ne_page_meta_new(), ne_page_meta_new(), ne_page_meta_new(), ne_page_meta_new()]
+            val updated = NePageMeta(last_prog_time: 0, rd_count: 42, pd_count: 0, nop_count: 0, flags: 0)
+            val written = ne_page_meta_set(metas, 999, updated)
+            expect(written.len()).to_equal(4)
+            expect(ne_page_meta_get(written, 1).rd_count).to_equal(0)
+
+    # ------------------------------------------------------------------
+    # Per-block metadata array — round-trip + bounds
+    # ------------------------------------------------------------------
+    describe("ne_block_meta_get / ne_block_meta_set"):
+        it("reads a good, unworn block for freshly-created metadata"):
+            val blocks = [ne_block_meta_new(), ne_block_meta_new(), ne_block_meta_new()]
+            val b = ne_block_meta_get(blocks, 0)
+            expect(b.pe_cycles).to_equal(0)
+            expect(b.bad_flag).to_equal(false)
+
+        it("round-trips a written block meta at the target block"):
+            """doc §7.3 wear model keys off pe_cycles. Writing block 2 to
+            pe_cycles=30000 (the Appendix B worked-example wear level) must
+            read back exactly 30000 at block 2."""
+            val blocks = [ne_block_meta_new(), ne_block_meta_new(), ne_block_meta_new()]
+            val updated = NeBlockMeta(pe_cycles: 30000, last_erase_time: 0, bad_flag: false, edc_state: 0, reserved: 0)
+            val written = ne_block_meta_set(blocks, 2, updated)
+            expect(ne_block_meta_get(written, 2).pe_cycles).to_equal(30000)
+
+        it("leaves neighboring blocks untouched by a single-block write"):
+            val blocks = [ne_block_meta_new(), ne_block_meta_new(), ne_block_meta_new()]
+            val updated = NeBlockMeta(pe_cycles: 30000, last_erase_time: 0, bad_flag: false, edc_state: 0, reserved: 0)
+            val written = ne_block_meta_set(blocks, 2, updated)
+            expect(ne_block_meta_get(written, 0).pe_cycles).to_equal(0)
+            expect(ne_block_meta_get(written, 1).pe_cycles).to_equal(0)
+
+        it("marks a block bad and reads the flag back"):
+            val blocks = [ne_block_meta_new(), ne_block_meta_new(), ne_block_meta_new()]
+            val bad = NeBlockMeta(pe_cycles: 0, last_erase_time: 0, bad_flag: true, edc_state: 0, reserved: 0)
+            val written = ne_block_meta_set(blocks, 0, bad)
+            expect(ne_block_meta_get(written, 0).bad_flag).to_equal(true)
+            expect(ne_block_meta_get(written, 1).bad_flag).to_equal(false)
+
+        it("reads a fresh good/unworn block for an out-of-bounds index"):
+            val blocks = [ne_block_meta_new(), ne_block_meta_new(), ne_block_meta_new()]
+            val b = ne_block_meta_get(blocks, 999)
+            expect(b.pe_cycles).to_equal(0)
+            expect(b.bad_flag).to_equal(false)
+
+        it("leaves the array unchanged when writing an out-of-bounds block"):
+            val blocks = [ne_block_meta_new(), ne_block_meta_new(), ne_block_meta_new()]
+            val updated = NeBlockMeta(pe_cycles: 30000, last_erase_time: 0, bad_flag: false, edc_state: 0, reserved: 0)
+            val written = ne_block_meta_set(blocks, 999, updated)
+            expect(written.len()).to_equal(3)
+            expect(ne_block_meta_get(written, 2).pe_cycles).to_equal(0)

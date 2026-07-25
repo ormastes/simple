@@ -1,0 +1,89 @@
+use std.io_runtime.{file_exists, file_size, read_file, list_dir, is_dir}
+
+pub class JsonlWatcher:
+    root: text
+    paths: [text]
+    offsets: [i64]
+
+    static fn with_dir(root: text) -> JsonlWatcher:
+        var watcher = JsonlWatcher(root: root, paths: [], offsets: [])
+        watcher.scan_existing_from_eof()
+        watcher
+
+    me watched_count() -> i64:
+        self.paths.len()
+
+    me poll() -> [text]:
+        self.discover_new_files()
+        var events: [text] = []
+        var i: i64 = 0
+        while i < self.paths.len():
+            val path = self.paths[i]
+            if file_exists(path):
+                val size = file_size(path)
+                if size < self.offsets[i]:
+                    self.offsets[i] = 0
+                if size > self.offsets[i]:
+                    val content = read_file(path) ?? ""
+                    val tail = content.slice(self.offsets[i], content.len())
+                    val complete_len = _complete_jsonl_tail_len(tail)
+                    if complete_len > 0:
+                        val complete_tail = tail.slice(0, complete_len)
+                        for raw in complete_tail.split("\n"):
+                            val line = raw.trim()
+                            if line != "":
+                                events.push(line)
+                        self.offsets[i] = self.offsets[i] + complete_len
+            i = i + 1
+        events
+
+    me scan_existing_from_eof():
+        val found = _jsonl_files(self.root)
+        for path in found:
+            if not self._has_path(path):
+                self.paths.push(path)
+                self.offsets.push(file_size(path))
+
+    me discover_new_files():
+        val found = _jsonl_files(self.root)
+        for path in found:
+            if not self._has_path(path):
+                self.paths.push(path)
+                self.offsets.push(file_size(path))
+
+    fn _has_path(path: text) -> bool:
+        for existing in self.paths:
+            if existing == path:
+                return true
+        false
+
+fn _join_path(base: text, name: text) -> text:
+    if base.ends_with("/"):
+        return base + name
+    base + "/" + name
+
+fn _complete_jsonl_tail_len(tail: text) -> i64:
+    var last_newline: i64 = -1
+    var i: i64 = 0
+    while i < tail.len():
+        if tail[i] == "\n":
+            last_newline = i
+        i = i + 1
+    if last_newline < 0:
+        return 0
+    last_newline + 1
+
+fn _jsonl_files(root: text) -> [text]:
+    var out: [text] = []
+    if root.trim() == "" or not is_dir(root):
+        return out
+    for project in list_dir(root):
+        val project_path = _join_path(root, project)
+        if not is_dir(project_path):
+            continue
+        for entry in list_dir(project_path):
+            if entry.ends_with(".jsonl"):
+                out.push(_join_path(project_path, entry))
+    out
+
+export JsonlWatcher

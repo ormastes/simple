@@ -1,0 +1,74 @@
+#!/bin/sh
+set -e
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+VHDL_DIR="$ROOT_DIR/build/vhdl/rv32"
+WORK_DIR="$ROOT_DIR/build/ghdl/rv32"
+TB_DIR="$ROOT_DIR/examples/09_embedded/fpga_riscv/rtl"
+PHASE="${1:---analyze}"
+
+command -v ghdl >/dev/null 2>&1 || { echo "ERROR: ghdl not found in PATH"; exit 1; }
+mkdir -p "$WORK_DIR"
+
+echo "=== GHDL RV32 Validation ==="
+echo "Phase: $PHASE"
+
+for file in rv32i_pkg rv32i_decode rv32i_regfile rv32_core rv32_exec_core soc_top_rv32_sim; do
+    path="$VHDL_DIR/$file.vhd"
+    [ -f "$path" ] || { echo "ERROR missing $path"; exit 1; }
+    printf "  Analyzing %s.vhd ... " "$file"
+    out="$(ghdl -a --std=08 --workdir="$WORK_DIR" "$path" 2>&1)" || true
+    if echo "$out" | grep -q ":error:"; then
+        echo "FAIL"
+        echo "$out" | tail -40
+        exit 1
+    fi
+    echo "OK"
+done
+
+[ "$PHASE" = "--analyze" ] && exit 0
+
+printf "  Elaborating soc_top_rv32_sim ... "
+out="$(ghdl -e --std=08 --workdir="$WORK_DIR" soc_top_rv32_sim 2>&1)" || true
+if echo "$out" | grep -q "error"; then
+    echo "FAIL"
+    echo "$out" | tail -40
+    exit 1
+fi
+echo "OK"
+
+[ "$PHASE" = "--elaborate" ] && exit 0
+
+tb="$TB_DIR/tb_rv32_wb_soc_smoke.vhd"
+printf "  Analyzing testbench ... "
+out="$(ghdl -a --std=08 --workdir="$WORK_DIR" "$tb" 2>&1)" || true
+if echo "$out" | grep -q ":error:"; then
+    echo "FAIL"
+    echo "$out" | tail -40
+    exit 1
+fi
+echo "OK"
+
+printf "  Elaborating testbench ... "
+out="$(ghdl -e --std=08 --workdir="$WORK_DIR" tb_rv32_wb_soc_smoke 2>&1)" || true
+if echo "$out" | grep -q "error"; then
+    echo "FAIL"
+    echo "$out" | tail -40
+    exit 1
+fi
+echo "OK"
+
+printf "  Running simulation ... "
+sim="$(ghdl -r --std=08 --workdir="$WORK_DIR" tb_rv32_wb_soc_smoke --stop-time=25ms 2>&1)" || true
+echo "$sim" | tail -40
+if echo "$sim" | grep -q "RV32_UART_TX_ACTIVITY_SEEN" &&
+    echo "$sim" | grep -q "RV32_UART_BYTE_SEEN" &&
+    echo "$sim" | grep -q "RV32_UART_MARKER_SEEN" &&
+    ! echo "$sim" | grep -q "error"; then
+    echo "Simulation PASSED"
+else
+    echo "Simulation FAILED"
+    exit 1
+fi

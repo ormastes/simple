@@ -1,0 +1,257 @@
+"""Calc text / reference / info tail spec (CARD 5).
+
+Scalar text (TEXTBEFORE/TEXTAFTER/ARRAYTOTEXT/VALUETOTEXT), reference
+(ADDRESS/ROWS/COLUMNS/ROW/COLUMN), and info (FORMULATEXT/ISFORMULA/SHEET/
+SHEETS/NA/TYPE) functions evaluate through the scalar formula path and cache a
+single display value. TEXTSPLIT is array-returning: it evaluates to a 2D grid
+whose top-left stays in the formula cell and the rest spills into the adjacent
+rectangle (like CHOOSECOLS). Bare ROW()/COLUMN() resolve via the recalc
+origin cell since CARD 14; with-arg forms unchanged. Historic note: they
+failed closed with
+#ERR — threading the formula's origin cell into the evaluator is deferred to
+CARD 14. Every expected value is hand-computed against Excel semantics.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text}
+use app.office.file_formats.{recalculate_formula_cells}
+
+fn _disp(sh: Sheet, ref: text) -> text:
+    """Display text of one cell."""
+    cell_display_text(sh.get_cell(ref))
+
+describe "Calc text tail — TEXTBEFORE / TEXTAFTER":
+    it "TEXTBEFORE returns the text before the first delimiter":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=TEXTBEFORE(\"red-blue-green\",\"-\")")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("red")
+
+    it "TEXTAFTER with instance 2 returns text after the second delimiter":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=TEXTAFTER(\"red-blue-green\",\"-\",2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("green")
+
+    it "TEXTAFTER defaults to instance 1":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=TEXTAFTER(\"red-blue-green\",\"-\")")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("blue-green")
+
+    it "TEXTBEFORE with a negative instance counts delimiters from the end":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=TEXTBEFORE(\"a-b-c\",\"-\",-1)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("a-b")
+
+    it "TEXTBEFORE fails closed with #ERR when the delimiter is absent":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=TEXTBEFORE(\"abc\",\"-\")")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_contain("#ERR")
+
+    it "TEXTAFTER fails closed with #ERR when the delimiter is absent":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=TEXTAFTER(\"abc\",\"-\")")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_contain("#ERR")
+
+describe "Calc text tail — ARRAYTOTEXT / VALUETOTEXT":
+    it "ARRAYTOTEXT joins a range's display texts with comma-space":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "apple")
+        sh.set_value("A2", "banana")
+        sh.set_value("A3", "cherry")
+        sh.set_value("D1", "=ARRAYTOTEXT(A1:A3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("apple, banana, cherry")
+
+    it "VALUETOTEXT renders a number as its display text":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=VALUETOTEXT(5)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("5")
+
+    it "VALUETOTEXT renders text unchanged":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=VALUETOTEXT(\"x\")")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("x")
+
+    it "VALUETOTEXT renders a boolean as TRUE":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=VALUETOTEXT(TRUE())")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("TRUE")
+
+describe "Calc text tail — TEXTSPLIT (spill)":
+    it "TEXTSPLIT with column and row delimiters spills a 2D grid":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "=TEXTSPLIT(\"a,b;c,d\",\",\",\";\")")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("a")
+        expect(_disp(sh, "B1")).to_equal("b")
+        expect(_disp(sh, "A2")).to_equal("c")
+        expect(_disp(sh, "B2")).to_equal("d")
+
+    it "TEXTSPLIT with only a column delimiter spills across one row":
+        var sh = Sheet.new("s")
+        sh.set_value("A1", "=TEXTSPLIT(\"a,b,c\",\",\")")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "A1")).to_equal("a")
+        expect(_disp(sh, "B1")).to_equal("b")
+        expect(_disp(sh, "C1")).to_equal("c")
+
+describe "Calc reference tail — ADDRESS":
+    it "ADDRESS defaults to a fully-absolute A1 reference":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=ADDRESS(2,3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("$C$2")
+
+    it "ADDRESS with abs 4 yields a fully-relative reference":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=ADDRESS(2,3,4)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("C2")
+
+    it "ADDRESS with abs 2 fixes the row only":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=ADDRESS(2,3,2)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("C$2")
+
+    it "ADDRESS with abs 3 fixes the column only":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=ADDRESS(2,3,3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("$C2")
+
+    it "ADDRESS with a1 FALSE yields an R1C1 reference":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=ADDRESS(5,4,1,FALSE())")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("R5C4")
+
+    it "ADDRESS fails closed with #ERR on a non-positive row":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=ADDRESS(0,3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_contain("#ERR")
+
+describe "Calc reference tail — ROWS / COLUMNS / ROW / COLUMN":
+    it "ROWS counts the rows spanned by a range":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=ROWS(A1:B3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("3")
+
+    it "COLUMNS counts the columns spanned by a range":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=COLUMNS(A1:B3)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("2")
+
+    it "ROW returns the 1-based row of a reference":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=ROW(B5)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("5")
+
+    it "COLUMN returns the 1-based column of a reference":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=COLUMN(B5)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("2")
+
+    it "ROWS of a single cell is 1":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=ROWS(B5)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("1")
+
+    it "bare ROW() resolves via the origin cell (CARD 14 behavior)":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=ROW()")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("1")
+
+    it "bare COLUMN() resolves via the origin cell (CARD 14 behavior)":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=COLUMN()")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("4")
+
+describe "Calc info tail — FORMULATEXT / ISFORMULA":
+    it "FORMULATEXT returns the referenced cell's formula text":
+        var sh = Sheet.new("s")
+        sh.set_value("B1", "=1+2")
+        sh.set_value("D1", "=FORMULATEXT(B1)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("=1+2")
+
+    it "FORMULATEXT fails closed with #ERR on a non-formula cell":
+        var sh = Sheet.new("s")
+        sh.set_value("B1", "hello")
+        sh.set_value("D1", "=FORMULATEXT(B1)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_contain("#ERR")
+
+    it "ISFORMULA is TRUE for a formula cell":
+        var sh = Sheet.new("s")
+        sh.set_value("B1", "=1+2")
+        sh.set_value("D1", "=ISFORMULA(B1)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("TRUE")
+
+    it "ISFORMULA is FALSE for a plain value cell":
+        var sh = Sheet.new("s")
+        sh.set_value("B1", "hello")
+        sh.set_value("D1", "=ISFORMULA(B1)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("FALSE")
+
+describe "Calc info tail — SHEET / SHEETS / NA / TYPE":
+    it "SHEET is 1 in the single-sheet model":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=SHEET()")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("1")
+
+    it "SHEETS is 1 in the single-sheet model":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=SHEETS()")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("1")
+
+    it "NA yields the #N/A error value":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=NA()")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_contain("#N/A")
+
+    it "TYPE of a number is 1":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=TYPE(5)")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("1")
+
+    it "TYPE of text is 2":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=TYPE(\"x\")")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("2")
+
+    it "TYPE of a boolean is 4":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=TYPE(TRUE())")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("4")
+
+    it "TYPE of an error value is 16":
+        var sh = Sheet.new("s")
+        sh.set_value("D1", "=TYPE(NA())")
+        sh = recalculate_formula_cells(sh)
+        expect(_disp(sh, "D1")).to_equal("16")

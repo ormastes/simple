@@ -1,0 +1,640 @@
+# PPTX Export — Impress decks as real PowerPoint packages
+#
+# Builds a complete OPC package: content types, package rels, presentation
+# (master list + slide list), a minimal slide master / layout / theme trio
+# (required by strict OOXML consumers), and one slide part per deck slide with
+# positioned text boxes (px -> EMU at 9525/px).
+#
+# Image elements (deck `![alt](path)` lines) embed their PNG bytes as
+# ppt/media/imageN.png (N is package-global) + an image relationship in the
+# slide's rels + a minimal <p:pic> shape. PNG only (documented scope); a
+# missing file or non-.png src falls back to a plain textbox carrying the
+# alt text — never crashing the export (the Word lane's pattern, see
+# odf_ooxml.spl's `_docx_image_run`). alt/src are stashed losslessly on the
+# pic's cNvPr name/descr attributes so import restores the exact
+# `![alt](path)` deck line without a side-channel.
+#
+# Table elements (deck markdown-table blocks, kind TableEl) export as a
+# `<p:graphicFrame>` holding `<a:tbl>` (uri ".../drawingml/2006/table"):
+# equal-width a:gridCol per column, one a:tr per non-separator row, cells as
+# a:tc/a:txBody/a:p/a:r/a:t. Header row = bold run + light tcPr solidFill
+# (direct formatting; no tblStyleLst — `firstRow="1"` is set but has no
+# style list to bind to, documented ceiling). Import scans graphicFrames
+# interleaved with a:p/p:pic in document order, so table blocks round-trip
+# in position.
+#
+# Verified structurally: system unzip validates the archive; our own zip
+# reader round-trips every part; slide text lands in a:t runs. Full
+# PowerPoint-desktop rendering is untested locally — recorded ceiling.
+
+use std.common.archive.zip.{zip_write_stored, zip_text_file, ZipFile, zip_extract_text}
+use app.office.slides.slide.{Slide, SlideElement, SlideElementKind, SlideLayout, blank_slide, add_text_box, add_slide_element}
+use app.office.slides.deck_format.{bullet_id_level, table_row_cells, is_table_separator_line}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_bytes(path: text) -> [u8]
+
+fn _x(s: text) -> text:
+    var r = s
+    r = r.replace("&", "&amp;")
+    r = r.replace("<", "&lt;")
+    r = r.replace(">", "&gt;")
+    r
+
+fn _xa(s: text) -> text:
+    """Escape for use inside a double-quoted XML attribute value."""
+    val e = _x(s)
+    e.replace("\"", "&quot;")
+
+val _NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+val _NS_P = "http://schemas.openxmlformats.org/presentationml/2006/main"
+val _NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+val _THEME = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><a:theme xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" name=\"Office\"><a:themeElements><a:clrScheme name=\"Office\"><a:dk1><a:sysClr val=\"windowText\" lastClr=\"000000\"/></a:dk1><a:lt1><a:sysClr val=\"window\" lastClr=\"FFFFFF\"/></a:lt1><a:dk2><a:srgbClr val=\"44546A\"/></a:dk2><a:lt2><a:srgbClr val=\"E7E6E6\"/></a:lt2><a:accent1><a:srgbClr val=\"4472C4\"/></a:accent1><a:accent2><a:srgbClr val=\"ED7D31\"/></a:accent2><a:accent3><a:srgbClr val=\"A5A5A5\"/></a:accent3><a:accent4><a:srgbClr val=\"FFC000\"/></a:accent4><a:accent5><a:srgbClr val=\"5B9BD5\"/></a:accent5><a:accent6><a:srgbClr val=\"70AD47\"/></a:accent6><a:hlink><a:srgbClr val=\"0563C1\"/></a:hlink><a:folHlink><a:srgbClr val=\"954F72\"/></a:folHlink></a:clrScheme><a:fontScheme name=\"Office\"><a:majorFont><a:latin typeface=\"Calibri Light\"/><a:ea typeface=\"\"/><a:cs typeface=\"\"/></a:majorFont><a:minorFont><a:latin typeface=\"Calibri\"/><a:ea typeface=\"\"/><a:cs typeface=\"\"/></a:minorFont></a:fontScheme><a:fmtScheme name=\"Office\"><a:fillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln><a:ln><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln><a:ln><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill><a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>"
+
+fn _sp_tree_open() -> text:
+    "<p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"0\" cy=\"0\"/><a:chOff x=\"0\" y=\"0\"/><a:chExt cx=\"0\" cy=\"0\"/></a:xfrm></p:grpSpPr>"
+
+fn _text_shape(id: i32, name: text, content: text, x: i32, y: i32, w: i32, h: i32, ppr: text, rpr: text) -> text:
+    """One positioned text box shape. Coordinates are px, emitted as EMU.
+    `ppr` is an optional `<a:pPr .../>` paragraph-properties fragment (bullet
+    level + marker); `rpr` an optional `<a:rPr .../>` run-properties fragment
+    (e.g. the section layout's larger font size)."""
+    val emu_x = x.to_i64() * 9525
+    val emu_y = y.to_i64() * 9525
+    val emu_w = w.to_i64() * 9525
+    val emu_h = h.to_i64() * 9525
+    var out = "<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"{name}\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>"
+    out = "{out}<p:spPr><a:xfrm><a:off x=\"{emu_x}\" y=\"{emu_y}\"/><a:ext cx=\"{emu_w}\" cy=\"{emu_h}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr>"
+    out = "{out}<p:txBody><a:bodyPr/><a:lstStyle/><a:p>{ppr}<a:r>{rpr}<a:t>{_x(content)}</a:t></a:r></a:p></p:txBody></p:sp>"
+    out
+
+fn _pic_shape(id: i32, rid: text, alt: text, src: text) -> text:
+    """One embedded picture shape (`<p:pic>`): nvPicPr carries alt/src on
+    cNvPr's name/descr attributes (the Word lane's lossless stash — see
+    odf_ooxml.spl's `_docx_drawing_xml`); blipFill references the media part
+    via a:blip r:embed; spPr places the picture at a FIXED slot below the
+    text area (px 60,340 sized 320x180, as EMU). v1 does not lay images
+    out — multiple embedded images on one slide share this slot."""
+    val name_attr = _xa(alt)
+    val descr_attr = _xa(src)
+    var out = "<p:pic><p:nvPicPr><p:cNvPr id=\"{id}\" name=\"{name_attr}\" descr=\"{descr_attr}\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>"
+    out = "{out}<p:blipFill><a:blip r:embed=\"{rid}\"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>"
+    out = "{out}<p:spPr><a:xfrm><a:off x=\"571500\" y=\"3238500\"/><a:ext cx=\"3048000\" cy=\"1714500\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr></p:pic>"
+    out
+
+fn _table_cell_xml(content: text, header: bool) -> text:
+    """One `<a:tc>`: txBody first, then tcPr (CT_TableCell child order).
+    Header cells get a bold run plus a light solid fill on tcPr (the
+    trivially-expressible header styling); data cells an empty tcPr."""
+    var rpr = ""
+    var tcpr = "<a:tcPr/>"
+    if header:
+        rpr = "<a:rPr b=\"1\"/>"
+        tcpr = "<a:tcPr><a:solidFill><a:srgbClr val=\"D9E2F3\"/></a:solidFill></a:tcPr>"
+    "<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r>{rpr}<a:t>{_x(content)}</a:t></a:r></a:p></a:txBody>{tcpr}</a:tc>"
+
+fn _table_graphic_frame(id: i32, rows: text) -> text:
+    """One `<p:graphicFrame>` holding an `<a:tbl>` for a TableEl's canonical
+    markdown rows (`rows` is newline-joined; the separator row is skipped —
+    it is deck notation, not data). tblGrid gets one equal-width a:gridCol
+    per header column; each remaining line becomes one a:tr of a:tc cells
+    (short rows pad with empty cells so every tr matches the grid). The
+    frame sits at a FIXED slot below the text area (EMU 571500,3238500 —
+    the image slot convention; v1 does not lay tables out)."""
+    val lines = rows.split("\n")
+    var ncols = 0
+    val header_cells = table_row_cells(lines[0])
+    for c in header_cells:
+        ncols = ncols + 1
+    if ncols == 0:
+        return ""
+    val col_w = 4572000 / ncols
+    val total_w = col_w * ncols
+    var cols_xml = ""
+    var i = 0
+    while i < ncols:
+        cols_xml = "{cols_xml}<a:gridCol w=\"{col_w}\"/>"
+        i = i + 1
+    var trs = ""
+    var li = 0
+    for line in lines:
+        if not is_table_separator_line(line):
+            val cells = table_row_cells(line)
+            var tcs = ""
+            var ci = 0
+            for cell in cells:
+                if ci < ncols:
+                    val tc = _table_cell_xml(cell, li == 0)
+                    tcs = "{tcs}{tc}"
+                ci = ci + 1
+            while ci < ncols:
+                val pad = _table_cell_xml("", li == 0)
+                tcs = "{tcs}{pad}"
+                ci = ci + 1
+            trs = "{trs}<a:tr h=\"370840\">{tcs}</a:tr>"
+            li = li + 1
+    var out = "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"{id}\" name=\"table\"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>"
+    out = "{out}<p:xfrm><a:off x=\"571500\" y=\"3238500\"/><a:ext cx=\"{total_w}\" cy=\"1714500\"/></p:xfrm>"
+    out = "{out}<a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/table\"><a:tbl><a:tblPr firstRow=\"1\"/><a:tblGrid>{cols_xml}</a:tblGrid>{trs}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"
+    out
+
+struct _SlideBuild:
+    """Result of building one slide part: its XML plus the image
+    relationship entries and ppt/media zip parts it allocated. Threaded via
+    the copy-return idiom (the Word lane's `_DocxRels` pattern)."""
+    xml: text
+    rels: [text]
+    media: [ZipFile]
+
+fn _bullet_ppr(level: i32) -> text:
+    """Paragraph properties for a bullet line: `lvl` attribute (omitted for
+    level 0, per OOXML defaulting) plus the bullet marker char."""
+    if level == 0:
+        return "<a:pPr><a:buChar char=\"-\"/></a:pPr>"
+    "<a:pPr lvl=\"{level}\"><a:buChar char=\"-\"/></a:pPr>"
+
+fn _first_textbox_content(slide: Slide) -> text:
+    """Content of the slide's first text box (its title), or ""."""
+    for e in slide.elements:
+        match e.kind:
+            SlideElementKind.TextBox(content: content):
+                return content
+            _:
+                pass_do_nothing("non-text elements skipped")
+    ""
+
+fn _transition_xml(transition: text) -> text:
+    """Map a deck transition name to a `<p:transition>` child. Empty or
+    unrecognized values emit no element (schema treats it as optional)."""
+    if transition == "fade":
+        return "<p:transition><p:fade/></p:transition>"
+    if transition == "wipe":
+        return "<p:transition><p:wipe/></p:transition>"
+    if transition == "push":
+        return "<p:transition><p:push/></p:transition>"
+    ""
+
+fn _layout_shapes(slide: Slide, img_start: i32) -> _SlideBuild:
+    """Shape arrangement per slide layout: TitleSlide (deck `title-only`)
+    emits just the title textbox vertically centered under the shape name
+    `ctrTitle`; SectionHeader (deck `section`) emits a big centered title with
+    a larger font size run attr under `sectionTitle`; anything else keeps the
+    default title+body arrangement with bullet paragraph levels.
+
+    In the default arrangement, ImageEl elements whose src is an existing
+    .png embed as ppt/media/image{img_start+k}.png (media numbering is
+    package-global via `img_start`) + an image relationship (rId3 onward —
+    rId1/rId2 are reserved for the layout/notes rels) + a `<p:pic>` shape,
+    emitted inline in element order so import preserves line order. A
+    missing file or non-.png src falls back to a plain alt-text textbox
+    named `imageAlt` — never crashing the export. PNG only (documented
+    scope)."""
+    match slide.layout:
+        SlideLayout.TitleSlide:
+            val title = _first_textbox_content(slide)
+            return _SlideBuild(xml: _text_shape(2, "ctrTitle", title, 60, 210, 840, 120, "", ""), rels: [], media: [])
+        SlideLayout.SectionHeader:
+            val title = _first_textbox_content(slide)
+            return _SlideBuild(xml: _text_shape(2, "sectionTitle", title, 60, 190, 840, 160, "", "<a:rPr sz=\"4400\"/>"), rels: [], media: [])
+        _:
+            var shapes = ""
+            var rels: [text] = []
+            var media: [ZipFile] = []
+            var id = 2
+            for el in slide.elements:
+                match el.kind:
+                    SlideElementKind.TextBox(content):
+                        var ppr = ""
+                        if el.id.starts_with("bullet"):
+                            val level = bullet_id_level(el.id)
+                            ppr = _bullet_ppr(level)
+                        val shape = _text_shape(id, el.id, content, el.x, el.y, el.width, el.height, ppr, "")
+                        shapes = "{shapes}{shape}"
+                        id = id + 1
+                    SlideElementKind.ImageEl(src: src, alt: alt):
+                        if src.ends_with(".png") and rt_file_exists(src):
+                            val img_idx = img_start + media.len() + 1
+                            val rid = "rId{3 + rels.len()}"
+                            val bytes = rt_file_read_bytes(src)
+                            media.push(ZipFile(name: "ppt/media/image{img_idx}.png", data: bytes))
+                            rels.push("<Relationship Id=\"{rid}\" Type=\"{_NS_R}/image\" Target=\"../media/image{img_idx}.png\"/>")
+                            val pic = _pic_shape(id, rid, alt, src)
+                            shapes = "{shapes}{pic}"
+                        else:
+                            val fallback = _text_shape(id, "imageAlt", alt, el.x, el.y, el.width, el.height, "", "")
+                            shapes = "{shapes}{fallback}"
+                        id = id + 1
+                    SlideElementKind.TableEl(rows: rows):
+                        val frame = _table_graphic_frame(id, rows)
+                        shapes = "{shapes}{frame}"
+                        id = id + 1
+                    _:
+                        pass_do_nothing("shape elements do not export to pptx v1")
+            return _SlideBuild(xml: shapes, rels: rels, media: media)
+
+fn _build_slide(slide: Slide, img_start: i32) -> _SlideBuild:
+    """Full slide part XML plus the image rels/media the slide allocated
+    (`img_start` = media parts already emitted by earlier slides)."""
+    val shapes_build = _layout_shapes(slide, img_start)
+    val shapes = shapes_build.xml
+    val transition_xml = _transition_xml(slide.transition)
+    val xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:sld xmlns:a=\"{_NS_A}\" xmlns:p=\"{_NS_P}\" xmlns:r=\"{_NS_R}\"><p:cSld>{_sp_tree_open()}{shapes}</p:spTree></p:cSld><p:clrMapOvr><a:overrideClrMapping bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:clrMapOvr>{transition_xml}</p:sld>"
+    _SlideBuild(xml: xml, rels: shapes_build.rels, media: shapes_build.media)
+
+fn _notes_paragraphs_xml(notes: text) -> text:
+    """One `<a:p>` per newline-separated line of speaker notes."""
+    var out = ""
+    for line in notes.split("\n"):
+        out = "{out}<a:p><a:r><a:t>{_x(line)}</a:t></a:r></a:p>"
+    out
+
+fn _notes_slide_xml(notes: text) -> text:
+    """Minimal notesSlide part: a notes-body placeholder shape holding the
+    speaker notes text, per ECMA-376 CT_NotesSlide."""
+    val paragraphs = _notes_paragraphs_xml(notes)
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:notes xmlns:a=\"{_NS_A}\" xmlns:p=\"{_NS_P}\" xmlns:r=\"{_NS_R}\"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Notes Placeholder\"/><p:cNvSpPr><a:spLocks noGrp=\"1\"/></p:cNvSpPr><p:nvPr><p:ph type=\"body\" idx=\"1\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>{paragraphs}</p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:notes>"
+
+# =========================================================================
+# PPTX import
+# =========================================================================
+
+fn _find_at(s: text, needle: text, from: i32) -> i32:
+    var i = from
+    while i + needle.len() <= s.len():
+        if s.slice(i, i + needle.len()) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _unx(s: text) -> text:
+    var r = s
+    r = r.replace("&lt;", "<")
+    r = r.replace("&gt;", ">")
+    r = r.replace("&quot;", "\"")
+    r = r.replace("&amp;", "&")
+    r
+
+fn pptx_slide_texts(slide_xml: text) -> [text]:
+    """Every a:t run's text, in document order."""
+    var texts: [text] = []
+    var i = 0
+    while i < slide_xml.len():
+        val t = _find_at(slide_xml, "<a:t>", i)
+        if t < 0:
+            break
+        val e = _find_at(slide_xml, "</a:t>", t)
+        if e < 0:
+            break
+        texts.push(_unx(slide_xml.slice(t + 5, e)))
+        i = e + 6
+    texts
+
+fn _extract_transition(slide_xml: text) -> text:
+    """Read back the `<p:transition>` child written by `_transition_xml`."""
+    if _find_at(slide_xml, "<p:transition>", 0) < 0:
+        return ""
+    if _find_at(slide_xml, "<p:fade/>", 0) >= 0:
+        return "fade"
+    if _find_at(slide_xml, "<p:wipe/>", 0) >= 0:
+        return "wipe"
+    if _find_at(slide_xml, "<p:push/>", 0) >= 0:
+        return "push"
+    ""
+
+fn _extract_layout(slide_xml: text) -> SlideLayout:
+    """Read back the slide layout from the shape-name markers written by
+    `_layout_shapes` (`ctrTitle` = title-only, `sectionTitle` = section).
+    Shape names live in attributes, so escaped run text cannot collide."""
+    if _find_at(slide_xml, "name=\"sectionTitle\"", 0) >= 0:
+        return SlideLayout.SectionHeader
+    if _find_at(slide_xml, "name=\"ctrTitle\"", 0) >= 0:
+        return SlideLayout.TitleSlide
+    SlideLayout.Blank
+
+fn _paragraph_lvl(seg: text) -> i32:
+    """Bullet level from a paragraph segment's `lvl` attribute (0..2;
+    absent = 0, matching the writer omitting lvl for level 0)."""
+    val p = _find_at(seg, "lvl=\"", 0)
+    if p < 0:
+        return 0
+    val c = seg.slice(p + 5, p + 6)
+    if c == "1":
+        return 1
+    if c == "2":
+        return 2
+    0
+
+fn _paragraph_first_text(seg: text) -> text:
+    """First a:t run's text within a paragraph segment (our writer emits one
+    run per paragraph)."""
+    val t = _find_at(seg, "<a:t>", 0)
+    if t < 0:
+        return ""
+    val e = _find_at(seg, "</a:t>", t)
+    if e < 0:
+        return ""
+    _unx(seg.slice(t + 5, e))
+
+fn _tag_attr(tag: text, name: text) -> text:
+    """Value of a ` name="..."` attribute inside a tag's text, XML-unescaped;
+    "" when absent."""
+    val probe = " {name}=\""
+    val p = _find_at(tag, probe, 0)
+    if p < 0:
+        return ""
+    val vs = p + probe.len()
+    val ve = _find_at(tag, "\"", vs)
+    if ve < 0:
+        return ""
+    _unx(tag.slice(vs, ve))
+
+fn _pic_image_element(pic_xml: text, bi: i32, y: i32) -> SlideElement:
+    """Rebuild an ImageEl from a `<p:pic>` segment: alt/src come back from
+    the cNvPr name/descr attributes our writer stashes them on (in-memory
+    lossless representation — no media extraction to disk on import). A
+    foreign .pptx whose pic carries no descr gets the placeholder src
+    "embedded.png" (alt-only fidelity — documented ceiling)."""
+    val c = _find_at(pic_xml, "<p:cNvPr", 0)
+    var alt = ""
+    var src = ""
+    if c >= 0:
+        val e = _find_at(pic_xml, "/>", c)
+        if e >= 0:
+            val tag = pic_xml.slice(c, e + 2)
+            alt = _tag_attr(tag, "name")
+            src = _tag_attr(tag, "descr")
+    if src == "":
+        src = "embedded.png"
+    SlideElement(
+        id: "image{bi}",
+        kind: SlideElementKind.ImageEl(src: src, alt: alt),
+        x: 60,
+        y: y,
+        width: 840,
+        height: 80
+    )
+
+fn _graphic_frame_table_rows(gf_xml: text) -> text:
+    """Rebuild canonical markdown table rows from a graphicFrame's `<a:tbl>`:
+    one `| a | b |` line per a:tr (first a:t run per `<a:tc>` cell), with
+    the canonical `| --- | --- |` separator inserted after the header row —
+    exactly what parse_deck stores, so the deck line block round-trips.
+    Returns "" when the frame holds no a:tbl (foreign chart/diagram
+    content) or no rows; foreign gridSpan cells (`<a:tc gridSpan=..>`) are
+    not scanned — documented ceiling."""
+    if _find_at(gf_xml, "<a:tbl>", 0) < 0:
+        return ""
+    var out = ""
+    var nrows = 0
+    var pos = 0
+    var scanning = true
+    while scanning:
+        val tr = _find_at(gf_xml, "<a:tr", pos)
+        if tr < 0:
+            scanning = false
+        else:
+            val tre = _find_at(gf_xml, "</a:tr>", tr)
+            if tre < 0:
+                scanning = false
+            else:
+                val tr_xml = gf_xml.slice(tr, tre)
+                var row = "|"
+                var ncols = 0
+                var cpos = 0
+                var cscan = true
+                while cscan:
+                    val tc = _find_at(tr_xml, "<a:tc>", cpos)
+                    if tc < 0:
+                        cscan = false
+                    else:
+                        val tce = _find_at(tr_xml, "</a:tc>", tc)
+                        if tce < 0:
+                            cscan = false
+                        else:
+                            val tc_xml = tr_xml.slice(tc, tce)
+                            val cell = _paragraph_first_text(tc_xml)
+                            row = "{row} {cell} |"
+                            ncols = ncols + 1
+                            cpos = tce + 7
+                if ncols > 0:
+                    if nrows == 0:
+                        var sep = "|"
+                        var i = 0
+                        while i < ncols:
+                            sep = "{sep} --- |"
+                            i = i + 1
+                        out = "{row}\n{sep}"
+                    else:
+                        out = "{out}\n{row}"
+                    nrows = nrows + 1
+                pos = tre + 7
+    out
+
+fn _notes_slide_text(notes_xml: text) -> text:
+    """Join a notesSlide part's a:t runs (one per paragraph) back into
+    newline-separated speaker notes text."""
+    var out = ""
+    var first = true
+    for t in pptx_slide_texts(notes_xml):
+        if first:
+            out = t
+            first = false
+        else:
+            out = "{out}\n{t}"
+    out
+
+fn pptx_bytes_to_deck(zip_bytes: [u8]) -> [Slide]:
+    """Import a real .pptx: each slide part's paragraphs become a slide with a
+    title box (first paragraph) and body/bullet boxes — the same shape
+    parse_deck builds. Bullet paragraphs (marked by `<a:buChar>`) read their
+    nesting level back from the `lvl` attribute; slide layouts, transitions,
+    and speaker notes are read back from the shape-name markers,
+    `<p:transition>`, and the matching `ppt/notesSlides/notesSlideN.xml`
+    part, if present. `<p:pic>` blocks are scanned interleaved with
+    paragraphs in document order (the writer emits shapes in element order),
+    so `![alt](src)` deck lines round-trip in their original position."""
+    var slides: [Slide] = []
+    var n = 1
+    var more = true
+    while more and n <= 500:
+        val xml = zip_extract_text(zip_bytes, "ppt/slides/slide{n}.xml")
+        if xml == "":
+            more = false
+        else:
+            var s = blank_slide("slide{slides.len() + 1}")
+            var bi = 0
+            var pos = 0
+            var scanning = true
+            while scanning:
+                val pp = _find_at(xml, "<a:p>", pos)
+                val pc = _find_at(xml, "<p:pic>", pos)
+                val pg = _find_at(xml, "<p:graphicFrame>", pos)
+                if pp < 0 and pc < 0 and pg < 0:
+                    scanning = false
+                elif pg >= 0 and (pp < 0 or pg < pp) and (pc < 0 or pg < pc):
+                    # graphicFrame first: consume the WHOLE frame so its
+                    # inner a:tc cell paragraphs never scan as body lines
+                    val ge = _find_at(xml, "</p:graphicFrame>", pg)
+                    if ge < 0:
+                        scanning = false
+                    else:
+                        val gf_xml = xml.slice(pg, ge)
+                        val rows_text = _graphic_frame_table_rows(gf_xml)
+                        if rows_text != "":
+                            val tel = SlideElement(
+                                id: "table{bi}",
+                                kind: SlideElementKind.TableEl(rows: rows_text),
+                                x: 60,
+                                y: 220 + 90 * (bi - 1),
+                                width: 840,
+                                height: 80
+                            )
+                            s = add_slide_element(s, tel)
+                            bi = bi + 1
+                        pos = ge + 17
+                elif pp >= 0 and (pc < 0 or pp < pc):
+                    val pe = _find_at(xml, "</a:p>", pp)
+                    if pe < 0:
+                        scanning = false
+                    else:
+                        val seg = xml.slice(pp + 5, pe)
+                        val content = _paragraph_first_text(seg)
+                        if bi == 0:
+                            s = add_text_box(s, "title", content, 60, 60, 840, 120)
+                        elif _find_at(seg, "<a:buChar", 0) >= 0:
+                            val level = _paragraph_lvl(seg)
+                            val bullet_id = "bullet{level}_{bi}"
+                            s = add_text_box(s, bullet_id, content, 60, 220 + 90 * (bi - 1), 840, 80)
+                        else:
+                            s = add_text_box(s, "body{bi}", content, 60, 220 + 90 * (bi - 1), 840, 80)
+                        bi = bi + 1
+                        pos = pe + 6
+                else:
+                    val ce = _find_at(xml, "</p:pic>", pc)
+                    if ce < 0:
+                        scanning = false
+                    else:
+                        val pic_xml = xml.slice(pc, ce)
+                        val el = _pic_image_element(pic_xml, bi, 220 + 90 * (bi - 1))
+                        s = add_slide_element(s, el)
+                        bi = bi + 1
+                        pos = ce + 8
+            val transition = _extract_transition(xml)
+            val notes_xml = zip_extract_text(zip_bytes, "ppt/notesSlides/notesSlide{n}.xml")
+            var notes = ""
+            if notes_xml != "":
+                notes = _notes_slide_text(notes_xml)
+            s = Slide(
+                id: s.id,
+                layout: _extract_layout(xml),
+                elements: s.elements,
+                notes: notes,
+                background: s.background,
+                transition: transition
+            )
+            slides.push(s)
+            n = n + 1
+    slides
+
+val _NOTES_MASTER_XML = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:notesMaster xmlns:a=\"{_NS_A}\" xmlns:p=\"{_NS_P}\" xmlns:r=\"{_NS_R}\"><p:cSld>{_sp_tree_open()}</p:spTree></p:cSld><p:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/></p:notesMaster>"
+
+val _NOTES_MASTER_RELS = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme\" Target=\"../theme/theme1.xml\"/></Relationships>"
+
+val _NOTES_SLIDE_RELS = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster\" Target=\"../notesMasters/notesMaster1.xml\"/></Relationships>"
+
+fn _slide_rels_xml(i: i32, has_notes: bool, image_rels: [text]) -> text:
+    """Slide rels part: rId1 = slideLayout always; rId2 = notesSlide when the
+    slide has speaker notes (rId2 stays reserved either way — image rIds
+    start at rId3 so numbering is stable with or without notes); image
+    relationship entries built by `_layout_shapes` follow."""
+    var body = "<Relationship Id=\"rId1\" Type=\"{_NS_R}/slideLayout\" Target=\"../slideLayouts/slideLayout1.xml\"/>"
+    if has_notes:
+        body = "{body}<Relationship Id=\"rId2\" Type=\"{_NS_R}/notesSlide\" Target=\"../notesSlides/notesSlide{i}.xml\"/>"
+    for e in image_rels:
+        body = "{body}{e}"
+    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{body}</Relationships>"
+
+fn _any_slide_has_notes(slides: [Slide]) -> bool:
+    for slide in slides:
+        if slide.notes != "":
+            return true
+    false
+
+fn _any_slide_embeds_image(slides: [Slide]) -> bool:
+    """True when any slide element will embed a media part (an ImageEl whose
+    src is an existing .png) — gates the png content-type Default."""
+    for slide in slides:
+        for el in slide.elements:
+            match el.kind:
+                SlideElementKind.ImageEl(src: src, alt: alt):
+                    if src.ends_with(".png") and rt_file_exists(src):
+                        return true
+                _:
+                    pass_do_nothing("text/shape elements carry no media")
+    false
+
+fn deck_to_pptx_bytes(slides: [Slide]) -> [u8]:
+    """Build a genuine .pptx package from a deck. Text boxes plus embedded
+    PNG images (`![alt](path)` deck lines; missing/non-png files degrade to
+    alt-text textboxes). Slides with non-empty `notes` get a notesSlide part
+    (plus the shared notesMaster part/relationships required to reference
+    it); slides with a `transition` get a `<p:transition>` child in their
+    slide XML; embedded images add ppt/media/imageN.png parts, per-slide
+    image relationships, and a png content-type Default."""
+    var files: [ZipFile] = []
+    val has_notes = _any_slide_has_notes(slides)
+    var defaults = ""
+    if _any_slide_embeds_image(slides):
+        defaults = "<Default Extension=\"png\" ContentType=\"image/png\"/>"
+    # content types
+    var overrides = "<Override PartName=\"/ppt/presentation.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml\"/><Override PartName=\"/ppt/slideMasters/slideMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml\"/><Override PartName=\"/ppt/slideLayouts/slideLayout1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml\"/><Override PartName=\"/ppt/theme/theme1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.theme+xml\"/>"
+    if has_notes:
+        overrides = "{overrides}<Override PartName=\"/ppt/notesMasters/notesMaster1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml\"/>"
+    var i = 1
+    while i <= slides.len():
+        overrides = "{overrides}<Override PartName=\"/ppt/slides/slide{i}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>"
+        if slides[i - 1].notes != "":
+            overrides = "{overrides}<Override PartName=\"/ppt/notesSlides/notesSlide{i}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml\"/>"
+        i = i + 1
+    files.push(zip_text_file("[Content_Types].xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Default Extension=\"xml\" ContentType=\"application/xml\"/>{defaults}{overrides}</Types>"))
+    files.push(zip_text_file("_rels/.rels", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"ppt/presentation.xml\"/></Relationships>"))
+    # presentation + rels
+    var sld_ids = ""
+    var pres_rels = "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster\" Target=\"slideMasters/slideMaster1.xml\"/>"
+    i = 1
+    while i <= slides.len():
+        sld_ids = "{sld_ids}<p:sldId id=\"{255 + i}\" r:id=\"rId{i + 1}\"/>"
+        pres_rels = "{pres_rels}<Relationship Id=\"rId{i + 1}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide{i}.xml\"/>"
+        i = i + 1
+    var notes_master_lst = ""
+    if has_notes:
+        val notes_master_rid = "rId{slides.len() + 2}"
+        pres_rels = "{pres_rels}<Relationship Id=\"{notes_master_rid}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster\" Target=\"notesMasters/notesMaster1.xml\"/>"
+        notes_master_lst = "<p:notesMasterIdLst><p:notesMasterId r:id=\"{notes_master_rid}\"/></p:notesMasterIdLst>"
+    files.push(zip_text_file("ppt/presentation.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:presentation xmlns:a=\"{_NS_A}\" xmlns:p=\"{_NS_P}\" xmlns:r=\"{_NS_R}\"><p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" r:id=\"rId1\"/></p:sldMasterIdLst>{notes_master_lst}<p:sldIdLst>{sld_ids}</p:sldIdLst><p:sldSz cx=\"9144000\" cy=\"5143500\"/><p:notesSz cx=\"6858000\" cy=\"9144000\"/></p:presentation>"))
+    files.push(zip_text_file("ppt/_rels/presentation.xml.rels", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{pres_rels}</Relationships>"))
+    # master / layout / theme
+    files.push(zip_text_file("ppt/slideMasters/slideMaster1.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:sldMaster xmlns:a=\"{_NS_A}\" xmlns:p=\"{_NS_P}\" xmlns:r=\"{_NS_R}\"><p:cSld>{_sp_tree_open()}</p:spTree></p:cSld><p:clrMap bg1=\"lt1\" tx1=\"dk1\" bg2=\"lt2\" tx2=\"dk2\" accent1=\"accent1\" accent2=\"accent2\" accent3=\"accent3\" accent4=\"accent4\" accent5=\"accent5\" accent6=\"accent6\" hlink=\"hlink\" folHlink=\"folHlink\"/><p:sldLayoutIdLst><p:sldLayoutId id=\"2147483649\" r:id=\"rId1\"/></p:sldLayoutIdLst></p:sldMaster>"))
+    files.push(zip_text_file("ppt/slideMasters/_rels/slideMaster1.xml.rels", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout\" Target=\"../slideLayouts/slideLayout1.xml\"/><Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme\" Target=\"../theme/theme1.xml\"/></Relationships>"))
+    files.push(zip_text_file("ppt/slideLayouts/slideLayout1.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><p:sldLayout xmlns:a=\"{_NS_A}\" xmlns:p=\"{_NS_P}\" xmlns:r=\"{_NS_R}\" type=\"blank\"><p:cSld>{_sp_tree_open()}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"))
+    files.push(zip_text_file("ppt/slideLayouts/_rels/slideLayout1.xml.rels", "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster\" Target=\"../slideMasters/slideMaster1.xml\"/></Relationships>"))
+    files.push(zip_text_file("ppt/theme/theme1.xml", _THEME))
+    if has_notes:
+        files.push(zip_text_file("ppt/notesMasters/notesMaster1.xml", _NOTES_MASTER_XML))
+        files.push(zip_text_file("ppt/notesMasters/_rels/notesMaster1.xml.rels", _NOTES_MASTER_RELS))
+    # slides (+ their media parts; image numbering is package-global)
+    i = 1
+    var img_total = 0
+    for slide in slides:
+        val built = _build_slide(slide, img_total)
+        files.push(zip_text_file("ppt/slides/slide{i}.xml", built.xml))
+        for m in built.media:
+            files.push(m)
+        img_total = img_total + built.media.len()
+        files.push(zip_text_file("ppt/slides/_rels/slide{i}.xml.rels", _slide_rels_xml(i, slide.notes != "", built.rels)))
+        if slide.notes != "":
+            files.push(zip_text_file("ppt/notesSlides/notesSlide{i}.xml", _notes_slide_xml(slide.notes)))
+            files.push(zip_text_file("ppt/notesSlides/_rels/notesSlide{i}.xml.rels", _NOTES_SLIDE_RELS))
+        i = i + 1
+    zip_write_stored(files)

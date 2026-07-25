@@ -1,0 +1,170 @@
+# Profiler — CPU timeline profiler with scope tracking
+#
+# Provides hierarchical scope-based profiling with a ring buffer
+# of ProfileSamples. Scopes nest via begin_scope / end_scope pairs,
+# and frame boundaries are tracked via begin_frame.
+
+# ============================================================================
+# ProfileSample — a single profiling measurement
+# ============================================================================
+
+struct ProfileSample:
+    """A single profiling scope measurement.
+
+    Fields:
+        name: Scope label (e.g. "Physics.Update")
+        start_ms: Start timestamp in milliseconds
+        end_ms: End timestamp (0.0 while scope is open)
+        depth: Nesting depth at the time scope was opened
+    """
+    name: text
+    start_ms: f64
+    end_ms: f64
+    depth: i32
+
+impl ProfileSample:
+    fn duration_ms() -> f64:
+        """Return the elapsed time for this sample."""
+        self.end_ms - self.start_ms
+
+# ============================================================================
+# Profiler — hierarchical scope profiler with ring buffer
+# ============================================================================
+
+class Profiler:
+    """CPU timeline profiler.
+
+    Fields:
+        samples: Ring buffer of completed and in-progress samples
+        max_samples: Maximum number of samples to retain
+        current_depth: Current nesting depth for new scopes
+        frame_count: Number of frames profiled
+        enabled: Whether profiling is active
+    """
+    samples: [ProfileSample]
+    max_samples: i64
+    current_depth: i32
+    frame_count: i64
+    enabled: bool
+
+impl Profiler:
+    static fn new(max_samples: i64) -> Profiler:
+        """Create a new profiler with the given ring buffer capacity."""
+        Profiler(
+            samples: [],
+            max_samples: max_samples,
+            current_depth: 0,
+            frame_count: 0,
+            enabled: true
+        )
+
+    me begin_scope(name: text, time_ms: f64):
+        """Open a new profiling scope at the current depth."""
+        if not self.enabled:
+            return
+        val sample = ProfileSample(
+            name: name,
+            start_ms: time_ms,
+            end_ms: 0.0,
+            depth: self.current_depth
+        )
+        self.samples = self.samples.push(sample)
+        self.current_depth = self.current_depth + 1
+
+    me end_scope(time_ms: f64):
+        """Close the most recently opened scope (last sample with end_ms == 0.0).
+
+        Sets end_ms on the matching sample and decrements the depth counter.
+        Trims oldest samples if the buffer exceeds max_samples.
+        """
+        if not self.enabled:
+            return
+        # Find last unfinished sample (scan from end)
+        var idx = self.samples.len() - 1
+        var found = false
+        while idx >= 0 and not found:
+            val s = self.samples[idx]
+            if s.end_ms == 0.0:
+                found = true
+            else:
+                idx = idx - 1
+
+        if found:
+            val old = self.samples[idx]
+            val closed = ProfileSample(
+                name: old.name,
+                start_ms: old.start_ms,
+                end_ms: time_ms,
+                depth: old.depth
+            )
+            self.samples = self._replace_sample(idx, closed)
+            if self.current_depth > 0:
+                self.current_depth = self.current_depth - 1
+
+        # Trim to max_samples
+        if self.samples.len() > self.max_samples:
+            self.samples = self._trim_front(self.samples, self.samples.len() - self.max_samples)
+
+    me begin_frame():
+        """Mark the start of a new frame."""
+        self.frame_count = self.frame_count + 1
+        self.current_depth = 0
+
+    me set_enabled(on: bool):
+        """Enable or disable profiling."""
+        self.enabled = on
+
+    fn is_enabled() -> bool:
+        """Return whether profiling is active."""
+        self.enabled
+
+    fn get_samples() -> [ProfileSample]:
+        """Return all current samples."""
+        self.samples
+
+    fn sample_count() -> i64:
+        """Return the number of stored samples."""
+        self.samples.len()
+
+    fn get_frame_count() -> i64:
+        """Return the number of frames profiled."""
+        self.frame_count
+
+    fn find_samples_by_name(name: text) -> [ProfileSample]:
+        """Return all samples matching the given name."""
+        var result: [ProfileSample] = []
+        var i = 0
+        while i < self.samples.len():
+            val s = self.samples[i]
+            if s.name == name:
+                result = result.push(s)
+            i = i + 1
+        result
+
+    me clear():
+        """Remove all samples and reset counters."""
+        self.samples = []
+        self.current_depth = 0
+        self.frame_count = 0
+
+    # --- internal helpers ---
+    me _replace_sample(index: i32, new_sample: ProfileSample) -> [ProfileSample]:
+        """Replace sample at index, returning a new list."""
+        var result: [ProfileSample] = []
+        var i = 0
+        while i < self.samples.len():
+            if i == index:
+                result = result.push(new_sample)
+            else:
+                result = result.push(self.samples[i])
+            i = i + 1
+        result
+
+    me _trim_front(arr: [ProfileSample], count: i64) -> [ProfileSample]:
+        """Remove the first 'count' elements from the array."""
+        var result: [ProfileSample] = []
+        var i = count
+        while i < arr.len():
+            result = result.push(arr[i])
+            i = i + 1
+        result

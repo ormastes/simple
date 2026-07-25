@@ -1,0 +1,34 @@
+# Editor Recovery — lock and WAL replay coordination.
+
+use std.editor.core.session_db.*
+use std.io_runtime.{file_read, file_write, file_delete, file_exists, getpid}
+
+struct RecoveryState:
+    needs_recovery: bool
+    stale_lock: bool
+    lock_path: text
+    wal_path: text
+
+class RecoveryManager:
+    lock_path: text
+    wal_path: text
+
+    static fn new(root: text) -> RecoveryManager:
+        RecoveryManager(lock_path: root + "/editor.lock", wal_path: root + "/editor.wal")
+
+    fn check() -> RecoveryState:
+        val lock_exists = file_exists(me.lock_path)
+        val wal = file_read(me.wal_path) ?? ""
+        RecoveryState(needs_recovery: wal != "", stale_lock: lock_exists, lock_path: me.lock_path, wal_path: me.wal_path)
+
+    me acquire_lock() -> bool:
+        file_write(me.lock_path, getpid().to_text())
+
+    me release_lock():
+        file_delete(me.lock_path)
+
+    me recover(session_db: SessionDb) -> bool:
+        val ok = session_db.checkpoint()
+        if ok:
+            me.release_lock()
+        ok

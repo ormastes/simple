@@ -1,0 +1,44 @@
+# @cover src/os/apps/showcase_catalog/showcase_catalog.spl 90%
+# @tag: unit, os, apps, showcase, catalog
+
+use std.spec.*
+use common.ui.widget.{UITree, WidgetNode}
+use common.ui.showcase_catalog.{ShowcaseEntry, ShowcaseSurface, showcase_catalog, showcase_surface_supported}
+use os.apps.showcase_catalog.showcase_catalog.{ShowcaseCatalogApp}
+
+fn require_node(tree: UITree, id: text) -> WidgetNode:
+    val found = tree.find_widget(id)
+    assert_not_equal(found, nil)
+    found.unwrap()
+
+fn verify_surface(tree: UITree, entry: ShowcaseEntry, surface: ShowcaseSurface, key: text, label: text):
+    val ready = showcase_surface_supported(entry, surface)
+    val expected = if ready: "Ready" else: "Blocked"
+    val readiness = require_node(tree, "showcase_readiness_{entry.app_id}_{key}")
+    val launch = require_node(tree, "showcase_launch_{entry.app_id}_{key}")
+    expect(readiness.get_prop("content")).to_equal("{label}: {expected}")
+    expect(launch.get_prop("label")).to_equal("{label} {expected}")
+    expect(launch.get_prop("action")).to_equal("showcase.launch:{entry.app_id}:{key}")
+    expect(launch.get_prop("disabled")).to_equal(if ready: "false" else: "true")
+
+describe "Showcase Catalog app":
+    it "builds exactly the three canonical app panels with semantic identity fields":
+        val session = ShowcaseCatalogApp.new().build_ui()
+        val tree = session.current_tree()
+        expect(tree.title_text()).to_equal("Showcase Catalog")
+        val entries = showcase_catalog()
+        expect(entries.len()).to_equal(3)
+        expect(tree.root_node().child_count()).to_equal(3)
+        for entry in entries:
+            val card = require_node(tree, "showcase_entry_{entry.app_id}")
+            expect(card.get_prop("title")).to_equal(entry.title)
+            expect(require_node(tree, "showcase_title_{entry.app_id}").get_prop("content")).to_equal(entry.title)
+            expect(require_node(tree, "showcase_app_id_{entry.app_id}").get_prop("content")).to_equal("App ID: {entry.app_id}")
+            expect(require_node(tree, "showcase_installed_path_{entry.app_id}").get_prop("content")).to_equal("Installed path: {entry.installed_path}")
+
+    it "derives honest readiness labels actions and disabled state from the shared catalog":
+        val tree = ShowcaseCatalogApp.new().build_ui().current_tree()
+        for entry in showcase_catalog():
+            verify_surface(tree, entry, ShowcaseSurface.Standalone, "standalone", "Standalone")
+            verify_surface(tree, entry, ShowcaseSurface.HostWm, "host_wm", "Host WM")
+            verify_surface(tree, entry, ShowcaseSurface.SimpleOsWm, "simpleos_wm", "SimpleOS WM")

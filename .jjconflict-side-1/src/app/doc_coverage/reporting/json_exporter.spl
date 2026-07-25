@@ -1,0 +1,167 @@
+# JSON exporter for documentation coverage reports
+#
+# Exports coverage data in JSON format for CI/CD integration and tooling.
+
+use doc_coverage.types.coverage_result.{CoverageReport, FileCoverage}
+use doc_coverage.types.doc_item.{DocItem}
+use std.string.{NL}
+
+# Export coverage report as JSON
+# include_tags: whether to include tags in the output
+fn export_coverage_json(coverage: CoverageReport, include_tags: bool) -> text:
+    var json = "{{NL}"
+
+    # Overall statistics
+    json = "{json}  \"summary\": {{NL}"
+    json = "{json}    \"total_items\": {coverage.total_items},{NL}"
+    json = "{json}    \"documented_items\": {coverage.documented_items},{NL}"
+    json = "{json}    \"missing_docs\": {coverage.missing_docs},{NL}"
+    json = "{json}    \"sdoctest_coverage\": {coverage.sdoctest_coverage},{NL}"
+    json = "{json}    \"missing_sdoctest\": {coverage.missing_sdoctest},{NL}"
+
+    # Calculate percentages
+    val overall_pct = coverage.overall_percent()
+    val sdoc_pct = coverage.sdoctest_percent()
+
+    json = "{json}    \"overall_percent\": {overall_pct},{NL}"
+    json = "{json}    \"sdoctest_percent\": {sdoc_pct},{NL}"
+    json = "{json}    \"timestamp\": {coverage.timestamp}{NL}"
+    json = "{json}  },{NL}"
+
+    # File-level breakdowns
+    json = "{json}  \"files\": [{NL}"
+
+    val files = coverage.files
+    var i = 0
+    while i < files.len():
+        val file_cov = files[i]
+        val file_json = _export_file_coverage_json(file_cov, include_tags)
+        json = "{json}{file_json}"
+
+        # Add comma if not last file
+        val is_last = i == (files.len() - 1)
+        if not is_last:
+            json = "{json},{NL}"
+        else:
+            json = "{json}{NL}"
+
+        i = i + 1
+
+    json = "{json}  ]{NL}"
+    json = "{json}}"
+
+    json
+
+fn _export_file_coverage_json(file_cov: FileCoverage, include_tags: bool) -> text:
+    var json = "    {{NL}"
+
+    # Escape file path for JSON
+    val escaped_path = _escape_json_string(file_cov.file_path)
+
+    json = "{json}      \"file\": \"{escaped_path}\",{NL}"
+    json = "{json}      \"total_items\": {file_cov.total_items},{NL}"
+    json = "{json}      \"documented_items\": {file_cov.documented_items},{NL}"
+    json = "{json}      \"missing_docs\": {file_cov.missing_docs},{NL}"
+    json = "{json}      \"has_sdoctest\": {file_cov.has_sdoctest},{NL}"
+    json = "{json}      \"missing_sdoctest\": {file_cov.missing_sdoctest},{NL}"
+
+    val cov_pct = file_cov.coverage_percent()
+    val sdoc_pct = file_cov.sdoctest_percent()
+
+    json = "{json}      \"coverage_percent\": {cov_pct},{NL}"
+    json = "{json}      \"sdoctest_percent\": {sdoc_pct},{NL}"
+
+    # Items array
+    json = "{json}      \"items\": [{NL}"
+
+    val items = file_cov.items
+    var i = 0
+    while i < items.len():
+        val item = items[i]
+        val item_json = _export_doc_item_json(item, include_tags)
+        json = "{json}{item_json}"
+
+        # Add comma if not last item
+        val is_last = i == (items.len() - 1)
+        if not is_last:
+            json = "{json},{NL}"
+        else:
+            json = "{json}{NL}"
+
+        i = i + 1
+
+    json = "{json}      ]{NL}"
+    json = "{json}    }"
+
+    json
+
+fn _export_doc_item_json(item: DocItem, include_tags: bool) -> text:
+    var json = "        {{NL}"
+
+    val escaped_name = _escape_json_string(item.name)
+    val kind_str = item.kind_str()
+    val escaped_vis = _escape_json_string(item.visibility)
+    val escaped_sig = _escape_json_string(item.signature)
+
+    json = "{json}          \"name\": \"{escaped_name}\",{NL}"
+    json = "{json}          \"kind\": \"{kind_str}\",{NL}"
+    json = "{json}          \"line\": {item.line},{NL}"
+    json = "{json}          \"col\": {item.col},{NL}"
+    json = "{json}          \"visibility\": \"{escaped_vis}\",{NL}"
+    json = "{json}          \"signature\": \"{escaped_sig}\",{NL}"
+    json = "{json}          \"is_public\": {_bool_to_json(item.is_public)},{NL}"
+    json = "{json}          \"is_exported\": {_bool_to_json(item.is_exported)},{NL}"
+    json = "{json}          \"has_inline_comment\": {_bool_to_json(item.has_inline_comment)},{NL}"
+    json = "{json}          \"has_docstring\": {_bool_to_json(item.has_docstring)},{NL}"
+    json = "{json}          \"has_sdoctest\": {_bool_to_json(item.has_sdoctest)}"
+
+    # Add tags if requested
+    if include_tags:
+        json = "{json},{NL}"
+        json = "{json}          \"tags\": ["
+
+        val tags = item.sdoctest_tags
+        var i = 0
+        while i < tags.len():
+            val tag = tags[i]
+            val escaped_tag = _escape_json_string(tag)
+            json = "{json}\"{escaped_tag}\""
+
+            val is_last = i == (tags.len() - 1)
+            if not is_last:
+                json = "{json}, "
+
+            i = i + 1
+
+        json = "{json}]{NL}"
+    else:
+        json = "{json}{NL}"
+
+    json = "{json}        }"
+
+    json
+
+fn _escape_json_string(s: text) -> text:
+    # Escape special characters for JSON strings
+    var result = s
+
+    # Replace backslashes first
+    result = result.replace("\\", "\\\\")
+
+    # Replace quotes
+    result = result.replace("\"", "\\\"")
+
+    # Replace newlines
+    result = result.replace("\n", "\\n")
+    result = result.replace("\r", "\\r")
+    result = result.replace("\t", "\\t")
+
+    result
+
+fn _bool_to_json(b: bool) -> text:
+    if b:
+        "true"
+    else:
+        "false"
+
+export export_coverage_json

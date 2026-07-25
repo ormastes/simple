@@ -1,0 +1,134 @@
+# Experiment Tracking CLI
+# Startup-light implementation for shared CLI log/progress preflight.
+
+use std.cli.cli_util (get_cli_args)
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use std.log.{error}
+use app.io.mod.{process_run}
+
+fn main() -> i64:
+    val raw_args = get_cli_args()
+    val log_opts = parse_log_options(raw_args)
+    if not log_opts.valid:
+        error("exp", log_opts.error)
+        return 1
+
+    val args = exp_clean_log_args(raw_args)
+    if args.len() == 0 or args[0] == "--help" or args[0] == "-h" or args[0] == "help":
+        if log_opts.log_mode == "json" and args.len() == 0:
+            print "{\"command\":\"exp\",\"status\":\"ready\"}"
+            return 0
+        print_help_with_progress(log_opts.progress)
+        return 0
+
+    val command = args[0]
+    if command == "run":
+        return cmd_run(args, log_opts.log_mode, log_opts.progress)
+    if command == "ls":
+        return cmd_ls(log_opts.log_mode, log_opts.progress)
+    if command == "gc":
+        return cmd_gc(log_opts.log_mode, log_opts.progress)
+
+    if log_opts.log_mode == "json":
+        print "{\"command\":\"exp\",\"status\":\"error\",\"error\":\"unknown command\"}"
+        return 1
+    print "Unknown command: {command}"
+    print_help()
+    1
+
+fn print_help():
+    print "exp - Experiment Tracking CLI"
+    print ""
+    print "Usage: exp <command> [args...]"
+    print ""
+    print "Commands:"
+    print "  run <script> [args...]      Run a Simple experiment script"
+    print "  ls                          List local experiment runs"
+    print "  gc                          Report artifact cleanup status"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+
+fn print_help_with_progress(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print_help()
+
+fn cmd_run(args: [text], log_mode: text, progress_mode: text) -> i64:
+    if args.len() < 2:
+        return print_error("script required", log_mode)
+
+    val script = args[1]
+    var forwarded: [text] = ["run", script]
+    var i = 2
+    while i < args.len():
+        forwarded.push(args[i])
+        i = i + 1
+
+    val progress = render_progress(progress_mode, 0, 1, "experiment")
+    if progress != "" and log_mode != "json":
+        print progress
+
+    val (stdout, stderr, code) = process_run("./bin/simple", forwarded)
+    if log_mode == "json":
+        if code == 0:
+            print "{\"command\":\"exp\",\"status\":\"ok\",\"action\":\"run\",\"script\":\"{script}\"}"
+        else:
+            print "{\"command\":\"exp\",\"status\":\"error\",\"action\":\"run\",\"script\":\"{script}\"}"
+        return code
+
+    if stdout != "":
+        print stdout
+    if stderr != "":
+        print stderr
+    code
+
+fn cmd_ls(log_mode: text, progress_mode: text) -> i64:
+    val progress = render_progress(progress_mode, 1, 1, "experiments")
+    if progress != "" and log_mode != "json":
+        print progress
+    if log_mode == "json":
+        print "{\"command\":\"exp\",\"status\":\"ok\",\"runs\":[]}"
+    else:
+        print "No experiment runs found."
+    0
+
+fn cmd_gc(log_mode: text, progress_mode: text) -> i64:
+    val progress = render_progress(progress_mode, 1, 1, "artifacts")
+    if progress != "" and log_mode != "json":
+        print progress
+    if log_mode == "json":
+        print "{\"command\":\"exp\",\"status\":\"ok\",\"deleted\":0}"
+    else:
+        print "Deleted 0 unreferenced artifact(s)."
+    0
+
+fn print_error(message: text, log_mode: text) -> i64:
+    if log_mode == "json":
+        print "{\"command\":\"exp\",\"status\":\"error\",\"error\":\"{message}\"}"
+    else:
+        print "error: {message}"
+    1
+
+fn exp_is_log_option(arg: text) -> bool:
+    arg == "--human" or arg == "--llm" or arg == "--json" or
+        arg == "--tui" or arg == "--stdout" or arg == "--quiet" or
+        arg == "--verbose" or arg == "--dots" or arg == "--count" or
+        arg == "--no-progress" or arg == "--log-mode" or arg == "--surface" or
+        arg == "--progress" or arg.starts_with("--log-mode=") or
+        arg.starts_with("--surface=") or arg.starts_with("--progress=")
+
+fn exp_clean_log_args(args: [text]) -> [text]:
+    var cleaned: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if exp_is_log_option(arg):
+            if arg == "--log-mode" or arg == "--surface" or arg == "--progress":
+                i = i + 1
+        else:
+            cleaned.push(arg)
+        i = i + 1
+    cleaned

@@ -1,0 +1,72 @@
+# std.web.http.server — HttpServer.run() production wiring + parse_flat_json fix.
+#
+# `HttpServer.run()` used to be a documented `pass_dn` no-op. It now delegates
+# to the shared std.http_server request parser/serializer (the same building
+# blocks the full async server and EmbeddedHttpServer use) via a socket-free
+# `dispatch_raw(raw_request) -> text` helper, so the dispatch path is testable
+# without binding a real port.
+#
+# `parse_flat_json` used to split the body on "," by hand, which broke on
+# commas embedded inside string values. It now delegates to the shared
+# std.json parser.
+#
+# NOTE (see worker report): a pre-existing interpreter bug makes `dispatch_raw`
+# specs below fail today -- `HttpRequestParser` (std.nogc_async_mut.http_server
+# .parser, not owned by this lane) relies on `idx.? and idx >= 0` after
+# `text.index_of(...)`, and this interpreter evaluates `0.?` as `false`
+# (contradicting doc/07_guide/quick_reference/syntax_quick_reference.md's
+# "primitives always present" rule for `.?`). Every HTTP request's
+# header-terminating blank line is found at buffer position 0 on the final
+# parse step, so `is_complete()` never becomes true and every request parses
+# as nil. This is a pre-existing bug in shared library code outside this
+# lane's ownership (`src/lib/nogc_async_mut/http_server/parser.spl` /
+# the interpreter's `.?` builtin) -- not something introduced by this change.
+
+use std.spec
+use std.web.http.server.{HttpServer, HttpRequest, HttpResponse}
+
+fn echo_path_handler(req: HttpRequest) -> HttpResponse:
+    HttpResponse.ok().text_body("hello {req.path}")
+
+describe "HttpRequest.body_json (parse_flat_json)":
+
+    it "parses a flat JSON object":
+        val headers: Dict<text, text> = {}
+        val req = HttpRequest.create("POST", "/x", headers, "{\"a\":\"1\",\"b\":\"2\"}", "")
+        val parsed = req.body_json()
+        expect(parsed.get("a") ?? "").to_equal("1")
+        expect(parsed.get("b") ?? "").to_equal("2")
+
+    it "handles commas embedded inside string values (the bug the old split-based parser had)":
+        val headers: Dict<text, text> = {}
+        val req = HttpRequest.create("POST", "/x", headers, "{\"a\":\"x,y\",\"b\":\"z\"}", "")
+        val parsed = req.body_json()
+        expect(parsed.get("a") ?? "").to_equal("x,y")
+        expect(parsed.get("b") ?? "").to_equal("z")
+
+    it "returns an empty dict for non-object JSON":
+        val headers: Dict<text, text> = {}
+        val req = HttpRequest.create("POST", "/x", headers, "[1,2,3]", "")
+        val parsed = req.body_json()
+        expect(parsed.len()).to_equal(0)
+
+describe "HttpServer.dispatch_raw (in-process, no real socket)":
+
+    it "dispatches a raw HTTP request to the registered handler":
+        var server = HttpServer.localhost(0)
+        server = server.handler(echo_path_handler)
+        val raw = "GET /world HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        val response_text = server.dispatch_raw(raw)
+        expect(response_text).to_contain("200")
+        expect(response_text).to_contain("hello /world")
+
+    it "falls back to the default 404 handler when none is registered":
+        val server = HttpServer.localhost(0)
+        val raw = "GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        val response_text = server.dispatch_raw(raw)
+        expect(response_text).to_contain("404")
+
+    it "returns 400 Bad Request for malformed input":
+        val server = HttpServer.localhost(0)
+        val response_text = server.dispatch_raw("not an http request")
+        expect(response_text).to_contain("400")

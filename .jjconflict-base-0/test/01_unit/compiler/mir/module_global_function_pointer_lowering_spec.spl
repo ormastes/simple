@@ -1,0 +1,47 @@
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir.*
+
+fn lower_function_slot_source(src: text) -> MirModule:
+    val ast = parse_full_frontend(src, "function_slot.spl", "function_slot.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("function_slot.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.lower_module(hir)
+
+describe "Module-global function pointer MIR lowering", tag: ["only-compiled"]:
+    it "loads the mutable slot and calls its current function indirectly":
+        val source = "fn default_cleanup():\n    ()\n\nfn replacement_cleanup():\n    ()\n\nvar cleanup: fn() = default_cleanup\n\nfn install():\n    cleanup = replacement_cleanup\n\nfn invoke():\n    cleanup()\n"
+        val mir = lower_function_slot_source(source)
+        var saw_store_global = false
+        var saw_load_global = false
+        var saw_indirect_call = false
+        var saw_direct_cleanup_call = false
+
+        for function in mir.functions.values():
+            if function.name == "install" or function.name == "invoke":
+                for block in function.blocks:
+                    for instruction in block.instructions:
+                        match instruction.kind:
+                            case MirInstKind.StoreGlobal(_, _):
+                                saw_store_global = true
+                            case MirInstKind.LoadGlobal(_, _):
+                                saw_load_global = true
+                            case MirInstKind.CallIndirect(_, _, _, _):
+                                saw_indirect_call = true
+                            case MirInstKind.Call(_, operand, _):
+                                match operand.kind:
+                                    case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                        if name == "cleanup":
+                                            saw_direct_cleanup_call = true
+                                    case _:
+                                        pass
+                            case _:
+                                pass
+
+        expect(saw_store_global).to_equal(true)
+        expect(saw_load_global).to_equal(true)
+        expect(saw_indirect_call).to_equal(true)
+        expect(saw_direct_cleanup_call).to_equal(false)

@@ -1,0 +1,91 @@
+"""
+# Claude Full CLI Auth Handler
+
+Checks auth login, status, logout, and token install decisions.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.cli.handlers.auth.{OAuthTokens, AuthLoginRequest, AuthStatusInput, installOAuthTokens, shouldUseClaudeAIAuth, authLogin, resolveLoginWithClaudeAi, authStatus, authMethod, resolvedApiKeySource, authLogout, missingEnvScopesMessage, forceLoginConflictMessage, loginSuccessMessage, logoutSuccessMessage, logoutFailedMessage, notLoggedInMessage, oauthFlowStartEvent, oauthSuccessEvent, oauthStorageWarningEvent, loginFromRefreshTokenEvent, refreshTokenEnvName, refreshScopesEnvName, apiKeyEnvName, clearOnboardingOnLogout, envRefreshMarksOnboardingComplete, oauthServiceCleanupInFinally, rolesFailureIsNonFatal, firstTokenDateFailureIsNonFatal, consoleApiKeyCreationIsCritical, homespaceIgnoresApiKeyEnvVar, textStatusUsesAccountAndProviderProperties, jsonStatusIncludesClaudeAiAccountFields, authStatusExitCode}
+
+describe "Claude full cli auth handler":
+    it "installs OAuth tokens and chooses Claude.ai versus Console work":
+        step("Claude.ai tokens fetch first token date; Console tokens create API key")
+        val claudeTokens = OAuthTokens.new("tok", ["user:profile", "user:sessions:claude_code"]).withProfile().withWarning("disk")
+        val claude = installOAuthTokens(claudeTokens, true)
+        expect(shouldUseClaudeAIAuth(claudeTokens.scopes)).to_equal(true)
+        expect(claude.loggedOutFirst).to_equal(true)
+        expect(claude.usedProfile).to_equal(true)
+        expect(claude.loggedStorageWarning).to_equal(true)
+        expect(claude.fetchedFirstTokenDate).to_equal(true)
+        expect(claude.createdApiKey).to_equal(false)
+        val consoleTokens = OAuthTokens.new("tok", ["user:inference"]).withTokenAccount()
+        val console = installOAuthTokens(consoleTokens, true)
+        expect(console.usedTokenAccountFallback).to_equal(true)
+        expect(console.createdApiKey).to_equal(true)
+        expect(installOAuthTokens(consoleTokens, false).error).to_contain("Unable to create API key")
+
+    it "handles login flag conflicts and method resolution":
+        step("Console and Claude.ai conflict; enterprise force method wins")
+        val conflict = authLogin(AuthLoginRequest.new().withConsole().withClaudeAiFlag())
+        expect(conflict.code).to_equal(1)
+        expect(conflict.stderr).to_equal(forceLoginConflictMessage())
+        expect(resolveLoginWithClaudeAi("", false)).to_equal(true)
+        expect(resolveLoginWithClaudeAi("", true)).to_equal(false)
+        expect(resolveLoginWithClaudeAi("claudeai", true)).to_equal(true)
+        expect(resolveLoginWithClaudeAi("console", false)).to_equal(false)
+
+    it "handles refresh-token login path":
+        step("Env refresh token requires scopes, validates org, and marks onboarding complete")
+        val missingScopes = authLogin(AuthLoginRequest.new().withEnvRefresh("refresh", ""))
+        expect(missingScopes.code).to_equal(1)
+        expect(missingScopes.stderr).to_equal(missingEnvScopesMessage())
+        val ok = authLogin(AuthLoginRequest.new().withEnvRefresh("refresh", "user:inference"))
+        expect(ok.code).to_equal(0)
+        expect(ok.stdout).to_equal(loginSuccessMessage())
+        expect(ok.usedEnvRefreshToken).to_equal(true)
+        expect(ok.markedOnboardingComplete).to_equal(true)
+        expect(ok.cleanedUpOAuthService).to_equal(false)
+
+    it "handles browser OAuth path":
+        step("Browser flow uses SSO hint and cleans OAuth service")
+        val ok = authLogin(AuthLoginRequest.new().withEmail("a@example.com").withSso())
+        expect(ok.code).to_equal(0)
+        expect(ok.loginWithClaudeAi).to_equal(true)
+        expect(ok.loginMethod).to_equal("sso")
+        expect(ok.cleanedUpOAuthService).to_equal(true)
+
+    it "resolves auth status methods and output":
+        step("Status chooses third-party, Claude.ai, helper, token, API key, or none")
+        expect(authMethod(AuthStatusInput.none().withThirdParty())).to_equal("third_party")
+        expect(authMethod(AuthStatusInput.none().withClaudeAi("a@b", "org", "Org", "pro"))).to_equal("claude.ai")
+        expect(authMethod(AuthStatusInput.none().withApiKeyEnv())).to_equal("api_key")
+        expect(resolvedApiKeySource(AuthStatusInput.none().withApiKeyEnv())).to_equal("ANTHROPIC_API_KEY")
+        val json = authStatus(AuthStatusInput.none().withClaudeAi("a@b", "org", "Org", "pro"), false)
+        expect(json.code).to_equal(0)
+        expect(json.output).to_contain("\"authMethod\":\"claude.ai\"")
+        expect(json.output).to_contain("\"email\":\"a@b\"")
+        val text = authStatus(AuthStatusInput.none(), true)
+        expect(text.code).to_equal(1)
+        expect(text.output).to_equal(notLoggedInMessage())
+
+    it "handles logout and exports source-backed constants":
+        step("Logout success/failure and event/env constants stay pinned")
+        expect(authLogout(true).stdout).to_equal(logoutSuccessMessage())
+        expect(authLogout(false).stderr).to_equal(logoutFailedMessage())
+        expect(oauthFlowStartEvent()).to_equal("tengu_oauth_flow_start")
+        expect(oauthSuccessEvent()).to_equal("tengu_oauth_success")
+        expect(oauthStorageWarningEvent()).to_equal("tengu_oauth_storage_warning")
+        expect(loginFromRefreshTokenEvent()).to_equal("tengu_login_from_refresh_token")
+        expect(refreshTokenEnvName()).to_equal("CLAUDE_CODE_OAUTH_REFRESH_TOKEN")
+        expect(refreshScopesEnvName()).to_equal("CLAUDE_CODE_OAUTH_SCOPES")
+        expect(apiKeyEnvName()).to_equal("ANTHROPIC_API_KEY")
+        expect(clearOnboardingOnLogout()).to_equal(false)
+        expect(envRefreshMarksOnboardingComplete()).to_equal(true)
+        expect(oauthServiceCleanupInFinally()).to_equal(true)
+        expect(rolesFailureIsNonFatal()).to_equal(true)
+        expect(firstTokenDateFailureIsNonFatal()).to_equal(true)
+        expect(consoleApiKeyCreationIsCritical()).to_equal(true)
+        expect(homespaceIgnoresApiKeyEnvVar()).to_equal(true)
+        expect(textStatusUsesAccountAndProviderProperties()).to_equal(true)
+        expect(jsonStatusIncludesClaudeAiAccountFields()).to_equal(true)
+        expect(authStatusExitCode(false)).to_equal(1)

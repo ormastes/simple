@@ -1,0 +1,360 @@
+# @cover src/os/compositor/background_image_provider.spl 80%
+# @cover src/lib/common/ui/window_scene.spl 80%
+# @tag: unit, ui, wm, background-provider
+
+"""
+BackgroundSpec kind:image (plan item A,
+doc/03_plan/os/desktop/wm_window_render_api_hardening_plan.md; design
+doc/05_design/os/desktop/simple_gui_internal_window_impl_spec.md 'Phase-2
+Provider Design') extends the existing loud-fail background contract with a
+real fs-backed image provider: source resolution, per-fit resampling
+(cover/contain/stretch/tile), a content-hash-keyed cache, and stale-serve
+semantics that avoid a wallpaper flash on a transient read/decode error.
+
+This spec pins invariants I1-I8 from the design's invariant table:
+  I1 kind:color stays byte-identical to today.
+  I2 unknown kind / kind:image with no provider / kind:motion still fails loud.
+  I3 the executor stays stateless; caching lives on the compositor provider.
+  I4 no per-pixel FFI: the executor blits one resampled buffer.
+  I5 cache key = (content_hash(source_bytes), target_w, target_h, fit).
+  I6 stale-serve returns the last-good surface + stale:true, marker only
+     when there is no prior good surface.
+  I7 the image background must not mask desktop chrome (command lane /
+     taskbar bands still draw on top of the blitted surface).
+  I8 (motion cadence) is out of scope for this item -- kind:motion stays
+     reserved and is asserted to still hit the loud marker, not implemented.
+"""
+
+use std.spec.{describe, it, expect, step, assert_not_equal}
+use std.fs.{File, dir_create_all, file_delete}
+use std.common.image.ppm_decode.{encode_ppm_p6}
+use common.ui.window_scene.{
+    BackgroundSpec,
+    SharedWmScene,
+    WM_BACKGROUND_KIND_COLOR,
+    WM_BACKGROUND_KIND_IMAGE,
+    WM_BACKGROUND_KIND_MOTION,
+    WM_BACKGROUND_UNRESOLVED_MARKER_COLOR,
+    shared_wm_background_color,
+    shared_wm_scene_resolve_background,
+    shared_wm_scene_register_background_image_provider
+}
+use common.ui.window_scene_draw_ir.{shared_wm_scene_render_to_backend}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use os.compositor.background_image_provider.{
+    HostBackgroundImageProvider,
+    host_background_image_provider_hits,
+    host_background_image_provider_misses,
+    host_background_image_provider_reset
+}
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+
+# Minimal in-memory CompositorBackend test double, mirroring
+# window_scene_render_executor_spec.spl's TestPixelBackend so this file stays
+# independent of host/QEMU wiring.
+class TestPixelBackend:
+    w: i32
+    h: i32
+    pixels: [u32]
+
+    static fn create(width: i32, height: i32, fill: u32) -> TestPixelBackend:
+        val total = if width > 0 and height > 0: width * height else: 0
+        var pixels: [u32] = []
+        var i = 0
+        while i < total:
+            pixels.push(fill)
+            i = i + 1
+        TestPixelBackend(w: width, h: height, pixels: pixels)
+
+impl CompositorBackend for TestPixelBackend:
+
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        var i = 0
+        while i < self.pixels.len():
+            self.pixels[i] = color
+            i = i + 1
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        var x0 = if x < 0: 0 else: x
+        var y0 = if y < 0: 0 else: y
+        var x1 = x + w
+        var y1 = y + h
+        if x1 > self.w:
+            x1 = self.w
+        if y1 > self.h:
+            y1 = self.h
+        if x1 <= x0 or y1 <= y0:
+            return
+        var yy = y0
+        while yy < y1:
+            var idx = yy * self.w + x0
+            var xx = x0
+            while xx < x1:
+                self.pixels[idx] = color
+                idx = idx + 1
+                xx = xx + 1
+            yy = yy + 1
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        pass_do_nothing
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        pass_do_nothing
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        if x < 0 or y < 0 or x >= self.w or y >= self.h:
+            return
+        val idx = y * self.w + x
+        if idx >= 0 and idx < self.pixels.len():
+            self.pixels[idx] = color
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        var dy = 0
+        while dy < h:
+            var dx = 0
+            while dx < w:
+                val idx = (y + dy) * self.w + (x + dx)
+                if idx >= 0 and idx < self.pixels.len():
+                    self.pixels[idx] = pixels[dy * w + dx]
+                dx = dx + 1
+            dy = dy + 1
+
+    me present():
+        pass_do_nothing
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        pass_do_nothing
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+# 2x2 fixture: TL=red, TR=green, BL=blue, BR=yellow — small enough to make
+# every fit policy's geometry independently checkable by hand.
+val _RED: u32 = 0xFFFF0000u32
+val _GREEN: u32 = 0xFF00FF00u32
+val _BLUE: u32 = 0xFF0000FFu32
+val _YELLOW: u32 = 0xFFFFFF00u32
+
+fn _fixture_dir() -> text:
+    "build/wm_background_image_provider_spec"
+
+fn _write_fixture(path: text, pixels: [u32]) -> text:
+    dir_create_all(_fixture_dir())
+    val bytes = encode_ppm_p6(2u32, 2u32, pixels)
+    File.write_bytes(path, bytes)
+    path
+
+fn _quad_fixture_path() -> text:
+    "{_fixture_dir()}/quad.ppm"
+
+fn _write_quad_fixture() -> text:
+    _write_fixture(_quad_fixture_path(), [_RED, _GREEN, _BLUE, _YELLOW])
+
+fn _image_background(source: text, fit: text) -> BackgroundSpec:
+    BackgroundSpec(kind: WM_BACKGROUND_KIND_IMAGE, color: 0xFF000000u32, source: source, fit: fit)
+
+describe "BackgroundSpec kind:image provider (background_image_provider + window_scene resolver)":
+
+    it "resolves kind:color byte-identical to today (I1)":
+        step("A plain color BackgroundSpec resolves with no surface, regardless of target size")
+        val resolution = shared_wm_scene_resolve_background(shared_wm_background_color(0xFF223344u32), 100, 80)
+        expect(resolution.resolved).to_equal(true)
+        expect(resolution.color).to_equal(0xFF223344u32)
+        expect(resolution.stale).to_equal(false)
+
+    it "fails loudly with the unresolved marker for kind:image with no provider registered, and for kind:motion (I2, I8)":
+        step("No provider is registered in this test")
+        shared_wm_scene_register_background_image_provider(nil)
+        val image_bg = _image_background("some/path.ppm", "cover")
+        val image_resolution = shared_wm_scene_resolve_background(image_bg, 40, 40)
+        expect(image_resolution.resolved).to_equal(false)
+        expect(image_resolution.color).to_equal(WM_BACKGROUND_UNRESOLVED_MARKER_COLOR)
+        step("kind:motion is still reserved and hits the same loud marker path")
+        val motion_bg = BackgroundSpec(kind: WM_BACKGROUND_KIND_MOTION, color: 0xFF000000u32, source: "", fit: "cover")
+        val motion_resolution = shared_wm_scene_resolve_background(motion_bg, 40, 40)
+        expect(motion_resolution.resolved).to_equal(false)
+        expect(motion_resolution.color).to_equal(WM_BACKGROUND_UNRESOLVED_MARKER_COLOR)
+
+    it "resolves kind:image through a registered provider, returning a decoded+resampled surface":
+        step("Register a fresh HostBackgroundImageProvider and resolve a real PPM fixture")
+        host_background_image_provider_reset()
+        val provider = HostBackgroundImageProvider.create()
+        shared_wm_scene_register_background_image_provider(provider)
+        val path = _write_quad_fixture()
+        val resolution = shared_wm_scene_resolve_background(_image_background(path, "stretch"), 4, 4)
+        shared_wm_scene_register_background_image_provider(nil)
+        expect(resolution.resolved).to_equal(true)
+        expect(resolution.stale).to_equal(false)
+        if val surface = resolution.surface:
+            expect(surface.width).to_equal(4)
+            expect(surface.height).to_equal(4)
+            expect(surface.pixels.len()).to_equal(16)
+        else:
+            expect(true).to_equal(false)
+
+    it "each fit policy produces the documented geometry (cover/contain/stretch/tile)":
+        host_background_image_provider_reset()
+        val provider = HostBackgroundImageProvider.create()
+        shared_wm_scene_register_background_image_provider(provider)
+        val path = _write_quad_fixture()
+
+        step("stretch to 4x4: each source pixel becomes a 2x2 quadrant block")
+        val stretched = shared_wm_scene_resolve_background(_image_background(path, "stretch"), 4, 4)
+        if val s = stretched.surface:
+            expect(s.pixels[0 * 4 + 0]).to_equal(_RED)
+            expect(s.pixels[0 * 4 + 3]).to_equal(_GREEN)
+            expect(s.pixels[3 * 4 + 0]).to_equal(_BLUE)
+            expect(s.pixels[3 * 4 + 3]).to_equal(_YELLOW)
+        else:
+            expect(true).to_equal(false)
+
+        step("cover to 4x2: crops to the top row (red/green), bottom row (blue/yellow) is discarded")
+        val covered = shared_wm_scene_resolve_background(_image_background(path, "cover"), 4, 2)
+        if val s = covered.surface:
+            expect(s.pixels[0 * 4 + 0]).to_equal(_RED)
+            expect(s.pixels[0 * 4 + 3]).to_equal(_GREEN)
+            expect(s.pixels[1 * 4 + 0]).to_equal(_RED)
+            expect(s.pixels[1 * 4 + 3]).to_equal(_GREEN)
+        else:
+            expect(true).to_equal(false)
+
+        step("contain to 4x2: the 2x2 source stays square, letterboxed left/right with the desktop-chrome fill color")
+        val theme = wm_chrome_theme()
+        val contained = shared_wm_scene_resolve_background(_image_background(path, "contain"), 4, 2)
+        if val s = contained.surface:
+            expect(s.pixels[0 * 4 + 0]).to_equal(theme.desktop_bg)
+            expect(s.pixels[0 * 4 + 3]).to_equal(theme.desktop_bg)
+            expect(s.pixels[0 * 4 + 1]).to_equal(_RED)
+            expect(s.pixels[0 * 4 + 2]).to_equal(_GREEN)
+            expect(s.pixels[1 * 4 + 1]).to_equal(_BLUE)
+            expect(s.pixels[1 * 4 + 2]).to_equal(_YELLOW)
+        else:
+            expect(true).to_equal(false)
+
+        step("tile to 4x4: the 2x2 source repeats twice in each direction, no resampling")
+        val tiled = shared_wm_scene_resolve_background(_image_background(path, "tile"), 4, 4)
+        if val s = tiled.surface:
+            expect(s.pixels[0 * 4 + 0]).to_equal(_RED)
+            expect(s.pixels[0 * 4 + 2]).to_equal(_RED)
+            expect(s.pixels[1 * 4 + 0]).to_equal(_BLUE)
+            expect(s.pixels[2 * 4 + 2]).to_equal(_RED)
+            expect(s.pixels[3 * 4 + 3]).to_equal(_YELLOW)
+        else:
+            expect(true).to_equal(false)
+
+        shared_wm_scene_register_background_image_provider(nil)
+
+    it "counts cache hits and misses as real events (I5)":
+        step("Cache/counter state is process-global module state (see background_image_provider.spl's module-var note); reset it first for a clean count")
+        host_background_image_provider_reset()
+        val provider = HostBackgroundImageProvider.create()
+        val path = _write_quad_fixture()
+        step("First resolve at a given (content-hash, target_w, target_h, fit) key is a miss")
+        provider.resolve(path, 8, 8, "cover")
+        expect(host_background_image_provider_misses()).to_equal(1)
+        expect(host_background_image_provider_hits()).to_equal(0)
+        step("An identical resolve is a cache hit, not a second decode")
+        provider.resolve(path, 8, 8, "cover")
+        expect(host_background_image_provider_misses()).to_equal(1)
+        expect(host_background_image_provider_hits()).to_equal(1)
+        step("A different target size or fit is a different key, so it is a miss again")
+        provider.resolve(path, 16, 16, "cover")
+        expect(host_background_image_provider_misses()).to_equal(2)
+        provider.resolve(path, 8, 8, "tile")
+        expect(host_background_image_provider_misses()).to_equal(3)
+
+    it "serves the last-good surface with stale:true after a resolve error, and only marks loud when there is no prior good surface (I6)":
+        host_background_image_provider_reset()
+        val provider = HostBackgroundImageProvider.create()
+        shared_wm_scene_register_background_image_provider(provider)
+        val missing_path = "{_fixture_dir()}/does_not_exist.ppm"
+        step("A source that has never resolved successfully hard-fails with no stale flag")
+        val first = shared_wm_scene_resolve_background(_image_background(missing_path, "cover"), 4, 4)
+        expect(first.resolved).to_equal(false)
+        expect(first.stale).to_equal(false)
+
+        val path = "{_fixture_dir()}/stale_target.ppm"
+        _write_fixture(path, [_RED, _GREEN, _BLUE, _YELLOW])
+        step("A successful resolve populates last-good for this (source, target, fit)")
+        val good = shared_wm_scene_resolve_background(_image_background(path, "cover"), 4, 4)
+        expect(good.resolved).to_equal(true)
+        expect(good.stale).to_equal(false)
+
+        step("Removing the source file and re-resolving serves the last-good surface, marked stale, with a diagnostic")
+        # File.delete (the class static method) hits an unrelated,
+        # pre-existing interpreter bug ("unknown property or method 'path'
+        # on String") independent of this change; the free extern-backed
+        # file_delete function works correctly, so use that instead.
+        file_delete(path)
+        val stale = shared_wm_scene_resolve_background(_image_background(path, "cover"), 4, 4)
+        expect(stale.resolved).to_equal(true)
+        expect(stale.stale).to_equal(true)
+        expect(stale.error_message).to_contain("last-good")
+        if val good_surface = good.surface:
+            if val stale_surface = stale.surface:
+                expect(stale_surface.pixels.len()).to_equal(good_surface.pixels.len())
+                var i = 0
+                var mismatch = false
+                while i < good_surface.pixels.len():
+                    if good_surface.pixels[i] != stale_surface.pixels[i]:
+                        mismatch = true
+                    i = i + 1
+                expect(mismatch).to_equal(false)
+            else:
+                expect(true).to_equal(false)
+        else:
+            expect(true).to_equal(false)
+        shared_wm_scene_register_background_image_provider(nil)
+
+    it "reflects changed source content on the next frame (change-then-reresolve, distinct from stale-serve)":
+        step("Resolve once, then overwrite the source with different content")
+        host_background_image_provider_reset()
+        val provider = HostBackgroundImageProvider.create()
+        shared_wm_scene_register_background_image_provider(provider)
+        val path = "{_fixture_dir()}/live_update.ppm"
+        _write_fixture(path, [_RED, _RED, _RED, _RED])
+        val before = shared_wm_scene_resolve_background(_image_background(path, "stretch"), 2, 2)
+        if val s = before.surface:
+            expect(s.pixels[0]).to_equal(_RED)
+        else:
+            expect(true).to_equal(false)
+        _write_fixture(path, [_BLUE, _BLUE, _BLUE, _BLUE])
+        val after = shared_wm_scene_resolve_background(_image_background(path, "stretch"), 2, 2)
+        expect(after.stale).to_equal(false)
+        if val s = after.surface:
+            expect(s.pixels[0]).to_equal(_BLUE)
+        else:
+            expect(true).to_equal(false)
+        shared_wm_scene_register_background_image_provider(nil)
+
+    it "blits the resolved surface before chrome, so command-lane/taskbar bands still draw on top (I3, I4, I7)":
+        step("Build a windowless scene whose background is a resolvable image; canvas is tall enough (140) to leave a real desktop gap between the fixed 44px command lane and 56px taskbar bands")
+        val provider = HostBackgroundImageProvider.create()
+        shared_wm_scene_register_background_image_provider(provider)
+        val path = _write_quad_fixture()
+        val scene = SharedWmScene(width: 100, height: 140, backend: "executor-spec", windows: [], background: _image_background(path, "stretch"))
+        val backend = TestPixelBackend.create(100, 140, 0u32)
+        shared_wm_scene_render_to_backend(backend, scene)
+        step("A desktop-area pixel (y=60, inside [44,84), left half of the stretched quad image) shows the source's red, not a flat clear color")
+        val desktop_probe = backend.pixels[60 * 100 + 10]
+        expect(desktop_probe).to_equal(_RED)
+        step("The command-lane band (y in [0,44)) still paints chrome on top of the image")
+        val theme = wm_chrome_theme()
+        expect(backend.pixels[0 * 100 + 0]).to_equal(theme.command_lane)
+        step("Rendering the identical scene into a second, differently-initialized backend gives identical pixels (lane parity)")
+        val backend_b = TestPixelBackend.create(100, 140, 0xFFFFFFFFu32)
+        shared_wm_scene_render_to_backend(backend_b, scene)
+        var i = 0
+        var mismatch = false
+        while i < backend.pixels.len():
+            if backend.pixels[i] != backend_b.pixels[i]:
+                mismatch = true
+            i = i + 1
+        expect(mismatch).to_equal(false)
+        shared_wm_scene_register_background_image_provider(nil)

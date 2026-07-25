@@ -1,0 +1,87 @@
+# Compositor — flattens DrawingLayers for display
+#
+# Provides blend functions and a flattened result structure
+# for compositing a multi-layer drawing document.
+
+use std.common.drawing.document.{DrawingLayer, DrawingDocument, BlendMode}
+
+# ============================================================================
+# Compositor Config
+# ============================================================================
+
+struct CompositorConfig:
+    background_color: i64
+
+fn default_compositor_config() -> CompositorConfig:
+    """Default white background."""
+    CompositorConfig(background_color: 4294967295)  # 0xFFFFFFFF — opaque white
+
+# ============================================================================
+# Flattened Result
+# ============================================================================
+
+struct FlattenedResult:
+    width: i32
+    height: i32
+    pixel_count: i32
+
+impl FlattenedResult:
+    static fn from_document(doc: DrawingDocument) -> FlattenedResult:
+        """Create a result descriptor matching the document dimensions."""
+        FlattenedResult(
+            width: doc.width,
+            height: doc.height,
+            pixel_count: doc.width * doc.height
+        )
+
+# ============================================================================
+# Blend Functions
+# ============================================================================
+
+fn clamp_channel(v: i32) -> i32:
+    """Clamp a color channel to 0..255."""
+    if v < 0:
+        return 0
+    if v > 255:
+        return 255
+    v
+
+fn pack_rgba(r: i32, g: i32, b: i32, a: i32) -> i64:
+    """Pack RGBA channels into a single i64."""
+    val ri = clamp_channel(r).to_i64()
+    val gi = clamp_channel(g).to_i64()
+    val bi = clamp_channel(b).to_i64()
+    val ai = clamp_channel(a).to_i64()
+    ri * 16777216 + gi * 65536 + bi * 256 + ai
+
+fn blend_normal(src_r: i32, src_g: i32, src_b: i32, src_a: i32, dst_r: i32, dst_g: i32, dst_b: i32, dst_a: i32) -> i64:
+    """Normal alpha-composite blend: src over dst. Returns packed RGBA."""
+    if src_a == 0:
+        return pack_rgba(dst_r, dst_g, dst_b, dst_a)
+    if src_a == 255:
+        return pack_rgba(src_r, src_g, src_b, 255)
+
+    val sa = src_a.to_f64() / 255.0
+    val da = dst_a.to_f64() / 255.0
+    val out_a = sa + da * (1.0 - sa)
+
+    if out_a <= 0.0:
+        return pack_rgba(0, 0, 0, 0)
+
+    val out_r = (src_r.to_f64() * sa + dst_r.to_f64() * da * (1.0 - sa)) / out_a
+    val out_g = (src_g.to_f64() * sa + dst_g.to_f64() * da * (1.0 - sa)) / out_a
+    val out_b = (src_b.to_f64() * sa + dst_b.to_f64() * da * (1.0 - sa)) / out_a
+    val out_ai = (out_a * 255.0).to_i32()
+
+    pack_rgba(out_r.to_i32(), out_g.to_i32(), out_b.to_i32(), out_ai)
+
+fn blend_multiply(src_r: i32, src_g: i32, src_b: i32, src_a: i32, dst_r: i32, dst_g: i32, dst_b: i32, dst_a: i32) -> i64:
+    """Multiply blend: each channel = src * dst / 255, then alpha-composite."""
+    if src_a == 0:
+        return pack_rgba(dst_r, dst_g, dst_b, dst_a)
+
+    val mr = (src_r * dst_r) / 255
+    val mg = (src_g * dst_g) / 255
+    val mb = (src_b * dst_b) / 255
+
+    blend_normal(mr, mg, mb, src_a, dst_r, dst_g, dst_b, dst_a)

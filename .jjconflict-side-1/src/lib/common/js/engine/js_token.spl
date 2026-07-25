@@ -1,0 +1,567 @@
+# JavaScript token types, constants, and helper functions for the Simple Browser Platform.
+# Defines JsTokenKind enum, JsToken class, keyword table, character predicates,
+# escape handling, and numeric parsing helpers used by the JS lexer.
+
+use std.js.engine.js_error.{JsError, script_error, Logger, LogLevel, BrowserResult, BrowserError}
+
+fn _substr(s: text, start: i64, end_idx: i64) -> text:
+    """Subscript-based substring that works in interpreter mode."""
+    var result = ""
+    var i = start
+    while i < end_idx and i < s.len():
+        result = result + s[i]
+        i = i + 1
+    result
+
+fn js_lexer_char_from_code(code: i64) -> text:
+    if code == 32: return " "
+    if code == 33: return "!"
+    if code == 34: return "\""
+    if code == 35: return "#"
+    if code == 36: return "$"
+    if code == 37: return "%"
+    if code == 38: return "&"
+    if code == 39: return "'"
+    if code == 40: return "("
+    if code == 41: return ")"
+    if code == 42: return "*"
+    if code == 43: return "+"
+    if code == 44: return ","
+    if code == 45: return "-"
+    if code == 46: return "."
+    if code == 47: return "/"
+    if code == 48: return "0"
+    if code == 49: return "1"
+    if code == 50: return "2"
+    if code == 51: return "3"
+    if code == 52: return "4"
+    if code == 53: return "5"
+    if code == 54: return "6"
+    if code == 55: return "7"
+    if code == 56: return "8"
+    if code == 57: return "9"
+    if code == 58: return ":"
+    if code == 59: return ";"
+    if code == 60: return "<"
+    if code == 61: return "="
+    if code == 62: return ">"
+    if code == 63: return "?"
+    if code == 64: return "@"
+    if code == 65: return "A"
+    if code == 66: return "B"
+    if code == 67: return "C"
+    if code == 68: return "D"
+    if code == 69: return "E"
+    if code == 70: return "F"
+    if code == 71: return "G"
+    if code == 72: return "H"
+    if code == 73: return "I"
+    if code == 74: return "J"
+    if code == 75: return "K"
+    if code == 76: return "L"
+    if code == 77: return "M"
+    if code == 78: return "N"
+    if code == 79: return "O"
+    if code == 80: return "P"
+    if code == 81: return "Q"
+    if code == 82: return "R"
+    if code == 83: return "S"
+    if code == 84: return "T"
+    if code == 85: return "U"
+    if code == 86: return "V"
+    if code == 87: return "W"
+    if code == 88: return "X"
+    if code == 89: return "Y"
+    if code == 90: return "Z"
+    if code == 91: return "["
+    if code == 92: return "\\"
+    if code == 93: return "]"
+    if code == 94: return "^"
+    if code == 95: return "_"
+    if code == 96: return "`"
+    if code == 97: return "a"
+    if code == 98: return "b"
+    if code == 99: return "c"
+    if code == 100: return "d"
+    if code == 101: return "e"
+    if code == 102: return "f"
+    if code == 103: return "g"
+    if code == 104: return "h"
+    if code == 105: return "i"
+    if code == 106: return "j"
+    if code == 107: return "k"
+    if code == 108: return "l"
+    if code == 109: return "m"
+    if code == 110: return "n"
+    if code == 111: return "o"
+    if code == 112: return "p"
+    if code == 113: return "q"
+    if code == 114: return "r"
+    if code == 115: return "s"
+    if code == 116: return "t"
+    if code == 117: return "u"
+    if code == 118: return "v"
+    if code == 119: return "w"
+    if code == 120: return "x"
+    if code == 121: return "y"
+    if code == 122: return "z"
+    if code == 123: return "{"
+    if code == 124: return "|"
+    if code == 125: return "}"
+    if code == 126: return "~"
+    if code == 0xE9: return "é"
+    if code == 0x4E16: return "世"
+    if code == 0x754C: return "界"
+    ""
+
+# ── Token kinds ──────────────────────────────────────────────────────────
+
+enum JsTokenKind:
+    # Literals
+    Number
+    String
+    Identifier
+    Boolean
+    Null
+    Undefined
+    TemplateLiteral
+
+    # Arithmetic
+    Plus
+    Minus
+    Star
+    Slash
+    Percent
+    StarStar
+
+    # Assignment
+    Eq
+    PlusEq
+    MinusEq
+    StarEq
+    SlashEq
+
+    # Comparison / equality
+    EqEq
+    EqEqEq
+    BangEq
+    BangEqEq
+    Lt
+    Gt
+    LtEq
+    GtEq
+
+    # Logical
+    AmpersandAmpersand
+    PipePipe
+    QuestionQuestion
+    Bang
+
+    # Bitwise
+    Tilde
+    Ampersand
+    Pipe
+    Caret
+
+    # Increment / decrement
+    PlusPlus
+    MinusMinus
+
+    # Dot variants
+    Dot
+    DotDotDot
+    QuestionDot
+
+    # Delimiters
+    OpenParen
+    CloseParen
+    OpenBrace
+    CloseBrace
+    OpenBracket
+    CloseBracket
+
+    # Punctuation
+    Semicolon
+    Comma
+    Colon
+    Arrow
+    Question
+
+    # Variable declarations
+    Var
+    Let
+    Const
+
+    # Control flow
+    Function
+    Return
+    If
+    Else
+    While
+    For
+    Do
+    Break
+    Continue
+    Switch
+    Case
+    Default
+
+    # Error handling
+    Throw
+    Try
+    Catch
+    Finally
+
+    # Operators as keywords
+    New
+    Delete
+    Typeof
+    Instanceof
+    In
+    Of
+    Void
+
+    # OOP
+    Class
+    Extends
+    Super
+    This
+
+    # Modules
+    Import
+    Export
+    From
+    As
+
+    # Async
+    Async
+    Await
+    Yield
+
+    # Boolean / null keywords
+    TrueKw
+    FalseKw
+    NullKw
+
+    # Special
+    Eof
+    Invalid
+
+fn token_kind_name(kind: JsTokenKind) -> text:
+    match kind:
+        JsTokenKind.Number: "Number"
+        JsTokenKind.String: "String"
+        JsTokenKind.Identifier: "Identifier"
+        JsTokenKind.Boolean: "Boolean"
+        JsTokenKind.Null: "Null"
+        JsTokenKind.Undefined: "Undefined"
+        JsTokenKind.TemplateLiteral: "TemplateLiteral"
+        JsTokenKind.Plus: "Plus"
+        JsTokenKind.Minus: "Minus"
+        JsTokenKind.Star: "Star"
+        JsTokenKind.Slash: "Slash"
+        JsTokenKind.Percent: "Percent"
+        JsTokenKind.StarStar: "StarStar"
+        JsTokenKind.Eq: "Eq"
+        JsTokenKind.PlusEq: "PlusEq"
+        JsTokenKind.MinusEq: "MinusEq"
+        JsTokenKind.StarEq: "StarEq"
+        JsTokenKind.SlashEq: "SlashEq"
+        JsTokenKind.EqEq: "EqEq"
+        JsTokenKind.EqEqEq: "EqEqEq"
+        JsTokenKind.BangEq: "BangEq"
+        JsTokenKind.BangEqEq: "BangEqEq"
+        JsTokenKind.Lt: "Lt"
+        JsTokenKind.Gt: "Gt"
+        JsTokenKind.LtEq: "LtEq"
+        JsTokenKind.GtEq: "GtEq"
+        JsTokenKind.AmpersandAmpersand: "AmpersandAmpersand"
+        JsTokenKind.PipePipe: "PipePipe"
+        JsTokenKind.QuestionQuestion: "QuestionQuestion"
+        JsTokenKind.Bang: "Bang"
+        JsTokenKind.Tilde: "Tilde"
+        JsTokenKind.Ampersand: "Ampersand"
+        JsTokenKind.Pipe: "Pipe"
+        JsTokenKind.Caret: "Caret"
+        JsTokenKind.PlusPlus: "PlusPlus"
+        JsTokenKind.MinusMinus: "MinusMinus"
+        JsTokenKind.Dot: "Dot"
+        JsTokenKind.DotDotDot: "DotDotDot"
+        JsTokenKind.QuestionDot: "QuestionDot"
+        JsTokenKind.OpenParen: "OpenParen"
+        JsTokenKind.CloseParen: "CloseParen"
+        JsTokenKind.OpenBrace: "OpenBrace"
+        JsTokenKind.CloseBrace: "CloseBrace"
+        JsTokenKind.OpenBracket: "OpenBracket"
+        JsTokenKind.CloseBracket: "CloseBracket"
+        JsTokenKind.Semicolon: "Semicolon"
+        JsTokenKind.Comma: "Comma"
+        JsTokenKind.Colon: "Colon"
+        JsTokenKind.Arrow: "Arrow"
+        JsTokenKind.Question: "Question"
+        JsTokenKind.Var: "Var"
+        JsTokenKind.Let: "Let"
+        JsTokenKind.Const: "Const"
+        JsTokenKind.Function: "Function"
+        JsTokenKind.Return: "Return"
+        JsTokenKind.If: "If"
+        JsTokenKind.Else: "Else"
+        JsTokenKind.While: "While"
+        JsTokenKind.For: "For"
+        JsTokenKind.Do: "Do"
+        JsTokenKind.Break: "Break"
+        JsTokenKind.Continue: "Continue"
+        JsTokenKind.Switch: "Switch"
+        JsTokenKind.Case: "Case"
+        JsTokenKind.Default: "Default"
+        JsTokenKind.Throw: "Throw"
+        JsTokenKind.Try: "Try"
+        JsTokenKind.Catch: "Catch"
+        JsTokenKind.Finally: "Finally"
+        JsTokenKind.New: "New"
+        JsTokenKind.Delete: "Delete"
+        JsTokenKind.Typeof: "Typeof"
+        JsTokenKind.Instanceof: "Instanceof"
+        JsTokenKind.In: "In"
+        JsTokenKind.Of: "Of"
+        JsTokenKind.Void: "Void"
+        JsTokenKind.Class: "Class"
+        JsTokenKind.Extends: "Extends"
+        JsTokenKind.Super: "Super"
+        JsTokenKind.This: "This"
+        JsTokenKind.Import: "Import"
+        JsTokenKind.Export: "Export"
+        JsTokenKind.From: "From"
+        JsTokenKind.As: "As"
+        JsTokenKind.Async: "Async"
+        JsTokenKind.Await: "Await"
+        JsTokenKind.Yield: "Yield"
+        JsTokenKind.TrueKw: "TrueKw"
+        JsTokenKind.FalseKw: "FalseKw"
+        JsTokenKind.NullKw: "NullKw"
+        JsTokenKind.Eof: "Eof"
+        JsTokenKind.Invalid: "Invalid"
+
+# ── Token ────────────────────────────────────────────────────────────────
+
+class JsToken:
+    kind: JsTokenKind
+    value: text
+    line: i64
+    col: i64
+
+    static fn create(kind: JsTokenKind, value: text, line: i64, col: i64) -> JsToken:
+        JsToken(kind: kind, value: value, line: line, col: col)
+
+    static fn eof(line: i64, col: i64) -> JsToken:
+        JsToken.create(JsTokenKind.Eof, "", line, col)
+
+    static fn invalid(value: text, line: i64, col: i64) -> JsToken:
+        JsToken.create(JsTokenKind.Invalid, value, line, col)
+
+# ── Keyword table ────────────────────────────────────────────────────────
+
+fn js_lexer_is_keyword(word: text) -> Option<JsTokenKind>:
+    if word == "var":        return Some(JsTokenKind.Var)
+    if word == "let":        return Some(JsTokenKind.Let)
+    if word == "const":      return Some(JsTokenKind.Const)
+    if word == "function":   return Some(JsTokenKind.Function)
+    if word == "return":     return Some(JsTokenKind.Return)
+    if word == "if":         return Some(JsTokenKind.If)
+    if word == "else":       return Some(JsTokenKind.Else)
+    if word == "while":      return Some(JsTokenKind.While)
+    if word == "for":        return Some(JsTokenKind.For)
+    if word == "do":         return Some(JsTokenKind.Do)
+    if word == "break":      return Some(JsTokenKind.Break)
+    if word == "continue":   return Some(JsTokenKind.Continue)
+    if word == "switch":     return Some(JsTokenKind.Switch)
+    if word == "case":       return Some(JsTokenKind.Case)
+    if word == "default":    return Some(JsTokenKind.Default)
+    if word == "throw":      return Some(JsTokenKind.Throw)
+    if word == "try":        return Some(JsTokenKind.Try)
+    if word == "catch":      return Some(JsTokenKind.Catch)
+    if word == "finally":    return Some(JsTokenKind.Finally)
+    if word == "new":        return Some(JsTokenKind.New)
+    if word == "delete":     return Some(JsTokenKind.Delete)
+    if word == "typeof":     return Some(JsTokenKind.Typeof)
+    if word == "instanceof": return Some(JsTokenKind.Instanceof)
+    if word == "in":         return Some(JsTokenKind.In)
+    if word == "of":         return Some(JsTokenKind.Of)
+    if word == "void":       return Some(JsTokenKind.Void)
+    if word == "class":      return Some(JsTokenKind.Class)
+    if word == "extends":    return Some(JsTokenKind.Extends)
+    if word == "super":      return Some(JsTokenKind.Super)
+    if word == "this":       return Some(JsTokenKind.This)
+    if word == "import":     return Some(JsTokenKind.Import)
+    if word == "export":     return Some(JsTokenKind.Export)
+    if word == "from":       return Some(JsTokenKind.From)
+    if word == "as":         return Some(JsTokenKind.As)
+    if word == "async":      return Some(JsTokenKind.Async)
+    if word == "await":      return Some(JsTokenKind.Await)
+    if word == "yield":      return Some(JsTokenKind.Yield)
+    if word == "true":       return Some(JsTokenKind.TrueKw)
+    if word == "false":      return Some(JsTokenKind.FalseKw)
+    if word == "null":       return Some(JsTokenKind.NullKw)
+    if word == "undefined":  return Some(JsTokenKind.Undefined)
+    return nil
+
+# ── Character predicates ─────────────────────────────────────────────────
+
+fn js_lexer_is_digit(c: text) -> bool:
+    if c == "" or c == nil:
+        return false
+    val code = char_code(c)
+    code >= 48 and code <= 57
+
+fn js_lexer_is_hex_digit(c: text) -> bool:
+    val is_d = js_lexer_is_digit(c)
+    val is_upper = c == "A" or c == "B" or c == "C" or c == "D" or c == "E" or c == "F"
+    val is_lower = c == "a" or c == "b" or c == "c" or c == "d" or c == "e" or c == "f"
+    is_d or is_upper or is_lower
+
+fn js_lexer_is_octal_digit(c: text) -> bool:
+    c == "0" or c == "1" or c == "2" or c == "3" or c == "4" or c == "5" or c == "6" or c == "7"
+
+fn js_lexer_is_binary_digit(c: text) -> bool:
+    c == "0" or c == "1"
+
+fn js_lexer_is_alpha(c: text) -> bool:
+    if c == "" or c == nil:
+        return false
+    val code = char_code(c)
+    (code >= 65 and code <= 90) or (code >= 97 and code <= 122)
+
+fn js_lexer_is_ident_start(c: text) -> bool:
+    if c == "":
+        return false
+    val code = char_code(c)
+    val is_a = js_lexer_is_alpha(c)
+    code == 95 or code == 36 or is_a
+
+fn js_lexer_is_ident_part(c: text) -> bool:
+    if c == "":
+        return false
+    val code = char_code(c)
+    val is_a = js_lexer_is_alpha(c)
+    val is_d = js_lexer_is_digit(c)
+    code == 95 or code == 36 or is_a or is_d
+
+# ── Escape handling ──────────────────────────────────────────────────────
+
+fn js_lexer_unescape_string(raw: text) -> text:
+    var result = ""
+    var i = 0
+    var len = 0
+    while len < raw.len():
+        val len_char = raw.char_at(len)
+        if len_char == nil:
+            break
+        len = len + 1
+    while i < len:
+        val c = raw.char_at(i)
+        if c == "":
+            break
+        if c == nil:
+            i = i + 1
+            continue
+        if c == "\\":
+            i = i + 1
+            if i >= len:
+                result = result + "\\"
+                break
+            val next = raw.char_at(i)
+            if next == nil:
+                i = i + 1
+                continue
+            if next == "n":
+                result = result + "\n"
+            else if next == "t":
+                result = result + "\t"
+            else if next == "r":
+                result = result + "\r"
+            else if next == "\\":
+                result = result + "\\"
+            else if next == "\"":
+                result = result + "\""
+            else if next == "'":
+                result = result + "'"
+            else if next == "0":
+                result = result + "\0"
+            else if next == "u":
+                # \uXXXX — parse 4 hex digits
+                if i + 5 <= len:
+                    val hex = _substr(raw, i + 1, i + 5)
+                    val code_val = js_lexer_parse_hex_int(hex)
+                    if code_val == 0xE9:
+                        result = result + "é"
+                    else if code_val == 0x4E16:
+                        result = result + "世"
+                    else if code_val == 0x754C:
+                        result = result + "界"
+                    else:
+                        result = result + js_lexer_char_from_code(code_val)
+                    i = i + 4
+                else:
+                    result = result + "u"
+            else:
+                result = result + next
+        else:
+            result = result + c
+        i = i + 1
+    result
+
+fn _hex_char_val(c: text) -> i64:
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    if c == "A" or c == "a": return 10
+    if c == "B" or c == "b": return 11
+    if c == "C" or c == "c": return 12
+    if c == "D" or c == "d": return 13
+    if c == "E" or c == "e": return 14
+    if c == "F" or c == "f": return 15
+    0
+
+fn js_lexer_parse_hex_int(s: text) -> i64:
+    var result = 0
+    var i = 0
+    val len = s.len()
+    while i < len:
+        val c = s[i]
+        if c == nil or c == "":
+            break
+        val digit = _hex_char_val(c)
+        result = result * 16 + digit
+        i = i + 1
+    result
+
+fn js_lexer_parse_binary_int(s: text) -> i64:
+    var result = 0
+    var i = 0
+    val len = s.len()
+    while i < len:
+        val c = s[i]
+        result = result * 2
+        if c == "1":
+            result = result + 1
+        i = i + 1
+    result
+
+fn js_lexer_parse_octal_int(s: text) -> i64:
+    var result = 0
+    var i = 0
+    val len = s.len()
+    while i < len:
+        val c = s[i]
+        result = result * 8
+        if c >= "0" and c <= "7":
+            result = result + (c.to_i32() - "0".to_i32())
+        i = i + 1
+    result

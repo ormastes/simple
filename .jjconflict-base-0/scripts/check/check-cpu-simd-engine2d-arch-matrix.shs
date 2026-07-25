@@ -1,0 +1,333 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/cpu-simd-engine2d-arch-matrix}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/cpu_simd_engine2d_arch_matrix_$(date -u +%F).md}"
+STRICT="${CPU_SIMD_ARCH_MATRIX_STRICT:-0}"
+SKIP_RUN="${CPU_SIMD_ARCH_MATRIX_SKIP_RUN:-0}"
+TARGET_BUILD="${CPU_SIMD_ARCH_MATRIX_TARGET_BUILD:-0}"
+ALLOW_PARTIAL="${CPU_SIMD_ARCH_MATRIX_ALLOW_PARTIAL:-0}"
+NATIVE_BUILD_SIMPLE="${CPU_SIMD_ARCH_MATRIX_NATIVE_BUILD_SIMPLE:-src/compiler_rust/target/debug/simple}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+
+host_arch() {
+    case "$(uname -m 2>/dev/null || echo unknown)" in
+        x86_64|amd64) echo x86_64 ;;
+        aarch64|arm64) echo aarch64 ;;
+        riscv64) echo riscv64 ;;
+        *) echo unknown ;;
+    esac
+}
+
+arch_bin() {
+    arch="$1"
+    case "$arch" in
+        x86_64) printf '%s' "${CPU_SIMD_ARCH_MATRIX_X86_64_SIMPLE_BIN:-}" ;;
+        aarch64) printf '%s' "${CPU_SIMD_ARCH_MATRIX_AARCH64_SIMPLE_BIN:-}" ;;
+        riscv64) printf '%s' "${CPU_SIMD_ARCH_MATRIX_RISCV64_SIMPLE_BIN:-}" ;;
+    esac
+}
+
+env_value() {
+    file="$1"
+    key="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+write_kv() {
+    printf '%s=%s\n' "$1" "$2" >>"$ENV_PATH"
+}
+
+source_range_contains() {
+    start="$1"
+    pattern="$2"
+    awk "/$start/ { grab = 1 } grab { print } /^}/ { if (grab) exit }" src/runtime/runtime_simd_dispatch.c |
+        grep -q "$pattern"
+}
+
+check_source_contract() {
+    status=pass
+    reason=mutable-aarch64-dispatch-present
+    if ! source_range_contains "rt_engine2d_simd_fill_u32" "engine2d_fill_into(data + off, n, color_word)"; then
+        status=fail
+        reason=missing-aarch64-fill-dispatch
+    elif ! source_range_contains "rt_engine2d_simd_copy_u32" "engine2d_copy_into(dst_start, src_start, n)"; then
+        status=fail
+        reason=missing-aarch64-copy-dispatch
+    elif ! source_range_contains "rt_engine2d_simd_copy_u32" "memmove(dst_start, src_start"; then
+        status=fail
+        reason=missing-copy-overlap-guard
+    fi
+    write_kv cpu_simd_engine2d_arch_matrix_source_contract_status "$status"
+    write_kv cpu_simd_engine2d_arch_matrix_source_contract_reason "$reason"
+}
+
+runtime_cc() {
+    arch="$1"
+    case "$arch" in
+        x86_64) printf '%s' "${CPU_SIMD_ARCH_MATRIX_X86_64_CC:-${CC:-cc}}" ;;
+        aarch64) printf '%s' "${CPU_SIMD_ARCH_MATRIX_AARCH64_CC:-aarch64-linux-gnu-gcc}" ;;
+        riscv64|riscv64_rvv) printf '%s' "${CPU_SIMD_ARCH_MATRIX_RISCV64_CC:-riscv64-linux-gnu-gcc}" ;;
+    esac
+}
+
+compile_runtime_owner() {
+    arch="$1"
+    cc="$(runtime_cc "$arch")"
+    flags=""
+    if [ "$arch" = "riscv64_rvv" ]; then
+        flags="-march=rv64gcv -mabi=lp64d"
+    fi
+    obj="$BUILD_DIR/runtime_${arch}.o"
+    err="$BUILD_DIR/runtime_${arch}.stderr.txt"
+
+    if ! command -v "$cc" >/dev/null 2>&1; then
+        status=unavailable
+        reason=missing-c-compiler
+    else
+        set +e
+        # shellcheck disable=SC2086
+        "$cc" $flags -c -O2 -std=gnu11 -Isrc/runtime src/runtime/runtime_simd_dispatch.c -o "$obj" 2>"$err"
+        code=$?
+        set -e
+        if [ "$code" -eq 0 ]; then
+            status=pass
+            reason=compiled
+        else
+            status=fail
+            reason="compile-exit-$code"
+        fi
+    fi
+
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_runtime_compile_status" "$status"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_runtime_compile_reason" "$reason"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_runtime_compile_cc" "$cc"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_runtime_compile_flags" "$flags"
+}
+
+target_triple() {
+    case "$1" in
+        x86_64) printf '%s' "x86_64-unknown-linux-gnu" ;;
+        aarch64) printf '%s' "aarch64-unknown-linux-gnu" ;;
+        riscv64) printf '%s' "riscv64gc-unknown-linux-gnu" ;;
+    esac
+}
+
+target_runner() {
+    case "$1" in
+        x86_64) printf '%s' "" ;;
+        aarch64) printf '%s' "qemu-aarch64 -L /usr/aarch64-linux-gnu" ;;
+        riscv64) printf '%s' "qemu-riscv64 -cpu rv64,v=true,vlen=128,elen=64 -L /usr/riscv64-linux-gnu" ;;
+    esac
+}
+
+target_file_pattern() {
+    case "$1" in
+        x86_64) printf '%s' "x86-64" ;;
+        aarch64) printf '%s' "ARM aarch64" ;;
+        riscv64) printf '%s' "RISC-V" ;;
+    esac
+}
+
+run_target_binary_build() {
+    arch="$1"
+    arch_dir="$BUILD_DIR/$arch"
+    out_bin="$arch_dir/engine2d-simd-c-kernels/engine2d_simd_c_test"
+    triple="$(target_triple "$arch")"
+    runner="$(target_runner "$arch")"
+    mkdir -p "$arch_dir"
+
+    if [ "$TARGET_BUILD" != "1" ]; then
+        status=unavailable
+        reason=disabled
+    elif [ "$runner" != "" ] && ! command -v "$(printf '%s' "$runner" | awk '{print $1}')" >/dev/null 2>&1; then
+        status=unavailable
+        reason=missing-qemu-runner
+    elif ! command -v "$(runtime_cc "$arch")" >/dev/null 2>&1; then
+        status=unavailable
+        reason=missing-c-compiler
+    else
+        set +e
+        CC="$(runtime_cc "$arch")" \
+            BUILD_DIR="$arch_dir/engine2d-simd-c-kernels" \
+            ENGINE2D_SIMD_C_KERNELS_CFLAGS="$(if [ "$arch" = "riscv64" ]; then printf '%s' "-march=rv64gcv -mabi=lp64d"; fi)" \
+            ENGINE2D_SIMD_C_KERNELS_RUNNER="$runner" \
+            ENGINE2D_ROW_SCHEDULING_SKIP_PERF=1 \
+            sh scripts/check/check-engine2d-simd-c-kernels.shs \
+            >"$arch_dir/engine2d-simd-c-kernels.stdout.txt" \
+            2>"$arch_dir/engine2d-simd-c-kernels.stderr.txt"
+        run_code=$?
+        file "$out_bin" >"$arch_dir/file.txt" 2>/dev/null
+        file_code=$?
+        set -e
+        if [ "$run_code" -ne 0 ]; then
+            status=fail
+            reason="engine2d-simd-c-kernels-exit-$run_code"
+        elif [ "$file_code" -ne 0 ] || ! grep -q "$(target_file_pattern "$arch")" "$arch_dir/file.txt"; then
+            status=fail
+            reason=target-file-mismatch
+        else
+            status=pass
+            reason=engine2d-simd-c-kernels-ran-with-row-scheduling
+        fi
+    fi
+
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_target_binary_status" "$status"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_target_binary_reason" "$reason"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_target_binary_triple" "$triple"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_target_binary_path" "$out_bin"
+}
+
+run_arch() {
+    arch="$1"
+    current_host="$2"
+    arch_dir="$BUILD_DIR/$arch"
+    arch_out="$arch_dir/out"
+    mkdir -p "$arch_dir"
+    bin="$(arch_bin "$arch")"
+    if [ "$bin" = "" ] && [ "$arch" = "$current_host" ]; then
+        bin="${SIMPLE_BIN:-bin/simple}"
+    fi
+
+    if [ "$SKIP_RUN" = "1" ]; then
+        status=unavailable
+        reason=skip-run
+    elif [ "$bin" = "" ]; then
+        status=unavailable
+        reason=missing-simple-bin
+    elif [ ! -x "$bin" ]; then
+        status=unavailable
+        reason=missing-simple-bin
+    else
+        set +e
+        SIMPLE_BIN="$bin" BUILD_DIR="$arch_out" REPORT_PATH="$arch_dir/report.md" \
+            sh scripts/check/check-cpu-simd-engine2d-evidence.shs \
+            >"$arch_dir/stdout.txt" 2>"$arch_dir/stderr.txt"
+        code=$?
+        set -e
+        env_file="$arch_out/evidence.env"
+        status="$(env_value "$env_file" cpu_simd_evidence_status)"
+        reason="$(env_value "$env_file" cpu_simd_evidence_reason)"
+        if [ "$status" = "" ]; then
+            status=fail
+            reason="missing-evidence-env-exit-$code"
+        elif [ "$code" -ne 0 ] && [ "$status" != "fail" ]; then
+            status=fail
+            reason="wrapper-exit-$code"
+        fi
+    fi
+
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_status" "$status"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_reason" "$reason"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_simple_bin" "$bin"
+    write_kv "cpu_simd_engine2d_arch_matrix_${arch}_report" "$arch_dir/report.md"
+}
+
+ENV_PATH="$BUILD_DIR/evidence.env"
+rm -f "$ENV_PATH" "$REPORT_PATH"
+
+HOST_ARCH="$(host_arch)"
+write_kv cpu_simd_engine2d_arch_matrix_host_arch "$HOST_ARCH"
+write_kv cpu_simd_engine2d_arch_matrix_strict "$STRICT"
+write_kv cpu_simd_engine2d_arch_matrix_target_build "$TARGET_BUILD"
+write_kv cpu_simd_engine2d_arch_matrix_native_build_simple "$NATIVE_BUILD_SIMPLE"
+check_source_contract
+
+for arch in x86_64 aarch64 riscv64; do
+    run_arch "$arch" "$HOST_ARCH"
+done
+for arch in x86_64 aarch64 riscv64 riscv64_rvv; do
+    compile_runtime_owner "$arch"
+done
+for arch in x86_64 aarch64 riscv64; do
+    run_target_binary_build "$arch"
+done
+
+passed=0
+missing=0
+failed=0
+for arch in x86_64 aarch64 riscv64; do
+    status="$(env_value "$ENV_PATH" "cpu_simd_engine2d_arch_matrix_${arch}_status")"
+    case "$status" in
+        pass) passed=$((passed + 1)) ;;
+        fail) failed=$((failed + 1)) ;;
+        *) missing=$((missing + 1)) ;;
+    esac
+done
+runtime_failed=0
+runtime_missing=0
+for arch in x86_64 aarch64 riscv64 riscv64_rvv; do
+    status="$(env_value "$ENV_PATH" "cpu_simd_engine2d_arch_matrix_${arch}_runtime_compile_status")"
+    case "$status" in
+        pass) ;;
+        fail) runtime_failed=$((runtime_failed + 1)) ;;
+        *) runtime_missing=$((runtime_missing + 1)) ;;
+    esac
+done
+target_binary_failed=0
+target_binary_missing=0
+for arch in x86_64 aarch64 riscv64; do
+    status="$(env_value "$ENV_PATH" "cpu_simd_engine2d_arch_matrix_${arch}_target_binary_status")"
+    case "$status" in
+        pass) ;;
+        fail) target_binary_failed=$((target_binary_failed + 1)) ;;
+        *) target_binary_missing=$((target_binary_missing + 1)) ;;
+    esac
+done
+
+overall=pass
+reason=all-arches-pass
+source_contract_status="$(env_value "$ENV_PATH" cpu_simd_engine2d_arch_matrix_source_contract_status)"
+if [ "$source_contract_status" != "pass" ]; then
+    overall=fail
+    reason=source-contract-failed
+elif [ "$target_binary_failed" -gt 0 ]; then
+    overall=fail
+    reason=target-binary-build-failed
+elif [ "$TARGET_BUILD" = "1" ] && [ "$ALLOW_PARTIAL" != "1" ] && [ "$target_binary_missing" -gt 0 ]; then
+    overall=fail
+    reason=target-binary-build-unavailable
+elif [ "$runtime_failed" -gt 0 ]; then
+    overall=fail
+    reason=runtime-owner-cross-compile-failed
+elif [ "$TARGET_BUILD" = "1" ] && [ "$target_binary_missing" -eq 0 ]; then
+    overall=pass
+    reason=target-binary-builds-pass
+elif [ "$failed" -gt 0 ]; then
+    overall=fail
+    reason=arch-evidence-failed
+elif [ "$missing" -gt 0 ]; then
+    overall=partial
+    reason=arch-evidence-unavailable
+fi
+if [ "$STRICT" = "1" ] && [ "$overall" != "pass" ]; then
+    overall=fail
+    reason=strict-requires-all-arches-pass
+fi
+
+write_kv cpu_simd_engine2d_arch_matrix_passed_count "$passed"
+write_kv cpu_simd_engine2d_arch_matrix_unavailable_count "$missing"
+write_kv cpu_simd_engine2d_arch_matrix_failed_count "$failed"
+write_kv cpu_simd_engine2d_arch_matrix_runtime_compile_unavailable_count "$runtime_missing"
+write_kv cpu_simd_engine2d_arch_matrix_runtime_compile_failed_count "$runtime_failed"
+write_kv cpu_simd_engine2d_arch_matrix_target_binary_unavailable_count "$target_binary_missing"
+write_kv cpu_simd_engine2d_arch_matrix_target_binary_failed_count "$target_binary_failed"
+write_kv cpu_simd_engine2d_arch_matrix_status "$overall"
+write_kv cpu_simd_engine2d_arch_matrix_reason "$reason"
+
+{
+    echo "# CPU SIMD Engine2D Arch Matrix"
+    echo
+    sed 's/^/- /' "$ENV_PATH"
+} >"$REPORT_PATH"
+
+cat "$ENV_PATH"
+echo "report_path=$REPORT_PATH"
+
+if [ "$overall" = "fail" ]; then
+    exit 1
+fi

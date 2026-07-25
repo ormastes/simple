@@ -1,0 +1,111 @@
+# Typed SQL Database Library - Health Check and Metrics
+#
+# Provides health check pings and aggregate query metrics for monitoring.
+
+use std.database.sql.types.{DbError}
+use std.database.sql.connection.{Database}
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# _now_ms — millisecond timestamp via process polyfill
+# ============================================================================
+
+fn _now_ms() -> i64:
+    val (out, err, code) = rt_process_run("date", ["+%s%3N"])
+    val _ = err
+    val _ = code
+    val ms = out.trim().to_int() ?? 0
+    ms * 1000
+
+# ============================================================================
+# HealthStatus — result of a health check ping
+# ============================================================================
+
+struct HealthStatus:
+    healthy: bool
+    latency_ms: i64
+    error: text?
+    last_check_ms: i64
+
+# ============================================================================
+# health_check — ping db with SELECT 1, measure latency
+# ============================================================================
+
+fn health_check(db: Database) -> HealthStatus:
+    val start = _now_ms()
+    val result = db.query("SELECT 1", [])
+    val end = _now_ms()
+    val latency = end - start
+    val now = end
+    match result:
+        Ok(_):
+            HealthStatus(
+                healthy: true,
+                latency_ms: latency,
+                error: nil,
+                last_check_ms: now,
+            )
+        Err(e):
+            HealthStatus(
+                healthy: false,
+                latency_ms: latency,
+                error: Some(e.message()),
+                last_check_ms: now,
+            )
+
+# ============================================================================
+# DbMetrics — aggregate counters for DB operations
+# ============================================================================
+
+class DbMetrics:
+    total_queries: i64
+    total_executions: i64
+    total_errors: i64
+    avg_query_ms: i64
+    slow_query_count: i64
+    pool_active: i64
+    pool_idle: i64
+    _query_ms_sum: i64
+    _slow_threshold_ms: i64
+
+    static fn new(slow_threshold_ms: i64) -> DbMetrics:
+        DbMetrics(
+            total_queries: 0,
+            total_executions: 0,
+            total_errors: 0,
+            avg_query_ms: 0,
+            slow_query_count: 0,
+            pool_active: 0,
+            pool_idle: 0,
+            _query_ms_sum: 0,
+            _slow_threshold_ms: slow_threshold_ms,
+        )
+
+    me record_query(duration_ms: i64):
+        self.total_queries = self.total_queries + 1
+        self._query_ms_sum = self._query_ms_sum + duration_ms
+        if self.total_queries > 0:
+            self.avg_query_ms = self._query_ms_sum / self.total_queries
+        if duration_ms >= self._slow_threshold_ms:
+            self.slow_query_count = self.slow_query_count + 1
+
+    me record_execution(duration_ms: i64):
+        val _ = duration_ms
+        self.total_executions = self.total_executions + 1
+
+    me record_error():
+        self.total_errors = self.total_errors + 1
+
+    fn snapshot() -> DbMetrics:
+        DbMetrics(
+            total_queries: self.total_queries,
+            total_executions: self.total_executions,
+            total_errors: self.total_errors,
+            avg_query_ms: self.avg_query_ms,
+            slow_query_count: self.slow_query_count,
+            pool_active: self.pool_active,
+            pool_idle: self.pool_idle,
+            _query_ms_sum: self._query_ms_sum,
+            _slow_threshold_ms: self._slow_threshold_ms,
+        )

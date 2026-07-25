@@ -1,0 +1,70 @@
+# Markdown state hardening specs.
+#
+# Covers: initial state, repeated toggles, toggles on empty buffer,
+# state round-trips through command dispatch.
+
+use std.spec
+use std.editor.view.md_editing.*
+
+describe "markdown_state via MdEditorState":
+
+    it "new state has preview and outline hidden":
+        val state = md_editor_state_new()
+        expect(md_editor_state_preview_visible(state)).to_equal(false)
+        expect(md_editor_state_outline_visible(state)).to_equal(false)
+
+    it "toggle preview shows then hides":
+        val state = md_editor_state_new()
+        val result1 = md_commands_dispatch("markdown.togglePreview", state, "", 0, 0)
+        expect(result1.preview_visible).to_equal(true)
+        val state2 = md_command_result_state(result1)
+        val result2 = md_commands_dispatch("markdown.togglePreview", state2, "", 0, 0)
+        expect(result2.preview_visible).to_equal(false)
+
+    it "toggle outline shows then hides":
+        val state = md_editor_state_new()
+        val result1 = md_commands_dispatch("markdown.toggleOutline", state, "", 0, 0)
+        expect(result1.outline_visible).to_equal(true)
+        val state2 = md_command_result_state(result1)
+        val result2 = md_commands_dispatch("markdown.toggleOutline", state2, "", 0, 0)
+        expect(result2.outline_visible).to_equal(false)
+
+    it "repeated preview toggles return to initial state":
+        val state = md_editor_state_new()
+        val r1 = md_commands_dispatch("markdown.togglePreview", state, "", 0, 0)
+        val r2 = md_commands_dispatch("markdown.togglePreview", md_command_result_state(r1), "", 0, 0)
+        val r3 = md_commands_dispatch("markdown.togglePreview", md_command_result_state(r2), "", 0, 0)
+        expect(r3.preview_visible).to_equal(true)
+
+    it "toggle preview does not affect outline state":
+        val state = md_editor_state_new()
+        val after_outline = md_command_result_state(md_commands_dispatch("markdown.toggleOutline", state, "", 0, 0))
+        val after_preview = md_command_result_state(md_commands_dispatch("markdown.togglePreview", after_outline, "", 0, 0))
+        expect(md_editor_state_outline_visible(after_preview)).to_equal(true)
+        expect(md_editor_state_preview_visible(after_preview)).to_equal(true)
+
+    it "toggle outline does not affect preview state":
+        val state = md_editor_state_new()
+        val after_preview = md_command_result_state(md_commands_dispatch("markdown.togglePreview", state, "", 0, 0))
+        val after_outline = md_command_result_state(md_commands_dispatch("markdown.toggleOutline", after_preview, "", 0, 0))
+        expect(md_editor_state_preview_visible(after_outline)).to_equal(true)
+        expect(md_editor_state_outline_visible(after_outline)).to_equal(true)
+
+    it "state on empty buffer toggles do not crash":
+        val state = md_editor_state_new()
+        val result = md_commands_dispatch("markdown.togglePreview", state, "", 0, 0)
+        expect(result.preview_visible).to_equal(true)
+
+    it "unknown command preserves state unchanged":
+        val state = md_editor_state_new()
+        val result = md_commands_dispatch("unknown.command", state, "", 0, 0)
+        expect(result.preview_visible).to_equal(false)
+        expect(result.outline_visible).to_equal(false)
+
+    it "command_result_state round-trips preview and outline":
+        val state = md_editor_state_new()
+        val r1 = md_commands_dispatch("markdown.togglePreview", state, "", 0, 0)
+        val r2 = md_commands_dispatch("markdown.toggleOutline", md_command_result_state(r1), "", 0, 0)
+        val final_state = md_command_result_state(r2)
+        expect(md_editor_state_preview_visible(final_state)).to_equal(true)
+        expect(md_editor_state_outline_visible(final_state)).to_equal(true)

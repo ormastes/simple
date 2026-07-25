@@ -1,0 +1,200 @@
+# CAS Store — Cross-process disk content-addressed store (Option-C cache, phase 1)
+#
+# Plan: doc/03_plan/compiler/cache/global_cas_interpreter_cache_option_c_plan_2026-07-24.md §1.2
+#
+# Layout (all entries addressed by SHA-256 hex digest):
+#   <root>/VERSION                          # schema version stamp
+#   <root>/cas/sha256/<ab>/<cdef...>        # immutable content blobs
+#   <root>/actions/sha256/<ab>/<cdef...>    # action manifests -> artifact digests
+#   <root>/tmp/                             # private temp files for atomic rename
+#   <root>/quarantine/                      # digest-mismatched (corrupt) entries
+#
+# Digest paths REPLACE the legacy `/`->`_` flattening in
+# cache_validator.source_to_cache_path, which collides ("a/b_c" vs "a_b/c").
+#
+# Write protocol: private temp file (`<root>/tmp/<digest>.<pid>.tmp`) -> atomic
+# rename into digest path. A lost race with identical bytes is success. Every
+# read re-verifies content against the requested digest; mismatch = corruption
+# -> quarantine, never serve unverified bytes.
+#
+# Phase 1: standalone module only — NOT wired into any load path. No locking
+# beyond atomic rename, no GC, no remote cache.
+
+use std.crypto.sha256.{sha256_text}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_delete(path: text) -> bool
+extern fn rt_file_move(old_path: text, new_path: text) -> bool
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_env_get(key: text) -> text
+extern fn rt_getpid() -> i64
+extern fn rt_time_now_unix_micros() -> i64
+
+val CAS_SCHEMA_VERSION: i64 = 1
+val CAS_MANIFEST_HEADER: text = "simple-cas-manifest-v1"
+
+# Action manifest: maps one ActionDigest to the artifact digests it produced.
+struct ActionManifest:
+    action_digest: text
+    artifact_digests: [text]
+    schema_version: i64
+
+# ============================================================================
+# Root resolution + paths
+# ============================================================================
+
+fn cas_root() -> text:
+    val env = rt_env_get("SIMPLE_CACHE") ?? ""
+    if env != "":
+        return env
+    "build/cache_cas"
+
+fn cas_version_text() -> text:
+    "{CAS_SCHEMA_VERSION}"
+
+fn cas_blob_path(root: text, digest: text) -> text:
+    "{root}/cas/sha256/{digest.substring(0, 2)}/{digest.substring(2, digest.len())}"
+
+fn cas_action_path(root: text, digest: text) -> text:
+    "{root}/actions/sha256/{digest.substring(0, 2)}/{digest.substring(2, digest.len())}"
+
+fn cas_parent_dir(path: text) -> text:
+    val slash = path.last_index_of("/") ?? -1
+    if slash <= 0:
+        return ""
+    path.substring(0, slash)
+
+# ============================================================================
+# Store open + schema versioning
+# ============================================================================
+
+# Open (create) a store at `root`. If a VERSION stamp from a different schema
+# is found, the old entries are never trusted: cas/ and actions/ are moved
+# aside and the store starts empty under the current version.
+fn cas_open(root: text) -> bool:
+    rt_dir_create_all(root)
+    val vpath = "{root}/VERSION"
+    val current = cas_version_text()
+    if rt_file_exists(vpath):
+        val stored = rt_file_read_text(vpath) ?? ""
+        if stored.trim() != current:
+            val stamp = "{rt_getpid()}-{rt_time_now_unix_micros()}"
+            rt_file_move("{root}/cas", "{root}/stale-cas-{stamp}")
+            rt_file_move("{root}/actions", "{root}/stale-actions-{stamp}")
+            rt_file_write_text(vpath, current)
+    else:
+        rt_file_write_text(vpath, current)
+    rt_dir_create_all("{root}/cas/sha256")
+    rt_dir_create_all("{root}/actions/sha256")
+    rt_dir_create_all("{root}/tmp")
+    true
+
+# ============================================================================
+# Blob store
+# ============================================================================
+
+# Store content, return its digest. Dedup: an existing blob (including one
+# that lands via a lost race with identical bytes) is success. Returns "" only
+# on a hard write failure.
+fn cas_put(root: text, content: text) -> text:
+    val digest = sha256_text(content)
+    val path = cas_blob_path(root, digest)
+    if rt_file_exists(path):
+        return digest
+    rt_dir_create_all(cas_parent_dir(path))
+    rt_dir_create_all("{root}/tmp")
+    val tmp = "{root}/tmp/{digest}.{rt_getpid()}.tmp"
+    if not rt_file_write_text(tmp, content):
+        return ""
+    if not rt_file_move(tmp, path):
+        rt_file_delete(tmp)
+        if not rt_file_exists(path):
+            return ""
+    digest
+
+# Fetch content by digest, re-verifying the bytes hash to the requested
+# digest. Corruption -> quarantined + treated as absent; unverified bytes are
+# never returned.
+fn cas_get(root: text, digest: text) -> text?:
+    val path = cas_blob_path(root, digest)
+    if not rt_file_exists(path):
+        return nil
+    val content = rt_file_read_text(path) ?? ""
+    if sha256_text(content) != digest:
+        cas_quarantine(root, path)
+        return nil
+    content
+
+# Stamp-fast existence check (no verification — strict path is cas_get).
+fn cas_has(root: text, digest: text) -> bool:
+    rt_file_exists(cas_blob_path(root, digest))
+
+fn cas_quarantine(root: text, path: text) -> bool:
+    rt_dir_create_all("{root}/quarantine")
+    val name = "{rt_getpid()}-{rt_time_now_unix_micros()}"
+    if rt_file_move(path, "{root}/quarantine/{name}"):
+        return true
+    rt_file_delete(path)
+
+# ============================================================================
+# Action manifests
+# ============================================================================
+
+# Canonical serialization: fixed header line, action digest line, then one
+# artifact digest per line (order preserved as given).
+fn action_manifest_serialize(manifest: ActionManifest) -> text:
+    var lines: [text] = [CAS_MANIFEST_HEADER, manifest.action_digest]
+    for d in manifest.artifact_digests:
+        lines = lines.push(d)
+    lines.join("\n")
+
+fn action_manifest_parse(content: text) -> ActionManifest?:
+    val lines = content.split("\n")
+    if lines.len() < 2:
+        return nil
+    if lines[0] != CAS_MANIFEST_HEADER:
+        return nil
+    var artifacts: [text] = []
+    var i = 2
+    while i < lines.len():
+        if lines[i] != "":
+            artifacts = artifacts.push(lines[i])
+        i = i + 1
+    ActionManifest(action_digest: lines[1], artifact_digests: artifacts, schema_version: CAS_SCHEMA_VERSION)
+
+# Store a manifest under its action digest. Refuses a mislabeled manifest
+# (key != manifest.action_digest) — a poisoned mapping must not be admitted.
+fn action_put(root: text, action_digest: text, manifest: ActionManifest) -> bool:
+    if manifest.action_digest != action_digest:
+        return false
+    val path = cas_action_path(root, action_digest)
+    rt_dir_create_all(cas_parent_dir(path))
+    rt_dir_create_all("{root}/tmp")
+    val tmp = "{root}/tmp/action-{action_digest}.{rt_getpid()}.tmp"
+    if not rt_file_write_text(tmp, action_manifest_serialize(manifest)):
+        return false
+    if not rt_file_move(tmp, path):
+        rt_file_delete(tmp)
+        return rt_file_exists(path)
+    true
+
+# Fetch a manifest by action digest. The stored manifest's own action_digest
+# field must match the requested key; a tampered or unparseable manifest is
+# quarantined and treated as absent.
+fn action_get(root: text, action_digest: text) -> ActionManifest?:
+    val path = cas_action_path(root, action_digest)
+    if not rt_file_exists(path):
+        return nil
+    val content = rt_file_read_text(path) ?? ""
+    val parsed = action_manifest_parse(content)
+    match parsed:
+        case Some(manifest):
+            if manifest.action_digest != action_digest:
+                cas_quarantine(root, path)
+                return nil
+            return manifest
+        case nil:
+            cas_quarantine(root, path)
+            return nil

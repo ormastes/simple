@@ -1,0 +1,211 @@
+# Shared app-process contract for launching the same GUI app source either as a
+# native host app or as a WM-managed child process.
+
+struct WmFsAppBridgeRequest:
+    kind: text
+    source_path: text
+    app_id: text
+    title: text
+    pid: i64
+    window_w: i32
+    window_h: i32
+    content: text
+    frame_path: text
+    event_path: text
+    frame_seq_path: text
+
+struct WmFsAppEvent:
+    seq: i64
+    kind: text
+    x: i32
+    y: i32
+    button: i64
+    pressed: bool
+
+val WM_APP_MODE_ENV: text = "SIMPLE_WM_APP_MODE"
+val WM_APP_MODE_CLIENT: text = "client"
+val WM_BRIDGE_FILE_ENV: text = "SIMPLE_WM_BRIDGE_FILE"
+val WM_FRAME_FILE_ENV: text = "SIMPLE_WM_FRAME_FILE"
+val WM_EVENT_FILE_ENV: text = "SIMPLE_WM_EVENT_FILE"
+val WM_FRAME_SEQ_FILE_ENV: text = "SIMPLE_WM_FRAME_SEQ_FILE"
+val WM_CLIENT_HOLD_ENV: text = "SIMPLE_WM_CLIENT_HOLD"
+
+val WIDGET_SHOWCASE_APP_SOURCE: text = "examples/06_io/ui/widget_showcase_gui.spl"
+val WIDGET_SHOWCASE_APP_ID: text = "/examples/widget-showcase"
+val WIDGET_SHOWCASE_TITLE: text = "Widget Showcase"
+val WIDGET_SHOWCASE_WINDOW_W: i32 = 528
+val WIDGET_SHOWCASE_WINDOW_H: i32 = 692
+
+fn wm_app_mode_is_client(mode: text) -> bool:
+    mode == WM_APP_MODE_CLIENT
+
+fn wm_widget_showcase_event_path(frame_path: text) -> text:
+    frame_path + ".event"
+
+fn wm_widget_showcase_frame_seq_path(frame_path: text) -> text:
+    frame_path + ".seq"
+
+fn wm_fs_app_event_seq_path(event_path: text, seq: i64) -> text:
+    event_path + "." + seq.to_text()
+
+fn wm_widget_showcase_content_text(source_path: text, frame_path: text, pid: i64) -> text:
+    "source={source_path} frame={frame_path} pid={pid}"
+
+fn wm_widget_showcase_bridge_request_sized(pid: i64, frame_path: text, window_w: i32, window_h: i32) -> WmFsAppBridgeRequest:
+    WmFsAppBridgeRequest(
+        kind: "create_window",
+        source_path: WIDGET_SHOWCASE_APP_SOURCE,
+        app_id: WIDGET_SHOWCASE_APP_ID,
+        title: WIDGET_SHOWCASE_TITLE,
+        pid: pid,
+        window_w: window_w,
+        window_h: window_h,
+        content: wm_widget_showcase_content_text(WIDGET_SHOWCASE_APP_SOURCE, frame_path, pid),
+        frame_path: frame_path,
+        event_path: wm_widget_showcase_event_path(frame_path),
+        frame_seq_path: wm_widget_showcase_frame_seq_path(frame_path)
+    )
+
+fn wm_widget_showcase_bridge_request(pid: i64, frame_path: text) -> WmFsAppBridgeRequest:
+    wm_widget_showcase_bridge_request_sized(pid, frame_path, WIDGET_SHOWCASE_WINDOW_W, WIDGET_SHOWCASE_WINDOW_H)
+
+fn wm_fs_bridge_encode(req: WmFsAppBridgeRequest) -> text:
+    "kind={req.kind}\nsource_path={req.source_path}\napp_id={req.app_id}\ntitle={req.title}\npid={req.pid}\nwindow_w={req.window_w}\nwindow_h={req.window_h}\ncontent={req.content}\nframe_path={req.frame_path}\nevent_path={req.event_path}\nframe_seq_path={req.frame_seq_path}\n"
+
+fn _wm_bridge_value(doc: text, key: text) -> text:
+    val prefix = key + "="
+    val lines = doc.split("\n")
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        if line.starts_with(prefix):
+            return line.substring(prefix.len(), line.len())
+        i = i + 1
+    ""
+
+fn wm_fs_bridge_decode(doc: text) -> WmFsAppBridgeRequest:
+    WmFsAppBridgeRequest(
+        kind: _wm_bridge_value(doc, "kind"),
+        source_path: _wm_bridge_value(doc, "source_path"),
+        app_id: _wm_bridge_value(doc, "app_id"),
+        title: _wm_bridge_value(doc, "title"),
+        pid: _wm_bridge_value(doc, "pid").to_i64() ?? 0,
+        window_w: (_wm_bridge_value(doc, "window_w").to_i64() ?? 0).to_i32(),
+        window_h: (_wm_bridge_value(doc, "window_h").to_i64() ?? 0).to_i32(),
+        content: _wm_bridge_value(doc, "content"),
+        frame_path: _wm_bridge_value(doc, "frame_path"),
+        event_path: _wm_bridge_value(doc, "event_path"),
+        frame_seq_path: _wm_bridge_value(doc, "frame_seq_path")
+    )
+
+fn wm_fs_app_event(seq: i64, kind: text, x: i32, y: i32, button: i64, pressed: bool) -> WmFsAppEvent:
+    WmFsAppEvent(seq: seq, kind: kind, x: x, y: y, button: button, pressed: pressed)
+
+fn wm_fs_app_event_encode(ev: WmFsAppEvent) -> text:
+    "seq={ev.seq}\nkind={ev.kind}\nx={ev.x}\ny={ev.y}\nbutton={ev.button}\npressed={ev.pressed}\n"
+
+fn wm_fs_app_event_decode(doc: text) -> WmFsAppEvent:
+    WmFsAppEvent(
+        seq: _wm_bridge_value(doc, "seq").to_i64() ?? 0,
+        kind: _wm_bridge_value(doc, "kind"),
+        x: (_wm_bridge_value(doc, "x").to_i64() ?? 0).to_i32(),
+        y: (_wm_bridge_value(doc, "y").to_i64() ?? 0).to_i32(),
+        button: _wm_bridge_value(doc, "button").to_i64() ?? 0,
+        pressed: _wm_bridge_value(doc, "pressed") == "true"
+    )
+
+fn wm_widget_showcase_client_env(bridge_path: text, frame_path: text) -> {text: text}:
+    var env: {text: text} = {}
+    env[WM_APP_MODE_ENV] = WM_APP_MODE_CLIENT
+    env[WM_BRIDGE_FILE_ENV] = bridge_path
+    env[WM_FRAME_FILE_ENV] = frame_path
+    env[WM_EVENT_FILE_ENV] = wm_widget_showcase_event_path(frame_path)
+    env[WM_FRAME_SEQ_FILE_ENV] = wm_widget_showcase_frame_seq_path(frame_path)
+    env[WM_CLIENT_HOLD_ENV] = "1"
+    env
+
+val GRAPHICS_2D_SHOWCASE_APP_SOURCE: text = "examples/06_io/ui/graphics_2d_showcase_gui.spl"
+val GRAPHICS_2D_SHOWCASE_APP_ID: text = "/examples/graphics-2d-showcase"
+val GRAPHICS_2D_SHOWCASE_TITLE: text = "Graphics 2D Showcase"
+val GRAPHICS_2D_SHOWCASE_WINDOW_W: i32 = 808
+val GRAPHICS_2D_SHOWCASE_WINDOW_H: i32 = 632
+
+val WEB_STANDARDS_SHOWCASE_APP_SOURCE: text = "examples/06_io/ui/web_standards_showcase_gui.spl"
+val WEB_STANDARDS_SHOWCASE_APP_ID: text = "/examples/web-standards-showcase"
+val WEB_STANDARDS_SHOWCASE_TITLE: text = "Web Standards Showcase"
+val WEB_STANDARDS_SHOWCASE_WINDOW_W: i32 = 88
+val WEB_STANDARDS_SHOWCASE_WINDOW_H: i32 = 68
+
+fn wm_graphics_2d_showcase_event_path(frame_path: text) -> text:
+    frame_path + ".event"
+
+fn wm_graphics_2d_showcase_frame_seq_path(frame_path: text) -> text:
+    frame_path + ".seq"
+
+fn wm_graphics_2d_showcase_content_text(source_path: text, frame_path: text, pid: i64) -> text:
+    "source={source_path} frame={frame_path} pid={pid}"
+
+fn wm_graphics_2d_showcase_bridge_request_sized(pid: i64, frame_path: text, window_w: i32, window_h: i32) -> WmFsAppBridgeRequest:
+    WmFsAppBridgeRequest(
+        kind: "create_window",
+        source_path: GRAPHICS_2D_SHOWCASE_APP_SOURCE,
+        app_id: GRAPHICS_2D_SHOWCASE_APP_ID,
+        title: GRAPHICS_2D_SHOWCASE_TITLE,
+        pid: pid,
+        window_w: window_w,
+        window_h: window_h,
+        content: wm_graphics_2d_showcase_content_text(GRAPHICS_2D_SHOWCASE_APP_SOURCE, frame_path, pid),
+        frame_path: frame_path,
+        event_path: wm_graphics_2d_showcase_event_path(frame_path),
+        frame_seq_path: wm_graphics_2d_showcase_frame_seq_path(frame_path)
+    )
+
+fn wm_graphics_2d_showcase_bridge_request(pid: i64, frame_path: text) -> WmFsAppBridgeRequest:
+    wm_graphics_2d_showcase_bridge_request_sized(pid, frame_path, GRAPHICS_2D_SHOWCASE_WINDOW_W, GRAPHICS_2D_SHOWCASE_WINDOW_H)
+
+fn wm_graphics_2d_showcase_client_env(bridge_path: text, frame_path: text) -> {text: text}:
+    var env: {text: text} = {}
+    env[WM_APP_MODE_ENV] = WM_APP_MODE_CLIENT
+    env[WM_BRIDGE_FILE_ENV] = bridge_path
+    env[WM_FRAME_FILE_ENV] = frame_path
+    env[WM_EVENT_FILE_ENV] = wm_graphics_2d_showcase_event_path(frame_path)
+    env[WM_FRAME_SEQ_FILE_ENV] = wm_graphics_2d_showcase_frame_seq_path(frame_path)
+    env[WM_CLIENT_HOLD_ENV] = "1"
+    env
+
+fn wm_web_standards_showcase_event_path(frame_path: text) -> text:
+    frame_path + ".event"
+
+fn wm_web_standards_showcase_frame_seq_path(frame_path: text) -> text:
+    frame_path + ".seq"
+
+fn wm_web_standards_showcase_content_text(source_path: text, frame_path: text, pid: i64) -> text:
+    "source={source_path} frame={frame_path} pid={pid}"
+
+fn wm_web_standards_showcase_bridge_request_sized(pid: i64, frame_path: text, window_w: i32, window_h: i32) -> WmFsAppBridgeRequest:
+    WmFsAppBridgeRequest(
+        kind: "create_window",
+        source_path: WEB_STANDARDS_SHOWCASE_APP_SOURCE,
+        app_id: WEB_STANDARDS_SHOWCASE_APP_ID,
+        title: WEB_STANDARDS_SHOWCASE_TITLE,
+        pid: pid,
+        window_w: window_w,
+        window_h: window_h,
+        content: wm_web_standards_showcase_content_text(WEB_STANDARDS_SHOWCASE_APP_SOURCE, frame_path, pid),
+        frame_path: frame_path,
+        event_path: wm_web_standards_showcase_event_path(frame_path),
+        frame_seq_path: wm_web_standards_showcase_frame_seq_path(frame_path)
+    )
+
+fn wm_web_standards_showcase_bridge_request(pid: i64, frame_path: text) -> WmFsAppBridgeRequest:
+    wm_web_standards_showcase_bridge_request_sized(pid, frame_path, WEB_STANDARDS_SHOWCASE_WINDOW_W, WEB_STANDARDS_SHOWCASE_WINDOW_H)
+
+fn wm_web_standards_showcase_client_env(bridge_path: text, frame_path: text) -> {text: text}:
+    var env: {text: text} = {}
+    env[WM_APP_MODE_ENV] = WM_APP_MODE_CLIENT
+    env[WM_BRIDGE_FILE_ENV] = bridge_path
+    env[WM_FRAME_FILE_ENV] = frame_path
+    env[WM_EVENT_FILE_ENV] = wm_web_standards_showcase_event_path(frame_path)
+    env[WM_FRAME_SEQ_FILE_ENV] = wm_web_standards_showcase_frame_seq_path(frame_path)
+    env[WM_CLIENT_HOLD_ENV] = "1"
+    env

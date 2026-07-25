@@ -1,0 +1,327 @@
+# codex-impl
+# Vector search operation adapter for reusable web/db GPU queue accounting.
+
+use std.database.vector.types.{DistanceMetric, SearchResult}
+use std.database.vector.offload_plan.{
+    VectorSearchOffloadPlan,
+    plan_vector_search_offload
+}
+use std.web_db_offload.contract.{
+    GpuWdbBudget,
+    GpuWdbCoarseBatchProfile,
+    GpuWdbDecisionPath,
+    GpuWdbWorkKind,
+    GpuWdbRuntimeSnapshot,
+    gpu_wdb_vector_db_profile,
+    gpu_wdb_profile_allows_gpu
+}
+use std.web_db_offload.queue.{
+    GpuWdbQueueState,
+    GpuWdbQueueSubmission,
+    gpu_wdb_queue_snapshot,
+    gpu_wdb_complete_submission
+}
+use std.web_db_offload.library.{
+    GpuWdbLibraryRegistry,
+    gpu_wdb_submit_registered_batch_for_generation
+}
+use std.web_db_offload.device_backend.{
+    GpuWdbDeviceBackend,
+    GpuWdbDeviceRunResult,
+    gpu_wdb_device_backend_registry,
+    gpu_wdb_run_device_batch
+}
+
+struct VectorSearchOffloadExecution:
+    plan: VectorSearchOffloadPlan
+    profile: GpuWdbCoarseBatchProfile
+    submission: GpuWdbQueueSubmission
+    state_after: GpuWdbQueueState
+    results: [SearchResult]
+    gpu_dispatched: bool
+    cpu_authoritative: bool
+    gpu_candidate_validated: bool
+    validation_reason: text
+
+struct VectorSearchDeviceOffloadExecution:
+    execution: VectorSearchOffloadExecution
+    device_result: GpuWdbDeviceRunResult
+
+fn vector_search_result_ids_equal(left: [SearchResult], right: [SearchResult]) -> bool:
+    if left.len() != right.len():
+        return false
+    var idx = 0
+    while idx < left.len():
+        if left[idx].id != right[idx].id:
+            return false
+        idx = idx + 1
+    true
+
+fn vector_search_offload_with_validation(execution: VectorSearchOffloadExecution,
+                                         results: [SearchResult],
+                                         dispatch_target: text,
+                                         reason: text,
+                                         gpu_dispatched: bool,
+                                         cpu_authoritative: bool,
+                                         validated: bool) -> VectorSearchOffloadExecution:
+    VectorSearchOffloadExecution(
+        plan: execution.plan,
+        profile: execution.profile,
+        submission: GpuWdbQueueSubmission(
+            accepted: gpu_dispatched,
+            state: execution.submission.state,
+            execution: execution.submission.execution,
+            queue_depth_after: execution.submission.queue_depth_after,
+            dispatch_target: dispatch_target,
+            pinned_host_bytes: execution.submission.pinned_host_bytes,
+            stream_id: execution.submission.stream_id,
+            reason: reason
+        ),
+        state_after: execution.state_after,
+        results: results,
+        gpu_dispatched: gpu_dispatched,
+        cpu_authoritative: cpu_authoritative,
+        gpu_candidate_validated: validated,
+        validation_reason: reason
+    )
+
+fn vector_search_offload_execute(metric: DistanceMetric, candidate_count: i64,
+                                 dimensions: i64, metadata_filter_cpu_owned: bool,
+                                 state: GpuWdbQueueState,
+                                 registry: GpuWdbLibraryRegistry,
+                                 gpu_available: bool,
+                                 generation_current: bool,
+                                 cpu_fallback_available: bool,
+                                 budget: GpuWdbBudget,
+                                 cpu_results: [SearchResult]) -> VectorSearchOffloadExecution:
+    vector_search_offload_execute_for_generation(
+        metric,
+        candidate_count,
+        dimensions,
+        metadata_filter_cpu_owned,
+        state,
+        registry,
+        gpu_available,
+        generation_current,
+        registry.generation,
+        cpu_fallback_available,
+        budget,
+        cpu_results
+    )
+
+fn vector_search_offload_execute_for_generation(metric: DistanceMetric, candidate_count: i64,
+                                                dimensions: i64, metadata_filter_cpu_owned: bool,
+                                                state: GpuWdbQueueState,
+                                                registry: GpuWdbLibraryRegistry,
+                                                gpu_available: bool,
+                                                generation_current: bool,
+                                                expected_registry_generation: i64,
+                                                cpu_fallback_available: bool,
+                                                budget: GpuWdbBudget,
+                                                cpu_results: [SearchResult]) -> VectorSearchOffloadExecution:
+    val snapshot = gpu_wdb_queue_snapshot(
+        state,
+        gpu_available,
+        generation_current,
+        cpu_fallback_available
+    )
+    val plan = plan_vector_search_offload(
+        metric,
+        candidate_count,
+        dimensions,
+        metadata_filter_cpu_owned,
+        snapshot,
+        budget
+    )
+    val submission =
+        if plan.batch.execution.decision.path == GpuWdbDecisionPath.GpuEvidence:
+            val effective_expected_generation =
+                if generation_current:
+                    expected_registry_generation
+                else:
+                    -1
+            gpu_wdb_submit_registered_batch_for_generation(
+                state,
+                registry,
+                plan.batch.execution.kind,
+                plan.estimated_batch_bytes,
+                plan.candidate_count,
+                gpu_available,
+                effective_expected_generation,
+                cpu_fallback_available,
+                budget
+            )
+        else:
+            GpuWdbQueueSubmission(
+                accepted: false,
+                state: state,
+                execution: plan.batch.execution,
+                queue_depth_after: state.queue_depth,
+                dispatch_target: "cpu_fallback",
+                pinned_host_bytes: 0,
+                stream_id: -1,
+                reason: plan.batch.execution.decision.reason
+            )
+    val state_after =
+        if submission.accepted:
+            gpu_wdb_complete_submission(submission.state, submission)
+        else:
+            submission.state
+    VectorSearchOffloadExecution(
+        plan: plan,
+        profile: gpu_wdb_vector_db_profile(),
+        submission: submission,
+        state_after: state_after,
+        results: cpu_results,
+        gpu_dispatched: submission.accepted,
+        cpu_authoritative: true,
+        gpu_candidate_validated: false,
+        validation_reason: "gpu-candidate-not-evaluated"
+    )
+
+fn vector_search_offload_execute_validated(metric: DistanceMetric, candidate_count: i64,
+                                           dimensions: i64, metadata_filter_cpu_owned: bool,
+                                           state: GpuWdbQueueState,
+                                           registry: GpuWdbLibraryRegistry,
+                                           gpu_available: bool,
+                                           generation_current: bool,
+                                           cpu_fallback_available: bool,
+                                           budget: GpuWdbBudget,
+                                           cpu_results: [SearchResult],
+                                           gpu_candidate_results: [SearchResult]) -> VectorSearchOffloadExecution:
+    val execution = vector_search_offload_execute(
+        metric,
+        candidate_count,
+        dimensions,
+        metadata_filter_cpu_owned,
+        state,
+        registry,
+        gpu_available,
+        generation_current,
+        cpu_fallback_available,
+        budget,
+        cpu_results
+    )
+    if not vector_search_offload_used_gpu(execution):
+        return vector_search_offload_with_validation(
+            execution,
+            cpu_results,
+            execution.submission.dispatch_target,
+            "gpu-not-dispatched",
+            false,
+            true,
+            false
+        )
+    if vector_search_result_ids_equal(cpu_results, gpu_candidate_results):
+        return vector_search_offload_with_validation(
+            execution,
+            gpu_candidate_results,
+            execution.submission.dispatch_target,
+            "gpu-cpu-vector-match",
+            true,
+            false,
+            true
+        )
+    vector_search_offload_with_validation(
+        execution,
+        cpu_results,
+        "cpu_fallback",
+        "gpu-cpu-vector-mismatch",
+        false,
+        true,
+        false
+    )
+
+fn vector_search_offload_execute_device_validated(metric: DistanceMetric,
+                                                  candidate_count: i64,
+                                                  dimensions: i64,
+                                                  metadata_filter_cpu_owned: bool,
+                                                  state: GpuWdbQueueState,
+                                                  backend: GpuWdbDeviceBackend,
+                                                  generation_current: bool,
+                                                  expected_backend_generation: i64,
+                                                  cpu_fallback_available: bool,
+                                                  budget: GpuWdbBudget,
+                                                  cpu_results: [SearchResult],
+                                                  gpu_candidate_results: [SearchResult],
+                                                  started_us: i64,
+                                                  finished_us: i64,
+                                                  measured_device_time_us: i64,
+                                                  timing_source: text) -> VectorSearchDeviceOffloadExecution:
+    val base = vector_search_offload_execute_for_generation(
+        metric,
+        candidate_count,
+        dimensions,
+        metadata_filter_cpu_owned,
+        state,
+        gpu_wdb_device_backend_registry(backend),
+        backend.native_device_execution,
+        generation_current,
+        expected_backend_generation,
+        cpu_fallback_available,
+        budget,
+        cpu_results
+    )
+    val effective_generation =
+        if base.gpu_dispatched and generation_current:
+            expected_backend_generation
+        else:
+            -1
+    val device_result = gpu_wdb_run_device_batch(
+        state,
+        backend,
+        GpuWdbWorkKind.DbVectorSearch,
+        base.plan.estimated_batch_bytes,
+        candidate_count,
+        effective_generation,
+        cpu_fallback_available,
+        budget,
+        started_us,
+        finished_us,
+        measured_device_time_us,
+        timing_source
+    )
+    if not device_result.production_device_claim:
+        return VectorSearchDeviceOffloadExecution(
+            execution: vector_search_offload_with_validation(
+                base,
+                cpu_results,
+                base.submission.dispatch_target,
+                "production-device-not-measured",
+                false,
+                true,
+                false
+            ),
+            device_result: device_result
+        )
+    if vector_search_result_ids_equal(cpu_results, gpu_candidate_results):
+        return VectorSearchDeviceOffloadExecution(
+            execution: vector_search_offload_with_validation(
+                base,
+                gpu_candidate_results,
+                base.submission.dispatch_target,
+                "production-gpu-vector-match",
+                true,
+                false,
+                true
+            ),
+            device_result: device_result
+        )
+    VectorSearchDeviceOffloadExecution(
+        execution: vector_search_offload_with_validation(
+            base,
+            cpu_results,
+            "cpu_fallback",
+            "production-gpu-vector-mismatch",
+            false,
+            true,
+            false
+        ),
+        device_result: device_result
+    )
+
+fn vector_search_offload_used_gpu(execution: VectorSearchOffloadExecution) -> bool:
+    execution.gpu_dispatched and vector_search_profile_allows_gpu(execution)
+
+fn vector_search_profile_allows_gpu(execution: VectorSearchOffloadExecution) -> bool:
+    gpu_wdb_profile_allows_gpu(execution.profile, execution.submission.execution.decision)

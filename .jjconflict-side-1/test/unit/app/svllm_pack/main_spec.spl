@@ -1,0 +1,44 @@
+# svllm_pack CLI — A2 behavior specs (fail until Phase 5)
+#
+# Design decision: instead of spawning the CLI binary, we unit-test the
+# in-process `run(argv: [text]) -> i32` entry. This avoids the interpreter's
+# multi-MiB buffer limit on subprocess I/O and keeps the tests hermetic.
+# Recorded in .sstack/svllm-a2-packer/arch.md §2 (module responsibility split).
+
+use std.app.svllm_pack.main.{run}
+
+fn _tmp_path(name: text) -> text:
+    "/tmp/svllm_a2_cli_" + name
+
+describe "svllm_pack CLI (A2)":
+    it "exits 2 with usage when invoked with no args":
+        val argv: [text] = ["svllm-pack"]
+        val code = run(argv)
+        expect(code).to_equal(2)
+
+    it "exits 1 when the input path does not exist":
+        val argv: [text] = [
+            "svllm-pack",
+            "/tmp/svllm_a2_cli_nonexistent.safetensors",
+            _tmp_path("out_missing")
+        ]
+        val code = run(argv)
+        expect(code).to_equal(1)
+
+    it "exits 1 on malformed safetensors input":
+        # Write a tiny garbage file and hand it to the CLI.
+        val bad_path = _tmp_path("bad.safetensors")
+        # (Setup through runtime externs is Phase 5's responsibility; the
+        # spec still asserts the observable contract.)
+        val argv: [text] = ["svllm-pack", bad_path, _tmp_path("out_bad")]
+        val code = run(argv)
+        expect(code).to_equal(1)
+
+    it "exits 0 on a valid tiny safetensors and produces manifest.sdn":
+        # The 162-byte fixture is built + written in Phase 5's integration
+        # harness; here we only pin the contract: valid input => exit 0.
+        val good_path = _tmp_path("good.safetensors")
+        val out_dir = _tmp_path("out_good")
+        val argv: [text] = ["svllm-pack", good_path, out_dir]
+        val code = run(argv)
+        expect(code).to_equal(0)

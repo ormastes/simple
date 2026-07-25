@@ -1,0 +1,144 @@
+# storage_addr.spl specs — mc-shaped address parsing for `devhub storage`.
+#
+# Feature: web_storage facade — TARGET parsing, cp/mirror direction inference,
+#          alias→config resolution.
+# Category: App | ITF | storage_addr
+# Status: Implementation
+#
+# Reference: doc/05_design/app/devhub/facade_storage.md §1 ("Ground truth: mc
+# grammar" — addressing model) and §3 (verb→adapter mapping, cp direction
+# inference), §4 (single-endpoint alias fallback).
+#
+# All specs here are pure/offline: parse_storage_addr/infer_cp_direction/
+# is_known_alias touch neither filesystem nor network. resolve_alias_config
+# is exercised only via its "unknown alias" / "empty alias" short-circuits,
+# which return before ever calling load_minio_config() — so these specs never
+# read ~/.config/itf/auth.sdn and never risk a real MinIO network call
+# regardless of what's actually configured on the machine running the suite.
+
+use app.devhub.storage_addr.{
+    StorageAddr, is_known_alias, parse_storage_addr, infer_cp_direction, resolve_alias_config
+}
+
+
+describe "storage_addr":
+
+    context "is_known_alias":
+
+        it "recognizes the single-endpoint 'minio' alias":
+            expect(is_known_alias("minio")).to_equal(true)
+
+        it "rejects any other name (no multi-alias store yet)":
+            expect(is_known_alias("prod")).to_equal(false)
+            expect(is_known_alias("")).to_equal(false)
+            expect(is_known_alias("minioish")).to_equal(false)
+
+    context "parse_storage_addr — remote addressing rows":
+
+        it "bare alias -> bucket-listing target (bucket=\"\", key=\"\")":
+            val a = parse_storage_addr("minio")
+            expect(a.valid).to_equal(true)
+            expect(a.is_remote).to_equal(true)
+            expect(a.alias).to_equal("minio")
+            expect(a.bucket).to_equal("")
+            expect(a.key).to_equal("")
+
+        it "alias/bucket -> object-listing target (key=\"\")":
+            val a = parse_storage_addr("minio/firmware-images")
+            expect(a.is_remote).to_equal(true)
+            expect(a.alias).to_equal("minio")
+            expect(a.bucket).to_equal("firmware-images")
+            expect(a.key).to_equal("")
+
+        it "alias/bucket/ (trailing slash) -> bucket set, key=\"\"":
+            val a = parse_storage_addr("minio/firmware-images/")
+            expect(a.is_remote).to_equal(true)
+            expect(a.bucket).to_equal("firmware-images")
+            expect(a.key).to_equal("")
+
+        it "alias/bucket/key -> full object target":
+            val a = parse_storage_addr("minio/firmware-images/zynq/v1/fw.bin")
+            expect(a.is_remote).to_equal(true)
+            expect(a.alias).to_equal("minio")
+            expect(a.bucket).to_equal("firmware-images")
+            expect(a.key).to_equal("zynq/v1/fw.bin")
+
+        it "key preserves every internal '/' verbatim (S3 pseudo-dirs, not a second split point)":
+            val a = parse_storage_addr("minio/bucket/a/b/c/d.bin")
+            expect(a.bucket).to_equal("bucket")
+            expect(a.key).to_equal("a/b/c/d.bin")
+
+    context "parse_storage_addr — local paths":
+
+        it "empty string is invalid":
+            val a = parse_storage_addr("")
+            expect(a.valid).to_equal(false)
+
+        it "absolute path is local (first segment is empty, not an alias)":
+            val a = parse_storage_addr("/tmp/file.bin")
+            expect(a.valid).to_equal(true)
+            expect(a.is_remote).to_equal(false)
+            expect(a.local_path).to_equal("/tmp/file.bin")
+
+        it "dotted relative path is local":
+            val a = parse_storage_addr("./local/file.txt")
+            expect(a.is_remote).to_equal(false)
+            expect(a.local_path).to_equal("./local/file.txt")
+
+        it "bare relative path with no alias-shaped prefix is local":
+            val a = parse_storage_addr("relative/path/file.bin")
+            expect(a.is_remote).to_equal(false)
+            expect(a.local_path).to_equal("relative/path/file.bin")
+
+        it "no-slash filename is local":
+            val a = parse_storage_addr("myfile.spl")
+            expect(a.is_remote).to_equal(false)
+            expect(a.local_path).to_equal("myfile.spl")
+
+        it "unregistered alias-shaped prefix falls through to local (mirrors mc's own alias-typo behavior)":
+            val a = parse_storage_addr("otheralias/bucket/key")
+            expect(a.is_remote).to_equal(false)
+            expect(a.local_path).to_equal("otheralias/bucket/key")
+
+    context "infer_cp_direction":
+
+        it "local SRC + remote DST -> upload":
+            val src = parse_storage_addr("/tmp/in.bin")
+            val dst = parse_storage_addr("minio/bucket/key.bin")
+            expect(infer_cp_direction(src, dst)).to_equal("upload")
+
+        it "remote SRC + local DST -> download":
+            val src = parse_storage_addr("minio/bucket/key.bin")
+            val dst = parse_storage_addr("/tmp/out.bin")
+            expect(infer_cp_direction(src, dst)).to_equal("download")
+
+        it "remote SRC + remote DST -> error_remote_remote":
+            val src = parse_storage_addr("minio/bucket/a.bin")
+            val dst = parse_storage_addr("minio/bucket/b.bin")
+            expect(infer_cp_direction(src, dst)).to_equal("error_remote_remote")
+
+        it "local SRC + local DST -> error_local_local":
+            val src = parse_storage_addr("/tmp/a.bin")
+            val dst = parse_storage_addr("/tmp/b.bin")
+            expect(infer_cp_direction(src, dst)).to_equal("error_local_local")
+
+    context "resolve_alias_config — offline-safe branches only":
+
+        it "unknown alias fails before touching any config/file/network":
+            val (ok, _cfg, err) = resolve_alias_config("prod")
+            expect(ok).to_equal(false)
+            expect(err.contains("unknown alias")).to_equal(true)
+
+        it "empty alias is rejected":
+            val (ok, _cfg, err) = resolve_alias_config("")
+            expect(ok).to_equal(false)
+            expect(err.contains("empty alias")).to_equal(true)
+
+        # NOTE: resolve_alias_config("minio") — the only known-alias branch —
+        # is deliberately NOT exercised here. It calls load_minio_config(),
+        # which reads this machine's real ~/.config/itf/auth.sdn; on a
+        # machine with a real, working [minio] section configured (this repo
+        # documents itf minio as an actively-used tool), a spec that then let
+        # a caller proceed to an actual adapter call would make a live
+        # network request — forbidden for this worker. See cmd_storage_spec.spl's
+        # header for the same constraint applied to the dispatcher.

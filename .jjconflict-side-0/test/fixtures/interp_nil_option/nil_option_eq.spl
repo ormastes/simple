@@ -1,0 +1,54 @@
+# Regression fixture for `interp_run_cross_module_db_option_mutation`.
+#
+# Root cause: in the interpreter, a function declared `-> T?` that does
+# `return nil` yields an `Option::None` enum, whereas the `nil` literal is a
+# distinct `Value::Nil`. The `==` / `!=` operators compared them as unequal, so
+# `if opt != nil:` was wrongly true for a None return, then `opt.unwrap()`
+# panicked "called unwrap on None". Fix: ops.rs Eq/NotEq/Is bridge nil-like
+# values (Value::Nil and Option::None) via Value::is_nil_like().
+#
+# Run: SIMPLE_EXECUTION_MODE=interpret simple run nil_option_eq.spl
+# (must also pass under default JIT — JIT was already correct).
+
+enum Kind:
+    Create
+    Ident
+
+fn always_nil() -> Kind?:
+    return nil
+
+fn mixed(w: text) -> Kind?:
+    if w == "create": return Some(Kind.Create)
+    return nil
+
+fn int_nil() -> i64?:
+    return nil
+
+fn main():
+    # A returned Option::None must compare equal to the `nil` literal.
+    val a = always_nil()
+    expect_false(a != nil, "always_nil() != nil")
+    expect_true(a == nil, "always_nil() == nil")
+
+    # The nil branch of a mixed-return function.
+    val m = mixed("bench")
+    expect_false(m != nil, "mixed-nil != nil")
+    expect_true(m == nil, "mixed-nil == nil")
+
+    # The Some branch must stay non-nil (no over-broadening).
+    val s = mixed("create")
+    expect_true(s != nil, "mixed-some != nil")
+
+    # Not enum-specific: i64? None also bridges.
+    val i = int_nil()
+    expect_false(i != nil, "int_nil() != nil")
+
+    print("OK nil_option_eq")
+
+fn expect_true(cond: bool, label: text):
+    if not cond:
+        print("FAIL expect_true: {label}")
+
+fn expect_false(cond: bool, label: text):
+    if cond:
+        print("FAIL expect_false: {label}")

@@ -1,0 +1,216 @@
+"""CPU SIMD Session — Scalar/SIMD provider selection, target-gated for x86/ARM/RISC-V.
+
+@tag:stdlib
+@tag:gpu
+
+Detects CPU architecture and feature flags at runtime, selects the best
+available kernel table (AVX2, SSE4, NEON, RVV, or scalar fallback), and
+tracks per-operation dispatch counters.
+
+Usage:
+    val session = CpuSimdSession.create("auto")
+    val err = session.init()
+    val r = session.fill(buffer, 0, 1920 * 1080, 0xFF000000)
+    val r2 = session.blit_rect(dst, 1920, 0, 0, src, 1920, 0, 0, 64, 64)
+"""
+
+use std.nogc_sync_mut.gpu.engine2d.backend_session.{BackendSessionKind, ComputeError}
+use std.nogc_sync_mut.gpu.engine2d.simd_kernels.{detect_simd_level, fill_span, copy_span, alpha_blend_span, simd_blit_rect, simd_scroll_region}
+use std.nogc_sync_mut.gpu.engine2d.simd_provider.{SimdHitCounts, simd_hit_counts}
+
+# ============================================================================
+# CpuKernelTable
+# ============================================================================
+
+class CpuKernelTable:
+    fill_kernel:   text
+    blit_kernel:   text
+    blend_kernel:  text
+    scroll_kernel: text
+
+impl CpuKernelTable:
+    static fn select_for_features(features: text, arch: text) -> CpuKernelTable:
+        if arch == "x86_64":
+            if features == "avx2" or features == "avx2,sse4":
+                return CpuKernelTable(
+                    fill_kernel:   "simd_fill_avx2",
+                    blit_kernel:   "simd_blit_avx2",
+                    blend_kernel:  "simd_blend_avx2",
+                    scroll_kernel: "simd_scroll_avx2"
+                )
+            if features == "sse4":
+                return CpuKernelTable(
+                    fill_kernel:   "simd_fill_sse4",
+                    blit_kernel:   "simd_blit_sse4",
+                    blend_kernel:  "simd_blend_sse4",
+                    scroll_kernel: "simd_scroll_sse4"
+                )
+        if arch == "aarch64":
+            if features == "neon":
+                return CpuKernelTable(
+                    fill_kernel:   "simd_fill_neon",
+                    blit_kernel:   "simd_blit_neon",
+                    blend_kernel:  "simd_blend_neon",
+                    scroll_kernel: "simd_scroll_neon"
+                )
+        if arch == "riscv64":
+            if features == "rvv":
+                return CpuKernelTable(
+                    fill_kernel:   "simd_fill_rvv",
+                    blit_kernel:   "simd_blit_rvv",
+                    blend_kernel:  "simd_blend_rvv",
+                    scroll_kernel: "simd_scroll_rvv"
+                )
+        CpuKernelTable(
+            fill_kernel:   "scalar_fill",
+            blit_kernel:   "scalar_blit",
+            blend_kernel:  "scalar_blend",
+            scroll_kernel: "scalar_scroll"
+        )
+
+    me summary() -> text:
+        "fill={self.fill_kernel} blit={self.blit_kernel} blend={self.blend_kernel} scroll={self.scroll_kernel}"
+
+# ============================================================================
+# CpuSimdSession
+# ============================================================================
+
+class CpuSimdSession:
+    arch:                  text
+    features:              text
+    kernel_table:          CpuKernelTable
+    mode:                  text
+    fill_count:            i64
+    blit_count:            i64
+    blend_count:           i64
+    scroll_count:          i64
+    scalar_fallback_count: i64
+    initialized:           bool
+    generation:            i64
+
+impl CpuSimdSession:
+    static fn create(mode: text) -> CpuSimdSession:
+        CpuSimdSession(
+            arch:                  "",
+            features:              "",
+            kernel_table:          CpuKernelTable(
+                fill_kernel:   "scalar_fill",
+                blit_kernel:   "scalar_blit",
+                blend_kernel:  "scalar_blend",
+                scroll_kernel: "scalar_scroll"
+            ),
+            mode:                  mode,
+            fill_count:            0,
+            blit_count:            0,
+            blend_count:           0,
+            scroll_count:          0,
+            scalar_fallback_count: 0,
+            initialized:           false,
+            generation:            0
+        )
+
+    me kind() -> BackendSessionKind:
+        BackendSessionKind.cpu_simd()
+
+    me init() -> ComputeError?:
+        val level = detect_simd_level()
+        self.arch = level.arch_text()
+        self.features = level.feature_text()
+        self.kernel_table = CpuKernelTable.select_for_features(self.features, self.arch)
+        self.initialized = true
+        self.generation = self.generation + 1
+        nil
+
+    me is_available() -> bool:
+        true
+
+    me fill(dst: any, offset: i64, count: i64, color: u32) -> ComputeError?:
+        self.fill_count = self.fill_count + 1
+        if self.kernel_table.fill_kernel == "scalar_fill":
+            self.scalar_fallback_count = self.scalar_fallback_count + 1
+        fill_span(dst, offset, count, color)
+        nil
+
+    me copy(dst: any, dst_off: i64, src: [u32], src_off: i64, count: i64) -> ComputeError?:
+        self.blit_count = self.blit_count + 1
+        if self.kernel_table.blit_kernel == "scalar_blit":
+            self.scalar_fallback_count = self.scalar_fallback_count + 1
+        copy_span(dst, dst_off, src, src_off, count)
+        nil
+
+    me alpha_blend(dst: any, src: [u32], offset: i64, count: i64) -> ComputeError?:
+        self.blend_count = self.blend_count + 1
+        if self.kernel_table.blend_kernel == "scalar_blend":
+            self.scalar_fallback_count = self.scalar_fallback_count + 1
+        alpha_blend_span(dst, src, offset, count)
+        nil
+
+    me blit_rect(dst: any, dst_stride: i64, dx: i64, dy: i64, src: [u32], src_stride: i64, sx: i64, sy: i64, w: i64, h: i64) -> ComputeError?:
+        self.blit_count = self.blit_count + 1
+        if self.kernel_table.blit_kernel == "scalar_blit":
+            self.scalar_fallback_count = self.scalar_fallback_count + 1
+        simd_blit_rect(dst, dst_stride, dx, dy, src, src_stride, sx, sy, w, h)
+        nil
+
+    me scroll(buf: any, stride: i64, x: i64, y: i64, w: i64, h: i64, delta_y: i64) -> ComputeError?:
+        self.scroll_count = self.scroll_count + 1
+        if self.kernel_table.scroll_kernel == "scalar_scroll":
+            self.scalar_fallback_count = self.scalar_fallback_count + 1
+        simd_scroll_region(buf, stride, x, y, w, h, delta_y)
+        nil
+
+    me load_module(name: text, source: text) -> ComputeError?:
+        nil
+
+    me launch_kernel(name: text, gx: i64, gy: i64, bx: i64, by: i64) -> ComputeError?:
+        nil
+
+    me synchronize() -> ComputeError?:
+        nil
+
+    me shutdown():
+        self.initialized = false
+
+    me hit_counts() -> SimdHitCounts:
+        simd_hit_counts()
+
+    me fill_geometry(x: i64, y: i64, w: i64, h: i64, color: i64) -> text:
+        self.fill_count = self.fill_count + 1
+        if self.kernel_table.fill_kernel == "scalar_fill":
+            self.scalar_fallback_count = self.scalar_fallback_count + 1
+        "ok:{self.kernel_table.fill_kernel}:x={x}:y={y}:w={w}:h={h}:color={color}"
+
+    me blit_geometry(sx: i64, sy: i64, dx: i64, dy: i64, w: i64, h: i64) -> text:
+        self.blit_count = self.blit_count + 1
+        if self.kernel_table.blit_kernel == "scalar_blit":
+            self.scalar_fallback_count = self.scalar_fallback_count + 1
+        "ok:{self.kernel_table.blit_kernel}:sx={sx}:sy={sy}:dx={dx}:dy={dy}:w={w}:h={h}"
+
+    me alpha_blend_geometry(x: i64, y: i64, w: i64, h: i64, alpha: i64) -> text:
+        self.blend_count = self.blend_count + 1
+        if self.kernel_table.blend_kernel == "scalar_blend":
+            self.scalar_fallback_count = self.scalar_fallback_count + 1
+        "ok:{self.kernel_table.blend_kernel}:x={x}:y={y}:w={w}:h={h}:alpha={alpha}"
+
+    me scroll_geometry(dx: i64, dy: i64, region_w: i64, region_h: i64) -> text:
+        self.scroll_count = self.scroll_count + 1
+        if self.kernel_table.scroll_kernel == "scalar_scroll":
+            self.scalar_fallback_count = self.scalar_fallback_count + 1
+        "ok:{self.kernel_table.scroll_kernel}:dx={dx}:dy={dy}:w={region_w}:h={region_h}"
+
+    me sync_readback(x: i64, y: i64, w: i64, h: i64) -> text:
+        "ok:sync_readback:x={x}:y={y}:w={w}:h={h}"
+
+    me is_simd_active() -> bool:
+        if self.initialized == false:
+            return false
+        self.kernel_table.fill_kernel != "scalar_fill"
+
+    me release() -> text:
+        if self.initialized == false:
+            return "not_initialized"
+        self.shutdown()
+        "ok"
+
+    me stats() -> text:
+        "arch={self.arch} features={self.features} mode={self.mode} gen={self.generation} fill={self.fill_count} blit={self.blit_count} blend={self.blend_count} scroll={self.scroll_count} scalar_fallbacks={self.scalar_fallback_count} kernels=[{self.kernel_table.summary()}]"

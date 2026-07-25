@@ -1,0 +1,158 @@
+"""
+# Storage API Trait Surface Completion Specification
+
+**Feature:** F5 — Trait surface completion (missing features P0)
+**ACs:** AC-3 (trait surface audit), AC-5 (hardening fix), AC-7 (new tests)
+**Status:** Failing (no implementation yet)
+
+Verifies that the storage_api.spl trait definitions include all required
+method signatures by writing mock impl blocks. If a method is missing
+from the trait, the impl block fails to compile and the spec file fails
+to load — which is the red-phase TDD signal.
+"""
+
+# @cover src/lib/nogc_sync_mut/simple_db_if/storage_api.spl
+
+use std.spec
+use std.simple_db_if.storage_api.{WalWriter, BufferManager, PageStore, Checkpointer, PageBuf}
+use std.simple_db_if.types.{Lsn, Rel, BlkNo, TxnId, PhysPtr}
+
+# ============================================================================
+# Mock implementations — compile-time trait conformance verification
+# ============================================================================
+
+# If wal_group_commit is not declared on WalWriter, this impl block
+# provides a method the trait doesn't know about — the existing required
+# method wal_append will still need to be satisfied, and the extra method
+# tests that the trait surface accepts it.
+
+struct MockWalWriter:
+    last_lsn: i64
+
+impl WalWriter for MockWalWriter:
+    fn wal_append(txn: TxnId, payload: [u8]) -> Lsn:
+        Lsn(value: 1)
+
+    fn wal_group_commit(upto: Lsn) -> Lsn:
+        upto
+
+struct MockBufferManager:
+    pool_size: i64
+
+impl BufferManager for MockBufferManager:
+    fn buf_get(rel: Rel, blk: BlkNo) -> PageBuf:
+        PageBuf(arena_id: 0, offset: 0, length: 4096, generation: 0)
+
+    fn buf_prefetch(rel: Rel, blk: BlkNo) -> bool:
+        true
+
+    fn buf_release(page: PageBuf) -> bool:
+        true
+
+    fn buf_pin_count(rel: Rel, blk: BlkNo) -> i64:
+        0
+
+struct MockPageStore:
+    page_count: i64
+
+impl PageStore for MockPageStore:
+    fn page_rewrite(rel: Rel, blk: BlkNo, new_bytes: [u8], wal_lsn: Lsn) -> PhysPtr:
+        PhysPtr(arena_id: 0, offset: 0)
+
+    fn page_read(rel: Rel, blk: BlkNo) -> [u8]:
+        []
+
+struct MockCheckpointer:
+    committed: bool
+
+impl Checkpointer for MockCheckpointer:
+    fn checkpoint_begin() -> Lsn:
+        Lsn.zero()
+
+    fn checkpoint_commit(at: Lsn) -> Result<Lsn, text>:
+        Ok(at)
+
+# ============================================================================
+# Module-level helpers for constructing test objects
+# ============================================================================
+
+fn make_mock_wal() -> MockWalWriter:
+    MockWalWriter(last_lsn: 0)
+
+fn make_mock_buf() -> MockBufferManager:
+    MockBufferManager(pool_size: 64)
+
+fn make_mock_pages() -> MockPageStore:
+    MockPageStore(page_count: 0)
+
+fn make_mock_ckpt() -> MockCheckpointer:
+    MockCheckpointer(committed: false)
+
+# ============================================================================
+# Trait-typed dispatch helpers — force trait-level resolution
+# If the trait does not declare the method, the typed parameter will reject it
+# ============================================================================
+
+fn require_wal_group_commit(w: WalWriter, lsn: Lsn) -> Lsn:
+    w.wal_group_commit(lsn)
+
+fn require_buf_release(bm: BufferManager, page: PageBuf) -> bool:
+    bm.buf_release(page)
+
+fn require_buf_pin_count(bm: BufferManager, rel: Rel, blk: BlkNo) -> i64:
+    bm.buf_pin_count(rel, blk)
+
+fn require_page_read(ps: PageStore, rel: Rel, blk: BlkNo) -> [u8]:
+    ps.page_read(rel, blk)
+
+fn require_checkpoint_commit(ck: Checkpointer, at: Lsn) -> Result<Lsn, text>:
+    ck.checkpoint_commit(at)
+
+# ============================================================================
+# WalWriter trait surface
+# ============================================================================
+
+describe "WalWriter trait":
+    it "wal_group_commit is callable and returns Lsn":
+        val w = make_mock_wal()
+        val result = require_wal_group_commit(w, Lsn(value: 42))
+        expect(result.value).to_equal(42)
+
+# ============================================================================
+# BufferManager trait surface
+# ============================================================================
+
+describe "BufferManager trait":
+    it "buf_release is callable and returns bool":
+        val bm = make_mock_buf()
+        val page = PageBuf(arena_id: 1, offset: 0, length: 4096, generation: 1)
+        val result = require_buf_release(bm, page)
+        expect(result).to_equal(true)
+
+    it "buf_pin_count is callable and returns i64":
+        val bm = make_mock_buf()
+        val count = require_buf_pin_count(bm, Rel(id: 1), BlkNo(n: 0))
+        expect(count).to_equal(0)
+
+# ============================================================================
+# PageStore trait surface
+# ============================================================================
+
+describe "PageStore trait":
+    it "page_read is callable and returns byte array":
+        val ps = make_mock_pages()
+        val data = require_page_read(ps, Rel(id: 1), BlkNo(n: 0))
+        expect(data.len()).to_equal(0)
+
+# ============================================================================
+# Checkpointer trait surface
+# ============================================================================
+
+describe "Checkpointer trait":
+    it "checkpoint_commit returns Result not bool":
+        val ck = make_mock_ckpt()
+        val result = require_checkpoint_commit(ck, Lsn(value: 100))
+        # If checkpoint_commit still returns bool, .is_ok() won't exist
+        expect(result.is_ok()).to_equal(true)
+        val lsn = result.unwrap()
+        expect(lsn.value).to_equal(100)

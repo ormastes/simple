@@ -1,0 +1,286 @@
+"""SMTP RFC 5321 command/response spec.
+
+Covers: command serialization exact bytes, multiline reply parsing,
+dot-stuffing round-trip, reply-code classification, session state machine,
+MIME headers, secure.spl composition (port constants).
+
+RFC 5321, RFC 5322, RFC 3207 (STARTTLS), RFC 8314 (port 465).
+"""
+
+use std.nogc_sync_mut.smtp.connect.{
+    smtp_command_helo, smtp_command_ehlo,
+    smtp_command_mail_from, smtp_command_rcpt_to,
+    smtp_command_data, smtp_command_quit, smtp_command_rset,
+    smtp_command_noop, smtp_command_starttls,
+    smtp_command_auth_plain, smtp_command_auth_login,
+    smtp_session_new, smtp_session_after_helo,
+    smtp_session_after_mail, smtp_session_after_rcpt,
+    smtp_can_mail, smtp_can_rcpt, smtp_can_data
+}
+
+use std.nogc_sync_mut.smtp.types.{
+    smtp_code_220, smtp_code_221, smtp_code_250, smtp_code_354,
+    smtp_code_421, smtp_code_500, smtp_code_503, smtp_code_550,
+    smtp_is_success_code, smtp_is_error_code,
+    smtp_code_description,
+    response_parse_code, response_parse_message, response_is_multiline
+}
+
+use std.nogc_sync_mut.smtp.send.{
+    email_validate, email_sanitize_subject,
+    smtp_dot_stuff, smtp_undot_stuff,
+    header_from, header_to, header_subject,
+    message_terminate
+}
+
+use std.nogc_sync_mut.smtp.auth.{
+    auth_plain_encode, auth_login_encode_username, auth_login_encode_password
+}
+
+use std.nogc_sync_mut.smtp.secure.{
+    smtps_default_port, smtp_starttls_port, smtp_cleartext_port
+}
+
+# ===========================================================================
+describe "SMTP command serialization — exact RFC 5321 wire bytes":
+
+    it "HELO command":
+        expect(smtp_command_helo("mail.example.com")).to_equal("HELO mail.example.com\r\n")
+
+    it "EHLO command":
+        expect(smtp_command_ehlo("client.example.com")).to_equal("EHLO client.example.com\r\n")
+
+    it "MAIL FROM command":
+        expect(smtp_command_mail_from("sender@example.com")).to_equal("MAIL FROM:<sender@example.com>\r\n")
+
+    it "RCPT TO command":
+        expect(smtp_command_rcpt_to("rcpt@example.com")).to_equal("RCPT TO:<rcpt@example.com>\r\n")
+
+    it "DATA command":
+        expect(smtp_command_data()).to_equal("DATA\r\n")
+
+    it "QUIT command":
+        expect(smtp_command_quit()).to_equal("QUIT\r\n")
+
+    it "RSET command":
+        expect(smtp_command_rset()).to_equal("RSET\r\n")
+
+    it "NOOP command":
+        expect(smtp_command_noop()).to_equal("NOOP\r\n")
+
+    it "STARTTLS command":
+        expect(smtp_command_starttls()).to_equal("STARTTLS\r\n")
+
+    it "AUTH PLAIN command":
+        expect(smtp_command_auth_plain()).to_equal("AUTH PLAIN\r\n")
+
+    it "AUTH LOGIN command":
+        expect(smtp_command_auth_login()).to_equal("AUTH LOGIN\r\n")
+
+    it "DATA terminator is CRLF.CRLF":
+        expect(message_terminate()).to_equal("\r\n.\r\n")
+
+# ===========================================================================
+describe "SMTP reply-code parsing":
+
+    it "parse code from single-line 220 response":
+        expect(response_parse_code("220 mail.example.com ESMTP ready\r\n")).to_equal(220)
+
+    it "parse code from 250 response":
+        expect(response_parse_code("250 OK\r\n")).to_equal(250)
+
+    it "parse code from 500 error":
+        expect(response_parse_code("500 Syntax error\r\n")).to_equal(500)
+
+    it "parse message from 250 OK":
+        expect(response_parse_message("250 OK\r\n")).to_equal("OK\r\n")
+
+    it "parse message from 220 banner":
+        val msg = response_parse_message("220 mail.example.com ESMTP\r\n")
+        expect(msg.starts_with("mail.example.com")).to_equal(true)
+
+    it "single-line response is NOT multiline":
+        expect(response_is_multiline("250 OK\r\n")).to_equal(false)
+
+    it "multiline response detected by dash at position 3":
+        expect(response_is_multiline("250-STARTTLS\r\n")).to_equal(true)
+
+    it "multiline continuation line":
+        expect(response_is_multiline("250-SIZE 14680064\r\n")).to_equal(true)
+
+    it "last line of multiline is not multiline":
+        expect(response_is_multiline("250 AUTH PLAIN LOGIN\r\n")).to_equal(false)
+
+# ===========================================================================
+describe "SMTP reply-code classification":
+
+    it "220 is success code":
+        expect(smtp_is_success_code(220)).to_equal(true)
+
+    it "250 is success code":
+        expect(smtp_is_success_code(250)).to_equal(true)
+
+    it "354 is not a 2xx success code (it is a 3xx positive intermediate)":
+        expect(smtp_is_success_code(354)).to_equal(false)
+
+    it "421 is error code":
+        expect(smtp_is_error_code(421)).to_equal(true)
+
+    it "500 is error code":
+        expect(smtp_is_error_code(500)).to_equal(true)
+
+    it "550 is error code":
+        expect(smtp_is_error_code(550)).to_equal(true)
+
+    it "220 is not error code":
+        expect(smtp_is_error_code(220)).to_equal(false)
+
+    it "code description 250":
+        val d = smtp_code_description(250)
+        expect(d.starts_with("Requested")).to_equal(true)
+
+    it "code description 354 mentions CRLF":
+        val d = smtp_code_description(354)
+        expect(d.starts_with("Start")).to_equal(true)
+
+# ===========================================================================
+describe "SMTP session state machine":
+
+    it "initial state is INITIAL":
+        val s = smtp_session_new()
+        expect(s).to_equal("INITIAL")
+
+    it "after HELO state is HELO":
+        expect(smtp_session_after_helo()).to_equal("HELO")
+
+    it "after MAIL state is MAIL":
+        expect(smtp_session_after_mail()).to_equal("MAIL")
+
+    it "after RCPT state is RCPT":
+        expect(smtp_session_after_rcpt()).to_equal("RCPT")
+
+    it "can_mail only in HELO state":
+        expect(smtp_can_mail("HELO")).to_equal(true)
+        expect(smtp_can_mail("INITIAL")).to_equal(false)
+        expect(smtp_can_mail("MAIL")).to_equal(false)
+
+    it "can_rcpt in MAIL state":
+        expect(smtp_can_rcpt("MAIL")).to_equal(true)
+
+    it "can_rcpt in RCPT state (multiple recipients)":
+        expect(smtp_can_rcpt("RCPT")).to_equal(true)
+
+    it "can_rcpt not in HELO state":
+        expect(smtp_can_rcpt("HELO")).to_equal(false)
+
+    it "can_data only in RCPT state":
+        expect(smtp_can_data("RCPT")).to_equal(true)
+        expect(smtp_can_data("MAIL")).to_equal(false)
+
+# ===========================================================================
+describe "SMTP dot-stuffing (RFC 5321 §4.5.2)":
+
+    it "body without dots is unchanged before terminator":
+        val body = "Hello world\r\n"
+        val stuffed = smtp_dot_stuff(body)
+        expect(stuffed.starts_with("Hello world\r\n")).to_equal(true)
+        expect(stuffed.ends_with("\r\n.\r\n")).to_equal(true)
+
+    it "line beginning with dot gets extra dot":
+        val body = "line one\r\n.line with dot\r\nline three\r\n"
+        val stuffed = smtp_dot_stuff(body)
+        expect(stuffed.index_of("\r\n..line with dot\r\n") != -1).to_equal(true)
+
+    it "dot-only line becomes double-dot":
+        val body = "before\r\n.\r\nafter\r\n"
+        val stuffed = smtp_dot_stuff(body)
+        expect(stuffed.index_of("\r\n..\r\n") != -1).to_equal(true)
+
+    it "terminator CRLF.CRLF appended":
+        val stuffed = smtp_dot_stuff("hello\r\n")
+        expect(stuffed.ends_with("\r\n.\r\n")).to_equal(true)
+
+    it "undot reverses dot-stuffing":
+        val original = "Hello\r\n.dotline\r\nend\r\n"
+        val stuffed = smtp_dot_stuff(original)
+        val restored = smtp_undot_stuff(stuffed)
+        expect(restored).to_equal(original)
+
+    it "undot strips terminator":
+        val stuffed = "Hello\r\n.\r\n"
+        val restored = smtp_undot_stuff(stuffed)
+        expect(restored.ends_with("\r\n.\r\n")).to_equal(false)
+
+    it "undot on body with doubled-dot restores single":
+        val body = "normal\r\n..doubly-dotted\r\n"
+        val restored = smtp_undot_stuff(body)
+        expect(restored.index_of("\r\n.doubly-dotted\r\n") != -1).to_equal(true)
+
+    it "round-trip multi-line body with mixed dots":
+        val original = "line1\r\n.sec\r\n..dbl\r\nnormal\r\n"
+        val stuffed = smtp_dot_stuff(original)
+        val restored = smtp_undot_stuff(stuffed)
+        expect(restored).to_equal(original)
+
+# ===========================================================================
+describe "SMTP email address validation":
+
+    it "valid address passes":
+        expect(email_validate("user@example.com")).to_equal(true)
+
+    it "address without @ fails":
+        expect(email_validate("userexample.com")).to_equal(false)
+
+    it "address without domain dot fails":
+        expect(email_validate("user@localhost")).to_equal(false)
+
+    it "empty string fails":
+        expect(email_validate("")).to_equal(false)
+
+    it "multiple @ fails":
+        expect(email_validate("a@b@c.com")).to_equal(false)
+
+    it "subject injection stripped":
+        val s = smtp_sanitize_smtp_subject("Hello\r\nBcc: evil@x.com")
+        expect(s.index_of("\r\n")).to_equal(-1)
+
+# ---------------------------------------------------------------------------
+# Local helper wrapping email_sanitize_subject for naming clarity
+fn smtp_sanitize_smtp_subject(s: text) -> text:
+    email_sanitize_subject(s)
+
+# ===========================================================================
+describe "SMTP AUTH encoding":
+
+    it "AUTH LOGIN username base64 — user encodes to dXNlcg==":
+        expect(auth_login_encode_username("user")).to_equal("dXNlcg==")
+
+    it "AUTH LOGIN password base64 — pass encodes to cGFzcw==":
+        expect(auth_login_encode_password("pass")).to_equal("cGFzcw==")
+
+    it "AUTH PLAIN base64 — NUL+user+NUL+pass encodes to AHVzZXIAcGFzcw==":
+        expect(auth_plain_encode("user", "pass")).to_equal("AHVzZXIAcGFzcw==")
+
+# ===========================================================================
+describe "SMTP secure (SMTPS) port constants":
+
+    it "SMTPS implicit TLS port is 465":
+        expect(smtps_default_port()).to_equal(465)
+
+    it "STARTTLS submission port is 587":
+        expect(smtp_starttls_port()).to_equal(587)
+
+    it "SMTP cleartext port is 25":
+        expect(smtp_cleartext_port()).to_equal(25)
+
+# ===========================================================================
+describe "SMTP message headers":
+
+    it "From header format":
+        expect(header_from("alice@example.com")).to_equal("From: alice@example.com\r\n")
+
+    it "To header format":
+        expect(header_to("bob@example.com")).to_equal("To: bob@example.com\r\n")
+
+    it "Subject header format":
+        expect(header_subject("Hello World")).to_equal("Subject: Hello World\r\n")

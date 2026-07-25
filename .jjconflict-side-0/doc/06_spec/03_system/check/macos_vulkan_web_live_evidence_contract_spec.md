@@ -1,0 +1,424 @@
+# macOS Vulkan web live-evidence wrapper contract
+
+> Locks the fail-closed source contract for the macOS Vulkan web evidence wrapper and exercises its pre-launch invalid-configuration paths. It verifies that a future live run must require Vulkan device readback, positive native handles, correlated checksums, native focus plus keyboard/pointer/click receipts, and 300-DPI vector-font evidence.
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 10 | 10 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# macOS Vulkan web live-evidence wrapper contract
+
+Locks the fail-closed source contract for the macOS Vulkan web evidence wrapper and exercises its pre-launch invalid-configuration paths. It verifies that a future live run must require Vulkan device readback, positive native handles, correlated checksums, native focus plus keyboard/pointer/click receipts, and 300-DPI vector-font evidence.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Requirements | doc/02_requirements/feature/engine2d_four_backend_capture.md |
+| Plan | doc/03_plan/sys_test/engine2d_four_backend_capture.md |
+| Design | doc/05_design/engine2d_four_backend_capture.md |
+| Research | doc/01_research/local/engine2d_four_backend_capture.md |
+| Source | `test/03_system/check/macos_vulkan_web_live_evidence_contract_spec.spl` |
+| Updated | 2026-07-25 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Locks the fail-closed source contract for the macOS Vulkan web evidence wrapper
+and exercises its pre-launch invalid-configuration paths. It verifies that a
+future live run must require Vulkan device readback, positive native handles,
+correlated checksums, native focus plus keyboard/pointer/click receipts, and
+300-DPI vector-font evidence.
+
+This spec does not launch a window or Vulkan device and is not live rendering
+or event-delivery proof. A live PASS exists only when the wrapper separately
+runs the application and retains its device, capture, and event evidence.
+
+**Requirements:** doc/02_requirements/feature/engine2d_four_backend_capture.md
+**Plan:** doc/03_plan/sys_test/engine2d_four_backend_capture.md
+**Design:** doc/05_design/engine2d_four_backend_capture.md
+**Research:** doc/01_research/local/engine2d_four_backend_capture.md
+**Architecture:** doc/04_architecture/engine2d_four_backend_capture.md
+
+## Syntax
+
+```sh
+bin/simple test test/03_system/check/macos_vulkan_web_live_evidence_contract_spec.spl --mode=interpreter
+```
+
+## Expected Result
+
+All source admission checks are present, malformed timeout/RSS inputs fail
+before platform launch, and child ownership/cleanup remains PID-scoped. The
+result proves the wrapper contract only; it makes no live Vulkan PASS claim.
+
+## Scenarios
+
+### macOS Vulkan web live evidence wrapper contract
+
+#### should require Vulkan device readback from both evidence producers
+
+- Inspect the backend and framebuffer-source admission checks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect the backend and framebuffer-source admission checks")
+val source = file_read(WRAPPER)
+expect(source).to_contain("SIMPLE_GUI_BACKEND=vulkan")
+expect(source).to_contain("[ \"$event_backend\" = \"vulkan\" ] || fail \"event-backend-not-vulkan\"")
+expect(source).to_contain("[ \"$source\" = \"device_readback\" ] || fail \"device-readback-missing\"")
+expect(source).to_contain("[ \"$renderer_source\" = \"device_readback\" ] || fail \"renderer-device-readback-missing\"")
+```
+
+</details>
+
+#### should require positive device handles and cross-check the renderer checksum
+
+- Inspect the handle and independent checksum correlation checks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect the handle and independent checksum correlation checks")
+val source = file_read(WRAPPER)
+expect(source).to_contain("[ \"" + SHELL_OPEN + "handle:-0}\" -gt 0 ] || fail \"backend-handle-missing\"")
+expect(source).to_contain("[ \"" + SHELL_OPEN + "renderer_handle:-0}\" -gt 0 ] || fail \"renderer-handle-missing\"")
+expect(source).to_contain("[ \"" + SHELL_OPEN + "renderer_checksum:-0}\" -gt 0 ] || fail \"renderer-checksum-missing\"")
+expect(source).to_contain("[ \"$renderer_checksum\" = \"$initial_checksum\" ]")
+expect(source).to_contain("fail \"renderer-event-checksum-mismatch\"")
+```
+
+</details>
+
+#### should prove interaction changes both device and visible captures
+
+- Inspect the before/after readback and screen-capture checks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect the before/after readback and screen-capture checks")
+val source = file_read(WRAPPER)
+expect(source).to_contain("[ \"" + SHELL_OPEN + "initial_checksum:-0}\" -gt 0 ] || fail \"initial-checksum-missing\"")
+expect(source).to_contain("[ \"" + SHELL_OPEN + "interaction_checksum:-0}\" -gt 0 ] || fail \"interaction-checksum-missing\"")
+expect(source).to_contain("[ \"$initial_checksum\" != \"$interaction_checksum\" ] || fail \"interaction-frame-unchanged\"")
+expect(source).to_contain("[ \"$before_bytes\" -gt 1000 ] || fail \"before-capture-empty\"")
+expect(source).to_contain("[ \"$after_bytes\" -gt 1000 ] || fail \"after-capture-empty\"")
+expect(source).to_contain("[ \"$before_cksum\" != \"$after_cksum\" ] || fail \"capture-unchanged\"")
+```
+
+</details>
+
+#### should route focus keyboard pointer and click input through the live window
+
+- Inspect input injection and application receipt checks
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect input injection and application receipt checks")
+val source = file_read(WRAPPER)
+expect(source).to_contain("set frontmost to true")
+expect(source).to_contain("keystroke \"g\"")
+expect(source).to_contain("error \"SimpleGui web pointer target missing\"")
+expect(source).to_contain("cliclick \"m:" + SHELL_OPEN + "click_x}," + SHELL_OPEN + "click_y}\" \"c:.\"")
+expect(source).to_contain("[ \"" + SHELL_OPEN + "focus_events:-0}\" -gt 0 ] || fail \"focus-event-missing\"")
+expect(source).to_contain("[ \"" + SHELL_OPEN + "native_focus_kind:-0}\" = \"5\" ] || fail \"native-focus-kind-mismatch\"")
+expect(source).to_contain("fail \"native-focus-not-observed\"")
+expect(source).to_contain("fail \"native-focus-not-reduced\"")
+expect(source).to_contain("fail \"focus-state-transition-missing\"")
+expect(source).to_contain("fail \"focus-state-revision-mismatch\"")
+expect(source).to_contain("fail \"focus-not-before-interaction\"")
+expect(source).to_contain("fail \"focus-state-unchanged\"")
+expect(source).to_contain("[ \"" + SHELL_OPEN + "keyboard:-0}\" -gt 0 ] || fail \"keyboard-event-missing\"")
+expect(source).to_contain("[ \"" + SHELL_OPEN + "pointer:-0}\" -gt 0 ] || fail \"pointer-event-missing\"")
+expect(source).to_contain("[ \"" + SHELL_OPEN + "clicks:-0}\" -gt 0 ] || fail \"click-event-missing\"")
+expect(source).to_contain("[ \"" + SHELL_OPEN + "revision:-0}\" -gt 0 ] || fail \"interaction-revision-missing\"")
+```
+
+</details>
+
+#### should emit a raw winit focus receipt before admitting interaction
+
+- Inspect native focus capture and the structured web event receipt
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 28 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect native focus capture and the structured web event receipt")
+val producer = file_read(PRODUCER)
+val winit = file_read(WINIT)
+expect(winit).to_contain("val EVT_FOCUSED: i64 = 5")
+expect(winit).to_contain("val EVT_UNFOCUSED: i64 = 6")
+expect(winit).to_contain("event_kinds.push(kind)")
+expect(producer).to_contain("focus_events = focus_events + input.focus_events")
+expect(producer).to_contain("val canonical = process_event(")
+expect(producer).to_contain("UIEvent.FocusEvent(target_id: target_id, kind: focus_kind)")
+expect(producer).to_contain("before.focused_id != after.focused_id")
+expect(producer).to_contain("web_standards_event_before_focus=" + SIMPLE_OPEN + "focus.before_focus}")
+expect(producer).to_contain("web_standards_event_after_focus=" + SIMPLE_OPEN + "focus.after_focus}")
+expect(producer).to_contain("web_standards_event_before_focus_state_revision=" + SIMPLE_OPEN + "focus.before_state_revision}")
+expect(producer).to_contain("web_standards_event_after_focus_state_revision=" + SIMPLE_OPEN + "focus.after_state_revision}")
+expect(producer).to_contain("web_standards_event_focus_receipt_revision=" + SIMPLE_OPEN + "focus.receipt_revision}")
+expect(producer).to_contain("keyboard_revision > focus.receipt_revision")
+expect(producer).to_contain("pointer_revision > focus.receipt_revision")
+expect(producer).to_contain("click_revision > focus.receipt_revision")
+expect(producer).to_contain("if raw_kind != 5 and raw_kind != 6:")
+expect(producer).to_contain("val focus_kind = if raw_kind == 5: \"focus\" else: \"blur\"")
+expect(producer).to_contain("if raw_kind == 6 and before.focused_id == target_id:")
+expect(producer).to_contain("focused_id: \"\"")
+expect(producer).to_contain("admitted: raw_kind == 5 and changed and after.focused_id != \"\"")
+expect(producer).to_contain("if raw_kind == 5 or raw_kind == 6:")
+expect(producer).to_contain("keyboard_receipt_revision = 0")
+expect(producer).to_contain("elif focus.admitted and")
+expect(producer).to_contain("web_live_interaction_admitted(")
+expect(producer).to_contain("focus.admitted and focus.raw_kind == 5")
+```
+
+</details>
+
+#### should require 300 DPI vector-font identity and point-to-pixel sizing
+
+- Inspect producer metadata and fail-closed wrapper admission
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 48 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect producer metadata and fail-closed wrapper admission")
+val source = file_read(WRAPPER)
+val producer = file_read(PRODUCER)
+val draw_ir = file_read(DRAW_IR)
+val fast = file_read(WEB_FAST)
+expect(source).to_contain("REQUESTED_DPI=\"" + SHELL_OPEN + "SHOWCASE_DPI:-300}\"")
+expect(source).to_contain("SHOWCASE_DPI=\"$REQUESTED_DPI\"")
+expect(source).to_contain("fail \"requires-300-dpi\"")
+expect(source).to_contain("[ \"$renderer_font_dpi_applied\" = \"true\" ] || fail \"vector-font-dpi-not-applied\"")
+expect(source).to_contain("[ \"$renderer_font_loaded\" = \"true\" ] || fail \"vector-font-not-loaded\"")
+expect(source).to_contain("fail \"vector-font-identity-mismatch\"")
+expect(source).to_contain("[ \"$renderer_font_point_size\" = \"24\" ]")
+expect(source).to_contain("[ \"$renderer_font_dpi\" = \"300\" ]")
+expect(source).to_contain("expected_font_pixel_size=$(((renderer_font_point_size * renderer_font_dpi + 36) / 72))")
+expect(source).to_contain("fail \"vector-font-dpi-formula-mismatch\"")
+expect(source).to_contain("fail \"event-vector-font-identity-mismatch\"")
+expect(source).to_contain("fail \"event-vector-font-pixel-size-mismatch\"")
+expect(source).to_contain("fail \"vector-font-batch-identity-missing\"")
+expect(source).to_contain("fail \"vector-font-device-oracle-mismatch\"")
+expect(source).to_contain("fail \"vector-font-readback-blank\"")
+expect(source).to_contain("fail \"vector-font-device-not-executed\"")
+expect(source).to_contain("fail \"vector-font-promotion-not-ready\"")
+expect(source).to_contain("fail \"event-vector-font-batch-identity-missing\"")
+expect(source).to_contain("fail \"event-vector-font-device-oracle-mismatch\"")
+expect(source).to_contain("fail \"event-vector-font-frame-revision-mismatch\"")
+expect(source).to_contain("fail \"event-vector-font-focus-revision-mismatch\"")
+expect(producer).to_contain("val WEB_LIVE_FONT_POINTS: i32 = 24")
+expect(producer).to_contain("(WEB_LIVE_FONT_POINTS * SHOWCASE_DPI_VALUE + 36) / 72")
+expect(producer).to_contain("font-family:Bungee;font-size:")
+expect(producer).to_contain("Simple Web 300 DPI")
+expect(producer).to_contain("dpi_scale_applied=false font_dpi_applied=true")
+expect(producer).to_contain("font_identity != font_expected_identity")
+expect(producer).to_contain("font_pixel_size != web_live_font_pixels()")
+expect(producer).to_contain("current_font_identity = updated_result.vector_font_identity")
+expect(producer).to_contain("current_font_batch_identity,")
+expect(producer).to_contain("val updated_html = web_live_evidence_html(")
+expect(producer).to_contain("interactive_web_html(raw_html, interaction_revision)")
+expect(producer).to_contain("current_font_frame_revision = interaction_revision")
+expect(producer).to_contain("current_font_focus_receipt_revision =")
+expect(draw_ir).to_contain("val rendered_fonts = eng.fonts()")
+expect(draw_ir).to_contain("result.font_identity = rendered_fonts.current_font_identity()")
+expect(draw_ir).to_contain("val vulkan_font = eng.vulkan_font_performance_evidence()")
+expect(draw_ir).to_contain("result.font_batch_identity = evidence.batch_identity")
+expect(draw_ir).to_contain("result.font_device_checksum = evidence.device_checksum")
+expect(draw_ir).to_contain("result.font_oracle_checksum = evidence.oracle_checksum")
+expect(draw_ir).to_contain("result.font_readback_nonblank_pixels = evidence.readback_nonblank_pixels")
+expect(fast).to_contain("vector_font_identity: render.font_identity")
+expect(fast).to_contain("vector_font_batch_identity: render.font_batch_identity")
+```
+
+</details>
+
+#### should bound startup by timeout and resident memory
+
+- Inspect numeric validation and peak RSS gates
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect numeric validation and peak RSS gates")
+val source = file_read(WRAPPER)
+expect(source).to_contain("TIMEOUT_SECS=\"" + SHELL_OPEN + "MACOS_VULKAN_WEB_TIMEOUT_SECS:-180}\"")
+expect(source).to_contain("MAX_RSS_KB=\"" + SHELL_OPEN + "MACOS_VULKAN_WEB_MAX_RSS_KB:-1048576}\"")
+expect(source).to_contain("normalize_positive_integer()")
+expect(source).to_contain("fail \"invalid-timeout-secs\"")
+expect(source).to_contain("fail \"invalid-max-rss-kb\"")
+expect(source).to_contain("deadline=$(($(date +%s) + TIMEOUT_SECS))")
+expect(source).to_contain("process_rss_kb()")
+expect(source).to_contain("sample_peak_rss()")
+expect(source).to_contain("[ \"$current_rss_kb\" -gt \"$peak_rss_kb\" ]")
+expect(source).to_contain("[ \"$peak_rss_kb\" -gt \"$MAX_RSS_KB\" ]")
+expect(source).to_contain("fail \"resource-limit-exceeded\"")
+expect(source).to_contain("macos_vulkan_web_live_peak_rss_kb=$peak_rss_kb")
+expect(source).to_contain("macos_vulkan_web_live_max_rss_kb=$MAX_RSS_KB")
+expect(source).to_contain("fail \"window-not-found\"")
+```
+
+</details>
+
+#### should reject malformed timeout and RSS limits before platform launch
+
+- Run the wrapper with invalid numeric configuration
+- process run
+   - Expected: timeout_code equals `1`
+- process run
+   - Expected: rss_code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the wrapper with invalid numeric configuration")
+val root = "build/test-macos-vulkan-web-live-numeric-contract"
+val timeout_command = "rm -rf " + root + " && mkdir -p " + root +
+    " && BUILD_DIR=" + root + "/timeout REPORT_PATH=" + root +
+    "/timeout.md MACOS_VULKAN_WEB_TIMEOUT_SECS=bad sh " + WRAPPER
+val (_timeout_stdout, _timeout_stderr, timeout_code) =
+    process_run("/bin/sh", ["-c", timeout_command])
+expect(timeout_code).to_equal(1)
+val timeout_evidence = file_read(root + "/timeout/evidence.env")
+expect(timeout_evidence).to_contain("macos_vulkan_web_live_status=fail")
+expect(timeout_evidence).to_contain("macos_vulkan_web_live_reason=invalid-timeout-secs")
+
+val rss_command = "BUILD_DIR=" + root + "/rss REPORT_PATH=" + root +
+    "/rss.md MACOS_VULKAN_WEB_MAX_RSS_KB=0 sh " + WRAPPER
+val (_rss_stdout, _rss_stderr, rss_code) =
+    process_run("/bin/sh", ["-c", rss_command])
+expect(rss_code).to_equal(1)
+val rss_evidence = file_read(root + "/rss/evidence.env")
+expect(rss_evidence).to_contain("macos_vulkan_web_live_status=fail")
+expect(rss_evidence).to_contain("macos_vulkan_web_live_reason=invalid-max-rss-kb")
+```
+
+</details>
+
+#### should fail closed when the launched child exits before its window
+
+- Inspect child discovery, early-exit detection, and bounded diagnostics
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect child discovery, early-exit detection, and bounded diagnostics")
+val source = file_read(WRAPPER)
+expect(source).to_contain("app_pid=\"\"")
+expect(source).to_contain("find_launched_pid()")
+expect(source).to_contain("capture_child_exit_cause()")
+expect(source).to_contain("child_logs_have_terminal_failure()")
+expect(source).to_contain("! kill -0 \"$app_pid\" 2>/dev/null")
+expect(source).to_contain("fail \"app-exited-before-window\"")
+expect(source).to_contain("macos_vulkan_web_live_child_exit_cause=$child_exit_cause")
+```
+
+</details>
+
+#### should clean up the exact launched child on every exit path
+
+- Inspect unique executable discovery and PID-scoped ownership
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect unique executable discovery and PID-scoped ownership")
+val source = file_read(WRAPPER)
+expect(source).to_contain("launch_app_bundle=")
+expect(source).to_contain("launch_app_executable=")
+expect(source).to_contain("$2 == executable")
+expect(source).to_contain("assert_launched_process()")
+expect(source).to_contain("fail \"launched-pid-executable-mismatch\"")
+expect(source).to_contain("cleanup()")
+expect(source).to_contain("trap cleanup EXIT HUP INT TERM")
+expect(source).to_contain("set targetPid to (item 1 of argv) as integer")
+expect(source).to_contain("processes whose unix id is targetPid")
+expect(source).to_contain("osascript - \"$app_pid\" >/dev/null")
+expect(source).to_contain("app_pid=\"" + SHELL_OPEN + "1:-}\"")
+expect(source).to_contain("fail \"invalid-window-pid\"")
+expect(source).to_contain("if kill -0 \"$app_pid\" 2>/dev/null; then")
+expect(source).to_contain("kill -TERM \"$app_pid\" 2>/dev/null || true")
+expect(source).to_contain("cleanup\napp_pid=\"\"")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 10 |
+| Active scenarios | 10 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** `doc/02_requirements/feature/engine2d_four_backend_capture.md`
+- **Plan:** `doc/03_plan/sys_test/engine2d_four_backend_capture.md`
+- **Design:** `doc/05_design/engine2d_four_backend_capture.md`
+- **Research:** `doc/01_research/local/engine2d_four_backend_capture.md`
+
+
+</details>

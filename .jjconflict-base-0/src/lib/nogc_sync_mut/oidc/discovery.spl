@@ -1,0 +1,197 @@
+"""
+# OIDC Discovery
+
+OpenID Connect Discovery 1.0 client. Fetches and caches the provider
+configuration from `{issuer}/.well-known/openid-configuration` and the
+associated JWKS document.
+
+## Usage
+
+```simple
+use std.nogc_sync_mut.oidc.discovery.{OidcDiscovery}
+
+var disco = OidcDiscovery.new("https://accounts.google.com")
+val config = disco.discover()?
+val jwks = disco.fetch_jwks()?
+```
+"""
+
+use std.io.types.{IoError, IoErrorKind}
+use std.nogc_sync_mut.io.http_sffi.{rt_http_get}
+
+# ============================================================================
+# OidcConfig
+# ============================================================================
+
+struct OidcConfig:
+    """Parsed OpenID Connect provider configuration."""
+    issuer: text
+    authorization_endpoint: text
+    token_endpoint: text
+    userinfo_endpoint: text
+    jwks_uri: text
+    supported_scopes: [text]
+    supported_response_types: [text]
+
+    static fn from_json(json_text: text) -> Result<OidcConfig, text>:
+        """Parse a .well-known/openid-configuration JSON response.
+
+        Uses minimal key extraction; nested arrays are split on comma.
+        """
+        val issuer = extract_json_string(json_text, "issuer")
+        if issuer == "":
+            return Err("missing required field: issuer")
+
+        val authz = extract_json_string(json_text, "authorization_endpoint")
+        val token = extract_json_string(json_text, "token_endpoint")
+        val userinfo = extract_json_string(json_text, "userinfo_endpoint")
+        val jwks = extract_json_string(json_text, "jwks_uri")
+
+        if jwks == "":
+            return Err("missing required field: jwks_uri")
+
+        val scopes = extract_json_array(json_text, "scopes_supported")
+        val response_types = extract_json_array(json_text, "response_types_supported")
+
+        Ok(OidcConfig(
+            issuer: issuer,
+            authorization_endpoint: authz,
+            token_endpoint: token,
+            userinfo_endpoint: userinfo,
+            jwks_uri: jwks,
+            supported_scopes: scopes,
+            supported_response_types: response_types
+        ))
+
+# ============================================================================
+# OidcDiscovery
+# ============================================================================
+
+class OidcDiscovery:
+    """Caching OIDC discovery client."""
+    issuer_url: text
+    config: Option<OidcConfig>
+    jwks_cache: Option<text>
+
+    static fn new(issuer_url: text) -> OidcDiscovery:
+        """Create a discovery client for the given issuer."""
+        OidcDiscovery(issuer_url: issuer_url, config: nil, jwks_cache: nil)
+
+impl OidcDiscovery:
+    me discover() -> Result<OidcConfig, IoError>:
+        """Fetch and parse the OIDC provider configuration.
+
+        Caches the result for subsequent calls.
+        """
+        match self.config:
+            Some(cached):
+                return Ok(cached)
+            nil:
+                pass_do_nothing("OIDC config cache miss")
+
+        val url = self.issuer_url + "/.well-known/openid-configuration"
+        val result = rt_http_get(url)
+        val status = result.0
+        val body = result.1
+        val error = result.2
+
+        if error != "":
+            return Err(IoError(kind: IoErrorKind.Other, message: "OIDC discovery failed: {error}", source: nil))
+
+        if status < 200 or status >= 300:
+            return Err(IoError(kind: IoErrorKind.Other, message: "OIDC discovery HTTP {status}", source: nil))
+
+        val parsed = OidcConfig.from_json(body)
+        match parsed:
+            case Ok(cfg):
+                self.config = Some(cfg)
+                return Ok(cfg)
+            case Err(msg):
+                return Err(IoError(kind: IoErrorKind.InvalidData, message: "OIDC parse error: {msg}", source: nil))
+
+    me fetch_jwks() -> Result<text, IoError>:
+        """Fetch the JWKS document from the provider's jwks_uri.
+
+        Requires discover() to have been called first.
+        """
+        match self.jwks_cache:
+            Some(cached):
+                return Ok(cached)
+            nil:
+                pass_do_nothing("JWKS cache miss")
+
+        val cfg = self.get_config()?
+        val result = rt_http_get(cfg.jwks_uri)
+        val status = result.0
+        val body = result.1
+        val error = result.2
+
+        if error != "":
+            return Err(IoError(kind: IoErrorKind.Other, message: "JWKS fetch failed: {error}", source: nil))
+
+        if status < 200 or status >= 300:
+            return Err(IoError(kind: IoErrorKind.Other, message: "JWKS fetch HTTP {status}", source: nil))
+
+        self.jwks_cache = Some(body)
+        Ok(body)
+
+    me get_config() -> Result<OidcConfig, IoError>:
+        """Return cached config or discover it."""
+        match self.config:
+            Some(cached):
+                return Ok(cached)
+            nil:
+                pass_do_nothing("OIDC config cache miss")
+        self.discover()
+
+# ============================================================================
+# JSON Helpers (minimal extraction, no full parser dependency)
+# ============================================================================
+
+fn extract_json_string(json: text, key: text) -> text:
+    """Extract a quoted string value for a given key from flat JSON."""
+    val needle = "\"" + key + "\""
+    val idx = json.index_of(needle)
+    if idx < 0:
+        return ""
+
+    val after_key = json.substring(idx + needle.length())
+    val colon_idx = after_key.index_of(":")
+    if colon_idx < 0:
+        return ""
+
+    val after_colon = after_key.substring(colon_idx + 1).trim()
+    if not after_colon.starts_with("\""):
+        return ""
+
+    val rest = after_colon.substring(1)
+    val end_quote = rest.index_of("\"")
+    if end_quote < 0:
+        return ""
+
+    rest.substring(0, end_quote)
+
+fn extract_json_array(json: text, key: text) -> [text]:
+    """Extract a JSON array of strings for a given key."""
+    val needle = "\"" + key + "\""
+    val idx = json.index_of(needle)
+    if idx < 0:
+        return []
+
+    val after_key = json.substring(idx + needle.length())
+    val bracket_start = after_key.index_of("[")
+    if bracket_start < 0:
+        return []
+
+    val bracket_end = after_key.index_of("]")
+    if bracket_end < 0:
+        return []
+
+    val inner = after_key.substring(bracket_start + 1, bracket_end)
+    val parts = inner.split(",")
+    var result: [text] = []
+    for part in parts:
+        val trimmed = part.trim().replace("\"", "")
+        if trimmed != "":
+            result = result + [trimmed]
+    result

@@ -1,0 +1,204 @@
+# Markdown LSP Configuration
+#
+# Wires the md_lsp server into the editor's LspClient.
+# Auto-starts on .md file open, manages lifecycle.
+
+struct MdLspState:
+    client: LspClient
+    running: bool
+    version: i64
+
+fn md_lsp_config(root_path: text) -> LspClientConfig:
+    LspClientConfig(
+        server_command: "bin/simple run src/app/md_lsp/md_lsp_main.spl",
+        root_path: root_path,
+        language_id: "markdown"
+    )
+
+fn md_lsp_state_new(root_path: text) -> MdLspState:
+    val config = md_lsp_config(root_path)
+    val client = LspClient.new(config)
+    MdLspState(client: client, running: false, version: 0)
+
+fn md_lsp_is_markdown_file(path: text) -> bool:
+    if path.len() < 3:
+        return false
+    val ext = path.slice(path.len() - 3, path.len())
+    if ext == ".md":
+        return true
+    if path.len() < 9:
+        return false
+    val ext_long = path.slice(path.len() - 9, path.len())
+    ext_long == ".markdown"
+
+fn md_lsp_start(state: MdLspState) -> MdLspState:
+    if state.running:
+        return state
+    var client = state.client
+    val started = client.start()
+    if not started:
+        return MdLspState(client: client, running: false, version: 0)
+    val resp = client.initialize()
+    if resp.ok:
+        client.initialized_notification()
+    MdLspState(client: client, running: true, version: 0)
+
+fn md_lsp_open_file(state: MdLspState, path: text, content: text) -> MdLspState:
+    if not state.running:
+        return state
+    var client = state.client
+    client.did_open(path, content, "markdown")
+    MdLspState(client: client, running: state.running, version: 1)
+
+fn md_lsp_change_file(state: MdLspState, path: text, content: text) -> MdLspState:
+    if not state.running:
+        return state
+    var client = state.client
+    val new_version = state.version + 1
+    client.did_change(path, content, new_version)
+    MdLspState(client: client, running: state.running, version: new_version)
+
+fn md_lsp_notify_watched_file(state: MdLspState, path: text, change_type: i64) -> MdLspState:
+    if not state.running:
+        return state
+    var client = state.client
+    client.did_change_watched_file(path, change_type)
+    MdLspState(client: client, running: state.running, version: state.version)
+
+fn md_lsp_notify_workspace_folder(state: MdLspState, path: text, name: text, added: bool) -> MdLspState:
+    if not state.running:
+        return state
+    var client = state.client
+    client.did_change_workspace_folder(path, name, added)
+    MdLspState(client: client, running: state.running, version: state.version)
+
+fn md_lsp_ensure_open(state: MdLspState, path: text, content: text) -> MdLspState:
+    if not md_lsp_is_markdown_file(path):
+        return state
+    var next = state
+    if not next.running:
+        next = md_lsp_start(next)
+    if next.running:
+        next = md_lsp_open_file(next, path, content)
+    next
+
+fn md_lsp_request(state: MdLspState, kind: text, payload: text, path: text, line: i64, col: i64) -> (MdLspState, LspResponse):
+    if not state.running:
+        return (state, LspResponse(id: 0, ok: false, result_json: "", error_text: "not running"))
+    var client = state.client
+    var resp = LspResponse(id: 0, ok: false, result_json: "", error_text: "unknown lsp request")
+    if kind == "completion":
+        resp = client.completion(path, line, col)
+    elif kind == "hover":
+        resp = client.hover(path, line, col)
+    elif kind == "definition":
+        resp = client.definition(path, line, col)
+    elif kind == "code-action":
+        resp = client.code_action(path, line, col)
+    elif kind == "references":
+        resp = client.references(path, line, col)
+    elif kind == "selection-ranges":
+        resp = client.selection_ranges(path, line, col)
+    elif kind == "document-symbols":
+        resp = client.document_symbols(path)
+    elif kind == "prepare-rename":
+        resp = client.prepare_rename(path, line, col)
+    elif kind == "formatting":
+        resp = client.formatting(path)
+    elif kind == "range-formatting":
+        resp = client.range_formatting(path, 0, 0, line, col)
+    elif kind == "signature-help":
+        resp = client.signature_help(path, line, col)
+    elif kind == "document-links":
+        resp = client.document_links(path)
+    elif kind == "folding-ranges":
+        resp = client.folding_ranges(path)
+    elif kind == "workspace-symbols":
+        resp = client.workspace_symbols(payload)
+    elif kind == "semantic-tokens":
+        resp = client.semantic_tokens(path)
+    elif kind == "inlay-hints":
+        resp = client.inlay_hints(path)
+    elif kind == "code-lens":
+        resp = client.code_lens(path)
+    elif kind == "call-hierarchy":
+        resp = client.call_hierarchy(path, line, col)
+    elif kind == "rename":
+        resp = client.rename(path, line, col, payload)
+    elif kind == "call-hierarchy-incoming":
+        resp = client.call_hierarchy_incoming(payload)
+    elif kind == "call-hierarchy-outgoing":
+        resp = client.call_hierarchy_outgoing(payload)
+    elif kind == "code-lens-resolve":
+        resp = client.code_lens_resolve(payload)
+    elif kind == "execute-command":
+        resp = client.execute_command(payload)
+    (MdLspState(client: client, running: state.running, version: state.version), resp)
+
+fn md_lsp_change_active(state: MdLspState, path: text, content: text) -> MdLspState:
+    if not state.running:
+        return state
+    md_lsp_change_file(state, path, content)
+
+fn md_lsp_poll_all_notifications(state: MdLspState) -> (MdLspState, [LspNotification]):
+    if not state.running:
+        var empty: [LspNotification] = []
+        return (state, empty)
+    var client = state.client
+    val notes = client.poll_notifications()
+    (MdLspState(client: client, running: state.running, version: state.version), notes)
+
+fn md_lsp_poll_all_responses(state: MdLspState) -> (MdLspState, [LspResponse]):
+    var client = state.client
+    client.poll_notifications()
+    val responses = client.poll_responses()
+    (MdLspState(client: client, running: state.running, version: state.version), responses)
+
+fn md_lsp_completion(state: MdLspState, path: text, line: i64, col: i64) -> LspResponse:
+    if not state.running:
+        return LspResponse(id: 0, ok: false, result_json: "", error_text: "not running")
+    var client = state.client
+    client.completion(path, line, col)
+
+fn md_lsp_hover(state: MdLspState, path: text, line: i64, col: i64) -> LspResponse:
+    if not state.running:
+        return LspResponse(id: 0, ok: false, result_json: "", error_text: "not running")
+    var client = state.client
+    client.hover(path, line, col)
+
+fn md_lsp_definition(state: MdLspState, path: text, line: i64, col: i64) -> LspResponse:
+    if not state.running:
+        return LspResponse(id: 0, ok: false, result_json: "", error_text: "not running")
+    var client = state.client
+    client.definition(path, line, col)
+
+fn md_lsp_code_action(state: MdLspState, path: text, line: i64, col: i64) -> LspResponse:
+    if not state.running:
+        return LspResponse(id: 0, ok: false, result_json: "", error_text: "not running")
+    var client = state.client
+    client.code_action(path, line, col)
+
+fn md_lsp_poll(state: MdLspState) -> [LspNotification]:
+    if not state.running:
+        var empty: [LspNotification] = []
+        return empty
+    var client = state.client
+    client.poll_notifications()
+
+fn md_lsp_stop(state: MdLspState) -> MdLspState:
+    if not state.running:
+        return state
+    var client = state.client
+    client.shutdown()
+    client.exit()
+    MdLspState(client: client, running: false, version: 0)
+
+fn md_lsp_ensure_started(state: MdLspState, path: text, content: text) -> MdLspState:
+    if not md_lsp_is_markdown_file(path):
+        return state
+    if state.running:
+        return state
+    var started = md_lsp_start(state)
+    if started.running:
+        started = md_lsp_open_file(started, path, content)
+    started

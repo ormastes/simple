@@ -1,0 +1,352 @@
+# `simple sound <sub>` — sound.sdn authoring CLI (sound_music_effects_plan Step 4).
+#
+# Subcommands:
+#   validate <file.sdn>                Parse + type-check only; print a summary.
+#   render <file.sdn> -o out.wav        Synthesize + encode a byte-deterministic WAV.
+#   play <file.sdn>                     Render to a temp WAV and play it via the
+#                                       existing AudioManager/audio_sffi path.
+#                                       Manual/local use only — not asserted in CI.
+#
+# Sound format: SDN. See src/lib/nogc_sync_mut/game2d/audio/sound_asset_sdn.spl
+# for the full recognised shape and defaults.
+#
+#   sound:
+#     kind: "sfx"                                              # or "sequence"/"pattern"
+#     sample_rate: 22050
+#     source: { type: "tone", wave: "sine", freq_hz: 440, duration_ms: 200 }
+#     envelope: { attack_ms: 5, decay_ms: 50, sustain: 0.6, release_ms: 100 }
+#     effects: [ { type: "lowpass", cutoff_hz: 800 }, { type: "reverb", room_size: 0.5, wet: 0.3 },
+#                { type: "pitch", pitch: 1.25 } ]
+#
+# Kind "sfx" with source.type "tone" renders via the synth primitives. Kind
+# "sequence" (a flat, timestamped clip-trigger list) renders by resolving each
+# event's `clip` next to the .sdn file being rendered — a sibling `.wav`
+# (decoded via wav_decode.spl) or a sibling `.sdn` (rendered recursively) —
+# then mixing every clip onto the timeline at its `at_ms` offset with `gain`
+# applied, sample-accurately (std.common.engine.audio.sound_synth.mix).
+# Clip sample_rate must match the sequence's sample_rate and clips must be
+# mono — no resampling/downmixing (scope-limited; extend if a real use needs
+# it). Missing/malformed clips fail with a path-qualified Err.
+#
+# Kind "pattern" (tracker-LITE step sequencing) is a pure front-end lowering
+# over "sequence": `sound.pattern.tracks[].steps` is one character per step —
+# `x` = trigger at gain 0.7, `X` = accented trigger at gain 1.0, `.` = rest.
+# Step duration is `60000 / bpm / steps_per_beat` ms; step `i` of repeat `r`
+# fires at `(r * steps.len() + i) * step_ms` (truncated to whole ms). All
+# tracks must share one `steps` length. `_lower_pattern_to_events` below
+# converts a pattern straight into the same `SoundEvent` list "sequence"
+# uses, then reuses `_build_sequence_wav` unchanged — no separate mixing path.
+#
+# Exit codes: 0 success, 1 failure (missing/malformed/invalid sound, write
+# failure, unsupported render shape), 2 usage error.
+
+use std.cli.cli_util.{get_cli_args}
+use std.io_runtime.{file_write_bytes, file_exists, file_read_bytes, getpid}
+use std.nogc_sync_mut.game2d.audio.sound_asset_sdn.{SoundAsset, SoundEvent, SoundPattern, load_sound_asset}
+use std.common.engine.audio.sound_synth.{
+    gen_sine, gen_square, gen_white_noise, apply_adsr,
+    apply_lowpass, apply_highpass, apply_delay, reverb, apply_pitch_shift, mix
+}
+use std.common.audio.wav_encode.{encode_wav_pcm16}
+use std.common.audio.wav_decode.{WavAudio, decode_wav}
+use std.nogc_sync_mut.io.audio_sffi.{audio_load_sound, audio_play}
+
+# ============================================================================
+# Pattern lowering — SoundPattern -> flat SoundEvent list (front-end only)
+# ============================================================================
+
+fn _lower_pattern_to_events(pattern: SoundPattern) -> [SoundEvent]:
+    """Step `i` of repeat `r` -> at_ms = trunc((r * steps.len() + i) * step_ms),
+    where step_ms = 60000 / bpm / steps_per_beat. 'x' -> gain 0.7, 'X' -> gain 1.0."""
+    val step_ms = 60000.0 / pattern.bpm / (pattern.steps_per_beat as f64)
+    var events: [SoundEvent] = []
+    for track in pattern.tracks:
+        val pattern_len = track.steps.len()
+        var r: i64 = 0
+        while r < pattern.repeat:
+            var i: i64 = 0
+            while i < pattern_len:
+                val c = track.steps.substring(i, i + 1)
+                if c != ".":
+                    var gain = 0.7
+                    if c == "X":
+                        gain = 1.0
+                    val step_index = r * pattern_len + i
+                    val at_ms = ((step_index as f64) * step_ms) as i64
+                    events.push(SoundEvent(at_ms: at_ms, clip: track.clip, gain: gain))
+                i = i + 1
+            r = r + 1
+    events
+
+# ============================================================================
+# Render pipeline — SoundAsset -> WAV bytes
+# ============================================================================
+
+fn build_wav_bytes(asset: SoundAsset, base_dir: text) -> Result<[u8], text>:
+    if asset.kind == "pattern":
+        val events = _lower_pattern_to_events(asset.pattern)
+        val synthetic = SoundAsset(
+            kind: "sequence", sample_rate: asset.sample_rate, source: asset.source,
+            envelope: asset.envelope, effects: asset.effects, events: events,
+            pattern: SoundPattern.default()
+        )
+        return _build_sequence_wav(synthetic, base_dir)
+    if asset.kind == "sequence":
+        return _build_sequence_wav(asset, base_dir)
+    if asset.source.kind != "tone":
+        return Err("unsupported source.type \"{asset.source.kind}\" for render (supported: tone)")
+
+    var samples: [f64] = []
+    if asset.source.wave == "sine":
+        samples = gen_sine(asset.source.freq_hz, asset.source.duration_ms, asset.sample_rate)
+    elif asset.source.wave == "square":
+        samples = gen_square(asset.source.freq_hz, asset.source.duration_ms, asset.sample_rate)
+    else:
+        samples = gen_white_noise(asset.source.duration_ms, asset.sample_rate, asset.source.seed)
+
+    samples = apply_adsr(
+        samples,
+        asset.envelope.attack_ms, asset.envelope.decay_ms,
+        asset.envelope.sustain, asset.envelope.release_ms,
+        asset.sample_rate
+    )
+
+    for fx in asset.effects:
+        if fx.kind == "lowpass":
+            samples = apply_lowpass(samples, fx.cutoff_hz, asset.sample_rate)
+        elif fx.kind == "highpass":
+            samples = apply_highpass(samples, fx.cutoff_hz, asset.sample_rate)
+        elif fx.kind == "delay":
+            samples = apply_delay(samples, fx.time_ms, fx.feedback, asset.sample_rate)
+        elif fx.kind == "reverb":
+            samples = reverb(samples, asset.sample_rate, fx.room_size, fx.wet)
+        elif fx.kind == "pitch":
+            samples = apply_pitch_shift(samples, fx.pitch, asset.sample_rate)
+
+    var f32_samples: [f32] = []
+    for s in samples:
+        f32_samples.push(s as f32)
+    Ok(encode_wav_pcm16(f32_samples, 1, asset.sample_rate as i32))
+
+# ============================================================================
+# Sequence render — resolve+decode clips, mix onto the timeline
+# ============================================================================
+
+fn _dir_of(path: text) -> text:
+    val idx = path.rfind("/")
+    if idx >= 0:
+        return path.substring(0, idx)
+    ""
+
+fn _join_dir(base_dir: text, name: text) -> text:
+    if base_dir == "":
+        return name
+    "{base_dir}/{name}"
+
+fn _render_clip(base_dir: text, clip: text) -> Result<WavAudio, text>:
+    val path = _join_dir(base_dir, clip)
+    if not file_exists(path):
+        return Err("clip not found: {path}")
+    if clip.ends_with(".sdn"):
+        val loaded = load_sound_asset(path)
+        if val Err(e) = loaded:
+            return Err(e)
+        var sub = SoundAsset.default()
+        if val Ok(a) = loaded:
+            sub = a
+        val built = build_wav_bytes(sub, _dir_of(path))
+        if val Err(e) = built:
+            return Err(e)
+        var bytes: [u8] = []
+        if val Ok(b) = built:
+            bytes = b
+        return decode_wav(bytes)
+    elif clip.ends_with(".wav"):
+        return decode_wav(file_read_bytes(path))
+    Err("clip {path}: unsupported clip extension (supported: .wav, .sdn)")
+
+fn _build_sequence_wav(asset: SoundAsset, base_dir: text) -> Result<[u8], text>:
+    var buffers: [[f64]] = []
+    for ev in asset.events:
+        val r = _render_clip(base_dir, ev.clip)
+        if val Err(e) = r:
+            return Err("event clip \"{ev.clip}\": {e}")
+        var clip_audio = WavAudio(samples: [], sample_rate: 0, channels: 0)
+        if val Ok(a) = r:
+            clip_audio = a
+        if clip_audio.channels != 1:
+            return Err("event clip \"{ev.clip}\": sequence render requires mono clips (got {clip_audio.channels} channels)")
+        if clip_audio.sample_rate != asset.sample_rate:
+            return Err("event clip \"{ev.clip}\": clip sample_rate {clip_audio.sample_rate} does not match sound.sample_rate {asset.sample_rate} (resampling not supported)")
+
+        val at_frames = ((ev.at_ms as f64) * (asset.sample_rate as f64) / 1000.0) as i64
+        var buf: [f64] = []
+        var i: i64 = 0
+        while i < at_frames:
+            buf.push(0.0)
+            i = i + 1
+        for s in clip_audio.samples:
+            buf.push((s as f64) * ev.gain)
+        buffers.push(buf)
+
+    val mixed = mix(buffers)
+    var f32_samples: [f32] = []
+    for s in mixed:
+        f32_samples.push(s as f32)
+    Ok(encode_wav_pcm16(f32_samples, 1, asset.sample_rate as i32))
+
+# ============================================================================
+# validate
+# ============================================================================
+
+fn cmd_validate(path: text) -> i64:
+    val r = load_sound_asset(path)
+    if val Err(e) = r:
+        print "error: {e}"
+        return 1
+    if val Ok(a) = r:
+        print "ok: {path} (kind={a.kind}, sample_rate={a.sample_rate} Hz)"
+        if a.kind == "sfx":
+            print "  source: type={a.source.kind} wave={a.source.wave} freq_hz={a.source.freq_hz} duration_ms={a.source.duration_ms}"
+            print "  envelope: attack_ms={a.envelope.attack_ms} decay_ms={a.envelope.decay_ms} sustain={a.envelope.sustain} release_ms={a.envelope.release_ms}"
+        elif a.kind == "sequence":
+            print "  events: {a.events.len()}"
+        else:
+            print "  pattern: bpm={a.pattern.bpm} steps_per_beat={a.pattern.steps_per_beat} tracks={a.pattern.tracks.len()} repeat={a.pattern.repeat}"
+        print "  effects: {a.effects.len()}"
+    0
+
+# ============================================================================
+# render
+# ============================================================================
+
+fn cmd_render(args: [text]) -> i64:
+    var sdn_path = ""
+    var out_path = ""
+    var i: i64 = 0
+    while i < args.len():
+        val a = args[i]
+        if (a == "-o" or a == "--out"):
+            if i + 1 >= args.len():
+                print "error: {a} requires a value"
+                return 2
+            out_path = args[i + 1]
+            i = i + 2
+        elif a.starts_with("-"):
+            print "error: unknown option {a}"
+            return 2
+        else:
+            if sdn_path != "":
+                print "error: unexpected extra argument \"{a}\""
+                return 2
+            sdn_path = a
+            i = i + 1
+    if sdn_path == "":
+        print "error: simple sound render <file.sdn> -o out.wav — missing sound file"
+        return 2
+    if out_path == "":
+        print "error: simple sound render <file.sdn> -o out.wav — missing -o/--out"
+        return 2
+    val loaded = load_sound_asset(sdn_path)
+    if val Err(e) = loaded:
+        print "error: {e}"
+        return 1
+    var asset = SoundAsset.default()
+    if val Ok(a) = loaded:
+        asset = a
+    val built = build_wav_bytes(asset, _dir_of(sdn_path))
+    if val Err(e) = built:
+        print "error: {e}"
+        return 1
+    var bytes: [u8] = []
+    if val Ok(b) = built:
+        bytes = b
+    if not file_write_bytes(out_path, bytes):
+        print "error: failed to write {out_path}"
+        return 1
+    print "wrote {out_path} ({bytes.len()} bytes, {asset.sample_rate} Hz)"
+    0
+
+# ============================================================================
+# play — manual/local only, not asserted in CI
+# ============================================================================
+
+fn cmd_play(path: text) -> i64:
+    val loaded = load_sound_asset(path)
+    if val Err(e) = loaded:
+        print "error: {e}"
+        return 1
+    var asset = SoundAsset.default()
+    if val Ok(a) = loaded:
+        asset = a
+    val built = build_wav_bytes(asset, _dir_of(path))
+    if val Err(e) = built:
+        print "error: {e}"
+        return 1
+    var bytes: [u8] = []
+    if val Ok(b) = built:
+        bytes = b
+    val tmp_path = "/tmp/simple_sound_play_{getpid()}.wav"
+    if not file_write_bytes(tmp_path, bytes):
+        print "error: failed to write temp file {tmp_path}"
+        return 1
+    val source = audio_load_sound(tmp_path)
+    if not source.is_valid:
+        print "error: audio backend could not load {tmp_path}"
+        return 1
+    val playback = audio_play(source)
+    if not playback.is_valid:
+        print "error: audio backend could not start playback"
+        return 1
+    print "playing {path} via {tmp_path}"
+    0
+
+# ============================================================================
+# usage / dispatch
+# ============================================================================
+
+fn print_usage():
+    print "Usage: simple sound <subcommand> [args]"
+    print ""
+    print "Subcommands:"
+    print "  validate <file.sdn>            Parse + type-check only"
+    print "  render <file.sdn> -o out.wav   Synthesize + encode a WAV (byte-deterministic)"
+    print "  play <file.sdn>                Render to a temp WAV and play it (manual/local use)"
+    print ""
+    print "Exit codes: 0 ok, 1 failure, 2 usage error"
+
+fn main() -> i64:
+    val args = get_cli_args()
+    if args.len() < 1:
+        print_usage()
+        return 2
+    val sub = args[0]
+    if (sub == "--help" or sub == "-h" or sub == "help"):
+        print_usage()
+        return 0
+    if sub == "validate":
+        if args.len() < 2:
+            print "error: simple sound validate <file.sdn> — missing sound file"
+            return 2
+        if args.len() > 2:
+            print "error: simple sound validate takes exactly one sound file"
+            return 2
+        return cmd_validate(args[1])
+    if sub == "render":
+        var rest: [text] = []
+        var i: i64 = 1
+        while i < args.len():
+            rest.push(args[i])
+            i = i + 1
+        return cmd_render(rest)
+    if sub == "play":
+        if args.len() < 2:
+            print "error: simple sound play <file.sdn> — missing sound file"
+            return 2
+        if args.len() > 2:
+            print "error: simple sound play takes exactly one sound file"
+            return 2
+        return cmd_play(args[1])
+    print "error: unknown subcommand: {sub}"
+    print_usage()
+    2

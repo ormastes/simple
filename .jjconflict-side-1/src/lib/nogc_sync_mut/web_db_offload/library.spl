@@ -1,0 +1,108 @@
+# codex-impl
+# Reusable GPU target registry for web/db offload dispatch.
+
+use std.web_db_offload.contract.{
+    GpuWdbWorkKind,
+    GpuWdbBudget,
+    GpuWdbRuntimeSnapshot,
+    gpu_wdb_gpu_library_target
+}
+use std.web_db_offload.queue.{
+    GpuWdbQueueState,
+    GpuWdbQueueSubmission,
+    gpu_wdb_queue_snapshot,
+    gpu_wdb_submit_batch
+}
+
+struct GpuWdbLibraryRegistry:
+    backend: text
+    generation: i64
+    available_targets: [text]
+
+fn gpu_wdb_library_empty() -> GpuWdbLibraryRegistry:
+    GpuWdbLibraryRegistry(
+        backend: "none",
+        generation: 0,
+        available_targets: []
+    )
+
+fn gpu_wdb_library_with_targets(backend: text, generation: i64,
+                                available_targets: [text]) -> GpuWdbLibraryRegistry:
+    GpuWdbLibraryRegistry(
+        backend: backend,
+        generation: generation,
+        available_targets: available_targets
+    )
+
+fn gpu_wdb_library_target_available(registry: GpuWdbLibraryRegistry, target: text) -> bool:
+    if registry.backend == "" or registry.backend == "none":
+        return false
+    for candidate in registry.available_targets:
+        if candidate == target:
+            return true
+    false
+
+fn gpu_wdb_library_kind_available(registry: GpuWdbLibraryRegistry, kind: GpuWdbWorkKind) -> bool:
+    gpu_wdb_library_target_available(registry, gpu_wdb_gpu_library_target(kind))
+
+fn gpu_wdb_library_generation_current(registry: GpuWdbLibraryRegistry,
+                                      expected_generation: i64) -> bool:
+    if expected_generation < 0:
+        return false
+    registry.generation == expected_generation
+
+fn gpu_wdb_library_snapshot(state: GpuWdbQueueState, registry: GpuWdbLibraryRegistry,
+                            expected_generation: i64, gpu_available: bool,
+                            cpu_fallback_available: bool) -> GpuWdbRuntimeSnapshot:
+    gpu_wdb_queue_snapshot(
+        state,
+        gpu_available and registry.backend != "" and registry.backend != "none",
+        gpu_wdb_library_generation_current(registry, expected_generation),
+        cpu_fallback_available
+    )
+
+fn gpu_wdb_submit_registered_batch(state: GpuWdbQueueState, registry: GpuWdbLibraryRegistry,
+                                   kind: GpuWdbWorkKind, total_batch_bytes: i64,
+                                   item_count: i64, gpu_available: bool,
+                                   generation_current: bool,
+                                   cpu_fallback_available: bool,
+                                   budget: GpuWdbBudget) -> GpuWdbQueueSubmission:
+    val target_available = gpu_wdb_library_kind_available(registry, kind)
+    gpu_wdb_submit_batch(
+        state,
+        kind,
+        total_batch_bytes,
+        item_count,
+        gpu_available and target_available,
+        generation_current,
+        cpu_fallback_available,
+        budget
+    )
+
+fn gpu_wdb_submit_registered_batch_for_generation(state: GpuWdbQueueState,
+                                                  registry: GpuWdbLibraryRegistry,
+                                                  kind: GpuWdbWorkKind,
+                                                  total_batch_bytes: i64,
+                                                  item_count: i64,
+                                                  gpu_available: bool,
+                                                  expected_generation: i64,
+                                                  cpu_fallback_available: bool,
+                                                  budget: GpuWdbBudget) -> GpuWdbQueueSubmission:
+    val snapshot = gpu_wdb_library_snapshot(
+        state,
+        registry,
+        expected_generation,
+        gpu_available,
+        cpu_fallback_available
+    )
+    gpu_wdb_submit_registered_batch(
+        state,
+        registry,
+        kind,
+        total_batch_bytes,
+        item_count,
+        snapshot.gpu_available,
+        snapshot.generation_current,
+        snapshot.cpu_fallback_available,
+        budget
+    )

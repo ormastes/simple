@@ -1,0 +1,79 @@
+# C Field Match
+#
+# Matches Simple struct fields to C struct fields using name normalization
+# and aka (alias) resolution. Validates field coverage.
+
+fn match_fields(simple_fields: [CImportedField], c_fields: [CField], strict: bool) -> FieldMatchResult:
+    var matched: [FieldMatch] = []
+    var unmatched_simple: [text] = []
+    var unmatched_c: [text] = []
+    var errors: [text] = []
+
+    var c_names: [text] = []
+    for cf in c_fields:
+        c_names.push(cf.name)
+
+    var matched_c_names: [text] = []
+
+    for sf in simple_fields:
+        var c_name = ""
+        if sf.aka_name != "":
+            c_name = find_aka_field(sf.aka_name, c_names)
+            if c_name == "":
+                errors.push("aka field not found in C struct: " + sf.aka_name)
+                continue
+        else:
+            c_name = c_find_matching_field(sf.name, c_names, strict)
+
+        if c_name != "":
+            matched.push(FieldMatch(
+                simple_name: sf.name,
+                c_name: c_name,
+                aka_name: sf.aka_name
+            ))
+            matched_c_names.push(c_name)
+        else:
+            unmatched_simple.push(sf.name)
+            errors.push("field has no match in C struct: " + sf.name)
+
+    for cn in c_names:
+        var was_matched = false
+        for mn in matched_c_names:
+            if mn == cn:
+                was_matched = true
+                break
+        if not was_matched:
+            unmatched_c.push(cn)
+
+    FieldMatchResult(
+        matched: matched,
+        unmatched_simple: unmatched_simple,
+        unmatched_c: unmatched_c,
+        errors: errors
+    )
+
+fn find_aka_field(aka_name: text, c_field_names: [text]) -> text:
+    for name in c_field_names:
+        if name == aka_name:
+            return name
+    ""
+
+struct FieldMatch:
+    simple_name: text
+    c_name: text
+    aka_name: text
+
+struct FieldMatchResult:
+    matched: [FieldMatch]
+    unmatched_simple: [text]
+    unmatched_c: [text]
+    errors: [text]
+
+fn validate_field_match(result: FieldMatchResult) -> [text]:
+    var errors: [text] = []
+    for e in result.errors:
+        errors.push(e)
+    if result.unmatched_simple.length > 0:
+        for name in result.unmatched_simple:
+            errors.push("Simple field has no match in C struct: " + name)
+    errors

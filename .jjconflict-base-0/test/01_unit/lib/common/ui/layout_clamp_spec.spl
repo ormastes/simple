@@ -1,0 +1,57 @@
+# @cover src/lib/common/ui/layout.spl 80%
+# @req FR-UI-LAYOUT-CLAMP
+#
+# vbox/hbox honor optional min_width/max_width/min_height/max_height props and
+# never hand a child a negative size: when fixed children overflow the box the
+# remaining flex space is clamped at 0, so starved flex children get 0 (are not
+# emitted), never a negative rect.
+
+use std.spec.*
+use common.ui.widget.{WidgetNode}
+use common.ui.builder.{column, row, button, build_tree}
+use common.ui.layout.{compute_layout, find_rect}
+
+describe "layout size clamping":
+
+    it "caps a flex child's height at max_height":
+        val root = column("cap_root", [button("cap_child", "C", "a")])
+        WidgetNode(id: "cap_child").set_prop("max_height", "20")
+        val rects = compute_layout(WidgetNode(id: "cap_root"), 0, 0, 100, 100)
+        match find_rect(rects, "cap_child"):
+            case Some(r): expect(r.h).to_equal(20)
+            case _: assert_true(false)
+
+    it "raises a flex child's height to min_height":
+        val root = column("min_root", [button("min_child", "C", "a")])
+        WidgetNode(id: "min_child").set_prop("min_height", "50")
+        val rects = compute_layout(WidgetNode(id: "min_root"), 0, 0, 100, 10)
+        match find_rect(rects, "min_child"):
+            case Some(r): expect(r.h).to_equal(50)
+            case _: assert_true(false)
+
+    it "caps a flex child's width at max_width in an hbox":
+        # `row` from the builder is an hbox; give the sole flex child a width cap.
+        val root = row("hb_root", [button("hb_child", "C", "a")])
+        WidgetNode(id: "hb_child").set_prop("max_width", "30")
+        val rects = compute_layout(WidgetNode(id: "hb_root"), 0, 0, 100, 40)
+        match find_rect(rects, "hb_child"):
+            case Some(r): expect(r.w).to_equal(30)
+            case _: assert_true(false)
+
+    it "gives starved flex children 0 size, never negative, when fixed children overflow":
+        val root = column("neg_root", [
+            button("neg_fixed_a", "A", "a"),
+            button("neg_fixed_b", "B", "b"),
+            button("neg_flex", "F", "f"),
+        ])
+        WidgetNode(id: "neg_fixed_a").set_prop("height", "80")
+        WidgetNode(id: "neg_fixed_b").set_prop("height", "80")
+        val rects = compute_layout(WidgetNode(id: "neg_root"), 0, 0, 100, 100)
+        # The flex child has 0 remaining space, so it is not emitted (0-sized),
+        # and every emitted rect has a non-negative height.
+        match find_rect(rects, "neg_flex"):
+            case Some(r): assert_true(r.h == 0)
+            case _: assert_true(true)
+        for rect in rects:
+            assert_true(rect.h >= 0)
+            assert_true(rect.w >= 0)

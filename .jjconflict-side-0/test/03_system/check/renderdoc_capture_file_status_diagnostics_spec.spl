@@ -1,0 +1,191 @@
+"""
+# RenderDoc Capture File Status Diagnostics
+
+## Overview
+
+Validates that RenderDoc capture gates emit explicit file-existence status for
+Chrome/external-host and Electron `.rdc` artifacts. The GUI/web/2D Vulkan goal
+can already distinguish ARGB bitmap parity from native RenderDoc capture proof;
+this contract makes the missing native `.rdc` path explicit so Linux, macOS,
+and Windows platform runs can diagnose the blocker without inferring from empty
+magic strings.
+
+**Plan:** doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md
+**Requirements:** N/A
+**Research:** doc/09_report/renderdoc_external_host_capture_2026-06-26.md
+**Design:** doc/07_guide/tooling/renderdoc_capture_infra.md
+
+## Syntax
+
+The Electron gate writes `rdoc_electron_html_gate_capture_file_status` beside
+`rdoc_electron_html_gate_capture_file` and
+`rdoc_electron_html_gate_capture_file_magic`.
+
+The external Chrome host wrapper writes `rdoc_external_host_capture_file_status`
+and `rdoc_external_host_gate_capture_file_status` beside the existing path and
+magic fields.
+
+The HTML/CSS RenderDoc goal aggregate forwards those producer fields as
+`external_renderdoc_capture_file_status`,
+`external_renderdoc_gate_capture_file_status`, and
+`electron_renderdoc_gate_capture_file_status`.
+
+The top-level GUI RenderDoc feature coverage aggregate also emits
+`electron_renderdoc_capture_file_status` from the raw Electron evidence file, so
+the report can distinguish a missing raw `.rdc` path from a nested gate failure.
+
+## Acceptance
+
+- The Electron HTML gate always emits `capture_file_status`.
+- Controlled Electron `.rdc` evidence reports `capture_file_status=pass`.
+- The external Chrome host wrapper emits capture file status even when capture
+  was not requested on the current host.
+- The external Chrome host wrapper reports symlinked `.rdc` artifacts as
+  `symlink` and does not read their magic bytes through the link.
+- The top-level GUI RenderDoc aggregate emits external capture file status,
+  external gate capture file status, raw Electron capture file status, and
+  Electron gate capture file status.
+- Missing or symlinked native `.rdc` artifacts are represented by typed status
+  values, not by absent keys.
+
+## Examples
+
+When a Linux host has Vulkan-backed Chrome and Electron ARGB parity but
+RenderDoc cannot hook the browser GPU process, the aggregate should report
+`gui_web_2d_vulkan_pixel_comparison_status=pass` while the RenderDoc blocker
+keys show `*_capture_file_status=missing`.
+
+When a prepared host emits real `RDOC` files, the same keys become `pass`, and
+the magic fields must independently contain `RDOC`.
+
+This contract does not claim a host has produced native RenderDoc captures. It
+only proves the diagnostics are present and typed so platform verification can
+separate missing artifacts, bad file magic, and other gate failures.
+
+## Debugging
+
+Inspect `build/test-renderdoc-capture-file-status-diagnostics/aggregate/evidence.env`
+after a failure. The important top-level keys are
+`external_renderdoc_capture_file_status`,
+`external_renderdoc_gate_capture_file_status`,
+`electron_renderdoc_capture_file_status`, and
+`electron_renderdoc_gate_capture_file_status`.
+
+Inspect `build/test-renderdoc-capture-file-status-diagnostics/electron-pass/out/evidence.env`
+for the producer-level Electron key. If that file reports `pass` but the
+top-level aggregate does not, the propagation layer is stale.
+
+These diagnostics are intentionally shared by future Linux Vulkan, macOS Metal,
+and Windows D3D12 render-log comparison work. Platform-specific tools may add
+native metadata, but the common gate must keep these simple status keys stable.
+
+## Platform Notes
+
+On Linux, the expected native artifacts are RenderDoc `.rdc` files from
+Chrome/ANGLE Vulkan and Electron/Chromium Vulkan. On macOS, this same diagnostic
+shape is used around MoltenVK-backed checks where RenderDoc support may be
+blocked by host packaging or upstream support. On Windows, PIX or GPU debugger
+logs may provide additional native fields, but missing RenderDoc-equivalent
+capture files must still be visible as typed status rather than absent keys.
+
+The contract intentionally accepts `pass`, `missing`, `unavailable`, and
+`symlink` as well-formed values. The value communicates host state; the
+invariant here is that the key exists and is machine-readable.
+
+## Evidence Checklist
+
+- `rdoc_electron_html_gate_capture_file_status=pass` is required when the
+  controlled Electron fixture creates a synthetic `RDOC` file.
+- `rdoc_external_host_capture_file_status=missing` is valid in no-capture mode
+  because the wrapper did not ask RenderDoc to launch Chrome.
+- `rdoc_external_host_capture_file_status=symlink` rejects substituted Chrome
+  `.rdc` artifacts before the wrapper reads file magic.
+- `external_renderdoc_capture_file_status` must be emitted by the top-level
+  aggregate for Chrome/external-host diagnostics.
+- `electron_renderdoc_capture_file_status` must be emitted by the top-level
+  aggregate for raw Electron evidence diagnostics.
+- `electron_renderdoc_gate_capture_file_status` must be emitted by the
+  top-level aggregate for nested Electron gate diagnostics.
+- Every status value must be one of `pass`, `missing`, or `unavailable` so other
+  platform checks can compare it without parsing prose reasons.
+"""
+
+# @tag: system, gpu, renderdoc, diagnostics, vulkan
+
+use std.spec.*
+use std.io_runtime.{file_read, process_run}
+
+fn _value_of(lines: text, key: text) -> text:
+    val prefix = key + "="
+    val parts = lines.split("\n")
+    var found = ""
+    for line in parts:
+        if line.starts_with(prefix):
+            found = line.slice(prefix.len(), line.len())
+    found
+
+describe "RenderDoc capture file status diagnostics":
+
+    it "emits Electron gate capture file status for controlled RDOC evidence":
+        step("Create controlled Electron RDOC evidence")
+        val command = "rm -rf build/test-renderdoc-capture-file-status-diagnostics/electron-pass && mkdir -p build/test-renderdoc-capture-file-status-diagnostics/electron-pass/source && " +
+            "printf 'RDOCsynthetic electron capture\\n' > build/test-renderdoc-capture-file-status-diagnostics/electron-pass/source/electron.rdc && " +
+            "printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > build/test-renderdoc-capture-file-status-diagnostics/electron-pass/source/electron_argb.json && " +
+            "printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-capture-file-status-diagnostics/electron-pass/source/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-renderdoc-capture-file-status-diagnostics/electron-pass/source/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --enable-features=Vulkan --use-angle=vulkan\\n' > build/test-renderdoc-capture-file-status-diagnostics/electron-pass/source/evidence.env && " +
+            "RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/test-renderdoc-capture-file-status-diagnostics/electron-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-capture-file-status-diagnostics/electron-pass/out REPORT_PATH=build/test-renderdoc-capture-file-status-diagnostics/electron-pass/report.md sh scripts/check/check-renderdoc-electron-html-gate.shs"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        step("Assert Electron gate exposes file status beside magic")
+        val evidence = file_read("build/test-renderdoc-capture-file-status-diagnostics/electron-pass/out/evidence.env")
+        expect(evidence).to_contain("rdoc_electron_html_gate_capture_file_status=pass")
+        expect(evidence).to_contain("rdoc_electron_html_gate_capture_file_magic=RDOC")
+
+    it "emits external Chrome host capture file status without capture":
+        step("Run the external host wrapper in no-capture mode")
+        val command = "rm -rf build/test-renderdoc-capture-file-status-diagnostics/external && BUILD_DIR=build/test-renderdoc-capture-file-status-diagnostics/external/out REPORT_PATH=build/test-renderdoc-capture-file-status-diagnostics/external/report.md sh scripts/check/check-renderdoc-external-host-capture.shs"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        step("Assert external host evidence exposes capture file status")
+        val evidence = file_read("build/test-renderdoc-capture-file-status-diagnostics/external/out/evidence.env")
+        expect(evidence).to_contain("rdoc_external_host_capture_file_status=missing")
+        expect(evidence).to_contain("rdoc_external_host_gate_capture_file_status=missing")
+
+    it "rejects symlinked external Chrome RDOC artifacts":
+        step("Create controlled external-host evidence with a symlinked RDOC artifact")
+        val root = "build/test-renderdoc-capture-file-status-diagnostics/external-symlink"
+        val command = "rm -rf " + root + " && mkdir -p " + root + "/source && " +
+            "printf 'RDOCsynthetic external capture\\n' > " + root + "/source/chrome-real.rdc && ln -s chrome-real.rdc " + root + "/source/chrome.rdc && " +
+            "printf 'rdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=" + root + "/source/chrome.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_scene=html-css-chrome\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan\\n' > " + root + "/source/evidence.env && " +
+            "RDOC_HTML_EVIDENCE_ENV=" + root + "/source/evidence.env BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-renderdoc-external-host-capture.shs"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        step("Assert the wrapper classifies the symlink without reading through it")
+        val evidence = file_read(root + "/out/evidence.env")
+        expect(evidence).to_contain("rdoc_external_host_capture_file_status=symlink")
+        expect(evidence).to_contain("rdoc_external_host_gate_capture_file_status=symlink")
+        expect(evidence).to_contain("rdoc_external_host_capture_file_magic=")
+        expect(evidence).to_contain("rdoc_external_host_gate_reason=rdc-file-symlink")
+
+    it "emits top-level Chrome and Electron capture file status diagnostics":
+        step("Run one top-level GUI RenderDoc aggregate pass")
+        val command = "rm -rf build/test-renderdoc-capture-file-status-diagnostics/aggregate && BUILD_DIR=build/test-renderdoc-capture-file-status-diagnostics/aggregate/out REPORT_PATH=build/test-renderdoc-capture-file-status-diagnostics/aggregate/report.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        step("Assert aggregate exposes typed capture file statuses")
+        val evidence = file_read("build/test-renderdoc-capture-file-status-diagnostics/aggregate/out/evidence.env")
+        val external_capture = _value_of(evidence, "external_renderdoc_capture_file_status")
+        val external_gate = _value_of(evidence, "external_renderdoc_gate_capture_file_status")
+        val electron_capture = _value_of(evidence, "electron_renderdoc_capture_file_status")
+        val electron_gate = _value_of(evidence, "electron_renderdoc_gate_capture_file_status")
+        expect(external_capture.len()).to_be_greater_than(0)
+        expect(external_gate.len()).to_be_greater_than(0)
+        expect(electron_capture.len()).to_be_greater_than(0)
+        expect(electron_gate.len()).to_be_greater_than(0)
+        expect(["pass", "missing", "unavailable", "symlink"].contains(external_capture)).to_be(true)
+        expect(["pass", "missing", "unavailable", "symlink"].contains(external_gate)).to_be(true)
+        expect(["pass", "missing", "unavailable", "symlink"].contains(electron_capture)).to_be(true)
+        expect(["pass", "missing", "unavailable", "symlink"].contains(electron_gate)).to_be(true)

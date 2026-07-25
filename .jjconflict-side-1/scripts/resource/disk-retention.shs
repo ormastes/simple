@@ -1,0 +1,224 @@
+#!/bin/sh
+# Bounded, safe disk-retention tool for build/ and src/compiler_rust/target/
+# per-run accumulation directories.
+#
+# Default = REPORT ONLY (dry run). Nothing is ever removed unless --apply is
+# passed. Even with --apply, a candidate is skipped if:
+#   - any file under it was modified within the last MIN_AGE_HOURS (default 24)
+#   - any live process has an open fd or cwd anywhere under it
+#
+# This is intentionally narrow: it only looks at a short list of KNOWN
+# unbounded-growth locations (per-run dirs with random/timestamp suffixes,
+# and abandoned cache-variant namespaces). It does not walk or judge the
+# whole build/ or target/ tree, and it never runs `cargo clean` or `rm -rf
+# build`.
+#
+# Usage:
+#   scripts/resource/disk-retention.shs                 # dry run, report only
+#   scripts/resource/disk-retention.shs --apply          # actually remove
+#   scripts/resource/disk-retention.shs --min-age-hours=48
+#   scripts/resource/disk-retention.shs --selftest        # prove dry-run is safe
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)"
+SCRATCH_CONTAINER="/tmp/claude-1000/-home-ormastes-dev-pub-simple"
+MIN_AGE_HOURS=24
+APPLY=0
+INCLUDE_SCRATCHPAD=1
+
+usage() {
+    cat <<'EOF'
+disk-retention.shs [--apply] [--min-age-hours=N] [--root=DIR]
+                    [--no-scratchpad] [--selftest] [--help]
+
+Dry run (report only) by default. Pass --apply to actually delete.
+Never touches a path modified in the last MIN_AGE_HOURS (default 24) hours,
+and never touches a path any live process has open.
+EOF
+}
+
+for arg in "$@"; do
+    case "$arg" in
+        --apply) APPLY=1 ;;
+        --min-age-hours=*) MIN_AGE_HOURS="${arg#*=}" ;;
+        --root=*) ROOT_DIR="${arg#*=}" ;;
+        --no-scratchpad) INCLUDE_SCRATCHPAD=0 ;;
+        --selftest) SELFTEST=1 ;;
+        --help|-h) usage; exit 0 ;;
+        *) echo "disk-retention: unknown arg: $arg" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Self-test: proves dry-run mode never deletes anything, using a throwaway
+# fake tree so it cannot touch the real repo. Run: disk-retention.shs --selftest
+# ---------------------------------------------------------------------------
+if [ "${SELFTEST:-0}" = "1" ]; then
+    FAKE_ROOT="$(mktemp -d)"
+    trap 'rm -rf "$FAKE_ROOT"' EXIT
+    mkdir -p "$FAKE_ROOT/build/bootstrap/native-objects-selftst1"
+    echo dummy > "$FAKE_ROOT/build/bootstrap/native-objects-selftst1/dummy.o"
+    # Backdate so it would otherwise be eligible for removal.
+    touch -d '@0' "$FAKE_ROOT/build/bootstrap/native-objects-selftst1" \
+                  "$FAKE_ROOT/build/bootstrap/native-objects-selftst1/dummy.o"
+    OUT="$("$0" --root="$FAKE_ROOT" --no-scratchpad 2>&1)"
+    if [ -e "$FAKE_ROOT/build/bootstrap/native-objects-selftst1/dummy.o" ]; then
+        echo "SELFTEST PASS: dry-run reported but did not delete:"
+        echo "$OUT" | grep 'would-remove' || echo "(candidate not matched — check pattern table)"
+        exit 0
+    else
+        echo "SELFTEST FAIL: dry-run deleted a candidate! This must never happen." >&2
+        exit 1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Snapshot every open-file target and cwd on the box ONCE, so per-candidate
+# busy checks are a cheap prefix match instead of a fresh /proc walk each time.
+# ---------------------------------------------------------------------------
+SNAPSHOT="$(mktemp)"
+trap 'rm -f "$SNAPSHOT"' EXIT
+for p in /proc/[0-9]*; do
+    [ -d "$p" ] || continue
+    if [ -r "$p/cwd" ]; then
+        readlink "$p/cwd" 2>/dev/null
+    fi
+    if [ -d "$p/fd" ]; then
+        for f in "$p"/fd/*; do
+            [ -e "$f" ] || continue
+            readlink "$f" 2>/dev/null
+        done
+    fi
+done > "$SNAPSHOT" 2>/dev/null || true
+
+path_is_busy() {
+    # true (0) if any live process has an open fd/cwd at $1 or under $1/
+    awk -v p="$1" '
+        { line=$0 }
+        index(line, p) == 1 {
+            rest = substr(line, length(p) + 1)
+            if (rest == "" || substr(rest, 1, 1) == "/") { found=1; exit }
+        }
+        END { exit !found }
+    ' "$SNAPSHOT"
+}
+
+path_has_recent_activity() {
+    # true (0) if $1 or anything under it was modified within MIN_AGE_HOURS
+    [ -e "$1" ] || return 1
+    find "$1" -newermt "-${MIN_AGE_HOURS} hours" 2>/dev/null | head -1 | grep -q .
+}
+
+human_size() {
+    du -sh "$1" 2>/dev/null | cut -f1
+}
+bytes_size() {
+    du -sb "$1" 2>/dev/null | cut -f1
+}
+
+TOTAL_RECLAIMABLE=0
+REMOVE_LIST="$(mktemp)"
+trap 'rm -f "$SNAPSHOT" "$REMOVE_LIST"' EXIT
+
+report_candidate() {
+    path="$1"
+    [ -e "$path" ] || return 0
+    sz_h="$(human_size "$path")"
+    sz_b="$(bytes_size "$path")"
+    [ -n "$sz_b" ] || sz_b=0
+
+    if path_is_busy "$path"; then
+        printf '%-70s %8s  protected:in-use\n' "$path" "$sz_h"
+        return 0
+    fi
+    if path_has_recent_activity "$path"; then
+        printf '%-70s %8s  protected:too-new (<%sh)\n' "$path" "$sz_h" "$MIN_AGE_HOURS"
+        return 0
+    fi
+    printf '%-70s %8s  would-remove\n' "$path" "$sz_h"
+    echo "$path" >> "$REMOVE_LIST"
+    TOTAL_RECLAIMABLE=$((TOTAL_RECLAIMABLE + sz_b))
+}
+
+# ---------------------------------------------------------------------------
+# Candidate table: container_dir | extended-regex matched against basename
+# of each immediate child. Only known unbounded-growth patterns — this is
+# NOT a general recursive scan of build/ or target/.
+# ---------------------------------------------------------------------------
+echo "disk-retention: scanning known accumulation points under $ROOT_DIR"
+echo "min-age-hours=$MIN_AGE_HOURS apply=$APPLY"
+echo ""
+printf '%-70s %8s  %s\n' "PATH" "SIZE" "STATUS"
+
+scan_container() {
+    container="$1"
+    regex="$2"
+    [ -d "$container" ] || return 0
+    list_tmp="$(mktemp)"
+    find "$container" -mindepth 1 -maxdepth 1 -type d -regextype posix-extended -regex ".*/${regex}" 2>/dev/null | sort > "$list_tmp"
+    # Read via redirection (not a pipe) so this stays in the current shell —
+    # a pipe's final stage runs in a subshell and would drop TOTAL_RECLAIMABLE.
+    while IFS= read -r child; do
+        [ -n "$child" ] || continue
+        report_candidate "$child"
+    done < "$list_tmp"
+    rm -f "$list_tmp"
+}
+
+# Per-run object dumps from repeated bootstrap probes: build/bootstrap/native-objects-XXXXXX
+scan_container "$ROOT_DIR/build/bootstrap" '[A-Za-z0-9_-]*native-objects-[A-Za-z0-9]+'
+# Abandoned experiment-variant native caches (separate namespace per variant,
+# never merged or pruned): build/bootstrap/native_cache_<variant>
+scan_container "$ROOT_DIR/build/bootstrap" 'native_cache_[A-Za-z0-9_]+'
+# Per-run FPGA implementation dirs, numeric epoch/PID suffix: k26_rv32_impl_3740420
+scan_container "$ROOT_DIR/build/fpga" '[A-Za-z0-9_]+_[0-9]{6,}'
+# Per-run evidence/probe dirs stamped with a date or epoch suffix.
+scan_container "$ROOT_DIR/build" 'simpleos_rv64_serial_shell_[0-9_]+'
+scan_container "$ROOT_DIR/build" 'agent-qemu-x86-font-[0-9]+'
+scan_container "$ROOT_DIR/build" 'agent_rv64_font_qemu_[0-9]+'
+scan_container "$ROOT_DIR/build" 'mini_cache_mcp_recheck_[0-9]+'
+
+# Per-session agent scratchpads (outside the repo, under /tmp). Only the
+# scratchpad/ subdir of each session is a candidate — never the session's
+# other harness state.
+if [ "$INCLUDE_SCRATCHPAD" = "1" ] && [ -d "$SCRATCH_CONTAINER" ]; then
+    sessions_tmp="$(mktemp)"
+    find "$SCRATCH_CONTAINER" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort > "$sessions_tmp"
+    while IFS= read -r session; do
+        [ -n "$session" ] || continue
+        sp="$session/scratchpad"
+        [ -d "$sp" ] || continue
+        report_candidate "$sp"
+    done < "$sessions_tmp"
+    rm -f "$sessions_tmp"
+fi
+
+echo ""
+printf 'total reclaimable (safe-to-remove, above protections applied): %s bytes\n' "$TOTAL_RECLAIMABLE"
+human_total=$(printf '%s\n' "$TOTAL_RECLAIMABLE" | awk '{printf "%.2f GiB", $1/1073741824}')
+printf 'total reclaimable: %s\n' "$human_total"
+
+if [ "$APPLY" != "1" ]; then
+    echo ""
+    echo "DRY RUN — nothing was removed. Re-run with --apply to delete the"
+    echo "'would-remove' paths above (each is re-checked for busy/too-new"
+    echo "immediately before deletion)."
+    exit 0
+fi
+
+echo ""
+echo "--apply given: removing would-remove paths (re-verifying each first)..."
+while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if path_is_busy "$path"; then
+        echo "skip (now busy): $path"
+        continue
+    fi
+    if path_has_recent_activity "$path"; then
+        echo "skip (now too-new): $path"
+        continue
+    fi
+    sz_h="$(human_size "$path")"
+    rm -rf -- "$path"
+    echo "removed $path ($sz_h)"
+done < "$REMOVE_LIST"

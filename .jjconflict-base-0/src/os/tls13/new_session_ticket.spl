@@ -1,0 +1,337 @@
+# TLS 1.3 NewSessionTicket — RFC 8446 §4.6.1
+#
+# Provides:
+#   - NewSessionTicket wire type + encode/decode
+#   - Handshake-wrapped encode (HandshakeType 0x04 + 3-byte length)
+#   - derive_resumption_psk_from_ticket — thin wrapper around tls13_resumption_secret
+#   - stored_psk_from_new_session_ticket — build StoredPsk from parsed NST + RMS
+#
+# Wire format (RFC 8446 §4.6.1):
+#   struct {
+#       uint32 ticket_lifetime;
+#       uint32 ticket_age_add;
+#       opaque ticket_nonce<0..255>;      # 1-byte length prefix
+#       opaque ticket<1..2^16-1>;         # 2-byte length prefix
+#       Extension extensions<0..2^16-2>; # 2-byte length prefix (opaque body here)
+#   } NewSessionTicket;
+#
+# Handshake wrapper (RFC 8446 §4):
+#   HandshakeType new_session_ticket = 4;
+#   uint24 length;
+#   NewSessionTicket body;
+
+use os.tls13.key_schedule.{tls13_resumption_secret}
+use os.tls13.psk.{StoredPsk}
+
+# ============================================================================
+# Data classes
+# ============================================================================
+
+class NewSessionTicket:
+    """NewSessionTicket message body per RFC 8446 §4.6.1."""
+    ticket_lifetime: u32
+    ticket_age_add: u32
+    ticket_nonce: [u8]
+    ticket: [u8]
+    extensions: [u8]
+
+class DecodedNewSessionTicket:
+    """Result of parsing a NewSessionTicket body (not including handshake header)."""
+    nst: NewSessionTicket
+    ok: bool
+    reason: text
+
+# ============================================================================
+# Encode helpers (shared with psk.spl style)
+# ============================================================================
+
+fn _nst_push_u8(buf: [u8], v: u8) -> [u8]:
+    var out = buf
+    out.push(v)
+    out
+
+fn _nst_push_u16_be(buf: [u8], v: u32) -> [u8]:
+    var out = buf
+    out.push(((v >> 8) & 0xFF).to_u8())
+    out.push((v & 0xFF).to_u8())
+    out
+
+fn _nst_push_u32_be(buf: [u8], v: u32) -> [u8]:
+    var out = buf
+    out.push(((v >> 24) & 0xFF).to_u8())
+    out.push(((v >> 16) & 0xFF).to_u8())
+    out.push(((v >> 8) & 0xFF).to_u8())
+    out.push((v & 0xFF).to_u8())
+    out
+
+fn _nst_append(buf: [u8], src: [u8]) -> [u8]:
+    var out = buf
+    var i: u64 = 0
+    val n = src.len().to_u64()
+    while i < n:
+        out.push(src[i.to_i64()])
+        i = i + 1
+    out
+
+# ============================================================================
+# Decode helpers
+# ============================================================================
+
+fn _nst_u16_be(buf: [u8], off: u64) -> u32:
+    val hi = buf[off.to_i64()].to_u32()
+    val lo = buf[(off + 1).to_i64()].to_u32()
+    (hi << 8) | lo
+
+fn _nst_u32_be(buf: [u8], off: u64) -> u32:
+    val b0 = buf[off.to_i64()].to_u32()
+    val b1 = buf[(off + 1).to_i64()].to_u32()
+    val b2 = buf[(off + 2).to_i64()].to_u32()
+    val b3 = buf[(off + 3).to_i64()].to_u32()
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+fn _nst_slice(buf: [u8], off: u64, n: u64) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < n:
+        out.push(buf[(off + i).to_i64()])
+        i = i + 1
+    out
+
+# ============================================================================
+# encode_new_session_ticket — serialize the NST body (no handshake header)
+# ============================================================================
+
+fn encode_new_session_ticket(nst: NewSessionTicket) -> [u8]:
+    """Encode NewSessionTicket body per RFC 8446 §4.6.1.
+
+    Layout:
+      4 bytes: ticket_lifetime (u32 big-endian)
+      4 bytes: ticket_age_add (u32 big-endian)
+      1 byte:  ticket_nonce length
+      N bytes: ticket_nonce
+      2 bytes: ticket length
+      M bytes: ticket
+      2 bytes: extensions length
+      P bytes: extensions body
+    """
+    var out: [u8] = []
+    out = _nst_push_u32_be(out, nst.ticket_lifetime)
+    out = _nst_push_u32_be(out, nst.ticket_age_add)
+    # ticket_nonce: 1-byte length prefix
+    val nonce_len = nst.ticket_nonce.len().to_u32()
+    out = _nst_push_u8(out, (nonce_len & 0xFF).to_u8())
+    out = _nst_append(out, nst.ticket_nonce)
+    # ticket: 2-byte length prefix
+    out = _nst_push_u16_be(out, nst.ticket.len().to_u32())
+    out = _nst_append(out, nst.ticket)
+    # extensions: 2-byte length prefix
+    out = _nst_push_u16_be(out, nst.extensions.len().to_u32())
+    out = _nst_append(out, nst.extensions)
+    out
+
+# ============================================================================
+# encode_new_session_ticket_handshake — wrap in Handshake header (type 0x04)
+# ============================================================================
+
+fn encode_new_session_ticket_handshake(nst: NewSessionTicket) -> [u8]:
+    """Wrap NST body in a Handshake record header.
+
+    Handshake format (RFC 8446 §4):
+      1 byte:  HandshakeType (0x04 = new_session_ticket)
+      3 bytes: uint24 body length (big-endian)
+      N bytes: body
+    """
+    val body = encode_new_session_ticket(nst)
+    val body_len = body.len().to_u32()
+    var out: [u8] = []
+    out = _nst_push_u8(out, 0x04u8)
+    # uint24 big-endian
+    out.push(((body_len >> 16) & 0xFF).to_u8())
+    out.push(((body_len >> 8) & 0xFF).to_u8())
+    out.push((body_len & 0xFF).to_u8())
+    out = _nst_append(out, body)
+    out
+
+# ============================================================================
+# decode_new_session_ticket — parse NST body (no handshake header)
+# ============================================================================
+
+fn decode_new_session_ticket(buf: [u8]) -> DecodedNewSessionTicket:
+    """Decode a NewSessionTicket body per RFC 8446 §4.6.1.
+
+    Does not strip the handshake header; call
+    decode_new_session_ticket_handshake to first validate and strip type+length.
+    Returns ok=false with a reason text on truncation or invalid data.
+    """
+    val n = buf.len().to_u64()
+    val empty_nst = NewSessionTicket(
+        ticket_lifetime: 0u32,
+        ticket_age_add: 0u32,
+        ticket_nonce: [],
+        ticket: [],
+        extensions: [],
+    )
+    # Minimum: 4 + 4 + 1 = 9 bytes before the nonce/ticket/ext lengths
+    if n < 9:
+        return DecodedNewSessionTicket(
+            nst: empty_nst,
+            ok: false,
+            reason: "decode_error: too short",
+        )
+    val lifetime = _nst_u32_be(buf, 0u64)
+    val age_add = _nst_u32_be(buf, 4u64)
+    val nonce_len = buf[8].to_u64()
+    var off: u64 = 9
+    if off + nonce_len > n:
+        return DecodedNewSessionTicket(
+            nst: empty_nst,
+            ok: false,
+            reason: "decode_error: ticket_nonce truncated",
+        )
+    val ticket_nonce = _nst_slice(buf, off, nonce_len)
+    off = off + nonce_len
+    if off + 2 > n:
+        return DecodedNewSessionTicket(
+            nst: empty_nst,
+            ok: false,
+            reason: "decode_error: ticket length field missing",
+        )
+    val ticket_len = _nst_u16_be(buf, off).to_u64()
+    off = off + 2
+    if ticket_len == 0:
+        return DecodedNewSessionTicket(
+            nst: empty_nst,
+            ok: false,
+            reason: "illegal_parameter: ticket length is zero",
+        )
+    if off + ticket_len > n:
+        return DecodedNewSessionTicket(
+            nst: empty_nst,
+            ok: false,
+            reason: "decode_error: ticket truncated",
+        )
+    val ticket = _nst_slice(buf, off, ticket_len)
+    off = off + ticket_len
+    if off + 2 > n:
+        return DecodedNewSessionTicket(
+            nst: empty_nst,
+            ok: false,
+            reason: "decode_error: extensions length field missing",
+        )
+    val ext_len = _nst_u16_be(buf, off).to_u64()
+    off = off + 2
+    if off + ext_len > n:
+        return DecodedNewSessionTicket(
+            nst: empty_nst,
+            ok: false,
+            reason: "decode_error: extensions truncated",
+        )
+    val extensions = _nst_slice(buf, off, ext_len)
+    DecodedNewSessionTicket(
+        nst: NewSessionTicket(
+            ticket_lifetime: lifetime,
+            ticket_age_add: age_add,
+            ticket_nonce: ticket_nonce,
+            ticket: ticket,
+            extensions: extensions,
+        ),
+        ok: true,
+        reason: "",
+    )
+
+# ============================================================================
+# decode_new_session_ticket_handshake — strip handshake header then decode body
+# ============================================================================
+
+class DecodedNstHandshake:
+    """Result of parsing a handshake-wrapped NewSessionTicket."""
+    nst: NewSessionTicket
+    ok: bool
+    reason: text
+
+fn decode_new_session_ticket_handshake(buf: [u8]) -> DecodedNstHandshake:
+    """Strip the Handshake header and decode the NewSessionTicket body.
+
+    Validates HandshakeType == 0x04 and that the uint24 length matches
+    the available buffer. Returns ok=false on any mismatch.
+    """
+    val n = buf.len().to_u64()
+    val empty_nst = NewSessionTicket(
+        ticket_lifetime: 0u32,
+        ticket_age_add: 0u32,
+        ticket_nonce: [],
+        ticket: [],
+        extensions: [],
+    )
+    if n < 4:
+        return DecodedNstHandshake(
+            nst: empty_nst,
+            ok: false,
+            reason: "decode_error: buffer too short for handshake header",
+        )
+    val msg_type = buf[0].to_u32()
+    if msg_type != 4u32:
+        return DecodedNstHandshake(
+            nst: empty_nst,
+            ok: false,
+            reason: "decode_error: not a new_session_ticket message",
+        )
+    # uint24 big-endian body length
+    val len_b0 = buf[1].to_u32()
+    val len_b1 = buf[2].to_u32()
+    val len_b2 = buf[3].to_u32()
+    val body_len = ((len_b0 << 16) | (len_b1 << 8) | len_b2).to_u64()
+    if 4 + body_len > n:
+        return DecodedNstHandshake(
+            nst: empty_nst,
+            ok: false,
+            reason: "decode_error: body length exceeds buffer",
+        )
+    val body = _nst_slice(buf, 4u64, body_len)
+    val d = decode_new_session_ticket(body)
+    if not d.ok:
+        return DecodedNstHandshake(nst: empty_nst, ok: false, reason: d.reason)
+    DecodedNstHandshake(nst: d.nst, ok: true, reason: "")
+
+# ============================================================================
+# derive_resumption_psk_from_ticket — RFC 8446 §7.1
+#
+# PSK = HKDF-Expand-Label(resumption_master_secret, "resumption", ticket_nonce, HashLen)
+# ============================================================================
+
+fn derive_resumption_psk_from_ticket(resumption_master_secret: [u8], ticket_nonce: [u8], hash_id: u8) -> [u8]:
+    """Derive per-ticket PSK from the resumption_master_secret.
+
+    Delegates to tls13_resumption_secret (key_schedule.spl).
+    hash_id: 1 = SHA-256 (32-byte output), 2 = SHA-384 (48-byte output).
+    """
+    tls13_resumption_secret(resumption_master_secret, ticket_nonce, hash_id)
+
+# ============================================================================
+# stored_psk_from_new_session_ticket — build client-side StoredPsk
+# ============================================================================
+
+fn stored_psk_from_new_session_ticket(
+    nst: NewSessionTicket,
+    resumption_master_secret: [u8],
+    hash_id: u8,
+    cipher_suite: u16,
+) -> StoredPsk:
+    """Build a StoredPsk from a parsed NewSessionTicket + the resumption_master_secret.
+
+    Derives the per-ticket PSK via:
+      PSK = HKDF-Expand-Label(rms, "resumption", ticket_nonce, HashLen)
+
+    The resulting StoredPsk can be used directly as the PSK identity for a
+    future ClientHello via encode_psk_identity(PskIdentity(identity=nst.ticket, ...)).
+    """
+    val psk = derive_resumption_psk_from_ticket(resumption_master_secret, nst.ticket_nonce, hash_id)
+    StoredPsk(
+        resumption_secret: psk,
+        lifetime_seconds: nst.ticket_lifetime,
+        age_add: nst.ticket_age_add,
+        ticket_nonce: nst.ticket_nonce,
+        ticket: nst.ticket,
+        cipher_suite: cipher_suite,
+        max_early_data_size: 0u32,
+    )

@@ -1,0 +1,277 @@
+# Synthesis Wrapper
+#
+# Pure-Simple synthesis orchestration for RISC-V FPGA Linux builds.
+# Generates Vivado TCL scripts, manages synthesis project structure,
+# and coordinates RTL + constraint file packaging.
+#
+# This module does NOT call Vivado directly — it generates the scripts
+# and project files that Vivado (or an open-source flow) will consume.
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_dir_create(path: text, recursive: bool) -> bool
+extern fn rt_file_exists(path: text) -> bool
+
+use hardware.fpga_linux.riscv_fpga_linux.{XilinxBoardProfile, RiscvFpgaLane, Xlen}
+use hardware.fpga_linux.xdc_gen.{XdcDocument, generate_xdc_for_board}
+
+# ============================================================================
+# Synthesis Project
+# ============================================================================
+
+pub struct SynthesisProject:
+    """
+    Represents a Vivado synthesis project for an FPGA board.
+    Tracks RTL sources, constraint files, and synthesis parameters.
+    """
+    project_name: text
+    board: XilinxBoardProfile
+    rtl_sources: [text]
+    constraint_files: [text]
+    top_module: text
+    output_dir: text
+
+impl SynthesisProject:
+    static fn create(name: text, board: XilinxBoardProfile, output_dir: text) -> SynthesisProject:
+        SynthesisProject(
+            project_name: name,
+            board: board,
+            rtl_sources: [],
+            constraint_files: [],
+            top_module: "simple_soc_top",
+            output_dir: output_dir
+        )
+
+    me add_rtl_source(path: text):
+        self.rtl_sources = self.rtl_sources.push(path)
+
+    me add_constraint_file(path: text):
+        self.constraint_files = self.constraint_files.push(path)
+
+    me set_top_module(name: text):
+        self.top_module = name
+
+    fn tcl_create_project() -> text:
+        """Generates TCL commands to create the Vivado project."""
+        val bname = self.board.name
+        val bpart = self.board.part
+        val pname = self.project_name
+        val odir = self.output_dir
+        val top = self.top_module
+        var lines: [text] = []
+        lines = lines.push("# Auto-generated Vivado TCL script")
+        lines = lines.push("# Board: {bname}")
+        lines = lines.push("# Part: {bpart}")
+        lines = lines.push("")
+        lines = lines.push("create_project {pname} {odir}/{pname} -part {bpart}")
+        lines = lines.push("")
+
+        # Add RTL sources
+        if self.rtl_sources.len() > 0:
+            lines = lines.push("# RTL sources")
+            for src in self.rtl_sources:
+                lines = lines.push("add_files -fileset sources_1 {src}")
+            lines = lines.push("")
+
+        # Add constraint files
+        if self.constraint_files.len() > 0:
+            lines = lines.push("# Constraint files")
+            for cst in self.constraint_files:
+                lines = lines.push("add_files -fileset constrs_1 {cst}")
+            lines = lines.push("")
+
+        # Set top module
+        lines = lines.push("set_property top {top} [current_fileset]")
+        lines = lines.push("")
+        return lines.join("\n")
+
+    fn tcl_run_synthesis() -> text:
+        """Generates TCL commands to run synthesis + implementation."""
+        val odir = self.output_dir
+        val pname = self.project_name
+        val top = self.top_module
+        var lines: [text] = []
+        lines = lines.push("# Synthesis and Implementation")
+        lines = lines.push("launch_runs synth_1")
+        lines = lines.push("wait_on_run synth_1")
+        lines = lines.push("")
+        lines = lines.push("launch_runs impl_1 -to_step write_bitstream")
+        lines = lines.push("wait_on_run impl_1")
+        lines = lines.push("")
+        lines = lines.push("# Export bitstream")
+        val bitstream_path = "{odir}/{pname}.bit"
+        lines = lines.push("file copy -force {odir}/{pname}/{pname}.runs/impl_1/{top}.bit {bitstream_path}")
+        lines = lines.push("")
+        return lines.join("\n")
+
+    fn tcl_full_flow() -> text:
+        """Generates the complete TCL script: project creation + synthesis + bitstream."""
+        var parts: [text] = []
+        parts = parts.push(self.tcl_create_project())
+        parts = parts.push(self.tcl_run_synthesis())
+        return parts.join("\n")
+
+    fn write_tcl(path: text) -> bool:
+        """Writes the full-flow TCL script to disk."""
+        rt_file_write_text(path, self.tcl_full_flow())
+
+# ============================================================================
+# SoC Top-Level Wrapper Generation
+# ============================================================================
+
+pub struct SocTopConfig:
+    """Configuration for generating the SoC top-level VHDL wrapper."""
+    board: XilinxBoardProfile
+    xlen: Xlen
+    has_uart: bool
+    has_spi: bool
+    uart_baud: i64
+    memory_kb: i64
+
+impl SocTopConfig:
+    static fn default_for(board: XilinxBoardProfile, xlen: Xlen) -> SocTopConfig:
+        SocTopConfig(
+            board: board,
+            xlen: xlen,
+            has_uart: true,
+            has_spi: false,
+            uart_baud: 115200,
+            memory_kb: 64
+        )
+
+    fn vhdl_entity() -> text:
+        """Generates the top-level VHDL entity declaration."""
+        var lines: [text] = []
+        lines = lines.push("library ieee;")
+        lines = lines.push("use ieee.std_logic_1164.all;")
+        lines = lines.push("use ieee.numeric_std.all;")
+        lines = lines.push("")
+        lines = lines.push("entity simple_soc_top is")
+        lines = lines.push("  port (")
+        lines = lines.push("    sys_clk   : in  std_logic;")
+        lines = lines.push("    sys_rst_n : in  std_logic;")
+        if self.has_uart:
+            lines = lines.push("    uart_txd  : out std_logic;")
+            lines = lines.push("    uart_rxd  : in  std_logic;")
+        if self.has_spi:
+            lines = lines.push("    spi_sck   : out std_logic;")
+            lines = lines.push("    spi_mosi  : out std_logic;")
+            lines = lines.push("    spi_miso  : in  std_logic;")
+            lines = lines.push("    spi_cs_n  : out std_logic;")
+        lines = lines.push("    led       : out std_logic_vector(3 downto 0)")
+        lines = lines.push("  );")
+        lines = lines.push("end entity simple_soc_top;")
+        return lines.join("\n")
+
+    fn vhdl_architecture_stub() -> text:
+        """Generates a stub architecture body for the SoC wrapper."""
+        var data_width = 64
+        match self.xlen:
+            case Rv32: data_width = 32
+            case Rv64: data_width = 64
+        var lines: [text] = []
+        lines = lines.push("")
+        lines = lines.push("architecture rtl of simple_soc_top is")
+        lines = lines.push("  -- Internal signals")
+        lines = lines.push("  signal clk_i   : std_logic;")
+        lines = lines.push("  signal rst_i   : std_logic;")
+        lines = lines.push("  signal led_reg : std_logic_vector(3 downto 0) := (others => '0');")
+        lines = lines.push("begin")
+        lines = lines.push("")
+        lines = lines.push("  -- Clock and reset")
+        lines = lines.push("  clk_i <= sys_clk;")
+        lines = lines.push("  rst_i <= not sys_rst_n;")
+        lines = lines.push("  led   <= led_reg;")
+        lines = lines.push("")
+        val mem = self.memory_kb
+        val baud = self.uart_baud
+        lines = lines.push("  -- CPU core instantiation placeholder")
+        lines = lines.push("  -- Data width: {data_width} bits")
+        lines = lines.push("  -- Memory: {mem} KB")
+        if self.has_uart:
+            lines = lines.push("  -- UART: {baud} baud")
+        lines = lines.push("")
+        lines = lines.push("end architecture rtl;")
+        return lines.join("\n")
+
+    fn full_vhdl() -> text:
+        """Generates the complete top-level VHDL file."""
+        self.vhdl_entity() + "\n" + self.vhdl_architecture_stub()
+
+# ============================================================================
+# High-Level Synthesis Flow
+# ============================================================================
+
+# @tag(board_id=board_id, output_dir=output_dir)
+pub fn create_synthesis_flow(board_id: text, output_dir: text) -> Result<SynthesisProject, text>:
+    """
+    Creates a complete synthesis project for a board, including
+    XDC constraints and project TCL script.
+    """
+    val board_result = XilinxBoardProfile.from_id(board_id)
+    val board = match board_result:
+        Ok(value):
+            value
+        Err(message):
+            return Err(message)
+
+    var project = SynthesisProject.create("riscv_soc", board, output_dir)
+
+    # Generate and add XDC constraints
+    val xdc_result = generate_xdc_for_board(board_id)
+    match xdc_result:
+        Ok(xdc):
+            val cdir = "{output_dir}/constraints"
+            val xdc_path = "{cdir}/{board_id}.xdc"
+            rt_dir_create(cdir, true)
+            xdc.write_to(xdc_path)
+            project.add_constraint_file(xdc_path)
+        Err(_):
+            pass
+
+    # Generate top-level wrapper for RV32 (primary target for Artix-7)
+    val soc_config = SocTopConfig.default_for(board, Xlen.Rv32)
+    val rtl_dir = "{output_dir}/rtl"
+    val top_path = "{rtl_dir}/simple_soc_top.vhd"
+    rt_dir_create(rtl_dir, true)
+    rt_file_write_text(top_path, soc_config.full_vhdl())
+    project.add_rtl_source(top_path)
+
+    Ok(project)
+
+# ============================================================================
+# RV64GC Vivado TCL Script Generator
+# ============================================================================
+
+pub fn generate_vivado_tcl_rv64() -> text:
+    """Generates a complete Vivado TCL script for synthesising the RV64GC SoC
+    on the Kria K26 (xck26-sfvc784-2LV-c)."""
+    var lines: [text] = []
+    lines = lines.push("# Auto-generated Vivado TCL script for RV64GC SoC on Kria K26")
+    lines = lines.push("# Part: xck26-sfvc784-2LV-c")
+    lines = lines.push("# DO NOT EDIT — regenerate via generate_vivado_tcl_rv64()")
+    lines = lines.push("")
+    lines = lines.push("create_project rv64_soc ./rv64_soc -part xck26-sfvc784-2LV-c")
+    lines = lines.push("")
+    lines = lines.push("# Add RTL sources")
+    lines = lines.push("add_files [glob *.vhd]")
+    lines = lines.push("add_files rv64gc_core.vhd")
+    lines = lines.push("add_files soc_top_rv64.vhd")
+    lines = lines.push("")
+    lines = lines.push("# Add constraint file")
+    lines = lines.push("add_files -fileset constrs_1 k26_constraints.xdc")
+    lines = lines.push("")
+    lines = lines.push("# Set top module")
+    lines = lines.push("set_property top soc_top_rv64 [current_fileset]")
+    lines = lines.push("")
+    lines = lines.push("# Run synthesis")
+    lines = lines.push("launch_runs synth_1")
+    lines = lines.push("wait_on_run synth_1")
+    lines = lines.push("")
+    lines = lines.push("# Run implementation")
+    lines = lines.push("launch_runs impl_1 -to_step write_bitstream")
+    lines = lines.push("wait_on_run impl_1")
+    lines = lines.push("")
+    lines = lines.push("# Export bitstream")
+    lines = lines.push("write_bitstream -force rv64_soc.bit")
+    lines = lines.push("")
+    lines.join("\n")

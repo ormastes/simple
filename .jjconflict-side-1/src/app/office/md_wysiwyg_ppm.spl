@@ -1,0 +1,67 @@
+# md_wysiwyg_ppm.spl — headless end-to-end graphical markdown render.
+#
+# Reads a `.md` file, builds the WYSIWYG view, wraps it as styled preview HTML
+# via wysiwyg_preview_pane, renders that HTML to pixels through the pure-Simple
+# web lane (layout + paint -> Engine2D CPU SIMD backend), and writes a binary P6
+# PPM for visual inspection. This is the missing markdown -> graphical glue:
+# it mirrors examples/06_io/ui/web_render_page_ppm.spl but accepts markdown,
+# not pre-converted HTML.
+#
+# Usage:
+#   bin/simple run src/app/office/md_wysiwyg_ppm.spl <doc.md> [out.ppm] [W] [H]
+# Env: PAGE_W / PAGE_H override the resolution.
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+use common.image.ppm_decode.{encode_ppm_p6}
+use app.office.md_wysiwyg.{build_wysiwyg_view, wysiwyg_preview_pane}
+use std.sffi.cli.{cli_get_args}
+use std.nogc_sync_mut.sffi.io.{file_write_bytes}
+
+use std.io_runtime.{read_file, file_exists, env_get}
+
+fn arg_with_suffix(suffix: text, fallback: text) -> text:
+    val args = cli_get_args()
+    var i = 0
+    while i < args.len():
+        if args[i].ends_with(suffix):
+            return args[i]
+        i = i + 1
+    fallback
+
+fn int_env(key: text, fallback: i32) -> i32:
+    val v = env_get(key) ?? ""
+    if v == "":
+        return fallback
+    v.to_i32()
+
+# Build the WYSIWYG styled preview HTML from raw markdown source.
+fn markdown_preview_html(md_source: text) -> text:
+    val view = build_wysiwyg_view(md_source)
+    wysiwyg_preview_pane(view)
+
+fn main() -> i64:
+    val mp = arg_with_suffix(".md", "")
+    if mp == "":
+        print "No .md argument supplied"
+        return 1
+    if not file_exists(mp):
+        print "Markdown file not found: {mp}"
+        return 1
+    val W = int_env("PAGE_W", 900)
+    val H = int_env("PAGE_H", 760)
+    val op = arg_with_suffix(".ppm", "/tmp/simple-web-capture/md_wysiwyg_page.ppm")
+
+    val md_source = read_file(mp)
+    val html = markdown_preview_html(md_source)
+    print "rendering markdown {mp} at {W}x{H} via pure-Simple web lane (cpu_simd)..."
+    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, W, H, "cpu_simd")
+    if pixels.len() < W * H:
+        print "render produced too few pixels: {pixels.len()} < {W*H}"
+        return 1
+
+    val bytes = encode_ppm_p6(W.to_u32(), H.to_u32(), pixels)
+    if not file_write_bytes(op, bytes):
+        print "failed to write {op}"
+        return 1
+    print "wrote {op} ({pixels.len()} px, {bytes.len()} bytes)"
+    0

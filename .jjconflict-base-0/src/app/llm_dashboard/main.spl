@@ -1,0 +1,143 @@
+use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
+use app.llm_dashboard.data.store.{AgentDashboardStore}
+use app.web_dashboard.server.{DashboardServer}
+use app.io.cli_commands.{cli_run_file}
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_env_get(key: text) -> text
+
+fn _is_help_arg(arg: text) -> bool:
+    arg == "--help" or arg == "-h" or arg == "help"
+
+fn _llm_dashboard_args() -> [text]:
+    val raw = rt_cli_get_args()
+    var args: [text] = []
+    var found = false
+    var i = 0
+    while i < raw.len():
+        val arg = raw[i]
+        if found:
+            args.push(arg)
+        elif arg == "llm-dashboard" or arg == "agents":
+            found = true
+        elif arg.ends_with("/app/llm_dashboard/main.spl") or arg == "src/app/llm_dashboard/main.spl":
+            found = true
+        i = i + 1
+    args
+
+fn _has_help(args: [text]) -> bool:
+    for arg in args:
+        if _is_help_arg(arg):
+            return true
+    false
+
+fn _has_status(args: [text]) -> bool:
+    for arg in args:
+        if arg == "--status" or arg == "status":
+            return true
+    false
+
+fn _dashboard_mode(args: [text]) -> text:
+    for arg in args:
+        if arg == "--gui" or arg == "--web":
+            return "web"
+        if arg == "--ios":
+            return "ios"
+        if arg == "--tui":
+            return "tui"
+    "tui"
+
+fn _dir_arg(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        if args[i] == "--dir" and i + 1 < args.len():
+            return args[i + 1]
+        i = i + 1
+    ""
+
+fn _port_arg(args: [text]) -> i64:
+    var i = 0
+    while i < args.len():
+        if (args[i] == "--port" or args[i] == "-p") and i + 1 < args.len():
+            return args[i + 1].to_i64() ?? 3600
+        i = i + 1
+    3600
+
+fn _is_interactive_tty() -> bool:
+    val term = rt_env_get("TERM")
+    term != "" and term != "dumb"
+
+fn _print_status(mode: text):
+    print "command=llm-dashboard"
+    print "mode={mode}"
+    print "surface=tui"
+    if mode == "web" or mode == "ios":
+        print "host_status=not-started"
+    else:
+        print "host_status=not-required"
+    print "agents=claude,codex,gemini"
+    print "status=ready"
+
+fn _print_help(progress_mode: text):
+    val progress = render_progress(progress_mode, 0, 1, "usage")
+    if progress != "":
+        print progress
+    print "LLM Agent Dashboard"
+    print ""
+    print "Usage: simple llm-dashboard [--gui|--web|--tui|--ios] [options]"
+    print ""
+    print "Modes:"
+    print "  --gui, --web        Start the browser dashboard surface"
+    print "  --tui               Render the terminal dashboard surface"
+    print "  --ios               Use iOS-friendly web layout defaults"
+    print ""
+    print "Options:"
+    print "  --port N, -p N     Web/iOS surface port (default 3600)"
+    print "  --dir PATH         Agent activity directory to watch"
+    print ""
+    print "Shared log options:"
+    for line in log_options_help():
+        print "  {line}"
+    print "  --status           Print dashboard mode and readiness without launching a host"
+
+fn _print_plain_summary(mode: text, dir: text):
+    val store = if dir != "": AgentDashboardStore.with_dir(dir) else: AgentDashboardStore.new()
+    print "LLM Agent Dashboard"
+    print "mode={mode}"
+    print store.summary_line()
+
+fn main() -> i64:
+    val args = _llm_dashboard_args()
+    val log_opts = parse_log_options(args)
+    if not log_opts.valid:
+        print log_opts.error
+        return 1
+
+    if _has_help(args):
+        _print_help(log_opts.progress)
+        return 0
+    val mode = _dashboard_mode(args)
+
+    if _has_status(args):
+        _print_status(mode)
+        return 0
+
+    if log_opts.log_mode == "json":
+        print "{\"command\":\"llm-dashboard\",\"status\":\"ready\",\"mode\":\"" + mode + "\"}"
+        return 0
+
+    val dir = _dir_arg(args)
+
+    if mode == "web" or mode == "ios":
+        val port = _port_arg(args)
+        val server = if mode == "ios": DashboardServer.new_ios(port, dir) else: DashboardServer.new(port)
+        server.start()
+        return 0
+
+    if _is_interactive_tty():
+        # Delegate to the isolated TUI entrypoint so the (lightweight) web/ios
+        # path above never has to eagerly compile the common-ui TUI stack.
+        return cli_run_file("src/app/llm_dashboard/tui_main.spl", args, false, false)
+
+    _print_plain_summary(mode, dir)
+    0

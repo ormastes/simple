@@ -1,0 +1,151 @@
+"""ML Cost Model — parametric cost estimation for query plan candidates.
+
+Estimates row counts, I/O cost, and CPU cost for each plan node so the
+query planner can select the lowest-cost execution path.  Weights are
+tunable; a future version may learn them from execution statistics.
+"""
+
+# ── Tuning knobs ────────────────────────────────────────────────────────────
+
+val COST_IO_WEIGHT_DEFAULT: f64 = 1.0
+val COST_CPU_WEIGHT_DEFAULT: f64 = 0.1
+val COST_SELECTIVITY_DEFAULT: f64 = 0.1
+val COST_SELECTIVITY_PREFIX: f64 = 0.05
+val COST_SELECTIVITY_RANGE: f64 = 0.2
+val COST_SELECTIVITY_FULL: f64 = 1.0
+val COST_JOIN_FACTOR: f64 = 0.8
+
+# ── Data types ───────────────────────────────────────────────────────────────
+
+struct CostModel:
+    row_count: i64
+    io_weight: f64
+    cpu_weight: f64
+    selectivity_default: f64
+
+fn cost_model_new(row_count: i64) -> CostModel:
+    CostModel(
+        row_count: row_count,
+        io_weight: COST_IO_WEIGHT_DEFAULT,
+        cpu_weight: COST_CPU_WEIGHT_DEFAULT,
+        selectivity_default: COST_SELECTIVITY_DEFAULT
+    )
+
+fn cost_model_with_weights(row_count: i64, io_weight: f64, cpu_weight: f64) -> CostModel:
+    CostModel(
+        row_count: row_count,
+        io_weight: io_weight,
+        cpu_weight: cpu_weight,
+        selectivity_default: COST_SELECTIVITY_DEFAULT
+    )
+
+struct PlanCost:
+    estimated_rows: i64
+    io_cost: f64
+    cpu_cost: f64
+    total_cost: f64
+
+fn plan_cost_total(c: PlanCost) -> f64:
+    c.total_cost
+
+fn plan_cost_rows(c: PlanCost) -> i64:
+    c.estimated_rows
+
+# ── Selectivity estimation ────────────────────────────────────────────────────
+
+fn selectivity_for_kind(kind: text) -> f64:
+    if kind == "Eq":
+        return COST_SELECTIVITY_DEFAULT
+    if kind == "Prefix":
+        return COST_SELECTIVITY_PREFIX
+    if kind == "Range":
+        return COST_SELECTIVITY_RANGE
+    COST_SELECTIVITY_FULL
+
+# ── Row estimation ────────────────────────────────────────────────────────────
+
+fn estimate_rows_full_scan(model: CostModel) -> i64:
+    model.row_count
+
+fn estimate_rows_index_lookup(model: CostModel) -> i64:
+    val sel = model.selectivity_default
+    val est = (model.row_count.to_float() * sel) as i64
+    if est < 1:
+        return 1
+    est
+
+fn estimate_rows_index_range(model: CostModel) -> i64:
+    val sel = COST_SELECTIVITY_RANGE
+    val est = (model.row_count.to_float() * sel) as i64
+    if est < 1:
+        return 1
+    est
+
+fn estimate_rows_index_prefix(model: CostModel) -> i64:
+    val sel = COST_SELECTIVITY_PREFIX
+    val est = (model.row_count.to_float() * sel) as i64
+    if est < 1:
+        return 1
+    est
+
+fn estimate_rows_for_kind(model: CostModel, kind: text) -> i64:
+    if kind == "FullScan":
+        return estimate_rows_full_scan(model)
+    if kind == "IndexLookup":
+        return estimate_rows_index_lookup(model)
+    if kind == "IndexRange":
+        return estimate_rows_index_range(model)
+    if kind == "IndexPrefix":
+        return estimate_rows_index_prefix(model)
+    if kind == "Join":
+        val half = model.row_count / 2
+        val est = (half.to_float() * COST_JOIN_FACTOR) as i64
+        if est < 1:
+            return 1
+        return est
+    estimate_rows_full_scan(model)
+
+# ── Cost estimation ───────────────────────────────────────────────────────────
+
+fn estimate_cost_full_scan(model: CostModel) -> PlanCost:
+    val rows = estimate_rows_full_scan(model)
+    val io = rows.to_float() * model.io_weight
+    val cpu = rows.to_float() * model.cpu_weight
+    PlanCost(estimated_rows: rows, io_cost: io, cpu_cost: cpu, total_cost: io + cpu)
+
+fn estimate_cost_index_lookup(model: CostModel) -> PlanCost:
+    val rows = estimate_rows_index_lookup(model)
+    val io = rows.to_float() * model.io_weight + 1.0
+    val cpu = rows.to_float() * model.cpu_weight
+    PlanCost(estimated_rows: rows, io_cost: io, cpu_cost: cpu, total_cost: io + cpu)
+
+fn estimate_cost_index_range(model: CostModel) -> PlanCost:
+    val rows = estimate_rows_index_range(model)
+    val io = rows.to_float() * model.io_weight + 1.0
+    val cpu = rows.to_float() * model.cpu_weight
+    PlanCost(estimated_rows: rows, io_cost: io, cpu_cost: cpu, total_cost: io + cpu)
+
+fn estimate_cost_index_prefix(model: CostModel) -> PlanCost:
+    val rows = estimate_rows_index_prefix(model)
+    val io = rows.to_float() * model.io_weight + 1.0
+    val cpu = rows.to_float() * model.cpu_weight
+    PlanCost(estimated_rows: rows, io_cost: io, cpu_cost: cpu, total_cost: io + cpu)
+
+fn estimate_cost_join(model: CostModel) -> PlanCost:
+    val rows = estimate_rows_for_kind(model, "Join")
+    val io = rows.to_float() * model.io_weight * 2.0
+    val cpu = rows.to_float() * model.cpu_weight * COST_JOIN_FACTOR
+    PlanCost(estimated_rows: rows, io_cost: io, cpu_cost: cpu, total_cost: io + cpu)
+
+fn estimate_cost(plan_kind: text, model: CostModel) -> PlanCost:
+    if plan_kind == "FullScan":
+        return estimate_cost_full_scan(model)
+    if plan_kind == "IndexLookup":
+        return estimate_cost_index_lookup(model)
+    if plan_kind == "IndexRange":
+        return estimate_cost_index_range(model)
+    if plan_kind == "IndexPrefix":
+        return estimate_cost_index_prefix(model)
+    if plan_kind == "Join":
+        return estimate_cost_join(model)
+    estimate_cost_full_scan(model)

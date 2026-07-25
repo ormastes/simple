@@ -1,0 +1,83 @@
+# Temporary probe: JS-driven animation in a real window. Content rendered ONCE
+# by the pure-Simple web renderer; per presented frame the REAL JS engine
+# computes a smoothstep-eased scroll offset; winit presents the crop.
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels}
+use std.js.engine.runtime.{JsRuntime}
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.types.js_types.{JsValue}
+use std.io.window_winit.{winit_loop_new, winit_loop_free, winit_window_new,
+    winit_window_free, winit_present_rgba, winit_poll_close_requested}
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_thread_sleep(ms: i64)
+
+val W: i32 = 480
+val VIEW_H: i32 = 240
+val TALL_H: i32 = 720
+
+fn build_page() -> text:
+    var body = ""
+    var i = 0
+    while i < 16:
+        val color = if i % 3 == 0: "#d04030" elif i % 3 == 1: "#30c050" else: "#3060c0"
+        body = body + "<div style=\"width:440px;height:40px;background:" + color + ";color:#ffffff;font-size:14px\">band " + i.to_text() + " — offset by JS smoothstep</div>"
+        i = i + 1
+    "<html><head><style>body{margin:0;background:#ffffff}</style></head><body><h1 style=\"margin:6px;font-size:22px\">JS-animated scroll</h1>" + body + "</body></html>"
+
+val t0 = rt_time_now_unix_micros()
+val tall = simple_web_layout_render_html_software_pixels(build_page(), W, TALL_H)
+print("render_ms=" + ((rt_time_now_unix_micros() - t0) / 1000).to_text() + " px=" + tall.len().to_text())
+
+var rt = JsRuntime.new(Logger.new("anim", LogLevel.Error))
+match rt.eval("var maxOff = 440; var speed = 1; maxOff"):
+    Ok(v): print("js_setup ok")
+    Err(e): print("js_setup err: " + e.message)
+
+fn js_offset(rt2: JsRuntime, frame: i64) -> i64:
+    val src = "var t = " + frame.to_text() + " / 120; var tt = t - t.floor ?? t; var e = t * t * (3 - 2 * t); e * maxOff"
+    # keep JS simple: clamp t in Simple, smoothstep in JS
+    val f2 = if frame > 120: 120 else: frame
+    val src2 = "var t = " + f2.to_text() + " / 120; var e = t * t * (3 - 2 * t); e * maxOff"
+    match rt2.eval(src2):
+        Ok(v):
+            match v:
+                JsValue.Number(n): return n.to_i64()
+                _: return 0
+        Err(e):
+            print("js err: " + e.message)
+            return 0
+    0
+
+val lp = winit_loop_new()
+if not lp.is_valid:
+    print("no gui runtime")
+else:
+    val win = winit_window_new(lp, W.to_i64(), VIEW_H.to_i64(), "JS-animated scroll — pure-Simple engine")
+    if not win.is_valid:
+        print("window failed")
+    else:
+        var frame_i = 0i64
+        var running = true
+        val row = W.to_i64()
+        val span = TALL_H.to_i64() - VIEW_H.to_i64()
+        while running and frame_i < 180:
+            if winit_poll_close_requested(lp):
+                running = false
+            val off = js_offset(rt, frame_i)
+            var crop: [i64] = [0; (W.to_i64() * VIEW_H.to_i64())]
+            var y = 0i64
+            while y < VIEW_H.to_i64():
+                val src_y = (y + off) % span
+                var x = 0i64
+                while x < row:
+                    crop[y * row + x] = (tall[src_y * row + x]).to_i64() & 0xFFFFFF
+                    x = x + 1
+                y = y + 1
+            winit_present_rgba(win, W.to_i64(), VIEW_H.to_i64(), crop)
+            if frame_i % 30 == 0:
+                print("frame=" + frame_i.to_text() + " js_offset=" + off.to_text())
+            rt_thread_sleep(30)
+            frame_i = frame_i + 1
+        winit_window_free(win)
+    winit_loop_free(lp)
+print("ANIM-PROBE: done")

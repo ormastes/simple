@@ -1,0 +1,42 @@
+# Lexer source array shallow-release ABI regression.
+#
+# @cover src/compiler/10.frontend/core/lexer.spl
+# @cover src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl
+# @cover src/compiler/70.backend/backend/cranelift_codegen_adapter.spl
+# @cover src/compiler/70.backend/backend/cranelift_runtime_imports.spl
+# @cover src/compiler/70.backend/backend/llvm_backend.spl
+# @cover src/compiler/70.backend/backend/llvm_lib_translate.spl
+# @cover src/runtime/runtime.h
+# @cover src/runtime/runtime_native.c
+# @cover src/runtime/simple_core/core_array_ops.spl
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+describe "lexer source array release ABI":
+    it "keeps one shallow void array-free contract across native providers":
+        val textual = source("src/compiler/70.backend/backend/_MirToLlvm/asm_constraints_helpers.spl")
+        val host = source("src/compiler/70.backend/backend/llvm_backend.spl")
+        val llvm_lib = source("src/compiler/70.backend/backend/llvm_lib_translate.spl")
+        val cranelift_imports = source("src/compiler/70.backend/backend/cranelift_runtime_imports.spl")
+        val cranelift_adapter = source("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        val core = source("src/runtime/simple_core/core_array_ops.spl")
+        val header = source("src/runtime/runtime.h")
+        val native = source("src/runtime/runtime_native.c")
+
+        expect(textual).to_contain("declare void @rt_array_free(ptr)")
+        expect(textual).to_contain("remember_function_return_type(\"rt_array_free\", \"void\")")
+        expect(host).to_contain("declare void @rt_array_free(ptr)")
+        expect(llvm_lib).to_contain("declare_fn(mod_, \"rt_array_free\", llvm_function_type(void_ty, [ptr_ty], false))")
+        expect(cranelift_imports).to_contain("fn translate_runtime_import_call_void")
+        expect(cranelift_adapter).to_contain("if name == \"rt_array_free\":")
+        expect(cranelift_adapter).to_contain("translate_runtime_import_call_void(ctx, cl_module, name, arg_vals)")
+        expect(core).to_contain("pub fn rt_array_free(array: i64):")
+        expect(core).to_contain("unregister_array(ptr)")
+        expect(header).to_contain("void      rt_array_free(SplArray* array)")
+        expect(native).to_contain("void rt_array_free(SplArray* value)")
+        expect(native).to_contain("rt_core_as_registered_array")
+        expect(native).to_contain("rt_core_unregister_array(array)")
+        expect(native.contains("void rt_array_free(SplArray* value) {\n    spl_array_free")).to_equal(false)

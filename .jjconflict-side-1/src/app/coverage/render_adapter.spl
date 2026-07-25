@@ -1,0 +1,235 @@
+# Coverage Render Adapter
+#
+# Bridges the coverage app to the shared UI render contract.
+# Produces RenderResult (text and/or html) from coverage data,
+# showing coverage tables with progress bars and colored indicators.
+
+use app.ui.render.types.{RenderConfig, RenderResult}
+use app.ui.render.ansi.{RESET, BOLD, DIM, RED, GREEN, YELLOW, CYAN}
+use app.ui.render.fmt.{fmt_number, fmt_percent}
+use app.ui.render.table.{TableBuilder, ALIGN_LEFT, ALIGN_RIGHT}
+use app.ui.render.progress.{progress_bar, progress_bar_html}
+use app.ui.render.html.{html_page, html_metric_card, html_table, css_dark_theme}
+
+# =========================================================================
+# Coverage Data Structures
+# =========================================================================
+
+struct CoverageEntry:
+    """A single coverage entry for a module or file."""
+    name: text
+    lines_total: i64
+    lines_covered: i64
+    functions_total: i64
+    functions_covered: i64
+
+    fn line_pct() -> f64:
+        if self.lines_total == 0: return 0.0
+        return (self.lines_covered * 100) as f64 / self.lines_total as f64
+
+    fn func_pct() -> f64:
+        if self.functions_total == 0: return 0.0
+        return (self.functions_covered * 100) as f64 / self.functions_total as f64
+
+struct CoverageReport:
+    """Aggregated coverage report."""
+    entries: [CoverageEntry]
+    total_lines: i64
+    covered_lines: i64
+    total_functions: i64
+    covered_functions: i64
+
+    fn line_pct() -> f64:
+        if self.total_lines == 0: return 0.0
+        return (self.covered_lines * 100) as f64 / self.total_lines as f64
+
+    fn func_pct() -> f64:
+        if self.total_functions == 0: return 0.0
+        return (self.covered_functions * 100) as f64 / self.total_functions as f64
+
+# =========================================================================
+# Main Render Entry Point
+# =========================================================================
+
+fn render_coverage(config: RenderConfig, report: CoverageReport) -> RenderResult:
+    """Render coverage report via the shared render contract.
+
+    config.mode selects view: "summary", "detail", or "full".
+    config.format selects output: "text", "html", or "both".
+    """
+    val mode = if config.mode == "render": "full" else: config.mode
+    val fmt = config.format
+
+    var text_out = ""
+    var html_out = ""
+
+    if fmt == "text" or fmt == "both":
+        text_out = render_text(report, mode)
+
+    if fmt == "html" or fmt == "both":
+        html_out = render_html(report, mode, config)
+
+    val meta: Dict<text, text> = {
+        "adapter": "coverage",
+        "mode": mode,
+        "format": fmt,
+        "total_lines": "{report.total_lines}",
+        "covered_lines": "{report.covered_lines}",
+        "line_coverage_pct": "{report.line_pct()}"
+    }
+
+    return RenderResult(
+        format: fmt,
+        text_output: text_out,
+        html_output: html_out,
+        metadata: meta,
+        warnings: []
+    )
+
+# =========================================================================
+# Text Rendering
+# =========================================================================
+
+fn render_text(report: CoverageReport, mode: text) -> text:
+    """Render coverage as text with ANSI colors and progress bars."""
+    var lines: [text] = []
+
+    lines.push("{BOLD}Coverage Report{RESET}")
+    lines.push("")
+
+    # Summary
+    val line_pct = report.line_pct()
+    val func_pct = report.func_pct()
+    val line_color = _threshold_color(line_pct)
+    val func_color = _threshold_color(func_pct)
+
+    lines.push("{BOLD}Overall:{RESET}")
+    val line_bar = progress_bar(line_pct / 100.0, 30)
+    val func_bar = progress_bar(func_pct / 100.0, 30)
+    lines.push("  Lines:     {line_color}{line_bar} {fmt_percent(line_pct)}{RESET}  ({report.covered_lines}/{report.total_lines})")
+    lines.push("  Functions: {func_color}{func_bar} {fmt_percent(func_pct)}{RESET}  ({report.covered_functions}/{report.total_functions})")
+    lines.push("")
+
+    if mode == "detail" or mode == "full":
+        # Per-module table
+        var tb = TableBuilder.new()
+        tb = tb.add_column("Module", ALIGN_LEFT)
+        tb = tb.add_column("Lines", ALIGN_RIGHT)
+        tb = tb.add_column("Covered", ALIGN_RIGHT)
+        tb = tb.add_column("Coverage", ALIGN_LEFT)
+        tb = tb.add_column("Functions", ALIGN_RIGHT)
+
+        for entry in report.entries:
+            val pct = entry.line_pct()
+            val bar = progress_bar(pct / 100.0, 20)
+            val color = _threshold_color(pct)
+            tb = tb.add_row([
+                entry.name,
+                fmt_number(entry.lines_total),
+                fmt_number(entry.lines_covered),
+                "{color}{bar} {fmt_percent(pct)}{RESET}",
+                "{entry.functions_covered}/{entry.functions_total}"
+            ])
+
+        lines.push("{BOLD}Per-Module Coverage:{RESET}")
+        lines.push(tb.render())
+
+    lines.join("\n")
+
+# =========================================================================
+# HTML Rendering
+# =========================================================================
+
+fn render_html(report: CoverageReport, mode: text, config: RenderConfig) -> text:
+    """Render coverage as styled HTML with progress bars and cards."""
+    val line_pct = report.line_pct()
+    val func_pct = report.func_pct()
+    val line_css = _threshold_css_color(line_pct)
+    val func_css = _threshold_css_color(func_pct)
+
+    var h = ""
+    h = "{h}{_html_head("Coverage Report")}"
+    h = "{h}<body>\n<div class=\"container\">\n"
+    h = "{h}<h1>Coverage Report</h1>\n"
+
+    # Summary cards
+    h = "{h}<div class=\"card-grid\">\n"
+    h = "{h}<div class=\"card\"><h3>Line Coverage</h3>"
+    h = "{h}<div class=\"value\" style=\"color:{line_css}\">{fmt_percent(line_pct)}</div>"
+    h = "{h}{progress_bar_html(line_pct / 100.0, line_css)}"
+    h = "{h}<div class=\"sub\">{report.covered_lines} / {report.total_lines} lines</div></div>\n"
+
+    h = "{h}<div class=\"card\"><h3>Function Coverage</h3>"
+    h = "{h}<div class=\"value\" style=\"color:{func_css}\">{fmt_percent(func_pct)}</div>"
+    h = "{h}{progress_bar_html(func_pct / 100.0, func_css)}"
+    h = "{h}<div class=\"sub\">{report.covered_functions} / {report.total_functions} functions</div></div>\n"
+    h = "{h}</div>\n"
+
+    if mode == "detail" or mode == "full":
+        # Per-module table
+        h = "{h}<div class=\"card\" style=\"margin-top:16px\">\n"
+        h = "{h}<h3>Per-Module Coverage</h3>\n"
+        h = "{h}<table>\n"
+        h = "{h}<tr><th>Module</th><th>Lines</th><th>Covered</th><th>Coverage</th><th>Functions</th></tr>\n"
+
+        for entry in report.entries:
+            val pct = entry.line_pct()
+            val css_color = _threshold_css_color(pct)
+            h = "{h}<tr>"
+            h = "{h}<td>{_html_escape(entry.name)}</td>"
+            h = "{h}<td style=\"text-align:right\">{fmt_number(entry.lines_total)}</td>"
+            h = "{h}<td style=\"text-align:right\">{fmt_number(entry.lines_covered)}</td>"
+            h = "{h}<td>{progress_bar_html(pct / 100.0, css_color)} <span style=\"color:{css_color}\">{fmt_percent(pct)}</span></td>"
+            h = "{h}<td style=\"text-align:right\">{entry.functions_covered}/{entry.functions_total}</td>"
+            h = "{h}</tr>\n"
+
+        h = "{h}</table>\n</div>\n"
+
+    h = "{h}</div>\n</body>\n</html>\n"
+    h
+
+# =========================================================================
+# Helpers
+# =========================================================================
+
+fn _threshold_color(pct: f64) -> text:
+    """Return ANSI color code based on coverage percentage."""
+    if pct >= 80.0: return GREEN
+    if pct >= 50.0: return YELLOW
+    return RED
+
+fn _threshold_css_color(pct: f64) -> text:
+    """Return CSS color based on coverage percentage."""
+    if pct >= 80.0: return "#3fb950"
+    if pct >= 50.0: return "#d29922"
+    return "#f85149"
+
+fn _html_head(title: text) -> text:
+    var h = ""
+    h = "{h}<!DOCTYPE html>\n<html>\n<head>\n"
+    h = "{h}  <meta charset=\"utf-8\">\n"
+    h = "{h}  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+    h = "{h}  <title>{title}</title>\n"
+    h = "{h}  <style>\n"
+    h = "{h}    body { font-family: system-ui, sans-serif; margin: 0; padding: 20px; background: #0d1117; color: #c9d1d9; }\n"
+    h = "{h}    .container { max-width: 1200px; margin: 0 auto; }\n"
+    h = "{h}    h1 { color: #58a6ff; }\n"
+    h = "{h}    .card { background: #161b22; padding: 20px; margin: 10px 0; border-radius: 8px; border: 1px solid #30363d; }\n"
+    h = "{h}    .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }\n"
+    h = "{h}    .value { font-size: 28px; font-weight: bold; }\n"
+    h = "{h}    .sub { font-size: 13px; color: #8b949e; margin-top: 4px; }\n"
+    h = "{h}    table { border-collapse: collapse; width: 100%; margin-top: 8px; }\n"
+    h = "{h}    th, td { border: 1px solid #30363d; padding: 8px 12px; font-size: 13px; }\n"
+    h = "{h}    th { background: #21262d; text-align: left; color: #c9d1d9; }\n"
+    h = "{h}    td { color: #c9d1d9; }\n"
+    h = "{h}  </style>\n"
+    h = "{h}</head>\n"
+    h
+
+fn _html_escape(s: text) -> text:
+    var result = s
+    result = result.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\"", "&quot;")
+    result

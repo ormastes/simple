@@ -1,0 +1,117 @@
+# codex-system-test
+use std.spec.*
+use std.io_runtime.{file_read}
+
+describe "RV64 filesystem exec source contract":
+    it "keeps the mounted-image launch and blocking exit-return chain wired":
+        step("Inspect the mounted-image launch route")
+        val active = file_read("src/os/kernel/loader/fs_exec_spawn.spl")
+        val spawn_source = file_read("src/os/kernel/loader/riscv64_fs_exec_spawn.spl")
+        val bridge = file_read("src/os/kernel/arch/user_entry_bridge.spl")
+        val user_entry = file_read("src/os/kernel/arch/riscv64/user_entry.spl")
+        expect(active).to_contain("riscv64_fs_exec_spawn_ring3(path, argv, envp)")
+        expect(spawn_source).to_contain("val prepared = fs_exec_prepare_spawn(path, argv, envp)")
+        expect(spawn_source).to_contain("dispatch_fs_exec_user_handoff(Architecture.Riscv64, prepared.pid as u64, prepared.scheduler)")
+        expect(bridge).to_contain("dispatch_rv64_enter_user(pid_hint, scheduler)")
+        expect(user_entry).to_contain("sched.schedule()")
+        expect(user_entry).to_contain("Rv64Interrupt.install_scheduler(sched)")
+        expect(user_entry).to_contain("vmm_switch_address_space(task.address_space)")
+        expect(user_entry).to_contain("fence_i()")
+        val dispatch_pos = user_entry.index_of("fn dispatch_enter_user_blocking(pid_hint: u64, scheduler: Scheduler) -> i64:") ?? -1
+        expect(dispatch_pos).to_be_greater_than(-1)
+        val dispatch_body = user_entry.slice(dispatch_pos, user_entry.len())
+        val switch_pos = dispatch_body.index_of("vmm_switch_address_space(task.address_space)") ?? -1
+        val fence_pos = dispatch_body.index_of("fence_i()") ?? -1
+        val enter_pos = dispatch_body.index_of("_rv64_enter_user(&rv_context as u64)") ?? -1
+        expect(fence_pos).to_be_greater_than(switch_pos)
+        expect(enter_pos).to_be_greater_than(fence_pos)
+
+        step("Verify Sv39 exit-return invariants")
+        val trap = file_read("src/os/kernel/arch/riscv64/trap_vector.spl")
+        val trap_model = file_read("src/os/kernel/arch/riscv64/trap_model.spl")
+        val interrupt = file_read("src/os/kernel/arch/riscv64/interrupt.spl")
+        val syscall = file_read("src/os/kernel/arch/riscv64/syscall.spl")
+        val paging = file_read("src/os/kernel/arch/riscv64/paging.spl")
+        val user_as = file_read("src/os/kernel/memory/user_address_space.spl")
+        val boot_mem = file_read("src/os/kernel/boot/riscv_boot_mem.spl")
+        val sysroot = file_read("scripts/os/simpleos-sysroot-riscv64.shs")
+        val native_build = file_read("scripts/os/simpleos-native-build-riscv64.shs")
+        val linker_owner = file_read("src/compiler/70.backend/backend/llvm_native_link.spl")
+        val arch_context = file_read("src/os/kernel/arch/arch_context.spl")
+        val context_switch = file_read("src/os/kernel/arch/riscv64/context.spl")
+        val trap_entry_pos = trap.index_of("fn _rv64_trap_vector()") ?? -1
+        val user_entry_pos = trap.index_of("fn _rv64_enter_user(ctx_addr: u64) -> i64:") ?? -1
+        expect(trap_entry_pos).to_be_greater_than(-1)
+        expect(user_entry_pos).to_be_greater_than(trap_entry_pos)
+        val trap_entry = trap.slice(trap_entry_pos, user_entry_pos)
+        val user_handoff = trap.slice(user_entry_pos, trap.len())
+        expect(trap_entry).to_contain("addi    sp, sp, -544")
+        expect(user_handoff).to_contain("addi    sp, sp, -544")
+        expect(user_handoff).to_contain(".Lrv64_enter_user_return:")
+
+        val fp_offsets = [272, 280, 288, 296, 304, 312, 320, 328,
+                          336, 344, 352, 360, 368, 376, 384, 392,
+                          400, 408, 416, 424, 432, 440, 448, 456,
+                          464, 472, 480, 488, 496, 504, 512, 520]
+        var fp_register = 0
+        for offset in fp_offsets:
+            val reg = fp_register.to_string()
+            val at = offset.to_string()
+            expect(trap_entry).to_contain("\"fsd     f" + reg + ", " + at + "(sp)\"")
+            expect(trap_entry).to_contain("\"fld     f" + reg + ", " + at + "(sp)\"")
+            expect(user_handoff).to_contain("\"fsd     f" + reg + ", " + at + "(sp)\"")
+            expect(user_handoff).to_contain("\"fld     f" + reg + ", " + at + "(a0)\"")
+            fp_register = fp_register + 1
+        expect(trap_entry).to_contain("\"sw      t0, 528(sp)\"")
+        expect(trap_entry).to_contain("\"frcsr   t0\"")
+        expect(trap_entry).to_contain("\"csrw    fcsr, zero\"")
+        expect(trap_entry).to_contain("\"lw      t0, 528(sp)\"")
+        expect(trap_entry).to_contain("\"csrw    fcsr, t0\"")
+        expect(user_handoff).to_contain("\"sw      t0, 528(sp)\"")
+        expect(user_handoff).to_contain("\"frcsr   t0\"")
+        expect(user_handoff).to_contain("\"lw      t0, 528(a0)\"")
+        expect(user_handoff).to_contain("\"csrw    fcsr, t0\"")
+
+        val kernel_context_pos = trap_model.index_of("fn create_rv64_kernel_context") ?? -1
+        val user_context_pos = trap_model.index_of("fn create_rv64_user_context") ?? -1
+        val classifier_pos = trap_model.index_of("fn rv64_is_interrupt") ?? -1
+        expect(kernel_context_pos).to_be_greater_than(-1)
+        expect(user_context_pos).to_be_greater_than(kernel_context_pos)
+        expect(classifier_pos).to_be_greater_than(user_context_pos)
+        val kernel_context = trap_model.slice(kernel_context_pos, user_context_pos)
+        val user_context = trap_model.slice(user_context_pos, classifier_pos)
+        expect(kernel_context).to_contain("fp_state: ExtendedCtxRv(bytes: [0; 264])")
+        expect(kernel_context).to_contain("fp_pad: 0")
+        expect(user_context).to_contain("fp_state: ExtendedCtxRv(bytes: [0; 264])")
+        expect(user_context).to_contain("fp_pad: 0")
+        val rv64_layout_pos = arch_context.index_of("struct ExtendedCtxRv:") ?? -1
+        val rv32_layout_pos = arch_context.index_of("struct Riscv32Context:") ?? -1
+        expect(rv64_layout_pos).to_be_greater_than(-1)
+        expect(rv32_layout_pos).to_be_greater_than(rv64_layout_pos)
+        val rv64_layout = arch_context.slice(rv64_layout_pos, rv32_layout_pos)
+        expect(rv64_layout).to_contain("bytes: [u8; 264]")
+        expect(rv64_layout).to_contain("fp_state: ExtendedCtxRv")
+        expect(rv64_layout).to_contain("fp_pad: u64")
+        val voluntary_save_pos = context_switch.index_of("fn _save_callee_saved() -> Riscv64Context:") ?? -1
+        val voluntary_restore_pos = context_switch.index_of("fn _restore_callee_saved(ctx: Riscv64Context):") ?? -1
+        expect(voluntary_save_pos).to_be_greater_than(-1)
+        expect(voluntary_restore_pos).to_be_greater_than(voluntary_save_pos)
+        val voluntary_save = context_switch.slice(voluntary_save_pos, voluntary_restore_pos)
+        expect(voluntary_save).to_contain("_save_fp_callee(unsafe_addr_of(fp_state))")
+        expect(voluntary_save).to_contain("fp_state: fp_state")
+        expect(voluntary_save).to_contain("fp_pad: 0")
+        expect(trap_model).to_contain("val RV64_CONTEXT_BYTES: u64 = 544")
+        expect(trap_model).to_contain("val RV64_SSTATUS_FS_INITIAL: u64 = 1 << 13")
+        expect(interrupt).to_contain("val saved_ptr = (ctx_addr + RV64_CONTEXT_BYTES) as *mut Riscv64Context")
+        expect(syscall).to_contain("sched.exit_task(args.arg0.to_i32())")
+        expect(paging).to_contain("val RV64_SUPERVISOR_MMIO_VPN2_SLOT: u64 = 0")
+        expect(paging).to_contain("_write_pte(new_root_phys, RV64_KERNEL_VPN2_SLOT, kernel_ram_entry)")
+        expect(user_as).to_contain("vmm_create_address_space as rv64_vmm_create_address_space")
+        expect(user_as).to_contain("AddressSpace(phys_root: rv64_vmm_create_address_space(), id: _next_user_as_id())")
+        expect(user_as).to_contain("riscv64_vmm_map_page_in(space.phys_root, virt, phys, flags)")
+        expect(boot_mem).to_contain("        RISCV_HEAP_START,")
+        expect(sysroot).to_contain("base 0x100000000")
+        expect(sysroot).to_contain(". = 0x100000000;")
+        expect(native_build).to_contain("simpleos.ld (base 0x100000000)")
+        expect(linker_owner).to_contain("entry_src = entry_src + \"  csrs sstatus, t0\\n\"")
+        expect(linker_owner).to_contain("entry_src = entry_src + \"  csrw fcsr, zero\\n\"")

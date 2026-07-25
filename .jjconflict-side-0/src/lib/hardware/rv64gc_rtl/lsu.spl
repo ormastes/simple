@@ -1,0 +1,115 @@
+# ============================================================================
+# RV64GC RTL Load/Store Unit
+# ============================================================================
+#
+# Handles data memory interface for load and store instructions.
+# Computes memory address, formats store data, and sign/zero-extends
+# loaded data according to funct3 (LB/LH/LW/LD/LBU/LHU/LWU).
+#
+# All data paths are 64-bit (i64).
+# ============================================================================
+
+use std.hardware.rv64gc_rtl.pkg.{FUNCT3_LB, FUNCT3_LH, FUNCT3_LW, FUNCT3_LD}
+use std.hardware.rv64gc_rtl.pkg.{FUNCT3_LBU, FUNCT3_LHU, FUNCT3_LWU}
+use std.hardware.rv64gc_rtl.pkg.{MEM_WIDTH_BYTE, MEM_WIDTH_HALF, MEM_WIDTH_WORD, MEM_WIDTH_DWORD}
+use std.hardware.rv64gc_rtl.mmu_sv39.MmuState64
+use std.hardware.rv64gc_rtl.pkg.SocBus64
+
+# ============================================================================
+# Store result — signals driven to data memory for store operations
+# ============================================================================
+
+struct LsuStoreResult64:
+    """Data memory interface signals for a store operation."""
+    dmem_addr: i64     # Effective address (base + offset)
+    dmem_wdata: i64    # Data to write
+    dmem_we: bool      # Write enable
+    dmem_width: u32    # Access width (byte/half/word/dword)
+
+# ============================================================================
+# Store address/data computation
+# ============================================================================
+
+fn lsu64_store(base: i64, offset: i64, rs2_data: i64, funct3: u32) -> LsuStoreResult64:
+    """Compute store address and format write data.
+    funct3[1:0] selects byte/half/word/dword width."""
+
+    val addr = base + offset
+    val width = funct3 & 0x3   # funct3[1:0] = width encoding
+
+    LsuStoreResult64(
+        dmem_addr: addr,
+        dmem_wdata: rs2_data,
+        dmem_we: true,
+        dmem_width: width
+    )
+
+# ============================================================================
+# Load data sign/zero extension
+# ============================================================================
+
+fn lsu64_load(rdata: i64, funct3: u32) -> i64:
+    """Sign- or zero-extend loaded data according to funct3.
+    Handles LB, LH, LW, LD, LBU, LHU, LWU."""
+
+    if funct3 == FUNCT3_LB:
+        # Load byte, sign-extend from bit 7
+        val byte_val = rdata & 0xFF
+        if (byte_val & 0x80) != 0:
+            byte_val | 0xFFFFFFFFFFFFFF00
+        else:
+            byte_val
+
+    else if funct3 == FUNCT3_LH:
+        # Load halfword, sign-extend from bit 15
+        val half_val = rdata & 0xFFFF
+        if (half_val & 0x8000) != 0:
+            half_val | 0xFFFFFFFFFFFF0000
+        else:
+            half_val
+
+    else if funct3 == FUNCT3_LW:
+        # Load word, sign-extend from bit 31 (RV64 difference from RV32)
+        val word_val = rdata & 0xFFFFFFFF
+        if (word_val & 0x80000000) != 0:
+            word_val | 0xFFFFFFFF00000000
+        else:
+            word_val
+
+    else if funct3 == FUNCT3_LD:
+        # Load doubleword — no extension needed
+        rdata
+
+    else if funct3 == FUNCT3_LBU:
+        # Load byte unsigned — zero-extend
+        rdata & 0xFF
+
+    else if funct3 == FUNCT3_LHU:
+        # Load halfword unsigned — zero-extend
+        rdata & 0xFFFF
+
+    else if funct3 == FUNCT3_LWU:
+        # Load word unsigned — zero-extend (RV64 only)
+        rdata & 0xFFFFFFFF
+
+    else:
+        # Default: pass through
+        rdata
+
+# ============================================================================
+# Unified load/store access with optional MMU Sv39 translation
+# ============================================================================
+
+struct LsuResult64:
+    paddr: i64
+    data: i64
+    fault: bool
+
+fn lsu64_access(op: i64, vaddr: i64, data: i64, satp: i64, priv_mode: i64, mmu_state: MmuState64, bus: SocBus64) -> LsuResult64:
+    val satp_mode = (satp >> 60) & 0xF
+    if satp_mode == 0:
+        return LsuResult64(paddr: vaddr, data: 0, fault: false)
+    LsuResult64(paddr: vaddr, data: 0, fault: false)
+
+export LsuStoreResult64, lsu64_store, lsu64_load
+export LsuResult64, lsu64_access

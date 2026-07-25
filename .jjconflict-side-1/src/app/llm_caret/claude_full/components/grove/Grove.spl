@@ -1,0 +1,675 @@
+"""
+Claude full Grove parity model.
+"""
+
+class GroveNode:
+    id: text
+    label: text
+    kind: text
+    path: text
+    detail: text
+    status: text
+    badge: text
+    tokens: i64
+    children: [GroveNode]
+
+impl GroveNode:
+    static fn new(id: text, label: text, kind: text, path: text, detail: text, status: text, badge: text, tokens: i64, children: [GroveNode]) -> GroveNode:
+        GroveNode(id: normalizeGroveId(id, path, label), label: normalizeGroveLabel(label, path), kind: normalizeGroveKind(kind), path: normalizeGrovePath(path), detail: detail.trim(), status: normalizeGroveStatus(status), badge: badge.trim(), tokens: clampGroveCount(tokens), children: children)
+
+    static fn branch(id: text, label: text, path: text, children: [GroveNode]) -> GroveNode:
+        GroveNode.new(id, label, "branch", path, "", "ready", "", 0, children)
+
+    static fn leaf(id: text, label: text, path: text, detail: text) -> GroveNode:
+        GroveNode.new(id, label, "leaf", path, detail, "ready", "", 0, [])
+
+    me isBranch() -> bool:
+        me.children.len() > 0 or me.kind == "branch" or me.kind == "folder" or me.kind == "root"
+
+    me isLeaf() -> bool:
+        not me.isBranch()
+
+    me matches(query: text, kindFilter: text, statusFilter: text) -> bool:
+        if not groveKindMatches(me.kind, kindFilter):
+            return false
+        if not groveStatusMatches(me.status, statusFilter):
+            return false
+        groveNodeTextMatches(me, query)
+
+    me summary() -> text:
+        renderGroveNodeSummary(me)
+
+class GroveState:
+    activeId: text
+    expandedIds: [text]
+    query: text
+    kindFilter: text
+    statusFilter: text
+    loading: bool
+    error: text
+    showBreadcrumbs: bool
+    showDetails: bool
+
+impl GroveState:
+    static fn new(activeId: text, expandedIds: [text], query: text, kindFilter: text, statusFilter: text, loading: bool, error: text, showBreadcrumbs: bool, showDetails: bool) -> GroveState:
+        GroveState(activeId: activeId.trim(), expandedIds: normalizeGroveIds(expandedIds), query: query.trim(), kindFilter: normalizeGroveKindFilter(kindFilter), statusFilter: normalizeGroveStatusFilter(statusFilter), loading: loading, error: error.trim(), showBreadcrumbs: showBreadcrumbs, showDetails: showDetails)
+
+    static fn empty() -> GroveState:
+        GroveState.new("", [], "", "all", "all", false, "", true, true)
+
+    me withActiveId(activeId: text) -> GroveState:
+        GroveState.new(activeId, me.expandedIds, me.query, me.kindFilter, me.statusFilter, me.loading, me.error, me.showBreadcrumbs, me.showDetails)
+
+    me withExpandedIds(expandedIds: [text]) -> GroveState:
+        GroveState.new(me.activeId, expandedIds, me.query, me.kindFilter, me.statusFilter, me.loading, me.error, me.showBreadcrumbs, me.showDetails)
+
+    me withQuery(query: text) -> GroveState:
+        GroveState.new(me.activeId, me.expandedIds, query, me.kindFilter, me.statusFilter, me.loading, me.error, me.showBreadcrumbs, me.showDetails)
+
+    me withKindFilter(kindFilter: text) -> GroveState:
+        GroveState.new(me.activeId, me.expandedIds, me.query, kindFilter, me.statusFilter, me.loading, me.error, me.showBreadcrumbs, me.showDetails)
+
+    me withStatusFilter(statusFilter: text) -> GroveState:
+        GroveState.new(me.activeId, me.expandedIds, me.query, me.kindFilter, statusFilter, me.loading, me.error, me.showBreadcrumbs, me.showDetails)
+
+    me withLoading(loading: bool) -> GroveState:
+        GroveState.new(me.activeId, me.expandedIds, me.query, me.kindFilter, me.statusFilter, loading, me.error, me.showBreadcrumbs, me.showDetails)
+
+    me withError(error: text) -> GroveState:
+        GroveState.new(me.activeId, me.expandedIds, me.query, me.kindFilter, me.statusFilter, me.loading, error, me.showBreadcrumbs, me.showDetails)
+
+    me withBreadcrumbs(showBreadcrumbs: bool) -> GroveState:
+        GroveState.new(me.activeId, me.expandedIds, me.query, me.kindFilter, me.statusFilter, me.loading, me.error, showBreadcrumbs, me.showDetails)
+
+    me withDetails(showDetails: bool) -> GroveState:
+        GroveState.new(me.activeId, me.expandedIds, me.query, me.kindFilter, me.statusFilter, me.loading, me.error, me.showBreadcrumbs, showDetails)
+
+class GroveModel:
+    roots: [GroveNode]
+    state: GroveState
+
+impl GroveModel:
+    static fn new(roots: [GroveNode], state: GroveState) -> GroveModel:
+        GroveModel(roots: roots, state: normalizeGroveState(roots, state))
+
+    me visibleRows() -> [GroveRow]:
+        visibleGroveRows(me.roots, me.state)
+
+    me activeNode() -> GroveNode?:
+        findGroveNodeById(me.roots, me.state.activeId)
+
+    me activeBreadcrumbs() -> [GroveNode]:
+        groveBreadcrumbs(me.roots, me.state.activeId)
+
+    me render() -> text:
+        renderGrove(me.roots, me.state)
+
+class GroveRow:
+    node: GroveNode
+    depth: i64
+    expanded: bool
+    active: bool
+    visibleChildCount: i64
+
+impl GroveRow:
+    static fn new(node: GroveNode, depth: i64, expanded: bool, active: bool, visibleChildCount: i64) -> GroveRow:
+        GroveRow(node: node, depth: clampGroveCount(depth), expanded: expanded, active: active, visibleChildCount: clampGroveCount(visibleChildCount))
+
+    me render(showDetails: bool) -> text:
+        renderGroveRow(me, showDetails)
+
+fn sampleGroveNodes() -> [GroveNode]:
+    [
+        GroveNode.new("workspace", "Workspace", "root", "/", "Project context", "ready", "root", 0, [
+            GroveNode.new("src", "src", "folder", "/src", "Application source", "ready", "", 0, [
+                GroveNode.new("app", "app", "folder", "/src/app", "Apps and tools", "ready", "", 0, [
+                    GroveNode.new("grove", "Grove.spl", "file", "/src/app/llm_caret/claude_full/components/grove/Grove.spl", "Claude full grove model", "active", "spl", 462, [])
+                ]),
+                GroveNode.new("lib", "lib", "folder", "/src/lib", "Shared library", "ready", "", 0, [])
+            ]),
+            GroveNode.new("docs", "docs", "folder", "/doc", "Architecture and guides", "ready", "", 0, [])
+        ])
+    ]
+
+fn createGrove(roots: [GroveNode]) -> GroveModel:
+    GroveModel.new(roots, GroveState.empty())
+
+fn normalizeGroveState(roots: [GroveNode], state: GroveState) -> GroveState:
+    val clean = GroveState.new(state.activeId, state.expandedIds, state.query, state.kindFilter, state.statusFilter, state.loading, state.error, state.showBreadcrumbs, state.showDetails)
+    if clean.loading or clean.error != "":
+        return clean
+    val rows = visibleGroveRows(roots, clean)
+    if rows.len() == 0:
+        return clean.withActiveId("")
+    if clean.activeId != "":
+        if val Some(row) = findGroveRowById(rows, clean.activeId):
+            return clean.withActiveId(row.node.id)
+    clean.withActiveId(rows[0].node.id)
+
+fn visibleGroveRows(roots: [GroveNode], state: GroveState) -> [GroveRow]:
+    var rows: [GroveRow] = []
+    var i = 0
+    while i < roots.len():
+        rows = appendVisibleGroveRows(rows, roots[i], 0, state)
+        i = i + 1
+    rows
+
+fn appendVisibleGroveRows(rows: [GroveRow], node: GroveNode, depth: i64, state: GroveState) -> [GroveRow]:
+    var out = rows
+    val matched = groveSubtreeMatches(node, state.query, state.kindFilter, state.statusFilter)
+    if not matched:
+        return out
+    val expanded = groveNodeExpanded(node, state)
+    val childCount = visibleGroveChildCount(node, state)
+    if node.matches(state.query, state.kindFilter, state.statusFilter) or childCount > 0:
+        out.push(GroveRow.new(node, depth, expanded, node.id == state.activeId, childCount))
+    if expanded:
+        var i = 0
+        while i < node.children.len():
+            out = appendVisibleGroveRows(out, node.children[i], depth + 1, state)
+            i = i + 1
+    out
+
+fn visibleGroveChildCount(node: GroveNode, state: GroveState) -> i64:
+    var count = 0
+    var i = 0
+    while i < node.children.len():
+        if groveSubtreeMatches(node.children[i], state.query, state.kindFilter, state.statusFilter):
+            count = count + 1
+        i = i + 1
+    count
+
+fn groveSubtreeMatches(node: GroveNode, query: text, kindFilter: text, statusFilter: text) -> bool:
+    if node.matches(query, kindFilter, statusFilter):
+        return true
+    var i = 0
+    while i < node.children.len():
+        if groveSubtreeMatches(node.children[i], query, kindFilter, statusFilter):
+            return true
+        i = i + 1
+    false
+
+fn findGroveNodeById(nodes: [GroveNode], id: text) -> GroveNode?:
+    val target = id.trim()
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].id == target:
+            return nodes[i]
+        if val Some(child) = findGroveNodeById(nodes[i].children, target):
+            return child
+        i = i + 1
+    nil
+
+fn findGroveRowById(rows: [GroveRow], id: text) -> GroveRow?:
+    val target = id.trim()
+    var i = 0
+    while i < rows.len():
+        if rows[i].node.id == target:
+            return rows[i]
+        i = i + 1
+    nil
+
+fn groveBreadcrumbs(nodes: [GroveNode], activeId: text) -> [GroveNode]:
+    var path: [GroveNode] = []
+    var i = 0
+    while i < nodes.len():
+        val found = appendGroveBreadcrumb(path, nodes[i], activeId.trim())
+        if found.len() > 0:
+            return found
+        i = i + 1
+    path
+
+fn appendGroveBreadcrumb(prefix: [GroveNode], node: GroveNode, activeId: text) -> [GroveNode]:
+    var path = prefix
+    path.push(node)
+    if node.id == activeId:
+        return path
+    var i = 0
+    while i < node.children.len():
+        val childPath = appendGroveBreadcrumb(path, node.children[i], activeId)
+        if childPath.len() > 0 and childPath[childPath.len() - 1].id == activeId:
+            return childPath
+        i = i + 1
+    []
+
+fn selectNextGroveNode(roots: [GroveNode], state: GroveState) -> GroveState:
+    val rows = visibleGroveRows(roots, state)
+    if rows.len() == 0:
+        return state.withActiveId("")
+    val index = selectedGroveRowIndex(rows, state.activeId)
+    if index + 1 < rows.len():
+        return state.withActiveId(rows[index + 1].node.id)
+    state.withActiveId(rows[0].node.id)
+
+fn selectPreviousGroveNode(roots: [GroveNode], state: GroveState) -> GroveState:
+    val rows = visibleGroveRows(roots, state)
+    if rows.len() == 0:
+        return state.withActiveId("")
+    val index = selectedGroveRowIndex(rows, state.activeId)
+    if index > 0:
+        return state.withActiveId(rows[index - 1].node.id)
+    state.withActiveId(rows[rows.len() - 1].node.id)
+
+fn selectFirstGroveNode(roots: [GroveNode], state: GroveState) -> GroveState:
+    val rows = visibleGroveRows(roots, state)
+    if rows.len() == 0:
+        return state.withActiveId("")
+    state.withActiveId(rows[0].node.id)
+
+fn selectLastGroveNode(roots: [GroveNode], state: GroveState) -> GroveState:
+    val rows = visibleGroveRows(roots, state)
+    if rows.len() == 0:
+        return state.withActiveId("")
+    state.withActiveId(rows[rows.len() - 1].node.id)
+
+fn selectedGroveRowIndex(rows: [GroveRow], activeId: text) -> i64:
+    var i = 0
+    while i < rows.len():
+        if rows[i].node.id == activeId:
+            return i
+        i = i + 1
+    0
+
+fn toggleGroveNode(roots: [GroveNode], state: GroveState) -> GroveState:
+    if val Some(active) = findGroveNodeById(roots, state.activeId):
+        if not active.isBranch():
+            return state
+        if containsGroveId(state.expandedIds, active.id):
+            return state.withExpandedIds(removeGroveId(state.expandedIds, active.id))
+        return state.withExpandedIds(addGroveId(state.expandedIds, active.id))
+    state
+
+fn expandGroveNode(state: GroveState, id: text) -> GroveState:
+    state.withExpandedIds(addGroveId(state.expandedIds, id))
+
+fn collapseGroveNode(state: GroveState, id: text) -> GroveState:
+    state.withExpandedIds(removeGroveId(state.expandedIds, id))
+
+fn expandAllGroveNodes(roots: [GroveNode], state: GroveState) -> GroveState:
+    state.withExpandedIds(allGroveBranchIds(roots))
+
+fn collapseAllGroveNodes(state: GroveState) -> GroveState:
+    state.withExpandedIds([])
+
+fn allGroveBranchIds(nodes: [GroveNode]) -> [text]:
+    var ids: [text] = []
+    var i = 0
+    while i < nodes.len():
+        ids = appendGroveBranchIds(ids, nodes[i])
+        i = i + 1
+    ids
+
+fn appendGroveBranchIds(ids: [text], node: GroveNode) -> [text]:
+    var out = ids
+    if node.isBranch():
+        out = addGroveId(out, node.id)
+    var i = 0
+    while i < node.children.len():
+        out = appendGroveBranchIds(out, node.children[i])
+        i = i + 1
+    out
+
+fn handleGroveKey(roots: [GroveNode], state: GroveState, key: text) -> GroveState:
+    val clean = key.trim().lower()
+    if clean == "down" or clean == "j":
+        return selectNextGroveNode(roots, state)
+    if clean == "up" or clean == "k":
+        return selectPreviousGroveNode(roots, state)
+    if clean == "home" or clean == "g":
+        return selectFirstGroveNode(roots, state)
+    if clean == "end" or clean == "shift+g":
+        return selectLastGroveNode(roots, state)
+    if clean == "enter" or clean == "space":
+        return toggleGroveNode(roots, state)
+    if clean == "right" or clean == "l":
+        return expandGroveNode(state, state.activeId)
+    if clean == "left" or clean == "h":
+        return collapseGroveNode(state, state.activeId)
+    state
+
+fn renderGrove(roots: [GroveNode], state: GroveState) -> text:
+    val normalized = normalizeGroveState(roots, state)
+    if normalized.loading:
+        return renderGroveLoadingState(normalized)
+    if normalized.error != "":
+        return renderGroveErrorState(normalized)
+    val rows = visibleGroveRows(roots, normalized)
+    if rows.len() == 0:
+        return renderGroveEmptyState(roots, normalized)
+    var lines: [text] = [renderGroveHeader(roots, rows, normalized)]
+    if normalized.showBreadcrumbs:
+        lines.push(renderGroveBreadcrumbLine(roots, normalized))
+    var i = 0
+    while i < rows.len():
+        lines.push(renderGroveRow(rows[i], normalized.showDetails))
+        i = i + 1
+    joinGroveText(lines, "\n")
+
+fn renderGroveHeader(roots: [GroveNode], rows: [GroveRow], state: GroveState) -> text:
+    var parts: [text] = ["Grove " + rows.len().to_text() + "/" + countGroveNodes(roots).to_text()]
+    parts.push(countGroveBranches(roots).to_text() + " branches")
+    parts.push(countGroveLeaves(roots).to_text() + " leaves")
+    if val Some(active) = findGroveNodeById(roots, state.activeId):
+        parts.push("active " + active.label)
+    if state.query.trim() != "":
+        parts.push("search:" + state.query.trim())
+    if normalizeGroveKindFilter(state.kindFilter) != "all":
+        parts.push("kind " + groveKindLabel(state.kindFilter))
+    if normalizeGroveStatusFilter(state.statusFilter) != "all":
+        parts.push("status " + groveStatusLabel(state.statusFilter))
+    joinGroveText(parts, " · ")
+
+fn renderGroveBreadcrumbLine(roots: [GroveNode], state: GroveState) -> text:
+    val crumbs = groveBreadcrumbs(roots, state.activeId)
+    if crumbs.len() == 0:
+        return "Breadcrumbs: none"
+    var names: [text] = []
+    var i = 0
+    while i < crumbs.len():
+        names.push(crumbs[i].label)
+        i = i + 1
+    "Breadcrumbs: " + joinGroveText(names, " / ")
+
+fn renderGroveRow(row: GroveRow, showDetails: bool) -> text:
+    val marker = if row.active: ">" else: " "
+    val branch = groveBranchGlyph(row)
+    val indent = groveIndent(row.depth)
+    val badge = renderGroveBadge(row.node)
+    val summary = if showDetails: " · " + renderGroveNodeSummary(row.node) else: ""
+    marker + " " + indent + branch + " " + groveKindIcon(row.node.kind) + " " + row.node.label + badge + summary
+
+fn renderGroveNodeSummary(node: GroveNode) -> text:
+    var parts: [text] = []
+    if node.detail != "":
+        parts.push(node.detail)
+    if node.path != "":
+        parts.push(node.path)
+    if node.status != "":
+        parts.push(groveStatusLabel(node.status))
+    if node.tokens > 0:
+        parts.push(node.tokens.to_text() + " tokens")
+    if node.children.len() > 0:
+        parts.push(node.children.len().to_text() + " children")
+    joinGroveText(parts, " · ")
+
+fn renderGroveBadge(node: GroveNode) -> text:
+    if node.badge == "":
+        return ""
+    " [" + node.badge + "]"
+
+fn renderGroveLoadingState(state: GroveState) -> text:
+    val label = if state.query.trim() == "": "Loading grove" else: "Loading grove for " + state.query.trim()
+    label + renderGroveStateFilterSuffix(state)
+
+fn renderGroveErrorState(state: GroveState) -> text:
+    "Grove error: " + state.error + renderGroveStateFilterSuffix(state)
+
+fn renderGroveEmptyState(roots: [GroveNode], state: GroveState) -> text:
+    if roots.len() == 0 and state.query.trim() == "" and state.kindFilter == "all" and state.statusFilter == "all":
+        return "Grove is empty"
+    "No grove nodes match " + groveFilterSummary(state)
+
+fn renderGroveStateFilterSuffix(state: GroveState) -> text:
+    val summary = groveFilterSummary(state)
+    if summary == "":
+        return ""
+    " · " + summary
+
+fn groveFilterSummary(state: GroveState) -> text:
+    var parts: [text] = []
+    if state.query.trim() != "":
+        parts.push("search \"" + state.query.trim() + "\"")
+    if normalizeGroveKindFilter(state.kindFilter) != "all":
+        parts.push("kind " + groveKindLabel(state.kindFilter))
+    if normalizeGroveStatusFilter(state.statusFilter) != "all":
+        parts.push("status " + groveStatusLabel(state.statusFilter))
+    joinGroveText(parts, " and ")
+
+fn groveBranchGlyph(row: GroveRow) -> text:
+    if not row.node.isBranch():
+        return "-"
+    if row.expanded:
+        return "v"
+    ">"
+
+fn groveKindIcon(kind: text) -> text:
+    val clean = normalizeGroveKind(kind)
+    if clean == "root":
+        return "#"
+    if clean == "folder" or clean == "branch":
+        return "dir"
+    if clean == "file":
+        return "file"
+    if clean == "symbol":
+        return "sym"
+    "node"
+
+fn groveIndent(depth: i64) -> text:
+    var out = ""
+    var i = 0
+    while i < depth:
+        out = out + "  "
+        i = i + 1
+    out
+
+fn groveNodeExpanded(node: GroveNode, state: GroveState) -> bool:
+    if state.query.trim() != "":
+        return true
+    containsGroveId(state.expandedIds, node.id)
+
+fn groveNodeTextMatches(node: GroveNode, query: text) -> bool:
+    val q = query.trim().lower()
+    if q == "":
+        return true
+    node.label.lower().contains(q) or node.id.lower().contains(q) or node.path.lower().contains(q) or node.detail.lower().contains(q) or node.badge.lower().contains(q) or node.kind.lower().contains(q) or node.status.lower().contains(q)
+
+fn groveKindMatches(kind: text, kindFilter: text) -> bool:
+    val filter = normalizeGroveKindFilter(kindFilter)
+    if filter == "all":
+        return true
+    normalizeGroveKind(kind) == filter
+
+fn groveStatusMatches(status: text, statusFilter: text) -> bool:
+    val filter = normalizeGroveStatusFilter(statusFilter)
+    if filter == "all":
+        return true
+    normalizeGroveStatus(status) == filter
+
+fn countGroveNodes(nodes: [GroveNode]) -> i64:
+    var count = 0
+    var i = 0
+    while i < nodes.len():
+        count = count + 1 + countGroveNodes(nodes[i].children)
+        i = i + 1
+    count
+
+fn countGroveBranches(nodes: [GroveNode]) -> i64:
+    var count = 0
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].isBranch():
+            count = count + 1
+        count = count + countGroveBranches(nodes[i].children)
+        i = i + 1
+    count
+
+fn countGroveLeaves(nodes: [GroveNode]) -> i64:
+    countGroveNodes(nodes) - countGroveBranches(nodes)
+
+fn containsGroveId(ids: [text], id: text) -> bool:
+    val target = id.trim()
+    var i = 0
+    while i < ids.len():
+        if ids[i] == target:
+            return true
+        i = i + 1
+    false
+
+fn addGroveId(ids: [text], id: text) -> [text]:
+    val clean = id.trim()
+    if clean == "" or containsGroveId(ids, clean):
+        return normalizeGroveIds(ids)
+    var out = normalizeGroveIds(ids)
+    out.push(clean)
+    out
+
+fn removeGroveId(ids: [text], id: text) -> [text]:
+    val target = id.trim()
+    var out: [text] = []
+    var i = 0
+    while i < ids.len():
+        val clean = ids[i].trim()
+        if clean != "" and clean != target and not containsGroveId(out, clean):
+            out.push(clean)
+        i = i + 1
+    out
+
+fn normalizeGroveIds(ids: [text]) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < ids.len():
+        val clean = ids[i].trim()
+        if clean != "" and not containsGroveId(out, clean):
+            out.push(clean)
+        i = i + 1
+    out
+
+fn normalizeGroveId(id: text, path: text, label: text) -> text:
+    val clean = id.trim()
+    if clean != "":
+        return clean
+    val pathClean = normalizeGrovePath(path)
+    if pathClean != "":
+        return pathClean
+    normalizeGroveLabel(label, path)
+
+fn normalizeGroveLabel(label: text, path: text) -> text:
+    val clean = label.trim()
+    if clean != "":
+        return clean
+    val pathClean = normalizeGrovePath(path)
+    if pathClean == "":
+        return "(untitled)"
+    groveBasename(pathClean)
+
+fn normalizeGrovePath(path: text) -> text:
+    path.trim()
+
+fn normalizeGroveKind(kind: text) -> text:
+    val clean = kind.trim().lower()
+    if clean == "root":
+        return "root"
+    if clean == "folder" or clean == "directory" or clean == "dir":
+        return "folder"
+    if clean == "branch":
+        return "branch"
+    if clean == "file":
+        return "file"
+    if clean == "symbol":
+        return "symbol"
+    if clean == "leaf":
+        return "leaf"
+    "node"
+
+fn normalizeGroveKindFilter(kind: text) -> text:
+    val clean = kind.trim().lower()
+    if clean == "" or clean == "all":
+        return "all"
+    normalizeGroveKind(clean)
+
+fn normalizeGroveStatus(status: text) -> text:
+    val clean = status.trim().lower()
+    if clean == "":
+        return "ready"
+    if clean == "ready" or clean == "active" or clean == "loading" or clean == "error" or clean == "stale":
+        return clean
+    "ready"
+
+fn normalizeGroveStatusFilter(status: text) -> text:
+    val clean = status.trim().lower()
+    if clean == "" or clean == "all":
+        return "all"
+    normalizeGroveStatus(clean)
+
+fn groveKindLabel(kind: text) -> text:
+    val clean = normalizeGroveKind(kind)
+    if clean == "root":
+        return "Root"
+    if clean == "folder":
+        return "Folder"
+    if clean == "branch":
+        return "Branch"
+    if clean == "file":
+        return "File"
+    if clean == "symbol":
+        return "Symbol"
+    if clean == "leaf":
+        return "Leaf"
+    "Node"
+
+fn groveStatusLabel(status: text) -> text:
+    val clean = normalizeGroveStatus(status)
+    if clean == "ready":
+        return "ready"
+    if clean == "active":
+        return "active"
+    if clean == "loading":
+        return "loading"
+    if clean == "error":
+        return "error"
+    if clean == "stale":
+        return "stale"
+    "ready"
+
+fn groveBasename(path: text) -> text:
+    val clean = path.trim()
+    if clean == "":
+        return ""
+    var lastSlash = -1
+    var i = 0
+    while i < clean.len():
+        if clean[i] == "/":
+            lastSlash = i
+        i = i + 1
+    if lastSlash < 0 or lastSlash + 1 >= clean.len():
+        return clean
+    clean.slice(lastSlash + 1, clean.len())
+
+fn clampGroveCount(value: i64) -> i64:
+    if value < 0:
+        return 0
+    value
+
+fn joinGroveText(values: [text], separator: text) -> text:
+    var out = ""
+    var i = 0
+    while i < values.len():
+        if i > 0:
+            out = out + separator
+        out = out + values[i]
+        i = i + 1
+    out
+
+fn groveModeledSourceFile() -> text:
+    "src/components/grove/Grove.tsx"
+
+fn groveModeledTreeHelper() -> text:
+    "buildGroveTree"
+
+fn groveModeledSelectionHelper() -> text:
+    "useGroveSelection"
+
+fn groveModeledExpansionHelper() -> text:
+    "useGroveExpansion"
+
+fn groveModeledFilterHelper() -> text:
+    "filterGroveNodes"
+
+fn groveModeledBreadcrumbHelper() -> text:
+    "getGroveBreadcrumbs"
+
+fn groveModeledRenderHelper() -> text:
+    "renderGroveNode"
+
+fn groveSourceLinesModeled() -> i64:
+    462

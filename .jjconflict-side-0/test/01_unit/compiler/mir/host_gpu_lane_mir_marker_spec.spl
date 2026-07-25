@@ -1,0 +1,49 @@
+# Host/GPU target.later MIR marker regression.
+#
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl 5%
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir.*
+
+fn make_logger() -> Logger:
+    Logger(level: 0)
+
+fn host_gpu_mir_marker_score(src: text, fname: text) -> i64:
+    val log = make_logger()
+    val module = parse_full_frontend(src, fname + ".spl", fname + ".spl", log)
+    var hir_lowering = HirLowering.with_filename(fname + ".spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    val functions = mir.functions.values()
+    for fn_ in functions:
+        if fn_.name == fname:
+            var score = 0
+            for block in fn_.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case MirInstKind.HostGpuLaneBegin(lane, max_packet):
+                            if lane == "gpu":
+                                score = score + 10
+                            if max_packet.?:
+                                score = score + 100
+                            if inst.span.?:
+                                score = score + 1000
+                        case MirInstKind.HostGpuLaneEnd(lane):
+                            if lane == "gpu":
+                                score = score + 1
+                            if inst.span.?:
+                                score = score + 10000
+                        case _:
+                            pass
+            return score
+    0
+
+describe "Host/GPU lane MIR markers", tag: ["only-compiled"]:
+    it "emits begin and end markers around target.later gpu lane body":
+        val src = "fn f():\n    target.later(max_packet: 512) gpu \\:\n        val draw_ir_batch = \"batch\"\n"
+        expect(host_gpu_mir_marker_score(src, "f")).to_equal(11111)
+

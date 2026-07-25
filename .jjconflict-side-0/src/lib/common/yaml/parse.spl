@@ -1,0 +1,120 @@
+# YAML parsing: scalars, flow collections, and block collections.
+
+use lib.yaml.types.{yaml_null, yaml_boolean, yaml_number, yaml_string, yaml_sequence, yaml_mapping}
+
+fn _yaml_split(s: text, delim: text) -> [text]:
+    var out = []
+    var cur = ""
+    var i = 0
+    while i < s.length():
+        val ch = s.substring(i, i + 1)
+        if ch == delim:
+            out.push(cur)
+            cur = ""
+        else:
+            cur = cur + ch
+        i = i + 1
+    out.push(cur)
+    out
+
+fn _yaml_is_number_text(t: text) -> bool:
+    if t == "":
+        return false
+    val digits = "0123456789"
+    val signs = "+-.eE"
+    var has_digit = false
+    var i = 0
+    while i < t.length():
+        val ch = t.substring(i, i + 1)
+        if digits.contains(ch):
+            has_digit = true
+        else:
+            if not signs.contains(ch):
+                return false
+        i = i + 1
+    has_digit
+
+fn yaml_parse_scalar(s: any) -> any:
+    val t = "{s}".trim()
+    if t == "" or t == "null" or t == "~":
+        return yaml_null()
+    if t == "true":
+        return yaml_boolean(true)
+    if t == "false":
+        return yaml_boolean(false)
+    if _yaml_is_number_text(t):
+        return yaml_number(t)
+    if t.length() >= 2 and t.starts_with("\"") and t.ends_with("\""):
+        return yaml_string(t.substring(1, t.length() - 1))
+    yaml_string(t)
+
+fn yaml_parse_flow_sequence(s: text) -> any:
+    var inner = s.trim()
+    if not inner.starts_with("[") or not inner.ends_with("]"):
+        return yaml_null()
+    inner = inner.substring(1, inner.length() - 1)
+    inner = inner.trim()
+    if inner == "":
+        return yaml_sequence([])
+    var out = []
+    for part in _yaml_split(inner, ","):
+        out.push(yaml_parse_scalar(part.trim()))
+    yaml_sequence(out)
+
+fn yaml_parse_flow_mapping(s: text) -> any:
+    var inner = s.trim()
+    if not inner.starts_with("{") or not inner.ends_with("}"):
+        return yaml_null()
+    inner = inner.substring(1, inner.length() - 1)
+    inner = inner.trim()
+    if inner == "":
+        return yaml_mapping([])
+    var out = []
+    for part in _yaml_split(inner, ","):
+        val kv = _yaml_split(part, ":")
+        if kv.length() >= 2:
+            out.push((kv[0].trim(), yaml_parse_scalar(kv[1].trim())))
+    yaml_mapping(out)
+
+fn yaml_parse_block(s: text) -> any:
+    val t = s.trim()
+    val lines = _yaml_split(t, "\n")
+    var is_seq = false
+    if lines.length() > 0:
+        val first = lines[0].trim()
+        if first.starts_with("- ") or first == "-":
+            is_seq = true
+    if is_seq:
+        var items = []
+        var i = 0
+        while i < lines.length():
+            val ln = lines[i].trim()
+            if ln.starts_with("- "):
+                items.push(yaml_parse_scalar(ln.substring(2, ln.length()).trim()))
+            else:
+                if ln == "-":
+                    items.push(yaml_null())
+            i = i + 1
+        return yaml_sequence(items)
+    var pairs = []
+    var i = 0
+    while i < lines.length():
+        val kv = _yaml_split(lines[i], ":")
+        if kv.length() >= 2:
+            pairs.push((kv[0].trim(), yaml_parse_scalar(kv[1].trim())))
+        i = i + 1
+    yaml_mapping(pairs)
+
+fn yaml_parse(s: text) -> any:
+    val t = s.trim()
+    if t == "":
+        return yaml_null()
+    if t.starts_with("["):
+        return yaml_parse_flow_sequence(t)
+    if t.starts_with("{"):
+        return yaml_parse_flow_mapping(t)
+    if t.contains("\n"):
+        return yaml_parse_block(t)
+    if t.contains(":") and not t.starts_with("\""):
+        return yaml_parse_block(t)
+    yaml_parse_scalar(t)

@@ -1,0 +1,103 @@
+# @platform: baremetal
+#
+# Per-arch hardware timer for RTOS tick.
+# ARM: SysTick, RISC-V: CLINT mtime/mtimecmp, x86_64: APIC timer.
+
+use std.baremetal.interrupt (
+    mem_read_u32, mem_write_u32,
+    nvic_enable_irq, nvic_set_priority,
+    apic_enable, apic_eoi,
+    EXCEPTION_SYSTICK
+)
+
+val TIMER_ARCH_ARM: i32 = 0
+val TIMER_ARCH_RISCV: i32 = 1
+val TIMER_ARCH_X86_64: i32 = 2
+
+var timer_arch: i32 = 0
+var timer_tick_hz: u32 = 1000u32
+var timer_initialized: bool = false
+
+# ARM SysTick registers
+val SYSTICK_CSR: u32 = 0xE000E010
+val SYSTICK_RVR: u32 = 0xE000E014
+val SYSTICK_CVR: u32 = 0xE000E018
+
+# RISC-V CLINT registers (QEMU virt)
+val CLINT_BASE: u32 = 0x02000000
+val CLINT_MTIMECMP: u32 = 0x02004000
+val CLINT_MTIME: u32 = 0x0200BFF8
+
+# x86_64 APIC timer registers
+val APIC_BASE_ADDR: u32 = 0xFEE00000
+val APIC_TIMER_LVT: u32 = 0x320
+val APIC_TIMER_INIT: u32 = 0x380
+val APIC_TIMER_CURR: u32 = 0x390
+val APIC_TIMER_DIV: u32 = 0x3E0
+
+fn timer_init_arm(cpu_hz: u32, tick_hz: u32):
+    """Configure SysTick for periodic tick."""
+    val reload = cpu_hz / tick_hz - 1u32
+    mem_write_u32(SYSTICK_RVR, reload)
+    mem_write_u32(SYSTICK_CVR, 0u32)
+    # Enable SysTick: processor clock, interrupt, enable
+    mem_write_u32(SYSTICK_CSR, 0x07u32)
+    nvic_set_priority(EXCEPTION_SYSTICK, 0xFF)
+
+fn timer_init_riscv(tick_interval: u32):
+    """Configure CLINT mtime/mtimecmp for periodic tick."""
+    val mtime_lo = mem_read_u32(CLINT_MTIME)
+    val next = mtime_lo + tick_interval
+    mem_write_u32(CLINT_MTIMECMP, next)
+
+fn timer_init_x86_64(divider: u32, initial_count: u32):
+    """Configure APIC timer for periodic tick."""
+    apic_enable()
+    # Divide by 16
+    mem_write_u32(APIC_BASE_ADDR + APIC_TIMER_DIV, 0x03u32)
+    # Periodic mode, vector 32
+    mem_write_u32(APIC_BASE_ADDR + APIC_TIMER_LVT, 0x20020u32)
+    mem_write_u32(APIC_BASE_ADDR + APIC_TIMER_INIT, initial_count)
+
+fn timer_init(arch: i32, tick_hz: u32):
+    """Initialize timer for the given architecture."""
+    timer_arch = arch
+    timer_tick_hz = tick_hz
+    timer_initialized = true
+
+    if arch == TIMER_ARCH_ARM:
+        timer_init_arm(16000000u32, tick_hz)
+    if arch == TIMER_ARCH_RISCV:
+        val interval = 10000000u32 / tick_hz
+        timer_init_riscv(interval)
+    if arch == TIMER_ARCH_X86_64:
+        timer_init_x86_64(0x03u32, 100000u32)
+
+fn timer_ack_arm():
+    """SysTick auto-clears; read CSR to clear COUNTFLAG."""
+    val _ = mem_read_u32(SYSTICK_CSR)
+
+fn timer_ack_riscv():
+    """Set next mtimecmp deadline."""
+    val interval = 10000000u32 / timer_tick_hz
+    val mtime_lo = mem_read_u32(CLINT_MTIME)
+    mem_write_u32(CLINT_MTIMECMP, mtime_lo + interval)
+
+fn timer_ack_x86_64():
+    """Send APIC EOI."""
+    apic_eoi()
+
+fn timer_isr():
+    """Timer interrupt handler. Acknowledges HW and calls sched_tick()."""
+    if timer_arch == TIMER_ARCH_ARM:
+        timer_ack_arm()
+    if timer_arch == TIMER_ARCH_RISCV:
+        timer_ack_riscv()
+    if timer_arch == TIMER_ARCH_X86_64:
+        timer_ack_x86_64()
+
+    sched_tick()
+
+fn timer_get_hz() -> u32:
+    """Return configured tick rate."""
+    timer_tick_hz

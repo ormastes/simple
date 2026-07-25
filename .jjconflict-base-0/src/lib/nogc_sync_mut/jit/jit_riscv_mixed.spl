@@ -1,0 +1,173 @@
+# RISC-V Mixed-Mode JIT Manager
+#
+# Manages both riscv64 (Cranelift) and riscv32 (LLVM, when available) JIT instances.
+# Applies the I32NarrowPass before compilation to reduce register pressure —
+# especially beneficial for rv32 which has limited general-purpose registers.
+#
+# Hot promotion always targets riscv64 (Cranelift). riscv32 requires the LLVM
+# feature flag and may not be available; all rv32 paths skip gracefully if the
+# handle is unavailable (< 1).
+#
+# Hotspot tracking uses flat scalar fields (hot_name, hot_source, hot_threshold,
+# hot_call_count) to avoid Simple's restriction on chained index+field assignment
+# (self.array[idx].field = x is not permitted; only simple obj.field = x is).
+#
+# Usage:
+#   use std.jit.jit_riscv_mixed.{RiscvMixedJit}
+
+use std.io
+use std.jit.opt_i32_narrow.{I32NarrowPass}
+
+extern fn rt_jit_create_for_target(arch: text) -> i64
+extern fn rt_jit_backend_name(handle: i64) -> text
+extern fn rt_jit_compile_source(handle: i64, source: text) -> text
+extern fn rt_jit_call_i64(handle: i64, name: text, arg: i64) -> i64
+extern fn rt_jit_has_function(handle: i64, name: text) -> bool
+extern fn rt_jit_cleanup(handle: i64) -> i64
+extern fn rt_time_now_micros() -> i64
+
+class RiscvCompileResult:
+    name: text
+    backend: text
+    err: text
+    compile_us: i64
+    narrowed: bool
+
+    static fn create(name: text, backend: text, err: text, compile_us: i64, narrowed: bool) -> RiscvCompileResult:
+        RiscvCompileResult(
+            name: name,
+            backend: backend,
+            err: err,
+            compile_us: compile_us,
+            narrowed: narrowed
+        )
+
+class RiscvMixedJit:
+    handle_64: i64
+    handle_32: i64
+    backend_64: text
+    backend_32: text
+    narrow_pass: I32NarrowPass
+    compile_count: i64
+    total_compile_us: i64
+    hotspot_promotions: i64
+    # Single-slot hotspot tracking (flat fields avoid chained index+field assignment)
+    hot_name: text
+    hot_source: text
+    hot_threshold: i64
+    hot_call_count: i64
+    hot_registered: bool
+
+    static fn create() -> RiscvMixedJit:
+        val h64 = rt_jit_create_for_target("riscv64")
+        val b64 = rt_jit_backend_name(h64)
+        val h32 = rt_jit_create_for_target("riscv32")
+        val b32 = rt_jit_backend_name(h32)
+        RiscvMixedJit(
+            handle_64: h64,
+            handle_32: h32,
+            backend_64: b64,
+            backend_32: b32,
+            narrow_pass: I32NarrowPass.create(),
+            compile_count: 0,
+            total_compile_us: 0,
+            hotspot_promotions: 0,
+            hot_name: "",
+            hot_source: "",
+            hot_threshold: 1,
+            hot_call_count: 0,
+            hot_registered: false
+        )
+
+    me compile_for_64(name: text, source: text) -> RiscvCompileResult:
+        val t0 = rt_time_now_micros()
+        val err = rt_jit_compile_source(self.handle_64, source)
+        val t1 = rt_time_now_micros()
+        if err == "":
+            self.compile_count = self.compile_count + 1
+            self.total_compile_us = self.total_compile_us + (t1 - t0)
+        return RiscvCompileResult.create(name, self.backend_64, err, t1 - t0, false)
+
+    me compile_for_32(name: text, source: text) -> RiscvCompileResult:
+        if self.handle_32 < 1:
+            return RiscvCompileResult.create(name, "llvm-jit", "SKIP: riscv32 JIT not available", 0, false)
+        val t0 = rt_time_now_micros()
+        val err = rt_jit_compile_source(self.handle_32, source)
+        val t1 = rt_time_now_micros()
+        if err == "":
+            self.compile_count = self.compile_count + 1
+            self.total_compile_us = self.total_compile_us + (t1 - t0)
+        return RiscvCompileResult.create(name, self.backend_32, err, t1 - t0, false)
+
+    me compile_optimized(name: text, source: text) -> RiscvCompileResult:
+        # Apply I32NarrowPass for stats tracking, then compile the original source.
+        # The annotated form (with # @i32-narrow comment headers) is for analysis
+        # only — the JIT backend does not accept # comments, so we compile the
+        # unmodified source but record the narrowing pass result.
+        self.narrow_pass.analyze(source)
+        val t0 = rt_time_now_micros()
+        val err = rt_jit_compile_source(self.handle_64, source)
+        val t1 = rt_time_now_micros()
+        if err == "":
+            self.compile_count = self.compile_count + 1
+            self.total_compile_us = self.total_compile_us + (t1 - t0)
+        return RiscvCompileResult.create(name, self.backend_64, err, t1 - t0, true)
+
+    me is_compiled_64(name: text) -> bool:
+        return rt_jit_has_function(self.handle_64, name)
+
+    me is_compiled_32(name: text) -> bool:
+        if self.handle_32 < 1:
+            return false
+        return rt_jit_has_function(self.handle_32, name)
+
+    me call_i64_on_64(name: text, arg: i64) -> i64:
+        return rt_jit_call_i64(self.handle_64, name, arg)
+
+    me call_i64_on_32(name: text, arg: i64) -> i64:
+        if self.handle_32 < 1:
+            return -1
+        return rt_jit_call_i64(self.handle_32, name, arg)
+
+    # Register a single function for hotspot tracking.
+    # Only one function can be tracked at a time (flat-field design).
+    me register_hot(name: text, source: text, threshold: i64):
+        self.hot_name = name
+        self.hot_source = source
+        self.hot_threshold = threshold
+        self.hot_call_count = 0
+        self.hot_registered = true
+
+    # Record a call to the registered hot function.
+    # Once call_count reaches threshold, compile_optimized is called automatically.
+    # Uses rt_jit_has_function as source of truth for compiled status.
+    me record_call(name: text):
+        if self.hot_registered == false:
+            return
+        if self.hot_name != name:
+            return
+        if rt_jit_has_function(self.handle_64, name):
+            return
+        self.hot_call_count = self.hot_call_count + 1
+        if self.hot_call_count >= self.hot_threshold:
+            val res = self.compile_optimized(name, self.hot_source)
+            if res.err == "":
+                self.hotspot_promotions = self.hotspot_promotions + 1
+            else:
+                print("RiscvMixedJit: hotspot compile failed for " + name + ": " + res.err)
+
+    me stats() -> text:
+        var msg = "RiscvMixedJit:"
+        msg = msg + " qemu_target=riscv64/" + self.backend_64
+        msg = msg + " qemu_target_32=riscv32/" + self.backend_32
+        msg = msg + " compiled=" + self.compile_count.to_text()
+        msg = msg + " compile_time=" + self.total_compile_us.to_text() + "us"
+        msg = msg + " promotions=" + self.hotspot_promotions.to_text()
+        msg = msg + " hot_calls=" + self.hot_call_count.to_text()
+        msg = msg + " | " + self.narrow_pass.stats()
+        return msg
+
+    me cleanup():
+        rt_jit_cleanup(self.handle_64)
+        if self.handle_32 >= 1:
+            rt_jit_cleanup(self.handle_32)

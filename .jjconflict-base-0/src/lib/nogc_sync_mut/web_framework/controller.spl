@@ -1,0 +1,153 @@
+"""
+Controller Context and Response Helpers
+
+Provides ControllerContext, make_context, and all response-building
+functions used by controller actions.
+
+Controller actions have signature:
+    fn action_X(ctx: ControllerContext) -> HttpResponseData
+"""
+
+use std.http_server.types.{HttpRequestData, HttpResponseData}
+use std.web_framework.flash.{FlashMessage}
+
+# ============================================================================
+# ControllerContext
+# ============================================================================
+
+class ControllerContext:
+    """Request context passed to each controller action.
+
+    Bundles the raw request, merged params (route + query + body),
+    session data, flash messages, and the current user id.
+    """
+    request: HttpRequestData
+    session_data: Dict<text, text>
+    flash_messages: [FlashMessage]
+    params: Dict<text, text>
+    current_user_id: text?
+
+fn make_context(request: HttpRequestData, session_data: Dict<text, text>,
+                flash_messages: [FlashMessage], params: Dict<text, text>,
+                current_user_id: text?) -> ControllerContext:
+    """Construct a ControllerContext from dispatcher components."""
+    ControllerContext(
+        request: request,
+        session_data: session_data,
+        flash_messages: flash_messages,
+        params: params,
+        current_user_id: current_user_id
+    )
+
+# ============================================================================
+# Param accessors
+# ============================================================================
+
+fn get_param(ctx: ControllerContext, name: text) -> text:
+    """Get a request param by name, returning "" if absent."""
+    ctx.params.get(name) ?? ""
+
+fn get_param_or(ctx: ControllerContext, name: text, default: text) -> text:
+    """Get a request param by name, returning default if absent or empty."""
+    val v = ctx.params.get(name) ?? ""
+    if v.len() == 0:
+        return default
+    v
+
+fn get_param_i64(ctx: ControllerContext, name: text) -> i64:
+    """Get a request param as i64, returning 0 on parse failure."""
+    val v = ctx.params.get(name) ?? ""
+    if v.len() == 0:
+        return 0
+    v.parse_int() ?? 0
+
+fn has_param(ctx: ControllerContext, name: text) -> bool:
+    """Return true if the param exists and is non-empty."""
+    val v = ctx.params.get(name) ?? ""
+    v.len() > 0
+
+# ============================================================================
+# Response builders
+# ============================================================================
+
+fn render_html(html: text) -> HttpResponseData:
+    """200 HTML response."""
+    val headers: list = [("Content-Type", "text/html; charset=utf-8"),
+                         ("Content-Length", "{html.len()}")]
+    (200, "OK", headers, html)
+
+fn render_page(ctx: ControllerContext, template_path: text,
+               data: Dict<text, text>) -> HttpResponseData:
+    """Render an HTML template file with simple {{key}} substitution.
+
+    Falls back to a plain text response if the file cannot be read.
+    """
+    val content = read_template(template_path, data)
+    render_html(content)
+
+fn render_json(json: text) -> HttpResponseData:
+    """200 JSON response."""
+    val headers: list = [("Content-Type", "application/json"),
+                         ("Content-Length", "{json.len()}")]
+    (200, "OK", headers, json)
+
+fn render_created(json: text) -> HttpResponseData:
+    """201 Created JSON response."""
+    val headers: list = [("Content-Type", "application/json"),
+                         ("Content-Length", "{json.len()}")]
+    (201, "Created", headers, json)
+
+fn render_redirect(location: text) -> HttpResponseData:
+    """302 redirect response."""
+    val headers: list = [("Location", location), ("Content-Length", "0")]
+    (302, "Found", headers, "")
+
+fn render_error(status: i64, message: text) -> HttpResponseData:
+    """Error response with given status and message body."""
+    val reason = status_reason_text(status)
+    val headers: list = [("Content-Type", "text/plain"),
+                         ("Content-Length", "{message.len()}")]
+    (status, reason, headers, message)
+
+fn render_not_found() -> HttpResponseData:
+    """404 Not Found response."""
+    render_error(404, "Not Found")
+
+fn render_forbidden() -> HttpResponseData:
+    """403 Forbidden response."""
+    render_error(403, "Forbidden")
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn status_reason_text(code: i64) -> text:
+    if code == 200: return "OK"
+    if code == 201: return "Created"
+    if code == 204: return "No Content"
+    if code == 302: return "Found"
+    if code == 400: return "Bad Request"
+    if code == 401: return "Unauthorized"
+    if code == 403: return "Forbidden"
+    if code == 404: return "Not Found"
+    if code == 422: return "Unprocessable Entity"
+    if code == 500: return "Internal Server Error"
+    if code == 501: return "Not Implemented"
+    "Unknown"
+
+fn read_template(path: text, data: Dict<text, text>) -> text:
+    """Read a template file and substitute {{key}} placeholders."""
+    # Simple key substitution; a full template engine is in the app layer.
+    var content = ""
+    if rt_file_exists(path):
+        content = rt_file_read_text(path)
+    else:
+        content = "<html><body><p>Template not found: {path}</p></body></html>"
+    var result = content
+    for key in data.keys():
+        val value = data.get(key) ?? ""
+        result = result.replace("{{" + key + "}}", value)
+    result
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text

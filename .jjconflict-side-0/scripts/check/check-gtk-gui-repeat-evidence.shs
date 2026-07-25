@@ -1,0 +1,231 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/gtk_gui_repeat_evidence}"
+REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
+BASELINE_REPORT_PATH="${BASELINE_REPORT_PATH:-$BUILD_DIR/baseline.md}"
+BASELINE_OUT="$BUILD_DIR/baseline.out"
+FALLBACK_REPORT_PATH="${FALLBACK_REPORT_PATH:-$BUILD_DIR/fallback.md}"
+FALLBACK_OUT="$BUILD_DIR/fallback.out"
+REQUIRE_SIMPLE_NATIVE="${REQUIRE_SIMPLE_NATIVE:-0}"
+GTK_GUI_REPEAT_FALLBACK_PROBE="${GTK_GUI_REPEAT_FALLBACK_PROBE:-1}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$BASELINE_OUT" "$REPORT_PATH"
+rm -f "$FALLBACK_OUT" "$FALLBACK_REPORT_PATH"
+
+field_of() {
+    key="$1"
+    sed -n "s/^${key}=//p" "$BASELINE_OUT" | tail -n 1
+}
+
+is_positive_int() {
+    value="$1"
+    case "$value" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$value" -gt 0 ]
+}
+
+if [ "${SKIP_SIMPLE_NATIVE+x}" ]; then
+    baseline_skip_native="$SKIP_SIMPLE_NATIVE"
+elif [ "$REQUIRE_SIMPLE_NATIVE" = "1" ]; then
+    baseline_skip_native=0
+else
+    baseline_skip_native=1
+fi
+
+echo "check=gtk_gui_repeat_evidence"
+echo "baseline_report_path=$BASELINE_REPORT_PATH"
+echo "require_simple_native=$REQUIRE_SIMPLE_NATIVE"
+echo "baseline_skip_simple_native=$baseline_skip_native"
+
+set +e
+REPORT_PATH="$BASELINE_REPORT_PATH" \
+BUILD_DIR="$BUILD_DIR/baseline" \
+SKIP_SIMPLE_NATIVE="$baseline_skip_native" \
+GTK_EVIDENCE_TRIALS="${GTK_EVIDENCE_TRIALS:-3}" \
+GTK_EVIDENCE_MIN_TRIALS="${GTK_EVIDENCE_MIN_TRIALS:-3}" \
+GTK_EVIDENCE_SIMPLE_MODE="${GTK_EVIDENCE_SIMPLE_MODE:-retained}" \
+SIMPLE_ITERATIONS="${SIMPLE_ITERATIONS:-4}" \
+GTK_ITERATIONS="${GTK_ITERATIONS:-200}" \
+SIMPLE_RUN_TIMEOUT_SECS="${SIMPLE_RUN_TIMEOUT_SECS:-120}" \
+SIMPLE_RUN_TIMEOUT_KILL_SECS="${SIMPLE_RUN_TIMEOUT_KILL_SECS:-10}" \
+SIMPLE_NATIVE_BUILD_TIMEOUT_SECS="${SIMPLE_NATIVE_BUILD_TIMEOUT_SECS:-240}" \
+SIMPLE_NATIVE_BUILD_TIMEOUT_KILL_SECS="${SIMPLE_NATIVE_BUILD_TIMEOUT_KILL_SECS:-10}" \
+    sh scripts/check-gtk-gui-size-speed-baseline.shs >"$BASELINE_OUT" 2>&1
+BASELINE_CODE=$?
+set -e
+
+cat "$BASELINE_OUT"
+echo "baseline_exit_code=$BASELINE_CODE"
+
+fallback_status=skipped
+fallback_reason=probe-disabled
+fallback_code=0
+if [ "$GTK_GUI_REPEAT_FALLBACK_PROBE" = "1" ]; then
+    set +e
+    REPORT_PATH="$FALLBACK_REPORT_PATH" \
+    BUILD_DIR="$BUILD_DIR/fallback" \
+    GTK_EVIDENCE_FALLBACK_PROBE_ONLY=1 \
+    GTK_EVIDENCE_FORCE_VECTOR_FONT_UNAVAILABLE=1 \
+        sh scripts/check-gtk-gui-size-speed-baseline.shs >"$FALLBACK_OUT" 2>&1
+    fallback_code=$?
+    set -e
+    cat "$FALLBACK_OUT"
+    fallback_status="$(sed -n 's/^gtk_benchmark_fallback_probe_status=//p' "$FALLBACK_OUT" | tail -n 1)"
+    fallback_reason="$(sed -n 's/^gtk_benchmark_evidence_reason=//p' "$FALLBACK_OUT" | tail -n 1)"
+    fallback_ink_pixels="$(sed -n 's/^simple_vector_text_ink_pixels=//p' "$FALLBACK_OUT" | tail -n 1)"
+    fallback_deterministic="$(sed -n 's/^simple_vector_text_deterministic=//p' "$FALLBACK_OUT" | tail -n 1)"
+else
+    fallback_ink_pixels=missing
+    fallback_deterministic=missing
+fi
+echo "fallback_exit_code=$fallback_code"
+
+evidence_status="$(field_of gtk_benchmark_evidence_status)"
+evidence_reason="$(field_of gtk_benchmark_evidence_reason)"
+sample_status="$(field_of gtk_benchmark_evidence_sample_status)"
+trial_status="$(field_of gtk_benchmark_evidence_trial_status)"
+simple_frame_us="$(field_of gtk_benchmark_simple_frame_us)"
+gtk_frame_us="$(field_of gtk_benchmark_gtk_frame_us)"
+simple_open_us="$(field_of gtk_benchmark_simple_open_us)"
+gtk_open_us="$(field_of gtk_benchmark_gtk_open_us)"
+simple_text_us="$(field_of gtk_benchmark_simple_text_us)"
+gtk_text_us="$(field_of gtk_benchmark_gtk_text_us)"
+simple_vector_text_total_us="$(field_of simple_vector_text_total_us)"
+simple_vector_text_pixels="$(field_of simple_vector_text_pixels)"
+simple_vector_text_ink_pixels="$(field_of simple_vector_text_ink_pixels)"
+simple_vector_text_checksum="$(field_of simple_vector_text_checksum)"
+simple_vector_text_deterministic="$(field_of simple_vector_text_deterministic)"
+simple_trials="$(field_of gtk_benchmark_simple_trial_count)"
+simple_failed_trials="$(field_of gtk_benchmark_simple_failed_trial_count)"
+simple_timeout_trials="$(field_of gtk_benchmark_simple_timeout_trial_count)"
+gtk_trials="$(field_of gtk_benchmark_gtk_trial_count)"
+gtk_failed_trials="$(field_of gtk_benchmark_gtk_failed_trial_count)"
+simple_bytes="$(field_of simple_bytes)"
+simple_closure_bytes="$(field_of simple_closure_bytes)"
+simple_min_bytes="$(field_of simple_min_bytes)"
+simple_min_closure_bytes="$(field_of simple_min_closure_bytes)"
+
+status=pass
+reason=repeat-evidence-verified
+
+if [ "$BASELINE_CODE" -ne 0 ]; then
+    status=fail
+    reason=baseline-command-failed
+elif [ "$evidence_status" != "pass" ] || [ "$evidence_reason" != "pass" ]; then
+    status=fail
+    if is_positive_int "${simple_timeout_trials:-0}"; then
+        reason=simple-trials-timed-out
+    else
+        reason="gtk-evidence-${evidence_reason:-missing}"
+    fi
+elif [ "$sample_status" != "ok" ]; then
+    status=fail
+    reason=sample-confidence-low
+elif [ "$trial_status" != "ok" ]; then
+    status=fail
+    reason=trial-confidence-low
+elif ! is_positive_int "$simple_frame_us" || ! is_positive_int "$gtk_frame_us" || ! is_positive_int "$simple_text_us" || ! is_positive_int "$gtk_text_us"; then
+    status=fail
+    reason=missing-positive-timings
+elif ! is_positive_int "$simple_open_us" || ! is_positive_int "$gtk_open_us"; then
+    status=fail
+    reason=missing-positive-open-timings
+elif [ "$simple_open_us" -ge "$gtk_open_us" ]; then
+    status=fail
+    reason=open-not-faster
+elif [ "$simple_frame_us" -ge "$gtk_frame_us" ]; then
+    status=fail
+    reason=frame-not-faster
+elif [ "$simple_text_us" -ge "$gtk_text_us" ]; then
+    status=fail
+    reason=text-not-faster
+elif ! is_positive_int "$simple_vector_text_ink_pixels"; then
+    status=fail
+    reason=empty-vector-text-output
+elif [ "$simple_vector_text_deterministic" != "true" ]; then
+    status=fail
+    reason=nondeterministic-vector-text-output
+elif [ "$REQUIRE_SIMPLE_NATIVE" = "1" ] && { ! is_positive_int "$simple_bytes" || ! is_positive_int "$simple_closure_bytes" || ! is_positive_int "$simple_min_bytes" || ! is_positive_int "$simple_min_closure_bytes"; }; then
+    status=fail
+    reason=missing-simple-native-artifact-bytes
+elif [ "$GTK_GUI_REPEAT_FALLBACK_PROBE" = "1" ] && { [ "$fallback_code" -ne 0 ] || [ "$fallback_status" != "pass" ] || [ "$fallback_reason" != "forced-vector-font-unavailable" ] || [ "$fallback_ink_pixels" != "0" ] || [ "$fallback_deterministic" != "true" ]; }; then
+    status=fail
+    reason=vector-font-fallback-probe-failed
+fi
+
+{
+    echo "# GTK GUI Repeat Evidence"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- baseline_exit_code: $BASELINE_CODE"
+    echo "- baseline_report: $BASELINE_REPORT_PATH"
+    echo "- fallback_probe: $fallback_status"
+    echo "- fallback_reason: $fallback_reason"
+    echo "- fallback_report: $FALLBACK_REPORT_PATH"
+    echo "- evidence_status: ${evidence_status:-missing}"
+    echo "- evidence_reason: ${evidence_reason:-missing}"
+    echo "- sample_status: ${sample_status:-missing}"
+    echo "- trial_status: ${trial_status:-missing}"
+    echo "- simple_frame_us: ${simple_frame_us:-missing}"
+    echo "- gtk_frame_us: ${gtk_frame_us:-missing}"
+    echo "- simple_open_us: ${simple_open_us:-missing}"
+    echo "- gtk_open_us: ${gtk_open_us:-missing}"
+    echo "- simple_text_us: ${simple_text_us:-missing}"
+    echo "- gtk_text_us: ${gtk_text_us:-missing}"
+    echo "- simple_vector_text_total_us: ${simple_vector_text_total_us:-missing}"
+    echo "- simple_vector_text_pixels: ${simple_vector_text_pixels:-missing}"
+    echo "- simple_vector_text_ink_pixels: ${simple_vector_text_ink_pixels:-missing}"
+    echo "- simple_vector_text_checksum: ${simple_vector_text_checksum:-missing}"
+    echo "- simple_vector_text_deterministic: ${simple_vector_text_deterministic:-missing}"
+    echo "- simple_trial_count: ${simple_trials:-missing}"
+    echo "- simple_failed_trial_count: ${simple_failed_trials:-missing}"
+    echo "- simple_timeout_trial_count: ${simple_timeout_trials:-missing}"
+    echo "- gtk_trial_count: ${gtk_trials:-missing}"
+    echo "- gtk_failed_trial_count: ${gtk_failed_trials:-missing}"
+    echo "- require_simple_native: $REQUIRE_SIMPLE_NATIVE"
+    echo "- simple_bytes: ${simple_bytes:-missing}"
+    echo "- simple_closure_bytes: ${simple_closure_bytes:-missing}"
+    echo "- simple_min_bytes: ${simple_min_bytes:-missing}"
+    echo "- simple_min_closure_bytes: ${simple_min_closure_bytes:-missing}"
+} >"$REPORT_PATH"
+
+echo "gtk_gui_repeat_evidence_status=$status"
+echo "gtk_gui_repeat_evidence_reason=$reason"
+echo "gtk_gui_repeat_fallback_probe_status=$fallback_status"
+echo "gtk_gui_repeat_fallback_probe_reason=$fallback_reason"
+echo "gtk_gui_repeat_fallback_probe_report=$FALLBACK_REPORT_PATH"
+echo "gtk_gui_repeat_evidence_baseline_status=${evidence_status:-missing}"
+echo "gtk_gui_repeat_evidence_baseline_reason=${evidence_reason:-missing}"
+echo "gtk_gui_repeat_evidence_sample_status=${sample_status:-missing}"
+echo "gtk_gui_repeat_evidence_trial_status=${trial_status:-missing}"
+echo "gtk_gui_repeat_simple_frame_us=${simple_frame_us:-missing}"
+echo "gtk_gui_repeat_gtk_frame_us=${gtk_frame_us:-missing}"
+echo "gtk_gui_repeat_simple_open_us=${simple_open_us:-missing}"
+echo "gtk_gui_repeat_gtk_open_us=${gtk_open_us:-missing}"
+echo "gtk_gui_repeat_simple_text_us=${simple_text_us:-missing}"
+echo "gtk_gui_repeat_gtk_text_us=${gtk_text_us:-missing}"
+echo "gtk_gui_repeat_simple_vector_text_total_us=${simple_vector_text_total_us:-missing}"
+echo "gtk_gui_repeat_simple_vector_text_pixels=${simple_vector_text_pixels:-missing}"
+echo "gtk_gui_repeat_simple_vector_text_ink_pixels=${simple_vector_text_ink_pixels:-missing}"
+echo "gtk_gui_repeat_simple_vector_text_checksum=${simple_vector_text_checksum:-missing}"
+echo "gtk_gui_repeat_simple_vector_text_deterministic=${simple_vector_text_deterministic:-missing}"
+echo "gtk_gui_repeat_simple_trial_count=${simple_trials:-missing}"
+echo "gtk_gui_repeat_simple_failed_trial_count=${simple_failed_trials:-missing}"
+echo "gtk_gui_repeat_simple_timeout_trial_count=${simple_timeout_trials:-missing}"
+echo "gtk_gui_repeat_gtk_trial_count=${gtk_trials:-missing}"
+echo "gtk_gui_repeat_gtk_failed_trial_count=${gtk_failed_trials:-missing}"
+echo "gtk_gui_repeat_require_simple_native=$REQUIRE_SIMPLE_NATIVE"
+echo "gtk_gui_repeat_simple_bytes=${simple_bytes:-missing}"
+echo "gtk_gui_repeat_simple_closure_bytes=${simple_closure_bytes:-missing}"
+echo "report_path=$REPORT_PATH"
+
+if [ "$status" != "pass" ]; then
+    exit 1
+fi

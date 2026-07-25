@@ -1,0 +1,159 @@
+# form_factor_spec — unit tests for DeviceClass detection, FormFactorProfile,
+# size-class boundaries (600/840), height classes (480/900), and policy queries.
+
+use std.spec.{describe, it, expect}
+use common.ui.form_factor.{
+    DeviceClass,
+    FormFactorProfile,
+    detect_device_class,
+    compute_form_factor,
+    min_touch_target,
+    supports_hover,
+    density_spacing
+}
+use common.ui.profile.{
+    SizeClass, Orientation, LayoutProfile, Breakpoints,
+    default_breakpoints, classify
+}
+use common.ui.viewport.{new_viewport}
+
+# =========================================================================
+# detect_device_class
+# =========================================================================
+
+describe "detect_device_class":
+    it "macos no-touch wide → Desktop":
+        expect(detect_device_class("macos", false, 900)).to_equal(DeviceClass.Desktop)
+
+    it "android touch narrow → Phone":
+        expect(detect_device_class("android", true, 411)).to_equal(DeviceClass.Phone)
+
+    it "android touch 600 → Tablet (boundary: >=600 Tablet)":
+        expect(detect_device_class("android", true, 600)).to_equal(DeviceClass.Tablet)
+
+    it "ios touch 599 → Phone":
+        expect(detect_device_class("ios", true, 599)).to_equal(DeviceClass.Phone)
+
+    it "ipados touch 768 → Tablet":
+        expect(detect_device_class("ipados", true, 768)).to_equal(DeviceClass.Tablet)
+
+    it "empty platform no-touch 500 → Desktop (unknown+no-touch)":
+        expect(detect_device_class("", false, 500)).to_equal(DeviceClass.Desktop)
+
+    it "windows touch 1000 → Tablet (touch-first windows tablet)":
+        expect(detect_device_class("windows", true, 1000)).to_equal(DeviceClass.Tablet)
+
+# =========================================================================
+# DeviceClass.to_wire
+# =========================================================================
+
+describe "DeviceClass.to_wire":
+    it "Phone → phone":
+        expect(DeviceClass.Phone.to_wire()).to_equal("phone")
+
+    it "Tablet → tablet":
+        expect(DeviceClass.Tablet.to_wire()).to_equal("tablet")
+
+    it "Desktop → desktop":
+        expect(DeviceClass.Desktop.to_wire()).to_equal("desktop")
+
+# =========================================================================
+# compute_form_factor — canonical viewports
+# =========================================================================
+
+describe "compute_form_factor":
+    it "390x844 ios touch → Phone, horizontal Compact, Portrait":
+        val vp = new_viewport(390, 844, "gui")
+        val ff = compute_form_factor(vp, "ios", true)
+        expect(ff.device).to_equal(DeviceClass.Phone)
+        expect(ff.layout.horizontal).to_equal(SizeClass.Compact)
+        expect(ff.layout.orientation).to_equal(Orientation.Portrait)
+
+    it "1024x768 ipados touch → Tablet, horizontal Expanded":
+        val vp = new_viewport(1024, 768, "gui")
+        val ff = compute_form_factor(vp, "ipados", true)
+        expect(ff.device).to_equal(DeviceClass.Tablet)
+        expect(ff.layout.horizontal).to_equal(SizeClass.Expanded)
+
+    it "1440x900 macos no-touch → Desktop, horizontal Expanded":
+        val vp = new_viewport(1440, 900, "gui")
+        val ff = compute_form_factor(vp, "macos", false)
+        expect(ff.device).to_equal(DeviceClass.Desktop)
+        expect(ff.layout.horizontal).to_equal(SizeClass.Expanded)
+
+    it "844x390 ios touch landscape phone → Phone, vertical Compact":
+        val vp = new_viewport(844, 390, "gui")
+        val ff = compute_form_factor(vp, "ios", true)
+        expect(ff.device).to_equal(DeviceClass.Phone)
+        expect(ff.layout.vertical).to_equal(SizeClass.Compact)
+
+# =========================================================================
+# Width size-class boundaries with default_breakpoints (600/840)
+# =========================================================================
+
+describe "default_breakpoints width boundaries":
+    it "classify(599) = Compact":
+        val bp = default_breakpoints()
+        expect(classify(599, bp)).to_equal(SizeClass.Compact)
+
+    it "classify(600) = Regular":
+        val bp = default_breakpoints()
+        expect(classify(600, bp)).to_equal(SizeClass.Regular)
+
+    it "classify(839) = Regular":
+        val bp = default_breakpoints()
+        expect(classify(839, bp)).to_equal(SizeClass.Regular)
+
+    it "classify(840) = Expanded":
+        val bp = default_breakpoints()
+        expect(classify(840, bp)).to_equal(SizeClass.Expanded)
+
+# =========================================================================
+# Height classes via height_breakpoints (480/900)
+# =========================================================================
+
+use common.ui.profile.{height_breakpoints}
+
+describe "height_breakpoints boundaries":
+    it "classify(479) = Compact":
+        val bp = height_breakpoints()
+        expect(classify(479, bp)).to_equal(SizeClass.Compact)
+
+    it "classify(480) = Regular":
+        val bp = height_breakpoints()
+        expect(classify(480, bp)).to_equal(SizeClass.Regular)
+
+    it "classify(899) = Regular":
+        val bp = height_breakpoints()
+        expect(classify(899, bp)).to_equal(SizeClass.Regular)
+
+    it "classify(900) = Expanded":
+        val bp = height_breakpoints()
+        expect(classify(900, bp)).to_equal(SizeClass.Expanded)
+
+# =========================================================================
+# Policy functions
+# =========================================================================
+
+describe "min_touch_target":
+    it "Phone ios → 44":
+        expect(min_touch_target(DeviceClass.Phone, "ios")).to_equal(44)
+
+    it "Phone android → 48":
+        expect(min_touch_target(DeviceClass.Phone, "android")).to_equal(48)
+
+    it "Tablet ipados → 44":
+        expect(min_touch_target(DeviceClass.Tablet, "ipados")).to_equal(44)
+
+    it "Desktop macos → 32":
+        expect(min_touch_target(DeviceClass.Desktop, "macos")).to_equal(32)
+
+describe "supports_hover":
+    it "Desktop → true":
+        expect(supports_hover(DeviceClass.Desktop)).to_equal(true)
+
+    it "Phone → false":
+        expect(supports_hover(DeviceClass.Phone)).to_equal(false)
+
+    it "Tablet → false":
+        expect(supports_hover(DeviceClass.Tablet)).to_equal(false)

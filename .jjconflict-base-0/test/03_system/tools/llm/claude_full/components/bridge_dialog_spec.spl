@@ -1,0 +1,61 @@
+"""
+# Claude Full Bridge Dialog
+
+Checks BridgeDialog parity state without terminal rendering.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.components.BridgeDialog.*
+
+describe "Claude full BridgeDialog":
+    it "models labels, visibility, and connection state":
+        step("Default empty labels to source copy")
+        val defaults = BridgeDialogState.new(true, false, true, "", "", "req_1", "", "")
+        expect(bridgeDialogProviderLabel(defaults)).to_equal("Claude")
+        expect(bridgeDialogTargetLabel(defaults)).to_equal("remote app")
+        expect(bridgeDialogVisible(defaults)).to_equal(true)
+        expect(bridgeDialogConnectionState(defaults)).to_equal("connecting")
+        expect(bridgeDialogTitle(defaults)).to_equal("Connect Claude to remote app")
+
+        step("Hide disconnected dialogs")
+        val hidden = BridgeDialogState.new(true, false, false, "Claude", "desktop", "req_2", "", "")
+        expect(bridgeDialogVisible(hidden)).to_equal(false)
+        expect(bridgeDialogTitle(hidden)).to_equal("Bridge dialog hidden")
+
+    it "summarizes status and error precedence":
+        step("Use custom status before generated connected copy")
+        val connected = BridgeDialogState.new(true, true, false, "Claude", "mobile", "req_3", "", "Waiting for approval")
+        expect(bridgeDialogConnectionState(connected)).to_equal("connected")
+        expect(bridgeDialogStatusSummary(connected)).to_equal("Waiting for approval")
+        expect(bridgeDialogCanApprove(connected)).to_equal(true)
+
+        step("Error state wins over connected state")
+        val failed = BridgeDialogState.new(true, true, false, "Claude", "mobile", "req_4", "token expired", "Waiting")
+        expect(bridgeDialogConnectionState(failed)).to_equal("failed")
+        expect(bridgeDialogStatusSummary(failed)).to_equal("Bridge failed: token expired")
+        expect(bridgeDialogCanApprove(failed)).to_equal(false)
+
+    it "returns approve and cancel results":
+        step("Approve connected bridge")
+        val ready = BridgeDialogState.new(true, true, false, "Claude", "desktop", "req_5", "", "")
+        val approved = bridgeDialogApprove(ready)
+        expect(approved.action).to_equal("approve")
+        expect(approved.approved).to_equal(true)
+        expect(approved.cancelled).to_equal(false)
+        expect(approved.requestId).to_equal("req_5")
+        expect(approved.summary).to_contain("desktop")
+
+        step("Block approve while connecting and allow cancel")
+        val pending = BridgeDialogState.new(true, false, true, "Claude", "desktop", "req_6", "", "")
+        val blocked = bridgeDialogApprove(pending)
+        expect(blocked.action).to_equal("blocked")
+        expect(blocked.summary).to_equal("Bridge connecting")
+        val cancelled = bridgeDialogCancel(pending)
+        expect(cancelled.action).to_equal("cancel")
+        expect(cancelled.approved).to_equal(false)
+        expect(cancelled.cancelled).to_equal(true)
+
+    it "exposes source helpers":
+        step("Read source helper values")
+        expect(bridgeDialogSource()).to_equal("BridgeDialog")
+        expect(bridgeDialogSourceLinesModeled()).to_equal(430)

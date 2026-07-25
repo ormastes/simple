@@ -1,0 +1,384 @@
+# P-384 Jacobian Point Operations
+#
+# Provides JacP384 (Jacobian coordinate point), curve generator constants,
+# Jacobian arithmetic (double, add_mixed, add_jac), constant-time select,
+# scalar multiplication, affine projection, and point validation.
+#
+# References:
+#   * FIPS 186-4 / SEC2 v2.0 §2.5.1 (P-384 parameters)
+#   * RFC 5903 §4.1 (ECDH with P-384)
+
+use os.crypto.p384_field.{MASK32, Fe384, fe_zero, fe_one, _fe_get, _fe_from_arr, fe_from_bytes, fe_to_bytes, fe_add, _fe_cond_sub_p, _fe_cond_select, fe_sub, _fe_add_p, fe_mul, fe_sq, _fe_mul_wide, _fe_reduce_wide, _reduce_one_round, fe_inv, fe_eq}
+
+# ============================================================================
+# Jacobian point type
+# ============================================================================
+
+struct JacP384:
+    x: Fe384
+    y: Fe384
+    z: Fe384
+    inf: bool
+
+fn _jac_inf() -> JacP384:
+    JacP384(x: fe_zero(), y: fe_one(), z: fe_zero(), inf: true)
+
+fn _jac_from_affine(ax: Fe384, ay: Fe384) -> JacP384:
+    JacP384(x: ax, y: ay, z: fe_one(), inf: false)
+
+# ============================================================================
+# Curve generator G
+# ============================================================================
+
+fn _gx() -> Fe384:
+    var b: [u8] = []
+    b.push(0xAA)
+    b.push(0x87)
+    b.push(0xCA)
+    b.push(0x22)
+    b.push(0xBE)
+    b.push(0x8B)
+    b.push(0x05)
+    b.push(0x37)
+    b.push(0x8E)
+    b.push(0xB1)
+    b.push(0xC7)
+    b.push(0x1E)
+    b.push(0xF3)
+    b.push(0x20)
+    b.push(0xAD)
+    b.push(0x74)
+    b.push(0x6E)
+    b.push(0x1D)
+    b.push(0x3B)
+    b.push(0x62)
+    b.push(0x8B)
+    b.push(0xA7)
+    b.push(0x9B)
+    b.push(0x98)
+    b.push(0x59)
+    b.push(0xF7)
+    b.push(0x41)
+    b.push(0xE0)
+    b.push(0x82)
+    b.push(0x54)
+    b.push(0x2A)
+    b.push(0x38)
+    b.push(0x55)
+    b.push(0x02)
+    b.push(0xF2)
+    b.push(0x5D)
+    b.push(0xBF)
+    b.push(0x55)
+    b.push(0x29)
+    b.push(0x6C)
+    b.push(0x3A)
+    b.push(0x54)
+    b.push(0x5E)
+    b.push(0x38)
+    b.push(0x72)
+    b.push(0x76)
+    b.push(0x0A)
+    b.push(0xB7)
+    fe_from_bytes(b)
+
+fn _gy() -> Fe384:
+    var b: [u8] = []
+    b.push(0x36)
+    b.push(0x17)
+    b.push(0xDE)
+    b.push(0x4A)
+    b.push(0x96)
+    b.push(0x26)
+    b.push(0x2C)
+    b.push(0x6F)
+    b.push(0x5D)
+    b.push(0x9E)
+    b.push(0x98)
+    b.push(0xBF)
+    b.push(0x92)
+    b.push(0x92)
+    b.push(0xDC)
+    b.push(0x29)
+    b.push(0xF8)
+    b.push(0xF4)
+    b.push(0x1D)
+    b.push(0xBD)
+    b.push(0x28)
+    b.push(0x9A)
+    b.push(0x14)
+    b.push(0x7C)
+    b.push(0xE9)
+    b.push(0xDA)
+    b.push(0x31)
+    b.push(0x13)
+    b.push(0xB5)
+    b.push(0xF0)
+    b.push(0xB8)
+    b.push(0xC0)
+    b.push(0x0A)
+    b.push(0x60)
+    b.push(0xB1)
+    b.push(0xCE)
+    b.push(0x1D)
+    b.push(0x7E)
+    b.push(0x81)
+    b.push(0x9D)
+    b.push(0x7A)
+    b.push(0x43)
+    b.push(0x1D)
+    b.push(0x7C)
+    b.push(0x90)
+    b.push(0xEA)
+    b.push(0x0E)
+    b.push(0x5F)
+    fe_from_bytes(b)
+
+fn _curve_b() -> Fe384:
+    var b: [u8] = []
+    b.push(0xB3)
+    b.push(0x31)
+    b.push(0x2F)
+    b.push(0xA7)
+    b.push(0xE2)
+    b.push(0x3E)
+    b.push(0xE7)
+    b.push(0xE4)
+    b.push(0x98)
+    b.push(0x8E)
+    b.push(0x05)
+    b.push(0x6B)
+    b.push(0xE3)
+    b.push(0xF8)
+    b.push(0x2D)
+    b.push(0x19)
+    b.push(0x18)
+    b.push(0x1D)
+    b.push(0x9C)
+    b.push(0x6E)
+    b.push(0xFE)
+    b.push(0x81)
+    b.push(0x41)
+    b.push(0x12)
+    b.push(0x03)
+    b.push(0x14)
+    b.push(0x08)
+    b.push(0x8F)
+    b.push(0x50)
+    b.push(0x13)
+    b.push(0x87)
+    b.push(0x5A)
+    b.push(0xC6)
+    b.push(0x56)
+    b.push(0x39)
+    b.push(0x8D)
+    b.push(0x8A)
+    b.push(0x2E)
+    b.push(0xD1)
+    b.push(0x9D)
+    b.push(0x2A)
+    b.push(0x85)
+    b.push(0xC8)
+    b.push(0xED)
+    b.push(0xD3)
+    b.push(0xEC)
+    b.push(0x2A)
+    b.push(0xEF)
+    fe_from_bytes(b)
+
+# ============================================================================
+# Jacobian point doubling (a = -3 short Weierstrass)
+# Cost: 4M + 4S
+# ============================================================================
+
+fn _jac_double(p: JacP384) -> JacP384:
+    if p.inf:
+        return _jac_inf()
+    val zz = fe_sq(p.z)
+    val xz = fe_sub(p.x, zz)
+    val xpz = fe_add(p.x, zz)
+    val mraw = fe_mul(xz, xpz)
+    val m = fe_add(fe_add(mraw, mraw), mraw)  # 3*(X^2 - Z^4)
+
+    val yy = fe_sq(p.y)
+    val xyy = fe_mul(p.x, yy)
+    val s = fe_add(xyy, xyy)
+    val s2 = fe_add(s, s)  # S = 4*X*Y^2
+
+    val m2 = fe_sq(m)
+    val s2x2 = fe_add(s2, s2)
+    val x3 = fe_sub(m2, s2x2)  # X3 = M^2 - 2S
+
+    val sxm = fe_sub(s2, x3)
+    val msxm = fe_mul(m, sxm)
+    val yyy = fe_sq(yy)
+    val yyy8 = fe_add(fe_add(fe_add(yyy, yyy), fe_add(yyy, yyy)),
+                      fe_add(fe_add(yyy, yyy), fe_add(yyy, yyy)))  # 8*Y^4
+    val y3 = fe_sub(msxm, yyy8)
+
+    val yz = fe_mul(p.y, p.z)
+    val z3 = fe_add(yz, yz)  # Z3 = 2*Y*Z
+
+    JacP384(x: x3, y: y3, z: z3, inf: false)
+
+# ============================================================================
+# Jacobian + affine mixed addition
+# ============================================================================
+
+fn _jac_add_mixed(p: JacP384, ax: Fe384, ay: Fe384) -> JacP384:
+    if p.inf:
+        return JacP384(x: ax, y: ay, z: fe_one(), inf: false)
+
+    val z1z1 = fe_sq(p.z)
+    val u2 = fe_mul(ax, z1z1)
+    val z1z1z1 = fe_mul(z1z1, p.z)
+    val s2 = fe_mul(ay, z1z1z1)
+
+    if fe_eq(p.x, u2):
+        if fe_eq(p.y, s2):
+            return _jac_double(p)
+        return _jac_inf()
+
+    val h = fe_sub(u2, p.x)
+    val r = fe_sub(s2, p.y)
+    val hh = fe_sq(h)
+    val hhh = fe_mul(hh, h)
+    val v = fe_mul(p.x, hh)
+
+    val rr = fe_sq(r)
+    val v2 = fe_add(v, v)
+    val x3 = fe_sub(fe_sub(rr, hhh), v2)
+
+    val vmx = fe_sub(v, x3)
+    val rvmx = fe_mul(r, vmx)
+    val y1hhh = fe_mul(p.y, hhh)
+    val y3 = fe_sub(rvmx, y1hhh)
+
+    val z3 = fe_mul(p.z, h)
+
+    JacP384(x: x3, y: y3, z: z3, inf: false)
+
+# ============================================================================
+# Jacobian + Jacobian full addition (for ECDSA verify)
+# ============================================================================
+
+fn _jac_add_jac(p1: JacP384, p2: JacP384) -> JacP384:
+    if p1.inf:
+        return p2
+    if p2.inf:
+        return p1
+
+    val z1sq = fe_sq(p1.z)
+    val z2sq = fe_sq(p2.z)
+    val z1cu = fe_mul(z1sq, p1.z)
+    val z2cu = fe_mul(z2sq, p2.z)
+
+    val u1 = fe_mul(p1.x, z2sq)
+    val u2 = fe_mul(p2.x, z1sq)
+    val s1 = fe_mul(p1.y, z2cu)
+    val s2 = fe_mul(p2.y, z1cu)
+
+    if fe_eq(u1, u2):
+        if fe_eq(s1, s2):
+            return _jac_double(p1)
+        return _jac_inf()
+
+    val h = fe_sub(u2, u1)
+    val r = fe_sub(s2, s1)
+    val hh = fe_sq(h)
+    val hhh = fe_mul(hh, h)
+    val v = fe_mul(u1, hh)
+
+    val rr = fe_sq(r)
+    val v2 = fe_add(v, v)
+    val x3 = fe_sub(fe_sub(rr, hhh), v2)
+
+    val vmx = fe_sub(v, x3)
+    val rvmx = fe_mul(r, vmx)
+    val s1hhh = fe_mul(s1, hhh)
+    val y3 = fe_sub(rvmx, s1hhh)
+
+    val z3 = fe_mul(fe_mul(p1.z, p2.z), h)
+
+    JacP384(x: x3, y: y3, z: z3, inf: false)
+
+# ============================================================================
+# Constant-time point select
+# ============================================================================
+
+fn _point_cselect(p0: JacP384, p1: JacP384, choose_p1: u64) -> JacP384:
+    val sel_x = _fe_cond_select(p0.x, p1.x, choose_p1)
+    val sel_y = _fe_cond_select(p0.y, p1.y, choose_p1)
+    val sel_z = _fe_cond_select(p0.z, p1.z, choose_p1)
+    val inf0_u: u64 = if p0.inf { 1 } else { 0 }
+    val inf1_u: u64 = if p1.inf { 1 } else { 0 }
+    val mask: u64 = (0 - choose_p1) & MASK32
+    val inf_out_u: u64 = inf0_u ^ (mask & (inf0_u ^ inf1_u))
+    JacP384(x: sel_x, y: sel_y, z: sel_z, inf: inf_out_u == 1)
+
+# ============================================================================
+# Scalar multiplication: MSB-first double-and-add with constant-time select
+# ============================================================================
+
+fn _scalar_mul_affine(scalar: [u8], ax: Fe384, ay: Fe384) -> JacP384:
+    """384-bit MSB-first scalar mult on affine point (ax, ay).
+    scalar: 48 bytes big-endian."""
+    var acc = _jac_inf()
+    var i: u64 = 0
+    while i < 48:
+        val byte_val: u64 = scalar[i].to_u64()
+        var bit: u64 = 0
+        while bit < 8:
+            acc = _jac_double(acc)
+            val bit_set: u64 = (byte_val >> (7 - bit)) & 1
+            val candidate = _jac_add_mixed(acc, ax, ay)
+            acc = _point_cselect(acc, candidate, bit_set)
+            bit = bit + 1
+        i = i + 1
+    acc
+
+# ============================================================================
+# Affine projection
+# ============================================================================
+
+fn _to_affine(p: JacP384) -> (Fe384, Fe384):
+    if p.inf:
+        return (fe_zero(), fe_zero())
+    val zinv = fe_inv(p.z)
+    val zinv2 = fe_sq(zinv)
+    val zinv3 = fe_mul(zinv2, zinv)
+    val ax = fe_mul(p.x, zinv2)
+    val ay = fe_mul(p.y, zinv3)
+    (ax, ay)
+
+# ============================================================================
+# Point on curve check
+# ============================================================================
+
+fn p384_point_on_curve(px: [u8], py: [u8]) -> bool:
+    """Check if affine point (px, py) is on P-384: y^2 == x^3 - 3x + b (mod p)."""
+    val x = fe_from_bytes(px)
+    val y = fe_from_bytes(py)
+    val y2 = fe_sq(y)
+    val x2 = fe_sq(x)
+    val x3 = fe_mul(x2, x)
+    val three_x = fe_add(fe_add(x, x), x)
+    val neg3x = fe_sub(fe_zero(), three_x)
+    val b_val = _curve_b()
+    val rhs = fe_add(fe_add(x3, neg3x), b_val)
+    fe_eq(y2, rhs)
+
+fn _valid_uncompressed_pubkey(pubkey: [u8]) -> bool:
+    """Check SEC1 uncompressed P-384 public-key encoding and curve membership."""
+    if pubkey.len() != 97:
+        return false
+    if pubkey[0u64] != 0x04u8:
+        return false
+    var px: [u8] = []
+    var py: [u8] = []
+    var i: u64 = 0
+    while i < 48:
+        px.push(pubkey[1 + i])
+        py.push(pubkey[49 + i])
+        i = i + 1
+    p384_point_on_curve(px, py)

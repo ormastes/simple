@@ -1,0 +1,63 @@
+# Task Daemon Collector Spec
+#
+# Tests for collect_task_daemon_tasks() and _parse_task_file() in
+# src/app/llm_dashboard/collectors/task_daemon_collector.spl.
+
+use app.llm_dashboard.collectors.task_daemon_collector (_parse_task_file, collect_task_daemon_tasks)
+use app.llm_dashboard.data.types (TaskKind, TaskState, task_kind_name, task_state_name)
+
+describe "_parse_task_file: key=value parsing":
+    it "parses id field":
+        val content = "id=abc-123\ncommand=bin/simple test\nstatus=working\n"
+        val task = _parse_task_file("abc-123.task", content)
+        expect(task.id).to_equal("abc-123")
+
+    it "parses command field":
+        val content = "id=task-1\ncommand=bin/simple build\nstatus=completed\n"
+        val task = _parse_task_file("task-1.task", content)
+        expect(task.command).to_equal("bin/simple build")
+
+    it "maps status=working to TaskState.Active":
+        val content = "id=t1\ncommand=echo hi\nstatus=working\n"
+        val task = _parse_task_file("t1.task", content)
+        expect(task_state_name(task.state)).to_equal("active")
+
+    it "maps status=completed to TaskState.Completed":
+        val content = "id=t2\ncommand=echo done\nstatus=completed\n"
+        val task = _parse_task_file("t2.task", content)
+        expect(task_state_name(task.state)).to_equal("done")
+
+    it "maps status=failed to TaskState.Failed":
+        val content = "id=t3\ncommand=false\nstatus=failed\n"
+        val task = _parse_task_file("t3.task", content)
+        expect(task_state_name(task.state)).to_equal("failed")
+
+    it "maps status=cancelled to TaskState.Cancelled":
+        val content = "id=t4\ncommand=cancel\nstatus=cancelled\n"
+        val task = _parse_task_file("t4.task", content)
+        expect(task_state_name(task.state)).to_equal("cancelled")
+
+    it "sets kind to TaskKind.Job":
+        val content = "id=t5\ncommand=run\nstatus=working\n"
+        val task = _parse_task_file("t5.task", content)
+        expect(task_kind_name(task.kind)).to_equal("job")
+
+    it "handles missing fields gracefully (no crash)":
+        val content = "id=t6\n"
+        val task = _parse_task_file("t6.task", content)
+        expect(task.id).to_equal("t6")
+        expect(task.command).to_equal("")
+
+    it "handles empty content without crashing":
+        val task = _parse_task_file("empty.task", "")
+        expect(task.id.len() >= 0).to_equal(true)
+
+describe "collect_task_daemon_tasks: file-system read":
+    it "returns a list (possibly empty if no task daemon dir)":
+        val tasks = collect_task_daemon_tasks()
+        expect(tasks.len() >= 0).to_equal(true)
+
+    it "all returned tasks have kind Job":
+        val tasks = collect_task_daemon_tasks()
+        for task in tasks:
+            expect(task_kind_name(task.kind)).to_equal("job")

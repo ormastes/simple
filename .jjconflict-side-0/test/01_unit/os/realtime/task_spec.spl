@@ -1,0 +1,162 @@
+use std.spipe.*
+
+val TASK_STATE_IDLE: i64 = 0
+val TASK_STATE_READY: i64 = 1
+val TASK_STATE_RUNNING: i64 = 2
+val TASK_STATE_BLOCKED: i64 = 3
+val TASK_STATE_SUSPENDED: i64 = 4
+val MAX_TASKS: i64 = 16
+val INVALID_TASK: i64 = -1
+
+class TCB:
+    id: i64
+    priority: i64
+    state: i64
+    stack_ptr: i64
+    entry_fn: i64
+    name: text
+    static fn empty(slot: i64) -> TCB:
+        TCB(id: slot, priority: 7, state: TASK_STATE_IDLE, stack_ptr: 0, entry_fn: 0, name: "")
+
+fn build_initial_table() -> [TCB]:
+    var out: [TCB] = []
+    var i: i64 = 0
+    while i < MAX_TASKS:
+        out.push(TCB.empty(i))
+        i = i + 1
+    out
+
+var task_table: [TCB] = build_initial_table()
+var task_count: i64 = 0
+
+fn get_count() -> i64:
+    task_count
+
+fn get_table_len() -> i64:
+    task_table.len()
+
+fn task_table_init():
+    var i: i64 = 0
+    while i < MAX_TASKS:
+        task_table[i] = TCB.empty(i)
+        i = i + 1
+    task_count = 0
+
+fn task_create(priority: i64, entry: i64, name: text) -> i64:
+    if task_count >= MAX_TASKS:
+        return INVALID_TASK
+    var i: i64 = 0
+    while i < MAX_TASKS:
+        if task_table[i].state == TASK_STATE_IDLE:
+            task_table[i] = TCB(id: i, priority: priority, state: TASK_STATE_READY, stack_ptr: 0, entry_fn: entry, name: name)
+            task_count = task_count + 1
+            return i
+        i = i + 1
+    INVALID_TASK
+
+fn task_delete(id: i64):
+    if id < 0 or id >= MAX_TASKS:
+        return
+    if task_table[id].state == TASK_STATE_IDLE:
+        return
+    task_table[id] = TCB.empty(id)
+    task_count = task_count - 1
+
+fn task_get(id: i64) -> TCB:
+    task_table[id]
+
+fn task_set_state(id: i64, state: i64):
+    if id >= 0 and id < MAX_TASKS:
+        var t = task_table[id]
+        task_table[id] = TCB(id: t.id, priority: t.priority, state: state, stack_ptr: t.stack_ptr, entry_fn: t.entry_fn, name: t.name)
+
+fn task_set_stack_ptr(id: i64, sp: i64):
+    if id >= 0 and id < MAX_TASKS:
+        var t = task_table[id]
+        task_table[id] = TCB(id: t.id, priority: t.priority, state: t.state, stack_ptr: sp, entry_fn: t.entry_fn, name: t.name)
+
+fn fill_table() -> i64:
+    var i: i64 = 0
+    var last: i64 = -1
+    while i < MAX_TASKS:
+        last = task_create(0, i, "fill")
+        i = i + 1
+    last
+
+describe "Task":
+    it "TCB.empty has IDLE state and default priority":
+        val t = TCB.empty(5)
+        expect(t.id).to_equal(5)
+        expect(t.state).to_equal(TASK_STATE_IDLE)
+        expect(t.priority).to_equal(7)
+        expect(t.stack_ptr).to_equal(0)
+        expect(t.name).to_equal("")
+
+    it "TCB constructs with all fields":
+        val t = TCB(id: 3, priority: 2, state: TASK_STATE_READY, stack_ptr: 4096, entry_fn: 100, name: "worker")
+        expect(t.id).to_equal(3)
+        expect(t.priority).to_equal(2)
+        expect(t.name).to_equal("worker")
+
+    it "task_table_init creates MAX_TASKS empty slots":
+        task_table_init()
+        expect(get_count()).to_equal(0)
+        expect(get_table_len()).to_equal(16)
+        val first = task_get(0)
+        val last = task_get(15)
+        expect(first.state).to_equal(TASK_STATE_IDLE)
+        expect(last.state).to_equal(TASK_STATE_IDLE)
+
+    it "task_create returns valid id":
+        task_table_init()
+        val id = task_create(2, 100, "t1")
+        expect(id).to_equal(0)
+        expect(get_count()).to_equal(1)
+
+    it "task_create sets state to READY":
+        task_table_init()
+        val id = task_create(1, 200, "t2")
+        val t = task_get(id)
+        expect(t.state).to_equal(TASK_STATE_READY)
+        expect(t.priority).to_equal(1)
+        expect(t.name).to_equal("t2")
+
+    it "task_get retrieves correct TCB":
+        task_table_init()
+        val id = task_create(3, 300, "getter")
+        val t = task_get(id)
+        expect(t.name).to_equal("getter")
+        expect(t.priority).to_equal(3)
+
+    it "task_delete marks slot as idle":
+        task_table_init()
+        val id = task_create(0, 400, "del")
+        expect(get_count()).to_equal(1)
+        task_delete(id)
+        expect(get_count()).to_equal(0)
+        val t = task_get(id)
+        expect(t.state).to_equal(TASK_STATE_IDLE)
+
+    it "task_set_state changes state":
+        task_table_init()
+        val id = task_create(1, 500, "st")
+        task_set_state(id, TASK_STATE_RUNNING)
+        val t1 = task_get(id)
+        expect(t1.state).to_equal(TASK_STATE_RUNNING)
+        task_set_state(id, TASK_STATE_BLOCKED)
+        val t2 = task_get(id)
+        expect(t2.state).to_equal(TASK_STATE_BLOCKED)
+
+    it "task_set_stack_ptr updates stack pointer":
+        task_table_init()
+        val id = task_create(1, 600, "sp")
+        task_set_stack_ptr(id, 8192)
+        val t = task_get(id)
+        expect(t.stack_ptr).to_equal(8192)
+
+    it "MAX_TASKS limit returns INVALID_TASK":
+        task_table_init()
+        val last = fill_table()
+        expect(get_count()).to_equal(16)
+        val overflow = task_create(0, 999, "overflow")
+        expect(overflow).to_equal(INVALID_TASK)

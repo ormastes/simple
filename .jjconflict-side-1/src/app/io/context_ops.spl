@@ -1,0 +1,317 @@
+# Minimal context CLI helpers. Kept separate from cli_ops so src/app/context
+# can run without loading broad CLI/compiler exports.
+
+extern fn sys_get_args() -> [text]
+extern fn rt_cli_get_args() -> [text]
+use std.io_runtime.{file_exists, file_read, file_write}
+use app.io.sqlite_sffi.{SqliteRow, sqlite_open, sqlite_open_memory, sqlite_close, sqlite_execute, sqlite_query_all, sqlite_insert, sqlite_row_get}
+
+fn _context_file_exists_impl(path: text) -> bool:
+    file_exists(path)
+
+fn _context_file_read_impl(path: text) -> text:
+    file_read(path)
+
+fn context_file_write(path: text, content: text) -> bool:
+    file_write(path, content)
+
+fn context_get_args() -> [text]:
+    val raw_args = rt_cli_get_args()
+    if raw_args != nil and raw_args.len() > 0:
+        return raw_args
+
+    val sys_args = sys_get_args()
+    if sys_args != nil and sys_args.len() > 0:
+        return sys_args
+
+    []
+
+fn context_file_exists(path: text) -> bool:
+    _context_file_exists_impl(path)
+
+fn context_args_allow_sourceless_sql_query(args: [text]) -> bool:
+    var has_sql = false
+    var has_query = false
+    for arg in args:
+        if arg == "--sql":
+            has_sql = true
+        elif arg.starts_with("--query=") and arg[8:].trim() != "":
+            has_query = true
+    has_sql and has_query
+
+fn _context_normalize_target(path: text, target: text) -> text:
+    val trimmed = target.trim()
+    if trimmed != "":
+        trimmed
+    else:
+        val parts = path.split("/")
+        val filename = parts[parts.len() - 1]
+        val name_parts = filename.split(".")
+        if name_parts.len() > 1:
+            name_parts[0]
+        else:
+            filename
+
+fn _context_json_escape(value: text) -> text:
+    var escaped = value.split("\\").join("\\\\")
+    escaped = escaped.split("\"").join("\\\"")
+    escaped = escaped.split("\n").join("\\n")
+    escaped
+
+fn _context_sql_literal(value: text) -> text:
+    "'" + value.split("'").join("''") + "'"
+
+fn _context_sql_like_literal(value: text) -> text:
+    _context_sql_literal("%" + value + "%")
+
+fn _context_token_estimate(content: text) -> i64:
+    if content == "":
+        0
+    else:
+        (content.len() + 3) / 4
+
+fn _context_line_count(content: text) -> i64:
+    if content == "":
+        0
+    else:
+        content.split("\n").len()
+
+fn context_generate(path: text, target: text, format: text) -> text:
+    val normalized_target = _context_normalize_target(path, target)
+    if not _context_file_exists_impl(path):
+        if format == "json":
+            return "{\"status\":\"missing\",\"source\":\"{_context_json_escape(path)}\",\"target\":\"{_context_json_escape(normalized_target)}\",\"content\":\"\"}"
+        return "status: missing\nsource: {path}\ntarget: {normalized_target}\ncontent: none"
+
+    val content = _context_file_read_impl(path)
+    val line_count = _context_line_count(content)
+    val token_estimate = _context_token_estimate(content)
+    val safe_path = _context_json_escape(path)
+    val safe_target = _context_json_escape(normalized_target)
+    val safe_content = _context_json_escape(content)
+
+    if format == "json":
+        return "{\"status\":\"ready\",\"source\":\"{safe_path}\",\"target\":\"{safe_target}\",\"format\":\"json\",\"line_count\":{line_count},\"token_estimate\":{token_estimate},\"content\":\"{safe_content}\"}"
+
+    if format == "text":
+        return "Simple context pack\nstatus: ready\nsource: {path}\ntarget: {normalized_target}\nlines: {line_count}\ntoken_estimate: {token_estimate}\n\n{content}"
+
+    "# Simple Context Pack\n\n- status: ready\n- source: `{path}`\n- target: `{normalized_target}`\n- lines: {line_count}\n- token_estimate: {token_estimate}\n\n```simple\n{content}\n```"
+
+fn context_stats(path: text, target: text) -> text:
+    val normalized_target = _context_normalize_target(path, target)
+    if not _context_file_exists_impl(path):
+        return "status: missing\nsource: {path}\ntarget: {normalized_target}\nlines: 0\ntoken_estimate: 0"
+
+    val content = _context_file_read_impl(path)
+    val line_count = _context_line_count(content)
+    val token_estimate = _context_token_estimate(content)
+    "status: ready\nsource: {path}\ntarget: {normalized_target}\nlines: {line_count}\ntoken_estimate: {token_estimate}"
+
+fn context_index_packs(paths: [text], target: text, format: text) -> text:
+    if paths.len() == 0:
+        if format == "json":
+            return "{\"status\":\"empty\",\"pack_count\":0,\"content\":\"\"}"
+        return "Simple context index\nstatus: empty\npack_count: 0\ncontent: none"
+
+    var entries: [text] = []
+    var pack_count: i64 = 0
+    for path in paths:
+        val normalized_target = _context_normalize_target(path, target)
+        if _context_file_exists_impl(path):
+            val content = _context_file_read_impl(path)
+            val line_count = _context_line_count(content)
+            val token_estimate = _context_token_estimate(content)
+            pack_count = pack_count + 1
+            entries.push("pack: " + str(pack_count))
+            entries.push("source: " + path)
+            entries.push("target: " + normalized_target)
+            entries.push("status: ready")
+            entries.push("lines: " + str(line_count))
+            entries.push("token_estimate: " + str(token_estimate))
+            entries.push("content:")
+            entries.push(content)
+            entries.push("---")
+        else:
+            pack_count = pack_count + 1
+            entries.push("pack: " + str(pack_count))
+            entries.push("source: " + path)
+            entries.push("target: " + normalized_target)
+            entries.push("status: missing")
+            entries.push("lines: 0")
+            entries.push("token_estimate: 0")
+            entries.push("content: none")
+            entries.push("---")
+
+    val body = entries.join("\n")
+    if format == "json":
+        return "{\"status\":\"ready\",\"pack_count\":" + str(pack_count) + ",\"content\":\"" + _context_json_escape(body) + "\"}"
+    if format == "markdown":
+        return "# Simple Context Index\n\n- status: ready\n- pack_count: " + str(pack_count) + "\n\n```text\n" + body + "\n```"
+    "Simple context index\nstatus: ready\npack_count: " + str(pack_count) + "\n\n" + body
+
+fn context_query_index(index_text: text, query: text, format: text) -> text:
+    val trimmed_query = query.trim()
+    if index_text.trim() == "":
+        if format == "json":
+            return "{\"status\":\"missing\",\"query\":\"" + _context_json_escape(trimmed_query) + "\",\"matches\":0,\"content\":\"\"}"
+        return "Simple context query\nstatus: missing\nquery: " + trimmed_query + "\nmatches: 0\ncontent: none"
+    if trimmed_query == "":
+        if format == "json":
+            return "{\"status\":\"empty_query\",\"query\":\"\",\"matches\":0,\"content\":\"\"}"
+        return "Simple context query\nstatus: empty_query\nquery: \nmatches: 0\ncontent: none"
+
+    var matches: [text] = []
+    for line in index_text.split("\n"):
+        if line.contains(trimmed_query):
+            matches.push(line)
+
+    val match_count = matches.len()
+    var status = "ready"
+    var body = matches.join("\n")
+    if match_count == 0:
+        status = "no_matches"
+        body = "content: none"
+
+    if format == "json":
+        return "{\"status\":\"" + status + "\",\"query\":\"" + _context_json_escape(trimmed_query) + "\",\"matches\":" + str(match_count) + ",\"content\":\"" + _context_json_escape(body) + "\"}"
+    if format == "markdown":
+        return "# Simple Context Query\n\n- status: " + status + "\n- query: `" + trimmed_query + "`\n- matches: " + str(match_count) + "\n\n```text\n" + body + "\n```"
+    "Simple context query\nstatus: " + status + "\nquery: " + trimmed_query + "\nmatches: " + str(match_count) + "\n\n" + body
+
+fn _context_sql_open(db_path: text):
+    if db_path.trim() == "":
+        sqlite_open_memory()
+    else:
+        sqlite_open(db_path)
+
+fn _context_sql_schema() -> text:
+    "CREATE TABLE IF NOT EXISTS context_packs (id INTEGER PRIMARY KEY, source TEXT, target TEXT, status TEXT, lines INTEGER, token_estimate INTEGER, content TEXT)"
+
+fn _context_sql_render_rows_filtered(rows: [SqliteRow], query: text, source_filter: text, format: text) -> text:
+    val trimmed_filter = source_filter.trim()
+    var match_count: i64 = 0
+    var status = "ready"
+    var body_parts: [text] = []
+
+    for row in rows:
+        val source = sqlite_row_get(row, "source")
+        val target = sqlite_row_get(row, "target")
+        val content = sqlite_row_get(row, "content")
+        val literal_query_match = query == "" or source.contains(query) or target.contains(query) or content.contains(query)
+        if literal_query_match and (trimmed_filter == "" or source == trimmed_filter or source.ends_with("/" + trimmed_filter)):
+            match_count = match_count + 1
+            body_parts.push("source: " + source)
+            body_parts.push("target: " + target)
+            body_parts.push("status: " + sqlite_row_get(row, "status"))
+            body_parts.push("lines: " + sqlite_row_get(row, "lines"))
+            body_parts.push("token_estimate: " + sqlite_row_get(row, "token_estimate"))
+            body_parts.push("content:")
+            body_parts.push(content)
+            body_parts.push("---")
+
+    if match_count == 0:
+        status = "no_matches"
+        body_parts.push("content: none")
+
+    val body = body_parts.join("\n")
+    if format == "json":
+        if trimmed_filter != "":
+            return "{\"status\":\"" + status + "\",\"backend\":\"sqlite\",\"query\":\"" + _context_json_escape(query) + "\",\"source_filter\":\"" + _context_json_escape(trimmed_filter) + "\",\"matches\":" + str(match_count) + ",\"content\":\"" + _context_json_escape(body) + "\"}"
+        return "{\"status\":\"" + status + "\",\"backend\":\"sqlite\",\"query\":\"" + _context_json_escape(query) + "\",\"matches\":" + str(match_count) + ",\"content\":\"" + _context_json_escape(body) + "\"}"
+    if format == "markdown":
+        if trimmed_filter != "":
+            return "# Simple Context SQL Query\n\n- status: " + status + "\n- backend: sqlite\n- query: `" + query + "`\n- source_filter: `" + trimmed_filter + "`\n- matches: " + str(match_count) + "\n\n```text\n" + body + "\n```"
+        return "# Simple Context SQL Query\n\n- status: " + status + "\n- backend: sqlite\n- query: `" + query + "`\n- matches: " + str(match_count) + "\n\n```text\n" + body + "\n```"
+    if trimmed_filter != "":
+        return "Simple context SQL query\nstatus: " + status + "\nbackend: sqlite\nquery: " + query + "\nsource_filter: " + trimmed_filter + "\nmatches: " + str(match_count) + "\n\n" + body
+    "Simple context SQL query\nstatus: " + status + "\nbackend: sqlite\nquery: " + query + "\nmatches: " + str(match_count) + "\n\n" + body
+
+fn _context_sql_render_rows(rows: [SqliteRow], query: text, format: text) -> text:
+    _context_sql_render_rows_filtered(rows, query, "", format)
+
+fn context_sql_index_packs(paths: [text], target: text, db_path: text, format: text) -> text:
+    val db = _context_sql_open(db_path)
+    if not db.is_valid:
+        if format == "json":
+            return "{\"status\":\"unavailable\",\"backend\":\"sqlite\",\"pack_count\":0,\"content\":\"\"}"
+        return "Simple context SQL index\nstatus: unavailable\nbackend: sqlite\npack_count: 0\ncontent: none"
+
+    sqlite_execute(db, _context_sql_schema())
+    sqlite_execute(db, "DELETE FROM context_packs")
+
+    var pack_count: i64 = 0
+    for path in paths:
+        val normalized_target = _context_normalize_target(path, target)
+        if _context_file_exists_impl(path):
+            val content = _context_file_read_impl(path)
+            pack_count = pack_count + 1
+            sqlite_insert(
+                db,
+                "context_packs",
+                ["source", "target", "status", "lines", "token_estimate", "content"],
+                [path, normalized_target, "ready", str(_context_line_count(content)), str(_context_token_estimate(content)), content],
+            )
+        else:
+            pack_count = pack_count + 1
+            sqlite_insert(
+                db,
+                "context_packs",
+                ["source", "target", "status", "lines", "token_estimate", "content"],
+                [path, normalized_target, "missing", "0", "0", "content: none"],
+            )
+
+    val rows = sqlite_query_all(db, "SELECT source, target, status, lines, token_estimate, content FROM context_packs ORDER BY id")
+    val rendered = _context_sql_render_rows(rows, "", "text")
+    sqlite_close(db)
+
+    if format == "json":
+        return "{\"status\":\"ready\",\"backend\":\"sqlite\",\"pack_count\":" + str(pack_count) + ",\"content\":\"" + _context_json_escape(rendered) + "\"}"
+    if format == "markdown":
+        return "# Simple Context SQL Index\n\n- status: ready\n- backend: sqlite\n- pack_count: " + str(pack_count) + "\n\n```text\n" + rendered + "\n```"
+    "Simple context SQL index\nstatus: ready\nbackend: sqlite\npack_count: " + str(pack_count) + "\n\n" + rendered
+
+fn context_sql_query_packs_by_source(paths: [text], target: text, query: text, source_filter: text, db_path: text, format: text) -> text:
+    val trimmed_query = query.trim()
+    if trimmed_query == "":
+        if format == "json":
+            if source_filter.trim() != "":
+                return "{\"status\":\"empty_query\",\"backend\":\"sqlite\",\"query\":\"\",\"source_filter\":\"" + _context_json_escape(source_filter.trim()) + "\",\"matches\":0,\"content\":\"\"}"
+            return "{\"status\":\"empty_query\",\"backend\":\"sqlite\",\"query\":\"\",\"matches\":0,\"content\":\"\"}"
+        if source_filter.trim() != "":
+            return "Simple context SQL query\nstatus: empty_query\nbackend: sqlite\nquery: \nsource_filter: " + source_filter.trim() + "\nmatches: 0\ncontent: none"
+        return "Simple context SQL query\nstatus: empty_query\nbackend: sqlite\nquery: \nmatches: 0\ncontent: none"
+
+    val db = _context_sql_open(db_path)
+    if not db.is_valid:
+        if format == "json":
+            if source_filter.trim() != "":
+                return "{\"status\":\"unavailable\",\"backend\":\"sqlite\",\"query\":\"" + _context_json_escape(trimmed_query) + "\",\"source_filter\":\"" + _context_json_escape(source_filter.trim()) + "\",\"matches\":0,\"content\":\"\"}"
+            return "{\"status\":\"unavailable\",\"backend\":\"sqlite\",\"query\":\"" + _context_json_escape(trimmed_query) + "\",\"matches\":0,\"content\":\"\"}"
+        if source_filter.trim() != "":
+            return "Simple context SQL query\nstatus: unavailable\nbackend: sqlite\nquery: " + trimmed_query + "\nsource_filter: " + source_filter.trim() + "\nmatches: 0\ncontent: none"
+        return "Simple context SQL query\nstatus: unavailable\nbackend: sqlite\nquery: " + trimmed_query + "\nmatches: 0\ncontent: none"
+
+    sqlite_execute(db, _context_sql_schema())
+    if paths.len() > 0:
+        sqlite_execute(db, "DELETE FROM context_packs")
+        for path in paths:
+            val normalized_target = _context_normalize_target(path, target)
+            if _context_file_exists_impl(path):
+                val content = _context_file_read_impl(path)
+                sqlite_insert(
+                    db,
+                    "context_packs",
+                    ["source", "target", "status", "lines", "token_estimate", "content"],
+                    [path, normalized_target, "ready", str(_context_line_count(content)), str(_context_token_estimate(content)), content],
+                )
+
+    val pattern = _context_sql_like_literal(trimmed_query)
+    val sql = "SELECT source, target, status, lines, token_estimate, content FROM context_packs WHERE source LIKE " + pattern + " OR target LIKE " + pattern + " OR content LIKE " + pattern + " ORDER BY id"
+    val rows = sqlite_query_all(db, sql)
+    val rendered = _context_sql_render_rows_filtered(rows, trimmed_query, source_filter, format)
+    sqlite_close(db)
+    rendered
+
+fn context_sql_query_packs(paths: [text], target: text, query: text, db_path: text, format: text) -> text:
+    context_sql_query_packs_by_source(paths, target, query, "", db_path, format)

@@ -1,0 +1,208 @@
+# Sprite Animation — frame-based sprite sheet animation
+#
+# Manages sprite sheet frame sequences with per-frame timing,
+# horizontal-strip construction, looping, and playback speed control.
+#
+# Usage:
+#   val walk = SpriteAnimation.from_strip("walk", 32, 32, 8, 12.0, true)
+#   var player = AnimationPlayer.new()
+#   player.add_animation(walk)
+#   player.play("walk")
+#   player.update(0.016)
+#   val frame = player.current_frame()
+
+# ============================================================================
+# AnimationFrame — single frame within a sprite sheet
+# ============================================================================
+
+struct AnimationFrame:
+    src_x: i32
+    src_y: i32
+    src_width: i32
+    src_height: i32
+    duration_ms: f64
+
+# ============================================================================
+# SpriteAnimation — named sequence of frames
+# ============================================================================
+
+struct SpriteAnimation:
+    name: text
+    frames: [AnimationFrame]
+    is_looping: bool
+
+impl SpriteAnimation:
+    static fn from_strip(name: text, frame_width: i32, frame_height: i32, frame_count: i32, fps: f64, is_looping: bool) -> SpriteAnimation:
+        """Generate frames left-to-right from a horizontal strip.
+        Each frame at (i * frame_width, 0, frame_width, frame_height)."""
+        val duration = 1000.0 / fps
+        var frames: [AnimationFrame] = []
+        var i = 0
+        while i < frame_count:
+            val frame = AnimationFrame(
+                src_x: i * frame_width,
+                src_y: 0,
+                src_width: frame_width,
+                src_height: frame_height,
+                duration_ms: duration
+            )
+            frames = frames.push(frame)
+            i = i + 1
+        SpriteAnimation(name: name, frames: frames, is_looping: is_looping)
+
+    static fn single_frame(name: text, x: i32, y: i32, w: i32, h: i32) -> SpriteAnimation:
+        """Create a one-frame animation (static sprite)."""
+        val frame = AnimationFrame(
+            src_x: x,
+            src_y: y,
+            src_width: w,
+            src_height: h,
+            duration_ms: 1000.0
+        )
+        SpriteAnimation(name: name, frames: [frame], is_looping: false)
+
+    fn total_duration_ms(self) -> f64:
+        """Sum of all frame durations in milliseconds."""
+        var total = 0.0
+        var i = 0
+        while i < self.frames.len():
+            total = total + self.frames[i].duration_ms
+            i = i + 1
+        total
+
+    fn frame_count(self) -> i32:
+        """Number of frames in this animation."""
+        self.frames.len()
+
+# ============================================================================
+# AnimationPlayer — manages multiple animations and playback state
+# ============================================================================
+
+class AnimationPlayer:
+    animation_names: [text]
+    animation_list: [SpriteAnimation]
+    current_animation: text
+    current_frame_index: i32
+    elapsed_ms: f64
+    playing: bool
+    speed: f64
+
+impl AnimationPlayer:
+    static fn new() -> AnimationPlayer:
+        """Create a new animation player with no animations loaded."""
+        AnimationPlayer(
+            animation_names: [],
+            animation_list: [],
+            current_animation: "",
+            current_frame_index: 0,
+            elapsed_ms: 0.0,
+            playing: false,
+            speed: 1.0
+        )
+
+    me add_animation(anim: SpriteAnimation):
+        """Register an animation by name. Overwrites if name already exists."""
+        # Check for existing animation with same name
+        var found = false
+        var i = 0
+        while i < self.animation_names.len():
+            if self.animation_names[i] == anim.name:
+                self.animation_list[i] = anim
+                found = true
+                i = self.animation_names.len()  # break
+            else:
+                i = i + 1
+        if not found:
+            self.animation_names = self.animation_names.push(anim.name)
+            self.animation_list = self.animation_list.push(anim)
+
+    me play(name: text):
+        """Start playing the named animation from the beginning."""
+        self.current_animation = name
+        self.current_frame_index = 0
+        self.elapsed_ms = 0.0
+        self.playing = true
+
+    me stop():
+        """Stop playback and reset to frame 0."""
+        self.playing = false
+        self.current_frame_index = 0
+        self.elapsed_ms = 0.0
+
+    me pause():
+        """Pause playback at the current frame."""
+        self.playing = false
+
+    me resume():
+        """Resume playback from where it was paused."""
+        self.playing = true
+
+    me set_speed(speed: f64):
+        """Set playback speed multiplier (1.0 = normal, 2.0 = double)."""
+        self.speed = speed
+
+    me update(dt_seconds: f64):
+        """Advance playback by dt_seconds. Handles frame transitions and looping."""
+        if not self.playing:
+            return
+
+        # Find the current animation
+        var anim_index = -1
+        var i = 0
+        while i < self.animation_names.len():
+            if self.animation_names[i] == self.current_animation:
+                anim_index = i
+                i = self.animation_names.len()  # break
+            else:
+                i = i + 1
+
+        if anim_index < 0:
+            return
+
+        val anim = self.animation_list[anim_index]
+        if anim.frames.len() == 0:
+            return
+
+        self.elapsed_ms = self.elapsed_ms + dt_seconds * 1000.0 * self.speed
+
+        # Advance frames while elapsed exceeds current frame duration
+        var advancing = true
+        while advancing:
+            if self.current_frame_index >= anim.frames.len():
+                self.current_frame_index = anim.frames.len() - 1
+                advancing = false
+            else:
+                val frame_dur = anim.frames[self.current_frame_index].duration_ms
+                if self.elapsed_ms >= frame_dur:
+                    self.elapsed_ms = self.elapsed_ms - frame_dur
+                    self.current_frame_index = self.current_frame_index + 1
+                    if self.current_frame_index >= anim.frames.len():
+                        if anim.is_looping:
+                            self.current_frame_index = 0
+                        else:
+                            self.current_frame_index = anim.frames.len() - 1
+                            self.playing = false
+                            self.elapsed_ms = 0.0
+                        advancing = false
+                else:
+                    advancing = false
+
+    fn current_frame(self) -> AnimationFrame?:
+        """Return the current animation frame, or nil if no animation is active."""
+        var i = 0
+        while i < self.animation_names.len():
+            if self.animation_names[i] == self.current_animation:
+                val anim = self.animation_list[i]
+                if self.current_frame_index < anim.frames.len():
+                    return anim.frames[self.current_frame_index]
+                return nil
+            i = i + 1
+        nil
+
+    fn is_playing(self) -> bool:
+        """Check whether the player is currently playing."""
+        self.playing
+
+    fn current_animation_name(self) -> text:
+        """Return the name of the current animation."""
+        self.current_animation

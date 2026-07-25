@@ -1,0 +1,57 @@
+use std.spec.*
+use std.js.engine.runtime.{JsRuntime}
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.types.js_types.{JsValue}
+
+fn _runtime_eval_text(source: text) -> text:
+    val runtime = JsRuntime.new(Logger.new("fast-path", LogLevel.Error))
+    val result = runtime.eval(source)
+    match result:
+        Ok(value):
+            match value:
+                JsValue.String(v): v
+                JsValue.Number(v):
+                    var s = "{v}"
+                    if s.ends_with(".0"):
+                        return s.substring(0, s.len() - 2)
+                    s
+                JsValue.Boolean(v): if v: "true" else: "false"
+                JsValue.Undefined: "undefined"
+                _: "object"
+        Err(err): "error"
+
+describe "JsRuntime Node host fast paths":
+    it "fast paths process cwd probes":
+        expect(_runtime_eval_text("process.cwd()")).to_equal("/")
+        expect(_runtime_eval_text("require('process').cwd()")).to_equal("/")
+        expect(_runtime_eval_text("require(\"process\").cwd()")).to_equal("/")
+
+    it "fast paths process argv probes":
+        expect(_runtime_eval_text("process.argv.length")).to_equal("2")
+        expect(_runtime_eval_text("process.argv[0]")).to_equal("simple")
+        expect(_runtime_eval_text("require('process').argv.length")).to_equal("2")
+
+    it "fast paths Buffer byteLength probes":
+        expect(_runtime_eval_text("require('buffer').Buffer.byteLength('hello', 'utf8')")).to_equal("5")
+        expect(_runtime_eval_text("require(\"buffer\").Buffer.byteLength(\"hello\", \"utf8\")")).to_equal("5")
+
+    it "fast paths Buffer.from toString probes":
+        expect(_runtime_eval_text("require('buffer').Buffer.from('68656c6c6f', 'hex').toString('utf8')")).to_equal("hello")
+        expect(_runtime_eval_text("require(\"buffer\").Buffer.from(\"68656c6c6f\", \"hex\").toString(\"utf8\")")).to_equal("hello")
+
+    it "fast paths deterministic os tmpdir probes":
+        expect(_runtime_eval_text("require('os').tmpdir()")).to_equal("/tmp")
+        expect(_runtime_eval_text("require('node:os').tmpdir()")).to_equal("/tmp")
+
+    it "fast paths deterministic os endianness probes":
+        expect(_runtime_eval_text("require('os').endianness()")).to_equal("LE")
+        expect(_runtime_eval_text("require('node:os').endianness()")).to_equal("LE")
+
+    it "fast paths deterministic os EOL probes":
+        expect(_runtime_eval_text("require('os').EOL")).to_equal("\n")
+        expect(_runtime_eval_text("require('node:os').EOL")).to_equal("\n")
+
+    it "fast paths os and node:os aliases consistently":
+        expect(_runtime_eval_text("require('os').type()")).to_equal("Linux")
+        expect(_runtime_eval_text("require('node:os').release()")).to_equal("0.0.0-simple")
+        expect(_runtime_eval_text("require('node:os').homedir()")).to_equal("/")

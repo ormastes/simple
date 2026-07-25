@@ -1,0 +1,138 @@
+# Simple Web GPU paint offload matrix.
+#
+# This is a deterministic communication/CPU-work gate, not a hardware benchmark:
+# hardware-specific device readback proof stays in the Engine2D backend gates.
+
+use std.spec.{describe, context, it, slow_it, expect}
+use common.render_scene.scene.{scene_fill_rect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_gpu_frame, WebGpuPaintFrame}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{web_gpu_paint_economics, web_gpu_paint_backend_verdict, simple_web_layout_render_html_should_gpu_paint, simple_web_layout_render_html_gpu_paint_route_verdict}
+
+fn solid_full_frame_html() -> text:
+    "<html><body><div style='background-color:#1d4ed8;width:64px;height:64px'></div></body></html>"
+
+fn text_and_solid_html() -> text:
+    "<html><body><div style='background-color:#1d4ed8;width:64px;height:32px'></div><p>text residual</p></body></html>"
+
+fn many_tiny_solid_html() -> text:
+    var html = "<html><body>"
+    var i = 0
+    while i < 100:
+        html = html + "<div style='background-color:#1d4ed8;width:1px;height:1px'></div>"
+        i = i + 1
+    html + "</body></html>"
+
+fn direct_frame(width: i32, height: i32, cpu_paint_pixels: i32, fill_x: i32, fill_y: i32, fill_w: i32, fill_h: i32) -> WebGpuPaintFrame:
+    val base = 0xFFFFFFFFu32
+    val op = scene_fill_rect(fill_x, fill_y, fill_w, fill_h, 0xFF1D4ED8u32 as i32)
+    WebGpuPaintFrame(fb: [base; width * height], fill_ops: [op], width: width, height: height, cpu_paint_pixels: cpu_paint_pixels)
+
+describe "Simple Web GPU paint offload matrix":
+
+    context "backend combinations":
+        slow_it "only treats GPU backends as paint offload candidates":
+            expect(web_gpu_paint_backend_verdict("software")).to_equal("cpu-backend-not-gpu-offload")
+            expect(web_gpu_paint_backend_verdict("cpu")).to_equal("cpu-backend-not-gpu-offload")
+            expect(web_gpu_paint_backend_verdict("cpu_simd")).to_equal("cpu-backend-not-gpu-offload")
+            expect(web_gpu_paint_backend_verdict("cuda")).to_equal("gpu-paint-candidate")
+            expect(web_gpu_paint_backend_verdict("vulkan")).to_equal("gpu-paint-candidate")
+            expect(web_gpu_paint_backend_verdict("metal")).to_equal("gpu-paint-candidate")
+            expect(web_gpu_paint_backend_verdict("unknown")).to_equal("unknown-backend-not-gpu-offload")
+
+        slow_it "routes only measured winning frames into the GPU paint path":
+            expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 64, 64, "cuda", true)).to_be(true)
+            expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 64, 64, "vulkan", true)).to_be(true)
+            expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 64, 64, "metal", true)).to_be(true)
+            expect(simple_web_layout_render_html_should_gpu_paint(many_tiny_solid_html(), 16, 16, "vulkan", true)).to_be(false)
+            expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 64, 64, "cpu_simd", true)).to_be(false)
+            expect(simple_web_layout_render_html_should_gpu_paint(solid_full_frame_html(), 64, 64, "vulkan", false)).to_be(false)
+
+        slow_it "reports why each backend and flag combination does or does not offload":
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "cuda", true)).to_equal("gpu-paint:gpu-paint-transfer-win:cpu-paint-offloaded:measured-gpu-faster")
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "vulkan", true)).to_equal("gpu-paint:gpu-paint-transfer-win:cpu-paint-offloaded:measured-gpu-faster")
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "metal", true)).to_equal("gpu-paint:gpu-paint-transfer-win:cpu-paint-offloaded:measured-gpu-faster")
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(many_tiny_solid_html(), 16, 16, "cuda", true)).to_equal("gpu-upload:communication-overhead:cpu-paint-offloaded:measured-gpu-slower-overhead")
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(many_tiny_solid_html(), 16, 16, "vulkan", true)).to_equal("gpu-upload:communication-overhead:cpu-paint-offloaded:measured-gpu-slower-overhead")
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(many_tiny_solid_html(), 16, 16, "metal", true)).to_equal("gpu-upload:communication-overhead:cpu-paint-offloaded:measured-gpu-slower-overhead")
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "cpu_simd", true)).to_equal("cpu-backend-not-gpu-offload")
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "unknown", true)).to_equal("unknown-backend-not-gpu-offload")
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(solid_full_frame_html(), 64, 64, "vulkan", false)).to_equal("gpu-paint-disabled")
+
+    context "CPU paint and communication economics":
+        slow_it "offloads when solid fill paint avoids CPU paint and transfer wins":
+            val frame = simple_web_layout_render_html_gpu_frame(solid_full_frame_html(), 64, 64)
+            val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
+            expect(economics.cpu_paint_pixels).to_equal(0)
+            expect(economics.fill_pixels).to_be_greater_than(0)
+            expect(economics.gpu_paint_transfer_pixels).to_be_less_than(economics.upload_bound_transfer_pixels)
+            expect(economics.gpu_paint_total_pixels).to_be_less_than(economics.upload_bound_total_pixels)
+            expect(economics.should_offload).to_equal(true)
+            expect(economics.cpu_job_verdict).to_equal("cpu-paint-offloaded")
+            expect(economics.speed_verdict).to_equal("measured-gpu-faster")
+
+        slow_it "offloads when transfer loses but saved CPU paint makes total work win":
+            val frame = direct_frame(16, 16, 0, 0, 0, 16, 16)
+            val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
+            expect(economics.cpu_paint_pixels).to_equal(0)
+            expect(economics.gpu_paint_transfer_pixels).to_be_greater_than(economics.upload_bound_transfer_pixels)
+            expect(economics.gpu_paint_total_pixels).to_be_less_than(economics.upload_bound_total_pixels)
+            expect(economics.should_offload).to_equal(true)
+            expect(economics.reason).to_equal("gpu-paint-total-win")
+            expect(economics.cpu_job_verdict).to_equal("cpu-paint-offloaded")
+            expect(economics.speed_verdict).to_equal("measured-gpu-faster")
+
+        slow_it "does not claim offload when CPU ground truth is still required":
+            val frame = simple_web_layout_render_html_gpu_frame(text_and_solid_html(), 64, 64)
+            val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
+            expect(economics.cpu_paint_pixels).to_equal(64 * 64)
+            expect(economics.should_offload).to_equal(false)
+            expect(economics.reason).to_equal("cpu-ground-truth-required")
+            expect(economics.cpu_job_verdict).to_equal("cpu-paint-required")
+            expect(economics.speed_verdict).to_equal("not-offloaded")
+
+        slow_it "rejects command-heavy tiny fills when communication overhead loses":
+            val frame = simple_web_layout_render_html_gpu_frame(many_tiny_solid_html(), 16, 16)
+            val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
+            expect(economics.cpu_paint_pixels).to_equal(0)
+            expect(economics.fill_op_count).to_be_greater_than(7)
+            expect(economics.gpu_paint_transfer_pixels).to_be_greater_than(economics.upload_bound_transfer_pixels)
+            expect(economics.gpu_paint_total_pixels).to_equal(economics.upload_bound_total_pixels)
+            expect(economics.should_offload).to_equal(false)
+            expect(economics.reason).to_equal("communication-overhead")
+            expect(economics.speed_verdict).to_equal("measured-gpu-slower-overhead")
+
+        slow_it "keeps exact break-even work on CPU instead of claiming offload":
+            val frame = direct_frame(16, 16, 192, 0, 0, 16, 16)
+            val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
+            expect(economics.cpu_paint_pixels).to_equal(192)
+            expect(economics.gpu_paint_total_pixels).to_equal(economics.upload_bound_total_pixels)
+            expect(economics.should_offload).to_equal(false)
+            expect(economics.reason).to_equal("communication-overhead")
+            expect(economics.speed_verdict).to_equal("measured-gpu-slower-overhead")
+
+        slow_it "rejects offload when saved CPU paint is not enough to beat total work":
+            val frame = direct_frame(16, 16, 193, 0, 0, 16, 16)
+            val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
+            expect(economics.cpu_paint_pixels).to_equal(193)
+            expect(economics.gpu_paint_total_pixels).to_be_greater_than(economics.upload_bound_total_pixels)
+            expect(economics.should_offload).to_equal(false)
+            expect(economics.reason).to_equal("communication-overhead")
+            expect(economics.cpu_job_verdict).to_equal("cpu-paint-offloaded")
+            expect(economics.speed_verdict).to_equal("measured-gpu-slower-overhead")
+
+        slow_it "does not treat skipped CPU work as offload when there are no fill commands":
+            val frame = WebGpuPaintFrame(fb: [0xFFFFFFFFu32; 16 * 16], fill_ops: [], width: 16, height: 16, cpu_paint_pixels: 0)
+            val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
+            expect(economics.cpu_paint_pixels).to_equal(0)
+            expect(economics.fill_op_count).to_equal(0)
+            expect(economics.should_offload).to_equal(false)
+            expect(economics.reason).to_equal("no-gpu-fill-ops")
+
+        slow_it "rejects offscreen fill commands that do no clipped GPU work":
+            val frame = direct_frame(16, 16, 0, 32, 32, 8, 8)
+            val economics = web_gpu_paint_economics(frame, 0xFFFFFFFFu32)
+            expect(economics.cpu_paint_pixels).to_equal(0)
+            expect(economics.fill_op_count).to_equal(1)
+            expect(economics.fill_pixels).to_equal(0)
+            expect(economics.should_offload).to_equal(false)
+            expect(economics.reason).to_equal("no-clipped-fill-pixels")

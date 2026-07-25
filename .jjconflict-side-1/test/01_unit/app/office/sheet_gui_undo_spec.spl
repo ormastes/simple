@@ -1,0 +1,225 @@
+# Sheet GUI undo/redo — SheetGuiHistory + session_edit_undoable/session_undo/
+# session_redo/session_key_undoable (gui.spl).
+#
+# History design under test: parallel text arrays (refs/old_texts/new_texts)
+# with a cursor pointing PAST the last applied entry; recording truncates the
+# redo tail; undo/redo re-apply RAW cell text through session_edit's
+# set+recalculate path (formula cells restore as live formula TEXT, never the
+# cached display value). Only validly COMMITTED edits record history.
+#
+# Demo sheet: B2=10, C2=2, D2==B2*C2 (recalculated to 20) — every undo/redo
+# assertion checks BOTH B2 and D2 so the recalculate path is proven, not
+# assumed.
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text}
+use app.office.sheets.validation.{empty_validation_rules, validation_add}
+use app.office.file_formats.{recalculate_formula_cells}
+use app.office.gui.{SheetGuiSession, session_new, session_edit, history_new, history_record, history_can_undo, history_can_redo, session_edit_undoable, session_undo, session_redo, session_key_undoable}
+
+fn _undo_demo_sheet() -> Sheet:
+    var sheet = Sheet.new("Undo")
+    sheet.set_value("A2", "Widget")
+    sheet.set_value("B2", "10")
+    sheet.set_value("C2", "2")
+    sheet.set_value("D2", "=B2*C2")
+    sheet = recalculate_formula_cells(sheet)
+    sheet
+
+fn _cell(session: SheetGuiSession, ref_str: text) -> text:
+    val sheet = session.sheet
+    val cell = sheet.get_cell(ref_str)
+    cell_display_text(cell)
+
+describe "sheet GUI undo/redo (SheetGuiHistory + undoable session entry points)":
+
+    it "starts with an empty history: no undo, no redo":
+        val h = history_new()
+        expect(history_can_undo(h)).to_equal(false)
+        expect(history_can_redo(h)).to_equal(false)
+
+    it "history_record enables undo and leaves the cursor at the end (no redo)":
+        var h = history_new()
+        h = history_record(h, "B2", "10", "40")
+        expect(history_can_undo(h)).to_equal(true)
+        expect(history_can_redo(h)).to_equal(false)
+
+    it "commits a valid edit, recalculates dependents, and records history":
+        val sheet = _undo_demo_sheet()
+        val session = session_new(sheet, "B2")
+        val vrules = empty_validation_rules()
+        val out = session_edit_undoable(session, history_new(), "B2", "40", vrules)
+        expect(out.last_error).to_equal("")
+        expect(_cell(out.session, "B2")).to_equal("40")
+        expect(_cell(out.session, "D2")).to_equal("80")
+        expect(history_can_undo(out.history)).to_equal(true)
+
+    it "undo restores the previous value AND recalculates dependents":
+        val sheet = _undo_demo_sheet()
+        val session = session_new(sheet, "B2")
+        val vrules = empty_validation_rules()
+        val edited = session_edit_undoable(session, history_new(), "B2", "40", vrules)
+        val out = session_undo(edited.session, edited.history)
+        expect(out.last_error).to_equal("")
+        expect(_cell(out.session, "B2")).to_equal("10")
+        expect(_cell(out.session, "D2")).to_equal("20")
+        expect(history_can_redo(out.history)).to_equal(true)
+
+    it "redo re-applies the undone edit with recalculation":
+        val sheet = _undo_demo_sheet()
+        val session = session_new(sheet, "B2")
+        val vrules = empty_validation_rules()
+        val edited = session_edit_undoable(session, history_new(), "B2", "40", vrules)
+        val undone = session_undo(edited.session, edited.history)
+        val out = session_redo(undone.session, undone.history)
+        expect(out.last_error).to_equal("")
+        expect(_cell(out.session, "B2")).to_equal("40")
+        expect(_cell(out.session, "D2")).to_equal("80")
+        expect(history_can_redo(out.history)).to_equal(false)
+
+    it "undoing a formula-cell overwrite restores the formula TEXT, not the cached value":
+        val sheet = _undo_demo_sheet()
+        val session = session_new(sheet, "D2")
+        val vrules = empty_validation_rules()
+        # overwrite the =B2*C2 formula (displaying 20) with a literal 99
+        val edited = session_edit_undoable(session, history_new(), "D2", "99", vrules)
+        expect(_cell(edited.session, "D2")).to_equal("99")
+        val out = session_undo(edited.session, edited.history)
+        expect(out.last_error).to_equal("")
+        expect(_cell(out.session, "D2")).to_equal("20")
+        # PROOF it came back as a LIVE formula: a later B2 edit re-recalcs D2.
+        # A cached-value restore ("20" literal) would leave D2 stuck at 20.
+        val after_b2 = session_edit(out.session, "B2", "40")
+        expect(_cell(after_b2, "D2")).to_equal("80")
+
+    it "undo at the beginning of history fails closed with nothing-to-undo":
+        val sheet = _undo_demo_sheet()
+        val session = session_new(sheet, "B2")
+        val out = session_undo(session, history_new())
+        expect(out.last_error).to_equal("nothing-to-undo")
+        expect(_cell(out.session, "B2")).to_equal("10")
+        expect(_cell(out.session, "D2")).to_equal("20")
+        expect(history_can_undo(out.history)).to_equal(false)
+
+    it "redo at the end of history fails closed with nothing-to-redo":
+        val sheet = _undo_demo_sheet()
+        val session = session_new(sheet, "B2")
+        val vrules = empty_validation_rules()
+        val edited = session_edit_undoable(session, history_new(), "B2", "40", vrules)
+        val out = session_redo(edited.session, edited.history)
+        expect(out.last_error).to_equal("nothing-to-redo")
+        expect(_cell(out.session, "B2")).to_equal("40")
+        expect(_cell(out.session, "D2")).to_equal("80")
+
+    it "a new edit after undo truncates the redo tail":
+        val sheet = _undo_demo_sheet()
+        val session = session_new(sheet, "B2")
+        val vrules = empty_validation_rules()
+        val edited = session_edit_undoable(session, history_new(), "B2", "40", vrules)
+        val undone = session_undo(edited.session, edited.history)
+        expect(history_can_redo(undone.history)).to_equal(true)
+        val fresh = session_edit_undoable(undone.session, undone.history, "B2", "60", vrules)
+        expect(fresh.last_error).to_equal("")
+        expect(history_can_redo(fresh.history)).to_equal(false)
+        val out = session_redo(fresh.session, fresh.history)
+        expect(out.last_error).to_equal("nothing-to-redo")
+        expect(_cell(out.session, "B2")).to_equal("60")
+        expect(_cell(out.session, "D2")).to_equal("120")
+
+    it "a validation-rejected edit records NOTHING and leaves the session unchanged":
+        val sheet = _undo_demo_sheet()
+        val session = session_new(sheet, "B2")
+        var vrules = empty_validation_rules()
+        vrules = validation_add(vrules, "B", "whole_number", "", 1.0, 100.0, "", "Price must be a whole number between 1 and 100")
+        val out = session_edit_undoable(session, history_new(), "B2", "999", vrules)
+        expect(out.last_error).to_equal("Price must be a whole number between 1 and 100")
+        expect(_cell(out.session, "B2")).to_equal("10")
+        expect(_cell(out.session, "D2")).to_equal("20")
+        expect(history_can_undo(out.history)).to_equal(false)
+
+    it "walks a multi-edit sequence back and forward: undo x2 then redo x1":
+        val sheet = _undo_demo_sheet()
+        val session = session_new(sheet, "B2")
+        val vrules = empty_validation_rules()
+        val e1 = session_edit_undoable(session, history_new(), "B2", "40", vrules)
+        val e2 = session_edit_undoable(e1.session, e1.history, "B2", "50", vrules)
+        expect(_cell(e2.session, "D2")).to_equal("100")
+        val u1 = session_undo(e2.session, e2.history)
+        expect(_cell(u1.session, "B2")).to_equal("40")
+        expect(_cell(u1.session, "D2")).to_equal("80")
+        val u2 = session_undo(u1.session, u1.history)
+        expect(_cell(u2.session, "B2")).to_equal("10")
+        expect(_cell(u2.session, "D2")).to_equal("20")
+        val r1 = session_redo(u2.session, u2.history)
+        expect(r1.last_error).to_equal("")
+        expect(_cell(r1.session, "B2")).to_equal("40")
+        expect(_cell(r1.session, "D2")).to_equal("80")
+        expect(history_can_redo(r1.history)).to_equal(true)
+
+    it "commit-on-enter through session_key_undoable records history and ctrl_z undoes it":
+        val sheet = _undo_demo_sheet()
+        val session = session_new(sheet, "B2")
+        val vrules = empty_validation_rules()
+        var out = session_key_undoable(session, history_new(), "4", 5, 4, 5, 4, vrules)
+        out = session_key_undoable(out.session, out.history, "0", 5, 4, 5, 4, vrules)
+        expect(history_can_undo(out.history)).to_equal(false)
+        out = session_key_undoable(out.session, out.history, "enter", 5, 4, 5, 4, vrules)
+        expect(out.last_error).to_equal("")
+        expect(_cell(out.session, "B2")).to_equal("40")
+        expect(_cell(out.session, "D2")).to_equal("80")
+        expect(history_can_undo(out.history)).to_equal(true)
+        out = session_key_undoable(out.session, out.history, "ctrl_z", 5, 4, 5, 4, vrules)
+        expect(out.last_error).to_equal("")
+        expect(_cell(out.session, "B2")).to_equal("10")
+        expect(_cell(out.session, "D2")).to_equal("20")
+
+    it "ctrl_y through session_key_undoable re-applies an undone commit":
+        val sheet = _undo_demo_sheet()
+        val session = session_new(sheet, "B2")
+        val vrules = empty_validation_rules()
+        var out = session_key_undoable(session, history_new(), "4", 5, 4, 5, 4, vrules)
+        out = session_key_undoable(out.session, out.history, "0", 5, 4, 5, 4, vrules)
+        out = session_key_undoable(out.session, out.history, "enter", 5, 4, 5, 4, vrules)
+        out = session_key_undoable(out.session, out.history, "ctrl_z", 5, 4, 5, 4, vrules)
+        out = session_key_undoable(out.session, out.history, "ctrl_y", 5, 4, 5, 4, vrules)
+        expect(out.last_error).to_equal("")
+        expect(_cell(out.session, "B2")).to_equal("40")
+        expect(_cell(out.session, "D2")).to_equal("80")
+        out = session_key_undoable(out.session, out.history, "ctrl_y", 5, 4, 5, 4, vrules)
+        expect(out.last_error).to_equal("nothing-to-redo")
+
+    it "ctrl_z with empty history fails closed through the key path":
+        val sheet = _undo_demo_sheet()
+        val session = session_new(sheet, "B2")
+        val vrules = empty_validation_rules()
+        val out = session_key_undoable(session, history_new(), "ctrl_z", 5, 4, 5, 4, vrules)
+        expect(out.last_error).to_equal("nothing-to-undo")
+        expect(_cell(out.session, "B2")).to_equal("10")
+
+    it "a validation-rejected enter keeps the buffer and records NOTHING":
+        val sheet = _undo_demo_sheet()
+        val session = session_new(sheet, "B2")
+        var vrules = empty_validation_rules()
+        vrules = validation_add(vrules, "B", "whole_number", "", 1.0, 100.0, "", "Price must be a whole number between 1 and 100")
+        var out = session_key_undoable(session, history_new(), "9", 5, 4, 5, 4, vrules)
+        out = session_key_undoable(out.session, out.history, "9", 5, 4, 5, 4, vrules)
+        out = session_key_undoable(out.session, out.history, "9", 5, 4, 5, 4, vrules)
+        out = session_key_undoable(out.session, out.history, "enter", 5, 4, 5, 4, vrules)
+        expect(out.last_error).to_equal("Price must be a whole number between 1 and 100")
+        val kept = out.session
+        expect(kept.pending_input).to_equal("999")
+        expect(_cell(out.session, "B2")).to_equal("10")
+        expect(history_can_undo(out.history)).to_equal(false)
+
+    it "non-committing keys pass through with the history untouched":
+        val sheet = _undo_demo_sheet()
+        val session = session_new(sheet, "B2")
+        val vrules = empty_validation_rules()
+        val edited = session_edit_undoable(session, history_new(), "B2", "40", vrules)
+        val out = session_key_undoable(edited.session, edited.history, "down", 5, 4, 5, 4, vrules)
+        expect(out.last_error).to_equal("")
+        val moved = out.session
+        expect(moved.selected_ref).to_equal("B3")
+        expect(history_can_undo(out.history)).to_equal(true)
+        expect(history_can_redo(out.history)).to_equal(false)

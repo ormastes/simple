@@ -1,0 +1,64 @@
+# FTS Search Engine — unified full-text search API.
+#
+# Combines inverted index (BM25), trigram substring search, and fuzzy matching.
+# Exports: FtsEngine
+
+use std.io_runtime
+use std.db.dbfs_engine.fts.tokenizer.{fts_tokenize, fts_tokenize_raw}
+use std.db.dbfs_engine.fts.inverted_index.{FtsInvertedIndex, FtsPosting}
+use std.db.dbfs_engine.fts.bm25.{fts_bm25_search, FtsSearchResult}
+use std.db.dbfs_engine.fts.trigram.{FtsTrigramIndex, fts_generate_trigrams}
+use std.db.dbfs_engine.fts.fuzzy.{fts_levenshtein, fts_fuzzy_match}
+
+# ── FtsEngine ──────────────────────────────────────────────────────────────────
+
+struct FtsEngine:
+    _inv_index: FtsInvertedIndex
+    _tri_index: FtsTrigramIndex
+    _doc_contents: Dict<text, text>
+
+impl FtsEngine:
+    static fn new() -> FtsEngine:
+        FtsEngine(
+            _inv_index: FtsInvertedIndex.new(),
+            _tri_index: FtsTrigramIndex.new(),
+            _doc_contents: {}
+        )
+
+    me fn add_document(doc_id: i64, content: text):
+        val doc_key = "{doc_id}"
+        self._doc_contents[doc_key] = content
+        self._inv_index.index_document(doc_id, content)
+        self._tri_index.index_document(doc_id, content)
+
+    me fn remove_document(doc_id: i64):
+        val doc_key = "{doc_id}"
+        self._inv_index.remove_document(doc_id)
+        self._tri_index.remove_document(doc_id)
+        # Mark as removed in contents
+        self._doc_contents[doc_key] = ""
+
+    me fn search_keyword(query: text) -> [FtsSearchResult]:
+        fts_bm25_search(self._inv_index, query)
+
+    me fn search_substring(query: text) -> [i64]:
+        self._tri_index.search(query)
+
+    me fn search_fuzzy(query: text, max_dist: i64) -> [text]:
+        val terms = self._inv_index.get_all_terms()
+        fts_fuzzy_match(query, terms, max_dist)
+
+    me fn search(query: text) -> [FtsSearchResult]:
+        # Primary: BM25 keyword search
+        val keyword_results = fts_bm25_search(self._inv_index, query)
+        if keyword_results.len() > 0:
+            return keyword_results
+
+        # Fallback: trigram substring search -> convert to FtsSearchResult
+        val trigram_ids = self._tri_index.search(query)
+        var results: [FtsSearchResult] = []
+        var ti: i32 = 0
+        while ti < trigram_ids.len() as i32:
+            results.push(FtsSearchResult(doc_id: trigram_ids[ti], score: 1000))
+            ti = ti + 1
+        results

@@ -1,0 +1,216 @@
+const SALT: text = "friend-2026-401"
+
+class CompanionStats:
+    helpfulness: i64
+    mischief: i64
+    focus: i64
+    luck: i64
+
+impl CompanionStats:
+    static fn new(helpfulness: i64, mischief: i64, focus: i64, luck: i64) -> CompanionStats:
+        CompanionStats(helpfulness: helpfulness, mischief: mischief, focus: focus, luck: luck)
+
+    me min() -> i64:
+        min4(me.helpfulness, me.mischief, me.focus, me.luck)
+
+    me max() -> i64:
+        max4(me.helpfulness, me.mischief, me.focus, me.luck)
+
+class CompanionBones:
+    rarity: text
+    species: text
+    eye: text
+    hat: text
+    shiny: bool
+    stats: CompanionStats
+
+impl CompanionBones:
+    static fn new(rarity: text, species: text, eye: text, hat: text, shiny: bool, stats: CompanionStats) -> CompanionBones:
+        CompanionBones(rarity: rarity, species: species, eye: eye, hat: hat, shiny: shiny, stats: stats)
+
+class Roll:
+    bones: CompanionBones
+    inspirationSeed: i64
+
+impl Roll:
+    static fn new(bones: CompanionBones, inspirationSeed: i64) -> Roll:
+        Roll(bones: bones, inspirationSeed: inspirationSeed)
+
+class CompanionSoul:
+    name: text
+    mood: text
+
+impl CompanionSoul:
+    static fn new(name: text, mood: text) -> CompanionSoul:
+        CompanionSoul(name: name, mood: mood)
+
+class Companion:
+    name: text
+    mood: text
+    bones: CompanionBones
+
+impl Companion:
+    static fn new(name: text, mood: text, bones: CompanionBones) -> Companion:
+        Companion(name: name, mood: mood, bones: bones)
+
+class CompanionConfig:
+    oauthAccountUuid: text
+    userID: text
+    hasStoredCompanion: bool
+    stored: CompanionSoul
+
+impl CompanionConfig:
+    static fn new(oauthAccountUuid: text, userID: text) -> CompanionConfig:
+        CompanionConfig(oauthAccountUuid: oauthAccountUuid, userID: userID, hasStoredCompanion: false, stored: CompanionSoul.new("", ""))
+
+    me withStored(name: text, mood: text) -> CompanionConfig:
+        CompanionConfig(oauthAccountUuid: me.oauthAccountUuid, userID: me.userID, hasStoredCompanion: true, stored: CompanionSoul.new(name, mood))
+
+class RollCache:
+    key: text
+    value: Roll
+
+impl RollCache:
+    static fn empty() -> RollCache:
+        RollCache(key: "", value: rollWithSeed("empty"))
+
+    me roll(userKey: text) -> Roll:
+        val key = userKey + SALT
+        if me.key == key:
+            return me.value
+        val value = rollWithSeed(key)
+        me.key = key
+        me.value = value
+        value
+
+fn roll(userKey: text) -> Roll:
+    rollWithSeed(userKey + SALT)
+
+fn rollWithSeed(seedText: text) -> Roll:
+    rollFrom(hashString(seedText))
+
+fn rollSignature(userKey: text) -> text:
+    val r = roll(userKey)
+    r.bones.rarity + "|" + r.bones.species + "|" + r.bones.eye + "|" + r.bones.hat + "|" + r.inspirationSeed.to_text()
+
+fn rollFrom(seed: i64) -> Roll:
+    val rarity = rollRarity(seed)
+    val species = pick(speciesList(), seed + 11)
+    val eye = pick(eyesList(), seed + 17)
+    val hat = if rarity == "common": "none" else: pick(hatsList(), seed + 23)
+    val shiny = positiveMod(seed, 100) == 0
+    val stats = rollStats(seed + 31, rarity)
+    Roll.new(CompanionBones.new(rarity, species, eye, hat, shiny, stats), seed)
+
+fn rollRarity(seed: i64) -> text:
+    val rollValue = positiveMod(seed, 1000)
+    if rollValue < 600:
+        return "common"
+    if rollValue < 850:
+        return "uncommon"
+    if rollValue < 960:
+        return "rare"
+    if rollValue < 995:
+        return "epic"
+    "legendary"
+
+fn rollStats(seed: i64, rarity: text) -> CompanionStats:
+    val floor = rarityFloor(rarity)
+    val peak = positiveMod(seed, 4)
+    val dump = (peak + 1 + positiveMod(seed / 7, 3)) % 4
+    CompanionStats.new(statValue(seed + 1, floor, 0, peak, dump), statValue(seed + 2, floor, 1, peak, dump), statValue(seed + 3, floor, 2, peak, dump), statValue(seed + 4, floor, 3, peak, dump))
+
+fn statValue(seed: i64, floor: i64, index: i64, peak: i64, dump: i64) -> i64:
+    if index == peak:
+        return min2(100, floor + 50 + positiveMod(seed, 30))
+    if index == dump:
+        return max2(1, floor - 10 + positiveMod(seed, 15))
+    floor + positiveMod(seed, 40)
+
+fn companionUserId(config: CompanionConfig) -> text:
+    if config.oauthAccountUuid != "":
+        return config.oauthAccountUuid
+    if config.userID != "":
+        return config.userID
+    "anon"
+
+fn getCompanion(config: CompanionConfig) -> Companion?:
+    if not config.hasStoredCompanion:
+        return nil
+    val bones = roll(companionUserId(config)).bones
+    Some(Companion.new(config.stored.name, config.stored.mood, bones))
+
+fn hashString(s: text) -> i64:
+    var h = 0
+    var i = 0
+    while i < s.len():
+        h = h + (charScore(s.substring(i, i + 1)) * (i + 1))
+        i = i + 1
+    h
+
+fn charScore(ch: text) -> i64:
+    if ch == "":
+        return 0
+    var i = 0
+    while i < alphabet().len():
+        if alphabet().substring(i, i + 1) == ch:
+            return i + 1
+        i = i + 1
+    37
+
+fn pick(values: [text], seed: i64) -> text:
+    values[positiveMod(seed, values.len())]
+
+fn rarityFloor(rarity: text) -> i64:
+    if rarity == "uncommon":
+        return 15
+    if rarity == "rare":
+        return 25
+    if rarity == "epic":
+        return 35
+    if rarity == "legendary":
+        return 50
+    5
+
+fn speciesList() -> [text]:
+    ["duck", "cat", "frog", "fox"]
+
+fn eyesList() -> [text]:
+    ["dot", "wide", "sleepy", "sparkle"]
+
+fn hatsList() -> [text]:
+    ["none", "cap", "crown", "wizard"]
+
+fn rarityList() -> [text]:
+    ["common", "uncommon", "rare", "epic", "legendary"]
+
+fn statNames() -> [text]:
+    ["helpfulness", "mischief", "focus", "luck"]
+
+fn salt() -> text:
+    SALT
+
+fn positiveMod(value: i64, modulo: i64) -> i64:
+    val raw = value % modulo
+    if raw < 0:
+        return raw + modulo
+    raw
+
+fn min2(a: i64, b: i64) -> i64:
+    if a < b:
+        return a
+    b
+
+fn max2(a: i64, b: i64) -> i64:
+    if a > b:
+        return a
+    b
+
+fn min4(a: i64, b: i64, c: i64, d: i64) -> i64:
+    min2(min2(a, b), min2(c, d))
+
+fn max4(a: i64, b: i64, c: i64, d: i64) -> i64:
+    max2(max2(a, b), max2(c, d))
+
+fn alphabet() -> text:
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"

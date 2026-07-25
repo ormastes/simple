@@ -1,0 +1,102 @@
+# Cursor shape/hotspot pipeline tests
+#
+# Covers the cursor model grown from the former CursorState stub: shape
+# transitions, per-shape hotspot offsets, Arrow/IBeam bitmaps, and the
+# cursor_rect damage math consumed by the WM damage path.
+
+use std.spec
+use os.compositor.cursor.{
+    CursorState, CursorShape, CursorHotspot, CursorRect,
+    default_cursor_state, cursor_shape, cursor_hotspot,
+    cursor_bitmap, cursor_rect, cursor_shape_code, cursor_shape_from_code,
+    get_cursor_bitmap, get_cursor_mask,
+    CURSOR_WIDTH, CURSOR_HEIGHT
+}
+
+fn count_nonzero(px: [u32]) -> i32:
+    var n: i32 = 0
+    for v in px:
+        if v != 0:
+            n = n + 1
+    n
+
+describe "cursor shape transitions":
+    it "defaults to Arrow with a tip hotspot":
+        val c = default_cursor_state()
+        expect(cursor_shape_code(c.shape_of())).to_equal(0)
+        expect(c.hotspot_x).to_equal(0)
+        expect(c.hotspot_y).to_equal(0)
+
+    it "set_shape updates the shape code and hotspot in place":
+        val c = default_cursor_state()
+        c.set_shape(CursorShape.IBeam)
+        expect(cursor_shape_code(c.shape_of())).to_equal(1)
+        expect(c.hotspot_x).to_equal(5)
+        expect(c.hotspot_y).to_equal(9)
+
+    it "with_shape returns a copy carrying the new shape, preserving position":
+        val base = CursorState(x: 40, y: 60, visible: true, hotspot_x: 0, hotspot_y: 0)
+        val hand = base.with_shape(CursorShape.Hand)
+        expect(hand.x).to_equal(40)
+        expect(hand.y).to_equal(60)
+        expect(cursor_shape_code(hand.shape_of())).to_equal(2)
+        expect(hand.hotspot_x).to_equal(5)
+        expect(hand.hotspot_y).to_equal(0)
+
+    it "round-trips every shape code through the enum":
+        expect(cursor_shape_code(cursor_shape_from_code(3))).to_equal(3)
+        expect(cursor_shape_code(cursor_shape_from_code(7))).to_equal(7)
+
+describe "cursor hotspot table":
+    it "gives Arrow a top-left hotspot":
+        val hs = cursor_hotspot(CursorShape.Arrow)
+        expect(hs.x).to_equal(0)
+        expect(hs.y).to_equal(0)
+
+    it "gives IBeam a centered hotspot":
+        val hs = cursor_hotspot(CursorShape.IBeam)
+        expect(hs.x).to_equal(5)
+        expect(hs.y).to_equal(9)
+
+describe "per-pixel cursor bitmaps":
+    it "Arrow bitmap is correctly sized and non-empty":
+        val bmp = cursor_bitmap(CursorShape.Arrow)
+        expect(bmp.len()).to_equal(CURSOR_WIDTH * CURSOR_HEIGHT)
+        assert_true(count_nonzero(bmp) > 0)
+
+    it "IBeam bitmap is correctly sized and non-empty":
+        val bmp = cursor_bitmap(CursorShape.IBeam)
+        expect(bmp.len()).to_equal(228)
+        assert_true(count_nonzero(bmp) > 0)
+
+    it "top-left pixel of the Arrow bitmap is filled":
+        val bmp = cursor_bitmap(CursorShape.Arrow)
+        expect(bmp[0]).to_equal(0xFFFFFFFF)
+
+    it "fallback shapes reuse the Arrow bitmap":
+        val arrow = cursor_bitmap(CursorShape.Arrow)
+        val wait = cursor_bitmap(CursorShape.Wait)
+        expect(wait.len()).to_equal(arrow.len())
+        expect(count_nonzero(wait)).to_equal(count_nonzero(arrow))
+
+describe "legacy row-encoded arrow":
+    it "keeps the 12x19 arrow contract":
+        expect(CURSOR_WIDTH).to_equal(12)
+        expect(CURSOR_HEIGHT).to_equal(19)
+        expect(get_cursor_bitmap().len()).to_equal(19)
+        expect(get_cursor_mask().len()).to_equal(19)
+        expect(get_cursor_bitmap()[0]).to_equal(2048)
+        expect(get_cursor_mask()[0]).to_equal(3072)
+
+    it "mask is a superset wider than the bitmap on the first row":
+        val wider = get_cursor_mask()[0] > get_cursor_bitmap()[0]
+        expect(wider).to_equal(true)
+
+describe "cursor damage rect":
+    it "offsets the origin by the hotspot and uses the cursor extent":
+        val c = CursorState(x: 30, y: 50, visible: true, hotspot_x: 5, hotspot_y: 9)
+        val r = cursor_rect(c)
+        expect(r.x).to_equal(25)
+        expect(r.y).to_equal(41)
+        expect(r.w).to_equal(12)
+        expect(r.h).to_equal(19)

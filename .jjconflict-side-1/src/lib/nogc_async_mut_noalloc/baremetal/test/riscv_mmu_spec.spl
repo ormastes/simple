@@ -1,0 +1,182 @@
+# ============================================================================
+# Spec: RISC-V MMU Module — Privilege Levels, SATP, Page Table Entries
+# ============================================================================
+
+use std.nogc_async_mut_noalloc.baremetal.riscv.mmu.{
+    PRIV_U, PRIV_S, PRIV_M, privilege_name,
+    SATP_MODE_BARE, SATP_MODE_SV39, SATP_MODE_SV48, SATP_MODE_SV57,
+    SATP32_MODE_BARE, SATP32_MODE_SV32,
+    satp_encode, satp_mode, satp_asid, satp_ppn, satp_mode_name,
+    satp32_encode, satp32_mode, satp32_asid, satp32_ppn,
+    PTE_V, PTE_R, PTE_W, PTE_X, PTE_U, PTE_G, PTE_A, PTE_D,
+    PTE_RWXV, PTE_RV, PTE_RWV, PTE_RXV,
+    pte_is_valid, pte_is_leaf, pte_is_readable, pte_is_writable,
+    pte_is_executable, pte_is_user, pte_is_dirty, pte_is_accessed,
+    pte_flags,
+    sv39_pte_encode, sv39_pte_ppn, sv39_pte_ppn_to_phys,
+    sv48_pte_encode, sv48_pte_ppn,
+    sv32_pte_encode, sv32_pte_ppn,
+    PAGE_SIZE, MEGA_PAGE_SIZE, GIGA_PAGE_SIZE,
+    sv39_vpn, sv39_page_offset, sv48_vpn
+}
+
+describe "Privilege Levels":
+    it "has correct encodings":
+        expect PRIV_U == 0
+        expect PRIV_S == 1
+        expect PRIV_M == 3
+
+    it "returns correct names":
+        expect privilege_name(PRIV_U) == "User"
+        expect privilege_name(PRIV_S) == "Supervisor"
+        expect privilege_name(PRIV_M) == "Machine"
+        expect privilege_name(2) == "Unknown"
+
+describe "SATP Mode Constants":
+    it "has correct RV64 mode values":
+        expect SATP_MODE_BARE == 0
+        expect SATP_MODE_SV39 == 8
+        expect SATP_MODE_SV48 == 9
+        expect SATP_MODE_SV57 == 10
+
+    it "has correct RV32 mode values":
+        expect SATP32_MODE_BARE == 0
+        expect SATP32_MODE_SV32 == 1
+
+    it "returns correct mode names":
+        expect satp_mode_name(SATP_MODE_BARE) == "Bare"
+        expect satp_mode_name(SATP_MODE_SV39) == "Sv39"
+        expect satp_mode_name(SATP_MODE_SV48) == "Sv48"
+        expect satp_mode_name(SATP_MODE_SV57) == "Sv57"
+        expect satp_mode_name(99) == "Unknown"
+
+describe "SATP Encode Decode RV64":
+    it "encodes mode asid and ppn":
+        val s = satp_encode(SATP_MODE_SV39, 0x1234, 0xABCDEF)
+        expect satp_mode(s) == SATP_MODE_SV39
+        expect satp_asid(s) == 0x1234
+        expect satp_ppn(s) == 0xABCDEF
+
+    it "roundtrips Bare mode":
+        val s = satp_encode(SATP_MODE_BARE, 0, 0)
+        expect satp_mode(s) == 0
+        expect satp_asid(s) == 0
+        expect satp_ppn(s) == 0
+
+    it "handles max asid":
+        val s = satp_encode(SATP_MODE_SV39, 0xFFFF, 0x1)
+        expect satp_asid(s) == 0xFFFF
+
+describe "SATP Encode Decode RV32":
+    it "encodes mode asid and ppn for RV32":
+        val s = satp32_encode(SATP32_MODE_SV32, 0x1FF, 0x3FFFFF)
+        expect satp32_mode(s) == 1
+        expect satp32_asid(s) == 0x1FF
+        expect satp32_ppn(s) == 0x3FFFFF
+
+    it "roundtrips Bare mode":
+        val s = satp32_encode(SATP32_MODE_BARE, 0, 0)
+        expect satp32_mode(s) == 0
+
+describe "PTE Flag Constants":
+    it "has correct bit positions":
+        expect PTE_V == 1
+        expect PTE_R == 2
+        expect PTE_W == 4
+        expect PTE_X == 8
+        expect PTE_U == 16
+        expect PTE_G == 32
+        expect PTE_A == 64
+        expect PTE_D == 128
+
+    it "has correct combined flags":
+        expect PTE_RWXV == 15
+        expect PTE_RV == 3
+        expect PTE_RWV == 7
+        expect PTE_RXV == 11
+
+describe "PTE Predicates":
+    it "checks valid bit":
+        expect pte_is_valid(PTE_V) == true
+        expect pte_is_valid(0) == false
+
+    it "checks leaf status":
+        expect pte_is_leaf(PTE_R | PTE_V) == true
+        expect pte_is_leaf(PTE_X | PTE_V) == true
+        expect pte_is_leaf(PTE_V) == false  # non-leaf pointer
+
+    it "checks individual permission bits":
+        val pte = PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D | PTE_V
+        expect pte_is_readable(pte) == true
+        expect pte_is_writable(pte) == true
+        expect pte_is_executable(pte) == true
+        expect pte_is_user(pte) == true
+        expect pte_is_accessed(pte) == true
+        expect pte_is_dirty(pte) == true
+
+    it "flags extraction returns lower 10 bits":
+        val pte = sv39_pte_encode(0x12345, PTE_RWXV | PTE_A | PTE_D)
+        val f = pte_flags(pte)
+        expect (f & PTE_V) != 0
+        expect (f & PTE_R) != 0
+        expect (f & PTE_W) != 0
+        expect (f & PTE_X) != 0
+        expect (f & PTE_A) != 0
+        expect (f & PTE_D) != 0
+
+describe "Sv39 PTE Encode Decode":
+    it "roundtrips ppn and flags":
+        val ppn: u64 = 0x12345
+        val flags = PTE_RWV | PTE_A | PTE_D
+        val pte = sv39_pte_encode(ppn, flags)
+        expect sv39_pte_ppn(pte) == ppn
+        expect pte_is_valid(pte) == true
+        expect pte_is_readable(pte) == true
+
+    it "converts ppn to physical address":
+        val pte = sv39_pte_encode(0x80000, PTE_RV)
+        val phys = sv39_pte_ppn_to_phys(pte)
+        expect phys == 0x80000000
+
+describe "Sv48 PTE":
+    it "uses same encoding as Sv39":
+        val ppn: u64 = 0xABCDE
+        val pte39 = sv39_pte_encode(ppn, PTE_RV)
+        val pte48 = sv48_pte_encode(ppn, PTE_RV)
+        expect sv39_pte_ppn(pte39) == sv48_pte_ppn(pte48)
+
+describe "Sv32 PTE":
+    it "roundtrips ppn and flags":
+        val ppn: u64 = 0x3FFFF
+        val pte = sv32_pte_encode(ppn, PTE_RWV)
+        expect sv32_pte_ppn(pte) == ppn
+
+describe "Page Size Constants":
+    it "has correct values":
+        expect PAGE_SIZE == 4096
+        expect MEGA_PAGE_SIZE == 2097152
+        expect GIGA_PAGE_SIZE == 1073741824
+
+describe "Sv39 Virtual Address Decomposition":
+    it "extracts VPN fields":
+        val va: u64 = 0x80123456
+        expect sv39_vpn(va, 0) == ((va >> 12) & 0x1FF)
+        expect sv39_vpn(va, 1) == ((va >> 21) & 0x1FF)
+        expect sv39_vpn(va, 2) == ((va >> 30) & 0x1FF)
+
+    it "extracts page offset":
+        expect sv39_page_offset(0x80001ABC) == 0xABC
+
+    it "returns zero for invalid level":
+        expect sv39_vpn(0x12345678, 3) == 0
+
+describe "Sv48 Virtual Address Decomposition":
+    it "extracts level-3 VPN":
+        val va: u64 = 0x0000FFFFFFFFFFFF
+        expect sv48_vpn(va, 3) == ((va >> 39) & 0x1FF)
+
+    it "shares lower levels with Sv39":
+        val va: u64 = 0x80123456
+        expect sv48_vpn(va, 0) == sv39_vpn(va, 0)
+        expect sv48_vpn(va, 1) == sv39_vpn(va, 1)
+        expect sv48_vpn(va, 2) == sv39_vpn(va, 2)

@@ -1,0 +1,133 @@
+# General IO Optimization Passes Spec
+#
+# Verifies CLibParityHotspot provider registration for the five new
+# general-purpose MIR recognizers: bulk_copy, bulk_fill, bulk_cmp,
+# endian_load, endian_store. Proves generality by testing provider
+# metadata (no FS-specific names or facts) and verifying existing
+# optimization engine regression.
+#
+# MIR pattern matching is integration-tested in the co-located
+# src/compiler/60.mir_opt/general_io_passes.spipe.
+
+use compiler.mir_opt.mir_opt.pattern.rule_engine.{
+    OptimizerProviderKind,
+    OptimizerRuleLookupKind,
+    optimization_rule_provider_bulk_copy,
+    optimization_rule_provider_bulk_fill,
+    optimization_rule_provider_bulk_cmp,
+    optimization_rule_provider_endian_load,
+    optimization_rule_provider_endian_store,
+    optimization_rule_provider_clib_parity,
+    optimization_rule_provider_can_run
+}
+
+# ============================================================================
+# AC-7: CLibParityHotspot provider entries — generic names, no FS-specific facts
+# ============================================================================
+
+describe "CLibParityHotspot Provider Registration":
+    describe "bulk_copy provider":
+        it "has CLibParityHotspot kind":
+            val p = optimization_rule_provider_bulk_copy("simple.opt.mir.bulk_copy")
+            expect(p.kind).to_equal(OptimizerProviderKind.CLibParityHotspot)
+
+        it "is hot_path and enabled":
+            val p = optimization_rule_provider_bulk_copy("simple.opt.mir.bulk_copy")
+            expect(p.hot_path).to_equal(true)
+            expect(p.enabled).to_equal(true)
+
+        it "uses PipelinePass lookup":
+            val p = optimization_rule_provider_bulk_copy("simple.opt.mir.bulk_copy")
+            expect(p.lookup_kind).to_equal(OptimizerRuleLookupKind.PipelinePass)
+
+        it "produces bulk_copy_rewrite fact":
+            val p = optimization_rule_provider_bulk_copy("simple.opt.mir.bulk_copy")
+            expect(p.produced_facts.len()).to_be_greater_than(0)
+
+    describe "bulk_fill provider":
+        it "has CLibParityHotspot kind":
+            val p = optimization_rule_provider_bulk_fill("simple.opt.mir.bulk_fill")
+            expect(p.kind).to_equal(OptimizerProviderKind.CLibParityHotspot)
+
+        it "is hot_path and enabled":
+            val p = optimization_rule_provider_bulk_fill("simple.opt.mir.bulk_fill")
+            expect(p.hot_path).to_equal(true)
+            expect(p.enabled).to_equal(true)
+
+    describe "bulk_cmp provider":
+        it "has CLibParityHotspot kind":
+            val p = optimization_rule_provider_bulk_cmp("simple.opt.mir.bulk_cmp")
+            expect(p.kind).to_equal(OptimizerProviderKind.CLibParityHotspot)
+
+        it "is hot_path and enabled":
+            val p = optimization_rule_provider_bulk_cmp("simple.opt.mir.bulk_cmp")
+            expect(p.hot_path).to_equal(true)
+            expect(p.enabled).to_equal(true)
+
+    describe "endian_load provider":
+        it "has CLibParityHotspot kind":
+            val p = optimization_rule_provider_endian_load("simple.opt.mir.endian_load")
+            expect(p.kind).to_equal(OptimizerProviderKind.CLibParityHotspot)
+
+        it "is hot_path and enabled":
+            val p = optimization_rule_provider_endian_load("simple.opt.mir.endian_load")
+            expect(p.hot_path).to_equal(true)
+            expect(p.enabled).to_equal(true)
+
+    describe "endian_store provider":
+        it "has CLibParityHotspot kind":
+            val p = optimization_rule_provider_endian_store("simple.opt.mir.endian_store")
+            expect(p.kind).to_equal(OptimizerProviderKind.CLibParityHotspot)
+
+        it "is hot_path and enabled":
+            val p = optimization_rule_provider_endian_store("simple.opt.mir.endian_store")
+            expect(p.hot_path).to_equal(true)
+            expect(p.enabled).to_equal(true)
+
+# ============================================================================
+# AC-7: All providers are general — no FS-specific required facts
+# ============================================================================
+
+describe "Provider Generality":
+    it "bulk_copy requires typed_mir not fs-specific facts":
+        val p = optimization_rule_provider_bulk_copy("simple.opt.mir.bulk_copy")
+        expect(p.safety_class).to_equal("pure")
+        expect(p.required_facts.len()).to_be_greater_than(0)
+
+    it "endian_load requires shift_or_chain not fs-specific facts":
+        val p = optimization_rule_provider_endian_load("simple.opt.mir.endian_load")
+        expect(p.safety_class).to_equal("pure")
+
+    it "endian_store requires shift_and_store_chain":
+        val p = optimization_rule_provider_endian_store("simple.opt.mir.endian_store")
+        expect(p.safety_class).to_equal("pure")
+
+    it "existing clib_parity provider still works":
+        val p = optimization_rule_provider_clib_parity("simple.opt.mir.clib_parity", true)
+        expect(p.kind).to_equal(OptimizerProviderKind.CLibParityHotspot)
+        expect(p.hot_path).to_equal(true)
+
+# ============================================================================
+# AC-7: Provider fact-gating works
+# ============================================================================
+
+describe "Provider Fact Gating":
+    it "bulk_copy can run when required facts are present":
+        val p = optimization_rule_provider_bulk_copy("simple.opt.mir.bulk_copy")
+        val facts = ["typed_mir", "gep_contiguous"]
+        expect(optimization_rule_provider_can_run(p, facts)).to_equal(true)
+
+    it "bulk_copy cannot run when facts are missing":
+        val p = optimization_rule_provider_bulk_copy("simple.opt.mir.bulk_copy")
+        val empty_facts: [text] = []
+        expect(optimization_rule_provider_can_run(p, empty_facts)).to_equal(false)
+
+    it "endian_load can run when shift_or_chain fact is present":
+        val p = optimization_rule_provider_endian_load("simple.opt.mir.endian_load")
+        val facts = ["typed_mir", "shift_or_chain"]
+        expect(optimization_rule_provider_can_run(p, facts)).to_equal(true)
+
+    it "endian_store cannot run without shift_and_store_chain":
+        val p = optimization_rule_provider_endian_store("simple.opt.mir.endian_store")
+        val facts = ["typed_mir"]
+        expect(optimization_rule_provider_can_run(p, facts)).to_equal(false)

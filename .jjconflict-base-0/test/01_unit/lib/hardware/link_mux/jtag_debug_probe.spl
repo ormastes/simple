@@ -1,0 +1,225 @@
+# Intensive probe: FULL RISC-V JTAG debug of the rv64 core over the shared link.
+# Interpreter-only (the rv64 core model is mis-executed by the seed JIT):
+#   SIMPLE_EXECUTION_MODE=interpreter bin/simple run \
+#     test/01_unit/lib/hardware/link_mux/jtag_debug_probe.spl
+#
+# Proves the entire chain host -> LinkMux(CH_JTAG) -> link -> LinkDemux ->
+# TAP -> DTM -> DMI -> DebugModule -> hart(soc_top_64) and back, RISC-V Debug
+# Spec v0.13 style:
+#   (a) read IDCODE via the IR path (== jtag_tap.vhd 0x15350067)
+#   (b) read DTMCS (version=1, abits=7, mirrors riscv_dtm.vhd)
+#   (c) run a tiny program on soc_top_64 (the reliable ram64 path, not bare core)
+#   (d) DMSTATUS shows the hart running
+#   (e) DMCONTROL.haltreq -> DMSTATUS allhalted
+#   (f) read dpc == the pc the hart halted at
+#   (g) read GPR x5 with its known value (42)
+#   (h) write GPR x5 to 0x1234 and read it back
+#   (i) resume -> allresumeack + running, step, verify pc advanced past halt
+# A CH_LOG burst is interleaved mid-debug-session to prove mux fairness does not
+# corrupt the JTAG stream.
+use std.hardware.link_mux.mux.{
+    TransportProfile, transport_sim_loopback, CH_LOG, CH_JTAG,
+    LinkMux, mux_create, mux_push, mux_pump_all,
+    LinkDemux, demux_create, demux_feed, demux_peek
+}
+use std.hardware.link_mux.dtm_route.{
+    DTM_IDCODE, IR_IDCODE, IR_DTMCS, IR_DMI, DMI_WIDTH, DMI_OP_READ, DMI_OP_WRITE,
+    cmds_reset, cmds_shift_ir, cmds_dr_read, cmds_dr_write, decode_bits,
+    dmi_dr_pack, dmi_extract_data, append_all
+}
+use std.hardware.link_mux.dm_model.{
+    HartHarness, hart_create, hart_run, DmRegs, dm_create,
+    FpgaDebug, debug_fpga_process,
+    DM_DATA0, DM_DATA1, DM_DMCONTROL, DM_DMSTATUS, DM_COMMAND
+}
+use std.hardware.link_mux.dtm_route.{DebugTap, debug_tap_create}
+use std.hardware.soc_rtl.soc_top_64.{SocTop64State, soc_top_64_init}
+use std.hardware.soc_rtl.ram64.{Ram64State, ram64_load_bytes}
+
+val RAM_BASE: i64 = 0x8000_0000
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        return 0
+    print("FAIL {name}")
+    1
+
+# --- program builder: li x5,42 followed by a long `addi x1,x1,1` sled ---
+fn push_le32(dst: [u8], w: i64) -> [u8]:
+    var out = dst
+    out.push((w & 0xFF).to_u8())
+    out.push(((w >> 8) & 0xFF).to_u8())
+    out.push(((w >> 16) & 0xFF).to_u8())
+    out.push(((w >> 24) & 0xFF).to_u8())
+    out
+
+fn build_program(sled: i64) -> [u8]:
+    var prog: [u8] = []
+    prog = push_le32(prog, 0x02A00293)       # addi x5, x0, 42  (li x5,42)
+    var i = 0
+    while i < sled:
+        prog = push_le32(prog, 0x00108093)   # addi x1, x1, 1
+        i = i + 1
+    prog
+
+# --- one host<->fpga JTAG transaction over the muxed link ---
+struct TxnResult:
+    fpga: FpgaDebug
+    replies: [u8]
+    log_ok: bool
+
+fn jtag_link_txn(fpga: FpgaDebug, cmds: [u8], log_burst: [u8]) -> TxnResult:
+    val prof = transport_sim_loopback()
+    # host multiplexes the JTAG command stream (+ optional LOG burst)
+    var hmux = mux_create(prof)
+    if log_burst.len() > 0:
+        hmux = mux_push(hmux, CH_LOG, log_burst)
+    hmux = mux_push(hmux, CH_JTAG, cmds)
+    val to_fpga = mux_pump_all(hmux).frame
+    # fpga demuxes the shared link
+    var fdemux = demux_create(prof)
+    fdemux = demux_feed(fdemux, to_fpga)
+    var log_ok = true
+    if log_burst.len() > 0:
+        val got = demux_peek(fdemux, CH_LOG)
+        log_ok = got.len() == log_burst.len()
+        var k = 0
+        while k < log_burst.len() and log_ok:
+            if (got[k].to_i64() & 0xFF) != (log_burst[k].to_i64() & 0xFF):
+                log_ok = false
+            k = k + 1
+    val fpga_cmds = demux_peek(fdemux, CH_JTAG)
+    # fpga drives TAP->DTM->DMI->DM->hart, frames TDO replies back on CH_JTAG
+    val proc = debug_fpga_process(fpga, fpga_cmds)
+    var fmux = mux_create(prof)
+    fmux = mux_push(fmux, CH_JTAG, proc.replies)
+    val to_host = mux_pump_all(fmux).frame
+    # host demuxes the return link
+    var hdemux = demux_create(prof)
+    hdemux = demux_feed(hdemux, to_host)
+    TxnResult(fpga: proc.fpga, replies: demux_peek(hdemux, CH_JTAG), log_ok: log_ok)
+
+# --- DMI register read: write op=read, then read back the 41-bit DR (one call) ---
+struct DmiRead:
+    fpga: FpgaDebug
+    data: i64
+    log_ok: bool
+
+fn dmi_read(fpga: FpgaDebug, addr: i64, log_burst: [u8]) -> DmiRead:
+    var cmds: [u8] = []
+    cmds = append_all(cmds, cmds_dr_write(dmi_dr_pack(DMI_OP_READ, addr, 0), DMI_WIDTH))
+    cmds = append_all(cmds, cmds_dr_read(DMI_WIDTH))
+    val t = jtag_link_txn(fpga, cmds, log_burst)
+    val dr_val = decode_bits(t.replies, DMI_WIDTH)
+    DmiRead(fpga: t.fpga, data: dmi_extract_data(dr_val), log_ok: t.log_ok)
+
+fn dmi_write(fpga: FpgaDebug, addr: i64, data: i64) -> FpgaDebug:
+    val cmds = cmds_dr_write(dmi_dr_pack(DMI_OP_WRITE, addr, data), DMI_WIDTH)
+    jtag_link_txn(fpga, cmds, []).fpga
+
+fn main() -> i64:
+    var fails: i64 = 0
+
+    # --- build the target: soc_top_64 with a tiny program in DRAM ---
+    var soc = soc_top_64_init(0x10000)
+    var ram = soc.ram
+    ram = ram64_load_bytes(ram, 0, build_program(1024))
+    soc.ram = ram
+    soc.core.pc = RAM_BASE
+    var fpga = FpgaDebug(tap: debug_tap_create(), dm: dm_create(), hart: hart_create(soc))
+
+    # --- (a) read IDCODE via the IR path (reset selects IDCODE) ---
+    var cmds_a: [u8] = []
+    cmds_a = append_all(cmds_a, cmds_reset())
+    cmds_a = append_all(cmds_a, cmds_dr_read(32))
+    val ta = jtag_link_txn(fpga, cmds_a, [])
+    fpga = ta.fpga
+    val idcode = decode_bits(ta.replies, 32)
+    fails = fails + check("(a) IDCODE over link == 0x15350067", idcode == DTM_IDCODE)
+
+    # --- (b) read DTMCS: version=1 [3:0], abits=7 [9:4] ---
+    var cmds_b: [u8] = []
+    cmds_b = append_all(cmds_b, cmds_shift_ir(IR_DTMCS))
+    cmds_b = append_all(cmds_b, cmds_dr_read(32))
+    val tb = jtag_link_txn(fpga, cmds_b, [])
+    fpga = tb.fpga
+    val dtmcs = decode_bits(tb.replies, 32)
+    fails = fails + check("(b) DTMCS version == 1", (dtmcs & 0xF) == 1)
+    fails = fails + check("(b) DTMCS abits == 7", ((dtmcs >> 4) & 0x3F) == 7)
+
+    # select the DMI instruction for the rest of the session
+    fpga = jtag_link_txn(fpga, cmds_shift_ir(IR_DMI), []).fpga
+    # activate the debug module
+    fpga = dmi_write(fpga, DM_DMCONTROL, 1)
+
+    # --- (c) run the hart on soc_top_64 for a few hundred ticks ---
+    fpga.hart = hart_run(fpga.hart, 90)
+    fpga.hart = hart_run(fpga.hart, 90)
+    val pc_running = fpga.hart.soc.core.pc
+    fails = fails + check("(c) hart advanced past reset", pc_running > RAM_BASE)
+
+    # --- (d) DMSTATUS shows running (allrunning set, allhalted clear) ---
+    val rd_run = dmi_read(fpga, DM_DMSTATUS, [])
+    fpga = rd_run.fpga
+    val st_run = rd_run.data
+    fails = fails + check("(d) DMSTATUS allrunning", ((st_run >> 11) & 1) == 1)
+    fails = fails + check("(d) DMSTATUS not halted", ((st_run >> 9) & 1) == 0)
+    fails = fails + check("(d) DMSTATUS version == 2", (st_run & 0xF) == 2)
+
+    # --- (e) haltreq -> DMSTATUS allhalted ---
+    fpga = dmi_write(fpga, DM_DMCONTROL, (1 << 31) | 1)   # dmactive + haltreq
+    val halt_pc = fpga.hart.soc.core.pc
+    val rd_halt = dmi_read(fpga, DM_DMSTATUS, [])
+    fpga = rd_halt.fpga
+    val st_halt = rd_halt.data
+    fails = fails + check("(e) DMSTATUS allhalted", ((st_halt >> 9) & 1) == 1)
+    fails = fails + check("(e) DMSTATUS not running", ((st_halt >> 11) & 1) == 0)
+
+    # --- (f) read dpc via abstract access-register command, == halt pc ---
+    # COMMAND: cmdtype=0, aarsize=3 (64-bit), transfer=1, write=0, regno=0x7B1(dpc)
+    fpga = dmi_write(fpga, DM_COMMAND, (3 << 20) | (1 << 17) | 0x7B1)
+    val dpc_lo = dmi_read(fpga, DM_DATA0, [])
+    fpga = dpc_lo.fpga
+    val dpc_hi = dmi_read(fpga, DM_DATA1, [])
+    fpga = dpc_hi.fpga
+    val dpc = (dpc_lo.data & 0xFFFFFFFF) | ((dpc_hi.data & 0xFFFFFFFF) << 32)
+    fails = fails + check("(f) dpc == halt pc", dpc == halt_pc)
+
+    # --- (g) read GPR x5 (known == 42) — with an interleaved CH_LOG burst ---
+    var log_burst: [u8] = []
+    var lc = 0
+    while lc < 40:
+        log_burst.push((0x41 + (lc % 26)).to_u8())   # 40-byte log spam
+        lc = lc + 1
+    # COMMAND: aarsize=3, transfer=1, write=0, regno=0x1005 (x5)
+    fpga = dmi_write(fpga, DM_COMMAND, (3 << 20) | (1 << 17) | 0x1005)
+    val g0 = dmi_read(fpga, DM_DATA0, log_burst)      # log interleaved here
+    fpga = g0.fpga
+    fails = fails + check("(g) CH_LOG intact through interleaved JTAG", g0.log_ok)
+    fails = fails + check("(g) GPR x5 == 42", (g0.data & 0xFFFFFFFF) == 42)
+
+    # --- (h) write GPR x5 = 0x1234, read it back ---
+    fpga = dmi_write(fpga, DM_DATA0, 0x1234)
+    fpga = dmi_write(fpga, DM_DATA1, 0)
+    fpga = dmi_write(fpga, DM_COMMAND, (3 << 20) | (1 << 17) | (1 << 16) | 0x1005)  # write
+    fpga = dmi_write(fpga, DM_COMMAND, (3 << 20) | (1 << 17) | 0x1005)              # read back
+    val h0 = dmi_read(fpga, DM_DATA0, [])
+    fpga = h0.fpga
+    fails = fails + check("(h) GPR x5 read-back == 0x1234", (h0.data & 0xFFFFFFFF) == 0x1234)
+
+    # --- (i) resume -> allresumeack + running; step; pc advances past halt ---
+    fpga = dmi_write(fpga, DM_DMCONTROL, (1 << 30) | 1)   # dmactive + resumereq
+    val rd_res = dmi_read(fpga, DM_DMSTATUS, [])
+    fpga = rd_res.fpga
+    val st_res = rd_res.data
+    fails = fails + check("(i) DMSTATUS allresumeack", ((st_res >> 17) & 1) == 1)
+    fails = fails + check("(i) DMSTATUS running after resume", ((st_res >> 11) & 1) == 1)
+    fpga.hart = hart_run(fpga.hart, 90)
+    val pc_after = fpga.hart.soc.core.pc
+    fails = fails + check("(i) pc advanced past halt point", pc_after > halt_pc)
+
+    if fails == 0:
+        print("JTAG DEBUG PROBE: ALL PASS")
+        return 0
+    print("JTAG DEBUG PROBE: {fails} FAIL")
+    1

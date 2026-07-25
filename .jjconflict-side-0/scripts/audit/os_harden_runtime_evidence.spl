@@ -1,0 +1,198 @@
+# Ingest runtime hardening markers from QEMU serial logs.
+
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_exit(code: i32) -> void
+
+struct RuntimeEvidenceConfig:
+    arches: [text]
+    logs: [text]
+    out_root: text
+
+fn shell_quote(value: text) -> text:
+    "'" + value.replace("'", "'\"'\"'") + "'"
+
+fn normalize_args(all_args: [text]) -> [text]:
+    var start = 0
+    var found = false
+    var i = 0
+    while i < all_args.len():
+        if all_args[i].ends_with("os_harden_runtime_evidence.spl"):
+            start = i + 1
+            found = true
+            break
+        i = i + 1
+    if not found and all_args.len() > 0:
+        start = 1
+
+    var args: [text] = []
+    i = start
+    while i < all_args.len():
+        if all_args[i] != "--":
+            args = args.push(all_args[i])
+        i = i + 1
+    args
+
+fn default_arches() -> [text]:
+    ["x86_64", "x86_32", "aarch64", "arm32", "riscv64", "riscv32"]
+
+fn default_config() -> RuntimeEvidenceConfig:
+    RuntimeEvidenceConfig(arches: [], logs: [], out_root: "build/multiarch")
+
+fn parse_args(args: [text]) -> RuntimeEvidenceConfig:
+    var config = default_config()
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--arch" and i + 1 < args.len():
+            config.arches = config.arches.push(args[i + 1])
+            i = i + 2
+        elif arg.starts_with("--arch="):
+            config.arches = config.arches.push(arg.substring("--arch=".len()))
+            i = i + 1
+        elif arg == "--out-root" and i + 1 < args.len():
+            config.out_root = args[i + 1]
+            i = i + 2
+        elif arg.starts_with("--out-root="):
+            config.out_root = arg.substring("--out-root=".len())
+            i = i + 1
+        elif not arg.starts_with("-"):
+            config.logs = config.logs.push(arg)
+            i = i + 1
+        else:
+            i = i + 1
+    if config.arches.len() == 0:
+        config.arches = default_arches()
+    if config.logs.len() == 0:
+        config.logs = discover_logs()
+    config
+
+fn discover_logs() -> [text]:
+    val command = "find build/multiarch -type f \\( -name '*.log' -o -name '*serial*.txt' -o -name '*serial*.log' \\) 2>/dev/null; find build -maxdepth 1 -type f -name 'qemu-*serial*.log' 2>/dev/null"
+    val result = rt_process_run("/bin/sh", ["-c", command])
+    var logs: [text] = []
+    if result.2 != 0:
+        return logs
+    for raw in result.0.split("\n"):
+        val path = raw.trim()
+        if path != "":
+            logs = logs.push(path)
+    logs
+
+fn dirname(path: text) -> text:
+    var idx = path.len() - 1
+    while idx >= 0:
+        if path.substring(idx, idx + 1) == "/":
+            return path.substring(0, idx)
+        idx = idx - 1
+    "."
+
+fn ensure_parent(path: text):
+    val dir = dirname(path)
+    val (_out, _err, _code) = rt_process_run("/bin/sh", ["-c", "mkdir -p " + shell_quote(dir)])
+
+fn json_escape(value: text) -> text:
+    val escaped_backslash = value.replace("\\", "\\\\")
+    val escaped_quote = escaped_backslash.replace("\"", "\\\"")
+    escaped_quote.replace("\n", "\\n")
+
+fn json_text_array(values: [text], limit: i64) -> text:
+    var out = "["
+    var i = 0
+    while i < values.len() and i < limit:
+        if i > 0:
+            out = out + ", "
+        out = out + "\"" + json_escape(values[i]) + "\""
+        i = i + 1
+    out + "]"
+
+fn contains_text(values: [text], value: text) -> bool:
+    for item in values:
+        if item == value:
+            return true
+    false
+
+fn distinct_count(values: [text]) -> i64:
+    var distinct: [text] = []
+    for value in values:
+        if not contains_text(distinct, value):
+            distinct = distinct.push(value)
+    distinct.len()
+
+fn token_value(line: text, key: text) -> text:
+    val marker = key + "="
+    val marker_idx = line.index_of(marker) ?? -1
+    if marker_idx < 0:
+        return ""
+    val rest = line.substring(marker_idx + marker.len())
+    val space = rest.index_of(" ") ?? -1
+    if space < 0:
+        return rest.trim()
+    rest.substring(0, space).trim()
+
+fn write_canary_json(out_root: text, arch: text, values: [text], sources: [text], ok: bool):
+    val path = out_root + "/" + arch + "/canary_runtime.json"
+    ensure_parent(path)
+    val body =
+        "{\n" +
+        "  \"arch\": \"" + json_escape(arch) + "\",\n" +
+        "  \"differs_across_reboots\": " + (if ok: "true" else: "false") + ",\n" +
+        "  \"distinct_sample_count\": " + distinct_count(values).to_string() + ",\n" +
+        "  \"samples\": " + json_text_array(values, 8) + ",\n" +
+        "  \"sources\": " + json_text_array(sources, 8) + "\n" +
+        "}\n"
+    rt_file_write_text(path, body)
+
+fn write_text_trap_json(out_root: text, sources: [text], passed: bool):
+    val path = out_root + "/x86_64/text_write_trap.json"
+    ensure_parent(path)
+    val body =
+        "{\n" +
+        "  \"arch\": \"x86_64\",\n" +
+        "  \"sources\": " + json_text_array(sources, 8) + ",\n" +
+        "  \"trap_observed\": " + (if passed: "true" else: "false") + "\n" +
+        "}\n"
+    rt_file_write_text(path, body)
+
+fn ingest_canary(arch: text, logs: [text], out_root: text) -> bool:
+    var values: [text] = []
+    var sources: [text] = []
+    for log in logs:
+        val body = rt_file_read_text(log) ?? ""
+        for line in body.split("\n"):
+            if line.contains("[harden]") and line.contains("canary"):
+                val line_arch = token_value(line, "arch")
+                val value = token_value(line, "value")
+                if line_arch == arch and value != "" and value != "0":
+                    values = values.push(value)
+                    sources = sources.push(log)
+    val ok = distinct_count(values) >= 2
+    if values.len() > 0:
+        write_canary_json(out_root, arch, values, sources, ok)
+    ok
+
+fn ingest_text_trap(logs: [text], out_root: text) -> bool:
+    var passed = false
+    var sources: [text] = []
+    for log in logs:
+        val body = rt_file_read_text(log) ?? ""
+        for line in body.split("\n"):
+            if line.contains("[harden]") and line.contains("text_write_trap=pass"):
+                passed = true
+                sources = sources.push(log)
+    if sources.len() > 0:
+        write_text_trap_json(out_root, sources, passed)
+    passed
+
+val config = parse_args(normalize_args(rt_cli_get_args()))
+var canary_ok = true
+for arch in config.arches:
+    if not ingest_canary(arch, config.logs, config.out_root):
+        canary_ok = false
+val text_ok = ingest_text_trap(config.logs, config.out_root)
+
+if canary_ok and text_ok:
+    rt_exit(0)
+rt_exit(1)

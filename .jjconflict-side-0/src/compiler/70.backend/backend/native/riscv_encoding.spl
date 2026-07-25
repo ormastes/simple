@@ -1,0 +1,358 @@
+# Shared RISC-V Instruction Encoding Utilities
+#
+# Instruction format encoders, ALU dispatch helpers, and emit utility
+# shared between riscv64 and riscv32 backends.
+# The encoding formats are identical between RV32 and RV64.
+
+use compiler.backend.native.mach_inst.{RV_OP_ADD, RV_OP_SUB, RV_OP_MUL, RV_OP_DIV, RV_OP_REM, RV_OP_AND, RV_OP_OR, RV_OP_XOR, RV_OP_SLL, RV_OP_SRA, RV_OP_SRL, RV_OP_SLT, RV_OP_SLTU, RV_OP_BEQ, RV_OP_BNE, RV_OP_BLT, RV_OP_BGE, RV_OP_ADDI, RV_OP_LUI, RV_OP_NEG, RV_OP_NOT, RV_OP_SEQZ, RV_OP_SNEZ}
+use compiler.backend.native.mach_inst.{MachInst, Operand, RV_X0, reg_id}
+use compiler.backend.native.operand_utils.{get_phys_reg_id, get_imm_value}
+
+# ============================================================================
+# Emit Helper
+# ============================================================================
+
+# Emit a 32-bit instruction as 4 little-endian bytes.
+# Uses division/modulo to avoid issues with negative bit operations.
+fn riscv_emit_u32_le(buf: [i64], instruction: i64) -> [i64]:
+    var masked = instruction % 4294967296
+    if masked < 0:
+        masked = masked + 4294967296
+    val b0 = masked % 256
+    val b1 = (masked / 256) % 256
+    val b2 = (masked / 65536) % 256
+    val b3 = (masked / 16777216) % 256
+    buf.push(b0)
+    buf.push(b1)
+    buf.push(b2)
+    buf.push(b3)
+    buf
+
+# ============================================================================
+# Instruction Format Encoders
+# ============================================================================
+
+# R-type: funct7[31:25] | rs2[24:20] | rs1[19:15] | funct3[14:12] | rd[11:7] | opcode[6:0]
+fn riscv_encode_r_type(funct7: i64, rs2: i64, rs1: i64, funct3: i64, rd: i64, opcode: i64) -> i64:
+    val f7 = (funct7 % 128) * 33554432
+    val r2 = (rs2 % 32) * 1048576
+    val r1 = (rs1 % 32) * 32768
+    val f3 = (funct3 % 8) * 4096
+    val d = (rd % 32) * 128
+    val op = opcode % 128
+    f7 + r2 + r1 + f3 + d + op
+
+# I-type: imm[31:20] | rs1[19:15] | funct3[14:12] | rd[11:7] | opcode[6:0]
+fn riscv_encode_i_type(imm12: i64, rs1: i64, funct3: i64, rd: i64, opcode: i64) -> i64:
+    var imm_val = imm12 % 4096
+    if imm_val < 0:
+        imm_val = imm_val + 4096
+    val im = imm_val * 1048576
+    val r1 = (rs1 % 32) * 32768
+    val f3 = (funct3 % 8) * 4096
+    val d = (rd % 32) * 128
+    val op = opcode % 128
+    im + r1 + f3 + d + op
+
+# S-type: imm[31:25] | rs2[24:20] | rs1[19:15] | funct3[14:12] | imm[11:7] | opcode[6:0]
+fn riscv_encode_s_type(imm12: i64, rs2: i64, rs1: i64, funct3: i64, opcode: i64) -> i64:
+    var imm_val = imm12 % 4096
+    if imm_val < 0:
+        imm_val = imm_val + 4096
+    val imm_hi = (imm_val / 32) % 128
+    val imm_lo = imm_val % 32
+    val hi = imm_hi * 33554432
+    val r2 = (rs2 % 32) * 1048576
+    val r1 = (rs1 % 32) * 32768
+    val f3 = (funct3 % 8) * 4096
+    val lo = imm_lo * 128
+    val op = opcode % 128
+    hi + r2 + r1 + f3 + lo + op
+
+# B-type: imm[12|10:5] | rs2[24:20] | rs1[19:15] | funct3[14:12] | imm[4:1|11] | opcode[6:0]
+# imm is a byte offset
+fn riscv_encode_b_type(imm_offset: i64, rs2: i64, rs1: i64, funct3: i64, opcode: i64) -> i64:
+    var imm = imm_offset % 8192
+    if imm < 0:
+        imm = imm + 8192
+    # bit 12 -> bit 31
+    val bit12 = (imm / 4096) % 2
+    # bits 10:5 -> bits 30:25
+    val bits_10_5 = (imm / 32) % 64
+    # bits 4:1 -> bits 11:8
+    val bits_4_1 = (imm / 2) % 16
+    # bit 11 -> bit 7
+    val bit11 = (imm / 2048) % 2
+    val hi = (bit12 * 2147483648) + (bits_10_5 * 33554432)
+    val r2 = (rs2 % 32) * 1048576
+    val r1 = (rs1 % 32) * 32768
+    val f3 = (funct3 % 8) * 4096
+    val lo = (bits_4_1 * 256) + (bit11 * 128)
+    val op = opcode % 128
+    hi + r2 + r1 + f3 + lo + op
+
+# U-type: imm[31:12] | rd[11:7] | opcode[6:0]
+fn riscv_encode_u_type(imm20: i64, rd: i64, opcode: i64) -> i64:
+    var imm_val = imm20 % 1048576
+    if imm_val < 0:
+        imm_val = imm_val + 1048576
+    val im = imm_val * 4096
+    val d = (rd % 32) * 128
+    val op = opcode % 128
+    im + d + op
+
+# J-type: imm[20|10:1|11|19:12] | rd[11:7] | opcode[6:0]
+# imm is a byte offset
+fn riscv_encode_j_type(imm_offset: i64, rd: i64, opcode: i64) -> i64:
+    var imm = imm_offset % 2097152
+    if imm < 0:
+        imm = imm + 2097152
+    # bit 20 -> bit 31
+    val bit20 = (imm / 1048576) % 2
+    # bits 10:1 -> bits 30:21
+    val bits_10_1 = (imm / 2) % 1024
+    # bit 11 -> bit 20
+    val bit11 = (imm / 2048) % 2
+    # bits 19:12 -> bits 19:12
+    val bits_19_12 = (imm / 4096) % 256
+    val hi = (bit20 * 2147483648) + (bits_10_1 * 2097152) + (bit11 * 1048576) + (bits_19_12 * 4096)
+    val d = (rd % 32) * 128
+    val op = opcode % 128
+    hi + d + op
+
+# ============================================================================
+# R-type ALU Dispatch Helpers
+# ============================================================================
+
+# Get funct7 field for R-type ALU opcodes
+fn riscv_alu_funct7(opcode: i64) -> i64:
+    if opcode == RV_OP_SUB: 0x20
+    elif opcode == RV_OP_SRA: 0x20
+    elif opcode == RV_OP_MUL: 0x01
+    elif opcode == RV_OP_DIV: 0x01
+    elif opcode == RV_OP_REM: 0x01
+    else: 0x00
+
+# Get funct3 field for R-type ALU opcodes
+fn riscv_alu_funct3(opcode: i64) -> i64:
+    if opcode == RV_OP_ADD: 0
+    elif opcode == RV_OP_SUB: 0
+    elif opcode == RV_OP_MUL: 0
+    elif opcode == RV_OP_DIV: 4
+    elif opcode == RV_OP_REM: 6
+    elif opcode == RV_OP_AND: 7
+    elif opcode == RV_OP_OR: 6
+    elif opcode == RV_OP_XOR: 4
+    elif opcode == RV_OP_SLL: 1
+    elif opcode == RV_OP_SRA: 5
+    elif opcode == RV_OP_SRL: 5
+    elif opcode == RV_OP_SLT: 2
+    elif opcode == RV_OP_SLTU: 3
+    else: 0
+
+# Get funct3 for B-type branch opcodes
+fn riscv_branch_funct3(opcode: i64) -> i64:
+    if opcode == RV_OP_BEQ: 0
+    elif opcode == RV_OP_BNE: 1
+    elif opcode == RV_OP_BLT: 4
+    elif opcode == RV_OP_BGE: 5
+    else: 0
+
+# ============================================================================
+# Common Instruction Encoder (shared between RV32 and RV64)
+# ============================================================================
+
+fn riscv_operand_is_imm(op: Operand) -> bool:
+    match op.kind:
+        case Imm(_): true
+        case _: false
+
+fn riscv_operand_is_signed_12_imm(op: Operand) -> bool:
+    match op.kind:
+        case Imm(v): v >= -2048 and v <= 2047
+        case _: false
+
+fn riscv_operand_is_u20_imm(op: Operand) -> bool:
+    match op.kind:
+        case Imm(v): v >= 0 and v < 1048576
+        case _: false
+
+fn riscv_offset_fits_jal(offset: i64) -> bool:
+    offset >= -1048576 and offset <= 1048574 and offset % 2 == 0
+
+fn riscv_offset_fits_branch(offset: i64) -> bool:
+    offset >= -4096 and offset <= 4094 and offset % 2 == 0
+
+fn riscv_operand_is_jal_imm(op: Operand) -> bool:
+    match op.kind:
+        case Imm(v): riscv_offset_fits_jal(v)
+        case _: false
+
+fn riscv_operand_is_reg(op: Operand) -> bool:
+    match op.kind:
+        case Reg(reg):
+            val id = reg_id(reg)
+            id >= 0 and id < 32
+        case _: false
+
+fn riscv_operand_is_mem(op: Operand) -> bool:
+    match op.kind:
+        case Mem(base, _):
+            val id = reg_id(base)
+            id >= 0 and id < 32
+        case _: false
+
+fn riscv_operand_mem_offset_is_signed_12(op: Operand) -> bool:
+    match op.kind:
+        case Mem(base, offset):
+            val id = reg_id(base)
+            id >= 0 and id < 32 and offset >= -2048 and offset <= 2047
+        case _: false
+
+fn riscv_operand_is_imm_or_sym(op: Operand) -> bool:
+    match op.kind:
+        case Imm(_): true
+        case Sym(_): true
+        case _: false
+
+fn riscv_operand_is_label(op: Operand) -> bool:
+    match op.kind:
+        case Label(_): true
+        case _: false
+
+fn riscv_operand_is_imm_or_label(op: Operand) -> bool:
+    match op.kind:
+        case Imm(_): true
+        case Label(_): true
+        case _: false
+
+fn riscv_encode_common_inst(inst: MachInst, code: [i64]) -> [i64]?:
+    if inst.opcode == RV_OP_ADD or inst.opcode == RV_OP_SUB or inst.opcode == RV_OP_MUL or inst.opcode == RV_OP_DIV or inst.opcode == RV_OP_REM or inst.opcode == RV_OP_AND or inst.opcode == RV_OP_OR or inst.opcode == RV_OP_XOR or inst.opcode == RV_OP_SLL or inst.opcode == RV_OP_SRA or inst.opcode == RV_OP_SRL or inst.opcode == RV_OP_SLT or inst.opcode == RV_OP_SLTU:
+        if inst.operands.len() < 3:
+            return riscv_emit_u32_le(code, 0x00000013)
+        if not riscv_operand_is_reg(inst.operands[0]):
+            return riscv_emit_u32_le(code, 0x00000013)
+        if not riscv_operand_is_reg(inst.operands[1]):
+            return riscv_emit_u32_le(code, 0x00000013)
+        if not riscv_operand_is_reg(inst.operands[2]):
+            return riscv_emit_u32_le(code, 0x00000013)
+        val rd = get_phys_reg_id(inst.operands[0])
+        val rs1 = get_phys_reg_id(inst.operands[1])
+        val rs2 = get_phys_reg_id(inst.operands[2])
+        val funct7 = riscv_alu_funct7(inst.opcode)
+        val funct3 = riscv_alu_funct3(inst.opcode)
+        val enc = riscv_encode_r_type(funct7, rs2, rs1, funct3, rd, 0x33)
+        return riscv_emit_u32_le(code, enc)
+    elif inst.opcode == RV_OP_ADDI:
+        if inst.operands.len() < 3:
+            return riscv_emit_u32_le(code, 0x00000013)
+        if not riscv_operand_is_reg(inst.operands[0]):
+            return riscv_emit_u32_le(code, 0x00000013)
+        if not riscv_operand_is_reg(inst.operands[1]):
+            return riscv_emit_u32_le(code, 0x00000013)
+        if not riscv_operand_is_signed_12_imm(inst.operands[2]):
+            return riscv_emit_u32_le(code, 0x00000013)
+        val rd = get_phys_reg_id(inst.operands[0])
+        val rs1 = get_phys_reg_id(inst.operands[1])
+        val imm12 = get_imm_value(inst.operands[2])
+        val enc = riscv_encode_i_type(imm12, rs1, 0, rd, 0x13)
+        return riscv_emit_u32_le(code, enc)
+    elif inst.opcode == RV_OP_NEG:
+        if inst.operands.len() < 2:
+            return riscv_emit_u32_le(code, 0x00000013)
+        if not riscv_operand_is_reg(inst.operands[0]):
+            return riscv_emit_u32_le(code, 0x00000013)
+        if not riscv_operand_is_reg(inst.operands[1]):
+            return riscv_emit_u32_le(code, 0x00000013)
+        val rd = get_phys_reg_id(inst.operands[0])
+        val rs = get_phys_reg_id(inst.operands[1])
+        val enc = riscv_encode_r_type(0x20, rs, RV_X0, 0, rd, 0x33)
+        return riscv_emit_u32_le(code, enc)
+    elif inst.opcode == RV_OP_NOT:
+        if inst.operands.len() < 2:
+            return riscv_emit_u32_le(code, 0x00000013)
+        if not riscv_operand_is_reg(inst.operands[0]):
+            return riscv_emit_u32_le(code, 0x00000013)
+        if not riscv_operand_is_reg(inst.operands[1]):
+            return riscv_emit_u32_le(code, 0x00000013)
+        val rd = get_phys_reg_id(inst.operands[0])
+        val rs = get_phys_reg_id(inst.operands[1])
+        val enc = riscv_encode_i_type(0xFFF, rs, 4, rd, 0x13)
+        return riscv_emit_u32_le(code, enc)
+    elif inst.opcode == RV_OP_SEQZ:
+        if inst.operands.len() < 2:
+            return riscv_emit_u32_le(code, 0x00000013)
+        if not riscv_operand_is_reg(inst.operands[0]):
+            return riscv_emit_u32_le(code, 0x00000013)
+        if not riscv_operand_is_reg(inst.operands[1]):
+            return riscv_emit_u32_le(code, 0x00000013)
+        val rd = get_phys_reg_id(inst.operands[0])
+        val rs = get_phys_reg_id(inst.operands[1])
+        val enc = riscv_encode_i_type(1, rs, 3, rd, 0x13)
+        return riscv_emit_u32_le(code, enc)
+    elif inst.opcode == RV_OP_SNEZ:
+        if inst.operands.len() < 2:
+            return riscv_emit_u32_le(code, 0x00000013)
+        if not riscv_operand_is_reg(inst.operands[0]):
+            return riscv_emit_u32_le(code, 0x00000013)
+        if not riscv_operand_is_reg(inst.operands[1]):
+            return riscv_emit_u32_le(code, 0x00000013)
+        val rd = get_phys_reg_id(inst.operands[0])
+        val rs = get_phys_reg_id(inst.operands[1])
+        val enc = riscv_encode_r_type(0x00, rs, RV_X0, 3, rd, 0x33)
+        return riscv_emit_u32_le(code, enc)
+    elif inst.opcode == RV_OP_LUI:
+        if inst.operands.len() < 2:
+            return riscv_emit_u32_le(code, 0x00000013)
+        if not riscv_operand_is_reg(inst.operands[0]):
+            return riscv_emit_u32_le(code, 0x00000013)
+        if not riscv_operand_is_u20_imm(inst.operands[1]):
+            return riscv_emit_u32_le(code, 0x00000013)
+        val rd = get_phys_reg_id(inst.operands[0])
+        val imm20 = get_imm_value(inst.operands[1])
+        val enc = riscv_encode_u_type(imm20, rd, 0x37)
+        return riscv_emit_u32_le(code, enc)
+    None
+
+# ============================================================================
+# Scalar Bit-Manip Encoders (Zbb / Zbkb)
+# ============================================================================
+
+fn riscv_emit_single_u32(instruction: i64) -> [i64]:
+    riscv_emit_u32_le([], instruction)
+
+fn riscv_emit_bitmanip_r_type(funct7: i64, rs2: i64, rs1: i64, funct3: i64, rd: i64) -> [i64]:
+    val enc = riscv_encode_r_type(funct7, rs2, rs1, funct3, rd, 0x33)
+    riscv_emit_single_u32(enc)
+
+fn riscv_emit_bitmanip_i_type(funct12: i64, rs1: i64, funct3: i64, rd: i64) -> [i64]:
+    val enc = riscv_encode_i_type(funct12, rs1, funct3, rd, 0x13)
+    riscv_emit_single_u32(enc)
+
+fn emit_rol_riscv64(rd: i64, rs1: i64, rs2: i64) -> [i64]:
+    """Emit `rol rd, rs1, rs2` from Zbb/Zbkb."""
+    riscv_emit_bitmanip_r_type(0x30, rs2, rs1, 0x1, rd)
+
+fn emit_ror_riscv64(rd: i64, rs1: i64, rs2: i64) -> [i64]:
+    """Emit `ror rd, rs1, rs2` from Zbb/Zbkb."""
+    riscv_emit_bitmanip_r_type(0x30, rs2, rs1, 0x5, rd)
+
+fn emit_clz_riscv64(rd: i64, rs: i64) -> [i64]:
+    """Emit `clz rd, rs` from Zbb."""
+    riscv_emit_bitmanip_i_type(0x600, rs, 0x1, rd)
+
+fn emit_ctz_riscv64(rd: i64, rs: i64) -> [i64]:
+    """Emit `ctz rd, rs` from Zbb."""
+    riscv_emit_bitmanip_i_type(0x601, rs, 0x1, rd)
+
+fn emit_cpop_riscv64(rd: i64, rs: i64) -> [i64]:
+    """Emit `cpop rd, rs` from Zbb."""
+    riscv_emit_bitmanip_i_type(0x602, rs, 0x1, rd)
+
+fn emit_rev8_riscv64(rd: i64, rs: i64) -> [i64]:
+    """Emit `rev8 rd, rs` from Zbb on RV64."""
+    riscv_emit_bitmanip_i_type(0x6b8, rs, 0x5, rd)
+
+fn emit_brev8_riscv64(rd: i64, rs: i64) -> [i64]:
+    """Emit `brev8 rd, rs` from Zbkb."""
+    riscv_emit_bitmanip_i_type(0x687, rs, 0x5, rd)

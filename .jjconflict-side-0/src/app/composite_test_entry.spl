@@ -1,0 +1,71 @@
+# Composite Test Runner Entry Point
+#
+# Invoked by the Rust test driver for composite platform modes.
+# Compiles .spl to baremetal ELF and runs on QEMU with semihosting.
+#
+# Usage: bin/simple src/app/composite_test_entry.spl <file> --mode=<spec>
+
+use app.io.mod.{file_exists, current_time_ms, dir_create}
+use app.io.process_ops.{process_run_timeout}
+use app.build.baremetal.{BaremetalBuilder, baremetal_config_riscv, baremetal_config_riscv32}
+
+fn parse_arch(args: [text]) -> text:
+    for arg in args:
+        if arg.contains("riscv32"): return "riscv32"
+        if arg.contains("riscv64"): return "riscv64"
+    "riscv32"
+
+fn main():
+    val args = get_args()
+    if args.len() < 2:
+        eprint "Usage: composite_test_entry.spl <test_file> [--mode=<spec>]"
+        exit(1)
+
+    val file_path = args[1]
+    val arch = parse_arch(args)
+
+    # Select config based on arch
+    var config = if arch == "riscv32":
+        baremetal_config_riscv32()
+    else:
+        baremetal_config_riscv()
+
+    # Step 1: Compile .spl to baremetal ELF
+    val builder = BaremetalBuilder.new(config)
+    val result = builder.build([file_path])
+
+    if not result.success:
+        print "ERROR: Baremetal compilation failed: {result.stderr}"
+        print "0 examples, 1 failures"
+        exit(1)
+
+    val elf_path = "{config.output_dir}/kernel.elf"
+    if not file_exists(elf_path):
+        print "ERROR: ELF not found at {elf_path}"
+        print "0 examples, 1 failures"
+        exit(1)
+
+    # Step 2: Run on QEMU with semihosting
+    val qemu_bin = if arch == "riscv32": "qemu-system-riscv32" else: "qemu-system-riscv64"
+    var qemu_args: [text] = [
+        "-M", "virt",
+        "-bios", "none",
+        "-kernel", elf_path,
+        "-nographic",
+        "-semihosting-config", "enable=on,target=native",
+    ]
+
+    val (stdout, stderr, exit_code) = process_run_timeout(qemu_bin, qemu_args, 30000)
+
+    # Print QEMU output (contains test results)
+    if stdout != "":
+        print stdout
+    if stderr != "" and exit_code != 0:
+        eprint stderr
+
+    # If exit code is 0 and we got output, treat as success
+    if exit_code == 0:
+        print "1 examples, 0 failures"
+    else:
+        print "0 examples, 1 failures"
+        exit(1)

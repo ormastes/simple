@@ -1,0 +1,85 @@
+# ============================================================================
+# nand_emu — Factory bad-block map generation
+# ============================================================================
+#
+# A deterministic factory bad-block map derived from a seed (doc §8 scenario 9:
+# "40 blocks with non-FFh at column 4,096 of page 0/1"). Good blocks read FFh
+# at the bad-block marker; factory-bad blocks carry a non-FFh marker. Erasing a
+# factory-bad block destroys the marker one-way (doc §8 scenario 10).
+#
+# Source: doc/01_research/hardware/nand_emu/nand_emu_fpga_riscv_emulator.md §8
+# ============================================================================
+
+use std.hardware.nand_emu.nand_types.NeGeometry
+
+# ----------------------------------------------------------------------------
+# Bad-block marker constant (datasheet) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_good_block_marker() -> i64:
+    """The marker byte a GOOD block reads at the bad-block marker column: FFh.
+    Factory-bad blocks carry a non-FFh value here (doc §8 scenario 9)."""
+    0xFF
+
+# ----------------------------------------------------------------------------
+# Deterministic factory bad-block map (doc §8) — IMPLEMENTED.
+# ----------------------------------------------------------------------------
+
+pub fn ne_factory_bad_map(geo: NeGeometry, count: i64, seed: i64) -> [bool]:
+    """Deterministically choose `count` factory-bad blocks from `seed`,
+    returning a per-block bad flag array of length geo.blocks (doc §8
+    scenario 9: "40 blocks with non-FFh at column 4,096 of page 0/1").
+
+    Block 0 is NEVER selected: the datasheet guarantees block 0 is always a
+    valid block (so a bootloader can always find one known-good block), so
+    candidates are drawn only from blocks 1..geo.blocks-1.
+
+    Self-contained 32-bit LCG (Numerical Recipes constants: a=1664525,
+    c=1013904223, mod 2^32) seeded from `seed` — deliberately NOT
+    vt_array.ne_splitmix32, which lives in a different module owned by a
+    different lane and is a stub there; this stays self-contained so
+    badblock.spl has no cross-lane dependency. Rejection-samples until
+    `count` distinct blocks are marked (or the achievable ceiling
+    geo.blocks - 1 is reached, so a caller can never request an unsatisfiable
+    map). Fully deterministic: the same (geo.blocks, count, seed) always
+    produces the exact same map, in the same pick order.
+    """
+    var bad: [bool] = []
+    var i = 0
+    while i < geo.blocks:
+        bad = bad.push(false)
+        i = i + 1
+
+    if geo.blocks < 2:
+        return bad
+
+    val ceiling = geo.blocks - 1
+    val target = count if count < ceiling else ceiling
+    var state = seed
+    var picked = 0
+    var guard = 0
+    val guard_max = ceiling * 1000 + 1000
+    while picked < target and guard < guard_max:
+        state = (state * 1664525 + 1013904223) & 0xFFFFFFFF
+        val candidate = 1 + (state % ceiling)
+        if !bad[candidate]:
+            bad[candidate] = true
+            picked = picked + 1
+        guard = guard + 1
+    bad
+
+pub fn ne_is_factory_bad(bad_map: [bool], blk: i64) -> bool:
+    """True when block `blk` is in the factory bad-block map."""
+    bad_map[blk]
+
+pub fn ne_bad_marker_column(geo: NeGeometry) -> i64:
+    """Column at which the bad-block marker lives for this geometry —
+    datasheet column 4,096 shrunk into the page window (doc §8 scenario 9).
+
+    On the real chip, column 4,096 is the first spare byte: the main area is
+    8 sectors * 512 B = 4,096 B, so the marker sits exactly at the main/spare
+    boundary. Shrunk profiles keep that same main/spare-boundary rule scaled
+    by their own sector count: boundary = sectors_per_page * 512.
+    S1/S2 (1 sector/page) -> column 512. S3 (8 sectors/page, i.e. real page
+    size) -> column 4,096, matching the real chip exactly."""
+    geo.sectors_per_page * 512

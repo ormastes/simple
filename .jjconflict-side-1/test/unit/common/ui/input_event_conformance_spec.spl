@@ -1,0 +1,598 @@
+# @cover src/lib/common/ui/widget.spl 0%
+# @tag: ui, input, conformance, contract
+# Row-7 GUI work matrix — Phase 1 (in-process) of the input-event
+# conformance suite.
+#
+# Plan: doc/03_plan/sys_test/input_event_conformance.md
+#
+# Phase 1 scope:
+#   * Cover the 13 existing UIEvent variants in src/lib/common/ui/widget.spl
+#   * Drive each scenario through the in-process reference-oracle backend
+#     (an in-memory event queue — the `ui.none` backend per the plan doc)
+#   * Load scenarios from SDN trace files under input_event_conformance/
+#     to prove the trace format + loader work end-to-end
+#   * Assert structural conformance: event count, shape, and canonical
+#     enum-variant rendering match the trace's expected sequence
+#
+# Out of scope (Phase 2/3): real Cocoa/Win32/winit/PS-2 platform hooks,
+# pointer/wheel/IME variants that don't yet exist on UIEvent, and
+# cross-backend wm_compare integration.
+
+use std.spec.{describe, context, it, expect}
+use common.ui.widget.{UIEvent}
+
+extern fn rt_file_read_lines(path: text) -> [text]
+
+# ============================================================================
+# Helpers (workarounds for interpreter type-tracking quirks)
+# ============================================================================
+#
+# These wrappers exist because calling text/array methods directly on
+# `var`/`val` locals in the interpreter degrades their tracked type to
+# bool/i64 and breaks subsequent calls on the same variable. Wrapping each
+# method in a free function with explicit parameter types isolates the
+# (broken) inference per call site.
+
+fn arr_len_text(a: [text]) -> i64:
+    a.len()
+
+fn arr_len_event(a: [UIEvent]) -> i64:
+    a.len()
+
+fn text_len(t: text) -> i64:
+    t.len()
+
+fn text_trim(t: text) -> text:
+    t.trim()
+
+fn text_starts_with(t: text, prefix: text) -> bool:
+    t.starts_with(prefix)
+
+fn text_ends_with(t: text, suffix: text) -> bool:
+    t.ends_with(suffix)
+
+fn text_substring(t: text, start: i64, end: i64) -> text:
+    t.substring(start, end)
+
+fn text_split(t: text, sep: text) -> [text]:
+    t.split(sep)
+
+fn _read_lines(path: text) -> [text]:
+    rt_file_read_lines(path) ?? []
+
+# ============================================================================
+# Canonical event rendering
+# ============================================================================
+#
+# Canonical text encoding: VARIANT[|arg|...]. Used for both trace files and
+# the live driver so enum reshapes across phases don't require rewriting
+# every trace.
+
+fn render_event(ev: UIEvent) -> text:
+    match ev:
+        case UIEvent.KeyPress(key):
+            "KeyPress|{key}"
+        case UIEvent.Resize(w, h):
+            "Resize|{w}|{h}"
+        case UIEvent.FileChanged:
+            "FileChanged"
+        case UIEvent.Quit:
+            "Quit"
+        case UIEvent.Action(name):
+            "Action|{name}"
+        case UIEvent.FocusNext:
+            "FocusNext"
+        case UIEvent.FocusPrev:
+            "FocusPrev"
+        case UIEvent.CommandMode:
+            "CommandMode"
+        case UIEvent.NormalMode:
+            "NormalMode"
+        case UIEvent.InsertMode:
+            "InsertMode"
+        case UIEvent.TouchPress(x, y):
+            "TouchPress|{x}|{y}"
+        case UIEvent.TouchMove(x, y):
+            "TouchMove|{x}|{y}"
+        case UIEvent.TouchRelease(x, y):
+            "TouchRelease|{x}|{y}"
+
+fn _digit_value(ch: text) -> i32:
+    match ch:
+        "0" => 0
+        "1" => 1
+        "2" => 2
+        "3" => 3
+        "4" => 4
+        "5" => 5
+        "6" => 6
+        "7" => 7
+        "8" => 8
+        "9" => 9
+        _ => -1
+
+fn parse_i32(s: text) -> i32:
+    # Hand-rolled decimal parser — avoids interpreter quirks where
+    # text.to_int() returns either Option<i64> or raw i64 depending on mode.
+    var result: i32 = 0
+    var sign: i32 = 1
+    var started = false
+    for ch in s:
+        val is_minus = ch == "-"
+        if is_minus and not started:
+            sign = -1
+            started = true
+        else:
+            val d = _digit_value(ch)
+            if d >= 0:
+                result = result * 10 + d
+                started = true
+    result * sign
+
+fn build_event(canonical: text) -> UIEvent?:
+    val parts = text_split(canonical, "|")
+    val kind = parts[0]
+    val n = arr_len_text(parts)
+    match kind:
+        "KeyPress" =>
+            if n >= 2:
+                Some(UIEvent.KeyPress(key: parts[1]))
+            else:
+                nil
+        "Resize" =>
+            if n >= 3:
+                val w = parse_i32(parts[1])
+                val h = parse_i32(parts[2])
+                Some(UIEvent.Resize(width: w, height: h))
+            else:
+                nil
+        "FileChanged" => Some(UIEvent.FileChanged)
+        "Quit"        => Some(UIEvent.Quit)
+        "Action" =>
+            if n >= 2:
+                Some(UIEvent.Action(name: parts[1]))
+            else:
+                nil
+        "FocusNext"   => Some(UIEvent.FocusNext)
+        "FocusPrev"   => Some(UIEvent.FocusPrev)
+        "CommandMode" => Some(UIEvent.CommandMode)
+        "NormalMode"  => Some(UIEvent.NormalMode)
+        "InsertMode"  => Some(UIEvent.InsertMode)
+        "TouchPress" =>
+            if n >= 3:
+                val x = parse_i32(parts[1])
+                val y = parse_i32(parts[2])
+                Some(UIEvent.TouchPress(x: x, y: y))
+            else:
+                nil
+        "TouchMove" =>
+            if n >= 3:
+                val x = parse_i32(parts[1])
+                val y = parse_i32(parts[2])
+                Some(UIEvent.TouchMove(x: x, y: y))
+            else:
+                nil
+        "TouchRelease" =>
+            if n >= 3:
+                val x = parse_i32(parts[1])
+                val y = parse_i32(parts[2])
+                Some(UIEvent.TouchRelease(x: x, y: y))
+            else:
+                nil
+        _ => nil
+
+# ============================================================================
+# In-process reference-oracle backend
+# ============================================================================
+#
+# Per the plan doc §5: the `ui.none` backend is the reference oracle. Its
+# stimulus is the expected UIEvent list itself — it can never disagree with
+# itself, so it serves as a round-trip check for the trace loader and the
+# canonical encoding.
+
+class InProcessInputBackend:
+    """Phase-1 in-memory UIEvent queue, used as the reference oracle."""
+    queue: [UIEvent]
+
+impl InProcessInputBackend:
+    static fn create() -> InProcessInputBackend:
+        InProcessInputBackend(queue: [])
+
+    me push(ev: UIEvent):
+        self.queue.push(ev)
+
+    me snapshot() -> [UIEvent]:
+        self.queue
+
+    me clear():
+        self.queue = []
+
+# ============================================================================
+# Trace loader
+# ============================================================================
+#
+# Phase-1 traces are intentionally small SDN documents with this shape:
+#
+#     name: <scenario name>
+#     description: <human description>
+#     expected:
+#       - "Variant|arg|arg"
+#       - ...
+#
+# The loader is a hand-rolled line scanner — it extracts the `expected:`
+# array as a flat list of canonical event strings. Phase-2 will likely
+# upgrade to the std.sdn parser once the full backend fan-out is needed,
+# but Phase-1 only needs the expected list.
+
+struct TraceScenario:
+    name: text
+    description: text
+    expected: [text]
+
+fn _strip_quotes(s: text) -> text:
+    val trimmed = text_trim(s)
+    val starts_q = text_starts_with(trimmed, "\"")
+    val ends_q = text_ends_with(trimmed, "\"")
+    val len_v = text_len(trimmed)
+    if starts_q and ends_q and len_v >= 2:
+        text_substring(trimmed, 1, len_v - 1)
+    else:
+        trimmed
+
+fn _value_after_colon(line: text) -> text:
+    # Split on the first ":" by using text_split and rejoining the tail.
+    # text_split is total in interpreter mode; if there's no colon the
+    # whole line comes back as parts[0] and we return "".
+    val parts = text_split(line, ":")
+    val n = arr_len_text(parts)
+    if n < 2:
+        return ""
+    var rest = parts[1]
+    var i: i64 = 2
+    while i < n:
+        rest = "{rest}:{parts[i]}"
+        i = i + 1
+    val rest_trimmed = text_trim(rest)
+    _strip_quotes(rest_trimmed)
+
+fn _item_value(line: text) -> text:
+    val line_len = text_len(line)
+    val tail = text_substring(line, 2, line_len)
+    val tail_trimmed = text_trim(tail)
+    _strip_quotes(tail_trimmed)
+
+fn load_trace(path: text) -> TraceScenario:
+    val lines = _read_lines(path)
+    var name: text = ""
+    var description: text = ""
+    var expected: [text] = []
+    var in_expected = false
+    for raw_line in lines:
+        val line = text_trim(raw_line)
+        val is_name = text_starts_with(line, "name:")
+        val is_desc = text_starts_with(line, "description:")
+        val is_exp_header = text_starts_with(line, "expected:")
+        val is_item = text_starts_with(line, "- ")
+        if is_name:
+            name = _value_after_colon(line)
+            in_expected = false
+        else:
+            if is_desc:
+                description = _value_after_colon(line)
+                in_expected = false
+            else:
+                if is_exp_header:
+                    in_expected = true
+                else:
+                    if is_item and in_expected:
+                        expected.push(_item_value(line))
+    TraceScenario(name: name, description: description, expected: expected)
+
+# ============================================================================
+# Driver: run a scenario through the in-process backend
+# ============================================================================
+
+fn run_scenario(scenario: TraceScenario) -> [text]:
+    val backend = InProcessInputBackend.create()
+    for canonical in scenario.expected:
+        val maybe = build_event(canonical)
+        if maybe.?:
+            backend.push(maybe.unwrap())
+    val drained = backend.snapshot()
+    var out: [text] = []
+    for ev in drained:
+        out.push(render_event(ev))
+    out
+
+fn _trace(name: text) -> text:
+    "test/unit/common/ui/input_event_conformance/{name}.sdn"
+
+# ============================================================================
+# Specs
+# ============================================================================
+
+describe "input event conformance suite (phase 1, in-process)":
+
+    context "canonical encoding round-trips through every UIEvent variant":
+
+        it "renders KeyPress with key argument":
+            val s = render_event(UIEvent.KeyPress(key: "a"))
+            expect(s == "KeyPress|a").to_be_true()
+
+        it "renders Resize with width and height":
+            val s = render_event(UIEvent.Resize(width: 800, height: 600))
+            expect(s == "Resize|800|600").to_be_true()
+
+        it "renders all unit variants":
+            val a = render_event(UIEvent.FileChanged)
+            val b = render_event(UIEvent.Quit)
+            val c = render_event(UIEvent.FocusNext)
+            val d = render_event(UIEvent.FocusPrev)
+            val e = render_event(UIEvent.CommandMode)
+            val f = render_event(UIEvent.NormalMode)
+            val g = render_event(UIEvent.InsertMode)
+            expect(a == "FileChanged").to_be_true()
+            expect(b == "Quit").to_be_true()
+            expect(c == "FocusNext").to_be_true()
+            expect(d == "FocusPrev").to_be_true()
+            expect(e == "CommandMode").to_be_true()
+            expect(f == "NormalMode").to_be_true()
+            expect(g == "InsertMode").to_be_true()
+
+        it "renders pointer/touch variants with coordinates":
+            val p = render_event(UIEvent.TouchPress(x: 1, y: 2))
+            val m = render_event(UIEvent.TouchMove(x: 3, y: 4))
+            val r = render_event(UIEvent.TouchRelease(x: 5, y: 6))
+            expect(p == "TouchPress|1|2").to_be_true()
+            expect(m == "TouchMove|3|4").to_be_true()
+            expect(r == "TouchRelease|5|6").to_be_true()
+
+        it "renders Action with name argument":
+            val s = render_event(UIEvent.Action(name: "focus_btn_ok"))
+            expect(s == "Action|focus_btn_ok").to_be_true()
+
+    context "in-process backend queues UIEvents in order":
+
+        it "starts with an empty queue":
+            val backend = InProcessInputBackend.create()
+            val snap = backend.snapshot()
+            val n = arr_len_event(snap)
+            val empty = n == 0
+            expect(empty).to_be_true()
+
+        it "snapshots pushed events in FIFO order":
+            val backend = InProcessInputBackend.create()
+            backend.push(UIEvent.KeyPress(key: "a"))
+            backend.push(UIEvent.KeyPress(key: "b"))
+            backend.push(UIEvent.Quit)
+            val drained = backend.snapshot()
+            val e0 = render_event(drained[0])
+            val e1 = render_event(drained[1])
+            val e2 = render_event(drained[2])
+            val n = arr_len_event(drained)
+            val len_ok = n == 3
+            expect(len_ok).to_be_true()
+            expect(e0 == "KeyPress|a").to_be_true()
+            expect(e1 == "KeyPress|b").to_be_true()
+            expect(e2 == "Quit").to_be_true()
+
+        it "clear empties the queue":
+            val backend = InProcessInputBackend.create()
+            backend.push(UIEvent.FileChanged)
+            backend.clear()
+            val snap = backend.snapshot()
+            val n = arr_len_event(snap)
+            val empty = n == 0
+            expect(empty).to_be_true()
+
+    context "SDN trace loader parses Phase-1 traces":
+
+        it "loads the key_press_letter trace with one expected event":
+            val sc = load_trace(_trace("key_press_letter"))
+            val name_ok = sc.name == "key_press_letter"
+            expect(name_ok).to_be_true()
+            val first = sc.expected[0]
+            val n = arr_len_text(sc.expected)
+            val len_ok = n == 1
+            expect(len_ok).to_be_true()
+            expect(first == "KeyPress|a").to_be_true()
+
+        it "loads the touch_drag_sequence trace as a multi-step scenario":
+            val sc = load_trace(_trace("touch_drag_sequence"))
+            val first = sc.expected[0]
+            val last = sc.expected[3]
+            val n = arr_len_text(sc.expected)
+            val len_ok = n == 4
+            expect(len_ok).to_be_true()
+            expect(first == "TouchPress|10|10").to_be_true()
+            expect(last == "TouchRelease|40|25").to_be_true()
+
+    context "structural conformance: every Phase-1 trace replays cleanly":
+
+        # One it-block per UIEvent variant (13 variants) plus the
+        # composite drag scenario. Each loads the SDN trace, runs it
+        # through the in-process backend, and asserts the rendered
+        # output matches the trace's expected list exactly.
+
+        it "replays key_press_letter (UIEvent.KeyPress letter)":
+            val sc = load_trace(_trace("key_press_letter"))
+            val out = run_scenario(sc)
+            val v = out[0]
+            val n = arr_len_text(out)
+            val expected_n = arr_len_text(sc.expected)
+            val len_ok = n == expected_n
+            expect(len_ok).to_be_true()
+            expect(v == "KeyPress|a").to_be_true()
+
+        it "replays key_press_enter (UIEvent.KeyPress named key)":
+            val sc = load_trace(_trace("key_press_enter"))
+            val out = run_scenario(sc)
+            val v = out[0]
+            val n = arr_len_text(out)
+            val len_ok = n == 1
+            expect(len_ok).to_be_true()
+            expect(v == "KeyPress|enter").to_be_true()
+
+        it "replays resize (UIEvent.Resize)":
+            val sc = load_trace(_trace("resize"))
+            val out = run_scenario(sc)
+            val v = out[0]
+            val n = arr_len_text(out)
+            val len_ok = n == 1
+            expect(len_ok).to_be_true()
+            expect(v == "Resize|1920|1080").to_be_true()
+
+        it "replays file_changed (UIEvent.FileChanged)":
+            val sc = load_trace(_trace("file_changed"))
+            val out = run_scenario(sc)
+            val v = out[0]
+            val n = arr_len_text(out)
+            val len_ok = n == 1
+            expect(len_ok).to_be_true()
+            expect(v == "FileChanged").to_be_true()
+
+        it "replays quit (UIEvent.Quit)":
+            val sc = load_trace(_trace("quit"))
+            val out = run_scenario(sc)
+            val v = out[0]
+            val n = arr_len_text(out)
+            val len_ok = n == 1
+            expect(len_ok).to_be_true()
+            expect(v == "Quit").to_be_true()
+
+        it "replays action_focus (UIEvent.Action)":
+            val sc = load_trace(_trace("action_focus"))
+            val out = run_scenario(sc)
+            val v = out[0]
+            val n = arr_len_text(out)
+            val len_ok = n == 1
+            expect(len_ok).to_be_true()
+            expect(v == "Action|focus_btn_ok").to_be_true()
+
+        it "replays focus_next (UIEvent.FocusNext)":
+            val sc = load_trace(_trace("focus_next"))
+            val out = run_scenario(sc)
+            val v = out[0]
+            val n = arr_len_text(out)
+            val len_ok = n == 1
+            expect(len_ok).to_be_true()
+            expect(v == "FocusNext").to_be_true()
+
+        it "replays focus_prev (UIEvent.FocusPrev)":
+            val sc = load_trace(_trace("focus_prev"))
+            val out = run_scenario(sc)
+            val v = out[0]
+            val n = arr_len_text(out)
+            val len_ok = n == 1
+            expect(len_ok).to_be_true()
+            expect(v == "FocusPrev").to_be_true()
+
+        it "replays command_mode (UIEvent.CommandMode)":
+            val sc = load_trace(_trace("command_mode"))
+            val out = run_scenario(sc)
+            val v = out[0]
+            val n = arr_len_text(out)
+            val len_ok = n == 1
+            expect(len_ok).to_be_true()
+            expect(v == "CommandMode").to_be_true()
+
+        it "replays normal_mode (UIEvent.NormalMode)":
+            val sc = load_trace(_trace("normal_mode"))
+            val out = run_scenario(sc)
+            val v = out[0]
+            val n = arr_len_text(out)
+            val len_ok = n == 1
+            expect(len_ok).to_be_true()
+            expect(v == "NormalMode").to_be_true()
+
+        it "replays insert_mode (UIEvent.InsertMode)":
+            val sc = load_trace(_trace("insert_mode"))
+            val out = run_scenario(sc)
+            val v = out[0]
+            val n = arr_len_text(out)
+            val len_ok = n == 1
+            expect(len_ok).to_be_true()
+            expect(v == "InsertMode").to_be_true()
+
+        it "replays touch_press (UIEvent.TouchPress)":
+            val sc = load_trace(_trace("touch_press"))
+            val out = run_scenario(sc)
+            val v = out[0]
+            val n = arr_len_text(out)
+            val len_ok = n == 1
+            expect(len_ok).to_be_true()
+            expect(v == "TouchPress|120|240").to_be_true()
+
+        it "replays touch_move (UIEvent.TouchMove, multi-sample)":
+            val sc = load_trace(_trace("touch_move"))
+            val out = run_scenario(sc)
+            val first = out[0]
+            val last = out[2]
+            val n = arr_len_text(out)
+            val len_ok = n == 3
+            expect(len_ok).to_be_true()
+            expect(first == "TouchMove|130|240").to_be_true()
+            expect(last == "TouchMove|150|250").to_be_true()
+
+        it "replays touch_release (UIEvent.TouchRelease)":
+            val sc = load_trace(_trace("touch_release"))
+            val out = run_scenario(sc)
+            val v = out[0]
+            val n = arr_len_text(out)
+            val len_ok = n == 1
+            expect(len_ok).to_be_true()
+            expect(v == "TouchRelease|150|250").to_be_true()
+
+        it "replays touch_drag_sequence (composite press/move/release)":
+            val sc = load_trace(_trace("touch_drag_sequence"))
+            val out = run_scenario(sc)
+            val v0 = out[0]
+            val v1 = out[1]
+            val v2 = out[2]
+            val v3 = out[3]
+            val n = arr_len_text(out)
+            val len_ok = n == 4
+            expect(len_ok).to_be_true()
+            expect(v0 == "TouchPress|10|10").to_be_true()
+            expect(v1 == "TouchMove|20|15").to_be_true()
+            expect(v2 == "TouchMove|30|20").to_be_true()
+            expect(v3 == "TouchRelease|40|25").to_be_true()
+
+    context "deferred Phase-2/3 variants":
+
+        # Variants in src/os/gui/input_event.spl & doc/03_plan/sys_test/
+        # input_event_conformance.md §2 that don't yet exist on UIEvent.
+        # Phase 2/3 will land them with real platform hooks. Documented
+        # here so the deferred set is visible from the spec.
+
+        it "documents KeyDown/KeyUp distinct from KeyPress (phase 2)":
+            # Needs UIEvent reshape — see plan doc §2.1
+            expect(true).to_be_true()
+
+        it "documents Modifier shift/ctrl/alt/meta snapshot (phase 2)":
+            # Modifier state lives in InputBackend trait, not UIEvent — plan §2.2
+            expect(true).to_be_true()
+
+        it "documents Scroll/Wheel dx,dy (phase 3)":
+            # Completely absent from UIEvent today — plan §2.3
+            expect(true).to_be_true()
+
+        it "documents PointerEnter/PointerLeave hover (phase 2)":
+            # Plan §2.4
+            expect(true).to_be_true()
+
+        it "documents window-level FocusGained/FocusLost (phase 2)":
+            # Plan §2.5
+            expect(true).to_be_true()
+
+        it "documents IME ImeComposeStart/Update/Commit/Cancel (phase 3)":
+            # Plan §2.6
+            expect(true).to_be_true()
+
+        it "documents CloseRequested distinct from Quit (phase 2)":
+            # Plan §2.7 — currently EVENT_CLOSE is collapsed to KeyPress(Escape)
+            expect(true).to_be_true()
+
+        it "documents DoubleClick/TripleClick click-count (phase 3)":
+            # Plan §2.8
+            expect(true).to_be_true()

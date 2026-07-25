@@ -1,0 +1,601 @@
+## Per-target cross-build scaffolding spec (A4/A5).
+##
+## Static checks that build.spl, build.shs, compiler_rt_cmake.cmake, and
+## the SimpleOS ToolChain README are wired up so the cross-build pipeline
+## iterates every SimpleOS triple and stages compiler-rt builtins into the
+## clang resource dir.
+##
+## Run:
+##   bin/simple test test/integration/os/port/llvm/per_target_build_spec.spl
+
+use std.text
+use std.process
+use std.spec
+
+val BUILD_SPL = "src/os/port/llvm/build.spl"
+val BUILD_SHS = "src/os/port/llvm/build.shs"
+val SYSROOT_SHS = "src/os/port/llvm/sysroot.shs"
+val RT_CMAKE  = "src/os/port/llvm/compiler_rt_cmake.cmake"
+val TOOLCHAIN_README = "src/os/port/llvm/patches/simpleos_toolchain_cpp/README.md"
+val RAW_OS_OSTREAM_PATCH = "src/os/port/llvm/patches/0005-llvm-support-raw-os-ostream-no-localization.patch.md"
+val PATH_MAIN_EXECUTABLE_PATCH = "src/os/port/llvm/patches/0006-llvm-support-simpleos-path-main-executable.patch.md"
+val ASSIGNMENT_TRACKING_PATCH = "src/os/port/llvm/patches/0007-llvm-codegen-assignment-tracking-no-sstream.patch.md"
+val SAMPLE_PROF_PATCH = "src/os/port/llvm/patches/0008-llvm-profiledata-sampleprof-no-sstream.patch.md"
+val INSTRUMENTATION_HEX_PATCH = "src/os/port/llvm/patches/0009-llvm-instrumentation-no-iostream-hex-formatting.patch.md"
+val MEMPROF_HEX_PATCH = "src/os/port/llvm/patches/0010-llvm-memprof-no-iostream-nodeid-formatting.patch.md"
+val IMPORT_STATS_PATCH = "src/os/port/llvm/patches/0011-llvm-analysis-import-stats-no-iostream-precision.patch.md"
+val MC_NO_SSTREAM_PATCH = "src/os/port/llvm/patches/0012-llvm-mc-no-sstream.patch.md"
+val COVERAGE_MAPPING_PATCH = "src/os/port/llvm/patches/0013-llvm-coverage-mapping-no-sstream.patch.md"
+val TEXTAPI_DYLIBREADER_PATCH = "src/os/port/llvm/patches/0014-llvm-textapi-dylibreader-no-iostream-hex-formatting.patch.md"
+val CLANG_PPMACROEXPANSION_PATCH = "src/os/port/llvm/patches/0015-clang-lex-ppmacroexpansion-no-put-time.patch.md"
+val LLD_ERRORHANDLER_PATCH = "src/os/port/llvm/patches/0016-lld-errorhandler-no-regex.patch.md"
+val CLANG_NO_IOSTREAM_PATCH = "src/os/port/llvm/patches/0017-clang-no-iostream-fstream.patch.md"
+val CLANG_DRIVER_FLUSH_PATCH = "src/os/port/llvm/patches/0018-clang-driver-flush-target-triple.patch.md"
+val LLD_NO_ASYNC_UNLINK_PATCH = "src/os/port/llvm/patches/0019-lld-filesystem-no-async-unlink-without-threads.patch.md"
+val CLANG_DRIVER_SYSROOT_LINK_PATCH = "src/os/port/llvm/patches/0020-clang-simpleos-driver-default-sysroot-link.patch.md"
+val LLVM_TARGETPARSER_NO_SYSCALL_PATCH = "src/os/port/llvm/patches/0021-llvm-targetparser-simpleos-no-linux-syscall-probes.patch.md"
+val LLVM_AARCH64_NO_SSTREAM_PATCH = "src/os/port/llvm/patches/0022-llvm-aarch64-no-sstream-frame-helper.patch.md"
+val LLVM_TOOLCHAIN = "src/os/toolchain/llvm/simpleos_cross_toolchain.cmake"
+val CXXABI_C = "src/os/libc/simpleos_cxxabi.c"
+val LIBC_C = "src/os/libc/simpleos_libc.c"
+val DLMALLOC_C = "src/os/libc/simpleos_dlmalloc.c"
+val FS_C = "src/os/libc/simpleos_fs.c"
+val FORK_C = "src/os/libc/simpleos_fork.c"
+val IPC_C = "src/os/libc/simpleos_ipc.c"
+val CRT0_S = "src/os/libc/simpleos_crt0.S"
+val PROCESS_WAIT_C = "src/os/libc/simpleos_process_wait.c"
+val STRING_EXT_C = "src/os/libc/simpleos_string_ext.c"
+val MATH_EXT_C = "src/os/libc/simpleos_math_ext.c"
+val ASSERT_H = "src/os/libc/include/assert.h"
+val CTYPE_H = "src/os/libc/include/ctype.h"
+val INTTYPES_H = "src/os/libc/include/inttypes.h"
+val ENDIAN_H = "src/os/libc/include/endian.h"
+val LIMITS_H = "src/os/libc/include/limits.h"
+val LOCALE_H = "src/os/libc/include/locale.h"
+val MATH_H = "src/os/libc/include/math.h"
+val MBSTATE_H = "src/os/libc/include/bits/types/mbstate_t.h"
+val STDIO_H = "src/os/libc/include/stdio.h"
+val STDLIB_H = "src/os/libc/include/stdlib.h"
+val STRING_H = "src/os/libc/include/string.h"
+val SYSEXITS_H = "src/os/libc/include/sysexits.h"
+val TIME_H = "src/os/libc/include/time.h"
+val PTHREAD_H = "src/os/libc/include/pthread.h"
+val WCHAR_H = "src/os/libc/include/wchar.h"
+val WCTYPE_H = "src/os/libc/include/wctype.h"
+val SCHED_H = "src/os/libc/include/sched.h"
+val UNISTD_H = "src/os/libc/include/unistd.h"
+val SYS_RESOURCE_H = "src/os/libc/include/sys/resource.h"
+val SYS_TIME_H = "src/os/libc/include/sys/time.h"
+val PWD_H = "src/os/libc/include/pwd.h"
+val SYS_SOCKET_H = "src/os/libc/include/sys/socket.h"
+val SYS_UN_H = "src/os/libc/include/sys/un.h"
+val SYS_FILE_H = "src/os/libc/include/sys/file.h"
+val SYS_MMAN_H = "src/os/libc/include/sys/mman.h"
+val SYS_STATVFS_H = "src/os/libc/include/sys/statvfs.h"
+val SYS_VFS_H = "src/os/libc/include/sys/vfs.h"
+val SYS_UTSNAME_H = "src/os/libc/include/sys/utsname.h"
+
+fn build_spl_src() -> text:
+    process.run("cat", [BUILD_SPL]).stdout
+
+fn build_shs_src() -> text:
+    process.run("cat", [BUILD_SHS]).stdout
+
+fn sysroot_shs_src() -> text:
+    process.run("cat", [SYSROOT_SHS]).stdout
+
+fn llvm_toolchain_src() -> text:
+    process.run("cat", [LLVM_TOOLCHAIN]).stdout
+
+fn rt_cmake_src() -> text:
+    process.run("cat", [RT_CMAKE]).stdout
+
+fn check(condition: bool):
+    expect(condition).to_equal(true)
+
+fn regular_file_exists(path: text) -> bool:
+    process.run("test", ["-f", path]).exit_code == 0
+
+describe "SimpleOS LLVM per-target build (A4/A5)":
+    """Scaffolding checks for the multi-target cross-build + compiler-rt stage."""
+
+    it "declares CROSS_SUPPORTED_TARGETS":
+        """The SimpleOS target list constant must be present."""
+        val src = build_spl_src()
+        check(src.contains("val CROSS_SUPPORTED_TARGETS"))
+
+    it "CROSS_SUPPORTED_TARGETS lists all five SimpleOS triples":
+        """All 5 triples required by A4 must appear in build.spl."""
+        val src = build_spl_src()
+        check(src.contains("x86_64-unknown-simpleos"))
+        check(src.contains("aarch64-unknown-simpleos"))
+        check(src.contains("armv7-unknown-simpleos"))
+        check(src.contains("riscv64gc-unknown-simpleos"))
+        check(src.contains("riscv32imac-unknown-simpleos"))
+
+    it "honours SIMPLE_TARGET env override":
+        """Single-target override must be wired into selection."""
+        val src = build_spl_src()
+        check(src.contains("SIMPLE_TARGET"))
+        check(src.contains("cross_selected_targets"))
+
+    it "cross_build_all iterates CROSS_SUPPORTED_TARGETS":
+        """Full cross-build must loop via the per-target stage helper."""
+        val src = build_spl_src()
+        check(src.contains("fn cross_build_all"))
+        check(src.contains("cross_build_stage_for_target"))
+
+    it "exports build_compiler_rt(triple)":
+        """A5's public compiler-rt builder must be present with a triple parameter."""
+        val src = build_spl_src()
+        check(src.contains("fn build_compiler_rt(triple: text)"))
+
+    it "exports build_compiler_rt_for_target":
+        """Internal per-target helper must also be exposed for callers/tests."""
+        val src = build_spl_src()
+        check(src.contains("fn build_compiler_rt_for_target"))
+
+    it "registers compiler-rt subcommand in cross_build_main":
+        """The new `compiler-rt` subcommand keyword must be wired up."""
+        val src = build_spl_src()
+        check(src.contains("\"compiler-rt\""))
+        check(src.contains("subcommand"))
+
+    it "exposes --print-plan CLI flag":
+        val src = build_spl_src()
+        check(src.contains("--print-plan"))
+
+    it "stages builtins into clang resource dir":
+        val src = build_spl_src()
+        val shs = build_shs_src()
+        check(src.contains("lib/clang/"))
+        check(src.contains("CLANG_RESOURCE_VERSION"))
+        check(src.contains("CLANG_RESOURCE_VERSION: text = \"20\""))
+        check(shs.contains("CLANG_RES_VERSION="))
+        check(shs.contains(":-20"))
+
+    it "gates compiler-rt behind -simpleos triples":
+        val src = build_spl_src()
+        check(src.contains("ends_with(\"-simpleos\")"))
+
+    it "per-target build dir is cross-<triple>":
+        val src = build_spl_src()
+        check(src.contains("cross-"))
+
+    it "compiler-rt build dir is compiler-rt-<triple>":
+        val src = build_spl_src()
+        check(src.contains("compiler-rt-"))
+
+    it "build.shs threads SIMPLEOS_TARGET_TRIPLE":
+        val src = build_shs_src()
+        check(src.contains("SIMPLEOS_TARGET_TRIPLE"))
+        check(src.contains("SIMPLE_TARGET"))
+
+    it "build.spl uses std.process run for staged shell calls":
+        val src = build_spl_src()
+        check(src.contains("process.run(\"sh\", [\"src/os/port/llvm/build.shs\", stage])"))
+
+    it "build.shs uses per-triple CROSS_DIR / RT_DIR":
+        val src = build_shs_src()
+        check(src.contains("CROSS_DIR="))
+        check(src.contains("RT_DIR="))
+
+    it "cross clang embeds LLD for in-guest linking":
+        val src = build_shs_src()
+        check(src.contains("-UCMAKE_C_FLAGS"))
+        check(src.contains("-UCMAKE_CXX_FLAGS"))
+        check(src.contains("-DLLVM_ENABLE_PROJECTS=\"clang;lld\""))
+        check(src.contains("-DCLANG_SIMPLEOS_EMBED_LLD=ON"))
+
+    it "build.shs still dispatches compiler-rt subcommand":
+        val src = build_shs_src()
+        check(src.contains("compiler-rt)"))
+        check(src.contains("stage3_compiler_rt"))
+
+    it "build.shs lets compiler-rt derive the default target triple":
+        val src = build_shs_src()
+        check(src.contains("-UCOMPILER_RT_DEFAULT_TARGET_TRIPLE"))
+        check(!src.contains("-DCOMPILER_RT_DEFAULT_TARGET_TRIPLE"))
+        check(src.contains("-DCMAKE_C_COMPILER_TARGET=\"$TRIPLE\""))
+
+    it "compiler-rt preload does not inject an empty sysroot flag":
+        val build = build_shs_src()
+        val cache = rt_cmake_src()
+        check(build.contains("-UCMAKE_EXE_LINKER_FLAGS"))
+        check(build.contains("-UCMAKE_C_FLAGS"))
+        check(build.contains("-UCMAKE_CXX_FLAGS"))
+        check(build.contains("-UCMAKE_ASM_FLAGS"))
+        check(!cache.contains("set(CMAKE_C_FLAGS"))
+        check(!cache.contains("set(CMAKE_CXX_FLAGS"))
+        check(!cache.contains("set(CMAKE_ASM_FLAGS"))
+
+    it "build.shs maps armv7 to LLVM ARM":
+        val src = build_shs_src()
+        check(src.contains("armv7-*)"))
+        check(src.contains("LLVM_ARCH=\"ARM\""))
+
+    it "build.shs preflights SimpleOS C++ standard headers":
+        val src = build_shs_src()
+        check(src.contains("check_cxx_runtime_headers"))
+        check(src.contains("#include <iosfwd>"))
+        check(src.contains("SimpleOS C++ standard headers are not available"))
+        check(src.contains("sys/utsname.h"))
+
+    it "build.shs rebuilds sysroot when target marker mismatches":
+        val src = build_shs_src()
+        check(src.contains("ensure_target_sysroot"))
+        check(src.contains("sysroot_target_matches"))
+        check(src.contains("target-triple.txt"))
+        check(src.contains("|| ! sysroot_target_matches"))
+        check(src.contains("Direct compiler-rt invocations also need the target-matched shared sysroot"))
+
+    it "sysroot.shs stages libc++ headers":
+        val src = sysroot_shs_src()
+        check(src.contains("libcxx/include"))
+        check(src.contains("build_libcxx_runtime"))
+        check(src.contains("build_libc_runtime"))
+        check(src.contains("libc-$TRIPLE"))
+        check(src.contains("aarch64-*"))
+        check(src.contains("simpleos_crt0_aarch64.S"))
+        check(src.contains("simpleos_syscall_aarch64.S"))
+        check(src.contains("simpleos_setjmp_aarch64.S"))
+        check(src.contains("install_compiler_builtins_seed"))
+        check(src.contains("libclang_rt.builtins-aarch64.a"))
+        check(src.contains("libc++.a"))
+        check(src.contains("include/c++/v1"))
+        check(src.contains("__config_site"))
+        check(src.contains("__assertion_handler"))
+        check(src.contains("_LIBCPP_HAS_THREADS 1"))
+        check(src.contains("_LIBCPP_HAS_CLOCK_GETTIME 1"))
+        check(src.contains("_LIBCPP_HAS_THREAD_API_PTHREAD 1"))
+        check(src.contains("_LIBCPP_HAS_RANDOM_DEVICE 1"))
+        check(src.contains("_LIBCPP_HAS_LOCALIZATION 0"))
+        check(src.contains("_LIBCPP_HAS_WIDE_CHARACTERS 1"))
+        check(src.contains("_LIBCPP_PROVIDES_DEFAULT_RUNE_TABLE 1"))
+        check(src.contains("_LIBCPP_PSTL_BACKEND_SERIAL"))
+
+    it "LLVM toolchain searches libc++ before C headers":
+        val src = llvm_toolchain_src()
+        check(src.contains("include/c++/v1"))
+        check(src.contains("CMAKE_C_COMPILER_TARGET"))
+        check(src.contains("CMAKE_CXX_COMPILER_TARGET"))
+        check(src.contains("CMAKE_ASM_COMPILER_TARGET"))
+        check(src.contains("--target="))
+        check(src.contains("SIMPLEOS_TARGET_TRIPLE}"))
+        check(src.contains("-isystem"))
+        check(src.contains("SIMPLEOS_SYSROOT}/include"))
+        check(src.contains("CMAKE_C_FLAGS"))
+        check(src.contains("CMAKE_CXX_FLAGS"))
+        check(src.contains("SIMPLEOS_CXX_LINK_RUNTIME"))
+        check(src.contains("SIMPLEOS_LLD_EMULATION"))
+        check(src.contains("SIMPLEOS_COMPILER_RT_ARCH"))
+        check(src.contains("SIMPLEOS_BUILTINS_ARCHIVE"))
+        check(src.contains("-Wl,-m,"))
+        check(src.contains("SIMPLEOS_LLD_EMULATION}"))
+        check(src.contains("aarch64elf"))
+        check(src.contains("CMAKE_CXX_STANDARD_LIBRARIES"))
+        check(src.contains("crt0.o"))
+        check(src.contains("__bss_end=_end"))
+        check(src.contains("-no-pie"))
+        check(src.contains("--export-dynamic"))
+        check(src.contains("-lc++"))
+        check(src.contains("-lsimpleos_c"))
+        check(src.contains("-lm"))
+
+    it "LLVM toolchain advertises Unix-style support for SimpleOS":
+        val src = llvm_toolchain_src()
+        check(src.contains("set(CMAKE_SYSTEM_NAME Linux)"))
+        check(src.contains("target triple and sysroot as SimpleOS"))
+        check(src.contains("Unix-style Support library"))
+        check(src.contains("HAVE_GETPAGESIZE 1"))
+        check(src.contains("HAVE_SYSCONF 1"))
+        check(src.contains("HAVE_GETRUSAGE 1"))
+
+    it "SimpleOS libc has C++ port support headers":
+        check(regular_file_exists(ASSERT_H))
+        check(regular_file_exists(CTYPE_H))
+        check(regular_file_exists(ENDIAN_H))
+        check(regular_file_exists(INTTYPES_H))
+        check(regular_file_exists(LIMITS_H))
+        check(regular_file_exists(LOCALE_H))
+        check(regular_file_exists(MBSTATE_H))
+        check(regular_file_exists(STDLIB_H))
+        check(regular_file_exists(STRING_H))
+        check(regular_file_exists(SYSEXITS_H))
+        check(regular_file_exists(TIME_H))
+        check(regular_file_exists(SCHED_H))
+        check(regular_file_exists(SYS_RESOURCE_H))
+        check(regular_file_exists(SYS_TIME_H))
+        check(regular_file_exists(PWD_H))
+        check(regular_file_exists(SYS_SOCKET_H))
+        check(regular_file_exists(SYS_UN_H))
+        check(regular_file_exists(SYS_FILE_H))
+        check(regular_file_exists(SYS_STATVFS_H))
+        check(regular_file_exists(SYS_VFS_H))
+        check(regular_file_exists(SYS_UTSNAME_H))
+        check(regular_file_exists(WCTYPE_H))
+
+    it "SimpleOS assert header exposes C11 static_assert":
+        val src = process.run("cat", [ASSERT_H]).stdout
+        check(src.contains("#define static_assert _Static_assert"))
+
+    it "SimpleOS limits header follows target char signedness":
+        val src = process.run("cat", [LIMITS_H]).stdout
+        check(src.contains("__CHAR_UNSIGNED__"))
+        check(src.contains("#define CHAR_MIN   0"))
+        check(src.contains("#define CHAR_MAX   UCHAR_MAX"))
+
+    it "SimpleOS libc exposes libc++ C-locale fallback declarations":
+        val ctype = process.run("cat", [CTYPE_H]).stdout
+        val locale = process.run("cat", [LOCALE_H]).stdout
+        val stdlib = process.run("cat", [STDLIB_H]).stdout
+        val string = process.run("cat", [STRING_H]).stdout
+        val time = process.run("cat", [TIME_H]).stdout
+        val wchar = process.run("cat", [WCHAR_H]).stdout
+        val wctype = process.run("cat", [WCTYPE_H]).stdout
+        check(ctype.contains("isascii"))
+        check(ctype.contains("isprint_l"))
+        check(locale.contains("LC_COLLATE_MASK"))
+        check(locale.contains("newlocale"))
+        check(stdlib.contains("strtod_l"))
+        check(stdlib.contains("mbtowc"))
+        check(string.contains("strcoll_l"))
+        check(time.contains("strftime_l"))
+        check(wchar.contains("mbsrtowcs"))
+        check(wchar.contains("wcsxfrm_l"))
+        check(wctype.contains("iswspace_l"))
+        check(wctype.contains("towlower_l"))
+
+    it "SimpleOS wchar header exposes libc++ wide support declarations":
+        val src = process.run("cat", [WCHAR_H]).stdout
+        check(src.contains("__WCHAR_TYPE__"))
+        check(src.contains("#include <stdio.h>"))
+        check(src.contains("#include <time.h>"))
+        check(src.contains("wcschr"))
+        check(src.contains("wmemchr"))
+
+    it "SimpleOS pthread header exposes rwlocks for libc++":
+        val src = process.run("cat", [PTHREAD_H]).stdout
+        check(src.contains("pthread_rwlock_t"))
+        check(src.contains("pthread_rwlock_rdlock"))
+        check(src.contains("pthread_rwlock_wrlock"))
+        check(src.contains("PTHREAD_MUTEX_RECURSIVE"))
+        check(src.contains("pthread_mutexattr_settype"))
+        check(src.contains("pthread_cond_timedwait"))
+
+    it "SimpleOS libc exposes next LLVM Support C/POSIX declarations":
+        val ctype = process.run("cat", [CTYPE_H]).stdout
+        val unistd = process.run("cat", [UNISTD_H]).stdout
+        check(ctype.contains("isxdigit"))
+        check(unistd.contains("gethostname"))
+        check(unistd.contains("getsid"))
+        check(unistd.contains("alarm"))
+        check(unistd.contains("getpagesize"))
+        check(unistd.contains("_SC_PAGE_SIZE"))
+
+    it "SimpleOS libc exposes final LLD link runtime declarations":
+        val stdio = process.run("cat", [STDIO_H]).stdout
+        val string = process.run("cat", [STRING_H]).stdout
+        val math = process.run("cat", [MATH_H]).stdout
+        val mman = process.run("cat", [SYS_MMAN_H]).stdout
+        check(stdio.contains("vfprintf"))
+        check(string.contains("wmemcmp"))
+        check(string.contains("strpbrk"))
+        check(math.contains("logb"))
+        check(math.contains("erf"))
+        check(math.contains("rint"))
+        check(mman.contains("mprotect"))
+
+    it "SimpleOS libc exposes Clang driver rlimit declarations":
+        val resource = process.run("cat", [SYS_RESOURCE_H]).stdout
+        val process_wait = process.run("cat", [PROCESS_WAIT_C]).stdout
+        val statvfs = process.run("cat", [SYS_STATVFS_H]).stdout
+        val vfs = process.run("cat", [SYS_VFS_H]).stdout
+        check(resource.contains("RLIMIT_DATA"))
+        check(resource.contains("RLIMIT_STACK"))
+        check(resource.contains("RLIMIT_CORE"))
+        check(resource.contains("typedef unsigned long rlim_t"))
+        check(resource.contains("RLIM_INFINITY"))
+        check(resource.contains("struct rlimit"))
+        check(resource.contains("getrlimit"))
+        check(resource.contains("setrlimit"))
+        check(statvfs.contains("f_type"))
+        check(vfs.contains("#define statfs statvfs"))
+        check(vfs.contains("#define fstatfs fstatvfs"))
+        check(process_wait.contains("int getrlimit"))
+        check(process_wait.contains("int setrlimit"))
+        check(process_wait.contains("RLIMIT_DATA"))
+        check(process_wait.contains("RLIMIT_CORE"))
+
+    it "SimpleOS libc implements final LLD link runtime surface":
+        val cxxabi = process.run("cat", [CXXABI_C]).stdout
+        val libc = process.run("cat", [LIBC_C]).stdout
+        val dlmalloc = process.run("cat", [DLMALLOC_C]).stdout
+        val fs = process.run("cat", [FS_C]).stdout
+        val fork = process.run("cat", [FORK_C]).stdout
+        val ipc = process.run("cat", [IPC_C]).stdout
+        val crt0 = process.run("cat", [CRT0_S]).stdout
+        val string_ext = process.run("cat", [STRING_EXT_C]).stdout
+        val math_ext = process.run("cat", [MATH_EXT_C]).stdout
+        check(cxxabi.contains("__cxa_thread_atexit"))
+        check(cxxabi.contains("align_val_t"))
+        check(cxxabi.contains("nothrow_t"))
+        check(cxxabi.contains("int main(int argc, char **argv)"))
+        check(cxxabi.contains("void _Exit(int status)"))
+        check(cxxabi.contains("linux_syscall1(60"))
+        check(libc.contains("int vfprintf"))
+        check(libc.contains("int mprotect"))
+        check(libc.contains("running_on_linux_host"))
+        check(libc.contains("linux_syscall3"))
+        check(libc.contains("linux_syscall6"))
+        check(libc.contains("linux_syscall3(0"))
+        check(libc.contains("linux_syscall3(2"))
+        check(libc.contains("linux_syscall3(3"))
+        check(libc.contains("linux_syscall6(9"))
+        check(libc.contains("linux_syscall3(10"))
+        check(libc.contains("linux_syscall3(11"))
+        check(dlmalloc.contains("_linux_host_mmap_pages"))
+        check(fs.contains("linux_host_stat_syscall"))
+        check(fs.contains("linux_host_stat_syscall(4"))
+        check(fs.contains("linux_host_stat_syscall(5"))
+        check(fs.contains("linux_syscall3(8"))
+        check(fs.contains("linux_syscall2(77"))
+        check(fork.contains("linux_syscall0(57"))
+        check(fork.contains("linux_syscall3(59"))
+        check(fork.contains("linux_syscall4(61"))
+        check(ipc.contains("linux_syscall1(22"))
+        check(ipc.contains("linux_syscall1(32"))
+        check(ipc.contains("linux_syscall2(33"))
+        check(crt0.contains("rsp[0] = argc"))
+        check(crt0.contains("mov     rsi, r13"))
+        check(crt0.contains("mov     rdx, r14"))
+        check(string_ext.contains("int wmemcmp"))
+        check(string_ext.contains("char *strpbrk"))
+        check(math_ext.contains("double logb"))
+        check(math_ext.contains("double erf"))
+        check(math_ext.contains("double rint"))
+
+    it "build.shs stages builtins into resource dir":
+        val src = build_shs_src()
+        check(src.contains("RES_LIB_DIR"))
+        check(src.contains("lib/clang/"))
+        check(src.contains("ninja -C \"$RT_DIR\" builtins"))
+        check(src.contains("libclang_rt.builtins*.a"))
+
+    it "compiler_rt_cmake.cmake exists":
+        check(regular_file_exists(RT_CMAKE))
+
+    it "compiler_rt_cmake.cmake enables COMPILER_RT_BUILD_BUILTINS":
+        val src = rt_cmake_src()
+        check(src.contains("COMPILER_RT_BUILD_BUILTINS"))
+
+    it "compiler_rt_cmake.cmake disables sanitizers / xray / profile":
+        val src = rt_cmake_src()
+        check(src.contains("COMPILER_RT_BUILD_SANITIZERS"))
+        check(src.contains("COMPILER_RT_BUILD_XRAY"))
+        check(src.contains("COMPILER_RT_BUILD_PROFILE"))
+
+    it "compiler_rt_cmake.cmake sets COMPILER_RT_OS_DIR to simpleos":
+        val src = rt_cmake_src()
+        check(src.contains("COMPILER_RT_OS_DIR simpleos"))
+
+    it "SimpleOS ToolChain README exists":
+        check(regular_file_exists(TOOLCHAIN_README))
+
+    it "SimpleOS ToolChain README documents current linker runtime layout":
+        val src = process.run("cat", [TOOLCHAIN_README]).stdout
+        check(src.contains("share/simpleos/simpleos.ld"))
+        check(src.contains("lib/clang/20/lib/x86_64-unknown-simpleos"))
+        check(src.contains("-lclang_rt.builtins-<arch>"))
+
+    it "records raw_os_ostream no-localization LLVM Support patch":
+        val src = process.run("cat", [RAW_OS_OSTREAM_PATCH]).stdout
+        check(src.contains("_LIBCPP_HAS_LOCALIZATION"))
+        check(src.contains("raw_os_ostream"))
+
+    it "records SimpleOS LLVM Support Path patch":
+        val src = process.run("cat", [PATH_MAIN_EXECUTABLE_PATCH]).stdout
+        check(src.contains("__simpleos__"))
+        check(src.contains("GetMainExecutable"))
+
+    it "records no-sstream AssignmentTrackingAnalysis patch":
+        val src = process.run("cat", [ASSIGNMENT_TRACKING_PATCH]).stdout
+        check(src.contains("raw_string_ostream"))
+        check(src.contains("AssignmentTrackingAnalysis.cpp"))
+
+    it "records no-sstream SampleProf patch":
+        val src = process.run("cat", [SAMPLE_PROF_PATCH]).stdout
+        check(src.contains("raw_string_ostream"))
+        check(src.contains("SampleProf.h"))
+
+    it "records no-iostream instrumentation hex formatting patch":
+        val src = process.run("cat", [INSTRUMENTATION_HEX_PATCH]).stdout
+        check(src.contains("utohexstr"))
+        check(src.contains("InstrOrderFile.cpp"))
+        check(src.contains("AddressSanitizer.cpp"))
+
+    it "records no-iostream MemProf node id formatting patch":
+        val src = process.run("cat", [MEMPROF_HEX_PATCH]).stdout
+        check(src.contains("Twine::utohexstr"))
+        check(src.contains("MemProfContextDisambiguation.cpp"))
+
+    it "records no-iostream imported function stats formatting patch":
+        val src = process.run("cat", [IMPORT_STATS_PATCH]).stdout
+        check(src.contains("format(\"%.4g\""))
+        check(src.contains("ImportedFunctionsInliningStatistics.cpp"))
+
+    it "records no-sstream LLVM MC formatting patch":
+        val src = process.run("cat", [MC_NO_SSTREAM_PATCH]).stdout
+        check(src.contains("raw_string_ostream"))
+        check(src.contains("MCPseudoProbe.cpp"))
+        check(src.contains("AsmParser.cpp"))
+        check(src.contains("MasmParser.cpp"))
+
+    it "records no-sstream coverage mapping patch":
+        val src = process.run("cat", [COVERAGE_MAPPING_PATCH]).stdout
+        check(src.contains("raw_string_ostream"))
+        check(src.contains("CoverageMapping.h"))
+
+    it "records no-iostream TextAPI DylibReader UUID formatting patch":
+        val src = process.run("cat", [TEXTAPI_DYLIBREADER_PATCH]).stdout
+        check(src.contains("format_hex_no_prefix"))
+        check(src.contains("DylibReader.cpp"))
+
+    it "records no-put-time Clang PPMacroExpansion timestamp patch":
+        val src = process.run("cat", [CLANG_PPMACROEXPANSION_PATCH]).stdout
+        check(src.contains("formatTimestamp"))
+        check(src.contains("PPMacroExpansion.cpp"))
+        check(src.contains("std::put_time"))
+
+    it "records no-regex LLD ErrorHandler patch":
+        val src = process.run("cat", [LLD_ERRORHANDLER_PATCH]).stdout
+        check(src.contains("std::regex"))
+        check(src.contains("ErrorHandler.cpp"))
+        check(src.contains("__simpleos__"))
+
+    it "records no-iostream/fstream Clang target patch":
+        val src = process.run("cat", [CLANG_NO_IOSTREAM_PATCH]).stdout
+        check(src.contains("_LIBCPP_HAS_LOCALIZATION=0"))
+        check(src.contains("CrossTranslationUnit.cpp"))
+        check(src.contains("IssueHash.cpp"))
+        check(src.contains("ThreadSafetyCommon.h"))
+        check(src.contains("UnsafeBufferUsage.cpp"))
+        check(src.contains("BareMetal.cpp"))
+        check(src.contains("LayoutOverrideSource.cpp"))
+        check(src.contains("CompilerInvocation.cpp"))
+        check(src.contains("MemoryBuffer"))
+        check(src.contains("raw_string_ostream"))
+
+    it "records Clang target triple stdout flush patch":
+        val src = process.run("cat", [CLANG_DRIVER_FLUSH_PATCH]).stdout
+        check(src.contains("Driver.cpp"))
+        check(src.contains("--print-target-triple"))
+        check(src.contains("--print-effective-triple"))
+        check(src.contains("llvm::outs().flush()"))
+
+    it "records no-async-unlink LLD filesystem patch":
+        val src = process.run("cat", [LLD_NO_ASYNC_UNLINK_PATCH]).stdout
+        check(src.contains("Filesystem.cpp"))
+        check(src.contains("unlinkAsync"))
+        check(src.contains("LLVM_ENABLE_THREADS"))
+        check(src.contains("sys::fs::remove(path)"))
+
+    it "records Clang SimpleOS default sysroot link patch":
+        val src = process.run("cat", [CLANG_DRIVER_SYSROOT_LINK_PATCH]).stdout
+        check(src.contains("SimpleOS.cpp"))
+        check(src.contains("build/os/sysroot"))
+        check(src.contains("share/simpleos/simpleos.ld"))
+        check(src.contains("lib/clang/20/lib/<triple>"))
+        check(src.contains("lclang_rt.builtins-<arch>"))
+
+    it "records SimpleOS TargetParser no Linux syscall probe patch":
+        val src = process.run("cat", [LLVM_TARGETPARSER_NO_SYSCALL_PATCH]).stdout
+        check(src.contains("Host.cpp"))
+        check(src.contains("__simpleos__"))
+        check(src.contains("syscall"))
+
+    it "records AArch64 no-sstream frame helper patch":
+        val src = process.run("cat", [LLVM_AARCH64_NO_SSTREAM_PATCH]).stdout
+        check(src.contains("AArch64LowerHomogeneousPrologEpilog.cpp"))
+        check(src.contains("raw_string_ostream"))
+        check(src.contains("std::ostringstream"))

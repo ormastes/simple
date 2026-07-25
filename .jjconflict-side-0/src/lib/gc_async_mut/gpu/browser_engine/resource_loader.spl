@@ -1,0 +1,81 @@
+"""
+# Resource Loader
+
+Content-Type dispatch for browser resources: HTML, CSS, JavaScript, images.
+Decodes [u8] body to text at the parse boundary (AC-4 binary safety).
+No network calls in this module — pure Content-Type detection logic.
+"""
+
+#![allow(REQC001)]
+
+pub enum ContentType:
+    """Detected content type of a fetched resource."""
+    Html
+    Css
+    JavaScript
+    Image
+    Binary
+    Unknown
+
+pub fn detect_content_type(headers: text, body_prefix: [u8]) -> ContentType:
+    """Detect ContentType from headers first; fall back to body sniffing.
+
+    Headers take priority. If no Content-Type header is present, sniff
+    the body prefix bytes for common signatures.
+    """
+    if headers.contains("text/html"):
+        return ContentType.Html
+    if headers.contains("text/css"):
+        return ContentType.Css
+    if headers.contains("application/javascript") or headers.contains("text/javascript"):
+        return ContentType.JavaScript
+    if headers.contains("image/"):
+        return ContentType.Image
+    if headers.contains("application/octet-stream"):
+        return ContentType.Binary
+    # If a Content-Type header is present but unknown, return Unknown
+    if headers.contains("Content-Type:"):
+        return ContentType.Unknown
+
+    # No Content-Type header — sniff body prefix
+    if body_prefix.len() == 0:
+        return ContentType.Unknown
+
+    # Convert up to first 32 bytes to text for HTML sniffing
+    val prefix_len = if body_prefix.len() < 32: body_prefix.len() else: 32
+    var prefix_bytes: [u8] = []
+    var i = 0
+    while i < prefix_len:
+        prefix_bytes.push(body_prefix[i])
+        i = i + 1
+
+    # PNG magic: 0x89 0x50 0x4E 0x47
+    if body_prefix.len() >= 4:
+        val b0 = body_prefix[0]
+        val b1 = body_prefix[1]
+        val b2 = body_prefix[2]
+        val b3 = body_prefix[3]
+        if b0 == 0x89 and b1 == 0x50 and b2 == 0x4E and b3 == 0x47:
+            return ContentType.Image
+
+    # HTML sniffing: look for text markers
+    val sniff_text = rt_bytes_to_text(prefix_bytes)
+    if sniff_text.starts_with("<!DOCTYPE html") or sniff_text.starts_with("<!DOCTYPE HTML"):
+        return ContentType.Html
+    if sniff_text.starts_with("<html") or sniff_text.starts_with("<HTML"):
+        return ContentType.Html
+
+    return ContentType.Unknown
+
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
+pub class ResourceLoader:
+    """Loads and dispatches resources by content type.
+
+    fetch_dispatch is optional — if none, load() returns empty responses.
+    """
+    _fetch: text
+
+    static fn new() -> ResourceLoader:
+        """Create a ResourceLoader without a fetch backend."""
+        return ResourceLoader { _fetch: "" }

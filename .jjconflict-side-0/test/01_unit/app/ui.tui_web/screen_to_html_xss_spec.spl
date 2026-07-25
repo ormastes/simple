@@ -1,0 +1,43 @@
+# TUI Web XSS sink hardening.
+#
+# app.ui.tui_web.html:75 does `innerHTML = data.html` on a WS-pushed payload.
+# `data.html` (and the initial page's embedded tui_html) both come from
+# `backend.current_html`, which is set to `screen_to_html(rendered)`
+# (see app/ui.tui_web/backend.spl:82 and server.spl:170,225,242).
+#
+# `screen_to_html`'s per-character `_escape_html` helper used to be a
+# hand-rolled copy that escaped `& < > "` but not `'` -- the same gap as the
+# other duplicated html_escape copies fixed in this lane's Item 1. It now
+# delegates to the canonical std.common.web.html_escape.html_escape_core.
+
+use std.spec
+use app.ui.tui_web.screen_to_html.{screen_to_html}
+use app.ui.tui_web.html.{generate_tui_html_page}
+
+describe "screen_to_html XSS escaping":
+
+    it "entity-escapes a <script> tag in cell content":
+        val html = screen_to_html("<script>alert(1)</script>")
+        expect(html).to_contain("&lt;script&gt;alert(1)&lt;/script&gt;")
+        assert_false(html.contains("<script>"))
+
+    it "escapes a lone apostrophe (the older copy missed this)":
+        val html = screen_to_html("it's")
+        expect(html).to_contain("it&#39;s")
+
+    it "escapes an embedded double quote":
+        val html = screen_to_html("say \"hi\"")
+        expect(html).to_contain("say &quot;hi&quot;")
+
+describe "generate_tui_html_page sink (app.ui.tui_web.html:75 innerHTML payload source)":
+
+    it "keeps a malicious cell as inert escaped text in the full page, not live markup":
+        val tui_html = screen_to_html("<script>alert(1)</script>")
+        val page = generate_tui_html_page(tui_html, 8080)
+        expect(page).to_contain("&lt;script&gt;alert(1)&lt;/script&gt;")
+        assert_false(page.contains("<script>alert(1)</script>"))
+
+    it "keeps an apostrophe-bearing cell escaped in the full page":
+        val tui_html = screen_to_html("it's")
+        val page = generate_tui_html_page(tui_html, 8080)
+        expect(page).to_contain("it&#39;s")

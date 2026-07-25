@@ -1,0 +1,69 @@
+diff --git a/src/compiler/50.mir/_MirLowering/function_lowering.spl b/src/compiler/50.mir/_MirLowering/function_lowering.spl
+index 11f5134ff0b..76c7de6ff02 100644
+--- a/src/compiler/50.mir/_MirLowering/function_lowering.spl
++++ b/src/compiler/50.mir/_MirLowering/function_lowering.spl
+@@ -148,8 +148,63 @@ impl MirLowering:
+             match param.type_.kind:
+                 case Named(type_symbol, _):
+                     val parameter_type = self.symbols.get_symbol(type_symbol)
+-                    if parameter_type != nil and self.struct_field_order.has(parameter_type.name):
++                    val is_named_struct = parameter_type != nil and self.struct_field_order.has(parameter_type.name)
++                    if is_named_struct:
+                         self.struct_value_syms[local.id] = parameter_type.name
++                        # Bug #167: structs have VALUE semantics (mirrors the HIR
++                        # interpreter's Value.Struct -- see backend/objects.spl,
++                        # "instances get value semantics (copied on bind/assign)
++                        # -- correct for STRUCTS"). Native codegen passes struct
++                        # arguments as a raw pointer with no ABI-level copy, so
++                        # `local` here is literally the SAME memory the caller
++                        # passed; a field mutation inside the callee
++                        # (`c.n = c.n + 1`) silently mutated the caller's `c`
++                        # too. Materialize a private per-call copy by reading
++                        # every field off the incoming arg pointer and
++                        # rebuilding a fresh aggregate (mirrors
++                        # lower_struct_construct in switch_operators_calls.spl),
++                        # then rebind the parameter symbol to the COPY instead
++                        # of the raw arg local.
++                        #
++                        # NOTE (found during this fix, NOT addressed here --
++                        # out of lane / a broader pre-existing frontend gap):
++                        # `self.struct_field_order` is keyed by NAME only (fed
++                        # from module.structs, see module_lowering.spl) and a
++                        # `class` declaration currently lands in `module.structs`
++                        # too (confirmed empirically: a `class K: n: i64`, with
++                        # or without methods, satisfies
++                        # `struct_field_order.has("K")`, and never appears in
++                        # `module.classes`; `Symbol.kind` resolved here also
++                        # read back as `SymbolKind.Struct` for that same class).
++                        # So this MIR layer currently has no reliable class-vs-
++                        # struct signal at all -- native codegen doesn't yet
++                        # implement class reference semantics as a distinct
++                        # concept; a class param only "looked" reference-typed
++                        # before this fix by accident (nothing was ever copied
++                        # for anyone). This copy therefore applies uniformly to
++                        # every `Named` aggregate param reachable through
++                        # struct_field_order, class included, until the
++                        # upstream class/struct conflation is fixed separately.
++                        val field_names = self.struct_field_order[parameter_type.name]
++                        var copy_ops: [MirOperand] = []
++                        var cfi = 0
++                        while cfi < field_names.len():
++                            var field_bldr = self.builder
++                            val field_val = field_bldr.emit_get_field(mir_operand_copy(local), cfi, MirType.i64())
++                            self.builder = field_bldr
++                            copy_ops = copy_ops.push(mir_operand_copy(field_val))
++                            cfi = cfi + 1
++                        var agg_bldr = self.builder
++                        val copy_local = agg_bldr.emit_aggregate(
++                            AggregateKind.Struct(type_symbol),
++                            copy_ops,
++                            MirType(kind: MirTypeKind.Struct(type_symbol))
++                        )
++                        self.builder = agg_bldr
++                        self.struct_value_syms[copy_local.id] = parameter_type.name
++                        if val copy_symbol = param.symbol:
++                            if copy_symbol != nil:
++                                self.local_map[copy_symbol.id] = copy_local
+                 case _:
+                     ()
+             pli = pli + 1

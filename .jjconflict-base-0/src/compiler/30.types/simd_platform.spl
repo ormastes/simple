@@ -1,0 +1,387 @@
+# SIMD Platform Detection & Intrinsics - Extracted from simd.spl
+#
+# SimdPlatform enum, SimdCapabilities class, SimdIntrinsics class,
+# CPU feature detection via /proc/cpuinfo parsing.
+
+# ============================================================================
+# SIMD Platform Detection
+# ============================================================================
+
+enum SimdPlatform:
+    """SIMD instruction sets"""
+    None_Platform  # No SIMD support (renamed to avoid keyword conflict)
+    SSE           # x86 SSE (128-bit)
+    SSE2          # x86 SSE2 (128-bit, doubles)
+    AVX           # x86 AVX (256-bit)
+    AVX2          # x86 AVX2 (256-bit, integers)
+    AVX512        # x86 AVX-512 (512-bit)
+    NEON          # ARM NEON (128-bit)
+    SVE           # ARM SVE (variable length)
+
+impl SimdPlatform:
+    fn to_string() -> text:
+        """String representation"""
+        match self:
+            case None_Platform: "None"
+            case SSE: "SSE"
+            case SSE2: "SSE2"
+            case AVX: "AVX"
+            case AVX2: "AVX2"
+            case AVX512: "AVX-512"
+            case NEON: "NEON"
+            case SVE: "SVE"
+
+    fn register_width() -> i64:
+        """Get SIMD register width in bits"""
+        match self:
+            case SSE: 128
+            case SSE2: 128
+            case AVX: 256
+            case AVX2: 256
+            case AVX512: 512
+            case NEON: 128
+            case SVE: 0  # Variable length
+            case None_Platform: 0
+
+class SimdCapabilities:
+    """
+    Runtime SIMD capability detection
+
+    Detects available SIMD instructions at runtime and provides
+    optimal code path selection.
+    """
+    platform: SimdPlatform
+
+impl SimdCapabilities:
+    static fn detect() -> SimdCapabilities:
+        """
+        Detect available SIMD platform by parsing /proc/cpuinfo on Linux.
+
+        Detection order (best to worst):
+        1. AVX-512 (512-bit)
+        2. AVX2 (256-bit, integers)
+        3. AVX (256-bit)
+        4. SSE2 (128-bit, doubles)
+        5. SSE (128-bit)
+        6. NEON (ARM, 128-bit)
+        7. None_Platform (scalar fallback)
+
+        Falls back to architecture-based heuristics if /proc/cpuinfo
+        is not available.
+        """
+        # Try to detect platform via /proc/cpuinfo parsing
+        var detected = _detect_from_cpuinfo()
+        SimdCapabilities(platform: detected)
+
+    static fn detect_x86() -> SimdPlatform:
+        """
+        Detect x86/x86_64 SIMD capabilities from /proc/cpuinfo flags.
+
+        Checks for flags in order:
+        - avx512f -> AVX-512
+        - avx2 -> AVX2
+        - avx -> AVX
+        - sse2 -> SSE2
+        - sse -> SSE
+        """
+        var flags = _read_cpuinfo_flags()
+        if flags == "":
+            # /proc/cpuinfo not available; x86_64 guarantees SSE2
+            return SimdPlatform.SSE2
+
+        # Check from highest to lowest capability
+        var has_avx512 = _flags_contain(flags, "avx512f")
+        if has_avx512:
+            return SimdPlatform.AVX512
+
+        var has_avx2 = _flags_contain(flags, "avx2")
+        if has_avx2:
+            return SimdPlatform.AVX2
+
+        var has_avx = _flags_contain(flags, "avx")
+        if has_avx:
+            return SimdPlatform.AVX
+
+        var has_sse2 = _flags_contain(flags, "sse2")
+        if has_sse2:
+            return SimdPlatform.SSE2
+
+        var has_sse = _flags_contain(flags, "sse")
+        if has_sse:
+            return SimdPlatform.SSE
+
+        # x86_64 always has SSE2
+        SimdPlatform.SSE2
+
+    static fn detect_arm() -> SimdPlatform:
+        """
+        Detect ARM SIMD capabilities from /proc/cpuinfo Features field.
+
+        Checks:
+        - sve flag -> SVE
+        - asimd/neon flag -> NEON
+        """
+        var flags = _read_cpuinfo_flags()
+        if flags == "":
+            # AArch64 always has NEON (called ASIMD)
+            return SimdPlatform.NEON
+
+        var has_sve = _flags_contain(flags, "sve")
+        if has_sve:
+            return SimdPlatform.SVE
+
+        var has_asimd = _flags_contain(flags, "asimd")
+        if has_asimd:
+            return SimdPlatform.NEON
+
+        var has_neon = _flags_contain(flags, "neon")
+        if has_neon:
+            return SimdPlatform.NEON
+
+        SimdPlatform.NEON
+
+    fn has_sse() -> bool:
+        """Check if SSE is available"""
+        match self.platform:
+            case SSE: true
+            case SSE2: true  # SSE2 includes SSE
+            case AVX: true
+            case AVX2: true
+            case AVX512: true
+            case _: false
+
+    fn has_sse2() -> bool:
+        """Check if SSE2 is available"""
+        match self.platform:
+            case SSE2: true
+            case AVX: true  # AVX includes SSE2
+            case AVX2: true
+            case AVX512: true
+            case _: false
+
+    fn has_avx() -> bool:
+        """Check if AVX is available"""
+        match self.platform:
+            case AVX: true
+            case AVX2: true  # AVX2 includes AVX
+            case AVX512: true
+            case _: false
+
+    fn has_avx2() -> bool:
+        """Check if AVX2 is available"""
+        match self.platform:
+            case AVX2: true
+            case AVX512: true  # AVX-512 includes AVX2
+            case _: false
+
+    fn has_avx512() -> bool:
+        """Check if AVX-512 is available"""
+        match self.platform:
+            case AVX512: true
+            case _: false
+
+    fn has_neon() -> bool:
+        """Check if ARM NEON is available"""
+        match self.platform:
+            case NEON: true
+            case SVE: true  # SVE includes NEON
+            case _: false
+
+    fn has_sve() -> bool:
+        """Check if ARM SVE is available"""
+        match self.platform:
+            case SVE: true
+            case _: false
+
+    fn register_width() -> i64:
+        """Get SIMD register width in bits"""
+        self.platform.register_width()
+
+    fn vector_width_f32() -> i64:
+        """How many f32 values fit in SIMD register"""
+        self.register_width() / 32
+
+    fn vector_width_f64() -> i64:
+        """How many f64 values fit in SIMD register"""
+        self.register_width() / 64
+
+    fn vector_width_i32() -> i64:
+        """How many i32 values fit in SIMD register"""
+        self.register_width() / 32
+
+    fn vector_width_i64() -> i64:
+        """How many i64 values fit in SIMD register"""
+        self.register_width() / 64
+
+    fn best_platform() -> SimdPlatform:
+        """Get the best available platform"""
+        self.platform
+
+    fn to_string() -> text:
+        """String representation"""
+        "SimdCapabilities(platform: {self.platform.to_string()}, width: {self.register_width()}-bit)"
+
+# ============================================================================
+# SIMD Intrinsics (Placeholder)
+# ============================================================================
+
+class SimdIntrinsics:
+    """
+    SIMD intrinsics for low-level operations
+
+    In a real implementation, these would be extern functions
+    that map to LLVM intrinsics or inline assembly.
+
+    For now, they're placeholders showing the API.
+    """
+
+impl SimdIntrinsics:
+    # ========================================================================
+    # SSE Intrinsics (128-bit, 4x f32)
+    # ========================================================================
+
+    static fn sse_add_ps(a: Vec4f, b: Vec4f) -> Vec4f:
+        """SSE: Add 4x f32 (addps)"""
+        # In real impl: __builtin_ia32_addps(a, b)
+        a.add(b)
+
+    static fn sse_sub_ps(a: Vec4f, b: Vec4f) -> Vec4f:
+        """SSE: Subtract 4x f32 (subps)"""
+        # In real impl: __builtin_ia32_subps(a, b)
+        a.sub(b)
+
+    static fn sse_mul_ps(a: Vec4f, b: Vec4f) -> Vec4f:
+        """SSE: Multiply 4x f32 (mulps)"""
+        # In real impl: __builtin_ia32_mulps(a, b)
+        a.mul(b)
+
+    static fn sse_div_ps(a: Vec4f, b: Vec4f) -> Vec4f:
+        """SSE: Divide 4x f32 (divps)"""
+        # In real impl: __builtin_ia32_divps(a, b)
+        a.div(b)
+
+    static fn sse_sqrt_ps(a: Vec4f) -> Vec4f:
+        """SSE: Square root 4x f32 (sqrtps)"""
+        # In real impl: __builtin_ia32_sqrtps(a)
+        Vec4f(
+            x: a.x.sqrt(),
+            y: a.y.sqrt(),
+            z: a.z.sqrt(),
+            w: a.w.sqrt()
+        )
+
+    static fn sse_min_ps(a: Vec4f, b: Vec4f) -> Vec4f:
+        """SSE: Minimum 4x f32 (minps)"""
+        # In real impl: __builtin_ia32_minps(a, b)
+        a.min(b)
+
+    static fn sse_max_ps(a: Vec4f, b: Vec4f) -> Vec4f:
+        """SSE: Maximum 4x f32 (maxps)"""
+        # In real impl: __builtin_ia32_maxps(a, b)
+        a.max(b)
+
+    # ========================================================================
+    # AVX Intrinsics (256-bit, 8x f32)
+    # ========================================================================
+
+    static fn avx_add_ps(a: Vec8f, b: Vec8f) -> Vec8f:
+        """AVX: Add 8x f32 (vaddps)"""
+        # In real impl: __builtin_ia32_addps256(a, b)
+        Vec8f(
+            e0: a.e0 + b.e0, e1: a.e1 + b.e1,
+            e2: a.e2 + b.e2, e3: a.e3 + b.e3,
+            e4: a.e4 + b.e4, e5: a.e5 + b.e5,
+            e6: a.e6 + b.e6, e7: a.e7 + b.e7
+        )
+
+    static fn avx_sub_ps(a: Vec8f, b: Vec8f) -> Vec8f:
+        """AVX: Subtract 8x f32 (vsubps)"""
+        Vec8f(
+            e0: a.e0 - b.e0, e1: a.e1 - b.e1,
+            e2: a.e2 - b.e2, e3: a.e3 - b.e3,
+            e4: a.e4 - b.e4, e5: a.e5 - b.e5,
+            e6: a.e6 - b.e6, e7: a.e7 - b.e7
+        )
+
+    static fn avx_mul_ps(a: Vec8f, b: Vec8f) -> Vec8f:
+        """AVX: Multiply 8x f32 (vmulps)"""
+        Vec8f(
+            e0: a.e0 * b.e0, e1: a.e1 * b.e1,
+            e2: a.e2 * b.e2, e3: a.e3 * b.e3,
+            e4: a.e4 * b.e4, e5: a.e5 * b.e5,
+            e6: a.e6 * b.e6, e7: a.e7 * b.e7
+        )
+
+# ============================================================================
+# Internal: /proc/cpuinfo Parsing
+# ============================================================================
+
+# SFFI binding for file reading (needed for /proc/cpuinfo)
+extern fn rt_file_read_text(path: text) -> text
+
+# Read CPU flags from /proc/cpuinfo.
+# Returns a space-delimited string of flags, or "" if unavailable.
+fn _read_cpuinfo_flags() -> text:
+    # Read /proc/cpuinfo using SFFI
+    var cpuinfo = rt_file_read_text("/proc/cpuinfo")
+    if cpuinfo == "":
+        return ""
+
+    # Find the "flags" line (x86) or "Features" line (ARM)
+    var lines = cpuinfo.split("\n")
+    var i = 0
+    while i < lines.len():
+        var line = lines[i]
+        var trimmed = line.trim()
+        # x86: "flags		: sse sse2 avx avx2 ..."
+        var is_flags_line = trimmed.starts_with("flags")
+        if is_flags_line:
+            var colon_pos = trimmed.index_of(":")
+            if colon_pos >= 0:
+                var flags_part = trimmed.substring(colon_pos + 1, trimmed.length())
+                return flags_part.trim()
+        # ARM: "Features	: fp asimd evtstrm ..."
+        var is_features_line = trimmed.starts_with("Features")
+        if is_features_line:
+            var colon_pos = trimmed.index_of(":")
+            if colon_pos >= 0:
+                var features_part = trimmed.substring(colon_pos + 1, trimmed.length())
+                return features_part.trim()
+        i = i + 1
+
+    ""
+
+# Check if a space-delimited flags string contains the given flag
+fn _flags_contain(flags: text, flag: text) -> bool:
+    # Check for exact word match (surrounded by spaces or at start/end)
+    var search = " " + flag + " "
+    var padded = " " + flags + " "
+    padded.contains(search)
+
+# Detect SIMD platform from /proc/cpuinfo with architecture fallbacks
+fn _detect_from_cpuinfo() -> SimdPlatform:
+    var flags = _read_cpuinfo_flags()
+
+    if flags != "":
+        # Determine architecture from flags content
+        var has_sse_flag = _flags_contain(flags, "sse")
+        var has_asimd_flag = _flags_contain(flags, "asimd")
+        var has_neon_flag = _flags_contain(flags, "neon")
+
+        # x86 detection path
+        if has_sse_flag:
+            return SimdCapabilities.detect_x86()
+
+        # ARM detection path
+        var is_arm = has_asimd_flag or has_neon_flag
+        if is_arm:
+            return SimdCapabilities.detect_arm()
+
+        # Check for SVE (ARM-only)
+        var has_sve = _flags_contain(flags, "sve")
+        if has_sve:
+            return SimdPlatform.SVE
+
+    # Fallback: use compile-time architecture knowledge
+    # On modern x86_64 Linux, SSE2 is guaranteed
+    SimdPlatform.SSE2

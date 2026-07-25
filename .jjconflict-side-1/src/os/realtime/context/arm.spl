@@ -1,0 +1,72 @@
+# @platform: baremetal
+# @cfg: arm32
+#
+# ARM Cortex-M context switch via PendSV.
+# Saves r4-r11 + LR to current TCB stack, loads from next TCB.
+# Hardware auto-saves r0-r3, r12, LR, PC, xPSR on exception entry.
+
+use std.baremetal.interrupt (
+    mem_read_u32, mem_write_u32,
+    nvic_set_pending, EXCEPTION_PENDSV,
+    SCB_ICSR
+)
+
+# PendSV trigger bit in SCB_ICSR
+val PENDSVSET: u32 = 1 << 28
+
+# Stack frame layout (saved by software in PendSV):
+#   [SP+0]  r4
+#   [SP+4]  r5
+#   [SP+8]  r6
+#   [SP+12] r7
+#   [SP+16] r8
+#   [SP+20] r9
+#   [SP+24] r10
+#   [SP+28] r11
+#   [SP+32] lr (EXC_RETURN)
+val CONTEXT_FRAME_SIZE: u32 = 36
+
+# extern for actual asm context save/restore
+extern fn rt_arm_context_save(stack_ptr: u64) -> u64
+extern fn rt_arm_context_restore(stack_ptr: u64)
+extern fn rt_arm_set_psp(sp: u64)
+extern fn rt_arm_get_psp() -> u64
+
+fn arm_trigger_pendsv():
+    """Trigger PendSV exception for deferred context switch."""
+    mem_write_u32(SCB_ICSR, PENDSVSET)
+
+fn arm_context_switch():
+    """Called from PendSV handler. Saves current, restores next."""
+    val curr_id = sched_get_current()
+
+    if curr_id >= 0:
+        val saved_sp = rt_arm_get_psp()
+        val new_sp = rt_arm_context_save(saved_sp)
+        task_set_stack_ptr(curr_id, new_sp)
+
+    sched_switch()
+
+    val next_id = sched_get_current()
+    if next_id >= 0:
+        val next_task = task_get(next_id)
+        rt_arm_context_restore(next_task.stack_ptr)
+        rt_arm_set_psp(next_task.stack_ptr + CONTEXT_FRAME_SIZE.to_u64())
+
+fn arm_init_task_stack(stack_top: u64, entry: u64) -> u64:
+    """Initialize a task stack frame for first context restore.
+    Returns the adjusted SP pointing to the software-saved frame."""
+    # Hardware frame (auto-pushed on exception entry):
+    #   xPSR, PC, LR, R12, R3, R2, R1, R0  (8 words = 32 bytes)
+    var sp = stack_top - 32u64
+    # xPSR with Thumb bit set
+    mem_write_u32((sp + 28u64).to_u32(), 0x01000000u32)
+    # PC = entry function
+    mem_write_u32((sp + 24u64).to_u32(), entry.to_u32())
+
+    # Software frame (r4-r11, lr): 9 words = 36 bytes
+    sp = sp - CONTEXT_FRAME_SIZE.to_u64()
+    # EXC_RETURN for thread mode with PSP
+    mem_write_u32((sp + 32u64).to_u32(), 0xFFFFFFFDu32)
+
+    sp

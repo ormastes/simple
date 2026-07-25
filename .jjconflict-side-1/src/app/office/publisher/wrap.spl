@@ -1,0 +1,126 @@
+# Publisher-like Text-Wrap-Around-Object Layout
+#
+# Extends page_layout's word-accurate greedy flow with a single rectangular
+# floating object (e.g. an inset image or shape) that text wraps around.
+# Assumption (documented, deliberately minimal): the FloatObject is
+# LEFT-ANCHORED within the frame — text on any line whose row-band
+# vertically overlaps the object is narrowed to the space to the object's
+# RIGHT; lines that don't overlap use the full frame width. No contour /
+# right-anchored / multi-object support — that is out of scope here.
+#
+# Uses the same layout constants as page_layout.spl (CHAR_W=6, LINE_H=16)
+# so capacities are hand-computable the same way.
+
+# =========================================================================
+# Layout constants (mirrors page_layout.spl)
+# =========================================================================
+
+val CHAR_W: i32 = 6
+val LINE_H: i32 = 16
+
+# =========================================================================
+# Core Struct
+# =========================================================================
+
+struct FloatObject:
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+
+fn float_new(x: i32, y: i32, w: i32, h: i32) -> FloatObject:
+    """Create a rectangular floating object (exclusion zone) at (x, y)
+    sized w x h. Left-anchored assumption: callers should give it the
+    frame's own x (or less) so `obj.x - frame_x` is the left margin."""
+    return FloatObject(x: x, y: y, w: w, h: h)
+
+# =========================================================================
+# Row-band overlap
+# =========================================================================
+
+fn _line_overlaps_obj(line_y_top: i32, line_y_bottom: i32, obj: FloatObject) -> bool:
+    """True if the line's vertical row-band [line_y_top, line_y_bottom)
+    intersects the object's vertical span [obj.y, obj.y + obj.h)."""
+    line_y_top < (obj.y + obj.h) and line_y_bottom > obj.y
+
+fn _line_capacity(frame_x: i32, frame_w: i32, line_y_top: i32, line_y_bottom: i32, obj: FloatObject) -> i32:
+    """Char capacity for one line: full frame width unless the line
+    overlaps the object's row-band, in which case only the space to the
+    right of the object (left-anchored) is usable."""
+    var avail_w = frame_w
+    if _line_overlaps_obj(line_y_top, line_y_bottom, obj):
+        avail_w = frame_w - (obj.x + obj.w - frame_x)
+    avail_w / CHAR_W
+
+# =========================================================================
+# Text Flow
+# =========================================================================
+
+fn wrap_flow(frame_x: i32, frame_y: i32, frame_w: i32, frame_h: i32, content: text, obj: FloatObject) -> [text]:
+    """Lay space-separated `content` into a text region of width `frame_w`
+    / height `frame_h` at (frame_x, frame_y), narrowing any line whose
+    row-band overlaps `obj` to the space right of the object. Greedy word
+    wrap per line (words never split). Returns one string per produced
+    line."""
+    val words = content.split(" ")
+    val word_count = words.len()
+    val total_lines = frame_h / LINE_H
+    var lines: [text] = []
+    var word_idx: i32 = 0
+    var line_idx: i32 = 0
+    while line_idx < total_lines and word_idx < word_count:
+        val line_y_top = frame_y + line_idx * LINE_H
+        val line_y_bottom = line_y_top + LINE_H
+        val cap = _line_capacity(frame_x, frame_w, line_y_top, line_y_bottom, obj)
+        var line_content = ""
+        var line_len: i32 = 0
+        while word_idx < word_count:
+            val word = words[word_idx]
+            val word_len = word.len()
+            val add_len = if line_content == "": word_len else: word_len + 1
+            if line_len + add_len <= cap:
+                if line_content == "":
+                    line_content = word
+                else:
+                    line_content = line_content + " " + word
+                line_len = line_len + add_len
+                word_idx = word_idx + 1
+            else:
+                break
+        lines.push(line_content)
+        line_idx = line_idx + 1
+    return lines
+
+fn wrap_line_count(frame_x: i32, frame_y: i32, frame_w: i32, frame_h: i32, content: text, obj: FloatObject) -> i32:
+    """Number of lines produced by wrap_flow for the same arguments."""
+    val lines = wrap_flow(frame_x, frame_y, frame_w, frame_h, content, obj)
+    lines.len()
+
+# =========================================================================
+# HTML Rendering
+# =========================================================================
+
+fn _html_escape(s: text) -> text:
+    var result = s
+    result = result.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\"", "&quot;")
+    result
+
+fn _line_html(line: text) -> text:
+    "<p>" + _html_escape(line) + "</p>"
+
+fn wrap_render_html(frame_x: i32, frame_y: i32, frame_w: i32, frame_h: i32, content: text, obj: FloatObject) -> text:
+    """Render a self-contained HTML string: a positioned text-region div
+    holding the wrapped lines (one <p> per line), plus a positioned
+    float div for the object."""
+    val lines = wrap_flow(frame_x, frame_y, frame_w, frame_h, content, obj)
+    var body = ""
+    for line in lines:
+        body = body + _line_html(line)
+    val text_style = "position:absolute;left:" + frame_x.to_text() + "px;top:" + frame_y.to_text() + "px;width:" + frame_w.to_text() + "px;height:" + frame_h.to_text() + "px;"
+    val text_div = "<div class=\"pub-wrap-text\" style=\"" + text_style + "\">" + body + "</div>"
+    val float_style = "position:absolute;left:" + obj.x.to_text() + "px;top:" + obj.y.to_text() + "px;width:" + obj.w.to_text() + "px;height:" + obj.h.to_text() + "px;"
+    val float_div = "<div class=\"pub-float\" style=\"" + float_style + "\"></div>"
+    "<div class=\"pub-wrap\">" + float_div + text_div + "</div>"

@@ -1,0 +1,60 @@
+# Protobuf wire-format encoder/decoder spec
+#
+# @covers src/lib/common/encoding/protobuf.spl
+#
+# NOTE: All payload-building is done in module-level helper functions to avoid
+# the it-block var-mutation footgun
+# (see .claude/memory/feedback_it_block_var_mutation.md).
+
+use std.common.encoding.protobuf.{pb_encode_varint, pb_decode_varint, pb_encode_zigzag, pb_decode_zigzag, pb_encode_tag, pb_encode_field_varint, pb_encode_field_bytes, pb_encode_field_string, pb_encode_fixed32, pb_encode_fixed64, pb_decode_field}
+
+    it "round-trips -1":
+        expect(pb_decode_zigzag(pb_encode_zigzag(-1))).to_equal(-1)
+
+    it "round-trips 1":
+        expect(pb_decode_zigzag(pb_encode_zigzag(1))).to_equal(1)
+
+    it "round-trips large negative":
+        expect(pb_decode_zigzag(pb_encode_zigzag(-100000))).to_equal(-100000)
+
+# ============================================================================
+# Tag encoding specs
+# ============================================================================
+
+describe "pb_encode_tag":
+    it "encodes field 1, wire_type 0 (varint) as single byte 0x08":
+        val enc = _tag_field1_varint()
+        expect(enc.len()).to_equal(1)
+        expect(enc[0].to_i64()).to_equal(0x08)
+
+    it "encodes field 2, wire_type 2 (length-delimited) as single byte 0x12":
+        val enc = _tag_field2_len()
+        expect(enc.len()).to_equal(1)
+        expect(enc[0].to_i64()).to_equal(0x12)
+
+# ============================================================================
+# Fixed32 / Fixed64 specs
+# ============================================================================
+
+describe "pb_encode_fixed32":
+    it "encodes 300 as 4 little-endian bytes":
+        val enc = _fixed32_300()
+        expect(enc.len()).to_equal(4)
+        expect(enc[0].to_i64()).to_equal(44)   # 300 & 0xFF = 0x2C = 44
+        expect(enc[1].to_i64()).to_equal(1)    # (300>>8)&0xFF = 1
+        expect(enc[2].to_i64()).to_equal(0)
+        expect(enc[3].to_i64()).to_equal(0)
+
+describe "pb_encode_fixed64":
+    it "encodes 1000000000000 as 8 little-endian bytes":
+        val enc = _fixed64_as_field()
+        # Just verify the tag+value field is 9 bytes (1 tag byte + 8 data bytes)
+        expect(enc.len()).to_equal(9)
+
+# ============================================================================
+# Full message round-trip spec
+# ============================================================================
+
+describe "protobuf message round-trip":
+    context "field1 = varint 150":
+        it "decodes field_num = 1":

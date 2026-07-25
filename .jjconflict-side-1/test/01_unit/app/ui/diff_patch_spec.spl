@@ -1,0 +1,157 @@
+# Tree Diff and Patch Specification
+#
+# Tests diff_trees from common.ui.diff and verifies correct UIPatch
+# generation for property changes, kind changes, layout/visibility changes,
+# and child additions/removals.
+
+use common.ui.widget.{WidgetNode, UITree, UIState}
+use common.ui.diff.{diff_trees}
+use common.ui.patch.{UIPatch, PatchKind}
+
+
+# ============================================================================
+# Identical Trees
+# ============================================================================
+
+describe "diff_trees identical":
+    it "produces empty patch list for identical trees":
+        val old_tree = WidgetNode.new("id1", "text")
+        val new_tree = WidgetNode.new("id1", "text")
+        val patches = diff_trees(old_tree, new_tree)
+        expect patches.len() to_equal 0
+
+
+# ============================================================================
+# Property Changes
+# ============================================================================
+
+describe "diff_trees property changes":
+    it "produces UpdateProp patch for changed property":
+        var old_node = WidgetNode.new("prop1", "text")
+        old_node = old_node.set_prop("content", "Hello")
+        var new_node = WidgetNode.new("prop1", "text")
+        new_node = new_node.set_prop("content", "World")
+        val patches = diff_trees(old_node, new_node)
+        expect patches.len() to_equal 1
+        val patch = patches[0]
+        expect patch.kind to_equal PatchKind.UpdateProp
+        expect patch.prop_key to_equal "content"
+        expect patch.prop_value to_equal "World"
+
+    it "produces RemoveProp patch for removed property":
+        var old_node = WidgetNode.new("prop2", "text")
+        old_node = old_node.set_prop("content", "Hello")
+        old_node = old_node.set_prop("color", "red")
+        var new_node = WidgetNode.new("prop2", "text")
+        new_node = new_node.set_prop("content", "Hello")
+        # "color" prop is absent in new_node
+        val patches = diff_trees(old_node, new_node)
+        var found_remove = false
+        for patch in patches:
+            if patch.kind == PatchKind.RemoveProp and patch.prop_key == "color":
+                found_remove = true
+        expect found_remove to_equal true
+
+    it "produces UpdateProp patch for added property":
+        var old_node = WidgetNode.new("prop3", "text")
+        old_node = old_node.set_prop("content", "Hello")
+        var new_node = WidgetNode.new("prop3", "text")
+        new_node = new_node.set_prop("content", "Hello")
+        new_node = new_node.set_prop("color", "blue")
+        val patches = diff_trees(old_node, new_node)
+        var found_update = false
+        for patch in patches:
+            if patch.kind == PatchKind.UpdateProp and patch.prop_key == "color":
+                found_update = true
+                expect patch.prop_value to_equal "blue"
+        expect found_update to_equal true
+
+
+# ============================================================================
+# Kind Changes
+# ============================================================================
+
+describe "diff_trees kind changes":
+    it "produces ReplaceNode patch for changed kind":
+        val old_node = WidgetNode.new("kind1", "text")
+        val new_node = WidgetNode.new("kind1", "button")
+        val patches = diff_trees(old_node, new_node)
+        expect patches.len() to_equal 1
+        expect patches[0].kind to_equal PatchKind.ReplaceNode
+
+
+# ============================================================================
+# Layout Changes
+# ============================================================================
+
+describe "diff_trees layout changes":
+    it "produces UpdateLayout patch for changed layout":
+        var old_node = WidgetNode.new("lay1", "panel")
+        old_node = old_node.set_layout("vbox")
+        var new_node = WidgetNode.new("lay1", "panel")
+        new_node = new_node.set_layout("hbox")
+        val patches = diff_trees(old_node, new_node)
+        var found_layout = false
+        for patch in patches:
+            if patch.kind == PatchKind.UpdateLayout:
+                found_layout = true
+        expect found_layout to_equal true
+
+
+# ============================================================================
+# Visibility Changes
+# ============================================================================
+
+describe "diff_trees visibility changes":
+    it "produces UpdateVisibility patch for changed visibility":
+        var old_node = WidgetNode.new("vis1", "panel")
+        var new_node = WidgetNode.new("vis1", "panel")
+        new_node = new_node.set_visible(false)
+        val patches = diff_trees(old_node, new_node)
+        var found_vis = false
+        for patch in patches:
+            if patch.kind == PatchKind.UpdateVisibility:
+                found_vis = true
+        expect found_vis to_equal true
+
+
+# ============================================================================
+# Child Changes
+# ============================================================================
+
+describe "diff_trees child changes":
+    it "produces InsertChild patch for added child":
+        val old_node = WidgetNode.new("par1", "panel")
+        var new_node = WidgetNode.new("par1", "panel")
+        val child = WidgetNode.new("par1_child", "text")
+        new_node = new_node.add_child(child)
+        val patches = diff_trees(old_node, new_node)
+        var found_insert = false
+        for patch in patches:
+            if patch.kind == PatchKind.InsertChild:
+                found_insert = true
+                expect patch.target_id to_equal "par1_child"
+        expect found_insert to_equal true
+
+    it "produces RemoveChild patch for removed child":
+        var old_node = WidgetNode.new("par2", "panel")
+        val child = WidgetNode.new("par2_child", "text")
+        old_node = old_node.add_child(child)
+        val new_node = WidgetNode.new("par2", "panel")
+        val patches = diff_trees(old_node, new_node)
+        var found_remove = false
+        for patch in patches:
+            if patch.kind == PatchKind.RemoveChild:
+                found_remove = true
+                expect patch.target_id to_equal "par2_child"
+        expect found_remove to_equal true
+
+    it "produces no patches when children are identical":
+        var old_node = WidgetNode.new("par3", "panel")
+        val child_old = WidgetNode.new("par3_kid", "text")
+        old_node = old_node.add_child(child_old)
+        var new_node = WidgetNode.new("par3", "panel")
+        val child_new = WidgetNode.new("par3_kid", "text")
+        new_node = new_node.add_child(child_new)
+        val patches = diff_trees(old_node, new_node)
+        expect patches.len() to_equal 0

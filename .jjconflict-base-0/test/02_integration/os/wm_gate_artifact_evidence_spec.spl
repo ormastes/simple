@@ -1,0 +1,87 @@
+# Integration artifact validation for SimpleOS x86_64 WM gates. The legacy
+# command now delegates to canonical fullscreen evidence; do not recreate its
+# old wm_entry serial or screendump receipts here.
+
+use std.spec
+use std.io_runtime.{file_exists, file_read, file_size}
+
+val FULLSCREEN_EVIDENCE: text = "build/simpleos_wm_fullscreen_evidence/evidence.env"
+val FULLSCREEN_SERIAL: text = "build/simpleos_wm_fullscreen_evidence/serial.log"
+val FULLSCREEN_BASELINE_PPM: text = "build/simpleos_wm_fullscreen_evidence/baseline.ppm"
+val FULLSCREEN_PPM: text = "build/simpleos_wm_fullscreen_evidence/fullscreen.ppm"
+val FULLSCREEN_RESTORED_PPM: text = "build/simpleos_wm_fullscreen_evidence/restored.ppm"
+val HELLO_SERIAL: text = "build/os/wm_hello_serial.clean.log"
+val HELLO_PPM_OPEN: text = "build/os/wm_hello_open.ppm"
+val HELLO_PPM_CLOSED: text = "build/os/wm_hello_closed.ppm"
+val READY_MARKER: text = "[production-readiness] wm=live"
+val HELLO_OPEN_MARKER: text = "[WM] Hello app window open: win=3"
+val HELLO_CLOSE_DISPATCH_MARKER: text = "type=window detail=action=close,win=3"
+val HELLO_CLOSE_DONE_MARKER: text = "[WM] window closed: hello"
+
+fn _ppm_meta(path: text) -> [i64]:
+    val head = file_read(path)
+    val parts = head.split("\n")
+    if parts.len() < 3 or parts[0] != "P6" or parts[2] != "255":
+        return [0, 0, 0, 0]
+    val dims = parts[1].split(" ")
+    if dims.len() != 2:
+        return [0, 0, 0, 0]
+    val width = dims[0].to_int() ?? 0
+    val height = dims[1].to_int() ?? 0
+    if width <= 0 or height <= 0:
+        return [0, 0, 0, 0]
+    val bytes_ok = if file_size(path) >= width.to_i64() * height.to_i64() * 3: 1 else: 0
+    [1, width.to_i64(), height.to_i64(), bytes_ok]
+
+describe "WM render-event gate artifact evidence":
+    it "uses canonical fullscreen evidence and both F11 device receipts":
+        if not (file_exists(FULLSCREEN_EVIDENCE) and file_exists(FULLSCREEN_SERIAL)):
+            fail("canonical fullscreen evidence is required; run scripts/check/check-simpleos-x86-64-wm-render-event-evidence.shs first")
+        else:
+            val evidence = file_read(FULLSCREEN_EVIDENCE)
+            val log = file_read(FULLSCREEN_SERIAL)
+            expect(evidence.contains("simpleos_wm_fullscreen_status=pass")).to_equal(true)
+            expect(evidence.contains("simpleos_wm_fullscreen_input_release_irq_marker=[wm-input-irq]")).to_equal(true)
+            expect(evidence.contains("simpleos_wm_fullscreen_restore_release_irq_marker=[wm-input-irq]")).to_equal(true)
+            expect(log.contains(READY_MARKER)).to_equal(true)
+            expect(log.contains("scancode=87 kind=press")).to_equal(true)
+            expect(log.contains("scancode=215 kind=release")).to_equal(true)
+
+    it "validates retained baseline, fullscreen, and restored P6 captures":
+        if not (file_exists(FULLSCREEN_BASELINE_PPM) and file_exists(FULLSCREEN_PPM) and file_exists(FULLSCREEN_RESTORED_PPM)):
+            fail("canonical fullscreen QMP pmemsave frames are required; run scripts/check/check-simpleos-x86-64-wm-render-event-evidence.shs first")
+        else:
+            val baseline = _ppm_meta(FULLSCREEN_BASELINE_PPM)
+            val fullscreen = _ppm_meta(FULLSCREEN_PPM)
+            val restored = _ppm_meta(FULLSCREEN_RESTORED_PPM)
+            expect(baseline[0]).to_equal(1)
+            expect(fullscreen[0]).to_equal(1)
+            expect(restored[0]).to_equal(1)
+            expect(baseline[3]).to_equal(1)
+            expect(fullscreen[3]).to_equal(1)
+            expect(restored[3]).to_equal(1)
+            expect(fullscreen[1]).to_equal(baseline[1])
+            expect(restored[2]).to_equal(baseline[2])
+
+describe "WM hello-lifecycle gate artifact evidence":
+    it "serial log orders boot, hello-open, close-dispatch, close-done markers":
+        if not file_exists(HELLO_SERIAL):
+            fail("hello-lifecycle serial evidence is required; run scripts/check/check-simpleos-x86-64-wm-hello-lifecycle-evidence.shs first")
+        else:
+            val log = file_read(HELLO_SERIAL)
+            expect(log.contains(HELLO_OPEN_MARKER)).to_equal(true)
+            expect(log.contains(HELLO_CLOSE_DISPATCH_MARKER)).to_equal(true)
+            expect(log.contains(HELLO_CLOSE_DONE_MARKER)).to_equal(true)
+
+    it "open and closed screendumps are well-formed P6 frames of the same size":
+        if not (file_exists(HELLO_PPM_OPEN) and file_exists(HELLO_PPM_CLOSED)):
+            fail("hello-lifecycle screendump pair is required; run scripts/check/check-simpleos-x86-64-wm-hello-lifecycle-evidence.shs first")
+        else:
+            val open_meta = _ppm_meta(HELLO_PPM_OPEN)
+            val closed_meta = _ppm_meta(HELLO_PPM_CLOSED)
+            expect(open_meta[0]).to_equal(1)
+            expect(closed_meta[0]).to_equal(1)
+            expect(open_meta[3]).to_equal(1)
+            expect(closed_meta[3]).to_equal(1)
+            expect(open_meta[1]).to_equal(closed_meta[1])
+            expect(open_meta[2]).to_equal(closed_meta[2])

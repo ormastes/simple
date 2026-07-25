@@ -1,0 +1,244 @@
+use common.text_advanced.{escape_json}
+use common.ui.access_types.{
+    UiAccessNode,
+    UiAccessProp,
+    UiAccessSurface,
+    UiAccessEvent,
+    UiAccessSnapshot,
+    UiAccessQueryResult,
+    UiAccessEnsureResult
+}
+
+fn ui_access_find_nodes(snapshot: UiAccessSnapshot, surface_id: text, kind: text, text_query: text, limit: i32) -> [UiAccessNode]:
+    ui_access_find_nodes_filtered(snapshot, surface_id, kind, text_query, false, limit)
+
+fn ui_access_find_nodes_filtered(snapshot: UiAccessSnapshot, surface_id: text, kind: text, text_query: text, focused_only: bool, limit: i32) -> [UiAccessNode]:
+    val node_count = snapshot.nodes.len()
+    if node_count == 0:
+        return []
+    var match_count = 0
+    var read_idx = 0
+    while read_idx < node_count:
+        val node = snapshot.nodes[read_idx]
+        if _access_node_matches_query(node, surface_id, kind, text_query, focused_only):
+            match_count = match_count + 1
+            if limit > 0 and match_count >= limit:
+                break
+        read_idx = read_idx + 1
+    if match_count == 0:
+        return []
+    var out: [UiAccessNode] = [snapshot.nodes[0]; match_count]
+    var write_idx = 0
+    read_idx = 0
+    while read_idx < node_count:
+        val node = snapshot.nodes[read_idx]
+        if _access_node_matches_query(node, surface_id, kind, text_query, focused_only):
+            out[write_idx] = node
+            write_idx = write_idx + 1
+            if write_idx >= match_count:
+                return out
+        read_idx = read_idx + 1
+    out
+
+fn _access_node_matches_query(node: UiAccessNode, surface_id: text, kind: text, text_query: text, focused_only: bool) -> bool:
+    if surface_id != "" and node.surface_id != surface_id:
+        return false
+    if kind != "" and node.kind != kind:
+        return false
+    if text_query != "" and not node.text_value.contains(text_query) and not node.widget_id.contains(text_query) and not node.canonical_id.contains(text_query):
+        return false
+    if focused_only and not node.focused:
+        return false
+    true
+
+fn ui_access_find_node(snapshot: UiAccessSnapshot, canonical_id: text) -> UiAccessNode?:
+    var i = 0
+    while i < snapshot.nodes.len():
+        val node = snapshot.nodes[i]
+        if node.canonical_id == canonical_id:
+            return node
+        i = i + 1
+    nil
+
+fn ui_access_node_value(node: UiAccessNode) -> text:
+    if node.text_value != "":
+        return node.text_value
+    var i = 0
+    while i < node.props.len():
+        val prop = node.props[i]
+        if prop.key == "value":
+            return prop.value
+        i = i + 1
+    ""
+
+fn ui_access_supports_value(node: UiAccessNode) -> bool:
+    node.kind == "input" or node.kind == "textfield" or node.kind == "textarea" or node.text_value != ""
+
+fn ui_access_value_to_json(value: text) -> text:
+    _access_json_str(value)
+
+fn ui_access_resolve_action_name(node: UiAccessNode, requested: text) -> text:
+    if requested != "":
+        return requested
+    if node.action_names.len() > 0:
+        return node.action_names[0]
+    "click"
+
+fn ui_access_snapshot_to_text(snapshot: UiAccessSnapshot) -> text:
+    "UiAccessSnapshot surfaces={snapshot.surfaces.len()} nodes={snapshot.nodes.len()} active={snapshot.active_surface}"
+
+fn ui_access_snapshot_to_json(snapshot: UiAccessSnapshot) -> text:
+    var parts: [text] = [
+        "{",
+        _access_json_pair("protocol_version", "{snapshot.protocol_version}"), ",",
+        _access_json_pair("snapshot_revision", "{snapshot.snapshot_revision}"), ",",
+        _access_json_pair("mode", _access_json_str(snapshot.mode)), ",",
+        _access_json_pair("active_surface", _access_json_str(snapshot.active_surface)), ",",
+        _access_json_pair("surfaces", _access_surfaces_to_json(snapshot.surfaces)), ",",
+        _access_json_pair("nodes", _access_nodes_to_json(snapshot.nodes)), ",",
+        _access_json_pair("recent_events", ui_access_events_to_json(snapshot.recent_events)),
+        "}"
+    ]
+    parts.join("")
+
+fn ui_access_surface_to_json(surface: UiAccessSurface) -> text:
+    var parts: [text] = [
+        "{",
+        _access_json_pair("surface_id", _access_json_str(surface.surface_id)), ",",
+        _access_json_pair("title", _access_json_str(surface.title)), ",",
+        _access_json_pair("active", _access_json_bool(surface.active)), ",",
+        _access_json_pair("window_id", _access_json_str(surface.window_id)), ",",
+        _access_json_pair("app_id", _access_json_str(surface.app_id)), ",",
+        _access_json_pair("root_canonical_id", _access_json_str(surface.root_canonical_id)),
+        "}"
+    ]
+    parts.join("")
+
+fn ui_access_query_to_json(result: UiAccessQueryResult) -> text:
+    var parts: [text] = [
+        "{",
+        _access_json_pair("count", "{result.count}"), ",",
+        _access_json_pair("nodes", _access_nodes_to_json(result.nodes)),
+        "}"
+    ]
+    parts.join("")
+
+fn ui_access_query_result(nodes: [UiAccessNode]) -> UiAccessQueryResult:
+    UiAccessQueryResult(nodes: nodes, count: nodes.len())
+
+fn ui_access_ensure_result(ok: bool, message: text, node: UiAccessNode?) -> UiAccessEnsureResult:
+    UiAccessEnsureResult(ok: ok, message: message, node: node)
+
+fn ui_access_ensure_to_json(result: UiAccessEnsureResult) -> text:
+    val node_json = if result.node == nil: "null" else: _access_node_to_json(result.node)
+    var parts: [text] = [
+        "{",
+        _access_json_pair("ok", _access_json_bool(result.ok)), ",",
+        _access_json_pair("message", _access_json_str(result.message)), ",",
+        _access_json_pair("node", node_json),
+        "}"
+    ]
+    parts.join("")
+
+fn ui_access_events_to_json(events: [UiAccessEvent]) -> text:
+    val event_count = events.len()
+    if event_count == 0:
+        return "[]"
+    var parts: [text] = [""; event_count]
+    var idx = 0
+    while idx < event_count:
+        parts[idx] = _access_event_to_json(events[idx])
+        idx = idx + 1
+    "[" + parts.join(",") + "]"
+
+fn _access_surfaces_to_json(surfaces: [UiAccessSurface]) -> text:
+    val surface_count = surfaces.len()
+    if surface_count == 0:
+        return "[]"
+    var parts: [text] = [""; surface_count]
+    var idx = 0
+    while idx < surface_count:
+        parts[idx] = ui_access_surface_to_json(surfaces[idx])
+        idx = idx + 1
+    "[" + parts.join(",") + "]"
+
+fn _access_nodes_to_json(nodes: [UiAccessNode]) -> text:
+    val node_count = nodes.len()
+    if node_count == 0:
+        return "[]"
+    var parts: [text] = [""; node_count]
+    var idx = 0
+    while idx < node_count:
+        parts[idx] = _access_node_to_json(nodes[idx])
+        idx = idx + 1
+    "[" + parts.join(",") + "]"
+
+fn _access_node_to_json(node: UiAccessNode) -> text:
+    var parts: [text] = [
+        "{",
+        _access_json_pair("canonical_id", _access_json_str(node.canonical_id)), ",",
+        _access_json_pair("surface_id", _access_json_str(node.surface_id)), ",",
+        _access_json_pair("widget_id", _access_json_str(node.widget_id)), ",",
+        _access_json_pair("kind", _access_json_str(node.kind)), ",",
+        _access_json_pair("visible", _access_json_bool(node.visible)), ",",
+        _access_json_pair("focused", _access_json_bool(node.focused)), ",",
+        _access_json_pair("enabled", _access_json_bool(node.enabled)), ",",
+        _access_json_pair("selected", _access_json_bool(node.selected)), ",",
+        _access_json_pair("text", _access_json_str(node.text_value)), ",",
+        _access_json_pair("props", _access_props_to_json(node.props)), ",",
+        _access_json_pair("child_ids", _access_text_array_to_json(node.child_ids)), ",",
+        _access_json_pair("action_names", _access_text_array_to_json(node.action_names)),
+        "}"
+    ]
+    parts.join("")
+
+fn _access_props_to_json(props: [UiAccessProp]) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < props.len():
+        var duplicate = false
+        var prior = 0
+        while prior < i:
+            if props[prior].key == props[i].key:
+                duplicate = true
+            prior = prior + 1
+        if not duplicate:
+            parts = parts.push(_access_json_pair(props[i].key, _access_json_str(props[i].value)))
+        i = i + 1
+    "{" + parts.join(",") + "}"
+
+fn _access_event_to_json(event: UiAccessEvent) -> text:
+    var parts: [text] = [
+        "{",
+        _access_json_pair("surface_id", _access_json_str(event.surface_id)), ",",
+        _access_json_pair("widget_id", _access_json_str(event.widget_id)), ",",
+        _access_json_pair("canonical_id", _access_json_str(event.canonical_id)), ",",
+        _access_json_pair("event_kind", _access_json_str(event.event_kind)), ",",
+        _access_json_pair("payload", _access_json_str(event.payload)), ",",
+        _access_json_pair("sequence", "{event.sequence}"),
+        "}"
+    ]
+    parts.join("")
+
+fn _access_text_array_to_json(values: [text]) -> text:
+    val value_count = values.len()
+    if value_count == 0:
+        return "[]"
+    var parts: [text] = [""; value_count]
+    var idx = 0
+    while idx < value_count:
+        parts[idx] = _access_json_str(values[idx])
+        idx = idx + 1
+    "[" + parts.join(",") + "]"
+
+fn _access_json_pair(key: text, value: text) -> text:
+    _access_json_str(key) + ":" + value
+
+fn _access_json_bool(value: bool) -> text:
+    if value:
+        "true"
+    else:
+        "false"
+
+fn _access_json_str(value: text) -> text:
+    "\"" + escape_json(value) + "\""

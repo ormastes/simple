@@ -1,0 +1,94 @@
+"""
+# Claude Full Bridge Debug
+
+Mirrors the ant-only bridge debug fault injection queue used by Claude Code to
+exercise reconnect, fatal teardown, and transient retry paths.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.bridge.bridgeDebug.{bridgeDebugStateNew, bridgeDebugHandleNew, bridgeFaultNew, normalizeBridgeFaultMethod, bridgeFaultContext}
+
+describe "Claude full bridge debug fault injection":
+    it "should register, describe, and clear the debug handle":
+        step("Create a debug state and register the active bridge handle")
+        val state = bridgeDebugStateNew()
+        val handle = bridgeDebugHandleNew("env-1", "session-1")
+        state.registerBridgeDebugHandle(handle)
+        expect(state.hasBridgeDebugHandle()).to_equal(true)
+        expect(state.getBridgeDebugHandle().describe()).to_equal("env=env-1 session=session-1")
+
+        step("Drive close, reconnect, and wake hooks on the registered handle")
+        val current = state.getBridgeDebugHandle()
+        current.fireClose(1006)
+        current.forceReconnect()
+        current.wakePollLoop()
+        expect(current.close_code).to_equal(1006)
+        expect(current.reconnect_count).to_equal(1)
+        expect(current.wake_count).to_equal(1)
+
+        step("Clear the handle and queued faults on teardown")
+        state.injectBridgeFault(bridgeFaultNew("pollForWork", "fatal", 404, "not_found_error", 1))
+        expect(state.faultCount()).to_equal(1)
+        state.clearBridgeDebugHandle()
+        expect(state.hasBridgeDebugHandle()).to_equal(false)
+        expect(state.faultCount()).to_equal(0)
+
+    it "should consume matching fatal faults before delegating to the API":
+        step("Queue a two-shot fatal poll fault")
+        val state = bridgeDebugStateNew()
+        state.injectBridgeFault(bridgeFaultNew("pollForWork", "fatal", 404, "not_found_error", 2))
+        expect(state.faultCount()).to_equal(1)
+        expect(state.latestLog()).to_contain("Queued fault")
+
+        step("Consume the first matching fault and keep the remaining shot")
+        val first = state.wrapApiForFaultInjection("pollForWork")
+        expect(first.matched).to_equal(true)
+        expect(first.fatal).to_equal(true)
+        expect(first.status).to_equal(404)
+        expect(first.errorType).to_equal("not_found_error")
+        expect(first.message).to_equal("[injected] Poll 404")
+        expect(state.faultCount()).to_equal(1)
+
+        step("Consume the final shot and then delegate unmatched calls")
+        val second = state.pollForWork()
+        expect(second.matched).to_equal(true)
+        expect(state.faultCount()).to_equal(0)
+        val delegated = state.pollForWork()
+        expect(delegated.matched).to_equal(false)
+        expect(delegated.message).to_equal("delegate:pollForWork")
+
+    it "should model transient registration, reconnect, and heartbeat faults":
+        step("Queue each non-poll bridge API method")
+        val state = bridgeDebugStateNew()
+        state.injectBridgeFault(bridgeFaultNew("registerBridgeEnvironment", "transient", 503, "", 1))
+        state.injectBridgeFault(bridgeFaultNew("reconnectSession", "fatal", 410, "gone", 1))
+        state.injectBridgeFault(bridgeFaultNew("heartbeatWork", "transient", 502, "", 1))
+        expect(state.faultCount()).to_equal(3)
+
+        step("Consume registration as a transient retryable fault")
+        val registration = state.registerBridgeEnvironment()
+        expect(registration.matched).to_equal(true)
+        expect(registration.fatal).to_equal(false)
+        expect(registration.message).to_equal("[injected transient] Registration 503")
+
+        step("Consume reconnect as fatal and heartbeat as transient")
+        val reconnect = state.reconnectSession()
+        expect(reconnect.fatal).to_equal(true)
+        expect(reconnect.message).to_equal("[injected] ReconnectSession 410")
+        val heartbeat = state.heartbeatWork()
+        expect(heartbeat.fatal).to_equal(false)
+        expect(heartbeat.message).to_equal("[injected transient] Heartbeat 502")
+        expect(state.faultCount()).to_equal(0)
+
+    it "should normalize defensive input the same way the wrapper does":
+        step("Normalize unsupported kind and method inputs to safe defaults")
+        val state = bridgeDebugStateNew()
+        val fault = bridgeFaultNew("unknown", "unknown", 500, "", 1)
+        expect(fault.method).to_equal("pollForWork")
+        expect(fault.kind).to_equal("transient")
+        expect(fault.label()).to_equal("pollForWork transient/500 x1")
+        state.injectBridgeFault(fault)
+        val result = state.wrapApiForFaultInjection("unknown")
+        expect(result.message).to_equal("[injected transient] Poll 500")
+        expect(normalizeBridgeFaultMethod("unknown")).to_equal("pollForWork")
+        expect(bridgeFaultContext("unknown")).to_equal("Poll")
