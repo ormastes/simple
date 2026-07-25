@@ -25,7 +25,7 @@ and instead produce target-correct relocatable objects where supported.
 | macOS x86_64 | Hosted full matrix | Hosted full matrix | exact exit/output | Wired; fresh CI receipt pending |
 | macOS AArch64 | Hosted full matrix | Hosted full matrix | exact exit/output | Wired; fresh CI receipt pending |
 | Windows x86_64 | Default hosted matrix | Hosted matrix | PE/COFF + exact exit | Cranelift wired; default-LLVM row remains open |
-| Windows AArch64 | COFF object | COFF object | nonempty machine-correct object | LLVM row remains open |
+| Windows AArch64 | COFF object | COFF object | nonempty machine-correct scalar, cross-module, and Option objects | Wired; fresh receipts pending |
 | FreeBSD x86_64 | Full QEMU matrix | Scoped QEMU matrix | guest identity + exact exit/output | Wired; fresh `--full` receipt pending |
 | Linux ARM32 | Relocatable object | Explicit unsupported rejection | ELF32 ARM hard-float | Wired; fresh receipt pending |
 | Linux AArch64 | QEMU-user executable | QEMU-user executable | ELF64 AArch64 + exact exit/output | Wired; Cranelift CI execution must be mandatory |
@@ -40,6 +40,7 @@ exists; header compilation alone is not runtime evidence.
 - `platform_case(name, description, writer, expected_exit, xfail)`
 - `require_nonempty_target_object(path)`
 - `require_target_machine(readelf, path, elf_class, machine)` (class/type/machine)
+- `require_coff_machine(readobj, path, format, machine)`
 - `require_runtime_exit(expected, command...)`
 
 No helper may turn a missing artifact, timeout, signal, empty selection, XPASS,
@@ -66,6 +67,11 @@ acceptance. Current source hardening is not a platform execution receipt.
 The fresh pure-Simple compiler/parser gate, Windows default-LLVM/ARM64 LLVM,
 mandatory Cranelift cross-execution, hosted CI reruns, and FreeBSD full QEMU
 run remain open.
+
+The first focused Windows ARM64 LLVM object attempt with the retained old
+generation-1 candidate crashed on a nil field receiver and illegal instruction
+before artifact creation. The new gate is wired but uncredited until a fresh
+candidate succeeds.
 
 ## Traceability
 

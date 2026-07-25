@@ -1087,3 +1087,12 @@ the shared binary — deploys require explicit user go-ahead).
   shared matrix but is not a substitute for their pending hosted CI receipts.
   The required pure-Simple SSpec docgen attempt timed out after 60 seconds
   without output; no generated-manual credit is claimed.
+
+  The Linux pure-Simple architecture gate now schedules default-LLVM Windows
+  ARM64 COFF scalar, cross-module `Result<u8>`, and Option objects and validates
+  their format/machine through the shared target assertions. Its portability
+  source gate passes. The retained old generation-1 candidate crashed
+  `field access on nil receiver` followed by illegal instruction while trying
+  the focused scalar object, before producing an artifact; this is blocker
+  evidence only. A fresh candidate must run the wired gate before Windows
+  ARM64 LLVM receives object credit.
