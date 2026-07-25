@@ -126,6 +126,14 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val)
     return ENCODE_PTR(s);
 }
 
+/* Interned string-literal constructor. The hosted runtime interns by literal
+ * address for perf; the freestanding kernel has no intern table, so forward to
+ * rt_string_new — functionally identical (a fresh heap string per call). */
+RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
+{
+    return rt_string_new(data, len_val);
+}
+
 RuntimeValue rt_rv32_probe_store32(RuntimeValue addr, RuntimeValue value)
 {
     *(volatile uint32_t *)(uintptr_t)addr = (uint32_t)(uintptr_t)value;
