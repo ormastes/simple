@@ -934,3 +934,32 @@ the shared binary — deploys require explicit user go-ahead).
   stack/value-map handling. Do not repeat the already-recorded admission or
   import-signature experiments. LLVM and platform-matrix execution remain
   deferred until Cranelift exits `42`.
+
+  A fresh session then isolated the merge hypothesis with a standalone typed
+  F64 probe. Both the unannotated and explicit-`f64` forms exited `1` on the
+  first check, `3.14 != 3.14`, before any Option or branch merge. This
+  establishes an independent F64 literal/comparison failure before C9's
+  shared-result-slot construction, so C9 cannot yet isolate that merge. The
+  reproducer is retained as
+  `test/03_system/native/f64_literal_compare.spl`, expected exit `42`.
+
+  Six `MirOperand.Copy`/`Move` optional-local consumers in Cranelift value
+  loading, indirect-call lowering, and operand-type classification now use
+  direct `?? LocalId(id: -1)` extraction instead of Stage4-fragile `if val`.
+  The resulting candidate completed with `7 compiled, 1392 cached, 0 failed`;
+  the annotated F64 reproducer still exited `1`.
+
+  The compiler-side SFFI wrapper also calls
+  `rt_cranelift_fconst(i64, i64, f64) -> i64`. A typed
+  `(I64, I64, F64) -> I64` runtime-import helper and exact symbol route now
+  prevent that call from falling through the generic all-i64 extern ABI. The
+  next candidate completed with `6 compiled, 1393 cached, 0 failed`, but the
+  F64 reproducer still exited `1` and staged C9 still exited `2`.
+
+  C9 remains uncredited and this session has reached its three-cycle cap.
+  The next fresh session should inspect the actual F64 value at
+  `rt_cranelift_fconst` entry and the two Cranelift operands passed to
+  `cranelift_fcmp`; do not rewrite the shared-result merge until the plain
+  reproducer is green.
+  LLVM and platform-matrix execution remain deferred until the plain F64
+  reproducer and C9 both exit `42`.
