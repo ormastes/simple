@@ -19,7 +19,7 @@ the wrapper skips instead of falling back to `src/compiler_rust/**`.
 - REQ-CPU-SIMD-ENGINE2D-BIN-001: Automatic Simple binary selection is
   self-hosted only.
 - REQ-CPU-SIMD-ENGINE2D-BIN-002: Rust seed Simple paths produce
-  `simple-bin-forbidden` evidence before generated Engine2D evidence runs.
+  `simple-bin-forbidden` evidence before canonical Engine2D evidence is copied.
 - REQ-CPU-SIMD-ENGINE2D-BIN-003: Evidence records selected Simple binary,
   source, and status fields.
 - REQ-CPU-SIMD-ENGINE2D-BIN-004: Arch matrix evidence records x86_64,
@@ -43,14 +43,14 @@ the wrapper skips instead of falling back to `src/compiler_rust/**`.
 2. Inspect the wrapper source for Rust seed detection and exported provenance.
 3. Run the wrapper with `SIMPLE_BIN=src/compiler_rust/target/release/simple`.
 4. Confirm `evidence.env` reports `simple-bin-forbidden`.
-5. Confirm the generated evidence source was not created for the forbidden path.
+5. Confirm the canonical evidence source was not copied for the forbidden path.
 
 ## Design
 
 **Design:** doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md
 
-The wrapper validates `SIMPLE_BIN` before generating the evidence `.spl`, so
-forbidden seed rejection is cheap and deterministic.
+The wrapper validates `SIMPLE_BIN` before copying the canonical evidence
+`.spl`, so forbidden seed rejection is cheap and deterministic.
 
 ## Research
 
@@ -72,6 +72,7 @@ describe "CPU SIMD Engine2D Simple binary contract":
 
     it "auto selects only self hosted Simple launchers":
         val script = file_read("scripts/check/check-cpu-simd-engine2d-evidence.shs")
+        val evidence_src = file_read("scripts/build/cpu-simd-engine2d-evidence/cpu_simd_engine2d_evidence.spl")
         expect(script).to_contain("SIMPLE_BIN_SOURCE=")
         expect(script).to_contain("SIMPLE_BIN_STATUS=pass")
         expect(script).to_contain("\"release\"/*/simple")
@@ -79,6 +80,8 @@ describe "CPU SIMD Engine2D Simple binary contract":
         expect(script).to_contain("\"build/bootstrap/stage3/simple\"")
         expect(script).to_contain("repo-self-hosted-engine2d-simd")
         expect(script).to_contain("is_rust_seed_simple")
+        expect(script).to_contain("binary_identifies_as_bootstrap_seed")
+        expect(script).to_contain("bootstrap seed only")
         expect(script).to_contain("binary_runs_engine2d_simd_smoke")
         expect(script).to_contain("engine2d_simd_candidate_smoke.spl")
         expect(script).to_contain("engine2d_simd_fill_row_u32(4, 0xFF010203u32)")
@@ -105,16 +108,29 @@ describe "CPU SIMD Engine2D Simple binary contract":
         expect(script).to_contain("cpu_simd_alpha_edge_expected_checksum")
         expect(script).to_contain("cpu_simd_alpha_edge_actual_checksum")
         expect(script).to_contain("cpu_simd_alpha_edge_mismatch_count")
-        expect(script).to_contain("mismatch_count(alpha_edge_expected, alpha_edge_actual) != 0")
+        expect(evidence_src).to_contain("val alpha_edge_mismatches = mismatch_count(alpha_edge_expected, alpha_edge_actual)")
+        expect(evidence_src).to_contain("alpha_edge_mismatches != 0")
         expect(script).to_contain("\"$ALPHA_EDGE_MISMATCH\" != \"0\"")
         expect(script).to_contain("REASON=simd-output-mismatch")
-        expect(script).to_contain("0x00000000u32")
-        expect(script).to_contain("0xFFFFFFFFu32")
-        expect(script).to_contain("0xFEF0A020u32")
+        expect(evidence_src).to_contain("0x00000000u32")
+        expect(evidence_src).to_contain("0xFFFFFFFFu32")
+        expect(evidence_src).to_contain("0xFEF0A020u32")
+        expect(script).to_contain("CANONICAL_EVIDENCE_SRC=\"scripts/build/cpu-simd-engine2d-evidence/cpu_simd_engine2d_evidence.spl\"")
+        expect(script).to_contain("cp \"$CANONICAL_EVIDENCE_SRC\" \"$EVIDENCE_SRC\"")
+        expect(script).to_contain("cmp -s \"$CANONICAL_EVIDENCE_SRC\" \"$EVIDENCE_SRC\"")
+        expect(script).to_contain("\"$COPIED_SOURCE_SHA256\" != \"$CANONICAL_SOURCE_SHA256\"")
+        expect(script).to_contain("cpu_simd_evidence_compiler_sha256=")
+        expect(script).to_contain("cpu_simd_evidence_native_executable_sha256=")
+        expect(script).to_contain("cpu_simd_evidence_git_revision=")
+        expect(script).to_contain("cpu_simd_evidence_native_build_command=")
+        expect(script).to_contain("cpu_simd_evidence_native_build_exit=")
+        expect(script).to_contain("cpu_simd_evidence_native_run_exit=")
+        expect(script).to_contain("cpu_simd_evidence_log_bounded=")
+        expect(script.contains("cat >\"$EVIDENCE_SRC\"")).to_equal(false)
         val no_seed_candidate = not script.contains("target/debug/simple\"") and not script.contains("target/release/simple\"")
         expect(no_seed_candidate).to_be(true)
 
-    it "rejects explicit Rust seed before generating Engine2D evidence":
+    it "rejects explicit Rust seed before copying canonical Engine2D evidence":
         val root = "build/test-cpu-simd-engine2d-seed-forbidden"
         val command = "rm -rf " + root + " && mkdir -p " + root + " && SIMPLE_BIN=src/compiler_rust/target/release/simple BUILD_DIR=" + root + "/out REPORT_PATH=" + root + "/report.md sh scripts/check/check-cpu-simd-engine2d-evidence.shs > " + root + "/stdout.txt 2> " + root + "/stderr.txt || true"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])

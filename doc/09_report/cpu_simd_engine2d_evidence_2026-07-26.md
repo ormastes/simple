@@ -1,51 +1,58 @@
 # CPU SIMD Engine2D AArch64 Evidence — 2026-07-26
 
-## Scope
+## Status
 
-Native AArch64/NEON exact-bitmap evidence for Engine2D fill, copy, alpha,
-scroll, and the 16x12 composed diagram.  The check uses no blur or tolerance.
+`BLOCKED`: the scalar normalization and evidence-integrity repair are ready,
+but no provenance-complete native acceptance run was performed in this review.
 
-## Diagnosis
+The lane already contains three native-build artifacts from the earlier
+diagnosis:
 
-- The production C/NEON `engine2d_blend_pixel` implementation was correct.
-- The pure-Simple scalar fallback read packed pixels through `any` without
-  normalizing them first.  Under native AOT this retained boxed values in its
-  channel arithmetic, so scalar expected pixels diverged even though the C
-  kernel was correct.
-- The evidence receipt also read aggregate bool fields that native AOT stored
-  incorrectly: hit count `2` and the reason text reported a native SIMD run,
-  while `native_simd_executed` printed `false`.
+1. `cpu_simd_engine2d_evidence`
+2. `cpu_simd_engine2d_evidence_fixed`
+3. `cpu_simd_engine2d_evidence_receipt`
 
-## Fix
+A fourth native build would violate the mandatory three-cycle cap. The earlier
+artifacts do not count as acceptance evidence because their exact compiler,
+source revision, source hash, build command, build exit, executable hash, run
+exit, and bounded raw logs were not retained together.
 
-- Normalize packed source and destination words to `i64` in
-  `_scalar_blend_row` before bit arithmetic.
-- Make both evidence sources use the canonical scalar helpers rather than
-  their duplicated scalar compositor.
-- Preserve a non-opaque destination alpha fixture, which catches the former
-  hardcoded-opaque reference formula.
-- Derive receipt text and gates from per-kernel hit counters and summed exact
-  bitmap mismatch totals, rather than aggregate bool storage or reason text.
+## Implemented Repair
 
-## Native Capture
+- `_scalar_blend_row` normalizes packed source and destination words to `i64`
+  before bit arithmetic.
+- The committed
+  `scripts/build/cpu-simd-engine2d-evidence/cpu_simd_engine2d_evidence.spl`
+  file is the only evidence program. The wrapper copies it and requires
+  byte-for-byte equality plus equal SHA-256 before execution.
+- The non-opaque alpha fixture covers source alpha `0`, `1`, `127`, `128`,
+  `254`, and `255`, with transparent, translucent, and opaque destinations.
+- Acceptance derives from explicit hit counters and exact mismatch totals,
+  not aggregate bool storage or diagnostic reason text.
+- Native mode now fails closed unless it records the Git revision, canonical
+  and copied source SHA-256 values, compiler SHA-256, exact build command,
+  build exit, executable SHA-256, exact run command, run exit, and bounded
+  build/run logs with their SHA-256 values.
 
-Command: native-build with the retained self-hosted AArch64 binary, followed by
-`build/cpu-simd-parity-native/cpu_simd_engine2d_evidence_receipt`.
+## Superseded Claims
 
-Before fix:
+The previous before/after checksum narrative is withdrawn as acceptance
+evidence because it was not bound to a complete retained provenance record.
+It must not be used to approve or release this lane.
 
-- diagram expected checksum: `79329719696120`
-- diagram actual checksum: `79321896458941`
-- diagram mismatches: `18` (first index `115`)
-- native SIMD hits: `2`; aggregate receipt printed `false`
+## Next Native Cycle
 
-After fix:
+In a fresh verification session, run exactly one native cycle through:
 
-- fill/copy/alpha/alpha-edge/scroll mismatch counts: `0`
-- diagram expected and actual checksum: `79321896458941`
-- diagram mismatch count: `0`
-- `cpu_simd_executed_all=true`
-- `cpu_simd_native_simd_executed=true`
-- `cpu_simd_native_simd_bit_exact=true`
-- native SIMD hits: `2`
-- overall: `pass`
+```sh
+SIMPLE_CPU_SIMD_EXECUTION_KIND=native \
+BUILD_DIR=build/cpu-simd-engine2d-evidence-native \
+REPORT_PATH=doc/09_report/cpu_simd_engine2d_evidence_2026-07-26.md \
+sh scripts/check/check-cpu-simd-engine2d-evidence.shs
+```
+
+The resulting report is acceptable only when status is `pass`, source equality
+is `pass`, all required hashes are present, both native exits are `0`, both
+logs are bounded, native SIMD hits are positive, and all exact bitmap mismatch
+counts are zero. The wrapper fails if no Engine2D-SIMD-capable pure-Simple
+compiler is available; deploy one before starting that fresh cycle.

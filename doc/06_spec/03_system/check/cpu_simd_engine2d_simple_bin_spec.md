@@ -2,29 +2,6 @@
 
 > The CPU SIMD Engine2D wrapper needs a Simple binary that contains the Engine2D SIMD extern names. This contract keeps automatic evidence on self-hosted/release Simple binaries; if no capable self-hosted binary exists, the wrapper skips instead of falling back to `src/compiler_rust/**`.
 
-<!-- sdn-diagram:id=cpu_simd_engine2d_simple_bin_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=cpu_simd_engine2d_simple_bin_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-cpu_simd_engine2d_simple_bin_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=cpu_simd_engine2d_simple_bin_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 3 | 3 | 0 | 0 |
@@ -47,7 +24,7 @@ The CPU SIMD Engine2D wrapper needs a Simple binary that contains the Engine2D S
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/cpu_simd_engine2d_simple_bin_spec.spl` |
-| Updated | 2026-07-08 |
+| Updated | 2026-07-25 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -64,7 +41,7 @@ the wrapper skips instead of falling back to `src/compiler_rust/**`.
 - REQ-CPU-SIMD-ENGINE2D-BIN-001: Automatic Simple binary selection is
   self-hosted only.
 - REQ-CPU-SIMD-ENGINE2D-BIN-002: Rust seed Simple paths produce
-  `simple-bin-forbidden` evidence before generated Engine2D evidence runs.
+  `simple-bin-forbidden` evidence before canonical Engine2D evidence is copied.
 - REQ-CPU-SIMD-ENGINE2D-BIN-003: Evidence records selected Simple binary,
   source, and status fields.
 - REQ-CPU-SIMD-ENGINE2D-BIN-004: Arch matrix evidence records x86_64,
@@ -73,7 +50,8 @@ the wrapper skips instead of falling back to `src/compiler_rust/**`.
   Engine2D SIMD rows for x86_64, aarch64, riscv64, and RVV riscv64 when the
   matching C compilers are present.
 - REQ-CPU-SIMD-ENGINE2D-BIN-006: Optional target-binary proof builds and runs
-  x86_64, aarch64, and riscv64 native-build outputs independently.
+  the Engine2D SIMD C kernel harness for x86_64, aarch64, and riscv64
+  independently.
 - REQ-CPU-SIMD-ENGINE2D-BIN-007: Exact bitmap quality evidence covers alpha
   blend edge cases for transparent, opaque, low-alpha, and high-alpha pixels.
 - REQ-CPU-SIMD-ENGINE2D-BIN-008: An explicitly pinned binary must pass the
@@ -87,16 +65,14 @@ the wrapper skips instead of falling back to `src/compiler_rust/**`.
 2. Inspect the wrapper source for Rust seed detection and exported provenance.
 3. Run the wrapper with `SIMPLE_BIN=src/compiler_rust/target/release/simple`.
 4. Confirm `evidence.env` reports `simple-bin-forbidden`.
-5. Confirm the generated evidence source was not created for the forbidden path.
+5. Confirm the canonical evidence source was not copied for the forbidden path.
 
 ## Design
 
 **Design:** doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md
 
-The wrapper validates `SIMPLE_BIN` before generating the evidence `.spl`, so
-forbidden seed rejection is cheap and deterministic. Explicit self-host paths
-must also execute the three-row SIMD smoke; a stale binary records
-`simple-bin-simd-smoke-failed` instead of reaching a segfaulting full run.
+The wrapper validates `SIMPLE_BIN` before copying the canonical evidence
+`.spl`, so forbidden seed rejection is cheap and deterministic.
 
 ## Research
 
@@ -117,11 +93,12 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_engine2d_simple_bin
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 58 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val script = file_read("scripts/check/check-cpu-simd-engine2d-evidence.shs")
+val evidence_src = file_read("scripts/build/cpu-simd-engine2d-evidence/cpu_simd_engine2d_evidence.spl")
 expect(script).to_contain("SIMPLE_BIN_SOURCE=")
 expect(script).to_contain("SIMPLE_BIN_STATUS=pass")
 expect(script).to_contain("\"release\"/*/simple")
@@ -129,8 +106,26 @@ expect(script).to_contain("\"bin/release\"/*/simple")
 expect(script).to_contain("\"build/bootstrap/stage3/simple\"")
 expect(script).to_contain("repo-self-hosted-engine2d-simd")
 expect(script).to_contain("is_rust_seed_simple")
+expect(script).to_contain("binary_identifies_as_bootstrap_seed")
+expect(script).to_contain("bootstrap seed only")
+expect(script).to_contain("binary_runs_engine2d_simd_smoke")
+expect(script).to_contain("engine2d_simd_candidate_smoke.spl")
+expect(script).to_contain("engine2d_simd_fill_row_u32(4, 0xFF010203u32)")
+expect(script).to_contain("engine2d_simd_copy_row_u32([0xFF000001u32")
+expect(script).to_contain("engine2d_simd_blend_row_u32([0xFF102030u32")
+expect(script).to_contain("blend[0] != 0xFF102030u32")
+expect(script).to_contain("blend[1] != 0xFFFFFFFFu32")
+expect(script).to_contain("binary_has_runnable_engine2d_simd_externs")
 expect(script).to_contain("if [ \"$SIMPLE_BIN_PINNED\" = \"0\" ]; then")
 expect(script.contains("|| [ \"$SIMPLE_BIN\" = \"bin/simple\" ]")).to_equal(false)
+expect(script).to_contain("\"$SIMPLE_BIN_PINNED\" = \"1\"")
+expect(script).to_contain("! binary_runs_engine2d_simd_smoke \"$SIMPLE_BIN\"")
+expect(script).to_contain("SIMPLE_BIN_STATUS=incompatible")
+expect(script).to_contain("REASON=\"simple-bin-simd-smoke-failed\"")
+expect(script).to_contain("rt_engine2d_simd_fill_row_u32")
+expect(script).to_contain("rt_engine2d_simd_copy_row_u32")
+expect(script).to_contain("rt_engine2d_simd_blend_row_u32")
+expect(script.contains("rt_engine2d_simd_fill_u32'")).to_equal(false)
 expect(script).to_contain("SIMPLE_BIN_STATUS=forbidden")
 expect(script).to_contain("export SIMPLE_BIN SIMPLE_BIN_SOURCE SIMPLE_BIN_STATUS")
 expect(script).to_contain("cpu_simd_evidence_simple_bin=$SIMPLE_BIN")
@@ -139,16 +134,32 @@ expect(script).to_contain("cpu_simd_evidence_simple_bin_status=$SIMPLE_BIN_STATU
 expect(script).to_contain("cpu_simd_alpha_edge_expected_checksum")
 expect(script).to_contain("cpu_simd_alpha_edge_actual_checksum")
 expect(script).to_contain("cpu_simd_alpha_edge_mismatch_count")
-expect(script).to_contain("0x00000000u32")
-expect(script).to_contain("0xFFFFFFFFu32")
-expect(script).to_contain("0xFEF0A020u32")
+expect(evidence_src).to_contain("val alpha_edge_mismatches = mismatch_count(alpha_edge_expected, alpha_edge_actual)")
+expect(evidence_src).to_contain("alpha_edge_mismatches != 0")
+expect(script).to_contain("\"$ALPHA_EDGE_MISMATCH\" != \"0\"")
+expect(script).to_contain("REASON=simd-output-mismatch")
+expect(evidence_src).to_contain("0x00000000u32")
+expect(evidence_src).to_contain("0xFFFFFFFFu32")
+expect(evidence_src).to_contain("0xFEF0A020u32")
+expect(script).to_contain("CANONICAL_EVIDENCE_SRC=\"scripts/build/cpu-simd-engine2d-evidence/cpu_simd_engine2d_evidence.spl\"")
+expect(script).to_contain("cp \"$CANONICAL_EVIDENCE_SRC\" \"$EVIDENCE_SRC\"")
+expect(script).to_contain("cmp -s \"$CANONICAL_EVIDENCE_SRC\" \"$EVIDENCE_SRC\"")
+expect(script).to_contain("\"$COPIED_SOURCE_SHA256\" != \"$CANONICAL_SOURCE_SHA256\"")
+expect(script).to_contain("cpu_simd_evidence_compiler_sha256=")
+expect(script).to_contain("cpu_simd_evidence_native_executable_sha256=")
+expect(script).to_contain("cpu_simd_evidence_git_revision=")
+expect(script).to_contain("cpu_simd_evidence_native_build_command=")
+expect(script).to_contain("cpu_simd_evidence_native_build_exit=")
+expect(script).to_contain("cpu_simd_evidence_native_run_exit=")
+expect(script).to_contain("cpu_simd_evidence_log_bounded=")
+expect(script.contains("cat >\"$EVIDENCE_SRC\"")).to_equal(false)
 val no_seed_candidate = not script.contains("target/debug/simple\"") and not script.contains("target/release/simple\"")
 expect(no_seed_candidate).to_be(true)
 ```
 
 </details>
 
-#### rejects explicit Rust seed before generating Engine2D evidence
+#### rejects explicit Rust seed before copying canonical Engine2D evidence
 
 <details>
 <summary>Executable SSpec</summary>
@@ -183,7 +194,7 @@ expect(src_code).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 50 lines folded for reproduction.
+Runnable source: 54 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -199,10 +210,14 @@ expect(script).to_contain("rv64gcv")
 expect(script).to_contain("runtime_compile_status")
 expect(script).to_contain("CPU_SIMD_ARCH_MATRIX_TARGET_BUILD")
 expect(script).to_contain("target_binary_status")
-expect(script).to_contain("target-binary-ran")
+expect(script).to_contain("engine2d-simd-c-kernels-ran")
+expect(script).to_contain("check-engine2d-simd-c-kernels.shs")
+expect(script).to_contain("ENGINE2D_SIMD_C_KERNELS_CFLAGS")
+expect(script).to_contain("ENGINE2D_SIMD_C_KERNELS_RUNNER")
+expect(script).to_contain("engine2d-simd-c-kernels/engine2d_simd_c_test")
 expect(script).to_contain("qemu-aarch64 -L /usr/aarch64-linux-gnu")
 expect(script).to_contain("qemu-riscv64 -L /usr/riscv64-linux-gnu")
-expect(script).to_contain("examples/llvm_nested_method_probe.spl")
+expect(script).to_contain("-march=rv64gcv -mabi=lp64d")
 expect(script).to_contain("strict-requires-all-arches-pass")
 
 val runtime = file_read("src/runtime/runtime_simd_dispatch.c")
@@ -257,9 +272,9 @@ expect(strict_evidence).to_contain("cpu_simd_engine2d_arch_matrix_reason=strict-
 
 ## Related Documentation
 
-- **Plan:** [doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-27.md](doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-27.md)
-- **Design:** [doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md](doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md)
-- **Research:** [doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md](doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md)
+- **Plan:** `doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-27.md`
+- **Design:** `doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md`
+- **Research:** `doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md`
 
 
 </details>
