@@ -37,7 +37,7 @@ Side policy is per-path: paths whose latest truth is local restore from the pre-
 
 ## Pre-push guards
 
-- No `.jjconflict-*` trees in the outgoing range (GitHub rejects >100MB blobs like `bin/release/simple`): `git rev-list main@origin..$TIP | xargs -I{} git ls-tree --name-only {} | grep '^\.jjconflict'` must be empty. Range only — never `main@{0}` (that sweeps the whole reflog).
+- **No `.jjconflict-*` trees in the outgoing range — run `sh scripts/check/check-no-conflict-tree-push.shs` (exit 0 = safe).** With no argument it checks `main@origin..@-`, exactly what `jj git push --bookmark main` sends. **`jj git push` does NOT block a conflict commit**; on 2026-07-25 one was pushed and `main` carried no source files at all across two commits until it was repaired. A jj conflict commit's git tree contains *only* `.jjconflict-base-0/` and `.jjconflict-side-N/`, so a clone gets an empty repo. Symptom to recognise: `git cat-file -p <sha>:<path>` says *"exists on disk, but not in <sha>"* — that reads like one missing file but means the whole tree is gone; confirm with `git ls-tree --name-only <sha>`. Range only — never `main@{0}` (that sweeps the whole reflog).
 - No leaked markers in previously-conflicted files: `git grep -c '^<<<<<<<' $TIP -- <paths>` must be 0.
 - Stale `.git/index.lock` with no live holder: `find .git/index.lock -mmin +5 -delete`. Check `pgrep -af 'jj (rebase|restore)'` first — a D-state jj may still be progressing (verify via `/proc/PID/io` deltas) and must not be killed.
 - Edit-tool changes are not auto-snapshotted: commit immediately after editing, and re-verify file content (`grep`) after any `workspace update-stale` — a parallel-session reconcile can silently clobber uncommitted edits.
@@ -67,7 +67,19 @@ origin versions". A sync that reverts is worse than no sync. Mandatory:
 Non-code artifacts (docs, skills, workflows, spipe state) may sync freely; the
 danger is only `src/**`, `scripts/**`, and other product code — hold those to the
 guards above. Upgrade path: a `scripts/check/` pre-push hook that fails when the
-outgoing range reverts a product file the committer didn't author.
+outgoing range reverts a product file the committer didn't author. (The
+conflict-tree half of this is now implemented as
+`scripts/check/check-no-conflict-tree-push.shs`; the revert-detection half is
+still manual.)
+
+**Rebasing onto a parallel session's resolution: diff both directions.** When
+two sessions fix the same file, the newer origin version is not automatically a
+superset. On 2026-07-25 origin's resolution of `make_os_disk.c` kept most of the
+local fixes but replaced fixed-cluster geometry with dynamic sizing — so the
+local copy was *behind* on one axis and *ahead* on three. Overwriting either way
+would have reverted real work. Check `diff -u origin_version local_version` and
+read **both** the `-` and `+` sides before choosing; often the answer is that
+origin already supersedes you and the right move is to drop your commit.
 
 ## LLM wiki before commit
 
