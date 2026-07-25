@@ -1943,6 +1943,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_create_sampler",
     "rt_vulkan_create_swapchain",
     "rt_vulkan_destroy_descriptor_set",
+    "rt_vulkan_discard_command",
     "rt_vulkan_destroy_fence",
     "rt_vulkan_destroy_framebuffer",
     "rt_vulkan_destroy_graphics_pipeline",
@@ -2081,6 +2082,7 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_ptr_read_i32"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_rocm_init"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_engine2d_rocm_download_pixels"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_vulkan_discard_command"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_memory_barrier"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_load_barrier"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_store_barrier"));

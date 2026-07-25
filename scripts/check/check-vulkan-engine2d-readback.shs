@@ -17,7 +17,12 @@ CLEAR_EXPECTED_PIXELS="$WORK_DIR/clear-expected-u32.json"
 CLEAR_ACTUAL_PIXELS="$WORK_DIR/clear-actual-u32.json"
 RECT_EXPECTED_PIXELS="$WORK_DIR/rect-expected-u32.json"
 RECT_ACTUAL_PIXELS="$WORK_DIR/rect-actual-u32.json"
-EXECUTION_MODE="${SIMPLE_EXECUTION_MODE:-interpret}"
+EXECUTION_MODE="${SIMPLE_EXECUTION_MODE:-native}"
+case "$EXECUTION_MODE" in
+    native|smf) TEST_EXECUTION_MODE="$EXECUTION_MODE" ;;
+    interpret|interpreter) TEST_EXECUTION_MODE=interpreter ;;
+    *) echo "unsupported SIMPLE_EXECUTION_MODE: $EXECUTION_MODE" >&2; exit 2 ;;
+esac
 VULKAN_ICD_PATH="${VK_ICD_FILENAMES:-}"
 
 if [ -z "$VULKAN_ICD_PATH" ] && [ "$(uname -s 2>/dev/null || true)" = "Darwin" ]; then
@@ -63,6 +68,14 @@ is_unsigned_decimal() {
     printf '%s\n' "$1" | grep -Eq '^[0-9]+$'
 }
 
+is_positive_decimal() {
+    is_unsigned_decimal "$1" && printf '%s\n' "$1" | grep -Eq '[1-9]'
+}
+
+native_fallback_detected() {
+    [ "$1" = native ] && grep -q 'falling back to interpreter' "$2"
+}
+
 pass_failure_reason() {
     [ "$(value_of present_exercised)" = "true" ] || { echo "missing-present"; return; }
     [ "$(value_of readback_exercised)" = "true" ] || { echo "missing-readback"; return; }
@@ -72,9 +85,13 @@ pass_failure_reason() {
         expected="$(value_of "${op}_expected_checksum")"
         actual="$(value_of "${op}_actual_checksum")"
         mismatches="$(value_of "${op}_mismatches")"
+        is_positive_decimal "$(value_of "${op}_readback_pixels")" || { echo "${op}-pixels-missing"; return; }
         is_unsigned_decimal "$expected" && is_unsigned_decimal "$actual" || { echo "${op}-checksum-missing"; return; }
         [ "$expected" = "$actual" ] || { echo "${op}-checksum-mismatch"; return; }
         [ "$mismatches" = "0" ] || { echo "${op}-mismatch-count"; return; }
+        [ "$(value_of "${op}_readback_source")" = "device_readback" ] || { echo "${op}-not-device-readback"; return; }
+        is_positive_decimal "$(value_of "${op}_backend_handle")" || { echo "${op}-backend-handle-missing"; return; }
+        is_positive_decimal "$(value_of "${op}_device_identity")" || { echo "${op}-device-identity-missing"; return; }
     done
 }
 
@@ -104,6 +121,9 @@ write_report() {
         echo "vulkan_engine2d_readback_clear_expected_checksum=$(value_of clear_expected_checksum)"
         echo "vulkan_engine2d_readback_clear_actual_checksum=$(value_of clear_actual_checksum)"
         echo "vulkan_engine2d_readback_clear_mismatches=$(value_of clear_mismatches)"
+        echo "vulkan_engine2d_readback_clear_source=$(value_of clear_readback_source)"
+        echo "vulkan_engine2d_readback_clear_backend_handle=$(value_of clear_backend_handle)"
+        echo "vulkan_engine2d_readback_clear_device_identity=$(value_of clear_device_identity)"
         echo "vulkan_engine2d_readback_clear_expected_pixels_path=$(value_of clear_expected_pixels_path)"
         echo "vulkan_engine2d_readback_clear_actual_pixels_path=$(value_of clear_actual_pixels_path)"
         echo "vulkan_engine2d_readback_rect_status=$(value_of rect_status)"
@@ -111,6 +131,9 @@ write_report() {
         echo "vulkan_engine2d_readback_rect_expected_checksum=$(value_of rect_expected_checksum)"
         echo "vulkan_engine2d_readback_rect_actual_checksum=$(value_of rect_actual_checksum)"
         echo "vulkan_engine2d_readback_rect_mismatches=$(value_of rect_mismatches)"
+        echo "vulkan_engine2d_readback_rect_source=$(value_of rect_readback_source)"
+        echo "vulkan_engine2d_readback_rect_backend_handle=$(value_of rect_backend_handle)"
+        echo "vulkan_engine2d_readback_rect_device_identity=$(value_of rect_device_identity)"
         echo "vulkan_engine2d_readback_rect_expected_pixels_path=$(value_of rect_expected_pixels_path)"
         echo "vulkan_engine2d_readback_rect_actual_pixels_path=$(value_of rect_actual_pixels_path)"
         echo "vulkan_engine2d_readback_blur_or_tolerance_used=false"
@@ -138,6 +161,9 @@ write_report() {
         echo "- clear expected checksum: $(value_of clear_expected_checksum)"
         echo "- clear actual checksum: $(value_of clear_actual_checksum)"
         echo "- clear mismatches: $(value_of clear_mismatches)"
+        echo "- clear source: $(value_of clear_readback_source)"
+        echo "- clear backend handle: $(value_of clear_backend_handle)"
+        echo "- clear device identity: $(value_of clear_device_identity)"
         echo "- clear expected pixels: $(value_of clear_expected_pixels_path)"
         echo "- clear actual pixels: $(value_of clear_actual_pixels_path)"
         echo "- rect status: $(value_of rect_status)"
@@ -145,6 +171,9 @@ write_report() {
         echo "- rect expected checksum: $(value_of rect_expected_checksum)"
         echo "- rect actual checksum: $(value_of rect_actual_checksum)"
         echo "- rect mismatches: $(value_of rect_mismatches)"
+        echo "- rect source: $(value_of rect_readback_source)"
+        echo "- rect backend handle: $(value_of rect_backend_handle)"
+        echo "- rect device identity: $(value_of rect_device_identity)"
         echo "- rect expected pixels: $(value_of rect_expected_pixels_path)"
         echo "- rect actual pixels: $(value_of rect_actual_pixels_path)"
         echo "- blur/tolerance used: false"
@@ -177,10 +206,12 @@ if [ "${1:-}" = "--self-test" ]; then
 backend_name=vulkan
 readback_exercised=true
 clear_status=pass
+clear_readback_pixels=256
 clear_expected_checksum=0
 clear_actual_checksum=0
 clear_mismatches=0
 rect_status=pass
+rect_readback_pixels=256
 rect_expected_checksum=1
 rect_actual_checksum=1
 rect_mismatches=0
@@ -197,10 +228,12 @@ EOF
 present_exercised=true
 backend_name=vulkan
 clear_status=pass
+clear_readback_pixels=256
 clear_expected_checksum=0
 clear_actual_checksum=0
 clear_mismatches=0
 rect_status=pass
+rect_readback_pixels=256
 rect_expected_checksum=1
 rect_actual_checksum=1
 rect_mismatches=0
@@ -218,13 +251,21 @@ present_exercised=true
 readback_exercised=true
 backend_name=vulkan
 clear_status=pass
+clear_readback_pixels=256
 clear_expected_checksum=0
 clear_actual_checksum=0
 clear_mismatches=0
 rect_status=pass
+rect_readback_pixels=256
 rect_expected_checksum=1
 rect_actual_checksum=2
 rect_mismatches=0
+clear_readback_source=device_readback
+clear_backend_handle=1
+clear_device_identity=1
+rect_readback_source=device_readback
+rect_backend_handle=1
+rect_device_identity=1
 EOF
     write_report pass pass pass
     if ! grep -q '^vulkan_engine2d_readback_status=fail$' "$ENV_PATH" \
@@ -239,18 +280,63 @@ present_exercised=true
 readback_exercised=true
 backend_name=vulkan
 clear_status=pass
+clear_readback_pixels=256
 clear_expected_checksum=0
 clear_actual_checksum=0
 clear_mismatches=0
 rect_status=pass
+rect_readback_pixels=256
 rect_expected_checksum=1
 rect_actual_checksum=1
 rect_mismatches=0
+clear_readback_source=cpu_fallback
+clear_backend_handle=1
+clear_device_identity=1
+rect_readback_source=device_readback
+rect_backend_handle=1
+rect_device_identity=1
+EOF
+    write_report pass pass pass
+    if ! grep -q '^vulkan_engine2d_readback_status=fail$' "$ENV_PATH" \
+        || ! grep -q '^vulkan_engine2d_readback_reason=clear-not-device-readback$' "$ENV_PATH"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=cpu-fallback-accepted"
+        exit 1
+    fi
+
+    cat >"$EVIDENCE_LOG" <<'EOF'
+present_exercised=true
+readback_exercised=true
+backend_name=vulkan
+clear_status=pass
+clear_readback_pixels=256
+clear_expected_checksum=0
+clear_actual_checksum=0
+clear_mismatches=0
+rect_status=pass
+rect_readback_pixels=256
+rect_expected_checksum=1
+rect_actual_checksum=1
+rect_mismatches=0
+clear_readback_source=device_readback
+clear_backend_handle=1
+clear_device_identity=1
+rect_readback_source=device_readback
+rect_backend_handle=1
+rect_device_identity=1
 EOF
     write_report pass pass pass
     if ! grep -q '^vulkan_engine2d_readback_status=pass$' "$ENV_PATH"; then
         echo "self_test_status=fail"
         echo "self_test_reason=valid-readback-rejected"
+        exit 1
+    fi
+
+    printf '%s\n' '[INFO] JIT compilation failed, falling back to interpreter' >"$EVIDENCE_LOG"
+    if ! native_fallback_detected native "$EVIDENCE_LOG" \
+        || native_fallback_detected interpret "$EVIDENCE_LOG"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=native-fallback-detector"
         exit 1
     fi
 
@@ -394,8 +480,9 @@ fn main() -> i64:
     val bg = 0xFF0000FFu32
     val fg = 0xFFFF0000u32
     engine.clear(bg)
+    val clear_readback = engine.read_pixels_with_source()
     engine.present()
-    val clear_pixels = engine.read_pixels()
+    val clear_pixels = clear_readback.pixels
     val clear_expected_pixels = expected_clear_pixels(clear_pixels.len(), bg)
     val clear_expected_written = write_u32_pixels(CLEAR_EXPECTED_PIXELS_PATH, "vulkan-clear-expected", clear_expected_pixels)
     val clear_actual_written = write_u32_pixels(CLEAR_ACTUAL_PIXELS_PATH, "vulkan-clear-readback", clear_pixels)
@@ -413,6 +500,9 @@ fn main() -> i64:
             clear_mismatches = clear_mismatches + 1
         i = i + 1
     print("clear_mismatches=" + clear_mismatches.to_text())
+    print("clear_readback_source=" + clear_readback.source)
+    print("clear_backend_handle=" + clear_readback.backend_handle.to_text())
+    print("clear_device_identity=" + clear_readback.device_identity.to_text())
     if clear_mismatches != 0 or not clear_expected_written or not clear_actual_written:
         engine.shutdown()
         print("present_exercised=true")
@@ -425,8 +515,9 @@ fn main() -> i64:
 
     engine.clear(bg)
     engine.draw_rect_filled(2, 2, 6, 6, fg)
+    val rect_readback = engine.read_pixels_with_source()
     engine.present()
-    val rect_pixels = engine.read_pixels()
+    val rect_pixels = rect_readback.pixels
     val rect_expected_pixels = expected_rect_pixels(bg, fg)
     val rect_expected_written = write_u32_pixels(RECT_EXPECTED_PIXELS_PATH, "vulkan-rect-expected", rect_expected_pixels)
     val rect_actual_written = write_u32_pixels(RECT_ACTUAL_PIXELS_PATH, "vulkan-rect-readback", rect_pixels)
@@ -435,6 +526,9 @@ fn main() -> i64:
     print("rect_expected_checksum=" + checksum_expected_rect(bg, fg).to_text())
     print("rect_actual_checksum=" + checksum_pixels(rect_pixels).to_text())
     print("rect_mismatches=" + rect_mismatches.to_text())
+    print("rect_readback_source=" + rect_readback.source)
+    print("rect_backend_handle=" + rect_readback.backend_handle.to_text())
+    print("rect_device_identity=" + rect_readback.device_identity.to_text())
     print("rect_expected_pixels_path=" + RECT_EXPECTED_PIXELS_PATH)
     print("rect_actual_pixels_path=" + RECT_ACTUAL_PIXELS_PATH)
     print("rect_expected_pixels_written=" + rect_expected_written.to_text())
@@ -459,13 +553,22 @@ SIMPLE
 echo "evidence_source=$EVIDENCE_SRC"
 
 set +e
-SIMPLE_EXECUTION_MODE="$EXECUTION_MODE" SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" run "$EVIDENCE_SRC" --mode=interpreter --clean >"$EVIDENCE_LOG" 2>&1
+SIMPLE_EXECUTION_MODE="$EXECUTION_MODE" SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" run "$EVIDENCE_SRC" --clean >"$EVIDENCE_LOG" 2>&1
 EVIDENCE_CODE=$?
 set -e
 
 cat "$EVIDENCE_LOG"
 echo "evidence_exit_code=$EVIDENCE_CODE"
 emit_file_status "evidence_log" "$EVIDENCE_LOG"
+
+if native_fallback_detected "$EXECUTION_MODE" "$EVIDENCE_LOG"; then
+    echo "native_execution_status=fail"
+    echo "native_execution_reason=interpreter-fallback"
+    echo "spec_status=not_run"
+    echo "overall=fail"
+    write_report fail native-interpreter-fallback not_run
+    exit 1
+fi
 
 if [ "$EVIDENCE_CODE" -ne 0 ]; then
     if ! grep -q '^vulkan_available=false$' "$EVIDENCE_LOG"; then
@@ -485,9 +588,9 @@ if ! grep -q '^overall=pass$' "$EVIDENCE_LOG"; then
 fi
 
 set +e
-SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" test test/02_integration/rendering/vulkan_strict_spec.spl --mode=interpreter --clean --no-daemon --format json >"$STRICT_LOG" 2>&1
+SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" test test/02_integration/rendering/vulkan_strict_spec.spl --mode="$TEST_EXECUTION_MODE" --clean --no-daemon --format json >"$STRICT_LOG" 2>&1
 STRICT_CODE=$?
-SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" test test/02_integration/rendering/engine2d_cpu_vulkan_parity_spec.spl --mode=interpreter --clean --no-daemon --format json >"$PARITY_LOG" 2>&1
+SIMPLE_LIB="${SIMPLE_LIB:-src}" run_with_timeout "$SIMPLE_BIN" test test/02_integration/rendering/engine2d_cpu_vulkan_parity_spec.spl --mode="$TEST_EXECUTION_MODE" --clean --no-daemon --format json >"$PARITY_LOG" 2>&1
 PARITY_CODE=$?
 set -e
 

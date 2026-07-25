@@ -315,6 +315,14 @@ pub fn register_static_runtime_symbols() {
     let _ = simple_runtime_abi::register_static_runtime_symbols(RUNTIME_SYMBOL_ENTRIES);
 }
 
+#[cfg(all(test, feature = "runtime-symbol-table"))]
+#[test]
+fn runtime_symbol_table_contains_vulkan_discard_command() {
+    assert!(RUNTIME_SYMBOL_ENTRIES
+        .iter()
+        .any(|entry| entry.name == "rt_vulkan_discard_command" && !entry.ptr.is_null()));
+}
+
 #[no_mangle]
 pub extern "C" fn rt_memory_barrier() {
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
