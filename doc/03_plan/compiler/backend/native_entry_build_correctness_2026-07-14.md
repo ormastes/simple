@@ -1110,4 +1110,6 @@ the shared binary — deploys require explicit user go-ahead).
   the parity harness defaulted to the untracked `bin/simple` convenience path,
   which is absent in a clean jj workspace. It now defaults to the tracked
   `bin/release/simple` self-hosted wrapper. The attempt is not a native receipt,
-  and the case remains pending until a later bounded run.
+  and the case remains pending until a later bounded run. Both parity and
+  native-matrix gates now reject a missing `SIMPLE_BINARY` once, before
+  generating cases, instead of reporting misleading per-case compiler bugs.
