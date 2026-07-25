@@ -19,7 +19,9 @@ silicon. The simulation boundary is deliberate and unchanged:
   the rv32 boot hook, including RAIN, ECC, scheduler, power/thermal, map-cache, band, journal,
   HIL/queue, task-pool fail-closed, IO/admin/flush, reactor, policy/target, DRAM/durability, wear/scrub, media-retire,
   power-cycle, backpressure/abort, feature/namespace guards, and the Cosmos+ OpenSSD target
-  profile; the full no-alloc firmware port is not wired into that boot path yet (see also
+  profile; as of 2026-07-25 the direct rv32 QEMU smoke prints `RV32 NVME FW BEGIN`
+  and `ALL RV32 NVME FW CHECKS PASS`, with bounded no-alloc counter caps for the
+  rv32 scalar floor. The full no-alloc firmware port is not wired into that boot path yet (see also
   `BUILD_STATUS.md`). The sibling rv64 lane has a direct-build recipe and fail-closed real-boot
   SSpec, but the current build attempt terminates before `build/nvme_fw_rv64.elf`; see
   `doc/08_tracking/bug/nvme_fw_rv64_direct_build_timeout_2026-07-07.md`.

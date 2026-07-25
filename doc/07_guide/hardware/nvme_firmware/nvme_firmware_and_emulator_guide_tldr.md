@@ -26,7 +26,8 @@ full no-alloc firmware port remains open.
 P9 artifacts: `fw_rv32/entry.spl` is the scalar/array-free reference, and default
 `fw_rv32/build.shs` is the fast direct rv32 smoke ELF recipe; QEMU boot evidence exists only
 after `build/nvme_fw_rv32.elf` is produced and prints `ALL RV32 NVME FW CHECKS PASS` /
-`RESULT: PASS`.
+`RESULT: PASS`; the serial begins with `RV32 NVME FW BEGIN`. The rv32 smoke uses
+bounded no-alloc counter caps; host simulation owns full-width counter stress.
 
 <!-- sdn-diagram:id=nvme_fw_emu_tldr -->
 ```

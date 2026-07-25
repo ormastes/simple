@@ -251,11 +251,14 @@ NVME_RV32_BUILD_TIMEOUT_SECS=60 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32
 sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs build/nvme_fw_rv32.elf
 ```
 
-When the ELF exists, the boot must print `ALL RV32 NVME FW CHECKS PASS` and exit `RESULT: PASS`;
+When the ELF exists, the boot must print `RV32 NVME FW BEGIN`,
+`ALL RV32 NVME FW CHECKS PASS`, and exit `RESULT: PASS`;
 `boot.shs --self-test` separately proves the wrapper fails closed on bad serial output. This is
 P9 direct-smoke evidence, not the full firmware port. Set
 `NVME_RV32_BUILD_OS_BOOT=1` only when intentionally exercising the slower full rv32 OS boot/source
-graph; the full 22-module no-alloc port remains open.
+graph; the full 22-module no-alloc port remains open. The rv32 scalar smoke uses
+bounded no-alloc caps for internal counters; host simulation remains the source
+for full-width counter stress.
 
 ---
 

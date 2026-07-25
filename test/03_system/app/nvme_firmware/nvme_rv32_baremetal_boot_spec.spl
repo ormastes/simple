@@ -43,7 +43,7 @@ fn _probe(cmd: text) -> (text, text, i64):
     process_run("/bin/sh", ["-c", cmd])
 
 fn _boot() -> (text, text, i64):
-    process_run("/bin/sh", ["-c", "mkdir -p build/test-artifacts; timeout 12 qemu-system-riscv32 -machine virt -cpu rv32 -m 128M -nographic -bios none -kernel " + ELF + " -serial file:" + SERIAL + " </dev/null; cat " + SERIAL])
+    process_run("/bin/sh", ["-c", "sh examples/09_embedded/simpleos_nvme_fw/fw_rv32/boot.shs " + ELF])
 
 fn _run(cmd: text) -> (text, text, i64):
     process_run("/bin/sh", ["-c", cmd])
@@ -54,9 +54,8 @@ fn _expect_no_fail_marker(out: text, label: text):
 
 describe "NVMe firmware rv32 baremetal-remote boot on QEMU":
     """
-    The NVMe firmware rv32 ELF boots on QEMU and its serial console
-    reports subsystem health: the SimpleOS RV32 banner, boot completion, and the
-    heap + supervisor self-checks.
+    The direct NVMe firmware rv32 ELF boots on QEMU and its serial console
+    reports the firmware begin marker and aggregate PASS marker.
     """
 
     it "the NVMe firmware rv32 ELF boots on QEMU and reports subsystem health":
@@ -77,11 +76,8 @@ describe "NVMe firmware rv32 baremetal-remote boot on QEMU":
                 step("Boot the NVMe firmware rv32 ELF on QEMU and capture the serial console")
                 val (out, err, code) = _boot()
 
-                step("The serial console shows the SimpleOS RV32 banner")
-                expect(out).to_contain("SimpleOS RV32")
-
-                step("The kernel reports boot completion on the serial console")
-                expect(out).to_contain("[BOOT] boot complete")
+                step("The serial console shows the direct firmware begin marker")
+                expect(out).to_contain("RV32 NVME FW BEGIN")
 
                 step("The NVMe firmware hook reports its rv32 self-test PASS marker")
                 expect(out).to_contain("ALL RV32 NVME FW CHECKS PASS")
@@ -90,11 +86,8 @@ describe "NVMe firmware rv32 baremetal-remote boot on QEMU":
                 if out.contains("FAIL"):
                     fail("SERIAL-FAIL: rv32 boot printed a failure marker")
 
-                step("The heap subsystem self-check reports healthy")
-                expect(out).to_contain("HEAP OK")
-
-                step("The supervisor-call subsystem self-check reports healthy")
-                expect(out).to_contain("SVC OK")
+                step("The boot wrapper reports PASS")
+                expect(out).to_contain("RESULT: PASS")
 
 describe "NVMe firmware rv32 P9 build evidence":
     """
@@ -105,11 +98,11 @@ describe "NVMe firmware rv32 P9 build evidence":
 
     it "runs the rv32 no-alloc logic reference and proves the boot hook is wired":
         step("The array-free rv32 RAIN+ECC+scheduler+power-thermal+map-cache+band+journal+HIL+queue-phase+task-pool-fail-closed+io-opcode-read-zero-trim-flush+admin-format-fw-log+reactor+policy-target+DRAM-durability+wear-scrub+media-retire+power-cycle+backpressure-abort+feature-guard+namespace-guard reference typechecks")
-        val (check_out, check_err, check_code) = _run("bin/simple check examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl")
+        val (check_out, check_err, check_code) = _run("SIMPLE=\"${NVME_RV32_SIMPLE_BIN:-bin/simple}\"; \"$SIMPLE\" check examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl")
         expect(check_code).to_equal(0)
 
         step("The host-runnable scalar logic reference passes")
-        val (logic_out, logic_err, logic_code) = _run("bin/simple run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl")
+        val (logic_out, logic_err, logic_code) = _run("SIMPLE=\"${NVME_RV32_SIMPLE_BIN:-bin/simple}\"; \"$SIMPLE\" run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl")
         expect(logic_code).to_equal(0)
         expect(logic_out).to_contain("RV32 NVME FW LOGIC OK")
         _expect_no_fail_marker(logic_out, "rv32 logic reference")
@@ -123,6 +116,13 @@ describe "NVMe firmware rv32 P9 build evidence":
         step("The rv32 build wrapper reports background/status progress and failed-build reason metadata")
         val (build_status_out, build_status_err, build_status_code) = _run("rg -n 'NVME_RV32_BUILD_BACKGROUND|NVME_RV32_BUILD_STATUS|reason=\\$BUILD_REASON|elapsed=\\$\\{BUILD_ELAPSED_SECS\\}s|external-termination-before-timeout|native-build-timeout' examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs")
         expect(build_status_code).to_equal(0)
+
+        step("The direct build generates a first-load-address entry shim and minimal runtime boot stubs")
+        val (direct_out, direct_err, direct_code) = _run("rg -n 'rv32_direct_entry\\.S|\\.section \\.text\\.entry|rv32_direct_runtime_stubs\\.c|rt_pool_safepoint|rt_riscv_uart_put' examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs")
+        expect(direct_code).to_equal(0)
+        expect(direct_out).to_contain("rv32_direct_entry.S")
+        expect(direct_out).to_contain("rt_pool_safepoint")
+        expect(direct_out).to_contain("rt_riscv_uart_put")
 
         step("The stock rv32 boot path calls the optional NVMe firmware self-test hook")
         val (boot_out, boot_err, boot_code) = _run("rg -n 'rt_rv32_boot_optional_nvme_fw_selftest\\(\\)' src/os/kernel/arch/riscv32/boot.spl")

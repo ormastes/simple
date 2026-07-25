@@ -319,11 +319,13 @@ whole-unit erasure.
 
 ## P9 — Bare-metal rv32 no-alloc port  *(G9)*  — ◐ REFERENCE WIRED; FULL PORT REMAINS
 
-> **Status (2026-07-07).** The fast direct-smoke path in
+> **Status (2026-07-25).** The fast direct-smoke path in
 > `examples/09_embedded/simpleos_nvme_fw/fw_rv32/build.shs` is the small rv32 ELF recipe that
 > avoids rebuilding the Rust seed and does not compile the full Simple firmware graph. QEMU boot
 > evidence is valid only after `build/nvme_fw_rv32.elf` exists and prints
-> `ALL RV32 NVME FW CHECKS PASS` / `RESULT: PASS`. `fw_rv32/entry.spl` remains a host-verified,
+> `RV32 NVME FW BEGIN`, `ALL RV32 NVME FW CHECKS PASS`, and `RESULT: PASS`.
+> The rv32 scalar smoke uses bounded no-alloc counter caps; host simulation owns
+> full-width counter stress. `fw_rv32/entry.spl` remains a host-verified,
 > array-free scalar reference for the Lean-proven RAIN reconstruction, SECDED ECC floor, fixed
 > scheduler floor, fixed power/thermal floor, fixed map-cache floor, fixed band floor, fixed
 > journal-ring floor, fixed HIL command/queue floor, fixed queue-phase floor, fixed task-pool

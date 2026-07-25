@@ -66,7 +66,7 @@ freestanding runtime. The full 22-module no-alloc port of `../fw/` remains the l
 Tracked:
 `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
 
-## Current status (2026-07-07): direct firmware smoke builds and boots
+## Current status (2026-07-25): direct firmware smoke builds and boots
 
 Default `build.shs` mode now produces a small direct firmware smoke ELF without
 rebuilding the Rust seed or compiling the full Simple firmware graph:
@@ -80,12 +80,20 @@ Verified output:
 
 - `build exit=0`
 - `build/nvme_fw_rv32.elf: ELF 32-bit LSB executable, UCB RISC-V`
+- `RV32 NVME FW BEGIN`
 - `ALL RV32 NVME FW CHECKS PASS`
 - `RESULT: PASS`
 
-`boot.shs --self-test` also passes the wrapper contract. Set
+The direct build now creates a minimal generated `boot/` tree with a
+`.text.entry` shim, `rt_riscv_uart_put`, and `rt_pool_safepoint` so QEMU starts
+at the first load address and the flattened firmware can run without the full OS
+boot graph. `boot.shs --self-test` also passes the wrapper contract. Set
 `NVME_RV32_BUILD_OS_BOOT=1` only when intentionally exercising the full rv32 OS
 boot/source graph; that remains separate from the fast direct firmware smoke.
+
+The rv32 scalar smoke uses bounded no-alloc counter caps for firmware counters
+whose full simulation model uses larger host-side sentinels. NVMe command-word
+validation still checks the 32-bit field width.
 
 ## 4-core SMP mode (wave-3/4, 2026-07-19): index-handles, SPSC IPC, coroutines
 

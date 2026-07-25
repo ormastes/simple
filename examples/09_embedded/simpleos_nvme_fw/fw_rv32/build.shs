@@ -34,6 +34,11 @@ DIRECT_ENTRY="$ENTRY_DIR/nvme_fw_direct_entry.spl"
 BOOT_STUB_LINK="$ENTRY_DIR/boot"
 TIMEOUT_SECS="${NVME_RV32_BUILD_TIMEOUT_SECS:-300}"
 SIMPLE_BIN="${NVME_RV32_SIMPLE_BIN:-bin/simple}"
+if [ ! -x "$SIMPLE_BIN" ]; then
+  echo "NVME_RV32_BUILD_FAILED missing Simple runtime: $SIMPLE_BIN" >&2
+  echo "Set NVME_RV32_SIMPLE_BIN to a self-hosted Simple binary." >&2
+  exit 127
+fi
 OS_BOOT_BUILD="${NVME_RV32_BUILD_OS_BOOT:-0}"
 LOG_DIR="build/test-artifacts"
 OUT_LOG="$LOG_DIR/nvme_fw_rv32_build.out"
@@ -370,7 +375,8 @@ EOF_SMP_START
   exit 0
 fi
 
-rm -f "$ENTRY_DIR"/*.spl
+rm -rf "$ENTRY_DIR"
+mkdir -p "$ENTRY_DIR"
 if [ "$OS_BOOT_BUILD" = "1" ]; then
   for logic_src in examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic*.spl; do
     case "$(basename "$logic_src")" in
@@ -386,24 +392,37 @@ else
     case "$(basename "$logic_src")" in
       logic.spl|logic_check.spl) continue ;;
     esac
-    sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d; s/-> i32:/-> i64:/g; s/: i32/: i64/g' "$logic_src" >>"$DIRECT_ENTRY"
+    sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d; /^[[:space:]]*use /d; s/-> i32:/-> i64:/g; s/: i32/: i64/g' "$logic_src" >>"$DIRECT_ENTRY"
     printf '\n' >>"$DIRECT_ENTRY"
   done
   sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d; /^[[:space:]]*use /d; s/-> i32:/-> i64:/g; s/: i32/: i64/g' \
     examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic.spl >>"$DIRECT_ENTRY"
-  cat >>"$DIRECT_ENTRY" <<'EOF_DIRECT_ENTRY'
-
-@export("C", name: "rt_rv32_boot_optional_nvme_fw_selftest")
-fn rt_rv32_boot_optional_nvme_fw_selftest() -> i64:
-    nvme_fw_rv32_logic_selftest()
-
-fn main() -> i64:
-    nvme_fw_rv32_logic_selftest()
-EOF_DIRECT_ENTRY
+  printf '\n' >>"$DIRECT_ENTRY"
+  sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d; /^[[:space:]]*use /d; s/-> i32:/-> i64:/g; s/: i32/: i64/g' \
+    examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl >>"$DIRECT_ENTRY"
+  mkdir -p "$BOOT_STUB_LINK"
+  cat >"$BOOT_STUB_LINK/rv32_direct_runtime_stubs.c" <<'EOF_DIRECT_STUBS'
+#include <stdint.h>
+#define UART0 ((volatile uint8_t*)0x10000000UL)
+void rt_riscv_uart_put(uint64_t b) { uint8_t out = (uint8_t)b; while (!(UART0[5] & 0x20)) {} UART0[0] = out; }
+long long rt_pool_safepoint(void) { return 0; }
+EOF_DIRECT_STUBS
+  cat >"$BOOT_STUB_LINK/rv32_direct_entry.S" <<'EOF_DIRECT_START'
+    .section .text.entry, "ax"
+    .globl _rv32_direct_entry
+_rv32_direct_entry:
+    la      sp, _stack_top
+    call    spl_main
+    lui     t0, 0x100
+    li      t1, 0x5555
+    sw      t1, 0(t0)
+1:  wfi
+    j       1b
+EOF_DIRECT_START
 fi
-rm -rf "$BOOT_STUB_LINK"
-ln -s "$PWD/src/os/kernel/arch/riscv32/boot" "$BOOT_STUB_LINK"
 if [ "$OS_BOOT_BUILD" = "1" ]; then
+  rm -rf "$BOOT_STUB_LINK"
+  ln -s "$PWD/src/os/kernel/arch/riscv32/boot" "$BOOT_STUB_LINK"
   cat >"$ENTRY" <<'EOF_ENTRY'
 use os.kernel.arch.riscv32.boot.{boot_main}
 use entry.{rt_rv32_boot_optional_nvme_fw_selftest}
@@ -520,6 +539,21 @@ done:
     sw      t1, 0(t0)
 1:  wfi
     j       1b
+
+    .globl rt_riscv_uart_put
+rt_riscv_uart_put:
+    lui     t0, 0x10000
+1:  lbu     t1, 5(t0)
+    andi    t1, t1, 0x20
+    beqz    t1, 1b
+    sb      a0, 0(t0)
+    ret
+
+    .globl rt_pool_safepoint
+rt_pool_safepoint:
+    li      a0, 0
+    li      a1, 0
+    ret
 EOF_START
   if ! riscv64-unknown-elf-gcc -march=rv32imac -mabi=ilp32 -c "$START_ASM" -o "$START_OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
     echo "NVME_RV32_BUILD_FAILED start-stub out=$OUT_LOG err=$ERR_LOG" >&2
@@ -531,8 +565,9 @@ EOF_START
   $BUILD_RUNNER env SIMPLE_COMPILER_PHASE_PROFILE=1 SIMPLE_NATIVE_BUILD_EMIT_OBJECT=1 "$SIMPLE_BIN" native-build --backend llvm \
     --source build/os/generated \
     --entry "$DIRECT_ENTRY" --entry-closure \
+    --linker-script src/os/kernel/arch/riscv32/linker.ld \
     --target riscv32-unknown-none \
-    --emit-object -o "$OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"
+    -o "$OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG"
   rc=$?
   BUILD_END_EPOCH=$(date +%s)
   BUILD_ELAPSED_SECS=$((BUILD_END_EPOCH - BUILD_START_EPOCH))
@@ -551,6 +586,12 @@ EOF_START
     exit "$rc"
   fi
   echo "NVME_RV32_BUILD_DONE elapsed=${BUILD_ELAPSED_SECS}s" >>"$OUT_LOG"
+  if file "$OBJ" 2>/dev/null | grep -q "executable"; then
+    cp "$OBJ" "$OUT"
+    echo "build exit=0"
+    ls -la "$OUT" 2>/dev/null && file "$OUT" 2>/dev/null
+    exit 0
+  fi
   llvm-objcopy --redefine-sym _start=__simple_unused_start "$OBJ" >>"$OUT_LOG" 2>>"$ERR_LOG" || true
   if ! ld.lld -m elf32lriscv -T src/os/kernel/arch/riscv32/linker.ld --no-relax --gc-sections -o "$OUT" "$START_OBJ" "$OBJ" "$LIBGCC" >>"$OUT_LOG" 2>>"$ERR_LOG"; then
     echo "NVME_RV32_BUILD_FAILED link out=$OUT_LOG err=$ERR_LOG" >&2
