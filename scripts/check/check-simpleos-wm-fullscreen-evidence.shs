@@ -187,11 +187,11 @@ regular_file_status() {
     fi
 }
 
-# UNRESOLVED CONTRADICTION — this gate currently fails the WM kernel it guards.
+# The admitted artifact is the post-link Multiboot1 wrapper, not a compiler
+# object or the pre-wrap x86_64 image.
 # See doc/08_tracking/bug/simpleos_x86_64_kernel_links_as_elf32_em386_2026-07-25.md
 #
-# The ELF64 (class=2) and EM_X86_64 (machine=62) assertions below reject the
-# multiboot kernel image on purpose-built input:
+# The multiboot kernel image is deliberately ELF32/EM_386:
 #   - the kernel's own .o files ARE ELF64/EM_X86_64 (codegen is correct), but
 #   - the final image is deliberately objcopy-wrapped to ELF32/EM_386 (grep this
 #     file for "ELF32 wrap step") because GRUB loads it via multiboot1 (grep
@@ -200,33 +200,27 @@ regular_file_status() {
 #     `[BOOT64] call _start` marker this same script greps for as success.
 #     (Referenced by marker text, not line number: adding this comment already
 #     shifted every line below it by ~20.)
-# So machine=62 asserts an architecture this stage cannot emit, and the cell
-# reports `wm-simple-web-build-invalid-elf` even though the kernel builds
-# clean (662 compiled / 0 failed) and links.
-#
-# These assertions did not exist at 2026-07-19 or 2026-07-23 — they postdate the
-# cell's last PASS. Deliberately NOT changed here: relaxing a gate is
-# indistinguishable from "make it green" unless the author's intent is known.
-# Owner: either assert ELF32/EM_386 for the wrapped multiboot image, or apply
-# the ELF64 check to the PRE-wrap artifact and an ELF32 check post-objcopy.
+# Admission therefore verifies the wrapped ELF32/EM_386 contract here. Native
+# cache objects remain independently inspectable as ELF64/EM_X86_64.
 elf_file_status() {
-    file_status="$(regular_file_status "$1")"
+    elf_path="$1"
+    file_status="$(regular_file_status "$elf_path")"
     if [ "$file_status" != pass ]; then
         echo "$file_status"
         return
     fi
-    if [ "$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')" != "7f454c46" ]; then
+    if [ "$(od -An -tx1 -N4 "$elf_path" 2>/dev/null | tr -d ' \n')" != "7f454c46" ]; then
         echo "invalid-elf-magic"
         return
     fi
-    set -- $(od -An -tu1 -j4 -N2 "$1" 2>/dev/null)
-    if [ "$#" -ne 2 ] || [ "$1" -ne 2 ] || [ "$2" -ne 1 ]; then
-        echo "invalid-elf64-little-endian"
+    set -- $(od -An -tu1 -j4 -N2 "$elf_path" 2>/dev/null)
+    if [ "$#" -ne 2 ] || [ "$1" -ne 1 ] || [ "$2" -ne 1 ]; then
+        echo "invalid-multiboot-elf32-little-endian"
         return
     fi
-    set -- $(od -An -tu1 -j18 -N2 "$1" 2>/dev/null)
-    if [ "$#" -ne 2 ] || [ "$(( $1 + 256 * $2 ))" -ne 62 ]; then
-        echo "invalid-elf-machine"
+    set -- $(od -An -tu1 -j18 -N2 "$elf_path" 2>/dev/null)
+    if [ "$#" -ne 2 ] || [ "$(( $1 + 256 * $2 ))" -ne 3 ]; then
+        echo "invalid-multiboot-elf-machine"
         return
     fi
     echo pass

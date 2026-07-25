@@ -1,9 +1,12 @@
 # SimpleOS x86_64 WM kernel links as ELF32/EM_386 despite an x86_64 target — newly-added ELF gate now rejects it
 
 - **ID:** simpleos_x86_64_kernel_links_as_elf32_em386_2026-07-25
-- **Status:** OPEN (measured, not fixed)
+- **Status:** RESOLVED — admission now validates the post-wrap Multiboot1 ELF32/EM_386 contract
 - **Severity:** high — blocks the `SimpleOS-WM × QEMU` showcase-matrix cell
-- **Do NOT "fix" by relaxing the gate** — see "Why the check is probably right".
+- **Resolution:** validate the post-wrap image as ELF32/EM_386; retain
+  ELF64/EM_X86_64 expectations for compiler objects and pre-wrap artifacts.
+  Preserve the artifact path across byte-field parsing so the machine check
+  does not interpret the already-parsed ELF class byte as a filename.
 
 ## Measurement
 
