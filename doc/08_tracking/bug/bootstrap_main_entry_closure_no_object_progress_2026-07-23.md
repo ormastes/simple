@@ -33,6 +33,20 @@ No child process from those clean-workspace probes remained afterward. An
 unrelated MCP mini build was active in `/home/ormastes/dev/pub/simple` and was
 left untouched.
 
+Later on 2026-07-25, `src/app/cli/native_build_main.spl` was made worker-only
+so the parent entry no longer imports `app.io._CliCompile.compile_targets`
+before it can spawn the worker. Evidence:
+
+- `simple_seed run src/app/cli/native_build_main.spl --help` returned in 0.05s
+  with the help text, proving the parent entry no longer loads the compiler graph
+  just to start.
+- The corrected worker-parent shard still hit a 180s cap with only the seed
+  warning in its log, zero cached `.o` files, and no output binary:
+  `SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_BUILD_FORCE_WORKER=1 simple_seed run src/app/cli/native_build_main.spl --backend cranelift --source src/compiler --source src/app --source src/lib --entry-closure --threads 4 --cache-dir build/mini_cache_bootstrap_main_worker_parent --mode dynload --entry src/app/cli/bootstrap_main.spl -o build/mini_builds/bootstrap_main_worker_parent/simple_bootstrap`.
+
+The blocker has moved from parent-entry graph loading to the worker process
+itself producing no progress/output before the timeout.
+
 ## Expected
 
 The shard should either emit cached objects/its executable or fail with a
