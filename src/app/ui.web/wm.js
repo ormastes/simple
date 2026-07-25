@@ -12500,7 +12500,7 @@ class SimpleWindowManager {
         this._electronOpenWindow(msg);
         break;
       case 'renderWindow':
-        this._electronRenderWindow(msg.windowId, msg.html || '');
+        this._electronRenderWindow(msg.windowId, msg.html || '', msg.css || '', msg.root_attrs || '');
         break;
       case 'closeWindow':
         this._electronCloseWindow(msg.windowId);
@@ -12526,7 +12526,7 @@ class SimpleWindowManager {
     const windowId = String(msg.windowId || '');
     if (!windowId || !this.desktop) return;
     if (this._electronWindows.has(windowId)) {
-      this._electronRenderWindow(windowId, msg.html || '');
+      this._electronRenderWindow(windowId, msg.html || '', msg.css || '', msg.root_attrs || '');
       this._electronFocusWindow(windowId);
       return;
     }
@@ -12566,8 +12566,10 @@ class SimpleWindowManager {
     const body = document.createElement('div');
     body.className = 'wm-body';
     body.dataset.surfaceId = windowId;
+    body.dataset.themeCss = '1';
     body.innerHTML = msg.html || '';
     winEl.appendChild(body);
+    this._applyElectronWindowEnvelope(msg, body);
     this.desktop.appendChild(winEl);
     this._animateWindowOpen(winEl);
     this._electronWindows.set(windowId, {
@@ -12581,9 +12583,50 @@ class SimpleWindowManager {
     this._electronFocusWindow(windowId);
   }
 
-  _electronRenderWindow(windowId, html) {
+  _electronRenderWindow(windowId, html, css, root_attrs) {
     const entry = this._electronWindows.get(String(windowId || ''));
-    if (entry) entry.body.innerHTML = html;
+    if (!entry) return;
+    entry.body.innerHTML = html;
+    this._applyElectronWindowEnvelope({ ...entry, body: entry.body, css, root_attrs }, entry.body);
+  }
+
+  _applyElectronWindowEnvelope(entry, body) {
+    if (!entry || !body) return;
+    const css = String(entry.css || '').trim();
+    const rootAttrs = String(entry.root_attrs || '').trim();
+
+    if (rootAttrs) {
+      const root = document.documentElement;
+      if (root) {
+        Array.from(root.attributes).forEach((attr) => {
+          if (String(attr.name).startsWith('data-wm-')) {
+            root.removeAttribute(attr.name);
+          }
+        });
+        const probe = document.createElement('span');
+        probe.innerHTML = `<span ${rootAttrs}></span>`;
+        const source = probe.firstElementChild;
+        if (source) {
+          Array.from(source.attributes).forEach((attr) => {
+            root.setAttribute(attr.name, attr.value);
+          });
+        }
+      }
+    }
+
+    let styleEl = body.querySelector('style[data-simple-window-css]');
+    if (css) {
+      if (!styleEl) {
+        styleEl = document.createElement('style');
+        styleEl.setAttribute('data-simple-window-css', '1');
+        body.prepend(styleEl);
+      }
+      if (styleEl.textContent !== css) {
+        styleEl.textContent = css;
+      }
+    } else if (styleEl) {
+      styleEl.remove();
+    }
   }
 
   _titleCommandKind(value) {

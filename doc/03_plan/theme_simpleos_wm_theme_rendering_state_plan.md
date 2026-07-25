@@ -14,6 +14,13 @@
   - prefer active WM chrome snapshot if present;
   - else apply and use default package snapshot;
   - else fallback to existing aetheric-generated snapshot.
+- Current follow-up work in progress:
+  - Fixed WM render-envelope propagation in `src/app/ui.web/wm.js` so `renderWindow` and reopened `openWindow` updates now apply `css` and `root_attrs` (plus stale theme attributes are replaced on the document root).
+  - Fixed Pure-Simple renderer custom-prop extraction in `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl` to include `:root[...]` variant selectors.
+  - Fixed `src/lib/gc_async_mut/gpu/browser_engine/style_block_resolve.spl` to treat `:root[...]` as root-element selectors during attribute matching.
+- Remaining checks to run:
+  - Re-run `check-simpleos-wm-visible-display-evidence` once grub tooling is available.
+  - Re-run host + qemu WM render parity checks after this commit.
 
 ## Parallel agent findings (host + QEMU)
 - `check-hosted-wm-capture-evidence.shs`: PASS.
