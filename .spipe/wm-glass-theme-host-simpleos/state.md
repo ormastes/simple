@@ -415,3 +415,15 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   phase-2 compiler closure. Current reports and root-cause notes are recorded
   under `doc/09_report/wm_current_*_2026-07-26.md` and
   `doc/08_tracking/bug/`.
+- continuation-2026-07-26-phase2-source-reclamation: Pushed `51ba081458`
+  after independent high review. Low-memory non-VHDL compilation now clears
+  every frontend whole-source holder after Phase 2, registry-frees every
+  `SourceFile.content` alias without dereferencing a previously freed alias,
+  then evicts source metadata before HIR. The focused spec covers shared and
+  distinct allocations plus parse/reset/reclaim/HIR ordering, and the stale
+  deep-free report now limits the claim to source buffers. Both direct-env
+  audits pass. The available full-CLI runner stayed CPU-bound without test
+  output for more than six minutes and was stopped once under the runaway
+  guard; therefore the new spec has no executable PASS and no Stage-4/RSS
+  claim. The final compiler-promotion attempt remains unspent until that
+  focused gate can run on a healthy admitted full CLI.
