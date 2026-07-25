@@ -1,0 +1,279 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+ARTIFACT_ROOT="build/test-artifacts/03_system/app/ui_cli_llm_access"
+FEATURE_ROOT="$ARTIFACT_ROOT/feature/ui_cli_llm_access"
+MANIFEST="$FEATURE_ROOT/evidence.sha256"
+RECEIPT="$ARTIFACT_ROOT/highest_capability_review.txt"
+MODE="${1:---check}"
+
+fail() {
+    echo "ui-cli-final-review: $*" >&2
+    exit 1
+}
+
+current_revision() {
+    jj log -r @- --no-graph --no-pager -T 'commit_id ++ "\n"' 2>/dev/null | tail -n 1
+}
+
+receipt_value() {
+    key="$1"
+    count="$(sed -n "s/^${key}=//p" "$RECEIPT" | wc -l | tr -d ' ')"
+    [ "$count" = 1 ] || fail "receipt must contain exactly one ${key}"
+    sed -n "s/^${key}=//p" "$RECEIPT"
+}
+
+evidence_value() {
+    key="$1"
+    file="$2"
+    count="$(sed -n "s/^${key}=//p" "$file" | wc -l | tr -d ' ')"
+    [ "$count" = 1 ] || fail "$file must contain exactly one ${key}"
+    sed -n "s/^${key}=//p" "$file"
+}
+
+require_pass() {
+    file="$1"
+    marker="$2"
+    [ -f "$file" ] || fail "missing transcript: $file"
+    [ "$(grep -Fxc "$marker" "$file")" = 1 ] || fail "missing or duplicate transcript marker: $marker"
+}
+
+validate_image() {
+    image="$1"
+    expected_size="$2"
+    [ -s "$image" ] || fail "empty screenshot: $image"
+    [ "$(identify -format '%wx%h' "$image")" = "$expected_size" ] || fail "unexpected screenshot size: $image"
+    colors="$(identify -format '%k' "$image")"
+    case "$colors" in ''|*[!0-9]*) fail "invalid screenshot color count: $image" ;; esac
+    [ "$colors" -gt 1 ] || fail "blank screenshot: $image"
+}
+
+validate_runtime() {
+    live="$FEATURE_ROOT/protocol/live-ui-transport.txt"
+    VALIDATED_RUNTIME_COMMAND="$(evidence_value runtime_command_path "$live")"
+    command_sha="$(evidence_value runtime_command_sha256 "$live")"
+    runtime_path="$(evidence_value runtime_path "$live")"
+    runtime_sha="$(evidence_value runtime_sha256 "$live")"
+    provenance="$(evidence_value runtime_provenance "$live")"
+    seed_path="$(evidence_value seed_delegate_path "$live")"
+    seed_sha="$(evidence_value seed_delegate_sha256 "$live")"
+    ui_backend_path="$(evidence_value ui_backend_path "$live")"
+    ui_backend_sha="$(evidence_value ui_backend_sha256 "$live")"
+    [ -x "$VALIDATED_RUNTIME_COMMAND" ] || fail "recorded runtime command is not executable"
+    [ -x "$runtime_path" ] || fail "recorded runtime binary is not executable"
+    [ "$(sha256sum "$VALIDATED_RUNTIME_COMMAND" | awk '{print $1}')" = "$command_sha" ] || fail "runtime command changed after live evidence"
+    [ "$(sha256sum "$runtime_path" | awk '{print $1}')" = "$runtime_sha" ] || fail "runtime binary changed after live evidence"
+    case "$runtime_path" in
+        *src/compiler_rust/*) fail "Rust seed cannot satisfy final review" ;;
+        */build/bootstrap/stage3/simple|*/build/bootstrap/stage3/*/simple)
+            [ "$provenance" = bootstrap-stage3 ] && [ "$seed_path" = none ] && [ "$seed_sha" = none ] || fail "invalid stage3 provenance"
+            ;;
+        */bin/release/*/simple|*/release/*/simple)
+            [ "$provenance" = release-distinct-seed ] || fail "invalid release provenance"
+            [ -x "$seed_path" ] || fail "missing recorded seed delegate"
+            [ "$(sha256sum "$seed_path" | awk '{print $1}')" = "$seed_sha" ] || fail "seed delegate changed after live evidence"
+            [ "$runtime_sha" != "$seed_sha" ] || fail "runtime is identical to Rust seed delegate"
+            ;;
+        *) fail "unrecognized pure-Simple runtime path: $runtime_path" ;;
+    esac
+    [ -x "$ui_backend_path" ] || fail "recorded compiled UI backend is not executable"
+    [ "$(sha256sum "$ui_backend_path" | awk '{print $1}')" = "$ui_backend_sha" ] || fail "compiled UI backend changed after live evidence"
+    [ "$(dirname -- "$ui_backend_path")" = "$(dirname -- "$runtime_path")" ] || fail "compiled UI backend is not a runtime sibling"
+    [ "$(basename -- "$ui_backend_path")" = simple_ui_backend ] || fail "unexpected compiled UI backend name"
+    [ "$ui_backend_sha" != "$seed_sha" ] || fail "compiled UI backend matches Rust seed delegate"
+    runtime_id="$("$VALIDATED_RUNTIME_COMMAND" --version 2>&1)"
+    case "$runtime_id" in *"Rust-built Simple binary"*|*"bootstrap seed only"*) fail "recorded runtime identifies as Rust seed" ;; esac
+}
+
+validate_evidence() {
+    live="$FEATURE_ROOT/protocol/live-ui-transport.txt"
+    t32_status="$FEATURE_ROOT/t32/t32-gui-status.txt"
+    [ -f "$live" ] || fail "missing live transport receipt"
+    validate_runtime
+    require_pass "$FEATURE_ROOT/focused-checks.txt" 'STATUS: PASS ui-cli-focused-checks'
+    require_pass "$FEATURE_ROOT/direct-runtime-working.txt" 'STATUS: PASS direct-runtime-working'
+    require_pass "$FEATURE_ROOT/direct-runtime-staged.txt" 'STATUS: PASS direct-runtime-staged'
+    require_pass "$FEATURE_ROOT/spec-layout.txt" 'STATUS: PASS spec-layout'
+    require_pass "$live" 'STATUS: PASS ui-cli-live-transport'
+    for marker in \
+        'runtime=pure-simple-self-hosted' 'runtime_probe=pass' 'rust_seed_used=false' \
+        'compiled_backend_artifact=pass' 'gui_backend_route=simple-ui-gui' \
+        'tui_web_backend_route=simple-ui-tui_web' \
+        't32_deployed_route=pass' 't32_invalid_json=invalid_argument' \
+        't32_live_windows=pass' 't32_live_show=pass' 't32_live_describe=pass' \
+        't32_live_action=pass' 't32_live_history=pass' \
+        'human_json_fixture_fields=equal' 'human_json_required_fields=equal' 'gui_screenshot_dimensions=1280x800' \
+        'gui_screenshot_nonblank=pass' 'gui_semantic_delta=unfocused_to_focused'; do
+        [ "$(grep -Fxc "$marker" "$live")" = 1 ] || fail "missing or duplicate live marker: $marker"
+    done
+    cmp -s "$FEATURE_ROOT/protocol/live-windows-json.semantic" "$FEATURE_ROOT/protocol/live-windows-human.semantic" || fail "human/JSON list semantics differ"
+    [ -s "$FEATURE_ROOT/protocol/live-windows-json.semantic" ] || fail "empty list semantic projection"
+    awk -F '\t' 'NF == 14 { found=1 } END { exit !found }' "$FEATURE_ROOT/protocol/live-windows-json.semantic" || fail "human/JSON projection omits required window fields"
+    rg -q '"schema":"simple.access/v1"' "$FEATURE_ROOT/protocol/t32-invalid.json" || fail "T32 JSON schema evidence missing"
+    rg -q '"operation":"history"' "$FEATURE_ROOT/protocol/t32-invalid.json" || fail "T32 operation evidence missing"
+    rg -q '"ok":false' "$FEATURE_ROOT/protocol/t32-invalid.json" || fail "T32 error envelope missing"
+    rg -q '"code":"invalid_argument"' "$FEATURE_ROOT/protocol/t32-invalid.json" || fail "T32 typed error missing"
+    require_pass "$FEATURE_ROOT/protocol/t32-live-session.txt" 'STATUS: PASS t32-live-session'
+    ! rg -qi 'error:|failed|not found|no active session|source_unavailable|timeout' "$FEATURE_ROOT/protocol/t32-live-session.txt" "$FEATURE_ROOT/protocol/t32-live-session.log" || fail "T32 live session contains an error"
+    for marker in 'register_view' 'window_key: register_view' 'action_key: step' 'access_request action:step' 'access_result action:step' 'code=ok' 'capture register_view'; do
+        rg -Fq "$marker" "$FEATURE_ROOT/protocol/t32-live-session.txt" || fail "T32 live session omitted: $marker"
+    done
+    ! rg -q '"focused":true' "$FEATURE_ROOT/protocol/live-before-target.json" || fail "GUI pre-action state is already focused"
+    rg -q '"focused":true' "$FEATURE_ROOT/protocol/live-after.json" || fail "GUI post-action semantic delta missing"
+    action_request_id="$(sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p' "$FEATURE_ROOT/protocol/live-act.json" | tail -n 1)"
+    [ -n "$action_request_id" ] && rg -Fq "$action_request_id" "$FEATURE_ROOT/protocol/live-history.json" || fail "GUI action/history correlation missing"
+    rg -q 'UI CLI access fixture' "$FEATURE_ROOT/protocol/tui-web-dom.html" || fail "TUI-web DOM semantics missing"
+    ! rg -q '"focused":true' "$FEATURE_ROOT/protocol/tui-web-before-target.json" || fail "TUI-web pre-action state is already focused"
+    rg -q '"focused":true' "$FEATURE_ROOT/protocol/tui-web-after.json" || fail "TUI-web post-action semantic delta missing"
+    tui_request_id="$(sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p' "$FEATURE_ROOT/protocol/tui-web-act.json" | tail -n 1)"
+    [ -n "$tui_request_id" ] && rg -Fq "$tui_request_id" "$FEATURE_ROOT/protocol/tui-web-history.json" || fail "TUI-web action/history correlation missing"
+    validate_image "doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/gui-before.png" 1280x800
+    validate_image "doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/gui-after.png" 1280x800
+    validate_image "doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/tui-web.png" 1280x800
+    [ -f "$t32_status" ] || fail "missing T32 GUI status evidence"
+    rg -qi '^font_match=t32\|[^|]*\|16([.]0+)?\|PCF\|/opt/t32/fonts/' "$t32_status" || fail "T32 PCF font evidence invalid"
+    rg -q 'PowerView RCL ready on port 20000' "$t32_status" || fail "T32 RCL readiness evidence missing"
+    rg -q 'PING OK:.*localhost:20000' "$t32_status" || fail "T32 RCL ping evidence missing"
+    rg -q 'xwininfo: Window id:' "$t32_status" || fail "T32 X11 root tree evidence missing"
+    rg -qi '^[[:space:]]+0x[0-9a-f]+ .*(PowerView|TRACE32|t32marm)' "$t32_status" || fail "T32 window tree has no GUI window"
+    t32_image="$FEATURE_ROOT/t32/t32-gui.png"
+    [ -s "$t32_image" ] || fail "empty T32 GUI screenshot"
+    t32_width="$(identify -format '%w' "$t32_image")"
+    t32_height="$(identify -format '%h' "$t32_image")"
+    [ "$t32_width" -ge 640 ] && [ "$t32_height" -ge 480 ] || fail "T32 GUI screenshot is too small"
+    validate_image "$t32_image" "${t32_width}x${t32_height}"
+}
+
+require_clean_revision() {
+    [ -z "$(jj diff --summary)" ] || fail "working copy is dirty"
+    REVISION="$(current_revision)"
+    [ -n "$REVISION" ] || fail "cannot resolve reviewed revision"
+}
+
+evidence_paths() {
+    printf '%s\n' \
+        "$FEATURE_ROOT/focused-checks.txt" \
+        "$FEATURE_ROOT/direct-runtime-working.txt" \
+        "$FEATURE_ROOT/direct-runtime-staged.txt" \
+        "$FEATURE_ROOT/spec-layout.txt" \
+        "$FEATURE_ROOT/protocol/live-ui-transport.txt" \
+        "$FEATURE_ROOT/protocol/live-help.txt" \
+        "$FEATURE_ROOT/protocol/t32-help.txt" \
+        "$FEATURE_ROOT/protocol/t32-invalid.json" \
+        "$FEATURE_ROOT/protocol/t32-live-commands.txt" \
+        "$FEATURE_ROOT/protocol/t32-live-session.txt" \
+        "$FEATURE_ROOT/protocol/t32-live-session.log" \
+        "$FEATURE_ROOT/protocol/live-windows.json" \
+        "$FEATURE_ROOT/protocol/live-windows-human.txt" \
+        "$FEATURE_ROOT/protocol/live-windows-json.semantic" \
+        "$FEATURE_ROOT/protocol/live-windows-human.semantic" \
+        "$FEATURE_ROOT/protocol/live-before-target.json" \
+        "$FEATURE_ROOT/protocol/live-act.json" \
+        "$FEATURE_ROOT/protocol/live-after.json" \
+        "$FEATURE_ROOT/protocol/live-history.json" \
+        "$FEATURE_ROOT/protocol/protocol.json" \
+        "$FEATURE_ROOT/protocol/tui-web.json" \
+        "$FEATURE_ROOT/protocol/tui-web-dom.html" \
+        "$FEATURE_ROOT/protocol/tui-web-before-target.json" \
+        "$FEATURE_ROOT/protocol/tui-web-act.json" \
+        "$FEATURE_ROOT/protocol/tui-web-after.json" \
+        "$FEATURE_ROOT/protocol/tui-web-history.json" \
+        "$FEATURE_ROOT/t32/t32-gui-status.txt" \
+        "$FEATURE_ROOT/t32/t32-gui.png" \
+        "$FEATURE_ROOT/tui/tui-before.txt" \
+        "$FEATURE_ROOT/tui/tui-after.txt" \
+        "doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/gui-before.png" \
+        "doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/gui-after.png" \
+        "doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/tui-web.png" \
+        "doc/06_spec/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_spec.md" \
+        "doc/06_spec/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_final_review_spec.md" \
+        "test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_spec.spl" \
+        "test/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access_final_review_spec.spl" \
+        "scripts/check/check-ui-cli-access.spl" \
+        "scripts/check/check-ui-cli-final-review.shs" \
+        "scripts/check/check-ui-cli-live-transport.shs"
+}
+
+write_hashes() {
+    output="$1"
+    : > "$output"
+    evidence_paths | while IFS= read -r path; do
+        [ -f "$path" ] || fail "missing evidence: $path"
+        sha256sum "$path" >> "$output"
+    done
+}
+
+write_manifest() {
+    require_clean_revision
+    validate_evidence
+    mkdir -p "$(dirname -- "$MANIFEST")"
+    tmp="$MANIFEST.tmp"
+    trap 'rm -f "$tmp"' EXIT HUP INT TERM
+    write_hashes "$tmp"
+    mv "$tmp" "$MANIFEST"
+    trap - EXIT HUP INT TERM
+    echo "evidence_manifest=$MANIFEST"
+    echo "evidence_manifest_sha256=$(sha256sum "$MANIFEST" | awk '{print $1}')"
+    echo "reviewed_revision=$REVISION"
+}
+
+check_binding() {
+    require_clean_revision
+    validate_evidence
+    [ -f "$RECEIPT" ] || fail "missing review receipt"
+    [ "$(receipt_value receipt_schema)" = "ui-cli-access-review/v1" ] || fail "unsupported receipt schema"
+    receipt_revision_matches || fail "receipt revision is stale"
+    [ "$(receipt_value evidence_manifest)" = "$MANIFEST" ] || fail "unexpected evidence manifest"
+    [ -f "$MANIFEST" ] || fail "missing evidence manifest"
+    expected_manifest="$(mktemp "${TMPDIR:-/tmp}/ui-cli-evidence.XXXXXX")"
+    trap 'rm -f "$expected_manifest"' EXIT HUP INT TERM
+    write_hashes "$expected_manifest"
+    cmp -s "$expected_manifest" "$MANIFEST" || fail "evidence manifest is incomplete or stale"
+    rm -f "$expected_manifest"
+    trap - EXIT HUP INT TERM
+    MANIFEST_SHA256="$(sha256sum "$MANIFEST" | awk '{print $1}')"
+    [ "$(receipt_value evidence_manifest_sha256)" = "$MANIFEST_SHA256" ] || fail "manifest digest does not match receipt"
+}
+
+receipt_revision_matches() {
+    [ "$(receipt_value reviewed_revision)" = "$REVISION" ]
+}
+
+check_stale_rejection() {
+    stale_receipt="$(mktemp "${TMPDIR:-/tmp}/ui-cli-review.XXXXXX")"
+    trap 'rm -f "$stale_receipt"' EXIT HUP INT TERM
+    canonical_receipt="$RECEIPT"
+    sed 's/^reviewed_revision=.*/reviewed_revision=0000000000000000000000000000000000000000/' "$canonical_receipt" > "$stale_receipt"
+    RECEIPT="$stale_receipt"
+    if receipt_revision_matches; then
+        fail "stale review receipt was accepted"
+    fi
+    RECEIPT="$canonical_receipt"
+    rm -f "$stale_receipt"
+    trap - EXIT HUP INT TERM
+    echo "stale_receipt_rejected=pass"
+}
+
+case "$MODE" in
+    --write-manifest)
+        write_manifest
+        ;;
+    --check-binding)
+        check_binding
+        ;;
+    --check)
+        check_binding
+        check_stale_rejection
+        exec "$VALIDATED_RUNTIME_COMMAND" run scripts/check/check-ui-cli-access.spl \
+            --scenario final \
+            --reviewed-revision "$REVISION" \
+            --evidence-manifest-sha256 "$MANIFEST_SHA256"
+        ;;
+    *)
+        echo "usage: $0 [--write-manifest|--check-binding|--check]" >&2
+        exit 2
+        ;;
+esac

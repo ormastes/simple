@@ -1,0 +1,111 @@
+# Baremetal Host Communication - Dedicated HW Transport
+#
+# UART via hardware adapter (FTDI/CP2102/CH340).
+# Uses serial FFI for direct UART access through USB-UART adapter.
+
+extern fn rt_serial_open(path: text, baud: i32) -> i64
+extern fn rt_serial_close(fd: i64) -> bool
+extern fn rt_serial_read(fd: i64, max_bytes: i32) -> text
+extern fn rt_serial_write(fd: i64, data: text) -> i64
+extern fn rt_serial_flush(fd: i64) -> bool
+extern fn rt_serial_available(fd: i64) -> i32
+extern fn rt_serial_set_timeout(fd: i64, timeout_ms: i64) -> bool
+extern fn rt_command_output(cmd: text) -> text
+
+# Dedicated UART hardware adapter transport (FTDI, CP2102, CH340)
+class DedicatedHwTransport:
+    device: text
+    baud_rate: i32
+    fd: i64
+    connected: bool
+
+impl DedicatedHwTransport:
+    static fn create(device: text, baud_rate: i32) -> DedicatedHwTransport:
+        DedicatedHwTransport(
+            device: device,
+            baud_rate: baud_rate,
+            fd: -1,
+            connected: false
+        )
+
+    fn name() -> text:
+        "dedicated_hw"
+
+    fn is_connected() -> bool:
+        self.connected
+
+    me connect() -> Result<text, text>:
+        # Detect adapter type
+        val adapter_type = detect_adapter(self.device)
+        if adapter_type == "unknown":
+            return Err("unrecognized UART adapter at {self.device}")
+
+        val handle = rt_serial_open(self.device, self.baud_rate)
+        if handle < 0:
+            return Err("failed to open UART adapter: {self.device}")
+
+        self.fd = handle
+        self.connected = true
+        Ok("dedicated_hw connected ({adapter_type}) at {self.device} {self.baud_rate} baud")
+
+    me disconnect() -> Result<text, text>:
+        if self.fd >= 0:
+            rt_serial_close(self.fd)
+            self.fd = -1
+        self.connected = false
+        Ok("dedicated_hw disconnected")
+
+    fn send(data: text) -> Result<i32, text>:
+        if not self.connected:
+            return Err("not connected")
+        val written = rt_serial_write(self.fd, data)
+        if written < 0:
+            return Err("UART write failed")
+        Ok(int(written))
+
+    fn receive() -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        val data = rt_serial_read(self.fd, 4096)
+        Ok(data)
+
+    fn receive_timeout(timeout_ms: i64) -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        rt_serial_set_timeout(self.fd, timeout_ms)
+        val data = rt_serial_read(self.fd, 4096)
+        Ok(data)
+
+    me send_command(cmd: text) -> Result<text, text>:
+        self.send(cmd)?
+        self.receive()
+
+    fn flush() -> Result<text, text>:
+        if not self.connected:
+            return Err("not connected")
+        rt_serial_flush(self.fd)
+        Ok("flushed")
+
+    fn available() -> Result<i32, text>:
+        if not self.connected:
+            return Err("not connected")
+        val count = rt_serial_available(self.fd)
+        Ok(count)
+
+# Detect adapter type from device path
+fn detect_adapter(device: text) -> text:
+    # Check USB device info
+    val info = rt_command_output("udevadm info --query=all --name={device} 2>/dev/null")
+    if info.contains("FTDI"):
+        return "FTDI"
+    if info.contains("CP210"):
+        return "CP2102"
+    if info.contains("CH340") or info.contains("CH341"):
+        return "CH340"
+    if info.contains("PL2303"):
+        return "PL2303"
+    # If device exists but type unknown, still allow connection
+    val check = rt_command_output("test -c {device} && echo yes")
+    if check.trim() == "yes":
+        return "generic"
+    "unknown"

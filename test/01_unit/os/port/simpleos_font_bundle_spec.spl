@@ -1,0 +1,113 @@
+# @tag: os, font, packaging, license
+use std.spec.*
+use os.port.font_bundle.{SimpleOsFontBundleEntry, simpleos_font_bundle_entries,
+    load_simpleos_font_bundle_entry}
+use std.common.encoding.font_registry.{selected_font_bundle_asset_pins,
+    _selected_font_bundle_asset_physical_path_from_root}
+
+fn short_leaf_is_83(name: text) -> bool:
+    val parts = name.split(".")
+    if parts.len() < 1 or parts.len() > 2: return false
+    if parts[0].len() < 1 or parts[0].len() > 8: return false
+    if parts.len() == 2 and (parts[1].len() < 1 or parts[1].len() > 3): return false
+    true
+
+fn pin_match_count(path: text) -> i64:
+    var count: i64 = 0
+    for pin in selected_font_bundle_asset_pins():
+        if pin.path == path: count = count + 1
+    count
+
+describe "SimpleOS font legal bundle":
+    # @req REQ-004 REQ-005
+    it "should project the closed Google Fonts and legal payload without collisions":
+        step("Project the shared font pins into SimpleOS guest paths")
+        val entries = simpleos_font_bundle_entries()
+        expect(entries.len()).to_equal(53)
+        var guest_paths = "|"
+        var short_names = "|"
+        var pinned_entries: i64 = 0
+        var ttf_entries: i64 = 0
+        var metadata_entries: i64 = 0
+        var google_entries: i64 = 0
+        var cldr_license_entries: i64 = 0
+        var root_notice_entries: i64 = 0
+        for entry in entries:
+            expect(entry.guest_long_path).to_start_with("/SYS/FONTS/")
+            expect(short_leaf_is_83(entry.guest_short_name)).to_be(true)
+            expect(guest_paths.contains("|" + entry.guest_long_path + "|")).to_be(false)
+            expect(short_names.contains("|" + entry.guest_short_name + "|")).to_be(false)
+            guest_paths = guest_paths + entry.guest_long_path + "|"
+            short_names = short_names + entry.guest_short_name + "|"
+            if entry.source_path.ends_with(".ttf"): ttf_entries = ttf_entries + 1
+            if entry.source_path.ends_with("/METADATA.pb"): metadata_entries = metadata_entries + 1
+            if entry.source_path.starts_with("assets/fonts/google-fonts/"): google_entries = google_entries + 1
+            if entry.source_path == "assets/fonts/cldr/release-48-2/LICENSE": cldr_license_entries = cldr_license_entries + 1
+            if entry.source_path == "LICENSE" or entry.source_path == "THIRD_PARTY_NOTICES.md": root_notice_entries = root_notice_entries + 1
+            if pin_match_count(entry.source_path) == 1: pinned_entries = pinned_entries + 1
+        expect(ttf_entries).to_equal(16)
+        expect(metadata_entries).to_equal(16)
+        expect(google_entries).to_equal(50)
+        expect(cldr_license_entries).to_equal(1)
+        expect(root_notice_entries).to_equal(2)
+        expect(pinned_entries).to_equal(51)
+        expect(guest_paths).to_contain("|/SYS/FONTS/NOTICES.MD|")
+        expect(_selected_font_bundle_asset_physical_path_from_root(
+            "assets/fonts/google-fonts/CORPUS.sdn", "C:\\Simple\\"
+        )).to_equal("C:/Simple/assets/fonts/google-fonts/CORPUS.sdn")
+        expect(_selected_font_bundle_asset_physical_path_from_root(
+            "THIRD_PARTY_NOTICES.md", "/opt/simple-package/"
+        )).to_equal("/opt/simple-package/THIRD_PARTY_NOTICES.md")
+        expect(_selected_font_bundle_asset_physical_path_from_root(
+            "tmp/unmanaged.txt", "/opt/simple-package"
+        )).to_equal("tmp/unmanaged.txt")
+
+    # @req REQ-004
+    it "should preserve font registry paths and exclude build-time CLDR evidence":
+        step("Inspect runtime paths and the CLDR boundary")
+        val entries = simpleos_font_bundle_entries()
+        var sources = "|"
+        var mono_long = ""
+        var mono_short = ""
+        for entry in entries:
+            sources = sources + entry.source_path + "|"
+            if entry.source_path.contains("notosansmono/") and entry.source_path.ends_with(".ttf"):
+                mono_long = entry.guest_long_path
+                mono_short = entry.guest_short_name
+        expect(mono_long).to_equal("/SYS/FONTS/NotoSansMono[wdth,wght].ttf")
+        expect(mono_short).to_equal("NOTOSANS")
+        expect(sources).to_contain("|assets/fonts/cldr/release-48-2/LICENSE|")
+        expect(sources.contains("supplementalData.xml")).to_be(false)
+        expect(sources.contains("supplementalMetadata.xml")).to_be(false)
+        expect(sources.contains("likelySubtags.xml")).to_be(false)
+        expect(sources.contains("/RANKING.sdn|")).to_be(false)
+        expect(sources.contains("/SOURCE.sdn|")).to_be(false)
+        expect(sources.contains("/TAG.txt|")).to_be(false)
+
+    # @req REQ-004
+    it "should validate pinned bytes and reject missing or unpinned payloads":
+        step("Load one pinned provenance file")
+        val corpus = load_simpleos_font_bundle_entry(SimpleOsFontBundleEntry(
+            source_path: "assets/fonts/google-fonts/CORPUS.sdn",
+            guest_long_path: "/SYS/FONTS/CORPUS.SDN",
+            guest_short_name: "CORPUS.SDN",
+        ))
+        expect(corpus.valid).to_be(true)
+        expect(corpus.reason).to_equal("valid")
+        expect(corpus.data.len()).to_be_greater_than(0)
+
+        step("Reject missing and unmanaged payload sources")
+        val missing = load_simpleos_font_bundle_entry(SimpleOsFontBundleEntry(
+            source_path: "/tmp/simpleos-font-bundle-does-not-exist",
+            guest_long_path: "/SYS/FONTS/MISSING.LIC",
+            guest_short_name: "MISSING.LIC",
+        ))
+        expect(missing.valid).to_be(false)
+        expect(missing.reason).to_equal("missing")
+        val unpinned = load_simpleos_font_bundle_entry(SimpleOsFontBundleEntry(
+            source_path: "test/01_unit/os/port/simpleos_font_bundle_spec.spl",
+            guest_long_path: "/SYS/FONTS/UNPINNED.TXT",
+            guest_short_name: "UNPINNED.TXT",
+        ))
+        expect(unpinned.valid).to_be(false)
+        expect(unpinned.reason).to_equal("unpinned")

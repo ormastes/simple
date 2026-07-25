@@ -1,0 +1,120 @@
+# DEFLATE compression integration for the ZIP archive writer.
+#
+# Verifies:
+# - raw DEFLATE round-trips (empty, highly repetitive, mixed text, all byte values)
+# - `zip_write` picks method 8 (deflate) when it shrinks the payload, else
+#   falls back to method 0 (stored), and the resulting archive round-trips
+#   through the pure-Simple reader
+# - cross-validation against the system `unzip` tool
+
+use std.spec.{describe, it, expect}
+use std.common.compress.deflate.{deflate_compress, deflate_decompress}
+use std.common.archive.zip.{zip_write, zip_entries, zip_extract, ZipFile}
+use std.fs.{File}
+use std.process.{run}
+use std.common.string_core.{char_from_code}
+
+fn _repeat_byte(byte_val: i64, count: i64) -> [u8]:
+    var data: [u8] = []
+    var i = 0
+    while i < count:
+        data.push(byte_val.to_u8())
+        i = i + 1
+    data
+
+fn _all_256_byte_values() -> [u8]:
+    var data: [u8] = []
+    var i = 0
+    while i < 256:
+        data.push(i.to_u8())
+        i = i + 1
+    data
+
+fn _mixed_text_sample(target_len: i64) -> [u8]:
+    # A ~2KB mixed-text sample: cycling phrase + varying punctuation/digits so
+    # it is neither perfectly repetitive nor fully random.
+    val phrase = "The quick brown fox jumps over the lazy dog 0123456789! "
+    var data: [u8] = []
+    var i = 0
+    while data.len() < target_len:
+        val ch = phrase.char_at(i % phrase.len())
+        data.push(ch.char_code_at(0).to_u8())
+        i = i + 1
+    data
+
+fn _bytes_to_text(data: [u8]) -> text:
+    var out = ""
+    var i = 0
+    while i < data.len():
+        out = out + char_from_code(data[i].to_i64())
+        i = i + 1
+    out
+
+describe "DEFLATE compression for ZIP entries":
+    it "round-trips empty input":
+        var empty: [u8] = []
+        val compressed = deflate_compress(empty)
+        val decompressed = deflate_decompress(compressed)
+        expect(decompressed.len()).to_equal(0)
+
+    it "round-trips 500 repeated 'a' bytes and compresses to under 30 bytes":
+        val input = _repeat_byte(97, 500)
+        val compressed = deflate_compress(input)
+        expect(compressed.len() < 30).to_equal(true)
+        val decompressed = deflate_decompress(compressed)
+        expect(decompressed.len()).to_equal(input.len())
+        expect(decompressed).to_equal(input)
+
+    it "round-trips a ~2KB mixed-text sample":
+        val input = _mixed_text_sample(2048)
+        val compressed = deflate_compress(input)
+        val decompressed = deflate_decompress(compressed)
+        expect(decompressed.len()).to_equal(input.len())
+        expect(decompressed).to_equal(input)
+
+    it "round-trips all 256 byte values":
+        val input = _all_256_byte_values()
+        val compressed = deflate_compress(input)
+        val decompressed = deflate_decompress(compressed)
+        expect(decompressed.len()).to_equal(input.len())
+        expect(decompressed).to_equal(input)
+
+    it "zip_write chooses method 8 for compressible entries and round-trips":
+        val input = _repeat_byte(97, 500)
+        val files = [ZipFile(name: "repeat.txt", data: input)]
+        val archive = zip_write(files)
+        val entries = zip_entries(archive)
+        expect(entries.len()).to_equal(1)
+        expect(entries[0].method).to_equal(8)
+        expect(entries[0].comp_size < input.len()).to_equal(true)
+        val extracted = zip_extract(archive, "repeat.txt") ?? []
+        expect(extracted).to_equal(input)
+
+    it "zip_write falls back to stored (method 0) for tiny incompressible entries":
+        var tiny: [u8] = []
+        tiny.push(120u8)
+        val files = [ZipFile(name: "x.bin", data: tiny)]
+        val archive = zip_write(files)
+        val entries = zip_entries(archive)
+        expect(entries.len()).to_equal(1)
+        expect(entries[0].method).to_equal(0)
+        val extracted = zip_extract(archive, "x.bin") ?? []
+        expect(extracted).to_equal(tiny)
+
+    it "produces an archive the system unzip tool accepts and can extract":
+        val input = _repeat_byte(97, 500)
+        val files = [ZipFile(name: "repeat.txt", data: input)]
+        val archive = zip_write(files)
+        val out_path = "/tmp/claude-1000/-home-ormastes-dev-pub-simple/de80534b-2c68-466d-a211-9ec2529fed18/scratchpad/deflate_compress_spec.zip"
+        File.write_bytes(out_path, archive)
+
+        val test_result = run("unzip", ["-t", out_path])
+        val test_code = test_result.exit_code
+        expect(test_code).to_equal(0)
+
+        val print_result = run("unzip", ["-p", out_path, "repeat.txt"])
+        val print_code = print_result.exit_code
+        expect(print_code).to_equal(0)
+        val printed = print_result.stdout
+        val expected_text = _bytes_to_text(input)
+        expect(printed).to_equal(expected_text)

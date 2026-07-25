@@ -1,0 +1,162 @@
+use os.kernel.loader.app_registry.{
+    app_registry_load,
+    app_registry_register,
+    app_registry_entries,
+    app_registry_is_loaded,
+    app_registry_lookup,
+    app_registry_lookup_by_fat32,
+    app_registry_fat32_alias,
+    app_registry_root_alias,
+    app_registry_canonical_from_bytes,
+    app_registry_cache_bytes,
+    app_registry_cached_bytes,
+    app_registry_boot_seed_entries,
+    app_registry_clear,
+    app_registry_load_hardcoded_fallback
+}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+fn _unwrap_text(opt: text?) -> text:
+    opt.unwrap()
+
+fn _test_manifest() -> text:
+    "# app registry manifest\n" +
+    "/sys/apps/clang|CLANGSMF.SMF|true\n" +
+    "/sys/apps/rust|RUSTSMF.SMF|true\n" +
+    "/sys/apps/hello_world|HELLOSMF.SMF|false\n" +
+    "/sys/apps/llvm|LLVMSMF.SMF|false\n"
+
+describe "dynamic app discovery — arbitrary path resolution":
+    it "resolves any /sys/apps/ path without registry entry":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val bytes = rt_text_to_bytes("/sys/apps/my_custom_tool")
+        val canonical = app_registry_canonical_from_bytes(bytes)
+        expect(canonical != nil).to_equal(true)
+        expect(_unwrap_text(canonical)).to_equal("/sys/apps/my_custom_tool")
+
+    it "rejects non-app paths even with valid bytes":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val bytes = rt_text_to_bytes("/etc/passwd")
+        expect(app_registry_canonical_from_bytes(bytes)).to_equal(nil)
+
+    it "dynamically registers unknown app on cache":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val initial_count = app_registry_entries().len()
+        val elf_bytes: [u8] = [0x7F, 0x45, 0x4C, 0x46, 0x02]
+        app_registry_cache_bytes("/sys/apps/new_dynamic_app", elf_bytes)
+        expect(app_registry_entries().len()).to_equal(initial_count + 1)
+        val entry = app_registry_lookup("/sys/apps/new_dynamic_app")
+        expect(entry != nil).to_equal(true)
+        expect(app_registry_cached_bytes("/sys/apps/new_dynamic_app").len()).to_equal(5)
+
+describe "dynamic app discovery — clang and rust loading":
+    it "resolves clang through registry alias":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val fat32 = app_registry_fat32_alias("/sys/apps/clang")
+        expect(fat32 != nil).to_equal(true)
+        expect(_unwrap_text(fat32)).to_equal("/SYS/APPS/CLANGSMF.SMF")
+
+    it "resolves rust through registry alias":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val fat32 = app_registry_fat32_alias("/sys/apps/rust")
+        expect(fat32 != nil).to_equal(true)
+        expect(_unwrap_text(fat32)).to_equal("/SYS/APPS/RUSTSMF.SMF")
+
+    it "marks clang and rust as boot seeds":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val seeds = app_registry_boot_seed_entries()
+        expect(seeds.len()).to_equal(2)
+        var has_clang = false
+        var has_rust = false
+        for seed in seeds:
+            if seed.canonical_path == "/sys/apps/clang":
+                has_clang = true
+            if seed.canonical_path == "/sys/apps/rust":
+                has_rust = true
+        expect(has_clang).to_equal(true)
+        expect(has_rust).to_equal(true)
+
+    it "caches clang executable bytes for loading":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val elf_header: [u8] = [0x7F, 0x45, 0x4C, 0x46, 0x02, 0x01]
+        app_registry_cache_bytes("/sys/apps/clang", elf_header)
+        val cached = app_registry_cached_bytes("/sys/apps/clang")
+        expect(cached.len()).to_equal(6)
+        expect(cached[0]).to_equal(0x7F)
+        expect(cached[3]).to_equal(0x46)
+
+describe "dynamic app discovery — FAT32 alias fallback":
+    it "resolves registered path via FAT32 alias":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val fat32 = app_registry_fat32_alias("/sys/apps/hello_world")
+        expect(fat32 != nil).to_equal(true)
+        expect(_unwrap_text(fat32)).to_equal("/SYS/APPS/HELLOSMF.SMF")
+
+    it "resolves .smf suffix variant via FAT32 alias":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val fat32 = app_registry_fat32_alias("/sys/apps/clang.smf")
+        expect(fat32 != nil).to_equal(true)
+        expect(_unwrap_text(fat32)).to_equal("/SYS/APPS/CLANGSMF.SMF")
+
+    it "returns nil for unregistered path alias":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        expect(app_registry_fat32_alias("/sys/apps/unknown_tool")).to_equal(nil)
+
+describe "dynamic app discovery — path canonicalization":
+    it "canonicalizes registered path from bytes":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val bytes = rt_text_to_bytes("/sys/apps/clang")
+        val canonical = app_registry_canonical_from_bytes(bytes)
+        expect(canonical != nil).to_equal(true)
+        expect(_unwrap_text(canonical)).to_equal("/sys/apps/clang")
+
+    it "canonicalizes .smf suffix from bytes":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val bytes = rt_text_to_bytes("/sys/apps/rust.smf")
+        val canonical = app_registry_canonical_from_bytes(bytes)
+        expect(canonical != nil).to_equal(true)
+        expect(_unwrap_text(canonical)).to_equal("/sys/apps/rust")
+
+    it "canonicalizes unregistered /sys/apps/ path from bytes":
+        app_registry_clear()
+        app_registry_load(_test_manifest())
+        val bytes = rt_text_to_bytes("/sys/apps/future_tool")
+        val canonical = app_registry_canonical_from_bytes(bytes)
+        expect(canonical != nil).to_equal(true)
+        expect(_unwrap_text(canonical)).to_equal("/sys/apps/future_tool")
+
+describe "dynamic app discovery — hardcoded fallback completeness":
+    it "hardcoded fallback includes all 18 standard entries":
+        app_registry_clear()
+        app_registry_load_hardcoded_fallback()
+        expect(app_registry_entries().len()).to_equal(18)
+
+    it "hardcoded fallback covers clang and rust with boot seed":
+        app_registry_clear()
+        app_registry_load_hardcoded_fallback()
+        val clang = app_registry_lookup("/sys/apps/clang")
+        expect(clang != nil).to_equal(true)
+        expect(clang.unwrap().boot_seed).to_equal(true)
+        val rust = app_registry_lookup("/sys/apps/rust")
+        expect(rust != nil).to_equal(true)
+        expect(rust.unwrap().boot_seed).to_equal(true)
+
+    it "hardcoded fallback reverse-lookups by FAT32 leaf":
+        app_registry_clear()
+        app_registry_load_hardcoded_fallback()
+        val entry = app_registry_lookup_by_fat32("CLANGSMF.SMF")
+        expect(entry != nil).to_equal(true)
+        expect(entry.unwrap().canonical_path).to_equal("/sys/apps/clang")

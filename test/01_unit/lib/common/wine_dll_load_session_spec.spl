@@ -1,0 +1,59 @@
+use common.wine_dll_load_session.{
+    wine_dll_load_session_loaded_count,
+    wine_dll_load_session_new,
+    wine_dll_session_load_modeled,
+    wine_dll_session_load_with_rollback,
+    wine_dll_session_unload_modeled
+}
+
+describe "wine dll load session":
+    it "records modeled loaded image state after image-map handoff":
+        val session = wine_dll_load_session_new(0x71000000)
+        val result = wine_dll_session_load_modeled(session, "kernel32.dll", "C:\\Games", "C:\\Users\\Player", ["D:\\GameBin"], ["kernel32.dll"], 0x6000)
+        expect(result.ok).to_equal(true)
+        expect(result.dll_name).to_equal("kernel32.dll")
+        expect(result.selected_path).to_equal("\\KnownDlls\\kernel32.dll")
+        expect(result.mapped_base).to_equal(0x71000000)
+        expect(result.mapped_size).to_equal(0x6000)
+        expect(result.ref_count).to_equal(1)
+        expect(result.status).to_equal("dll-load-session-recorded")
+        expect(wine_dll_load_session_loaded_count(result.session)).to_equal(1)
+        expect(result.evidence).to_contain("dll-image-map-handoff-ready")
+        expect(result.evidence).to_contain("dll-load-session-recorded")
+        expect(result.evidence).to_contain("modeled-loaded-image")
+        expect(result.evidence).to_contain("no-real-dll-loaded")
+        expect(result.evidence).to_contain("no-dll-entrypoint-executed")
+        expect(result.evidence).to_contain("no-tls-callback-executed")
+
+    it "increments modeled refcount for repeated loads and unloads by refcount":
+        val session = wine_dll_load_session_new(0x72000000)
+        val first = wine_dll_session_load_modeled(session, "kernel32.dll", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"], 0x5000)
+        val second = wine_dll_session_load_modeled(first.session, "kernel32.dll", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"], 0x5000)
+        expect(second.ok).to_equal(true)
+        expect(second.ref_count).to_equal(2)
+        expect(second.status).to_equal("dll-load-existing-refcounted")
+        expect(wine_dll_load_session_loaded_count(second.session)).to_equal(1)
+        val released = wine_dll_session_unload_modeled(second.session, "kernel32.dll")
+        expect(released.ok).to_equal(true)
+        expect(released.ref_count).to_equal(1)
+        expect(wine_dll_load_session_loaded_count(released.session)).to_equal(1)
+
+    it "rolls back modeled loads without leaving loaded state":
+        val session = wine_dll_load_session_new(0x73000000)
+        val result = wine_dll_session_load_with_rollback(session, "user32.dll", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"], 0x7000, false)
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("dll-load-session-rolled-back")
+        expect(result.status).to_equal("rolled-back")
+        expect(result.ref_count).to_equal(0)
+        expect(wine_dll_load_session_loaded_count(result.session)).to_equal(0)
+        expect(result.evidence).to_contain("dll-load-session-unloaded")
+        expect(result.evidence).to_contain("dll-load-session-rolled-back")
+        expect(result.evidence).to_contain("no-real-dll-loaded")
+
+    it "rejects invalid image handoff inputs":
+        val session = wine_dll_load_session_new(0x74000000)
+        val result = wine_dll_session_load_modeled(session, "C:\\Windows\\kernel32.dll", "C:\\Games", "C:\\Users\\Player", [], ["kernel32.dll"], 0x4000)
+        expect(result.ok).to_equal(false)
+        expect(result.error).to_equal("image-map:dll-search:dll-name-must-be-basename")
+        expect(result.status).to_equal("rejected")
+        expect(wine_dll_load_session_loaded_count(result.session)).to_equal(0)

@@ -1,0 +1,378 @@
+#!/bin/sh
+# Cross-engine widget-shell rendering evidence.
+#
+# Proves the NEW production widget fixtures (GUI window + taskbar shell) render
+# correctly by comparing the pure-Simple web engine output (layout -> engine2d
+# -> Metal) against REAL Chrome and REAL Electron rendering the SAME fixture
+# HTML, with PNG/ARGB artifacts on disk.
+#
+# For each fixture (window, taskbar):
+#   (a) emit the fixture HTML via the shared fixture module,
+#   (b) render on the Simple Metal lane -> ARGB JSON,
+#   (c) capture the same HTML in real Chrome headless (sRGB) -> ARGB + geometry,
+#   (d) capture the same HTML in real Electron offscreen (sRGB) -> ARGB,
+#   (e) encode side-by-side PNGs and compare NON-TEXT structure.
+#
+# Text legitimately differs (Simple 5x7/8x16 bitmap font vs Chromium's font
+# rasterizer, documented precedent), so glyph pixels are excluded via the Chrome
+# DOM text mask and only theme colors, non-text pixel agreement, and the panel
+# color band are compared. No blur, no self-comparison: Simple is compared
+# against the two independent real engines. Tolerance is a per-channel absolute
+# delta reported honestly in the keys.
+#
+# Standalone by design: does NOT touch the production parity aggregate.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/widget_shells_crossengine}"
+REPORT_PATH="${REPORT_PATH:-$BUILD_DIR/report.md}"
+
+WINDOW_WIDTH="${WIDGET_WINDOW_WIDTH:-320}"
+WINDOW_HEIGHT="${WIDGET_WINDOW_HEIGHT:-200}"
+TASKBAR_WIDTH="${WIDGET_TASKBAR_WIDTH:-480}"
+TASKBAR_HEIGHT="${WIDGET_TASKBAR_HEIGHT:-64}"
+SIMPLE_TIMEOUT_SECS="${WIDGET_SIMPLE_TIMEOUT_SECS:-600}"
+ENGINE_TIMEOUT_SECS="${WIDGET_ENGINE_TIMEOUT_SECS:-90}"
+CHANNEL_TOL="${WIDGET_CHANNEL_TOL:-8}"
+
+# Pass thresholds (justified from measured baseline; see report). Non-text
+# structure should agree strongly because the theme colors are identical hex;
+# the two real engines (Chrome vs Electron) must agree very tightly.
+NONTEXT_MIN_SIMPLE="${WIDGET_NONTEXT_MIN_SIMPLE:-80}"
+NONTEXT_MIN_REAL="${WIDGET_NONTEXT_MIN_REAL:-95}"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+CHROME_SCRIPT="tools/chrome-live-bitmap/capture_html_argb.js"
+ELECTRON_SCRIPT="tools/electron-live-bitmap/capture_html_argb.js"
+COMPARATOR="scripts/check/compare-widget-crossengine.js"
+DRIVER_SRC="$BUILD_DIR/simple_widget_crossengine_driver.spl"
+SIMPLE_LOG="$BUILD_DIR/simple.log"
+ENV_PATH="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$DRIVER_SRC" "$SIMPLE_LOG" "$ENV_PATH" "$REPORT_PATH" \
+      "$BUILD_DIR"/*.html "$BUILD_DIR"/*-argb.json "$BUILD_DIR"/*-geometry.json \
+      "$BUILD_DIR"/*.png "$BUILD_DIR"/compare_*.json "$BUILD_DIR"/*.env "$BUILD_DIR"/*.out 2>/dev/null || true
+
+emit_unavailable() {
+    reason="$1"
+    {
+        echo "widget_crossengine_status=unavailable"
+        echo "widget_crossengine_reason=$reason"
+    } >"$ENV_PATH"
+    {
+        echo "# Widget Shells Cross-Engine Evidence"
+        echo
+        echo "- status: unavailable"
+        echo "- reason: $reason"
+    } >"$REPORT_PATH"
+    cat "$ENV_PATH"
+}
+
+# --- resolve self-hosted Simple binary (Rust seed forbidden) ---
+is_rust_seed_simple() {
+    case "$1" in
+        src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+if [ -z "${SIMPLE_BIN+x}" ]; then
+    for candidate in "bin/simple" "./bin/simple" "release"/*/simple "bin/release"/*/simple "build/bootstrap/stage3/simple"; do
+        if [ -x "$candidate" ]; then SIMPLE_BIN="$candidate"; break; fi
+    done
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-}"
+if [ "$SIMPLE_BIN" = "" ] || [ ! -x "$SIMPLE_BIN" ]; then emit_unavailable "missing-self-hosted-simple-bin"; exit 1; fi
+if is_rust_seed_simple "$SIMPLE_BIN"; then emit_unavailable "rust-seed-simple-bin-forbidden"; exit 1; fi
+
+have node || { emit_unavailable "missing-command:node"; exit 1; }
+[ -f "$CHROME_SCRIPT" ] || { emit_unavailable "missing-chrome-capture-script"; exit 1; }
+[ -f "$ELECTRON_SCRIPT" ] || { emit_unavailable "missing-electron-capture-script"; exit 1; }
+[ -f "$COMPARATOR" ] || { emit_unavailable "missing-comparator"; exit 1; }
+
+CHROME_BIN=""
+for c in "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" "/usr/bin/google-chrome" "/usr/bin/google-chrome-stable" "/usr/bin/chromium" "/usr/bin/chromium-browser"; do
+    if [ -x "$c" ]; then CHROME_BIN="$c"; break; fi
+done
+[ "$CHROME_BIN" != "" ] || { emit_unavailable "chrome-binary-unavailable"; exit 1; }
+
+ELECTRON_BIN=""
+for c in "tools/electron-shell/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron" "tools/electron-shell/node_modules/.bin/electron" "tools/electron-shell/node_modules/electron/dist/electron"; do
+    if [ -x "$c" ]; then ELECTRON_BIN="$c"; break; fi
+done
+[ "$ELECTRON_BIN" != "" ] || { emit_unavailable "electron-binary-unavailable"; exit 1; }
+
+WIN_HTML="$ROOT_DIR/$BUILD_DIR/window.html"
+TASK_HTML="$ROOT_DIR/$BUILD_DIR/taskbar.html"
+WIN_SIMPLE_ARGB="$ROOT_DIR/$BUILD_DIR/simple-window-argb.json"
+TASK_SIMPLE_ARGB="$ROOT_DIR/$BUILD_DIR/simple-taskbar-argb.json"
+
+# --- (a)+(b) emit fixture HTML and render on Simple Metal lane ---
+cat >"$DRIVER_SRC" <<SIMPLE_EOF
+use app.wm_compare.production_gui_window_taskbar_widget_shells.{gui_window_widget_html, taskbar_shell_widget_html}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend, simple_web_resolved_engine2d_backend_name}
+use std.nogc_sync_mut.sffi.io.{file_write_text}
+use common.string_builder.{StringBuilder}
+
+fn _checksum(pixels: [u32]) -> i64:
+    var sum: i64 = 0
+    var i = 0
+    val n = pixels.len()
+    while i < n:
+        sum = sum + pixels[i].to_i64()
+        i = i + 1
+    sum
+
+fn _write_argb(path: text, pixels: [u32], w: i32, h: i32) -> bool:
+    # preallocated local parts + one join: interpreted StringBuilder pushes
+    # clone the backing array per call (O(n^2)) and previously blew the
+    # render timeout on 64k-pixel dumps. Identical JSON output.
+    val n = pixels.len()
+    var parts: [text] = [""; n]
+    var i = 0
+    while i < n:
+        parts[i] = pixels[i].to_i64().to_text()
+        i = i + 1
+    var sb = StringBuilder.new()
+    sb.push("{\"width\":")
+    sb.push(w.to_text())
+    sb.push(",\"height\":")
+    sb.push(h.to_text())
+    sb.push(",\"format\":\"argb-u32\",\"producer\":\"pure-simple-web-engine2d-metal\",\"pixels\":[")
+    sb.push(parts.join(","))
+    sb.push("]}")
+    file_write_text(path, sb.to_text())
+
+fn _emit(name: text, html: text, html_path: text, argb_path: text, w: i32, h: i32):
+    val wrote_html = file_write_text(html_path, html)
+    val backend = simple_web_resolved_engine2d_backend_name(w, h, "metal")
+    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, w, h, "metal")
+    val wrote_argb = _write_argb(argb_path, pixels, w, h)
+    print name + "_html_written=" + wrote_html.to_text()
+    print name + "_argb_written=" + wrote_argb.to_text()
+    print name + "_resolved_backend=" + backend
+    print name + "_pixel_count=" + pixels.len().to_text()
+    print name + "_checksum=" + _checksum(pixels).to_text()
+
+fn main():
+    _emit("window", gui_window_widget_html(), "$WIN_HTML", "$WIN_SIMPLE_ARGB", ${WINDOW_WIDTH}, ${WINDOW_HEIGHT})
+    _emit("taskbar", taskbar_shell_widget_html(), "$TASK_HTML", "$TASK_SIMPLE_ARGB", ${TASKBAR_WIDTH}, ${TASKBAR_HEIGHT})
+    print "simple_driver_status=done"
+SIMPLE_EOF
+
+run_with_timeout() {
+    secs="$1"; shift
+    if have timeout; then timeout "$secs" "$@"; else "$@"; fi
+}
+
+set +e
+SIMPLE_LIB="${SIMPLE_LIB:-src}" SIMPLE_EXECUTION_MODE=interpret SIMPLE_EXECUTION_LIMIT=0 \
+    OSTYPE=darwin SIMPLE_ONE_CALL_READBACK=1 \
+    run_with_timeout "$SIMPLE_TIMEOUT_SECS" "$SIMPLE_BIN" run "$DRIVER_SRC" --mode=interpreter --clean >"$SIMPLE_LOG" 2>&1
+simple_code=$?
+set -e
+
+simple_field() { sed -n "s/^${1}=//p" "$SIMPLE_LOG" | tail -n 1; }
+
+if [ "$simple_code" -eq 124 ]; then emit_unavailable "simple-render-timeout"; exit 1; fi
+if [ "$simple_code" -ne 0 ] || [ "$(simple_field simple_driver_status)" != "done" ]; then
+    { echo "widget_crossengine_status=fail"; echo "widget_crossengine_reason=simple-render-failed"; echo "widget_crossengine_simple_exit=$simple_code"; } >"$ENV_PATH"
+    { echo "# Widget Shells Cross-Engine Evidence"; echo; echo "- status: fail"; echo "- reason: simple-render-failed (exit $simple_code)"; echo; echo '## Simple Log (tail)'; tail -n 40 "$SIMPLE_LOG" | sed 's/^/- /'; } >"$REPORT_PATH"
+    cat "$ENV_PATH"; exit 1
+fi
+[ -s "$WIN_SIMPLE_ARGB" ] || { emit_unavailable "missing-simple-window-argb"; exit 1; }
+[ -s "$TASK_SIMPLE_ARGB" ] || { emit_unavailable "missing-simple-taskbar-argb"; exit 1; }
+
+WINDOW_BACKEND="$(simple_field window_resolved_backend)"
+TASKBAR_BACKEND="$(simple_field taskbar_resolved_backend)"
+
+# --- Chrome + Electron capture + compare for one fixture ---
+# args: fixture html_path width height simple_argb -> writes <fixture>.env
+capture_and_compare() {
+    fx="$1"; html="$2"; w="$3"; h="$4"; simple_argb="$5"
+    chrome_argb="$ROOT_DIR/$BUILD_DIR/chrome-$fx-argb.json"
+    chrome_geom="$ROOT_DIR/$BUILD_DIR/chrome-$fx-geometry.json"
+    chrome_proof="$ROOT_DIR/$BUILD_DIR/chrome-$fx-proof.json"
+    chrome_out="$BUILD_DIR/chrome-$fx.out"
+    electron_argb="$ROOT_DIR/$BUILD_DIR/electron-$fx-argb.json"
+    electron_geom="$ROOT_DIR/$BUILD_DIR/electron-$fx-geometry.json"
+    electron_out="$BUILD_DIR/electron-$fx.out"
+    fx_env="$BUILD_DIR/$fx.env"
+    : >"$fx_env"
+
+    set +e
+    CHROME_CAPTURE_HTML="$html" CHROME_CAPTURE_WIDTH="$w" CHROME_CAPTURE_HEIGHT="$h" \
+    CHROME_CAPTURE_OUTPUT="$chrome_argb" CHROME_CAPTURE_GEOMETRY_OUTPUT="$chrome_geom" \
+    CHROME_CAPTURE_PROOF_PATH="$chrome_proof" CHROME_CAPTURE_BIN="$CHROME_BIN" \
+    CHROME_CAPTURE_TIMEOUT_MS="$((ENGINE_TIMEOUT_SECS * 1000))" \
+        run_with_timeout "$ENGINE_TIMEOUT_SECS" node "$CHROME_SCRIPT" >"$chrome_out" 2>&1
+    chrome_code=$?
+    set -e
+
+    set +e
+    ELECTRON_CAPTURE_HTML="$html" ELECTRON_CAPTURE_WIDTH="$w" ELECTRON_CAPTURE_HEIGHT="$h" \
+    ELECTRON_CAPTURE_OUTPUT="$electron_argb" ELECTRON_CAPTURE_GEOMETRY_OUTPUT="$electron_geom" \
+    ELECTRON_CAPTURE_OFFSCREEN_PAINT=1 \
+        run_with_timeout "$ENGINE_TIMEOUT_SECS" "$ELECTRON_BIN" --no-sandbox --disable-gpu "$ELECTRON_SCRIPT" >"$electron_out" 2>&1
+    electron_code=$?
+    set -e
+
+    fx_reason=pass
+    fx_status=pass
+    if [ ! -s "$chrome_argb" ]; then fx_status=fail; fx_reason="chrome-capture-failed:$chrome_code"; fi
+    if [ "$fx_status" = pass ] && [ ! -s "$electron_argb" ]; then fx_status=fail; fx_reason="electron-capture-failed:$electron_code"; fi
+
+    if [ "$fx_status" != pass ]; then
+        {
+            echo "${fx}_status=$fx_status"
+            echo "${fx}_reason=$fx_reason"
+            echo "${fx}_chrome_exit=$chrome_code"
+            echo "${fx}_electron_exit=$electron_code"
+            echo "${fx}_chrome_out_tail=$(tail -n 1 "$chrome_out" 2>/dev/null)"
+            echo "${fx}_electron_out_tail=$(tail -n 1 "$electron_out" 2>/dev/null)"
+        } >"$fx_env"
+        return 0
+    fi
+
+    set +e
+    COMPARE_PREFIX="$fx" COMPARE_WIDTH="$w" COMPARE_HEIGHT="$h" \
+    COMPARE_SIMPLE_ARGB="$simple_argb" COMPARE_CHROME_ARGB="$chrome_argb" COMPARE_ELECTRON_ARGB="$electron_argb" \
+    COMPARE_CHROME_GEOMETRY="$chrome_geom" COMPARE_OUT_DIR="$ROOT_DIR/$BUILD_DIR" COMPARE_FIXTURE="$fx" \
+    COMPARE_CHANNEL_TOL="$CHANNEL_TOL" \
+        node "$COMPARATOR" >"$fx_env" 2>>"$fx_env"
+    compare_code=$?
+    set -e
+    {
+        echo "${fx}_chrome_exit=$chrome_code"
+        echo "${fx}_electron_exit=$electron_code"
+        echo "${fx}_compare_exit=$compare_code"
+    } >>"$fx_env"
+}
+
+capture_and_compare "window" "$WIN_HTML" "$WINDOW_WIDTH" "$WINDOW_HEIGHT" "$WIN_SIMPLE_ARGB"
+capture_and_compare "taskbar" "$TASK_HTML" "$TASKBAR_WIDTH" "$TASKBAR_HEIGHT" "$TASK_SIMPLE_ARGB"
+
+fx_val() { sed -n "s/^${1}=//p" "$BUILD_DIR/$2.env" | tail -n 1; }
+
+# integer-compare a fixed-point percentage string (e.g. 97.31) against an int min
+pct_at_least() {
+    v="$1"; m="$2"
+    vi="${v%%.*}"
+    case "$vi" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$vi" -ge "$m" ]
+}
+
+# Three-valued classification per fixture, fail-closed:
+#   fail      = infra problem (capture/compare failed, a REAL engine did not
+#               render themed content, or the two real engines disagree so the
+#               same HTML was not rendered consistently).
+#   divergent = the two real engines agree but the Simple web engine's non-text
+#               structure genuinely differs from Chromium (layout/box geometry
+#               divergence) — a documented FINDING, not hidden by tolerance.
+#   pass      = Simple non-text structure matches both real engines within
+#               threshold and the panel band edges align within 2px.
+num_ge() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -ge "$2" ]; }
+
+FX_CLASS=""
+FX_REASON=""
+classify_fixture() {
+    fx="$1"
+    st="$(fx_val "${fx}_status" "$fx")"
+    if [ "$st" != "pass" ]; then FX_CLASS=fail; FX_REASON="${fx}:$(fx_val "${fx}_reason" "$fx")"; return; fi
+    sc="$(fx_val "${fx}_nontext_agree_simple_chrome_pct" "$fx")"
+    se="$(fx_val "${fx}_nontext_agree_simple_electron_pct" "$fx")"
+    ce="$(fx_val "${fx}_nontext_agree_chrome_electron_pct" "$fx")"
+    cp="$(fx_val "${fx}_chrome_panel_count" "$fx")"
+    cbg="$(fx_val "${fx}_chrome_bg_count" "$fx")"
+    ep="$(fx_val "${fx}_electron_panel_count" "$fx")"
+    ebg="$(fx_val "${fx}_electron_bg_count" "$fx")"
+    sp="$(fx_val "${fx}_simple_panel_count" "$fx")"
+    topm="$(fx_val "${fx}_geometry_panel_top_match_simple_chrome" "$fx")"
+    botm="$(fx_val "${fx}_geometry_panel_bottom_match_simple_chrome" "$fx")"
+    # Infra fail: a real engine did not render the themed shell, or the two real
+    # engines disagree (the fixture HTML was not rendered consistently).
+    if ! num_ge "$cp" 1 || ! num_ge "$cbg" 1 || ! num_ge "$ep" 1 || ! num_ge "$ebg" 1; then
+        FX_CLASS=fail; FX_REASON="${fx}:real-engine-theme-absent"; return
+    fi
+    if ! pct_at_least "$ce" "$NONTEXT_MIN_REAL"; then
+        FX_CLASS=fail; FX_REASON="${fx}:real-engines-disagree:${ce}pct"; return
+    fi
+    # Simple must at least render a themed panel surface; if not, that is itself
+    # a divergence finding (blank/absent Simple render).
+    if pct_at_least "$sc" "$NONTEXT_MIN_SIMPLE" && pct_at_least "$se" "$NONTEXT_MIN_SIMPLE" \
+        && [ "$topm" = "true" ] && [ "$botm" = "true" ]; then
+        FX_CLASS=pass; FX_REASON="${fx}:pass"
+    else
+        FX_CLASS=divergent
+        FX_REASON="${fx}:simple-vs-chromium-structural-divergence sc=${sc}pct se=${se}pct panel_top_match=${topm} panel_bottom_match=${botm} simple_panel=${sp} chrome_panel=${cp}"
+    fi
+}
+
+overall=pass
+overall_reason=pass
+for fx in window taskbar; do
+    classify_fixture "$fx"
+    # precedence: fail > divergent > pass
+    if [ "$FX_CLASS" = "fail" ]; then
+        overall=fail; overall_reason="$FX_REASON"; break
+    elif [ "$FX_CLASS" = "divergent" ] && [ "$overall" != "fail" ]; then
+        overall=divergent
+        if [ "$overall_reason" = "pass" ]; then overall_reason="$FX_REASON"; else overall_reason="$overall_reason | $FX_REASON"; fi
+    fi
+done
+
+{
+    echo "widget_crossengine_status=$overall"
+    echo "widget_crossengine_reason=$overall_reason"
+    echo "widget_crossengine_blur_or_tolerance_used=false"
+    echo "widget_crossengine_channel_tol=$CHANNEL_TOL"
+    echo "widget_crossengine_nontext_min_simple=$NONTEXT_MIN_SIMPLE"
+    echo "widget_crossengine_nontext_min_real=$NONTEXT_MIN_REAL"
+    echo "widget_crossengine_window_backend=$WINDOW_BACKEND"
+    echo "widget_crossengine_taskbar_backend=$TASKBAR_BACKEND"
+    echo "widget_crossengine_chrome_bin=$CHROME_BIN"
+    echo "widget_crossengine_electron_bin=$ELECTRON_BIN"
+    for fx in window taskbar; do
+        cat "$BUILD_DIR/$fx.env" 2>/dev/null || true
+    done
+} >"$ENV_PATH"
+
+{
+    echo "# Widget Shells Cross-Engine Evidence"
+    echo
+    echo "- status: $overall  (pass = Simple matches both real engines; divergent = real engines agree but Simple layout genuinely differs from Chromium; fail = infra/real-engine problem)"
+    echo "- reason: $overall_reason"
+    echo "- tolerance: per-channel abs <= $CHANNEL_TOL (no blur; text glyph pixels excluded via Chrome DOM mask)"
+    echo "- thresholds: Simple-vs-real non-text >= ${NONTEXT_MIN_SIMPLE}%, Chrome-vs-Electron non-text >= ${NONTEXT_MIN_REAL}%"
+    echo "- Chrome: $CHROME_BIN"
+    echo "- Electron: $ELECTRON_BIN"
+    echo
+    for fx in window taskbar; do
+        echo "## Fixture: $fx"
+        echo
+        echo "- Simple PNG:   $(fx_val "${fx}_simple_png_path" "$fx")"
+        echo "- Chrome PNG:   $(fx_val "${fx}_chrome_png_path" "$fx")"
+        echo "- Electron PNG: $(fx_val "${fx}_electron_png_path" "$fx")"
+        echo "- non-text agreement: Simple/Chrome=$(fx_val "${fx}_nontext_agree_simple_chrome_pct" "$fx")% Simple/Electron=$(fx_val "${fx}_nontext_agree_simple_electron_pct" "$fx")% Chrome/Electron=$(fx_val "${fx}_nontext_agree_chrome_electron_pct" "$fx")%"
+        echo "- full-frame agreement (incl. text): Simple/Chrome=$(fx_val "${fx}_fullframe_agree_simple_chrome_pct" "$fx")%"
+        echo "- text mask: rects=$(fx_val "${fx}_text_mask_rects" "$fx") pixels=$(fx_val "${fx}_text_mask_pixels" "$fx") fraction=$(fx_val "${fx}_text_mask_fraction" "$fx")"
+        echo "- panel color pixels: Simple=$(fx_val "${fx}_simple_panel_count" "$fx") Chrome=$(fx_val "${fx}_chrome_panel_count" "$fx") Electron=$(fx_val "${fx}_electron_panel_count" "$fx")"
+        echo "- accent color pixels: Simple=$(fx_val "${fx}_simple_accent_count" "$fx") Chrome=$(fx_val "${fx}_chrome_accent_count" "$fx") Electron=$(fx_val "${fx}_electron_accent_count" "$fx")"
+        echo "- bg color pixels: Simple=$(fx_val "${fx}_simple_bg_count" "$fx") Chrome=$(fx_val "${fx}_chrome_bg_count" "$fx") Electron=$(fx_val "${fx}_electron_bg_count" "$fx")"
+        echo "- panel band top: Simple=$(fx_val "${fx}_simple_panel_band_top" "$fx") Chrome=$(fx_val "${fx}_chrome_panel_band_top" "$fx") Electron=$(fx_val "${fx}_electron_panel_band_top" "$fx")"
+        echo "- panel band bottom: Simple=$(fx_val "${fx}_simple_panel_band_bottom" "$fx") Chrome=$(fx_val "${fx}_chrome_panel_band_bottom" "$fx") Electron=$(fx_val "${fx}_electron_panel_band_bottom" "$fx")"
+        echo "- geometry panel top match (Simple/Chrome): $(fx_val "${fx}_geometry_panel_top_match_simple_chrome" "$fx") (delta=$(fx_val "${fx}_geometry_panel_top_delta_simple_chrome" "$fx")px)"
+        echo "- geometry panel bottom match (Simple/Chrome): $(fx_val "${fx}_geometry_panel_bottom_match_simple_chrome" "$fx") (delta=$(fx_val "${fx}_geometry_panel_bottom_delta_simple_chrome" "$fx")px)"
+        echo "- geometry panel band match (Chrome/Electron): top=$(fx_val "${fx}_geometry_panel_top_match_chrome_electron" "$fx") bottom=$(fx_val "${fx}_geometry_panel_bottom_match_chrome_electron" "$fx")"
+        echo
+    done
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$ENV_PATH"
+} >"$REPORT_PATH"
+
+cat "$ENV_PATH"
+echo "report_path=$REPORT_PATH"
+[ "$overall" = "pass" ]

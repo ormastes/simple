@@ -1,0 +1,146 @@
+# VirtIO-net legacy PCI register constants, virtqueue size helpers, and VirtioNetDriver struct.
+use os.drivers.virtio.virtio_net.*
+# VirtIO Network Device Driver — DeviceGrant-based PCI transport
+#
+# MDSOC: feature dimension, drivers layer
+# Provides Ethernet frame send/receive for the network stack service.
+# Uses two virtqueues: RX (queue 0) and TX (queue 1).
+#
+# VirtIO legacy PCI transport (BAR0 I/O register layout):
+#   0x00 host_features, 0x04 guest_features, 0x08 queue_pfn,
+#   0x0C queue_size, 0x0E queue_sel, 0x10 queue_notify,
+#   0x12 status, 0x13 isr, 0x14 mac[6], 0x1A link_status
+#
+# All DMA buffers are allocated via syscall 84 (AllocDma).
+# BAR0 is mapped via syscall 83 (MapBar).
+
+use os.kernel.types.device_mem_types.{DeviceGrant}
+use os.kernel.boot.mmio.{mmio_read8, mmio_read16, mmio_read32, mmio_write8, mmio_write16, mmio_write32}
+use os.userlib.syscall_raw.{syscall}
+use os.drivers.virtio.virtio_common.{VirtqDesc, VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE}
+use os.drivers.virtio.virtio_net_async.{VirtioNetRecvFuture, VirtioNetSendFuture}
+use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
+
+
+# ============================================================================
+# VirtIO Legacy PCI BAR0 Register Offsets
+# ============================================================================
+
+val VIRTIO_PCI_HOST_FEATURES: u64 = 0x00
+val VIRTIO_PCI_GUEST_FEATURES: u64 = 0x04
+val VIRTIO_PCI_QUEUE_PFN: u64 = 0x08
+val VIRTIO_PCI_QUEUE_SIZE: u64 = 0x0C
+val VIRTIO_PCI_QUEUE_SEL: u64 = 0x0E
+val VIRTIO_PCI_QUEUE_NOTIFY: u64 = 0x10
+val VIRTIO_PCI_STATUS: u64 = 0x12
+val VIRTIO_PCI_ISR: u64 = 0x13
+
+# Net-specific config (after generic header, offset 0x14)
+val VIRTIO_NET_MAC_OFFSET: u64 = 0x14    # 6 bytes: MAC address
+val VIRTIO_NET_STATUS_OFFSET: u64 = 0x1A  # 2 bytes: link status
+
+# Device status bits
+val VIRTIO_STATUS_ACKNOWLEDGE: u8 = 1
+val VIRTIO_STATUS_DRIVER: u8 = 2
+val VIRTIO_STATUS_DRIVER_OK: u8 = 4
+val VIRTIO_STATUS_FEATURES_OK: u8 = 8
+val VIRTIO_STATUS_FAILED: u8 = 128
+
+# Queue indices
+val VIRTIO_NET_RX_QUEUE: u16 = 0
+val VIRTIO_NET_TX_QUEUE: u16 = 1
+
+# Buffer configuration
+val RX_BUFFER_COUNT: u64 = 64
+val TX_BUFFER_COUNT: u64 = 64
+val BUFFER_SIZE: u64 = 2048
+
+# VirtIO net header size (legacy: 10 bytes)
+val VIRTIO_NET_HDR_SIZE: u64 = 10
+
+# Completion-mode selection for blocking queue operations.
+# AUTO preserves current behavior by resolving to interrupt-backed waits.
+val VIRTIO_NET_COMPLETION_POLL: u64 = 0
+val VIRTIO_NET_COMPLETION_INTERRUPT: u64 = 1
+val VIRTIO_NET_COMPLETION_AUTO: u64 = 2
+val VIRTIO_NET_COMPLETION_POLL_LIMIT: u32 = 100000
+
+# ============================================================================
+# Virtqueue ring layout helpers
+# ============================================================================
+# For a queue of size N:
+#   Descriptor table: N * 16 bytes
+#   Available ring:   4 + 2*N bytes  (flags:u16, idx:u16, ring[N]:u16)
+#   Used ring:        4 + 8*N bytes  (flags:u16, idx:u16, ring[N]:(id:u32,len:u32))
+# Legacy PCI virtqueue: all three placed contiguously, PFN = phys >> 12
+
+fn virtqueue_desc_size(queue_size: u64) -> u64:
+    queue_size * 16
+
+fn virtqueue_avail_size(queue_size: u64) -> u64:
+    4 + 2 * queue_size
+
+fn virtqueue_used_size(queue_size: u64) -> u64:
+    4 + 8 * queue_size
+
+fn virtqueue_total_size(queue_size: u64) -> u64:
+    val ds = virtqueue_desc_size(queue_size)
+    val avs = virtqueue_avail_size(queue_size)
+    val us = virtqueue_used_size(queue_size)
+    # Align used ring to 4096 boundary (virtio spec requirement for legacy)
+    val desc_avail = ds + avs
+    val aligned = (desc_avail + 4095) & ~4095
+    aligned + us
+
+# ============================================================================
+# VirtIO Network Driver
+# ============================================================================
+
+struct VirtioNetDriver:
+    """VirtIO PCI network device driver using DeviceGrant resources.
+
+    Maps BAR0 via syscall 83, allocates DMA buffers via syscall 84.
+    Manages separate RX (queue 0) and TX (queue 1) virtqueues.
+    """
+    bar0_virt: u64
+    notif_id: u64
+    device_bdf: u64
+    # RX virtqueue
+    rx_desc_virt: u64       # Descriptor table vaddr
+    rx_avail_virt: u64      # Available ring vaddr
+    rx_used_virt: u64       # Used ring vaddr
+    rx_desc_phys: u64       # Descriptor table paddr (for PFN)
+    rx_queue_size: u16
+    rx_last_used: u16
+    # TX virtqueue
+    tx_desc_virt: u64
+    tx_avail_virt: u64
+    tx_used_virt: u64
+    tx_desc_phys: u64
+    tx_queue_size: u16
+    tx_last_used: u16
+    # DMA buffers
+    rx_bufs_virt: u64
+    rx_bufs_phys: u64
+    rx_bufs_allocation_id: u64
+    rx_buf_virt: [u64; 64]
+    rx_buf_phys: [u64; 64]
+    rx_buf_allocation_id: [u64; 64]
+    tx_bufs_virt: u64
+    tx_bufs_phys: u64
+    tx_bufs_allocation_id: u64
+    tx_buf_virt: [u64; 64]
+    tx_buf_phys: [u64; 64]
+    tx_buf_allocation_id: [u64; 64]
+    rx_queue_allocation_id: u64
+    tx_queue_allocation_id: u64
+    # MAC address (6 bytes stored individually for baremetal safety)
+    mac0: u8
+    mac1: u8
+    mac2: u8
+    mac3: u8
+    mac4: u8
+    mac5: u8
+    initialized: bool
+    completion_mode: u64
+    tx_async_reserved: bool

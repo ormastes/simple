@@ -1,0 +1,211 @@
+# SimpleOS Reincarnation Server (G4)
+#
+# Minix-style supervisor: polls heartbeats, restarts dead capsules, and
+# re-grants capabilities from DS after restart.  RS is the capstone
+# reliability feature for SimpleOS microkernel userland.
+#
+# ECS internals: each supervised capsule is an entity.  Five component
+# stores model per-capsule state (identity, manifest, heartbeat, policy,
+# crash info).
+
+use std.ecs.entity.{Entity, EntityAllocator}
+use std.ecs.component_store.{ComponentStore}
+use std.ecs.world.{WorldBase}
+
+# ============================================================================
+# Crash reason constants
+# ============================================================================
+
+val RS_REASON_NONE:              u32 = 0
+val RS_REASON_HEARTBEAT_TIMEOUT: u32 = 1
+val RS_REASON_EXIT_NONZERO:      u32 = 2
+val RS_REASON_SIGNAL:            u32 = 3
+
+# ============================================================================
+# ECS Component types (POD)
+# ============================================================================
+
+struct CapsuleId:
+    """ECS component: supervised capsule identity."""
+    value: u64
+
+struct Manifest:
+    """ECS component: rs.conf-equivalent — name, binary path, auto-restart flag."""
+    name:         text
+    binary_path:  text
+    auto_restart: bool
+
+struct Heartbeat:
+    """ECS component: liveness tracking — last observed tick, interval, timeout."""
+    last_tick:      u64
+    interval_ticks: u64
+    timeout_ticks:  u64
+
+struct RestartPolicy:
+    """ECS component: restart budget and backoff state."""
+    max_restarts:      u32
+    restarts_so_far:   u32
+    backoff_ticks:     u64
+    last_restart_tick: u64
+
+struct LastCrashInfo:
+    """ECS component: post-mortem for the most recent crash."""
+    reason:         u32
+    exit_code:      i32
+    crashed_at_tick: u64
+
+# ============================================================================
+# RsWorld — ECS container for all supervised-capsule state
+# ============================================================================
+
+struct RsWorld:
+    """ECS world owning all capsule entities and their component data."""
+    base:     WorldBase
+    ids:      ComponentStore<CapsuleId>
+    manifests: ComponentStore<Manifest>
+    heartbeats: ComponentStore<Heartbeat>
+    policies:  ComponentStore<RestartPolicy>
+    crashes:   ComponentStore<LastCrashInfo>
+
+# ============================================================================
+# RsService — public API
+# ============================================================================
+
+class RsService:
+    """Reincarnation Server: heartbeat supervision and capsule restart for SimpleOS."""
+    world:       RsWorld
+    tick:        u64
+    initialized: bool
+
+impl RsService:
+    static fn new() -> RsService:
+        """Create a fresh RsService with tick=0 and an empty ECS world."""
+        RsService(
+            world: RsWorld(
+                base:      WorldBase.new(),
+                ids:       ComponentStore.new(),
+                manifests: ComponentStore.new(),
+                heartbeats: ComponentStore.new(),
+                policies:  ComponentStore.new(),
+                crashes:   ComponentStore.new()
+            ),
+            tick:        0,
+            initialized: false
+        )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    me rs_register(self, name: text, binary_path: text, heartbeat_interval: u64, timeout: u64, max_restarts: u32, auto_restart: bool) -> Entity:
+        """Register a capsule for supervision and install all 5 components.
+
+        Returns the new Entity handle for the capsule.
+        """
+        val e = self.world.base.spawn()
+        val ecs_tick = self.world.base.now()
+        # Use a sequential id derived from current store length + 1
+        val capsule_id_val = self.world.ids.len().to_u64() + 1
+        self.world.ids.insert(e, CapsuleId(value: capsule_id_val), ecs_tick)
+        self.world.manifests.insert(e, Manifest(name: name, binary_path: binary_path, auto_restart: auto_restart), ecs_tick)
+        self.world.heartbeats.insert(e, Heartbeat(last_tick: self.tick, interval_ticks: heartbeat_interval, timeout_ticks: timeout), ecs_tick)
+        self.world.policies.insert(e, RestartPolicy(max_restarts: max_restarts, restarts_so_far: 0, backoff_ticks: 0, last_restart_tick: 0), ecs_tick)
+        self.world.crashes.insert(e, LastCrashInfo(reason: RS_REASON_NONE, exit_code: 0, crashed_at_tick: 0), ecs_tick)
+        self.initialized = true
+        e
+
+    me rs_heartbeat(self, capsule: Entity) -> bool:
+        """Called by a supervised capsule to signal liveness.
+
+        Updates Heartbeat.last_tick to the current RS tick.
+        Returns false if the entity has no Heartbeat component.
+        """
+        val slot = self.world.heartbeats.get_slot(capsule)
+        if slot < 0:
+            return false
+        val hb = self.world.heartbeats.dense[slot]
+        val ecs_tick = self.world.base.now()
+        self.world.heartbeats.insert(capsule, Heartbeat(last_tick: self.tick, interval_ticks: hb.interval_ticks, timeout_ticks: hb.timeout_ticks), ecs_tick)
+        true
+
+    me rs_advance(self) -> u64:
+        """Increment tick, run heartbeat check + restart systems, return new tick."""
+        self.tick = self.tick + 1
+        self.world.base.advance()
+        self.sys_check_heartbeats()
+        self.tick
+
+    me sys_check_heartbeats(self):
+        """ECS system: scan all Heartbeat components.
+
+        For each capsule where (tick - last_tick) > timeout_ticks, record
+        LastCrashInfo with reason=RS_REASON_HEARTBEAT_TIMEOUT and attempt restart.
+        Two-pass to avoid aliasing during component mutation.
+        """
+        val count = self.world.heartbeats.len()
+        var timed_out: [i32] = []
+        var i: i32 = 0
+        while i < count:
+            val eid_raw = self.world.heartbeats.entity_at(i)
+            val e = Entity(id: eid_raw, generation: 0)
+            val slot = self.world.heartbeats.get_slot(e)
+            if slot >= 0:
+                val hb = self.world.heartbeats.dense[slot]
+                val elapsed = self.tick - hb.last_tick
+                if elapsed > hb.timeout_ticks:
+                    timed_out = timed_out.push(eid_raw)
+            i = i + 1
+
+        for eid_raw in timed_out:
+            val e = Entity(id: eid_raw, generation: 0)
+            val ecs_tick = self.world.base.now()
+            self.world.crashes.insert(e, LastCrashInfo(reason: RS_REASON_HEARTBEAT_TIMEOUT, exit_code: 0, crashed_at_tick: self.tick), ecs_tick)
+            self.rs_restart(e)
+
+    me rs_restart(self, capsule: Entity) -> bool:
+        """Attempt to restart a capsule within its restart budget.
+
+        Bumps restarts_so_far and records last_restart_tick.
+        Returns false if the budget is exhausted (restarts_so_far >= max_restarts).
+        """
+        val slot = self.world.policies.get_slot(capsule)
+        if slot < 0:
+            return false
+        val pol = self.world.policies.dense[slot]
+        if pol.restarts_so_far >= pol.max_restarts:
+            return false
+        val ecs_tick = self.world.base.now()
+        self.world.policies.insert(capsule, RestartPolicy(
+            max_restarts:      pol.max_restarts,
+            restarts_so_far:   pol.restarts_so_far + 1,
+            backoff_ticks:     pol.backoff_ticks,
+            last_restart_tick: self.tick
+        ), ecs_tick)
+        true
+
+    fn rs_is_alive(self, capsule: Entity) -> bool:
+        """Return true if capsule has a Heartbeat AND (tick - last_tick) <= timeout."""
+        val slot = self.world.heartbeats.get_slot(capsule)
+        if slot < 0:
+            return false
+        val hb = self.world.heartbeats.dense[slot]
+        val elapsed = self.tick - hb.last_tick
+        elapsed <= hb.timeout_ticks
+
+    fn rs_count(self) -> i32:
+        """Return the number of supervised capsules."""
+        self.world.ids.len()
+
+    fn rs_restart_count(self, capsule: Entity) -> u32:
+        """Return the number of restarts so far for capsule (0 if not found)."""
+        val slot = self.world.policies.get_slot(capsule)
+        if slot < 0:
+            return 0
+        self.world.policies.dense[slot].restarts_so_far
+
+    fn rs_last_crash_reason(self, capsule: Entity) -> u32:
+        """Return the most recent crash reason code, or RS_REASON_NONE if never crashed."""
+        val slot = self.world.crashes.get_slot(capsule)
+        if slot < 0:
+            return RS_REASON_NONE
+        self.world.crashes.dense[slot].reason

@@ -1,0 +1,81 @@
+# @cover src/lib/nogc_async_mut/gpu/engine2d/host_gpu_draw_ir_event_flow.spl 85%
+# @tag: unit, gpu, draw_ir, host_gpu_queue, sosix
+"""
+# SOSIX GPU Lane Routing Spec — browser (nogc) twin (#39 Gap #2)
+
+## Overview
+
+Proves the SOSIX seal-before-share routing on the `nogc_async_mut` twin — the
+lane the browser backend imports. Mirrors the `gc_async_mut` proof: seal a
+draw-IR payload and route it through the EXISTING runtime GPU queue
+(emit -> runtime_drain, COMPLETED=3) with the bytes recovered intact and content
+identity re-derived from the recovered bytes. This is the mechanism the live
+browser dispatch site (`browser_backend_dispatch_prepared_draw_ir`) uses when
+`SIMPLE_SOSIX_GPU_LANE=1`.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** doc/03_plan/os/scheduling/cpu_gpu_offload_scheduler_plan.md
+
+## Design
+
+**Design:** doc/05_design/os/scheduling/cpu_gpu_offload_scheduling_gap_map.md
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+Seal a draw-IR v2 payload, route it through a runtime queue (queue 1, backend
+handle 7), and assert it drains COMPLETED with the payload recovered byte-intact.
+"""
+
+use std.spec.*
+use std.nogc_async_mut.gpu.engine2d.host_gpu_draw_ir_event_flow.{
+    engine2d_host_gpu_sosix_lane_route,
+    engine2d_host_gpu_seal_draw_ir_payload,
+    engine2d_sosix_gpu_lane_enabled
+}
+use std.nogc_async_mut.gpu.engine2d.host_gpu_event_queue.{
+    engine2d_host_gpu_runtime_queue_with_backend_handle,
+    engine2d_host_gpu_runtime_reset
+}
+
+val DRAW_IR_PAYLOAD: text = "schema=simple-draw-ir-v2;op=rect;x=2;y=3;w=6;h=5;color=ff00ff00"
+
+describe "SOSIX GPU lane routing — nogc twin (#39 Gap #2)":
+
+    it "routes a sealed draw-IR payload through the runtime queue to COMPLETED":
+        engine2d_host_gpu_runtime_reset()
+        val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096)
+        val sealed = engine2d_host_gpu_seal_draw_ir_payload(DRAW_IR_PAYLOAD)
+
+        val routed = engine2d_host_gpu_sosix_lane_route(queue, "evt-nogc-1", "draw_ir_delta", 256, 4096, true, false, false, false, true, 12, DRAW_IR_PAYLOAD)
+
+        assert_true(routed.sealed)
+        assert_true(routed.sealed_hash != 0)
+        assert_true(routed.submitted)
+        expect(routed.drained).to_equal(1)
+        expect(routed.drain_status).to_equal("completed")
+        assert_true(routed.completed)
+        expect(routed.drain_payload_text).to_equal(DRAW_IR_PAYLOAD)
+        val recovered = engine2d_host_gpu_seal_draw_ir_payload(routed.drain_payload_text)
+        expect(recovered.payload_hash).to_equal(sealed.payload_hash)
+        engine2d_host_gpu_runtime_reset()
+
+    it "falls back to the CPU mirror for a host-mutating op":
+        engine2d_host_gpu_runtime_reset()
+        val queue = engine2d_host_gpu_runtime_queue_with_backend_handle("vulkan", 1, 7, true, 4096)
+        val routed = engine2d_host_gpu_sosix_lane_route(queue, "evt-nogc-2", "scroll_commit", 256, 4096, true, true, false, false, true, 12, DRAW_IR_PAYLOAD)
+        assert_true(routed.sealed)
+        assert_false(routed.submitted)
+        assert_false(routed.completed)
+        engine2d_host_gpu_runtime_reset()
+
+    it "keeps the lane opt-in: the flag is off by default":
+        assert_false(engine2d_sosix_gpu_lane_enabled())

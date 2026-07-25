@@ -1,0 +1,170 @@
+# Mail Rules Engine
+#
+# Outlook-style mail rules at the pure model level (no network): each rule
+# names a field ("from" | "subject" | "body"), a case-insensitive substring
+# condition, and an action ("move" | "flag" | "markread"). Applying rules is
+# first-matching-rule-wins per email, and — per the interpreter's copy
+# semantics — every transform RETURNS a new email list; callers reassign.
+
+use app.office.mail.message.{Email, EmailAddress}
+
+# =========================================================================
+# Rule model
+# =========================================================================
+
+struct MailRule:
+    name: text
+    field: text      # "from" | "subject" | "body"
+    contains: text   # case-insensitive substring needle
+    action: text     # "move" | "flag" | "markread"
+    target: text     # folder name for "move"; "" otherwise
+
+# =========================================================================
+# Matching
+# =========================================================================
+
+fn _rule_haystack(rule: MailRule, email: Email) -> text:
+    """The email text a rule's field selects: sender name+address for "from",
+    else the subject or body. Unknown fields yield "" (never match)."""
+    if rule.field == "from":
+        return "{email.from_addr.name} {email.from_addr.address}"
+    if rule.field == "subject":
+        return email.subject
+    if rule.field == "body":
+        return email.body
+    return ""
+
+fn rule_matches(rule: MailRule, email: Email) -> bool:
+    """True when the rule's needle occurs (case-insensitively) in the email
+    field the rule targets. An empty needle never matches."""
+    if rule.contains == "":
+        return false
+    val hay_raw = _rule_haystack(rule, email)
+    val hay = hay_raw.lower()
+    val needle = rule.contains.lower()
+    return hay.contains(needle)
+
+# =========================================================================
+# Applying rules
+# =========================================================================
+
+fn apply_rules(emails: [Email], rules: [MailRule]) -> [Email]:
+    """Apply rules to every email, first-matching-rule-wins per email:
+    "move" sets the email's folder to the rule's target, "flag" sets
+    starred, "markread" sets read. Returns a NEW list (copy semantics);
+    callers reassign: `emails = apply_rules(emails, rules)`."""
+    var out: [Email] = []
+    for email in emails:
+        var applied = false
+        var new_folder = email.folder
+        var new_read = email.read
+        var new_starred = email.starred
+        for rule in rules:
+            if not applied:
+                if rule_matches(rule, email):
+                    applied = true
+                    if rule.action == "move":
+                        new_folder = rule.target
+                    elif rule.action == "flag":
+                        new_starred = true
+                    elif rule.action == "markread":
+                        new_read = true
+        out = out.push(Email(
+            id: email.id,
+            from_addr: email.from_addr,
+            to: email.to,
+            cc: email.cc,
+            subject: email.subject,
+            body: email.body,
+            date: email.date,
+            read: new_read,
+            starred: new_starred,
+            thread_id: email.thread_id,
+            folder: new_folder,
+            attachments: email.attachments
+        ))
+    return out
+
+# =========================================================================
+# Summary
+# =========================================================================
+
+fn rules_summary(emails: [Email], rules: [MailRule]) -> [text]:
+    """One line per rule, "RuleName: N matched", where N counts the emails
+    for which that rule is the FIRST matching rule — i.e. the emails the
+    rule would act on under apply_rules."""
+    var lines: [text] = []
+    var ri = 0
+    for rule in rules:
+        var count = 0
+        for email in emails:
+            var earlier = false
+            var rj = 0
+            for other in rules:
+                if rj < ri:
+                    if rule_matches(other, email):
+                        earlier = true
+                rj = rj + 1
+            if not earlier:
+                if rule_matches(rule, email):
+                    count = count + 1
+        lines = lines.push("{rule.name}: {count} matched")
+        ri = ri + 1
+    return lines
+
+# =========================================================================
+# Parser
+# =========================================================================
+
+fn _strip_quotes(s: text) -> text:
+    """Drop one pair of surrounding double quotes, if present."""
+    if s.len() >= 2 and s.starts_with("\"") and s.ends_with("\""):
+        return s.substring(1, s.len() - 1)
+    return s
+
+fn parse_rules(spec_text: text) -> [MailRule]:
+    """Parse a plain-text rules spec into MailRules. One rule per line:
+
+        name | field contains "needle" | action target
+
+    where field is from|subject|body and action is move|flag|markread
+    (target is the destination folder for move, omitted otherwise; the
+    needle's quotes are optional). Blank lines and lines starting with '#'
+    are skipped; malformed lines are ignored. Mirrors the cell-format spec
+    syntax read by macro_parse_formats."""
+    var rules: [MailRule] = []
+    val lines = spec_text.split("\n")
+    var li = 0
+    while li < lines.len():
+        val line = lines[li].trim()
+        li = li + 1
+        if line != "" and not line.starts_with("#"):
+            val parts = line.split("|")
+            if parts.len() >= 3:
+                val name = parts[0].trim()
+                val cond = parts[1].trim()
+                val act = parts[2].trim()
+                val cparts = cond.split(" contains ")
+                if cparts.len() == 2:
+                    val field = cparts[0].trim()
+                    val needle_raw = cparts[1].trim()
+                    val needle = _strip_quotes(needle_raw)
+                    val aparts = act.split(" ")
+                    if aparts.len() >= 1 and aparts[0] != "":
+                        val action = aparts[0]
+                        var target = ""
+                        if action == "move" and aparts.len() >= 2:
+                            var tparts: [text] = []
+                            var ti = 1
+                            while ti < aparts.len():
+                                tparts = tparts.push(aparts[ti])
+                                ti = ti + 1
+                            target = tparts.join(" ")
+                        rules = rules.push(MailRule(
+                            name: name,
+                            field: field,
+                            contains: needle,
+                            action: action,
+                            target: target
+                        ))
+    return rules

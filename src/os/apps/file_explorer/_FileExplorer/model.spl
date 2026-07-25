@@ -1,0 +1,164 @@
+# Data model: sort/view enums, FileEntry/sidebar/preview structs, FinderApp class, formatting helpers
+use os.apps.file_explorer.file_explorer.*
+# Finder — macOS Finder-style File Explorer for SimpleOS
+#
+# Three-panel layout: sidebar (Favorites/Devices/Tags),
+# content area (column/list view modes), preview panel.
+# GUI mode via finder_state_to_html(); TUI via build_ui().
+#
+# MDSOC: feature dimension, file_explorer layer
+
+use common.ui.builder.{column, row, menubar, statusbar, tree_leaf, table_widget, panel, button, text_widget, label, build_tree_with_title, with_flex, with_width, list_widget, divider, scroll, textarea, with_readonly}
+use common.ui.widget.{WidgetNode}
+use nogc_sync_mut.ui.session.{UISession}
+use os.kernel.types.fs_types.{DirEntry, FsNode, FsNodeKind}
+use os.services.vfs.vfs.{VfsManager}
+
+# =========================================================================
+# Sort Configuration
+# =========================================================================
+
+enum SortField:
+    """Column to sort file listing by."""
+    Name
+    Size
+    Date
+
+enum SortDirection:
+    """Sort direction."""
+    Ascending
+    Descending
+
+# =========================================================================
+# View Mode
+# =========================================================================
+
+enum ViewMode:
+    """File listing display mode."""
+    Column
+    List
+    Icon
+
+# =========================================================================
+# File Entry (display model)
+# =========================================================================
+
+struct FileEntry:
+    """Flattened directory entry for display."""
+    name: text
+    kind: FsNodeKind
+    size: u64
+    modified_ns: u64
+    permissions: u16
+
+fn dir_entry_to_file_entry(entry: DirEntry) -> FileEntry:
+    """Convert a DirEntry to a display FileEntry."""
+    return FileEntry(
+        name: entry.name,
+        kind: entry.node.kind,
+        size: entry.node.size,
+        modified_ns: entry.node.modified_ns,
+        permissions: entry.node.permissions
+    )
+
+fn format_size(bytes: u64) -> text:
+    """Format file size in human-readable form."""
+    if bytes < 1024:
+        return "{bytes} B"
+    val kb = bytes / 1024
+    if kb < 1024:
+        return "{kb} KB"
+    val mb = kb / 1024
+    if mb < 1024:
+        return "{mb} MB"
+    val gb = mb / 1024
+    return "{gb} GB"
+
+fn format_kind(kind: FsNodeKind) -> text:
+    """Format filesystem node kind for display."""
+    match kind:
+        FsNodeKind.File => "File"
+        FsNodeKind.Directory => "Dir"
+        FsNodeKind.Symlink => "Link"
+        FsNodeKind.Device => "Dev"
+        FsNodeKind.Pipe => "Pipe"
+
+fn kind_icon(kind: FsNodeKind) -> text:
+    """Icon prefix for filesystem node kind."""
+    match kind:
+        FsNodeKind.Directory => "[D] "
+        FsNodeKind.Symlink => "[L] "
+        FsNodeKind.Device => "[C] "
+        FsNodeKind.Pipe => "[P] "
+        _ => "    "
+
+# =========================================================================
+# Sidebar State
+# =========================================================================
+
+struct SidebarItem:
+    """A single item in the sidebar."""
+    label: text
+    path: text
+    icon: text
+
+struct SidebarSection:
+    """A titled group of sidebar items."""
+    title: text
+    items: [SidebarItem]
+
+# =========================================================================
+# Column State
+# =========================================================================
+
+struct ColumnState:
+    """A single column panel in the column/Miller view."""
+    path: text
+    entries: [FileEntry]
+    selected_index: i32
+
+# =========================================================================
+# Preview State
+# =========================================================================
+
+enum PreviewKind:
+    """What kind of item is being previewed."""
+    NoPreview
+    File
+    Directory
+    Text
+
+struct PreviewState:
+    """State for the preview panel."""
+    entry: FileEntry?
+    kind: PreviewKind
+    preview_lines: [text]
+    item_count: i32
+
+# =========================================================================
+# Navigation History
+# =========================================================================
+
+struct NavHistory:
+    """Back/forward navigation stack."""
+    back_stack: [text]
+    forward_stack: [text]
+
+# =========================================================================
+# FinderApp
+# =========================================================================
+
+class FinderApp:
+    """macOS Finder-style three-panel file explorer."""
+    sidebar_sections: [SidebarSection]
+    columns: [ColumnState]
+    active_column_index: i32
+    preview: PreviewState
+    preview_entry: FileEntry?
+    view_mode: ViewMode
+    search_query: text
+    vfs: VfsManager?
+    nav_history: NavHistory
+    sort_by: SortField
+    sort_dir: SortDirection
+    show_hidden: bool

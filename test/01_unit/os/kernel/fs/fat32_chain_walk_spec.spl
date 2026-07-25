@@ -1,0 +1,221 @@
+"""
+# FAT32 Cluster-Chain Walk — Wave-4b Regression Spec
+
+**Bug:** fat32_no_cycle_guard_chain_walk_2026-06-11
+**Feature:** kernel FAT32 driver (IF-07) read_cluster_chain
+
+Verifies that `Fat32Filesystem.read_cluster_chain`:
+  1. Correctly walks a linear N-cluster chain to EOC.
+  2. Terminates at EOC and returns the chain without the EOC value.
+  3. Returns Err on a cyclic FAT (entry pointing back into the chain).
+  4. Returns Err on a FREE cluster mid-chain.
+  5. Returns Err on a BAD cluster (0x0FFFFFF7) mid-chain.
+  6. Returns Err when start cluster < 2.
+
+The mock block device stores FAT sectors in memory so tests never touch
+real hardware.  Geometry is configured via `Fat32Filesystem.make_for_chain_test`.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.fs.fat32.{Fat32Filesystem}
+
+# ============================================================================
+# In-memory mock block device — answers read_sector(lba) with stored data
+# ============================================================================
+
+struct MockSector:
+    lba: u64
+    data: [u8]
+
+class MockFatDevice:
+    sectors: [MockSector]
+
+impl MockFatDevice:
+    static fn new() -> MockFatDevice:
+        MockFatDevice(sectors: [])
+
+    me fn with_sector(lba: u64, data: [u8]) -> MockFatDevice:
+        self.sectors.push(MockSector(lba: lba, data: data))
+        self
+
+    fn read_sector(lba: u64) -> Result<[u8], text>:
+        var i = 0
+        while i < self.sectors.len():
+            if self.sectors[i].lba == lba:
+                return Ok(self.sectors[i].data)
+            i = i + 1
+        # Unregistered LBA: return zeroed sector
+        var zero: [u8] = []
+        var zi = 0
+        while zi < 512:
+            zero.push(0u8)
+            zi = zi + 1
+        Ok(zero)
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _zero_sector() -> [u8]:
+    var b: [u8] = []
+    var i = 0
+    while i < 512:
+        b.push(0u8)
+        i = i + 1
+    b
+
+# Write a u32 in little-endian at the given offset of the buffer (in-place).
+fn _poke32(buf: [u8], offset: i32, value: u32) -> [u8]:
+    buf[offset]     = (value & 0xFFu32).to_u8()
+    buf[offset + 1] = ((value >> 8)  & 0xFFu32).to_u8()
+    buf[offset + 2] = ((value >> 16) & 0xFFu32).to_u8()
+    buf[offset + 3] = ((value >> 24) & 0xFFu32).to_u8()
+    buf
+
+# Set the FAT32 entry for 'cluster' in the sector buffer (4 bytes per entry).
+fn _fat_put(buf: [u8], cluster: u32, entry: u32) -> [u8]:
+    _poke32(buf, (cluster * 4u32).to_i32(), entry)
+
+# Build a Fat32Filesystem configured for chain-walk tests:
+#   fat_start_sector=32, bytes_per_sector=512, data_clusters=fuel
+fn _make_fs(fuel: u32) -> Fat32Filesystem:
+    Fat32Filesystem.make_for_chain_test(32u32, 512u32, fuel)
+
+# FAT32 special values (local — not imported from fat32.spl)
+fn _eoc() -> u32: 0x0FFFFFFFu32      # end-of-chain
+fn _eoc_min() -> u32: 0x0FFFFFF8u32  # minimum valid EOC value
+fn _free() -> u32: 0x00000000u32     # free cluster
+fn _bad() -> u32: 0x0FFFFFF7u32      # bad-cluster marker
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "fat32 read_cluster_chain — wave-4b cycle guard":
+
+    describe "linear chain walk":
+
+        it "single-cluster chain (FAT[2]=EOC) returns chain length 1":
+            var sec = _zero_sector()
+            sec = _fat_put(sec, 2u32, _eoc())
+            var dev = MockFatDevice.new()
+            dev = dev.with_sector(32u64, sec)
+            var fs = _make_fs(10u32)
+            val result = fs.read_cluster_chain(dev, 2u32)
+            expect(result.is_ok()).to_equal(true)
+            val chain = result.unwrap()
+            expect(chain.len()).to_equal(1)
+            expect(chain[0]).to_equal(2u32)
+
+        it "three-cluster chain (2→3→4→EOC) returns [2, 3, 4]":
+            var sec = _zero_sector()
+            sec = _fat_put(sec, 2u32, 3u32)
+            sec = _fat_put(sec, 3u32, 4u32)
+            sec = _fat_put(sec, 4u32, _eoc())
+            var dev = MockFatDevice.new()
+            dev = dev.with_sector(32u64, sec)
+            var fs = _make_fs(100u32)
+            val result = fs.read_cluster_chain(dev, 2u32)
+            expect(result.is_ok()).to_equal(true)
+            val chain = result.unwrap()
+            expect(chain.len()).to_equal(3)
+            expect(chain[0]).to_equal(2u32)
+            expect(chain[1]).to_equal(3u32)
+            expect(chain[2]).to_equal(4u32)
+
+        it "EOC at 0x0FFFFFF8 (minimum EOC) terminates correctly":
+            var sec = _zero_sector()
+            sec = _fat_put(sec, 2u32, _eoc_min())
+            var dev = MockFatDevice.new()
+            dev = dev.with_sector(32u64, sec)
+            var fs = _make_fs(10u32)
+            val result = fs.read_cluster_chain(dev, 2u32)
+            expect(result.is_ok()).to_equal(true)
+            expect(result.unwrap().len()).to_equal(1)
+
+        it "chain starting at cluster 5 returns correct list":
+            var sec = _zero_sector()
+            sec = _fat_put(sec, 5u32, 6u32)
+            sec = _fat_put(sec, 6u32, _eoc())
+            var dev = MockFatDevice.new()
+            dev = dev.with_sector(32u64, sec)
+            var fs = _make_fs(10u32)
+            val result = fs.read_cluster_chain(dev, 5u32)
+            expect(result.is_ok()).to_equal(true)
+            val chain = result.unwrap()
+            expect(chain.len()).to_equal(2)
+            expect(chain[0]).to_equal(5u32)
+            expect(chain[1]).to_equal(6u32)
+
+    describe "cycle guard":
+
+        it "cyclic FAT (2→3→2) with fuel=2 returns Err":
+            # step1: push 2, fuel→1; step2: push 3, fuel→0; next FAT[3]=2 → Err
+            var sec = _zero_sector()
+            sec = _fat_put(sec, 2u32, 3u32)
+            sec = _fat_put(sec, 3u32, 2u32)
+            var dev = MockFatDevice.new()
+            dev = dev.with_sector(32u64, sec)
+            var fs = _make_fs(2u32)
+            val result = fs.read_cluster_chain(dev, 2u32)
+            expect(result.is_err()).to_equal(true)
+
+        it "chain longer than fuel (4 clusters, fuel=3) returns Err":
+            var sec = _zero_sector()
+            sec = _fat_put(sec, 2u32, 3u32)
+            sec = _fat_put(sec, 3u32, 4u32)
+            sec = _fat_put(sec, 4u32, 5u32)
+            sec = _fat_put(sec, 5u32, _eoc())
+            var dev = MockFatDevice.new()
+            dev = dev.with_sector(32u64, sec)
+            var fs = _make_fs(3u32)
+            val result = fs.read_cluster_chain(dev, 2u32)
+            expect(result.is_err()).to_equal(true)
+
+        it "chain exactly at fuel (3 clusters, fuel=3) succeeds":
+            var sec = _zero_sector()
+            sec = _fat_put(sec, 2u32, 3u32)
+            sec = _fat_put(sec, 3u32, 4u32)
+            sec = _fat_put(sec, 4u32, _eoc())
+            var dev = MockFatDevice.new()
+            dev = dev.with_sector(32u64, sec)
+            var fs = _make_fs(3u32)
+            val result = fs.read_cluster_chain(dev, 2u32)
+            expect(result.is_ok()).to_equal(true)
+            expect(result.unwrap().len()).to_equal(3)
+
+    describe "corruption guards":
+
+        it "FREE cluster (0x00000000) mid-chain returns Err":
+            var sec = _zero_sector()
+            sec = _fat_put(sec, 2u32, 3u32)
+            sec = _fat_put(sec, 3u32, _free())
+            var dev = MockFatDevice.new()
+            dev = dev.with_sector(32u64, sec)
+            var fs = _make_fs(10u32)
+            val result = fs.read_cluster_chain(dev, 2u32)
+            expect(result.is_err()).to_equal(true)
+
+        it "BAD cluster marker (0x0FFFFFF7) mid-chain returns Err":
+            var sec = _zero_sector()
+            sec = _fat_put(sec, 2u32, 3u32)
+            sec = _fat_put(sec, 3u32, _bad())
+            var dev = MockFatDevice.new()
+            dev = dev.with_sector(32u64, sec)
+            var fs = _make_fs(10u32)
+            val result = fs.read_cluster_chain(dev, 2u32)
+            expect(result.is_err()).to_equal(true)
+
+    describe "invalid start cluster":
+
+        it "start cluster 0 returns Err":
+            var dev = MockFatDevice.new()
+            var fs = _make_fs(10u32)
+            val result = fs.read_cluster_chain(dev, 0u32)
+            expect(result.is_err()).to_equal(true)
+
+        it "start cluster 1 returns Err (reserved)":
+            var dev = MockFatDevice.new()
+            var fs = _make_fs(10u32)
+            val result = fs.read_cluster_chain(dev, 1u32)
+            expect(result.is_err()).to_equal(true)

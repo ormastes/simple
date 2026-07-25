@@ -1,0 +1,232 @@
+# UI Core Widget Types — hub module
+#
+# Platform-independent type definitions for the UI system.
+# Exports UIMode, UIEvent, WidgetNode, UITree, WidgetRect, UIState.
+# Implementations split into widget_kind.spl, widget_store_ops.spl, widget_node.spl.
+
+export use common.ui.widget_kind.{WidgetKind, LayoutKind}
+export use common.ui.widget_store_ops.{
+    WidgetNode,
+    WidgetRecord,
+    WidgetProp,
+    parse_widget_kind,
+    parse_layout_kind,
+    parse_semantic_prop,
+    default_widget_record,
+    upsert_widget_record,
+    get_widget_record,
+    require_widget_record,
+    get_widget,
+    get_widget_child_ids,
+    register_widget_child,
+    widget_props,
+    widget_store_revision,
+    set_widget_props,
+    get_internal_prop,
+    set_internal_prop,
+    encode_child_ids,
+    decode_child_ids
+}
+export use common.ui.theme_registry.{ThemeId, theme_id_key, theme_registry}
+
+# Token key under which `with_keybindings` serializes mode-scoped bindings so
+# they round-trip through the value-typed UITree (see UITree.bindings()).
+val _KEYBINDINGS_TOKEN: text = "ui_keybindings"
+
+enum UIMode:
+    Normal
+    Command
+    Insert
+    Menu
+
+enum UIEvent:
+    KeyPress(key: text)
+    Resize(width: i32, height: i32)
+    FileChanged
+    Quit
+    Action(name: text)
+    FocusNext
+    FocusPrev
+    CommandMode
+    NormalMode
+    InsertMode
+    TouchPress(x: i32, y: i32)
+    TouchMove(x: i32, y: i32)
+    TouchRelease(x: i32, y: i32)
+    # Mouse / scroll / focus / input from a Canvas2D-rendered surface.
+    # `kind` for MouseEvent: "down" | "up" | "move".
+    # `button` for MouseEvent: "left" | "right" | "middle" | "" (move events).
+    MouseEvent(x: f64, y: f64, button: text, kind: text)
+    ScrollEvent(x: f64, y: f64, dx: f64, dy: f64)
+    # `kind` for FocusEvent: "focus" | "blur".
+    FocusEvent(target_id: text, kind: text)
+    InputChange(target_id: text, value: text)
+    # Result of a previously requested HTTP fetch, fulfilled by the host
+    # process (e.g. Electron main). `status` is HTTP status (0 on error);
+    # `headers` is a newline-delimited "Name: value" block; `error` is an
+    # error message (empty on success). `request_id` lets callers correlate
+    # to their original request_fetch.
+    FetchResult(request_id: text, url: text, status: i32, headers: text, body: text, error: text)
+    # Content drag-and-drop (distinct from window titlebar move, which stays
+    # compositor-only). `mime`/`data` carry the dragged payload; `source_id`
+    # is the widget the drag started from.
+    DragStart(source_id: text, mime: text, data: text)
+    DragMove(x: i32, y: i32)
+    DragDrop(mime: text, data: text, x: i32, y: i32, source_id: text)
+    # Clipboard command events (framework-level; see common.ui.clipboard_service).
+    Copy
+    Cut
+    Paste
+    PasteFromHistory(index: i32)
+    # IME composition events (CJK/accented input via a host input-method
+    # editor). `text` for CompositionUpdate is the current in-progress
+    # preedit string (shown but not yet committed to the focused input's
+    # value); `text` for CompositionCommit is the final composed string to
+    # insert at the caret. See common.ui.event's handling in the text-edit
+    # dispatch and common.ui.widget_hit's composition helpers.
+    CompositionUpdate(text: text)
+    CompositionCommit(text: text)
+
+struct UITree:
+    root_id: text
+    tokens: Dict<text, text>
+
+impl UITree:
+
+    static fn new(root: WidgetNode) -> UITree:
+        return UITree(root_id: root.id, tokens: {})
+
+    me root_node() -> WidgetNode:
+        return WidgetNode(id: me.root_id)
+
+    me title_text() -> text:
+        val rn = me.root_node()
+        val title = rn.get_prop("ui_tree_title")
+        if title != "":
+            return title
+        return "Simple UI"
+
+    me theme_name() -> text:
+        val rn = me.root_node()
+        val theme = rn.get_prop("ui_tree_theme")
+        if theme != "":
+            return theme
+        return theme_id_key(ThemeId.GlassDark)
+
+    me resolve_token(key: text) -> text:
+        # Bracket + contains_key, not `.get()`: dict `.get()` is unreliable on
+        # the interpreter (returns nil for present keys), which silently drops
+        # every stored token. `[]` is reliable on both interpreter and native.
+        if me.tokens.contains_key(key):
+            return me.tokens[key]
+        return ""
+
+    me root() -> WidgetNode: me.root_node()
+    me title() -> text: me.title_text()
+    me theme() -> text: me.theme_name()
+
+    me bindings() -> Dict<text, Dict<text, text>>:
+        """Return UI bindings registered via `with_keybindings`.
+
+        Bindings are serialized into the token bag under `_KEYBINDINGS_TOKEN`
+        (mode/key/action, one per line, tab-separated) so they round-trip
+        through the value-typed UITree. This reconstructs the nested
+        `mode -> (key -> action)` map. mode.spl handles missing-mode lookups
+        via `all_bindings.get(mode_name)` returning `nil`, so an unset token
+        yields the empty-dict default (a UITree without bound modes).
+        """
+        val payload = me.resolve_token(_KEYBINDINGS_TOKEN)
+        var result: Dict<text, Dict<text, text>> = {}
+        if payload == "":
+            return result
+        for line in payload.split("\n"):
+            val parts = line.split("\t")
+            if parts.len() >= 3:
+                val mode = parts[0]
+                val key = parts[1]
+                val action = parts[2]
+                # Bracket indexing, not `.get()`: dict-literal `.get()` is
+                # unreliable on the interpreter (returns nil for present keys),
+                # while `[]` + `contains_key` works on both interpreter and
+                # native.
+                var mode_map: Dict<text, text> = {}
+                if result.contains_key(mode):
+                    mode_map = result[mode]
+                mode_map[key] = action
+                result[mode] = mode_map
+        return result
+
+    me with_title(title: text) -> UITree:
+        val rn = me.root_node()
+        val updated = rn.set_prop("ui_tree_title", title)
+        return UITree(root_id: updated.id, tokens: me.tokens)
+
+    me with_theme(theme: text) -> UITree:
+        val rn = me.root_node()
+        val updated = rn.set_prop("ui_tree_theme", theme)
+        return UITree(root_id: updated.id, tokens: me.tokens)
+
+    me with_token(key: text, value: text) -> UITree:
+        var updated_tokens = me.tokens
+        updated_tokens[key] = value
+        return UITree(root_id: me.root_id, tokens: updated_tokens)
+
+    me with_keybindings(keybindings: Dict<text, Dict<text, text>>) -> UITree:
+        """Register mode-scoped keybindings, serialized into the token bag so
+        they round-trip through the value-typed UITree and are read back by
+        `bindings()` (consulted in the key-dispatch path before default
+        handling)."""
+        # Bracket indexing, not `.get()`: dict-literal `.get()` returns nil for
+        # present keys on the interpreter; `[]` over `keys()` is reliable on
+        # both interpreter and native.
+        var payload = ""
+        for mode in keybindings.keys():
+            val mode_map = keybindings[mode]
+            for key in mode_map.keys():
+                val action = mode_map[key]
+                if payload != "":
+                    payload = payload + "\n"
+                payload = payload + mode + "\t" + key + "\t" + action
+        return me.with_token(_KEYBINDINGS_TOKEN, payload)
+
+    me find_widget(id: text) -> WidgetNode?:
+        val rn = me.root_node()
+        return rn.find_by_id(id)
+
+    me all_widget_ids() -> [text]:
+        val rn = me.root_node()
+        return rn.collect_ids()
+
+struct WidgetRect:
+    id: text
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+
+    static fn new(id: text, x: i32, y: i32, w: i32, h: i32) -> WidgetRect:
+        return WidgetRect(id: id, x: x, y: y, w: w, h: h)
+
+struct UIState:
+    tree: UITree
+    mode: UIMode
+    focused_id: text
+    command_buffer: text
+
+    static fn new(tree: UITree) -> UIState:
+        var initial_focus = tree.root_id
+        if initial_focus == nil:
+            initial_focus = ""
+        return UIState(
+            tree: tree,
+            mode: UIMode.Normal,
+            focused_id: initial_focus,
+            command_buffer: ""
+        )
+
+    me mode_name() -> text:
+        return match me.mode:
+            UIMode.Normal => "NORMAL"
+            UIMode.Command => "COMMAND"
+            UIMode.Insert => "INSERT"
+            UIMode.Menu => "MENU"

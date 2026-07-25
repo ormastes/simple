@@ -1,0 +1,56 @@
+use std.spec.{describe, it, expect}
+use os.drivers.nvme.nvme_transfer_command.{
+    NVME_TRANSFER_OPCODE_READ,
+    NVME_TRANSFER_OPCODE_WRITE,
+    nvme_io_lba_range_reason,
+    nvme_io_status_code,
+    nvme_read_io_command,
+    nvme_read_io_command_for_namespace,
+    nvme_write_io_command,
+    nvme_write_io_command_for_namespace,
+    nvme_flush_io_command,
+    nvme_flush_io_command_for_namespace
+}
+
+describe "NVMe transfer command":
+    it "builds read and write commands without syscall or C bridge state":
+        val read = nvme_read_io_command(0x100000002u64, 8u32, 0x200000u64, 0x100000100u64).unwrap()
+        expect(read.opcode).to_equal(NVME_TRANSFER_OPCODE_READ)
+        expect(read.nsid).to_equal(1u32)
+        expect(read.prp1).to_equal(0x200000u64)
+        expect(read.cdw10).to_equal(2u32)
+        expect(read.cdw11).to_equal(1u32)
+        expect(read.cdw12).to_equal(7u32)
+
+        val write = nvme_write_io_command(4u64, 1u32, 0x300000u64, 16u64).unwrap()
+        expect(write.opcode).to_equal(NVME_TRANSFER_OPCODE_WRITE)
+        expect(write.cdw12).to_equal(0u32)
+
+    it "builds namespace-aware read and write commands for assigned namespaces":
+        val read = nvme_read_io_command_for_namespace(7u32, 4u64, 2u32, 0x200000u64, 16u64).unwrap()
+        expect(read.opcode).to_equal(NVME_TRANSFER_OPCODE_READ)
+        expect(read.nsid).to_equal(7u32)
+        expect(read.cdw12).to_equal(1u32)
+
+        val write = nvme_write_io_command_for_namespace(9u32, 8u64, 1u32, 0x300000u64, 16u64).unwrap()
+        expect(write.opcode).to_equal(NVME_TRANSFER_OPCODE_WRITE)
+        expect(write.nsid).to_equal(9u32)
+        expect(write.cdw12).to_equal(0u32)
+
+    it "rejects unsafe ranges before command submission":
+        expect(nvme_read_io_command_for_namespace(0u32, 0u64, 1u32, 0x200000u64, 16u64).unwrap_err()).to_equal("nvme-io-namespace-zero")
+        expect(nvme_io_lba_range_reason(0u64, 0u32, 16u64)).to_equal("nvme-io-zero-sector-count")
+        expect(nvme_io_lba_range_reason(0u64, 65537u32, 70000u64)).to_equal("nvme-io-sector-count-too-large")
+        expect(nvme_io_lba_range_reason(15u64, 2u32, 16u64)).to_equal("nvme-io-beyond-namespace-capacity")
+        expect(nvme_read_io_command(0u64, 1u32, 0u64, 16u64).unwrap_err()).to_equal("nvme-io-dma-buffer-zero")
+
+    it "shares flush command and completion status decoding":
+        val flush = nvme_flush_io_command()
+        expect(flush.opcode).to_equal(0u8)
+        expect(flush.nsid).to_equal(1u32)
+        val ns_flush = nvme_flush_io_command_for_namespace(7u32).unwrap()
+        expect(ns_flush.opcode).to_equal(0u8)
+        expect(ns_flush.nsid).to_equal(7u32)
+        expect(nvme_flush_io_command_for_namespace(0u32).unwrap_err()).to_equal("nvme-io-namespace-zero")
+        expect(nvme_io_status_code(0u32)).to_equal(0u32)
+        expect(nvme_io_status_code(4u32 << 17)).to_equal(4u32)

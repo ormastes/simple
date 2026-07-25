@@ -1,0 +1,82 @@
+"""
+# Claude Full Utils Hooks Slice
+
+Focused coverage for trust gating, hook output parsing, matching, command
+execution, blocking aggregation, and outside-REPL/session hook routes.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.utils.hooks.*
+
+describe "Claude full utils hooks parity":
+    it "should model trust gating input and JSON parsing":
+        step("Check trust and input routes")
+        expect(getSessionEndHookTimeoutMs(0)).to_equal(3000)
+        expect(getSessionEndHookTimeoutMs(1200)).to_equal(1200)
+        expect(executeInBackgroundRoute(true, false)).to_equal("spawn detached background hook")
+        expect(executeInBackgroundRoute(false, true)).to_equal("spawn with abort handling")
+        expect(shouldSkipHookDueToTrustRoute(false, false, false)).to_equal("skip untrusted hook")
+        expect(shouldSkipHookDueToTrustRoute(true, false, false)).to_equal("run hook")
+        expect(trustGateRoute(false, false)).to_equal("non interactive bypass trust gate")
+        expect(trustGateRoute(true, false)).to_equal("interactive skip untrusted hooks")
+        expect(createBaseHookInputRoute("PreToolUse", true)).to_equal("event input with transcript path")
+
+        step("Check JSON and HTTP parsing")
+        expect(validateHookJsonRoute(false, false, false)).to_equal("invalid hook json")
+        expect(validateHookJsonRoute(true, true, true)).to_equal("valid decision with blocking message")
+        expect(parseHookOutputRoute("", "", 2)).to_equal("exit status blocking hook")
+        expect(parseHookOutputRoute("{\"decision\":\"block\"}", "", 0)).to_equal("parse json stdout")
+        expect(parseHookOutputRoute("", "warn", 0)).to_equal("stderr warning output")
+        expect(parseHookOutputRoute("", "", 1)).to_equal("nonzero hook failure")
+        expect(parseHttpHookOutputRoute(500, true)).to_equal("http hook failure")
+        expect(parseHttpHookOutputRoute(200, true)).to_equal("http hook json")
+        expect(parseHttpHookBodyRoute(true, false)).to_equal("http empty body accepted as empty json")
+        expect(parseHttpHookBodyRoute(false, false)).to_equal("http hook invalid json")
+        expect(processHookJSONOutputRoute("block", true)).to_equal("blocking hook result")
+        expect(processHookJSONOutputRoute("allow", false)).to_equal("stop hook flow")
+
+    it "should model command execution matching and hook config":
+        step("Check command execution and matchers")
+        expect(execCommandHookRoute(true, false, false)).to_equal("hook command timeout")
+        expect(execCommandHookRoute(false, true, false)).to_equal("hook command killed")
+        expect(execCommandHookRoute(false, false, true)).to_equal("hook command json result")
+        expect(commandExecutionControlRoute(false, false, true, false)).to_equal("background async hook")
+        expect(commandExecutionControlRoute(false, false, false, true)).to_equal("prompt line request protocol")
+        expect(commandExecutionControlRoute(false, true, false, false)).to_equal("plugin env substitution")
+        expect(matchesPatternRoute("*", "Bash")).to_equal(true)
+        expect(matchesPatternRoute("Bash", "Bash")).to_equal(true)
+        expect(matchesPatternRoute("Bash|Read", "Read")).to_equal(true)
+        expect(matchesPatternRoute("[", "Read")).to_equal(false)
+        expect(matchesPatternRoute("ash", "Bash")).to_equal(true)
+        expect(prepareIfConditionMatcherRoute("PreToolUse", false, false)).to_equal("no condition matcher")
+        expect(prepareIfConditionMatcherRoute("PreToolUse", true, true)).to_equal("compiled if condition matcher")
+        expect(prepareIfConditionMatcherRoute("Notification", true, true)).to_equal("skip if condition for non tool event")
+        expect(isInternalHookRoute("internal")).to_equal(true)
+        expect(getHooksConfigRoute(true, true)).to_equal("merge user and plugin hooks")
+        expect(hasHookForEventRoute(false)).to_equal("fast path no hooks for event")
+        expect(matchQueryRoute("PreToolUse")).to_equal("match tool name query")
+        expect(matchQueryRoute("SessionEnd")).to_equal("match session end query")
+        expect(getMatchingHooksRoute("PreToolUse", false, true)).to_equal("no matching hooks")
+        expect(getMatchingHooksRoute("PreToolUse", true, false)).to_equal("hooks filtered by if condition")
+        expect(getMatchingHooksRoute("PreToolUse", true, true)).to_equal("matching hooks")
+
+    it "should model blocking aggregation and execution families":
+        step("Check blocking and outside execution routes")
+        val blocking = HookResult.new("ok", true, "", "")
+        expect(blocking.blocking).to_equal(true)
+        val aggregate = AggregatedHookResult.new(1, 0)
+        expect(hasBlockingResultRoute(aggregate.blockingCount)).to_equal(true)
+        expect(executeHooksOutsideREPLRoute(true, false)).to_equal("outside repl blocking result")
+        expect(executeHooksOutsideREPLRoute(false, true)).to_equal("outside repl warning result")
+        expect(executeHooksOutsideREPLUnsupportedRoute("prompt")).to_equal("unsupported outside repl non blocking failure")
+        expect(executeSessionEndHooksRoute(false, false)).to_equal("no session end hooks")
+        expect(executeSessionEndHooksRoute(true, true)).to_equal("session end timeout")
+        expect(executeSessionEndHooksRoute(true, false)).to_equal("session end hooks complete")
+        expect(executeSessionEndCleanupRoute(true)).to_equal("session end hooks complete clear state")
+        expect(executeConfigChangeHooksRoute(true)).to_equal("config change ignores blocking hook")
+        expect(executeNotificationHooksRoute(false, false)).to_equal("no notification hooks")
+        expect(executeNotificationHooksRoute(true, true)).to_equal("notification hooks background")
+
+    it "should check modeled source floor":
+        step("Read source line helper")
+        expect(hooksSourceLinesModeled()).to_equal(5022)

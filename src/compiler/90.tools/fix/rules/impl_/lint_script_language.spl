@@ -1,0 +1,70 @@
+# EasyFix Rules - Script Language Policy
+#
+# L:simple_script_required flags repository automation that is still written as
+# Python when it should be migrated to a Simple-based script.
+
+use std.tooling.easy_fix.*
+
+fn check_simple_script_required(source: text, file: text) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+
+    if _is_python_automation_path(file):
+        fixes.push(_script_language_fix(file, 1, 0, "Python automation script should be migrated to a Simple script"))
+        return fixes
+
+    if _is_shell_automation_path(file):
+        val lines = source.split("\n")
+        var line_num = 0
+        var byte_offset = 0
+        for line in lines:
+            line_num = line_num + 1
+            if _line_invokes_python(line, file):
+                fixes.push(_script_language_fix(file, line_num, byte_offset, "shell script invokes Python; migrate helper logic to Simple script"))
+            byte_offset = byte_offset + line.len() + 1
+
+    fixes
+
+fn _script_language_fix(file: text, line_num: i64, byte_offset: i64, description: text) -> EasyFix:
+    var fix = EasyFix.create(
+        id: "L:simple_script_required:{line_num}",
+        description: description,
+        confidence: FixConfidence.Uncertain
+    )
+    fix.add_replacement(Replacement.create(
+        file: file,
+        start: byte_offset,
+        end: byte_offset,
+        line: line_num,
+        column: 1,
+        new_text: ""
+    ))
+    fix
+
+fn _is_python_automation_path(file: text) -> bool:
+    if not file.ends_with(".py"):
+        return false
+    if file.contains("/node_modules/") or file.contains("/vendor/"):
+        return false
+    if _is_allowed_python_baseline(file):
+        return false
+    file.starts_with("scripts/") or file.starts_with("tools/")
+
+fn _is_allowed_python_baseline(file: text) -> bool:
+    file == "tools/gui_perf_bench/bench_python.py"
+
+fn _is_shell_automation_path(file: text) -> bool:
+    if not file.ends_with(".shs") and not file.ends_with(".sh"):
+        return false
+    if file.contains("/vendor/"):
+        return false
+    file.starts_with("scripts/") or file.starts_with("tools/")
+
+fn _line_invokes_python(line: text, file: text) -> bool:
+    val trimmed = line.trim()
+    if trimmed.starts_with("#"):
+        return false
+    if file == "tools/gui_perf_bench/run_all_benchmarks.shs" and (trimmed.contains("bench_python.py") or trimmed.contains("import tkinter") or trimmed.contains("python3 tkinter")):
+        return false
+    if file == "scripts/check/check-cross-language-perf.shs":
+        return false
+    trimmed.contains("python3 ") or trimmed.contains("python ") or trimmed.contains("/python3 ") or trimmed.contains("/python ")

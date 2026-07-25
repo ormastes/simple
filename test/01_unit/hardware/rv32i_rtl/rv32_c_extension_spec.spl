@@ -1,0 +1,57 @@
+use std.spec.*
+use std.hardware.rv32i_rtl.c_extension.{rv32c_is_compressed, rv32c_expand}
+use std.hardware.rv32i_rtl.c_extension.{rv32c_fetch_window, rv32c_assemble_fetch}
+
+describe "Frozen RV32C expansion lane":
+    it "expands integer C.ADDI and C.JAL with their architectural link register":
+        expect(rv32c_is_compressed(0x0085)).to_be(true)
+        val addi = rv32c_expand(0x0085)
+        expect(addi.illegal).to_be(false)
+        expect(addi.length_bytes).to_equal(2)
+        expect(addi.instruction).to_equal(0x00108093)
+
+        val jal = rv32c_expand(0x2001)
+        expect(jal.illegal).to_be(false)
+        expect((jal.instruction >> 7) & 0x1F).to_equal(1)
+        expect(jal.instruction & 0x7F).to_equal(0x6F)
+
+        val jalr = rv32c_expand(0x9082)
+        expect(jalr.illegal).to_be(false)
+        expect(jalr.instruction).to_equal(0x000080E7)
+
+    it "fails closed on reserved RV32 encodings":
+        expect(rv32c_expand(0x0000).illegal).to_be(true)
+        # C.SLLI shamt[5] is reserved in RV32.
+        expect(rv32c_expand(0x1082).illegal).to_be(true)
+        # RV64 C.SUBW encoding is reserved in RV32.
+        expect(rv32c_expand(0x9C01).illegal).to_be(true)
+
+    it "lowers x0 C.LUI, C.MV, and C.ADD hints to no-op":
+        expect(rv32c_expand(0x6001).illegal).to_be(false)
+        expect(rv32c_expand(0x6001).instruction).to_equal(0x00000013)
+        expect(rv32c_expand(0x8006).instruction).to_equal(0x00000013)
+        expect(rv32c_expand(0x9006).instruction).to_equal(0x00000013)
+
+    it "assembles PC plus 2 instructions and preserves cross-page fault ownership":
+        val pc2 = rv32c_fetch_window(0x1002, 0x00930085)
+        expect(pc2.waiting_for_second_word).to_be(true)
+        val assembled = rv32c_assemble_fetch(pc2, 0xDEAD0010, false)
+        expect(assembled.illegal).to_be(false)
+        expect(assembled.length_bytes).to_equal(4)
+        expect(assembled.instruction).to_equal(0x00100093)
+
+        val compressed = rv32c_fetch_window(0x1002, 0x00850000)
+        expect(compressed.waiting_for_second_word).to_be(false)
+        expect(rv32c_assemble_fetch(compressed, 0, false).instruction).to_equal(0x00108093)
+
+        val page_edge = rv32c_fetch_window(0x00000FFE, 0x00930000)
+        val fault = rv32c_assemble_fetch(page_edge, 0, true)
+        expect(page_edge.waiting_for_second_word).to_be(true)
+        expect(page_edge.second_half_address).to_equal(0x00001000)
+        expect(fault.instruction_pc).to_equal(0x00000FFE)
+        expect(fault.second_half_address).to_equal(0x00001000)
+        expect(fault.illegal).to_be(false)
+        expect(fault.fetch_fault).to_be(true)
+        expect(fault.fault_address).to_equal(0x00001000)
+        expect(fault.fault_status).to_equal(1)
+        expect(fault.length_bytes).to_equal(4)

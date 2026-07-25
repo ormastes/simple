@@ -1,0 +1,163 @@
+# @cover src/lib/nogc_sync_mut/ui/session.spl 80%
+"""
+# UISession Clipboard Dispatch Spec
+
+## Overview
+
+`UISession` owns one `ClipboardService` per session (constructed at
+runtime in each `UISession.new*`, never as a module-level singleton) and
+wires `UIEvent.Copy` / `Cut` / `Paste` / `PasteFromHistory` — plus the
+editor's pre-existing `editor.edit.cut` / `editor.edit.copy` /
+`editor.edit.paste` / `editor.edit.paste_history_N` button actions — to it
+through `dispatch()`. This spec proves the end-to-end path real apps (like
+`src/os/apps/editor/editor.spl`) exercise: focus an input, Copy/Cut/Paste
+through `session.dispatch`, and paste from history — plus that a
+default-deny `CapabilityPolicy` blocks clipboard access entirely.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** N/A
+
+## Design
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+A one-input session: type a value in (via `set_prop`), copy it, change the
+value, cut it (clearing the field), then paste — the field is restored.
+Three sequential copies build history; `UIEvent.PasteFromHistory(1)` writes
+the middle entry back into the focused input. The same sequence driven
+through `UIEvent.Action("editor.edit.copy")` etc. (what editor.spl's
+buttons actually emit) proves the button wiring, not just the raw event
+API. A session built with `UISession.new_with_policy` and a default-deny
+policy shows Copy/Paste are no-ops when ClipboardRead/Write aren't granted.
+"""
+
+use std.spec.*
+use common.ui.widget.{WidgetNode, UITree, UIEvent}
+use common.ui.builder.{column, text_input, build_tree}
+use common.ui.capability.{Capability}
+use common.ui.capability_policy.{CapabilityPolicy, grant}
+use nogc_sync_mut.ui.session.{UISession, new_session}
+
+fn one_input_session(p: text) -> UISession:
+    val root = column("{p}_root", [text_input("{p}_field", "placeholder")])
+    val tree = build_tree(root)
+    var session = new_session(tree)
+    session.dispatch(UIEvent.FocusEvent(target_id: "{p}_field", kind: "focus"))
+    return session
+
+describe "UISession — Copy/Cut/Paste on the focused widget":
+
+    it "Copy reads the focused input's value into ClipboardService without changing it":
+        step("Focus the input, seed a value, then Copy")
+        var session = one_input_session("copy")
+        WidgetNode(id: "copy_field").set_prop("value", "hello world")
+        session.dispatch(UIEvent.Copy)
+
+        expect(session.clipboard.history_len()).to_equal(1)
+        expect(WidgetNode(id: "copy_field").get_prop("value")).to_equal("hello world")
+
+    it "Cut moves the value into ClipboardService and clears the field":
+        step("Focus the input, seed a value, then Cut")
+        var session = one_input_session("cut")
+        WidgetNode(id: "cut_field").set_prop("value", "cut-me")
+        session.dispatch(UIEvent.Cut)
+
+        val current = session.clipboard.paste()
+        assert_true(current != nil)
+        if current != nil:
+            expect(current.data).to_equal("cut-me")
+        expect(WidgetNode(id: "cut_field").get_prop("value")).to_equal("")
+
+    it "Paste writes the current clipboard entry into the focused field":
+        step("Cut from one field, then paste into it again")
+        var session = one_input_session("paste")
+        WidgetNode(id: "paste_field").set_prop("value", "round-trip")
+        session.dispatch(UIEvent.Cut)
+        expect(WidgetNode(id: "paste_field").get_prop("value")).to_equal("")
+
+        session.dispatch(UIEvent.Paste)
+        expect(WidgetNode(id: "paste_field").get_prop("value")).to_equal("round-trip")
+
+describe "UISession — clipboard HISTORY via PasteFromHistory":
+
+    it "three copies build history; PasteFromHistory(1) restores the middle one":
+        step("Copy three distinct values in order")
+        var session = one_input_session("hist")
+        WidgetNode(id: "hist_field").set_prop("value", "first")
+        session.dispatch(UIEvent.Copy)
+        WidgetNode(id: "hist_field").set_prop("value", "second")
+        session.dispatch(UIEvent.Copy)
+        WidgetNode(id: "hist_field").set_prop("value", "third")
+        session.dispatch(UIEvent.Copy)
+        expect(session.clipboard.history_len()).to_equal(3)
+
+        step("Paste from history index 1 (the middle entry, 'second')")
+        session.dispatch(UIEvent.PasteFromHistory(index: 1))
+        expect(WidgetNode(id: "hist_field").get_prop("value")).to_equal("second")
+
+describe "UISession — editor.edit.* button actions (editor.spl's real wiring)":
+
+    it "editor.edit.copy / editor.edit.cut / editor.edit.paste route through the same clipboard path":
+        step("Copy via the button action name, not the raw UIEvent.Copy")
+        var session = one_input_session("btn")
+        WidgetNode(id: "btn_field").set_prop("value", "button-copied")
+        session.dispatch(UIEvent.Action(name: "editor.edit.copy"))
+        expect(session.clipboard.history_len()).to_equal(1)
+
+        step("Cut via the button action name clears the field")
+        session.dispatch(UIEvent.Action(name: "editor.edit.cut"))
+        expect(WidgetNode(id: "btn_field").get_prop("value")).to_equal("")
+
+        step("Paste via the button action name restores it")
+        session.dispatch(UIEvent.Action(name: "editor.edit.paste"))
+        expect(WidgetNode(id: "btn_field").get_prop("value")).to_equal("button-copied")
+
+    it "editor.edit.paste_history_N routes to PasteFromHistory(N) (the Paste History button)":
+        step("Build two-entry history, then use the paste_history_1 button action")
+        var session = one_input_session("btnhist")
+        WidgetNode(id: "btnhist_field").set_prop("value", "older")
+        session.dispatch(UIEvent.Action(name: "editor.edit.copy"))
+        WidgetNode(id: "btnhist_field").set_prop("value", "newer")
+        session.dispatch(UIEvent.Action(name: "editor.edit.copy"))
+
+        session.dispatch(UIEvent.Action(name: "editor.edit.paste_history_1"))
+        expect(WidgetNode(id: "btnhist_field").get_prop("value")).to_equal("older")
+
+describe "UISession — capability gating denies clipboard access":
+
+    it "a default-deny CapabilityPolicy blocks Copy (no ClipboardWrite grant)":
+        step("Build a session whose policy grants nothing")
+        val root = column("deny_root", [text_input("deny_field", "placeholder")])
+        val tree = build_tree(root)
+        val policy = CapabilityPolicy.new("deny_window")
+        var session = UISession.new_with_policy(tree, policy)
+        session.dispatch(UIEvent.FocusEvent(target_id: "deny_field", kind: "focus"))
+        WidgetNode(id: "deny_field").set_prop("value", "should-not-copy")
+
+        session.dispatch(UIEvent.Copy)
+        expect(session.clipboard.history_len()).to_equal(0)
+
+    it "granting ClipboardWrite/ClipboardRead lets Copy/Paste through the same policy-gated session":
+        step("Build a session whose policy explicitly grants both capabilities")
+        val root = column("grant_root", [text_input("grant_field", "placeholder")])
+        val tree = build_tree(root)
+        var policy = CapabilityPolicy.new("grant_window")
+        policy = grant(policy, Capability.ClipboardWrite)
+        policy = grant(policy, Capability.ClipboardRead)
+        var session = UISession.new_with_policy(tree, policy)
+        session.dispatch(UIEvent.FocusEvent(target_id: "grant_field", kind: "focus"))
+        WidgetNode(id: "grant_field").set_prop("value", "granted-value")
+
+        session.dispatch(UIEvent.Copy)
+        expect(session.clipboard.history_len()).to_equal(1)

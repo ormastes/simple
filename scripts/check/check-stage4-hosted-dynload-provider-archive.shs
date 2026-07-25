@@ -1,0 +1,136 @@
+#!/bin/sh
+set -eu
+
+die() {
+    printf '%s\n' "stage4 hosted dynload provider archive check: $*" >&2
+    exit 1
+}
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+host_os=$(uname -s 2>/dev/null || true)
+cross_target=${SIMPLE_STAGE4_DYNLOAD_ARCHIVE_CROSS_TARGET:-}
+object_name=runtime_dynload.o
+archive_name=libsimple_stage4_dynload.a
+case "$cross_target" in
+    "")
+        case "$host_os" in
+            Linux) archive_format=elf ;;
+            Darwin) archive_format=macho ;;
+            FreeBSD) archive_format=elf ;;
+            MINGW*|MSYS*|CYGWIN*|Windows*)
+                [ "${SIMPLE_WINDOWS_ABI:-}" = "msvc" ] || die "Windows proof requires SIMPLE_WINDOWS_ABI=msvc"
+                archive_format=coff-msvc
+                object_name=runtime_dynload.obj
+                archive_name=simple_stage4_dynload.lib
+                ;;
+            *) die "requires Linux, macOS, FreeBSD, or Windows MSVC" ;;
+        esac
+        ;;
+    x86_64-w64-mingw32)
+        [ "$host_os" = "Linux" ] || die "MinGW cross proof requires Linux"
+        archive_format=coff-mingw
+        ;;
+    *) die "unsupported archive cross target: $cross_target" ;;
+esac
+
+SIMPLE_BINARY=${SIMPLE_BINARY:-bin/simple}
+BUILD_DIR=${BUILD_DIR:-build/check/stage4-hosted-dynload-provider}
+VALIDATOR=scripts/check/validate_stage4_hosted_dynload_provider_archive.spl
+SOURCE=src/runtime/runtime_dynload.c
+
+[ -x "$SIMPLE_BINARY" ] || die "Simple binary is missing or not executable: $SIMPLE_BINARY"
+[ -f "$VALIDATOR" ] || die "Simple validator is missing: $VALIDATOR"
+[ -f "$SOURCE" ] || die "dynamic-loader source is missing: $SOURCE"
+
+if [ -n "${CC:-}" ]; then
+    command -v "$CC" >/dev/null 2>&1 || die "C compiler is unavailable: $CC"
+elif command -v clang >/dev/null 2>&1; then
+    CC=clang
+elif command -v cc >/dev/null 2>&1; then
+    CC=cc
+elif command -v gcc >/dev/null 2>&1; then
+    CC=gcc
+else
+    die "requires clang, cc, or gcc"
+fi
+
+if [ "$cross_target" = "x86_64-w64-mingw32" ]; then
+    compiler_target=$("$CC" -dumpmachine 2>/dev/null) \
+        || die "failed to query the MinGW C compiler target"
+    [ "$compiler_target" = "x86_64-w64-mingw32" ] \
+        || die "MinGW proof requires x86_64-w64-mingw32 (found: $compiler_target)"
+elif [ "$archive_format" = "coff-msvc" ]; then
+    compiler_target=$("$CC" --print-target-triple 2>/dev/null) \
+        || die "failed to query the Windows C compiler target"
+    case "$compiler_target" in
+        x86_64-*-windows-msvc*) ;;
+        *) die "Windows proof requires x86_64 Windows MSVC clang (found: $compiler_target)" ;;
+    esac
+fi
+
+if [ -n "${AR:-}" ]; then
+    command -v "$AR" >/dev/null 2>&1 || die "archive tool is unavailable: $AR"
+elif command -v llvm-ar >/dev/null 2>&1; then
+    AR=llvm-ar
+elif command -v ar >/dev/null 2>&1; then
+    AR=ar
+else
+    die "requires llvm-ar or ar"
+fi
+
+command -v cmp >/dev/null 2>&1 || die "requires cmp"
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        checksum=$(sha256sum "$1") || die "failed to hash $1"
+    elif command -v shasum >/dev/null 2>&1; then
+        checksum=$(shasum -a 256 "$1") || die "failed to hash $1"
+    elif command -v sha256 >/dev/null 2>&1; then
+        checksum=$(sha256 -q "$1") || die "failed to hash $1"
+    else
+        die "requires sha256sum, shasum, or sha256"
+    fi
+    printf '%s\n' "${checksum%% *}"
+}
+
+mkdir -p "$BUILD_DIR/a" "$BUILD_DIR/b"
+BUILD_DIR=$(CDPATH= cd -- "$BUILD_DIR" && pwd)
+if [ "$archive_format" = "coff-msvc" ]; then
+    command -v cygpath >/dev/null 2>&1 || die "Windows MSVC proof requires cygpath"
+    BUILD_DIR=$(cygpath -m "$BUILD_DIR")
+fi
+
+for lane in a b; do
+    object="$BUILD_DIR/$lane/$object_name"
+    archive="$BUILD_DIR/$lane/$archive_name"
+    rm -f "$object" "$archive"
+    "$CC" -c -Os -ffunction-sections -fdata-sections \
+        -fno-unwind-tables -fno-asynchronous-unwind-tables \
+        -fno-stack-protector -fno-builtin -fPIC -std=gnu11 \
+        -Isrc/runtime -Isrc/runtime/platform "$SOURCE" -o "$object" \
+        || die "failed to compile $SOURCE for lane $lane"
+    "$AR" rcsD "$archive" "$object" \
+        || die "failed to create deterministic archive for lane $lane"
+    members=$("$AR" t "$archive") \
+        || die "failed to list archive members for lane $lane"
+    members=$(printf '%s' "$members" | tr -d '\r')
+    [ "$members" = "$object_name" ] \
+        || die "lane $lane archive must contain exactly $object_name (found: $members)"
+done
+
+archive_a="$BUILD_DIR/a/$archive_name"
+archive_b="$BUILD_DIR/b/$archive_name"
+sha_a=$(sha256_file "$archive_a")
+sha_b=$(sha256_file "$archive_b")
+[ "$sha_a" = "$sha_b" ] || die "independent archive SHA-256 values differ"
+cmp -s "$archive_a" "$archive_b" || die "independent archive bytes differ"
+
+validator_output=$(env \
+    SIMPLE_STAGE4_DYNLOAD_ARCHIVE_FORMAT="$archive_format" \
+    SIMPLE_STAGE4_DYNLOAD_ARCHIVE_A="$archive_a" \
+    SIMPLE_STAGE4_DYNLOAD_ARCHIVE_B="$archive_b" \
+    "$SIMPLE_BINARY" run "$VALIDATOR" --mode=interpreter)
+printf '%s\n' "$validator_output"
+printf '%s\n' "$validator_output" | grep -qx 'stage4_dynload_provider_archive=true' || die "validator success receipt missing"

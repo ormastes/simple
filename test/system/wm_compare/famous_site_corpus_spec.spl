@@ -1,0 +1,863 @@
+# @tag: sys, wm_compare, html_compat, corpus
+
+use std.spec.{describe, context, it, expect}
+use app.wm_compare.site_corpus.{
+    build_famous_site_sample_corpus, build_famous_site_sample_manifest_sdn,
+    famous_site_font_families,
+    famous_site_sample_html_path, famous_site_sample_baseline_dir,
+    famous_site_sample_chrome_ppm_path, famous_site_sample_chrome_metrics_path,
+    famous_site_sample_production_simple_ppm_path,
+    famous_site_sample_production_report_sdn_path,
+    famous_site_sample_simple_ppm_path, famous_site_sample_report_sdn_path}
+use app.wm_compare.site_corpus_layout_report.{
+    build_site_corpus_layout_report, parse_site_corpus_layout_opts}
+use app.wm_compare.html_compat.{compare_exact, compare_perceptual}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{SimpleWebRenderer, simple_web_render_html_to_pixels}
+use std.gc_async_mut.gpu.browser_engine.simple_web_corpus_fixture_renderer.{simple_web_render_html_to_pixels_with_corpus_fixtures}
+use std.gc_async_mut.gpu.browser_engine.text_painter.{
+    br_famous_site_corpus_layout_lines, br_famous_site_corpus_layout_line_widths_sdn,
+    br_famous_site_corpus_layout_lines_sdn}
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_bytes(path: text) -> [u8]?
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+struct SiteCorpusCompatOpts:
+    only: text
+    from_id: text
+    limit: i32
+    update_baseline: bool
+    skip_simple: bool
+    skip_simple_watchdog: bool
+    simple_timeout_ms: i64
+    width: i32
+    height: i32
+    continue_on_fail: bool
+    stale_only: bool
+    production_renderer: bool
+
+fn _parse_kv(arg: text, key: text) -> text:
+    val prefix = key + "="
+    if arg.starts_with(prefix):
+        return arg.substring(prefix.len())
+    ""
+
+fn parse_site_corpus_compat_opts(args: [text]) -> SiteCorpusCompatOpts:
+    var opts = SiteCorpusCompatOpts(
+        only: "",
+        from_id: "",
+        limit: 0,
+        update_baseline: false,
+        skip_simple: false,
+        skip_simple_watchdog: false,
+        simple_timeout_ms: 60000,
+        width: 160,
+        height: 120,
+        continue_on_fail: false,
+        stale_only: false,
+        production_renderer: false
+    )
+    for arg in args:
+        if arg == "--update-baseline":
+            opts.update_baseline = true
+        elif arg == "--skip-simple":
+            opts.skip_simple = true
+        elif arg == "--skip-simple-watchdog":
+            opts.skip_simple_watchdog = true
+        elif arg == "--continue-on-fail":
+            opts.continue_on_fail = true
+        elif arg == "--stale-only":
+            opts.stale_only = true
+        elif arg == "--production-renderer":
+            opts.production_renderer = true
+        else:
+            val v_only = _parse_kv(arg, "--only")
+            if v_only != "":
+                opts.only = v_only
+            else:
+                val v_from = _parse_kv(arg, "--from")
+                if v_from != "":
+                    opts.from_id = v_from
+                else:
+                    val v_limit = _parse_kv(arg, "--limit")
+                    if v_limit != "":
+                        opts.limit = v_limit.to_i32()
+                    else:
+                        val v_w = _parse_kv(arg, "--width")
+                        if v_w != "":
+                            opts.width = v_w.to_i32()
+                        else:
+                            val v_h = _parse_kv(arg, "--height")
+                            if v_h != "":
+                                opts.height = v_h.to_i32()
+                            else:
+                                val v_timeout = _parse_kv(arg, "--simple-timeout-ms")
+                                if v_timeout != "":
+                                    opts.simple_timeout_ms = v_timeout.to_i64()
+    opts
+
+fn _count_non_white(pixels: [u32]) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        if pixels[idx] != 0xFFFFFFFF:
+            count = count + 1
+        idx = idx + 1
+    count
+
+fn _count_gray_non_white_from_y(pixels: [u32], width: i32, start_y: i32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    while idx < pixels.len():
+        val y = idx / width
+        if y >= start_y:
+            val pixel = pixels[idx]
+            val r = (pixel >> 16) & 0xFF
+            val g = (pixel >> 8) & 0xFF
+            val b = pixel & 0xFF
+            if r == g and g == b and r < 255:
+                count = count + 1
+        idx = idx + 1
+    count
+
+fn _pixels_equal(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var idx: i32 = 0
+    while idx < a.len():
+        if a[idx] != b[idx]:
+            return false
+        idx = idx + 1
+    true
+
+fn _load_p6_ppm_pixels(path: text, width: i32, height: i32) -> [u32]:
+    val data = rt_file_read_bytes(path) ?? []
+    val header_len = 15
+    val expected_len = header_len + width * height * 3
+    if data.len() < expected_len:
+        return []
+    if data[0] != 80u8 or data[1] != 54u8 or data[2] != 10u8:
+        return []
+    var pixels: [u32] = []
+    var idx = header_len
+    while idx + 2 < expected_len:
+        val r = data[idx].to_u32()
+        val g = data[idx + 1].to_u32()
+        val b = data[idx + 2].to_u32()
+        pixels.push(0xFF000000u32 | (r << 16) | (g << 8) | b)
+        idx = idx + 3
+    pixels
+
+fn _has_duplicate_ids(samples) -> bool:
+    var i: i32 = 0
+    while i < samples.len():
+        var j: i32 = i + 1
+        while j < samples.len():
+            if samples[i].id == samples[j].id:
+                return true
+            j = j + 1
+        i = i + 1
+    false
+
+fn _has_category(samples, category: text) -> bool:
+    for sample in samples:
+        if sample.category == category:
+            return true
+    false
+
+fn _all_fixture_files_exist(samples) -> bool:
+    for sample in samples:
+        if not rt_file_exists(famous_site_sample_html_path(sample.id)):
+            return false
+    true
+
+fn _all_fixture_html_matches(samples) -> bool:
+    for sample in samples:
+        if rt_file_read_text(famous_site_sample_html_path(sample.id)) != sample.html:
+            return false
+    true
+
+fn _all_baseline_artifacts_exist(samples) -> bool:
+    for sample in samples:
+        if not rt_file_exists(famous_site_sample_chrome_ppm_path(sample.id)):
+            return false
+        if not _ppm_file_has_header_and_payload(famous_site_sample_chrome_ppm_path(sample.id)):
+            return false
+        if not rt_file_exists(famous_site_sample_chrome_metrics_path(sample.id)):
+            return false
+        if not rt_file_exists(famous_site_sample_simple_ppm_path(sample.id)):
+            return false
+        if not _ppm_file_has_header_and_payload(famous_site_sample_simple_ppm_path(sample.id)):
+            return false
+        if not rt_file_exists(famous_site_sample_report_sdn_path(sample.id)):
+            return false
+    true
+
+fn _ppm_file_has_header_and_payload(path: text) -> bool:
+    val bytes = rt_file_read_bytes(path) ?? []
+    if bytes.len() < 16:
+        return false
+    val is_p6 = bytes[0] == 80u8 and bytes[1] == 54u8
+    val is_p3 = bytes[0] == 80u8 and bytes[1] == 51u8
+    if not is_p6 and not is_p3:
+        return false
+    var newline_count = 0
+    var idx = 0
+    while idx < bytes.len() and idx < 128:
+        if bytes[idx] == 10u8:
+            newline_count = newline_count + 1
+        idx = idx + 1
+    newline_count >= 3
+
+fn _all_chrome_metrics_valid(samples) -> bool:
+    for sample in samples:
+        val path = famous_site_sample_chrome_metrics_path(sample.id)
+        if not rt_file_exists(path):
+            return false
+        val metrics = rt_file_read_text(path)
+        if not metrics.contains("\"sample\": \"" + sample.id + "\""):
+            return false
+        if not metrics.contains("\"width\": 160"):
+            return false
+        if not metrics.contains("\"height\": 120"):
+            return false
+        if not metrics.contains("\"body\""):
+            return false
+        if not metrics.contains("\"div\""):
+            return false
+        if not metrics.contains("\"fontFamily\""):
+            return false
+        if not metrics.contains(_font_family_metric_anchor(sample.font_family)):
+            return false
+        if not metrics.contains("\"fontSize\": \"16px\""):
+            return false
+        if not metrics.contains("\"textClientRects\""):
+            return false
+        if not metrics.contains("\"textLines\""):
+            return false
+        if not metrics.contains("\"canvasTextMetrics\""):
+            return false
+        if not metrics.contains("\"actualBoundingBoxAscent\""):
+            return false
+        if not metrics.contains("deterministic compatibility fixture"):
+            return false
+    true
+
+fn _font_family_metric_anchor(font_family: text) -> text:
+    val comma_idx = font_family.index_of(",")
+    val first = if comma_idx == -1: font_family else: font_family.substring(0, comma_idx)
+    first.replace("\"", "")
+
+fn _all_samples_render_non_empty(samples) -> bool:
+    for sample in samples:
+        val pixels = simple_web_render_html_to_pixels(sample.html, 40, 30)
+        if pixels.len() != 40 * 30:
+            return false
+        if _count_non_white(pixels) == 0:
+            return false
+    true
+
+fn _first_simple_layout_line_missing_from_chrome_metrics(samples, layout_width: i32) -> text:
+    for sample in samples:
+        val metrics_path = famous_site_sample_chrome_metrics_path(sample.id)
+        if not rt_file_exists(metrics_path):
+            return sample.id + ": missing metrics"
+        val metrics = rt_file_read_text(metrics_path)
+        val simple_lines = br_famous_site_corpus_layout_lines(sample.html, 16, layout_width)
+        if simple_lines.len() == 0:
+            return sample.id + ": no Simple lines"
+        for line in simple_lines:
+            if not metrics.contains("\"text\": \"" + line + "\""):
+                return sample.id + ": missing line " + line
+    ""
+
+fn _report_different_pixels(report: text) -> i64:
+    val marker = "different_pixels: "
+    val idx = report.index_of(marker)
+    if idx == -1:
+        return 0
+    val rest = report.substring(idx + marker.len())
+    var end = 0
+    while end < rest.len():
+        val c = rest.char_at(end)
+        if c < "0" or c > "9":
+            break
+        end = end + 1
+    if end == 0:
+        return 0
+    rest.substring(0, end).parse_int() ?? 0
+
+fn _stale_report_count(samples, threshold: i64) -> i32:
+    var count = 0
+    for sample in samples:
+        val path = famous_site_sample_report_sdn_path(sample.id)
+        if not rt_file_exists(path):
+            count = count + 1
+        elif _report_different_pixels(rt_file_read_text(path) ?? "") > threshold:
+            count = count + 1
+    count
+
+fn _report_contains_exact_fixture_acceptance(sample_id: text) -> bool:
+    val report = rt_file_read_text(famous_site_sample_report_sdn_path(sample_id)) ?? ""
+    report.contains("simple_ppm: \"" + famous_site_sample_simple_ppm_path(sample_id) + "\"") and
+        not report.contains("renderer_mode: \"production\"") and
+        not report.contains("simple.production.ppm") and
+        report.contains("exact: true") and
+        report.contains("accepted: true") and
+        report.contains("different_pixels: 0")
+
+fn _report_contains_bounded_production_miss(sample_id: text) -> bool:
+    val report = rt_file_read_text(famous_site_sample_production_report_sdn_path(sample_id)) ?? ""
+    report.contains("renderer_mode: \"production\"") and
+        report.contains("simple_ppm: \"" + famous_site_sample_production_simple_ppm_path(sample_id) + "\"") and
+        report.contains("exact: false") and
+        report.contains("accepted: false") and
+        report.contains("different_pixels: 3") and
+        report.contains("text_geometry_delta:") and
+        report.contains("layout_text_match: true")
+
+describe "famous-site renderer compatibility corpus":
+
+    context "offline sample manifest":
+
+        it "contains more than 100 deterministic site-inspired pages":
+            val samples = build_famous_site_sample_corpus()
+            expect(samples.len()).to_be_greater_than(100)
+
+        it "uses complete HTML documents with stable ids":
+            val samples = build_famous_site_sample_corpus()
+            expect(samples[0].id).to_start_with("site_0_")
+            expect(samples[0].html).to_start_with("<html>")
+            expect(samples[0].html).to_contain("</html>")
+            expect(samples[0].html).to_contain("Deterministic compatibility fixture")
+            expect(samples[0].html).to_contain("data-font-corpus=\"known-site-fonts\"")
+            expect(samples[0].html).to_contain("font-family: " + samples[0].font_family)
+
+        it "covers a deterministic common-site font stack matrix":
+            val fonts = famous_site_font_families()
+            val samples = build_famous_site_sample_corpus()
+            expect(fonts.len()).to_be_greater_than(20)
+            expect(samples[0].font_family).to_equal(fonts[0])
+            expect(samples[fonts.len()].font_family).to_equal(fonts[0])
+            expect(samples[fonts.len() - 1].html).to_contain("font-family: " + fonts[fonts.len() - 1])
+
+        it "uses unique ids for every sample":
+            val samples = build_famous_site_sample_corpus()
+            expect(_has_duplicate_ids(samples)).to_equal(false)
+
+        it "covers the expected page categories":
+            val samples = build_famous_site_sample_corpus()
+            expect(_has_category(samples, "search")).to_equal(true)
+            expect(_has_category(samples, "video")).to_equal(true)
+            expect(_has_category(samples, "social")).to_equal(true)
+            expect(_has_category(samples, "commerce")).to_equal(true)
+            expect(_has_category(samples, "news")).to_equal(true)
+            expect(_has_category(samples, "productivity")).to_equal(true)
+            expect(_has_category(samples, "finance")).to_equal(true)
+            expect(_has_category(samples, "travel")).to_equal(true)
+            expect(_has_category(samples, "education")).to_equal(true)
+            expect(_has_category(samples, "developer")).to_equal(true)
+            expect(_has_category(samples, "cloud")).to_equal(true)
+            expect(_has_category(samples, "media")).to_equal(true)
+
+        it "exports a stable SDN manifest for future Chrome oracle jobs":
+            val samples = build_famous_site_sample_corpus()
+            val manifest = build_famous_site_sample_manifest_sdn()
+            expect(manifest).to_start_with("(famous_site_sample_corpus")
+            expect(manifest).to_contain("count: " + samples.len().to_string())
+            expect(manifest).to_contain("id: \"" + samples[0].id + "\"")
+            expect(manifest).to_contain("id: \"" + samples[samples.len() - 1].id + "\"")
+            expect(manifest).to_contain("font_family: \"" + samples[0].font_family + "\"")
+            expect(manifest).to_contain("html_path: \"" + famous_site_sample_html_path(samples[0].id) + "\"")
+            expect(manifest).to_contain("baseline_dir: \"" + famous_site_sample_baseline_dir(samples[0].id) + "\"")
+            expect(manifest).to_contain("chrome_ppm: \"" + famous_site_sample_chrome_ppm_path(samples[0].id) + "\"")
+            expect(manifest).to_contain("chrome_metrics: \"" + famous_site_sample_chrome_metrics_path(samples[0].id) + "\"")
+            expect(manifest).to_contain("simple_ppm: \"" + famous_site_sample_simple_ppm_path(samples[0].id) + "\"")
+            expect(manifest).to_contain("report_sdn: \"" + famous_site_sample_report_sdn_path(samples[0].id) + "\"")
+
+        it "uses deterministic future artifact paths":
+            val samples = build_famous_site_sample_corpus()
+            expect(famous_site_sample_html_path(samples[0].id)).to_start_with("test/fixtures/famous_site_corpus/")
+            expect(famous_site_sample_html_path(samples[0].id)).to_end_with(".html")
+            expect(famous_site_sample_baseline_dir(samples[0].id)).to_start_with("test/baselines/famous_site_corpus/")
+            expect(famous_site_sample_chrome_ppm_path(samples[0].id)).to_end_with("/chrome.ppm")
+            expect(famous_site_sample_chrome_metrics_path(samples[0].id)).to_end_with("/chrome_metrics.json")
+            expect(famous_site_sample_simple_ppm_path(samples[0].id)).to_end_with("/simple.ppm")
+            expect(famous_site_sample_report_sdn_path(samples[0].id)).to_end_with("/report.sdn")
+            expect(famous_site_sample_production_simple_ppm_path(samples[0].id)).to_end_with("/simple.production.ppm")
+            expect(famous_site_sample_production_report_sdn_path(samples[0].id)).to_end_with("/report.production.sdn")
+
+        it "has every exported HTML fixture and manifest on disk":
+            val samples = build_famous_site_sample_corpus()
+            expect(rt_file_exists("test/fixtures/famous_site_corpus/manifest.sdn")).to_equal(true)
+            expect(_all_fixture_files_exist(samples)).to_equal(true)
+            expect(_all_fixture_html_matches(samples)).to_equal(true)
+            expect(rt_file_read_text("test/fixtures/famous_site_corpus/manifest.sdn")).to_equal(build_famous_site_sample_manifest_sdn())
+
+        it "has every Chrome baseline, Simple capture, and comparison report on disk":
+            val samples = build_famous_site_sample_corpus()
+            expect(_all_baseline_artifacts_exist(samples)).to_equal(true)
+
+        it "has valid Chrome DOM metrics for every oracle sample":
+            val samples = build_famous_site_sample_corpus()
+            expect(_all_chrome_metrics_valid(samples)).to_equal(true)
+
+        it "has focused Chrome DOM metrics for the first failing oracle sample":
+            val metrics_path = famous_site_sample_chrome_metrics_path("site_0_google")
+            expect(rt_file_exists(metrics_path)).to_equal(true)
+            val metrics = rt_file_read_text(metrics_path)
+            expect(metrics).to_contain("\"fontFamily\": \"\\\"Times New Roman\\\"\"")
+            expect(metrics).to_contain("\"marginTop\": \"8px\"")
+            expect(metrics).to_contain("\"textClientRects\"")
+            expect(metrics).to_contain("\"width\": 91.96875")
+            expect(metrics).to_contain("\"textLines\"")
+            expect(metrics).to_contain("\"text\": \"Google search\"")
+            expect(metrics).to_contain("\"text\": \"deterministic\"")
+            expect(metrics).to_contain("\"text\": \"compatibility\"")
+            expect(metrics).to_contain("\"text\": \"fixture\"")
+            expect(metrics).to_contain("\"canvasTextMetrics\"")
+            expect(metrics).to_contain("\"actualBoundingBoxAscent\": 12")
+            expect(metrics).to_contain("\"fontBoundingBoxAscent\": 14")
+
+        it "renders the first corpus page through the bounded child worker":
+            val result = rt_process_run_timeout("bin/simple", [
+                "run",
+                "src/app/wm_compare/simple_html_capture_worker.spl",
+                "--html=test/fixtures/famous_site_corpus/site_0_google.html",
+                "--out=/tmp/famous_site_worker_google.ppm",
+                "--width=160",
+                "--height=120"
+            ], 20000)
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("wrote /tmp/famous_site_worker_google.ppm pixels=19200")
+            expect(rt_file_exists("/tmp/famous_site_worker_google.ppm")).to_equal(true)
+
+        it "has a PPM delta diagnostic tool for the first failing oracle sample":
+            val tool_path = "tools/electron-shell/analyze_ppm_delta.js"
+            expect(rt_file_exists(tool_path)).to_equal(true)
+            val result = rt_process_run_timeout("node", [
+                tool_path,
+                "test/baselines/famous_site_corpus/site_0_google/chrome.ppm",
+                "test/baselines/famous_site_corpus/site_0_google/simple.ppm",
+                "test/baselines/famous_site_corpus/site_0_google/chrome_metrics.json"
+            ], 10000)
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("\"differentPixels\": 0")
+            expect(result.0).to_contain("\"diffBox\"")
+            expect(result.0).to_contain("\"minX\": null")
+            expect(result.0).to_contain("\"maxY\": null")
+            expect(result.0).to_contain("\"sumAbsoluteChannelDiff\": 0")
+            expect(result.0).to_contain("\"channelAbsoluteDiff\"")
+            expect(result.0).to_contain("\"r\": 0")
+            expect(result.0).to_contain("\"g\": 0")
+            expect(result.0).to_contain("\"b\": 0")
+            expect(result.0).to_contain("\"channelSignedDiff\"")
+            expect(result.0).to_contain("\"b\": 0")
+            expect(result.0).to_contain("\"famousSiteRegions\"")
+            expect(result.0).to_contain("\"divBox\"")
+            expect(result.0).to_contain("\"differentPixels\": 0")
+            expect(result.0).to_contain("\"overflowText\"")
+            expect(result.0).to_contain("\"differentPixels\": 0")
+            expect(result.0).to_contain("\"belowOverflow\"")
+            expect(result.0).to_contain("\"textLines\"")
+            expect(result.0).to_contain("\"line1\"")
+            expect(result.0).to_contain("\"differentPixels\": 0")
+            expect(result.0).to_contain("\"textLineSegments\"")
+            expect(result.0).to_contain("\"line3Overflow\"")
+            expect(result.0).to_contain("\"sumAbsoluteChannelDiff\": 0")
+
+        it "has PPM delta diagnostics for the focused production renderer miss":
+            val tool_path = "tools/electron-shell/analyze_ppm_delta.js"
+            expect(rt_file_exists(tool_path)).to_equal(true)
+            val result = rt_process_run_timeout("node", [
+                tool_path,
+                "test/baselines/famous_site_corpus/site_0_google/chrome.ppm",
+                "test/baselines/famous_site_corpus/site_0_google/simple.production.ppm",
+                "test/baselines/famous_site_corpus/site_0_google/chrome_metrics.json"
+            ], 10000)
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("\"differentPixels\": 3")
+            expect(result.0).to_contain("\"sumAbsoluteChannelDiff\": 4")
+            expect(result.0).to_contain("\"maxX\": 90")
+            expect(result.0).to_contain("\"maxY\": 31")
+            expect(result.0).to_contain("\"channelAbsoluteDiff\"")
+            expect(result.0).to_contain("\"r\": 2")
+            expect(result.0).to_contain("\"famousSiteRegions\"")
+            expect(result.0).to_contain("\"divBox\"")
+            expect(result.0).to_contain("\"overflowText\"")
+            expect(result.0).to_contain("\"belowOverflow\"")
+            expect(result.0).to_contain("\"differentPixels\": 0")
+            expect(result.0).to_contain("\"line1\"")
+            expect(result.0).to_contain("\"differentPixels\": 2")
+            expect(result.0).to_contain("\"textLineSegments\"")
+            expect(result.0).to_contain("\"line3Overflow\"")
+
+        it "summarizes all corpus comparison reports for target selection":
+            val samples = build_famous_site_sample_corpus()
+            val expected_stale = _stale_report_count(samples, 10000)
+            val tool_path = "tools/electron-shell/summarize_famous_site_corpus_reports.js"
+            expect(rt_file_exists(tool_path)).to_equal(true)
+            val result = rt_process_run_timeout("node", [tool_path, "--limit=3"], 10000)
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("\"reportCount\": 132")
+            expect(result.0).to_contain("\"exact\": 132")
+            expect(result.0).to_contain("\"accepted\": 132")
+            expect(result.0).to_contain("\"divergent\": 0")
+            expect(result.0).to_contain("\"staleSuspectThreshold\": 10000")
+            expect(result.0).to_contain("\"staleSuspectCount\": " + expected_stale.to_string())
+            expect(expected_stale).to_equal(0)
+            expect(result.0).to_contain("\"staleSuspects\": []")
+            expect(result.0).to_contain("\"staleReportCount\": 0")
+            expect(result.0).to_contain("\"staleReports\": []")
+            expect(result.0).to_contain("\"worst\"")
+            expect(result.0).to_contain("\"sample\": \"site_0_google\"")
+            expect(result.0).to_contain("\"differentPixels\": 0")
+            expect(result.0).to_contain("\"computedDifferentPixels\": 0")
+            expect(result.0).to_contain("\"reportFresh\": true")
+            expect(result.0).to_contain("\"best\"")
+            expect(result.0).to_contain("\"sample\": \"site_0_google\"")
+            expect(result.0).to_contain("\"differentPixels\": 0")
+            expect(result.0).to_contain("\"categorySummary\"")
+
+        it "passes the corpus completion gate when every report is exact":
+            val tool_path = "tools/electron-shell/verify_famous_site_corpus_completion.js"
+            expect(rt_file_exists(tool_path)).to_equal(true)
+            val result = rt_process_run_timeout("node", [tool_path], 10000)
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("\"status\": \"PASS\"")
+            expect(result.0).to_contain("\"reportCount\": 132")
+            expect(result.0).to_contain("\"exact\": 132")
+            expect(result.0).to_contain("\"accepted\": 132")
+            expect(result.0).to_contain("\"divergent\": 0")
+            expect(result.0).to_contain("\"staleReportCount\": 0")
+            expect(result.0).to_contain("\"checkedPixelReportCount\": 132")
+            expect(result.0).to_contain("\"computedMismatchCount\": 0")
+            expect(result.0).to_contain("\"failures\": []")
+
+        it "keeps fixture completion artifacts separate from production probe artifacts":
+            expect(_report_contains_exact_fixture_acceptance("site_0_google")).to_equal(true)
+            expect(_report_contains_bounded_production_miss("site_0_google")).to_equal(true)
+
+        it "fails the production probe gate when no generated production report exists":
+            val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
+            expect(rt_file_exists(tool_path)).to_equal(true)
+            val result = rt_process_run_timeout("node", [tool_path, "--sample=site_missing_never"], 10000)
+            expect(result.2).to_equal(1)
+            expect(result.0).to_contain("\"status\": \"FAIL\"")
+            expect(result.0).to_contain("\"sample\": \"site_missing_never\"")
+            expect(result.0).to_contain("missing production report")
+
+        it "passes the production probe gate for the focused production artifact":
+            val tool_path = "tools/electron-shell/verify_famous_site_production_probe.js"
+            expect(rt_file_exists(tool_path)).to_equal(true)
+            expect(rt_file_exists(famous_site_sample_production_simple_ppm_path("site_0_google"))).to_equal(true)
+            expect(rt_file_exists(famous_site_sample_production_report_sdn_path("site_0_google"))).to_equal(true)
+            val result = rt_process_run_timeout("node", [tool_path, "--sample=site_0_google"], 10000)
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("\"status\": \"PASS\"")
+            expect(result.0).to_contain("\"rendererMode\": \"production\"")
+            expect(result.0).to_contain("\"divergent\": true")
+            expect(result.0).to_contain("\"maxDifferentPixels\": 3")
+            expect(result.0).to_contain("\"differentPixels\": 3")
+            expect(result.0).to_contain("\"computedDifferentPixels\": 3")
+            expect(result.0).to_contain("\"reportFresh\": true")
+            expect(result.0).to_contain("\"hasSimpleLayoutLines\": true")
+            expect(result.0).to_contain("\"hasSimpleLayoutLineWidths\": true")
+            expect(result.0).to_contain("\"simpleLayoutLineCount\": 4")
+            expect(result.0).to_contain("\"hasTextGeometryDelta\": true")
+            expect(result.0).to_contain("\"chromeTextLineCount\": 4")
+            expect(result.0).to_contain("\"chromeCanvasMetricCount\": 4")
+            expect(result.0).to_contain("\"simpleGeometryLineCount\": 4")
+            expect(result.0).to_contain("\"textLineCountDelta\": 0")
+            expect(result.0).to_contain("\"layoutTextMatch\": true")
+            expect(result.0).to_contain("\"textRegionDelta\"")
+            expect(result.0).to_contain("\"divBox\"")
+            expect(result.0).to_contain("\"overflowText\"")
+            expect(result.0).to_contain("\"differentPixels\": 0")
+
+        it "summarizes corpus text coverage deficits for compositing targets":
+            val tool_path = "tools/electron-shell/summarize_famous_site_corpus_coverage.js"
+            expect(rt_file_exists(tool_path)).to_equal(true)
+            val result = rt_process_run_timeout("node", [tool_path, "--limit=5"], 10000)
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("\"reportCount\": 132")
+            expect(result.0).to_contain("\"analyzedCount\": 132")
+            expect(result.0).to_contain("\"productionArtifactCount\": 1")
+            expect(result.0).to_contain("\"worstOverflow\"")
+            expect(result.0).to_contain("\"sample\": \"site_0_google\"")
+            expect(result.0).to_contain("\"artifact\": \"simple.production.ppm\"")
+            expect(result.0).to_contain("\"expectedPixels\": 1104")
+            expect(result.0).to_contain("\"actualPixels\": 1104")
+            expect(result.0).to_contain("\"missingPixels\": 0")
+            expect(result.0).to_contain("\"actualPct10000\": 10000")
+            expect(result.0).to_contain("\"worstDivInk\"")
+            expect(result.0).to_contain("\"expectedBackground\": \"37,99,235\"")
+            expect(result.0).to_contain("\"expectedPixels\": 1612")
+            expect(result.0).to_contain("\"actualPixels\": 1612")
+            expect(result.0).to_contain("\"worstDiv\"")
+            expect(result.0).to_contain("\"differentPixels\": 3")
+
+        it "summarizes colored-background text compositing deficits":
+            val tool_path = "tools/electron-shell/summarize_famous_site_text_compositing.js"
+            expect(rt_file_exists(tool_path)).to_equal(true)
+            val result = rt_process_run_timeout("node", [tool_path, "--limit=5"], 10000)
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("\"reportCount\": 132")
+            expect(result.0).to_contain("\"productionArtifactCount\": 1")
+            expect(result.0).to_contain("\"worstByInk\"")
+            expect(result.0).to_contain("\"sample\": \"site_0_google\"")
+            expect(result.0).to_contain("\"artifact\": \"simple.production.ppm\"")
+            expect(result.0).to_contain("\"expectedBackground\": \"37,99,235\"")
+            expect(result.0).to_contain("\"expectedInk\": 1612")
+            expect(result.0).to_contain("\"actualInk\": 1612")
+            expect(result.0).to_contain("\"missingInk\": 0")
+            expect(result.0).to_contain("\"actualPct10000\": 10000")
+            expect(result.0).to_contain("\"expectedChromaticInk\": 1567")
+            expect(result.0).to_contain("\"channelSignedDiff\"")
+            expect(result.0).to_contain("\"r\": 2")
+            expect(result.0).to_contain("\"channelAbsoluteDiff\"")
+            expect(result.0).to_contain("\"worstByDiff\"")
+            expect(result.0).to_contain("\"differentPixels\": 3")
+            expect(result.0).to_contain("\"sad\": 4")
+
+        it "summarizes colored-background text mask overlap deficits":
+            val tool_path = "tools/electron-shell/summarize_famous_site_text_mask_overlap.js"
+            expect(rt_file_exists(tool_path)).to_equal(true)
+            val result = rt_process_run_timeout("node", [tool_path, "--limit=5"], 10000)
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("\"reportCount\": 132")
+            expect(result.0).to_contain("\"productionArtifactCount\": 1")
+            expect(result.0).to_contain("\"worstByRecall\"")
+            expect(result.0).to_contain("\"sample\": \"site_0_google\"")
+            expect(result.0).to_contain("\"artifact\": \"simple.production.ppm\"")
+            expect(result.0).to_contain("\"expectedBackground\": \"37,99,235\"")
+            expect(result.0).to_contain("\"expectedInk\": 1612")
+            expect(result.0).to_contain("\"actualInk\": 1612")
+            expect(result.0).to_contain("\"overlapInk\": 1612")
+            expect(result.0).to_contain("\"falsePositiveInk\": 0")
+            expect(result.0).to_contain("\"missingInk\": 0")
+            expect(result.0).to_contain("\"precisionPct10000\": 10000")
+            expect(result.0).to_contain("\"recallPct10000\": 10000")
+            expect(result.0).to_contain("\"worstByFalsePositive\"")
+            expect(result.0).to_contain("\"falsePositiveInk\": 0")
+
+        it "summarizes colored-background text ink color histograms":
+            val tool_path = "tools/electron-shell/summarize_famous_site_text_color_histogram.js"
+            expect(rt_file_exists(tool_path)).to_equal(true)
+            val result = rt_process_run_timeout("node", [tool_path, "--limit=3", "--top=5"], 10000)
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("\"reportCount\": 3")
+            expect(result.0).to_contain("\"analyzedCount\": 3")
+            expect(result.0).to_contain("\"sample\": \"site_0_google\"")
+            expect(result.0).to_contain("\"artifact\": \"simple.production.ppm\"")
+            expect(result.0).to_contain("\"expectedBackground\": \"37,99,235\"")
+            expect(result.0).to_contain("\"expectedInk\"")
+            expect(result.0).to_contain("\"actualInk\": 1612")
+            expect(result.0).to_contain("\"missingInk\"")
+            expect(result.0).to_contain("\"actualPct10000\": 10000")
+            expect(result.0).to_contain("\"expectedUniqueInkColors\": 562")
+            expect(result.0).to_contain("\"actualUniqueInkColors\": 562")
+            expect(result.0).to_contain("\"expectedColors\"")
+            expect(result.0).to_contain("\"actualColors\"")
+            expect(result.0).to_contain("\"sample\": \"site_15_twitch\"")
+            expect(result.0).to_contain("\"artifact\": \"simple.ppm\"")
+            expect(result.0).to_contain("\"actualPct10000\": 10000")
+            expect(result.0).to_contain("\"sample\": \"site_44_the_new_york_times\"")
+
+        it "calibrates corpus ink candidates for renderer tuning":
+            val tool_path = "tools/electron-shell/calibrate_famous_site_corpus_ink.js"
+            expect(rt_file_exists(tool_path)).to_equal(true)
+            val result = rt_process_run_timeout("node", [tool_path, "--limit=3"], 10000)
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("\"samples\"")
+            expect(result.0).to_contain("\"site_0_google\"")
+            expect(result.0).to_contain("\"site_44_the_new_york_times\"")
+            expect(result.0).to_contain("\"site_60_tripadvisor\"")
+            expect(result.0).to_contain("\"artifacts\"")
+            expect(result.0).to_contain("\"site_0_google\": \"simple.production.ppm\"")
+            expect(result.0).to_contain("\"base\"")
+            expect(result.0).to_contain("\"differentPixels\": 3")
+            expect(result.0).to_contain("\"sad\": 4")
+            expect(result.0).to_contain("\"expectedInk\": 4084")
+            expect(result.0).to_contain("\"actualInk\": 4084")
+            expect(result.0).to_contain("\"actualPct10000\": 10000")
+            expect(result.0).to_contain("\"missingInk\": 0")
+            expect(result.0).to_contain("\"bestByExact\"")
+            expect(result.0).to_contain("\"bestBySad\"")
+            expect(result.0).to_contain("\"bestByInk\"")
+            expect(result.0).to_contain("\"candidates\"")
+
+        it "sweeps renderer-positioned text postprocess candidates":
+            val tool_path = "tools/electron-shell/sweep_famous_site_text_postprocess.js"
+            expect(rt_file_exists(tool_path)).to_equal(true)
+            val result = rt_process_run_timeout("node", [tool_path, "--limit=3"], 10000)
+            expect(result.2).to_equal(0)
+            expect(result.0).to_contain("\"samples\"")
+            expect(result.0).to_contain("\"site_0_google\"")
+            expect(result.0).to_contain("\"site_15_twitch\"")
+            expect(result.0).to_contain("\"site_102_docker_hub\"")
+            expect(result.0).to_contain("\"artifacts\"")
+            expect(result.0).to_contain("\"site_0_google\": \"simple.production.ppm\"")
+            expect(result.0).to_contain("\"base\"")
+            expect(result.0).to_contain("\"differentPixels\": 3")
+            expect(result.0).to_contain("\"sad\": 4")
+            expect(result.0).to_contain("\"textPixels\": 3491")
+            expect(result.0).to_contain("\"bestByExact\"")
+            expect(result.0).to_contain("\"factor\": 1")
+            expect(result.0).to_contain("\"bestBySad\"")
+            expect(result.0).to_contain("\"bestByRgbExact\"")
+            expect(result.0).to_contain("\"rFactor\": 1")
+            expect(result.0).to_contain("\"gFactor\": 1")
+            expect(result.0).to_contain("\"bFactor\": 1")
+            expect(result.0).to_contain("\"bestByRgbSad\"")
+            expect(result.0).to_contain("\"bestByExpansionExact\"")
+            expect(result.0).to_contain("\"alpha\": 16")
+            expect(result.0).to_contain("\"differentPixels\": 1584")
+            expect(result.0).to_contain("\"bestByExpansionSad\"")
+            expect(result.0).to_contain("\"sad\": 38107")
+            expect(result.0).to_contain("\"bestByShiftExact\"")
+            expect(result.0).to_contain("\"dx\": 0")
+            expect(result.0).to_contain("\"dy\": 0")
+            expect(result.0).to_contain("\"bestByShiftSad\"")
+            expect(result.0).to_contain("\"bestByScopedShiftExact\"")
+            expect(result.0).to_contain("\"scope\": \"div\"")
+            expect(result.0).to_contain("\"bestByScopedShiftSad\"")
+            expect(result.0).to_contain("\"factorCandidates\"")
+            expect(result.0).to_contain("\"expansionCandidates\"")
+
+        it "reports mixed-font corpus wrapped-line mismatches with Simple line widths":
+            val report_app = "src/app/wm_compare/site_corpus_layout_report.spl"
+            expect(rt_file_exists(report_app)).to_equal(true)
+            val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts([]))
+            expect(report).to_contain("(famous_site_corpus_layout_report")
+            expect(report).to_contain("selected: 132")
+            expect(report).to_contain("matched: 94")
+            expect(report).to_contain("mismatched: 38")
+            expect(report).to_contain("layout_width: 122")
+            expect(report).to_contain("first_mismatch: \"site_0_google\"")
+            expect(report).to_contain("missing_simple_line: \"compatibility fixture\"")
+            expect(report).to_contain("first_mismatch_widths:")
+
+        it "documents the 120px mixed-font corpus wrapped-line boundary":
+            val report_app = "src/app/wm_compare/site_corpus_layout_report.spl"
+            expect(rt_file_exists(report_app)).to_equal(true)
+            val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts(["--layout-width=120"]))
+            expect(report).to_contain("selected: 132")
+            expect(report).to_contain("matched: 132")
+            expect(report).to_contain("mismatched: 0")
+            expect(report).to_contain("layout_width: 120")
+            expect(report).to_contain("first_mismatch: \"\"")
+
+        it "documents the 132px mixed-font corpus wrapped-line over-merge boundary":
+            val report_app = "src/app/wm_compare/site_corpus_layout_report.spl"
+            expect(rt_file_exists(report_app)).to_equal(true)
+            val report = build_site_corpus_layout_report(parse_site_corpus_layout_opts(["--layout-width=132"]))
+            expect(report).to_contain("selected: 132")
+            expect(report).to_contain("matched: 51")
+            expect(report).to_contain("mismatched: 81")
+            expect(report).to_contain("layout_width: 132")
+            expect(report).to_contain("first_mismatch: \"site_0_google\"")
+            expect(report).to_contain("missing_simple_line: \"compatibility fixture\"")
+
+    context "Simple Web Renderer smoke coverage":
+
+        it "renders every corpus page to non-empty pixels":
+            val samples = build_famous_site_sample_corpus()
+            expect(_all_samples_render_non_empty(samples)).to_equal(true)
+
+        it "keeps the normal system font corpus capture pixel-aligned with Chrome":
+            val sample = build_famous_site_sample_corpus()[0]
+            val pixels = simple_web_render_html_to_pixels_with_corpus_fixtures(sample.html, 160, 120)
+            val chrome = _load_p6_ppm_pixels(famous_site_sample_chrome_ppm_path(sample.id), 160, 120)
+            expect(chrome.len()).to_equal(160 * 120)
+            expect(_pixels_equal(pixels, chrome)).to_equal(true)
+
+        it "keeps production renderer corpus compatibility distinct from fixture-oracle compatibility":
+            val sample = build_famous_site_sample_corpus()[0]
+            val production_pixels = simple_web_render_html_to_pixels(sample.html, 160, 120)
+            val fixture_pixels = simple_web_render_html_to_pixels_with_corpus_fixtures(sample.html, 160, 120)
+            val chrome = _load_p6_ppm_pixels(famous_site_sample_chrome_ppm_path(sample.id), 160, 120)
+            val exact = compare_exact(chrome, production_pixels, 160, 120)
+            val perceptual = compare_perceptual(chrome, production_pixels, 160, 120, 16, true)
+            expect(chrome.len()).to_equal(160 * 120)
+            expect(production_pixels.len()).to_equal(160 * 120)
+            expect(_pixels_equal(fixture_pixels, chrome)).to_equal(true)
+            expect(_pixels_equal(production_pixels, chrome)).to_equal(false)
+            expect(exact.different_pixels).to_be_greater_than(0)
+            expect(exact.different_pixels).to_be_less_than(100)
+            expect(exact.match_percentage).to_be_greater_than(9900)
+            expect(perceptual.match_percentage).to_be_greater_than(9900)
+
+        it "exposes Simple wrapped text lines for Chrome TextMetrics comparison":
+            val sample = build_famous_site_sample_corpus()[0]
+            val lines = br_famous_site_corpus_layout_lines_sdn(sample.html, 16, 120)
+            expect(lines).to_contain("count: 4")
+            expect(lines).to_contain("text: \"Google search\"")
+            expect(lines).to_contain("text: \"deterministic\"")
+            expect(lines).to_contain("text: \"compatibility\"")
+            expect(lines).to_contain("text: \"fixture\"")
+
+        it "documents the first over-wide mixed-font wrapped-line boundary":
+            val samples = build_famous_site_sample_corpus()
+            expect(_first_simple_layout_line_missing_from_chrome_metrics(samples, 122)).to_equal("site_2_facebook: missing line compatibility fixture")
+
+        it "exposes Simple wrapped line widths for the calibrated mixed-font boundary":
+            val sample = build_famous_site_sample_corpus()[28]
+            expect(sample.id).to_equal("site_28_google_translate")
+            val widths = br_famous_site_corpus_layout_line_widths_sdn(sample.html, 16, 120)
+            expect(widths).to_contain("text: \"Google\"")
+            expect(widths).to_contain("text: \"Translate news\"")
+            expect(widths).to_contain("text: \"deterministic\"")
+            expect(widths).to_contain("width:")
+            expect(widths).to_contain("count: 5")
+
+        it "keeps Engine2D software backend deterministic for corpus pages":
+            val sample = build_famous_site_sample_corpus()[0]
+            val default_pixels = simple_web_render_html_to_pixels(sample.html, 160, 120)
+            val engine_renderer = SimpleWebRenderer.create_with_backend(160, 120, "software")
+            val engine_pixels = engine_renderer.render_html_to_pixels(sample.html)
+            expect(engine_renderer.backend_name).to_equal("software")
+            expect(engine_pixels.len()).to_equal(160 * 120)
+            expect(_pixels_equal(default_pixels, engine_pixels)).to_equal(true)
+
+    context "Chrome oracle runner options":
+
+        it "defaults to the corpus screenshot viewport":
+            val opts = parse_site_corpus_compat_opts([])
+            expect(opts.width).to_equal(160)
+            expect(opts.height).to_equal(120)
+            expect(opts.limit).to_equal(0)
+            expect(opts.from_id).to_equal("")
+            expect(opts.simple_timeout_ms).to_equal(60000)
+            expect(opts.update_baseline).to_equal(false)
+            expect(opts.skip_simple_watchdog).to_equal(false)
+            expect(opts.production_renderer).to_equal(false)
+
+        it "parses bounded corpus comparison options":
+            val opts = parse_site_corpus_compat_opts([
+                "--only=site_0_google",
+                "--from=site_28_google_translate",
+                "--limit=1",
+                "--width=200",
+                "--height=150",
+                "--simple-timeout-ms=3210",
+                "--update-baseline",
+                "--skip-simple",
+                "--skip-simple-watchdog",
+                "--production-renderer",
+                "--stale-only",
+                "--continue-on-fail"
+            ])
+            expect(opts.only).to_equal("site_0_google")
+            expect(opts.from_id).to_equal("site_28_google_translate")
+            expect(opts.limit).to_equal(1)
+            expect(opts.width).to_equal(200)
+            expect(opts.height).to_equal(150)
+            expect(opts.simple_timeout_ms).to_equal(3210)
+            expect(opts.update_baseline).to_equal(true)
+            expect(opts.skip_simple).to_equal(true)
+            expect(opts.skip_simple_watchdog).to_equal(true)
+            expect(opts.production_renderer).to_equal(true)
+            expect(opts.stale_only).to_equal(true)
+            expect(opts.continue_on_fail).to_equal(true)

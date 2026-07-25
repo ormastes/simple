@@ -1,0 +1,89 @@
+"""
+# sj client facade
+"""
+
+use std.io_runtime
+use app.sj.cli
+use app.sj.fallback
+use app.sj_daemon.request_handler
+
+extern fn rt_getpid() -> i64
+
+struct SjClient:
+    daemon_running: bool
+    handler: SjRequestHandler
+
+struct SjResult:
+    exit_code: i64
+    stdout: text
+    stderr: text
+    wire_json: text
+
+fn sj_client_new(repo_path: text, max_hold_ms: i64) -> SjClient:
+    SjClient(
+        daemon_running: false,
+        handler: sj_request_handler_new(repo_path, max_hold_ms)
+    )
+
+fn _wrap(resp: CommandResponse) -> SjResult:
+    SjResult(
+        exit_code: resp.exit_code,
+        stdout: resp.stdout,
+        stderr: resp.stderr,
+        wire_json: response_json(resp)
+    )
+
+fn exec_args(client: SjClient, argv: [text]) -> SjResult:
+    val parsed = parse_cli(argv)
+    _wrap(fallback_exec(client.handler, parsed.argv, rt_getpid()))
+
+fn format_busy_json(lease_id: text, holder_pid: i64, expires_at: text) -> text:
+    "{\"error\":\"BUSY\",\"lease_id\":\"{lease_id}\",\"holder_pid\":{holder_pid},\"expires_at\":\"{expires_at}\"}"
+
+fn build_command(argv: [text]) -> text:
+    if argv.len() == 0i64:
+        return ""
+    val key = if argv.len() > 2i64 and argv[1i64] == "op":
+        "op " + argv[2i64]
+    else if argv.len() > 2i64 and argv[1i64] == "file":
+        "file " + argv[2i64]
+    else if argv.len() > 2i64 and argv[1i64] == "bookmark":
+        "bookmark " + argv[2i64]
+    else if argv.len() > 2i64 and argv[1i64] == "config":
+        "config " + argv[2i64]
+    else if argv.len() > 1i64:
+        argv[1i64]
+    else:
+        ""
+    val read = key == "log" or
+        key == "status" or
+        key == "diff" or
+        key == "show" or
+        key == "op log" or
+        key == "op show" or
+        key == "evolog" or
+        key == "file annotate" or
+        key == "file list" or
+        key == "file show" or
+        key == "bookmark list" or
+        key == "config list"
+    var out: [text] = ["jj"]
+    if read:
+        out.push("--ignore-working-copy")
+    out.push("--no-pager")
+    out.push("--color")
+    out.push("never")
+    var i = 1i64
+    while i < argv.len():
+        out.push(argv[i])
+        i = i + 1i64
+    out.join(" ")
+
+fn should_reclaim_index_lock(lock_exists: bool, lsof_empty: bool, age_seconds: i64, no_live_lease: bool) -> bool:
+    lock_exists and lsof_empty and age_seconds > 30i64 and no_live_lease
+
+fn lock_paths_for_repo(repo_root: text) -> [text]:
+    [
+        "{repo_root}/.git/index.lock",
+        "{repo_root}/.git/worktrees/*/index.lock"
+    ]

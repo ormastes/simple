@@ -1,0 +1,110 @@
+#!/bin/sh
+# run_gdb_e2e.shs — end-to-end GDB session over the Stage-5 OpenOCD sim harness.
+#
+#   gdb (riscv) --:3333--> openocd (remote_bitbang) --:9999--> ghdl sim
+#     (tb_openocd_bitbang: jtag_tap -> riscv_dtm -> dmi_bus ->
+#      riscv_debug_module [abstract GPR/CSR + SBA] -> sba_test_mem;
+#      hart = tb fake_hart model — hart integration is the deferred item)
+#
+# Reuses the exact Stage-5 build steps from openocd_attach.md; drives the
+# batch script gdb_e2e.gdb; writes transcripts and prints PASS/FAIL verdicts.
+#
+# Usage:  sh run_gdb_e2e.shs [workdir]        (default workdir /tmp/ghdl-jtag-gdb)
+# Exit:   0 = all gates PASS, 1 = a gate FAILED, 2 = BLOCKED (no riscv gdb)
+
+set -u
+DIR=$(cd "$(dirname "$0")" && pwd)
+W=${1:-/tmp/ghdl-jtag-gdb}
+mkdir -p "$W"
+
+# ---- pick a riscv-capable gdb (fail closed: BLOCKED if none) ----------------
+GDB=""
+for cand in riscv64-unknown-elf-gdb riscv64-linux-gnu-gdb riscv32-unknown-elf-gdb gdb-multiarch; do
+    if command -v "$cand" >/dev/null 2>&1; then GDB=$(command -v "$cand"); break; fi
+done
+if [ -z "$GDB" ] && command -v gdb >/dev/null 2>&1; then
+    if gdb -batch -ex 'set architecture riscv:rv64' >/dev/null 2>&1; then GDB=$(command -v gdb); fi
+fi
+if [ -z "$GDB" ]; then
+    echo "BLOCKED: no riscv-capable gdb found (need riscv64-*-gdb, gdb-multiarch, or a gdb built with riscv support)."
+    echo "Install one (e.g. apt install gdb-multiarch) and re-run. OpenOCD-side equivalent commands"
+    echo "for the same DM paths are in openocd_attach.md section 3."
+    exit 2
+fi
+echo "using gdb: $GDB"
+
+# ---- 1. build (identical to openocd_attach.md section 1) --------------------
+cc -shared -fPIC -o "$W/bb_glue.so" "$DIR/openocd_bitbang_glue.c" || exit 1
+ghdl -a --std=08 --workdir="$W" \
+    "$DIR/jtag_tap.vhd" "$DIR/riscv_dtm.vhd" "$DIR/dmi_bus.vhd" \
+    "$DIR/debug_registers.vhd" "$DIR/riscv_debug_module.vhd" \
+    "$DIR/sba_test_mem.vhd" "$DIR/tb_openocd_bitbang.vhd" || exit 1
+
+# ---- 2. start the simulation (bitbang server on :9999) ----------------------
+rm -f "$W/sim.log" "$W/openocd.log" "$W/gdb.log"
+( cd "$W" && LD_LIBRARY_PATH=$W timeout 600 ghdl -r --std=08 --workdir="$W" \
+      tb_openocd_bitbang >"$W/sim.log" 2>&1 ) &
+SIM_PID=$!
+i=0
+until grep -q 'listening' "$W/sim.log" 2>/dev/null; do
+    i=$((i+1)); [ $i -gt 60 ] && { echo "FAIL: sim did not open :9999"; cat "$W/sim.log"; kill $SIM_PID 2>/dev/null; exit 1; }
+    sleep 1
+done
+echo "sim up (pid $SIM_PID)"
+
+# ---- 3. start OpenOCD (gdb server on :3333) ---------------------------------
+timeout 570 openocd -f "$DIR/openocd_riscv_sim.cfg" >"$W/openocd.log" 2>&1 &
+OCD_PID=$!
+i=0
+until grep -q 'Listening on port 3333' "$W/openocd.log" 2>/dev/null; do
+    i=$((i+1)); [ $i -gt 120 ] && { echo "FAIL: OpenOCD gdb server did not come up"; tail -20 "$W/openocd.log"; kill $OCD_PID $SIM_PID 2>/dev/null; exit 1; }
+    sleep 1
+done
+echo "openocd up (pid $OCD_PID)"
+
+# ---- 4. drive the batch GDB session -----------------------------------------
+# gdb runs in the background (line-buffered log). When the script reaches
+# `continue`, it prints CONTINUE_STARTED; we then deliver the interactive
+# halt: SIGINT to gdb -> RSP 0x03 interrupt -> OpenOCD haltreq -> stop
+# reply -> the batch script resumes at the next command (PC_HALTED read).
+stdbuf -oL -eL "$GDB" -nx -batch -x "$DIR/gdb_e2e.gdb" >"$W/gdb.log" 2>&1 &
+GPID=$!
+i=0
+until grep -q 'CONTINUE_STARTED' "$W/gdb.log" 2>/dev/null; do
+    i=$((i+1)); [ $i -gt 420 ] && break
+    kill -0 $GPID 2>/dev/null || break
+    sleep 1
+done
+sleep 3
+kill -INT $GPID 2>/dev/null
+( sleep 90; kill -9 $GPID 2>/dev/null ) & WATCHDOG=$!
+wait $GPID
+GDB_RC=$?
+kill $WATCHDOG 2>/dev/null
+echo "--- gdb transcript ($W/gdb.log, rc=$GDB_RC) ---"
+cat "$W/gdb.log"
+echo "--- end transcript ---"
+
+# ---- 5. teardown -------------------------------------------------------------
+kill -INT $OCD_PID 2>/dev/null; wait $OCD_PID 2>/dev/null
+wait $SIM_PID 2>/dev/null
+
+# ---- 6. verdicts (fail closed) ----------------------------------------------
+g() { sed -n "s/^$1=//p" "$W/gdb.log" | tail -1; }
+FAIL=0
+X5=$(g X5_AFTER);      [ "$X5" = "0x123" ]        && echo "PASS gpr-write   (x5=$X5)"          || { echo "FAIL gpr-write   (x5='$X5')"; FAIL=1; }
+M28=$(g MEM28_AFTER);  [ "$M28" = "0xfeedc0de" ]  && echo "PASS mem-rw-sba  (mem[0x28]=$M28)"  || { echo "FAIL mem-rw-sba  (mem[0x28]='$M28')"; FAIL=1; }
+grep -q '0x10:.*0x00020002' "$W/gdb.log"          && echo "PASS mem-read-sba (init pattern @0x10)" || { echo "FAIL mem-read-sba"; FAIL=1; }
+PB=$(g PC_BEFORE)
+[ "$PB" = "0x100" ] && echo "PASS pc-write    (dpc abstract write, pc=$PB)" || { echo "FAIL pc-write    (pc='$PB')"; FAIL=1; }
+PA=$(g PC_AFTER)
+if [ -n "$PB" ] && [ -n "$PA" ] && [ $(( PA - PB )) -eq 4 ]; then
+    echo "PASS step        (dcsr.step via gdb monitor channel: pc $PB -> $PA, +4)"
+else
+    echo "FAIL step        (pc '$PB' -> '$PA')"; FAIL=1
+fi
+PH=$(g PC_HALTED);     [ -n "$PH" ]               && echo "PASS cont-halt   (native continue/interrupt, re-halted at pc=$PH)" || { echo "FAIL cont-halt"; FAIL=1; }
+grep -q 'E2E_DONE' "$W/gdb.log"                   && echo "PASS session     (clean detach)"    || { echo "FAIL session     (no E2E_DONE)"; FAIL=1; }
+
+[ $FAIL -eq 0 ] && echo "GDB_E2E: ALL PASS" || echo "GDB_E2E: FAILED"
+exit $FAIL

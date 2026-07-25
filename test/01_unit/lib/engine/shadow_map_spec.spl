@@ -1,0 +1,88 @@
+# Shadow Map System Tests
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.engine.render.shadow_map.{ShadowMapConfig, CascadeLevel, CascadedShadowMap, ShadowSystem}
+
+describe "ShadowMapConfig":
+    it "creates default config":
+        val cfg = ShadowMapConfig.default_config()
+        expect(cfg.resolution).to_equal(1024)
+        expect(cfg.bias).to_equal(0.005)
+        expect(cfg.normal_bias).to_equal(0.02)
+        expect(cfg.soft_shadows).to_equal(true)
+
+    it "creates high quality config":
+        val cfg = ShadowMapConfig.high_quality()
+        expect(cfg.resolution).to_equal(2048)
+        expect(cfg.bias).to_equal(0.003)
+        expect(cfg.normal_bias).to_equal(0.01)
+        expect(cfg.soft_shadows).to_equal(true)
+
+describe "CascadedShadowMap":
+    it "creates with correct cascade count":
+        val cfg = ShadowMapConfig.default_config()
+        val csm = CascadedShadowMap.new(4, cfg)
+        expect(csm.cascade_count).to_equal(4)
+        expect(csm.cascades.len()).to_equal(4)
+
+    it "generates increasing split distances":
+        val cfg = ShadowMapConfig.default_config()
+        val csm = CascadedShadowMap.new(3, cfg)
+        val c0 = csm.cascades[0]
+        val c1 = csm.cascades[1]
+        val c2 = csm.cascades[2]
+        expect(c0.split_distance < c1.split_distance).to_equal(true)
+        expect(c1.split_distance < c2.split_distance).to_equal(true)
+
+    it "gets cascade by valid index":
+        val cfg = ShadowMapConfig.default_config()
+        val csm = CascadedShadowMap.new(2, cfg)
+        val maybe = csm.get_cascade(0)
+        if val Some(level) = maybe:
+            expect(level.split_distance > 0.0).to_equal(true)
+
+    it "returns None for invalid cascade index":
+        val cfg = ShadowMapConfig.default_config()
+        val csm = CascadedShadowMap.new(2, cfg)
+        val maybe = csm.get_cascade(5)
+        if val Some(level) = maybe:
+            expect(1).to_equal(0)
+
+    it "computes total resolution":
+        val cfg = ShadowMapConfig.default_config()
+        val csm = CascadedShadowMap.new(2, cfg)
+        val total = csm.total_resolution()
+        # First cascade: 1024, second: 512
+        expect(total).to_equal(1536)
+
+describe "ShadowSystem":
+    it "starts enabled":
+        val cfg = ShadowMapConfig.default_config()
+        val sys = ShadowSystem.new(cfg)
+        expect(sys.is_enabled()).to_equal(true)
+        expect(sys.shadow_map_count()).to_equal(0)
+
+    it "adds shadow maps":
+        val cfg = ShadowMapConfig.default_config()
+        var sys = ShadowSystem.new(cfg)
+        val csm = CascadedShadowMap.new(3, cfg)
+        val idx = sys.add_shadow_map(csm)
+        expect(idx).to_equal(0)
+        expect(sys.shadow_map_count()).to_equal(1)
+
+    it "toggles enabled state":
+        val cfg = ShadowMapConfig.default_config()
+        var sys = ShadowSystem.new(cfg)
+        sys.set_enabled(false)
+        expect(sys.is_enabled()).to_equal(false)
+        sys.set_enabled(true)
+        expect(sys.is_enabled()).to_equal(true)
+
+    it "clears all shadow maps":
+        val cfg = ShadowMapConfig.default_config()
+        var sys = ShadowSystem.new(cfg)
+        sys.add_shadow_map(CascadedShadowMap.new(2, cfg))
+        sys.add_shadow_map(CascadedShadowMap.new(4, cfg))
+        expect(sys.shadow_map_count()).to_equal(2)
+        sys.clear()
+        expect(sys.shadow_map_count()).to_equal(0)

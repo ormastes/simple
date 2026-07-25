@@ -1,0 +1,82 @@
+# codex-system-test
+# @req REQ-012
+# @evidence-display: links
+"""# Simple Web Backend Equivalence
+
+Exercises the production Simple Web facade with exact pixel comparison.  The
+widget inventory is independently derived by the canonical coverage gate.
+"""
+use std.spec.*
+use std.io_runtime.{file_read, process_run}
+use app.wm_compare.html_compat.{compare_exact}
+use app.wm_compare.site_corpus.{build_famous_site_sample_corpus}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{simple_web_layout_render_html_pixels}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{SimpleWebRenderer, simple_web_render_html_to_pixels}
+
+fn production_backend_matches_default(sample, width: i32, height: i32) -> bool:
+    val default_pixels = simple_web_render_html_to_pixels(sample.html, width, height)
+    val renderer = SimpleWebRenderer.create_with_backend(width, height, "software")
+    val backend_pixels = renderer.render_html_to_pixels(sample.html)
+    if renderer.backend_name != "software" or backend_pixels.len() != width * height:
+        return false
+    val comparison = compare_exact(default_pixels, backend_pixels, width, height)
+    comparison.different_pixels == 0 and comparison.match_percentage == 10000
+
+fn first_production_layouts_match(count: i32, width: i32, height: i32) -> bool:
+    val samples = build_famous_site_sample_corpus()
+    if samples.len() < count:
+        return false
+    var index: i32 = 0
+    while index < count:
+        if not production_backend_matches_default(samples[index], width, height):
+            return false
+        index = index + 1
+    true
+
+fn all_offline_site_fixtures_match(width: i32, height: i32) -> bool:
+    val samples = build_famous_site_sample_corpus()
+    if samples.len() != 132:
+        return false
+    for sample in samples:
+        if not production_backend_matches_default(sample, width, height):
+            return false
+    true
+
+fn widget_coverage_gate_passes() -> bool:
+    val dir = "build/test-simple-web-backend-widget-coverage"
+    val command = "rm -rf " + dir + " && BUILD_DIR=" + dir + " REPORT_PATH=" + dir + "/report.md sh scripts/check/check-gui-widget-rendering-fixture-coverage.shs"
+    val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+    if code != 0:
+        return false
+    val evidence = file_read(dir + "/evidence.env")
+    evidence.contains("gui_widget_rendering_fixture_coverage_status=pass") and
+        evidence.contains("gui_widget_rendering_fixture_coverage_widget_kind_count=43") and
+        evidence.contains("gui_widget_rendering_fixture_coverage_render_fixture_covered_count=43") and
+        evidence.contains("gui_widget_rendering_fixture_coverage_renderdoc_fixture_covered_count=43")
+
+describe "Simple Web detailed backend equivalence":
+    # @capture(html)
+    # @capture(protocol)
+    it "validates fifty production layouts with exact pixels":
+        step("Render the first fifty deterministic production layouts")
+        expect(first_production_layouts_match(50, 40, 30)).to_equal(true)
+
+    # @capture(html)
+    it "renders all one hundred thirty-two offline site fixtures":
+        step("Run every deterministic site through the production facade")
+        expect(all_offline_site_fixtures_match(40, 30)).to_equal(true)
+
+    # @capture(html)
+    it "covers the forty-three widget fixture witnesses":
+        step("Derive and verify the complete widget inventory")
+        expect(widget_coverage_gate_passes()).to_equal(true)
+
+    it "keeps text-bearing software and cpu layout pixels exact":
+        step("Compare production layout output without a tolerance")
+        val sample = build_famous_site_sample_corpus()[0]
+        val software = simple_web_layout_render_html_pixels(sample.html, 160, 120, "software")
+        val cpu = simple_web_layout_render_html_pixels(sample.html, 160, 120, "cpu")
+        val comparison = compare_exact(software, cpu, 160, 120)
+        expect(comparison.different_pixels).to_equal(0)
+
+# @tag: sys, wm_compare, html_compat, corpus, engine2d

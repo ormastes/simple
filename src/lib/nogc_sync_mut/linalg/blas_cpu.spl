@@ -1,0 +1,133 @@
+"""CPU BLAS Provider — pure-Simple scalar implementation.
+
+CpuBlasProvider performs the same arithmetic as MockCpuBlasProvider but is
+a distinct type in the provider selection ladder.  Use when:
+  - SIMPLE_BLAS_BACKEND=scalar (or unset and no native shim found)
+  - Real arithmetic needed without any native dependency
+
+Import path: use std.nogc_sync_mut.linalg.blas_cpu.*
+
+# THREAD-SAFETY: one handle per process in v1; actor boundary crossing forbidden.
+
+# PERF-SUGAR-003: generic <T> variants deferred to v1.1 (interp dispatch erasure).
+# v1.1: fn blas_axpy<T>(...)
+"""
+
+use std.common.science_math.blas_provider.{BlasProvider, BlasProviderError}
+
+# ============================================================
+# CpuBlasProvider
+# Pure-Simple scalar loops — no native library dependency.
+# ============================================================
+
+pub class CpuBlasProvider:
+    pub fn provider_name(self) -> text:
+        "scalar"
+
+    # BLAS Level-1 — axpy: result[i] = alpha*x[i] + y[i]
+    pub fn blas_axpy(self, alpha: f64, n: i64, x: [f64], y: [f64]) -> Result<[f64], BlasProviderError>:
+        if x.len() != n or y.len() != n:
+            return Err(BlasProviderError.DimensionMismatch)
+        var out: [f64] = []
+        var i = 0
+        while i < n:
+            out.push(alpha * x[i] + y[i])
+            i = i + 1
+        Ok(out)
+
+    # BLAS Level-1 — scal: result[i] = alpha*x[i]
+    pub fn blas_scal(self, alpha: f64, n: i64, x: [f64]) -> Result<[f64], BlasProviderError>:
+        if x.len() != n:
+            return Err(BlasProviderError.DimensionMismatch)
+        var out: [f64] = []
+        var i = 0
+        while i < n:
+            out.push(alpha * x[i])
+            i = i + 1
+        Ok(out)
+
+    # BLAS Level-1 — dot: sum(x[i]*y[i])
+    pub fn blas_dot(self, n: i64, x: [f64], y: [f64]) -> Result<f64, BlasProviderError>:
+        if x.len() != n or y.len() != n:
+            return Err(BlasProviderError.DimensionMismatch)
+        var total = 0.0
+        var i = 0
+        while i < n:
+            total = total + x[i] * y[i]
+            i = i + 1
+        Ok(total)
+
+    # BLAS Level-1 — nrm2: sqrt(sum(x[i]^2))
+    pub fn blas_nrm2(self, n: i64, x: [f64]) -> Result<f64, BlasProviderError>:
+        if x.len() != n:
+            return Err(BlasProviderError.DimensionMismatch)
+        var sum_sq = 0.0
+        var i = 0
+        while i < n:
+            sum_sq = sum_sq + x[i] * x[i]
+            i = i + 1
+        Ok(cpu_sqrt_f64(sum_sq))
+
+    # BLAS Level-2 — gemv: y_out[i] = alpha * sum_j(A[i,j]*x[j]) + beta*y[i]
+    # A is row-major m×n.
+    # gemv operand-swap: pass row-major A with CUBLAS_OP_T at Layer A.
+    # Do NOT use (AB)^T = B^T A^T (that is gemm only).
+    pub fn blas_gemv(self, alpha: f64, a: [f64], m: i64, n: i64, x: [f64], beta: f64, y: [f64]) -> Result<[f64], BlasProviderError>:
+        if a.len() != m * n:
+            return Err(BlasProviderError.DimensionMismatch)
+        if x.len() != n:
+            return Err(BlasProviderError.DimensionMismatch)
+        if y.len() != m:
+            return Err(BlasProviderError.DimensionMismatch)
+        var out: [f64] = []
+        var row = 0
+        while row < m:
+            var total = beta * y[row]
+            var col = 0
+            while col < n:
+                total = total + alpha * a[row * n + col] * x[col]
+                col = col + 1
+            out.push(total)
+            row = row + 1
+        Ok(out)
+
+    # BLAS Level-3 — gemm: C[i,j] = alpha * sum_k(A[i,k]*B[k,j]) + beta*C_in[i,j]
+    # A is row-major m×k, B is row-major k×n, C is row-major m×n.
+    # Operand-swap (AB)^T = B^T A^T is applied at Layer A for cuBLAS; not needed here.
+    pub fn blas_gemm(self, alpha: f64, a: [f64], m: i64, kk: i64, b: [f64], bn: i64, beta: f64, c: [f64]) -> Result<[f64], BlasProviderError>:
+        if a.len() != m * kk:
+            return Err(BlasProviderError.DimensionMismatch)
+        if b.len() != kk * bn:
+            return Err(BlasProviderError.DimensionMismatch)
+        if c.len() != m * bn:
+            return Err(BlasProviderError.DimensionMismatch)
+        var out: [f64] = []
+        var i = 0
+        while i < m:
+            var j = 0
+            while j < bn:
+                var total = beta * c[i * bn + j]
+                var k = 0
+                while k < kk:
+                    total = total + alpha * a[i * kk + k] * b[k * bn + j]
+                    k = k + 1
+                out.push(total)
+                j = j + 1
+            i = i + 1
+        Ok(out)
+
+# ============================================================
+# Internal math helpers
+# ============================================================
+
+fn cpu_sqrt_f64(value: f64) -> f64:
+    if value <= 0.0:
+        return 0.0
+    var estimate = value
+    if estimate < 1.0:
+        estimate = 1.0
+    var i = 0
+    while i < 20:
+        estimate = 0.5 * (estimate + value / estimate)
+        i = i + 1
+    estimate

@@ -1,0 +1,211 @@
+"""Intel oneAPI Level Zero FFI Dispatch — Dynamic-First Dual-Path
+
+@tag:stdlib
+@tag:gpu
+
+Wraps Level Zero API functions behind an IntelFfi class. Dynamic-first
+since no Rust runtime exists for rt_intel_*. The static path resolves
+to extern fn stubs that will link-error unless the runtime is built.
+
+Usage:
+    val ffi = IntelFfi.create(GpuFfiMode.Dynamic)  # primary path
+    if ffi != nil and ffi.is_available():
+        ffi.init()
+"""
+
+use std.sffi.dynamic.{DynLib}
+use std.gpu.engine2d.ffi_dispatch.{GpuFfiMode, FfiDispatchBase, try_load_gpu_lib}
+
+# ============================================================================
+# Static extern declarations (no runtime impl yet — will link-error)
+# ============================================================================
+
+extern fn rt_intel_init() -> bool
+extern fn rt_intel_shutdown() -> bool
+extern fn rt_intel_is_available() -> bool
+extern fn rt_intel_driver_count() -> i64
+extern fn rt_intel_device_count() -> i64
+extern fn rt_intel_device_get(id: i64) -> i64
+extern fn rt_intel_command_list_create() -> i64
+extern fn rt_intel_command_list_close(handle: i64) -> bool
+extern fn rt_intel_command_list_destroy(handle: i64) -> bool
+extern fn rt_intel_command_queue_execute(queue: i64, cmd: i64) -> bool
+extern fn rt_intel_module_create(spirv: [u8]) -> i64
+extern fn rt_intel_module_destroy(module: i64) -> bool
+extern fn rt_intel_kernel_create(module: i64, name: text) -> i64
+extern fn rt_intel_kernel_destroy(kernel: i64) -> bool
+extern fn rt_intel_kernel_set_arg(kernel: i64, index: i64, value: i64) -> bool
+extern fn rt_intel_launch_kernel(cmd: i64, kernel: i64, gx: i64, gy: i64, gz: i64) -> bool
+extern fn rt_intel_mem_alloc(size: i64) -> i64
+extern fn rt_intel_mem_free(ptr: i64) -> bool
+extern fn rt_intel_fence_create() -> i64
+extern fn rt_intel_fence_wait(fence: i64) -> bool
+extern fn rt_intel_fence_destroy(fence: i64) -> bool
+extern fn rt_intel_engine2d_set_args_clear(fb_ptr: i64, color: i64, width: i64, height: i64) -> bool
+extern fn rt_intel_engine2d_set_args_rect(fb_ptr: i64, x: i64, y: i64, w: i64, h: i64, color: i64, fb_w: i64, fb_h: i64, filled: i64) -> bool
+extern fn rt_intel_engine2d_set_args_line(fb_ptr: i64, x1: i64, y1: i64, x2: i64, y2: i64, color: i64, thickness: i64, fb_w: i64, fb_h: i64) -> bool
+extern fn rt_intel_engine2d_set_args_circle(fb_ptr: i64, cx: i64, cy: i64, r: i64, color: i64, fb_w: i64, fb_h: i64, filled: i64) -> bool
+extern fn rt_intel_engine2d_set_args_rounded_rect(fb_ptr: i64, x: i64, y: i64, w: i64, h: i64, radius: i64, color: i64, fb_w: i64, fb_h: i64) -> bool
+extern fn rt_intel_engine2d_set_args_triangle(fb_ptr: i64, x1: i64, y1: i64, x2: i64, y2: i64, x3: i64, y3: i64, color: i64, fb_w: i64, fb_h: i64, min_x: i64, min_y: i64) -> bool
+extern fn rt_intel_engine2d_set_args_gradient(fb_ptr: i64, x: i64, y: i64, w: i64, h: i64, top_color: i64, bottom_color: i64, fb_w: i64, fb_h: i64) -> bool
+extern fn rt_intel_engine2d_set_args_blit(fb_ptr: i64, src_ptr: i64, x: i64, y: i64, w: i64, h: i64, fb_w: i64, fb_h: i64) -> bool
+extern fn rt_intel_engine2d_upload_pixels(d_dst: i64, pixels: [u32], count: i64) -> i64
+extern fn rt_intel_engine2d_download_pixels(d_src: i64, pixels: [u32], byte_size: i64) -> i64
+extern fn rt_intel_engine2d_upload_host_buf(d_dst: i64, host_buf: [u32], byte_size: i64) -> i64
+
+fn intel_engine2d_set_args_clear(fb_ptr: i64, color: i64, width: i64, height: i64) -> bool:
+    rt_intel_engine2d_set_args_clear(fb_ptr, color, width, height)
+
+fn intel_engine2d_set_args_rect(fb_ptr: i64, x: i64, y: i64, w: i64, h: i64, color: i64, fb_w: i64, fb_h: i64, filled: i64) -> bool:
+    rt_intel_engine2d_set_args_rect(fb_ptr, x, y, w, h, color, fb_w, fb_h, filled)
+
+fn intel_engine2d_set_args_line(fb_ptr: i64, x1: i64, y1: i64, x2: i64, y2: i64, color: i64, thickness: i64, fb_w: i64, fb_h: i64) -> bool:
+    rt_intel_engine2d_set_args_line(fb_ptr, x1, y1, x2, y2, color, thickness, fb_w, fb_h)
+
+fn intel_engine2d_set_args_circle(fb_ptr: i64, cx: i64, cy: i64, r: i64, color: i64, fb_w: i64, fb_h: i64, filled: i64) -> bool:
+    rt_intel_engine2d_set_args_circle(fb_ptr, cx, cy, r, color, fb_w, fb_h, filled)
+
+fn intel_engine2d_set_args_rounded_rect(fb_ptr: i64, x: i64, y: i64, w: i64, h: i64, radius: i64, color: i64, fb_w: i64, fb_h: i64) -> bool:
+    rt_intel_engine2d_set_args_rounded_rect(fb_ptr, x, y, w, h, radius, color, fb_w, fb_h)
+
+fn intel_engine2d_set_args_triangle(fb_ptr: i64, x1: i64, y1: i64, x2: i64, y2: i64, x3: i64, y3: i64, color: i64, fb_w: i64, fb_h: i64, min_x: i64, min_y: i64) -> bool:
+    rt_intel_engine2d_set_args_triangle(fb_ptr, x1, y1, x2, y2, x3, y3, color, fb_w, fb_h, min_x, min_y)
+
+fn intel_engine2d_set_args_gradient(fb_ptr: i64, x: i64, y: i64, w: i64, h: i64, top_color: i64, bottom_color: i64, fb_w: i64, fb_h: i64) -> bool:
+    rt_intel_engine2d_set_args_gradient(fb_ptr, x, y, w, h, top_color, bottom_color, fb_w, fb_h)
+
+fn intel_engine2d_set_args_blit(fb_ptr: i64, src_ptr: i64, x: i64, y: i64, w: i64, h: i64, fb_w: i64, fb_h: i64) -> bool:
+    rt_intel_engine2d_set_args_blit(fb_ptr, src_ptr, x, y, w, h, fb_w, fb_h)
+
+fn intel_engine2d_upload_pixels(d_dst: i64, pixels: [u32], count: i64) -> i64:
+    rt_intel_engine2d_upload_pixels(d_dst, pixels, count)
+
+fn intel_engine2d_download_pixels(d_src: i64, pixels: [u32], byte_size: i64) -> i64:
+    rt_intel_engine2d_download_pixels(d_src, pixels, byte_size)
+
+fn intel_engine2d_upload_host_buf(d_dst: i64, host_buf: [u32], byte_size: i64) -> i64:
+    rt_intel_engine2d_upload_host_buf(d_dst, host_buf, byte_size)
+
+# ============================================================================
+# IntelFfi
+# ============================================================================
+
+class IntelFfi:
+    _mode: GpuFfiMode
+    _dyn_lib: DynLib?
+
+impl FfiDispatchBase for IntelFfi:
+
+    fn mode() -> GpuFfiMode:
+        self._mode
+
+    static fn create_static() -> IntelFfi:
+        IntelFfi(_mode: GpuFfiMode.Static, _dyn_lib: nil)
+
+    static fn create_dynamic() -> IntelFfi?:
+        val lib = try_load_gpu_lib("ze_loader")
+        if lib == nil:
+            return nil
+        IntelFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib)
+
+    static fn create_dynamic_from(path: text) -> IntelFfi?:
+        val lib = DynLib.load(path)
+        if lib == nil:
+            return nil
+        IntelFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib)
+
+    static fn create(ffi_mode: GpuFfiMode) -> IntelFfi?:
+        match ffi_mode:
+            case Dynamic:
+                val dyn_ffi = IntelFfi.create_dynamic()
+                if dyn_ffi != nil:
+                    return dyn_ffi
+                nil
+            case Static:
+                IntelFfi.create_static()
+
+    fn is_available() -> bool:
+        match self._mode:
+            case Static: rt_intel_is_available()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("zeInit", 0)
+                    result == 0
+                else:
+                    false
+
+    fn init() -> bool:
+        match self._mode:
+            case Static: rt_intel_init()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("zeInit", 0)
+                    result == 0
+                else:
+                    false
+
+    fn shutdown() -> bool:
+        match self._mode:
+            case Static: rt_intel_shutdown()
+            case Dynamic: true
+
+    fn driver_count() -> i64:
+        match self._mode:
+            case Static: rt_intel_driver_count()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call0("zeDriverGet")
+                else:
+                    0
+
+    fn device_count() -> i64:
+        match self._mode:
+            case Static: rt_intel_device_count()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call0("zeDeviceGet")
+                else:
+                    0
+
+    fn command_list_create() -> i64:
+        match self._mode:
+            case Static: rt_intel_command_list_create()
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call0("zeCommandListCreate")
+                else:
+                    0
+
+    fn kernel_create(module: i64, name: text) -> i64:
+        match self._mode:
+            case Static: rt_intel_kernel_create(module, name)
+            case Dynamic: 0
+
+    fn launch_kernel(cmd: i64, kernel: i64, gx: i64, gy: i64, gz: i64) -> bool:
+        match self._mode:
+            case Static: rt_intel_launch_kernel(cmd, kernel, gx, gy, gz)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call_n("zeCommandListAppendLaunchKernel", [cmd, kernel, gx, gy, gz])
+                    result == 0
+                else:
+                    false
+
+    fn mem_alloc(size: i64) -> i64:
+        match self._mode:
+            case Static: rt_intel_mem_alloc(size)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    self._dyn_lib.call1("zeMemAllocDevice", size)
+                else:
+                    0
+
+    fn mem_free(ptr: i64) -> bool:
+        match self._mode:
+            case Static: rt_intel_mem_free(ptr)
+            case Dynamic:
+                if self._dyn_lib != nil:
+                    val result = self._dyn_lib.call1("zeMemFree", ptr)
+                    result == 0
+                else:
+                    false

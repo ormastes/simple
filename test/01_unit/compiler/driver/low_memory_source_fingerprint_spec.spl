@@ -1,0 +1,32 @@
+use std.spec
+use std.io_runtime.{file_read}
+use compiler.common.driver_core_types.{CompileOptions, SourceFile}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.driver.driver_aot_output.{driver_native_sources_fingerprint}
+
+describe "low-memory native source metadata":
+    it "preserves cache identity and path metadata while evicting content":
+        var ctx = CompileContext.create(CompileOptions.default())
+        ctx.sources = [
+            SourceFile(path: "a.spl", content: "fn a() -> i64: 1", module_name: "a"),
+            SourceFile(path: "b.spl", content: "fn b() -> i64: 2", module_name: "b")
+        ]
+        ctx.native_sources_fingerprint = driver_native_sources_fingerprint(ctx.sources)
+        val fingerprint = ctx.native_sources_fingerprint
+
+        ctx.evict_sources()
+
+        expect(ctx.sources.len()).to_equal(2)
+        expect(ctx.sources[0].path).to_equal("a.spl")
+        expect(ctx.sources[0].module_name).to_equal("a")
+        expect(ctx.sources[0].content).to_equal("")
+        expect(ctx.sources[1].path).to_equal("b.spl")
+        expect(ctx.native_sources_fingerprint).to_equal(fingerprint)
+
+    it "captures the fingerprint before phase-two parsing":
+        val source = file_read("src/compiler/80.driver/driver.spl")
+        val fingerprint_pos = source.find("self.ctx.native_sources_fingerprint = driver_native_sources_fingerprint(self.ctx.sources)") ?? -1
+        val parse_pos = source.find("val (parsed_ctx, parse_ok) = self.parse_all_impl()") ?? -1
+
+        expect(fingerprint_pos).to_be_greater_than(0)
+        expect(parse_pos).to_be_greater_than(fingerprint_pos)

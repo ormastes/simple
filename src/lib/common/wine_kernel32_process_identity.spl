@@ -1,0 +1,57 @@
+"""Bounded KERNEL32 process/thread identity bridge for Wine startup probes."""
+
+class WineKernel32ProcessIdentity:
+    process_id: i64
+    thread_id: i64
+    process_handle: i64
+    thread_handle: i64
+
+class WineKernel32ProcessIdentityResult:
+    ok: bool
+    error: text
+    process_id: i64
+    thread_id: i64
+    process_handle: i64
+    thread_handle: i64
+    operations: text
+
+fn _identity(process_id: i64, thread_id: i64, process_handle: i64, thread_handle: i64) -> WineKernel32ProcessIdentity:
+    WineKernel32ProcessIdentity(process_id: process_id, thread_id: thread_id, process_handle: process_handle, thread_handle: thread_handle)
+
+fn _result(ok: bool, error: text, process_id: i64, thread_id: i64, process_handle: i64, thread_handle: i64, operations: text) -> WineKernel32ProcessIdentityResult:
+    WineKernel32ProcessIdentityResult(ok: ok, error: error, process_id: process_id, thread_id: thread_id, process_handle: process_handle, thread_handle: thread_handle, operations: operations)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    if symbols.len() == 0:
+        return "bridge-missing:kernel32-process-identity"
+    for symbol in symbols:
+        if symbol != "GetCurrentProcessId" and symbol != "GetCurrentThreadId" and symbol != "GetCurrentProcess" and symbol != "GetCurrentThread":
+            return "bridge-wrong-category:" + symbol
+    if symbols.len() != 4:
+        return "kernel32-process-identity-sequence-count-mismatch"
+    if symbols[0] != "GetCurrentProcessId":
+        return "kernel32-process-identity-sequence-expected:GetCurrentProcessId"
+    if symbols[1] != "GetCurrentThreadId":
+        return "kernel32-process-identity-sequence-expected:GetCurrentThreadId"
+    if symbols[2] != "GetCurrentProcess":
+        return "kernel32-process-identity-sequence-expected:GetCurrentProcess"
+    if symbols[3] != "GetCurrentThread":
+        return "kernel32-process-identity-sequence-expected:GetCurrentThread"
+    "ready"
+
+pub fn wine_kernel32_process_identity_default() -> WineKernel32ProcessIdentity:
+    _identity(0x40, 0x80, -1, -2)
+
+pub fn wine_kernel32_execute_process_identity(symbols: [text], identity: WineKernel32ProcessIdentity) -> WineKernel32ProcessIdentityResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, 0, 0, 0, 0, "")
+    if identity.process_id <= 0:
+        return _result(false, "GetCurrentProcessId:invalid-process-id", 0, 0, 0, 0, "")
+    if identity.thread_id <= 0:
+        return _result(false, "GetCurrentThreadId:invalid-thread-id", identity.process_id, 0, 0, 0, "GetCurrentProcessId")
+    if identity.process_handle != -1:
+        return _result(false, "GetCurrentProcess:invalid-pseudo-handle", identity.process_id, identity.thread_id, 0, 0, "GetCurrentProcessId GetCurrentThreadId")
+    if identity.thread_handle != -2:
+        return _result(false, "GetCurrentThread:invalid-pseudo-handle", identity.process_id, identity.thread_id, identity.process_handle, 0, "GetCurrentProcessId GetCurrentThreadId GetCurrentProcess")
+    _result(true, "", identity.process_id, identity.thread_id, identity.process_handle, identity.thread_handle, "GetCurrentProcessId GetCurrentThreadId GetCurrentProcess GetCurrentThread")

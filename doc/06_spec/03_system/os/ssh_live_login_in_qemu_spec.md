@@ -1,0 +1,155 @@
+# Live SSH Login in QEMU Specification
+
+> This scenario is the live x86_64 QEMU release gate for the SimpleOS SSH server and shell launch path. It builds the Cranelift `x64-ssh` guest, boots it with host port 2222 forwarded to guest port 22, and drives real TCP sessions through the host-side probe wrapper.
+
+<!-- sdn-diagram:id=ssh_live_login_in_qemu_spec.arch -->
+<details class="sdn-source">
+<summary>SDN source</summary>
+
+```sdn id=ssh_live_login_in_qemu_spec.arch hash=sha256:auto render=ascii
+@layout dag
+@direction LR
+
+ssh_live_login_in_qemu_spec -> std
+ssh_live_login_in_qemu_spec -> os
+```
+
+</details>
+
+<details class="sdn-ascii" open>
+<summary>Diagram</summary>
+
+```ascii generated-from=ssh_live_login_in_qemu_spec.arch hash=sha256:auto
+# run: simple md-diagram-update
+```
+
+</details>
+<!-- sdn-diagram:end -->
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 1 | 1 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Live SSH Login in QEMU Specification
+
+This scenario is the live x86_64 QEMU release gate for the SimpleOS SSH server and shell launch path. It builds the Cranelift `x64-ssh` guest, boots it with host port 2222 forwarded to guest port 22, and drives real TCP sessions through the host-side probe wrapper.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Requirements | N/A |
+| Plan | .spipe/simpleos-harden-exec/state.md |
+| Design | N/A |
+| Research | N/A |
+| Source | `test/03_system/os/ssh_live_login_in_qemu_spec.spl` |
+| Updated | 2026-06-01 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+This scenario is the live x86_64 QEMU release gate for the SimpleOS SSH server
+and shell launch path. It builds the Cranelift `x64-ssh` guest, boots it with
+host port 2222 forwarded to guest port 22, and drives real TCP sessions through
+the host-side probe wrapper.
+
+## Acceptance Criteria
+
+- The `x64-ssh` scenario resolves and the `ssh_live_entry.spl` kernel builds
+  with the Cranelift backend.
+- The guest initializes the C-backed network runtime, binds TCP port 22, and
+  reaches the `[ssh-live] ready` serial marker.
+- A valid shell session authenticates as `root` with password `simpleos` and
+  receives the shell command response.
+- A bad-auth probe and a bad-session probe both fail closed and are recorded in
+  the serial log.
+- `SESSION shell simple.smf --version` resolves through `/usr/bin/simple.smf`
+  to the SMF alias `/SYS/APPS/SIMPLSTC.SMF`.
+- `SESSION shell simple --check` resolves through `/usr/bin/simple` to the same
+  SMF-backed executable alias, proving executable-file launch routing as well
+  as direct SMF launch routing.
+
+## Artifacts
+
+The host-side SSH contract writes durable evidence under `build/os/`:
+
+- `x64-ssh-live.serial.log` contains the guest serial markers.
+- `x64-ssh-live.session-smf.txt` contains the SMF launch session transcript.
+- `x64-ssh-live.session-exec.txt` contains the executable launch transcript.
+
+## Examples
+
+Run the live gate with:
+
+```bash
+SIMPLE_LIB=src SIMPLE_BIN=src/compiler_rust/target/release/simple \
+  src/compiler_rust/target/release/simple test \
+  test/system/ssh_live_login_in_qemu_spec.spl \
+  --mode=interpreter --timeout 900 --clean --format json
+```
+
+Passing transcripts include:
+
+```text
+SESSION OK shell simple.smf path=/usr/bin/simple.smf alias=/SYS/APPS/SIMPLSTC.SMF
+SESSION OK shell simple path=/usr/bin/simple alias=/SYS/APPS/SIMPLSTC.SMF
+```
+
+## Failure Diagnostics
+
+If the build succeeds but the scenario fails, inspect
+`build/test-artifacts/system/ssh_live_login_in_qemu/combined.log` first. Then
+check the three `build/os/x64-ssh-live.*` transcript files to determine whether
+the failure happened before TCP readiness, during authentication, or during the
+SMF/executable shell launch probes.
+
+**Requirements:** N/A
+**Plan:** .spipe/simpleos-harden-exec/state.md
+**Design:** N/A
+**Research:** N/A
+
+## Scenarios
+
+### Live SSH probe in QEMU
+
+#### boots the Cranelift x64-ssh guest and accepts shell, SMF, executable, bad-auth, and bad-session probes
+
+<details>
+<summary>Executable SPipe</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val scenario = get_scenario("x64-ssh")
+expect(scenario.name).to_equal("x64-ssh")
+val target = get_ssh_live_target()
+expect(build_os_with_backend(target, "cranelift")).to_equal(true)
+val ok = test_scenario(scenario, scenario_test_timeout_ms(scenario))
+expect(ok).to_equal(true)
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 1 |
+| Active scenarios | 1 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Plan:** [.spipe/simpleos-harden-exec/state.md](.spipe/simpleos-harden-exec/state.md)
+
+
+</details>

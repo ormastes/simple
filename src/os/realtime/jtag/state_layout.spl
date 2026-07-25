@@ -1,0 +1,126 @@
+# @platform: baremetal
+#
+# On-target RTOS state snapshot layout.
+# Placed in .rtos_state linker section at a fixed address
+# so JTAG probes can read/write it directly.
+
+val RTOS_SNAPSHOT_MAGIC: u32 = 0x52544F53  # "RTOS"
+val RTOS_SNAPSHOT_VERSION: u16 = 1u16
+val MAX_TASKS: i32 = 16
+
+class TaskSnapshot:
+    """Serializable copy of a single TCB."""
+    id: i32
+    priority: i32
+    state: i32
+    stack_ptr_lo: u32
+    stack_ptr_hi: u32
+    entry_fn_lo: u32
+    entry_fn_hi: u32
+    deadline_lo: u32
+    deadline_hi: u32
+
+    static fn from_tcb(tcb: TCB) -> TaskSnapshot:
+        TaskSnapshot(
+            id: tcb.id,
+            priority: tcb.priority,
+            state: tcb.state,
+            stack_ptr_lo: (tcb.stack_ptr & 0xFFFFFFFFu64).to_u32(),
+            stack_ptr_hi: (tcb.stack_ptr >> 32).to_u32(),
+            entry_fn_lo: (tcb.entry_fn & 0xFFFFFFFFu64).to_u32(),
+            entry_fn_hi: (tcb.entry_fn >> 32).to_u32(),
+            deadline_lo: (tcb.deadline_tick & 0xFFFFFFFFu64).to_u32(),
+            deadline_hi: (tcb.deadline_tick >> 32).to_u32()
+        )
+
+    fn to_stack_ptr() -> u64:
+        self.stack_ptr_lo.to_u64() | (self.stack_ptr_hi.to_u64() << 32)
+
+    fn to_entry_fn() -> u64:
+        self.entry_fn_lo.to_u64() | (self.entry_fn_hi.to_u64() << 32)
+
+    fn to_deadline() -> u64:
+        self.deadline_lo.to_u64() | (self.deadline_hi.to_u64() << 32)
+
+class RtosSnapshot:
+    """Full RTOS state for JTAG capture/restore."""
+    magic: u32
+    version: u16
+    task_count: i32
+    active_task_id: i32
+    tick_count_lo: u32
+    tick_count_hi: u32
+    priority_bitmap: i32
+    rng_state: [u64]
+    tasks: [TaskSnapshot]
+
+    static fn empty() -> RtosSnapshot:
+        RtosSnapshot(
+            magic: RTOS_SNAPSHOT_MAGIC,
+            version: RTOS_SNAPSHOT_VERSION,
+            task_count: 0,
+            active_task_id: -1,
+            tick_count_lo: 0u32,
+            tick_count_hi: 0u32,
+            priority_bitmap: 0,
+            rng_state: [],
+            tasks: []
+        )
+
+var snapshot: RtosSnapshot = RtosSnapshot.empty()
+var snapshot_ready: bool = false
+
+fn snapshot_init():
+    """Initialize the snapshot region."""
+    snapshot = RtosSnapshot.empty()
+    snapshot_ready = true
+
+fn snapshot_prepare():
+    """Capture live scheduler state into the snapshot struct.
+    Call before halting (or from a JTAG breakpoint handler)."""
+    snapshot.magic = RTOS_SNAPSHOT_MAGIC
+    snapshot.version = RTOS_SNAPSHOT_VERSION
+    snapshot.task_count = task_count
+    snapshot.active_task_id = sched_get_current()
+
+    val tick = sched_get_tick()
+    snapshot.tick_count_lo = (tick & 0xFFFFFFFFu64).to_u32()
+    snapshot.tick_count_hi = (tick >> 32).to_u32()
+    snapshot.priority_bitmap = sched_get_bitmap()
+    snapshot.rng_state = rng_get_state()
+
+    snapshot.tasks = []
+    var i = 0
+    while i < MAX_TASKS:
+        val tcb = task_get(i)
+        snapshot.tasks.push(TaskSnapshot.from_tcb(tcb))
+        i = i + 1
+
+    snapshot_ready = true
+
+fn snapshot_restore():
+    """Restore scheduler state from the snapshot struct.
+    Call after JTAG writes new data into the snapshot region."""
+    if snapshot.magic != RTOS_SNAPSHOT_MAGIC:
+        return
+
+    val tick = snapshot.tick_count_lo.to_u64() | (snapshot.tick_count_hi.to_u64() << 32)
+    sched_set_tick(tick)
+    sched_set_current(snapshot.active_task_id)
+    sched_set_bitmap(snapshot.priority_bitmap)
+
+    if snapshot.rng_state.length() >= 4:
+        rng_set_state(snapshot.rng_state)
+
+    var i = 0
+    while i < snapshot.tasks.length():
+        val ts = snapshot.tasks[i]
+        if ts.id >= 0 and ts.id < MAX_TASKS:
+            task_set_state(ts.id, ts.state)
+            task_set_stack_ptr(ts.id, ts.to_stack_ptr())
+            task_set_deadline(ts.id, ts.to_deadline())
+        i = i + 1
+
+fn snapshot_is_valid() -> bool:
+    """Check if snapshot has valid magic."""
+    snapshot.magic == RTOS_SNAPSHOT_MAGIC and snapshot_ready

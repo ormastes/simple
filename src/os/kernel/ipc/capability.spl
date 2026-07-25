@@ -1,0 +1,1265 @@
+# Capability Enforcement — Computation Dimension
+#
+# Per-task capability management with pledge/unveil restrictions.
+# Capabilities follow the generation-counter pattern from SurfaceHandle:
+# revoking a capability bumps its generation, invalidating all copies.
+#
+# Monotonic security model (inspired by OpenBSD):
+#   - pledge() permanently restricts a task's capability set
+#   - unveil() permanently restricts file path access
+#   - Neither can ever be expanded once applied
+
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet, PrivilegeMask, Grant, PRIVCTL_SET_MASK, PRIVCTL_GET_MASK, PRIVCTL_ADD_PEER, PRIVCTL_REMOVE_PEER, GRANT_R, GRANT_W, GRANT_RW, priv_allows_kernel_call, priv_allows_send_to}
+use os.kernel.types.vmspace_types.{ProcessVmSpace, VMA_READ, VMA_WRITE}
+use os.kernel.memory.vmm.{vma_find, vmm_pt_range_user_readable, vmm_pt_range_user_writable}
+use os.kernel.privilege.privilege_bridge.{two_gate_for_task}
+use os.kernel.types.session_types.{Session, SessionKind, capset_subset, capset_clone_unpledged, Container, EscrowCap}
+
+# ============================================================================
+# Per-Task Capability Record
+# ============================================================================
+
+struct TaskCapRecord:
+    """Capability state for a single task.
+
+    Tracks the capability set, pledge/unveil status, and path restrictions.
+    """
+    task_id: TaskId
+    caps: CapabilitySet
+    unveil_paths: [UnveilEntry]     # Allowed paths after unveil()
+    is_unveiled: bool               # Once unveiled, no new paths can be added
+    session_id: u64                 # Owning privilege session (0 = none / legacy) — S1
+    session_epoch: u64              # Session epoch captured at bind time — S3 O(1) revoke
+
+struct UnveilEntry:
+    """A single unveil path restriction."""
+    path: text
+    permissions: text               # "r", "w", "rw", "rwx", "rwxc", etc.
+
+# ============================================================================
+# Capability Manager
+# ============================================================================
+
+class CapabilityManager:
+    """Manages per-task capability sets and enforces security policy.
+
+    Each task starts with a full capability set (or inherits from parent).
+    Tasks can permanently restrict their capabilities via pledge() and
+    restrict file access via unveil(). These restrictions are monotonic:
+    once applied, they can only shrink, never expand.
+
+    Capability transfer between tasks uses generation counters:
+    revoking a token bumps the generation, immediately invalidating
+    all copies held by other tasks.
+
+    E3/E4 (2026-06-11): every token carries a token_id + parent_token_id for
+    transitive revocation lineage, and a depth budget for delegation depth enforcement.
+    """
+    records: [TaskCapRecord]
+    next_generation: u64            # Global generation counter for tokens
+    next_token_id: u64              # Monotone token provenance counter (E3)
+    sessions: [Session]             # S1 privilege-session table
+    next_session_id: u64            # Monotone session id allocator
+    next_session_epoch: u64         # Monotone session epoch allocator (S3 revoke)
+    containers: [Container]         # S5 session-owned container table
+    next_container_id: u64          # Monotone container id allocator (S5)
+    escrows: [EscrowCap]            # S5 cross-session single-use escrow table
+    next_escrow_id: u64             # Monotone escrow id allocator (S5)
+
+impl CapabilityManager:
+    static fn new() -> CapabilityManager:
+        """Create an empty capability manager."""
+        CapabilityManager(
+            records: [],
+            next_generation: 1,
+            next_token_id: 1,
+            sessions: [],
+            next_session_id: 1,
+            next_session_epoch: 1,
+            containers: [],
+            next_container_id: 1,
+            escrows: [],
+            next_escrow_id: 1
+        )
+
+    # -- Checking ------------------------------------------------------------
+
+    fn check(task: TaskId, required: CapabilityKind) -> bool:
+        """Check if a task holds a capability matching the required kind.
+
+        Returns true if the task has the capability, false otherwise.
+        """
+        val record = self._find_record(task)
+        if record == nil:
+            return false
+        val rec = record
+        # S3: a session-bound record is only usable while its session is live
+        # at the epoch captured when the record was bound. A teardown epoch bump
+        # (or seal) invalidates every bound capability without a per-token walk.
+        if rec.session_id != 0u64:
+            if not self._session_live(rec.session_id, rec.session_epoch):
+                return false
+        rec.caps.has(required)
+
+    fn check_file_access(task: TaskId, path: text, perm: text) -> bool:
+        """Check if a task can access a file path with given permissions.
+
+        If the task has not called unveil(), all paths are allowed
+        (subject to normal capability checks). Once unveiled, only
+        explicitly allowed paths are permitted.
+        """
+        val record = self._find_record(task)
+        if record == nil:
+            return false
+        val rec = record
+        if not _perms_contain("rwxc", perm):
+            return false
+        var requested_cap = false
+        if perm.contains("r"):
+            requested_cap = true
+            if not self.check(task, CapabilityKind.FileRead(path_prefix: path)):
+                return false
+        if perm.contains("w"):
+            requested_cap = true
+            if not self.check(task, CapabilityKind.FileWrite(path_prefix: path)):
+                return false
+        if perm.contains("x"):
+            requested_cap = true
+            if not self.check(task, CapabilityKind.FileExec(path_prefix: path)):
+                return false
+        if perm.contains("c"):
+            requested_cap = true
+            if not self.check(task, CapabilityKind.FileCreate(path_prefix: path)):
+                return false
+        if not requested_cap:
+            return false
+        if not rec.is_unveiled:
+            # Not unveiled — all paths allowed (capability-only check)
+            return true
+        # Check unveil entries
+        for entry in rec.unveil_paths:
+            val path_matches = _path_starts_with(path, entry.path)
+            val perm_matches = _perms_contain(entry.permissions, perm)
+            if path_matches:
+                if perm_matches:
+                    return true
+        false
+
+    # -- Granting / Revoking -------------------------------------------------
+
+    me grant(from: TaskId, to: TaskId, cap: CapabilityToken) -> bool:
+        """Grant (delegate) a capability from one task to another.
+
+        E3: the child token receives token_id = next_token_id and
+            parent_token_id = cap.token_id so the lineage can be walked
+            by revoke_transitive().
+        E4: delegation requires cap.depth > 0; child gets depth = cap.depth - 1.
+            A zero-depth token cannot be delegated further (deny, not clamp).
+        """
+        # Verify the source task holds this capability
+        val has_cap = self.check(from, cap.kind)
+        if not has_cap:
+            return false
+
+        # E4: depth guard — deny delegation when budget is exhausted
+        if cap.depth <= 0:
+            return false
+
+        # spm-winfs-llm-suite AC-3: second gate — hierarchical privilege via
+        # kernel-local privilege_bridge. Both gates must pass. Boot-critical
+        # tasks (pid 1, SPM placeholder) receive root mirrors during init;
+        # tasks without mirrors fall back to capability-only gating.
+        val has_priv = two_gate_for_task(from.id, cap.kind)
+        if not has_priv:
+            return false
+
+        # Create a new token for the target (E3: provenance; E4: depth-1)
+        val child_tid = self.next_token_id
+        self.next_token_id = self.next_token_id + 1
+        val new_token = CapabilityToken(
+            kind: cap.kind,
+            generation: self.next_generation,
+            owner: to.id,
+            token_id: child_tid,
+            parent_token_id: cap.token_id,
+            depth: cap.depth - 1
+        )
+        self.next_generation = self.next_generation + 1
+
+        # Add to target's capability set
+        self._ensure_record(to)
+        var idx = 0
+        while idx < self.records.len():
+            var rec = self.records[idx]
+            if rec.task_id.id == to.id:
+                # Build a new caps list with the token appended (arrays are value types)
+                var new_caps_list: [CapabilityToken] = []
+                for existing_tok in rec.caps.caps:
+                    new_caps_list.push(existing_tok)
+                new_caps_list.push(new_token)
+                rec.caps.caps = new_caps_list
+                self.records[idx] = rec
+                return true
+            idx = idx + 1
+        false
+
+    me revoke(cap: CapabilityToken) -> bool:
+        """Revoke a capability token (owner-level, direct).
+
+        Removes the token from the owning task's capability set only.
+        Use revoke_transitive() to also revoke all derived descendants.
+        """
+        val owner_id = TaskId(id: cap.owner)
+        var idx = 0
+        while idx < self.records.len():
+            var rec = self.records[idx]
+            if rec.task_id.id == owner_id.id:
+                var new_caps: [CapabilityToken] = []
+                for existing in rec.caps.caps:
+                    # Keep all caps except the revoked one
+                    val same_kind = existing.kind == cap.kind
+                    val same_gen = existing.generation == cap.generation
+                    if same_kind:
+                        if same_gen:
+                            pass  # Skip — this is the revoked token
+                        else:
+                            new_caps.push(existing)
+                    else:
+                        new_caps.push(existing)
+                rec.caps.caps = new_caps
+                if new_caps.len() == 0:
+                    rec.caps.is_pledged = true
+                self.records[idx] = rec
+                return true
+            idx = idx + 1
+        false
+
+    me revoke_transitive(root_token_id: u64) -> i64:
+        """Revoke a token AND all tokens in its delegation ancestry (E3).
+
+        Walks every record and removes any token whose token_id equals
+        root_token_id OR whose ancestry chain (via parent_token_id links)
+        includes root_token_id.  Uses an iterative worklist — no recursion.
+
+        Returns the count of tokens revoked across all records.
+        """
+        # Build the worklist of token_ids to revoke, starting with the root.
+        var worklist: [u64] = []
+        worklist.push(root_token_id)
+        var revoked_count: i64 = 0
+
+        # Process until no more descendants are discovered.
+        var wi = 0
+        while wi < worklist.len():
+            val current_id = worklist[wi]
+            wi = wi + 1
+
+            # Walk all records and remove tokens matching current_id; collect children.
+            var ri = 0
+            while ri < self.records.len():
+                var rec = self.records[ri]
+                var kept: [CapabilityToken] = []
+                for tok in rec.caps.caps:
+                    if tok.token_id == current_id:
+                        # This token is in the revocation set — collect its children
+                        # (any token whose parent_token_id == current_id will be
+                        #  caught when current_id's children are processed in later
+                        #  worklist iterations).
+                        revoked_count = revoked_count + 1
+                        # Schedule children: any token with parent = current_id
+                        # will be found in the next pass; we enqueue current_id's
+                        # own token_id so children are caught automatically above.
+                    else:
+                        kept.push(tok)
+                        # Enqueue child token_ids discovered in this pass
+                        if tok.parent_token_id == current_id:
+                            var already = false
+                            for wid in worklist:
+                                if wid == tok.token_id:
+                                    already = true
+                            if not already:
+                                worklist.push(tok.token_id)
+                rec.caps.caps = kept
+                if kept.len() == 0:
+                    rec.caps.is_pledged = true
+                self.records[ri] = rec
+                ri = ri + 1
+
+        revoked_count
+
+    # -- Pledge / Unveil (Monotonic Restriction) -----------------------------
+
+    me pledge(task: TaskId, allowed: [CapabilityKind]):
+        """Permanently restrict a task's capabilities to the allowed list.
+
+        After pledge(), the task can only use capabilities in the allowed
+        list. This is irreversible — once pledged, the set can only shrink.
+
+        Delegates to CapabilitySet.pledge() which handles the filtering.
+        """
+        self._ensure_record(task)
+        var idx = 0
+        while idx < self.records.len():
+            var rec = self.records[idx]
+            if rec.task_id.id == task.id:
+                rec.caps.pledge(allowed)
+                self.records[idx] = rec
+                return
+            idx = idx + 1
+
+    me unveil(task: TaskId, path: text, permissions: text):
+        """Restrict file access to a specific path with given permissions.
+
+        First call to unveil() locks the task into unveiled mode.
+        Subsequent calls can only add more restrictive entries.
+        Once unveiled, access to non-unveiled paths is denied.
+        """
+        self._ensure_record(task)
+        var idx = 0
+        while idx < self.records.len():
+            var rec = self.records[idx]
+            if rec.task_id.id == task.id:
+                rec.is_unveiled = true
+                rec.unveil_paths.push(UnveilEntry(
+                    path: path,
+                    permissions: permissions
+                ))
+                self.records[idx] = rec
+                return
+            idx = idx + 1
+
+    # -- Batch Revocation ----------------------------------------------------
+
+    me revoke_all_for_task(task: TaskId):
+        """Revoke all capabilities granted to a task.
+
+        Iterates the task's capability set and bumps generation counters
+        to invalidate every token. This is called during task cleanup to
+        ensure no stale capabilities survive a task exit or crash.
+
+        After revocation, the task's capability record is removed entirely.
+        """
+        var idx = 0
+        while idx < self.records.len():
+            var rec = self.records[idx]
+            if rec.task_id.id == task.id:
+                # Bump generation for each capability to invalidate copies
+                for cap in rec.caps.caps:
+                    # Each revoked token gets a fresh (higher) generation,
+                    # ensuring any copies held by other tasks fail check()
+                    self.next_generation = self.next_generation + 1
+                # Clear the capability set
+                rec.caps.caps = []
+                self.records[idx] = rec
+                break
+            idx = idx + 1
+        # Remove the record entirely
+        self.destroy_task(task)
+
+    # -- Task Lifecycle ------------------------------------------------------
+
+    me init_task_record(task: TaskId, full: bool):
+        """Initialize capability record for a new task at spawn time.
+
+        Idempotent: if a record already exists for `task`, returns without
+        modifying it. If `full` is true, grants a full capability set
+        seeded with FileRead, FileWrite, FileCreate, FileExec, and
+        ProcessSpawn tokens so spawned processes can perform I/O
+        immediately; otherwise grants an empty pledged set.
+        """
+        val existing = self._find_record(task)
+        if existing != nil:
+            return
+        # full=true: unpledged full-trust set; full=false: empty pledged set
+        var cap_tokens: [CapabilityToken] = []
+        if full:
+            cap_tokens.push(CapabilityToken(kind: CapabilityKind.FileRead(path_prefix: ""), generation: self.next_generation, owner: task.id, token_id: self.next_token_id, parent_token_id: 0u64, depth: 2))
+            self.next_generation = self.next_generation + 1
+            self.next_token_id = self.next_token_id + 1
+            cap_tokens.push(CapabilityToken(kind: CapabilityKind.FileWrite(path_prefix: ""), generation: self.next_generation, owner: task.id, token_id: self.next_token_id, parent_token_id: 0u64, depth: 2))
+            self.next_generation = self.next_generation + 1
+            self.next_token_id = self.next_token_id + 1
+            cap_tokens.push(CapabilityToken(kind: CapabilityKind.FileCreate(path_prefix: ""), generation: self.next_generation, owner: task.id, token_id: self.next_token_id, parent_token_id: 0u64, depth: 2))
+            self.next_generation = self.next_generation + 1
+            self.next_token_id = self.next_token_id + 1
+            cap_tokens.push(CapabilityToken(kind: CapabilityKind.FileExec(path_prefix: ""), generation: self.next_generation, owner: task.id, token_id: self.next_token_id, parent_token_id: 0u64, depth: 2))
+            self.next_generation = self.next_generation + 1
+            self.next_token_id = self.next_token_id + 1
+            cap_tokens.push(CapabilityToken(kind: CapabilityKind.ProcessSpawn, generation: self.next_generation, owner: task.id, token_id: self.next_token_id, parent_token_id: 0u64, depth: 2))
+            self.next_generation = self.next_generation + 1
+            self.next_token_id = self.next_token_id + 1
+        var caps = CapabilitySet(caps: cap_tokens, is_pledged: not full)
+        val record = TaskCapRecord(
+            task_id: task,
+            caps: caps,
+            unveil_paths: [],
+            is_unveiled: false,
+            session_id: 0u64,
+            session_epoch: 0u64
+        )
+        self.records.push(record)
+
+    me init_task(task: TaskId, caps: CapabilitySet):
+        """Initialize capability record for a new task."""
+        var stored_caps = caps
+        if task.id != 1 and not caps.is_pledged and caps.caps.len() == 0:
+            stored_caps = CapabilitySet.empty()
+        val record = TaskCapRecord(
+            task_id: task,
+            caps: stored_caps,
+            unveil_paths: [],
+            is_unveiled: false,
+            session_id: 0u64,
+            session_epoch: 0u64
+        )
+        self.records.push(record)
+
+    me install_sandbox_lowering(task: TaskId, sandbox_lowering_sdn: text) -> bool:
+        """Install lowered sandbox capabilities for a task.
+
+        This is the SimpleOS handoff for generated `sandbox_lowering.sdn`.
+        The generated backend plan remains textual, but the kernel immediately
+        converts its explicit capability handles into a pledged CapabilitySet
+        so normal syscall capability checks deny ambient authority.
+        """
+        val caps = capability_set_from_sandbox_lowering(task, sandbox_lowering_sdn)
+        self.install_sandbox_capability_set(task, caps)
+
+    me install_baremetal_sandbox_lowering(task: TaskId, sandbox_lowering_sdn: text, static_section_present: bool) -> bool:
+        """Install baremetal MPU/static-capability sandbox lowering.
+
+        Baremetal lowering is only authoritative when the linked image kept the
+        `.simple.sandbox*` / `.simple.mpu*` metadata section. If a generated
+        baremetal MPU plan reaches boot without that section, fail closed
+        rather than falling back to ambient task authority.
+        """
+        if sandbox_lowering_sdn.contains("baremetal_mpu_linker_regions"):
+            if not static_section_present:
+                return false
+        val caps = capability_set_from_sandbox_lowering(task, sandbox_lowering_sdn)
+        self.install_sandbox_capability_set(task, caps)
+
+    me install_sandbox_capability_set(task: TaskId, caps: CapabilitySet) -> bool:
+        """Replace or initialize a task with a pledged sandbox capability set."""
+        var pledged = caps
+        pledged.is_pledged = true
+        var idx = 0
+        while idx < self.records.len():
+            var rec = self.records[idx]
+            if rec.task_id.id == task.id:
+                rec.caps = pledged
+                self.records[idx] = rec
+                return true
+            idx = idx + 1
+        val record = TaskCapRecord(
+            task_id: task,
+            caps: pledged,
+            unveil_paths: [],
+            is_unveiled: false,
+            session_id: 0u64,
+            session_epoch: 0u64
+        )
+        self.records.push(record)
+        true
+
+    me destroy_task(task: TaskId):
+        """Remove all capability records for a destroyed task."""
+        var new_records: [TaskCapRecord] = []
+        for rec in self.records:
+            if rec.task_id.id != task.id:
+                new_records.push(rec)
+        self.records = new_records
+
+    # -- Internal Helpers ----------------------------------------------------
+
+    fn _find_record(task: TaskId) -> TaskCapRecord?:
+        """Find the capability record for a task."""
+        for rec in self.records:
+            if rec.task_id.id == task.id:
+                return rec
+        nil
+
+    me _ensure_record(task: TaskId):
+        """Ensure a capability record exists for the task, creating if needed.
+
+        SECURITY: unknown tasks get empty() (deny-all) — not full(). Tasks
+        that legitimately need capabilities receive explicit grants via
+        cap_grant() / init_task_record(task, full: true).
+        """
+        val existing = self._find_record(task)
+        if existing != nil:
+            return
+        val record = TaskCapRecord(
+            task_id: task,
+            caps: CapabilitySet.empty(),
+            unveil_paths: [],
+            is_unveiled: false,
+            session_id: 0u64,
+            session_epoch: 0u64
+        )
+        self.records.push(record)
+
+    # ========================================================================
+    # S1–S3 — Privilege Session Hierarchy
+    #
+    # login() mints a root User session; open_subrole() irreversibly narrows a
+    # child; session_teardown() DFS-seals a subtree and bumps each epoch (O(1)
+    # bulk revoke). check() consults _session_live() so a bound task's caps die
+    # the instant its session (or any ancestor) is torn down.
+    # ========================================================================
+
+    me login(principal: text, max_caps: CapabilitySet) -> Session:
+        """S1: mint a root User session for an authenticated principal.
+
+        ceiling == current == max_caps (the principal's full granted authority).
+        Root sessions have no parent (parent = 0) so no containment check
+        applies. Each login draws a FRESH id AND a FRESH epoch, so two
+        concurrent logins are disjoint in both identity and generation — the
+        keystone that lets one login's teardown never touch another's caps.
+        """
+        val sid = self.next_session_id
+        self.next_session_id = self.next_session_id + 1
+        val ep = self.next_session_epoch
+        self.next_session_epoch = self.next_session_epoch + 1
+        val s = Session(
+            id: sid,
+            kind: SessionKind.User,
+            epoch: ep,
+            principal: principal,
+            ceiling: max_caps,
+            current: max_caps,
+            budget: 0u64,
+            parent: 0u64,
+            children: [],
+            sealed: false
+        )
+        self.sessions.push(s)
+        s
+
+    me create_child_session(parent_id: u64, kind: SessionKind, principal: text, ceiling: CapabilitySet, current: CapabilitySet, budget: u64) -> Session?:
+        """Create a child session under `parent_id`, enforcing the S1 invariant
+        ceiling(child) ⊆ current(parent) (and current ⊆ ceiling). Returns nil
+        (fail closed) when the parent is unknown, sealed, or the containment
+        invariant is violated — a child can NEVER be minted above its parent.
+        """
+        val parent_opt = self._find_session(parent_id)
+        if parent_opt == nil:
+            return nil
+        val parent = parent_opt
+        if parent.sealed:
+            return nil
+        # SECURITY (fail-closed): an ambient-full set (is_pledged:false + zero
+        # tokens) represents ALL authority, but capset_subset only iterates its
+        # (empty) token list and would VACUOUSLY pass containment — minting a
+        # child ABOVE its parent (a session-authority escalation). Guard it
+        # explicitly: an ambient ceiling is contained only by an ambient parent,
+        # and an ambient current only by an ambient ceiling.
+        val ceiling_ambient = (not ceiling.is_pledged) and (ceiling.caps.len() == 0)
+        val parent_ambient = (not parent.current.is_pledged) and (parent.current.caps.len() == 0)
+        if ceiling_ambient and (not parent_ambient):
+            return nil
+        val current_ambient = (not current.is_pledged) and (current.caps.len() == 0)
+        if current_ambient and (not ceiling_ambient):
+            return nil
+        # Invariant: the child's ceiling must sit within the parent's CURRENT
+        # authority, and the child's current within its own ceiling.
+        if not capset_subset(ceiling, parent.current):
+            return nil
+        if not capset_subset(current, ceiling):
+            return nil
+        val sid = self.next_session_id
+        self.next_session_id = self.next_session_id + 1
+        val ep = self.next_session_epoch
+        self.next_session_epoch = self.next_session_epoch + 1
+        val child = Session(
+            id: sid,
+            kind: kind,
+            epoch: ep,
+            principal: principal,
+            ceiling: ceiling,
+            current: current,
+            budget: budget,
+            parent: parent_id,
+            children: [],
+            sealed: false
+        )
+        self.sessions.push(child)
+        self._add_child(parent_id, sid)
+        child
+
+    me open_subrole(parent_session: Session, mask: [CapabilityKind]) -> Session:
+        """S2: drop into an irreversibly narrowed SubRole of `parent_session`.
+
+        The child's current is a FRESH unpledged clone of the parent's current
+        set, then pledge(mask) filters it to exactly the masked caps the parent
+        actually holds. Because pledge can only KEEP tokens already present, a
+        subrole can NEVER regain a dropped cap and can never exceed the parent
+        ceiling — the drop is monotonic and irreversible. On an unknown/sealed
+        parent, returns a sealed deny-all session (fail closed).
+        """
+        var parent = parent_session
+        val live = self._find_session(parent_session.id)
+        if live != nil:
+            parent = live
+        var child_current = capset_clone_unpledged(parent.current)
+        child_current.pledge(mask)
+        val child_opt = self.create_child_session(parent.id, SessionKind.SubRole, parent.principal, child_current, child_current, 0u64)
+        if child_opt != nil:
+            val child = child_opt
+            return child
+        Session(
+            id: 0u64,
+            kind: SessionKind.SubRole,
+            epoch: 0u64,
+            principal: parent.principal,
+            ceiling: CapabilitySet.empty(),
+            current: CapabilitySet.empty(),
+            budget: 0u64,
+            parent: parent.id,
+            children: [],
+            sealed: true
+        )
+
+    me bind_task_to_session(task: TaskId, session_id: u64):
+        """Bind a task's capability record to a session. Capability checks for
+        the task then also require the session to be live at its bound epoch."""
+        var ep = 0u64
+        val s_opt = self._find_session(session_id)
+        if s_opt != nil:
+            val s = s_opt
+            ep = s.epoch
+        var idx = 0
+        while idx < self.records.len():
+            var rec = self.records[idx]
+            if rec.task_id.id == task.id:
+                rec.session_id = session_id
+                rec.session_epoch = ep
+                self.records[idx] = rec
+                return
+            idx = idx + 1
+
+    me session_teardown(root_session: Session):
+        """S3: tear down `root_session` and its whole subtree.
+
+        DFS the subtree via parent links; each session is sealed and given a
+        FRESH epoch. That single epoch bump revokes every capability bound to
+        the session in O(1) (no per-token walk) — bound records fail
+        _session_live on the epoch mismatch. The subtree's remaining budget is
+        refunded upward to the teardown root's parent.
+        """
+        var worklist: [u64] = []
+        worklist.push(root_session.id)
+        var subtree: [u64] = []
+        var wi = 0
+        while wi < worklist.len():
+            val cur = worklist[wi]
+            wi = wi + 1
+            var seen = false
+            for sid in subtree:
+                if sid == cur:
+                    seen = true
+            if not seen:
+                subtree.push(cur)
+                for s in self.sessions:
+                    if s.parent == cur:
+                        worklist.push(s.id)
+        var refund: u64 = 0u64
+        var root_parent: u64 = 0u64
+        var idx = 0
+        while idx < self.sessions.len():
+            var s = self.sessions[idx]
+            var in_sub = false
+            for sid in subtree:
+                if sid == s.id:
+                    in_sub = true
+            if in_sub:
+                if s.id == root_session.id:
+                    root_parent = s.parent
+                refund = refund + s.budget
+                s.budget = 0u64
+                s.sealed = true
+                val nep = self.next_session_epoch
+                self.next_session_epoch = self.next_session_epoch + 1
+                s.epoch = nep
+                self.sessions[idx] = s
+            idx = idx + 1
+        if root_parent != 0u64:
+            self._credit_budget(root_parent, refund)
+
+    fn session_of(session_id: u64) -> Session?:
+        """Public accessor: current table state for a session id (or nil)."""
+        self._find_session(session_id)
+
+    fn _find_session(session_id: u64) -> Session?:
+        """Find a session by id, or nil."""
+        for s in self.sessions:
+            if s.id == session_id:
+                return s
+        nil
+
+    me _add_child(parent_id: u64, child_id: u64):
+        """Register child_id under the parent's children list (idempotent)."""
+        var idx = 0
+        while idx < self.sessions.len():
+            var s = self.sessions[idx]
+            if s.id == parent_id:
+                var already = false
+                for c in s.children:
+                    if c == child_id:
+                        already = true
+                if not already:
+                    s.children.push(child_id)
+                    self.sessions[idx] = s
+                return
+            idx = idx + 1
+
+    me _credit_budget(session_id: u64, amount: u64):
+        """Add refunded budget to a live session (S3 upward refund)."""
+        var idx = 0
+        while idx < self.sessions.len():
+            var s = self.sessions[idx]
+            if s.id == session_id:
+                s.budget = s.budget + amount
+                self.sessions[idx] = s
+                return
+            idx = idx + 1
+
+    fn _session_live(session_id: u64, bound_epoch: u64) -> bool:
+        """A bound capability is live iff its session exists, is not sealed, and
+        its epoch still matches the epoch captured at bind time."""
+        val s_opt = self._find_session(session_id)
+        if s_opt == nil:
+            return false
+        val s = s_opt
+        if s.sealed:
+            return false
+        if s.epoch != bound_epoch:
+            return false
+        true
+
+    # ========================================================================
+    # S5 — Container: CSpace + budget + namespace, session-owned, epoch-bound
+    #
+    # A container is the §3.6/§17 SHAPE of a CSpace (cspace + sub-budget + label
+    # namespace) owned by exactly ONE session. It captures that session's epoch
+    # at creation, so session_teardown's epoch bump revokes every container the
+    # session owns in O(1) — a container cap dies with its session.
+    # ========================================================================
+
+    me create_container(owner_session_id: u64, cspace: CapabilitySet, budget: u64, labels: [text]) -> Container?:
+        """S5: create a container owned by `owner_session_id`. Fail-closed unless
+        the owner session exists and is live, cspace ⊆ owner.current (a container
+        can never see wider authority than the session that owns it), AND the
+        container budget fits within the owner's budget (quota). The container
+        captures owner.epoch, so an owner teardown revokes it with no walk."""
+        val owner_opt = self._find_session(owner_session_id)
+        if owner_opt == nil:
+            return nil
+        val owner = owner_opt
+        if owner.sealed:
+            return nil
+        if not capset_subset(cspace, owner.current):
+            return nil
+        if budget > owner.budget:
+            return nil
+        val cid = self.next_container_id
+        self.next_container_id = self.next_container_id + 1
+        val c = Container(
+            id: cid,
+            owner_session: owner_session_id,
+            cspace: cspace,
+            budget: budget,
+            labels: labels,
+            epoch: owner.epoch
+        )
+        self.containers.push(c)
+        c
+
+    fn container_live(c: Container) -> bool:
+        """A container is live iff its owning session is still live at the epoch
+        captured when the container was created. A session teardown bumps that
+        epoch (or seals the session), so every container it owns dies at once."""
+        self._session_live(c.owner_session, c.epoch)
+
+    fn container_of(container_id: u64) -> Container?:
+        """Public accessor: current table state for a container id (or nil)."""
+        for c in self.containers:
+            if c.id == container_id:
+                return c
+        nil
+
+    # ========================================================================
+    # S5 — Escrow: cross-session single-use cowork (powerbox, research §17)
+    #
+    # The "scheduler-LLM hands ticketing-LLM a one-shot create-ticket cap" flow:
+    # a single-use cap minted into the RECEIVER's arena, bound to the RECEIVER's
+    # epoch (so it dies with the receiver, never leaks out of a torn-down sender),
+    # consumed on first use, and monotonic (never exceeds the sender's current).
+    # ========================================================================
+
+    me escrow_cap(from_session_id: u64, to_session_id: u64, cap: CapabilityToken) -> EscrowCap?:
+        """S5: mint a SINGLE-USE cap from `from_session` into `to_session`'s arena.
+
+        Monotonic: the sender must actually hold `cap.kind` in its CURRENT
+        authority (never the sender's max) — an escrow can never exceed the
+        sender. Fail-closed when either session is unknown/sealed or the sender
+        lacks the authority. The escrow is bound to the RECEIVER's epoch, so it
+        dies with the receiver."""
+        val from_opt = self._find_session(from_session_id)
+        if from_opt == nil:
+            return nil
+        val from_s = from_opt
+        if from_s.sealed:
+            return nil
+        val to_opt = self._find_session(to_session_id)
+        if to_opt == nil:
+            return nil
+        val to_s = to_opt
+        if to_s.sealed:
+            return nil
+        if not from_s.current.has(cap.kind):
+            return nil
+        val eid = self.next_escrow_id
+        self.next_escrow_id = self.next_escrow_id + 1
+        val e = EscrowCap(
+            id: eid,
+            from_session: from_session_id,
+            to_session: to_session_id,
+            to_epoch: to_s.epoch,
+            cap: cap,
+            consumed: false
+        )
+        self.escrows.push(e)
+        e
+
+    me consume_escrow(escrow_id: u64, by_session_id: u64) -> CapabilityToken?:
+        """S5: redeem a single-use escrow. Returns the cap on the FIRST consume by
+        the intended receiver while its session is live; every later attempt (a
+        second consume, a wrong receiver, or a torn-down receiver) is DENIED
+        (nil). Single-use is enforced by flipping `consumed` on first success."""
+        var idx = 0
+        while idx < self.escrows.len():
+            var e = self.escrows[idx]
+            if e.id == escrow_id:
+                if e.consumed:
+                    return nil
+                if e.to_session != by_session_id:
+                    return nil
+                if not self._session_live(e.to_session, e.to_epoch):
+                    return nil
+                e.consumed = true
+                self.escrows[idx] = e
+                return e.cap
+            idx = idx + 1
+        nil
+
+    # ========================================================================
+    # S6 — Multi-tenant tree: System → Tenant → User, disjoint arenas + quota
+    #
+    # open_system mints the root of trust with a resource budget; Tenants and
+    # Users are create_child_quota children whose budget can NEVER exceed the
+    # parent's (per-node quota) and whose ceiling ⊆ parent.current (disjoint,
+    # monotone-down arenas). Teardown of a Tenant cascades to all descendants via
+    # the existing session_teardown DFS epoch bump.
+    # ========================================================================
+
+    me open_system(principal: text, ceiling: CapabilitySet, budget: u64) -> Session:
+        """S6: mint the root System session — the top of the multi-tenant tree.
+
+        Like login() but kind == System and with an explicit resource budget that
+        Tenant/User children draw against via create_child_quota. Fresh id +
+        epoch, no parent (parent = 0)."""
+        val sid = self.next_session_id
+        self.next_session_id = self.next_session_id + 1
+        val ep = self.next_session_epoch
+        self.next_session_epoch = self.next_session_epoch + 1
+        val s = Session(
+            id: sid,
+            kind: SessionKind.System,
+            epoch: ep,
+            principal: principal,
+            ceiling: ceiling,
+            current: ceiling,
+            budget: budget,
+            parent: 0u64,
+            children: [],
+            sealed: false
+        )
+        self.sessions.push(s)
+        s
+
+    me create_child_quota(parent_id: u64, kind: SessionKind, principal: text, ceiling: CapabilitySet, current: CapabilitySet, budget: u64) -> Session?:
+        """S6: create a multi-tenant child (System → Tenant → User) enforcing the
+        per-node budget quota ON TOP of the S1 ceiling containment. Returns nil
+        (fail closed) when budget > parent.budget (a child can never be funded
+        above its parent) or when the ceiling(child) ⊆ current(parent) invariant
+        fails. The plain create_child_session keeps its budget-agnostic behavior
+        for callers that account budget separately."""
+        val parent_opt = self._find_session(parent_id)
+        if parent_opt == nil:
+            return nil
+        val parent = parent_opt
+        if budget > parent.budget:
+            return nil
+        self.create_child_session(parent_id, kind, principal, ceiling, current, budget)
+
+fn capability_set_from_sandbox_lowering(task: TaskId, sandbox_lowering_sdn: text) -> CapabilitySet:
+    """Map generated sandbox capability handles into kernel capabilities.
+
+    Sandbox-lowered tokens are root grants (parent_token_id=0, depth=2).
+    token_id is assigned sequentially starting at 1 within this function;
+    these tokens are not managed by the CapabilityManager token counter so
+    they use a local counter (sufficient for static sandbox grants).
+    """
+    var caps: [CapabilityToken] = []
+    var generation = 1u64
+    var local_tid = 1u64
+    if sandbox_lowering_sdn.contains("ReadFile") or sandbox_lowering_sdn.contains("ReadDir"):
+        caps.push(CapabilityToken(kind: CapabilityKind.FileRead(path_prefix: "/"), generation: generation, owner: task.id, token_id: local_tid, parent_token_id: 0u64, depth: 2))
+        generation = generation + 1
+        local_tid = local_tid + 1
+    if sandbox_lowering_sdn.contains("WriteFile") or sandbox_lowering_sdn.contains("WriteDir"):
+        caps.push(CapabilityToken(kind: CapabilityKind.FileWrite(path_prefix: "/"), generation: generation, owner: task.id, token_id: local_tid, parent_token_id: 0u64, depth: 2))
+        generation = generation + 1
+        local_tid = local_tid + 1
+    if sandbox_lowering_sdn.contains("ProcessSpawner") or sandbox_lowering_sdn.contains("ProcessSpawn"):
+        caps.push(CapabilityToken(kind: CapabilityKind.ProcessSpawn, generation: generation, owner: task.id, token_id: local_tid, parent_token_id: 0u64, depth: 2))
+        generation = generation + 1
+        local_tid = local_tid + 1
+    if sandbox_lowering_sdn.contains("NetworkEndpoint"):
+        caps.push(CapabilityToken(kind: CapabilityKind.NetConnect(port: 0u16), generation: generation, owner: task.id, token_id: local_tid, parent_token_id: 0u64, depth: 2))
+        generation = generation + 1
+    CapabilitySet(caps: caps, is_pledged: true)
+
+# ============================================================================
+# Path Matching Helpers
+# ============================================================================
+
+fn _path_starts_with(path: text, prefix: text) -> bool:
+    """Check if a path starts with a given prefix.
+
+    Handles the root prefix "/" as matching everything.
+    """
+    if prefix == "/":
+        return true
+    if path == prefix:
+        return true
+    if path.len() < prefix.len():
+        return false
+    if path[0:prefix.len()] != prefix:
+        return false
+    if path.len() == prefix.len():
+        return true
+    path[prefix.len()] == "/"
+
+fn _perms_contain(allowed: text, requested: text) -> bool:
+    """Check if allowed permissions contain the requested permission.
+
+    Permissions are single characters: r, w, x, c (create).
+    """
+    var i = 0
+    while i < requested.len():
+        val ch = requested[i]
+        val found = allowed.contains(ch)
+        if not found:
+            return false
+        i = i + 1
+    true
+
+# ============================================================================
+# G11 — Per-Task Privilege Table
+# ============================================================================
+
+struct PrivilegeRecord:
+    """Per-task privilege record stored in the privilege table."""
+    task_id: u32
+    mask: PrivilegeMask
+
+class PrivilegeTable:
+    """Holds per-task PrivilegeMask entries.
+
+    sys_privctl reads/writes this table; the dispatcher checks it at entry
+    to guard privileged kernel calls.
+    Only tasks holding SystemPrivilege may mutate another task's mask.
+    """
+    records: [PrivilegeRecord]
+
+impl PrivilegeTable:
+    static fn new() -> PrivilegeTable:
+        PrivilegeTable(records: [])
+
+    fn get(task_id: u32) -> PrivilegeMask?:
+        """Return the privilege mask for a task, or nil if not found."""
+        for rec in self.records:
+            if rec.task_id == task_id:
+                return rec.mask
+        nil
+
+    me set(task_id: u32, mask: PrivilegeMask):
+        """Set (replace) the privilege mask for a task."""
+        var idx = 0
+        while idx < self.records.len():
+            var rec = self.records[idx]
+            if rec.task_id == task_id:
+                rec.mask = mask
+                self.records[idx] = rec
+                return
+            idx = idx + 1
+        self.records.push(PrivilegeRecord(task_id: task_id, mask: mask))
+
+    me add_peer(task_id: u32, peer: u32):
+        """Add a peer to the task's allowed_peers list (idempotent)."""
+        var idx = 0
+        while idx < self.records.len():
+            var rec = self.records[idx]
+            if rec.task_id == task_id:
+                # Check for duplicates
+                var already = false
+                for p in rec.mask.allowed_peers:
+                    if p == peer:
+                        already = true
+                if not already:
+                    rec.mask.allowed_peers.push(peer)
+                    self.records[idx] = rec
+                return
+            idx = idx + 1
+        # No record yet — create a default one with just this peer
+        val new_mask = PrivilegeMask(
+            kernel_calls: 0,
+            irqs: 0,
+            io_port_base: 0,
+            io_port_len: 0,
+            allowed_peers: [peer]
+        )
+        self.records.push(PrivilegeRecord(task_id: task_id, mask: new_mask))
+
+    me remove_peer(task_id: u32, peer: u32):
+        """Remove a peer from the task's allowed_peers list."""
+        var idx = 0
+        while idx < self.records.len():
+            var rec = self.records[idx]
+            if rec.task_id == task_id:
+                var new_peers: [u32] = []
+                for p in rec.mask.allowed_peers:
+                    if p != peer:
+                        new_peers.push(p)
+                rec.mask.allowed_peers = new_peers
+                self.records[idx] = rec
+                return
+            idx = idx + 1
+
+# ============================================================================
+# G12 — Task VmSpace Registry (wired from syscall spawn/exec handlers)
+# ============================================================================
+
+struct TaskVmSpaceEntry:
+    """Maps a task id to its ProcessVmSpace."""
+    task_id: u32
+    space: ProcessVmSpace
+
+var g_task_vmspaces: [TaskVmSpaceEntry] = []
+
+fn task_vmspace_of(task_id: u32) -> ProcessVmSpace?:
+    """Look up the registered vmspace for a task, or nil if not registered.
+
+    Returns nil when the PM has not yet wired this task's space. Callers
+    must treat nil as "skip VMA validation" (see safecopy_from / safecopy_to).
+    """
+    for entry in g_task_vmspaces:
+        if entry.task_id == task_id:
+            return entry.space
+    nil
+
+fn register_task_vmspace(task_id: u32, space: ProcessVmSpace):
+    """Register (or replace) the vmspace for a task.
+
+    Called by the Process Manager when a task is spawned or its address space
+    is updated. Also exposed for testing.
+    """
+    var idx = 0
+    while idx < g_task_vmspaces.len():
+        var e = g_task_vmspaces[idx]
+        if e.task_id == task_id:
+            e.space = space
+            g_task_vmspaces[idx] = e
+            return
+        idx = idx + 1
+    g_task_vmspaces.push(TaskVmSpaceEntry(task_id: task_id, space: space))
+
+fn _vma_range_readable(space: ProcessVmSpace, start: u64, len: u64) -> bool:
+    """Return true iff every page in [start, start+len) is covered by a
+    VMA that has VMA_READ set. Returns true for zero-length ranges."""
+    if len == 0:
+        return true
+    val PAGE_SIZE: u64 = 4096
+    var page = start & ~(PAGE_SIZE - 1)
+    val end = start + len
+    while page < end:
+        val area_opt = vma_find(space, page)
+        if area_opt == nil:
+            return false
+        val area = area_opt
+        if (area.flags & VMA_READ) == 0:
+            return false
+        page = page + PAGE_SIZE
+    true
+
+fn _vma_range_writable(space: ProcessVmSpace, start: u64, len: u64) -> bool:
+    """Return true iff every page in [start, start+len) is covered by a
+    VMA that has VMA_WRITE set. Returns true for zero-length ranges."""
+    if len == 0:
+        return true
+    val PAGE_SIZE: u64 = 4096
+    var page = start & ~(PAGE_SIZE - 1)
+    val end = start + len
+    while page < end:
+        val area_opt = vma_find(space, page)
+        if area_opt == nil:
+            return false
+        val area = area_opt
+        if (area.flags & VMA_WRITE) == 0:
+            return false
+        page = page + PAGE_SIZE
+    true
+
+# ============================================================================
+# G12 — Per-Task Grant Table
+# ============================================================================
+
+struct GrantTable:
+    """Per-system grant table holding all active memory grants.
+
+    Grants are created by cap_grant() and invalidated by cap_revoke().
+    sys_safecopy_from / sys_safecopy_to validate through this table before
+    performing the copy.
+    """
+    grants: [Grant]
+    next_id: u32
+
+impl GrantTable:
+    static fn new() -> GrantTable:
+        GrantTable(grants: [], next_id: 1)
+
+    me cap_grant(grantor: u32, grantee: u32, vaddr: u64, len: u64, flags: u32) -> u32:
+        """Issue a new grant. Returns the monotonic grant_id.
+
+        The grant is immediately valid. Caller is responsible for checking
+        that the grantor actually owns the vaddr range.
+        """
+        val gid = self.next_id
+        self.next_id = self.next_id + 1
+        val g = Grant(
+            id: gid,
+            grantor: grantor,
+            grantee: grantee,
+            vaddr: vaddr,
+            len: len,
+            flags: flags,
+            valid: true
+        )
+        self.grants.push(g)
+        gid
+
+    me cap_revoke(grant_id: u32) -> bool:
+        """Invalidate a grant by id. Returns true if found and revoked."""
+        var idx = 0
+        while idx < self.grants.len():
+            var g = self.grants[idx]
+            if g.id == grant_id:
+                if g.valid:
+                    g.valid = false
+                    self.grants[idx] = g
+                    return true
+                else:
+                    return false    # Already revoked
+            idx = idx + 1
+        false
+
+    fn find_valid(grant_id: u32, grantee: u32) -> Grant?:
+        """Find a valid grant for the given grantee, or nil."""
+        for g in self.grants:
+            if g.id == grant_id:
+                if g.valid:
+                    if g.grantee == grantee:
+                        return g
+                return nil
+        nil
+
+    fn safecopy_from(grantee: u32, grant_id: u32, src_off: u64, dst_vaddr: u64, len: u64) -> i32:
+        """Bounds-checked read through a grant with VMA validation.
+
+        Steps:
+          1. Find a valid grant owned by grantee; return -1 if absent or invalid.
+          2. Verify GRANT_R flag; return -1 if missing.
+          3. Verify src_off + len <= grant.len; return -1 if out of bounds.
+          4. If grantor's ProcessVmSpace is registered, walk every page in
+             [grant.vaddr + src_off, grant.vaddr + src_off + len) and verify
+             VMA_READ is set; return -1 (-EFAULT) on any unmapped or unreadable page.
+             If the vmspace is not yet registered (PM not wired), skip VMA check.
+          5. If a real PML4 root is present, verify page-table translation
+             page-by-page before accepting the copy.
+          On success returns 0.
+        """
+        val grant_opt = self.find_valid(grant_id, grantee)
+        if grant_opt == nil:
+            return -1   # EPERM: no such valid grant for this grantee
+        val g = grant_opt
+        # Check read permission
+        val readable = (g.flags & GRANT_R) != 0
+        if not readable:
+            return -1   # EPERM: grant does not permit read
+        # Bounds check: src_off + len must fit inside grant
+        if src_off + len > g.len:
+            return -1   # EFAULT: out of bounds
+        # VMA validation: verify every page of the source range is readable
+        val src_space_opt = task_vmspace_of(g.grantor)
+        if src_space_opt != nil:
+            val src_space = src_space_opt
+            val src_start = g.vaddr + src_off
+            val ok = _vma_range_readable(src_space, src_start, len)
+            if not ok:
+                return -1   # EFAULT: unmapped or non-readable page in source range
+            if src_space.pml4 != 0:
+                if not vmm_pt_range_user_readable(src_space, src_start, len):
+                    return -1   # EFAULT: page-table walk miss
+        0
+
+    fn safecopy_to(grantee: u32, grant_id: u32, dst_off: u64, src_vaddr: u64, len: u64) -> i32:
+        """Bounds-checked write through a grant with VMA validation.
+
+        Steps:
+          1. Find a valid grant owned by grantee; return -1 if absent or invalid.
+          2. Verify GRANT_W flag; return -1 if missing.
+          3. Verify dst_off + len <= grant.len; return -1 if out of bounds.
+          4. If grantor's ProcessVmSpace is registered, walk every page in
+             [grant.vaddr + dst_off, grant.vaddr + dst_off + len) and verify
+             VMA_WRITE is set; return -1 (-EFAULT) on any unmapped or unwritable page.
+             If the vmspace is not yet registered (PM not wired), skip VMA check.
+          5. If a real PML4 root is present, verify page-table translation
+             page-by-page before accepting the copy.
+          On success returns 0.
+        """
+        val grant_opt = self.find_valid(grant_id, grantee)
+        if grant_opt == nil:
+            return -1   # EPERM: no such valid grant for this grantee
+        val g = grant_opt
+        # Check write permission
+        val writable = (g.flags & GRANT_W) != 0
+        if not writable:
+            return -1   # EPERM: grant does not permit write
+        # Bounds check
+        if dst_off + len > g.len:
+            return -1   # EFAULT: out of bounds
+        # VMA validation: verify every page of the destination range is writable
+        val dst_space_opt = task_vmspace_of(g.grantor)
+        if dst_space_opt != nil:
+            val dst_space = dst_space_opt
+            val dst_start = g.vaddr + dst_off
+            val ok = _vma_range_writable(dst_space, dst_start, len)
+            if not ok:
+                return -1   # EFAULT: unmapped or non-writable page in dest range
+            if dst_space.pml4 != 0:
+                if not vmm_pt_range_user_writable(dst_space, dst_start, len):
+                    return -1   # EFAULT: page-table walk miss
+        0

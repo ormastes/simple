@@ -1,0 +1,173 @@
+# Compositor Library Tests
+# Tests EngineColor (rasterizer foundation), RGBA packing, and color operations.
+#
+# Note: Compositor modules (GpuSurface, Rasterizer, DamageTracker, FrameScheduler,
+# StackingContext) depend on core.collections.{List} which is unavailable in
+# interpreter mode. Full rasterizer integration tests require compiled mode.
+# Interpreter mode verifies file loading only — it block bodies do not execute.
+
+use std.spec.{describe, it, expect}
+use std.common.engine.color.{EngineColor}
+use std.common.engine.units.{RGBA8}
+
+# Inline version of _raster_pack_rgba for testing the packing logic
+fn test_pack_rgba(color: EngineColor) -> i64:
+    val rgba = color.to_rgba8()
+    rgba.r * 16777216 + rgba.g * 65536 + rgba.b * 256 + rgba.a
+
+# Inline version of clamp_byte for testing
+fn test_clamp_byte(value: i64) -> i64:
+    if value < 0:
+        return 0
+    if value > 255:
+        return 255
+    value
+
+describe "EngineColor constructors":
+    it "creates red color":
+        val red = EngineColor.red()
+        expect(red.r).to_equal(1.0)
+        expect(red.g).to_equal(0.0)
+        expect(red.b).to_equal(0.0)
+        expect(red.a).to_equal(1.0)
+
+    it "creates from rgb":
+        val c = EngineColor.rgb(0.5, 0.25, 0.75)
+        expect(c.r).to_equal(0.5)
+        expect(c.g).to_equal(0.25)
+        expect(c.b).to_equal(0.75)
+        expect(c.a).to_equal(1.0)
+
+    it "creates from rgba":
+        val c = EngineColor.rgba(0.1, 0.2, 0.3, 0.4)
+        expect(c.r).to_equal(0.1)
+        expect(c.a).to_equal(0.4)
+
+    it "creates from hex":
+        val c = EngineColor.from_hex(0xFF0000)
+        expect(c.r).to_equal(1.0)
+        expect(c.g).to_equal(0.0)
+        expect(c.a).to_equal(1.0)
+
+    it "creates from hex with alpha":
+        val c = EngineColor.from_hex_alpha(0xFF000080)
+        expect(c.r).to_equal(1.0)
+
+    it "has color presets":
+        val w = EngineColor.white()
+        expect(w.r).to_equal(1.0)
+        expect(w.g).to_equal(1.0)
+        val b = EngineColor.black()
+        expect(b.r).to_equal(0.0)
+        val t = EngineColor.transparent()
+        expect(t.a).to_equal(0.0)
+
+describe "EngineColor operations":
+    it "modifies alpha with with_alpha":
+        val c = EngineColor.red()
+        val faded = c.with_alpha(0.5)
+        expect(faded.r).to_equal(1.0)
+        expect(faded.a).to_equal(0.5)
+
+    it "converts to rgba8":
+        val white = EngineColor.white()
+        val rgba = white.to_rgba8()
+        expect(rgba.r).to_equal(255)
+        expect(rgba.g).to_equal(255)
+        expect(rgba.b).to_equal(255)
+        expect(rgba.a).to_equal(255)
+
+    it "converts black to rgba8":
+        val black = EngineColor.black()
+        val rgba = black.to_rgba8()
+        expect(rgba.r).to_equal(0)
+        expect(rgba.g).to_equal(0)
+        expect(rgba.b).to_equal(0)
+        expect(rgba.a).to_equal(255)
+
+    it "lerps between colors":
+        val a = EngineColor.black()
+        val b = EngineColor.white()
+        val mid = a.lerp(b, 0.5)
+        expect(mid.r).to_be_greater_than(0.4)
+        expect(mid.r).to_be_less_than(0.6)
+
+    it "lerps at extremes":
+        val a = EngineColor.red()
+        val b = EngineColor.blue()
+        val start = a.lerp(b, 0.0)
+        expect(start.r).to_equal(1.0)
+        val end_c = a.lerp(b, 1.0)
+        expect(end_c.b).to_equal(1.0)
+
+    it "tests equality":
+        val a = EngineColor.red()
+        val b = EngineColor.red()
+        expect(a.eq(b)).to_equal(true)
+        val c = EngineColor.blue()
+        expect(a.eq(c)).to_equal(false)
+
+describe "RGBA packing (rasterizer helper)":
+    it "packs white to expected value":
+        val white = EngineColor.white()
+        val packed = test_pack_rgba(white)
+        # white = (255, 255, 255, 255)
+        # packed = 255*16777216 + 255*65536 + 255*256 + 255 = 4294967295
+        expect(packed).to_be_greater_than(0)
+
+    it "packs red correctly":
+        val red = EngineColor.red()
+        val packed = test_pack_rgba(red)
+        # red = (255, 0, 0, 255) -> 255*16777216 + 0 + 0 + 255 = 4278190335
+        val expected = 255 * 16777216 + 0 + 0 + 255
+        expect(packed).to_equal(expected)
+
+    it "packs black with full alpha":
+        val black = EngineColor.black()
+        val packed = test_pack_rgba(black)
+        # black = (0, 0, 0, 255) -> 0 + 0 + 0 + 255 = 255
+        expect(packed).to_equal(255)
+
+    it "packs transparent to zero":
+        val t = EngineColor.transparent()
+        val packed = test_pack_rgba(t)
+        expect(packed).to_equal(0)
+
+    it "packs green correctly":
+        val green = EngineColor.green()
+        val packed = test_pack_rgba(green)
+        # green = (0, 255, 0, 255) -> 0 + 255*65536 + 0 + 255 = 16711935
+        val expected = 255 * 65536 + 255
+        expect(packed).to_equal(expected)
+
+    it "packs blue correctly":
+        val blue = EngineColor.blue()
+        val packed = test_pack_rgba(blue)
+        # blue = (0, 0, 255, 255) -> 0 + 0 + 255*256 + 255 = 65535
+        val expected = 255 * 256 + 255
+        expect(packed).to_equal(expected)
+
+describe "clamp_byte (rasterizer helper)":
+    it "clamps negative to zero":
+        expect(test_clamp_byte(-10)).to_equal(0)
+
+    it "clamps above 255":
+        expect(test_clamp_byte(300)).to_equal(255)
+
+    it "passes through valid values":
+        expect(test_clamp_byte(0)).to_equal(0)
+        expect(test_clamp_byte(128)).to_equal(128)
+        expect(test_clamp_byte(255)).to_equal(255)
+
+describe "EngineColor tinting (rasterizer opacity)":
+    it "applies opacity to color alpha":
+        val color = EngineColor.red()
+        val opacity = 0.5
+        val tinted = EngineColor(r: color.r, g: color.g, b: color.b, a: color.a * opacity)
+        expect(tinted.r).to_equal(1.0)
+        expect(tinted.a).to_equal(0.5)
+
+    it "zero opacity produces transparent":
+        val color = EngineColor.white()
+        val tinted = EngineColor(r: color.r, g: color.g, b: color.b, a: color.a * 0.0)
+        expect(tinted.a).to_equal(0.0)

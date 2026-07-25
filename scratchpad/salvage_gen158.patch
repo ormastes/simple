@@ -1,0 +1,99 @@
+diff --git a/src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl b/src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+index 6019402a39a..e3da6ca2a46 100644
+--- a/src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
++++ b/src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+@@ -956,6 +956,27 @@ fn convert_decl_fn(idx: i64) -> Function:
+ 
+     val visibility = convert_decl_visibility(idx)
+     val fn_params: [Param] = params
++    # decl_get_type_params returns the `<T, U, ...>` names captured by
++    # parse_type_params() at parse time. This bridge previously discarded
++    # them entirely -- `parser_function_new` below was always called with a
++    # hardcoded `[]`, so `Function.type_params` was empty by the time HIR
++    # (and every downstream check gated on it) ever saw the function, turning
++    # `fn id<T>(x: T) -> T` into a silent-wrong native build (bug: generic
++    # functions on the native --entry path return 0 instead of the argument).
++    # Thread the real names through as `[TypeParam]` so HIR lowering can see
++    # (and reject) generic functions instead of erasing them.
++    val tp_names = decl_get_type_params(idx)
++    var fn_type_params: [TypeParam] = []
++    var tpi = 0
++    while tpi < tp_names.len():
++        fn_type_params.push(TypeParam(
++            name: tp_names[tpi],
++            bounds: [],
++            has_default: false,
++            default: Type(kind: TypeKind.Infer, span: span),
++            span: span
++        ))
++        tpi = tpi + 1
+     # decl_get_ret_type returns a type tag (>0 when a `-> T` return type was
+     # declared). This was previously fetched into `ret` and then discarded --
+     # the function was always constructed with has_return_type=false and an
+@@ -992,7 +1013,7 @@ fn convert_decl_fn(idx: i64) -> Function:
+             fn_attributes.push(Attribute(name: "clocked", args: clocked_args, span: span))
+     val converted: Function = parser_function_new(
+         name,
+-        [],
++        fn_type_params,
+         fn_params,
+         has_ret,
+         inferred_ret,
+diff --git a/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl b/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
+index 74445087f9d..d70430804ba 100644
+--- a/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
++++ b/src/compiler/20.hir/hir_lowering/_Items/declaration_lowering.spl
+@@ -150,6 +150,19 @@ impl HirLowering:
+         if bootstrap_diag:
+             eprint("[hir-lower] lower_function:type_params {fn_.name}")
+ 
++        # Phase A gate (#158): generic functions (`fn id<T>(x: T) -> T`) are
++        # NOT monomorphized on the native --entry build path -- the erased
++        # `T` parameter/return type silently degrades to `Infer`/ANY, which
++        # previously made calls to generic functions return 0 instead of the
++        # real argument (silent-wrong, no diagnostic). Now that
++        # `Function.type_params` is threaded through from the frontend
++        # (convert_decl_fn in the flat-AST bridge), fail loudly here instead
++        # of proceeding into codegen with an unmonomorphized generic. Real
++        # monomorphization is tracked separately (#158 Phase B) -- this is a
++        # deliberate hard stop, not a workaround.
++        if fn_.type_params.len() > 0:
++            self.error("generic functions are not supported on the native build path yet: fn '{fn_.name}' declares type parameter(s); monomorphization is not implemented (#158 Phase B)", fn_.span)
++
+         # Lower parameters
+         # NOTE(#133): lowered unconditionally, including under SIMPLE_BOOTSTRAP.
+         # Previously this whole block was skipped under bootstrap, so `params`
+diff --git a/src/compiler/80.driver/driver.spl b/src/compiler/80.driver/driver.spl
+index 1f959ec8db0..d241844e846 100644
+--- a/src/compiler/80.driver/driver.spl
++++ b/src/compiler/80.driver/driver.spl
+@@ -112,6 +112,20 @@ fn dtrace(msg: text) -> ():
+ # targets (a bare `nosuchfn(1)` call, matching the task's known bug where an
+ # unresolved ident silently decayed to HirExprKind.Error); everything else
+ # stays a non-fatal warning.
++#
++# #158 Phase A: "generic functions are not supported..." is the second class
++# added to this allowlist. Root cause: the flat-AST bridge (convert_decl_fn,
++# 10.frontend/_FlatAstBridge/convert_nodes.spl) previously hardcoded a plain
++# `fn`'s type_params to `[]`, so `fn id<T>(x: T) -> T` silently erased its `T`
++# to Infer/ANY through HIR/MIR/LLVM and returned 0 instead of the argument on
++# the native --entry path (no diagnostic at all). Now that type_params are
++# threaded through, `lower_function` (20.hir/hir_lowering/_Items/
++# declaration_lowering.spl) raises this error for any function with its own
++# type parameters. Without adding it here, that push would (like every other
++# HirLowering.error() call) decay to a non-fatal warning and the build would
++# proceed into monomorphize/MIR/LLVM anyway, resurfacing as a cryptic
++# backend/llc crash instead of a clear diagnostic — real monomorphization is
++# tracked separately (#158 Phase B), so until then this must hard-fail here.
+ fn _format_hir_lowering_error(name: text, err: LoweringError) -> text:
+     if err.span.file != "":
+         "HIR lowering error in {name} ({err.span.file}:{err.span.line}:{err.span.col}): {err.message}"
+@@ -119,7 +133,7 @@ fn _format_hir_lowering_error(name: text, err: LoweringError) -> text:
+         "HIR lowering error in {name}: {err.message}"
+ 
+ fn _hir_lowering_error_is_fatal(message: text) -> bool:
+-    message.starts_with("unresolved name:")
++    message.starts_with("unresolved name:") or message.starts_with("generic functions are not supported on the native build path yet")
+ 
+ fn _driver_collect_hir_errors(ctx: CompileContext, name: text, errors: [LoweringError]):
+     for err in errors:
