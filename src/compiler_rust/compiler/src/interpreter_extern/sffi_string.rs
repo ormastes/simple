@@ -8,7 +8,7 @@ use simple_runtime::value::RuntimeValue;
 use std::cell::RefCell;
 
 // Import actual SFFI functions from runtime
-use simple_runtime::value::{rt_string_new, rt_string_concat, rt_string_len, rt_string_eq};
+use simple_runtime::value::{rt_string_new, rt_string_concat, rt_string_len, rt_string_eq, rt_string_free};
 use simple_runtime::value::{rt_string_data};
 
 fn resolve_runtime_string(val: &Value) -> Result<RuntimeValue, CompileError> {
@@ -86,6 +86,28 @@ pub fn rt_string_len_fn(args: &[Value]) -> Result<Value, CompileError> {
         }
         None => Err(CompileError::semantic_with_context(
             "rt_string_len expects 1 argument".to_string(),
+            ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
+        )),
+    }
+}
+
+/// Free a runtime heap string. Returns 1 if reclaimed, 0 if refused.
+///
+/// A `Value::Str` is REFUSED on purpose. Interpreter strings are Rust-owned
+/// (`SharedText`), not entries in the runtime heap registry, so there is
+/// nothing here for this primitive to reclaim -- and routing one through
+/// `resolve_runtime_string` would allocate a fresh runtime string only to free
+/// that copy, reporting a reclaim that never happened. Only an already-tagged
+/// runtime value is a real candidate.
+pub fn rt_string_free_fn(args: &[Value]) -> Result<Value, CompileError> {
+    match args.first() {
+        Some(Value::Str(_)) => Ok(Value::Int(0)),
+        Some(value) => {
+            let string = RuntimeValue::from_raw(value.as_int()? as u64);
+            Ok(Value::Int(rt_string_free(string)))
+        }
+        None => Err(CompileError::semantic_with_context(
+            "rt_string_free expects 1 argument".to_string(),
             ErrorContext::new().with_code(codes::ARGUMENT_COUNT_MISMATCH),
         )),
     }

@@ -224,6 +224,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_array_new", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_free", &[I64], &[]),
+    // Unlike rt_array_free, this RETURNS i64 (1 = reclaimed, 0 = refused).
+    RuntimeFuncSpec::new("rt_string_free", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_byte_array_new", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_byte_array_new_len", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_to_text", &[I64], &[I64]),
