@@ -24,6 +24,8 @@ use compiler.tools.aop.{AopWeaver, LogAspect}
 use compiler.frontend.core.aop.{WeavingConfig, Pointcut, PointcutKind}
 use compiler.common.compiler_services.{CompilerServices, create_default_services}
 
+extern fn rt_string_free(value: text) -> i64
+
 # ------------------------------------------------------------------------------
 # Compilation Context
 # ------------------------------------------------------------------------------
@@ -162,6 +164,21 @@ class CompileContext:
     # ------------------------------------------------------------------
     # Memory eviction (--low-memory mode)
     # ------------------------------------------------------------------
+    # `rt_string_free` is registry-checked: aliases may carry the same copied
+    # RuntimeValue, and a second call safely returns 0 without dereferencing an
+    # unregistered pointer. Never inspect content after the first call because
+    # a logical alias may already name freed storage. Paths are not ownership.
+    me reclaim_source_contents() -> i64:
+        var reclaimed: i64 = 0
+        for source in self.sources:
+            val freed = rt_string_free(source.content)
+            if freed == 1:
+                reclaimed = reclaimed + 1
+        reclaimed
+
+    me source_contents_reclaimable() -> bool:
+        self.options.low_memory and self.options.backend != "vhdl"
+
     # After parsing, raw source text is no longer needed.
     me evict_sources():
         var metadata: [SourceFile] = []
