@@ -799,3 +799,22 @@ the shared binary — deploys require explicit user go-ahead).
   propagation or Option logic. This is the same struct-optional payload-loss
   class that blocked C5 implicit tails. Credit C9 only after the positional
   executable exits `42`.
+
+  The next bounded session applied only that producer extraction correction
+  first. Its clean incremental Stage4 candidate completed with `6 compiled,
+  1387 cached, 0 failed`, but positional C9 still rejected all four
+  `.unwrap_or` calls. A second candidate replaced the critical metadata
+  membership reads with the existing raw-`i64` dictionary lookup ABI after
+  direct bracket reads had shown a tagged-key mismatch. It also completed with
+  `6 compiled, 1387 cached, 0 failed`, but produced the identical four
+  unresolved calls. The raw lookup experiment was reverted; it was not the
+  root fix. The independently established non-void call-result extraction
+  correction remains, with a source contract.
+
+  C9 has again reached the three-cycle cap. The next session must inspect the
+  actual metadata write representation at the `parse_f64` producer and the
+  copied receiver immediately before method dispatch. In particular, determine
+  whether `local_hir_types` requires its documented parallel-array owner
+  pattern rather than another dictionary membership variant. Do not change
+  `unwrap_or` routing until that representation is proven. Credit C9 only when
+  the positional executable exits `42`.
