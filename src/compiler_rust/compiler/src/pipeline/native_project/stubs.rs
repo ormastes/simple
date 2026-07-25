@@ -123,18 +123,34 @@ fn resolve_defined_suffix_alias(sym: &str, defined: &std::collections::HashSet<S
     }
 
     let sanitized = sym.replace('.', "_dot_");
-    let tail = sanitized.rsplit("__").next().unwrap_or(sanitized.as_str());
-    let suffix = format!("__{}", tail);
-    let mut matches = defined
-        .iter()
-        .filter(|candidate| candidate.as_str() != sym)
-        .filter(|candidate| candidate.replace('.', "_dot_").ends_with(&suffix));
-    let first = matches.next().cloned();
-    if matches.next().is_none() {
-        first
-    } else {
-        None
+    let unique_suffix = |suffix: &str| {
+        let mut matches = defined
+            .iter()
+            .filter(|candidate| candidate.as_str() != sym)
+            .filter(|candidate| candidate.replace('.', "_dot_").ends_with(suffix));
+        let first = matches.next().cloned();
+        if matches.next().is_none() {
+            first
+        } else {
+            None
+        }
+    };
+
+    if sanitized.contains("__") {
+        if let Some(exact_module_match) = unique_suffix(&format!("__{}", sanitized)) {
+            return Some(exact_module_match);
+        }
+        if let Some(decorated) = sanitized.strip_prefix('_') {
+            return unique_suffix(&format!("__{}", decorated));
+        }
+        return None;
     }
+
+    let tail = sanitized.rsplit("__").next().unwrap_or(sanitized.as_str());
+    unique_suffix(&format!("__{}", tail)).or_else(|| {
+        tail.strip_prefix('_')
+            .and_then(|decorated| unique_suffix(&format!("__{}", decorated)))
+    })
 }
 
 /// Generate a legacy stub object file for a FREESTANDING (cross) target.
@@ -973,5 +989,36 @@ mod tests {
             resolve_defined_suffix_alias("helper", &defined),
             Some("m_01_unit__spec__helper".to_string())
         );
+    }
+
+    #[test]
+    fn qualified_alias_prefers_unique_full_module_suffix() {
+        let defined = HashSet::from([
+            "nogc_sync_mut__io__env_ops__env_get".to_string(),
+            "common__config__env_get".to_string(),
+        ]);
+
+        assert_eq!(
+            resolve_defined_suffix_alias("io__env_ops__env_get", &defined),
+            Some("nogc_sync_mut__io__env_ops__env_get".to_string())
+        );
+        assert_eq!(
+            resolve_defined_suffix_alias("_io__env_ops__env_get", &defined),
+            Some("nogc_sync_mut__io__env_ops__env_get".to_string())
+        );
+        assert_eq!(
+            resolve_defined_suffix_alias("other__env_get", &defined),
+            None
+        );
+    }
+
+    #[test]
+    fn ambiguous_short_alias_is_rejected() {
+        let defined = HashSet::from([
+            "tier_x86_64__app__cli__run_check".to_string(),
+            "tier_scalar__tool__check__run_check".to_string(),
+        ]);
+
+        assert_eq!(resolve_defined_suffix_alias("run_check", &defined), None);
     }
 }

@@ -1116,8 +1116,13 @@ before the caller reads the common leading `kind`; registration is locked,
 amortized O(1), and allocation failure frees the new object (boxed floats retain
 their existing inline fallback). Arrays remain on their deletion-aware registry.
 
-`clang -fsyntax-only` and the focused hosted C runtime contract pass. A
-source-matched generation-1 benchmark remains pending: the current upstream
-full-CLI link fails first on unrelated missing `io__env_ops`,
-`io__time_ops`, and `io__dir_ops` compatibility aliases. Do not credit the
-multi-file performance gate or full Stage4 until that link regression is fixed.
+`clang -fsyntax-only` and the focused hosted C runtime contract pass. The
+blocking seed-linker defect was also fixed in source: qualified unresolved
+symbols now try a unique full-module suffix before any short-name alias, so
+`io__env_ops__env_get` resolves to
+`nogc_sync_mut__io__env_ops__env_get` even when other modules define
+`env_get`. Qualified misses fail closed instead of binding an unrelated leaf.
+Focused resolver tests pass. A source-matched generation-1 benchmark still
+requires rebuilding the Rust bootstrap seed with that fix; do not credit the
+multi-file performance gate or full Stage4 until that rebuild and benchmark
+complete.

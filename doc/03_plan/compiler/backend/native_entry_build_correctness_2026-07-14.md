@@ -1015,3 +1015,12 @@ the shared binary — deploys require explicit user go-ahead).
   this change is only a bootstrap bridge. Next: fix the self-host parse
   performance blocker, resume the fresh generation-2 build, then run staged
   F64 once and C9 only after F64 exits 42.
+
+  The next generation-1 rebuild exposed a seed-linker alias defect rather than
+  a missing implementation: callers referenced `io__env_ops__env_get` while a
+  linked object defined `nogc_sync_mut__io__env_ops__env_get`. The resolver
+  compared only the final `env_get` leaf and rejected it as ambiguous. It now
+  prefers a unique full qualified suffix, rejects qualified misses instead of
+  guessing by leaf, and handles leading object-format underscores exact-first.
+  Focused unit tests pass; rebuild the bootstrap seed before retrying the full
+  CLI link and generation-2 performance receipt.
