@@ -1,0 +1,1396 @@
+export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.*
+
+class LayoutResult:
+    bx: [i32]
+    by: [i32]
+    bw: [i32]
+    bh: [i32]
+    wrap_starts: [[i32]]
+    wrap_ends: [[i32]]
+    intrinsic_widths: [i32]
+    height: i32
+
+class PositionOffsetResult:
+    bx: [i32]
+    by: [i32]
+
+fn offset_layout_subtree(child_index: HtmlChildIndex, node_index: i32, dx: i32, dy: i32, bx: [i32], by: [i32]) -> PositionOffsetResult:
+    var out_bx = bx
+    var out_by = by
+    out_bx[node_index] = out_bx[node_index] + dx
+    out_by[node_index] = out_by[node_index] + dy
+    var child = child_index.first_child[node_index]
+    while child >= 0:
+        val shifted = offset_layout_subtree(child_index, child, dx, dy, out_bx, out_by)
+        out_bx = shifted.bx
+        out_by = shifted.by
+        child = child_index.next_sibling[child]
+    PositionOffsetResult(bx: out_bx, by: out_by)
+
+fn relative_layout_result(child_index: HtmlChildIndex, node_index: i32, st: Style, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32], height: i32) -> LayoutResult:
+    if st.position_relative and (st.left_px != 0 or st.top_px != 0):
+        val shifted = offset_layout_subtree(child_index, node_index, st.left_px, st.top_px, bx, by)
+        return LayoutResult(bx: shifted.bx, by: shifted.by, bw: bw, bh: bh, wrap_starts: wrap_starts, wrap_ends: wrap_ends, intrinsic_widths: intrinsic_widths, height: height)
+    LayoutResult(bx: bx, by: by, bw: bw, bh: bh, wrap_starts: wrap_starts, wrap_ends: wrap_ends, intrinsic_widths: intrinsic_widths, height: height)
+
+class TextWrapCache:
+    starts: [[i32]]
+    ends: [[i32]]
+
+class IntrinsicWidthResult:
+    width: i32
+    widths: [i32]
+
+class LineWrapRanges:
+    starts: [i32]
+    ends: [i32]
+
+fn char_w(fs: i32) -> i32:
+    if fs <= 8:
+        return 4
+    6 * glyph_scale(fs)
+
+fn text_advance(fs: i32) -> i32:
+    if fs <= 8:
+        return 4
+    5 * glyph_scale(fs)
+
+fn style_char_w(st: Style) -> i32:
+    var out = char_w(st.font_size) + st.letter_spacing_px
+    if out < 1:
+        out = 1
+    out
+
+fn style_text_advance(st: Style) -> i32:
+    var out = text_advance(st.font_size) + st.letter_spacing_px
+    if out < 1:
+        out = 1
+    out
+
+fn style_space_advance(st: Style) -> i32:
+    var out = style_text_advance(st) / 2 + st.word_spacing_px
+    if out < 1:
+        out = 1
+    out
+
+fn line_h(fs: i32) -> i32:
+    9 * glyph_scale(fs)
+
+fn style_line_h(st: Style) -> i32:
+    if st.line_height_px > 0:
+        return st.line_height_px
+    if st.line_height_px < 0:
+        # negative sentinel = unitless line-height multiplier * 10 (e.g. 1.6 -> -16),
+        # resolved here against the element's final font-size.
+        val lh = st.font_size * (0 - st.line_height_px) / 10
+        if lh > 0:
+            return lh
+    if st.resolved_font_line_height > 0:
+        return st.resolved_font_line_height
+    line_h(st.font_size)
+
+fn resolved_text_range_width(st: Style, start: i32, endv: i32) -> i32:
+    if st.resolved_font_identity == "" or start < 0 or endv > st.resolved_font_advances.len():
+        return -1
+    var width = 0
+    var i = start
+    while i < endv:
+        width = width + st.resolved_font_advances[i]
+        i = i + 1
+    width
+
+fn style_baseline_offset(st: Style) -> i32:
+    var baseline = st.font_size * 7 / 8
+    if baseline < 1:
+        baseline = 1
+    baseline
+
+fn flex_item_align(parent: Style, child: Style) -> text:
+    if child.align_self.len() > 0 and child.align_self != "auto":
+        return child.align_self
+    parent.align_items
+
+fn flex_ordered_children(styles: [Style], child_index: HtmlChildIndex, parent_i: i32) -> [i32]:
+    val child_count = child_index.child_count[parent_i]
+    if child_count <= 0:
+        return []
+    var out: [i32] = [0; child_count]
+    var c = child_index.first_child[parent_i]
+    var out_len = 0
+    var sorted = true
+    var last_order = 0
+    while c >= 0:
+        val current_order = styles[c].order
+        if out_len > 0 and current_order < last_order:
+            sorted = false
+        last_order = current_order
+        out[out_len] = c
+        out_len = out_len + 1
+        c = child_index.next_sibling[c]
+    if sorted:
+        return out
+    _sort_style_order_indices(out, out_len, styles)
+
+fn flex_item_outer_height(node: HNode, st: Style) -> i32:
+    val legacy_widget_box = node.has_widget_class or node.has_icon_image_class
+    val border_y = st.border_t + st.border_b
+    if st.height_px > 0:
+        if legacy_widget_box or st.border_box:
+            return constrained_outer_height(node, st, st.height_px)
+        return constrained_outer_height(node, st, st.height_px + st.pad_t + st.pad_b + border_y)
+    constrained_outer_height(node, st, style_line_h(st))
+
+fn style_with_height(st: Style, height_px: i32) -> Style:
+    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, fg: st.fg, font_size: st.font_size, font_family: st.font_family, resolved_font_identity: st.resolved_font_identity, resolved_font_advances: st.resolved_font_advances, resolved_font_width: st.resolved_font_width, resolved_font_line_height: st.resolved_font_line_height, line_height_px: st.line_height_px, width_px: st.width_px, height_px: height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, backdrop_filter_raw: st.backdrop_filter_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, vertical_align: st.vertical_align, caret_color: st.caret_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold)
+
+fn style_with_width(st: Style, width_px: i32) -> Style:
+    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, fg: st.fg, font_size: st.font_size, font_family: st.font_family, resolved_font_identity: st.resolved_font_identity, resolved_font_advances: st.resolved_font_advances, resolved_font_width: st.resolved_font_width, resolved_font_line_height: st.resolved_font_line_height, line_height_px: st.line_height_px, width_px: width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, backdrop_filter_raw: st.backdrop_filter_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: st.margin_t, margin_r: st.margin_r, margin_b: st.margin_b, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: st.display, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, vertical_align: st.vertical_align, caret_color: st.caret_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: st.bold)
+
+fn styles_with_height(styles: [Style], index: i32, height_px: i32) -> [Style]:
+    val style_count = styles.len()
+    if style_count == 0:
+        return []
+    var result: [Style] = [styles[0]; style_count]
+    var si = 0
+    while si < style_count:
+        if si == index:
+            result[si] = style_with_height(styles[si], height_px)
+        else:
+            result[si] = styles[si]
+        si = si + 1
+    result
+fn intrinsic_text_width(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, widths: [i32]) -> IntrinsicWidthResult:
+    if widths[i] >= 0:
+        return IntrinsicWidthResult(width: widths[i], widths: widths)
+    var out_widths = widths
+    var width = 0
+    var c = child_index.first_child[i]
+    while c >= 0:
+        if nodes[c].tag == "#text":
+            val txt: text = nodes[c].text_trimmed
+            if txt.len() > 0:
+                val resolved = styles[c].resolved_font_width
+                if resolved > 0:
+                    width = width + resolved
+                else:
+                    val glyph_w = style_char_w(styles[c])
+                    val ink_w = if glyph_w > 1: glyph_w - 1 else: glyph_w
+                    width = width + txt.len() * ink_w
+        elif styles[c].display == "inline":
+            val child = intrinsic_text_width(nodes, styles, child_index, c, out_widths)
+            out_widths = child.widths
+            width = width + child.width
+        c = child_index.next_sibling[c]
+    if nodes[i].tag != "#text":
+        width = width + styles[i].pad_l + styles[i].pad_r + styles[i].border_l + styles[i].border_r
+    out_widths[i] = width
+    IntrinsicWidthResult(width: width, widths: out_widths)
+
+fn inline_text_advance_width(node: HNode, st: Style) -> i32:
+    if node.tag != "#text":
+        return 0
+    val raw = node.text_data
+    if st.resolved_font_width > 0 and st.resolved_font_advances.len() == raw.len():
+        return st.resolved_font_width
+    if raw == " " and node.text_trimmed == "":
+        var whitespace_advance = style_space_advance(st) / 3
+        if whitespace_advance < 1:
+            whitespace_advance = 1
+        return whitespace_advance
+    var width = 0
+    var i = 0
+    val n = raw.len()
+    val advance = style_text_advance(st)
+    val space_advance = style_space_advance(st)
+    while i < n:
+        val ch = raw.char_code_at(i)
+        if ch == 32:
+            width = width + space_advance
+        elif ch == 9 or ch == 10 or ch == 13:
+            if node.text_trimmed != "":
+                width = width + space_advance
+        else:
+            width = width + advance
+        i = i + 1
+    width
+
+fn text_ink_y_offset(fs: i32) -> i32:
+    val scale = glyph_scale(fs)
+    if scale > 1:
+        return scale + 1
+    1
+
+fn text_ink_x_offset(fs: i32) -> i32:
+    1
+
+fn wrap_line_end(txt: text, off: i32, cpl: i32) -> i32:
+    val n = txt.len()
+    var limit = off + cpl
+    if limit >= n:
+        return n
+    var last_space = -1
+    var i = off
+    while i < limit:
+        if txt.char_code_at(i) == 32:
+            last_space = i
+        i = i + 1
+    if last_space > off:
+        return last_space
+    limit
+
+fn skip_wrap_spaces(txt: text, off: i32) -> i32:
+    var out = off
+    val n = txt.len()
+    while out < n and txt.char_code_at(out) == 32:
+        out = out + 1
+    out
+
+fn text_line_advance_width(txt: text, start: i32, endv: i32, advance: i32, space_advance: i32) -> i32:
+    var width = 0
+    var i = start
+    while i < endv:
+        width = width + if txt.char_code_at(i) == 32: space_advance else: advance
+        i = i + 1
+    width
+
+fn style_text_line_advance_width(txt: text, start: i32, endv: i32, st: Style, advance: i32, space_advance: i32) -> i32:
+    val resolved = resolved_text_range_width(st, start, endv)
+    if resolved >= 0:
+        return resolved
+    text_line_advance_width(txt, start, endv, advance, space_advance)
+
+fn text_line_aligned_x(base_x: i32, line_box_w: i32, line_w: i32, st: Style, line_i: i32, line_count: i32) -> i32:
+    var align = st.text_align
+    if line_i == line_count - 1 and st.text_align_last != "auto":
+        align = st.text_align_last
+    if align == "start":
+        align = if st.direction_rtl: "right" else: "left"
+    elif align == "end":
+        align = if st.direction_rtl: "left" else: "right"
+    if align == "center":
+        return base_x + (line_box_w - line_w) / 2
+    if align == "right":
+        return base_x + line_box_w - line_w
+    base_x
+
+fn text_line_needs_paint_width(st: Style, line_i: i32, line_count: i32) -> bool:
+    if st.text_decoration_underline:
+        return true
+    var align = st.text_align
+    if line_i == line_count - 1 and st.text_align_last != "auto":
+        align = st.text_align_last
+    if align == "center" or align == "right":
+        return true
+    if align == "start":
+        return st.direction_rtl
+    if align == "end":
+        return not st.direction_rtl
+    false
+
+fn ellipsize_text_for_width(txt: text, start: i32, endv: i32, max_width: i32, st: Style, advance: i32, space_advance: i32) -> text:
+    if max_width <= 0:
+        return ""
+    val full_width = style_text_line_advance_width(txt, start, endv, st, advance, space_advance)
+    if full_width <= max_width:
+        return txt.substring(start, endv)
+    val ellipsis = "..."
+    val ellipsis_w = text_line_advance_width(ellipsis, 0, ellipsis.len(), advance, space_advance)
+    if max_width <= ellipsis_w:
+        return ellipsis
+    val content_limit = max_width - ellipsis_w
+    var out = ""
+    var used = 0
+    var i = start
+    while i < endv:
+        val resolved_char_w = resolved_text_range_width(st, i, i + 1)
+        val char_w = if resolved_char_w >= 0: resolved_char_w elif txt.char_code_at(i) == 32: space_advance else: advance
+        if used + char_w > content_limit:
+            break
+        out = out + txt.char_at(i)
+        used = used + char_w
+        i = i + 1
+    out + ellipsis
+
+fn compute_wrap_ranges(txt: text, cpl: i32) -> LineWrapRanges:
+    val txt_len = txt.len()
+    if txt_len == 0:
+        return LineWrapRanges(starts: [0; 1], ends: [0; 1])
+    var line_count = 0
+    var count_off = 0
+    while count_off < txt_len:
+        val endc = wrap_line_end(txt, count_off, cpl)
+        line_count = line_count + 1
+        count_off = skip_wrap_spaces(txt, endc)
+    if line_count <= 0:
+        return LineWrapRanges(starts: [0; 1], ends: [0; 1])
+    var starts: [i32] = [0; line_count]
+    var ends: [i32] = [0; line_count]
+    var off = 0
+    var line = 0
+    while off < txt_len:
+        val endc = wrap_line_end(txt, off, cpl)
+        starts[line] = off
+        ends[line] = endc
+        off = skip_wrap_spaces(txt, endc)
+        line = line + 1
+    LineWrapRanges(starts: starts, ends: ends)
+
+fn compute_style_wrap_ranges(txt: text, max_width: i32, st: Style, fallback_cpl: i32) -> LineWrapRanges:
+    if st.resolved_font_identity == "" or st.resolved_font_advances.len() != txt.len() or max_width <= 0:
+        return compute_wrap_ranges(txt, fallback_cpl)
+    var starts: [i32] = []
+    var ends: [i32] = []
+    var start = 0
+    val n = txt.len()
+    while start < n:
+        var endv = start
+        var used = 0
+        var last_space = -1
+        while endv < n and used + st.resolved_font_advances[endv] <= max_width:
+            used = used + st.resolved_font_advances[endv]
+            if txt.char_code_at(endv) == 32:
+                last_space = endv
+            endv = endv + 1
+        if endv == start:
+            endv = start + 1
+        elif endv < n and last_space > start:
+            endv = last_space
+        starts.push(start)
+        ends.push(endv)
+        start = skip_wrap_spaces(txt, endv)
+    LineWrapRanges(starts: starts, ends: ends)
+
+fn zero_i32_list(count: i32) -> [i32]:
+    [0; count]
+
+fn neg_one_i32_list(count: i32) -> [i32]:
+    [-1; count]
+
+fn shifted_i32_list(values: [i32], delta: i32) -> [i32]:
+    val count = values.len()
+    var shifted: [i32] = [0; count]
+    var i = 0
+    while i < count:
+        shifted[i] = values[i] + delta
+        i = i + 1
+    shifted
+
+fn empty_i32_lists(count: i32) -> [[i32]]:
+    [[]; count]
+
+fn css_outer_width(node: HNode, st: Style, css_width: i32) -> i32:
+    val legacy_widget_box = node.has_widget_class or node.has_icon_image_class
+    if legacy_widget_box or st.border_box:
+        return css_width
+    css_width + st.pad_l + st.pad_r + st.border_l + st.border_r
+
+fn css_outer_height(node: HNode, st: Style, css_height: i32) -> i32:
+    val legacy_widget_box = node.has_widget_class or node.has_icon_image_class
+    if legacy_widget_box or st.border_box:
+        return css_height
+    css_height + st.pad_t + st.pad_b + st.border_t + st.border_b
+
+fn definite_content_height_limit(node: HNode, st: Style) -> i32:
+    val legacy_widget_box = node.has_widget_class or node.has_icon_image_class
+    val border_y = st.border_t + st.border_b
+    if st.height_px > 0:
+        if legacy_widget_box or st.border_box:
+            return st.height_px - st.pad_t - st.pad_b - border_y
+        return st.height_px
+    if st.min_height_px > 0:
+        return st.min_height_px
+    0
+
+fn constrained_outer_width(node: HNode, st: Style, candidate_width: i32) -> i32:
+    var out = candidate_width
+    if st.min_width_px > 0:
+        val min_outer = css_outer_width(node, st, st.min_width_px)
+        if out < min_outer:
+            out = min_outer
+    if st.max_width_px > 0:
+        val max_outer = css_outer_width(node, st, st.max_width_px)
+        if out > max_outer:
+            out = max_outer
+    if out < 1:
+        out = 1
+    out
+
+fn constrained_outer_height(node: HNode, st: Style, candidate_height: i32) -> i32:
+    var out = candidate_height
+    if st.min_height_px > 0:
+        val min_outer = css_outer_height(node, st, st.min_height_px)
+        if out < min_outer:
+            out = min_outer
+    if st.max_height_px > 0:
+        val max_outer = css_outer_height(node, st, st.max_height_px)
+        if out > max_outer:
+            out = max_outer
+    if out < 1:
+        out = 1
+    out
+
+fn absolute_outer_width(parent: Style, node: HNode, st: Style, containing_w: i32) -> i32:
+    if st.width_px == 0 and st.left_px > 0 and st.right_px >= 0:
+        val padding_box_w = containing_w + parent.pad_l + parent.pad_r
+        var stretched = padding_box_w - st.left_px - st.right_px
+        if stretched < 1:
+            stretched = 1
+        return constrained_outer_width(node, st, stretched)
+    if st.width_px < 0:
+        val padding_box_w = containing_w + parent.pad_l + parent.pad_r
+        val percent_content_w = padding_box_w * (0 - st.width_px) / 100
+        return constrained_outer_width(node, st, css_outer_width(node, st, percent_content_w))
+    val explicit_node_w = css_outer_width(node, st, st.width_px)
+    if st.width_px > 0:
+        return constrained_outer_width(node, st, explicit_node_w)
+    constrained_outer_width(node, st, containing_w)
+
+fn absolute_outer_height(node: HNode, st: Style, containing_h: i32) -> i32:
+    val border_y = st.border_t + st.border_b
+    val resolved_h = resolve_percent_height_px(st.height_px, containing_h)
+    if resolved_h > 0:
+        if st.border_box:
+            return constrained_outer_height(node, st, resolved_h)
+        return constrained_outer_height(node, st, resolved_h + st.pad_t + st.pad_b + border_y)
+    constrained_outer_height(node, st, style_line_h(st))
+
+fn resolve_horizontal_margin_px(margin_px: i32, containing_w: i32) -> i32:
+    if margin_px < 0:
+        return containing_w * (0 - margin_px) / 100
+    margin_px
+
+fn resolve_percent_height_px(height_px: i32, containing_h: i32) -> i32:
+    if height_px < 0 and containing_h > 0:
+        return containing_h * (0 - height_px) / 100
+    height_px
+
+fn resolve_vertical_margin_px(margin_px: i32, viewport_h: i32) -> i32:
+    if margin_px <= -1000:
+        return viewport_h * ((0 - margin_px) - 1000) / 100
+    if margin_px < 0:
+        return 0
+    margin_px
+
+fn absolute_child_x(parent_x: i32, parent: Style, child_node: HNode, child: Style, containing_w: i32) -> i32:
+    if child.right_px >= 0:
+        val padding_box_w = containing_w + parent.pad_l + parent.pad_r
+        return parent_x + parent.border_l + padding_box_w - absolute_outer_width(parent, child_node, child, containing_w) - child.right_px
+    parent_x + parent.border_l + child.left_px
+
+fn absolute_child_y(parent_y: i32, parent: Style, child_node: HNode, child: Style, containing_h: i32) -> i32:
+    if child.bottom_px >= 0:
+        return parent_y + parent.border_t + containing_h - absolute_outer_height(child_node, child, containing_h) - child.bottom_px
+    parent_y + parent.border_t + child.top_px
+
+fn absolute_child_styles(styles: [Style], child_index: i32, parent: Style, child: Style, containing_w: i32, containing_h: i32) -> [Style]:
+    var resolved_child = child
+    if child.width_px < 0:
+        val padding_box_w = containing_w + parent.pad_l + parent.pad_r
+        val child_width_px = padding_box_w * (0 - child.width_px) / 100
+        resolved_child = style_with_width(resolved_child, child_width_px)
+    val child_height_px = resolve_percent_height_px(child.height_px, containing_h)
+    if child_height_px > 0 and child_height_px != resolved_child.height_px:
+        resolved_child = style_with_height(resolved_child, child_height_px)
+    if resolved_child.width_px != child.width_px or resolved_child.height_px != child.height_px:
+        val style_count = styles.len()
+        if style_count == 0:
+            return []
+        var result: [Style] = [styles[0]; style_count]
+        var si = 0
+        while si < style_count:
+            if si == child_index:
+                result[si] = resolved_child
+            else:
+                result[si] = styles[si]
+            si = si + 1
+        return result
+    styles
+
+fn layout(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, x: i32, y: i32, w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32]) -> LayoutResult:
+    var out_bx = bx
+    var out_by = by
+    var out_bw = bw
+    var out_bh = bh
+    var out_wrap_starts = wrap_starts
+    var out_wrap_ends = wrap_ends
+    var out_intrinsic_widths = intrinsic_widths
+    out_bx[i] = x
+    out_by[i] = y
+    val st = styles[i]
+    val node = nodes[i]
+    # Budget guard: short-circuit layout of not-yet-processed subtrees on expiry.
+    # Emit a zero-size box for this node and return a valid LayoutResult so the
+    # recursion unwinds cleanly while already-computed boxes stay intact.
+    if _web_budget_expired():
+        out_bw[i] = 0
+        out_bh[i] = 0
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, 0)
+    val legacy_widget_box = node.has_widget_class or node.has_icon_image_class
+    if st.display == "none":
+        out_bw[i] = 0
+        out_bh[i] = 0
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, 0)
+    if st.display == "contents":
+        out_bw[i] = w
+        var cy_contents = y
+        var c_contents = child_index.first_child[i]
+        var child_count_contents = 0
+        var prev_margin_b_contents = 0
+        while c_contents >= 0:
+            val cst = styles[c_contents]
+            val cml = resolve_horizontal_margin_px(cst.margin_l, w)
+            val cmr = resolve_horizontal_margin_px(cst.margin_r, w)
+            if child_count_contents > 0:
+                cy_contents = cy_contents + st.gap_px
+            val cst_margin_t_contents = resolve_vertical_margin_px(cst.margin_t, viewport_h)
+            val collapsed_margin_contents = if prev_margin_b_contents > cst_margin_t_contents: prev_margin_b_contents else: cst_margin_t_contents
+            cy_contents = cy_contents + collapsed_margin_contents
+            var child_w_contents = w - cml - cmr
+            if child_w_contents < 1:
+                child_w_contents = 1
+            val child = layout(nodes, styles, child_index, c_contents, x + cml, cy_contents, child_w_contents, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+            out_bx = child.bx
+            out_by = child.by
+            out_bw = child.bw
+            out_bh = child.bh
+            out_wrap_starts = child.wrap_starts
+            out_wrap_ends = child.wrap_ends
+            out_intrinsic_widths = child.intrinsic_widths
+            cy_contents = cy_contents + child.height
+            prev_margin_b_contents = resolve_vertical_margin_px(cst.margin_b, viewport_h)
+            child_count_contents = child_count_contents + 1
+            c_contents = child_index.next_sibling[c_contents]
+        if child_count_contents > 0:
+            cy_contents = cy_contents + prev_margin_b_contents
+        val h_contents = cy_contents - y
+        out_bh[i] = h_contents
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h_contents)
+    val border_x = st.border_l + st.border_r
+    val border_y = st.border_t + st.border_b
+    val explicit_node_w = css_outer_width(node, st, st.width_px)
+    # width_px > 0: explicit px. width_px < 0: percentage of available width
+    # (negative sentinel from apply_decls). width_px == 0: fill available width.
+    var node_w = if st.width_px > 0: explicit_node_w else: w
+    if st.flex_basis_px > 0 and w > 0:
+        node_w = w
+    if st.width_px < 0:
+        node_w = css_outer_width(nodes[i], st, w * (0 - st.width_px) / 100)
+        if node_w < 1:
+            node_w = 1
+    out_bw[i] = node_w
+    if node.tag != "#text" and st.width_px == 0 and st.white_space_nowrap:
+        val nowrap_intrinsic = intrinsic_text_width(nodes, styles, child_index, i, out_intrinsic_widths)
+        out_intrinsic_widths = nowrap_intrinsic.widths
+        if nowrap_intrinsic.width > node_w:
+            node_w = nowrap_intrinsic.width
+    node_w = constrained_outer_width(node, st, node_w)
+    out_bw[i] = node_w
+    if node.tag == "iframe":
+        # Replaced element (like img): fixed box from CSS width/height, else the
+        # width/height HTML attributes, else the browser default 300x150. The
+        # subtree is never laid out (returns without recursing into children).
+        if st.width_px == 0:
+            val attr_w = parse_int(attr_value(node.attrs_raw, "width"))
+            var iframe_w = if attr_w > 0: attr_w else: 300
+            iframe_w = constrained_outer_width(node, st, iframe_w)
+            out_bw[i] = iframe_w
+        val explicit_iframe_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
+        var iframe_h = explicit_iframe_h
+        if st.height_px == 0:
+            val attr_h = parse_int(attr_value(node.attrs_raw, "height"))
+            iframe_h = if attr_h > 0: attr_h else: 150
+        iframe_h = constrained_outer_height(node, st, iframe_h)
+        out_bh[i] = iframe_h
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, iframe_h)
+    if node.tag == "#text":
+        # white-space:pre/nowrap (st.white_space_nowrap, inherited from e.g. a
+        # <pre> code block) preserves the raw text incl. leading indentation;
+        # normal flow uses the trimmed text. Measure and paint must agree on which.
+        val txt: text = if st.white_space_nowrap: node.text_data else: node.text_trimmed
+        val txt_len = if st.white_space_nowrap: node.text_data.len() else: node.text_trimmed.len()
+        val cw = style_char_w(st)
+        var cpl = node_w / cw
+        if cpl < 1:
+            cpl = 1
+        # If the whole run fits the box at its real advance width, keep it on
+        # one line. An inline #text box is sized by advance width (5px/char at
+        # scale 1) while cpl divides by cell width (6px/char), so without this
+        # check a run that exactly fits its box spuriously wraps at ~5/6 of its
+        # length ("Simple Editor" -> "Simple"/"Editor", "EDITOR" -> "EDITO"/"R").
+        val full_adv = style_text_line_advance_width(txt, 0, txt_len, st, style_text_advance(st), style_space_advance(st))
+        if st.white_space_nowrap:
+            out_wrap_starts[i] = [0; 1]
+            out_wrap_ends[i] = [txt_len; 1]
+        elif full_adv <= node_w:
+            out_wrap_starts[i] = [0; 1]
+            out_wrap_ends[i] = [txt_len; 1]
+        else:
+            val ranges = compute_style_wrap_ranges(txt, node_w, st, cpl)
+            out_wrap_starts[i] = ranges.starts
+            out_wrap_ends[i] = ranges.ends
+        val lines = out_wrap_starts[i].len()
+        val h = lines * style_line_h(st)
+        out_bh[i] = h
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
+    if node.tag == "img" or node.tag == "input":
+        val explicit_node_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
+        val h = constrained_outer_height(node, st, if st.height_px > 0: explicit_node_h else: style_line_h(st))
+        out_bh[i] = h
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
+    if st.content_visibility_hidden:
+        var hidden_h = st.pad_t + st.pad_b + border_y
+        if st.height_px > 0:
+            hidden_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
+        if st.min_height_px > 0:
+            val min_hidden_h = css_outer_height(node, st, st.min_height_px)
+            if min_hidden_h > hidden_h:
+                hidden_h = min_hidden_h
+        if hidden_h < 1:
+            hidden_h = 1
+        out_bh[i] = hidden_h
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, hidden_h)
+    val ix = x + st.border_l + st.pad_l
+    var iw = node_w - st.pad_l - st.pad_r - border_x
+    if iw < 1:
+        iw = 1
+    val scrollbar_gutter = 15
+    val content_height_limit = definite_content_height_limit(node, st)
+    if st.display == "flex" and st.flex_direction != "column":
+        val children_for_i_count = child_index.child_count[i]
+        if st.flex_wrap != "nowrap":
+            val row_wrap_column_gap = st.column_gap_px
+            val row_wrap_row_gap = st.row_gap_px
+            var line_heights: [i32] = [0; children_for_i_count]
+            var line_count = 0
+            var total_line_h = 0
+            var cx_measure = 0
+            var line_h_measure = 0
+            var child_count_measure = 0
+            var fm = child_index.first_child[i]
+            while fm >= 0:
+                val cst = styles[fm]
+                if not cst.position_absolute:
+                    val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
+                    val resolved_cst = if child_height_px > 0 and child_height_px != cst.height_px:
+                        style_with_height(cst, child_height_px)
+                    else:
+                        cst
+                    val cml = resolve_horizontal_margin_px(cst.margin_l, iw)
+                    val cmr = resolve_horizontal_margin_px(cst.margin_r, iw)
+                    val base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fm].has_widget_class or nodes[fm].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
+                    val item_outer_w = cml + base_w_wrap + cmr
+                    if child_count_measure > 0 and cx_measure + row_wrap_column_gap + item_outer_w > iw:
+                        line_heights[line_count] = line_h_measure
+                        line_count = line_count + 1
+                        total_line_h = total_line_h + line_h_measure
+                        cx_measure = 0
+                        line_h_measure = 0
+                        child_count_measure = 0
+                    if child_count_measure > 0:
+                        cx_measure = cx_measure + row_wrap_column_gap
+                    cx_measure = cx_measure + item_outer_w
+                    val used_h = resolved_cst.margin_t + flex_item_outer_height(nodes[fm], resolved_cst) + resolved_cst.margin_b
+                    if used_h > line_h_measure:
+                        line_h_measure = used_h
+                    child_count_measure = child_count_measure + 1
+                fm = child_index.next_sibling[fm]
+            if child_count_measure > 0:
+                line_heights[line_count] = line_h_measure
+                line_count = line_count + 1
+                total_line_h = total_line_h + line_h_measure
+            if line_count > 1:
+                total_line_h = total_line_h + row_wrap_row_gap * (line_count - 1)
+            val explicit_content_h = if st.height_px > 0:
+                if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
+            else:
+                0
+            var align_content_offset = 0
+            var align_content_gap_extra = 0
+            var align_content_line_extra = 0
+            var total_line_h_with_align = total_line_h
+            if (st.align_content == "center" or st.align_content == "safe-center" or st.align_content == "unsafe-center") and explicit_content_h > total_line_h:
+                align_content_offset = (explicit_content_h - total_line_h) / 2
+            elif (st.align_content == "flex-end" or st.align_content == "end") and explicit_content_h > total_line_h:
+                align_content_offset = explicit_content_h - total_line_h
+            elif st.align_content == "space-between" and explicit_content_h > total_line_h and line_count > 1:
+                align_content_gap_extra = (explicit_content_h - total_line_h) / (line_count - 1)
+            elif st.align_content == "space-around" and explicit_content_h > total_line_h and line_count > 0:
+                align_content_offset = (explicit_content_h - total_line_h) / (line_count * 2)
+                align_content_gap_extra = (explicit_content_h - total_line_h) / line_count
+            elif st.align_content == "space-evenly" and explicit_content_h > total_line_h and line_count > 0:
+                align_content_offset = (explicit_content_h - total_line_h) / (line_count + 1)
+                align_content_gap_extra = (explicit_content_h - total_line_h) / (line_count + 1)
+            elif (st.align_content == "stretch" or st.align_content == "normal") and explicit_content_h > total_line_h and line_count > 0:
+                align_content_line_extra = (explicit_content_h - total_line_h) / line_count
+                total_line_h_with_align = total_line_h + align_content_line_extra * line_count
+            val reverse_wrap = st.flex_wrap == "wrap-reverse"
+            var cx_wrap = ix
+            var cy_wrap = if reverse_wrap:
+                y + st.border_t + st.pad_t + align_content_offset + total_line_h_with_align - (if line_count > 0: line_heights[0] + align_content_line_extra else: 0)
+            else:
+                y + st.border_t + st.pad_t + align_content_offset
+            var line_h_wrap = 0
+            var line_index_wrap = 0
+            var fc_wrap = child_index.first_child[i]
+            var flex_child_count_wrap = 0
+            while fc_wrap >= 0:
+                val cst = styles[fc_wrap]
+                if cst.position_absolute:
+                    val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
+                    val ax = absolute_child_x(x, st, nodes[fc_wrap], cst, iw)
+                    val ay = absolute_child_y(y, st, nodes[fc_wrap], cst, absolute_containing_h)
+                    val absolute_w = absolute_outer_width(st, nodes[fc_wrap], cst, iw)
+                    val child_styles = absolute_child_styles(styles, fc_wrap, st, cst, iw, absolute_containing_h)
+                    val child = layout(nodes, child_styles, child_index, fc_wrap, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                    out_bx = child.bx
+                    out_by = child.by
+                    out_bw = child.bw
+                    out_bh = child.bh
+                    out_wrap_starts = child.wrap_starts
+                    out_wrap_ends = child.wrap_ends
+                    out_intrinsic_widths = child.intrinsic_widths
+                else:
+                    val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
+                    val child_styles = if child_height_px > 0 and child_height_px != cst.height_px:
+                        styles_with_height(styles, fc_wrap, child_height_px)
+                    else:
+                        styles
+                    val resolved_cst = child_styles[fc_wrap]
+                    val cml = resolve_horizontal_margin_px(cst.margin_l, iw)
+                    val cmr = resolve_horizontal_margin_px(cst.margin_r, iw)
+                    val base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fc_wrap].has_widget_class or nodes[fc_wrap].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
+                    val item_outer_w = cml + base_w_wrap + cmr
+                    if flex_child_count_wrap > 0 and cx_wrap - ix + st.gap_px + item_outer_w > iw:
+                        cx_wrap = ix
+                        if reverse_wrap:
+                            cy_wrap = cy_wrap - ((if line_index_wrap + 1 < line_count: line_heights[line_index_wrap + 1] + align_content_line_extra else: 0) + row_wrap_row_gap + align_content_gap_extra)
+                        else:
+                            cy_wrap = cy_wrap + line_h_wrap + row_wrap_row_gap + align_content_gap_extra
+                        line_index_wrap = line_index_wrap + 1
+                        line_h_wrap = if line_index_wrap < line_count: line_heights[line_index_wrap] + align_content_line_extra else: 0
+                        flex_child_count_wrap = 0
+                    if flex_child_count_wrap == 0 and line_index_wrap < line_count:
+                        line_h_wrap = line_heights[line_index_wrap] + align_content_line_extra
+                    if flex_child_count_wrap > 0:
+                        cx_wrap = cx_wrap + row_wrap_column_gap
+                    cx_wrap = cx_wrap + cml
+                    var remaining_w = base_w_wrap
+                    if remaining_w < 1:
+                        remaining_w = 1
+                    val child = layout(nodes, child_styles, child_index, fc_wrap, cx_wrap, cy_wrap + resolved_cst.margin_t, remaining_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                    out_bx = child.bx
+                    out_by = child.by
+                    out_bw = child.bw
+                    out_bh = child.bh
+                    out_wrap_starts = child.wrap_starts
+                    out_wrap_ends = child.wrap_ends
+                    out_intrinsic_widths = child.intrinsic_widths
+                    cx_wrap = cx_wrap + out_bw[fc_wrap] + cmr
+                    flex_child_count_wrap = flex_child_count_wrap + 1
+                fc_wrap = child_index.next_sibling[fc_wrap]
+            var flex_h_wrap = if st.height_px > 0:
+                if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
+            else:
+                total_line_h + st.pad_t + st.pad_b + border_y
+            if flex_h_wrap < 1:
+                flex_h_wrap = 1
+            out_bh[i] = flex_h_wrap
+            return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, flex_h_wrap)
+        # Pre-pass: distribute the inner width across flex children. Children with an
+        # explicit width (px or %) take it; the leftover space is shared by flex-grow
+        # weight using left-to-right cumulative rounding so integer remainders stay
+        # stable against Chromium for small fixtures.
+        val ordered_flex_children = flex_ordered_children(styles, child_index, i)
+        val ordered_flex_child_count = ordered_flex_children.len()
+        var sum_explicit = 0
+        var auto_weight = 0
+        var auto_main_margin_count = 0
+        var shrink_scaled_total = 0
+        var nonabs_count = 0
+        var ps_i = 0
+        while ps_i < ordered_flex_child_count:
+            val ps = ordered_flex_children[ps_i]
+            val pcst = styles[ps]
+            if not pcst.position_absolute:
+                val pml = resolve_horizontal_margin_px(pcst.margin_l, iw)
+                val pmr = resolve_horizontal_margin_px(pcst.margin_r, iw)
+                nonabs_count = nonabs_count + 1
+                var base_w = 0
+                if pcst.flex_basis_px > 0:
+                    base_w = pcst.flex_basis_px
+                elif pcst.width_px > 0:
+                    base_w = if nodes[ps].has_widget_class or nodes[ps].has_icon_image_class or pcst.border_box: pcst.width_px else: pcst.width_px + pcst.pad_l + pcst.pad_r + pcst.border_l + pcst.border_r
+                elif pcst.width_px < 0:
+                    base_w = iw * (0 - pcst.width_px) / 100
+                if base_w > 0:
+                    sum_explicit = sum_explicit + base_w
+                    val shrink_factor = if pcst.flex_shrink > 0: pcst.flex_shrink else: 0
+                    shrink_scaled_total = shrink_scaled_total + (shrink_factor * base_w)
+                else:
+                    val intrinsic = intrinsic_text_width(nodes, styles, child_index, ps, out_intrinsic_widths)
+                    out_intrinsic_widths = intrinsic.widths
+                    val intrinsic_w = intrinsic.width
+                    if intrinsic_w > 0 and pcst.flex_grow == 0:
+                        base_w = intrinsic_w
+                        sum_explicit = sum_explicit + base_w
+                        val shrink_factor = if pcst.flex_shrink > 0: pcst.flex_shrink else: 0
+                        shrink_scaled_total = shrink_scaled_total + (shrink_factor * base_w)
+                    else:
+                        val grow = if pcst.flex_grow > 0: pcst.flex_grow else: 1
+                        auto_weight = auto_weight + grow
+                if pcst.margin_l_auto:
+                    auto_main_margin_count = auto_main_margin_count + 1
+                else:
+                    sum_explicit = sum_explicit + pml
+                if pcst.margin_r_auto:
+                    auto_main_margin_count = auto_main_margin_count + 1
+                else:
+                    sum_explicit = sum_explicit + pmr
+            ps_i = ps_i + 1
+        var gaps_total = 0
+        if nonabs_count > 1:
+            gaps_total = st.column_gap_px * (nonabs_count - 1)
+        val main_free_space = iw - sum_explicit - gaps_total
+        val shrink_deficit = if sum_explicit + gaps_total > iw: sum_explicit + gaps_total - iw else: 0
+        var auto_avail = iw - sum_explicit - gaps_total
+        if auto_avail < auto_weight:
+            auto_avail = auto_weight
+        val auto_main_margin_px = if shrink_deficit == 0 and auto_weight == 0 and auto_main_margin_count > 0 and main_free_space > 0:
+            main_free_space / auto_main_margin_count
+        else:
+            0
+        val positive_free_space = if shrink_deficit == 0 and auto_weight == 0 and auto_main_margin_count == 0 and iw > sum_explicit + gaps_total: iw - sum_explicit - gaps_total else: 0
+        var justify_start_offset = 0
+        var justify_gap_extra = 0
+        if positive_free_space > 0:
+            if st.justify_content == "space-between" and nonabs_count > 1:
+                justify_gap_extra = positive_free_space / (nonabs_count - 1)
+            elif st.justify_content == "space-around" and nonabs_count > 0:
+                justify_start_offset = positive_free_space / (nonabs_count * 2)
+                justify_gap_extra = positive_free_space / nonabs_count
+            elif st.justify_content == "space-evenly" and nonabs_count > 0:
+                justify_start_offset = positive_free_space / (nonabs_count + 1)
+                justify_gap_extra = positive_free_space / (nonabs_count + 1)
+            elif st.justify_content == "center" or st.justify_content == "safe-center" or st.justify_content == "unsafe-center":
+                justify_start_offset = positive_free_space / 2
+            elif st.justify_content == "flex-end" or st.justify_content == "end":
+                justify_start_offset = positive_free_space
+        elif main_free_space < 0 and st.justify_content == "unsafe-center" and shrink_scaled_total == 0:
+            justify_start_offset = main_free_space / 2
+        var cx = ix + justify_start_offset
+        var max_child_h = 0
+        var flex_child_count = 0
+        var flex_weight_used = 0
+        var flex_width_assigned = 0
+        var shrink_scaled_used = 0
+        var shrink_width_assigned = 0
+        var max_baseline = 0
+        if st.align_items == "baseline":
+            var pb_i = 0
+            while pb_i < ordered_flex_child_count:
+                val pb = ordered_flex_children[pb_i]
+                val pcst = styles[pb]
+                if not pcst.position_absolute:
+                    val baseline = pcst.margin_t + style_baseline_offset(pcst)
+                    if baseline > max_baseline:
+                        max_baseline = baseline
+                pb_i = pb_i + 1
+        else:
+            var pb_self_i = 0
+            while pb_self_i < ordered_flex_child_count:
+                val pb_self = ordered_flex_children[pb_self_i]
+                val pcst_self = styles[pb_self]
+                if not pcst_self.position_absolute and flex_item_align(st, pcst_self) == "baseline":
+                    val baseline_self = pcst_self.margin_t + style_baseline_offset(pcst_self)
+                    if baseline_self > max_baseline:
+                        max_baseline = baseline_self
+                pb_self_i = pb_self_i + 1
+        var fc_i = 0
+        while fc_i < ordered_flex_child_count:
+            val fc = ordered_flex_children[fc_i]
+            val cst = styles[fc]
+            if cst.position_absolute:
+                val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
+                val ax = absolute_child_x(x, st, nodes[fc], cst, iw)
+                val ay = absolute_child_y(y, st, nodes[fc], cst, absolute_containing_h)
+                val absolute_w = absolute_outer_width(st, nodes[fc], cst, iw)
+                val child_styles = absolute_child_styles(styles, fc, st, cst, iw, absolute_containing_h)
+                val child = layout(nodes, child_styles, child_index, fc, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                out_bx = child.bx
+                out_by = child.by
+                out_bw = child.bw
+                out_bh = child.bh
+                out_wrap_starts = child.wrap_starts
+                out_wrap_ends = child.wrap_ends
+                out_intrinsic_widths = child.intrinsic_widths
+            else:
+                val cml = resolve_horizontal_margin_px(cst.margin_l, iw)
+                val cmr = resolve_horizontal_margin_px(cst.margin_r, iw)
+                if flex_child_count > 0:
+                    cx = cx + st.column_gap_px + justify_gap_extra
+                cx = cx + (if cst.margin_l_auto: auto_main_margin_px else: cml)
+                # auto-width child gets its weighted share; %-width resolves against
+                # the container inner width; px-width children ignore this.
+                var remaining_w = iw - (cx - ix) - cmr
+                var force_used_w = false
+                if shrink_deficit > 0 and shrink_scaled_total > 0 and (cst.width_px != 0 or cst.flex_basis_px > 0):
+                    # width_px < 0 is the percentage sentinel: a %-width flex item
+                    # (e.g. width:100% taskbar pills in a row) must shrink from the
+                    # same base the measuring loop used, not take the full inner
+                    # width (which stacked/overflowed the row).
+                    val base_w = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px < 0: iw * (0 - cst.width_px) / 100 else: if nodes[fc].has_widget_class or nodes[fc].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
+                    val shrink_factor = if cst.flex_shrink > 0: cst.flex_shrink else: 0
+                    val scaled_shrink = shrink_factor * base_w
+                    val cumulative_shrink = (shrink_deficit * (shrink_scaled_used + scaled_shrink)) / shrink_scaled_total
+                    remaining_w = base_w - (cumulative_shrink - shrink_width_assigned)
+                    shrink_scaled_used = shrink_scaled_used + scaled_shrink
+                    shrink_width_assigned = cumulative_shrink
+                    # CSS automatic minimum size (min-width: auto): a flex item
+                    # with VISIBLE overflow never shrinks below its min-content
+                    # width; without this floor a width:100% button in a tight
+                    # row collapses to a sliver and wraps its label one char per
+                    # line. Items with overflow hidden/auto keep min-width 0.
+                    if not cst.overflow_hidden and not cst.overflow_auto_y:
+                        val floor_intrinsic = intrinsic_text_width(nodes, styles, child_index, fc, out_intrinsic_widths)
+                        out_intrinsic_widths = floor_intrinsic.widths
+                        if floor_intrinsic.width > 0 and remaining_w < floor_intrinsic.width:
+                            remaining_w = floor_intrinsic.width
+                    force_used_w = true
+                elif cst.width_px == 0 and cst.flex_basis_px == 0 and cst.flex_grow == 0:
+                    val intrinsic = intrinsic_text_width(nodes, styles, child_index, fc, out_intrinsic_widths)
+                    out_intrinsic_widths = intrinsic.widths
+                    val intrinsic_w = intrinsic.width
+                    if intrinsic_w > 0:
+                        remaining_w = intrinsic_w
+                    elif auto_weight > 0:
+                        val grow = 1
+                        val cumulative_target = (auto_avail * (flex_weight_used + grow) + auto_weight - 1) / auto_weight
+                        remaining_w = cumulative_target - flex_width_assigned
+                        flex_weight_used = flex_weight_used + grow
+                        flex_width_assigned = cumulative_target
+                elif cst.width_px == 0:
+                    if auto_weight > 0:
+                        val grow = if cst.flex_grow > 0: cst.flex_grow else: 1
+                        val cumulative_target = (auto_avail * (flex_weight_used + grow) + auto_weight - 1) / auto_weight
+                        remaining_w = cumulative_target - flex_width_assigned
+                        flex_weight_used = flex_weight_used + grow
+                        flex_width_assigned = cumulative_target
+                elif cst.width_px < 0:
+                    remaining_w = iw
+                elif cst.flex_basis_px > 0:
+                    remaining_w = cst.flex_basis_px
+                elif shrink_deficit > 0 and shrink_scaled_total > 0:
+                    val base_w = if cst.flex_basis_px > 0: cst.flex_basis_px else: if nodes[fc].has_widget_class or nodes[fc].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
+                    val shrink_factor = if cst.flex_shrink > 0: cst.flex_shrink else: 0
+                    val scaled_shrink = shrink_factor * base_w
+                    val cumulative_shrink = (shrink_deficit * (shrink_scaled_used + scaled_shrink)) / shrink_scaled_total
+                    remaining_w = base_w - (cumulative_shrink - shrink_width_assigned)
+                    shrink_scaled_used = shrink_scaled_used + scaled_shrink
+                    shrink_width_assigned = cumulative_shrink
+                    if not cst.overflow_hidden and not cst.overflow_auto_y:
+                        val floor_intrinsic2 = intrinsic_text_width(nodes, styles, child_index, fc, out_intrinsic_widths)
+                        out_intrinsic_widths = floor_intrinsic2.widths
+                        if floor_intrinsic2.width > 0 and remaining_w < floor_intrinsic2.width:
+                            remaining_w = floor_intrinsic2.width
+                # Explicit CSS min-width floors every flex sizing branch: a
+                # min-width'd item (taskbar sections' min-width: 180px) keeps
+                # its floor and the row overflows, exactly as Chromium lays it.
+                if cst.min_width_px > 0:
+                    val min_w_outer = if nodes[fc].has_widget_class or nodes[fc].has_icon_image_class or cst.border_box: cst.min_width_px else: cst.min_width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r
+                    if remaining_w < min_w_outer:
+                        remaining_w = min_w_outer
+                if remaining_w < 1:
+                    remaining_w = 1
+                val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
+                var child_styles = if child_height_px > 0 and child_height_px != cst.height_px:
+                    styles_with_height(styles, fc, child_height_px)
+                else:
+                    styles
+                val resolved_cst = child_styles[fc]
+                val item_align = flex_item_align(st, resolved_cst)
+                var child_y = y + st.border_t + st.pad_t + resolved_cst.margin_t
+                val container_cross_auto = if st.height_px > 0:
+                    if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
+                else:
+                    0
+                val child_outer_h_auto = flex_item_outer_height(nodes[fc], resolved_cst)
+                if (resolved_cst.margin_t_auto or resolved_cst.margin_b_auto) and container_cross_auto > child_outer_h_auto + resolved_cst.margin_t + resolved_cst.margin_b:
+                    val free_cross_auto = container_cross_auto - child_outer_h_auto - resolved_cst.margin_t - resolved_cst.margin_b
+                    if resolved_cst.margin_t_auto and resolved_cst.margin_b_auto:
+                        child_y = y + st.border_t + st.pad_t + resolved_cst.margin_t + free_cross_auto / 2
+                    elif resolved_cst.margin_t_auto:
+                        child_y = y + st.border_t + st.pad_t + resolved_cst.margin_t + free_cross_auto
+                    else:
+                        child_y = y + st.border_t + st.pad_t + resolved_cst.margin_t
+                elif item_align == "baseline":
+                    child_y = y + st.border_t + st.pad_t + max_baseline - style_baseline_offset(resolved_cst)
+                elif item_align == "center":
+                    val container_cross = if st.height_px > 0:
+                        if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
+                    else:
+                        0
+                    val child_outer_h = flex_item_outer_height(nodes[fc], resolved_cst)
+                    val child_margin_h = resolved_cst.margin_t + child_outer_h + resolved_cst.margin_b
+                    if container_cross > child_margin_h:
+                        child_y = y + st.border_t + st.pad_t + resolved_cst.margin_t + (container_cross - child_margin_h) / 2
+                elif item_align == "flex-end" or item_align == "end":
+                    val container_cross_end = if st.height_px > 0:
+                        if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
+                    else:
+                        0
+                    val child_outer_h_end = flex_item_outer_height(nodes[fc], resolved_cst)
+                    val child_margin_h_end = resolved_cst.margin_t + child_outer_h_end + resolved_cst.margin_b
+                    if container_cross_end > child_margin_h_end:
+                        child_y = y + st.border_t + st.pad_t + resolved_cst.margin_t + container_cross_end - child_margin_h_end
+                if (item_align == "stretch" or item_align == "") and st.height_px > 0 and resolved_cst.height_px == 0:
+                    val container_cross_stretch = if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
+                    var stretch_outer_h = container_cross_stretch - resolved_cst.margin_t - resolved_cst.margin_b
+                    if stretch_outer_h < 1:
+                        stretch_outer_h = 1
+                    val child_border_y = resolved_cst.border_t + resolved_cst.border_b
+                    var stretch_style_h = stretch_outer_h
+                    if not (nodes[fc].has_widget_class or nodes[fc].has_icon_image_class or resolved_cst.border_box):
+                        stretch_style_h = stretch_outer_h - resolved_cst.pad_t - resolved_cst.pad_b - child_border_y
+                    if stretch_style_h < 1:
+                        stretch_style_h = 1
+                    child_styles = styles_with_height(child_styles, fc, stretch_style_h)
+                val child = layout(nodes, child_styles, child_index, fc, cx, child_y, remaining_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                out_bx = child.bx
+                out_by = child.by
+                out_bw = child.bw
+                out_bh = child.bh
+                out_wrap_starts = child.wrap_starts
+                out_wrap_ends = child.wrap_ends
+                out_intrinsic_widths = child.intrinsic_widths
+                if force_used_w:
+                    out_bw[fc] = remaining_w
+                val used_h = cst.margin_t + child.height + cst.margin_b
+                if used_h > max_child_h:
+                    max_child_h = used_h
+                cx = cx + out_bw[fc] + (if cst.margin_r_auto: auto_main_margin_px else: cmr)
+                flex_child_count = flex_child_count + 1
+            fc_i = fc_i + 1
+        var flex_h = max_child_h + st.pad_t + st.pad_b + border_y
+        val explicit_flex_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
+        if st.height_px > 0:
+            flex_h = explicit_flex_h
+        if st.min_height_px > 0:
+            val min_flex_h = css_outer_height(node, st, st.min_height_px)
+            if min_flex_h > flex_h:
+                flex_h = min_flex_h
+        if st.max_height_px > 0:
+            val max_flex_h = css_outer_height(node, st, st.max_height_px)
+            if max_flex_h < flex_h:
+                flex_h = max_flex_h
+        if st.min_height_vh and viewport_h > flex_h:
+            flex_h = viewport_h
+        if st.flex_fill or nodes[i].has_widget_panel_class:
+            # fill the ANCESTOR content box, not the raw viewport: a page like
+            # `#app { min-height: 100vh; padding: ...14px }` reserves a bottom
+            # inset Chromium honors when growing flex:1 children.
+            val fill_bottom = viewport_h - ancestor_bottom_inset(nodes, styles, i)
+            if fill_bottom - y > flex_h:
+                flex_h = fill_bottom - y
+        if flex_h < 1:
+            flex_h = 1
+        out_bh[i] = flex_h
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, flex_h)
+    if st.display == "flex" and st.flex_direction == "column":
+        var col_nonabs_count = 0
+        var col_run_h = 0
+        var col_auto_main_margin_count = 0
+        var col_measure = child_index.first_child[i]
+        while col_measure >= 0:
+            val measure_st = styles[col_measure]
+            if not measure_st.position_absolute:
+                val measure_height_px = resolve_percent_height_px(measure_st.height_px, content_height_limit)
+                val resolved_measure_st = if measure_height_px > 0 and measure_height_px != measure_st.height_px:
+                    style_with_height(measure_st, measure_height_px)
+                else:
+                    measure_st
+                if resolved_measure_st.margin_t_auto:
+                    col_auto_main_margin_count = col_auto_main_margin_count + 1
+                else:
+                    col_run_h = col_run_h + resolved_measure_st.margin_t
+                col_run_h = col_run_h + flex_item_outer_height(nodes[col_measure], resolved_measure_st)
+                if resolved_measure_st.margin_b_auto:
+                    col_auto_main_margin_count = col_auto_main_margin_count + 1
+                else:
+                    col_run_h = col_run_h + resolved_measure_st.margin_b
+                col_nonabs_count = col_nonabs_count + 1
+            col_measure = child_index.next_sibling[col_measure]
+        if col_nonabs_count > 1:
+            col_run_h = col_run_h + st.row_gap_px * (col_nonabs_count - 1)
+        val col_container_main = if st.height_px > 0:
+            if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
+        else:
+            0
+        val col_main_free_space = col_container_main - col_run_h
+        val col_positive_free_space = if col_main_free_space > 0: col_main_free_space else: 0
+        val col_auto_main_margin_px = if col_positive_free_space > 0 and col_auto_main_margin_count > 0:
+            col_positive_free_space / col_auto_main_margin_count
+        else:
+            0
+        var col_justify_start_offset = 0
+        var col_justify_gap_extra = 0
+        if col_positive_free_space > 0 and col_auto_main_margin_count == 0:
+            if st.justify_content == "space-between" and col_nonabs_count > 1:
+                col_justify_gap_extra = col_positive_free_space / (col_nonabs_count - 1)
+            elif st.justify_content == "space-around" and col_nonabs_count > 0:
+                col_justify_start_offset = col_positive_free_space / (col_nonabs_count * 2)
+                col_justify_gap_extra = col_positive_free_space / col_nonabs_count
+            elif st.justify_content == "space-evenly" and col_nonabs_count > 0:
+                col_justify_start_offset = col_positive_free_space / (col_nonabs_count + 1)
+                col_justify_gap_extra = col_positive_free_space / (col_nonabs_count + 1)
+            elif st.justify_content == "center" or st.justify_content == "safe-center" or st.justify_content == "unsafe-center":
+                col_justify_start_offset = col_positive_free_space / 2
+            elif st.justify_content == "flex-end" or st.justify_content == "end":
+                col_justify_start_offset = col_positive_free_space
+        elif col_main_free_space < 0 and st.justify_content == "unsafe-center":
+            col_justify_start_offset = col_main_free_space / 2
+        var cy_flex = y + st.border_t + st.pad_t + col_justify_start_offset
+        var flex_c = child_index.first_child[i]
+        var flex_child_count_col = 0
+        while flex_c >= 0:
+            val cst = styles[flex_c]
+            if cst.position_absolute:
+                val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
+                val ax = absolute_child_x(x, st, nodes[flex_c], cst, iw)
+                val ay = absolute_child_y(y, st, nodes[flex_c], cst, absolute_containing_h)
+                val absolute_w = absolute_outer_width(st, nodes[flex_c], cst, iw)
+                val child_styles = absolute_child_styles(styles, flex_c, st, cst, iw, absolute_containing_h)
+                val child = layout(nodes, child_styles, child_index, flex_c, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                out_bx = child.bx
+                out_by = child.by
+                out_bw = child.bw
+                out_bh = child.bh
+                out_wrap_starts = child.wrap_starts
+                out_wrap_ends = child.wrap_ends
+                out_intrinsic_widths = child.intrinsic_widths
+            else:
+                val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
+                val child_styles = if child_height_px > 0 and child_height_px != cst.height_px:
+                    styles_with_height(styles, flex_c, child_height_px)
+                else:
+                    styles
+                val resolved_cst = child_styles[flex_c]
+                val cml = resolve_horizontal_margin_px(resolved_cst.margin_l, iw)
+                val cmr = resolve_horizontal_margin_px(resolved_cst.margin_r, iw)
+                if flex_child_count_col > 0:
+                    cy_flex = cy_flex + st.row_gap_px + col_justify_gap_extra
+                cy_flex = cy_flex + (if resolved_cst.margin_t_auto: col_auto_main_margin_px else: resolved_cst.margin_t)
+                var child_inner_w = iw
+                if child_inner_w < 1:
+                    child_inner_w = 1
+                var child_w = child_inner_w - cml - cmr
+                if child_w < 1:
+                    child_w = 1
+                var child_x = ix + cml
+                val col_item_align = flex_item_align(st, resolved_cst)
+                val col_child_outer_w = if resolved_cst.width_px > 0:
+                    if nodes[flex_c].has_widget_class or nodes[flex_c].has_icon_image_class or resolved_cst.border_box: resolved_cst.width_px else: resolved_cst.width_px + resolved_cst.pad_l + resolved_cst.pad_r + resolved_cst.border_l + resolved_cst.border_r
+                else:
+                    child_w
+                val col_child_margin_w = cml + col_child_outer_w + cmr
+                if col_item_align == "center" and iw > col_child_margin_w:
+                    child_x = ix + cml + (iw - col_child_margin_w) / 2
+                    child_w = col_child_outer_w
+                elif (col_item_align == "flex-end" or col_item_align == "end") and iw > col_child_margin_w:
+                    child_x = ix + cml + iw - col_child_margin_w
+                    child_w = col_child_outer_w
+                val child = layout(nodes, child_styles, child_index, flex_c, child_x, cy_flex, child_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                out_bx = child.bx
+                out_by = child.by
+                out_bw = child.bw
+                out_bh = child.bh
+                out_wrap_starts = child.wrap_starts
+                out_wrap_ends = child.wrap_ends
+                out_intrinsic_widths = child.intrinsic_widths
+                cy_flex = cy_flex + child.height + (if resolved_cst.margin_b_auto: col_auto_main_margin_px else: resolved_cst.margin_b)
+                flex_child_count_col = flex_child_count_col + 1
+            flex_c = child_index.next_sibling[flex_c]
+        var flex_h_col = (cy_flex - y) + st.pad_b + st.border_b
+        val explicit_flex_h_col = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
+        if st.height_px > 0:
+            flex_h_col = explicit_flex_h_col
+        if st.min_height_px > 0:
+            val min_flex_h_col = css_outer_height(node, st, st.min_height_px)
+            if min_flex_h_col > flex_h_col:
+                flex_h_col = min_flex_h_col
+        if st.max_height_px > 0:
+            val max_flex_h_col = css_outer_height(node, st, st.max_height_px)
+            if max_flex_h_col < flex_h_col:
+                flex_h_col = max_flex_h_col
+        if st.min_height_vh and viewport_h > flex_h_col:
+            flex_h_col = viewport_h
+        if st.flex_fill or nodes[i].has_widget_panel_class:
+            val fill_bottom_col = viewport_h - ancestor_bottom_inset(nodes, styles, i)
+            if fill_bottom_col - y > flex_h_col:
+                flex_h_col = fill_bottom_col - y
+        if flex_h_col < 1:
+            flex_h_col = 1
+        out_bh[i] = flex_h_col
+        return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, flex_h_col)
+    var cy = y + st.border_t + st.pad_t
+    var child_count = 0
+    var prev_margin_b = 0
+    var in_inline_run = false
+    var inline_x = 0
+    var inline_line_h = 0
+    var c = child_index.first_child[i]
+    while c >= 0:
+        val cst = styles[c]
+        if cst.position_absolute:
+            val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
+            val ax = absolute_child_x(x, st, nodes[c], cst, iw)
+            val ay = absolute_child_y(y, st, nodes[c], cst, absolute_containing_h)
+            val absolute_w = absolute_outer_width(st, nodes[c], cst, iw)
+            val child_styles = absolute_child_styles(styles, c, st, cst, iw, absolute_containing_h)
+            val child = layout(nodes, child_styles, child_index, c, ax, ay, absolute_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+            out_bx = child.bx
+            out_by = child.by
+            out_bw = child.bw
+            out_bh = child.bh
+            out_wrap_starts = child.wrap_starts
+            out_wrap_ends = child.wrap_ends
+            out_intrinsic_widths = child.intrinsic_widths
+        else:
+            if cst.display == "inline":
+                if not in_inline_run:
+                    in_inline_run = true
+                    inline_x = 0
+                    inline_line_h = style_line_h(cst)
+                val intrinsic = intrinsic_text_width(nodes, styles, child_index, c, out_intrinsic_widths)
+                out_intrinsic_widths = intrinsic.widths
+                var inline_w = intrinsic.width
+                val text_advance_w = inline_text_advance_width(nodes[c], cst)
+                if text_advance_w > inline_w:
+                    inline_w = text_advance_w
+                if inline_w < 1:
+                    inline_w = 1
+                # Bound an inline #text run to the available content width so a
+                # long line wraps inside the block instead of overflowing past the
+                # surface edge and clipping (web_render_no_line_wrapping_right_edge_clip).
+                # Short inline pieces (intrinsic <= available) are unaffected.
+                # white-space:nowrap remains intrinsic width unless the parent
+                # requested text-overflow:ellipsis, which needs a bounded box.
+                if nodes[c].tag == "#text" and (not cst.white_space_nowrap or cst.text_overflow_ellipsis):
+                    val avail_inline = iw - inline_x
+                    if avail_inline > 0 and inline_w > avail_inline:
+                        inline_w = avail_inline
+                val child = layout(nodes, styles, child_index, c, ix + inline_x, cy, inline_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+                out_bx = child.bx
+                out_by = child.by
+                out_bw = child.bw
+                out_bh = child.bh
+                out_wrap_starts = child.wrap_starts
+                out_wrap_ends = child.wrap_ends
+                out_intrinsic_widths = child.intrinsic_widths
+                if nodes[c].tag == "#text":
+                    # Reserve the WRAPPED height: a text node that wraps to N
+                    # lines occupies N*line-height, not one line. Collapsing it to
+                    # a single line under-counts the inline run height, so cy
+                    # advances too little and the next block overlaps the wrapped
+                    # tail (see web_render_line_height_overlap_at_bottom).
+                    val wrap_lines = out_wrap_starts[c].len()
+                    val text_lines = if wrap_lines > 0: wrap_lines else: 1
+                    out_bh[c] = text_lines * style_line_h(cst)
+                elif nodes[c].tag == "span" and out_bh[c] > 1:
+                    out_bh[c] = out_bh[c] - 1
+                var inline_contribution_h = out_bh[c]
+                if nodes[c].tag == "button":
+                    inline_contribution_h = inline_contribution_h + 3
+                if inline_contribution_h > inline_line_h:
+                    inline_line_h = inline_contribution_h
+                inline_x = inline_x + out_bw[c]
+                prev_margin_b = 0
+                child_count = child_count + 1
+                c = child_index.next_sibling[c]
+                continue
+            if in_inline_run:
+                cy = cy + inline_line_h
+                in_inline_run = false
+                inline_x = 0
+                inline_line_h = 0
+            if child_count > 0:
+                cy = cy + st.gap_px
+            val resolved_cst_margin_t = resolve_vertical_margin_px(cst.margin_t, viewport_h)
+            val collapsed_margin = if prev_margin_b > resolved_cst_margin_t: prev_margin_b else: resolved_cst_margin_t
+            if child_count == 0 and nodes[i].tag == "body" and st.border_t == 0 and st.pad_t == 0:
+                val resolved_st_margin_t = resolve_vertical_margin_px(st.margin_t, viewport_h)
+                val collapsed_body_top = if resolved_st_margin_t > resolved_cst_margin_t: resolved_st_margin_t else: resolved_cst_margin_t
+                cy = cy - resolved_st_margin_t + collapsed_body_top
+            else:
+                cy = cy + collapsed_margin
+            var child_inner_w = iw
+            if st.overflow_auto_y and content_height_limit > 0:
+                child_inner_w = child_inner_w - scrollbar_gutter
+            if child_inner_w < 1:
+                child_inner_w = 1
+            val cml = resolve_horizontal_margin_px(cst.margin_l, child_inner_w)
+            val cmr = resolve_horizontal_margin_px(cst.margin_r, child_inner_w)
+            var child_w = child_inner_w - cml - cmr
+            if child_w < 1:
+                child_w = 1
+            # Horizontal margin:auto centering. When an in-flow block has an
+            # explicit (non-auto) width narrower than the available space and
+            # left/right margins are auto, the free space is distributed: both
+            # auto -> centered, one auto -> pushed to that side.
+            var auto_offset = 0
+            if cst.margin_l_auto or cst.margin_r_auto:
+                val child_outer = if cst.width_px > 0:
+                    css_outer_width(nodes[c], cst, cst.width_px)
+                elif cst.width_px < 0:
+                    css_outer_width(nodes[c], cst, child_w * (0 - cst.width_px) / 100)
+                else:
+                    0
+                if child_outer > 0 and child_outer < child_w:
+                    val free = child_w - child_outer
+                    if cst.margin_l_auto and cst.margin_r_auto:
+                        auto_offset = free / 2
+                    elif cst.margin_l_auto:
+                        auto_offset = free
+            val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
+            val child_styles = if child_height_px > 0 and child_height_px != cst.height_px:
+                styles_with_height(styles, c, child_height_px)
+            else:
+                styles
+            val child = layout(nodes, child_styles, child_index, c, ix + cml + auto_offset, cy, child_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
+            out_bx = child.bx
+            out_by = child.by
+            out_bw = child.bw
+            out_bh = child.bh
+            out_wrap_starts = child.wrap_starts
+            out_wrap_ends = child.wrap_ends
+            out_intrinsic_widths = child.intrinsic_widths
+            cy = cy + child.height
+            prev_margin_b = resolve_vertical_margin_px(cst.margin_b, viewport_h)
+            child_count = child_count + 1
+        c = child_index.next_sibling[c]
+    if child_count > 0:
+        if in_inline_run:
+            cy = cy + inline_line_h
+        cy = cy + prev_margin_b
+    var h = (cy - y) + st.pad_b + st.border_b
+    val explicit_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
+    if st.height_px > 0:
+        h = explicit_h
+    if st.min_height_px > 0:
+        val min_h = css_outer_height(node, st, st.min_height_px)
+        if min_h > h:
+            h = min_h
+    if st.max_height_px > 0:
+        val max_h = css_outer_height(node, st, st.max_height_px)
+        if max_h < h:
+            h = max_h
+    if st.min_height_vh and viewport_h > h:
+        h = viewport_h
+    val generated_panel_fill = nodes[i].has_widget_panel_class
+    if st.flex_fill or generated_panel_fill:
+        val fill_bottom_blk = viewport_h - ancestor_bottom_inset(nodes, styles, i)
+        if fill_bottom_blk - y > h:
+            h = fill_bottom_blk - y
+    if h < 1:
+        h = 1
+    out_bh[i] = h
+    relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, h)
