@@ -9,14 +9,21 @@
 `runtime error: field access on nil receiver` before ANY compile output — even for a
 3-line hello probe. The harness's `native-build.out` files are 0 bytes.
 
-## Regression window
-- WORKED: 03:45 deploy (main `4ed680f5`-era) — SimpleOS harness run 2 produced real
-  parser diagnostics through this lane.
-- BROKEN: every build from `d5a6312d` onward, including origin tip `3a6982e8`.
-- Window contents: today's CLI refactors (`6aec1b71` native-build parent lightweight,
-  `4392ce6d` global flag split, `debc189e` seed-delegate fallback, `6cf217f0` exe via
-  /proc/$PPID, `0531ca8c` exe identity in-process). `/proc` does not exist on macOS —
-  prime suspect class: nil exe-path Option flowing into a field access.
+## CORRECTED analysis (07-26, after differential probes)
+- The crash is **LLVM-backend-specific and LONGSTANDING**, not a same-day regression:
+  every binary vintage (03:45, 13:12, tip) crashes identically in
+  `MirToLlvm.llvm_type_text` (`udf 0xc11f` nil-receiver trap at the FIRST field access)
+  because macOS-host default native-build selects the LLVM backend.
+- `--backend=cranelift` native-build WORKS (compiles; separate host-lane `cc linking
+  failed` gap + a stray `[DEBUG] 550670556` print left in the link path).
+- A source-level nil-guard `if ty == nil: return ...` added before `ty.kind` did NOT
+  prevent the trap — suspicion: `==` on a non-nilable struct param is elided or itself
+  lowered to a field access, so the guard can't fire. Nil-slip root is upstream
+  (`static_.type_`/`body.return_ty`/`local.type_` in core_codegen.spl callers).
+- Harness runs 3-4 "timeouts" were MISDIAGNOSED as this crash: the kernel cranelift
+  build was silently COMPUTING at 100% single-core CPU under `--log off` — 2700s is
+  simply not enough from cold cache post-parser-fixes (run 2 "worked" only because
+  parse errors abort early). Run 5 uses 7200s + preserved cache.
 
 ## Masked consequences (already burned today)
 - SimpleOS WM harness runs 3-4 reported `wm-simple-web-build-timeout` (900s/2700s) with
