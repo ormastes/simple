@@ -1,8 +1,8 @@
 # macOS Vulkan 2D Live Evidence
 
 - status: fail
-- reason: runtime-provider-rpath-missing
-- selected driver: `/Users/ormastes/simple/build/worktrees/render_lane_origin_main/build/native_probe/macos-vulkan-2d-4k-300/macos_vulkan_2d_live_harness`
+- reason: launched-process-missing
+- selected driver: `/Users/ormastes/simple/build/native_probe/macos_vulkan_2d_live_harness`
 - selected driver kind: pure-simple-native-output
 - runtime receipt: `/Users/ormastes/simple/build/tmp/macos_vulkan_2d_live_evidence/runtime_receipt.env`
 - 4K/300-DPI framebuffer: `/Users/ormastes/simple/build/tmp/macos_vulkan_2d_live_evidence/vulkan_3840x2160_300dpi.png`
@@ -15,7 +15,7 @@
 
 ```text
 macos_vulkan_2d_live_status=fail
-macos_vulkan_2d_live_reason=runtime-provider-rpath-missing
+macos_vulkan_2d_live_reason=launched-process-missing
 macos_vulkan_2d_live_driver_kind=pure-simple-native-output
-macos_vulkan_2d_live_driver_path=/Users/ormastes/simple/build/worktrees/render_lane_origin_main/build/native_probe/macos-vulkan-2d-4k-300/macos_vulkan_2d_live_harness
+macos_vulkan_2d_live_driver_path=/Users/ormastes/simple/build/native_probe/macos_vulkan_2d_live_harness
 ```

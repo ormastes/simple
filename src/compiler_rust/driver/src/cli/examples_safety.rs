@@ -1,5 +1,6 @@
 //! Shared safety policy for direct execution and compilation of example files.
 
+use std::io::Read as _;
 use std::path::{Component, Path};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -112,6 +113,14 @@ pub fn run_isolated_example_file(path: &Path, gc_log: bool, gc_off: bool, args: 
     ))
 }
 
+fn spawn_pipe_drain<R: std::io::Read + Send + 'static>(mut pipe: R) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = pipe.read_to_end(&mut buf);
+        buf
+    })
+}
+
 fn run_child_with_timeout(mut cmd: Command, path: &Path, timeout: Duration, timeout_secs: u64) -> i32 {
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -120,6 +129,15 @@ fn run_child_with_timeout(mut cmd: Command, path: &Path, timeout: Duration, time
             return 1;
         }
     };
+
+    // Drain stdout/stderr on dedicated threads concurrently with the timeout
+    // poll loop below. Without this, a child that writes more than the pipe
+    // buffer size (commonly 64KB) blocks in write() once the buffer fills,
+    // and never reaches try_wait()'s exit condition until the watchdog kills
+    // it — the parent only read the pipes after the loop via
+    // wait_with_output(), which deadlocks against a full, undrained pipe.
+    let stdout_handle = child.stdout.take().map(spawn_pipe_drain);
+    let stderr_handle = child.stderr.take().map(spawn_pipe_drain);
 
     let start = Instant::now();
     let mut timed_out = false;
@@ -142,19 +160,22 @@ fn run_child_with_timeout(mut cmd: Command, path: &Path, timeout: Duration, time
         }
     }
 
-    let output = match child.wait_with_output() {
-        Ok(output) => output,
+    let stdout = stdout_handle.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
+    let stderr = stderr_handle.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
+
+    let status = match child.wait() {
+        Ok(status) => status,
         Err(err) => {
             eprintln!("error: failed to collect example output: {}", err);
             return 1;
         }
     };
 
-    if !output.stdout.is_empty() {
-        print!("{}", String::from_utf8_lossy(&output.stdout));
+    if !stdout.is_empty() {
+        print!("{}", String::from_utf8_lossy(&stdout));
     }
-    if !output.stderr.is_empty() {
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    if !stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&stderr));
     }
 
     if timed_out {
@@ -162,7 +183,7 @@ fn run_child_with_timeout(mut cmd: Command, path: &Path, timeout: Duration, time
         return 1;
     }
 
-    output.status.code().unwrap_or(101)
+    status.code().unwrap_or(101)
 }
 
 impl Drop for ExamplesWatchdogGuard {
