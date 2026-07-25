@@ -757,6 +757,20 @@ the shared binary — deploys require explicit user go-ahead).
 
   Positional C9 then reached MIR lowering and failed loudly on both
   `.unwrap_or` calls. Parallel source/history traces confirmed the existing
-  `parse_f64` nullable provenance is intact. C9 remains pending; its proposed
-  optional-control fix was split from this validated C5 change until a
-  positional executable can prove exit `42`.
+  `parse_f64` nullable provenance source block is intact. Two current-source
+  candidates then disproved the optional-control hypothesis: direct `.?` and
+  explicit `if option.?: true else: false` normalization both rebuilt cleanly,
+  but positional C9 still failed all four `.unwrap_or` calls as unresolved.
+  Those ineffective compiler changes were reverted. The fixture now also
+  requires default values for both invalid and trailing-junk parses.
+
+  C9 has reached its three-cycle cap. The next session must trace the actual
+  MIR local IDs and `local_hir_types` membership at two points only: immediately
+  after `rt_string_to_float`, and after the `val` copy into `f`/`zero`/
+  `invalid`/`trailing`. Do not change Result/Option routing again without that
+  evidence. The safe bootstrap path is now proven: the Rust binary is used
+  only to build a pure-Simple Stage4 candidate, with the preserved cache and a
+  temporary output. The final candidate build was `5 compiled, 1388 cached,
+  0 failed`, SHA-256
+  `02b5a88088b77a5644b9c921963d63984bb5688d712463f9bf5bc732c06ff1e2`.
+  Credit C9 only when its positional executable exits `42`.
