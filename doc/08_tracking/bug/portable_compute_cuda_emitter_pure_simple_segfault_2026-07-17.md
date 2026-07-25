@@ -56,6 +56,19 @@ A current Rust bootstrap-seed interpreter diagnostic exits 0 and emits a
 SHA-256 strings. This isolates the remaining failure to stale pure-Simple
 deployment, but is not accepted as pure-Simple or CUDA toolchain evidence.
 
+## 2026-07-25 bounded recheck
+
+A CUDA-only canonical checker run invoked the emitter through
+`bin/release/simple`. The emitter again terminated before producing source; its
+stderr was `timeout: the monitored command dumped core` followed by
+`Segmentation fault`. Both CUDA rows report `generated_source_failed` and zero
+bytes, and neither candidate compiled or validated. The retained report is
+`doc/09_report/portable_compute_toolchains_2026-07-25.md`.
+
+No PTX pin changed and no device-readback claim is accepted. This recheck
+matches the diagnosed stale-deployment symptom but does not add a new backtrace
+or claim a new root cause.
+
 ## Acceptance
 
 - The pure-Simple emitter exits successfully and produces non-empty source.

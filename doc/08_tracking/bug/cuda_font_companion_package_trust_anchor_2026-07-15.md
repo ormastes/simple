@@ -2,7 +2,9 @@
 
 Date: 2026-07-15
 
-Status: trust anchor implemented; retained CUDA device readback pending (2026-07-16)
+Status: trust anchor implemented for semantics v1; semantics-v2 regeneration is
+blocked by the deployed self-hosted runner, and retained CUDA device readback
+remains pending (2026-07-25)
 
 ## Impact
 
@@ -125,3 +127,7 @@ program version. The checker and focused SPipe bind the pinned source and
 emitter-version hashes exactly to a fresh Simple emission. Criteria 1-3 are
 implemented; criterion 4 remains open until the canonical runner and retained
 CUDA device-origin readback pass.
+
+The current semantics-v2 regeneration blocker and bounded retry evidence are
+tracked in
+`doc/08_tracking/bug/portable_compute_cuda_emitter_pure_simple_segfault_2026-07-17.md`.
