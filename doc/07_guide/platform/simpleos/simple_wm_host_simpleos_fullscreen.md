@@ -48,8 +48,10 @@ use a bounded 32 MiB ceiling, above the largest selected face; the C
 compatibility reader remains bounded at 4 MiB. The WM
 does not own a font renderer: its scene
 carries Draw IR family/identity semantics and the persistent Engine2D owns
-`FontRenderer` materialization. Missing guest file support, an identity mismatch,
-or an unavailable vector runtime retains the fixed bitmap fallback.
+`FontRenderer` materialization. Missing guest media or incomplete selected-font
+registration aborts x86_64, AArch64, and RV64 before Engine2D creation. A later
+selected identity/shaping failure is skipped by the Draw IR executor and fails
+the frame evidence gate; it does not silently become bitmap evidence.
 Registered-only source paths now shape the pinned Hindi and Arabic/Urdu
 witnesses from validated VFS bytes without the host font ABI, then materialize
 them through the existing selected-byte `FontRenderer`. This is executable

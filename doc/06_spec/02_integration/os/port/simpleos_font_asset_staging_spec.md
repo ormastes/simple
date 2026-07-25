@@ -43,13 +43,18 @@ targets attach the existing ARM filesystem image arguments, and the scenario
 media gate builds that image before launch. Existing ARM images are accepted
 only when `mtype` plus `sha256sum`/`shasum` prove `/SYS/FONTS/NOTOSANS` is
 exactly 1,708,408 bytes with the pinned SHA-256; hosts without those tools fail
-closed instead of trusting image manifest text. Successful registration
-selects the VFS face; only failed mount or validation selects bitmap fallback.
+closed instead of trusting image manifest text. Successful registration selects
+the VFS face; failed mount or validation aborts before Engine2D creation instead
+of selecting bitmap fallback.
 The ARM initializer clears VFS state both before probing and after a failed
 post-mount executable probe, so a rejected image cannot remain marked ready.
-RV64 is intentionally unchanged: its current driver path is ARM-only and its
-64 KiB runtime heap cannot support this vector-font bootstrap, so the existing
-bitmap lane makes no vector-font claim.
+RV64 uses its architecture-specific FAT32 initializer and the same shared
+selected-font registration contract. Mount or registration failure returns
+before rendering, matching the x86_64 and AArch64 fail-closed policy.
+The x86_64 evidence row rereads and validates the registry-owned short alias
+used by the existing QEMU oracle before reporting its pinned identity and
+SHA-256. The shared bootstrap itself still resolves the canonical long path
+first.
 The Simple Browser independently iterates the same 16-candidate registry, reads
 each readable long path with its short alias as the only fallback, registers
 bytes under the canonical repository identity, and refuses to render when the

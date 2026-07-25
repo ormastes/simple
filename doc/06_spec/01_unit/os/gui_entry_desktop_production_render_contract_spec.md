@@ -3,14 +3,17 @@
 **Status:** manually synchronized; executable docgen refresh pending
 **Executable:** `test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl`
 
-Five source-contract scenarios keep x86_64, AArch64, and RV64 desktops on the
+Six source-contract scenarios keep x86_64, AArch64, and RV64 desktops on the
 canonical WM/Draw IR/Engine2D route.
 
 ## Operator flow
 
 1. Mount the architecture FAT32 media where required, then register the selected
    VFS font bytes through the shared desktop bootstrap before Engine2D creation
-   on x86_64, AArch64, and RV64.
+   on x86_64, AArch64, and RV64. A failed media mount or incomplete selected
+   font registration aborts before rendering; it cannot enter bitmap fallback.
+   x86_64 also validates the exact registry-owned short-alias bytes named in
+   its retained font evidence before associating them with the pinned hash.
 2. Require the taskbar-clock `SharedWmScene -> DrawIrComposition -> Engine2D`
    marker to bind the selected asset hash, rasterizer, size, text, and crop hash.
 3. Reject private post-frame `draw_text`, probe rectangle, or `present`
