@@ -49,28 +49,45 @@ src/compiler_rust/target/debug/simple native-build <file>.spl \
 |---|---|
 | `triv.spl` — `fn main(): print "hi"` | **rc=0**, prints `hi` |
 | `varA.spl` — `fn main() -> i64`, NO extern | **rc=0**, prints `A` |
-| `varB.spl` — module-level `extern fn`, main with no return type | *pending at time of writing* |
+| `varB.spl` — module-level `extern fn`, main with no return type | **rc=1, no functions** |
 | `ctrl_probe.spl` — extern + `fn main() -> i64` + `val` | rc=1, no functions |
 | `free_probe.spl` — externs + `fn main() -> i64` + `var`/loops | rc=1, no functions |
 
-## Next step — discriminate before bisecting
+## TRIGGER ISOLATED: a module-level `extern fn` declaration
 
-**A return-typed `main` is RULED OUT** — `varA.spl` builds and runs. The prime
-remaining suspect is the module-level `extern fn` declaration, isolated by
-`varB.spl`.
+Single-variable result. A return-typed `main` is RULED OUT (`varA` passes);
+adding nothing but an `extern fn` at module scope makes the build fail:
 
-- If `varB` FAILS: the trigger is a module-level `extern fn` under
-  `--entry-closure`. Look first at how extern declarations are collected into
-  the module's MIR function list — a module whose only items are externs plus
-  `main` apparently ends up with zero functions.
-- If `varB` PASSES: neither feature alone is sufficient; the trigger is the
-  COMBINATION (extern + return-typed main, or the local `val`). Add one variable
-  at a time from `varB` toward `ctrl_probe`.
+```
+extern fn rt_heap_registry_count() -> i64   # <-- remove this line and it builds
 
-Only if that whole ladder passes should the seed be bisected, reverting in
-order and rebuilding between each: `runtime_sffi.rs` (`RuntimeFuncSpec`),
-`elf_utils.rs`, `interpreter_extern/{mod,sffi_string}.rs`,
-`runtime/src/value/mod.rs`.
+fn main():
+    print "B"
+```
+
+Two consequences worth stating:
+
+1. **This is not about `rt_string_free`.** `varB` declares
+   `rt_heap_registry_count`, a long-pre-existing extern. Any module-level extern
+   appears to trigger it, so the blast radius is much wider than the deep-free
+   work — it plausibly affects any `.spl` module that declares an extern and is
+   built with `--entry-closure`.
+2. It is still a regression against the older seed: `free_probe.spl`, which
+   declares externs, built and ran clean (`BUILD_RC=0`) on the 06:43 seed.
+
+**Where to look first:** how extern declarations are collected into a module's
+MIR function list. A module whose items are externs plus `main` ends up with
+zero MIR functions, which suggests externs are either displacing real functions
+in that list or causing the collection to bail early. Note the seed edits in
+`d479d1a4302` touched exactly the extern registration surface
+(`runtime_sffi.rs` `RuntimeFuncSpec`, `elf_utils.rs`,
+`interpreter_extern/{mod,sffi_string}.rs`, `runtime/src/value/mod.rs`), so start
+by reverting those one at a time and rebuilding between each — `runtime_sffi.rs`
+first, since a `RuntimeFuncSpec` entry is the change most likely to alter how
+externs are enumerated.
+
+Fast repro loop (~1 build): `varB.spl` vs `triv.spl`. Do NOT use `free_probe.spl`
+for bisecting — it is slower and has extra variables.
 
 Also rule out working-copy `src/compiler/**` edits from parallel sessions
 (`cuda_backend.spl`, `contracts.spl` were dirty at the time) and the
