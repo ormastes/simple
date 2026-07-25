@@ -1,7 +1,7 @@
 # SimpleOS-WM cell: frame renders correctly but is rejected — `material_fallback_kind=none`, empty material digest
 
 - **ID:** simpleos_wm_content_provenance_material_fallback_none_2026-07-25
-- **Status:** OPEN — characterised and narrowed, root cause NOT established
+- **Status:** OPEN — pending re-run; the suspected cause was fixed upstream (5a01603505b, fd935c8d9ad) after the analysed run
 - **Severity:** medium — blocks the `SimpleOS-WM × QEMU` showcase-matrix cell at
   the *render-provenance* stage, which is the stage after disk staging (now
   passing)
@@ -116,10 +116,10 @@ not realize the material would make the evidence meaningless. Fix the producer.
 `data-wm-theme-fallback == "solid-material"` it applies
 `backdrop-filter:none;-webkit-backdrop-filter:none;background-image:none;` plus
 `background-color:<wm_bg>` and `color:<wm_fg>` via `apply_decls`, *after* the
-normal cascade (grep `data-wm-theme-bg` in the layout renderer, ~line 6015).
+normal cascade (grep `data-wm-theme-bg` in the layout renderer).
 
-**NOT established:** why `declared_realized` is nonetheless false. It requires
-all five of:
+**NOT established at the time of the failing run:** why `declared_realized` was
+false. The predicate then required all five of:
 
 ```
 declared        - attr == "solid-material"                  (emitted; should hold)
@@ -130,19 +130,47 @@ layers_cleared  - background_gradient_from == 0 and background_gradient_to == 0
                   and bg_layers_raw == ""
 ```
 
-Narrowing done so far: `bg_layers_raw` is **only ever read, never assigned**
-outside the `Style` constructor default of `""` — it is declared at
-`simple_web_html_layout_renderer.spl:1746` and read at two provenance sites
-(`:9309`, `:9734`) and nowhere else. If it is genuinely never written, it
-cannot be the failing term, which points at `styles[i].bg == declared_bg` (a
-color-space / parse mismatch between `_theme_rgb_css(_theme_solid_fallback_rgba(theme))`
-and the computed `background-color`) or at the gradient stops.
+Narrowing at the time: `bg_layers_raw` appeared to be read-only (never assigned
+outside the `Style` constructor default of `""`), pointing suspicion at
+`styles[i].bg == declared_bg` — a mismatch between
+`_theme_rgb_css(_theme_solid_fallback_rgba(theme))` and the computed
+`background-color`.
 
-**Do not fix on this inference.** The cheap decisive step is to print the five
-terms for the annotated node and see which is false, rather than reasoning
-further about the cascade. `_simple_web_realized_material_fallback` is the right
-place for that probe, and per the log-retention rule it should go in
-level-gated rather than be deleted afterwards.
+### SUPERSEDED — another session removed that exact term
+
+Do **not** act on the narrowing above. Between the failing run and this note,
+two commits landed on the renderer:
+
+```
+5a01603505b fix(web): align material fallback provenance
+fd935c8d9ad fix(web): diagnose freestanding fallback predicate
+```
+
+The predicate is now the shared, exported
+`simple_web_material_fallback_realized(declared, bg, gradient_from, gradient_to, layers_raw)`
+— and the `styles[i].bg == declared_bg` re-parse is **gone**. The in-code
+rationale states that re-parsing `data-wm-theme-bg` and demanding a second
+exact equality "made this parallel provenance path reject the already-executed
+opaque material on freestanding x86 even though the Draw IR command recorded
+solid-material and its image layers were cleared."
+
+That is the same defect class this file described, fixed at the source. A
+level-gated rejection receipt now also exists, so the five terms no longer need
+a hand-added probe — grep the serial log for `[web-material-fallback] rejected`
+and it prints `declared`, `bg`, `bg_alpha`, `gradient_from`, `gradient_to`,
+`layers_len`, `layers_cleared` directly.
+
+**The serial log analysed above predates both commits** (zero occurrences of
+`web-material-fallback` in it). This bug therefore needs a re-run against
+current `main` before any further work — the observed rejection may already be
+fixed.
+
+> **Cite by marker, not line number.** An earlier revision of this file gave
+> line numbers in `simple_web_html_layout_renderer.spl` (`:1746`, `:9309`,
+> `:9734`, `~6015`). That file was **9,900 lines when those were written and is
+> now 472** — a parallel session split it, invalidating every one of them in a
+> single commit. All references here are grep markers instead. Same lesson as
+> `simpleos_x86_64_kernel_links_as_elf32_em386_2026-07-25.md`.
 
 ## Reproduction
 
