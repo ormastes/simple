@@ -1553,3 +1553,13 @@ RuntimeValue rt_x86_32_fpu_restore(RuntimeValue ctx_ptr_val)
 #include "../../common/boot/text_codepoint_runtime.h"
 
 /* End of x86_32 baremetal_stubs.c */
+
+/* Interned string-literal ctor: codegen emits rt_string_new_literal for every
+ * multi-byte literal (hosted interns by data ptr for perf). The freestanding
+ * kernel has no intern table, so forward to rt_string_new — functionally
+ * identical (a fresh heap string per call). Matches the riscv32 stub. */
+RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
+RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
+{
+    return rt_string_new(data, len_val);
+}

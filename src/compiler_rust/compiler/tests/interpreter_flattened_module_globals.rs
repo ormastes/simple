@@ -45,6 +45,25 @@ fn imported_functions_share_live_module_globals() {
 }
 
 #[test]
+fn flattened_functions_share_growing_module_global_arrays() {
+    let dir = tempdir().unwrap();
+    let state_path = dir.path().join("state.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        state_path,
+        "var values: [i32] = []\n\nfn push_value(value: i32):\n    values.push(value)\n\nfn read_value(index: i32) -> i32:\n    return values[index]\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use state.{push_value, read_value}\n\nfn main() -> i32:\n    push_value(17)\n    return read_value(0)\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 17);
+}
+
+#[test]
 fn nested_local_shadow_reveals_latest_owner_global() {
     let dir = tempdir().unwrap();
     let state_path = dir.path().join("state.spl");
