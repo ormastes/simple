@@ -103,11 +103,13 @@ level-gated probes. See log-retention policy
   has no dedicated revision field by design — `composition_id` doubles as
   the revision key). `draw_ir_patch_commands_equal` is the round-trip
   oracle. Documented, non-silent limitation: only kind/component_id/
-  parent_id/geometry/color/text_value/computed_style are diffed/compared —
-  border_rect/content_rect/hit_rect/clip_rect/image_uri/edge/points/
-  glyph_run are not yet patchable; `apply()` collapses the result into the
+  parent_id/geometry/color/text_value/computed_style/glyph_run are
+  diffed/compared; glyph-only changes reuse UpdateStyle's full-command carrier —
+  border_rect/content_rect/hit_rect/clip_rect/image_uri/edge/points are not
+  yet patchable; `apply()` collapses the result into the
   base composition's first batch (multi-batch structural preservation is
-  out of scope this slice). Spec: `draw_ir_patch_spec.spl` (12/12).
+  out of scope this slice). Spec: `draw_ir_patch_spec.spl` (13 active;
+  current runner execution pending bootstrap repair).
 - **`simple test` vs `simple run` divergence on `text?`-lookup + equality
   (bug filed, workaround applied in new code only):** a "loop, return
   first match as `T?`, compare with `== nil`" pattern gives a DIFFERENT

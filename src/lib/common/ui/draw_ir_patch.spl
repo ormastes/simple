@@ -2,8 +2,8 @@
 #
 # Additive companion to draw_ir_diff.spl (Phase-4 slice item 7, see
 # doc/03_plan/ui/unified_2d_engine/web_wm_gpu_3d_review_2026-07-20.md). This
-# does NOT change DrawIrCommand or DrawIrDiffReport semantics -- the diff
-# report stays for its existing consumers. This module reuses the same
+# does NOT change DrawIrCommand or DrawIrDiffReport shape/schema -- existing
+# report consumers remain source-compatible. This module reuses the same
 # component_id -> flat-index maps (DrawIrCommandIndex) that draw_ir_diff.spl
 # builds, so patch generation is O(N+M) instead of a nested linear scan.
 #
@@ -32,10 +32,10 @@
 #   bijection fill relies on this; duplicate ids are unsupported.
 # - Change detection and the round-trip oracle (draw_ir_patch_commands_equal)
 #   cover kind/component_id/parent_id/geometry/color/text_value/
-#   computed_style. border_rect/content_rect/hit_rect/clip_rect/image_uri/
-#   edge/points/glyph_run are neither diffed nor compared -- they are not
-#   yet patchable. This keeps the round-trip invariant sound for the fields
-#   it does cover; it does not claim full-command coverage.
+#   computed_style/glyph_run. border_rect/content_rect/hit_rect/clip_rect/image_uri/
+#   edge/points are neither diffed nor compared -- they are not yet patchable.
+#   This keeps the round-trip invariant sound for the fields it does cover; it
+#   does not claim full-command coverage.
 
 use common.ui.draw_ir.{
     DrawIrBatch,
@@ -112,6 +112,23 @@ fn _draw_ir_patch_style_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
 fn _draw_ir_patch_text_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
     a.text_value != b.text_value
 
+fn _draw_ir_patch_array_equal<T>(a: [T], b: [T]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _draw_ir_patch_glyph_run_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
+    a.glyph_run.valid != b.glyph_run.valid or
+        not _draw_ir_patch_array_equal(a.glyph_run.glyph_ids, b.glyph_run.glyph_ids) or
+        not _draw_ir_patch_array_equal(a.glyph_run.xs, b.glyph_run.xs) or
+        not _draw_ir_patch_array_equal(a.glyph_run.ys, b.glyph_run.ys) or
+        not _draw_ir_patch_array_equal(a.glyph_run.clusters, b.glyph_run.clusters)
+
 fn _draw_ir_patch_push_damage(damage: mut [DrawIrRect], old_bounds: DrawIrRect, new_bounds: DrawIrRect):
     if old_bounds.present:
         damage.push(old_bounds)
@@ -127,10 +144,9 @@ fn _draw_ir_patch_push_damage(damage: mut [DrawIrRect], old_bounds: DrawIrRect, 
 #
 # `misc_changed` covers fields that draw_ir_patch_commands_equal (the
 # round-trip oracle) compares but that have no dedicated op kind in this
-# slice's fixed 6-kind vocabulary: color, kind, parent_id. Without a carrier,
-# a color-only change (the most common in-place UI diff: hover/selection/
-# theme) would detect zero ops and the apply-side survivor path would keep
-# the stale command, silently breaking the round-trip invariant. UpdateStyle
+# slice's fixed 6-kind vocabulary: color, kind, parent_id, and glyph_run.
+# Without a carrier, a color-only or glyph-only change would detect zero ops
+# and the apply-side survivor path would keep the stale command. UpdateStyle
 # is reused as that carrier since it already always ships the full updated
 # command payload.
 fn _draw_ir_patch_build_forward_ops(baseline_index: DrawIrCommandIndex, current_index: DrawIrCommandIndex, operations: mut [DrawIrPatchOp], damage: mut [DrawIrRect]):
@@ -156,7 +172,7 @@ fn _draw_ir_patch_build_forward_ops(baseline_index: DrawIrCommandIndex, current_
             val geometry_changed = _draw_ir_patch_geometry_changed(base, current)
             val style_prop_changed = _draw_ir_patch_style_changed(base, current)
             val text_changed = _draw_ir_patch_text_changed(base, current)
-            val misc_changed = base.color != current.color or base.kind != current.kind or base.parent_id != current.parent_id
+            val misc_changed = base.color != current.color or base.kind != current.kind or base.parent_id != current.parent_id or _draw_ir_patch_glyph_run_changed(base, current)
             val style_changed = style_prop_changed or misc_changed
             val old_bounds = _draw_ir_patch_bounds(base)
             val new_bounds = _draw_ir_patch_bounds(current)
@@ -334,6 +350,8 @@ fn draw_ir_patch_commands_equal(a: DrawIrComposition, b: DrawIrComposition) -> b
         if ca.text_value != cb.text_value:
             return false
         if _draw_ir_patch_style_changed(ca, cb):
+            return false
+        if _draw_ir_patch_glyph_run_changed(ca, cb):
             return false
         i = i + 1
     true

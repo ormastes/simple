@@ -16,8 +16,8 @@ draw_ir_patch:
          -> collapses to ONE batch (multi-batch split = out of scope)
   damage_rects: old_bounds(if present) + new_bounds(if present) per changed op
   oracle: draw_ir_patch_commands_equal covers kind/component_id/parent_id/
-          geometry/color/text_value/computed_style ONLY -- NOT border_rect/
-          content_rect/hit_rect/clip_rect/image_uri/edge/points/glyph_run
+          geometry/color/text_value/computed_style/glyph_run -- NOT border_rect/
+          content_rect/hit_rect/clip_rect/image_uri/edge/points
 ```
 
 Limitations recorded, not silent: component_id assumed unique; single-batch

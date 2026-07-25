@@ -1,17 +1,17 @@
 # Draw IR incremental patch generation
 
-> Backends normally re-receive a whole `DrawIrComposition` every frame and diff it themselves. This spec covers the incremental patch companion (`common.ui.draw_ir_patch`): computing a compact list of per-component operations (Insert / Remove / UpdateGeometry / UpdateText / UpdateStyle / Reorder) between two composition revisions, and applying that patch back onto the baseline to reproduce the target composition exactly, command-by-command — so a renderer can repaint only the changed regions instead of the whole frame.
+> Backends normally re-receive a whole `DrawIrComposition` every frame and diff it themselves. This spec covers the incremental patch companion (`common.ui.draw_ir_patch`): computing per-component operations between two revisions and applying them to reproduce every patch-covered command field, including shaped glyph payloads.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
 
 # Draw IR incremental patch generation
 
-Backends normally re-receive a whole `DrawIrComposition` every frame and diff it themselves. This spec covers the incremental patch companion (`common.ui.draw_ir_patch`): computing a compact list of per-component operations (Insert / Remove / UpdateGeometry / UpdateText / UpdateStyle / Reorder) between two composition revisions, and applying that patch back onto the baseline to reproduce the target composition exactly, command-by-command — so a renderer can repaint only the changed regions instead of the whole frame.
+Backends normally re-receive a whole `DrawIrComposition` every frame and diff it themselves. This spec covers the incremental patch companion (`common.ui.draw_ir_patch`): computing per-component operations between two revisions and applying them to reproduce every patch-covered command field, including shaped glyph payloads.
 
 ## At a Glance
 
@@ -20,8 +20,8 @@ Backends normally re-receive a whole `DrawIrComposition` every frame and diff it
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/ui/draw_ir_patch_spec.spl` |
-| Updated | 2026-07-20 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-25 |
+| Generator | Manually synchronized; executable docgen refresh pending |
 
 ## Overview
 
@@ -30,9 +30,8 @@ diff it themselves. This spec covers the incremental patch companion
 (`common.ui.draw_ir_patch`): computing a compact list of per-component
 operations (Insert / Remove / UpdateGeometry / UpdateText / UpdateStyle /
 Reorder) between two composition revisions, and applying that patch back
-onto the baseline to reproduce the target composition exactly,
-command-by-command — so a renderer can repaint only the changed regions
-instead of the whole frame.
+onto the baseline to reproduce every patch-covered command field, including
+shaped glyph payloads.
 
 ## Examples
 
@@ -44,8 +43,8 @@ that keeps its content but moves emits Reorder — unless content ALSO
 changed at the new position, in which case the content-change op wins and
 Reorder is suppressed. The round-trip contract holds on every case,
 including a ~30-command mixed composition exercising every op kind at
-once: `apply(old, patch_between(old, new))` always equals `new`,
-command-by-command.
+once: `apply(old, patch_between(old, new))` equals `new` across every
+patch-covered field.
 
 ## Scenarios
 
@@ -448,6 +447,17 @@ expect(applied.composition.batches[0].commands[0].color).to_equal(9u32)
 
 </details>
 
+#### compares every glyph_run member and suppresses reorder for moved glyph changes
+
+- shaped text retains the same text and computed font style
+- glyph IDs, x/y positions, clusters, validity, and unequal lengths mutate one
+  at a time
+   - Expected: each isolated mutation emits exactly one `UpdateStyle`
+   - Expected: malformed unequal arrays are compared without out-of-bounds access
+   - Expected: after swapping with a peer, the glyph command emits geometry
+     plus style and no reorder; the unchanged peer carries the reorder
+   - Expected: apply reproduces each target payload
+
 #### rejects apply when the composition revision does not match base_revision
 
 - draw ir batch
@@ -599,8 +609,8 @@ expect(draw_ir_patch_commands_equal(applied.composition, current)).to_equal(true
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

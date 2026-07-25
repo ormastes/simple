@@ -10,9 +10,9 @@ diff it themselves. This spec covers the incremental patch companion
 (`common.ui.draw_ir_patch`): computing a compact list of per-component
 operations (Insert / Remove / UpdateGeometry / UpdateText / UpdateStyle /
 Reorder) between two composition revisions, and applying that patch back
-onto the baseline to reproduce the target composition exactly,
-command-by-command — so a renderer can repaint only the changed regions
-instead of the whole frame.
+onto the baseline to reproduce the target across the patch-covered command
+fields, including shaped glyph payloads — so a renderer can repaint only the
+changed regions instead of the whole frame.
 
 ## Examples
 
@@ -24,8 +24,8 @@ that keeps its content but moves emits Reorder — unless content ALSO
 changed at the new position, in which case the content-change op wins and
 Reorder is suppressed. The round-trip contract holds on every case,
 including a ~30-command mixed composition exercising every op kind at
-once: `apply(old, patch_between(old, new))` always equals `new`,
-command-by-command.
+once: `apply(old, patch_between(old, new))` equals `new` across every
+patch-covered field.
 """
 
 use std.spec
@@ -36,10 +36,12 @@ use common.ui.draw_ir.{
     draw_ir_box_with_style,
     draw_ir_composition,
     draw_ir_embedding_config,
+    draw_ir_glyph_run_payload,
     draw_ir_no_rect,
     draw_ir_rect,
     draw_ir_style_prop,
-    draw_ir_text
+    draw_ir_text,
+    draw_ir_text_shaped_font
 }
 use common.ui.draw_ir_patch.{
     DRAW_IR_PATCH_OP_INSERT,
@@ -62,6 +64,13 @@ fn _op_kind_present(ops: [DrawIrPatchOp], kind: i32, component_id: text) -> bool
         if op.kind == kind and op.component_id == component_id:
             return true
     false
+
+fn _op_kind_count(ops: [DrawIrPatchOp], kind: i32, component_id: text) -> i32:
+    var count = 0
+    for op in ops:
+        if op.kind == kind and op.component_id == component_id:
+            count = count + 1
+    count
 
 describe "Draw IR patch generation":
 
@@ -252,6 +261,55 @@ describe "Draw IR patch generation":
         expect(applied.ok).to_equal(true)
         expect(draw_ir_patch_commands_equal(applied.composition, current)).to_equal(true)
         expect(applied.composition.batches[0].commands[0].color).to_equal(9u32)
+
+    it "compares every glyph_run member and suppresses reorder for moved glyph changes":
+        val baseline = draw_ir_composition("rev-1", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
+                draw_ir_text_shaped_font("label", 5, 5, "AB", 2u32, "mono", "face", [8, 8], 16, 12, 12,
+                    draw_ir_glyph_run_payload([1u32, 2u32], [0, 8], [0, 0], [0, 1], true)),
+                draw_ir_rect("peer", 40, 5, 8, 8, 3u32)
+            ])
+        ])
+        val changed_payloads = [
+            draw_ir_glyph_run_payload([9u32, 2u32], [0, 8], [0, 0], [0, 1], true),
+            draw_ir_glyph_run_payload([1u32, 2u32], [1, 8], [0, 0], [0, 1], true),
+            draw_ir_glyph_run_payload([1u32, 2u32], [0, 8], [1, 0], [0, 1], true),
+            draw_ir_glyph_run_payload([1u32, 2u32], [0, 8], [0, 0], [1, 1], true),
+            draw_ir_glyph_run_payload([1u32, 2u32], [0, 8], [0, 0], [0, 1], false),
+            draw_ir_glyph_run_payload([1u32, 2u32], [0], [0, 0], [0, 1], true)
+        ]
+        for changed_payload in changed_payloads:
+            val current = draw_ir_composition("rev-2", "scene", DRAW_IR_BACKEND_CPU, [
+                draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
+                    draw_ir_text_shaped_font("label", 5, 5, "AB", 2u32, "mono", "face", [8, 8], 16, 12, 12, changed_payload),
+                    draw_ir_rect("peer", 40, 5, 8, 8, 3u32)
+                ])
+            ])
+            val patch = draw_ir_patch_between(baseline, "rev-1", current, "rev-2")
+            expect(patch.operations.len()).to_equal(1)
+            expect(_op_kind_count(patch.operations, DRAW_IR_PATCH_OP_UPDATE_STYLE, "label")).to_equal(1)
+            expect(_op_kind_present(patch.operations, DRAW_IR_PATCH_OP_REORDER, "label")).to_equal(false)
+            expect(patch.damage_rects.len()).to_equal(2)
+            expect(draw_ir_patch_commands_equal(baseline, current)).to_equal(false)
+            val applied = draw_ir_patch_apply(baseline, patch)
+            expect(applied.ok).to_equal(true)
+            expect(draw_ir_patch_commands_equal(applied.composition, current)).to_equal(true)
+
+        val moved = draw_ir_composition("rev-2", "scene", DRAW_IR_BACKEND_CPU, [
+            draw_ir_batch("batch", DRAW_IR_BACKEND_CPU, _embedding(), [
+                draw_ir_rect("peer", 40, 5, 8, 8, 3u32),
+                draw_ir_text_shaped_font("label", 6, 5, "AB", 2u32, "mono", "face", [8, 8], 16, 12, 12,
+                    draw_ir_glyph_run_payload([9u32, 2u32], [0, 8], [0, 0], [0, 1], true))
+            ])
+        ])
+        val moved_patch = draw_ir_patch_between(baseline, "rev-1", moved, "rev-2")
+        expect(_op_kind_count(moved_patch.operations, DRAW_IR_PATCH_OP_UPDATE_GEOMETRY, "label")).to_equal(1)
+        expect(_op_kind_count(moved_patch.operations, DRAW_IR_PATCH_OP_UPDATE_STYLE, "label")).to_equal(1)
+        expect(_op_kind_present(moved_patch.operations, DRAW_IR_PATCH_OP_REORDER, "label")).to_equal(false)
+        expect(_op_kind_count(moved_patch.operations, DRAW_IR_PATCH_OP_REORDER, "peer")).to_equal(1)
+        val moved_applied = draw_ir_patch_apply(baseline, moved_patch)
+        expect(moved_applied.ok).to_equal(true)
+        expect(draw_ir_patch_commands_equal(moved_applied.composition, moved)).to_equal(true)
 
     it "rejects apply when the composition revision does not match base_revision":
         val baseline = draw_ir_composition("rev-1", "scene", DRAW_IR_BACKEND_CPU, [
