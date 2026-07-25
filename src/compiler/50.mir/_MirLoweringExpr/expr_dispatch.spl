@@ -110,21 +110,13 @@ impl MirLowering:
         # is_mutable) -- inline the folded constant value/type instead, the
         # same way the existing OUTPUT_LIMIT/DEFAULT_TIMEOUT_MS hardcoded
         # cases already do via `emit_const`. Restricted to SCALAR constant
-        # kinds (Int/Float/Bool/Str/Zero) deliberately: a compound module
-        # `val` (Array/Tuple/Struct) folds fine at the MIR-constant level
-        # (module_lowering.spl's `lower_const`/`lower_const_expr` already
-        # produce a `MirConstValue.Array(...)` etc for it), but `emit_const`'s
+        # kinds (Int/Float/Bool/Str/Zero) deliberately: `emit_const`'s
         # backend (`translate_const_value`, core_codegen.spl) only renders a
         # scalar LLVM literal -- it is not the same lowering strategy as a
         # real array/struct's runtime construction (`lower_array_lit`'s
         # rt_array_new-based heap allocation), so inlining a compound value
         # through it produced a bad LLVM constant and crashed at runtime
         # (SIGSEGV, confirmed empirically with `val SIZES = [10,20,30]`).
-        # Falling through to `nil` here restores the existing "undefined
-        # variable" COMPILE-time error for that (still unsupported, needs a
-        # real array/struct-constant lowering path as a follow-up) case,
-        # instead of a silent runtime crash -- never turn a clean loud
-        # failure into a worse one.
         val const_values = self.builder.module.constants.values()
         var cvi = 0
         while cvi < const_values.len():
@@ -167,8 +159,37 @@ impl MirLowering:
                     b_const_read.emit_const(const_dest, mir_const.value, const_read_ty)
                     self.builder = b_const_read
                     return Some(const_dest)
-                return nil
-            cvi = cvi + 1
+                # Compound (Array/Tuple/Struct) match found in module.constants
+                # but not scalar -- fall through to the global_const_exprs
+                # re-lowering fallback below (outside this loop) instead of
+                # returning nil here.
+                cvi = const_values.len()
+            else:
+                cvi = cvi + 1
+        # array_global_2026-07-25: fallback for a COMPOUND immutable module
+        # `val` (Array/Tuple/Struct/...), reached either because the loop
+        # above found a non-scalar `mir_const` match, or -- more commonly --
+        # because `lower_const_expr` (function_lowering.spl's `lower_const`)
+        # could not fold the initializer AT ALL (confirmed empirically: an
+        # ArrayLit like `[2, 3]` returns nil from `lower_const_expr` on this
+        # path, so `module.constants` never got an entry for this symbol in
+        # the first place -- the earlier code comment claiming it "folds
+        # fine at the MIR-constant level" did not hold up under test).
+        # `global_const_exprs` (populated unconditionally by `lower_const`,
+        # regardless of whether folding succeeded -- see its doc comment in
+        # mir_lowering_types.spl) carries the ORIGINAL HIR initializer
+        # expression; re-lower it fresh at this reference site, exercising
+        # the real array/struct construction path (`lower_array_lit`'s
+        # rt_array_new-based heap allocation) exactly as if the literal were
+        # written inline at the use site (already proven to work). Safe
+        # because the binding is immutable: every reference constructing an
+        # independent equal value is observationally identical to sharing
+        # one. Falls through to the existing `nil` -> "undefined variable"
+        # error only if no initializer expr was recorded (should not happen
+        # once `lower_const` has run for this symbol).
+        if self.global_const_exprs.contains(symbol_id):
+            val hir_init = self.global_const_exprs[symbol_id]
+            return Some(self.lower_expr(hir_init))
         nil
 
     fn local_is_runtime_array(local: LocalId) -> bool:

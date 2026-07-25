@@ -271,6 +271,28 @@ struct MirLowering:
     # mir_lowering_stmts.spl's `lower_assign_var` write hook (to emit
     # `StoreGlobal` for the mutable subset).
     global_symbol_ids: Dict<i64, bool>
+    # array_global_2026-07-25: companion map, symbol id -> the module-level
+    # `val`/`var` binding's ORIGINAL HIR initializer expression. Populated
+    # alongside `global_symbol_ids` (see `lower_const`, function_lowering.spl).
+    # Consulted only as a fallback by `try_lower_global_read` (expr_dispatch.spl)
+    # for an immutable `val` whose folded MIR constant is a COMPOUND value
+    # (Array/Tuple/Struct/...): neither `emit_const` (only renders a scalar
+    # LLVM literal -- inlining a compound value through it produced a bad
+    # LLVM constant and crashed at runtime, confirmed empirically with
+    # `val SIZES = [10,20,30]`) nor real `MirModule.statics` storage (the
+    # cranelift backend's `declare_module_statics` only accepts scalar
+    # Int/Bool/Zero inits, and the module-init-constructor auto-call wiring
+    # that could otherwise runtime-construct+StoreGlobal it only exists for
+    # the LLVM/C backends -- see `llvm_native_link.spl`) can represent it.
+    # Instead, re-lower the ORIGINAL initializer expression fresh at each
+    # reference site (`self.lower_expr(hir_expr)`), exactly as if the
+    # literal had been written inline at the use site (already proven to
+    # work). Safe because the binding is immutable: every reference
+    # constructs an equal, independent value. i64-keyed (not
+    # `Dict<SymbolId, ...>`) deliberately, matching `global_symbol_ids` --
+    # see its doc comment for the struct-keyed-dict interpreter lookup
+    # landmine this sidesteps.
+    global_const_exprs: Dict<i64, HirExpr>
     target_context: MirTargetContext
 
 impl MirLowering:

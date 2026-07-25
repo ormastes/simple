@@ -402,6 +402,22 @@ impl MirLowering:
     me lower_const(const_: HirConst):
         """Lower HIR constant to MIR static."""
         val value = self.lower_const_expr(const_.value)
+        # array_global_2026-07-25: register the module-scope binding
+        # UNCONDITIONALLY, even when `value` folds to nil. A compound
+        # initializer (e.g. `val ITEMS: [i64] = [2, 3]`) does NOT fold here
+        # -- `lower_const_expr` only handles scalar-foldable expressions, so
+        # `value` is nil for an ArrayLit/TupleLit/etc (confirmed empirically;
+        # despite this, the whole registration block below used to live
+        # INSIDE the `if val const_value = value:` gate, so an unfoldable
+        # compound `val` got NEITHER a `global_symbol_ids` entry NOR a
+        # `module.constants` entry -- any reference to it hit "undefined
+        # variable" before `try_lower_global_read` (expr_dispatch.spl) could
+        # even try its `global_const_exprs` fallback, since that check itself
+        # starts by requiring `global_symbol_ids.contains(symbol_id)`).
+        val sym_id_always = const_.symbol.id
+        if sym_id_always >= 0:
+            self.global_symbol_ids[sym_id_always] = true
+            self.global_const_exprs[sym_id_always] = const_.value
         if val const_value = value:
             val const_type = self.lower_type(const_.type_)
             val mir_const = MirConstant(
@@ -418,27 +434,25 @@ impl MirLowering:
             module.constants = constants
             bldr.module = module
             self.builder = bldr
-
             # mutglobal2 lane (module-level `var`/`val` mutation end-to-end,
             # see scratchpad/mutglobal_plan.md + scratchpad/mutglobal2
-            # report): register this module-level binding's symbol id in an
-            # i64-keyed bool set so expr_dispatch.spl's NamedVar/Var read
-            # hook and mir_lowering_stmts.spl's lower_assign_var write hook
-            # can recognize "this identifier is a module global" instead of
-            # erroring "undefined variable" the moment it's referenced from
-            # any function body (neither `self.local_map` nor anything else
-            # downstream of parsing previously carried this information).
-            # Covers `var` AND `val` alike -- the read hook distinguishes
-            # mutable-vs-immutable itself by checking `module.statics`
-            # (mutable-only) first, falling back to `module.constants`
-            # (populated for both, just above) for the immutable case. This
-            # runs once per module-level binding, before this lane, and
-            # `mir_lowering.spl`'s `lower_module` now runs this loop BEFORE
-            # any function body is lowered (see the reordering in
-            # module_lowering.spl), so every function body sees the full set.
-            val sym_id = const_.symbol.id
-            if sym_id >= 0:
-                self.global_symbol_ids[sym_id] = true
+            # report): `global_symbol_ids`/`global_const_exprs` (registered
+            # UNCONDITIONALLY above, before this `if val const_value = value:`
+            # gate) let expr_dispatch.spl's NamedVar/Var read hook and
+            # mir_lowering_stmts.spl's lower_assign_var write hook recognize
+            # "this identifier is a module global" instead of erroring
+            # "undefined variable" the moment it's referenced from any
+            # function body. Covers `var` AND `val` alike -- the read hook
+            # distinguishes mutable-vs-immutable itself by checking
+            # `module.statics` (mutable-only) first, falling back to
+            # `module.constants` (populated for both, just above, when the
+            # value folds) for the immutable+foldable case, and to
+            # `global_const_exprs` (always populated) for the
+            # immutable+unfoldable/compound case. This runs once per
+            # module-level binding, before this lane, and `mir_lowering.spl`'s
+            # `lower_module` now runs this loop BEFORE any function body is
+            # lowered (see the reordering in module_lowering.spl), so every
+            # function body sees the full set.
 
     me lower_type(type_: HirType) -> MirType:
         """Lower HIR type to MIR type."""
