@@ -860,3 +860,26 @@ the shared binary — deploys require explicit user go-ahead).
   falling through to source interpretation. The candidate is ready for a
   fresh positional C9 run, but C9 remains uncredited in this session because
   its three-cycle cap was already reached.
+
+  A fresh bounded C9 session then exercised that candidate on the five-case
+  fixture (`f`, `zero`, `invalid`, `trailing`, and second-hop `zero_copy`).
+  The first positional Cranelift run reached MIR lowering and rejected all five
+  `.unwrap_or` calls as unresolved. A cache-preserving diagnostic candidate
+  completed with `13 compiled, 1386 cached, 0 failed`, but the traced run
+  exited `139` before any producer, copy, or method-dispatch marker. All
+  temporary trace code was removed.
+
+  History and source review identified the next candidate representation boundary:
+  `find_local_hir_type` and its C9-critical consumers exchange `HirType?`.
+  Rewriting only the lookup to the established optional-accumulator return
+  pattern produced a candidate with `5 compiled, 1394 cached, 0 failed`, but
+  the positional run still exited `139`. That change was reverted rather than
+  preserving a crash.
+
+  This session has reached C9's three-cycle cap. In the next fresh session,
+  change only the C9-critical consumers—`option_inner_hir_type_for_local`, the
+  primary `let` metadata copy, and reassignment if reached—from `if val`
+  optional aggregate destructuring to the established `.?`/`??` extraction
+  pattern. Then trace the option-resolution gate. Do not change `unwrap_or`
+  routing, and defer LLVM execution until backend-neutral MIR lowering passes.
+  Credit C9 only when the positional executable exits `42`.
