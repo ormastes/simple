@@ -26,6 +26,18 @@ use std.hardware.fpga_linux.riscv_fpga_linux.{
 fn _assert_lane_contract_ready(lane: RiscvFpgaLane):
     expect(lane.readiness_status()).to_equal(RiscvReadinessStatus.Contract)
 
+fn _find_lane_for_xlen(manifest: RiscvFpgaLinuxManifest, xlen: text) -> RiscvFpgaLane:
+    val lanes = manifest.lanes
+    expect(lanes.len()).to_equal(2)
+    var rv: RiscvFpgaLane = RiscvFpgaLane.rv32_default()
+    var found = false
+    for lane in lanes:
+        if lane.xlen.to_text() == xlen:
+            rv = lane
+            found = true
+    expect(found).to_equal(true)
+    rv
+
 fn generate_dual_arch_rtl_evidence():
     val manifest = create_default_riscv_fpga_linux_manifest()
     expect(manifest.lanes.len()).to_equal(2)
@@ -72,7 +84,9 @@ fn require_terminal_login_ls_evidence():
 fn require_dual_arch_board_origin_evidence():
     val generic = create_default_riscv_fpga_linux_manifest()
     expect(generic.board.validate_for_hardware_boot()).to_contain("xilinx part must be selected before hardware boot")
-    val mlk = create_riscv_fpga_linux_manifest_for_board("mlk_s02_100t").ok().unwrap()
+    val mlk_result = create_riscv_fpga_linux_manifest_for_board("mlk_s02_100t")
+    expect(mlk_result.is_ok()).to_equal(true)
+    val mlk = mlk_result.ok().unwrap()
     expect(mlk.board.name).to_equal("mlk_s02_100t")
     expect(mlk.board.part).to_equal("xc7a100tfgg484-2")
     expect(mlk.board.clock_hz).to_equal(25000000)
@@ -93,8 +107,8 @@ fn reject_noncanonical_rtl_evidence():
 
 fn reject_unprotected_or_cross_arch_evidence():
     val manifest = create_default_riscv_fpga_linux_manifest()
-    val rv32 = manifest.lanes[0]
-    val rv64 = manifest.lanes[1]
+    val rv32 = _find_lane_for_xlen(manifest, "rv32")
+    val rv64 = _find_lane_for_xlen(manifest, "rv64")
     expect(rv32.proof_lane_summary()).to_equal("generated_rv32_linux shell=none")
     expect(rv64.proof_lane_summary()).to_equal("generated_rv64_linux shell=none")
     expect(rv32.boot_products_id("xilinx_generic")).to_contain("rv32")
@@ -109,9 +123,9 @@ fn reject_qemu_or_output_only_evidence():
     expect(products.contains("TX_ONLY")).to_equal(false)
 
 fn reject_vacuous_formal_evidence():
-    val bundle = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_dual_formal")
-    val _ = bundle.is_ok()
-    val ok = bundle.unwrap()
+    val bundle_result = generate_default_riscv_fpga_rtl_bundle("/tmp/riscv_dual_formal")
+    expect(bundle_result.is_ok()).to_equal(true)
+    val ok = bundle_result.ok().unwrap()
     val rv32 = read_generated_riscv_fpga_rtl_file("/tmp/riscv_dual_formal/rv32/rtl/simple_rv32gc_core.debug.json")
     val rv64 = read_generated_riscv_fpga_rtl_file("/tmp/riscv_dual_formal/rv64/rtl/simple_rv64gc_core.debug.json")
     val manifest_text = ok.rtl_manifest_text("/tmp/riscv_dual_formal")
@@ -137,7 +151,8 @@ fn reject_incomplete_manual_or_provenance():
     expect(manifest_text).to_contain("contract_file = \"/tmp/riscv_dual_rtl/rv32/rtl/simple_rv32gc_core.spl\"")
     expect(manifest_text).to_contain("contract_file = \"/tmp/riscv_dual_rtl/rv64/rtl/simple_rv64gc_core.spl\"")
     expect(products_text).to_contain("boot_script = \"scripts/mlk_s02_100t_generated_linux_boot.shs\"")
-    expect(manifest_text).to_contain("auth*")
+    expect(manifest_text).to_contain("authoritative_rtl_provenance = \"none\"")
+    expect(manifest_text).to_contain("pure_simple_authoritative_rtl = \"false\"")
 
 describe "RV32/RV64 Simple-generated FPGA CPU and Linux production qualification":
     # @capture(exec)
