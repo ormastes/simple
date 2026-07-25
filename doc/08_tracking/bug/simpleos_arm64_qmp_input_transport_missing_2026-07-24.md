@@ -79,8 +79,32 @@ a probe lane, not a HID event transport.
 
 ## Acceptance and capture prerequisites
 
-- Build:
-  `SIMPLE_BINARY=$PWD/bin/release/aarch64-apple-darwin/simple SIMPLE_LIB=src SIMPLE_OS_BUILD_TIMEOUT_MS=900000 $PWD/bin/release/aarch64-apple-darwin/simple os test --scenario=arm64-desktop-engine2d --log=off`
+- Canonical no-build live gate:
+  `sh scripts/check/check-simpleos-arm64-qmp-input-evidence.shs`.
+  It consumes the current `build/os/simpleos_arm64_desktop_engine2d.elf` and
+  `build/os/fat32-arm64-desktop.img`; no path override is admitted. It requires
+  the canonical build manifest to bind both artifact hashes and the guest
+  source revision to current `HEAD`, then re-hashes both at launch and after
+  capture. It injects the ordered QMP events and correlates guest-owned
+  sequences through WM frames. Admission additionally requires one successful
+  guest RAMFB visual-commit receipt for the baseline and every input, carrying
+  address, generation, frame ID, checksum, and changed-region coordinates.
+  Baseline/post-input screendumps must differ only inside the union of those
+  guest-declared regions. The canonical ARM64 desktop now emits this receipt
+  only after its Engine2D frame presenter returns, using a checksum read from
+  the actual RAMFB scanout; live admission remains red until a host QEMU run
+  proves the complete correlation.
+- Canonical attested build:
+  `sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs`.
+  The wrapper invokes exactly
+  `bin/simple os build --scenario=arm64-desktop-engine2d` with pinned LLVM,
+  log, and timeout settings. Before and after the build it requires a clean
+  guest-source worktree, unchanged `HEAD`, unchanged compiler identity, and
+  the same deterministic content fingerprint/count across every source root
+  consumed by the scenario (`build/os/generated`, `src/os`, `src/lib`, and
+  `examples/09_embedded/simple_os`). Only then does it atomically publish the
+  canonical ELF/disk manifest. The live gate recomputes the same source
+  snapshot before launch and after capture.
 - RV64 build:
   `bin/simple os build --scenario=riscv64-display-smoke`
 - QEMU must expose a QMP Unix socket and attach the target's two production

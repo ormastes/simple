@@ -110,13 +110,28 @@ canonical Engine2D desktop entry while retaining their distinct output and
 QEMU launch contracts:
 
 ```bash
-bin/simple os build --scenario=arm64-desktop-engine2d
+sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
 bin/simple os run --scenario=arm64-desktop-engine2d
 bin/simple os test --scenario=arm64-desktop-engine2d
 ```
 
-It builds `arch/arm64/gui_entry_desktop.spl` with the `src/os` and `src/lib`
-closure, configures RAMFB, and renders compositor-owned Simple Web content via
+The attested wrapper resolves and directly executes an allowlisted deployed
+`bin/release/<host-triple>/simple os build --scenario=arm64-desktop-engine2d`
+executable. It rejects scripts, symlinks, foreign binaries, and mismatched host
+architectures by checking Mach-O/ELF magic plus native architecture bytes; the
+manifest records and the consumer independently revalidates that format,
+architecture, hash, and version. This is deployed-binary identity evidence, not
+a claim that a canonical Stage3 source-provenance manifest exists. It then publishes
+the ELF/disk/source manifest required by the live QMP input gate. It invalidates
+the kernel stamp/output, disk image, and compiled disk writer before invoking
+the runner, so persistent kernel or disk cache hits cannot masquerade as a
+fresh attested build. The source identity covers the disk script/C producer,
+the pinned font companion manifest, and the complete `assets/fonts` tree.
+The wrapper also removes the runner's
+transient generated log source before both source snapshots. Source path
+enumeration stays NUL-delimited through byte-safe sorting and hashing. It builds
+`arch/arm64/gui_entry_desktop.spl` with the `src/os` and `src/lib` closure,
+configures RAMFB, and renders compositor-owned Simple Web content via
 `DesktopShell` and `Engine2dWmFrameExecutor`. The static scenario intentionally
 does not invent a shared-memory path or daemon lifecycle.
 RAMFB fw_cfg DMA is owned by `src/os/kernel/arch/arm64/ramfb.spl`; PL011 input
@@ -128,6 +143,16 @@ only when the captured serial output contains RAMFB configuration, the
 canonical first-frame marker emitted after a positive revision, and the ARM
 desktop-ready marker. This proves local Engine2D composition, not host-GPU
 execution.
+
+The live QMP input gate is
+`sh scripts/check/check-simpleos-arm64-qmp-input-evidence.shs`. Its source
+attestation fails closed when Git status, source enumeration, sorting, record
+generation, counting, or hashing fails. After each successful canonical
+Engine2D presentation, the ARM64 desktop emits a guest-owned
+`[ramfb-visual-commit]` receipt with the RAMFB address, presentation
+generation, frame ID, scanout checksum, and committed region. The gate
+correlates those receipts with VirtIO input and QMP screendumps; the receipt
+contract alone is not a live PASS.
 
 The host-GPU evidence owner remains
 `scripts/check/check-simpleos-qemu-host-gpu-2d.shs`. Its AArch64 row must first

@@ -7,6 +7,7 @@ use os.kernel.arch.arm64.ramfb.{
     ARM64_RAMFB_SCRATCH_BYTES,
     ARM64_RAMFB_WIDTH,
     arm64_ramfb_framebuffer_bytes,
+    arm64_ramfb_scanout_checksum,
     arm64_ramfb_setup
 }
 use os.kernel.arch.arm64.console.{uart_data_ready, uart_init, uart_read_char, uart_writeln}
@@ -79,6 +80,31 @@ fn arm64_wm_action_from_virtio_key(event: KeyEvent) -> WmAction:
                 Key.R: WmAction.Restore
                 Key.T: WmAction.ToggleTheme
                 _: WmAction.None
+
+fn arm64_emit_ramfb_visual_commit(
+    input_sequence: i64,
+    framebuffer_address: u64,
+    generation: i64,
+    frame_id: i64
+) -> bool:
+    """Emit guest-owned evidence only after the canonical frame presenter returns."""
+    val checksum = arm64_ramfb_scanout_checksum(
+        framebuffer_address,
+        ARM64_RAMFB_WIDTH,
+        ARM64_RAMFB_HEIGHT,
+        ARM64_RAMFB_WIDTH * 4u32
+    )
+    if checksum <= 0:
+        uart_writeln(
+            "[ramfb-visual-commit] input_seq={input_sequence} status=failed reason=scanout-checksum"
+        )
+        return false
+    # Engine2D recomposes and presents the complete scene for this lane, so the
+    # truthful committed region is the full RAMFB surface.
+    uart_writeln(
+        "[ramfb-visual-commit] input_seq={input_sequence} address={framebuffer_address} width={ARM64_RAMFB_WIDTH} height={ARM64_RAMFB_HEIGHT} stride={ARM64_RAMFB_WIDTH * 4u32} format=bgra8888 generation={generation} frame_id={frame_id} checksum={checksum:x} changed_x=0 changed_y=0 changed_width={ARM64_RAMFB_WIDTH} changed_height={ARM64_RAMFB_HEIGHT} status=success"
+    )
+    true
 
 fn spl_start():
     uart_init()
@@ -166,6 +192,16 @@ fn spl_start():
     val first_revision = shell.render_baremetal_first_frame(wm_frame_executor)
     if first_revision <= 0:
         uart_writeln("[desktop-gui-arm64] fatal reason=first-frame")
+        return
+    var ramfb_generation = first_revision
+    var ramfb_frame_id: i64 = 1
+    if not arm64_emit_ramfb_visual_commit(
+        0,
+        framebuffer_address.to_u64(),
+        ramfb_generation,
+        ramfb_frame_id
+    ):
+        uart_writeln("[desktop-gui-arm64] fatal reason=first-frame-ramfb-receipt")
         return
     val simd_enabled = baremetal_simd_fill_enabled()
     val simd_hits = baremetal_simd_fill_hits()
@@ -316,10 +352,25 @@ fn spl_start():
             else:
                 uart_writeln("[backend2d-event-receipt] backend=simpleos-qemu-arm64 event_backend=pl011-uart event_count={event_count}")
             val rendered_revision = shell.render_baremetal_frame(wm_frame_executor)
+            if rendered_revision > 0:
+                ramfb_generation = ramfb_generation + 1
+                ramfb_frame_id = ramfb_frame_id + 1
+                val frame_input_sequence = if key_event_pending:
+                    key_sequence
+                else:
+                    pointer_sequence
+                if not arm64_emit_ramfb_visual_commit(
+                    frame_input_sequence,
+                    framebuffer_address.to_u64(),
+                    ramfb_generation,
+                    ramfb_frame_id
+                ):
+                    uart_writeln("[desktop-gui-arm64] fatal reason=changed-frame-ramfb-receipt")
+                    running = false
             if pointer_event_pending:
-                uart_writeln("[wm-pointer-frame] input_seq={pointer_sequence} generation={rendered_revision}")
+                uart_writeln("[wm-pointer-frame] input_seq={pointer_sequence} generation={ramfb_generation}")
             if key_event_pending:
-                uart_writeln("[wm-key-frame] input_seq={key_sequence} generation={rendered_revision}")
+                uart_writeln("[wm-key-frame] input_seq={key_sequence} generation={ramfb_generation}")
             if rendered_revision <= 0:
                 uart_writeln("[desktop-gui-arm64] fatal reason=changed-frame")
                 running = false

@@ -9,6 +9,10 @@ use os.kernel.boot.mmio.{
 }
 use os.kernel.boot.mmio_hardware.{mmio_memory_barrier}
 use os.kernel.arch.arm64.console.{uart_writeln}
+use common.gpu.simpleos_host_gpu_protocol.{
+    simpleos_host_gpu_readback_checksum_finalize,
+    simpleos_host_gpu_readback_checksum_step
+}
 
 val ARM64_RAMFB_WIDTH: u32 = 1024
 val ARM64_RAMFB_HEIGHT: u32 = 768
@@ -24,6 +28,37 @@ val _DMA_SELECT_WRITE: u32 = 0x18
 
 fn arm64_ramfb_framebuffer_bytes(width: u32, height: u32) -> i64:
     width.to_i64() * height.to_i64() * 4
+
+fn arm64_ramfb_scanout_checksum(
+    fb_addr: u64,
+    width: u32,
+    height: u32,
+    stride: u32
+) -> i64:
+    """Checksum the pixels QEMU ramfb will scan out after a frame commit."""
+    if fb_addr == 0u64 or width == 0u32 or height == 0u32:
+        return 0
+    val row_bytes = width.to_u64() * 4u64
+    if stride.to_u64() < row_bytes or stride % 4u32 != 0u32:
+        return 0
+    val max_u64 = 0xFFFFFFFFFFFFFFFFu64
+    val last_row_offset = (height.to_u64() - 1u64) * stride.to_u64()
+    if last_row_offset > max_u64 - row_bytes:
+        return 0
+
+    var checksum: i64 = 0
+    var row: u64 = 0u64
+    while row < height.to_u64():
+        var col: u64 = 0u64
+        while col < width.to_u64():
+            val pixel_addr = fb_addr + row * stride.to_u64() + col * 4u64
+            checksum = simpleos_host_gpu_readback_checksum_step(
+                checksum,
+                mmio_read32(pixel_addr)
+            )
+            col = col + 1u64
+        row = row + 1u64
+    simpleos_host_gpu_readback_checksum_finalize(checksum)
 
 fn _swap16(value: u16) -> u16:
     ((value & 0x00FF) << 8) | ((value >> 8) & 0x00FF)
