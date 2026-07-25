@@ -1,0 +1,124 @@
+#!/bin/sh
+# Build and run the windowless, direct macOS Vulkan runtime-provider probe.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${VULKAN_PROVIDER_PROBE_BUILD_DIR:-$ROOT_DIR/build/macos_vulkan_provider_micro_probe}"
+ENTRY="test/02_integration/rendering/macos_vulkan_provider_micro_probe.spl"
+OUTPUT="$BUILD_DIR/macos_vulkan_provider_micro_probe"
+RAW_STDOUT="$BUILD_DIR/probe.stdout"
+RAW_STDERR="$BUILD_DIR/probe.stderr"
+EVIDENCE="$BUILD_DIR/evidence.env"
+PROVIDER="${VULKAN_PROVIDER_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_wm.dylib}"
+
+fail() {
+    reason="$1"
+    mkdir -p "$BUILD_DIR"
+    {
+        echo "vulkan_provider_probe_wrapper_status=fail"
+        echo "vulkan_provider_probe_wrapper_reason=$reason"
+        echo "vulkan_provider_probe_evidence=$EVIDENCE"
+    } >"$EVIDENCE"
+    cat "$EVIDENCE"
+    exit 1
+}
+
+canonical_file() {
+    [ -f "$1" ] || return 1
+    [ ! -L "$1" ] || return 1
+    file_dir="$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P)"
+    printf '%s/%s\n' "$file_dir" "$(basename -- "$1")"
+}
+
+resolve_compiler() {
+    if [ -n "${VULKAN_PROVIDER_PROBE_COMPILER:-}" ]; then
+        case "$VULKAN_PROVIDER_PROBE_COMPILER" in
+            *compiler_rust/target/*) return 1 ;;
+        esac
+        [ -x "$VULKAN_PROVIDER_PROBE_COMPILER" ] || return 1
+        canonical_file "$VULKAN_PROVIDER_PROBE_COMPILER"
+        return
+    fi
+    case "$(uname -m)" in
+        arm64|aarch64)
+            candidates="
+$ROOT_DIR/bin/release/aarch64-apple-darwin-macho/simple
+$ROOT_DIR/bin/release/aarch64-apple-darwin/simple
+$ROOT_DIR/bin/release/macos-arm64/simple
+$ROOT_DIR/bin/release/darwin-aarch64/simple"
+            ;;
+        x86_64)
+            candidates="
+$ROOT_DIR/bin/release/macos-x86_64/simple
+$ROOT_DIR/bin/release/x86_64-apple-darwin/simple"
+            ;;
+        *) return 1 ;;
+    esac
+    for candidate in $candidates; do
+        if [ -x "$candidate" ] && [ ! -L "$candidate" ]; then
+            canonical_file "$candidate"
+            return
+        fi
+    done
+    return 1
+}
+
+[ "$(uname -s)" = Darwin ] || fail "macos-required"
+mkdir -p "$BUILD_DIR"
+rm -f "$OUTPUT" "$RAW_STDOUT" "$RAW_STDERR" "$EVIDENCE"
+
+COMPILER="$(resolve_compiler)" || fail "self-hosted-compiler-missing"
+PROVIDER="$(canonical_file "$PROVIDER")" || fail "provider-dylib-missing-or-untrusted"
+
+nm -gU "$PROVIDER" | grep -Fq "_rt_vulkan_provider_is_available" ||
+    fail "provider-availability-symbol-missing"
+nm -gU "$PROVIDER" | grep -Fq "_rt_vulkan_provider_device_count" ||
+    fail "provider-device-count-symbol-missing"
+nm -gU "$PROVIDER" | grep -Fq "_rt_vulkan_get_last_error" ||
+    fail "provider-last-error-symbol-missing"
+
+SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=src \
+    "$COMPILER" native-build \
+    --backend cranelift \
+    --threads 4 \
+    --cache-dir "$BUILD_DIR/native-cache" \
+    --runtime-bundle core-c-bootstrap \
+    --source src/lib \
+    --source test/02_integration/rendering \
+    --entry-closure \
+    --entry "$ENTRY" \
+    --output "$OUTPUT" \
+    >"$BUILD_DIR/native-build.log" 2>&1 ||
+    fail "native-build-failed"
+
+[ -x "$OUTPUT" ] || fail "native-output-missing"
+
+set +e
+VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}" \
+DYLD_PRINT_LIBRARIES=1 \
+    "$OUTPUT" "$PROVIDER" >"$RAW_STDOUT" 2>"$RAW_STDERR"
+PROBE_EXIT=$?
+set -e
+
+dyld_resolution_status=fail
+if grep -Fq "$PROVIDER" "$RAW_STDERR"; then
+    dyld_resolution_status=pass
+fi
+
+{
+    echo "vulkan_provider_probe_wrapper_status=$(if [ "$PROBE_EXIT" = 0 ] && [ "$dyld_resolution_status" = pass ]; then echo pass; else echo fail; fi)"
+    echo "vulkan_provider_probe_wrapper_reason=$(if [ "$PROBE_EXIT" = 0 ] && [ "$dyld_resolution_status" = pass ]; then echo provider-probe-complete; else echo provider-probe-failed; fi)"
+    echo "vulkan_provider_probe_compiler=$COMPILER"
+    echo "vulkan_provider_probe_provider_dylib=$PROVIDER"
+    echo "vulkan_provider_probe_provider_sha256=$(shasum -a 256 "$PROVIDER" | awk '{print $1}')"
+    echo "vulkan_provider_probe_dyld_resolution_status=$dyld_resolution_status"
+    echo "vulkan_provider_probe_exit_code=$PROBE_EXIT"
+    echo "vulkan_provider_probe_stdout=$RAW_STDOUT"
+    echo "vulkan_provider_probe_stderr=$RAW_STDERR"
+    cat "$RAW_STDOUT"
+} >"$EVIDENCE"
+
+cat "$EVIDENCE"
+[ "$PROBE_EXIT" = 0 ] && [ "$dyld_resolution_status" = pass ]

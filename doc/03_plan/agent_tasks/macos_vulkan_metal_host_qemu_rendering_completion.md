@@ -420,6 +420,14 @@ same failure.
   output now passes its focused contract, but the producer must wait for a
   fresh session. The helper/producer bundle remains local and uncommitted until
   a real Stage3 manifest is produced and verified.
+- The independent provider micro-probe is now implemented without Engine2D,
+  winit, or a window. Its focused contract passes 2/2, but the canonical
+  self-hosted compiler stopped its only native build attempt with
+  `Illegal instruction: 4` / `field access on nil receiver`. Do not rerun the
+  exhausted full-live Vulkan command or substitute the Rust seed. Resume the
+  micro-probe only with a healthy canonical self-hosted compiler, then require
+  its provider availability, positive device count, dyld resolution, and
+  provider-error fields before another full-live cycle.
 
 ## Required Evidence and Documentation
 
