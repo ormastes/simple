@@ -543,6 +543,40 @@ fn import_binding_marker_name(importer: &str, local: &str, source_owner: &str, s
     )
 }
 
+fn append_flattened_import_binding_markers(
+    items: &mut Vec<Node>,
+    use_stmt: &UseStmt,
+    module_path: &Path,
+    owner_name: &str,
+) {
+    let Some(source_path) = resolve_use_to_path(use_stmt, module_path.parent().unwrap_or(Path::new("."))) else {
+        return;
+    };
+    let source_name = normalize_path_key(&source_path).to_string_lossy().into_owned();
+    let mut add_marker = |local_name: &str, source_symbol: &str| {
+        items.push(Node::Const(ConstStmt {
+            span: use_stmt.span,
+            name: import_binding_marker_name(owner_name, local_name, &source_name, source_symbol),
+            ty: None,
+            value: Expr::Nil,
+            visibility: Visibility::Private,
+        }));
+    };
+    match &use_stmt.target {
+        ImportTarget::Group(targets) => {
+            for target in targets {
+                match target {
+                    ImportTarget::Single(name) => add_marker(name, name),
+                    ImportTarget::Aliased { name, alias } => add_marker(alias, name),
+                    _ => {}
+                }
+            }
+        }
+        ImportTarget::Glob => add_marker("*", "*"),
+        ImportTarget::Single(_) | ImportTarget::Aliased { .. } => {}
+    }
+}
+
 fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
     let owner_path = normalize_path_key(module_path);
     let owner_name = owner_path.to_string_lossy();
@@ -565,32 +599,29 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
 
         match item {
             Node::UseStmt(use_stmt) => {
-                if let Some(source_path) =
-                    resolve_use_to_path(&use_stmt, module_path.parent().unwrap_or(Path::new(".")))
-                {
-                    let source_name = normalize_path_key(&source_path).to_string_lossy().into_owned();
-                    let mut add_marker = |local_name: &str, source_symbol: &str| {
-                        items.push(Node::Const(ConstStmt {
-                            span: use_stmt.span,
-                            name: import_binding_marker_name(&owner_name, local_name, &source_name, source_symbol),
-                            ty: None,
-                            value: Expr::Nil,
-                            visibility: Visibility::Private,
-                        }));
+                append_flattened_import_binding_markers(&mut items, &use_stmt, module_path, &owner_name);
+                next_global_already_tagged = false;
+            }
+            Node::ExportUseStmt(export_use) => {
+                // A re-export facade participates in the flattened interpreter
+                // just like an ordinary import.  Keep its global binding chain
+                // even though the ExportUseStmt itself is removed below: an
+                // importer may resolve a mutable module global through this
+                // facade (consumer -> facade -> defining module).
+                if !export_use.path.segments.is_empty() {
+                    let reexport_as_use = UseStmt {
+                        span: export_use.span,
+                        path: export_use.path,
+                        target: export_use.target,
+                        is_type_only: false,
+                        is_lazy: false,
                     };
-                    match &use_stmt.target {
-                        ImportTarget::Group(targets) => {
-                            for target in targets {
-                                match target {
-                                    ImportTarget::Single(name) => add_marker(name, name),
-                                    ImportTarget::Aliased { name, alias } => add_marker(alias, name),
-                                    _ => {}
-                                }
-                            }
-                        }
-                        ImportTarget::Glob => add_marker("*", "*"),
-                        ImportTarget::Single(_) | ImportTarget::Aliased { .. } => {}
-                    }
+                    append_flattened_import_binding_markers(
+                        &mut items,
+                        &reexport_as_use,
+                        module_path,
+                        &owner_name,
+                    );
                 }
                 next_global_already_tagged = false;
             }
@@ -1919,11 +1950,69 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
-    use simple_parser::ast::{ImportTarget, ModulePath, UseStmt};
+    use simple_parser::ast::{ExportUseStmt, ImportTarget, ModulePath, UseStmt};
     use simple_parser::token::Span;
     use std::collections::HashSet;
     use std::path::Path;
     use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn flattened_export_use_emits_global_binding_markers_for_reexport_facades() {
+        let temp = tempfile::tempdir().unwrap();
+        let facade_path = temp.path().join("facade.spl");
+        let leaf_path = temp.path().join("leaf.spl");
+        fs::write(&leaf_path, "var value: i32 = 0\n").unwrap();
+
+        let span = Span::new(0, 0, 0, 0);
+        let module = Module {
+            name: None,
+            items: vec![
+                Node::ExportUseStmt(ExportUseStmt {
+                    span,
+                    path: ModulePath::new(vec!["leaf".to_string()]),
+                    target: ImportTarget::Group(vec![
+                        ImportTarget::Single("value".to_string()),
+                        ImportTarget::Aliased {
+                            name: "other_value".to_string(),
+                            alias: "aliased_value".to_string(),
+                        },
+                    ]),
+                }),
+                Node::ExportUseStmt(ExportUseStmt {
+                    span,
+                    path: ModulePath::new(vec!["leaf".to_string()]),
+                    target: ImportTarget::Glob,
+                }),
+            ],
+        };
+
+        let flattened = strip_flattened_import_nodes(module, &facade_path);
+        let importer = normalize_path_key(&facade_path).to_string_lossy().into_owned();
+        let source = normalize_path_key(&leaf_path).to_string_lossy().into_owned();
+        let marker_names: Vec<String> = flattened
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Node::Const(marker) if marker.name.starts_with(FLATTEN_IMPORT_BINDING_MARKER_PREFIX) => {
+                    Some(marker.name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert!(marker_names.contains(&import_binding_marker_name(&importer, "value", &source, "value")));
+        assert!(marker_names.contains(&import_binding_marker_name(
+            &importer,
+            "aliased_value",
+            &source,
+            "other_value"
+        )));
+        assert!(marker_names.contains(&import_binding_marker_name(&importer, "*", &source, "*")));
+        assert!(!flattened
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::ExportUseStmt(_))));
+    }
 
     fn simd_tier_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
