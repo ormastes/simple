@@ -72,6 +72,12 @@ UI/TUI, GUI, and WM runtime evidence gates.
   retries, so no new timing receipt is claimed. Four stray consumers were
   normalized to the canonical `compiler.core.parser` spelling as source hygiene,
   not as a claimed fix.
+- Read-only tracing isolated the unresolved imports to the CLI entry-closure
+  BFS: it probed literal `src/compiler/core/...` paths and never reused the
+  driver's numbered compiler resolver. The BFS now delegates `compiler.*`
+  imports to that shared resolver and accepts the result only under a supplied
+  source root. A fresh pure-Simple candidate is required before rerunning the
+  exhausted timing fixture.
 
 ## Rejected fixes
 

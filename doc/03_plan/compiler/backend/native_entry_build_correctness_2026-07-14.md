@@ -1062,6 +1062,13 @@ the shared binary — deploys require explicit user go-ahead).
   `compiler.core.parser` spelling, but that cleanup receives no performance or
   blocker credit.
 
+  The unresolved-symbol root is now isolated before HIR: the CLI entry-closure
+  walker only probed literal source-root paths, so `compiler.core.parser` never
+  reached numbered `compiler/10.frontend/core/parser.spl`. It now reuses the
+  driver's numbered compiler resolver, constrained to the caller's supplied
+  source roots, with a source contract. This remains uncredited until a fresh
+  pure-Simple candidate executes the focused fixture in a later bounded cycle.
+
   A bootstrap seed rebuilt with both the alias and grammar fixes passed the
   former 16-second discovery failure and emitted no parser/link diagnostics,
   but the final full-CLI attempt hit its 15-minute cap at sustained 100% CPU
