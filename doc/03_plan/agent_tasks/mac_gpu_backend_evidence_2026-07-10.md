@@ -283,3 +283,18 @@ Merge owner: main workspace owner. Final reviewer: normal/highest-capability
 model. Reject stale artifacts, CPU fallback presented as GPU evidence,
 unavailable-host PASS, missing timing/RSS/device identity, or deployment
 evidence not tied to the tested revision.
+
+## 2026-07-25 handoff
+
+Agent A's warm-cache Stage3 completed: 3 compiled, 676 cached, 0 failed in
+67.1s; artifact SHA-256
+`cf4834e6d8b8c5b7b148c4e86cf395f76fd5f665dd8c97bcc2f695a498056ca2`.
+The canonical Stage4 remained blocked in parse and was stopped at
+36,311,984 KiB RSS after 207/1,155 files. Its previously ignored
+`--low-memory` flag is now propagated, but phase-2 per-file release remains
+required by the existing Stage4 memory bug before Agent A retries.
+
+TODO 582 is complete with 15/15 focused regressions. Agents B and C remain
+blocked on a source-matched deployed full CLI. The macOS owner must not reuse
+the Stage3 bootstrap artifact as that CLI and must keep Metal/live-window rows
+open until Agent A's Stage4 and deployment gates pass.

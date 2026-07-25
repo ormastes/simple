@@ -395,8 +395,7 @@ fn file_plausibly_provides_names(path: &Path, names: &[String]) -> std::collecti
     let Ok(source) = fs::read_to_string(path) else {
         return std::collections::HashSet::new();
     };
-    let tokens: std::collections::HashSet<&str> =
-        source.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
+    let tokens: std::collections::HashSet<&str> = source.split(|c: char| !(c.is_alphanumeric() || c == '_')).collect();
     names
         .iter()
         .filter(|name| tokens.contains(name.as_str()))
@@ -1048,7 +1047,7 @@ pub fn load_and_merge_module(
 
     // Cache the full module exports for future use
     let exports_value = Value::Dict(Arc::new(exports.clone()));
-    cache_module_exports(&module_path, exports_value);
+    cache_module_exports(&module_path, exports_value.clone());
 
     // Also cache the module definitions (classes, functions, enums) for future imports.
     // module_functions is already HashMap<String, Arc<FunctionDef>> -- cache stores Arc clones (cheap).
@@ -1104,7 +1103,7 @@ pub fn load_and_merge_module(
     }
 
     // Otherwise, return the full module dict (for glob imports or module-level imports)
-    Ok(Value::Dict(Arc::new(exports)))
+    Ok(exports_value)
 }
 
 #[cfg(test)]

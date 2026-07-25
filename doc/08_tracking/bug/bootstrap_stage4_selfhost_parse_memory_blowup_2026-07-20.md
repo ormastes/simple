@@ -933,3 +933,26 @@ cranelift one-binary of compiler+app+lib+10_tooling:
   present so the Stage4 closure passes), not this stripped validation shortcut.
 - Net: interning-active proven (fullbuild grep=1); linear parse proven (stage3 to
   412K chars); `bin/release` intentionally left untouched.
+
+## Update 2026-07-25: source-matched Stage3 passes; Stage4 still retains parse state
+
+The warm-cache Stage3 owner-provenance self-host completed with 3 compiled,
+676 cached, 0 failed in 67.1s. Its 20 MB bootstrap artifact has SHA-256
+`cf4834e6d8b8c5b7b148c4e86cf395f76fd5f665dd8c97bcc2f695a498056ca2`
+and passed bootstrap version/error-path sanity.
+
+The canonical Stage4 command was stopped after about 4.7 minutes at only
+207/1,155 parsed files because RSS had reached 36,311,984 KiB and
+`heap_registry` about 4,485,786. It had emitted no artifact or cache objects.
+This confirms the retained parser-state defect on Linux with the latest
+source-matched Stage3.
+
+The command-line path also silently ignored the bootstrap script's
+`--low-memory` option. The validator, parser, and both `CompileOptions`
+construction branches now propagate it, with a focused 13/13 parser contract
+pass. That enables the existing phase-boundary evictions, but does not close
+this bug: `parse_all_impl` still retains every parsed source/AST until phase 2
+ends. The next repair must release per-file parse material while preserving a
+cached source fingerprint for correct object-cache invalidation, then pass the
+existing multi-file RSS and changed-source cache regressions before one bounded
+Stage4 retry.

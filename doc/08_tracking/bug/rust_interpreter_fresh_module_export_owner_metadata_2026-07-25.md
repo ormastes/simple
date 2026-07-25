@@ -1,7 +1,7 @@
 # Bug: Fresh module export loses owner metadata
 
 - **Date:** 2026-07-25
-- **Status:** open
+- **Status:** fixed
 - **Severity:** high
 - **Area:** Rust bootstrap interpreter module loading
 - **TODO:** 582
@@ -25,3 +25,12 @@ Add an unflattened three-module regression where a facade imports an aliased
 growing global, calls its defining module to mutate it, and then reads the alias.
 Require the existing 14-test flattened/global-owner suite plus the new
 unflattened case to pass once.
+
+## Verification
+
+The loader now returns the same `exports_value` whose dictionary pointer was
+registered by `cache_module_exports`. Grouped aliased imports are also installed
+in the module environment and retain their source binding.
+
+The fresh focused test binary passed all 15 owner/global regressions, including
+`unflattened_transitive_alias_sees_growing_global_array`, on 2026-07-25.

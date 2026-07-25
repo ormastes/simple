@@ -50,6 +50,31 @@ fn imported_functions_share_live_module_globals() {
 }
 
 #[test]
+fn unflattened_transitive_alias_sees_growing_global_array() {
+    let dir = tempdir().unwrap();
+    let arena_path = dir.path().join("arena.spl");
+    let facade_path = dir.path().join("facade.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        arena_path,
+        "var values: [i32] = []\n\nfn push_value(value: i32):\n    values.push(value)\n",
+    )
+    .unwrap();
+    fs::write(
+        facade_path,
+        "use arena.{values as imported_values, push_value}\n\nfn push_then_read(value: i32) -> i32:\n    push_value(value)\n    return imported_values[0]\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "import facade\n\nfn main() -> i32:\n    return facade.push_then_read(41)\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_unflattened_clean(&main_path), 41);
+}
+
+#[test]
 fn flattened_functions_share_growing_module_global_arrays() {
     let dir = tempdir().unwrap();
     let state_path = dir.path().join("state.spl");

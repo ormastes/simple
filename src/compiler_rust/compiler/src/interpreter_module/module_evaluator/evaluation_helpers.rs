@@ -656,6 +656,17 @@ fn process_use_stmt(
                     env.insert(name.clone(), export_value.clone());
                     exports.insert(name.clone(), export_value.clone());
                 }
+                if let ImportTarget::Group(items) = &use_stmt.target {
+                    for item in items {
+                        if let ImportTarget::Aliased { name, alias } = item {
+                            if let Some(export_value) = module_exports.get(name) {
+                                record_import_binding(module_path, alias, source_owner.as_ref(), name);
+                                env.insert(alias.clone(), export_value.clone());
+                                exports.insert(alias.clone(), export_value.clone());
+                            }
+                        }
+                    }
+                }
             }
             // For glob imports, don't overwrite the unpacked exports with the module dict
             // This prevents a class named "shell" from being overwritten by the "shell" module dict
