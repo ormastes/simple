@@ -383,6 +383,11 @@ static void put_named_dir_entry(unsigned char *entries, int *count, const char *
     put_dir_entry(entries, count, short_name, cluster, size, attr);
 }
 
+/* FAT32 mandates "." and ".." as the first two entries of every subdirectory;
+ * without them fsck reports "Expected a valid '.' entry in the first slot, found
+ * free entry" and the directory is not traversable. Call this on a subdirectory
+ * buffer BEFORE any content lands in it. Per spec, ".." carries cluster 0 when
+ * the parent is the root directory — callers pass 0, not ROOT_CLUSTER, there. */
 static void put_dot_entries(unsigned char *entries, int *count,
                             int self_cluster, int parent_cluster)
 {
@@ -592,6 +597,15 @@ static void maybe_write_esp(const char *img_path, const struct bytes *bootloader
     write_file_path(path, limine->data, limine->len);
 }
 
+/* FAT32 FSInfo sector. The BPB DECLARES fsinfo_sector=1 (le16(48, 1) below);
+ * leaving that sector zeroed made `fsck.fat` fail the image with "FSINFO sector
+ * has bad magic number(s)" and the SimpleOS-WM evidence harness reject it as
+ * invalid-fat32-structure. Offsets are spec-fixed: lead 0x41615252 at +0,
+ * struct 0x61417272 at +484, trail 00 00 55 AA at +508.
+ * free_count/next_free carry REAL values rather than 0xFFFFFFFF ("unknown");
+ * unknown is spec-legal but fsck flags it as "Free cluster summary
+ * uninitialized". Data clusters are numbered from 2, so used = g_next_cluster-2.
+ * See doc/08_tracking/bug/simpleos_wm_fat32_image_fsinfo_uninitialized_2026-07-25.md */
 static void write_fat32_fsinfo(size_t sector_offset)
 {
     unsigned char *fsinfo = g_image + sector_offset;
@@ -629,14 +643,25 @@ static void finish_fat32_image(const char *img_path)
     le32(44, ROOT_CLUSTER);
     le16(48, 1);
     le16(50, 6);
-    g_image[64] = 0x80;
+    g_image[64] = 0x80;                 /* BS_DrvNum: fixed disk */
+    /* Extended boot signature + volume label. 0x29 at offset 66 marks
+     * vol-id/label/fs-type as present; the label field (offset 71, 11 bytes,
+     * space-padded) left as zeros makes fsck report "Label '' stored in boot
+     * sector is not valid. Auto-removing label". The spelling here MUST match
+     * the root-directory ATTR_VOLUME_ID (0x08) entry exactly, padding included. */
     g_image[66] = 0x29;
-    le32(67, 0x12345678U);
+    le32(67, 0x12345678U);              /* volume id (arbitrary but stable) */
     memcpy(g_image + 71, "SIMPLEOS   ", 11);
     memcpy(g_image + 82, "FAT32   ", 8);
     g_image[510] = 0x55;
     g_image[511] = 0xaa;
 
+    /* Sector 6: backup boot sector, declared above by le16(50, 6) and otherwise
+     * never written — fsck reported every BPB byte as differing from its
+     * all-zero backup. A verbatim copy of sector 0 is what the spec wants; it
+     * must be taken AFTER sector 0 is fully populated.
+     * Sector 1 is the primary FSInfo; sector 7 is its copy inside the backup
+     * boot region (backup of sectors 0..2 at 6..8), so both are written. */
     memcpy(g_image + (size_t)6 * SECTOR_SIZE, g_image, SECTOR_SIZE);
     write_fat32_fsinfo((size_t)1 * SECTOR_SIZE);
     write_fat32_fsinfo((size_t)7 * SECTOR_SIZE);
@@ -681,6 +706,10 @@ static void write_desktop_font_image(
     unsigned char sys[DIRECTORY_BYTES] = {0};
     unsigned char fonts[DIRECTORY_BYTES] = {0};
     int root_n = 0, sys_n = 0, fonts_n = 0;
+    /* Volume label must exist BOTH in the boot sector (offset 71) and as a
+     * root-directory entry with ATTR_VOLUME_ID (0x08), cluster 0, size 0. With
+     * only the boot-sector half fsck reports "Label in boot sector is
+     * 'SIMPLEOS', but there is no volume label in root directory". */
     put_dir_entry(root, &root_n, "SIMPLEOS   ", 0, 0, 0x08);
     put_dir_entry(root, &root_n, "SYS        ", sys_cluster, 0, 0x10);
     put_dot_entries(sys, &sys_n, sys_cluster, 0);
@@ -705,6 +734,9 @@ static void write_desktop_font_image(
     put_dir_entry(fonts, &fonts_n, "CLDR    LIC", cldr_license_cluster, cldr_license_payload.len, 0x20);
     put_dir_entry(fonts, &fonts_n, "SIMPLE  LIC", simple_license_cluster, simple_license_payload.len, 0x20);
     put_dir_entry(fonts, &fonts_n, "NOTICES MD ", notices_cluster, third_party_notices_payload.len, 0x20);
+    /* 93 = 91 font-bundle entries + the 2 mandatory FAT32 dot entries ("." and
+     * "..") this directory now emits. The guard is KEPT (it catches a missing or
+     * extra font asset); only the expected total moved, by exactly 2. */
     if (fonts_n != 93)
         die("SimpleOS desktop font bundle directory manifest mismatch");
 
@@ -935,10 +967,24 @@ int main(int argc, char **argv)
     int llvm_manifest_cluster = alloc_clusters(llvm_manifest.data, llvm_manifest.len);
     int clang_manifest_cluster = alloc_clusters(clang_manifest.data, clang_manifest.len);
     int rust_manifest_cluster = alloc_clusters(rust_manifest.data, rust_manifest.len);
+    /* TODO(simpleos-steam-staging): a steam manifest and a proof marker were
+     * once allocated here but never published into any directory — the clusters
+     * were allocated in the FAT and orphaned (fsck "Reclaimed unused clusters").
+     * The manifest named /usr/share/simpleos/games/steam_2048/marker.txt as its
+     * proof_marker, so the intended staging path exists but was never wired.
+     * The allocations are gone so the FAT stays consistent; the staging itself
+     * is still owed. Do NOT re-add alloc_clusters here without also adding the
+     * put_dir_entry that consumes it. */
     int steam_port_cluster = alloc_clusters(steam_port.data, steam_port.len);
     int llvm_ll_cluster = alloc_clusters(llvm_ll.data, llvm_ll.len);
     int llvm_s_cluster = alloc_clusters(llvm_s.data, llvm_s.len);
     int llvm_pipe_cluster = alloc_clusters(llvm_pipe.data, llvm_pipe.len);
+    /* FAT32 has NO hard links: two directory entries must not share one cluster
+     * chain. This payload is deliberately published at two paths (/SYS/CLANGHEL.C
+     * via clang_c_cluster and /HELLO.C via hello_c_cluster), and sharing made
+     * fsck report "/HELLO.C and /SYS/CLANGHEL.C share clusters. Truncating second
+     * to 0 bytes" — one of the two paths then read as empty. Each path gets its
+     * own independent copy. */
     int clang_c_cluster = alloc_clusters(clang_c.data, clang_c.len);
     int hello_c_cluster = alloc_clusters(clang_c.data, clang_c.len);
     int clang_flags_cluster = alloc_clusters(clang_flags.data, clang_flags.len);
@@ -953,6 +999,15 @@ int main(int argc, char **argv)
     int loader_cluster = alloc_clusters(simple_loader.data, simple_loader.len);
     int simple_cluster = alloc_clusters(simple_cli.data, simple_cli.len);
     int simple_usr_cluster = simple_payload.len ? alloc_clusters(simple_payload.data, simple_payload.len) : 0;
+    /* Same no-hard-links rule as clang_c_cluster/hello_c_cluster above: this
+     * payload is published at /USR/BIN/SIMPLE, /BIN/SIMPLE and /SIMPLE.ELF, so
+     * each entry needs its own chain. Every allocation guard here must match the
+     * guard on the CONSUMING put_dir_entry, or the chain is allocated in the FAT
+     * and never referenced ("Reclaimed N unused clusters"). simple_usr_cluster is
+     * non-zero exactly when simple_payload.len is non-zero (cluster numbers start
+     * at 2), so the `if (simple_usr_cluster)` consumers below are covered by the
+     * `simple_payload.len` guard used here; simple_root_cluster is consumed under
+     * its own `if (simple_root_cluster)`. */
     int simple_bin_cluster = simple_payload.len ? alloc_clusters(simple_payload.data, simple_payload.len) : 0;
     int simple_root_cluster = simple_payload.len ? alloc_clusters(simple_payload.data, simple_payload.len) : 0;
     int simple_apps_cluster = simple_payload.len ? alloc_clusters(simple_payload.data, simple_payload.len) : 0;
@@ -992,6 +1047,11 @@ int main(int argc, char **argv)
     int cfat4k_cluster = cfat4k.len ? alloc_clusters(cfat4k.data, cfat4k.len) : 0;
     int fat4k_cluster = alloc_clusters(fat4k.data, fat4k.len);
 
+    /* `tmp` was once the one directory given a cluster and a root entry but NO
+     * content buffer, so its cluster was never written and fsck reported
+     * "/TMP Expected a valid '.' entry in the first slot, found free entry".
+     * Every directory declared here must also get dot entries below AND a
+     * write_directory() call at the end — TMP was the sole gap. */
     unsigned char root[DIRECTORY_BYTES] = {0}, efi[DIRECTORY_BYTES] = {0};
     unsigned char boot[DIRECTORY_BYTES] = {0}, sys[DIRECTORY_BYTES] = {0};
     unsigned char fonts[DIRECTORY_BYTES] = {0}, apps[DIRECTORY_BYTES] = {0};
@@ -1067,6 +1127,8 @@ int main(int argc, char **argv)
                   simple_license_cluster, simple_license_payload.len, 0x20);
     put_dir_entry(fonts, &fonts_n, "NOTICES MD ",
                   third_party_notices_cluster, third_party_notices_payload.len, 0x20);
+    /* 93 = 91 font-bundle entries + the 2 mandatory FAT32 dot entries. Guard
+     * kept; only the expected total moved, by exactly 2. */
     if (fonts_n != 93)
         die("SimpleOS font bundle directory manifest mismatch");
     put_dir_entry(sys, &sys_n, "NVFSVER TXT", nvfs_cluster, nvfs.len, 0x20);
