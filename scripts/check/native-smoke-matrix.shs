@@ -395,7 +395,22 @@ write_case_parse_f64() {
 # Runner
 # ---------------------------------------------------------------------------
 
-run_case() {
+require_nonempty_target_object() {
+    [ -s "$1" ]
+}
+
+require_runtime_exit() {
+    expected="$1"
+    target="$2"
+    log="$3"
+    set +e
+    "$target" >/dev/null 2>>"$log"
+    RUNTIME_RC=$?
+    set -e
+    [ "$RUNTIME_RC" -eq "$expected" ]
+}
+
+platform_case() {
     id="$1"
     desc="$2"
     writer="$3"
@@ -431,10 +446,14 @@ run_case() {
 
     got_rc="build-failed"
     if [ "$build_ok" -eq 1 ] && [ -x "$bin" ]; then
-        set +e
-        "$bin" >/dev/null 2>>"$build_log"
-        got_rc=$?
-        set -e
+        if require_nonempty_target_object "$bin"; then
+            if require_runtime_exit "$expected_rc" "$bin" "$build_log"; then
+                :
+            fi
+            got_rc="$RUNTIME_RC"
+        else
+            got_rc="empty-output"
+        fi
     fi
     base_status="FAIL"
     if [ "$got_rc" = "$expected_rc" ]; then
@@ -508,13 +527,13 @@ if [ -n "${NATIVE_SMOKE_CASES:-}" ]; then
         while IFS='|' read -r id desc writer rc xfail; do
             [ -z "$id" ] && continue
             [ "$id" = "$want_id" ] || continue
-            run_case "$id" "$desc" "$writer" "$rc" "$xfail"
+            platform_case "$id" "$desc" "$writer" "$rc" "$xfail"
         done <"$CASES_FILE"
     done
 else
     while IFS='|' read -r id desc writer rc xfail; do
         [ -z "$id" ] && continue
-        run_case "$id" "$desc" "$writer" "$rc" "$xfail"
+        platform_case "$id" "$desc" "$writer" "$rc" "$xfail"
     done <"$CASES_FILE"
 fi
 
@@ -533,7 +552,7 @@ if [ "$XPASS_N" -gt 0 ]; then
     echo "NOTE: $XPASS_N case(s) marked XFAIL now PASS — promote them to real PASS cases."
 fi
 
-if [ "$FAIL_N" -gt 0 ] || [ "$FALLBACK_TOTAL" -gt 0 ]; then
+if [ "$TOTAL" -eq 0 ] || [ "$FAIL_N" -gt 0 ] || [ "$XPASS_N" -gt 0 ] || [ "$FALLBACK_TOTAL" -gt 0 ]; then
     echo "native_smoke_matrix=false"
     exit 1
 fi

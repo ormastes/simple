@@ -1076,3 +1076,14 @@ the shared binary — deploys require explicit user go-ahead).
   exhausted for this lane; do not retry unchanged. Generation-1,
   generation-2, staged F64, and C9 remain uncredited. The next session should
   inspect the warm native-cache miss/compile profile before another full build.
+
+  Platform-gate hardening now routes every hosted native-smoke case through
+  shared `platform_case`, `require_nonempty_target_object`, and
+  `require_runtime_exit` checks. A focused pure-Simple generation-1 Cranelift
+  arithmetic case passed with the strict receipt
+  `total=1 pass=1 fail=0 ... native_smoke_matrix=true`. The canonical FreeBSD
+  QEMU wrapper also fails before bootstrap unless `uname -s` is exactly
+  `FreeBSD`. This strengthens Linux/macOS/Windows/FreeBSD consumers of the
+  shared matrix but is not a substitute for their pending hosted CI receipts.
+  The required pure-Simple SSpec docgen attempt timed out after 60 seconds
+  without output; no generated-manual credit is claimed.
