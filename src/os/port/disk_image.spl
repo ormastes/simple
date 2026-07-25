@@ -11,7 +11,7 @@
 #   hardcoding sector 288/289 as earlier revisions of this file did.
 #
 # Wave-4a began with one 8.3 payload. Nested payloads now retain an 8.3 alias
-# and add ASCII VFAT long-name slots only when a component needs them.
+# and add UTF-16LE VFAT long-name slots only when a component needs them.
 #
 # clang_as_general_fs_exec (Phase 1, task 1, 2026-07-07): added real nested
 # FAT32 subdirectory support (`DiskImageConfig.nested_payloads`) so a file
@@ -32,6 +32,9 @@
 # 32 MiB byte buffer in the interpreter is intractable (>30s for 1 MiB).
 extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
 extern fn rt_file_truncate(path: text, size: u64) -> bool
+
+use std.common.encoding.utf8.{text_codepoints, text_is_valid_utf8}
+use std.common.encoding.utf16.{utf16_encode_all}
 
 # -- Public types -----------------------------------------------------------
 
@@ -156,15 +159,16 @@ fn _fat_short_char_valid(b: u8) -> bool:
     b == 0x21u8 or b == 0x28u8 or b == 0x29u8 or b == 0x7Bu8 or
     b == 0x7Du8 or b == 0x5Eu8 or b == 0x23u8 or b == 0x26u8
 
-fn _vfat_ascii_name_valid(name: text) -> bool:
-    if name.length == 0u64 or name.length > 255u64 or name == "." or name == "..":
+fn _vfat_name_valid(name: text) -> bool:
+    val units = utf16_encode_all(text_codepoints(name))
+    if name == "" or units.length > 255u64 or name == "." or name == ".." or not text_is_valid_utf8(name):
         return false
     if (name[name.length - 1u64] as u8) == 0x20u8 or (name[name.length - 1u64] as u8) == 0x2Eu8:
         return false
     var i: u64 = 0u64
     while i < name.length:
         val b = name[i] as u8
-        if b < 0x20u8 or b > 0x7Eu8 or b == 0x22u8 or b == 0x2Au8 or
+        if b < 0x20u8 or b == 0x22u8 or b == 0x2Au8 or
            b == 0x2Fu8 or b == 0x3Au8 or b == 0x3Cu8 or b == 0x3Eu8 or
            b == 0x3Fu8 or b == 0x5Cu8 or b == 0x7Cu8:
             return false
@@ -289,38 +293,39 @@ fn _fat_short_name_checksum(name83: text) -> u8:
 
 fn _vfat_lfn_slot_count(name: text) -> u64:
     if name == "": return 0u64
-    (name.length + 12u64) / 13u64
+    val units = utf16_encode_all(text_codepoints(name))
+    (units.length + 12u64) / 13u64
 
 fn _named_dir_entry_slot_count(long_name: text) -> u64:
     1u64 + _vfat_lfn_slot_count(long_name)
 
-fn _push_vfat_name_units(buf: [u8], name: text, start: u64, count: u64) -> [u8]:
+fn _push_vfat_name_units(buf: [u8], units: [i64], start: u64, count: u64) -> [u8]:
     var i: u64 = 0u64
     while i < count:
         val index = start + i
-        if index < name.length:
-            buf = _push_u16(buf, (name[index] as u8) as u32)
+        if index < units.length:
+            buf = _push_u16(buf, units[index] as u32)
         else:
-            if index == name.length:
+            if index == units.length:
                 buf = _push_u16(buf, 0u32)
             else:
                 buf = _push_u16(buf, 0xFFFFu32)
         i = i + 1u64
     buf
 
-fn _build_vfat_lfn_slot(buf: [u8], name: text, ordinal: u64, slot_count: u64, checksum: u8) -> [u8]:
+fn _build_vfat_lfn_slot(buf: [u8], units: [i64], ordinal: u64, slot_count: u64, checksum: u8) -> [u8]:
     var sequence = ordinal as u8
     if ordinal == slot_count:
         sequence = sequence | 0x40u8
     buf = _push_u8(buf, sequence)
     val start = (ordinal - 1u64) * 13u64
-    buf = _push_vfat_name_units(buf, name, start, 5u64)
+    buf = _push_vfat_name_units(buf, units, start, 5u64)
     buf = _push_u8(buf, 0x0Fu8)
     buf = _push_u8(buf, 0u8)
     buf = _push_u8(buf, checksum)
-    buf = _push_vfat_name_units(buf, name, start + 5u64, 6u64)
+    buf = _push_vfat_name_units(buf, units, start + 5u64, 6u64)
     buf = _push_u16(buf, 0u32)
-    _push_vfat_name_units(buf, name, start + 11u64, 2u64)
+    _push_vfat_name_units(buf, units, start + 11u64, 2u64)
 
 # -- Nested-directory helpers (real FAT32 subdirs for cfg.nested_payloads) --
 
@@ -473,12 +478,13 @@ fn _build_dir_entry(buf: [u8], name83: text, first_cluster: u32, file_size: u32)
 
 fn _build_named_dir_entry_attr(buf: [u8], short_name83: text, long_name: text,
                                first_cluster: u32, file_size: u32, attr: u8) -> [u8]:
-    val slot_count = _vfat_lfn_slot_count(long_name)
+    val units = utf16_encode_all(text_codepoints(long_name))
+    val slot_count = (units.length + 12u64) / 13u64
     if slot_count > 0u64:
         val checksum = _fat_short_name_checksum(short_name83)
         var ordinal = slot_count
         while ordinal > 0u64:
-            buf = _build_vfat_lfn_slot(buf, long_name, ordinal, slot_count, checksum)
+            buf = _build_vfat_lfn_slot(buf, units, ordinal, slot_count, checksum)
             ordinal = ordinal - 1u64
     _build_dir_entry_attr(buf, short_name83, first_cluster, file_size, attr)
 
@@ -536,8 +542,8 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
         var ci: u64 = 0u64
         while ci < comps.length - 1u64:
             val component = comps[ci]
-            if not _vfat_ascii_name_valid(component):
-                return Err("disk_image.build: invalid ASCII VFAT directory component: '" + component + "'")
+            if not _vfat_name_valid(component):
+                return Err("disk_image.build: invalid VFAT directory component: '" + component + "'")
             val upper = component.upper()
             val key = parent_idx.to_text() + "/" + upper
             # Find-or-create, inlined (see note above): a separate helper
@@ -576,8 +582,8 @@ fn build(cfg: DiskImageConfig, out_path: text) -> Result<(), text>:
             parent_idx = found_idx
             ci = ci + 1u64
         val leaf = comps[comps.length - 1u64]
-        if not _vfat_ascii_name_valid(leaf):
-            return Err("disk_image.build: invalid ASCII VFAT leaf name: '" + leaf + "'")
+        if not _vfat_name_valid(leaf):
+            return Err("disk_image.build: invalid VFAT leaf name: '" + leaf + "'")
         val leaf_key = parent_idx.to_text() + "/" + leaf.upper()
         var li: u64 = 0u64
         while li < dir_keys.length:

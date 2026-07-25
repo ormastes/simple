@@ -963,7 +963,7 @@ Full enumeration of proposed `Capability` variants. For each: semantics, FAT32 s
 | `Hardlinks` | Multiple directory entries to one inode | No | Yes | Yes |
 | `SparseFiles` | Sparse file holes (unallocated blocks read as zeros) | No | Yes (via extent map) | Partial (pwrite shim allocates all blocks) |
 | `LargeFiles` | Files >4 GiB | FAT32: up to 4 GiB (32-bit size field) | Yes (i64 offsets) | Yes |
-| `UnicodeNames` | Unicode filenames (not ASCII-only) | Limited (FAT32 LFN: UCS-2) | Yes (UTF-8) | Yes |
+| `UnicodeNames` | Unicode filenames (not ASCII-only) | UTF-16LE LFN, including valid BMP and surrogate-pair astral scalars; malformed pairs fail closed to 8.3 | Yes (UTF-8) | Yes |
 | `CaseSensitive` | Case-sensitive name lookup | No | Yes (default) | Yes |
 | `PosixCompat` | POSIX random-write / truncate / rename / unlink semantics | N/A (FAT32 is accessed via host VFS, which is POSIX) | No (explicit opt-in required) | Yes (this IS the shim) |
 | `AsyncIo` | Async non-blocking I/O via DMA / NVMe queues | No | Planned (`nogc_async_mut`) | Planned |

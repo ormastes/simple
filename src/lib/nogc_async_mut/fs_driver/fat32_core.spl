@@ -9,7 +9,7 @@ use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.types.{FileHandle, DirEntry, Inode}
 use std.fs_driver.direct_io.{DirectIoExtent}
 use std.fs_driver.fat32_parsers.{
-    _to_lower_byte, _read_u32_le, _read_u16_le, _parse_short_name, _parse_lfn_slot, _split_path, _lower_text
+    _to_lower_byte, _read_u32_le, _read_u16_le, _parse_short_name, _parse_lfn_slot_units, _decode_lfn_units, _split_path, _lower_text
 }
 use std.fs_driver.fat32_dir_ops.{fat32_create_file, fat32_mkdir, fat32_unlink, fat32_rename}
 
@@ -636,7 +636,7 @@ impl Fat32Core:
             Ok(value): value
             Err(err): return Err(err)
         var entries: [DirEntry] = []
-        var pending_lfn = ""
+        var pending_lfn_units: [i64] = []
         var ci = 0
         while ci < chain.len():
             val cluster_data_rc = self.read_cluster(chain[ci])
@@ -658,17 +658,30 @@ impl Fat32Core:
                     self._dcache_valid = true
                     return Ok(self._dcache_entries)
                 if first_byte == 0xE5:
-                    pending_lfn = ""
+                    pending_lfn_units = []
                     ei = ei + 1
                     continue
                 val attr = cluster_data[off + 11]
                 if attr == FAT32_ATTR_LONG_NAME:
-                    pending_lfn = _parse_lfn_slot(cluster_data, off) + pending_lfn
+                    val slot_units = _parse_lfn_slot_units(cluster_data, off)
+                    var combined_units: [i64] = []
+                    var ui = 0
+                    while ui < slot_units.len():
+                        combined_units.push(slot_units[ui])
+                        ui = ui + 1
+                    ui = 0
+                    while ui < pending_lfn_units.len():
+                        combined_units.push(pending_lfn_units[ui])
+                        ui = ui + 1
+                    pending_lfn_units = combined_units
                     ei = ei + 1
                     continue
                 val short_name = _parse_short_name(cluster_data, off)
-                val name = if pending_lfn != "": pending_lfn else: short_name
-                pending_lfn = ""
+                val lfn_name = _decode_lfn_units(pending_lfn_units)
+                val name = match lfn_name:
+                    Some(value): value
+                    nil: short_name
+                pending_lfn_units = []
                 if name == "." or name == "..":
                     ei = ei + 1
                     continue

@@ -47,7 +47,9 @@ Updated 2026-07-13. Companion plan:
   (`src/os/services/{devfs,procfs,pipefs}_service.spl`) awaiting trait
   mounts. Production FAT32 boot still bypasses the trait (recorded
   follow-up). Boot root order: NVFS → DBFS → FAT32 fallback (`boot_fs.spl`).
-- FAT32: LFN read both stacks; in-guest creation 8.3-only (root dir).
+- FAT32: UTF-16LE LFN read in both pure-Simple stacks (BMP and astral
+  surrogate pairs; malformed pairs fall back to 8.3); in-guest creation
+  remains 8.3-only (root dir).
   DBFS: POSIX shim (D10), no modes/symlinks (fail-closed Errs).
 
 ## Terminal stack

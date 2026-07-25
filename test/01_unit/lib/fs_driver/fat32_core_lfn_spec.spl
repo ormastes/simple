@@ -1,6 +1,8 @@
 use std.spec.{describe, it, expect}
 use std.fs_driver.block_device.{BlockDevice}
 use std.fs_driver.fat32_core.{Fat32Core}
+use os.services.fat32.shared_fat32_driver.{SharedFat32Driver}
+use os.kernel.types.fs_types.{FileFlags}
 
 val FAT32_EOC: u32 = 0x0FFFFFF8
 val FAT32_ATTR_ARCHIVE: u8 = 0x20
@@ -70,65 +72,190 @@ fn _fat_sector() -> [u8]:
     var bytes = _zero_sector()
     _write_u32_le(bytes, 8, FAT32_EOC)
     _write_u32_le(bytes, 20, FAT32_EOC)
+    _write_u32_le(bytes, 24, FAT32_EOC)
     bytes
 
-fn _root_with_browser_demo_lfn() -> [u8]:
+fn _root_with_cafe_lfn() -> [u8]:
     var bytes = _zero_sector()
     bytes[0] = 0x41u8
-    bytes[1] = 'b' as u8
-    bytes[3] = 'r' as u8
-    bytes[5] = 'o' as u8
-    bytes[7] = 'w' as u8
-    bytes[9] = 's' as u8
     bytes[11] = FAT32_ATTR_LFN
-    bytes[14] = 'e' as u8
-    bytes[16] = 'r' as u8
-    bytes[18] = '_' as u8
-    bytes[20] = 'd' as u8
-    bytes[22] = 'e' as u8
-    bytes[24] = 'm' as u8
-    bytes[28] = 'o' as u8
-    bytes[30] = 0x00u8
-    bytes[31] = 0x00u8
+    bytes[13] = 0xDEu8
+    _write_lfn_units(bytes, 0, [
+        'c' as u16, 'a' as u16, 'f' as u16, 0x00E9u16,
+        '.' as u16, 't' as u16, 'x' as u16, 't' as u16
+    ])
 
-    bytes[32] = 'B' as u8
-    bytes[33] = 'R' as u8
-    bytes[34] = 'O' as u8
-    bytes[35] = 'W' as u8
-    bytes[36] = 'S' as u8
-    bytes[37] = 'E' as u8
-    bytes[38] = '~' as u8
-    bytes[39] = '1' as u8
+    bytes[32] = 'C' as u8
+    bytes[33] = 'A' as u8
+    bytes[34] = 'F' as u8
+    bytes[35] = 'E' as u8
+    bytes[36] = '~' as u8
+    bytes[37] = '1' as u8
+    bytes[38] = 0x20u8
+    bytes[39] = 0x20u8
+    bytes[40] = 'T' as u8
+    bytes[41] = 'X' as u8
+    bytes[42] = 'T' as u8
     bytes[43] = FAT32_ATTR_ARCHIVE
     bytes[58] = 0x05u8
     _write_u32_le(bytes, 60, 12345u32)
+
+    bytes[64] = 0x41u8
+    bytes[75] = FAT32_ATTR_LFN
+    bytes[77] = 0xF2u8
+    _write_lfn_units(bytes, 64, [
+        'c' as u16, 'a' as u16, 'f' as u16, 0x65E5u16,
+        '.' as u16, 't' as u16, 'x' as u16, 't' as u16
+    ])
+
+    bytes[96] = 'C' as u8
+    bytes[97] = 'A' as u8
+    bytes[98] = 'F' as u8
+    bytes[99] = 'O' as u8
+    bytes[100] = '~' as u8
+    bytes[101] = '1' as u8
+    bytes[102] = 0x20u8
+    bytes[103] = 0x20u8
+    bytes[104] = 'T' as u8
+    bytes[105] = 'X' as u8
+    bytes[106] = 'T' as u8
+    bytes[107] = FAT32_ATTR_ARCHIVE
+    bytes[122] = 0x06u8
+    _write_u32_le(bytes, 124, 54321u32)
+    bytes
+
+fn _write_lfn_units(bytes: [u8], offset: i32, units: [u16]):
+    val positions: [i32] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30]
+    var i = 0
+    while i < positions.len():
+        val pos = offset + positions[i]
+        bytes[pos] = 0xFFu8
+        bytes[pos + 1] = 0xFFu8
+        i = i + 1
+    i = 0
+    while i < units.len():
+        val pos = offset + positions[i]
+        bytes[pos] = (units[i] & 0xFFu16).to_u8()
+        bytes[pos + 1] = (units[i] >> 8).to_u8()
+        i = i + 1
+    if units.len() < positions.len():
+        val terminator = offset + positions[units.len()]
+        bytes[terminator] = 0x00u8
+        bytes[terminator + 1] = 0x00u8
+
+fn _root_with_split_surrogate_lfn() -> [u8]:
+    var bytes = _zero_sector()
+    bytes[0] = 0x42u8
+    bytes[11] = FAT32_ATTR_LFN
+    bytes[13] = 0xE7u8
+    _write_lfn_units(bytes, 0, [0xDE00u16, 't' as u16, 'a' as u16, 'i' as u16, 'l' as u16])
+    bytes[32] = 0x01u8
+    bytes[43] = FAT32_ATTR_LFN
+    bytes[45] = 0xE7u8
+    _write_lfn_units(bytes, 32, [
+        'a' as u16, 'b' as u16, 'c' as u16, 'd' as u16, 'e' as u16, 'f' as u16,
+        'g' as u16, 'h' as u16, 'i' as u16, 'j' as u16, 'k' as u16, 'l' as u16, 0xD83Du16
+    ])
+    bytes[64] = 'U' as u8
+    bytes[65] = 'N' as u8
+    bytes[66] = 'I' as u8
+    bytes[67] = 'C' as u8
+    bytes[68] = 'O' as u8
+    bytes[69] = 'D' as u8
+    bytes[70] = '~' as u8
+    bytes[71] = '1' as u8
+    bytes[72] = 0x20u8
+    bytes[73] = 0x20u8
+    bytes[74] = 0x20u8
+    bytes[75] = FAT32_ATTR_ARCHIVE
+    bytes
+
+fn _root_with_reversed_surrogates_lfn() -> [u8]:
+    var bytes = _zero_sector()
+    bytes[0] = 0x41u8
+    bytes[11] = FAT32_ATTR_LFN
+    bytes[13] = 0x34u8
+    _write_lfn_units(bytes, 0, ['b' as u16, 'a' as u16, 'd' as u16, 0xDE00u16, 0xD83Du16])
+    bytes[32] = 'B' as u8
+    bytes[33] = 'A' as u8
+    bytes[34] = 'D' as u8
+    bytes[35] = '~' as u8
+    bytes[36] = '1' as u8
+    bytes[37] = 0x20u8
+    bytes[38] = 0x20u8
+    bytes[39] = 0x20u8
+    bytes[40] = 0x20u8
+    bytes[41] = 0x20u8
+    bytes[42] = 0x20u8
+    bytes[43] = FAT32_ATTR_ARCHIVE
     bytes
 
 fn _mounted_lfn_driver() -> Fat32Core:
     var dev = Fat32LfnMockBlockDevice.new()
     dev = dev.with_sector(32u64, _fat_sector())
-    dev = dev.with_sector(2048u64, _root_with_browser_demo_lfn())
+    dev = dev.with_sector(2048u64, _root_with_cafe_lfn())
+    var driver = Fat32Core.new(dev)
+    val mounted = driver.mount()
+    expect(mounted.is_ok()).to_equal(true)
+    driver
+
+fn _mounted_lfn_driver_with_root(root: [u8]) -> Fat32Core:
+    var dev = Fat32LfnMockBlockDevice.new()
+    dev = dev.with_sector(32u64, _fat_sector())
+    dev = dev.with_sector(2048u64, root)
     var driver = Fat32Core.new(dev)
     val mounted = driver.mount()
     expect(mounted.is_ok()).to_equal(true)
     driver
 
 describe "shared Fat32Core long filename directory reads":
-    it "lists a single-slot LFN instead of the backing 8.3 alias":
+    it "lists a UTF-16LE LFN instead of the backing 8.3 alias":
         var driver = _mounted_lfn_driver()
         val entries = driver.read_dir_entries(2u32)
         expect(entries.is_ok()).to_equal(true)
         val listed = entries.unwrap()
-        expect(listed.len()).to_equal(1)
-        expect(listed[0].name).to_equal("browser_demo")
+        expect(listed.len()).to_equal(2)
+        expect(listed[0].name).to_equal("café.txt")
         expect(listed[0].inode.id).to_equal(5u64)
         expect(listed[0].size).to_equal(12345)
+        expect(listed[1].name).to_equal("caf日.txt")
+        expect(listed[1].inode.id).to_equal(6u64)
 
-    it "resolves the LFN case-insensitively through shared Fat32Core":
+    it "keeps distinct Unicode LFNs distinct during lookup":
         var driver = _mounted_lfn_driver()
-        val lower = driver.resolve_path("/browser_demo")
-        val upper = driver.resolve_path("/BROWSER_DEMO")
-        expect(lower.is_ok()).to_equal(true)
-        expect(upper.is_ok()).to_equal(true)
-        expect(lower.unwrap().name).to_equal("browser_demo")
-        expect(upper.unwrap().inode.id).to_equal(5u64)
+        val long_name = driver.resolve_path("/café.txt")
+        val sibling_name = driver.resolve_path("/caf日.txt")
+        val absent_ascii = driver.resolve_path("/caf.txt")
+        expect(long_name.is_ok()).to_equal(true)
+        expect(sibling_name.is_ok()).to_equal(true)
+        expect(absent_ascii.is_err()).to_equal(true)
+        expect(long_name.unwrap().name).to_equal("café.txt")
+        expect(sibling_name.unwrap().inode.id).to_equal(6u64)
+
+    it "decodes a surrogate pair split between LFN entries":
+        val driver = _mounted_lfn_driver_with_root(_root_with_split_surrogate_lfn())
+        val entries = driver.read_dir_entries(2u32)
+        expect(entries.is_ok()).to_equal(true)
+        expect(entries.unwrap()[0].name).to_equal("abcdefghijkl😀tail")
+
+    it "rejects reversed LFN surrogates and uses the 8.3 alias":
+        val driver = _mounted_lfn_driver_with_root(_root_with_reversed_surrogates_lfn())
+        val entries = driver.read_dir_entries(2u32)
+        expect(entries.is_ok()).to_equal(true)
+        expect(entries.unwrap()[0].name).to_equal("bad~1")
+
+describe "SharedFat32Driver Unicode LFN forwarding":
+    it "preserves Unicode LFN names through readdir, stat, and open":
+        var dev = Fat32LfnMockBlockDevice.new()
+        dev = dev.with_sector(32u64, _fat_sector())
+        dev = dev.with_sector(2048u64, _root_with_cafe_lfn())
+        var driver = SharedFat32Driver.new(dev)
+        expect(driver.mount("mock", "").is_ok()).to_equal(true)
+        val entries = driver.readdir("/")
+        val node = driver.stat("/café.txt")
+        val handle = driver.open("/café.txt", FileFlags(read: true, write: false, append: false, create: false, truncate: false, directory: false))
+        expect(entries.is_ok()).to_equal(true)
+        expect(entries.unwrap()[0].name).to_equal("café.txt")
+        expect(node.is_ok()).to_equal(true)
+        expect(node.unwrap().id).to_equal(5u64)
+        expect(handle.is_ok()).to_equal(true)
