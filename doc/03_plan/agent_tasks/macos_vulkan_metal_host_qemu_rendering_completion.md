@@ -321,6 +321,33 @@ same failure.
   Vulkan 2D must pass before Vulkan web/GUI/WM live gates and before starting
   Metal or QEMU acceptance runs.
 
+### 2026-07-25 Font ownership checkpoint
+
+- Vulkan live cycle 1 exposed AOT first-trait-vtable selection. Moving
+  `impl Engine2DExtended` after `impl RenderBackend` restored the Vulkan
+  `RenderBackend` vtable and advanced the harness through GPU primitives.
+- Vulkan live cycle 2 exposed two hosted-native optional ownership faults:
+  selected-font physical-path lookup unwrapped an `Option` as a boolean, then
+  `Engine2D.draw_text` reused a narrowed boolean as the `FontRenderer`
+  receiver. Direct indexed font lookup plus explicit `Some(FontRenderer)`
+  stores and `Some` pattern reads now preserve the concrete renderer.
+- The focused font-state probe then advanced to atlas invalidation and exposed
+  the same class at mutex release. Shared font caches now acquire and return a
+  concrete `Mutex`, store it as `Some(active)`, use the free
+  `mutex_lock`/`mutex_unlock` facade, and release the exact acquired local.
+  Highest-capability review accepted this backend-neutral Vulkan/Metal/CPU
+  ownership pattern. Lazy first initialization still has its pre-existing
+  hosted concurrency race and is not claimed generally thread-safe.
+- Focused physical-path native probe: PASS. The replacement font-state native
+  probe compile was stopped after a bounded resource window while still
+  consuming 100% CPU and about 8.6 GB RSS; it produced no binary or diagnostic.
+  A lightweight file check also stopped before the changed file on existing
+  `src/compiler/10.frontend/core/lexer_struct.spl` diagnostics.
+- Preserve Vulkan live cycle 3. Do not launch it until a fresh-session focused
+  font-state native probe passes. Then build a fresh full harness and consume
+  the one remaining live attempt. If it fails, record the result and stop
+  under the three-cycle cap.
+
 ## Required Evidence and Documentation
 
 - `doc/04_architecture/shared_multilingual_gpu_fonts.md`

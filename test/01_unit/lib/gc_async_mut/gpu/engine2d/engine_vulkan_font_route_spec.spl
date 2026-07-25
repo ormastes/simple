@@ -9,6 +9,19 @@ use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 
 describe "Engine2D Vulkan font routing":
+    it "publishes the complete RenderBackend table before Vulkan extensions":
+        val backend_source = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl"
+        )
+        val render_impl = backend_source.index_of(
+            "impl RenderBackend for VulkanBackend:"
+        ) ?? -1
+        val extended_impl = backend_source.index_of(
+            "impl Engine2DExtended for VulkanBackend:"
+        ) ?? -1
+        expect(render_impl).to_be_greater_than(-1)
+        expect(extended_impl).to_be_greater_than(render_impl)
+
     it "keeps non-Vulkan engines out of the Vulkan font lane":
         var engine = Engine2D.create_with_backend(2, 2, "software")
         expect(engine.vulkan_backend).to_equal(nil)
@@ -67,6 +80,15 @@ describe "Engine2D Vulkan font routing":
         val perf_source = file_read(
             "test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl"
         )
+        val draw_ir_source = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl"
+        )
+        val live_source = file_read(
+            "test/02_integration/rendering/macos_gpu_2d_live_harness.spl"
+        )
+        val rss_source = file_read(
+            "src/app/test/shared_multilingual_gpu_fonts_rss_probe.spl"
+        )
         expect(source).to_contain("use std.gpu.engine2d.backend_vulkan_font")
         expect(source).to_contain("vulkan_backend: VulkanBackend? = nil")
         expect(source).to_contain("vulkan_backend: Some(vulkan)")
@@ -85,6 +107,17 @@ describe "Engine2D Vulkan font routing":
         )
         expect(perf_source.contains("engine.vulkan_backend = vulkan")).to_equal(false)
         expect(source).to_contain("font_renderer: nil")
+        expect(source).to_contain("self.font_renderer = Some(created)")
+        expect(source).to_contain("self.font_renderer = Some(fonts)")
+        expect(source).to_contain("case Some(fonts):")
+        expect(source.contains("self.font_renderer = fonts")).to_equal(false)
+        expect(source.contains("self.font_renderer = loaded_fonts")).to_equal(false)
+        expect(draw_ir_source).to_contain("eng.font_renderer = Some(fonts)")
+        expect(draw_ir_source.contains("eng.font_renderer = fonts")).to_equal(false)
+        expect(live_source).to_contain("engine.font_renderer = Some(loaded_fonts)")
+        expect(live_source.contains("engine.font_renderer = loaded_fonts")).to_equal(false)
+        expect(perf_source).to_contain("engine.font_renderer = Some(fixture.renderer)")
+        expect(rss_source).to_contain("engine.font_renderer = Some(FontRenderer.new())")
         expect(source).to_contain("last_font_execution_attempts: []")
         expect(source.contains("vulkan_backend: dx_vk")).to_equal(false)
         expect(source.contains("vulkan_backend: metal_vk")).to_equal(false)
