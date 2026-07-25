@@ -1,10 +1,11 @@
 # Metal Font Atlas Companion Specification
 
-> Manually synchronized on 2026-07-12; no Simple/docgen or native Metal command
+> Manually synchronized on 2026-07-25; no Simple/docgen or native Metal command
 > ran in this session.
 
-Seven scenarios verify the exact 13-word/52-byte little-endian parameter block,
-signed-coordinate overflow rejection, the initial invalidated atlas state,
+Ten scenarios verify the exact 13-word/52-byte little-endian parameter block,
+source-local nonzero/count/product/i32 bounds, signed-coordinate overflow
+rejection, the initial invalidated atlas state,
 sequential distinct-renderer dependency tokens do not alias cached Metal atlas
 state under serialized access,
 unsupported program versions fail before atlas mutation, failed zero-prefix

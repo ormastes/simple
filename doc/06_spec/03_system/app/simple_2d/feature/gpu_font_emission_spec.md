@@ -20,8 +20,8 @@ Emits one versioned alpha-atlas composition program and compile plan for five po
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl` |
-| Updated | 2026-07-19 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-25 |
+| Generator | manually synchronized; executable docgen refresh pending |
 
 Emits one versioned alpha-atlas composition program and compile plan for five portable targets.
 
@@ -287,7 +287,7 @@ expect_backend_emission(PortableComputeTarget.WebGpu, "webgpu", "@compute @workg
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 37 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -298,6 +298,7 @@ val metal = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.Meta
 val webgpu = emit_portable_font_atlas_composite_kernel(PortableComputeTarget.WebGpu)
 expect(cuda.source).to_contain("atlas")
 expect(cuda.source).to_contain("dst")
+expect(cuda.source).to_equal(font_atlas_composite_cuda_source())
 expect(cuda.source).to_contain("atlas_count")
 expect(cuda.source).to_contain("quad_width > atlas_width - atlas_x")
 expect(cuda.source).to_contain("if (si >= atlas_count)")
@@ -322,6 +323,9 @@ expect(webgpu.source).to_contain("arrayLength(&atlas)")
 expect(webgpu.source).to_contain("arrayLength(&dst)")
 expect(webgpu.source).to_contain("arrayLength(&params) < 11u")
 expect(webgpu.source).to_contain("params[0] <= 0 || params[1] <= 0")
+expect(webgpu.source).to_contain("params[0] > 2147483647 || params[1] > 2147483647")
+expect(webgpu.source).to_contain("params[4] > 2147483647 || params[5] > 2147483647")
+expect(webgpu.source).to_contain("params[6] > 2147483647 || params[7] > 2147483647")
 expect(webgpu.source).to_contain("params[2] < 0 || params[3] < 0")
 expect(webgpu.source).to_contain("atlas_width > 0xffffffffu / atlas_height")
 expect(webgpu.source).to_contain("quad_width > atlas_width - atlas_x")

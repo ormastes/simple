@@ -1,12 +1,12 @@
 # Vulkan Font Atlas Composite Specification
 
-> Manually synchronized on 2026-07-13 because the self-hosted Simple/docgen
+> Manually synchronized on 2026-07-25 because the self-hosted Simple/docgen
 > lane is blocked. This is reviewed source evidence, not native execution.
 
-The 22 active scenarios cover the frozen parameter ABI, bounded dispatch,
+The 23 active scenarios cover the frozen parameter ABI, bounded dispatch,
 atlas replacement, checksums, exact packed-pixel equality, promotion classification, full atlas upload,
-session lifecycle, artifact validation, batch validation, and idempotent shared
-session cleanup.
+session lifecycle, artifact validation, batch validation, unsupported-transform
+rejection before atlas mutation, and idempotent shared session cleanup.
 
 The portable checker separates candidate compilation, artifact validation, and
 pin admission. It records semantics revision 2, runs the selected Vulkan
