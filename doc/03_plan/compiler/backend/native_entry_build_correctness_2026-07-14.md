@@ -1142,3 +1142,9 @@ the shared binary — deploys require explicit user go-ahead).
   smoke; it grants no Simple ARM32 compiler credit. The portability contract
   rejects restoration of the retired workflows or optional phantom jobs.
   Windows x86_64 hosted default-LLVM execution remains the genuine matrix gap.
+  The stale release-only Chocolatey install and optional `llvm-lib` Stage 2
+  were removed because the Rust seed requires `llvm-config` and link libraries
+  that provider does not supply; the portability guard prevents that
+  false-green path from returning. Real support needs a pinned compatible seed
+  provider or a designed Cranelift-seed to pure-Simple Stage 2 bridge before
+  the dynamic LLVM Stage 3 gate can become mandatory.

@@ -16,6 +16,9 @@
   variants before terminal platform evidence.
 - Windows bootstrap now uses Cranelift only. Linux and both macOS architectures
   retain LLVM and Cranelift gates.
+- The release workflow no longer installs the incompatible Chocolatey LLVM
+  package or runs an optional Windows `llvm-lib` stage. The portability
+  contract rejects restoring that false evidence.
 - FreeBSD run `30154805541` reached the canonical full bootstrap with KVM and
   failed at `rust-seed-build` with exit 101. The guest log was not retained.
   The QEMU wrapper now copies bounded bootstrap failure logs to
@@ -57,7 +60,9 @@
    Acceptance: correct target triple, `.exe`/`.lib` artifacts, WFFI DLL symbol
    lookup, Stage 2/3 pass, and explicit full CLI smoke. This remains open after
    run `30152376592`; do not restore a Windows LLVM gate until a pinned,
-   compatible provider includes `llvm-config`, libraries, and the matching ABI.
+   compatible seed provider includes `llvm-config`, libraries, and the matching
+   ABI, or a separately designed Cranelift-seed to pure-Simple Stage 2 bridge
+   reaches the existing dynamic `LLVM-C.dll` loader for Stage 3.
 
 4. Prove the deployed dynload consumer boundary. The current fast path avoids
    Stage 4 and produces staged/cache artifacts; it must not claim hot deployment

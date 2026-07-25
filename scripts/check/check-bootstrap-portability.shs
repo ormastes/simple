@@ -114,10 +114,28 @@ fi
 multiplatform=.github/workflows/rust-bootstrap-multiplatform.yml
 freebsd_workflow=.github/workflows/freebsd-build.yml
 windows_workflow=.github/workflows/windows-build.yml
+release_workflow=.github/workflows/release.yml
 grep -Fq "group: \${{ github.workflow }}-\${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}" "${freebsd_workflow}" || fail "manual FreeBSD runs are not isolated"
 grep -Fq -- '--backend=cranelift' "${windows_workflow}" || fail "Windows strict bootstrap does not select Cranelift"
 if grep -Eq 'choco install llvm|LLVM_SYS_180_PREFIX|--backend=llvm' "${windows_workflow}"; then
   fail "Windows workflow still provisions or selects unsupported LLVM"
+fi
+release_windows_steps="$(
+  awk '
+    /^      - name:/ {
+      if (step ~ /runner\.os.*Windows/) printf "%s", step
+      step = $0 ORS
+      next
+    }
+    { step = step $0 ORS }
+    END {
+      if (step ~ /runner\.os.*Windows/) printf "%s", step
+    }
+  ' "${release_workflow}"
+)"
+if printf '%s\n' "${release_windows_steps}" |
+    grep -Eq 'choco install llvm|LLVM_SYS_[0-9]+_PREFIX|SIMPLE_LLVM_PATH|--backend([=][[:space:]]*|[[:space:]]+)llvm(-lib)?'; then
+  fail "release workflow still presents unsupported Windows LLVM as optional evidence"
 fi
 matrix_backends_for() {
   awk -v name="$1" '
