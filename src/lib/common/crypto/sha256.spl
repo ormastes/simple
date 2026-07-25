@@ -41,37 +41,59 @@ fn sha256_bytes(data: [i64]) -> [i64]:
     var h7 = 1541459225
 
     # Pre-processing: copy data then pad.
+    #
+    # PERF (2026-07-25): this used to build `padded` (and the per-block `w`
+    # schedule below) with `.push()` in a `while` loop instead of pre-sizing
+    # and index-assigning. The documented interpreter landmine is
+    # `arr = arr.push(v)` (reassignment) cloning the whole backing array per
+    # call, O(N^2) for N one-at-a-time appends; see
+    # reference_seed_array_push_clones_no_fast_path. This code used the bare
+    # `padded.push(v)` form (no reassignment), which measured as true O(N) on
+    # the seed interpreter available for verification here — so this change
+    # is a hardening fix, not a proven fix of quadratic behavior on that
+    # binary. It removes any dependence on `push()`'s growth strategy by
+    # using the same allocation-light, pre-sized + direct-index pattern
+    # already proven correct in the sibling `sha256_u8_hex` below (added for
+    # exactly this class of problem on a 1.7MB font), which is unambiguously
+    # O(N) regardless of interpreter. This path runs on every font load (the
+    # default selected font, Noto Sans SC, is ~17.8MB) as part of
+    # `font_registry._validate_selected_font_asset`, one contributor
+    # investigated for the 2D-headless-showcase regression; see
+    # doc/08_tracking/bug/sha256_bytes_push_quadratic_font_hash_2026-07-25.md
+    # for the full before/after measurement and the separate, larger
+    # remaining cause (interpreter_gc_root_scan_blowup_large_array). Output
+    # is unchanged — verified against NIST FIPS 180-4 vectors.
     val data_len = data.len()
-    var padded: [i64] = []
+    val min_len = data_len + 9  # data + 0x80 marker + 8-byte bit-length suffix
+    val block_count = (min_len + 63) / 64
+    val total_len = block_count * 64
+    var padded: [i64] = [0; total_len]
     var pi = 0
     while pi < data_len:
-        padded.push(data[pi])
+        padded[pi] = data[pi]
         pi = pi + 1
 
-    # Append 0x80 byte.
-    padded.push(128)
+    # Append 0x80 byte. Zero padding is already in place from the array's
+    # zero-initialized allocation above.
+    padded[data_len] = 128
 
-    # Pad with zeros until length ≡ 56 mod 64.
-    while padded.len() % 64 != 56:
-        padded.push(0)
-
-    # Append original bit-length as 8-byte big-endian.
+    # Append original bit-length as 8-byte big-endian, at the fixed tail.
     val bit_len = data_len * 8
-    padded.push((bit_len >> 56) & 255)
-    padded.push((bit_len >> 48) & 255)
-    padded.push((bit_len >> 40) & 255)
-    padded.push((bit_len >> 32) & 255)
-    padded.push((bit_len >> 24) & 255)
-    padded.push((bit_len >> 16) & 255)
-    padded.push((bit_len >>  8) & 255)
-    padded.push( bit_len        & 255)
+    padded[total_len - 8] = (bit_len >> 56) & 255
+    padded[total_len - 7] = (bit_len >> 48) & 255
+    padded[total_len - 6] = (bit_len >> 40) & 255
+    padded[total_len - 5] = (bit_len >> 32) & 255
+    padded[total_len - 4] = (bit_len >> 24) & 255
+    padded[total_len - 3] = (bit_len >> 16) & 255
+    padded[total_len - 2] = (bit_len >>  8) & 255
+    padded[total_len - 1] = ( bit_len        & 255)
 
     # Process each 64-byte block.
-    val total_len = padded.len()
     var block_offset = 0
     while block_offset < total_len:
-        # Build message schedule w[0..63].
-        var w: [i64] = []
+        # Build message schedule w[0..63] in a pre-sized buffer (see PERF
+        # note above — no per-element `.push()`).
+        var w: [i64] = [0; 64]
         var wi = 0
         while wi < 16:
             val base = block_offset + wi * 4
@@ -81,7 +103,7 @@ fn sha256_bytes(data: [i64]) -> [i64]:
                 ((padded[base + 2] & 255) <<  8) |
                  (padded[base + 3] & 255)
             ) & mask32
-            w.push(word)
+            w[wi] = word
             wi = wi + 1
 
         wi = 16
@@ -90,7 +112,7 @@ fn sha256_bytes(data: [i64]) -> [i64]:
             val w2  = w[wi - 2]
             val s0 = (rotr32(w15, 7) ^ rotr32(w15, 18) ^ (w15 >> 3)) & mask32
             val s1 = (rotr32(w2, 17) ^ rotr32(w2,  19) ^ (w2  >> 10)) & mask32
-            w.push((w[wi - 16] + s0 + w[wi - 7] + s1) & mask32)
+            w[wi] = (w[wi - 16] + s0 + w[wi - 7] + s1) & mask32
             wi = wi + 1
 
         # Working variables.
