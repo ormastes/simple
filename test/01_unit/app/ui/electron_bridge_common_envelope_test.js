@@ -103,6 +103,8 @@ assert(bridgeSource.includes('bridgeBodyActionFrameRouted'));
 assert(bridgeSource.includes('bridgeMinimizeFrameRouted'));
 assert(bridgeSource.includes('bridgeMaximizeFrameRouted'));
 assert(bridgeSource.includes('bridgeCloseFrameRouted'));
+assert(bridgeSource.includes('_applyElectronWindowEnvelope'));
+assert(bridgeSource.includes('data-simple-window-css'));
 assert(bridgeSource.includes('trafficMinimizeRouted'));
 assert(bridgeSource.includes('trafficMaximizeRouted'));
 assert(bridgeSource.includes('trafficCloseRouted'));

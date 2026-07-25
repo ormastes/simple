@@ -641,6 +641,44 @@ function electronWmInitScript() {
                             self.sendWindowInput(id, self.elementId(target), target.isContentEditable ? target.textContent : target.value);
                         });
                     },
+                    _applyElectronWindowEnvelope: function(msg, body) {
+                        if (!msg || !body) return;
+                        var css = String(msg.css || '').trim();
+                        var rootAttrs = String(msg.root_attrs || '').trim();
+
+                        if (rootAttrs) {
+                            var root = document.documentElement;
+                            if (root) {
+                                Array.from(root.attributes).forEach(function(attr) {
+                                    if (String(attr.name).startsWith('data-wm-')) {
+                                        root.removeAttribute(attr.name);
+                                    }
+                                });
+                                var probe = document.createElement('span');
+                                probe.innerHTML = '<span ' + rootAttrs + '></span>';
+                                var source = probe.firstElementChild;
+                                if (source) {
+                                    Array.from(source.attributes).forEach(function(attr) {
+                                        root.setAttribute(attr.name, attr.value);
+                                    });
+                                }
+                            }
+                        }
+
+                        var styleEl = body.querySelector('style[data-simple-window-css]');
+                        if (css) {
+                            if (!styleEl) {
+                                styleEl = document.createElement('style');
+                                styleEl.setAttribute('data-simple-window-css', '1');
+                                body.prepend(styleEl);
+                            }
+                            if (styleEl.textContent !== css) {
+                                styleEl.textContent = css;
+                            }
+                        } else if (styleEl) {
+                            styleEl.remove();
+                        }
+                    },
                     receiveElectronMessage: function(msg) {
                         if (!msg || !msg.type) return;
                         if (msg.type === 'openWindow') {
@@ -678,14 +716,17 @@ function electronWmInitScript() {
                                 existing = this.windows[id] = { win: win, body: body, title: title, titlebar: titlebar };
                                 this.bindDrag(id, win, titlebar);
                                 this.bindWindowEvents(id, win, body);
+                                this._applyElectronWindowEnvelope(msg, body);
                             } else {
                                 existing.body.innerHTML = msg.html || '';
                                 existing.title.textContent = msg.title || id;
+                                this._applyElectronWindowEnvelope(msg, existing.body);
                             }
                             this.mountTitlebarWidgets(existing);
                             this.focus(id);
                         } else if (msg.type === 'renderWindow' && this.windows[msg.windowId]) {
                             this.windows[msg.windowId].body.innerHTML = msg.html || '';
+                            this._applyElectronWindowEnvelope(msg, this.windows[msg.windowId].body);
                             this.mountTitlebarWidgets(this.windows[msg.windowId]);
                         } else if (msg.type === 'closeWindow' && this.windows[msg.windowId]) {
                             this.windows[msg.windowId].win.remove();
