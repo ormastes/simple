@@ -405,6 +405,21 @@ same failure.
   returns failure without a diagnostic after the bounded repair cycle, so
   these provenance-helper edits remain uncommitted and the producer must not
   be retried again in this session.
+- Fresh parallel review repaired the opaque helper failures: negative command
+  validation is subshell-contained, BSD `env` receives no literal `--`, the
+  combined provenance self-test passes, Darwin tool authority accepts
+  non-GNU version behavior, nested authority copies populate before freezing,
+  only exact Cargo `target` directories are pruned, and canonical source
+  snapshots bind in-tree directory aliases while pruning generated VS Code
+  trees. Focused tool and source authority snapshots pass.
+- Three bounded canonical producer attempts then exposed and repaired, in
+  order, a stale self-referential runtime symlink, unsupported source-directory
+  symlinks/global shell output collision, and retry cleanup against the prior
+  read-only admitted authority. The final attempt stopped during that cleanup,
+  before Stage 2 compilation. A scoped thaw of only the private provenance
+  output now passes its focused contract, but the producer must wait for a
+  fresh session. The helper/producer bundle remains local and uncommitted until
+  a real Stage3 manifest is produced and verified.
 
 ## Required Evidence and Documentation
 
