@@ -23,7 +23,9 @@
   - Re-run host + qemu WM render parity checks after this commit.
 
 ## Parallel agent findings (host + QEMU)
-- `check-hosted-wm-capture-evidence.shs`: PASS.
+- `check-hosted-wm-capture-evidence.shs`: diagnostic pixels only; production
+  admission fails on the Rust seed warning, empty theme manifest hash, local
+  raster fallback, and absent event/performance binding.
   - Evidence in `build/hosted-wm-capture-evidence/*` and
     `doc/09_report/hosted_wm_capture_evidence_2026-07-25.md`.
   - Backend currently uses local Web raster readback; Metal GPU submit/readback remains unhooked.

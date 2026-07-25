@@ -56,6 +56,15 @@ HTML, GUI, binary, log and artifact. The generated manual uses linked evidence.
 
 ## Focused Regression Specs
 
+### 2026-07-25 admission checkpoint
+
+| Evidence | Admission |
+|---|---|
+| 16x16 hosted Aetheric capture | Diagnostic only; satisfies no production host, event, or provenance scenario |
+| x86 SSE2/static preflight | Pass; QEMU not launched |
+| ARM VirtIO/C preflight | Pass; QEMU not launched |
+| Aggregate WM glass spec | Fail-fast until exact-current host and QEMU artifacts validate |
+
 Extend theme-package, WM-chrome, Simple-Web-window, Web glass-feature-gap,
 Engine2D glass, canonical GUI-entry contract and QEMU evidence-contract specs.
 Each test uses built-in matchers and concrete values. Missing runtime helpers

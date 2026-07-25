@@ -96,6 +96,11 @@ overlapping dirty work and remains read-only for this lane.
 
 ### Next execution order
 
+2026-07-25 checkpoint: the 16x16 hosted capture is **DIAGNOSTIC ONLY**.
+x86 SSE2/static and ARM VirtIO/C preflights pass, but neither launched QEMU.
+Resume in this order: native `to_i64` fixture, exact-current self-hosted
+binary, production host evidence, x86 QEMU, ARM QEMU, then aggregate SSpec.
+
 1. Focused current-source Rust HIR regression: COMPLETE. The corrected
    name-filtered run passed the intended test (`1 passed; 3346 filtered out`);
    the earlier `--exact` run was rejected because it filtered the test out.

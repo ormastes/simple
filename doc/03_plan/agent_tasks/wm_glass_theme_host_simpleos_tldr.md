@@ -1,5 +1,9 @@
 # WM Glass Theme Agent Tasks — TLDR
 
+- 2026-07-25: hosted 16x16 pixels are diagnostic-only; x86 and ARM preflights
+  pass without QEMU. Next: native `to_i64` fixture -> exact-current binary ->
+  production host -> x86 QEMU -> ARM QEMU -> aggregate SSpec.
+
 - Active integration worktree: `build/worktrees/wm-glass-theme`.
 - Host and SimpleOS bootstrap ownership is now unified: host installs the
   resolved package snapshot; x86_64 and ARM64 install the generated Aetheric

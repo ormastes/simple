@@ -92,6 +92,8 @@ class SimpleWindowManager {
     this._commandSelectionFeedbackTimer = 0;
     this._commandRecentFeedbackTimer = 0;
     this._snapPreview = null;
+    this._themeRootAttrs = '';
+    this._themeRootAttrNames = [];
     this._snapLayoutPalette = null;
     this._windowArrangePalette = null;
     this._lastSnapZone = '';
@@ -12500,7 +12502,13 @@ class SimpleWindowManager {
         this._electronOpenWindow(msg);
         break;
       case 'renderWindow':
-        this._electronRenderWindow(msg.windowId, msg.html || '', msg.css || '', msg.root_attrs || '');
+        this._electronRenderWindow(
+          msg.windowId,
+          msg.html || '',
+          msg.css || '',
+          msg.root_attrs,
+          Object.prototype.hasOwnProperty.call(msg, 'root_attrs')
+        );
         break;
       case 'closeWindow':
         this._electronCloseWindow(msg.windowId);
@@ -12526,7 +12534,13 @@ class SimpleWindowManager {
     const windowId = String(msg.windowId || '');
     if (!windowId || !this.desktop) return;
     if (this._electronWindows.has(windowId)) {
-      this._electronRenderWindow(windowId, msg.html || '', msg.css || '', msg.root_attrs || '');
+      this._electronRenderWindow(
+        windowId,
+        msg.html || '',
+        msg.css || '',
+        msg.root_attrs,
+        Object.prototype.hasOwnProperty.call(msg, 'root_attrs')
+      );
       this._electronFocusWindow(windowId);
       return;
     }
@@ -12583,35 +12597,21 @@ class SimpleWindowManager {
     this._electronFocusWindow(windowId);
   }
 
-  _electronRenderWindow(windowId, html, css, root_attrs) {
+  _electronRenderWindow(windowId, html, css, root_attrs, hasRootAttrs) {
     const entry = this._electronWindows.get(String(windowId || ''));
     if (!entry) return;
     entry.body.innerHTML = html;
-    this._applyElectronWindowEnvelope({ ...entry, body: entry.body, css, root_attrs }, entry.body);
+    const envelope = { ...entry, body: entry.body, css };
+    if (hasRootAttrs) envelope.root_attrs = root_attrs;
+    this._applyElectronWindowEnvelope(envelope, entry.body);
   }
 
   _applyElectronWindowEnvelope(entry, body) {
     if (!entry || !body) return;
     const css = String(entry.css || '').trim();
-    const rootAttrs = String(entry.root_attrs || '').trim();
 
-    if (rootAttrs) {
-      const root = document.documentElement;
-      if (root) {
-        Array.from(root.attributes).forEach((attr) => {
-          if (String(attr.name).startsWith('data-wm-')) {
-            root.removeAttribute(attr.name);
-          }
-        });
-        const probe = document.createElement('span');
-        probe.innerHTML = `<span ${rootAttrs}></span>`;
-        const source = probe.firstElementChild;
-        if (source) {
-          Array.from(source.attributes).forEach((attr) => {
-            root.setAttribute(attr.name, attr.value);
-          });
-        }
-      }
+    if (Object.prototype.hasOwnProperty.call(entry, 'root_attrs')) {
+      this._applyThemeRootAttrs(String(entry.root_attrs || '').trim());
     }
 
     let styleEl = body.querySelector('style[data-simple-window-css]');
@@ -12627,6 +12627,35 @@ class SimpleWindowManager {
     } else if (styleEl) {
       styleEl.remove();
     }
+  }
+
+  _applyThemeRootAttrs(rootAttrs) {
+    if (this._themeRootAttrs === rootAttrs) return;
+
+    const root = document.documentElement;
+    if (!root) return;
+
+    if (this._themeRootAttrNames.length) {
+      for (const attrName of this._themeRootAttrNames) {
+        root.removeAttribute(attrName);
+      }
+    }
+
+    const nextNames = [];
+    if (rootAttrs) {
+      const probe = document.createElement('span');
+      probe.innerHTML = `<span ${rootAttrs}></span>`;
+      const source = probe.firstElementChild;
+      if (source) {
+        Array.from(source.attributes).forEach((attr) => {
+          root.setAttribute(attr.name, attr.value);
+          nextNames.push(attr.name);
+        });
+      }
+    }
+
+    this._themeRootAttrs = rootAttrs;
+    this._themeRootAttrNames = nextNames;
   }
 
   _titleCommandKind(value) {

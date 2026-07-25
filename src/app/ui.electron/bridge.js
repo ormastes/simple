@@ -413,6 +413,8 @@ function electronWmInitScript() {
             if (!window.__SIMPLE_ELECTRON_WM__) {
                 window.__SIMPLE_ELECTRON_WM__ = {
                     windows: {},
+                    _themeRootAttrs: '',
+                    _themeRootAttrNames: [],
                     z: 20,
                     drag: null,
                     dragEventsBound: false,
@@ -641,28 +643,39 @@ function electronWmInitScript() {
                             self.sendWindowInput(id, self.elementId(target), target.isContentEditable ? target.textContent : target.value);
                         });
                     },
+                    _applyThemeRootAttrs: function(rootAttrs) {
+                        if (this._themeRootAttrs === rootAttrs) return;
+
+                        var root = document.documentElement;
+                        if (!root) return;
+
+                        if (this._themeRootAttrNames && this._themeRootAttrNames.length) {
+                            for (var i = 0; i < this._themeRootAttrNames.length; i++) {
+                                root.removeAttribute(this._themeRootAttrNames[i]);
+                            }
+                        }
+
+                        var nextNames = [];
+                        if (rootAttrs) {
+                            var probe = document.createElement('span');
+                            probe.innerHTML = '<span ' + rootAttrs + '></span>';
+                            var source = probe.firstElementChild;
+                            if (source) {
+                                Array.from(source.attributes).forEach(function(attr) {
+                                    root.setAttribute(attr.name, attr.value);
+                                    nextNames.push(attr.name);
+                                });
+                            }
+                        }
+                        this._themeRootAttrs = rootAttrs;
+                        this._themeRootAttrNames = nextNames;
+                    },
                     _applyElectronWindowEnvelope: function(msg, body) {
                         if (!msg || !body) return;
                         var css = String(msg.css || '').trim();
-                        var rootAttrs = String(msg.root_attrs || '').trim();
 
-                        if (rootAttrs) {
-                            var root = document.documentElement;
-                            if (root) {
-                                Array.from(root.attributes).forEach(function(attr) {
-                                    if (String(attr.name).startsWith('data-wm-')) {
-                                        root.removeAttribute(attr.name);
-                                    }
-                                });
-                                var probe = document.createElement('span');
-                                probe.innerHTML = '<span ' + rootAttrs + '></span>';
-                                var source = probe.firstElementChild;
-                                if (source) {
-                                    Array.from(source.attributes).forEach(function(attr) {
-                                        root.setAttribute(attr.name, attr.value);
-                                    });
-                                }
-                            }
+                        if (Object.prototype.hasOwnProperty.call(msg, 'root_attrs')) {
+                            this._applyThemeRootAttrs(String(msg.root_attrs || '').trim());
                         }
 
                         var styleEl = body.querySelector('style[data-simple-window-css]');

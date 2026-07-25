@@ -58,7 +58,7 @@ No new drawing IR, private widget renderer, font atlas/cache, Engine3D shortcut,
   capability-declared pixel evidence.
 
 ## Phase
-implementation-blocked-host-theme-return-and-native-to-i64-resolution
+implementation-blocked-native-to-i64-and-exact-current-live-evidence
 
 ## Log
 - dev: Created state file with 10 acceptance criteria (type: bug); defined bounded cooperative lanes, canonical interface constraints, evidence steps, and fail-fast policy.
@@ -246,3 +246,16 @@ implementation-blocked-host-theme-return-and-native-to-i64-resolution
   recorded in
   `doc/08_tracking/bug/native_primitive_to_i64_ufcs_collision_2026-07-24.md`.
   The final Web producer cycle remains unspent.
+- continuation-2026-07-25-admission: Package CSS authority now requires the
+  installed snapshot fingerprint to match the resolved package, and Web plus
+  Electron root attributes distinguish omission (preserve) from explicit
+  empty (clear). Focused Web (5/5), Electron bridge, theme bootstrap (5/5),
+  and hosted-wrapper (3/3) contracts pass. The retained 16x16 Aetheric host
+  capture is diagnostic-only: its launcher emitted the Rust seed warning, the
+  manifest hash is empty, render time is zero, readback is local raster, and
+  event/performance evidence is absent. The evidence wrapper now fails closed
+  for those conditions. x86 SSE2/static and ARM VirtIO/C preflights pass
+  without launching QEMU. AC-1 is source-complete and AC-6 is fail-closed;
+  AC-2/3/4/5/7/8/10 remain open, while AC-9 awaits final manual refresh.
+  Exact-current host and QEMU evidence remain blocked by the recorded native
+  primitive `.to_i64()`/imported `LogLevel.to_i64` collision.

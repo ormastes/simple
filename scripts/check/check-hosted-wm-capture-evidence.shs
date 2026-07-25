@@ -12,7 +12,12 @@ VALIDATION_LOG="$BUILD_DIR/validation.env"
 SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 SIMPLE_BIN_STATUS=pass
 is_rust_seed_simple() {
-    case "$1" in
+    candidate="$1"
+    candidate_dir="$(dirname -- "$candidate")"
+    if resolved_dir="$(CDPATH= cd -P -- "$candidate_dir" 2>/dev/null && pwd -P)"; then
+        candidate="$resolved_dir/$(basename -- "$candidate")"
+    fi
+    case "$candidate" in
         src/compiler_rust/*|*/src/compiler_rust/*|./src/compiler_rust/*) return 0 ;;
         *) return 1 ;;
     esac
@@ -199,6 +204,49 @@ checksum="$(sed -n 's/^hosted_wm_capture_sample_checksum=//p' "$VALIDATION_LOG" 
 capture_theme_id="$(sed -n 's/^hosted_wm_capture_theme_id=//p' "$LOG_PATH" | tail -n 1)"
 capture_theme_source_manifest_sha256="$(sed -n 's/^hosted_wm_capture_theme_source_manifest_sha256=//p' "$LOG_PATH" | tail -n 1)"
 render_us="$(sed -n 's/^hosted_wm_capture_render_us=//p' "$LOG_PATH" | tail -n 1)"
+backend_selected="$(sed -n 's/^hosted_wm_backend_selected=//p' "$LOG_PATH" | tail -n 1)"
+backend_fallback_reason="$(sed -n 's/^hosted_wm_backend_fallback_reason=//p' "$LOG_PATH" | tail -n 1)"
+backend_readback_status="$(sed -n 's/^hosted_wm_backend_readback_status=//p' "$LOG_PATH" | tail -n 1)"
+backend_status="$(sed -n 's/^hosted_wm_backend_status=//p' "$LOG_PATH" | tail -n 1)"
+
+admission_status="pass"
+admission_reason="$reason"
+if grep -Fq "Rust-built Simple binary is a bootstrap seed only" "$LOG_PATH"; then
+    admission_status="fail"
+    admission_reason="runtime-rust-seed-forbidden"
+    SIMPLE_BIN_STATUS="forbidden"
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-runtime-rust-seed-forbidden"
+elif [ "${#capture_theme_source_manifest_sha256}" -ne 64 ]; then
+    admission_status="fail"
+    admission_reason="missing-theme-source-manifest"
+else
+    case "$capture_theme_source_manifest_sha256" in
+        *[!0-9a-f]*)
+            admission_status="fail"
+            admission_reason="invalid-theme-source-manifest"
+            ;;
+    esac
+fi
+if [ "$admission_status" = "pass" ]; then
+    case "$backend_selected" in
+        ""|*local_raster*|*request_local*|*software*|*fallback*)
+            admission_status="fail"
+            admission_reason="local-raster-fallback-forbidden"
+            ;;
+    esac
+fi
+if [ "$admission_status" = "pass" ] && {
+    [ "$backend_status" != "pass" ] ||
+    [ "$backend_fallback_reason" != "" ] ||
+    [ "$backend_readback_status" = "" ];
+}; then
+    admission_status="fail"
+    admission_reason="noncanonical-backend-readback"
+fi
+if [ "$admission_status" != "pass" ]; then
+    status="fail"
+    reason="$admission_reason"
+fi
 
 {
     echo "# Hosted WM Capture Evidence"
@@ -218,6 +266,11 @@ render_us="$(sed -n 's/^hosted_wm_capture_render_us=//p' "$LOG_PATH" | tail -n 1
     echo "- theme_id: $capture_theme_id"
     echo "- theme_source_manifest_sha256: $capture_theme_source_manifest_sha256"
     echo "- render_us: ${render_us:-0}"
+    echo "- backend_selected: $backend_selected"
+    echo "- backend_fallback_reason: $backend_fallback_reason"
+    echo "- backend_readback_status: $backend_readback_status"
+    echo "- backend_status: $backend_status"
+    echo "- production_admission: $admission_status"
     echo "- launcher_log: $LOG_PATH"
 } >"$REPORT_PATH"
 
@@ -227,6 +280,11 @@ echo "hosted_wm_capture_simple_bin_source=$SIMPLE_BIN_SOURCE"
 echo "hosted_wm_capture_simple_bin_status=$SIMPLE_BIN_STATUS"
 echo "hosted_wm_capture_theme_id=${capture_theme_id:-}"
 echo "hosted_wm_capture_theme_source_manifest_sha256=${capture_theme_source_manifest_sha256:-}"
+echo "hosted_wm_capture_backend_selected=${backend_selected:-}"
+echo "hosted_wm_capture_backend_fallback_reason=${backend_fallback_reason:-}"
+echo "hosted_wm_capture_backend_readback_status=${backend_readback_status:-}"
+echo "hosted_wm_capture_backend_status=${backend_status:-}"
+echo "hosted_wm_capture_production_admission=$admission_status"
 
 if [ "$status" != "pass" ]; then
     exit 1
