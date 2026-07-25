@@ -15,8 +15,9 @@ use std.nogc_sync_mut.shell.file (rename)
 
 # Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
 use compiler.driver.driver (compiler_driver_create, compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf)
-use std.nogc_sync_mut.src.collections.hashset.{hashset_with_capacity}
-use std.nogc_sync_mut.src.collections.hashmap.{hashmap_with_capacity}
+# Dict.entries currently lowers to this implementation; keep its object in the
+# entry closure even though this walker no longer constructs a custom HashMap.
+use std.nogc_sync_mut.src.collections.hashmap.{HashMap}
 use lazy compiler.backend.linker.lib_smf_writer (LibSmfBuilder)
 use lazy app.compile.native (compile_native)
 use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, compile_result_errors, compileoptions_normalize_mir_optimization, driver_output_format_both, driver_output_format_native)
@@ -597,10 +598,12 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     # errors in the compile phase.
     val trace_closure = (rt_env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE") ?? "") == "1"
     var queue: [text] = [entry]
-    var discovered = hashset_with_capacity(1024)
-    discovered.insert(entry)
+    # The Rust seed drops receivers for custom read-only instance methods.
+    # Built-in Dict keeps hashed lookup while the self-hosted ABI catches up.
+    var discovered: Dict<text, bool> = {}
+    discovered[entry] = true
     var result: [text] = []
-    var resolve_cache = hashmap_with_capacity(2048)
+    var resolve_cache: Dict<text, text> = {}
     val closure_source_dirs = _nb_normalize_source_dirs(source_dirs)
     var qi = 0
     while qi < queue.len():
@@ -645,41 +648,41 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
                     val mod_last = mod_segs_bfs[mod_segs_bfs.len() - 1]
                     if mod_last != "":
                         val mod_rp = _nb_resolve_relative("." + mod_last, f)
-                        if mod_rp != "" and not discovered.contains(mod_rp):
+                        if mod_rp != "" and not discovered.has(mod_rp):
                             queue = queue.push(mod_rp)
-                            discovered.insert(mod_rp)
+                            discovered[mod_rp] = true
                 continue
             if import_line.starts_with("export ") and import_line.ends_with(".*") and not import_line.starts_with("export use "):
                 val exp_tail = import_line.substring(7).trim()
                 val exp_base = exp_tail[0:exp_tail.len() - 2]
                 if not exp_base.contains(" ") and not exp_base.contains(","):
                     val exp_rp = _nb_resolve_relative("." + exp_base, f)
-                    if exp_rp != "" and not discovered.contains(exp_rp):
+                    if exp_rp != "" and not discovered.has(exp_rp):
                         queue = queue.push(exp_rp)
-                        discovered.insert(exp_rp)
+                        discovered[exp_rp] = true
                 continue
             val mp = _nb_module_path_from_use(import_line)
             if mp == "":
                 continue
             if mp.starts_with("."):
                 val rel_rp = _nb_resolve_relative(mp, f)
-                if rel_rp != "" and not discovered.contains(rel_rp):
+                if rel_rp != "" and not discovered.has(rel_rp):
                     queue = queue.push(rel_rp)
-                    discovered.insert(rel_rp)
+                    discovered[rel_rp] = true
                 continue
             val segs = mp.split(".")
             val seg_key = _nb_join_segments(segs)
             var rp = ""
-            if resolve_cache.contains_key(seg_key):
-                rp = resolve_cache.get(seg_key) ?? ""
+            if resolve_cache.has(seg_key):
+                rp = resolve_cache[seg_key]
             else:
                 rp = _nb_resolve_segs(segs, closure_source_dirs)
-                resolve_cache.insert(seg_key, rp)
+                resolve_cache[seg_key] = rp
             if trace_closure and f == entry:
                 _cli_eprint("[native-build] closure import {mp} -> {rp}")
-            if rp != "" and not discovered.contains(rp):
+            if rp != "" and not discovered.has(rp):
                 queue = queue.push(rp)
-                discovered.insert(rp)
+                discovered[rp] = true
             if rp == "" and segs.len() > 1 and not raw.contains("{"):
                 var drop: [text] = []
                 var di = 0
@@ -688,14 +691,14 @@ fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
                     di = di + 1
                 val drop_key = _nb_join_segments(drop)
                 var drop_rp = ""
-                if resolve_cache.contains_key(drop_key):
-                    drop_rp = resolve_cache.get(drop_key) ?? ""
+                if resolve_cache.has(drop_key):
+                    drop_rp = resolve_cache[drop_key]
                 else:
                     drop_rp = _nb_resolve_segs(drop, closure_source_dirs)
-                    resolve_cache.insert(drop_key, drop_rp)
-                if drop_rp != "" and not discovered.contains(drop_rp):
+                    resolve_cache[drop_key] = drop_rp
+                if drop_rp != "" and not discovered.has(drop_rp):
                     queue = queue.push(drop_rp)
-                    discovered.insert(drop_rp)
+                    discovered[drop_rp] = true
     result
 
 fn cli_native_build(args: [text]) -> i64:

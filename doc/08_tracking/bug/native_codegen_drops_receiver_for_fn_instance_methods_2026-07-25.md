@@ -68,8 +68,8 @@ string.
 `src/compiler/50.mir/_MirLowering/function_lowering.spl:194` gates the receiver on
 `fn_.is_mutable` (`is_me_receiver`) — consistent with the observed divergence.
 
-Crash sites in the CLI: `src/app/io/_CliCompile/compile_targets.spl:673` and `:691`
-(`resolve_cache.contains_key`); latent at `:648/:657/:666/:680` (`discovered.contains`).
+Pre-bridge crash sites in the CLI were the `resolve_cache.contains_key` calls;
+the `discovered.contains` calls carried the same latent receiver bug.
 
 ## Scope
 
@@ -97,6 +97,21 @@ crash. That is a workaround masking a general ABI defect — every other `fn`
 instance method in the codebase stays miscompiled and will fail the same way.
 Recorded here rather than normalized, per the project rule against silently
 absorbing a broken form.
+
+**Bootstrap bridge (closure verified, full self-host pending):**
+`_native_build_entry_closure` uses built-in `Dict<text, bool/text>` for its
+discovery and resolution tables. This keeps hashed lookup while avoiding the
+seed-generated `HashSet.contains` and `HashMap.contains_key` calls in this
+bootstrap-only walker. A rebuilt generation-1 CLI traversed 908 closure sources
+and entered generation-2 parsing instead of crashing. The full build remains
+blocked by the separately tracked self-host parse performance problem. This is
+not the ABI fix: custom non-`me` instance methods remain affected, so this bug
+stays OPEN until caller and callee ABI change atomically.
+
+The walker retains an explicit `HashMap` import because built-in `Dict.entries`
+currently lowers to that implementation. Removing the import omitted its object
+from the entry closure and produced an undefined `HashMap.entries` at link; the
+source contract protects this non-obvious closure root.
 
 ## Impact on current work
 

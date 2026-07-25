@@ -1004,3 +1004,14 @@ the shared binary — deploys require explicit user go-ahead).
   object. The next fresh session should fix or bypass that closure HashMap
   crash with a focused regression, then produce the second-generation
   compiler from an isolated cache and rerun the staged F64 fixture once.
+
+  The closure walker now uses built-in `Dict` tables instead of custom
+  `HashSet.contains`/`HashMap.contains_key` probes. A seed-built generation-1
+  CLI linked (`5 compiled, 1393 cached`) and, with a fresh generation-2 cache,
+  traversed 908 closure sources and entered parsing rather than crashing.
+  Generation-2 parsing remained too slow (roughly 10–50 seconds per early CLI
+  file), so the bounded run was stopped; full generation-2 link, staged F64,
+  and C9 remain uncredited. The generic non-`me` receiver ABI bug remains OPEN;
+  this change is only a bootstrap bridge. Next: fix the self-host parse
+  performance blocker, resume the fresh generation-2 build, then run staged
+  F64 once and C9 only after F64 exits 42.
