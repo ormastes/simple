@@ -973,3 +973,30 @@ after 7m35s while still in phase 2, at 57,792,476 KiB max RSS and
 `heap_registry` about 5,039,086. It emitted no CLI. True per-file phase-2 AST
 release and cache-hit admission remain required. Do not repeat this Stage4
 command without that repair.
+
+### Corroborating data point 2026-07-25 (independent session; ran the command
+### before reading this doc — see caution below)
+
+Same canonical Stage4 command, `--threads 1`, `--low-memory` on, stage3
+source-matched and interning-bearing, run in isolation after a competing
+bootstrap finished. Extends the curve above to its furthest-observed point:
+
+| t | files parsed | heap_registry | RSS |
+|---|---|---|---|
+| 9s | phase1 done (n_sources=1550, unique=1151) | 1,616,585 | — |
+| 943s | ~1,390 (examples/.../cmm_parser_expr.spl) | 8,049,651 | ~99 GB |
+| 966s | ~1,400 (src/os/drivers/real_device_readiness.spl) | 8,312,303 | 100 GB |
+
+Killed manually at 2 GB host free. Consistent with the 57.8 GB / 5.0 M point
+above — same monotonic slope, just further along; **no new mechanism**, and it
+does NOT contradict any finding here. Confirms only that `--threads 1` does not
+help (thread count is not the driver) and that the phase-2 wall is reached even
+with no competing build on the host.
+
+**Caution for future sessions (process, not mechanism):** this run should not
+have happened — the line directly above it already said so. Two full Stage4
+attempts each drove a shared 128 GB host to 1-2 GB free, risking every other
+session on the box. Before running the canonical Stage4 command, read this
+doc's tail first. If a bounded repeat is genuinely needed, cap it
+(`systemd-run --scope -p MemoryMax=40G`, or `ulimit -v`) so the experiment dies
+before the host does, instead of relying on someone watching a sampler.
