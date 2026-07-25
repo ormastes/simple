@@ -60,6 +60,15 @@ fn text_command(composition: DrawIrComposition, value: text) -> DrawIrCommand:
     fail("missing GUI text command: " + value)
     draw_ir_text("missing-gui-font-command", 0, 0, "", 0u32)
 
+fn command_index(composition: DrawIrComposition, component_id: text) -> i32:
+    var index = 0
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.component_id == component_id:
+                return index
+            index = index + 1
+    -1
+
 fn style_value(command: DrawIrCommand, key: text) -> text:
     for prop in command.computed_style:
         if prop.key == key:
@@ -123,6 +132,9 @@ describe "GUI font and event surface":
         expect(title.y).to_equal(9)
         expect(title.width).to_equal(35)
         expect(title.height).to_equal(14)
+        expect(command_index(submitted, "gui-root")).to_be_less_than(command_index(submitted, "gui-title"))
+        expect(command_index(submitted, "gui-title")).to_be_less_than(command_index(submitted, "gui-input"))
+        expect(command_index(submitted, "gui-input")).to_be_less_than(command_index(submitted, "gui-input-value"))
 
         step("Emit the selected font composite program and plan compilation")
         expect(submitted.composition_id).to_start_with("ui-session-")
@@ -286,3 +298,15 @@ describe "GUI font and event surface":
         expect(rendered.readback_source).to_equal("cpu_mirror")
         expect(rendered.readback_checksum).to_be_greater_than(0)
         expect(rendered.readback_checksum).to_equal(framebuffer_checksum(rendered.pixels))
+
+        step("Resize the submitted surface and invalidate the prior frame")
+        val resize_event = session.current_draw_ir_event("resize-1", UIEvent.Resize(width: WIDTH + 8, height: HEIGHT + 4))
+        expect(session.dispatch_draw_ir_event(resize_event)).to_be(true)
+        expect(session.current_state().tree.resolve_token("viewport_w")).to_equal((WIDTH + 8).to_string())
+        expect(session.current_state().tree.resolve_token("viewport_h")).to_equal((HEIGHT + 4).to_string())
+        val resized = session.submit_widget_draw_ir(WIDTH + 8, HEIGHT + 4, DRAW_IR_BACKEND_CPU)
+        expect(resized.composition_id).to_equal(submitted.composition_id.split(":")[0] + ":widget-submission-4")
+        expect(resized.scene_key).to_equal("widget:200x84")
+        expect(resized.batches[0].embedding.width).to_equal(WIDTH + 8)
+        expect(resized.batches[0].embedding.height).to_equal(HEIGHT + 4)
+        expect(session.dispatch_draw_ir_event(resize_event)).to_be(false)
