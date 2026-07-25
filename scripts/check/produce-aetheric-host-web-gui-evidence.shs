@@ -12,6 +12,34 @@ SIMPLE_BIN="${SIMPLE_BIN:-}"
 PROOF_PATH="${AETHERIC_HOST_WEB_GUI_PROOF:-$BUILD_DIR/aetheric-host-web-gui.env}"
 WIDTH="${AETHERIC_HOST_WEB_GUI_WIDTH:-960}"
 HEIGHT="${AETHERIC_HOST_WEB_GUI_HEIGHT:-640}"
+RENDERER_WM_PROVIDER="${AETHERIC_HOST_WEB_GUI_WM_PROVIDER:-$ROOT_DIR/build/sffi/libsimple_runtime_wm.dylib}"
+RENDERER_C_WM_PROVIDER="${AETHERIC_HOST_WEB_GUI_C_WM_PROVIDER:-$ROOT_DIR/build/sffi/libsimple_runtime_c_wm.dylib}"
+
+fail() {
+    echo "produce-aetheric-host-web-gui-evidence: $1" >&2
+    exit 2
+}
+
+sha256_file() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        sha256sum "$1" | awk '{print $1}'
+    fi
+}
+
+canonical_regular_file() {
+    [ -f "$1" ] && [ ! -L "$1" ] || fail "provider is missing, non-regular, or symlinked: $1"
+    provider_dir="$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P)"
+    printf '%s/%s\n' "$provider_dir" "$(basename -- "$1")"
+}
+
+require_global_symbol() {
+    provider="$1"
+    symbol="$2"
+    nm -gU "$provider" 2>/dev/null | grep -Eq "(_| )${symbol}$" ||
+        fail "provider lacks required symbol $symbol: $provider"
+}
 
 if [ -z "$SIMPLE_BIN" ] || [ ! -x "$SIMPLE_BIN" ]; then
     echo "produce-aetheric-host-web-gui-evidence: SIMPLE_BIN must name an executable self-hosted binary" >&2
@@ -27,6 +55,7 @@ if ! "$SIMPLE_BIN" --version >/dev/null 2>&1; then
 fi
 
 mkdir -p "$BUILD_DIR"
+BUILD_DIR="$(CDPATH= cd -- "$BUILD_DIR" && pwd -P)"
 HTML_PATH="$BUILD_DIR/aetheric_dark_production.html"
 SOURCE_LOG="$BUILD_DIR/source-generation.log"
 SIMPLE_PIXELS="$BUILD_DIR/aetheric_dark_engine2d.argb.json"
@@ -42,37 +71,104 @@ GENERATOR_BIN="$BUILD_DIR/aetheric-host-web-gui-generator"
 RENDERER_BIN="$BUILD_DIR/aetheric-host-web-gui-renderer"
 UI_CLI_BIN="$BUILD_DIR/aetheric-host-web-gui-ui-access"
 NATIVE_CACHE="$BUILD_DIR/native-cache"
+PROVIDER_DIR="$BUILD_DIR/providers"
+SQLITE_PROVIDER_DIR="$PROVIDER_DIR/sqlite"
+PROVIDER_PROVENANCE="$PROVIDER_DIR/provenance.env"
+
+[ "$(uname -s)" = Darwin ] || fail "this production host evidence producer requires macOS"
+command -v xcrun >/dev/null 2>&1 || fail "xcrun is required"
+command -v nm >/dev/null 2>&1 || fail "nm is required"
+
+RENDERER_WM_PROVIDER="$(canonical_regular_file "$RENDERER_WM_PROVIDER")"
+RENDERER_C_WM_PROVIDER="$(canonical_regular_file "$RENDERER_C_WM_PROVIDER")"
+require_global_symbol "$RENDERER_WM_PROVIDER" rt_engine2d_simd_fill_row_u32
+require_global_symbol "$RENDERER_C_WM_PROVIDER" rt_engine2d_rocm_download_pixels
+
+mkdir -p "$SQLITE_PROVIDER_DIR"
+SQLITE_SOURCE="$(canonical_regular_file "$ROOT_DIR/src/runtime/runtime_sqlite.c")"
+SQLITE_OBJECT="$SQLITE_PROVIDER_DIR/runtime_sqlite.o"
+SDK_PATH="$(xcrun --show-sdk-path)"
+SQLITE_SYSTEM_PROVIDER="$(canonical_regular_file "$SDK_PATH/usr/lib/libsqlite3.tbd")"
+CLANG_PATH="$(canonical_regular_file "$(xcrun --find clang)")"
+SQLITE_COMPILE_FLAGS="-Os -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-stack-protector -fno-builtin -fPIC -std=gnu11"
+"$CLANG_PATH" -c -Os -ffunction-sections -fdata-sections \
+    -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-stack-protector \
+    -fno-builtin -fPIC -std=gnu11 -isysroot "$SDK_PATH" \
+    -I"$ROOT_DIR/src/runtime" -I"$ROOT_DIR/src/runtime/platform" \
+    "$SQLITE_SOURCE" -o "$SQLITE_OBJECT"
+[ -s "$SQLITE_OBJECT" ] || fail "SQLite provider object was not produced"
+require_global_symbol "$SQLITE_OBJECT" rt_sqlite_open
+require_global_symbol "$SQLITE_OBJECT" rt_sqlite_query_next
 
 build_native() {
     entry="$1"
     output="$2"
     log="$3"
-    extra_source="${4:-}"
+    cache="$4"
+    link_objects="${5:-}"
+    extra_source="${6:-}"
     if [ -n "$extra_source" ]; then
         set -- --source "$extra_source"
     else
         set --
     fi
-    SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BIN" native-build \
+    SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_LINK_OBJECTS="$link_objects" \
+        "$SIMPLE_BIN" native-build \
         --source "$entry" "$@" --entry "$entry" --entry-closure --strip \
-        --backend cranelift --cache-dir "$NATIVE_CACHE" --mode dynload --output "$output" \
+        --backend cranelift --cache-dir "$cache" --mode dynload --output "$output" \
         >"$log" 2>&1
     [ -x "$output" ] || return 1
     ! grep -Eq 'FAILED FILES|non-critical file\(s\) failed|Generating [1-9][0-9]* stub functions|Warning: [1-9][0-9]* files failed' "$log"
 }
 
-build_native src/app/test/aetheric_host_web_gui_producer.spl "$GENERATOR_BIN" "$BUILD_DIR/generator-native-build.log" || {
+build_native src/app/test/aetheric_host_web_gui_producer.spl "$GENERATOR_BIN" \
+    "$BUILD_DIR/generator-native-build.log" "$NATIVE_CACHE/generator" || {
     tail -n 40 "$BUILD_DIR/generator-native-build.log" >&2
     exit 2
 }
-build_native tools/pixel_compare/render_simple_html.spl "$RENDERER_BIN" "$BUILD_DIR/renderer-native-build.log" src/lib/nogc_sync_mut/failsafe/core.spl || {
+build_native tools/pixel_compare/render_simple_html.spl "$RENDERER_BIN" \
+    "$BUILD_DIR/renderer-native-build.log" "$NATIVE_CACHE/renderer" \
+    "$RENDERER_WM_PROVIDER:$RENDERER_C_WM_PROVIDER" src/lib/nogc_sync_mut/failsafe/core.spl || {
     tail -n 40 "$BUILD_DIR/renderer-native-build.log" >&2
     exit 2
 }
-build_native src/app/test/ui_access_cli_driver.spl "$UI_CLI_BIN" "$BUILD_DIR/ui-access-native-build.log" || {
+build_native src/app/test/ui_access_cli_driver.spl "$UI_CLI_BIN" \
+    "$BUILD_DIR/ui-access-native-build.log" "$NATIVE_CACHE/ui-access" \
+    "$SQLITE_OBJECT:$SQLITE_SYSTEM_PROVIDER" || {
     tail -n 40 "$BUILD_DIR/ui-access-native-build.log" >&2
     exit 2
 }
+
+PROVIDER_PROVENANCE_TMP="$PROVIDER_PROVENANCE.tmp.$$"
+umask 077
+{
+    echo "schema=aetheric-host-web-gui-provider-provenance-v1"
+    echo "status=pass"
+    echo "source_revision=$REVISION"
+    echo "compiler_path=$(canonical_regular_file "$SIMPLE_BIN")"
+    echo "compiler_sha256=$(sha256_file "$SIMPLE_BIN")"
+    echo "renderer_wm_provider_path=$RENDERER_WM_PROVIDER"
+    echo "renderer_wm_provider_sha256=$(sha256_file "$RENDERER_WM_PROVIDER")"
+    echo "renderer_c_wm_provider_path=$RENDERER_C_WM_PROVIDER"
+    echo "renderer_c_wm_provider_sha256=$(sha256_file "$RENDERER_C_WM_PROVIDER")"
+    echo "sqlite_source_path=$SQLITE_SOURCE"
+    echo "sqlite_source_sha256=$(sha256_file "$SQLITE_SOURCE")"
+    echo "sqlite_object_path=$SQLITE_OBJECT"
+    echo "sqlite_object_sha256=$(sha256_file "$SQLITE_OBJECT")"
+    echo "sqlite_system_provider_path=$SQLITE_SYSTEM_PROVIDER"
+    echo "sqlite_system_provider_sha256=$(sha256_file "$SQLITE_SYSTEM_PROVIDER")"
+    echo "sqlite_compiler_path=$CLANG_PATH"
+    echo "sqlite_compiler_sha256=$(sha256_file "$CLANG_PATH")"
+    echo "sqlite_sdk_path=$SDK_PATH"
+    echo "sqlite_compile_flags=$SQLITE_COMPILE_FLAGS"
+    echo "generator_cache_path=$NATIVE_CACHE/generator"
+    echo "renderer_cache_path=$NATIVE_CACHE/renderer"
+    echo "ui_access_cache_path=$NATIVE_CACHE/ui-access"
+    echo "generator_binary_sha256=$(sha256_file "$GENERATOR_BIN")"
+    echo "renderer_binary_sha256=$(sha256_file "$RENDERER_BIN")"
+    echo "ui_driver_binary_sha256=$(sha256_file "$UI_CLI_BIN")"
+} >"$PROVIDER_PROVENANCE_TMP"
+mv "$PROVIDER_PROVENANCE_TMP" "$PROVIDER_PROVENANCE"
 "$GENERATOR_BIN" "$HTML_PATH" >"$SOURCE_LOG"
 PIXEL_HTML="$HTML_PATH" PIXEL_W="$WIDTH" PIXEL_H="$HEIGHT" PIXEL_BACKEND="cpu_simd" PIXEL_OUT="$SIMPLE_PIXELS" \
     "$RENDERER_BIN"
@@ -140,6 +236,9 @@ node tools/electron-live-bitmap/write_aetheric_host_web_gui_proof.js \
     --source-log "$SOURCE_LOG" --html "$HTML_PATH" --simple-pixels "$SIMPLE_PIXELS" --electron-pixels "$ELECTRON_PIXELS" \
     --observation "$OBSERVATION" --screenshot "$SCREENSHOT" --binary "$SIMPLE_BIN" \
     --generator-binary "$GENERATOR_BIN" --renderer-binary "$RENDERER_BIN" --ui-driver-binary "$UI_CLI_BIN" \
+    --provider-provenance "$PROVIDER_PROVENANCE" \
+    --renderer-wm-provider "$RENDERER_WM_PROVIDER" --renderer-c-wm-provider "$RENDERER_C_WM_PROVIDER" \
+    --ui-sqlite-provider "$SQLITE_OBJECT" --ui-sqlite-system-provider "$SQLITE_SYSTEM_PROVIDER" \
     --revision "$REVISION" --ui-access-dir "$UI_ACCESS_DIR" --output "$PROOF_PATH"
 
 echo "aetheric_host_web_gui_producer_status=complete"
