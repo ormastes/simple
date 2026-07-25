@@ -1046,6 +1046,13 @@ the shared binary — deploys require explicit user go-ahead).
   compiler/backend/target/option/source fingerprint and deduplicated object
   set.
 
+  Parser tracing then confirmed that token text already comes from the lexer's
+  direct current-token slot. The old generation-keyed whole-source parser cache
+  had no callers, so its slots, environment counter, and invalidation calls are
+  removed with a source regression. This removes misleading dead work; it does
+  not credit the outstanding 22 KiB parser-time gate or authorize another full
+  generation build.
+
   A bootstrap seed rebuilt with both the alias and grammar fixes passed the
   former 16-second discovery failure and emitted no parser/link diagnostics,
   but the final full-CLI attempt hit its 15-minute cap at sustained 100% CPU

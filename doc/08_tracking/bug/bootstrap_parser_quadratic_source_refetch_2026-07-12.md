@@ -59,6 +59,12 @@ UI/TUI, GUI, and WM runtime evidence gates.
 - Runtime slice offsets now follow lexer character indices, translating to
   UTF-8 byte boundaries in Rust and C. The prior byte-offset behavior was
   wrong for non-ASCII source; focused ownership/Unicode tests pass.
+- The live parser now reads token text directly from `lex_cur_text_direct`;
+  `parser_lex_source_cached()` and its environment generation counter had no
+  callers. That obsolete cache, its generation update sites, and its two module
+  slots were removed on 2026-07-25, confirming that the live parser no longer
+  uses the original whole-source refetch mechanism. This does not yet satisfy
+  the 22 KiB absolute-time gate.
 
 ## Rejected fixes
 
