@@ -1053,6 +1053,15 @@ the shared binary — deploys require explicit user go-ahead).
   not credit the outstanding 22 KiB parser-time gate or authorize another full
   generation build.
 
+  The retained generation-1 pure-Simple candidate could not run the focused
+  scaling fixture because HIR resolution rejected exported `parse_module` and
+  `parser_has_errors`; both parser module spellings failed. The bounded
+  three-cycle fixture lane is exhausted with no timing credit. Diagnose that
+  candidate's source-closure/export resolution before the next measurement;
+  do not substitute the Rust seed. Four consumers now use the canonical
+  `compiler.core.parser` spelling, but that cleanup receives no performance or
+  blocker credit.
+
   A bootstrap seed rebuilt with both the alias and grammar fixes passed the
   former 16-second discovery failure and emitted no parser/link diagnostics,
   but the final full-CLI attempt hit its 15-minute cap at sustained 100% CPU

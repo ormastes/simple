@@ -65,6 +65,13 @@ UI/TUI, GUI, and WM runtime evidence gates.
   slots were removed on 2026-07-25, confirming that the live parser no longer
   uses the original whole-source refetch mechanism. This does not yet satisfy
   the 22 KiB absolute-time gate.
+- The available generation-1 pure-Simple candidate could not execute the
+  scaling fixture: its HIR resolver reported exported `parse_module` and
+  `parser_has_errors` unresolved. Both the implementation-path and canonical
+  parser imports produced the same failure. The three-cycle cap stopped further
+  retries, so no new timing receipt is claimed. Four stray consumers were
+  normalized to the canonical `compiler.core.parser` spelling as source hygiene,
+  not as a claimed fix.
 
 ## Rejected fixes
 
