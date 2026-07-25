@@ -215,3 +215,54 @@ SIMPLE_BIN=bin/simple SIMPLE_LIB=src sh scripts/check/check-production-gui-web-h
   The unproven lexer/parser slot-identity workaround was removed. The capped
   full bootstrap shard was not rerun, so deployment and TODO 119/531/555 remain
   gated on a fresh continuation's cache-preserving build.
+
+## Detailed Continuation Lanes (2026-07-25)
+
+Shared rules:
+
+- Preserve unrelated working-copy changes and inspect only the assigned lane.
+- Use `SIMPLE_NO_STUB_FALLBACK=1`; never deploy or certify a Rust seed.
+- Run each acceptance command once, stop after three fix/verify cycles, and
+  retain binary path, revision, timestamps, exit code, and report path.
+- Timeout, missing artifact, stale report, CPU fallback, or unavailable host is
+  not a PASS.
+
+### Agent A: bootstrap closure and deployment
+
+1. Start from TODO 580 and the entry-closure no-object-progress bug report.
+2. Run the direct worker with closure tracing and a fresh isolated cache.
+   Compare against the baseline: 75 visited files in 180 seconds, zero objects.
+3. Keep the 16-bucket change only if closure reaches driver start materially
+   faster and emits objects. Otherwise revert only that change and profile the
+   two bucket-add helpers.
+4. Run focused source contracts once, build the candidate, then run the
+   canonical redeploy gate and post-swap `-c 'print(1+1)'` smoke.
+5. Do not unlock GPU evidence until every deployment gate passes.
+
+### Agent B: Linux CUDA and Vulkan evidence
+
+1. Use only Agent A's source-matched deployed pure-Simple binary.
+2. Run generated CUDA readback once; require device-origin data, exact
+   pixel/checksum parity, and stable UUID identity.
+3. Run generated Vulkan readback/parity once; require hardware selection,
+   successful submit/readback, and exact CPU parity.
+4. Record setup, transfer, and device timings separately. Classify a correct
+   result below the required speedup as available-not-preferred.
+5. Do not reuse the retained 2026-07-14 CUDA report as current-source evidence.
+
+### Agent C: macOS Metal and live-window evidence
+
+1. Run Apple Silicon first and Intel when available; Linux cannot pass this lane.
+2. Re-run generated Metal 2D, framebuffer readback, CPU/Metal parity, the
+   1024-pixel clip scene, and the production queue wrapper.
+3. Require a real Simple Web/winit window, successful presents, keyboard and
+   explicit primary-pointer interactions, and completion-only nonblank pixels.
+4. Capture warm latency, max RSS, selected device identity, Xcode GPU evidence
+   when required, and exact source/binary provenance.
+5. Leave TODO 119 and TODO 531 open until both host rows and reviewer approval
+   exist.
+
+Merge owner: main workspace owner. Final reviewer: normal/highest-capability
+model. Reject stale artifacts, CPU fallback presented as GPU evidence,
+unavailable-host PASS, missing timing/RSS/device identity, or deployment
+evidence not tied to the tested revision.
