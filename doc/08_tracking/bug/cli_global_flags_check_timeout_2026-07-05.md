@@ -16,6 +16,7 @@ Partially fixed. The focused file check now returns instead of timing out after 
 - Adding the backend option pair (`--backend=` / `--backend value`) crossed back into timeout in the bounded repro.
 - Mechanical cleanups (`??` removal, unused flag removal, inline-if expansion, wide constructor replacement) did not clear the timeout.
 - Splitting core, backend, and limit flag parsing into separate helpers made `bin/simple check src/app/cli/_CliMain/args_and_os_commands.spl` reach file-level `OK` in 14 seconds. The command still exits nonzero in the repo hygiene gate with `simple: seed sibling not found, skipping delegation: /usr/bin/simple_seed`.
+- Added a repo-local `bin/simple_seed` fallback in `src/app/io/cli_ops.spl` and a source regression in `test/01_unit/app/io/cli_argv0_resolution_spec.spl`. The currently deployed binary still contains the old delegation path, so the spec cannot run until this source fix is rebuilt/redeployed.
 - On 2026-07-24, a cached pure-Simple Stage 4 `native-build` for the repaired
   test-runner JSON lane hit its 1,800-second hard cap with no candidate
   artifact. Phase tracing loaded the 630-file closure in 202 seconds, then
@@ -34,4 +35,4 @@ Partially fixed. The focused file check now returns instead of timing out after 
 
 ## Next Step
 
-Fix the repo hygiene/delegation path that treats the missing `/usr/bin/simple_seed` sibling as a check failure after the focused file reports `OK`.
+Rebuild/redeploy the pure-Simple CLI so the repo-local seed fallback is present in the running binary, then rerun the focused check without `SIMPLE_BOOTSTRAP_DRIVER`.
