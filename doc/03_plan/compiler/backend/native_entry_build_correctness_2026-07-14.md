@@ -707,3 +707,18 @@ the shared binary — deploys require explicit user go-ahead).
   resume only after the unrelated workers drain, using the preserved cache and
   a separately bounded process. Positional C5 exit `42` remains unproven; C9
   must not run yet.
+
+  After the runaway test process groups were removed, an isolated Cranelift
+  compiler cache produced a valid 675-file no-stub candidate. Positional C5
+  first exposed a Stage4 `SymbolId`/optional ABI fault in
+  `canonical_mir_type_symbol`: the helper passed the struct through
+  `get_symbol(SymbolId?)`, then dereferenced a present-but-nil payload. Current
+  source uses the established `get_symbol_raw(symbol.id)` boundary and rejects
+  a nil `Some(info)` payload before field access. The final incremental rebuild
+  completed with `4 compiled, 671 cached, 0 failed`; candidate SHA-256 is
+  `15e7712d3fc37d43c434b3538e9bf6ba201bcf0bb1dfb0b0dff2682a34e6582b`.
+  Positional C5 no longer SIGILLs and now fails loudly on unresolved `chr` and
+  `to_char` before output, with no stub fallback. This session reached its
+  three-cycle cap. The next session must inspect why the existing integer
+  builtin classifier is not selected in this exact current candidate; C5 exit
+  `42` and C9 remain pending.
