@@ -7,7 +7,7 @@ Fixed in the temporary Rust runner on 2026-07-17.
 ## Reproduction
 
 ```text
-SIMPLE_TEST_RUNNER_RUST=1 simple test sibling_describe_green_fixture.spl
+SIMPLE_TEST_RUNNER_RUST=1 simple test sibling_describe_green_spec.spl
 Spec files (*_spec.spl): 0
 Test files (*_test.spl): 0
 Passed: 0
