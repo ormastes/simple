@@ -2,7 +2,7 @@
 
 ## Status
 
-Open.
+Partially fixed. The focused file check now returns instead of timing out after splitting the global flag parser into smaller helper groups.
 
 ## Symptom
 
@@ -15,6 +15,7 @@ Open.
 - Valid cumulative slices through the interpreter-mode and run-config branches passed.
 - Adding the backend option pair (`--backend=` / `--backend value`) crossed back into timeout in the bounded repro.
 - Mechanical cleanups (`??` removal, unused flag removal, inline-if expansion, wide constructor replacement) did not clear the timeout.
+- Splitting core, backend, and limit flag parsing into separate helpers made `bin/simple check src/app/cli/_CliMain/args_and_os_commands.spl` reach file-level `OK` in 14 seconds. The command still exits nonzero in the repo hygiene gate with `simple: seed sibling not found, skipping delegation: /usr/bin/simple_seed`.
 - On 2026-07-24, a cached pure-Simple Stage 4 `native-build` for the repaired
   test-runner JSON lane hit its 1,800-second hard cap with no candidate
   artifact. Phase tracing loaded the 630-file closure in 202 seconds, then
@@ -33,4 +34,4 @@ Open.
 
 ## Next Step
 
-Minimize the backend-branch repro, then fix the parser/checker path or replace the manual flag parser with the already-planned `cli` declaration once that language support is available.
+Fix the repo hygiene/delegation path that treats the missing `/usr/bin/simple_seed` sibling as a check failure after the focused file reports `OK`.
