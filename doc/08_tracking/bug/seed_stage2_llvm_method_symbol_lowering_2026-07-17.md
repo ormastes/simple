@@ -263,3 +263,19 @@ offset'
    - **Effort:** Low (grep + dispatch config).
    - **Owner:** Runtime layer.
    - **Blocks:** If rt_* are actually missing definitions, requires runtime extension.
+
+## 2026-07-25 Regression on Current Main
+
+The prior FIXED status no longer describes current `main`. A clean Linux
+full-bootstrap reached Stage 2 link after LLVM vtable layout and virtual-call
+lowering were implemented, then failed on:
+
+```text
+undefined reference to `f64.to_hex'
+undefined reference to `ElfReloc.reloc_type_to_elf_value'
+undefined reference to `rt_dict_insert'
+```
+
+Evidence:
+`build/bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`.
+No further bootstrap retry was made because this was the third bounded cycle.

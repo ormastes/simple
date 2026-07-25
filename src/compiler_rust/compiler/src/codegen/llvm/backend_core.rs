@@ -346,6 +346,48 @@ impl LlvmBackend {
         }
     }
 
+    #[cfg(feature = "llvm")]
+    fn emit_vtables(&self, module_ir: &MirModule) {
+        let module_ref = self.module.borrow();
+        let module = module_ref.as_ref().unwrap();
+        let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+
+        for (_, _, symbol, methods, export) in &module_ir.vtable_impls {
+            let entries: Vec<_> = methods
+                .iter()
+                .map(|method| {
+                    method
+                        .as_ref()
+                        .and_then(|name| {
+                            module
+                                .get_function(name)
+                                .or_else(|| module.get_function(&name.replace('.', "_dot_")))
+                                .or_else(|| {
+                                    let suffix = format!("__{}", name.replace('.', "_dot_"));
+                                    module.get_functions().find(|f| {
+                                        f.get_name()
+                                            .to_str()
+                                            .is_ok_and(|candidate| candidate.ends_with(&suffix))
+                                    })
+                                })
+                        })
+                        .map(|f| f.as_global_value().as_pointer_value())
+                        .unwrap_or_else(|| ptr_type.const_null())
+                })
+                .chain((methods.is_empty()).then(|| ptr_type.const_null()))
+                .collect();
+            let initializer = ptr_type.const_array(&entries);
+            let global = module.add_global(initializer.get_type(), None, symbol);
+            global.set_initializer(&initializer);
+            global.set_constant(true);
+            global.set_linkage(if *export {
+                inkwell::module::Linkage::External
+            } else {
+                inkwell::module::Linkage::Internal
+            });
+        }
+    }
+
     /// Generate a `__module_init_<prefix>` function that initializes heap-backed
     /// module globals at startup. Mirrors the cranelift backend's
     /// `generate_module_init` (common_backend.rs): for each entry in
@@ -1396,6 +1438,8 @@ impl NativeBackend for LlvmBackend {
         }
         #[cfg(feature = "llvm")]
         self.declare_dot_aliases_for_methods();
+        #[cfg(feature = "llvm")]
+        self.emit_vtables(module);
 
         // Second pass: compile all function bodies
         for func in &module.functions {

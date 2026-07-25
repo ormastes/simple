@@ -901,6 +901,7 @@ impl LlvmBackend {
             MirInst::StructInit {
                 dest,
                 struct_size,
+                vtable_symbol,
                 field_offsets,
                 field_types,
                 field_values,
@@ -909,6 +910,7 @@ impl LlvmBackend {
                 self.compile_struct_init(
                     *dest,
                     *struct_size,
+                    vtable_symbol.as_deref(),
                     field_offsets,
                     field_types,
                     field_values,
@@ -921,18 +923,34 @@ impl LlvmBackend {
                 object,
                 byte_offset,
                 field_type,
+                owner_has_vtable,
                 ..
             } => {
-                self.compile_field_get(*dest, *object, *byte_offset, field_type, vreg_map, builder)?;
+                self.compile_field_get(
+                    *dest,
+                    *object,
+                    *byte_offset + u32::from(owner_has_vtable == &Some(true)) * 8,
+                    field_type,
+                    vreg_map,
+                    builder,
+                )?;
             }
             MirInst::FieldSet {
                 object,
                 byte_offset,
                 field_type,
                 value,
+                owner_has_vtable,
                 ..
             } => {
-                self.compile_field_set(*object, *byte_offset, field_type, *value, vreg_map, builder)?;
+                self.compile_field_set(
+                    *object,
+                    *byte_offset + u32::from(owner_has_vtable == &Some(true)) * 8,
+                    field_type,
+                    *value,
+                    vreg_map,
+                    builder,
+                )?;
             }
             MirInst::ClosureCreate {
                 dest,
@@ -1377,8 +1395,10 @@ impl LlvmBackend {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
                     module.add_function("rt_enum_new", fn_type, None)
                 });
-                let enum_id_val =
-                    i32_t.const_int(u64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)), false);
+                let enum_id_val = i32_t.const_int(
+                    u64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)),
+                    false,
+                );
                 let disc_val = i32_t.const_int(disc as u64, false);
                 // NIL = 3 (TAG_SPECIAL=0b011 | SPECIAL_NIL=0)
                 let nil_val = i64_t.const_int(3, false);
@@ -1413,8 +1433,10 @@ impl LlvmBackend {
                     let fn_type = i64_t.fn_type(&[i32_t.into(), i32_t.into(), i64_t.into()], false);
                     module.add_function("rt_enum_new", fn_type, None)
                 });
-                let enum_id_val =
-                    i32_t.const_int(u64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)), false);
+                let enum_id_val = i32_t.const_int(
+                    u64::from(crate::codegen::shared::enum_runtime_type_id(enum_name)),
+                    false,
+                );
                 let disc_val = i32_t.const_int(disc as u64, false);
                 let payload_val = vreg_map
                     .get(payload)
@@ -1976,22 +1998,72 @@ impl LlvmBackend {
                 vreg_map.insert(*dest, result);
             }
 
-            // MethodCallVirtual — vtable-based dispatch; in tagged-value ABI just call receiver as function pointer
+            // MethodCallVirtual — load object[0], then call the selected vtable slot.
             MirInst::MethodCallVirtual {
-                dest, receiver, args, ..
+                dest,
+                receiver,
+                vtable_slot,
+                param_types,
+                return_type,
+                args,
             } => {
+                use inkwell::types::BasicType;
+
                 let i64_type = self.runtime_int_type();
-                let mut all_args = vec![*receiver];
-                all_args.extend_from_slice(args);
-                let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-                for arg in &all_args {
+                let ptr_type = self.context_ref().ptr_type(inkwell::AddressSpace::default());
+                let receiver_value = self.get_vreg(receiver, vreg_map)?;
+                let receiver_int = self.coerce_value_to_type(receiver_value, Some(i64_type.into()), builder)?;
+                let receiver_int = receiver_int.into_int_value();
+                let object_bits = builder
+                    .build_and(receiver_int, i64_type.const_int(!0x7, false), "virtual_object_bits")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("mask virtual receiver", &e))?;
+                let object_ptr = builder
+                    .build_int_to_ptr(object_bits, ptr_type, "virtual_object")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("virtual object pointer", &e))?;
+                let vtable_ptr = builder
+                    .build_load(ptr_type, object_ptr, "vtable")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("load vtable", &e))?
+                    .into_pointer_value();
+                let slot_ptr = unsafe {
+                    builder.build_gep(
+                        ptr_type,
+                        vtable_ptr,
+                        &[self.context_ref().i32_type().const_int(*vtable_slot as u64, false)],
+                        "vtable_slot",
+                    )
+                }
+                .map_err(|e| crate::error::factory::llvm_build_failed("vtable slot", &e))?;
+                let method_ptr = builder
+                    .build_load(ptr_type, slot_ptr, "virtual_method")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("load virtual method", &e))?
+                    .into_pointer_value();
+
+                let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = vec![receiver_int.into()];
+                for arg in args {
                     let val = self.get_vreg(arg, vreg_map)?;
                     let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
                     arg_vals.push(casted.into());
                 }
-                // In tagged-value ABI, virtual calls are rare; just return default
+                let mut llvm_params: Vec<inkwell::types::BasicMetadataTypeEnum> = vec![i64_type.into()];
+                llvm_params.extend(
+                    param_types
+                        .iter()
+                        .map(|_| inkwell::types::BasicMetadataTypeEnum::from(i64_type)),
+                );
+                let fn_type = if *return_type == crate::hir::TypeId::VOID {
+                    self.context_ref().void_type().fn_type(&llvm_params, false)
+                } else {
+                    self.llvm_type(return_type)?.fn_type(&llvm_params, false)
+                };
+                let call = builder
+                    .build_indirect_call(fn_type, method_ptr, &arg_vals, "virtual_call")
+                    .map_err(|e| crate::error::factory::llvm_build_failed("virtual call", &e))?;
                 if let Some(d) = dest {
-                    vreg_map.insert(*d, i64_type.const_int(0, false).into());
+                    let value = call
+                        .try_as_basic_value()
+                        .left()
+                        .unwrap_or_else(|| i64_type.const_zero().into());
+                    vreg_map.insert(*d, value);
                 }
             }
             // Method call instructions — compiled as regular function calls
@@ -2900,9 +2972,81 @@ impl LlvmBackend {
 #[cfg(all(test, feature = "llvm"))]
 mod tests {
     use super::*;
+    use crate::codegen::backend_trait::NativeBackend;
     use crate::mir::{CallTarget, LocalKind, MirInst, MirLocal, Terminator, VReg};
     use simple_common::target::{Target, TargetArch, TargetOS};
     use std::collections::HashMap;
+
+    #[test]
+    fn virtual_call_uses_emitted_vtable_and_object_header() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let mut backend = LlvmBackend::new(target).unwrap();
+        let symbol = "__vtable__Owner__for__Trait";
+
+        let mut method = MirFunction::new(
+            "Owner_dot_method".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        method.params.push(MirLocal {
+            name: "self".to_string(),
+            ty: crate::hir::TypeId::I64,
+            kind: LocalKind::Parameter,
+            is_ghost: false,
+        });
+        method.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(1),
+            value: 7,
+        });
+        method.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+
+        let mut caller = MirFunction::new(
+            "call_virtual".to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Public,
+        );
+        caller.blocks[0].instructions.push(MirInst::ConstInt {
+            dest: VReg(0),
+            value: 3,
+        });
+        caller.blocks[0].instructions.push(MirInst::StructInit {
+            dest: VReg(1),
+            type_id: crate::hir::TypeId::I64,
+            struct_name: Some("Owner".to_string()),
+            vtable_symbol: Some(symbol.to_string()),
+            struct_size: 8,
+            field_offsets: vec![0],
+            field_types: vec![crate::hir::TypeId::I64],
+            field_values: vec![VReg(0)],
+        });
+        caller.blocks[0].instructions.push(MirInst::MethodCallVirtual {
+            dest: Some(VReg(2)),
+            receiver: VReg(1),
+            vtable_slot: 0,
+            param_types: vec![],
+            return_type: crate::hir::TypeId::I64,
+            args: vec![],
+        });
+        caller.blocks[0].terminator = Terminator::Return(Some(VReg(2)));
+
+        let mut mir = crate::mir::MirModule::new();
+        mir.name = Some("virtual_dispatch".to_string());
+        mir.functions = vec![method, caller];
+        mir.vtable_impls.push((
+            crate::hir::TypeId::I64,
+            "Owner".to_string(),
+            symbol.to_string(),
+            vec![Some("Owner.method".to_string())],
+            true,
+        ));
+
+        backend.compile(&mir).unwrap();
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains(symbol), "{ir}");
+        assert!(ir.contains("virtual_call"), "{ir}");
+        assert!(ir.contains("i64 16"), "{ir}");
+        backend.verify().unwrap();
+    }
 
     #[test]
     fn method_call_static_arity_mismatch_uses_typed_indirect_call() {

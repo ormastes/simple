@@ -593,32 +593,6 @@ pub(crate) fn compile_file_to_object(
     let use_llvm = backend == "llvm";
 
     if use_llvm {
-        let requires_vtable_object_abi = !mir.vtable_impls.is_empty()
-            || mir.functions.iter().any(|function| {
-                function.blocks.iter().any(|block| {
-                    block.instructions.iter().any(|instruction| {
-                        matches!(
-                            instruction,
-                            crate::mir::MirInst::StructInit {
-                                vtable_symbol: Some(_),
-                                ..
-                            } | crate::mir::MirInst::FieldGet {
-                                owner_has_vtable: Some(true),
-                                ..
-                            } | crate::mir::MirInst::FieldSet {
-                                owner_has_vtable: Some(true),
-                                ..
-                            }
-                        )
-                    })
-                })
-            });
-        if requires_vtable_object_abi {
-            return Err(format!(
-                "{}: LLVM native-project backend does not yet implement qualified vtable object layout; use Cranelift",
-                file_path.display()
-            ));
-        }
         #[cfg(feature = "llvm")]
         {
             use crate::codegen::backend_trait::NativeBackend;
@@ -1287,10 +1261,7 @@ fn qualify_native_struct_layouts(
         if let Some(owner) = use_map.get(name) {
             return Some((owner.clone(), false));
         }
-        import_map
-            .get(name)
-            .cloned()
-            .map(|owner| (owner, false))
+        import_map.get(name).cloned().map(|owner| (owner, false))
     };
 
     // The backend's local vtable map and local StructInit must use the same
@@ -1302,8 +1273,8 @@ fn qualify_native_struct_layouts(
         // resolve to no local struct or import; keep the legacy
         // `{module_prefix}__{name}` ownership so the key matches the
         // consumer-side fallback in imports.rs pending_vtable_impls.
-        let (owner, _) = resolve_exact_owner(&bare_owner)
-            .unwrap_or_else(|| (format!("{module_prefix}__{bare_owner}"), true));
+        let (owner, _) =
+            resolve_exact_owner(&bare_owner).unwrap_or_else(|| (format!("{module_prefix}__{bare_owner}"), true));
         let trait_name = vtable_symbol
             .rsplit_once("__for__")
             .map(|(_, trait_name)| trait_name)
@@ -1312,12 +1283,6 @@ fn qualify_native_struct_layouts(
         *owner_name = owner;
         *export_symbol = true;
     }
-    let emitted_vtables: std::collections::HashSet<(String, String)> = mir
-        .vtable_impls
-        .iter()
-        .map(|(_, owner, symbol, _, _)| (owner.clone(), symbol.clone()))
-        .collect();
-
     for function in &mut mir.functions {
         for block in &mut function.blocks {
             for instruction in &mut block.instructions {
@@ -1334,9 +1299,7 @@ fn qualify_native_struct_layouts(
                                         "native object layout: vtable-bearing type `{name}` has no provider vtable symbol"
                                     )
                                 })?;
-                                if !emitted_vtables.contains(&(owner.clone(), selected_symbol.clone())) {
-                                    *vtable_symbol = Some(selected_symbol);
-                                }
+                                *vtable_symbol = Some(selected_symbol);
                             }
                             *name = owner;
                         } else if ambiguous_names.contains(name) {

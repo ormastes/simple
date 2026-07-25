@@ -22,7 +22,7 @@ full CLI relink. Expensive boundaries are explicit:
 
 | Platform | Fixed | Verification |
 |---|---|---|
-| Linux | Portable fingerprint pruning; dynload-only default | PASS: Stage 2/3, no Cargo, no Stage 4; 54 seconds |
+| Linux | Portable fingerprint pruning; LLVM vtable object layout and virtual dispatch | FAIL on current main: Stage 2 reaches link, then three unresolved symbols remain |
 | macOS | `shasum`, `gtimeout`, Homebrew prefix, LLVM-major validation | Static contract only; no macOS host available |
 | Windows | Git Bash/`.cmd` entrypoints, MinGW/MSVC triples, `.exe`/`.lib`, WFFI/DLL names | Rust host check PASS; no Windows host available |
 | FreeBSD | Shared wrapper, portable hashes/timeouts, canonical QEMU flow, 900-second pristine-image SSH wait, nested-worktree rsync exclusions | Smoke PASS on FreeBSD 14.3; full mode remains pending |
@@ -83,3 +83,16 @@ sh scripts/check/check-freebsd-bootstrap-qemu.shs --full
   fixture successfully, then `bin/simple <refreshed-main.smf>` exited 1 with
   `file not found`. No fake or knowingly failing spec was committed; production
   SMF dispatch remains a concrete loader/runtime blocker.
+
+## Current-Main Recheck (2026-07-25)
+
+- Clean Linux full-bootstrap cycles initially rejected 40 LLVM modules carrying
+  vtable metadata, then six modules containing real virtual calls.
+- LLVM now emits vtable globals, stores the vtable pointer in an eight-byte
+  object header, shifts direct field access, and lowers virtual calls through
+  the selected slot. The focused Rust IR test passes.
+- The third bounded full-bootstrap cycle compiled all Stage 2 objects and
+  reached the linker. It now fails only on `f64.to_hex`,
+  `ElfReloc.reloc_type_to_elf_value`, and `rt_dict_insert`.
+- The mandatory three-cycle cap is reached. Linux Stage 2/3, FreeBSD full,
+  native macOS/Windows, and the production dynload consumer remain open.

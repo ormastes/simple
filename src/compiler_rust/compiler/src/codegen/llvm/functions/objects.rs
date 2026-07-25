@@ -16,6 +16,7 @@ impl LlvmBackend {
         &self,
         dest: crate::mir::VReg,
         struct_size: u32,
+        vtable_symbol: Option<&str>,
         field_offsets: &[u32],
         field_types: &[crate::hir::TypeId],
         field_values: &[crate::mir::VReg],
@@ -34,7 +35,8 @@ impl LlvmBackend {
         let alloc_fn = module
             .get_function("rt_alloc")
             .unwrap_or_else(|| module.add_function("rt_alloc", alloc_fn_type, None));
-        let size_val = i64_type.const_int(struct_size as u64, false);
+        let header_size = u64::from(vtable_symbol.is_some()) * 8;
+        let size_val = i64_type.const_int(struct_size as u64 + header_size, false);
         let alloc_call = builder
             .build_call(alloc_fn, &[size_val.into()], "struct_alloc")
             .map_err(|e| crate::error::factory::llvm_build_failed("rt_alloc call", &e))?;
@@ -57,9 +59,24 @@ impl LlvmBackend {
             }
         };
 
+        if let Some(symbol) = vtable_symbol {
+            let vtable = module.get_global(symbol).unwrap_or_else(|| {
+                let array_type = i8_ptr_type.array_type(1);
+                let global = module.add_global(array_type, None, symbol);
+                global.set_linkage(inkwell::module::Linkage::External);
+                global
+            });
+            builder
+                .build_store(struct_ptr, vtable.as_pointer_value())
+                .map_err(|e| crate::error::factory::llvm_build_failed("store vtable", &e))?;
+        }
+
         for ((offset, field_type), value) in field_offsets.iter().zip(field_types.iter()).zip(field_values.iter()) {
             let field_val = self.get_vreg(value, vreg_map)?;
-            let offset_val = self.context_ref().i32_type().const_int(*offset as u64, false);
+            let offset_val = self
+                .context_ref()
+                .i32_type()
+                .const_int(*offset as u64 + header_size, false);
             let field_ptr = unsafe { builder.build_gep(i8_type, struct_ptr, &[offset_val], "field_ptr") }
                 .map_err(|e| crate::error::factory::llvm_build_failed("gep", &e))?;
             let llvm_field_ty = self.llvm_type(field_type)?;
