@@ -2,12 +2,12 @@
 #
 # This probe deliberately stops below the renderer and window system. It opens
 # one explicit runtime provider dylib, resolves the provider aliases, and
-# records the provider's own initialization result and error.
+# records the provider's own initialization result. DynLib.call0 returns i64,
+# while rt_vulkan_get_last_error returns text, so this probe does not invoke
+# that symbol through an unsafe ABI reinterpretation.
 
 use std.cli.cli_util.{get_cli_args}
 use std.sffi.dynamic.{DynLib}
-
-extern fn rt_cstring_to_text(cstr: i64) -> text
 
 fn emit_unavailable(path: text, loader_error: text, reason: text) -> i64:
     print("vulkan_provider_probe_schema=macos-vulkan-provider-micro-v1")
@@ -24,7 +24,8 @@ fn emit_unavailable(path: text, loader_error: text, reason: text) -> i64:
     print("vulkan_provider_probe_init=0")
     print("vulkan_provider_probe_device_count=0")
     print("vulkan_provider_probe_loader_error=" + loader_error)
-    print("vulkan_provider_probe_provider_error=")
+    print("vulkan_provider_probe_provider_error=unavailable-dynamic-text-abi")
+    print("vulkan_provider_probe_provider_error_abi=blocked")
     2
 
 fn main() -> i64:
@@ -59,31 +60,52 @@ fn main() -> i64:
         print("vulkan_provider_probe_init=0")
         print("vulkan_provider_probe_device_count=0")
         print("vulkan_provider_probe_loader_error=provider-symbol-missing")
-        print("vulkan_provider_probe_provider_error=")
+        print("vulkan_provider_probe_provider_error=unavailable-dynamic-text-abi")
+        print("vulkan_provider_probe_provider_error_abi=blocked")
         provider.close()
         return 3
 
     val is_available = provider.call0("rt_vulkan_provider_is_available")
+    if is_available == 0:
+        print("vulkan_provider_probe_is_available=0")
+        print("vulkan_provider_probe_init=0")
+        print("vulkan_provider_probe_device_count=0")
+        print("vulkan_provider_probe_loader_error=")
+        print("vulkan_provider_probe_provider_error=unavailable-dynamic-text-abi")
+        print("vulkan_provider_probe_provider_error_abi=blocked")
+        print("vulkan_provider_probe_status=fail")
+        print("vulkan_provider_probe_reason=provider-unavailable")
+        provider.close()
+        return 4
+
     val initialized = provider.call0("rt_vulkan_init")
+    if initialized == 0:
+        print("vulkan_provider_probe_is_available=1")
+        print("vulkan_provider_probe_init=0")
+        print("vulkan_provider_probe_device_count=0")
+        print("vulkan_provider_probe_loader_error=")
+        print("vulkan_provider_probe_provider_error=unavailable-dynamic-text-abi")
+        print("vulkan_provider_probe_provider_error_abi=blocked")
+        print("vulkan_provider_probe_status=fail")
+        print("vulkan_provider_probe_reason=provider-init-failed")
+        provider.close()
+        return 4
+
     val device_count = provider.call0("rt_vulkan_provider_device_count")
-    val error_pointer = provider.call0("rt_vulkan_get_last_error")
-    val provider_error = if error_pointer > 0: rt_cstring_to_text(error_pointer) else: ""
 
     print("vulkan_provider_probe_is_available=" + is_available.to_text())
     print("vulkan_provider_probe_init=" + initialized.to_text())
     print("vulkan_provider_probe_device_count=" + device_count.to_text())
     print("vulkan_provider_probe_loader_error=")
-    print("vulkan_provider_probe_provider_error=" + provider_error)
+    print("vulkan_provider_probe_provider_error=unavailable-dynamic-text-abi")
+    print("vulkan_provider_probe_provider_error_abi=blocked")
 
-    if initialized != 0:
-        provider.call0("rt_vulkan_shutdown")
+    provider.call0("rt_vulkan_shutdown")
     provider.close()
 
-    if is_available != 0 and initialized != 0 and device_count > 0:
-        print("vulkan_provider_probe_status=pass")
-        print("vulkan_provider_probe_reason=provider-device-enumerated")
-        return 0
-
     print("vulkan_provider_probe_status=fail")
-    print("vulkan_provider_probe_reason=provider-unavailable-or-device-missing")
+    if device_count > 0:
+        print("vulkan_provider_probe_reason=provider-error-abi-unavailable")
+    else:
+        print("vulkan_provider_probe_reason=provider-device-missing")
     4

@@ -38,8 +38,11 @@ vulkan_provider_probe_wrapper_reason=native-build-failed
 
 Retained local artifacts:
 
-- `build/macos_vulkan_provider_micro_probe/native-build.log`
-- `build/macos_vulkan_provider_micro_probe/evidence.env`
+- `build/macos_vulkan_provider_micro_probe/native-build.log` — 44 bytes,
+  SHA-256 `dac6c14935953df43b1bf83a677ef069ee62367514d859ed719397b43a0938f0`;
+  retained excerpt: `runtime error: field access on nil receiver`.
+- `build/macos_vulkan_provider_micro_probe/evidence.env` — 244 bytes,
+  SHA-256 `231b31004da0744ba6d409778dc772524c9f74b4346dd7bf05ad1b136c816f62`.
 
 Not produced because the native probe never launched:
 
@@ -47,7 +50,8 @@ Not produced because the native probe never launched:
 - `rt_vulkan_provider_device_count` result
 - dyld provider resolution
 - loader error from probe execution
-- provider error from `rt_vulkan_get_last_error`
+- provider error from `rt_vulkan_get_last_error` (the symbol is resolved, but
+  its text ABI is intentionally blocked until DynLib gains a typed text call)
 
 No full-live Vulkan command, window, framebuffer, or input evidence was
 attempted. The three-cycle micro verification limit was reached, so this
