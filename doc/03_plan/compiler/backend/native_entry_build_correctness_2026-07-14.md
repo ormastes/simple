@@ -907,3 +907,30 @@ the shared binary — deploys require explicit user go-ahead).
   advanced beyond nonzero `f.unwrap_or`; do not repeat the already-recorded
   positional run first. LLVM and the downstream platform matrix remain
   deferred until the Cranelift executable exits `42`.
+
+  The following bounded session first reran that staged probe against the
+  payload-fixed candidate; it still returned `5`, so the first nonzero
+  `unwrap_or` value remained corrupt. Six sibling `rt_is_some` call-result
+  sites and both F64/F32 unbox call-result sites still used Stage4-unsafe
+  `if val` extraction of `LocalId?`; all now use direct `?? LocalId(id: 0)`
+  or guarded `.?`/`??` extraction. The canonical C9 fixture now reports each
+  presence/value failure with a distinct exit while preserving success `42`.
+  A cache-backed pure-Simple candidate completed with `15 compiled,
+  1384 cached, 0 failed`, but the staged fixture exited `2`.
+
+  A final value-class probe returned `14`: the present value was neither the
+  default, zero, a sane 3.14-range scalar, nor negative. Cranelift's generic
+  external-call path declared every result as i64, while
+  `rt_value_as_float(i64)` returns f64. The backend now has a typed
+  i64-to-f64 runtime-import helper and routes that exact symbol before the
+  generic path, with source contracts for the parameter and return ABI.
+  The resulting candidate completed with `6 compiled, 1393 cached, 0 failed`;
+  the canonical Cranelift C9 fixture still exited `2`.
+
+  C9 remains uncredited and this session has reached its three-cycle cap.
+  The next fresh session should inspect the F64 `unwrap_or` some-branch merge:
+  trace the typed `rt_value_as_float` SSA result through
+  `emit_copy(result_local_uo, some_val_uo)` and Cranelift's destination
+  stack/value-map handling. Do not repeat the already-recorded admission or
+  import-signature experiments. LLVM and platform-matrix execution remain
+  deferred until Cranelift exits `42`.
