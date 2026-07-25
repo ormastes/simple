@@ -485,3 +485,19 @@ implementation-milestone-0-in-progress
   three bounded cycles in the prior session, so budget for a multi-cycle task.
   The failure is deterministic (missing file, not flaky), so one attempt of the
   three-cycle cap was spent and retries were correctly not attempted.
+- RV32 QEMU oracle blocked on stale media 2026-07-25: the first live run of the
+  fixed `scripts/os/check_riscv_linux_qemu.shs rv32` never reaches QEMU. It
+  fails its first prerequisite gate with
+  `ERROR: missing media manifest: build/os/rv32_soc/manifest.txt`.
+  Verified on disk: `build/os/rv32_soc/` holds `Image` and `fw_jump.bin` but no
+  `manifest.txt`, `build/os/buildroot/rv32/` does not exist, and the initramfs
+  is still named `initramfs_login.cpio.gz` — the pre-provenance builder's output
+  name, not the current builder's `initramfs.cpio.gz` + `manifest.txt` pair. So
+  the RV32 pinned media are stale leftovers, and the `-initrd` FDT fix recorded
+  above remains UNTESTED — it may well be correct, but nothing has exercised it.
+  AC-9 and AC-10 are therefore blocked upstream of the boot path, not on a boot
+  bug. Unblocking requires re-running `scripts/os/build_riscv_linux_assets.shs`
+  and `scripts/os/build_riscv_buildroot.shs` to completion; Buildroot alone took
+  three bounded cycles in the prior session, so budget for a multi-cycle task.
+  The failure is deterministic (missing file, not flaky), so one attempt of the
+  three-cycle cap was spent and retries were correctly not attempted.
