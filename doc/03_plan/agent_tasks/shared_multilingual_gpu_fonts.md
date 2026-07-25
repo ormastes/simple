@@ -151,3 +151,23 @@ Each handoff names exact producer/consumer symbols, existing scenarios, the
 smallest uncovered branch, its modern SSpec/manual change (or why none is
 needed), honest runtime status, and any concrete reproduction-backed defect.
 No agent may invent a numeric coverage percentage without tool evidence.
+
+## GSUB/GPOS completion campaign — 2026-07-25
+
+Frozen interfaces remain `select_gsub_lookups`, `select_gpos_lookups`,
+`ShapedGlyph`, `FontGlyphRun`, and the existing
+`shared_multilingual_gpu_fonts` SSpec helpers. New scenarios reuse
+`step("Shape selected Unicode scripts with the pinned face")`,
+`setup_selected_shaping_face`, and `expect_selected_unicode_shaping`.
+
+| Lane | Sidecar | Scope |
+|---|---|---|
+| parser/selection | Codex small model | common bounds, fallback, duplicates, aliases, order |
+| positioning | Codex small model | GPOS application and glyph-position bridge |
+| tests/manual | Codex small model | fixture inventory and frozen vocabulary |
+| standards | Codex small model | official OpenType and Unicode references |
+| architecture/perf | Codex small model | canonical owner, complexity, resource safety |
+
+Merge owner is `/root`. A highest-capability model reviews the merged research,
+design, implementation diff, and claim boundaries. Sidecars do not commit,
+sync, broaden accepted witnesses, or mark the feature complete.
