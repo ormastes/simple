@@ -427,3 +427,15 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   guard; therefore the new spec has no executable PASS and no Stage-4/RSS
   claim. The final compiler-promotion attempt remains unspent until that
   focused gate can run on a healthy admitted full CLI.
+- continuation-2026-07-26-cpu-simd-oracle-and-provenance: Pushed the reviewed
+  CPU-SIMD correction through `b7abf9512d`. Production C/NEON blending was
+  already correct; the pure-Simple scalar fallback needed explicit packed-word
+  `i64` normalization under native AOT. The evidence program now uses the
+  canonical scalar helpers, covers non-opaque destinations, and derives gates
+  from per-kernel hit counters plus exact mismatch totals rather than corrupted
+  aggregate bool receipts. The wrapper has one committed canonical source,
+  byte/SHA equality, exact command and artifact provenance, bounded logs, and
+  fail-closed native mode. No fourth native run was made after the three-cycle
+  cap, so the report remains `BLOCKED`; the unchanged architecture-matrix
+  scenario also remains a release blocker. This is an integrated correctness
+  and evidence-hardening checkpoint, not a fresh native parity PASS.
