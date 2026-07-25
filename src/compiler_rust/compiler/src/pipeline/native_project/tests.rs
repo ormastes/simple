@@ -1186,6 +1186,73 @@ fn test_default_config_mangle() {
     );
 }
 
+// Memory-balloon regression coverage: on a 32-core box, `--backend llvm
+// --mode one-binary` builds were observed peaking at 50-64 GB RSS and getting
+// earlyoom-killed, while the same tree under `--backend cranelift --mode
+// dynload` peaked around 1 GB. Root cause: `num_threads` defaulted to
+// `available_parallelism()` (all cores) for both backends, but each LLVM
+// worker owns an independent inkwell::Context + full optimization pipeline
+// (GB-scale peak) vs. Cranelift's much leaner per-worker footprint, so
+// uncapped parallelism multiplied the LLVM peak by the core count. These
+// tests pin `resolve_num_threads`'s backend-aware clamp so a future change
+// can't silently remove it.
+#[test]
+fn test_resolve_num_threads_clamps_llvm_default_to_max_threads() {
+    let mut config = NativeBuildConfig::default();
+    config.backend = "llvm".to_string();
+    config.num_threads = None;
+    config.low_memory = false;
+    // 32-core host, no explicit --threads, no SIMPLE_BOOTSTRAP_THREADS:
+    // must NOT fall back to all 32 cores.
+    assert_eq!(resolve_num_threads(&config, 32, None), LLVM_DEFAULT_MAX_THREADS);
+    // Small host: clamp must not artificially raise thread count above cores.
+    assert_eq!(resolve_num_threads(&config, 2, None), 2);
+}
+
+#[test]
+fn test_resolve_num_threads_cranelift_uses_all_cores_by_default() {
+    let mut config = NativeBuildConfig::default();
+    config.backend = "cranelift".to_string();
+    config.num_threads = None;
+    config.low_memory = false;
+    assert_eq!(resolve_num_threads(&config, 32, None), 32);
+}
+
+#[test]
+fn test_resolve_num_threads_explicit_threads_overrides_llvm_default() {
+    let mut config = NativeBuildConfig::default();
+    config.backend = "llvm".to_string();
+    config.num_threads = Some(16);
+    config.low_memory = false;
+    // An explicit --threads always wins over the backend-aware default,
+    // including going *above* LLVM_DEFAULT_MAX_THREADS -- the clamp is a
+    // safety default, not a hard cap.
+    assert_eq!(resolve_num_threads(&config, 32, None), 16);
+}
+
+#[test]
+fn test_resolve_num_threads_bootstrap_env_wins_over_backend_default() {
+    let mut config = NativeBuildConfig::default();
+    config.backend = "llvm".to_string();
+    config.num_threads = None;
+    config.low_memory = false;
+    assert_eq!(resolve_num_threads(&config, 32, Some(8)), 8);
+}
+
+#[test]
+fn test_resolve_num_threads_low_memory_forces_single_worker() {
+    let mut config = NativeBuildConfig::default();
+    config.backend = "cranelift".to_string();
+    config.num_threads = Some(16);
+    config.low_memory = true;
+    // --low-memory must win over everything, including an explicit --threads,
+    // because it is an explicit memory-safety request from the caller.
+    assert_eq!(resolve_num_threads(&config, 32, Some(8)), 1);
+
+    config.backend = "llvm".to_string();
+    assert_eq!(resolve_num_threads(&config, 32, None), 1);
+}
+
 #[test]
 fn test_discover_files_includes_explicit_entry_outside_source_dirs() {
     let temp = tempfile::tempdir().unwrap();

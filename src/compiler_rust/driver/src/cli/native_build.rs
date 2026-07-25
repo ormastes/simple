@@ -10,7 +10,10 @@
 //!                        (default: src/app/cli/main.spl if it exists)
 //!   --verbose           Verbose output
 //!   --strip             Strip symbols from output
-//!   --threads <n>       Number of compilation threads
+//!   --threads <n>       Number of compilation threads (default: all CPUs for
+//!                        cranelift, clamped to 4 for llvm -- see LLVM_DEFAULT_MAX_THREADS
+//!                        in pipeline/native_project/mod.rs)
+//!   --low-memory        Force single-worker compilation regardless of backend/--threads
 //!   --timeout <secs>    Per-file compilation timeout (default: 60)
 //!   --no-incremental    Disable incremental compilation
 //!   --clean             Force clean rebuild (delete cache)
@@ -85,6 +88,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
     let mut verbose = false;
     let mut strip = false;
     let mut threads: Option<usize> = None;
+    let mut low_memory = false;
     // Large legitimate files need >60s; raised to avoid spurious bootstrap aborts.
     let mut timeout: u64 = 300;
     let mut incremental = true;
@@ -164,6 +168,20 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                     eprintln!("error: --threads requires a number");
                     return 1;
                 }
+            }
+            "--low-memory" => {
+                // Forces single-worker compilation regardless of backend or
+                // host core count. Previously this flag was UNRECOGNIZED here
+                // and silently fell through to the `other => source_dirs.push(..)`
+                // catch-all below -- i.e. it was pushed as a (nonexistent)
+                // source directory and did nothing whatsoever to bound
+                // memory. Every caller that passed `--low-memory` believing
+                // it throttled parallelism (e.g.
+                // scripts/bootstrap/bootstrap-from-scratch.sh) was getting a
+                // no-op. See NativeBuildConfig::low_memory / init_rayon_pool
+                // in pipeline/native_project/mod.rs for the actual effect.
+                low_memory = true;
+                i += 1;
             }
             "--timeout" => {
                 if i + 1 < args.len() {
@@ -435,6 +453,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
                 .map_or("(none)".to_string(), |p| p.display().to_string())
         );
         eprintln!("  Threads: {}", threads.map_or("auto".to_string(), |n| n.to_string()));
+        eprintln!("  Low memory: {}", low_memory);
         eprintln!("  Timeout: {}s", timeout);
         eprintln!("  Incremental: {}", incremental);
         eprintln!("  Mangle: {}", !no_mangle);
@@ -494,6 +513,7 @@ pub fn handle_native_build(args: &[String]) -> i32 {
         emit_archive,
         // Opt-in safe incremental object reuse (default off): SIMPLE_NATIVE_INCREMENTAL=1.
         incremental_hardening: std::env::var("SIMPLE_NATIVE_INCREMENTAL").as_deref() == Ok("1"),
+        low_memory,
         ..Default::default()
     };
     // cranelift has no rv32 codegen backend; default rv32 targets to LLVM when the
@@ -637,7 +657,8 @@ fn print_help() {
     println!("                       (default: src/app/cli/main.spl if it exists)");
     println!("  --verbose, -v       Verbose output");
     println!("  --strip             Strip symbols from output");
-    println!("  --threads <n>       Number of compilation threads (default: all CPUs)");
+    println!("  --threads <n>       Number of compilation threads (default: all CPUs; llvm backend defaults to at most 4 -- each worker owns a full LLVM Context/optimizer, so unclamped parallelism balloons memory)");
+    println!("  --low-memory        Force single-worker compilation (overrides --threads); use when even the llvm default (4 workers) is too much for the host");
     println!("  --timeout <secs>    Per-file timeout in seconds (default: 60)");
     println!("  --no-incremental    Disable incremental compilation");
     println!("  --clean             Force clean rebuild (delete cache)");

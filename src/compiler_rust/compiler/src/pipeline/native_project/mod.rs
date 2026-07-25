@@ -72,22 +72,73 @@ fn native_object_staging_dir(cache_base_dir: &Path, cache_dir: &Path) -> Result<
 /// Subsequent calls are no-ops (safe for tests and repeated builds).
 ///
 /// Thread count resolution order:
-/// 1. Explicit `num_threads` from `NativeBuildConfig`
-/// 2. `SIMPLE_BOOTSTRAP_THREADS` environment variable
-/// 3. `std::thread::available_parallelism()` (all cores)
+/// 1. `--low-memory` forces a single worker, full stop (highest priority: an
+///    explicit memory-safety request must never be silently overridden).
+/// 2. Explicit `num_threads` from `NativeBuildConfig` (`--threads`)
+/// 3. `SIMPLE_BOOTSTRAP_THREADS` environment variable
+/// 4. Backend-aware default: `available_parallelism()` (all cores) for
+///    Cranelift, but clamped for LLVM (see `LLVM_DEFAULT_MAX_THREADS` below).
+///
+/// # Why LLVM gets a lower default
+/// Each rayon worker that compiles with `--backend llvm` builds its own
+/// independent `inkwell::Context` + `LlvmBackend` (see
+/// `compile_file_to_object` in `codegen`-adjacent `compiler.rs`), which spins
+/// up a full LLVM optimization pipeline per translation unit. LLVM's
+/// per-translation-unit peak memory is routinely GB-scale for large/complex
+/// modules, vs. Cranelift's much leaner tens-of-MB footprint for the same
+/// input. Before this clamp, `num_threads` defaulted to
+/// `available_parallelism()` (all host cores) for BOTH backends equally, so
+/// on a 32-core box, 32 concurrent LLVM workers each peaking around 1.5-2 GB
+/// multiplied straight into the 50-64 GB earlyoom kills observed on
+/// `--backend llvm --mode one-binary` builds -- while the identical source
+/// tree under `--backend cranelift --mode dynload` peaked around 1 GB,
+/// because Cranelift's per-worker footprint stayed small even at full
+/// parallelism. This is not a leak; it is unbounded worker-count x
+/// per-worker-peak with no backend-aware ceiling.
+const LLVM_DEFAULT_MAX_THREADS: usize = 4;
+
+/// Pure thread-count resolution, factored out of `init_rayon_pool` so the
+/// backend-aware clamp can be unit tested without touching the process-global
+/// rayon pool (which can only be initialized once per test process).
+///
+/// `bootstrap_threads_env` is passed in (rather than read from the process
+/// environment directly) so tests can exercise the `SIMPLE_BOOTSTRAP_THREADS`
+/// branch deterministically.
+pub(crate) fn resolve_num_threads(
+    config: &NativeBuildConfig,
+    available_cores: usize,
+    bootstrap_threads_env: Option<usize>,
+) -> usize {
+    if config.low_memory {
+        return 1;
+    }
+    if let Some(n) = config.num_threads {
+        return n;
+    }
+    if let Some(n) = bootstrap_threads_env.filter(|&n| n > 0) {
+        return n;
+    }
+    if config.backend == "llvm" {
+        available_cores.min(LLVM_DEFAULT_MAX_THREADS)
+    } else {
+        available_cores
+    }
+}
+
 fn init_rayon_pool(config: &NativeBuildConfig) {
     use std::sync::Once;
     static POOL_INIT: Once = Once::new();
 
-    let num_threads = config
-        .num_threads
-        .or_else(|| {
-            std::env::var("SIMPLE_BOOTSTRAP_THREADS")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .filter(|&n| n > 0)
-        })
-        .unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1));
+    let available_cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let bootstrap_threads_env = std::env::var("SIMPLE_BOOTSTRAP_THREADS").ok().and_then(|s| s.parse::<usize>().ok());
+    let num_threads = resolve_num_threads(config, available_cores, bootstrap_threads_env);
+
+    if config.verbose || std::env::var("SIMPLE_NATIVE_BUILD_TRACE").is_ok() {
+        eprintln!(
+            "[native-build] parallelism: {num_threads} worker(s) (backend={}, low_memory={})",
+            config.backend, config.low_memory
+        );
+    }
 
     let stack_size = config.stack_size;
 
@@ -303,6 +354,15 @@ pub struct NativeBuildConfig {
     /// whole per-module cache instead of silently reusing a stale object for
     /// module B. Default false preserves the legacy content-only key.
     pub incremental_hardening: bool,
+    /// Force conservative (memory-safe) compilation parallelism regardless of
+    /// backend or host core count. Overrides the LLVM default-parallelism
+    /// clamp below with an even tighter single-worker bound. See
+    /// `init_rayon_pool` for why this exists: each parallel worker owns an
+    /// independent LLVM `Context` + optimization pipeline, whose peak memory
+    /// is far larger than Cranelift's, so unclamped `available_parallelism()`
+    /// (the previous default) multiplies that peak by the host core count —
+    /// this is what produced the 50-64 GB earlyoom kills on a 32-core box.
+    pub low_memory: bool,
 }
 
 impl Default for NativeBuildConfig {
@@ -333,6 +393,7 @@ impl Default for NativeBuildConfig {
             opt_level: NativeOptimizationLevel::default_for_native_executable(),
             emit_archive: false,
             incremental_hardening: false,
+            low_memory: false,
         }
     }
 }
