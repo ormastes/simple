@@ -308,3 +308,19 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   session. ARM64 remains blocked because the canonical producer requires the
   absent full CLI `os build` dispatcher; Stage 3 cannot substitute for that
   provenance path. Live x86/ARM captures and comparison therefore remain open.
+- continuation-2026-07-25-fat32-x86-host-arm: Valid FAT32 image construction
+  and fsck/manifest integrity are now on `main`. The x86 QEMU lane boots GRUB,
+  the current kernel, NVMe, and a real 3840x2160 ARGB scanout; after the
+  DrawIR optional workaround it reaches `engine2d_rendered`, but correctly
+  fails closed because the material fallback identity is lost (`none` with an
+  empty hash). No x86 capture or input receipt is claimed. The reviewed host
+  native-provider binding and compiler zero-argument receiver preservation
+  fixes are pushed through `62b498050e`. A refreshed host CPU-SIMD run now
+  reaches `engine-cleared` before a distinct nil-receiver fault, so screenshot
+  and Electron event evidence remain open. Vulkan compiles but its earlier
+  live run faulted in the font-atlas path; Metal compiles but fails closed to
+  CPU because no backend-specific probe is available. Standalone NEON reports
+  exact primitives but 18/192 composite mismatches. The focused ARM CLI source
+  route passed high review, but its exact Stage4 capsule was killed with
+  exit 137 before producing an executable, so ARM QEMU was not launched.
+  Parallel agents own the x86 provenance and host nil-receiver diagnoses.
