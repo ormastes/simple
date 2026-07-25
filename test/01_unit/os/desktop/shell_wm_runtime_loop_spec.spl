@@ -1,3 +1,4 @@
+# codex-system-test
 use std.spec
 use os.desktop.shell.{DesktopShell}
 use os.compositor.compositor.{Compositor}
@@ -33,6 +34,46 @@ impl SilentInputBackend:
     static fn new() -> SilentInputBackend:
         SilentInputBackend(_unused: false)
 
+class PointerInputBackend:
+    pending: bool
+
+impl InputBackend for PointerInputBackend:
+    me poll_key() -> KeyEvent?:
+        nil
+
+    me poll_mouse() -> MouseEvent?:
+        if not self.pending:
+            return nil
+        self.pending = false
+        MouseEvent(
+            x: 90,
+            y: 125,
+            dx: 0,
+            dy: 0,
+            left_pressed: true,
+            right_pressed: false,
+            middle_pressed: false,
+            left_just_pressed: true,
+            right_just_pressed: false,
+            left_just_released: false
+        )
+
+    fn alt_held() -> bool:
+        false
+
+    fn shift_held() -> bool:
+        false
+
+    fn ctrl_held() -> bool:
+        false
+
+    fn key_to_char(key: Key) -> text?:
+        nil
+
+impl PointerInputBackend:
+    static fn new() -> PointerInputBackend:
+        PointerInputBackend(pending: true)
+
 fn _make_test_shell() -> DesktopShell:
     val backend = BrowserCompositorBackend.new(800, 600)
     val input = SilentInputBackend.new()
@@ -42,6 +83,22 @@ fn _make_test_shell() -> DesktopShell:
     shell
 
 describe "DesktopShell live WM runtime loop wiring":
+    it "delivers a typed input-trait mouse event through the compositor owner":
+        val backend = BrowserCompositorBackend.new(800, 600)
+        val input = PointerInputBackend.new()
+        var compositor = Compositor.with_backends(backend, input, 800, 600)
+        compositor.create_window("One", 10, 40, 300, 200)
+        val second = compositor.create_window("Two", 80, 120, 300, 200)
+
+        compositor.handle_input()
+
+        expect(compositor.cursor.x).to_equal(90)
+        expect(compositor.cursor.y).to_equal(125)
+        expect(compositor.surfaces[compositor.surfaces.len() - 1].id).to_equal(second)
+        expect(compositor.has_pending_wm_pointer_step()).to_equal(true)
+        expect(compositor.pending_wm_pointer_button_code_value()).to_equal(1)
+        expect(compositor.pending_wm_pointer_kind_code_value()).to_equal(1)
+
     it "consumes pending compositor pointer steps through the SimpleOS WM bridge":
         launcher_init()
         var shell = _make_test_shell()
