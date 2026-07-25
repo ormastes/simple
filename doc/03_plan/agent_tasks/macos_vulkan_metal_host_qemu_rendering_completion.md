@@ -428,6 +428,31 @@ same failure.
   micro-probe only with a healthy canonical self-hosted compiler, then require
   its provider availability, positive device count, dyld resolution, and
   provider-error fields before another full-live cycle.
+- The provenance helper/producer bundle is now committed and rebased as
+  `e97529a460` (not pushed). Its focused wrapper/provenance contract passes,
+  including invariance under conflicting ambient `SDKROOT`, `CFLAGS`, and
+  `LLVM_SYS_*` values. The exact ambient contaminant was Apple `cc --version`;
+  selected real Rust/Cargo/CC/llvm-config probes now run under `env -i`.
+- An isolated full Cranelift producer at
+  `/private/tmp/simple-stage3-git-e975` completed Stage 2 and Stage 3 with 685
+  files compiled and zero failures. Stage 3 sanity passed and emitted SHA-256
+  `866e43930620393ecd5044684d6ea3d83b84675a2d0152df993d26c58542ee7a`.
+  The fresh-shell standalone verifier correctly rejected the manifest:
+  producer-time seed authority was
+  `d0749dfc29e32998e6639a1ffbc21a5e146e22a595fa98ee0105a63ea7cee64e`,
+  while ambient standalone re-derivation was
+  `7cd28afe1eba2a356a0ff83d3102d31f706c5afb0e51331f0b4c3731b285a965`.
+  Git head, dirty-byte fingerprint, helper bundle, and seed artifact stamp all
+  matched. The remaining mismatch is PATH authority: platform detection puts
+  LLVM 18's `llvm-config` on the producer PATH, while a fresh verifier shell
+  does not. Re-derive the seed fingerprint under the Stage 2 transcript's
+  recorded PATH (the exact PATH used by the build), regenerate the manifest,
+  and require standalone PASS before pushing or launching Vulkan.
+- The three-cycle cap is exhausted for this session. Two clean, inactive,
+  detached generated worktrees (`simple-wm-e3e0c5c4` and `engine2d-vulkan`)
+  were removed after an independent disk audit to recover about 13.6 GiB;
+  their commits remain in Git. Dirty and branch-attached agent worktrees were
+  preserved.
 
 ## Required Evidence and Documentation
 

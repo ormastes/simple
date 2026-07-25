@@ -167,6 +167,19 @@ fi
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
 cd "${repo_root}"
+BOOTSTRAP_STAGE3_FACADE_PATH=\
+"${repo_root}/scripts/check/lib/bootstrap-stage3-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH
+. "${BOOTSTRAP_STAGE3_FACADE_PATH}"
+bootstrap_script_path="${repo_root}/scripts/bootstrap/bootstrap-from-scratch.sh"
+bootstrap_script_sha256_before=$(bootstrap_stage3_hash_file "${bootstrap_script_path}")
+bootstrap_provenance_helper="${repo_root}/scripts/check/lib/bootstrap-stage3-provenance.shs"
+bootstrap_provenance_helper_sha256_before=$(
+  bootstrap_stage3_hash_file "${bootstrap_provenance_helper}"
+)
+bootstrap_provenance_bundle_fingerprint_before=$(
+  bootstrap_stage3_helper_bundle_fingerprint
+)
 
 # Concurrency guard: two bootstraps sharing one ${output_dir} interleave logs
 # and race binary writes (observed 2026-07-24: twin stage2 builds truncated
@@ -342,6 +355,38 @@ if [ -n "${LLVM_PREFIX:-}" ] && [ -d "${LLVM_PREFIX}/bin" ]; then
   esac
 fi
 
+# Bind builds to existing canonical tool directories. Hosted launchers may
+# inject duplicate, missing, or symlinked PATH entries (notably Cryptex paths
+# on macOS); those are not stable provenance authorities.
+bootstrap_canonical_path=
+bootstrap_path_old_ifs=$IFS
+IFS=:
+for bootstrap_path_entry in ${PATH}; do
+  IFS=$bootstrap_path_old_ifs
+  [ -d "${bootstrap_path_entry}" ] || {
+    IFS=:
+    continue
+  }
+  bootstrap_path_entry=$(
+    CDPATH= cd -- "${bootstrap_path_entry}" && pwd -P
+  ) || exit 1
+  case ":${bootstrap_canonical_path}:" in
+    *":${bootstrap_path_entry}:"*) ;;
+    *)
+      bootstrap_canonical_path=\
+"${bootstrap_canonical_path:+${bootstrap_canonical_path}:}${bootstrap_path_entry}"
+      ;;
+  esac
+  IFS=:
+done
+IFS=$bootstrap_path_old_ifs
+[ -n "${bootstrap_canonical_path}" ] || {
+  echo "error: canonical bootstrap PATH is empty" >&2
+  exit 1
+}
+PATH=${bootstrap_canonical_path}
+export PATH
+
 log_dir="${output_dir}/logs/${PLATFORM}"
 mkdir -p "${log_dir}"
 
@@ -469,19 +514,64 @@ COMPILER_CHECK_KILL_GRACE_SECONDS=1
 
 bootstrap_stage_sanity() (
   candidate=$1
-  version=$(run_timeout 10 "${candidate}" --version 2>&1) || return 1
-  [ "${version}" = "simple-bootstrap 1.0.0-beta" ] || return 1
+  evidence_path=${2:-}
+  sanity_home=$3
+  sanity_tmpdir=$4
+  sanity_path=$5
+  for sanity_env_name in $(env | sed 's/=.*//'); do
+    unset "${sanity_env_name}"
+  done
+  HOME=${sanity_home}
+  TMPDIR=${sanity_tmpdir}
+  PATH=${sanity_path}
+  LC_ALL=C
+  LANG=C
+  export HOME TMPDIR PATH LC_ALL LANG
+  evidence_tmp="${evidence_path:-${TMPDIR:-/tmp}/bootstrap-sanity}.tmp.$$"
+  frontend_log="${evidence_tmp}.frontend"
+  rm -f "${evidence_tmp}" "${frontend_log}"
+  candidate_sha_before=$(bootstrap_stage3_hash_file "${candidate}") || return 1
+  version_status=0
+  version=$(run_timeout 10 "${candidate}" --version 2>&1) ||
+    version_status=$?
+  unsupported_status=0
   if unsupported=$(run_timeout 10 "${candidate}" run scripts/check/cert/redeploy_gate/fixtures/p2_add.spl 2>&1); then
-    return 1
+    unsupported_status=0
   else
     unsupported_status=$?
   fi
-  [ "${unsupported_status}" -eq 1 ] || return 1
-  case "${unsupported}" in
-    *"unknown command 'run'"*) ;;
-    *) return 1 ;;
-  esac
-  CANDIDATE_FRONTEND_BACKEND="${backend}" candidate_frontend_smoke "${candidate}"
+  frontend_status=0
+  CANDIDATE_FRONTEND_BACKEND="${backend}" \
+    candidate_frontend_smoke "${candidate}" >"${frontend_log}" 2>&1 ||
+    frontend_status=$?
+  candidate_sha_after=$(bootstrap_stage3_hash_file "${candidate}") || return 1
+  sanity_status=fail
+  if [ "${version_status}" -eq 0 ] &&
+    [ "${version}" = "simple-bootstrap 1.0.0-beta" ] &&
+    [ "${unsupported_status}" -eq 1 ] &&
+    case "${unsupported}" in *"unknown command 'run'"*) true ;; *) false ;; esac &&
+    [ "${frontend_status}" -eq 0 ] &&
+    [ "${candidate_sha_before}" = "${candidate_sha_after}" ]; then
+    sanity_status=pass
+  fi
+  if [ -n "${evidence_path}" ]; then
+    {
+      echo "schema=simple-bootstrap-sanity-evidence-v1"
+      echo "status=${sanity_status}"
+      echo "candidate_sha256_before=${candidate_sha_before}"
+      echo "version_status=${version_status}"
+      echo "version_output=${version}"
+      echo "unsupported_status=${unsupported_status}"
+      printf 'unsupported_output_sha256=%s\n' \
+        "$(printf '%s' "${unsupported}" | bootstrap_stage3_hash_stream)"
+      echo "frontend_smoke_status=${frontend_status}"
+      echo "frontend_smoke_output_sha256=$(bootstrap_stage3_hash_file "${frontend_log}")"
+      echo "candidate_sha256_after=${candidate_sha_after}"
+    } >"${evidence_tmp}" || return 1
+    mv "${evidence_tmp}" "${evidence_path}"
+  fi
+  rm -f "${frontend_log}"
+  [ "${sanity_status}" = pass ]
 )
 
 bootstrap_native_build_main() {
@@ -538,27 +628,20 @@ compiler_backfill_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simpl
 # stale seed would silently miscompile, which is worse than a slow build.
 seed_stamp="${seed_bin}.inputs.sha256"
 seed_inputs_hash() {
-  {
-    find src/compiler_rust \( -type d -name 'target*' -o -path src/compiler_rust/vendor \) -prune -o \
-      \( -name '*.rs' -o -name 'Cargo.toml' \) -type f -print 2>/dev/null \
-      | LC_ALL=C sort | hash_path_list
-    find src/runtime \( -name '*.c' -o -name '*.h' \) -type f -print 2>/dev/null \
-      | LC_ALL=C sort | hash_path_list
-    printf '%s  %s\n' "$(hash_file src/compiler_rust/Cargo.lock)" src/compiler_rust/Cargo.lock
-    printf 'profile=bootstrap backend=%s features=%s\n' "${backend}" "${llvm_features}"
-    rustc -V 2>/dev/null
-  } | hash_stream
+  bootstrap_stage3_seed_inputs_fingerprint "${repo_root}" \
+    "${backend}" "${llvm_features}" "${PATH}"
 }
 seed_stale=0
 rust_rebuilt=0
+compiler_backfill_rebuilt=0
 # (content-hash staleness gate runs below, after backend/llvm_features settle)
 
 # Detect LLVM 18 availability for LLVM backends.
 llvm_features=""
 if [ "${backend}" = "llvm-lib" ] || [ "${backend}" = "llvm" ]; then
   # LLVM is resolved once by the shared platform interface
-  # (scripts/setup/platform-detect.shs, sourced above), which also exports
-  # LLVM_SYS_<major>0_PREFIX and SIMPLE_LLVM_PATH for the Rust build and Simple runtime.
+  # (scripts/setup/platform-detect.shs, sourced above), which also exports the
+  # LLVM_SYS_<major>0_PREFIX used by the Rust build and the runtime's LLVM path.
   if [ "${LLVM_FOUND:-0}" = "1" ]; then
     echo "LLVM ${LLVM_VERSION} found: ${LLVM_PREFIX} (lib: ${LLVM_LIB})"
     llvm_features="--features llvm"
@@ -583,7 +666,9 @@ fi
 # runtime library is missing, the cargo branch below rebuilds regardless.
 seed_inputs_fingerprint=$(seed_inputs_hash)
 if [ -x "${seed_bin}" ] && [ -f "${native_all_lib}" ]; then
-  if [ ! -f "${seed_stamp}" ] || [ "$(cat "${seed_stamp}" 2>/dev/null)" != "${seed_inputs_fingerprint}" ]; then
+  if ! bootstrap_stage3_verify_seed_stamp "${seed_stamp}" \
+    "${seed_inputs_fingerprint}" "${seed_bin}" "${native_all_lib}" \
+    "${compiler_backfill_lib}"; then
     seed_stale=1
     if [ "${full_bootstrap}" -eq 1 ]; then
       echo "Seed/runtime stale (Rust source content changed since last build). Full bootstrap will rebuild Rust."
@@ -594,6 +679,151 @@ if [ -x "${seed_bin}" ] && [ -f "${native_all_lib}" ]; then
     echo "Seed/runtime current (input content hash matches); skipping Rust rebuild."
   fi
 fi
+
+if [ "${full_bootstrap}" -eq 1 ]; then
+  rust_authority_root="${output_dir}/rust-authority-${seed_inputs_fingerprint}"
+  rust_authority_target="${rust_authority_root}/target"
+  rust_authority_home="${rust_authority_root}/home"
+  rust_authority_cargo_home="${rust_authority_root}/cargo-home"
+  rust_authority_tmp="${rust_authority_root}/tmp"
+  rust_toolchain_authority=$(
+    bootstrap_stage3_resolve_rust_toolchain "${repo_root}" "${PATH}"
+  ) || {
+    echo "error: could not resolve canonical Rust toolchain" >&2
+    exit 1
+  }
+  rust_sysroot=$(
+    printf '%s\n' "${rust_toolchain_authority}" |
+      sed -n 's/^rust-sysroot=//p'
+  )
+  rustc_abs=$(
+    printf '%s\n' "${rust_toolchain_authority}" |
+      sed -n 's/^rustc-path=//p'
+  )
+  cargo_abs=$(
+    printf '%s\n' "${rust_toolchain_authority}" |
+      sed -n 's/^cargo-path=//p'
+  )
+  [ -x "${rustc_abs}" ] && [ -x "${cargo_abs}" ] || {
+    echo "error: Rust toolchain binaries missing under sysroot: ${rust_sysroot}" >&2
+    exit 1
+  }
+  cc_abs=$(command -v cc)
+  rust_llvm_authority=$(
+    bootstrap_stage3_resolve_llvm_build_authority \
+      "${PATH}" "${llvm_features}"
+  ) || {
+    echo "error: could not resolve deterministic LLVM build authority" >&2
+    exit 1
+  }
+  rust_llvm_status=$(
+    printf '%s\n' "${rust_llvm_authority}" |
+      sed -n 's/^llvm-build-status=//p'
+  )
+  rust_llvm_major=$(
+    printf '%s\n' "${rust_llvm_authority}" |
+      sed -n 's/^llvm-major=//p'
+  )
+  rust_llvm_prefix=$(
+    printf '%s\n' "${rust_llvm_authority}" |
+      sed -n 's/^llvm-prefix=//p'
+  )
+  rust_llvm_sdkroot=$(
+    printf '%s\n' "${rust_llvm_authority}" |
+      sed -n 's/^llvm-sdkroot=//p'
+  )
+  rust_llvm_homebrew_prefix=$(
+    printf '%s\n' "${rust_llvm_authority}" |
+      sed -n 's/^llvm-homebrew-prefix=//p'
+  )
+  rust_llvm_library_path=$(
+    printf '%s\n' "${rust_llvm_authority}" |
+      sed -n 's/^llvm-library-path=//p'
+  )
+fi
+
+rust_authority_workspace_prepared=0
+prepare_rust_authority_workspace() {
+  if [ "${rust_authority_workspace_prepared}" -eq 1 ]; then
+    return 0
+  fi
+
+  rm -rf "${rust_authority_root}"
+  mkdir -p "${rust_authority_target}" "${rust_authority_home}" \
+    "${rust_authority_cargo_home}" "${rust_authority_tmp}"
+  vendored_sources_absolute=$(
+    CDPATH= cd -- "${repo_root}/src/compiler_rust/vendor" && pwd -P
+  )
+  cargo_authority_config="${rust_authority_cargo_home}/config.toml"
+  awk -v vendored_sources="${vendored_sources_absolute}" '
+    {
+      config_line = $0
+      sub(/\r$/, "", config_line)
+    }
+    config_line == "directory = \"vendor\"" {
+      print "directory = \"" vendored_sources "\""
+      replaced += 1
+      next
+    }
+    { print }
+    END { if (replaced != 1) exit 1 }
+  ' "${repo_root}/src/compiler_rust/.cargo/config.toml" \
+    >"${cargo_authority_config}" || {
+    echo "error: could not create private offline Cargo configuration" >&2
+    exit 1
+  }
+  rust_authority_workspace_prepared=1
+}
+
+run_rust_authority_cargo() {
+  rust_authority_log=$1
+  rust_authority_lto=$2
+  shift 2
+  prepare_rust_authority_workspace
+  if [ "${rust_llvm_status:-disabled}" = enabled ]; then
+    if [ "${rust_authority_lto}" = off ]; then
+      run_logged "${rust_authority_log}" env -i \
+        HOME="$(absolute_path "${rust_authority_home}")" \
+        CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
+        CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
+        TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
+        RUSTC="${rustc_abs}" CC="${cc_abs}" LC_ALL=C LANG=C \
+        "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
+        "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
+        "LIBRARY_PATH=${rust_llvm_library_path}" \
+        "SDKROOT=${rust_llvm_sdkroot}" CARGO_PROFILE_BOOTSTRAP_LTO=off \
+        "${cargo_abs}" "$@"
+    else
+      run_logged "${rust_authority_log}" env -i \
+        HOME="$(absolute_path "${rust_authority_home}")" \
+        CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
+        CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
+        TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
+        RUSTC="${rustc_abs}" CC="${cc_abs}" LC_ALL=C LANG=C \
+        "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
+        "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
+        "LIBRARY_PATH=${rust_llvm_library_path}" \
+        "SDKROOT=${rust_llvm_sdkroot}" \
+        "${cargo_abs}" "$@"
+    fi
+  elif [ "${rust_authority_lto}" = off ]; then
+    run_logged "${rust_authority_log}" env -i \
+      HOME="$(absolute_path "${rust_authority_home}")" \
+      CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
+      CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
+      TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
+      RUSTC="${rustc_abs}" CC="${cc_abs}" LC_ALL=C LANG=C \
+      CARGO_PROFILE_BOOTSTRAP_LTO=off "${cargo_abs}" "$@"
+  else
+    run_logged "${rust_authority_log}" env -i \
+      HOME="$(absolute_path "${rust_authority_home}")" \
+      CARGO_HOME="$(absolute_path "${rust_authority_cargo_home}")" \
+      CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
+      TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
+      RUSTC="${rustc_abs}" CC="${cc_abs}" LC_ALL=C LANG=C \
+      "${cargo_abs}" "$@"
+  fi
+}
 
 if [ "${full_bootstrap}" -eq 0 ]; then
   # Default/pure-Simple rebuild: reuse the existing Rust seed and runtime
@@ -629,25 +859,53 @@ elif [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ] || [ "${seed_stale}"
   # leaving the `simple-driver` bin with an undefined `rt_cli_run_file` symbol
   # (the C symbol is provided by `simple-native-all`, which the seed bin does
   # not link). Separate invocations keep simple-runtime's feature set per-bin.
-  run_logged rust-seed-build cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver ${llvm_features}
-  run_logged rust-native-all-build cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-native-all ${llvm_features}
+  run_rust_authority_cargo rust-seed-build default \
+    build --locked --offline \
+    --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
+    -p simple-driver ${llvm_features}
+  run_rust_authority_cargo rust-native-all-build default \
+    build --locked --offline \
+    --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
+    -p simple-native-all ${llvm_features}
   # Rebuild simple-runtime LAST with LTO off so deps/libsimple_runtime.a holds
   # machine-code symbol definitions. Under the bootstrap profile's thin-LTO the
   # rlib members export symbols only inside embedded `__bitcode` sections, which
   # the stage4 `-r` capsule link cannot LTO-compile — every runtime root then
   # audits as "0 definitions". The last cargo invocation wins the deps/ archive
   # slot, so this must stay after the driver and native-all builds.
-  run_logged rust-runtime-nolto-build env CARGO_PROFILE_BOOTSTRAP_LTO=off cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-runtime --features runtime-symbol-table
+  run_rust_authority_cargo rust-runtime-nolto-build off \
+    build --locked --offline \
+    --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
+    -p simple-runtime --features runtime-symbol-table
+  mkdir -p "$(dirname -- "${seed_bin}")"
+  cp -p "${rust_authority_target}/bootstrap/simple${exe_suffix}" "${seed_bin}"
+  cp -p "${rust_authority_target}/bootstrap/${archive_prefix}simple_native_all${archive_suffix}" \
+    "${native_all_lib}"
+  for rust_runtime_artifact in \
+    "${rust_authority_target}/bootstrap/${archive_prefix}simple_runtime"*; do
+    [ -f "${rust_runtime_artifact}" ] || continue
+    cp -p "${rust_runtime_artifact}" "$(dirname -- "${seed_bin}")/"
+  done
   rust_rebuilt=1
-  # Record the fingerprint of the inputs we just built from, so the next run
-  # can skip cargo when nothing actually changed (only written after a real
-  # rebuild — never in pure-Simple or hash-match-skip paths).
-  seed_inputs_hash > "${seed_stamp}"
 fi
 
 if [ "${full_bootstrap}" -eq 1 ] \
    && { [ ! -f "${compiler_backfill_lib}" ] || [ "${seed_stale}" -eq 1 ] || [ "${rust_rebuilt}" -eq 1 ]; }; then
-  run_logged rust-compiler-backfill-build cargo build --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-compiler-backfill
+  run_rust_authority_cargo rust-compiler-backfill-build default \
+    build --locked --offline \
+    --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
+    -p simple-compiler-backfill
+  cp -p "${rust_authority_target}/bootstrap/${archive_prefix}simple_compiler_backfill${archive_suffix}" \
+    "${compiler_backfill_lib}"
+  compiler_backfill_rebuilt=1
+fi
+if [ "${rust_rebuilt}" -eq 1 ] || [ "${compiler_backfill_rebuilt}" -eq 1 ]; then
+  bootstrap_stage3_write_seed_stamp "${seed_stamp}" \
+    "${seed_inputs_fingerprint}" "${seed_bin}" "${native_all_lib}" \
+    "${compiler_backfill_lib}" || {
+    echo "error: could not bind Rust seed/runtime artifact tuple" >&2
+    exit 1
+  }
 fi
 
 # Force manual bootstrap — ensures SIMPLE_RUNTIME_PATH is used for linking
@@ -683,31 +941,205 @@ else
     exit 1
   fi
 
+  # Capture the complete source authority before either staged compiler runs.
+  # The manifest is emitted only after an identical post-Stage-3 snapshot.
+  stage3_provenance_dir="${output_dir}/stage3/${PLATFORM}"
+  stage3_provenance_manifest="${stage3_provenance_dir}/provenance.env"
+  stage3_source_before="${stage3_provenance_dir}/source-inputs-before.txt"
+  stage3_source_after="${stage3_provenance_dir}/source-inputs-after.txt"
+  stage3_git_before="${stage3_provenance_dir}/git-state-before.env"
+  stage3_git_after="${stage3_provenance_dir}/git-state-after.env"
+  stage2_command_transcript="${stage3_provenance_dir}/stage2-command.transcript"
+  stage3_command_transcript="${stage3_provenance_dir}/stage3-command.transcript"
+  stage2_sanity_evidence="${stage3_provenance_dir}/stage2-sanity.env"
+  stage3_sanity_evidence="${stage3_provenance_dir}/stage3-sanity.env"
+  stage2_provenance_cache="${stage3_provenance_dir}/stage2-native-cache"
+  stage3_provenance_cache="${stage3_provenance_dir}/stage3-native-cache"
+  stage2_provenance_home="${stage3_provenance_dir}/stage2-home"
+  stage2_provenance_tmp="${stage3_provenance_dir}/stage2-tmp"
+  stage3_provenance_home="${stage3_provenance_dir}/stage3-home"
+  stage3_provenance_tmp="${stage3_provenance_dir}/stage3-tmp"
+  stage2_admitted_dir="${stage3_provenance_dir}/stage2-admitted"
+  stage2_admitted_bin="${stage2_admitted_dir}/simple${exe_suffix}"
+  stage2_runtime_authority="${stage3_provenance_dir}/stage2-runtime-authority"
+  runtime_origin_before="${stage3_provenance_dir}/runtime-origin-before.txt"
+  runtime_origin_after="${stage3_provenance_dir}/runtime-origin-after.txt"
+  runtime_admitted_snapshot="${stage3_provenance_dir}/runtime-admitted.txt"
+  tool_authority_before="${stage3_provenance_dir}/tool-authority-before.txt"
+  tool_authority_after="${stage3_provenance_dir}/tool-authority-after.txt"
+  mkdir -p "${stage3_provenance_dir}"
+  # A previous fail-closed run may leave its admitted authority deliberately
+  # frozen (directories 0500, files 0400/0500). Thaw only this private output
+  # tree before replacing it; source/runtime authorities remain untouched.
+  chmod -R u+w "${stage3_provenance_dir}" || {
+    echo "error: could not thaw previous Stage 3 provenance output" >&2
+    exit 1
+  }
+  rm -f "${stage3_provenance_manifest}" \
+    "${stage3_source_before}" "${stage3_source_after}" \
+    "${stage3_git_before}" "${stage3_git_after}" \
+    "${stage2_command_transcript}" "${stage3_command_transcript}" \
+    "${stage2_sanity_evidence}" "${stage3_sanity_evidence}"
+  rm -rf "${stage2_provenance_cache}" "${stage3_provenance_cache}" \
+    "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
+    "${stage3_provenance_home}" "${stage3_provenance_tmp}" \
+    "${stage2_admitted_dir}" "${stage2_runtime_authority}"
+  mkdir -p "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
+    "${stage3_provenance_home}" "${stage3_provenance_tmp}"
+  runtime_origin_absolute="$(absolute_path \
+    src/compiler_rust/target/bootstrap)"
+  runtime_bootstrap_self_link="${runtime_origin_absolute}/bootstrap"
+  if [ -L "${runtime_bootstrap_self_link}" ]; then
+    runtime_bootstrap_self_target=$(readlink "${runtime_bootstrap_self_link}") ||
+      exit 1
+    case "${runtime_bootstrap_self_target}" in
+      /*)
+        runtime_bootstrap_self_target=$(
+          CDPATH= cd -- "${runtime_bootstrap_self_target}" && pwd -P
+        ) || exit 1
+        ;;
+      *)
+        runtime_bootstrap_self_target=$(
+          CDPATH= cd -- \
+            "${runtime_origin_absolute}/${runtime_bootstrap_self_target}" &&
+            pwd -P
+        ) || exit 1
+        ;;
+    esac
+    [ "${runtime_bootstrap_self_target}" = "${runtime_origin_absolute}" ] || {
+      echo "error: unexpected Rust runtime authority symlink" >&2
+      exit 1
+    }
+    rm -f "${runtime_bootstrap_self_link}"
+  fi
+  bootstrap_stage3_directory_snapshot \
+    "$(absolute_path "${runtime_origin_before}")" \
+    "${runtime_origin_absolute}" || {
+    echo "error: could not snapshot Rust runtime authority" >&2
+    exit 1
+  }
+  bootstrap_stage3_copy_authority "${runtime_origin_absolute}" \
+    "$(absolute_path "${stage2_runtime_authority}")" || {
+    echo "error: could not freeze Stage 2 runtime authority" >&2
+    exit 1
+  }
+  bootstrap_stage3_directory_snapshot \
+    "$(absolute_path "${runtime_origin_after}")" \
+    "${runtime_origin_absolute}" || exit 1
+  bootstrap_stage3_directory_snapshot \
+    "$(absolute_path "${runtime_admitted_snapshot}")" \
+    "$(absolute_path "${stage2_runtime_authority}")" || exit 1
+  cmp -s "${runtime_origin_before}" "${runtime_origin_after}" &&
+    cmp -s "${runtime_origin_after}" "${runtime_admitted_snapshot}" || {
+    echo "error: Rust runtime authority changed during private admission" >&2
+    exit 1
+  }
+  bootstrap_stage3_tool_authority_snapshot \
+    "$(absolute_path "${tool_authority_before}")" "${PATH}" \
+    "${repo_root}" || {
+    echo "error: could not bind bootstrap tool authority" >&2
+    exit 1
+  }
+  bootstrap_stage3_git_state "${repo_root}" "${stage3_git_before}" || {
+    echo "error: could not bind Stage 3 git HEAD/dirty state" >&2
+    exit 1
+  }
+  bootstrap_stage3_source_snapshot "${stage3_source_before}" "${repo_root}" || {
+    echo "error: could not snapshot Stage 3 source authority" >&2
+    exit 1
+  }
+
   # Stage 2: seed compiles bootstrap_main.spl
   # Stage 2 uses the configured backend; LLVM is the default and Cranelift is
   # an explicit supported alternative.
   mkdir -p "${output_dir}/stage2/${PLATFORM}"
   echo "Stage 2: seed → bootstrap_main.spl"
-  prepare_native_cache stage2
+  mkdir -p "${stage2_provenance_cache}"
   # Stage 2 failure is reported before Stage 3; no later stage may claim it.
   # the self-hosting frontend now fails closed instead of linking a ret-0 stub
   # (doc/08_tracking/bug/bootstrap_stage2_empty_mir_bodies_2026-07-05.md), so a
   # stage-2 build error must not abort the whole pipeline.
-  stage2_bin="${output_dir}/stage2/${PLATFORM}/simple${exe_suffix}"
-  stage3_bin="${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}"
+  stage2_bin="$(absolute_path \
+    "${output_dir}/stage2/${PLATFORM}/simple${exe_suffix}")"
+  stage3_bin="$(absolute_path \
+    "${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}")"
   native_verbose_arg=""
   if [ "${verbose}" -eq 1 ]; then
     native_verbose_arg="--verbose"
   fi
+  stage_build_rust_log="${RUST_LOG:-error}"
+  stage2_seed_absolute="$(absolute_path \
+    "${stage2_runtime_authority}/simple${exe_suffix}")"
+  stage2_output_absolute="${stage2_bin}"
+  stage3_output_absolute="${stage3_bin}"
+  stage2_admitted_absolute="$(absolute_path "${stage2_admitted_bin}")"
+  stage_runtime_absolute="$(absolute_path "${stage2_runtime_authority}")"
+  stage2_cache_absolute="$(absolute_path "${stage2_provenance_cache}")"
+  stage3_cache_absolute="$(absolute_path "${stage3_provenance_cache}")"
+  stage2_home_absolute="$(absolute_path "${stage2_provenance_home}")"
+  stage2_tmp_absolute="$(absolute_path "${stage2_provenance_tmp}")"
+  stage3_home_absolute="$(absolute_path "${stage3_provenance_home}")"
+  stage3_tmp_absolute="$(absolute_path "${stage3_provenance_tmp}")"
+  stage_build_path="${PATH:?PATH is required}"
+  case "${stage_build_path}" in
+    /*) ;;
+    *) echo "error: bootstrap PATH must contain absolute entries only" >&2; exit 1 ;;
+  esac
+  if printf '%s\n' "${stage_build_path}" | grep -Eq '(^|:)([^/]|$)'; then
+    echo "error: bootstrap PATH must contain absolute entries only" >&2
+    exit 1
+  fi
+  stage2_build_args_sha256=$(
+    bootstrap_stage3_args_sha256 \
+      "RUST_LOG=${stage_build_rust_log}" \
+      "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
+      "SIMPLE_NATIVE_BUILD_RUST=1" \
+      "SIMPLE_NO_STUB_FALLBACK=1" \
+      "SIMPLE_BINARY=${stage2_seed_absolute}" \
+      native-build --target "${PLATFORM}" --backend "${backend}" \
+      --runtime-bundle core-c-bootstrap \
+      --source src/compiler --source src/app --source src/lib \
+      --entry-closure --threads "${jobs}" --cache-dir "${stage2_cache_absolute}" \
+      ${native_verbose_arg} \
+      --mode "${bootstrap_mode}" --entry src/app/cli/bootstrap_main.spl \
+      --runtime-path "${stage_runtime_absolute}" \
+      -o "${stage2_bin}"
+  )
+  stage3_build_args_sha256=$(
+    bootstrap_stage3_args_sha256 \
+      "RUST_LOG=${stage_build_rust_log}" \
+      "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
+      "SIMPLE_NATIVE_BUILD_RUST=1" \
+      "SIMPLE_NO_STUB_FALLBACK=1" \
+      "LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1" \
+      "SIMPLE_BINARY=${stage2_admitted_absolute}" \
+      native-build --target "${PLATFORM}" --backend "${backend}" \
+      --runtime-bundle core-c-bootstrap \
+      --source src/compiler --source src/app --source src/lib \
+      --entry-closure --threads "${selfhost_jobs}" \
+      --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
+      --entry src/app/cli/bootstrap_main.spl \
+      --runtime-path "${stage_runtime_absolute}" \
+      -o "${stage3_bin}"
+  )
   rm -f "${stage2_bin}" "${stage3_bin}"
+  bootstrap_stage3_directory_snapshot \
+    "${stage3_provenance_dir}/runtime-before-stage2.txt" \
+    "${stage_runtime_absolute}" || exit 1
+  cmp -s "${runtime_admitted_snapshot}" \
+    "${stage3_provenance_dir}/runtime-before-stage2.txt" || exit 1
   set +e
-  env RUST_LOG="${RUST_LOG:-error}" \
+  bootstrap_stage3_run_transcribed \
+    "$(absolute_path "${stage2_command_transcript}")" "${repo_root}" \
+    "$(absolute_path "${log_dir}/stage2-native-build.log")" \
+    "${stage2_home_absolute}" "${stage2_tmp_absolute}" "${stage_build_path}" \
+    RUST_LOG="${stage_build_rust_log}" \
     SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_NATIVE_BUILD_RUST=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
-    SIMPLE_BINARY="$(absolute_path "${seed_bin}")" \
-    "${seed_bin}" native-build \
+    SIMPLE_BINARY="${stage2_seed_absolute}" -- \
+    "${stage2_seed_absolute}" native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
@@ -715,22 +1147,45 @@ else
     --entry-closure \
     --threads "${jobs}" \
     ${native_verbose_arg} \
-    --cache-dir "${native_cache_dir}" \
+    --cache-dir "${stage2_cache_absolute}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/bootstrap_main.spl \
-    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
-    -o "${stage2_bin}" \
-    >"${log_dir}/stage2-native-build.log" 2>&1
+    --runtime-path "${stage_runtime_absolute}" \
+    -o "${stage2_bin}"
   stage2_status=$?
   set -e
+  bootstrap_stage3_directory_snapshot \
+    "${stage3_provenance_dir}/runtime-after-stage2.txt" \
+    "${stage_runtime_absolute}" || exit 1
+  cmp -s "${runtime_admitted_snapshot}" \
+    "${stage3_provenance_dir}/runtime-after-stage2.txt" || {
+    echo "error: frozen runtime authority changed during Stage 2" >&2
+    exit 1
+  }
   echo "  stage2-native-build log: ${log_dir}/stage2-native-build.log"
   if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
     echo "  Stage 2: running bootstrap compiler sanity"
-    if ! bootstrap_stage_sanity "${stage2_bin}"; then
+    if ! bootstrap_stage_sanity "${stage2_bin}" \
+      "$(absolute_path "${stage2_sanity_evidence}")" \
+      "${stage2_home_absolute}" "${stage2_tmp_absolute}" \
+      "${stage_build_path}"; then
       echo "error: Stage 2 bootstrap compiler sanity failed" >&2
       stage2_status=2
       rm -f "${stage2_bin}"
     fi
+  fi
+  if [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ]; then
+    stage2_origin_sha_before=$(bootstrap_stage3_hash_file "${stage2_bin}")
+    mkdir -p "${stage2_admitted_dir}"
+    cp -p "${stage2_bin}" "${stage2_admitted_bin}"
+    chmod 500 "${stage2_admitted_dir}" "${stage2_admitted_bin}"
+    stage2_origin_sha_after=$(bootstrap_stage3_hash_file "${stage2_bin}")
+    [ "${stage2_origin_sha_before}" = "${stage2_origin_sha_after}" ] &&
+      [ "${stage2_origin_sha_before}" = \
+        "$(bootstrap_stage3_hash_file "${stage2_admitted_bin}")" ] || {
+      echo "error: Stage 2 compiler changed during private admission" >&2
+      exit 1
+    }
   fi
   if [ "${stage2_status}" -ne 0 ]; then
     if [ "${strict_bootstrap}" -eq 1 ]; then
@@ -747,38 +1202,71 @@ else
   # symbol conflicts). When Stage 3 fails, the wrapper stops before Stage 4.
   mkdir -p "${output_dir}/stage3/${PLATFORM}"
   echo "Stage 3: stage2 → bootstrap_main.spl (self-host)"
-  prepare_native_cache stage3
+  rm -rf "${stage3_provenance_cache}"
+  mkdir -p "${stage3_provenance_cache}"
 
   stage3_ok=0
   rm -f "${stage3_bin}"
+  stage2_admitted_sha_before_stage3=absent
+  if [ "${stage2_status}" -eq 0 ]; then
+    stage2_admitted_sha_before_stage3=$(
+      bootstrap_stage3_hash_file "${stage2_admitted_absolute}"
+    ) || exit 1
+    bootstrap_stage3_directory_snapshot \
+      "${stage3_provenance_dir}/runtime-before-stage3.txt" \
+      "${stage_runtime_absolute}" || exit 1
+    cmp -s "${runtime_admitted_snapshot}" \
+      "${stage3_provenance_dir}/runtime-before-stage3.txt" || exit 1
+  fi
   set +e
   [ "${stage2_status}" -eq 0 ] && [ -x "${stage2_bin}" ] && \
-  env RUST_LOG="${RUST_LOG:-error}" \
+  bootstrap_stage3_run_transcribed \
+    "$(absolute_path "${stage3_command_transcript}")" "${repo_root}" \
+    "$(absolute_path "${log_dir}/stage3-native-build.log")" \
+    "${stage3_home_absolute}" "${stage3_tmp_absolute}" "${stage_build_path}" \
+    RUST_LOG="${stage_build_rust_log}" \
     SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_NATIVE_BUILD_RUST=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
-    SIMPLE_BINARY="$(absolute_path "${stage2_bin}")" \
-    "${stage2_bin}" native-build \
+    SIMPLE_BINARY="${stage2_admitted_absolute}" -- \
+    "${stage2_admitted_absolute}" native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
     --source src/compiler --source src/app --source src/lib \
     --entry-closure \
     --threads "${selfhost_jobs}" \
-    --cache-dir "${native_cache_dir}" \
+    --cache-dir "${stage3_cache_absolute}" \
     --mode "${bootstrap_mode}" \
     --entry src/app/cli/bootstrap_main.spl \
-    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
-    -o "${stage3_bin}" \
-    >"${log_dir}/stage3-native-build.log" 2>&1
+    --runtime-path "${stage_runtime_absolute}" \
+    -o "${stage3_bin}"
   stage3_status=$?
   set -e
+  if [ "${stage2_admitted_sha_before_stage3}" != absent ]; then
+    [ "${stage2_admitted_sha_before_stage3}" = \
+      "$(bootstrap_stage3_hash_file "${stage2_admitted_absolute}")" ] || {
+      echo "error: admitted Stage 2 compiler changed during Stage 3" >&2
+      exit 1
+    }
+    bootstrap_stage3_directory_snapshot \
+      "${stage3_provenance_dir}/runtime-after-stage3.txt" \
+      "${stage_runtime_absolute}" || exit 1
+    cmp -s "${runtime_admitted_snapshot}" \
+      "${stage3_provenance_dir}/runtime-after-stage3.txt" || {
+      echo "error: frozen runtime authority changed during Stage 3" >&2
+      exit 1
+    }
+  fi
 
   echo "  stage3-native-build log: ${log_dir}/stage3-native-build.log"
   if [ "${stage3_status}" -eq 0 ] && [ -x "${output_dir}/stage3/${PLATFORM}/simple${exe_suffix}" ]; then
-    if bootstrap_stage_sanity "${stage3_bin}"; then
+    if bootstrap_stage_sanity "${stage3_bin}" \
+      "$(absolute_path "${stage3_sanity_evidence}")" \
+      "${stage3_home_absolute}" "${stage3_tmp_absolute}" \
+      "${stage_build_path}"; then
       stage3_ok=1
       echo "  Stage 3 succeeded and passed bootstrap compiler sanity"
     else
@@ -800,6 +1288,93 @@ else
     else
       echo "  warning: stage3 self-host failed (exit ${stage3_status}); Stage 4 unavailable"
     fi
+  else
+    bootstrap_stage3_tool_authority_snapshot \
+      "$(absolute_path "${tool_authority_after}")" "${PATH}" \
+      "${repo_root}" || exit 1
+    cmp -s "${tool_authority_before}" "${tool_authority_after}" || {
+      echo "error: bootstrap tool authority changed during Stage 2/3" >&2
+      exit 1
+    }
+    bootstrap_stage3_git_state "${repo_root}" "${stage3_git_after}" || {
+      echo "error: could not re-bind Stage 3 git HEAD/dirty state" >&2
+      exit 1
+    }
+    bootstrap_stage3_source_snapshot "${stage3_source_after}" "${repo_root}" || {
+      echo "error: could not snapshot Stage 3 source authority after build" >&2
+      exit 1
+    }
+    BSTAGE3_ROOT="${repo_root}"
+    BSTAGE3_MANIFEST="$(absolute_path "${stage3_provenance_manifest}")"
+    BSTAGE3_PLATFORM="${PLATFORM}"
+    BSTAGE3_BACKEND="${backend}"
+    BSTAGE3_MODE="${bootstrap_mode}"
+    BSTAGE3_SEED="${stage2_seed_absolute}"
+    BSTAGE3_SEED_STAMP="${stage2_seed_absolute}.inputs.sha256"
+    BSTAGE3_NATIVE_ALL="${stage_runtime_absolute}/${archive_prefix}simple_native_all${archive_suffix}"
+    BSTAGE3_BACKFILL="${stage_runtime_absolute}/${archive_prefix}simple_compiler_backfill${archive_suffix}"
+    BSTAGE3_RUNTIME_ORIGIN_BEFORE="$(absolute_path "${runtime_origin_before}")"
+    BSTAGE3_RUNTIME_ORIGIN_AFTER="$(absolute_path "${runtime_origin_after}")"
+    BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT="$(absolute_path "${runtime_admitted_snapshot}")"
+    BSTAGE3_TOOL_AUTHORITY="$(absolute_path "${tool_authority_after}")"
+    BSTAGE3_STAGE2="$(absolute_path "${stage2_bin}")"
+    BSTAGE3_STAGE2_ADMITTED="${stage2_admitted_absolute}"
+    BSTAGE3_STAGE3="$(absolute_path "${stage3_bin}")"
+    BSTAGE3_SOURCE_BEFORE="$(absolute_path "${stage3_source_before}")"
+    BSTAGE3_SOURCE_AFTER="$(absolute_path "${stage3_source_after}")"
+    BSTAGE3_STAGE2_LOG="$(absolute_path "${log_dir}/stage2-native-build.log")"
+    BSTAGE3_STAGE3_LOG="$(absolute_path "${log_dir}/stage3-native-build.log")"
+    BSTAGE3_STAGE2_ARGS_SHA256="${stage2_build_args_sha256}"
+    BSTAGE3_STAGE3_ARGS_SHA256="${stage3_build_args_sha256}"
+    BSTAGE3_STAGE2_THREADS="${jobs}"
+    BSTAGE3_STAGE3_THREADS="${selfhost_jobs}"
+    BSTAGE3_STAGE2_CACHE_DIR="${stage2_cache_absolute}"
+    BSTAGE3_STAGE3_CACHE_DIR="${stage3_cache_absolute}"
+    BSTAGE3_RUNTIME_PATH="${stage_runtime_absolute}"
+    BSTAGE3_STAGE2_COMMAND_OUTPUT="${stage2_bin}"
+    BSTAGE3_STAGE3_COMMAND_OUTPUT="${stage3_bin}"
+    BSTAGE3_BOOTSTRAP_SCRIPT="${bootstrap_script_path}"
+    BSTAGE3_HELPER="${bootstrap_provenance_helper}"
+    BSTAGE3_HELPER_SHA256_BEFORE="${bootstrap_provenance_helper_sha256_before}"
+    BSTAGE3_HELPER_BUNDLE_FINGERPRINT_BEFORE=\
+"${bootstrap_provenance_bundle_fingerprint_before}"
+    BSTAGE3_BOOTSTRAP_SCRIPT_SHA256_BEFORE="${bootstrap_script_sha256_before}"
+    BSTAGE3_SEED_INPUTS_FINGERPRINT="${seed_inputs_fingerprint}"
+    BSTAGE3_SEED_FEATURES="${llvm_features}"
+    BSTAGE3_GIT_BEFORE="$(absolute_path "${stage3_git_before}")"
+    BSTAGE3_GIT_AFTER="$(absolute_path "${stage3_git_after}")"
+    BSTAGE3_STAGE2_TRANSCRIPT="$(absolute_path "${stage2_command_transcript}")"
+    BSTAGE3_STAGE3_TRANSCRIPT="$(absolute_path "${stage3_command_transcript}")"
+    BSTAGE3_STAGE2_SANITY="$(absolute_path "${stage2_sanity_evidence}")"
+    BSTAGE3_STAGE3_SANITY="$(absolute_path "${stage3_sanity_evidence}")"
+    BSTAGE3_LOCK="$(absolute_path "${bootstrap_lock}")"
+    BSTAGE3_RUST_LOG="${stage_build_rust_log}"
+    export BSTAGE3_ROOT BSTAGE3_MANIFEST BSTAGE3_PLATFORM BSTAGE3_BACKEND \
+      BSTAGE3_MODE BSTAGE3_SEED BSTAGE3_NATIVE_ALL BSTAGE3_BACKFILL \
+      BSTAGE3_RUNTIME_ORIGIN_BEFORE BSTAGE3_RUNTIME_ORIGIN_AFTER \
+      BSTAGE3_RUNTIME_ADMITTED_SNAPSHOT \
+      BSTAGE3_TOOL_AUTHORITY \
+      BSTAGE3_SEED_STAMP BSTAGE3_HELPER BSTAGE3_HELPER_SHA256_BEFORE \
+      BSTAGE3_HELPER_BUNDLE_FINGERPRINT_BEFORE \
+      BSTAGE3_STAGE2 BSTAGE3_STAGE2_ADMITTED BSTAGE3_STAGE3 \
+      BSTAGE3_SOURCE_BEFORE \
+      BSTAGE3_SOURCE_AFTER BSTAGE3_STAGE2_LOG BSTAGE3_STAGE3_LOG \
+      BSTAGE3_STAGE2_ARGS_SHA256 BSTAGE3_STAGE3_ARGS_SHA256 \
+      BSTAGE3_STAGE2_THREADS BSTAGE3_STAGE3_THREADS \
+      BSTAGE3_STAGE2_CACHE_DIR BSTAGE3_STAGE3_CACHE_DIR \
+      BSTAGE3_RUNTIME_PATH BSTAGE3_STAGE2_COMMAND_OUTPUT \
+      BSTAGE3_STAGE3_COMMAND_OUTPUT \
+      BSTAGE3_BOOTSTRAP_SCRIPT BSTAGE3_BOOTSTRAP_SCRIPT_SHA256_BEFORE \
+      BSTAGE3_SEED_INPUTS_FINGERPRINT BSTAGE3_SEED_FEATURES \
+      BSTAGE3_GIT_BEFORE BSTAGE3_GIT_AFTER \
+      BSTAGE3_STAGE2_TRANSCRIPT BSTAGE3_STAGE3_TRANSCRIPT \
+      BSTAGE3_STAGE2_SANITY BSTAGE3_STAGE3_SANITY BSTAGE3_LOCK \
+      BSTAGE3_RUST_LOG
+    bootstrap_stage3_write_manifest || {
+      echo "error: refusing Stage 3 without canonical provenance" >&2
+      exit 1
+    }
+    echo "  Stage 3 provenance: ${stage3_provenance_manifest}"
   fi
 
   stage2_capability_ok=0
