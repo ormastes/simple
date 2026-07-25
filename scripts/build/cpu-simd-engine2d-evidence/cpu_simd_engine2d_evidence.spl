@@ -1,6 +1,7 @@
 use std.gpu.engine2d.backend_probe.{StrictBackendFactory, backend_status_text}
 use std.gpu.engine2d.rendering_opt_provider.{rendering_opt_report_from_simd}
 use std.gpu.engine2d.simd_kernels.{cpu_simd_runtime_evidence, fill_span, copy_span, alpha_blend_span, simd_blit_rect, simd_scroll_region}
+use std.gpu.engine2d.simd_kernels.{_scalar_fill_span, _scalar_copy_span, _scalar_alpha_blend_span, _scalar_blit_rect, _scalar_scroll_region}
 use std.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
 
 fn checksum_pixels(pixels: [u32]) -> i64:
@@ -38,93 +39,18 @@ fn mismatch_summary(a: [u32], b: [u32]) -> text:
         i = i + 1
     out
 
-fn alpha_pixel(s: u32, d: u32) -> u32:
-    val sa = (s >> 24) & 0xFF
-    if sa == 255:
-        return s
-    if sa == 0:
-        return d
-    val inv_a = 255 - sa
-    val dr = (d >> 16) & 0xFF
-    val dg = (d >> 8) & 0xFF
-    val db = d & 0xFF
-    val sr = (s >> 16) & 0xFF
-    val sg = (s >> 8) & 0xFF
-    val sb = s & 0xFF
-    val r = (sr * sa + dr * inv_a) / 255
-    val g = (sg * sa + dg * inv_a) / 255
-    val b = (sb * sa + db * inv_a) / 255
-    (255u32 << 24) | (r << 16) | (g << 8) | b
-
-fn scalar_fill(buf: any, offset: i64, count: i64, color: u32):
-    var i: i64 = 0
-    while i < count:
-        buf[(offset + i).to_i32()] = color
-        i = i + 1
-
-fn scalar_copy(dst: any, dst_off: i64, src: [u32], src_off: i64, count: i64):
-    var i: i64 = 0
-    while i < count:
-        dst[(dst_off + i).to_i32()] = src[(src_off + i).to_i32()]
-        i = i + 1
-
-fn scalar_alpha(dst: any, src: [u32], offset: i64, count: i64):
-    var i: i64 = 0
-    while i < count:
-        val idx = (offset + i).to_i32()
-        dst[idx] = alpha_pixel(src[idx], dst[idx])
-        i = i + 1
-
-fn scalar_blit_rect(dst: any, dst_stride: i64, dst_x: i64, dst_y: i64, src: [u32], src_stride: i64, src_x: i64, src_y: i64, w: i64, h: i64):
-    var row: i64 = 0
-    while row < h:
-        scalar_copy(dst, (dst_y + row) * dst_stride + dst_x, src, (src_y + row) * src_stride + src_x, w)
-        row = row + 1
-
-fn scalar_scroll_region(buf: any, stride: i64, x: i64, y: i64, w: i64, h: i64, delta_y: i64):
-    if w <= 0:
-        return
-    if h <= 0:
-        return
-    if delta_y == 0:
-        return
-    val abs_dy = if delta_y < 0: -delta_y else: delta_y
-    val rows_to_copy = h - abs_dy
-    if rows_to_copy <= 0:
-        return
-    if delta_y < 0:
-        var row: i64 = 0
-        while row < rows_to_copy:
-            val dst_off = (y + row) * stride + x
-            val src_off = (y + row + abs_dy) * stride + x
-            var col: i64 = 0
-            while col < w:
-                buf[(dst_off + col).to_i32()] = buf[(src_off + col).to_i32()]
-                col = col + 1
-            row = row + 1
-    else:
-        var row: i64 = rows_to_copy - 1
-        while row >= 0:
-            val dst_off = (y + row + abs_dy) * stride + x
-            val src_off = (y + row) * stride + x
-            var col: i64 = 0
-            while col < w:
-                buf[(dst_off + col).to_i32()] = buf[(src_off + col).to_i32()]
-                col = col + 1
-            row = row - 1
-
 fn draw_scalar_diagram(buf: any, tile: [u32], alpha_src: [u32]):
     val width: i64 = 16
-    scalar_fill(buf, 0, 192, 0xFF101418u32)
-    scalar_fill(buf, 1 * width + 1, 14, 0xFF2458A6u32)
-    scalar_fill(buf, 3 * width + 2, 7, 0xFFE0A420u32)
-    scalar_copy(buf, 9 * width + 1, tile, 4, 8)
-    scalar_blit_rect(buf, width, 10, 4, tile, 4, 0, 0, 4, 4)
+    _scalar_fill_span(buf, 0, 192, 0xFF101418u32)
+    _scalar_fill_span(buf, 1 * width + 1, 14, 0xFF2458A6u32)
+    _scalar_fill_span(buf, 3 * width + 2, 7, 0xFFE0A420u32)
+    _scalar_copy_span(buf, 9 * width + 1, tile, 4, 8)
+    _scalar_blit_rect(buf, width, 10, 4, tile, 4, 0, 0, 4, 4)
     var row: i64 = 0
     while row < 3:
-        scalar_alpha(buf, alpha_src, (6 + row) * width + 3, 9)
+        _scalar_alpha_blend_span(buf, alpha_src, (6 + row) * width + 3, 9)
         row = row + 1
-    scalar_scroll_region(buf, width, 1, 2, 14, 5, 1)
+    _scalar_scroll_region(buf, width, 1, 2, 14, 5, 1)
 
 fn draw_simd_diagram(buf: any, tile: [u32], alpha_src: [u32]):
     val width: i64 = 16
@@ -165,10 +91,15 @@ fn main() -> i64:
     var alpha_expected: [u32] = [0xFF102030u32; 16]
     val alpha_src: [u32] = [0x804080C0u32; 16]
     alpha_blend_span(alpha_actual, alpha_src, 0, 16)
-    var alpha_i = 0
-    while alpha_i < 16:
-        alpha_expected[alpha_i] = alpha_pixel(alpha_src[alpha_i], alpha_expected[alpha_i])
-        alpha_i = alpha_i + 1
+    _scalar_alpha_blend_span(alpha_expected, alpha_src, 0, 16)
+
+    # Keep a transparent-destination case: the old duplicate oracle forced
+    # output alpha to 255 and therefore passed opaque-only primitive checks.
+    val alpha_edge_src: [u32] = [0x00000000u32, 0x01010203u32, 0x7F4080C0u32, 0x804080C0u32, 0xFEF0A020u32, 0xFFFFFFFFu32, 0x00ABCDEFu32, 0xFF010203u32]
+    var alpha_edge_actual: [u32] = [0x40102030u32, 0x80010203u32, 0x00112233u32, 0x7F445566u32, 0xFF8899AAu32, 0xFFAABBCCu32, 0xFFCCDDEEu32, 0xFF102030u32]
+    var alpha_edge_expected: [u32] = [0x40102030u32, 0x80010203u32, 0x00112233u32, 0x7F445566u32, 0xFF8899AAu32, 0xFFAABBCCu32, 0xFFCCDDEEu32, 0xFF102030u32]
+    alpha_blend_span(alpha_edge_actual, alpha_edge_src, 0, alpha_edge_actual.len().to_i64())
+    _scalar_alpha_blend_span(alpha_edge_expected, alpha_edge_src, 0, alpha_edge_expected.len().to_i64())
 
     var scroll_actual: [u32] = [0xFF000001u32, 0xFF000002u32, 0xFF000003u32, 0xFF000004u32, 0xFF000005u32, 0xFF000006u32, 0xFF000007u32, 0xFF000008u32, 0xFF000009u32, 0xFF00000Au32, 0xFF00000Bu32, 0xFF00000Cu32, 0xFF00000Du32, 0xFF00000Eu32, 0xFF00000Fu32, 0xFF000010u32]
     val scroll_expected: [u32] = [0xFF000001u32, 0xFF000002u32, 0xFF000003u32, 0xFF000004u32, 0xFF000001u32, 0xFF000002u32, 0xFF000003u32, 0xFF000004u32, 0xFF000005u32, 0xFF000006u32, 0xFF000007u32, 0xFF000008u32, 0xFF00000Du32, 0xFF00000Eu32, 0xFF00000Fu32, 0xFF000010u32]
@@ -191,35 +122,61 @@ fn main() -> i64:
     draw_simd_diagram(diagram_actual, diagram_tile, diagram_alpha_src)
     val counts = simd_hit_counts()
     val report = rendering_opt_report_from_simd(evidence.arch, evidence.feature)
+    val fill_mismatches = mismatch_count(fill_expected, fill_actual)
+    val copy_mismatches = mismatch_count(copy_expected, copy_actual)
+    val alpha_mismatches = mismatch_count(alpha_expected, alpha_actual)
+    val alpha_edge_mismatches = mismatch_count(alpha_edge_expected, alpha_edge_actual)
+    val scroll_mismatches = mismatch_count(scroll_expected, scroll_actual)
+    val diagram_mismatches = mismatch_count(diagram_expected, diagram_actual)
+    var executed_kind_count: i64 = 0
+    if counts.fill_hits > 0:
+        executed_kind_count = executed_kind_count + 1
+    if counts.copy_hits > 0:
+        executed_kind_count = executed_kind_count + 1
+    if counts.alpha_hits > 0:
+        executed_kind_count = executed_kind_count + 1
+    if counts.blit_hits > 0:
+        executed_kind_count = executed_kind_count + 1
+    if counts.scroll_hits > 0:
+        executed_kind_count = executed_kind_count + 1
+    val parity_failure_count = fill_mismatches + copy_mismatches + alpha_mismatches + alpha_edge_mismatches + scroll_mismatches + diagram_mismatches
+    # Native AOT stores aggregate bool fields incorrectly; derive receipt text
+    # from counters and exact mismatch totals without retaining an aggregate bool.
+    val simd_executed_all_text = if executed_kind_count == 5: "true" else: "false"
+    val native_simd_executed_text = if evidence.native_simd_hits > 0: "true" else: "false"
+    val native_simd_bit_exact_text = if parity_failure_count == 0: "true" else: "false"
 
     print("cpu_simd_arch=" + evidence.arch)
     print("cpu_simd_feature=" + evidence.feature)
     print("cpu_simd_level=" + evidence.level)
-    print("cpu_simd_executed_all=" + evidence.executed_all().to_text())
+    print("cpu_simd_executed_all=" + simd_executed_all_text)
     print("cpu_simd_checksum=" + evidence.checksum.to_text())
     print("cpu_simd_hit_summary=" + evidence.hit_summary)
-    print("cpu_simd_native_simd_executed=" + evidence.native_simd_executed.to_text())
-    print("cpu_simd_native_simd_bit_exact=" + evidence.native_simd_bit_exact.to_text())
+    print("cpu_simd_native_simd_executed=" + native_simd_executed_text)
+    print("cpu_simd_native_simd_bit_exact=" + native_simd_bit_exact_text)
     print("cpu_simd_native_simd_hits=" + evidence.native_simd_hits.to_text())
     print("cpu_simd_native_simd_reason=" + evidence.reason)
     print("cpu_simd_provider_hits=" + report.total_hits.to_text())
     print("cpu_simd_provider_changes=" + report.total_changes.to_text())
     print("cpu_simd_fill_expected_checksum=" + checksum_pixels(fill_expected).to_text())
     print("cpu_simd_fill_actual_checksum=" + checksum_pixels(fill_actual).to_text())
-    print("cpu_simd_fill_mismatch_count=" + mismatch_count(fill_expected, fill_actual).to_text())
+    print("cpu_simd_fill_mismatch_count=" + fill_mismatches.to_text())
     print("cpu_simd_copy_expected_checksum=" + checksum_pixels(copy_expected).to_text())
     print("cpu_simd_copy_actual_checksum=" + checksum_pixels(copy_actual).to_text())
-    print("cpu_simd_copy_mismatch_count=" + mismatch_count(copy_expected, copy_actual).to_text())
+    print("cpu_simd_copy_mismatch_count=" + copy_mismatches.to_text())
     print("cpu_simd_alpha_expected_checksum=" + checksum_pixels(alpha_expected).to_text())
     print("cpu_simd_alpha_actual_checksum=" + checksum_pixels(alpha_actual).to_text())
-    print("cpu_simd_alpha_mismatch_count=" + mismatch_count(alpha_expected, alpha_actual).to_text())
+    print("cpu_simd_alpha_mismatch_count=" + alpha_mismatches.to_text())
+    print("cpu_simd_alpha_edge_expected_checksum=" + checksum_pixels(alpha_edge_expected).to_text())
+    print("cpu_simd_alpha_edge_actual_checksum=" + checksum_pixels(alpha_edge_actual).to_text())
+    print("cpu_simd_alpha_edge_mismatch_count=" + alpha_edge_mismatches.to_text())
     print("cpu_simd_scroll_expected_checksum=" + checksum_pixels(scroll_expected).to_text())
     print("cpu_simd_scroll_actual_checksum=" + checksum_pixels(scroll_actual).to_text())
-    print("cpu_simd_scroll_mismatch_count=" + mismatch_count(scroll_expected, scroll_actual).to_text())
+    print("cpu_simd_scroll_mismatch_count=" + scroll_mismatches.to_text())
     print("cpu_simd_diagram_pixel_count=" + diagram_actual.len().to_text())
     print("cpu_simd_diagram_expected_checksum=" + checksum_pixels(diagram_expected).to_text())
     print("cpu_simd_diagram_actual_checksum=" + checksum_pixels(diagram_actual).to_text())
-    print("cpu_simd_diagram_mismatch_count=" + mismatch_count(diagram_expected, diagram_actual).to_text())
+    print("cpu_simd_diagram_mismatch_count=" + diagram_mismatches.to_text())
     print("cpu_simd_diagram_mismatch_summary=" + mismatch_summary(diagram_expected, diagram_actual))
     print("cpu_simd_diagram_fill_hits=" + counts.fill_hits.to_text())
     print("cpu_simd_diagram_copy_hits=" + counts.copy_hits.to_text())
@@ -236,7 +193,7 @@ fn main() -> i64:
     print("cpu_simd_arm_diag=" + arm.diagnostic_text())
     print("cpu_simd_riscv_diag=" + riscv.diagnostic_text())
 
-    if not evidence.executed_all():
+    if executed_kind_count != 5:
         print("overall=fail")
         return 1
     if evidence.checksum <= 0:
@@ -245,23 +202,20 @@ fn main() -> i64:
     if report.total_hits < 10:
         print("overall=fail")
         return 1
-    if counts.fill_hits <= 0 or counts.copy_hits <= 0 or counts.alpha_hits <= 0 or counts.blit_hits <= 0 or counts.scroll_hits <= 0:
+    if fill_mismatches != 0 or copy_mismatches != 0 or alpha_mismatches != 0 or alpha_edge_mismatches != 0 or scroll_mismatches != 0:
         print("overall=fail")
         return 1
-    if mismatch_count(fill_expected, fill_actual) != 0 or mismatch_count(copy_expected, copy_actual) != 0 or mismatch_count(alpha_expected, alpha_actual) != 0 or mismatch_count(scroll_expected, scroll_actual) != 0:
-        print("overall=fail")
-        return 1
-    if diagram_actual.len() != 192 or mismatch_count(diagram_expected, diagram_actual) != 0:
+    if diagram_actual.len() != 192 or diagram_mismatches != 0:
         print("overall=fail")
         return 1
     # Genuine native-SIMD gate: the native kernels must stay bit-identical to
     # scalar, and on aarch64 the NEON vectorized path must actually execute
     # (hit counter advanced). This rejects the historical scalar false-green
     # where the path merely reported has_neon without running NEON.
-    if not evidence.native_simd_bit_exact:
+    if parity_failure_count != 0:
         print("overall=fail")
         return 1
-    if evidence.arch == "aarch64" and not evidence.native_simd_executed:
+    if evidence.arch == "aarch64" and evidence.native_simd_hits <= 0:
         print("overall=fail")
         return 1
     print("overall=pass")
