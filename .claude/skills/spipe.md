@@ -1016,6 +1016,69 @@ fixture and compare it to what you wrote.
   final verdict line (pattern: `test/.../probe_interaction_core.spl`,
   `test/02_integration/ui/probe_event_loop_smoke.spl`).
 
+## Silent defaults (`??` on a non-Optional) — the evidence is empty, the reason lies
+
+`expr ?? default` fires **only on `nil`**. Applied to a non-Optional it is dead
+code: the default is unreachable and the expression silently yields the empty/zero
+value. Nothing warns.
+
+The trap in this codebase is `env_get`, which exists with **two return types**:
+
+| definition | returns | `?? default` |
+|---|---|---|
+| `src/lib/nogc_sync_mut/io_runtime.spl:174` (`std.io_runtime`) | `text` | **DEAD** |
+| `src/lib/nogc_sync_mut/env/variables.spl:11` | `text` | **DEAD** |
+| `src/lib/nogc_sync_mut/src/config.spl:764` | `text?` | works |
+
+So `env_get("SOME_PATH") ?? path_join(root, "f.ppm")` yields `""` when the
+variable is unset — and whether your code is correct depends on which import is
+in scope. ~680 occurrences of the pattern in-tree; **occurrences, not bugs** —
+check each against its own import before touching it.
+
+**How it wastes a session.** An empty path produced `status=fail
+reason=ppm-write-failed` in a showcase evidence lane. Permissions, directory
+existence, 1.6 MB payload size, filename collision and `path_join` were all
+tested and all fine — because the failing *value* was never printed. Two added
+prints found it immediately.
+
+**Rules for evidence lanes:**
+- A failure branch must print the **value it failed on**, not just a reason slug.
+  `reason=ppm-write-failed` with no path is unactionable; `failed_ppm_path=` +
+  `failed_ppm_bytes=` is a diagnosis.
+- **Never discard a status return.** `dir_create_all(x)` with the result ignored
+  turns a directory-layer failure into a mystery write failure two phases later.
+  One reason slug covering two distinct causes is what stalls root-causing.
+- A reason slug is a **hypothesis**, not a finding. Confirm the named cause is
+  the real one before acting on it (here it was not).
+- `grep 'Results:'` / assert on artifact existence — never conclude from a
+  `tail`, and never from a pipeline's exit code (`cmd | tail` reported `EXIT=0`
+  while the build SIGSEGV'd).
+
+Detail: `doc/08_tracking/bug/env_get_nil_coalesce_dead_fallback_2026-07-25.md`.
+Glossary: *Dead Nil-Coalesce Fallback*, *Same-Name Divergence*.
+
+## Watchdogs and isolation wrappers can eat your evidence
+
+Before concluding "the lane produced nothing", rule out the harness itself. Three
+independent kills sat in front of one host-WM showcase cell, each hiding the next:
+
+1. **`examples/**` isolation buffers child output** and prints it only after
+   `child.wait()` — a timeout kill discards everything, including `main()`'s
+   first line. Symptom: **zero output AND exit 0**, which reads as success to any
+   check that inspects only the return code.
+2. **A 10s in-process watchdog** (`SIMPLE_TIMEOUT_SECONDS` default) against a
+   capture lane whose bridge+frame waits budget ~8 minutes. It also *misreports*
+   its own limit: the watchdog prints `(10s)` while the surfaced error says
+   `exceeded 0 second limit`.
+3. Only then the real defect (the silent default above).
+
+Setting `SIMPLE_TIMEOUT_SECONDS=<n>` raises the watchdog **and** disables the
+isolation re-exec (`examples_safety.rs:38,42` key off that one variable).
+
+Corollary: "no verdict" is never self-explanatory — read the cause out of the log
+every time. Detail:
+`doc/08_tracking/bug/examples_isolation_buffers_output_lost_on_timeout_2026-07-25.md`.
+
 ## Fixtures that lie (mock stdlib on a real-IO path)
 
 `std.nogc_sync_mut.file_system.file_ops` is a **mock**: `file_read_text` returns

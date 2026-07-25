@@ -742,3 +742,61 @@ guest-native `build/os/clang_static/bin/clang_static`). Build driver
 
 Full guide (locations + verified hello-world commands): `doc/07_guide/os/simpleos_llvm_toolchain.md`.
 Blocker detail: `doc/08_tracking/bug/simpleos_in_guest_toolchain_execution.md`.
+
+## Dead Nil-Coalesce Fallback (`??` on a non-Optional)
+
+`expr ?? default` where `expr` is **not** an Optional. `??` fires only on `nil`,
+so the default is **unreachable** — the expression silently evaluates to `expr`'s
+own empty/zero value. No error, no warning; the idiom reads as correct.
+
+Canonical instance: `env_get(key) ?? "fallback"`. `std.io_runtime`'s `env_get`
+returns plain `text` (`src/lib/nogc_sync_mut/io_runtime.spl:174`), so an unset
+variable yields `""`, never `nil`, and the fallback never runs. A **sibling**
+`env_get` (`src/lib/nogc_sync_mut/src/config.spl:764`) *does* return `text?`,
+where the same idiom is correct — so whether the code works depends on which
+import is in scope. `src/lib/nogc_sync_mut/env/variables.spl:11` also returns
+plain `text`.
+
+`grep -rn 'env_get([^)]*) *??' --include=*.spl src examples` finds ~680
+occurrences. **Occurrences, not bugs** — only `text`-returning imports are
+broken; each site must be checked against its own import before being changed.
+
+Cost a full investigation 2026-07-25: an empty path produced a
+`ppm-write-failed` that was blamed on permissions, disk, payload size and
+filename collisions (all verified fine) because the failing value was never
+printed. Detail: `doc/08_tracking/bug/env_get_nil_coalesce_dead_fallback_2026-07-25.md`.
+
+**Prevention:** a compiler diagnostic on `??` applied to a non-Optional — it is
+provably dead code, and one warning covers every site at build time.
+
+See also: Same-Name Divergence (below).
+
+## Same-Name Divergence (One Name, Several Definitions)
+
+The recurring structural defect in this codebase: **one name, multiple
+definitions, silently diverged.** Same-named types collapse in the global symbol
+registry — **first registration wins**, regardless of which module an importer
+named — so the wrong definition can be bound with no diagnostic. Functions
+diverge by *signature* instead (see Dead Nil-Coalesce Fallback).
+
+Five instances found on 2026-07-25 alone, each surfacing as an unrelated-looking
+failure:
+
+| divergence | how it presented |
+|---|---|
+| `ant-trace` / `ant_trace` (29 dir pairs) | native-build module collision; repo-root builds fail |
+| `CompiledSymbolKind` ×3 (one had `External` where others had `Const`) | `unknown variant 'Const'` deep in entry-closure discovery |
+| `Engine2D` (nogc scene-graph vs GC immediate-mode) | GC-tier object pulled into a software render path; 40-min stall |
+| `MouseEvent` (`ps2_mouse` struct vs `input_event` class) | `hir: struct 'ANY' field 'left_just_pressed'`; SimpleOS kernel build blocked |
+| `env_get` (`text` vs `text?`) | `??` fallback never fires; empty path, misattributed write failure |
+
+None of the five failed at its definition site; all failed somewhere downstream
+wearing a different symptom. **Do NOT resolve a divergence by bulk-deleting one
+copy** — an audit of the `ant-trace` pair found 48 files differing and 39
+existing only in the "duplicate", so deletion would have destroyed code.
+
+**Prevention (highest-leverage open item):** emit a diagnostic at *registration*
+naming both modules when a same-named type is registered twice. That converts
+this whole class from silent-and-downstream into immediate-and-obvious. Tracked
+as P5 in `doc/03_plan/ui/showcase_matrix_replan_2026-07-25.md`; struct-level
+precedent recorded in `.claude/memory/feedback_interp_struct_name_collision_global_registry.md`.
