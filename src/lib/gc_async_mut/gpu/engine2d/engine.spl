@@ -67,6 +67,13 @@ use std.gc_async_mut.text_layout.font_renderer.{
     font_execution_plan, font_render_config_selection_supported,
     font_renderer_registered_selected_bytes_only
 }
+use std.gc_async_mut.gpu.engine2d.font_owner.{
+    Engine2DFontOwner,
+    engine2d_font_owner_clear,
+    engine2d_font_owner_current,
+    engine2d_font_owner_get_or_create,
+    engine2d_font_owner_store
+}
 use std.common.encoding.font_registry.{selected_font_asset_local_path_for_identity}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload}
 
@@ -213,19 +220,29 @@ class Engine2D:
     h: i32
     pacing: FramePacingCounters
     selected_backend_name: text
-    font_renderer: FontRenderer? = nil
+    font_owner: Engine2DFontOwner
     last_font_execution_attempts: [text] = []
     last_font_execution_target: text = ""
 
     me fonts() -> FontRenderer:
-        match self.font_renderer:
-            case Some(active):
-                return active
+        val owner: Engine2DFontOwner = self.font_owner
+        val renderer = engine2d_font_owner_get_or_create(owner)
+        self.font_owner = owner
+        renderer
+
+    me install_font_renderer(renderer: FontRenderer):
+        self.font_owner = engine2d_font_owner_store(self.font_owner, renderer)
+
+    me selected_font_identity() -> text:
+        val owner: Engine2DFontOwner = self.font_owner
+        val selected = engine2d_font_owner_current(owner)
+        match selected:
+            case Some(fonts):
+                val identity = fonts.current_font_identity()
+                self.font_owner = engine2d_font_owner_store(owner, fonts)
+                return identity
             case None:
-                pass_do_nothing("create the renderer below on cache miss")
-        val created = FontRenderer.new()
-        self.font_renderer = Some(created)
-        created
+                return ""
 
     fn font_execution_attempts() -> [text]: self.last_font_execution_attempts
     fn font_execution_target() -> text: self.last_font_execution_target
@@ -336,7 +353,7 @@ class Engine2D:
                 var sw = SoftwareBackend.create()
                 sw.init(width, height)
                 val capability = sw.capability()
-                Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
+                Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
 
     static fn create_with_backend_fast(width: i32, height: i32, backend_name: text) -> Engine2D:
         """Create an engine in native-only ("no mirror") fast mode.
@@ -371,7 +388,7 @@ class Engine2D:
                     last_vulkan_font_evidence: nil,
                     metal_backend: Some(metal), opencl_backend: nil,
                     rocm_backend: nil, software_backend: nil,
-                    font_renderer: nil, last_font_execution_attempts: [],
+                    font_owner: Engine2DFontOwner.new(), last_font_execution_attempts: [],
                     last_font_execution_target: "",
                     w: width, h: height, pacing: make_frame_pacing_counters(),
                     selected_backend_name: "metal")
@@ -415,7 +432,7 @@ class Engine2D:
         # offscreen's software rasterizer and skip the two full-surface scratch
         # buffers draw_engine_opacity() would otherwise allocate per translucent
         # window (the residual first-frame heap pressure).
-        Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, vulkan_font_state_unknown: false, last_vulkan_font_evidence: nil, metal_backend: nil, opencl_backend: nil, rocm_backend: nil, software_backend: sw, font_renderer: nil, last_font_execution_attempts: [], last_font_execution_target: "", w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
+        Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, vulkan_font_state_unknown: false, last_vulkan_font_evidence: nil, metal_backend: nil, opencl_backend: nil, rocm_backend: nil, software_backend: sw, font_owner: Engine2DFontOwner.new(), last_font_execution_attempts: [], last_font_execution_target: "", w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
 
     me create_shared_vulkan_offscreen(width: i32, height: i32) -> Result<Engine2D, text>:
         """Create one transparent child framebuffer on this engine's Vulkan session."""
@@ -438,7 +455,7 @@ class Engine2D:
             vulkan_font_state_unknown: false,
             last_vulkan_font_evidence: nil, metal_backend: nil,
             opencl_backend: nil, rocm_backend: nil, software_backend: nil,
-            font_renderer: nil, last_font_execution_attempts: [],
+            font_owner: Engine2DFontOwner.new(), last_font_execution_attempts: [],
             last_font_execution_target: "",
             w: width, h: height, pacing: make_frame_pacing_counters(),
             selected_backend_name: "vulkan")
@@ -466,7 +483,7 @@ class Engine2D:
             cuda_backend: nil, vulkan_backend: nil,
             vulkan_font_state_unknown: false, last_vulkan_font_evidence: nil,
             metal_backend: Some(metal), opencl_backend: nil,
-            rocm_backend: nil, software_backend: nil, font_renderer: nil,
+            rocm_backend: nil, software_backend: nil, font_owner: Engine2DFontOwner.new(),
             last_font_execution_attempts: [], last_font_execution_target: "",
             w: width, h: height, pacing: make_frame_pacing_counters(),
             selected_backend_name: "metal"))
@@ -477,7 +494,7 @@ class Engine2D:
         if requested_backend == "cuda":
             var cuda = CudaBackend.create()
             if cuda.init(width, height):
-                var engine = Engine2D(backend: cuda, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: cuda, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cuda")
+                var engine = Engine2D(backend: cuda, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, cuda_backend: cuda, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cuda")
                 engine.install_pinned_cuda_font_artifact()
                 return Ok(engine)
 
@@ -491,7 +508,7 @@ class Engine2D:
                     vulkan_font_state_unknown: false,
                     last_vulkan_font_evidence: nil, metal_backend: nil,
                     opencl_backend: nil, rocm_backend: nil,
-                    software_backend: nil, font_renderer: nil,
+                    software_backend: nil, font_owner: Engine2DFontOwner.new(),
                     last_font_execution_attempts: [],
                     last_font_execution_target: "",
                     w: width, h: height,
@@ -506,7 +523,7 @@ class Engine2D:
                 # its internal SoftwareBackend even when the D3D11/DXVK device
                 # chain initializes. "directx" stays valid as the REQUESTED key.
                 val selected_name = directx.name()
-                return Ok(Engine2D(backend: directx, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: selected_name))
+                return Ok(Engine2D(backend: directx, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: selected_name))
 
         if requested_backend == "directx-on-vulkan":
             # DirectX-on-Vulkan emulation: serve a DirectX API request through the
@@ -519,17 +536,17 @@ class Engine2D:
             # as "directx-software-emulation".
             var dx_vk = VulkanBackend.create()
             if dx_vk.init(width, height):
-                return Ok(Engine2D(backend: dx_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "directx-on-vulkan"))
+                return Ok(Engine2D(backend: dx_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "directx-on-vulkan"))
 
         if requested_backend == "opencl":
             var opencl = OpenClBackend.create()
             if opencl.init(width, height):
-                return Ok(Engine2D(backend: opencl, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, opencl_backend: opencl, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opencl"))
+                return Ok(Engine2D(backend: opencl, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, opencl_backend: opencl, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opencl"))
 
         if requested_backend == "opengl":
             var opengl = OpenGLBackend.create()
             if opengl.init(width, height):
-                return Ok(Engine2D(backend: opengl, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opengl"))
+                return Ok(Engine2D(backend: opengl, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "opengl"))
 
         if requested_backend == "metal":
             var metal = MetalBackend.create()
@@ -543,7 +560,7 @@ class Engine2D:
                     last_vulkan_font_evidence: nil,
                     metal_backend: Some(metal), opencl_backend: nil,
                     rocm_backend: nil, software_backend: nil,
-                    font_renderer: nil, last_font_execution_attempts: [],
+                    font_owner: Engine2DFontOwner.new(), last_font_execution_attempts: [],
                     last_font_execution_target: "",
                     w: width, h: height, pacing: make_frame_pacing_counters(),
                     selected_backend_name: "metal"))
@@ -552,33 +569,33 @@ class Engine2D:
             # Compatibility stays explicit: strict "metal" never claims this lane.
             var metal_vk = VulkanBackend.create()
             if metal_vk.init(width, height):
-                return Ok(Engine2D(backend: metal_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal-on-vulkan"))
+                return Ok(Engine2D(backend: metal_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal-on-vulkan"))
 
         if requested_backend == "rocm":
             var rocm = RocmBackend.create()
             if rocm.init(width, height):
-                return Ok(Engine2D(backend: rocm, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, rocm_backend: rocm, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "rocm"))
+                return Ok(Engine2D(backend: rocm, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, rocm_backend: rocm, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "rocm"))
 
         if requested_backend == "intel":
             var intel = IntelBackend.create()
             if intel.init(width, height):
-                return Ok(Engine2D(backend: intel, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "intel"))
+                return Ok(Engine2D(backend: intel, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "intel"))
 
         if requested_backend == "qualcomm":
             var qualcomm = QualcommBackend.create()
             if qualcomm.init(width, height):
-                return Ok(Engine2D(backend: qualcomm, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "qualcomm"))
+                return Ok(Engine2D(backend: qualcomm, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "qualcomm"))
 
         if requested_backend == "webgpu":
             var webgpu = WebGpuBackend.create()
             if webgpu.init(width, height):
-                return Ok(Engine2D(backend: webgpu, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "webgpu"))
+                return Ok(Engine2D(backend: webgpu, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "webgpu"))
 
         if requested_backend == "software":
             var sw = SoftwareBackend.create()
             if sw.init(width, height):
                 val capability = sw.capability()
-                return Ok(Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software"))
+                return Ok(Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software"))
 
         # Note: "baremetal" is NOT auto-detected. It requires a pre-initialized
         # FramebufferDriver and must be created via create_with_baremetal_backend().
@@ -590,13 +607,13 @@ class Engine2D:
             var cpu_simd = CpuBackend.create_simd()
             if not cpu_simd.init(width, height):
                 return Err("backend unavailable: cpu_simd init failed")
-            return Ok(Engine2D(backend: cpu_simd, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu_simd"))
+            return Ok(Engine2D(backend: cpu_simd, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu_simd"))
 
         if requested_backend == "cpu":
             var cpu = CpuBackend.create()
             if not cpu.init(width, height):
                 return Err("backend unavailable: cpu init failed")
-            return Ok(Engine2D(backend: cpu, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu"))
+            return Ok(Engine2D(backend: cpu, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "cpu"))
 
         Err("backend unavailable: " + requested_backend)
 
@@ -611,7 +628,7 @@ class Engine2D:
                 vulkan_font_state_unknown: false,
                 last_vulkan_font_evidence: nil, metal_backend: nil,
                 opencl_backend: nil, rocm_backend: nil,
-                software_backend: nil, font_renderer: nil,
+                software_backend: nil, font_owner: Engine2DFontOwner.new(),
                 last_font_execution_attempts: [],
                 last_font_execution_target: "",
                 w: width, h: height, pacing: make_frame_pacing_counters(),
@@ -663,11 +680,11 @@ class Engine2D:
         same category) explicitly rather than adding more fields to the
         growing exception list.
         """
-        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: Some(backend), virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, vulkan_font_state_unknown: false, last_vulkan_font_evidence: nil, metal_backend: nil, opencl_backend: nil, rocm_backend: nil, software_backend: nil, font_renderer: nil, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "baremetal")
+        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: Some(backend), virtio_gpu_backend: nil, cuda_backend: nil, vulkan_backend: nil, vulkan_font_state_unknown: false, last_vulkan_font_evidence: nil, metal_backend: nil, opencl_backend: nil, rocm_backend: nil, software_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "baremetal")
 
     static fn create_with_virtio_gpu_backend(backend: VirtioGpuBackend) -> Engine2D:
         """Create engine with a pre-initialized VirtioGpuBackend."""
-        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: Some(backend), cuda_backend: nil, vulkan_backend: nil, metal_backend: nil, opencl_backend: nil, font_renderer: nil, w: backend.w, h: backend.h, pacing: make_frame_pacing_counters(), selected_backend_name: "virtio_gpu")
+        Engine2D(backend: backend, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: Some(backend), cuda_backend: nil, vulkan_backend: nil, metal_backend: nil, opencl_backend: nil, font_owner: Engine2DFontOwner.new(), w: backend.w, h: backend.h, pacing: make_frame_pacing_counters(), selected_backend_name: "virtio_gpu")
 
     static fn create_with_backend_strict(width: i32, height: i32, backend_name: text) -> Result<Engine2D, BackendProbeResult>:
         """Create engine with a specific backend, returning diagnostics on failure.
@@ -1204,20 +1221,22 @@ class Engine2D:
     me draw_glyph_run(x: i32, y: i32, run: FontGlyphRun, color: u32, font_size: i32) -> bool:
         val fonts = self.fonts()
         val batch = fonts.prepare_glyph_run(run, color, font_size)
-        self.font_renderer = Some(fonts)
+        self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
         self._draw_font_batch(x, y, batch)
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         """Draw a selected vector face fail-closed, or use the bitmap default."""
         var has_ttf = false
-        match self.font_renderer:
+        val owner: Engine2DFontOwner = self.font_owner
+        val current_fonts = engine2d_font_owner_current(owner)
+        match current_fonts:
             case Some(fonts):
                 has_ttf = fonts.has_sffi_ttf()
             case None:
                 pass_do_nothing("bitmap fallback needs no selected vector renderer")
         if _VEC_TEXT_PROBE and _vec_entry_probe_count < 8:
             _vec_entry_probe_count = _vec_entry_probe_count + 1
-            print("[vec-text-probe] draw_text-entry text_len={text_val.len()} font_renderer_nil={self.font_renderer == nil} has_sffi_ttf={has_ttf} vulkan_font_state_unknown={self.vulkan_font_state_unknown} selected_backend={self.selected_backend_name}")
+            print("[vec-text-probe] draw_text-entry text_len={text_val.len()} font_renderer_nil={current_fonts == nil} has_sffi_ttf={has_ttf} vulkan_font_state_unknown={self.vulkan_font_state_unknown} selected_backend={self.selected_backend_name}")
         if has_ttf:
             if _VEC_TEXT_PROBE and _vec_entry_probe_count < 24:
                 _vec_entry_probe_count = _vec_entry_probe_count + 1
@@ -1258,7 +1277,7 @@ class Engine2D:
             return false
         val fonts = self.fonts()
         val batch = fonts.prepare_text_configured(text_val, color, config)
-        self.font_renderer = Some(fonts)
+        self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
         self._draw_font_batch_plan(x, y, batch, plan)
 
     me draw_text_with_advances(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, font_size: i32) -> bool:
@@ -1273,7 +1292,7 @@ class Engine2D:
             return false
         val fonts = self.fonts()
         val batch = fonts.prepare_text_with_advances_configured(text_val, advance_widths, color, config)
-        self.font_renderer = Some(fonts)
+        self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
         self._draw_font_batch_plan(x, y, batch, plan)
 
     me draw_shaped_text(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> bool:
@@ -1288,7 +1307,7 @@ class Engine2D:
             return false
         val fonts = self.fonts()
         val batch = fonts.prepare_selected_glyph_run_configured(glyph_run, color, config)
-        self.font_renderer = Some(fonts)
+        self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
         self._draw_font_batch_plan(x, y, batch, plan)
 
     me load_font(path: text) -> bool:
@@ -1317,23 +1336,25 @@ class Engine2D:
                 self.backend = rocm
         val fonts = self.fonts()
         val loaded = fonts.try_load_runtime_ttf(path)
-        self.font_renderer = Some(fonts)
+        self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
         loaded
 
     me load_font_bytes(path: text, blob: [u8]) -> bool:
         val fonts = self.fonts()
         val loaded = fonts.try_load_selected_bytes(path, blob)
-        self.font_renderer = Some(fonts)
+        self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
         loaded
 
     me select_font_identity(identity: text) -> bool:
         """Select the exact bundled face named by a stable Draw IR identity."""
         if identity == "":
             return false
-        match self.font_renderer:
+        val owner: Engine2DFontOwner = self.font_owner
+        val current_fonts = engine2d_font_owner_current(owner)
+        match current_fonts:
             case Some(fonts):
                 val current_identity = fonts.current_font_identity()
-                self.font_renderer = Some(fonts)
+                self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
                 if current_identity == identity:
                     return true
             case None:
@@ -1343,13 +1364,13 @@ class Engine2D:
             return false
         val fonts = self.fonts()
         val registered = fonts.try_load_registered_identity(identity)
-        self.font_renderer = Some(fonts)
+        self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
         if (not registered and
             (font_renderer_registered_selected_bytes_only() or not self.load_font(selected_path))):
             return false
         val loaded_fonts = self.fonts()
         val loaded_identity = loaded_fonts.current_font_identity()
-        self.font_renderer = Some(loaded_fonts)
+        self.font_owner = engine2d_font_owner_store(self.font_owner, loaded_fonts)
         if loaded_identity == identity:
             return true
         self.unload_font()
@@ -1379,12 +1400,8 @@ class Engine2D:
             self.rocm_backend = rocm
             if rocm.initialized:
                 self.backend = rocm
-        match self.font_renderer:
-            case Some(fonts):
-                fonts.clear_ttf()
-            case None:
-                pass_do_nothing("no selected renderer to unload")
-        self.font_renderer = nil
+        val owner: Engine2DFontOwner = self.font_owner
+        self.font_owner = engine2d_font_owner_clear(owner)
 
     me font_cache_stats() -> FontCacheStats:
         val fonts = self.fonts()
@@ -1401,12 +1418,14 @@ class Engine2D:
         backend cell painter. This is the method `Engine2dCompositorBackend`
         and other GUI wrappers should call.
         """
-        match self.font_renderer:
+        val owner: Engine2DFontOwner = self.font_owner
+        val current_fonts = engine2d_font_owner_current(owner)
+        match current_fonts:
             case Some(fonts):
                 if fonts.has_sffi_ttf() and font_size > 0 and font_size <= 512:
                     val text_width = fonts.measure_text_width(text_val, font_size)
                     var line_height = fonts.horizontal_line_metric(font_size, 3)
-                    self.font_renderer = Some(fonts)
+                    self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
                     if line_height <= 0:
                         line_height = font_size
                     if text_width > 0:

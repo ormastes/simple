@@ -348,6 +348,33 @@ same failure.
   the one remaining live attempt. If it fails, record the result and stop
   under the three-cycle cap.
 
+### 2026-07-25 Engine2D font-owner continuation
+
+- Added the production `Engine2DFontOwner` capsule and routed Engine2D, Draw
+  IR, live/perf/RSS probes, compositor provenance, and showcase apps through
+  it. Owner operations use free functions with explicit concrete arguments;
+  this avoids the hosted AOT bug that drops receivers for no-argument methods
+  called through fields. All 23 canonical `Engine2D(...)` literals explicitly
+  construct the owner; no callable field default remains.
+- Focused owner/mutex native probe cycle 2: PASS. Production Engine2D
+  delegation probe cycle 3: PASS after replacing field-method receiver calls
+  with explicit free functions. Highest-capability source and disassembly
+  review accepted constructor coverage, concrete `FontRenderer` receivers,
+  owner clear/recreate, and concrete `mutex_unlock` argument preservation.
+- Fresh full Vulkan harness compile: PASS, 212 files, output
+  `build/macos_gpu_2d_live_native/stage3_font_owner_free_functions/macos_vulkan_2d_live_native`.
+- Canonical live wrapper remains blocked before launch because the existing
+  Stage3 compiler has no contemporaneous `provenance.env`. A canonical
+  bootstrap producer attempt exited without producing evidence; the preceding
+  local producer's retained log ends in 71 unresolved `_rt_cranelift_*`
+  symbols plus `_rt_time_now_monotonic_ms`. Do not synthesize a manifest.
+- The one remaining diagnostic Vulkan live cycle was consumed with the fresh
+  binary packaged as a high-resolution macOS app. PID 3939 exited before
+  `ready.env`, runtime receipt, capture, stdout, or stderr. Evidence directory:
+  `build/tmp/macos_vulkan_2d_font_owner_live.iPxc00/`. No retry is allowed in
+  this session. Vulkan rendering/events/vector-font/300-DPI status therefore
+  remains FAIL/unproved; Metal, web, GUI, WM, and QEMU stay blocked behind it.
+
 ## Required Evidence and Documentation
 
 - `doc/04_architecture/shared_multilingual_gpu_fonts.md`
