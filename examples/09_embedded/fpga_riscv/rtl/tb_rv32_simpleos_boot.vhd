@@ -76,7 +76,9 @@ begin
 
   process
   begin
-    wait for 40 ms;
+    -- Safety timeout only; a terminal marker (TEST PASSED/FAILED) stops earlier.
+    -- Sized to give the ramdisk FS/ls/launch path headroom past the boot markers.
+    wait for 200 ms;
     if not done then
       report "RV32_BOOT_STUCK pc=0x" & to_hstring(debug_pc)
         & " ins=0x" & to_hstring(debug_ins)

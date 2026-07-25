@@ -69,6 +69,48 @@ architecture rtl of rv32_exec_core_flat is
   end function;
 
   signal ram : ram_t := init_ram;
+
+  -- ------------------------------------------------------------------------
+  -- Ramdisk bank (memory-backed FS for the GHDL soft-core FS/ls/launch lane).
+  -- On silicon this window is a region of PS DDR at 0x88000000; here it is a
+  -- small behavioral array preloaded from "rv32_ramdisk.mem" (a truncated
+  -- FAT32 image, same 32-bit-LE-word-per-line hex format as rv32_flat.mem).
+  -- The rv32 kernel's virtio_blk_read_sector() memcpy's 512-byte sectors out
+  -- of this window when the kernel is built with -DRISCV_RAMDISK_BASE=
+  -- 0x88000000 (arch/common/riscv_common.h). Read-only: the FS smoke never
+  -- writes the disk, so no store path is provided. If rv32_ramdisk.mem is
+  -- absent (non-FS boot lanes) the bank stays zero and the core still
+  -- elaborates.
+  -- ------------------------------------------------------------------------
+  constant RDISK_BASE  : unsigned(31 downto 0) := x"88000000";
+  constant RDISK_WORDS : natural := 262144;  -- 1 MiB window (off(19 downto 2))
+  type rdisk_t is array(0 to RDISK_WORDS - 1) of std_logic_vector(31 downto 0);
+
+  impure function init_rdisk return rdisk_t is
+    file f : text;
+    variable fstatus : file_open_status;
+    variable line_v : line;
+    variable word_v : std_logic_vector(31 downto 0);
+    variable mem_v : rdisk_t := (others => x"00000000");
+    variable idx : natural := 0;
+  begin
+    file_open(fstatus, f, "rv32_ramdisk.mem", read_mode);
+    if fstatus /= open_ok then
+      return mem_v;
+    end if;
+    while not endfile(f) loop
+      readline(f, line_v);
+      hread(line_v, word_v);
+      if idx < RDISK_WORDS then
+        mem_v(idx) := word_v;
+      end if;
+      idx := idx + 1;
+    end loop;
+    file_close(f);
+    return mem_v;
+  end function;
+
+  signal rdisk : rdisk_t := init_rdisk;
   -- CSR file (minimal zicsr; RO-ish, matches the synthesizable core)
   signal csr_mhartid : unsigned(31 downto 0) := x"00000000";
   signal csr_mstatus : unsigned(31 downto 0) := x"00000000";
@@ -200,6 +242,19 @@ architecture rtl of rv32_exec_core_flat is
   function in_ram(addr : unsigned(31 downto 0)) return boolean is
   begin
     return addr >= BASE_ADDR and addr < BASE_ADDR + to_unsigned(RAM_WORDS * 4 - 1, 32);
+  end function;
+
+  -- True when addr lands in the ramdisk bank (0x88000000 .. +4 MiB).
+  function in_rdisk(addr : unsigned(31 downto 0)) return boolean is
+  begin
+    return addr >= RDISK_BASE and addr < RDISK_BASE + to_unsigned(RDISK_WORDS * 4 - 1, 32);
+  end function;
+
+  function rdisk_index(addr : unsigned(31 downto 0)) return natural is
+    variable off : unsigned(31 downto 0);
+  begin
+    off := addr - RDISK_BASE;
+    return to_integer(off(19 downto 2));
   end function;
 begin
   uart_tx <= uart_tx_q;
@@ -413,6 +468,8 @@ begin
               load_addr := r(rs1) + c_lw_imm(h);
               if in_ram(load_addr) then
                 r(rd) := unsigned(ram(word_index(load_addr)));
+              elsif in_rdisk(load_addr) then
+                r(rd) := unsigned(rdisk(rdisk_index(load_addr)));
               else
                 r(rd) := (others => '0');
               end if;
@@ -436,6 +493,8 @@ begin
                 load_addr := r(2) + c_lwsp_imm(h);
                 if in_ram(load_addr) then
                   r(rd) := unsigned(ram(word_index(load_addr)));
+                elsif in_rdisk(load_addr) then
+                  r(rd) := unsigned(rdisk(rdisk_index(load_addr)));
                 else
                   r(rd) := (others => '0');
                 end if;
@@ -645,6 +704,8 @@ begin
               elsif rd /= 0 then
                 if in_ram(eff) then
                   lw_val := ram(word_index(eff));
+                elsif in_rdisk(eff) then
+                  lw_val := rdisk(rdisk_index(eff));
                 else
                   lw_val := (others => '0');
                 end if;

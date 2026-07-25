@@ -25,13 +25,25 @@ cd "$ROOT_DIR"
 RTL_DIR="$ROOT_DIR/examples/09_embedded/fpga_riscv/rtl"
 WORK_DIR="$ROOT_DIR/build/ghdl/rv32_simpleos_boot"
 KERNEL_ELF="${KERNEL_ELF:-$ROOT_DIR/build/os/simpleos_riscv32_smf_fs.elf}"
+# Ramdisk (memory-backed FS) image. The kernel must have been built with
+# -DRISCV_RAMDISK_BASE=0x88000000 (SIMPLEOS_RV32_RAMDISK_BASE=0x88000000 during
+# native-build) so virtio_blk_read_sector() memcpys sectors out of the 0x88000000
+# ramdisk bank instead of driving a (non-existent in GHDL) virtio-blk device.
+FAT32_IMG="${FAT32_IMG:-$ROOT_DIR/build/os/fat32-riscv32.img}"
+# Bank is 1 MiB (rv32_exec_core_flat RDISK_WORDS=262144); the FS metadata + the
+# hello/browser SMF ELFs all live in the first ~0.3 MiB of the image (max sector
+# read ~593), so a 1 MiB truncation carries everything the FS/ls/launch smoke
+# reads while keeping GHDL elaboration/textio-init fast.
+RAMDISK_BYTES="${RAMDISK_BYTES:-1048576}"
 
 command -v ghdl >/dev/null 2>&1 || { echo "ERROR: ghdl not found in PATH"; exit 1; }
 [ -f "$KERNEL_ELF" ] || { echo "ERROR: kernel ELF missing: $KERNEL_ELF"; exit 1; }
+[ -f "$FAT32_IMG" ] || { echo "ERROR: FAT32 ramdisk image missing: $FAT32_IMG"; exit 1; }
 
 mkdir -p "$WORK_DIR"
-echo "=== GHDL RV32 SimpleOS kernel boot (flat 16MB core) ==="
+echo "=== GHDL RV32 SimpleOS kernel boot (flat 16MB core + 1MB ramdisk bank) ==="
 echo "  Kernel ELF: $KERNEL_ELF"
+echo "  Ramdisk img: $FAT32_IMG (first $RAMDISK_BYTES bytes -> 0x88000000)"
 
 # 1. Flatten loadable PROGBITS to the flat core's init_mem file. objcopy -O
 #    binary emits the loadable segments as one image starting at the lowest LMA
@@ -41,6 +53,14 @@ echo "  Kernel ELF: $KERNEL_ELF"
 riscv64-unknown-elf-objcopy -O binary "$KERNEL_ELF" "$WORK_DIR/kernel.bin"
 od -An -v -tx4 -w4 "$WORK_DIR/kernel.bin" | awk 'NF{print $1}' > "$WORK_DIR/rv32_flat.mem"
 echo "  Kernel image: $(wc -l < "$WORK_DIR/rv32_flat.mem") words (rv32_flat.mem)"
+
+# 1b. Flatten the ramdisk (FAT32) image into the core's ramdisk-bank init file.
+#     Truncate to the 4 MiB bank window and emit 32-bit LE words (same hex format
+#     as rv32_flat.mem). The core loads this into the 0x88000000 bank; sector N
+#     read = memcpy from 0x88000000 + N*512.
+head -c "$RAMDISK_BYTES" "$FAT32_IMG" > "$WORK_DIR/rv32_ramdisk.img"
+od -An -v -tx4 -w4 "$WORK_DIR/rv32_ramdisk.img" | awk 'NF{print $1}' > "$WORK_DIR/rv32_ramdisk.mem"
+echo "  Ramdisk image: $(wc -l < "$WORK_DIR/rv32_ramdisk.mem") words (rv32_ramdisk.mem)"
 
 # 2. Analyse + elaborate.
 printf "  Analysing flat core + testbench ... "
@@ -60,7 +80,7 @@ fi
 echo "OK"
 
 # 3. Run from WORK_DIR so the core's relative init_mem open finds rv32_flat.mem.
-STOP_TIME="${STOP_TIME:-40ms}"
+STOP_TIME="${STOP_TIME:-200ms}"
 printf "  Running simulation (stop-time=%s) ... \n" "$STOP_TIME"
 sim="$(cd "$WORK_DIR" && ghdl -r --std=08 --workdir="$WORK_DIR" \
   tb_rv32_simpleos_boot --stop-time="$STOP_TIME" 2>&1)" || true

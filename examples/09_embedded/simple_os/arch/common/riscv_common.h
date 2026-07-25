@@ -133,8 +133,49 @@ static int virtio_blk_init(void)
     return 1;
 }
 
+/* Base of the optional memory-backed ramdisk. On the FPGA/GHDL rv32 soft-core
+ * the FAT32 filesystem image is preloaded into a RAM bank here (see
+ * rv32_exec_core_flat.vhd); on silicon this is a region of PS DDR. Overridable
+ * at build time, but detection is at RUNTIME so ONE kernel binary serves both
+ * the QEMU virtio-blk lane and the ramdisk lane. */
+#ifndef RISCV_RAMDISK_BASE
+#define RISCV_RAMDISK_BASE 0x88000000u
+#endif
+
+/* Auto-detect a memory-backed ramdisk: true only when a valid FAT boot sector
+ * (0xEB/0xE9 jump + 0x55AA signature) is present at RISCV_RAMDISK_BASE. In QEMU
+ * that window is plain zeroed RAM (256 MiB guest), so the probe fails and the
+ * driver uses virtio-blk; in the GHDL soft-core the bank holds the image, so the
+ * probe succeeds and sector reads become a plain RAM memcpy. Result is cached. */
+static int ramdisk_fs_present(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const volatile unsigned char *r =
+            (const volatile unsigned char *)(uintptr_t)(RISCV_RAMDISK_BASE);
+        if ((r[0] == 0xEBU || r[0] == 0xE9U) && r[510] == 0x55U && r[511] == 0xAAU) {
+            cached = 1;
+        } else {
+            cached = 0;
+        }
+    }
+    return cached;
+}
+
 static int virtio_blk_read_sector(uint32_t lba)
 {
+    if (ramdisk_fs_present()) {
+        /* Memory-backed ramdisk path: the FAT32 image lives at
+         * RISCV_RAMDISK_BASE, so a sector read is a 512-byte memcpy into the
+         * sector buffer (g_dma + 16 == sector_data()). No virtio doorbell/DMA.
+         * All fat32/nvfs/smf callers stay device-agnostic via sector_data(). */
+        const unsigned char *src =
+            (const unsigned char *)(uintptr_t)(RISCV_RAMDISK_BASE) +
+            ((uintptr_t)lba * 512U);
+        unsigned char *dst = g_dma + 16U;
+        for (uint32_t i = 0; i < 512U; i++) dst[i] = src[i];
+        return 1;
+    }
     if (!g_blk_mmio && !virtio_blk_init()) return 0;
     rv_memzero(g_dma, sizeof(g_dma));
     uintptr_t dma = (uintptr_t)g_dma;
