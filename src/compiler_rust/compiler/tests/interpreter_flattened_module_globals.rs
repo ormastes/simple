@@ -323,6 +323,69 @@ fn flattened_transitive_import_preserves_global_owner() {
 }
 
 #[test]
+fn flattened_export_use_alias_facade_reads_live_mutable_globals() {
+    let dir = tempdir().unwrap();
+    let leaf_path = dir.path().join("leaf.spl");
+    let facade_path = dir.path().join("facade.spl");
+    let consumer_path = dir.path().join("consumer.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        leaf_path,
+        "var values: [i32] = []\n\nfn push_value(value: i32):\n    values.push(value)\n",
+    )
+    .unwrap();
+    fs::write(
+        facade_path,
+        "export use leaf.{values as facade_values, push_value}\n",
+    )
+    .unwrap();
+    fs::write(
+        consumer_path,
+        "use facade.{facade_values, push_value}\n\nfn push_then_read(value: i32) -> i32:\n    push_value(value)\n    return facade_values[0]\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use consumer.{push_then_read}\n\nfn main() -> i32:\n    return push_then_read(41)\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 41);
+}
+
+#[test]
+fn flattened_export_use_glob_facade_keeps_two_live_global_owners() {
+    // Glob marker expansion is intentionally eager: record_flattened_import_binding
+    // copies globals/bindings that the source owner has registered already. This
+    // proves the supported acyclic flattening order; cyclic re-export facades do
+    // not yet have a deferred/fixpoint binding contract and must not be claimed
+    // as supported by this regression.
+    let dir = tempdir().unwrap();
+    let leaf_path = dir.path().join("leaf.spl");
+    let facade_path = dir.path().join("facade.spl");
+    let consumer_path = dir.path().join("consumer.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        leaf_path,
+        "var left: [i32] = []\nvar right: [i32] = []\n\nfn push_both(a: i32, b: i32):\n    left.push(a)\n    right.push(b)\n",
+    )
+    .unwrap();
+    fs::write(facade_path, "export use leaf.*\n").unwrap();
+    fs::write(
+        consumer_path,
+        "use facade.{left, right, push_both}\n\nfn push_then_read(a: i32, b: i32) -> i32:\n    push_both(a, b)\n    return left[0] * 100 + right[0]\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use consumer.{push_then_read}\n\nfn main() -> i32:\n    return push_then_read(12, 3)\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 1203);
+}
+
+#[test]
 fn flattened_owner_keeps_private_state_across_colliding_helpers() {
     let dir = tempdir().unwrap();
     let core_path = dir.path().join("vmm_core.spl");

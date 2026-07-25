@@ -1983,6 +1983,11 @@ mod tests {
                     path: ModulePath::new(vec!["leaf".to_string()]),
                     target: ImportTarget::Glob,
                 }),
+                Node::ExportUseStmt(ExportUseStmt {
+                    span,
+                    path: ModulePath::new(vec![]),
+                    target: ImportTarget::Single("bare_value".to_string()),
+                }),
             ],
         };
 
@@ -2008,6 +2013,7 @@ mod tests {
             "other_value"
         )));
         assert!(marker_names.contains(&import_binding_marker_name(&importer, "*", &source, "*")));
+        assert!(!marker_names.iter().any(|marker| marker.contains("bare_value")));
         assert!(!flattened
             .items
             .iter()
