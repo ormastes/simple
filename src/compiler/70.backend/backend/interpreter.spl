@@ -32,6 +32,39 @@ fn resolve_sym_name(symbol: SymbolId, ctx: EvalContext) -> text:
         return nm ?? ""
     ""
 
+# Reinterpret an i64 bit-pattern as an UNSIGNED 64-bit value expressed as f64.
+# `Value.Int` stores a bare i64 with no signedness tag, so a high-bit-set `u64`
+# (>= 2^63) is held as a negative two's-complement pattern. A plain `.to_f64()`
+# would yield the negative double, which is exactly the
+# u64_to_f64_comparison_uses_signed_conversion_2026-07-25 bug. When the operand
+# is statically unsigned and its pattern is negative, split off the top bit so
+# the low 63 bits convert as a non-negative i64, then add 2^63. Signed or
+# non-negative values convert directly (negative i64 must stay negative).
+fn interp_int_to_f64(bits: i64, is_unsigned: bool) -> f64:
+    if is_unsigned and bits < 0:
+        val low63 = bits & 0x7FFFFFFFFFFFFFFF
+        9223372036854775808.0 + low63.to_f64()
+    else:
+        bits.to_f64()
+
+# True when a HIR operand's static type is an unsigned integer (u8/u16/u32/u64).
+# Consulted at every mixed int/float comparison/arith-promotion site so the
+# int->float conversion carries the operand's unsigned-ness (see
+# interp_int_to_f64). Defaults to false (signed) when the type is absent.
+fn interp_hir_expr_unsigned(e: HirExpr) -> bool:
+    if e == nil:
+        return false
+    if not e.has_type_:
+        return false
+    val t = e.type_
+    if t == nil:
+        return false
+    match t.kind:
+        case HirTypeKind.Int(_bits, signed):
+            not signed
+        case _:
+            false
+
 # ============================================================================
 # Interpreter Backend Implementation
 # ============================================================================
@@ -403,7 +436,13 @@ impl InterpreterBackendImpl:
                 val lv = self.eval_expr(bin_left_t, ctx)?
                 val rv = self.eval_expr(bin_right_t, ctx)?
                 itrace("[EE] Binary lv_nil={lv == nil} rv_nil={rv == nil}")
-                val bo_res = self.eval_binop(bin_op_t, lv, rv, expr.span)
+                # Thread each operand's static unsigned-ness so a mixed
+                # int/float compare/arith promotes a high-bit u64 via an
+                # UNSIGNED int->float conversion (bug
+                # u64_to_f64_comparison_uses_signed_conversion_2026-07-25).
+                val left_unsigned = interp_hir_expr_unsigned(bin_left_t)
+                val right_unsigned = interp_hir_expr_unsigned(bin_right_t)
+                val bo_res = self.eval_binop(bin_op_t, lv, rv, expr.span, left_unsigned, right_unsigned)
                 itrace("[EE] Binary eval_binop returned nil={bo_res == nil}")
                 bo_res
 
@@ -726,14 +765,14 @@ impl InterpreterBackendImpl:
         Ok(result)
 
     # Helper functions for comparison operators
-    fn eval_gt(left: Value, right: Value, span: Span) -> Result<Value, BackendError>:
+    fn eval_gt(left: Value, right: Value, span: Span, left_unsigned: bool, right_unsigned: bool) -> Result<Value, BackendError>:
         match left:
             case Value.Int(l):
                 match right:
                     case Value.Int(r):
                         Ok(Value.Bool(l > r))
                     case Value.Float(r):
-                        Ok(Value.Bool(l.to_f64() > r))
+                        Ok(Value.Bool(interp_int_to_f64(l, left_unsigned) > r))
                     case _:
                         Err(BackendError.type_error("invalid operands for >", Some(span)))
             case Value.Float(l):
@@ -741,20 +780,20 @@ impl InterpreterBackendImpl:
                     case Value.Float(r):
                         Ok(Value.Bool(l > r))
                     case Value.Int(r):
-                        Ok(Value.Bool(l > r.to_f64()))
+                        Ok(Value.Bool(l > interp_int_to_f64(r, right_unsigned)))
                     case _:
                         Err(BackendError.type_error("invalid operands for >", Some(span)))
             case _:
                 Err(BackendError.type_error("invalid operands for >", Some(span)))
 
-    fn eval_gteq(left: Value, right: Value, span: Span) -> Result<Value, BackendError>:
+    fn eval_gteq(left: Value, right: Value, span: Span, left_unsigned: bool, right_unsigned: bool) -> Result<Value, BackendError>:
         match left:
             case Value.Int(l):
                 match right:
                     case Value.Int(r):
                         Ok(Value.Bool(l >= r))
                     case Value.Float(r):
-                        Ok(Value.Bool(l.to_f64() >= r))
+                        Ok(Value.Bool(interp_int_to_f64(l, left_unsigned) >= r))
                     case _:
                         Err(BackendError.type_error("invalid operands for >=", Some(span)))
             case Value.Float(l):
@@ -762,13 +801,13 @@ impl InterpreterBackendImpl:
                     case Value.Float(r):
                         Ok(Value.Bool(l >= r))
                     case Value.Int(r):
-                        Ok(Value.Bool(l >= r.to_f64()))
+                        Ok(Value.Bool(l >= interp_int_to_f64(r, right_unsigned)))
                     case _:
                         Err(BackendError.type_error("invalid operands for >=", Some(span)))
             case _:
                 Err(BackendError.type_error("invalid operands for >=", Some(span)))
 
-    fn eval_binop(op: HirBinOp, left: Value, right: Value, span: Span) -> Result<Value, BackendError>:
+    fn eval_binop(op: HirBinOp, left: Value, right: Value, span: Span, left_unsigned: bool, right_unsigned: bool) -> Result<Value, BackendError>:
         itrace("[EBO] eval_binop enter")
         var op_t: HirBinOp = op
         if op_t == nil:
@@ -788,7 +827,7 @@ impl InterpreterBackendImpl:
                             case Value.Int(r):
                                 Ok(Value.Int(l + r))
                             case Value.Float(r):
-                                Ok(Value.Float(l.to_f64() + r))
+                                Ok(Value.Float(interp_int_to_f64(l, left_unsigned) + r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for +", Some(span)))
                     case Value.Float(l):
@@ -796,7 +835,7 @@ impl InterpreterBackendImpl:
                             case Value.Float(r):
                                 Ok(Value.Float(l + r))
                             case Value.Int(r):
-                                Ok(Value.Float(l + r.to_f64()))
+                                Ok(Value.Float(l + interp_int_to_f64(r, right_unsigned)))
                             case _:
                                 Err(BackendError.type_error("invalid operands for +", Some(span)))
                     case Value.String(l):
@@ -815,7 +854,7 @@ impl InterpreterBackendImpl:
                             case Value.Int(r):
                                 Ok(Value.Int(l - r))
                             case Value.Float(r):
-                                Ok(Value.Float(l.to_f64() - r))
+                                Ok(Value.Float(interp_int_to_f64(l, left_unsigned) - r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for -", Some(span)))
                     case Value.Float(l):
@@ -823,7 +862,7 @@ impl InterpreterBackendImpl:
                             case Value.Float(r):
                                 Ok(Value.Float(l - r))
                             case Value.Int(r):
-                                Ok(Value.Float(l - r.to_f64()))
+                                Ok(Value.Float(l - interp_int_to_f64(r, right_unsigned)))
                             case _:
                                 Err(BackendError.type_error("invalid operands for -", Some(span)))
                     case _:
@@ -836,7 +875,7 @@ impl InterpreterBackendImpl:
                             case Value.Int(r):
                                 Ok(Value.Int(l * r))
                             case Value.Float(r):
-                                Ok(Value.Float(l.to_f64() * r))
+                                Ok(Value.Float(interp_int_to_f64(l, left_unsigned) * r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for *", Some(span)))
                     case Value.Float(l):
@@ -844,7 +883,7 @@ impl InterpreterBackendImpl:
                             case Value.Float(r):
                                 Ok(Value.Float(l * r))
                             case Value.Int(r):
-                                Ok(Value.Float(l * r.to_f64()))
+                                Ok(Value.Float(l * interp_int_to_f64(r, right_unsigned)))
                             case _:
                                 Err(BackendError.type_error("invalid operands for *", Some(span)))
                     case _:
@@ -866,7 +905,7 @@ impl InterpreterBackendImpl:
                             case Value.Int(r):
                                 Ok(Value.Int(l / r))
                             case Value.Float(r):
-                                Ok(Value.Float(l.to_f64() / r))
+                                Ok(Value.Float(interp_int_to_f64(l, left_unsigned) / r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for /", Some(span)))
                     case Value.Float(l):
@@ -874,7 +913,7 @@ impl InterpreterBackendImpl:
                             case Value.Float(r):
                                 Ok(Value.Float(l / r))
                             case Value.Int(r):
-                                Ok(Value.Float(l / r.to_f64()))
+                                Ok(Value.Float(l / interp_int_to_f64(r, right_unsigned)))
                             case _:
                                 Err(BackendError.type_error("invalid operands for /", Some(span)))
                     case _:
@@ -935,7 +974,7 @@ impl InterpreterBackendImpl:
                             case Value.Int(r):
                                 Ok(Value.Bool(l < r))
                             case Value.Float(r):
-                                Ok(Value.Bool(l.to_f64() < r))
+                                Ok(Value.Bool(interp_int_to_f64(l, left_unsigned) < r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for <", Some(span)))
                     case Value.Float(l):
@@ -943,7 +982,7 @@ impl InterpreterBackendImpl:
                             case Value.Float(r):
                                 Ok(Value.Bool(l < r))
                             case Value.Int(r):
-                                Ok(Value.Bool(l < r.to_f64()))
+                                Ok(Value.Bool(l < interp_int_to_f64(r, right_unsigned)))
                             case _:
                                 Err(BackendError.type_error("invalid operands for <", Some(span)))
                     case Value.String(l):
@@ -962,7 +1001,7 @@ impl InterpreterBackendImpl:
                             case Value.Int(r):
                                 Ok(Value.Bool(l <= r))
                             case Value.Float(r):
-                                Ok(Value.Bool(l.to_f64() <= r))
+                                Ok(Value.Bool(interp_int_to_f64(l, left_unsigned) <= r))
                             case _:
                                 Err(BackendError.type_error("invalid operands for <=", Some(span)))
                     case Value.Float(l):
@@ -970,16 +1009,16 @@ impl InterpreterBackendImpl:
                             case Value.Float(r):
                                 Ok(Value.Bool(l <= r))
                             case Value.Int(r):
-                                Ok(Value.Bool(l <= r.to_f64()))
+                                Ok(Value.Bool(l <= interp_int_to_f64(r, right_unsigned)))
                             case _:
                                 Err(BackendError.type_error("invalid operands for <=", Some(span)))
                     case _:
                         Err(BackendError.type_error("invalid operands for <=", Some(span)))
 
             case HirBinOp.Gt:
-                self.eval_gt(left, right, span)
+                self.eval_gt(left, right, span, left_unsigned, right_unsigned)
             case HirBinOp.GtEq:
-                self.eval_gteq(left, right, span)
+                self.eval_gteq(left, right, span, left_unsigned, right_unsigned)
 
             case HirBinOp.And:
                 Ok(Value.Bool(left.is_truthy() and right.is_truthy()))

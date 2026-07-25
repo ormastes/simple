@@ -33,6 +33,26 @@ fn mir_expr_env_get(key: text) -> text:
 fn mir_expr_symbol_id_value(symbol: SymbolId) -> i64:
     symbol.id
 
+# True when a HIR operand's static type is an unsigned integer (u8/u16/u32/u64).
+# Consulted at the mixed int/float comparison-promotion site so a u64 operand
+# whose MIR local type was flattened to I64 still promotes via an UNSIGNED
+# int->float convert (bug
+# u64_to_f64_comparison_uses_signed_conversion_2026-07-25). Defaults to false
+# (signed) when the HIR type is absent — matches the prior always-signed path.
+fn hir_expr_static_unsigned(e: HirExpr) -> bool:
+    if e == nil:
+        return false
+    if not e.has_type_:
+        return false
+    val t = e.type_
+    if t == nil:
+        return false
+    match t.kind:
+        case HirTypeKind.Int(_bits, signed):
+            not signed
+        case _:
+            false
+
 # ============================================================================
 # Expression Lowering
 # ============================================================================
@@ -2088,10 +2108,38 @@ impl MirLowering:
                                     self.builder = b
                                     return strict_ne
                                 case _: ()
+                        # An unsigned int operand promoted to f64 for a mixed
+                        # int/float comparison must use an UNSIGNED int->float
+                        # convert (uitofp / fcvt_from_uint); a signed convert
+                        # reads a high-bit u64 (>= 2^63) as negative, so
+                        # `(2^63 as u64) > 0.0` wrongly yields false (bug
+                        # u64_to_f64_comparison_uses_signed_conversion_2026-07-25).
+                        # The u64 suffix/annotation is frequently flattened to an
+                        # I64 MIR local on this path, so consult BOTH the MIR
+                        # local type and the operand's static HIR type; when
+                        # unsigned, retype the operand to U64 before the f64 cast
+                        # so the backend's Cast lowering (which keys off the
+                        # source operand type) selects the unsigned convert.
+                        var left_int_unsigned = false
+                        match left_binop_type.kind:
+                            case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: left_int_unsigned = true
+                            case _: ()
+                        if not left_int_unsigned:
+                            left_int_unsigned = hir_expr_static_unsigned(left)
+                        var right_int_unsigned = false
+                        match right_binop_type.kind:
+                            case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: right_int_unsigned = true
+                            case _: ()
+                        if not right_int_unsigned:
+                            right_int_unsigned = hir_expr_static_unsigned(right)
                         if ordered_comparison and mixed_numeric_kinds:
                             if not left_f64:
+                                if left_int_unsigned:
+                                    left_binop = b.emit_cast(mir_operand_copy(left_binop), MirType(kind: MirTypeKind.U64))
                                 left_binop = b.emit_cast(mir_operand_copy(left_binop), MirType.f64())
                             if not right_f64:
+                                if right_int_unsigned:
+                                    right_binop = b.emit_cast(mir_operand_copy(right_binop), MirType(kind: MirTypeKind.U64))
                                 right_binop = b.emit_cast(mir_operand_copy(right_binop), MirType.f64())
                         if comparison and left_narrow_int and right_i64:
                             right_binop = b.emit_cast(mir_operand_copy(right_binop), left_binop_type)
