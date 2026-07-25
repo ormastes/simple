@@ -956,10 +956,29 @@ the shared binary — deploys require explicit user go-ahead).
   next candidate completed with `6 compiled, 1393 cached, 0 failed`, but the
   F64 reproducer still exited `1` and staged C9 still exited `2`.
 
+  The remaining boundary was the adapter's call to the bare Simple wrapper
+  `cranelift_fconst`, not the wrapper's inner `rt_cranelift_fconst` call.
+  Cross-module wrapper calls use the same external-import lowering, so the
+  bare name still received the generic all-i64 signature and passed its f64
+  argument in the wrong ABI class. Both exact names now share the existing
+  `(I64, I64, F64) -> I64` import helper; fcmp remains unchanged because its
+  operands are intentionally i64 SSA-value handles. A source contract covers
+  both names.
+
+  Behavioral verification is blocked after the bounded three-cycle rebuild
+  cap. Two seed-driven Cranelift rebuilds reached the linker but failed on the
+  same unrelated missing entry-closure symbols (`Poll.unwrap`, `Path.join`,
+  `FailSafeResult.is_err`, and siblings). A pure-Simple LLVM rebuild remained
+  compute-bound without producing cache artifacts for 20 minutes and was
+  stopped at the budget ceiling. The source-contract runner also reported
+  `no examples executed`; none of these failures disproves the narrow ABI
+  correction, but the plain F64 and C9 exits remain uncredited.
+
   C9 remains uncredited and this session has reached its three-cycle cap.
-  The next fresh session should inspect the actual F64 value at
-  `rt_cranelift_fconst` entry and the two Cranelift operands passed to
-  `cranelift_fcmp`; do not rewrite the shared-result merge until the plain
-  reproducer is green.
+  The next fresh session must first restore a linkable cached compiler
+  candidate, then run the plain F64 reproducer. If it remains red, inspect the
+  actual F64 value at `rt_cranelift_fconst` entry and the two Cranelift
+  operands passed to `cranelift_fcmp`; do not rewrite the shared-result merge
+  until the plain reproducer is green.
   LLVM and platform-matrix execution remain deferred until the plain F64
   reproducer and C9 both exit `42`.
