@@ -16,6 +16,38 @@ Updated: 2026-07-24
 
 ### 2026-07-25 Current Vulkan 2D checkpoint
 
+- GitHub `main` now contains provider checkpoint `c103e8ad001e` and shared
+  dimension checkpoint `5dbb483e7440`.
+- The hosted provider is built with Cargo features
+  `runtime-symbol-table,vulkan`; both macOS runtime dylibs use stable `@rpath`
+  identities. A fresh pure-Stage3 closure advanced past the earlier
+  `availability` rejection.
+- The third and final bounded launch for this session reached Vulkan backend
+  creation and failed with `Vulkan framebuffer dimensions are invalid`.
+  Disassembly showed that the imported module-global 3840x2160 aliases were
+  emitted in BSS and never initialized. The shared Vulkan/Metal harness now
+  uses function-local literal-backed 3840x2160 dimensions throughout creation,
+  probes, readback validation, capture, and receipts. The corrected closure
+  compiles and links, and high-capability source review accepts the fix.
+- The mandatory three-cycle guard is exhausted. Do not claim live success or
+  relaunch in this session. A fresh scoped session must perform exactly one
+  Vulkan 2D live launch from a newly attested canonical Stage3 build. Until
+  that produces device readback, a real window/capture, ordered events, and
+  300-DPI vector-font receipts, Vulkan web/GUI/WM, Metal, and QEMU live
+  acceptance remain gated.
+- QEMU ARM source attestation checkpoint `1b66b7f093b1` is on GitHub `main`.
+  It validates the deployed compiler's native format/host architecture, forces
+  kernel/disk/writer rebuilds, fingerprints disk/font inputs, and correlates a
+  guest-owned RAMFB visual commit with QMP input/frame/capture evidence. This
+  is reviewed source/manual infrastructure only; no QEMU live PASS was run.
+- Stage3 provenance remains local and unpushed after the third review cycle.
+  Remaining blockers are: the seed/native-all fingerprint omits the
+  unconditional `src/runtime/hosted` Rust/Cargo path dependency; inherited
+  environment records are discarded rather than exactly validated; and the
+  self-test does not exercise seed tampering, frontend replay, transcript or
+  canonical-path rejection, or private compiler/provenance freezing. Stop
+  this lane for the session under the mandatory three-cycle guard.
+
 - Host Vulkan installation is healthy: MoltenVK 1.4.1, Vulkan loader/tools
   1.4.350.1, validation layer 1.4.350, and Apple M4 device enumeration pass.
 - The shared Vulkan/Metal live harness now:
@@ -226,6 +258,28 @@ same failure.
   `runtime_native` archive. The resulting binary is diagnostic only because
   the Stage 3 compiler lacks a canonical bootstrap provenance manifest and the
   production builder still admits only the deployed release compiler.
+- The canonical bootstrap now produces
+  `build/wm-to-i64-bootstrap/stage3/<platform>/provenance.env` only after
+  identical pre/post snapshots of every `.spl` file under `src/compiler`,
+  `src/app`, and `src/lib`. The manifest binds the seed input stamp, seed,
+  native-all archive, optional compiler backfill, Stage 2 producer, both exact
+  staged command digests and logs, bootstrap/provenance helper bytes, Stage 3
+  output, and successful sanity gates. Consumers re-derive mutable hashes and
+  reject a symlink, stale source tree, stale seed stamp, or noncanonical path.
+- The GPU 2D producer now admits only that manifest-attested Stage 3 path and
+  labels its full-CLI state `separate-not-proven`; it does not deploy the
+  bootstrap CLI as `bin/simple`. Its explicit-entry native-build route uses the
+  bound bootstrap native-all backfill, which is disclosed in both manifests.
+  A new Stage 2/3 bootstrap run is still required to create the manifest before
+  the production Vulkan build can proceed.
+- Stage 4's memory failure is not evidence that the CLI entry closure is
+  intrinsically too large. The log reaches `src/app/ui.web/html.spl` through
+  eager optional CLI imports (including UI/browser command capsules). The
+  correct follow-up is to make optional command owners lazy/dynload capsules
+  while preserving the full CLI surface, then rerun the entry-seeded
+  `aot_native_project_with_backend_fixed` path. Excluding UI/web source roots
+  or deploying `bootstrap_main.spl` as the normal CLI would weaken scope and is
+  not an acceptable workaround.
 - Before the next Vulkan run, update and review the production builder so the
   core-C runtime bundle is not shadowed by `--runtime-path`. Recover a
   manifest-attested pure-Simple compiler at the canonical path; do not weaken
