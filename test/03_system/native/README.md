@@ -30,6 +30,7 @@ env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 <self-hosted-simple> native-bu
 | `option_nullcoalesce_struct.spl` | `??` payload struct field-name provenance (Some side) | see below | **42** | **PASS** | fields misread (both default to index 0) |
 | `option_nullcoalesce_struct_none.spl` | `??` default-expr struct field-name provenance (None side) | see below | **42** | **PASS** | fields misread (both default to index 0) |
 | `enum_f64_payload_precision.spl` | LLVM enum f64 payload-word ABI | — | **30** | SOURCE FIX / execution pending | f64 bits numerically converted |
+| `primitive_to_i64_collision.spl` | primitive conversion vs imported/custom `to_i64` ownership | — | **42** | RED / compiler fix pending | primitive call binds `LogLevel.to_i64`, custom method bypass, duplicate receiver evaluation, or text parse loss |
 | `struct_array_push_i64_field_tagshift.spl` | struct pushed into an empty-literal `[]`-declared array (i64 fields) | (this fix) | **30** | PASS | SIGSEGV, or a specific 11x rc marking which field/element mismatched |
 
 ## RESOLVED: `option_try_unwrap_ifval*.spl` (i64/text/struct/none)

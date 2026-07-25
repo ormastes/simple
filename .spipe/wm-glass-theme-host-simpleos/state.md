@@ -259,3 +259,12 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   AC-2/3/4/5/7/8/10 remain open, while AC-9 awaits final manual refresh.
   Exact-current host and QEMU evidence remain blocked by the recorded native
   primitive `.to_i64()`/imported `LogLevel.to_i64` collision.
+- continuation-2026-07-25-to-i64-fixture: Added the required semantic native
+  fixture for imported/custom/primitive/text `to_i64` ownership. An isolated
+  bootstrap produced two verified pure-Simple Stage 3 compilers; optional
+  Stage 4 was killed by signal 9. Both candidate fixture binaries linked
+  without unresolved `LogLevel.to_i64`, but returned code 4 because the
+  side-effecting `u8` result did not convert to 255. The candidate MIR guards
+  were rejected and removed. The three-cycle cap is exhausted; exact-current
+  host and QEMU launches remain blocked, with the retained cache and next
+  inspection point recorded in the bug tracker.

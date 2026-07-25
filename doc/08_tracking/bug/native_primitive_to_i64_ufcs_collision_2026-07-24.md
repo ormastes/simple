@@ -74,3 +74,23 @@ sh scripts/check/produce-aetheric-host-web-gui-evidence.shs
 Only if the producer completes may the admission wrapper run. Do not add a
 `LogLevel` object manually, add a raw runtime alias, rename feature call sites,
 or treat the existing partial artifacts as evidence.
+
+## 2026-07-25 semantic-fixture cycle
+
+Added `test/03_system/native/primitive_to_i64_collision.spl`, which imports
+the colliding `LogLevel` and checks custom enum/trait ownership, once-only
+evaluation, high-bit unsigned/bool/char conversion, and text parsing.
+
+One isolated full bootstrap produced verified Stage 3
+`833fa212bd79e7ad1b7c15028248465899327bcae5e95d402f1741ac54a283b1`;
+its optional Stage 4 was killed by signal 9. A refined pure-Simple rebuild
+produced verified Stage 3
+`6689d942d79fc9d43cae8af34ef1b9dbc4c356e39c6abf575a184234a3f47aa4`.
+Both candidate fixture builds linked cleanly and had no undefined
+`LogLevel.to_i64` symbol, but execution returned code `4`: the side-effecting
+`u8` receiver did not convert to `255`. The two recovery candidates were
+rejected and removed because they did not satisfy the semantic fixture.
+
+The three-cycle cap is exhausted. Resume by inspecting the emitted
+HIR/MIR/LLVM for `probe.next_u8().to_i64()` from the retained isolated cache
+`build/wm-to-i64-bootstrap/native_cache`; do not retry the same cast guards.
