@@ -1,0 +1,279 @@
+# Metal Session
+#
+# Shared GPU state extracted from MetalBackend so multiple Engine2D surfaces
+# can share one Metal device, command queue, shader library, and compute
+# pipelines.  Each surface still owns its own per-surface d_framebuffer.
+#
+# `class` in Simple uses reference semantics (like most OO classes), so
+# MetalSession instances can be retained by multiple MetalBackend surfaces
+# and the ref_count field correctly tracks live references.
+#
+# Usage:
+#   use std.gpu.engine2d.metal_session.{MetalSession}
+
+use std.gpu.engine2d.backend_metal_msl.{_engine2d_msl}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_ENTRY, font_atlas_composite_metal_source}
+use std.nogc_sync_mut.io.metal_sffi.{
+    metal_sffi_init, metal_sffi_is_available, metal_sffi_device_count,
+    metal_sffi_create_device, metal_sffi_destroy_device,
+    metal_sffi_create_command_queue, metal_sffi_destroy_command_queue,
+    metal_sffi_compile_shader, metal_sffi_destroy_shader,
+    metal_sffi_create_compute_pipeline, metal_sffi_destroy_pipeline,
+    metal_sffi_run_compute_frame,
+    metal_last_error
+}
+# ============================================================================
+# MetalSession
+# ============================================================================
+
+class MetalSession:
+    """Shared Metal GPU context: device + command queue + shader library + pipelines.
+
+    Multiple MetalBackend surfaces can share a single MetalSession, avoiding
+    the cost of redundant device creation and shader compilation.
+
+    Lifecycle:
+      val s = MetalSession.create()
+      if s.init():
+          # hand s (or s.retain()) to each MetalBackend via init_with_session()
+          ...
+          s.release()   # each backend calls release() in shutdown()
+
+    init() is fully owned by Simple: it probes the seeded runtime functions,
+    creates the Metal device/queue, compiles the Engine2D MSL, and creates the
+    compute pipelines used by MetalBackend.
+    """
+
+    device: i64               # MTLDevice handle
+    command_queue: i64        # MTLCommandQueue handle
+    shader_lib: i64           # Compiled MSL shader library handle
+    font_shader_lib: i64      # Separate shared font-atlas MSL library
+    pipe_clear: i64           # Compute pipeline: clear
+    pipe_rect_filled: i64     # Compute pipeline: filled rect
+    pipe_rect_outline: i64    # Compute pipeline: rect outline
+    pipe_line: i64            # Compute pipeline: line
+    pipe_circle: i64          # Compute pipeline: circle outline
+    pipe_circle_filled: i64   # Compute pipeline: filled circle
+    pipe_rounded_rect: i64    # Compute pipeline: rounded rect
+    pipe_rounded_rect_outline: i64  # Compute pipeline: thick rounded-rect outline
+    pipe_triangle: i64        # Compute pipeline: filled triangle
+    pipe_gradient: i64        # Compute pipeline: gradient rect
+    pipe_blit: i64            # Compute pipeline: image blit
+    pipe_image_composite: i64 # Compute pipeline: src-over image + opacity
+    pipe_indexed_fill: i64    # Compute pipeline: GPU-dict pilot indexed_fill (design cpu_gpu_dual_algorithm)
+    pipe_glyph_atlas_blit: i64  # Compute pipeline: GPU-dict glyph atlas draw_text accelerator (design cpu_gpu_dual_algorithm W4)
+    pipe_font_atlas_composite: i64  # Optional common font-atlas composite pipeline
+    ref_count: i64            # Live reference count (i64 matches CUDA/Vulkan/CPU)
+    is_initialized: bool      # True after a successful init() (matches CUDA/Vulkan/CPU naming)
+    generation: i64           # Stale-resource detection; incremented on init and cleanup
+    last_error: i64            # Last init failure code; 0 means success
+
+    static fn create(mode: text) -> MetalSession:
+        """Return a zero-initialised, uninitialised session. Call init() before use."""
+        MetalSession(
+            device: 0,
+            command_queue: 0,
+            shader_lib: 0,
+            font_shader_lib: 0,
+            pipe_clear: 0,
+            pipe_rect_filled: 0,
+            pipe_rect_outline: 0,
+            pipe_line: 0,
+            pipe_circle: 0,
+            pipe_circle_filled: 0,
+            pipe_rounded_rect: 0,
+            pipe_rounded_rect_outline: 0,
+            pipe_triangle: 0,
+            pipe_gradient: 0,
+            pipe_blit: 0,
+            pipe_image_composite: 0,
+            pipe_indexed_fill: 0,
+            pipe_glyph_atlas_blit: 0,
+            pipe_font_atlas_composite: 0,
+            ref_count: 0,
+            is_initialized: false,
+            generation: 0,
+            last_error: 0
+        )
+
+    me init() -> bool:
+        """Initialize the Simple-owned Metal session through seeded SFFI calls."""
+        self._cleanup()
+        val available = metal_sffi_is_available()
+        if not available:
+            self.last_error = 1
+            return false
+        val runtime_initialized = metal_sffi_init()
+        if not runtime_initialized:
+            self.last_error = 2
+            return false
+        val device_count = metal_sffi_device_count()
+        if device_count <= 0:
+            self.last_error = 3
+            return false
+        self.device = metal_sffi_create_device(0)
+        if self.device == 0:
+            self.last_error = 4
+            return false
+        self.command_queue = metal_sffi_create_command_queue(self.device)
+        if self.command_queue == 0:
+            self.last_error = 5
+            self._cleanup()
+            return false
+        val shader_source = _engine2d_msl()
+        self.shader_lib = metal_sffi_compile_shader(self.device, shader_source)
+        if self.shader_lib == 0:
+            self.last_error = 6
+            self._cleanup()
+            return false
+        self.pipe_clear = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_clear")
+        self.pipe_rect_filled = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_filled")
+        self.pipe_rect_outline = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rect_outline")
+        self.pipe_line = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_line")
+        self.pipe_circle = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle")
+        self.pipe_circle_filled = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_circle_filled")
+        self.pipe_rounded_rect = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rounded_rect")
+        self.pipe_rounded_rect_outline = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_rounded_rect_outline")
+        self.pipe_triangle = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_triangle_filled")
+        self.pipe_gradient = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_draw_gradient_rect")
+        self.pipe_blit = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_blit_image")
+        self.pipe_image_composite = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_composite_image")
+        if self.pipe_clear == 0 or self.pipe_rect_filled == 0 or self.pipe_rect_outline == 0 or self.pipe_line == 0 or self.pipe_circle == 0 or self.pipe_circle_filled == 0 or self.pipe_rounded_rect == 0 or self.pipe_rounded_rect_outline == 0 or self.pipe_triangle == 0 or self.pipe_gradient == 0 or self.pipe_blit == 0 or self.pipe_image_composite == 0:
+            self.last_error = 7
+            self._cleanup()
+            return false
+        # GPU-dict pilot pipeline: deliberately NOT part of the gate above.
+        # A compile/pipeline-creation failure here must not take down the rest
+        # of Metal rendering (loud fall-through, design §3.4) — MetalBackend's
+        # capability() checks pipe_indexed_fill directly and reports
+        # indexed_fill as unaccelerated (normal D2 CPU-lane fallthrough) when
+        # it is 0, instead of failing the whole session.
+        self.pipe_indexed_fill = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_indexed_fill")
+        # GPU-dict use case #2 (design W4): same loud-fallthrough discipline —
+        # MetalBackend.draw_text() checks pipe_glyph_atlas_blit directly and
+        # falls through to the CPU-lane mirror when it is 0.
+        self.pipe_glyph_atlas_blit = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_glyph_atlas_blit")
+        # The portable font module remains optional so it cannot disable the
+        # existing Metal renderer on an older compiler/runtime.
+        self.font_shader_lib = metal_sffi_compile_shader(self.device, font_atlas_composite_metal_source())
+        if self.font_shader_lib != 0:
+            self.pipe_font_atlas_composite = metal_sffi_create_compute_pipeline(self.device, self.font_shader_lib, FONT_ATLAS_COMPOSITE_ENTRY)
+        self.ref_count = 1
+        self.is_initialized = true
+        self.last_error = 0
+        self.generation = self.generation + 1
+        true
+
+    me retain() -> MetalSession:
+        """Increment the reference count and return self for convenient assignment."""
+        self.ref_count = self.ref_count + 1
+        self
+
+    me release():
+        """Decrement the reference count; destroy GPU resources when it reaches zero."""
+        if self.ref_count <= 0:
+            return
+        self.ref_count = self.ref_count - 1
+        if self.ref_count == 0:
+            self._cleanup()
+
+    me is_valid() -> bool:
+        self.is_initialized and self.device != 0 and self.command_queue != 0
+
+    me error_code() -> i64:
+        self.last_error
+
+    me dispatch_font_atlas_composite(atlas: i64, dst: i64, params: [u8], thread_count: i64) -> bool:
+        if not self.is_valid() or self.pipe_font_atlas_composite == 0:
+            return false
+        if atlas <= 0 or dst <= 0 or params.len() != 52:
+            return false
+        if thread_count <= 0 or thread_count > 2147483647:
+            return false
+        val groups = (thread_count + 63) / 64
+        metal_sffi_run_compute_frame(self.command_queue, self.pipe_font_atlas_composite, atlas, dst, params, groups, 1, 1, 64, 1, 1)
+
+    me error_message() -> text:
+        """Return a human-readable description of the last init failure."""
+        if self.last_error == 1:
+            return "Metal SFFI not available"
+        if self.last_error == 2:
+            return "Metal runtime init failed"
+        if self.last_error == 3:
+            return "No Metal devices found"
+        if self.last_error == 4:
+            return "Metal device creation failed"
+        if self.last_error == 5:
+            return "Metal command queue creation failed"
+        if self.last_error == 6:
+            return "Metal shader compilation failed"
+        if self.last_error == 7:
+            return "Metal compute pipeline creation failed"
+        if self.last_error == 0:
+            return ""
+        "Metal initialization failed"
+
+    me _cleanup():
+        """Destroy and reset all tracked GPU handles."""
+        if self.pipe_clear != 0:
+            metal_sffi_destroy_pipeline(self.pipe_clear)
+        if self.pipe_rect_filled != 0:
+            metal_sffi_destroy_pipeline(self.pipe_rect_filled)
+        if self.pipe_rect_outline != 0:
+            metal_sffi_destroy_pipeline(self.pipe_rect_outline)
+        if self.pipe_line != 0:
+            metal_sffi_destroy_pipeline(self.pipe_line)
+        if self.pipe_circle != 0:
+            metal_sffi_destroy_pipeline(self.pipe_circle)
+        if self.pipe_circle_filled != 0:
+            metal_sffi_destroy_pipeline(self.pipe_circle_filled)
+        if self.pipe_rounded_rect != 0:
+            metal_sffi_destroy_pipeline(self.pipe_rounded_rect)
+        if self.pipe_rounded_rect_outline != 0:
+            metal_sffi_destroy_pipeline(self.pipe_rounded_rect_outline)
+        if self.pipe_triangle != 0:
+            metal_sffi_destroy_pipeline(self.pipe_triangle)
+        if self.pipe_gradient != 0:
+            metal_sffi_destroy_pipeline(self.pipe_gradient)
+        if self.pipe_blit != 0:
+            metal_sffi_destroy_pipeline(self.pipe_blit)
+        if self.pipe_image_composite != 0:
+            metal_sffi_destroy_pipeline(self.pipe_image_composite)
+        if self.pipe_indexed_fill != 0:
+            metal_sffi_destroy_pipeline(self.pipe_indexed_fill)
+        if self.pipe_glyph_atlas_blit != 0:
+            metal_sffi_destroy_pipeline(self.pipe_glyph_atlas_blit)
+        if self.pipe_font_atlas_composite != 0:
+            metal_sffi_destroy_pipeline(self.pipe_font_atlas_composite)
+        if self.font_shader_lib != 0:
+            metal_sffi_destroy_shader(self.font_shader_lib)
+        if self.shader_lib != 0:
+            metal_sffi_destroy_shader(self.shader_lib)
+        if self.command_queue != 0:
+            metal_sffi_destroy_command_queue(self.command_queue)
+        if self.device != 0:
+            metal_sffi_destroy_device(self.device)
+        self.pipe_clear = 0
+        self.pipe_rect_filled = 0
+        self.pipe_rect_outline = 0
+        self.pipe_line = 0
+        self.pipe_circle = 0
+        self.pipe_circle_filled = 0
+        self.pipe_rounded_rect = 0
+        self.pipe_rounded_rect_outline = 0
+        self.pipe_triangle = 0
+        self.pipe_gradient = 0
+        self.pipe_blit = 0
+        self.pipe_image_composite = 0
+        self.pipe_indexed_fill = 0
+        self.pipe_glyph_atlas_blit = 0
+        self.pipe_font_atlas_composite = 0
+        self.font_shader_lib = 0
+        self.shader_lib = 0
+        self.command_queue = 0
+        self.device = 0
+        self.ref_count = 0
+        self.is_initialized = false
+        self.generation = self.generation + 1
+
+export MetalSession

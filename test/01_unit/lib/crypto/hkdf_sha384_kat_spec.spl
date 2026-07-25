@@ -1,0 +1,198 @@
+# HKDF-SHA-384 KAT Spec (RFC 5869 structural + Wycheproof)
+#
+# Tests the pure-Simple HKDF-SHA-384 binding in src/lib/common/crypto/hkdf.spl.
+#
+# Dependency chain:
+#   hkdf_extract_sha384 / hkdf_expand_sha384 / hkdf_sha384
+#     → hmac_sha384_bytes (std.crypto.hmac)
+#       → sha384_bytes    (std.crypto.sha512 — src/lib/common/crypto/sha512.spl)
+#
+# WARNING — KNOWN BROKEN SHA-384 DEPENDENCY (pending W16-B-FIX):
+#   src/os/crypto/sha384.spl has a KAT failure (2/6 FIPS 180-4 vectors fail).
+#   The lib path above uses std.crypto.sha512.sha384_bytes, which is a
+#   SEPARATE implementation in src/lib/common/crypto/sha512.spl.  If that
+#   implementation shares the same defect the fixed-value MAC/OKM assertions
+#   in this file WILL FAIL until W16-B-FIX lands and both paths are verified.
+#   Structural / length-only assertions (L=0, L=1, L=48, L>max) do NOT depend
+#   on SHA-384 numerical correctness and are safe to run at all times.
+#
+# KAT vectors sourced from:
+#   1. RFC 4231 §4.2 TC1  — HMAC-SHA-384 doubles as HKDF-Extract PRK vector.
+#   2. Project Wycheproof — testvectors_v1/hkdf_sha384_test.json tcIds 1, 11, 12.
+#
+# NOTE: interpreter-mode test runner verifies file loading, NOT it-block
+# execution.  Fixed-value assertions only fire under compiled/native mode (see
+# .claude/memory/feedback_compile_mode_false_greens.md).
+
+use std.spipe.*
+use std.crypto.hkdf.{hkdf_extract_sha384, hkdf_expand_sha384, hkdf_sha384}
+use std.crypto.types.{bytes_to_hex}
+
+# ============================================================================
+# Helpers — build inputs in module-level fns to avoid the it-block var
+# mutation interpreter quirk (feedback_it_block_var_mutation.md).
+# ============================================================================
+
+# RFC 4231 §4.2 TC1: Key = 20 × 0x0b
+fn _rfc4231_key() -> list:
+    var out = []
+    var i = 0
+    while i < 20:
+        out.push(0x0b)
+        i = i + 1
+    out
+
+# RFC 4231 §4.2 TC1: Data = "Hi There" (ASCII 48 69 20 54 68 65 72 65)
+fn _rfc4231_data() -> list:
+    [0x48, 0x69, 0x20, 0x54, 0x68, 0x65, 0x72, 0x65]
+
+# Wycheproof tcId 1: ikm = 24aeff2645e3e0f5494a9a102778c43a  (16 bytes)
+fn _wp1_ikm() -> list:
+    [0x24, 0xae, 0xff, 0x26, 0x45, 0xe3, 0xe0, 0xf5,
+     0x49, 0x4a, 0x9a, 0x10, 0x27, 0x78, 0xc4, 0x3a]
+
+# Wycheproof tcId 11: ikm  = 0cbd136d66d15a4ffefde1303b430821
+fn _wp11_ikm() -> list:
+    [0x0c, 0xbd, 0x13, 0x6d, 0x66, 0xd1, 0x5a, 0x4f,
+     0xfe, 0xfd, 0xe1, 0x30, 0x3b, 0x43, 0x08, 0x21]
+
+# Wycheproof tcId 11: salt = 2614d80275b08a1cf90bae0eb607d4d5
+fn _wp11_salt() -> list:
+    [0x26, 0x14, 0xd8, 0x02, 0x75, 0xb0, 0x8a, 0x1c,
+     0xf9, 0x0b, 0xae, 0x0e, 0xb6, 0x07, 0xd4, 0xd5]
+
+# Wycheproof tcId 11: info = ee991de21aeb6baa6a5f683dbb755e6f80db1c1d
+fn _wp11_info() -> list:
+    [0xee, 0x99, 0x1d, 0xe2, 0x1a, 0xeb, 0x6b, 0xaa,
+     0x6a, 0x5f, 0x68, 0x3d, 0xbb, 0x75, 0x5e, 0x6f,
+     0x80, 0xdb, 0x1c, 0x1d]
+
+# Wycheproof tcId 12: ikm  = 7a00817689a3d79001825a864c69c120
+fn _wp12_ikm() -> list:
+    [0x7a, 0x00, 0x81, 0x76, 0x89, 0xa3, 0xd7, 0x90,
+     0x01, 0x82, 0x5a, 0x86, 0x4c, 0x69, 0xc1, 0x20]
+
+# Wycheproof tcId 12: salt = 08bc01c053a6406c7c4a667c9b9b3894
+fn _wp12_salt() -> list:
+    [0x08, 0xbc, 0x01, 0xc0, 0x53, 0xa6, 0x40, 0x6c,
+     0x7c, 0x4a, 0x66, 0x7c, 0x9b, 0x9b, 0x38, 0x94]
+
+# Wycheproof tcId 12: info = 967ccd75395be6e96a67759f070487c9e2107791
+fn _wp12_info() -> list:
+    [0x96, 0x7c, 0xcd, 0x75, 0x39, 0x5b, 0xe6, 0xe9,
+     0x6a, 0x67, 0x75, 0x9f, 0x07, 0x04, 0x87, 0xc9,
+     0xe2, 0x10, 0x77, 0x91]
+
+# ============================================================================
+# Structural / length-only tests — safe regardless of SHA-384 correctness
+# ============================================================================
+
+describe "HKDF-SHA-384 structural correctness (length-only — SHA-384-bug-safe)":
+
+    it "Extract PRK is exactly 48 bytes (SHA-384 HashLen = 384/8)":
+        # PRK length depends only on HMAC output size, not on the value.
+        # Safe even if SHA-384 produces wrong bytes.
+        expect(hkdf_extract_sha384([], _wp1_ikm()).len()).to_equal(48)
+
+    it "Extract PRK with explicit salt is exactly 48 bytes":
+        expect(hkdf_extract_sha384(_wp11_salt(), _wp11_ikm()).len()).to_equal(48)
+
+    it "Expand with L=1 returns exactly 1 byte":
+        val prk = hkdf_extract_sha384(_wp11_salt(), _wp11_ikm())
+        expect(hkdf_expand_sha384(prk, _wp11_info(), 1).len()).to_equal(1)
+
+    it "Expand with L=48 returns exactly 48 bytes":
+        val prk = hkdf_extract_sha384(_wp11_salt(), _wp11_ikm())
+        expect(hkdf_expand_sha384(prk, _wp11_info(), 48).len()).to_equal(48)
+
+    it "Expand with L=96 returns exactly 96 bytes (two HMAC blocks)":
+        val prk = hkdf_extract_sha384(_wp11_salt(), _wp11_ikm())
+        expect(hkdf_expand_sha384(prk, _wp11_info(), 96).len()).to_equal(96)
+
+    it "L=0 returns empty list":
+        expect(hkdf_sha384(_wp11_salt(), _wp11_ikm(), _wp11_info(), 0).len()).to_equal(0)
+
+    it "L exceeding 255*48 (12240) returns empty list":
+        expect(hkdf_sha384(_wp11_salt(), _wp11_ikm(), _wp11_info(), 12241).len()).to_equal(0)
+
+    it "Two-step Extract+Expand produces same length as combined hkdf_sha384":
+        val prk = hkdf_extract_sha384(_wp12_salt(), _wp12_ikm())
+        val two_step_len = hkdf_expand_sha384(prk, _wp12_info(), 64).len()
+        val combined_len = hkdf_sha384(_wp12_salt(), _wp12_ikm(), _wp12_info(), 64).len()
+        expect(two_step_len).to_equal(combined_len)
+
+    it "Empty-info Expand returns the correct length":
+        val prk = hkdf_extract_sha384([], _wp1_ikm())
+        expect(hkdf_expand_sha384(prk, [], 42).len()).to_equal(42)
+
+# ============================================================================
+# Determinism / idempotency — safe regardless of SHA-384 value correctness
+# ============================================================================
+
+describe "HKDF-SHA-384 determinism (SHA-384-bug-safe)":
+
+    it "Two independent invocations with same inputs produce identical output":
+        val first  = hkdf_sha384(_wp11_salt(), _wp11_ikm(), _wp11_info(), 42)
+        val second = hkdf_sha384(_wp11_salt(), _wp11_ikm(), _wp11_info(), 42)
+        expect(bytes_to_hex(first)).to_equal(bytes_to_hex(second))
+
+    it "Two-step equals combined convenience wrapper (value match)":
+        # This is a compositional identity test: the two paths must agree
+        # regardless of whether SHA-384 itself is numerically correct.
+        val prk       = hkdf_extract_sha384(_wp12_salt(), _wp12_ikm())
+        val two_step  = hkdf_expand_sha384(prk, _wp12_info(), 64)
+        val combined  = hkdf_sha384(_wp12_salt(), _wp12_ikm(), _wp12_info(), 64)
+        expect(bytes_to_hex(two_step)).to_equal(bytes_to_hex(combined))
+
+# ============================================================================
+# Fixed-value KAT assertions — DEPEND ON SHA-384 CORRECTNESS
+#
+# WARNING: These tests WILL FAIL if std.crypto.sha512.sha384_bytes shares
+# the defect tracked in src/os/crypto/sha384.spl (W16-B-FIX pending).
+# If they fail with mismatched hex values rather than length errors, the
+# cause is the SHA-384 computation bug, not the HKDF construction.
+# Mark failures as "blocked by W16-B-FIX" rather than HKDF bugs.
+# ============================================================================
+
+describe "HKDF-SHA-384 Extract KAT — RFC 4231 §4.2 TC1 (pending W16-B-FIX)":
+
+    it "Extract(salt=20*0x0b, ikm='Hi There') matches RFC 4231 TC1 HMAC-SHA-384":
+        # RFC 4231 §4.2 TC1 HMAC-SHA-384:
+        #   afd03944d84895626b0825f4ab46907f
+        #   15f9dadbe4101ec682aa034c7cebc59c
+        #   faea9ea9076ede7f4af152e8b2fa9cb6
+        # HKDF-Extract(salt, ikm) = HMAC-SHA-384(salt, ikm), so this vector
+        # is a direct cross-check of hkdf_extract_sha384.
+        # DEPENDENCY: std.crypto.sha512.sha384_bytes — pending W16-B-FIX.
+        expect(bytes_to_hex(hkdf_extract_sha384(_rfc4231_key(), _rfc4231_data()))).to_equal(
+            "afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6"
+        )
+
+describe "HKDF-SHA-384 OKM KAT — Wycheproof valid vectors (pending W16-B-FIX)":
+
+    it "Wycheproof tcId 1 — empty salt + empty info, L=20":
+        # salt = (empty) → effective salt = 48 zero bytes (RFC 5869 §2.2)
+        # info = (empty)
+        # OKM  = 4b7045423d9156424b0b85d95a7d602fba3924b1  (20 bytes)
+        # DEPENDENCY: std.crypto.sha512.sha384_bytes — pending W16-B-FIX.
+        expect(bytes_to_hex(hkdf_sha384([], _wp1_ikm(), [], 20))).to_equal(
+            "4b7045423d9156424b0b85d95a7d602fba3924b1"
+        )
+
+    it "Wycheproof tcId 11 — 16-byte salt, 20-byte info, L=42":
+        # OKM = e618b91d9f3d10c007958d025841a3347947eb41
+        #       b23ec35a3d7927aad74f293c50405a56911d8158e74f
+        # DEPENDENCY: std.crypto.sha512.sha384_bytes — pending W16-B-FIX.
+        expect(bytes_to_hex(hkdf_sha384(_wp11_salt(), _wp11_ikm(), _wp11_info(), 42))).to_equal(
+            "e618b91d9f3d10c007958d025841a3347947eb41b23ec35a3d7927aad74f293c50405a56911d8158e74f"
+        )
+
+    it "Wycheproof tcId 12 — 16-byte salt, 20-byte info, L=64":
+        # OKM = bd02e16b6024f2c3b752d1c1d3047583
+        #       697731915fbbb34418f479b0c9bf84a8
+        #       6bd8e715eca198da8f9b39b25a1229c3
+        #       11853f862340cdefe46ddf41dcf256d9
+        # DEPENDENCY: std.crypto.sha512.sha384_bytes — pending W16-B-FIX.
+        expect(bytes_to_hex(hkdf_sha384(_wp12_salt(), _wp12_ikm(), _wp12_info(), 64))).to_equal(
+            "bd02e16b6024f2c3b752d1c1d3047583697731915fbbb34418f479b0c9bf84a86bd8e715eca198da8f9b39b25a1229c311853f862340cdefe46ddf41dcf256d9"
+        )

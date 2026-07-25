@@ -1,0 +1,70 @@
+#[runtime_intrinsics]
+extern fn rt_metal_buffer_upload(buffer: i64, data_ptr: i64, size: i64) -> i64
+extern fn rt_metal_set_bytes(encoder: i64, data_ptr: i64, length: i64, index: i64) -> i64
+extern fn rt_write_u32s_to_raw(data_ptr: i64, pixels: [u32]) -> i64
+
+export use std.gc_async_mut.io.metal_ptr.{metal_buffer_download_ptr, metal_u32s_from_ptr}
+
+fn metal_host_buffer_upload(buffer: i64, data_ptr: i64, size: i64) -> i64:
+    rt_metal_buffer_upload(buffer, data_ptr, size)
+
+fn metal_host_set_bytes(encoder: i64, data_ptr: i64, length: i64, index: i64) -> i64:
+    rt_metal_set_bytes(encoder, data_ptr, length, index)
+
+pub fn metal_buffer_upload_ptr(buffer: i64, data_ptr: i64, size: i64) -> i64:
+    metal_host_buffer_upload(buffer, data_ptr, size)
+
+pub fn metal_set_bytes_ptr(encoder: i64, data_ptr: i64, length: i64, index: i64) -> i64:
+    metal_host_set_bytes(encoder, data_ptr, length, index)
+
+# One-call argument marshalling of a pixel block into a host byte buffer:
+# copies the whole [u32] into `data_ptr` (little-endian) Rust-side. Inverse of
+# metal_u32s_from_ptr. A per-pixel FFI write loop costs one round-trip per
+# pixel (~480K calls for one 800x600 frame — minutes of interpreter dispatch).
+# Returns the number of u32 values written.
+pub fn metal_write_u32s_to_ptr(data_ptr: i64, pixels: [u32]) -> i64:
+    rt_write_u32s_to_raw(data_ptr, pixels)
+
+# ============================================================================
+# GpuLut — buffer-backed lookup table pack helper (GPU-dict pilot, design
+# doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md §3.1/§3.3).
+#
+# Dense-kind (kind=0) layout only, for the indexed_fill palette pilot:
+#   word[0]=kind(0)  word[1]=count  word[2]=mask(unused)  word[3]=value_stride(1)
+#   payload: values[count]  (the palette itself; key IS the index)
+#
+# Packs into a raw host buffer via rt_alloc + one rt_ptr_write_i32 call per
+# u32 word — the same non-bulk pack idiom backend_metal.spl already uses for
+# its small param structs and the draw_image per-pixel fallback. Deliberately
+# does NOT go through rt_write_u32s_to_raw: this pilot is upload-only via the
+# existing rt_metal_buffer_upload fast path (metal_buffer_upload_ptr below),
+# the writeback direction (metal_write_u32s_to_ptr above) stays untouched.
+# Caller uploads the returned host pointer via metal_buffer_upload_ptr into a
+# device buffer, then frees it with rt_free.
+# ============================================================================
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64) -> i64
+extern fn rt_ptr_write_i32(ptr: i64, offset: i64, value: i64) -> i64
+
+pub fn gpu_lut_dense_byte_len(count: i32) -> i64:
+    (4 + count).to_i64() * 4
+
+pub fn gpu_lut_pack_dense(palette: [u32]) -> i64:
+    val count = palette.len()
+    val byte_len = gpu_lut_dense_byte_len(count.to_i32())
+    val host = rt_alloc(byte_len)
+    if host == 0:
+        return 0
+    rt_ptr_write_i32(host, 0, 0)               # kind = dense
+    rt_ptr_write_i32(host, 4, count.to_i64())  # count
+    rt_ptr_write_i32(host, 8, 0)                # mask (unused, dense)
+    rt_ptr_write_i32(host, 12, 1)                # value_stride = 1 (ARGB)
+    var i = 0
+    while i < count:
+        rt_ptr_write_i32(host, (4 + i).to_i64() * 4, palette[i].to_i64())
+        i = i + 1
+    host
+
+pub fn gpu_lut_free(host_ptr: i64) -> i64:
+    rt_free(host_ptr)

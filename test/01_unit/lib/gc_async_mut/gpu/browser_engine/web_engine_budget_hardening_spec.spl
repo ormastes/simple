@@ -1,0 +1,100 @@
+"""
+# Simple Web Engine Budget + Quota Hardening Specification
+
+## Overview
+
+Guards the hostile-page hardening added to the pure-Simple HTML/CSS software
+renderer (`simple_web_html_layout_renderer.spl`): a wall-clock render budget and
+CSS rule/declaration quotas that degrade GRACEFULLY (return a correctly sized,
+partially painted framebuffer) instead of hanging, plus the `body`/`html` canvas
+background-color propagation to the full viewport.
+
+Absolute oracles only: exact framebuffer length (`width * height`), exact pixel
+colors, and the honest degraded flag. The render budget is exercised via the
+overridable `budget_ms` parameter so a hostile sheet trips deterministically in
+milliseconds rather than waiting out the 10s default.
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+"""
+
+use std.spec.*
+use lib.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels,
+    simple_web_layout_last_render_degraded}
+
+val W: i32 = 96
+val H: i32 = 64
+
+# framebuffer sample at (x, y) in a W-wide [u32] buffer.
+fn _px(pixels: [u32], x: i32, y: i32) -> u32:
+    pixels[y * W + x]
+
+# Build an oversized <style> block: `count` distinct class rules (~30 bytes
+# each), so ~1500 rules ≈ 45KB — enough parse+cascade work to exceed a 1ms
+# budget deterministically.
+fn _oversized_style(count: i32) -> text:
+    var parts: [text] = []
+    var i = 0
+    while i < count:
+        parts = parts.push(".g" + i.to_text() + "{color:#101010;padding:1px;margin:1px}")
+        i = i + 1
+    "<style>" + parts.join("") + "</style>"
+
+# A stylesheet whose FIRST rule sets the body background to a known color,
+# followed by `junk` distinct non-matching class rules (so the body background
+# rule is the sole candidate for <body> and wins regardless of quota ordering).
+fn _quota_style(junk: i32) -> text:
+    var parts: [text] = []
+    parts = parts.push("body{margin:0;background:#3050a0}")
+    var i = 0
+    while i < junk:
+        parts = parts.push(".j" + i.to_text() + "{color:#111111;border:1px solid #222222}")
+        i = i + 1
+    "<style>" + parts.join("") + "</style>"
+
+describe "Simple Web engine budget + quota hardening":
+
+    it "returns a full-sized degraded framebuffer when the budget trips on an oversized stylesheet":
+        step("Render a ~45KB generated stylesheet at 96x64 under a generous 60s budget")
+        val html = "<html><head>" + _oversized_style(1500) + "</head><body class=\"g0 g1\"><div class=\"g2\">hi</div></body></html>"
+        # Generous budget so this completion assertion is not load-sensitive; the
+        # 1ms call below is the actual degradation test.
+        val ok = simple_web_layout_render_html_software_pixels(html, W, H, 60000)
+        step("Assert it completes: framebuffer length is exactly width*height and it is NOT degraded")
+        expect(ok.len()).to_equal(W * H)
+        expect(simple_web_layout_last_render_degraded()).to_equal(false)
+        step("Render the same page under a 1ms budget so a phase must stop early")
+        val degraded = simple_web_layout_render_html_software_pixels(html, W, H, 1)
+        step("Assert graceful degradation: still a full-sized buffer, and the flag honestly reports the trip")
+        expect(degraded.len()).to_equal(W * H)
+        expect(simple_web_layout_last_render_degraded()).to_equal(true)
+
+    it "keeps the first stylesheet rule effective when total rules exceed the quota":
+        step("Render body background #3050a0 followed by 4300 distinct junk rules (over the 4096 quota)")
+        val html = "<html><head>" + _quota_style(4300) + "</head><body></body></html>"
+        # Generous budget: this scenario's intent is the RULE QUOTA, so keep the
+        # wall-clock budget out of its way (the parse of 4300 rules is O(rules)).
+        val pixels = simple_web_layout_render_html_software_pixels(html, W, H, 60000)
+        step("Assert render completes at exact size and is not degraded")
+        expect(pixels.len()).to_equal(W * H)
+        expect(simple_web_layout_last_render_degraded()).to_equal(false)
+        step("Assert a background pixel equals the first rule's color exactly")
+        expect(_px(pixels, 4, 58)).to_equal(0xFF3050A0u32)
+
+    it "renders a small honest page exactly and reports it as not degraded":
+        step("Render a 40x30 green block on an unstyled body at 96x64")
+        val html = "<html><body style=\"margin:0\"><div style=\"width:40px;height:30px;background:#20c040\"></div></body></html>"
+        val pixels = simple_web_layout_render_html_software_pixels(html, W, H)
+        step("Assert the block's center pixel is exactly the block color and the render is not degraded")
+        expect(pixels.len()).to_equal(W * H)
+        expect(_px(pixels, 20, 15)).to_equal(0xFF20C040u32)
+        expect(simple_web_layout_last_render_degraded()).to_equal(false)
+
+    it "propagates the body background to the viewport below the content":
+        step("Render body background #204060 with a 96x20 header block #d04030 at 96x64")
+        val html = "<html><body style=\"margin:0;background:#204060\"><div style=\"width:96px;height:20px;background:#d04030\"></div></body></html>"
+        val pixels = simple_web_layout_render_html_software_pixels(html, W, H)
+        step("Assert a pixel inside the header equals the header color exactly")
+        expect(_px(pixels, 48, 10)).to_equal(0xFFD04030u32)
+        step("Assert a pixel well below the content equals the body background color exactly")
+        expect(_px(pixels, 48, 45)).to_equal(0xFF204060u32)

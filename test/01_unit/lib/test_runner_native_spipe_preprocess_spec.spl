@@ -1,0 +1,142 @@
+use std.spec.*
+use std.io.{file_delete, file_exists, file_read, file_write, time_now_unix_micros}
+use std.test_runner.test_result_wrapper.{preprocess_spipe_file, preprocess_spipe_native_result_file}
+
+fn delete_if_present(path: text):
+    if path != "" and file_exists(path):
+        expect(file_delete(path)).to_be(true)
+
+describe "native SPipe preprocessing":
+    it "preserves the legacy wrapper and adds ordered native result guards":
+        val source = "/tmp/simple_native_spipe_{time_now_unix_micros()}_spec.spl"
+        val body = "use std.spec.*\n\nfn deliberate_failure():\n    fail(\"deliberate\")\n\ndescribe \"sample\":\n    it \"passes\":\n        expect(2).to_equal(2)   \n        expect 3 to_not_equal 4\n"
+        expect(file_write(source, body)).to_be(true)
+
+        val legacy_path = preprocess_spipe_file(source)
+        val native_path = preprocess_spipe_native_result_file(source)
+        val legacy = file_read(legacy_path)
+        val native = file_read(native_path)
+        expect(legacy).to_contain("fn main():")
+        expect(legacy.contains("rt_bdd_executed_count")).to_be(false)
+        expect(legacy.contains("native result wrapper complete")).to_be(false)
+        expect(native).to_contain("fn main() -> i64:")
+        expect(native).to_contain("extern fn rt_exit(code: i64)")
+        expect(native).to_contain("fn fail_assertion(message: text):\n    print \"    assertion failed: \" + message\n    expect false\n    rt_exit(1)")
+        expect(native).to_contain("\n            expect(2 == 2)\n")
+        expect(native).to_contain("expect(3 != 4)")
+
+        val clear_at = native.index_of("\n    rt_bdd_clear_state()\n") ?? -1
+        val body_at = native.index_of("describe \"sample\"") ?? -1
+        val format_at = native.index_of("val __simple_native_spec_failures = rt_bdd_format_results()") ?? -1
+        val count_at = native.index_of("val __simple_native_spec_executed = rt_bdd_executed_count()") ?? -1
+        val zero_at = native.index_of("__simple_native_spec_executed == 0") ?? -1
+        val marker_at = native.index_of("test-runner: native result wrapper complete") ?? -1
+        val failure_at = native.index_of("test-runner: spec failed") ?? -1
+        expect(body_at).to_be_greater_than(clear_at)
+        expect(format_at).to_be_greater_than(body_at)
+        expect(count_at).to_be_greater_than(format_at)
+        expect(zero_at).to_be_greater_than(count_at)
+        expect(marker_at).to_be_greater_than(zero_at)
+        expect(failure_at).to_be_greater_than(marker_at)
+
+        delete_if_present(native_path)
+        delete_if_present(legacy_path)
+        delete_if_present(source)
+
+    it "uses distinct compiler-safe native paths for a hyphenated source path":
+        val source = "/tmp/simple-font-worktree-{time_now_unix_micros()}-spec.spl"
+        expect(file_write(source, "describe \"sample\":\n    it \"passes\":\n        expect(1).to_equal(1)\n")).to_be(true)
+        val first = preprocess_spipe_native_result_file(source)
+        val second = preprocess_spipe_native_result_file(source)
+        expect(first == second).to_be(false)
+        expect(first).to_start_with("/tmp/spipe_native_")
+        expect(second).to_start_with("/tmp/spipe_native_")
+        expect(first).to_end_with("_spec.spl")
+        expect(second).to_end_with("_spec.spl")
+        expect(first.contains("-")).to_be(false)
+        expect(second.contains("-")).to_be(false)
+        delete_if_present(first)
+        delete_if_present(second)
+        delete_if_present(source)
+
+    it "keeps consecutive font declarations before the generated main":
+        val source = "/tmp/simple_native_spipe_font_decls_{time_now_unix_micros()}_spec.spl"
+        val body = "val FONT_ASSET_ROOT = \"/tmp/fonts\"   \nval FONT_CORPUS_PATH = \"/tmp/fonts/CORPUS\"\nconst FONT_COUNT = 16\nalias FontName = text\nstruct FontRow:\n    family: text\nexport FontRow\nclass FontFixture:\n    name: text\nfn setup_shared_font_fixture() -> FontFixture:\n    FontFixture(name: \"fixture\")\nfn expect_font_license(value: text):\n    expect(value).to_equal(\"OFL\")\ndescribe \"font manifest\":\n    it \"loads pinned data\":\n        step(\"Load the pinned multilingual font manifest\")\n        expect(1).to_equal(1)\n"
+        expect(file_write(source, body)).to_be(true)
+        val native_path = preprocess_spipe_native_result_file(source)
+        val native = file_read(native_path)
+        val main_at = native.index_of("fn main() -> i64:") ?? -1
+        val fixture_at = native.index_of("class FontFixture:") ?? -1
+        val setup_at = native.index_of("fn setup_shared_font_fixture()") ?? -1
+        val license_at = native.index_of("fn expect_font_license(value: text)") ?? -1
+        val step_at = native.index_of("step(\"Load the pinned multilingual font manifest\")") ?? -1
+        expect(native.index_of("val FONT_ASSET_ROOT") ?? -1).to_be_less_than(main_at)
+        expect(native.index_of("val FONT_CORPUS_PATH") ?? -1).to_be_less_than(main_at)
+        expect(native.index_of("const FONT_COUNT") ?? -1).to_be_less_than(main_at)
+        expect(native.index_of("alias FontName") ?? -1).to_be_less_than(main_at)
+        expect(native.index_of("struct FontRow") ?? -1).to_be_less_than(main_at)
+        expect(native.index_of("export FontRow") ?? -1).to_be_less_than(main_at)
+        expect(fixture_at).to_be_less_than(main_at)
+        expect(setup_at).to_be_less_than(main_at)
+        expect(license_at).to_be_less_than(main_at)
+        expect(step_at).to_be_greater_than(main_at)
+        expect(native.contains("\n    fn setup_shared_font_fixture")).to_be(false)
+        expect(native.contains("\n    fn expect_font_license")).to_be(false)
+        delete_if_present(native_path)
+        delete_if_present(source)
+
+    it "lowers a font assertion without mistaking numeric conversion for a matcher":
+        val source = "/tmp/simple_native_spipe_font_conversion_{time_now_unix_micros()}_spec.spl"
+        val body = "describe \"font pixels\":\n    it \"matches the atlas quad\":\n        step(\"Prepare one shared font batch for 2D\")\n        expect(pixels.len()).to_equal((quad.width * quad.height).to_i64())\n        expect(checker).to_contain(\"void main()\")\n"
+        expect(file_write(source, body)).to_be(true)
+        val native_path = preprocess_spipe_native_result_file(source)
+        val native = file_read(native_path)
+        expect(native_path == "").to_be(false)
+        expect(native).to_contain("expect(pixels.len() == (quad.width * quad.height).to_i64())")
+        expect(native).to_contain("expect((checker).contains(\"void main()\"))")
+        delete_if_present(native_path)
+        delete_if_present(source)
+
+    it "strips the SPipe import and supplies the font inequality helper":
+        val source = "/tmp/simple_native_spipe_font_assert_ne_{time_now_unix_micros()}_spec.spl"
+        val body = "use std.spipe.*\n\ndescribe \"font identity\":\n    it \"rejects a stale wrapper\":\n        step(\"Reject a stale global-face wrapper after loading a second selected face\")\n        assert_not_equal(first, second)\n"
+        expect(file_write(source, body)).to_be(true)
+        val native_path = preprocess_spipe_native_result_file(source)
+        val native = file_read(native_path)
+        expect(native_path == "").to_be(false)
+        expect(native.contains("use std.spipe")).to_be(false)
+        expect(native).to_contain("fn assert_not_equal(a, b):")
+        expect(native).to_contain("assert_not_equal(first, second)")
+        delete_if_present(native_path)
+        delete_if_present(source)
+
+    it "fails closed for empty, colliding, and unsupported matcher sources":
+        val stamp = time_now_unix_micros()
+        val empty = "/tmp/simple_native_spipe_empty_{stamp}_spec.spl"
+        val collision = "/tmp/simple_native_spipe_collision_{stamp}_spec.spl"
+        val unsupported = "/tmp/simple_native_spipe_unsupported_{stamp}_spec.spl"
+        val multiline = "/tmp/simple_native_spipe_multiline_matcher_{stamp}_spec.spl"
+        val chained = "/tmp/simple_native_spipe_chained_matcher_{stamp}_spec.spl"
+        val invalid_arity = "/tmp/simple_native_spipe_invalid_arity_{stamp}_spec.spl"
+        val pending_block = "/tmp/simple_native_spipe_pending_block_{stamp}_spec.spl"
+        expect(file_write(empty, "")).to_be(true)
+        expect(file_write(collision, "fn main():\n    print \"collision\"\n")).to_be(true)
+        expect(file_write(unsupported, "describe \"sample\":\n    it \"fails closed\":\n        expect(1).to_unknown(1)\n")).to_be(true)
+        expect(file_write(multiline, "describe \"sample\":\n    it \"fails closed\":\n        expect(1)\n            .to_equal(1)\n")).to_be(true)
+        expect(file_write(chained, "describe \"sample\":\n    it \"fails closed\":\n        expect(1).to_equal(1).to_equal(1)\n")).to_be(true)
+        expect(file_write(invalid_arity, "describe \"sample\":\n    it \"fails closed\":\n        expect(nil).to_be_nil(fail(\"side effect\"))\n")).to_be(true)
+        expect(file_write(pending_block, "describe \"sample\":\n    pending_on(\"must not false-green\", \"dependency\", deliberate_failure)\n")).to_be(true)
+        expect(preprocess_spipe_native_result_file(empty)).to_equal("")
+        expect(preprocess_spipe_native_result_file(collision)).to_equal("")
+        expect(preprocess_spipe_native_result_file(unsupported)).to_equal("")
+        expect(preprocess_spipe_native_result_file(multiline)).to_equal("")
+        expect(preprocess_spipe_native_result_file(chained)).to_equal("")
+        expect(preprocess_spipe_native_result_file(invalid_arity)).to_equal("")
+        expect(preprocess_spipe_native_result_file(pending_block)).to_equal("")
+        delete_if_present(empty)
+        delete_if_present(collision)
+        delete_if_present(unsupported)
+        delete_if_present(multiline)
+        delete_if_present(chained)
+        delete_if_present(invalid_arity)
+        delete_if_present(pending_block)

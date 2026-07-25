@@ -1,0 +1,87 @@
+# Desktop Shell Process Helpers — Process rows, overlay rows, selection helpers
+#
+# Companion to shell.spl. Free functions for querying and projecting
+# launcher-owned process state into shell-layer views.
+
+use os.services.launcher.launcher.{
+    launcher_get_process_count, launcher_get_process_name, launcher_get_process_pid,
+    launcher_get_process_state, launcher_get_process_window_count,
+    launcher_get_process_is_headless, launcher_get_process_app_id_for_pid
+}
+use os.desktop.shell.{ShellProcessRow}
+
+# ============================================================================
+# Process Row Queries
+# ============================================================================
+
+fn _process_rows() -> [ShellProcessRow]:
+    """Return launcher-backed process rows in render order."""
+    var rows: [ShellProcessRow] = []
+    val process_count = launcher_get_process_count()
+    var idx: u64 = 0
+    while idx < process_count.to_u64():
+        val name = launcher_get_process_name(idx)
+        val pid = launcher_get_process_pid(idx)
+        if name != "" and pid > 0:
+            rows = rows.push(ShellProcessRow(
+                process_index: idx,
+                name: name,
+                pid: pid,
+                state: launcher_get_process_state(idx),
+                windows: launcher_get_process_window_count(idx),
+                headless: launcher_get_process_is_headless(idx),
+                app_id: launcher_get_process_app_id_for_pid(pid)
+            ))
+        idx = idx + 1
+    rows
+
+fn _selected_process_row(selected_process_idx: i64) -> ShellProcessRow?:
+    val rows = _process_rows()
+    if rows.len() == 0:
+        return nil
+    val idx = _normalized_process_selection(selected_process_idx, rows.len())
+    rows[idx]
+
+fn _normalized_process_selection(selected_process_idx: i64, row_count: i32) -> i32:
+    if row_count <= 0:
+        return 0
+    if selected_process_idx < 0:
+        return 0
+    if selected_process_idx >= row_count.to_i64():
+        return row_count - 1
+    selected_process_idx.to_i32()
+
+fn _process_is_live(state: text) -> bool:
+    state == "running" or state == "launching" or state == "terminating"
+
+fn _process_panel_rows() -> [text]:
+    """Public shell view over launcher-owned process state for the overlay."""
+    var rows: [text] = []
+    for row in _process_rows():
+        val headless_tag = if row.headless: " headless" else: ""
+        rows = rows.push("{row.name} pid {row.pid} {row.state} w{row.windows}{headless_tag}")
+    rows
+
+fn _window_overlay_rows() -> [text]:
+    """Visible top-level app windows for the baremetal demo overlay."""
+    var rows: [text] = []
+    for row in _process_rows():
+        if row.windows > 0:
+            rows = rows.push(row.name)
+    rows
+
+# ============================================================================
+# Container Helpers
+# ============================================================================
+
+fn _contains_text(items: [text], value: text) -> bool:
+    for item in items:
+        if item == value:
+            return true
+    false
+
+fn _contains_u64(items: [u64], value: u64) -> bool:
+    for item in items:
+        if item == value:
+            return true
+    false

@@ -1,0 +1,209 @@
+# @cover src/lib/common/ui/clipboard_service.spl 80%
+"""
+# Clipboard Service Spec
+
+## Overview
+
+`ClipboardService` is the framework-level clipboard: a current entry plus a
+bounded HISTORY ring (kill-ring / clipboard-manager semantics), an
+injectable host-OS bridge seam, and capability-gated entry points. This spec
+proves the ring bounds correctly, `paste_from_history` promotes an older
+entry to current (moving it to the front) rather than duplicating it, the
+host bridge seam round-trips through installed function pointers instead of
+any real OS call, and the capability gates deny when the caller lacks
+ClipboardRead/ClipboardWrite.
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** N/A
+
+## Design
+
+**Design:** doc/04_architecture/ui/simple_gui_stack.md
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+Three copies fill history most-recent-first; a 4th copy against a
+capacity-3 service evicts the oldest. `paste_from_history(1)` promotes that
+entry to `history[0]` and to `paste()`'s answer, without growing the ring.
+A fake host bridge (two top-level fns over a module var) proves `copy()`
+calls the write side and `sync_from_host()` calls the read side — no real
+SDL2/OS clipboard is touched. `copy_gated`/`paste_gated` deny with
+`NotSupported` when the capability list omits ClipboardWrite/ClipboardRead.
+"""
+
+use std.spec.*
+use common.ui.clipboard_service.{ClipboardService, ClipboardEntry}
+use common.ui.capability.{Capability}
+
+# Fake host-bridge state for the "injectable seam" tests below. Plain
+# top-level (module-scope) fns + a module var, NOT closures over an `it`
+# block's local vars: nested closures in this runtime can only READ outer
+# locals, not modify them (module-scope mutation works fine), so the bridge
+# functions installed on ClipboardService must be real top-level fns
+# (mirrors how ClipboardService's own `_no_host_read`/`_no_host_write`
+# defaults work).
+var _fake_host_slot: text = ""
+var _fake_host_write_calls: i32 = 0
+
+fn _fake_host_read() -> text:
+    _fake_host_slot
+
+fn _fake_host_write(content: text) -> bool:
+    _fake_host_slot = content
+    _fake_host_write_calls = _fake_host_write_calls + 1
+    true
+
+describe "ClipboardService — history ring":
+
+    it "copy() pushes most-recent-first and paste() returns the current entry":
+        step("Copy three items in order a, b, c")
+        var svc = ClipboardService.new()
+        svc.copy("text/plain", "a")
+        svc.copy("text/plain", "b")
+        svc.copy("text/plain", "c")
+
+        step("history()[0] is the most recent copy; paste() matches it")
+        val hist = svc.history_entries()
+        expect(hist.len()).to_equal(3)
+        expect(hist[0].data).to_equal("c")
+        expect(hist[1].data).to_equal("b")
+        expect(hist[2].data).to_equal("a")
+        val current = svc.paste()
+        assert_true(current != nil)
+        if current != nil:
+            expect(current.data).to_equal("c")
+
+    it "a bounded ring evicts the oldest entry once capacity is exceeded":
+        step("Fill a capacity-3 service with 4 copies")
+        var svc = ClipboardService.with_capacity(3)
+        svc.copy("text/plain", "1")
+        svc.copy("text/plain", "2")
+        svc.copy("text/plain", "3")
+        svc.copy("text/plain", "4")
+
+        step("Oldest entry (1) is evicted; ring stays at capacity")
+        expect(svc.history_len()).to_equal(3)
+        val hist = svc.history_entries()
+        expect(hist[0].data).to_equal("4")
+        expect(hist[1].data).to_equal("3")
+        expect(hist[2].data).to_equal("2")
+
+    it "paste_from_history(idx) promotes that entry to current without duplicating it":
+        step("Copy three items, then paste from history index 1 (the middle one)")
+        var svc = ClipboardService.new()
+        svc.copy("text/plain", "first")
+        svc.copy("text/plain", "second")
+        svc.copy("text/plain", "third")
+
+        val promoted = svc.paste_from_history(1)
+        assert_true(promoted != nil)
+        if promoted != nil:
+            expect(promoted.data).to_equal("second")
+
+        step("The promoted entry is now current and at the front; ring size unchanged")
+        expect(svc.history_len()).to_equal(3)
+        val hist = svc.history_entries()
+        expect(hist[0].data).to_equal("second")
+        val current = svc.paste()
+        assert_true(current != nil)
+        if current != nil:
+            expect(current.data).to_equal("second")
+
+    it "paste_from_history rejects an out-of-range index":
+        step("A one-entry service has no index 5")
+        var svc = ClipboardService.new()
+        svc.copy("text/plain", "only")
+        val missing = svc.paste_from_history(5)
+        assert_true(missing == nil)
+
+    it "cut() records the same way copy() does":
+        step("cut() is clipboard-mechanics-identical to copy()")
+        var svc = ClipboardService.new()
+        svc.cut("text/plain", "cut-payload")
+        val current = svc.paste()
+        assert_true(current != nil)
+        if current != nil:
+            expect(current.data).to_equal("cut-payload")
+
+    it "clear() empties the ring":
+        step("Populate then clear")
+        var svc = ClipboardService.new()
+        svc.copy("text/plain", "x")
+        svc.copy("text/plain", "y")
+        svc.clear()
+        expect(svc.history_len()).to_equal(0)
+        assert_true(svc.paste() == nil)
+
+    it "paste() on an empty service returns nil":
+        var svc = ClipboardService.new()
+        assert_true(svc.paste() == nil)
+
+describe "ClipboardService — injectable host bridge seam":
+
+    it "copy() calls the installed write function, not a real OS clipboard":
+        step("Install the fake bridge (top-level fns backed by a module var)")
+        _fake_host_slot = ""
+        _fake_host_write_calls = 0
+        var svc = ClipboardService.new()
+        svc.install_host_bridge(_fake_host_read, _fake_host_write)
+
+        step("copy() must reach the fake write function")
+        svc.copy("text/plain", "bridged")
+        expect(_fake_host_write_calls).to_equal(1)
+        expect(_fake_host_slot).to_equal("bridged")
+
+    it "sync_from_host() pulls a live host value into history when it changed":
+        step("Fake bridge pre-seeded with an external value never copied locally")
+        _fake_host_slot = "external-value"
+        _fake_host_write_calls = 0
+        var svc = ClipboardService.new()
+        svc.install_host_bridge(_fake_host_read, _fake_host_write)
+
+        step("sync_from_host() records it as the new current entry")
+        svc.sync_from_host()
+        val current = svc.paste()
+        assert_true(current != nil)
+        if current != nil:
+            expect(current.data).to_equal("external-value")
+
+    it "sync_from_host() is a no-op when no bridge is installed (the SimpleOS case)":
+        step("No bridge installed -- the service is its own clipboard")
+        var svc = ClipboardService.new()
+        svc.sync_from_host()
+        expect(svc.history_len()).to_equal(0)
+
+describe "ClipboardService — capability gating":
+
+    it "copy_gated denies without ClipboardWrite":
+        step("Empty capability list has neither Read nor Write")
+        var svc = ClipboardService.new()
+        val result = svc.copy_gated([], "text/plain", "should-not-land")
+        assert_true(result.is_err())
+        expect(svc.history_len()).to_equal(0)
+
+    it "copy_gated succeeds with ClipboardWrite granted":
+        var svc = ClipboardService.new()
+        val result = svc.copy_gated([Capability.ClipboardWrite], "text/plain", "granted")
+        assert_true(result.is_ok())
+        expect(svc.history_len()).to_equal(1)
+
+    it "paste_gated denies without ClipboardRead":
+        var svc = ClipboardService.new()
+        svc.copy("text/plain", "present")
+        val result = svc.paste_gated([])
+        assert_true(result.is_err())
+
+    it "paste_gated succeeds with ClipboardRead granted":
+        var svc = ClipboardService.new()
+        svc.copy("text/plain", "present")
+        val result = svc.paste_gated([Capability.ClipboardRead])
+        assert_true(result.is_ok())

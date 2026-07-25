@@ -1,0 +1,262 @@
+# Math Bridge: Excel-to-stdlib math adapter
+#
+# Excel-compatible wrapper functions that delegate to stdlib math while
+# preserving Excel error semantics. All functions return f64; domain
+# validation happens at the call site in formula.spl.
+
+use std.common.math.math.{
+    math_sin, math_cos, math_tan, math_pow, math_exp, math_sqrt,
+    math_abs, math_round, math_trunc,
+    math_min, math_max, MATH_PI, MATH_E
+}
+
+use std.nogc_sync_mut.io.math.{
+    math_floor, math_ceil, math_asin, math_acos, math_atan, math_atan2
+}
+
+use std.common.math.statistics.{
+    mean, median, stdev_sample, variance_sample, stdev_pop, var_pop, standardize
+}
+
+use std.common.math.special.{
+    exp_f64, ln_f64, sqrt_f64
+}
+
+# ============================================================================
+# Trigonometry (Radians)
+# ============================================================================
+
+pub fn excel_sin(x: f64) -> f64:
+    """SINE of x in radians."""
+    math_sin(x)
+
+pub fn excel_cos(x: f64) -> f64:
+    """COSINE of x in radians."""
+    math_cos(x)
+
+pub fn excel_tan(x: f64) -> f64:
+    """TANGENT of x in radians."""
+    val cv = math_cos(x)
+    if cv == 0.0:
+        return 1.7976931348623157e+308  # MATH_INF (Excel behavior)
+    math_sin(x) / cv
+
+pub fn excel_asin(x: f64) -> f64:
+    """ARCSINE of x."""
+    math_asin(x)
+
+pub fn excel_acos(x: f64) -> f64:
+    """ARCCOSINE of x."""
+    math_acos(x)
+
+pub fn excel_atan(x: f64) -> f64:
+    """ARCTANGENT of x."""
+    math_atan(x)
+
+pub fn excel_sinh(x: f64) -> f64:
+    """HYPERBOLIC SINE: sinh(x) = (e^x - e^(-x)) / 2"""
+    (math_exp(x) - math_exp(0.0 - x)) / 2.0
+
+pub fn excel_cosh(x: f64) -> f64:
+    """HYPERBOLIC COSINE: cosh(x) = (e^x + e^(-x)) / 2"""
+    (math_exp(x) + math_exp(0.0 - x)) / 2.0
+
+pub fn excel_tanh(x: f64) -> f64:
+    """HYPERBOLIC TANGENT: tanh(x) = (e^(2x) - 1) / (e^(2x) + 1)"""
+    val e2x = math_exp(2.0 * x)
+    (e2x - 1.0) / (e2x + 1.0)
+
+# ============================================================================
+# Logarithmic and Exponential
+# ============================================================================
+
+pub fn excel_ln(x: f64) -> f64:
+    """NATURAL LOGARITHM (base e)."""
+    ln_f64(x)
+
+pub fn excel_log10(x: f64) -> f64:
+    """LOGARITHM base 10."""
+    ln_f64(x) / ln_f64(10.0)
+
+pub fn excel_log(x: f64, base: f64) -> f64:
+    """LOGARITHM with arbitrary base."""
+    ln_f64(x) / ln_f64(base)
+
+pub fn excel_exp(x: f64) -> f64:
+    """EXPONENTIAL: e^x."""
+    math_exp(x)
+
+pub fn excel_sqrt(x: f64) -> f64:
+    """SQUARE ROOT."""
+    math_sqrt(x)
+
+pub fn excel_sqrt_pi(x: f64) -> f64:
+    """SQUARE ROOT of π*x."""
+    math_sqrt(MATH_PI * x)
+
+# ============================================================================
+# Statistical Aggregates
+# ============================================================================
+
+pub fn excel_sum(values: [f64]) -> f64:
+    """SUM of all numeric values."""
+    var total = 0.0
+    for v in values:
+        total = total + v
+    total
+
+pub fn excel_average(values: [f64]) -> f64:
+    """ARITHMETIC MEAN (AVERAGE)."""
+    mean(values)
+
+pub fn excel_count(values: [f64]) -> i64:
+    """COUNT of numeric values."""
+    values.len().to_i64()
+
+pub fn excel_min(values: [f64]) -> f64:
+    """MINIMUM value."""
+    if values.len() == 0:
+        return 0.0
+    var result = values[0]
+    for v in values:
+        if v < result:
+            result = v
+    result
+
+pub fn excel_max(values: [f64]) -> f64:
+    """MAXIMUM value."""
+    if values.len() == 0:
+        return 0.0
+    var result = values[0]
+    for v in values:
+        if v > result:
+            result = v
+    result
+
+pub fn excel_product(values: [f64]) -> f64:
+    """PRODUCT of all values."""
+    var result = 1.0
+    for v in values:
+        result = result * v
+    result
+
+pub fn excel_sumsq(values: [f64]) -> f64:
+    """SUM of SQUARES."""
+    var total = 0.0
+    for v in values:
+        total = total + v * v
+    total
+
+pub fn excel_stdev(values: [f64]) -> f64:
+    """SAMPLE STANDARD DEVIATION (n-1 denominator)."""
+    stdev_sample(values)
+
+pub fn excel_var(values: [f64]) -> f64:
+    """SAMPLE VARIANCE (n-1 denominator)."""
+    variance_sample(values)
+
+pub fn excel_median(values: [f64]) -> f64:
+    """MEDIAN (middle value)."""
+    median(values)
+
+# ============================================================================
+# Rounding Functions
+# ============================================================================
+
+pub fn excel_roundup(x: f64) -> f64:
+    """Round AWAY from zero."""
+    if x < 0.0:
+        val up = math_ceil(0.0 - x)
+        return 0.0 - up
+    math_ceil(x)
+
+pub fn excel_rounddown(x: f64) -> f64:
+    """Round TOWARD zero."""
+    if x < 0.0:
+        val down = math_floor(0.0 - x)
+        return 0.0 - down
+    math_floor(x)
+
+pub fn excel_even(x: f64) -> f64:
+    """Round UP to nearest even integer."""
+    var n = math_ceil(x).to_i64()
+    if n % 2 != 0:
+        n = n + 1
+    n.to_f64()
+
+pub fn excel_odd(x: f64) -> f64:
+    """Round UP to nearest odd integer."""
+    var n = math_ceil(x).to_i64()
+    if n % 2 == 0:
+        n = n + 1
+    n.to_f64()
+
+pub fn excel_mround(x: f64, multiple: f64) -> f64:
+    """Round to nearest MULTIPLE."""
+    if multiple == 0.0:
+        return 0.0
+    val quotient = x / multiple
+    val rounded = math_round(quotient)
+    rounded * multiple
+
+pub fn excel_round(x: f64, digits: i64) -> f64:
+    """Round to specified NUMBER of DIGITS."""
+    if digits == 0:
+        return math_round(x)
+    val multiplier = math_pow(10.0, digits.to_f64())
+    math_round(x * multiplier) / multiplier
+
+pub fn excel_trunc(x: f64, digits: i64) -> f64:
+    """Truncate to specified NUMBER of DIGITS."""
+    if digits == 0:
+        return math_trunc(x)
+    val multiplier = math_pow(10.0, digits.to_f64())
+    math_trunc(x * multiplier) / multiplier
+
+pub fn excel_power(base: f64, exp: f64) -> f64:
+    """NUMBER raised to POWER."""
+    math_pow(base, exp)
+
+pub fn excel_abs(x: f64) -> f64:
+    """ABSOLUTE value."""
+    math_abs(x)
+
+pub fn excel_floor(x: f64, significance: f64) -> f64:
+    """Round toward zero to nearest SIGNIFICANCE."""
+    if significance == 0.0:
+        return 0.0
+    math_floor(x / significance) * significance
+
+pub fn excel_ceiling(x: f64, significance: f64) -> f64:
+    """Round away from zero to nearest SIGNIFICANCE."""
+    if significance == 0.0:
+        return 0.0
+    math_ceil(x / significance) * significance
+
+pub fn excel_atan2(y: f64, x: f64) -> f64:
+    """Arctangent of y/x with full quadrant handling."""
+    math_atan2(y, x)
+
+pub fn excel_standardize(x: f64, mean_val: f64, stdev_val: f64) -> f64:
+    """Standardize: (x - mean) / stdev."""
+    standardize(x, mean_val, stdev_val)
+
+pub fn excel_stdev_p(values: [f64]) -> f64:
+    """Population STANDARD DEVIATION (N denominator)."""
+    stdev_pop(values)
+
+pub fn excel_var_p(values: [f64]) -> f64:
+    """Population VARIANCE (N denominator)."""
+    var_pop(values)
+
+# ============================================================================
+# Angle Conversion
+# ============================================================================
+
+pub fn excel_degrees(radians: f64) -> f64:
+    """Convert RADIANS to DEGREES."""
+    radians * 180.0 / MATH_PI
+
+pub fn excel_radians(degrees: f64) -> f64:
+    """Convert DEGREES to RADIANS."""
+    degrees * MATH_PI / 180.0

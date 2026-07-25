@@ -1,0 +1,64 @@
+use app.io.cli_ops.{
+    context_generate, context_stats, settlement_main,
+    fault_set_stack_overflow_detection, fault_set_max_recursion_depth,
+    fault_set_timeout, fault_set_execution_limit,
+    get_args, cli_get_args
+}
+use std.io_runtime.{file_read}
+
+describe "Cli Ops Ext":
+    it "reports missing context generation output for absent files":
+        val result = context_generate("path", "target", "format")
+        expect(result).to_contain("status: missing")
+        expect(result).to_contain("source: path")
+        expect(result).to_contain("target: target")
+
+    it "reports missing context stats output for absent files":
+        val result = context_stats("path", "target")
+        expect(result).to_contain("status: missing")
+        expect(result).to_contain("source: path")
+        expect(result).to_contain("target: target")
+
+    it "returns success for settlement main placeholder implementation":
+        val result = settlement_main()
+        expect(result).to_equal(0)
+
+    it "keeps fault configuration hooks callable without changing context stats":
+        fault_set_stack_overflow_detection(true)
+        fault_set_stack_overflow_detection(false)
+        fault_set_max_recursion_depth(100)
+        fault_set_timeout(30)
+        fault_set_execution_limit(1000)
+
+        expect(context_stats("path", "target")).to_contain("status: missing")
+
+    it "returns argument lists from both public argument accessors":
+        val args = get_args()
+        val cli_args = cli_get_args()
+
+        expect(args.len()).to_be_greater_than(-1)
+        expect(cli_args.len()).to_be_greater_than(-1)
+
+    it "does not re-export the compiler-heavy CLI dispatch surface (regression guard)":
+        # cli_ops.spl is documented as "Pure Simple I/O" and is imported by
+        # light, broadly-used consumers like `app.io.mod` for basic helpers
+        # (shell, settlement_main, context_generate, ...). It previously ALSO
+        # re-exported `_CliCommands.run_commands`/`_CliCommands.handler_commands`/
+        # `_CliCompile.*` (cli_run_lint, cli_compile, cli_native_build, etc.) —
+        # duplicating what `app.io.cli_commands`/`app.io.cli_compile` already
+        # provide. Because the module loader's `export use` flattening pulls
+        # in a re-exported target's full transitive closure regardless of
+        # which names a caller actually requested, that duplication forced
+        # every consumer of `app.io.mod`/`app.io.cli_ops` — including simple
+        # test specs — to also compile the *entire* compiler (driver, lexer,
+        # HIR, MIR, every backend: ~250 files) on every invocation. See
+        # doc/08_tracking/bug/stage4_test_runner_daemon_fallback_relint_nonmemoized_2026-07-20.md.
+        # Guard: keep the compiler-dispatch re-exports out of this file so
+        # this regression can't silently come back.
+        val source = file_read("src/app/io/cli_ops.spl")
+        # Guard the guard: an empty read (e.g. run from the wrong CWD) would
+        # make every `.contains(...) == false` check below pass vacuously.
+        expect(source.contains("fn cli_env_get")).to_equal(true)
+        expect(source.contains("export use app.io._CliCompile")).to_equal(false)
+        expect(source.contains("export use app.io._CliCommands.run_commands")).to_equal(false)
+        expect(source.contains("export use app.io._CliCommands.handler_commands")).to_equal(false)

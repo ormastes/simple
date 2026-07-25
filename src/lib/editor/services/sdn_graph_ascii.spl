@@ -1,0 +1,261 @@
+# SDN Graph ASCII Renderer
+# Renders SdnGraph to ASCII art with box-drawing characters.
+# Supports linear chains and branching DAGs via topological layer assignment.
+
+use std.editor.services.sdn_graph.{SdnGraph, SdnGraphNode, SdnGraphEdge}
+
+fn sdn_graph_render_ascii(graph: SdnGraph, layout: text, direction: text) -> text:
+    val node_ids = _derive_node_ids(graph)
+    if node_ids.len() == 0:
+        return ""
+    val layers = _topological_layers(node_ids, graph.edges)
+    val labels = _build_label_map(node_ids, graph.nodes)
+    if direction == "TB" or direction == "tb" or direction == "down":
+        return _render_tb(layers, graph.edges, labels)
+    _render_lr(layers, graph.edges, labels)
+
+fn _derive_node_ids(graph: SdnGraph) -> [text]:
+    var seen: [text] = []
+    for node in graph.nodes:
+        if not _text_in(seen, node.id):
+            seen.push(node.id)
+    for edge in graph.edges:
+        if not _text_in(seen, edge.from_id):
+            seen.push(edge.from_id)
+        if not _text_in(seen, edge.to_id):
+            seen.push(edge.to_id)
+    _sort_texts(seen)
+
+fn _text_in(arr: [text], item: text) -> bool:
+    for x in arr:
+        if x == item:
+            return true
+    false
+
+fn _sort_texts(arr: [text]) -> [text]:
+    var result: [text] = []
+    for x in arr:
+        result.push(x)
+    var i = 0
+    while i < result.len():
+        var j = i + 1
+        while j < result.len():
+            if result[j] < result[i]:
+                val tmp = result[i]
+                result[i] = result[j]
+                result[j] = tmp
+            j = j + 1
+        i = i + 1
+    result
+
+fn _build_label_map(node_ids: [text], nodes: [SdnGraphNode]) -> [text]:
+    var labels: [text] = []
+    for nid in node_ids:
+        var lbl = nid
+        for node in nodes:
+            if node.id == nid and node.label != "":
+                lbl = node.label
+                break
+        labels.push(lbl)
+    labels
+
+fn _get_label(node_ids: [text], labels: [text], nid: text) -> text:
+    var i = 0
+    while i < node_ids.len():
+        if node_ids[i] == nid:
+            return labels[i]
+        i = i + 1
+    nid
+
+fn _topological_layers(node_ids: [text], edges: [SdnGraphEdge]) -> [[text]]:
+    var layer_of: [i64] = []
+    for nid in node_ids:
+        layer_of.push(0)
+    var changed = true
+    while changed:
+        changed = false
+        for edge in edges:
+            val from_idx = _index_of(node_ids, edge.from_id)
+            val to_idx = _index_of(node_ids, edge.to_id)
+            if from_idx >= 0 and to_idx >= 0:
+                val new_layer = layer_of[from_idx] + 1
+                if new_layer > layer_of[to_idx]:
+                    layer_of[to_idx] = new_layer
+                    changed = true
+    var max_layer = 0
+    for l in layer_of:
+        if l > max_layer:
+            max_layer = l
+    var layers: [[text]] = []
+    var li = 0
+    while li <= max_layer:
+        var layer: [text] = []
+        var ni = 0
+        while ni < node_ids.len():
+            if layer_of[ni] == li:
+                layer.push(node_ids[ni])
+            ni = ni + 1
+        layers.push(layer)
+        li = li + 1
+    layers
+
+fn _index_of(arr: [text], item: text) -> i64:
+    var i = 0
+    while i < arr.len():
+        if arr[i] == item:
+            return i
+        i = i + 1
+    -1
+
+fn _repeat_char(ch: text, count: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < count:
+        result = result + ch
+        i = i + 1
+    result
+
+fn _box_top(label: text) -> text:
+    "+" + _repeat_char("-", label.len() + 2) + "+"
+
+fn _box_mid(label: text, width: i64) -> text:
+    val pad = width - label.len()
+    "| " + label + _repeat_char(" ", pad) + " |"
+
+fn _box_bot(label: text) -> text:
+    "+" + _repeat_char("-", label.len() + 2) + "+"
+
+fn _render_lr(layers: [[text]], edges: [SdnGraphEdge], labels: [text]) -> text:
+    val all_ids = _flatten_layers(layers)
+    var max_rows = 0
+    for layer in layers:
+        if layer.len() > max_rows:
+            max_rows = layer.len()
+    if max_rows == 0:
+        return ""
+    var col_widths: [i64] = []
+    for layer in layers:
+        var max_w = 0
+        for nid in layer:
+            val lbl = _get_label(all_ids, labels, nid)
+            val w = lbl.len() + 4
+            if w > max_w:
+                max_w = w
+        col_widths.push(max_w)
+    var top_lines: [text] = []
+    var mid_lines: [text] = []
+    var bot_lines: [text] = []
+    var row = 0
+    while row < max_rows:
+        var top = ""
+        var mid = ""
+        var bot = ""
+        var col = 0
+        while col < layers.len():
+            val layer = layers[col]
+            val cw = col_widths[col]
+            if row < layer.len():
+                val nid = layer[row]
+                val lbl = _get_label(all_ids, labels, nid)
+                val inner_w = cw - 4
+                top = top + "+" + _repeat_char("-", inner_w + 2) + "+"
+                mid = mid + _box_mid(lbl, inner_w)
+                bot = bot + "+" + _repeat_char("-", inner_w + 2) + "+"
+                if col < layers.len() - 1:
+                    val next_layer = layers[col + 1]
+                    if row < next_layer.len() and _has_edge(edges, nid, next_layer[row]):
+                        top = top + "      "
+                        mid = mid + " ---> "
+                        bot = bot + "      "
+                    else:
+                        top = top + "      "
+                        mid = mid + "      "
+                        bot = bot + "      "
+            else:
+                top = top + _repeat_char(" ", cw)
+                mid = mid + _repeat_char(" ", cw)
+                bot = bot + _repeat_char(" ", cw)
+                if col < layers.len() - 1:
+                    top = top + "      "
+                    mid = mid + "      "
+                    bot = bot + "      "
+            col = col + 1
+        top_lines.push(top)
+        mid_lines.push(mid)
+        bot_lines.push(bot)
+        row = row + 1
+    var result = ""
+    var ri = 0
+    while ri < max_rows:
+        if ri > 0:
+            result = result + "\n"
+        result = result + top_lines[ri] + "\n" + mid_lines[ri] + "\n" + bot_lines[ri]
+        ri = ri + 1
+    result
+
+fn _render_tb(layers: [[text]], edges: [SdnGraphEdge], labels: [text]) -> text:
+    val all_ids = _flatten_layers(layers)
+    var max_cols = 0
+    for layer in layers:
+        if layer.len() > max_cols:
+            max_cols = layer.len()
+    if max_cols == 0:
+        return ""
+    var result = ""
+    var li = 0
+    while li < layers.len():
+        val layer = layers[li]
+        var top = ""
+        var mid = ""
+        var bot = ""
+        for nid in layer:
+            val lbl = _get_label(all_ids, labels, nid)
+            if top != "":
+                top = top + "   "
+                mid = mid + "   "
+                bot = bot + "   "
+            top = top + _box_top(lbl)
+            mid = mid + _box_mid(lbl, lbl.len())
+            bot = bot + _box_bot(lbl)
+        if result != "":
+            result = result + "\n"
+            var arrow_line = ""
+            var ai = 0
+            while ai < layer.len():
+                val nid = layer[ai]
+                val lbl = _get_label(all_ids, labels, nid)
+                val box_w = lbl.len() + 4
+                val center = box_w / 2
+                if ai > 0:
+                    arrow_line = arrow_line + "   "
+                arrow_line = arrow_line + _repeat_char(" ", center) + "|" + _repeat_char(" ", box_w - center - 1)
+                ai = ai + 1
+            result = result + arrow_line + "\n"
+            var v_line = ""
+            var vi = 0
+            while vi < layer.len():
+                val nid = layer[vi]
+                val lbl = _get_label(all_ids, labels, nid)
+                val box_w = lbl.len() + 4
+                val center = box_w / 2
+                if vi > 0:
+                    v_line = v_line + "   "
+                v_line = v_line + _repeat_char(" ", center) + "v" + _repeat_char(" ", box_w - center - 1)
+                vi = vi + 1
+            result = result + v_line + "\n"
+        result = result + top + "\n" + mid + "\n" + bot
+        li = li + 1
+    result
+
+fn _has_edge(edges: [SdnGraphEdge], from: text, to: text) -> bool:
+    for e in edges:
+        if e.from_id == from and e.to_id == to:
+            return true
+    false
+
+fn _flatten_layers(layers: [[text]]) -> [text]:
+    var result: [text] = []
+    for layer in layers:
+        for nid in layer:
+            result.push(nid)
+    result

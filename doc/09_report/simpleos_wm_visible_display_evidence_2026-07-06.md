@@ -1,0 +1,23 @@
+# SimpleOS WM Visible Display Evidence
+
+- date: 2026-07-06
+- status: pass
+- reason: pass
+- Simple binary: bin/simple
+- Simple binary resolved: /Users/ormastes/simple/bin/release/aarch64-apple-darwin-macho/simple
+- no Rust seed fallback: pass (selected-simple-binary-not-under-src-compiler-rust; source=explicit-env; status=pass)
+- display backend: cocoa (macos-cocoa-preferred)
+- real display surface: pass (real-display-backend-cocoa)
+- kernel: build/os/simpleos_wm_simple_web_check_32.elf
+- serial markers: pass (pass)
+- shared-renderer serial evidence: web-demo renderer, backend selected, direct-mmio present, html renderable, render-ready
+- marker state: probe:true web:true backend:true present:true mdi:true windows:true top:true taskbar:true html:true render:true
+- QMP capture: pass (pass; method=human-monitor-command)
+- PPM validation: pass (pass)
+- PPM: build/simpleos_wm_visible_display_gui_renderer_2/qmp-visible-display.ppm 1024x768, nonblack=778810, unique_colors=20
+- taskbar/item pixels: colored=17388, runs=7, sampled_regions=5
+- readable text glyph matches: 1956 / 1988
+- cleanup: pass (pass; qemu=terminated, qmp_socket=absent)
+- serial log: build/simpleos_wm_visible_display_gui_renderer_2/serial.log
+- QEMU stderr: build/simpleos_wm_visible_display_gui_renderer_2/qemu.stderr.log
+- command: `qemu-system-x86_64 -no-user-config -monitor none -net none -machine q35 -cpu qemu64 -m 2G -serial file:build/simpleos_wm_visible_display_gui_renderer_2/serial.log -display cocoa -no-reboot -kernel build/os/simpleos_wm_simple_web_check_32.elf -vga std -device isa-debug-exit,iobase=0xf4,iosize=0x04 -qmp unix:/tmp/simpleos_wm_visible_57970_qmp.sock,server,nowait`

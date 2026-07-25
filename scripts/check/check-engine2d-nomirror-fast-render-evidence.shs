@@ -1,0 +1,85 @@
+#!/bin/sh
+# Engine2D no-mirror (native fast) render gate.
+#
+# Runs test/02_integration/rendering/engine2d_nomirror_fast_render_run.spl which
+# proves (a) the Metal no-mirror fast path is byte-identical to the software
+# mirror path on a clean rect scene, and (b) wm_scene.render_scene_to_backend
+# routes desktop-resolution CSS chrome through the fast Engine2D entry (byte
+# identical to the direct fast entry, CSS chrome color present). On non-macOS the
+# harness reports skip and the gate reports skip (non-zero exit) — a skip is
+# not verified evidence and must not be reported as a pass.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+# Prefer the self-hosted Simple binary; the Rust seed is bootstrap-only and must
+# not produce release evidence.
+if [ -z "${SIMPLE_BIN+x}" ]; then
+    SIMPLE_BIN=""
+    for _cand in bin/simple ./bin/simple release/*/simple bin/release/*/simple build/bootstrap/stage3/simple; do
+        if [ -x "$_cand" ]; then
+            SIMPLE_BIN="$_cand"
+            break
+        fi
+    done
+fi
+
+case "$SIMPLE_BIN" in
+    src/compiler_rust/*|./src/compiler_rust/*|*/src/compiler_rust/*)
+        echo "engine2d-nomirror-fast: fail (rust-seed-forbidden)"
+        exit 1
+        ;;
+esac
+
+if [ -z "$SIMPLE_BIN" ] || [ ! -x "$SIMPLE_BIN" ]; then
+    echo "engine2d-nomirror-fast: fail (simple-bin-missing)"
+    exit 1
+fi
+
+TIMEOUT_SECS="${ENGINE2D_NOMIRROR_TIMEOUT_SECS:-320}"
+WORK_DIR="${BUILD_DIR:-build/engine2d-nomirror-fast-render-evidence}"
+HARNESS="test/02_integration/rendering/engine2d_nomirror_fast_render_run.spl"
+LOG="$WORK_DIR/fast.log"
+mkdir -p "$WORK_DIR"
+rm -f "$LOG"
+
+have() { command -v "$1" >/dev/null 2>&1; }
+run_with_timeout() {
+    if have timeout; then timeout "$TIMEOUT_SECS" "$@"; else "$@"; fi
+}
+
+# GUI/Metal runs require the interpreter execution mode and benefit from an
+# explicit darwin OSTYPE.
+OSTYPE="${OSTYPE:-darwin}" \
+SIMPLE_EXECUTION_MODE=interpret \
+SIMPLE_EXECUTION_LIMIT=0 \
+    run_with_timeout "$SIMPLE_BIN" run "$HARNESS" >"$LOG" 2>&1 || true
+
+CORRECTNESS_LINE="$(grep '^correctness:' "$LOG" | tail -1 || true)"
+ROUTING_LINE="$(grep '^wm_routing:' "$LOG" | tail -1 || true)"
+SUMMARY_LINE="$(grep '^SUMMARY:' "$LOG" | tail -1 || true)"
+SKIP_LINE="$(grep 'SKIP reason=' "$LOG" | tail -1 || true)"
+
+echo "engine2d_nomirror_fast_correctness=${CORRECTNESS_LINE:-none}"
+echo "engine2d_nomirror_fast_routing=${ROUTING_LINE:-none}"
+echo "engine2d_nomirror_fast_summary=${SUMMARY_LINE:-none}"
+echo "engine2d_nomirror_fast_harness=$HARNESS"
+
+case "$SUMMARY_LINE" in
+    "SUMMARY: pass (skipped)")
+        # Honesty: the harness didn't exercise the Metal no-mirror fast path at
+        # all (no macOS/Metal host) — this is a skip, not verified evidence,
+        # and must not be reported as a pass.
+        echo "engine2d-nomirror-fast: skip (skipped-no-metal)"
+        exit 1
+        ;;
+    "SUMMARY: pass")
+        echo "engine2d-nomirror-fast: pass (native-fast-bitexact)"
+        exit 0
+        ;;
+    *)
+        echo "engine2d-nomirror-fast: fail (see $LOG)"
+        exit 1
+        ;;
+esac

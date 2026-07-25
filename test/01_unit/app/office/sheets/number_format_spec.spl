@@ -1,0 +1,301 @@
+"""Office sheets number-format-code spec.
+
+Hand-verified cases for `format_number` (Excel Format-Cells number-code
+subset: fixed decimals, thousands grouping, percent, generic currency
+prefix, scientific notation, date serials, "@" text passthrough, general
+fallback, negative numbers), the `sheet_set_number_format` registry helper,
+and the `cell_display_formatted` end-to-end display path.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell_format.{
+    FormatSpec, empty_sheet_formats, formats_set, formats_get,
+    sheet_set_number_format
+}
+use app.office.sheets.number_format.{format_number, format_text_with_code, cell_display_formatted}
+use app.office.file_formats.{recalculate_formula_cells}
+
+describe "format_number: fixed decimals":
+    """"0.00"-style codes: round-half-away-from-zero, zero-padded."""
+
+    it "rounds 1234.567 to two decimals":
+        # 1234.567 * 100 = 123456.7 -> +0.5 -> 123457.2 -> floor -> 1234.57
+        expect(format_number(1234.567, "0.00")).to_equal("1234.57")
+
+    it "rounds to three decimals":
+        expect(format_number(1234.5, "0.000")).to_equal("1234.500")
+
+    it "rounds to a whole number with no decimal point":
+        expect(format_number(1234.5, "0")).to_equal("1235")
+
+describe "format_number: thousands grouping":
+    """"#,##0"-style codes."""
+
+    it "groups thousands with two decimals":
+        expect(format_number(1234.567, "#,##0.00")).to_equal("1,234.57")
+
+    it "groups millions with no decimals, rounding up":
+        # 1234567.891 -> +0.5 -> 1234568.391 -> floor -> 1,234,568
+        expect(format_number(1234567.891, "#,##0")).to_equal("1,234,568")
+
+describe "format_number: percent":
+    """"0%"-style codes: value * 100 with a trailing '%'."""
+
+    it "formats a percentage with one decimal":
+        # 0.4567 * 100 = 45.67 -> round half up to 1 decimal -> 45.7%
+        expect(format_number(0.4567, "0.0%")).to_equal("45.7%")
+
+    it "formats a percentage with no decimals":
+        expect(format_number(0.5, "0%")).to_equal("50%")
+
+describe "format_number: currency / generic literal prefix":
+    """Leading literal characters before the first '0'/'#' are kept as a
+    prefix (e.g. a currency symbol)."""
+
+    it "formats dollars with a currency prefix":
+        expect(format_number(1234.5, "$#,##0.00")).to_equal("$1,234.50")
+
+    it "keeps a multi-character literal prefix":
+        expect(format_number(1234.5, "USD #,##0.00")).to_equal("USD 1,234.50")
+
+describe "format_number: scientific notation":
+    """"0.00E+00"-style codes: mantissa in [1,10) + 2-digit signed exponent."""
+
+    it "formats 12345.6789 in scientific notation":
+        # 12345.6789 = 1.23456789e4 -> mantissa rounds to 1.23, exponent 4
+        expect(format_number(12345.6789, "0.00E+00")).to_equal("1.23E+04")
+
+describe "format_number: dates":
+    """Value read as an Excel date serial (days since 1899-12-30, 1900
+    leap-year-bug system), converted via std.math.financial's own
+    civil<->serial conversion.
+
+    Recomputed independently with `date -u -d "1970-01-01 +N days" +%F`
+    where N = serial - 25569 (the financial lib's Excel-epoch offset):
+    serial 45107 -> N = 19538 -> 2023-06-30 (matches the brief's example;
+    no correction needed).
+    """
+
+    it "formats an Excel date serial as yyyy-mm-dd":
+        expect(format_number(45107.0, "yyyy-mm-dd")).to_equal("2023-06-30")
+
+    it "formats the same serial as mm/dd/yyyy":
+        expect(format_number(45107.0, "mm/dd/yyyy")).to_equal("06/30/2023")
+
+    it "formats the same serial as dd.mm.yyyy":
+        expect(format_number(45107.0, "dd.mm.yyyy")).to_equal("30.06.2023")
+
+describe "format_number: negative numbers":
+    """A plain '-' prefix ahead of the formatted magnitude."""
+
+    it "prefixes a minus sign for a negative grouped value":
+        expect(format_number(-1234.5, "#,##0.00")).to_equal("-1,234.50")
+
+    it "prefixes a minus sign ahead of a currency literal":
+        expect(format_number(-1234.5, "$#,##0.00")).to_equal("-$1,234.50")
+
+describe "format_number: fallbacks":
+    """"@"/'' and unknown codes never error the display path."""
+
+    it "falls back to general for an empty code":
+        expect(format_number(42.0, "")).to_equal("42")
+
+    it "trims a whole-number value under general display":
+        expect(format_number(3.0, "")).to_equal("3")
+
+    it "keeps a fractional value under general display":
+        expect(format_number(3.5, "")).to_equal("3.5")
+
+    it "falls back to general for an unrecognized code":
+        expect(format_number(42.5, "???")).to_equal("42.5")
+
+describe "sheet_set_number_format: registry":
+    """Sets only the number-format code, preserving existing bold/bg/fg."""
+
+    it "sets a number format on a cell with no prior format":
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "B2", "0.00")
+        val spec = formats_get(formats, "B2")
+        expect(spec.num_fmt).to_equal("0.00")
+        expect(spec.bold).to_equal(false)
+
+    it "preserves existing bold/bg/fg when only the number format changes":
+        var formats = empty_sheet_formats()
+        formats = formats_set(formats, "B2", FormatSpec(num_fmt: "0", bold: true, bg: "#ffe4b5", fg: "#7a2e00"))
+        formats = sheet_set_number_format(formats, "B2", "#,##0.00")
+        val spec = formats_get(formats, "B2")
+        expect(spec.num_fmt).to_equal("#,##0.00")
+        expect(spec.bold).to_equal(true)
+        expect(spec.bg).to_equal("#ffe4b5")
+        expect(spec.fg).to_equal("#7a2e00")
+
+describe "cell_display_formatted: end-to-end display":
+    """Applies format_number to numeric cells with a code set, falls back
+    to cell_display_text (formula/text cells, or numeric cells with no
+    code)."""
+
+    it "formats a plain numeric cell with a set number format":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("A1", "1234.567")
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "A1", "0.00")
+        expect(cell_display_formatted(sheet, formats, "A1")).to_equal("1234.57")
+
+    it "formats a formula cell's numeric result":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("B1", "2")
+        sheet.set_value("B2", "3")
+        sheet.set_value("B3", "=B1+B2")
+        sheet = recalculate_formula_cells(sheet)
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "B3", "0.00")
+        expect(cell_display_formatted(sheet, formats, "B3")).to_equal("5.00")
+
+    it "passes a text cell through unchanged regardless of any code":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("C1", "hello")
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "C1", "@")
+        expect(cell_display_formatted(sheet, formats, "C1")).to_equal("hello")
+
+    it "falls back to plain display when no format is set":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("D1", "42")
+        val formats = empty_sheet_formats()
+        expect(cell_display_formatted(sheet, formats, "D1")).to_equal("42")
+
+describe "format_number: multi-section codes -- 2 sections (positive+zero / negative)":
+    """Section 2 applies to negative values against the ABSOLUTE value,
+    with NO automatic "-" -- a sign only appears if the section spells
+    one out itself (a literal "-", or parentheses)."""
+
+    it "uses section 1 for a positive value":
+        expect(format_number(1234.5, "#,##0.00;-#,##0.00")).to_equal("1,234.50")
+
+    it "uses section 1 for a zero value (positive+zero share section 1)":
+        expect(format_number(0.0, "#,##0.00;(#,##0.00)")).to_equal("0.00")
+
+    it "applies section 2's own literal minus to the absolute value":
+        expect(format_number(-1234.5, "#,##0.00;-#,##0.00")).to_equal("-1,234.50")
+
+    it "wraps a negative value in parentheses per the parenthesized negative section":
+        # Hand-verified: Excel's classic accounting negative style.
+        expect(format_number(-1234.5, "#,##0.00;(#,##0.00)")).to_equal("(1,234.50)")
+
+describe "format_number: multi-section codes -- 3 sections (positive/negative/zero)":
+    it "uses section 1 for a positive value":
+        expect(format_number(1234.5, "#,##0.00;(#,##0.00);\"-\"")).to_equal("1,234.50")
+
+    it "uses section 2 (parens) for a negative value":
+        expect(format_number(-1234.5, "#,##0.00;(#,##0.00);\"-\"")).to_equal("(1,234.50)")
+
+    it "uses section 3 (a quoted literal) for a zero value":
+        # Hand-verified: a common accounting idiom -- render zero as a dash.
+        expect(format_number(0.0, "#,##0.00;(#,##0.00);\"-\"")).to_equal("-")
+
+describe "format_number: multi-section codes -- 4 sections (+ text, numeric side)":
+    """A 4th section is text-only (see `format_text_with_code` below);
+    `format_number` (always numeric) only ever reaches sections 1-3."""
+
+    it "still uses section 1 for a positive value when a 4th section is present":
+        expect(format_number(1234.5, "#,##0.00;(#,##0.00);\"-\";\"txt\"")).to_equal("1,234.50")
+
+describe "format_text_with_code: the text (4th) section":
+    """Applies only when a code has 4 ";"-separated sections; "@" in that
+    section is replaced with the cell's text value."""
+
+    it "substitutes '@' with the text value":
+        expect(format_text_with_code("abc", "#,##0.00;(#,##0.00);\"-\";\"Value: \"@")).to_equal("Value: abc")
+
+    it "substitutes '@' with no surrounding literal":
+        expect(format_text_with_code("hello", "0;0;0;@")).to_equal("hello")
+
+    it "passes text through unchanged when the code has fewer than 4 sections":
+        expect(format_text_with_code("hi", "0.00")).to_equal("hi")
+
+describe "format_number: color tags are stripped and ignored":
+    it "strips a [Red] tag ahead of a negative section's literal minus":
+        expect(format_number(-1234.5, "#,##0.00;[Red]-#,##0.00")).to_equal("-1,234.50")
+
+    it "strips a [Blue] tag ahead of the positive section":
+        expect(format_number(1234.5, "[Blue]#,##0.00;-#,##0.00")).to_equal("1,234.50")
+
+describe "format_number: quote-aware section splitting":
+    it "does not split on a ';' that appears inside a quoted literal":
+        # If splitting were quote-BLIND this would wrongly become 3
+        # sections ("x, "\"x", "y\"0.00", "-0.00") instead of 2.
+        expect(format_number(1234.5, "\"x;y\"0.00;-0.00")).to_equal("x;y1234.50")
+
+describe "format_number: dates -- dd/mm vs mm/dd distinction":
+    """Prior to this change "dd/mm/yyyy" and "mm/dd/yyyy" produced the
+    SAME output (the old code only checked for the presence of "/"). The
+    tokenizer now reads day/month/year tokens in the order they appear."""
+
+    it "renders dd/mm/yyyy with the day first":
+        expect(format_number(45107.0, "dd/mm/yyyy")).to_equal("30/06/2023")
+
+    it "renders mm/dd/yyyy with the month first (unchanged regression)":
+        expect(format_number(45107.0, "mm/dd/yyyy")).to_equal("06/30/2023")
+
+    it "renders a 2-digit year":
+        expect(format_number(45107.0, "dd/mm/yy")).to_equal("30/06/23")
+
+    it "renders single-digit day/month with no zero-padding":
+        # Serial 45082 = 2023-06-05 (25 days before serial 45107's 2023-06-30).
+        expect(format_number(45082.0, "d/m/yyyy")).to_equal("5/6/2023")
+
+describe "format_number: dates -- month names":
+    it "renders the abbreviated month name (mmm)":
+        expect(format_number(45107.0, "dd-mmm-yyyy")).to_equal("30-Jun-2023")
+
+    it "renders the full month name (mmmm)":
+        expect(format_number(45107.0, "mmmm dd, yyyy")).to_equal("June 30, 2023")
+
+describe "format_number: thousands-scaling commas":
+    """Each trailing comma directly after the last digit placeholder (no
+    literal characters in between) divides the value by 1000 -- Excel's
+    thousands/millions display scaling."""
+
+    it "scales by one million with two trailing commas":
+        # Hand-verified: 12,345,678 / 1,000,000 = 12.345678 -> 1 decimal -> 12.3
+        expect(format_number(12345678.0, "0.0,,")).to_equal("12.3")
+
+    it "scales by one thousand with a single trailing comma, still grouped":
+        # 12,345,678 / 1,000 = 12345.678 -> round to int -> 12,346
+        expect(format_number(12345678.0, "#,##0,")).to_equal("12,346")
+
+    it "does not confuse a mid-pattern grouping comma with a scaling comma":
+        expect(format_number(1234.5, "#,##0.00")).to_equal("1,234.50")
+
+describe "format_number: '?' digit placeholder":
+    """Ceiling: '?' is treated like '#' for locating the digit run and its
+    right edge (so it never breaks parsing), but it does NOT get real
+    Excel space-padding. Alone (no '0'/'#' present) it does NOT anchor a
+    section as numeric -- this preserves the existing "falls back to
+    general for an unrecognized code" behavior for a bare "???" code."""
+
+    it "extends the digit run without changing the rendered value":
+        expect(format_number(1234.5, "#,##0.0?")).to_equal("1,234.5")
+
+describe "format_number: quoted literal suffix/prefix":
+    it "renders a quoted literal unit suffix":
+        expect(format_number(1.5, "0.00 \"kg\"")).to_equal("1.50 kg")
+
+    it "renders a quoted literal currency prefix":
+        expect(format_number(1234.5, "\"USD \"#,##0.00")).to_equal("USD 1,234.50")
+
+describe "cell_display_formatted: text cells with a 4-section code":
+    it "applies the text section to a text cell's display":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("E1", "world")
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "E1", "0;0;0;\"Hi \"@")
+        expect(cell_display_formatted(sheet, formats, "E1")).to_equal("Hi world")
+
+    it "leaves a text cell unchanged when the code has fewer than 4 sections":
+        var sheet = Sheet.new("S1")
+        sheet.set_value("F1", "world")
+        var formats = empty_sheet_formats()
+        formats = sheet_set_number_format(formats, "F1", "0.00")
+        expect(cell_display_formatted(sheet, formats, "F1")).to_equal("world")

@@ -1,0 +1,48 @@
+# Runnable mirror for the EventLoop poll smoke that CANNOT run under sspec in
+# the interpreter (probe_interaction_core.spl pattern). Run directly:
+#   bin/simple run test/02_integration/ui/probe_event_loop_smoke.spl
+# Prints one PASS/FAIL line per stage and "EVENT LOOP SMOKE: PASS|FAIL" last.
+#
+# Why this exists: under any sspec `it`, the platform-event extern's empty
+# [i64] return degrades to i64 0, so EventLoop.poll's internal raw.len()
+# faults. The identical code passes from fn main. Bug:
+# doc/08_tracking/bug/interp_empty_event_array_result_match_erasure_2026-07-21.md
+# Paired spec: event_backend_matrix_spec.spl (create/backend/close assertions).
+
+use std.io.platform_event.{PlatformEvent}
+use std.io.event_loop.{EventLoop}
+
+fn check(label: text, ok: bool) -> i64:
+    if ok:
+        print("PASS {label}")
+        0
+    else:
+        print("FAIL {label}")
+        1
+
+fn main():
+    var failures = 0
+    val r = EventLoop.new()
+    match r:
+        case Ok(el):
+            var lp = el
+            failures = failures + check("create: loop_fd >= 0", lp.loop_fd >= 0)
+            failures = failures + check("backend matches PlatformEvent", lp.platform() == PlatformEvent.new().backend_name())
+            val pr = lp.poll(0)
+            failures = failures + check("poll(0) with no fds is ok", pr.is_ok())
+            val pr1 = lp.poll_one(0)
+            var empty_ok = false
+            match pr1:
+                case Ok(ev):
+                    empty_ok = not ev.?
+                case Err(perr):
+                    empty_ok = false
+            failures = failures + check("poll_one(0) confirms empty", empty_ok)
+            val cr = lp.close()
+            failures = failures + check("close is ok", cr.is_ok())
+        case Err(e):
+            failures = failures + check("create event loop", false)
+    if failures == 0:
+        print("EVENT LOOP SMOKE: PASS")
+    else:
+        print("EVENT LOOP SMOKE: FAIL ({failures} stage(s))")

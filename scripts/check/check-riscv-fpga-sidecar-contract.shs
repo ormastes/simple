@@ -1,0 +1,137 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+BUILD_ROOT="${BUILD_ROOT:-$ROOT_DIR/build/riscv_fpga_sidecar_contract}"
+RVFI_REQUIRED="${REQUIRE_RVFI:-0}"
+
+is_rust_seed_simple() {
+    case "$1" in
+        "$ROOT_DIR"/src/compiler_rust/*|*/src/compiler_rust/*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    seed_path="$ROOT_DIR/build/riscv_fpga_sidecar_contract_selftest/src/compiler_rust/fake/simple"
+    self_hosted_path="$ROOT_DIR/bin/release/simple"
+    if is_rust_seed_simple "$seed_path" && ! is_rust_seed_simple "$self_hosted_path"; then
+        echo "STATUS: PASS riscv-fpga-sidecar-contract self-test"
+        exit 0
+    fi
+    echo "STATUS: FAIL riscv-fpga-sidecar-contract self-test" >&2
+    exit 1
+fi
+
+if [ "${SIMPLE_BIN:-}" = "" ]; then
+    for candidate in "$ROOT_DIR/bin/simple" "$ROOT_DIR/bin/release/simple" "$ROOT_DIR/bin/release"/*/simple "$ROOT_DIR/build/bootstrap/stage3/simple"; do
+        if [ -x "$candidate" ]; then
+            SIMPLE_BIN="$candidate"
+            break
+        fi
+    done
+fi
+SIMPLE_BIN="${SIMPLE_BIN:-$ROOT_DIR/bin/simple}"
+if [ ! -x "$SIMPLE_BIN" ]; then
+    echo "FAIL: missing Simple runner: $SIMPLE_BIN" >&2
+    exit 1
+fi
+if is_rust_seed_simple "$SIMPLE_BIN"; then
+    echo "FAIL: RISC-V formal sidecar gate must use self-hosted Simple, not Rust seed: $SIMPLE_BIN" >&2
+    exit 1
+fi
+
+check_contains() {
+    file="$1"
+    needle="$2"
+    if ! grep -Fq "$needle" "$file"; then
+        echo "FAIL: $file missing $needle" >&2
+        return 1
+    fi
+}
+
+check_absent() {
+    file="$1"
+    needle="$2"
+    if grep -Fq "$needle" "$file"; then
+        echo "FAIL: $file unexpectedly contains $needle" >&2
+        return 1
+    fi
+}
+
+check_bundle() {
+    dir="$1"
+    board="$2"
+    rv32="$dir/rv32/rtl/simple_rv32gc_core.debug.json"
+    rv64="$dir/rv64/rtl/simple_rv64gc_core.debug.json"
+    rv32_vhdl="$dir/rv32/rtl/simple_rv32gc_core.vhd"
+    rv64_vhdl="$dir/rv64/rtl/simple_rv64gc_core.vhd"
+    rv32_formal="$dir/rv32/rtl/simple_rv32gc_core_formal.vhd"
+    rv64_formal="$dir/rv64/rtl/simple_rv64gc_core_formal.vhd"
+    rv32_sby="$dir/rv32/rtl/simple_rv32gc_core.sby"
+    rv64_sby="$dir/rv64/rtl/simple_rv64gc_core.sby"
+    rv32_formal_manifest="$dir/rv32/rtl/simple_rv32gc_core_formal.sdn"
+    rv64_formal_manifest="$dir/rv64/rtl/simple_rv64gc_core_formal.sdn"
+    manifest="$dir/manifest.sdn"
+    if [ ! -f "$manifest" ]; then
+        manifest="$dir/riscv_fpga_rtl_manifest.sdn"
+    fi
+    product_byl="$dir/riscv_product.byl"
+
+    test -f "$rv32" || { echo "FAIL: missing $rv32" >&2; return 1; }
+    test -f "$rv64" || { echo "FAIL: missing $rv64" >&2; return 1; }
+    test -f "$rv32_vhdl" || { echo "FAIL: missing $rv32_vhdl" >&2; return 1; }
+    test -f "$rv64_vhdl" || { echo "FAIL: missing $rv64_vhdl" >&2; return 1; }
+    test -f "$rv32_formal" || { echo "FAIL: missing $rv32_formal" >&2; return 1; }
+    test -f "$rv64_formal" || { echo "FAIL: missing $rv64_formal" >&2; return 1; }
+    test -f "$rv32_sby" || { echo "FAIL: missing $rv32_sby" >&2; return 1; }
+    test -f "$rv64_sby" || { echo "FAIL: missing $rv64_sby" >&2; return 1; }
+    test -f "$rv32_formal_manifest" || { echo "FAIL: missing $rv32_formal_manifest" >&2; return 1; }
+    test -f "$rv64_formal_manifest" || { echo "FAIL: missing $rv64_formal_manifest" >&2; return 1; }
+    test -f "$manifest" || { echo "FAIL: missing $manifest" >&2; return 1; }
+    test -f "$product_byl" || { echo "FAIL: missing $product_byl" >&2; return 1; }
+
+    check_contains "$manifest" "board = \"$board\""
+    check_contains "$manifest" "product_level = \"linux-rtl\""
+    check_contains "$manifest" "configuration_profile = \"qemu-virt+fpga-board\""
+    check_contains "$manifest" "formal_gate = \"rvfi_port_manifest\""
+    check_contains "$product_byl" "schema = \"simple.riscv_product\""
+    check_contains "$product_byl" "lane rv32"
+    check_contains "$product_byl" "lane rv64"
+    check_contains "$product_byl" "formal_gate = \"rvfi+sby\""
+
+    check_contains "$rv32" "\"productLevel\": \"linux-rtl\""
+    check_contains "$rv32" "\"configurationProfile\": \"qemu-virt+fpga-board\""
+    check_contains "$rv32" "\"rtlBudget\": {\"maxLuts\": 25000, \"targetMhz\": 50}"
+    check_contains "$rv32" "\"formal\": {\"flow\": \"rvfi+sby\", \"gate\": \"rvfi_port_manifest\", \"status\": \"rvfi-ready\""
+    check_contains "$rv32" "\"observedRvfiPortCount\": 17"
+    check_contains "$rv32" "\"harness\": \"$dir/rv32/rtl/simple_rv32gc_core_formal.vhd\""
+    check_contains "$rv32" "\"sby\": \"$dir/rv32/rtl/simple_rv32gc_core.sby\""
+    check_contains "$rv32" "\"manifest\": \"$dir/rv32/rtl/simple_rv32gc_core_formal.sdn\""
+    check_contains "$rv32" "\"signal\":\"Rv32Instruction.opcode\""
+    check_contains "$rv32" "tb_generated_rv32_linux_handoff.vhd"
+    check_contains "$rv32" "GENERATED_RV32_BOOT_INFO_REAL_DTB: PASS"
+    CORE_VHDL="$rv32_vhdl" FORMAL_HARNESS="$rv32_formal" FORMAL_SBY="$rv32_sby" FORMAL_MANIFEST="$rv32_formal_manifest" REQUIRE_RVFI="$RVFI_REQUIRED" sh "$ROOT_DIR/scripts/rtl/check-rvfi-formal-readiness.shs" >/dev/null
+
+    check_contains "$rv64" "\"productLevel\": \"linux-rtl\""
+    check_contains "$rv64" "\"configurationProfile\": \"qemu-virt+fpga-board\""
+    check_contains "$rv64" "\"rtlBudget\": {\"maxLuts\": 45000, \"targetMhz\": 50}"
+    check_contains "$rv64" "\"formal\": {\"flow\": \"rvfi+sby\", \"gate\": \"rvfi_port_manifest\", \"status\": \"rvfi-ready\""
+    check_contains "$rv64" "\"observedRvfiPortCount\": 17"
+    check_contains "$rv64" "\"harness\": \"$dir/rv64/rtl/simple_rv64gc_core_formal.vhd\""
+    check_contains "$rv64" "\"sby\": \"$dir/rv64/rtl/simple_rv64gc_core.sby\""
+    check_contains "$rv64" "\"manifest\": \"$dir/rv64/rtl/simple_rv64gc_core_formal.sdn\""
+    check_contains "$rv64" "\"signal\":\"Rv64Instruction.opcode\""
+    CORE_VHDL="$rv64_vhdl" FORMAL_HARNESS="$rv64_formal" FORMAL_SBY="$rv64_sby" FORMAL_MANIFEST="$rv64_formal_manifest" REQUIRE_RVFI="$RVFI_REQUIRED" sh "$ROOT_DIR/scripts/rtl/check-rvfi-formal-readiness.shs" >/dev/null
+}
+
+rm -rf "$BUILD_ROOT"
+mkdir -p "$BUILD_ROOT"
+
+"$SIMPLE_BIN" run "$ROOT_DIR/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl" "$BUILD_ROOT/default" >/dev/null
+"$SIMPLE_BIN" run "$ROOT_DIR/src/hardware/fpga_linux/generate_riscv_fpga_bundle.spl" "$BUILD_ROOT/mlk" --board=mlk_s02_100t >/dev/null
+
+check_bundle "$BUILD_ROOT/default" "xilinx_generic"
+check_bundle "$BUILD_ROOT/mlk" "mlk_s02_100t"
+
+echo "STATUS: PASS riscv-fpga-sidecar-contract"

@@ -1,0 +1,44 @@
+#!/bin/sh
+# check-wm-daemon-autoconnect-overhead-evidence.shs
+#
+# Item 2 of the WM hardening plan: wm_daemon_autoconnect() (the auto-ensure
+# probe wired into every hosted GUI app's init_host_wm) must cost the app's
+# launch path a negligible, sub-millisecond amount on the "daemon already
+# running" hit path (it never blocks on daemon init on a miss either -- see
+# src/app/play/wm_daemon_ensure.spl).
+#
+# Runs scripts/check/measure_wm_daemon_autoconnect_overhead.spl (1000 calls
+# against a synthetic "running" lock file) and asserts the average is under
+# the sub-millisecond budget. Writes build/wm_daemon_overhead/report.md.
+set -u
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/wm_daemon_overhead}"
+REPORT="$BUILD_DIR/report.md"
+BUDGET_US="${WM_DAEMON_AUTOCONNECT_BUDGET_US:-1000}"
+GUI_BIN="${SIMPLE_BIN:-bin/simple}"
+
+mkdir -p "$BUILD_DIR"
+
+[ -x "$GUI_BIN" ] || { echo "FAIL: simple-binary-missing ($GUI_BIN)"; exit 1; }
+
+OUT="$(SIMPLE_LIB="${SIMPLE_LIB:-src}" "$GUI_BIN" run scripts/check/measure_wm_daemon_autoconnect_overhead.spl 2>"$BUILD_DIR/stderr.log")"
+echo "$OUT" | grep '^wm_daemon_autoconnect_' > "$REPORT" || true
+cat "$REPORT"
+
+AVG_US="$(printf '%s\n' "$OUT" | sed -n 's/^wm_daemon_autoconnect_overhead_avg_us=//p' | tail -1)"
+if [ -z "$AVG_US" ]; then
+    echo "FAIL: no-measurement-produced (see $BUILD_DIR/stderr.log)"
+    exit 1
+fi
+
+# Integer-truncate for a POSIX-sh comparison (e.g. "729.421" -> "729").
+AVG_INT="${AVG_US%%.*}"
+if [ "$AVG_INT" -lt "$BUDGET_US" ] 2>/dev/null; then
+    echo "PASS: avg=${AVG_US}us < budget=${BUDGET_US}us"
+    exit 0
+fi
+echo "FAIL: avg=${AVG_US}us >= budget=${BUDGET_US}us"
+exit 1

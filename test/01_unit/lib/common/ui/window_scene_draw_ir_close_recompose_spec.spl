@@ -1,0 +1,196 @@
+# Component spec: WM scene -> Draw IR card projection across the window close
+# lifecycle, plus the close flow through the runtime dispatch adapter.
+#
+# Campaign rule: structured evidence BEFORE pixels. These specs assert the
+# structured object evidence that feeds DrawIrComposition: the z-layer window
+# card projection (which cards exist, in which paint order) and the per-card
+# revision identity, across close/minimize dispatches.
+#
+# BLOCKED (seed): full-composition assertions (card batch census with
+# "-close"/"-traffic-*" nodes, stale-node sweep after recompose, drawn-rect vs
+# dispatch lockstep) crash the seed: shared_wm_scene_draw_ir_composition dies
+# in resolve_font_metrics_with_language ("field access on nil receiver") for
+# ANY scene — origin/main's own window_scene_draw_ir_spec currently aborts at
+# its second example for the same reason. See
+# doc/08_tracking/bug/font_renderer_resolve_metrics_nil_receiver_seed.md.
+# Those assertions are recorded as explicit skips below, NOT silently dropped.
+
+use std.spec
+use common.ui.taskbar_model.{TaskbarModel}
+use common.ui.window_scene.{
+    SharedWmScene,
+    SharedWmWindow,
+    simple_gui_internal_window,
+    simple_gui_internal_window_scene,
+    shared_wm_dispatch_pointer,
+    shared_wm_focused_window_id,
+    shared_wm_minimize_window_by_window_id
+}
+use common.ui.window_scene_draw_ir.{_wm_draw_ir_visible_windows_by_layer, _wm_draw_ir_window_revision}
+use common.ui.wm_runtime_dispatch.{
+    wm_runtime_command_from_shared_dispatch,
+    wm_runtime_dispatch_wire,
+    wm_runtime_apply_shared_dispatch,
+    wm_runtime_shell_state_empty
+}
+
+fn _taskbar_empty() -> TaskbarModel:
+    TaskbarModel(pinned: [], running: [], tray: [])
+
+fn _win(n: i32, x: i32, y: i32, z: i32, focused: bool) -> SharedWmWindow:
+    simple_gui_internal_window("surf{n}", "win{n}", 42u64, "app{n}", "Window {n}", x, y, 300, 200, "", false, focused, z)
+
+fn _three_window_scene() -> SharedWmScene:
+    simple_gui_internal_window_scene(800, 600, "cpu", [
+        _win(1, 100, 100, 1, false),
+        _win(2, 150, 150, 2, false),
+        _win(3, 200, 200, 3, true)
+    ])
+
+fn _layer_ids(scene: SharedWmScene) -> [text]:
+    var ids: [text] = []
+    for window in _wm_draw_ir_visible_windows_by_layer(scene):
+        ids.push(window.window_id)
+    ids
+
+describe "WM Draw IR window card layer projection":
+
+    it "projects three window cards bottom-to-top by z-index":
+        val ids = _layer_ids(_three_window_scene())
+        expect(ids.len()).to_equal(3)
+        expect(ids[0]).to_equal("win1")
+        expect(ids[1]).to_equal("win2")
+        expect(ids[2]).to_equal("win3")
+
+    it "projects two cards and no stale card after a close dispatch":
+        val scene = _three_window_scene()
+        # win2 close X spans [426,446)x[152,172), uncovered by win1/win3.
+        val closed = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 436, 162, "left", "down", 1000, "", 0)
+        expect(closed.action).to_equal("close_window")
+        expect(closed.window_id).to_equal("win2")
+        val ids = _layer_ids(closed.scene)
+        expect(ids.len()).to_equal(2)
+        expect(ids[0]).to_equal("win1")
+        expect(ids[1]).to_equal("win3")
+
+    it "drops a minimized card from the projection but keeps the scene entry":
+        val scene = _three_window_scene()
+        # win3 yellow traffic light center (235,214).
+        val minimized = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 235, 214, "left", "down", 1000, "", 0)
+        expect(minimized.action).to_equal("minimize_window")
+        val ids = _layer_ids(minimized.scene)
+        expect(ids.len()).to_equal(2)
+        expect(ids[0]).to_equal("win1")
+        expect(ids[1]).to_equal("win2")
+        expect(minimized.scene.windows.len()).to_equal(3)
+
+    it "keeps equal-z card order stable across an unrelated close":
+        val scene = simple_gui_internal_window_scene(800, 600, "cpu", [
+            _win(1, 100, 100, 5, false),
+            _win(2, 150, 150, 5, false),
+            _win(3, 200, 200, 5, true),
+            _win(4, 250, 250, 9, false)
+        ])
+        # Close win4 (top, z 9) via its close X: [526,546)x[252,272).
+        val closed = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 536, 262, "left", "down", 1000, "", 0)
+        expect(closed.action).to_equal("close_window")
+        expect(closed.window_id).to_equal("win4")
+        val ids = _layer_ids(closed.scene)
+        expect(ids.len()).to_equal(3)
+        expect(ids[0]).to_equal("win1")
+        expect(ids[1]).to_equal("win2")
+        expect(ids[2]).to_equal("win3")
+
+    it "changes the card revision identity across lifecycle state changes":
+        val scene = _three_window_scene()
+        val before = _wm_draw_ir_window_revision(scene.windows[1])
+        # Closing focused win3 refocuses win2 -> win2's revision must change so
+        # a revision-keyed renderer repaints its titlebar as focused.
+        val closed = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 486, 212, "left", "down", 1000, "", 0)
+        expect(closed.action).to_equal("close_window")
+        val after = _wm_draw_ir_window_revision(closed.scene.windows[1])
+        # Seed landmine: an inline `==` inside expect() mis-evaluates as an
+        # expect/to_equal pair, so compare via a precomputed bool.
+        val focus_rev_changed = before != after
+        expect(focus_rev_changed).to_equal(true)
+        # Minimizing changes the minimized facet of the SAME window's revision.
+        val min_scene = shared_wm_minimize_window_by_window_id(scene, "win1")
+        val min_rev = _wm_draw_ir_window_revision(min_scene.windows[0])
+        val orig_rev = _wm_draw_ir_window_revision(scene.windows[0])
+        val min_rev_changed = min_rev != orig_rev
+        expect(min_rev_changed).to_equal(true)
+
+    it "records the seed-blocked full-composition assertions as explicit skips":
+        # std.spec skip() prints are swallowed by the seed's cross-module
+        # evaluator defect, so record the skips with direct prints.
+        print "    SKIP composing 3 windows yields 3 card batches with close/traffic nodes: seed crashes in resolve_font_metrics_with_language — see doc/08_tracking/bug/font_renderer_resolve_metrics_nil_receiver_seed_2026-07-20.md"
+        print "    SKIP recompose after close leaves no stale win2 nodes and changes scene key: same font_renderer nil-receiver crash"
+        print "    SKIP dispatch honors exactly the drawn close/traffic rects (lockstep): same font_renderer nil-receiver crash"
+        expect(true).to_equal(true)
+
+describe "close lifecycle through the runtime dispatch adapter":
+
+    it "a close dispatch maps to a handled window_close command with stable wire form":
+        val scene = _three_window_scene()
+        val closed = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 486, 212, "left", "down", 1000, "", 0)
+        val command = wm_runtime_command_from_shared_dispatch(closed)
+        expect(command.kind).to_equal("window_close")
+        expect(command.handled).to_equal(true)
+        expect(command.window_id).to_equal("win3")
+        expect(command.target_id).to_equal("surf3")
+        expect(wm_runtime_dispatch_wire(command)).to_equal("kind=window_close;target=surf3;app=app3;window=win3;handled=true;payload=surface_id=surf3;window_id=win3")
+
+    it "a minimize dispatch maps to a handled window_minimize command":
+        val scene = _three_window_scene()
+        val minimized = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 235, 214, "left", "down", 1000, "", 0)
+        val command = wm_runtime_command_from_shared_dispatch(minimized)
+        expect(command.kind).to_equal("window_minimize")
+        expect(command.handled).to_equal(true)
+        expect(command.window_id).to_equal("win3")
+
+    it "applying a close clears focus and records the closed window id":
+        val scene = _three_window_scene()
+        var state = wm_runtime_shell_state_empty()
+        # Focus win3 through a real body click first, then close it.
+        val focus = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 350, 350, "left", "down", 1000, "", 0)
+        expect(focus.action).to_equal("focus_window")
+        state = wm_runtime_apply_shared_dispatch(state, focus)
+        expect(state.focused_window_id).to_equal("win3")
+        val closed = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 486, 212, "left", "down", 1000, "", 0)
+        state = wm_runtime_apply_shared_dispatch(state, closed)
+        expect(state.last_command_kind).to_equal("window_close")
+        expect(state.focused_window_id).to_equal("")
+        expect(state.closed_window_ids.len()).to_equal(1)
+        expect(state.closed_window_ids[0]).to_equal("win3")
+        expect(state.minimized_window_ids.len()).to_equal(0)
+
+    it "applying a minimize records the minimized window id and drops its focus":
+        val scene = _three_window_scene()
+        var state = wm_runtime_shell_state_empty()
+        val focus = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 350, 350, "left", "down", 1000, "", 0)
+        state = wm_runtime_apply_shared_dispatch(state, focus)
+        val minimized = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 235, 214, "left", "down", 1000, "", 0)
+        state = wm_runtime_apply_shared_dispatch(state, minimized)
+        expect(state.last_command_kind).to_equal("window_minimize")
+        expect(state.focused_window_id).to_equal("")
+        expect(state.minimized_window_ids.len()).to_equal(1)
+        expect(state.minimized_window_ids[0]).to_equal("win3")
+        expect(state.closed_window_ids.len()).to_equal(0)
+
+    it "closing an unfocused window keeps the current focus owner":
+        val scene = _three_window_scene()
+        var state = wm_runtime_shell_state_empty()
+        val focus = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 350, 350, "left", "down", 1000, "", 0)
+        state = wm_runtime_apply_shared_dispatch(state, focus)
+        # win1 close X at [376,396)x[102,122) is uncovered.
+        val closed = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 386, 112, "left", "down", 1000, "", 0)
+        expect(closed.window_id).to_equal("win1")
+        state = wm_runtime_apply_shared_dispatch(state, closed)
+        expect(state.focused_window_id).to_equal("win3")
+        expect(state.closed_window_ids[0]).to_equal("win1")
+
+# NOTE: widget_draw_ir (widget_tree_to_draw_ir) coverage is intentionally NOT
+# here: importing common.ui.widget_draw_ir in a spec kills the run on the seed
+# and calling widget_tree_to_draw_ir_cpu via `bin/simple run` nil-crashes and
+# dumps core even for rect-only trees — same font_renderer root. See the bug
+# doc above; add the widget composition specs when it lands.

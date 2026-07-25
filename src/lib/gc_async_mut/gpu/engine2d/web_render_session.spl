@@ -1,0 +1,140 @@
+# Web Render Session
+#
+# Bridges web rendering surfaces with the BackendSession layer.
+# A WebRenderSession owns a BackendSessionHandle (by id), tracks a surface_id,
+# and maintains per-surface frame counters.
+#
+# Constraint: PerfExclusive mode is forbidden for web surfaces.
+# create_surface() returns is_valid() == false when PerfExclusive is requested.
+#
+# Usage:
+#   val ws = WebRenderSession.create(surface_id: 42, session_id: handle.id,
+#                                    session_mode: handle.mode)
+#   if ws.is_valid():
+#       ws.begin_frame()
+#       ...
+#       ws.end_frame()
+#       ws.release_session()
+
+# ============================================================================
+# Replicated minimal enums (no import — avoids interpreter timeout)
+# ============================================================================
+
+enum BackendSessionMode:
+    LegacyNoSession
+    ManagedShared
+    PerfExclusive
+
+# ============================================================================
+# WebRenderSession
+# ============================================================================
+
+class WebRenderSession:
+    """Web surface integration with a BackendSession.
+
+    Owns a reference to a session by id, a surface_id for compositor
+    routing, and frame counters for paint/upload/present tracking.
+
+    Lifecycle:
+      val ws = WebRenderSession.create(surface_id: sid, session_id: hid,
+                                       session_mode: mode)
+      if not ws.is_valid():
+          # PerfExclusive was requested — reject
+          return
+      ws.retain_session()
+      ws.begin_frame()
+      ...
+      ws.end_frame()
+      ws.release_session()
+    """
+    surface_id: i64
+    session_id: i64
+    session_mode: BackendSessionMode
+    ref_count: i64
+    frame_count: i64
+    begin_count: i64
+    end_count: i64
+    is_active: bool
+    valid: bool
+
+    static fn create(surface_id: i64, session_id: i64, session_mode: BackendSessionMode) -> WebRenderSession:
+        """Create a WebRenderSession for the given surface and session handle id.
+
+        Returns an invalid session if PerfExclusive is requested — web surfaces
+        must not monopolise the GPU context.
+        """
+        if session_mode == BackendSessionMode.PerfExclusive:
+            return WebRenderSession(
+                surface_id: surface_id,
+                session_id: 0,
+                session_mode: session_mode,
+                ref_count: 0,
+                frame_count: 0,
+                begin_count: 0,
+                end_count: 0,
+                is_active: false,
+                valid: false
+            )
+        WebRenderSession(
+            surface_id: surface_id,
+            session_id: session_id,
+            session_mode: session_mode,
+            ref_count: 1,
+            frame_count: 0,
+            begin_count: 0,
+            end_count: 0,
+            is_active: false,
+            valid: true
+        )
+
+    fn is_valid() -> bool:
+        self.valid
+
+    me create_surface() -> i64:
+        """Register this session with the compositor surface system.
+
+        Returns the surface_id on success, or 0 if the session is invalid
+        (e.g. PerfExclusive was attempted).
+        """
+        if not self.valid:
+            return 0
+        self.surface_id
+
+    me retain_session() -> i64:
+        """Increment the session reference count.
+
+        Returns the new ref_count, or -1 if the session is invalid.
+        """
+        if not self.valid:
+            return -1
+        self.ref_count = self.ref_count + 1
+        self.ref_count
+
+    me release_session():
+        """Decrement the session reference count.
+
+        When ref_count reaches zero the surface binding is torn down.
+        """
+        if not self.valid:
+            return
+        if self.ref_count <= 0:
+            return
+        self.ref_count = self.ref_count - 1
+        if self.ref_count == 0:
+            self.is_active = false
+            self.valid = false
+
+    me begin_frame():
+        """Mark the start of a new render frame for this surface."""
+        if not self.valid:
+            return
+        self.is_active = true
+        self.begin_count = self.begin_count + 1
+
+    me end_frame():
+        """Mark the end of the current render frame and increment the frame counter."""
+        if not self.valid:
+            return
+        self.is_active = false
+        self.end_count = self.end_count + 1
+        self.frame_count = self.frame_count + 1

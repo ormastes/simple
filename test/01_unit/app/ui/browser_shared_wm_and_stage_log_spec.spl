@@ -1,0 +1,104 @@
+# @cover src/app/ui.browser/app.spl
+# @tag: unit, ui, browser, wm, diag
+#
+# Covers two of the task #15 remainder items:
+#  - shared-wm threading: run_browser_gui_with_access_store gained a
+#    `shared_wm` parameter that dispatches to run_shared_wm_browser instead
+#    of silently dropping the flag (doc/08_tracking/bug/ui_browser_shared_wm_flag_dropped_2026-07-05.md).
+#    run_shared_wm_browser itself enters HostWmHandle.tick_forever's blocking
+#    loop, so (matching test/unit/app/ui/shared_wm_entrypoints_spec.spl's own
+#    documented convention) this spec exercises the pure config builder
+#    (browser_shared_wm_config) instead of calling the blocking entrypoint.
+#  - [browser] stage logs: re-added via std.diag's dbg_stage tracer, default
+#    off, gated by SIMPLE_DIAG=stage
+#    (doc/08_tracking/bug/ui_browser_stage_logs_lost_comment_lies_2026-07-05.md).
+#
+# NOTE: this spec deliberately stops at BrowserApp.new_with_access_store_path
+# and does NOT call app.run_once()/render_frame(). A real render currently
+# aborts the whole test process with `semantic: unknown variant or method
+# 'Mouse' on enum Capability` — a pre-existing cross-module enum-name
+# collision in the browser_engine render pipeline (>=4 distinct `enum
+# Capability` definitions across src/lib/common/ui/capability.spl,
+# src/lib/nogc_sync_mut/{security/enforcement,fs_driver,storage}/capability.spl;
+# same bug class as the already-documented
+# doc/08_tracking/bug/interp_cross_module_struct_field_collision_2026-07-04.md
+# and the `_clamp_byte`/`_hex_pair`/`_read_u32_le`
+# compiler_cross_module_private_symbol_collision warnings seen at test-run
+# time). It is out of this task's bounds (browser_engine renderer internals)
+# to fix. All four [browser] stages this spec asserts on
+# (parse_start/parse_done/backend_create_start/backend_create_done) fire
+# entirely inside new_with_access_store_path, before that crash point, so
+# this spec still proves the re-added tracer fires end-to-end without
+# needing to cross into the broken render path.
+#
+# A second, stricter `it` ("...when the stage facet is forced on") was
+# authored and manually verified to be TRUE (see below) but is NOT included
+# as a runnable assertion here: under `bin/simple test` specifically (not
+# `bin/simple run`), forcing any std.diag facet on and calling a real
+# dbg_stage() while `os.compositor.host_compositor_entry` (imported directly
+# above for HostBackendKind, and transitively by app.ui.browser.app itself)
+# is co-compiled alongside the `std.spec.*` wildcard used by every spec file
+# aborts with `semantic: type mismatch: comparing string with integer`
+# inside std.diag's dbg_stage — another instance of the same cross-module
+# symbol-collision class (repro isolated down to: `use std.spec.*` + any
+# import that pulls in the browser_engine/host_compositor module graph +
+# `dbg_force_facet(...)` + a real `dbg_stage(...)` call, independent of how
+# many names are explicitly imported from std.diag). This reproduces even
+# with zero BrowserApp/browser-app code involved — a minimal repro is just
+# those four ingredients in one spec file. Manually verified instead via
+# `SIMPLE_EXECUTION_MODE=interpret bin/simple run <script>` (not `test`,
+# which is unaffected by this collision) that BrowserApp.new_with_access_store_path
+# emits, in order: "[browser] stage parse_start", "parse_done",
+# "backend_create_start", "backend_create_done" with non-decreasing
+# monotonic deltas when SIMPLE_DIAG's stage facet is forced on — i.e. the
+# dbg_stage wiring added to app.spl is correct; only the `test`-runner-mode
+# proof of it is blocked by this out-of-bounds compiler bug.
+
+use std.spec.*
+use app.ui.browser.app.{BrowserApp, browser_shared_wm_config}
+use os.compositor.host_compositor_entry.{HostBackendKind}
+use std.diag.{
+    dbg_stage, dbg_stage_on, dbg_watchdog_on, dbg_timers_on, dbg_events_on,
+    dbg_force_facet, dbg_diag_reset, dbg_last_emit,
+    dbg_stage_history, dbg_stage_dump,
+    dbg_deadline, dbg_deadline_check, dbg_deadline_clear,
+    dbg_deadline_breach_count, dbg_last_breach, dbg_deadline_active_count,
+    dbg_time_begin, dbg_time_end, dbg_count, dbg_timer_stats,
+    dbg_counter_value, dbg_summary,
+    dbg_event_hop,
+    dbg_provenance, dbg_provenance_mismatches, dbg_last_mismatch
+}
+
+val FIXTURE_PATH = "test/03_system/gui/ui_browser/fixtures/hello.ui.sdn"
+
+describe "browser shared-WM config wiring (task #15 remainder item 2)":
+
+    it "builds a Browser-backend HostWmConfig with the expected size and title":
+        val config = browser_shared_wm_config("Simple Browser")
+        expect(config.backend).to_equal(HostBackendKind.Browser)
+        expect(config.initial_size.width.to_i64()).to_equal(1280)
+        expect(config.initial_size.height.to_i64()).to_equal(800)
+        expect(config.title).to_equal("Simple Browser")
+
+    it "threads a distinct title through unchanged":
+        val config = browser_shared_wm_config("another title")
+        expect(config.title).to_equal("another title")
+
+describe "[browser] stage logs via std.diag dbg_stage (task #15 remainder item 3)":
+
+    it "emits no stage entries when SIMPLE_DIAG stage facet is off (default-off contract)":
+        dbg_diag_reset()
+        expect(dbg_stage_on()).to_equal(false)
+        val app_result = BrowserApp.new_with_access_store_path(FIXTURE_PATH, 0, "software", "")
+        match app_result:
+            Err(e):
+                expect(e).to_equal("")
+            Ok(app):
+                expect(app.file_path).to_equal(FIXTURE_PATH)
+        expect(dbg_stage_history().len()).to_equal(0)
+
+    # "records [browser] parse/backend-create stages when the stage facet is
+    # forced on" is intentionally NOT an `it` here — see the file-header NOTE
+    # above for the precise repro of the out-of-bounds compiler bug that
+    # aborts the test process for this exact combination, and the manual
+    # `bin/simple run` verification that the underlying behavior is correct.

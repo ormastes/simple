@@ -1,0 +1,622 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/llm_strict_host_prereq_doctor}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/2026/06/llm_strict_host_prereq_doctor_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+SURFACE_MANIFEST="$BUILD_DIR/strict_host_prereq_surface_manifest.tsv"
+PYTHON_VLLM_LOG="$BUILD_DIR/python_vllm_probe.log"
+PYTHON_TORCH_LOG="$BUILD_DIR/python_torch_probe.log"
+SYSTEM_LIBTORCH_LOG="$BUILD_DIR/system_libtorch_probe.log"
+GPU_LOG="$BUILD_DIR/gpu_probe.log"
+TORCH_BRIDGE_BUILD_DIR="$BUILD_DIR/torch_sffi_bridge"
+TORCH_BRIDGE_LOG="$BUILD_DIR/torch_sffi_bridge_setup.log"
+TORCH_BRIDGE_ENV="$TORCH_BRIDGE_BUILD_DIR/evidence.env"
+BASE_MODEL="${LLM_VLLM_BASE_MODEL:-${BASE_MODEL:-base-model}}"
+ENDPOINT="${LLM_VLLM_ENDPOINT:-${ENDPOINT:-http://127.0.0.1:8000/v1}}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+rm -f "$OUT_ENV" "$REPORT_PATH" "$SURFACE_MANIFEST" \
+    "$PYTHON_VLLM_LOG" "$PYTHON_TORCH_LOG" "$SYSTEM_LIBTORCH_LOG" "$GPU_LOG" \
+    "$TORCH_BRIDGE_LOG"
+
+artifact_size() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        wc -c <"$path" | tr -d ' '
+    else
+        printf '%s\n' "0"
+    fi
+}
+
+artifact_sha256() {
+    path="$1"
+    if [ -n "$path" ] && [ -f "$path" ]; then
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$path" | awk '{print $1}'
+        elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$path" | awk '{print $1}'
+        else
+            printf '%s\n' "unavailable"
+        fi
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+env_presence() {
+    name="$1"
+    eval "value=\${$name:-}"
+    if [ -n "$value" ]; then
+        printf '%s\n' "configured"
+    else
+        printf '%s\n' "missing"
+    fi
+}
+
+normalize_capability_status() {
+    case "$(printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]')" in
+        ready)
+            printf '%s\n' "ready"
+            ;;
+        unsupported)
+            printf '%s\n' "unsupported"
+            ;;
+        unavailable)
+            printf '%s\n' "unavailable"
+            ;;
+        unchecked)
+            printf '%s\n' "unchecked"
+            ;;
+        missing|"")
+            printf '%s\n' "missing"
+            ;;
+        *)
+            printf '%s\n' "unavailable"
+            ;;
+    esac
+}
+
+artifact_value() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+}
+
+json_string_for() {
+    key="$1"
+    file="$2"
+    if [ -n "$file" ] && [ -f "$file" ]; then
+        sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$file" | tail -n 1
+    fi
+}
+
+json_number_for() {
+    key="$1"
+    file="$2"
+    if [ -n "$file" ] && [ -f "$file" ]; then
+        sed -n "s/.*\"${key}\"[[:space:]]*:[[:space:]]*\\([0-9][0-9.]*\\).*/\\1/p" "$file" | tail -n 1
+    fi
+}
+
+append_gate() {
+    gate="$1"
+    if [ -z "$blocked_gates" ]; then
+        blocked_gates="$gate"
+        primary_blocked_gate="$gate"
+    else
+        blocked_gates="$blocked_gates|$gate"
+    fi
+    blocked_count=$((blocked_count + 1))
+}
+
+python3 - >"$PYTHON_VLLM_LOG" <<'PY'
+import importlib.util
+try:
+    from importlib import metadata
+except Exception:
+    metadata = None
+spec = importlib.util.find_spec("vllm")
+if spec:
+    version = "missing"
+    if metadata:
+        try:
+            version = metadata.version("vllm")
+        except Exception:
+            pass
+    print("python_vllm_module_status=available")
+    print(f"python_vllm_origin={getattr(spec, 'origin', '') or 'missing'}")
+    print(f"python_vllm_version={version}")
+else:
+    print("python_vllm_module_status=missing")
+    print("python_vllm_origin=missing")
+    print("python_vllm_version=missing")
+PY
+
+python3 - >"$PYTHON_TORCH_LOG" <<'PY'
+import importlib.util
+spec = importlib.util.find_spec("torch")
+if not spec:
+    print("python_torch_module_status=missing")
+    print("python_torch_version=missing")
+    print("python_torch_cuda_available=missing")
+    print("python_torch_cuda_device_count=0")
+    raise SystemExit(0)
+try:
+    import torch
+    print("python_torch_module_status=available")
+    print(f"python_torch_version={getattr(torch, '__version__', 'missing')}")
+    cuda_available = bool(torch.cuda.is_available())
+    print(f"python_torch_cuda_available={'true' if cuda_available else 'false'}")
+    print(f"python_torch_cuda_device_count={torch.cuda.device_count() if cuda_available else 0}")
+except Exception as exc:
+    print("python_torch_module_status=error")
+    print("python_torch_version=missing")
+    print("python_torch_cuda_available=false")
+    print("python_torch_cuda_device_count=0")
+    print(f"python_torch_error={type(exc).__name__}")
+PY
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    if timeout 3 nvidia-smi --query-gpu=name --format=csv,noheader >"$GPU_LOG" 2>&1; then
+        gpu_status="available"
+    else
+        gpu_status="missing"
+    fi
+    nvidia_smi_path="$(command -v nvidia-smi)"
+else
+    printf '%s\n' "missing_command=nvidia-smi" >"$GPU_LOG"
+    gpu_status="missing"
+    nvidia_smi_path="missing"
+fi
+
+if command -v ldconfig >/dev/null 2>&1; then
+    if ldconfig -p 2>/dev/null | grep -E 'libtorch|libc10' >"$SYSTEM_LIBTORCH_LOG"; then
+        system_libtorch_status="available"
+    else
+        printf '%s\n' "libtorch_not_found" >"$SYSTEM_LIBTORCH_LOG"
+        system_libtorch_status="missing"
+    fi
+else
+    printf '%s\n' "ldconfig_unavailable" >"$SYSTEM_LIBTORCH_LOG"
+    system_libtorch_status="unknown"
+fi
+system_libtorch_match_count="0"
+if [ "$system_libtorch_status" = "available" ]; then
+    system_libtorch_match_count="$(wc -l <"$SYSTEM_LIBTORCH_LOG" | tr -d ' ')"
+fi
+
+value_for() {
+    key="$1"
+    file="$2"
+    sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+auth_source="missing"
+if [ -n "${LLM_DASHBOARD_LIVE_AUTH_HEADER:-}" ]; then
+    auth_source="auth_header"
+elif [ -n "${LLM_DASHBOARD_LIVE_AUTH_COOKIE:-}" ]; then
+    auth_source="auth_cookie"
+elif [ -n "${LLM_DASHBOARD_LIVE_COOKIE_NAME:-}" ] && [ -n "${LLM_DASHBOARD_LIVE_COOKIE_VALUE:-}" ]; then
+    auth_source="cookie_pair"
+fi
+
+dashboard_base_url_status="$(env_presence LLM_DASHBOARD_LIVE_BASE_URL)"
+if [ "$dashboard_base_url_status" = "configured" ] && [ "$auth_source" != "missing" ]; then
+    dashboard_prereq_status="ready"
+else
+    dashboard_prereq_status="blocked"
+fi
+
+vllm_command_path="$(command -v vllm 2>/dev/null || true)"
+if [ -n "$vllm_command_path" ]; then
+    vllm_command_status="available"
+else
+    vllm_command_path="missing"
+    vllm_command_status="missing"
+fi
+if [ -n "$BASE_MODEL" ]; then
+    vllm_base_model_status="configured"
+else
+    vllm_base_model_status="missing"
+fi
+if [ "${BASE_MODEL:-}" = "base-model" ]; then
+    vllm_base_model_source="default"
+else
+    vllm_base_model_source="env"
+fi
+if [ -n "$ENDPOINT" ]; then
+    vllm_endpoint_status="configured"
+else
+    vllm_endpoint_status="missing"
+fi
+if [ "${ENDPOINT:-}" = "http://127.0.0.1:8000/v1" ]; then
+    vllm_endpoint_source="default"
+else
+    vllm_endpoint_source="env"
+fi
+python_vllm_module_status="$(value_for python_vllm_module_status "$PYTHON_VLLM_LOG")"
+python_vllm_origin="$(value_for python_vllm_origin "$PYTHON_VLLM_LOG")"
+python_vllm_version="$(value_for python_vllm_version "$PYTHON_VLLM_LOG")"
+if [ "$vllm_command_status" = "available" ] &&
+    [ "$python_vllm_module_status" = "available" ] &&
+    [ "$gpu_status" = "available" ] &&
+    [ "$vllm_base_model_status" = "configured" ] &&
+    [ "$vllm_endpoint_status" = "configured" ]; then
+    vllm_prereq_status="ready"
+else
+    vllm_prereq_status="blocked"
+fi
+
+svllm_read_range_status="$(normalize_capability_status "${SVLLM_NATIVE_READ_RANGE_STATUS:-missing}")"
+svllm_pinned_buffer_status="$(normalize_capability_status "${SVLLM_NATIVE_PINNED_BUFFER_STATUS:-missing}")"
+svllm_device_staging_status="$(normalize_capability_status "${SVLLM_NATIVE_DEVICE_STAGING_STATUS:-missing}")"
+svllm_capability_source="${SVLLM_NATIVE_CAPABILITY_SOURCE:-missing}"
+svllm_capability_evidence_path="${SVLLM_NATIVE_CAPABILITY_EVIDENCE_PATH:-}"
+svllm_capability_source_status="ready"
+case "$svllm_capability_source" in
+    ""|missing|env_or_default|default|unknown)
+        svllm_capability_source_status="missing"
+        ;;
+esac
+svllm_capability_evidence_size="$(artifact_size "$svllm_capability_evidence_path")"
+svllm_capability_evidence_sha256="$(artifact_sha256 "$svllm_capability_evidence_path")"
+svllm_capability_evidence_schema_version="missing"
+svllm_capability_evidence_source="missing"
+svllm_capability_probe_event="missing"
+svllm_capability_probe_status="missing"
+svllm_capability_probe_exit="missing"
+svllm_capability_evidence_read_range_status="missing"
+svllm_capability_evidence_pinned_buffer_status="missing"
+svllm_capability_evidence_device_staging_status="missing"
+if [ -n "$svllm_capability_evidence_path" ] && [ -s "$svllm_capability_evidence_path" ]; then
+    svllm_capability_evidence_schema_version="$(artifact_value svllm_native_capability_schema_version "$svllm_capability_evidence_path")"
+    svllm_capability_evidence_source="$(artifact_value svllm_native_capability_source "$svllm_capability_evidence_path")"
+    svllm_capability_probe_event="$(artifact_value svllm_native_capability_probe_event "$svllm_capability_evidence_path")"
+    svllm_capability_probe_status="$(artifact_value svllm_native_capability_probe_status "$svllm_capability_evidence_path")"
+    svllm_capability_probe_exit="$(artifact_value svllm_native_capability_probe_exit "$svllm_capability_evidence_path")"
+    svllm_capability_evidence_read_range_status="$(normalize_capability_status "$(artifact_value svllm_native_capability_read_range_status "$svllm_capability_evidence_path")")"
+    svllm_capability_evidence_pinned_buffer_status="$(normalize_capability_status "$(artifact_value svllm_native_capability_pinned_buffer_status "$svllm_capability_evidence_path")")"
+    svllm_capability_evidence_device_staging_status="$(normalize_capability_status "$(artifact_value svllm_native_capability_device_staging_status "$svllm_capability_evidence_path")")"
+    if [ "$svllm_capability_evidence_schema_version" = "1" ] &&
+        [ "$svllm_capability_evidence_source" = "$svllm_capability_source" ] &&
+        [ "$svllm_capability_probe_event" = "svllm_native_capability_probe" ] &&
+        [ "$svllm_capability_probe_status" = "pass" ] &&
+        [ "$svllm_capability_probe_exit" = "0" ] &&
+        [ "$svllm_capability_evidence_read_range_status" = "$svllm_read_range_status" ] &&
+        [ "$svllm_capability_evidence_pinned_buffer_status" = "$svllm_pinned_buffer_status" ] &&
+        [ "$svllm_capability_evidence_device_staging_status" = "$svllm_device_staging_status" ]; then
+        svllm_capability_evidence_status="ready"
+    else
+        svllm_capability_evidence_status="invalid"
+    fi
+else
+    svllm_capability_evidence_status="missing"
+fi
+if [ "$svllm_read_range_status" = "ready" ] && \
+    [ "$svllm_pinned_buffer_status" = "ready" ] && \
+    [ "$svllm_device_staging_status" = "ready" ] && \
+    [ "$svllm_capability_source_status" = "ready" ] && \
+    [ "$svllm_capability_evidence_status" = "ready" ]; then
+    svllm_prereq_status="ready"
+else
+    svllm_prereq_status="blocked"
+fi
+
+python_torch_module_status="$(value_for python_torch_module_status "$PYTHON_TORCH_LOG")"
+python_torch_version="$(value_for python_torch_version "$PYTHON_TORCH_LOG")"
+python_torch_cuda_available="$(value_for python_torch_cuda_available "$PYTHON_TORCH_LOG")"
+python_torch_cuda_device_count="$(value_for python_torch_cuda_device_count "$PYTHON_TORCH_LOG")"
+python_torch_error="$(value_for python_torch_error "$PYTHON_TORCH_LOG")"
+python_torch_error="${python_torch_error:-none}"
+if BUILD_DIR="$TORCH_BRIDGE_BUILD_DIR" REPORT_PATH="$TORCH_BRIDGE_BUILD_DIR/report.md" \
+    sh scripts/setup/setup-llm-runtime-torch-sffi-bridge.shs >"$TORCH_BRIDGE_LOG" 2>&1; then
+    torch_bridge_setup_exit="0"
+else
+    torch_bridge_setup_exit="$?"
+fi
+torch_bridge_status="$(artifact_value llm_runtime_torch_sffi_bridge_status "$TORCH_BRIDGE_ENV")"
+torch_bridge_reason="$(artifact_value llm_runtime_torch_sffi_bridge_reason "$TORCH_BRIDGE_ENV")"
+torch_bridge_output_status="$(artifact_value llm_runtime_torch_sffi_bridge_output_status "$TORCH_BRIDGE_ENV")"
+torch_bridge_output_path="$(artifact_value llm_runtime_torch_sffi_bridge_output_path "$TORCH_BRIDGE_ENV")"
+torch_bridge_compile_status="$(artifact_value llm_runtime_torch_sffi_bridge_compile_status "$TORCH_BRIDGE_ENV")"
+torch_bridge_libtorch_export="$(artifact_value llm_runtime_torch_sffi_bridge_libtorch_export "$TORCH_BRIDGE_ENV")"
+torch_bridge_simple_sffi_path_export="$(artifact_value llm_runtime_torch_sffi_bridge_simple_sffi_path_export "$TORCH_BRIDGE_ENV")"
+torch_bridge_status="${torch_bridge_status:-missing}"
+torch_bridge_reason="${torch_bridge_reason:-missing}"
+torch_bridge_output_status="${torch_bridge_output_status:-missing}"
+torch_bridge_output_path="${torch_bridge_output_path:-missing}"
+torch_bridge_compile_status="${torch_bridge_compile_status:-missing}"
+torch_bridge_libtorch_export="${torch_bridge_libtorch_export:-missing}"
+torch_bridge_simple_sffi_path_export="${torch_bridge_simple_sffi_path_export:-missing}"
+if [ "$python_torch_cuda_available" = "true" ] &&
+    [ "$torch_bridge_status" = "pass" ] &&
+    [ "$torch_bridge_output_status" = "visible" ]; then
+    torch_prereq_status="ready"
+else
+    torch_prereq_status="blocked"
+fi
+
+retry5_cache_manifest=".spipe/llm-finetune-process/data/llm_backed_app_server_dry_run_retry5_cache_manifest.sdn"
+retry6_model_manifest=".spipe/llm-finetune-process/artifacts/llm_backed_app_server_dry_run_retry6/model_manifest.json"
+retry6_eval_result=".spipe/llm-finetune-process/artifacts/llm_backed_app_server_dry_run_retry6/eval_result.json"
+retry7_attempt=".spipe/llm-finetune-process/attempts/llm_backed_app_server_dry_run_retry7.sdn"
+retry5_cache_manifest_status="missing"
+retry6_model_manifest_status="missing"
+retry6_eval_result_status="missing"
+retry7_attempt_status="missing"
+[ -s "$retry5_cache_manifest" ] && retry5_cache_manifest_status="ready"
+[ -s "$retry6_model_manifest" ] && retry6_model_manifest_status="ready"
+[ -s "$retry6_eval_result" ] && retry6_eval_result_status="ready"
+[ -s "$retry7_attempt" ] && retry7_attempt_status="ready"
+retry6_model_manifest_schema_version="$(json_string_for schema_version "$retry6_model_manifest")"
+retry6_model_manifest_schema_version="${retry6_model_manifest_schema_version:-$(json_number_for schema_version "$retry6_model_manifest")}"
+retry6_model_manifest_attempt_id="$(json_string_for attempt_id "$retry6_model_manifest")"
+retry6_model_manifest_base_model="$(json_string_for base_model "$retry6_model_manifest")"
+retry6_model_manifest_deployable="$(json_string_for deployable "$retry6_model_manifest")"
+retry6_model_manifest_model_artifact_path="$(json_string_for model_artifact_path "$retry6_model_manifest")"
+retry6_eval_result_schema_version="$(json_string_for schema_version "$retry6_eval_result")"
+retry6_eval_result_schema_version="${retry6_eval_result_schema_version:-$(json_number_for schema_version "$retry6_eval_result")}"
+retry6_eval_result_status_value="$(json_string_for status "$retry6_eval_result")"
+retry6_eval_result_metric_value="$(json_number_for target_accuracy "$retry6_eval_result")"
+if [ -z "$retry6_eval_result_metric_value" ]; then
+    retry6_eval_result_metric_value="$(json_number_for final_accuracy "$retry6_eval_result")"
+fi
+retry6_eval_result_metric_target="$(json_number_for required_accuracy "$retry6_eval_result")"
+retry6_eval_result_dataset_id="$(json_string_for dataset_id "$retry6_eval_result")"
+retry6_eval_result_dataset_checksum="$(json_string_for dataset_checksum "$retry6_eval_result")"
+retry6_eval_result_samples="$(json_number_for samples "$retry6_eval_result")"
+if [ "$retry5_cache_manifest_status" = "ready" ] && \
+    [ "$retry6_model_manifest_status" = "ready" ] && \
+    [ "$retry6_eval_result_status" = "ready" ] && \
+    [ "$retry7_attempt_status" = "ready" ]; then
+    finetune_prereq_status="ready"
+else
+    finetune_prereq_status="blocked"
+fi
+
+blocked_count=0
+blocked_gates=""
+primary_blocked_gate="none"
+[ "$dashboard_prereq_status" = "ready" ] || append_gate "dashboard_live_http"
+[ "$vllm_prereq_status" = "ready" ] || append_gate "vllm_host"
+[ "$svllm_prereq_status" = "ready" ] || append_gate "svllm_native"
+[ "$torch_prereq_status" = "ready" ] || append_gate "torch_libtorch"
+[ "$finetune_prereq_status" = "ready" ] || append_gate "finetune_retry"
+
+if [ "$blocked_count" -eq 0 ]; then
+    status="pass"
+    reason="all_prereqs_ready"
+    next_action="run strict evidence wrappers"
+else
+    status="warn"
+    reason="strict_host_prereqs_missing"
+    next_action="provide blocked host prerequisites, then rerun strict evidence wrappers"
+fi
+
+if [ "$dashboard_prereq_status" = "ready" ]; then
+    dashboard_next_action="run scripts/check/check-llm-dashboard-live-http-evidence.shs"
+else
+    dashboard_next_action="set LLM_DASHBOARD_LIVE_BASE_URL and one accepted dashboard auth source"
+fi
+if [ "$vllm_prereq_status" = "ready" ]; then
+    vllm_next_action="run scripts/check/check-llm-runtime-vllm-host-probe.shs --strict"
+else
+    vllm_next_action="install local vllm command and Python module, keep GPU visible, then start the configured endpoint"
+fi
+if [ "$svllm_prereq_status" = "ready" ]; then
+    svllm_next_action="run scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs"
+else
+    svllm_next_action="provide matching SVLLM_NATIVE_CAPABILITY_SOURCE and schema-v1 capability evidence for read_range, pinned_buffer, and device_staging"
+fi
+if [ "$torch_prereq_status" = "ready" ]; then
+    torch_next_action="run scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs --strict"
+else
+    torch_next_action="run scripts/setup/setup-llm-runtime-torch-sffi-bridge.shs, export SIMPLE_SFFI_PATH and LIBTORCH from its evidence, then rerun the strict Torch optimizer probe"
+fi
+if [ "$finetune_prereq_status" = "ready" ]; then
+    finetune_next_action="run scripts/check/check-llm-finetune-acceptance-evidence.shs"
+else
+    finetune_next_action="complete retry5 cache manifest, retry6 model/eval artifacts, and retry7 acceptance attempt evidence"
+fi
+
+{
+    for path in \
+        scripts/check/check-llm-strict-host-prereq-doctor.shs \
+        scripts/check/check-llm-strict-host-prereq-doctor-contract.shs \
+        scripts/check/check-llm-dashboard-live-http-evidence.shs \
+        scripts/check/check-llm-runtime-vllm-host-probe.shs \
+        scripts/check/check-llm-runtime-svllm-native-streaming-evidence.shs \
+        scripts/setup/setup-llm-runtime-torch-sffi-bridge.shs \
+        scripts/check/check-llm-runtime-torch-cuda-optimizer-probe.shs \
+        scripts/check/check-llm-finetune-acceptance-evidence.shs \
+        doc/07_guide/app/llm/llm_runtime_vllm_torch_interface.md \
+        doc/08_tracking/bug/llm_strict_host_completion_blockers_2026-06-29.md
+    do
+        printf '%s\t%s\t%s\n' "$path" "$(artifact_size "$path")" "$(artifact_sha256 "$path")"
+    done
+} >"$SURFACE_MANIFEST"
+surface_manifest_count="$(wc -l <"$SURFACE_MANIFEST" | tr -d ' ')"
+surface_manifest_size="$(artifact_size "$SURFACE_MANIFEST")"
+surface_manifest_sha256="$(artifact_sha256 "$SURFACE_MANIFEST")"
+
+{
+    printf '%s\n' "llm_strict_host_prereq_doctor_status=$status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_reason=$reason"
+    printf '%s\n' "llm_strict_host_prereq_doctor_required_gates=dashboard_live_http,vllm_host,svllm_native,torch_libtorch,finetune_retry"
+    printf '%s\n' "llm_strict_host_prereq_doctor_blocked_gate_count=$blocked_count"
+    printf '%s\n' "llm_strict_host_prereq_doctor_blocked_gates=${blocked_gates:-none}"
+    printf '%s\n' "llm_strict_host_prereq_doctor_primary_blocked_gate=$primary_blocked_gate"
+    printf '%s\n' "llm_strict_host_prereq_doctor_dashboard_status=$dashboard_prereq_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_dashboard_base_url_status=$dashboard_base_url_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_dashboard_auth_source=$auth_source"
+    printf '%s\n' "llm_strict_host_prereq_doctor_dashboard_next_action=$dashboard_next_action"
+    printf '%s\n' "llm_strict_host_prereq_doctor_vllm_status=$vllm_prereq_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_vllm_command_status=$vllm_command_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_vllm_command_path=$vllm_command_path"
+    printf '%s\n' "llm_strict_host_prereq_doctor_vllm_base_model=$BASE_MODEL"
+    printf '%s\n' "llm_strict_host_prereq_doctor_vllm_base_model_status=$vllm_base_model_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_vllm_base_model_source=$vllm_base_model_source"
+    printf '%s\n' "llm_strict_host_prereq_doctor_vllm_endpoint=$ENDPOINT"
+    printf '%s\n' "llm_strict_host_prereq_doctor_vllm_endpoint_status=$vllm_endpoint_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_vllm_endpoint_source=$vllm_endpoint_source"
+    printf '%s\n' "llm_strict_host_prereq_doctor_python_vllm_module_status=$python_vllm_module_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_python_vllm_origin=$python_vllm_origin"
+    printf '%s\n' "llm_strict_host_prereq_doctor_python_vllm_version=$python_vllm_version"
+    printf '%s\n' "llm_strict_host_prereq_doctor_gpu_status=$gpu_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_nvidia_smi_path=$nvidia_smi_path"
+    printf '%s\n' "llm_strict_host_prereq_doctor_vllm_next_action=$vllm_next_action"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_status=$svllm_prereq_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_read_range_status=$svllm_read_range_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_pinned_buffer_status=$svllm_pinned_buffer_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_device_staging_status=$svllm_device_staging_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_source=$svllm_capability_source"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_source_status=$svllm_capability_source_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_path=$svllm_capability_evidence_path"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_status=$svllm_capability_evidence_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_size=$svllm_capability_evidence_size"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_sha256=$svllm_capability_evidence_sha256"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_source=$svllm_capability_evidence_source"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_schema_version=$svllm_capability_evidence_schema_version"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_probe_event=$svllm_capability_probe_event"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_probe_status=$svllm_capability_probe_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_probe_exit=$svllm_capability_probe_exit"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_read_range_status=$svllm_capability_evidence_read_range_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_pinned_buffer_status=$svllm_capability_evidence_pinned_buffer_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_capability_evidence_device_staging_status=$svllm_capability_evidence_device_staging_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_svllm_next_action=$svllm_next_action"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_status=$torch_prereq_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_python_torch_module_status=$python_torch_module_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_python_torch_version=$python_torch_version"
+    printf '%s\n' "llm_strict_host_prereq_doctor_python_torch_cuda_available=$python_torch_cuda_available"
+    printf '%s\n' "llm_strict_host_prereq_doctor_python_torch_cuda_device_count=$python_torch_cuda_device_count"
+    printf '%s\n' "llm_strict_host_prereq_doctor_python_torch_error=$python_torch_error"
+    printf '%s\n' "llm_strict_host_prereq_doctor_system_libtorch_status=$system_libtorch_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_system_libtorch_match_count=$system_libtorch_match_count"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_setup_exit=$torch_bridge_setup_exit"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_status=$torch_bridge_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_reason=$torch_bridge_reason"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_output_status=$torch_bridge_output_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_output_path=$torch_bridge_output_path"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_compile_status=$torch_bridge_compile_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_simple_sffi_path_export=$torch_bridge_simple_sffi_path_export"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_libtorch_export=$torch_bridge_libtorch_export"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_next_action=$torch_next_action"
+    printf '%s\n' "llm_strict_host_prereq_doctor_finetune_status=$finetune_prereq_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_retry5_cache_manifest_status=$retry5_cache_manifest_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_retry6_model_manifest_status=$retry6_model_manifest_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_retry6_model_manifest_schema_version=${retry6_model_manifest_schema_version:-missing}"
+    printf '%s\n' "llm_strict_host_prereq_doctor_retry6_model_manifest_attempt_id=${retry6_model_manifest_attempt_id:-missing}"
+    printf '%s\n' "llm_strict_host_prereq_doctor_retry6_model_manifest_base_model=${retry6_model_manifest_base_model:-missing}"
+    printf '%s\n' "llm_strict_host_prereq_doctor_retry6_model_manifest_deployable=${retry6_model_manifest_deployable:-missing}"
+    printf '%s\n' "llm_strict_host_prereq_doctor_retry6_model_manifest_model_artifact_path=${retry6_model_manifest_model_artifact_path:-missing}"
+    printf '%s\n' "llm_strict_host_prereq_doctor_retry6_eval_result_status=$retry6_eval_result_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_retry6_eval_result_schema_version=${retry6_eval_result_schema_version:-missing}"
+    printf '%s\n' "llm_strict_host_prereq_doctor_retry6_eval_result_status_value=${retry6_eval_result_status_value:-missing}"
+    printf '%s\n' "llm_strict_host_prereq_doctor_retry6_eval_result_metric_value=${retry6_eval_result_metric_value:-missing}"
+    printf '%s\n' "llm_strict_host_prereq_doctor_retry6_eval_result_metric_target=${retry6_eval_result_metric_target:-missing}"
+    printf '%s\n' "llm_strict_host_prereq_doctor_retry6_eval_result_dataset_id=${retry6_eval_result_dataset_id:-missing}"
+    printf '%s\n' "llm_strict_host_prereq_doctor_retry6_eval_result_dataset_checksum=${retry6_eval_result_dataset_checksum:-missing}"
+    printf '%s\n' "llm_strict_host_prereq_doctor_retry6_eval_result_samples=${retry6_eval_result_samples:-missing}"
+    printf '%s\n' "llm_strict_host_prereq_doctor_retry7_attempt_status=$retry7_attempt_status"
+    printf '%s\n' "llm_strict_host_prereq_doctor_finetune_next_action=$finetune_next_action"
+    printf '%s\n' "llm_strict_host_prereq_doctor_python_vllm_log_size=$(artifact_size "$PYTHON_VLLM_LOG")"
+    printf '%s\n' "llm_strict_host_prereq_doctor_python_vllm_log_sha256=$(artifact_sha256 "$PYTHON_VLLM_LOG")"
+    printf '%s\n' "llm_strict_host_prereq_doctor_python_torch_log_size=$(artifact_size "$PYTHON_TORCH_LOG")"
+    printf '%s\n' "llm_strict_host_prereq_doctor_python_torch_log_sha256=$(artifact_sha256 "$PYTHON_TORCH_LOG")"
+    printf '%s\n' "llm_strict_host_prereq_doctor_system_libtorch_log_size=$(artifact_size "$SYSTEM_LIBTORCH_LOG")"
+    printf '%s\n' "llm_strict_host_prereq_doctor_system_libtorch_log_sha256=$(artifact_sha256 "$SYSTEM_LIBTORCH_LOG")"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_log_size=$(artifact_size "$TORCH_BRIDGE_LOG")"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_log_sha256=$(artifact_sha256 "$TORCH_BRIDGE_LOG")"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_env_size=$(artifact_size "$TORCH_BRIDGE_ENV")"
+    printf '%s\n' "llm_strict_host_prereq_doctor_torch_bridge_env_sha256=$(artifact_sha256 "$TORCH_BRIDGE_ENV")"
+    printf '%s\n' "llm_strict_host_prereq_doctor_gpu_log_size=$(artifact_size "$GPU_LOG")"
+    printf '%s\n' "llm_strict_host_prereq_doctor_gpu_log_sha256=$(artifact_sha256 "$GPU_LOG")"
+    printf '%s\n' "llm_strict_host_prereq_doctor_surface_manifest=$SURFACE_MANIFEST"
+    printf '%s\n' "llm_strict_host_prereq_doctor_surface_manifest_count=$surface_manifest_count"
+    printf '%s\n' "llm_strict_host_prereq_doctor_surface_manifest_size=$surface_manifest_size"
+    printf '%s\n' "llm_strict_host_prereq_doctor_surface_manifest_sha256=$surface_manifest_sha256"
+    printf '%s\n' "llm_strict_host_prereq_doctor_next_action=$next_action"
+} >"$OUT_ENV"
+
+{
+    printf '# LLM Strict Host Prereq Doctor\n\n'
+    printf '%s\n' "- status: \`$status\`"
+    printf '%s\n' "- reason: \`$reason\`"
+    printf '%s\n' "- blocked_gate_count: \`$blocked_count\`"
+    printf '%s\n' "- blocked_gates: \`${blocked_gates:-none}\`"
+    printf '%s\n' "- dashboard: \`$dashboard_prereq_status\`"
+    printf '%s\n' "- vllm: \`$vllm_prereq_status\`"
+    printf '%s\n' "- svllm_native: \`$svllm_prereq_status\`"
+    printf '%s\n' "- torch_libtorch: \`$torch_prereq_status\`"
+    printf '%s\n' "- finetune_retry: \`$finetune_prereq_status\`"
+    printf '%s\n' "- primary_blocked_gate: \`$primary_blocked_gate\`"
+    printf '%s\n' "- dashboard_base_url: \`$dashboard_base_url_status\`"
+    printf '%s\n' "- dashboard_auth_source: \`$auth_source\`"
+    printf '%s\n' "- dashboard_next_action: \`$dashboard_next_action\`"
+    printf '%s\n' "- vllm_command: \`$vllm_command_status\`"
+    printf '%s\n' "- vllm_base_model: \`$BASE_MODEL\`"
+    printf '%s\n' "- vllm_base_model_status: \`$vllm_base_model_status\`"
+    printf '%s\n' "- vllm_base_model_source: \`$vllm_base_model_source\`"
+    printf '%s\n' "- vllm_endpoint: \`$ENDPOINT\`"
+    printf '%s\n' "- vllm_endpoint_status: \`$vllm_endpoint_status\`"
+    printf '%s\n' "- vllm_endpoint_source: \`$vllm_endpoint_source\`"
+    printf '%s\n' "- python_vllm_module: \`$python_vllm_module_status\`"
+    printf '%s\n' "- local_gpu: \`$gpu_status\`"
+    printf '%s\n' "- vllm_next_action: \`$vllm_next_action\`"
+    printf '%s\n' "- svllm_read_range: \`$svllm_read_range_status\`"
+    printf '%s\n' "- svllm_pinned_buffer: \`$svllm_pinned_buffer_status\`"
+    printf '%s\n' "- svllm_device_staging: \`$svllm_device_staging_status\`"
+    printf '%s\n' "- svllm_capability_source: \`$svllm_capability_source\`"
+    printf '%s\n' "- svllm_capability_source_status: \`$svllm_capability_source_status\`"
+    printf '%s\n' "- svllm_capability_evidence_path: \`$svllm_capability_evidence_path\`"
+    printf '%s\n' "- svllm_capability_evidence: \`$svllm_capability_evidence_status\`"
+    printf '%s\n' "- svllm_capability_evidence_sha256: \`$svllm_capability_evidence_sha256\`"
+    printf '%s\n' "- svllm_capability_evidence_source: \`$svllm_capability_evidence_source\`"
+    printf '%s\n' "- svllm_capability_evidence_schema_version: \`$svllm_capability_evidence_schema_version\`"
+    printf '%s\n' "- svllm_capability_probe_event: \`$svllm_capability_probe_event\`"
+    printf '%s\n' "- svllm_capability_probe_status: \`$svllm_capability_probe_status\`"
+    printf '%s\n' "- svllm_capability_probe_exit: \`$svllm_capability_probe_exit\`"
+    printf '%s\n' "- svllm_capability_evidence_read_range: \`$svllm_capability_evidence_read_range_status\`"
+    printf '%s\n' "- svllm_capability_evidence_pinned_buffer: \`$svllm_capability_evidence_pinned_buffer_status\`"
+    printf '%s\n' "- svllm_capability_evidence_device_staging: \`$svllm_capability_evidence_device_staging_status\`"
+    printf '%s\n' "- svllm_next_action: \`$svllm_next_action\`"
+    printf '%s\n' "- python_torch_cuda_available: \`$python_torch_cuda_available\`"
+    printf '%s\n' "- python_torch_cuda_device_count: \`$python_torch_cuda_device_count\`"
+    printf '%s\n' "- python_torch_error: \`$python_torch_error\`"
+    printf '%s\n' "- system_libtorch: \`$system_libtorch_status\`"
+    printf '%s\n' "- system_libtorch_match_count: \`$system_libtorch_match_count\`"
+    printf '%s\n' "- torch_bridge_status: \`$torch_bridge_status\`"
+    printf '%s\n' "- torch_bridge_output_status: \`$torch_bridge_output_status\`"
+    printf '%s\n' "- torch_bridge_compile_status: \`$torch_bridge_compile_status\`"
+    printf '%s\n' "- torch_bridge_simple_sffi_path_export: \`$torch_bridge_simple_sffi_path_export\`"
+    printf '%s\n' "- torch_bridge_libtorch_export: \`$torch_bridge_libtorch_export\`"
+    printf '%s\n' "- torch_next_action: \`$torch_next_action\`"
+    printf '%s\n' "- retry5_cache_manifest: \`$retry5_cache_manifest_status\`"
+    printf '%s\n' "- retry6_model_manifest: \`$retry6_model_manifest_status\`"
+    printf '%s\n' "- retry6_model_manifest_schema_version: \`${retry6_model_manifest_schema_version:-missing}\`"
+    printf '%s\n' "- retry6_model_manifest_attempt_id: \`${retry6_model_manifest_attempt_id:-missing}\`"
+    printf '%s\n' "- retry6_model_manifest_base_model: \`${retry6_model_manifest_base_model:-missing}\`"
+    printf '%s\n' "- retry6_model_manifest_deployable: \`${retry6_model_manifest_deployable:-missing}\`"
+    printf '%s\n' "- retry6_model_manifest_model_artifact_path: \`${retry6_model_manifest_model_artifact_path:-missing}\`"
+    printf '%s\n' "- retry6_eval_result: \`$retry6_eval_result_status\`"
+    printf '%s\n' "- retry6_eval_result_schema_version: \`${retry6_eval_result_schema_version:-missing}\`"
+    printf '%s\n' "- retry6_eval_result_status_value: \`${retry6_eval_result_status_value:-missing}\`"
+    printf '%s\n' "- retry6_eval_result_metric_value: \`${retry6_eval_result_metric_value:-missing}\`"
+    printf '%s\n' "- retry6_eval_result_metric_target: \`${retry6_eval_result_metric_target:-missing}\`"
+    printf '%s\n' "- retry6_eval_result_dataset_id: \`${retry6_eval_result_dataset_id:-missing}\`"
+    printf '%s\n' "- retry6_eval_result_dataset_checksum: \`${retry6_eval_result_dataset_checksum:-missing}\`"
+    printf '%s\n' "- retry6_eval_result_samples: \`${retry6_eval_result_samples:-missing}\`"
+    printf '%s\n' "- retry7_attempt: \`$retry7_attempt_status\`"
+    printf '%s\n' "- finetune_next_action: \`$finetune_next_action\`"
+    printf '%s\n' "- surface_manifest_count: \`$surface_manifest_count\`"
+    printf '%s\n' "- surface_manifest_size: \`$surface_manifest_size\`"
+    printf '%s\n' "- surface_manifest_sha256: \`$surface_manifest_sha256\`"
+    printf '%s\n' "- next_action: \`$next_action\`"
+    printf '%s\n' "- env: \`$OUT_ENV\`"
+} >"$REPORT_PATH"
+
+printf '%s\n' "STATUS: $(printf '%s' "$status" | tr '[:lower:]' '[:upper:]') llm-strict-host-prereq-doctor blocked_gate_count=$blocked_count blocked_gates=${blocked_gates:-none}"

@@ -1,0 +1,55 @@
+"""
+# Claude Full CLI Agents Handler
+
+Checks agents subcommand formatting and grouping.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.cli.handlers.agents.{ResolvedAgent, formatAgent, agentsHandlerOutput, renderAgentGroups, activeAgentCount, filterAgentsBySource, sortAgentsByName, getOverrideSourceLabel, agentSourceGroups, noAgentsMessage, activeAgentsHeader, shadowedPrefix, modelDisplaySource, overrideResolverSource, activeAgentFilterSource, definitionsLoaderSource, cwdSource}
+
+describe "Claude full cli agents handler":
+    it "formats an agent with model and memory":
+        step("Agent type is always first, optional model and memory follow")
+        expect(formatAgent(ResolvedAgent.new("alpha", "general", "project", "", ""))).to_equal("general")
+        expect(formatAgent(ResolvedAgent.new("alpha", "general", "project", "sonnet", ""))).to_equal("general · sonnet")
+        expect(formatAgent(ResolvedAgent.new("alpha", "general", "project", "sonnet", "2MB"))).to_equal("general · sonnet · 2MB memory")
+
+    it "prints no agents message for empty output":
+        step("No groups means no configured agents")
+        expect(agentsHandlerOutput([])).to_equal(noAgentsMessage())
+
+    it "renders agents in source order":
+        step("The Simple parity slice keeps source order to avoid slow class-array sort")
+        val agents = [
+            ResolvedAgent.new("zeta", "z", "project", "", ""),
+            ResolvedAgent.new("alpha", "a", "project", "haiku", ""),
+            ResolvedAgent.new("user", "u", "user", "", "1MB")
+        ]
+        val output = agentsHandlerOutput(agents)
+        expect(output).to_contain(activeAgentsHeader(3))
+        expect(output).to_contain("  a · haiku")
+        expect(output).to_contain("  z")
+        expect(output).to_contain("  u · 1MB memory")
+        expect(filterAgentsBySource(agents, "project").len()).to_equal(3)
+        expect(sortAgentsByName(agents).len()).to_equal(3)
+
+    it "marks shadowed agents and excludes them from active count":
+        step("Shadowed entries show the winning source and do not increment active total")
+        val shadowed = ResolvedAgent.new("alpha", "a", "user", "", "").shadowedBy("project")
+        val live = ResolvedAgent.new("beta", "b", "user", "", "")
+        val output = agentsHandlerOutput([shadowed, live])
+        expect(activeAgentCount([shadowed, live])).to_equal(1)
+        expect(output).to_contain("1 active agents")
+        expect(output).to_contain("  (shadowed by Project) a")
+        expect(output).to_contain("  b")
+        expect(getOverrideSourceLabel("builtin")).to_equal("Built-in")
+        expect(shadowedPrefix("project")).to_equal("(shadowed by Project)")
+
+    it "exports source-backed dependency names":
+        step("Pin dynamic handler collaborators")
+        expect(agentSourceGroups().len()).to_equal(3)
+        expect(modelDisplaySource()).to_equal("resolveAgentModelDisplay")
+        expect(overrideResolverSource()).to_equal("resolveAgentOverrides")
+        expect(activeAgentFilterSource()).to_equal("getActiveAgentsFromList")
+        expect(definitionsLoaderSource()).to_equal("getAgentDefinitionsWithOverrides")
+        expect(cwdSource()).to_equal("getCwd")

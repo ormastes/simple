@@ -1,0 +1,127 @@
+"""
+# RV64 Single-Precision FP Arithmetic Tests
+
+**Feature IDs:** #RV64-FP-ARITH-S-001
+**Category:** Hardware
+**Difficulty:** 3/5
+**Status:** Draft
+
+## Overview
+
+Unit tests for single-precision FP: fadd.s, fsub.s, fmul.s, fdiv.s, fsqrt.s.
+"""
+
+# tag: only-compiled
+
+import std.spec
+
+use hardware.rv64gc.ext.rv64_float.{fp_add_s, fp_sub_s, fp_mul_s, fp_div_s, fp_sqrt_s}
+use hardware.rv64gc.pkg.rv64_fp_types_pkg.*
+
+val POS_ZERO_S: i64 = 0x00000000
+val NEG_ZERO_S: i64 = 0x80000000
+val POS_INF_S: i64 = 0x7F800000
+val NEG_INF_S: i64 = 0xFF800000
+val QNAN_S: i64 = 0x7FC00000
+val ONE_S: i64 = 0x3F800000
+val TWO_S: i64 = 0x40000000
+val THREE_S: i64 = 0x40400000
+val HALF_S: i64 = 0x3F000000
+val NEG_ONE_S: i64 = 0xBF800000
+val FOUR_S: i64 = 0x40800000
+val SIX_S: i64 = 0x40C00000
+
+val FP_FLAG_NV: i64 = 0x10
+val FP_FLAG_DZ: i64 = 0x08
+val FP_FLAG_NX: i64 = 0x01
+
+describe "FADD.S":
+    it "1.0 + 2.0 = 3.0":
+        val r = fp_add_s(ONE_S, TWO_S, RoundMode.RNE)
+        expect(r.value).to_equal(THREE_S)
+        expect(r.flags).to_equal(0)
+
+    it "+0.0 + -0.0 = +0.0":
+        val r = fp_add_s(POS_ZERO_S, NEG_ZERO_S, RoundMode.RNE)
+        expect(r.value).to_equal(POS_ZERO_S)
+
+    it "+inf + finite = +inf":
+        val r = fp_add_s(POS_INF_S, ONE_S, RoundMode.RNE)
+        expect(r.value).to_equal(POS_INF_S)
+
+    it "+inf + -inf = NaN (invalid)":
+        val r = fp_add_s(POS_INF_S, NEG_INF_S, RoundMode.RNE)
+        expect(r.value).to_equal(QNAN_S)
+        expect((r.flags and FP_FLAG_NV) != 0).to_equal(true)
+
+    it "NaN + anything = NaN":
+        val r = fp_add_s(QNAN_S, ONE_S, RoundMode.RNE)
+        expect(r.value).to_equal(QNAN_S)
+
+describe "FSUB.S":
+    it "3.0 - 1.0 = 2.0":
+        val r = fp_sub_s(THREE_S, ONE_S, RoundMode.RNE)
+        expect(r.value).to_equal(TWO_S)
+
+    it "1.0 - 1.0 = +0.0":
+        val r = fp_sub_s(ONE_S, ONE_S, RoundMode.RNE)
+        expect(r.value).to_equal(POS_ZERO_S)
+
+    it "+inf - +inf = NaN":
+        val r = fp_sub_s(POS_INF_S, POS_INF_S, RoundMode.RNE)
+        expect(r.value).to_equal(QNAN_S)
+
+describe "FMUL.S":
+    it "2.0 * 3.0 = 6.0":
+        val r = fp_mul_s(TWO_S, THREE_S, RoundMode.RNE)
+        expect(r.value).to_equal(SIX_S)
+
+    it "0.0 * inf = NaN":
+        val r = fp_mul_s(POS_ZERO_S, POS_INF_S, RoundMode.RNE)
+        expect(r.value).to_equal(QNAN_S)
+        expect((r.flags and FP_FLAG_NV) != 0).to_equal(true)
+
+    it "-1.0 * 1.0 = -1.0":
+        val r = fp_mul_s(NEG_ONE_S, ONE_S, RoundMode.RNE)
+        expect(r.value).to_equal(NEG_ONE_S)
+
+    it "any * NaN = NaN":
+        val r = fp_mul_s(TWO_S, QNAN_S, RoundMode.RNE)
+        expect(r.value).to_equal(QNAN_S)
+
+describe "FDIV.S":
+    it "6.0 / 2.0 = 3.0":
+        val r = fp_div_s(SIX_S, TWO_S, RoundMode.RNE)
+        expect(r.value).to_equal(THREE_S)
+
+    it "1.0 / 0.0 = +inf (divide by zero)":
+        val r = fp_div_s(ONE_S, POS_ZERO_S, RoundMode.RNE)
+        expect(r.value).to_equal(POS_INF_S)
+        expect((r.flags and FP_FLAG_DZ) != 0).to_equal(true)
+
+    it "0.0 / 0.0 = NaN":
+        val r = fp_div_s(POS_ZERO_S, POS_ZERO_S, RoundMode.RNE)
+        expect(r.value).to_equal(QNAN_S)
+        expect((r.flags and FP_FLAG_NV) != 0).to_equal(true)
+
+    it "-1.0 / 0.0 = -inf":
+        val r = fp_div_s(NEG_ONE_S, POS_ZERO_S, RoundMode.RNE)
+        expect(r.value).to_equal(NEG_INF_S)
+
+describe "FSQRT.S":
+    it "sqrt(4.0) = 2.0":
+        val r = fp_sqrt_s(FOUR_S, RoundMode.RNE)
+        expect(r.value).to_equal(TWO_S)
+
+    it "sqrt(0.0) = 0.0":
+        val r = fp_sqrt_s(POS_ZERO_S, RoundMode.RNE)
+        expect(r.value).to_equal(POS_ZERO_S)
+
+    it "sqrt(-1.0) = NaN (invalid)":
+        val r = fp_sqrt_s(NEG_ONE_S, RoundMode.RNE)
+        expect(r.value).to_equal(QNAN_S)
+        expect((r.flags and FP_FLAG_NV) != 0).to_equal(true)
+
+    it "sqrt(+inf) = +inf":
+        val r = fp_sqrt_s(POS_INF_S, RoundMode.RNE)
+        expect(r.value).to_equal(POS_INF_S)

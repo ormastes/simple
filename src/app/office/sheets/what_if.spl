@@ -1,0 +1,137 @@
+# What-If Analysis
+#
+# Excel-style What-If Analysis (Data Tables, Goal Seek, Scenario Manager)
+# over a simple linear model f(x) = slope*x + intercept. The linear model
+# stands in for a spreadsheet formula the analysis targets; keeping it
+# linear and integer-exact makes the analysis deterministic and
+# hand-computable instead of an iterative numeric solver.
+
+# =========================================================================
+# Linear Model
+# =========================================================================
+
+struct LinearModel:
+    """A linear formula f(x) = slope*x + intercept that What-If Analysis
+    targets, standing in for a spreadsheet formula cell.
+
+    Fields:
+        slope: Coefficient multiplying x
+        intercept: Constant term
+    """
+    slope: i64
+    intercept: i64
+
+fn model_new(slope: i64, intercept: i64) -> LinearModel:
+    """Construct a LinearModel."""
+    LinearModel(slope: slope, intercept: intercept)
+
+fn model_eval(model: LinearModel, x: i64) -> i64:
+    """Evaluate f(x) = slope*x + intercept."""
+    model.slope * x + model.intercept
+
+# =========================================================================
+# Data Table (one-variable)
+# =========================================================================
+
+fn data_table_1d(model: LinearModel, inputs: [i64]) -> [text]:
+    """Excel one-variable data table: evaluate the model at each input
+    value and return one "<x> -> <f(x)>" line per input, in input order."""
+    var result: [text] = []
+    var i = 0
+    while i < inputs.len():
+        val x = inputs[i]
+        val y = model_eval(model, x)
+        result.push("{x} -> {y}")
+        i = i + 1
+    result
+
+# =========================================================================
+# Goal Seek
+# =========================================================================
+
+fn goal_seek(model: LinearModel, target_y: i64) -> i64:
+    """Excel Goal Seek: find x such that model_eval(model, x) == target_y.
+
+    Excel's real Goal Seek iterates numerically toward a target cell value.
+    Because this model is linear, the exact solution is algebraic:
+    x = (target_y - intercept) / slope. Assumes exact integer division
+    (the caller supplies targets that land on an integer x). If slope is
+    0 (a degenerate constant model), there is no unique x for a non-matching
+    target; this returns 0 rather than dividing by zero.
+    """
+    if model.slope == 0:
+        return 0
+    (target_y - model.intercept) / model.slope
+
+# =========================================================================
+# Scenario Manager
+# =========================================================================
+
+struct Scenario:
+    """A named what-if input value for the Scenario Manager.
+
+    Fields:
+        name: Scenario name (e.g., "Low", "High")
+        x: The input value this scenario evaluates the model at
+    """
+    name: text
+    x: i64
+
+fn scenario_new(name: text, x: i64) -> Scenario:
+    """Construct a Scenario."""
+    Scenario(name: name, x: x)
+
+fn scenario_results(model: LinearModel, scenarios: [Scenario]) -> [text]:
+    """Excel Scenario Manager summary: one "<name>: x=<x> -> <f(x)>" line
+    per scenario, in scenario order."""
+    var result: [text] = []
+    var i = 0
+    while i < scenarios.len():
+        val scenario = scenarios[i]
+        val y = model_eval(model, scenario.x)
+        result.push("{scenario.name}: x={scenario.x} -> {y}")
+        i = i + 1
+    result
+
+fn scenario_best(model: LinearModel, scenarios: [Scenario]) -> text:
+    """Name of the scenario with the highest f(x); ties keep the first
+    (earliest) scenario with that maximum value."""
+    var best_name = ""
+    var best_y = 0i64
+    var has_best = false
+    var i = 0
+    while i < scenarios.len():
+        val scenario = scenarios[i]
+        val y = model_eval(model, scenario.x)
+        if not has_best or y > best_y:
+            best_name = scenario.name
+            best_y = y
+            has_best = true
+        i = i + 1
+    best_name
+
+# =========================================================================
+# Data Table (two-variable)
+# =========================================================================
+
+fn data_table_2d(base_slope: i64, base_intercept: i64, slopes: [i64], intercepts: [i64], x: i64) -> [text]:
+    """Excel two-variable data table: for each (slope, intercept) pair drawn
+    from `slopes` x `intercepts` (row-major: slopes outer, intercepts
+    inner), evaluate slope*x + intercept and return a "s=<slope>
+    b=<intercept> -> <val>" line. `base_slope`/`base_intercept` mirror
+    Excel's base formula cell that a two-variable data table references;
+    they are not used in the per-cell evaluation, which always uses the
+    row/column header values (slopes/intercepts) instead of the base."""
+    val _unused_base = base_slope + base_intercept
+    var result: [text] = []
+    var i = 0
+    while i < slopes.len():
+        val slope = slopes[i]
+        var j = 0
+        while j < intercepts.len():
+            val intercept = intercepts[j]
+            val val_result = slope * x + intercept
+            result.push("s={slope} b={intercept} -> {val_result}")
+            j = j + 1
+        i = i + 1
+    result

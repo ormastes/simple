@@ -1,0 +1,401 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT"
+
+SIMPLE_BIN=${SIMPLE_BIN:-bin/simple}
+OUT=build/test-artifacts/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access/protocol
+DB=$OUT/live-ui.sqlite
+TUI_WEB_DB=$OUT/live-tui-web.sqlite
+PORT=18765
+TUI_WEB_PORT=18766
+IMAGE_OUT=doc/06_spec/image/03_system/app/ui_cli_llm_access/feature/ui_cli_llm_access
+
+fail() {
+    echo "ui-cli-live-transport: $*" >&2
+    exit 1
+}
+
+[ -x "$SIMPLE_BIN" ] || fail "missing self-hosted Simple binary: $SIMPLE_BIN"
+SIMPLE_BIN_REAL=$SIMPLE_BIN
+if command -v realpath >/dev/null 2>&1; then
+    SIMPLE_BIN_REAL=$(realpath "$SIMPLE_BIN")
+elif readlink -f "$SIMPLE_BIN" >/dev/null 2>&1; then
+    SIMPLE_BIN_REAL=$(readlink -f "$SIMPLE_BIN")
+fi
+case "$SIMPLE_BIN:$SIMPLE_BIN_REAL" in
+    *src/compiler_rust/*)
+        echo "ui-cli-live-transport: Rust seed is bootstrap-only; use bin/simple" >&2
+        exit 1
+        ;;
+esac
+SIMPLE_COMMAND_REAL=$SIMPLE_BIN_REAL
+SIMPLE_RUNTIME_REAL=$SIMPLE_COMMAND_REAL
+RUNTIME_MAGIC=$(od -An -tx1 -N4 "$SIMPLE_RUNTIME_REAL" | tr -d ' \n')
+if [ "$RUNTIME_MAGIC" != "7f454c46" ]; then
+    case "$SIMPLE_COMMAND_REAL" in
+        */bin/release/simple|*/release/simple)
+            candidate_count=0
+            release_dir=$(dirname -- "$SIMPLE_COMMAND_REAL")
+            preferred="$release_dir/x86_64-unknown-linux-gnu/simple"
+            if [ -x "$preferred" ] && [ "$(od -An -tx1 -N4 "$preferred" | tr -d ' \n')" = "7f454c46" ]; then
+                SIMPLE_RUNTIME_REAL=$(realpath "$preferred")
+                candidate_count=1
+            else
+                for candidate in "$release_dir"/*/simple; do
+                    [ -x "$candidate" ] || continue
+                    [ "$(od -An -tx1 -N4 "$candidate" | tr -d ' \n')" = "7f454c46" ] || continue
+                    SIMPLE_RUNTIME_REAL=$(realpath "$candidate")
+                    candidate_count=$((candidate_count + 1))
+                done
+            fi
+            [ "$candidate_count" -eq 1 ] || fail "release wrapper must resolve exactly one deployed ELF runtime"
+            ;;
+        *) fail "runtime command is not a deployed ELF or canonical release wrapper: $SIMPLE_COMMAND_REAL" ;;
+    esac
+fi
+
+RUNTIME_PROVENANCE=
+SEED_DELEGATE_REAL=none
+SEED_DELEGATE_SHA256=none
+case "$SIMPLE_RUNTIME_REAL" in
+    */build/bootstrap/stage3/simple|*/build/bootstrap/stage3/*/simple)
+        RUNTIME_PROVENANCE=bootstrap-stage3
+        ;;
+    */bin/release/*/simple|*/release/*/simple)
+        RUNTIME_PROVENANCE=release-distinct-seed
+        seed_delegate="$(dirname -- "$SIMPLE_RUNTIME_REAL")/simple_seed"
+        [ -x "$seed_delegate" ] || fail "deployed runtime is missing its bootstrap-only seed delegate"
+        SEED_DELEGATE_REAL=$(realpath "$seed_delegate")
+        SEED_DELEGATE_SHA256=$(sha256sum "$SEED_DELEGATE_REAL" | awk '{print $1}')
+        [ "$(sha256sum "$SIMPLE_RUNTIME_REAL" | awk '{print $1}')" != "$SEED_DELEGATE_SHA256" ] || fail "runtime and Rust seed delegate are identical"
+        ;;
+    *) fail "runtime is not a recognized pure-Simple deployment: $SIMPLE_RUNTIME_REAL" ;;
+esac
+
+SIMPLE_RUNTIME_ID=$("$SIMPLE_COMMAND_REAL" --version 2>&1)
+case "$SIMPLE_RUNTIME_ID" in
+    *"Rust-built Simple binary"*|*"bootstrap seed only"*)
+        echo "ui-cli-live-transport: deployed runtime is the Rust bootstrap seed, not Pure Simple" >&2
+        exit 1
+        ;;
+esac
+[ "$("$SIMPLE_COMMAND_REAL" -c 'print(6 * 7)' 2>/dev/null)" = "42" ] || fail "runtime arithmetic probe failed"
+SIMPLE_COMMAND_SHA256=$(sha256sum "$SIMPLE_COMMAND_REAL" | awk '{print $1}')
+SIMPLE_RUNTIME_SHA256=$(sha256sum "$SIMPLE_RUNTIME_REAL" | awk '{print $1}')
+SIMPLE_BIN=$SIMPLE_COMMAND_REAL
+UI_BACKEND_REAL="$(dirname -- "$SIMPLE_RUNTIME_REAL")/simple_ui_backend"
+[ -x "$UI_BACKEND_REAL" ] || fail "missing deployed compiled UI backend: $UI_BACKEND_REAL"
+UI_BACKEND_REAL=$(realpath "$UI_BACKEND_REAL")
+UI_BACKEND_SHA256=$(sha256sum "$UI_BACKEND_REAL" | awk '{print $1}')
+[ "$UI_BACKEND_SHA256" != "$SEED_DELEGATE_SHA256" ] || fail "compiled UI backend is the Rust seed delegate"
+
+json_string_field() {
+    sed -n "s/.*\"$2\":\"\([^\"]*\)\".*/\1/p" "$1" | tail -n 1
+}
+
+json_bool_field() {
+    sed -n "s/.*\"$2\":\(true\|false\).*/\1/p" "$1" | tail -n 1
+}
+
+json_text_or_dash() {
+    value=$(json_string_field "$1" "$2")
+    if [ -n "$value" ]; then
+        printf '%s\n' "$value"
+    elif rg -q "\"$2\":null" "$1"; then
+        printf '%s\n' '-'
+    else
+        fail "missing JSON field: $2"
+    fi
+}
+
+json_number_or_dash() {
+    value=$(sed -n "s/.*\"$2\":\(-\{0,1\}[0-9][0-9]*\).*/\1/p" "$1" | tail -n 1)
+    [ -n "$value" ] && printf '%s\n' "$value" || printf '%s\n' '-'
+}
+
+json_bool_or_dash() {
+    value=$(json_bool_field "$1" "$2")
+    [ -n "$value" ] && printf '%s\n' "$value" || printf '%s\n' '-'
+}
+
+json_geometry_or_dash() {
+    value=$(sed -n 's/.*"geometry":{"x":\(-\{0,1\}[0-9][0-9]*\),"y":\(-\{0,1\}[0-9][0-9]*\),"width":\(-\{0,1\}[0-9][0-9]*\),"height":\(-\{0,1\}[0-9][0-9]*\)}.*/\1,\2 \3x\4/p' "$1" | tail -n 1)
+    [ -n "$value" ] && printf '%s\n' "$value" || printf '%s\n' '-'
+}
+
+json_capabilities_or_dash() {
+    value=$(sed -n 's/.*"capabilities":\[\([^]]*\)\].*/\1/p' "$1" | tail -n 1 | tr -d '"')
+    [ -n "$value" ] && printf '%s\n' "$value" || printf '%s\n' '-'
+}
+
+assert_list_semantic_equal() {
+    json_file="$1"
+    human_file="$2"
+    stem="$3"
+    id=$(json_string_field "$json_file" id)
+    title=$(json_string_field "$json_file" title)
+    owner=$(json_text_or_dash "$json_file" owner)
+    kind=$(json_string_field "$json_file" surface_kind)
+    state=$(json_string_field "$json_file" state)
+    geometry=$(json_geometry_or_dash "$json_file")
+    focused=$(json_bool_field "$json_file" focused)
+    visible=$(json_bool_field "$json_file" visible)
+    parent=$(json_text_or_dash "$json_file" parent_id)
+    capabilities=$(json_capabilities_or_dash "$json_file")
+    revision=$(json_number_or_dash "$json_file" captured_revision)
+    captured_at=$(json_text_or_dash "$json_file" captured_at)
+    generation=$(json_text_or_dash "$json_file" generation)
+    stale=$(json_bool_or_dash "$json_file" stale)
+    [ -n "$id" ] && [ -n "$title" ] && [ -n "$kind" ] && [ -n "$state" ] || fail "JSON window semantics are incomplete"
+    [ "$focused" = true ] && focused=yes || focused=no
+    [ "$visible" = true ] && visible=yes || visible=no
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$id" "$title" "$owner" "$kind" "$state" "$geometry" "$focused" "$visible" "$parent" "$capabilities" "$revision" "$captured_at" "$generation" "$stale" >"$stem-json.semantic"
+    awk -F '  +' 'NR == 3 { sub(/^  /, ""); print $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 "\t" $7 "\t" $8 "\t" $9 "\t" $10 "\t" $11 "\t" $12 "\t" $13 "\t" $14 }' "$human_file" >"$stem-human.semantic"
+    cmp -s "$stem-json.semantic" "$stem-human.semantic" || fail "human and JSON window semantics differ"
+}
+
+assert_image() {
+    image="$1"
+    expected_size="$2"
+    [ -s "$image" ] || fail "empty screenshot: $image"
+    [ "$(identify -format '%wx%h' "$image")" = "$expected_size" ] || fail "unexpected screenshot size: $image"
+    colors=$(identify -format '%k' "$image")
+    case "$colors" in ''|*[!0-9]*) fail "invalid screenshot color count: $image" ;; esac
+    [ "$colors" -gt 1 ] || fail "blank screenshot: $image"
+}
+
+mkdir -p "$OUT"
+mkdir -p "$IMAGE_OUT"
+rm -f "$DB" "$TUI_WEB_DB" "$OUT"/live-*.json "$OUT"/live-*.log "$OUT"/live-*.txt "$OUT"/live-*.semantic "$OUT"/tui-web-*
+
+"$SIMPLE_BIN" ui --help >"$OUT/live-help.txt"
+for operation in windows snapshot surface find act history; do
+    rg -q "simple ui $operation" "$OUT/live-help.txt"
+done
+"$SIMPLE_BIN" t32 --help >"$OUT/t32-help.txt"
+rg -q 'Usage: simple t32' "$OUT/t32-help.txt"
+if "$SIMPLE_BIN" t32 history nope --json >"$OUT/t32-invalid.json" 2>"$OUT/t32-invalid.log"; then
+    fail "invalid deployed T32 command unexpectedly succeeded"
+fi
+rg -q '"schema":"simple.access/v1"' "$OUT/t32-invalid.json"
+rg -q '"operation":"history"' "$OUT/t32-invalid.json"
+rg -q '"ok":false' "$OUT/t32-invalid.json"
+rg -q '"code":"invalid_argument"' "$OUT/t32-invalid.json"
+
+printf '%s\n' \
+    'session open 127.0.0.1 20000 ui_access unknown' \
+    'windows' \
+    'show register_view' \
+    'describe register_view' \
+    'do step --confirm' \
+    'history 10' \
+    'quit' >"$OUT/t32-live-commands.txt"
+"$SIMPLE_BIN" t32 shell <"$OUT/t32-live-commands.txt" >"$OUT/t32-live-session.txt" 2>"$OUT/t32-live-session.log"
+! rg -qi 'error:|failed|not found|no active session|source_unavailable|timeout' "$OUT/t32-live-session.txt" "$OUT/t32-live-session.log" || fail "deployed T32 session reported an error"
+for marker in 'register_view' 'window_key: register_view' 'action_key: step' 'access_request action:step' 'access_result action:step' 'code=ok' 'capture register_view'; do
+    rg -Fq "$marker" "$OUT/t32-live-session.txt" || fail "deployed T32 session omitted: $marker"
+done
+printf '%s\n' 'STATUS: PASS t32-live-session' >>"$OUT/t32-live-session.txt"
+
+cleanup() {
+    if [ "${SERVER_PID:-}" ]; then
+        kill "$SERVER_PID" 2>/dev/null || true
+        wait "$SERVER_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+SIMPLE_GUI_BACKEND=web SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET=1 SIMPLE_UI_ACCESS_DB_PATH="$DB" \
+    "$SIMPLE_BIN" ui gui test/fixtures/ui_cli_access/live.ui.sdn --port "$PORT" --ui-access-db "$DB" \
+    >"$OUT/live-server.log" 2>&1 &
+SERVER_PID=$!
+
+ready=0
+i=0
+while [ "$i" -lt 50 ]; do
+    if "$SIMPLE_BIN" ui windows --port "$PORT" --timeout 200 --json >"$OUT/live-windows.json" 2>"$OUT/live-windows.log"; then
+        ready=1
+        break
+    fi
+    kill -0 "$SERVER_PID" 2>/dev/null || exit 1
+    i=$((i + 1))
+    sleep 0.1
+done
+[ "$ready" -eq 1 ]
+"$SIMPLE_BIN" ui windows --port "$PORT" >"$OUT/live-windows-human.txt" 2>"$OUT/live-windows-human.log"
+assert_list_semantic_equal "$OUT/live-windows.json" "$OUT/live-windows-human.txt" "$OUT/live-windows"
+LIVE_REVISION=$(rg -o '"revision":[0-9]+' "$OUT/live-windows.json" | head -1 | cut -d: -f2)
+[ -n "$LIVE_REVISION" ]
+
+if "$SIMPLE_BIN" ui find --limit bad --port "$PORT" --json >"$OUT/live-malformed.json" 2>"$OUT/live-malformed.log"; then
+    exit 1
+fi
+if "$SIMPLE_BIN" ui act --canonical main#__missing__ --action focus_noop --revision "$LIVE_REVISION" --port "$PORT" --json >"$OUT/live-missing.json" 2>"$OUT/live-missing.log"; then
+    exit 1
+fi
+
+CHROME_BIN=${CHROME_BIN:-}
+if [ -z "$CHROME_BIN" ]; then
+    CHROME_BIN=$(rg --files "$HOME/.cache/ms-playwright" 2>/dev/null | rg '/chrome-headless-shell$' | sort | tail -1)
+fi
+[ -n "$CHROME_BIN" ]
+"$CHROME_BIN" --headless --no-sandbox --disable-gpu --window-size=1280,800 --screenshot="$IMAGE_OUT/gui-before.png" "http://127.0.0.1:$PORT/" >"$OUT/live-gui-before.log" 2>&1
+
+"$SIMPLE_BIN" ui find --surface main --kind button --text noop --limit 10 --port "$PORT" --json >"$OUT/live-find.json" 2>"$OUT/live-find.log"
+"$SIMPLE_BIN" ui find --surface main --canonical main#noop --limit 1 --port "$PORT" --json >"$OUT/live-before-target.json" 2>"$OUT/live-before-target.log"
+LIVE_REVISION=$(rg -o '"revision":[0-9]+' "$OUT/live-find.json" | head -1 | cut -d: -f2)
+[ -n "$LIVE_REVISION" ]
+"$SIMPLE_BIN" ui act --canonical main#noop --action focus_noop --revision "$LIVE_REVISION" --port "$PORT" --timeout 2000 --json >"$OUT/live-act.json" 2>"$OUT/live-act.log"
+"$SIMPLE_BIN" ui find --surface main --canonical main#noop --focused-only --limit 1 --port "$PORT" --json >"$OUT/live-after.json" 2>"$OUT/live-after.log"
+"$SIMPLE_BIN" ui history --surface main --count 10 --port "$PORT" --json >"$OUT/live-history.json" 2>"$OUT/live-history.log"
+"$CHROME_BIN" --headless --no-sandbox --disable-gpu --window-size=1280,800 --screenshot="$IMAGE_OUT/gui-after.png" "http://127.0.0.1:$PORT/" >"$OUT/live-gui-after.log" 2>&1
+
+kill "$SERVER_PID"
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=
+
+if "$SIMPLE_BIN" ui windows --port "$PORT" --timeout 200 --json >"$OUT/live-stopped.json" 2>"$OUT/live-stopped.log"; then
+    exit 1
+fi
+"$SIMPLE_BIN" ui snapshot --ui-access-db "$DB" --json >"$OUT/live-db-snapshot.json" 2>"$OUT/live-db-snapshot.log"
+if "$SIMPLE_BIN" ui act --canonical main#noop --action focus_noop --revision "$LIVE_REVISION" --ui-access-db "$DB" --json >"$OUT/live-db-act.json" 2>"$OUT/live-db-act.log"; then
+    exit 1
+fi
+
+SIMPLE_UI_WEB_ALLOW_INSECURE_DEV_SECRET=1 SIMPLE_UI_ACCESS_DB_PATH="$TUI_WEB_DB" \
+    "$SIMPLE_BIN" ui tui_web test/fixtures/ui_cli_access/live.ui.sdn \
+    --port "$TUI_WEB_PORT" --ui-access-db "$TUI_WEB_DB" \
+    >"$OUT/tui-web-server.log" 2>&1 &
+SERVER_PID=$!
+
+ready=0
+i=0
+while [ "$i" -lt 50 ]; do
+    if "$SIMPLE_BIN" ui windows --port "$TUI_WEB_PORT" --timeout 200 --json >"$OUT/tui-web-windows.json" 2>"$OUT/tui-web-windows.log"; then
+        ready=1
+        break
+    fi
+    kill -0 "$SERVER_PID" 2>/dev/null || exit 1
+    i=$((i + 1))
+    sleep 0.1
+done
+[ "$ready" -eq 1 ]
+"$SIMPLE_BIN" ui snapshot --port "$TUI_WEB_PORT" --json >"$OUT/tui-web-snapshot.json" 2>"$OUT/tui-web-snapshot.log"
+"$SIMPLE_BIN" ui surface main --port "$TUI_WEB_PORT" --json >"$OUT/tui-web-surface.json" 2>"$OUT/tui-web-surface.log"
+"$CHROME_BIN" --headless --no-sandbox --disable-gpu --dump-dom "http://127.0.0.1:$TUI_WEB_PORT/" >"$OUT/tui-web-dom.html" 2>"$OUT/tui-web-dom.log"
+"$CHROME_BIN" --headless --no-sandbox --disable-gpu --window-size=1280,800 --screenshot="$IMAGE_OUT/tui-web.png" "http://127.0.0.1:$TUI_WEB_PORT/" >"$OUT/tui-web-gui.log" 2>&1
+"$SIMPLE_BIN" ui find --surface main --kind button --text noop --limit 10 --port "$TUI_WEB_PORT" --json >"$OUT/tui-web-find.json" 2>"$OUT/tui-web-find.log"
+"$SIMPLE_BIN" ui find --surface main --canonical main#noop --limit 1 --port "$TUI_WEB_PORT" --json >"$OUT/tui-web-before-target.json" 2>"$OUT/tui-web-before-target.log"
+TUI_WEB_REVISION=$(rg -o '"revision":[0-9]+' "$OUT/tui-web-find.json" | head -1 | cut -d: -f2)
+[ -n "$TUI_WEB_REVISION" ]
+"$SIMPLE_BIN" ui act --canonical main#noop --action focus_noop --revision "$TUI_WEB_REVISION" --port "$TUI_WEB_PORT" --timeout 2000 --json >"$OUT/tui-web-act.json" 2>"$OUT/tui-web-act.log"
+"$SIMPLE_BIN" ui find --surface main --canonical main#noop --focused-only --limit 1 --port "$TUI_WEB_PORT" --json >"$OUT/tui-web-after.json" 2>"$OUT/tui-web-after.log"
+"$SIMPLE_BIN" ui history --surface main --count 10 --port "$TUI_WEB_PORT" --json >"$OUT/tui-web-history.json" 2>"$OUT/tui-web-history.log"
+
+kill "$SERVER_PID"
+wait "$SERVER_PID" 2>/dev/null || true
+SERVER_PID=
+
+rg -q '"schema":"simple.access/v1"' "$OUT/live-windows.json"
+rg -q 'main' "$OUT/live-windows-human.txt"
+rg -q 'main' "$OUT/live-windows.json"
+rg -q 'UI CLI access fixture' "$OUT/live-windows-human.txt"
+rg -q 'UI CLI access fixture' "$OUT/live-windows.json"
+rg -q 'invalid_argument' "$OUT/live-malformed.log" "$OUT/live-malformed.json"
+rg -q 'target_not_found' "$OUT/live-missing.log" "$OUT/live-missing.json"
+rg -q 'main#noop' "$OUT/live-find.json"
+rg -q 'main#noop' "$OUT/live-before-target.json"
+if rg -q '"focused":true' "$OUT/live-before-target.json"; then
+    fail "GUI target was already focused before the action"
+fi
+rg -q '"request_id":' "$OUT/live-act.json"
+ACTION_REQUEST_ID=$(rg -o '"request_id":"[^"]+"' "$OUT/live-act.json" | head -1 | cut -d'"' -f4)
+[ -n "$ACTION_REQUEST_ID" ]
+rg -q 'main#noop' "$OUT/live-after.json"
+rg -q '"focused":true' "$OUT/live-after.json"
+assert_image "$IMAGE_OUT/gui-before.png" 1280x800
+assert_image "$IMAGE_OUT/gui-after.png" 1280x800
+rg -q 'access_request' "$OUT/live-history.json"
+rg -Fq "$ACTION_REQUEST_ID" "$OUT/live-history.json"
+rg -q 'source_unavailable' "$OUT/live-stopped.log" "$OUT/live-stopped.json"
+rg -q '"mode":"persisted"' "$OUT/live-db-snapshot.json"
+rg -q 'source_unavailable' "$OUT/live-db-act.log" "$OUT/live-db-act.json"
+cp "$OUT/live-windows.json" "$OUT/protocol.json"
+rg -q '"schema":"simple.access/v1"' "$OUT/tui-web-windows.json"
+rg -q '"mode":"tui_web"' "$OUT/tui-web-snapshot.json"
+rg -q '"surface_id":"main"' "$OUT/tui-web-surface.json"
+rg -q 'UI CLI access fixture' "$OUT/tui-web-dom.html"
+assert_image "$IMAGE_OUT/tui-web.png" 1280x800
+rg -q 'main#noop' "$OUT/tui-web-find.json"
+rg -q 'main#noop' "$OUT/tui-web-before-target.json"
+if rg -q '"focused":true' "$OUT/tui-web-before-target.json"; then
+    fail "TUI-web target was already focused before the action"
+fi
+rg -q 'main#noop' "$OUT/tui-web-after.json"
+rg -q '"focused":true' "$OUT/tui-web-after.json"
+TUI_WEB_REQUEST_ID=$(rg -o '"request_id":"[^"]+"' "$OUT/tui-web-act.json" | head -1 | cut -d'"' -f4)
+[ -n "$TUI_WEB_REQUEST_ID" ]
+rg -Fq "$TUI_WEB_REQUEST_ID" "$OUT/tui-web-history.json"
+cp "$OUT/tui-web-snapshot.json" "$OUT/tui-web.json"
+
+{
+    printf '%s\n' 'runtime=pure-simple-self-hosted'
+    printf '%s\n' 'runtime_probe=pass'
+    printf 'runtime_command_path=%s\n' "$SIMPLE_COMMAND_REAL"
+    printf 'runtime_command_sha256=%s\n' "$SIMPLE_COMMAND_SHA256"
+    printf 'runtime_path=%s\n' "$SIMPLE_RUNTIME_REAL"
+    printf 'runtime_sha256=%s\n' "$SIMPLE_RUNTIME_SHA256"
+    printf 'runtime_provenance=%s\n' "$RUNTIME_PROVENANCE"
+    printf 'seed_delegate_path=%s\n' "$SEED_DELEGATE_REAL"
+    printf 'seed_delegate_sha256=%s\n' "$SEED_DELEGATE_SHA256"
+    printf '%s\n' 'rust_seed_used=false'
+    printf 'ui_backend_path=%s\n' "$UI_BACKEND_REAL"
+    printf 'ui_backend_sha256=%s\n' "$UI_BACKEND_SHA256"
+    printf '%s\n' 'compiled_backend_artifact=pass'
+    printf '%s\n' 'gui_backend_route=simple-ui-gui'
+    printf '%s\n' 'tui_web_backend_route=simple-ui-tui_web'
+    printf '%s\n' 't32_deployed_route=pass'
+    printf '%s\n' 't32_invalid_json=invalid_argument'
+    printf '%s\n' 't32_live_windows=pass'
+    printf '%s\n' 't32_live_show=pass'
+    printf '%s\n' 't32_live_describe=pass'
+    printf '%s\n' 't32_live_action=pass'
+    printf '%s\n' 't32_live_history=pass'
+    printf '%s\n' 'transport=existing-test-api'
+    printf '%s\n' 'client_process=separate'
+    printf '%s\n' 'loopback_default=true'
+    printf '%s\n' 'help_operations=pass'
+    printf '%s\n' 'human_json_fixture_fields=equal'
+    printf '%s\n' 'human_json_required_fields=equal'
+    printf '%s\n' 'gui_screenshot_dimensions=1280x800'
+    printf '%s\n' 'gui_screenshot_nonblank=pass'
+    printf '%s\n' 'gui_semantic_delta=unfocused_to_focused'
+    printf '%s\n' 'malformed_args=invalid_argument'
+    printf '%s\n' 'unknown_target=target_not_found'
+    printf '%s\n' 'live_windows=pass'
+    printf '%s\n' 'live_find=pass'
+    printf '%s\n' 'live_act=pass'
+    printf '%s\n' 'post_action_state=pass'
+    printf '%s\n' 'correlated_history=pass'
+    printf 'correlated_history_request_id=%s\n' "$ACTION_REQUEST_ID"
+    printf '%s\n' 'service_stop=source_unavailable'
+    printf '%s\n' 'db_fallback=read_only'
+    printf '%s\n' 'db_act=source_unavailable'
+    printf '%s\n' 'tui_web_transport=separate_process'
+    printf '%s\n' 'tui_web_html=visible'
+    printf '%s\n' 'tui_web_screenshot_dimensions=1280x800'
+    printf '%s\n' 'tui_web_screenshot_nonblank=pass'
+    printf '%s\n' 'tui_web_windows=pass'
+    printf '%s\n' 'tui_web_snapshot=pass'
+    printf '%s\n' 'tui_web_surface=pass'
+    printf '%s\n' 'tui_web_find=pass'
+    printf '%s\n' 'tui_web_act=pass'
+    printf '%s\n' 'tui_web_post_action_state=pass'
+    printf '%s\n' 'tui_web_correlated_history=pass'
+    printf 'tui_web_request_id=%s\n' "$TUI_WEB_REQUEST_ID"
+    printf '%s\n' 'STATUS: PASS ui-cli-live-transport'
+} >"$OUT/live-ui-transport.txt"
+
+printf '%s\n' 'STATUS: PASS ui-cli-live-transport'

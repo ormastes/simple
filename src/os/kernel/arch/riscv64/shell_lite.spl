@@ -1,0 +1,63 @@
+"""SimpleOS RV64 Lite Shell — minimal serial-UART command dispatch.
+
+Pure text-in/text-out dispatch, unit-testable in the interpreter without UART
+hardware. The interactive read/echo loop that wires it to the 16550 UART, plus
+the login gate and the `ls` (real VFS readdir) handling, live in
+os.kernel.arch.riscv64.console (serial_shell_main), which owns the MMIO I/O
+and the VFS. This module provides the pure directory-listing formatter that
+`ls` reuses so the formatting stays unit-testable.
+
+Commands handled here: help, info, pwd, net, echo <text>, reboot.
+`ls` and login are I/O and live in console.spl.
+"""
+
+use os.kernel.types.fs_types.{DirEntry}
+
+fn rv64_shell_banner() -> text:
+    "SimpleOS RV64 serial console - network unavailable, UART management active.\r\nType 'help' for commands."
+
+fn rv64_shell_prompt() -> text:
+    "simpleos-rv64> "
+
+fn rv64_shell_help() -> text:
+    "commands: help, info, ls, launch <path>, pwd, net, echo <text>, reboot"
+
+fn rv64_shell_pwd() -> text:
+    "/"
+
+fn rv64_shell_format_dir_entries(entries: [DirEntry]) -> text:
+    """Pure formatter: one entry name per line. console.spl calls this with the
+    live result of g_vfs_readdir so `ls` reflects the actual mounted filesystem
+    rather than a static manifest."""
+    var out = ""
+    var i: u64 = 0
+    while i < entries.len():
+        out = out + entries[i].name + "\r\n"
+        i = i + 1
+    out
+
+fn rv64_shell_dispatch(line: text, network_ok: i64) -> text:
+    """Map one command line to its response text. Pure: no UART, no I/O.
+    `ls` is NOT handled here — console.spl intercepts it to call g_vfs_readdir,
+    then formats via rv64_shell_format_dir_entries."""
+    if line == "help":
+        return rv64_shell_help()
+    if line == "info":
+        return "SimpleOS RV64 (riscv64) - serial console fallback"
+    if line == "pwd":
+        return rv64_shell_pwd()
+    if line == "net":
+        if network_ok == 1:
+            return "network: ready"
+        return "network: unavailable - UART telnet/ssh fallback in use"
+    if line == "reboot":
+        # ponytail: stub response only — wire SBI system_reset in the console
+        # loop when an operator actually needs remote reset.
+        return "rebooting..."
+    if line.starts_with("echo "):
+        return line.slice(5, line.len())
+    if line == "":
+        return ""
+    return "unknown command: {line}\r\nType 'help' for commands."
+
+export rv64_shell_banner, rv64_shell_prompt, rv64_shell_dispatch, rv64_shell_help, rv64_shell_pwd, rv64_shell_format_dir_entries

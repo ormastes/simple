@@ -1,0 +1,158 @@
+use std.io_runtime
+
+class UnloadPolicy:
+    path: text
+    metadata_symbols_count: i32
+    heuristic_symbols_count: i32
+    total_removed: i32
+    used_metadata: bool
+    used_heuristic: bool
+
+    static fn create(path: text) -> UnloadPolicy:
+        return UnloadPolicy(
+            path: path,
+            metadata_symbols_count: 0,
+            heuristic_symbols_count: 0,
+            total_removed: 0,
+            used_metadata: false,
+            used_heuristic: false
+        )
+
+    me with_metadata(count: i32) -> UnloadPolicy:
+        return UnloadPolicy(
+            path: self.path,
+            metadata_symbols_count: count,
+            heuristic_symbols_count: self.heuristic_symbols_count,
+            total_removed: self.total_removed + count,
+            used_metadata: true,
+            used_heuristic: self.used_heuristic
+        )
+
+    me with_heuristic(count: i32) -> UnloadPolicy:
+        return UnloadPolicy(
+            path: self.path,
+            metadata_symbols_count: self.metadata_symbols_count,
+            heuristic_symbols_count: count,
+            total_removed: self.total_removed + count,
+            used_metadata: self.used_metadata,
+            used_heuristic: true
+        )
+
+    me metadata_beats_heuristic() -> bool:
+        return self.metadata_symbols_count > 0
+
+    me is_noop() -> bool:
+        return self.total_removed == 0
+
+
+class GlobalRebuildResult:
+    original_count: i32
+    removed_count: i32
+    rebuilt_count: i32
+    is_deterministic: bool
+
+    static fn create(orig: i32, removed: i32, rebuilt: i32) -> GlobalRebuildResult:
+        val det = rebuilt == orig - removed
+        return GlobalRebuildResult(
+            original_count: orig,
+            removed_count: removed,
+            rebuilt_count: rebuilt,
+            is_deterministic: det
+        )
+
+    me verify() -> bool:
+        return self.is_deterministic
+
+
+class InvariantCheck:
+    invariant_name: text
+    passed: bool
+    detail: text
+
+    static fn unknown_path_noop(removed_count: i32) -> InvariantCheck:
+        val ok = removed_count == 0
+        return InvariantCheck(
+            invariant_name: "unknown_path_noop",
+            passed: ok,
+            detail: "removed_count must be 0 for unknown path; got " + removed_count.to_text()
+        )
+
+    static fn metadata_cleanup(metadata_count: i32, removed_count: i32) -> InvariantCheck:
+        val ok = removed_count >= metadata_count
+        return InvariantCheck(
+            invariant_name: "metadata_cleanup",
+            passed: ok,
+            detail: "removed_count(" + removed_count.to_text() + ") must be >= metadata_count(" + metadata_count.to_text() + ")"
+        )
+
+    static fn metadata_priority(has_metadata: bool, used_heuristic: bool) -> InvariantCheck:
+        val ok = (has_metadata == false) || (used_heuristic == false)
+        return InvariantCheck(
+            invariant_name: "metadata_priority",
+            passed: ok,
+            detail: "when metadata present, heuristic must not be used; has_metadata=" + has_metadata.to_text() + " used_heuristic=" + used_heuristic.to_text()
+        )
+
+    static fn reload_resolvable(pre_count: i32, post_count: i32) -> InvariantCheck:
+        val ok = post_count >= pre_count
+        return InvariantCheck(
+            invariant_name: "reload_resolvable",
+            passed: ok,
+            detail: "post_count(" + post_count.to_text() + ") must be >= pre_count(" + pre_count.to_text() + ")"
+        )
+
+    static fn deterministic_rebuild(rebuild: GlobalRebuildResult) -> InvariantCheck:
+        val ok = rebuild.verify()
+        return InvariantCheck(
+            invariant_name: "deterministic_rebuild",
+            passed: ok,
+            detail: "rebuild must be deterministic; orig=" + rebuild.original_count.to_text() + " removed=" + rebuild.removed_count.to_text() + " rebuilt=" + rebuild.rebuilt_count.to_text()
+        )
+
+
+class InvariantReport:
+    check_count: i32
+    pass_count: i32
+    fail_count: i32
+    c0_name: text
+    c0_passed: bool
+    c1_name: text
+    c1_passed: bool
+    c2_name: text
+    c2_passed: bool
+    c3_name: text
+    c3_passed: bool
+    c4_name: text
+    c4_passed: bool
+
+    static fn from_five(c0: InvariantCheck, c1: InvariantCheck, c2: InvariantCheck, c3: InvariantCheck, c4: InvariantCheck) -> InvariantReport:
+        var passes = 0
+        if c0.passed:
+            passes = passes + 1
+        if c1.passed:
+            passes = passes + 1
+        if c2.passed:
+            passes = passes + 1
+        if c3.passed:
+            passes = passes + 1
+        if c4.passed:
+            passes = passes + 1
+        val fails = 5 - passes
+        return InvariantReport(
+            check_count: 5,
+            pass_count: passes,
+            fail_count: fails,
+            c0_name: c0.invariant_name,
+            c0_passed: c0.passed,
+            c1_name: c1.invariant_name,
+            c1_passed: c1.passed,
+            c2_name: c2.invariant_name,
+            c2_passed: c2.passed,
+            c3_name: c3.invariant_name,
+            c3_passed: c3.passed,
+            c4_name: c4.invariant_name,
+            c4_passed: c4.passed
+        )
+
+    me all_passed() -> bool:
+        return self.fail_count == 0

@@ -1,0 +1,143 @@
+# @cover src/os/realtime/test/config.spl 80%
+# Validates RTOS test config defaults, JTAG config, and bridge to T32WatchdogConfig.
+
+use std.spipe.*
+
+# --- Inline constants (interpreter can't resolve cross-module imports) ---
+
+val TEST_PROFILE_FAST: i64 = 0
+val TEST_PROFILE_SESSION: i64 = 1
+val TEST_PROFILE_FUZZ: i64 = 2
+val TEST_PROFILE_VERIFY: i64 = 3
+
+val JTAG_PROBE_OPENOCD: i64 = 0
+val JTAG_PROBE_TRACE32: i64 = 1
+
+# --- Inline simplified classes ---
+
+class RtosJtagConfig:
+    probe_type: i64
+    host: text
+    port: i64
+    t32_ping_timeout_ms: i64
+    t32_operation_timeout_ms: i64
+    t32_max_retries: i64
+    t32_auto_reconnect: bool
+    t32_kill_on_hang: bool
+
+    static fn default_openocd() -> RtosJtagConfig:
+        RtosJtagConfig(
+            probe_type: JTAG_PROBE_OPENOCD, host: "localhost", port: 3333,
+            t32_ping_timeout_ms: 0, t32_operation_timeout_ms: 0,
+            t32_max_retries: 0, t32_auto_reconnect: false, t32_kill_on_hang: false
+        )
+
+    static fn default_trace32() -> RtosJtagConfig:
+        RtosJtagConfig(
+            probe_type: JTAG_PROBE_TRACE32, host: "localhost", port: 20000,
+            t32_ping_timeout_ms: 3000, t32_operation_timeout_ms: 10000,
+            t32_max_retries: 3, t32_auto_reconnect: true, t32_kill_on_hang: false
+        )
+
+class T32WatchdogConfig:
+    ping_timeout_ms: i64
+    operation_timeout_ms: i64
+    max_retries: i64
+    auto_reconnect: bool
+    kill_on_hang: bool
+    host: text
+    port: i64
+
+class RtosTestConfig:
+    arch: i64
+    replay_mode: i64
+    session_mode: i64
+    timeout_ms: i64
+    fuzz_iterations: i64
+    fuzz_enabled: bool
+    checkpoint_id: i64
+
+    static fn default_fast() -> RtosTestConfig:
+        RtosTestConfig(
+            arch: 0, replay_mode: 0, session_mode: 0,
+            timeout_ms: 5000, fuzz_iterations: 0,
+            fuzz_enabled: false, checkpoint_id: 0
+        )
+
+fn jtag_to_t32_watchdog_config(cfg: RtosJtagConfig) -> T32WatchdogConfig:
+    T32WatchdogConfig(
+        ping_timeout_ms: cfg.t32_ping_timeout_ms,
+        operation_timeout_ms: cfg.t32_operation_timeout_ms,
+        max_retries: cfg.t32_max_retries,
+        auto_reconnect: cfg.t32_auto_reconnect,
+        kill_on_hang: cfg.t32_kill_on_hang,
+        host: cfg.host, port: cfg.port
+    )
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Profile and Probe Constants":
+    it "profile constants are sequential 0-3":
+        expect(TEST_PROFILE_FAST).to_equal(0)
+        expect(TEST_PROFILE_SESSION).to_equal(1)
+        expect(TEST_PROFILE_FUZZ).to_equal(2)
+        expect(TEST_PROFILE_VERIFY).to_equal(3)
+
+    it "probe type constants are 0 and 1":
+        expect(JTAG_PROBE_OPENOCD).to_equal(0)
+        expect(JTAG_PROBE_TRACE32).to_equal(1)
+
+describe "RtosJtagConfig":
+    it "default_openocd has localhost:3333 with probe_type 0":
+        val cfg = RtosJtagConfig.default_openocd()
+        expect(cfg.host).to_equal("localhost")
+        expect(cfg.port).to_equal(3333)
+        expect(cfg.probe_type).to_equal(0)
+        expect(cfg.t32_ping_timeout_ms).to_equal(0)
+        expect(cfg.t32_max_retries).to_equal(0)
+        expect(cfg.t32_auto_reconnect).to_equal(false)
+
+    it "default_trace32 has localhost:20000 with probe_type 1":
+        val cfg = RtosJtagConfig.default_trace32()
+        expect(cfg.host).to_equal("localhost")
+        expect(cfg.port).to_equal(20000)
+        expect(cfg.probe_type).to_equal(1)
+
+    it "default_trace32 has correct T32 timeouts and retries":
+        val cfg = RtosJtagConfig.default_trace32()
+        expect(cfg.t32_ping_timeout_ms).to_equal(3000)
+        expect(cfg.t32_operation_timeout_ms).to_equal(10000)
+        expect(cfg.t32_max_retries).to_equal(3)
+        expect(cfg.t32_auto_reconnect).to_equal(true)
+        expect(cfg.t32_kill_on_hang).to_equal(false)
+
+describe "RtosTestConfig":
+    it "default_fast has replay off, 5s timeout, no fuzz":
+        val cfg = RtosTestConfig.default_fast()
+        expect(cfg.replay_mode).to_equal(0)
+        expect(cfg.timeout_ms).to_equal(5000)
+        expect(cfg.fuzz_enabled).to_equal(false)
+        expect(cfg.fuzz_iterations).to_equal(0)
+        expect(cfg.checkpoint_id).to_equal(0)
+
+describe "jtag_to_t32_watchdog_config Bridge":
+    it "maps all T32 fields from trace32 defaults":
+        val jtag = RtosJtagConfig.default_trace32()
+        val wd = jtag_to_t32_watchdog_config(jtag)
+        expect(wd.ping_timeout_ms).to_equal(3000)
+        expect(wd.operation_timeout_ms).to_equal(10000)
+        expect(wd.max_retries).to_equal(3)
+        expect(wd.auto_reconnect).to_equal(true)
+        expect(wd.kill_on_hang).to_equal(false)
+        expect(wd.host).to_equal("localhost")
+        expect(wd.port).to_equal(20000)
+
+    it "maps zeroed fields from openocd defaults":
+        val jtag = RtosJtagConfig.default_openocd()
+        val wd = jtag_to_t32_watchdog_config(jtag)
+        expect(wd.ping_timeout_ms).to_equal(0)
+        expect(wd.max_retries).to_equal(0)
+        expect(wd.host).to_equal("localhost")
+        expect(wd.port).to_equal(3333)

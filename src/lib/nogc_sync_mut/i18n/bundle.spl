@@ -1,0 +1,302 @@
+# i18n Resource Bundle
+#
+# Provides Java-like locale-based resource bundles using SDN format.
+# Convention: i18n/messages.sdn (default), i18n/messages_{locale}.sdn
+#
+# Locale resolution order:
+#   1. Exact match: messages_ko.sdn
+#   2. Language only: messages_ko.sdn (from ko_KR)
+#   3. Default: messages.sdn
+#   4. Key itself (if no bundle found)
+#
+# SDN i18n file format (simple key: value):
+#   greeting: Hello, World!
+#   farewell: Goodbye!
+#   user.welcome: Welcome, {name}!
+#
+# Usage:
+#   use std.i18n.bundle.{ResourceBundle}
+#
+#   val bundle = ResourceBundle.load(".", "ko")
+#   match bundle:
+#       case Ok(b):
+#           val msg = b.get("greeting")
+#           val welcome = b.get_fmt("user.welcome", {"name": "Alice"})
+#       case Err(e):
+#           print "Failed to load bundle: {e}"
+
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_env_get(key: text) -> text
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+# ============================================================================
+# ResourceBundle
+# ============================================================================
+
+struct ResourceBundle:
+    """Locale-based resource bundle for i18n string lookup."""
+    locale: text                        # current locale (e.g. "en", "ko", "ja")
+    messages: Dict<text, text>          # key -> translated string
+    fallback_messages: Dict<text, text> # default locale messages
+
+impl ResourceBundle:
+    """Load a resource bundle for the given locale.
+
+    Searches for i18n files in the given base directory.
+    Falls back to default messages.sdn if locale-specific file not found.
+
+    Args:
+        base_dir: Directory containing i18n/ folder
+        locale: Locale code (e.g. "en", "ko", "ja", "zh")
+
+    Returns:
+        Ok(bundle) on success, Err(message) on failure
+    """
+    static fn load(base_dir: text, locale: text) -> Result<ResourceBundle, text>:
+        val i18n_dir = "{base_dir}/i18n"
+
+        # Load default (fallback) messages
+        var fallback: Dict<text, text> = {}
+        val default_path = "{i18n_dir}/messages.sdn"
+        if rt_file_exists(default_path):
+            val content = rt_file_read_text(default_path)
+            if content != nil and content != "":
+                fallback = parse_i18n_file(content)
+
+        # Resolve locale-specific file
+        var msgs: Dict<text, text> = {}
+        val resolved = _resolve_locale_file(i18n_dir, locale)
+        if resolved != "":
+            val content = rt_file_read_text(resolved)
+            if content != nil and content != "":
+                msgs = parse_i18n_file(content)
+
+        # At least one bundle must exist
+        if msgs.len() == 0 and fallback.len() == 0:
+            return Err("No i18n bundle found in {i18n_dir} for locale '{locale}'")
+
+        Ok(ResourceBundle(
+            locale: locale,
+            messages: msgs,
+            fallback_messages: fallback
+        ))
+
+    """Get translated message by key.
+
+    Resolution order:
+    1. Locale-specific message
+    2. Fallback (default) message
+    3. Key itself with {missing} prefix
+    """
+    fn get(key: text) -> text:
+        if self.messages.contains_key(key):
+            return self.messages[key]
+        if self.fallback_messages.contains_key(key):
+            return self.fallback_messages[key]
+        "{missing:" + key + "}"
+
+    """Get translated message with parameter substitution.
+
+    Replaces {param_name} placeholders with values from the params dict.
+    Example: get_fmt("user.welcome", {"name": "Alice"}) -> "Welcome, Alice!"
+    """
+    fn get_fmt(key: text, params: Dict<text, text>) -> text:
+        var template = self.get(key)
+        for param_key in params.keys():
+            val placeholder = "{" + param_key + "}"
+            template = template.replace(placeholder, params[param_key])
+        template
+
+    """Check if a key exists in the bundle (locale or fallback)."""
+    fn has_key(key: text) -> bool:
+        if self.messages.contains_key(key):
+            return true
+        self.fallback_messages.contains_key(key)
+
+    """Get all available keys from both locale and fallback bundles."""
+    fn keys() -> [text]:
+        var result: [text] = []
+        var seen: Dict<text, bool> = {}
+        for k in self.messages.keys():
+            result.push(k)
+            seen[k] = true
+        for k in self.fallback_messages.keys():
+            if not seen.contains_key(k):
+                result.push(k)
+        result
+
+    """Get current locale code."""
+    fn current_locale() -> text:
+        self.locale
+
+# ============================================================================
+# SDN i18n File Parser
+# ============================================================================
+
+"""Parse an SDN i18n file into a key-value dictionary.
+
+Format:
+    key: value
+    nested.key: value
+    key_with_params: Hello, {name}!
+
+Lines starting with # are comments.
+Blank lines are skipped.
+"""
+fn parse_i18n_file(content: text) -> Dict<text, text>:
+    var result: Dict<text, text> = {}
+    val lines = content.split("\n")
+
+    for line in lines:
+        val trimmed = line.trim()
+
+        # Skip blank lines and comments
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+
+        # Find first colon separator
+        var colon_pos = -1
+        var i = 0
+        while i < trimmed.len():
+            if trimmed[i] == ":":
+                colon_pos = i
+                break
+            i = i + 1
+
+        if colon_pos > 0:
+            val key = trimmed[0:colon_pos].trim()
+            var value = ""
+            if colon_pos + 1 < trimmed.len():
+                value = trimmed[colon_pos + 1:].trim()
+            result[key] = value
+
+    result
+
+# ============================================================================
+# Locale Detection
+# ============================================================================
+
+"""Detect current locale from environment.
+
+Checks in order:
+1. SIMPLE_LOCALE env var
+2. LANG env var (extracts language code)
+3. LC_ALL env var
+4. Falls back to "en"
+"""
+fn detect_locale() -> text:
+    # Check SIMPLE_LOCALE first
+    val simple_locale = rt_env_get("SIMPLE_LOCALE")
+    if simple_locale != nil and simple_locale != "":
+        return _normalize_locale(simple_locale)
+
+    # Check LANG
+    val lang = rt_env_get("LANG")
+    if lang != nil and lang != "":
+        return _extract_lang_code(lang)
+
+    # Check LC_ALL
+    val lc_all = rt_env_get("LC_ALL")
+    if lc_all != nil and lc_all != "":
+        return _extract_lang_code(lc_all)
+
+    # Default
+    "en"
+
+"""List available locales in a directory.
+
+Scans i18n/ directory for messages_*.sdn files.
+Returns list of locale codes (e.g. ["en", "ko", "ja"]).
+"""
+fn list_available_locales(base_dir: text) -> [text]:
+    var locales: [text] = []
+    val i18n_dir = "{base_dir}/i18n"
+
+    val (out, err, code) = rt_process_run("/bin/sh", ["-c", "ls -1 '{i18n_dir}' 2>/dev/null"])
+    if code != 0:
+        return locales
+
+    val files = out.trim().split("\n")
+    for file in files:
+        val trimmed = file.trim()
+        if trimmed == "":
+            continue
+        if trimmed.starts_with("messages_") and trimmed.ends_with(".sdn"):
+            # Extract locale: messages_en.sdn -> en
+            val locale = trimmed[9 : trimmed.len() - 4]
+            if locale != "":
+                locales.push(locale)
+
+    locales
+
+# ============================================================================
+# Internal Helpers
+# ============================================================================
+
+fn _resolve_locale_file(i18n_dir: text, locale: text) -> text:
+    """Resolve the best locale file for the given locale code.
+
+    Resolution order:
+    1. Exact match: messages_{locale}.sdn (e.g. messages_ko_KR.sdn)
+    2. Language only: messages_{lang}.sdn (e.g. messages_ko.sdn from ko_KR)
+    3. Empty string if nothing found
+    """
+    # Try exact match first
+    val exact_path = "{i18n_dir}/messages_{locale}.sdn"
+    if rt_file_exists(exact_path):
+        return exact_path
+
+    # Try language-only (strip region)
+    val lang = _language_from_locale(locale)
+    if lang != locale:
+        val lang_path = "{i18n_dir}/messages_{lang}.sdn"
+        if rt_file_exists(lang_path):
+            return lang_path
+
+    ""
+
+fn _language_from_locale(locale: text) -> text:
+    """Extract language code from locale string.
+
+    ko_KR -> ko
+    en_US -> en
+    ja -> ja
+    zh-Hans -> zh
+    """
+    # Check for underscore separator (ko_KR)
+    var i = 0
+    while i < locale.len():
+        if locale[i] == "_" or locale[i] == "-":
+            return locale[0:i]
+        i = i + 1
+    locale
+
+fn _normalize_locale(locale: text) -> text:
+    """Normalize locale string (trim whitespace, lowercase)."""
+    locale.trim()
+
+fn _extract_lang_code(env_value: text) -> text:
+    """Extract language code from LANG/LC_ALL env values.
+
+    en_US.UTF-8 -> en
+    ko_KR.EUC-KR -> ko
+    C -> en (fallback)
+    POSIX -> en (fallback)
+    """
+    val trimmed = env_value.trim()
+
+    if trimmed == "C" or trimmed == "POSIX" or trimmed == "":
+        return "en"
+
+    # Strip encoding (.UTF-8 etc)
+    var base = trimmed
+    var i = 0
+    while i < base.len():
+        if base[i] == ".":
+            base = base[0:i]
+            break
+        i = i + 1
+
+    # Extract language part (before _ or -)
+    _language_from_locale(base)

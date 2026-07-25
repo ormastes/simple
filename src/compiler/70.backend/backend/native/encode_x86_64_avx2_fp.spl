@@ -1,0 +1,253 @@
+# src/compiler/70.backend/backend/native/encode_x86_64_avx2_fp.spl
+#
+# AVX2 Floating-Point Instruction Byte-Emit Encoder — Pure Simple
+#
+# Produces exact byte sequences for AVX2 YMM packed single-precision FP instructions:
+#   VADDPS   (packed float add,          VEX.256.0F.WIG 58 /r)
+#   VSUBPS   (packed float subtract,     VEX.256.0F.WIG 5C /r)
+#   VMULPS   (packed float multiply,     VEX.256.0F.WIG 59 /r)
+#   VDIVPS   (packed float divide,       VEX.256.0F.WIG 5E /r)
+#   VMAXPS   (packed float maximum,      VEX.256.0F.WIG 5F /r)
+#   VMINPS   (packed float minimum,      VEX.256.0F.WIG 5D /r)
+#   VSQRTPS  (packed float sqrt,         VEX.256.0F.WIG 51 /r, 2-op)
+#   VRSQRTPS (packed float recip sqrt,   VEX.256.0F.WIG 52 /r, 2-op)
+#
+# VEX 3-byte prefix (C4h) for YMM (256-bit) register forms:
+#   Byte 0: 0xC4
+#   Byte 1: ~R  ~X  ~B  m4 m3 m2 m1 m0
+#     ~R   = 1 when ModRM.reg operand < 8,  else 0
+#     ~X   = 1 (no SIB; register-direct only)
+#     ~B   = 1 when ModRM.rm  operand < 8,  else 0
+#     mmmmm= 00001 (1) for 0F map
+#   Byte 2: W  ~v3 ~v2 ~v1 ~v0  L  p1 p0
+#     W    = 0 (WIG — ignored for these instructions)
+#     ~vvvv= inverted 4-bit vvvv index: (15 - vvvv_reg)
+#     L    = 1 (256-bit YMM)
+#     pp   = 00 (no mandatory prefix — PS form uses no 66h/F3h/F2h)
+#
+# /r three-operand forms (VADDPS/VSUBPS/VMULPS/VDIVPS/VMAXPS/VMINPS):
+#   ModRM.reg = rd (destination)
+#   VEX.vvvv  = rn (first source, inverted in byte2)
+#   ModRM.rm  = rm (second source)
+#
+# /r two-operand forms (VSQRTPS/VRSQRTPS):
+#   ModRM.reg = rd (destination)
+#   VEX.vvvv  = 1111 (unused, rn=0 → 15-0=15=1111b)
+#   ModRM.rm  = rm (source)
+#
+# Arithmetic for byte1 (no SIB, register-direct, 0F map):
+#   byte1 = 225 - (modrm_reg / 8) * 128 - (modrm_rm / 8) * 32
+#   (225 = 0xE1 = ~R=1 ~X=1 ~B=1 mmmmm=1)
+#
+# Arithmetic for byte2 (W=0, L=1, pp=00):
+#   byte2 = (15 - vvvv) * 8 + 4
+#   (L=1 contributes 4; pp=00 contributes 0; W=0 contributes 0)
+#
+# ALL byte goldens verified by formula cross-check against Intel SDM.
+# Reference: Intel SDM Vol 2C VADDPS/VSUBPS/VMULPS/VDIVPS/VMAXPS/VMINPS/VSQRTPS/VRSQRTPS;
+#            Intel SDM Vol 2A §2.3.5 (VEX prefix).
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _modrm_direct_ps(reg: i64, rm: i64) -> i64:
+    """
+    ModRM byte for register-direct operands (mod=11).
+    mod=11 → 192; reg field uses low 3 bits of reg; rm field uses low 3 bits of rm.
+    """
+    192 + ((reg % 8) * 8) + (rm % 8)
+
+fn _avx2_vex_byte1_0f_ps(modrm_reg: i64, modrm_rm: i64) -> i64:
+    """
+    VEX Byte 1 for 0F map (mmmmm=1), register-register, no SIB.
+    ~R=1 when modrm_reg<8, ~X=1, ~B=1 when modrm_rm<8, mmmmm=1.
+    byte1 = 225 - (modrm_reg/8)*128 - (modrm_rm/8)*32
+    (225 = 0xE1 = ~R=1 ~X=1 ~B=1 mmmmm=1)
+    """
+    225 - (modrm_reg / 8) * 128 - (modrm_rm / 8) * 32
+
+fn _avx2_vex_byte2_ymm_ps(vvvv: i64) -> i64:
+    """
+    VEX Byte 2 for YMM (256-bit) PS forms: W=0, ~vvvv=(15-vvvv), L=1, pp=00.
+    byte2 = (15 - vvvv) * 8 + 4
+    (L=1 contributes 4; pp=00 contributes 0; W=0 contributes 0)
+    """
+    (15 - vvvv) * 8 + 4
+
+fn _pack_vex3_ymm_0f_ps(rd: i64, rn: i64, rm: i64, opcode: i64) -> [i64]:
+    """
+    3-byte VEX emit for VEX.256.0F.WIG /r PS forms (5 bytes total).
+    rd → ModRM.reg (destination), rn → VEX.vvvv (src1), rm → ModRM.rm (src2).
+    Used by: VADDPS, VSUBPS, VMULPS, VDIVPS, VMAXPS, VMINPS, VSQRTPS, VRSQRTPS.
+    """
+    val b1    = _avx2_vex_byte1_0f_ps(rd, rm)
+    val b2    = _avx2_vex_byte2_ymm_ps(rn)
+    val modrm = _modrm_direct_ps(rd, rm)
+    [0xC4, b1, b2, opcode, modrm]
+
+# ============================================================================
+# VADDPS — Packed Single-Precision Float Add  (VEX.256.0F.WIG 58 /r)
+# VADDPS rd, rn, rm
+#   rd ← rn + rm  (element-wise float32)
+#   Routing: vvvv=rn, ModRM.reg=rd, ModRM.rm=rm
+# Reference: Intel SDM Vol 2C "VADDPS" — VEX.256.0F.WIG 58 /r
+# ============================================================================
+
+fn emit_vaddps_ymm(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    VADDPS ymm, ymm, ymm — packed single-precision float add (YMM 256-bit form).
+    Encoding: VEX.256.0F.WIG 58 /r
+    rd, rn, rm: YMM register indices 0..15 (ymm0=0, ymm1=1, ...).
+    Example: emit_vaddps_ymm(0, 0, 0) → [0xC4, 0xE1, 0x7C, 0x58, 0xC0]
+      byte1: ~R=1,~X=1,~B=1,mmmmm=1 → 225
+      byte2: W=0,~vvvv=15(rn=0),L=1,pp=00 → 15*8+4=124
+      ModRM: mod=11,reg=0,rm=0 → 192
+    Reference: Intel SDM Vol 2C VADDPS; Vol 2A §2.3.5 (VEX prefix).
+    """
+    _pack_vex3_ymm_0f_ps(rd, rn, rm, 0x58)
+
+# ============================================================================
+# VSUBPS — Packed Single-Precision Float Subtract  (VEX.256.0F.WIG 5C /r)
+# VSUBPS rd, rn, rm
+#   rd ← rn - rm  (element-wise float32)
+#   Routing: vvvv=rn, ModRM.reg=rd, ModRM.rm=rm
+# Reference: Intel SDM Vol 2C "VSUBPS" — VEX.256.0F.WIG 5C /r
+# ============================================================================
+
+fn emit_vsubps_ymm(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    VSUBPS ymm, ymm, ymm — packed single-precision float subtract (YMM 256-bit form).
+    Encoding: VEX.256.0F.WIG 5C /r
+    rd, rn, rm: YMM register indices 0..15.
+    Example: emit_vsubps_ymm(0, 0, 0) → [0xC4, 0xE1, 0x7C, 0x5C, 0xC0]
+    Reference: Intel SDM Vol 2C VSUBPS; Vol 2A §2.3.5 (VEX prefix).
+    """
+    _pack_vex3_ymm_0f_ps(rd, rn, rm, 0x5C)
+
+# ============================================================================
+# VMULPS — Packed Single-Precision Float Multiply  (VEX.256.0F.WIG 59 /r)
+# VMULPS rd, rn, rm
+#   rd ← rn * rm  (element-wise float32)
+#   Routing: vvvv=rn, ModRM.reg=rd, ModRM.rm=rm
+# Reference: Intel SDM Vol 2C "VMULPS" — VEX.256.0F.WIG 59 /r
+# ============================================================================
+
+fn emit_vmulps_ymm(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    VMULPS ymm, ymm, ymm — packed single-precision float multiply (YMM 256-bit form).
+    Encoding: VEX.256.0F.WIG 59 /r
+    rd, rn, rm: YMM register indices 0..15.
+    Example: emit_vmulps_ymm(0, 0, 0) → [0xC4, 0xE1, 0x7C, 0x59, 0xC0]
+    Reference: Intel SDM Vol 2C VMULPS; Vol 2A §2.3.5 (VEX prefix).
+    """
+    _pack_vex3_ymm_0f_ps(rd, rn, rm, 0x59)
+
+# ============================================================================
+# VDIVPS — Packed Single-Precision Float Divide  (VEX.256.0F.WIG 5E /r)
+# VDIVPS rd, rn, rm
+#   rd ← rn / rm  (element-wise float32)
+#   Routing: vvvv=rn, ModRM.reg=rd, ModRM.rm=rm
+# Reference: Intel SDM Vol 2C "VDIVPS" — VEX.256.0F.WIG 5E /r
+# ============================================================================
+
+fn emit_vdivps_ymm(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    VDIVPS ymm, ymm, ymm — packed single-precision float divide (YMM 256-bit form).
+    Encoding: VEX.256.0F.WIG 5E /r
+    rd, rn, rm: YMM register indices 0..15.
+    Example: emit_vdivps_ymm(0, 0, 0) → [0xC4, 0xE1, 0x7C, 0x5E, 0xC0]
+    Reference: Intel SDM Vol 2C VDIVPS; Vol 2A §2.3.5 (VEX prefix).
+    """
+    _pack_vex3_ymm_0f_ps(rd, rn, rm, 0x5E)
+
+# ============================================================================
+# VMAXPS — Packed Single-Precision Float Maximum  (VEX.256.0F.WIG 5F /r)
+# VMAXPS rd, rn, rm
+#   rd ← max(rn, rm)  (element-wise float32)
+#   Routing: vvvv=rn, ModRM.reg=rd, ModRM.rm=rm
+# Reference: Intel SDM Vol 2C "VMAXPS" — VEX.256.0F.WIG 5F /r
+# ============================================================================
+
+fn emit_vmaxps_ymm(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    VMAXPS ymm, ymm, ymm — packed single-precision float maximum (YMM 256-bit form).
+    Encoding: VEX.256.0F.WIG 5F /r
+    rd, rn, rm: YMM register indices 0..15.
+    Example: emit_vmaxps_ymm(0, 0, 0) → [0xC4, 0xE1, 0x7C, 0x5F, 0xC0]
+    Reference: Intel SDM Vol 2C VMAXPS; Vol 2A §2.3.5 (VEX prefix).
+    """
+    _pack_vex3_ymm_0f_ps(rd, rn, rm, 0x5F)
+
+# ============================================================================
+# VMINPS — Packed Single-Precision Float Minimum  (VEX.256.0F.WIG 5D /r)
+# VMINPS rd, rn, rm
+#   rd ← min(rn, rm)  (element-wise float32)
+#   Routing: vvvv=rn, ModRM.reg=rd, ModRM.rm=rm
+# Reference: Intel SDM Vol 2C "VMINPS" — VEX.256.0F.WIG 5D /r
+# ============================================================================
+
+fn emit_vminps_ymm(rd: i64, rn: i64, rm: i64) -> [i64]:
+    """
+    VMINPS ymm, ymm, ymm — packed single-precision float minimum (YMM 256-bit form).
+    Encoding: VEX.256.0F.WIG 5D /r
+    rd, rn, rm: YMM register indices 0..15.
+    Example: emit_vminps_ymm(0, 0, 0) → [0xC4, 0xE1, 0x7C, 0x5D, 0xC0]
+    Reference: Intel SDM Vol 2C VMINPS; Vol 2A §2.3.5 (VEX prefix).
+    """
+    _pack_vex3_ymm_0f_ps(rd, rn, rm, 0x5D)
+
+# ============================================================================
+# VSQRTPS — Packed Single-Precision Float Square Root  (VEX.256.0F.WIG 51 /r)
+# VSQRTPS rd, rm
+#   rd ← sqrt(rm)  (element-wise float32, 2-operand)
+#   vvvv=1111 (unused; rn=0 → 15-0=15=1111b)
+# Reference: Intel SDM Vol 2C "VSQRTPS" — VEX.256.0F.WIG 51 /r
+# ============================================================================
+
+fn emit_vsqrtps_ymm(rd: i64, rm: i64) -> [i64]:
+    """
+    VSQRTPS ymm, ymm — packed single-precision float square root (YMM 256-bit form).
+    Encoding: VEX.256.0F.WIG 51 /r  (2-operand; vvvv=1111 unused)
+    rd: destination YMM register index 0..15.
+    rm: source YMM register index 0..15.
+    vvvv=1111 encoded as rn=0 (15-0=15=0xF).
+    Example: emit_vsqrtps_ymm(0, 0) → [0xC4, 0xE1, 0x7C, 0x51, 0xC0]
+      byte2: W=0,~vvvv=15,L=1,pp=00 → 15*8+4=124
+    Reference: Intel SDM Vol 2C VSQRTPS; Vol 2A §2.3.5 (VEX prefix).
+    """
+    _pack_vex3_ymm_0f_ps(rd, 0, rm, 0x51)
+
+# ============================================================================
+# VRSQRTPS — Packed Single-Precision Float Reciprocal Square Root
+#             (VEX.256.0F.WIG 52 /r)
+# VRSQRTPS rd, rm
+#   rd ← 1/sqrt(rm)  (element-wise float32 approximation, 2-operand)
+#   vvvv=1111 (unused; rn=0 → 15-0=15=1111b)
+# Reference: Intel SDM Vol 2C "VRSQRTPS" — VEX.256.0F.WIG 52 /r
+# ============================================================================
+
+fn emit_vrsqrtps_ymm(rd: i64, rm: i64) -> [i64]:
+    """
+    VRSQRTPS ymm, ymm — packed single-precision float reciprocal sqrt (YMM 256-bit form).
+    Encoding: VEX.256.0F.WIG 52 /r  (2-operand; vvvv=1111 unused)
+    rd: destination YMM register index 0..15.
+    rm: source YMM register index 0..15.
+    vvvv=1111 encoded as rn=0 (15-0=15=0xF).
+    Example: emit_vrsqrtps_ymm(0, 0) → [0xC4, 0xE1, 0x7C, 0x52, 0xC0]
+    Reference: Intel SDM Vol 2C VRSQRTPS; Vol 2A §2.3.5 (VEX prefix).
+    """
+    _pack_vex3_ymm_0f_ps(rd, 0, rm, 0x52)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export emit_vaddps_ymm
+export emit_vsubps_ymm
+export emit_vmulps_ymm
+export emit_vdivps_ymm
+export emit_vmaxps_ymm
+export emit_vminps_ymm
+export emit_vsqrtps_ymm
+export emit_vrsqrtps_ymm

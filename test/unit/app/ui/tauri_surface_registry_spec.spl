@@ -1,0 +1,37 @@
+# Tauri surface registry participation
+#
+# Covers the narrow registry binding contract for Tauri webview windows.
+
+use std.spec.{describe, it, expect}
+use common.ui.window_surface_registry.{UI_SURFACE_KIND_TAURI, new_ui_window_surface_registry}
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn _source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn _register_tauri_window(reg, surface_id: text, window_id: text, process_id: u64, app_id: text, title: text):
+    reg.bind_with_kind(window_id, surface_id, process_id, app_id, title, UI_SURFACE_KIND_TAURI)
+
+describe "app.ui.tauri.surface_registry":
+    it "exposes a Tauri registry helper in the shared-WM Tauri entrypoint":
+        val source = _source("src/app/ui.tauri/async_app.spl")
+        expect(source).to_contain("fn register_tauri_window")
+        expect(source).to_contain("UI_SURFACE_KIND_TAURI")
+        expect(source).to_contain("reg.bind_with_kind(window_id, surface_id, process_id, app_id, title, UI_SURFACE_KIND_TAURI)")
+
+    it "binds a Tauri window with the Tauri surface kind":
+        val reg = new_ui_window_surface_registry()
+        _register_tauri_window(reg, "surface-tauri", "window-tauri", 77 as u64, "app.tauri", "Tauri")
+        val binding = reg.for_surface("surface-tauri")
+        expect(binding).to_not_equal(nil)
+        expect(binding.surface_kind).to_equal(UI_SURFACE_KIND_TAURI)
+        expect(reg.window_id_for_surface("surface-tauri")).to_equal("window-tauri")
+
+    it "replaces prior bindings through the shared one-to-one registry rule":
+        val reg = new_ui_window_surface_registry()
+        _register_tauri_window(reg, "surface-one", "window-tauri", 77 as u64, "app.tauri", "One")
+        _register_tauri_window(reg, "surface-two", "window-tauri", 77 as u64, "app.tauri", "Two")
+        expect(reg.len()).to_equal(1)
+        expect(reg.window_id_for_surface("surface-one")).to_equal("")
+        expect(reg.window_id_for_surface("surface-two")).to_equal("window-tauri")

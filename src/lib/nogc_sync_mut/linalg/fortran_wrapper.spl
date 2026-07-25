@@ -1,0 +1,225 @@
+"""
+# Fortran-Compatible C Wrappers — scilib Port
+
+C-compatible wrappers that handle:
+  1. Symbol name decoration (no underscore for scilib shim; documented here)
+  2. Argument marshalling: i64 pointers via rt_alloc staging buffers
+  3. Row-major ↔ column-major index conversion using fortran_abi helpers
+  4. LP64 integer ABI enforcement
+
+These are Layer B helpers consumed by cuda_blas.spl and by LAPACK callers.
+They do NOT duplicate linalg_core.spl — they extend the sync path under
+`nogc_sync_mut/linalg/` which has no async dependency.
+
+## Fortran symbol name convention
+The scilib shim always exports `rt_blas_*` and `rt_lapack_*` symbols with NO
+trailing underscore.  Direct `extern fn` declarations or DynLoader calls
+must use exactly these names:
+  - rt_blas_dgemm, rt_blas_ddot, rt_blas_daxpy, rt_blas_dgemv, etc.
+  - rt_lapack_dgesv, rt_lapack_dgetrf, rt_lapack_dgetrs, etc.
+  - NOT cblas_dgemm, NOT DGEMM_, NOT dgemm_ — those are platform Fortran names.
+
+Import path: use std.nogc_sync_mut.linalg.fortran_wrapper.{fortran_pivot_to_zero_based, ...}
+"""
+
+use std.common.science_math.fortran_abi.{rc_to_cm_index, rc_to_rm_index, lda_for_row_major}
+use std.linalg.linalg_core.{BackendError, _scilib_call_n}
+use std.nogc_sync_mut.ptr.raw.{rt_alloc, rt_free, rt_ptr_read_i64, rt_ptr_write_i64, spl_f64_to_bits, spl_bits_to_f64}
+
+# ---------------------------------------------------------------------------
+# Symbol name helpers
+# ---------------------------------------------------------------------------
+
+pub fn blas_rt_symbol(precision: text, op: text) -> text:
+    """Canonical rt_blas_* symbol name: 'rt_blas_' + precision + op.
+
+    precision: 'd' (double) or 's' (single)
+    op: 'gemm', 'dot', 'axpy', 'gemv', 'nrm2', 'scal', etc.
+    """
+    "rt_blas_" + precision + op
+
+pub fn lapack_rt_symbol(op: text) -> text:
+    """Canonical rt_lapack_* symbol name (always double precision for v1).
+
+    op: 'gesv', 'getrf', 'getrs', 'geqrf', 'syevd', 'gesvd', etc.
+    Returns 'rt_lapack_d' + op.
+    """
+    "rt_lapack_d" + op
+
+# ---------------------------------------------------------------------------
+# Pivot array conversion
+# ---------------------------------------------------------------------------
+
+pub fn fortran_pivot_to_zero_based(ipiv: [i64]) -> [i64]:
+    """Convert a LAPACK/cuSOLVER IPIV array from 1-based to 0-based indices.
+
+    LAPACK (both LAPACKE and cuSOLVER) returns 1-based pivot indices.
+    Simple arrays are 0-based.  Apply this conversion before using IPIV
+    to index into a row array.
+    """
+    var out: [i64] = []
+    var i = 0
+    while i < ipiv.len():
+        out.push(ipiv[i] - 1)
+        i = i + 1
+    out
+
+pub fn fortran_pivot_to_one_based(ipiv: [i64]) -> [i64]:
+    """Convert a 0-based pivot array to 1-based LAPACK convention.
+
+    Use before passing a Simple-side IPIV array to rt_lapack_dgetrs.
+    """
+    var out: [i64] = []
+    var i = 0
+    while i < ipiv.len():
+        out.push(ipiv[i] + 1)
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# Matrix layout conversion helpers
+# ---------------------------------------------------------------------------
+
+pub fn row_major_to_col_major(data: [f64], rows: i64, cols: i64) -> [f64]:
+    """Convert a flat row-major buffer to column-major order.
+
+    Equivalent to transposing the matrix.  Used when the caller needs to
+    pass data directly to a Fortran-convention routine that does NOT go
+    through the operand-swap Layer B trick.
+    """
+    var out: [f64] = []
+    var c = 0
+    while c < cols:
+        var r = 0
+        while r < rows:
+            out.push(data[rc_to_rm_index(r, c, cols)])
+            r = r + 1
+        c = c + 1
+    out
+
+pub fn col_major_to_row_major(data: [f64], rows: i64, cols: i64) -> [f64]:
+    """Convert a flat column-major buffer to row-major order."""
+    var out: [f64] = []
+    var r = 0
+    while r < rows:
+        var c = 0
+        while c < cols:
+            out.push(data[rc_to_cm_index(r, c, rows)])
+            c = c + 1
+        r = r + 1
+    out
+
+# ---------------------------------------------------------------------------
+# LAPACK pivot staging helpers (i64 arrays via rt_alloc)
+# ---------------------------------------------------------------------------
+
+pub fn alloc_ipiv_buf(n: i64) -> i64:
+    """Allocate an i64 staging buffer for an IPIV array of length n.
+
+    Returns the raw pointer as i64, or 0 on allocation failure.
+    Caller must free with rt_free(ptr, n * 8).
+    """
+    if n <= 0:
+        return 0
+    rt_alloc(n * 8)
+
+pub fn write_ipiv_buf(buf: i64, ipiv: [i64]) -> i64:
+    """Write a Simple [i64] IPIV array into a staging buffer at `buf`.
+
+    Returns the count written.  Converts to 1-based convention expected
+    by LAPACK/cuSOLVER (adds 1 to each element).
+    """
+    var i = 0
+    while i < ipiv.len():
+        rt_ptr_write_i64(buf, i * 8, ipiv[i] + 1)
+        i = i + 1
+    ipiv.len()
+
+pub fn read_ipiv_buf(buf: i64, n: i64) -> [i64]:
+    """Read n i64 values from a staging buffer into a Simple [i64] slice.
+
+    Converts from 1-based LAPACK convention to 0-based Simple convention
+    (subtracts 1 from each element).
+    """
+    var out: [i64] = []
+    var i = 0
+    while i < n:
+        out.push(rt_ptr_read_i64(buf, i * 8) - 1)
+        i = i + 1
+    out
+
+# ---------------------------------------------------------------------------
+# LAPACK dgesv: solve A*X = B
+# ---------------------------------------------------------------------------
+
+pub fn lapack_dgesv_values(n: i64, nrhs: i64, a: [f64], b: [f64]) -> Result<[f64], BackendError>:
+    """Solve A*X = B using rt_lapack_dgesv via the openblas shim bits path.
+
+    a    — n×n coefficient matrix (row-major, length n*n)
+    b    — n×nrhs right-hand side matrix (row-major, length n*nrhs)
+
+    Returns the solution X as a flat row-major [f64] slice of size n*nrhs,
+    or BackendError.BackendExecutionFailed if the shim reports a singular matrix.
+
+    LP64 ABI: all index/info arguments are passed as i64 through the _bits
+    interface.
+    """
+    val a_size = n * n
+    val b_size = n * nrhs
+    if a.len() < a_size or b.len() < b_size:
+        return Err(BackendError.BackendExecutionFailed("lapack_dgesv_values: buffer too small"))
+
+    val a_bytes = a_size * 8
+    val b_bytes = b_size * 8
+
+    val a_buf = rt_alloc(a_bytes)
+    if a_buf == 0:
+        return Err(BackendError.BackendExecutionFailed("lapack_dgesv_values: A alloc failed"))
+    val b_buf = rt_alloc(b_bytes)
+    if b_buf == 0:
+        rt_free(a_buf, a_bytes)
+        return Err(BackendError.BackendExecutionFailed("lapack_dgesv_values: B alloc failed"))
+    # Allocate packed params buffer: [n, nrhs] — 2 x i64 = 16 bytes
+    val params_buf = rt_alloc(16)
+    if params_buf == 0:
+        rt_free(a_buf, a_bytes)
+        rt_free(b_buf, b_bytes)
+        return Err(BackendError.BackendExecutionFailed("lapack_dgesv_values: params alloc failed"))
+    # Allocate output buffer (shim writes solution into out_bits, not b_bits)
+    val out_buf = rt_alloc(b_bytes)
+    if out_buf == 0:
+        rt_free(a_buf, a_bytes)
+        rt_free(b_buf, b_bytes)
+        rt_free(params_buf, 16)
+        return Err(BackendError.BackendExecutionFailed("lapack_dgesv_values: out alloc failed"))
+
+    var i = 0
+    while i < a_size:
+        rt_ptr_write_i64(a_buf, i * 8, spl_f64_to_bits(a[i]))
+        i = i + 1
+    i = 0
+    while i < b_size:
+        rt_ptr_write_i64(b_buf, i * 8, spl_f64_to_bits(b[i]))
+        i = i + 1
+
+    # Pack params: shim expects params[0]=n, [1]=nrhs
+    rt_ptr_write_i64(params_buf, 0, n)
+    rt_ptr_write_i64(params_buf, 8, nrhs)
+
+    # Call: (params_addr, a_bits_addr, b_bits_addr, out_bits_addr)
+    val rc = _scilib_call_n("rt_scilib_openblas_dgesv_bits", [params_buf, a_buf, b_buf, out_buf])
+
+    var out: [f64] = []
+    i = 0
+    while i < b_size:
+        out.push(spl_bits_to_f64(rt_ptr_read_i64(out_buf, i * 8)))
+        i = i + 1
+
+    rt_free(a_buf, a_bytes)
+    rt_free(b_buf, b_bytes)
+    rt_free(params_buf, 16)
+    rt_free(out_buf, b_bytes)
+
+    if rc != 0:
+        return Err(BackendError.BackendExecutionFailed("rt_scilib_openblas_dgesv_bits failed info=" + rc.to_text()))
+    Ok(out)

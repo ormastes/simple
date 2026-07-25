@@ -1,0 +1,239 @@
+# wm_optimization.spl
+#
+# Window manager optimization primitives:
+#   DirtyRect     — per-surface damage region with union/intersect helpers
+#   WmTimingCounters — per-frame phase timing accumulators
+#   PresentBatcher   — coalesces dirty rects into batched present calls
+
+extern fn rt_time_now_micros() -> i64
+
+# ---------------------------------------------------------------------------
+# DirtyRect
+# ---------------------------------------------------------------------------
+
+class DirtyRect:
+    x:          i64
+    y:          i64
+    w:          i64
+    h:          i64
+    surface_id: i64
+
+fn dirty_rect_create(surface_id: i64, x: i64, y: i64, w: i64, h: i64) -> DirtyRect:
+    DirtyRect(surface_id: surface_id, x: x, y: y, w: w, h: h)
+
+fn dirty_rect_intersects(a: DirtyRect, b: DirtyRect) -> bool:
+    val ax2 = a.x + a.w
+    val ay2 = a.y + a.h
+    val bx2 = b.x + b.w
+    val by2 = b.y + b.h
+    (a.x < bx2) and (ax2 > b.x) and (a.y < by2) and (ay2 > b.y)
+
+fn min_i64(a: i64, b: i64) -> i64:
+    if a < b:
+        return a
+    b
+
+fn max_i64(a: i64, b: i64) -> i64:
+    if a > b:
+        return a
+    b
+
+fn dirty_rect_union_with(a: DirtyRect, b: DirtyRect) -> DirtyRect:
+    val ux = min_i64(a.x, b.x)
+    val uy = min_i64(a.y, b.y)
+    val ux2 = max_i64(a.x + a.w, b.x + b.w)
+    val uy2 = max_i64(a.y + a.h, b.y + b.h)
+    DirtyRect(surface_id: a.surface_id, x: ux, y: uy, w: ux2 - ux, h: uy2 - uy)
+
+fn dirty_rect_area(r: DirtyRect) -> i64:
+    r.w * r.h
+
+fn dirty_rect_info(r: DirtyRect) -> text:
+    "DirtyRect(sid=" + r.surface_id.to_text()
+    + " x=" + r.x.to_text()
+    + " y=" + r.y.to_text()
+    + " w=" + r.w.to_text()
+    + " h=" + r.h.to_text()
+    + " area=" + dirty_rect_area(r).to_text() + ")"
+
+# ---------------------------------------------------------------------------
+# WmTimingCounters
+# ---------------------------------------------------------------------------
+
+class WmTimingCounters:
+    event_wait_us: i64
+    input_us:      i64
+    layout_us:     i64
+    paint_us:      i64
+    present_us:    i64
+    idle_us:       i64
+    frame_count:   i64
+
+fn wm_timing_create() -> WmTimingCounters:
+    WmTimingCounters(
+        event_wait_us: 0,
+        input_us:      0,
+        layout_us:     0,
+        paint_us:      0,
+        present_us:    0,
+        idle_us:       0,
+        frame_count:   0,
+    )
+
+fn wm_timing_record_event_wait(c: WmTimingCounters, us: i64) -> WmTimingCounters:
+    WmTimingCounters(
+        event_wait_us: c.event_wait_us + us,
+        input_us:      c.input_us,
+        layout_us:     c.layout_us,
+        paint_us:      c.paint_us,
+        present_us:    c.present_us,
+        idle_us:       c.idle_us,
+        frame_count:   c.frame_count,
+    )
+
+fn wm_timing_record_input(c: WmTimingCounters, us: i64) -> WmTimingCounters:
+    WmTimingCounters(
+        event_wait_us: c.event_wait_us,
+        input_us:      c.input_us + us,
+        layout_us:     c.layout_us,
+        paint_us:      c.paint_us,
+        present_us:    c.present_us,
+        idle_us:       c.idle_us,
+        frame_count:   c.frame_count,
+    )
+
+fn wm_timing_record_layout(c: WmTimingCounters, us: i64) -> WmTimingCounters:
+    WmTimingCounters(
+        event_wait_us: c.event_wait_us,
+        input_us:      c.input_us,
+        layout_us:     c.layout_us + us,
+        paint_us:      c.paint_us,
+        present_us:    c.present_us,
+        idle_us:       c.idle_us,
+        frame_count:   c.frame_count,
+    )
+
+fn wm_timing_record_paint(c: WmTimingCounters, us: i64) -> WmTimingCounters:
+    WmTimingCounters(
+        event_wait_us: c.event_wait_us,
+        input_us:      c.input_us,
+        layout_us:     c.layout_us,
+        paint_us:      c.paint_us + us,
+        present_us:    c.present_us,
+        idle_us:       c.idle_us,
+        frame_count:   c.frame_count,
+    )
+
+fn wm_timing_record_present(c: WmTimingCounters, us: i64) -> WmTimingCounters:
+    WmTimingCounters(
+        event_wait_us: c.event_wait_us,
+        input_us:      c.input_us,
+        layout_us:     c.layout_us,
+        paint_us:      c.paint_us,
+        present_us:    c.present_us + us,
+        idle_us:       c.idle_us,
+        frame_count:   c.frame_count,
+    )
+
+fn wm_timing_record_idle(c: WmTimingCounters, us: i64) -> WmTimingCounters:
+    WmTimingCounters(
+        event_wait_us: c.event_wait_us,
+        input_us:      c.input_us,
+        layout_us:     c.layout_us,
+        paint_us:      c.paint_us,
+        present_us:    c.present_us,
+        idle_us:       c.idle_us + us,
+        frame_count:   c.frame_count + 1,
+    )
+
+fn wm_timing_total_frame_us(c: WmTimingCounters) -> i64:
+    c.event_wait_us + c.input_us + c.layout_us + c.paint_us + c.present_us + c.idle_us
+
+fn wm_timing_summary(c: WmTimingCounters) -> text:
+    "WmTiming frames=" + c.frame_count.to_text()
+    + " total_us=" + wm_timing_total_frame_us(c).to_text()
+    + " [wait=" + c.event_wait_us.to_text()
+    + " input=" + c.input_us.to_text()
+    + " layout=" + c.layout_us.to_text()
+    + " paint=" + c.paint_us.to_text()
+    + " present=" + c.present_us.to_text()
+    + " idle=" + c.idle_us.to_text() + "]"
+
+# ---------------------------------------------------------------------------
+# PresentBatcher — coalesces up to 2 dirty rects, presents when batch full
+# ---------------------------------------------------------------------------
+
+class PresentBatcher:
+    batch_size:      i64
+    pending_count:   i64
+    total_batched:   i64
+    total_presented: i64
+    dirty_count:     i64
+    d0_x: i64
+    d0_y: i64
+    d0_w: i64
+    d0_h: i64
+    d1_x: i64
+    d1_y: i64
+    d1_w: i64
+    d1_h: i64
+
+fn present_batcher_create(batch_size: i64) -> PresentBatcher:
+    PresentBatcher(
+        batch_size:      batch_size,
+        pending_count:   0,
+        total_batched:   0,
+        total_presented: 0,
+        dirty_count:     0,
+        d0_x: 0, d0_y: 0, d0_w: 0, d0_h: 0,
+        d1_x: 0, d1_y: 0, d1_w: 0, d1_h: 0,
+    )
+
+fn present_batcher_add_dirty(b: PresentBatcher, x: i64, y: i64, w: i64, h: i64) -> text:
+    if b.dirty_count == 0:
+        b.d0_x = x
+        b.d0_y = y
+        b.d0_w = w
+        b.d0_h = h
+        b.dirty_count = 1
+        b.pending_count = b.pending_count + 1
+        b.total_batched = b.total_batched + 1
+        return "queued_0"
+    if b.dirty_count == 1:
+        b.d1_x = x
+        b.d1_y = y
+        b.d1_w = w
+        b.d1_h = h
+        b.dirty_count = 2
+        b.pending_count = b.pending_count + 1
+        b.total_batched = b.total_batched + 1
+        return "queued_1"
+    # Slots full — union into slot 1
+    val ux = min_i64(b.d1_x, x)
+    val uy = min_i64(b.d1_y, y)
+    val ux2 = max_i64(b.d1_x + b.d1_w, x + w)
+    val uy2 = max_i64(b.d1_y + b.d1_h, y + h)
+    b.d1_x = ux
+    b.d1_y = uy
+    b.d1_w = ux2 - ux
+    b.d1_h = uy2 - uy
+    b.total_batched = b.total_batched + 1
+    "merged"
+
+fn present_batcher_should_present(b: PresentBatcher) -> bool:
+    b.pending_count >= b.batch_size
+
+fn present_batcher_present_batch(b: PresentBatcher) -> text:
+    if b.pending_count == 0:
+        return "nothing_to_present"
+    val n = b.pending_count
+    b.total_presented = b.total_presented + n
+    b.pending_count = 0
+    b.dirty_count = 0
+    "presented " + n.to_text() + " rect(s)"
+
+fn present_batcher_stats(b: PresentBatcher) -> text:
+    "PresentBatcher[batch=" + b.batch_size.to_text()
+    + " pending=" + b.pending_count.to_text()
+    + " total_batched=" + b.total_batched.to_text()
+    + " total_presented=" + b.total_presented.to_text() + "]"

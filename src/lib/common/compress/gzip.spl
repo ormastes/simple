@@ -1,0 +1,54 @@
+# Common gzip facade built from pure Simple compression primitives.
+
+use std.nogc_sync_mut.compression.gzip.types.{OS_UNIX}
+use std.nogc_sync_mut.compression.gzip.crc.{crc32_calculate}
+use std.nogc_sync_mut.compression.gzip.header.{
+    gzip_header_create, gzip_header_parse, gzip_header_size,
+    gzip_footer_create, gzip_footer_parse, gzip_footer_validate
+}
+use std.nogc_sync_mut.compression.gzip.lz77.{lz77_compress}
+use std.nogc_sync_mut.compression.gzip.deflate.{deflate_block_fixed}
+use std.nogc_sync_mut.compression.gzip.inflate.{inflate}
+
+fn _append_bytes(target: [u8], source: [u8]) -> [u8]:
+    var out = target
+    var i = 0
+    while i < source.len():
+        out.push(source[i])
+        i = i + 1
+    out
+
+pub fn gzip_compress(data: [u8]) -> [u8]:
+    val level = 1
+    val header = gzip_header_create(nil, 0, 0, OS_UNIX)
+    val tokens = lz77_compress(data, level)
+    val compressed = deflate_block_fixed(tokens, true)
+    val footer = gzip_footer_create(crc32_calculate(data), data.len())
+    _append_bytes(_append_bytes(header, compressed), footer)
+
+pub fn gzip_decompress(data: [u8]) -> [u8]:
+    if data.len() < 18:
+        return []
+    val header_info = gzip_header_parse(data)
+    if header_info == nil:
+        return []
+    val header_size = gzip_header_size(header_info)
+    val footer_offset = data.len() - 8
+    val footer_info = gzip_footer_parse(data, footer_offset)
+    if footer_info == nil:
+        return []
+    var compressed: [u8] = []
+    var i = header_size
+    while i < footer_offset:
+        compressed.push(data[i])
+        i = i + 1
+    val maybe_decompressed = inflate(compressed)
+    if maybe_decompressed == nil:
+        return []
+    val decompressed = maybe_decompressed ?? []
+    if not gzip_footer_validate(footer_info, decompressed, decompressed.len()):
+        return []
+    decompressed
+
+pub fn gzip_crc32(data: [u8]) -> u32:
+    crc32_calculate(data) as u32

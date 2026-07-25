@@ -1,0 +1,72 @@
+use std.spec
+use os.hosted.hosted_wm_evidence.{
+    host_wm_evidence_config,
+    host_wm_evidence_parse_command,
+    host_wm_evidence_ppm,
+    host_wm_input_receipt,
+    host_wm_input_receipt_json,
+    host_wm_input_record_key,
+    host_wm_input_record_pointer_button,
+    host_wm_input_record_pointer_move
+}
+
+describe "hosted WM production evidence protocol":
+    it "is disabled by default and rejects partial hook configuration":
+        val disabled = host_wm_evidence_config("", "", "")
+        expect(disabled.enabled).to_equal(false)
+        expect(disabled.valid).to_equal(true)
+        val partial = host_wm_evidence_config("scene.json", "", "commands")
+        expect(partial.enabled).to_equal(true)
+        expect(partial.valid).to_equal(false)
+
+    it "accepts nonce-tagged production input commands and rejects malformed input":
+        val f11 = host_wm_evidence_parse_command("17 f11\n")
+        expect(f11.valid).to_equal(true)
+        expect(f11.nonce).to_equal(17)
+        expect(f11.action).to_equal("f11")
+        val pointer = host_wm_evidence_parse_command("18 pointer 42 77")
+        expect(pointer.valid).to_equal(true)
+        expect(pointer.x).to_equal(42)
+        expect(pointer.y).to_equal(77)
+        expect(host_wm_evidence_parse_command("0 f11").valid).to_equal(false)
+        expect(host_wm_evidence_parse_command("19 unknown").valid).to_equal(false)
+
+    it "encodes exact presented ARGB pixels as binary PPM RGB bytes":
+        val ppm = host_wm_evidence_ppm(2, 1, [0xFFFF0000u32, 0xFF00FF00u32])
+        expect(ppm.len()).to_equal(17)
+        expect(ppm[11]).to_equal(0xFFu8)
+        expect(ppm[12]).to_equal(0u8)
+        expect(ppm[13]).to_equal(0u8)
+        expect(ppm[14]).to_equal(0u8)
+        expect(ppm[15]).to_equal(0xFFu8)
+        expect(ppm[16]).to_equal(0u8)
+
+    it "rejects capture dimensions that do not exactly match readback":
+        expect(host_wm_evidence_ppm(2, 2, [0u32]).len()).to_equal(0)
+
+    it "retains distinct keyboard down and up receipts":
+        val initial = host_wm_input_receipt()
+        val pressed = host_wm_input_record_key(initial, 30, 65, true)
+        val released = host_wm_input_record_key(pressed, 30, 65, false)
+        expect(released.key_down_count).to_equal(1)
+        expect(released.key_up_count).to_equal(1)
+        expect(released.last_event_kind).to_equal("key-up")
+        expect(released.last_scancode).to_equal(30)
+        expect(released.last_keycode).to_equal(65)
+
+    it "retains distinct pointer move, button-down, and button-up receipts":
+        val initial = host_wm_input_receipt()
+        val moved = host_wm_input_record_pointer_move(initial, 42, 77)
+        val pressed = host_wm_input_record_pointer_button(moved, 0, true)
+        val released = host_wm_input_record_pointer_button(pressed, 0, false)
+        expect(released.pointer_move_count).to_equal(1)
+        expect(released.pointer_button_down_count).to_equal(1)
+        expect(released.pointer_button_up_count).to_equal(1)
+        expect(released.last_event_kind).to_equal("pointer-button-up")
+        expect(released.last_pointer_x).to_equal(42)
+        expect(released.last_pointer_y).to_equal(77)
+        expect(released.last_pointer_button).to_equal(0)
+        val receipt_json = host_wm_input_receipt_json(released)
+        expect(receipt_json).to_contain("\"pointer_move_count\":1")
+        expect(receipt_json).to_contain("\"pointer_button_down_count\":1")
+        expect(receipt_json).to_contain("\"pointer_button_up_count\":1")

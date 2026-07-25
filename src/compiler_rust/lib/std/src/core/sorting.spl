@@ -1,0 +1,377 @@
+# Sorting Algorithms Module
+# Provides configurable sorting algorithms for collections
+# Feature: Ruby-style API enhancements
+
+use core.traits.*
+use core.collections.*
+
+# ============================================
+# SortAlgorithm Enum
+# ============================================
+
+enum SortAlgorithm:
+    InsertionSort    # O(n^2), stable, good for small arrays (<32 elements)
+    PDQSort          # Pattern-Defeating Quicksort, general purpose, unstable
+    TimSort          # Optimized for real-world data, stable
+    HeapSort         # O(n log n) guaranteed, unstable, in-place
+
+# Default sorting algorithm (PDQSort is generally best for random data)
+const DEFAULT_SORT_ALGORITHM: SortAlgorithm = SortAlgorithm.PDQSort
+
+impl SortAlgorithm:
+    fn to_string() -> text:
+        """Convert SortAlgorithm to string representation.
+        Returns: algorithm name
+        Example: SortAlgorithm.PDQSort.to_string()  # -> "PDQSort"
+        """
+        match self:
+            case SortAlgorithm.InsertionSort: "InsertionSort"
+            case SortAlgorithm.PDQSort: "PDQSort"
+            case SortAlgorithm.TimSort: "TimSort"
+            case SortAlgorithm.HeapSort: "HeapSort"
+
+    fn description() -> text:
+        """Get human-readable description of the algorithm.
+        Returns: descriptive explanation
+        Example: SortAlgorithm.TimSort.description()
+        """
+        match self:
+            case SortAlgorithm.InsertionSort:
+                "Insertion sort - O(n^2), stable, best for small arrays"
+            case SortAlgorithm.PDQSort:
+                "Pattern-Defeating Quicksort - O(n log n) average, general purpose"
+            case SortAlgorithm.TimSort:
+                "TimSort - O(n log n), stable, optimized for real-world data"
+            case SortAlgorithm.HeapSort:
+                "Heap sort - O(n log n) guaranteed, in-place"
+
+    fn is_stable() -> bool:
+        """Check if the algorithm maintains relative order of equal elements.
+        Returns: true if stable
+        Example: SortAlgorithm.TimSort.is_stable()  # -> true
+        """
+        match self:
+            case SortAlgorithm.InsertionSort: true
+            case SortAlgorithm.PDQSort: false
+            case SortAlgorithm.TimSort: true
+            case SortAlgorithm.HeapSort: false
+
+    fn is_adaptive() -> bool:
+        """Check if the algorithm adapts to partially sorted data.
+        Returns: true if adaptive
+        Example: SortAlgorithm.TimSort.is_adaptive()  # -> true
+        """
+        match self:
+            case SortAlgorithm.InsertionSort: true
+            case SortAlgorithm.PDQSort: true
+            case SortAlgorithm.TimSort: true
+            case SortAlgorithm.HeapSort: false
+
+    fn summary() -> text:
+        """Get comprehensive summary of the algorithm.
+        Returns: summary with name, stability, and description
+        """
+        val name = self.to_string()
+        val stable = if self.is_stable(): "stable" else: "unstable"
+        val desc = self.description()
+        "SortAlgorithm: {name} ({stable}) - {desc}"
+
+# ============================================
+# Sorting Implementations
+# ============================================
+
+# Insertion sort - best for small arrays
+fn insertion_sort<T>(slice: MutSlice<T>) where T: Ord:
+    """Sort using insertion sort algorithm.
+    Time: O(n^2) worst/average, O(n) best
+    Space: O(1)
+    Stable: Yes
+    """
+    val n = slice.len()
+    if n < 2:
+        return
+
+    for i in 1..n:
+        var j = i
+        while j > 0:
+            val curr = slice.get(j).expect("valid index")
+            val prev = slice.get(j - 1).expect("valid index")
+            if curr.lt(&prev):
+                slice.swap(j, j - 1).expect("valid indices")
+                j = j - 1
+            else:
+                break
+
+# Heap sort - guaranteed O(n log n), in-place
+fn heapsort<T>(slice: MutSlice<T>) where T: Ord:
+    """Sort using heapsort algorithm.
+    Time: O(n log n) guaranteed
+    Space: O(1)
+    Stable: No
+    """
+    val n = slice.len()
+    if n < 2:
+        return
+
+    # Build max heap
+    var i = n / 2
+    while i > 0:
+        i = i - 1
+        sift_down(slice, start=i, end=n)
+
+    # Extract elements from heap
+    var end = n
+    while end > 1:
+        end = end - 1
+        slice.swap(0, end).expect("valid indices")
+        sift_down(slice, start=0, end=end)
+
+# Helper for heapsort - sift element down the heap
+fn sift_down<T>(slice: MutSlice<T>, start: usize, end: usize) where T: Ord:
+    var root = start
+    while true:
+        val left = 2 * root + 1
+        if left >= end:
+            break
+
+        var largest = root
+        val root_val = slice.get(root).expect("valid")
+        val left_val = slice.get(left).expect("valid")
+
+        if left_val.gt(&root_val):
+            largest = left
+
+        val right = left + 1
+        if right < end:
+            val largest_val = slice.get(largest).expect("valid")
+            val right_val = slice.get(right).expect("valid")
+            if right_val.gt(&largest_val):
+                largest = right
+
+        if largest == root:
+            break
+
+        slice.swap(root, largest).expect("valid indices")
+        root = largest
+
+# PDQSort (Pattern-Defeating Quicksort) - simplified version
+fn pdqsort<T>(slice: MutSlice<T>) where T: Ord:
+    """Sort using pattern-defeating quicksort algorithm.
+    Time: O(n log n) average, O(n^2) worst (rare)
+    Space: O(log n) stack
+    Stable: No
+    """
+    val n = slice.len()
+    if n < 2:
+        return
+
+    # Use insertion sort for small arrays
+    if n <= 16:
+        insertion_sort(slice)
+        return
+
+    pdqsort_impl(slice, left=0, right=n, depth=log2_floor(n) * 2)
+
+fn pdqsort_impl<T>(slice: MutSlice<T>, left: usize, right: usize, depth: usize) where T: Ord:
+    val len = right - left
+    if len <= 16:
+        # Use insertion sort for small subarrays
+        val sub_slice = slice.subslice(left, right)
+        insertion_sort(sub_slice)
+        return
+
+    if depth == 0:
+        # Fallback to heapsort to avoid O(n^2)
+        val sub_slice = slice.subslice(left, right)
+        heapsort(sub_slice)
+        return
+
+    # Choose pivot using median-of-three
+    val mid = left + len / 2
+    val pivot_idx = median_of_three(slice, a=left, b=mid, c=right - 1)
+
+    # Partition around pivot
+    slice.swap(pivot_idx, right - 1).expect("valid")
+    val pivot_val = slice.get(right - 1).expect("valid")
+
+    var i = left
+    var j = right - 2
+
+    while true:
+        while i < right - 1 and slice.get(i).expect("valid").lt(&pivot_val):
+            i = i + 1
+        while j > left and slice.get(j).expect("valid").gt(&pivot_val):
+            j = j - 1
+        if i >= j:
+            break
+        slice.swap(i, j).expect("valid")
+        i = i + 1
+        j = j - 1
+
+    slice.swap(i, right - 1).expect("valid")
+
+    # Recurse on smaller partition first to limit stack depth
+    val left_len = i - left
+    val right_len = right - i - 1
+
+    if left_len < right_len:
+        pdqsort_impl(slice, left=left, right=i, depth=depth - 1)
+        pdqsort_impl(slice, left=i + 1, right=right, depth=depth - 1)
+    else:
+        pdqsort_impl(slice, left=i + 1, right=right, depth=depth - 1)
+        pdqsort_impl(slice, left=left, right=i, depth=depth - 1)
+
+# TimSort - optimized for real-world data (simplified version)
+fn timsort<T>(slice: MutSlice<T>) where T: Ord:
+    """Sort using TimSort algorithm (simplified).
+    Time: O(n log n)
+    Space: O(n)
+    Stable: Yes
+    """
+    val n = slice.len()
+    if n < 2:
+        return
+
+    # Use insertion sort for small arrays
+    if n <= 32:
+        insertion_sort(slice)
+        return
+
+    # TimSort uses runs of 32-64 elements
+    val min_run: usize = 32
+
+    # Sort individual runs with insertion sort
+    var i: usize = 0
+    while i < n:
+        val run_end = min_usize(left=i + min_run, right=n)
+        val run_slice = slice.subslice(i, run_end)
+        insertion_sort(run_slice)
+        i = i + min_run
+
+    # Merge runs
+    var size = min_run
+    while size < n:
+        var left_start: usize = 0
+        while left_start < n:
+            val mid = min_usize(left=left_start + size, right=n)
+            val right_end = min_usize(left=left_start + 2 * size, right=n)
+
+            if mid < right_end:
+                merge(slice, left=left_start, mid=mid, right=right_end)
+
+            left_start = left_start + 2 * size
+
+        size = size * 2
+
+# Merge helper for timsort
+fn merge<T>(slice: MutSlice<T>, left: usize, mid: usize, right: usize) where T: Ord + Clone:
+    # Create temporary arrays
+    var left_arr = List.new()
+    for i in left..mid:
+        left_arr.push(slice.get(i).expect("valid").clone())
+
+    var right_arr = List.new()
+    for i in mid..right:
+        right_arr.push(slice.get(i).expect("valid").clone())
+
+    var i: usize = 0
+    var j: usize = 0
+    var k = left
+
+    while i < left_arr.len() and j < right_arr.len():
+        val left_val = left_arr.get(i).expect("valid")
+        val right_val = right_arr.get(j).expect("valid")
+
+        if left_val.le(&right_val):
+            slice.set(k, left_val.clone()).expect("valid")
+            i = i + 1
+        else:
+            slice.set(k, right_val.clone()).expect("valid")
+            j = j + 1
+        k = k + 1
+
+    while i < left_arr.len():
+        slice.set(k, left_arr.get(i).expect("valid").clone()).expect("valid")
+        i = i + 1
+        k = k + 1
+
+    while j < right_arr.len():
+        slice.set(k, right_arr.get(j).expect("valid").clone()).expect("valid")
+        j = j + 1
+        k = k + 1
+
+# ============================================
+# Helper Functions
+# ============================================
+
+fn median_of_three<T>(slice: MutSlice<T>, a: usize, b: usize, c: usize) -> usize where T: Ord:
+    """Find median of three elements and return its index."""
+    val va = slice.get(a).expect("valid")
+    val vb = slice.get(b).expect("valid")
+    val vc = slice.get(c).expect("valid")
+
+    if va.lt(&vb):
+        if vb.lt(&vc):
+            b
+        elif va.lt(&vc):
+            c
+        else:
+            a
+    else:
+        if va.lt(&vc):
+            a
+        elif vb.lt(&vc):
+            c
+        else:
+            b
+
+fn log2_floor(n: usize) -> usize:
+    """Calculate floor of log base 2."""
+    if n == 0:
+        return 0
+    var result: usize = 0
+    var value = n
+    while value > 1:
+        value = value / 2
+        result = result + 1
+    result
+
+fn min_usize(left: usize, right: usize) -> usize:
+    if left < right: left else: right
+
+# ============================================
+# Main Sorting Function
+# ============================================
+
+fn sort_with_algorithm<T>(slice: MutSlice<T>, algo: SortAlgorithm) where T: Ord:
+    """Sort a mutable slice using the specified algorithm.
+
+    Args:
+        slice: Mutable slice to sort in-place
+        algo: Sorting algorithm to use
+
+    Example:
+        var arr = [5, 2, 8, 1, 9]
+        sort_with_algorithm(arr.as_mut_slice(), SortAlgorithm.TimSort)
+    """
+    match algo:
+        case SortAlgorithm.InsertionSort:
+            insertion_sort(slice)
+        case SortAlgorithm.PDQSort:
+            pdqsort(slice)
+        case SortAlgorithm.TimSort:
+            timsort(slice)
+        case SortAlgorithm.HeapSort:
+            heapsort(slice)
+
+fn sort_default<T>(slice: MutSlice<T>) where T: Ord:
+    """Sort a mutable slice using the default algorithm (PDQSort).
+
+    Args:
+        slice: Mutable slice to sort in-place
+
+    Example:
+        var arr = [5, 2, 8, 1, 9]
+        sort_default(arr.as_mut_slice())
+    """
+    sort_with_algorithm(slice, DEFAULT_SORT_ALGORITHM)

@@ -1,0 +1,160 @@
+# Physics System — Internal 2D Rigid Body
+#
+# Internal rigid body used by PhysicsWorld2D. NOT exported to users directly.
+# Implements semi-implicit Euler integration with linear and angular damping.
+#
+# Usage (internal only):
+#   var body = InternalBody2D.create_dynamic(Vec2(x: 0.0, y: 5.0), 1.0)
+#   body.apply_force(Vec2(x: 0.0, y: -9.81))
+#   body.integrate(0.016)
+
+use std.common.engine.math2d.{Vec2}
+
+# ============================================================================
+# InternalBody2D
+# ============================================================================
+
+class InternalBody2D:
+    position: Vec2
+    velocity: Vec2
+    force: Vec2
+    mass: f64
+    inv_mass: f64
+    rotation: f64
+    angular_velocity: f64
+    torque: f64
+    inertia: f64
+    inv_inertia: f64
+    linear_damping: f64
+    angular_damping: f64
+    is_static_body: bool
+    is_kinematic: bool
+    gravity_scale: f64
+
+impl InternalBody2D:
+
+    # ------------------------------------------------------------------
+    # Static constructors
+    # ------------------------------------------------------------------
+
+    static fn create_dynamic(pos: Vec2, mass: f64) -> InternalBody2D:
+        val im = 1.0 / mass
+        val inertia_val = mass * 0.4
+        val ii = 1.0 / inertia_val
+        InternalBody2D(
+            position: pos,
+            velocity: Vec2.zero(),
+            force: Vec2.zero(),
+            mass: mass,
+            inv_mass: im,
+            rotation: 0.0,
+            angular_velocity: 0.0,
+            torque: 0.0,
+            inertia: inertia_val,
+            inv_inertia: ii,
+            linear_damping: 0.01,
+            angular_damping: 0.01,
+            is_static_body: false,
+            is_kinematic: false,
+            gravity_scale: 1.0
+        )
+
+    static fn create_static(pos: Vec2) -> InternalBody2D:
+        InternalBody2D(
+            position: pos,
+            velocity: Vec2.zero(),
+            force: Vec2.zero(),
+            mass: 0.0,
+            inv_mass: 0.0,
+            rotation: 0.0,
+            angular_velocity: 0.0,
+            torque: 0.0,
+            inertia: 0.0,
+            inv_inertia: 0.0,
+            linear_damping: 0.0,
+            angular_damping: 0.0,
+            is_static_body: true,
+            is_kinematic: false,
+            gravity_scale: 0.0
+        )
+
+    static fn create_kinematic(pos: Vec2) -> InternalBody2D:
+        InternalBody2D(
+            position: pos,
+            velocity: Vec2.zero(),
+            force: Vec2.zero(),
+            mass: 0.0,
+            inv_mass: 0.0,
+            rotation: 0.0,
+            angular_velocity: 0.0,
+            torque: 0.0,
+            inertia: 0.0,
+            inv_inertia: 0.0,
+            linear_damping: 0.0,
+            angular_damping: 0.0,
+            is_static_body: false,
+            is_kinematic: true,
+            gravity_scale: 0.0
+        )
+
+    # ------------------------------------------------------------------
+    # Integration — Semi-implicit Euler
+    # ------------------------------------------------------------------
+
+    me integrate(dt: f64):
+        if self.is_static_body or self.is_kinematic:
+            self.force = Vec2.zero()
+            self.torque = 0.0
+            return
+
+        # Linear: a = F * inv_mass
+        val ax = self.force.x * self.inv_mass
+        val ay = self.force.y * self.inv_mass
+
+        # v += a * dt
+        val new_vx = self.velocity.x + ax * dt
+        val new_vy = self.velocity.y + ay * dt
+
+        # Apply linear damping: v *= (1 - damping * dt)
+        val damp = 1.0 - self.linear_damping * dt
+        val dvx = new_vx * damp
+        val dvy = new_vy * damp
+        self.velocity = Vec2(x: dvx, y: dvy)
+
+        # p += v * dt
+        val px = self.position.x + self.velocity.x * dt
+        val py = self.position.y + self.velocity.y * dt
+        self.position = Vec2(x: px, y: py)
+
+        # Angular: alpha = torque * inv_inertia
+        val alpha = self.torque * self.inv_inertia
+        var omega = self.angular_velocity + alpha * dt
+        # Apply angular damping
+        val ang_damp = 1.0 - self.angular_damping * dt
+        omega = omega * ang_damp
+        self.angular_velocity = omega
+
+        self.rotation = self.rotation + omega * dt
+
+        # Clear forces
+        self.force = Vec2.zero()
+        self.torque = 0.0
+
+    # ------------------------------------------------------------------
+    # Force / Impulse application
+    # ------------------------------------------------------------------
+
+    me apply_force(f: Vec2):
+        self.force = self.force.add(f)
+
+    me apply_impulse(impulse: Vec2):
+        val dx = impulse.x * self.inv_mass
+        val dy = impulse.y * self.inv_mass
+        self.velocity = Vec2(x: self.velocity.x + dx, y: self.velocity.y + dy)
+
+    me apply_torque_impulse(t: f64):
+        self.angular_velocity = self.angular_velocity + t * self.inv_inertia
+
+    me clear_forces():
+        self.force = Vec2.zero()
+        self.torque = 0.0

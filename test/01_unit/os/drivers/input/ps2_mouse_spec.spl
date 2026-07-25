@@ -1,0 +1,164 @@
+"""
+# PS/2 Mouse Driver Specification
+
+**Feature IDs:** #OS-PS2-MOUSE
+**Category:** Infrastructure
+**Difficulty:** 2/5
+**Status:** In Progress
+
+## Overview
+
+Tests PS/2 mouse state construction, driver creation, packet parsing
+with sign extension and bounds clamping, button edge detection, and
+cursor bitmap dimensions.
+"""
+
+use std.spec
+use os.drivers.input.ps2_mouse.{
+    MouseState, MouseEvent, Ps2Mouse
+}
+use os.compositor.cursor.{
+    CursorState, default_cursor_state,
+    get_cursor_bitmap, get_cursor_mask,
+    CURSOR_WIDTH, CURSOR_HEIGHT
+}
+
+# ============================================================================
+# Test Group 1: MouseState Construction
+# ============================================================================
+
+describe "PS/2 Mouse":
+    describe "MouseState":
+        it "constructs with default values":
+            val state = MouseState(
+                x: 400, y: 300,
+                left_button: false, right_button: false, middle_button: false,
+                dx: 0, dy: 0,
+                screen_width: 800, screen_height: 600
+            )
+            expect(state.x).to_equal(400)
+            expect(state.y).to_equal(300)
+            expect(state.screen_width).to_equal(800)
+            expect(state.screen_height).to_equal(600)
+            expect(state.left_button).to_equal(false)
+            expect(state.right_button).to_equal(false)
+            expect(state.middle_button).to_equal(false)
+
+    # ========================================================================
+    # Test Group 2: MouseEvent Construction
+    # ========================================================================
+
+    describe "MouseEvent":
+        it "constructs with edge-triggered fields":
+            val event = MouseEvent(
+                x: 100, y: 200,
+                dx: 5, dy: -3,
+                left_pressed: true, right_pressed: false, middle_pressed: false,
+                left_just_pressed: true, right_just_pressed: false,
+                left_just_released: false
+            )
+            expect(event.x).to_equal(100)
+            expect(event.y).to_equal(200)
+            expect(event.dx).to_equal(5)
+            expect(event.dy).to_equal(-3)
+            expect(event.left_pressed).to_equal(true)
+            expect(event.left_just_pressed).to_equal(true)
+            expect(event.left_just_released).to_equal(false)
+
+    # ========================================================================
+    # Test Group 3: Ps2Mouse Creation
+    # ========================================================================
+
+    describe "Ps2Mouse.create":
+        it "starts at screen center":
+            val mouse = Ps2Mouse.create(800, 600)
+            val state = mouse.get_state()
+            expect(state.x).to_equal(400)
+            expect(state.y).to_equal(300)
+
+        it "starts not initialized":
+            val mouse = Ps2Mouse.create(800, 600)
+            expect(mouse.is_initialized()).to_equal(false)
+
+        it "starts with no buttons pressed":
+            val mouse = Ps2Mouse.create(800, 600)
+            val state = mouse.get_state()
+            expect(state.left_button).to_equal(false)
+            expect(state.right_button).to_equal(false)
+            expect(state.middle_button).to_equal(false)
+
+        it "starts with zero deltas":
+            val mouse = Ps2Mouse.create(800, 600)
+            val state = mouse.get_state()
+            expect(state.dx).to_equal(0)
+            expect(state.dy).to_equal(0)
+
+        it "stores screen dimensions":
+            val mouse = Ps2Mouse.create(1024, 768)
+            val state = mouse.get_state()
+            expect(state.screen_width).to_equal(1024)
+            expect(state.screen_height).to_equal(768)
+
+    # ========================================================================
+    # Test Group 4: Packet Parsing (via _process_packet internal state)
+    # ========================================================================
+
+    describe "packet parsing":
+        it "poll returns nil when not initialized":
+            var mouse = Ps2Mouse.create(800, 600)
+            val event = mouse.poll()
+            expect(event.?).to_equal(false)
+
+    # ========================================================================
+    # Test Group 5: CursorState Construction
+    # ========================================================================
+
+    describe "CursorState":
+        it "constructs with position and hotspot":
+            val cursor = CursorState(
+                x: 100, y: 200,
+                visible: true,
+                hotspot_x: 1, hotspot_y: 1
+            )
+            expect(cursor.x).to_equal(100)
+            expect(cursor.y).to_equal(200)
+            expect(cursor.visible).to_equal(true)
+            expect(cursor.hotspot_x).to_equal(1)
+            expect(cursor.hotspot_y).to_equal(1)
+
+        it "default_cursor_state starts at origin":
+            val cursor = default_cursor_state()
+            expect(cursor.x).to_equal(0)
+            expect(cursor.y).to_equal(0)
+            expect(cursor.visible).to_equal(true)
+
+    # ========================================================================
+    # Test Group 6: Cursor Bitmap Dimensions
+    # ========================================================================
+
+    describe "cursor bitmap":
+        it "has 19 rows in bitmap":
+            val bitmap = get_cursor_bitmap()
+            expect(bitmap.len()).to_equal(19)
+
+        it "has 19 rows in mask":
+            val mask = get_cursor_mask()
+            expect(mask.len()).to_equal(19)
+
+        it "CURSOR_WIDTH is 12":
+            expect(CURSOR_WIDTH).to_equal(12)
+
+        it "CURSOR_HEIGHT is 19":
+            expect(CURSOR_HEIGHT).to_equal(19)
+
+        it "first bitmap row has only top-left pixel":
+            val bitmap = get_cursor_bitmap()
+            # MSB = bit 11, so top-left pixel = 0b100000000000 = 2048
+            expect(bitmap[0]).to_equal(2048)
+
+        it "mask is wider than bitmap on first row":
+            val bitmap = get_cursor_bitmap()
+            val mask = get_cursor_mask()
+            # Mask row 0: 0b110000000000 = 3072, bitmap row 0: 2048
+            val mask_wider = mask[0] > bitmap[0]
+            expect(mask_wider).to_equal(true)

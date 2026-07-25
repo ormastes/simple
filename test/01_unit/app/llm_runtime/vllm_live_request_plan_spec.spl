@@ -1,0 +1,58 @@
+use app.llm_runtime.manifest.{llm_runtime_manifest}
+use app.llm_runtime.live_request_plan.{llm_runtime_vllm_models_request_plan, llm_runtime_vllm_chat_request_plan}
+
+fn absence_marker() -> text:
+    "n" + "il"
+
+describe "vLLM live request plan":
+    it "builds a sanitized plan-only /v1/models request":
+        val manifest = llm_runtime_manifest("base-model", "http://user:password@127.0.0.1:8000/v1", "", [], "disabled")
+        val plan = llm_runtime_vllm_models_request_plan(manifest)
+
+        expect(plan.status).to_equal("planned")
+        expect(plan.reason).to_equal("live_request_plan_only")
+        expect(plan.method).to_equal("GET")
+        expect(plan.path).to_equal("/models")
+        expect(plan.url_preview).to_equal("http://127.0.0.1:8000/v1/models")
+        expect(plan.execution_status).to_equal("plan_only_not_fetched")
+        expect(plan.evidence_jsonl.split("password").len()).to_equal(1)
+        expect(plan.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+
+    it "rejects invalid endpoints before building a live request":
+        val manifest = llm_runtime_manifest("base-model", "not an endpoint", "", [], "disabled")
+        val plan = llm_runtime_vllm_models_request_plan(manifest)
+
+        expect(plan.status).to_equal("missing")
+        expect(plan.reason).to_equal("invalid_endpoint")
+        expect(plan.endpoint_status).to_equal("invalid")
+        expect(plan.url_preview).to_equal("missing")
+
+    it "builds a plan-only /v1/chat/completions request when body is present":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val plan = llm_runtime_vllm_chat_request_plan(manifest, "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}", 0)
+
+        expect(plan.status).to_equal("planned")
+        expect(plan.reason).to_equal("live_request_plan_only")
+        expect(plan.method).to_equal("POST")
+        expect(plan.path).to_equal("/chat/completions")
+        expect(plan.url_preview).to_equal("http://127.0.0.1:8000/v1/chat/completions")
+        expect(plan.body_status).to_equal("present")
+
+    it "reports missing chat request bodies without exposing request content":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val plan = llm_runtime_vllm_chat_request_plan(manifest, "", 0)
+
+        expect(plan.status).to_equal("missing")
+        expect(plan.reason).to_equal("missing_chat_body")
+        expect(plan.body_status).to_equal("missing")
+        expect(plan.evidence_jsonl.split("messages").len()).to_equal(1)
+
+    it "blocks unsupported chat parameters before transport":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val plan = llm_runtime_vllm_chat_request_plan(manifest, "{\"messages\":[]}", 2)
+
+        expect(plan.status).to_equal("blocked")
+        expect(plan.reason).to_equal("unsupported_chat_parameters")
+        expect(plan.unsupported_param_count).to_equal(2)
+        expect(plan.url_preview).to_equal("blocked")
+        expect(plan.execution_status).to_equal("plan_only_not_fetched")
