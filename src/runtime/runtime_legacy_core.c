@@ -23,6 +23,7 @@
 #else
 #include <dirent.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -43,6 +44,29 @@ int64_t rt_thread_available_parallelism(void) {
 #else
     long count = sysconf(_SC_NPROCESSORS_ONLN);
     return count > 0 ? (int64_t)count : 1;
+#endif
+}
+
+int64_t rt_munmap_raw(int64_t addr, int64_t length) {
+#if defined(_WIN32)
+    (void)length;
+    if (!addr) return -1;
+    return VirtualFree((void*)(uintptr_t)addr, 0, MEM_RELEASE) ? 0 : -1;
+#else
+    return (int64_t)munmap((void*)(uintptr_t)addr, (size_t)length);
+#endif
+}
+
+int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
+#if defined(_WIN32)
+    DWORD protect = PAGE_READWRITE;
+    if (prot == 0x1) protect = PAGE_READONLY;
+    else if (prot == 0x5) protect = PAGE_EXECUTE_READ;
+    else if (prot == 0x7) protect = PAGE_EXECUTE_READWRITE;
+    DWORD old_protect;
+    return VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, protect, &old_protect) ? 0 : -1;
+#else
+    return (int64_t)mprotect((void*)(uintptr_t)addr, (size_t)length, (int)prot);
 #endif
 }
 

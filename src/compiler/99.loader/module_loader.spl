@@ -10,7 +10,7 @@ use compiler.loader.compiler_sffi.{TypeInfo, type_to_string}
 use compiler.loader.metadata_symbols.{loaded_metadata_instantiation_symbol_names, loaded_metadata_remove_path}
 use compiler.loader.unload_ownership.{owned_global_symbol_names, global_symbols_without_names}
 use compiler.backend.linker.smf_reader_memory.{SmfReaderMemory}
-use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64}
+use compiler.loader.smf_mmap_native.{native_alloc_exec_memory, native_write_exec_memory, native_make_executable, native_make_rw, native_flush_icache, native_reloc_write_i32, native_reloc_write_i64, native_call_function_0}
 use std.io_runtime.{file_read_bytes}
 
 fn _path_tag(path: text) -> text:
@@ -537,6 +537,27 @@ fn moduleloader_unload(self: ModuleLoader, path: text):
 
 fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
     self.resolve_symbol(name)
+
+fn moduleloader_execute_smf(path: text) -> Result<i64, text>:
+    val loader = moduleloader_with_defaults()
+    match moduleloader_load(loader, path):
+        case Success(_):
+            moduleloader_execute_loaded_main(loader, path)
+        case AlreadyLoaded(_):
+            moduleloader_execute_loaded_main(loader, path)
+        case Error(message):
+            Err("SMF load failed for {path}: {message}")
+
+fn moduleloader_execute_loaded_main(loader: ModuleLoader, path: text) -> Result<i64, text>:
+    match moduleloader_resolve_symbol(loader, "main"):
+        case Found(symbol, _):
+            Ok(native_call_function_0(symbol.address))
+        case JitCompiled(symbol, _):
+            Ok(native_call_function_0(symbol.address))
+        case NotFound(_):
+            Err("SMF entry point 'main' not found in {path}")
+        case Error(message):
+            Err("SMF entry point 'main' resolution failed: {message}")
 
 fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [TypeInfo]) -> SymbolResult:
     self.resolve_symbol(mangle_name(name, type_args))
