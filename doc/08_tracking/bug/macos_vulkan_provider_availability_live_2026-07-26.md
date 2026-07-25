@@ -38,3 +38,31 @@ or the native receiver/cache divergence before spending another full live
 window cycle.
 
 The three Vulkan build/launch diagnosis cycles for this session are exhausted.
+
+## Focused provider micro-probe — 2026-07-26
+
+A separate windowless discriminator now exists at
+`scripts/check/check-macos-vulkan-provider-micro-probe.shs`. Its pure-Simple
+probe opens one explicitly supplied provider dylib and directly resolves:
+
+- `rt_vulkan_provider_is_available`
+- `rt_vulkan_provider_device_count`
+- `rt_vulkan_init`
+- `rt_vulkan_get_last_error`
+- `rt_vulkan_shutdown`
+
+The checker also records the canonical provider path, provider SHA-256, and
+dyld library resolution. It does not construct `VulkanBackend`, start
+Engine2D, use winit, or launch a window.
+
+The focused source contract passed 2/2. The only allowed native execution
+attempt did not reach the provider: the canonical self-hosted compiler exited
+with `Illegal instruction: 4`, and its retained build log contains:
+
+```text
+runtime error: field access on nil receiver
+```
+
+Therefore provider availability, device count, dyld resolution, and provider
+error remain unobserved in this run. No Rust seed fallback and no exhausted
+full-live Vulkan command were used.
