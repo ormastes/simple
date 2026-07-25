@@ -875,7 +875,17 @@ begin
               end case;
             when "0000011" =>
               eff := r(rs1) + sext(ins(31 downto 20));
-              if rd /= 0 then
+              if eff = UART_ADDR + x"00000005" then
+                -- 16550 UART Line Status Register read. Report THRE|TEMT (0x60)
+                -- so the firmware's "wait until TX holding register empty" poll
+                -- (lbu 5(uart_base); andi 0x20; beqz loop) makes forward progress.
+                -- Without modelling the LSR the soft-core returned 0 here and any
+                -- LSR-polling firmware (the minimal NVMe self-test) spun forever
+                -- before emitting its first UART byte. QEMU's 16550 models this;
+                -- the core must too to run the same firmware. Board-faithful: a
+                -- real idle 16550 reads 0x60 in the LSR.
+                if rd /= 0 then r(rd) := x"00000060"; end if;
+              elsif rd /= 0 then
                 case ins(14 downto 12) is
                   when "000" =>
                     mem_idx := word_index(eff);
