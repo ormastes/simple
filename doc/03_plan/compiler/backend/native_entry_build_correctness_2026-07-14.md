@@ -1096,3 +1096,12 @@ the shared binary — deploys require explicit user go-ahead).
   the focused scalar object, before producing an artifact; this is blocker
   evidence only. A fresh candidate must run the wired gate before Windows
   ARM64 LLVM receives object credit.
+
+  Two legacy CI definitions were retired instead of repaired:
+  `windows-tests.yml` executed no Windows binary, while
+  `test-isolation.yml` invoked five absent test roots and masked every failure.
+  Their platform intent is superseded by the mandatory multiplatform, FreeBSD
+  QEMU, and RISC-V hardware gates; they provided no valid coverage to preserve.
+  The portability source contract rejects restoration of either false-green
+  workflow, and both deleted paths still trigger that contract. External
+  branch protection must not require their retired check names.
