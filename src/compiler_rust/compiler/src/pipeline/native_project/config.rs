@@ -105,9 +105,13 @@ impl NativeProjectBuilder {
         let Some(entry) = self.entry_file.as_ref().map(|entry| super::safe_canonicalize(entry)) else {
             return false;
         };
-        ["src/app/cli/main.spl", "src/app/cli/native_build_main.spl"]
-            .iter()
-            .any(|expected| entry == super::safe_canonicalize(&self.project_root.join(expected)))
+        [
+            "src/app/cli/main.spl",
+            "src/app/cli/native_build_main.spl",
+            "src/app/os/main.spl",
+        ]
+        .iter()
+        .any(|expected| entry == super::safe_canonicalize(&self.project_root.join(expected)))
     }
 
     pub(crate) fn selected_stage4_compiler_backfill_archive(&self) -> Result<Option<PathBuf>, String> {

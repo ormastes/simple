@@ -2892,6 +2892,13 @@ fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry()
         NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("cli-out")).entry_file(cli_entry);
     assert!(cli_builder.is_authorized_stage4_compiler_entry());
 
+    let os_entry = temp.path().join("src/app/os/main.spl");
+    std::fs::create_dir_all(os_entry.parent().unwrap()).unwrap();
+    std::fs::write(&os_entry, "fn main() -> i64: 0\n").unwrap();
+    let os_builder =
+        NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("os-out")).entry_file(os_entry);
+    assert!(os_builder.is_authorized_stage4_compiler_entry());
+
     let no_entry = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("no-entry-out"));
     assert!(!no_entry.is_authorized_stage4_compiler_entry());
     let bootstrap_entry = temp.path().join("src/app/cli/bootstrap_main.spl");
@@ -2987,9 +2994,18 @@ fn test_stage4_compiler_entries_select_only_dedicated_compiler_backfill() {
     let full_entry = temp.path().join("src/app/cli/main.spl");
     std::fs::write(&full_entry, "fn main() -> i64: 0\n").unwrap();
     let full = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("full-out"))
-        .config(config)
+        .config(config.clone())
         .entry_file(full_entry.clone());
     let error = full.selected_stage4_compiler_backfill_archive().unwrap_err();
+    assert!(error.contains("libsimple_compiler_backfill.a"));
+
+    let os_entry = temp.path().join("src/app/os/main.spl");
+    std::fs::create_dir_all(os_entry.parent().unwrap()).unwrap();
+    std::fs::write(&os_entry, "fn main() -> i64: 0\n").unwrap();
+    let os = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("os-out"))
+        .config(config)
+        .entry_file(os_entry.clone());
+    let error = os.selected_stage4_compiler_backfill_archive().unwrap_err();
     assert!(error.contains("libsimple_compiler_backfill.a"));
 
     let dedicated = runtime_path.join("libsimple_compiler_backfill.a");
@@ -3000,12 +3016,14 @@ fn test_stage4_compiler_entries_select_only_dedicated_compiler_backfill() {
     );
     assert_eq!(
         full.selected_stage4_compiler_backfill_archive().unwrap(),
-        Some(dedicated)
+        Some(dedicated.clone())
     );
+    assert_eq!(os.selected_stage4_compiler_backfill_archive().unwrap(), Some(dedicated));
     let native_all = (runtime_path.join("libsimple_native_all.a"), true);
     assert!(focused.reject_unexpected_native_all(Some(&native_all)).is_err());
     assert!(full.reject_unexpected_native_all(Some(&native_all)).is_err());
-    for entry in [focused_entry.clone(), full_entry.clone()] {
+    assert!(os.reject_unexpected_native_all(Some(&native_all)).is_err());
+    for entry in [focused_entry.clone(), full_entry.clone(), os_entry.clone()] {
         let without_runtime =
             NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("missing-runtime-out"))
                 .entry_file(entry);
@@ -3014,7 +3032,7 @@ fn test_stage4_compiler_entries_select_only_dedicated_compiler_backfill() {
             .unwrap_err()
             .contains("explicit runtime path"));
     }
-    for entry in [focused_entry, full_entry] {
+    for entry in [focused_entry, full_entry, os_entry] {
         for (bundle, expected) in [
             ("hosted", "removed Rust-hosted runtime bundles"),
             ("simple-core", "requires the core-c-bootstrap runtime lane"),
