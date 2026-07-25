@@ -522,7 +522,15 @@ fn headless_status(prefix: text, key: text, value: text):
 fn run_headless_capture(repo_root: text) -> i64:
     val prefix = "wm_web_standards_showcase_host_headless"
     val tmp_root = path_join(repo_root, "build/tmp")
-    dir_create_all(tmp_root)
+    # Check the return: a directory-layer failure here otherwise surfaces much
+    # later as the generic `ppm-write-failed`, which absorbed at least two
+    # distinct failures and stalled a root-cause hunt. See
+    # doc/08_tracking/bug/wm_widget_headless_default_ppm_path_write_fails_2026-07-25.md
+    if not dir_create_all(tmp_root):
+        headless_status(prefix, "status", "fail")
+        headless_status(prefix, "reason", "tmp-root-create-failed")
+        headless_status(prefix, "tmp_root", tmp_root)
+        return 1
     val stamp = "{getpid()}_{time_now_unix_micros()}"
     val bridge_path = path_join(tmp_root, "wm_web_standards_showcase_headless_{stamp}.bridge")
     val frame_path = path_join(tmp_root, "wm_web_standards_showcase_headless_{stamp}.ppm")
@@ -566,11 +574,43 @@ fn run_headless_capture(repo_root: text) -> i64:
         return 1
     val present_pixels = blit_child_frame_pixels(base_pixels, comp, child.pixels, child.w, child.h)
     val metrics = headless_capture_metrics(present_pixels)
-    val ppm_path = env_get("SIMPLE_WM_HEADLESS_CAPTURE_PPM") ?? path_join(tmp_root, "wm_web_standards_showcase_headless_capture.ppm")
+    # NOT `env_get(...) ?? fallback`: std.io_runtime's env_get returns plain
+    # `text` (io_runtime.spl:174), not `text?`, so it yields "" — never nil —
+    # for an unset variable and `??` never fires. That silently produced an
+    # EMPTY ppm_path and a bogus `ppm-write-failed`. A sibling env_get
+    # (src/config.spl:764) DOES return `text?`, which is why the idiom looks
+    # right. See doc/08_tracking/bug/env_get_nil_coalesce_dead_fallback_2026-07-25.md
+    val ppm_override = env_get("SIMPLE_WM_HEADLESS_CAPTURE_PPM")
+    val ppm_path = if ppm_override != "":
+        ppm_override
+    else:
+        path_join(tmp_root, "wm_web_standards_showcase_headless_capture.ppm")
     val ppm_bytes = encode_ppm_p6(W.to_u32(), H.to_u32(), present_pixels)
     if not file_write_bytes(ppm_path, ppm_bytes):
         headless_status(prefix, "status", "fail")
         headless_status(prefix, "reason", "ppm-write-failed")
+        # Report WHAT failed, not just that something did: this branch used to
+        # emit the reason alone, so the actual path and payload size at failure
+        # time had to be reconstructed from outside the process.
+        headless_status(prefix, "failed_ppm_path", ppm_path)
+        headless_status(prefix, "failed_ppm_bytes", "{ppm_bytes.len()}")
+        return 1
+    # Gate the CHILD frame separately from the composite. `metrics` above is
+    # computed on present_pixels, which already contains WM chrome (titlebar,
+    # borders, taskbar, desktop) — that chrome alone makes `varied` true, so a
+    # totally blank child app still scored status=pass reason=ok. Measured:
+    # composite 10 distinct colours, child frame 1. The blank-or-uniform gate
+    # cannot see through the chrome, so the showcase content it is supposed to
+    # prove was never actually checked. See
+    # doc/08_tracking/bug/web_render_budget_interpreter_gap_2026-07-25.md
+    val child_metrics = headless_capture_metrics(child.pixels)
+    if not child_metrics.varied or child_metrics.nonzero == 0:
+        headless_status(prefix, "status", "fail")
+        headless_status(prefix, "reason", "child-frame-uniform")
+        headless_status(prefix, "child_pixels", child.pixels.len().to_text())
+        headless_status(prefix, "child_nonzero", child_metrics.nonzero.to_text())
+        headless_status(prefix, "child_checksum", child_metrics.checksum.to_text())
+        headless_status(prefix, "ppm_path", ppm_path)
         return 1
     if not metrics.varied or metrics.nonzero == 0 or metrics.checksum == 0:
         headless_status(prefix, "status", "fail")
