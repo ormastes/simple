@@ -100,6 +100,50 @@ synthesis and compiler-internals judgment.
 | P5 | tier de-dup + loud collisions | opus | cross-cutting, correctness-sensitive |
 | — | matrix synthesis / report | opus | integrates all lanes |
 
+## Results of the first execution pass (2026-07-25, same day)
+
+Matrix still **1/7 PASS**. But every cluster-C blocker is now identified, and two
+are fixed. Four defects were found that were previously invisible:
+
+| # | finding | status |
+|---|---|---|
+| P1 | **native codegen drops the receiver for non-`me` (`fn`) instance methods.** Call sites emit one register; the first arg lands in the `self` slot. `HashMap.contains_key` reads word 0 of a `text` (`"STR1"`=0x53545231), low bits match the heap tag, untag+deref → SIGSEGV. Gated on `fn_.is_mutable`, `50.mir/_MirLowering/function_lowering.spl:194`. Minimal repro: 82-byte file, one dotted `use`, `--entry-closure`. | FILED `native_codegen_drops_receiver_for_fn_instance_methods_2026-07-25` |
+| P4 | **`examples/**` isolation buffers child output and prints only after `wait()`** — a timeout kill discards everything, so slow examples show zero output AND exit 0. This is why 3 host-WM cells were misattributed as "window-only blocked". | FILED `examples_isolation_buffers_output_lost_on_timeout_2026-07-25` |
+| P3 | **`MouseEvent` duplicate-type erasure** blocked the SimpleOS kernel build. | **FIXED** (`a163f3977a2`) |
+| P2b | **bare-reassignment multi-line grammar gap** (`val x =\n e` parses, `x =\n e` does not). | FILED + example fixed |
+
+### P3 SimpleOS-WM: kernel build blocker CLEARED
+Before: `1 file(s) failed to compile`. After the `MouseEvent` fix:
+**662 compiled, 0 cached, 0 failed**, linked 9,281 KB ELF, 25.8s compile +
+81.5s link. Cell moved `wm-simple-web-build-failed` → `wm-simple-web-build-invalid-elf`.
+**Next blocker (current work):** `elf_file_status`
+(`check-simpleos-wm-fullscreen-evidence.shs:190-208`) requires magic `7f454c46`,
+class=2 (ELF64), data=1 (LE), machine=62 (EM_X86_64). Harness targets x86_64
+throughout (entry/linker-script/`--target` all `arch/x86_64`). The stale on-disk
+`simpleos_wm_production_desktop.elf` (Jul 22) is **ELF32/EM_386** — leftover from
+an older configuration, not today's product. Today's candidate is `rm -f`'d on
+failure, so it must be rebuilt to inspect its header.
+
+### Corrections forced by evidence (all mine)
+1. **The 2D showcase never triggered the segfault.** An 82-byte file with one
+   `use` does; a file with zero `use` builds fine. Closure size and the GC-tier
+   import are irrelevant. My "GC-tier import causes the crash" framing was wrong.
+2. **The host-WM cells were never window-blocked.** They ran; their output was
+   discarded. `SIMPLE_EXAMPLE_ISOLATED_CHILD=1` → 169,612 lines vs 2.
+3. **`bin/simple` is itself a Rust seed right now** (it prints the seed warning).
+   Per `.claude/rules/bootstrap.md` that is an emergency stopgap, never the
+   resting state — worth its own follow-up.
+4. The 2D compiled lane via `bin/simple` **timed out at 20 min with zero cache
+   objects** — so "use bin/simple for the compiled lane" is not yet a working
+   route either.
+
+### Deliberately NOT done
+The one-word stopgap `fn contains_key` → `me contains_key`
+(`hashmap.spl:99`, `hashset.spl:112`) would clear P1's crash immediately. Not
+applied: it masks a general ABI defect leaving every other `fn` instance method
+miscompiled. The correct fix flips the calling convention for all of them
+atomically and needs its own bootstrap-verified change.
+
 ## Honest risk notes
 
 - The compiled lane **bypasses** the GC-tier problem for these cells; it does not
