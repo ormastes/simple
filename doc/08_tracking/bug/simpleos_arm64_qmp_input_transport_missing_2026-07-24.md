@@ -88,12 +88,14 @@ a probe lane, not a HID event transport.
   capture. It injects the ordered QMP events and correlates guest-owned
   sequences through WM frames. Admission additionally requires one successful
   guest RAMFB visual-commit receipt for the baseline and every input, carrying
-  address, generation, frame ID, checksum, and changed-region coordinates.
-  Baseline/post-input screendumps must differ only inside the union of those
-  guest-declared regions. The canonical ARM64 desktop now emits this receipt
-  only after its Engine2D frame presenter returns, using a checksum read from
-  the actual RAMFB scanout; live admission remains red until a host QEMU run
-  proves the complete correlation.
+  address, authoritative rendered revision, monotonic presentation frame ID,
+  checksum, bounded checksum duration, and an explicitly conservative
+  full-frame damage bound. The checker injects only one logical
+  edge at a time and waits for its poll/frame/commit chain before sending the
+  next edge, so queued pointer/key batching cannot be misattributed. The
+  canonical ARM64 desktop emits the receipt only after its Engine2D frame
+  presenter returns, using a checksum read from the actual RAMFB scanout; live
+  admission remains red until a host QEMU run proves the complete correlation.
 - Canonical attested build:
   `sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs`.
   The wrapper invokes exactly

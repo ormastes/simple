@@ -27,7 +27,7 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 273 lines folded for reproduction.
+Runnable source folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -135,7 +135,31 @@ expect(live_wrapper).to_contain(
     "[ramfb-visual-commit\\] input_seq="
 )
 expect(live_wrapper).to_contain(
-    "QMP pixel delta is outside guest-declared changed regions"
+    "QMP pixel delta is outside guest-declared damage bounds"
+)
+expect(live_wrapper).to_contain("def inject_and_wait(")
+expect(live_wrapper).to_contain(
+    "Each logical input action"
+)
+expect(entry).to_contain("rendered_revision={rendered_revision}")
+expect(entry).to_contain(
+    "damage_kind=conservative-full-frame"
+)
+expect(entry).to_contain("checksum_us={checksum_us}")
+expect(entry).to_contain(
+    "checksum_finished_us <= checksum_started_us"
+)
+expect(live_wrapper).to_contain(
+    "max-checksum-us-exceeds-release-ceiling"
+)
+expect(live_wrapper).to_contain(
+    "pointer relative-motion receipt mismatch"
+)
+expect(live_wrapper).to_contain(
+    "Tab key-down did not change focused window"
+)
+expect(entry).to_contain(
+    "fatal reason=multi-input-frame-attribution"
 )
 expect(live_wrapper).to_contain(
     "sequence=focus,pointer_move,pointer_down,pointer_up,key_down,key_up"
@@ -295,7 +319,9 @@ expect(entry).to_contain(
     "[ramfb-visual-commit] input_seq={{input_sequence}}"
 )
 expect(entry).to_contain("checksum={{checksum:x}}")
-expect(entry).to_contain("changed_x=0 changed_y=0")
+expect(entry).to_contain(
+    "damage_bound_x=0 damage_bound_y=0"
+)
 expect(entry).to_contain(
     "arm64_emit_ramfb_visual_commit(\n        0,"
 )
@@ -331,7 +357,7 @@ expect(entry.contains("[wm-pointer-irq]")).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

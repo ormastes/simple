@@ -23,6 +23,7 @@ QMP_LOG="$EVIDENCE_DIR/qmp-input.log"
 BEFORE_PPM="$EVIDENCE_DIR/before-input.ppm"
 AFTER_PPM="$EVIDENCE_DIR/after-input.ppm"
 QMP_SOCKET="$EVIDENCE_DIR/qmp.sock"
+MAX_CHECKSUM_US="${SIMPLEOS_ARM64_QMP_MAX_CHECKSUM_US:-5000000}"
 QEMU_PID=""
 
 mkdir -p "$EVIDENCE_DIR"
@@ -209,6 +210,10 @@ COMPILER_SHA256="$(sha256_file "$MANIFEST_COMPILER_PATH")" ||
 
 command -v qemu-system-aarch64 >/dev/null 2>&1 ||
     fail_evidence "qemu-system-aarch64-missing"
+printf '%s\n' "$MAX_CHECKSUM_US" | grep -Eq '^[1-9][0-9]*$' ||
+    fail_evidence "invalid-max-checksum-us"
+[ "$MAX_CHECKSUM_US" -le 5000000 ] ||
+    fail_evidence "max-checksum-us-exceeds-release-ceiling"
 
 # Re-hash immediately at the launch boundary. The post-run check below also
 # rejects artifacts mutated while evidence was being collected.
@@ -247,7 +252,8 @@ qemu-system-aarch64 \
 QEMU_PID=$!
 
 set +e
-python3 - "$QMP_SOCKET" "$SERIAL_LOG" "$BEFORE_PPM" "$AFTER_PPM" >"$QMP_LOG" 2>&1 <<'PY'
+python3 - "$QMP_SOCKET" "$SERIAL_LOG" "$BEFORE_PPM" "$AFTER_PPM" \
+    "$MAX_CHECKSUM_US" >"$QMP_LOG" 2>&1 <<'PY'
 import hashlib
 import json
 import os
@@ -257,6 +263,7 @@ import sys
 import time
 
 socket_path, serial_path, before_path, after_path = sys.argv[1:5]
+max_checksum_us = int(sys.argv[5])
 deadline = time.monotonic() + 15
 while time.monotonic() < deadline and not os.path.exists(socket_path):
     time.sleep(0.05)
@@ -375,26 +382,34 @@ wait_serial(
 commit_pattern = re.compile(
     r"^\[ramfb-visual-commit\] input_seq=(\d+) address=(\d+) "
     r"width=(\d+) height=(\d+) stride=(\d+) format=bgra8888 "
-    r"generation=(\d+) frame_id=(\d+) checksum=([0-9a-fA-F]+) "
-    r"changed_x=(\d+) changed_y=(\d+) changed_width=(\d+) "
-    r"changed_height=(\d+) status=success\r?$",
+    r"rendered_revision=(\d+) frame_id=(\d+) "
+    r"checksum=([0-9a-fA-F]+) checksum_us=(\d+) "
+    r"damage_kind=conservative-full-frame "
+    r"damage_bound_x=(\d+) damage_bound_y=(\d+) "
+    r"damage_bound_width=(\d+) damage_bound_height=(\d+) "
+    r"status=success\r?$",
     re.M,
 )
 
 def parse_commit(match):
     values = [int(value) for value in match.groups()[:7]]
     checksum = match.group(8).lower()
-    region = tuple(int(value) for value in match.groups()[8:12])
-    seq, address, width, height, stride, generation, frame_id = values
-    x, y, changed_width, changed_height = region
+    checksum_us = int(match.group(9))
+    region = tuple(int(value) for value in match.groups()[9:13])
+    (
+        seq, address, width, height, stride, rendered_revision, frame_id
+    ) = values
+    x, y, damage_width, damage_height = region
     if (
         address <= 0 or width <= 0 or height <= 0 or
         width > 16384 or height > 16384 or
         stride < width * 4 or stride % 4 != 0 or
-        generation <= 0 or frame_id <= 0 or
+        rendered_revision <= 0 or frame_id <= 0 or
+        checksum_us <= 0 or checksum_us > max_checksum_us or
         not checksum.strip("0") or
-        x < 0 or y < 0 or changed_width < 0 or changed_height < 0 or
-        x + changed_width > width or y + changed_height > height
+        region != (0, 0, width, height) or
+        x < 0 or y < 0 or damage_width < 0 or damage_height < 0 or
+        x + damage_width > width or y + damage_height > height
     ):
         raise RuntimeError("invalid guest RAMFB visual-commit receipt")
     return {
@@ -403,9 +418,10 @@ def parse_commit(match):
         "width": width,
         "height": height,
         "stride": stride,
-        "generation": generation,
+        "rendered_revision": rendered_revision,
         "frame_id": frame_id,
         "checksum": checksum,
+        "checksum_us": checksum_us,
         "region": region,
     }
 
@@ -424,45 +440,89 @@ def commit_for_sequence(text, seq):
 # RAMFB buffer and successful visual commit that produced its initial frame.
 _, baseline_serial = wait_serial(
     r"^\[ramfb-visual-commit\] input_seq=0 address=\d+ width=\d+ "
-    r"height=\d+ stride=\d+ format=bgra8888 generation=\d+ "
-    r"frame_id=\d+ checksum=[0-9a-fA-F]+ changed_x=\d+ changed_y=\d+ "
-    r"changed_width=\d+ changed_height=\d+ status=success\r?$",
+    r"height=\d+ stride=\d+ format=bgra8888 rendered_revision=\d+ "
+    r"frame_id=\d+ checksum=[0-9a-fA-F]+ "
+    r"checksum_us=\d+ damage_kind=conservative-full-frame "
+    r"damage_bound_x=\d+ damage_bound_y=\d+ damage_bound_width=\d+ "
+    r"damage_bound_height=\d+ status=success\r?$",
     5,
 )
 baseline_commit = commit_for_sequence(baseline_serial, 0)
-if baseline_commit["generation"] != baseline_revision:
-    raise RuntimeError("baseline RAMFB generation does not match desktop revision")
+if baseline_commit["rendered_revision"] != baseline_revision:
+    raise RuntimeError("baseline RAMFB renderer revision does not match desktop revision")
 screendump(before_path)
 
-# Preserve the guest's declared six-event order:
-# focus (boot receipt), pointer move/down/up, then key down/up.
-qmp("input-send-event", {"events": [
-    {"type": "rel", "data": {"axis": "x", "value": 24}},
-    {"type": "rel", "data": {"axis": "y", "value": 16}},
-]})
-qmp("input-send-event", {"events": [
-    {"type": "btn", "data": {"down": True, "button": "left"}},
-]})
-qmp("input-send-event", {"events": [
-    {"type": "btn", "data": {"down": False, "button": "left"}},
-]})
-qmp("input-send-event", {"events": [
-    {"type": "key", "data": {
+def inject_and_wait(events, poll_pattern, frame_label):
+    # Keep one logical input in flight until the guest proves its poll, frame,
+    # and RAMFB presentation. This prevents scheduler-dependent attribution of
+    # several queued inputs to one render.
+    qmp("input-send-event", {"events": events})
+    poll, _ = wait_serial(poll_pattern, 10)
+    seq = int(poll.group(1))
+    frame, serial = wait_serial(
+        r"^\[%s\] input_seq=%d rendered_revision=(\d+) "
+        r"frame_id=(\d+)\r?$" % (frame_label, seq),
+        15,
+    )
+    _, serial = wait_serial(
+        r"^\[ramfb-visual-commit\] input_seq=%d .* status=success\r?$" % seq,
+        15,
+    )
+    commit = commit_for_sequence(serial, seq)
+    if (
+        int(frame.group(1)) != commit["rendered_revision"] or
+        int(frame.group(2)) != commit["frame_id"]
+    ):
+        raise RuntimeError("input frame does not match RAMFB render provenance")
+    return seq, commit
+
+# Preserve the guest's declared six-event order. Each logical input action
+# completes its own
+# guest poll/frame/commit cycle before the next QMP command is admitted.
+move_seq, move_commit = inject_and_wait(
+    [
+        {"type": "rel", "data": {"axis": "x", "value": 24}},
+        {"type": "rel", "data": {"axis": "y", "value": 16}},
+    ],
+    r"^\[wm-pointer-poll\] source=poll input_seq=(\d+) "
+    r"x=\d+ y=\d+ button_code=\d+ kind_code=3\r?$",
+    "wm-pointer-frame",
+)
+down_seq, down_commit = inject_and_wait(
+    [{"type": "btn", "data": {"down": True, "button": "left"}}],
+    r"^\[wm-pointer-poll\] source=poll input_seq=(\d+) "
+    r"x=\d+ y=\d+ button_code=\d+ kind_code=1\r?$",
+    "wm-pointer-frame",
+)
+up_seq, up_commit = inject_and_wait(
+    [{"type": "btn", "data": {"down": False, "button": "left"}}],
+    r"^\[wm-pointer-poll\] source=poll input_seq=(\d+) "
+    r"x=\d+ y=\d+ button_code=\d+ kind_code=2\r?$",
+    "wm-pointer-frame",
+)
+key_down_seq, key_down_commit = inject_and_wait(
+    [{"type": "key", "data": {
         "down": True, "key": {"type": "qcode", "data": "tab"}
-    }},
-]})
-qmp("input-send-event", {"events": [
-    {"type": "key", "data": {
+    }}],
+    r"^\[wm-key-poll\] source=poll input_seq=(\d+) "
+    r"edge=press code=15\r?$",
+    "wm-key-frame",
+)
+key_up_seq, key_up_commit = inject_and_wait(
+    [{"type": "key", "data": {
         "down": False, "key": {"type": "qcode", "data": "tab"}
-    }},
-]})
+    }}],
+    r"^\[wm-key-poll\] source=poll input_seq=(\d+) "
+    r"edge=release code=15\r?$",
+    "wm-key-frame",
+)
 
 _, serial = wait_serial(
     r"^\[backend2d-event-receipt\] backend=simpleos-qemu-arm64 "
     r"event_backend=virtio-mmio event_count=6 "
     r"sequence=focus,pointer_move,pointer_down,pointer_up,key_down,key_up "
     r"delivered=true\r?$",
-    30,
+    10,
 )
 
 def sequence(pattern):
@@ -471,39 +531,34 @@ def sequence(pattern):
         raise RuntimeError("missing guest sequence: " + pattern)
     return matches[-1]
 
-move_seq = sequence(
-    r"^\[wm-pointer-poll\] source=poll input_seq=(\d+) "
-    r"x=\d+ y=\d+ button_code=\d+ kind_code=3\r?$"
-)
-down_seq = sequence(
+raw_down_seq = sequence(
     r"^\[virtio-input-device\] input_seq=(\d+) device=pointer "
     r"type=1 code=272 value=1 frame=raw-edge\r?$"
 )
-up_seq = sequence(
+raw_up_seq = sequence(
     r"^\[virtio-input-device\] input_seq=(\d+) device=pointer "
     r"type=1 code=272 value=0 frame=raw-edge\r?$"
 )
-key_down_seq = sequence(
+raw_key_down_seq = sequence(
     r"^\[virtio-input-device\] input_seq=(\d+) device=keyboard "
     r"type=1 code=15 value=1\r?$"
 )
-key_up_seq = sequence(
+raw_key_up_seq = sequence(
     r"^\[virtio-input-device\] input_seq=(\d+) device=keyboard "
     r"type=1 code=15 value=0\r?$"
 )
+if (
+    raw_down_seq != down_seq or raw_up_seq != up_seq or
+    raw_key_down_seq != key_down_seq or raw_key_up_seq != key_up_seq
+):
+    raise RuntimeError("raw device sequence does not match delivered WM sequence")
 if not (move_seq < down_seq < up_seq < key_down_seq < key_up_seq):
     raise RuntimeError("guest input sequences are not strictly ordered")
 
-# The six-event receipt is emitted while the release record is decoded; wait
-# for its later WM frame before evaluating the complete serial correlation.
-_, serial = wait_serial(
-    r"^\[wm-key-frame\] input_seq=%d generation=\d+\r?$" % key_up_seq,
-    10,
-)
-
 input_sequences = [move_seq, down_seq, up_seq, key_down_seq, key_up_seq]
-input_commits = [commit_for_sequence(serial, seq) for seq in input_sequences]
-previous_generation = baseline_commit["generation"]
+input_commits = [
+    move_commit, down_commit, up_commit, key_down_commit, key_up_commit
+]
 previous_frame_id = baseline_commit["frame_id"]
 for commit in input_commits:
     if (
@@ -511,51 +566,91 @@ for commit in input_commits:
         commit["width"] != baseline_commit["width"] or
         commit["height"] != baseline_commit["height"] or
         commit["stride"] != baseline_commit["stride"] or
-        commit["generation"] <= previous_generation or
         commit["frame_id"] <= previous_frame_id
     ):
         raise RuntimeError("RAMFB visual commits are not stable and monotonic")
-    previous_generation = commit["generation"]
     previous_frame_id = commit["frame_id"]
 
-for seq, kind in ((move_seq, 3), (down_seq, 1), (up_seq, 2)):
+if not re.search(
+    r"^\[virtio-input-device\] input_seq=%d device=pointer "
+    r"type=2 code=0 value=24 frame=raw-summary\r?$" % move_seq,
+    serial, re.M,
+) or not re.search(
+    r"^\[virtio-input-device\] input_seq=%d device=pointer "
+    r"type=2 code=1 value=16 frame=raw-summary\r?$" % move_seq,
+    serial, re.M,
+):
+    raise RuntimeError("pointer relative-motion receipt mismatch")
+
+expected_pointer_x = baseline_commit["width"] // 2 + 24
+expected_pointer_y = baseline_commit["height"] // 2 + 16
+pointer_focus = {}
+for seq, kind, button in (
+    (move_seq, 3, 0),
+    (down_seq, 1, 1),
+    (up_seq, 2, 1),
+):
     if not re.search(
         r"^\[wm-pointer-poll\] source=poll input_seq=%d "
-        r"x=\d+ y=\d+ button_code=\d+ kind_code=%d\r?$" % (seq, kind),
+        r"x=%d y=%d button_code=%d kind_code=%d\r?$"
+        % (seq, expected_pointer_x, expected_pointer_y, button, kind),
         serial, re.M,
     ):
         raise RuntimeError("pointer poll correlation missing")
-    if not re.search(
-        r"^\[wm-pointer-state\] input_seq=%d focused_idx=-?\d+\r?$" % seq,
+    state = re.search(
+        r"^\[wm-pointer-state\] input_seq=%d focused_idx=(-?\d+)\r?$" % seq,
         serial, re.M,
-    ):
+    )
+    if not state:
         raise RuntimeError("pointer state correlation missing")
+    pointer_focus[seq] = int(state.group(1))
     frame = re.search(
-        r"^\[wm-pointer-frame\] input_seq=%d generation=(\d+)\r?$" % seq,
+        r"^\[wm-pointer-frame\] input_seq=%d rendered_revision=(\d+) "
+        r"frame_id=(\d+)\r?$" % seq,
         serial, re.M,
     )
     commit = commit_for_sequence(serial, seq)
-    if not frame or int(frame.group(1)) != commit["generation"]:
+    if (
+        not frame or
+        int(frame.group(1)) != commit["rendered_revision"] or
+        int(frame.group(2)) != commit["frame_id"]
+    ):
         raise RuntimeError("pointer frame correlation missing")
 
-for seq, edge in ((key_down_seq, "press"), (key_up_seq, "release")):
+key_focus = {}
+for seq, edge, changed in (
+    (key_down_seq, "press", "true"),
+    (key_up_seq, "release", "false"),
+):
     if not re.search(
         r"^\[wm-key-poll\] source=poll input_seq=%d edge=%s code=15\r?$"
         % (seq, edge), serial, re.M,
     ):
         raise RuntimeError("key poll correlation missing")
-    if not re.search(
-        r"^\[wm-key-state\] input_seq=%d edge=%s changed=(?:true|false) "
-        r"focused_idx=-?\d+\r?$" % (seq, edge), serial, re.M,
-    ):
+    state = re.search(
+        r"^\[wm-key-state\] input_seq=%d edge=%s changed=%s "
+        r"focused_idx=(-?\d+)\r?$" % (seq, edge, changed), serial, re.M,
+    )
+    if not state:
         raise RuntimeError("key state correlation missing")
+    key_focus[seq] = int(state.group(1))
     frame = re.search(
-        r"^\[wm-key-frame\] input_seq=%d generation=(\d+)\r?$" % seq,
+        r"^\[wm-key-frame\] input_seq=%d rendered_revision=(\d+) "
+        r"frame_id=(\d+)\r?$" % seq,
         serial, re.M,
     )
     commit = commit_for_sequence(serial, seq)
-    if not frame or int(frame.group(1)) != commit["generation"]:
+    if (
+        not frame or
+        int(frame.group(1)) != commit["rendered_revision"] or
+        int(frame.group(2)) != commit["frame_id"]
+    ):
         raise RuntimeError("key frame correlation missing")
+
+if key_focus[key_down_seq] == pointer_focus[up_seq]:
+    raise RuntimeError("Tab key-down did not change focused window")
+if key_focus[key_up_seq] != key_focus[key_down_seq]:
+    raise RuntimeError("Tab key-up unexpectedly changed focused window")
 
 screendump(after_path)
 before_w, before_h, before_pixels, before_sha = ppm(before_path)
@@ -571,12 +666,12 @@ if (
 ):
     raise RuntimeError("QMP capture dimensions do not match guest RAMFB receipt")
 
-regions = [
+damage_bounds = [
     commit["region"] for commit in input_commits
     if commit["region"][2] > 0 and commit["region"][3] > 0
 ]
-if not regions:
-    raise RuntimeError("guest reported no changed RAMFB region")
+if not damage_bounds:
+    raise RuntimeError("guest reported no RAMFB damage bound")
 changed_pixels = 0
 outside_pixels = 0
 for y in range(before_h):
@@ -587,11 +682,11 @@ for y in range(before_h):
         changed_pixels += 1
         if not any(
             rx <= x < rx + rw and ry <= y < ry + rh
-            for rx, ry, rw, rh in regions
+            for rx, ry, rw, rh in damage_bounds
         ):
             outside_pixels += 1
 if changed_pixels <= 0 or outside_pixels != 0:
-    raise RuntimeError("QMP pixel delta is outside guest-declared changed regions")
+    raise RuntimeError("QMP pixel delta is outside guest-declared damage bounds")
 
 final_commit = input_commits[-1]
 if final_commit["checksum"] == baseline_commit["checksum"]:
@@ -599,7 +694,10 @@ if final_commit["checksum"] == baseline_commit["checksum"]:
 # Reject a later uncorrelated repaint that could make the after capture belong
 # to a frame other than the final injected input.
 latest_commits = [parse_commit(match) for match in commit_pattern.finditer(serial_text())]
-if not latest_commits or latest_commits[-1]["generation"] != final_commit["generation"]:
+if (
+    not latest_commits or
+    latest_commits[-1]["frame_id"] != final_commit["frame_id"]
+):
     raise RuntimeError("uncorrelated RAMFB commit occurred before after capture")
 
 print("qmp_transport=input-send-event")
@@ -611,13 +709,19 @@ print("before_sha256=%s" % before_sha)
 print("after_sha256=%s" % after_sha)
 print("changed_rgb_bytes=%d" % changed_bytes)
 print("changed_rgb_pixels=%d" % changed_pixels)
-print("outside_declared_region_pixels=%d" % outside_pixels)
-print("baseline_ramfb_generation=%d" % baseline_commit["generation"])
-print("after_ramfb_generation=%d" % final_commit["generation"])
+print("outside_damage_bound_pixels=%d" % outside_pixels)
+print("damage_bound_kind=conservative-full-frame")
+print("baseline_rendered_revision=%d" % baseline_commit["rendered_revision"])
+print("after_rendered_revision=%d" % final_commit["rendered_revision"])
 print("baseline_ramfb_frame_id=%d" % baseline_commit["frame_id"])
 print("after_ramfb_frame_id=%d" % final_commit["frame_id"])
 print("baseline_ramfb_checksum=%s" % baseline_commit["checksum"])
 print("after_ramfb_checksum=%s" % final_commit["checksum"])
+print("max_checksum_us=%d" % max_checksum_us)
+print("peak_checksum_us=%d" % max(
+    [baseline_commit["checksum_us"]] +
+    [commit["checksum_us"] for commit in input_commits]
+))
 print("capture_width=%d" % before_w)
 print("capture_height=%d" % before_h)
 PY
@@ -700,13 +804,16 @@ arm64_guest_source_snapshot ||
     echo "arm64_qmp_input_after_sha256=$AFTER_SHA256"
     echo "arm64_qmp_input_changed_rgb_bytes=$CHANGED_RGB_BYTES"
     echo "arm64_qmp_input_changed_rgb_pixels=$(field changed_rgb_pixels)"
-    echo "arm64_qmp_input_outside_declared_region_pixels=$(field outside_declared_region_pixels)"
-    echo "arm64_qmp_input_baseline_ramfb_generation=$(field baseline_ramfb_generation)"
-    echo "arm64_qmp_input_after_ramfb_generation=$(field after_ramfb_generation)"
+    echo "arm64_qmp_input_outside_damage_bound_pixels=$(field outside_damage_bound_pixels)"
+    echo "arm64_qmp_input_damage_bound_kind=$(field damage_bound_kind)"
+    echo "arm64_qmp_input_baseline_rendered_revision=$(field baseline_rendered_revision)"
+    echo "arm64_qmp_input_after_rendered_revision=$(field after_rendered_revision)"
     echo "arm64_qmp_input_baseline_ramfb_frame_id=$(field baseline_ramfb_frame_id)"
     echo "arm64_qmp_input_after_ramfb_frame_id=$(field after_ramfb_frame_id)"
     echo "arm64_qmp_input_baseline_ramfb_checksum=$(field baseline_ramfb_checksum)"
     echo "arm64_qmp_input_after_ramfb_checksum=$(field after_ramfb_checksum)"
+    echo "arm64_qmp_input_max_checksum_us=$(field max_checksum_us)"
+    echo "arm64_qmp_input_peak_checksum_us=$(field peak_checksum_us)"
     echo "arm64_qmp_input_capture_width=$(field capture_width)"
     echo "arm64_qmp_input_capture_height=$(field capture_height)"
     echo "arm64_qmp_input_serial_log=$SERIAL_LOG"

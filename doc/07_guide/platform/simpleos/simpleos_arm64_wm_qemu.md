@@ -150,9 +150,15 @@ attestation fails closed when Git status, source enumeration, sorting, record
 generation, counting, or hashing fails. After each successful canonical
 Engine2D presentation, the ARM64 desktop emits a guest-owned
 `[ramfb-visual-commit]` receipt with the RAMFB address, presentation
-generation, frame ID, scanout checksum, and committed region. The gate
-correlates those receipts with VirtIO input and QMP screendumps; the receipt
-contract alone is not a live PASS.
+revision, monotonic presentation frame ID, scanout checksum, measured checksum
+duration, and conservative full-frame damage bound. The gate admits
+only one logical input action at a time, waiting for that action's guest poll, frame, and
+visual commit before injecting the next edge. It correlates those receipts
+with VirtIO input and QMP screendumps; the conservative bound is not presented
+as localized-damage proof, and the receipt contract alone is not a live PASS.
+`SIMPLEOS_ARM64_QMP_MAX_CHECKSUM_US` sets the positive per-scan upper bound
+(default 5,000,000 microseconds); exceeding it rejects the run rather than
+silently extending the evidence timeout.
 
 The host-GPU evidence owner remains
 `scripts/check/check-simpleos-qemu-host-gpu-2d.shs`. Its AArch64 row must first
