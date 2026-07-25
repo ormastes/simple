@@ -2,8 +2,8 @@
 
 - status: pass
 - reason: hosted-first-frame-capture-valid
-- simple_bin: bin/release/aarch64-apple-darwin/simple
-- simple_bin_source: explicit-env
+- simple_bin: bin/release/aarch64-apple-darwin-macho/simple
+- simple_bin_source: repo-self-hosted-fallback
 - simple_bin_status: pass
 - capture_ppm: build/hosted-wm-capture-evidence/hosted_wm_first_frame.ppm
 - width: 16
