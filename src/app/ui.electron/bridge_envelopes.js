@@ -27,15 +27,32 @@ function renderEnvelopeMetadata(msg) {
 function renderEnvelopeScript(msg) {
     const metadata = renderEnvelopeMetadata(msg);
     const bodyHtml = msg.body_html || msg.html || '';
+    const rootAttrs = (msg.root_attrs || '').trim();
     const css = msg.css || '';
     const renderProof = {
         ...metadata,
         body_html_length: bodyHtml.length,
-        css_length: css.length
+        css_length: css.length,
+        root_attrs_length: rootAttrs.length
     };
     return `
         window.__SIMPLE_WEB_RENDER_ENVELOPE__ = ${JSON.stringify(renderProof)};
         (function() {
+            var root = document.documentElement;
+            var rootAttrs = ${JSON.stringify(rootAttrs)};
+            if (root && rootAttrs) {
+                var probe = document.createElement('div');
+                probe.innerHTML = '<span ' + rootAttrs + '></span>';
+                var source = probe.firstElementChild;
+                if (source) {
+                    var attrIndex = 0;
+                    while (attrIndex < source.attributes.length) {
+                        var attr = source.attributes[attrIndex];
+                        root.setAttribute(attr.name, attr.value);
+                        attrIndex = attrIndex + 1;
+                    }
+                }
+            }
             var cssText = ${JSON.stringify(css)};
             if (cssText) {
                 var styleEl = document.getElementById('simple-server-css');

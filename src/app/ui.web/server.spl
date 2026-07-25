@@ -9,7 +9,7 @@ use common.ui.widget.{UIState, UITree, UIEvent, UIMode}
 use nogc_sync_mut.ui.parse.sdn_tree.{parse_ui_to_tree}
 use common.ui.state.{update_state}
 use common.ui.event.{process_event}
-use app.ui.web.html.{generate_html_page, generate_wm_html_page}
+use app.ui.web.html.{generate_css, generate_html_page, generate_wm_html_page, wm_root_data_attrs}
 use app.ui.web.ws_handler.{handle_ws_upgrade, handle_ws_wm_upgrade, is_ws_upgrade_request, ui_web_ws_upgrade_method_allowed, ui_web_ws_upgrade_path_allowed, extract_ws_key, compute_ws_accept}
 use app.ui.web.async_ws.{parse_ws_event}
 use app.ui.render.html_widgets.{render_html_tree}
@@ -31,7 +31,7 @@ use app.ui.web.taskbar_runtime.{host_taskbar_runtime_enable, host_taskbar_runtim
 use app.ui.web.json.{state_to_json, widgets_to_json}
 use os.compositor.host_compositor_entry.{HostBackendKind}
 use os.compositor.simple_web_window_renderer.{simple_web_content_render_request_with_active_theme}
-use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, web_render_body_html}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, web_render_full_html, web_render_ipc_json_with_html}
 use std.io_runtime.{env_get, file_exists, get_args, read_file, write_file}
 use common.ui.theme_package.{default_theme_id}
 use common.ui.wm_chrome_theme.{active_wm_theme_render_snapshot}
@@ -563,8 +563,8 @@ class WebServer:
         """Render the current widget tree and push the legacy browser render frame."""
         val body = render_html_tree(self.state.tree.root_node(), self.state)
         val req = simple_web_content_render_request_with_active_theme("", body, 0, 0)
-        val render_body = web_render_body_html(req)
-        val msg = "{\"type\":\"render\",\"target\":\"" + escape_json(WEB_RENDER_TARGET_SIMPLE_WEB) + "\",\"surface_id\":\"\",\"html\":\"" + escape_json(render_body) + "\"}"
+        val full_html = web_render_full_html(req)
+        val msg = web_render_ipc_json_with_html(req, full_html)
         send_ws_tcp_frame(stream, msg)
 
     fn handle_login(stream: TcpStream, headers: text, initial_body: text):
@@ -985,8 +985,12 @@ fn _native_window_html(path: text) -> text:
     val html = host_taskbar_runtime_native_window_html(app_id)
     if html != nil:
         return html
-    return "<!doctype html><html><body style='font-family:monospace;padding:24px'>" +
-        "<h1>Unsupported app</h1><p>" + escape_json(app_id) + "</p></body></html>"
+    val theme = _active_or_default_wm_theme_id()
+    val attrs = wm_root_data_attrs(theme)
+    val css = generate_css(theme)
+    return "<!doctype html><html {attrs}><head><meta charset='utf-8'>" +
+        "<style>" + css + "body { margin: 0; padding: 24px; font-family: monospace; background: var(--ui-bg); color: var(--ui-fg); }</style></head>" +
+        "<body><h1>Unsupported app</h1><p>" + escape_json(app_id) + "</p></body></html>"
 
 fn _decorate_host_shell_html(html: text) -> text:
     val mode_name = host_taskbar_runtime_mode_name()

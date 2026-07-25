@@ -13,6 +13,7 @@ const renderLine = JSON.stringify({
   width: 1280,
   height: 720,
   html: '<main>Electron</main>',
+  root_attrs: 'data-wm-theme-id="classic" data-wm-theme="dark"',
 });
 
 const envelope = renderEnvelopeMetadata(JSON.parse(renderLine));
@@ -28,6 +29,8 @@ assert(script.includes('__SIMPLE_WEB_RENDER_ENVELOPE__'));
 assert(script.includes('"target":"electron"'));
 assert(script.includes('"surface_id":"main"'));
 assert(script.includes('<main>Electron</main>'));
+assert(script.includes('root.setAttribute'));
+assert(script.includes('"root_attrs_length":'));
 
 const resize = commonInputEnvelope('resize', { x: 640, y: 480 });
 assert.deepStrictEqual(resize, {
