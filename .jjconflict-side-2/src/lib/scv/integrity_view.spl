@@ -1,0 +1,152 @@
+# SCV view/bookmark/workspace/operation integrity checks.
+
+use app.io.mod (file_exists, file_read, dir_walk)
+use std.scv.core.{scv_objects_dir, scv_object_path, scv_head_path, scv_bookmarks_path, scv_workspace_path, scv_line_set_contains, scv_metadata_path_safe, scv_object_ref_safe}
+use std.scv.store.{scv_object_field}
+use std.scv.integrity_object.{scv_object_id_from_path}
+
+fn scv_validate_view_commit_ref(root: text, commit: text, label: text) -> text:
+    if commit == "":
+        return ""
+    if file_exists(scv_object_path(root, "commits", commit)):
+        ""
+    else:
+        "missing view commit: {label} {commit}\n"
+
+fn scv_validate_bookmark_name(name: text) -> bool:
+    scv_metadata_path_safe(name) and not name.contains(" ")
+
+fn scv_validate_current_head(root: text) -> text:
+    val path = scv_head_path(root)
+    if not file_exists(path):
+        return "missing HEAD_OP\n"
+    val head = file_read(path).trim()
+    if not scv_object_ref_safe(head, "op_"):
+        return "bad HEAD_OP: {head}\n"
+    if not file_exists(scv_object_path(root, "operations", head)):
+        return "missing HEAD_OP operation: {head}\n"
+    ""
+
+fn scv_validate_view_content(root: text, view_content: text) -> text:
+    var errors = ""
+    var section = ""
+    var seen_bookmarks = ""
+    var seen_workspaces = ""
+    for line in view_content.split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        if trimmed == "heads:" or trimmed == "bookmarks:" or trimmed == "workspaces:":
+            section = trimmed
+            continue
+        if section == "heads:":
+            if trimmed.contains("|") or trimmed.contains(" "):
+                errors = errors + "bad view head row: {trimmed}\n"
+            else:
+                errors = errors + scv_validate_view_commit_ref(root, trimmed, "head")
+        elif section == "bookmarks:":
+            val parts = trimmed.split("|")
+            if parts.len() != 2:
+                errors = errors + "bad view bookmark row: {trimmed}\n"
+                continue
+            if not scv_validate_bookmark_name(parts[0]):
+                errors = errors + "invalid view bookmark name: {parts[0]}\n"
+            if scv_line_set_contains(seen_bookmarks, parts[0]):
+                errors = errors + "duplicate view bookmark: {parts[0]}\n"
+            else:
+                seen_bookmarks = seen_bookmarks + parts[0] + "\n"
+            errors = errors + scv_validate_view_commit_ref(root, parts[1].trim(), "bookmark {parts[0]}")
+        elif section == "workspaces:":
+            val parts = trimmed.split(":")
+            if parts.len() != 2:
+                errors = errors + "bad view workspace row: {trimmed}\n"
+                continue
+            val workspace = parts[0].trim()
+            val commit = parts[1].trim()
+            if not scv_validate_bookmark_name(workspace):
+                errors = errors + "invalid view workspace name: {workspace}\n"
+            if scv_line_set_contains(seen_workspaces, workspace):
+                errors = errors + "duplicate view workspace: {workspace}\n"
+            else:
+                seen_workspaces = seen_workspaces + workspace + "\n"
+            errors = errors + scv_validate_view_commit_ref(root, commit, "workspace {workspace}")
+    errors
+
+fn scv_validate_current_bookmarks(root: text) -> text:
+    val path = scv_bookmarks_path(root)
+    if not file_exists(path):
+        return ""
+    var errors = ""
+    var seen = ""
+    for line in file_read(path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split("|")
+        if parts.len() != 2:
+            errors = errors + "bad bookmark row: {trimmed}\n"
+            continue
+        if not scv_validate_bookmark_name(parts[0]):
+            errors = errors + "invalid bookmark name: {parts[0]}\n"
+        if scv_line_set_contains(seen, parts[0]):
+            errors = errors + "duplicate bookmark: {parts[0]}\n"
+        else:
+            seen = seen + parts[0] + "\n"
+        errors = errors + scv_validate_view_commit_ref(root, parts[1].trim(), "bookmark {parts[0]}")
+    errors
+
+fn scv_validate_current_workspaces(root: text) -> text:
+    val path = scv_workspace_path(root)
+    if not file_exists(path):
+        return "missing workspace metadata\n"
+    var errors = ""
+    var seen = ""
+    for line in file_read(path).split("\n"):
+        val trimmed = line.trim()
+        if trimmed == "":
+            continue
+        val parts = trimmed.split(":")
+        if parts.len() != 2:
+            errors = errors + "bad workspace row: {trimmed}\n"
+            continue
+        val workspace = parts[0].trim()
+        val commit = parts[1].trim()
+        if not scv_validate_bookmark_name(workspace):
+            errors = errors + "invalid workspace name: {workspace}\n"
+        if scv_line_set_contains(seen, workspace):
+            errors = errors + "duplicate workspace: {workspace}\n"
+        else:
+            seen = seen + workspace + "\n"
+        errors = errors + scv_validate_view_commit_ref(root, commit, "workspace {workspace}")
+    errors
+
+fn scv_validate_operation_views(root: text) -> text:
+    val ops_dir = "{scv_objects_dir(root)}/operations"
+    if not file_exists(ops_dir):
+        return ""
+    var errors = ""
+    for op_path in dir_walk(ops_dir):
+        val op_id = scv_object_id_from_path(op_path)
+        val content = file_read(op_path)
+        val parents = scv_object_field(content, "parents")
+        for parent in parents.split(","):
+            val parent_op = parent.trim()
+            if parent_op == "":
+                continue
+            if not scv_object_ref_safe(parent_op, "op_"):
+                errors = errors + "bad operation parent ref: {op_id} {parent_op}\n"
+                continue
+            if not file_exists(scv_object_path(root, "operations", parent_op)):
+                errors = errors + "missing operation parent: {op_id} {parent_op}\n"
+        val view = scv_object_field(content, "view")
+        if view == "":
+            continue
+        if not scv_object_ref_safe(view, "view_"):
+            errors = errors + "bad operation view ref: {op_id} {view}\n"
+            continue
+        val view_path = scv_object_path(root, "operations", view)
+        if not file_exists(view_path):
+            errors = errors + "missing operation view: {view}\n"
+            continue
+        errors = errors + scv_validate_view_content(root, file_read(view_path))
+    errors

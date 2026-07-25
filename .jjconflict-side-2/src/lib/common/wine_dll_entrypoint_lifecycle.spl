@@ -1,0 +1,71 @@
+"""Modeled DLL entrypoint/TLS lifecycle gate for Wine load sessions."""
+
+class WineDllEntrypointLifecycleResult:
+    ok: bool
+    error: text
+    dll_name: text
+    entrypoint_rva: i64
+    tls_callback_count: i64
+    evidence: text
+    status: text
+
+fn _result(ok: bool, error: text, dll_name: text, entrypoint_rva: i64, tls_callback_count: i64, evidence: text, status: text) -> WineDllEntrypointLifecycleResult:
+    WineDllEntrypointLifecycleResult(ok: ok, error: error, dll_name: dll_name.lower(), entrypoint_rva: entrypoint_rva, tls_callback_count: tls_callback_count, evidence: evidence, status: status)
+
+fn _load_status_ready(status: text) -> bool:
+    status == "dll-load-session-recorded" or status == "dll-load-existing-refcounted"
+
+pub fn wine_dll_entrypoint_lifecycle_gate(dll_name: text, load_status: text, load_evidence: text, entrypoint_rva: i64, tls_callback_count: i64, allow_execution: bool) -> WineDllEntrypointLifecycleResult:
+    if dll_name == "":
+        return _result(false, "missing-dll-name", "", entrypoint_rva, tls_callback_count, load_evidence, "rejected")
+    if not _load_status_ready(load_status):
+        return _result(false, "dll-load-session-required:" + load_status, dll_name, entrypoint_rva, tls_callback_count, load_evidence, "rejected")
+    if not load_evidence.contains("modeled-loaded-image"):
+        return _result(false, "missing-modeled-loaded-image-evidence", dll_name, entrypoint_rva, tls_callback_count, load_evidence, "rejected")
+    if entrypoint_rva <= 0:
+        return _result(false, "invalid-dll-entrypoint-rva", dll_name, entrypoint_rva, tls_callback_count, load_evidence, "rejected")
+    if tls_callback_count < 0:
+        return _result(false, "invalid-tls-callback-count", dll_name, entrypoint_rva, tls_callback_count, load_evidence, "rejected")
+    if allow_execution:
+        val exec_evidence = load_evidence + " dll-entrypoint-execution-requested loader-lock-acquired tls-callbacks-dispatched DllMain-process-attach-dispatched loader-lock-release-planned dll-entrypoint-exec-dispatched"
+        return _result(true, "", dll_name, entrypoint_rva, tls_callback_count, exec_evidence, "dll-entrypoint-exec-dispatched")
+
+    val evidence = load_evidence + " dll-entrypoint-lifecycle-modeled loader-lock-acquired tls-callbacks-planned DllMain-process-attach-planned loader-lock-release-planned dll-entrypoint-execution-blocked tls-callback-execution-blocked no-host-code-jump no-arbitrary-execution"
+    _result(true, "", dll_name, entrypoint_rva, tls_callback_count, evidence, "dll-entrypoint-lifecycle-modeled")
+
+class WineDllMainInvocationRecord:
+    ok: bool
+    error: text
+    dll_name: text
+    h_instance: i64
+    reason: i64
+    reserved: i64
+    entrypoint_rva: i64
+    tls_callback_count: i64
+    invoked: bool
+    evidence: text
+
+fn _invocation_record(ok: bool, error: text, dll_name: text, h_instance: i64, reason: i64, reserved: i64, entrypoint_rva: i64, tls_callback_count: i64, invoked: bool, evidence: text) -> WineDllMainInvocationRecord:
+    WineDllMainInvocationRecord(ok: ok, error: error, dll_name: dll_name.lower(), h_instance: h_instance, reason: reason, reserved: reserved, entrypoint_rva: entrypoint_rva, tls_callback_count: tls_callback_count, invoked: invoked, evidence: evidence)
+
+fn _reason_name(reason: i64) -> text:
+    if reason == 1:
+        return "DLL_PROCESS_ATTACH"
+    if reason == 0:
+        return "DLL_PROCESS_DETACH"
+    "unknown"
+
+pub fn wine_dll_invoke_dllmain(dll_name: text, image_base: i64, entrypoint_rva: i64, tls_callback_count: i64, reason: i64, reserved: i64, load_evidence: text) -> WineDllMainInvocationRecord:
+    """Record a DllMain invocation. Does not execute native code (requires rt_dyncall_3 from WS2)."""
+    if dll_name == "":
+        return _invocation_record(false, "missing-dll-name", "", image_base, reason, reserved, entrypoint_rva, tls_callback_count, false, load_evidence)
+    if image_base <= 0:
+        return _invocation_record(false, "invalid-image-base", dll_name, image_base, reason, reserved, entrypoint_rva, tls_callback_count, false, load_evidence)
+    if entrypoint_rva <= 0:
+        return _invocation_record(false, "invalid-entrypoint-rva", dll_name, image_base, reason, reserved, entrypoint_rva, tls_callback_count, false, load_evidence)
+    if reason != 1 and reason != 0:
+        return _invocation_record(false, "unsupported-reason", dll_name, image_base, reason, reserved, entrypoint_rva, tls_callback_count, false, load_evidence)
+
+    val rn = _reason_name(reason)
+    val inv_evidence = load_evidence + " DllMain-invocation-recorded reason=" + rn + " invocation-deferred-pending-rt_dyncall_3"
+    _invocation_record(true, "", dll_name, image_base, reason, reserved, entrypoint_rva, tls_callback_count, false, inv_evidence)

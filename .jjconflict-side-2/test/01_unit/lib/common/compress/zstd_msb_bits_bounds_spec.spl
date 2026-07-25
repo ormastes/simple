@@ -1,0 +1,109 @@
+use std.spec
+use std.common.compress.{CompressionError}
+use std.common.compress.zstd_bits.{ZstdMsbBackwardBits, zstd_msb_bits_read, zstd_msb_bits_remaining}
+
+fn check(condition: bool):
+    expect condition == true
+
+describe "Zstd MSB bit reader bounds validation":
+    it "rejects non-eof states before the start before padding":
+        var data: [u8] = [0x80u8]
+        val state = ZstdMsbBackwardBits(
+            data: data,
+            start: 1,
+            byte_idx: 0,
+            next_bit: 7,
+            eof: false
+        )
+        val decoded = zstd_msb_bits_read(state, 1)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("msb bitstream range"))
+            _:
+                check(false)
+
+    it "rejects malformed read state before indexing":
+        var data: [u8] = [0x80u8]
+        val state = ZstdMsbBackwardBits(
+            data: data,
+            start: 0,
+            byte_idx: 4,
+            next_bit: 7,
+            eof: false
+        )
+        val decoded = zstd_msb_bits_read(state, 1)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.TruncatedInput(message):
+                check(message.contains("msb bitstream bits"))
+            _:
+                check(false)
+
+    it "does not count bytes beyond the backing buffer":
+        var data: [u8] = [0x80u8]
+        val state = ZstdMsbBackwardBits(
+            data: data,
+            start: 0,
+            byte_idx: 4,
+            next_bit: 7,
+            eof: false
+        )
+        check(zstd_msb_bits_remaining(state) == 0)
+
+    it "rejects negative bit index before shifting":
+        var data: [u8] = [0x80u8]
+        val state = ZstdMsbBackwardBits(
+            data: data,
+            start: 0,
+            byte_idx: 0,
+            next_bit: -1,
+            eof: false
+        )
+        val decoded = zstd_msb_bits_read(state, 1)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("bit index"))
+            _:
+                check(false)
+
+    it "rejects oversized bit index before shifting":
+        var data: [u8] = [0x80u8]
+        val state = ZstdMsbBackwardBits(
+            data: data,
+            start: 0,
+            byte_idx: 0,
+            next_bit: 8,
+            eof: false
+        )
+        val decoded = zstd_msb_bits_read(state, 1)
+        check(decoded.is_err())
+        val err = decoded.unwrap_err()
+        match err:
+            CompressionError.CorruptStream(message):
+                check(message.contains("bit index"))
+            _:
+                check(false)
+
+    it "does not count malformed bit indexes":
+        var data: [u8] = [0x80u8]
+        val negative = ZstdMsbBackwardBits(
+            data: data,
+            start: 0,
+            byte_idx: 0,
+            next_bit: -1,
+            eof: false
+        )
+        val oversized = ZstdMsbBackwardBits(
+            data: data,
+            start: 0,
+            byte_idx: 0,
+            next_bit: 8,
+            eof: false
+        )
+        check(zstd_msb_bits_remaining(negative) == 0)
+        check(zstd_msb_bits_remaining(oversized) == 0)

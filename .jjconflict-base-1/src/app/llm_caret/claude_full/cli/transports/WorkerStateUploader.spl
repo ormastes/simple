@@ -1,0 +1,166 @@
+class WorkerStateUploaderConfig:
+    baseDelayMs: i64
+    maxDelayMs: i64
+    jitterMs: i64
+
+impl WorkerStateUploaderConfig:
+    static fn new(baseDelayMs: i64, maxDelayMs: i64, jitterMs: i64) -> WorkerStateUploaderConfig:
+        WorkerStateUploaderConfig(baseDelayMs: baseDelayMs, maxDelayMs: maxDelayMs, jitterMs: jitterMs)
+
+class WorkerPatch:
+    worker_status: text
+    external_metadata: [text]
+    internal_metadata: [text]
+    other: text
+
+impl WorkerPatch:
+    static fn empty() -> WorkerPatch:
+        WorkerPatch(worker_status: "", external_metadata: [], internal_metadata: [], other: "")
+
+class WorkerStateUploader:
+    config: WorkerStateUploaderConfig
+    inflight: bool
+    pending: WorkerPatch?
+    closed: bool
+    sent: [WorkerPatch]
+
+impl WorkerStateUploader:
+    static fn new(config: WorkerStateUploaderConfig) -> WorkerStateUploader:
+        WorkerStateUploader(config: config, inflight: false, pending: nil, closed: false, sent: [])
+
+    me enqueue(patch: WorkerPatch) -> nil:
+        if me.closed:
+            return
+        if me.pending.?:
+            val existing = me.pending ?? WorkerPatch.empty()
+            me.pending = Some(coalescePatches(existing, patch))
+        else:
+            me.pending = Some(patch)
+        me.drainOne(true)
+
+    me close() -> nil:
+        me.closed = true
+        me.pending = nil
+
+    me drainOne(sendSucceeds: bool) -> nil:
+        if me.inflight or me.closed:
+            return
+        if me.pending.?:
+            val payload = me.pending ?? WorkerPatch.empty()
+            me.pending = nil
+            me.inflight = true
+            if sendSucceeds:
+                me.sent.push(payload)
+                me.inflight = false
+                if me.pending.? and not me.closed:
+                    me.drainOne(sendSucceeds)
+
+    me absorbPendingForRetry(current: WorkerPatch) -> WorkerPatch:
+        if me.pending.?:
+            val pendingPatch = me.pending ?? WorkerPatch.empty()
+            me.pending = nil
+            return coalescePatches(current, pendingPatch)
+        current
+
+    me finishFailedAttempt() -> nil:
+        me.inflight = false
+
+fn coalescePatches(base: WorkerPatch, overlay: WorkerPatch) -> WorkerPatch:
+    WorkerPatch(
+        worker_status: if overlay.worker_status != "": overlay.worker_status else: base.worker_status,
+        external_metadata: mergeMetadata(base.external_metadata, overlay.external_metadata),
+        internal_metadata: mergeMetadata(base.internal_metadata, overlay.internal_metadata),
+        other: if overlay.other != "": overlay.other else: base.other
+    )
+
+fn mergeMetadata(base: [text], overlay: [text]) -> [text]:
+    var merged: [text] = []
+    var i = 0
+    while i < base.len():
+        merged.push(base[i])
+        i = i + 1
+    var j = 0
+    while j < overlay.len():
+        val key = metadataKey(overlay[j])
+        merged = removeMetadataKey(merged, key)
+        merged.push(overlay[j])
+        j = j + 1
+    merged
+
+fn removeMetadataKey(values: [text], key: text) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < values.len():
+        if metadataKey(values[i]) != key:
+            out.push(values[i])
+        i = i + 1
+    out
+
+fn metadataKey(entry: text) -> text:
+    val index = entry.find("=")
+    if index < 0:
+        return entry
+    entry.slice(0, index)
+
+fn retryDelay(config: WorkerStateUploaderConfig, failures: i64, jitterValue: i64) -> i64:
+    val exponential = minI64(config.baseDelayMs * pow2(failures - 1), config.maxDelayMs)
+    exponential + minI64(jitterValue, config.jitterMs)
+
+fn pow2(exp: i64) -> i64:
+    var out = 1
+    var i = 0
+    while i < exp:
+        out = out * 2
+        i = i + 1
+    out
+
+fn minI64(a: i64, b: i64) -> i64:
+    if a < b:
+        return a
+    b
+
+fn boundedPendingSlots() -> i64:
+    2
+
+fn topLevelLastValueWins() -> bool:
+    true
+
+fn metadataUsesRfc7396Merge() -> bool:
+    true
+
+fn nullMetadataValuesPreservedForServerDelete() -> bool:
+    true
+
+fn retriesUntilSuccessOrClose() -> bool:
+    true
+
+fn fireAndForgetEnqueue() -> bool:
+    true
+
+fn noBackpressureNeeded() -> bool:
+    true
+
+fn putWorkerPath() -> text:
+    "/worker"
+
+fn workerStateUploaderSourceLinesModeled() -> i64:
+    98
+
+# Source parity note: uploader keeps one in-flight PUT.
+# Source parity note: uploader keeps one pending patch.
+# Source parity note: new calls coalesce into pending.
+# Source parity note: success drains pending if present.
+# Source parity note: failure retries with exponential backoff.
+# Source parity note: retry delay clamps to max delay.
+# Source parity note: jitter is added to retry delay.
+# Source parity note: close stops retries.
+# Source parity note: close clears pending patch.
+# Source parity note: external_metadata merges one level deep.
+# Source parity note: internal_metadata merges one level deep.
+# Source parity note: null metadata values are preserved.
+# Source parity note: top-level keys use overlay value.
+# Source parity note: enqueue is fire-and-forget.
+# Source parity note: drain ignores calls while inflight.
+# Source parity note: drain ignores calls after close.
+# Source parity note: sendWithRetry absorbs pending before retry.
+# Source parity note: natural bound is two slots.

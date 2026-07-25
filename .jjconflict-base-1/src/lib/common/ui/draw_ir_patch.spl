@@ -1,0 +1,339 @@
+# Draw IR incremental patch generation and application.
+#
+# Additive companion to draw_ir_diff.spl (Phase-4 slice item 7, see
+# doc/03_plan/ui/unified_2d_engine/web_wm_gpu_3d_review_2026-07-20.md). This
+# does NOT change DrawIrCommand or DrawIrDiffReport semantics -- the diff
+# report stays for its existing consumers. This module reuses the same
+# component_id -> flat-index maps (DrawIrCommandIndex) that draw_ir_diff.spl
+# builds, so patch generation is O(N+M) instead of a nested linear scan.
+#
+# Revision model: DrawIrComposition carries no dedicated revision field (and
+# this module does not add one to keep the change additive to draw_ir.spl's
+# existing consumers). Instead, base_revision/target_revision are caller-
+# supplied identifiers; the natural choice is the composition's own
+# composition_id (as draw_ir_diff.spl's report already does for
+# baseline_id/current_id). draw_ir_patch_apply gates on
+# `composition.composition_id == patch.base_revision` and, on success,
+# stamps the resulting composition's composition_id with
+# patch.target_revision so a chain of applies can keep using composition_id
+# as the revision.
+#
+# Batch scoping: apply() collapses the result into a single batch reusing
+# the base composition's first batch's metadata (schema/batch_id/
+# backend_target/source/embedding). Multi-batch structural preservation
+# (splitting the result back across multiple original batches) is out of
+# scope for this slice -- the round-trip oracle compares flattened commands,
+# not batch containers. This is a documented, deliberate limitation, not a
+# silent gap.
+#
+# Known limitations (documented, not silent):
+# - component_id is assumed unique per composition (matches the existing
+#   assumption in draw_ir_diff.spl's find-by-id semantics). apply()'s
+#   bijection fill relies on this; duplicate ids are unsupported.
+# - Change detection and the round-trip oracle (draw_ir_patch_commands_equal)
+#   cover kind/component_id/parent_id/geometry/color/text_value/
+#   computed_style. border_rect/content_rect/hit_rect/clip_rect/image_uri/
+#   edge/points/glyph_run are neither diffed nor compared -- they are not
+#   yet patchable. This keeps the round-trip invariant sound for the fields
+#   it does cover; it does not claim full-command coverage.
+
+use common.ui.draw_ir.{
+    DrawIrBatch,
+    DrawIrCommand,
+    DrawIrComposition,
+    DrawIrRect,
+    draw_ir_batch,
+    draw_ir_embedding_config,
+    draw_ir_no_rect,
+    draw_ir_rect,
+    draw_ir_rect_bounds
+}
+use common.ui.draw_ir_diff.{
+    DrawIrCommandIndex,
+    draw_ir_build_command_index,
+    draw_ir_command_index_find
+}
+
+pub val DRAW_IR_PATCH_OP_INSERT: i32 = 0
+pub val DRAW_IR_PATCH_OP_REMOVE: i32 = 1
+pub val DRAW_IR_PATCH_OP_UPDATE_GEOMETRY: i32 = 2
+pub val DRAW_IR_PATCH_OP_UPDATE_STYLE: i32 = 3
+pub val DRAW_IR_PATCH_OP_UPDATE_TEXT: i32 = 4
+pub val DRAW_IR_PATCH_OP_REORDER: i32 = 5
+
+struct DrawIrPatchOp:
+    kind: i32
+    component_id: text
+    parent_id: text
+    command: DrawIrCommand?
+    old_bounds: DrawIrRect
+    new_bounds: DrawIrRect
+    old_index: i32
+    new_index: i32
+
+struct DrawIrPatch:
+    base_revision: text
+    target_revision: text
+    operations: [DrawIrPatchOp]
+    damage_rects: [DrawIrRect]
+
+struct DrawIrPatchApplyResult:
+    ok: bool
+    reason: text
+    composition: DrawIrComposition
+
+fn _draw_ir_patch_bounds(command: DrawIrCommand) -> DrawIrRect:
+    draw_ir_rect_bounds(command.x, command.y, command.width, command.height)
+
+fn _draw_ir_patch_geometry_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
+    a.x != b.x or a.y != b.y or a.width != b.width or a.height != b.height
+
+# NOTE: deliberately avoids returning text? (nilable) from a per-property
+# lookup and comparing via `== nil` / `!=` -- that optional-return pattern
+# diverges between the `simple test` daemon evaluator and `simple run`
+# (see draw_ir_diff.spl's `_draw_ir_style_changed`, which uses the same
+# pattern and carries the identical latent defect, masked there because its
+# spec only exercises changed/empty styles; filed as a bug, not touched here
+# per the additive-only constraint on draw_ir_diff.spl's report semantics).
+# This raw double-loop membership check has no optional in the comparison
+# path and is verified consistent under both evaluators.
+fn _draw_ir_patch_style_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
+    if a.computed_style.len() != b.computed_style.len():
+        return true
+    for prop in a.computed_style:
+        var matched = false
+        for other in b.computed_style:
+            if other.key == prop.key and other.value == prop.value:
+                matched = true
+        if not matched:
+            return true
+    false
+
+fn _draw_ir_patch_text_changed(a: DrawIrCommand, b: DrawIrCommand) -> bool:
+    a.text_value != b.text_value
+
+fn _draw_ir_patch_push_damage(damage: mut [DrawIrRect], old_bounds: DrawIrRect, new_bounds: DrawIrRect):
+    if old_bounds.present:
+        damage.push(old_bounds)
+    if new_bounds.present:
+        damage.push(new_bounds)
+
+# Builds Insert/UpdateGeometry/UpdateStyle/UpdateText/Reorder ops by walking
+# the new composition's flat command list once, looking up each id's prior
+# state via the O(1) baseline index. Reorder is emitted only when content is
+# byte-for-byte identical but the flat position moved (same id, same
+# content, different index) -- per-attribute update ops win whenever content
+# differs, even if the index moved too.
+#
+# `misc_changed` covers fields that draw_ir_patch_commands_equal (the
+# round-trip oracle) compares but that have no dedicated op kind in this
+# slice's fixed 6-kind vocabulary: color, kind, parent_id. Without a carrier,
+# a color-only change (the most common in-place UI diff: hover/selection/
+# theme) would detect zero ops and the apply-side survivor path would keep
+# the stale command, silently breaking the round-trip invariant. UpdateStyle
+# is reused as that carrier since it already always ships the full updated
+# command payload.
+fn _draw_ir_patch_build_forward_ops(baseline_index: DrawIrCommandIndex, current_index: DrawIrCommandIndex, operations: mut [DrawIrPatchOp], damage: mut [DrawIrRect]):
+    var i = 0
+    while i < current_index.commands.len():
+        val current = current_index.commands[i]
+        val base = draw_ir_command_index_find(baseline_index, current.component_id)
+        if base == nil:
+            val new_bounds = _draw_ir_patch_bounds(current)
+            operations.push(DrawIrPatchOp(
+                kind: DRAW_IR_PATCH_OP_INSERT,
+                component_id: current.component_id,
+                parent_id: current.parent_id,
+                command: current,
+                old_bounds: draw_ir_no_rect(),
+                new_bounds: new_bounds,
+                old_index: -1,
+                new_index: i
+            ))
+            _draw_ir_patch_push_damage(damage, draw_ir_no_rect(), new_bounds)
+        else:
+            val old_index_at = baseline_index.id_to_index[current.component_id]
+            val geometry_changed = _draw_ir_patch_geometry_changed(base, current)
+            val style_prop_changed = _draw_ir_patch_style_changed(base, current)
+            val text_changed = _draw_ir_patch_text_changed(base, current)
+            val misc_changed = base.color != current.color or base.kind != current.kind or base.parent_id != current.parent_id
+            val style_changed = style_prop_changed or misc_changed
+            val old_bounds = _draw_ir_patch_bounds(base)
+            val new_bounds = _draw_ir_patch_bounds(current)
+            if geometry_changed:
+                operations.push(DrawIrPatchOp(
+                    kind: DRAW_IR_PATCH_OP_UPDATE_GEOMETRY, component_id: current.component_id,
+                    parent_id: current.parent_id, command: current,
+                    old_bounds: old_bounds, new_bounds: new_bounds,
+                    old_index: old_index_at, new_index: i
+                ))
+                _draw_ir_patch_push_damage(damage, old_bounds, new_bounds)
+            if style_changed:
+                operations.push(DrawIrPatchOp(
+                    kind: DRAW_IR_PATCH_OP_UPDATE_STYLE, component_id: current.component_id,
+                    parent_id: current.parent_id, command: current,
+                    old_bounds: old_bounds, new_bounds: new_bounds,
+                    old_index: old_index_at, new_index: i
+                ))
+                _draw_ir_patch_push_damage(damage, old_bounds, new_bounds)
+            if text_changed:
+                operations.push(DrawIrPatchOp(
+                    kind: DRAW_IR_PATCH_OP_UPDATE_TEXT, component_id: current.component_id,
+                    parent_id: current.parent_id, command: current,
+                    old_bounds: old_bounds, new_bounds: new_bounds,
+                    old_index: old_index_at, new_index: i
+                ))
+                _draw_ir_patch_push_damage(damage, old_bounds, new_bounds)
+            if not geometry_changed and not style_changed and not text_changed and old_index_at != i:
+                operations.push(DrawIrPatchOp(
+                    kind: DRAW_IR_PATCH_OP_REORDER, component_id: current.component_id,
+                    parent_id: current.parent_id, command: current,
+                    old_bounds: old_bounds, new_bounds: new_bounds,
+                    old_index: old_index_at, new_index: i
+                ))
+                _draw_ir_patch_push_damage(damage, old_bounds, new_bounds)
+        i = i + 1
+
+fn _draw_ir_patch_build_remove_ops(baseline_index: DrawIrCommandIndex, current_index: DrawIrCommandIndex, operations: mut [DrawIrPatchOp], damage: mut [DrawIrRect]):
+    var j = 0
+    while j < baseline_index.commands.len():
+        val old_command = baseline_index.commands[j]
+        if draw_ir_command_index_find(current_index, old_command.component_id) == nil:
+            val old_bounds = _draw_ir_patch_bounds(old_command)
+            operations.push(DrawIrPatchOp(
+                kind: DRAW_IR_PATCH_OP_REMOVE,
+                component_id: old_command.component_id,
+                parent_id: old_command.parent_id,
+                command: nil,
+                old_bounds: old_bounds,
+                new_bounds: draw_ir_no_rect(),
+                old_index: j,
+                new_index: -1
+            ))
+            _draw_ir_patch_push_damage(damage, old_bounds, draw_ir_no_rect())
+        j = j + 1
+
+fn draw_ir_patch_between(old_composition: DrawIrComposition, old_rev: text, new_composition: DrawIrComposition, new_rev: text) -> DrawIrPatch:
+    val baseline_index = draw_ir_build_command_index(old_composition)
+    val current_index = draw_ir_build_command_index(new_composition)
+    var operations: [DrawIrPatchOp] = []
+    var damage: [DrawIrRect] = []
+    _draw_ir_patch_build_forward_ops(baseline_index, current_index, operations, damage)
+    _draw_ir_patch_build_remove_ops(baseline_index, current_index, operations, damage)
+    DrawIrPatch(
+        base_revision: old_rev,
+        target_revision: new_rev,
+        operations: operations,
+        damage_rects: damage
+    )
+
+fn _draw_ir_patch_result_length(base_index: DrawIrCommandIndex, patch: DrawIrPatch) -> i32:
+    var removed_count = 0
+    var inserted_count = 0
+    for op in patch.operations:
+        if op.kind == DRAW_IR_PATCH_OP_REMOVE:
+            removed_count = removed_count + 1
+        else if op.kind == DRAW_IR_PATCH_OP_INSERT:
+            inserted_count = inserted_count + 1
+    base_index.commands.len() - removed_count + inserted_count
+
+fn _draw_ir_patch_placeholder_command() -> DrawIrCommand:
+    draw_ir_rect("", 0, 0, 0, 0, 0u32)
+
+# Reconstructs the target flat command list as a bijection fill: every
+# surviving unchanged command (no op recorded for its id) keeps its
+# baseline flat index -- which equals its target index precisely because a
+# Reorder op would have been emitted otherwise -- and every non-Remove op
+# writes its authoritative command payload at its recorded new_index. No
+# ordering/LCS computation is needed because new_index is unique per
+# surviving id and is exactly the position draw_ir_patch_between observed
+# while walking the new composition.
+fn _draw_ir_patch_apply_commands(base_index: DrawIrCommandIndex, patch: DrawIrPatch) -> [DrawIrCommand]:
+    val result_len = _draw_ir_patch_result_length(base_index, patch)
+    if result_len == 0:
+        return []
+    var removed_ids: Dict<text, bool> = {}
+    var op_by_id: Dict<text, DrawIrPatchOp> = {}
+    for op in patch.operations:
+        if op.kind == DRAW_IR_PATCH_OP_REMOVE:
+            removed_ids[op.component_id] = true
+        else:
+            op_by_id[op.component_id] = op
+    var result: [DrawIrCommand] = [_draw_ir_patch_placeholder_command(); result_len]
+    var j = 0
+    while j < base_index.commands.len():
+        val old_command = base_index.commands[j]
+        val id = old_command.component_id
+        if not removed_ids.has(id) and not op_by_id.has(id):
+            result[j] = old_command
+        j = j + 1
+    for op in patch.operations:
+        if op.kind != DRAW_IR_PATCH_OP_REMOVE:
+            val payload = op.command
+            if payload != nil:
+                result[op.new_index] = payload
+    result
+
+fn _draw_ir_patch_base_batch(composition: DrawIrComposition) -> DrawIrBatch:
+    val batches = composition.batches
+    if batches.len() > 0:
+        return batches[0]
+    draw_ir_batch("patched", composition.backend_target, draw_ir_embedding_config("", "", 0, 0, 0, 0, 0, 1000, false), [])
+
+fn draw_ir_patch_apply(composition: DrawIrComposition, patch: DrawIrPatch) -> DrawIrPatchApplyResult:
+    if composition.composition_id != patch.base_revision:
+        return DrawIrPatchApplyResult(
+            ok: false,
+            reason: "revision mismatch: composition is at revision '{composition.composition_id}' but patch base_revision is '{patch.base_revision}'; needs full snapshot",
+            composition: composition
+        )
+    val base_index = draw_ir_build_command_index(composition)
+    val commands = _draw_ir_patch_apply_commands(base_index, patch)
+    val base_batch = _draw_ir_patch_base_batch(composition)
+    val patched_batch = DrawIrBatch(
+        schema: base_batch.schema,
+        batch_id: base_batch.batch_id,
+        backend_target: base_batch.backend_target,
+        source: base_batch.source,
+        embedding: base_batch.embedding,
+        commands: commands
+    )
+    val patched_composition = DrawIrComposition(
+        schema: composition.schema,
+        composition_id: patch.target_revision,
+        scene_key: composition.scene_key,
+        backend_target: composition.backend_target,
+        batches: [patched_batch]
+    )
+    DrawIrPatchApplyResult(ok: true, reason: "", composition: patched_composition)
+
+# Round-trip oracle helper: flattens both compositions to their ordered
+# command lists and compares field-by-field. Batch containers are
+# deliberately NOT compared (see module doc: apply() collapses to a single
+# batch), which matches the "command-by-command" contract this helper is
+# named for.
+fn draw_ir_patch_commands_equal(a: DrawIrComposition, b: DrawIrComposition) -> bool:
+    val a_index = draw_ir_build_command_index(a)
+    val b_index = draw_ir_build_command_index(b)
+    if a_index.commands.len() != b_index.commands.len():
+        return false
+    var i = 0
+    while i < a_index.commands.len():
+        val ca = a_index.commands[i]
+        val cb = b_index.commands[i]
+        if ca.kind != cb.kind:
+            return false
+        if ca.component_id != cb.component_id:
+            return false
+        if ca.parent_id != cb.parent_id:
+            return false
+        if ca.x != cb.x or ca.y != cb.y or ca.width != cb.width or ca.height != cb.height:
+            return false
+        if ca.color != cb.color:
+            return false
+        if ca.text_value != cb.text_value:
+            return false
+        if _draw_ir_patch_style_changed(ca, cb):
+            return false
+        i = i + 1
+    true

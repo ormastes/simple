@@ -1,0 +1,89 @@
+# ============================================================================
+# game_net/loopback.spl — deterministic in-memory transport
+#
+# Netcode plan P4: no OS sockets. `send` enqueues raw bytes with a scheduled
+# delivery tick computed from a seeded LCG (reused from
+# `std.common.random_pure`, not reimplemented) so latency/jitter/loss are
+# reproducible byte-for-byte given the same seed. `drain_ready` delivers
+# everything whose scheduled tick has arrived, sorted by delivery tick (ties
+# broken by original send order) — jitter naturally produces out-of-order
+# delivery without any separate "reorder" knob. Real UDP is a drop-in
+# transport swap later (out of this slice).
+# ============================================================================
+
+use std.common.random_pure.{LcgRng, lcg_rng, lcg_advance, lcg_value}
+
+struct QueuedMsg:
+    deliver_at_ms: u64
+    enqueue_seq: u64
+    payload: [u8]
+
+class LoopbackChannel:
+    queue: [QueuedMsg]
+    rng: LcgRng
+    latency_ms: u64
+    jitter_ms: u64
+    loss_rate_pct: u64
+    next_seq: u64
+
+impl LoopbackChannel:
+    static fn new(seed: i64, latency_ms: u64, jitter_ms: u64, loss_rate_pct: u64) -> LoopbackChannel:
+        LoopbackChannel(
+            queue: [], rng: lcg_rng(seed), latency_ms: latency_ms,
+            jitter_ms: jitter_ms, loss_rate_pct: loss_rate_pct, next_seq: 0u64
+        )
+
+    me send(now_ms: u64, payload: [u8]):
+        """Enqueue payload for later delivery, subject to seeded loss/jitter."""
+        self.rng = lcg_advance(self.rng)
+        val roll: u64 = (lcg_value(self.rng) % 100).to_u64()
+        if roll < self.loss_rate_pct:
+            return
+        var jitter: u64 = 0u64
+        if self.jitter_ms > 0u64:
+            self.rng = lcg_advance(self.rng)
+            jitter = lcg_value(self.rng).to_u64() % self.jitter_ms
+        val deliver_at = now_ms + self.latency_ms + jitter
+        self.next_seq = self.next_seq + 1u64
+        self.queue.push(QueuedMsg(deliver_at_ms: deliver_at, enqueue_seq: self.next_seq, payload: payload))
+
+    me drain_ready(now_ms: u64) -> [[u8]]:
+        """Deliver every message whose scheduled tick has arrived, ordered
+        by delivery tick (jitter can reorder relative to send order)."""
+        var ready: [QueuedMsg] = []
+        var remaining: [QueuedMsg] = []
+        var i: u64 = 0
+        while i < self.queue.len().to_u64():
+            val m = self.queue[i]
+            if m.deliver_at_ms <= now_ms:
+                ready.push(m)
+            else:
+                remaining.push(m)
+            i = i + 1
+        self.queue = remaining
+        val n = ready.len().to_u64()
+        var a: u64 = 1
+        while a < n:
+            val key = ready[a]
+            var b: i64 = (a as i64) - 1
+            while b >= 0:
+                val prior = ready[b.to_u64()]
+                val out_of_order = (prior.deliver_at_ms > key.deliver_at_ms) or ((prior.deliver_at_ms == key.deliver_at_ms) and (prior.enqueue_seq > key.enqueue_seq))
+                if out_of_order:
+                    ready[(b + 1).to_u64()] = prior
+                    b = b - 1
+                else:
+                    break
+            ready[(b + 1).to_u64()] = key
+            a = a + 1
+        var out: [[u8]] = []
+        i = 0
+        while i < ready.len().to_u64():
+            out.push(ready[i].payload)
+            i = i + 1
+        out
+
+    fn pending_count() -> u64:
+        self.queue.len().to_u64()
+
+export LoopbackChannel

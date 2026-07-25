@@ -1,0 +1,535 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BACKEND="$(printf '%s' "${GPU_2D_LIVE_BACKEND:-}" | tr '[:upper:]' '[:lower:]')"
+case "$BACKEND" in
+    vulkan|metal) ;;
+    *) echo "macOS GPU 2D live evidence: FAIL (invalid-backend)" >&2; exit 1 ;;
+esac
+PREFIX="macos_${BACKEND}_2d_live"
+BACKEND_TITLE="$(printf '%s' "$BACKEND" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
+BUILD_DIR="${BUILD_DIR:-build/tmp/macos_${BACKEND}_2d_live_evidence}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/macos_${BACKEND}_2d_live_evidence_$(date -u +%F).md}"
+HARNESS="$ROOT_DIR/test/02_integration/rendering/macos_${BACKEND}_2d_live_harness.spl"
+SHARED_HARNESS="$ROOT_DIR/test/02_integration/rendering/macos_gpu_2d_live_harness.spl"
+BACKEND_SOURCE="$ROOT_DIR/src/lib/gc_async_mut/gpu/engine2d/backend_${BACKEND}.spl"
+CAPTURE_PPM="$BUILD_DIR/${BACKEND}_3840x2160_300dpi.ppm"
+CAPTURE_PNG="$BUILD_DIR/${BACKEND}_3840x2160_300dpi.png"
+WINDOW_BEFORE_PNG="$BUILD_DIR/window_before.png"
+WINDOW_AFTER_PNG="$BUILD_DIR/window_after.png"
+RECEIPT="$BUILD_DIR/runtime_receipt.env"
+READY="$BUILD_DIR/ready.env"
+EVIDENCE="$BUILD_DIR/evidence.env"
+LAUNCH_OUT="$BUILD_DIR/launch.out"
+LAUNCH_ERR="$BUILD_DIR/launch.err"
+WINDOW_RECORD="$BUILD_DIR/window.env"
+TIMEOUT_SECS="${GPU_2D_LIVE_TIMEOUT_SECS:-420}"
+SELECTED_DRIVER_PATH="${GPU_2D_LIVE_NATIVE_BIN:-}"
+SELECTED_DRIVER_KIND="pure-simple-native-output"
+SPL_WINIT_LIB="${GPU_2D_LIVE_WINIT_LIB:-$ROOT_DIR/build/sffi/libspl_winit.dylib}"
+SIMPLE_RUNTIME_DYLIB="${GPU_2D_LIVE_RUNTIME_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_wm.dylib}"
+SIMPLE_RUNTIME_C_DYLIB="${GPU_2D_LIVE_RUNTIME_C_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_c_wm.dylib}"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+BUILD_DIR_ABS="$(CDPATH= cd -- "$BUILD_DIR" && pwd)"
+CAPTURE_PPM="$BUILD_DIR_ABS/$(basename -- "$CAPTURE_PPM")"
+CAPTURE_PNG="$BUILD_DIR_ABS/$(basename -- "$CAPTURE_PNG")"
+WINDOW_BEFORE_PNG="$BUILD_DIR_ABS/$(basename -- "$WINDOW_BEFORE_PNG")"
+WINDOW_AFTER_PNG="$BUILD_DIR_ABS/$(basename -- "$WINDOW_AFTER_PNG")"
+RECEIPT="$BUILD_DIR_ABS/$(basename -- "$RECEIPT")"
+READY="$BUILD_DIR_ABS/$(basename -- "$READY")"
+EVIDENCE="$BUILD_DIR_ABS/$(basename -- "$EVIDENCE")"
+LAUNCH_OUT="$BUILD_DIR_ABS/$(basename -- "$LAUNCH_OUT")"
+LAUNCH_ERR="$BUILD_DIR_ABS/$(basename -- "$LAUNCH_ERR")"
+WINDOW_RECORD="$BUILD_DIR_ABS/$(basename -- "$WINDOW_RECORD")"
+rm -f "$CAPTURE_PPM" "$CAPTURE_PNG" "$WINDOW_BEFORE_PNG" \
+    "$WINDOW_AFTER_PNG" "$RECEIPT" "$READY" "$EVIDENCE" \
+    "$LAUNCH_OUT" "$LAUNCH_ERR" "$WINDOW_RECORD" "$REPORT_PATH"
+
+app_pid=""
+app_dir=""
+app_executable=""
+
+value_of() {
+    sed -n "s/^${1}=//p" "$2" | tail -n 1
+}
+
+positive_integer() {
+    case "${1:-}" in
+        ""|0|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+pid_matches_executable() {
+    target_pid="$1"
+    target_executable="$2"
+    command_line="$(ps -p "$target_pid" -o command= 2>/dev/null || true)"
+    [ "$command_line" = "$target_executable" ] ||
+        [ "${command_line#"$target_executable "}" != "$command_line" ]
+}
+
+cleanup() {
+    if [ -n "$app_pid" ] && [ -n "$app_executable" ] &&
+            pid_matches_executable "$app_pid" "$app_executable"; then
+        osascript - "$app_pid" >/dev/null 2>&1 <<'OSA' || true
+on run argv
+  set targetPid to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in (processes whose unix id is targetPid)
+      tell proc
+        set frontmost to true
+        keystroke "q"
+      end tell
+    end repeat
+  end tell
+end run
+OSA
+        if kill -0 "$app_pid" 2>/dev/null; then
+            kill -TERM "$app_pid" 2>/dev/null || true
+        fi
+    fi
+    app_pid=""
+    if [ -n "$app_dir" ] && [ -d "$app_dir" ]; then
+        rm -rf "$app_dir"
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+
+write_report() {
+    status="$1"
+    reason="$2"
+    {
+        echo "# macOS $BACKEND_TITLE 2D Live Evidence"
+        echo
+        echo "- status: $status"
+        echo "- reason: $reason"
+        echo "- selected driver: \`$SELECTED_DRIVER_PATH\`"
+        echo "- selected driver kind: $SELECTED_DRIVER_KIND"
+        echo "- runtime receipt: \`$RECEIPT\`"
+        echo "- 4K/300-DPI framebuffer: \`$CAPTURE_PNG\`"
+        echo "- exact window before input: \`$WINDOW_BEFORE_PNG\`"
+        echo "- exact window after input: \`$WINDOW_AFTER_PNG\`"
+        echo "- launcher stdout: \`$LAUNCH_OUT\`"
+        echo "- launcher stderr: \`$LAUNCH_ERR\`"
+        if [ -f "$EVIDENCE" ]; then
+            echo
+            echo "## Validated evidence"
+            echo
+            echo '```text'
+            cat "$EVIDENCE"
+            echo '```'
+        fi
+        if [ -f "$RECEIPT" ]; then
+            echo
+            echo "## Runtime receipt"
+            echo
+            echo '```text'
+            cat "$RECEIPT"
+            echo '```'
+        fi
+    } >"$REPORT_PATH"
+}
+
+fail() {
+    reason="$1"
+    {
+        echo "${PREFIX}_status=fail"
+        echo "${PREFIX}_reason=$reason"
+        echo "${PREFIX}_driver_kind=$SELECTED_DRIVER_KIND"
+        echo "${PREFIX}_driver_path=$SELECTED_DRIVER_PATH"
+    } >"$EVIDENCE"
+    write_report fail "$reason"
+    echo "macOS $BACKEND_TITLE 2D live evidence: FAIL ($reason)" >&2
+    exit 1
+}
+
+require_launched_process() {
+    if ! kill -0 "$app_pid" 2>/dev/null; then
+        if [ -s "$RECEIPT" ] &&
+                [ "$(value_of gpu_2d_live_status "$RECEIPT")" = "fail" ]; then
+            receipt_reason="$(value_of gpu_2d_live_reason "$RECEIPT")"
+            [ -n "$receipt_reason" ] ||
+                receipt_reason="runtime-failure-receipt-without-reason"
+            fail "runtime-$receipt_reason"
+        fi
+        fail "launched-process-missing"
+    fi
+    pid_matches_executable "$app_pid" "$app_executable" ||
+        fail "launched-process-identity-mismatch"
+}
+
+find_exact_app_pid() {
+    ps -axo pid=,command= | awk -v executable="$app_executable" '
+        {
+            pid = $1
+            $1 = ""
+            sub(/^[[:space:]]+/, "")
+            if ($0 == executable || index($0, executable " ") == 1) {
+                print pid
+                exit
+            }
+        }
+    '
+}
+
+file_bytes() {
+    if [ -f "$1" ]; then wc -c <"$1" | tr -d ' '; else echo 0; fi
+}
+
+file_cksum() {
+    if [ -f "$1" ]; then cksum "$1" | awk '{print $1}'; else echo 0; fi
+}
+
+[ "$(uname -s)" = "Darwin" ] || fail "requires-macos"
+[ -f "$HARNESS" ] || fail "harness-missing"
+[ -f "$SHARED_HARNESS" ] || fail "shared-harness-missing"
+[ -f "$BACKEND_SOURCE" ] || fail "backend-source-missing"
+command -v osascript >/dev/null 2>&1 || fail "osascript-missing"
+command -v screencapture >/dev/null 2>&1 || fail "screencapture-missing"
+command -v cliclick >/dev/null 2>&1 || fail "cliclick-missing"
+command -v sips >/dev/null 2>&1 || fail "sips-missing"
+
+# This gate admits only an explicitly supplied pure-Simple native harness.
+# A Rust seed, source interpreter fallback, or executable outside the owned
+# build tree cannot satisfy production GPU evidence.
+[ -n "$SELECTED_DRIVER_PATH" ] || fail "admissible-native-driver-required"
+[ -x "$SELECTED_DRIVER_PATH" ] || fail "admissible-native-driver-missing"
+case "$SELECTED_DRIVER_PATH" in
+    "$ROOT_DIR"/build/*) ;;
+    *) fail "native-driver-outside-owned-build-tree" ;;
+esac
+for provider in "$SPL_WINIT_LIB" "$SIMPLE_RUNTIME_DYLIB" "$SIMPLE_RUNTIME_C_DYLIB"; do
+    [ -s "$provider" ] || fail "runtime-provider-missing"
+    otool -L "$SELECTED_DRIVER_PATH" |
+        grep -Fq "@rpath/$(basename -- "$provider")" ||
+        fail "runtime-provider-not-linked"
+done
+otool -l "$SELECTED_DRIVER_PATH" |
+    grep -Fq "$(dirname -- "$SIMPLE_RUNTIME_DYLIB")" ||
+    fail "runtime-provider-rpath-missing"
+if [ "$BACKEND" = vulkan ]; then
+    LC_ALL=C grep -aFq "Vulkan device not initialised" "$SIMPLE_RUNTIME_DYLIB" ||
+        fail "vulkan-runtime-provider-stub"
+    nm -gU "$SIMPLE_RUNTIME_DYLIB" |
+        grep -Fq "_rt_vulkan_provider_is_available" ||
+        fail "vulkan-runtime-provider-availability-alias-missing"
+    nm -gU "$SIMPLE_RUNTIME_DYLIB" |
+        grep -Fq "_rt_vulkan_provider_device_count" ||
+        fail "vulkan-runtime-provider-device-count-alias-missing"
+fi
+
+driver_sha256="$(shasum -a 256 "$SELECTED_DRIVER_PATH" | awk '{print $1}')"
+source_revision="$(printf '%s\n' "$(git rev-parse HEAD)" \
+    "$(git hash-object "$HARNESS")" "$(git hash-object "$SHARED_HARNESS")" \
+    "$(git hash-object "$BACKEND_SOURCE")" "$driver_sha256" |
+    shasum -a 256 | awk '{print substr($1,1,40)}')"
+
+# LaunchServices reports canonical /private/var paths while mktemp may return
+# the /var symlink spelling.  Canonicalize before deriving the exact executable
+# identity used by both PID discovery and subsequent ownership checks.
+app_dir="$(CDPATH= cd -- "$(mktemp -d)" && pwd -P)"
+app="$app_dir/SimpleGpu2d.app"
+app_executable="$app/Contents/MacOS/SimpleGpu2d"
+mkdir -p "$app/Contents/MacOS"
+cp "$SELECTED_DRIVER_PATH" "$app_executable"
+cat >"$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleExecutable</key><string>SimpleGpu2d</string>
+  <key>CFBundleIdentifier</key><string>com.simple.$BACKEND.evidence.$$</string>
+  <key>CFBundleName</key><string>Simple${BACKEND_TITLE}Evidence</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>LSEnvironment</key>
+  <dict>
+    <key>SIMPLE_GUI</key><string>1</string>
+    <key>SIMPLE_ASSET_ROOT</key><string>$ROOT_DIR</string>
+    <key>SIMPLE_ONE_CALL_UPLOAD</key><string>1</string>
+    <key>SIMPLE_ONE_CALL_READBACK</key><string>1</string>
+    <key>SIMPLE_NO_DEPRECATED_WARNINGS</key><string>1</string>
+    <key>VK_ICD_FILENAMES</key><string>${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}</string>
+    <key>DYLD_LIBRARY_PATH</key><string>$ROOT_DIR/build/sffi:${DYLD_LIBRARY_PATH:-/opt/homebrew/lib}</string>
+    <key>GPU_2D_LIVE_CAPTURE_PATH</key><string>$CAPTURE_PPM</string>
+    <key>GPU_2D_LIVE_RECEIPT_PATH</key><string>$RECEIPT</string>
+    <key>GPU_2D_LIVE_READY_PATH</key><string>$READY</string>
+    <key>GPU_2D_LIVE_SOURCE_REVISION</key><string>$source_revision</string>
+    <key>GPU_2D_LIVE_HOLD</key><string>1</string>
+  </dict>
+</dict>
+</plist>
+PLIST
+
+open -n --stdout "$LAUNCH_OUT" --stderr "$LAUNCH_ERR" "$app" ||
+    fail "launch-failed"
+
+pid_deadline=$(($(date +%s) + 15))
+while [ "$(date +%s)" -lt "$pid_deadline" ]; do
+    app_pid="$(find_exact_app_pid)"
+    [ -z "$app_pid" ] || break
+    sleep 0.1
+done
+positive_integer "$app_pid" || fail "exact-launched-pid-missing"
+require_launched_process
+
+deadline=$(($(date +%s) + TIMEOUT_SECS))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    require_launched_process
+    if [ -s "$READY" ] &&
+            osascript - "$app_pid" >"$WINDOW_RECORD" 2>/dev/null <<'OSA'; then
+on run argv
+  set targetPid to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in (processes whose unix id is targetPid)
+      tell proc
+        if (count of windows) > 0 then
+          set targetWindow to window 1
+          set position of targetWindow to {120, 100}
+          set frontmost to true
+          set p to position of targetWindow
+          set s to size of targetWindow
+          set windowNumber to value of attribute "AXWindowNumber" of targetWindow
+          if windowNumber is missing value then error "GPU window id missing"
+          set AppleScript's text item delimiters to ","
+          return (targetPid as text) & "," & (item 1 of p as text) & "," & ¬
+            (item 2 of p as text) & "," & (item 1 of s as text) & "," & ¬
+            (item 2 of s as text) & "," & (windowNumber as text)
+        end if
+      end tell
+    end repeat
+  end tell
+  error "GPU evidence window not ready"
+end run
+OSA
+        break
+    fi
+    sleep 1
+done
+[ -s "$READY" ] || fail "render-ready-timeout"
+[ -s "$WINDOW_RECORD" ] || fail "window-not-found"
+
+window_record="$(tr -d '\r\n ' <"$WINDOW_RECORD")"
+case "$window_record" in *,*,*,*,*,*) ;; *) fail "invalid-window-record" ;; esac
+old_ifs=$IFS
+IFS=,
+set -- $window_record
+IFS=$old_ifs
+window_pid="${1:-}"
+window_x="${2:-0}"
+window_y="${3:-0}"
+window_w="${4:-0}"
+window_h="${5:-0}"
+window_id="${6:-}"
+[ "$window_pid" = "$app_pid" ] || fail "window-pid-mismatch"
+positive_integer "$window_w" || fail "invalid-window-width"
+positive_integer "$window_h" || fail "invalid-window-height"
+positive_integer "$window_id" || fail "invalid-window-id"
+
+require_launched_process
+screencapture -x -o -l"$window_id" "$WINDOW_BEFORE_PNG" ||
+    fail "before-window-capture-failed"
+[ "$(file_bytes "$WINDOW_BEFORE_PNG")" -gt 1000 ] ||
+    fail "before-window-capture-empty"
+
+# The exact PID-owned window is frontmost before the ordered pointer/key input.
+osascript - "$app_pid" "$window_id" >/dev/null <<'OSA' ||
+    fail "window-focus-failed"
+on run argv
+  set targetPid to (item 1 of argv) as integer
+  set targetWindowId to (item 2 of argv) as integer
+  tell application "System Events"
+    repeat with proc in (processes whose unix id is targetPid)
+      tell proc
+        repeat with targetWindow in windows
+          set candidateWindowId to value of attribute "AXWindowNumber" of targetWindow
+          if candidateWindowId = targetWindowId then
+            set frontmost to true
+            return true
+          end if
+        end repeat
+      end tell
+    end repeat
+  end tell
+  error "GPU evidence window identity missing"
+end run
+OSA
+
+pointer_x=$((window_x + (window_w / 2)))
+pointer_y=$((window_y + (window_h / 2)))
+cliclick "m:${pointer_x},${pointer_y}" "dd:." "w:200" "du:." ||
+    fail "pointer-injection-failed"
+osascript - "$app_pid" >/dev/null <<'OSA' || fail "key-injection-failed"
+on run argv
+  set targetPid to (item 1 of argv) as integer
+  tell application "System Events"
+    repeat with proc in (processes whose unix id is targetPid)
+      tell proc
+        set frontmost to true
+        key code 5
+        return true
+      end tell
+    end repeat
+  end tell
+  error "GPU evidence process missing"
+end run
+OSA
+
+receipt_deadline=$(($(date +%s) + 180))
+while [ "$(date +%s)" -lt "$receipt_deadline" ] && [ ! -s "$RECEIPT" ]; do
+    require_launched_process
+    sleep 1
+done
+[ -s "$RECEIPT" ] || fail "runtime-receipt-timeout"
+[ -s "$CAPTURE_PPM" ] || fail "framebuffer-capture-missing"
+
+require_launched_process
+screencapture -x -o -l"$window_id" "$WINDOW_AFTER_PNG" ||
+    fail "after-window-capture-failed"
+before_window_bytes="$(file_bytes "$WINDOW_BEFORE_PNG")"
+after_window_bytes="$(file_bytes "$WINDOW_AFTER_PNG")"
+before_window_cksum="$(file_cksum "$WINDOW_BEFORE_PNG")"
+after_window_cksum="$(file_cksum "$WINDOW_AFTER_PNG")"
+[ "$after_window_bytes" -gt 1000 ] || fail "after-window-capture-empty"
+[ "$before_window_cksum" != "$after_window_cksum" ] ||
+    fail "window-capture-unchanged"
+
+[ "$(value_of gpu_2d_live_status "$RECEIPT")" = "pass" ] ||
+    fail "runtime-status-failed"
+[ "$(value_of gpu_2d_live_backend "$RECEIPT")" = "$BACKEND" ] ||
+    fail "backend-mismatch"
+[ "$(value_of gpu_2d_live_source "$RECEIPT")" = "device_readback" ] ||
+    fail "device-readback-missing"
+[ "$(value_of gpu_2d_live_width "$RECEIPT")" = "3840" ] ||
+    fail "width-mismatch"
+[ "$(value_of gpu_2d_live_height "$RECEIPT")" = "2160" ] ||
+    fail "height-mismatch"
+[ "$(value_of gpu_2d_live_dpi "$RECEIPT")" = "300" ] ||
+    fail "dpi-mismatch"
+[ "$(value_of gpu_2d_live_source_revision "$RECEIPT")" = "$source_revision" ] ||
+    fail "source-revision-mismatch"
+[ "$(value_of gpu_2d_live_event_sequence "$RECEIPT")" = \
+    "focus,pointer_move,pointer_down,pointer_up,key_down,key_up" ] ||
+    fail "event-sequence-mismatch"
+[ "$(value_of gpu_2d_live_event_count "$RECEIPT")" = "6" ] ||
+    fail "event-count-mismatch"
+[ "$(value_of gpu_2d_live_event_backend "$RECEIPT")" = "$BACKEND" ] ||
+    fail "event-backend-mismatch"
+[ "$(value_of gpu_2d_live_font_loaded "$RECEIPT")" = "true" ] ||
+    fail "vector-font-not-loaded"
+font_expected_identity="$(value_of gpu_2d_live_font_expected_identity "$RECEIPT")"
+font_identity="$(value_of gpu_2d_live_font_identity "$RECEIPT")"
+[ -n "$font_expected_identity" ] || fail "vector-font-expected-identity-missing"
+[ "$font_identity" = "$font_expected_identity" ] ||
+    fail "vector-font-identity-mismatch"
+[ "$(value_of gpu_2d_live_font_warm_rasterizations "$RECEIPT")" = "0" ] ||
+    fail "vector-font-warm-rerasterized"
+[ "$(value_of gpu_2d_live_font_execution_target "$RECEIPT")" = "$BACKEND" ] ||
+    fail "vector-font-not-executed-on-backend"
+font_attempts="$(value_of gpu_2d_live_font_execution_attempts "$RECEIPT")"
+printf '%s' "$font_attempts" | grep -Fq "$BACKEND" ||
+    fail "vector-font-backend-attempt-missing"
+font_cold="$(value_of gpu_2d_live_font_cold_rasterizations "$RECEIPT")"
+font_hits="$(value_of gpu_2d_live_font_warm_hits "$RECEIPT")"
+backend_handle="$(value_of gpu_2d_live_backend_handle "$RECEIPT")"
+initial_checksum="$(value_of gpu_2d_live_initial_checksum "$RECEIPT")"
+interaction_checksum="$(value_of gpu_2d_live_interaction_checksum "$RECEIPT")"
+positive_integer "$font_cold" ||
+    fail "vector-font-cold-rasterization-missing"
+positive_integer "$font_hits" || fail "vector-font-warm-hit-missing"
+positive_integer "$backend_handle" || fail "backend-handle-missing"
+positive_integer "$initial_checksum" || fail "initial-checksum-missing"
+positive_integer "$interaction_checksum" || fail "interaction-checksum-missing"
+[ "$initial_checksum" != "$interaction_checksum" ] ||
+    fail "interaction-checksum-unchanged"
+
+ppm_bytes="$(wc -c <"$CAPTURE_PPM" | tr -d ' ')"
+[ "$ppm_bytes" -gt 24883200 ] || fail "capture-truncated"
+ppm_header="$(head -n 3 "$CAPTURE_PPM" | tr '\n' '|')"
+[ "$ppm_header" = "P6|3840 2160|255|" ] || fail "capture-header-mismatch"
+pixel_sha256="$(dd if="$CAPTURE_PPM" bs=1 skip=17 2>/dev/null |
+    shasum -a 256 | awk '{print $1}')"
+case "$pixel_sha256" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*)
+        [ "${#pixel_sha256}" -eq 64 ] || fail "pixel-sha256-invalid" ;;
+    *) fail "pixel-sha256-invalid" ;;
+esac
+non_background_bounds="$(value_of gpu_2d_live_non_background_bounds "$RECEIPT")"
+case "$non_background_bounds" in
+    *,*,*,*) ;;
+    *) fail "non-background-bounds-missing" ;;
+esac
+
+sips -s format png "$CAPTURE_PPM" --out "$CAPTURE_PNG" >/dev/null ||
+    fail "png-conversion-failed"
+[ -s "$CAPTURE_PNG" ] || fail "png-conversion-empty"
+png_width="$(sips -g pixelWidth "$CAPTURE_PNG" |
+    awk '/pixelWidth:/{print $2}')"
+png_height="$(sips -g pixelHeight "$CAPTURE_PNG" |
+    awk '/pixelHeight:/{print $2}')"
+[ "$png_width" = "3840" ] && [ "$png_height" = "2160" ] ||
+    fail "png-dimensions-mismatch"
+
+{
+    echo "${PREFIX}_status=pass"
+    echo "${PREFIX}_reason=pass"
+    echo "${PREFIX}_driver_kind=$SELECTED_DRIVER_KIND"
+    echo "${PREFIX}_driver_path=$SELECTED_DRIVER_PATH"
+    echo "${PREFIX}_driver_sha256=$driver_sha256"
+    echo "${PREFIX}_backend=$BACKEND"
+    echo "${PREFIX}_source=device_readback"
+    echo "${PREFIX}_backend_handle=$backend_handle"
+    echo "${PREFIX}_initial_checksum=$initial_checksum"
+    echo "${PREFIX}_interaction_checksum=$interaction_checksum"
+    echo "${PREFIX}_width=3840"
+    echo "${PREFIX}_height=2160"
+    echo "${PREFIX}_dpi=300"
+    echo "${PREFIX}_pixel_sha256=$pixel_sha256"
+    echo "${PREFIX}_non_background_bounds=$non_background_bounds"
+    echo "${PREFIX}_event_sequence=focus,pointer_move,pointer_down,pointer_up,key_down,key_up"
+    echo "${PREFIX}_event_count=6"
+    echo "${PREFIX}_event_backend=$BACKEND"
+    echo "${PREFIX}_font_loaded=true"
+    echo "${PREFIX}_font_expected_identity=$font_expected_identity"
+    echo "${PREFIX}_font_identity=$font_identity"
+    echo "${PREFIX}_font_cold_rasterizations=$font_cold"
+    echo "${PREFIX}_font_warm_rasterizations=0"
+    echo "${PREFIX}_font_warm_hits=$font_hits"
+    echo "${PREFIX}_font_execution_target=$BACKEND"
+    echo "${PREFIX}_source_revision=$source_revision"
+    echo "${PREFIX}_pid=$app_pid"
+    echo "${PREFIX}_executable=$app_executable"
+    echo "${PREFIX}_window_id=$window_id"
+    echo "${PREFIX}_window_rect=$window_x,$window_y,$window_w,$window_h"
+    echo "${PREFIX}_window_before_png=$WINDOW_BEFORE_PNG"
+    echo "${PREFIX}_window_after_png=$WINDOW_AFTER_PNG"
+    echo "${PREFIX}_window_before_bytes=$before_window_bytes"
+    echo "${PREFIX}_window_after_bytes=$after_window_bytes"
+    echo "${PREFIX}_window_before_cksum=$before_window_cksum"
+    echo "${PREFIX}_window_after_cksum=$after_window_cksum"
+    echo "${PREFIX}_capture_path=$CAPTURE_PPM"
+    echo "backend=$BACKEND"
+    echo "target=macos-host"
+    echo "width=3840"
+    echo "height=2160"
+    echo "dpi=300"
+    echo "pixel_sha256=$pixel_sha256"
+    echo "non_background_bounds=$non_background_bounds"
+    echo "event_sequence=focus,pointer_move,pointer_down,pointer_up,key_down,key_up"
+    echo "event_count=6"
+    echo "event_backend=$BACKEND"
+    echo "capture_path=$CAPTURE_PPM"
+    echo "source_revision=$source_revision"
+} >"$EVIDENCE"
+
+write_report pass "live-$BACKEND-device-readback-vector-font-ordered-events-exact-window"
+cleanup
+trap - EXIT HUP INT TERM
+echo "macOS $BACKEND_TITLE 2D live evidence: PASS"
+echo "report=$REPORT_PATH"
+echo "capture=$CAPTURE_PNG"

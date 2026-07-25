@@ -1,0 +1,33 @@
+# Should happen: `struct X: use SomeMixin` injects the mixin's field(s) and
+# method(s) into X, same as for `class` (or, if unsupported for `struct`, a
+# compile-time rejection).
+# Actually happens (deployed binary): SILENT ACCEPT (exit=0). stderr gets
+# "Runtime error: Function 'Player.add_score' not found" (the injected method
+# is not actually wired up on `struct`), but the process still exits 0 and
+# stdout gets the literal string "error" (print()'s stand-in for the failed
+# call's result) followed by "0" for the field read.
+#
+# Repro:
+#   bin/release/x86_64-unknown-linux-gnu/simple run <this file> ; echo "exit=$?"
+# Observed (exit=0):
+#   stderr: Runtime error: Function 'Player.add_score' not found
+#   stdout: error
+#           0
+# This is a TOR-FM-02-class defect: a program that should either work or be
+# rejected at compile time instead runs to completion (exit=0) while leaking a
+# fabricated "error" string onto stdout, which a real caller could mistake for
+# valid program output.
+mixin Scorable:
+    score: i64
+
+    fn add_score(n: i64) -> i64:
+        return self.score + n
+
+struct Player:
+    use Scorable
+    name: text
+
+fn main():
+    val p = Player(score: 10, name: "Alice")
+    print(p.add_score(5))   # expected 15, ACTUAL: "error" (stdout) + stderr diag
+    print(p.name)             # expected Alice, ACTUAL: 0

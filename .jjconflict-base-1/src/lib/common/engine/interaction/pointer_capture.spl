@@ -1,0 +1,127 @@
+# pointer_capture.spl — Unified 2D interaction core: pointer capture +
+# hover-path bookkeeping.
+#
+# PointerRouter tracks per-pointer capture/hover/press state. While a
+# pointer is captured, the effective routing target is the capture target
+# regardless of where the point currently is (events keep routing to it
+# even outside its bounds) until release_pointer() is called -- see
+# doc/03_plan/ui/unified_2d_engine/unified_2d_interaction_2026-07-20.md.
+
+use std.common.engine.interaction.hit_test.{HitTestResult}
+
+class PointerRouter:
+    """captures/hover_paths/pressed_targets are keyed by pointer_id. Every
+    lookup goes through contains_key + `[]`, never `.get()` -- dict
+    `.get()` returns nil for PRESENT keys on the interpreter (see
+    .claude/memory/ref_coding.md / the interpreter dict-and-value-quirks
+    reference), which would silently drop live captures."""
+    captures: Dict<i64, i64>
+    hover_paths: Dict<i64, [i64]>
+    pressed_targets: Dict<i64, i64>
+
+    static fn create() -> PointerRouter:
+        PointerRouter(captures: {}, hover_paths: {}, pressed_targets: {})
+
+    me capture_pointer(pointer_id: i64, node_id: i64):
+        self.captures[pointer_id] = node_id
+
+    me release_pointer(pointer_id: i64):
+        if self.captures.contains_key(pointer_id):
+            self.captures.remove(pointer_id)
+
+    fn has_pointer_capture(pointer_id: i64, node_id: i64) -> bool:
+        if self.captures.contains_key(pointer_id):
+            return self.captures[pointer_id] == node_id
+        false
+
+    fn capture_target(pointer_id: i64) -> i64:
+        """The node currently capturing `pointer_id`, or -1 if none."""
+        if self.captures.contains_key(pointer_id):
+            return self.captures[pointer_id]
+        -1
+
+    me set_hover_path(pointer_id: i64, path: [i64]):
+        self.hover_paths[pointer_id] = path
+
+    fn hover_path(pointer_id: i64) -> [i64]:
+        if self.hover_paths.contains_key(pointer_id):
+            return self.hover_paths[pointer_id]
+        []
+
+    me set_pressed(pointer_id: i64, node_id: i64):
+        self.pressed_targets[pointer_id] = node_id
+
+    me clear_pressed(pointer_id: i64):
+        if self.pressed_targets.contains_key(pointer_id):
+            self.pressed_targets.remove(pointer_id)
+
+    fn pressed_target(pointer_id: i64) -> i64:
+        if self.pressed_targets.contains_key(pointer_id):
+            return self.pressed_targets[pointer_id]
+        -1
+
+fn effective_target(router: PointerRouter, pointer_id: i64, hit: HitTestResult) -> i64:
+    """Routing target for `pointer_id`: the capture target if captured
+    (regardless of the hit-test result / current bounds), else the
+    hit-test's primary (-1 if nothing hit). When captured, the caller
+    resolves the matching ancestor path via
+    hit_test.ancestor_path_of(parents, effective_target(...)) rather than
+    hit.ancestor_path -- a captured target's path is independent of the
+    current hit-test result, since the pointer may be outside every
+    proxy's bounds while still captured."""
+    val captured = router.capture_target(pointer_id)
+    if captured != -1:
+        return captured
+    hit.primary
+
+struct HoverDiff:
+    """entered/left are in root-to-target path order (matches
+    HitTestResult.ancestor_path). over_target/out_target are -1 when the
+    primary (deepest) hovered node did not change between old and new."""
+    entered: [i64]
+    left: [i64]
+    over_target: i64
+    out_target: i64
+
+fn _contains_i64(arr: [i64], v: i64) -> bool:
+    var i = 0
+    while i < arr.len():
+        if arr[i] == v:
+            return true
+        i = i + 1
+    false
+
+fn hover_diff(old_path: [i64], new_path: [i64]) -> HoverDiff:
+    """Diff two root-to-target hover paths into enter/leave node sets plus
+    an over/out primary-target pair, DOM pointerenter/pointerleave/
+    pointerover/pointerout style. `old_path`/`new_path` are typically
+    PointerRouter.hover_path(pointer_id) (before) and
+    HitTestResult.ancestor_path (after) for the same pointer."""
+    var entered: [i64] = []
+    var i = 0
+    while i < new_path.len():
+        val id = new_path[i]
+        if not _contains_i64(old_path, id):
+            entered.push(id)
+        i = i + 1
+    var left: [i64] = []
+    var j = 0
+    while j < old_path.len():
+        val id = old_path[j]
+        if not _contains_i64(new_path, id):
+            left.push(id)
+        j = j + 1
+    var old_primary: i64 = -1
+    if old_path.len() > 0:
+        old_primary = old_path[old_path.len() - 1]
+    var new_primary: i64 = -1
+    if new_path.len() > 0:
+        new_primary = new_path[new_path.len() - 1]
+    var over_t: i64 = -1
+    var out_t: i64 = -1
+    if old_primary != new_primary:
+        over_t = new_primary
+        out_t = old_primary
+    HoverDiff(entered: entered, left: left, over_target: over_t, out_target: out_t)
+
+export PointerRouter, effective_target, HoverDiff, hover_diff

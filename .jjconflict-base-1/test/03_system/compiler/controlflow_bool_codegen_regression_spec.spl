@@ -1,0 +1,186 @@
+"""
+# Control-Flow / Bool Native-Codegen Regression
+
+**Feature IDs:** #controlflow-bool-native-codegen-regression
+**Category:** Compiler / Backend / Native Codegen
+**Status:** Regression
+
+## Overview
+
+This SSpec guards four native-codegen-only fixes (all correct in the
+interpreter before their fix, but wrong or crashing once compiled to a
+native binary) against silent regression:
+
+- **#151** — `i64`/`iN` -> `bool` narrowing on an if/elif/else tail-merge
+  emitted an invalid `bitcast i64 to i1` (rejected by `llc`, or on backends
+  that tolerate it, garbage truth values); the fix in
+  `src/compiler/70.backend/backend/mir_to_llvm_helpers.spl` and
+  `_MirToLlvm/asm_constraints_helpers.spl` selects `trunc` for iN->i1 casts.
+- **#150** — string concat/`.len()` corruption, plus `Result<T, E>` and
+  `Option<T>` (`Dict.get()`) short-circuiting via the `?` operator, were
+  unreliable once compiled natively.
+- **#143** — `for x in <non-array iterable>` used to lower through
+  null-function-pointer stub calls that `call 0` and SIGSEGV natively; the
+  fix (`src/compiler/50.mir/mir_lowering_stmts.spl`) fails loudly on truly
+  unsupported iterables, while the still-supported paths (`Range`, and
+  arrays such as `Dict.keys()`/`Dict.values()`) must keep working correctly
+  rather than crashing.
+- **#144** — `i64_local.to_string()` printed via `println` resolved to
+  `MethodResolution.Unresolved` on the bootstrap-flat lowering path and
+  silently dropped the digits instead of rendering the decimal value.
+
+Since the interpreter already gets all of these right, this spec's teeth are
+in `--mode=native` (and the native-build-and-run probe below it): it must
+fail loudly if any of the four regress.
+
+## Research
+
+**Research:** doc/08_tracking/bug/flat_bridge_bool_bitcast_and_text_corruption_2026-07-11.md
+
+## Syntax
+
+```sh
+src/compiler_rust/target/debug/simple test test/03_system/compiler/controlflow_bool_codegen_regression_spec.spl --mode=native --clean
+```
+"""
+
+use std.spec.*
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+val SIMPLE_BIN: text = "src/compiler_rust/target/debug/simple"
+val BUILD_DIR: text = "build/test/controlflow_bool_codegen_regression"
+val SOURCE_PATH: text = BUILD_DIR + "/controlflow_bool_probe.spl"
+val NATIVE_PATH: text = BUILD_DIR + "/controlflow_bool_probe.bin"
+
+fn shell(command: text) -> (text, i64):
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+    (stdout + stderr, code)
+
+fn probe_source() -> text:
+    [
+        "fn classify(n: i64) -> bool:\n",
+        "    if n > 10:\n",
+        "        return true\n",
+        "    elif n < 0:\n",
+        "        return false\n",
+        "    else:\n",
+        "        return n == 5\n",
+        "\n",
+        "fn divide(a: i64, b: i64) -> Result<i64, text>:\n",
+        "    if b == 0:\n",
+        "        return Err(\"division by zero\")\n",
+        "    return Ok(a / b)\n",
+        "\n",
+        "fn compute_ratio(a: i64, b: i64, c: i64) -> Result<i64, text>:\n",
+        "    val step1 = divide(a, b)?\n",
+        "    val step2 = divide(step1, c)?\n",
+        "    return Ok(step2)\n",
+        "\n",
+        "fn dict_lookup_doubled(d: Dict<text, i64>, key: text) -> Option<i64>:\n",
+        "    val v = d.get(key)?\n",
+        "    return Some(v * 2)\n",
+        "\n",
+        "fn sum_range(limit: i64) -> i64:\n",
+        "    var total = 0\n",
+        "    for i in 0..limit:\n",
+        "        total = total + i\n",
+        "    total\n",
+        "\n",
+        "fn main() -> i64:\n",
+        "    # --- #151: bool tail-merge (if/elif/else) narrowing ---\n",
+        "    if classify(20) != true:\n",
+        "        return 101\n",
+        "    if classify(-5) != false:\n",
+        "        return 102\n",
+        "    if classify(5) != true:\n",
+        "        return 103\n",
+        "    if classify(7) != false:\n",
+        "        return 104\n",
+        "    if classify(0) != false:\n",
+        "        return 105\n",
+        "    if classify(10) != false:\n",
+        "        return 106\n",
+        "\n",
+        "    # --- #150a: Result<i64,text> propagated with ? (success + failure) ---\n",
+        "    val ok_result = compute_ratio(100, 5, 2)\n",
+        "    if ok_result.is_ok() != true:\n",
+        "        return 110\n",
+        "    if ok_result.unwrap() != 10:\n",
+        "        return 111\n",
+        "    val err_result = compute_ratio(100, 0, 2)\n",
+        "    if err_result.is_err() != true:\n",
+        "        return 112\n",
+        "\n",
+        "    # --- #150b: Dict.get() Option flowed through ? ---\n",
+        "    val d: Dict<text, i64> = {\"a\": 21}\n",
+        "    val found = dict_lookup_doubled(d, \"a\")\n",
+        "    if found.is_some() != true:\n",
+        "        return 120\n",
+        "    if found.unwrap() != 42:\n",
+        "        return 121\n",
+        "    val missing = dict_lookup_doubled(d, \"z\")\n",
+        "    if missing.is_none() != true:\n",
+        "        return 122\n",
+        "\n",
+        "    # --- #150c: string concat + .len() ---\n",
+        "    val combined = \"hello\" + \" world\"\n",
+        "    if combined.len() != 11:\n",
+        "        return 130\n",
+        "    if combined != \"hello world\":\n",
+        "        return 131\n",
+        "\n",
+        "    # --- #143: for-in over a Range, and over Dict.keys()/.values() (array-backed) ---\n",
+        "    val range_sum = sum_range(5)\n",
+        "    if range_sum != 10:\n",
+        "        return 140\n",
+        "    val d2: Dict<text, i64> = {\"x\": 1, \"y\": 2, \"z\": 3}\n",
+        "    var key_count = 0\n",
+        "    for k in d2.keys():\n",
+        "        key_count = key_count + 1\n",
+        "    if key_count != 3:\n",
+        "        return 141\n",
+        "    var value_sum = 0\n",
+        "    for v in d2.values():\n",
+        "        value_sum = value_sum + v\n",
+        "    if value_sum != 6:\n",
+        "        return 142\n",
+        "\n",
+        "    # --- #144: i64 local .to_string() must render decimal digits ---\n",
+        "    val n: i64 = 12345\n",
+        "    val printed = n.to_string()\n",
+        "    if printed != \"12345\":\n",
+        "        return 150\n",
+        "    if printed.len() != 5:\n",
+        "        return 151\n",
+        "    println(\"n_to_string=\" + printed)\n",
+        "\n",
+        "    println(\"ALL_OK\")\n",
+        "    0\n"
+    ].join("")
+
+describe "control-flow / bool native-codegen regression":
+    it "keeps bool tail-merge, Result/Option ?-propagation, for-in, and i64.to_string() green under interpreter":
+        step("Write the combined control-flow/bool probe")
+        val (write_out, write_code) = shell("mkdir -p " + BUILD_DIR + " && cat > " + SOURCE_PATH + " <<'EOF'\n" + probe_source() + "\nEOF")
+        expect(write_out).to_equal("")
+        expect(write_code).to_equal(0)
+
+        step("Interpreter run reaches ALL_OK (proves the logic itself, not the native backend, is correct)")
+        val (interp_out, interp_code) = shell(SIMPLE_BIN + " run " + SOURCE_PATH)
+        expect(interp_code).to_equal(0)
+        expect(interp_out).to_contain("ALL_OK")
+        expect(interp_out).to_contain("n_to_string=12345")
+
+    it "keeps bool tail-merge, Result/Option ?-propagation, for-in, and i64.to_string() green under native codegen":
+        step("Hosted native compile of the probe still succeeds")
+        val (compile_out, compile_code) = shell(SIMPLE_BIN + " compile " + SOURCE_PATH + " --native -o " + NATIVE_PATH)
+        expect(compile_code).to_equal(0)
+        expect(compile_out).to_contain("Compiled")
+
+        step("The standalone native probe exits 0 and prints ALL_OK instead of crashing or returning a per-bug failure code")
+        val (native_out, native_code) = shell("sh -c '" + NATIVE_PATH + " >/tmp/controlflow_bool_probe.out 2>&1; code=$?; cat /tmp/controlflow_bool_probe.out; echo EXIT=$code'")
+        expect(native_code).to_equal(0)
+        expect(native_out).to_contain("ALL_OK")
+        expect(native_out).to_contain("n_to_string=12345")
+        expect(native_out).to_contain("EXIT=0")

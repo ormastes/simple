@@ -1,0 +1,90 @@
+# x86_64 network service initialization for QEMU q35 bring-up.
+#
+# Mirrors the RISC-V network branch in `riscv_services.spl`: probe PCI for a
+# virtio-net device, negotiate it via the C freestanding runtime, then require
+# real device-level packet TX and RX readiness before reporting the network as
+# ready. The device TX/RX probes (`rt_net_tx_test` / `rt_net_rx_ready`) are
+# provided by the x86_64 baremetal runtime and drive an ARP round trip against
+# the QEMU gateway, so a dead NIC cannot be reported as ready.
+
+extern fn serial_println(msg: text)
+extern fn rt_pci_device_count() -> i64
+extern fn rt_pci_get_field(index: i64, field: i64) -> i64
+extern fn rt_net_init() -> i64
+extern fn rt_net_tx_test() -> i64
+extern fn rt_net_rx_ready() -> i64
+extern fn rt_net_stats() -> i64
+
+var x86_64_network_ok: i64 = 0
+var x86_64_network_device_index: i64 = -1
+
+pub fn init_x86_64_network_service() -> i64:
+    """Initialize the x86_64 virtio-net surface for SSH-live boot."""
+    serial_println("========================================")
+    serial_println("[init] Starting SimpleOS x86_64 network service...")
+    serial_println("========================================")
+
+    serial_println("[net-x86] Starting network service probe...")
+    val count = rt_pci_device_count()
+    x86_64_network_device_index = -1
+    var i: i64 = 0
+    while i < count:
+        val cls = rt_pci_get_field(i, 3)
+        val sub = rt_pci_get_field(i, 4)
+        val vendor = rt_pci_get_field(i, 5)
+        val device_id = rt_pci_get_field(i, 6)
+        val is_virtio_net = cls == 2 and sub == 0 and vendor == 0x1af4 and (device_id == 0x1000 or device_id == 0x1041)
+        if is_virtio_net:
+            x86_64_network_device_index = i
+            break
+        i = i + 1
+
+    var network_ok: i64 = 0
+    if x86_64_network_device_index < 0:
+        serial_println("[net-x86] Network unavailable: no PCI Ethernet/VirtIO device")
+        network_ok = 0
+    else:
+        serial_println("[net-x86] PCI network device index {x86_64_network_device_index}")
+        val init_rc = rt_net_init()
+        if init_rc < 0:
+            serial_println("[net-x86] Network init failed rc={init_rc}")
+            network_ok = 0
+        else:
+            serial_println("[net-x86] Network device ready")
+            val tx_rc = rt_net_tx_test()
+            if tx_rc < 0:
+                serial_println("[net-x86] Network packet TX unavailable rc={tx_rc}")
+                network_ok = 0
+            else:
+                serial_println("[net-x86] Network packet TX ready")
+                val rx_rc = rt_net_rx_ready()
+                if rx_rc < 0:
+                    serial_println("[net-x86] Network packet RX unavailable rc={rx_rc}")
+                    network_ok = 0
+                else:
+                    serial_println("[net-x86] Network packet RX ready")
+                    val stats_rc = rt_net_stats()
+                    if stats_rc < 0:
+                        serial_println("[net-x86] Network stats probe failed rc={stats_rc}")
+                        network_ok = 0
+                    else:
+                        network_ok = 1
+                        serial_println("[net-x86] Network stats probe rc={stats_rc}")
+                        serial_println("[net-x86] Network service ready")
+
+    x86_64_network_ok = network_ok
+    if network_ok == 1:
+        serial_println("[init] network: ready")
+    else:
+        serial_println("[init] network: unavailable")
+    serial_println("[init] x86_64 network init complete")
+    serial_println("========================================")
+    network_ok
+
+pub fn x86_64_network_ready() -> bool:
+    """Check whether the x86_64 network service found and initialized a NIC."""
+    return x86_64_network_ok == 1
+
+pub fn x86_64_network_ready_code() -> i64:
+    """Freestanding-safe numeric readiness gate for boot callers."""
+    return x86_64_network_ok

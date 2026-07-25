@@ -1,0 +1,54 @@
+use common.wine_kernel32_virtual_memory.{wine_kernel32_execute_virtual_memory}
+use common.wine_vm_adapter.{wine_vm_access_gate, wine_vm_space_new}
+
+describe "Wine KERNEL32 virtual memory bridge":
+    it "executes a bounded allocate-protect-free sequence through the VM adapter":
+        val result = wine_kernel32_execute_virtual_memory(
+            ["VirtualAlloc", "VirtualProtect", "VirtualFree"],
+            wine_vm_space_new(),
+            0x700000,
+            0x2000,
+            "rw",
+            "rx"
+        )
+
+        expect(result.ok).to_equal(true)
+        expect(result.base).to_equal(0x700000)
+        expect(result.size).to_equal(0x2000)
+        expect(result.old_perms).to_equal("rw")
+        expect(result.operations).to_equal("VirtualAlloc VirtualProtect VirtualFree")
+        expect(wine_vm_access_gate(result.space, 0x700000, "read")).to_equal("page-fault-unmapped")
+
+    it "keeps virtual memory dispatch ordered and bounded":
+        val out_of_order = wine_kernel32_execute_virtual_memory(
+            ["VirtualProtect", "VirtualAlloc", "VirtualFree"],
+            wine_vm_space_new(),
+            0x710000,
+            0x1000,
+            "rw",
+            "rx"
+        )
+        expect(out_of_order.ok).to_equal(false)
+        expect(out_of_order.error).to_equal("kernel32-virtual-memory-sequence-expected:VirtualAlloc")
+
+        val wrong_family = wine_kernel32_execute_virtual_memory(
+            ["VirtualAlloc", "GetCommandLineW", "VirtualFree"],
+            wine_vm_space_new(),
+            0x720000,
+            0x1000,
+            "rw",
+            "rx"
+        )
+        expect(wrong_family.ok).to_equal(false)
+        expect(wrong_family.error).to_equal("bridge-wrong-category:GetCommandLineW")
+
+        val invalid = wine_kernel32_execute_virtual_memory(
+            ["VirtualAlloc", "VirtualProtect", "VirtualFree"],
+            wine_vm_space_new(),
+            0x730000,
+            0,
+            "rw",
+            "rx"
+        )
+        expect(invalid.ok).to_equal(false)
+        expect(invalid.error).to_equal("VirtualAlloc:invalid-size")

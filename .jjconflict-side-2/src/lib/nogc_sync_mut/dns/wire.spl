@@ -1,0 +1,374 @@
+"""DNS RFC 1035 wire-format encoder and decoder.
+
+Byte arrays are [i64] (each element 0–255).  Using [i64] sidesteps the
+text.bytes() corruption bug and the \xNN-in-text fragility described in
+bug dns_text_byte_encoding_stub_2026-06-15.md.
+
+Entry points
+  dns_wire_encode_query(id, domain, qtype) -> [i64]
+  dns_wire_decode_message(bytes: [i64]) -> (header, questions, answers, auth, additional)
+
+Internal helpers are exported so specs can pin them individually.
+"""
+
+use string.{char_from_code}
+
+use std.nogc_sync_mut.dns.types.{
+    DNS_TYPE_A, DNS_TYPE_NS, DNS_TYPE_CNAME, DNS_TYPE_SOA,
+    DNS_TYPE_PTR, DNS_TYPE_MX, DNS_TYPE_TXT, DNS_TYPE_AAAA, DNS_TYPE_SRV,
+    DNS_CLASS_IN,
+    DNS_FLAG_QR_QUERY, DNS_FLAG_QR_RESPONSE, DNS_FLAG_OPCODE_QUERY,
+    DNS_RCODE_NOERROR,
+    dns_create_header, dns_create_question, dns_create_rr, dns_create_message
+}
+
+# ---------------------------------------------------------------------------
+# Primitive byte helpers
+# ---------------------------------------------------------------------------
+
+fn wire_push_u8(buf: [i64], v: i64) -> [i64]:
+    buf.push(v & 255)
+    buf
+
+fn wire_push_u16(buf: [i64], v: i64) -> [i64]:
+    buf.push((v >> 8) & 255)
+    buf.push(v & 255)
+    buf
+
+fn wire_push_u32(buf: [i64], v: i64) -> [i64]:
+    buf.push((v >> 24) & 255)
+    buf.push((v >> 16) & 255)
+    buf.push((v >> 8) & 255)
+    buf.push(v & 255)
+    buf
+
+fn wire_read_u8(bytes: [i64], offset: i64) -> i64:
+    if offset < 0 or offset >= bytes.length():
+        return 0
+    bytes[offset]
+
+fn wire_read_u16(bytes: [i64], offset: i64) -> i64:
+    if offset < 0 or offset + 1 >= bytes.length():
+        return 0
+    val hi: i64 = bytes[offset]
+    val lo: i64 = bytes[offset + 1]
+    (hi << 8) | lo
+
+fn wire_read_u32(bytes: [i64], offset: i64) -> i64:
+    if offset < 0 or offset + 3 >= bytes.length():
+        return 0
+    val b0: i64 = bytes[offset]
+    val b1: i64 = bytes[offset + 1]
+    val b2: i64 = bytes[offset + 2]
+    val b3: i64 = bytes[offset + 3]
+    (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+# ---------------------------------------------------------------------------
+# Name encoding (label format, RFC 1035 §3.1)
+# ---------------------------------------------------------------------------
+
+fn wire_encode_name(buf: [i64], name: text) -> [i64]:
+    # Split on '.', encode each label as length+octets, terminate with 0x00.
+    # Empty trailing label (FQDN dot) is handled by appending 0x00 once.
+    val labels = name.split(".")
+    var i = 0
+    while i < labels.length():
+        val label = labels[i]
+        val llen = label.length()
+        if llen > 0:
+            buf = wire_push_u8(buf, llen)
+            var j = 0
+            while j < llen:
+                val code: i64 = label.char_code_at(j)
+                buf = wire_push_u8(buf, code)
+                j = j + 1
+        i = i + 1
+    buf = wire_push_u8(buf, 0)
+    buf
+
+fn wire_encode_name_to_bytes(name: text) -> [i64]:
+    var buf: [i64] = []
+    wire_encode_name(buf, name)
+
+# ---------------------------------------------------------------------------
+# Name decoding with 0xC0 pointer support (RFC 1035 §4.1.4)
+# ---------------------------------------------------------------------------
+
+# Returns (decoded_name, bytes_consumed_at_start_offset).
+# bytes_consumed is the span in the original message at `offset`, NOT
+# counting pointer targets — callers must advance by bytes_consumed.
+fn wire_decode_name(bytes: [i64], offset: i64) -> (text, i64):
+    if offset < 0:
+        return ("", 0)
+    var labels: [text] = []
+    var pos = offset
+    var consumed = 0          # bytes consumed at the original offset
+    var followed_pointer = 0  # 1 after first pointer jump
+    var safety = 0            # guard against malformed pointer loops
+
+    while safety < 128:
+        safety = safety + 1
+        if pos >= bytes.length():
+            safety = 128  # force exit
+        else:
+            val b: i64 = bytes[pos]
+            if b == 0:
+                # End of name
+                if followed_pointer == 0:
+                    consumed = pos - offset + 1
+                pos = bytes.length()  # exit loop
+            else:
+                val top2: i64 = b & 0xC0
+                if top2 == 0xC0:
+                    # Compression pointer
+                    if pos + 1 >= bytes.length():
+                        return (labels.join("."), consumed)
+                    val lo: i64 = bytes[pos + 1]
+                    val ptr: i64 = ((b & 63) << 8) | lo
+                    if ptr < 0 or ptr >= bytes.length():
+                        return (labels.join("."), consumed)
+                    if followed_pointer == 0:
+                        consumed = pos - offset + 2
+                    followed_pointer = 1
+                    pos = ptr
+                else:
+                    # Normal label
+                    val llen: i64 = b
+                    pos = pos + 1
+                    if pos + llen > bytes.length():
+                        return (labels.join("."), consumed)
+                    var label_chars: [text] = []
+                    var k = 0
+                    while k < llen:
+                        val ch_code: i64 = bytes[pos + k]
+                        label_chars.push(char_from_code(ch_code))
+                        k = k + 1
+                    labels.push(label_chars.join(""))
+                    pos = pos + llen
+
+    val name = labels.join(".")
+    (name, consumed)
+
+# ---------------------------------------------------------------------------
+# Header encoding (12 bytes, RFC 1035 §4.1.1)
+# ---------------------------------------------------------------------------
+
+fn wire_encode_header(buf: [i64], id: i64, flags: i64, qd: i64, an: i64, ns: i64, ar: i64) -> [i64]:
+    buf = wire_push_u16(buf, id)
+    buf = wire_push_u16(buf, flags)
+    buf = wire_push_u16(buf, qd)
+    buf = wire_push_u16(buf, an)
+    buf = wire_push_u16(buf, ns)
+    buf = wire_push_u16(buf, ar)
+    buf
+
+# ---------------------------------------------------------------------------
+# Question encoding (RFC 1035 §4.1.2)
+# ---------------------------------------------------------------------------
+
+fn wire_encode_question(buf: [i64], name: text, qtype: i64, qclass: i64) -> [i64]:
+    buf = wire_encode_name(buf, name)
+    buf = wire_push_u16(buf, qtype)
+    buf = wire_push_u16(buf, qclass)
+    buf
+
+# ---------------------------------------------------------------------------
+# Resource record encoding (RFC 1035 §3.2)
+# For A records: data is "a.b.c.d" text; for others: raw bytes as [i64]
+# For simplicity here the rdata field is pre-encoded as [i64].
+# ---------------------------------------------------------------------------
+
+fn wire_encode_rr_a(buf: [i64], name: text, ttl: i64, ip: text) -> [i64]:
+    buf = wire_encode_name(buf, name)
+    buf = wire_push_u16(buf, DNS_TYPE_A)
+    buf = wire_push_u16(buf, DNS_CLASS_IN)
+    buf = wire_push_u32(buf, ttl)
+    buf = wire_push_u16(buf, 4)  # RDLENGTH = 4 for IPv4
+    val octets = ip.split(".")
+    var k = 0
+    while k < 4:
+        val octet_str = octets[k]
+        var octet_val = 0
+        var c = 0
+        while c < octet_str.length():
+            val ch = octet_str.char_at(c)
+            var d = 0
+            if ch == "0": d = 0
+            if ch == "1": d = 1
+            if ch == "2": d = 2
+            if ch == "3": d = 3
+            if ch == "4": d = 4
+            if ch == "5": d = 5
+            if ch == "6": d = 6
+            if ch == "7": d = 7
+            if ch == "8": d = 8
+            if ch == "9": d = 9
+            octet_val = octet_val * 10 + d
+            c = c + 1
+        buf = wire_push_u8(buf, octet_val)
+        k = k + 1
+    buf
+
+# ---------------------------------------------------------------------------
+# Full query encoder — primary public API
+# ---------------------------------------------------------------------------
+
+fn dns_wire_encode_query(id: i64, domain: text, qtype: i64) -> [i64]:
+    """Encode a DNS query for `domain` and `qtype` with the given `id`.
+
+    Returns exact RFC 1035 wire bytes as [i64] (values 0–255).
+    Flags byte: RD=1 (recursion desired), QR=0 (query), OPCODE=0 (standard).
+    """
+    # Flags: RD bit = 0x0100
+    val flags = 0x0100
+    var buf: [i64] = []
+    buf = wire_encode_header(buf, id, flags, 1, 0, 0, 0)
+    buf = wire_encode_question(buf, domain, qtype, DNS_CLASS_IN)
+    buf
+
+# ---------------------------------------------------------------------------
+# Message decoder — header section (12 bytes)
+# ---------------------------------------------------------------------------
+
+fn wire_decode_header(bytes: [i64]):
+    val id    = wire_read_u16(bytes, 0)
+    val flags = wire_read_u16(bytes, 2)
+    val qd    = wire_read_u16(bytes, 4)
+    val an    = wire_read_u16(bytes, 6)
+    val ns    = wire_read_u16(bytes, 8)
+    val ar    = wire_read_u16(bytes, 10)
+    dns_create_header(id, (flags >> 15) & 1, (flags >> 11) & 15,
+                      (flags >> 10) & 1, (flags >> 9) & 1,
+                      (flags >> 8) & 1,  (flags >> 7) & 1,
+                      flags & 15,
+                      qd, an, ns, ar)
+
+# ---------------------------------------------------------------------------
+# Message decoder — question section
+# ---------------------------------------------------------------------------
+
+fn wire_decode_questions(bytes: [i64], offset: i64, count: i64) -> ([text], i64):
+    var questions: [text] = []
+    var pos = offset
+    var qi = 0
+    while qi < count:
+        val pair = wire_decode_name(bytes, pos)
+        val name = pair.0
+        val consumed = pair.1
+        pos = pos + consumed
+        val qtype  = wire_read_u16(bytes, pos)
+        val qclass = wire_read_u16(bytes, pos + 2)
+        pos = pos + 4
+        questions.push("{name}:{qtype}:{qclass}")
+        qi = qi + 1
+    (questions, pos)
+
+# ---------------------------------------------------------------------------
+# Message decoder — resource record section
+# ---------------------------------------------------------------------------
+
+fn wire_decode_rr(bytes: [i64], offset: i64) -> (text, i64):
+    val pair = wire_decode_name(bytes, offset)
+    val name = pair.0
+    val consumed = pair.1
+    var pos = offset + consumed
+    val rtype  = wire_read_u16(bytes, pos)
+    val rclass = wire_read_u16(bytes, pos + 2)
+    val ttl    = wire_read_u32(bytes, pos + 4)
+    val rdlen  = wire_read_u16(bytes, pos + 8)
+    pos = pos + 10
+
+    # Decode rdata based on type
+    var rdata = ""
+    if rtype == DNS_TYPE_A:
+        val a0: i64 = bytes[pos]
+        val a1: i64 = bytes[pos + 1]
+        val a2: i64 = bytes[pos + 2]
+        val a3: i64 = bytes[pos + 3]
+        rdata = "{a0}.{a1}.{a2}.{a3}"
+    if rtype == DNS_TYPE_CNAME:
+        val npair = wire_decode_name(bytes, pos)
+        rdata = npair.0
+    if rtype == DNS_TYPE_MX:
+        val pref = wire_read_u16(bytes, pos)
+        val npair = wire_decode_name(bytes, pos + 2)
+        val mx_name = npair.0
+        rdata = "{pref} {mx_name}"
+    if rtype == DNS_TYPE_TXT:
+        val txt_len: i64 = bytes[pos]
+        var txt_chars: [text] = []
+        var tk = 0
+        while tk < txt_len:
+            val code: i64 = bytes[pos + 1 + tk]
+            txt_chars.push(char_from_code(code))
+            tk = tk + 1
+        rdata = txt_chars.join("")
+    if rtype == DNS_TYPE_NS:
+        val npair = wire_decode_name(bytes, pos)
+        rdata = npair.0
+
+    pos = pos + rdlen
+    val rr_text = "{name}:{rtype}:{rclass}:{ttl}:{rdata}"
+    (rr_text, pos)
+
+fn wire_decode_rr_section(bytes: [i64], offset: i64, count: i64) -> ([text], i64):
+    var records: [text] = []
+    var pos = offset
+    var ri = 0
+    while ri < count:
+        val pair = wire_decode_rr(bytes, pos)
+        records.push(pair.0)
+        pos = pair.1
+        ri = ri + 1
+    (records, pos)
+
+# ---------------------------------------------------------------------------
+# Full message decoder — primary public API
+# ---------------------------------------------------------------------------
+
+fn dns_wire_decode_message(bytes: [i64]):
+    """Decode a full DNS wire-format message from [i64] byte array.
+
+    Returns (header, questions, answers, authority, additional) tuples.
+    question strings: "name:qtype:qclass"
+    rr strings: "name:rtype:rclass:ttl:rdata"
+    """
+    val header = wire_decode_header(bytes)
+    val qd = wire_read_u16(bytes, 4)
+    val an = wire_read_u16(bytes, 6)
+    val ns = wire_read_u16(bytes, 8)
+    val ar = wire_read_u16(bytes, 10)
+
+    val q_pair = wire_decode_questions(bytes, 12, qd)
+    val questions = q_pair.0
+    var pos = q_pair.1
+
+    val a_pair = wire_decode_rr_section(bytes, pos, an)
+    val answers = a_pair.0
+    pos = a_pair.1
+
+    val ns_pair = wire_decode_rr_section(bytes, pos, ns)
+    val authority = ns_pair.0
+    pos = ns_pair.1
+
+    val ar_pair = wire_decode_rr_section(bytes, pos, ar)
+    val additional = ar_pair.0
+
+    (header, questions, answers, authority, additional)
+
+# ---------------------------------------------------------------------------
+# Convenience: header field accessors for decoded wire header
+# ---------------------------------------------------------------------------
+
+fn wire_header_id(header)    -> i64: dns_get_header_id(header)
+fn wire_header_flags(header) -> i64: dns_get_header_flags(header)
+fn wire_header_qd(header)    -> i64: dns_get_header_qd_count(header)
+fn wire_header_an(header)    -> i64: dns_get_header_an_count(header)
+
+# Forward declarations (resolved from dns/query.spl via mod.spl)
+fn dns_get_header_id(h)          -> i64
+fn dns_get_header_flags(h)       -> i64
+fn dns_get_header_qd_count(h)    -> i64
+fn dns_get_header_an_count(h)    -> i64
+fn dns_get_header_ns_count(h)    -> i64
+fn dns_get_header_ar_count(h)    -> i64

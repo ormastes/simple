@@ -1,0 +1,338 @@
+#!/bin/sh
+# CPU-lane per-element-loop hot-path gate.
+#
+# Enforces doc/05_design/ui/rendering/cpu_gpu_dual_algorithm_design.md §6 /
+# §6.1 ("Enforcement — the per-element-loop hot-path lint") /
+# doc/03_plan/ui/rendering/cpu_gpu_dual_algorithm_plan.md W2: on the
+# designated CPU hot-path file set (scripts/check/cpu_lane_hotpath_files.txt),
+# a per-element interpreted loop is presumed expensive and must either be
+# annotated `# cpu-lane-loop-ok: <reason>` (a documented, permanent
+# exception) or tracked in the baseline (existing debt, ratcheted down over
+# time — never grown without a plan note).
+#
+# Modeled on scripts/check/check-ui-backend-isolation.shs: grep-based, no
+# bitmap diff, baseline-ratcheted (existing hits pass, only NEW hits fail).
+#
+# ENFORCEMENT LANES (design §6.1 "Wiring"):
+#   * .github/workflows/repo-hygiene.yml — CI push/PR gate. This is the
+#     AUTHORITATIVE, non-bypassable lane: it runs `sh` on this script directly,
+#     needs no self-hosted rebuild, and cannot be skipped by jj.
+#   * scripts/hooks/pre-commit — local git hook. Best-effort only: jj bypasses
+#     git hooks, so it is a convenience, not a guarantee.
+#   * `bin/simple lint` — invoked from src/app/io/_CliCommands/run_commands.spl
+#     cli_run_lint (the authoritative CLI lint fn: main_and_help ->
+#     app.io.cli_ops re-export -> run_commands.cli_run_lint), placed beside
+#     check-ui-backend-isolation.shs so it runs whenever that gate runs. Two
+#     honest caveats, both identical to the isolation gate's: (1) the deployed
+#     bin/release binary is built from an older tree, so this lane only fires
+#     after the next self-hosted rebuild; (2) `simple lint` currently prefers a
+#     frontend-delegate binary when one is configured (main_and_help.spl "lint"
+#     branch, interim until self-hosted-parser completion), which bypasses
+#     cli_run_lint entirely. Because of these, do not treat the CLI lane as the
+#     guarantee — CI is. The gate's behaviour today is proven by direct `sh`
+#     invocation, not by a CLI round-trip through a stale binary.
+#   * NOT `bin/simple build lint` — that lane routes to a Rust clippy shim that
+#     is inert for this repo (build_lint_routes_to_rust_clippy, task #34), so a
+#     gate wired only there would silently never run. Do not claim it there.
+#
+# Violation classes (structural grep heuristics — see design §6/§6.1):
+#   (a) LOOP   — a `while`/`for` loop header in a designated file, whether the
+#                `:` is on the same line (single-line header) OR on a later line
+#                (multi-line parenthesized condition — the `while (a and\n ...):`
+#                continuation form). Every loop in these files is presumed a
+#                per-pixel / per-element / per-character body; it is a violation
+#                unless annotated.
+#   (b) BYTE   — a per-element index read/write (`name[...]`) on a variable
+#                or field that was declared with type `[u8]` in the same
+#                file (a byte-array touched one element at a time instead of
+#                via a bulk idiom).
+#   (c) SUBSTR — a per-position `substring(pos, ...)` / `substring(i, ...)` /
+#                `substring(idx, ...)` / `substring(j, ...)` call (research §4
+#                CPU DON'T: per-position substring instead of a bulk scan).
+#   (d) CHAIN  — an idiomatic per-element iterator escape: `.for_each(`,
+#                `.map(`, `.each(` call chains. On the interpreted CPU lane
+#                these are per-element closures, i.e. the same cost as a loop
+#                body written out; they must not be a silent escape route past
+#                the LOOP rule (design §6.1 "false-negative escape routes").
+#
+# NOT catchable by grep (documented limitation, design §6.1): tail/self
+# recursion used as an element walk. There is no structural line pattern for a
+# recursive descent; it is out of scope for this gate and covered instead by
+# the D2 parity/perf harness. Do not pretend coverage here.
+#
+# Annotation: append `# cpu-lane-loop-ok: <reason>` on the SAME line as the
+# flagged construct (the loop HEADER line for a loop), or on the line
+# immediately above it. Annotated hits are never keyed, never baselined and
+# never fail — they are the documented, permanent exceptions (e.g. `draw_line`'s
+# per-point Bresenham walk, or a GPU CPU-lane reference body such as
+# `indexed_fill` whose per-pixel loop is the parity oracle). A function-level
+# annotation on the `def` line does NOT exempt loops nested below it — put the
+# annotation on each loop header.
+#
+# Existing debt (loops/reads that are neither annotated nor fixed yet) is
+# baselined in cpu_lane_hotloop_baseline.txt. The baseline is CONTENT-KEYED,
+# not line-keyed: each entry is
+#     COUNT<TAB>CLASS<TAB>file<TAB>trimmed-content
+# i.e. per (class, file, trimmed source text) with a per-key COUNT. Because the
+# key carries no line number, inserting or deleting lines above a baselined loop
+# shifts no key and re-flags nothing. The gate RATCHETS on counts: for each key,
+# only the amount by which the CURRENT count exceeds the BASELINE count is a NEW
+# violation (a genuinely-added loop matching an existing key still counts as
+# new). Shrink the baseline as loops move onto a bulk idiom or get annotated;
+# never grow a count without a plan note.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+# Fail LOUD if the one tool the gate depends on is missing. Without this, every
+# `rg` invocation below is `2>/dev/null || true`, so an absent ripgrep would
+# yield zero hits and a false `cpu_lane_hotloop_ok=true` — a silently-passing
+# (i.e. decorative) gate. Exit 2 = gate could not run (distinct from exit 1 =
+# new violations found).
+if ! command -v rg >/dev/null 2>&1; then
+    echo "check-cpu-hotloop-idiom: ripgrep (rg) is required but was not found on PATH" >&2
+    exit 2
+fi
+
+FILE_LIST="scripts/check/cpu_lane_hotpath_files.txt"
+BASELINE="scripts/check/cpu_lane_hotloop_baseline.txt"
+
+LOOP_PATTERN='^[[:space:]]*(while|for)\b.*:[[:space:]]*(#.*)?$'
+LOOP_HEADER_PATTERN='^[[:space:]]*(while|for)\b'
+SUBSTR_PATTERN='\.substring\((pos|i|idx|j)[[:space:]]*[,+]'
+CHAIN_PATTERN='\.(for_each|map|each)[[:space:]]*\('
+U8_DECL_PATTERN='^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*\[u8\]|\([A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*\[u8\]'
+
+UPDATE_BASELINE=0
+FILE_LIST_OVERRIDE=""
+BASELINE_OVERRIDE=""
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --update-baseline)
+            UPDATE_BASELINE=1
+            shift
+            ;;
+        --file-list)
+            FILE_LIST_OVERRIDE="${2:-}"
+            shift 2
+            ;;
+        --file-list=*)
+            FILE_LIST_OVERRIDE="${1#--file-list=}"
+            shift
+            ;;
+        --baseline)
+            BASELINE_OVERRIDE="${2:-}"
+            shift 2
+            ;;
+        --baseline=*)
+            BASELINE_OVERRIDE="${1#--baseline=}"
+            shift
+            ;;
+        *)
+            echo "check-cpu-hotloop-idiom: unknown arg: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [ -n "$FILE_LIST_OVERRIDE" ]; then
+    FILE_LIST="$FILE_LIST_OVERRIDE"
+fi
+if [ -n "$BASELINE_OVERRIDE" ]; then
+    BASELINE="$BASELINE_OVERRIDE"
+fi
+
+if [ ! -f "$FILE_LIST" ]; then
+    echo "check-cpu-hotloop-idiom: designated file list not found: $FILE_LIST" >&2
+    exit 2
+fi
+
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "$tmp_dir"' EXIT INT TERM
+
+designated="$tmp_dir/designated.txt"
+grep -v '^[[:space:]]*#' "$FILE_LIST" | sed '/^[[:space:]]*$/d' >"$designated" || true
+
+# Only scan files that actually exist (a fixture list may name files that
+# don't exist yet in a --file-list override scan; skip them quietly).
+existing="$tmp_dir/existing.txt"
+: >"$existing"
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ -f "$f" ] && echo "$f" >>"$existing"
+done <"$designated"
+
+loop_single="$tmp_dir/loop_single.txt"
+loop_all="$tmp_dir/loop_all.txt"
+loop_hits="$tmp_dir/loop_hits.txt"
+substr_hits="$tmp_dir/substr_hits.txt"
+chain_hits="$tmp_dir/chain_hits.txt"
+u8_decl_hits="$tmp_dir/u8_decl_hits.txt"
+byte_hits="$tmp_dir/byte_hits.txt"
+: >"$loop_single"
+: >"$loop_all"
+: >"$loop_hits"
+: >"$substr_hits"
+: >"$chain_hits"
+: >"$u8_decl_hits"
+: >"$byte_hits"
+
+if [ -s "$existing" ]; then
+    xargs rg -n -H -e "$LOOP_PATTERN" <"$existing" >"$loop_single" 2>/dev/null || true
+    xargs rg -n -H -e "$LOOP_HEADER_PATTERN" <"$existing" >"$loop_all" 2>/dev/null || true
+    xargs rg -n -H -e "$SUBSTR_PATTERN" <"$existing" >"$substr_hits" 2>/dev/null || true
+    xargs rg -n -H -e "$CHAIN_PATTERN" <"$existing" >"$chain_hits" 2>/dev/null || true
+    xargs rg -n -H -o -e "$U8_DECL_PATTERN" <"$existing" >"$u8_decl_hits" 2>/dev/null || true
+fi
+
+# LOOP = single-line headers (end in `:`) PLUS multi-line headers (a
+# `while`/`for` keyword line whose `:` is on a later continuation line). The
+# multi-line set is `loop_all` minus `loop_single`; computing it as a set
+# difference avoids double-counting a single-line header and avoids a fragile
+# "does-not-end-in-colon" regex (trailing-comment case).
+awk -v SF="$loop_single" 'FILENAME==SF { seen[$0]=1; next } !($0 in seen)' "$loop_single" "$loop_all" >"$tmp_dir/loop_multi.txt" || true
+cat "$loop_single" "$tmp_dir/loop_multi.txt" >"$loop_hits" || true
+
+# Byte-array element reads: names declared `name: [u8]` (as a field or a
+# param), then indexed in that same file as `name[...]`. Keep each name paired
+# with its declaring file: a common identifier in another designated file is
+# unrelated and must not become a false positive.
+u8_file_names="$tmp_dir/u8_file_names.txt"
+sed -E 's/^([^:]+):[0-9]+:.*[^A-Za-z0-9_]([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*:[[:space:]]*\[u8\].*/\1\t\2/' "$u8_decl_hits" \
+    | sort -u | sed '/^$/d' >"$u8_file_names" || true
+
+if [ -s "$u8_file_names" ]; then
+    while IFS="$(printf '\t')" read -r file name; do
+        [ -n "$file" ] && [ -n "$name" ] || continue
+        rg -n -H -e "\\b${name}\\[[A-Za-z0-9_]" "$file" 2>/dev/null || true
+    done <"$u8_file_names" >"$byte_hits"
+fi
+
+# Annotation check: a hit is exempt if the SAME line or the line immediately
+# above it contains the `cpu-lane-loop-ok` marker. For a loop this means the
+# loop HEADER line (or the line directly above it) — a function-level `def`-line
+# annotation does NOT reach a loop nested several lines below.
+is_annotated() {
+    # $1 = file, $2 = line number
+    f="$1"
+    n="$2"
+    line_text=$(sed -n "${n}p" "$f" 2>/dev/null || true)
+    case "$line_text" in
+        *cpu-lane-loop-ok*) return 0 ;;
+    esac
+    if [ "$n" -gt 1 ]; then
+        prev=$((n - 1))
+        prev_text=$(sed -n "${prev}p" "$f" 2>/dev/null || true)
+        case "$prev_text" in
+            *cpu-lane-loop-ok*) return 0 ;;
+        esac
+    fi
+    return 1
+}
+
+# Filtered, un-annotated hits as `CLASS<TAB>file<TAB>lineno<TAB>rawcontent`.
+filtered="$tmp_dir/filtered.txt"
+: >"$filtered"
+
+collect() {
+    # $1 = class prefix, $2 = hits file
+    class="$1"
+    hits="$2"
+    while IFS= read -r hit; do
+        [ -n "$hit" ] || continue
+        file="${hit%%:*}"
+        rest="${hit#*:}"
+        lineno="${rest%%:*}"
+        content="${rest#*:}"
+        if ! is_annotated "$file" "$lineno"; then
+            printf '%s\t%s\t%s\t%s\n' "$class" "$file" "$lineno" "$content" >>"$filtered"
+        fi
+    done <"$hits"
+}
+
+collect "LOOP" "$loop_hits"
+collect "BYTE" "$byte_hits"
+collect "SUBSTR" "$substr_hits"
+collect "CHAIN" "$chain_hits"
+
+# Content-key: trim each rawcontent CONSISTENTLY (expand tabs -> single space,
+# strip leading/trailing whitespace, collapse internal whitespace runs) so a
+# key is (CLASS, file, normalized source text). Applied identically at
+# generate-time and check-time. Then aggregate to a per-key COUNT.
+current="$tmp_dir/current_keyed.txt"
+awk -F'\t' '
+    {
+        cls=$1; file=$2; c=$4;
+        gsub(/\t/, " ", c);            # expand tabs to space
+        gsub(/^[ ]+/, "", c);          # strip leading
+        gsub(/[ ]+$/, "", c);          # strip trailing
+        gsub(/[ ]+/, " ", c);          # collapse internal runs
+        print cls "\t" file "\t" c;
+    }
+' "$filtered" | sort | uniq -c | sed -E 's/^[[:space:]]*([0-9]+)[[:space:]]/\1\t/' >"$current"
+
+if [ "$UPDATE_BASELINE" -eq 1 ]; then
+    sort -o "$current" "$current"
+    cp "$current" "$BASELINE"
+    keys=$(grep -c . "$BASELINE" 2>/dev/null) || keys=0
+    echo "cpu_lane_hotloop_baseline_updated=$keys"
+    exit 0
+fi
+
+[ -f "$BASELINE" ] || : >"$BASELINE"
+
+# Ratchet on COUNTS. Read baseline (count-keyed) then current (count-keyed);
+# for each key, NEW = max(0, current_count - baseline_count). Report per-key
+# increases and, unless scanning a fixture override, baseline keys whose count
+# shrank (candidates for tightening the baseline).
+report="$tmp_dir/report.txt"
+# NOTE: select baseline vs current rows by FILENAME, not `FNR==NR` — the latter
+# misclassifies the current file as the baseline whenever the baseline is empty
+# (e.g. a fresh `--baseline /dev/null` fixture run: an empty first file yields
+# zero records, so awk's FNR resets and the second file matches FNR==NR).
+awk -F'\t' -v skip_stale="${FILE_LIST_OVERRIDE:+1}" -v BF="$BASELINE" '
+    FILENAME==BF {
+        key=$2 SUBSEP $3 SUBSEP $4;
+        bcount[key]=$1; bseen[key]=1; btot+=$1; next;
+    }
+    {
+        key=$2 SUBSEP $3 SUBSEP $4;
+        cseen[key]=1; ccount[key]=$1; ctot+=$1;
+        b=bcount[key]+0;
+        if ($1 > b) {
+            print "cpu_lane_hotloop_new_violation=" $2 ":" $3 ":" $4 " (baseline=" b " current=" $1 ")";
+            newc += $1 - b;
+        }
+    }
+    END {
+        if (skip_stale == "") {
+            for (k in bseen) {
+                c = ccount[k]+0;
+                if (bcount[k] > c) {
+                    n=split(k, a, SUBSEP);
+                    print "cpu_lane_hotloop_baseline_stale=" a[1] ":" a[2] ":" a[3] " (baseline=" bcount[k] " current=" c ")";
+                }
+            }
+        }
+        print "__NEW__=" newc+0;
+        print "__BTOT__=" btot+0;
+        print "__CTOT__=" ctot+0;
+    }
+' "$BASELINE" "$current" >"$report"
+
+grep -v '^__' "$report" || true
+new_count=$(sed -n 's/^__NEW__=//p' "$report"); new_count=${new_count:-0}
+baseline_total=$(sed -n 's/^__BTOT__=//p' "$report"); baseline_total=${baseline_total:-0}
+current_total=$(sed -n 's/^__CTOT__=//p' "$report"); current_total=${current_total:-0}
+
+echo "cpu_lane_hotloop_baselined=$baseline_total"
+echo "cpu_lane_hotloop_current=$current_total"
+echo "cpu_lane_hotloop_new=$new_count"
+
+if [ "$new_count" -gt 0 ]; then
+    echo "cpu_lane_hotloop_ok=false"
+    exit 1
+fi
+echo "cpu_lane_hotloop_ok=true"

@@ -1,0 +1,70 @@
+# Verifies the self-contained Simple → HTML generator (mobile_html_gen) builds
+# correct markup from a node model — an absolute oracle (exact expected strings),
+# not an equality-to-itself tautology.
+
+use std.spec
+use common.ui.mobile_html_gen.{
+    HtmlNode,
+    HtmlAttr,
+    attr,
+    html_node,
+    html_leaf,
+    html_void,
+    html_node_render,
+    html_gen_document,
+    html_gen_escape_text
+}
+
+fn hello_button() -> HtmlNode:
+    html_leaf("button", [attr("id", "hello_button"), attr("data-action", "go")], "Hello World")
+
+fn hello_input() -> HtmlNode:
+    html_void("input", [attr("id", "hello_text"), attr("value", "Generated UI")])
+
+fn hello_nav() -> HtmlNode:
+    html_node("nav", [attr("id", "hello_taskbar")], [
+        html_leaf("button", [attr("id", "hello_taskbar_home")], "Home"),
+        html_leaf("button", [attr("id", "hello_taskbar_apps")], "Apps")
+    ])
+
+describe "mobile_html_gen — Simple generates HTML from a node model":
+
+    it "renders a leaf button to exact markup":
+        val html = html_node_render(hello_button())
+        expect(html).to_equal("<button id=\"hello_button\" data-action=\"go\">Hello World</button>")
+
+    it "renders a void input with no closing tag":
+        val html = html_node_render(hello_input())
+        expect(html).to_equal("<input id=\"hello_text\" value=\"Generated UI\">")
+
+    it "renders nested children in order":
+        val html = html_node_render(hello_nav())
+        expect(html).to_equal("<nav id=\"hello_taskbar\"><button id=\"hello_taskbar_home\">Home</button><button id=\"hello_taskbar_apps\">Apps</button></nav>")
+
+    it "escapes text content (no HTML injection)":
+        val node = html_leaf("span", [], "<script>x</script>&y")
+        val html = html_node_render(node)
+        expect(html).to_equal("<span>&lt;script&gt;x&lt;/script&gt;&amp;y</span>")
+
+    it "escapes attribute values":
+        val node = html_void("input", [attr("value", "a\"b<c")])
+        val html = html_node_render(node)
+        expect(html).to_equal("<input value=\"a&quot;b&lt;c\">")
+
+    it "wraps a full document with title + css + body":
+        val body = html_node_render(hello_button())
+        val doc = html_gen_document("Hello", body, "button{min-height:44px;}")
+        expect(doc.contains("<title>Hello</title>")).to_equal(true)
+        expect(doc.contains("<style>button{min-height:44px;}</style>")).to_equal(true)
+        expect(doc.contains("<button id=\"hello_button\" data-action=\"go\">Hello World</button>")).to_equal(true)
+        expect(doc.starts_with("<!doctype html>")).to_equal(true)
+
+    it "generated body matches the hello reference structure (id markers)":
+        val body = html_node_render(html_node("main", [attr("data-simple-wasm", "hello")], [
+            hello_nav(), hello_button(), hello_input()
+        ]))
+        # absolute oracle: the same id markers the hand-authored hello body exposes
+        expect(body.contains("data-simple-wasm=\"hello\"")).to_equal(true)
+        expect(body.contains("id=\"hello_taskbar\"")).to_equal(true)
+        expect(body.contains("id=\"hello_button\"")).to_equal(true)
+        expect(body.contains("id=\"hello_text\"")).to_equal(true)

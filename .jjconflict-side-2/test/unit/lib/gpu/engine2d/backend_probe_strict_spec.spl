@@ -1,0 +1,148 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_probe.spl 90%
+# @tag: unit, gpu, engine2d, backend, strict, diagnostics
+
+use std.gpu.engine2d.backend_probe.{BackendProber, BackendStatus, StrictBackendFactory}
+use std.gc_async_mut.cuda.{cuda_available}
+
+describe "Engine2D strict backend probe diagnostics":
+
+    it "reports typed ROCm diagnostics without CPU fallback":
+        val probe = StrictBackendFactory.strict().create_backend("rocm")
+
+        expect(probe.requested_name).to_equal("rocm")
+        expect(probe.selected_name).to_equal("rocm")
+        expect(probe.api_name).to_equal("rocm")
+        expect(probe.feature_gate).to_equal("rocm_hip_runtime")
+        expect(probe.shader_format).to_equal("hsaco")
+        expect(probe.status).to_equal(BackendStatus.Unavailable)
+        expect(probe.has_compute).to_equal(true)
+        expect(probe.has_graphics).to_equal(false)
+        expect(probe.strict_failure_without_fallback()).to_equal(true)
+
+    it "reports CPU SIMD as a capability-gated non-hardware path":
+        val probe = StrictBackendFactory.strict().create_backend("cpu_simd")
+
+        expect(probe.requested_name).to_equal("cpu_simd")
+        expect(probe.selected_name).to_equal("cpu_simd")
+        expect(probe.api_name).to_equal("cpu-simd")
+        expect(probe.feature_gate).to_equal("runtime_cpu_features")
+        expect(probe.shader_format).to_equal("none")
+        expect(probe.is_ok()).to_equal(true)
+        expect(probe.is_hardware()).to_equal(false)
+        expect(probe.strict_failure_without_fallback()).to_equal(true)
+
+    it "reports CUDA selectable when runtime and device are available":
+        val probe = StrictBackendFactory.strict().create_backend("cuda")
+
+        expect(probe.requested_name).to_equal("cuda")
+        expect(probe.selected_name).to_equal("cuda")
+        expect(probe.api_name).to_equal("cuda")
+        expect(probe.shader_format).to_equal("ptx")
+        expect(probe.has_compute).to_equal(true)
+        expect(probe.strict_failure_without_fallback()).to_equal(true)
+        if cuda_available():
+            expect(probe.status).to_equal(BackendStatus.Initialized)
+            expect(probe.feature_gate).to_equal("cuda_context")
+            expect(probe.reason).to_contain("context initialized")
+        else:
+            expect(probe.status).to_equal(BackendStatus.Unavailable)
+
+    it "reports architecture-specific CPU SIMD probes without fallback":
+        val factory = StrictBackendFactory.strict()
+        val x86 = factory.create_backend("cpu_simd_x86")
+        val arm = factory.create_backend("cpu_simd_arm")
+        val riscv = factory.create_backend("cpu_simd_riscv")
+
+        expect(x86.requested_name).to_equal("cpu_simd_x86")
+        expect(x86.selected_name).to_equal("cpu_simd_x86")
+        expect(x86.api_name).to_equal("cpu-simd-x86")
+        expect(x86.feature_gate).to_equal("x86_sse42_avx2_avx512")
+        expect(x86.has_compute).to_equal(true)
+        expect(x86.is_hardware()).to_equal(false)
+        expect(x86.strict_failure_without_fallback()).to_equal(true)
+        expect(arm.api_name).to_equal("cpu-simd-arm")
+        expect(arm.feature_gate).to_equal("arm_neon_sve")
+        expect(arm.strict_failure_without_fallback()).to_equal(true)
+        expect(riscv.api_name).to_equal("cpu-simd-riscv")
+        expect(riscv.feature_gate).to_equal("riscv_vector_extension")
+        expect(riscv.strict_failure_without_fallback()).to_equal(true)
+
+        val arch_status_known = (x86.status == BackendStatus.Initialized or x86.status == BackendStatus.Unavailable) and (arm.status == BackendStatus.Initialized or arm.status == BackendStatus.Unavailable) and (riscv.status == BackendStatus.Initialized or riscv.status == BackendStatus.Unavailable)
+        expect(arch_status_known).to_equal(true)
+        expect(x86.summary()).to_contain("executed=true")
+        expect(arm.summary()).to_contain("executed=true")
+        expect(riscv.summary()).to_contain("executed=true")
+        expect(x86.memory_mb).to_be_greater_than(0)
+        expect(arm.memory_mb).to_be_greater_than(0)
+        expect(riscv.memory_mb).to_be_greater_than(0)
+
+    it "reports OptiX as unsupported for Engine2D raster instead of falling back":
+        val probe = StrictBackendFactory.strict().create_backend("optix")
+
+        expect(probe.requested_name).to_equal("optix")
+        expect(probe.selected_name).to_equal("optix")
+        expect(probe.api_name).to_equal("optix")
+        expect(probe.feature_gate).to_equal("optix_2d_raster_unsupported")
+        expect(probe.shader_format).to_equal("ptx")
+        expect(probe.status).to_equal(BackendStatus.Unavailable)
+        expect(probe.has_compute).to_equal(true)
+        expect(probe.has_graphics).to_equal(false)
+        expect(probe.has_present).to_equal(false)
+        expect(probe.strict_failure_without_fallback()).to_equal(true)
+
+    it "reports OpenCL from ICD platform evidence without graphics or present":
+        val probe = StrictBackendFactory.strict().create_backend("opencl")
+
+        expect(probe.requested_name).to_equal("opencl")
+        expect(probe.selected_name).to_equal("opencl")
+        expect(probe.api_name).to_equal("opencl")
+        expect(probe.feature_gate).to_equal("opencl_icd_platform")
+        expect(probe.shader_format).to_equal("opencl-c")
+        expect(probe.has_compute).to_equal(true)
+        expect(probe.has_graphics).to_equal(false)
+        expect(probe.has_present).to_equal(false)
+        expect(probe.strict_failure_without_fallback()).to_equal(true)
+        if probe.status == BackendStatus.Initialized:
+            expect(probe.available).to_equal(true)
+            expect(probe.diagnostic_text()).to_contain("platform")
+        else:
+            expect(probe.status).to_equal(BackendStatus.Unavailable)
+            expect(probe.diagnostic_text()).to_contain("OpenCL ICD")
+
+    it "keeps strict Vulkan Metal CUDA WebGPU failures on the requested backend":
+        val factory = StrictBackendFactory.strict()
+        val vulkan = factory.create_backend("vulkan")
+        val metal = factory.create_backend("metal")
+        val cuda = factory.create_backend("cuda")
+        val webgpu = factory.create_backend("webgpu")
+
+        expect(vulkan.selected_name).to_equal("vulkan")
+        expect(vulkan.shader_format).to_equal("spirv")
+        expect(vulkan.strict_failure_without_fallback()).to_equal(true)
+        expect(metal.selected_name).to_equal("metal")
+        expect(metal.shader_format).to_equal("msl")
+        expect(metal.strict_failure_without_fallback()).to_equal(true)
+        expect(cuda.selected_name).to_equal("cuda")
+        expect(cuda.shader_format).to_equal("ptx")
+        expect(cuda.strict_failure_without_fallback()).to_equal(true)
+        expect(webgpu.selected_name).to_equal("webgpu")
+        expect(webgpu.shader_format).to_equal("wgsl")
+        expect(webgpu.strict_failure_without_fallback()).to_equal(true)
+
+    it "probe summary includes all hardened backend names":
+        val summary = BackendProber.create().probe_all_summary()
+
+        expect(summary).to_contain("requested=cpu")
+        expect(summary).to_contain("requested=cpu_simd")
+        expect(summary).to_contain("requested=cpu_simd_x86")
+        expect(summary).to_contain("requested=cpu_simd_arm")
+        expect(summary).to_contain("requested=cpu_simd_riscv")
+        expect(summary).to_contain("requested=vulkan")
+        expect(summary).to_contain("requested=cuda")
+        expect(summary).to_contain("requested=metal")
+        expect(summary).to_contain("requested=opencl")
+        expect(summary).to_contain("requested=rocm")
+        expect(summary).to_contain("requested=webgpu")
+        expect(summary).to_contain("requested=optix")
+        expect(summary).to_contain("runtime_evidence selected=")
+        expect(summary).to_contain("compute=true")

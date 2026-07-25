@@ -1,0 +1,264 @@
+# Particle System — 2D particle emitter with configurable behavior
+#
+# CPU-based particle system supporting emission rate, lifetime, color
+# interpolation, gravity, and spread angle. Renders particles as colored
+# rects via the render command buffer.
+#
+# Usage:
+#   val config = ParticleConfig.default_fire()
+#   var emitter = ParticleEmitter2D.create(config, Vec2(x: 400.0, y: 300.0), ZIndex(value: 10))
+#   emitter.start()
+#   emitter.update(Seconds(value: 0.016))
+#   emitter.emit_render_commands(cmd_buffer)
+
+use std.common.engine.math2d.{Vec2}
+use std.common.engine.color.{EngineColor}
+use std.common.engine.rect.{Rect2}
+use std.common.engine.units.{Seconds, ZIndex}
+use std.nogc_sync_mut.engine.render.command.{RenderCommand, RenderCommandBuffer}
+
+# ============================================================================
+# Particle — A single particle instance
+# ============================================================================
+
+struct Particle:
+    position: Vec2
+    velocity: Vec2
+    lifetime: f64
+    max_lifetime: f64
+    color: EngineColor
+    size: f64
+
+# ============================================================================
+# ParticleConfig — Emitter configuration
+# ============================================================================
+
+struct ParticleConfig:
+    emission_rate: f64
+    min_lifetime: f64
+    max_lifetime: f64
+    min_speed: f64
+    max_speed: f64
+    min_size: f64
+    max_size: f64
+    start_color: EngineColor
+    end_color: EngineColor
+    direction: Vec2
+    spread_angle: f64
+    gravity: Vec2
+
+impl ParticleConfig:
+    static fn default_fire() -> ParticleConfig:
+        """A reasonable default config for fire-like particles."""
+        ParticleConfig(
+            emission_rate: 20.0,
+            min_lifetime: 0.5,
+            max_lifetime: 1.5,
+            min_speed: 30.0,
+            max_speed: 80.0,
+            min_size: 2.0,
+            max_size: 6.0,
+            start_color: EngineColor(r: 1.0, g: 0.8, b: 0.0, a: 1.0),
+            end_color: EngineColor(r: 1.0, g: 0.0, b: 0.0, a: 0.0),
+            direction: Vec2(x: 0.0, y: -1.0),
+            spread_angle: 0.5,
+            gravity: Vec2(x: 0.0, y: 0.0)
+        )
+
+# ============================================================================
+# ParticleEmitter2D — Emits and manages particles
+# ============================================================================
+
+class ParticleEmitter2D:
+    config: ParticleConfig
+    particles: [Particle]
+    emission_accumulator: f64
+    is_emitting: bool
+    position: Vec2
+    z_index: ZIndex
+    seed: i64
+
+impl ParticleEmitter2D:
+    static fn create(config: ParticleConfig, position: Vec2, z_index: ZIndex) -> ParticleEmitter2D:
+        """Create a new particle emitter (initially not emitting)."""
+        ParticleEmitter2D(
+            config: config,
+            particles: [],
+            emission_accumulator: 0.0,
+            is_emitting: false,
+            position: position,
+            z_index: z_index,
+            seed: 42
+        )
+
+    me start():
+        """Begin emitting particles."""
+        self.is_emitting = true
+
+    me stop():
+        """Stop emitting new particles (existing particles continue)."""
+        self.is_emitting = false
+
+    fn particle_count() -> i64:
+        """Return the number of currently live particles."""
+        self.particles.len()
+
+    me update(dt: Seconds):
+        """Advance particle simulation by dt seconds.
+
+        Updates existing particle positions and lifetimes, removes dead
+        particles, and spawns new ones based on emission rate.
+        """
+        val dt_f = dt.value
+
+        # Update existing particles
+        var alive: [Particle] = []
+        var i = 0
+        while i < self.particles.len():
+            val p = self.particles[i]
+            val new_lifetime = p.lifetime - dt_f
+            if new_lifetime > 0.0:
+                # Apply gravity to velocity
+                val new_vx = p.velocity.x + self.config.gravity.x * dt_f
+                val new_vy = p.velocity.y + self.config.gravity.y * dt_f
+                val new_vel = Vec2(x: new_vx, y: new_vy)
+                # Update position
+                val new_px = p.position.x + new_vel.x * dt_f
+                val new_py = p.position.y + new_vel.y * dt_f
+                val new_pos = Vec2(x: new_px, y: new_py)
+                val updated = Particle(
+                    position: new_pos,
+                    velocity: new_vel,
+                    lifetime: new_lifetime,
+                    max_lifetime: p.max_lifetime,
+                    color: p.color,
+                    size: p.size
+                )
+                alive.push(updated)
+            i = i + 1
+        self.particles = alive
+
+        # Spawn new particles
+        if self.is_emitting:
+            self.emission_accumulator = self.emission_accumulator + self.config.emission_rate * dt_f
+            while self.emission_accumulator >= 1.0:
+                val new_p = self._spawn_particle()
+                self.particles.push(new_p)
+                self.emission_accumulator = self.emission_accumulator - 1.0
+
+    fn emit_render_commands(cmds: RenderCommandBuffer):
+        """Push DrawRect commands for each live particle with interpolated color."""
+        var i = 0
+        while i < self.particles.len():
+            val p = self.particles[i]
+            # Interpolate color based on lifetime fraction
+            val t = 1.0 - p.lifetime / p.max_lifetime
+            val color = _lerp_color(self.config.start_color, self.config.end_color, t)
+            val half = p.size / 2.0
+            val rect = Rect2(
+                x: p.position.x - half,
+                y: p.position.y - half,
+                width: p.size,
+                height: p.size
+            )
+            val cmd = RenderCommand.DrawRect(rect: rect, color: color, z_order: self.z_index)
+            cmds.push(cmd)
+            i = i + 1
+
+    # ========================================================================
+    # Internal: random number generation (LCG)
+    # ========================================================================
+
+    me _next_random() -> f64:
+        """Simple linear congruential generator. Returns value in [0.0, 1.0)."""
+        self.seed = (self.seed * 1103515245 + 12345) % 2147483648
+        var s = self.seed
+        if s < 0:
+            s = -s
+        s * 1.0 / 2147483648.0
+
+    me _random_range(min_val: f64, max_val: f64) -> f64:
+        """Return a random f64 in [min_val, max_val]."""
+        val t = self._next_random()
+        min_val + t * (max_val - min_val)
+
+    # ========================================================================
+    # Internal: particle spawning
+    # ========================================================================
+
+    me _spawn_particle() -> Particle:
+        """Create a new particle with randomized properties within config bounds."""
+        val lifetime = self._random_range(self.config.min_lifetime, self.config.max_lifetime)
+        val speed = self._random_range(self.config.min_speed, self.config.max_speed)
+        val size = self._random_range(self.config.min_size, self.config.max_size)
+        # Random angle offset within spread cone
+        val angle_offset = self._random_range(-self.config.spread_angle, self.config.spread_angle)
+        # Compute direction from base direction rotated by angle_offset
+        val base_angle = _atan2(self.config.direction.y, self.config.direction.x)
+        val final_angle = base_angle + angle_offset
+        val vx = _cos_approx(final_angle) * speed
+        val vy = _sin_approx(final_angle) * speed
+        Particle(
+            position: Vec2(x: self.position.x, y: self.position.y),
+            velocity: Vec2(x: vx, y: vy),
+            lifetime: lifetime,
+            max_lifetime: lifetime,
+            color: self.config.start_color,
+            size: size
+        )
+
+# ============================================================================
+# Module-level helpers
+# ============================================================================
+
+fn _lerp_color(a: EngineColor, b: EngineColor, t: f64) -> EngineColor:
+    """Linearly interpolate between two colors."""
+    val r = a.r + (b.r - a.r) * t
+    val g = a.g + (b.g - a.g) * t
+    val bl = a.b + (b.b - a.b) * t
+    val alpha = a.a + (b.a - a.a) * t
+    EngineColor(r: r, g: g, b: bl, a: alpha)
+
+fn _atan2(y: f64, x: f64) -> f64:
+    """Approximate atan2 using polynomial approximation."""
+    # Handle special cases
+    if x == 0.0 and y == 0.0:
+        return 0.0
+    if x == 0.0:
+        if y > 0.0:
+            return 1.5707963
+        return -1.5707963
+    val ratio = y / x
+    var angle = ratio / (1.0 + 0.28125 * ratio * ratio)
+    if x < 0.0:
+        if y >= 0.0:
+            angle = angle + 3.1415926
+        else:
+            angle = angle - 3.1415926
+    angle
+
+fn _cos_approx(a: f64) -> f64:
+    """Approximate cosine using Taylor series (good enough for particles)."""
+    # Normalize angle to [-pi, pi]
+    var x = a
+    while x > 3.1415926:
+        x = x - 6.2831853
+    while x < -3.1415926:
+        x = x + 6.2831853
+    val x2 = x * x
+    val x4 = x2 * x2
+    val x6 = x4 * x2
+    1.0 - x2 / 2.0 + x4 / 24.0 - x6 / 720.0
+
+fn _sin_approx(a: f64) -> f64:
+    """Approximate sine using Taylor series."""
+    var x = a
+    while x > 3.1415926:
+        x = x - 6.2831853
+    while x < -3.1415926:
+        x = x + 6.2831853
+    val x2 = x * x
+    val x3 = x * x2
+    val x5 = x3 * x2
+    val x7 = x5 * x2
+    x - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0

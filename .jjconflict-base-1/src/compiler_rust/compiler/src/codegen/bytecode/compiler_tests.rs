@@ -1,0 +1,431 @@
+//! Tests for the MIR-to-bytecode compiler.
+
+use simple_parser::ast::Visibility;
+use simple_runtime::bytecode::vm::BytecodeVM;
+use simple_runtime::value::{hash_variant_discriminant, rt_enum_discriminant, rt_enum_id, rt_enum_payload};
+use simple_runtime::RuntimeValue;
+
+use super::compiler::BytecodeCompiler;
+use crate::hir::{BinOp, TypeId, UnaryOp};
+use crate::mir::{BlockId, LocalKind, MirBlock, MirFunction, MirInst, MirLocal, MirPattern, Terminator, VReg};
+
+/// Helper to create a simple MIR function with one block.
+fn make_function(name: &str, params: Vec<MirLocal>, instructions: Vec<MirInst>, terminator: Terminator) -> MirFunction {
+    let mut func = MirFunction::new(name.to_string(), TypeId::I64, Visibility::Public);
+    func.params = params;
+    func.blocks[0].instructions = instructions;
+    func.blocks[0].terminator = terminator;
+    func
+}
+
+/// Helper to create a param local.
+fn param(name: &str) -> MirLocal {
+    MirLocal {
+        name: name.to_string(),
+        ty: TypeId::I64,
+        kind: LocalKind::Parameter,
+        is_ghost: false,
+    }
+}
+
+#[test]
+fn test_compile_const_int_return() {
+    // fn foo() -> i64 { 42 }
+    let func = make_function(
+        "foo",
+        vec![],
+        vec![MirInst::ConstInt {
+            dest: VReg(0),
+            value: 42,
+        }],
+        Terminator::Return(Some(VReg(0))),
+    );
+
+    let mut compiler = BytecodeCompiler::new();
+    let compiled = compiler.compile_function(&func).expect("Compilation failed");
+
+    assert_eq!(compiled.metadata.name, "foo");
+    assert_eq!(compiled.metadata.param_count, 0);
+
+    // Execute
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&compiled.code);
+    let result = vm.execute().expect("Execution failed");
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn test_compile_add_two_params() {
+    // fn add(a: i64, b: i64) -> i64 { a + b }
+    let func = make_function(
+        "add",
+        vec![param("a"), param("b")],
+        vec![MirInst::BinOp {
+            dest: VReg(2),
+            op: BinOp::Add,
+            left: VReg(0),
+            right: VReg(1),
+        }],
+        Terminator::Return(Some(VReg(2))),
+    );
+
+    let mut compiler = BytecodeCompiler::new();
+    let compiled = compiler.compile_function(&func).expect("Compilation failed");
+
+    assert_eq!(compiled.metadata.param_count, 2);
+
+    // Execute via call_function
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&compiled.code);
+    vm.set_functions(vec![compiled.metadata]);
+
+    let args = [RuntimeValue::from_int(15), RuntimeValue::from_int(27)];
+    let result = vm.call_function(0, &args).expect("Execution failed");
+    assert_eq!(result.as_int(), 42);
+}
+
+#[test]
+fn test_compile_arithmetic_expression() {
+    // fn expr() -> i64 { (3 + 4) * 2 }
+    let func = make_function(
+        "expr",
+        vec![],
+        vec![
+            MirInst::ConstInt {
+                dest: VReg(0),
+                value: 3,
+            },
+            MirInst::ConstInt {
+                dest: VReg(1),
+                value: 4,
+            },
+            MirInst::BinOp {
+                dest: VReg(2),
+                op: BinOp::Add,
+                left: VReg(0),
+                right: VReg(1),
+            },
+            MirInst::ConstInt {
+                dest: VReg(3),
+                value: 2,
+            },
+            MirInst::BinOp {
+                dest: VReg(4),
+                op: BinOp::Mul,
+                left: VReg(2),
+                right: VReg(3),
+            },
+        ],
+        Terminator::Return(Some(VReg(4))),
+    );
+
+    let mut compiler = BytecodeCompiler::new();
+    let compiled = compiler.compile_function(&func).expect("Compilation failed");
+
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&compiled.code);
+    let result = vm.execute().expect("Execution failed");
+    assert_eq!(result.as_int(), 14); // (3 + 4) * 2 = 14
+}
+
+#[test]
+fn test_compile_comparison() {
+    // fn is_less(a: i64, b: i64) -> bool { a < b }
+    let func = make_function(
+        "is_less",
+        vec![param("a"), param("b")],
+        vec![MirInst::BinOp {
+            dest: VReg(2),
+            op: BinOp::Lt,
+            left: VReg(0),
+            right: VReg(1),
+        }],
+        Terminator::Return(Some(VReg(2))),
+    );
+
+    let mut compiler = BytecodeCompiler::new();
+    let compiled = compiler.compile_function(&func).expect("Compilation failed");
+
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&compiled.code);
+    vm.set_functions(vec![compiled.metadata]);
+
+    let args = [RuntimeValue::from_int(3), RuntimeValue::from_int(5)];
+    let result = vm.call_function(0, &args).expect("Execution failed");
+    assert!(result.as_bool());
+}
+
+#[test]
+fn test_compile_branch() {
+    // fn max(a: i64, b: i64) -> i64 {
+    //     if a > b: a
+    //     else: b
+    // }
+    let mut func = MirFunction::new("max".to_string(), TypeId::I64, Visibility::Public);
+    func.params = vec![param("a"), param("b")];
+
+    // Block 0 (entry): compare and branch
+    func.blocks[0].instructions = vec![MirInst::BinOp {
+        dest: VReg(2),
+        op: BinOp::Gt,
+        left: VReg(0),
+        right: VReg(1),
+    }];
+    func.blocks[0].terminator = Terminator::Branch {
+        cond: VReg(2),
+        then_block: BlockId(1),
+        else_block: BlockId(2),
+    };
+
+    // Block 1 (then): return a
+    func.blocks.push(MirBlock {
+        id: BlockId(1),
+        instructions: vec![],
+        terminator: Terminator::Return(Some(VReg(0))),
+    });
+
+    // Block 2 (else): return b
+    func.blocks.push(MirBlock {
+        id: BlockId(2),
+        instructions: vec![],
+        terminator: Terminator::Return(Some(VReg(1))),
+    });
+
+    let mut compiler = BytecodeCompiler::new();
+    let compiled = compiler.compile_function(&func).expect("Compilation failed");
+
+    // Test: max(10, 5) = 10
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&compiled.code);
+    vm.set_functions(vec![compiled.metadata.clone()]);
+
+    let args = [RuntimeValue::from_int(10), RuntimeValue::from_int(5)];
+    let result = vm.call_function(0, &args).expect("Execution failed");
+    assert_eq!(result.as_int(), 10);
+
+    // Test: max(3, 7) = 7
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&compiled.code);
+    vm.set_functions(vec![compiled.metadata]);
+
+    let args = [RuntimeValue::from_int(3), RuntimeValue::from_int(7)];
+    let result = vm.call_function(0, &args).expect("Execution failed");
+    assert_eq!(result.as_int(), 7);
+}
+
+#[test]
+fn test_compile_void_return() {
+    // fn noop() {}
+    let func = make_function("noop", vec![], vec![], Terminator::Return(None));
+
+    let mut compiler = BytecodeCompiler::new();
+    let compiled = compiler.compile_function(&func).expect("Compilation failed");
+
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&compiled.code);
+    let result = vm.execute().expect("Execution failed");
+    assert!(result.is_nil());
+}
+
+#[test]
+fn test_compile_copy() {
+    // fn identity(x: i64) -> i64 { x }
+    let func = make_function(
+        "identity",
+        vec![param("x")],
+        vec![MirInst::Copy {
+            dest: VReg(1),
+            src: VReg(0),
+        }],
+        Terminator::Return(Some(VReg(1))),
+    );
+
+    let mut compiler = BytecodeCompiler::new();
+    let compiled = compiler.compile_function(&func).expect("Compilation failed");
+
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&compiled.code);
+    vm.set_functions(vec![compiled.metadata]);
+
+    let args = [RuntimeValue::from_int(99)];
+    let result = vm.call_function(0, &args).expect("Execution failed");
+    assert_eq!(result.as_int(), 99);
+}
+
+#[test]
+fn test_compile_negation() {
+    // fn negate(x: i64) -> i64 { -x }
+    let func = make_function(
+        "negate",
+        vec![param("x")],
+        vec![MirInst::UnaryOp {
+            dest: VReg(1),
+            op: UnaryOp::Neg,
+            operand: VReg(0),
+        }],
+        Terminator::Return(Some(VReg(1))),
+    );
+
+    let mut compiler = BytecodeCompiler::new();
+    let compiled = compiler.compile_function(&func).expect("Compilation failed");
+
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&compiled.code);
+    vm.set_functions(vec![compiled.metadata]);
+
+    let args = [RuntimeValue::from_int(42)];
+    let result = vm.call_function(0, &args).expect("Execution failed");
+    assert_eq!(result.as_int(), -42);
+}
+
+#[test]
+fn test_compile_bool_const() {
+    // fn get_true() -> bool { true }
+    let func = make_function(
+        "get_true",
+        vec![],
+        vec![MirInst::ConstBool {
+            dest: VReg(0),
+            value: true,
+        }],
+        Terminator::Return(Some(VReg(0))),
+    );
+
+    let mut compiler = BytecodeCompiler::new();
+    let compiled = compiler.compile_function(&func).expect("Compilation failed");
+
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&compiled.code);
+    let result = vm.execute().expect("Execution failed");
+    assert!(result.as_bool());
+}
+
+#[test]
+fn test_compile_enum_constructors_preserve_runtime_type_identity() {
+    let unit = make_function(
+        "unit_enum",
+        vec![],
+        vec![MirInst::EnumUnit {
+            dest: VReg(0),
+            enum_name: "pkg.Config".to_string(),
+            variant_name: "Ready".to_string(),
+        }],
+        Terminator::Return(Some(VReg(0))),
+    );
+    let payload = make_function(
+        "payload_enum",
+        vec![],
+        vec![
+            MirInst::ConstInt {
+                dest: VReg(0),
+                value: 42,
+            },
+            MirInst::EnumWith {
+                dest: VReg(1),
+                enum_name: "pkg.Other".to_string(),
+                variant_name: "Ready".to_string(),
+                payload: VReg(0),
+            },
+        ],
+        Terminator::Return(Some(VReg(1))),
+    );
+
+    let mut compiler = BytecodeCompiler::new();
+    let unit = compiler.compile_function(&unit).expect("unit enum compilation failed");
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&unit.code);
+    let unit = vm.execute().expect("unit enum execution failed");
+
+    let payload = compiler
+        .compile_function(&payload)
+        .expect("payload enum compilation failed");
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&payload.code);
+    let payload = vm.execute().expect("payload enum execution failed");
+
+    assert_eq!(
+        rt_enum_id(unit),
+        i64::from(crate::codegen::shared::enum_runtime_type_id("pkg.Config"))
+    );
+    assert_eq!(
+        rt_enum_id(payload),
+        i64::from(crate::codegen::shared::enum_runtime_type_id("pkg.Other"))
+    );
+    assert!(rt_enum_id(unit) >= 2);
+    assert!(rt_enum_id(payload) >= 2);
+    assert_ne!(rt_enum_id(unit), rt_enum_id(payload));
+    let discriminant = hash_variant_discriminant("Ready");
+    assert!(discriminant > u32::from(u16::MAX));
+    assert_eq!(rt_enum_discriminant(unit), i64::from(discriminant));
+    assert_eq!(rt_enum_discriminant(payload), i64::from(discriminant));
+    assert!(rt_enum_payload(unit).is_nil());
+    assert_eq!(rt_enum_payload(payload).as_int(), 42);
+}
+
+#[test]
+fn test_compile_enum_variant_test_preserves_type_and_full_discriminant() {
+    let variant = |enum_name: &str, variant_name: &str| MirPattern::Variant {
+        enum_name: enum_name.to_string(),
+        variant_name: variant_name.to_string(),
+        payload: None,
+    };
+    let func = make_function(
+        "enum_variant_test",
+        vec![],
+        vec![
+            MirInst::EnumUnit {
+                dest: VReg(0),
+                enum_name: "pkg.Config".to_string(),
+                variant_name: "Ready".to_string(),
+            },
+            MirInst::PatternTest {
+                dest: VReg(1),
+                subject: VReg(0),
+                pattern: variant("pkg.Config", "Ready"),
+            },
+            MirInst::PatternTest {
+                dest: VReg(2),
+                subject: VReg(0),
+                pattern: variant("pkg.Other", "Ready"),
+            },
+            MirInst::PatternTest {
+                dest: VReg(3),
+                subject: VReg(0),
+                pattern: variant("pkg.Config", "Waiting"),
+            },
+            MirInst::UnaryOp {
+                dest: VReg(4),
+                op: UnaryOp::Not,
+                operand: VReg(2),
+            },
+            MirInst::UnaryOp {
+                dest: VReg(5),
+                op: UnaryOp::Not,
+                operand: VReg(3),
+            },
+            MirInst::BinOp {
+                dest: VReg(6),
+                op: BinOp::And,
+                left: VReg(1),
+                right: VReg(4),
+            },
+            MirInst::BinOp {
+                dest: VReg(7),
+                op: BinOp::And,
+                left: VReg(6),
+                right: VReg(5),
+            },
+        ],
+        Terminator::Return(Some(VReg(7))),
+    );
+
+    let mut compiler = BytecodeCompiler::new();
+    let compiled = compiler
+        .compile_function(&func)
+        .expect("variant test compilation failed");
+    let mut vm = BytecodeVM::new();
+    vm.load_bytecode(&compiled.code);
+
+    assert!(hash_variant_discriminant("Ready") > u32::from(u16::MAX));
+    assert!(vm.execute().expect("variant test execution failed").as_bool());
+}

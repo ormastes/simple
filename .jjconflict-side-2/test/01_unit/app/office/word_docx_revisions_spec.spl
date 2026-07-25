@@ -1,0 +1,152 @@
+"""DOCX track-changes serialization — Word's w:ins/w:del round-trip.
+
+An insert-revision span serializes wrapped in
+<w:ins w:id=".." w:author=".." w:date="..">...runs...</w:ins>; a
+delete-revision span serializes wrapped in <w:del ...> with the run's text
+as <w:delText> instead of <w:t> (OOXML requirement — Word rejects a plain
+<w:t> inside w:del). Author/date come from the doc-level RevisionDef the
+span's revision_id points at (see attributed_text.spl/track_changes.spl);
+w:date is the same fixed constant the rest of odf_ooxml.spl's writer uses
+("2026-01-01T00:00:00Z"), keeping export deterministic.
+
+On import, every <w:ins>/<w:del> wrapper becomes revision-marked spans plus
+one fresh RevisionDef in `doc.revisions` (see `_docx_para_spans` in
+odf_ooxml.spl) — ids are RENUMBERED sequentially per import, never the
+original document's w:id values, so round-trip comparisons below are over
+"<author>|<kind>|<text>" triples (revisions_summary minus the id column),
+not the raw summary lines.
+
+Ceilings (see odf_ooxml.spl docstrings): revision ids renumbered on read;
+a <w:del> nested inside a <w:ins> (or vice versa) is not modeled; w:date is
+a fixed constant on write and read back as free text, no format validation.
+"""
+
+use std.spec
+use app.office.file_formats.{parse_markdown_document}
+use app.office.odf_ooxml.{document_to_docx_bytes, docx_bytes_to_document}
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle}
+use common.rich_text.track_changes.{tracked_insert, tracked_delete, revisions_summary, final_text}
+use std.common.archive.zip.{zip_entries, zip_extract_text}
+
+fn _plain_span(t: text) -> TextSpan:
+    TextSpan(text: t, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: "")
+
+fn _doc1(spans: [TextSpan]) -> RichDocument:
+    RichDocument(title: "T", blocks: [DocBlock(kind: BlockKind.Paragraph, spans: spans)], comments: [], revisions: [])
+
+fn _has_entry(zip_bytes: [u8], name: text) -> bool:
+    var found = false
+    for e in zip_entries(zip_bytes):
+        if e.name == name:
+            found = true
+    found
+
+fn _summary_triples(doc: RichDocument) -> [text]:
+    """revisions_summary's '<id>|<author>|<kind>|<text>' lines with the id
+    column dropped — ids renumber across a docx round trip, author|kind|text
+    does not. Fixture texts below never contain '|', so a 4-way split is
+    exact."""
+    var out: [text] = []
+    for line in revisions_summary(doc):
+        val parts = line.split("|")
+        out.push("{parts[1]}|{parts[2]}|{parts[3]}")
+    out
+
+describe "DOCX track changes: w:ins insert-revision round trip":
+    """A single-author tracked insert serializes as <w:ins> wrapping the
+    inserted run, and round-trips back to an equivalent revision."""
+
+    it "wraps the inserted run in <w:ins w:id=.. w:author=.. w:date=..> in word/document.xml":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d1 = tracked_insert(doc, 0, 5, " there", "Alice")
+        val docx = document_to_docx_bytes(d1)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:ins w:id=\"")
+        expect(document_xml).to_contain("w:author=\"Alice\"")
+        expect(document_xml).to_contain("w:date=\"2026-01-01T00:00:00Z\"")
+        expect(document_xml).to_contain("</w:ins>")
+        expect(document_xml).to_contain(" there")
+
+    it "round-trips the insert-revision summary (author|kind|text) and final_text":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d1 = tracked_insert(doc, 0, 5, " there", "Alice")
+        val before = _summary_triples(d1)
+        expect(before.len()).to_equal(1)
+        expect(before[0]).to_equal("Alice|insert| there")
+        val docx = document_to_docx_bytes(d1)
+        val back = docx_bytes_to_document(docx, "d2")
+        val after = _summary_triples(back)
+        expect(after.len()).to_equal(1)
+        expect(after[0]).to_equal("Alice|insert| there")
+        expect(final_text(back)).to_equal(final_text(d1))
+
+describe "DOCX track changes: w:del delete-revision round trip":
+    """A single-author tracked delete serializes as <w:del> wrapping the
+    deleted run, using <w:delText> instead of <w:t> for the run's content."""
+
+    it "wraps the deleted run in <w:del ...> with <w:delText> (not <w:t>) in word/document.xml":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d1 = tracked_delete(doc, 0, 0, 5, "Bob")
+        val docx = document_to_docx_bytes(d1)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("<w:del w:id=\"")
+        expect(document_xml).to_contain("w:author=\"Bob\"")
+        expect(document_xml).to_contain("</w:del>")
+        expect(document_xml).to_contain("<w:delText xml:space=\"preserve\">Hello</w:delText>")
+
+    it "round-trips the delete-revision summary (author|kind|text) and final_text":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d1 = tracked_delete(doc, 0, 0, 5, "Bob")
+        val before = _summary_triples(d1)
+        expect(before.len()).to_equal(1)
+        expect(before[0]).to_equal("Bob|delete|Hello")
+        val docx = document_to_docx_bytes(d1)
+        val back = docx_bytes_to_document(docx, "d2")
+        val after = _summary_triples(back)
+        expect(after.len()).to_equal(1)
+        expect(after[0]).to_equal("Bob|delete|Hello")
+        expect(final_text(back)).to_equal(final_text(d1))
+        expect(final_text(back)).to_equal(" world")
+
+describe "DOCX track changes: two-author mixed insert + delete round trip":
+    """An insert from one author and a delete from another in the same
+    document both round-trip, ids renumbered but author|kind|text intact."""
+
+    it "round-trips both revisions' summaries and final_text unchanged":
+        val doc = _doc1([_plain_span("Hello world")])
+        val d1 = tracked_insert(doc, 0, 0, "Hi ", "Alice")
+        val d2 = tracked_delete(d1, 0, 3, 8, "Bob")
+        val before = _summary_triples(d2)
+        expect(before.len()).to_equal(2)
+        expect(before[0]).to_equal("Alice|insert|Hi ")
+        expect(before[1]).to_equal("Bob|delete|Hello")
+        val docx = document_to_docx_bytes(d2)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml).to_contain("w:author=\"Alice\"")
+        expect(document_xml).to_contain("w:author=\"Bob\"")
+        val back = docx_bytes_to_document(docx, "d2")
+        val after = _summary_triples(back)
+        expect(after.len()).to_equal(2)
+        expect(after[0]).to_equal("Alice|insert|Hi ")
+        expect(after[1]).to_equal("Bob|delete|Hello")
+        expect(final_text(back)).to_equal(final_text(d2))
+
+describe "DOCX track changes: no-revision regression guard":
+    """A document with zero tracked revisions must serialize byte-identical
+    to how it serialized before this feature existed — no <w:ins>/<w:del>
+    ever appears when every span's revision_id is ""."""
+
+    it "a revision-less document has no w:ins/w:del in word/document.xml":
+        val doc = parse_markdown_document("# Report\n\nBody text.", "d")
+        val docx = document_to_docx_bytes(doc)
+        val document_xml = zip_extract_text(docx, "word/document.xml")
+        expect(document_xml.contains("<w:ins ")).to_be(false)
+        expect(document_xml.contains("<w:del ")).to_be(false)
+        expect(document_xml.contains("<w:delText")).to_be(false)
+
+    it "a revision-less document's bytes are unaffected by the revisions feature (double-export stability)":
+        val doc = parse_markdown_document("# Report\n\n- a bullet\n\nBody text.", "d")
+        val first = document_to_docx_bytes(doc)
+        val second = document_to_docx_bytes(doc)
+        expect(first).to_equal(second)
+        expect(_has_entry(first, "word/document.xml")).to_be(true)

@@ -1,0 +1,247 @@
+use os.crypto.p384.{p384_add, p384_mul, p384_inv, p384_scalar_mult, p384_point_on_curve}
+extern fn rt_cli_get_args() -> [text]
+extern fn rt_cli_exit(code: i64)
+
+fn _hex_nibble(n: u8) -> text:
+    if n == 0: "0"
+    elif n == 1: "1"
+    elif n == 2: "2"
+    elif n == 3: "3"
+    elif n == 4: "4"
+    elif n == 5: "5"
+    elif n == 6: "6"
+    elif n == 7: "7"
+    elif n == 8: "8"
+    elif n == 9: "9"
+    elif n == 10: "a"
+    elif n == 11: "b"
+    elif n == 12: "c"
+    elif n == 13: "d"
+    elif n == 14: "e"
+    else: "f"
+
+fn _bytes_hex(b: [u8]) -> text:
+    var s: text = ""
+    var i: u64 = 0
+    while i < b.len().to_u64():
+        val bv = b[i]
+        s = s + _hex_nibble((bv >> 4) & 0x0F)
+        s = s + _hex_nibble(bv & 0x0F)
+        i = i + 1
+    s
+
+fn _be48_val(last_byte: u8) -> [u8]:
+    var b: [u8] = []
+    var i: u64 = 0
+    while i < 47:
+        b.push(0x00)
+        i = i + 1
+    b.push(last_byte)
+    b
+
+fn _gx_bytes() -> [u8]:
+    [
+        0xAAu8, 0x87u8, 0xCAu8, 0x22u8, 0xBEu8, 0x8Bu8, 0x05u8, 0x37u8,
+        0x8Eu8, 0xB1u8, 0xC7u8, 0x1Eu8, 0xF3u8, 0x20u8, 0xADu8, 0x74u8,
+        0x6Eu8, 0x1Du8, 0x3Bu8, 0x62u8, 0x8Bu8, 0xA7u8, 0x9Bu8, 0x98u8,
+        0x59u8, 0xF7u8, 0x41u8, 0xE0u8, 0x82u8, 0x54u8, 0x2Au8, 0x38u8,
+        0x55u8, 0x02u8, 0xF2u8, 0x5Du8, 0xBFu8, 0x55u8, 0x29u8, 0x6Cu8,
+        0x3Au8, 0x54u8, 0x5Eu8, 0x38u8, 0x72u8, 0x76u8, 0x0Au8, 0xB7u8
+    ]
+
+fn _gy_bytes() -> [u8]:
+    [
+        0x36u8, 0x17u8, 0xDEu8, 0x4Au8, 0x96u8, 0x26u8, 0x2Cu8, 0x6Fu8,
+        0x5Du8, 0x9Eu8, 0x98u8, 0xBFu8, 0x92u8, 0x92u8, 0xDCu8, 0x29u8,
+        0xF8u8, 0xF4u8, 0x1Du8, 0xBDu8, 0x28u8, 0x9Au8, 0x14u8, 0x7Cu8,
+        0xE9u8, 0xDAu8, 0x31u8, 0x13u8, 0xB5u8, 0xF0u8, 0xB8u8, 0xC0u8,
+        0x0Au8, 0x60u8, 0xB1u8, 0xCEu8, 0x1Du8, 0x7Eu8, 0x81u8, 0x9Du8,
+        0x7Au8, 0x43u8, 0x1Du8, 0x7Cu8, 0x90u8, 0xEAu8, 0x0Eu8, 0x5Fu8
+    ]
+
+fn _curve_p() -> [u8]:
+    [
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFEu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8
+    ]
+
+fn _curve_minus_three() -> [u8]:
+    [
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFEu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+        0x00u8, 0x00u8, 0x00u8, 0x00u8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFCu8
+    ]
+
+fn _sub_be(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < a.len().to_u64():
+        out.push(0x00u8)
+        i = i + 1
+    var borrow: u64 = 0
+    i = a.len().to_u64()
+    while i > 0:
+        val idx = i - 1
+        val diff = a[idx].to_u64() + 0x100u64 - b[idx].to_u64() - borrow
+        out[idx] = (diff & 0xFFu64).to_u8()
+        borrow = 1u64 - ((diff >> 8) & 1u64)
+        i = i - 1
+    out
+
+fn _neg(a: [u8]) -> [u8]:
+    _sub_be(_curve_p(), a)
+
+fn _pub_x(pubkey: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 48:
+        out.push(pubkey[1 + i])
+        i = i + 1
+    out
+
+fn _pub_y(pubkey: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < 48:
+        out.push(pubkey[49 + i])
+        i = i + 1
+    out
+
+fn _point_bytes(x: [u8], y: [u8]) -> [u8]:
+    var out: [u8] = []
+    out.push(0x04u8)
+    var i: u64 = 0
+    while i < 48:
+        out.push(x[i])
+        i = i + 1
+    i = 0
+    while i < 48:
+        out.push(y[i])
+        i = i + 1
+    out
+
+fn _expect_hex(label: text, got: [u8], expected: text) -> bool:
+    val got_hex = _bytes_hex(got)
+    if got_hex != expected:
+        print "{label} mismatch"
+        print "got={got_hex}"
+        print "expected={expected}"
+        return false
+    true
+
+fn _pass_case(name: text) -> bool:
+    print "PASS {name}"
+    true
+
+fn _fail_case(name: text, detail: text) -> bool:
+    print "FAIL {name}: {detail}"
+    false
+
+fn _selected_case() -> text:
+    val args = rt_cli_get_args()
+    var i: i64 = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--case" and i + 1 < args.len():
+            return args[i + 1]
+        elif arg.starts_with("--case="):
+            return arg.slice(7, arg.len())
+        i = i + 1
+    ""
+
+fn _run_case(selected: text, name: text) -> bool:
+    selected == "" or selected == name
+
+fn _affine_double(px: [u8], py: [u8]) -> [u8]:
+    val x2 = p384_mul(px, px)
+    val num = p384_add(p384_add(x2, x2), p384_add(x2, _curve_minus_three()))
+    val den = p384_add(py, py)
+    val lambda = p384_mul(num, p384_inv(den))
+    val lambda2 = p384_mul(lambda, lambda)
+    val rx = p384_add(lambda2, _neg(p384_add(px, px)))
+    val ry = p384_add(p384_mul(lambda, p384_add(px, _neg(rx))), _neg(py))
+    _point_bytes(rx, ry)
+
+fn _affine_add(px: [u8], py: [u8], qx: [u8], qy: [u8]) -> [u8]:
+    val num = p384_add(qy, _neg(py))
+    val den = p384_add(qx, _neg(px))
+    val lambda = p384_mul(num, p384_inv(den))
+    val lambda2 = p384_mul(lambda, lambda)
+    val rx = p384_add(p384_add(lambda2, _neg(px)), _neg(qx))
+    val ry = p384_add(p384_mul(lambda, p384_add(px, _neg(rx))), _neg(py))
+    _point_bytes(rx, ry)
+
+fn _case_k2(gx: [u8], gy: [u8]) -> bool:
+    val k2_pub = p384_scalar_mult(_be48_val(0x02), gx, gy)
+    if not _expect_hex("k2", k2_pub, "0408d999057ba3d2d969260045c55b97f089025959a6f434d651d207d19fb96e9e4fe0e86ebe0e64f85b96a9c75295df618e80f1fa5b1b3cedb7bfe8dffd6dba74b275d875bc6cc43e904e505f256ab4255ffd43e94d39e22d61501e700a940e80"):
+        return _fail_case("k2", "oracle mismatch")
+    _pass_case("k2")
+
+fn _case_affine_k2(gx: [u8], gy: [u8]) -> bool:
+    val affine_k2 = _affine_double(gx, gy)
+    if not p384_point_on_curve(_pub_x(affine_k2), _pub_y(affine_k2)):
+        return _fail_case("affine_k2", "point is not on curve")
+    if not _expect_hex("affine_k2", affine_k2, "0408d999057ba3d2d969260045c55b97f089025959a6f434d651d207d19fb96e9e4fe0e86ebe0e64f85b96a9c75295df618e80f1fa5b1b3cedb7bfe8dffd6dba74b275d875bc6cc43e904e505f256ab4255ffd43e94d39e22d61501e700a940e80"):
+        return _fail_case("affine_k2", "oracle mismatch")
+    _pass_case("affine_k2")
+
+fn _case_k3(gx: [u8], gy: [u8]) -> bool:
+    val k3_pub = p384_scalar_mult(_be48_val(0x03), gx, gy)
+    if not p384_point_on_curve(_pub_x(k3_pub), _pub_y(k3_pub)):
+        return _fail_case("k3", "point is not on curve")
+    if not _expect_hex("k3", k3_pub, "04077a41d4606ffa1464793c7e5fdc7d98cb9d3910202dcd06bea4f240d3566da6b408bbae5026580d02d7e5c70500c831c995f7ca0b0c42837d0bbe9602a9fc998520b41c85115aa5f7684c0edc111eacc24abd6be4b5d298b65f28600a2f1df1"):
+        return _fail_case("k3", "oracle mismatch")
+    _pass_case("k3")
+
+fn _case_affine_k3(gx: [u8], gy: [u8]) -> bool:
+    val affine_k2 = _affine_double(gx, gy)
+    val affine_k3 = _affine_add(_pub_x(affine_k2), _pub_y(affine_k2), gx, gy)
+    if not p384_point_on_curve(_pub_x(affine_k3), _pub_y(affine_k3)):
+        return _fail_case("affine_k3", "point is not on curve")
+    if not _expect_hex("affine_k3", affine_k3, "04077a41d4606ffa1464793c7e5fdc7d98cb9d3910202dcd06bea4f240d3566da6b408bbae5026580d02d7e5c70500c831c995f7ca0b0c42837d0bbe9602a9fc998520b41c85115aa5f7684c0edc111eacc24abd6be4b5d298b65f28600a2f1df1"):
+        return _fail_case("affine_k3", "oracle mismatch")
+    _pass_case("affine_k3")
+
+fn main():
+    val selected = _selected_case()
+    var ran_case = false
+    var ok = true
+    val gx = _gx_bytes()
+    val gy = _gy_bytes()
+    print "p384_scalar_k123_oracle_probe start selected={selected}"
+
+    if _run_case(selected, "k2"):
+        ran_case = true
+        ok = _case_k2(gx, gy) and ok
+
+    if _run_case(selected, "affine_k2"):
+        ran_case = true
+        ok = _case_affine_k2(gx, gy) and ok
+
+    if _run_case(selected, "k3"):
+        ran_case = true
+        ok = _case_k3(gx, gy) and ok
+
+    if _run_case(selected, "affine_k3"):
+        ran_case = true
+        ok = _case_affine_k3(gx, gy) and ok
+
+    if not ran_case:
+        print "FAIL p384_scalar_k123_oracle_probe: unknown case {selected}"
+        rt_cli_exit(1)
+        return
+
+    if not ok:
+        print "FAIL p384_scalar_k123_oracle_probe"
+        rt_cli_exit(1)
+        return
+
+    print "PASS p384_scalar_k123_oracle_probe"
+    rt_cli_exit(0)

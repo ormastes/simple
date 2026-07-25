@@ -1,0 +1,191 @@
+# UiAccessStore persistence contract
+#
+# Covers the real persisted store module for UI access events, surfaces, and
+# current-node queries. This spec stays at the test layer and exercises the
+# public store API directly.
+
+use std.spec.{describe, it, expect}
+use common.ui.access.{UiAccessStore, UiAccessNode, UiAccessSurface, UiAccessEvent, UiAccessSnapshot, ui_access_canonical_id}
+use app.io.mod.{file_exists, file_delete}
+
+fn _surface(surface_id: text, title: text, active: bool, root_widget_id: text) -> UiAccessSurface:
+    UiAccessSurface(
+        surface_id: surface_id,
+        title: title,
+        active: active,
+        window_id: "",
+        app_id: "",
+        root_canonical_id: ui_access_canonical_id(surface_id, root_widget_id),
+    )
+
+fn _node(
+    surface_id: text,
+    widget_id: text,
+    kind: text,
+    name: text,
+    text: text,
+    visible: bool,
+    focused: bool,
+    enabled: bool,
+    selected: bool,
+    child_ids: [text],
+    action_names: [text]
+) -> UiAccessNode:
+    UiAccessNode(
+        canonical_id: ui_access_canonical_id(surface_id, widget_id),
+        surface_id: surface_id,
+        widget_id: widget_id,
+        kind: kind,
+        visible: visible,
+        focused: focused,
+        enabled: enabled,
+        selected: selected,
+        text: text,
+        props: [],
+        child_ids: child_ids,
+        action_names: action_names,
+    )
+
+fn _snapshot(active_surface: text, surfaces: [UiAccessSurface], nodes: [UiAccessNode]) -> UiAccessSnapshot:
+    UiAccessSnapshot(
+        protocol_version: 1,
+        mode: "NORMAL",
+        active_surface: active_surface,
+        surfaces: surfaces,
+        nodes: nodes,
+        recent_events: [],
+    )
+
+fn _event(sequence: i64, surface_id: text, widget_id: text, event_kind: text, payload: text) -> UiAccessEvent:
+    UiAccessEvent(
+        surface_id: surface_id,
+        widget_id: widget_id,
+        canonical_id: ui_access_canonical_id(surface_id, widget_id),
+        event_kind: event_kind,
+        payload: payload,
+        sequence: sequence,
+    )
+
+describe "UiAccessStore":
+    it "opens and closes a file-backed store":
+        val store = UiAccessStore.open("/tmp/ui_access_store_test.sqlite")?
+        store.close()?
+
+    it "opens an in-memory store and allows schema re-initialization":
+        var store = UiAccessStore.memory()?
+        store.init_schema()?
+        store.close()?
+
+    it "persists events and lists them newest-first":
+        var store = UiAccessStore.memory()?
+        store.insert_event(_event(1, "main", "submit_btn", "action", "click"))?
+        store.insert_event(_event(3, "main", "submit_btn", "action", "focus"))?
+        store.insert_event(_event(2, "popup", "ok_btn", "action", "click"))?
+        val all_events = store.list_events("", 10)?
+        expect(all_events.len()).to_equal(3)
+        expect(all_events[0].sequence).to_equal(3)
+        expect(all_events[1].sequence).to_equal(2)
+        expect(all_events[2].sequence).to_equal(1)
+        val main_events = store.list_events("main", 10)?
+        expect(main_events.len()).to_equal(2)
+        expect(main_events[0].surface_id).to_equal("main")
+        expect(main_events[0].canonical_id).to_equal("main#submit_btn")
+
+    it "persists a snapshot and keeps the latest current nodes":
+        var store = UiAccessStore.memory()?
+        val initial_snapshot = _snapshot(
+            "main",
+            [_surface("main", "Main", true, "root_main")],
+            [
+                _node("main", "root_main", "root", "Main", "Main", true, true, true, false, ["main#submit_btn"], []),
+                _node("main", "submit_btn", "button", "Submit", "Submit", true, true, true, false, [], ["click", "focus"])
+            ]
+        )
+        store.persist_snapshot(initial_snapshot)?
+        val initial_surfaces = store.list_surfaces()?
+        expect(initial_surfaces.len()).to_equal(1)
+        expect(initial_surfaces[0].surface_id).to_equal("main")
+        expect(initial_surfaces[0].active).to_equal(true)
+        val initial_nodes = store.query_nodes("main", "button", "submit", 10)?
+        expect(initial_nodes.len()).to_equal(1)
+        expect(initial_nodes[0].canonical_id).to_equal("main#submit_btn")
+        expect(initial_nodes[0].text).to_equal("Submit")
+        expect(initial_nodes[0].action_names.len()).to_equal(2)
+
+        val updated_snapshot = _snapshot(
+            "main",
+            [
+                _surface("main", "Main", true, "root_main"),
+                _surface("popup", "Popup", false, "root_popup")
+            ],
+            [
+                _node("main", "root_main", "root", "Main", "Main", true, true, true, false, ["main#submit_btn"], []),
+                _node("main", "submit_btn", "button", "Save", "Save", true, true, true, false, [], ["click", "focus"]),
+                _node("popup", "root_popup", "root", "Popup", "Popup", true, false, true, false, ["popup#ok_btn"], []),
+                _node("popup", "ok_btn", "button", "OK", "OK", true, false, true, false, [], ["click"])
+            ]
+        )
+        store.persist_snapshot(updated_snapshot)?
+        val surfaces = store.list_surfaces()?
+        expect(surfaces.len()).to_equal(2)
+        expect(surfaces[0].surface_id).to_equal("main")
+        expect(surfaces[1].surface_id).to_equal("popup")
+        val nodes = store.query_nodes("main", "button", "", 10)?
+        expect(nodes.len()).to_equal(1)
+        expect(nodes[0].text).to_equal("Save")
+        expect(nodes[0].action_names.len()).to_equal(2)
+
+    it "filters persisted nodes by surface, kind, text, and limit":
+        var store = UiAccessStore.memory()?
+        val snapshot = _snapshot(
+            "main",
+            [
+                _surface("main", "Main", true, "root_main"),
+                _surface("popup", "Popup", false, "root_popup")
+            ],
+            [
+                _node("main", "root_main", "root", "Main", "Main", true, true, true, false, ["main#submit_btn"], []),
+                _node("main", "submit_btn", "button", "Submit", "Submit", true, true, true, false, [], ["click", "focus"]),
+                _node("main", "title", "text", "Title", "Hello Access", true, false, true, false, [], []),
+                _node("popup", "root_popup", "root", "Popup", "Popup", true, false, true, false, ["popup#ok_btn"], []),
+                _node("popup", "ok_btn", "button", "OK", "OK", true, false, true, false, [], ["click"])
+            ]
+        )
+        store.persist_snapshot(snapshot)?
+        val main_buttons = store.query_nodes("main", "button", "", 10)?
+        expect(main_buttons.len()).to_equal(1)
+        expect(main_buttons[0].widget_id).to_equal("submit_btn")
+        val by_text = store.query_nodes("", "", "hello", 10)?
+        expect(by_text.len()).to_equal(1)
+        expect(by_text[0].surface_id).to_equal("main")
+        expect(by_text[0].widget_id).to_equal("title")
+        val all_nodes = store.query_nodes("", "", "", 10)?
+        expect(all_nodes.len()).to_equal(5)
+        val limited = store.query_nodes("", "", "", 2)?
+        expect(limited.len()).to_equal(2)
+
+    it "reopens a file-backed store and preserves current nodes and events":
+        val db_path = "/tmp/ui_access_store_reopen.sqlite"
+        if file_exists(db_path):
+            file_delete(db_path)
+        var first = UiAccessStore.open(db_path)?
+        first.insert_event(_event(1, "main", "submit_btn", "action", "submit"))?
+        first.persist_snapshot(_snapshot(
+            "main",
+            [_surface("main", "Main", true, "root_main")],
+            [
+                _node("main", "root_main", "root", "Main", "Main", true, true, true, false, ["main#submit_btn"], []),
+                _node("main", "submit_btn", "button", "Submit", "Submit", true, true, true, false, [], ["click"])
+            ]
+        ))?
+        first.close()?
+        var reopened = UiAccessStore.open(db_path)?
+        val events = reopened.list_events("main", 10)?
+        expect(events.len()).to_equal(1)
+        expect(events[0].payload).to_equal("submit")
+        val nodes = reopened.query_nodes("main", "button", "submit", 10)?
+        expect(nodes.len()).to_equal(1)
+        expect(nodes[0].canonical_id).to_equal("main#submit_btn")
+        reopened.close()?
+        if file_exists(db_path):
+            file_delete(db_path)

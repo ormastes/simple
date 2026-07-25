@@ -1,0 +1,257 @@
+"""BLAS Types, Handle, and Mock CPU Provider — Phase 3 BLAS Provider Boundary.
+
+Provides:
+  - NormOrd enum (L1, L2, Inf)
+  - Extended LinalgError enum
+  - BlasHandle skeleton (provider selection + singleton policy)
+  - MockCpuBlasProvider: always-available provider with CORRECT small-N arithmetic
+    (T-BLAS-15: mock must NOT return zero-stubs)
+
+Import path: use std.common.science_math.blas.*
+
+# THREAD-SAFETY: one handle per process in v1; actor boundary crossing forbidden.
+# v1.1 will add actor-aware handle-per-fiber once that design is settled.
+
+# PERF-SUGAR-003: generic <T> variants deferred to v1.1 (interp dispatch erasure).
+# v1.1 planned: fn axpy<T>(alpha: T, x: Vector<T>, y: Vector<T>) -> Result<Vector<T>, LinalgError>
+"""
+
+use std.common.science_math.blas_provider.{BlasProvider, BlasProviderError, SwapResult}
+
+# ============================================================
+# NormOrd — used by linalg.norm public API
+# ============================================================
+
+pub enum NormOrd:
+    L1
+    L2
+    Inf
+
+# ============================================================
+# Extended LinalgError
+# (subset shared with lapack area; coordinate on final definition location)
+# ============================================================
+
+pub enum LinalgError:
+    Singular
+    DimensionMismatch
+    UnsupportedDType(text)
+    BackendUnavailable(text)
+
+# ============================================================
+# BlasHandle skeleton
+# LP64 ABI only in v1. ILP64 documented as later extension.
+# ============================================================
+
+pub class BlasHandle:
+    backend: text
+    _provider: MockCpuBlasProvider
+
+    pub static fn create() -> BlasHandle:
+        # Provider selection: mock → scalar → openblas → cublas
+        # In v1 the handle always uses MockCpuBlasProvider (pure-Simple).
+        # OpenBLAS and cuBLAS providers (nogc_sync_mut/linalg/blas_openblas.spl)
+        # are selected by the caller when they extend this handle in v1.1.
+        BlasHandle(backend: "mock", _provider: MockCpuBlasProvider())
+
+    pub fn backend_name(self) -> text:
+        self.backend
+
+# ============================================================
+# MockCpuBlasProvider
+#
+# T-BLAS-15: mock shim symbol stubs with CORRECT small-N values.
+# This is NOT a zero-stub. Every operation performs real arithmetic.
+# Required so specs run under SIMPLE_BLAS_BACKEND=mock without native libs.
+# ============================================================
+
+pub class MockCpuBlasProvider:
+    pub fn provider_name(self) -> text:
+        "mock"
+
+    # BLAS Level-1 — axpy: result[i] = alpha*x[i] + y[i]
+    pub fn blas_axpy(self, alpha: f64, n: i64, x: [f64], y: [f64]) -> Result<[f64], BlasProviderError>:
+        if x.len() != n or y.len() != n:
+            return Err(BlasProviderError.DimensionMismatch)
+        var out: [f64] = []
+        var i = 0
+        while i < n:
+            out.push(alpha * x[i] + y[i])
+            i = i + 1
+        Ok(out)
+
+    # BLAS Level-1 — scal: x[i] = alpha*x[i]  (returns new buffer; input unchanged)
+    pub fn blas_scal(self, alpha: f64, n: i64, x: [f64]) -> Result<[f64], BlasProviderError>:
+        if x.len() != n:
+            return Err(BlasProviderError.DimensionMismatch)
+        var out: [f64] = []
+        var i = 0
+        while i < n:
+            out.push(alpha * x[i])
+            i = i + 1
+        Ok(out)
+
+    # BLAS Level-1 — dot: sum(x[i]*y[i])
+    pub fn blas_dot(self, n: i64, x: [f64], y: [f64]) -> Result<f64, BlasProviderError>:
+        if x.len() != n or y.len() != n:
+            return Err(BlasProviderError.DimensionMismatch)
+        var total = 0.0
+        var i = 0
+        while i < n:
+            total = total + x[i] * y[i]
+            i = i + 1
+        Ok(total)
+
+    # BLAS Level-1 — nrm2: sqrt(sum(x[i]^2))
+    pub fn blas_nrm2(self, n: i64, x: [f64]) -> Result<f64, BlasProviderError>:
+        if x.len() != n:
+            return Err(BlasProviderError.DimensionMismatch)
+        var sum_sq = 0.0
+        var i = 0
+        while i < n:
+            sum_sq = sum_sq + x[i] * x[i]
+            i = i + 1
+        Ok(mock_sqrt_f64(sum_sq))
+
+    # BLAS Level-1 — copy: returns a new buffer equal to x (BLAS dcopy)
+    pub fn blas_copy(self, n: i64, x: [f64]) -> Result<[f64], BlasProviderError>:
+        if x.len() != n:
+            return Err(BlasProviderError.DimensionMismatch)
+        var out: [f64] = []
+        var i = 0
+        while i < n:
+            out.push(x[i])
+            i = i + 1
+        Ok(out)
+
+    # BLAS Level-1 — swap: exchanges x and y element-wise; returns SwapResult{new_x, new_y}
+    # Both new_x and new_y are fresh buffers (input unchanged).
+    pub fn blas_swap(self, n: i64, x: [f64], y: [f64]) -> Result<SwapResult, BlasProviderError>:
+        if x.len() != n or y.len() != n:
+            return Err(BlasProviderError.DimensionMismatch)
+        var new_x: [f64] = []
+        var new_y: [f64] = []
+        var i = 0
+        while i < n:
+            new_x.push(y[i])
+            new_y.push(x[i])
+            i = i + 1
+        Ok(SwapResult(new_x: new_x, new_y: new_y))
+
+    # BLAS Level-2 — gemv: y_out[i] = alpha * sum_j(A[i,j]*x[j]) + beta*y[i]
+    # A is row-major m×n.
+    # gemv operand-swap: pass row-major A with CUBLAS_OP_T at Layer A.
+    # Do NOT use (AB)^T = B^T A^T (that is gemm only).
+    pub fn blas_gemv(self, alpha: f64, a: [f64], m: i64, n: i64, x: [f64], beta: f64, y: [f64]) -> Result<[f64], BlasProviderError>:
+        if a.len() != m * n:
+            return Err(BlasProviderError.DimensionMismatch)
+        if x.len() != n:
+            return Err(BlasProviderError.DimensionMismatch)
+        if y.len() != m:
+            return Err(BlasProviderError.DimensionMismatch)
+        var out: [f64] = []
+        var row = 0
+        while row < m:
+            var total = beta * y[row]
+            var col = 0
+            while col < n:
+                total = total + alpha * a[row * n + col] * x[col]
+                col = col + 1
+            out.push(total)
+            row = row + 1
+        Ok(out)
+
+    # BLAS Level-3 — gemm: C[i,j] = alpha * sum_k(A[i,k]*B[k,j]) + beta*C_in[i,j]
+    # A is row-major m×k, B is row-major k×n, C is row-major m×n.
+    # Operand-swap (AB)^T = B^T A^T is applied at Layer A when calling cuBLAS.
+    # This mock operates directly in row-major; no swap needed here.
+    pub fn blas_gemm(self, alpha: f64, a: [f64], m: i64, kk: i64, b: [f64], bn: i64, beta: f64, c: [f64]) -> Result<[f64], BlasProviderError>:
+        if a.len() != m * kk:
+            return Err(BlasProviderError.DimensionMismatch)
+        if b.len() != kk * bn:
+            return Err(BlasProviderError.DimensionMismatch)
+        if c.len() != m * bn:
+            return Err(BlasProviderError.DimensionMismatch)
+        var out: [f64] = []
+        var i = 0
+        while i < m:
+            var j = 0
+            while j < bn:
+                var total = beta * c[i * bn + j]
+                var k = 0
+                while k < kk:
+                    total = total + alpha * a[i * kk + k] * b[k * bn + j]
+                    k = k + 1
+                out.push(total)
+                j = j + 1
+            i = i + 1
+        Ok(out)
+
+# ============================================================
+# Public convenience wrappers (Layer C — no primitives in signature)
+# These delegate to MockCpuBlasProvider for v1.
+#
+# T-BLAS-16 audit: zero <T> generics at Layer C in v1.
+# PERF-SUGAR-003: v1.1 will add Float32 and generic variants.
+# ============================================================
+
+fn _mock_provider() -> MockCpuBlasProvider:
+    MockCpuBlasProvider()
+
+pub fn blas_axpy_f64(alpha: f64, x: [f64], y: [f64]) -> Result<[f64], BlasProviderError>:
+    val p = _mock_provider()
+    if x.len() != y.len():
+        return Err(BlasProviderError.DimensionMismatch)
+    p.blas_axpy(alpha, x.len(), x, y)
+
+pub fn blas_scal_f64(alpha: f64, x: [f64]) -> Result<[f64], BlasProviderError>:
+    val p = _mock_provider()
+    p.blas_scal(alpha, x.len(), x)
+
+pub fn blas_dot_f64(x: [f64], y: [f64]) -> Result<f64, BlasProviderError>:
+    val p = _mock_provider()
+    if x.len() != y.len():
+        return Err(BlasProviderError.DimensionMismatch)
+    p.blas_dot(x.len(), x, y)
+
+pub fn blas_nrm2_f64(x: [f64]) -> f64:
+    val p = _mock_provider()
+    match p.blas_nrm2(x.len(), x):
+        Ok(value):
+            value
+        Err(_):
+            0.0
+
+pub fn blas_gemv_f64(alpha: f64, a: [f64], m: i64, n: i64, x: [f64], beta: f64, y: [f64]) -> Result<[f64], BlasProviderError>:
+    val p = _mock_provider()
+    p.blas_gemv(alpha, a, m, n, x, beta, y)
+
+pub fn blas_gemm_f64(alpha: f64, a: [f64], m: i64, k: i64, b: [f64], n: i64, beta: f64, c: [f64]) -> Result<[f64], BlasProviderError>:
+    val p = _mock_provider()
+    p.blas_gemm(alpha, a, m, k, b, n, beta, c)
+
+pub fn blas_copy_f64(x: [f64]) -> Result<[f64], BlasProviderError>:
+    val p = _mock_provider()
+    p.blas_copy(x.len(), x)
+
+pub fn blas_swap_f64(x: [f64], y: [f64]) -> Result<SwapResult, BlasProviderError>:
+    val p = _mock_provider()
+    if x.len() != y.len():
+        return Err(BlasProviderError.DimensionMismatch)
+    p.blas_swap(x.len(), x, y)
+
+# ============================================================
+# Internal math helpers
+# ============================================================
+
+fn mock_sqrt_f64(value: f64) -> f64:
+    if value <= 0.0:
+        return 0.0
+    var estimate = value
+    if estimate < 1.0:
+        estimate = 1.0
+    var i = 0
+    while i < 20:
+        estimate = 0.5 * (estimate + value / estimate)
+        i = i + 1
+    estimate

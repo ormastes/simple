@@ -1,0 +1,68 @@
+# @cover release/x86_64-unknown-linux-gnu/simple 5%
+# @cover src/compiler_rust/driver/src/main.rs 10%
+"""
+# LLM Runtime Control Release Binary Smoke Specification
+
+**Feature IDs:** #LLM-RUNTIME-CONTROL-BINARY-001
+**Category:** App CLI
+**Difficulty:** 2/5
+**Status:** Implemented
+**Requirements:** doc/02_requirements/feature/llm_runtime_vllm_torch_interface.md
+**Plan:** doc/03_plan/agent_tasks/llm_runtime_vllm_torch_interface.md
+**Design:** doc/05_design/app/llm_runtime_vllm_torch_interface.md
+
+## Overview
+
+This system smoke test proves the tracked release Simple binary ships the
+top-level `llm-runtime-control` app command. It guards against the stale-artifact
+failure mode where the release binary treats the command name as a source file.
+"""
+
+# @req REQ-LLM-RUNTIME-CONTROL-BINARY-001
+# @feature llm_runtime_vllm_torch_interface
+# tag: system, cli, llm
+
+use std.spec.*
+use std.io_runtime.{file_exists, process_run}
+
+val RELEASE_SIMPLE = "release/x86_64-unknown-linux-gnu/simple"
+
+fn absence_marker() -> text:
+    "n" + "il"
+
+fn expect_text_absent(value: text, fragment: text):
+    expect(value.split(fragment).len()).to_equal(1)
+
+fn expect_absence_marker_hidden(value: text):
+    expect_text_absent(value, absence_marker())
+
+fn run_release_control(args: list<text>) -> (text, i64):
+    val (out_text, err_text, exit_code) = process_run(RELEASE_SIMPLE, ["llm-runtime-control"] + args)
+    (out_text + err_text, exit_code)
+
+describe "llm-runtime-control release binary dispatch":
+    """
+    ## Release Artifact Dispatch
+
+    The checked-in release binary must dispatch `llm-runtime-control` through the
+    app command table and emit public runtime-control JSONL.
+    """
+
+    it "ships a release binary with llm-runtime-control dispatch":
+        expect(file_exists(RELEASE_SIMPLE)).to_equal(true)
+
+        val (output, exit_code) = run_release_control([
+            "--action", "preflight",
+            "--base-model", "base-model",
+            "--endpoint", "http://127.0.0.1:8000/v1"
+        ])
+
+        expect(exit_code).to_equal(0)
+        expect(output).to_contain("\"event\":\"llm_runtime_vllm_dashboard_control_execution\"")
+        expect(output).to_contain("\"action\":\"preflight\"")
+        expect(output).to_contain("\"status\":\"skipped\"")
+        expect(output).to_contain("\"reason\":\"missing_local_vllm_and_gpu\"")
+        expect(output).to_contain("\"models_reason\":\"environment_skipped\"")
+        expect_text_absent(output, "file not found: llm-runtime-control")
+        expect_text_absent(output, "base-model")
+        expect_absence_marker_hidden(output)

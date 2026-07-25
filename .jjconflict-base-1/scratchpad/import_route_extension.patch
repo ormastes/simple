@@ -1,0 +1,39 @@
+diff --git a/src/app/cli/bootstrap_main.spl b/src/app/cli/bootstrap_main.spl
+index 21b25617026..bca2ffe90d3 100644
+--- a/src/app/cli/bootstrap_main.spl
++++ b/src/app/cli/bootstrap_main.spl
+@@ -4,6 +4,7 @@ extern fn rt_native_build(args: [text]) -> i64
+ use lazy compiler.driver.{compiler_driver_create, compiler_driver_run_compile}
+ use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native)
+ use app.io._CliCompile.compile_options.{cli_native_default_opt_level}
++use app.io._CliCompile.compile_targets.{_native_build_entry_closure}
+ use std.nogc_sync_mut.io_runtime.{env_set}
+ 
+ # Keep in sync with ./VERSION file
+@@ -138,12 +139,25 @@ fn run_native_build_bootstrap(args: [text]) -> i64:
+     # here (a fresh compiled bootstrap_main process does not inherit the
+     # bootstrap-time env) to match cli_native_build's behaviour.
+     env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
++    # Resolve the entry's IMPORT CLOSURE the same way cli_native_build does
++    # (mirrors compile_targets.spl:848/879). This single-file positional shape
++    # never has an explicit --source flag, so default source_dirs to ["src"]
++    # -- exactly the value every proven invocation in
++    # scripts/check/check-simple-core-runtime-smoke.shs passes explicitly
++    # (`--source src` / `--source examples`); the smoke matrix never omits
++    # --source, so this mirrors the PROVEN root, not an untested empty-list
++    # default. `use std.X` resolves under it because src/std is a symlink to
++    # src/lib. BFS over-approximates safely: an unresolved `use` is skipped
++    # here and still errors during the compile phase below if it was a real
++    # missing import.
++    val source_dirs: [text] = ["src"]
++    val closure_files = _native_build_entry_closure(entry_path, source_dirs)
+     # Build directly through the pure-Simple CompilerDriver (unique symbol
+     # names -- avoids the `aot_native_file_with_backend` duplicate-name
+     # collision between driver_public_compile [subprocess facade] and
+     # driver_api_native_single [in-process]).
+     var options = driver_core_compile_options_default()
+-    options.input_files = [entry_path]
++    options.input_files = closure_files
+     options.mode = CompileMode.Aot
+     options.output_file = Some(output)
+     options.output_format = driver_output_format_native()

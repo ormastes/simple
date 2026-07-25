@@ -1,0 +1,416 @@
+"""
+Variance Checking - Tests Phase 6A + 6B
+
+Test functions for:
+- Phase 6A: Variance Representation
+- Phase 6B: Variance Inference
+"""
+
+use compiler.types.variance_types.{Variance, VarianceOps, TypeParamDef, VarianceEnv}
+use compiler.types.variance_types.{HirType, FieldDef, MethodDef, TypeDef, VarianceInference}
+use compiler.types.variance_types.{SubtypeEnv, VarianceChecker}
+use compiler.types.variance_types.{box_of, cell_of, fn_type}
+
+# ============================================================================
+# Tests - Phase 6A: Variance Representation
+# ============================================================================
+
+fn test_variance_basic():
+    """Test basic variance creation"""
+    val cov = Variance.Covariant
+    val contra = Variance.Contravariant
+    val inv = Variance.Inv
+    val bi = Variance.Bivariant
+
+    assert cov.is_covariant(), "Is covariant"
+    assert contra.is_contravariant(), "Is contravariant"
+    assert inv.is_inv(), "Is invariant"
+    assert bi.is_bivariant(), "Is bivariant"
+
+    assert cov.to_string() == "+", "Covariant symbol"
+    assert contra.to_string() == "-", "Contravariant symbol"
+    assert inv.to_string() == "=", "Invariant symbol"
+    assert bi.to_string() == "±", "Bivariant symbol"
+
+    print "  [pass] Basic variance"
+
+fn test_variance_flip():
+    """Test variance flipping"""
+    val cov = Variance.Covariant
+    val contra = Variance.Contravariant
+    val inv = Variance.Inv
+    val bi = Variance.Bivariant
+
+    # Flip covariant → contravariant
+    val flipped_cov = VarianceOps.flip(cov)
+    assert flipped_cov.is_contravariant(), "Flip covariant"
+
+    # Flip contravariant → covariant
+    val flipped_contra = VarianceOps.flip(contra)
+    assert flipped_contra.is_covariant(), "Flip contravariant"
+
+    # Flip invariant → invariant
+    val flipped_inv = VarianceOps.flip(inv)
+    assert flipped_inv.is_inv(), "Flip invariant"
+
+    # Flip bivariant → bivariant
+    val flipped_bi = VarianceOps.flip(bi)
+    assert flipped_bi.is_bivariant(), "Flip bivariant"
+
+    print "  [pass] Variance flip"
+
+fn test_variance_compose():
+    """Test variance composition"""
+    val cov = Variance.Covariant
+    val contra = Variance.Contravariant
+    val inv = Variance.Inv
+
+    # Covariant + v = v
+    val result1 = VarianceOps.compose(cov, cov)
+    assert result1.is_covariant(), "Cov + Cov = Cov"
+
+    val result2 = VarianceOps.compose(cov, contra)
+    assert result2.is_contravariant(), "Cov + Contra = Contra"
+
+    # Contravariant + v = flip(v)
+    val result3 = VarianceOps.compose(contra, cov)
+    assert result3.is_contravariant(), "Contra + Cov = Contra"
+
+    val result4 = VarianceOps.compose(contra, contra)
+    assert result4.is_covariant(), "Contra + Contra = Cov (double flip)"
+
+    # Invariant + v = Invariant
+    val result5 = VarianceOps.compose(inv, cov)
+    assert result5.is_inv(), "Inv + Cov = Inv"
+
+    print "  [pass] Variance compose"
+
+fn test_variance_combine():
+    """Test variance combination"""
+    val cov = Variance.Covariant
+    val contra = Variance.Contravariant
+    val inv = Variance.Inv
+    val bi = Variance.Bivariant
+
+    # Bivariant is identity
+    val result1 = VarianceOps.combine(bi, cov)
+    assert result1.is_covariant(), "Bi + Cov = Cov"
+
+    val result2 = VarianceOps.combine(cov, bi)
+    assert result2.is_covariant(), "Cov + Bi = Cov"
+
+    # Same variance → keep it
+    val result3 = VarianceOps.combine(cov, cov)
+    assert result3.is_covariant(), "Cov + Cov = Cov"
+
+    val result4 = VarianceOps.combine(contra, contra)
+    assert result4.is_contravariant(), "Contra + Contra = Contra"
+
+    # Conflict → invariant
+    val result5 = VarianceOps.combine(cov, contra)
+    assert result5.is_inv(), "Cov + Contra = Inv (conflict)"
+
+    val result6 = VarianceOps.combine(inv, cov)
+    assert result6.is_inv(), "Inv + Cov = Inv (already invariant)"
+
+    print "  [pass] Variance combine"
+
+fn test_type_param_def():
+    """Test type parameter definition"""
+    val t_cov = TypeParamDef.covariant("T")
+    val u_contra = TypeParamDef.contravariant("U")
+    val v_inv = TypeParamDef.inv("V")
+
+    assert t_cov.variance.is_covariant(), "T is covariant"
+    assert u_contra.variance.is_contravariant(), "U is contravariant"
+    assert v_inv.variance.is_inv(), "V is invariant"
+
+    assert t_cov.to_string() == "+T", "T string"
+    assert u_contra.to_string() == "-U", "U string"
+    assert v_inv.to_string() == "=V", "V string"
+
+    print "  [pass] Type parameter definition"
+
+fn test_variance_env():
+    """Test variance environment"""
+    val env = VarianceEnv.empty()
+
+    assert env.type_count() == 0, "Initially empty"
+
+    # Set Box<T> = Covariant
+    env.set_type_variance("Box", "T", Variance.Covariant)
+
+    assert env.has_type("Box"), "Has Box"
+    assert env.type_count() == 1, "One type"
+
+    val t_var = env.get_type_variance("Box", "T")
+    assert t_var.is_covariant(), "Box<T> is covariant"
+
+    # Set Cell<T> = Invariant
+    env.set_type_variance("Cell", "T", Variance.Inv)
+
+    assert env.has_type("Cell"), "Has Cell"
+    assert env.type_count() == 2, "Two types"
+
+    val cell_t_var = env.get_type_variance("Cell", "T")
+    assert cell_t_var.is_inv(), "Cell<T> is invariant"
+
+    # Get unknown type → Bivariant
+    val unknown = env.get_type_variance("Unknown", "X")
+    assert unknown.is_bivariant(), "Unknown type is bivariant"
+
+    print "  [pass] Variance environment"
+
+fn test_variance_env_multiple():
+    """Test variance environment with multiple parameters"""
+    val env = VarianceEnv.empty()
+
+    # Set Fn<T, U> = (Contravariant, Covariant)
+    env.set_type_variance("Fn", "T", Variance.Contravariant)
+    env.set_type_variance("Fn", "U", Variance.Covariant)
+
+    val t_var = env.get_type_variance("Fn", "T")
+    val u_var = env.get_type_variance("Fn", "U")
+
+    assert t_var.is_contravariant(), "Fn<T> is contravariant"
+    assert u_var.is_covariant(), "Fn<U> is covariant"
+
+    print "  [pass] Variance environment multiple params"
+
+fn test_variance_env_bulk():
+    """Test setting all variances at once"""
+    val env = VarianceEnv.empty()
+
+    # Set Result<T, E> = (Covariant, Covariant)
+    val variances = [Variance.Covariant, Variance.Covariant]
+    val param_names = ["T", "E"]
+
+    env.set_type_variances("Result", variances, param_names)
+
+    val t_var = env.get_type_variance("Result", "T")
+    val e_var = env.get_type_variance("Result", "E")
+
+    assert t_var.is_covariant(), "Result<T> is covariant"
+    assert e_var.is_covariant(), "Result<E> is covariant"
+
+    print "  [pass] Variance environment bulk set"
+
+# ============================================================================
+# Tests - Phase 6B: Variance Inference
+# ============================================================================
+
+fn test_infer_box():
+    """Test Box<T> (covariant)"""
+    val infer = VarianceInference.empty()
+
+    # struct Box<T>:
+    #     value: T
+    val box_def = TypeDef(
+        name: "Box",
+        type_param_count: 1,
+        fields: [
+            FieldDef(name: "value", ty: HirType.TypeParam(id: 0))
+        ],
+        methods: []
+    )
+
+    infer.add_type_def(box_def)
+
+    val variances = infer.infer_variance("Box")
+
+    assert variances.len() == 1, "One type parameter"
+    assert variances[0].to_string() == "+", "T is covariant"
+
+    print "  [pass] Infer Box<T> = Covariant"
+
+fn test_infer_cell():
+    """Test Cell<T> (invariant via mut)"""
+    val infer = VarianceInference.empty()
+
+    # struct Cell<T>:
+    #     value: mut T
+    val cell_def = TypeDef(
+        name: "Cell",
+        type_param_count: 1,
+        fields: [
+            FieldDef(
+                name: "value",
+                ty: HirType.MutRef(inner: HirType.TypeParam(id: 0))
+            )
+        ],
+        methods: []
+    )
+
+    infer.add_type_def(cell_def)
+
+    val variances = infer.infer_variance("Cell")
+
+    assert variances.len() == 1, "One type parameter"
+    assert variances[0].to_string() == "=", "T is invariant"
+
+    print "  [pass] Infer Cell<T> = Invariant"
+
+fn test_infer_function_type():
+    """Test fn(T) -> U (contravariant/covariant)"""
+    val infer = VarianceInference.empty()
+
+    # type Fn<T, U> = fn(T) -> U
+    # Represented as: Generic("Fn", [T, U]) where Fn has fields: [Arrow(T, U)]
+    val fn_def = TypeDef(
+        name: "Fn",
+        type_param_count: 2,
+        fields: [
+            FieldDef(
+                name: "call",
+                ty: HirType.Arrow(
+                    from: HirType.TypeParam(id: 0),  # T
+                    to: HirType.TypeParam(id: 1)     # U
+                )
+            )
+        ],
+        methods: []
+    )
+
+    infer.add_type_def(fn_def)
+
+    val variances = infer.infer_variance("Fn")
+
+    assert variances.len() == 2, "Two type parameters"
+    assert variances[0].to_string() == "-", "T is contravariant"
+    assert variances[1].to_string() == "+", "U is covariant"
+
+    print "  [pass] Infer Fn<T, U> = (Contravariant, Covariant)"
+
+fn test_infer_nested_variance():
+    """Test nested variance: Processor<T> with handler: fn(T) -> ()"""
+    val infer = VarianceInference.empty()
+
+    # struct Processor<T>:
+    #     handler: fn(T) -> ()
+    val processor_def = TypeDef(
+        name: "Processor",
+        type_param_count: 1,
+        fields: [
+            FieldDef(
+                name: "handler",
+                ty: HirType.Arrow(
+                    from: HirType.TypeParam(id: 0),  # T
+                    to: HirType.Int                  # () represented as Int
+                )
+            )
+        ],
+        methods: []
+    )
+
+    infer.add_type_def(processor_def)
+
+    val variances = infer.infer_variance("Processor")
+
+    # T appears in field (covariant context)
+    # But inside fn(T) -> () (contravariant position in function)
+    # Result: covariant context + contravariant position = contravariant
+    assert variances.len() == 1, "One type parameter"
+    assert variances[0].to_string() == "-", "T is contravariant"
+
+    print "  [pass] Infer nested variance (Processor<T>)"
+
+fn test_infer_multiple_uses():
+    """Test type parameter used in multiple positions"""
+    val infer = VarianceInference.empty()
+
+    # struct Container<T>:
+    #     get_value: fn() -> T      # T covariant (return)
+    #     set_value: fn(T) -> ()    # T contravariant (param)
+    val container_def = TypeDef(
+        name: "Container",
+        type_param_count: 1,
+        fields: [],
+        methods: [
+            MethodDef(
+                name: "get_value",
+                params: [],
+                return_ty: HirType.TypeParam(id: 0)  # T covariant
+            ),
+            MethodDef(
+                name: "set_value",
+                params: [HirType.TypeParam(id: 0)],  # T contravariant
+                return_ty: HirType.Int
+            )
+        ]
+    )
+
+    infer.add_type_def(container_def)
+
+    val variances = infer.infer_variance("Container")
+
+    # T appears in both covariant and contravariant positions
+    # Combine: Covariant + Contravariant = Invariant
+    assert variances.len() == 1, "One type parameter"
+    assert variances[0].to_string() == "=", "T is invariant"
+
+    print "  [pass] Infer multiple uses (Container<T> = Invariant)"
+
+fn test_infer_generic_composition():
+    """Test generic type composition"""
+    val infer = VarianceInference.empty()
+
+    # First define Box<T> (covariant)
+    val box_def = TypeDef(
+        name: "Box",
+        type_param_count: 1,
+        fields: [FieldDef(name: "value", ty: HirType.TypeParam(id: 0))],
+        methods: []
+    )
+    infer.add_type_def(box_def)
+
+    # Then define Wrapper<T>:
+    #     boxed: Box<T>
+    val wrapper_def = TypeDef(
+        name: "Wrapper",
+        type_param_count: 1,
+        fields: [
+            FieldDef(
+                name: "boxed",
+                ty: HirType.Generic(
+                    name: "Box",
+                    args: [HirType.TypeParam(id: 0)]
+                )
+            )
+        ],
+        methods: []
+    )
+    infer.add_type_def(wrapper_def)
+
+    val wrapper_variances = infer.infer_variance("Wrapper")
+
+    # T in Wrapper appears in Box<T>
+    # Box<T> is covariant, so T in Wrapper is covariant
+    assert wrapper_variances.len() == 1, "One type parameter"
+    assert wrapper_variances[0].to_string() == "+", "T is covariant"
+
+    print "  [pass] Infer generic composition (Wrapper<Box<T>>)"
+
+fn test_infer_bivariant():
+    """Test unused type parameter (bivariant)"""
+    val infer = VarianceInference.empty()
+
+    # struct Marker<T>:
+    #     # T not used
+    #     marker: i32
+    val marker_def = TypeDef(
+        name: "Marker",
+        type_param_count: 1,
+        fields: [
+            FieldDef(name: "marker", ty: HirType.Int)
+        ],
+        methods: []
+    )
+
+    infer.add_type_def(marker_def)
+
+    val variances = infer.infer_variance("Marker")
+
+    assert variances.len() == 1, "One type parameter"
+    assert variances[0].to_string() == "±", "T is bivariant (unused)"
+
+    print "  [pass] Infer bivariant (Marker<T> unused)"

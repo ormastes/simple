@@ -1,0 +1,386 @@
+#!/usr/bin/env bash
+# GUI Performance Profile — run framework/backend benchmarks and write Markdown
+# Usage: ./run_all_benchmarks.shs [--width 7680 --height 4320 --frames 60]
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BUILD_DIR="${BUILD_DIR:-$PROJECT_DIR/build/gui_perf_bench}"
+REPORT="${REPORT_PATH:-$PROJECT_DIR/doc/09_report/gui_perf_benchmark_$(date +%Y-%m-%d).md}"
+PROFILE_REPORT_CONTRACT_TEST="${PROFILE_REPORT_CONTRACT_TEST:-$PROJECT_DIR/test/05_perf/profile_scripts/profile_report_contract_test.shs}"
+
+WIDTH="${WIDTH:-7680}"
+HEIGHT="${HEIGHT:-4320}"
+FRAMES="${FRAMES:-60}"
+DPI="${DPI:-300}"
+SIMPLE_WEB_CPU_MODE="${SIMPLE_WEB_CPU_MODE:-native}"
+CPU_BASE_COMPARE_FAILED=0
+
+select_simple_bin() {
+    if [[ -x "$PROJECT_DIR/bin/simple" ]]; then
+        printf '%s\n' "$PROJECT_DIR/bin/simple"
+    elif [[ -x "$PROJECT_DIR/bin/release/simple" ]]; then
+        printf '%s\n' "$PROJECT_DIR/bin/release/simple"
+    elif [[ -x "$PROJECT_DIR/bin/bootstrap/simple" ]]; then
+        printf '%s\n' "$PROJECT_DIR/bin/bootstrap/simple"
+    else
+        printf '%s\n' ""
+    fi
+}
+
+# Parse args
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --width) WIDTH="$2"; shift 2 ;;
+        --height) HEIGHT="$2"; shift 2 ;;
+        --frames) FRAMES="$2"; shift 2 ;;
+        --dpi) DPI="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+
+mkdir -p "$BUILD_DIR" "$(dirname "$REPORT")"
+{
+    echo "# GUI Performance Profile"
+    echo ""
+    echo "**Date:** $(date -Iseconds)"
+    echo "**Resolution:** ${WIDTH}x${HEIGHT}"
+    echo "**Frames:** ${FRAMES}"
+    echo "**DPI:** ${DPI}"
+    echo "**Simple Web CPU mode:** ${SIMPLE_WEB_CPU_MODE}"
+    echo "**Profile script:** \`tools/gui_perf_bench/run_all_benchmarks.shs\`"
+    echo "**Report path:** \`${REPORT#$PROJECT_DIR/}\`"
+    echo ""
+    echo "## Methodology"
+    echo ""
+    echo "- Builds or invokes available GUI/backend lanes and records each backend separately."
+    echo "- Captures stdout, stderr, exit status, and maximum resident set size with \`/usr/bin/time -v\`."
+    echo "- Marks unavailable dependencies and failed backends explicitly; skipped rows are environment facts, not performance wins."
+    echo "- Uses the same resolution and frame count for all lanes that can accept those knobs."
+    echo ""
+    echo "## Environment"
+    echo ""
+    echo "- Host: \`$(hostname)\`"
+    echo "- OS: \`$(uname -m) / $(uname -s) $(uname -r)\`"
+    echo "- GPU: \`$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 || echo 'none')\`"
+    echo "- Build dir: \`${BUILD_DIR#$PROJECT_DIR/}\`"
+    echo ""
+    echo "## TUI startup speed"
+    echo ""
+    echo "TUI startup speed is not measured by this GUI profile. The canonical startup audit is"
+    echo "\`scripts/check/check-startup-size-performance-audit.shs\`, which reports"
+    echo "\`Simple standalone TUI\` and \`Simple full TUI app\` rows in"
+    echo "\`doc/09_report/startup_size_performance_audit_2026-05-27.md\`."
+    echo ""
+    echo "## Backend Results"
+    echo ""
+} | tee "$REPORT"
+
+run_bench() {
+    local name="$1"
+    local cmd="$2"
+    local out="$BUILD_DIR/${name}.stdout"
+    local err="$BUILD_DIR/${name}.stderr"
+    local time_out="$BUILD_DIR/${name}.time"
+
+    echo "### $name" | tee -a "$REPORT"
+    echo "" | tee -a "$REPORT"
+    if /usr/bin/time -v bash -c "$cmd" >"$out" 2>"$err"; then
+        if [[ "$name" == simple_web_* ]] && grep -q "falling back to interpreter" "$err"; then
+            echo "gui_perf_benchmark_backend=$name" | tee -a "$REPORT"
+            echo "gui_perf_benchmark_status=failed" | tee -a "$REPORT"
+            echo "gui_perf_benchmark_reason=simple_web_cpu_mode_fell_back_to_interpreter" | tee -a "$REPORT"
+            echo "gui_perf_benchmark_exit_code=97" | tee -a "$REPORT"
+            echo '```text' | tee -a "$REPORT"
+            grep "falling back to interpreter" "$err" | head -1 | tee -a "$REPORT"
+            echo '```' | tee -a "$REPORT"
+            echo "" | tee -a "$REPORT"
+            return 0
+        fi
+        echo '```text' | tee -a "$REPORT"
+        cat "$out" | tee -a "$REPORT"
+        echo '```' | tee -a "$REPORT"
+        # Extract RSS from time output (in stderr)
+        local rss
+        rss=$(grep "Maximum resident" "$err" | awk '{print $NF}' 2>/dev/null || echo "unavailable")
+        echo "gui_perf_benchmark_max_rss_kb=$rss" | tee -a "$REPORT"
+        echo "gui_perf_benchmark_exit_code=0" | tee -a "$REPORT"
+    else
+        local rc=$?
+        echo "gui_perf_benchmark_backend=$name" | tee -a "$REPORT"
+        echo "gui_perf_benchmark_status=failed" | tee -a "$REPORT"
+        echo "gui_perf_benchmark_exit_code=$rc" | tee -a "$REPORT"
+        echo '```text' | tee -a "$REPORT"
+        head -20 "$err" 2>/dev/null | tee -a "$REPORT" || true
+        echo '```' | tee -a "$REPORT"
+    fi
+    echo "" | tee -a "$REPORT"
+}
+
+write_simple_web_export_entry() {
+    local entry="$1"
+    local backend="$2"
+    local fixture="$3"
+    local dpi_source="default"
+    if [[ "$DPI" != "300" ]]; then
+        dpi_source="override"
+    fi
+    cat >"$entry" <<EOF
+use app.wm_compare.backend_measurement_software_export.{software_only_render_loop_export_values}
+
+fn main() -> i64:
+    print(software_only_render_loop_export_values("$backend", $WIDTH, $HEIGHT, $DPI, "$dpi_source", 1, $FRAMES, "$fixture", "simple-web", "bench-8k", "$(hostname)", $SIMPLE_BIN_SIZE, $SIMPLE_BIN_SIZE, $SIMPLE_BIN_SIZE))
+    0
+EOF
+}
+
+kv_value() {
+    local file="$1"
+    local key="$2"
+    grep "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+sdn_i64_value() {
+    local file="$1"
+    local key="$2"
+    sed -n "s/.*${key}: \\([0-9][0-9]*\\).*/\\1/p" "$file" 2>/dev/null | head -1 || true
+}
+
+sdn_text_value() {
+    local file="$1"
+    local key="$2"
+    sed -n "s/.*${key}: \"\\([^\"]*\\)\".*/\\1/p" "$file" 2>/dev/null | head -1 || true
+}
+
+sdn_token_value() {
+    local file="$1"
+    local key="$2"
+    sed -n "s/.*${key}: \\([^ )][^ )]*\\).*/\\1/p" "$file" 2>/dev/null | head -1 || true
+}
+
+emit_cpu_base_compare() {
+    local simple_file="$BUILD_DIR/simple_web_cpu_simd.stdout"
+    local simple_us
+    simple_us="$(sdn_i64_value "$simple_file" "p50_frame_us")"
+    local baseline_backend=""
+    local baseline_metric=""
+    local baseline_ms=""
+    local baseline_checksum=""
+
+    if [[ "$(kv_value "$BUILD_DIR/javascript_node.stdout" "gui_perf_benchmark_status")" == "completed" ]]; then
+        baseline_backend="$(kv_value "$BUILD_DIR/javascript_node.stdout" "gui_perf_benchmark_backend")"
+        baseline_metric="frame_time_p50_ms"
+        baseline_ms="$(kv_value "$BUILD_DIR/javascript_node.stdout" "gui_perf_benchmark_frame_time_p50_ms")"
+        baseline_checksum="$(kv_value "$BUILD_DIR/javascript_node.stdout" "gui_perf_benchmark_argb_sum32")"
+    elif [[ "$(kv_value "$BUILD_DIR/gtk3.stdout" "gui_perf_benchmark_status")" == "completed" ]]; then
+        baseline_backend="gtk3_cairo"
+        baseline_metric="draw_only_avg_ms"
+        baseline_ms="$(kv_value "$BUILD_DIR/gtk3.stdout" "gui_perf_benchmark_draw_only_avg_ms")"
+        baseline_checksum="$(kv_value "$BUILD_DIR/gtk3.stdout" "gui_perf_benchmark_argb_sum32")"
+    fi
+
+    echo "## CPU Drawing Library Baseline Compare" | tee -a "$REPORT"
+    echo "" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_source=gui_perf_bench_external_cpu_library" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_pixels=${WIDTH}x${HEIGHT}" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_dpi=$DPI" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_dpi_source=$(kv_value "$simple_file" "gui_perf_benchmark_dpi_source")" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_frames=$FRAMES" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_simple_mode=$SIMPLE_WEB_CPU_MODE" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_simple_launch_kind=run" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_simple_native_artifact_used=false" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_schedule_order=cpu_simd_first" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_physical_pixels=$(kv_value "$simple_file" "gui_perf_benchmark_physical_pixels")" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_screen_size_reduced=$(kv_value "$simple_file" "gui_perf_benchmark_screen_size_reduced")" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_simple_checksum=$(sdn_text_value "$simple_file" "checksum")" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_simple_pixel_proof=$(sdn_text_value "$simple_file" "pixel_proof")" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_runtime_compute_target=$(sdn_text_value "$simple_file" "runtime_compute_target")" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_runtime_execution_path=$(sdn_text_value "$simple_file" "runtime_execution_path")" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_render_readback_scope=$(sdn_text_value "$simple_file" "render_readback_scope")" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_offload_tag_kind=$(sdn_text_value "$simple_file" "offload_tag_kind")" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_simd_provider_hits=$(kv_value "$simple_file" "gui_perf_benchmark_simd_provider_hits")" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_native_simd_executed=$(kv_value "$simple_file" "gui_perf_benchmark_native_simd_executed")" | tee -a "$REPORT"
+    echo "gui_perf_cpu_base_compare_fallback_used=$(sdn_token_value "$simple_file" "fallback_used")" | tee -a "$REPORT"
+    if [[ -z "$simple_us" ]]; then
+        echo "gui_perf_cpu_base_compare_status=unavailable" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_reason=simple_web_cpu_simd_missing_p50_frame_us" | tee -a "$REPORT"
+    elif [[ -z "$baseline_ms" ]]; then
+        echo "gui_perf_cpu_base_compare_status=unavailable" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_reason=no_completed_gtk3_or_node_canvas_cpu_baseline" | tee -a "$REPORT"
+    elif [[ "$baseline_checksum" != "$(sdn_text_value "$simple_file" "checksum")" ]]; then
+        echo "gui_perf_cpu_base_compare_status=invalid" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_reason=fixture-checksum-mismatch" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_baseline_checksum=$baseline_checksum" | tee -a "$REPORT"
+        CPU_BASE_COMPARE_FAILED=1
+    else
+        local simple_ms
+        simple_ms="$(awk -v us="$simple_us" 'BEGIN { printf "%.3f", us / 1000.0 }')"
+        local ratio
+        ratio="$(awk -v b="$baseline_ms" -v s="$simple_ms" 'BEGIN { if (s > 0) printf "%.3f", b / s; else print "0" }')"
+        local target
+        target="$(awk -v b="$baseline_ms" -v s="$simple_ms" 'BEGIN { print (s <= b) ? "yes" : "no" }')"
+        echo "gui_perf_cpu_base_compare_status=measured" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_simple_backend=simple_web_cpu_simd" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_simple_p50_ms=$simple_ms" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_baseline_backend=$baseline_backend" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_baseline_metric=$baseline_metric" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_baseline_ms=$baseline_ms" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_baseline_checksum=$baseline_checksum" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_semantic_parity=true" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_baseline_over_simple_ratio=$ratio" | tee -a "$REPORT"
+        echo "gui_perf_cpu_base_compare_target_met=$target" | tee -a "$REPORT"
+        if [[ "${GUI_CPU_BASELINE_REQUIRE_TARGET_MET:-0}" = "1" && "$target" != "yes" ]]; then
+            echo "gui_perf_cpu_base_compare_strict_status=fail" | tee -a "$REPORT"
+            echo "gui_perf_cpu_base_compare_strict_reason=target-not-met" | tee -a "$REPORT"
+            CPU_BASE_COMPARE_FAILED=1
+        fi
+    fi
+    echo "" | tee -a "$REPORT"
+}
+
+# ── 1. C/GTK3 ──
+if pkg-config --exists gtk+-3.0 2>/dev/null; then
+    GTK_BIN="$BUILD_DIR/bench_gtk"
+    if [[ ! -f "$GTK_BIN" ]] || [[ "$SCRIPT_DIR/bench_gtk.c" -nt "$GTK_BIN" ]]; then
+        echo "Building GTK benchmark..."
+        gcc -O2 -o "$GTK_BIN" "$SCRIPT_DIR/bench_gtk.c" $(pkg-config --cflags --libs gtk+-3.0) -lm
+    fi
+    if command -v xvfb-run >/dev/null 2>&1; then
+        run_bench "gtk3" "xvfb-run -a env GDK_BACKEND=x11 $GTK_BIN --width $WIDTH --height $HEIGHT --frames $FRAMES --fixture gui-perf-cpu-base-solid"
+    else
+        run_bench "gtk3" "GDK_BACKEND=x11 $GTK_BIN --width $WIDTH --height $HEIGHT --frames $FRAMES --fixture gui-perf-cpu-base-solid"
+    fi
+else
+    echo "--- gtk3: SKIPPED (gtk+-3.0 not found) ---" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_backend=gtk3" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_status=unavailable" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_reason=pkg-config gtk+-3.0 not found" | tee -a "$REPORT"
+    echo "" | tee -a "$REPORT"
+fi
+
+# ── 2. Python/tkinter ──
+if python3 -c "import tkinter" 2>/dev/null; then
+    run_bench "python_tkinter" "sh $SCRIPT_DIR/bench_python.shs --width $WIDTH --height $HEIGHT --frames $FRAMES"
+else
+    echo "--- python_tkinter: SKIPPED (tkinter not found) ---" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_backend=python_tkinter" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_status=unavailable" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_reason=python3 tkinter not available" | tee -a "$REPORT"
+    echo "" | tee -a "$REPORT"
+fi
+
+# ── 3. JavaScript/Node canvas ──
+if command -v node >/dev/null 2>&1; then
+    # Check if canvas module available
+    if node -e "require('canvas')" 2>/dev/null; then
+        run_bench "javascript_node" "node $SCRIPT_DIR/bench_js_node.js --width $WIDTH --height $HEIGHT --frames $FRAMES --fixture gui-perf-cpu-base-solid"
+    else
+        echo "--- javascript_node: installing canvas module ---"
+        (cd "$SCRIPT_DIR" && npm install canvas 2>/dev/null) || true
+        if node -e "require('canvas')" 2>/dev/null; then
+            run_bench "javascript_node" "node $SCRIPT_DIR/bench_js_node.js --width $WIDTH --height $HEIGHT --frames $FRAMES --fixture gui-perf-cpu-base-solid"
+        else
+            echo "--- javascript_node: SKIPPED (canvas module unavailable) ---" | tee -a "$REPORT"
+            echo "gui_perf_benchmark_backend=javascript_node" | tee -a "$REPORT"
+            echo "gui_perf_benchmark_status=unavailable" | tee -a "$REPORT"
+            echo "gui_perf_benchmark_reason=node canvas module not installable" | tee -a "$REPORT"
+            echo "" | tee -a "$REPORT"
+        fi
+    fi
+else
+    echo "--- javascript_node: SKIPPED (node not found) ---" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_backend=javascript_node" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_status=unavailable" | tee -a "$REPORT"
+    echo "" | tee -a "$REPORT"
+fi
+
+# ── 4. Electron (via existing infrastructure) ──
+ELECTRON_BIN=$(command -v electron 2>/dev/null || echo "")
+if [[ -n "$ELECTRON_BIN" ]]; then
+    run_bench "electron" "echo 'gui_perf_benchmark_backend=electron' && echo 'gui_perf_benchmark_status=deferred' && echo 'gui_perf_benchmark_reason=use-existing-wm-compare-electron-matrix'"
+else
+    echo "--- electron: SKIPPED (electron not installed) ---" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_backend=electron" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_status=unavailable" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_reason=electron binary not found; existing contract reports cold_startup=4075ms" | tee -a "$REPORT"
+    echo "" | tee -a "$REPORT"
+fi
+
+# ── 5. Tauri ──
+if command -v cargo >/dev/null 2>&1 && cargo tauri --version >/dev/null 2>&1; then
+    echo "--- tauri: integration pending ---" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_backend=tauri" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_status=unavailable" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_reason=tauri benchmark app not yet built; requires cargo-tauri + webview2" | tee -a "$REPORT"
+else
+    echo "--- tauri: SKIPPED (cargo tauri not found) ---" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_backend=tauri" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_status=unavailable" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_reason=cargo tauri CLI not installed" | tee -a "$REPORT"
+    echo "" | tee -a "$REPORT"
+fi
+
+# ── 6. Pure Simple (CUDA-backed) ──
+SIMPLE_CUDA_BIN="$(select_simple_bin)"
+if command -v nvidia-smi >/dev/null 2>&1 && [[ -x "$SIMPLE_CUDA_BIN" ]]; then
+    run_bench "pure_simple_cuda" "$SIMPLE_CUDA_BIN run $PROJECT_DIR/src/app/wm_compare/backend_measurement_export.spl -- --measure-cuda-device-buffer true --width $WIDTH --height $HEIGHT --fixture gui-perf-8k-fill --shell simple-web --command bench-8k --host $(hostname)"
+else
+    echo "--- pure_simple_cuda: SKIPPED ---" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_backend=pure_simple_cuda" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_status=unavailable" | tee -a "$REPORT"
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        echo "gui_perf_benchmark_reason=no CUDA GPU available" | tee -a "$REPORT"
+    else
+        echo "gui_perf_benchmark_reason=simple compiler binary not found" | tee -a "$REPORT"
+    fi
+    echo "" | tee -a "$REPORT"
+fi
+
+# ── 7. Simple Web Renderer (CPU software and CPU-SIMD paths) ──
+SIMPLE_BIN="$(select_simple_bin)"
+if [[ -x "$SIMPLE_BIN" ]]; then
+    SIMPLE_BIN_SIZE=$(stat -Lc%s "$SIMPLE_BIN" 2>/dev/null || wc -c <"$SIMPLE_BIN")
+    SIMPLE_WEB_CPU_SIMD_ENTRY="$BUILD_DIR/simple_web_cpu_simd.entry.spl"
+    SIMPLE_WEB_SOFTWARE_ENTRY="$BUILD_DIR/simple_web_software.entry.spl"
+    write_simple_web_export_entry "$SIMPLE_WEB_CPU_SIMD_ENTRY" cpu_simd gui-perf-cpu-base-solid
+    write_simple_web_export_entry "$SIMPLE_WEB_SOFTWARE_ENTRY" software gui-perf-cpu-base-solid
+    run_bench "simple_web_cpu_simd" "$SIMPLE_BIN run $SIMPLE_WEB_CPU_SIMD_ENTRY --mode=$SIMPLE_WEB_CPU_MODE"
+    run_bench "simple_web_software" "$SIMPLE_BIN run $SIMPLE_WEB_SOFTWARE_ENTRY --mode=$SIMPLE_WEB_CPU_MODE"
+else
+    echo "--- simple_web_cpu_simd/simple_web_software: SKIPPED ---" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_backend=simple_web_cpu_simd,simple_web_software" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_status=unavailable" | tee -a "$REPORT"
+    echo "gui_perf_benchmark_reason=simple compiler binary not found" | tee -a "$REPORT"
+    echo "" | tee -a "$REPORT"
+fi
+
+emit_cpu_base_compare
+
+{
+    echo "## Reproducibility"
+    echo ""
+    echo "Run from the repository root:"
+    echo ""
+    echo '```sh'
+    echo "tools/gui_perf_bench/run_all_benchmarks.shs --width $WIDTH --height $HEIGHT --frames $FRAMES --dpi $DPI"
+    echo '```'
+    echo ""
+    echo "Useful knobs: \`WIDTH\`, \`HEIGHT\`, \`FRAMES\`, \`DPI\`, \`SIMPLE_WEB_CPU_MODE\`, \`BUILD_DIR\`, and \`REPORT_PATH\`."
+    echo ""
+    echo "Per-backend stdout/stderr files are written under \`${BUILD_DIR#$PROJECT_DIR/}\`."
+    echo ""
+    echo "## Limitations"
+    echo ""
+    echo "- Headless hosts need \`xvfb-run\` for GTK; without it GTK is recorded as failed or unavailable."
+    echo "- Electron, Tauri, CUDA, and Node canvas rows depend on host-installed tools."
+    echo "- Backend rows that print startup-only or unmeasured fields must not be used as frame-time evidence."
+    echo "- The report compares available lanes on one host; release claims need repeated runs on the target platform."
+    echo ""
+    echo "Benchmark complete. Full report: \`${REPORT#$PROJECT_DIR/}\`"
+} | tee -a "$REPORT"
+
+if [[ "${SKIP_PROFILE_REPORT_CONTRACT:-0}" != "1" ]]; then
+    sh "$PROFILE_REPORT_CONTRACT_TEST" gui tools/gui_perf_bench/run_all_benchmarks.shs "${REPORT#$PROJECT_DIR/}"
+fi
+
+exit "$CPU_BASE_COMPARE_FAILED"

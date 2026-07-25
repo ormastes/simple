@@ -1,0 +1,188 @@
+# MCP SDK - Transport Trait Unit Tests
+#
+# Tests BufferTransport round-trip, trait-object dispatch via transport_send,
+# and StdioTransport construction + write_message (no stdin reads — interpreter
+# hangs on StdioTransport.read_message() because the extern is unresolved).
+
+use std.mcp_sdk.transport.transport.{
+    Transport,
+    BufferTransport,
+    StdioTransport,
+    transport_send
+}
+
+# ============================================================================
+# BufferTransport — construction and basic queue ops
+# ============================================================================
+
+describe "BufferTransport - construction":
+    it "new() creates an empty transport":
+        var bt = BufferTransport.new()
+        val sc = bt.sent_count()
+        val ic = bt.inbound_count()
+        expect(sc).to_equal(0)
+        expect(ic).to_equal(0)
+
+    it "with_messages() pre-loads inbound queue":
+        var bt = BufferTransport.with_messages(["hello", "world"])
+        val ic = bt.inbound_count()
+        expect(ic).to_equal(2)
+
+    it "with_messages() preserves order (index 0 first)":
+        var bt = BufferTransport.with_messages(["first", "second"])
+        val msg = bt.read_message() ?? ""
+        expect(msg).to_equal("first")
+
+# ============================================================================
+# BufferTransport — read_message round-trip
+# ============================================================================
+
+describe "BufferTransport - read_message":
+    it "returns exact message text":
+        var bt = BufferTransport.with_messages(["{\"method\":\"ping\"}"])
+        val msg = bt.read_message() ?? ""
+        expect(msg).to_equal("{\"method\":\"ping\"}")
+
+    it "returns nil when queue is empty":
+        var bt = BufferTransport.new()
+        val got_nil = bt.read_message() == nil
+        expect(got_nil).to_equal(true)
+
+    it "dequeues in FIFO order":
+        var bt = BufferTransport.with_messages(["a", "b", "c"])
+        val m1 = bt.read_message() ?? ""
+        val m2 = bt.read_message() ?? ""
+        val m3 = bt.read_message() ?? ""
+        expect(m1).to_equal("a")
+        expect(m2).to_equal("b")
+        expect(m3).to_equal("c")
+
+    it "returns nil after all messages consumed":
+        var bt = BufferTransport.with_messages(["only"])
+        bt.read_message()
+        val got_nil = bt.read_message() == nil
+        expect(got_nil).to_equal(true)
+
+    it "inbound_count decrements after each read":
+        var bt = BufferTransport.with_messages(["x", "y"])
+        bt.read_message()
+        val ic = bt.inbound_count()
+        expect(ic).to_equal(1)
+
+# ============================================================================
+# BufferTransport — write_message and sent queue
+# ============================================================================
+
+describe "BufferTransport - write_message":
+    it "captured message equals sent text":
+        var bt = BufferTransport.new()
+        bt.write_message("{\"result\":\"ok\"}")
+        val sent = bt.all_sent()
+        expect(sent.len()).to_equal(1)
+        expect(sent[0]).to_equal("{\"result\":\"ok\"}")
+
+    it "sent_count increments":
+        var bt = BufferTransport.new()
+        bt.write_message("msg1")
+        bt.write_message("msg2")
+        val sc = bt.sent_count()
+        expect(sc).to_equal(2)
+
+    it "all_sent preserves insertion order":
+        var bt = BufferTransport.new()
+        bt.write_message("alpha")
+        bt.write_message("beta")
+        val sent = bt.all_sent()
+        expect(sent[0]).to_equal("alpha")
+        expect(sent[1]).to_equal("beta")
+
+    it "pop_sent removes oldest first":
+        var bt = BufferTransport.new()
+        bt.write_message("first")
+        bt.write_message("second")
+        val p1 = bt.pop_sent() ?? ""
+        val p2 = bt.pop_sent() ?? ""
+        expect(p1).to_equal("first")
+        expect(p2).to_equal("second")
+
+    it "pop_sent returns nil when empty":
+        var bt = BufferTransport.new()
+        val got_nil = bt.pop_sent() == nil
+        expect(got_nil).to_equal(true)
+
+# ============================================================================
+# BufferTransport — push_inbound
+# ============================================================================
+
+describe "BufferTransport - push_inbound":
+    it "appends to inbound queue":
+        var bt = BufferTransport.new()
+        bt.push_inbound("dynamic")
+        val ic = bt.inbound_count()
+        expect(ic).to_equal(1)
+
+    it "reads pushed message":
+        var bt = BufferTransport.new()
+        bt.push_inbound("pushed_msg")
+        val msg = bt.read_message() ?? ""
+        expect(msg).to_equal("pushed_msg")
+
+# ============================================================================
+# BufferTransport — close behaviour
+# ============================================================================
+
+describe "BufferTransport - close":
+    it "read_message returns nil after close":
+        var bt = BufferTransport.with_messages(["queued"])
+        bt.close()
+        val got_nil = bt.read_message() == nil
+        expect(got_nil).to_equal(true)
+
+    it "write_message is a no-op after close":
+        var bt = BufferTransport.new()
+        bt.close()
+        bt.write_message("ignored")
+        val sc = bt.sent_count()
+        expect(sc).to_equal(0)
+
+# ============================================================================
+# Trait-object dispatch via transport_send
+# ============================================================================
+
+describe "Transport trait-object dispatch":
+    it "transport_send routes to BufferTransport.write_message":
+        var bt = BufferTransport.new()
+        transport_send(bt, "dispatched")
+        val sent = bt.all_sent()
+        expect(sent.len()).to_equal(1)
+        expect(sent[0]).to_equal("dispatched")
+
+    it "transport_send works with multiple messages":
+        var bt = BufferTransport.new()
+        transport_send(bt, "msg_a")
+        transport_send(bt, "msg_b")
+        val sc = bt.sent_count()
+        expect(sc).to_equal(2)
+
+# ============================================================================
+# StdioTransport — construction only (no stdin reads in interpreter mode)
+# ============================================================================
+
+describe "StdioTransport - construction":
+    it "new() constructs without error":
+        var st = StdioTransport.new()
+        val closed = st.closed
+        expect(closed).to_equal(false)
+
+    it "json_lines() constructs without error":
+        var st = StdioTransport.json_lines()
+        val closed = st.closed
+        expect(closed).to_equal(false)
+
+    it "write_message does not crash on a simple payload":
+        # write_message calls write_stdout_message which calls print_raw.
+        # We verify success by checking closed is still false after the call.
+        var st = StdioTransport.json_lines()
+        st.write_message("{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}")
+        val closed = st.closed
+        expect(closed).to_equal(false)

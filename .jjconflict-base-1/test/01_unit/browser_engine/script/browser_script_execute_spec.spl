@@ -1,0 +1,47 @@
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.browser_script_execute.{execute_scripts_in_html}
+use std.gc_async_mut.gpu.browser_engine.browser_script_render.{render_html_to_pixels_with_scripts}
+
+describe "hardened browser script execution":
+    it "executes only deterministic literal console logs without host subprocesses":
+        val html = "<html><body><script>console.log('hello'); console.log(\"world\")</script></body></html>"
+        val result = execute_scripts_in_html(html)
+
+        expect(result.scripts_collected).to_equal(1)
+        expect(result.scripts_executed).to_equal(1)
+        expect(result.scripts_denied).to_equal(0)
+        expect(result.console_output).to_contain("hello")
+        expect(result.console_output).to_contain("world")
+        expect(result.diagnostics.len()).to_equal(0)
+
+    it "denies Node and host escape APIs before execution":
+        val html = "<script>require('fs').readFileSync('/etc/passwd');</script><script>process.env.OPENAI_API_KEY</script><script>host.shell('id')</script>"
+        val result = execute_scripts_in_html(html)
+
+        expect(result.scripts_collected).to_equal(3)
+        expect(result.scripts_executed).to_equal(0)
+        expect(result.scripts_denied).to_equal(3)
+        expect(result.diagnostics).to_contain("module loader access denied")
+        expect(result.diagnostics).to_contain("ambient environment access denied")
+        expect(result.diagnostics).to_contain("host shell access denied")
+
+    it "denies external scripts and unsupported script types fail closed":
+        val html = "<script src='https://example.com/app.js'></script><script type='text/simple'>stdout_write('bad')</script>"
+        val result = execute_scripts_in_html(html)
+
+        expect(result.scripts_collected).to_equal(2)
+        expect(result.scripts_executed).to_equal(0)
+        expect(result.scripts_denied).to_equal(2)
+        expect(result.diagnostics).to_contain("external script src denied: https://example.com/app.js")
+        expect(result.diagnostics).to_contain("unsupported script type denied: text/simple")
+
+    it "propagates denied browser JavaScript diagnostics through rendering":
+        val html = "<html><head><title>Script Gate</title></head><body><h1>Visible</h1><script>fetch('https://example.com')</script></body></html>"
+        val result = render_html_to_pixels_with_scripts(html, 64, 64)
+
+        expect(result.ok).to_equal(true)
+        expect(result.title).to_equal("Script Gate")
+        expect(result.scripts_collected).to_equal(1)
+        expect(result.scripts_executed).to_equal(0)
+        expect(result.scripts_denied).to_equal(1)
+        expect(result.diagnostics).to_contain("network access denied")

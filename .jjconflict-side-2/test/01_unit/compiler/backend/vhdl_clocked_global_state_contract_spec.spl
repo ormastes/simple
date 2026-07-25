@@ -1,0 +1,368 @@
+use std.spec
+use compiler.backend.backend.vhdl_backend.VhdlBackend
+use compiler.backend.backend.backend_types.{CodegenTarget, compileoptions_default_options}
+use compiler.common.attributes.{VhdlClockedMetadata, VhdlResetPolarity, VhdlResetSynchrony, vhdl_hardware_metadata_default}
+use compiler.common.diagnostics.span.Span
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_types.SymbolId
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.MirLowering
+use compiler.driver.driver_api_codegen_backends.aot_vhdl_file
+use std.io.{file_read_text, file_delete}
+use std.env.variables.{env_get, env_set, env_unset, env_has}
+
+fn span() -> Span:
+    Span(start: 0, end: 0, line: 1, col: 1, file: "", length: 0)
+
+fn i32_type() -> MirType:
+    MirType(kind: MirTypeKind.I32)
+
+fn bool_type() -> MirType:
+    MirType(kind: MirTypeKind.Bool)
+
+fn copy(local: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(LocalId(id: local)))
+
+fn clocked_metadata():
+    var metadata = vhdl_hardware_metadata_default()
+    metadata.is_hardware = true
+    metadata.has_clocked = true
+    metadata.clocked = VhdlClockedMetadata(
+        clock_signal: "clk", reset_signal: "", has_reset: false,
+        reset_polarity: VhdlResetPolarity.ActiveLow,
+        reset_synchrony: VhdlResetSynchrony.None_, domain: "clk",
+        is_valid: true, validation_errors: []
+    )
+    metadata
+
+fn clocked_state_module(state_type: MirType, mode: i64) -> MirModule:
+    val global_symbol = SymbolId(id: 700)
+    val function_symbol = SymbolId(id: 701)
+    var entry_instructions = [
+        MirInst(kind: MirInstKind.UnaryOp(LocalId(id: 2), MirUnaryOp.Not, copy(1)), span: nil)
+    ]
+    var entry_condition = copy(2)
+    if mode == 1:
+        entry_instructions = []
+        entry_condition = copy(1)
+    elif mode == 4:
+        entry_instructions = entry_instructions.push(
+            MirInst(kind: MirInstKind.LoadGlobal(LocalId(id: 3), global_symbol), span: nil)
+        )
+    var reset_instructions = [
+        MirInst(kind: MirInstKind.Const(LocalId(id: 3), MirConstValue.Int(0), i32_type()), span: nil),
+        MirInst(kind: MirInstKind.StoreGlobal(global_symbol, copy(3)), span: nil)
+    ]
+    if mode == 2:
+        reset_instructions = [
+            MirInst(kind: MirInstKind.LoadGlobal(LocalId(id: 3), global_symbol), span: nil),
+            MirInst(kind: MirInstKind.StoreGlobal(global_symbol, copy(3)), span: nil)
+        ]
+    var feedback_instructions = [
+        MirInst(kind: MirInstKind.LoadGlobal(LocalId(id: 3), global_symbol), span: nil),
+        MirInst(kind: MirInstKind.StoreGlobal(global_symbol, copy(3)), span: nil)
+    ]
+    if mode == 3:
+        feedback_instructions = [
+            MirInst(kind: MirInstKind.StoreGlobal(global_symbol, copy(3)), span: nil),
+            MirInst(kind: MirInstKind.LoadGlobal(LocalId(id: 3), global_symbol), span: nil)
+        ]
+    val entry = MirBlock(id: BlockId(id: 0), label: Some("entry"),
+        instructions: entry_instructions,
+        terminator: MirTerminator.If(entry_condition, BlockId(id: 1), BlockId(id: 2)))
+    val reset = MirBlock(id: BlockId(id: 1), label: Some("reset"),
+        instructions: reset_instructions, terminator: MirTerminator.Ret(Some(copy(3))))
+    val feedback = MirBlock(id: BlockId(id: 2), label: Some("feedback"),
+        instructions: feedback_instructions, terminator: MirTerminator.Ret(Some(copy(3))))
+    val function = MirFunction(
+        symbol: function_symbol, name: "clocked_state",
+        signature: MirSignature(params: [bool_type(), bool_type()], return_type: i32_type(), is_variadic: false),
+        locals: [
+            MirLocal(id: LocalId(id: 0), name: Some("clk"), type_: bool_type(), kind: LocalKind.Arg(0)),
+            MirLocal(id: LocalId(id: 1), name: Some("reset_n"), type_: bool_type(), kind: LocalKind.Arg(1)),
+            MirLocal(id: LocalId(id: 2), name: Some("reset_asserted"), type_: bool_type(), kind: LocalKind.Temp),
+            MirLocal(id: LocalId(id: 3), name: Some("state_value"), type_: state_type, kind: LocalKind.Temp)
+        ],
+        blocks: [entry, reset, feedback], entry_block: BlockId(id: 0), span: span(),
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {}, layout_phase: nil, is_kernel: false, gpu_target: "",
+        gpu_backend_order: "", is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: true, vhdl_metadata: clocked_metadata(),
+        has_fast_math: false, unroll_factor: 0, pipeline_ii: 0, memory_banks: 0
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[function_symbol] = function
+    val init_symbol = SymbolId(id: 702)
+    functions[init_symbol] = MirFunction(
+        symbol: init_symbol, name: "__module_init_contract_dynamic",
+        signature: MirSignature(params: [], return_type: MirType.unit(), is_variadic: false),
+        locals: [], blocks: [MirBlock(id: BlockId(id: 0), label: Some("entry"),
+            instructions: [], terminator: MirTerminator.Ret(nil))],
+        entry_block: BlockId(id: 0), span: span(), generic_params: [],
+        is_generic_template: false, specialization_of: nil, type_bindings: {},
+        layout_phase: nil, is_kernel: false, gpu_target: "", gpu_backend_order: "",
+        is_export_c: false, export_name: "", has_driver_manifest_attr: false,
+        driver_manifest_attr: nil, has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(), has_fast_math: false,
+        unroll_factor: 0, pipeline_ii: 0, memory_banks: 0
+    )
+    var statics: Dict<SymbolId, MirStatic> = {}
+    statics[global_symbol] = MirStatic(symbol: global_symbol, name: "state",
+        type_: state_type, init: nil, is_mutable: true)
+    val unused_symbol = SymbolId(id: 703)
+    statics[unused_symbol] = MirStatic(symbol: unused_symbol,
+        name: "unused_state", type_: i32_type(), init: nil, is_mutable: true)
+    MirModule(name: "clocked_state_contract", functions: functions,
+        statics: statics, constants: {}, types: {})
+
+fn backend() -> VhdlBackend:
+    VhdlBackend.create(CodegenTarget.Riscv32, compileoptions_default_options())
+
+fn restore_env(key: text, was_present: bool, value: text):
+    if was_present:
+        env_set(key, value)
+    else:
+        env_unset(key)
+
+fn compile_frontend_source(src: text, module_name: text):
+    val parsed = parse_full_frontend(src, "testdata/{module_name}.spl", module_name, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("testdata/{module_name}.spl")
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    backend().compile(mir_lowering.lower_module(hir))
+
+describe "VHDL clocked global state":
+    it "flattens annotated struct outputs and honors field bit widths":
+        val result = compile_frontend_source("""
+struct FormalPorts:
+    mode: u32 @bits(2)
+    addr: u32 @bits(5)
+    mask: u32 @bits(4)
+    data: u32
+
+@hardware
+@flatten_struct_output
+fn formal_ports(mode: u32, addr: u32, mask: u32, data: u32) -> FormalPorts:
+    FormalPorts(mode: mode, addr: addr, mask: mask, data: data)
+""", "formal_ports")
+        expect(result.is_ok()).to_equal(true)
+        val vhdl = result.unwrap().vhdl
+        expect(vhdl).to_contain("mode : out unsigned(1 downto 0)")
+        expect(vhdl).to_contain("addr : out unsigned(4 downto 0)")
+        expect(vhdl).to_contain("mask : out unsigned(3 downto 0)")
+        expect(vhdl).to_contain("data : out unsigned(31 downto 0)")
+        expect(vhdl.contains("result_out : out")).to_equal(false)
+
+    it "lowers an RV32 product entry through frontend MIR and VHDL":
+        val result = compile_frontend_source("""
+var product_state: u32 = 0u32
+
+@hardware
+@clocked(clk, none)
+fn core32_product_contract(clk: bool, reset_n: bool, reset_vec: u32) -> u32:
+    if not reset_n:
+        product_state = reset_vec
+        return reset_vec
+    val next_state = product_state + 1u32
+    product_state = next_state
+    next_state
+""", "core32_product_contract")
+        expect(result.is_ok()).to_equal(true)
+        val vhdl = result.unwrap().vhdl
+        expect(vhdl.contains("entity core32_product_contract is")).to_equal(true)
+        expect(vhdl.contains("signal global_product_state")).to_equal(true)
+        expect(vhdl.contains("p_clk: process(clk)")).to_equal(true)
+
+    it "resolves and emits the checked-in qualified RV64IMAC entry closure":
+        val entry = "src/lib/hardware/rv64gc_rtl/imac_entry.spl"
+        val output = "/tmp/simple-rv64-imac-entry-contract.vhd"
+        val manifest_path = output + ".gen.json"
+        file_delete(output)
+        file_delete(manifest_path)
+        val entry_was_present = env_has("SIMPLE_NATIVE_BUILD_ENTRY")
+        val closure_was_present = env_has("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        val previous_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY")
+        val previous_closure = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry)
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+        val result = aot_vhdl_file(entry, output)
+        restore_env("SIMPLE_NATIVE_BUILD_ENTRY", entry_was_present, previous_entry)
+        restore_env("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", closure_was_present,
+            previous_closure)
+        if not result.is_success():
+            val errors = result.get_errors()
+            expect(if errors.len() > 0: errors[0] else: "VHDL closure compile failed").to_equal("")
+        val vhdl = file_read_text(output)
+        val manifest = file_read_text(manifest_path)
+        expect(vhdl.contains("entity core64_imac_product_entry is")).to_equal(true)
+        expect(vhdl.contains("entity core64_imac_cycle is")).to_equal(true)
+        expect(vhdl.contains("function core64_imac_sum_enabled")).to_equal(true)
+        expect(vhdl.contains("function core64_imac_mxr_enabled")).to_equal(true)
+        expect(vhdl.contains("simple_hwcall_core64_imac_sum_enabled")).to_equal(false)
+        expect(vhdl.contains("global__core64_imac_product_state")).to_equal(true)
+        expect(vhdl.contains("p_clk: process(clk)")).to_equal(true)
+        expect(vhdl.contains("clk : in bit")).to_equal(true)
+        expect(vhdl.contains("reset_n : in bit")).to_equal(true)
+        expect(vhdl.contains("reset_vec : in signed(63 downto 0)")).to_equal(true)
+        expect(vhdl.contains("msip : in bit")).to_equal(true)
+        expect(vhdl.contains("mtip : in bit")).to_equal(true)
+        expect(vhdl.contains("meip : in bit")).to_equal(true)
+        expect(vhdl.contains("stip : in bit")).to_equal(true)
+        expect(vhdl.contains("seip : in bit")).to_equal(true)
+        expect(vhdl.contains("time_value : in signed(63 downto 0)")).to_equal(true)
+        expect(vhdl.contains("request_ready : in bit")).to_equal(true)
+        expect(vhdl.contains("response_valid : in bit")).to_equal(true)
+        expect(vhdl.contains("response_error : in bit")).to_equal(true)
+        expect(vhdl.contains("response_data : in signed(63 downto 0)")).to_equal(true)
+        val product_start = vhdl.index_of("entity core64_imac_product_entry is")
+        val product_end = vhdl.index_of("end entity core64_imac_product_entry;")
+        val product = vhdl.substring(product_start, product_end)
+        for port in ["bus_valid", "bus_addr", "bus_size", "bus_write",
+                     "bus_wdata", "bus_is_pte", "bus_atomic", "rvfi_valid",
+                     "rvfi_order", "rvfi_insn", "rvfi_trap", "rvfi_halt",
+                     "rvfi_intr", "rvfi_mode", "rvfi_ixl", "rvfi_rs1_addr",
+                     "rvfi_rs2_addr", "rvfi_rs1_rdata", "rvfi_rs2_rdata",
+                     "rvfi_rd_addr", "rvfi_rd_wdata", "rvfi_pc_rdata",
+                     "rvfi_pc_wdata", "rvfi_mem_addr", "rvfi_mem_rmask",
+                     "rvfi_mem_wmask", "rvfi_mem_rdata", "rvfi_mem_wdata"]:
+            expect(product).to_contain("{port} : out ")
+        expect(product).to_contain("rvfi_mode : out unsigned(1 downto 0)")
+        expect(product).to_contain("rvfi_ixl : out unsigned(1 downto 0)")
+        expect(product).to_contain("rvfi_rs1_addr : out unsigned(4 downto 0)")
+        expect(product).to_contain("rvfi_rs2_addr : out unsigned(4 downto 0)")
+        expect(product).to_contain("rvfi_rd_addr : out unsigned(4 downto 0)")
+        expect(product).to_contain("rvfi_mem_rmask : out unsigned(7 downto 0)")
+        expect(product).to_contain("rvfi_mem_wmask : out unsigned(7 downto 0)")
+        expect(product).to_contain("rvfi_valid : out bit")
+        expect(product).to_contain("rvfi_order : out signed(63 downto 0)")
+        expect(product).to_contain("rvfi_insn : out unsigned(31 downto 0)")
+        expect(product).to_contain("rvfi_rs1_rdata : out signed(63 downto 0)")
+        expect(product).to_contain("rvfi_mem_addr : out signed(63 downto 0)")
+        expect(product.contains("result_out")).to_equal(false)
+        expect(manifest).to_contain("\"backend\": \"vhdl\"")
+        expect(manifest).to_contain("\"generated\": \"{output}\"")
+        expect(manifest).to_contain("\"design_catalog\": \"simple_vhdl_design\"")
+        expect(manifest).to_contain("\"source_module_count\": ")
+        expect(manifest).to_contain("\"hardware_entity_count\": ")
+        expect(manifest.contains("\"source_module_count\": 1,")).to_equal(false)
+        expect(manifest.contains("\"hardware_entity_count\": 0,")).to_equal(false)
+        file_delete(output)
+        file_delete(manifest_path)
+
+    it "resolves and emits the checked-in qualified RV32 product entry closure":
+        val entry = "src/lib/hardware/rv32i_rtl/protected_entry.spl"
+        val output = "/tmp/simple-rv32-protected-entry-contract.vhd"
+        val manifest_path = output + ".gen.json"
+        file_delete(output)
+        file_delete(manifest_path)
+        val entry_was_present = env_has("SIMPLE_NATIVE_BUILD_ENTRY")
+        val closure_was_present = env_has("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        val previous_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY")
+        val previous_closure = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry)
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+        val result = aot_vhdl_file(entry, output)
+        restore_env("SIMPLE_NATIVE_BUILD_ENTRY", entry_was_present, previous_entry)
+        restore_env("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", closure_was_present,
+            previous_closure)
+        if not result.is_success():
+            val errors = result.get_errors()
+            expect(if errors.len() > 0: errors[0] else: "RV32 VHDL closure compile failed").to_equal("")
+        val vhdl = file_read_text(output)
+        val manifest = file_read_text(manifest_path)
+        expect(vhdl.contains("entity core32_protected_product_entry is")).to_equal(true)
+        expect(vhdl.contains("entity core32_cycle is")).to_equal(true)
+        expect(vhdl.contains("function core32_tick_cycle")).to_equal(true)
+        expect(vhdl.contains("function core32_data_privilege")).to_equal(true)
+        expect(vhdl.contains("simple_hwcall_core32_tick_cycle")).to_equal(false)
+        expect(vhdl.contains("global__core32_product_state")).to_equal(true)
+        expect(vhdl.contains("p_clk: process(clk)")).to_equal(true)
+        expect(vhdl.contains("clk : in bit")).to_equal(true)
+        expect(vhdl.contains("reset_n : in bit")).to_equal(true)
+        expect(vhdl.contains("reset_vec : in unsigned(31 downto 0)")).to_equal(true)
+        expect(vhdl.contains("msip : in bit")).to_equal(true)
+        expect(vhdl.contains("mtip : in bit")).to_equal(true)
+        expect(vhdl.contains("meip : in bit")).to_equal(true)
+        expect(vhdl.contains("stip : in bit")).to_equal(true)
+        expect(vhdl.contains("seip : in bit")).to_equal(true)
+        expect(vhdl.contains("time_value : in signed(63 downto 0)")).to_equal(true)
+        expect(vhdl.contains("request_ready : in bit")).to_equal(true)
+        expect(vhdl.contains("response_valid : in bit")).to_equal(true)
+        expect(vhdl.contains("response_error : in bit")).to_equal(true)
+        expect(vhdl.contains("response_data : in unsigned(31 downto 0)")).to_equal(true)
+        val product_start = vhdl.index_of("entity core32_protected_product_entry is")
+        val product_end = vhdl.index_of("end entity core32_protected_product_entry;")
+        val product = vhdl.substring(product_start, product_end)
+        for port in ["bus_valid", "bus_addr", "bus_size", "bus_write",
+                     "bus_wdata", "bus_is_pte", "bus_atomic", "bus_lock",
+                     "rvfi_valid", "rvfi_order", "rvfi_insn", "rvfi_trap",
+                     "rvfi_halt", "rvfi_intr", "rvfi_mode", "rvfi_ixl",
+                     "rvfi_rs1_addr", "rvfi_rs2_addr", "rvfi_rs1_rdata",
+                     "rvfi_rs2_rdata", "rvfi_rd_addr", "rvfi_rd_wdata",
+                     "rvfi_pc_rdata", "rvfi_pc_wdata", "rvfi_mem_addr",
+                     "rvfi_mem_rmask", "rvfi_mem_wmask", "rvfi_mem_rdata",
+                     "rvfi_mem_wdata"]:
+            expect(product).to_contain("{port} : out ")
+        expect(product).to_contain("rvfi_mode : out unsigned(1 downto 0)")
+        expect(product).to_contain("rvfi_ixl : out unsigned(1 downto 0)")
+        expect(product).to_contain("rvfi_rs1_addr : out unsigned(4 downto 0)")
+        expect(product).to_contain("rvfi_rs2_addr : out unsigned(4 downto 0)")
+        expect(product).to_contain("rvfi_rd_addr : out unsigned(4 downto 0)")
+        expect(product).to_contain("rvfi_mem_rmask : out unsigned(3 downto 0)")
+        expect(product).to_contain("rvfi_mem_wmask : out unsigned(3 downto 0)")
+        expect(product).to_contain("rvfi_valid : out bit")
+        expect(product).to_contain("rvfi_order : out signed(63 downto 0)")
+        expect(product).to_contain("rvfi_insn : out unsigned(31 downto 0)")
+        expect(product).to_contain("rvfi_rs1_rdata : out unsigned(31 downto 0)")
+        expect(product).to_contain("rvfi_mem_addr : out unsigned(31 downto 0)")
+        expect(product.contains("result_out")).to_equal(false)
+        expect(manifest).to_contain("\"backend\": \"vhdl\"")
+        expect(manifest).to_contain("\"generated\": \"{output}\"")
+        expect(manifest).to_contain("\"design_catalog\": \"simple_vhdl_design\"")
+        expect(manifest).to_contain("\"source_module_count\": ")
+        expect(manifest).to_contain("\"hardware_entity_count\": ")
+        expect(manifest.contains("\"source_module_count\": 1,")).to_equal(false)
+        expect(manifest.contains("\"hardware_entity_count\": 0,")).to_equal(false)
+        file_delete(output)
+        file_delete(manifest_path)
+
+    it "emits a same-edge reset and feedback process":
+        val result = backend().compile(clocked_state_module(i32_type(), 0))
+        expect(result.is_ok()).to_equal(true)
+        val vhdl = result.unwrap().vhdl
+        expect(vhdl.contains("signal global_state : signed(31 downto 0);")).to_equal(true)
+        expect(vhdl.contains("p_clk: process(clk)")).to_equal(true)
+        expect(vhdl.contains("variable state_value : signed(31 downto 0);")).to_equal(true)
+        expect(vhdl.contains("if rising_edge(clk) then")).to_equal(true)
+        expect(vhdl.contains("global_state <= state_value;")).to_equal(true)
+        expect(vhdl.contains("global_unused_state")).to_equal(false)
+        expect(vhdl.contains("__module_init_contract_dynamic")).to_equal(false)
+
+    it "rejects dynamic module state":
+        val dynamic_type = MirType(kind: MirTypeKind.Array(i32_type(), 2))
+        val result = backend().compile(clocked_state_module(dynamic_type, 0))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().message.contains("fixed scalar or transitive record")).to_equal(true)
+
+    it "rejects a reset guard that does not dominate initialization":
+        val result = backend().compile(clocked_state_module(i32_type(), 1))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().message.contains("if not reset_n")).to_equal(true)
+
+    it "rejects loading old state in the reset branch":
+        val result = backend().compile(clocked_state_module(i32_type(), 2))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().message.contains("without loading prior state")).to_equal(true)
+
+    it "rejects same-edge store then load":
+        val result = backend().compile(clocked_state_module(i32_type(), 3))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().message.contains("store-then-load")).to_equal(true)
+
+    it "rejects loading state before the reset split":
+        val result = backend().compile(clocked_state_module(i32_type(), 4))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().message.contains("before the reset/feedback branch")).to_equal(true)

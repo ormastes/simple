@@ -1,0 +1,175 @@
+# SimpleOS simplebox applet cores — pure, kernel-free logic.
+# Implements dd, timeout parse, and chown parse cores.
+# No cross-module imports (avoids interpreter merge bugs).
+
+# ---- ChownReq struct for chown parsing ----
+
+struct ChownReq:
+    uid: i64
+    gid: i64
+    has_uid: bool
+    has_gid: bool
+
+# ---- dd core: slice [u8] by offset and count ----
+
+fn applet_dd(src: [u8], offset: i64, count: i64) -> [u8]:
+    """
+    Return count bytes from src starting at offset.
+    Clamp to bounds: if offset >= len(src), return empty.
+    If count extends past len(src), truncate to available.
+    """
+    val n = src.len()
+    if offset >= n:
+        return []
+
+    # Effective start position
+    val start = offset
+
+    # Effective end position: min(offset + count, n)
+    val end = if (offset + count) < n: (offset + count) else: n
+
+    # Copy [start, end)
+    var out: [u8] = []
+    var i = start
+    while i < end:
+        out.push(src[i])
+        i = i + 1
+    out
+
+# ---- timeout parse: "5", "5s", "2m", "1h" -> seconds ----
+
+fn applet_timeout_parse(spec: text) -> i64:
+    """
+    Parse a duration spec into seconds.
+    Forms: "5" (5 seconds), "5s" (5 seconds), "2m" (120 seconds), "1h" (3600 seconds).
+    Invalid specs return -1.
+    """
+    val bytes = spec.bytes()
+    val n = bytes.len()
+
+    if n == 0:
+        return -1
+
+    # Parse numeric prefix
+    var num_end = 0
+    while num_end < n and bytes[num_end] >= 48 and bytes[num_end] <= 57:
+        num_end = num_end + 1
+
+    if num_end == 0:
+        return -1  # No digits at start
+
+    # Parse the number
+    var num = 0
+    var i = 0
+    while i < num_end:
+        val ch = bytes[i]
+        val digit = ch - 48
+        num = num * 10 + digit
+        i = i + 1
+
+    # Check for unit suffix
+    if num_end == n:
+        # No suffix => seconds
+        return num
+
+    # Single character suffix expected
+    if (num_end + 1) != n:
+        return -1  # Extra garbage after unit
+
+    # Check the unit character at bytes[num_end]
+    if bytes[num_end] == 115:  # 's'
+        return num
+    elif bytes[num_end] == 109:  # 'm'
+        return num * 60
+    elif bytes[num_end] == 104:  # 'h'
+        return num * 3600
+    else:
+        return -1  # Unknown unit
+
+# ---- chown parse: "uid:gid", "uid", ":gid" -> ChownReq ----
+
+fn applet_chown_parse(spec: text) -> ChownReq:
+    """
+    Parse chown spec into uid and gid.
+    Forms:
+      "1000:1000" -> uid=1000, gid=1000, has_uid=true, has_gid=true
+      "1000" -> uid=1000, gid=-1, has_uid=true, has_gid=false
+      ":1000" -> uid=-1, gid=1000, has_uid=false, has_gid=true
+      "" -> uid=-1, gid=-1, has_uid=false, has_gid=false
+    Invalid digit sequences return -1 for that component.
+    """
+    val bytes = spec.bytes()
+    val n = bytes.len()
+
+    if n == 0:
+        return ChownReq(uid: -1, gid: -1, has_uid: false, has_gid: false)
+
+    # Find the colon position
+    var colon_pos = -1
+    var i = 0
+    while i < n:
+        if bytes[i] == 58:  # ':'
+            colon_pos = i
+            break
+        i = i + 1
+
+    if colon_pos == -1:
+        # No colon: entire thing is uid
+        var uid = 0
+        var valid = true
+        i = 0
+        while i < n:
+            val ch = bytes[i]
+            if ch >= 48 and ch <= 57:
+                uid = uid * 10 + (ch - 48)
+            else:
+                valid = false
+                break
+            i = i + 1
+
+        if valid:
+            return ChownReq(uid: uid, gid: -1, has_uid: true, has_gid: false)
+        else:
+            return ChownReq(uid: -1, gid: -1, has_uid: false, has_gid: false)
+
+    # Has colon: parse uid (before) and gid (after)
+    var uid: i64 = -1
+    var has_uid = false
+    var gid: i64 = -1
+    var has_gid = false
+
+    # Parse uid part (before colon)
+    if colon_pos > 0:
+        var uid_val = 0
+        var valid = true
+        i = 0
+        while i < colon_pos:
+            val ch = bytes[i]
+            if ch >= 48 and ch <= 57:
+                uid_val = uid_val * 10 + (ch - 48)
+            else:
+                valid = false
+                break
+            i = i + 1
+        if valid:
+            uid = uid_val
+            has_uid = true
+
+    # Parse gid part (after colon)
+    if (colon_pos + 1) < n:
+        var gid_val = 0
+        var valid = true
+        i = colon_pos + 1
+        while i < n:
+            val ch = bytes[i]
+            if ch >= 48 and ch <= 57:
+                gid_val = gid_val * 10 + (ch - 48)
+            else:
+                valid = false
+                break
+            i = i + 1
+        if valid:
+            gid = gid_val
+            has_gid = true
+
+    ChownReq(uid: uid, gid: gid, has_uid: has_uid, has_gid: has_gid)

@@ -1,0 +1,199 @@
+# SReplay — Core types shared across all replay backends
+#
+# Architecture-neutral: addresses stored as u64 + width tag,
+# register schemas identified by string ID.
+
+# ============================================================================
+# Target Architecture
+# ============================================================================
+
+enum Arch:
+    X86_32
+    X86_64
+    ARM32
+    AARCH64
+    RISCV32
+    RISCV64
+
+impl Arch:
+    fn pointer_bits() -> i32:
+        match self:
+            case Arch.X86_32: 32
+            case Arch.X86_64: 64
+            case Arch.ARM32: 32
+            case Arch.AARCH64: 64
+            case Arch.RISCV32: 32
+            case Arch.RISCV64: 64
+
+    fn qemu_system_cmd() -> text:
+        match self:
+            case Arch.X86_32: "qemu-system-i386"
+            case Arch.X86_64: "qemu-system-x86_64"
+            case Arch.ARM32: "qemu-system-arm"
+            case Arch.AARCH64: "qemu-system-aarch64"
+            case Arch.RISCV32: "qemu-system-riscv32"
+            case Arch.RISCV64: "qemu-system-riscv64"
+
+    fn default_machine() -> text:
+        match self:
+            case Arch.X86_32: "q35"
+            case Arch.X86_64: "q35"
+            case Arch.ARM32: "virt"
+            case Arch.AARCH64: "virt"
+            case Arch.RISCV32: "virt"
+            case Arch.RISCV64: "virt"
+
+    fn default_register_schema() -> text:
+        match self:
+            case Arch.X86_32: "x86_32-v1"
+            case Arch.X86_64: "x86_64-sysv-v1"
+            case Arch.ARM32: "arm32-v1"
+            case Arch.AARCH64: "aarch64-v1"
+            case Arch.RISCV32: "riscv32-gpr-v1"
+            case Arch.RISCV64: "riscv64-gpr-v1"
+
+    fn to_text() -> text:
+        match self:
+            case Arch.X86_32: "x86_32"
+            case Arch.X86_64: "x86_64"
+            case Arch.ARM32: "arm32"
+            case Arch.AARCH64: "aarch64"
+            case Arch.RISCV32: "riscv32"
+            case Arch.RISCV64: "riscv64"
+
+    static fn from_text(s: text) -> Arch:
+        if s == "x86_32" or s == "i386" or s == "i686":
+            Arch.X86_32
+        elif s == "x86_64" or s == "amd64":
+            Arch.X86_64
+        elif s == "arm32" or s == "arm":
+            Arch.ARM32
+        elif s == "aarch64" or s == "arm64":
+            Arch.AARCH64
+        elif s == "riscv32" or s == "rv32":
+            Arch.RISCV32
+        elif s == "riscv64" or s == "rv64":
+            Arch.RISCV64
+        else:
+            Arch.X86_64
+
+# ============================================================================
+# Endianness
+# ============================================================================
+
+enum Endian:
+    Little
+    Big
+
+impl Endian:
+    fn to_text() -> text:
+        match self:
+            case Endian.Little: "little"
+            case Endian.Big: "big"
+
+# ============================================================================
+# Architecture-Neutral Address
+# ============================================================================
+
+struct Address:
+    bits: i32       # 32 or 64
+    value: i64      # upper bits zero for 32-bit target
+
+impl Address:
+    static fn from_32(v: i64) -> Address:
+        Address(bits: 32, value: v)
+
+    static fn from_64(v: i64) -> Address:
+        Address(bits: 64, value: v)
+
+    static fn for_arch(arch: Arch, v: i64) -> Address:
+        Address(bits: arch.pointer_bits(), value: v)
+
+# ============================================================================
+# Target Description
+# ============================================================================
+
+struct TargetDesc:
+    arch: Arch
+    endian: Endian
+    page_size: i32
+    register_schema_id: text
+
+impl TargetDesc:
+    static fn for_arch(arch: Arch) -> TargetDesc:
+        val endian = match arch:
+            case Arch.ARM32: Endian.Little
+            case _: Endian.Little
+        TargetDesc(
+            arch: arch,
+            endian: endian,
+            page_size: 4096,
+            register_schema_id: arch.default_register_schema()
+        )
+
+# ============================================================================
+# Replay Mode
+# ============================================================================
+
+enum ReplayMode:
+    Record
+    Replay
+
+impl ReplayMode:
+    fn to_text() -> text:
+        match self:
+            case ReplayMode.Record: "record"
+            case ReplayMode.Replay: "replay"
+
+# ============================================================================
+# Replay Configuration
+# ============================================================================
+
+struct ReplayConfig:
+    arch: Arch
+    mode: ReplayMode
+    kernel_path: text       # ELF binary
+    trace_path: text        # .srrq file for QEMU replay
+    machine: text           # QEMU machine type (empty = default)
+    memory: text            # RAM size (empty = default)
+    gdb_port: i32           # 0 = auto-assign
+    qmp_socket: text        # Unix socket path for QMP
+    extra_args: [text]
+
+impl ReplayConfig:
+    static fn for_record(arch: Arch, kernel: text, trace: text) -> ReplayConfig:
+        ReplayConfig(
+            arch: arch,
+            mode: ReplayMode.Record,
+            kernel_path: kernel,
+            trace_path: trace,
+            machine: "",
+            memory: "",
+            gdb_port: 0,
+            qmp_socket: "",
+            extra_args: []
+        )
+
+    static fn for_replay(arch: Arch, kernel: text, trace: text) -> ReplayConfig:
+        ReplayConfig(
+            arch: arch,
+            mode: ReplayMode.Replay,
+            kernel_path: kernel,
+            trace_path: trace,
+            machine: "",
+            memory: "",
+            gdb_port: 1234,
+            qmp_socket: "",
+            extra_args: []
+        )
+
+# ============================================================================
+# Replay Session Info
+# ============================================================================
+
+struct ReplaySessionInfo:
+    session_id: text
+    mode: ReplayMode
+    arch: Arch
+    trace_path: text
+    checkpoint_count: i32

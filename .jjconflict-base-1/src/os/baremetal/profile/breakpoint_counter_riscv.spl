@@ -1,0 +1,65 @@
+# RISC-V software-breakpoint target adapter contracts.
+
+use os.baremetal.profile.breakpoint_counter.{breakpoint_architecture_patch_profile}
+
+pub class BreakpointRiscvResumePlan:
+    arch: text
+    exception_pc: u64
+    restore_pc: u64
+    resume_pc_after_single_step: u64
+    patch_width_bytes: i64
+    requires_fence_i: bool
+    compressed: bool
+    valid: bool
+    reason: text
+
+fn breakpoint_riscv_arch_supported(arch: text) -> bool:
+    arch == "riscv32" or arch == "riscv64" or arch == "riscv32c" or arch == "riscv64c"
+
+fn breakpoint_riscv_arch_compressed(arch: text) -> bool:
+    arch == "riscv32c" or arch == "riscv64c"
+
+pub fn breakpoint_riscv_resume_plan(arch: text, exception_pc: u64) -> BreakpointRiscvResumePlan:
+    val profile = breakpoint_architecture_patch_profile(arch)
+    if not breakpoint_riscv_arch_supported(arch) or not profile.valid:
+        return BreakpointRiscvResumePlan(
+            arch: arch,
+            exception_pc: exception_pc,
+            restore_pc: 0,
+            resume_pc_after_single_step: 0,
+            patch_width_bytes: 0,
+            requires_fence_i: false,
+            compressed: false,
+            valid: false,
+            reason: "unsupported_riscv_arch"
+        )
+    if exception_pc == 0:
+        return BreakpointRiscvResumePlan(
+            arch: arch,
+            exception_pc: exception_pc,
+            restore_pc: 0,
+            resume_pc_after_single_step: 0,
+            patch_width_bytes: profile.patch_width_bytes,
+            requires_fence_i: true,
+            compressed: breakpoint_riscv_arch_compressed(arch),
+            valid: false,
+            reason: "missing_exception_pc"
+        )
+    BreakpointRiscvResumePlan(
+        arch: arch,
+        exception_pc: exception_pc,
+        restore_pc: exception_pc,
+        resume_pc_after_single_step: exception_pc + (profile.pc_advance_bytes as u64),
+        patch_width_bytes: profile.patch_width_bytes,
+        requires_fence_i: true,
+        compressed: breakpoint_riscv_arch_compressed(arch),
+        valid: true,
+        reason: "riscv_ebreak_pc_at_instruction"
+    )
+
+pub fn breakpoint_riscv_qemu_target(arch: text) -> text:
+    if arch == "riscv32" or arch == "riscv32c":
+        return "qemu-system-riscv32"
+    if arch == "riscv64" or arch == "riscv64c":
+        return "qemu-system-riscv64"
+    ""

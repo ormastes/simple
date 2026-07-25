@@ -1,0 +1,81 @@
+# Test Daemon Resource Policy — admission control for local and QEMU work
+#
+# Keeps the daemon cheap while idle and prevents local/QEMU test work from
+# starting when the host is already under pressure.
+
+struct TestDaemonResourcePolicy:
+    resource_limit_pct: i64
+    min_free_cpu_pct: i64
+    min_free_memory_pct: i64
+    max_clients: i64
+    max_qemu_sessions: i64
+    qemu_memory_mb: i64
+    qemu_cpu_cores: i64
+    idle_poll_ms: i64
+    busy_poll_ms: i64
+
+struct TestDaemonResourceSnapshot:
+    cpu_percent: f64
+    memory_percent: f64
+    memory_total_mb: i64
+    active_clients: i64
+    active_qemu_sessions: i64
+    idle_qemu_sessions: i64
+    cpu_count: i64
+
+fn test_daemon_resource_policy_default() -> TestDaemonResourcePolicy:
+    TestDaemonResourcePolicy(
+        resource_limit_pct: 75,
+        min_free_cpu_pct: 25,
+        min_free_memory_pct: 25,
+        max_clients: 32,
+        max_qemu_sessions: 4,
+        qemu_memory_mb: 1536,
+        qemu_cpu_cores: 1,
+        idle_poll_ms: 1000,
+        busy_poll_ms: 100
+    )
+
+fn test_daemon_can_accept_client(policy: TestDaemonResourcePolicy, snap: TestDaemonResourceSnapshot) -> (bool, text):
+    if snap.active_clients >= policy.max_clients:
+        return (false, "client limit reached")
+    val free_cpu = 100.0 - snap.cpu_percent
+    val free_mem = 100.0 - snap.memory_percent
+    if free_cpu < policy.min_free_cpu_pct.to_f64():
+        return (false, "free cpu below daemon floor")
+    if free_mem < policy.min_free_memory_pct.to_f64():
+        return (false, "free memory below daemon floor")
+    (true, "")
+
+fn test_daemon_effective_qemu_limit(policy: TestDaemonResourcePolicy, snap: TestDaemonResourceSnapshot) -> i64:
+    var by_cpu = snap.cpu_count * policy.resource_limit_pct / 100 / policy.qemu_cpu_cores
+    if by_cpu < 1:
+        by_cpu = 1
+    var by_mem = policy.max_qemu_sessions
+    if policy.qemu_memory_mb > 0 and snap.memory_total_mb > 0:
+        val budget_mb = snap.memory_total_mb * policy.resource_limit_pct / 100
+        by_mem = budget_mb / policy.qemu_memory_mb
+        if by_mem < 1:
+            by_mem = 1
+    var limit = policy.max_qemu_sessions
+    if by_cpu < limit:
+        limit = by_cpu
+    if by_mem < limit:
+        limit = by_mem
+    if limit < 1:
+        limit = 1
+    limit
+
+fn test_daemon_can_start_qemu(policy: TestDaemonResourcePolicy, snap: TestDaemonResourceSnapshot) -> (bool, text):
+    val client_ok = test_daemon_can_accept_client(policy, snap)
+    if not client_ok[0]:
+        return client_ok
+    val limit = test_daemon_effective_qemu_limit(policy, snap)
+    if snap.active_qemu_sessions >= limit:
+        return (false, "qemu session limit reached")
+    (true, "")
+
+fn test_daemon_poll_sleep_ms(policy: TestDaemonResourcePolicy, snap: TestDaemonResourceSnapshot, pending_requests: i64) -> i64:
+    if pending_requests > 0 or snap.active_clients > 0 or snap.active_qemu_sessions > 0:
+        return policy.busy_poll_ms
+    policy.idle_poll_ms

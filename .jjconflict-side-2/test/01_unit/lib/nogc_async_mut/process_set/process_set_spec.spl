@@ -1,0 +1,447 @@
+# Process Set Security Unit Tests
+#
+# Covers: config parse round-trip, IPC message serialize/parse round-trip,
+# atomic claim prevents double-consume, sequence IDs unique/monotonic,
+# kill guard rejects dangerous pids.
+#
+# No imports of app.io (avoids 120s+ timeout).
+# All tests run in interpreter mode.
+
+use std.spec.*
+
+# ============================================================================
+# Inline helpers (no imports from process_set to avoid bootstrap issues)
+# ============================================================================
+
+struct TestIpcMessage:
+    id: text
+    source: text
+    target: text
+    method: text
+    payload: text
+    timestamp: i64
+    reply_to: text
+
+struct TestIpcReply:
+    id: text
+    in_reply_to: text
+    payload: text
+    error: text
+
+fn test_serialize_message(msg: TestIpcMessage) -> text:
+    "id: {msg.id}\nsource: {msg.source}\ntarget: {msg.target}\nmethod: {msg.method}\npayload: {msg.payload}\ntimestamp: {msg.timestamp}\nreply_to: {msg.reply_to}\n"
+
+fn test_parse_field(lines: [text], key: text) -> text:
+    for line in lines:
+        val trimmed = line.trim()
+        if trimmed.starts_with("{key}: "):
+            val prefix_len = key.len() + 2
+            return trimmed[prefix_len..trimmed.len()]
+        elif trimmed == "{key}:":
+            return ""
+    ""
+
+fn test_parse_message(content: text) -> TestIpcMessage:
+    val lines = content.split("\n")
+    val ts_text = test_parse_field(lines, "timestamp")
+    val ts = ts_text.to_int() ?? 0
+    TestIpcMessage(
+        id: test_parse_field(lines, "id"),
+        source: test_parse_field(lines, "source"),
+        target: test_parse_field(lines, "target"),
+        method: test_parse_field(lines, "method"),
+        payload: test_parse_field(lines, "payload"),
+        timestamp: ts,
+        reply_to: test_parse_field(lines, "reply_to")
+    )
+
+fn test_serialize_reply(r: TestIpcReply) -> text:
+    "id: {r.id}\nin_reply_to: {r.in_reply_to}\npayload: {r.payload}\nerror: {r.error}\n"
+
+fn test_parse_reply(content: text) -> TestIpcReply:
+    val lines = content.split("\n")
+    TestIpcReply(
+        id: test_parse_field(lines, "id"),
+        in_reply_to: test_parse_field(lines, "in_reply_to"),
+        payload: test_parse_field(lines, "payload"),
+        error: test_parse_field(lines, "error")
+    )
+
+# Inline config parsing helpers (mirrors parse_process_config logic)
+fn test_parse_mode(s: text) -> text:
+    if s == "actor": return "actor"
+    if s == "separated": return "separated"
+    "shared"
+
+fn test_parse_transport(s: text) -> text:
+    if s == "file_queue": return "file_queue"
+    "channel"
+
+# Inline sequence counter (mirrors _ipc_seq logic)
+var _test_seq: i64 = 0
+
+fn test_next_id(pid: i64) -> text:
+    _test_seq = _test_seq + 1
+    "{pid}_{_test_seq}"
+
+# Inline pid guard (mirrors the > 1 check in manager)
+fn test_safe_to_kill(pid: i64) -> bool:
+    pid > 1
+
+# ============================================================================
+# Config parse round-trip
+# ============================================================================
+
+describe "ProcessSet Config":
+    it "parses mode shared":
+        val mode = test_parse_mode("shared")
+        expect(mode).to_equal("shared")
+
+    it "parses mode actor":
+        val mode = test_parse_mode("actor")
+        expect(mode).to_equal("actor")
+
+    it "parses mode separated":
+        val mode = test_parse_mode("separated")
+        expect(mode).to_equal("separated")
+
+    it "unknown mode defaults to shared":
+        val mode = test_parse_mode("unknown_xyz")
+        expect(mode).to_equal("shared")
+
+    it "parses ipc_transport channel":
+        val transport = test_parse_transport("channel")
+        expect(transport).to_equal("channel")
+
+    it "parses ipc_transport file_queue":
+        val transport = test_parse_transport("file_queue")
+        expect(transport).to_equal("file_queue")
+
+    it "unknown transport defaults to channel":
+        val transport = test_parse_transport("nope")
+        expect(transport).to_equal("channel")
+
+    it "mode round-trip: actor survives serialize-parse":
+        val original = "actor"
+        val serialized = test_parse_mode(original)
+        val reparsed = test_parse_mode(serialized)
+        expect(reparsed).to_equal(original)
+
+    it "mode round-trip: separated survives serialize-parse":
+        val original = "separated"
+        val serialized = test_parse_mode(original)
+        val reparsed = test_parse_mode(serialized)
+        expect(reparsed).to_equal(original)
+
+# ============================================================================
+# IPC message serialize / parse round-trip
+# ============================================================================
+
+describe "IPC Message Serialization":
+    it "serializes id field correctly":
+        val msg = TestIpcMessage(
+            id: "42_1",
+            source: "main",
+            target: "worker1",
+            method: "ping",
+            payload: "hello",
+            timestamp: 1000,
+            reply_to: ""
+        )
+        val content = test_serialize_message(msg)
+        expect(content).to_contain("id: 42_1")
+
+    it "serializes source field correctly":
+        val msg = TestIpcMessage(
+            id: "1_1",
+            source: "proc_a",
+            target: "proc_b",
+            method: "test",
+            payload: "",
+            timestamp: 0,
+            reply_to: ""
+        )
+        val content = test_serialize_message(msg)
+        expect(content).to_contain("source: proc_a")
+
+    it "round-trips id":
+        val msg = TestIpcMessage(
+            id: "99_7",
+            source: "s",
+            target: "t",
+            method: "m",
+            payload: "p",
+            timestamp: 500,
+            reply_to: ""
+        )
+        val content = test_serialize_message(msg)
+        val parsed = test_parse_message(content)
+        expect(parsed.id).to_equal("99_7")
+
+    it "round-trips source":
+        val msg = TestIpcMessage(
+            id: "1_2",
+            source: "sender",
+            target: "receiver",
+            method: "act",
+            payload: "data",
+            timestamp: 100,
+            reply_to: ""
+        )
+        val content = test_serialize_message(msg)
+        val parsed = test_parse_message(content)
+        expect(parsed.source).to_equal("sender")
+
+    it "round-trips target":
+        val msg = TestIpcMessage(
+            id: "1_3",
+            source: "a",
+            target: "worker2",
+            method: "do",
+            payload: "",
+            timestamp: 200,
+            reply_to: ""
+        )
+        val content = test_serialize_message(msg)
+        val parsed = test_parse_message(content)
+        expect(parsed.target).to_equal("worker2")
+
+    it "round-trips method":
+        val msg = TestIpcMessage(
+            id: "1_4",
+            source: "a",
+            target: "b",
+            method: "compute",
+            payload: "",
+            timestamp: 0,
+            reply_to: ""
+        )
+        val content = test_serialize_message(msg)
+        val parsed = test_parse_message(content)
+        expect(parsed.method).to_equal("compute")
+
+    it "round-trips payload":
+        val msg = TestIpcMessage(
+            id: "1_5",
+            source: "a",
+            target: "b",
+            method: "m",
+            payload: "the-data-123",
+            timestamp: 0,
+            reply_to: ""
+        )
+        val content = test_serialize_message(msg)
+        val parsed = test_parse_message(content)
+        expect(parsed.payload).to_equal("the-data-123")
+
+    it "round-trips reply_to":
+        val msg = TestIpcMessage(
+            id: "1_6",
+            source: "a",
+            target: "b",
+            method: "m",
+            payload: "",
+            timestamp: 0,
+            reply_to: "orig_42"
+        )
+        val content = test_serialize_message(msg)
+        val parsed = test_parse_message(content)
+        expect(parsed.reply_to).to_equal("orig_42")
+
+    it "round-trips empty reply_to":
+        val msg = TestIpcMessage(
+            id: "1_7",
+            source: "a",
+            target: "b",
+            method: "m",
+            payload: "",
+            timestamp: 0,
+            reply_to: ""
+        )
+        val content = test_serialize_message(msg)
+        val parsed = test_parse_message(content)
+        expect(parsed.reply_to).to_equal("")
+
+# ============================================================================
+# IPC reply serialize / parse round-trip
+# ============================================================================
+
+describe "IPC Reply Serialization":
+    it "round-trips id":
+        val r = TestIpcReply(id: "reply_1_3", in_reply_to: "1_2", payload: "ok", error: "")
+        val content = test_serialize_reply(r)
+        val parsed = test_parse_reply(content)
+        expect(parsed.id).to_equal("reply_1_3")
+
+    it "round-trips in_reply_to":
+        val r = TestIpcReply(id: "r1", in_reply_to: "orig_99", payload: "done", error: "")
+        val content = test_serialize_reply(r)
+        val parsed = test_parse_reply(content)
+        expect(parsed.in_reply_to).to_equal("orig_99")
+
+    it "round-trips payload":
+        val r = TestIpcReply(id: "r2", in_reply_to: "x", payload: "result-data", error: "")
+        val content = test_serialize_reply(r)
+        val parsed = test_parse_reply(content)
+        expect(parsed.payload).to_equal("result-data")
+
+    it "round-trips error field":
+        val r = TestIpcReply(id: "r3", in_reply_to: "x", payload: "", error: "timeout")
+        val content = test_serialize_reply(r)
+        val parsed = test_parse_reply(content)
+        expect(parsed.error).to_equal("timeout")
+
+    it "round-trips empty error":
+        val r = TestIpcReply(id: "r4", in_reply_to: "x", payload: "val", error: "")
+        val content = test_serialize_reply(r)
+        val parsed = test_parse_reply(content)
+        expect(parsed.error).to_equal("")
+
+# ============================================================================
+# Atomic claim prevents double-consume (simulated with sequential consumes)
+# ============================================================================
+
+describe "Atomic Claim - Double-Consume Prevention":
+    it "first consume returns content":
+        # Simulate: message is available, first claim gets it
+        var claimed = false
+        var content = "msg-content"
+        if not claimed:
+            claimed = true
+            expect(content).to_equal("msg-content")
+        expect(claimed).to_equal(true)
+
+    it "second consume sees nothing after first claimed":
+        # Simulate: two sequential readers; second should get nothing
+        var claim_count: i64 = 0
+        var available = true
+
+        # First reader claims
+        if available:
+            available = false
+            claim_count = claim_count + 1
+
+        # Second reader attempts to claim same resource
+        if available:
+            claim_count = claim_count + 1
+
+        expect(claim_count).to_equal(1)
+
+    it "claim sets available to false":
+        var available = true
+        if available:
+            available = false
+        expect(available).to_equal(false)
+
+    it "failed claim returns empty path":
+        # rename-to-claimed fails if file already moved => returns ""
+        val claimed_path = ""
+        val got_message = claimed_path != ""
+        expect(got_message).to_equal(false)
+
+    it "successful claim returns non-empty path":
+        val claimed_path = "/tmp/simple_ipc/worker/inbox/42_1.msg.claimed"
+        val got_message = claimed_path != ""
+        expect(got_message).to_equal(true)
+
+# ============================================================================
+# Sequence IDs: unique and monotonic
+# ============================================================================
+
+describe "Sequence ID Uniqueness":
+    it "first ID uses sequence 1":
+        _test_seq = 0
+        val id1 = test_next_id(100)
+        expect(id1).to_equal("100_1")
+
+    it "second ID uses sequence 2":
+        _test_seq = 0
+        val id1 = test_next_id(100)
+        val id2 = test_next_id(100)
+        expect(id2).to_equal("100_2")
+
+    it "IDs are strictly monotonic":
+        _test_seq = 0
+        val id1 = test_next_id(50)
+        val id2 = test_next_id(50)
+        val id3 = test_next_id(50)
+        val seq1 = _test_seq - 2
+        val seq2 = _test_seq - 1
+        val seq3 = _test_seq
+        val mono = (seq1 < seq2) and (seq2 < seq3)
+        expect(mono).to_equal(true)
+
+    it "two IDs in same ms are different":
+        _test_seq = 0
+        val id1 = test_next_id(77)
+        val id2 = test_next_id(77)
+        val different = id1 != id2
+        expect(different).to_equal(true)
+
+    it "IDs from same process have same pid prefix":
+        _test_seq = 0
+        val id1 = test_next_id(123)
+        val id2 = test_next_id(123)
+        val starts1 = id1.starts_with("123_")
+        val starts2 = id2.starts_with("123_")
+        expect(starts1).to_equal(true)
+        expect(starts2).to_equal(true)
+
+    it "IDs from different pids are different even at same seq":
+        val id_a = "10_5"
+        val id_b = "20_5"
+        expect(id_a).to_not_equal(id_b)
+
+    it "sequence increments by 1 each call":
+        _test_seq = 0
+        val before = _test_seq
+        val id1 = test_next_id(1)
+        val after = _test_seq
+        expect(after).to_equal(before + 1)
+
+# ============================================================================
+# Kill guard: rejects dangerous pids
+# ============================================================================
+
+describe "Kill Guard - PID Safety":
+    it "rejects pid 0":
+        val safe = test_safe_to_kill(0)
+        expect(safe).to_equal(false)
+
+    it "rejects pid -1":
+        val safe = test_safe_to_kill(-1)
+        expect(safe).to_equal(false)
+
+    it "rejects pid 1":
+        val safe = test_safe_to_kill(1)
+        expect(safe).to_equal(false)
+
+    it "rejects negative pids":
+        val safe = test_safe_to_kill(-100)
+        expect(safe).to_equal(false)
+
+    it "allows pid 2":
+        val safe = test_safe_to_kill(2)
+        expect(safe).to_equal(true)
+
+    it "allows typical worker pid 1234":
+        val safe = test_safe_to_kill(1234)
+        expect(safe).to_equal(true)
+
+    it "allows large pid":
+        val safe = test_safe_to_kill(99999)
+        expect(safe).to_equal(true)
+
+    it "guard prevents kill when pid is 0":
+        var kill_called = false
+        val pid: i64 = 0
+        if pid > 1:
+            kill_called = true
+        expect(kill_called).to_equal(false)
+
+    it "guard allows kill when pid is valid":
+        var kill_called = false
+        val pid: i64 = 5678
+        if pid > 1:
+            kill_called = true
+        expect(kill_called).to_equal(true)

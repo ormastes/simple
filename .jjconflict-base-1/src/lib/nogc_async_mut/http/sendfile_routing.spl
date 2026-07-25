@@ -1,0 +1,118 @@
+"""
+Sendfile Routing
+
+Pure routing logic that decides how to serve a static-file HTTP response.
+Uses an explicit SendfileBackend enum so the chosen path is always labelled
+and inspectable by the verification gate.
+
+Feature IDs: FR-NET-0003
+Plan: doc/03_plan/webserver_hardening_optimization_plan_2026-05-26.md (WQ-2)
+Design: doc/05_design/net_http_sendfile_routing.md
+"""
+
+# ============================================================================
+# SendfileBackend — the routing decision for a static-file response
+# ============================================================================
+
+enum SendfileBackend:
+    """Explicit backend label for a static-file response route."""
+    Sendfile
+    PortableRead
+    Unsupported
+
+# ============================================================================
+# Capability descriptor (HTTP-layer subset)
+# ============================================================================
+
+struct SendfileCapabilities:
+    """Subset of backend capabilities relevant to sendfile routing."""
+    backend_name: text
+    sendfile_available: bool
+    zero_copy_available: bool
+
+fn sendfile_caps(name: text, sendfile: bool, zero_copy: bool) -> SendfileCapabilities:
+    """Build a capability descriptor for the current runtime backend."""
+    SendfileCapabilities(
+        backend_name: name,
+        sendfile_available: sendfile,
+        zero_copy_available: zero_copy
+    )
+
+fn sendfile_caps_portable(name: text) -> SendfileCapabilities:
+    """Portable backend: no kernel or hardware acceleration."""
+    sendfile_caps(name, false, false)
+
+fn sendfile_caps_with_sendfile(name: text) -> SendfileCapabilities:
+    """Backend with sendfile(2) or equivalent kernel support."""
+    sendfile_caps(name, true, false)
+
+fn sendfile_caps_with_zero_copy(name: text) -> SendfileCapabilities:
+    """Backend with zero-copy DMA but NOT sendfile."""
+    sendfile_caps(name, false, true)
+
+fn sendfile_caps_full(name: text) -> SendfileCapabilities:
+    """Backend with both sendfile and zero-copy."""
+    sendfile_caps(name, true, true)
+
+# ============================================================================
+# Detection — is sendfile available for the current backend?
+# ============================================================================
+
+fn detect_sendfile_support(caps: SendfileCapabilities) -> bool:
+    """Check whether the backend supports the sendfile syscall path."""
+    caps.sendfile_available
+
+# ============================================================================
+# Routing — pick the right backend for a static-file response
+# ============================================================================
+
+fn route_sendfile(caps: SendfileCapabilities, has_file_body: bool) -> SendfileBackend:
+    """
+    Choose the SendfileBackend for a static-file response.
+
+    Rules (per FR-NET-0003 design):
+    - No file body → Unsupported (response is in-memory, no file I/O path)
+    - sendfile available → Sendfile
+    - Otherwise → PortableRead (including zero-copy-only backends, because
+      the worker submit_sendfile API has no separate file-backed zero-copy
+      send path)
+
+    The zero-copy guard is implicit: zero_copy_available=true with
+    sendfile_available=false still returns PortableRead, never Sendfile.
+    """
+    if not has_file_body:
+        return SendfileBackend.Unsupported
+    if caps.sendfile_available:
+        return SendfileBackend.Sendfile
+    SendfileBackend.PortableRead
+
+# ============================================================================
+# Backend label — explicit text tag for the verification gate
+# ============================================================================
+
+fn sendfile_backend_label(backend: SendfileBackend) -> text:
+    """Return a human-readable label for logging and verification."""
+    match backend:
+        case Sendfile: "sendfile"
+        case PortableRead: "portable-read"
+        case Unsupported: "unsupported"
+
+# ============================================================================
+# Guard — prevent zero-copy from incorrectly routing to sendfile
+# ============================================================================
+
+fn sendfile_guard_ok(caps: SendfileCapabilities, routed: SendfileBackend) -> bool:
+    """
+    Verify that the routing decision is safe.
+
+    Returns false if the routed backend is Sendfile but the actual
+    capability does not support it. This catches any future caller
+    that constructs a Sendfile variant without going through route_sendfile.
+    """
+    match routed:
+        case Sendfile:
+            caps.sendfile_available
+        case PortableRead:
+            true
+        case Unsupported:
+            true

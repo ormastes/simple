@@ -1,0 +1,74 @@
+"""
+NVMe firmware **Cosmos+ OpenSSD** (Zynq-7000 / Cortex-A9) bring-up — booted on QEMU's
+`xilinx-zynq-a9` machine (the actual Zynq-7000 emulation) and observed over the Cadence UART.
+
+**Feature IDs:** #NVME-COSMOS-001
+**Category:** Hardware
+**Difficulty:** 4/5
+**Status:** Implemented (bring-up; silicon port gaps enumerated)
+**Plan:** doc/03_plan/hardware/cosmos_openssd_port_2026-06-30.md
+**Research:** doc/01_research/hardware/nvme_firmware/research_addendum_2026-06-29.md
+
+Config 3: the real NVMe-fw dev environment based on the CRZ Cosmos+ OpenSSD platform. The
+Cortex-A9 bring-up (`src/os/kernel/arch/arm32/cosmos/`, Cadence UART) boots on QEMU's
+`xilinx-zynq-a9` and prints a banner plus an explicit "MISSING for silicon" gap list — the
+port is deliberately incomplete and says so (see the plan doc for the full gap analysis).
+
+Build the image first: `sh src/os/kernel/arch/arm32/cosmos/build.shs`.
+
+FAIL-CLOSED: this spec passes ONLY when the image genuinely boots on the Zynq emulation and
+the Cadence UART shows every required marker (banner + UART-up + honest gap list). If
+`qemu-system-arm` is absent, the prebuilt image is missing, or a marker is absent, the single
+classification assertion below goes RED — it never asserts a self-containing literal and never
+skips. Run: `bin/simple test test/03_system/app/nvme_firmware/nvme_cosmos_openssd_boot_spec.spl`.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run}
+
+val ELF: text = "build/os/simpleos_cosmos_openssd.elf"
+val SERIAL: text = "build/test-artifacts/nvme_cosmos.log"
+
+fn _probe(cmd: text) -> (text, text, i64):
+    process_run("/bin/sh", ["-c", cmd])
+
+fn _boot() -> (text, text, i64):
+    # qemu zynq-a9: route UART1 (the firmware's primary Cadence UART) to a capture file.
+    process_run("/bin/sh", ["-c", "mkdir -p build/test-artifacts; timeout 8 qemu-system-arm -M xilinx-zynq-a9 -display none -serial null -serial file:" + SERIAL + " -kernel " + ELF + " </dev/null; cat " + SERIAL])
+
+describe "NVMe firmware Cosmos+ OpenSSD bring-up on QEMU xilinx-zynq-a9":
+    """
+    The CRZ Cosmos+ OpenSSD (Zynq-7000 / Cortex-A9) bring-up boots on the real Zynq
+    emulation and reports over the Cadence UART, including the explicit silicon-port gap list.
+    """
+
+    it "boots on the Zynq-7000 emulation and reports the Cosmos+ banner + gap list":
+        step("Probe the host for qemu-system-arm and the prebuilt Cosmos+ image")
+        val (qout, qerr, qcode) = _probe("command -v qemu-system-arm >/dev/null 2>&1 && echo QEMU_PRESENT || echo QEMU_ABSENT")
+        val (eout, eerr, ecode) = _probe("test -f " + ELF + " && echo ELF_PRESENT || echo ELF_ABSENT")
+
+        # Single fail-closed classification (see header): GREEN only on a real Zynq boot whose
+        # Cadence UART shows the banner, the UART-up line, and the honest silicon-gap list.
+        var verdict: text = "pass"
+        if qout.contains("QEMU_ABSENT"):
+            verdict = "host-unavailable: qemu-system-arm not installed"
+        else:
+            if eout.contains("ELF_ABSENT"):
+                verdict = "missing-media: " + ELF + " not built (run src/os/kernel/arch/arm32/cosmos/build.shs)"
+            else:
+                step("Boot the Cosmos+ image on QEMU xilinx-zynq-a9 and capture the Cadence UART")
+                val (out, err, code) = _boot()
+                if not out.contains("COSMOS+ OpenSSD"):
+                    verdict = "boot-fail: COSMOS+ OpenSSD banner absent"
+                else:
+                    if out.contains("FAIL"):
+                        verdict = "boot-fail: serial failure marker present"
+                    else:
+                        if not out.contains("Cadence UART"):
+                            verdict = "boot-fail: Cadence UART up-marker absent"
+                        else:
+                            if not out.contains("MISSING for silicon"):
+                                verdict = "boot-fail: honest silicon-gap list absent"
+
+        step("Fail-closed: only a real Zynq boot with banner + UART + gap list classifies as pass")
+        expect(verdict).to_equal("pass")

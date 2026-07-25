@@ -1,0 +1,63 @@
+# Strict native proof for deferred Metal submission ownership.
+#
+# This intentionally uses an unknown registry handle. It exercises the runtime
+# failure path without creating a Metal device or dispatching GPU work.
+
+use std.nogc_sync_mut.io.metal_sffi.{
+    metal_sffi_is_available,
+    metal_sffi_create_device,
+    metal_sffi_destroy_device,
+    metal_sffi_create_command_queue,
+    metal_sffi_destroy_command_queue,
+    metal_sffi_create_command_buffer,
+    metal_sffi_destroy_command_buffer,
+    metal_sffi_quarantine_submission,
+    metal_sffi_quarantine_release_proven,
+    metal_sffi_reap_submission_quarantine,
+}
+
+fn _metal_registry_lifecycle_available() -> bool:
+    val device = metal_sffi_create_device(0)
+    if device <= 0:
+        return false
+    val queue = metal_sffi_create_command_queue(device)
+    if queue <= 0:
+        metal_sffi_destroy_device(device)
+        return false
+    val command = metal_sffi_create_command_buffer(queue)
+    if command <= 0:
+        metal_sffi_destroy_command_queue(queue)
+        metal_sffi_destroy_device(device)
+        return false
+    val command_released = metal_sffi_destroy_command_buffer(command)
+    val queue_released = metal_sffi_destroy_command_queue(queue)
+    val device_released = metal_sffi_destroy_device(device)
+    command_released and queue_released and device_released
+
+fn main() -> i64:
+    # The retention oracle relies on real Metal registry lookups returning
+    # false for an unknown handle. A runtime without the Metal extern surface
+    # can coerce missing calls to false too, which would be a false green.
+    if not metal_sffi_is_available() or not _metal_registry_lifecycle_available():
+        return 8
+    if metal_sffi_quarantine_release_proven(false, false):
+        return 1
+    if not metal_sffi_quarantine_release_proven(true, false):
+        return 2
+    if not metal_sffi_quarantine_release_proven(false, true):
+        return 3
+    if metal_sffi_quarantine_submission(0, 0, 0, 0):
+        return 4
+
+    # No Metal objects exist in this process, so this positive handle is
+    # unknown to the runtime registry. Both wait and removal must fail, and the
+    # submission must remain quarantined across repeated reaper passes.
+    if not metal_sffi_quarantine_submission(0x5a5a5a, 0, 0, 0):
+        return 5
+    if metal_sffi_reap_submission_quarantine():
+        return 6
+    if metal_sffi_reap_submission_quarantine():
+        return 7
+
+    print("metal-sffi-quarantine: pass")
+    0

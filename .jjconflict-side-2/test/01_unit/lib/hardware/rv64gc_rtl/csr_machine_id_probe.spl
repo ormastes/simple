@@ -1,0 +1,50 @@
+# Probe: OpenSBI reads mvendorid/marchid/mimpid (0xF11-0xF13) and mconfigptr
+# (0xF15) directly in sbi_boot_print_banner. They are read-only-0 machine-ID
+# CSRs; the core must return 0 for a csrr of each WITHOUT taking an illegal
+# trap (regression guard for core64_machine_csr_known).
+# Run: bin/simple run test/01_unit/lib/hardware/rv64gc_rtl/csr_machine_id_probe.spl
+use std.hardware.rv64gc_rtl.core.{CoreState64, core64_init, core64_combinational, core64_update}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS {name}")
+        return 0
+    print("FAIL {name}")
+    1
+
+fn main() -> i64:
+    var fails: i64 = 0
+
+    # Reset vector 0:
+    #   0x00 csrrs x5,  mvendorid(0xF11), x0
+    #   0x04 csrrs x6,  marchid(0xF12),   x0
+    #   0x08 csrrs x7,  mimpid(0xF13),    x0
+    #   0x0C csrrs x28, mconfigptr(0xF15),x0
+    #   0x10 jal   x0, 0                  (park)
+    val prog = [0xF11022F3u32, 0xF1202373u32, 0xF13023F3u32, 0xF1502E73u32,
+                0x0000006Fu32]
+
+    var st = core64_init(0)
+    var i = 0
+    while i < 12:
+        val idx = st.pc / 4
+        var insn: u32 = 0x0000006Fu32
+        if idx >= 0 and idx < 5:
+            insn = prog[idx]
+        val comb = core64_combinational(st, insn, 0, st.rf)
+        st = core64_update(st, insn, comb, comb.a0_val, comb.a1_val)
+        i = i + 1
+
+    print("pc={st.pc} mcause={st.csr_m.mcause} x5={st.rf.regs[5]} x6={st.rf.regs[6]} x7={st.rf.regs[7]} x28={st.rf.regs[28]}")
+    fails = fails + check("no illegal trap taken (mcause==0)", st.csr_m.mcause == 0)
+    fails = fails + check("parked at jal self-loop 0x10 (all csrr retired)", st.pc == 0x10)
+    fails = fails + check("mvendorid reads 0", st.rf.regs[5] == 0)
+    fails = fails + check("marchid reads 0", st.rf.regs[6] == 0)
+    fails = fails + check("mimpid reads 0", st.rf.regs[7] == 0)
+    fails = fails + check("mconfigptr reads 0", st.rf.regs[28] == 0)
+
+    if fails == 0:
+        print("CSR MACHINE-ID PROBE: ALL PASS")
+        return 0
+    print("CSR MACHINE-ID PROBE: {fails} FAILURES")
+    1

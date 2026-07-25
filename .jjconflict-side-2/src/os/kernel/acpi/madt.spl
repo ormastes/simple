@@ -1,0 +1,65 @@
+# ACPI MADT parser for CPU topology discovery.
+#
+# The Multiple APIC Description Table ("APIC") enumerates Local APIC/x2APIC
+# processor entries. Scheduler topology uses these APIC IDs as the hardware CPU
+# ids and CPUID topology leaves provide the SMT/cache grouping shape.
+
+use os.kernel.boot.mmio.{mmio_read8, mmio_read32}
+use os.kernel.boot.limine_boot.{phys_to_virt}
+use os.kernel.acpi.rsdt.{SDT_OFF_LENGTH, SDT_HEADER_LEN, acpi_find_table}
+
+val ACPI_SIG_APIC: u32 = 0x43495041
+
+val MADT_ENTRY_TYPE_LOCAL_APIC: u8 = 0
+val MADT_ENTRY_TYPE_LOCAL_X2APIC: u8 = 9
+val MADT_ENTRY_HEADER_LEN: u64 = 2
+val MADT_FIXED_HEADER_LEN: u64 = 44
+val MADT_CPU_ENABLED: u32 = 1
+val MADT_CPU_ONLINE_CAPABLE: u32 = 8
+
+val MADT_LAPIC_LEN: u8 = 8
+val MADT_LAPIC_OFF_APIC_ID: u64 = 3
+val MADT_LAPIC_OFF_FLAGS: u64 = 4
+
+val MADT_X2APIC_LEN: u8 = 16
+val MADT_X2APIC_OFF_ID: u64 = 4
+val MADT_X2APIC_OFF_FLAGS: u64 = 8
+
+fn _madt_cpu_flags_usable(flags: u32) -> bool:
+    (flags & MADT_CPU_ENABLED) != 0 or (flags & MADT_CPU_ONLINE_CAPABLE) != 0
+
+fn acpi_madt_lapic_ids_raw(read8: fn(u64) -> u8, read32: fn(u64) -> u32, base: u64) -> [u32]:
+    """Return usable Local APIC/x2APIC ids from a MADT byte source."""
+    val total_len = read32(base + SDT_OFF_LENGTH) as u64
+    var ids: [u32] = []
+    if total_len < MADT_FIXED_HEADER_LEN:
+        return ids
+
+    var off = MADT_FIXED_HEADER_LEN
+    while off + MADT_ENTRY_HEADER_LEN <= total_len:
+        val entry_type = read8(base + off)
+        val entry_len = read8(base + off + 1) as u64
+        if entry_len < MADT_ENTRY_HEADER_LEN:
+            break
+        if off + entry_len > total_len:
+            break
+
+        if entry_type == MADT_ENTRY_TYPE_LOCAL_APIC and entry_len >= MADT_LAPIC_LEN as u64:
+            val flags = read32(base + off + MADT_LAPIC_OFF_FLAGS)
+            if _madt_cpu_flags_usable(flags):
+                ids.push(read8(base + off + MADT_LAPIC_OFF_APIC_ID) as u32)
+        elif entry_type == MADT_ENTRY_TYPE_LOCAL_X2APIC and entry_len >= MADT_X2APIC_LEN as u64:
+            val flags = read32(base + off + MADT_X2APIC_OFF_FLAGS)
+            if _madt_cpu_flags_usable(flags):
+                ids.push(read32(base + off + MADT_X2APIC_OFF_ID))
+
+        off = off + entry_len
+    ids
+
+fn acpi_madt_lapic_ids(rsdp_phys: u64) -> [u32]:
+    """Find MADT through RSDP and return usable APIC/x2APIC ids."""
+    val madt_phys = acpi_find_table(rsdp_phys, ACPI_SIG_APIC)
+    if madt_phys == nil:
+        return []
+    val virt = phys_to_virt(madt_phys as u64)
+    acpi_madt_lapic_ids_raw(mmio_read8, mmio_read32, virt)

@@ -1,0 +1,130 @@
+# Engine2D Compute Dispatch
+#
+# Probe-backed selector for the shared compute-session plan. This layer chooses
+# the fastest usable compute backend by policy order and exposes frame sync and
+# launch-count evidence while concrete sessions continue to mature.
+
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendProber, BackendStatus, StrictBackendFactory}
+use std.gpu.engine2d.backend_session.{BackendFrame}
+use std.gpu.engine2d.simd_provider.{simd_hit_counts}
+
+class ComputeDispatchHits:
+    kernel_launches: i64
+    synchronize_calls: i64
+    simd_fill_hits: i64
+    simd_copy_hits: i64
+    simd_alpha_hits: i64
+    simd_blit_hits: i64
+    simd_scroll_hits: i64
+
+    static fn zero() -> ComputeDispatchHits:
+        ComputeDispatchHits(
+            kernel_launches: 0,
+            synchronize_calls: 0,
+            simd_fill_hits: 0,
+            simd_copy_hits: 0,
+            simd_alpha_hits: 0,
+            simd_blit_hits: 0,
+            simd_scroll_hits: 0
+        )
+
+    me record_kernel_launch():
+        self.kernel_launches = self.kernel_launches + 1
+
+    me record_synchronize():
+        self.synchronize_calls = self.synchronize_calls + 1
+
+    me refresh_simd_counts():
+        val counts = simd_hit_counts()
+        self.simd_fill_hits = counts.fill_hits
+        self.simd_copy_hits = counts.copy_hits
+        self.simd_alpha_hits = counts.alpha_hits
+        self.simd_blit_hits = counts.blit_hits
+        self.simd_scroll_hits = counts.scroll_hits
+
+    fn summary() -> text:
+        "gpu_launches={self.kernel_launches};sync={self.synchronize_calls};simd_fill={self.simd_fill_hits};simd_copy={self.simd_copy_hits};simd_alpha={self.simd_alpha_hits};simd_blit={self.simd_blit_hits};simd_scroll={self.simd_scroll_hits}"
+
+class ComputeDispatchResult:
+    selected_name: text
+    session_kind: text
+    probe: BackendProbeResult
+    hits: ComputeDispatchHits
+
+    static fn create(probe: BackendProbeResult) -> ComputeDispatchResult:
+        ComputeDispatchResult(
+            selected_name: probe.selected_name,
+            session_kind: probe.selected_name,
+            probe: probe,
+            hits: ComputeDispatchHits.zero()
+        )
+
+    fn is_available() -> bool:
+        self.probe.status == BackendStatus.Initialized
+
+    me record_launch():
+        self.hits.record_kernel_launch()
+
+    me refresh_hit_counts():
+        self.hits.refresh_simd_counts()
+
+    me synchronize_frame() -> bool:
+        self.hits.record_synchronize()
+        self.probe.has_compute
+
+    me synchronize_backend_frame(frame: BackendFrame) -> text:
+        self.hits.record_synchronize()
+        val submit_status = frame.mark_submitted()
+        if not self.probe.has_compute:
+            return "no_compute"
+        if submit_status != "":
+            return submit_status
+        "ok"
+
+    fn summary() -> text:
+        "dispatch selected={self.selected_name};status={self.probe.status};hits={self.hits.summary()};probe={self.probe.diagnostic_text()}"
+
+class ComputeDispatch:
+    prober: BackendProber
+
+    static fn create() -> ComputeDispatch:
+        ComputeDispatch(prober: BackendProber.create())
+
+    static fn auto() -> ComputeDispatchResult:
+        ComputeDispatch.create().select_best()
+
+    static fn from_strict_factory(factory: StrictBackendFactory, name: text) -> ComputeDispatchResult:
+        ComputeDispatchResult.create(factory.create_backend(name))
+
+    fn select_best() -> ComputeDispatchResult:
+        val cuda = self.prober.probe_cuda()
+        if cuda.status == BackendStatus.Initialized:
+            return ComputeDispatchResult.create(cuda)
+
+        val rocm = self.prober.probe_rocm()
+        if rocm.status == BackendStatus.Initialized:
+            return ComputeDispatchResult.create(rocm)
+
+        val opencl = self.prober.probe_opencl()
+        if opencl.status == BackendStatus.Initialized:
+            return ComputeDispatchResult.create(opencl)
+
+        val cpu_x86 = self.prober.probe_cpu_simd_x86()
+        if cpu_x86.status == BackendStatus.Initialized:
+            return ComputeDispatchResult.create(cpu_x86)
+
+        val cpu_arm = self.prober.probe_cpu_simd_arm()
+        if cpu_arm.status == BackendStatus.Initialized:
+            return ComputeDispatchResult.create(cpu_arm)
+
+        val cpu_riscv = self.prober.probe_cpu_simd_riscv()
+        if cpu_riscv.status == BackendStatus.Initialized:
+            return ComputeDispatchResult.create(cpu_riscv)
+
+        ComputeDispatchResult.create(self.prober.probe_cpu())
+
+fn compute_dispatch_auto() -> ComputeDispatchResult:
+    ComputeDispatch.auto()
+
+fn compute_dispatch_for_backend(name: text) -> ComputeDispatchResult:
+    ComputeDispatch.from_strict_factory(StrictBackendFactory.strict(), name)

@@ -1,0 +1,77 @@
+# @tag: font, sfnt, glyf, vector, host, text_layout
+# @cover src/lib/common/encoding/font_registry.spl 40%
+# @cover src/lib/common/encoding/sfnt.spl 20%
+# @cover src/lib/nogc_sync_mut/sffi/spl_fonts.spl 20%
+# @evidence-display: links
+
+"""# Vector Font Pipeline (Host)
+
+End-to-end HOST-side vector font path now used by SimpleOS: the checked-in
+NotoSansMono selected asset validates against the pinned registry identity,
+its sfnt `name` table decodes the five canonical embedded names, and the
+pure-sfnt-glyf rasterizer (no native dylib, no dylib_path) turns a real glyph
+outline into a nonzero-coverage alpha bitmap. This is the `FontRasterizer`
+`lib_handle == 0` branch — `load_selected()` + `rasterize()` routing straight
+into `_rasterize_selected_outline()` / `sfnt_rasterize_codepoint_parts()`.
+"""
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+use std.common.encoding.font_registry.{validate_selected_font_asset}
+use std.common.encoding.sfnt.{sfnt_debug_selected_names}
+use std.nogc_sync_mut.sffi.spl_fonts.{FontRasterizer, GlyphBitmap}
+
+val NOTO_SANS_MONO_PATH = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+
+# Checker helper: crosses the spl_fonts module boundary on a GlyphBitmap
+# value, so it takes the type explicitly and reads only the gbm_-prefixed
+# fields / alpha_at() accessor (the prefix exists specifically so this
+# cross-module read cannot collide with CachedGlyph's field offsets).
+fn Then_glyph_has_plausible_coverage(glyph: GlyphBitmap):
+    expect(glyph.gbm_width).to_be_greater_than(0)
+    expect(glyph.gbm_width).to_be_less_than(65)
+    expect(glyph.gbm_height).to_be_greater_than(0)
+    expect(glyph.gbm_height).to_be_less_than(65)
+    var coverage: i64 = 0
+    var y: i64 = 0
+    while y < glyph.gbm_height:
+        var x: i64 = 0
+        while x < glyph.gbm_width:
+            coverage = coverage + glyph.alpha_at(x, y)
+            x = x + 1
+        y = y + 1
+    expect(coverage).to_be_greater_than(0)
+
+describe "Vector font pipeline: selected asset validation":
+
+    it "selected font asset validates":
+        step("Read the checked-in NotoSansMono selected asset bytes")
+        val blob = file_read_bytes(NOTO_SANS_MONO_PATH)
+        expect(blob.len()).to_equal(1708408)
+
+        step("Validate the exact bytes against the pinned registry identity")
+        val result = validate_selected_font_asset(NOTO_SANS_MONO_PATH, blob)
+        expect(result.selected).to_be(true)
+        expect(result.valid).to_be(true)
+        expect(result.reason).to_equal("valid")
+        expect(result.family).to_equal("Noto Sans Mono")
+
+describe "Vector font pipeline: sfnt name table decode":
+
+    it "name table decodes the 5 canonical names":
+        val blob = file_read_bytes(NOTO_SANS_MONO_PATH)
+        val decoded = sfnt_debug_selected_names(blob)
+        expect(decoded).to_equal("|Noto Sans Mono|Regular|Noto Sans Mono Regular|NotoSansMono-Regular|Version 2.014")
+
+describe "Vector font pipeline: glyf outline rasterization":
+
+    it "glyf outline rasterizes a real glyph":
+        step("Load the selected face through the no-dylib pure-sfnt-glyf path")
+        val fr = FontRasterizer.load_selected(NOTO_SANS_MONO_PATH)
+        expect(fr != nil).to_be(true)
+        if fr != nil:
+            step("Rasterize the digit '0' (codepoint 48) at 12px — the clock uses digits")
+            val glyph = fr.rasterize(48, 12)
+            expect(glyph != nil).to_be(true)
+            if glyph != nil:
+                Then_glyph_has_plausible_coverage(glyph)

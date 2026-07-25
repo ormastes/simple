@@ -1,0 +1,35 @@
+"""
+# Claude Full Session Storage Project
+
+Checks Project parity for encoded project paths, transcript append chains,
+message removal, flush state, and test reset hooks.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.utils.sessionStorage.*
+
+describe "Claude full utils sessionStorage Project":
+    it "tracks a project transcript chain and flush snapshot":
+        step("Create a project in an encoded cwd and append two message entries")
+        val project = getProject("/home/dev/my repo", "session-1")
+        val withUser = project.addMessage("u1", "user", "hello")
+        val withAssistant = withUser.addMessage("a1", "assistant", "world")
+
+        expect(project.dir).to_equal("~/.claude/projects/-home-dev-my repo")
+        expect(withAssistant.transcriptPath()).to_equal("~/.claude/projects/-home-dev-my repo/session-1.jsonl")
+        expect(withAssistant.messages.len()).to_equal(2)
+        expect(withAssistant.messages[1].parentUuid).to_equal("u1")
+        expect(withAssistant.lastUuid()).to_equal("a1")
+        expect(sessionIdExists(withAssistant, "session-1")).to_equal(true)
+
+        step("Remove a message, flush the JSONL-style snapshot, and reset flush state")
+        val removed = withAssistant.removeTranscriptMessage("u1")
+        val flushed = removed.flush()
+        val reset = resetProjectFlushStateForTesting(flushed)
+
+        expect(removed.messages.len()).to_equal(1)
+        expect(flushed.flushState.pending).to_equal(false)
+        expect(flushed.flushState.flushCount).to_equal(1)
+        expect(flushed.flushState.lastWrite).to_contain("a1")
+        expect(reset.flushState.flushCount).to_equal(0)
+        expect(sessionStorageSourceLinesModeled()).to_equal(4018)

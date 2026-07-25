@@ -1,0 +1,77 @@
+# Header Decision Specification (chunked rejection + Content-Length policy)
+#
+# **Feature IDs:** #SEC-022
+# **Category:** HTTP Server Security
+# **Difficulty:** 2/5
+# **Status:** Implemented
+#
+# ## Overview
+# headers_decision() is the pure decision function parse_request_with_limits
+# applies to the parsed header list. These specs drive the REAL rejection
+# branches (review finding: the previous version of this spec only poked
+# content_length_from_text and left the 501/400/413 branches untested):
+#   - Transfer-Encoding: chunked -> 501 (fail closed, never misparsed)
+#   - duplicate Content-Length -> 400 (request-smuggling vector)
+#   - invalid Content-Length -> 400
+#   - Content-Length above max_body -> 413
+#   - acceptable headers -> ("", content_length)
+
+use std.spec.*
+use std.nogc_sync_mut.http_server.parser.{headers_decision, MAX_BODY_SIZE}
+
+describe "headers_decision — chunked Transfer-Encoding rejected with 501":
+    it "rejects Transfer-Encoding: chunked":
+        val d = headers_decision([("Transfer-Encoding", "chunked")], MAX_BODY_SIZE)
+        expect(d.0.starts_with("501")).to_equal(true)
+
+    it "rejects mixed-case header name and value":
+        val d = headers_decision([("TRANSFER-ENCODING", "Chunked")], MAX_BODY_SIZE)
+        expect(d.0.starts_with("501")).to_equal(true)
+
+    it "rejects chunked inside a compound value":
+        val d = headers_decision([("Transfer-Encoding", "gzip, chunked")], MAX_BODY_SIZE)
+        expect(d.0.starts_with("501")).to_equal(true)
+
+    it "accepts non-chunked transfer-encoding values":
+        val d = headers_decision([("Transfer-Encoding", "identity")], MAX_BODY_SIZE)
+        expect(d.0).to_equal("")
+
+describe "headers_decision — Content-Length policy":
+    it "accepts a single valid Content-Length":
+        val d = headers_decision([("Content-Length", "42")], MAX_BODY_SIZE)
+        expect(d.0).to_equal("")
+        expect(d.1).to_equal(42)
+
+    it "rejects duplicate Content-Length with 400":
+        val d = headers_decision([("Content-Length", "42"), ("content-length", "42")], MAX_BODY_SIZE)
+        expect(d.0.starts_with("400")).to_equal(true)
+
+    it "rejects conflicting duplicate Content-Length with 400":
+        val d = headers_decision([("Content-Length", "10"), ("Content-Length", "999")], MAX_BODY_SIZE)
+        expect(d.0.starts_with("400")).to_equal(true)
+
+    it "rejects negative Content-Length with 400":
+        val d = headers_decision([("Content-Length", "-1")], MAX_BODY_SIZE)
+        expect(d.0.starts_with("400")).to_equal(true)
+
+    it "rejects non-numeric Content-Length with 400":
+        val d = headers_decision([("Content-Length", "abc")], MAX_BODY_SIZE)
+        expect(d.0.starts_with("400")).to_equal(true)
+
+    it "rejects plus-signed Content-Length with 400":
+        val d = headers_decision([("Content-Length", "+5")], MAX_BODY_SIZE)
+        expect(d.0.starts_with("400")).to_equal(true)
+
+    it "rejects Content-Length above max_body with 413":
+        val d = headers_decision([("Content-Length", "1025")], 1024)
+        expect(d.0.starts_with("413")).to_equal(true)
+
+    it "accepts Content-Length exactly at max_body":
+        val d = headers_decision([("Content-Length", "1024")], 1024)
+        expect(d.0).to_equal("")
+        expect(d.1).to_equal(1024)
+
+    it "returns zero content length when no body headers present":
+        val d = headers_decision([("Host", "example.com"), ("Accept", "*/*")], MAX_BODY_SIZE)
+        expect(d.0).to_equal("")
+        expect(d.1).to_equal(0)

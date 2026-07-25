@@ -1,0 +1,36 @@
+use std.spec.{describe, it, expect}
+use std.common.gpu.font_atlas_composite.{
+    FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION,
+    font_atlas_composite_cache_identity
+}
+
+fn _identity(material: text, backend: text, device: text, artifact: text, dependency: text) -> text:
+    font_atlas_composite_cache_identity(material, backend, device, artifact, dependency)
+
+describe "font atlas composite cache identity":
+    it "is stable, target-aware, collision-safe, and fail-closed":
+        val base = _identity("material", "vulkan", "device", "artifact", "dependency")
+        val semantics = FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION.to_string()
+        expect(FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION).to_equal(2)
+        expect(base).to_equal(_identity("material", "vulkan", "device", "artifact", "dependency"))
+        expect(base).to_contain("|semantics=" + semantics.len().to_string() + ":" + semantics)
+        expect(base == _identity("material-2", "vulkan", "device", "artifact", "dependency")).to_be(false)
+        expect(base == _identity("material", "metal", "device", "artifact", "dependency")).to_be(false)
+        expect(base == _identity("material", "vulkan", "device-2", "artifact", "dependency")).to_be(false)
+        expect(base == _identity("material", "vulkan", "device", "artifact-2", "dependency")).to_be(false)
+        expect(base == _identity("material", "vulkan", "device", "artifact", "dependency-2")).to_be(false)
+        expect(_identity("a|b", "c", "d", "e", "f") == _identity("a", "b|c", "d", "e", "f")).to_be(false)
+        expect(_identity("", "b", "c", "d", "e")).to_equal("")
+        expect(_identity("a", "", "c", "d", "e")).to_equal("")
+        expect(_identity("a", "b", "", "d", "e")).to_equal("")
+        expect(_identity("a", "b", "c", "", "e")).to_equal("")
+        expect(_identity("a", "b", "c", "d", "")).to_equal("")
+
+    it "keeps the six native font targets distinct":
+        var keys: [text] = []
+        for backend in ["cuda", "metal", "opencl", "rocm", "vulkan2d", "vulkan3d"]:
+            val key = _identity("material", backend, "device", "artifact", "dependency")
+            expect(key).to_contain("|backend=" + backend.len().to_string() + ":" + backend)
+            for prior in keys:
+                expect(key == prior).to_be(false)
+            keys.push(key)

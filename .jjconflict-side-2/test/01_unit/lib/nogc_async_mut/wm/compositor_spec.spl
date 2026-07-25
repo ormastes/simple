@@ -1,0 +1,107 @@
+"""WM Compositor ECS World — window lifecycle, framebuffer present, input, clipboard, cursor."""
+
+use std.spec.{describe, it, expect, to_equal, to_contain, to_be_greater_than}
+use nogc_async_mut.wm.compositor.{
+    wm_compositor_new,
+    wm_compositor_window_create,
+    wm_compositor_window_destroy,
+    wm_compositor_window_configure,
+    wm_compositor_window_focus,
+    wm_compositor_window_present,
+    wm_compositor_set_cursor,
+    wm_compositor_set_clipboard,
+    wm_compositor_get_clipboard,
+    wm_compositor_push_input,
+    wm_compositor_poll_input,
+    wm_compositor_window_count,
+    WmCompositor,
+    WmOpResult,
+    WmInputEvent,
+    WmInputPollResult
+}
+
+fn _ready_compositor():
+    val c0 = wm_compositor_new()
+    val r1 = wm_compositor_window_create(c0, 1, "wine-app", "Hello", 640, 480)
+    val r2 = wm_compositor_window_configure(r1.compositor, 1, 0, 0, 800, 600)
+    val r3 = wm_compositor_window_focus(r2.compositor, 1)
+    val r4 = wm_compositor_window_present(r3.compositor, 1, 42)
+    val r5 = wm_compositor_set_cursor(r4.compositor, "arrow")
+    val r6 = wm_compositor_set_clipboard(r5.compositor, "hello-clip")
+    wm_compositor_window_destroy(r6.compositor, 1)
+
+describe "WM Compositor ECS World":
+    it "starts empty with no windows":
+        val c = wm_compositor_new()
+        expect(wm_compositor_window_count(c)).to_equal(0)
+
+    it "creates a window and increments count":
+        val c = wm_compositor_new()
+        val r = wm_compositor_window_create(c, 1, "wine-app", "Hello", 640, 480)
+        expect(r.ok).to_equal(true)
+        expect(r.state).to_equal("created")
+        expect(wm_compositor_window_count(r.compositor)).to_equal(1)
+
+    it "rejects creating a window with id 0 or duplicate id":
+        val c = wm_compositor_new()
+        val bad = wm_compositor_window_create(c, 0, "wine-app", "Bad", 640, 480)
+        expect(bad.ok).to_equal(false)
+        expect(bad.state).to_equal("invalid-id")
+        val r1 = wm_compositor_window_create(c, 2, "wine-app", "Win", 640, 480)
+        val dup = wm_compositor_window_create(r1.compositor, 2, "wine-app", "Dup", 320, 200)
+        expect(dup.ok).to_equal(false)
+        expect(dup.state).to_equal("window-exists")
+
+    it "configures geometry and increments generation":
+        val c = wm_compositor_new()
+        val r1 = wm_compositor_window_create(c, 1, "wine-app", "Win", 320, 200)
+        val r2 = wm_compositor_window_configure(r1.compositor, 1, 10, 20, 800, 600)
+        expect(r2.ok).to_equal(true)
+        expect(r2.state).to_equal("configured")
+        expect(r2.generation).to_be_greater_than(0)
+
+    it "records focus state for the active window":
+        val c = wm_compositor_new()
+        val r1 = wm_compositor_window_create(c, 5, "wine-app", "Win", 640, 480)
+        val r2 = wm_compositor_window_focus(r1.compositor, 5)
+        expect(r2.ok).to_equal(true)
+        expect(r2.state).to_equal("focused")
+        expect(r2.focused_id).to_equal(5)
+
+    it "records framebuffer present with nonzero checksum evidence":
+        val c = wm_compositor_new()
+        val r1 = wm_compositor_window_create(c, 1, "wine-app", "Win", 10, 10)
+        val r2 = wm_compositor_window_present(r1.compositor, 1, 5)
+        expect(r2.ok).to_equal(true)
+        expect(r2.state).to_equal("presented")
+        expect(r2.checksum).to_be_greater_than(0)
+
+    it "tracks cursor and clipboard state":
+        val c = wm_compositor_new()
+        val r1 = wm_compositor_set_cursor(c, "crosshair")
+        expect(r1.ok).to_equal(true)
+        expect(r1.cursor_name).to_equal("crosshair")
+        val r2 = wm_compositor_set_clipboard(r1.compositor, "some text")
+        expect(r2.ok).to_equal(true)
+        val clip = wm_compositor_get_clipboard(r2.compositor)
+        expect(clip).to_equal("some text")
+
+    it "destroys a window and decrements count":
+        val c = wm_compositor_new()
+        val r1 = wm_compositor_window_create(c, 3, "wine-app", "Win", 640, 480)
+        val r2 = wm_compositor_window_destroy(r1.compositor, 3)
+        expect(r2.ok).to_equal(true)
+        expect(r2.state).to_equal("destroyed")
+        expect(wm_compositor_window_count(r2.compositor)).to_equal(0)
+
+    it "rejects configure/focus/present/destroy on missing window":
+        val c = wm_compositor_new()
+        val rc = wm_compositor_window_configure(c, 99, 0, 0, 640, 480)
+        expect(rc.ok).to_equal(false)
+        expect(rc.state).to_equal("missing-window")
+        val rf = wm_compositor_window_focus(c, 99)
+        expect(rf.ok).to_equal(false)
+        val rp = wm_compositor_window_present(c, 99, 1)
+        expect(rp.ok).to_equal(false)
+        val rd = wm_compositor_window_destroy(c, 99)
+        expect(rd.ok).to_equal(false)

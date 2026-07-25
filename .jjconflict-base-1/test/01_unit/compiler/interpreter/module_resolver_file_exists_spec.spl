@@ -1,0 +1,60 @@
+"""
+# Module Resolver rt_file_exists Bool/i64 Regression (B5)
+
+Regression for: rt_file_exists_bool_vs_int_interpreted_resolver_2026-06-10
+
+In the interpreter the `extern fn rt_file_exists` returns a native Rust `bool`
+(true/false).  The resolver previously compared `rt_file_exists(path) == 1`
+which always failed for `true`, causing all path candidates to be rejected.
+
+The fix: declare the return type as `bool` and use the result directly as a
+condition (no `== 1`).
+
+This spec drives the resolver directly and verifies that known-good stdlib paths
+resolve to non-empty strings — confirming the bool-path is taken correctly.
+"""
+
+use compiler.core.interpreter.module_loader_resolve.{
+    resolve_module_path,
+    module_resolve_cache_reset
+}
+
+fn check_std_ctype_resolves() -> text:
+    module_resolve_cache_reset()
+    val path = resolve_module_path("std.ctype", "test/01_unit/compiler/interpreter/module_resolver_file_exists_spec.spl")
+    if path == "":
+        return "resolve_module_path(std.ctype) returned empty — rt_file_exists bool/i64 mismatch likely"
+    ""
+
+fn check_std_io_runtime_resolves() -> text:
+    module_resolve_cache_reset()
+    val path = resolve_module_path("std.io_runtime", "test/01_unit/compiler/interpreter/module_resolver_file_exists_spec.spl")
+    if path == "":
+        return "resolve_module_path(std.io_runtime) returned empty — rt_file_exists bool/i64 mismatch likely"
+    ""
+
+fn check_nonexistent_returns_nonempty_fallback() -> text:
+    # The resolver returns the relative path even when the file doesn't exist (will error later).
+    # Important: it should NOT return "" for a resolvable-pattern name.
+    module_resolve_cache_reset()
+    val path = resolve_module_path("std.definitely_nonexistent_xyz_abc", "test/01_unit/compiler/interpreter/module_resolver_file_exists_spec.spl")
+    # Returns the attempted path (not empty), even on miss.
+    if path == "":
+        return "resolver returned empty string for unknown module — unexpected"
+    ""
+
+describe "module_resolver rt_file_exists bool regression":
+    """Verifies the resolver correctly resolves stdlib modules under the interpreter
+    where rt_file_exists returns bool (not i64==1). Bug: B5 / 2026-06-10."""
+
+    it "resolves std.ctype to a non-empty path":
+        val err = check_std_ctype_resolves()
+        expect(err).to_equal("")
+
+    it "resolves std.io_runtime to a non-empty path":
+        val err = check_std_io_runtime_resolves()
+        expect(err).to_equal("")
+
+    it "returns non-empty fallback path for unknown module":
+        val err = check_nonexistent_returns_nonempty_fallback()
+        expect(err).to_equal("")

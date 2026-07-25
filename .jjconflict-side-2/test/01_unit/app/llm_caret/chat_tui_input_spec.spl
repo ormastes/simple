@@ -1,0 +1,224 @@
+# LLM Caret - Raw TUI Input Specification
+#
+# Focused production coverage for ANSI/UTF-8 byte decoding, input-widget
+# transitions, and raw-line control precedence. Kept separate from the main
+# chat_tui spec so both files stay below the repository's 800-line limit.
+
+use app.llm_caret.chat_tui.{make_chat_tui}
+use app.llm_caret.tui_input.{
+    decode_raw_key_byte, apply_raw_key_decode,
+    make_raw_line_state, step_raw_line_byte,
+    RAW_LINE_CONTINUE, RAW_LINE_SUBMIT, RAW_LINE_EXIT,
+    RAW_LINE_PAGE_UP, RAW_LINE_PAGE_DOWN
+}
+use std.string_core.{char_from_code}
+
+fn _decode_raw_bytes(bytes: [i64]) -> (text, text):
+    var state = 0
+    var keys: [text] = []
+    var printable = ""
+    for b in bytes:
+        val decoded = decode_raw_key_byte(state, b)
+        state = decoded.state
+        if decoded.key != "" and decoded.key != "text":
+            keys.push(decoded.key)
+        if decoded.printable_byte >= 0:
+            printable = printable + (decoded.printable_byte as char).to_text()
+    (keys.join(","), printable)
+
+fn _apply_raw_bytes(bytes: [i64]) -> (text, i64):
+    var input = make_chat_tui("decoder fixture").input
+    var state = 0
+    for b in bytes:
+        val decoded = decode_raw_key_byte(state, b)
+        state = decoded.state
+        input = apply_raw_key_decode(input, decoded)
+    (input.value, input.cursor_pos)
+
+describe "ANSI raw-key decoding":
+    it "should decode CSI and SS3 arrows without leaking printable bytes":
+        expect(_decode_raw_bytes([27, 91, 65])).to_equal(("up", ""))
+        expect(_decode_raw_bytes([27, 91, 66])).to_equal(("down", ""))
+        expect(_decode_raw_bytes([27, 91, 67])).to_equal(("right", ""))
+        expect(_decode_raw_bytes([27, 91, 68])).to_equal(("left", ""))
+        expect(_decode_raw_bytes([27, 79, 67])).to_equal(("right", ""))
+
+    it "should decode direct and numeric home and end sequences":
+        expect(_decode_raw_bytes([27, 91, 72])).to_equal(("home", ""))
+        expect(_decode_raw_bytes([27, 91, 70])).to_equal(("end", ""))
+        expect(_decode_raw_bytes([27, 91, 49, 126])).to_equal(("home", ""))
+        expect(_decode_raw_bytes([27, 91, 52, 126])).to_equal(("end", ""))
+        expect(_decode_raw_bytes([27, 91, 55, 126])).to_equal(("home", ""))
+        expect(_decode_raw_bytes([27, 91, 56, 126])).to_equal(("end", ""))
+
+    it "should decode every supported SS3 navigation key":
+        expect(_decode_raw_bytes([27, 79, 65])).to_equal(("up", ""))
+        expect(_decode_raw_bytes([27, 79, 66])).to_equal(("down", ""))
+        expect(_decode_raw_bytes([27, 79, 67])).to_equal(("right", ""))
+        expect(_decode_raw_bytes([27, 79, 68])).to_equal(("left", ""))
+        expect(_decode_raw_bytes([27, 79, 70])).to_equal(("end", ""))
+        expect(_decode_raw_bytes([27, 79, 72])).to_equal(("home", ""))
+
+    it "should swallow modified and unknown ANSI sequences":
+        expect(_decode_raw_bytes([27, 91, 49, 59, 53, 68])).to_equal(
+            ("left", "")
+        )
+        expect(_decode_raw_bytes([27, 91, 51, 126])).to_equal(("", ""))
+        expect(_decode_raw_bytes([27, 120])).to_equal(("", ""))
+
+    it "should preserve ordinary printable input after a completed sequence":
+        expect(_decode_raw_bytes([27, 91, 67, 120])).to_equal(("right", "x"))
+
+    it "should recover after abandoned and unknown escape sequences":
+        expect(_decode_raw_bytes(
+            [27, 91, 27, 91, 68, 120]
+        )).to_equal(("left", "x"))
+        expect(_decode_raw_bytes(
+            [27, 91, 51, 126, 121]
+        )).to_equal(("", "y"))
+
+    it "should apply decoded cursor keys without inserting escape bytes":
+        val edited = _apply_raw_bytes([
+            97, 98, 99,
+            27, 91, 68, 88,
+            27, 91, 72, 62,
+            27, 91, 70, 33
+        ])
+        expect(edited).to_equal((">abXc!", 6))
+
+describe "UTF-8 raw-key decoding":
+    it "should insert valid two three and four byte code points":
+        val edited = _apply_raw_bytes([
+            0xC2, 0xA2,
+            0xED, 0x95, 0x9C,
+            0xF0, 0x9F, 0x98, 0x80
+        ])
+        expect(edited).to_equal(("¢한😀", 3))
+
+    it "should accept the valid Unicode scalar boundary sequences":
+        val edited = _apply_raw_bytes([
+            0xC2, 0x80,
+            0xDF, 0xBF,
+            0xE0, 0xA0, 0x80,
+            0xED, 0x9F, 0xBF,
+            0xEE, 0x80, 0x80,
+            0xF0, 0x90, 0x80, 0x80,
+            0xF4, 0x8F, 0xBF, 0xBF
+        ])
+        val expected = (
+            char_from_code(0x80) + char_from_code(0x7FF) +
+            char_from_code(0x800) + char_from_code(0xD7FF) +
+            char_from_code(0xE000) + char_from_code(0x10000) +
+            char_from_code(0x10FFFF)
+        )
+        expect(edited).to_equal((expected, 7))
+
+    it "should insert a decoded Unicode code point at the widget cursor":
+        val edited = _apply_raw_bytes([
+            65, 66,
+            27, 91, 68,
+            0xED, 0x95, 0x9C
+        ])
+        expect(edited).to_equal(("A한B", 2))
+
+    it "should preserve ANSI navigation around decoded Unicode input":
+        val edited = _apply_raw_bytes([
+            0xC2, 0xA2,
+            0xF0, 0x9F, 0x98, 0x80,
+            27, 91, 72, 62,
+            27, 91, 70, 33
+        ])
+        expect(edited).to_equal((">¢😀!", 4))
+
+    it "should reject invalid leads and stray continuation bytes":
+        val edited = _apply_raw_bytes([
+            0xC0, 0x80, 97,
+            0xC1, 0xBF, 98,
+            0xF5, 0x80, 0x80, 0x80, 99,
+            0x80, 0xBF, 100
+        ])
+        expect(edited).to_equal(("abcd", 4))
+
+    it "should reject overlong surrogate and out of range sequences":
+        val edited = _apply_raw_bytes([
+            0xE0, 0x80, 0xAF, 97,
+            0xF0, 0x80, 0x80, 0xAF, 98,
+            0xED, 0xA0, 0x80, 99,
+            0xF4, 0x90, 0x80, 0x80, 100
+        ])
+        expect(edited).to_equal(("abcd", 4))
+
+    it "should fail closed when a sequence has an invalid continuation":
+        val edited = _apply_raw_bytes([
+            0xE2, 65, 0x82, 0xAC, 66,
+            0xF0, 0x9F, 67, 0x98, 0x80, 68
+        ])
+        expect(edited).to_equal(("BD", 2))
+
+    it "should retain incomplete sequences without inserting partial text":
+        expect(_apply_raw_bytes([0xC2])).to_equal(("", 0))
+        expect(_apply_raw_bytes([0xE0, 0xA0])).to_equal(("", 0))
+        expect(_apply_raw_bytes([0xF0, 0x90, 0x80])).to_equal(("", 0))
+
+describe "Raw-line control reduction":
+    it "should submit the exact input on CR and LF in ordinary state":
+        var state = make_raw_line_state(make_chat_tui("raw line").input)
+        state = step_raw_line_byte(state, 97).state
+        state = step_raw_line_byte(state, 98).state
+        val cr = step_raw_line_byte(state, 13)
+        val lf = step_raw_line_byte(state, 10)
+        expect(cr.action).to_equal(RAW_LINE_SUBMIT)
+        expect(cr.submitted).to_equal("ab")
+        expect(lf.action).to_equal(RAW_LINE_SUBMIT)
+        expect(lf.submitted).to_equal("ab")
+
+    it "should delete before the cursor for DEL and BS":
+        var state = make_raw_line_state(make_chat_tui("raw line").input)
+        state = step_raw_line_byte(state, 97).state
+        state = step_raw_line_byte(state, 98).state
+        state = step_raw_line_byte(state, 127).state
+        expect(state.input.value).to_equal("a")
+        state = step_raw_line_byte(state, 8).state
+        expect(state.input.value).to_equal("")
+        state = step_raw_line_byte(state, 8).state
+        expect(state.input.value).to_equal("")
+
+    it "should emit paging actions only in ordinary state":
+        val state = make_raw_line_state(make_chat_tui("raw line").input)
+        val older = step_raw_line_byte(state, 16)
+        val newer = step_raw_line_byte(state, 14)
+        expect(older.action).to_equal(RAW_LINE_PAGE_UP)
+        expect(newer.action).to_equal(RAW_LINE_PAGE_DOWN)
+        expect(older.state.input.value).to_equal("")
+        expect(newer.state.input.value).to_equal("")
+
+    it "should exit on Ctrl-C Ctrl-D and EOF from every decoder state":
+        val ordinary = make_raw_line_state(make_chat_tui("raw line").input)
+        val escape = step_raw_line_byte(ordinary, 27).state
+        val utf8 = step_raw_line_byte(ordinary, 0xE0).state
+        expect(step_raw_line_byte(ordinary, 3).action).to_equal(RAW_LINE_EXIT)
+        expect(step_raw_line_byte(escape, 4).action).to_equal(RAW_LINE_EXIT)
+        expect(step_raw_line_byte(utf8, -1).action).to_equal(RAW_LINE_EXIT)
+
+    it "should give exit precedence over incomplete input sequences":
+        val ordinary = make_raw_line_state(make_chat_tui("raw line").input)
+        val escape = step_raw_line_byte(ordinary, 27).state
+        val utf8 = step_raw_line_byte(ordinary, 0xF0).state
+        expect(step_raw_line_byte(escape, 3).action).to_equal(RAW_LINE_EXIT)
+        expect(step_raw_line_byte(utf8, 4).action).to_equal(RAW_LINE_EXIT)
+
+    it "should swallow line controls inside an incomplete ANSI sequence":
+        val ordinary = make_raw_line_state(make_chat_tui("raw line").input)
+        for b in [13, 127, 16, 14]:
+            val escape = step_raw_line_byte(ordinary, 27).state
+            val result = step_raw_line_byte(escape, b)
+            expect(result.action).to_equal(RAW_LINE_CONTINUE)
+            expect(result.submitted).to_equal("")
+            expect(result.state.input.value).to_equal("")
+
+    it "should preserve input while exiting or paging":
+        var state = make_raw_line_state(make_chat_tui("raw line").input)
+        state = step_raw_line_byte(state, 120).state
+        expect(step_raw_line_byte(state, 16).state.input.value).to_equal("x")
+        expect(step_raw_line_byte(state, 14).state.input.value).to_equal("x")
+        expect(step_raw_line_byte(state, 3).state.input.value).to_equal("x")

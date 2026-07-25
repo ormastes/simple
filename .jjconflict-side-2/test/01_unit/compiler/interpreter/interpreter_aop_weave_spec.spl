@@ -1,0 +1,130 @@
+# Interpreter AOP weaving — pointcut matcher + advice selection unit spec (task #31)
+#
+# Covers: src/compiler/70.backend/backend/interpreter_aop_weave.spl
+#
+# The interpreter path historically ignored declarative `on pc{...}` aspects
+# (compiled path weaves them in MIR via driver_pipeline). interpreter_aop_weave
+# adds the interpreter-side weaver: this spec pins its pure logic — pointcut
+# match/non-match (execution glob, &, |, !, parentheses), per-form advice
+# collection, and priority ordering (before: high first; after_*: high last).
+#
+# End-to-end weaving (advice actually firing around interpreted calls) is
+# exercised by test/feature/usage/aop_spec.spl once a binary containing the
+# call_hir_function hook is deployed; this spec runs against the module as
+# ordinary interpreted source, so it is deploy-independent.
+
+use std.spec.*
+use std.io_runtime.{file_read}
+
+use compiler.backend.backend.interpreter_aop_weave.{
+    interp_aop_predicate_matches, interp_aop_collect, interp_aop_sort_by_priority
+}
+use compiler.hir.hir.{HirAopAdvice}
+use compiler.common.diagnostics.span.{Span}
+
+fn mk_advice(pred: text, handler: text, form: text, priority: i64) -> HirAopAdvice:
+    HirAopAdvice(
+        predicate_text: pred,
+        advice_function: handler,
+        form: form,
+        priority: priority,
+        span: Span.empty()
+    )
+
+describe "interp_aop_predicate_matches — execution selector":
+    # predicate_text arrives space-tokenized from parse_pointcut_text,
+    # e.g. `on pc{ execution(* get*(..)) }` => "execution ( * get* ( .. ) )".
+
+    it "matches exact function name":
+        expect(interp_aop_predicate_matches("execution ( * exact_name ( .. ) )", "exact_name")).to_equal(true)
+
+    it "does not match a different function name":
+        expect(interp_aop_predicate_matches("execution ( * exact_name ( .. ) )", "other_name")).to_equal(false)
+
+    it "matches prefix wildcard":
+        expect(interp_aop_predicate_matches("execution ( * handle* ( .. ) )", "handle_request")).to_equal(true)
+        expect(interp_aop_predicate_matches("execution ( * handle* ( .. ) )", "process_data")).to_equal(false)
+
+    it "matches suffix wildcard":
+        expect(interp_aop_predicate_matches("execution ( * *_service ( .. ) )", "user_service")).to_equal(true)
+        expect(interp_aop_predicate_matches("execution ( * *_service ( .. ) )", "user_controller")).to_equal(false)
+
+    it "matches any function with bare star":
+        expect(interp_aop_predicate_matches("execution ( * * ( .. ) )", "anything")).to_equal(true)
+
+    it "keeps advice lookup off shared optional target mutation":
+        val source = file_read("src/compiler/70.backend/backend/interpreter_aop_weave.spl")
+
+        expect(source.contains("var target: HirFunction? = nil")).to_equal(false)
+        expect(source.contains("target = Some(c)")).to_equal(false)
+        expect(source).to_contain("var target_index = -1")
+        expect(source).to_contain("val target = candidates[target_index]")
+
+describe "interp_aop_predicate_matches — combinators":
+
+    it "AND requires both sides":
+        val pred = "execution ( * get* ( .. ) ) & execution ( * *_user ( .. ) )"
+        expect(interp_aop_predicate_matches(pred, "get_user")).to_equal(true)
+        expect(interp_aop_predicate_matches(pred, "get_order")).to_equal(false)
+
+    it "OR matches either side":
+        val pred = "execution ( * func_a ( .. ) ) | execution ( * func_b ( .. ) )"
+        expect(interp_aop_predicate_matches(pred, "func_a")).to_equal(true)
+        expect(interp_aop_predicate_matches(pred, "func_b")).to_equal(true)
+        expect(interp_aop_predicate_matches(pred, "func_c")).to_equal(false)
+
+    it "NOT excludes the matching name":
+        val pred = "! execution ( * should_skip ( .. ) ) & execution ( * should* ( .. ) )"
+        expect(interp_aop_predicate_matches(pred, "should_count")).to_equal(true)
+        expect(interp_aop_predicate_matches(pred, "should_skip")).to_equal(false)
+
+    it "parenthesized group evaluates before AND":
+        val pred = "( execution ( * a_fn ( .. ) ) | execution ( * b_fn ( .. ) ) ) & ! execution ( * b_fn ( .. ) )"
+        expect(interp_aop_predicate_matches(pred, "a_fn")).to_equal(true)
+        expect(interp_aop_predicate_matches(pred, "b_fn")).to_equal(false)
+
+    it "unsupported selectors evaluate false without breaking combinators":
+        # attr()/within() are documented follow-ups: parsed, never matched.
+        expect(interp_aop_predicate_matches("attr ( traced )", "traced_operation")).to_equal(false)
+        val pred = "execution ( * traced* ( .. ) ) | attr ( traced )"
+        expect(interp_aop_predicate_matches(pred, "traced_operation")).to_equal(true)
+
+describe "interp_aop_collect — form filtering + pointcut match":
+
+    it "collects only advices whose form and pointcut both match":
+        var advices: [HirAopAdvice] = []
+        advices = advices.push(mk_advice("execution ( * target ( .. ) )", "before_hit", "before", 10))
+        advices = advices.push(mk_advice("execution ( * target ( .. ) )", "after_hit", "after_success", 10))
+        advices = advices.push(mk_advice("execution ( * other ( .. ) )", "before_miss", "before", 10))
+        val before = interp_aop_collect(advices, "before", "target")
+        expect(before.len()).to_equal(1)
+        expect(before[0].advice_function).to_equal("before_hit")
+        val after = interp_aop_collect(advices, "after_success", "target")
+        expect(after.len()).to_equal(1)
+        expect(after[0].advice_function).to_equal("after_hit")
+
+    it "returns empty when no pointcut matches":
+        var advices: [HirAopAdvice] = []
+        advices = advices.push(mk_advice("execution ( * target ( .. ) )", "h", "before", 10))
+        val got = interp_aop_collect(advices, "before", "unrelated")
+        expect(got.len()).to_equal(0)
+
+describe "interp_aop_sort_by_priority":
+
+    it "orders highest priority first for before advice":
+        var advices: [HirAopAdvice] = []
+        advices = advices.push(mk_advice("*", "low", "before", 1))
+        advices = advices.push(mk_advice("*", "high", "before", 100))
+        advices = advices.push(mk_advice("*", "mid", "before", 50))
+        val ordered = interp_aop_sort_by_priority(advices, true)
+        expect(ordered[0].advice_function).to_equal("high")
+        expect(ordered[1].advice_function).to_equal("mid")
+        expect(ordered[2].advice_function).to_equal("low")
+
+    it "orders lowest priority first for after advice":
+        var advices: [HirAopAdvice] = []
+        advices = advices.push(mk_advice("*", "low", "after_success", 1))
+        advices = advices.push(mk_advice("*", "high", "after_success", 100))
+        val ordered = interp_aop_sort_by_priority(advices, false)
+        expect(ordered[0].advice_function).to_equal("low")
+        expect(ordered[1].advice_function).to_equal("high")

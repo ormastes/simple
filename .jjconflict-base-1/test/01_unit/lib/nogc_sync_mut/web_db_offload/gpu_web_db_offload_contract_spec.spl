@@ -1,0 +1,158 @@
+use std.spec.*
+use std.web_db_offload.contract.*
+
+fn request(kind: GpuWdbWorkKind, batch_bytes: i64, queue_depth: i64,
+           gpu_available: bool, generation_current: bool,
+           cpu_fallback_available: bool) -> GpuWdbRequest:
+    GpuWdbRequest(
+        kind: kind,
+        batch_bytes: batch_bytes,
+        queue_depth: queue_depth,
+        gpu_available: gpu_available,
+        generation_current: generation_current,
+        cpu_fallback_available: cpu_fallback_available
+    )
+
+describe "GPU web/db offload contract":
+    it "should keep proxy forwarding on the CPU control plane":
+        step("Classify proxy forwarding as non-GPU control plane work")
+        val decision = gpu_wdb_decide(
+            request(GpuWdbWorkKind.ProxyForwarding, 65536, 0, true, true, true),
+            gpu_wdb_default_budget()
+        )
+        expect(decision.path).to_equal(GpuWdbDecisionPath.CpuFallback)
+        expect(decision.reason).to_equal("control-plane-stays-on-cpu")
+        expect(decision.cpu_fallback_count).to_equal(1)
+        expect(decision.gpu_hit_count).to_equal(0)
+
+    it "should reject GPU work when CPU fallback is missing":
+        step("Submit eligible GPU work without a CPU fallback")
+        val decision = gpu_wdb_decide(
+            request(GpuWdbWorkKind.DbVectorSearch, 65536, 0, true, true, false),
+            gpu_wdb_default_budget()
+        )
+        expect(decision.path).to_equal(GpuWdbDecisionPath.Reject)
+        expect(decision.reason).to_equal("cpu-fallback-required")
+
+    it "should fall back for stale database generations":
+        step("Submit stale DB work that must not use GPU results")
+        val decision = gpu_wdb_decide(
+            request(GpuWdbWorkKind.DbScanFilterProject, 65536, 0, true, false, true),
+            gpu_wdb_default_budget()
+        )
+        expect(decision.path).to_equal(GpuWdbDecisionPath.CpuFallback)
+        expect(decision.reason).to_equal("stale-generation")
+
+    it "should fall back when the GPU queue is full":
+        step("Submit eligible work at the queue limit")
+        val budget = gpu_wdb_default_budget()
+        val decision = gpu_wdb_decide(
+            request(GpuWdbWorkKind.WebEmbedding, 65536, budget.max_queue_depth, true, true, true),
+            budget
+        )
+        expect(decision.path).to_equal(GpuWdbDecisionPath.CpuFallback)
+        expect(decision.reason).to_equal("gpu-queue-full")
+
+    it "should reject tiny batches for GPU performance claims":
+        step("Submit a tiny vector batch")
+        val budget = gpu_wdb_default_budget()
+        val decision = gpu_wdb_decide(
+            request(GpuWdbWorkKind.DbVectorSearch, budget.min_gpu_batch_bytes - 1, 0, true, true, true),
+            budget
+        )
+        expect(decision.path).to_equal(GpuWdbDecisionPath.CpuFallback)
+        expect(decision.reason).to_equal("batch-too-small")
+
+    it "should reject invalid queue and batch inputs before GPU admission":
+        step("Submit impossible runtime accounting values")
+        val budget = gpu_wdb_default_budget()
+        val negative_queue = gpu_wdb_decide(
+            request(GpuWdbWorkKind.WebRank, budget.min_gpu_batch_bytes, -1, true, true, true),
+            budget
+        )
+        val empty_batch = gpu_wdb_decide(
+            request(GpuWdbWorkKind.WebRank, 0, 0, true, true, true),
+            budget
+        )
+        expect(negative_queue.path).to_equal(GpuWdbDecisionPath.Reject)
+        expect(negative_queue.reason).to_equal("queue-depth-invalid")
+        expect(empty_batch.path).to_equal(GpuWdbDecisionPath.Reject)
+        expect(empty_batch.reason).to_equal("batch-bytes-invalid")
+
+    it "should report GPU evidence for eligible coarse batches":
+        step("Submit a coarse eligible rank batch")
+        val budget = gpu_wdb_default_budget()
+        val decision = gpu_wdb_decide(
+            request(GpuWdbWorkKind.WebRank, budget.min_gpu_batch_bytes, 0, true, true, true),
+            budget
+        )
+        expect(decision.path).to_equal(GpuWdbDecisionPath.GpuEvidence)
+        expect(decision.reason).to_equal("gpu-evidence")
+        expect(decision.gpu_hit_count).to_equal(1)
+        expect(decision.cpu_fallback_count).to_equal(0)
+
+    it "should build reusable GPU library execution plans":
+        step("Convert a runtime snapshot into a shared execution plan")
+        val budget = gpu_wdb_default_budget()
+        val snapshot = GpuWdbRuntimeSnapshot(
+            queue_depth: 0,
+            gpu_available: true,
+            generation_current: true,
+            cpu_fallback_available: true
+        )
+        val req = gpu_wdb_request(GpuWdbWorkKind.DbVectorSearch, budget.min_gpu_batch_bytes, snapshot)
+        val plan = gpu_wdb_execution_plan(req, budget)
+        expect(plan.decision.path).to_equal(GpuWdbDecisionPath.GpuEvidence)
+        expect(plan.target).to_equal("gpu_db_vector_search_batch")
+
+    it "should reserve one queue slot for an eligible reusable batch plan":
+        step("Plan a coarse DB vector batch through the shared queue accounting API")
+        val budget = gpu_wdb_default_budget()
+        val snapshot = GpuWdbRuntimeSnapshot(
+            queue_depth: 3,
+            gpu_available: true,
+            generation_current: true,
+            cpu_fallback_available: true
+        )
+        val window = gpu_wdb_batch_window(GpuWdbWorkKind.DbVectorSearch, budget.min_gpu_batch_bytes * 4, 4, snapshot)
+        val plan = gpu_wdb_batch_plan(window, budget)
+        expect(plan.execution.decision.path).to_equal(GpuWdbDecisionPath.GpuEvidence)
+        expect(plan.execution.target).to_equal("gpu_db_vector_search_batch")
+        expect(plan.average_item_bytes).to_equal(budget.min_gpu_batch_bytes)
+        expect(plan.queue_depth_after).to_equal(4)
+
+    it "should release the queue slot when a reusable batch falls back":
+        step("Plan a tiny web batch that must remain on CPU")
+        val budget = gpu_wdb_default_budget()
+        val snapshot = GpuWdbRuntimeSnapshot(
+            queue_depth: 3,
+            gpu_available: true,
+            generation_current: true,
+            cpu_fallback_available: true
+        )
+        val window = gpu_wdb_batch_window(GpuWdbWorkKind.WebEmbedding, budget.min_gpu_batch_bytes - 1, 2, snapshot)
+        val plan = gpu_wdb_batch_plan(window, budget)
+        expect(plan.execution.decision.path).to_equal(GpuWdbDecisionPath.CpuFallback)
+        expect(plan.execution.decision.reason).to_equal("batch-too-small")
+        expect(plan.execution.target).to_equal("cpu_fallback")
+        expect(plan.queue_depth_after).to_equal(3)
+
+    it "should reject reusable batch plans with no items":
+        step("Plan a malformed empty batch")
+        val budget = gpu_wdb_default_budget()
+        val snapshot = GpuWdbRuntimeSnapshot(
+            queue_depth: 0,
+            gpu_available: true,
+            generation_current: true,
+            cpu_fallback_available: true
+        )
+        val window = gpu_wdb_batch_window(GpuWdbWorkKind.WebRank, budget.min_gpu_batch_bytes, 0, snapshot)
+        val plan = gpu_wdb_batch_plan(window, budget)
+        expect(plan.execution.decision.path).to_equal(GpuWdbDecisionPath.Reject)
+        expect(plan.execution.decision.reason).to_equal("batch-item-count-invalid")
+
+    it "should require CPU-owned metadata filters in NoSQL mode":
+        step("Submit NoSQL work without CPU-owned metadata filtering")
+        val decision = gpu_wdb_nosql_mode_admits(65536, false, gpu_wdb_default_budget())
+        expect(decision.path).to_equal(GpuWdbDecisionPath.Reject)
+        expect(decision.reason).to_equal("metadata-filter-must-stay-cpu-owned")

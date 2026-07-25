@@ -1,0 +1,141 @@
+# Cache Validator Specification
+#
+# Tests the unified validation logic for SHB and SMF cache artifacts.
+# Uses mock file system to avoid real I/O.
+#
+# **Feature IDs:** #CACHE-021 to #CACHE-030
+# **Category:** Infrastructure
+
+# ============================================================================
+# Mock file system for testing (parallel arrays, no Dict)
+# ============================================================================
+
+var mock_paths: [text] = []
+var mock_hashes: [i64] = []
+
+fn mock_reset():
+    mock_paths = []
+    mock_hashes = []
+
+fn mock_find(path: text) -> i64:
+    var i = 0
+    while i < mock_paths.len():
+        if mock_paths[i] == path:
+            return i
+        i = i + 1
+    -1
+
+fn mock_add_file(path: text, hash: i64):
+    val idx = mock_find(path)
+    if idx >= 0:
+        mock_hashes[idx] = hash
+    else:
+        mock_paths = mock_paths + [path]
+        mock_hashes = mock_hashes + [hash]
+
+fn mock_file_exists(path: text) -> bool:
+    mock_find(path) >= 0
+
+fn mock_hash(path: text) -> i64:
+    val idx = mock_find(path)
+    if idx >= 0:
+        return mock_hashes[idx]
+    0
+
+# ============================================================================
+# Mock validation functions (mirror real cache_validator API)
+# ============================================================================
+
+fn validate_source_hash_mock(source_path: text, cached_hash: i64) -> i64:
+    if not mock_file_exists(source_path):
+        return -1  # ERROR
+    val current_hash = mock_hash(source_path)
+    if current_hash == cached_hash:
+        return 0   # FRESH
+    2   # STALE
+
+# Dependency validation using parallel arrays
+var dep_paths: [text] = []
+var dep_expected: [i64] = []
+var dep_actual: [i64] = []
+
+fn dep_reset():
+    dep_paths = []
+    dep_expected = []
+    dep_actual = []
+
+fn dep_add(path: text, expected: i64, actual: i64):
+    dep_paths = dep_paths + [path]
+    dep_expected = dep_expected + [expected]
+    dep_actual = dep_actual + [actual]
+
+fn validate_deps_mock() -> i64:
+    var i = 0
+    while i < dep_paths.len():
+        if dep_actual[i] == 0:
+            return 2  # STALE - dependency missing
+        if dep_actual[i] != dep_expected[i]:
+            return 2  # STALE - dependency changed
+        i = i + 1
+    0  # FRESH
+
+fn source_to_cache_path_mock(source_path: text, cache_dir: text, ext: text) -> text:
+    var tmp = source_path.replace("/", "_")
+    val base = tmp.replace(".spl", "")
+    "{cache_dir}/{base}{ext}"
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "validate_source_hash":
+    it "returns FRESH when hash matches":
+        mock_reset()
+        mock_add_file("src/main.spl", 12345)
+        val result = validate_source_hash_mock("src/main.spl", 12345)
+        expect(result).to_equal(0)
+
+    it "returns STALE when hash differs":
+        mock_reset()
+        mock_add_file("src/main.spl", 99999)
+        val result = validate_source_hash_mock("src/main.spl", 12345)
+        expect(result).to_equal(2)
+
+    it "returns ERROR when file missing":
+        mock_reset()
+        val result = validate_source_hash_mock("nonexistent.spl", 12345)
+        expect(result).to_equal(-1)
+
+describe "validate_dependencies":
+    it "returns FRESH when all deps match":
+        dep_reset()
+        dep_add("dep1.spl", 100, 100)
+        dep_add("dep2.spl", 200, 200)
+        val result = validate_deps_mock()
+        expect(result).to_equal(0)
+
+    it "returns STALE when dependency changed":
+        dep_reset()
+        dep_add("dep1.spl", 100, 999)
+        val result = validate_deps_mock()
+        expect(result).to_equal(2)
+
+    it "returns STALE when dependency missing":
+        dep_reset()
+        dep_add("dep1.spl", 100, 0)
+        val result = validate_deps_mock()
+        expect(result).to_equal(2)
+
+    it "returns FRESH for empty dependency list":
+        dep_reset()
+        val result = validate_deps_mock()
+        expect(result).to_equal(0)
+
+describe "source_to_cache_path":
+    it "converts source path to SHB path":
+        val result = source_to_cache_path_mock("src/app/main.spl", ".build/headers", ".shb")
+        expect(result).to_equal(".build/headers/src_app_main.shb")
+
+    it "converts source path to SMF path":
+        val result = source_to_cache_path_mock("src/lib/math.spl", "build/smf", ".smf")
+        expect(result).to_equal("build/smf/src_lib_math.smf")

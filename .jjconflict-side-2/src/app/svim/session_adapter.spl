@@ -1,0 +1,205 @@
+# SVIM Session Adapter
+#
+# Thin bridge that exposes a SvimSession-compatible surface while delegating
+# file open/close/save and layout (split, focus) operations to EditSession.
+# SVIM-specific state (mode, registers, jump list, quickfix) lives here;
+# buffer content and document identity come from EditSession.
+
+use app.svim.core.{
+    ModeState, SvimMode, RegisterBank, RegisterEntry,
+    JumpList, QuickfixList, CommandRequest, CommandResult,
+    EditorEvent, BufferId
+}
+use std.editor.core.session.{EditSession}
+use app.svim.buffer_manager.{buffer_switch_by_name, buffer_switch_by_index}
+use app.svim.split_pane_render.{render_pane_status}
+
+
+class SvimSessionAdapter:
+    edit_session: EditSession
+    workspace_path: text
+    mode: ModeState
+    registers: RegisterBank
+    jump_list: JumpList
+    quickfix: QuickfixList
+
+
+fn svim_adapter_create(workspace_path: text) -> SvimSessionAdapter:
+    SvimSessionAdapter(
+        edit_session: EditSession.new(),
+        workspace_path: workspace_path,
+        mode: ModeState(mode: SvimMode.Normal, pending_count: 0, commandline: ""),
+        registers: RegisterBank(
+            entries: [RegisterEntry(name: "\"", content: "", linewise: false)],
+            active_register: "\""
+        ),
+        jump_list: JumpList(locations: [], index: 0),
+        quickfix: QuickfixList(items: [], selected_index: 0)
+    )
+
+
+me svim_adapter_open(adapter: SvimSessionAdapter, path: text):
+    val _ = adapter.edit_session.open_file(path)
+
+
+me svim_adapter_open_empty(adapter: SvimSessionAdapter):
+    val _ = adapter.edit_session.open_empty()
+
+
+me svim_adapter_close(adapter: SvimSessionAdapter):
+    adapter.edit_session.close_tab()
+
+
+me svim_adapter_save(adapter: SvimSessionAdapter) -> CommandResult:
+    val ok = adapter.edit_session.save_active()
+    if ok:
+        CommandResult(ok: true, message: "saved", events: [EditorEvent(kind: "buffer-saved", message: "")])
+    else:
+        CommandResult(ok: false, message: "save failed", events: [])
+
+
+fn svim_adapter_current_buffer_text(adapter: SvimSessionAdapter) -> text:
+    val buf = adapter.edit_session.active_buffer()
+    if buf == nil:
+        return ""
+    buf.to_text()
+
+
+fn svim_adapter_buffer_count(adapter: SvimSessionAdapter) -> i64:
+    adapter.edit_session.document_count()
+
+
+fn svim_adapter_pane_status(adapter: SvimSessionAdapter) -> text:
+    """Status bar text: [buffer i/N] [pane x/y] [modified]."""
+    render_pane_status(adapter.edit_session)
+
+
+fn svim_adapter_pane_count(adapter: SvimSessionAdapter) -> i64:
+    adapter.edit_session.pane_count()
+
+
+fn svim_adapter_switch_buffer_by_name(adapter: SvimSessionAdapter, name: text) -> bool:
+    buffer_switch_by_name(adapter.edit_session, name)
+
+
+me svim_adapter_split_horizontal(adapter: SvimSessionAdapter):
+    adapter.edit_session.split_editor_horizontal()
+
+
+me svim_adapter_split_vertical(adapter: SvimSessionAdapter):
+    adapter.edit_session.split_editor()
+
+
+me svim_adapter_focus_direction(adapter: SvimSessionAdapter, direction: text):
+    adapter.edit_session.focus_direction(direction, [])
+
+
+me svim_adapter_execute(adapter: SvimSessionAdapter, cmd: CommandRequest) -> CommandResult:
+    match cmd.name:
+        "save":
+            svim_adapter_save(adapter)
+        "save-as":
+            val ok = adapter.edit_session.save_active()
+            if ok:
+                CommandResult(ok: true, message: "saved", events: [])
+            else:
+                CommandResult(ok: false, message: "save failed", events: [])
+        "open-buffer":
+            val _ = adapter.edit_session.open_file(cmd.payload)
+            CommandResult(ok: true, message: "opened {cmd.payload}", events: [EditorEvent(kind: "buffer-opened", message: cmd.payload)])
+        "split-window":
+            adapter.edit_session.split_editor_horizontal()
+            CommandResult(ok: true, message: "split", events: [EditorEvent(kind: "window-split", message: "")])
+        "new-tab":
+            adapter.edit_session.split_editor()
+            CommandResult(ok: true, message: "new tab", events: [EditorEvent(kind: "tab-opened", message: "")])
+        "next-buffer":
+            adapter.edit_session.switch_tab(1)
+            CommandResult(ok: true, message: "next buffer", events: [])
+        "prev-buffer":
+            adapter.edit_session.switch_tab(-1)
+            CommandResult(ok: true, message: "prev buffer", events: [])
+        "vsplit":
+            adapter.edit_session.split_editor()
+            CommandResult(ok: true, message: "vsplit", events: [EditorEvent(kind: "window-vsplit", message: "")])
+        "close-pane":
+            adapter.edit_session.close_other_groups()
+            CommandResult(ok: true, message: "closed other panes", events: [])
+        "focus-left":
+            adapter.edit_session.focus_direction("left", [])
+            CommandResult(ok: true, message: "focus left", events: [])
+        "focus-right":
+            adapter.edit_session.focus_direction("right", [])
+            CommandResult(ok: true, message: "focus right", events: [])
+        "focus-up":
+            adapter.edit_session.focus_direction("up", [])
+            CommandResult(ok: true, message: "focus up", events: [])
+        "focus-down":
+            adapter.edit_session.focus_direction("down", [])
+            CommandResult(ok: true, message: "focus down", events: [])
+        "switch-buffer":
+            val found = buffer_switch_by_name(adapter.edit_session, cmd.payload)
+            if found:
+                CommandResult(ok: true, message: "switched to {cmd.payload}", events: [])
+            else:
+                CommandResult(ok: false, message: "buffer not found: {cmd.payload}", events: [])
+        "set-mode":
+            adapter.mode.mode = _svim_adapter_mode_from_text(cmd.payload)
+            CommandResult(ok: true, message: cmd.payload, events: [])
+        "commandline":
+            _svim_adapter_commandline(adapter, cmd.payload)
+        _:
+            CommandResult(ok: false, message: "unsupported via adapter: {cmd.name}", events: [])
+
+
+fn _svim_adapter_commandline(adapter: SvimSessionAdapter, commandline: text) -> CommandResult:
+    adapter.mode.commandline = commandline
+    if commandline == "w":
+        return svim_adapter_save(adapter)
+    if commandline == "split":
+        adapter.edit_session.split_editor_horizontal()
+        return CommandResult(ok: true, message: "split", events: [])
+    if commandline == "tabnew":
+        adapter.edit_session.split_editor()
+        return CommandResult(ok: true, message: "new tab", events: [])
+    if commandline == "bn" or commandline == "bnext":
+        adapter.edit_session.switch_tab(1)
+        return CommandResult(ok: true, message: "next buffer", events: [])
+    if commandline == "bp" or commandline == "bprev":
+        adapter.edit_session.switch_tab(-1)
+        return CommandResult(ok: true, message: "prev buffer", events: [])
+    if commandline == "vsplit":
+        adapter.edit_session.split_editor()
+        return CommandResult(ok: true, message: "vsplit", events: [EditorEvent(kind: "window-vsplit", message: "")])
+    if commandline == "close" or commandline == "clo":
+        adapter.edit_session.close_tab()
+        return CommandResult(ok: true, message: "closed", events: [])
+    if commandline == "only" or commandline == "on":
+        adapter.edit_session.close_other_groups()
+        return CommandResult(ok: true, message: "only pane", events: [])
+    if commandline.starts_with("b "):
+        val name = commandline.slice(2, commandline.len()).trim()
+        val found = buffer_switch_by_name(adapter.edit_session, name)
+        if found:
+            return CommandResult(ok: true, message: "switched to {name}", events: [])
+        return CommandResult(ok: false, message: "buffer not found: {name}", events: [])
+    if commandline == "q":
+        return CommandResult(ok: true, message: "quit requested", events: [EditorEvent(kind: "quit-requested", message: "")])
+    if commandline.starts_with("e "):
+        val path = commandline.slice(2, commandline.len()).trim()
+        val _ = adapter.edit_session.open_file(path)
+        return CommandResult(ok: true, message: "opened {path}", events: [EditorEvent(kind: "buffer-opened", message: path)])
+    if commandline.starts_with("w "):
+        val _ = adapter.edit_session.save_active()
+        return CommandResult(ok: true, message: "saved", events: [])
+    CommandResult(ok: false, message: "unknown commandline: {commandline}", events: [])
+
+
+fn _svim_adapter_mode_from_text(name: text) -> SvimMode:
+    if name.lower() == "insert":
+        return SvimMode.Insert
+    if name.lower() == "visual":
+        return SvimMode.Visual
+    if name.lower() == "command":
+        return SvimMode.Command
+    SvimMode.Normal

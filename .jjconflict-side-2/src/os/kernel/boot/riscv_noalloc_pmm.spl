@@ -1,0 +1,106 @@
+# RISC-V noalloc physical page window.
+#
+# This is not the hosted bitmap PMM. It is a scalar boot allocator for the
+# freestanding RV64 path: no arrays, Option, Result, text, logging, or MMIO
+# wrapper imports. It reserves the kernel/image prefix and the upper heap
+# window, then hands out 4 KiB pages monotonically from the remaining RAM.
+
+val NOALLOC_PAGE_SIZE: u64 = 4096
+
+var g_riscv_noalloc_pmm_ready: bool = false
+var g_riscv_noalloc_pmm_base: u64 = 0
+var g_riscv_noalloc_pmm_limit: u64 = 0
+var g_riscv_noalloc_pmm_next: u64 = 0
+var g_riscv_noalloc_pmm_total_pages: u64 = 0
+var g_riscv_noalloc_pmm_free_pages: u64 = 0
+
+extern fn rt_riscv_uart_put(byte: u64)
+
+fn _uart_put(byte: u64):
+    rt_riscv_uart_put(byte)
+
+fn _crlf():
+    _uart_put(13)
+    _uart_put(10)
+
+fn _line_pmm_ok():
+    _uart_put(80)  # P
+    _uart_put(77)  # M
+    _uart_put(77)  # M
+    _uart_put(32)  # space
+    _uart_put(79)  # O
+    _uart_put(75)  # K
+    _crlf()
+
+fn _line_pmm_fail():
+    _uart_put(80)  # P
+    _uart_put(77)  # M
+    _uart_put(77)  # M
+    _uart_put(32)  # space
+    _uart_put(70)  # F
+    _uart_put(65)  # A
+    _uart_put(73)  # I
+    _uart_put(76)  # L
+    _crlf()
+
+fn _align_page_up(value: u64) -> u64:
+    ((value + NOALLOC_PAGE_SIZE - 1) / NOALLOC_PAGE_SIZE) * NOALLOC_PAGE_SIZE
+
+fn _normalize_phys32(value: u64) -> u64:
+    val low_mask = ((1 as u64) << 32) - 1
+    if (value >> 32) == low_mask:
+        return value & low_mask
+    value
+
+fn riscv_noalloc_pmm_init(ram_base: u64, ram_size: u64, reserved_end: u64, heap_start: u64) -> bool:
+    val base = _normalize_phys32(ram_base)
+    val reserved = _normalize_phys32(reserved_end)
+    val heap = _normalize_phys32(heap_start)
+    val ram_end = base + ram_size
+    if ram_size <= NOALLOC_PAGE_SIZE:
+        _line_pmm_fail()
+        return false
+    if reserved <= base:
+        _line_pmm_fail()
+        return false
+    if heap <= reserved:
+        _line_pmm_fail()
+        return false
+    if heap > ram_end:
+        _line_pmm_fail()
+        return false
+
+    val alloc_base = _align_page_up(reserved)
+    val alloc_limit = heap
+    if alloc_base >= alloc_limit:
+        _line_pmm_fail()
+        return false
+
+    g_riscv_noalloc_pmm_base = alloc_base
+    g_riscv_noalloc_pmm_limit = alloc_limit
+    g_riscv_noalloc_pmm_next = alloc_base
+    g_riscv_noalloc_pmm_total_pages = (alloc_limit - alloc_base) / NOALLOC_PAGE_SIZE
+    g_riscv_noalloc_pmm_free_pages = g_riscv_noalloc_pmm_total_pages
+    g_riscv_noalloc_pmm_ready = true
+    _line_pmm_ok()
+    true
+
+fn riscv_noalloc_alloc_page() -> u64:
+    if not g_riscv_noalloc_pmm_ready:
+        return 0
+    if g_riscv_noalloc_pmm_next >= g_riscv_noalloc_pmm_limit:
+        return 0
+    val page = g_riscv_noalloc_pmm_next
+    g_riscv_noalloc_pmm_next = g_riscv_noalloc_pmm_next + NOALLOC_PAGE_SIZE
+    if g_riscv_noalloc_pmm_free_pages > 0:
+        g_riscv_noalloc_pmm_free_pages = g_riscv_noalloc_pmm_free_pages - 1
+    page
+
+fn riscv_noalloc_pmm_is_ready() -> bool:
+    g_riscv_noalloc_pmm_ready
+
+fn riscv_noalloc_pmm_free_pages() -> u64:
+    g_riscv_noalloc_pmm_free_pages
+
+fn riscv_noalloc_pmm_total_pages() -> u64:
+    g_riscv_noalloc_pmm_total_pages

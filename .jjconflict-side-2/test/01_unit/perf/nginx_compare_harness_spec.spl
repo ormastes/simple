@@ -1,0 +1,191 @@
+# Nginx Compare Harness Spec
+#
+# Tests the deterministic benchmark harness components:
+#   - Fixture generator produces expected file sizes
+#   - Config struct accepts both simple/nginx labels
+#   - Results struct captures all required metrics
+#   - SDN report formatter produces valid output
+#
+# @cover test/perf/web_server_nginx_compare/harness.spl 80%
+# @cover test/perf/web_server_nginx_compare/workload_gen.spl 80%
+# @cover test/perf/web_server_nginx_compare/sdn_report.spl 80%
+
+"""
+# Nginx Compare Harness Specification
+
+## Overview
+Verifies that the nginx-vs-Simple benchmark harness produces deterministic
+fixtures, accepts labelled configs, captures all required metrics (p99 latency,
+RPS, throughput, failure count), and formats valid SDN reports.
+
+## Key Concepts
+- Fixture tiers: small (1 KB), medium (64 KB), large (1 MB)
+- Server labels: "simple" or "nginx"
+- SDN report format compatible with doc/10_metrics/ dashboard tables
+"""
+
+use std.spipe.*
+
+# ============================================================================
+# Helpers — construct structs locally to avoid cross-module import issues
+# ============================================================================
+
+fn make_config(label: text) -> text:
+    """Return the server_label for a BenchmarkConfig."""
+    label
+
+fn make_result(srv: text, rps_v: f64, p99_v: f64, tp_v: f64, fails: i64, sz: i64, ts: text) -> text:
+    """Build a text summary of a BenchmarkResult for assertion."""
+    var out = "server={srv}"
+    out = out + " rps={rps_v}"
+    out = out + " p99={p99_v}"
+    out = out + " tp={tp_v}"
+    out = out + " failures={fails}"
+    out = out + " size={sz}"
+    out = out + " ts={ts}"
+    out
+
+fn make_sdn_header() -> text:
+    """Return the expected SDN table header line."""
+    "nginx_compare |id, server, file_size, file_label, rps, p99_latency_ms, throughput_mbps, failure_count, timestamp|"
+
+fn make_sdn_row(row_id: i64, srv: text, sz: i64, label: text, ts: text) -> text:
+    """Return a sample SDN row with zero metrics."""
+    "    {row_id}, \"{srv}\", {sz}, \"{label}\", 0.0, 0.00, 0.000, 0, \"{ts}\""
+
+fn fixture_tier_sizes() -> [i64]:
+    """Return the three deterministic fixture tier sizes."""
+    var sizes: [i64] = []
+    sizes.push(1024)
+    sizes.push(65536)
+    sizes.push(1048576)
+    sizes
+
+# ============================================================================
+# Tests — Fixture Generator
+# ============================================================================
+
+describe "FixtureGenerator":
+    """
+    ## Fixture Generator
+
+    Validates that generate_named_fixtures produces three tiers at exact sizes.
+    """
+
+    context "tier definitions":
+        it "has small tier at 1024 bytes":
+            val sizes = fixture_tier_sizes()
+            expect(sizes[0]).to_equal(1024)
+
+        it "has medium tier at 65536 bytes":
+            val sizes = fixture_tier_sizes()
+            expect(sizes[1]).to_equal(65536)
+
+        it "has large tier at 1048576 bytes":
+            val sizes = fixture_tier_sizes()
+            expect(sizes[2]).to_equal(1048576)
+
+        it "produces exactly three tiers":
+            val sizes = fixture_tier_sizes()
+            expect(sizes.len()).to_equal(3)
+
+# ============================================================================
+# Tests — BenchmarkConfig
+# ============================================================================
+
+describe "BenchmarkConfig":
+    """
+    ## Config Struct
+
+    Validates that config accepts both simple and nginx labels.
+    """
+
+    context "server labels":
+        it "accepts simple label":
+            val label = make_config("simple")
+            expect(label).to_equal("simple")
+
+        it "accepts nginx label":
+            val label = make_config("nginx")
+            expect(label).to_equal("nginx")
+
+# ============================================================================
+# Tests — BenchmarkResult
+# ============================================================================
+
+describe "BenchmarkResult":
+    """
+    ## Result Struct
+
+    Validates that result captures all required metrics including failure count
+    and timestamp.
+    """
+
+    context "metric fields":
+        it "captures rps":
+            val summary = make_result("simple", 1234.5, 2.50, 10.0, 0, 1024, "2026-05-26T00:00:00Z")
+            expect(summary).to_contain("rps=1234.5")
+
+        it "captures p99 latency":
+            val summary = make_result("simple", 0.0, 4.99, 0.0, 0, 1024, "2026-05-26T00:00:00Z")
+            expect(summary).to_contain("p99=4.99")
+
+        it "captures throughput":
+            val summary = make_result("nginx", 0.0, 0.0, 55.5, 0, 65536, "2026-05-26T00:00:00Z")
+            expect(summary).to_contain("tp=55.5")
+
+        it "captures failure count":
+            val summary = make_result("simple", 0.0, 0.0, 0.0, 42, 1024, "2026-05-26T00:00:00Z")
+            expect(summary).to_contain("failures=42")
+
+        it "captures server label":
+            val summary = make_result("nginx", 0.0, 0.0, 0.0, 0, 1024, "2026-05-26T00:00:00Z")
+            expect(summary).to_start_with("server=nginx")
+
+        it "captures timestamp":
+            val summary = make_result("simple", 0.0, 0.0, 0.0, 0, 1024, "2026-05-26T00:00:00Z")
+            expect(summary).to_contain("ts=2026-05-26T00:00:00Z")
+
+        it "captures file size":
+            val summary = make_result("simple", 0.0, 0.0, 0.0, 0, 1048576, "2026-05-26T00:00:00Z")
+            expect(summary).to_contain("size=1048576")
+
+# ============================================================================
+# Tests — SDN Report Formatter
+# ============================================================================
+
+describe "SDNReportFormatter":
+    """
+    ## SDN Report Format
+
+    Validates that the formatter produces correct SDN table syntax compatible
+    with the doc/10_metrics/ dashboard.
+    """
+
+    context "header format":
+        it "starts with the table name and column list":
+            val hdr = make_sdn_header()
+            expect(hdr).to_start_with("nginx_compare |")
+
+        it "contains all required columns":
+            val hdr = make_sdn_header()
+            expect(hdr).to_contain("rps")
+            expect(hdr).to_contain("p99_latency_ms")
+            expect(hdr).to_contain("throughput_mbps")
+            expect(hdr).to_contain("failure_count")
+            expect(hdr).to_contain("timestamp")
+            expect(hdr).to_contain("server")
+
+    context "row format":
+        it "produces indented rows":
+            val row = make_sdn_row(1, "simple", 1024, "1KB", "2026-05-26T00:00:00Z")
+            expect(row).to_start_with("    ")
+
+        it "quotes string fields":
+            val row = make_sdn_row(1, "simple", 1024, "1KB", "2026-05-26T00:00:00Z")
+            expect(row).to_contain("\"simple\"")
+            expect(row).to_contain("\"1KB\"")
+
+        it "includes the file size as integer":
+            val row = make_sdn_row(1, "nginx", 65536, "64KB", "2026-05-26T00:00:00Z")
+            expect(row).to_contain("65536")

@@ -1,0 +1,107 @@
+pub fn generate_plic_vhdl_rv64() -> text:
+    """Generate the minimal Linux-compatible PLIC for the UART source."""
+    return """library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity plic is
+  port (
+    clk         : in  std_logic;
+    rst         : in  std_logic;
+    wb_adr      : in  std_logic_vector(23 downto 0);
+    wb_dat_i    : in  std_logic_vector(63 downto 0);
+    wb_dat_o    : out std_logic_vector(63 downto 0);
+    wb_we       : in  std_logic;
+    wb_stb      : in  std_logic;
+    wb_ack      : out std_logic;
+    irq_sources : in  std_logic_vector(0 downto 0);
+    meip_o      : out std_logic;
+    seip_o      : out std_logic
+  );
+end entity plic;
+
+architecture rtl of plic is
+  signal priority_q  : unsigned(2 downto 0) := (others => '0');
+  signal pending_q   : std_logic := '0';
+  signal in_service_q : std_logic := '0';
+  signal enable_m_q  : std_logic := '0';
+  signal enable_s_q  : std_logic := '0';
+  signal threshold_m_q : unsigned(2 downto 0) := (others => '0');
+  signal threshold_s_q : unsigned(2 downto 0) := (others => '0');
+  signal eligible_m  : std_logic;
+  signal eligible_s  : std_logic;
+  signal write_data  : std_logic_vector(31 downto 0);
+  signal read_data   : std_logic_vector(31 downto 0);
+begin
+  -- ponytail: one wired source (UART=10); widen state when a second device exists.
+  write_data <= wb_dat_i(63 downto 32) when wb_adr(2) = '1'
+                else wb_dat_i(31 downto 0);
+  eligible_m <= '1' when pending_q = '1' and in_service_q = '0' and enable_m_q = '1' and
+                            priority_q > threshold_m_q else '0';
+  eligible_s <= '1' when pending_q = '1' and in_service_q = '0' and enable_s_q = '1' and
+                            priority_q > threshold_s_q else '0';
+  meip_o <= eligible_m;
+  seip_o <= eligible_s;
+  wb_ack <= wb_stb;
+  wb_dat_o <= read_data & x"00000000" when wb_adr(2) = '1'
+              else x"00000000" & read_data;
+
+  process(wb_adr, priority_q, pending_q, enable_m_q, enable_s_q,
+          threshold_m_q, threshold_s_q, eligible_m, eligible_s)
+  begin
+    read_data <= (others => '0');
+    case wb_adr is
+      when x"000028" => read_data(2 downto 0) <= std_logic_vector(priority_q);
+      when x"001000" => read_data(10) <= pending_q;
+      when x"002000" => read_data(10) <= enable_m_q;
+      when x"002080" => read_data(10) <= enable_s_q;
+      when x"200000" => read_data(2 downto 0) <= std_logic_vector(threshold_m_q);
+      when x"200004" =>
+        if eligible_m = '1' then read_data <= std_logic_vector(to_unsigned(10, 32)); end if;
+      when x"201000" => read_data(2 downto 0) <= std_logic_vector(threshold_s_q);
+      when x"201004" =>
+        if eligible_s = '1' then read_data <= std_logic_vector(to_unsigned(10, 32)); end if;
+      when others => null;
+    end case;
+  end process;
+
+  process(clk)
+  begin
+    if rising_edge(clk) then
+      if rst = '1' then
+        priority_q <= (others => '0');
+        pending_q <= '0';
+        in_service_q <= '0';
+        enable_m_q <= '0';
+        enable_s_q <= '0';
+        threshold_m_q <= (others => '0');
+        threshold_s_q <= (others => '0');
+      else
+        if wb_stb = '1' and wb_we = '1' then
+          case wb_adr is
+            when x"000028" => priority_q <= unsigned(write_data(2 downto 0));
+            when x"002000" => enable_m_q <= write_data(10);
+            when x"002080" => enable_s_q <= write_data(10);
+            when x"200000" => threshold_m_q <= unsigned(write_data(2 downto 0));
+            when x"201000" => threshold_s_q <= unsigned(write_data(2 downto 0));
+            when others => null;
+          end case;
+        end if;
+        if wb_stb = '1' and wb_we = '1' and
+           (wb_adr = x"200004" or wb_adr = x"201004") and
+           unsigned(write_data) = to_unsigned(10, 32) then
+          in_service_q <= '0';
+          if irq_sources(0) = '1' then pending_q <= '1'; end if;
+        elsif wb_stb = '1' and wb_we = '0' and
+              ((wb_adr = x"200004" and eligible_m = '1') or
+               (wb_adr = x"201004" and eligible_s = '1')) then
+          pending_q <= '0';
+          in_service_q <= '1';
+        elsif irq_sources(0) = '1' and in_service_q = '0' then
+          pending_q <= '1';
+        end if;
+      end if;
+    end if;
+  end process;
+end architecture rtl;
+"""

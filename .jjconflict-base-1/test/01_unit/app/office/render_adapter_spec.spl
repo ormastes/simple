@@ -1,0 +1,156 @@
+"""Office render adapter spec.
+
+Verifies the unified render adapter routes each surface (Writer / Calc /
+Impress) to its real model->HTML renderer wrapped in a complete, styled HTML5
+page, and that unknown/empty adapter names fall back to the suite index.
+"""
+
+use std.spec
+use app.ui.render.types.{RenderConfig}
+use app.office.render_adapter.{office_render, office_render_source, render_sheet_html, office_demo_sheet, office_demo_document, office_demo_slide, render_sheet_html_with_rules, render_chart_section_html}
+use app.office.word.html_render.{render_document_html}
+use app.office.slides.html_render.{render_slide_html}
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cond_format.{CondRule}
+use app.office.sheets.chart.{sheet_bar_chart_svg}
+
+fn _render(surface: text) -> text:
+    var cfg = RenderConfig.html_export()
+    cfg.adapter_name = surface
+    val result = office_render(cfg)
+    result.html_output
+
+describe "office render adapter: full-page HTML export":
+    """Each surface renders a complete, self-contained HTML document."""
+
+    it "renders Writer with a doctype, title bar, and document article":
+        val html = _render("word")
+        expect(html).to_start_with("<!DOCTYPE html>")
+        expect(html).to_contain("LibreOffice Writer")
+        expect(html).to_contain("<article class=\"document\">")
+        expect(html).to_contain("Quarterly Business Review")
+        expect(html).to_end_with("</html>")
+
+    it "renders Calc as a styled HTML table with the budget grid":
+        val html = _render("sheets")
+        expect(html).to_contain("LibreOffice Calc")
+        expect(html).to_contain("<table")
+        expect(html).to_contain("Revenue")
+        expect(html).to_contain("Profit")
+
+    it "renders Impress as a slide section":
+        val html = _render("slides")
+        expect(html).to_contain("LibreOffice Impress")
+        expect(html).to_contain("<section class=\"slide\"")
+        expect(html).to_contain("Simple Office")
+
+    it "falls back to the suite index for unknown adapter names":
+        val html = _render("")
+        expect(html).to_contain("LibreOffice Suite")
+        expect(html).to_contain("Writer")
+        expect(html).to_contain("Calc")
+        expect(html).to_contain("Impress")
+
+    it "accepts LibreOffice aliases (writer/calc/impress)":
+        expect(_render("writer")).to_contain("LibreOffice Writer")
+        expect(_render("calc")).to_contain("LibreOffice Calc")
+        expect(_render("impress")).to_contain("LibreOffice Impress")
+
+    it "renders Mail as a Gmail-like mailbox page":
+        val html = _render("mail")
+        expect(html).to_contain("LibreOffice Mail")
+        expect(html).to_contain("mailbox")
+
+    it "renders Planner as a kanban board page":
+        val html = _render("planner")
+        expect(html).to_contain("LibreOffice Planner")
+        expect(html).to_contain("kanban-lane")
+
+    it "renders Draw as SVG, Base as a table, Math as MathML":
+        expect(_render("draw")).to_contain("<svg")
+        val base_html = _render("base")
+        expect(base_html).to_contain("LibreOffice Base")
+        expect(base_html).to_contain("Ada Lovelace")
+        expect(_render("math")).to_contain("<math")
+
+    it "gives Calc spreadsheet chrome: column letters and row numbers":
+        val html = _render("sheets")
+        expect(html).to_contain(">A</th>")
+        expect(html).to_contain(">B</th>")
+        expect(html).to_contain(">1</th>")
+        expect(html).to_contain(">4</th>")
+
+    it "shows a menubar strip on every page":
+        val html = _render("word")
+        expect(html).to_contain("<nav")
+        expect(html).to_contain("Format")
+
+    it "renders a deck file's slides through office_render_source":
+        val deck = "Intro\nWelcome\n---\nRoadmap\nQ3 goals"
+        val result = office_render_source("slides", "d.deck", deck)
+        expect(result.html_output).to_contain("Intro")
+        expect(result.html_output).to_contain("Roadmap")
+        expect(result.html_output).to_contain("<section class=\"slide\"")
+
+describe "office render adapter: surface renderers reuse real models":
+    """The demo models feed the same renderers the live surfaces use."""
+
+    it "renders the demo sheet table from cell display values":
+        val table = render_sheet_html(office_demo_sheet())
+        expect(table).to_start_with("<table")
+        expect(table).to_contain("<th")
+        expect(table).to_contain("1200")
+
+    it "produces a non-empty document and slide from the demo builders":
+        expect(render_document_html(office_demo_document())).to_contain("Highlights")
+        expect(render_slide_html(office_demo_slide())).to_contain("production-ready")
+
+describe "office render adapter: conditional formatting and charts":
+    """Calc feature modules (cond_format, chart) wired into the sheet grid render."""
+
+    it "merges a matching rule's CSS into that cell's td and leaves non-matching cells unchanged":
+        var sheet = Sheet.new("Demo")
+        sheet.set_value("A1", "50")
+        sheet.set_value("A2", "150")
+        val css = "background:#fde7e9;color:#c00"
+        val rules = [CondRule(range: "A1:A2", kind: "cell_value", criteria: ">100", n: 0, css: css)]
+        val html = render_sheet_html_with_rules(sheet, rules)
+        val cells = html.split("<td")
+        var matched_td = ""
+        var unmatched_td = ""
+        for part in cells:
+            if part.contains(">150<"):
+                matched_td = part
+            if part.contains(">50<"):
+                unmatched_td = part
+        expect(matched_td).to_contain(css)
+        expect(unmatched_td).to_contain("border: 1px solid")
+        assert_false(unmatched_td.contains(css))
+
+    it "renders no CSS on any cell when no rule matches":
+        var sheet = Sheet.new("Demo")
+        sheet.set_value("A1", "5")
+        val rules = [CondRule(range: "A1:A1", kind: "cell_value", criteria: ">100", n: 0, css: "background:#fde7e9")]
+        val html = render_sheet_html_with_rules(sheet, rules)
+        expect(html).to_contain(">5<")
+        assert_false(html.contains("background:#fde7e9"))
+
+    it "embeds a chart SVG below the sheet grid in a titled section":
+        var sheet = Sheet.new("Demo")
+        sheet.set_value("A1", "Q1")
+        sheet.set_value("A2", "Q2")
+        sheet.set_value("B1", "10")
+        sheet.set_value("B2", "20")
+        val svg = sheet_bar_chart_svg(sheet, "A1:A2", "B1:B2", "Quarterly Totals")
+        val section = render_chart_section_html(svg, "Quarterly Totals")
+        expect(section).to_contain("<svg")
+        expect(section).to_contain("Quarterly Totals")
+
+    it "wires conditional formatting and a chart into the Calc surface export":
+        var cfg = RenderConfig.html_export()
+        cfg.adapter_name = "sheets"
+        val result = office_render(cfg)
+        val html = result.html_output
+        expect(html).to_contain("<svg")
+        expect(html).to_contain("Q1 Revenue vs Costs")
+        expect(html).to_contain("background:#d1fae5")

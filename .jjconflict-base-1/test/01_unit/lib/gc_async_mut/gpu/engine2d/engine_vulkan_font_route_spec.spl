@@ -1,0 +1,88 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl 10%
+# @tag: unit, gpu, engine2d, font-offload
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
+
+describe "Engine2D Vulkan font routing":
+    it "keeps non-Vulkan engines out of the Vulkan font lane":
+        var engine = Engine2D.create_with_backend(2, 2, "software")
+        expect(engine.vulkan_backend).to_equal(nil)
+        expect(engine.install_vulkan_font_spirv([0u8; 20])).to_equal(false)
+        engine.shutdown()
+
+    it "replays the same font batch through software after Vulkan poison":
+        var engine = Engine2D.create_with_backend(8, 8, "software")
+        engine.selected_backend_name = "vulkan"
+        engine.vulkan_backend = VulkanBackend.create()
+        engine.clear(0xff010203u32)
+        engine.draw_rect_filled(7, 7, 1, 1, 0xffabcdefu32)
+        val fallback_pixels = engine.read_pixels()
+        engine._poison_vulkan_font_surface(fallback_pixels)
+        expect(engine.selected_backend_name).to_equal("vulkan-poisoned-software")
+        expect(engine.vulkan_backend != nil).to_equal(true)
+        expect(engine.vulkan_backend.?.completion_unknown).to_equal(true)
+        val batch = FontRenderBatch(
+            program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION,
+            font_identity: "poison-replay", face_generation: 7, valid: true,
+            atlas_width: 1, atlas_height: 1, atlas_pixels: [0xffffffffu32],
+            quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+                width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0xff123456u32)],
+            atlas_generation: 9, dirty_rects: [])
+        val identity_before = batch.atlas_cache_identity()
+        expect(engine._draw_font_batch(0, 0, batch)).to_equal(true)
+        expect(batch.atlas_cache_identity()).to_equal(identity_before)
+        expect(engine.read_pixels()[0]).to_equal(0xff123456u32)
+        expect(engine.read_pixels()[63]).to_equal(0xffabcdefu32)
+        expect(engine.last_font_execution_target).to_equal("cpu")
+        engine.shutdown()
+
+    it "replays an unavailable Vulkan font batch through software from quad zero":
+        var engine = Engine2D.create_with_backend(3, 2, "software")
+        engine.vulkan_backend = VulkanBackend.create()
+        val batch = FontRenderBatch(
+            program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION,
+            font_identity: "route-test", face_generation: 1, valid: true,
+            atlas_width: 1, atlas_height: 1, atlas_pixels: [0xff000000u32],
+            quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 1, dst_y: 1,
+                width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0xff123456u32)],
+            atlas_generation: 1, dirty_rects: []
+        )
+        engine.clear(0xff000000u32)
+        expect(engine._draw_font_batch(0, 0, batch)).to_equal(true)
+        expect(engine.read_pixels()[4]).to_equal(0xff123456u32)
+        expect(engine.vulkan_font_state_unknown).to_equal(false)
+        val unavailable = engine.vulkan_backend
+        expect(unavailable != nil).to_equal(true)
+        expect(unavailable.?.d_font_atlas).to_equal(0)
+        engine.shutdown()
+
+    it "routes only the canonical Vulkan constructor and preserves CPU replay":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+        val font_source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_font.spl")
+        expect(source).to_contain("use std.gpu.engine2d.backend_vulkan_font")
+        expect(source).to_contain("vulkan_backend: VulkanBackend? = nil")
+        expect(source).to_contain("vulkan_backend: vulkan")
+        expect(source.contains("vulkan_backend: dx_vk")).to_equal(false)
+        expect(source.contains("vulkan_backend: metal_vk")).to_equal(false)
+        expect(source).to_contain("evidence.dispatch_count == batch.quads.len()")
+        expect(source).to_contain("evidence.reason == \"partial-framebuffer-restore-failed\"")
+        expect(source).to_contain("evidence.reason == \"missing-command-cleanup-capability\"")
+        expect(source).to_contain("evidence.reason == \"descriptor-cleanup-failed\"")
+        expect(source).to_contain("evidence.reason == \"atlas-cleanup-failed\"")
+        expect(source).to_contain("evidence.reason == \"cleanup-failed\"")
+        expect(source).to_contain("evidence.reason == \"fence-completion-unknown\"")
+        expect(source).to_contain("if (evidence.promotion_ready and")
+        expect(source.contains("evidence.device_executed and evidence.parity")).to_equal(false)
+        expect(source).to_contain("self.selected_backend_name = \"vulkan-poisoned-software\"")
+        expect(source).to_contain("self._poison_vulkan_font_surface(evidence.fallback_pixels)")
+        expect(font_source).to_contain("_vulkan_font_with_fallback")
+        expect(source).to_contain("target + \":poisoned-skip\"")
+        expect(source).to_contain("evidence.reason == \"device-lost\"")
+        expect(source).to_contain("vulkan.shutdown()")
+        expect(source).to_contain("if self.vulkan_font_state_unknown and target != \"cpu\"")
+        expect(source).to_contain("while quad_index < batch.quads.len()")

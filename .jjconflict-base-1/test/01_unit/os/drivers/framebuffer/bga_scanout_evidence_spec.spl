@@ -1,0 +1,61 @@
+use std.spec
+use os.drivers.framebuffer.bga_init.{ScanoutEvidence, scanout_evidence_from_framebuffer, scanout_evidence_is_valid, scanout_pixel_format, scanout_stride_pixels}
+use app.io.mod.{file_read}
+use os.kernel.boot.ports.{FramebufferInfo}
+use os.kernel.types.memory_types.{PhysAddr}
+
+describe "BGA scanout evidence":
+    it "uses QEMU's aligned word data port and retains hardware readback":
+        val source = file_read("src/os/drivers/framebuffer/bga_init.spl")
+        expect(source).to_contain("port_outw(0x01D0, value)")
+        expect(source).to_contain("port_inw(0x01D0)")
+        expect(source).to_contain("val active_width = bga_read(0x01)")
+        expect(source).to_contain("val active_height = bga_read(0x02)")
+        expect(source.contains("port_inw(0x01CF)")).to_be(false)
+
+    it "prefers the discovered PCI MMIO register BAR for stdvga":
+        val source = file_read("src/os/drivers/framebuffer/bga_init.spl")
+        expect(source).to_contain("pci_config_read32(0, dev, 0, 0x18)")
+        expect(source).to_contain("mmio_bar + 0x0500 + index.to_u64() * 2")
+        expect(source).to_contain("bga_mmio_read(mmio_bar, 0x01)")
+        expect(source).to_contain("addr: PhysAddr(addr: pci_device.framebuffer_bar)")
+        expect(source).to_contain("bga_mmio_read(mmio_bar, 0x01) as u32")
+
+    it "preserves initialized framebuffer metadata and generation":
+        val fb = FramebufferInfo(
+            addr: PhysAddr(addr: 0xFD000000),
+            width: 1280,
+            height: 720,
+            pitch: 5120,
+            bpp: 32
+        )
+        val evidence = scanout_evidence_from_framebuffer(fb, 7)
+
+        expect(evidence.address).to_equal(0xFD000000)
+        expect(evidence.width).to_equal(1280)
+        expect(evidence.height).to_equal(720)
+        expect(evidence.stride).to_equal(5120)
+        expect(evidence.pixel_format).to_equal("argb8888")
+        expect(evidence.generation).to_equal(7)
+
+    it "maps supported BGA depths to explicit pixel formats":
+        expect(scanout_pixel_format(32)).to_equal("argb8888")
+        expect(scanout_pixel_format(24)).to_equal("rgb888")
+        expect(scanout_pixel_format(16)).to_equal("rgb565")
+        expect(scanout_pixel_format(8)).to_equal("unknown")
+
+    it "derives pixel pitch from padded byte stride":
+        val evidence = ScanoutEvidence(address: 4096, width: 3, height: 2, stride: 16, pixel_format: "argb8888", generation: 1)
+        expect(scanout_stride_pixels(evidence)).to_equal(4)
+        expect(scanout_evidence_is_valid(evidence)).to_be(true)
+
+    it "rejects incomplete, undersized, and unsupported metadata":
+        val missing_address = ScanoutEvidence(address: 0, width: 3, height: 2, stride: 16, pixel_format: "argb8888", generation: 1)
+        val undersized = ScanoutEvidence(address: 4096, width: 5, height: 2, stride: 16, pixel_format: "argb8888", generation: 1)
+        val unsupported = ScanoutEvidence(address: 4096, width: 3, height: 2, stride: 12, pixel_format: "rgb888", generation: 1)
+        val stale = ScanoutEvidence(address: 4096, width: 3, height: 2, stride: 12, pixel_format: "argb8888", generation: 0)
+
+        expect(scanout_evidence_is_valid(missing_address)).to_be(false)
+        expect(scanout_evidence_is_valid(undersized)).to_be(false)
+        expect(scanout_evidence_is_valid(unsupported)).to_be(false)
+        expect(scanout_evidence_is_valid(stale)).to_be(false)

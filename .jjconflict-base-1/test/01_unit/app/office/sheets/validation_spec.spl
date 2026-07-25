@@ -1,0 +1,148 @@
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.validation.{ValidationRuleSpec, ValidationRules, empty_validation_rules, validation_add, validation_remove, validation_check, validation_list_values, validate_sheet}
+
+describe("validation list rules"):
+    it("accepts member in allowed list"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "A1", "list", "apple,banana,cherry", 0.0, 0.0, "", "Not in list")
+        val result = validation_check(rules, Sheet.new("test"), "A1", "banana")
+        expect(result.ok).to_equal(true)
+
+    it("rejects non-member with message"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "A1", "list", "apple,banana,cherry", 0.0, 0.0, "", "Must be apple, banana, or cherry")
+        val result = validation_check(rules, Sheet.new("test"), "A1", "orange")
+        expect(result.ok).to_equal(false)
+        expect(result.message).to_equal("Must be apple, banana, or cherry")
+
+describe("validation whole_number rules"):
+    it("accepts value at minimum boundary"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "B1", "whole_number", "", 10.0, 20.0, "", "Must be 10-20")
+        val result = validation_check(rules, Sheet.new("test"), "B1", "10")
+        expect(result.ok).to_equal(true)
+
+    it("rejects value below minimum"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "B1", "whole_number", "", 10.0, 20.0, "", "Must be 10-20")
+        val result = validation_check(rules, Sheet.new("test"), "B1", "9")
+        expect(result.ok).to_equal(false)
+
+    it("accepts value at maximum boundary"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "B1", "whole_number", "", 10.0, 20.0, "", "Must be 10-20")
+        val result = validation_check(rules, Sheet.new("test"), "B1", "20")
+        expect(result.ok).to_equal(true)
+
+    it("rejects non-integer"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "B1", "whole_number", "", 10.0, 20.0, "", "Must be integer")
+        val result = validation_check(rules, Sheet.new("test"), "B1", "15.5")
+        expect(result.ok).to_equal(false)
+
+describe("validation decimal rules"):
+    it("accepts decimal within range"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "C1", "decimal", "", 0.5, 2.5, "", "Must be 0.5-2.5")
+        val result = validation_check(rules, Sheet.new("test"), "C1", "1.5")
+        expect(result.ok).to_equal(true)
+
+    it("rejects decimal above maximum"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "C1", "decimal", "", 0.5, 2.5, "", "Must be 0.5-2.5")
+        val result = validation_check(rules, Sheet.new("test"), "C1", "3.0")
+        expect(result.ok).to_equal(false)
+
+describe("validation text_length rules"):
+    it("accepts text within length bounds"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "D1", "text_length", "", 3.0, 10.0, "", "Must be 3-10 chars")
+        val result = validation_check(rules, Sheet.new("test"), "D1", "hello")
+        expect(result.ok).to_equal(true)
+
+    it("rejects text shorter than minimum"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "D1", "text_length", "", 3.0, 10.0, "", "Must be 3-10 chars")
+        val result = validation_check(rules, Sheet.new("test"), "D1", "ab")
+        expect(result.ok).to_equal(false)
+
+    it("rejects text longer than maximum"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "D1", "text_length", "", 3.0, 10.0, "", "Must be 3-10 chars")
+        val result = validation_check(rules, Sheet.new("test"), "D1", "this is too long")
+        expect(result.ok).to_equal(false)
+
+describe("validation date rules"):
+    it("accepts date serial within range"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "E1", "date", "", 44562.0, 45000.0, "", "Invalid date range")
+        val result = validation_check(rules, Sheet.new("test"), "E1", "44700")
+        expect(result.ok).to_equal(true)
+
+    it("rejects date serial outside range"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "E1", "date", "", 44562.0, 45000.0, "", "Invalid date range")
+        val result = validation_check(rules, Sheet.new("test"), "E1", "45100")
+        expect(result.ok).to_equal(false)
+
+describe("validation remove"):
+    it("removes a rule by cell reference"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "A1", "list", "apple,banana", 0.0, 0.0, "", "Bad list")
+        expect(rules.keys.len()).to_equal(1)
+        rules = validation_remove(rules, "A1")
+        expect(rules.keys.len()).to_equal(0)
+
+    it("does not affect other rules"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "A1", "list", "apple", 0.0, 0.0, "", "Bad")
+        rules = validation_add(rules, "B1", "whole_number", "", 1.0, 10.0, "", "Bad")
+        rules = validation_remove(rules, "A1")
+        expect(rules.keys.len()).to_equal(1)
+        expect(rules.keys[0]).to_equal("B1")
+
+describe("validate_sheet"):
+    it("returns all violations on a seeded sheet"):
+        var sh = Sheet.new("test")
+        sh.set_value("A1", "good")
+        sh.set_value("A2", "bad")
+        sh.set_value("B1", "150")
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "A1", "list", "good,ok,fine", 0.0, 0.0, "", "Not in list")
+        rules = validation_add(rules, "A2", "list", "good,ok,fine", 0.0, 0.0, "", "Not in list")
+        rules = validation_add(rules, "B1", "whole_number", "", 0.0, 100.0, "", "Out of range")
+        val violations = validate_sheet(rules, sh)
+        expect(violations.len()).to_equal(2)
+
+describe("validation column-wide rules"):
+    it("applies rule to every cell in column"):
+        var sh = Sheet.new("test")
+        sh.set_value("A1", "10")
+        sh.set_value("A2", "20")
+        sh.set_value("A3", "5")
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "A", "whole_number", "", 10.0, 30.0, "", "Out of range")
+        val r1 = validation_check(rules, sh, "A1", "10")
+        val r2 = validation_check(rules, sh, "A2", "20")
+        val r3 = validation_check(rules, sh, "A3", "5")
+        expect(r1.ok).to_equal(true)
+        expect(r2.ok).to_equal(true)
+        expect(r3.ok).to_equal(false)
+
+describe("validation_list_values"):
+    it("extracts allowed values from list rule"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "A1", "list", "apple, banana, cherry", 0.0, 0.0, "", "")
+        val values = validation_list_values(rules, "A1")
+        expect(values.len()).to_equal(3)
+        expect(values[0]).to_equal("apple")
+        expect(values[1]).to_equal("banana")
+        expect(values[2]).to_equal("cherry")
+
+describe("validation deliberate-fail probe"):
+    it("fails when condition is wrong to verify test execution"):
+        var rules = empty_validation_rules()
+        rules = validation_add(rules, "Z1", "list", "x,y,z", 0.0, 0.0, "", "Not in xyz")
+        val result = validation_check(rules, Sheet.new("test"), "Z1", "w")
+        expect(result.ok).to_equal(false)

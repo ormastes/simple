@@ -1,0 +1,224 @@
+# Table Query Operations
+#
+# select/order/join/group-count over table.spl's Table — the query layer of
+# the minimal Access-like database. Reuses table.spl's table_new/
+# table_col_index/table_insert/table_row_count for all storage; this file
+# only adds comparison, ordering, and combination logic on top.
+
+use app.office.database.table.{Table, table_new, table_col_index, table_insert}
+
+# =========================================================================
+# Internal helpers
+# =========================================================================
+
+fn _is_numeric_text(s: text) -> bool:
+    """True if `s` looks like a plain number (optional leading '-', digits,
+    at most one '.'). Deliberately hand-rolled rather than trusting
+    `to_f64()` alone: `to_f64()` silently returns 0.0 for garbage text, which
+    would misclassify non-numeric cells as numeric zero."""
+    if s == "":
+        return false
+    var i = 0
+    var has_digit = false
+    var has_dot = false
+    while i < s.len():
+        val ch = s.slice(i, i + 1)
+        if ch == "-" and i == 0:
+            pass_do_nothing("leading minus sign allowed")
+        elif ch == ".":
+            if has_dot:
+                return false
+            has_dot = true
+        elif ch >= "0" and ch <= "9":
+            has_digit = true
+        else:
+            return false
+        i = i + 1
+    has_digit
+
+fn _row_key_less(a: text, b: text) -> bool:
+    """Ordering primitive shared by comparisons and sorting: numeric compare
+    when both sides look numeric, else case-insensitive text compare."""
+    if _is_numeric_text(a) and _is_numeric_text(b):
+        return a.to_f64() < b.to_f64()
+    a.lower() < b.lower()
+
+fn _compare_values(a: text, b: text, op: text) -> bool:
+    """Apply `op` ("=","!=",">","<",">=","<=") to cell values `a`,`b`.
+    Numeric compare when both parse as numbers; otherwise case-insensitive
+    text compare (equality ops use text eq, relational ops use
+    lexicographic order on the lowercased text)."""
+    if _is_numeric_text(a) and _is_numeric_text(b):
+        val av = a.to_f64()
+        val bv = b.to_f64()
+        if op == "=":
+            return av == bv
+        if op == "!=":
+            return av != bv
+        if op == ">":
+            return av > bv
+        if op == "<":
+            return av < bv
+        if op == ">=":
+            return av >= bv
+        if op == "<=":
+            return av <= bv
+        return false
+    val al = a.lower()
+    val bl = b.lower()
+    if op == "=":
+        return al == bl
+    if op == "!=":
+        return al != bl
+    if op == ">":
+        return al > bl
+    if op == "<":
+        return al < bl
+    if op == ">=":
+        return al >= bl
+    if op == "<=":
+        return al <= bl
+    false
+
+fn _index_of_text(items: [text], target: text) -> i32:
+    """Linear scan for the first-seen-order group key set below; group
+    counts are small so O(n) per row is fine."""
+    var i = 0
+    while i < items.len():
+        if items[i] == target:
+            return i
+        i = i + 1
+    -1
+
+# =========================================================================
+# query_select_where
+# =========================================================================
+
+fn query_select_where(table: Table, col: text, op: text, value: text) -> Table:
+    """Rows of `table` where `col` `op` `value` holds (see `_compare_values`
+    for the numeric/text comparison rule). Unknown `col` yields an empty
+    table with the same shape (fail-soft)."""
+    val idx = table_col_index(table, col)
+    var out = table_new(table.name, table.cols)
+    if idx < 0:
+        return out
+    var i = 0
+    while i < table.rows.len():
+        val row_vals = table.rows[i]
+        if idx < row_vals.len() and _compare_values(row_vals[idx], value, op):
+            out = table_insert(out, row_vals)
+        i = i + 1
+    out
+
+# =========================================================================
+# query_order_by
+# =========================================================================
+
+fn query_order_by(table: Table, col: text, descending: bool) -> Table:
+    """Rows of `table` sorted by `col` (stable insertion sort — ties keep
+    their original relative order). Numeric/text ordering follows
+    `_row_key_less`. Unknown `col` returns `table` unchanged."""
+    val idx = table_col_index(table, col)
+    if idx < 0:
+        return table
+    var rows_copy: [[text]] = []
+    var i = 0
+    while i < table.rows.len():
+        rows_copy.push(table.rows[i])
+        i = i + 1
+    var n = rows_copy.len()
+    var a = 1
+    while a < n:
+        val key_row = rows_copy[a]
+        val key_val = key_row[idx]
+        var b = a - 1
+        var shifting = true
+        while shifting and b >= 0:
+            val cur_val = rows_copy[b][idx]
+            val should_shift = if descending: _row_key_less(cur_val, key_val) else: _row_key_less(key_val, cur_val)
+            if should_shift:
+                rows_copy[b + 1] = rows_copy[b]
+                b = b - 1
+            else:
+                shifting = false
+        rows_copy[b + 1] = key_row
+        a = a + 1
+    Table(name: table.name, cols: table.cols, rows: rows_copy)
+
+# =========================================================================
+# query_inner_join
+# =========================================================================
+
+fn query_inner_join(left: Table, right: Table, left_col: text, right_col: text) -> Table:
+    """Inner join: every (left row, right row) pair whose `left_col`/
+    `right_col` values compare equal (see `_compare_values`, op "="). The
+    result's columns are `left.cols` followed by `right.cols`, concatenated
+    in row order. Unknown join column on either side yields an empty table
+    with the concatenated shape (fail-soft)."""
+    val lidx = table_col_index(left, left_col)
+    val ridx = table_col_index(right, right_col)
+    var new_cols: [text] = []
+    var i = 0
+    while i < left.cols.len():
+        new_cols.push(left.cols[i])
+        i = i + 1
+    i = 0
+    while i < right.cols.len():
+        new_cols.push(right.cols[i])
+        i = i + 1
+    var out = table_new("{left.name}_{right.name}", new_cols)
+    if lidx < 0 or ridx < 0:
+        return out
+    var li = 0
+    while li < left.rows.len():
+        val lrow = left.rows[li]
+        var ri = 0
+        while ri < right.rows.len():
+            val rrow = right.rows[ri]
+            if lidx < lrow.len() and ridx < rrow.len() and _compare_values(lrow[lidx], rrow[ridx], "="):
+                var joined_row: [text] = []
+                var k = 0
+                while k < lrow.len():
+                    joined_row.push(lrow[k])
+                    k = k + 1
+                k = 0
+                while k < rrow.len():
+                    joined_row.push(rrow[k])
+                    k = k + 1
+                out = table_insert(out, joined_row)
+            ri = ri + 1
+        li = li + 1
+    out
+
+# =========================================================================
+# query_group_count
+# =========================================================================
+
+fn query_group_count(table: Table, col: text) -> Table:
+    """Group `table` by the text value of `col`, counting rows per group.
+    Groups are emitted in first-seen order (top-to-bottom scan of `table`),
+    not lexicographic order. Result columns: [col, "count"]. Unknown `col`
+    yields an empty [col, "count"] table (fail-soft)."""
+    val idx = table_col_index(table, col)
+    var out = table_new("{table.name}_group", [col, "count"])
+    if idx < 0:
+        return out
+    var keys: [text] = []
+    var counts: [i64] = []
+    var i = 0
+    while i < table.rows.len():
+        val row_vals = table.rows[i]
+        if idx < row_vals.len():
+            val key = row_vals[idx]
+            val pos = _index_of_text(keys, key)
+            if pos < 0:
+                keys.push(key)
+                counts.push(1)
+            else:
+                counts[pos] = counts[pos] + 1
+        i = i + 1
+    var j = 0
+    while j < keys.len():
+        out = table_insert(out, [keys[j], "{counts[j]}"])
+        j = j + 1
+    out

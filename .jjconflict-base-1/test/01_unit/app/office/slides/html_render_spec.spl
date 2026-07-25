@@ -1,0 +1,101 @@
+"""Slide HTML render spec.
+
+Verifies that `render_slide_html` renders a slide as a styled HTML fragment
+using the shared office style resolver's slide theme — the "render PPT like MS
+PowerPoint" slice of the LibreOffice suite. Element roles are inferred from the
+slide layout and element position (first element = title; on a title slide the
+second = subtitle; otherwise = body), and each gets the resolver's Word-level
+slide styling inlined.
+
+All assertions are over the produced HTML string, so they run on the test
+runner without the f64/i32 toolchain fragility.
+"""
+
+use std.spec
+use app.office.slides.html_render.{render_slide_html}
+use app.office.slides.slide.{Slide, SlideElement, SlideElementKind, SlideLayout, title_slide, content_slide, set_slide_notes}
+
+describe "slide HTML render: title slide":
+    """A title slide renders a centered bold title and a subtitle, each styled
+    from the resolver's slide theme."""
+
+    it "wraps the slide in a styled <section>":
+        val html = render_slide_html(title_slide("s1", "My Talk", "A subtitle"))
+        expect(html).to_start_with("<section class=\"slide\"")
+        expect(html).to_end_with("</section>")
+
+    it "styles the title as slide_title (bold, centered, 2.5em)":
+        val html = render_slide_html(title_slide("s1", "My Talk", "A subtitle"))
+        expect(html).to_contain("class=\"slide_title\"")
+        expect(html).to_contain("font-size: 2.5em;")
+        expect(html).to_contain("text-align: center;")
+        expect(html).to_contain(">My Talk</div>")
+
+    it "styles the second element as slide_subtitle":
+        val html = render_slide_html(title_slide("s1", "My Talk", "A subtitle"))
+        expect(html).to_contain("class=\"slide_subtitle\"")
+        expect(html).to_contain(">A subtitle</div>")
+
+describe "slide HTML render: content slide":
+    """A content slide styles its non-title elements as slide_body."""
+
+    it "styles the body element as slide_body":
+        val html = render_slide_html(content_slide("s2", "Agenda", "First point"))
+        expect(html).to_contain("class=\"slide_title\"")
+        expect(html).to_contain("class=\"slide_body\"")
+        expect(html).to_contain(">First point</div>")
+
+    it "escapes text content before writing HTML":
+        val html = render_slide_html(content_slide("s3", "A&B", "<script>bad</script>"))
+        expect(html).to_contain(">A&amp;B</div>")
+        expect(html).to_contain("&lt;script&gt;bad&lt;/script&gt;")
+        expect(html.contains("<script>")).to_be(false)
+
+    it "sanitizes invalid background colors":
+        val slide = Slide(
+            id: "s4",
+            layout: SlideLayout.Blank,
+            elements: [],
+            notes: "",
+            background: "url(javascript:bad)",
+            transition: ""
+        )
+        val html = render_slide_html(slide)
+        expect(html).to_contain("background: #ffffff;")
+
+    it "positions slide elements with clamped boxes":
+        val slide = Slide(
+            id: "s5",
+            layout: SlideLayout.Blank,
+            elements: [SlideElement(
+                id: "e1",
+                kind: SlideElementKind.TextBox(content: "Box"),
+                x: -10,
+                y: 20,
+                width: 300,
+                height: -40
+            )],
+            notes: "",
+            background: "#112233",
+            transition: ""
+        )
+        val html = render_slide_html(slide)
+        expect(html).to_contain("position: relative; width: 960px; height: 540px;")
+        expect(html).to_contain("left: 0px; top: 20px; width: 300px; height: 0px;")
+
+describe "slide HTML render: speaker notes":
+    """Speaker notes render as a styled presenter-notes block after the slide,
+    using inline CSS only (no <style> blocks — string interpolation eats
+    literal braces)."""
+
+    it "renders a presenter-notes block when notes are set":
+        val slide = set_slide_notes(content_slide("s6", "Agenda", "First point"), "Remember to smile")
+        val html = render_slide_html(slide)
+        expect(html).to_contain("</section>")
+        expect(html).to_contain("class=\"slide-notes\"")
+        expect(html).to_contain("Remember to smile")
+        expect(html.contains("<style")).to_be(false)
+
+    it "omits the presenter-notes block when notes are empty":
+        val html = render_slide_html(content_slide("s7", "Agenda", "First point"))
+        expect(html.contains("slide-notes")).to_be(false)

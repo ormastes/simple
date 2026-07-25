@@ -1,0 +1,67 @@
+# SCV changed-range incremental rebuild — PROD-002.
+#
+# Strategy: full reparse + structural node-ID deduplication.
+# No tree-blob persistence needed. Unchanged subtrees reuse their
+# existing object-store entries via scv_ts_node_structural_id hashing.
+# byte_start/byte_end stored but excluded from hash — nodes survive line insertions.
+
+use std.scv.parser.{scv_syntax_node_children}
+use std.scv.wasm_executor.{scv_wasm_parse}
+
+# ---------------------------------------------------------------------------
+# Reuse counter helpers
+# ---------------------------------------------------------------------------
+
+# Count how many children in new_children appear in old_children (set lookup).
+# Returns (reused_count, changed_count).
+fn scv_incremental_reuse_counters(old_children: [text], new_children: [text]) -> (i64, i64):
+    var reused: i64 = 0
+    var i = 0
+    while i < new_children.len():
+        val nc = new_children[i]
+        var found = false
+        var j = 0
+        while j < old_children.len():
+            if old_children[j] == nc:
+                found = true
+                j = old_children.len()
+            j = j + 1
+        if found:
+            reused = reused + 1
+        i = i + 1
+    val changed = new_children.len() - reused
+    (reused, changed)
+
+# ---------------------------------------------------------------------------
+# Full incremental rebuild
+# ---------------------------------------------------------------------------
+
+# Rebuild syntax tree for a file after an edit.
+# Strategy: full reparse via WASM (or fallback) + structural dedup.
+# Returns (new_root_node_id, reused_count, changed_count).
+fn scv_incremental_rebuild(root: text, old_node_id: text, new_source: text,
+                            language: text, grammar: text, version: text,
+                            parser_hash: text) -> (text, i64, i64):
+    val (new_root_id, err) = scv_wasm_parse(root, language, grammar, version, parser_hash, new_source)
+    if err != "":
+        return (old_node_id, 0, 0)
+    val old_children = scv_syntax_node_children(root, old_node_id)
+    val new_children = scv_syntax_node_children(root, new_root_id)
+    val (reused, changed) = scv_incremental_reuse_counters(old_children, new_children)
+    (new_root_id, reused, changed)
+
+# ---------------------------------------------------------------------------
+# Reuse metrics report (used by parse-gate CLI output)
+# ---------------------------------------------------------------------------
+
+# Report reuse stats for a path given its old and new parse index lines.
+# Returns "reused_lines=N\nchanged_lines=M\n" or "" if not applicable.
+fn scv_incremental_reuse_metrics(root: text, old_node_id: text, new_node_id: text) -> text:
+    if old_node_id == "" or new_node_id == "":
+        return ""
+    val old_children = scv_syntax_node_children(root, old_node_id)
+    val new_children = scv_syntax_node_children(root, new_node_id)
+    if new_children.len() == 0:
+        return ""
+    val (reused, changed) = scv_incremental_reuse_counters(old_children, new_children)
+    "reused_lines={reused}\nchanged_lines={changed}\n"

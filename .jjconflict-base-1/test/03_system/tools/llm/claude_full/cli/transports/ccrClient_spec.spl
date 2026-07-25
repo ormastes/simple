@@ -1,0 +1,125 @@
+"""
+# Claude Full CCR Client
+
+Checks the CCR init error, lifecycle state, request decisions, delivery queues,
+and text-delta accumulation model used by the Simple parity slice.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.cli.transports.ccrClient.{CCRInitError, EventPayload, CCRClient, ListInternalEventsResponse, InternalEvent, alwaysValidStatus, createStreamAccumulator, scopeKey, accumulateStreamEvents, clearStreamAccumulatorForMessage, defaultHeartbeatIntervalMs, streamEventFlushIntervalMs, maxConsecutiveAuthFailures, ccrInitFailReasons, requestContentTypeHeader, requestAnthropicVersionHeader, requestUserAgentHeaderRequired, workerPath, workerHeartbeatPath, workerEventsPath, workerInternalEventsPath, workerDeliveryPath, streamEventsAreBuffered, textDeltasEmitFullSnapshots, assistantMessageClearsAccumulator, nonStreamWriteFlushesBufferedStreamEvents, deliveryAckRegisteredInConstructor, initializeRequiresAuthHeaders, initializeRequiresWorkerEpoch, initializeStartsHeartbeatAfterWorkerPut, requestReturnsRetryAfterMilliseconds, authFailureThresholdExits, closeClearsTimersQueuesAndAccumulator, ccrClientSourceLinesModeled}
+
+describe "Claude full CCRClient":
+    it "models CCRInitError reasons and constructor URL state":
+        step("Init errors carry typed reasons and the client extracts the session id")
+        val err = CCRInitError.new("missing_epoch")
+        expect(err.reason).to_equal("missing_epoch")
+        expect(err.message).to_equal("CCRClient init failed: missing_epoch")
+        expect(ccrInitFailReasons()).to_equal(["no_auth_headers", "missing_epoch", "worker_register_failed"])
+        val client = CCRClient.new("https://ccr.example/v1/code/sessions/cse_123/", ["Authorization: Bearer t"])
+        expect(client.sessionBaseUrl).to_equal("https://ccr.example/v1/code/sessions/cse_123")
+        expect(client.sessionId).to_equal("cse_123")
+        expect(client.heartbeatIntervalMs).to_equal(20000)
+
+    it "initializes only with auth headers and a worker epoch":
+        step("Initialization fails before side effects, then starts idle heartbeat after success")
+        val missingAuth = CCRClient.new("https://ccr.example/v1/code/sessions/cse_1", [])
+        if val Some(err) = missingAuth.initialize(1):
+            expect(err.reason).to_equal("no_auth_headers")
+        else:
+            expect("missing error").to_equal("no_auth_headers")
+        val missingEpoch = CCRClient.new("https://ccr.example/v1/code/sessions/cse_1", ["Authorization: Bearer t"])
+        if val Some(err) = missingEpoch.initialize(-1):
+            expect(err.reason).to_equal("missing_epoch")
+        else:
+            expect("missing error").to_equal("missing_epoch")
+        val failedPut = CCRClient.new("https://ccr.example/v1/code/sessions/cse_1", ["Authorization: Bearer t"])
+        if val Some(err) = failedPut.initializeWithRegisterStatus(7, 500):
+            expect(err.reason).to_equal("worker_register_failed")
+        else:
+            expect("missing error").to_equal("worker_register_failed")
+        val ok = CCRClient.new("https://ccr.example/v1/code/sessions/cse_1", ["Authorization: Bearer t"])
+        expect(ok.initialize(42)).to_be_nil()
+        expect(ok.getWorkerEpoch()).to_equal(42)
+        expect(ok.currentState).to_equal("idle")
+        expect(ok.heartbeatStarted).to_equal(true)
+
+    it "handles request statuses and worker reporting":
+        step("2xx resets auth failures, 429 returns milliseconds, 409 closes")
+        val client = CCRClient.new("https://ccr.example/v1/code/sessions/cse_1", ["Authorization: Bearer t"])
+        client.consecutiveAuthFailures = 4
+        expect(client.requestStatus(204, 0).ok).to_equal(true)
+        expect(client.consecutiveAuthFailures).to_equal(0)
+        val throttled = client.requestStatus(429, 3)
+        expect(throttled.ok).to_equal(false)
+        expect(throttled.retryAfterMs).to_equal(3000)
+        var i = 0
+        while i < maxConsecutiveAuthFailures():
+            client.requestStatus(401, 0)
+            i = i + 1
+        expect(client.epochMismatchCount).to_equal(1)
+        client.reportState("requires_action", "tool=Edit")
+        client.reportMetadata("task_summary=hello")
+        client.reportDelivery("evt_1", "processed")
+        expect(client.workerPatches).to_equal(["worker_status=requires_action;requires_action_details=tool=Edit", "external_metadata=task_summary=hello"])
+        expect(client.deliveryEvents).to_equal(["evt_1:processed"])
+
+    it "coalesces stream text and clears completed assistant state":
+        step("Text deltas emit full-so-far snapshots for the active message")
+        val state = createStreamAccumulator()
+        val started = EventPayload.streamMessageStart("u0", "cse_1", "", "msg_1")
+        expect(scopeKey(started)).to_equal("cse_1:")
+        val out = accumulateStreamEvents([
+            started,
+            EventPayload.streamTextDelta("u1", "cse_1", "", 0, "hel"),
+            EventPayload.streamTextDelta("u2", "cse_1", "", 0, "lo")
+        ], state)
+        expect(out.len()).to_equal(3)
+        expect(out[1].text).to_equal("hel")
+        expect(out[2].text).to_equal("hello")
+        clearStreamAccumulatorForMessage(state, EventPayload.assistant("cse_1", "", "msg_1"))
+        val raw = accumulateStreamEvents([EventPayload.streamTextDelta("u3", "cse_1", "", 0, "!")], state)
+        expect(raw[0].text).to_equal("!")
+        expect(state.blocks.len() < 1).to_equal(true)
+
+    it "flushes stream events before non-stream writes and closes queues":
+        step("Client write path preserves ordering and marks stream snapshots ephemeral")
+        val client = CCRClient.new("https://ccr.example/v1/code/sessions/cse_1", ["Authorization: Bearer t"])
+        client.writeEvent(EventPayload.streamMessageStart("u0", "cse_1", "", "msg_1"))
+        client.writeEvent(EventPayload.streamTextDelta("u1", "cse_1", "", 0, "a"))
+        client.writeEvent(EventPayload.new("", "keep_alive"))
+        expect(client.clientEvents.len()).to_equal(3)
+        expect(client.clientEvents[1].ephemeral).to_equal(true)
+        expect(client.clientEvents[1].payload.text).to_equal("a")
+        expect(client.clientEvents[2].payload.uuid).to_equal("generated-uuid")
+        client.writeInternalEvent("transcript", "assistant", true, "agent_1")
+        expect(client.internalEventsPending()).to_equal(1)
+        client.close()
+        expect(client.closed).to_equal(true)
+        expect(client.heartbeatStarted).to_equal(false)
+        expect(client.streamEventBuffer.len() < 1).to_equal(true)
+
+    it "exports source-backed constants":
+        step("Pin CCR paths, timers, and parity accounting")
+        expect(alwaysValidStatus()).to_equal(true)
+        expect(defaultHeartbeatIntervalMs()).to_equal(20000)
+        expect(streamEventFlushIntervalMs()).to_equal(100)
+        expect(requestContentTypeHeader()).to_equal("Content-Type: application/json")
+        expect(requestAnthropicVersionHeader()).to_equal("anthropic-version: 2023-06-01")
+        expect(requestUserAgentHeaderRequired()).to_equal(true)
+        expect(workerPath()).to_equal("/worker")
+        expect(workerHeartbeatPath()).to_equal("/worker/heartbeat")
+        expect(workerEventsPath()).to_equal("/worker/events")
+        expect(workerInternalEventsPath()).to_equal("/worker/internal-events")
+        expect(workerDeliveryPath()).to_equal("/worker/events/delivery")
+        expect(streamEventsAreBuffered()).to_equal(true)
+        expect(textDeltasEmitFullSnapshots()).to_equal(true)
+        expect(assistantMessageClearsAccumulator()).to_equal(true)
+        expect(nonStreamWriteFlushesBufferedStreamEvents()).to_equal(true)
+        expect(deliveryAckRegisteredInConstructor()).to_equal(true)
+        expect(initializeRequiresAuthHeaders()).to_equal(true)
+        expect(initializeRequiresWorkerEpoch()).to_equal(true)
+        expect(initializeStartsHeartbeatAfterWorkerPut()).to_equal(true)
+        expect(requestReturnsRetryAfterMilliseconds()).to_equal(true)
+        expect(authFailureThresholdExits()).to_equal(true)
+        expect(closeClearsTimersQueuesAndAccumulator()).to_equal(true)
+        expect(ccrClientSourceLinesModeled()).to_equal(998)

@@ -1,0 +1,60 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/browser_renderer.spl 80%
+# codex-system-test
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{
+    BrowserRenderer,
+    render_html_to_pixels_with_viewport
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels}
+
+val WEB_W: i32 = 64
+val WEB_H: i32 = 32
+
+fn _expect_draw_web_html() -> text:
+    "<!doctype html><html><head><title>Expect Draw Web</title><style>body { margin: 0; background-color: #123456; color: #f8fafc; }</style></head><body style=\"background-color: #123456\"><main class=\"expect-draw\"><h1>Render Ready</h1><p>Visible HTML text before pixels.</p></main></body></html>"
+
+describe "BrowserRenderer HTML/CSS expect-draw evidence":
+    it "captures source HTML and visible text before pixel evidence":
+        val html = _expect_draw_web_html()
+        var renderer = BrowserRenderer.create(WEB_W, WEB_H)
+        val result = renderer.render_html(html)
+
+        expect(result.ok).to_equal(true)
+        expect(result.has_html_capture()).to_equal(true)
+        expect(result.title).to_equal("Expect Draw Web")
+        expect(result.source_html).to_contain("<main class=\"expect-draw\">")
+        expect(result.source_html).to_contain("Render Ready")
+        expect(result.source_html).to_contain("Visible HTML text before pixels.")
+        expect(result.pixel_data.len()).to_equal(WEB_W * WEB_H)
+
+    it "exposes CSS-backed scene evidence after HTML assertions":
+        val html = _expect_draw_web_html()
+        var renderer = BrowserRenderer.create(WEB_W, WEB_H)
+        val result = renderer.render_html_to_pixels(html)
+        val scene = result.to_scene()
+
+        expect(result.source_html).to_contain("background-color: #123456")
+        expect(result.source_html).to_contain("color: #f8fafc")
+        expect(scene.width).to_equal(WEB_W)
+        expect(scene.height).to_equal(WEB_H)
+        expect(scene.commands.len()).to_equal(1)
+        expect(scene.commands[0].kind).to_equal("fill_rect")
+        expect(scene.commands[0].color).to_equal(0xFF123456u32)
+
+    it "keeps the viewport helper on the same HTML capture contract":
+        val html = _expect_draw_web_html()
+        val result = render_html_to_pixels_with_viewport(html, WEB_W, WEB_H)
+
+        expect(result.has_html_capture()).to_equal(true)
+        expect(result.source_html).to_contain("expect-draw")
+        expect(result.pixel_data.len()).to_equal(WEB_W * WEB_H)
+        expect(result.byte_count()).to_equal((WEB_W * WEB_H * 4).to_i64())
+
+    it "keeps widget class paint flags active through the pure Simple renderer":
+        val html = "<html><body><SECTION class=\"widget-panel focused\"><BUTTON class=\"widget-button\">Go</BUTTON  ><IMG class=\"widget-image icon-image\" /></SECTION  ></body></html>"
+        val pixels = simple_web_layout_render_html_software_pixels(html, WEB_W, WEB_H)
+
+        expect(pixels.len()).to_equal(WEB_W * WEB_H)
+        expect(pixels[0]).to_equal(0xFF0066CCu32)
+        expect(pixels[(WEB_H - 1) * WEB_W]).to_equal(0xFF0066CCu32)

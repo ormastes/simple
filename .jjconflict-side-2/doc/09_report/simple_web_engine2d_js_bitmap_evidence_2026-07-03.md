@@ -1,0 +1,1904 @@
+# Simple Web Engine2D JS Bitmap Evidence
+
+- status: pass
+- reason: pass
+- baseline runtime: node
+- node fixture tool: tools/node-render-bitmap/simple_web_engine2d_fixture.js
+- node fixture target: pure_simple
+- node fixture renderer: node-simple-web-engine2d-baseline
+- node fixture producer: node-simple-web-engine2d-baseline
+- node fixture Engine2D backend: software
+- node fixture pixel format: argb-u32
+- node fixture baseline source: js-fixture
+- scene: simple-web-engine2d-image-taskbar-command
+- dimensions: 96x64
+- iterations per trial: 1000
+- trials: 3
+- simple checksum: 26296152649728
+- baseline checksum: 26296152649728
+- simple weighted checksum: 80792557145241600
+- baseline weighted checksum: 80792557145241600
+- mismatch count: 0
+- blur/tolerance used: false
+- optimized path: static-pixel-cache
+- simple cache hits: 1000
+- simple cache stores: 1
+- best simple frame us: 2
+- best baseline frame us: 45
+- baseline/simple speedup x1000: 22500
+- simple ARGB path: build/simple_web_engine2d_js_bitmap_evidence/simple-argb.json
+- baseline ARGB path: build/simple_web_engine2d_js_bitmap_evidence/node-argb.json
+- simple binary: bin/simple (repo-self-hosted-fallback, pass)
+
+## Simple Output
+- ## trial 1
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3698:24
+-    |
+- 3698 |     while a < b and (cb[a] == 32 or cb[a] == 9 or cb[a] == 10 or cb[a] == 13):
+-    |                        ^
+-
+- Use angle brackets: cb<...> instead of cb[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4633:58
+-    |
+- 4633 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+-
+- Use angle brackets: left<...> instead of left[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4651:58
+-    |
+- 4651 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+-
+- Use angle brackets: left<...> instead of left[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4684:58
+-    |
+- 4684 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4687:42
+-    |
+- 4687 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4711:58
+-    |
+- 4711 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4714:42
+-    |
+- 4714 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:6372:78
+-    |
+- 6372 |     if node.tag == "#text" and parent >= 0 and parent < nodes.len() and nodes[parent].tag == "q" and st.quotes_enabled:
+-    |                                                                              ^
+-
+- Use angle brackets: nodes<...> instead of nodes[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/common/string_core.spl:89:44
+-    |
+-  89 |     while i < slen and is_whitespace_char(s[i]):
+-    |                                            ^
+-
+- Use angle brackets: s<...> instead of s[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/time_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.time_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/platform.spl:3:1
+-    |
+-   3 | export use nogc_sync_mut.platform.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_sync_mut/path.spl:142:31
+-    |
+- 142 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/env/platform.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.env.platform.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_async_mut/path.spl:142:31
+-    |
+- 142 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.metal_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/env_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.env_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/process_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.process_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/browser_file_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3698:24
+-    |
+- 3698 |     while a < b and (cb[a] == 32 or cb[a] == 9 or cb[a] == 10 or cb[a] == 13):
+-    |                        ^
+-
+- Use angle brackets: cb<...> instead of cb[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4633:58
+-    |
+- 4633 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+-
+- Use angle brackets: left<...> instead of left[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4651:58
+-    |
+- 4651 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+-
+- Use angle brackets: left<...> instead of left[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4684:58
+-    |
+- 4684 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4687:42
+-    |
+- 4687 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4711:58
+-    |
+- 4711 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4714:42
+-    |
+- 4714 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:6372:78
+-    |
+- 6372 |     if node.tag == "#text" and parent >= 0 and parent < nodes.len() and nodes[parent].tag == "q" and st.quotes_enabled:
+-    |                                                                              ^
+-
+- Use angle brackets: nodes<...> instead of nodes[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/common/string_core.spl:89:44
+-    |
+-  89 |     while i < slen and is_whitespace_char(s[i]):
+-    |                                            ^
+-
+- Use angle brackets: s<...> instead of s[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/time_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.time_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/platform.spl:3:1
+-    |
+-   3 | export use nogc_sync_mut.platform.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_sync_mut/path.spl:142:31
+-    |
+- 142 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/env/platform.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.env.platform.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_async_mut/path.spl:142:31
+-    |
+- 142 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.metal_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/env_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.env_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/process_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.process_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/browser_file_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.time_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_cuda' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [2m2026-07-03T12:01:37.110562Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mspl_dlopen
+- [2m2026-07-03T12:01:37.110577Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mspl_dlsym
+- [2m2026-07-03T12:01:37.110581Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mspl_dlclose
+- [2m2026-07-03T12:01:37.110594Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mspl_wffi_call_i64
+- [2m2026-07-03T12:01:37.116714Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_file_write_text
+- [2m2026-07-03T12:01:37.116726Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_file_read_text
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_vulkan' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.vulkan_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [2m2026-07-03T12:01:37.270917Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_get
+- [2m2026-07-03T12:01:37.270929Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_home
+- [2m2026-07-03T12:01:37.270933Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_set
+- [2m2026-07-03T12:01:37.270935Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_cwd
+- [2m2026-07-03T12:01:37.270937Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_remove
+- [2m2026-07-03T12:01:37.270940Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_hostname
+- [2m2026-07-03T12:01:37.270942Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_process_run
+- [2m2026-07-03T12:01:37.270944Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_vars
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.metal_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_rocm' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [2m2026-07-03T12:01:37.301462Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_is_available
+- [2m2026-07-03T12:01:37.301475Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_init
+- [2m2026-07-03T12:01:37.301478Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_device_count
+- [2m2026-07-03T12:01:37.301480Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_malloc
+- [2m2026-07-03T12:01:37.301482Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_free
+- [2m2026-07-03T12:01:37.301484Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_device_name
+- [2m2026-07-03T12:01:37.301486Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_device_memory
+- [2m2026-07-03T12:01:37.301488Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_set_device
+- [2m2026-07-03T12:01:37.301490Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_get_device
+- [2m2026-07-03T12:01:37.301491Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_memcpy_h2d
+- [2m2026-07-03T12:01:37.301493Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_memcpy_d2h
+- [2m2026-07-03T12:01:37.301496Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_memcpy_d2d
+- [2m2026-07-03T12:01:37.301498Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_memset
+- [2m2026-07-03T12:01:37.301500Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_compile_hsaco
+- [2m2026-07-03T12:01:37.301511Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_get_function
+- [2m2026-07-03T12:01:37.301513Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_launch_kernel
+- [2m2026-07-03T12:01:37.301516Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_unload_module
+- [2m2026-07-03T12:01:37.301518Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_synchronize
+- [2m2026-07-03T12:01:37.301520Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_create_stream
+- [2m2026-07-03T12:01:37.301522Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_destroy_stream
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.oneapi_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.env_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.process_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=2
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/simple_web_engine2d_js_bitmap_evidence/simple-argb.json
+- blur_or_tolerance_used=false
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=2
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/simple_web_engine2d_js_bitmap_evidence/simple-argb.json
+- blur_or_tolerance_used=false
+- ## trial 2
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3698:24
+-    |
+- 3698 |     while a < b and (cb[a] == 32 or cb[a] == 9 or cb[a] == 10 or cb[a] == 13):
+-    |                        ^
+-
+- Use angle brackets: cb<...> instead of cb[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4633:58
+-    |
+- 4633 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+-
+- Use angle brackets: left<...> instead of left[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4651:58
+-    |
+- 4651 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+-
+- Use angle brackets: left<...> instead of left[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4684:58
+-    |
+- 4684 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4687:42
+-    |
+- 4687 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4711:58
+-    |
+- 4711 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4714:42
+-    |
+- 4714 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:6372:78
+-    |
+- 6372 |     if node.tag == "#text" and parent >= 0 and parent < nodes.len() and nodes[parent].tag == "q" and st.quotes_enabled:
+-    |                                                                              ^
+-
+- Use angle brackets: nodes<...> instead of nodes[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/common/string_core.spl:89:44
+-    |
+-  89 |     while i < slen and is_whitespace_char(s[i]):
+-    |                                            ^
+-
+- Use angle brackets: s<...> instead of s[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/time_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.time_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/platform.spl:3:1
+-    |
+-   3 | export use nogc_sync_mut.platform.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_sync_mut/path.spl:142:31
+-    |
+- 142 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/env/platform.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.env.platform.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_async_mut/path.spl:142:31
+-    |
+- 142 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.metal_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/env_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.env_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/process_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.process_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/browser_file_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3698:24
+-    |
+- 3698 |     while a < b and (cb[a] == 32 or cb[a] == 9 or cb[a] == 10 or cb[a] == 13):
+-    |                        ^
+-
+- Use angle brackets: cb<...> instead of cb[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4633:58
+-    |
+- 4633 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+-
+- Use angle brackets: left<...> instead of left[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4651:58
+-    |
+- 4651 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+-
+- Use angle brackets: left<...> instead of left[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4684:58
+-    |
+- 4684 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4687:42
+-    |
+- 4687 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4711:58
+-    |
+- 4711 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4714:42
+-    |
+- 4714 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:6372:78
+-    |
+- 6372 |     if node.tag == "#text" and parent >= 0 and parent < nodes.len() and nodes[parent].tag == "q" and st.quotes_enabled:
+-    |                                                                              ^
+-
+- Use angle brackets: nodes<...> instead of nodes[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/common/string_core.spl:89:44
+-    |
+-  89 |     while i < slen and is_whitespace_char(s[i]):
+-    |                                            ^
+-
+- Use angle brackets: s<...> instead of s[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/time_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.time_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/platform.spl:3:1
+-    |
+-   3 | export use nogc_sync_mut.platform.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_sync_mut/path.spl:142:31
+-    |
+- 142 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/env/platform.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.env.platform.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_async_mut/path.spl:142:31
+-    |
+- 142 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.metal_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/env_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.env_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/process_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.process_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/browser_file_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.time_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_cuda' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [2m2026-07-03T12:01:37.973436Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mspl_dlopen
+- [2m2026-07-03T12:01:37.973452Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mspl_dlsym
+- [2m2026-07-03T12:01:37.973455Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mspl_dlclose
+- [2m2026-07-03T12:01:37.973467Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mspl_wffi_call_i64
+- [2m2026-07-03T12:01:37.979400Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_file_write_text
+- [2m2026-07-03T12:01:37.979410Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_file_read_text
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_vulkan' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.vulkan_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [2m2026-07-03T12:01:38.131864Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_get
+- [2m2026-07-03T12:01:38.131888Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_home
+- [2m2026-07-03T12:01:38.131892Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_set
+- [2m2026-07-03T12:01:38.131894Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_cwd
+- [2m2026-07-03T12:01:38.131896Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_remove
+- [2m2026-07-03T12:01:38.131898Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_hostname
+- [2m2026-07-03T12:01:38.131899Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_process_run
+- [2m2026-07-03T12:01:38.131901Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_vars
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.metal_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_rocm' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [2m2026-07-03T12:01:38.161972Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_is_available
+- [2m2026-07-03T12:01:38.161982Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_init
+- [2m2026-07-03T12:01:38.161985Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_device_count
+- [2m2026-07-03T12:01:38.161987Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_malloc
+- [2m2026-07-03T12:01:38.161989Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_free
+- [2m2026-07-03T12:01:38.161991Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_device_name
+- [2m2026-07-03T12:01:38.161992Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_device_memory
+- [2m2026-07-03T12:01:38.161994Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_set_device
+- [2m2026-07-03T12:01:38.161996Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_get_device
+- [2m2026-07-03T12:01:38.161998Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_memcpy_h2d
+- [2m2026-07-03T12:01:38.162000Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_memcpy_d2h
+- [2m2026-07-03T12:01:38.162001Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_memcpy_d2d
+- [2m2026-07-03T12:01:38.162003Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_memset
+- [2m2026-07-03T12:01:38.162005Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_compile_hsaco
+- [2m2026-07-03T12:01:38.162014Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_get_function
+- [2m2026-07-03T12:01:38.162017Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_launch_kernel
+- [2m2026-07-03T12:01:38.162019Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_unload_module
+- [2m2026-07-03T12:01:38.162021Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_synchronize
+- [2m2026-07-03T12:01:38.162023Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_create_stream
+- [2m2026-07-03T12:01:38.162025Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_destroy_stream
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.oneapi_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.env_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.process_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=2
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/simple_web_engine2d_js_bitmap_evidence/simple-argb.json
+- blur_or_tolerance_used=false
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=2
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/simple_web_engine2d_js_bitmap_evidence/simple-argb.json
+- blur_or_tolerance_used=false
+- ## trial 3
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3698:24
+-    |
+- 3698 |     while a < b and (cb[a] == 32 or cb[a] == 9 or cb[a] == 10 or cb[a] == 13):
+-    |                        ^
+-
+- Use angle brackets: cb<...> instead of cb[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4633:58
+-    |
+- 4633 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+-
+- Use angle brackets: left<...> instead of left[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4651:58
+-    |
+- 4651 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+-
+- Use angle brackets: left<...> instead of left[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4684:58
+-    |
+- 4684 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4687:42
+-    |
+- 4687 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4711:58
+-    |
+- 4711 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4714:42
+-    |
+- 4714 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:6372:78
+-    |
+- 6372 |     if node.tag == "#text" and parent >= 0 and parent < nodes.len() and nodes[parent].tag == "q" and st.quotes_enabled:
+-    |                                                                              ^
+-
+- Use angle brackets: nodes<...> instead of nodes[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/common/string_core.spl:89:44
+-    |
+-  89 |     while i < slen and is_whitespace_char(s[i]):
+-    |                                            ^
+-
+- Use angle brackets: s<...> instead of s[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/time_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.time_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/platform.spl:3:1
+-    |
+-   3 | export use nogc_sync_mut.platform.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_sync_mut/path.spl:142:31
+-    |
+- 142 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/env/platform.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.env.platform.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_async_mut/path.spl:142:31
+-    |
+- 142 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.metal_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/env_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.env_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/process_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.process_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/browser_file_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [INFO] JIT compilation failed, falling back to interpreter: HIR lowering error: Unknown type: any
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3698:24
+-    |
+- 3698 |     while a < b and (cb[a] == 32 or cb[a] == 9 or cb[a] == 10 or cb[a] == 13):
+-    |                        ^
+-
+- Use angle brackets: cb<...> instead of cb[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4633:58
+-    |
+- 4633 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+-
+- Use angle brackets: left<...> instead of left[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4651:58
+-    |
+- 4651 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+-
+- Use angle brackets: left<...> instead of left[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4684:58
+-    |
+- 4684 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4687:42
+-    |
+- 4687 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4711:58
+-    |
+- 4711 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:4714:42
+-    |
+- 4714 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+-
+- Use angle brackets: rules<...> instead of rules[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:6372:78
+-    |
+- 6372 |     if node.tag == "#text" and parent >= 0 and parent < nodes.len() and nodes[parent].tag == "q" and st.quotes_enabled:
+-    |                                                                              ^
+-
+- Use angle brackets: nodes<...> instead of nodes[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/common/string_core.spl:89:44
+-    |
+-  89 |     while i < slen and is_whitespace_char(s[i]):
+-    |                                            ^
+-
+- Use angle brackets: s<...> instead of s[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/time_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.time_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_vulkan.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_vulkan.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/vulkan_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.vulkan_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/platform.spl:3:1
+-    |
+-   3 | export use nogc_sync_mut.platform.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_sync_mut/path.spl:142:31
+-    |
+- 142 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_opencl.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_opencl.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_metal_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/env/platform.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.env.platform.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /Users/ormastes/simple/src/lib/nogc_async_mut/path.spl:142:31
+-    |
+- 142 |         if c < bp.len() and pp[c] == bp[c]:
+-    |                               ^
+-
+- Use angle brackets: pp<...> instead of pp[...]
+-
+- Run `simple migrate --fix-generics` to automatically update your code
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/metal_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.metal_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/sffi_rocm.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.gpu.engine2d.sffi_rocm.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/backend_rocm_runtime_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_ffi.spl:3:1
+-    |
+-   3 | export use std.gc_async_mut.io.oneapi_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/oneapi_sffi.spl:3:1
+-    |
+-   3 | export use std.nogc_async_mut.io.oneapi_sffi.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/engine2d/host_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/env_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.env_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: Avoid 'export use *' - exposes unnecessary interfaces
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/io/process_ops.spl:7:1
+-    |
+-   7 | export use std.nogc_async_mut.io.process_ops.*
+-    | ^
+-
+- Use explicit exports instead
+-
+- Example: export use module.{A, B, C} or export A, B from module
+-
+- [33mwarning[0m: '#[runtime_intrinsics]' uses deprecated syntax, use '@runtime_intrinsics' instead
+-   --> /Users/ormastes/simple/src/lib/gc_async_mut/gpu/browser_engine/browser_file_ops.spl:1:1
+-    |
+-   1 | #[runtime_intrinsics]
+-    | ^
+-
+- Replace '#[runtime_intrinsics]' with '@runtime_intrinsics'
+-
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_provider' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.simd_kernels' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.time_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_cuda' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.sffi.dynamic' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [2m2026-07-03T12:01:38.839478Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mspl_dlopen
+- [2m2026-07-03T12:01:38.839498Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mspl_dlsym
+- [2m2026-07-03T12:01:38.839501Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mspl_dlclose
+- [2m2026-07-03T12:01:38.839513Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mspl_wffi_call_i64
+- [2m2026-07-03T12:01:38.845501Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_file_write_text
+- [2m2026-07-03T12:01:38.845513Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_file_read_text
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_vulkan' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.vulkan_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_opencl' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.opengl_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.env.types' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [2m2026-07-03T12:01:38.998740Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_get
+- [2m2026-07-03T12:01:38.998753Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_home
+- [2m2026-07-03T12:01:38.998757Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_set
+- [2m2026-07-03T12:01:38.998759Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_cwd
+- [2m2026-07-03T12:01:38.998761Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_remove
+- [2m2026-07-03T12:01:38.998763Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_hostname
+- [2m2026-07-03T12:01:38.998765Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_process_run
+- [2m2026-07-03T12:01:38.998767Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_env_vars
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.metal_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.gpu.engine2d.sffi_rocm' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.rocm_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [2m2026-07-03T12:01:39.029279Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_is_available
+- [2m2026-07-03T12:01:39.029294Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_init
+- [2m2026-07-03T12:01:39.029298Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_device_count
+- [2m2026-07-03T12:01:39.029300Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_malloc
+- [2m2026-07-03T12:01:39.029303Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_free
+- [2m2026-07-03T12:01:39.029305Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_device_name
+- [2m2026-07-03T12:01:39.029307Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_device_memory
+- [2m2026-07-03T12:01:39.029309Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_set_device
+- [2m2026-07-03T12:01:39.029311Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_get_device
+- [2m2026-07-03T12:01:39.029313Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_memcpy_h2d
+- [2m2026-07-03T12:01:39.029314Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_memcpy_d2h
+- [2m2026-07-03T12:01:39.029316Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_memcpy_d2d
+- [2m2026-07-03T12:01:39.029318Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_memset
+- [2m2026-07-03T12:01:39.029320Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_compile_hsaco
+- [2m2026-07-03T12:01:39.029332Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_get_function
+- [2m2026-07-03T12:01:39.029334Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_launch_kernel
+- [2m2026-07-03T12:01:39.029337Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_unload_module
+- [2m2026-07-03T12:01:39.029339Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_synchronize
+- [2m2026-07-03T12:01:39.029341Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_create_stream
+- [2m2026-07-03T12:01:39.029343Z[0m [33m WARN[0m ThreadId(02) [2msimple_compiler::interpreter::interpreter_module::module_evaluator::evaluation_helpers[0m[2m:[0m [2m712:[0m Export statement references undefined symbol [3mname[0m[2m=[0mrt_rocm_destroy_stream
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.oneapi_sffi' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.env_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- [gc-warning] Higher-layer module 'std.nogc_sync_mut.io.process_ops' (family: nogc_sync_mut) imported in restricted context (family: nogc_async_mut) (higher_layer_runtime_family)
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=2
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/simple_web_engine2d_js_bitmap_evidence/simple-argb.json
+- blur_or_tolerance_used=false
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=2
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/simple_web_engine2d_js_bitmap_evidence/simple-argb.json
+- blur_or_tolerance_used=false
+
+## Baseline Output
+- ## trial 1
+- target=pure_simple
+- renderer=node-simple-web-engine2d-baseline
+- producer=node-simple-web-engine2d-baseline
+- engine2d_backend=software
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=47
+- pixel_format=argb-u32
+- baseline_source=js-fixture
+- blur_or_tolerance_used=false
+- ## trial 2
+- target=pure_simple
+- renderer=node-simple-web-engine2d-baseline
+- producer=node-simple-web-engine2d-baseline
+- engine2d_backend=software
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=47
+- pixel_format=argb-u32
+- baseline_source=js-fixture
+- blur_or_tolerance_used=false
+- ## trial 3
+- target=pure_simple
+- renderer=node-simple-web-engine2d-baseline
+- producer=node-simple-web-engine2d-baseline
+- engine2d_backend=software
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=45
+- pixel_format=argb-u32
+- baseline_source=js-fixture
+- blur_or_tolerance_used=false

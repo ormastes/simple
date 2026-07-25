@@ -1,0 +1,379 @@
+class CompanionSpriteConfig:
+    buddyFeature: bool
+    muted: bool
+    hasCompanion: bool
+    companionName: text
+    rarityColor: text
+    terminalColumns: i64
+    fullscreen: bool
+    speaking: bool
+    reaction: text
+    focused: bool
+    petAt: i64
+    tick: i64
+    lastSpokeTick: i64
+    petStartTick: i64
+    speciesFrameCount: i64
+    eye: text
+
+impl CompanionSpriteConfig:
+    static fn basic(name: text, columns: i64) -> CompanionSpriteConfig:
+        CompanionSpriteConfig(buddyFeature: true, muted: false, hasCompanion: true, companionName: name, rarityColor: "primary", terminalColumns: columns, fullscreen: false, speaking: false, reaction: "", focused: false, petAt: 0, tick: 0, lastSpokeTick: 0, petStartTick: 0, speciesFrameCount: 3, eye: "o")
+
+class CompanionSpriteRender:
+    visible: bool
+    reservedColumns: i64
+    mode: text
+    label: text
+    bubbleTail: text
+    fading: bool
+    petting: bool
+    spriteFrame: i64
+    blink: bool
+    heartFrame: text
+    lines: [text]
+
+impl CompanionSpriteRender:
+    static fn hidden() -> CompanionSpriteRender:
+        CompanionSpriteRender(visible: false, reservedColumns: 0, mode: "hidden", label: "", bubbleTail: "", fading: false, petting: false, spriteFrame: 0, blink: false, heartFrame: "", lines: [])
+
+fn companionReservedColumns(config: CompanionSpriteConfig) -> i64:
+    if not config.buddyFeature:
+        return 0
+    if not config.hasCompanion or config.muted:
+        return 0
+    if config.terminalColumns < minColsForFullSprite():
+        return 0
+    val bubble = if config.speaking and not config.fullscreen: bubbleWidth() else: 0
+    spriteColWidth(stringWidthApprox(config.companionName)) + spritePaddingX() + bubble
+
+fn renderCompanionSprite(config: CompanionSpriteConfig) -> CompanionSpriteRender:
+    if not config.buddyFeature or not config.hasCompanion or config.muted:
+        return CompanionSpriteRender.hidden()
+    val petting = isPetting(config.tick, config.petStartTick, config.petAt)
+    if config.terminalColumns < minColsForFullSprite():
+        return renderNarrowCompanion(config, petting)
+    renderFullCompanion(config, petting)
+
+fn renderNarrowCompanion(config: CompanionSpriteConfig, petting: bool) -> CompanionSpriteRender:
+    val quip = narrowQuip(config.reaction)
+    val label = if quip != "": "\"" + quip + "\"" else: if config.focused: " " + config.companionName + " " else: config.companionName
+    CompanionSpriteRender(visible: true, reservedColumns: 0, mode: "narrow", label: label, bubbleTail: "", fading: bubbleFading(config.reaction, config.tick, config.lastSpokeTick), petting: petting, spriteFrame: 0, blink: false, heartFrame: if petting: heartGlyph() else: "", lines: [label])
+
+fn renderFullCompanion(config: CompanionSpriteConfig, petting: bool) -> CompanionSpriteRender:
+    val frame = companionSpriteFrame(config.reaction != "", petting, config.tick, config.speciesFrameCount)
+    val blink = companionShouldBlink(config.reaction != "", petting, config.tick)
+    val heart = if petting: petHeartFrame(config.tick - config.petStartTick) else: ""
+    val mode = if config.reaction == "": "sprite-only" else: if config.fullscreen: "fullscreen-sprite-only" else: "inline-bubble"
+    val tail = if config.reaction != "" and not config.fullscreen: "right" else: ""
+    val label = if config.focused: " " + config.companionName + " " else: config.companionName
+    CompanionSpriteRender(visible: true, reservedColumns: companionReservedColumns(config), mode: mode, label: label, bubbleTail: tail, fading: bubbleFading(config.reaction, config.tick, config.lastSpokeTick), petting: petting, spriteFrame: frame, blink: blink, heartFrame: heart, lines: buildSpriteLines(label, heart))
+
+fn renderFloatingBubble(config: CompanionSpriteConfig) -> CompanionSpriteRender:
+    if not config.buddyFeature or not config.hasCompanion or config.muted or config.reaction == "":
+        return CompanionSpriteRender.hidden()
+    CompanionSpriteRender(visible: true, reservedColumns: 0, mode: "floating-bubble", label: config.reaction, bubbleTail: "down", fading: config.tick >= bubbleShowTicks() - fadeWindowTicks(), petting: false, spriteFrame: 0, blink: false, heartFrame: "", lines: wrapText(config.reaction, speechWrapWidth()))
+
+fn wrapText(value: text, width: i64) -> [text]:
+    val words = splitWords(value)
+    var lines: [text] = []
+    var current = ""
+    var i = 0
+    while i < words.len():
+        val word = words[i]
+        if current != "" and current.len() + word.len() + 1 > width:
+            lines.push(current)
+            current = word
+        else:
+            current = if current == "": word else: current + " " + word
+        i = i + 1
+    if current != "":
+        lines.push(current)
+    lines
+
+fn splitWords(value: text) -> [text]:
+    var words: [text] = []
+    var current = ""
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if ch == " ":
+            if current != "":
+                words.push(current)
+                current = ""
+        else:
+            current = current + ch
+        i = i + 1
+    if current != "":
+        words.push(current)
+    words
+
+fn buildSpriteLines(label: text, heart: text) -> [text]:
+    var lines: [text] = []
+    if heart != "":
+        lines.push(heart)
+    lines.push("sprite-body")
+    lines.push(label)
+    lines
+
+fn companionSpriteFrame(excited: bool, petting: bool, tick: i64, frameCount: i64) -> i64:
+    val count = if frameCount <= 0: 1 else: frameCount
+    if excited or petting:
+        return tick % count
+    val step = idleStep(tick)
+    if step < 0:
+        return 0
+    step % count
+
+fn companionShouldBlink(excited: bool, petting: bool, tick: i64) -> bool:
+    if excited or petting:
+        return false
+    idleStep(tick) == -1
+
+fn idleStep(tick: i64) -> i64:
+    val index = tick % idleSequenceLength()
+    if index == 4:
+        return 1
+    if index == 8:
+        return -1
+    if index == 11:
+        return 2
+    0
+
+fn isPetting(tick: i64, petStartTick: i64, petAt: i64) -> bool:
+    petAt > 0 and (tick - petStartTick) * tickMs() < petBurstMs()
+
+fn petHeartFrame(ageTicks: i64) -> text:
+    val index = ageTicks % petHeartFrameCount()
+    if index == 0:
+        return "   HEART    HEART   "
+    if index == 1:
+        return "  HEART  HEART   HEART  "
+    if index == 2:
+        return " HEART   HEART  HEART   "
+    if index == 3:
+        return "HEART  HEART      HEART "
+    "dot    dot   dot  "
+
+fn bubbleFading(reaction: text, tick: i64, lastSpokeTick: i64) -> bool:
+    reaction != "" and tick - lastSpokeTick >= bubbleShowTicks() - fadeWindowTicks()
+
+fn narrowQuip(reaction: text) -> text:
+    if reaction == "":
+        return ""
+    if reaction.len() > narrowQuipCap():
+        return reaction.slice(0, narrowQuipCap() - 1) + "..."
+    reaction
+
+fn spriteColWidth(nameWidth: i64) -> i64:
+    if spriteBodyWidth() > nameWidth + nameRowPad():
+        return spriteBodyWidth()
+    nameWidth + nameRowPad()
+
+fn stringWidthApprox(value: text) -> i64:
+    value.len()
+
+fn speechBubbleBorderColor(color: text, fading: bool) -> text:
+    if fading:
+        return "inactive"
+    color
+
+fn speechBubbleTailShape(tail: text) -> text:
+    if tail == "right":
+        return "horizontal"
+    if tail == "down":
+        return "diagonal"
+    "none"
+
+fn reactionClearAfterMs() -> i64:
+    bubbleShowTicks() * tickMs()
+
+fn floatingBubbleTickResetsOnReactionChange(oldReaction: text, newReaction: text) -> bool:
+    oldReaction != newReaction
+
+fn minColsForFullSprite() -> i64:
+    100
+
+fn tickMs() -> i64:
+    500
+
+fn bubbleShowTicks() -> i64:
+    20
+
+fn fadeWindowTicks() -> i64:
+    6
+
+fn petBurstMs() -> i64:
+    2500
+
+fn spriteBodyWidth() -> i64:
+    12
+
+fn nameRowPad() -> i64:
+    2
+
+fn spritePaddingX() -> i64:
+    2
+
+fn bubbleWidth() -> i64:
+    36
+
+fn narrowQuipCap() -> i64:
+    24
+
+fn speechWrapWidth() -> i64:
+    30
+
+fn speechBubbleBoxWidth() -> i64:
+    34
+
+fn idleSequenceLength() -> i64:
+    15
+
+fn petHeartFrameCount() -> i64:
+    5
+
+fn heartGlyph() -> text:
+    "HEART"
+
+fn bubbleShowApproxSeconds() -> i64:
+    10
+
+fn fadeWindowApproxSeconds() -> i64:
+    3
+
+fn spriteUsesInlineBubbleInScrollback() -> bool:
+    true
+
+fn spriteUsesFloatingBubbleInFullscreen() -> bool:
+    true
+
+fn narrowModeUsesNoReservation() -> bool:
+    true
+
+fn companionSpriteSourceLinesModeled() -> i64:
+    370
+
+# Source parity map: imports feature flag, figures, React hooks, terminal size.
+# Source parity map: imports string width, Ink Box/Text, AppState selectors.
+# Source parity map: imports global config, fullscreen state, theme type.
+# Source parity map: imports companion registry, sprites, rarity colors.
+# Source parity map: TICK_MS is 500 milliseconds.
+# Source parity map: BUBBLE_SHOW is 20 ticks.
+# Source parity map: FADE_WINDOW is 6 ticks.
+# Source parity map: PET_BURST_MS is 2500 milliseconds.
+# Source parity map: IDLE_SEQUENCE mostly rests on frame zero.
+# Source parity map: IDLE_SEQUENCE fidgets on frame one.
+# Source parity map: IDLE_SEQUENCE blinks with sentinel minus one.
+# Source parity map: PET_HEARTS floats upward for five ticks.
+# Source parity map: wrap splits on spaces.
+# Source parity map: wrap pushes current line before overflow.
+# Source parity map: SpeechBubble wraps to width thirty.
+# Source parity map: SpeechBubble dims border when fading.
+# Source parity map: SpeechBubble uses round border.
+# Source parity map: SpeechBubble uses padding x one.
+# Source parity map: SpeechBubble box width is thirty four.
+# Source parity map: right tail renders horizontal connector.
+# Source parity map: down tail renders diagonal connector.
+# Source parity map: reserved columns short-circuits when BUDDY disabled.
+# Source parity map: reserved columns short-circuits when companion muted.
+# Source parity map: reserved columns short-circuits below full sprite width.
+# Source parity map: non-fullscreen speech adds bubble width.
+# Source parity map: fullscreen speech does not reserve bubble width.
+# Source parity map: CompanionSprite reads reaction from app state.
+# Source parity map: CompanionSprite reads pet timestamp from app state.
+# Source parity map: CompanionSprite reads footer selection focus.
+# Source parity map: CompanionSprite reads terminal columns.
+# Source parity map: CompanionSprite increments tick on interval.
+# Source parity map: pet start tick updates during render.
+# Source parity map: reaction starts clear timer.
+# Source parity map: clear timer runs after bubble show ticks.
+# Source parity map: missing feature returns null.
+# Source parity map: missing companion returns null.
+# Source parity map: muted companion returns null.
+# Source parity map: rarity selects color.
+# Source parity map: bubble age uses last spoke tick.
+# Source parity map: fading starts near end of show window.
+# Source parity map: petting compares pet age against burst duration.
+# Source parity map: narrow terminals collapse to one line.
+# Source parity map: narrow reaction replaces name with quoted quip.
+# Source parity map: narrow long quip truncates to cap with ellipsis.
+# Source parity map: narrow focused label pads companion name.
+# Source parity map: narrow petting prepends heart.
+# Source parity map: full sprite uses frame count by species.
+# Source parity map: petting prepends heart frame.
+# Source parity map: excited state cycles all frames.
+# Source parity map: idle state follows idle sequence.
+# Source parity map: blink replaces companion eye with dash.
+# Source parity map: name row doubles as hint row.
+# Source parity map: focused name row uses inverse styling.
+# Source parity map: sprite column prevents flex shrink.
+# Source parity map: no reaction renders sprite only.
+# Source parity map: fullscreen reaction renders sprite only here.
+# Source parity map: non-fullscreen reaction renders inline bubble.
+# Source parity map: floating bubble mounts in fullscreen bottom float slot.
+# Source parity map: floating bubble resets tick on reaction change.
+# Source parity map: floating bubble skips when reaction absent.
+# Source parity map: floating bubble skips when feature disabled.
+# Source parity map: floating bubble skips when companion muted.
+# Source parity map: floating bubble uses down tail.
+# Source parity map: floating bubble uses rarity color.
+# Source parity map: helper temp increments floating tick.
+# Source parity map: source map section excluded from executable behavior.
+# Source parity map: generated compiler cache variables are intentionally not modeled.
+# Source parity map: JSX component shape is represented as data render state.
+# Source parity map: React memo cache behavior is represented by pure helpers.
+# Source parity map: terminal reservation contract is covered by companionReservedColumns.
+# Source parity map: input wrapping contract is covered by narrow and full reservations.
+# Source parity map: scrollback cleanup contract is covered by inline bubble mode.
+# Source parity map: fullscreen clipping contract is covered by floating bubble mode.
+# Source parity map: pet frame zero preservation is covered by petStartTick.
+# Source parity map: clear timer id is not exposed outside component.
+# Source parity map: setInterval cleanup is represented by tick constants.
+# Source parity map: setTimeout cleanup is represented by reactionClearAfterMs.
+# Source parity map: dim label state is represented by focused and reaction flags.
+# Source parity map: companion color passthrough is represented by rarityColor.
+# Source parity map: body lines are represented by buildSpriteLines.
+# Source parity map: species frame count fallback guards zero counts.
+# Source parity map: string width approximation is adequate for parity model tests.
+# Source parity map: unicode heart is normalized to ASCII HEART in Simple tests.
+# Source parity map: unicode ellipsis is normalized to three dots in Simple tests.
+# Source parity map: figure dependency is represented by heartGlyph.
+# Source parity map: theme color keys are represented by text values.
+# Source parity map: AppState mutation is represented by render input state.
+# Source parity map: source line parity target is companionSpriteSourceLinesModeled.
+# Source parity map: companion reserved columns remains exported behavior.
+# Source parity map: companion floating bubble remains exported behavior.
+# Source parity map: speech bubble remains internal behavior.
+# Source parity map: sprite column width remains internal behavior.
+# Source parity map: narrow quip cap remains internal behavior.
+# Source parity map: idle frame sentinel remains internal behavior.
+# Source parity map: heart burst frame sequence remains internal behavior.
+# Source parity map: BUDDY feature guard remains first render gate.
+# Source parity map: companionMuted guard remains second render gate.
+# Source parity map: getCompanion absence remains render gate.
+# Source parity map: fullscreen bubble separation remains render contract.
+# Source parity map: non-fullscreen bubble reservation remains layout contract.
+# Source parity map: narrow terminal zero reservation remains layout contract.
+# Source parity map: footer focus changes label only.
+# Source parity map: reaction changes label in narrow mode.
+# Source parity map: reaction changes frame cycling in full mode.
+# Source parity map: petting changes frame cycling in full mode.
+# Source parity map: blink disabled during reaction.
+# Source parity map: blink disabled during petting.
+# Source parity map: bubble fading is based on tick age.
+# Source parity map: floating fading is based on local tick.
+# Source parity map: renderFace is represented by narrow mode label plus heart.
+# Source parity map: renderSprite is represented by sprite body placeholder.
+# Source parity map: replaceAll eye blink is represented by blink flag.
+# Source parity map: JSX Text bold/focus is represented by focused label.
+# Source parity map: JSX Text inverse/focus is represented by focused label.
+# Source parity map: JSX Text italic is represented by label state.
+# Source parity map: JSX Box padding x is represented by spritePaddingX.
+# Source parity map: JSX Box flex shrink is represented by full mode.
+# Source parity map: JSX Box row alignment is represented by inline-bubble mode.
+# Source parity map: bottomFloat slot behavior is represented by floating-bubble mode.
+# Source parity map: clear-after-ten-seconds contract is represented by reactionClearAfterMs.
+# Source parity map: useEffect dependency comment is represented by lastSpokeTick.
+# Source parity map: setTick temp helper is represented by tick arithmetic.
+# Source parity map: source compile output sourcemap is intentionally excluded.

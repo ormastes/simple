@@ -1,0 +1,109 @@
+"""Vulkan executor for the validated ProcessingIR FillU32 operation."""
+
+use std.common.processing.processing_ir.{ProcessingIr, processing_ir_validate}
+use std.gc_async_mut.io.vulkan_sffi.{
+    vulkan_init, vulkan_alloc_storage, vulkan_free_buffer,
+    vulkan_compile_spirv, vulkan_destroy_shader,
+    vulkan_create_pipeline_with_push, vulkan_destroy_pipeline,
+    vulkan_last_error
+}
+use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
+    vulkan_sffi_read_buffer_bytes, vulkan_sffi_selected_device_driver_identity,
+    vulkan_sffi_dispatch_buffer_compute_checked,
+    vulkan_sffi_quarantine_dependencies,
+    vulkan_sffi_reap_dependency_quarantine,
+    vulkan_sffi_shutdown_reaped
+}
+use std.common.hash.djb2.{djb2_hash_text}
+use std.gpu.engine2d.backend_vulkan_spirv.{spirv_clear}
+
+struct ProcessingVulkanResult:
+    completed: bool
+    reason: text
+    values: [u32]
+    backend_handle: i64
+    device_identity: i64
+
+fn processing_vulkan_device_identity(selected_driver_identity: text) -> i64:
+    if selected_driver_identity == "":
+        return 0
+    val identity = djb2_hash_text(selected_driver_identity) & 0x7FFFFFFF
+    if identity == 0: 1 else: identity
+
+fn _processing_fill_push_constants(ir: ProcessingIr) -> [u8]:
+    var bytes: [u8] = [0u8; 64]
+    val value = ir.value
+    bytes[0] = (value & 0xFFu32).to_u8()
+    bytes[1] = ((value >> 8u32) & 0xFFu32).to_u8()
+    bytes[2] = ((value >> 16u32) & 0xFFu32).to_u8()
+    bytes[3] = ((value >> 24u32) & 0xFFu32).to_u8()
+    val count = ir.element_count.to_u32()
+    bytes[4] = (count & 0xFFu32).to_u8()
+    bytes[5] = ((count >> 8u32) & 0xFFu32).to_u8()
+    bytes[6] = ((count >> 16u32) & 0xFFu32).to_u8()
+    bytes[7] = ((count >> 24u32) & 0xFFu32).to_u8()
+    bytes[8] = 1u8
+    bytes
+
+fn _processing_u32_values(bytes: [u8], count: i64) -> [u32]:
+    var values: [u32] = []
+    var i: i64 = 0
+    while i < count:
+        val offset = i * 4
+        values.push(bytes[offset].to_u32() |
+            (bytes[offset + 1].to_u32() << 8u32) |
+            (bytes[offset + 2].to_u32() << 16u32) |
+            (bytes[offset + 3].to_u32() << 24u32))
+        i = i + 1
+    values
+
+fn processing_ir_execute_vulkan(ir: ProcessingIr) -> ProcessingVulkanResult:
+    val valid = processing_ir_validate(ir)
+    if not valid.valid:
+        return ProcessingVulkanResult(completed: false, reason: valid.reason, values: [], backend_handle: 0, device_identity: 0)
+    if not vulkan_init():
+        return ProcessingVulkanResult(completed: false, reason: vulkan_last_error(), values: [], backend_handle: 0, device_identity: 0)
+    if not vulkan_sffi_reap_dependency_quarantine():
+        return ProcessingVulkanResult(completed: false, reason: "vulkan-dependency-quarantine-pending", values: [], backend_handle: 0, device_identity: 0)
+
+    val device_identity = processing_vulkan_device_identity(vulkan_sffi_selected_device_driver_identity())
+
+    val byte_count = ir.element_count * 4
+    val buffer = vulkan_alloc_storage(byte_count)
+    if not buffer.is_valid:
+        val reason = vulkan_last_error()
+        vulkan_sffi_shutdown_reaped()
+        return ProcessingVulkanResult(completed: false, reason: reason, values: [], backend_handle: 0, device_identity: 0)
+    val shader = vulkan_compile_spirv(spirv_clear())
+    if not shader.is_valid:
+        val reason = vulkan_last_error()
+        vulkan_free_buffer(buffer)
+        vulkan_sffi_shutdown_reaped()
+        return ProcessingVulkanResult(completed: false, reason: reason, values: [], backend_handle: 0, device_identity: 0)
+    val pipeline = vulkan_create_pipeline_with_push(shader, "main", 64)
+    if not pipeline.is_valid:
+        val reason = vulkan_last_error()
+        vulkan_destroy_shader(shader)
+        vulkan_free_buffer(buffer)
+        vulkan_sffi_shutdown_reaped()
+        return ProcessingVulkanResult(completed: false, reason: reason, values: [], backend_handle: 0, device_identity: 0)
+    val dispatch_status = vulkan_sffi_dispatch_buffer_compute_checked(
+        buffer.handle, pipeline.handle, _processing_fill_push_constants(ir),
+        (ir.element_count + 255) / 256, 1, 1)
+    if dispatch_status < 0:
+        vulkan_sffi_quarantine_dependencies(0, buffer.handle, pipeline.handle, shader.handle)
+        return ProcessingVulkanResult(completed: false, reason: "vulkan-dispatch-completion-unknown", values: [], backend_handle: 0, device_identity: 0)
+    val bytes = if dispatch_status == 1: vulkan_sffi_read_buffer_bytes(buffer.handle, byte_count, 0) else: []
+    val read = bytes.len().to_i64() == byte_count
+    val failure_reason = if dispatch_status == 0: "vulkan-dispatch-ineligible" else: if read: "ok" else: vulkan_last_error()
+    val handle = buffer.handle
+    # Known-safe dispatch statuses may release their dependent resources.
+    vulkan_destroy_pipeline(pipeline)
+    vulkan_destroy_shader(shader)
+    vulkan_free_buffer(buffer)
+    vulkan_sffi_shutdown_reaped()
+    if not read or device_identity <= 0:
+        return ProcessingVulkanResult(completed: false, reason: if read: "vulkan-device-identity-unavailable" else: failure_reason, values: [], backend_handle: 0, device_identity: 0)
+    ProcessingVulkanResult(completed: true, reason: "ok", values: _processing_u32_values(bytes, ir.element_count), backend_handle: handle, device_identity: device_identity)
+
+export ProcessingVulkanResult, processing_vulkan_device_identity, processing_ir_execute_vulkan

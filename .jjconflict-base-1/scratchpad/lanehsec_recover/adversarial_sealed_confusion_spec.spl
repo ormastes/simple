@@ -1,0 +1,196 @@
+"""
+# Adversarial: Sealed / No-Ambient + Token Confusion (OCap Hardening)
+
+**Feature IDs:** #OS-OCAP-HARDEN
+**Category:** Runtime / Security (adversarial)
+**Difficulty:** 4/5
+**Status:** Implemented
+**Plan:** doc/04_architecture/os/security/ocap_privilege_architecture.md (§P1)
+
+## Overview
+
+These specs attack the LLM-session sealing model and the type/port safety of
+capability matching.
+
+Requirement 4 (sealed / no-ambient):
+  - a sealed session denies any cap not explicitly granted;
+  - an UNSEALED session denies everything (fail-closed default), even when its
+    caps list holds a real token — a construction bug can never leak authority;
+  - `resolve_tool` returns nil for any tool whose cap is absent, and the tool
+    name is not even ENUMERABLE (no probing surface);
+  - the ambient allow-all hole is UNREACHABLE from the spawn primitives (their
+    output is always pledged).
+
+Requirement 5 (token forgery / confusion):
+  - a cap of the wrong KIND (FileRead where IpcConnect is required, etc.) is
+    denied;
+  - a mismatched port / object / generation is denied (no confusion across
+    designations).
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet, CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_QUEUE_SUBMIT, capability_kind_allows}
+use os.kernel.ipc.cspace_spawn.{SpawnSpec, CapGrant, CspaceMint, spawn_with_cspace, fork_cspace, spawn_full, atten_identity}
+use os.kernel.ipc.llm_session.{LlmSession, spawn_llm}
+use os.services.llm.mcp_tool_gate.{resolve_tool, available_tool_names, os_mcp_tool_cap_map}
+
+# ============================================================================
+# Fixtures
+# ============================================================================
+
+val CAL_OBJ: u64 = 4242u64
+val CAL_GEN: u64 = 7u64
+val IMG: text = "blake3:same-binary"
+
+fn _tickets() -> CapabilityKind:
+    CapabilityKind.IpcConnect(port_name: "svc.tickets")
+
+fn _window() -> CapabilityKind:
+    CapabilityKind.IpcConnect(port_name: "svc.window")
+
+fn _calendar_ro() -> CapabilityKind:
+    CapabilityKind.SharedDataset(object_id: CAL_OBJ, generation: CAL_GEN, rights: CAP_RIGHT_READ)
+
+fn _calendar_rw() -> CapabilityKind:
+    CapabilityKind.SharedDataset(object_id: CAL_OBJ, generation: CAL_GEN, rights: CAP_RIGHT_READ + CAP_RIGHT_WRITE)
+
+fn _fwrite_var() -> CapabilityKind:
+    CapabilityKind.FileWrite(path_prefix: "/var")
+
+fn _tok(kind: CapabilityKind, generation: u64, tid: u64, depth: i64) -> CapabilityToken:
+    CapabilityToken(kind: kind, generation: generation, owner: 1u64, token_id: tid, parent_token_id: 0u64, depth: depth)
+
+fn make_orch() -> CapabilitySet:
+    CapabilitySet(caps: [_tok(_tickets(), 1u64, 100u64, 2), _tok(_calendar_rw(), 2u64, 101u64, 2), _tok(_fwrite_var(), 3u64, 102u64, 2)], is_pledged: true)
+
+fn ticketing_spec() -> SpawnSpec:
+    SpawnSpec(image_hash: IMG, grants: [CapGrant(label: "ipc.tickets", requested: _tickets(), atten: atten_identity())], isolation: "sandbox", budget: 0u64)
+
+fn window_spec() -> SpawnSpec:
+    SpawnSpec(image_hash: IMG, grants: [CapGrant(label: "ipc.window", requested: _window(), atten: atten_identity())], isolation: "sandbox", budget: 0u64)
+
+fn _names_has(names: [text], target: text) -> bool:
+    for n in names:
+        if n == target:
+            return true
+    false
+
+fn ticketing_session() -> LlmSession:
+    spawn_llm(make_orch(), ticketing_spec(), "ticketing", 9u64, 20u64, 1000u64, 300u64)
+
+# ============================================================================
+# Group 1 — Sealed / no-ambient
+# ============================================================================
+
+describe "adversarial sealed: a sealed session denies un-granted authority":
+    """A ticketing role holds ONLY the ticket cap; everything else fails closed."""
+
+    it "the session is sealed and holds its granted ticket cap":
+        val s = ticketing_session()
+        expect(s.sealed).to_equal(true)
+        expect(s.can(_tickets())).to_equal(true)
+
+    it "it denies FileWrite, calendar, and ProcessSpawn (no ambient authority)":
+        val s = ticketing_session()
+        expect(s.can(_fwrite_var())).to_equal(false)
+        expect(s.can(_calendar_ro())).to_equal(false)
+        expect(s.can(CapabilityKind.ProcessSpawn)).to_equal(false)
+
+    it "an UNSEALED session denies EVERYTHING even with a real cap in its list":
+        val bug = LlmSession(role: "x", session_id: 1u64, image_hash: IMG, caps: CapabilitySet(caps: [_tok(_tickets(), 1u64, 1u64, 2)], is_pledged: true), sealed: false, rejected: 0, grant_labels: [])
+        expect(bug.can(_tickets())).to_equal(false)
+
+describe "adversarial sealed: resolve_tool has no probing surface":
+    """An absent capability makes the tool nil AND un-enumerable."""
+
+    it "resolve_tool returns nil for every un-granted tool":
+        val s = ticketing_session()
+        expect(resolve_tool(s, "file_write") == nil).to_equal(true)
+        expect(resolve_tool(s, "system_exec") == nil).to_equal(true)
+        expect(resolve_tool(s, "process_spawn") == nil).to_equal(true)
+        expect(resolve_tool(s, "calendar_write") == nil).to_equal(true)
+
+    it "resolve_tool returns the ticket tool the role WAS granted":
+        val s = ticketing_session()
+        expect(resolve_tool(s, "ticket_submit") != nil).to_equal(true)
+
+    it "an un-granted tool is not even ENUMERABLE in the visible menu":
+        val s = ticketing_session()
+        val names = available_tool_names(s, os_mcp_tool_cap_map())
+        expect(_names_has(names, "ticket_submit")).to_equal(true)
+        expect(_names_has(names, "file_write")).to_equal(false)
+        expect(_names_has(names, "system_exec")).to_equal(false)
+        expect(_names_has(names, "calendar_write")).to_equal(false)
+
+    it "a completely unknown tool name is nil (indistinguishable from denied)":
+        val s = ticketing_session()
+        expect(resolve_tool(s, "no_such_tool_xyz") == nil).to_equal(true)
+
+describe "adversarial sealed: the ambient allow-all hole is unreachable":
+    """spawn_with_cspace / fork / spawn_llm always emit a pledged set."""
+
+    it "an empty recipe yields a pledged (deny-all) set, never ambient full":
+        val em = spawn_with_cspace(make_orch(), SpawnSpec(image_hash: IMG, grants: [], isolation: "s", budget: 0u64), 22u64, 5000u64, 600u64)
+        expect(em.caps.is_pledged).to_equal(true)
+        expect(em.caps.caps.len()).to_equal(0)
+
+    it "forking ambient full() yields a pledged empty set (deny-all)":
+        val fk = fork_cspace(spawn_full(), 23u64, 6000u64, 700u64)
+        expect(fk.caps.is_pledged).to_equal(true)
+        expect(fk.caps.caps.len()).to_equal(0)
+
+    it "spawn_llm from an ambient full() parent grants nothing (all rejected)":
+        val amb = spawn_llm(spawn_full(), ticketing_spec(), "t", 8u64, 24u64, 7000u64, 800u64)
+        expect(amb.sealed).to_equal(true)
+        expect(amb.rejected).to_be_greater_than(0)
+        expect(amb.can(_tickets())).to_equal(false)
+
+# ============================================================================
+# Group 2 — Token forgery / confusion
+# ============================================================================
+
+describe "adversarial confusion: wrong-KIND caps never satisfy a requirement":
+    """capability_kind_allows never crosses capability kinds."""
+
+    it "FileRead cannot satisfy IpcConnect":
+        expect(capability_kind_allows(CapabilityKind.FileRead(path_prefix: "/"), _window())).to_equal(false)
+
+    it "IpcConnect cannot satisfy FileRead":
+        expect(capability_kind_allows(_window(), CapabilityKind.FileRead(path_prefix: "/"))).to_equal(false)
+
+    it "ProcessSpawn cannot satisfy ProcessSignalAny (spawn is not kill)":
+        expect(capability_kind_allows(CapabilityKind.ProcessSpawn, CapabilityKind.ProcessSignalAny)).to_equal(false)
+
+    it "a FileRead-only session cannot resolve an IPC-gated tool":
+        val fr_parent = CapabilitySet(caps: [_tok(CapabilityKind.FileRead(path_prefix: "/"), 1u64, 210u64, 2)], is_pledged: true)
+        val fr_spec = SpawnSpec(image_hash: IMG, grants: [CapGrant(label: "fs.read", requested: CapabilityKind.FileRead(path_prefix: "/"), atten: atten_identity())], isolation: "s", budget: 0u64)
+        val s = spawn_llm(fr_parent, fr_spec, "reader", 6u64, 26u64, 8000u64, 900u64)
+        expect(s.can(CapabilityKind.FileRead(path_prefix: "/etc"))).to_equal(true)
+        expect(resolve_tool(s, "window_create") == nil).to_equal(true)
+
+describe "adversarial confusion: mismatched designation is denied":
+    """Port / object / generation confusion never leaks authority."""
+
+    it "IpcConnect port confusion: svc.window does not grant svc.tickets":
+        expect(capability_kind_allows(_window(), _tickets())).to_equal(false)
+
+    it "a window-only session cannot resolve the ticket tool":
+        val ws = spawn_llm(CapabilitySet(caps: [_tok(_window(), 1u64, 220u64, 2)], is_pledged: true), window_spec(), "window", 5u64, 25u64, 8500u64, 950u64)
+        expect(ws.can(_window())).to_equal(true)
+        expect(resolve_tool(ws, "window_create") != nil).to_equal(true)
+        expect(resolve_tool(ws, "ticket_submit") == nil).to_equal(true)
+
+    it "SharedDataset stale generation is denied (generation mismatch)":
+        val held = CapabilityKind.SharedDataset(object_id: CAL_OBJ, generation: 7u64, rights: CAP_RIGHT_READ)
+        val stale = CapabilityKind.SharedDataset(object_id: CAL_OBJ, generation: 8u64, rights: CAP_RIGHT_READ)
+        expect(capability_kind_allows(held, stale)).to_equal(false)
+
+    it "SharedDataset wrong object id is denied":
+        val held = CapabilityKind.SharedDataset(object_id: CAL_OBJ, generation: 7u64, rights: CAP_RIGHT_READ)
+        val other = CapabilityKind.SharedDataset(object_id: 9999u64, generation: 7u64, rights: CAP_RIGHT_READ)
+        expect(capability_kind_allows(held, other)).to_equal(false)
+
+    it "ProcessQueue wrong queue id is denied":
+        val held = CapabilityKind.ProcessQueue(queue_id: 5u64, generation: 1u64, rights: CAP_RIGHT_QUEUE_SUBMIT)
+        val other = CapabilityKind.ProcessQueue(queue_id: 6u64, generation: 1u64, rights: CAP_RIGHT_QUEUE_SUBMIT)
+        expect(capability_kind_allows(held, other)).to_equal(false)

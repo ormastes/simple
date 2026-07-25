@@ -1,0 +1,396 @@
+# ============================================================================
+# common/search/roaring.spl — roaring-style compressed bitmap filter (Phase 2)
+#
+# The candidate-set filter primitive for search. A `RoaringBitmap` stores a set
+# of non-negative i64 ids, chunked by the high 16 bits of the id. Each chunk
+# holds a `Container` over the low 16 bits:
+#   - ARRAY container   for sparse chunks (sorted [i64] of low values)
+#   - BITMAP container   for dense chunks (1024 x 64-bit words = 65536 bits)
+# A chunk promotes ARRAY -> BITMAP once it exceeds ARRAY_MAX (4096) entries,
+# matching CRoaring's crossover. Membership / cardinality / and / or / andnot
+# all run off these containers.
+#
+# Plan: doc/03_plan/lib/search/custom_type_alpha_search_team_plan_2026-06-15.md
+#   Phase 2 — "roaring bitmap filters (CRoaring oracle)".
+#
+# NOTE: the existing src/lib/common/bloom_filter/ is .smf-only (compiled, no
+# .spl source present), so none of its code is reusable here — this is a fresh
+# pure-Simple implementation.
+#
+# KNOWN BUGS designed around:
+#   * `for x in <custom struct>` iterates zero times — every loop here is an
+#     index counter loop (while i < n).
+#   * `text + i64` produces garbage — all ints rendered via `.to_text()`.
+#   * `1 << 63` is a negative i64 (two's complement). Words are therefore NEVER
+#     order-compared (`<`/`>`); bit tests use `(word >> bit) & 1`, sets use
+#     `word | (1 << bit)`, clears mask the target bit only. Popcount counts via
+#     `& 1` per bit.
+#
+# Receiver convention (mirrors common/bytes/span.spl, common/search/types.spl):
+#   static fn new(...)   constructors
+#   fn  ...              read-only methods
+#   me  ...              self-mutating methods
+# ============================================================================
+
+use std.common.bytes.span.{ByteSpan, ByteBuffer}
+
+# Low 16-bit space: 0..65535. ARRAY container promotes to BITMAP above this many
+# entries (CRoaring's crossover point).
+val ARRAY_MAX: i64 = 4096
+# 65536 bits / 64 bits-per-word = 1024 words.
+val BITMAP_WORDS: i64 = 1024
+val CHUNK_SPAN: i64 = 65536
+
+# ----------------------------------------------------------------------------
+# Container — one chunk's low-16-bit set, ARRAY (sparse) or BITMAP (dense).
+# ----------------------------------------------------------------------------
+# `kind`: 0 = ARRAY, 1 = BITMAP. ARRAY keeps `arr` sorted ascending and unique.
+# BITMAP keeps `words` (1024 x i64); `arr` is empty in BITMAP mode.
+struct Container:
+    """A single high-16-bit chunk. Sparse chunks use a sorted unique [i64] of
+    low values; dense chunks (> ARRAY_MAX entries) use a 1024-word bitmap.
+    Promotion is one-way (ARRAY -> BITMAP) and preserves membership exactly."""
+    kind: i64
+    arr: [i64]
+    words: [i64]
+
+impl Container:
+    static fn array() -> Container:
+        Container(kind: 0, arr: [], words: [])
+
+    static fn bitmap_zeroed() -> Container:
+        var w: [i64] = []
+        var i = 0
+        while i < BITMAP_WORDS:
+            w.push(0)
+            i = i + 1
+        Container(kind: 1, arr: [], words: w)
+
+    fn is_array() -> bool:
+        self.kind == 0
+
+    fn is_bitmap() -> bool:
+        self.kind == 1
+
+    # --- ARRAY helpers (sorted, unique) -----------------------------------
+    fn arr_index_of(low: i64) -> i64:
+        """Binary search for `low` in the sorted array; -1 if absent."""
+        var lo = 0
+        var hi = self.arr.len() - 1
+        while lo <= hi:
+            val mid = (lo + hi) / 2
+            val v = self.arr[mid]
+            if v == low:
+                return mid
+            if v < low:
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        0 - 1
+
+    me arr_insert(low: i64):
+        """Insert `low` into the sorted array keeping it sorted + unique."""
+        val n = self.arr.len()
+        # Fast path: append-only when low is strictly greater than the current
+        # maximum (covers sequential bulk-add 0..N which is the promotion test).
+        if n > 0 and self.arr[n - 1] <= low:
+            if self.arr[n - 1] == low:
+                return
+            self.arr.push(low)
+            return
+        var pos = 0
+        while pos < n and self.arr[pos] < low:
+            pos = pos + 1
+        if pos < n and self.arr[pos] == low:
+            return
+        # Append then shift the tail right by one (no insert primitive relied on).
+        self.arr.push(0)
+        var i = self.arr.len() - 1
+        while i > pos:
+            self.arr[i] = self.arr[i - 1]
+            i = i - 1
+        self.arr[pos] = low
+
+    # --- BITMAP helpers ----------------------------------------------------
+    fn bitmap_test(low: i64) -> bool:
+        val wi = low / 64
+        val bit = low - wi * 64
+        val word = self.words[wi]
+        ((word >> bit) & 1) == 1
+
+    me bitmap_set(low: i64):
+        val wi = low / 64
+        val bit = low - wi * 64
+        self.words[wi] = self.words[wi] | (1 << bit)
+
+    me promote_to_bitmap():
+        """Convert this ARRAY container into an equivalent BITMAP container."""
+        var w: [i64] = []
+        var i = 0
+        while i < BITMAP_WORDS:
+            w.push(0)
+            i = i + 1
+        var j = 0
+        while j < self.arr.len():
+            val low = self.arr[j]
+            val wi = low / 64
+            val bit = low - wi * 64
+            w[wi] = w[wi] | (1 << bit)
+            j = j + 1
+        self.kind = 1
+        self.words = w
+        self.arr = []
+
+    # --- public per-container ops -----------------------------------------
+    fn contains_low(low: i64) -> bool:
+        if self.kind == 0:
+            return self.arr_index_of(low) >= 0
+        self.bitmap_test(low)
+
+    me add_low(low: i64):
+        if self.kind == 1:
+            self.bitmap_set(low)
+            return
+        # ARRAY: insert, then promote if it has grown too dense.
+        self.arr_insert(low)
+        if self.arr.len() > ARRAY_MAX:
+            self.promote_to_bitmap()
+
+    fn cardinality() -> i64:
+        if self.kind == 0:
+            return self.arr.len()
+        var total = 0
+        var wi = 0
+        while wi < self.words.len():
+            var word = self.words[wi]
+            var bit = 0
+            while bit < 64:
+                total = total + ((word >> bit) & 1)
+                bit = bit + 1
+            wi = wi + 1
+        total
+
+    fn to_sorted_lows() -> [i64]:
+        """Ascending list of low values held by this container."""
+        if self.kind == 0:
+            return self.arr
+        var out: [i64] = []
+        var wi = 0
+        while wi < self.words.len():
+            val word = self.words[wi]
+            var bit = 0
+            while bit < 64:
+                if ((word >> bit) & 1) == 1:
+                    out.push(wi * 64 + bit)
+                bit = bit + 1
+            wi = wi + 1
+        out
+
+# ----------------------------------------------------------------------------
+# RoaringBitmap — the set of i64 ids, chunked by high 16 bits.
+# ----------------------------------------------------------------------------
+# `high_keys` is kept sorted ascending and parallel to `chunks` so output is
+# deterministic ascending and lookup is a binary search. (Avoids sorting a
+# struct array: only the i64 high keys are sorted.)
+struct RoaringBitmap:
+    """A roaring-style compressed bitmap over non-negative i64 ids. Chunked by
+    the high 16 bits; each chunk auto-promotes ARRAY -> BITMAP when dense. The
+    candidate-set filter primitive: `add`/`contains`/`cardinality` plus the set
+    algebra `and`/`or`/`andnot`."""
+    high_keys: [i64]
+    chunks: [Container]
+
+impl RoaringBitmap:
+    static fn new() -> RoaringBitmap:
+        RoaringBitmap(high_keys: [], chunks: [])
+
+    static fn of(ids: [i64]) -> RoaringBitmap:
+        """Build from an arbitrary id list (any order, dups allowed)."""
+        var rb = RoaringBitmap(high_keys: [], chunks: [])
+        var i = 0
+        while i < ids.len():
+            rb.add(ids[i])
+            i = i + 1
+        rb
+
+    fn high_of(id: i64) -> i64:
+        id / CHUNK_SPAN
+
+    fn low_of(id: i64) -> i64:
+        id - (id / CHUNK_SPAN) * CHUNK_SPAN
+
+    fn chunk_slot(high: i64) -> i64:
+        """Binary search the sorted high_keys for `high`; -1 if absent."""
+        var lo = 0
+        var hi = self.high_keys.len() - 1
+        while lo <= hi:
+            val mid = (lo + hi) / 2
+            val v = self.high_keys[mid]
+            if v == high:
+                return mid
+            if v < high:
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        0 - 1
+
+    me ensure_chunk(high: i64) -> i64:
+        """Return slot index for `high`, creating a new ARRAY container (kept in
+        ascending high-key order) if it does not yet exist."""
+        val existing = self.chunk_slot(high)
+        if existing >= 0:
+            return existing
+        # Find insert position keeping high_keys sorted ascending.
+        var pos = 0
+        val n = self.high_keys.len()
+        while pos < n and self.high_keys[pos] < high:
+            pos = pos + 1
+        # Grow both arrays then shift the tail right by one.
+        self.high_keys.push(0)
+        var i = self.high_keys.len() - 1
+        while i > pos:
+            self.high_keys[i] = self.high_keys[i - 1]
+            i = i - 1
+        self.high_keys[pos] = high
+        self.chunks.push(Container.array())
+        var k = self.chunks.len() - 1
+        while k > pos:
+            self.chunks[k] = self.chunks[k - 1]
+            k = k - 1
+        self.chunks[pos] = Container.array()
+        pos
+
+    me add(id: i64):
+        """Add a non-negative id (idempotent; negatives ignored)."""
+        if id < 0:
+            return
+        val high = self.high_of(id)
+        val low = self.low_of(id)
+        val slot = self.ensure_chunk(high)
+        # Element-receiver write-back: mutate a local copy then re-seat it. A
+        # `me` method invoked directly on an array element (`self.chunks[i].m()`)
+        # whose body delegates to a further nested `me` can lose the inner write
+        # in the interpreter; the local-var round-trip is fail-safe.
+        var c = self.chunks[slot]
+        c.add_low(low)
+        self.chunks[slot] = c
+
+    fn contains(id: i64) -> bool:
+        if id < 0:
+            return false
+        val high = self.high_of(id)
+        val slot = self.chunk_slot(high)
+        if slot < 0:
+            return false
+        self.chunks[slot].contains_low(self.low_of(id))
+
+    fn cardinality() -> i64:
+        """Total number of distinct ids in the bitmap."""
+        var total = 0
+        var i = 0
+        while i < self.chunks.len():
+            total = total + self.chunks[i].cardinality()
+            i = i + 1
+        total
+
+    fn is_empty() -> bool:
+        self.cardinality() == 0
+
+    fn to_sorted_ids() -> [i64]:
+        """Materialize all ids in ascending order (deterministic). Chunks are
+        already in ascending high-key order with sorted low values."""
+        var out: [i64] = []
+        var i = 0
+        while i < self.chunks.len():
+            val base = self.high_keys[i] * CHUNK_SPAN
+            val lows = self.chunks[i].to_sorted_lows()
+            var j = 0
+            while j < lows.len():
+                out.push(base + lows[j])
+                j = j + 1
+            i = i + 1
+        out
+
+    # --- set algebra -------------------------------------------------------
+    # One code path: materialize each operand to ascending ids and run the
+    # classic two-cursor sorted merge, then rebuild via `add` (promotion falls
+    # out for free). Result chunks are re-formed in ascending order.
+    fn and(other: RoaringBitmap) -> RoaringBitmap:
+        """Intersection: ids present in BOTH bitmaps."""
+        val a = self.to_sorted_ids()
+        val b = other.to_sorted_ids()
+        var out = RoaringBitmap.new()
+        var i = 0
+        var j = 0
+        val na = a.len()
+        val nb = b.len()
+        while i < na and j < nb:
+            val x = a[i]
+            val y = b[j]
+            if x < y:
+                i = i + 1
+            else:
+                if y < x:
+                    j = j + 1
+                else:
+                    out.add(x)
+                    i = i + 1
+                    j = j + 1
+        out
+
+    fn or(other: RoaringBitmap) -> RoaringBitmap:
+        """Union: ids present in EITHER bitmap (deduplicated)."""
+        val a = self.to_sorted_ids()
+        val b = other.to_sorted_ids()
+        var out = RoaringBitmap.new()
+        var i = 0
+        var j = 0
+        val na = a.len()
+        val nb = b.len()
+        while i < na and j < nb:
+            val x = a[i]
+            val y = b[j]
+            if x < y:
+                out.add(x)
+                i = i + 1
+            else:
+                if y < x:
+                    out.add(y)
+                    j = j + 1
+                else:
+                    out.add(x)
+                    i = i + 1
+                    j = j + 1
+        while i < na:
+            out.add(a[i])
+            i = i + 1
+        while j < nb:
+            out.add(b[j])
+            j = j + 1
+        out
+
+    fn andnot(other: RoaringBitmap) -> RoaringBitmap:
+        """Difference self \\ other: ids in self but NOT in other."""
+        val a = self.to_sorted_ids()
+        val b = other.to_sorted_ids()
+        var out = RoaringBitmap.new()
+        var i = 0
+        var j = 0
+        val na = a.len()
+        val nb = b.len()
+        while i < na and j < nb:
+            val x = a[i]
+            val y = b[j]
+            if x < y:
+                out.add(x)
+                i = i + 1
+            else:
+                if y < x:
+                    j = j + 1
+                else:
+                    i = i + 1
+                    j = j + 1
+        while i < na:
+            out.add(a[i])
+            i = i + 1
+        out

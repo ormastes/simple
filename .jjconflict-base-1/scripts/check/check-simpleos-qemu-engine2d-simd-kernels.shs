@@ -1,0 +1,40 @@
+#!/bin/sh
+# Static prerequisite gate only. Guest hit/chunk receipts and QMP captures are
+# still mandatory before a SimpleOS backend can be marked verified.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/simpleos-qemu-simd.XXXXXX")
+trap 'rm -rf "$work_dir"' EXIT HUP INT TERM
+
+arm_source="$repo_root/examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c"
+x86_source="$repo_root/examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c"
+
+clang -target aarch64-unknown-none-elf -c -ffreestanding -nostdlib -fno-pie \
+    -ffunction-sections -fdata-sections -O2 \
+    -I "$repo_root/examples/09_embedded/simple_os/arch/arm64/boot" \
+    -o "$work_dir/arm64.o" "$arm_source"
+
+clang -target x86_64-unknown-none-elf -c -m64 -ffreestanding -fno-pic \
+    -fno-pie -mno-red-zone -O2 -Wno-error=implicit-function-declaration \
+    -o "$work_dir/x86_64.o" "$x86_source"
+
+objdump -d --disassemble-symbols=rt_gui_fill4 "$work_dir/arm64.o" \
+    > "$work_dir/arm64.dis"
+objdump -d --disassemble-symbols=rt_gui_fill4 "$work_dir/x86_64.o" \
+    > "$work_dir/x86_64.dis"
+
+grep -Eq '[[:space:]]dup[[:space:]]+v[0-9]+\\.4s' "$work_dir/arm64.dis"
+grep -Eq '[[:space:]]st1[[:space:]]+\\{' "$work_dir/arm64.dis"
+grep -Eq '[[:space:]]pshufd[[:space:]]' "$work_dir/x86_64.dis"
+grep -Eq '[[:space:]]movdqu[[:space:]]' "$work_dir/x86_64.dis"
+
+for object_path in "$work_dir/arm64.o" "$work_dir/x86_64.o"; do
+    objdump -t "$object_path" > "$work_dir/symbols"
+    grep -q 'rt_gui_simd_fill_enabled' "$work_dir/symbols"
+    grep -q 'rt_gui_simd_fill_hits' "$work_dir/symbols"
+    grep -q 'rt_gui_simd_fill_chunks' "$work_dir/symbols"
+    grep -q 'rt_gui_simd_fill_tail_pixels' "$work_dir/symbols"
+done
+
+echo "PASS: ARM64 NEON and x86_64 SSE2 fill kernels plus receipt symbols"

@@ -1,0 +1,142 @@
+# ============================================================================
+# game_net/server.spl — authoritative server: per-client input queue + tick
+#
+# Netcode plan P2 ("extend engine/net/GameServer"): client connection
+# bookkeeping (roster, ids) is reused as-is from the existing
+# `std.nogc_sync_mut.engine.net.server.GameServer` scaffold rather than
+# reimplemented; this module adds the authoritative fixed-step simulation,
+# per-client pending-input queues, and per-client snapshot broadcast that the
+# plain roster scaffold never had. `engine/net/{client,sync,rpc}.spl` are
+# untouched — they cover a different surface (generic RPC/entity-sync) and
+# are out of scope for this deterministic prediction/reconciliation slice.
+#
+# `fixed_update` applies each queued input only if `seq > last_acked_seq`,
+# so a client resending its whole unacked backlog every tick (the loss/
+# reorder recovery strategy the loopback harness exercises) is naturally
+# idempotent: duplicates and late/stale resends of already-applied inputs
+# are skipped, and a single dropped packet self-heals once a later resend
+# carries the same seq through.
+#
+# Interest management: each ClientEntity carries an optional
+# `interest: InterestConfig?`. `snapshot_for` applies `interest_filter` to
+# the broadcast entity list only when a client has a config set — `nil`
+# (the default at `connect`, via `set_interest`) keeps the original
+# broadcast-all behavior byte-for-byte, so every existing caller is
+# unaffected.
+# ============================================================================
+
+use std.nogc_sync_mut.engine.net.server.{GameServer}
+use std.nogc_sync_mut.game_net.demo_sim.{SimState, sim_state_new, sim_step}
+use std.nogc_sync_mut.game_net.wire.{InputFrame, Snapshot, EntityState}
+use std.nogc_sync_mut.game_net.interest.{InterestConfig, interest_filter}
+
+struct ClientEntity:
+    client_id: i32
+    state: SimState
+    last_acked_seq: u32
+    pending: [InputFrame]
+    interest: InterestConfig?
+
+class GameNetServer:
+    roster: GameServer
+    entities: [ClientEntity]
+    tick: u32
+    dt: f32
+
+impl GameNetServer:
+    static fn new(dt: f32) -> GameNetServer:
+        var roster = GameServer.new(64, 60)
+        roster.start()
+        GameNetServer(roster: roster, entities: [], tick: 0u32, dt: dt)
+
+    me connect(entity_id: u32) -> i32:
+        val cid = self.roster.connect_client("loopback")
+        self.entities.push(ClientEntity(
+            client_id: cid, state: sim_state_new(entity_id),
+            last_acked_seq: 0u32, pending: [], interest: nil
+        ))
+        cid
+
+    me set_interest(client_id: i32, config: InterestConfig?):
+        """Configure (or, passing nil, clear back to broadcast-all) this
+        client's distance-based interest view."""
+        var i: u64 = 0
+        while i < self.entities.len().to_u64():
+            val ent = self.entities[i]
+            if ent.client_id == client_id:
+                self.entities[i] = ClientEntity(
+                    client_id: ent.client_id, state: ent.state,
+                    last_acked_seq: ent.last_acked_seq, pending: ent.pending,
+                    interest: config
+                )
+                return
+            i = i + 1
+
+    me submit_input(client_id: i32, frame: InputFrame):
+        """Queue one client's input for consumption on the next fixed_update."""
+        var i: u64 = 0
+        while i < self.entities.len().to_u64():
+            val ent = self.entities[i]
+            if ent.client_id == client_id:
+                var new_pending: [InputFrame] = ent.pending
+                new_pending.push(frame)
+                self.entities[i] = ClientEntity(
+                    client_id: ent.client_id, state: ent.state,
+                    last_acked_seq: ent.last_acked_seq, pending: new_pending,
+                    interest: ent.interest
+                )
+                return
+            i = i + 1
+
+    me fixed_update():
+        """Advance the authoritative tick, draining each client's queued
+        inputs through the same deterministic sim_step used client-side.
+        Inputs with seq <= last_acked_seq are skipped (idempotent replay of
+        a resent backlog)."""
+        self.tick = self.tick + 1u32
+        var i: u64 = 0
+        while i < self.entities.len().to_u64():
+            val ent = self.entities[i]
+            var st = ent.state
+            var acked = ent.last_acked_seq
+            var j: u64 = 0
+            while j < ent.pending.len().to_u64():
+                val frame = ent.pending[j]
+                if frame.seq > acked:
+                    st = sim_step(st, frame.move_x, frame.move_y, self.dt)
+                    acked = frame.seq
+                j = j + 1
+            self.entities[i] = ClientEntity(
+                client_id: ent.client_id, state: st, last_acked_seq: acked, pending: [],
+                interest: ent.interest
+            )
+            i = i + 1
+
+    fn snapshot_for(client_id: i32) -> Snapshot:
+        """Broadcast-all (indie scale, per plan): every entity, with the
+        ack_input_seq specific to the requesting client — unless that
+        client has an InterestConfig set, in which case the entity list is
+        filtered down to what its view center + radius can see."""
+        var acked: u32 = 0u32
+        var cfg: InterestConfig? = nil
+        var list: [EntityState] = []
+        var i: u64 = 0
+        while i < self.entities.len().to_u64():
+            val ent = self.entities[i]
+            if ent.client_id == client_id:
+                acked = ent.last_acked_seq
+                cfg = ent.interest
+            val e = ent.state
+            list.push(EntityState(entity_id: e.entity_id, pos_x: e.pos_x, pos_y: e.pos_y, vel_x: e.vel_x, vel_y: e.vel_y))
+            i = i + 1
+        # `cfg != nil` + direct field access, not `if val c = cfg:` — the
+        # latter misdetects nil as present under the interpreter fallback
+        # path (tracked:
+        # doc/08_tracking/bug/interpreter_if_val_nil_mismatch_option_2026-07-03.md),
+        # and nil (broadcast-all, no interest config) is the common case here.
+        if cfg != nil:
+            list = interest_filter(list, cfg.center_x, cfg.center_y, cfg.radius)
+        Snapshot(tick: self.tick, ack_input_seq: acked, entities: list)
+
+export GameNetServer
+export ClientEntity

@@ -1,0 +1,295 @@
+# test/unit/compiler/backend/neon_fp16_spec.spl
+#
+# Feature ID: #COMPILER-BACKEND-NATIVE-NEON-FP16
+# Category:   Compiler | Backend | Native | AArch64 FP16 Conversion Encoding
+#
+# Byte-level golden tests for FP16 conversion emit variants:
+#   FCVTN  Vd.4H,  Vn.4S  (Q=0, narrow fp32→fp16, lower half, ARMv8 ARM §C7.2.67)
+#   FCVTN2 Vd.8H,  Vn.4S  (Q=1, narrow fp32→fp16, upper half, ARMv8 ARM §C7.2.67)
+#   FCVTL  Vd.4S,  Vn.4H  (Q=0, widen fp16→fp32, lower half,  ARMv8 ARM §C7.2.66)
+#   FCVTL2 Vd.4S,  Vn.8H  (Q=1, widen fp16→fp32, upper half,  ARMv8 ARM §C7.2.66)
+#   FCVTZS Vd.4S,  Vn.4S  (Q=1, fp32→signed int32 truncate,   ARMv8 ARM §C7.2.68)
+#   FCVTZU Vd.4S,  Vn.4S  (Q=1, fp32→unsigned int32 truncate, ARMv8 ARM §C7.2.69)
+#
+# All instructions are 4-byte fixed-width, little-endian per ARMv8 ABI.
+# 2-register encoding: base + Rn*32 + Rd
+#
+# Interpreter-mode note (per .claude/rules/testing.md):
+#   The test runner in interpreter mode only verifies file loading and
+#   describe/it block reachability.  Assertions inside it-blocks are not
+#   executed.  Compiled-mode execution will exercise them.
+
+use compiler.backend.native.arm_neon.{emit_fcvtn_4h, emit_fcvtn2_8h, emit_fcvtl_4s, emit_fcvtl2_4s, emit_fcvtzs_4s, emit_fcvtzu_4s}
+
+# ============================================================================
+# FCVTN Vd.4H, Vn.4S — base 0x0E216800
+# Canonical (V0,V0): LE [0x00, 0x68, 0x21, 0x0E]
+# ============================================================================
+
+describe "emit_fcvtn_4h — narrow fp32 to fp16 into lower half":
+    it "FCVTN V0.4H, V0.4S encodes to base opcode bytes":
+        # word = 0x0E216800 + 0*32 + 0 = 0x0E216800
+        # LE: [0x00, 0x68, 0x21, 0x0E]
+        var b = emit_fcvtn_4h(0, 0)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0x68)
+        expect(b[2]).to_equal(0x21)
+        expect(b[3]).to_equal(0x0E)
+
+    it "FCVTN V0.4H, V1.4S encodes rn=1 into bits[9:5]":
+        # word = 0x0E216800 + 1*32 + 0 = 0x0E216820
+        # LE: [0x20, 0x68, 0x21, 0x0E]
+        var b = emit_fcvtn_4h(0, 1)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x20)
+        expect(b[1]).to_equal(0x68)
+        expect(b[2]).to_equal(0x21)
+        expect(b[3]).to_equal(0x0E)
+
+    it "FCVTN V1.4H, V2.4S encodes rd=1 rn=2 correctly":
+        # word = 0x0E216800 + 2*32 + 1 = 0x0E216841
+        # LE: [0x41, 0x68, 0x21, 0x0E]
+        var b = emit_fcvtn_4h(1, 2)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x41)
+        expect(b[1]).to_equal(0x68)
+        expect(b[2]).to_equal(0x21)
+        expect(b[3]).to_equal(0x0E)
+
+# ============================================================================
+# FCVTN2 Vd.8H, Vn.4S — base 0x4E216800
+# Canonical (V0,V0): LE [0x00, 0x68, 0x21, 0x4E]
+# ============================================================================
+
+describe "emit_fcvtn2_8h — narrow fp32 to fp16 into upper half":
+    it "FCVTN2 V0.8H, V0.4S encodes to base opcode bytes":
+        # word = 0x4E216800 + 0*32 + 0 = 0x4E216800
+        # LE: [0x00, 0x68, 0x21, 0x4E]
+        var b = emit_fcvtn2_8h(0, 0)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0x68)
+        expect(b[2]).to_equal(0x21)
+        expect(b[3]).to_equal(0x4E)
+
+    it "FCVTN2 V0.8H, V1.4S encodes rn=1":
+        # word = 0x4E216800 + 1*32 + 0 = 0x4E216820
+        # LE: [0x20, 0x68, 0x21, 0x4E]
+        var b = emit_fcvtn2_8h(0, 1)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x20)
+        expect(b[1]).to_equal(0x68)
+        expect(b[2]).to_equal(0x21)
+        expect(b[3]).to_equal(0x4E)
+
+    it "FCVTN2 V3.8H, V4.4S encodes rd=3 rn=4 correctly":
+        # word = 0x4E216800 + 4*32 + 3 = 0x4E216883
+        # LE: [0x83, 0x68, 0x21, 0x4E]
+        var b = emit_fcvtn2_8h(3, 4)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x83)
+        expect(b[1]).to_equal(0x68)
+        expect(b[2]).to_equal(0x21)
+        expect(b[3]).to_equal(0x4E)
+
+# ============================================================================
+# FCVTL Vd.4S, Vn.4H — base 0x0E217800
+# Canonical (V0,V0): LE [0x00, 0x78, 0x21, 0x0E]
+# ============================================================================
+
+describe "emit_fcvtl_4s — widen fp16 to fp32 from lower half":
+    it "FCVTL V0.4S, V0.4H encodes to base opcode bytes":
+        # word = 0x0E217800 + 0*32 + 0 = 0x0E217800
+        # LE: [0x00, 0x78, 0x21, 0x0E]
+        var b = emit_fcvtl_4s(0, 0)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0x78)
+        expect(b[2]).to_equal(0x21)
+        expect(b[3]).to_equal(0x0E)
+
+    it "FCVTL V0.4S, V1.4H encodes rn=1":
+        # word = 0x0E217800 + 1*32 + 0 = 0x0E217820
+        # LE: [0x20, 0x78, 0x21, 0x0E]
+        var b = emit_fcvtl_4s(0, 1)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x20)
+        expect(b[1]).to_equal(0x78)
+        expect(b[2]).to_equal(0x21)
+        expect(b[3]).to_equal(0x0E)
+
+    it "FCVTL V2.4S, V3.4H encodes rd=2 rn=3 correctly":
+        # word = 0x0E217800 + 3*32 + 2 = 0x0E217862
+        # LE: [0x62, 0x78, 0x21, 0x0E]
+        var b = emit_fcvtl_4s(2, 3)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x62)
+        expect(b[1]).to_equal(0x78)
+        expect(b[2]).to_equal(0x21)
+        expect(b[3]).to_equal(0x0E)
+
+# ============================================================================
+# FCVTL2 Vd.4S, Vn.8H — base 0x4E217800
+# Canonical (V0,V0): LE [0x00, 0x78, 0x21, 0x4E]
+# ============================================================================
+
+describe "emit_fcvtl2_4s — widen fp16 to fp32 from upper half":
+    it "FCVTL2 V0.4S, V0.8H encodes to base opcode bytes":
+        # word = 0x4E217800 + 0*32 + 0 = 0x4E217800
+        # LE: [0x00, 0x78, 0x21, 0x4E]
+        var b = emit_fcvtl2_4s(0, 0)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0x78)
+        expect(b[2]).to_equal(0x21)
+        expect(b[3]).to_equal(0x4E)
+
+    it "FCVTL2 V0.4S, V1.8H encodes rn=1":
+        # word = 0x4E217800 + 1*32 + 0 = 0x4E217820
+        # LE: [0x20, 0x78, 0x21, 0x4E]
+        var b = emit_fcvtl2_4s(0, 1)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x20)
+        expect(b[1]).to_equal(0x78)
+        expect(b[2]).to_equal(0x21)
+        expect(b[3]).to_equal(0x4E)
+
+    it "FCVTL2 V2.4S, V3.8H encodes rd=2 rn=3 correctly":
+        # word = 0x4E217800 + 3*32 + 2 = 0x4E217862
+        # LE: [0x62, 0x78, 0x21, 0x4E]
+        var b = emit_fcvtl2_4s(2, 3)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x62)
+        expect(b[1]).to_equal(0x78)
+        expect(b[2]).to_equal(0x21)
+        expect(b[3]).to_equal(0x4E)
+
+# ============================================================================
+# FCVTZS Vd.4S, Vn.4S — base 0x4EA1B800
+# Canonical (V0,V0): LE [0x00, 0xB8, 0xA1, 0x4E]
+# ============================================================================
+
+describe "emit_fcvtzs_4s — fp32 to signed int32 truncate 4 lanes":
+    it "FCVTZS V0.4S, V0.4S encodes to base opcode bytes":
+        # word = 0x4EA1B800 + 0*32 + 0 = 0x4EA1B800
+        # LE: [0x00, 0xB8, 0xA1, 0x4E]
+        var b = emit_fcvtzs_4s(0, 0)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0xB8)
+        expect(b[2]).to_equal(0xA1)
+        expect(b[3]).to_equal(0x4E)
+
+    it "FCVTZS V0.4S, V1.4S encodes rn=1":
+        # word = 0x4EA1B800 + 1*32 + 0 = 0x4EA1B820
+        # LE: [0x20, 0xB8, 0xA1, 0x4E]
+        var b = emit_fcvtzs_4s(0, 1)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x20)
+        expect(b[1]).to_equal(0xB8)
+        expect(b[2]).to_equal(0xA1)
+        expect(b[3]).to_equal(0x4E)
+
+    it "FCVTZS V3.4S, V4.4S encodes rd=3 rn=4 correctly":
+        # word = 0x4EA1B800 + 4*32 + 3 = 0x4EA1B883
+        # LE: [0x83, 0xB8, 0xA1, 0x4E]
+        var b = emit_fcvtzs_4s(3, 4)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x83)
+        expect(b[1]).to_equal(0xB8)
+        expect(b[2]).to_equal(0xA1)
+        expect(b[3]).to_equal(0x4E)
+
+# ============================================================================
+# FCVTZU Vd.4S, Vn.4S — base 0x6EA1B800
+# Canonical (V0,V0): LE [0x00, 0xB8, 0xA1, 0x6E]
+# ============================================================================
+
+describe "emit_fcvtzu_4s — fp32 to unsigned int32 truncate 4 lanes":
+    it "FCVTZU V0.4S, V0.4S encodes to base opcode bytes":
+        # word = 0x6EA1B800 + 0*32 + 0 = 0x6EA1B800
+        # LE: [0x00, 0xB8, 0xA1, 0x6E]
+        var b = emit_fcvtzu_4s(0, 0)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x00)
+        expect(b[1]).to_equal(0xB8)
+        expect(b[2]).to_equal(0xA1)
+        expect(b[3]).to_equal(0x6E)
+
+    it "FCVTZU V0.4S, V1.4S encodes rn=1":
+        # word = 0x6EA1B800 + 1*32 + 0 = 0x6EA1B820
+        # LE: [0x20, 0xB8, 0xA1, 0x6E]
+        var b = emit_fcvtzu_4s(0, 1)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x20)
+        expect(b[1]).to_equal(0xB8)
+        expect(b[2]).to_equal(0xA1)
+        expect(b[3]).to_equal(0x6E)
+
+    it "FCVTZU V3.4S, V4.4S encodes rd=3 rn=4 correctly":
+        # word = 0x6EA1B800 + 4*32 + 3 = 0x6EA1B883
+        # LE: [0x83, 0xB8, 0xA1, 0x6E]
+        var b = emit_fcvtzu_4s(3, 4)
+        expect(b.len()).to_equal(4)
+        expect(b[0]).to_equal(0x83)
+        expect(b[1]).to_equal(0xB8)
+        expect(b[2]).to_equal(0xA1)
+        expect(b[3]).to_equal(0x6E)
+
+# ============================================================================
+# Property: all variants always return exactly 4 bytes
+# ============================================================================
+
+describe "FP16 conversion emit output length":
+    it "emit_fcvtn_4h always returns 4 bytes":
+        var b = emit_fcvtn_4h(1, 2)
+        expect(b.len()).to_equal(4)
+
+    it "emit_fcvtn2_8h always returns 4 bytes":
+        var b = emit_fcvtn2_8h(1, 2)
+        expect(b.len()).to_equal(4)
+
+    it "emit_fcvtl_4s always returns 4 bytes":
+        var b = emit_fcvtl_4s(1, 2)
+        expect(b.len()).to_equal(4)
+
+    it "emit_fcvtl2_4s always returns 4 bytes":
+        var b = emit_fcvtl2_4s(1, 2)
+        expect(b.len()).to_equal(4)
+
+    it "emit_fcvtzs_4s always returns 4 bytes":
+        var b = emit_fcvtzs_4s(1, 2)
+        expect(b.len()).to_equal(4)
+
+    it "emit_fcvtzu_4s always returns 4 bytes":
+        var b = emit_fcvtzu_4s(1, 2)
+        expect(b.len()).to_equal(4)
+
+# ============================================================================
+# Property: FCVTN/FCVTN2 differ only in byte[3] (Q bit = bit30)
+# ============================================================================
+
+describe "FCVTN vs FCVTN2 Q-bit distinction":
+    it "FCVTN and FCVTN2 with same registers match bytes 0-2 and differ at byte[3]":
+        var n  = emit_fcvtn_4h(0, 1)
+        var n2 = emit_fcvtn2_8h(0, 1)
+        expect(n[0]).to_equal(n2[0])
+        expect(n[1]).to_equal(n2[1])
+        expect(n[2]).to_equal(n2[2])
+        # FCVTN2 has Q=1 (bit 30), raising byte[3] by 0x40
+        expect(n2[3] - n[3]).to_equal(0x40)
+
+# ============================================================================
+# Property: FCVTZS vs FCVTZU differ only in byte[3] (U bit = bit29)
+# ============================================================================
+
+describe "FCVTZS vs FCVTZU U-bit distinction":
+    it "FCVTZS and FCVTZU with same registers match bytes 0-2 and differ at byte[3]":
+        var s = emit_fcvtzs_4s(0, 1)
+        var u = emit_fcvtzu_4s(0, 1)
+        expect(s[0]).to_equal(u[0])
+        expect(s[1]).to_equal(u[1])
+        expect(s[2]).to_equal(u[2])
+        # FCVTZU has U=1 (bit 29), raising byte[3] by 0x20
+        expect(u[3] - s[3]).to_equal(0x20)

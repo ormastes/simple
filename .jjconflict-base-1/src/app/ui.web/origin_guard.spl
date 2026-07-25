@@ -1,0 +1,137 @@
+# Origin Guard — validates the HTTP Origin header against an allowlist.
+#
+# Reads SIMPLE_UI_WEB_ALLOWED_ORIGINS (comma-separated).
+# Default for local dev mode: loopback HTTP/HTTPS origins with optional ports.
+
+use std.io_runtime.{env_get}
+
+# =========================================================================
+# Auth error variants — shared with session_token.spl
+# =========================================================================
+
+enum AuthError:
+    MissingOrigin
+    DisallowedOrigin
+    MissingToken
+    InvalidToken
+    ExpiredToken
+    OriginMismatch
+    Forbidden
+
+# =========================================================================
+# OriginGuard
+# =========================================================================
+
+class OriginGuard:
+    allowed: List<text>
+
+    static fn from_env() -> OriginGuard:
+        """Build an OriginGuard from the SIMPLE_UI_WEB_ALLOWED_ORIGINS env var.
+        Falls back to localhost defaults when the variable is unset or empty."""
+        val raw = env_get("SIMPLE_UI_WEB_ALLOWED_ORIGINS") ?? ""
+        return OriginGuard.from_env_value(raw)
+
+    static fn from_env_value(raw: text) -> OriginGuard:
+        if raw.trim() == "":
+            return OriginGuard(allowed: ["https://localhost", "http://localhost"])
+        var origins: List<text> = []
+        for part in raw.split(","):
+            val trimmed = part.trim()
+            if trimmed != "":
+                origins = origins.push(trimmed)
+        if origins.len() == 0:
+            return OriginGuard(allowed: ["https://localhost", "http://localhost"])
+        return OriginGuard(allowed: origins)
+
+    fn check(self, headers: text) -> Result<text, AuthError>:
+        """Extract the Origin header and verify it is in the allowlist.
+
+        Returns Ok(origin) on success.
+        Returns Err(MissingOrigin) if no Origin header is present.
+        Returns Err(DisallowedOrigin) if the origin is not in the allowlist."""
+        var origin = ""
+        for line in headers.split("\n"):
+            val trimmed = line.trim()
+            if trimmed.lower().starts_with("origin:"):
+                origin = trimmed[7:].trim()
+                break
+        if origin == "":
+            return Err(AuthError.MissingOrigin)
+        for allowed in self.allowed:
+            if allowed == origin:
+                return Ok(origin)
+        if self._uses_default_localhost_policy() and _is_loopback_origin(origin):
+            return Ok(origin)
+        return Err(AuthError.DisallowedOrigin)
+
+    fn _uses_default_localhost_policy(self) -> bool:
+        if self.allowed.len() != 2:
+            return false
+        var saw_http = false
+        var saw_https = false
+        for allowed in self.allowed:
+            if allowed == "http://localhost":
+                saw_http = true
+            elif allowed == "https://localhost":
+                saw_https = true
+        return saw_http and saw_https
+
+fn _is_loopback_origin(origin: text) -> bool:
+    if _origin_has_path_or_query(origin):
+        return false
+    if origin == "http://localhost" or origin == "https://localhost":
+        return true
+    if origin.starts_with("http://localhost:") or origin.starts_with("https://localhost:"):
+        return _origin_port_is_numeric(origin)
+    if origin == "http://127.0.0.1" or origin == "https://127.0.0.1":
+        return true
+    if origin.starts_with("http://127.0.0.1:") or origin.starts_with("https://127.0.0.1:"):
+        return _origin_port_is_numeric(origin)
+    if origin == "http://[::1]" or origin == "https://[::1]":
+        return true
+    if origin.starts_with("http://[::1]:") or origin.starts_with("https://[::1]:"):
+        return _origin_port_is_numeric(origin)
+    return false
+
+fn _origin_has_path_or_query(origin: text) -> bool:
+    val scheme = "://"
+    val scheme_idx = origin.find(scheme)
+    if scheme_idx < 0:
+        return true
+    val host_start = scheme_idx + scheme.len()
+    val rest = origin.slice(host_start, origin.len())
+    return rest.contains("/") or rest.contains("?") or rest.contains("#")
+
+fn _origin_port_is_numeric(origin: text) -> bool:
+    val colon = _last_colon(origin)
+    if colon < 0 or colon + 1 >= origin.len():
+        return false
+    val port = origin.slice(colon + 1, origin.len())
+    var i = 0
+    while i < port.len():
+        if _digit(port.slice(i, i + 1)) < 0:
+            return false
+        i = i + 1
+    return true
+
+fn _last_colon(s: text) -> i64:
+    var idx = -1
+    var i = 0
+    while i < s.len():
+        if s.slice(i, i + 1) == ":":
+            idx = i
+        i = i + 1
+    return idx
+
+fn _digit(ch: text) -> i64:
+    if ch == "0": return 0
+    if ch == "1": return 1
+    if ch == "2": return 2
+    if ch == "3": return 3
+    if ch == "4": return 4
+    if ch == "5": return 5
+    if ch == "6": return 6
+    if ch == "7": return 7
+    if ch == "8": return 8
+    if ch == "9": return 9
+    return -1

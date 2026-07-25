@@ -1,0 +1,36 @@
+#!/bin/sh
+# Generated-product Sv32 -> final PMP -> Wishbone evidence.  No source generation.
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+rtl=${1:-"$root/build/vhdl/rv32"}
+work="$root/build/ghdl/rv32_product_sv32_pmp"
+tb="$root/test/01_unit/lib/hardware/fpga_linux/rv32_product_sv32_pmp_ghdl"
+fixture="$tb/rv32_product_sv32_pmp.S"
+testbench="$tb/tb_rv32_product_sv32_pmp.vhd"
+runner="$root/scripts/fpga/ghdl_rv32_product_sv32_pmp.shs"
+gcc=${RV32_GCC:-riscv64-unknown-elf-gcc}
+objcopy=${RV32_OBJCOPY:-riscv64-unknown-elf-objcopy}
+. "$root/scripts/check/riscv-fpga-preflight-common.shs"
+command -v ghdl >/dev/null 2>&1 || { echo "FAIL: ghdl not found"; exit 1; }
+command -v "$gcc" >/dev/null 2>&1 || { echo "FAIL: RV32 GCC not found: $gcc"; exit 1; }
+command -v "$objcopy" >/dev/null 2>&1 || { echo "FAIL: RV32 objcopy not found: $objcopy"; exit 1; }
+for f in core32_protected_product.vhd rv32imac_core_product_wb.vhd; do
+  [ -s "$rtl/$f" ] || { echo "FAIL: generated product missing: $rtl/$f"; exit 1; }
+done
+grep -q 'entity core32_protected_product_entry is' "$rtl/core32_protected_product.vhd" || { echo "FAIL: invalid generated product core"; exit 1; }
+grep -q 'entity rv32imac_core_product_wb is' "$rtl/rv32imac_core_product_wb.vhd" || { echo "FAIL: invalid generated product wrapper"; exit 1; }
+rm -rf "$work"; mkdir -p "$work"
+"$gcc" -march=rv32imac_zicsr -mabi=ilp32 -nostdlib -Wl,-Ttext=0 -Wl,-e,_start -o "$work/rv32_product_sv32_pmp.elf" "$fixture"
+"$objcopy" -O binary "$work/rv32_product_sv32_pmp.elf" "$work/rv32_product_sv32_pmp.bin"
+od -An -v -tx4 -w4 --endian=little "$work/rv32_product_sv32_pmp.bin" | tr -d ' ' >"$work/rv32_product_sv32_pmp.mem"
+ghdl -a --std=08 --workdir="$work" "$rtl/core32_protected_product.vhd"
+ghdl -a --std=08 --workdir="$work" "$rtl/rv32imac_core_product_wb.vhd"
+ghdl -a --std=08 --workdir="$work" "$testbench"
+ghdl -e --std=08 --workdir="$work" tb_rv32_product_sv32_pmp
+log="$work/sim.log"
+if ! (cd "$work" && ghdl -r --std=08 --workdir="$work" tb_rv32_product_sv32_pmp --stop-time=20us) >"$log" 2>&1; then tail -40 "$log"; exit 1; fi
+grep -q RV32_PRODUCT_SV32_PMP_GHDL_PASS "$log" || { tail -40 "$log"; exit 1; }
+digest="$(preflight_input_digest "$rtl/core32_protected_product.vhd" "$rtl/rv32imac_core_product_wb.vhd" "$testbench" "$fixture" "$runner")"
+printf 'PRODUCT_INPUT_SHA256=%s\n' "$digest" >>"$log"
+printf '%s\n' "$digest" >"$work/provenance.sha256"
+echo RV32_PRODUCT_SV32_PMP_GHDL_PASS

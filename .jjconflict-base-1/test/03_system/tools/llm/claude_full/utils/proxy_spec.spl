@@ -1,0 +1,60 @@
+"""
+# Claude Full proxy utils
+
+Pure Simple coverage for proxy env selection.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.utils.proxy.*
+
+describe "Claude full proxy utils":
+    it "prefers HTTPS lowercase then uppercase before HTTP variants":
+        step("Check proxy URL priority")
+        val env = ProxyEnv.new("https-lower", "https-upper", "http-lower", "http-upper", "", "")
+        expect(getProxyUrl(env)).to_equal(Some("https-lower"))
+
+        val fallback = ProxyEnv.new("", "https-upper", "http-lower", "http-upper", "", "")
+        expect(getProxyUrl(fallback)).to_equal(Some("https-upper"))
+
+        val httpFallback = ProxyEnv.new("", "", "http-lower", "http-upper", "", "")
+        expect(getProxyUrl(httpFallback)).to_equal(Some("http-lower"))
+
+        val upperHttp = ProxyEnv.new("", "", "", "http-upper", "", "")
+        expect(getProxyUrl(upperHttp)).to_equal(Some("http-upper"))
+
+    it "treats empty proxy env values as unset":
+        step("Check empty values")
+        val env = ProxyEnv.new("", "", "", "", "", "")
+        expect(getProxyUrl(env)).to_be_nil()
+        expect(getNoProxy(env)).to_be_nil()
+
+    it "prefers lowercase no_proxy over uppercase NO_PROXY":
+        step("Check no_proxy priority")
+        val env = ProxyEnv.new("", "", "", "", "lower", "upper")
+        expect(getNoProxy(env)).to_equal(Some("lower"))
+
+        val fallback = ProxyEnv.new("", "", "", "", "", "upper")
+        expect(getNoProxy(fallback)).to_equal(Some("upper"))
+
+    it "matches no_proxy wildcards and domain entries":
+        step("Check no_proxy matching")
+        expect(shouldBypassProxy("https://api.example.com/v1", Some("localhost,.example.com"))).to_equal(true)
+        expect(shouldBypassProxy("https://api.example.com/v1", Some("localhost .example.com"))).to_equal(true)
+        expect(shouldBypassProxy("https://api.example.com?x=1", Some("api.example.com"))).to_equal(true)
+        expect(shouldBypassProxy("https://api.example.com:8443#section", Some("api.example.com:8443"))).to_equal(true)
+        expect(shouldBypassProxy("https://example.com", Some(".example.com"))).to_equal(true)
+        expect(shouldBypassProxy("https://other.test", Some("*"))).to_equal(true)
+        expect(shouldBypassProxy("not-a-url", Some("*"))).to_equal(true)
+
+    it "matches no_proxy ports and bracketed ipv6 hosts":
+        step("Check no_proxy host and port matching")
+        expect(shouldBypassProxy("https://api.example.com:8443/v1", Some("api.example.com:8443"))).to_equal(true)
+        expect(shouldBypassProxy("https://api.example.com:8443/v1", Some("api.example.com:8080"))).to_equal(false)
+        expect(shouldBypassProxy("https://[::1]:8443/v1", Some("[::1]:8443"))).to_equal(true)
+
+    it "does not bypass when no_proxy is unset or unmatched":
+        step("Check no_proxy misses")
+        expect(shouldBypassProxy("https://api.example.com", nil)).to_equal(false)
+        expect(shouldBypassProxy("https://api.example.com", Some(""))).to_equal(false)
+        expect(shouldBypassProxy("not-a-url", Some("example.com"))).to_equal(false)
+        expect(shouldBypassProxy("https://api.example.com", Some("internal.test"))).to_equal(false)

@@ -1,0 +1,573 @@
+# @cover src/os/smf/dynsmf_session.spl 80%
+"""
+# dynSMF Session Specification
+
+## Overview
+
+Verifies selected low_dependency_ui_dynsmf session behavior for the requested
+stdlib-like dynSMF libraries. The spec covers manifest declaration, build-plan
+generation, artifact-readiness validation, argument/environment policy parsing,
+session-scoped autoload evidence, unload, stale symbol lookup, and reload
+generation changes.
+
+## Examples
+
+The default manifest declares all requested stdlib-like dynSMF ids as
+precompiled SMF artifacts and autoloads enabled entries by default. A disabled
+policy records skip evidence, and an unloaded session reports stale symbol
+evidence until the library is loaded again. Checked sessions use
+`smf_dlopen_checked`, `smf_dlsym`, and `smf_dlclose` so the evidence proves the
+dynSMF path instead of a separate fake loader. Checked load validates missing,
+short, and invalid SMF artifacts before accepting a handle.
+
+**Requirements:** doc/02_requirements/feature/low_dependency_ui_dynsmf.md
+**Requirements:** doc/02_requirements/nfr/low_dependency_ui_dynsmf.md
+**Traceability:** REQ-004, REQ-005, REQ-006, REQ-007, REQ-008, REQ-009, REQ-010, NFR-003, NFR-004, NFR-005, NFR-006
+**Plan:** doc/03_plan/sys_test/low_dependency_ui_dynsmf_dynsmf_session.md
+**Design:** doc/05_design/low_dependency_ui_dynsmf.md
+**Research:** doc/01_research/local/low_dependency_ui_dynsmf.md
+"""
+
+use std.spec
+use app.io.mod.{file_write, file_delete}
+use std.common.string_core.{char_code}
+use os.smf.dynsmf_session.{
+    DynSmfManifestEntry,
+    DynSmfArtifactStatus,
+    dynsmf_default_manifest,
+    dynsmf_manifest_all_precompiled,
+    dynsmf_artifact_status_from_bytes,
+    dynsmf_artifact_status_with_hash,
+    dynsmf_srchash_path,
+    dynsmf_source_hash_current,
+    dynsmf_abi_path,
+    dynsmf_ifacehash_path,
+    dynsmf_interface_hash_current,
+    dynsmf_interface_fingerprint,
+    dynsmf_build_plans,
+    dynsmf_build_plans_ready,
+    dynsmf_policy_default,
+    dynsmf_policy_from_args_env,
+    dynsmf_session_new,
+    dynsmf_session_request_background_compiles_from_statuses,
+    dynsmf_session_autoload,
+    dynsmf_session_load_checked,
+    dynsmf_session_symbol,
+    dynsmf_session_record_symbol,
+    dynsmf_session_unload,
+    dynsmf_id_disabled
+}
+
+# Test-only helpers for the stub-artifact honesty (export-witness) check.
+# These are NOT part of the production reader (smf_artifact_has_export in
+# src/os/smf/smf_dynlib.spl) — they exist only so the pre-existing abi/
+# interface-hash sidecar specs below (which are not about proving the
+# export-witness gate itself) can clear the new gate. The dedicated proof of
+# the gate, further down, uses a hand-written literal byte array instead of
+# these helpers for its one positive case (false-green guard).
+fn spec_stub_honesty_padded_bytes() -> [u8]:
+    """Magic + zero padding well past the known 219-byte stub size and with
+    no export names present — clears the unconditional size floor for
+    exports:[] fixtures (dynsmf_artifact_size_exceeds_stub_floor)."""
+    var data: [u8] = [83, 77, 70, 0]
+    var i = 0
+    while i < 250:
+        data.push(0)
+        i = i + 1
+    data
+
+fn spec_stub_honesty_witness_bytes(exports: [text]) -> [u8]:
+    """Magic + zero padding past the known stub size, followed by each
+    export name written as a null-terminated ASCII run — the real SMF
+    string-table convention (src/compiler/70.backend/linker/smf_reader.spl
+    read_string_from_table) that smf_artifact_has_export scans for. Used so
+    pre-existing abi/hash specs can clear the export-witness gate without
+    hand-typing long export names such as 'format_new_diagnostics_block'."""
+    var data: [u8] = [83, 77, 70, 0]
+    var i = 0
+    while i < 250:
+        data.push(0)
+        i = i + 1
+    var j = 0
+    while j < exports.len():
+        val name = exports[j]
+        var k = 0
+        while k < name.len():
+            data.push(char_code(name.char_at(k)) as u8)
+            k = k + 1
+        data.push(0)
+        j = j + 1
+    data
+
+describe "dynSMF manifest":
+    it "declares all requested stdlib-like library ids":
+        val manifest = dynsmf_default_manifest()
+        expect(manifest[0].id).to_equal("file_io")
+        expect(manifest[1].id).to_equal("net_io")
+        expect(manifest[2].id).to_equal("render2d")
+        expect(manifest[3].id).to_equal("web_renderer")
+        expect(manifest[4].id).to_equal("gui_renderer")
+        expect(manifest[5].id).to_equal("tui_renderer")
+        expect(manifest[6].id).to_equal("ui_html")
+        expect(manifest[7].id).to_equal("mcp_diag_tools")
+        expect(manifest[8].id).to_equal("fmt_tool")
+        expect(manifest[9].id).to_equal("lint_tool")
+        expect(manifest[10].id).to_equal("fix_tool")
+        expect(manifest[11].id).to_equal("todo_scan")
+        expect(manifest.len()).to_equal(12)
+        expect(dynsmf_manifest_all_precompiled(manifest)).to_equal(true)
+        expect(manifest[0].artifact_kind).to_equal("precompiled_smf")
+        expect(manifest[0].default_autoload).to_equal(true)
+        expect(manifest[5].default_autoload).to_equal(true)
+        expect(manifest[6].default_autoload).to_equal(true)
+
+    it "gates the 5 new toolchain entries out of default autoload (on-demand only)":
+        val manifest = dynsmf_default_manifest()
+        expect(manifest[7].default_autoload).to_equal(false)
+        expect(manifest[8].default_autoload).to_equal(false)
+        expect(manifest[9].default_autoload).to_equal(false)
+        expect(manifest[10].default_autoload).to_equal(false)
+        expect(manifest[11].default_autoload).to_equal(false)
+        expect(manifest[7].artifact_kind).to_equal("precompiled_smf")
+        expect(manifest[7].abi_version).to_equal("1")
+
+    it "creates deterministic compile plans for all precompiled artifacts":
+        val manifest = dynsmf_default_manifest()
+        val plans = dynsmf_build_plans(manifest)
+        expect(plans.len()).to_equal(12)
+        expect(dynsmf_build_plans_ready(plans)).to_equal(true)
+        expect(plans[0].source_path).to_equal("src/lib/nogc_sync_mut/io/file.spl")
+        expect(plans[0].command).to_equal("bin/simple compile src/lib/nogc_sync_mut/io/file.spl -o build/dynsmf/file_io.smf")
+        expect(plans[2].source_path).to_equal("src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl")
+        expect(plans[3].source_path).to_equal("src/app/ui.render/html_widgets.spl")
+        expect(plans[5].output_path).to_equal("build/dynsmf/tui_renderer.smf")
+        expect(plans[6].source_path).to_equal("src/lib/common/ui/html_ui/dynsmf_entry.spl")
+        expect(plans[6].output_path).to_equal("build/dynsmf/ui_html.smf")
+
+    it "creates ready build plans for the 5 new on-demand toolchain entries":
+        val manifest = dynsmf_default_manifest()
+        val plans = dynsmf_build_plans(manifest)
+        expect(plans[7].library_id).to_equal("mcp_diag_tools")
+        expect(plans[7].source_path).to_equal("src/app/mcp/main_lazy_diag_tools.spl")
+        expect(plans[7].output_path).to_equal("build/dynsmf/mcp_diag_tools.smf")
+        expect(plans[7].status).to_equal("ready")
+        expect(plans[8].library_id).to_equal("fmt_tool")
+        expect(plans[8].source_path).to_equal("src/compiler/90.tools/formatter/main.spl")
+        expect(plans[8].command).to_equal("bin/simple compile src/compiler/90.tools/formatter/main.spl -o build/dynsmf/fmt_tool.smf")
+        expect(plans[8].status).to_equal("ready")
+        expect(plans[9].library_id).to_equal("lint_tool")
+        expect(plans[9].source_path).to_equal("src/compiler/90.tools/lint/main.spl")
+        expect(plans[9].output_path).to_equal("build/dynsmf/lint_tool.smf")
+        expect(plans[9].status).to_equal("ready")
+        expect(plans[10].library_id).to_equal("fix_tool")
+        expect(plans[10].source_path).to_equal("src/compiler/90.tools/fix/main.spl")
+        expect(plans[10].output_path).to_equal("build/dynsmf/fix_tool.smf")
+        expect(plans[10].status).to_equal("ready")
+        expect(plans[11].library_id).to_equal("todo_scan")
+        expect(plans[11].source_path).to_equal("src/app/todo_scan/main.spl")
+        expect(plans[11].command).to_equal("bin/simple compile src/app/todo_scan/main.spl -o build/dynsmf/todo_scan.smf")
+        expect(plans[11].status).to_equal("ready")
+
+    it "records general background compile evidence for non-gui and gui artifacts":
+        val manifest = [
+            DynSmfManifestEntry(id: "file_io", path: "build/dynsmf/bg_file_io_missing.smf", source_module: "std.io", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["open"]),
+            DynSmfManifestEntry(id: "net_io", path: "build/dynsmf/bg_net_io_missing.smf", source_module: "std.net", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["connect"]),
+            DynSmfManifestEntry(id: "bad", path: "build/dynsmf/bg_bad.smf", source_module: "std.bad", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: []),
+            DynSmfManifestEntry(id: "gui_renderer", path: "build/dynsmf/bg_gui_renderer_missing.smf", source_module: "app.ui.web.backend", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["render_gui"]),
+            DynSmfManifestEntry(id: "render2d", path: "build/dynsmf/bg_render2d_ready.smf", source_module: "std.render2d", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["draw"])
+        ]
+        val statuses = [
+            DynSmfArtifactStatus(library_id: "file_io", path: "build/dynsmf/bg_file_io_missing.smf", ready: false, reason: "missing_file", byte_count: 0, magic_hex: "short"),
+            DynSmfArtifactStatus(library_id: "net_io", path: "build/dynsmf/bg_net_io_missing.smf", ready: false, reason: "missing_file", byte_count: 0, magic_hex: "short"),
+            DynSmfArtifactStatus(library_id: "bad", path: "build/dynsmf/bg_bad.smf", ready: false, reason: "missing_file", byte_count: 0, magic_hex: "short"),
+            DynSmfArtifactStatus(library_id: "gui_renderer", path: "build/dynsmf/bg_gui_renderer_missing.smf", ready: false, reason: "missing_file", byte_count: 0, magic_hex: "short"),
+            DynSmfArtifactStatus(library_id: "render2d", path: "build/dynsmf/bg_render2d_ready.smf", ready: true, reason: "smf_artifact_ready", byte_count: 8, magic_hex: "534d4600")
+        ]
+        val policy = dynsmf_policy_from_args_env(["--disable-dynsmf=net_io"], "", "")
+        val session = dynsmf_session_request_background_compiles_from_statuses(dynsmf_session_new("background", policy), manifest, statuses, true, true)
+        expect(session.evidence.len()).to_equal(5)
+        expect(session.evidence[0].library_id).to_equal("file_io")
+        expect(session.evidence[0].action).to_equal("compile_background")
+        expect(session.evidence[0].status).to_equal("queued")
+        expect(session.evidence[0].reason).to_contain("bin/simple compile src/lib/nogc_sync_mut/io/file.spl")
+        expect(session.evidence[1].library_id).to_equal("net_io")
+        expect(session.evidence[1].status).to_equal("skipped")
+        expect(session.evidence[1].reason).to_equal("disabled")
+        expect(session.evidence[2].library_id).to_equal("bad")
+        expect(session.evidence[2].status).to_equal("failed")
+        expect(session.evidence[2].reason).to_equal("invalid_unknown_source")
+        expect(session.evidence[3].library_id).to_equal("gui_renderer")
+        expect(session.evidence[3].status).to_equal("queued")
+        expect(session.evidence[3].reason).to_contain("src/app/ui.web/backend.spl")
+        expect(session.evidence[4].library_id).to_equal("render2d")
+        expect(session.evidence[4].status).to_equal("skipped")
+        expect(session.evidence[4].reason).to_equal("artifact_ready")
+
+    it "validates precompiled SMF artifact bytes without filesystem dependency":
+        val entry = dynsmf_default_manifest()[0]
+        val ready = dynsmf_artifact_status_from_bytes(entry, true, [83, 77, 70, 0, 1, 2])
+        expect(ready.ready).to_equal(true)
+        expect(ready.reason).to_equal("smf_artifact_ready")
+        expect(ready.byte_count).to_equal(6)
+        expect(ready.magic_hex).to_equal("534d4600")
+
+        val short = dynsmf_artifact_status_from_bytes(entry, true, [83, 77, 70])
+        expect(short.ready).to_equal(false)
+        expect(short.reason).to_equal("too_short")
+
+        val invalid = dynsmf_artifact_status_from_bytes(entry, true, [0, 77, 70, 0])
+        expect(invalid.ready).to_equal(false)
+        expect(invalid.reason).to_equal("invalid_magic")
+
+    it "reports non-precompiled or missing artifacts as not ready":
+        val base = dynsmf_default_manifest()[0]
+        val wrong_kind = DynSmfManifestEntry(id: "bad", path: "build/dynsmf/bad.smf", source_module: "std.bad", artifact_kind: "source", abi_version: "1", default_autoload: true, exports: [])
+        val not_precompiled = dynsmf_artifact_status_from_bytes(wrong_kind, true, [83, 77, 70, 0])
+        expect(not_precompiled.ready).to_equal(false)
+        expect(not_precompiled.reason).to_equal("not_precompiled_smf")
+
+        val missing_path = DynSmfManifestEntry(id: base.id, path: "", source_module: base.source_module, artifact_kind: base.artifact_kind, abi_version: base.abi_version, default_autoload: base.default_autoload, exports: base.exports)
+        val path_status = dynsmf_artifact_status_from_bytes(missing_path, true, [83, 77, 70, 0])
+        expect(path_status.ready).to_equal(false)
+        expect(path_status.reason).to_equal("missing_path")
+
+        val missing_file = dynsmf_artifact_status_from_bytes(base, false, [])
+        expect(missing_file.ready).to_equal(false)
+        expect(missing_file.reason).to_equal("missing_file")
+
+describe "dynSMF policy":
+    it "supports skip all from args":
+        val policy = dynsmf_policy_from_args_env(["--no-dynsmf"], "", "")
+        expect(policy.disabled_all).to_equal(true)
+        expect(policy.source).to_equal("arg:--no-dynsmf")
+
+    it "supports skip all from env":
+        val policy = dynsmf_policy_from_args_env([], "0", "")
+        expect(policy.disabled_all).to_equal(true)
+        expect(policy.source).to_equal("env:SIMPLE_DYNSMF")
+
+    it "supports per-id disable from args":
+        val policy = dynsmf_policy_from_args_env(["--disable-dynsmf=web_renderer,tui_renderer"], "", "")
+        expect(dynsmf_id_disabled(policy, "web_renderer")).to_equal(true)
+        expect(dynsmf_id_disabled(policy, "tui_renderer")).to_equal(true)
+        expect(dynsmf_id_disabled(policy, "net_io")).to_equal(false)
+        expect(policy.source).to_equal("arg:--disable-dynsmf")
+
+    it "supports per-id disable from env":
+        val policy = dynsmf_policy_from_args_env([], "", "web_renderer,tui_renderer")
+        expect(dynsmf_id_disabled(policy, "web_renderer")).to_equal(true)
+        expect(dynsmf_id_disabled(policy, "tui_renderer")).to_equal(true)
+        expect(dynsmf_id_disabled(policy, "file_io")).to_equal(false)
+        expect(policy.source).to_equal("env:SIMPLE_DYNSMF_DISABLE")
+
+describe "dynSMF session lifecycle":
+    it "autoloads tui_renderer and records evidence":
+        val manifest = dynsmf_default_manifest()
+        val session = dynsmf_session_autoload(dynsmf_session_new("test", dynsmf_policy_default()), manifest)
+        expect(session.loaded.len()).to_equal(7)
+        expect(session.loaded[0].id).to_equal("file_io")
+        expect(session.loaded[5].id).to_equal("tui_renderer")
+        expect(session.loaded[6].id).to_equal("ui_html")
+        expect(session.evidence[0].action).to_equal("load")
+        expect(session.evidence[0].status).to_equal("loaded")
+        expect(session.evidence[0].reason).to_equal("smf_dlopen")
+        expect(session.evidence[0].to_text()).to_contain("default:loaded")
+
+    it "records skip evidence when tui_renderer is disabled while loading other defaults":
+        val manifest = dynsmf_default_manifest()
+        val policy = dynsmf_policy_from_args_env(["--disable-dynsmf=tui_renderer"], "", "")
+        val session = dynsmf_session_autoload(dynsmf_session_new("test", policy), manifest)
+        expect(session.loaded.len()).to_equal(6)
+        expect(session.loaded[0].id).to_equal("file_io")
+        expect(session.evidence[5].library_id).to_equal("tui_renderer")
+        expect(session.evidence[5].action).to_equal("skip")
+        expect(session.evidence[5].reason).to_equal("disabled")
+        expect(session.evidence[6].library_id).to_equal("ui_html")
+        expect(session.evidence[6].action).to_equal("load")
+
+    it "records skip evidence for every default when all dynSMF loading is disabled":
+        val manifest = dynsmf_default_manifest()
+        val policy = dynsmf_policy_from_args_env(["--no-dynsmf"], "", "")
+        val session = dynsmf_session_autoload(dynsmf_session_new("test", policy), manifest)
+        expect(session.loaded.len()).to_equal(0)
+        expect(session.evidence.len()).to_equal(7)
+        expect(session.evidence[0].action).to_equal("skip")
+        expect(session.evidence[5].library_id).to_equal("tui_renderer")
+        expect(session.evidence[5].policy_source).to_equal("arg:--no-dynsmf")
+        expect(session.evidence[6].library_id).to_equal("ui_html")
+        expect(session.evidence[6].action).to_equal("skip")
+
+    it "checked loading fails before dlopen when the artifact file is missing":
+        val manifest = [
+            DynSmfManifestEntry(id: "missing", path: "build/dynsmf/does_not_exist_for_dynsmf_session_spec.smf", source_module: "std.missing", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: true, exports: ["open"])
+        ]
+        val session = dynsmf_session_load_checked(dynsmf_session_new("checked", dynsmf_policy_default()), manifest, "missing")
+        expect(session.loaded.len()).to_equal(0)
+        expect(session.evidence.len()).to_equal(1)
+        expect(session.evidence[0].status).to_equal("failed")
+        expect(session.evidence[0].reason).to_equal("artifact_missing_file")
+
+    it "can append symbol and stale lookups to session evidence":
+        val manifest = dynsmf_default_manifest()
+        val loaded = dynsmf_session_autoload(dynsmf_session_new("test", dynsmf_policy_default()), manifest)
+        val with_symbol = dynsmf_session_record_symbol(loaded, "tui_renderer", "render_tui_tree")
+        expect(with_symbol.evidence.len()).to_equal(8)
+        expect(with_symbol.evidence[7].action).to_equal("symbol")
+        expect(with_symbol.evidence[7].status).to_equal("ok")
+        expect(with_symbol.evidence[7].reason).to_equal("render_tui_tree@1")
+        val unloaded = dynsmf_session_unload(with_symbol, "tui_renderer")
+        val with_stale = dynsmf_session_record_symbol(unloaded, "tui_renderer", "render_tui_tree")
+        expect(with_stale.evidence[9].action).to_equal("symbol")
+        expect(with_stale.evidence[9].status).to_equal("stale")
+        expect(with_stale.evidence[9].reason).to_equal("unloaded")
+
+    it "unloads, reports stale symbol lookup, and reloads with fresh generation":
+        val manifest = dynsmf_default_manifest()
+        val loaded = dynsmf_session_autoload(dynsmf_session_new("test", dynsmf_policy_default()), manifest)
+        val symbol_before = dynsmf_session_symbol(loaded, "tui_renderer", "render_tui_tree")
+        expect(symbol_before.status).to_equal("ok")
+        expect(symbol_before.reason).to_equal("render_tui_tree@1")
+        val missing_symbol = dynsmf_session_symbol(loaded, "tui_renderer", "missing_symbol")
+        expect(missing_symbol.status).to_equal("missing")
+        val unloaded = dynsmf_session_unload(loaded, "tui_renderer")
+        expect(unloaded.evidence[7].reason).to_equal("smf_dlclose")
+        val stale = dynsmf_session_symbol(unloaded, "tui_renderer", "render_tui_tree")
+        expect(stale.status).to_equal("stale")
+        val reloaded = dynsmf_session_autoload(unloaded, manifest)
+        val symbol_after = dynsmf_session_symbol(reloaded, "tui_renderer", "render_tui_tree")
+        expect(symbol_after.status).to_equal("ok")
+        expect(symbol_after.generation).to_be_greater_than(symbol_before.generation)
+        expect(reloaded.evidence[8].action).to_equal("reload")
+
+describe "dynSMF interface fingerprint (heuristic exported-line hash input)":
+    it "extracts only exported-signature lines and drops private helpers":
+        val source_text = "fn helper() -> i64:\n    1\n\npub fn demo() -> i64:\n    2\n\nexport demo\n"
+        val fingerprint = dynsmf_interface_fingerprint(source_text)
+        expect(fingerprint).to_contain("pub fn demo() -> i64:")
+        expect(fingerprint).to_contain("export demo")
+        expect(fingerprint).to_not_contain("fn helper")
+
+    it "produces an unchanged fingerprint when only a private helper body changes":
+        val before = "pub fn demo() -> i64:\n    1\n\nfn helper() -> i64:\n    1\n"
+        val after = "pub fn demo() -> i64:\n    1\n\nfn helper() -> i64:\n    2\n"
+        expect(dynsmf_interface_fingerprint(before)).to_equal(dynsmf_interface_fingerprint(after))
+
+    it "produces a changed fingerprint when an exported signature changes":
+        val before = "pub fn demo() -> i64:\n    1\n"
+        val after = "pub fn demo(extra: i64) -> i64:\n    1\n"
+        expect(dynsmf_interface_fingerprint(before)).to_not_equal(dynsmf_interface_fingerprint(after))
+
+describe "dynSMF abi_version + interface-hash hardening (fail-closed sidecars)":
+    it "flags a missing abi sidecar as abi_mismatch (deliberate-red: fail-closed, never mask)":
+        val artifact_path = "build/dynsmf/_ifacehardening_spec_missing_abi.smf"
+        val source_path = "build/dynsmf/_ifacehardening_spec_missing_abi_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_srchash_path(artifact_path), dynsmf_source_hash_current(source_path).to_text())
+        file_write(dynsmf_ifacehash_path(artifact_path), dynsmf_interface_hash_current(source_path).to_text())
+        # Deliberately do NOT write an `.abi` sidecar.
+        val entry = DynSmfManifestEntry(id: "spec_missing_abi", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_padded_bytes(), source_path)
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("abi_mismatch")
+        file_delete(source_path)
+        file_delete(dynsmf_srchash_path(artifact_path))
+        file_delete(dynsmf_ifacehash_path(artifact_path))
+
+    it "flags a wrong abi sidecar as abi_mismatch and never treats the artifact as loadable (deliberate-red)":
+        val artifact_path = "build/dynsmf/_ifacehardening_spec_wrong_abi.smf"
+        val source_path = "build/dynsmf/_ifacehardening_spec_wrong_abi_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_srchash_path(artifact_path), dynsmf_source_hash_current(source_path).to_text())
+        file_write(dynsmf_ifacehash_path(artifact_path), dynsmf_interface_hash_current(source_path).to_text())
+        file_write(dynsmf_abi_path(artifact_path), "999")
+        val entry = DynSmfManifestEntry(id: "spec_wrong_abi", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_padded_bytes(), source_path)
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("abi_mismatch")
+        file_delete(source_path)
+        file_delete(dynsmf_srchash_path(artifact_path))
+        file_delete(dynsmf_ifacehash_path(artifact_path))
+        file_delete(dynsmf_abi_path(artifact_path))
+
+    it "reports the artifact ready when abi and srchash sidecars both match current source":
+        val artifact_path = "build/dynsmf/_ifacehardening_spec_fresh.smf"
+        val source_path = "build/dynsmf/_ifacehardening_spec_fresh_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_abi_path(artifact_path), "1")
+        file_write(dynsmf_srchash_path(artifact_path), dynsmf_source_hash_current(source_path).to_text())
+        val entry = DynSmfManifestEntry(id: "spec_fresh", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_padded_bytes(), source_path)
+        expect(status.ready).to_equal(true)
+        expect(status.reason).to_equal("smf_artifact_ready")
+        file_delete(source_path)
+        file_delete(dynsmf_abi_path(artifact_path))
+        file_delete(dynsmf_srchash_path(artifact_path))
+
+    it "reports stale_impl when srchash is stale but the interface hash is unchanged (module-only rebuild)":
+        val artifact_path = "build/dynsmf/_ifacehardening_spec_stale_impl.smf"
+        val source_path = "build/dynsmf/_ifacehardening_spec_stale_impl_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_abi_path(artifact_path), "1")
+        # srchash sidecar deliberately stale (does not match current whole-file hash).
+        file_write(dynsmf_srchash_path(artifact_path), "1")
+        # ifacehash sidecar matches the CURRENT exported-interface fingerprint (signature unchanged).
+        file_write(dynsmf_ifacehash_path(artifact_path), dynsmf_interface_hash_current(source_path).to_text())
+        val entry = DynSmfManifestEntry(id: "spec_stale_impl", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_padded_bytes(), source_path)
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("stale_impl")
+        file_delete(source_path)
+        file_delete(dynsmf_abi_path(artifact_path))
+        file_delete(dynsmf_srchash_path(artifact_path))
+        file_delete(dynsmf_ifacehash_path(artifact_path))
+
+    it "reports stale_interface when both srchash and the interface hash are stale (dependents need a rebuild)":
+        val artifact_path = "build/dynsmf/_ifacehardening_spec_stale_interface.smf"
+        val source_path = "build/dynsmf/_ifacehardening_spec_stale_interface_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_abi_path(artifact_path), "1")
+        file_write(dynsmf_srchash_path(artifact_path), "1")
+        file_write(dynsmf_ifacehash_path(artifact_path), "1")
+        val entry = DynSmfManifestEntry(id: "spec_stale_interface", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_padded_bytes(), source_path)
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("stale_interface")
+        file_delete(source_path)
+        file_delete(dynsmf_abi_path(artifact_path))
+        file_delete(dynsmf_srchash_path(artifact_path))
+        file_delete(dynsmf_ifacehash_path(artifact_path))
+
+    it "falls back to stale_source when the ifacehash sidecar is absent (legacy artifact, cannot distinguish)":
+        val artifact_path = "build/dynsmf/_ifacehardening_spec_missing_ifacehash.smf"
+        val source_path = "build/dynsmf/_ifacehardening_spec_missing_ifacehash_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_abi_path(artifact_path), "1")
+        file_write(dynsmf_srchash_path(artifact_path), "1")
+        # Deliberately no `.ifacehash` sidecar written.
+        val entry = DynSmfManifestEntry(id: "spec_missing_ifacehash", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_padded_bytes(), source_path)
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("stale_source")
+        file_delete(source_path)
+        file_delete(dynsmf_abi_path(artifact_path))
+        file_delete(dynsmf_srchash_path(artifact_path))
+
+describe "dynSMF toolchain entries — fresh-sidecar status transitions (on-demand, default_autoload:false)":
+    it "reports each new toolchain entry ready when abi and srchash sidecars match current source":
+        val manifest = dynsmf_default_manifest()
+        val plans = dynsmf_build_plans(manifest)
+        var idx = 7
+        while idx < 12:
+            val entry = manifest[idx]
+            val source_path = plans[idx].source_path
+            file_write(dynsmf_abi_path(entry.path), entry.abi_version)
+            file_write(dynsmf_srchash_path(entry.path), dynsmf_source_hash_current(source_path).to_text())
+            val data = if entry.exports.len() == 0: spec_stub_honesty_padded_bytes() else: spec_stub_honesty_witness_bytes(entry.exports)
+            val status = dynsmf_artifact_status_with_hash(entry, true, data, source_path)
+            expect(status.ready).to_equal(true)
+            expect(status.reason).to_equal("smf_artifact_ready")
+            file_delete(dynsmf_abi_path(entry.path))
+            file_delete(dynsmf_srchash_path(entry.path))
+            idx = idx + 1
+
+    it "flags a missing abi sidecar as abi_mismatch for a new toolchain entry too (fail-closed applies uniformly)":
+        val manifest = dynsmf_default_manifest()
+        val plans = dynsmf_build_plans(manifest)
+        val entry = manifest[11]
+        val source_path = plans[11].source_path
+        expect(entry.id).to_equal("todo_scan")
+        file_write(dynsmf_srchash_path(entry.path), dynsmf_source_hash_current(source_path).to_text())
+        # Deliberately do NOT write an `.abi` sidecar.
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_witness_bytes(entry.exports), source_path)
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("abi_mismatch")
+        file_delete(dynsmf_srchash_path(entry.path))
+
+describe "dynSMF stub-artifact honesty (export-witness check, doc/08_tracking/bug/seed_compile_smf_stub_fail_open_2026-07-17.md)":
+    it "reports stub_artifact for a stub-sized (219-byte) artifact with NO witnessed exports, even with fresh abi/srchash/ifacehash sidecars (deliberate-red: byte-for-byte length of today's real hollow stub)":
+        val artifact_path = "build/dynsmf/_stubhonesty_spec_stub_sized.smf"
+        val source_path = "build/dynsmf/_stubhonesty_spec_stub_sized_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_abi_path(artifact_path), "1")
+        file_write(dynsmf_srchash_path(artifact_path), dynsmf_source_hash_current(source_path).to_text())
+        file_write(dynsmf_ifacehash_path(artifact_path), dynsmf_interface_hash_current(source_path).to_text())
+        val entry = DynSmfManifestEntry(id: "spec_stub_sized", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: ["open", "close"])
+        # Hand-written literal bytes: magic + zero padding to exactly 219
+        # bytes (the known real stub size) — no "open"/"close" names present,
+        # matching the actual build/dynsmf/*.smf stubs on disk today.
+        val data = [83, 77, 70, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0]
+        expect(data.len()).to_equal(219)
+        val status = dynsmf_artifact_status_with_hash(entry, true, data, source_path)
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("stub_artifact")
+        file_delete(source_path)
+        file_delete(dynsmf_abi_path(artifact_path))
+        file_delete(dynsmf_srchash_path(artifact_path))
+        file_delete(dynsmf_ifacehash_path(artifact_path))
+
+    it "reports stub_artifact when the payload exceeds the stub size but lacks the required export names (padding alone does not satisfy the witness)":
+        val artifact_path = "build/dynsmf/_stubhonesty_spec_padding_only.smf"
+        val entry = DynSmfManifestEntry(id: "spec_padding_only", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: ["open", "close"])
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_padded_bytes(), "")
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("stub_artifact")
+
+    it "passes the export-witness check when the payload exceeds the stub size AND the artifact's own bytes carry the required export names":
+        val artifact_path = "build/dynsmf/_stubhonesty_spec_with_witness.smf"
+        val source_path = "build/dynsmf/_stubhonesty_spec_with_witness_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_abi_path(artifact_path), "1")
+        file_write(dynsmf_srchash_path(artifact_path), dynsmf_source_hash_current(source_path).to_text())
+        val entry = DynSmfManifestEntry(id: "spec_with_witness", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: ["open", "close"])
+        # Hand-written literal bytes, constructed independently of the
+        # checker's own parsing code (smf_artifact_has_export in
+        # src/os/smf/smf_dynlib.spl) — NOT produced via
+        # spec_stub_honesty_witness_bytes. magic(4) + 220 zero-padding bytes
+        # (> the 219-byte stub floor) + "open\0" + "close\0" (null-terminated
+        # ASCII, the real SMF string-table convention):
+        val data = [83, 77, 70, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            111, 112, 101, 110, 0, 99, 108, 111, 115, 101, 0]
+        expect(data.len()).to_equal(235)
+        val status = dynsmf_artifact_status_with_hash(entry, true, data, source_path)
+        expect(status.ready).to_equal(true)
+        expect(status.reason).to_equal("smf_artifact_ready")
+        file_delete(source_path)
+        file_delete(dynsmf_abi_path(artifact_path))
+        file_delete(dynsmf_srchash_path(artifact_path))
+
+    it "reports stub_artifact for an empty-exports entry whose payload does not exceed the known stub size (honesty floor)":
+        val artifact_path = "build/dynsmf/_stubhonesty_spec_empty_exports_small.smf"
+        val entry = DynSmfManifestEntry(id: "spec_empty_exports_small", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val status = dynsmf_artifact_status_with_hash(entry, true, [83, 77, 70, 0], "")
+        expect(status.ready).to_equal(false)
+        expect(status.reason).to_equal("stub_artifact")
+
+    it "passes the honesty floor for an empty-exports entry whose payload exceeds the known 219-byte stub size":
+        val artifact_path = "build/dynsmf/_stubhonesty_spec_empty_exports_large.smf"
+        val source_path = "build/dynsmf/_stubhonesty_spec_empty_exports_large_src.spl"
+        file_write(source_path, "pub fn demo() -> i64:\n    1\n")
+        file_write(dynsmf_abi_path(artifact_path), "1")
+        file_write(dynsmf_srchash_path(artifact_path), dynsmf_source_hash_current(source_path).to_text())
+        val entry = DynSmfManifestEntry(id: "spec_empty_exports_large", path: artifact_path, source_module: "test.mod", artifact_kind: "precompiled_smf", abi_version: "1", default_autoload: false, exports: [])
+        val status = dynsmf_artifact_status_with_hash(entry, true, spec_stub_honesty_padded_bytes(), source_path)
+        expect(status.ready).to_equal(true)
+        expect(status.reason).to_equal("smf_artifact_ready")
+        file_delete(source_path)
+        file_delete(dynsmf_abi_path(artifact_path))
+        file_delete(dynsmf_srchash_path(artifact_path))

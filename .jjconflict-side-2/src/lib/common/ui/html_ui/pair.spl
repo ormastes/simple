@@ -1,0 +1,149 @@
+# HtmlCssPair — tracks an HTML file and its associated CSS stylesheets.
+#
+# This module is pure (core-lib tier): the struct plus text-only scanning /
+# rewriting helpers. All file I/O (loading, injecting a <link>, and saving
+# back to disk) lives in the impure sibling module
+# std.nogc_sync_mut.ui.html_ui.pair_io, which imports the helpers below to
+# do the actual text transforms. Keep it that way — do not reintroduce
+# std.io_runtime or any filesystem-touching import or extern call here.
+#
+# Arrays are VALUE TYPES in Simple — all mutation returns a new struct.
+
+struct HtmlCssPair:
+    html_path: text
+    css_paths: [text]
+
+# ============================================================================
+# Pure helpers (used directly by pair_io.spl's I/O functions)
+# ============================================================================
+
+# Scan HTML text for <link rel="stylesheet" href="..."> and collect hrefs.
+# Resolves relative paths against the directory of html_path.
+fn _discover_css(html_path: text, content: text) -> [text]:
+    val dir = _dir_of(html_path)
+    var css: [text] = []
+    var pos = 0
+    while pos < content.len():
+        val link_pos = _index_of(content, "<link", pos)
+        if link_pos < 0:
+            pos = content.len()
+        else:
+            val tag_end = _index_of(content, ">", link_pos)
+            if tag_end < 0:
+                pos = content.len()
+            else:
+                val tag_text = content.slice(link_pos, tag_end + 1)
+                if _has_attr(tag_text, "rel", "stylesheet"):
+                    val href = _attr_value(tag_text, "href")
+                    if href.len() > 0:
+                        val resolved = _resolve_path(dir, href)
+                        css = css + [resolved]
+                pos = tag_end + 1
+    css
+
+# Inject a <link rel="stylesheet" href="css_path"> before </head> or at end.
+fn _inject_link(html: text, css_path: text) -> text:
+    val tag = "<link rel=" + "\"" + "stylesheet" + "\"" + " href=" + "\"" + css_path + "\">"
+    val head_close = _index_of(html, "</head>", 0)
+    if head_close >= 0:
+        html.slice(0, head_close) + tag + "\n" + html.slice(head_close, html.len())
+    else:
+        html + "\n" + tag
+
+# Remove all <link rel="stylesheet" ...> tags from HTML text.
+fn _strip_links(html: text) -> text:
+    var result = ""
+    var pos = 0
+    while pos < html.len():
+        val link_pos = _index_of(html, "<link", pos)
+        if link_pos < 0:
+            result = result + html.slice(pos, html.len())
+            pos = html.len()
+        else:
+            val tag_end = _index_of(html, ">", link_pos)
+            if tag_end < 0:
+                result = result + html.slice(pos, html.len())
+                pos = html.len()
+            else:
+                val tag_text = html.slice(link_pos, tag_end + 1)
+                if _has_attr(tag_text, "rel", "stylesheet"):
+                    result = result + html.slice(pos, link_pos)
+                    pos = tag_end + 1
+                else:
+                    result = result + html.slice(pos, tag_end + 1)
+                    pos = tag_end + 1
+    result
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+# Return directory part of a path (everything before last '/').
+fn _dir_of(path: text) -> text:
+    var last = -1
+    var i = 0
+    while i < path.len():
+        if path.char_at(i) == "/":
+            last = i
+        i = i + 1
+    if last < 0:
+        "."
+    else:
+        path.slice(0, last)
+
+# Resolve href relative to dir. Absolute hrefs (start with /) or URLs are
+# returned as-is.
+fn _resolve_path(dir: text, href: text) -> text:
+    if href.starts_with("/") or href.starts_with("http://") or href.starts_with("https://"):
+        href
+    else if dir == ".":
+        href
+    else:
+        dir + "/" + href
+
+# Return the value of an attribute by name from a tag fragment, or "".
+fn _attr_value(tag_text: text, attr_name: text) -> text:
+    val needle = attr_name + "="
+    val pos = _index_of(tag_text, needle, 0)
+    if pos < 0:
+        return ""
+    val after = pos + needle.len()
+    if after >= tag_text.len():
+        return ""
+    val quote = tag_text.char_at(after)
+    if quote == "\"" or quote == "'":
+        val close = _index_of(tag_text, quote, after + 1)
+        if close < 0:
+            return ""
+        return tag_text.slice(after + 1, close)
+    # unquoted value — read until space or >
+    var end = after
+    while end < tag_text.len():
+        val c = tag_text.char_at(end)
+        if c == " " or c == ">" or c == "/":
+            return tag_text.slice(after, end)
+        end = end + 1
+    tag_text.slice(after, end)
+
+# Check that a tag fragment has attr=value (case-insensitive for rel).
+fn _has_attr(tag_text: text, attr_name: text, attr_value: text) -> bool:
+    val v = _attr_value(tag_text, attr_name)
+    v == attr_value
+
+# Find needle in haystack starting from start_pos. Returns -1 if not found.
+fn _index_of(haystack: text, needle: text, start_pos: i64) -> i64:
+    val hlen = haystack.len()
+    val nlen = needle.len()
+    if nlen == 0:
+        return start_pos
+    var i = start_pos
+    while i <= hlen - nlen:
+        if haystack.slice(i, i + nlen) == needle:
+            return i
+        i = i + 1
+    -1
+
+export HtmlCssPair
+export _discover_css
+export _inject_link
+export _strip_links

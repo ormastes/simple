@@ -1,0 +1,179 @@
+# Inventory Classifier
+#
+# Five-category module classifier for src/lib .spl files.
+# Uses first-match-wins priority ordering per D-3:
+#   1. hw-hook: @address, @volatile, rt_volatile_*, rt_dma_*
+#   2. shell-backed: /bin/sh, Command::new("sh")
+#   3. sffi-wrapper: *_sffi.spl filename or feature_registry
+#   4. c-wrapper: any extern fn declaration
+#   5. pure-simple: everything else (default)
+#
+# @tag:api
+
+use app.io (file_read, file_exists, file_write, dir_list, is_dir)
+
+# ============================================================================
+# Provider Type Enum
+# ============================================================================
+
+enum ProviderType:
+    PureSimple
+    CWrapper
+    SffiWrapper
+    ShellBacked
+    HwHook
+
+# ============================================================================
+# Classification Result
+# ============================================================================
+
+struct ClassifyResult:
+    path: text
+    provider: ProviderType
+
+# ============================================================================
+# Content-Based Predicates
+# ============================================================================
+
+fn is_hw_hook_content(content: text) -> bool:
+    if content.contains("@address"):
+        return true
+    if content.contains("@volatile"):
+        return true
+    if content.contains("rt_volatile_"):
+        return true
+    if content.contains("rt_dma_"):
+        return true
+    false
+
+fn is_shell_backed_content(content: text) -> bool:
+    if content.contains("/bin/sh"):
+        return true
+    if content.contains("Command::new(\"sh\")"):
+        return true
+    false
+
+fn is_c_wrapper_content(content: text) -> bool:
+    content.contains("extern fn")
+
+# ============================================================================
+# Filename-Based Predicates
+# ============================================================================
+
+fn is_sffi_filename(path: text) -> bool:
+    path.ends_with("_sffi.spl")
+
+# ============================================================================
+# Main Classifier (first-match-wins)
+# ============================================================================
+
+fn classify_module(file_path: text) -> ProviderType:
+    # Priority 1: Check filename for SFFI pattern first (no content needed)
+    if is_sffi_filename(file_path):
+        return ProviderType.SffiWrapper
+
+    # Read file content for content-based classification
+    val content = file_read(file_path)
+
+    # Priority 2: hw-hook (highest content priority)
+    if is_hw_hook_content(content):
+        return ProviderType.HwHook
+
+    # Priority 3: shell-backed
+    if is_shell_backed_content(content):
+        return ProviderType.ShellBacked
+
+    # Priority 4: C-wrapper (any extern fn)
+    if is_c_wrapper_content(content):
+        return ProviderType.CWrapper
+
+    # Priority 5: pure-Simple (default)
+    ProviderType.PureSimple
+
+# ============================================================================
+# Batch Classification
+# ============================================================================
+
+fn dir_walk_spl(path: text) -> [text]:
+    var results: [text] = []
+    val entries = dir_list(path)
+    for entry in entries:
+        val full_path = "{path}/{entry}"
+        if is_dir(full_path):
+            var sub_results = dir_walk_spl(full_path)
+            results = results.merge(sub_results)
+        else:
+            if full_path.ends_with(".spl"):
+                results.push(full_path)
+    results
+
+fn classify_all_modules(root_dir: text) -> [ClassifyResult]:
+    val files = dir_walk_spl(root_dir)
+    var results: [ClassifyResult] = []
+    for file_path in files:
+        val provider = classify_module(file_path)
+        results.push(ClassifyResult(path: file_path, provider: provider))
+    results
+
+# ============================================================================
+# Report Generation
+# ============================================================================
+
+fn provider_type_name(p: ProviderType) -> text:
+    if p == ProviderType.PureSimple:
+        return "PureSimple"
+    if p == ProviderType.CWrapper:
+        return "CWrapper"
+    if p == ProviderType.SffiWrapper:
+        return "SffiWrapper"
+    if p == ProviderType.ShellBacked:
+        return "ShellBacked"
+    "HwHook"
+
+fn generate_inventory_report(root_dir: text, output_path: text) -> Result<text, text>:
+    val results = classify_all_modules(root_dir)
+
+    var pure_simple_entries: [text] = []
+    var c_wrapper_entries: [text] = []
+    var sffi_wrapper_entries: [text] = []
+    var shell_backed_entries: [text] = []
+    var hw_hook_entries: [text] = []
+
+    for r in results:
+        val name = provider_type_name(r.provider)
+        if name == "PureSimple":
+            pure_simple_entries.push(r.path)
+        elif name == "CWrapper":
+            c_wrapper_entries.push(r.path)
+        elif name == "SffiWrapper":
+            sffi_wrapper_entries.push(r.path)
+        elif name == "ShellBacked":
+            shell_backed_entries.push(r.path)
+        elif name == "HwHook":
+            hw_hook_entries.push(r.path)
+
+    var report = "# Module Inventory Report\n\n"
+    report = report + "Total modules: {results.len()}\n\n"
+
+    report = report + "## PureSimple ({pure_simple_entries.len()})\n\n"
+    for e in pure_simple_entries:
+        report = report + "- {e}\n"
+
+    report = report + "\n## CWrapper ({c_wrapper_entries.len()})\n\n"
+    for e in c_wrapper_entries:
+        report = report + "- {e}\n"
+
+    report = report + "\n## SffiWrapper ({sffi_wrapper_entries.len()})\n\n"
+    for e in sffi_wrapper_entries:
+        report = report + "- {e}\n"
+
+    report = report + "\n## ShellBacked ({shell_backed_entries.len()})\n\n"
+    for e in shell_backed_entries:
+        report = report + "- {e}\n"
+
+    report = report + "\n## HwHook ({hw_hook_entries.len()})\n\n"
+    for e in hw_hook_entries:
+        report = report + "- {e}\n"
+
+    file_write(output_path, report)
+    Ok(report)

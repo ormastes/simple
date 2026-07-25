@@ -1,0 +1,195 @@
+@allow(unnamed_duplicate_typed_args)
+# Leak Check - Growth Runner
+#
+# Runs a target in a subprocess and samples per-process RSS to detect
+# sustained memory growth or hard RSS budget breaches.
+
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
+extern fn rt_process_is_running(pid: i64) -> bool
+extern fn rt_process_kill(pid: i64) -> bool
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_sleep_ms(ms: i64)
+
+use types
+
+fn file_exists(path: text) -> bool:
+    rt_file_exists(path)
+
+fn current_time_ms() -> i64:
+    rt_time_now_unix_micros() / 1000
+
+fn read_file_text(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn _extract_numeric_token(line: text) -> i64:
+    val parts = line.split(" ")
+    for part in parts:
+        val trimmed = part.trim()
+        if trimmed.len() > 0:
+            val ch = trimmed.substring(0, 1)
+            if ch >= "0" and ch <= "9":
+                return trimmed.to_int()
+    0
+
+fn read_process_rss_kb(pid: i64) -> i64:
+    val status_path = "/proc/{pid}/status"
+    if not file_exists(status_path):
+        return 0
+    val content = read_file_text(status_path)
+    if content == "":
+        return 0
+    for line in content.split("\n"):
+        if line.starts_with("VmRSS:"):
+            return _extract_numeric_token(line)
+    0
+
+fn resolve_target_kind(cfg: LeakCheckConfig) -> TargetKind:
+    if cfg.target_kind != TargetKind.Auto:
+        return cfg.target_kind
+    if cfg.source_file.ends_with(".sdt"):
+        return TargetKind.SDoctest
+    if cfg.source_file.ends_with("_spec.spl") or cfg.source_file.ends_with("_test.spl"):
+        return TargetKind.SimpleTest
+    if cfg.source_file.ends_with(".spl"):
+        return TargetKind.Program
+    TargetKind.Shell
+
+fn resolve_simple_binary() -> text:
+    if file_exists("./target/debug/simple"):
+        return "./target/debug/simple"
+    if file_exists("./target/release/simple"):
+        return "./target/release/simple"
+    "simple"
+
+fn build_growth_command(cfg: LeakCheckConfig) -> (text, [text], text):
+    val target_kind = resolve_target_kind(cfg)
+    val simple_binary = resolve_simple_binary()
+
+    match target_kind:
+        case TargetKind.Program:
+            (simple_binary, [cfg.source_file], cfg.source_file)
+        case TargetKind.SimpleTest:
+            (simple_binary, ["test", cfg.source_file, "--sequential"], cfg.source_file)
+        case TargetKind.SDoctest:
+            (simple_binary, ["doctest", cfg.source_file], cfg.source_file)
+        case TargetKind.RustTest:
+            ("cargo", ["test", "--", cfg.source_file, "--exact", "--nocapture"], cfg.source_file)
+        case TargetKind.Shell:
+            ("/bin/sh", ["-c", cfg.source_file], cfg.source_file)
+        case _:
+            (simple_binary, [cfg.source_file], cfg.source_file)
+
+fn has_growth_event_kind(events: [GrowthEvent], kind: text) -> bool:
+    for event in events:
+        if event.kind == kind:
+            return true
+    false
+
+fn add_growth_event(events: [GrowthEvent], kind: text, baseline_rss_kb: i64, observed_rss_kb: i64, detail: text) -> [GrowthEvent]:
+    if has_growth_event_kind(events, kind):
+        return events
+    var updated = events
+    updated.push(GrowthEvent(
+        kind: kind,
+        baseline_rss_kb: baseline_rss_kb,
+        observed_rss_kb: observed_rss_kb,
+        delta_kb: observed_rss_kb - baseline_rss_kb,
+        detail: detail
+    ))
+    updated
+
+fn run_growth_check(cfg: LeakCheckConfig) -> LeakCheckResult:
+    var result = empty_leak_check_result()
+    result.mode = "growth"
+    result.target = cfg.source_file
+    result.evidence_level = "heuristic"
+
+    if cfg.source_file == "":
+        print "Error: no growth target specified"
+        result.exit_code = 1
+        result.verdict = "fail"
+        return result
+
+    val (cmd, args, target_label) = build_growth_command(cfg)
+    val pid = rt_process_spawn_async(cmd, args)
+    if pid <= 0:
+        print "Error: failed to spawn growth target"
+        result.exit_code = 1
+        result.verdict = "fail"
+        return result
+
+    val started_ms = current_time_ms()
+    var baseline_rss_kb: i64 = 0
+    var max_rss_kb: i64 = 0
+    var timed_out = false
+
+    while rt_process_is_running(pid):
+        val now_ms = current_time_ms()
+        val rss_kb = read_process_rss_kb(pid)
+        if rss_kb > 0:
+            if baseline_rss_kb == 0:
+                baseline_rss_kb = rss_kb
+            if rss_kb > max_rss_kb:
+                max_rss_kb = rss_kb
+
+            val delta_kb = rss_kb - baseline_rss_kb
+            if cfg.warn_threshold_kb > 0 and delta_kb >= cfg.warn_threshold_kb:
+                result.growth_events = add_growth_event(
+                    result.growth_events,
+                    "threshold_warn",
+                    baseline_rss_kb,
+                    rss_kb,
+                    "RSS growth exceeded warning threshold while running {target_label}"
+                )
+            if cfg.fail_threshold_kb > 0 and delta_kb >= cfg.fail_threshold_kb:
+                result.growth_events = add_growth_event(
+                    result.growth_events,
+                    "threshold_fail",
+                    baseline_rss_kb,
+                    rss_kb,
+                    "RSS growth exceeded failure threshold while running {target_label}"
+                )
+            if cfg.rss_budget_kb > 0 and rss_kb >= cfg.rss_budget_kb:
+                result.growth_events = add_growth_event(
+                    result.growth_events,
+                    "rss_budget",
+                    baseline_rss_kb,
+                    rss_kb,
+                    "RSS exceeded configured budget while running {target_label}"
+                )
+                _ = rt_process_kill(pid)
+                break
+        if cfg.timeout_seconds > 0 and now_ms - started_ms > cfg.timeout_seconds * 1000:
+            timed_out = true
+            _ = rt_process_kill(pid)
+            break
+        rt_sleep_ms(cfg.sample_ms)
+
+    val exit_code = rt_process_wait(pid, 0)
+    result.max_rss_kb = max_rss_kb
+
+    if timed_out:
+        result.growth_events = add_growth_event(
+            result.growth_events,
+            "timeout",
+            baseline_rss_kb,
+            max_rss_kb,
+            "Growth target exceeded timeout of {cfg.timeout_seconds}s"
+        )
+        result.exit_code = 1
+        result.verdict = "fail"
+    elif exit_code != 0 and exit_code != -2:
+        result.growth_events = add_growth_event(
+            result.growth_events,
+            "process_error",
+            baseline_rss_kb,
+            max_rss_kb,
+            "Growth target exited with code {exit_code}"
+        )
+        result.exit_code = 1
+        result.verdict = "fail"
+
+    result

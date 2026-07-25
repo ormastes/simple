@@ -1,0 +1,328 @@
+use std.hardware.rv64gc_rtl.pkg.{OP_LUI, OP_AUIPC, OP_JAL, OP_JALR}
+use std.hardware.rv64gc_rtl.pkg.{OP_BRANCH, OP_LOAD, OP_STORE, OP_SYSTEM, OP_MISC_MEM}
+use std.hardware.rv64gc_rtl.pkg.{OP_IMMED, OP_REG, OP_OP_IMM_32, OP_OP_32, OP_AMO}
+use std.hardware.rv64gc_rtl.pkg.{BR_BEQ, BR_BNE, BR_BLT, BR_BGE, BR_BLTU, BR_BGEU}
+use std.hardware.rv64gc_rtl.pkg.{AMO_LR, AMO_SC, AMO_SWAP, AMO_ADD, AMO_XOR, AMO_AND, AMO_OR}
+use std.hardware.rv64gc_rtl.pkg.{AMO_MIN, AMO_MAX, AMO_MINU, AMO_MAXU}
+use std.hardware.rv64gc_rtl.decode.DecodeResult64
+use std.hardware.rv64gc_rtl.alu.i64_signed_lt
+use std.hardware.rv64gc_rtl.trap.{CAUSE_LOAD_MISALIGNED, CAUSE_STORE_MISALIGNED}
+use std.hardware.rv64gc_rtl.csr.{CsrFile64, csr64_read, csr64_write, csr64_set_fs}
+use std.hardware.rv64gc_rtl.csr.{csr_ext64_read, csr_ext64_write, csr_ext64_known}
+use std.hardware.rv64gc_rtl.csr.{MSTATUS_FS_MASK, MSTATUS_SD_MASK}
+use std.hardware.rv64gc_rtl.csr_s.{CsrSMode64, csr_s64_read, csr_s64_write}
+use std.hardware.rv64gc_rtl.csr_s.{SSTATUS_SUM_MASK_64, SSTATUS_MXR_MASK_64}
+use std.hardware.rv64gc_rtl.mmu_sv39.{mmu64_flush, mmu64_set_satp}
+use std.hardware.rv64gc_rtl.pmp_csr.{pmp64_csr_read, pmp64_csr_write}
+use std.hardware.rv64gc_rtl.fpu.{OP_FP, OP_LOAD_FP, OP_STORE_FP, OP_FMADD, OP_FMSUB, OP_FNMSUB, OP_FNMADD}
+use std.hardware.rv64gc_rtl.core_types.{CoreState64, CoreCsrAccess64}
+use std.hardware.rv64gc_rtl.core_types.CORE64_MSTATUS_DATA_MASK
+
+# ============================================================================
+# Signed comparison helpers for branch evaluation
+# ============================================================================
+
+fn i64_signed_ge(a: i64, b: i64) -> bool:
+    """Signed greater-than-or-equal for i64."""
+    not i64_signed_lt(a, b)
+
+# ============================================================================
+# Unsigned comparison helpers for branch evaluation
+# ============================================================================
+
+fn i64_unsigned_lt(a: i64, b: i64) -> bool:
+    """Unsigned less-than for i64 (two's complement)."""
+    val flip: i64 = 0x8000000000000000
+    val fa = a ^ flip
+    val fb = b ^ flip
+    fa < fb
+
+fn i64_unsigned_ge(a: i64, b: i64) -> bool:
+    """Unsigned greater-than-or-equal for i64."""
+    not i64_unsigned_lt(a, b)
+
+# ============================================================================
+# Misaligned load/store/AMO detection
+# ============================================================================
+# Natural-alignment enforcement: byte accesses never fault; half/word/dword
+# must be 2/4/8-byte aligned. On a misaligned access core64_combinational
+# suppresses the memory access and core64_update raises CAUSE_LOAD_MISALIGNED
+# (4) or CAUSE_STORE_MISALIGNED (6). Both sides use the SAME predicate so the
+# suppressed access and the raised trap stay consistent.
+
+fn core64_access_size(funct3: u32) -> i64:
+    """Natural alignment (bytes) for an access whose width is funct3[1:0]."""
+    val w = funct3 & 0x3
+    if w == 0:
+        return 1
+    if w == 1:
+        return 2
+    if w == 2:
+        return 4
+    8
+
+fn core64_is_mem_op(dec: DecodeResult64) -> bool:
+    """A load, store, or atomic memory operation (the only faulting classes)."""
+    dec.mem_read or dec.mem_write or dec.is_amo
+
+fn core64_mem_misaligned(dec: DecodeResult64, addr: i64) -> bool:
+    """True when this mem op's effective address is not naturally aligned."""
+    if core64_is_mem_op(dec) == false:
+        return false
+    val size = core64_access_size(dec.funct3)
+    (addr & (size - 1)) != 0
+
+fn core64_mem_misalign_cause(dec: DecodeResult64) -> i64:
+    """CAUSE_LOAD_MISALIGNED for loads; CAUSE_STORE_MISALIGNED for stores/AMO."""
+    if dec.mem_read:
+        return CAUSE_LOAD_MISALIGNED
+    CAUSE_STORE_MISALIGNED
+
+# ============================================================================
+# Branch evaluation
+# ============================================================================
+
+fn eval_branch_64(funct3: u32, rs1_data: i64, rs2_data: i64) -> bool:
+    """Evaluate branch condition. Returns true if branch is taken."""
+    if funct3 == BR_BEQ:
+        return rs1_data == rs2_data
+    if funct3 == BR_BNE:
+        return rs1_data != rs2_data
+    if funct3 == BR_BLT:
+        return i64_signed_lt(rs1_data, rs2_data)
+    if funct3 == BR_BGE:
+        return i64_signed_ge(rs1_data, rs2_data)
+    if funct3 == BR_BLTU:
+        return i64_unsigned_lt(rs1_data, rs2_data)
+    if funct3 == BR_BGEU:
+        return i64_unsigned_ge(rs1_data, rs2_data)
+    false
+
+fn core64_instruction_legal(instruction: u32, dec: DecodeResult64) -> bool:
+    """Fail closed for every encoding the current integer datapath accepts."""
+    val op = dec.opcode
+    val f3 = dec.funct3
+    val f7 = dec.funct7
+
+    if op == OP_LUI or op == OP_AUIPC or op == OP_JAL:
+        return true
+    if op == OP_JALR:
+        return f3 == 0
+    if op == OP_BRANCH:
+        return f3 == 0 or f3 == 1 or f3 == 4 or f3 == 5 or f3 == 6 or f3 == 7
+    if op == OP_LOAD:
+        return f3 <= 6
+    if op == OP_STORE:
+        return f3 <= 3
+    if (op as i64) == OP_LOAD_FP or (op as i64) == OP_STORE_FP:
+        return f3 == 2 or f3 == 3
+    if core64_is_fp(op as i64):
+        return true
+
+    if op == OP_IMMED:
+        if f3 == 1:
+            return ((instruction >> 26) & 0x3F) == 0
+        if f3 == 5:
+            val funct6 = (instruction >> 26) & 0x3F
+            return funct6 == 0 or funct6 == 0x10
+        return f3 == 0 or f3 == 2 or f3 == 3 or f3 == 4 or f3 == 6 or f3 == 7
+
+    if op == OP_REG:
+        if f7 == 0 or f7 == 1:
+            return true
+        return f7 == 0x20 and (f3 == 0 or f3 == 5)
+
+    if op == OP_OP_IMM_32:
+        if f3 == 0:
+            return true
+        if f3 == 1:
+            return f7 == 0
+        if f3 == 5:
+            return f7 == 0 or f7 == 0x20
+        return false
+
+    if op == OP_OP_32:
+        if f7 == 1:
+            return true
+        if f7 == 0:
+            return f3 == 0 or f3 == 1 or f3 == 5
+        return f7 == 0x20 and (f3 == 0 or f3 == 5)
+
+    if op == OP_MISC_MEM:
+        if f3 == 0:
+            return dec.rd == 0 and dec.rs1 == 0
+        return instruction == 0x0000100F
+
+    if op == OP_SYSTEM:
+        if dec.is_sfence_vma:
+            return dec.rd == 0
+        if dec.is_csr or dec.is_mret or dec.is_sret or dec.is_wfi:
+            return true
+        return instruction == 0x00000073 or instruction == 0x00100073
+
+    # A extension: LR/SC + AMO, .W (f3=2) and .D (f3=3) only. LR requires
+    # rs2 == 0. aq/rl bits (funct7[1:0]) are accepted — single-hart, all
+    # accesses already sequentially consistent.
+    if op == OP_AMO:
+        if f3 != 2 and f3 != 3:
+            return false
+        val f5 = f7 >> 2
+        if f5 == AMO_LR:
+            return dec.rs2 == 0
+        return (f5 == AMO_SC or f5 == AMO_SWAP or f5 == AMO_ADD or
+                f5 == AMO_XOR or f5 == AMO_AND or f5 == AMO_OR or
+                f5 == AMO_MIN or f5 == AMO_MAX or f5 == AMO_MINU or
+                f5 == AMO_MAXU)
+    false
+
+fn core64_privileged_instruction_legal(state: CoreState64,
+                                       dec: DecodeResult64) -> bool:
+    if dec.is_mret:
+        return state.priv_mode == 3
+    if dec.is_sret or dec.is_sfence_vma:
+        return state.priv_mode == 1 or state.priv_mode == 3
+    true
+
+# ============================================================================
+# Privileged CSR routing
+# ============================================================================
+
+fn core64_machine_csr_known(addr: u32) -> bool:
+    # OpenSBI reads these machine-ID CSRs while printing its boot banner.
+    # The CSR file implements them as read-only zero values.
+    (addr == 0x300 or addr == 0x301 or addr == 0x302 or addr == 0x303 or
+     addr == 0x304 or addr == 0x305 or addr == 0x340 or addr == 0x341 or
+     addr == 0x342 or addr == 0x343 or addr == 0x344 or addr == 0xB00 or
+     addr == 0xB02 or addr == 0xF14 or addr == 0xF11 or addr == 0xF12 or
+     addr == 0xF13 or addr == 0xF15)
+
+fn core64_pmp_csr_address(addr: u32) -> bool:
+    (addr >= 0x3A0 and addr <= 0x3A3) or (addr >= 0x3B0 and addr <= 0x3BF)
+
+fn core64_supervisor_csr_known(addr: u32) -> bool:
+    (addr == 0x100 or addr == 0x104 or addr == 0x105 or addr == 0x140 or
+     addr == 0x141 or addr == 0x142 or addr == 0x143 or addr == 0x144 or
+     addr == 0x180)
+
+fn core64_sync_sstatus_fp(csr_s: CsrSMode64, csr_m: CsrFile64) -> CsrSMode64:
+    """Reflect the architectural mstatus.FS/SD view through sstatus."""
+    var out = csr_s
+    val fp_mask = MSTATUS_FS_MASK | MSTATUS_SD_MASK
+    out.sstatus = (out.sstatus & (fp_mask ^ -1)) | (csr_m.mstatus & fp_mask)
+    out
+
+fn core64_csr_source(funct3: u32, rs1: u32, rs1_data: i64) -> i64:
+    if (funct3 & 0x4) != 0:
+        return rs1 as i64
+    rs1_data
+
+fn core64_csr_write_requested(funct3: u32, source: i64) -> bool:
+    val op = funct3 & 0x3
+    op == 1 or ((op == 2 or op == 3) and source != 0)
+
+fn core64_csr_next_value(old_value: i64, source: i64, funct3: u32) -> i64:
+    val op = funct3 & 0x3
+    if op == 1:
+        return source
+    if op == 2:
+        return old_value | source
+    if op == 3:
+        return old_value & (source ^ -1)
+    old_value
+
+fn core64_invalid_csr_access(state: CoreState64) -> CoreCsrAccess64:
+    CoreCsrAccess64(valid: false, old_value: 0, csr_m: state.csr_m,
+        csr_ext: state.csr_ext, csr_s: state.csr_s, mmu: state.mmu,
+        pmp: state.pmp)
+
+fn core64_csr_access(state: CoreState64, addr: u32, source: i64, funct3: u32) -> CoreCsrAccess64:
+    """Route one Zicsr operation to M, S, or PMP state and fail closed."""
+    val op = funct3 & 0x3
+    if op == 0:
+        return core64_invalid_csr_access(state)
+
+    val required_priv = ((addr >> 8) & 0x3) as i64
+    val write_requested = core64_csr_write_requested(funct3, source)
+    val read_only = ((addr >> 10) & 0x3) == 0x3
+    if state.priv_mode < required_priv or (write_requested and read_only):
+        return core64_invalid_csr_access(state)
+
+    if core64_pmp_csr_address(addr):
+        val pmp_read = pmp64_csr_read(state.pmp, addr)
+        if not pmp_read.handled:
+            # RV64 reserves pmpcfg1/pmpcfg3.  Never fall back to stale CsrExt
+            # storage, because only PmpEntries64 controls actual protection.
+            return core64_invalid_csr_access(state)
+        var new_pmp = state.pmp
+        if write_requested:
+            val next_value = core64_csr_next_value(pmp_read.value, source, funct3)
+            new_pmp = pmp64_csr_write(state.pmp, addr, next_value).entries
+        return CoreCsrAccess64(valid: true, old_value: pmp_read.value,
+            csr_m: state.csr_m, csr_ext: state.csr_ext, csr_s: state.csr_s,
+            mmu: state.mmu, pmp: new_pmp)
+
+    if core64_machine_csr_known(addr):
+        val old_value = csr64_read(state.csr_m, addr)
+        var new_csr_m = state.csr_m
+        var new_csr_s = state.csr_s
+        if write_requested:
+            val next_value = core64_csr_next_value(old_value, source, funct3)
+            new_csr_m = csr64_write(state.csr_m, addr, next_value)
+            if addr == 0x300:
+                new_csr_m.mstatus = (new_csr_m.mstatus & (CORE64_MSTATUS_DATA_MASK ^ -1)) |
+                    (next_value & CORE64_MSTATUS_DATA_MASK)
+                new_csr_s.sstatus = (new_csr_s.sstatus &
+                    ((SSTATUS_SUM_MASK_64 | SSTATUS_MXR_MASK_64) ^ -1)) |
+                    (new_csr_m.mstatus & (SSTATUS_SUM_MASK_64 | SSTATUS_MXR_MASK_64))
+        if addr == 0x300:
+            new_csr_s = core64_sync_sstatus_fp(new_csr_s, new_csr_m)
+        return CoreCsrAccess64(valid: true, old_value: old_value,
+            csr_m: new_csr_m, csr_ext: state.csr_ext, csr_s: new_csr_s,
+            mmu: state.mmu, pmp: state.pmp)
+
+    # PMP + counter-enable CSRs: readable/writable storage, no enforcement.
+    # (required_priv already gated above from the address bits — PMP/menvcfg/
+    # mcounteren need M, scounteren needs S, which the check enforces.)
+    if csr_ext64_known(addr):
+        val old_value = csr_ext64_read(state.csr_ext, addr)
+        var new_ext = state.csr_ext
+        if write_requested:
+            new_ext = csr_ext64_write(state.csr_ext, addr, core64_csr_next_value(old_value, source, funct3))
+        return CoreCsrAccess64(valid: true, old_value: old_value,
+            csr_m: state.csr_m, csr_ext: new_ext, csr_s: state.csr_s,
+            mmu: state.mmu, pmp: state.pmp)
+
+    if core64_supervisor_csr_known(addr):
+        var current_csr_s = state.csr_s
+        if addr == 0x100:
+            current_csr_s = core64_sync_sstatus_fp(current_csr_s, state.csr_m)
+        val old_value = csr_s64_read(current_csr_s, addr)
+        var new_csr_s = current_csr_s
+        var new_csr_m = state.csr_m
+        var new_mmu = state.mmu
+        if write_requested:
+            new_csr_s = csr_s64_write(current_csr_s, addr, core64_csr_next_value(old_value, source, funct3))
+            if addr == 0x100:
+                new_csr_m.mstatus = (new_csr_m.mstatus &
+                    ((SSTATUS_SUM_MASK_64 | SSTATUS_MXR_MASK_64) ^ -1)) |
+                    (new_csr_s.sstatus & (SSTATUS_SUM_MASK_64 | SSTATUS_MXR_MASK_64))
+                new_csr_m = csr64_set_fs(new_csr_m,
+                    (new_csr_s.sstatus & MSTATUS_FS_MASK) >> 13)
+                new_csr_s = core64_sync_sstatus_fp(new_csr_s, new_csr_m)
+            if addr == 0x180 and new_csr_s.satp != state.csr_s.satp:
+                new_mmu = mmu64_set_satp(mmu64_flush(state.mmu), new_csr_s.satp)
+        return CoreCsrAccess64(valid: true, old_value: old_value,
+            csr_m: new_csr_m, csr_ext: state.csr_ext, csr_s: new_csr_s,
+            mmu: new_mmu, pmp: state.pmp)
+
+    core64_invalid_csr_access(state)
+
+fn core64_is_fp_compute(opcode: i64) -> bool:
+    """OP-FP and the fused multiply-add family — the F/D compute ops the core
+    routes to the injected FPU. Load/store FP are not yet wired (deferred)."""
+    opcode == OP_FP or opcode == OP_FMADD or opcode == OP_FMSUB or
+        opcode == OP_FNMSUB or opcode == OP_FNMADD
+
+fn core64_is_fp(opcode: i64) -> bool:
+    """Every F/D opcode the core routes to the FPU: compute + FP load/store."""
+    core64_is_fp_compute(opcode) or opcode == OP_LOAD_FP or opcode == OP_STORE_FP

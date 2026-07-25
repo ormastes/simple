@@ -1,0 +1,354 @@
+# codex-impl
+# Pure, versioned backend-render record, validation, canonical comparison, and
+# equivalence policy. This module deliberately has no IO/runtime/backend imports.
+
+use std.common.crypto.sha256.{sha256_text}
+
+val BACKEND_RENDER_SCHEMA_NAME: text = "simple-backend-render-record"
+val BACKEND_RENDER_SCHEMA_VERSION: i32 = 1
+
+struct BackendRenderField:
+    path: text
+    value: text
+    value_kind: text
+    semantic: bool
+
+struct BackendRenderRecord:
+    schema_name: text
+    schema_version: i32
+    producer_id: text
+    fields: [BackendRenderField]
+    semantic_hash: text
+    record_hash: text
+
+struct BackendRenderRecordError:
+    code: text
+    path: text
+    message: text
+
+struct BackendRenderDifference:
+    path: text
+    expected: text
+    actual: text
+    kind: text
+
+struct BackendRenderRecordDiff:
+    record_equal: bool
+    semantic_equal: bool
+    first_difference: BackendRenderDifference?
+    differences: [BackendRenderDifference]
+    normalized_paths: [text]
+
+struct BackendRenderOracle:
+    oracle_mismatch_count: i64
+    pair_mismatch_count: i64
+    blur_or_tolerance: bool
+
+struct BackendRenderEquivalenceResult:
+    passed: bool
+    record_diff: BackendRenderRecordDiff
+    independent_producers: bool
+    completed: bool
+    positive_handles: bool
+    nonblank: bool
+    oracle_mismatch_count: i64
+    pair_mismatch_count: i64
+    blur_or_tolerance: bool
+    reason: text
+
+fn backend_render_field(path: text, value: text, value_kind: text, semantic: bool) -> BackendRenderField:
+    BackendRenderField(path: path, value: value, value_kind: value_kind, semantic: semantic)
+
+fn _record_error(code: text, path: text, message: text) -> BackendRenderRecordError:
+    BackendRenderRecordError(code: code, path: path, message: message)
+
+fn _field_value(record: BackendRenderRecord, path: text) -> text:
+    for field in record.fields:
+        if field.path == path:
+            return field.value
+    ""
+
+fn backend_render_record_field(record: BackendRenderRecord, path: text) -> text:
+    """Return one canonical field value, or empty text when absent."""
+    _field_value(record, path)
+
+fn _required_paths() -> [text]:
+    [
+        "commands.count",
+        "frame.backend_handle",
+        "frame.complete",
+        "producer.actual_backend",
+        "producer.adapter",
+        "producer.execution_kind",
+        "producer.native_api",
+        "producer.requested_backend",
+        "producer.translation_layer",
+        "readback.content_hash",
+        "readback.format",
+        "readback.height",
+        "readback.nonblank_pixel_count",
+        "readback.pixel_count",
+        "readback.source",
+        "readback.stride",
+        "readback.width",
+        "target.content_hash",
+        "target.format",
+        "target.height",
+        "target.stride",
+        "target.width"
+    ]
+
+fn _path_is_normalized(path: text) -> bool:
+    path == "producer.capture_path" or path == "producer.capture_log_path"
+
+fn _normalized_path_value(path: text, value: text) -> text:
+    if not _path_is_normalized(path):
+        return value
+    var last_slash = -1
+    var i = 0
+    while i < value.len():
+        if value[i] == '/':
+            last_slash = i
+        i = i + 1
+    if last_slash >= 0 and last_slash + 1 < value.len():
+        return "<artifact>/" + value[last_slash + 1:value.len()]
+    value
+
+fn _length_value(value: text) -> text:
+    value.len().to_text() + ":" + value
+
+fn _canonical_unchecked(record: BackendRenderRecord, semantic_only: bool) -> text:
+    var out = "schema=" + _length_value(record.schema_name) + ";version=" + record.schema_version.to_text() + ";"
+    if not semantic_only:
+        out = out + "producer=" + _length_value(record.producer_id) + ";"
+    for field in record.fields:
+        if not semantic_only or field.semantic:
+            val value = _normalized_path_value(field.path, field.value)
+            out = out + _length_value(field.path) + "=" + _length_value(field.value_kind) + ":" + _length_value(value) + ";"
+    out
+
+fn backend_render_record_finalize(producer_id: text, fields: [BackendRenderField]) -> BackendRenderRecord:
+    """Create a record and compute both semantic and exact canonical hashes."""
+    val base = BackendRenderRecord(
+        schema_name: BACKEND_RENDER_SCHEMA_NAME,
+        schema_version: BACKEND_RENDER_SCHEMA_VERSION,
+        producer_id: producer_id,
+        fields: fields,
+        semantic_hash: "",
+        record_hash: ""
+    )
+    val semantic_hash = sha256_text(_canonical_unchecked(base, true))
+    val record_hash = sha256_text(_canonical_unchecked(base, false))
+    BackendRenderRecord(
+        schema_name: base.schema_name,
+        schema_version: base.schema_version,
+        producer_id: base.producer_id,
+        fields: base.fields,
+        semantic_hash: semantic_hash,
+        record_hash: record_hash
+    )
+
+fn _is_lower_hex_hash(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    val allowed = "0123456789abcdef"
+    var i = 0
+    while i < value.len():
+        if not allowed.contains(value[i].to_text()):
+            return false
+        i = i + 1
+    true
+
+fn _positive_i64(value: text) -> bool:
+    value.to_i64() > 0
+
+fn _nonnegative_i64(value: text) -> bool:
+    value != "" and value.to_i64() >= 0
+
+fn _validate_required_fields(record: BackendRenderRecord) -> BackendRenderRecordError?:
+    for path in _required_paths():
+        if _field_value(record, path) == "":
+            return _record_error("missing-field", path, "required backend-render field is missing")
+    nil
+
+fn _validate_field_order(record: BackendRenderRecord) -> BackendRenderRecordError?:
+    var previous = ""
+    for field in record.fields:
+        if field.path == "":
+            return _record_error("missing-field", "fields.path", "field path is empty")
+        if previous != "" and field.path <= previous:
+            val code = if field.path == previous: "duplicate-id" else: "invalid-sequence"
+            return _record_error(code, field.path, "record fields must be unique and sorted by path")
+        if field.value_kind != "text" and field.value_kind != "i64" and field.value_kind != "bool" and field.value_kind != "sha256":
+            return _record_error("invalid-enum", field.path, "unsupported canonical value kind")
+        if field.value_kind == "sha256" and not _is_lower_hex_hash(field.value):
+            return _record_error("invalid-hash", field.path, "SHA-256 value must be 64 lowercase hexadecimal characters")
+        previous = field.path
+    nil
+
+fn _validate_dimensions(record: BackendRenderRecord) -> BackendRenderRecordError?:
+    val target_width = _field_value(record, "target.width").to_i64()
+    val target_height = _field_value(record, "target.height").to_i64()
+    val target_stride = _field_value(record, "target.stride").to_i64()
+    val read_width = _field_value(record, "readback.width").to_i64()
+    val read_height = _field_value(record, "readback.height").to_i64()
+    val read_stride = _field_value(record, "readback.stride").to_i64()
+    if target_width <= 0 or target_height <= 0 or read_width <= 0 or read_height <= 0:
+        return _record_error("invalid-dimensions", "target", "target and readback dimensions must be positive")
+    if target_width != read_width or target_height != read_height:
+        return _record_error("invalid-readback", "readback", "readback dimensions must match the target")
+    if target_stride < target_width * 4 or read_stride < read_width * 4:
+        return _record_error("invalid-stride", "readback.stride", "ARGB stride must cover every pixel")
+    if _field_value(record, "readback.pixel_count").to_i64() != read_width * read_height:
+        return _record_error("invalid-readback", "readback.pixel_count", "pixel count must match dimensions")
+    nil
+
+fn _validate_provenance(record: BackendRenderRecord) -> BackendRenderRecordError?:
+    val requested = _field_value(record, "producer.requested_backend")
+    val actual = _field_value(record, "producer.actual_backend")
+    val native_api = _field_value(record, "producer.native_api")
+    val execution = _field_value(record, "producer.execution_kind")
+    val translation = _field_value(record, "producer.translation_layer")
+    val readback = _field_value(record, "readback.source")
+    if execution != "native" and execution != "translated" and execution != "emulated" and execution != "software":
+        return _record_error("invalid-enum", "producer.execution_kind", "execution kind is unsupported")
+    if execution == "native" and (translation != "none" or requested != actual):
+        return _record_error("contradictory-provenance", "producer.translation_layer", "native execution cannot claim translation or a different backend")
+    if (execution == "translated" or execution == "emulated") and (translation == "" or translation == "none"):
+        return _record_error("contradictory-provenance", "producer.translation_layer", "translated execution requires an explicit layer")
+    if execution == "software" and readback == "device_readback":
+        return _record_error("contradictory-provenance", "readback.source", "software pixels cannot be labeled device readback")
+    if native_api == "" or actual == "":
+        return _record_error("missing-field", "producer.native_api", "actual backend and native API are required")
+    nil
+
+fn validate_backend_render_record(record: BackendRenderRecord) -> Result<BackendRenderRecord, BackendRenderRecordError>:
+    """Validate a backend-render record in stable fail-closed order."""
+    if record.schema_name != BACKEND_RENDER_SCHEMA_NAME:
+        return Err(_record_error("unsupported-version", "schema_name", "unsupported backend-render schema"))
+    if record.schema_version != BACKEND_RENDER_SCHEMA_VERSION:
+        return Err(_record_error("unsupported-version", "schema_version", "unsupported backend-render schema version"))
+    if record.producer_id == "":
+        return Err(_record_error("missing-field", "producer_id", "producer identity is required"))
+    if val err = _validate_field_order(record): return Err(err)
+    if val err = _validate_required_fields(record): return Err(err)
+    if val err = _validate_dimensions(record): return Err(err)
+    if val err = _validate_provenance(record): return Err(err)
+    if _field_value(record, "frame.complete") != "true":
+        return Err(_record_error("incomplete-frame", "frame.complete", "frame must be complete"))
+    if not _positive_i64(_field_value(record, "frame.backend_handle")):
+        return Err(_record_error("invalid-handle", "frame.backend_handle", "backend handle must be positive"))
+    if not _positive_i64(_field_value(record, "commands.count")):
+        return Err(_record_error("empty-command-stream", "commands.count", "at least one command is required"))
+    if not _positive_i64(_field_value(record, "readback.nonblank_pixel_count")):
+        return Err(_record_error("blank-readback", "readback.nonblank_pixel_count", "readback must contain a nonblank pixel"))
+    if not _is_lower_hex_hash(_field_value(record, "target.content_hash")):
+        return Err(_record_error("invalid-hash", "target.content_hash", "target content hash is invalid"))
+    if not _is_lower_hex_hash(_field_value(record, "readback.content_hash")):
+        return Err(_record_error("invalid-hash", "readback.content_hash", "readback content hash is invalid"))
+    val expected_semantic = sha256_text(_canonical_unchecked(record, true))
+    val expected_record = sha256_text(_canonical_unchecked(record, false))
+    if record.semantic_hash != expected_semantic:
+        return Err(_record_error("invalid-hash", "semantic_hash", "semantic hash does not match canonical fields"))
+    if record.record_hash != expected_record:
+        return Err(_record_error("invalid-hash", "record_hash", "record hash does not match canonical fields"))
+    Ok(record)
+
+fn canonical_backend_render_record(record: BackendRenderRecord, semantic_only: bool) -> Result<text, BackendRenderRecordError>:
+    """Return deterministic length-prefixed canonical text for a valid record."""
+    match validate_backend_render_record(record):
+        case Ok(valid): Ok(_canonical_unchecked(valid, semantic_only))
+        case Err(err): Err(err)
+
+fn _difference(path: text, expected: text, actual: text, kind: text) -> BackendRenderDifference:
+    BackendRenderDifference(path: path, expected: expected, actual: actual, kind: kind)
+
+fn _empty_diff() -> BackendRenderRecordDiff:
+    BackendRenderRecordDiff(record_equal: true, semantic_equal: true, first_difference: nil, differences: [], normalized_paths: ["producer.capture_log_path", "producer.capture_path"])
+
+fn compare_backend_render_records(expected: BackendRenderRecord, actual: BackendRenderRecord) -> BackendRenderRecordDiff:
+    """Walk both canonical field arrays and report first/all differences."""
+    var differences: [BackendRenderDifference] = []
+    if expected.schema_name != actual.schema_name:
+        differences = differences.push(_difference("schema_name", expected.schema_name, actual.schema_name, "semantic"))
+    if expected.schema_version != actual.schema_version:
+        differences = differences.push(_difference("schema_version", expected.schema_version.to_text(), actual.schema_version.to_text(), "semantic"))
+    if expected.producer_id != actual.producer_id:
+        differences = differences.push(_difference("producer_id", expected.producer_id, actual.producer_id, "provenance"))
+    var left = 0
+    var right = 0
+    while left < expected.fields.len() or right < actual.fields.len():
+        if right >= actual.fields.len():
+            val field = expected.fields[left]
+            differences = differences.push(_difference(field.path, field.value, "<missing>", if field.semantic: "semantic" else: "provenance"))
+            left = left + 1
+        else if left >= expected.fields.len():
+            val field = actual.fields[right]
+            differences = differences.push(_difference(field.path, "<missing>", field.value, if field.semantic: "semantic" else: "provenance"))
+            right = right + 1
+        else:
+            val expected_field = expected.fields[left]
+            val actual_field = actual.fields[right]
+            if expected_field.path < actual_field.path:
+                differences = differences.push(_difference(expected_field.path, expected_field.value, "<missing>", if expected_field.semantic: "semantic" else: "provenance"))
+                left = left + 1
+            else if actual_field.path < expected_field.path:
+                differences = differences.push(_difference(actual_field.path, "<missing>", actual_field.value, if actual_field.semantic: "semantic" else: "provenance"))
+                right = right + 1
+            else:
+                val expected_value = _normalized_path_value(expected_field.path, expected_field.value)
+                val actual_value = _normalized_path_value(actual_field.path, actual_field.value)
+                if expected_value != actual_value or expected_field.value_kind != actual_field.value_kind or expected_field.semantic != actual_field.semantic:
+                    val kind = if _path_is_normalized(expected_field.path): "allowed-nondeterminism" else if expected_field.semantic: "semantic" else: "provenance"
+                    differences = differences.push(_difference(expected_field.path, expected_value, actual_value, kind))
+                left = left + 1
+                right = right + 1
+    var semantic_equal = true
+    for diff in differences:
+        if diff.kind == "semantic": semantic_equal = false
+    val first = if differences.len() > 0: differences[0] else: nil
+    BackendRenderRecordDiff(
+        record_equal: differences.len() == 0,
+        semantic_equal: semantic_equal,
+        first_difference: first,
+        differences: differences,
+        normalized_paths: ["producer.capture_log_path", "producer.capture_path"]
+    )
+
+fn _equivalence_result(diff: BackendRenderRecordDiff, independent: bool, completed: bool, handles: bool, nonblank: bool, oracle: BackendRenderOracle, passed: bool, reason: text) -> BackendRenderEquivalenceResult:
+    BackendRenderEquivalenceResult(
+        passed: passed,
+        record_diff: diff,
+        independent_producers: independent,
+        completed: completed,
+        positive_handles: handles,
+        nonblank: nonblank,
+        oracle_mismatch_count: oracle.oracle_mismatch_count,
+        pair_mismatch_count: oracle.pair_mismatch_count,
+        blur_or_tolerance: oracle.blur_or_tolerance,
+        reason: reason
+    )
+
+fn verify_backend_render_equivalence(left: BackendRenderRecord, right: BackendRenderRecord, oracle: BackendRenderOracle) -> BackendRenderEquivalenceResult:
+    """Require valid independent records, semantic equality, and exact pixels."""
+    val diff = compare_backend_render_records(left, right)
+    match validate_backend_render_record(left):
+        case Err(err): return _equivalence_result(diff, false, false, false, false, oracle, false, "left-" + err.code)
+        case Ok(_left): ()
+    match validate_backend_render_record(right):
+        case Err(err): return _equivalence_result(diff, false, false, false, false, oracle, false, "right-" + err.code)
+        case Ok(_right): ()
+    val independent = left.producer_id != right.producer_id
+    val completed = _field_value(left, "frame.complete") == "true" and _field_value(right, "frame.complete") == "true"
+    val handles = _positive_i64(_field_value(left, "frame.backend_handle")) and _positive_i64(_field_value(right, "frame.backend_handle"))
+    val nonblank = _positive_i64(_field_value(left, "readback.nonblank_pixel_count")) and _positive_i64(_field_value(right, "readback.nonblank_pixel_count"))
+    if not independent: return _equivalence_result(diff, independent, completed, handles, nonblank, oracle, false, "non-independent-producers")
+    if not diff.semantic_equal: return _equivalence_result(diff, independent, completed, handles, nonblank, oracle, false, "semantic-record-mismatch")
+    if not completed: return _equivalence_result(diff, independent, completed, handles, nonblank, oracle, false, "incomplete-frame")
+    if not handles: return _equivalence_result(diff, independent, completed, handles, nonblank, oracle, false, "invalid-handle")
+    if not nonblank: return _equivalence_result(diff, independent, completed, handles, nonblank, oracle, false, "blank-readback")
+    if oracle.blur_or_tolerance: return _equivalence_result(diff, independent, completed, handles, nonblank, oracle, false, "tolerance-forbidden")
+    if oracle.oracle_mismatch_count != 0: return _equivalence_result(diff, independent, completed, handles, nonblank, oracle, false, "oracle-mismatch")
+    if oracle.pair_mismatch_count != 0: return _equivalence_result(diff, independent, completed, handles, nonblank, oracle, false, "pairwise-mismatch")
+    _equivalence_result(diff, independent, completed, handles, nonblank, oracle, true, "pass")
+

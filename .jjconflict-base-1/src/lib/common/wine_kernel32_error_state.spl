@@ -1,0 +1,81 @@
+"""Bounded KERNEL32 error-state bridge for Wine startup probes."""
+
+class WineKernel32ErrorState:
+    code: i64
+    symbol: text
+    message: text
+
+class WineKernel32ErrorStateResult:
+    ok: bool
+    error: text
+    state: WineKernel32ErrorState
+    code: i64
+    message: text
+    operations: text
+
+fn _state(code: i64, symbol: text, message: text) -> WineKernel32ErrorState:
+    WineKernel32ErrorState(code: code, symbol: symbol, message: message)
+
+fn _result(ok: bool, error: text, state: WineKernel32ErrorState, code: i64, message: text, operations: text) -> WineKernel32ErrorStateResult:
+    WineKernel32ErrorStateResult(ok: ok, error: error, state: state, code: code, message: message, operations: operations)
+
+fn _message_for_code(code: i64) -> text:
+    if code == 0:
+        return "The operation completed successfully."
+    if code == 2:
+        return "The system cannot find the file specified."
+    if code == 6:
+        return "The handle is invalid."
+    if code == 87:
+        return "The parameter is incorrect."
+    "Unknown error."
+
+fn _symbol_for_code(code: i64) -> text:
+    if code == 0:
+        return "ERROR_SUCCESS"
+    if code == 2:
+        return "ERROR_FILE_NOT_FOUND"
+    if code == 6:
+        return "ERROR_INVALID_HANDLE"
+    if code == 87:
+        return "ERROR_INVALID_PARAMETER"
+    "ERROR_UNKNOWN"
+
+fn _sequence_gate(symbols: [text]) -> text:
+    if symbols.len() == 0:
+        return "bridge-missing:kernel32-error-state"
+    for symbol in symbols:
+        if symbol != "SetLastError" and symbol != "GetLastError" and symbol != "FormatMessageW":
+            return "bridge-wrong-category:" + symbol
+    if symbols.len() != 3:
+        return "kernel32-error-state-sequence-count-mismatch"
+    if symbols[0] != "SetLastError":
+        return "kernel32-error-state-sequence-expected:SetLastError"
+    if symbols[1] != "GetLastError":
+        return "kernel32-error-state-sequence-expected:GetLastError"
+    if symbols[2] != "FormatMessageW":
+        return "kernel32-error-state-sequence-expected:FormatMessageW"
+    "ready"
+
+pub fn wine_kernel32_error_state_new() -> WineKernel32ErrorState:
+    _state(0, "ERROR_SUCCESS", _message_for_code(0))
+
+pub fn wine_kernel32_set_last_error(state: WineKernel32ErrorState, code: i64) -> WineKernel32ErrorState:
+    _state(code, _symbol_for_code(code), _message_for_code(code))
+
+pub fn wine_kernel32_get_last_error(state: WineKernel32ErrorState) -> WineKernel32ErrorStateResult:
+    _result(true, "", state, state.code, state.symbol, "GetLastError")
+
+pub fn wine_kernel32_format_message_w(state: WineKernel32ErrorState, code: i64) -> WineKernel32ErrorStateResult:
+    _result(true, "", state, code, _message_for_code(code), "FormatMessageW")
+
+pub fn wine_kernel32_execute_error_state(symbols: [text], state: WineKernel32ErrorState, code: i64) -> WineKernel32ErrorStateResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, state, 0, "", "")
+    if code < 0:
+        return _result(false, "SetLastError:invalid-error-code", state, code, "", "")
+    val updated = wine_kernel32_set_last_error(state, code)
+    val fetched = wine_kernel32_get_last_error(updated)
+    val formatted = wine_kernel32_format_message_w(updated, fetched.code)
+    _result(true, "", updated, fetched.code, formatted.message, "SetLastError GetLastError FormatMessageW")

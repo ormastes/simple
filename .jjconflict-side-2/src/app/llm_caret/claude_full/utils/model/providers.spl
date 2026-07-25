@@ -1,0 +1,127 @@
+use app.llm_caret.claude_full.utils.envUtils.{isEnvTruthy}
+
+fn getAPIProvider(bedrockEnv: Option<text>, vertexEnv: Option<text>, foundryEnv: Option<text>) -> text:
+    if isEnvTruthy(bedrockEnv):
+        return "bedrock"
+    if isEnvTruthy(vertexEnv):
+        return "vertex"
+    if isEnvTruthy(foundryEnv):
+        return "foundry"
+    "firstParty"
+
+fn getAPIProviderForStatsig(bedrockEnv: Option<text>, vertexEnv: Option<text>, foundryEnv: Option<text>) -> text:
+    getAPIProvider(bedrockEnv, vertexEnv, foundryEnv)
+
+fn isFirstPartyAnthropicBaseUrl(baseUrl: Option<text>, userType: Option<text>) -> bool:
+    val raw = baseUrl ?? ""
+    if raw == "":
+        return true
+    val host = urlHost(raw) ?? ""
+    if host == "api.anthropic.com":
+        return true
+    host == "api-staging.anthropic.com" and userType == Some("ant")
+
+fn urlHost(url: text) -> Option<text>:
+    val schemeEnd = url.index_of("://") ?? -1
+    if schemeEnd <= 0:
+        return nil
+    val scheme = url.slice(0, schemeEnd).lower()
+    if not isUrlScheme(scheme):
+        return nil
+
+    val normalized = url.replace("\\", "/")
+    val rest = normalized.slice(schemeEnd + 3, normalized.len())
+    val authorityEnd = firstAuthorityEnd(rest)
+    val authority = rest.slice(0, authorityEnd)
+    if authority == "" or authority.contains(" ") or authority.contains("\n") or authority.contains("\r") or authority.contains("\t"):
+        return nil
+
+    val hostPort = authorityAfterUserinfo(authority)
+    normalizeHostPort(hostPort, scheme)
+
+fn authorityAfterUserinfo(authority: text) -> text:
+    val at = lastIndexOfText(authority, "@")
+    if at >= 0:
+        return authority.slice(at + 1, authority.len())
+    authority
+
+fn normalizeHostPort(hostPort: text, scheme: text) -> Option<text>:
+    if hostPort == "":
+        return nil
+    if hostPort.starts_with("["):
+        return Some(hostPort.lower())
+
+    val colon = lastIndexOfText(hostPort, ":")
+    if colon < 0:
+        return Some(hostPort.lower())
+
+    val host = hostPort.slice(0, colon)
+    val port = hostPort.slice(colon + 1, hostPort.len())
+    if host == "":
+        return nil
+    if port == "":
+        return Some(host.lower())
+    if not allDigits(port):
+        return nil
+    if isDefaultPort(scheme, port):
+        return Some(host.lower())
+    Some(host.lower() + ":" + port)
+
+fn isDefaultPort(scheme: text, port: text) -> bool:
+    val normalizedPort = trimLeadingZeroes(port)
+    if normalizedPort == "80":
+        return scheme == "http" or scheme == "ws"
+    if normalizedPort == "443":
+        return scheme == "https" or scheme == "wss"
+    if normalizedPort == "21":
+        return scheme == "ftp"
+    false
+
+fn trimLeadingZeroes(value: text) -> text:
+    var i = 0
+    while i < value.len() and value.slice(i, i + 1) == "0":
+        i = i + 1
+    val trimmed = value.slice(i, value.len())
+    if trimmed == "":
+        return "0"
+    trimmed
+
+fn firstAuthorityEnd(value: text) -> i64:
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if ch == "/" or ch == "?" or ch == "#":
+            return i
+        i = i + 1
+    value.len()
+
+fn allDigits(value: text) -> bool:
+    var i = 0
+    while i < value.len():
+        val ch = value.slice(i, i + 1)
+        if ch < "0" or ch > "9":
+            return false
+        i = i + 1
+    true
+
+fn isUrlScheme(scheme: text) -> bool:
+    val first = scheme.slice(0, 1)
+    if not ((first >= "a" and first <= "z") or (first >= "A" and first <= "Z")):
+        return false
+    var i = 0
+    while i < scheme.len():
+        val ch = scheme.slice(i, i + 1)
+        val valid = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "+" or ch == "-" or ch == "."
+        if not valid:
+            return false
+        i = i + 1
+    true
+
+fn lastIndexOfText(value: text, needle: text) -> i64:
+    var found = -1
+    var i = 0
+    while i < value.len():
+        if value.slice(i, i + needle.len()) == needle:
+            found = i
+        i = i + 1
+    found

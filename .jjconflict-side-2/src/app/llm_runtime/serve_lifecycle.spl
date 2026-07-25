@@ -1,0 +1,95 @@
+use app.llm_runtime.manifest.{LlmRuntimeManifest}
+use app.llm_runtime.serve_plan.{llm_runtime_static_serve_plan}
+use app.mcp.main_lazy_json.{LB, RB, jp, js}
+use app.io.mod.{process_spawn_async, process_is_running, process_kill}
+
+pub class LlmRuntimeServeLifecycleResult:
+    status: text
+    reason: text
+    pid: i64
+    running_status: text
+    binary: text
+    command_preview: text
+    evidence_jsonl: text
+
+pub fn llm_runtime_start_vllm_serve(manifest: LlmRuntimeManifest) -> LlmRuntimeServeLifecycleResult:
+    val plan = llm_runtime_static_serve_plan(manifest)
+    if plan.status != "planned":
+        return _lifecycle_result("not_started", plan.reason, -1, "not_started", plan.binary, plan.command_preview)
+    val pid = process_spawn_async(plan.binary, _serve_args(manifest))
+    _serve_lifecycle_from_pid(pid, plan.binary, plan.command_preview)
+
+pub fn llm_runtime_vllm_serve_lifecycle_from_pid(pid: i64, command_preview: text) -> LlmRuntimeServeLifecycleResult:
+    _serve_lifecycle_from_pid(pid, "vllm", command_preview)
+
+fn _serve_lifecycle_from_pid(pid: i64, binary: text, command_preview: text) -> LlmRuntimeServeLifecycleResult:
+    if pid <= 0:
+        return _lifecycle_result("error", "spawn_failed", pid, "not_running", binary, command_preview)
+    _lifecycle_result("started", "process_spawned", pid, "unknown_until_polled", binary, command_preview)
+
+pub fn llm_runtime_vllm_serve_running_status(pid: i64) -> text:
+    if pid <= 0:
+        return "not_running"
+    if process_is_running(pid):
+        return "running"
+    "not_running"
+
+pub fn llm_runtime_stop_vllm_serve(pid: i64) -> LlmRuntimeServeLifecycleResult:
+    if pid <= 0:
+        return _lifecycle_result("not_stopped", "invalid_pid", pid, "not_running", "vllm", "redacted")
+    if process_kill(pid):
+        return _lifecycle_result("stopped", "process_killed", pid, "not_running", "vllm", "redacted")
+    _lifecycle_result("error", "process_kill_failed", pid, "unknown_until_polled", "vllm", "redacted")
+
+pub fn llm_runtime_serve_lifecycle_jsonl_event(result: LlmRuntimeServeLifecycleResult) -> text:
+    LB() +
+    jp("event", js("llm_runtime_vllm_serve_lifecycle")) +
+    "," + jp("status", js(result.status)) +
+    "," + jp("reason", js(result.reason)) +
+    "," + jp("pid", str(result.pid)) +
+    "," + jp("running", js(result.running_status)) +
+    "," + jp("binary", js(result.binary)) +
+    "," + jp("command_preview", js(result.command_preview)) +
+    RB() + "\n"
+
+fn _serve_args(manifest: LlmRuntimeManifest) -> [text]:
+    if manifest.backend == "sglang":
+        var sglang_args = ["-m", "sglang.launch_server", "--model-path", manifest.base_model]
+        if manifest.tensor_parallel_size > 0:
+            sglang_args.push("--tp")
+            sglang_args.push(manifest.tensor_parallel_size.to_text())
+        if manifest.data_parallel_size > 0:
+            sglang_args.push("--dp")
+            sglang_args.push(manifest.data_parallel_size.to_text())
+        if manifest.memory_fraction_static.trim() != "":
+            sglang_args.push("--mem-fraction-static")
+            sglang_args.push(manifest.memory_fraction_static.trim())
+        return sglang_args
+    var args = ["serve", manifest.base_model]
+    if manifest.lora_adapters.len() > 0:
+        args.push("--enable-lora")
+        args.push("--lora-modules")
+        args.push(_lora_modules_arg(manifest))
+    args
+
+fn _lora_modules_arg(manifest: LlmRuntimeManifest) -> text:
+    var parts: [text] = []
+    for adapter in manifest.lora_adapters:
+        parts.push(adapter.name + "=" + adapter.path)
+    parts.join(",")
+
+fn _lifecycle_result(status: text, reason: text, pid: i64, running_status: text, binary: text, command_preview: text) -> LlmRuntimeServeLifecycleResult:
+    val result = LlmRuntimeServeLifecycleResult(
+        status: status,
+        reason: reason,
+        pid: pid,
+        running_status: running_status,
+        binary: binary,
+        command_preview: command_preview,
+        evidence_jsonl: ""
+    )
+    result.evidence_jsonl = llm_runtime_serve_lifecycle_jsonl_event(result)
+    result
+
+export LlmRuntimeServeLifecycleResult
+export llm_runtime_start_vllm_serve, llm_runtime_vllm_serve_lifecycle_from_pid, llm_runtime_vllm_serve_running_status, llm_runtime_stop_vllm_serve, llm_runtime_serve_lifecycle_jsonl_event

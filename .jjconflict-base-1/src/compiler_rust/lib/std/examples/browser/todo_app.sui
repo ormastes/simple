@@ -1,0 +1,239 @@
+# Todo List Application - Browser Example
+#
+# Demonstrates using the browser stdlib for a complete interactive web application.
+# This .sui file will be compiled to:
+# - Server code (x64): Initial data loading
+# - Client code (WASM): Interactive UI updates
+# - Template (HTML): Initial page structure
+
+{$ let todos: List[Todo] = [] $}
+
+# Server block - Runs during SSR
+{- server -}
+import db
+
+struct Todo:
+    id: i64
+    text: str
+    completed: bool
+
+# Load todos from database
+fn load_todos() -> List[Todo]:
+    return db.query("SELECT * FROM todos")
+
+# Initialize todos
+todos = load_todos()
+
+# Client block - Compiled to WASM
+{+ client +}
+import browser.console as console
+import browser.dom as dom
+import browser.fetch as fetch
+
+# Add a new todo
+@async
+fn add_todo():
+    let input = dom.get_element_by_id("todo-input")
+    let text = input.get_text_content()
+
+    if text.trim() == "":
+        console.warn("Cannot add empty todo")
+        return
+
+    # Create new todo via API
+    let new_todo = {"text": text, "completed": false}
+    let response = await fetch.post_json("/api/todos", new_todo)
+
+    if response.ok():
+        let todo = await response.json()
+        add_todo_to_ui(todo)
+        input.set_text_content("")
+        console.log("Added todo:", text)
+    else:
+        console.error("Failed to add todo:", response.status())
+
+# Toggle todo completion
+@async
+fn toggle_todo(todo_id: i64):
+    let response = await fetch.patch_json("/api/todos/" + todo_id.to_string(), {
+        "completed": true
+    })
+
+    if response.ok():
+        update_todo_ui(todo_id)
+        console.log("Toggled todo:", todo_id)
+    else:
+        console.error("Failed to toggle todo")
+
+# Delete a todo
+@async
+fn delete_todo(todo_id: i64):
+    let response = await fetch.delete("/api/todos/" + todo_id.to_string())
+
+    if response.ok():
+        remove_todo_from_ui(todo_id)
+        console.log("Deleted todo:", todo_id)
+    else:
+        console.error("Failed to delete todo")
+
+# Add todo to UI
+fn add_todo_to_ui(todo):
+    let list = dom.get_element_by_id("todo-list")
+    let doc = dom.get_document()
+
+    let item = doc.create_element("li")
+    item.set_attribute("data-id", todo.id.to_string())
+
+    let checkbox = doc.create_element("input")
+    checkbox.set_attribute("type", "checkbox")
+    if todo.completed:
+        checkbox.set_attribute("checked", "checked")
+    checkbox.add_event_listener("change", fn():
+        toggle_todo(todo.id)
+    )
+
+    let text = doc.create_element("span")
+    text.set_text_content(todo.text)
+
+    let delete_btn = doc.create_element("button")
+    delete_btn.set_text_content("Delete")
+    delete_btn.add_class("btn-delete")
+    delete_btn.add_event_listener("click", fn():
+        delete_todo(todo.id)
+    )
+
+    item.append_child(checkbox)
+    item.append_child(text)
+    item.append_child(delete_btn)
+
+    list.append_child(item)
+
+# Update todo UI state
+fn update_todo_ui(todo_id: i64):
+    let item = dom.query_selector("[data-id='" + todo_id.to_string() + "']")
+    if item:
+        let checkbox = item.query_selector("input[type='checkbox']")
+        let is_checked = checkbox.get_attribute("checked") == "checked"
+
+        if is_checked:
+            checkbox.remove_attribute("checked")
+            item.remove_class("completed")
+        else:
+            checkbox.set_attribute("checked", "checked")
+            item.add_class("completed")
+
+# Remove todo from UI
+fn remove_todo_from_ui(todo_id: i64):
+    let item = dom.query_selector("[data-id='" + todo_id.to_string() + "']")
+    if item:
+        let parent = item.get_parent()
+        parent.remove_child(item)
+
+# Filter todos
+fn filter_todos(filter: str):
+    let items = dom.query_selector_all("#todo-list li")
+
+    for item in items:
+        if filter == "all":
+            item.set_style("display", "block")
+        elif filter == "active":
+            if item.has_class("completed"):
+                item.set_style("display", "none")
+            else:
+                item.set_style("display", "block")
+        elif filter == "completed":
+            if item.has_class("completed"):
+                item.set_style("display", "block")
+            else:
+                item.set_style("display", "none")
+
+    console.log("Filtered todos:", filter)
+
+# Event listeners
+fn setup_event_listeners():
+    # Add todo button
+    let add_btn = dom.get_element_by_id("add-todo-btn")
+    add_btn.add_event_listener("click", add_todo)
+
+    # Enter key in input
+    let input = dom.get_element_by_id("todo-input")
+    input.add_event_listener("keypress", fn(event: Event):
+        if event.get_type() == "Enter":
+            add_todo()
+    )
+
+    # Filter buttons
+    let all_btn = dom.get_element_by_id("filter-all")
+    all_btn.add_event_listener("click", fn():
+        filter_todos("all")
+    )
+
+    let active_btn = dom.get_element_by_id("filter-active")
+    active_btn.add_event_listener("click", fn():
+        filter_todos("active")
+    )
+
+    let completed_btn = dom.get_element_by_id("filter-completed")
+    completed_btn.add_event_listener("click", fn():
+        filter_todos("completed")
+    )
+
+    console.log("Event listeners setup complete")
+
+# Initialize app
+setup_event_listeners()
+console.log("Todo app initialized with", todos.len(), "todos")
+
+# Template block - Initial HTML structure
+{@ render @}
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple Todo App</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
+        h1 { margin-bottom: 20px; }
+        .input-group { display: flex; gap: 10px; margin-bottom: 20px; }
+        #todo-input { flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 4px; }
+        button { padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
+        #add-todo-btn { background: #4CAF50; color: white; }
+        .btn-delete { background: #f44336; color: white; font-size: 12px; padding: 5px 10px; }
+        .filters { display: flex; gap: 10px; margin-bottom: 20px; }
+        .filters button { background: #2196F3; color: white; }
+        ul { list-style: none; }
+        li { padding: 15px; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 10px; }
+        li.completed span { text-decoration: line-through; color: #999; }
+        input[type="checkbox"] { width: 20px; height: 20px; }
+        span { flex: 1; }
+    </style>
+</head>
+<body>
+    <h1>📝 Simple Todo App</h1>
+
+    <div class="input-group">
+        <input type="text" id="todo-input" placeholder="What needs to be done?">
+        <button id="add-todo-btn">Add Todo</button>
+    </div>
+
+    <div class="filters">
+        <button id="filter-all">All</button>
+        <button id="filter-active">Active</button>
+        <button id="filter-completed">Completed</button>
+    </div>
+
+    <ul id="todo-list">
+        {% for todo in todos: %}
+        <li data-id="{{ todo.id }}" {% if todo.completed: %}class="completed"{% end %}>
+            <input type="checkbox" {% if todo.completed: %}checked{% end %}>
+            <span>{{ todo.text }}</span>
+            <button class="btn-delete">Delete</button>
+        </li>
+        {% end %}
+    </ul>
+
+    <script src="todo_app.js"></script>
+</body>
+</html>

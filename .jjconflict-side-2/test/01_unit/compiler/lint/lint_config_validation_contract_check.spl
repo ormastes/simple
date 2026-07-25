@@ -1,0 +1,42 @@
+use compiler.tools.lint.main.{run_lint_file, LintConfig}
+use std.io_runtime.{dir_create, dir_remove_all, file_write, getpid}
+
+extern fn rt_exit(code: i32)
+
+val first_error = LintConfig.from_sdn_string("[lints]\nnot_a_rule = \"deny\"\nstub_impl = \"fatal\"\n")
+if first_error.error != "unknown lint: not_a_rule":
+    print "FAIL: lint config did not preserve its first validation error"
+    rt_exit(1)
+
+val valid_config = LintConfig.from_sdn_string("[lints]\nprofile = \"reliable\"\nstub_impl = \"deny\"\n")
+if valid_config.error != "":
+    print "FAIL: valid lint config was rejected"
+    rt_exit(1)
+
+val root = "/tmp/simple_lint_config_validation_{getpid()}"
+dir_remove_all(root)
+if not dir_create(root, false):
+    print "FAIL: could not create fixture directory"
+    rt_exit(1)
+
+val source_path = root + "/main.spl"
+if not file_write(source_path, "fn clean_name() -> i64:\n    1\n"):
+    print "FAIL: could not create source fixture"
+    rt_exit(1)
+
+val invalid_configs = [
+    "[lints]\nprofile = \"typo\"\n",
+    "[lints]\nnot_a_rule = \"deny\"\n",
+    "[lints]\nstub_impl = \"fatal\"\n"
+]
+for config_text in invalid_configs:
+    if not file_write(root + "/simple.sdn", config_text):
+        print "FAIL: could not create config fixture"
+        rt_exit(1)
+    if run_lint_file(source_path, ["--json"]) != 2:
+        print "FAIL: invalid lint config did not return usage status"
+        rt_exit(1)
+
+dir_remove_all(root)
+print "PASS: lint rejects invalid simple.sdn profiles, rules, and levels"
+rt_exit(0)

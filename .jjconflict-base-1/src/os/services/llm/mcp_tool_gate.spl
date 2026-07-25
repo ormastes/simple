@@ -1,0 +1,183 @@
+# MCP Tool Gate — Capability-Scoped Tool Resolution for LLM Sessions (Lane S-llm)
+#
+# THE HOLE (verified): OsMcpServer (src/os/services/llm/_McpOsServer/server_class.spl)
+# is a stateless singleton — every registered tool (file/process/window/widget/
+# ui_access/screen/system) is reachable by ANY client, with no per-request
+# identity or role. A prompt-injected "ticketing" instance can call `file_write`
+# or `system_exec` exactly as freely as an operator.
+#
+# THE GATE (this module): a THIN resolution layer that sits IN FRONT of the
+# existing OsMcpServer without rewriting it. Each tool is mapped to the ONE
+# capability it needs; `resolve_tool(session, tool_name)` returns the tool ONLY
+# when the caller's LlmSession holds that capability. An absent capability yields
+# `nil` — the tool is not merely denied, it is INVISIBLE (research §3.3: "no
+# capability is indistinguishable from nonexistence"), so a session cannot even
+# probe for a tool it was never granted. This is capability-as-designation: the
+# session's C-Space IS the tool menu.
+#
+# Design: doc/01_research/os/security/llm_role_cspace_container_design.md §3.3.
+# Session object: src/os/kernel/ipc/llm_session.spl (LlmSession).
+#
+# Pure Simple, seed-run verifiable
+# (test/01_unit/os/security/llm_role_session_spec.spl).
+
+use os.kernel.types.capability_types.{CapabilityKind, CAP_RIGHT_READ, CAP_RIGHT_WRITE}
+use os.kernel.ipc.llm_session.{LlmSession}
+
+# ============================================================================
+# Well-known service/object addresses used by the default OS tool map.
+# ============================================================================
+# Role tools reach OS services through named IPC ports (research §3.4: post-seal
+# global needs go through SERVICE capabilities — a granted endpoint slot). The
+# calendar is a shared-dataset object; its id/generation are well-known so a
+# scheduling role can be granted exactly it.
+
+val SVC_TICKETS: text  = "svc.tickets"    # ticket-queue broker endpoint
+val SVC_WINDOW: text   = "svc.window"     # window/widget compositor endpoint
+val SVC_UI: text       = "svc.ui"         # ui_access adapter endpoint
+val SVC_SCREEN: text   = "svc.screen"     # screen capture endpoint
+val CALENDAR_OBJ: u64  = 4242u64          # scheduling calendar dataset object id
+val CALENDAR_GEN: u64  = 7u64             # calendar generation
+
+# ============================================================================
+# LlmTool + ToolCapMap
+# ============================================================================
+
+struct LlmTool:
+    """One MCP tool and the SINGLE capability a session must hold to see it.
+
+    category is advisory grouping only (file/process/window/...); `required` is
+    the authority question. `resolve_tool` returns this struct verbatim when the
+    session holds `required`, so the caller may then dispatch into the existing
+    OsMcpServer handler by `name`."""
+    name: text
+    category: text
+    required: CapabilityKind
+
+struct ToolCapMap:
+    """The tool->capability table. A role's visible toolset is the subset of this
+    map whose `required` capability the role's session holds."""
+    tools: [LlmTool]
+
+impl ToolCapMap:
+    fn find(name: text) -> LlmTool?:
+        """Lookup a tool by name; nil if this map has no such tool at all."""
+        for t in self.tools:
+            if t.name == name:
+                return t
+        nil
+
+    me add(name: text, category: text, required: CapabilityKind):
+        self.tools.push(LlmTool(name: name, category: category, required: required))
+
+# ============================================================================
+# The default OsMcpServer tool -> capability map
+# ============================================================================
+
+fn _fread() -> CapabilityKind:
+    CapabilityKind.FileRead(path_prefix: "/")
+
+fn _fwrite() -> CapabilityKind:
+    CapabilityKind.FileWrite(path_prefix: "/")
+
+fn _ipc(port: text) -> CapabilityKind:
+    CapabilityKind.IpcConnect(port_name: port)
+
+fn _calendar(rights: u32) -> CapabilityKind:
+    CapabilityKind.SharedDataset(object_id: CALENDAR_OBJ, generation: CALENDAR_GEN, rights: rights)
+
+fn os_mcp_tool_cap_map() -> ToolCapMap:
+    """Map every OsMcpServer tool (plus the two headline role tools, ticket +
+    calendar) to the ONE capability it requires.
+
+    Path-bearing file tools use a root-level presence probe: `resolve_tool` is a
+    ROLE-LEVEL gate ("does this role hold file authority at all"); the concrete
+    path is authorized later, at call time, against the session's actual
+    prefix-scoped FileRead/FileWrite cap. Port tools (window/ui/screen/tickets)
+    require an EXACT service endpoint — capability_kind_allows matches IpcConnect
+    only by exact port, so holding `svc.window` never leaks `svc.tickets`."""
+    var m = ToolCapMap(tools: [])
+
+    # --- File: read family needs FileRead, write needs FileWrite ---
+    m.add("file_read",   "file", _fread())
+    m.add("file_list",   "file", _fread())
+    m.add("file_search", "file", _fread())
+    m.add("file_write",  "file", _fwrite())
+
+    # --- Process: spawn/enumerate need ProcessSpawn, kill needs ProcessSignalAny ---
+    m.add("process_list",  "process", CapabilityKind.ProcessSpawn)
+    m.add("process_spawn", "process", CapabilityKind.ProcessSpawn)
+    m.add("process_kill",  "process", CapabilityKind.ProcessSignalAny)
+
+    # --- Window + Widget: the compositor service endpoint ---
+    m.add("window_create", "window", _ipc(SVC_WINDOW))
+    m.add("window_close",  "window", _ipc(SVC_WINDOW))
+    m.add("window_list",   "window", _ipc(SVC_WINDOW))
+    m.add("window_focus",  "window", _ipc(SVC_WINDOW))
+    m.add("widget_set",    "widget", _ipc(SVC_WINDOW))
+    m.add("widget_read",   "widget", _ipc(SVC_WINDOW))
+    m.add("widget_action", "widget", _ipc(SVC_WINDOW))
+
+    # --- UI access: the accessibility adapter service endpoint ---
+    m.add("ui_access_snapshot",         "ui_access", _ipc(SVC_UI))
+    m.add("ui_access_surface",          "ui_access", _ipc(SVC_UI))
+    m.add("ui_access_find",             "ui_access", _ipc(SVC_UI))
+    m.add("ui_access_act",              "ui_access", _ipc(SVC_UI))
+    m.add("ui_access_history",          "ui_access", _ipc(SVC_UI))
+    m.add("ui_access_observe",          "ui_access", _ipc(SVC_UI))
+    m.add("ui_access_state",            "ui_access", _ipc(SVC_UI))
+    m.add("ui_access_query",            "ui_access", _ipc(SVC_UI))
+    m.add("ui_access_ensure",           "ui_access", _ipc(SVC_UI))
+    m.add("ui_access_value",            "ui_access", _ipc(SVC_UI))
+    m.add("ui_access_adapter_snapshot", "ui_access", _ipc(SVC_UI))
+    m.add("ui_access_visual_probe",     "ui_access", _ipc(SVC_UI))
+
+    # --- Screen capture ---
+    m.add("screenshot",       "screen", _ipc(SVC_SCREEN))
+    m.add("screen_read_text", "screen", _ipc(SVC_SCREEN))
+
+    # --- System: read-only info needs SystemTime; exec spawns => ProcessSpawn ---
+    m.add("system_info", "system", CapabilityKind.SystemTime)
+    m.add("system_exec", "system", CapabilityKind.ProcessSpawn)
+
+    # --- Headline role tools: ticketing vs scheduling ---
+    m.add("ticket_submit",  "ticket",   _ipc(SVC_TICKETS))
+    m.add("ticket_read",    "ticket",   _ipc(SVC_TICKETS))
+    m.add("calendar_read",  "calendar", _calendar(CAP_RIGHT_READ))
+    m.add("calendar_write", "calendar", _calendar(CAP_RIGHT_READ + CAP_RIGHT_WRITE))
+
+    m
+
+# ============================================================================
+# resolve_tool — the capability-scoped resolver
+# ============================================================================
+
+fn resolve_tool_in(session: LlmSession, map: ToolCapMap, tool_name: text) -> LlmTool?:
+    """Resolve `tool_name` for `session` against an explicit tool map.
+
+    Returns the tool ONLY when the session holds the capability the tool requires.
+    Two ways to get `nil`, both indistinguishable to the caller (no probing
+    surface): the map has no such tool, OR the session lacks the required cap."""
+    val t_opt = map.find(tool_name)
+    if t_opt == nil:
+        return nil
+    val t = t_opt
+    if session.can(t.required):
+        return t
+    nil
+
+fn resolve_tool(session: LlmSession, tool_name: text) -> LlmTool?:
+    """Resolve `tool_name` for `session` against the default OsMcpServer tool map.
+    The session's C-Space IS the menu: absent capability => the tool is nil, as if
+    it never existed."""
+    resolve_tool_in(session, os_mcp_tool_cap_map(), tool_name)
+
+fn available_tool_names(session: LlmSession, map: ToolCapMap) -> [text]:
+    """The full visible toolset for a session: every tool whose required cap the
+    session holds. This is what an MCP `tools/list` for this role would return —
+    NOT the whole server surface, only the role's authorized subset."""
+    var out: [text] = []
+    for t in map.tools:
+        if session.can(t.required):
+            out.push(t.name)
+    out

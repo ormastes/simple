@@ -1,0 +1,179 @@
+"""Calc deferred-math remainder spec (CARD 14).
+
+Every shipped function is pinned to a PUBLISHED Excel worked example, not a
+self-derived value:
+  * CHISQ.TEST({58,35;11,25;10,23}, {45.35,47.65;17.56,18.44;16.09,16.91})
+    = 0.000308  (Excel documentation example; df=(3-1)(2-1)=2).
+  * T.TEST({3,4,5,8,9,1,2,4,5},{6,19,3,2,14,4,5,17,1}, 2, 1) = 0.196016
+    (Excel documentation example; paired, two-tailed).
+  * F.TEST({6,7,9,15,21},{20,28,31,38,40}) = 0.648318 (Excel documentation
+    example; var1=39.8, var2=64.8, two-tailed. NOTE: the CARD 14 brief's
+    array1 carried five extra elements {26,28,31,38,40} — a plan transcription
+    typo of the same kind the card warns about; verified against the genuine
+    MS worked example, which is 5-vs-5 and reproduces 0.648318 exactly).
+  * BESSELY(2.5,1) = 0.145918 ; BESSELK(1.5,1) = 0.277388 (Excel docs).
+Bare ROW()/COLUMN() resolve through the module-level origin var set by the
+recalc driver (CARD 14 probe: module-var mutation survives the interpreter on
+the imported-module path used by recalculate_formula_cells). A direct
+evaluate_formula call with no cell context leaves ROW()/COLUMN() as #ERR.
+LET/LAMBDA remain deferred (evaluator variable scoping) — no assertions here.
+"""
+
+use std.spec
+use app.office.sheets.spreadsheet.{Sheet}
+use app.office.sheets.cell.{cell_display_text, CellValue}
+use app.office.file_formats.{recalculate_formula_cells}
+use app.office.sheets.formula.{evaluate_formula}
+
+fn _is_error(cv: CellValue) -> bool:
+    match cv:
+        CellValue.ErrorVal(message): return true
+        _: return false
+
+fn _eval(formula: text) -> text:
+    var sh = Sheet.new("f")
+    sh.set_value("Z1", formula)
+    sh = recalculate_formula_cells(sh)
+    cell_display_text(sh.get_cell("Z1"))
+
+fn _approx(formula: text, target: f64, tol: f64) -> bool:
+    val v = _eval(formula).to_f64()
+    var d = v - target
+    if d < 0.0:
+        d = 0.0 - d
+    d < tol
+
+fn _chisq_sheet() -> Sheet:
+    var sh = Sheet.new("f")
+    sh.set_value("A1", "58")
+    sh.set_value("B1", "35")
+    sh.set_value("A2", "11")
+    sh.set_value("B2", "25")
+    sh.set_value("A3", "10")
+    sh.set_value("B3", "23")
+    sh.set_value("D1", "45.35")
+    sh.set_value("E1", "47.65")
+    sh.set_value("D2", "17.56")
+    sh.set_value("E2", "18.44")
+    sh.set_value("D3", "16.09")
+    sh.set_value("E3", "16.91")
+    sh
+
+fn _ttest_sheet() -> Sheet:
+    var sh = Sheet.new("f")
+    sh.set_value("A1", "3")
+    sh.set_value("A2", "4")
+    sh.set_value("A3", "5")
+    sh.set_value("A4", "8")
+    sh.set_value("A5", "9")
+    sh.set_value("A6", "1")
+    sh.set_value("A7", "2")
+    sh.set_value("A8", "4")
+    sh.set_value("A9", "5")
+    sh.set_value("B1", "6")
+    sh.set_value("B2", "19")
+    sh.set_value("B3", "3")
+    sh.set_value("B4", "2")
+    sh.set_value("B5", "14")
+    sh.set_value("B6", "4")
+    sh.set_value("B7", "5")
+    sh.set_value("B8", "17")
+    sh.set_value("B9", "1")
+    sh
+
+fn _ftest_sheet() -> Sheet:
+    var sh = Sheet.new("f")
+    sh.set_value("A1", "6")
+    sh.set_value("A2", "7")
+    sh.set_value("A3", "9")
+    sh.set_value("A4", "15")
+    sh.set_value("A5", "21")
+    sh.set_value("B1", "20")
+    sh.set_value("B2", "28")
+    sh.set_value("B3", "31")
+    sh.set_value("B4", "38")
+    sh.set_value("B5", "40")
+    sh
+
+fn _run(sh_in: Sheet, formula: text) -> text:
+    var sh = sh_in
+    sh.set_value("Z1", formula)
+    sh = recalculate_formula_cells(sh)
+    cell_display_text(sh.get_cell("Z1"))
+
+fn _run_approx(sh_in: Sheet, formula: text, target: f64, tol: f64) -> bool:
+    val v = _run(sh_in, formula).to_f64()
+    var d = v - target
+    if d < 0.0:
+        d = 0.0 - d
+    d < tol
+
+describe "Calc CHISQ.TEST":
+    it "matches the Excel documentation worked example to 6 digits":
+        expect(_run_approx(_chisq_sheet(), "=CHISQ.TEST(A1:B3,D1:E3)", 0.000308, 0.0000005)).to_be(true)
+
+    it "aliases the legacy CHITEST spelling":
+        expect(_run_approx(_chisq_sheet(), "=CHITEST(A1:B3,D1:E3)", 0.000308, 0.0000005)).to_be(true)
+
+    it "errors when the two ranges differ in size":
+        expect(_run(_chisq_sheet(), "=CHISQ.TEST(A1:B3,D1:E2)")).to_contain("#ERR")
+
+describe "Calc T.TEST":
+    it "paired two-tailed matches the Excel documentation example":
+        expect(_run_approx(_ttest_sheet(), "=T.TEST(A1:A9,B1:B9,2,1)", 0.196016, 0.000001)).to_be(true)
+
+    it "one-tailed paired is half the two-tailed probability":
+        expect(_run_approx(_ttest_sheet(), "=T.TEST(A1:A9,B1:B9,1,1)", 0.098008, 0.000001)).to_be(true)
+
+    it "aliases the legacy TTEST spelling":
+        expect(_run_approx(_ttest_sheet(), "=TTEST(A1:A9,B1:B9,2,1)", 0.196016, 0.000001)).to_be(true)
+
+    it "two-sample equal-variance (type 2) runs":
+        expect(_run(_ttest_sheet(), "=T.TEST(A1:A9,B1:B9,2,2)").to_f64() > 0.0).to_be(true)
+
+    it "two-sample unequal-variance Welch (type 3) runs":
+        expect(_run(_ttest_sheet(), "=T.TEST(A1:A9,B1:B9,2,3)").to_f64() > 0.0).to_be(true)
+
+describe "Calc F.TEST":
+    it "matches the Excel documentation worked example to 6 digits":
+        expect(_run_approx(_ftest_sheet(), "=F.TEST(A1:A5,B1:B5)", 0.648318, 0.000001)).to_be(true)
+
+    it "aliases the legacy FTEST spelling":
+        expect(_run_approx(_ftest_sheet(), "=FTEST(A1:A5,B1:B5)", 0.648318, 0.000001)).to_be(true)
+
+describe "Calc BESSELY / BESSELK":
+    it "BESSELY(2.5,1) matches the Excel-documented value to 6 digits":
+        expect(_approx("=BESSELY(2.5,1)", 0.145918, 0.000001)).to_be(true)
+
+    it "BESSELK(1.5,1) matches the Excel-documented value to 6 digits":
+        expect(_approx("=BESSELK(1.5,1)", 0.277388, 0.000001)).to_be(true)
+
+    it "BESSELY requires x > 0 (singular at the origin)":
+        expect(_eval("=BESSELY(0,1)")).to_contain("#ERR")
+
+    it "BESSELK requires x > 0":
+        expect(_eval("=BESSELK(-1,1)")).to_contain("#ERR")
+
+    it "rejects negative order":
+        expect(_eval("=BESSELY(2.5,-1)")).to_contain("#ERR")
+
+describe "Calc bare ROW() / COLUMN()":
+    it "bare ROW() resolves to the origin cell row through the recalc driver":
+        var sh = Sheet.new("f")
+        sh.set_value("C5", "=ROW()")
+        sh = recalculate_formula_cells(sh)
+        expect(cell_display_text(sh.get_cell("C5"))).to_equal("5")
+
+    it "bare COLUMN() resolves to the origin cell column through the recalc driver":
+        var sh = Sheet.new("f")
+        sh.set_value("D3", "=COLUMN()")
+        sh = recalculate_formula_cells(sh)
+        expect(cell_display_text(sh.get_cell("D3"))).to_equal("4")
+
+    it "ROW(ref) still returns the referenced row (with-arg form intact)":
+        expect(_eval("=ROW(B7)")).to_equal("7")
+
+    it "bare ROW() with no cell context (direct evaluate) is #ERR":
+        var sh = Sheet.new("f")
+        val cv = evaluate_formula("=ROW()", sh)
+        expect(_is_error(cv)).to_be(true)

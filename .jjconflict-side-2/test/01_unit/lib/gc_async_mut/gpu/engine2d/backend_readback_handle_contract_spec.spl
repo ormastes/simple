@@ -1,0 +1,120 @@
+"""
+# Engine2D backend readback handle contract
+
+## Overview
+
+Prevents Engine2D backends from reporting `device_readback` through the
+zero-handle helper. A backend may use `device_readback` only when it also uses
+`engine2d_readback_with_handle(...)` with a concrete backend handle, or when a
+platform-specific runtime test proves equivalent handle propagation.
+
+This spec is intentionally source-contract evidence because several backends
+require platform runtimes that are not available on every CI host. Runtime
+queue, BrowserBackend, Vulkan, and CUDA wrappers provide the hardware evidence
+where those hosts are available.
+
+**Requirements:** doc/02_requirements/feature/host_gpu_lane.md
+**Research:** doc/01_research/language/host_gpu_lane/later_gpu_host_grammar.md
+**Plan:** doc/03_plan/sys_test/production_gui_web_host_gpu_queue_readback.md
+**Architecture:** doc/04_architecture/ui/simple_gui_stack.md
+**Design:** doc/05_design/host_gpu_lane.md
+
+## Syntax
+
+Backends with real device readback should preserve a concrete handle:
+
+```simple
+engine2d_readback_with_handle(pixels, "device_readback", backend_handle)
+```
+
+Backends without a concrete handle should use non-device provenance:
+
+```simple
+engine2d_readback(pixels, "cpu_mirror")
+engine2d_readback(pixels, "framebuffer_surface")
+engine2d_readback(pixels, "not_requested")
+engine2d_readback_with_handle(pixels, "surface_upload", surface_handle)
+engine2d_readback_with_handle(pixels, "swapchain_present", swapchain_handle)
+```
+
+## Examples
+
+Vulkan, CUDA, OpenCL, Metal, OpenGL, ROCm, and initialized DirectX
+device-readback branches preserve
+their initialized backend handle. Baremetal framebuffer reads remain
+`framebuffer_surface` until `FramebufferSurface` exposes a stable handle.
+DirectX may report `device_readback` only after its no-GC D3D11/DXVK readback
+target returns the expected pixel count through a positive readback handle;
+checksum is evidence but must not be the validity gate because an all-zero
+frame is valid. Otherwise it may report `swapchain_present` with a positive
+swapchain handle when presentation was accepted. WebGPU may report `surface_upload` with
+a positive surface handle when an initialized WebGPU surface accepted the frame
+upload. Presentation/upload provenance remains separate from production backend
+readback proof.
+
+## Acceptance
+
+- CPU mirror, cache, framebuffer-surface, and not-requested paths may use
+  `engine2d_readback(...)` with handle `0`; WebGPU surface-upload receipts may
+  use `engine2d_readback_with_handle(...)` with non-device `surface_upload`, and
+  DirectX presentation receipts may use non-device `swapchain_present`.
+- DirectX `device_readback` must be gated by `last_readback_ok`, a positive
+  `readback_handle`, and exact no-GC readback pixel count.
+- Device readback paths must not use the zero-handle helper.
+- Backends without a concrete handle must use a non-device provenance string
+  until their API exposes one.
+"""
+
+# @tag: unit, gpu, engine2d, backend_handle
+
+use std.spec
+
+extern fn rt_file_read_text(path: text) -> text
+
+fn zero_handle_device_readback_violations(path: text) -> text:
+    val source = rt_file_read_text(path)
+    var violations = ""
+    if source.contains("engine2d_readback(copy, \"device_readback\")"):
+        violations = violations + path + ": copy helper used for device_readback\n"
+    if source.contains("engine2d_readback(self.host_buf, \"device_readback\")"):
+        violations = violations + path + ": host_buf helper used for device_readback\n"
+    if source.contains("engine2d_readback(self.sw.read_pixels(), \"device_readback\")"):
+        violations = violations + path + ": software mirror helper used for device_readback\n"
+    if source.contains("engine2d_readback(_read_u32_pixels_from_host"):
+        violations = violations + path + ": host readback helper used without backend handle\n"
+    if source.contains("source = \"device_readback\"") and not source.contains("engine2d_readback_with_handle(copy, source, self.d_framebuffer.ptr)") and not source.contains("engine2d_readback_with_handle(copy, source, self.d_framebuffer)"):
+        violations = violations + path + ": variable device_readback source missing framebuffer handle\n"
+    if source.contains("val source = if self.direct_fb: \"device_readback\"") and not source.contains("engine2d_readback_with_handle(copy, source, self.resource_id.to_i64())"):
+        violations = violations + path + ": direct framebuffer device_readback source missing resource handle\n"
+    if path.contains("backend_directx.spl") and source.contains("\"device_readback\""):
+        if not source.contains("self.last_readback_ok and self.readback_handle > 0"):
+            violations = violations + path + ": DirectX device_readback missing positive readback handle gate\n"
+        if not source.contains("readback.pixel_count == expected_count"):
+            violations = violations + path + ": DirectX device_readback missing exact pixel-count gate\n"
+        if source.contains("last_readback_pixels"):
+            violations = violations + path + ": DirectX GC adapter must not cache a duplicate readback pixel buffer\n"
+        if not source.contains("engine2d_readback_with_handle(readback.pixels, \"device_readback\", self.readback_handle)"):
+            violations = violations + path + ": DirectX device_readback missing readback handle propagation\n"
+    if path.contains("backend_vulkan.spl") and source.contains("\"device_readback\""):
+        if not source.contains("engine2d_readback_with_identity(") or not source.contains("self.session.device"):
+            violations = violations + path + ": Vulkan device readback missing retained session identity\n"
+    if path.contains("backend_rocm.spl") and source.contains("\"device_readback\""):
+        if not source.contains("engine2d_readback_with_identity(") or not source.contains("self.device_identity"):
+            violations = violations + path + ": ROCm device readback missing retained UUID identity\n"
+    violations
+
+describe "Engine2D backend readback handle contract":
+
+    it "does not classify zero-handle helper readbacks as device readback":
+        var violations = ""
+        violations = violations + zero_handle_device_readback_violations("src/lib/gc_async_mut/gpu/engine2d/backend_baremetal.spl")
+        violations = violations + zero_handle_device_readback_violations("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        violations = violations + zero_handle_device_readback_violations("src/lib/gc_async_mut/gpu/engine2d/backend_directx.spl")
+        violations = violations + zero_handle_device_readback_violations("src/lib/gc_async_mut/gpu/engine2d/backend_intel.spl")
+        violations = violations + zero_handle_device_readback_violations("src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl")
+        violations = violations + zero_handle_device_readback_violations("src/lib/gc_async_mut/gpu/engine2d/backend_opencl.spl")
+        violations = violations + zero_handle_device_readback_violations("src/lib/gc_async_mut/gpu/engine2d/backend_opengl.spl")
+        violations = violations + zero_handle_device_readback_violations("src/lib/gc_async_mut/gpu/engine2d/backend_rocm.spl")
+        violations = violations + zero_handle_device_readback_violations("src/lib/gc_async_mut/gpu/engine2d/backend_virtio_gpu.spl")
+        violations = violations + zero_handle_device_readback_violations("src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl")
+        expect(violations).to_equal("")

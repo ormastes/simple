@@ -1,0 +1,126 @@
+"""SmartArt diagram spec.
+
+Verifies the SmartArt-style diagram model in `app.office.slides.smartart`:
+auto-layout for "process" (horizontal chain), "list" (vertical stack), and
+"hierarchy" (level-banded tree) diagrams, plus SVG rendering with the
+expected rects and connector lines. All positions below are hand-computed
+from the stated layout rules, not just re-derived from the implementation.
+"""
+
+use std.spec
+use app.office.slides.smartart.{node_new, diagram_new, diagram_add, diagram_layout, diagram_to_svg, diagram_node_count}
+
+describe "smartart: process layout (horizontal chain)":
+    """A 3-node process chain A->B->C laid out into 900x200: equal-width
+    boxes of 900/3 = 300, full height, left-to-right: A@0, B@300, C@600."""
+
+    it "places three equal-width boxes left to right at x=0,300,600":
+        var diagram = diagram_new("process")
+        diagram = diagram_add(diagram, node_new("A", "Start", 0))
+        diagram = diagram_add(diagram, node_new("B", "Middle", 0))
+        diagram = diagram_add(diagram, node_new("C", "End", 0))
+        val lines = diagram_layout(diagram, 900, 200)
+        expect(lines).to_equal([
+            "A@0,0 300x200: Start",
+            "B@300,0 300x200: Middle",
+            "C@600,0 300x200: End"
+        ])
+
+    it "renders 3 rects and 2 connector lines chaining box N to N+1 center-to-center":
+        var diagram = diagram_new("process")
+        diagram = diagram_add(diagram, node_new("A", "Start", 0))
+        diagram = diagram_add(diagram, node_new("B", "Middle", 0))
+        diagram = diagram_add(diagram, node_new("C", "End", 0))
+        val svg = diagram_to_svg(diagram, 900, 200)
+        val rect_parts = svg.split("<rect")
+        val line_parts = svg.split("<line")
+        expect(rect_parts.len() - 1).to_equal(3)
+        expect(line_parts.len() - 1).to_equal(2)
+        # Box centers: A@150,100  B@450,100  C@750,100 (each box is 300x200)
+        expect(svg).to_contain("<line x1=\"150\" y1=\"100\" x2=\"450\" y2=\"100\"/>")
+        expect(svg).to_contain("<line x1=\"450\" y1=\"100\" x2=\"750\" y2=\"100\"/>")
+
+describe "smartart: list layout (vertical stack)":
+    """A 3-node list laid out into 400x300: equal-height boxes of 300/3 =
+    100, full width, top-to-bottom: same x=0, increasing y=0,100,200."""
+
+    it "places three full-width boxes top to bottom at y=0,100,200":
+        var diagram = diagram_new("list")
+        diagram = diagram_add(diagram, node_new("X", "First", 0))
+        diagram = diagram_add(diagram, node_new("Y", "Second", 0))
+        diagram = diagram_add(diagram, node_new("Z", "Third", 0))
+        val lines = diagram_layout(diagram, 400, 300)
+        expect(lines).to_equal([
+            "X@0,0 400x100: First",
+            "Y@0,100 400x100: Second",
+            "Z@0,200 400x100: Third"
+        ])
+
+    it "renders 3 rects with no connector lines":
+        var diagram = diagram_new("list")
+        diagram = diagram_add(diagram, node_new("X", "First", 0))
+        diagram = diagram_add(diagram, node_new("Y", "Second", 0))
+        val svg = diagram_to_svg(diagram, 400, 200)
+        val rect_parts = svg.split("<rect")
+        val line_parts = svg.split("<line")
+        expect(rect_parts.len() - 1).to_equal(2)
+        expect(line_parts.len() - 1).to_equal(0)
+
+describe "smartart: hierarchy layout (level-banded tree)":
+    """A 1-root + 2-child hierarchy laid out into 900x400: widest level
+    (level 1, 2 nodes) sets box width = 900/2 = 450; band height =
+    400/2 = 200. Root (count=1) is centered: left_margin=(900-450)/2=225,
+    so root@225,0. Children (count=2) fill the row: left_margin=0, so
+    child0@0,200 and child1@450,200 — one full band lower than the root."""
+
+    it "centers the root box at the top":
+        var diagram = diagram_new("hierarchy")
+        diagram = diagram_add(diagram, node_new("R", "Root", 0))
+        diagram = diagram_add(diagram, node_new("C1", "Child 1", 1))
+        diagram = diagram_add(diagram, node_new("C2", "Child 2", 1))
+        val lines = diagram_layout(diagram, 900, 400)
+        expect(lines[0]).to_equal("R@225,0 450x200: Root")
+
+    it "places the children on a lower row spread across the width":
+        var diagram = diagram_new("hierarchy")
+        diagram = diagram_add(diagram, node_new("R", "Root", 0))
+        diagram = diagram_add(diagram, node_new("C1", "Child 1", 1))
+        diagram = diagram_add(diagram, node_new("C2", "Child 2", 1))
+        val lines = diagram_layout(diagram, 900, 400)
+        expect(lines[1]).to_equal("C1@0,200 450x200: Child 1")
+        expect(lines[2]).to_equal("C2@450,200 450x200: Child 2")
+
+    it "renders 3 rects and 2 connector lines from each child to the root":
+        var diagram = diagram_new("hierarchy")
+        diagram = diagram_add(diagram, node_new("R", "Root", 0))
+        diagram = diagram_add(diagram, node_new("C1", "Child 1", 1))
+        diagram = diagram_add(diagram, node_new("C2", "Child 2", 1))
+        val svg = diagram_to_svg(diagram, 900, 400)
+        val rect_parts = svg.split("<rect")
+        val line_parts = svg.split("<line")
+        expect(rect_parts.len() - 1).to_equal(3)
+        expect(line_parts.len() - 1).to_equal(2)
+        expect(svg).to_contain("<line x1=\"450\" y1=\"100\" x2=\"225\" y2=\"300\"/>")
+        expect(svg).to_contain("<line x1=\"450\" y1=\"100\" x2=\"675\" y2=\"300\"/>")
+
+describe "smartart: node count":
+    """diagram_node_count reports the number of nodes added, regardless of
+    kind."""
+
+    it "counts nodes as they are added":
+        var diagram = diagram_new("list")
+        expect(diagram_node_count(diagram)).to_equal(0)
+        diagram = diagram_add(diagram, node_new("X", "First", 0))
+        diagram = diagram_add(diagram, node_new("Y", "Second", 0))
+        expect(diagram_node_count(diagram)).to_equal(2)
+
+    describe "deliberate-fail probe (fixed to green)":
+        """A probe that intentionally asserted the wrong node count first,
+        to confirm the example is actually exercised, then corrected."""
+
+        it "has exactly three nodes after three adds":
+            var diagram = diagram_new("process")
+            diagram = diagram_add(diagram, node_new("A", "Start", 0))
+            diagram = diagram_add(diagram, node_new("B", "Middle", 0))
+            diagram = diagram_add(diagram, node_new("C", "End", 0))
+            expect(diagram_node_count(diagram)).to_equal(3)

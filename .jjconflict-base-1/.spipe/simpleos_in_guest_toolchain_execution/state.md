@@ -1,0 +1,32 @@
+# Feature: simpleos_in_guest_toolchain_execution
+
+## Raw Request
+Work in /home/ormastes/dev/pub/simple on tracker doc/08_tracking/bug/simpleos_in_guest_toolchain_execution.md. You are not alone in the codebase: do not revert others' edits. Own only SimpleOS guest toolchain execution files/docs/tests directly related to this tracker plus .spipe/simpleos_in_guest_toolchain_execution/** and the tracker. Use $sp_dev workflow. Pure Simple is main; Rust is seed/tooling. Implement a concrete improvement or close with evidence if fixed, run focused smokes, update tracker. Report changed paths, tests, blockers.
+
+## Task Type
+bug
+
+## Refined Goal
+Improve or conclusively re-evaluate SimpleOS guest toolchain execution evidence without touching unrelated code or reverting concurrent edits.
+
+## Acceptance Criteria
+- AC-1: The tracker records the current status with fresh evidence from focused SimpleOS guest toolchain execution checks.
+- AC-2: Any code/test/doc change is limited to SimpleOS guest toolchain execution files, `.spipe/simpleos_in_guest_toolchain_execution/**`, and the tracker.
+- AC-3: If a concrete improvement is possible in pure Simple, it is implemented with focused smoke verification.
+- AC-4: If full in-guest compiler execution remains blocked, the remaining blockers are explicitly documented with evidence.
+
+## Scope Exclusions
+Unrelated dirty worktree files, broad toolchain cross-build implementation in Rust/C++ unless already present and needed, and release work.
+
+## Phase
+ship-done
+
+## Log
+- dev: Created state file with 4 acceptance criteria (type: bug)
+- impl: Added fs-exec prepared-task serial evidence after scheduler registration.
+- impl: Tightened toolchain VFS probe completion contract to require prepared-task markers.
+- verify: Focused check and smoke tests passed; real compiler payloads remain unbuilt.
+- ship: Refreshed tracker and real-OS audit references for the prepared-task evidence and corrected tracker path.
+- impl: Added a pure Simple guest-toolchain execution status gate so deploy status reports BLOCKED until real clang/rust payloads and bake enablement are present.
+- verify: Focused gate check passed, deploy_toolchains_status_spec passed 2/2, and deploy_toolchains --status runs via interpreter fallback and reports guest-toolchain-exec-gate BLOCKED with missing payload blockers.
+- ship: Updated tracker with the fresh blocker evidence; full in-guest compiler execution remains open.

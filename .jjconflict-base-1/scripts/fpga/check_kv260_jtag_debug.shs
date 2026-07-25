@@ -1,0 +1,153 @@
+#!/bin/sh
+# check_kv260_jtag_debug.shs — Lane B: attach OpenOCD to the Simple RISC-V debug
+# module in the KV260 rv32 SoC (through the BSCANE2 tunnel) and either VERIFY the
+# debug primitives or run a >=600 s soak-progress POLL. Programs nothing itself.
+#
+# Modes:
+#   verify  (default) — halt; read pc + x1..x31; set a breakpoint at the soak
+#                       loop; resume; confirm the hit; single-step twice; resume;
+#                       detach. PASS/FAIL per step.
+#   soak              — periodic NON-destructive poll for >=SOAK_SECONDS: halt,
+#                       read progress + golden GPRs (timestamped), resume. At the
+#                       end compare the golden GPR to GOLDEN_EXPECTED (Adler-32).
+#
+# FAIL-CLOSED: if the JTAG chain is held by hw_server/Vivado, or the board/DM is
+# absent (examine fails), the script prints `BLOCKED: <reason>` and exits non-zero
+# WITHOUT emitting PASS. The JTAG chain is single-client — this never runs while
+# hw_server/Vivado hold the FT4232H.
+#
+# Env knobs: OPENOCD, OPENOCD_CFG, SOAK_SECONDS(=600), POLL_INTERVAL(=30),
+#   PROGRESS_REG(=x29), GOLDEN_REG(=x28), GOLDEN_EXPECTED(hex, optional),
+#   BP_ADDR(=0x80000010), OUT_DIR.
+set -u
+
+MODE="${1:-verify}"
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+OPENOCD="${OPENOCD:-/usr/bin/openocd}"
+OPENOCD_CFG="${OPENOCD_CFG:-$REPO_ROOT/scripts/fpga/openocd_kv260_bscan.cfg}"
+SOAK_SECONDS="${SOAK_SECONDS:-600}"
+POLL_INTERVAL="${POLL_INTERVAL:-30}"
+PROGRESS_REG="${PROGRESS_REG:-x29}"
+GOLDEN_REG="${GOLDEN_REG:-x28}"
+GOLDEN_EXPECTED="${GOLDEN_EXPECTED:-}"
+BP_ADDR="${BP_ADDR:-0x80000010}"
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/build/fpga/jtag_debug}"
+STAMP="$(date +%Y%m%d_%H%M%S)"
+TRANSCRIPT="$OUT_DIR/jtag_${MODE}_${STAMP}.log"
+
+mkdir -p "$OUT_DIR"
+
+blocked() { echo "BLOCKED: $1"; echo "transcript: $TRANSCRIPT"; exit 3; }
+
+# ---- Pre-flight: tools + single-client guard --------------------------------
+[ -x "$OPENOCD" ] || blocked "openocd not found/executable at $OPENOCD"
+[ -f "$OPENOCD_CFG" ] || blocked "openocd cfg missing: $OPENOCD_CFG"
+# Vivado check patterns avoid pgrep self-match (Lane A note): match the binary
+# path 'lnx64.o/vivado', and hw_server explicitly.
+if pgrep -f 'lnx64.o/vivado' >/dev/null 2>&1; then
+  blocked "Vivado is running — it holds the JTAG chain (close Hardware Manager)"
+fi
+if pgrep -x hw_server >/dev/null 2>&1 || pgrep -f '[h]w_server' >/dev/null 2>&1; then
+  blocked "hw_server is running — kill it before OpenOCD (single-client chain)"
+fi
+
+# ---- Examine the DM (fail-closed) -------------------------------------------
+: > "$TRANSCRIPT"
+echo "== $MODE @ $STAMP ==" >> "$TRANSCRIPT"
+if ! "$OPENOCD" -f "$OPENOCD_CFG" -c "targets" -c "shutdown" >> "$TRANSCRIPT" 2>&1; then
+  cat "$TRANSCRIPT"
+  blocked "OpenOCD could not examine the debug module (board absent / bitstream not debug-enabled / tunnel mismatch)"
+fi
+grep -qiE 'riscv|hart' "$TRANSCRIPT" || blocked "no RISC-V hart reported by examine"
+
+case "$MODE" in
+  verify)
+    "$OPENOCD" -f "$OPENOCD_CFG" \
+      -c "halt" \
+      -c "echo \"PC: [reg pc]\"" \
+      -c "foreach r {x1 x2 x3 x5 x8 x10 x28 x29} { echo \"$r = [reg $r]\" }" \
+      -c "bp $BP_ADDR 4 hw" \
+      -c "resume" \
+      -c "wait_halt 5000" \
+      -c "echo \"HIT_PC: [reg pc]\"" \
+      -c "step" -c "echo \"STEP1_PC: [reg pc]\"" \
+      -c "step" -c "echo \"STEP2_PC: [reg pc]\"" \
+      -c "rbp $BP_ADDR" \
+      -c "resume" \
+      -c "shutdown" >> "$TRANSCRIPT" 2>&1
+    RC=$?
+    cat "$TRANSCRIPT"
+    HIT="$(grep -oE 'HIT_PC: 0x[0-9a-fA-F]+' "$TRANSCRIPT" | head -1 | awk '{print $2}')"
+    FAIL=0
+    [ $RC -eq 0 ] || { echo "FAIL: openocd session rc=$RC"; FAIL=1; }
+    grep -q "PC: 0x" "$TRANSCRIPT" && echo "PASS halt+read-pc" || { echo "FAIL halt/read-pc"; FAIL=1; }
+    grep -q "x1 = 0x" "$TRANSCRIPT" && echo "PASS read-gpr" || { echo "FAIL read-gpr"; FAIL=1; }
+    if [ -n "${HIT:-}" ] && [ "$(printf '%d' "$HIT" 2>/dev/null)" = "$(printf '%d' "$BP_ADDR" 2>/dev/null)" ]; then
+      echo "PASS breakpoint-hit ($HIT)"
+    else
+      echo "FAIL breakpoint-hit (HIT_PC='$HIT' expected $BP_ADDR)"; FAIL=1
+    fi
+    grep -q "STEP1_PC: 0x" "$TRANSCRIPT" && grep -q "STEP2_PC: 0x" "$TRANSCRIPT" \
+      && echo "PASS single-step-x2" || { echo "FAIL single-step"; FAIL=1; }
+    echo "transcript: $TRANSCRIPT"
+    if [ $FAIL -eq 0 ]; then echo "CHECK_KV260_JTAG_DEBUG: PASS"; exit 0
+    else echo "CHECK_KV260_JTAG_DEBUG: FAIL"; exit 1; fi
+    ;;
+
+  soak)
+    # One OpenOCD session runs a tcl poll loop: halt / read / resume every
+    # POLL_INTERVAL for >= SOAK_SECONDS, timestamped, then read the final golden.
+    TCL="$OUT_DIR/soak_poll_${STAMP}.tcl"
+    cat > "$TCL" <<TCLEOF
+set deadline [expr {[clock seconds] + $SOAK_SECONDS}]
+set n 0
+while {[clock seconds] < \$deadline} {
+    halt
+    set pc [reg pc]
+    set prog [reg $PROGRESS_REG]
+    set gold [reg $GOLDEN_REG]
+    echo "POLL [clock seconds] n=\$n pc=\$pc $PROGRESS_REG=\$prog $GOLDEN_REG=\$gold"
+    resume
+    incr n
+    sleep [expr {$POLL_INTERVAL * 1000}]
+}
+halt
+echo "FINAL [clock seconds] $GOLDEN_REG=[reg $GOLDEN_REG] $PROGRESS_REG=[reg $PROGRESS_REG]"
+resume
+shutdown
+TCLEOF
+    START=$(date +%s)
+    "$OPENOCD" -f "$OPENOCD_CFG" -f "$TCL" >> "$TRANSCRIPT" 2>&1
+    RC=$?
+    END=$(date +%s)
+    DUR=$((END - START))
+    cat "$TRANSCRIPT"
+    FAIL=0
+    [ $RC -eq 0 ] || { echo "FAIL: openocd soak session rc=$RC"; FAIL=1; }
+    POLLS=$(grep -c '^POLL ' "$TRANSCRIPT" 2>/dev/null | tr -d ' ')
+    [ "${POLLS:-0}" -ge 2 ] || { echo "FAIL: too few polls ($POLLS)"; FAIL=1; }
+    if [ "$DUR" -lt "$SOAK_SECONDS" ]; then
+      echo "FAIL: soak ran ${DUR}s < required ${SOAK_SECONDS}s"; FAIL=1
+    else
+      echo "PASS duration (${DUR}s >= ${SOAK_SECONDS}s)"
+    fi
+    GOLD_FINAL="$(grep -oE "FINAL .*${GOLDEN_REG}=[^ ]+" "$TRANSCRIPT" | grep -oE "${GOLDEN_REG}=.*" | head -1)"
+    echo "golden(final): $GOLD_FINAL"
+    if [ -n "$GOLDEN_EXPECTED" ]; then
+      if echo "$GOLD_FINAL" | grep -qiE "0x0*${GOLDEN_EXPECTED#0x}"; then
+        echo "PASS golden-compare (== $GOLDEN_EXPECTED)"
+      else
+        echo "FAIL golden-compare (got '$GOLD_FINAL' want $GOLDEN_EXPECTED)"; FAIL=1
+      fi
+    else
+      echo "NOTE: GOLDEN_EXPECTED unset — golden reported, not compared (INCONCLUSIVE)"
+      FAIL=1
+    fi
+    echo "transcript: $TRANSCRIPT"
+    if [ $FAIL -eq 0 ]; then echo "CHECK_KV260_JTAG_DEBUG: PASS"; exit 0
+    else echo "CHECK_KV260_JTAG_DEBUG: FAIL"; exit 1; fi
+    ;;
+
+  *)
+    echo "usage: $0 [verify|soak]"; exit 2;;
+esac

@@ -1,0 +1,241 @@
+"""LLDB DAP adapter specification tests.
+
+Tests the DAP protocol framing helpers, JSON request construction,
+sequence numbering, breakpoint tracking, and config factory.
+All tests exercise pure functions — no lldb-dap subprocess needed.
+
+Interpreter-mode compatible: no extern calls, no subprocess spawning.
+"""
+
+use std.nogc_sync_mut.dap.adapter.lldb_dap.{
+    dap_encode, dap_parse_content_length, dap_request,
+    json_get_text, json_get_bool, json_get_int,
+    lldb_config,
+    LldbDapAdapter,
+}
+use std.nogc_sync_mut.dap.adapter.mod.AdapterConfig
+
+# ============================================================================
+# DAP Content-Length framing
+# ============================================================================
+
+describe "DAP Content-Length framing":
+    it "encodes body with correct Content-Length header":
+        val body = "{\"seq\":1,\"type\":\"request\"}"
+        val encoded = dap_encode(body)
+        expect encoded.starts_with("Content-Length: ")
+        expect encoded.contains("\r\n\r\n")
+        expect encoded.ends_with(body)
+
+    it "header contains correct byte count":
+        val body = "hello"
+        val encoded = dap_encode(body)
+        expect encoded.starts_with("Content-Length: 5\r\n\r\n")
+
+    it "parses Content-Length from valid header":
+        val length = dap_parse_content_length("Content-Length: 42")
+        expect(length).to_equal(42)
+
+    it "parses Content-Length with extra whitespace":
+        val length = dap_parse_content_length("Content-Length:   128  ")
+        expect(length).to_equal(128)
+
+    it "returns -1 for malformed header":
+        val length = dap_parse_content_length("X-Custom: 99")
+        expect(length).to_equal(-1)
+
+    it "returns -1 for empty header":
+        val length = dap_parse_content_length("")
+        expect(length).to_equal(-1)
+
+# ============================================================================
+# DAP request JSON construction
+# ============================================================================
+
+describe "DAP request construction":
+    it "builds launch request with arguments":
+        val req = dap_request(1, "launch", "{\"program\":\"/a.out\"}")
+        expect req.contains("\"seq\":1")
+        expect req.contains("\"type\":\"request\"")
+        expect req.contains("\"command\":\"launch\"")
+        expect req.contains("\"arguments\":{\"program\":\"/a.out\"}")
+
+    it "builds continue request":
+        val req = dap_request(5, "continue", "{\"threadId\":1}")
+        expect req.contains("\"seq\":5")
+        expect req.contains("\"command\":\"continue\"")
+        expect req.contains("\"threadId\":1")
+
+    it "builds stepIn request":
+        val req = dap_request(3, "stepIn", "{\"threadId\":1}")
+        expect req.contains("\"command\":\"stepIn\"")
+        expect req.contains("\"seq\":3")
+
+    it "builds stackTrace request":
+        val req = dap_request(7, "stackTrace", "{\"threadId\":1,\"startFrame\":0,\"levels\":20}")
+        expect req.contains("\"command\":\"stackTrace\"")
+        expect req.contains("\"levels\":20")
+
+    it "builds evaluate request":
+        val req = dap_request(10, "evaluate", "{\"expression\":\"x+1\",\"context\":\"watch\"}")
+        expect req.contains("\"command\":\"evaluate\"")
+        expect req.contains("\"expression\":\"x+1\"")
+
+    it "builds request without arguments":
+        val req = dap_request(2, "disconnect", "")
+        expect req.contains("\"seq\":2")
+        expect req.contains("\"command\":\"disconnect\"")
+        expect not req.contains("\"arguments\"")
+
+# ============================================================================
+# Request sequence numbering
+# ============================================================================
+
+describe "Request sequence numbering":
+    it "sequence numbers increment across requests":
+        val r1 = dap_request(1, "initialize", "{}")
+        val r2 = dap_request(2, "launch", "{}")
+        val r3 = dap_request(3, "continue", "{}")
+        expect r1.contains("\"seq\":1")
+        expect r2.contains("\"seq\":2")
+        expect r3.contains("\"seq\":3")
+
+    it "sequence is embedded correctly in encoded message":
+        val body = dap_request(42, "pause", "{\"threadId\":1}")
+        val encoded = dap_encode(body)
+        expect encoded.contains("\"seq\":42")
+        expect encoded.contains("Content-Length:")
+
+# ============================================================================
+# JSON helper functions
+# ============================================================================
+
+describe "JSON helper functions":
+    it "extracts text field from JSON":
+        val json = "{\"name\":\"main\",\"value\":\"42\"}"
+        val name = json_get_text(json, "name")
+        expect(name).to_equal("main")
+
+    it "extracts numeric text field":
+        val json = "{\"line\":15,\"column\":0}"
+        val line = json_get_text(json, "line")
+        expect(line).to_equal("15")
+
+    it "returns empty for missing key":
+        val json = "{\"name\":\"test\"}"
+        val missing = json_get_text(json, "value")
+        expect(missing.len()).to_equal(0)
+
+    it "extracts boolean field true":
+        val json = "{\"success\":true,\"seq\":1}"
+        val success = json_get_bool(json, "success")
+        expect success == true
+
+    it "extracts boolean field false":
+        val json = "{\"success\":false}"
+        val success = json_get_bool(json, "success")
+        expect success == false
+
+    it "extracts integer field":
+        val json = "{\"variablesReference\":5,\"name\":\"x\"}"
+        val ref_val = json_get_int(json, "variablesReference")
+        expect(ref_val).to_equal(5)
+
+# ============================================================================
+# Config factory
+# ============================================================================
+
+describe "LLDB config factory":
+    it "creates correct AdapterConfig for lldb-dap":
+        val config = lldb_config("/path/to/program")
+        expect(config.adapter_type).to_equal("lldb-dap")
+        expect(config.program).to_equal("/path/to/program")
+        expect(config.host).to_equal("")
+        expect(config.port).to_equal(0)
+        expect(config.timeout_ms).to_equal(30000)
+        expect(config.architecture).to_equal("x86_64")
+
+    it "creates config with empty args":
+        val config = lldb_config("/a.out")
+        expect(config.args.len()).to_equal(0)
+
+# ============================================================================
+# Breakpoint JSON construction
+# ============================================================================
+
+describe "Breakpoint JSON construction":
+    it "builds setBreakpoints JSON for single breakpoint":
+        val json = LldbDapAdapter.build_breakpoints_json("/src/main.spl", [10])
+        expect json.contains("\"path\":\"/src/main.spl\"")
+        expect json.contains("\"line\":10")
+
+    it "builds setBreakpoints JSON for multiple breakpoints":
+        val json = LldbDapAdapter.build_breakpoints_json("/src/main.spl", [5, 15, 25])
+        expect json.contains("\"line\":5")
+        expect json.contains("\"line\":15")
+        expect json.contains("\"line\":25")
+
+    it "builds setBreakpoints JSON with empty lines":
+        val json = LldbDapAdapter.build_breakpoints_json("/src/main.spl", [])
+        expect json.contains("\"breakpoints\":[]")
+
+# ============================================================================
+# Hex conversion helpers
+# ============================================================================
+
+describe "Hex conversion helpers":
+    it "converts zero to hex":
+        val hex = LldbDapAdapter.to_hex(0)
+        expect(hex).to_equal("0x0")
+
+    it "converts positive value to hex":
+        val hex = LldbDapAdapter.to_hex(255)
+        expect(hex).to_equal("0xff")
+
+    it "converts large value to hex":
+        val hex = LldbDapAdapter.to_hex(4096)
+        expect(hex).to_equal("0x1000")
+
+    it "parses hex string to i64":
+        val value = LldbDapAdapter.parse_hex_i64("0xff")
+        expect(value).to_equal(255)
+
+    it "parses hex without prefix":
+        val value = LldbDapAdapter.parse_hex_i64("1a")
+        expect(value).to_equal(26)
+
+# ============================================================================
+# Variable and stack frame parsing
+# ============================================================================
+
+describe "Variable parsing":
+    it "parses empty variables response":
+        val result = LldbDapAdapter.parse_variables("{\"variables\":[]}")
+        expect result.is_ok()
+        val vars = result.ok.unwrap()
+        expect(vars.len()).to_equal(0)
+
+    it "parses single variable":
+        val json = "{\"variables\":[{\"name\":\"x\",\"value\":\"42\",\"type\":\"int\",\"variablesReference\":0}]}"
+        val result = LldbDapAdapter.parse_variables(json)
+        expect result.is_ok()
+        val vars = result.ok.unwrap()
+        expect(vars.len()).to_equal(1)
+        expect(vars[0].name).to_equal("x")
+        expect(vars[0].value).to_equal("42")
+
+describe "Stack frame parsing":
+    it "parses empty stack trace":
+        val result = LldbDapAdapter.parse_stack_frames("{\"stackFrames\":[]}")
+        expect result.is_ok()
+        val frames = result.ok.unwrap()
+        expect(frames.len()).to_equal(0)
+
+    it "parses single frame with source":
+        val json = "{\"stackFrames\":[{\"id\":0,\"name\":\"main\",\"source\":{\"path\":\"/src/main.spl\"},\"line\":10}]}"
+        val result = LldbDapAdapter.parse_stack_frames(json)
+        expect result.is_ok()
+        val frames = result.ok.unwrap()
+        expect(frames.len()).to_equal(1)
+        expect(frames[0].function_name).to_equal("main")
+        expect(frames[0].line).to_equal(10)

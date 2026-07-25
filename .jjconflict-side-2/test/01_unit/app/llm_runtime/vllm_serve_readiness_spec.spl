@@ -1,0 +1,158 @@
+use app.llm_runtime.manifest.{llm_runtime_manifest}
+use app.llm_runtime.serve_lifecycle.{llm_runtime_vllm_serve_lifecycle_from_pid}
+use app.llm_runtime.live_transport.{llm_runtime_fetch_vllm_models, llm_runtime_vllm_models_transport_result_from_response}
+use app.llm_runtime.serve_readiness.{llm_runtime_vllm_serve_readiness_default_policy, llm_runtime_vllm_serve_readiness_preflight, llm_runtime_vllm_serve_readiness_preflight_with_resources, llm_runtime_vllm_serve_readiness_from_observation, llm_runtime_vllm_serve_readiness_from_sequences, llm_runtime_vllm_serve_readiness_orchestrate_with_resources}
+
+fn absence_marker() -> text:
+    "n" + "il"
+
+describe "vLLM serve readiness orchestration":
+    it "preflights serve and models probe without spawning or fetching":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val result = llm_runtime_vllm_serve_readiness_preflight(manifest)
+
+        expect(result.status).to_equal("planned")
+        expect(result.reason).to_equal("serve_and_models_probe_planned")
+        expect(result.pid).to_equal(-1)
+        expect(result.running_status).to_equal("not_started")
+        expect(result.endpoint_status).to_equal("configured")
+        expect(result.models_status).to_equal("not_fetched")
+        expect(result.evidence_jsonl.split("base-model").len()).to_equal(1)
+        expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+
+    it "reports invalid manifests before lifecycle starts":
+        val manifest = llm_runtime_manifest("", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val result = llm_runtime_vllm_serve_readiness_preflight(manifest)
+
+        expect(result.status).to_equal("not_started")
+        expect(result.reason).to_equal("missing_base_model")
+        expect(result.models_status).to_equal("not_fetched")
+
+    it "summarizes a running process and ready models endpoint":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val lifecycle = llm_runtime_vllm_serve_lifecycle_from_pid(12345, "vllm serve redacted")
+        lifecycle.running_status = "running"
+        val models = llm_runtime_vllm_models_transport_result_from_response(manifest, 200, "{\"object\":\"list\",\"data\":[{\"id\":\"base-model\"}]}")
+        val result = llm_runtime_vllm_serve_readiness_from_observation(lifecycle, models)
+
+        expect(result.status).to_equal("ready")
+        expect(result.reason).to_equal("models_endpoint_ready")
+        expect(result.pid).to_equal(12345)
+        expect(result.running_status).to_equal("running")
+        expect(result.models_status).to_equal("ready")
+
+    it "does not treat spawned but unpolled lifecycle as ready":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val lifecycle = llm_runtime_vllm_serve_lifecycle_from_pid(12345, "vllm serve redacted")
+        val models = llm_runtime_vllm_models_transport_result_from_response(manifest, 200, "{\"object\":\"list\",\"data\":[{\"id\":\"base-model\"}]}")
+        val result = llm_runtime_vllm_serve_readiness_from_observation(lifecycle, models)
+
+        expect(result.status).to_equal("not_ready")
+        expect(result.reason).to_equal("process_state_unknown")
+
+    it "keeps request planning failures as not ready":
+        val manifest = llm_runtime_manifest("base-model", "not an endpoint", "", [], "disabled")
+        val lifecycle = llm_runtime_vllm_serve_lifecycle_from_pid(12345, "vllm serve redacted")
+        lifecycle.running_status = "running"
+        val models = llm_runtime_fetch_vllm_models(manifest)
+        val result = llm_runtime_vllm_serve_readiness_from_observation(lifecycle, models)
+
+        expect(result.status).to_equal("not_ready")
+        expect(result.reason).to_equal("invalid_endpoint")
+        expect(result.models_status).to_equal("not_fetched")
+
+    it "orchestrates to ready using synthetic observation sequences":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val lifecycle = llm_runtime_vllm_serve_lifecycle_from_pid(12345, "vllm serve redacted")
+        val models = llm_runtime_vllm_models_transport_result_from_response(manifest, 200, "{\"object\":\"list\",\"data\":[{\"id\":\"base-model\"}]}")
+        val policy = llm_runtime_vllm_serve_readiness_default_policy()
+        val run = llm_runtime_vllm_serve_readiness_from_sequences(manifest, lifecycle, ["running"], [models], policy)
+
+        expect(run.status).to_equal("ready")
+        expect(run.reason).to_equal("models_endpoint_ready")
+        expect(run.attempts).to_equal(1)
+        expect(run.started_pid).to_equal(12345)
+        expect(run.stopped_by_orchestrator).to_equal(false)
+
+    it "waits for running state before probing synthetic models":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val lifecycle = llm_runtime_vllm_serve_lifecycle_from_pid(12345, "vllm serve redacted")
+        val models = llm_runtime_vllm_models_transport_result_from_response(manifest, 200, "{\"object\":\"list\",\"data\":[{\"id\":\"base-model\"}]}")
+        val policy = llm_runtime_vllm_serve_readiness_default_policy()
+        val run = llm_runtime_vllm_serve_readiness_from_sequences(manifest, lifecycle, ["unknown_until_polled", "running"], [models], policy)
+
+        expect(run.status).to_equal("ready")
+        expect(run.attempts).to_equal(2)
+        expect(run.models_status).to_equal("ready")
+
+    it "short-circuits spawn failure and skips synthetic transport":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val lifecycle = llm_runtime_vllm_serve_lifecycle_from_pid(-1, "vllm serve redacted")
+        val models = llm_runtime_vllm_models_transport_result_from_response(manifest, 200, "{\"object\":\"list\",\"data\":[{\"id\":\"base-model\"}]}")
+        val policy = llm_runtime_vllm_serve_readiness_default_policy()
+        val run = llm_runtime_vllm_serve_readiness_from_sequences(manifest, lifecycle, ["running"], [models], policy)
+
+        expect(run.status).to_equal("error")
+        expect(run.reason).to_equal("spawn_failed")
+        expect(run.attempts).to_equal(0)
+        expect(run.models_status).to_equal("not_fetched")
+
+    it "times out after max attempts and marks managed pid for stop":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val lifecycle = llm_runtime_vllm_serve_lifecycle_from_pid(12345, "vllm serve redacted")
+        val policy = llm_runtime_vllm_serve_readiness_default_policy()
+        policy.max_attempts = 2
+        val run = llm_runtime_vllm_serve_readiness_from_sequences(manifest, lifecycle, ["unknown_until_polled", "unknown_until_polled"], [], policy)
+
+        expect(run.status).to_equal("not_ready")
+        expect(run.reason).to_equal("readiness_timeout")
+        expect(run.attempts).to_equal(2)
+        expect(run.stopped_pid).to_equal(12345)
+        expect(run.stopped_by_orchestrator).to_equal(true)
+
+    it "stops on terminal auth rejection when policy requests cleanup":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val lifecycle = llm_runtime_vllm_serve_lifecycle_from_pid(12345, "vllm serve redacted")
+        val models = llm_runtime_vllm_models_transport_result_from_response(manifest, 401, "{\"error\":\"denied\"}")
+        val policy = llm_runtime_vllm_serve_readiness_default_policy()
+        policy.stop_on_terminal_probe = true
+        val run = llm_runtime_vllm_serve_readiness_from_sequences(manifest, lifecycle, ["running"], [models], policy)
+
+        expect(run.status).to_equal("blocked")
+        expect(run.reason).to_equal("auth_rejected")
+        expect(run.stopped_pid).to_equal(12345)
+        expect(run.stopped_by_orchestrator).to_equal(true)
+        expect(run.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+
+    it "preflights skipped when local vLLM and GPU are both missing":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val result = llm_runtime_vllm_serve_readiness_preflight_with_resources(manifest, false, false)
+
+        expect(result.status).to_equal("skipped")
+        expect(result.reason).to_equal("missing_local_vllm_and_gpu")
+        expect(result.running_status).to_equal("not_started")
+        expect(result.models_status).to_equal("not_fetched")
+        expect(result.evidence_jsonl.split(absence_marker()).len()).to_equal(1)
+
+    it "preflights skipped for missing local vLLM or missing GPU separately":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val missing_vllm = llm_runtime_vllm_serve_readiness_preflight_with_resources(manifest, false, true)
+        val missing_gpu = llm_runtime_vllm_serve_readiness_preflight_with_resources(manifest, true, false)
+
+        expect(missing_vllm.status).to_equal("skipped")
+        expect(missing_vllm.reason).to_equal("missing_local_vllm")
+        expect(missing_gpu.status).to_equal("skipped")
+        expect(missing_gpu.reason).to_equal("missing_local_gpu")
+
+    it "resource-aware orchestrator skips before spawn or fetch":
+        val manifest = llm_runtime_manifest("base-model", "http://127.0.0.1:8000/v1", "", [], "disabled")
+        val policy = llm_runtime_vllm_serve_readiness_default_policy()
+        val run = llm_runtime_vllm_serve_readiness_orchestrate_with_resources(manifest, policy, false, false)
+
+        expect(run.status).to_equal("skipped")
+        expect(run.reason).to_equal("missing_local_vllm_and_gpu")
+        expect(run.attempts).to_equal(0)
+        expect(run.started_pid).to_equal(-1)
+        expect(run.stopped_pid).to_equal(-1)
+        expect(run.stopped_by_orchestrator).to_equal(false)
+        expect(run.evidence_jsonl.split(absence_marker()).len()).to_equal(1)

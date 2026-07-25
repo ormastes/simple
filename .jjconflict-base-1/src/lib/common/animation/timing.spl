@@ -1,0 +1,142 @@
+# CSS animation timing functions (easing functions).
+# Pure functions for evaluating standard CSS easing curves: linear, ease, ease-in,
+# ease-out, ease-in-out, cubic-bezier, and steps.
+
+enum TimingFunction:
+    """CSS timing function variants."""
+    Linear
+    Ease
+    EaseIn
+    EaseOut
+    EaseInOut
+    CubicBezier(x1: f64, y1: f64, x2: f64, y2: f64)
+    Steps(steps: i64, jump_type: text)
+
+fn evaluate_timing(timing: TimingFunction, t: f64) -> f64:
+    """Evaluate a timing function at normalized progress t ∈ [0.0, 1.0].
+
+    Returns the eased progress value.
+    """
+    match timing:
+        TimingFunction.Linear:
+            t
+        TimingFunction.Ease:
+            cubic_bezier_at(t, 0.25, 0.1, 0.25, 1.0)
+        TimingFunction.EaseIn:
+            cubic_bezier_at(t, 0.42, 0.0, 1.0, 1.0)
+        TimingFunction.EaseOut:
+            cubic_bezier_at(t, 0.0, 0.0, 0.58, 1.0)
+        TimingFunction.EaseInOut:
+            cubic_bezier_at(t, 0.42, 0.0, 0.58, 1.0)
+        TimingFunction.CubicBezier(x1, y1, x2, y2):
+            cubic_bezier_at(t, x1, y1, x2, y2)
+        TimingFunction.Steps(steps, jump_type):
+            evaluate_steps(t, steps, jump_type)
+
+fn parse_timing_function(timing_str: text) -> TimingFunction:
+    """Parse a CSS timing function string.
+
+    Recognizes:
+    - "linear"
+    - "ease", "ease-in", "ease-out", "ease-in-out"
+    - For cubic-bezier and steps, returns the best matching enum variant.
+
+    Default fallback: "ease".
+    """
+    val trimmed = timing_str.trim()
+
+    if trimmed == "linear":
+        TimingFunction.Linear
+    else if trimmed == "ease":
+        TimingFunction.Ease
+    else if trimmed == "ease-in":
+        TimingFunction.EaseIn
+    else if trimmed == "ease-out":
+        TimingFunction.EaseOut
+    else if trimmed == "ease-in-out":
+        TimingFunction.EaseInOut
+    else:
+        # Default fallback for unrecognized timing functions
+        TimingFunction.Ease
+
+fn cubic_bezier_at(t: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64:
+    """Evaluate a cubic Bézier curve at normalized time t ∈ [0.0, 1.0].
+
+    Solves for x(t) = 3(1-t)²t·x1 + 3(1-t)t²·x2 + t³ using Newton's method,
+    then evaluates y at that parameter.
+
+    Control points: P0 = (0, 0), P1 = (x1, y1), P2 = (x2, y2), P3 = (1, 1).
+    """
+    # Clamp edge cases
+    if t <= 0.0:
+        return 0.0
+    if t >= 1.0:
+        return 1.0
+
+    # If linear in x (almost vertical), use direct evaluation
+    if x1 == 0.0 and x2 == 1.0:
+        return t
+
+    # Newton's method to find parameter u such that x(u) = t
+    var u = t
+    var i = 0
+    while i < 8:
+        val x_u = cubic_bezier_component(u, x1, x2)
+        if (x_u - t).abs() < 1e-6:
+            return cubic_bezier_component(u, y1, y2)
+        val dx_du = cubic_bezier_derivative(u, x1, x2)
+        if dx_du.abs() < 1e-9:
+            return cubic_bezier_component(u, y1, y2)
+        u = u - (x_u - t) / dx_du
+        u = clamp_f64(u, 0.0, 1.0)
+        i = i + 1
+
+    cubic_bezier_component(u, y1, y2)
+
+fn cubic_bezier_component(t: f64, c1: f64, c2: f64) -> f64:
+    """Evaluate cubic Bézier component: B(t) = 3(1-t)²t·c1 + 3(1-t)t²·c2 + t³."""
+    val mt = 1.0 - t
+    3.0 * mt * mt * t * c1 + 3.0 * mt * t * t * c2 + t * t * t
+
+fn cubic_bezier_derivative(t: f64, c1: f64, c2: f64) -> f64:
+    """Derivative of cubic Bézier component."""
+    val mt = 1.0 - t
+    3.0 * (mt * mt * (c1 - 0.0) + 2.0 * mt * t * (c2 - c1) + t * t * (1.0 - c2))
+
+fn evaluate_steps(t: f64, steps: i64, jump_type: text) -> f64:
+    """Evaluate a steps() timing function.
+
+    jump_type interpretations:
+    - "start" / "jump-start": step at 1/n, 2/n, ..., 1.0
+    - "end" / "jump-end" (default): step at 1/n, 2/n, ..., 1.0 after reaching 1
+    - "jump-none": step at 1/n, 2/n, ..., (n-1)/n; no jump at endpoints
+    - "jump-both": n+1 steps including 0 and 1
+    """
+    if steps <= 0:
+        return t
+
+    val normalized = clamp_f64(t, 0.0, 1.0)
+
+    match jump_type:
+        "start" | "jump-start":
+            val step_index = (normalized * steps.to_f64()).ceil()
+            step_index / steps.to_f64()
+        "jump-none":
+            val step_index = (normalized * steps.to_f64()).floor()
+            step_index / steps.to_f64()
+        "jump-both":
+            val step_index = (normalized * (steps + 1).to_f64()).floor()
+            step_index / (steps + 1).to_f64()
+        _:
+            # "end" and "jump-end" (default)
+            val step_index = (normalized * steps.to_f64()).floor()
+            step_index / steps.to_f64()
+
+fn clamp_f64(v: f64, min: f64, max: f64) -> f64:
+    """Clamp f64 value to [min, max]."""
+    if v < min:
+        min
+    else if v > max:
+        max
+    else:
+        v

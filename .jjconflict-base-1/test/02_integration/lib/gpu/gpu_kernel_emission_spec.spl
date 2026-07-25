@@ -1,0 +1,73 @@
+# @cover src/compiler/70.backend/backend/gpu_portable_compute.spl
+"""
+# Per-Backend GPU Kernel Emission
+
+The portable compute emitter turns one logical kernel into per-backend source
+for every supported GPU target. "cuda/metal/webgpu backed" is proven at the
+emission level, with no device required: the emitted source must carry that
+backend's distinguishing marker. This scenario walks each accepted backend and
+each closed (rejected) backend so the whole `match target` and the
+accept/reject gate are covered on Linux CI.
+
+**Category:** Testing | **Status:** In Progress
+**Requirements:** N/A
+**Design:** N/A
+**Research:** N/A
+**Plan:** doc/03_plan/ui/testing/gpu_draw_event_intensive_tests.md
+"""
+
+use std.spec.*
+use compiler.backend.gpu_portable_compute.{PortableComputeTarget}
+use test.helpers.gpu_draw_event_shared.{
+    assert_fill_kernel_markers, assert_add_kernel_markers,
+    assert_kernel_backend_rejected, assert_kernel_backend_accepted
+}
+
+describe "per-backend GPU kernel emission markers":
+
+    it "emits a CUDA fill kernel with the __global__ marker":
+        step("Emit the u32 fill kernel for the CUDA target")
+        assert_fill_kernel_markers(PortableComputeTarget.Cuda, "simple_2d_fill_u32")
+
+    it "emits a HIP fill kernel that shares the CUDA __global__ marker":
+        step("Emit the u32 fill kernel for the HIP target")
+        # HIP diverges from CUDA only by enum/binary-format/toolchain, so its
+        # source carries the same __global__ marker (not __kernel).
+        assert_fill_kernel_markers(PortableComputeTarget.Hip, "simple_2d_fill_u32")
+
+    it "emits an OpenCL fill kernel with the __kernel marker":
+        step("Emit the u32 fill kernel for the OpenCL target")
+        assert_fill_kernel_markers(PortableComputeTarget.OpenCl, "simple_2d_fill_u32")
+
+    it "emits a Metal fill kernel with kernel void + thread_position_in_grid":
+        step("Emit the u32 fill kernel for the Metal target")
+        assert_fill_kernel_markers(PortableComputeTarget.Metal, "simple_2d_fill_u32")
+
+    it "emits a WebGPU fill kernel with the @compute workgroup marker":
+        step("Emit the u32 fill kernel for the WebGPU (WGSL) target")
+        assert_fill_kernel_markers(PortableComputeTarget.WebGpu, "simple_2d_fill_u32")
+
+    it "emits an add kernel with per-backend markers on every target":
+        step("Emit the u32 add kernel for each supported backend")
+        assert_add_kernel_markers(PortableComputeTarget.Cuda, "simple_2d_add_u32")
+        assert_add_kernel_markers(PortableComputeTarget.Hip, "simple_2d_add_u32")
+        assert_add_kernel_markers(PortableComputeTarget.OpenCl, "simple_2d_add_u32")
+        assert_add_kernel_markers(PortableComputeTarget.Metal, "simple_2d_add_u32")
+        assert_add_kernel_markers(PortableComputeTarget.WebGpu, "simple_2d_add_u32")
+
+describe "GPU kernel emission accept / reject gate":
+
+    it "accepts the portable compute backends by name":
+        step("Ask the emitter which backends it accepts")
+        assert_kernel_backend_accepted("cuda", "cuda")
+        assert_kernel_backend_accepted("rocm", "hip")
+        assert_kernel_backend_accepted("cl", "opencl")
+        assert_kernel_backend_accepted("msl", "metal")
+
+    it "closes Vulkan because SPIR-V is compiled by the dedicated backend":
+        step("Ask the emitter for the Vulkan target")
+        assert_kernel_backend_rejected("vulkan", "unsupported-vulkan-spirv")
+
+    it "closes an unknown backend name fail-safe":
+        step("Ask the emitter for a backend name it does not know")
+        assert_kernel_backend_rejected("nonexistent_gpu", "unsupported-backend")

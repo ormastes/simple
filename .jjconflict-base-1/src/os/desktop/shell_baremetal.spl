@@ -1,0 +1,97 @@
+# Desktop Shell Baremetal Renderer — shared WM scene rendering
+#
+# Companion to shell.spl. Draws the taskbar, launcher grid, launched-app
+# windows, and process panel through the shared CompositorBackend draw
+# contract — no WidgetNode DSL, which crashes in baremetal.
+
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use common.ui.taskbar_model.{TaskbarModel}
+use common.ui.window_scene.{SharedWmScene, WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput}
+use common.ui.window_scene_draw_ir.{SharedWmPixelBufferBackend, shared_wm_scene_render_taskbar_context_to_backend, shared_wm_scene_render_taskbar_context_to_pixel_buffer, shared_wm_pixel_buffer_pixels}
+use os.gui.render.{render_blit_frame}
+
+# ============================================================================
+# Baremetal Engine2D adapter (shared CompositorBackend contract)
+# ============================================================================
+
+class BaremetalEngine2dOverlayBackend:
+    engine: Engine2D
+    w: i32
+    h: i32
+
+impl CompositorBackend for BaremetalEngine2dOverlayBackend:
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        self.engine.clear(color)
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.engine.draw_rect_filled(x, y, w, h, color)
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        self.engine.draw_text(x, y, text_str, fg, 12)
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        self.engine.draw_text(x, y, "{ch}", fg, 12)
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        self.engine.draw_rect_filled(x, y, 1, 1, color)
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        var row: i32 = 0
+        while row < h:
+            var col: i32 = 0
+            while col < w:
+                val src_idx = row * w + col
+                if src_idx >= 0 and src_idx < pixels.len():
+                    self.put_pixel(x + col, y + row, pixels[src_idx])
+                col = col + 1
+            row = row + 1
+
+    me present():
+        self.engine.present()
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        self.engine.present()
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+fn baremetal_engine2d_overlay_backend(engine: Engine2D, screen_w: i32, screen_h: i32) -> BaremetalEngine2dOverlayBackend:
+    BaremetalEngine2dOverlayBackend(engine: engine, w: screen_w, h: screen_h)
+
+fn render_baremetal_shared_wm_scene(backend: CompositorBackend, scene: SharedWmScene, taskbar: TaskbarModel, content_frames: [WmContentFrame], scene_revision: i64, taskbar_revision: i64, clock: text):
+    """Render the immutable projection of the live SimpleOS compositor.
+
+    Window content and taskbar objects are both authoritative inputs. Missing,
+    stale, duplicated, or malformed content frames fail closed in the shared
+    executor instead of selecting title-based canned content.
+    """
+    val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 56)
+    val revision = WmSceneRevision(scene_revision: scene_revision, input_revision: scene_revision, taskbar_revision: taskbar_revision)
+    val render_input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: content_frames, metrics: metrics, t_micros: 0)
+    val taskbar_input = SharedWmTaskbarRenderInput(render: render_input, taskbar: taskbar, clock_label: clock)
+    shared_wm_scene_render_taskbar_context_to_backend(backend, taskbar_input)
+
+fn render_baremetal_shared_wm_scene_to_pixel_buffer(backend: SharedWmPixelBufferBackend, scene: SharedWmScene, taskbar: TaskbarModel, content_frames: [WmContentFrame], scene_revision: i64, taskbar_revision: i64, clock: text):
+    val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 56)
+    val revision = WmSceneRevision(scene_revision: scene_revision, input_revision: scene_revision, taskbar_revision: taskbar_revision)
+    val render_input = SharedWmRenderInput(scene: scene, revision: revision, content_frames: content_frames, metrics: metrics, t_micros: 0)
+    val taskbar_input = SharedWmTaskbarRenderInput(render: render_input, taskbar: taskbar, clock_label: clock)
+    shared_wm_scene_render_taskbar_context_to_pixel_buffer(backend, taskbar_input)
+    # Hand the freshly composed pixels to the MMIO framebuffer path so the
+    # widget/compositor output actually reaches the screen. Exactly once per
+    # composed frame.
+    present_pixel_buffer_to_framebuffer(backend)
+
+fn present_pixel_buffer_to_framebuffer(backend: SharedWmPixelBufferBackend):
+    """Copy the pixel-buffer backend's composed frame into the os.gui.render
+    shadow buffer (full-frame dirty) and present it. render_init(fb, w, h) must
+    have run first; render_blit_frame no-ops until the shadow buffer exists."""
+    val pixels = shared_wm_pixel_buffer_pixels(backend)
+    render_blit_frame(pixels, backend.width_px.to_u64(), backend.height_px.to_u64())

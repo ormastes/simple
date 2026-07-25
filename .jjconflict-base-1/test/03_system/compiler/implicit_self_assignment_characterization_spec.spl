@@ -1,0 +1,75 @@
+"""
+# Implicit-Self Field Assignment Characterization Spec
+
+CHARACTERIZATION spec for
+doc/08_tracking/bug/interp_implicit_self_field_assignment_silent_noop_2026-07-17.md
+(status OPEN as of 2026-07-17). Inside a `me` method, assigning to a field
+WITHOUT `self.` (the form the compiler's own lint hint recommends: "In
+Simple, 'self' is implicit in methods. Don't write 'self.'.") silently does
+nothing -- the assignment binds a fresh local instead of the declared
+field, so the receiver's field is left unchanged. The explicit `self.field
+= value` form works correctly.
+
+Directly reproduced against the current bootstrap seed (2026-07-18,
+`src/compiler_rust/target/bootstrap/simple run`) for this exact spec's
+probe shape:
+
+```
+implicit result: false
+explicit result: true
+```
+
+(The JIT path additionally fails to lower the implicit assignment at all
+--"HIR lowering error: Unknown variable: flag while lowering C.set_it"--
+and falls back to the interpreter, which then silently no-ops instead of
+mutating the field.)
+
+This spec documents CURRENT behavior honestly, per the bug doc's intent: it
+is written to FAIL LOUDLY (not silently start passing) the moment the
+underlying bug is fixed, so the fix is caught and this spec must be updated
+rather than left stale. Nothing here is marked skip/pending. It imports
+nothing from src/compiler or app.io so it runs standalone.
+"""
+
+use std.spec
+
+class ImplicitSelfProbe:
+    flag: bool
+
+    me set_via_implicit():
+        flag = true
+
+    me set_via_explicit_self():
+        self.flag = true
+
+describe "implicit-self field assignment inside a me method (characterization)":
+    """
+    Compares the field-mutation outcome of an implicit `flag = true`
+    assignment against the explicit `self.flag = true` form inside `me`
+    methods on the same class.
+    """
+
+    it "explicit self.field assignment mutates the field":
+        var probe = ImplicitSelfProbe(flag: false)
+        probe.set_via_explicit_self()
+        assert_true(probe.flag)
+
+    it "implicit field assignment currently does not mutate the field (BUG: see doc/08_tracking/bug/interp_implicit_self_field_assignment_silent_noop_2026-07-17.md)":
+        var probe = ImplicitSelfProbe(flag: false)
+        probe.set_via_implicit()
+        # Honest characterization of the CURRENT (buggy) behavior: the
+        # implicit assignment silently no-ops, so the field stays false.
+        # This assertion is EXPECTED TO FAIL once the bug above is fixed --
+        # that failure is the intended signal to update this spec, not a
+        # regression to chase.
+        assert_true(probe.flag == false)
+
+    it "implicit and explicit assignment currently diverge on the identical field/value":
+        var implicit_probe = ImplicitSelfProbe(flag: false)
+        implicit_probe.set_via_implicit()
+        var explicit_probe = ImplicitSelfProbe(flag: false)
+        explicit_probe.set_via_explicit_self()
+        # Documents the divergence itself: today these two forms produce
+        # DIFFERENT results for what should be equivalent code. Once fixed,
+        # both should read true and this assertion should also flip.
+        assert_not_equal(implicit_probe.flag, explicit_probe.flag)

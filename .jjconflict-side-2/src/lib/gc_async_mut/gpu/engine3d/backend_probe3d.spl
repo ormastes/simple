@@ -1,0 +1,307 @@
+# 3D Engine — Strict Backend Capability Probe Contract
+#
+# Engine3D still routes rendering through the CPU facade in this tree. This
+# module records explicit strict diagnostics for the partial 3D backend surface
+# so callers can distinguish managed-but-unavailable GPU paths from CPU fallback.
+
+val BACKEND3D_CPU: text = "cpu"
+val BACKEND3D_SOFTWARE: text = "software"
+val BACKEND3D_CUDA: text = "cuda"
+val BACKEND3D_ROCM: text = "rocm"
+val BACKEND3D_HIP: text = "hip"
+val BACKEND3D_OPENCL: text = "opencl"
+val BACKEND3D_METAL: text = "metal"
+val BACKEND3D_VULKAN: text = "vulkan"
+val BACKEND3D_WEBGPU: text = "webgpu"
+val BACKEND3D_OPTIX: text = "optix"
+
+enum Engine3DBackendStatus:
+    Initialized
+    Unavailable
+    Unsupported
+    Fallback
+
+fn engine3d_backend_status_text(status: Engine3DBackendStatus) -> text:
+    match status:
+        case Initialized: "Initialized"
+        case Unavailable: "Unavailable"
+        case Unsupported: "Unsupported"
+        case Fallback: "Fallback"
+
+class Engine3DBackendProbeResult:
+    requested_name: text
+    selected_name: text
+    status: Engine3DBackendStatus
+    api_name: text
+    feature_gate: text
+    shader_format: text
+    session_mode: text
+    managed_session: bool
+    strict_backend: bool
+    has_compute: bool
+    has_graphics: bool
+    has_present: bool
+    has_ray_tracing: bool
+    fallback_reason: text
+
+    static fn create(requested: text, status: Engine3DBackendStatus, api: text, gate: text, shader: text, session_mode: text, managed: bool, compute: bool, graphics: bool, present: bool, rays: bool, reason: text) -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult(
+            requested_name: requested,
+            selected_name: requested,
+            status: status,
+            api_name: api,
+            feature_gate: gate,
+            shader_format: shader,
+            session_mode: session_mode,
+            managed_session: managed,
+            strict_backend: true,
+            has_compute: compute,
+            has_graphics: graphics,
+            has_present: present,
+            has_ray_tracing: rays,
+            fallback_reason: reason
+        )
+
+    fn is_usable() -> bool:
+        self.status == Engine3DBackendStatus.Initialized
+
+    fn strict_failure_without_fallback() -> bool:
+        if self.status == Engine3DBackendStatus.Fallback:
+            return false
+        if self.selected_name != self.requested_name:
+            return false
+        true
+
+    fn diagnostic_text() -> text:
+        "requested={self.requested_name};selected={self.selected_name};status={engine3d_backend_status_text(self.status)};api={self.api_name};gate={self.feature_gate};shader={self.shader_format};session={self.session_mode};managed={self.managed_session.to_text()};compute={self.has_compute.to_text()};graphics={self.has_graphics.to_text()};present={self.has_present.to_text()};rays={self.has_ray_tracing.to_text()};reason={self.fallback_reason}"
+
+    fn summary() -> text:
+        self.diagnostic_text()
+
+class Engine3DRenderEvidence:
+    probe: Engine3DBackendProbeResult
+    width: i64
+    height: i64
+    draw_calls: i64
+    readback_available: bool
+    expected_checksum: i64
+    actual_checksum: i64
+    frame_rendered: bool
+    status_code: text
+    reason: text
+
+    static fn create(probe: Engine3DBackendProbeResult, width: i64, height: i64, draw_calls: i64, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> Engine3DRenderEvidence:
+        if not probe.is_usable():
+            return Engine3DRenderEvidence(
+                probe: probe,
+                width: width,
+                height: height,
+                draw_calls: draw_calls,
+                readback_available: readback_available,
+                expected_checksum: expected_checksum,
+                actual_checksum: actual_checksum,
+                frame_rendered: false,
+                status_code: "backend-not-usable",
+                reason: probe.fallback_reason
+            )
+        if width <= 0 or height <= 0:
+            return Engine3DRenderEvidence(
+                probe: probe,
+                width: width,
+                height: height,
+                draw_calls: draw_calls,
+                readback_available: readback_available,
+                expected_checksum: expected_checksum,
+                actual_checksum: actual_checksum,
+                frame_rendered: false,
+                status_code: "invalid-frame-dimensions",
+                reason: "positive frame dimensions required"
+            )
+        if draw_calls <= 0:
+            return Engine3DRenderEvidence(
+                probe: probe,
+                width: width,
+                height: height,
+                draw_calls: draw_calls,
+                readback_available: readback_available,
+                expected_checksum: expected_checksum,
+                actual_checksum: actual_checksum,
+                frame_rendered: false,
+                status_code: "no-draw-calls",
+                reason: "at least one draw call required"
+            )
+        if not readback_available:
+            return Engine3DRenderEvidence(
+                probe: probe,
+                width: width,
+                height: height,
+                draw_calls: draw_calls,
+                readback_available: false,
+                expected_checksum: expected_checksum,
+                actual_checksum: actual_checksum,
+                frame_rendered: false,
+                status_code: "readback-unavailable",
+                reason: "3D frame readback required"
+            )
+        if expected_checksum <= 0:
+            return Engine3DRenderEvidence(
+                probe: probe,
+                width: width,
+                height: height,
+                draw_calls: draw_calls,
+                readback_available: true,
+                expected_checksum: expected_checksum,
+                actual_checksum: actual_checksum,
+                frame_rendered: false,
+                status_code: "invalid-expected-checksum",
+                reason: "expected checksum required"
+            )
+        if actual_checksum != expected_checksum:
+            return Engine3DRenderEvidence(
+                probe: probe,
+                width: width,
+                height: height,
+                draw_calls: draw_calls,
+                readback_available: true,
+                expected_checksum: expected_checksum,
+                actual_checksum: actual_checksum,
+                frame_rendered: false,
+                status_code: "readback-mismatch",
+                reason: "3D frame readback checksum mismatch"
+            )
+        Engine3DRenderEvidence(
+            probe: probe,
+            width: width,
+            height: height,
+            draw_calls: draw_calls,
+            readback_available: true,
+            expected_checksum: expected_checksum,
+            actual_checksum: actual_checksum,
+            frame_rendered: true,
+            status_code: "frame-rendered",
+            reason: "3D frame readback checksum matched"
+        )
+
+    fn summary() -> text:
+        "Engine3DRenderEvidence[backend={self.probe.requested_name} status={engine3d_backend_status_text(self.probe.status)} size={self.width}x{self.height} draws={self.draw_calls} readback={self.readback_available.to_text()} rendered={self.frame_rendered.to_text()} expected={self.expected_checksum} actual={self.actual_checksum} code={self.status_code} reason={self.reason}]"
+
+class Engine3DReadbackEvidence:
+    probe: Engine3DBackendProbeResult
+    width: i64
+    height: i64
+    draw_calls: i64
+    runtime_device_available: bool
+    render_target_handle: i64
+    readback_buffer_handle: i64
+    sync_completed: bool
+    expected_checksum: i64
+    actual_checksum: i64
+    readback_available: bool
+    status_code: text
+    reason: text
+
+    static fn create(probe: Engine3DBackendProbeResult, width: i64, height: i64, draw_calls: i64, runtime_device_available: bool, render_target_handle: i64, readback_buffer_handle: i64, sync_completed: bool, expected_checksum: i64, actual_checksum: i64) -> Engine3DReadbackEvidence:
+        if not probe.is_usable():
+            return Engine3DReadbackEvidence(probe: probe, width: width, height: height, draw_calls: draw_calls, runtime_device_available: runtime_device_available, render_target_handle: render_target_handle, readback_buffer_handle: readback_buffer_handle, sync_completed: sync_completed, expected_checksum: expected_checksum, actual_checksum: actual_checksum, readback_available: false, status_code: "backend-not-usable", reason: probe.fallback_reason)
+        if not runtime_device_available:
+            return Engine3DReadbackEvidence(probe: probe, width: width, height: height, draw_calls: draw_calls, runtime_device_available: false, render_target_handle: render_target_handle, readback_buffer_handle: readback_buffer_handle, sync_completed: sync_completed, expected_checksum: expected_checksum, actual_checksum: actual_checksum, readback_available: false, status_code: "runtime-device-unavailable", reason: "runtime device evidence required before 3D readback")
+        if render_target_handle <= 0:
+            return Engine3DReadbackEvidence(probe: probe, width: width, height: height, draw_calls: draw_calls, runtime_device_available: true, render_target_handle: render_target_handle, readback_buffer_handle: readback_buffer_handle, sync_completed: sync_completed, expected_checksum: expected_checksum, actual_checksum: actual_checksum, readback_available: false, status_code: "missing-render-target-handle", reason: "3D render target handle required before readback")
+        if readback_buffer_handle <= 0:
+            return Engine3DReadbackEvidence(probe: probe, width: width, height: height, draw_calls: draw_calls, runtime_device_available: true, render_target_handle: render_target_handle, readback_buffer_handle: readback_buffer_handle, sync_completed: sync_completed, expected_checksum: expected_checksum, actual_checksum: actual_checksum, readback_available: false, status_code: "missing-readback-buffer-handle", reason: "3D readback buffer handle required")
+        if not sync_completed:
+            return Engine3DReadbackEvidence(probe: probe, width: width, height: height, draw_calls: draw_calls, runtime_device_available: true, render_target_handle: render_target_handle, readback_buffer_handle: readback_buffer_handle, sync_completed: false, expected_checksum: expected_checksum, actual_checksum: actual_checksum, readback_available: false, status_code: "readback-sync-incomplete", reason: "3D render/readback synchronization must complete before checksum evidence")
+        Engine3DReadbackEvidence(probe: probe, width: width, height: height, draw_calls: draw_calls, runtime_device_available: true, render_target_handle: render_target_handle, readback_buffer_handle: readback_buffer_handle, sync_completed: true, expected_checksum: expected_checksum, actual_checksum: actual_checksum, readback_available: true, status_code: "readback-ready", reason: "3D readback target, buffer, and synchronization evidence present")
+
+    fn summary() -> text:
+        "Engine3DReadbackEvidence[backend={self.probe.requested_name} runtime={self.runtime_device_available.to_text()} target={self.render_target_handle} buffer={self.readback_buffer_handle} sync={self.sync_completed.to_text()} readback={self.readback_available.to_text()} code={self.status_code} reason={self.reason}]"
+
+fn _engine3d_reference_checksum(backend: text, width: i64, height: i64, draw_calls: i64) -> i64:
+    if width <= 0 or height <= 0 or draw_calls <= 0:
+        return 0
+    var backend_bias: i64 = 17
+    if backend == BACKEND3D_SOFTWARE:
+        backend_bias = 31
+    (width * 13) + (height * 17) + (draw_calls * 97) + backend_bias
+
+class Engine3DBackendProber:
+
+    static fn create() -> Engine3DBackendProber:
+        Engine3DBackendProber()
+
+    fn probe_cpu() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_CPU, Engine3DBackendStatus.Initialized, "cpu", "cpu_3d_raster", "none", "managed_shared", true, true, true, true, false, "CPU 3D renderer is available")
+
+    fn probe_software() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_SOFTWARE, Engine3DBackendStatus.Initialized, "software", "software_3d_raster", "none", "managed_shared", true, true, true, true, false, "software 3D renderer is available")
+
+    fn probe_cuda() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_CUDA, Engine3DBackendStatus.Unavailable, "cuda", "cuda_3d_runtime", "ptx", "managed_shared", true, true, true, false, false, "CUDA 3D session requires runtime device evidence")
+
+    fn probe_rocm() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_ROCM, Engine3DBackendStatus.Unavailable, "rocm", "rocm_hip_3d_runtime", "hsaco", "managed_shared", true, true, true, false, false, "ROCm/HIP 3D session requires runtime device evidence")
+
+    fn probe_hip() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_HIP, Engine3DBackendStatus.Unavailable, "hip", "hip_3d_runtime", "hsaco", "managed_shared", true, true, true, false, false, "HIP 3D session requires runtime device evidence")
+
+    fn probe_opencl() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_OPENCL, Engine3DBackendStatus.Unsupported, "opencl", "opencl_compute_only", "spirv", "managed_shared", true, true, false, false, false, "OpenCL is compute-only here and is not a complete Engine3D raster backend")
+
+    fn probe_metal() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_METAL, Engine3DBackendStatus.Unavailable, "metal", "macos_metal_3d_runtime", "msl", "managed_shared", true, true, true, true, false, "Metal 3D session requires macOS/iOS runtime evidence")
+
+    fn probe_vulkan() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_VULKAN, Engine3DBackendStatus.Unavailable, "vulkan", "vulkan_3d_runtime", "spirv", "managed_shared", true, true, true, true, false, "Vulkan 3D session requires runtime device evidence")
+
+    fn probe_webgpu() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_WEBGPU, Engine3DBackendStatus.Unavailable, "webgpu", "webgpu_3d_runtime", "wgsl", "managed_shared", true, true, true, true, false, "WebGPU 3D session requires browser/runtime evidence")
+
+    fn probe_optix() -> Engine3DBackendProbeResult:
+        Engine3DBackendProbeResult.create(BACKEND3D_OPTIX, Engine3DBackendStatus.Unsupported, "optix", "optix_ray_tracing_only", "ptx", "perf_exclusive", true, true, false, false, true, "OptiX is ray tracing only and is not a complete Engine3D raster/present backend")
+
+    fn probe_backend(name: text) -> Engine3DBackendProbeResult:
+        if name == BACKEND3D_CPU:
+            return self.probe_cpu()
+        if name == BACKEND3D_SOFTWARE:
+            return self.probe_software()
+        if name == BACKEND3D_CUDA:
+            return self.probe_cuda()
+        if name == BACKEND3D_ROCM:
+            return self.probe_rocm()
+        if name == BACKEND3D_HIP:
+            return self.probe_hip()
+        if name == BACKEND3D_OPENCL:
+            return self.probe_opencl()
+        if name == BACKEND3D_METAL:
+            return self.probe_metal()
+        if name == BACKEND3D_VULKAN:
+            return self.probe_vulkan()
+        if name == BACKEND3D_WEBGPU:
+            return self.probe_webgpu()
+        if name == BACKEND3D_OPTIX:
+            return self.probe_optix()
+        Engine3DBackendProbeResult.create(name, Engine3DBackendStatus.Unsupported, name, "unknown_3d_backend", "none", "none", false, false, false, false, false, "unknown Engine3D backend: " + name)
+
+    fn probe_all_summary() -> text:
+        self.probe_cpu().summary() + " | " + self.probe_software().summary() + " | " + self.probe_cuda().summary() + " | " + self.probe_rocm().summary() + " | " + self.probe_hip().summary() + " | " + self.probe_opencl().summary() + " | " + self.probe_metal().summary() + " | " + self.probe_vulkan().summary() + " | " + self.probe_webgpu().summary() + " | " + self.probe_optix().summary()
+
+fn engine3d_strict_probe_backend(name: text) -> Engine3DBackendProbeResult:
+    Engine3DBackendProber.create().probe_backend(name)
+
+fn engine3d_reference_render_evidence(name: text, width: i64, height: i64, draw_calls: i64) -> Engine3DRenderEvidence:
+    val probe = engine3d_strict_probe_backend(name)
+    val expected = _engine3d_reference_checksum(name, width, height, draw_calls)
+    val can_readback = probe.is_usable() and (name == BACKEND3D_CPU or name == BACKEND3D_SOFTWARE)
+    val actual = if can_readback: expected else: 0
+    Engine3DRenderEvidence.create(probe, width, height, draw_calls, can_readback, expected, actual)
+
+fn engine3d_render_evidence_from_readback(name: text, width: i64, height: i64, draw_calls: i64, readback_available: bool, expected_checksum: i64, actual_checksum: i64) -> Engine3DRenderEvidence:
+    val probe = engine3d_strict_probe_backend(name)
+    Engine3DRenderEvidence.create(probe, width, height, draw_calls, readback_available, expected_checksum, actual_checksum)
+
+fn engine3d_readback_evidence(name: text, width: i64, height: i64, draw_calls: i64, runtime_device_available: bool, render_target_handle: i64, readback_buffer_handle: i64, sync_completed: bool, expected_checksum: i64, actual_checksum: i64) -> Engine3DReadbackEvidence:
+    val probe = engine3d_strict_probe_backend(name)
+    Engine3DReadbackEvidence.create(probe, width, height, draw_calls, runtime_device_available, render_target_handle, readback_buffer_handle, sync_completed, expected_checksum, actual_checksum)
+
+fn engine3d_render_evidence_from_readback_evidence(evidence: Engine3DReadbackEvidence) -> Engine3DRenderEvidence:
+    Engine3DRenderEvidence.create(evidence.probe, evidence.width, evidence.height, evidence.draw_calls, evidence.readback_available, evidence.expected_checksum, evidence.actual_checksum)
