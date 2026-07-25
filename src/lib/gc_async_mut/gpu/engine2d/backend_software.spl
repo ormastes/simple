@@ -725,42 +725,51 @@ impl SoftwareBackend:
             ly = ly + 1
 
     me sw_fill_raw_span(offset: i32, count: i32, color: u32):
+        val safe_count = _span_safe_count(self.buf.len(), offset, count)
+        if safe_count <= 0:
+            return
         if self.native_simd_spans and native_pixel_rows_enabled():
             record_simd_fill_hit()
-            self.buf = rt_engine2d_simd_fill_span_u32(self.buf, offset as i64, count as i64, color)
+            self.buf = rt_engine2d_simd_fill_span_u32(self.buf, offset as i64, safe_count as i64, color)
             return
-        _scalar_fill_row(self.buf, offset as i64, count as i64, color)
+        _scalar_fill_row(self.buf, offset as i64, safe_count as i64, color)
 
     me sw_copy_raw_span(dst_offset: i32, src: [u32], src_offset: i32, count: i32):
+        val safe_count = _span_copy_safe_count(self.buf.len(), dst_offset, src.len(), src_offset, count)
+        if safe_count <= 0:
+            return
         if self.native_simd_spans and native_pixel_rows_enabled():
             record_simd_copy_hit()
-            self.buf = rt_engine2d_simd_copy_span_u32(self.buf, dst_offset as i64, src, src_offset as i64, count as i64)
+            self.buf = rt_engine2d_simd_copy_span_u32(self.buf, dst_offset as i64, src, src_offset as i64, safe_count as i64)
             return
         var i = 0
-        while i < count:
+        while i < safe_count:
             self.buf[dst_offset + i] = src[src_offset + i]
             i = i + 1
 
     me sw_blend_const_raw_span(offset: i32, count: i32, color: u32):
+        val safe_count = _span_safe_count(self.buf.len(), offset, count)
+        if safe_count <= 0:
+            return
         if self.native_simd_spans and native_pixel_rows_enabled():
             record_simd_alpha_hit()
-            var dst_row: [u32] = [0; count]
-            var src_row: [u32] = [color; count]
+            var dst_row: [u32] = [0; safe_count]
+            var src_row: [u32] = [color; safe_count]
             var j = 0
-            while j < count:
+            while j < safe_count:
                 dst_row[j] = self.buf[offset + j]
                 j = j + 1
             val row = engine2d_simd_blend_row_u32(dst_row, src_row)
             j = 0
-            while j < count and j < row.len():
+            while j < safe_count and j < row.len():
                 self.buf[offset + j] = row[j]
                 j = j + 1
-            while j < count:
+            while j < safe_count:
                 self.buf[offset + j] = blend(color, self.buf[offset + j])
                 j = j + 1
             return
         var i = 0
-        while i < count:
+        while i < safe_count:
             self.buf[offset + i] = blend(color, self.buf[offset + i])
             i = i + 1
 
@@ -895,6 +904,31 @@ impl SoftwareBackend:
 # ============================================================================
 # Read-only span helpers (no mutation — safe as free functions)
 # ============================================================================
+
+fn _span_safe_count(buf_len: i32, offset: i32, count: i32) -> i32:
+    if buf_len <= 0 or offset < 0 or count <= 0:
+        return 0
+    if offset >= buf_len:
+        return 0
+    val remaining = (buf_len - offset).to_i64()
+    val safe_count = if count.to_i64() < remaining: count.to_i64() else: remaining
+    if safe_count > 2147483647:
+        return 2147483647
+    safe_count.to_i32()
+
+fn _span_copy_safe_count(dst_len: i32, dst_offset: i32, src_len: i32, src_offset: i32, count: i32) -> i32:
+    val dst_count = _span_safe_count(dst_len, dst_offset, count)
+    if dst_count <= 0:
+        return 0
+    if src_len <= 0 or src_offset < 0:
+        return 0
+    if src_offset >= src_len:
+        return 0
+    val src_remaining = (src_len - src_offset).to_i64()
+    val cnt = dst_count.to_i64()
+    if cnt < src_remaining:
+        return dst_count
+    src_remaining.to_i32()
 
 fn _clip_span(backend: SoftwareBackend, x: i32, y: i32, length: i32) -> (i32, i32, i32):
     """Clip a horizontal span to framebuffer and active clip rectangle.
