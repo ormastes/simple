@@ -193,6 +193,24 @@ pub fn unregister_heap_ptr(ptr: *mut HeapHeader) {
     }
 }
 
+/// Unregister a heap pointer, reporting whether THIS call is the one that
+/// erased it. Mirrors the C runtime's `rt_core_unregister_immortal_ptr`
+/// (src/runtime/runtime_native.c), whose non-zero return is the single
+/// serialization point that makes a free safe: the registry mutex guarantees
+/// exactly one caller observes `true` for a given pointer, so a double free
+/// (or a free of a never-registered pointer) is refused instead of executing.
+/// `RuntimeValue` is `Copy`, so aliases are the norm — this is the gate.
+#[inline]
+pub fn unregister_heap_ptr_checked(ptr: *mut HeapHeader) -> bool {
+    if ptr.is_null() {
+        return false;
+    }
+    heap_allocation_registry()
+        .lock()
+        .map(|mut registry| registry.remove(&(ptr as usize)))
+        .unwrap_or(false)
+}
+
 #[inline]
 pub fn is_registered_heap_ptr(ptr: *mut HeapHeader) -> bool {
     heap_allocation_registry()

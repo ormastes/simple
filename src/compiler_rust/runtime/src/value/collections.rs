@@ -12,7 +12,8 @@ use super::byte_kernels::{
 use super::core::RuntimeValue;
 use super::dict::RuntimeDict;
 use super::heap::{
-    gc_flags, get_typed_ptr, get_typed_ptr_mut, register_heap_ptr, unregister_heap_ptr, HeapHeader, HeapObjectType,
+    gc_flags, get_typed_ptr, get_typed_ptr_mut, register_heap_ptr, unregister_heap_ptr, unregister_heap_ptr_checked,
+    HeapHeader, HeapObjectType,
 };
 use super::objects::rt_closure_func_ptr;
 use super::primitive_sort;
@@ -219,6 +220,31 @@ pub(crate) unsafe fn alloc_runtime_string(len: u64) -> Option<*mut RuntimeString
     Some(ptr)
 }
 
+/// Marks a heap string owned by a process-wide cache (`SHORT_STRING_CACHE` or
+/// `STRING_LITERAL_INTERN`). Those objects are handed out repeatedly to
+/// unrelated callers, so freeing one corrupts every other holder;
+/// `rt_string_free` refuses them.
+///
+/// Parity note: this is the Rust twin of `RT_CORE_STRING_FLAG_SHARED` in
+/// src/runtime/runtime_native.c, and like it the bit lives in the existing
+/// `reserved` padding field (`HeapHeader::reserved`), so no layout changes.
+pub(crate) const RT_STRING_FLAG_SHARED: u16 = 1;
+
+/// Set `RT_STRING_FLAG_SHARED` on a cache-owned string. No-op for NIL (an
+/// allocation failure) or a non-heap value.
+fn mark_string_shared(value: RuntimeValue) {
+    if !value.is_heap() {
+        return;
+    }
+    let ptr = value.as_heap_ptr();
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        (*ptr).reserved |= RT_STRING_FLAG_SHARED;
+    }
+}
+
 static SHORT_STRING_CACHE: OnceLock<[RuntimeValue; 257]> = OnceLock::new();
 
 fn rt_string_new_uncached(bytes: *const u8, len: u64) -> RuntimeValue {
@@ -242,12 +268,15 @@ fn rt_string_new_uncached(bytes: *const u8, len: u64) -> RuntimeValue {
 fn short_string_cache() -> &'static [RuntimeValue; 257] {
     SHORT_STRING_CACHE.get_or_init(|| {
         std::array::from_fn(|index| {
-            if index == 0 {
+            let value = if index == 0 {
                 rt_string_new_uncached(std::ptr::null(), 0)
             } else {
                 let byte = [(index - 1) as u8];
                 rt_string_new_uncached(byte.as_ptr(), 1)
-            }
+            };
+            // Process-wide, handed to every len<=1 caller: never freeable.
+            mark_string_shared(value);
+            value
         })
     })
 }
@@ -1511,6 +1540,45 @@ pub extern "C" fn rt_array_free(array: RuntimeValue) {
     }
 }
 
+/// Free a heap string. Returns 1 if the object was reclaimed, 0 if refused.
+///
+/// Rust-side twin of `rt_string_free` in src/runtime/runtime_native.c, matching
+/// its safety contract bit for bit so JIT/AOT/self-hosted paths agree. This
+/// runtime has no refcounting and `RuntimeValue` is `Copy` (aliasing by
+/// construction), so the CALLER must own the only reference.
+///
+/// Refuses, rather than trusting the caller, when the value is:
+///   * not a heap string (`get_typed_ptr_mut` rejects non-heap, misaligned, and
+///     wrong-`object_type` values),
+///   * absent from `HEAP_ALLOCATION_REGISTRY` — already freed, or never
+///     registered (`get_typed_ptr_mut` checks membership, and
+///     `unregister_heap_ptr_checked` re-checks it atomically under the lock so
+///     only one racing caller can proceed),
+///   * owned by a process-wide cache — `SHORT_STRING_CACHE` (len<=1) or
+///     `STRING_LITERAL_INTERN` — flagged via `RT_STRING_FLAG_SHARED`.
+///
+/// A refusal leaks; a wrong free corrupts every other holder. The bias toward
+/// refusing is deliberate.
+#[no_mangle]
+pub extern "C" fn rt_string_free(value: RuntimeValue) -> i64 {
+    let ptr = as_typed_ptr!(mut value, HeapObjectType::String, RuntimeString, 0);
+    unsafe {
+        if ((*ptr).header.reserved & RT_STRING_FLAG_SHARED) != 0 {
+            return 0;
+        }
+        // Read len BEFORE unregistering: it sizes the dealloc layout and must
+        // match `alloc_runtime_string` exactly.
+        let len = (*ptr).len;
+        if !unregister_heap_ptr_checked(ptr as *mut HeapHeader) {
+            return 0;
+        }
+        let size = std::mem::size_of::<RuntimeString>() + len as usize;
+        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        std::alloc::dealloc(ptr as *mut u8, layout);
+    }
+    1
+}
+
 // ============================================================================
 // Tuple SFFI functions
 // ============================================================================
@@ -1622,6 +1690,9 @@ pub extern "C" fn rt_string_new_literal(bytes: *const u8, len: u64) -> RuntimeVa
         }
     }
     let value = rt_string_new(bytes, len);
+    // Owned by the intern table from here on: every later evaluation of this
+    // literal site returns this same object, so rt_string_free must refuse it.
+    mark_string_shared(value);
     if let Ok(mut guard) = map.lock() {
         guard.insert(key, value.to_raw());
     }
