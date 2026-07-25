@@ -14,6 +14,12 @@ EVIDENCE="$BUILD_DIR/evidence.env"
 PROVIDER="${VULKAN_PROVIDER_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_wm.dylib}"
 COMPILER_MANIFEST="${VULKAN_PROVIDER_PROBE_COMPILER_MANIFEST:-$ROOT_DIR/build/macos_gpu_2d_live_native/vulkan/trusted-build.env}"
 NATIVE_LOG="$BUILD_DIR/native-build.log"
+NATIVE_STATUS="$BUILD_DIR/native-build.status"
+NATIVE_LOG_HEAD_BYTES=4096
+NATIVE_LOG_TAIL_BYTES=4096
+# 8 KiB transcript plus the fixed-format omission marker and a 64-bit byte
+# count. Keep this conservative hard cap independently of compiler output.
+NATIVE_LOG_MAX_BYTES=8256
 
 sha256_file() {
     shasum -a 256 "$1" | awk '{print $1}'
@@ -31,7 +37,7 @@ file_bytes() {
 
 native_build_args_sha256() {
     {
-        printf '%s\\0' \
+        printf '%s\0' \
             native-build --backend cranelift --threads 4 \
             --cache-dir "$BUILD_DIR/native-cache" \
             --runtime-bundle core-c-bootstrap \
@@ -39,6 +45,86 @@ native_build_args_sha256() {
             --source test/02_integration/rendering \
             --entry-closure --entry "$ENTRY" --output "$OUTPUT"
     } | shasum -a 256 | awk '{print $1}'
+}
+
+shell_quote() {
+    printf "'"
+    printf '%s' "$1" | sed "s/'/'\\\\''/g"
+    printf "'"
+}
+
+native_build_command() {
+    printf 'env '
+    shell_quote 'SIMPLE_NO_STUB_FALLBACK=1'
+    printf ' '
+    shell_quote 'SIMPLE_LIB=src'
+    printf ' '
+    shell_quote "${COMPILER:-}"
+    for arg in \
+        native-build --backend cranelift --threads 4 \
+        --cache-dir "$BUILD_DIR/native-cache" \
+        --runtime-bundle core-c-bootstrap \
+        --source src/lib \
+        --source test/02_integration/rendering \
+        --entry-closure --entry "$ENTRY" --output "$OUTPUT"; do
+        printf ' '
+        shell_quote "$arg"
+    done
+}
+
+bounded_native_build_log() {
+    # Keep only a deterministic 8 KiB head+tail transcript while draining the
+    # full compiler stream. This never writes an unbounded raw build log.
+    perl -e '
+        my ($head_max, $tail_max) = @ARGV;
+        my ($head, $tail, $total) = ("", "", 0);
+        while (1) {
+            my $read = read(STDIN, my $chunk, 4096);
+            last if !defined($read) || $read == 0;
+            $total += $read;
+            if (length($head) < $head_max) {
+                my $take = $head_max - length($head);
+                $take = $read if $take > $read;
+                $head .= substr($chunk, 0, $take);
+            }
+            $tail .= $chunk;
+            if (length($tail) > $tail_max) {
+                substr($tail, 0, length($tail) - $tail_max, "");
+            }
+        }
+        if ($total <= $head_max) {
+            print $head;
+        } elsif ($total <= $head_max + $tail_max) {
+            print $tail;
+        } else {
+            print $head;
+            print "\\n--- omitted ", $total - $head_max - $tail_max,
+                " native-build bytes ---\\n";
+            print $tail;
+        }
+    ' "$NATIVE_LOG_HEAD_BYTES" "$NATIVE_LOG_TAIL_BYTES"
+}
+
+run_native_build_bounded() {
+    rm -f "$NATIVE_STATUS"
+    (
+        SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=src \
+            "$COMPILER" native-build \
+            --backend cranelift \
+            --threads 4 \
+            --cache-dir "$BUILD_DIR/native-cache" \
+            --runtime-bundle core-c-bootstrap \
+            --source src/lib \
+            --source test/02_integration/rendering \
+            --entry-closure \
+            --entry "$ENTRY" \
+            --output "$OUTPUT" \
+            2>&1
+        printf '%s\\n' "$?" >"$NATIVE_STATUS"
+    ) | bounded_native_build_log >"$NATIVE_LOG"
+    [ -f "$NATIVE_STATUS" ] || return 1
+    native_status="$(sed -n '1p' "$NATIVE_STATUS")"
+    [ "$native_status" = 0 ]
 }
 
 write_evidence() {
@@ -55,6 +141,8 @@ write_evidence() {
         echo "vulkan_provider_probe_provider_dylib=${PROVIDER:-}"
         echo "vulkan_provider_probe_provider_sha256=${PROVIDER_SHA256:-}"
         echo "vulkan_provider_probe_native_build_log=$NATIVE_LOG"
+        echo "vulkan_provider_probe_native_build_log_max_bytes=$NATIVE_LOG_MAX_BYTES"
+        echo "vulkan_provider_probe_native_build_command=$(native_build_command)"
         echo "vulkan_provider_probe_native_build_args_sha256=$(native_build_args_sha256)"
         if [ -f "$NATIVE_LOG" ]; then
             echo "vulkan_provider_probe_native_build_log_sha256=$(sha256_file "$NATIVE_LOG")"
@@ -145,7 +233,7 @@ probe_output_has_required_fields() {
 
 [ "$(uname -s)" = Darwin ] || fail "macos-required"
 mkdir -p "$BUILD_DIR"
-rm -f "$OUTPUT" "$RAW_STDOUT" "$RAW_STDERR" "$EVIDENCE"
+rm -f "$OUTPUT" "$RAW_STDOUT" "$RAW_STDERR" "$EVIDENCE" "$NATIVE_LOG" "$NATIVE_STATUS"
 
 COMPILER="$(resolve_compiler)" || fail "self-hosted-compiler-missing"
 PROVIDER="$(canonical_file "$PROVIDER")" || fail "provider-dylib-missing-or-untrusted"
@@ -164,19 +252,14 @@ nm -gU "$PROVIDER" | grep -Fq "_rt_vulkan_init" ||
 nm -gU "$PROVIDER" | grep -Fq "_rt_vulkan_shutdown" ||
     fail "provider-shutdown-symbol-missing"
 
-SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_LIB=src \
-    "$COMPILER" native-build \
-    --backend cranelift \
-    --threads 4 \
-    --cache-dir "$BUILD_DIR/native-cache" \
-    --runtime-bundle core-c-bootstrap \
-    --source src/lib \
-    --source test/02_integration/rendering \
-    --entry-closure \
-    --entry "$ENTRY" \
-    --output "$OUTPUT" \
-    >"$NATIVE_LOG" 2>&1 ||
-    fail "native-build-failed"
+if run_native_build_bounded; then
+    native_build_ok=1
+else
+    native_build_ok=0
+fi
+[ -f "$NATIVE_LOG" ] || fail "native-build-log-missing"
+[ "$(file_bytes "$NATIVE_LOG")" -le "$NATIVE_LOG_MAX_BYTES" ] || fail "native-build-log-unbounded"
+[ "$native_build_ok" = 1 ] || fail "native-build-failed"
 
 [ -x "$OUTPUT" ] || fail "native-output-missing"
 
