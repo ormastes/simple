@@ -380,6 +380,22 @@ same failure.
   ownership. No retry is allowed in this session. Vulkan
   rendering/events/vector-font/300-DPI status therefore remains FAIL/unproved;
   Metal, web, GUI, WM, and QEMU stay blocked behind it.
+- Parallel source and native-disassembly review then proved the exact corruption:
+  `VulkanBackend.init_with_session` stored the return register from
+  `session.retain()` into its session slot, and hosted native code returned the
+  bare `STR1` header there. The backend now retains separately and stores the
+  preserved original session argument; its no-argument evidence method is also
+  an explicit `me` receiver.
+- `vulkan_session_retention_native_probe.spl` passes with the macOS runtime
+  providers linked. Disassembly confirms the original session survives in
+  `x28` and is stored at backend offset `+0x180`; the ownership byte is stored
+  at `+0x188`. The self-hosted interpreter unit run was stopped as inconclusive
+  after five minutes under the runaway guard, so it earns no additional PASS.
+- The 72-symbol `driver-trace4` link failure is not the canonical Stage3 path:
+  that driver correctly selected core-C, while canonical bootstrap Stage3 uses
+  `SIMPLE_BOOTSTRAP=1`, `bootstrap_main.spl`, and native-all. Produce a fresh
+  canonical Stage3 and manifest with the standard bootstrap script before the
+  next live Vulkan run; never backfill or synthesize provenance.
 
 ## Required Evidence and Documentation
 
