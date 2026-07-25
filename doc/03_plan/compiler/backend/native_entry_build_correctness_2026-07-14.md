@@ -883,3 +883,27 @@ the shared binary — deploys require explicit user go-ahead).
   pattern. Then trace the option-resolution gate. Do not change `unwrap_or`
   routing, and defer LLVM execution until backend-neutral MIR lowering passes.
   Credit C9 only when the positional executable exits `42`.
+
+  The next bounded session migrated those five C9-critical consumers to the
+  established `.?`/`??` aggregate extraction pattern. The first pure-Simple
+  self-rebuild attempt exited `139` before logging, so the Rust seed was used
+  only for its bootstrap role. It produced a pure-Simple candidate with
+  `1399 compiled, 0 cached, 0 failed`. That candidate resolved all five
+  `.unwrap_or` calls, emitted and linked the Cranelift fixture, and exited
+  `20`: uppercase passed, while the parse/Option block did not.
+
+  One staged first-failure probe returned `5`, proving `f`, `zero`, invalid,
+  and trailing presence checks passed before the nonzero `f.unwrap_or(0.0)`
+  value comparison failed. Review found the same payload/handle mistake in
+  `unwrap`, `unwrap_or`, and `map`: each extracted `some_val_*` and then passed
+  the enclosing `receiver_local` to `decode_runtime_value`. All three sibling
+  calls now decode the extracted payload, with focused source contracts.
+  The cache-backed candidate completed with `5 compiled, 1394 cached,
+  0 failed`, but the positional C9 fixture still exited `20`.
+
+  C9 remains uncredited and this session has reached its three-cycle cap.
+  The next fresh session should run the staged first-failure probe against the
+  payload-fixed candidate to determine whether the first failing condition
+  advanced beyond nonzero `f.unwrap_or`; do not repeat the already-recorded
+  positional run first. LLVM and the downstream platform matrix remain
+  deferred until the Cranelift executable exits `42`.
