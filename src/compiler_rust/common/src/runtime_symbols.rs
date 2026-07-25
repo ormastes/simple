@@ -126,7 +126,6 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_value_as_int",
     "rt_array_new",
     "rt_array_free",
-    "rt_string_free",
     "rt_transient_array_scope_begin",
     "rt_transient_array_scope_pause",
     "rt_transient_array_scope_end",
