@@ -43,6 +43,9 @@ pub fn focused_native_build_linker_script(args: [text]) -> text:
 pub fn focused_native_build_runtime_path(args: [text]) -> text:
     focused_native_build_arg_value(args, "--runtime-path")
 
+pub fn focused_native_build_cache_dir(args: [text]) -> text:
+    focused_native_build_arg_value(args, "--cache-dir")
+
 pub fn focused_native_build_backend(args: [text]) -> text:
     val backend = focused_native_build_arg_value(args, "--backend")
     if backend == "":
@@ -50,8 +53,21 @@ pub fn focused_native_build_backend(args: [text]) -> text:
     else:
         backend
 
-pub fn focused_native_build_strip(args: [text], include_sources: bool) -> bool:
-    not include_sources or focused_native_build_has_flag(args, "--strip")
+pub fn focused_native_build_effective_sources(args: [text], exact_stage4_capsule: bool) -> [text]:
+    if exact_stage4_capsule:
+        []
+    else:
+        focused_native_build_sources(args)
+
+pub fn focused_native_build_effective_cache_dir(args: [text], previous: text) -> text:
+    val requested = focused_native_build_cache_dir(args)
+    if requested == "": previous else: requested
+
+pub fn focused_native_build_strip(args: [text], exact_stage4_capsule: bool) -> bool:
+    exact_stage4_capsule or focused_native_build_has_flag(args, "--strip")
+
+pub fn focused_native_build_exact_capsule_entry_allowed(entry: text) -> bool:
+    entry == "src/app/cli/main.spl" or entry == "src/app/os/main.spl"
 
 fn focused_native_build_has_flag(args: [text], flag: text) -> bool:
     for arg in args:
@@ -90,14 +106,26 @@ pub fn focused_native_build_error(args: [text]) -> text:
         return "Error: focused native-build requires --output"
     ""
 
-pub fn run_focused_native_build(args: [text], include_sources: bool) -> i64:
+pub fn run_focused_native_build(args: [text]) -> i64:
+    run_focused_native_build_plan(args, false)
+
+pub fn run_exact_stage4_focused_capsule(args: [text]) -> i64:
+    if env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1":
+        print "Error: exact focused capsule requires SIMPLE_BOOTSTRAP_STAGE4=1"
+        return 1
+    val entry = focused_native_build_arg_value(args, "--entry")
+    if not focused_native_build_exact_capsule_entry_allowed(entry):
+        print "Error: exact focused capsule entry must be src/app/cli/main.spl or src/app/os/main.spl"
+        return 1
+    run_focused_native_build_plan(args, true)
+
+fn run_focused_native_build_plan(args: [text], exact_stage4_capsule: bool) -> i64:
     val plan_error = focused_native_build_error(args)
     if plan_error != "":
         print plan_error
         return 1
 
-    val parsed_sources = focused_native_build_sources(args)
-    val sources = if include_sources: parsed_sources else: []
+    val sources = focused_native_build_effective_sources(args, exact_stage4_capsule)
     val entry = focused_native_build_arg_value(args, "--entry")
     var output = focused_native_build_arg_value(args, "--output")
     if output == "":
@@ -113,6 +141,7 @@ pub fn run_focused_native_build(args: [text], include_sources: bool) -> i64:
     val old_target = env_get("SIMPLE_NATIVE_BUILD_TARGET")
     val old_linker_script = env_get("SIMPLE_LINKER_SCRIPT")
     val old_runtime_path = env_get("SIMPLE_RUNTIME_PATH")
+    val old_cache_dir = env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR")
     val old_runtime_bundle = env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE")
     val old_native_arena_decls = env_get("SIMPLE_NATIVE_ARENA_DECLS")
     env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry)
@@ -124,6 +153,7 @@ pub fn run_focused_native_build(args: [text], include_sources: bool) -> i64:
         env_set("SIMPLE_LINKER_SCRIPT", linker_script)
     if runtime_path != "":
         env_set("SIMPLE_RUNTIME_PATH", runtime_path)
+    env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", focused_native_build_effective_cache_dir(args, old_cache_dir))
     if runtime_bundle != "":
         env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", runtime_bundle)
 
@@ -137,7 +167,7 @@ pub fn run_focused_native_build(args: [text], include_sources: bool) -> i64:
         entry,
         output,
         backend,
-        focused_native_build_strip(args, include_sources),
+        focused_native_build_strip(args, exact_stage4_capsule),
         true,
         focused_native_build_opt_level(args),
         focused_native_build_has_flag(args, "--no-borrow-check")
@@ -148,6 +178,7 @@ pub fn run_focused_native_build(args: [text], include_sources: bool) -> i64:
     env_set("SIMPLE_NATIVE_BUILD_TARGET", old_target)
     env_set("SIMPLE_LINKER_SCRIPT", old_linker_script)
     env_set("SIMPLE_RUNTIME_PATH", old_runtime_path)
+    env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_cache_dir)
     env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", old_runtime_bundle)
     env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
 
