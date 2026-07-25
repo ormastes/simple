@@ -534,13 +534,27 @@ begin
                   r(rd) := c_lui_imm(h);
                 end if;
               when "100" =>
-                if h(12) = '0' then
-                  rd := 8 + to_integer(unsigned(h(9 downto 7)));
-                  r(rd) := shift_right(r(rd), to_integer(unsigned(h(6 downto 2))));
-                else
-                  rd := 8 + to_integer(unsigned(h(9 downto 7)));
-                  r(rd) := r(rd) and c_addi_imm(h);
-                end if;
+                -- C1 MISC-ALU group. h(11 downto 10) selects the sub-op; the
+                -- earlier decode looked only at h(12) and so mis-ran C.SRAI,
+                -- C.SUB/C.XOR/C.OR/C.AND (and small-immediate C.ANDI) all as
+                -- C.SRLI. Decode the full field.
+                rd := 8 + to_integer(unsigned(h(9 downto 7)));  -- rd'/rs1'
+                case h(11 downto 10) is
+                  when "00" => -- C.SRLI (rv32: shamt = h(6 downto 2), h(12)=0)
+                    r(rd) := shift_right(r(rd), to_integer(unsigned(h(6 downto 2))));
+                  when "01" => -- C.SRAI (arithmetic)
+                    r(rd) := unsigned(shift_right(signed(r(rd)), to_integer(unsigned(h(6 downto 2)))));
+                  when "10" => -- C.ANDI (sign-extended CI immediate)
+                    r(rd) := r(rd) and c_addi_imm(h);
+                  when others => -- "11": CA-format register-register ops
+                    rs2 := 8 + to_integer(unsigned(h(4 downto 2)));  -- rs2'
+                    case h(6 downto 5) is
+                      when "00" => r(rd) := r(rd) - r(rs2);    -- C.SUB
+                      when "01" => r(rd) := r(rd) xor r(rs2);  -- C.XOR
+                      when "10" => r(rd) := r(rd) or r(rs2);   -- C.OR
+                      when others => r(rd) := r(rd) and r(rs2);-- C.AND
+                    end case;
+                end case;
               when "101" =>
                 pc_next := pc_q + c_j_imm(h);
               when "110" =>
@@ -695,6 +709,7 @@ begin
                 case ins(14 downto 12) is
                   when "000" => r(rd) := r(rs1) + sext(ins(31 downto 20));
                   when "111" => r(rd) := r(rs1) and sext(ins(31 downto 20));
+                  when "100" => r(rd) := r(rs1) xor sext(ins(31 downto 20));
                   when "110" => r(rd) := r(rs1) or sext(ins(31 downto 20));
                   when "010" =>
                     if signed(r(rs1)) < signed(sext(ins(31 downto 20))) then r(rd) := to_unsigned(1, 32); else r(rd) := (others => '0'); end if;
