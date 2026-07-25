@@ -1947,6 +1947,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_destroy_shader",
     "rt_vulkan_destroy_swapchain",
     "rt_vulkan_device_count",
+    "rt_vulkan_dependency_quarantine_lock",
+    "rt_vulkan_dependency_quarantine_unlock",
     "rt_vulkan_device_driver_identity",
     "rt_vulkan_device_memory",
     "rt_vulkan_device_name",

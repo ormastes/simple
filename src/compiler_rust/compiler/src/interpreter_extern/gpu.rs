@@ -6,6 +6,7 @@
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::value::Value;
+use parking_lot::lock_api::RawMutex as _;
 use std::ffi::{CStr, CString};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -2726,6 +2727,20 @@ mod vulkan_dlopen {
 
 static VULKAN_DL_AVAILABLE: OnceLock<bool> = OnceLock::new();
 static SHADERC_DL: OnceLock<Option<vulkan_dlopen::ShadercFns>> = OnceLock::new();
+static VULKAN_DEPENDENCY_QUARANTINE_GATE: parking_lot::RawMutex = parking_lot::RawMutex::INIT;
+
+pub fn rt_vulkan_dependency_quarantine_lock_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    VULKAN_DEPENDENCY_QUARANTINE_GATE.lock();
+    Ok(Value::Int(1))
+}
+
+pub fn rt_vulkan_dependency_quarantine_unlock_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    // SAFETY: the Simple quarantine owner balances lock/unlock calls.
+    unsafe {
+        VULKAN_DEPENDENCY_QUARANTINE_GATE.unlock();
+    }
+    Ok(Value::Int(1))
+}
 
 fn check_vulkan_available() -> bool {
     *VULKAN_DL_AVAILABLE.get_or_init(|| vulkan_dlopen::load_vulkan().is_some())

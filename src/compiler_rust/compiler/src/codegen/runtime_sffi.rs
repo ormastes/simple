@@ -1534,6 +1534,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cuda_device_compute_capability", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_is_available", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_device_count", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_vulkan_dependency_quarantine_lock", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_vulkan_dependency_quarantine_unlock", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_device_driver_identity", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_device_name", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_selected_device_name", &[], &[I64]),

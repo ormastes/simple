@@ -4,7 +4,8 @@ use std::os::raw::c_char;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
-use parking_lot::Mutex;
+use parking_lot::lock_api::RawMutex as _;
+use parking_lot::{Mutex, RawMutex as ParkingRawMutex};
 
 // ── Vulkan module imports (feature-gated) ────────────────────────────────────
 
@@ -43,6 +44,27 @@ pub(super) use ash::vk;
 // ── Handle allocator ─────────────────────────────────────────────────────────
 
 static NEXT_HANDLE: AtomicI64 = AtomicI64::new(1);
+
+// Serialize the Simple-owned dependency quarantine independently from STATE.
+// Quarantine operations call rt_vulkan_* while holding this gate, and those
+// runtime functions acquire STATE themselves, so sharing STATE would deadlock.
+static DEPENDENCY_QUARANTINE_GATE: ParkingRawMutex = ParkingRawMutex::INIT;
+
+#[no_mangle]
+pub extern "C" fn rt_vulkan_dependency_quarantine_lock() -> i64 {
+    DEPENDENCY_QUARANTINE_GATE.lock();
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn rt_vulkan_dependency_quarantine_unlock() -> i64 {
+    // SAFETY: the Simple quarantine owner balances each successful lock call
+    // on the same control-flow path before returning.
+    unsafe {
+        DEPENDENCY_QUARANTINE_GATE.unlock();
+    }
+    1
+}
 
 #[cfg(feature = "vulkan")]
 pub(super) struct FontGraphicsResources {

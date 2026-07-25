@@ -72,15 +72,45 @@ describe "SimpleOS host GPU IMAGE and TEXT execution":
         val engine = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
         val processing = file_read("src/lib/gc_async_mut/processing/vulkan_fill_u32.spl")
         val async_facade = file_read("src/lib/nogc_async_mut/gpu/engine2d/sffi_vulkan.spl")
+        val rust_runtime = file_read("src/compiler_rust/runtime/src/vulkan_graphics_runtime_core.rs")
+        val c_runtime = file_read("src/runtime/runtime_native.c")
+        val runtime_header = file_read("src/runtime/runtime.h")
+        val runtime_sffi = file_read("src/compiler_rust/compiler/src/codegen/runtime_sffi.rs")
+        val interpreter_registry = file_read("src/compiler_rust/compiler/src/interpreter_extern/mod.rs")
         expect(helper).to_contain("vulkan_sffi_dispatch_buffer_compute_checked")
         expect(owner).to_contain("vulkan_sffi_submit_and_wait_fence(cmd)")
         expect(owner).to_contain("if fence < 0:")
         expect(owner).to_contain("vulkan_sffi_discard_command(cmd)")
         expect(owner).to_contain("struct VulkanSffiDependencyQuarantine:")
         expect(owner).to_contain("descriptor: i64\n    buffer: i64\n    pipeline: i64\n    shader: i64")
-        expect(owner).to_contain("_vulkan_sffi_dependency_quarantine_lock: Mutex")
+        expect(owner).to_contain("extern fn rt_vulkan_dependency_quarantine_lock() -> bool")
+        expect(owner).to_contain("extern fn rt_vulkan_dependency_quarantine_unlock() -> bool")
+        expect(owner).to_contain("fn _vulkan_sffi_dependency_lock_acquire():")
+        expect(owner).to_contain("rt_vulkan_dependency_quarantine_lock()")
+        expect(owner).to_contain("_vulkan_sffi_dependency_lock_acquire()")
         expect(owner).to_contain("if not rt_vulkan_wait_idle():")
-        expect(owner).to_contain("_vulkan_sffi_dependency_quarantine_lock.unlock(0)\n        return false")
+        expect(owner).to_contain(
+            "_vulkan_sffi_dependency_lock_release()\n        return false"
+        )
+        expect(owner.contains("mutex_new(")).to_equal(false)
+        expect(owner.contains("mutex_lock(")).to_equal(false)
+        expect(rust_runtime).to_contain(
+            "static DEPENDENCY_QUARANTINE_GATE: ParkingRawMutex = ParkingRawMutex::INIT"
+        )
+        expect(rust_runtime).to_contain("DEPENDENCY_QUARANTINE_GATE.lock()")
+        expect(rust_runtime).to_contain("DEPENDENCY_QUARANTINE_GATE.unlock()")
+        expect(c_runtime).to_contain(
+            "static atomic_flag rt_vulkan_dependency_quarantine_gate = ATOMIC_FLAG_INIT"
+        )
+        expect(runtime_header).to_contain(
+            "int64_t rt_vulkan_dependency_quarantine_lock(void)"
+        )
+        expect(runtime_sffi).to_contain(
+            "RuntimeFuncSpec::new(\"rt_vulkan_dependency_quarantine_lock\", &[], &[I64])"
+        )
+        expect(interpreter_registry).to_contain(
+            "\"rt_vulkan_dependency_quarantine_lock\",\n        gpu::rt_vulkan_dependency_quarantine_lock_fn"
+        )
         expect(owner).to_contain("entry.descriptor == unique.descriptor")
         expect(owner).to_contain("entry.buffer == unique.buffer")
         expect(owner).to_contain("val descriptor_released = entry.descriptor <= 0 or vulkan_sffi_destroy_descriptor_set(entry.descriptor)")

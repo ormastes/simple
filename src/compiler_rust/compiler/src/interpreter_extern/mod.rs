@@ -1965,6 +1965,14 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     );
     insert_simple!("rt_renderdoc_num_captures", gpu::rt_renderdoc_num_captures_fn);
     insert_simple!("rt_vulkan_is_available", gpu::rt_vulkan_is_available_fn);
+    insert_simple!(
+        "rt_vulkan_dependency_quarantine_lock",
+        gpu::rt_vulkan_dependency_quarantine_lock_fn
+    );
+    insert_simple!(
+        "rt_vulkan_dependency_quarantine_unlock",
+        gpu::rt_vulkan_dependency_quarantine_unlock_fn
+    );
     insert_simple!("rt_vulkan_push_constants", gpu::rt_vulkan_push_constants_fn);
     insert_simple!("rt_vulkan_select_device", gpu::rt_vulkan_select_device_fn);
     insert_simple!("rt_vulkan_shutdown", gpu::rt_vulkan_shutdown_fn);

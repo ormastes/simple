@@ -237,7 +237,7 @@ class Engine2D:
             return false
         val vulkan = active
         val evidence = vulkan.install_font_atlas_pipeline(spirv_bytes)
-        self.vulkan_backend = vulkan
+        self.vulkan_backend = Some(vulkan)
         evidence.status == "ready"
 
     me install_cuda_font_ptx(ptx: text) -> bool:
@@ -275,7 +275,7 @@ class Engine2D:
     me _poison_vulkan_font_surface(fallback_pixels: [u32]):
         if val Some(vulkan) = self.vulkan_backend:
             vulkan.mark_completion_unknown()
-            self.vulkan_backend = vulkan
+            self.vulkan_backend = Some(vulkan)
         var software = SoftwareBackend.create()
         software.init(self.w, self.h)
         if fallback_pixels.len() == self.w.to_i64() * self.h.to_i64():
@@ -361,7 +361,18 @@ class Engine2D:
             if metal.init(width, height):
                 metal.use_gpu_only()
                 val capability = metal.capability()
-                return Engine2D(backend: metal, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, metal_backend: metal, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal")
+                return Engine2D(
+                    backend: metal, capability: capability,
+                    baremetal_backend: nil, virtio_gpu_backend: nil,
+                    cuda_backend: nil, vulkan_backend: nil,
+                    vulkan_font_state_unknown: false,
+                    last_vulkan_font_evidence: nil,
+                    metal_backend: Some(metal), opencl_backend: nil,
+                    rocm_backend: nil, software_backend: nil,
+                    font_renderer: nil, last_font_execution_attempts: [],
+                    last_font_execution_target: "",
+                    w: width, h: height, pacing: make_frame_pacing_counters(),
+                    selected_backend_name: "metal")
         Engine2D.create_with_backend(width, height, backend_name)
 
     static fn create_offscreen(width: i32, height: i32) -> Engine2D:
@@ -418,7 +429,17 @@ class Engine2D:
         var vulkan = VulkanBackend.create()
         if not vulkan.init_with_session(width, height, parent.session):
             return Err(if vulkan.last_error == "": "shared-vulkan-surface-init-failed" else: vulkan.last_error)
-        var child = Engine2D(backend: vulkan, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, vulkan_backend: vulkan, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "vulkan")
+        var child = Engine2D(
+            backend: vulkan, capability: backend_capability_default(),
+            baremetal_backend: nil, virtio_gpu_backend: nil,
+            cuda_backend: nil, vulkan_backend: Some(vulkan),
+            vulkan_font_state_unknown: false,
+            last_vulkan_font_evidence: nil, metal_backend: nil,
+            opencl_backend: nil, rocm_backend: nil, software_backend: nil,
+            font_renderer: nil, last_font_execution_attempts: [],
+            last_font_execution_target: "",
+            w: width, h: height, pacing: make_frame_pacing_counters(),
+            selected_backend_name: "vulkan")
         child.clear(0x00000000u32)
         Ok(child)
 
@@ -437,7 +458,16 @@ class Engine2D:
         if not metal.init_with_session(width, height, parent.session):
             return Err(if metal.last_error == "": "shared-metal-surface-init-failed" else: metal.last_error)
         val capability = metal.capability()
-        Ok(Engine2D(backend: metal, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, metal_backend: metal, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal"))
+        Ok(Engine2D(
+            backend: metal, capability: capability,
+            baremetal_backend: nil, virtio_gpu_backend: nil,
+            cuda_backend: nil, vulkan_backend: nil,
+            vulkan_font_state_unknown: false, last_vulkan_font_evidence: nil,
+            metal_backend: Some(metal), opencl_backend: nil,
+            rocm_backend: nil, software_backend: nil, font_renderer: nil,
+            last_font_execution_attempts: [], last_font_execution_target: "",
+            w: width, h: height, pacing: make_frame_pacing_counters(),
+            selected_backend_name: "metal"))
 
     static fn create_requested_backend(width: i32, height: i32, backend_name: text) -> Result<Engine2D, text>:
         """Create one canonical backend without silently falling back."""
@@ -452,7 +482,19 @@ class Engine2D:
         if requested_backend == "vulkan":
             var vulkan = VulkanBackend.create()
             if vulkan.init(width, height):
-                return Ok(Engine2D(backend: vulkan, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, vulkan_backend: vulkan, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "vulkan"))
+                return Ok(Engine2D(
+                    backend: vulkan, capability: backend_capability_default(),
+                    baremetal_backend: nil, virtio_gpu_backend: nil,
+                    cuda_backend: nil, vulkan_backend: Some(vulkan),
+                    vulkan_font_state_unknown: false,
+                    last_vulkan_font_evidence: nil, metal_backend: nil,
+                    opencl_backend: nil, rocm_backend: nil,
+                    software_backend: nil, font_renderer: nil,
+                    last_font_execution_attempts: [],
+                    last_font_execution_target: "",
+                    w: width, h: height,
+                    pacing: make_frame_pacing_counters(),
+                    selected_backend_name: "vulkan"))
 
         if requested_backend == "directx":
             var directx = DirectXBackend.create()
@@ -491,7 +533,18 @@ class Engine2D:
             var metal = MetalBackend.create()
             if metal.init(width, height):
                 val capability = metal.capability()
-                return Ok(Engine2D(backend: metal, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, metal_backend: metal, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal"))
+                return Ok(Engine2D(
+                    backend: metal, capability: capability,
+                    baremetal_backend: nil, virtio_gpu_backend: nil,
+                    cuda_backend: nil, vulkan_backend: nil,
+                    vulkan_font_state_unknown: false,
+                    last_vulkan_font_evidence: nil,
+                    metal_backend: Some(metal), opencl_backend: nil,
+                    rocm_backend: nil, software_backend: nil,
+                    font_renderer: nil, last_font_execution_attempts: [],
+                    last_font_execution_target: "",
+                    w: width, h: height, pacing: make_frame_pacing_counters(),
+                    selected_backend_name: "metal"))
 
         if requested_backend == "metal-on-vulkan":
             # Compatibility stays explicit: strict "metal" never claims this lane.
@@ -549,7 +602,18 @@ class Engine2D:
         """Create canonical Vulkan without retaining unrelated backend factories."""
         var vulkan = VulkanBackend.create()
         if vulkan.init(width, height):
-            return Ok(Engine2D(backend: vulkan, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, vulkan_backend: vulkan, w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "vulkan"))
+            return Ok(Engine2D(
+                backend: vulkan, capability: backend_capability_default(),
+                baremetal_backend: nil, virtio_gpu_backend: nil,
+                cuda_backend: nil, vulkan_backend: Some(vulkan),
+                vulkan_font_state_unknown: false,
+                last_vulkan_font_evidence: nil, metal_backend: nil,
+                opencl_backend: nil, rocm_backend: nil,
+                software_backend: nil, font_renderer: nil,
+                last_font_execution_attempts: [],
+                last_font_execution_target: "",
+                w: width, h: height, pacing: make_frame_pacing_counters(),
+                selected_backend_name: "vulkan"))
         Err("backend unavailable: vulkan")
 
     static fn create_with_baremetal_backend(backend: BaremetalBackend) -> Engine2D:
@@ -850,7 +914,7 @@ class Engine2D:
             bm.clear(color)
         elif val Some(vulkan) = self.vulkan_backend:
             vulkan.clear(color)
-            self.vulkan_backend = vulkan
+            self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
         else:
             self.backend.clear(color)
@@ -872,7 +936,7 @@ class Engine2D:
             bm.draw_rect_filled(x, y, w, h, color)
         elif val Some(vulkan) = self.vulkan_backend:
             vulkan.draw_rect_filled(x, y, w, h, color)
-            self.vulkan_backend = vulkan
+            self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
         else:
             self.backend.draw_rect_filled(x, y, w, h, color)
@@ -1058,7 +1122,7 @@ class Engine2D:
                 else:
                     val metal = active
                     quad_index = metal.draw_font_batch(x, y, batch)
-                    self.metal_backend = metal
+                    self.metal_backend = Some(metal)
                     if quad_index < 0 or quad_index > batch.quads.len(): quad_index = 0
                     attempts.push(if quad_index == batch.quads.len(): "metal:success" else: "metal:failed")
                     if quad_index == batch.quads.len(): winner = "metal"
@@ -1084,7 +1148,7 @@ class Engine2D:
                     # whole-program JIT (2026-07-18).
                     var evidence = vulkan.composite_font_batch(x, y, batch)
                     self.last_vulkan_font_evidence = evidence
-                    self.vulkan_backend = vulkan
+                    self.vulkan_backend = Some(vulkan)
                     attempts.push("vulkan:" + evidence.reason)
                     if (evidence.reason == "partial-framebuffer-restore-failed" or
                         evidence.reason == "missing-command-cleanup-capability" or
@@ -1172,7 +1236,7 @@ class Engine2D:
         elif val Some(vulkan) = self.vulkan_backend:
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_text(x, y, text_val, color, font_size)
-            self.vulkan_backend = vulkan_typed
+            self.vulkan_backend = Some(vulkan_typed)
             self.backend = vulkan_typed
         else:
             self.backend.draw_text(x, y, text_val, color, font_size)
@@ -1241,7 +1305,7 @@ class Engine2D:
         if active_metal != nil:
             val metal = active_metal
             metal.invalidate_font_atlas()
-            self.metal_backend = metal
+            self.metal_backend = Some(metal)
         val active_rocm = self.rocm_backend
         if active_rocm != nil:
             val rocm = active_rocm
@@ -1304,7 +1368,7 @@ class Engine2D:
         if active_metal != nil:
             val metal = active_metal
             metal.invalidate_font_atlas()
-            self.metal_backend = metal
+            self.metal_backend = Some(metal)
         val active_rocm = self.rocm_backend
         if active_rocm != nil:
             val rocm = active_rocm
@@ -1359,7 +1423,7 @@ class Engine2D:
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_image(
                 x, y, text_buf.width, text_buf.height, text_buf.pixels)
-            self.vulkan_backend = vulkan_typed
+            self.vulkan_backend = Some(vulkan_typed)
             self.backend = vulkan_typed
         else:
             emu_draw_text_bg(self.backend, x, y, text_val, fg, bg, font_size)
@@ -1372,7 +1436,7 @@ class Engine2D:
             bm.draw_image(x, y, w, h, pixels)
         elif val Some(vulkan) = self.vulkan_backend:
             vulkan.draw_image(x, y, w, h, pixels)
-            self.vulkan_backend = vulkan
+            self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
         else:
             self.backend.draw_image(x, y, w, h, pixels)
@@ -1458,7 +1522,7 @@ class Engine2D:
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_gradient_rect_h(
                 x, y, w, h, left_color, right_color)
-            self.vulkan_backend = vulkan_typed
+            self.vulkan_backend = Some(vulkan_typed)
             self.backend = vulkan_typed
         else:
             emu_draw_gradient_rect_h(self.backend, x, y, w, h, left_color, right_color)
@@ -1479,7 +1543,7 @@ class Engine2D:
         elif val Some(vulkan) = self.vulkan_backend:
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_rect_blend(x, y, w, h, color)
-            self.vulkan_backend = vulkan_typed
+            self.vulkan_backend = Some(vulkan_typed)
             self.backend = vulkan_typed
         else:
             emu_draw_rect_blend(self.backend, x, y, w, h, color)
@@ -1498,7 +1562,7 @@ class Engine2D:
         elif val Some(vulkan) = self.vulkan_backend:
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_image_blend(x, y, w, h, pixels)
-            self.vulkan_backend = vulkan_typed
+            self.vulkan_backend = Some(vulkan_typed)
             self.backend = vulkan_typed
         else:
             # emu_* free-function route like draw_image_scaled: the AOT lane
@@ -1563,7 +1627,7 @@ class Engine2D:
             return false
         val vulkan = active
         val completed = vulkan.draw_image_blend_checked(dst_x, dst_y, width, height, pixels, opacity_milli)
-        self.vulkan_backend = vulkan
+        self.vulkan_backend = Some(vulkan)
         completed
 
     me draw_metal_image_blend_checked(dst_x: i32, dst_y: i32, width: i32, height: i32, pixels: [u32], opacity_milli: i32) -> bool:
@@ -1573,7 +1637,7 @@ class Engine2D:
             return false
         val metal = active
         val completed = metal.draw_image_blend_checked(dst_x, dst_y, width, height, pixels, opacity_milli)
-        self.metal_backend = metal
+        self.metal_backend = Some(metal)
         completed
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
@@ -1587,7 +1651,7 @@ class Engine2D:
             # compile` of every Engine2D user, 2026-07-18).
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_image_scaled(dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
-            self.vulkan_backend = vulkan_typed
+            self.vulkan_backend = Some(vulkan_typed)
             self.backend = vulkan_typed
         elif val Some(vg) = self.virtio_gpu_backend:
             emu_draw_image_scaled(self.backend, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
@@ -1604,7 +1668,7 @@ class Engine2D:
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_image_scaled_blend(
                 dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
-            self.vulkan_backend = vulkan_typed
+            self.vulkan_backend = Some(vulkan_typed)
             self.backend = vulkan_typed
         else:
             emu_draw_image_scaled_blend(self.backend, dst_x, dst_y, dst_w, dst_h, src_w, src_h, pixels)
@@ -1625,7 +1689,7 @@ class Engine2D:
         elif val Some(vulkan) = self.vulkan_backend:
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_blur_rect(x, y, w, h, radius)
-            self.vulkan_backend = vulkan_typed
+            self.vulkan_backend = Some(vulkan_typed)
             self.backend = vulkan_typed
         else:
             emu_draw_blur_rect(self.backend, x, y, w, h, radius)
@@ -1639,7 +1703,7 @@ class Engine2D:
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_shadow_rect(
                 x, y, w, h, offset_x, offset_y, blur_r, color)
-            self.vulkan_backend = vulkan_typed
+            self.vulkan_backend = Some(vulkan_typed)
             self.backend = vulkan_typed
         else:
             emu_draw_shadow_rect(self.backend, x, y, w, h, offset_x, offset_y, blur_r, color)
@@ -1653,7 +1717,7 @@ class Engine2D:
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_image_transform(
                 dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
-            self.vulkan_backend = vulkan_typed
+            self.vulkan_backend = Some(vulkan_typed)
             self.backend = vulkan_typed
         else:
             emu_draw_image_transform(self.backend, dst_x, dst_y, src_w, src_h, a, b, c, d, tx, ty, pixels)
@@ -1666,7 +1730,7 @@ class Engine2D:
         elif val Some(vulkan) = self.vulkan_backend:
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.draw_rect_blend_mode(x, y, w, h, color, mode)
-            self.vulkan_backend = vulkan_typed
+            self.vulkan_backend = Some(vulkan_typed)
             self.backend = vulkan_typed
         else:
             emu_draw_rect_blend_mode(self.backend, x, y, w, h, color, mode)
@@ -1679,7 +1743,7 @@ class Engine2D:
         elif val Some(vulkan) = self.vulkan_backend:
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.set_mask(mask_pixels, w, h)
-            self.vulkan_backend = vulkan_typed
+            self.vulkan_backend = Some(vulkan_typed)
             self.backend = vulkan_typed
         else:
             self.backend.set_mask(mask_pixels, w, h)
@@ -1692,7 +1756,7 @@ class Engine2D:
         elif val Some(vulkan) = self.vulkan_backend:
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.clear_mask()
-            self.vulkan_backend = vulkan_typed
+            self.vulkan_backend = Some(vulkan_typed)
             self.backend = vulkan_typed
         else:
             self.backend.clear_mask()
@@ -1706,7 +1770,7 @@ class Engine2D:
         elif val Some(vulkan) = self.vulkan_backend:
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.set_clip(x, y, w, h)
-            self.vulkan_backend = vulkan_typed
+            self.vulkan_backend = Some(vulkan_typed)
             self.backend = vulkan_typed
         else:
             self.backend.set_clip(x, y, w, h)
@@ -1720,7 +1784,7 @@ class Engine2D:
         elif val Some(vulkan) = self.vulkan_backend:
             var vulkan_typed: VulkanBackend = vulkan
             vulkan_typed.clear_clip()
-            self.vulkan_backend = vulkan_typed
+            self.vulkan_backend = Some(vulkan_typed)
             self.backend = vulkan_typed
         else:
             self.backend.clear_clip()
@@ -1733,7 +1797,7 @@ class Engine2D:
             bm.present()
         elif val Some(vulkan) = self.vulkan_backend:
             vulkan.present()
-            self.vulkan_backend = vulkan
+            self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
         else:
             self.backend.present()
@@ -1750,7 +1814,7 @@ class Engine2D:
             return bm.read_pixels()
         elif val Some(vulkan) = self.vulkan_backend:
             val pixels = vulkan.read_pixels()
-            self.vulkan_backend = vulkan
+            self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
             return pixels
         else:
@@ -1764,7 +1828,7 @@ class Engine2D:
             bm.read_pixels_with_source()
         elif val Some(vulkan) = self.vulkan_backend:
             val readback = vulkan.read_pixels_with_source()
-            self.vulkan_backend = vulkan
+            self.vulkan_backend = Some(vulkan)
             self.backend = vulkan
             readback
         else:
@@ -1781,7 +1845,7 @@ class Engine2D:
             if val Some(vulkan) = self.vulkan_backend:
                 vulkan.shutdown()
                 if vulkan.completion_unknown:
-                    self.vulkan_backend = vulkan
+                    self.vulkan_backend = Some(vulkan)
                 else:
                     self.vulkan_backend = nil
         if val Some(vg) = self.virtio_gpu_backend:

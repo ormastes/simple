@@ -40,6 +40,10 @@ bool rt_is_macro_trace_enabled(void);
 void rt_set_debug_mode(bool enabled);
 bool rt_is_debug_mode_enabled(void);
 
+/* Runtime-owned gate for Simple's Vulkan dependency quarantine. */
+int64_t rt_vulkan_dependency_quarantine_lock(void);
+int64_t rt_vulkan_dependency_quarantine_unlock(void);
+
 /* ===== Tagged Value System ===== */
 
 typedef enum {

@@ -200,6 +200,25 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_device_count(void) {
     return spl_hosted_provider_i64_probe("rt_vulkan_provider_device_count");
 }
 
+/*
+ * Core-C parity for the runtime-owned Vulkan dependency-quarantine gate.
+ * This lock is intentionally independent from any provider's Vulkan state:
+ * callers invoke rt_vulkan_* operations while holding it.
+ */
+static atomic_flag rt_vulkan_dependency_quarantine_gate = ATOMIC_FLAG_INIT;
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_dependency_quarantine_lock(void) {
+    while (atomic_flag_test_and_set_explicit(
+        &rt_vulkan_dependency_quarantine_gate, memory_order_acquire)) { }
+    return 1;
+}
+
+SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_dependency_quarantine_unlock(void) {
+    atomic_flag_clear_explicit(
+        &rt_vulkan_dependency_quarantine_gate, memory_order_release);
+    return 1;
+}
+
 /* Optional hosted backends are unavailable in the core C runtime. */
 /* oneAPI */
 bool rt_oneapi_init(void) { return false; }

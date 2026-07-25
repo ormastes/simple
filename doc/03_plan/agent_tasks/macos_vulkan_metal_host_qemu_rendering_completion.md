@@ -1,6 +1,6 @@
 # macOS Vulkan/Metal and SimpleOS QEMU Rendering Completion
 
-Updated: 2026-07-24
+Updated: 2026-07-25
 
 ## 2026-07-25 Live iteration notes
 
@@ -15,6 +15,30 @@ Updated: 2026-07-24
   - refresh SimpleOS QEMU ARM SIMD rendering evidence after host lanes close.
 
 ### 2026-07-25 Current Vulkan 2D checkpoint
+
+#### Runtime gate and final bounded diagnostic
+
+- Fixed Engine2D backend option ownership: Vulkan and Metal constructors and
+  writebacks now store `Some(backend)` consistently and initialize all
+  optional/font state explicitly.
+- Replaced the invalid eager Simple mutex used by Vulkan dependency quarantine
+  with a dedicated runtime-owned static gate. Rust native, interpreter, runtime
+  symbol registration, and core-C parity are implemented and high-capability
+  review accepted the ABI, lock balance, and deadlock separation from Vulkan
+  `STATE`.
+- The Vulkan runtime provider and a pure-Stage3 diagnostic closure rebuilt
+  successfully with the new gate symbols. This is diagnostic build evidence,
+  not canonical Stage3 provenance attestation.
+- The third and final live launch ran exactly once and then stopped under the
+  mandatory cycle cap. It advanced beyond both earlier nil-receiver failures,
+  then crashed at a null call target from `Engine2D.draw_gradient_rect` before
+  render-ready. No receipt, window, capture, ordered events, device-readback,
+  vector-font cache, or 300-DPI evidence was produced. Diagnostic artifacts:
+  `build/tmp/macos_vulkan_2d_runtime_gate_diagnostic_20260725/`.
+- Next session: diagnose the gradient dispatch target without relaunching,
+  implement one scoped repair, rebuild from an accepted Stage3 artifact, then
+  permit one bounded Vulkan 2D live launch. Web/GUI/WM, Metal, and QEMU remain
+  gated until that launch passes.
 
 - GitHub `main` now contains provider checkpoint `c103e8ad001e` and shared
   dimension checkpoint `5dbb483e7440`.
