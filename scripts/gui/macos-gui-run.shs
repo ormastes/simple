@@ -39,23 +39,78 @@ for arg in "$@"; do
 done
 
 # Locate a GUI-enabled driver (contains the winit runtime).
-gui_bin=""
-for c in \
-  "$repo_root/src/compiler_rust/target/gui/release/simple" \
-  "$repo_root/src/compiler_rust/target/gui/debug/simple"; do
-  # Release linking may strip the raw extern symbol name even though the GUI
-  # feature and embedded window module are present. Accept either marker.
-  if [[ -x "$c" ]] && LC_ALL=C grep -aq \
-      -e "rt_winit_event_loop_new" -e "window_winitmodule.smf" "$c"; then
-    gui_bin="$c"
-    break
+is_rust_seed_simple() {
+  case "$1" in
+    */src/compiler_rust/*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+has_winit_marker() {
+  LC_ALL=C grep -aq -e "rt_winit_event_loop_new" -e "window_winitmodule.smf" "$1"
+}
+
+resolve_gui_binary() {
+  local override_candidate
+  for override_candidate in "${SIMPLE_GUI_BINARY:-}" "${SIMPLE_BIN:-}"; do
+    if [ -n "$override_candidate" ] && [ -x "$override_candidate" ]; then
+      if has_winit_marker "$override_candidate"; then
+        if is_rust_seed_simple "$override_candidate"; then
+          return 1
+        fi
+        echo "$override_candidate"
+        return 0
+      fi
+    fi
+  done
+
+  local c
+  for c in \
+    "$repo_root/bin/simple" \
+    "$repo_root/bin/release/"*"/simple" \
+    "$repo_root/release/"*"/simple" \
+    "$repo_root/build/bootstrap/stage3/simple"; do
+    if [ -e "$c" ] && [ -x "$c" ] && has_winit_marker "$c"; then
+      echo "$c"
+      return 0
+    fi
+  done
+
+  if [ "${SIMPLE_GUI_ALLOW_RUST_DRIVER:-0}" = "1" ]; then
+    for c in \
+      "$repo_root/src/compiler_rust/target/gui/release/simple" \
+      "$repo_root/src/compiler_rust/target/gui/debug/simple"; do
+      if [ -x "$c" ] && has_winit_marker "$c"; then
+        echo "$c"
+        return 0
+      fi
+    done
   fi
-done
-if [[ -z "$gui_bin" ]]; then
-  echo "error: no GUI-enabled driver found." >&2
+
+  return 1
+}
+
+gui_bin="$(resolve_gui_binary)" || {
+  if [ -n "${SIMPLE_GUI_BINARY:-${SIMPLE_BIN:-}}" ]; then
+    selected="${SIMPLE_GUI_BINARY:-${SIMPLE_BIN:-}}"
+    if is_rust_seed_simple "$selected"; then
+      echo "error: SIMPLE_GUI_BINARY/SIMPLE_BIN points to forbidden rust-seed driver: $selected" >&2
+      echo "set SIMPLE_GUI_ALLOW_RUST_DRIVER=1 for compatibility fallback if needed." >&2
+    elif [ -n "$selected" ] && [ -x "$selected" ]; then
+      echo "error: SIMPLE_GUI_BINARY/SIMPLE_BIN points to non-WINIT driver: $selected" >&2
+    else
+      echo "error: SIMPLE_GUI_BINARY/SIMPLE_BIN is not executable: $selected" >&2
+    fi
+  fi
+  echo "error: no GUI-enabled pure-simple driver found." >&2
   echo "build one: (cd \"$repo_root/src/compiler_rust\" && CARGO_TARGET_DIR=target/gui cargo build -p simple-driver --features gui)" >&2
+  echo "or provide SIMPLE_GUI_BINARY pointing to a GUI-enabled executable." >&2
   exit 1
-fi
+}
 
 # Build a throwaway .app bundle whose executable IS the driver (self-contained),
 # so LaunchServices registers it. An exec-wrapper does NOT work (de-registers).

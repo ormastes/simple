@@ -2,6 +2,18 @@
 
 Updated: 2026-07-24
 
+## 2026-07-25 Live iteration notes
+
+- Implemented: `scripts/gui/macos-gui-run.shs` now resolves the GUI driver using:
+  - explicit `SIMPLE_GUI_BINARY` and `SIMPLE_BIN` overrides when present,
+  - preferred self-hosted candidates (`bin/simple`, `bin/release/*/simple`, `release/*/simple`, `build/bootstrap/stage3/simple`),
+  - optional rust-driver compatibility fallback when `SIMPLE_GUI_ALLOW_RUST_DRIVER=1`,
+  - explicit errors when an override is non-executable, non-WINIT, or rust-seed in strict mode.
+- Remains:
+  - verify Vulkan and Metal 4K/300-DPI live 2D evidence and GUI widget/web 300-DPI vector-font paths on macOS.
+  - re-run native-process-lifecycle checks (`launched-process-missing`, PID identity, event sequence, font cache transitions).
+  - refresh SimpleOS QEMU ARM SIMD rendering evidence after host lanes close.
+
 ## Goal
 
 Prove equivalent Simple 2D, web, GUI, vector-font, and event behavior through
