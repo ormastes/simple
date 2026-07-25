@@ -392,3 +392,26 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   That test is pushed as `7554bc6ff1`. Host and QEMU live evidence remain
   open until the current compiler promotion succeeds; no screenshot, input,
   Vulkan, Metal, or SIMD parity claim is added by this checkpoint.
+- continuation-2026-07-26-current-host-live-failures: The canonical staged
+  self-hosted compiler at the repository release path rebuilt both current
+  macOS backend harnesses and refreshed their trusted manifests. Real window
+  launches still fail before readiness. Vulkan's stripped artifact exits 132
+  on a nil receiver, while an unstripped current diagnostic artifact reaches a
+  fail-closed receipt:
+  `Vulkan shared session initialization failed: availability`. MoltenVK,
+  the loader, and provider symbols are present, so a focused availability /
+  device-count receipt is required before another full window cycle. Metal
+  falls back to CPU because the main Engine2D MSL library fails compilation.
+  The shared harness now probes `MetalBackend.last_error` directly instead of
+  reporting the previous uninformative
+  `backend-specific-probe-unavailable`. A diagnostic attempt to preserve
+  `metal_last_error()` exposed a separate native text ABI corruption
+  (`<value:...>`), so that misleading detail plumbing was reverted.
+
+  The host Vulkan and Metal three-cycle limits are exhausted for this session.
+  No before/after window capture, 4K device readback, ordered input receipt, or
+  cross-backend parity is claimed. CPU-SIMD and both QEMU lanes remain open;
+  QEMU still depends on a pure compiler route that does not retain the entire
+  phase-2 compiler closure. Current reports and root-cause notes are recorded
+  under `doc/09_report/wm_current_*_2026-07-26.md` and
+  `doc/08_tracking/bug/`.
