@@ -136,6 +136,21 @@ pub fn _cli_source_entry_executable(resolved_argv0: text, simple_binary: text, b
         return simple_binary
     resolved_argv0
 
+fn _cli_basename(path: text) -> text:
+    val slash = path.last_index_of("/") ?? -1
+    if slash < 0:
+        return path
+    path.substring(slash + 1, path.len())
+
+fn _cli_is_spawned_helper_exe(path: text) -> bool:
+    # A /proc/<pid>/exe read only tells the truth if <pid> really is us. If the
+    # PPID hop is ever off by a level we get back one of the helpers this
+    # function itself spawns — treat that as "identity unknown" rather than
+    # believing it, because a wrong exe path drives seed-sibling lookup and
+    # therefore delegation (fork-bomb, 2026-07-25).
+    val base = _cli_basename(path)
+    base == "readlink" or base == "sh" or base == "dash" or base == "bash"
+
 fn _cli_current_exe_path() -> text:
     # Prefer the kernel's record of the real executable: argv0-based
     # resolution breaks under the bin/simple symlink (relative argv0 +
@@ -143,10 +158,13 @@ fn _cli_current_exe_path() -> text:
     # `bin/simple test` never delegates). See
     # doc/08_tracking/bug/cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md.
     if not _cli_is_windows_platform():
-        val self_exe = rt_process_run("readlink", ["-f", "/proc/self/exe"])
+        # $PPID, not /proc/self: /proc/self in the spawned child resolves the
+        # CHILD (/usr/bin/readlink), whose seed sibling /usr/bin/simple_seed
+        # never exists -> fall through to `bin/simple` -> infinite delegation.
+        val self_exe = rt_process_run("sh", ["-c", "readlink -f /proc/$PPID/exe"])
         if self_exe.2 == 0:
             val self_path = self_exe.0.trim()
-            if self_path.len() > 0:
+            if self_path.len() > 0 and not _cli_is_spawned_helper_exe(self_path):
                 return self_path
     # rt_cli_arg_count/rt_cli_arg_at are unregistered on the currently
     # deployed seed binary (#159); route through sys_get_args(), which the
