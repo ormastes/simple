@@ -769,9 +769,16 @@ int64_t rt_host_gpu_queue_last_payload_size(void) { return rt_host_gpu_queue_las
 int64_t rt_host_gpu_queue_last_payload_hash(void) { return rt_host_gpu_queue_last_payload_hash_value; }
 const char* rt_host_gpu_queue_last_payload_text(void) { return rt_host_gpu_queue_last_payload_text_value; }
 
+/* RT_CORE_STRING_FLAG_SHARED marks a string owned by a process-wide cache
+ * (rt_core_short_string_cache or rt_literal_intern_table). Those objects are
+ * handed out repeatedly to unrelated callers, so freeing one corrupts every
+ * other holder. rt_string_free refuses them. Stored in the existing padding
+ * field, so the struct layout is unchanged. */
+#define RT_CORE_STRING_FLAG_SHARED 1u
+
 typedef struct RtCoreString {
     uint32_t kind;
-    uint32_t reserved;
+    uint32_t reserved; /* RT_CORE_STRING_FLAG_* */
     uint64_t len;
     char data[];
 } RtCoreString;
@@ -1129,9 +1136,20 @@ static RtCoreClosure* rt_core_as_closure(int64_t value) {
  * enter this table. Strings and boxed floats are never removed, so their
  * addresses cannot be reused into stale-membership false positives.
  * -------------------------------------------------------------------------- */
+/* Open-addressing table. 0 = never used, TOMBSTONE = erased.
+ *
+ * The table originally had no deletion at all (hence "immortal"), which is why
+ * nothing in this runtime could free a string: erasing an entry by writing 0
+ * would truncate any probe chain that ran through that slot, making unrelated
+ * still-live pointers read as unregistered. Deletion therefore writes a
+ * tombstone, which terminates insertion but NOT lookup. Tombstones occupy
+ * slots, so they are counted against the load factor and reclaimed on grow. */
+#define RT_CORE_IMMORTAL_TOMBSTONE ((uintptr_t)1)
+
 static uintptr_t* rt_core_immortal_registry = NULL; /* open-addressing table, 0 = empty */
 static size_t rt_core_immortal_registry_cap = 0;    /* power of two, or 0 */
 static size_t rt_core_immortal_registry_len = 0;
+static size_t rt_core_immortal_registry_tombs = 0;
 static atomic_flag rt_core_immortal_registry_lock = ATOMIC_FLAG_INIT;
 
 static void rt_core_immortal_registry_acquire(void) {
@@ -1153,13 +1171,44 @@ static inline size_t rt_core_immortal_hash_ptr(uintptr_t p) {
 static int rt_core_immortal_registry_insert_raw(uintptr_t p) {
     size_t mask = rt_core_immortal_registry_cap - 1;
     size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    size_t first_tomb = SIZE_MAX;
     for (;;) {
-        if (rt_core_immortal_registry[i] == 0) {
-            rt_core_immortal_registry[i] = p;
+        uintptr_t e = rt_core_immortal_registry[i];
+        if (e == 0) {
+            /* Reuse the earliest tombstone seen, but only after proving p is
+             * not already present further along the probe chain. */
+            if (first_tomb != SIZE_MAX) {
+                rt_core_immortal_registry[first_tomb] = p;
+                rt_core_immortal_registry_tombs--;
+            } else {
+                rt_core_immortal_registry[i] = p;
+            }
             rt_core_immortal_registry_len++;
             return 1;
         }
-        if (rt_core_immortal_registry[i] == p) return 0;
+        if (e == RT_CORE_IMMORTAL_TOMBSTONE) {
+            if (first_tomb == SIZE_MAX) first_tomb = i;
+        } else if (e == p) {
+            return 0;
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+/* caller holds the lock; returns 1 if an entry was erased */
+static int rt_core_immortal_registry_erase_raw(uintptr_t p) {
+    if (rt_core_immortal_registry_cap == 0) return 0;
+    size_t mask = rt_core_immortal_registry_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    for (;;) {
+        uintptr_t e = rt_core_immortal_registry[i];
+        if (e == 0) return 0;
+        if (e == p) {
+            rt_core_immortal_registry[i] = RT_CORE_IMMORTAL_TOMBSTONE;
+            rt_core_immortal_registry_len--;
+            rt_core_immortal_registry_tombs++;
+            return 1;
+        }
         i = (i + 1) & mask;
     }
 }
@@ -1175,8 +1224,11 @@ static int rt_core_immortal_registry_grow(void) {
     rt_core_immortal_registry = fresh;
     rt_core_immortal_registry_cap = new_cap;
     rt_core_immortal_registry_len = 0;
+    rt_core_immortal_registry_tombs = 0; /* rehash drops tombstones */
     for (size_t i = 0; i < old_cap; i++) {
-        if (old[i] != 0) rt_core_immortal_registry_insert_raw(old[i]);
+        if (old[i] != 0 && old[i] != RT_CORE_IMMORTAL_TOMBSTONE) {
+            rt_core_immortal_registry_insert_raw(old[i]);
+        }
     }
     free(old);
     return 1;
@@ -1185,8 +1237,10 @@ static int rt_core_immortal_registry_grow(void) {
 static int rt_core_register_immortal_ptr(void* ptr) {
     if (!ptr) return 0;
     rt_core_immortal_registry_acquire();
-    /* grow at 70% load */
-    if ((rt_core_immortal_registry_len + 1) * 10 >= rt_core_immortal_registry_cap * 7) {
+    /* grow at 70% load; tombstones count as occupancy since they lengthen
+     * probe chains exactly as live entries do */
+    if ((rt_core_immortal_registry_len + rt_core_immortal_registry_tombs + 1) * 10
+            >= rt_core_immortal_registry_cap * 7) {
         if (!rt_core_immortal_registry_grow()) {
             rt_core_immortal_registry_release();
             return 0;
@@ -1216,6 +1270,21 @@ static int rt_core_is_registered_immortal_ptr(void* ptr) {
     }
     rt_core_immortal_registry_release();
     return found;
+}
+
+static int rt_core_unregister_immortal_ptr(void* ptr) {
+    if (!ptr) return 0;
+    rt_core_immortal_registry_acquire();
+    int erased = rt_core_immortal_registry_erase_raw((uintptr_t)ptr);
+    rt_core_immortal_registry_release();
+    if (erased) {
+        atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    }
+    return erased;
+}
+
+static int rt_core_unregister_string(RtCoreString* s) {
+    return rt_core_unregister_immortal_ptr(s);
 }
 
 static int rt_core_register_float(RtCoreFloat* f) {
@@ -1598,7 +1667,11 @@ int64_t rt_string_new(const uint8_t* bytes, uint64_t len) {
     if (!cached) {
         int64_t value = rt_string_new_uncached(bytes, len);
         cached = rt_core_as_string(value);
-        if (cached) rt_core_short_string_cache[index] = cached;
+        if (cached) {
+            /* process-wide shared: never freeable */
+            cached->reserved |= RT_CORE_STRING_FLAG_SHARED;
+            rt_core_short_string_cache[index] = cached;
+        }
     }
     atomic_flag_clear_explicit(&rt_core_short_string_cache_lock, memory_order_release);
     return cached
@@ -1647,6 +1720,10 @@ int64_t rt_string_new_literal(const uint8_t* bytes, uint64_t len) {
     atomic_flag_clear_explicit(&rt_literal_intern_lock, memory_order_release);
 
     int64_t value = rt_string_new(bytes, len);
+    /* Interned literals are handed to every evaluation of that literal site,
+     * so this object outlives any single holder: never freeable. */
+    RtCoreString* interned = rt_core_as_string(value);
+    if (interned) interned->reserved |= RT_CORE_STRING_FLAG_SHARED;
     RtLiteralInternNode* node = (RtLiteralInternNode*)malloc(sizeof(RtLiteralInternNode));
     if (!node) return value;
     node->bytes = bytes;
@@ -3377,6 +3454,25 @@ void rt_array_free(SplArray* value) {
     if (!array || !rt_core_unregister_array(array)) return;
     free(array->data);
     free(array);
+}
+
+/* Free a heap string. Returns 1 if the object was reclaimed, 0 if it was
+ * refused. This runtime has no refcounting and RuntimeValue is Copy, so the
+ * CALLER must own the only reference -- see
+ * doc/09_report/stage4_deepfree_blocked_no_string_free_2026-07-25.md for which
+ * values qualify (SourceFile.content does; an AST node's name does NOT).
+ *
+ * Refuses, rather than trusting the caller, when the object is: not a heap
+ * string, owned by a process-wide cache (short-string or literal-intern), or
+ * absent from the registry (already freed / never registered). A refusal leaks;
+ * a wrong free corrupts every other holder, so the bias is deliberate. */
+int64_t rt_string_free(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return 0;
+    if (s->reserved & RT_CORE_STRING_FLAG_SHARED) return 0;
+    if (!rt_core_unregister_string(s)) return 0;
+    free(s);
+    return 1;
 }
 
 SplArray* rt_byte_array_new(uint64_t cap) {
