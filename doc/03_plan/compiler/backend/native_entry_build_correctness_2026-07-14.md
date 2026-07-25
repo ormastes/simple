@@ -818,3 +818,45 @@ the shared binary — deploys require explicit user go-ahead).
   pattern rather than another dictionary membership variant. Do not change
   `unwrap_or` routing until that representation is proven. Credit C9 only when
   the positional executable exits `42`.
+
+  The following bounded session proved that representation boundary. History
+  identified the existing Stage4 precedent: `MirLowering` already keeps local
+  symbol bindings in parallel arrays because mutation of a dictionary stored
+  in that struct is not reliable. The same owner pattern now backs declared
+  local HIR types and runtime-value membership, with shared set/find/remove
+  helpers and every caller migrated. The C9 fixture adds a second-hop
+  `zero_copy` binding so metadata-copy persistence is distinguished from direct
+  `unwrap_or` routing. High-level review found no helper, constructor, reset,
+  or caller-migration blocker, and pure-Simple checks reported both
+  `src/compiler` and `src/lib` source parsing `OK`.
+
+  C9 remains uncredited. Three cache-preserving Stage4 attempts were consumed
+  before positional execution: the first two found committed parser errors in
+  the Web-to-Engine2D lane (a split assignment and an unparenthesized split
+  Boolean), both now repaired; the third reached link and failed on undefined
+  `moduleloader_execute_smf` from CLI `run_file` under `core-c-bootstrap`.
+  Do not retry C9 again in this session. The next bottom-up blocker is to restore
+  the pure-Simple/core-C owner for that loader symbol, then resume C9 in a fresh
+  bounded session and credit it only when the positional executable exits
+  `42`.
+
+  The loader blocker is now fixed without a hosted fallback. The first explicit
+  facade import proved that the older loader reached six `rt_smf_reader_*`
+  declarations that have no C or Rust implementation. CLI SMF execution now
+  reuses the existing pure-Simple `SmfReaderMemory` compatibility loader
+  instead. Its two real OS boundaries, `rt_mprotect` and `rt_munmap_raw`, are
+  owned by the Stage4 legacy core C provider on Unix, macOS, FreeBSD, and
+  Windows, with its audited ABI contract expanded from 19 to 21 symbols.
+  The runtime-lane divergence baseline records these deliberate Stage4-only
+  owners plus the matching `rt_getpid` compatibility owner; the combined
+  runtime bundle does not contain either pair and its duplicate-symbol gate
+  remains unchanged.
+
+  The final cache-backed Stage4 CLI candidate completed with `5 compiled,
+  1394 cached, 0 failed`; SHA-256
+  `ceb22bdcc8072ff7ddfe612c1ffd858d35579ef82b1748df1b2ab0fccc0ee251`.
+  Runtime sanity on a missing `.smf` exits `1` with exactly one controlled
+  `SMF load failed` message. The CLI branch now returns that result instead of
+  falling through to source interpretation. The candidate is ready for a
+  fresh positional C9 run, but C9 remains uncredited in this session because
+  its three-cycle cap was already reached.
