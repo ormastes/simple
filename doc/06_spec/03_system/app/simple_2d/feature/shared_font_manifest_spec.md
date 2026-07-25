@@ -149,7 +149,7 @@ match first:
    - Expected: total_bytes equals `51764704`
    - Expected: distribution_paths.len() equals `57`
    - Expected: distribution_paths.len() + 2 equals `59`
-   - Expected: distribution_bytes equals `53433272`
+   - Expected: distribution_bytes equals `53433279`
 
 
 <details>
@@ -184,7 +184,7 @@ for path in distribution_paths:
 expect(total_bytes).to_equal(51764704)
 expect(distribution_paths.len()).to_equal(57)
 expect(distribution_paths.len() + 2).to_equal(59)
-expect(distribution_bytes).to_equal(53433272)
+expect(distribution_bytes).to_equal(53433279)
 expect(distribution_bytes).to_be_less_than(80 * 1024 * 1024 + 1)
 ```
 
