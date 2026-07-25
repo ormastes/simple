@@ -371,9 +371,15 @@ same failure.
 - The one remaining diagnostic Vulkan live cycle was consumed with the fresh
   binary packaged as a high-resolution macOS app. PID 3939 exited before
   `ready.env`, runtime receipt, capture, stdout, or stderr. Evidence directory:
-  `build/tmp/macos_vulkan_2d_font_owner_live.iPxc00/`. No retry is allowed in
-  this session. Vulkan rendering/events/vector-font/300-DPI status therefore
-  remains FAIL/unproved; Metal, web, GUI, WM, and QEMU stay blocked behind it.
+  `build/tmp/macos_vulkan_2d_font_owner_live.iPxc00/`. The delayed crash report
+  `~/Library/Logs/DiagnosticReports/SimpleGpu2d-2026-07-25-223435.ips` records
+  `EXC_BAD_ACCESS` in `VulkanSession.is_valid`, reached through
+  `font_atlas_pipeline_evidence` and Engine2D text composition. Receiver
+  registers contain tagged text sentinels (`STR1`), so the next fix is Vulkan
+  session field/receiver ownership or native struct layout, not FontRenderer
+  ownership. No retry is allowed in this session. Vulkan
+  rendering/events/vector-font/300-DPI status therefore remains FAIL/unproved;
+  Metal, web, GUI, WM, and QEMU stay blocked behind it.
 
 ## Required Evidence and Documentation
 
