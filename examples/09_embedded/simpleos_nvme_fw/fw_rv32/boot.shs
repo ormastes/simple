@@ -34,14 +34,27 @@ case "${NVME_RV32_FAKE_SERIAL:-pass}" in
   fail)
     printf '%s\n' "SimpleOS RV32" "[BOOT] boot complete" "ALL RV32 NVME FW CHECKS PASS" "FAIL injected" >"$serial"
     ;;
+  qemu_fail)
+    printf '%s\n' "SimpleOS RV32" "[BOOT] boot complete" "ALL RV32 NVME FW CHECKS PASS" >"$serial"
+    exit 7
+    ;;
   *)
     exit 4
     ;;
 esac
 EOF
-  chmod +x "$fake_bin/qemu-system-riscv32"
+  cat >"$fake_bin/readelf" <<'EOF'
+#!/bin/sh
+cat <<'HEADER'
+  Class:                             ELF32
+  Type:                              EXEC (Executable file)
+  Machine:                           RISC-V
+  Entry point address:               0x80000000
+HEADER
+EOF
+  chmod +x "$fake_bin/qemu-system-riscv32" "$fake_bin/readelf"
   fake_elf="$tmp_dir/fake.elf"
-  : >"$fake_elf"
+  printf 'ELF' >"$fake_elf"
 
   PATH="$fake_bin:$PATH" NVME_RV32_FAKE_SERIAL=pass sh "$0" "$fake_elf" >"$tmp_dir/pass.out"
   grep -Fq "RESULT: PASS" "$tmp_dir/pass.out" || {
@@ -67,6 +80,15 @@ EOF
     exit 1
   }
 
+  if PATH="$fake_bin:$PATH" NVME_RV32_FAKE_SERIAL=qemu_fail sh "$0" "$fake_elf" >"$tmp_dir/qemu_fail.out" 2>&1; then
+    echo "STATUS: FAIL nvme-rv32-boot self-test: QEMU failure passed" >&2
+    exit 1
+  fi
+  grep -Fq "RESULT: FAIL (QEMU exit 7)" "$tmp_dir/qemu_fail.out" || {
+    echo "STATUS: FAIL nvme-rv32-boot self-test: QEMU failure reason absent" >&2
+    exit 1
+  }
+
   echo "STATUS: PASS nvme-rv32-boot self-test"
   exit 0
 fi
@@ -88,15 +110,54 @@ else
   MARKER="ALL RV32 NVME FW CHECKS PASS"
   SMP_FLAGS=""
 fi
-if [ ! -f "$ELF" ]; then
+if [ ! -s "$ELF" ]; then
   echo "missing-media: $ELF (build it with fw_rv32/build.shs after wiring the rv32 boot entry)"
   exit 2
 fi
+for tool in readelf timeout qemu-system-riscv32; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "missing-tool: $tool" >&2
+    exit 2
+  }
+done
+ELF_HEADER="$(readelf -hW "$ELF" 2>/dev/null)" || {
+  echo "invalid-media: $ELF is not a readable ELF" >&2
+  exit 2
+}
+printf '%s\n' "$ELF_HEADER" | grep -Fq "Class:                             ELF32" || {
+  echo "invalid-media: $ELF is not ELF32" >&2
+  exit 2
+}
+printf '%s\n' "$ELF_HEADER" | grep -Fq "Type:                              EXEC" || {
+  echo "invalid-media: $ELF is not executable" >&2
+  exit 2
+}
+printf '%s\n' "$ELF_HEADER" | grep -Fq "Machine:                           RISC-V" || {
+  echo "invalid-media: $ELF is not RISC-V" >&2
+  exit 2
+}
+ENTRY="$(printf '%s\n' "$ELF_HEADER" | sed -n 's/.*Entry point address:[[:space:]]*//p')"
+case "$ENTRY" in
+  ""|0|0x0|0X0)
+    echo "invalid-media: $ELF has no entry point" >&2
+    exit 2
+    ;;
+esac
 mkdir -p "$(dirname "$LOG")"; rm -f "$LOG"
 # M-mode direct boot, no OpenSBI (the linker loads at 0x80000000); 16550 UART at 0x10000000.
+set +e
 timeout 15 qemu-system-riscv32 -machine virt -cpu rv32 $SMP_FLAGS -m 128M -nographic -bios none \
   -kernel "$ELF" -serial file:"$LOG" </dev/null >/dev/null 2>&1
+QEMU_STATUS=$?
+set -e
 echo "--- serial ---"; cat "$LOG" 2>/dev/null; echo "--- end ---"
+case "$QEMU_STATUS" in
+  0|124) ;;
+  *)
+    echo "RESULT: FAIL (QEMU exit $QEMU_STATUS)"
+    exit 1
+    ;;
+esac
 if ! grep -q "$MARKER" "$LOG" 2>/dev/null; then
   echo "RESULT: FAIL (marker not found)"; exit 1
 fi

@@ -53,17 +53,10 @@ BG_ERR_LOG="$LOG_DIR/nvme_fw_rv32_background.err"
 # stub instead of the default single-hart direct-firmware path. The default
 # path (SMP_MODE unset) is completely unchanged by this branch.
 #
-# FLATTEN, not multi-file entry-closure (fixed 2026-07-19): an earlier version
-# of this branch copied the 189 individual logic*.spl files into
-# $SMP_ENTRY_DIR and compiled entry_smp.spl with --entry-closure. That fails
-# with `HIR lowering error ... unresolved name: _rv32_io_command_valid` (and
-# _rv32_ecc_*) because *_cases.spl files reference module-PRIVATE underscore
-# names from their *_core.spl modules -- legal only inside ONE module. The
-# default (non-SMP) build below sidesteps this by flattening every logic*.spl
-# into ONE module ($DIRECT_ENTRY, a plain concatenation -- see the sed loop
-# under `else` further down). The SMP branch now does the same: it builds the
-# identical flattened base, then appends the wave-3 IPC/pool/fourcore cores
-# and entry_smp.spl on top, all as one module.
+# SMP still uses its collision-checked flattened image because entry_smp.spl
+# overlays wave-3 entry/runtime owners. The default direct build preserves the
+# logic modules: shared core helpers are explicitly public, so case modules no
+# longer depend on flattening to reach private names.
 SMP_MODE="${NVME_RV32_SMP:-0}"
 SMP_OUT="build/nvme_fw_rv32_smp.elf"
 SMP_ENTRY_DIR="build/os/generated_smp"
@@ -387,19 +380,14 @@ if [ "$OS_BOOT_BUILD" = "1" ]; then
   sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' \
     examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl >"$ENTRY_DIR/entry.spl"
 else
-  : >"$DIRECT_ENTRY"
   for logic_src in examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic*.spl; do
     case "$(basename "$logic_src")" in
-      logic.spl|logic_check.spl) continue ;;
+      logic_check.spl) continue ;;
     esac
-    sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d; /^[[:space:]]*use /d; s/-> i32:/-> i64:/g; s/: i32/: i64/g' "$logic_src" >>"$DIRECT_ENTRY"
-    printf '\n' >>"$DIRECT_ENTRY"
+    sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$logic_src" >"$ENTRY_DIR/$(basename "$logic_src")"
   done
-  sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d; /^[[:space:]]*use /d; s/-> i32:/-> i64:/g; s/: i32/: i64/g' \
-    examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic.spl >>"$DIRECT_ENTRY"
-  printf '\n' >>"$DIRECT_ENTRY"
-  sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d; /^[[:space:]]*use /d; s/-> i32:/-> i64:/g; s/: i32/: i64/g' \
-    examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl >>"$DIRECT_ENTRY"
+  sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' \
+    examples/09_embedded/simpleos_nvme_fw/fw_rv32/entry.spl >"$DIRECT_ENTRY"
   mkdir -p "$BOOT_STUB_LINK"
   cat >"$BOOT_STUB_LINK/rv32_direct_runtime_stubs.c" <<'EOF_DIRECT_STUBS'
 #include <stdint.h>
@@ -441,7 +429,7 @@ rm -f "$OUT"
     echo "entry=$ENTRY target=riscv32-unknown-none mode=os_boot"
   else
     echo "sources=build/os/generated"
-    echo "entry=$DIRECT_ENTRY target=riscv32-unknown-none mode=direct_firmware"
+    echo "entry=$DIRECT_ENTRY target=riscv32-unknown-none mode=direct_firmware_modules"
   fi
 } >"$OUT_LOG"
 : >"$ERR_LOG"

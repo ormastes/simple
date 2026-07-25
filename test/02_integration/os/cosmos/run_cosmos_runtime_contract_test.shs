@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)
+source_dir="$root/src/os/kernel/arch/arm32/cosmos"
+test_source="$root/test/02_integration/os/cosmos/cosmos_runtime_contract_test.c"
+build_dir=$(mktemp -d "${TMPDIR:-/tmp}/cosmos-runtime-contract.XXXXXX")
+trap 'rm -rf "$build_dir"' EXIT HUP INT TERM
+
+common_flags='-std=c11 -O2 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wstrict-prototypes -Wformat=2 -fno-builtin -fno-stack-protector'
+
+cc $common_flags -DCOSMOS_MMIO_TEST=1 -I"$source_dir" \
+    "$test_source" "$source_dir/cosmos_runtime.c" \
+    -o "$build_dir/cosmos_runtime_contract_test"
+"$build_dir/cosmos_runtime_contract_test"
+
+cc $common_flags -DCOSMOS_MMIO_TEST=1 -I"$source_dir" \
+    -c "$source_dir/cosmos_runtime.c" -o "$build_dir/cosmos_runtime.host.o"
+test -z "$(nm -u "$build_dir/cosmos_runtime.host.o")"
+
+clang --target=armv7-none-eabi -mcpu=cortex-a9 -marm \
+    -ffreestanding -nostdlib $common_flags -I"$source_dir" \
+    -c "$source_dir/cosmos_runtime.c" -o "$build_dir/cosmos_runtime.arm.o"
+test -z "$(nm -u "$build_dir/cosmos_runtime.arm.o")"
+
+echo "cosmos runtime host/ARM ABI objects: PASS"
