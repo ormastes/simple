@@ -2,6 +2,7 @@ use compiler.common.driver_core_types.{CompileResult}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_path_absolute(path: text) -> text
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
@@ -614,17 +615,14 @@ fn _current_exe_path_for_guard() -> text:
     val os_env = rt_env_get("OS") ?? ""
     if os_env.contains("Windows"):
         return ""
-    # $PPID, not /proc/self: /proc/self in the child is the child's own exe.
-    val self_exe = rt_process_run("sh", ["-c", "readlink -f /proc/$PPID/exe"])
-    if self_exe.2 == 0:
-        val self_path = self_exe.0.trim()
-        # If the PPID hop is ever off by a level we get one of the helpers we
-        # just spawned back; "" (identity unknown) is the safe answer here,
-        # because this guard refuses delegation when identity is unknown.
-        val slash = self_path.last_index_of("/") ?? -1
-        val base = if slash < 0: self_path else: self_path.substring(slash + 1, self_path.len())
-        if base != "readlink" and base != "sh" and base != "dash" and base != "bash":
-            return self_path
+    # Canonicalize IN-PROCESS (std::fs::canonicalize). Never shell out: a
+    # /proc/self read done by a spawned helper describes the HELPER, which is
+    # how `readlink -f /proc/self/exe` returned /usr/bin/readlink and turned
+    # this guard into a fork bomb (2026-07-25). "" means identity unknown, and
+    # this guard refuses delegation on unknown identity.
+    val self_path = rt_path_absolute("/proc/self/exe") ?? ""
+    if self_path.len() > 0 and self_path != "/proc/self/exe":
+        return self_path
     ""
 
 # Returns "" when the spawn is safe, or an error message when it must be

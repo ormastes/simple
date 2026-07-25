@@ -11,6 +11,8 @@ use app.io.mod (file_exists, file_read, file_write, dir_create, cwd, env_get, sh
 use app.io.mod.{ProcessResult}
 use std.db_atomic.{atomic_write, DbConfig}
 
+extern fn rt_path_absolute(path: text) -> text
+
 fn get_version() -> text:
     "1.0.0-beta"
 
@@ -269,13 +271,10 @@ fn strip_sdn_quotes(s: text) -> text:
 
 fn check_self_contained() -> bool:
     # Check if this binary is a self-contained executable (runtime + SMF)
-    # $PPID, not /proc/self: inside `sh -c`, /proc/self is the shell itself.
-    val exe_path_result = shell("readlink -f /proc/$PPID/exe 2>/dev/null")
-    if exe_path_result.exit_code != 0:
-        return false
-
-    val exe_path = exe_path_result.stdout.replace("\n", "")
-    if exe_path == "":
+    # Canonicalize in-process. Inside `sh -c`, /proc/self is the shell itself,
+    # so a shell-out here checks the shell for an SMF trailer (2026-07-25).
+    val exe_path = rt_path_absolute("/proc/self/exe") ?? ""
+    if exe_path == "" or exe_path == "/proc/self/exe":
         return false
 
     # Quick size check: must be > 32 bytes

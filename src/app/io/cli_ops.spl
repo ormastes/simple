@@ -21,6 +21,7 @@ extern fn rt_cli_handle_compile(args: [text]) -> i64
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
+extern fn rt_path_absolute(path: text) -> text
 extern fn rt_mkdir_p(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_file_delete(path: text) -> bool
@@ -136,20 +137,17 @@ pub fn _cli_source_entry_executable(resolved_argv0: text, simple_binary: text, b
         return simple_binary
     resolved_argv0
 
-fn _cli_basename(path: text) -> text:
-    val slash = path.last_index_of("/") ?? -1
-    if slash < 0:
-        return path
-    path.substring(slash + 1, path.len())
-
-fn _cli_is_spawned_helper_exe(path: text) -> bool:
-    # A /proc/<pid>/exe read only tells the truth if <pid> really is us. If the
-    # PPID hop is ever off by a level we get back one of the helpers this
-    # function itself spawns — treat that as "identity unknown" rather than
-    # believing it, because a wrong exe path drives seed-sibling lookup and
-    # therefore delegation (fork-bomb, 2026-07-25).
-    val base = _cli_basename(path)
-    base == "readlink" or base == "sh" or base == "dash" or base == "bash"
+fn _cli_resolve_symlink(path: text) -> text:
+    # rt_path_absolute is std::fs::canonicalize: it resolves symlink chains and
+    # makes the path absolute IN-PROCESS, and falls back to a cwd-joined
+    # absolute path rather than ever returning empty. Single scalar `text` arg,
+    # so it dodges the rt_process_run args-array JIT marshalling bug noted
+    # above — which is exactly why a `readlink -f` shell-out is the wrong tool
+    # here (see 2026-07-11 + 2026-07-25 entries in
+    # doc/08_tracking/bug/cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md).
+    if path == "":
+        return ""
+    rt_path_absolute(path) ?? ""
 
 fn _cli_current_exe_path() -> text:
     # Prefer the kernel's record of the real executable: argv0-based
@@ -158,14 +156,14 @@ fn _cli_current_exe_path() -> text:
     # `bin/simple test` never delegates). See
     # doc/08_tracking/bug/cli_symlink_argv0_seed_sibling_lookup_2026-07-24.md.
     if not _cli_is_windows_platform():
-        # $PPID, not /proc/self: /proc/self in the spawned child resolves the
-        # CHILD (/usr/bin/readlink), whose seed sibling /usr/bin/simple_seed
-        # never exists -> fall through to `bin/simple` -> infinite delegation.
-        val self_exe = rt_process_run("sh", ["-c", "readlink -f /proc/$PPID/exe"])
-        if self_exe.2 == 0:
-            val self_path = self_exe.0.trim()
-            if self_path.len() > 0 and not _cli_is_spawned_helper_exe(self_path):
-                return self_path
+        # Canonicalize /proc/self/exe IN-PROCESS. Do NOT shell out: any
+        # /proc/self read performed by a spawned helper describes the HELPER
+        # (`readlink -f /proc/self/exe` returned /usr/bin/readlink, whose seed
+        # sibling /usr/bin/simple_seed never exists -> fall through to
+        # `bin/simple` -> unbounded self-delegation, 2026-07-25).
+        val self_path = _cli_resolve_symlink("/proc/self/exe")
+        if self_path.len() > 0 and self_path != "/proc/self/exe":
+            return self_path
     # rt_cli_arg_count/rt_cli_arg_at are unregistered on the currently
     # deployed seed binary (#159); route through sys_get_args(), which the
     # deployed binary already registers, instead.
@@ -206,9 +204,12 @@ fn _cli_is_current_exe(path: text) -> bool:
         # If identity cannot be established, delegation is unsafe: the
         # candidate may be this process and recurse without bound.
         return true
-    var resolved = _cli_resolve_argv0(cwd(), path)
-    if resolved == "":
-        resolved = path
+    # Resolve the CANDIDATE's symlinks too, or this guard misses the case it
+    # exists for: `bin/simple` is a symlink to bin/release/<triple>/simple, so
+    # comparing the unresolved candidate against our real exe never matches and
+    # the fork-bomb guard waves through a delegation to ourselves. Restored
+    # 2026-07-25 — dropped when the argv0 path was replaced on 2026-07-24.
+    val resolved = _cli_resolve_symlink(path)
     current == resolved or current == path or current.ends_with("/" + path) or path.ends_with("/" + current)
 
 pub fn _cli_process_run(cmd: text, args: [text]) -> (text, text, i64):
