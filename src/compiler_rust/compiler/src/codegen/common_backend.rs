@@ -77,6 +77,9 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                         names.insert("rt_value_bool".to_string());
                         names.insert("rt_value_as_float".to_string());
                     }
+                    MirInst::InterpEval { .. } => {
+                        names.insert("rt_interp_eval".to_string());
+                    }
                     MirInst::BoxFloat { .. } => {
                         // Container floats are heap-boxed losslessly via a
                         // runtime call (see cranelift/llvm emit_box_float).
@@ -104,6 +107,9 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                     }
                     MirInst::ActorSend { .. } => {
                         names.insert("rt_actor_send".to_string());
+                    }
+                    MirInst::ActorRecv { .. } => {
+                        names.insert("rt_actor_recv".to_string());
                     }
                     MirInst::ActorJoin { .. } => {
                         names.insert("rt_actor_join".to_string());
