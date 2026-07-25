@@ -14,11 +14,37 @@ use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 # Portable Tool Finder (shared helper)
 # ============================================================================
 
+# Homebrew installs LLVM keg-only (not linked onto PATH) so `command -v` never
+# finds it there. These absolute prefixes are checked as a last resort after
+# the PATH probe fails. They are no-ops on non-macOS hosts since the paths
+# simply don't exist.
+fn _macos_homebrew_llvm_prefixes() -> [text]:
+    [
+        "/opt/homebrew/opt/llvm",
+        "/opt/homebrew/opt/llvm@25", "/opt/homebrew/opt/llvm@24", "/opt/homebrew/opt/llvm@23",
+        "/opt/homebrew/opt/llvm@22", "/opt/homebrew/opt/llvm@21", "/opt/homebrew/opt/llvm@20",
+        "/opt/homebrew/opt/llvm@19", "/opt/homebrew/opt/llvm@18", "/opt/homebrew/opt/llvm@17",
+        "/opt/homebrew/opt/llvm@16", "/opt/homebrew/opt/llvm@15", "/opt/homebrew/opt/llvm@14",
+        "/usr/local/opt/llvm",
+        "/usr/local/opt/llvm@25", "/usr/local/opt/llvm@24", "/usr/local/opt/llvm@23",
+        "/usr/local/opt/llvm@22", "/usr/local/opt/llvm@21", "/usr/local/opt/llvm@20",
+        "/usr/local/opt/llvm@19", "/usr/local/opt/llvm@18", "/usr/local/opt/llvm@17",
+        "/usr/local/opt/llvm@16",
+    ]
+
+pub fn tool_probe_locations(base_name: text) -> [text]:
+    """Absolute paths that _find_tool checks for `base_name` beyond PATH."""
+    var out: [text] = []
+    for prefix in _macos_homebrew_llvm_prefixes():
+        out.push("{prefix}/bin/{base_name}")
+    out
+
 fn _find_tool(candidates: [text]) -> text:
     """Find a tool using platform-appropriate detection.
 
     On Unix: `command -v`
     On Windows: `where`
+    Falls back to known Homebrew keg-only install locations on macOS.
     Bootstrap-safe.
     """
     # Detect Windows by trying `where` first on failure of `command -v`
@@ -32,6 +58,13 @@ fn _find_tool(candidates: [text]) -> text:
         val (wout, werr, wcode) = backend_shell_tuple("where {candidate} 2>NUL")
         if wcode == 0 and wout.trim() != "":
             return candidate
+    # Homebrew keg-only fallback (macOS): probe absolute prefixes for the
+    # unversioned tool name (last candidate in the fallback chain).
+    if candidates.len() > 0:
+        val base_name = candidates[candidates.len() - 1]
+        for path in tool_probe_locations(base_name):
+            if file_exists(path):
+                return path
     ""
 
 # ============================================================================
