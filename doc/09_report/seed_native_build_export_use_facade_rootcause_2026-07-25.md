@@ -1,3 +1,35 @@
+> # RETRACTED 2026-07-25 — this report's conclusion is WRONG.
+>
+> **A seed built from current `main` DOES native-build and run.** Verified with
+> every precondition checked:
+> ```
+> worktree at 1976a2a3ec5   HAS 3e92fc115116
+> cargo rc=0  compiled=2     (genuine rebuild, not a cache hit)
+> interning=4                (rt_string_new_literal present)
+> probe rc=0  OOB=0
+> BINARY: 22928 bytes        RUN: 7
+> ```
+>
+> **What actually blocked native-build:** `3e92fc115116` — "align duplicate
+> `CompiledSymbolKind` so native-build resolves" — landed on main at 07:04.
+> A one-line enum divergence. `d312b8e4253` was never the blocker.
+>
+> **Why this report got it wrong:** every failing run behind it was executed in a
+> worktree pinned at `d7e0be3d0cd`, created BEFORE 07:04 and therefore missing the
+> fix. Eight "reproductions", two patches and four probes all measured a tree that
+> lacked the actual fix. The commits were checked for ancestry against `main`, but
+> the *worktree under test* was never checked — the wrong axis.
+>
+> The `export use` facade analysis below may still describe a real gap
+> (`.claude/rules/bootstrap.md:154` documents it independently), but it is NOT the
+> cause of this failure and nothing here establishes it as such. Treat the
+> mechanism as unverified and the conclusion as withdrawn.
+>
+> Consequence: redeploy is UNBLOCKED. A main-tip seed with interning active is a
+> valid bootstrap input. See also: redeploy works on `--backend=cranelift` (~1GB);
+> the 50-64GB explosions were the LLVM one-binary path plus a 17,319-process
+> fork-bomb, not an intrinsic stage4 ceiling.
+
 # Phase 2 — seed regression `d312b8e4253` root cause
 
 ## Verdict: BLOCKED (root-caused, fix NOT landed — two attempted patches verified insufficient)
