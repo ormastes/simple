@@ -66,14 +66,20 @@ Evidence:
    `build/simpleos_wm_fullscreen_evidence/native-cache` are all `class=2
    machine=62`. Codegen is correct; only the final image is 32-bit.
 2. **The harness itself documents the downgrade as a deliberate step.**
-   `check-simpleos-wm-fullscreen-evidence.shs:499`:
-   *"plus an llvm-objcopy on PATH for the **ELF32 wrap step**"* — with the
-   `llvm-objcopy` discovery immediately following (lines 502+).
+   In `check-simpleos-wm-fullscreen-evidence.shs`, grep **`ELF32 wrap step`**:
+   *"plus an llvm-objcopy on PATH for the ELF32 wrap step"* — with the
+   `llvm-objcopy` discovery immediately following.
 3. **The boot path requires it.** GRUB loads the kernel with
-   `multiboot /boot/kernel.elf` (line 648) and `insmod multiboot` (638).
-   **Multiboot1 mandates a 32-bit ELF.** The 64-bit handoff happens after, at
-   `[BOOT64] call _start` (line 758) — which the harness itself greps for as a
-   success marker.
+   `multiboot /boot/kernel.elf` and `insmod multiboot`.
+   **Multiboot1 mandates a 32-bit ELF.** The 64-bit handoff happens after, at the
+   `[BOOT64] call _start` marker — which the harness itself greps for as a
+   success signal.
+
+> **Cite by marker, not line number.** An earlier revision of this doc gave line
+> numbers (499 / 638 / 648 / 758, `elf_file_status` at 190-208). Adding the
+> in-code warning comment shifted everything below line 190 by ~20 lines and
+> invalidated all of them in one edit. Current values, already stale-prone:
+> `elf_file_status` ~210, ELF32 wrap ~519, multiboot ~658/668, BOOT64 ~778.
 
 So the pipeline is: compile x86_64 objects → link → **objcopy-wrap to
 ELF32/EM_386 for multiboot** → GRUB loads it → kernel switches to long mode.
