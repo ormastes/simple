@@ -7,7 +7,9 @@
 
 use common.ui.widget.{WidgetNode, UITree, UIState, UIEvent, UIMode}
 use common.ui.draw_ir.{DrawIrComposition}
-use common.ui.widget_draw_ir.{widget_tree_to_draw_ir}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir, widget_tree_to_draw_ir_with_theme}
+use common.ui.wm_chrome_theme.{active_wm_theme_render_snapshot}
+use nogc_sync_mut.ui.theme_package.{resolve_theme_alias}
 use common.ui.widget_store.{WidgetStore}
 use common.ui.viewport.{Viewport, default_viewport}
 use common.ui.changelog.{ChangeLog, default_changelog}
@@ -213,7 +215,20 @@ impl UISession:
 
     me submit_widget_draw_ir(width: i32, height: i32, backend: text) -> DrawIrComposition:
         """Build the canonical widget frame and assign its submission identity."""
-        val composition = widget_tree_to_draw_ir(self.state.tree.root_node(), width, height, backend)
+        val root = self.state.tree.root_node()
+        val requested_theme = self.state.tree.theme_name()
+        val resolved_theme = resolve_theme_alias(requested_theme)
+        # A process-global WM snapshot must never override a tree that selected
+        # a different theme. Production startup installs the selected package
+        # snapshot before submission; a mismatch fails closed to the ordinary
+        # widget theme instead of painting another application's material.
+        val composition = if val snapshot = active_wm_theme_render_snapshot():
+            if snapshot.id == resolved_theme:
+                widget_tree_to_draw_ir_with_theme(root, width, height, backend, snapshot)
+            else:
+                widget_tree_to_draw_ir(root, width, height, backend)
+        else:
+            widget_tree_to_draw_ir(root, width, height, backend)
         self.submit_draw_ir_composition(composition)
 
     fn current_draw_ir_event(input_key: text, event: UIEvent) -> UiDrawIrEvent:

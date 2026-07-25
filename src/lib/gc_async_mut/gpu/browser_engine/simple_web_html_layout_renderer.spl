@@ -4224,7 +4224,7 @@ fn _cb_chars_between(cb: [i64], from: i32, to: i32) -> i32:
         i = i + 1
     n
 
-fn _css_collect_custom_props(css: text) -> text:
+fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
     # Collect --name: value pairs from :root { } blocks.
     # Returns a compact string of "--name:value\n" entries.
     #
@@ -4238,8 +4238,13 @@ fn _css_collect_custom_props(css: text) -> text:
     # preserved: a `:root` match counts only when the text between it and the
     # opening brace is whitespace (a standalone `:root` selector, exactly what
     # `css_bytes_trimmed_eq(..., ":root")` accepted before).
-    var entries: [text] = [""; 400]
-    var entry_i = 0
+    # Bare :root declarations have lower specificity than matching
+    # :root[attr] declarations. Keep the two groups separate, preserving
+    # source order within each, then concatenate base before variants.
+    var base_entries: [text] = [""; 400]
+    var variant_entries: [text] = [""; 400]
+    var base_entry_i = 0
+    var variant_entry_i = 0
     var pos = 0
     var guard = 0
     while guard < 200:
@@ -4251,12 +4256,17 @@ fn _css_collect_custom_props(css: text) -> text:
         if brace < 0:
             break
         val between = css.substring(rp + 5, brace).trim()
-        val is_root_variant = true
+        var is_root_variant = true
         if between.len() > 0:
             if not between.starts_with("["):
                 is_root_variant = false
-            else if find_from(between, "]", 0) < 0:
-                is_root_variant = false
+            else:
+                val attr_close = find_from(between, "]", 0)
+                if attr_close < 0:
+                    is_root_variant = false
+                else:
+                    val suffix = between.substring(attr_close + 1, between.len()).trim()
+                    is_root_variant = suffix.len() == 0 and attr_selector_matches(root_attrs, between.substring(1, attr_close))
         if not is_root_variant:
             # Skip selectors like `:root.dark` or `:root main {}` here.
             # `:root` was part of a larger selector (e.g. `:root.dark`); skip it.
@@ -4283,14 +4293,19 @@ fn _css_collect_custom_props(css: text) -> text:
             if val_end < 0:
                 val_end = body_len
             val prop_val = body.substring(colon + 1, val_end).trim()
-            if name.len() > 2 and entry_i < entries.len():
-                entries[entry_i] = name + ":" + prop_val + "\n"
-                entry_i = entry_i + 1
+            if name.len() > 2:
+                val entry = name + ":" + prop_val + "\n"
+                if between.len() == 0 and base_entry_i < base_entries.len():
+                    base_entries[base_entry_i] = entry
+                    base_entry_i = base_entry_i + 1
+                elif between.len() > 0 and variant_entry_i < variant_entries.len():
+                    variant_entries[variant_entry_i] = entry
+                    variant_entry_i = variant_entry_i + 1
             bp = if semi >= 0: semi + 1 else: body_len
         pos = close + 1
-    if entry_i == 0:
+    if base_entry_i == 0 and variant_entry_i == 0:
         return ""
-    text_list_prefix(entries, entry_i).join("")
+    text_list_prefix(base_entries, base_entry_i).join("") + text_list_prefix(variant_entries, variant_entry_i).join("")
 
 fn _css_resolve_vars(css: text, props: text) -> text:
     if props.len() == 0 or css.index_of("var(") < 0:
@@ -4359,7 +4374,16 @@ fn _css_resolve_vars(css: text, props: text) -> text:
                 break
             m = m + 1
         val prop_name = (if comma >= 0: inner.substring(0, comma) else: inner).trim()
-        val prop_idx = text_key_index_count(names, prop_name, prop_count)
+        # CSS declarations are last-wins. Search backwards so a matching
+        # :root variant (or a later base declaration) overrides an earlier
+        # custom property instead of being silently ignored.
+        var prop_idx = -1
+        var prop_scan = prop_count - 1
+        while prop_scan >= 0:
+            if names[prop_scan] == prop_name:
+                prop_idx = prop_scan
+                break
+            prop_scan = prop_scan - 1
         chunks[chunk_count] = css.substring(scan, open)
         chunk_count = chunk_count + 1
         if prop_idx >= 0:
@@ -4500,6 +4524,20 @@ fn _css_scan_rules_simple(css: text) -> CssRuleScan:
 
 fn extract_css_vw(html: text, viewport_w: i32, trace_stages: bool = false) -> Rules:
     # First pass: collect CSS custom properties from all :root blocks
+    var html_tag = find_from(html, "<html", 0)
+    var html_tag_guard = 0
+    while html_tag >= 0 and html_tag_guard < 20:
+        html_tag_guard = html_tag_guard + 1
+        val after_tag = html_tag + 5
+        if after_tag >= html.len():
+            html_tag = -1
+            break
+        val boundary = html.char_at(after_tag)
+        if boundary == ">" or boundary == " " or boundary == "\t" or boundary == "\n" or boundary == "\r":
+            break
+        html_tag = find_from(html, "<html", after_tag)
+    val html_tag_close = if html_tag >= 0: find_from(html, ">", html_tag + 5) else: -1
+    val root_attrs = if html_tag >= 0 and html_tag_close >= 0: html.substring(html_tag + 5, html_tag_close) else: ""
     var custom_prop_parts: [text] = [""; 100]
     var custom_prop_count = 0
     var pre_pos = 0
@@ -4516,7 +4554,7 @@ fn extract_css_vw(html: text, viewport_w: i32, trace_stages: bool = false) -> Ru
         if pre_close < 0:
             break
         val pre_css = html.substring(pre_open + 1, pre_close)
-        val collected_props = _css_collect_custom_props(pre_css)
+        val collected_props = _css_collect_custom_props(pre_css, root_attrs)
         if collected_props.len() > 0 and custom_prop_count < custom_prop_parts.len():
             custom_prop_parts[custom_prop_count] = collected_props
             custom_prop_count = custom_prop_count + 1
@@ -4594,25 +4632,39 @@ fn unquote_css_attr_value(raw: text) -> text:
     v
 
 fn attr_selector_matches(attrs: text, expr: text) -> bool:
-    val raw = expr.trim()
+    var raw = expr.trim()
     if raw.len() == 0:
         return false
+    var case_insensitive = false
+    if raw.ends_with(" i") or raw.ends_with(" I"):
+        case_insensitive = true
+        raw = raw.substring(0, raw.len() - 2).trim()
+    elif raw.ends_with(" s") or raw.ends_with(" S"):
+        # Explicit case-sensitive flag; comparison below already has that
+        # behavior, but remove the flag before unquoting the operand.
+        raw = raw.substring(0, raw.len() - 2).trim()
     val prefix_op = text_index_of(raw, "^=")
     if prefix_op >= 0:
         val name = raw.substring(0, prefix_op).trim()
         val want = unquote_css_attr_value(raw.substring(prefix_op + 2, raw.len()))
         val actual = attr_value(attrs, name)
+        if case_insensitive:
+            return actual.len() > 0 and actual.lower().starts_with(want.lower())
         return actual.len() > 0 and actual.starts_with(want)
     val suffix_op = text_index_of(raw, "$=")
     if suffix_op >= 0:
         val name = raw.substring(0, suffix_op).trim()
         val want = unquote_css_attr_value(raw.substring(suffix_op + 2, raw.len()))
         val actual = attr_value(attrs, name)
+        if case_insensitive:
+            return actual.len() > 0 and actual.lower().ends_with(want.lower())
         return actual.len() > 0 and actual.ends_with(want)
     val exact_op = text_index_of(raw, "=")
     if exact_op >= 0:
         val name = raw.substring(0, exact_op).trim()
         val want = unquote_css_attr_value(raw.substring(exact_op + 1, raw.len()))
+        if case_insensitive:
+            return attr_value(attrs, name).lower() == want.lower()
         return attr_value(attrs, name) == want
     attr_value(attrs, raw).len() > 0
 
@@ -4753,7 +4805,8 @@ fn simple_match(sel: text, tag: text, cls: text, class_words: [text], id: text, 
         if root_rest.starts_with("["):
             val root_close = text_index_of(root_rest, "]")
             if root_close > 0:
-                return attr_selector_matches(attrs, root_rest.substring(1, root_close))
+                val suffix = root_rest.substring(root_close + 1, root_rest.len()).trim()
+                return suffix.len() == 0 and attr_selector_matches(attrs, root_rest.substring(1, root_close))
             return false
         return true
     # Split off the base (before the first colon at depth 0)
@@ -9269,7 +9322,9 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("background-color", "{st.bg}"),
         draw_ir_style_prop("background-image", if st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32: "linear-gradient({st.background_gradient_from},{st.background_gradient_to})" else: "none"),
         draw_ir_style_prop("background-origin", st.background_origin),
-        draw_ir_style_prop("box-shadow", if st.box_shadow_raw != "": st.box_shadow_raw elif st.box_shadow_color != 0u32: "{st.box_shadow_x_px}px {st.box_shadow_y_px}px {st.box_shadow_color}" else: "none"),
+        # Engine2D consumes a typed first-layer projection. Keep the full
+        # authored CSS in box-shadow-raw for future multi-layer backends.
+        draw_ir_style_prop("box-shadow", if st.box_shadow_color != 0u32: "{st.box_shadow_x_px}px {st.box_shadow_y_px}px {st.box_shadow_color}" else: "none"),
         draw_ir_style_prop("box-shadow-raw", st.box_shadow_raw),
         draw_ir_style_prop("box-shadow-layer-count", "{_html_draw_ir_shadow_layer_count(st.box_shadow_raw)}"),
         draw_ir_style_prop("box-shadow-blur-radius", "{st.box_shadow_blur_px}"),

@@ -260,14 +260,20 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
         val sx = _engine2d_draw_ir_nth_int(shadow, 0, 0) as i32
         val sy = _engine2d_draw_ir_nth_int(shadow, 1, 0) as i32
         val scolor = _engine2d_draw_ir_nth_int(shadow, 2, 0) as u32
+        val sblur = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "box-shadow-blur-radius"), 0, 0) as i32
         if _engine2d_draw_ir_has_visible_alpha(scolor):
-            eng.draw_shadow_rect(x, y, w, h, sx, sy, 0, scolor)
+            eng.draw_shadow_rect(x, y, w, h, sx, sy, sblur, scolor)
     val radius = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-radius"), 0, 0) as i32
     val bg_image = _engine2d_draw_ir_style_value(style, "background-image")
-    if bg_image.starts_with("linear-gradient("):
+    if bg_image.starts_with("linear-gradient(") and radius <= 0:
         val g_from = _engine2d_draw_ir_nth_int(bg_image, 0, 0) as u32
         val g_to = _engine2d_draw_ir_nth_int(bg_image, 1, 0) as u32
         eng.draw_gradient_rect(x, y, w, h, g_from, g_to)
+    elif bg_image.starts_with("linear-gradient(") and radius > 0 and _engine2d_draw_ir_has_visible_alpha(command.color):
+        # No backend owns a rounded-gradient clip yet. Honor the radius with
+        # the producer's explicit solid fallback rather than leaking square
+        # gradient pixels outside the glass surface.
+        eng.draw_rounded_rect(x, y, w, h, radius, command.color)
     elif _engine2d_draw_ir_has_visible_alpha(command.color):
         if radius > 0:
             eng.draw_rounded_rect(x, y, w, h, radius, command.color)
@@ -298,7 +304,15 @@ fn _engine2d_draw_ir_image_is_opaque(image: Engine2dResolvedDrawIrImage) -> bool
 
 fn _engine2d_draw_ir_fresh_device_rect_style_supported(style: [DrawIrStyleProp]) -> bool:
     for prop in style:
-        if prop.key != "source" and prop.key != "part" and prop.key != "z-index" and prop.key != "focused":
+        val key = prop.key
+        val identity = key == "source" or key == "part" or key == "z-index" or key == "focused"
+        val background = key == "background-color" or key == "background-image" or key == "background-image-source-css" or key == "background-image-capability" or key == "background-image-fallback" or key == "background-image-fallback-reason"
+        val border = key == "border-radius" or key == "border-top-width" or key == "border-right-width" or key == "border-bottom-width" or key == "border-left-width" or key == "border-top-color" or key == "border-right-color" or key == "border-bottom-color" or key == "border-left-color"
+        val shadow = key == "box-shadow" or key == "box-shadow-raw" or key == "box-shadow-layer-count" or key == "box-shadow-blur-radius"
+        val backdrop = key == "backdrop-filter" or key == "backdrop-filter-capability" or key == "backdrop-filter-fallback" or key == "backdrop-filter-fallback-reason"
+        val typography = key == "color" or key == "font-family" or key == "font-size" or key == "font-weight"
+        val wm_metadata = key == "wm-theme-schema" or key == "wm-theme-id" or key == "wm-theme-family-id" or key == "wm-theme-source-reference" or key == "wm-theme-source-manifest-sha256" or key == "wm-theme-material-sha256" or key == "wm-material-request" or key == "wm-material-surface-alpha-milli"
+        if not (identity or background or border or shadow or backdrop or typography or wm_metadata):
             return false
     true
 

@@ -548,8 +548,12 @@ fn _wm_draw_ir_window_snapshot_style(snapshot: ThemeRenderSnapshot, window: Shar
     val surface_color = if part == "body": material.solid_fallback_rgba else if window.focused: _wm_draw_ir_opaque(material.active_title_fill_rgba) else: _wm_draw_ir_opaque(material.inactive_title_fill_rgba)
     val gradient_requested = part == "body"
     val has_window_gradient = gradient_requested and material.window_gradient_available
-    val background_image = if has_window_gradient: "linear-gradient({material.window_gradient_start_rgba},{material.window_gradient_end_rgba})" else: "none"
-    val background_capability = if not gradient_requested: "not-requested" else if has_window_gradient: "engine2d-two-stop" else: "unavailable"
+    # Engine2D has no rounded-gradient clip. Preserve the typed request but
+    # realize the existing opaque rounded fallback rather than leaking a
+    # square gradient outside the window radius.
+    val gradient_realized = has_window_gradient and material.corner_radius_px <= 0
+    val background_image = if gradient_realized: "linear-gradient({material.window_gradient_start_rgba},{material.window_gradient_end_rgba})" else: "none"
+    val background_capability = if not gradient_requested: "not-requested" else if gradient_realized: "engine2d-two-stop" elif has_window_gradient: "unavailable-rounded-clip" else: "unavailable"
     var style = [
         draw_ir_style_prop("wm-theme-schema", "theme-render-snapshot-v1"),
         draw_ir_style_prop("wm-theme-id", snapshot.id),
@@ -583,9 +587,10 @@ fn _wm_draw_ir_window_snapshot_style(snapshot: ThemeRenderSnapshot, window: Shar
     ]
     if has_window_gradient:
         style.push(draw_ir_style_prop("background-image-source-css", material.window_gradient_source_css))
-    elif gradient_requested:
+    if gradient_requested and not gradient_realized:
         style.push(draw_ir_style_prop("background-image-fallback", "solid-material"))
-        style.push(draw_ir_style_prop("background-image-fallback-reason", "typed-theme-gradient-unavailable"))
+        val fallback_reason = if has_window_gradient: "rounded-gradient-clip-unavailable" else: "typed-theme-gradient-unavailable"
+        style.push(draw_ir_style_prop("background-image-fallback-reason", fallback_reason))
     if part == "body":
         style.push(draw_ir_style_prop("box-shadow", _wm_draw_ir_engine_shadow(shadows)))
         style.push(draw_ir_style_prop("box-shadow-raw", _wm_draw_ir_shadow_raw(shadows)))
@@ -860,11 +865,7 @@ fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backen
     # rows are actually black and DO render, painting over the safe fallback.
     # Restored to the single flat box below until the underlying compiler bug
     # is fixed; do not re-attempt this pattern without new pixel evidence.
-    var commands: [DrawIrCommand] = [
-        # Shadow/buttons remain legacy primitives. Window material belongs only
-        # to the top-level body and titlebar surfaces, never arbitrary controls.
-        draw_ir_rect("{window.window_id}-shadow", WM_WINDOW_SHADOW_OFFSET_X, WM_WINDOW_SHADOW_OFFSET_Y, window.width, window.height, theme.window_shadow)
-    ]
+    var commands: [DrawIrCommand] = []
     if val snapshot = active_wm_theme_render_snapshot():
         commands.push(_wm_draw_ir_window_box(snapshot, window, "{window.window_id}-body", "body", 0, 0, window.width, window.height, snapshot.material.solid_fallback_rgba))
         val title_fallback = if window.focused: _wm_draw_ir_opaque(snapshot.material.active_title_fill_rgba) else: _wm_draw_ir_opaque(snapshot.material.inactive_title_fill_rgba)
@@ -878,6 +879,7 @@ fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backen
     else:
         # No resolved package means the historic DrawIR stream is retained
         # exactly: plain RECT commands with no style metadata or geometry box.
+        commands.push(draw_ir_rect("{window.window_id}-shadow", WM_WINDOW_SHADOW_OFFSET_X, WM_WINDOW_SHADOW_OFFSET_Y, window.width, window.height, theme.window_shadow))
         commands.push(draw_ir_rect("{window.window_id}-body", 0, 0, window.width, window.height, theme.host_window_body))
         commands.push(draw_ir_rect("{window.window_id}-titlebar", 0, 0, window.width, 28, title_color))
         commands.push(draw_ir_rect("{window.window_id}-traffic-red", 12, 9, 10, 10, 0xFFE74C3Cu32))

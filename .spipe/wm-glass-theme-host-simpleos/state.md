@@ -277,3 +277,17 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   compiler candidates were rejected and removed at the hard cycle cap. The
   semantic fixture and exact next native-entry HIR/MIR instrumentation point
   remain recorded; production host/QEMU evidence is still blocked.
+- continuation-2026-07-25-theme-root-fixes: Integrated the reviewed typed WM
+  material/gradient projection and fixed four remaining owner boundaries:
+  UI-session submissions honor the tree-selected snapshot identity; Web
+  custom properties filter `:root[attr]` against the actual root, preserve
+  selector specificity and source-last precedence, reject descendant leakage,
+  and support `i`/`s` attribute flags; Web Draw IR emits a typed first shadow
+  layer with retained raw CSS; Engine2D consumes its blur radius and admits
+  the supported WM glass style keys on a fresh device. Focused regressions
+  cover root variants and typed shadow serialization. `git diff --check`
+  passes. Runtime verification is still open: the deployed nominal release
+  binary identifies itself as a Rust bootstrap seed, the isolated full
+  bootstrap hit disk exhaustion, and current Stage4 rejects the shared
+  compiler backfill as stale. The three-attempt build cap is exhausted, so
+  no host/QEMU live claim is made from these source changes.
