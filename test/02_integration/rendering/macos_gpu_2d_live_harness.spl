@@ -17,8 +17,6 @@ use std.io.window_winit.{winit_loop_new, winit_loop_free, winit_window_new, wini
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
 use std.io_runtime.{env_get, file_write, file_write_bytes}
 use macos_gpu_2d_draw_ir_event_fixture.{
-    MACOS_GPU_2D_FIXTURE_HEIGHT,
-    MACOS_GPU_2D_FIXTURE_WIDTH,
     MACOS_GPU_2D_NATIVE_FOCUS_KIND,
     MacosGpu2dDrawIrEventFixture,
     macos_gpu_2d_draw_ir_event_fixture
@@ -30,8 +28,6 @@ extern fn rt_winit_event_key_pressed(ev: i64) -> i64
 extern fn rt_winit_event_mouse_pressed(ev: i64) -> i64
 extern fn rt_winit_event_free(ev: i64)
 
-val LIVE_WIDTH: i32 = MACOS_GPU_2D_FIXTURE_WIDTH
-val LIVE_HEIGHT: i32 = MACOS_GPU_2D_FIXTURE_HEIGHT
 val LIVE_DPI: i32 = 300
 val LIVE_FONT_POINTS: i32 = 24
 val LIVE_BACKGROUND: u32 = 0xFF101522u32
@@ -100,7 +96,7 @@ fn write_runtime_receipt(path: text, backend: text, capture_path: text,
                          repo_revision: text, shared_scene_fingerprint: text,
                          source_revision: text, backend_handle: i64,
                          initial_checksum: i64, interaction_checksum: i64,
-                         bounds: text,
+                         bounds: text, live_width: i32, live_height: i32,
                          font_loaded: bool, expected_font_identity: text,
                          font_identity: text, cold_rasterizations: i64,
                          warm_rasterizations: i64, warm_hits: i64,
@@ -114,8 +110,8 @@ fn write_runtime_receipt(path: text, backend: text, capture_path: text,
         "gpu_2d_live_status=pass\n" +
         "gpu_2d_live_backend={backend}\n" +
         "gpu_2d_live_target=macos-host\n" +
-        "gpu_2d_live_width={LIVE_WIDTH}\n" +
-        "gpu_2d_live_height={LIVE_HEIGHT}\n" +
+        "gpu_2d_live_width={live_width}\n" +
+        "gpu_2d_live_height={live_height}\n" +
         "gpu_2d_live_dpi={LIVE_DPI}\n" +
         "gpu_2d_live_capture_path={capture_path}\n" +
         "gpu_2d_live_repo_revision={repo_revision}\n" +
@@ -173,6 +169,12 @@ fn write_failure_receipt(path: text, backend: text, reason: text,
     exit_code
 
 fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
+    # Keep native framebuffer dimensions function-local and literal-backed.
+    # Cross-module module-global aliases currently lower into zero-initialized
+    # BSS in native builds, while this offscreen buffer must remain 3840x2160
+    # independently of the later 960x540 event-preview window.
+    val live_width: i32 = 3840
+    val live_height: i32 = 2160
     val capture_path = env_get("GPU_2D_LIVE_CAPTURE_PATH") ?? ""
     val receipt_path = env_get("GPU_2D_LIVE_RECEIPT_PATH") ?? ""
     val ready_path = env_get("GPU_2D_LIVE_READY_PATH") ?? ""
@@ -184,14 +186,14 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
         return 2
     if backend != "vulkan" and backend != "metal":
         return 3
-    var engine = Engine2D.create_with_backend_fast(LIVE_WIDTH, LIVE_HEIGHT, backend)
+    var engine = Engine2D.create_with_backend_fast(live_width, live_height, backend)
     if engine.backend_name() != backend:
         val selected_backend = engine.backend_name()
         engine.shutdown()
         var probe_reason = "backend-specific-probe-unavailable"
         if backend == "vulkan":
             var vulkan_probe = VulkanBackend.create()
-            if vulkan_probe.init(LIVE_WIDTH, LIVE_HEIGHT):
+            if vulkan_probe.init(live_width, live_height):
                 probe_reason = "vulkan-direct-probe-unexpectedly-initialized"
                 vulkan_probe.shutdown()
             else:
@@ -245,7 +247,7 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
     val initial_readback = engine.read_pixels_with_source()
     if (initial_readback.source != "device_readback" or
         initial_readback.backend_handle <= 0 or initial_readback.checksum <= 0 or
-        initial_readback.pixel_count != (LIVE_WIDTH * LIVE_HEIGHT).to_i64()):
+        initial_readback.pixel_count != (live_width * live_height).to_i64()):
         engine.shutdown()
         return write_failure_receipt(
             receipt_path, backend, "initial-device-readback-failed", 6, 6)
@@ -360,7 +362,7 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
     if (draw_ir_result.readback_source != "device_readback" or
         draw_ir_result.backend_handle != backend_handle or
         draw_ir_result.readback_checksum <= 0 or
-        draw_ir_result.pixels.len() != (LIVE_WIDTH * LIVE_HEIGHT).to_i64() or
+        draw_ir_result.pixels.len() != (live_width * live_height).to_i64() or
         draw_ir_result.rendered_command_count != expected_draw_ir_commands or
         draw_ir_result.skipped_command_count != 0 or
         draw_ir_result.fallback_required or draw_ir_result.fallback_reason != ""):
@@ -384,7 +386,7 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
         interaction_readback.backend_handle != backend_handle or
         interaction_readback.checksum <= 0 or
         interaction_readback.checksum == initial_checksum or
-        interaction_readback.pixel_count != (LIVE_WIDTH * LIVE_HEIGHT).to_i64()):
+        interaction_readback.pixel_count != (live_width * live_height).to_i64()):
         winit_window_free(win)
         winit_loop_free(lp)
         engine.shutdown()
@@ -392,21 +394,21 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
             receipt_path, backend, "interaction-device-readback-failed", 15, 15)
     engine.present()
     val captured_pixels = interaction_readback.pixels
-    if captured_pixels.len() != LIVE_WIDTH * LIVE_HEIGHT:
+    if captured_pixels.len() != live_width * live_height:
         winit_window_free(win)
         winit_loop_free(lp)
         engine.shutdown()
         return write_failure_receipt(
             receipt_path, backend, "interaction-pixel-count-mismatch", 16, 16)
-    val bounds = measured_non_background_bounds(captured_pixels, LIVE_WIDTH, LIVE_HEIGHT)
+    val bounds = measured_non_background_bounds(captured_pixels, live_width, live_height)
     if bounds == "":
         winit_window_free(win)
         winit_loop_free(lp)
         engine.shutdown()
         return write_failure_receipt(
             receipt_path, backend, "non-background-bounds-empty", 17, 17)
-    val ppm = encode_ppm_p6(LIVE_WIDTH.to_u32(), LIVE_HEIGHT.to_u32(), captured_pixels)
-    if ppm.len() <= LIVE_WIDTH * LIVE_HEIGHT * 3 or not file_write_bytes(capture_path, ppm):
+    val ppm = encode_ppm_p6(live_width.to_u32(), live_height.to_u32(), captured_pixels)
+    if ppm.len() <= live_width * live_height * 3 or not file_write_bytes(capture_path, ppm):
         winit_window_free(win)
         winit_loop_free(lp)
         engine.shutdown()
@@ -415,7 +417,7 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
     if not write_runtime_receipt(
         receipt_path, backend, capture_path, repo_revision,
         shared_scene_fingerprint, source_revision, backend_handle,
-        initial_checksum, interaction_readback.checksum, bounds,
+        initial_checksum, interaction_readback.checksum, bounds, live_width, live_height,
         font_loaded, expected_font_identity, font_identity, cold_rasterizations,
         warm_rasterizations, warm_hits, font_pixel_size, font_target, font_attempts,
         event_sequence, event_count, fixture, draw_ir_result):

@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -64,6 +64,32 @@ expect(runtime_builder).to_contain(
 expect(runtime_builder).to_contain(
     "-Wl,-install_name,@rpath/libsimple_runtime_c_wm.dylib"
 )
+```
+
+</details>
+
+#### keep the offscreen 4K dimensions local in the shared native harness
+
+- "Engine2D create with backend fast
+   - Expected: harness does not contain `val LIVE_WIDTH:`
+   - Expected: harness does not contain `val LIVE_HEIGHT:`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val harness = file_read(HARNESS)
+expect(harness).to_contain("val live_width: i32 = 3840")
+expect(harness).to_contain("val live_height: i32 = 2160")
+expect(harness).to_contain(
+    "Engine2D.create_with_backend_fast(live_width, live_height, backend)"
+)
+expect(harness.contains("val LIVE_WIDTH:")).to_equal(false)
+expect(harness.contains("val LIVE_HEIGHT:")).to_equal(false)
 ```
 
 </details>
@@ -336,8 +362,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
