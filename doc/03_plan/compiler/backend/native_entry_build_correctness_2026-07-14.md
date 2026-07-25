@@ -982,3 +982,25 @@ the shared binary — deploys require explicit user go-ahead).
   until the plain reproducer is green.
   LLVM and platform-matrix execution remain deferred until the plain F64
   reproducer and C9 both exit `42`.
+
+  The exact retained Stage4 seed command was recovered from the session log
+  and replayed with its original full-CLI entry, tooling source, low-memory
+  flag, and shared cache. It produced a corrected-source candidate with
+  `5 compiled, 1394 cached, 0 failed`. That seed-built generation still exited
+  `1` on the plain F64 fixture. Object disassembly proved the direct `3.14`
+  comparison itself received pointer-like payloads such as `0x40c4efd0`
+  instead of IEEE-754 `0x40091eb851eb851f`; fcmp was consuming an already-bad
+  constant. The fixture now stages direct literal, local round-trip, and
+  branch merge failures as exits 1, 2, and 3.
+
+  This also establishes a generation boundary: the Rust seed does not execute
+  the patched pure-Simple `cl_translate_call`, so its candidate cannot prove
+  the bare-wrapper ABI correction. A fresh second-generation compiler must be
+  built by that candidate through Cranelift. Both bounded closure builds
+  crashed before object emission in
+  `_native_build_entry_closure -> HashMap.contains_key`; a debugger backtrace
+  captured that exact stack. Removing `--entry-closure` avoided the crash but
+  spent the 10-minute cap in whole-source frontend work without emitting an
+  object. The next fresh session should fix or bypass that closure HashMap
+  crash with a focused regression, then produce the second-generation
+  compiler from an isolated cache and rerun the staged F64 fixture once.

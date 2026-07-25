@@ -18,7 +18,7 @@ env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 <self-hosted-simple> native-bu
 | `w2_array_index_rw.spl` | W2 `local_mir_type_of` Option in `lower_array_lit` | e7c445145a7 | **72** | PASS | build-fail `unknown static method ptr on class MirType` |
 | `c5_char_from_code.spl` | C5 integer builtin/owner precedence + Unicode runtime backing | source update | **42** | SOURCE FIX / execution pending | UFCS/custom dispatch, missing symbol, or ASCII-only result |
 | `c9_string_parse_f64_to_upper.spl` | C9 `.parse_f64()`/`.to_upper()` MIR dispatch | 84701d8fb5e | **42** | RED / compiler fix pending | staged exit `2`: nonzero F64 value mismatch |
-| `f64_literal_compare.spl` | typed F64 literal compare and branch merge | source update | **42** | RED / compiler fix pending | plain `3.14 != 3.14` returns true |
+| `f64_literal_compare.spl` | typed F64 literal compare, local round-trip, and branch merge | source update | **42** | RED / compiler fix pending | exit 1 = direct literal, 2 = local round-trip, 3 = merge |
 | `dict_struct_value.spl` | dict struct-value round-trip | (batch) | **73** | PASS | wrong value |
 | `dict_fn_value.spl` | dict fn-value round-trip | (batch) | **33** | PASS | wrong value |
 | `class_array.spl` | class + array interaction | (batch) | **42** | PASS | wrong value |
