@@ -44,6 +44,11 @@ Retained local artifacts:
 - `build/macos_vulkan_provider_micro_probe/evidence.env` — 244 bytes,
   SHA-256 `231b31004da0744ba6d409778dc772524c9f74b4346dd7bf05ad1b136c816f62`.
 
+Future checker attempts retain no unbounded native-build transcript. Evidence
+records an exactly shell-quoted `env` + compiler + argument command and hashes
+a deterministic 4 KiB head plus 4 KiB tail transcript (8,256-byte hard cap),
+adding an omission marker when compiler output exceeds that bound.
+
 Not produced because the native probe never launched:
 
 - `rt_vulkan_provider_is_available` result

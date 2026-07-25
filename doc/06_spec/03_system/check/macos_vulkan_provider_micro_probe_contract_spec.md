@@ -24,8 +24,12 @@ The checker must:
 1. Require a trusted build manifest that binds the canonical repository release
    compiler path and SHA-256, and reject `compiler_rust/target` overrides.
 2. Build with `SIMPLE_NO_STUB_FALLBACK=1`.
-3. Record the provider path and SHA-256 plus bounded, hashed native-build and
-   probe-output evidence.
+3. Record the provider path and SHA-256, an exactly shell-quoted native-build
+   command (environment, compiler, and every argument), plus bounded, hashed
+   native-build and probe-output evidence. The native-build stream is drained
+   through a deterministic 4 KiB head + 4 KiB tail log, with an omission marker
+   when needed and an 8,256-byte hard cap; no unbounded raw build log is retained.
+   The cap is checked on both successful and failed native-build attempts.
 4. Use `DYLD_PRINT_LIBRARIES=1` to verify the provider image loaded.
 5. Avoid the full-live Vulkan checker.
 
