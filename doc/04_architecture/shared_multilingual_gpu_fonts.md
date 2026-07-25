@@ -368,3 +368,30 @@ Vulkan). Only an independently reviewed, reproducible tracked tuple may report
 5. Add the two Engine3D entrypoints and promote one real graphics backend.
 6. Update guides/SPipe recipes, then remove compatibility code only after parity
    and reference-removal gates pass.
+
+## GSUB/GPOS staged-completion boundary — 2026-07-25
+
+<!-- codex-design -->
+
+One pure layout plan is selected per script run from the owned `OtFont` bytes.
+GSUB mutates a bounded glyph-record sequence carrying glyph ID, source index,
+cluster, advance, and offsets; GPOS then adjusts that same sequence. It becomes
+the existing public `ShapedGlyph` sequence only after every active lookup
+validates and applies.
+
+The selector is common to GSUB and GPOS and owns Script/LangSys/Feature/Lookup
+bounds, fallback, uniqueness, indices, and order. Unsupported active flags,
+types, formats, nested calls, device data, or GDEF dependencies make the plan
+incomplete. Pinned Arabic/Devanagari profiles remain compatibility witnesses
+until the generic plan covers their full active lookup sets.
+
+No parser, lookup, face, atlas, cache, or backend resource crosses into Draw IR.
+The established `FontRenderer` resolver and transient `FontRenderBatch` remain
+the only material boundary. A simple bounded
+O(active-lookups × glyphs × subtables) pass is accepted initially; the existing
+resolved-metrics cache avoids repeated shaping, and no second cache is added
+without measurement.
+
+This boundary cannot claim selected-corpus completion until every active pinned
+lookup validates and applies. Full specification-wide GSUB/GPOS is a separate
+option.

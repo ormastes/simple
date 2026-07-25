@@ -104,3 +104,57 @@ The retained full pure-Simple CLI still embeds the tracked obsolete
 font tests therefore exit 139 before assertions. The serif implementation and
 oracles remain candidate readiness work; the 67/4/26/3 selection policy is
 unchanged until a rebuilt current-ABI pure-Simple CLI executes them.
+
+## GSUB/GPOS staged-completion audit — 2026-07-25
+
+<!-- codex-research -->
+
+The remaining shaping gap is selection and honest completion, not another
+renderer. `ot_parser_layout.spl` already owns bounded Coverage 1/2 decoding,
+SingleSubst 1/2 application, and GSUB/GPOS lookup catalogs. Its GSUB selector
+duplicates the common GPOS selector, accepts duplicate or aliased records,
+omits absent-script `DFLT` fallback, and appends duplicate lookup indices. The
+general shaper then bypasses both selectors: it passes the entire GSUB catalog
+to an identity `_gsub_apply`, while `_gpos_advance` reads only `hmtx`.
+
+The pinned Hindi and Arabic/Urdu paths contain useful bounded application code
+but do not establish general GSUB/GPOS support. Hindi applies selected
+SingleSubst, a narrow chained-context case, LigatureSubst, and PairPos format 2.
+Arabic/Urdu uses catalog-index profiles and applies narrow MultipleSubst,
+chained SingleSubst, PairPos format 2, and MarkToBase format 1 cases. Other
+active lookup types, flags, formats, device adjustments, and nested behavior
+must remain visible as incomplete.
+
+The root fix is one fail-closed selector shared by GSUB and GPOS, followed by
+run-level sequence application. Scalar `_gsub_apply(glyph_id)` cannot support
+multiple, ligature, or contextual substitutions because they change sequence
+length and cluster provenance. The public `ShapedGlyph`, `ShapedRun`,
+`FontGlyphRun`, Draw IR, and transient `FontRenderBatch` boundaries need no new
+fields.
+
+This audit does not establish specification-wide completion. The pinned corpus
+still activates Arabic GPOS types 5, 6, and 8 that the current witness path does
+not apply. Selection hardening is only Stage B; the generic sequence engine and
+full active-corpus application remain later stages.
+
+### Selected Option A active-plan inventory
+
+Latin, Han, and Cyrillic witnesses keep valid empty GSUB/GPOS plans under the
+selected explicit-feature policy. Advertised discretionary/default features are
+not activated merely because a font lists them.
+
+The Hindi `dev2/HIN ` plan activates GSUB types 2, 4, 5, and 6 (formats 1–3 as
+applicable) plus GPOS types 2, 4, 6, and 8. Arabic/Urdu activates GSUB types 1,
+2, 4, 5, and 6 plus GPOS types 2, 4, 5, 6, and 8. Active flags include ignore
+marks and mark-filtering-set behavior; GDEF MarkGlyphSets and bounded nested
+lookup dispatch are therefore required. The operation union for Option A is:
+
+- GSUB 1 formats 1/2, 2 format 1, 4 format 1, 5 formats 2/3, and 6 formats
+  1/2/3;
+- GPOS 2 formats 1/2, 4/5/6 format 1, and 8 format 3; and
+- LookupFlags `0`, `0x0008`, and `0x0010`.
+
+Noto Sans SC has a nonzero GPOS FeatureVariations offset, but the selected Han
+plan is empty. It is valid only because no selected feature can be substituted;
+any nonempty active v1.1 plan remains incomplete until default-instance
+FeatureVariations is implemented.

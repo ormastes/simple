@@ -295,3 +295,24 @@ An unavailable Vulkan device or an unbootable QEMU image remains an explicit
 failed/unavailable row. Software fallback, a compatibility renderer, serial
 markers without pixels, or pixels without correlated events cannot satisfy the
 row.
+
+## GSUB/GPOS incremental gate — 2026-07-25
+
+Run once, in order:
+
+1. canonical parser unit fixtures for exact/default/`DFLT`, malformed exact
+   no-fallback, required/optional features, ascending LookupList
+   order/deduplication,
+   duplicates/aliases/bad indices, and nonzero `lookupOrder`;
+2. supported GSUB substitution and GPOS placement/advance fixtures;
+3. one negative fixture for every unsupported active flag/type/format, requiring
+   the corresponding completion flag to be false;
+4. existing pinned Hindi and Arabic/Urdu unit vectors;
+5. the existing shared shaping system scenario using the frozen
+   `step("Shape selected Unicode scripts with the pinned face")` vocabulary;
+6. Draw IR SDN round-trip and Engine2D material evidence with a nonzero bearing
+   or GPOS offset.
+
+Pure-Simple runtime execution remains blocked until a current self-hosted CLI is
+deployed. Static source checks do not promote these rows and no Rust seed may
+substitute.
