@@ -7,7 +7,8 @@ use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     evaluate_expr, exec_assignment, exec_augmented_assignment, exec_with, get_type_name, pattern_matches,
     BLOCK_SCOPED_ENUMS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, EXTERN_FUNCTIONS, GLOBAL_ENUMS, IMMUTABLE_VARS,
-    MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS, TRAIT_IMPLS, TRAITS, USER_MACROS,
+    MACRO_DEFINITION_ORDER, MIXINS, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER,
+    CURRENT_EXEC_MODULE, TRAIT_IMPLS, TRAITS, USER_MACROS,
 };
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
@@ -17,6 +18,77 @@ use std::sync::Arc;
 
 type Enums = HashMap<String, Arc<EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<FunctionDef>>>;
+
+enum ModuleGlobalTarget {
+    Owned { owner: Arc<str>, name: String },
+    Legacy,
+}
+
+fn module_global_target(name: &str, env: &Env) -> Option<ModuleGlobalTarget> {
+    let current_owner = CURRENT_EXEC_MODULE.with(|cell| cell.borrow().clone());
+    let Some(owner) = current_owner else {
+        return MODULE_GLOBALS
+            .with(|cell| cell.borrow().contains_key(name))
+            .then_some(ModuleGlobalTarget::Legacy);
+    };
+    if env.is_local(name) {
+        return None;
+    }
+    if MODULE_GLOBALS_BY_OWNER.with(|cell| {
+        cell.borrow()
+            .get(&owner)
+            .is_some_and(|globals| globals.contains_key(name))
+    }) {
+        return Some(ModuleGlobalTarget::Owned {
+            owner,
+            name: name.to_owned(),
+        });
+    }
+    MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| {
+        cell.borrow()
+            .get(&owner)
+            .and_then(|bindings| bindings.get(name))
+            .cloned()
+            .map(|(owner, name)| ModuleGlobalTarget::Owned { owner, name })
+    })
+}
+
+fn seed_module_global(target: &ModuleGlobalTarget, local_name: &str, env: &mut Env) {
+    let ModuleGlobalTarget::Owned { owner, name } = target else {
+        return;
+    };
+    if env.get(local_name).is_some() {
+        return;
+    }
+    if let Some(value) =
+        MODULE_GLOBALS_BY_OWNER.with(|cell| cell.borrow().get(owner).and_then(|globals| globals.get(name)).cloned())
+    {
+        env.insert(local_name.to_owned(), value);
+    }
+}
+
+fn sync_module_global(target: ModuleGlobalTarget, local_name: &str, env: &mut Env) {
+    match target {
+        ModuleGlobalTarget::Owned { owner, name } => {
+            if let Some(value) = env.get(local_name).cloned() {
+                MODULE_GLOBALS_BY_OWNER.with(|cell| {
+                    if let Some(globals) = cell.borrow_mut().get_mut(&owner) {
+                        if globals.contains_key(&name) {
+                            globals.insert(name, value);
+                        }
+                    }
+                });
+            }
+        }
+        ModuleGlobalTarget::Legacy => {
+            if let Some(value) = env.remove(local_name) {
+                MODULE_GLOBALS.with(|cell| {
+                    cell.borrow_mut().insert(local_name.to_owned(), value);
+                });
+            }
+        }
+    }
+}
 
 /// Inject mixin fields and methods into a ClassDef.
 /// Returns a new ClassDef with mixin fields prepended and mixin methods appended.
@@ -230,18 +302,15 @@ pub(super) fn exec_block_closure_into(
                 last_value = Value::Nil;
             }
             Node::Assignment(assign_stmt) => {
-                let global_name = if assign_stmt.op == simple_parser::ast::AssignOp::Assign {
-                    match &assign_stmt.target {
-                        simple_parser::ast::Expr::Identifier(name)
-                            if MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name)) =>
-                        {
-                            Some(name.clone())
-                        }
-                        _ => None,
+                let global_target = match &assign_stmt.target {
+                    simple_parser::ast::Expr::Identifier(name) => {
+                        module_global_target(name, &local_env).map(|target| (name.clone(), target))
                     }
-                } else {
-                    None
+                    _ => None,
                 };
+                if let Some((name, target)) = &global_target {
+                    seed_module_global(target, name, &mut local_env);
+                }
                 let control = if assign_stmt.op != simple_parser::ast::AssignOp::Assign {
                     exec_augmented_assignment(assign_stmt, &mut local_env, functions, classes, enums, impl_methods)
                 } else {
@@ -249,12 +318,8 @@ pub(super) fn exec_block_closure_into(
                 }?;
                 match control {
                     crate::interpreter::Control::Next => {
-                        if let Some(name) = global_name {
-                            if let Some(value) = local_env.remove(&name) {
-                                MODULE_GLOBALS.with(|cell| {
-                                    cell.borrow_mut().insert(name, value);
-                                });
-                            }
+                        if let Some((name, target)) = global_target {
+                            sync_module_global(target, &name, &mut local_env);
                         }
                         last_value = Value::Nil;
                     }
@@ -481,7 +546,8 @@ pub(super) fn exec_block_closure_into(
                                 }
                             }
                         } else if {
-                            let elif_val = evaluate_expr(cond, &mut local_env, functions, classes, enums, impl_methods)?;
+                            let elif_val =
+                                evaluate_expr(cond, &mut local_env, functions, classes, enums, impl_methods)?;
                             is_condition_present(cond, &elif_val)
                         } {
                             last_value = exec_block_closure_mut(
@@ -566,7 +632,8 @@ pub(super) fn exec_block_closure_into(
                             for (name, value) in &bindings {
                                 guard_env.insert(name.clone(), value.clone());
                             }
-                            let guard_val = evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?;
+                            let guard_val =
+                                evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?;
                             if !is_condition_present(guard, &guard_val) {
                                 continue;
                             }
@@ -864,7 +931,8 @@ pub(super) fn exec_block_closure_into(
                 // Insert into local environment
                 local_env.insert(const_stmt.name.clone(), value);
                 // Register as const name
-                crate::interpreter::const_trace("blockexec:const-insert", &const_stmt.name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
+                crate::interpreter::const_trace("blockexec:const-insert", &const_stmt.name);
+                CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
                 last_value = Value::Nil;
             }
             Node::Static(static_stmt) => {
@@ -881,7 +949,8 @@ pub(super) fn exec_block_closure_into(
                 local_env.insert(static_stmt.name.clone(), value);
                 // Register as const if immutable
                 if !static_stmt.mutability.is_mutable() {
-                    crate::interpreter::const_trace("blockexec:static-insert", &static_stmt.name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
+                    crate::interpreter::const_trace("blockexec:static-insert", &static_stmt.name);
+                    CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
                 }
                 last_value = Value::Nil;
             }
@@ -1042,6 +1111,15 @@ fn exec_block_closure_mut(
                 last_value = Value::Nil;
             }
             Node::Assignment(assign_stmt) => {
+                let global_target = match &assign_stmt.target {
+                    simple_parser::ast::Expr::Identifier(name) => {
+                        module_global_target(name, local_env).map(|target| (name.clone(), target))
+                    }
+                    _ => None,
+                };
+                if let Some((name, target)) = &global_target {
+                    seed_module_global(target, name, local_env);
+                }
                 let control = if assign_stmt.op != simple_parser::ast::AssignOp::Assign {
                     exec_augmented_assignment(assign_stmt, local_env, functions, classes, enums, impl_methods)
                 } else {
@@ -1049,6 +1127,9 @@ fn exec_block_closure_mut(
                 }?;
                 match control {
                     crate::interpreter::Control::Next => {
+                        if let Some((name, target)) = global_target {
+                            sync_module_global(target, &name, local_env);
+                        }
                         last_value = Value::Nil;
                     }
                     crate::interpreter::Control::Return(value) => return Ok(value),
@@ -1104,7 +1185,8 @@ fn exec_block_closure_mut(
                         }
                     }
                 } else if {
-                    let cond_val = evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
+                    let cond_val =
+                        evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
                     // `is_condition_present` (not plain `.truthy()`): see its
                     // doc comment in `interpreter_control.rs`.
                     is_condition_present(&if_stmt.condition, &cond_val)
@@ -1229,7 +1311,8 @@ fn exec_block_closure_mut(
                             for (name, value) in &bindings {
                                 guard_env.insert(name.clone(), value.clone());
                             }
-                            let guard_val = evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?;
+                            let guard_val =
+                                evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?;
                             if !is_condition_present(guard, &guard_val) {
                                 continue;
                             }
@@ -1459,7 +1542,8 @@ fn exec_block_closure_mut(
                 // Insert into environment
                 local_env.insert(const_stmt.name.clone(), value);
                 // Register as const name
-                crate::interpreter::const_trace("blockexec:const-insert", &const_stmt.name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
+                crate::interpreter::const_trace("blockexec:const-insert", &const_stmt.name);
+                CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
                 last_value = Value::Nil;
             }
             Node::Static(static_stmt) => {
@@ -1469,7 +1553,8 @@ fn exec_block_closure_mut(
                 local_env.insert(static_stmt.name.clone(), value);
                 // Register as const if immutable
                 if !static_stmt.mutability.is_mutable() {
-                    crate::interpreter::const_trace("blockexec:static-insert", &static_stmt.name); CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
+                    crate::interpreter::const_trace("blockexec:static-insert", &static_stmt.name);
+                    CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
                 }
                 last_value = Value::Nil;
             }
@@ -1667,11 +1752,19 @@ mod tests {
     /// fix landed for the statement-level `exec_if`.
     #[test]
     fn if_val_skips_when_absent_in_block_closure() {
-        let body = parse_probe_body("fn probe():\n    if val v = x:\n        \"TAKEN\"\n    else:\n        \"SKIPPED\"\n");
+        let body =
+            parse_probe_body("fn probe():\n    if val v = x:\n        \"TAKEN\"\n    else:\n        \"SKIPPED\"\n");
         let mut env = Env::new();
         env.insert("x".to_string(), Value::Nil);
-        let result = exec_block_closure(&body, &env, &mut HashMap::new(), &mut HashMap::new(), &HashMap::new(), &HashMap::new())
-            .expect("exec_block_closure");
+        let result = exec_block_closure(
+            &body,
+            &env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("exec_block_closure");
         assert_eq!(result.to_display_string(), "SKIPPED");
     }
 
@@ -1682,8 +1775,15 @@ mod tests {
         let body = parse_probe_body("fn probe():\n    if val v = x:\n        v\n    else:\n        99\n");
         let mut env = Env::new();
         env.insert("x".to_string(), Value::Int(42));
-        let result = exec_block_closure(&body, &env, &mut HashMap::new(), &mut HashMap::new(), &HashMap::new(), &HashMap::new())
-            .expect("exec_block_closure");
+        let result = exec_block_closure(
+            &body,
+            &env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("exec_block_closure");
         assert_eq!(result.as_int().expect("int"), 42);
     }
 
@@ -1695,8 +1795,15 @@ mod tests {
     fn return_inside_match_arm_exits_block_closure() {
         let body = parse_probe_body("fn probe():\n    match 1:\n        1: return 100\n    return 999\n");
         let env = Env::new();
-        let result = exec_block_closure(&body, &env, &mut HashMap::new(), &mut HashMap::new(), &HashMap::new(), &HashMap::new())
-            .expect("exec_block_closure");
+        let result = exec_block_closure(
+            &body,
+            &env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("exec_block_closure");
         assert_eq!(result.as_int().expect("int"), 100);
     }
 
@@ -1707,8 +1814,15 @@ mod tests {
     fn return_at_top_level_exits_block_closure() {
         let body = parse_probe_body("fn probe():\n    return 100\n");
         let env = Env::new();
-        let result = exec_block_closure(&body, &env, &mut HashMap::new(), &mut HashMap::new(), &HashMap::new(), &HashMap::new())
-            .expect("exec_block_closure");
+        let result = exec_block_closure(
+            &body,
+            &env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .expect("exec_block_closure");
         assert_eq!(result.as_int().expect("int"), 100);
     }
 }

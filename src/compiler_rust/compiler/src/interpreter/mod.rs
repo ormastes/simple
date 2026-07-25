@@ -26,8 +26,8 @@ pub(crate) use crate::interpreter_unit::*;
 #[path = "../interpreter_state.rs"]
 mod interpreter_state;
 pub(crate) use interpreter_state::{
-    clear_moved_vars, const_trace, const_trace_target, get_aop_config, get_di_config, mark_as_moved, set_aop_config, set_di_config, ExecutionMode,
-    debug_call_stack_snapshot, field_access_debug_enabled,
+    clear_moved_vars, const_trace, const_trace_target, get_aop_config, get_di_config, mark_as_moved, set_aop_config,
+    set_di_config, ExecutionMode, debug_call_stack_snapshot, field_access_debug_enabled,
 };
 pub use interpreter_state::{
     check_execution_limit,
@@ -63,11 +63,11 @@ pub(crate) use interpreter_state::{
     COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, CURRENT_FILE, DI_CONFIG, DI_SINGLETONS,
     EXECUTION_MODE, EXTERN_FUNCTIONS, GENERATOR_YIELDS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, IMMUTABLE_VARS,
     IN_IMMUTABLE_FN_METHOD, INTERFACE_BINDINGS, INTERPRETER_ARGS, INTERRUPT_REQUESTED, MACRO_DEFINITION_ORDER,
-    MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER, MOVED_VARS,
-    SI_BASE_UNITS, TIMEOUT_EXCEEDED, TRAIT_IMPLS, TRAITS, MIXINS,
+    MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER, MODULE_GLOBALS_BY_OWNER,
+    MODULE_GLOBALS_INITIAL_BY_OWNER, MOVED_VARS, SI_BASE_UNITS, TIMEOUT_EXCEEDED, TRAIT_IMPLS, TRAITS, MIXINS,
     UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY, USER_MACROS, FUNCTION_OVERLOADS,
     CLASS_OVERLOADS, FUNCTION_MODULE_OWNER, CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
-    FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner,
+    FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner,
 };
 
 // Core types and utilities

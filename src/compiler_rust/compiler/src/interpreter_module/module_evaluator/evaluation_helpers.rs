@@ -13,13 +13,86 @@ use simple_parser::ast::{Attribute, ClassDef, Expr, FunctionDef, ImportTarget, N
 
 use crate::error::CompileError;
 use crate::value::{Env, Value};
-use crate::interpreter::{FUNCTION_OVERLOADS, FUNCTION_MODULE_OWNER};
+use crate::interpreter::{
+    tag_function_module_owner, FUNCTION_MODULE_OWNER, FUNCTION_OVERLOADS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
+    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER,
+};
 
 use crate::interpreter::interpreter_module::export_handler::load_export_source;
-use crate::interpreter::module_cache::filter_functions_from_value;
+use crate::interpreter::module_cache::{filter_functions_from_value, module_exports_owner, normalize_path_key};
 
 type Enums = HashMap<String, Arc<simple_parser::ast::EnumDef>>;
 type ImplMethods = HashMap<String, Vec<Arc<simple_parser::ast::FunctionDef>>>;
+
+fn record_function_owner(function: &Arc<FunctionDef>, owner: Option<&Arc<str>>) {
+    if let Some(owner) = owner {
+        FUNCTION_MODULE_OWNER.with(|cell| {
+            cell.borrow_mut()
+                .insert(Arc::as_ptr(function) as usize, Arc::clone(owner));
+        });
+    }
+}
+
+fn tag_methods_owner(methods: &mut [FunctionDef], owner: Option<&Arc<str>>) {
+    if let Some(owner) = owner {
+        for method in methods {
+            tag_function_module_owner(method, owner);
+        }
+    }
+}
+
+fn module_owner(module_path: Option<&Path>) -> Option<Arc<str>> {
+    module_path.map(|path| Arc::from(normalize_path_key(path).to_string_lossy().as_ref()))
+}
+
+fn record_owned_global(module_path: Option<&Path>, name: &str, value: &Value) {
+    MODULE_GLOBALS.with(|cell| {
+        cell.borrow_mut().insert(name.to_owned(), value.clone());
+    });
+    let Some(owner) = module_owner(module_path) else {
+        return;
+    };
+    MODULE_GLOBALS_BY_OWNER.with(|cell| {
+        cell.borrow_mut()
+            .entry(Arc::clone(&owner))
+            .or_default()
+            .insert(name.to_owned(), value.clone());
+    });
+    MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cell| {
+        cell.borrow_mut()
+            .entry(owner)
+            .or_default()
+            .insert(name.to_owned(), value.clone());
+    });
+}
+
+fn imported_binding(source_owner: &Arc<str>, source_name: &str) -> (Arc<str>, String) {
+    MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| {
+        cell.borrow()
+            .get(source_owner)
+            .and_then(|bindings| bindings.get(source_name))
+            .cloned()
+            .unwrap_or_else(|| (Arc::clone(source_owner), source_name.to_owned()))
+    })
+}
+
+fn record_import_binding(
+    module_path: Option<&Path>,
+    local_name: &str,
+    source_owner: Option<&Arc<str>>,
+    source_name: &str,
+) {
+    let (Some(importer), Some(source_owner)) = (module_owner(module_path), source_owner) else {
+        return;
+    };
+    let binding = imported_binding(source_owner, source_name);
+    MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cell| {
+        cell.borrow_mut()
+            .entry(importer)
+            .or_default()
+            .insert(local_name.to_owned(), binding);
+    });
+}
 
 fn has_driver_manifest_attr(attrs: &[Attribute]) -> bool {
     attrs
@@ -90,18 +163,13 @@ pub(super) fn register_definitions(
     // that belongs to the calling function's own module. `None` when the
     // module path is unavailable — those functions simply get no owner entry
     // and fall back to the pre-existing first-registered tie-break.
-    let module_ident: Option<Arc<str>> = module_path.map(|p| Arc::from(p.to_string_lossy().as_ref()));
+    let module_ident = module_owner(module_path);
 
     for item in items.iter() {
         match item {
             Node::Function(f) => {
                 let arc_f = Arc::new(f.clone());
-                if let Some(ident) = &module_ident {
-                    FUNCTION_MODULE_OWNER.with(|cell| {
-                        cell.borrow_mut()
-                            .insert(Arc::as_ptr(&arc_f) as usize, Arc::clone(ident));
-                    });
-                }
+                record_function_owner(&arc_f, module_ident.as_ref());
                 local_functions.insert(f.name.clone(), Arc::clone(&arc_f));
                 FUNCTION_OVERLOADS.with(|cell| {
                     cell.borrow_mut()
@@ -116,9 +184,11 @@ pub(super) fn register_definitions(
                 }
             }
             Node::Class(c) => {
-                let arc_c = Arc::new(c.clone());
+                let mut class = c.clone();
+                tag_methods_owner(&mut class.methods, module_ident.as_ref());
+                let arc_c = Arc::new(class);
                 local_classes.insert(c.name.clone(), Arc::clone(&arc_c));
-                global_classes.insert(c.name.clone(), arc_c);
+                global_classes.insert(c.name.clone(), Arc::clone(&arc_c));
                 exports.insert(
                     c.name.clone(),
                     Value::Constructor {
@@ -126,11 +196,12 @@ pub(super) fn register_definitions(
                     },
                 );
                 // Register static methods as mangled free functions (ClassName__method)
-                for method in &c.methods {
+                for method in &arc_c.methods {
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", c.name, method.name);
                         let arc_method = Arc::new(method.clone());
+                        record_function_owner(&arc_method, module_ident.as_ref());
                         local_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         global_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         exports.insert(
@@ -147,7 +218,7 @@ pub(super) fn register_definitions(
             Node::Struct(s) => {
                 // Treat structs like classes for export purposes
                 // Include struct methods so they're available for method calls
-                let class_def = ClassDef {
+                let mut class_def = ClassDef {
                     span: s.span,
                     name: s.name.clone(),
                     generic_params: s.generic_params.clone(),
@@ -167,9 +238,10 @@ pub(super) fn register_definitions(
                     type_bindings: s.type_bindings.clone(),
                     is_value_type: true,
                 };
+                tag_methods_owner(&mut class_def.methods, module_ident.as_ref());
                 let arc_class_def = Arc::new(class_def);
                 local_classes.insert(s.name.clone(), Arc::clone(&arc_class_def));
-                global_classes.insert(s.name.clone(), arc_class_def);
+                global_classes.insert(s.name.clone(), Arc::clone(&arc_class_def));
                 exports.insert(
                     s.name.clone(),
                     Value::Constructor {
@@ -177,11 +249,12 @@ pub(super) fn register_definitions(
                     },
                 );
                 // Register static methods as mangled free functions (StructName__method)
-                for method in &s.methods {
+                for method in &arc_class_def.methods {
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", s.name, method.name);
                         let arc_method = Arc::new(method.clone());
+                        record_function_owner(&arc_method, module_ident.as_ref());
                         local_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         global_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         exports.insert(
@@ -284,9 +357,11 @@ pub(super) fn register_definitions(
                 }
             }
             Node::Enum(e) => {
-                let arc_e = Arc::new(e.clone());
+                let mut enum_def = e.clone();
+                tag_methods_owner(&mut enum_def.methods, module_ident.as_ref());
+                let arc_e = Arc::new(enum_def);
                 local_enums.insert(e.name.clone(), Arc::clone(&arc_e));
-                global_enums.insert(e.name.clone(), arc_e);
+                global_enums.insert(e.name.clone(), Arc::clone(&arc_e));
                 // Export enum as EnumType so EnumName.VariantName syntax works
                 let enum_type = Value::EnumType {
                     enum_name: e.name.clone(),
@@ -295,11 +370,12 @@ pub(super) fn register_definitions(
                 // CRITICAL FIX: Also add to env so it's available in closures
                 env.insert(e.name.clone(), enum_type);
                 // Register enum static methods as mangled free functions
-                for method in &e.methods {
+                for method in &arc_e.methods {
                     let is_static = method.is_static || !method.params.iter().any(|p| p.name == "self");
                     if is_static {
                         let mangled = format!("{}__{}", e.name, method.name);
                         let arc_method = Arc::new(method.clone());
+                        record_function_owner(&arc_method, module_ident.as_ref());
                         local_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         global_functions.insert(mangled.clone(), Arc::clone(&arc_method));
                         exports.insert(
@@ -417,9 +493,7 @@ pub(super) fn process_imports_and_assignments(
                             // Sync module-level vars to MODULE_GLOBALS so that functions
                             // within this module can read/write them even when called from
                             // other modules (where the function's captured_env may not be used).
-                            MODULE_GLOBALS.with(|cell| {
-                                cell.borrow_mut().insert(name.clone(), value);
-                            });
+                            record_owned_global(module_path, &name, &value);
                         }
                     }
                 }
@@ -435,9 +509,20 @@ pub(super) fn process_imports_and_assignments(
                 )?;
                 env.insert(stmt.name.clone(), value.clone());
                 exports.insert(stmt.name.clone(), value.clone());
-                MODULE_GLOBALS.with(|cell| {
-                    cell.borrow_mut().insert(stmt.name.clone(), value);
-                });
+                record_owned_global(module_path, &stmt.name, &value);
+            }
+            Node::Static(stmt) => {
+                let value = evaluate_expr(
+                    &stmt.value,
+                    env,
+                    local_functions,
+                    local_classes,
+                    local_enums,
+                    impl_methods,
+                )?;
+                env.insert(stmt.name.clone(), value.clone());
+                exports.insert(stmt.name.clone(), value.clone());
+                record_owned_global(module_path, &stmt.name, &value);
             }
             Node::Assignment(stmt) => {
                 // Evaluate module-level assignments
@@ -454,9 +539,7 @@ pub(super) fn process_imports_and_assignments(
                         // Export vars so they're visible after import
                         exports.insert(name.clone(), value.clone());
                         // Sync to MODULE_GLOBALS for the same reason as Node::Let above
-                        MODULE_GLOBALS.with(|cell| {
-                            cell.borrow_mut().insert(name.clone(), value);
-                        });
+                        record_owned_global(module_path, name, &value);
                     }
                 }
             }
@@ -521,6 +604,7 @@ fn process_use_stmt(
         global_enums,
     ) {
         Ok(value) => {
+            let source_owner = module_exports_owner(&value);
             // Unpack module exports into current namespace
             if let Value::Dict(module_exports) = &value {
                 for (name, export_value) in module_exports.iter() {
@@ -568,6 +652,7 @@ fn process_use_stmt(
                             }
                         });
                     }
+                    record_import_binding(module_path, name, source_owner.as_ref(), name);
                     env.insert(name.clone(), export_value.clone());
                     exports.insert(name.clone(), export_value.clone());
                 }
@@ -628,18 +713,20 @@ fn process_export_stmt(
         bare_exports.push(names_to_export);
     } else {
         // Re-export: export X, Y from module
-        if let Ok(source_exports) =
+        if let Ok((source_exports, source_owner)) =
             load_export_source(export_stmt, module_path, global_functions, global_classes, global_enums)
         {
             match &export_stmt.target {
                 ImportTarget::Single(name) => {
                     if let Some(value) = source_exports.get(name) {
+                        record_import_binding(module_path, name, source_owner.as_ref(), name);
                         exports.insert(name.clone(), value.clone());
                         env.insert(name.clone(), value.clone());
                     }
                 }
                 ImportTarget::Aliased { name, alias } => {
                     if let Some(value) = source_exports.get(name) {
+                        record_import_binding(module_path, alias, source_owner.as_ref(), name);
                         exports.insert(alias.clone(), value.clone());
                         env.insert(alias.clone(), value.clone());
                     }
@@ -647,6 +734,7 @@ fn process_export_stmt(
                 ImportTarget::Glob => {
                     // Export everything from the source module
                     for (name, value) in source_exports {
+                        record_import_binding(module_path, &name, source_owner.as_ref(), &name);
                         exports.insert(name.clone(), value.clone());
                         env.insert(name, value);
                     }
@@ -657,12 +745,14 @@ fn process_export_stmt(
                         match item {
                             ImportTarget::Single(name) => {
                                 if let Some(value) = source_exports.get(name) {
+                                    record_import_binding(module_path, name, source_owner.as_ref(), name);
                                     exports.insert(name.clone(), value.clone());
                                     env.insert(name.clone(), value.clone());
                                 }
                             }
                             ImportTarget::Aliased { name, alias } => {
                                 if let Some(value) = source_exports.get(name) {
+                                    record_import_binding(module_path, alias, source_owner.as_ref(), name);
                                     exports.insert(alias.clone(), value.clone());
                                     env.insert(alias.clone(), value.clone());
                                 }

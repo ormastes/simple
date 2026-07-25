@@ -14,6 +14,7 @@ use simple_parser::Parser;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     normalize_path_key, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
+    FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
 };
 use crate::stdlib_variant::stdlib_root_candidates;
 use crate::CompileError as _;
@@ -532,6 +533,16 @@ fn tag_node_function_owners(node: &mut Node, owner: &str) {
     }
 }
 
+fn import_binding_marker_name(importer: &str, local: &str, source_owner: &str, source_name: &str) -> String {
+    format!(
+        "{FLATTEN_IMPORT_BINDING_MARKER_PREFIX}{}:{importer}{}:{local}{}:{source_owner}{}:{source_name}",
+        importer.len(),
+        local.len(),
+        source_owner.len(),
+        source_name.len()
+    )
+}
+
 fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
     let owner_path = normalize_path_key(module_path);
     let owner_name = owner_path.to_string_lossy();
@@ -546,9 +557,43 @@ fn strip_flattened_import_nodes(module: Module, module_path: &Path) -> Module {
                 items.push(item);
                 continue;
             }
+            if marker.name.starts_with(FLATTEN_IMPORT_BINDING_MARKER_PREFIX) {
+                items.push(item);
+                continue;
+            }
         }
 
         match item {
+            Node::UseStmt(use_stmt) => {
+                if let Some(source_path) =
+                    resolve_use_to_path(&use_stmt, module_path.parent().unwrap_or(Path::new(".")))
+                {
+                    let source_name = normalize_path_key(&source_path).to_string_lossy().into_owned();
+                    let mut add_marker = |local_name: &str, source_symbol: &str| {
+                        items.push(Node::Const(ConstStmt {
+                            span: use_stmt.span,
+                            name: import_binding_marker_name(&owner_name, local_name, &source_name, source_symbol),
+                            ty: None,
+                            value: Expr::Nil,
+                            visibility: Visibility::Private,
+                        }));
+                    };
+                    match &use_stmt.target {
+                        ImportTarget::Group(targets) => {
+                            for target in targets {
+                                match target {
+                                    ImportTarget::Single(name) => add_marker(name, name),
+                                    ImportTarget::Aliased { name, alias } => add_marker(alias, name),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        ImportTarget::Glob => add_marker("*", "*"),
+                        ImportTarget::Single(_) | ImportTarget::Aliased { .. } => {}
+                    }
+                }
+                next_global_already_tagged = false;
+            }
             Node::Function(function) => {
                 if function.name == "main" {
                     continue;

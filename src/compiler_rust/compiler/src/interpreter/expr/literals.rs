@@ -273,39 +273,23 @@ pub(super) fn eval_literal_expr(
                     ctx,
                 ));
             }
-            // First check env for local variables and closures.
-            //
-            // Deferred lazy imports capture a module's globals into its per-owner
-            // env snapshot. An *imported* global (defined and mutated in another
-            // module) is captured here as a STALE snapshot taken at module-load
-            // time — e.g. the AST arena `expr_tag`, defined and grown in
-            // compiler.core.ast_expr but imported by the desugar/MIR modules, is
-            // captured empty and never updated, so indexing it read length 0 and
-            // raised a spurious "array index out of bounds". The live value lives
-            // in the shared flat MODULE_GLOBALS (kept current by
-            // sync_owned_captured_globals). So: if this env binding is a non-local
-            // module-global that the *currently executing* module does not own
-            // (absent from its MODULE_GLOBALS_BY_OWNER entry), prefer the shared
-            // flat value. The owner's OWN globals are still served from env, which
-            // preserves same-function read-after-write (env can be fresher than the
-            // not-yet-synced flat map for a global the running function is mutating).
+            // Imported globals can change during a nested call, so refresh only
+            // bindings with exact owner provenance at the point of each read.
             if let Some(val) = env.get(name) {
-                // Only a growing *container* global (the AST arena arrays) can be
-                // observed stale across the boundary in a way that crashes, and
-                // container-valued bare-identifier reads are rare next to scalar /
-                // function reads — so gate the (comparatively costly) cross-module
-                // owner check on the value shape to keep the hot read path free.
-                if matches!(val, Value::Array(_) | Value::FrozenArray(_)) && !env.is_local(name) {
-                    let owner_owns = crate::interpreter::CURRENT_EXEC_MODULE.with(|cell| {
-                        cell.borrow().as_ref().is_some_and(|owner| {
-                            crate::interpreter::MODULE_GLOBALS_BY_OWNER
-                                .with(|c| c.borrow().get(owner).is_some_and(|m| m.contains_key(name)))
+                if !env.is_local(name) {
+                    let imported = crate::interpreter::CURRENT_EXEC_MODULE.with(|owner_cell| {
+                        let owner = owner_cell.borrow();
+                        let owner = owner.as_ref()?;
+                        crate::interpreter::MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|bindings_cell| {
+                            let bindings = bindings_cell.borrow();
+                            let (defining_owner, defining_name) = bindings.get(owner)?.get(name)?;
+                            crate::interpreter::MODULE_GLOBALS_BY_OWNER.with(|globals_cell| {
+                                globals_cell.borrow().get(defining_owner)?.get(defining_name).cloned()
+                            })
                         })
                     });
-                    if !owner_owns {
-                        if let Some(shared) = MODULE_GLOBALS.with(|cell| cell.borrow().get(name).cloned()) {
-                            return Ok(Some(shared));
-                        }
+                    if let Some(imported) = imported {
+                        return Ok(Some(imported));
                     }
                 }
                 return Ok(Some(val.clone()));

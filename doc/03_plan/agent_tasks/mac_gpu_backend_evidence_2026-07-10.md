@@ -238,6 +238,18 @@ Shared rules:
    canonical redeploy gate and post-swap `-c 'print(1+1)'` smoke.
 5. Do not unlock GPU evidence until every deployment gate passes.
 
+Owner-global repair detail after the 2026-07-25 three-cycle cap:
+
+1. Owner-qualified assignments, static registration, length-encoded flattened
+   binding metadata, and exact read-time refresh are complete.
+2. The focused module-global suite passed 14/14.
+3. The bounded Stage 2 worker produced the source-matched 20 MB bootstrap
+   artifact with 679 compiled, 0 failed, and passed bootstrap sanity.
+4. Continue with one Stage 3 self-host verification, then the canonical
+   full-CLI redeploy and essential-tools smoke.
+5. Keep TODO 582 separate: fresh unflattened export dictionaries still need
+   owner metadata attached to the exact returned `Arc<Dict>`.
+
 ### Agent B: Linux CUDA and Vulkan evidence
 
 1. Use only Agent A's source-matched deployed pure-Simple binary.

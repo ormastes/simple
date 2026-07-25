@@ -10,8 +10,8 @@ use std::sync::{Arc, OnceLock};
 
 use tracing::trace;
 use crate::interpreter::{
-    FUNCTION_MODULE_OWNER, FUNCTION_OVERLOADS, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBALS_BY_OWNER,
-    MODULE_GLOBALS_INITIAL_BY_OWNER,
+    FUNCTION_MODULE_OWNER, FUNCTION_OVERLOADS, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
+    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER,
 };
 
 use crate::value::{Env, Value};
@@ -56,6 +56,7 @@ pub const MAX_MODULE_DEPTH: usize = 50;
 // Key: normalized module path, Value: module exports dict
 thread_local! {
     pub static MODULE_EXPORTS_CACHE: RefCell<HashMap<PathBuf, Value>> = RefCell::new(HashMap::new());
+    static MODULE_EXPORT_OWNERS: RefCell<HashMap<usize, Arc<str>>> = RefCell::new(HashMap::new());
     // Cache for ClassDef objects (Arc-wrapped for cheap sharing)
     pub static MODULE_CLASSES_CACHE: RefCell<HashMap<PathBuf, HashMap<String, Arc<ClassDef>>>> = RefCell::new(HashMap::new());
     // Cache for FunctionDef objects (Arc-wrapped for cheap sharing with Value::Function)
@@ -76,6 +77,7 @@ thread_local! {
 /// Clear the module exports cache (useful between test runs)
 pub fn clear_module_cache() {
     MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
+    MODULE_EXPORT_OWNERS.with(|cache| cache.borrow_mut().clear());
     MODULE_CLASSES_CACHE.with(|cache| cache.borrow_mut().clear());
     MODULE_FUNCTIONS_CACHE.with(|cache| cache.borrow_mut().clear());
     MODULE_ENUMS_CACHE.with(|cache| cache.borrow_mut().clear());
@@ -83,6 +85,7 @@ pub fn clear_module_cache() {
     MODULE_GLOBALS_BY_OWNER.with(|cache| cache.borrow_mut().clear());
     MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cache| cache.borrow_mut().clear());
     MODULE_ENV_BY_OWNER.with(|cache| cache.borrow_mut().clear());
+    MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cache| cache.borrow_mut().clear());
     FUNCTION_MODULE_OWNER.with(|cache| cache.borrow_mut().clear());
     FUNCTION_OVERLOADS.with(|cache| cache.borrow_mut().clear());
     MODULES_LOADING.with(|loading| loading.borrow_mut().clear());
@@ -114,21 +117,37 @@ pub fn clear_module_cache_selective() {
     }
 
     MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().retain(|k, _| is_stdlib(k)));
+    MODULE_EXPORT_OWNERS.with(|cache| {
+        cache
+            .borrow_mut()
+            .retain(|_, owner| is_stdlib(Path::new(owner.as_ref())));
+    });
     MODULE_CLASSES_CACHE.with(|cache| cache.borrow_mut().retain(|k, _| is_stdlib(k)));
     MODULE_FUNCTIONS_CACHE.with(|cache| cache.borrow_mut().retain(|k, _| is_stdlib(k)));
     MODULE_ENUMS_CACHE.with(|cache| cache.borrow_mut().retain(|k, _| is_stdlib(k)));
     MODULE_GLOBALS.with(|cache| cache.borrow_mut().clear());
     FUNCTION_OVERLOADS.with(|cache| cache.borrow_mut().clear());
     MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cache| {
-        cache.borrow_mut().retain(|owner, _| is_stdlib(Path::new(owner.as_ref())));
+        cache
+            .borrow_mut()
+            .retain(|owner, _| is_stdlib(Path::new(owner.as_ref())));
     });
     let initial_globals = MODULE_GLOBALS_INITIAL_BY_OWNER.with(|cache| cache.borrow().clone());
     MODULE_GLOBALS_BY_OWNER.with(|cache| *cache.borrow_mut() = initial_globals);
     MODULE_ENV_BY_OWNER.with(|cache| {
-        cache.borrow_mut().retain(|owner, _| is_stdlib(Path::new(owner.as_ref())));
+        cache
+            .borrow_mut()
+            .retain(|owner, _| is_stdlib(Path::new(owner.as_ref())));
+    });
+    MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|cache| {
+        cache
+            .borrow_mut()
+            .retain(|owner, _| is_stdlib(Path::new(owner.as_ref())));
     });
     FUNCTION_MODULE_OWNER.with(|cache| {
-        cache.borrow_mut().retain(|_, owner| is_stdlib(Path::new(owner.as_ref())));
+        cache
+            .borrow_mut()
+            .retain(|_, owner| is_stdlib(Path::new(owner.as_ref())));
     });
     // Always clear loading/depth state (transient per-file)
     MODULES_LOADING.with(|loading| loading.borrow_mut().clear());
@@ -315,9 +334,22 @@ pub fn get_cached_module_exports(path: &Path) -> Option<Value> {
 pub fn cache_module_exports(path: &Path, exports: Value) {
     let key = normalize_path_key(path);
     trace!(path = ?key, "Caching module exports");
+    if let Value::Dict(dict) = &exports {
+        let owner: Arc<str> = Arc::from(key.to_string_lossy().as_ref());
+        MODULE_EXPORT_OWNERS.with(|cache| {
+            cache.borrow_mut().insert(Arc::as_ptr(dict) as usize, owner);
+        });
+    }
     MODULE_EXPORTS_CACHE.with(|cache| {
         cache.borrow_mut().insert(key, exports);
     });
+}
+
+pub fn module_exports_owner(exports: &Value) -> Option<Arc<str>> {
+    let Value::Dict(dict) = exports else {
+        return None;
+    };
+    MODULE_EXPORT_OWNERS.with(|cache| cache.borrow().get(&(Arc::as_ptr(dict) as usize)).cloned())
 }
 
 /// Cache module definitions (classes, functions, enums) for a path.

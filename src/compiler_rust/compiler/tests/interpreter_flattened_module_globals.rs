@@ -69,6 +69,81 @@ fn flattened_functions_share_growing_module_global_arrays() {
 }
 
 #[test]
+fn flattened_transitive_import_sees_growing_global_array() {
+    let dir = tempdir().unwrap();
+    let arena_path = dir.path().join("arena.spl");
+    let facade_path = dir.path().join("facade.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        arena_path,
+        "var values: [i32] = []\n\nfn push_value(value: i32):\n    values.push(value)\n",
+    )
+    .unwrap();
+    fs::write(
+        facade_path,
+        "use arena.{values, push_value}\n\nfn push_then_read(value: i32) -> i32:\n    push_value(value)\n    return values[0]\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use facade.{push_then_read}\n\nfn main() -> i32:\n    return push_then_read(17)\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 17);
+}
+
+#[test]
+fn flattened_transitive_alias_sees_growing_global_array() {
+    let dir = tempdir().unwrap();
+    let arena_path = dir.path().join("arena.spl");
+    let facade_path = dir.path().join("facade.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        arena_path,
+        "var values: [i32] = []\n\nfn push_value(value: i32):\n    values.push(value)\n",
+    )
+    .unwrap();
+    fs::write(
+        facade_path,
+        "use arena.{values as imported_values, push_value}\n\nfn push_then_read(value: i32) -> i32:\n    push_value(value)\n    return imported_values[0]\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use facade.{push_then_read}\n\nfn main() -> i32:\n    return push_then_read(31)\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 31);
+}
+
+#[test]
+fn flattened_same_named_global_arrays_remain_owner_isolated() {
+    let dir = tempdir().unwrap();
+    let left_path = dir.path().join("left.spl");
+    let right_path = dir.path().join("right.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        left_path,
+        "var values: [i32] = []\n\nfn push_left(value: i32):\n    values.push(value)\n\nfn read_left(index: i32) -> i32:\n    return values[index]\n",
+    )
+    .unwrap();
+    fs::write(
+        right_path,
+        "var values: [i32] = []\n\nfn push_right(value: i32):\n    values.push(value)\n\nfn read_right(index: i32) -> i32:\n    return values[index]\n",
+    )
+    .unwrap();
+    fs::write(
+        &main_path,
+        "use left.{push_left, read_left}\nuse right.{push_right, read_right}\n\nfn main() -> i32:\n    push_left(11)\n    push_right(22)\n    return read_left(0) * 100 + read_right(0)\n",
+    )
+    .unwrap();
+
+    assert_eq!(evaluate_loaded(&main_path), 1122);
+}
+
+#[test]
 fn nested_local_shadow_reveals_latest_owner_global() {
     let dir = tempdir().unwrap();
     let state_path = dir.path().join("state.spl");

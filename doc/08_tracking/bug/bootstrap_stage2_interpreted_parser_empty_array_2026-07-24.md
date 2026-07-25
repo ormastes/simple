@@ -1,7 +1,7 @@
 # Bug: Stage 2 interpreted parser indexes an empty array
 
 - **Date:** 2026-07-24
-- **Status:** open; unsafe candidate rejected by review
+- **Status:** resolved 2026-07-25
 - **Severity:** high
 - **Area:** Rust-seed interpreter / pure-Simple frontend
 
@@ -91,3 +91,64 @@ The focused regression must include two modules with the same global name and
 prove that a non-empty value from one owner cannot replace the other's empty
 value. It must also cover the transitive imported-array path that triggered the
 parser failure.
+
+## 2026-07-25 bounded owner-provenance cycle
+
+The three-cycle cap was reached before the repair converged:
+
+- exact module-export owner metadata and owner-qualified call refresh were
+  implemented;
+- same-named owner isolation passed;
+- runtime-loaded static methods were tagged with their module owner, and the
+  focused static-method regression changed from `90` to the expected `99`;
+- the transitive growing-array regression still failed with index 0 / length 0;
+- a synthetic flattened-import marker experiment also made
+  `imported_functions_share_live_module_globals` fail with `enabled` missing,
+  so that marker experiment was removed and was not accepted.
+
+Next cycle:
+
+1. In both assignment paths in
+   `interpreter_call/block_execution.rs`, identify ownership through
+   `CURRENT_EXEC_MODULE` and `MODULE_GLOBALS_BY_OWNER` rather than flat
+   `MODULE_GLOBALS.contains_key`.
+2. Preserve the updated binding in `local_env` so
+   `sync_owned_captured_globals` can publish it.
+3. If flattened import metadata is still required, use a length-encoded marker
+   and canonicalize transitive bindings through the source owner's binding
+   table. Do not restore bare-name lookup.
+4. Run the focused module-global suite once. It must pass the transitive array,
+   same-name isolation, static-method, and `enabled` regressions before a
+   bounded Stage 2 worker is allowed.
+
+## Resolution evidence
+
+The owner-qualified repair converged without the flat bare-name fallback:
+
+- length-encoded flattened import markers preserve selected and aliased source
+  ownership;
+- imported identifiers refresh from the exact defining owner at read time, so
+  a nested mutation is visible without cross-owner name guessing;
+- owner-qualified assignment paths retain their local overlay and update only
+  an existing defining-owner global;
+- module evaluation now registers `static` globals and runtime-loaded static
+  methods retain their owner.
+
+Focused result:
+
+```text
+interpreter_flattened_module_globals: 14 passed, 0 failed
+```
+
+The single bounded Stage 2 worker then completed:
+
+```text
+Build complete: 679 compiled, 0 cached, 0 failed
+Binary: build/mini_builds/todo580_owner_provenance/simple_bootstrap (19953 KB)
+Time: 218.5s compile + 51.9s link = 270.4s total
+SHA-256: 69b033528c47c46a4e38597702d53c91751d29d91ca6086096ee4a0cb3b8b7e7
+```
+
+The artifact reports `simple-bootstrap 1.0.0-beta` and rejects unsupported
+`run` with status 1. Stage 3, full-CLI deployment, and fresh GPU evidence remain
+under TODO 580; they are no longer blocked by this parser failure.

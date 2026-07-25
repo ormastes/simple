@@ -6,8 +6,8 @@ use super::macros::*;
 use crate::error::CompileError;
 use crate::interpreter::{
     exec_block_fn, Control, CONST_NAMES, IMMUTABLE_VARS, IN_IMMUTABLE_FN_METHOD, GENERATOR_YIELDS, CURRENT_EXEC_MODULE,
-    FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBALS_BY_OWNER,
-    MODULE_GLOBALS_INITIAL_BY_OWNER, visit_pattern_binding_names,
+    FUNCTION_MODULE_OWNER, MODULE_ENV_BY_OWNER, MODULE_GLOBALS, MODULE_GLOBAL_BINDINGS_BY_OWNER,
+    MODULE_GLOBALS_BY_OWNER, MODULE_GLOBALS_INITIAL_BY_OWNER, visit_pattern_binding_names,
 };
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
@@ -79,6 +79,25 @@ fn captured_env_with_live_globals(func: &FunctionDef, captured_env: &Env) -> Env
     } else {
         captured_env.to_map()
     };
+    let imported_globals = MODULE_GLOBAL_BINDINGS_BY_OWNER.with(|bindings_cell| {
+        let bindings = bindings_cell.borrow();
+        let Some(owner_bindings) = bindings.get(&owner) else {
+            return Vec::new();
+        };
+        MODULE_GLOBALS_BY_OWNER.with(|globals_cell| {
+            let globals = globals_cell.borrow();
+            owner_bindings
+                .iter()
+                .filter_map(|(local_name, (defining_owner, defining_name))| {
+                    globals
+                        .get(defining_owner)
+                        .and_then(|owner_globals| owner_globals.get(defining_name))
+                        .map(|value| (local_name.clone(), value.clone()))
+                })
+                .collect::<Vec<_>>()
+        })
+    });
+    base.extend(imported_globals);
     base.extend(owner_globals);
     Env::with_base(Arc::new(base))
 }
@@ -370,7 +389,10 @@ fn execute_function_body(
     let saved_immutable_vars = IMMUTABLE_VARS.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
     if let Some(traced) = crate::interpreter::const_trace_target() {
         if saved_const_names.contains(traced) {
-            eprintln!("[const-trace] fnexec:take fn={} saved-set-contains={}", func.name, traced);
+            eprintln!(
+                "[const-trace] fnexec:take fn={} saved-set-contains={}",
+                func.name, traced
+            );
         }
     }
 
@@ -426,7 +448,12 @@ fn execute_function_body(
     if let Some(traced) = crate::interpreter::const_trace_target() {
         let live_has = CONST_NAMES.with(|cell| cell.borrow().contains(traced));
         if live_has || saved_const_names.contains(traced) {
-            eprintln!("[const-trace] fnexec:restore fn={} live-had={} restoring-to-contains={}", func.name, live_has, saved_const_names.contains(traced));
+            eprintln!(
+                "[const-trace] fnexec:restore fn={} live-had={} restoring-to-contains={}",
+                func.name,
+                live_has,
+                saved_const_names.contains(traced)
+            );
         }
     }
     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
@@ -554,15 +581,7 @@ pub(crate) fn exec_function_with_bound_args(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     with_effect_check!(func, {
-        exec_function_with_bound_args_inner(
-            func,
-            bound_args,
-            outer_env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        )
+        exec_function_with_bound_args_inner(func, bound_args, outer_env, functions, classes, enums, impl_methods)
     })
 }
 

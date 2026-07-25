@@ -62,6 +62,7 @@ pub struct LiteralFunctionInfo {
 /// so the lint "unknown attribute" check never sees it.
 pub(crate) const FLATTEN_MODULE_OWNER_ATTR_PREFIX: &str = "__simple_flatten_module_owner__=";
 pub(crate) const FLATTEN_GLOBAL_OWNER_MARKER_PREFIX: &str = "__simple_flatten_global_owner__=";
+pub(crate) const FLATTEN_IMPORT_BINDING_MARKER_PREFIX: &str = "__simple_flatten_import_binding__=";
 
 pub(crate) fn tag_function_module_owner(function: &mut FunctionDef, owner: &str) {
     if function
@@ -150,7 +151,9 @@ pub(crate) use simple_common::fault_detection::TIMEOUT_EXCEEDED;
 /// keep for the next CONST_NAMES scoping regression — this is a recurring class.
 pub(crate) fn const_trace_target() -> Option<&'static str> {
     static TARGET: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    TARGET.get_or_init(|| std::env::var("SIMPLE_CONST_TRACE").ok()).as_deref()
+    TARGET
+        .get_or_init(|| std::env::var("SIMPLE_CONST_TRACE").ok())
+        .as_deref()
 }
 
 pub(crate) fn const_trace(site: &str, name: &str) {
@@ -214,6 +217,9 @@ thread_local! {
     pub(crate) static MODULE_GLOBALS_INITIAL_BY_OWNER: RefCell<HashMap<Arc<str>, HashMap<String, Value>>> = RefCell::new(HashMap::new());
     /// Immutable filtered module environments keyed by owner.
     pub(crate) static MODULE_ENV_BY_OWNER: RefCell<HashMap<Arc<str>, Arc<HashMap<String, Value>>>> = RefCell::new(HashMap::new());
+    /// Imported global bindings keyed by importer, then local name.
+    /// Values retain the defining owner and defining name for collision-free refresh.
+    pub(crate) static MODULE_GLOBAL_BINDINGS_BY_OWNER: RefCell<HashMap<Arc<str>, HashMap<String, (Arc<str>, String)>>> = RefCell::new(HashMap::new());
     /// BDD Test Registry - shared across all modules that import spec.registry
     /// This ensures that describe/context/it blocks register to the same location
     /// regardless of how the registry module is imported.
