@@ -9,13 +9,10 @@ extern fn rt_native_build(args: [text]) -> i64
 # Importing driver.spl directly lets discovery pull the driver and its
 # transitive imports statically. (2026-07-13 redeploy)
 use compiler.driver.driver.{compiler_driver_create, compiler_driver_run_compile}
-use compiler.driver.bootstrap_api.{aot_native_project_with_backend_fixed}
 use compiler.common.driver_core_types (CompileMode, CompileResult, driver_core_compile_options_default, compileoptions_normalize_mir_optimization, driver_output_format_native, driver_output_format_smf, compile_result_is_success, compile_result_errors)
+use app.cli.bootstrap_identity.{bootstrap_version}
+use app.cli.bootstrap_focused_native_build.{run_focused_native_build}
 use std.nogc_sync_mut.io_runtime.{env_get, env_set, file_exists, file_size, remove_file_if_exists}
-
-# Keep in sync with ./VERSION file
-pub fn bootstrap_version() -> text:
-    "1.0.0-beta"
 
 fn native_build_help() -> i64:
     0
@@ -215,32 +212,16 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     if explicit_entry != "":
         if env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1":
             return run_rt_native_build(args)
-        if explicit_entry != "src/app/cli/main.spl":
-            print "Error: Stage4 entry must be src/app/cli/main.spl"
+        if explicit_entry != "src/app/cli/main.spl" and explicit_entry != "src/app/os/main.spl":
+            print "Error: Stage4 entry must be src/app/cli/main.spl or src/app/os/main.spl"
             return 1
         if mode != "one-binary":
-            print "Error: Stage4 full CLI requires --mode one-binary"
+            print "Error: Stage4 compiler capsule requires --mode one-binary"
             return 1
-        val stage4_output = bootstrap_output_from_args(args, 0)
-        val stage4_backend = native_build_backend_from_args(args, 0)
-        env_set("SIMPLE_NATIVE_BUILD_ENTRY", explicit_entry)
         # Seed only the entry. The driver resolves its transitive imports and
         # then enables closure mode; pre-enabling it while passing whole source
         # roots made Stage 4 parse every file before it could prune anything.
-        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
-        val old_native_arena_decls = env_get("SIMPLE_NATIVE_ARENA_DECLS")
-        env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")
-        val stage4_result = aot_native_project_with_backend_fixed(
-            "", "", "", "", "", 0,
-            explicit_entry, stage4_output, stage4_backend, true, true, 3,
-            native_build_no_borrow_check_from_args(args, 0)
-        )
-        env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
-        if compile_result_is_success(stage4_result):
-            return 0
-        for err in compile_result_errors(stage4_result):
-            print "error: in-process Stage4 native-build: {err}"
-        return 1
+        return run_focused_native_build(args, false)
     val entry_path = native_build_single_spl_positional(args)
     if entry_path == "":
         return run_rt_native_build(args)
@@ -384,17 +365,17 @@ fn main() -> i64:
     val all_args = get_cli_args()
     val argc = all_args.len()
     if argc < 2:
-        print "Simple Bootstrap Compiler v1.0.0-beta"
+        print "Simple Bootstrap Compiler v{bootstrap_version()}"
         print "Usage: simple compile <file> [-o <output>] [--native] [--opt-level=<level>] [--list-optimizations]"
         return 0
     val first = all_args[1]
     if first == "native-build":
         return run_native_build_bootstrap(all_args)
     if first.len() == 9 and first.starts_with("--version"):
-        print "simple-bootstrap 1.0.0-beta"
+        print "simple-bootstrap {bootstrap_version()}"
         return 0
     if first.len() == 6 and first.starts_with("--help"):
-        print "Simple Bootstrap Compiler v1.0.0-beta"
+        print "Simple Bootstrap Compiler v{bootstrap_version()}"
         print "Built from Simple source via the staged bootstrap"
         print ""
         print "Compile-related flags include:"

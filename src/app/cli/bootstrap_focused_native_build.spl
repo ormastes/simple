@@ -1,0 +1,158 @@
+# Pure-Simple native-build dispatch for exact, focused compiler capsules.
+#
+# This module drives CompilerDriver directly, with no legacy native-build FFI,
+# so exact Stage4 provider composition stays on the localized
+# compiler-backfill + core-runtime lane.
+
+use compiler.driver.bootstrap_api.{aot_native_project_with_backend_fixed}
+use compiler.common.driver_core_types.{compile_result_is_success, compile_result_errors}
+use std.nogc_sync_mut.io_runtime.{env_get, env_set}
+
+pub fn focused_native_build_arg_value(args: [text], flag: text) -> text:
+    var i = 0
+    val prefix = flag + "="
+    while i < args.len():
+        if args[i] == flag:
+            if i + 1 < args.len():
+                return args[i + 1]
+            return ""
+        if args[i].starts_with(prefix):
+            return args[i].substring(prefix.len())
+        i = i + 1
+    ""
+
+pub fn focused_native_build_sources(args: [text]) -> [text]:
+    var sources: [text] = []
+    var i = 0
+    while i < args.len():
+        if args[i] == "--source":
+            if i + 1 < args.len():
+                sources.push(args[i + 1])
+                i = i + 1
+        elif args[i].starts_with("--source="):
+            sources.push(args[i].substring(9))
+        i = i + 1
+    sources
+
+pub fn focused_native_build_target(args: [text]) -> text:
+    focused_native_build_arg_value(args, "--target")
+
+pub fn focused_native_build_linker_script(args: [text]) -> text:
+    focused_native_build_arg_value(args, "--linker-script")
+
+pub fn focused_native_build_runtime_path(args: [text]) -> text:
+    focused_native_build_arg_value(args, "--runtime-path")
+
+pub fn focused_native_build_backend(args: [text]) -> text:
+    val backend = focused_native_build_arg_value(args, "--backend")
+    if backend == "":
+        "llvm"
+    else:
+        backend
+
+pub fn focused_native_build_strip(args: [text], include_sources: bool) -> bool:
+    not include_sources or focused_native_build_has_flag(args, "--strip")
+
+fn focused_native_build_has_flag(args: [text], flag: text) -> bool:
+    for arg in args:
+        if arg == flag:
+            return true
+    false
+
+fn focused_native_build_source_at(sources: [text], index: i64) -> text:
+    if index >= 0 and index < sources.len():
+        sources[index]
+    else:
+        ""
+
+fn focused_native_build_opt_level(args: [text]) -> i64:
+    val value = focused_native_build_arg_value(args, "--opt-level")
+    if value == "none":
+        0
+    elif value == "basic":
+        1
+    elif value == "standard":
+        2
+    else:
+        3
+
+pub fn focused_native_build_error(args: [text]) -> text:
+    val mode = focused_native_build_arg_value(args, "--mode")
+    if mode != "" and mode != "dynload" and mode != "one-binary":
+        return "Error: invalid --mode '{mode}' (expected dynload or one-binary)"
+    val sources = focused_native_build_sources(args)
+    if sources.len() > 5:
+        return "Error: focused native-build accepts at most five --source roots"
+    if focused_native_build_arg_value(args, "--entry") == "":
+        return "Error: focused native-build requires --entry"
+    if (focused_native_build_arg_value(args, "--output") == "" and
+        focused_native_build_arg_value(args, "-o") == ""):
+        return "Error: focused native-build requires --output"
+    ""
+
+pub fn run_focused_native_build(args: [text], include_sources: bool) -> i64:
+    val plan_error = focused_native_build_error(args)
+    if plan_error != "":
+        print plan_error
+        return 1
+
+    val parsed_sources = focused_native_build_sources(args)
+    val sources = if include_sources: parsed_sources else: []
+    val entry = focused_native_build_arg_value(args, "--entry")
+    var output = focused_native_build_arg_value(args, "--output")
+    if output == "":
+        output = focused_native_build_arg_value(args, "-o")
+    val backend = focused_native_build_backend(args)
+    val target = focused_native_build_target(args)
+    val linker_script = focused_native_build_linker_script(args)
+    val runtime_path = focused_native_build_runtime_path(args)
+    val runtime_bundle = focused_native_build_arg_value(args, "--runtime-bundle")
+
+    val old_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY")
+    val old_entry_closure = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE")
+    val old_target = env_get("SIMPLE_NATIVE_BUILD_TARGET")
+    val old_linker_script = env_get("SIMPLE_LINKER_SCRIPT")
+    val old_runtime_path = env_get("SIMPLE_RUNTIME_PATH")
+    val old_runtime_bundle = env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE")
+    val old_native_arena_decls = env_get("SIMPLE_NATIVE_ARENA_DECLS")
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry)
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
+    env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")
+    if target != "":
+        env_set("SIMPLE_NATIVE_BUILD_TARGET", target)
+    if linker_script != "":
+        env_set("SIMPLE_LINKER_SCRIPT", linker_script)
+    if runtime_path != "":
+        env_set("SIMPLE_RUNTIME_PATH", runtime_path)
+    if runtime_bundle != "":
+        env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", runtime_bundle)
+
+    val result = aot_native_project_with_backend_fixed(
+        focused_native_build_source_at(sources, 0),
+        focused_native_build_source_at(sources, 1),
+        focused_native_build_source_at(sources, 2),
+        focused_native_build_source_at(sources, 3),
+        focused_native_build_source_at(sources, 4),
+        sources.len(),
+        entry,
+        output,
+        backend,
+        focused_native_build_strip(args, include_sources),
+        true,
+        focused_native_build_opt_level(args),
+        focused_native_build_has_flag(args, "--no-borrow-check")
+    )
+
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_entry)
+    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_entry_closure)
+    env_set("SIMPLE_NATIVE_BUILD_TARGET", old_target)
+    env_set("SIMPLE_LINKER_SCRIPT", old_linker_script)
+    env_set("SIMPLE_RUNTIME_PATH", old_runtime_path)
+    env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", old_runtime_bundle)
+    env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+
+    if compile_result_is_success(result):
+        return 0
+    for err in compile_result_errors(result):
+        print "error: focused native-build: {err}"
+    1
