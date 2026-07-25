@@ -342,3 +342,27 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   was not launched. The backend capture comparison remains fail-closed:
   Vulkan and Metal compile, standalone NEON has 18/192 composite mismatches,
   and no backend currently has comparable live capture plus event evidence.
+- continuation-2026-07-26-toolchain-promotion: High review rejected the host
+  `fn`-getter-to-`me` workaround and its rectangle-only probe because it hid
+  the immutable receiver ABI bug and expected an impossible nonempty font
+  target; neither change was integrated. The strengthened material-provenance
+  probe and exact refutable-binding grammar fixture are pushed, but x86 QEMU
+  did not launch because both retained Stage3 compilers reject the legitimate
+  `val Some(x) = value else: break` surface. The guarded ARM exact-capsule
+  source/cache route is pushed as `0f4c846a08`; source review accepts it, while
+  execution remains open. The owner-level pure parser fix for existing
+  unparenthesized tuple bindings is pushed as `1c03e23f0d`.
+  A no-Rust synthetic bridge at historical `19b32d6aec` plus the tuple parser
+  and receiver fixes built 675 modules with zero failures:
+  `build/worktrees/grammar-bridge-19b-synthetic/build/grammar-bridge-19b/bootstrap/aarch64-apple-darwin/simple`,
+  SHA-256 `ce3440cc2fe6fcd1f5a58d9372624565c1d167a3c0dc3bd24853ee906823b45c`.
+  Its native receiver regression passes. The bridge's pure positional route
+  also parses/code-generates the refutable binding, proving the earlier
+  `Else` failure came from the historical `--entry` delegation to the stale
+  Rust parser, not the pure parser. Positional linking still fails on missing
+  `___simple_runtime_init`, `___simple_runtime_shutdown`, and `spl_init_args`,
+  so the bridge is not admitted for the current-main hop. The manual-discovered
+  full CLI SHA `8a0c22df...` is rejected: it predates focused OS routing,
+  loses linker stderr, and crashes with corrupted HIR state. Next resume must
+  repair/admit the pure positional runtime-link/one-binary route, then rebuild
+  current main with fresh caches before any host or QEMU evidence run.
