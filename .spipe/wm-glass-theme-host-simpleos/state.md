@@ -291,3 +291,20 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   bootstrap hit disk exhaustion, and current Stage4 rejects the shared
   compiler backfill as stale. The three-attempt build cap is exhausted, so
   no host/QEMU live claim is made from these source changes.
+- continuation-2026-07-25-stage3-evidence-routing: The export-use global
+  binding fix cleared fresh bootstrap stages 2 and 3; full Stage 4 now reaches
+  the full-CLI parse and is killed at roughly 4.68 million heap-registry
+  entries, so it is recorded as a resource/OOM blocker rather than an
+  export-use regression. The verified Stage 3 compiler built the focused host
+  generator and CPU-SIMD renderer after isolating native caches per entry and
+  wiring the existing WM runtime providers, but the UI-access CLI then exposed
+  an unwired SQLite provider set. The three host cycles are exhausted and no
+  host screenshot/event PASS is claimed. The x86_64 WM kernel independently
+  compiled 662 files with zero failures and produced a preserved
+  ELF32/little-endian/EM_386 Multiboot1 image. Its wrapper admission had both
+  the wrong ELF64 expectation and a positional-argument clobber that made the
+  machine check read a file named after the class byte; both source defects
+  are corrected, but the cycle cap prevents a further QEMU launch in this
+  session. ARM64 remains blocked because the canonical producer requires the
+  absent full CLI `os build` dispatcher; Stage 3 cannot substitute for that
+  provenance path. Live x86/ARM captures and comparison therefore remain open.
