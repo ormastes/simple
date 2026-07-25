@@ -161,34 +161,28 @@ local-hostname: freebsd-bootstrap
 EOF
 
 cat > "$CLOUDINIT_DIR/user-data" <<USERDATA
-#!/bin/sh
-# nuageinit on FreeBSD executes non-cloud-config user-data as a root script
-# during firstboot (BEFORE networking/sshd). This sets up SSH keys and
-# enables root login so the host can SSH in as root for package installs.
-
-# Ensure freebsd user exists
-pw useradd -n ${QEMU_USER} -s /bin/sh -m -G wheel 2>/dev/null || true
-
-# SSH keys for both root and freebsd
-mkdir -p /root/.ssh /home/${QEMU_USER}/.ssh
-echo '${SSH_PUB_KEY_CONTENT}' >> /root/.ssh/authorized_keys
-echo '${SSH_PUB_KEY_CONTENT}' >> /home/${QEMU_USER}/.ssh/authorized_keys
-chmod 700 /root/.ssh /home/${QEMU_USER}/.ssh
-chmod 600 /root/.ssh/authorized_keys /home/${QEMU_USER}/.ssh/authorized_keys
-chown -R ${QEMU_USER}:${QEMU_USER} /home/${QEMU_USER}/.ssh
-
-# Enable root SSH login
-sed -i '' 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-sed -i '' 's/^PermitRootLogin no/PermitRootLogin yes/' /etc/ssh/sshd_config
-
-# Set hostname
-hostname freebsd-bootstrap
-
-# The pristine cloud image enables network-bound firstboot update/package
-# jobs ahead of sshd. They can exceed the host's bounded SSH wait and are
-# redundant because full mode installs its explicit dependency set later.
-sysrc firstboot_freebsd_update_enable=NO >/dev/null 2>&1 || true
-sysrc firstboot_pkgs_enable=NO >/dev/null 2>&1 || true
+#cloud-config
+write_files:
+  - path: /etc/rc.conf.d/firstboot_freebsd_update
+    permissions: "0644"
+    content: |
+      firstboot_freebsd_update_enable="NO"
+  - path: /etc/rc.conf.d/firstboot_pkgs
+    permissions: "0644"
+    content: |
+      firstboot_pkgs_enable="NO"
+runcmd:
+  - |
+    pw useradd -n ${QEMU_USER} -s /bin/sh -m -G wheel 2>/dev/null || true
+    mkdir -p /root/.ssh /home/${QEMU_USER}/.ssh
+    echo '${SSH_PUB_KEY_CONTENT}' >> /root/.ssh/authorized_keys
+    echo '${SSH_PUB_KEY_CONTENT}' >> /home/${QEMU_USER}/.ssh/authorized_keys
+    chmod 700 /root/.ssh /home/${QEMU_USER}/.ssh
+    chmod 600 /root/.ssh/authorized_keys /home/${QEMU_USER}/.ssh/authorized_keys
+    chown -R ${QEMU_USER}:${QEMU_USER} /home/${QEMU_USER}/.ssh
+    sed -i '' 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+    sed -i '' 's/^PermitRootLogin no/PermitRootLogin yes/' /etc/ssh/sshd_config
+    hostname freebsd-bootstrap
 USERDATA
 chmod +x "$CLOUDINIT_DIR/user-data"
 
