@@ -1,6 +1,14 @@
 use os.compositor.cursor.{CursorState}
 use os.compositor.display_backend_core.{CompositorBackend}
 use os.compositor.input_backend.{InputBackend}
+# Import the SAME MouseEvent the InputBackend trait returns
+# (os.drivers.input.ps2_mouse). A second, unrelated `MouseEvent` exists at
+# os.drivers.input.input_event with a different field set (delta_x/abs_x, no
+# edge-triggered button flags). Same-named types collapse in the global
+# registry (first registration wins), so without this explicit import the
+# field accesses below lower against the wrong type and HIR fails with
+# "struct 'ANY' field 'left_just_pressed'".
+use os.drivers.input.ps2_mouse.{MouseEvent}
 use os.drivers.framebuffer.fb_driver.{Color}
 use os.kernel.boot.cpu.{port_inb, port_outb}
 use common.window_protocol.geometry.{WindowId}
@@ -453,7 +461,11 @@ class Compositor:
                 # the bare character, not an Option wrapper.
                 if val Some(shortcut_char) = inp.key_to_char(pressed_key):
                     self.pending_shortcut = shortcut_char
-        if val mouse_event = inp.poll_mouse():
+        # Bind through a typed local so the optional carries a concrete
+        # MouseEvent type into lowering; the trait-dispatched call alone
+        # leaves the receiver erased.
+        val mouse_opt: MouseEvent? = inp.poll_mouse()
+        if val mouse_event = mouse_opt:
             var new_x = mouse_event.x.to_i32()
             var new_y = mouse_event.y.to_i32()
             if new_x < 0:
