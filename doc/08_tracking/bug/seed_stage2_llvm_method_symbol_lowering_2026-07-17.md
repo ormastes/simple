@@ -279,3 +279,13 @@ undefined reference to `rt_dict_insert'
 Evidence:
 `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage2-native-build.log`.
 No further bootstrap retry was made because this was the third bounded cycle.
+
+The next bounded session fixed all three symbols without runtime stubs:
+
+- PTX float constants use existing IEEE bit conversions and fixed-width hex;
+- ELF relocation enums map through an explicit free helper;
+- Rust LLVM maps `rt_dict_insert` to the existing `rt_dict_set` owner.
+
+Focused Rust IR and Simple source tests pass. A clean-cache Linux
+full-bootstrap then produced Stage 2 and Stage 3, and both passed bootstrap
+compiler sanity.

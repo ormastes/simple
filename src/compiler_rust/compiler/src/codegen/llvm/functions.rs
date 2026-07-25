@@ -3115,6 +3115,7 @@ mod tests {
             (VReg(5), "str.chars", vec![VReg(0)]),
             (VReg(6), "str.ord", vec![VReg(0)]),
             (VReg(7), "rt_string_contains", vec![VReg(0), VReg(0)]),
+            (VReg(8), "rt_dict_insert", vec![VReg(0), VReg(1), VReg(2)]),
         ] {
             func.blocks[0].instructions.push(MirInst::Call {
                 dest: Some(dest),
@@ -3132,10 +3133,18 @@ mod tests {
             "@rt_string_chars",
             "@rt_string_char_code_at",
             "@rt_contains",
+            "@rt_dict_set",
         ] {
             assert!(ir.contains(symbol), "missing {symbol}:\n{ir}");
         }
-        for raw in ["@substring(", "str.bytes", "str.chars", "str.ord", "rt_string_contains"] {
+        for raw in [
+            "@substring(",
+            "str.bytes",
+            "str.chars",
+            "str.ord",
+            "rt_string_contains",
+            "@rt_dict_insert",
+        ] {
             assert!(!ir.contains(raw), "raw call {raw} leaked:\n{ir}");
         }
         backend.verify().unwrap();

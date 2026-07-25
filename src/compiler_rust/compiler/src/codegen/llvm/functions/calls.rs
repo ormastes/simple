@@ -22,6 +22,7 @@ fn map_sffi_name(func_name: &str) -> &str {
         "sys_exit" => "rt_exit",
         "rt_file_read_text" => "rt_file_read_text_rv",
         "rt_file_delete" => "rt_file_remove",
+        "rt_dict_insert" => "rt_dict_set",
         "rt_println" => "rt_println_value",
         "rt_print" => "rt_print_value",
         "rt_string_contains" => "rt_contains",

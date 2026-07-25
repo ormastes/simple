@@ -2,10 +2,9 @@
 
 ## Current State
 
-- Linux's earlier pure-Simple dynload PASS is stale on current `main`.
-  A 2026-07-25 clean full-bootstrap run reaches the final link after adding
-  LLVM vtable dispatch, then fails on three unresolved symbols:
-  `f64.to_hex`, `ElfReloc.reloc_type_to_elf_value`, and `rt_dict_insert`.
+- Linux current-main pure-Simple Stage 2/3 dynload: PASS from a clean cache on
+  2026-07-25. LLVM virtual dispatch, PTX float-bit formatting, ELF relocation
+  values, and `rt_dict_insert -> rt_dict_set` lowering are covered.
 - FreeBSD 14.3 QEMU smoke: PASS.
 - Rust `simple-runtime` and `simple-compiler` host checks: PASS.
 - Portable macOS/Windows paths are implemented but not executed on native
@@ -20,18 +19,7 @@
 
 ## Remaining Work
 
-1. Restore current-main Linux Stage 2/3:
-
-   - route `f64.to_hex` to a semantics-compatible compiled Simple owner;
-   - fix the stale `ElfReloc.reloc_type_to_elf_value` call owner;
-   - ensure the existing `rt_dict_insert` provider is admitted to the Stage 2
-     link closure.
-
-   Acceptance: the bounded full-bootstrap run produces and executes Stage 2
-   and Stage 3 in dynload mode. Start this in a fresh session because the
-   2026-07-25 three-cycle limit was reached.
-
-2. Run one fresh FreeBSD full verification:
+1. Run one fresh FreeBSD full verification:
 
    ```sh
    sh scripts/check/check-freebsd-bootstrap-qemu.shs --full
@@ -40,7 +28,7 @@
    Acceptance: Rust seed/runtime build, Stage 2/3 dynload success, Stage 3
    artifact retrieval, and clean QEMU shutdown.
 
-3. Run native macOS verification on Intel and Apple Silicon where available:
+2. Run native macOS verification on Intel and Apple Silicon where available:
 
    ```sh
    sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --mode=dynload --no-mcp
@@ -50,7 +38,7 @@
    Acceptance: LLVM major matches, Homebrew libraries resolve, Stage 2/3 pass,
    and the explicit full CLI passes `-c 'print(1+1)'`.
 
-4. Run native Windows verification for MSVC and MinGW/UCRT:
+3. Run native Windows verification for MSVC and MinGW/UCRT:
 
    ```bat
    scripts\bootstrap\bootstrap-windows.cmd --full-bootstrap --mode=dynload --no-mcp
@@ -60,7 +48,7 @@
    Acceptance: correct target triple, `.exe`/`.lib` artifacts, WFFI DLL symbol
    lookup, Stage 2/3 pass, and explicit full CLI smoke.
 
-5. Prove the deployed dynload consumer boundary. The current fast path avoids
+4. Prove the deployed dynload consumer boundary. The current fast path avoids
    Stage 4 and produces staged/cache artifacts; it must not claim hot deployment
    until the production CLI demonstrably loads the refreshed SMF/native module
    manifest without relinking.
@@ -74,7 +62,7 @@
    refreshed artifact and can assert behavior, cache hits, and unchanged
    launcher identity without mocks or source-text checks.
 
-6. After all native-host gates pass, update the status report, close TODO rows,
+5. After all native-host gates pass, update the status report, close TODO rows,
    and run the normal verify/release process. Do not use a Rust seed fallback as
    production evidence.
 

@@ -12,9 +12,10 @@ set -eu
 #   QEMU_BASE_VM_PATH    Alias for QEMU_VM_PATH
 #   QEMU_CLOUDINIT_ISO   Cloud-init seed ISO (default: build/freebsd/vm/freebsd-cloudinit-seed.iso)
 #   QEMU_SSH_PUBLIC_KEY   SSH public key to inject (default: ~/.ssh/id_ed25519.pub or ~/.ssh/id_rsa.pub)
+#   QEMU_SSH_PRIVATE_KEY  Matching SSH private key (default: public-key path without .pub)
 #   QEMU_PORT            SSH forwarding port (default: 2222)
 #   QEMU_USER            VM user (default: freebsd)
-#   QEMU_MEM             RAM (default: 4G)
+#   QEMU_MEM             RAM (default: 8G)
 #   QEMU_CPUS            CPUs (default: 4)
 #   QEMU_SSH_TIMEOUT     Initial SSH wait seconds (default: 600; pristine images
 #                        may run freebsd-update before nuageinit/sshd)
@@ -26,7 +27,7 @@ cd "$ROOT_DIR"
 VM_DIR="${ROOT_DIR}/build/freebsd/vm"
 QEMU_PORT="${QEMU_PORT:-2222}"
 QEMU_USER="${QEMU_USER:-freebsd}"
-QEMU_MEM="${QEMU_MEM:-4G}"
+QEMU_MEM="${QEMU_MEM:-8G}"
 QEMU_CPUS="${QEMU_CPUS:-4}"
 QEMU_SSH_TIMEOUT="${QEMU_SSH_TIMEOUT:-900}"
 QEMU_ROOT_SSH_TIMEOUT="${QEMU_ROOT_SSH_TIMEOUT:-120}"
@@ -64,6 +65,11 @@ cleanup() {
     if [ -f "$PID_FILE" ]; then
         pid=$(cat "$PID_FILE" 2>/dev/null || true)
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            if [ -n "${VM_SSH:-}" ]; then
+                info "Requesting guest shutdown"
+                $VM_SSH "shutdown -p now" >/dev/null 2>&1 || true
+                sleep 5
+            fi
             info "Stopping QEMU (pid=$pid)"
             kill "$pid" 2>/dev/null || true
             sleep 1
@@ -108,6 +114,12 @@ else
     fail "No SSH public key found (set QEMU_SSH_PUBLIC_KEY)"
 fi
 pass "SSH public key: $SSH_PUB_KEY"
+
+SSH_PRIVATE_KEY="${QEMU_SSH_PRIVATE_KEY:-${SSH_PUB_KEY%.pub}}"
+if [ ! -f "$SSH_PRIVATE_KEY" ]; then
+    fail "Matching SSH private key not found: $SSH_PRIVATE_KEY (set QEMU_SSH_PRIVATE_KEY)"
+fi
+pass "SSH private key: $SSH_PRIVATE_KEY"
 
 # ── Base Image ─────────────────────────────────────────────────────────
 printf '[3/7] Base image\n'
@@ -248,7 +260,7 @@ require_qemu_alive() {
 # ── SSH Connectivity ───────────────────────────────────────────────────
 printf '[6/7] SSH connectivity\n'
 
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -p ${QEMU_PORT}"
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -i ${SSH_PRIVATE_KEY} -p ${QEMU_PORT}"
 SSH_CMD="ssh ${SSH_OPTS} ${QEMU_USER}@localhost"
 ROOT_SSH_CMD="ssh ${SSH_OPTS} root@localhost"
 SSH_TIMEOUT="$QEMU_SSH_TIMEOUT"
@@ -342,9 +354,28 @@ else
     VM_HOME=$($VM_SSH "echo \$HOME" 2>/dev/null)
     VM_HOME="${VM_HOME:-/root}"
 
+    info "Growing and checking the guest root filesystem..."
+    $PKG_CMD "service growfs onestart >/tmp/simple-growfs.log 2>&1 || true"
+    ROOT_AVAILABLE_KB=$($VM_SSH "df -k / | awk 'NR == 2 { print \$4 }'" 2>/dev/null)
+    case "$ROOT_AVAILABLE_KB" in
+        ''|*[!0-9]*) fail "Could not determine guest root free space" ;;
+    esac
+    [ "$ROOT_AVAILABLE_KB" -ge 10485760 ] || fail "Guest root has less than 10 GiB free after growfs"
+    pass "Guest root has at least 10 GiB free"
+
     info "Installing build dependencies in VM (this may take a few minutes)..."
-    $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg bootstrap" 2>&1 | tail -3 || true
-    $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y rsync curl rust llvm git gmake pkgconf" 2>&1 | tail -5
+    if ! $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg bootstrap > /tmp/simple-pkg-bootstrap.log 2>&1"; then
+        $VM_SSH "tail -20 /tmp/simple-pkg-bootstrap.log" >&2 || true
+        fail "pkg bootstrap failed"
+    fi
+    if ! $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg update -f > /tmp/simple-pkg-update.log 2>&1"; then
+        $VM_SSH "tail -20 /tmp/simple-pkg-update.log" >&2 || true
+        fail "pkg update failed"
+    fi
+    if ! $PKG_CMD "env ASSUME_ALWAYS_YES=yes pkg install -y rsync curl rust llvm git gmake pkgconf > /tmp/simple-pkg-install.log 2>&1"; then
+        $VM_SSH "tail -20 /tmp/simple-pkg-install.log" >&2 || true
+        fail "dependency installation failed"
+    fi
     $VM_SSH "command -v rsync" 2>/dev/null || fail "rsync install failed"
     pass "Dependencies installed"
 
@@ -472,7 +503,7 @@ else
     # Retrieve binary
     FREEBSD_BIN_DIR="${ROOT_DIR}/bin/release/freebsd-x86_64"
     mkdir -p "$FREEBSD_BIN_DIR"
-    SCP_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -P ${QEMU_PORT}"
+    SCP_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5 -i ${SSH_PRIVATE_KEY} -P ${QEMU_PORT}"
     scp ${SCP_OPTS} \
         "${VM_USER}@localhost:${STAGE_BIN}" \
         "${FREEBSD_BIN_DIR}/simple" 2>/dev/null || fail "Failed to retrieve binary"

@@ -22,7 +22,7 @@ full CLI relink. Expensive boundaries are explicit:
 
 | Platform | Fixed | Verification |
 |---|---|---|
-| Linux | Portable fingerprint pruning; LLVM vtable object layout and virtual dispatch | FAIL on current main: Stage 2 reaches link, then three unresolved symbols remain |
+| Linux | Portable fingerprint pruning; LLVM vtable/object dispatch; canonical PTX/ELF/runtime symbols | PASS: clean-cache Stage 2/3 dynload and compiler sanity |
 | macOS | `shasum`, `gtimeout`, Homebrew prefix, LLVM-major validation | Static contract only; no macOS host available |
 | Windows | Git Bash/`.cmd` entrypoints, MinGW/MSVC triples, `.exe`/`.lib`, WFFI/DLL names | Rust host check PASS; no Windows host available |
 | FreeBSD | Shared wrapper, portable hashes/timeouts, canonical QEMU flow, 900-second pristine-image SSH wait, nested-worktree rsync exclusions | Smoke PASS on FreeBSD 14.3; full mode remains pending |
@@ -94,5 +94,12 @@ sh scripts/check/check-freebsd-bootstrap-qemu.shs --full
 - The third bounded full-bootstrap cycle compiled all Stage 2 objects and
   reached the linker. It now fails only on `f64.to_hex`,
   `ElfReloc.reloc_type_to_elf_value`, and `rt_dict_insert`.
-- The mandatory three-cycle cap is reached. Linux Stage 2/3, FreeBSD full,
-  native macOS/Windows, and the production dynload consumer remain open.
+- A fresh bounded session replaced those calls with existing owners and added
+  focused regressions. Linux Stage 2 and Stage 3 then passed from a clean
+  cache; Stage 3 passed compiler sanity and became the verified downstream
+  compiler.
+- The FreeBSD checker now defaults to 8 GiB, selects the matching SSH private
+  key, grows and verifies guest root space, preserves package command status,
+  and requests guest shutdown before force cleanup.
+- FreeBSD full, native macOS/Windows, and the production dynload consumer
+  remain open.
