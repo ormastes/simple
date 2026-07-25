@@ -12,7 +12,21 @@
 
 use compiler.core.tokens.{keyword_lookup, token_requires_rhs}
 use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space}
-use std.string_core.{char_from_code}
+use std.string_core.{char_code, char_from_code}
+
+# Token text is immutable. Reuse common identifier/literal spellings before
+# join allocates another permanently registered no-GC string.
+var core_token_text_intern: {i64: text} = {}
+
+fn core_token_text_matches(chars: [text], start: i64, end: i64, value: text) -> bool:
+    if value.len() != end - start:
+        return false
+    var i = start
+    while i < end:
+        if chars[i] != value[i - start:i - start + 1]:
+            return false
+        i = i + 1
+    true
 
 # Digit-value helpers for string escape decoding (\NNN octal, \xNN hex,
 # \u{...} unicode). Return -1 for non-digits so callers can stop consuming.
@@ -190,9 +204,32 @@ impl CoreLexer:
             e = n
         if e <= s:
             return ""
-        # Keep indexed access for SimpleOS guest compatibility, but join once:
-        # immutable prefix concatenation retains O(span^2) temporary strings in
-        # the no-GC runtime registry during whole-compiler parsing.
+        val span_len = e - s
+        # ponytail: intern short tokens only; widen if profiles show repeated
+        # long lexemes are material to Stage4 memory.
+        if span_len <= 128:
+            if core_token_text_intern == nil:
+                core_token_text_intern = {}
+            var hash = span_len + 17
+            var hash_i = s
+            while hash_i < e:
+                hash = (hash * 131 + char_code(self.source_chars[hash_i])) % 2147483647
+                hash_i = hash_i + 1
+            val key = hash * 1000003 + span_len
+            if val cached = core_token_text_intern.get(key):
+                if core_token_text_matches(self.source_chars, s, e, cached):
+                    return cached
+
+            self.slice_parts.clear()
+            var intern_i = s
+            while intern_i < e:
+                self.slice_parts.push(self.source_chars[intern_i])
+                intern_i = intern_i + 1
+            val interned = self.slice_parts.join("")
+            core_token_text_intern[key] = interned
+            return interned
+
+        # Keep indexed access for SimpleOS guest compatibility, but join once.
         self.slice_parts.clear()
         var i: i64 = s
         while i < e:

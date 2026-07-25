@@ -298,3 +298,17 @@ TODO 582 is complete with 15/15 focused regressions. Agents B and C remain
 blocked on a source-matched deployed full CLI. The macOS owner must not reuse
 the Stage3 bootstrap artifact as that CLI and must keep Metal/live-window rows
 open until Agent A's Stage4 and deployment gates pass.
+
+## 2026-07-25 retention-repair review
+
+Three read-only sidecars audited AST alias safety, source/cache correctness,
+and bounded verification. The source-matched Stage3 artifact has SHA-256
+`01f856054ef6f61a8dae11934d609eb4327ad586f5c7c85877d37720d567c7f1`.
+The 20/40-file guards pass at 136,888 KiB, but unchanged-source native builds
+still report zero cache hits. The single full Stage4 attempt reached
+57,792,476 KiB RSS and about 5.0 million heap objects after 7m35s while still
+parsing, then terminated without an artifact.
+
+Agent A must implement true per-file phase-2 AST release and cache-hit
+admission before another Stage4 attempt. Agents B and C remain blocked until a
+deployed source-matched full CLI passes its smoke gates.

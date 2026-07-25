@@ -956,3 +956,20 @@ ends. The next repair must release per-file parse material while preserving a
 cached source fingerprint for correct object-cache invalidation, then pass the
 existing multi-file RSS and changed-source cache regressions before one bounded
 Stage4 retry.
+
+## Update 2026-07-25: bounded retention repair does not scale to full Stage4
+
+A source-matched rebuild containing short-token interning, shared immutable
+empty AST slots, fingerprint-safe source metadata eviction, and fail-closed
+native cache setup passed Stage2/Stage3 with 679 compiled and 0 failed.
+Stage3 used 324,000 KiB max RSS and produced SHA-256
+`01f856054ef6f61a8dae11934d609eb4327ad586f5c7c85877d37720d567c7f1`.
+Bootstrap sanity and the 20/40-file guards passed; both guards used
+136,888 KiB max RSS. Changed-source output correctly moved from `41` to `42`.
+
+The unchanged-source cache criterion failed: both fixture builds reported
+`1 compiled, 0 cached`. The canonical full-CLI Stage4 attempt was terminated
+after 7m35s while still in phase 2, at 57,792,476 KiB max RSS and
+`heap_registry` about 5,039,086. It emitted no CLI. True per-file phase-2 AST
+release and cache-hit admission remain required. Do not repeat this Stage4
+command without that repair.

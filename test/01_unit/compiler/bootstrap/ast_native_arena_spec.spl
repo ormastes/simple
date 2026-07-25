@@ -7,10 +7,12 @@
 
 use compiler.core.ast.{ast_reset, decl_get_body, module_decl_at}
 use compiler.core.ast_expr.{
-    EXPR_INT_LIT, expr_count, expr_get_int, expr_get_tag, expr_int_lit, expr_tag
+    EXPR_INT_LIT, expr_call, expr_count, expr_get_args, expr_get_int, expr_get_tag,
+    expr_int_lit, expr_tag
 }
 use compiler.core.ast_stmt.{
-    STMT_EXPR, stmt_count, stmt_expr_stmt, stmt_get_expr, stmt_get_tag, stmt_tag
+    STMT_EXPR, stmt_block_stmt, stmt_count, stmt_expr_stmt, stmt_get_body,
+    stmt_get_expr, stmt_get_tag, stmt_tag
 }
 use compiler.core.types.{named_type_find}
 use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
@@ -55,6 +57,22 @@ fn expect_current_native_arena(value: i64):
     expect(expr_get_int(expr_id)).to_equal(value)
 
 describe "bootstrap native AST arena isolation":
+    it "replaces shared empty slots without mutating sibling nodes":
+        ast_reset()
+        defer:
+            ast_reset()
+        val callee = expr_int_lit(1, 0)
+        val argument = expr_int_lit(2, 0)
+        val call = expr_call(callee, [argument], 0)
+        expect(expr_get_args(callee).len()).to_equal(0)
+        expect(expr_get_args(argument).len()).to_equal(0)
+        expect(expr_get_args(call)).to_equal([argument])
+
+        val plain_stmt = stmt_expr_stmt(callee, 0)
+        val block_stmt = stmt_block_stmt([plain_stmt], 0)
+        expect(stmt_get_body(plain_stmt).len()).to_equal(0)
+        expect(stmt_get_body(block_stmt)).to_equal([plain_stmt])
+
     it "reuses arena buffers and caches hot expression and statement mode flags":
         val module_source = rt_file_read_text("src/compiler/10.frontend/core/_Ast/module_state.spl") ?? ""
         val expr_source = rt_file_read_text("src/compiler/10.frontend/core/_AstExpr/nodes.spl") ?? ""
@@ -67,11 +85,19 @@ describe "bootstrap native AST arena isolation":
         expect(expr_source.contains("\n    expr_tag = []\n")).to_equal(false)
         expect(stmt_source.contains("\n    stmt_tag = []\n")).to_equal(false)
         expect(module_source).to_contain("decl_body_stmts_flat.clear()")
+        expect(decl_source).to_contain("decl_params.push(decl_empty_i64)")
+        expect(decl_source).to_contain("decl_param_names.push(decl_empty_text)")
+        expect(decl_source.contains("decl_params.push([])")).to_equal(false)
         expect(stmt_source).to_contain("stmt_gpu_grid_exprs.clear()")
         expect(stmt_source).to_contain("stmt_gpu_block_exprs.clear()")
+        expect(stmt_source).to_contain("stmt_body.push(stmt_empty_i64)")
+        expect(stmt_source.contains("stmt_body.push([])")).to_equal(false)
         expect(expr_source).to_contain("var expr_env_mirror_slot: [bool]")
         expect(expr_source).to_contain("fn expr_mode_slots_refresh()")
         expect(expr_source).to_contain("return expr_env_mirror_slot[0]")
+        expect(expr_source).to_contain("expr_args.push(expr_empty_i64)")
+        expect(expr_source).to_contain("expr_arg_names.push(expr_empty_text)")
+        expect(expr_source.contains("expr_args.push([])")).to_equal(false)
         expect(stmt_source).to_contain("var stmt_env_mirror_slot: [bool]")
         expect(stmt_source).to_contain("fn stmt_mode_slots_refresh()")
         expect(stmt_source).to_contain("return stmt_env_mirror_slot[0]")
