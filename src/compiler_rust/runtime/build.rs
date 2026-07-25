@@ -77,7 +77,8 @@ fn main() {
         return;
     }
 
-    let defined_symbols = collect_defined_runtime_symbols(&runtime_src, &runtime_c_dir, runtime_regex);
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let defined_symbols = collect_defined_runtime_symbols(&runtime_src, &runtime_c_dir, runtime_regex, &target_os);
 
     generated.push_str("#[allow(clashing_extern_declarations)]\n");
     generated.push_str("mod exported_symbols {\n");
@@ -119,7 +120,8 @@ fn main() {
 fn compile_c_runtime_sources() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let runtime_c_dir = manifest_dir.join("../../runtime");
-    let c_sources = [
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let mut c_sources = vec![
         "runtime_memory.c",
         "runtime_time.c",
         "runtime_timestamp.c",
@@ -132,8 +134,10 @@ fn compile_c_runtime_sources() {
         "runtime_hosted_fs.c",
         "runtime_font.c",
         "runtime_memtrack.c",
-        "hosted_win32.c",
     ];
+    if target_os != "windows" {
+        c_sources.push("hosted_win32.c");
+    }
 
     let mut build = cc::Build::new();
     build.opt_level(2).warnings(false).cargo_metadata(false);
@@ -177,7 +181,6 @@ fn compile_c_runtime_sources() {
         println!("cargo:rustc-link-lib=static=runtime_sffi_c");
     }
 
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os != "windows" {
         println!("cargo:rustc-link-lib=dylib=m");
     } else {
@@ -192,7 +195,12 @@ fn compile_c_runtime_sources() {
     }
 }
 
-fn collect_defined_runtime_symbols(root: &Path, c_root: &Path, runtime_regex: bool) -> HashSet<String> {
+fn collect_defined_runtime_symbols(
+    root: &Path,
+    c_root: &Path,
+    runtime_regex: bool,
+    target_os: &str,
+) -> HashSet<String> {
     let mut exported = HashSet::new();
     let mut stack = vec![root.to_path_buf()];
 
@@ -218,11 +226,11 @@ fn collect_defined_runtime_symbols(root: &Path, c_root: &Path, runtime_regex: bo
         }
     }
 
-    collect_c_runtime_exports(c_root, &mut exported);
+    collect_c_runtime_exports(c_root, target_os, &mut exported);
     exported
 }
 
-fn collect_c_runtime_exports(root: &Path, exported: &mut HashSet<String>) {
+fn collect_c_runtime_exports(root: &Path, target_os: &str, exported: &mut HashSet<String>) {
     const LINKED_C_SOURCES: &[&str] = &[
         "runtime_memory.c",
         "runtime_time.c",
@@ -239,6 +247,9 @@ fn collect_c_runtime_exports(root: &Path, exported: &mut HashSet<String>) {
         "hosted_win32.c",
     ];
     for source in LINKED_C_SOURCES {
+        if target_os == "windows" && *source == "hosted_win32.c" {
+            continue;
+        }
         let path = root.join(source);
         let Ok(file) = fs::read_to_string(path) else {
             continue;
