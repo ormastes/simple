@@ -37,6 +37,24 @@ val SHOWCASE_DPI_ENV: text = "SHOWCASE_DPI"
 val GUI_EVENT_EVIDENCE_ENV: text = "SIMPLE_GUI_EVENT_EVIDENCE_PATH"
 val GUI_EXIT_AFTER_INTERACTION_ENV: text = "SIMPLE_GUI_EXIT_AFTER_INTERACTION"
 
+# Level-gated stage trace (default OFF). Set SIMPLE_SHOWCASE_TRACE=1 to localize
+# where a slow/blocked headless run is spending its time. Retained per the log
+# retention policy: these are level-gated probes, not one-off dumps.
+# See doc/07_guide/infra/logging/log_retention_policy.md
+val SHOWCASE_TRACE_ENV: text = "SIMPLE_SHOWCASE_TRACE"
+
+fn showcase_trace_enabled() -> bool:
+    (env_get(SHOWCASE_TRACE_ENV) ?? "") == "1"
+
+# NOTE: the parameter cannot be named `on` — a bare `on` identifier is captured
+# by the AOP pointcut grammar and fails the whole file with "expected pointcut
+# expression 'pc{...}', found Newline". Filed:
+# doc/08_tracking/bug/aop_on_hard_keyword_blocks_identifier_2026-07-25.md
+fn showcase_trace(enabled: bool, stage: text) -> bool:
+    if enabled:
+        print "graphics_2d_trace={stage}"
+    enabled
+
 class ShowcaseSize:
     width: i32
     height: i32
@@ -131,8 +149,10 @@ fn label(mut e: Engine2D, rw: i32, rh: i32, dpi: i32, x: i32, y: i32, value: tex
 # does not write back) — the showcase read back an unpainted engine and
 # printed nonzero=0 (root-caused via checkpoint bisect 2026-07-18). Thread
 # the engine back explicitly.
-fn draw_showcase(mut e: Engine2D, rw: i32, rh: i32, dpi: i32) -> Engine2D:
+fn draw_showcase(mut e: Engine2D, rw: i32, rh: i32, dpi: i32, tr: bool) -> Engine2D:
+    showcase_trace(tr, "draw_begin")
     e.clear(BG)
+    showcase_trace(tr, "cleared")
     e.draw_text(sx(20, rw), sy(12, rh), "Simple Engine2D — complete primitive showcase", WHITE, sd(18, rw, dpi))
 
     # Rectangles, outlines, rounded geometry, and line families.
@@ -159,6 +179,7 @@ fn draw_showcase(mut e: Engine2D, rw: i32, rh: i32, dpi: i32) -> Engine2D:
     e.draw_triangle_outline(sx(375, rw), sy(245, rh), sx(410, rw), sy(195, rh), sx(450, rw), sy(245, rh), WHITE, sd(3, rw, dpi))
     e.draw_polygon_filled([sx(465, rw), sx(495, rw), sx(520, rw), sx(505, rw), sx(475, rw)], [sy(205, rh), sy(190, rh), sy(215, rh), sy(248, rh), sy(245, rh)], 5, GREEN)
     e.draw_bezier(sx(290, rw), sy(275, rh), sx(345, rw), sy(235, rh), sx(430, rw), sy(315, rh), sx(510, rw), sy(270, rh), AMBER, sd(3, rw, dpi))
+    showcase_trace(tr, "shapes_done")
 
     # Vertical, horizontal, and radial gradients.
     e.draw_rect_filled(sx(539, rw), sy(48, rh), sx(243, rw), sy(245, rh), PANEL)
@@ -172,6 +193,7 @@ fn draw_showcase(mut e: Engine2D, rw: i32, rh: i32, dpi: i32) -> Engine2D:
     e.draw_blur_rect(sx(680, rw), sy(192, rh), sx(65, rw), sy(32, rh), sd(5, rw, dpi))
     e.draw_rect_blend(sx(558, rw), sy(252, rh), sx(65, rw), sy(25, rh), 0x887C3AEDu32)
     e.draw_rect_blend_mode(sx(635, rw), sy(252, rh), sx(65, rw), sy(25, rh), 0xAA22C55Eu32, 1)
+    showcase_trace(tr, "gradients_done")
 
     # Generated image operations and text backgrounds. draw_image/draw_image_blend
     # take the source dimensions (4x4) as w/h — those stay unscaled; only the
@@ -185,6 +207,7 @@ fn draw_showcase(mut e: Engine2D, rw: i32, rh: i32, dpi: i32) -> Engine2D:
     e.draw_image_transform(sx(185, rw), sy(345, rh), 4, 4, 256, 64, 0, 256, 0, 0, image)
     e.draw_text(sx(235, rw), sy(350, rh), "glyph text", GREEN, sd(14, rw, dpi))
     e.draw_text_bg(sx(235, rw), sy(380, rh), "text background", WHITE, BLUE, sd(14, rw, dpi))
+    showcase_trace(tr, "image_text_done")
 
     # Clip is visibly confined to the cyan frame.
     e.draw_rect_filled(sx(397, rw), sy(307, rh), sx(180, rw), sy(130, rh), PANEL)
@@ -194,14 +217,18 @@ fn draw_showcase(mut e: Engine2D, rw: i32, rh: i32, dpi: i32) -> Engine2D:
     e.draw_circle_filled(sx(416, rw), sy(380, rh), sx(55, rw), RED)
     e.draw_rect_filled(sx(480, rw), sy(340, rh), sx(100, rw), sy(85, rh), PURPLE)
     e.clear_clip()
+    showcase_trace(tr, "clip_done")
 
     # Full-frame alpha mask confines this draw to the lower-right mask region.
     e.draw_rect_filled(sx(591, rw), sy(307, rh), sx(191, rw), sy(130, rh), PANEL)
     e = label(e, rw, rh, dpi, 601, 315, "MASK")
+    showcase_trace(tr, "mask_build_begin")
     val mask = showcase_mask(rw, rh)
+    showcase_trace(tr, "mask_build_done")
     e.set_mask(mask, rw, rh)
     e.draw_gradient_rect_h(sx(600, rw), sy(350, rh), sx(180, rw), sy(80, rh), AMBER, RED)
     e.clear_mask()
+    showcase_trace(tr, "mask_done")
 
     # Engine-to-engine composition. The child keeps its native 80x60 size (its
     # internal draws are child-local); only its placement scales.
@@ -215,6 +242,7 @@ fn draw_showcase(mut e: Engine2D, rw: i32, rh: i32, dpi: i32) -> Engine2D:
     e.draw_engine(sx(38, rw), sy(495, rh), child)
     e.draw_engine_opacity(sx(138, rw), sy(495, rh), child, 450)
     child.shutdown()
+    showcase_trace(tr, "draw_end")
     e
 
 fn pack_rgb(pixels: [u32]) -> [i64]:
@@ -267,19 +295,25 @@ fn write_gui_event_evidence(path: text, backend: text, source: text, backend_han
         "graphics_2d_event_interaction_revision={interaction_revision}\n")
 
 fn run_graphics_2d_showcase(gui: bool, backend: text) -> i64:
+    val tr = showcase_trace_enabled()
+    showcase_trace(tr, "entry")
     val size = resolve_showcase_dimensions()
     val render_w = size.width
     val render_h = size.height
     val dpi = resolve_showcase_dpi()
     var engine = if backend == "software": Engine2D.create_offscreen(render_w, render_h) else: Engine2D.create_with_backend_fast(render_w, render_h, backend)
+    showcase_trace(tr, "engine_created")
     val actual = engine.backend_name()
     # Use the first pinned, checksum-identified selected face. This is the
     # canonical trusted sans default and gives the live showcase actual vector
     # glyph rasterization plus transient backend atlas-composite evidence.
     val font_candidate = selected_font_asset_candidates()[0]
     val expected_font_identity = selected_font_asset_identity(font_candidate)
+    showcase_trace(tr, "font_candidate_resolved")
     val font_loaded = engine.load_font(font_candidate.local_path)
-    engine = draw_showcase(engine, render_w, render_h, dpi)
+    showcase_trace(tr, "font_loaded")
+    engine = draw_showcase(engine, render_w, render_h, dpi, tr)
+    showcase_trace(tr, "draw_showcase_returned")
     # A deliberately new glyph set gives one cold rasterization followed by
     # one warm cache hit. Drawing at the same coordinates keeps the visual
     # result stable while proving that the second pass reused glyph material.
@@ -292,6 +326,7 @@ fn run_graphics_2d_showcase(gui: bool, backend: text) -> i64:
         sx(250, render_w), sy(535, render_h),
         "QZJ~ VECTOR", WHITE, sd(14, render_w, dpi))
     val font_stats_warm = engine.font_cache_stats()
+    showcase_trace(tr, "font_cache_probe_done")
     val loaded_fonts = engine.fonts()
     val loaded_font_identity = loaded_fonts.current_font_identity()
     engine.install_font_renderer(loaded_fonts)
@@ -307,12 +342,16 @@ fn run_graphics_2d_showcase(gui: bool, backend: text) -> i64:
     # Read the exact dirty device frame before present refreshes the backend's
     # host cache. The following present still exercises the production path,
     # while this receipt retains the originating Vulkan/Metal handle.
+    showcase_trace(tr, "readback_begin")
     val readback = engine.read_pixels_with_source()
+    showcase_trace(tr, "readback_done")
     engine.present()
+    showcase_trace(tr, "present_done")
     var nonzero = 0
     for pixel in readback.pixels:
         if pixel != 0u32:
             nonzero = nonzero + 1
+    showcase_trace(tr, "nonzero_scan_done")
     val semantic_differences = semantic_sample_differences(readback.pixels, render_w, render_h)
     val gpu_requested = gpu_backend_requested(backend)
     print "graphics_2d_requested_backend={backend}"
