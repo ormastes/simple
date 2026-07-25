@@ -9,6 +9,8 @@ use std.io_runtime.{file_read, process_run}
 use std.spec.*
 
 val WRAPPER = "scripts/check/check-aetheric-host-web-gui-evidence.shs"
+val PRODUCER = "scripts/check/produce-aetheric-host-web-gui-evidence.shs"
+val PROOF_WRITER = "tools/electron-live-bitmap/write_aetheric_host_web_gui_proof.js"
 
 describe "Aetheric host Web/GUI evidence":
     it "requires canonical production proof fields and UI access history":
@@ -68,3 +70,35 @@ describe "Aetheric host Web/GUI evidence":
         expect(source).to_contain("[ \"$(field capture_sha256)\" = \"$(sha256_file \"$(field capture_path)\")\" ]")
         expect(source).to_contain("[ \"$(field html_sha256)\" = \"$(sha256_file \"$(field html_path)\")\" ]")
         expect(source).to_contain("[ \"$(field observation_sha256)\" = \"$(sha256_file \"$(field observation_path)\")\" ]")
+
+    it "isolates native caches and binds every renderer and UI provider":
+        step("Inspect the producer's per-entry native cache and provider scopes")
+        val producer = file_read(PRODUCER)
+        expect(producer).to_contain("\"$NATIVE_CACHE/generator\"")
+        expect(producer).to_contain("\"$NATIVE_CACHE/renderer\"")
+        expect(producer).to_contain("\"$NATIVE_CACHE/ui-access\"")
+        expect(producer).to_contain("\"$RENDERER_WM_PROVIDER:$RENDERER_C_WM_PROVIDER\"")
+        expect(producer).to_contain("\"$SQLITE_OBJECT:$SQLITE_SYSTEM_PROVIDER\"")
+        expect(producer).to_contain("src/runtime/runtime_sqlite.c")
+        expect(producer).to_contain("libsqlite3.tbd")
+        expect(producer).to_contain("require_global_symbol \"$SQLITE_OBJECT\" rt_sqlite_open")
+        expect(producer).to_contain("schema=aetheric-host-web-gui-provider-provenance-v1")
+
+        step("Require the proof writer to hash the exact admitted providers")
+        val writer = file_read(PROOF_WRITER)
+        expect(writer).to_contain("required(\"--provider-provenance\")")
+        expect(writer).to_contain("required(\"--renderer-wm-provider\")")
+        expect(writer).to_contain("required(\"--renderer-c-wm-provider\")")
+        expect(writer).to_contain("required(\"--ui-sqlite-provider\")")
+        expect(writer).to_contain("required(\"--ui-sqlite-system-provider\")")
+        expect(writer).to_contain("provider_provenance_sha256: sha256(providerProvenancePath)")
+
+        step("Keep provider paths, hashes, manifest bindings, and cache scopes fail closed")
+        val wrapper = file_read(WRAPPER)
+        expect(wrapper).to_contain("provider-path-not-canonical")
+        expect(wrapper).to_contain("provider-sha256-mismatch")
+        expect(wrapper).to_contain("provider-provenance-sha256-mismatch")
+        expect(wrapper).to_contain("provider-provenance-binding-mismatch")
+        expect(wrapper).to_contain("provider-provenance-sqlite-source-mismatch")
+        expect(wrapper).to_contain("provider-provenance-sqlite-sdk-mismatch")
+        expect(wrapper).to_contain("provider-provenance-cache-scope-mismatch")

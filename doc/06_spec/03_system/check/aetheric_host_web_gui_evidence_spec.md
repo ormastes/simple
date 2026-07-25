@@ -39,3 +39,13 @@ Three compiler fix/review cycles were rejected on custom-method, inferred-text,
 and cross-backend float semantics; the candidate was not integrated and the
 remaining producer cycle was not spent. No Electron capture or PASS is
 admitted from the partial run.
+
+The generator, renderer, and UI-access driver use separate native caches. The
+renderer link is explicitly bound to the validated WM and C-WM runtime
+providers. The UI-access driver is explicitly bound to a freshly compiled
+`runtime_sqlite.o` and the macOS SDK SQLite text stub because canonical UI
+history persistence owns the SQLite dependency. A hashed, atomic provider
+manifest records the exact compiler, source, provider, cache, and output
+bindings. The proof writer carries that manifest and each provider path/hash;
+admission independently checks canonical regular-file paths, hashes, current
+SQLite source, native binary bindings, and cache separation.
