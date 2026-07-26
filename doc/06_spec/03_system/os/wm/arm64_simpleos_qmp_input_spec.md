@@ -1,6 +1,9 @@
 # Arm64 Simpleos Qmp Input Specification
 
-> <details>
+> This manual documents the fail-closed source and evidence contract. Reading
+> it, or passing its static source assertions, is not live QEMU, SIMD,
+> rendering, capture, or input-delivery evidence. Only a successful canonical
+> live checker run can produce that evidence.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -17,12 +20,16 @@
 
 #### wires capability-discovered VirtIO-MMIO keyboard and pointer event queues
 
-- Inspect the canonical ARM64 desktop, runtime owner, and QEMU target
-- "find \"$snapshot root\" \\
-- "simpleos host gpu readback checksum " + "finalize
-- "final simd receipt = require simd receipt
-- "arm64 qmp input simd scalar parity=$
-- "simd receipt = require simd receipt
+- Inspect the canonical ARM64 desktop, input runtime owner, QEMU target,
+  attested builder, and live evidence wrapper.
+- Verify source admission uses byte-safe, NUL-delimited path enumeration and
+  binds the complete guest source fingerprint.
+- Verify the guest emits the exact AArch64/NEON SIMD receipt with positive
+  native fill hits, positive vector chunks, and bit-exact scalar parity.
+- Verify the live wrapper rejects missing, duplicate, fallback, mismatched, or
+  zero-execution SIMD receipts before input injection.
+- Verify the final transcript repeats the uniqueness check and binds normalized
+  SIMD fields into the evidence environment and human-readable report.
 
 
 <details>
@@ -386,7 +393,8 @@ expect(entry.contains("[wm-pointer-irq]")).to_be(false)
    - Artifact capture: after_step
 - Capture baseline and post-input RAMFB images
    - Artifact capture: after_step
-- require arm64 live qmp input evidence
+- Run the canonical live evidence checker and require its explicit PASS record;
+  these manual steps alone do not satisfy the live gate.
    - Artifact capture: after_step
 
 
