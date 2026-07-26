@@ -70,20 +70,23 @@ HTML, GUI, binary, log and artifact. The generated manual uses linked evidence.
 | Focused source regression | Required claim | Not evidence of |
 |---|---|---|
 | `test/01_unit/lib/common/ui/window_scene_draw_ir_spec.spl` | WM body retains opaque `DrawIrCommand.color` fallback for native-safe transport while `background-color` carries translucent window material, plus rounded gradient and CPU-composited capability; titlebar remains not-requested | GUI/Web realization, host pixels, QEMU pixels |
+| `test/02_integration/rendering/simple_web_css_cascade_spec.spl` | Exact WM opt-in preserves the Aetheric translucent base/backdrop/typed gradient; padded opt-in and unsupported image syntax fail closed | Engine2D execution or host pixels |
+| `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl` | Draw IR carries opaque fallback plus complete CPU material witnesses; provenance remains none without a matching execution receipt | Native-device execution |
 | `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl` | Existing Draw IR styled-RECT lowering preserves the opaque fallback when capability is absent and routes a supported request through the canonical material helper | CPU-SIMD or GPU execution |
 | `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_glass_material_spec.spl` | Rounded corner/center alpha, bounded backdrop blur, gradient endpoints, and saturation arithmetic are pinned as CPU pixel semantics | Vulkan/Metal device readback, events, timing, RSS |
+| `test/01_unit/os/compositor/simple_web_window_renderer_spec.spl` | WM provenance admits only exact solid/CPU reason pairs with lowercase SHA-256 formatting | Semantic digest recomputation at the frame boundary |
 
 The source slice is deliberately not a system-spec PASS. The aggregate
 `wm_glass_theme_host_simpleos_spec.spl` remains fail-closed until retained,
 current-source host and QEMU evidence satisfies the five visible manual steps.
 The third source verification cycle had an opaque-material test failure.
-Static review corrected the saturation-zero luminance rounding mismatch, but
-the session retry cap forbids a post-fix run. Requested blur `30px` is
+Static review corrected the saturation-zero luminance rounding mismatch and
+the Web source now preserves the exact Aetheric request, emits complete Draw IR
+witnesses, and binds CPU provenance to a successful Engine2D execution receipt.
+The session retry cap forbids a post-fix run. Requested blur `30px` is
 explicitly realized as blur `4px`, with realized blur/saturation and reduction
-witnesses. Normal Web lowering still intentionally selects named solid-material
-fallback, so GUI/Web realization needs a mode-aware provenance-preserving
-patch. A fresh-session PASS is still required before this checkpoint can be
-promoted beyond SOURCE PREPARED / UNVERIFIED.
+witnesses. A fresh pure-Simple PASS is still required before this checkpoint
+can be promoted beyond SOURCE PREPARED / UNVERIFIED.
 
 The planned Web repair adds paired evidence:
 

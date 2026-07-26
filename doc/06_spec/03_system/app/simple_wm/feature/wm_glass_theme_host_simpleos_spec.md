@@ -43,11 +43,24 @@ blur 30 is explicitly realized as blur 4, with realized blur/saturation and a
 reduction witness. The helper uses `i64` arithmetic and caps output plus
 horizontal working storage at 67,108,864 pixels.
 
-This is source-level CPU pixel semantics only. It does not prove Simple GUI or
-Simple Web material realization, CPU-SIMD execution, Vulkan or Metal device
-execution, host capture, QEMU capture, device-origin readback, input-event
-delivery, timing, or RSS. Those rows require their own retained immutable
-artifacts and independent review.
+The canonical Simple Web source path now preserves the exact opt-in Aetheric
+glass stack, rejects unsupported raw layers, emits explicit requested and
+bounded-realized material witnesses, and keeps the named opaque command
+fallback. Engine2D records a receipt only when CPU glass execution succeeds;
+CPU-composited provenance is created after execution only when the complete
+Draw IR witness count equals that receipt count. The WM frame validator admits
+only the exact solid/CPU reason pairs and lowercase SHA-256 formatting.
+The Aetheric typed snapshot and Web shorthand both retain the translucent
+`0xCC1F1F21` base plus raw alpha stops `0x14FFFFFF` and `0x06FFFFFF`; the
+current material hash is
+`0ad3df8e5f6169cb83a2554fbe0823ec470070ae43a47eae701c4f9321cdda37`.
+Embedded/offscreen material batches remain receipt-ineligible until they can
+sample the already-painted parent backdrop.
+
+This remains source-level CPU semantics. It does not prove CPU-SIMD execution,
+Vulkan or Metal device execution, host capture, QEMU capture, device-origin
+readback, input-event delivery, timing, or RSS. Those rows require their own
+retained immutable artifacts and independent review.
 
 ## Evidence and failure handling
 
@@ -60,10 +73,11 @@ QEMU requires the canonical entry, independent framebuffer capture, and
 ordered guest input evidence.
 
 Until those artifacts exist, `require_wm_glass_theme_evidence()` intentionally
-fails the executable system scenario. The 2026-07-26 CPU-composited source
-checkpoint is **SOURCE PREPARED / UNVERIFIED**: its third verification cycle
-had an opaque-material test failure. Static review corrected the identified
-saturation-zero luminance mismatch, but the retry cap leaves no post-fix
-passing receipt. Normal Web lowering still intentionally realizes named solid
-fallback; GUI/Web realization needs a mode-aware provenance-preserving patch.
-This cannot be treated as a system PASS.
+fails the executable system scenario. The 2026-07-26 CPU/Web material
+checkpoint is **SOURCE PREPARED / UNVERIFIED**: the focused runner exhausted
+its three-cycle cap with only `0 passed, 1 failed` and no child diagnostic.
+The harness defect is tracked in
+`doc/08_tracking/bug/sspec_runner_suppresses_child_failure_diagnostic_2026-07-26.md`.
+The available repository launcher identifies as a Rust bootstrap seed, and no
+bootstrap was authorized. A fresh pure-Simple focused PASS plus host/device/QEMU
+artifacts are still required; this cannot be treated as a system PASS.

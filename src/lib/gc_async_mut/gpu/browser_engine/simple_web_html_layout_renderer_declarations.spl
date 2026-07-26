@@ -1,5 +1,36 @@
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.*
 
+fn _background_has_image_syntax(raw: text) -> bool:
+    val lower = raw.trim().lower()
+    (
+        lower.contains("gradient(") or
+        lower.contains("url(") or
+        lower.contains("image(") or
+        lower.contains("image-set(") or
+        lower.contains("cross-fade(") or
+        lower.contains("element(") or
+        lower.contains("paint(")
+    )
+
+fn _background_is_exact_typed_linear_layer(raw: text, gradient_from: u32, gradient_to: u32, allow_base_color_layer: bool) -> bool:
+    if gradient_from == 0u32 or gradient_to == 0u32:
+        return false
+    val layers = split_top_level_commas(raw.trim().lower())
+    if layers.len() < 1 or layers.len() > 2:
+        return false
+    val image_layer = layers[0].trim()
+    if not image_layer.starts_with("linear-gradient("):
+        return false
+    val open = find_from(image_layer, "(", 0)
+    if open != "linear-gradient".len():
+        return false
+    val close = paren_matching_close(image_layer, open)
+    if close != image_layer.len() - 1:
+        return false
+    if layers.len() == 1:
+        return true
+    allow_base_color_layer and parse_color_any(layers[1].trim()) != 0u32
+
 fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
     if decls.len() == 0:
         return st
@@ -221,32 +252,47 @@ fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
     val bg_image_pos = decl_last_pos(decls, "background-image")
     if bg_pos >= 0 or bgs_pos >= 0:
         if bgs_pos > bg_pos:
-            # keep the raw multi-layer value when it carries radial layers the
-            # scalar Style fields cannot represent (painted by the stack path)
-            bg_layers_raw_v = if bgs.lower().contains("radial-gradient("): bgs else: ""
             val gradient_from = parse_linear_gradient_color(bgs, 0)
             val gradient_to = parse_linear_gradient_color(bgs, 1)
+            val parsed_layers = parse_background_layers(bgs)
             if gradient_from != 0u32 and gradient_to != 0u32:
                 background_gradient_from_v = gradient_from
                 background_gradient_to_v = gradient_to
+                if parsed_layers.base_color != 0u32:
+                    bg_v = parsed_layers.base_color
             elif bgs.contains("gradient("):
                 # multi-layer / nested-rgba shorthand the simple splitter can't
                 # handle (e.g. "linear-gradient(180deg, rgba(...), rgba(...)), #f5f5f5")
-                val bg_layers = parse_background_layers(bgs)
-                if bg_layers.base_color != 0u32:
-                    bg_v = bg_layers.base_color
-                if bg_layers.gradient_from != 0u32 and bg_layers.gradient_to != 0u32:
-                    background_gradient_from_v = bg_layers.gradient_from
-                    background_gradient_to_v = bg_layers.gradient_to
+                if parsed_layers.base_color != 0u32:
+                    bg_v = parsed_layers.base_color
+                if parsed_layers.gradient_from != 0u32 and parsed_layers.gradient_to != 0u32:
+                    background_gradient_from_v = parsed_layers.gradient_from
+                    background_gradient_to_v = parsed_layers.gradient_to
                 else:
                     background_gradient_from_v = 0u32
                     background_gradient_to_v = 0u32
-                    if bg_layers.base_color == 0u32:
+                    if parsed_layers.base_color == 0u32:
                         bg_v = parse_color_alpha(bgs)
             else:
                 bg_v = parse_color_alpha(bgs)
                 background_gradient_from_v = 0u32
                 background_gradient_to_v = 0u32
+            # The typed pair is the canonical representation of the one image
+            # layer Engine2D can reproduce. Preserve every other authored image
+            # form as a rejection witness so material admission cannot mistake
+            # a lossy scalar projection for complete layered parity.
+            if (
+                _background_has_image_syntax(bgs) and
+                not _background_is_exact_typed_linear_layer(
+                    bgs,
+                    background_gradient_from_v,
+                    background_gradient_to_v,
+                    true
+                )
+            ):
+                bg_layers_raw_v = bgs
+            else:
+                bg_layers_raw_v = ""
         else:
             bg_v = parse_color_alpha(bg)
             background_gradient_from_v = 0u32
@@ -265,9 +311,19 @@ fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
         else:
             val gradient_from = parse_linear_gradient_color(bg_image, 0)
             val gradient_to = parse_linear_gradient_color(bg_image, 1)
-            if gradient_from != 0u32 and gradient_to != 0u32:
+            if _background_is_exact_typed_linear_layer(
+                bg_image, gradient_from, gradient_to, false
+            ):
                 background_gradient_from_v = gradient_from
                 background_gradient_to_v = gradient_to
+                bg_layers_raw_v = ""
+            else:
+                # Unsupported, multiple, or malformed image layers must
+                # replace any prior typed projection and remain observable to
+                # the fail-closed Draw IR/material gate.
+                background_gradient_from_v = 0u32
+                background_gradient_to_v = 0u32
+                bg_layers_raw_v = bg_image
     if bg_repeat.len() > 0:
         val repeat_lower = bg_repeat.trim().lower()
         if repeat_lower == "no-repeat" or repeat_lower == "repeat":
@@ -1610,15 +1666,6 @@ fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
     elif webkit_backdrop_filter_decl.len() > 0:
         val backdrop_filter_norm = webkit_backdrop_filter_decl.trim().lower()
         backdrop_filter_raw_v = if backdrop_filter_norm == "none": "" else: backdrop_filter_norm
-    # The CPU raster lane has no backdrop sampling pass. Realize the declared
-    # solid-material fallback by making the already-resolved surface fill
-    # opaque and removing image/gradient layers; leaving either translucency
-    # or a layered image would no longer be the declared solid material.
-    if backdrop_filter_raw_v != "" and bg_v != 0u32:
-        bg_v = 0xFF000000u32 | (bg_v & 0x00FFFFFFu32)
-        background_gradient_from_v = 0u32
-        background_gradient_to_v = 0u32
-        bg_layers_raw_v = ""
     val margin = decl_get(decls, "margin")
     if margin.len() > 0:
         # Token-aware shorthand so per-side "auto" (centering) and "%" survive.

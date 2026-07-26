@@ -87,13 +87,13 @@ for backdrop material in this slice. The fallback witness
 means CPU realization exists while native device realization is still pending;
 it must never be reported as a device fallback/readback receipt.
 
-Normal Simple Web lowering still intentionally erases glass layers to the
-named solid-material fallback. GUI and Web realization remain open and require
-a mode-aware provenance-preserving patch that retains material only when the
-selected canonical mode can realize it, while preserving the named fallback in
-all other modes.
+Simple Web now preserves glass layers only for the byte-exact
+`engine2d-cpu-composited-material-v1` opt-in. All other modes retain the named
+opaque fallback. Unsupported/multiple image syntax stays visible as a raw
+rejection witness instead of being silently projected into the supported typed
+gradient.
 
-### Planned Simple Web CSS-to-material repair
+### Simple Web CSS-to-material source implementation
 
 The implementation order is fixed:
 
@@ -121,7 +121,8 @@ The implementation order is fixed:
    `cpu-composited-material` realization and semantic hash. Existing
    `solid-material` receipts remain valid only for the fallback lane.
 
-No source phase may promote Web support until a focused
+The source implementation follows this order, but no phase may promote Web
+support until a focused
 CSS -> computed Style -> Draw IR -> independent CPU pixel test proves base,
 gradient alpha, rounded corner, backdrop sample, and opaque fallback from the
 same request. Native Vulkan/Metal, SIMD, event, host, and QEMU evidence remain

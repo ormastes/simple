@@ -320,21 +320,39 @@ struct WmContentFrame:
     theme_id: text = ""
     theme_source_manifest_sha256: text = ""
 
+fn _wm_lower_hex_sha256_valid(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    val allowed = "0123456789abcdef"
+    var i = 0
+    while i < value.len():
+        if not allowed.contains(value[i].to_text()):
+            return false
+        i = i + 1
+    true
+
 # Theme-backed Simple Web WM frames must prove that the canonical renderer
-# produced them and that unsupported backdrop sampling was realized as the
-# declared stable solid material. Other content origins have their own
-# producer contracts and are not constrained by this predicate.
+# produced them and that backdrop material handling used one of the two
+# declared realizations. Other content origins have their own producer
+# contracts and are not constrained by this predicate.
 fn wm_content_frame_web_provenance_valid(frame: WmContentFrame) -> bool:
     if frame.origin_kind != WM_CONTENT_ORIGIN_SIMPLE_WEB:
         return true
+    val material_valid = (
+        (frame.material_fallback_kind == "solid-material" and
+            frame.material_fallback_reason ==
+                "cpu-raster-backdrop-sampling-unavailable") or
+        (frame.material_fallback_kind == "cpu-composited-material" and
+            frame.material_fallback_reason ==
+                "native-device-backdrop-path-pending")
+    )
     (frame.engine2d_status == "engine2d_rendered" and
         frame.engine2d_backend != "" and
         frame.engine2d_backend != "native-safe-fallback" and
-        frame.material_fallback_kind == "solid-material" and
-        frame.material_fallback_reason != "" and
-        frame.material_fallback_sha256.len() == 64 and
+        material_valid and
+        _wm_lower_hex_sha256_valid(frame.material_fallback_sha256) and
         frame.theme_id != "" and
-        frame.theme_source_manifest_sha256.len() == 64)
+        _wm_lower_hex_sha256_valid(frame.theme_source_manifest_sha256))
 
 # Shared checksum algorithm for WmContentFrame.checksum. Extracted from the
 # Simple Web adapter (os.compositor.simple_web_window_renderer) so every

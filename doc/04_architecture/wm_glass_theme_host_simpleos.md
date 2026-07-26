@@ -117,6 +117,16 @@ that disagree with the package CSS. The Web semantic/layout owner derives the
 requested material from the cascaded CSS and preserves both the request and
 fallback in one Draw IR command. Provenance distinguishes
 `cpu-composited-material` from `solid-material`; neither is device execution.
+The CPU kind is never inferred from cascade state alone. `draw_ir_adv` counts
+only successful glass-material executions, and the Web artifact producer emits
+CPU provenance only after complete rendering when the full Draw IR witness
+count exactly matches that execution receipt. Skips, pixel-size failure,
+unsupported layers, incomplete witnesses, or count mismatch remain
+fail-closed with no CPU provenance.
+An embedded/offscreen material batch also receives no CPU provenance until it
+can sample the already-painted parent backdrop; rendering it against a
+transparent child surface is not an equivalent receipt. Direct full-target
+batches remain eligible.
 
 Aetheric's layered surface is base translucent color followed by a two-stop
 alpha gradient. Engine2D must composite in that order after the backdrop pass.

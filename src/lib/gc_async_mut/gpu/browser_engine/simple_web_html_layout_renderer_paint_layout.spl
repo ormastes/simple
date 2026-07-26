@@ -545,13 +545,146 @@ fn _html_draw_ir_shadow_layer_count(value: text) -> i32:
         return 0
     split_top_level_commas(value).len() as i32
 
+# Keep this parser aligned with the Engine2D material consumer: backdrop CSS is
+# intentionally carried as text, while this producer emits bounded witnesses.
+fn _html_draw_ir_nth_int(value: text, n: i32, fallback: i64) -> i64:
+    var count = 0
+    var idx: i64 = 0
+    val length = value.len()
+    while idx < length:
+        val ch0: i64 = value.char_code_at(idx)
+        val is_digit = ch0 >= 48 and ch0 <= 57
+        var sign_ok = false
+        if (ch0 == 45 or ch0 == 43) and idx + 1 < length:
+            val next: i64 = value.char_code_at(idx + 1)
+            sign_ok = next >= 48 and next <= 57
+        if is_digit or sign_ok:
+            val negative = ch0 == 45
+            if ch0 == 45 or ch0 == 43:
+                idx = idx + 1
+            var acc: i64 = 0
+            while idx < length:
+                val ch: i64 = value.char_code_at(idx)
+                if ch >= 48 and ch <= 57:
+                    if acc < 1000000:
+                        acc = acc * 10 + (ch - 48)
+                        if acc > 1000000:
+                            acc = 1000000
+                    idx = idx + 1
+                else:
+                    break
+            if negative:
+                acc = 0 - acc
+            if count == n:
+                return acc
+            count = count + 1
+        else:
+            idx = idx + 1
+    fallback
+
+fn _html_draw_ir_clamp_i64(value: i64, low: i64, high: i64) -> i64:
+    if value < low:
+        return low
+    if value > high:
+        return high
+    value
+
+struct HtmlDrawIrBackdropAdmission:
+    admitted: bool
+    realized_blur_px: i64
+    realized_saturation_milli: i64
+
+fn _html_draw_ir_backdrop_admission(backdrop: text) -> HtmlDrawIrBackdropAdmission:
+    # Match the typed producer witness byte-for-byte: this is a bounded,
+    # canonical grammar rather than a permissive filter-number projection.
+    val terms = backdrop.split(" ")
+    if terms.len() != 2:
+        return HtmlDrawIrBackdropAdmission(
+            admitted: false, realized_blur_px: 0,
+            realized_saturation_milli: 0)
+    val blur_term = terms[0]
+    val saturation_term = terms[1]
+    if not blur_term.starts_with("blur(") or not blur_term.ends_with("px)"):
+        return HtmlDrawIrBackdropAdmission(
+            admitted: false, realized_blur_px: 0,
+            realized_saturation_milli: 0)
+    if (not saturation_term.starts_with("saturate(") or
+        not saturation_term.ends_with("%)")):
+        return HtmlDrawIrBackdropAdmission(
+            admitted: false, realized_blur_px: 0,
+            realized_saturation_milli: 0)
+    val blur_text = blur_term.slice(5, blur_term.len() - 3)
+    val saturation_text = saturation_term.slice(9, saturation_term.len() - 2)
+    val blur = blur_text.to_i64()
+    val saturation_percent = saturation_text.to_i64()
+    if (blur == nil or saturation_percent == nil or blur < 0 or blur > 1000000 or
+        saturation_percent < 0 or saturation_percent > 300):
+        return HtmlDrawIrBackdropAdmission(
+            admitted: false, realized_blur_px: 0,
+            realized_saturation_milli: 0)
+    if backdrop != "blur({blur}px) saturate({saturation_percent}%)":
+        return HtmlDrawIrBackdropAdmission(
+            admitted: false, realized_blur_px: 0,
+            realized_saturation_milli: 0)
+    HtmlDrawIrBackdropAdmission(
+        admitted: true,
+        realized_blur_px: if blur > 4: 4 else: blur,
+        realized_saturation_milli: saturation_percent * 10)
+
+fn _html_draw_ir_wm_fallback_color(node: HNode, st: Style) -> u32:
+    val wm_fallback = attr_value(
+        node.attrs_raw, "data-wm-theme-fallback").trim().lower()
+    if wm_fallback != "solid-material":
+        return st.bg
+    val declared = parse_color_any(attr_value(node.attrs_raw, "data-wm-theme-bg").trim())
+    if ((declared >> 24) & 255u32) == 255u32:
+        return declared
+    if ((st.bg >> 24) & 255u32) == 255u32:
+        return st.bg
+    # Incomplete contracts still need native-safe opaque transport. They do
+    # not receive a material capability or any realized witness.
+    0xFF000000u32 | (st.bg & 0x00FFFFFFu32)
+
 fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
-    val wm_fallback = attr_value(node.attrs_raw, "data-wm-theme-fallback").trim().lower()
+    val wm_fallback = attr_value(node.attrs_raw, "data-wm-theme-fallback")
     val wm_solid_fallback = wm_fallback == "solid-material"
-    val backdrop_requested = st.backdrop_filter_raw != "" or wm_solid_fallback
+    val material_mode_attr = attr_value(node.attrs_raw, "data-wm-theme-material-mode")
+    val material_mode = material_mode_attr == "engine2d-cpu-composited-material-v1"
+    val declared_fallback_attr = attr_value(node.attrs_raw, "data-wm-theme-bg")
+    val declared_fallback_color = parse_color_any(declared_fallback_attr)
+    val declared_fallback_opaque = (
+        declared_fallback_attr != "" and
+        ((declared_fallback_color >> 24) & 255u32) == 255u32
+    )
     val bg_alpha = (st.bg >> 24) & 255u32
-    val solid_fallback_realized = backdrop_requested and bg_alpha == 255u32 and st.background_gradient_from == 0u32 and st.background_gradient_to == 0u32 and st.bg_layers_raw == ""
-    [
+    val backdrop_requested = st.backdrop_filter_raw != ""
+    val has_gradient = (
+        st.background_gradient_from != 0u32 and
+        st.background_gradient_to != 0u32
+    )
+    val typed_stops_absent = (
+        st.background_gradient_from == 0u32 and
+        st.background_gradient_to == 0u32
+    )
+    val typed_stops_present = (
+        st.background_gradient_from != 0u32 and
+        st.background_gradient_to != 0u32
+    )
+    val typed_stops_valid = typed_stops_absent or typed_stops_present
+    val raw_layers_empty = st.bg_layers_raw == ""
+    val backdrop = _html_draw_ir_backdrop_admission(st.backdrop_filter_raw)
+    # The CPU material path supports a translucent base with at most one
+    # normalized linear-gradient layer. Extra/radial stacks remain fail-closed
+    # on the opaque command fallback instead of overstating layered parity.
+    val material_ready = (
+        material_mode and wm_solid_fallback and
+        declared_fallback_opaque and backdrop.admitted and
+        bg_alpha > 0u32 and bg_alpha < 255u32 and
+        raw_layers_empty and typed_stops_valid
+    )
+    val realized_blur = backdrop.realized_blur_px
+    val realized_saturation = backdrop.realized_saturation_milli
+    var props = [
         draw_ir_style_prop("tag", node.tag),
         draw_ir_style_prop("id", node.id_attr),
         draw_ir_style_prop("class", node.class_attr),
@@ -565,6 +698,7 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("background-attachment", st.background_attachment),
         draw_ir_style_prop("background-color", "{st.bg}"),
         draw_ir_style_prop("background-image", if st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32: "linear-gradient({st.background_gradient_from},{st.background_gradient_to})" else: "none"),
+        draw_ir_style_prop("background-layers-raw", st.bg_layers_raw),
         draw_ir_style_prop("background-origin", st.background_origin),
         # Engine2D consumes a typed first-layer projection. Keep the full
         # authored CSS in box-shadow-raw for future multi-layer backends.
@@ -572,13 +706,10 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("box-shadow-raw", st.box_shadow_raw),
         draw_ir_style_prop("box-shadow-layer-count", "{_html_draw_ir_shadow_layer_count(st.box_shadow_raw)}"),
         draw_ir_style_prop("box-shadow-blur-radius", "{st.box_shadow_blur_px}"),
-        draw_ir_style_prop("backdrop-filter", if st.backdrop_filter_raw != "": st.backdrop_filter_raw elif wm_solid_fallback: "realized-as-solid-material" else: "none"),
-        # The CPU bitmap/Engine2D executor does not yet own a backdrop sampling
-        # pass. Preserve the effect instead of silently dropping it, and expose
-        # the exact capability fallback to downstream renderers and inspectors.
-        draw_ir_style_prop("backdrop-filter-capability", if backdrop_requested: "unavailable" else: "not-requested"),
-        draw_ir_style_prop("backdrop-filter-fallback", if solid_fallback_realized: "solid-material" else: "none"),
-        draw_ir_style_prop("backdrop-filter-fallback-reason", if solid_fallback_realized: "cpu-raster-backdrop-sampling-unavailable" elif backdrop_requested: "solid-material-not-realized" else: "none"),
+        draw_ir_style_prop("backdrop-filter", if backdrop_requested: st.backdrop_filter_raw else: "none"),
+        draw_ir_style_prop("backdrop-filter-capability", if material_ready: "engine2d-cpu-composited-material-v1" elif wm_solid_fallback or backdrop_requested: "unavailable" else: "not-requested"),
+        draw_ir_style_prop("backdrop-filter-fallback", if material_ready: "cpu-composited-material" elif wm_solid_fallback and material_mode_attr == "": "solid-material" else: "none"),
+        draw_ir_style_prop("backdrop-filter-fallback-reason", if material_ready: "native-device-backdrop-path-pending" elif material_mode_attr != "": "incomplete-wm-material-contract" elif wm_solid_fallback: "cpu-raster-backdrop-sampling-unavailable" elif backdrop_requested: "incomplete-wm-material-contract" else: "none"),
         draw_ir_style_prop("color", "{st.fg}"),
         draw_ir_style_prop("direction", if st.direction_rtl: "rtl" else: "ltr"),
         draw_ir_style_prop("font-size", "{st.font_size}"),
@@ -703,6 +834,23 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("orphans", "{st.orphans}"),
         draw_ir_style_prop("widows", "{st.widows}")
     ]
+    if material_ready:
+        props.push(draw_ir_style_prop("wm-material-request", "window-surface-glass"))
+        props.push(draw_ir_style_prop(
+            "wm-material-surface-alpha-milli",
+            "{(bg_alpha as i64) * 1000 / 255}"
+        ))
+        props.push(draw_ir_style_prop("backdrop-filter-realized", "blur({realized_blur}px) saturate({realized_saturation / 10}%)"))
+        props.push(draw_ir_style_prop("backdrop-filter-realized-blur-radius-px", "{realized_blur}"))
+        props.push(draw_ir_style_prop("backdrop-filter-realized-saturation-milli", "{realized_saturation}"))
+        if st.backdrop_filter_raw != "blur({realized_blur}px) saturate({realized_saturation / 10}%)":
+            props.push(draw_ir_style_prop("backdrop-filter-reduction-reason", "cpu-blur-radius-bounded-to-4"))
+        if has_gradient:
+            props.push(draw_ir_style_prop(
+                "background-image-composite-mode",
+                "surface-then-alpha-gradient"
+            ))
+    props
 
 fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32, width: i32, height: i32, vector_fonts: bool) -> DrawIrCommand:
     val node = nodes[i]
@@ -768,7 +916,7 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
         y,
         w,
         h,
-        st.bg,
+        _html_draw_ir_wm_fallback_color(node, st),
         border_rect,
         content_rect,
         hit_rect,

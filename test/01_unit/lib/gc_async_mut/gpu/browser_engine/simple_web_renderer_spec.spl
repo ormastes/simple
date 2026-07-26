@@ -38,10 +38,15 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     SimpleWebRenderer, simple_web_render_html_to_scene, simple_web_render_html_to_pixels,
     simple_web_render_url_to_pixels, simple_web_resolved_engine2d_backend_name}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_material_provenance_after_execution,
     simple_web_layout_render_html_draw_ir,
+    simple_web_layout_render_html_draw_ir_result,
     simple_web_layout_render_html_software_pixels,
     simple_web_layout_uses_legacy_widget_chrome,
-    simple_web_layout_debug_layout_by_id}
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_debug_style_by_id}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_readback_engine2d_result}
 use std.gc_async_mut.gpu.browser_engine.simple_web_corpus_fixture_renderer.{
     simple_web_render_html_to_pixels_with_corpus_fixtures}
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
@@ -107,6 +112,29 @@ fn _draw_ir_style_value(command: DrawIrCommand, key: text) -> text:
             return command.computed_style[idx].value
         idx = idx + 1
     ""
+
+fn _wm_material_section(component_id: text, image_declarations: text) -> text:
+    (
+        "<section id='" + component_id + "'" +
+        " data-wm-theme-material-mode='engine2d-cpu-composited-material-v1'" +
+        " data-wm-theme-fallback='solid-material'" +
+        " data-wm-theme-bg='#123456'" +
+        " style='display:block;width:12px;height:8px;" +
+        "background:rgba(255,255,255,0.2);" +
+        image_declarations +
+        "backdrop-filter:blur(4px) saturate(120%)'></section>"
+    )
+
+fn _wm_material_section_with_backdrop(component_id: text, backdrop: text) -> text:
+    (
+        "<section id='" + component_id + "'" +
+        " data-wm-theme-material-mode='engine2d-cpu-composited-material-v1'" +
+        " data-wm-theme-fallback='solid-material'" +
+        " data-wm-theme-bg='#123456'" +
+        " style='display:block;width:12px;height:8px;" +
+        "background:rgba(255,255,255,0.2);" +
+        "backdrop-filter:" + backdrop + "'></section>"
+    )
 
 describe "SimpleWebRenderer":
 
@@ -211,6 +239,133 @@ describe "SimpleWebRenderer":
         expect(_draw_ir_style_value(card, "tag")).to_equal("section")
         expect(_draw_ir_style_value(card, "display")).to_equal("block")
         expect(_draw_ir_style_value(card, "padding-left")).to_equal("2")
+
+    it "fails closed to an opaque Draw IR color when the WM material mode is incomplete":
+        val html = "<html><body><section id='card' data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' style='display:block;width:12px;height:8px;background:rgba(255,255,255,0.2);backdrop-filter:blur(30px) saturate(170%)'></section></body></html>"
+        val composition = simple_web_layout_render_html_draw_ir(html, 32, 20)
+        val card = _draw_ir_command_by_id(composition.batches[0].commands, "card")
+
+        expect(card.color).to_equal(0xFF123456u32)
+        expect(_draw_ir_style_value(card, "backdrop-filter-capability")).to_equal("unavailable")
+        expect(_draw_ir_style_value(card, "backdrop-filter-realized")).to_equal("")
+        expect(_draw_ir_style_value(card, "backdrop-filter-realized-blur-radius-px")).to_equal("")
+        expect(_draw_ir_style_value(card, "backdrop-filter-realized-saturation-milli")).to_equal("")
+
+    it "projects a complete WM Web material request with explicit bounded realization":
+        val html = "<html><body><section id='card' data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' style='display:block;width:12px;height:8px;background:linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.025)),rgba(31,31,33,0.80);backdrop-filter:blur(30px) saturate(170%)'></section></body></html>"
+        val composition = simple_web_layout_render_html_draw_ir(html, 32, 20)
+        val card = _draw_ir_command_by_id(composition.batches[0].commands, "card")
+
+        expect(card.color).to_equal(0xFF123456u32)
+        expect(_draw_ir_style_value(card, "background-color")).to_equal("3424591649")
+        expect(_draw_ir_style_value(card, "backdrop-filter")).to_equal("blur(30px) saturate(170%)")
+        expect(_draw_ir_style_value(card, "backdrop-filter-capability")).to_equal("engine2d-cpu-composited-material-v1")
+        expect(_draw_ir_style_value(card, "backdrop-filter-realized")).to_equal("blur(4px) saturate(170%)")
+        expect(_draw_ir_style_value(card, "backdrop-filter-realized-blur-radius-px")).to_equal("4")
+        expect(_draw_ir_style_value(card, "backdrop-filter-realized-saturation-milli")).to_equal("1700")
+        expect(_draw_ir_style_value(card, "backdrop-filter-reduction-reason")).to_equal("cpu-blur-radius-bounded-to-4")
+        expect(_draw_ir_style_value(card, "wm-material-surface-alpha-milli")).to_equal("200")
+        expect(_draw_ir_style_value(card, "background-image-composite-mode")).to_equal("surface-then-alpha-gradient")
+        expect(_draw_ir_style_value(card, "background-layers-raw")).to_equal("")
+
+    it "claims CPU material provenance only with a matching execution receipt":
+        val html = "<html><body><section id='card' data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' style='display:block;width:12px;height:8px;background:linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.025)),rgba(31,31,33,0.80);backdrop-filter:blur(30px) saturate(170%)'></section></body></html>"
+        val layout = simple_web_layout_render_html_draw_ir_result(
+            html, 32, 20)
+        val without_receipt =
+            simple_web_layout_material_provenance_after_execution(
+                layout.material_witness, 0, 32 * 20, 32 * 20, 0)
+        val with_receipt =
+            simple_web_layout_material_provenance_after_execution(
+                layout.material_witness, 0, 32 * 20, 32 * 20, 1)
+
+        expect(layout.material_fallback.kind).to_equal("none")
+        expect(without_receipt.kind).to_equal("none")
+        expect(with_receipt.kind).to_equal("cpu-composited-material")
+        expect(with_receipt.reason).to_equal(
+            "native-device-backdrop-path-pending")
+        expect(with_receipt.material_sha256.len()).to_equal(64)
+
+    it "executes Aetheric shorthand through Style Draw IR and the typed CPU receipt":
+        # This is the closest integrated public path: the CSS shorthand is
+        # cascaded into Style, lowered to Draw IR, executed by Engine2D, then
+        # admitted only through the producer witness plus CPU receipt.
+        val html = "<html><head><style>#aetheric{display:block;width:12px;height:8px;background:linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.025)),rgba(31,31,33,0.80);backdrop-filter:blur(30px) saturate(170%)}</style></head><body><section id='aetheric' data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456'></section></body></html>"
+        val layout = simple_web_layout_render_html_draw_ir_result(html, 32, 20)
+        val card = _draw_ir_command_by_id(layout.composition.batches[0].commands, "aetheric")
+        val execution = simple_web_layout_render_html_readback_engine2d_result(
+            html, 32, 20, "software")
+
+        expect(card.kind).to_equal("rect")
+        expect(_draw_ir_style_value(card, "backdrop-filter-realized")).to_equal("blur(4px) saturate(170%)")
+        expect(layout.material_witness.cpu_composited_count).to_equal(1)
+        expect(layout.material_witness.cpu_composited_sha256.len()).to_equal(64)
+        expect(execution.readback.pixels.len()).to_equal(32 * 20)
+        expect(execution.material_fallback.kind).to_equal("cpu-composited-material")
+        expect(execution.material_fallback.material_sha256).to_equal(layout.material_witness.cpu_composited_sha256)
+
+    it "software-composites Aetheric gradient stops over its translucent base":
+        val html = "<html><head><style>html,body{margin:0;padding:0;width:2px;height:2px;background:#ffffff}#aetheric{display:block;width:2px;height:2px;background:linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.025)),rgba(31,31,33,0.80)}</style></head><body><section id='aetheric'></section></body></html>"
+        val pixels = simple_web_layout_render_html_software_pixels(html, 2, 2)
+
+        # The centered first-row sample interpolates alpha 20 -> 6 to 17, then
+        # source-over blends that 7% white over the painted translucent base.
+        expect(pixels[0]).to_equal(0xFF595959u32)
+
+    it "rejects malformed or noncanonical exact-mode backdrop grammar":
+        val html = (
+            "<html><body>" +
+            _wm_material_section_with_backdrop("space", "blur(4px)  saturate(120%)") +
+            _wm_material_section_with_backdrop("decimal", "blur(4.0px) saturate(120%)") +
+            _wm_material_section_with_backdrop("over-saturated", "blur(4px) saturate(301%)") +
+            _wm_material_section_with_backdrop("extra", "blur(4px) saturate(120%) contrast(110%)") +
+            "</body></html>"
+        )
+        val layout = simple_web_layout_render_html_draw_ir_result(html, 64, 48)
+        for component_id in ["space", "decimal", "over-saturated", "extra"]:
+            val command = _draw_ir_command_by_id(
+                layout.composition.batches[0].commands, component_id)
+            expect(_draw_ir_style_value(command, "backdrop-filter-capability")).to_equal("unavailable")
+            expect(_draw_ir_style_value(command, "backdrop-filter-fallback")).to_equal("none")
+            expect(_draw_ir_style_value(command, "backdrop-filter-realized")).to_equal("")
+        expect(layout.material_witness.cpu_composited_count).to_equal(0)
+
+    it "fails closed for unsupported WM image layers and admits an explicit none reset":
+        val html = (
+            "<html><body>" +
+            _wm_material_section("radial", "background-image:radial-gradient(#112233,#445566);") +
+            _wm_material_section("multiple", "background-image:linear-gradient(#112233,#445566),linear-gradient(#778899,#aabbcc);") +
+            _wm_material_section("url", "background-image:url(hero.png);") +
+            _wm_material_section("unknown", "background-image:conic-gradient(#112233,#445566);") +
+            _wm_material_section("malformed", "background-image:linear-gradient(#112233);") +
+            _wm_material_section("override", "background-image:linear-gradient(#112233,#445566);background-image:radial-gradient(#778899,#aabbcc);") +
+            _wm_material_section("reset", "background-image:radial-gradient(#112233,#445566);background-image:none;") +
+            "</body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 96, 80)
+        val rejected_ids = [
+            "radial", "multiple", "url", "unknown", "malformed", "override"
+        ]
+        for rejected_id in rejected_ids:
+            val command = _draw_ir_command_by_id(
+                composition.batches[0].commands, rejected_id)
+            expect(command.color).to_equal(0xFF123456u32)
+            expect(_draw_ir_style_value(
+                command, "backdrop-filter-capability")).to_equal("unavailable")
+            expect(_draw_ir_style_value(
+                command, "backdrop-filter-realized")).to_equal("")
+            expect(_draw_ir_style_value(
+                command, "background-image-composite-mode")).to_equal("")
+
+        val reset = _draw_ir_command_by_id(
+            composition.batches[0].commands, "reset")
+        expect(_draw_ir_style_value(
+            reset, "background-layers-raw")).to_equal("")
+        expect(_draw_ir_style_value(
+            reset, "backdrop-filter-capability")).to_equal(
+                "engine2d-cpu-composited-material-v1")
+        expect(_draw_ir_style_value(
+            reset, "background-image-composite-mode")).to_equal("")
 
     it "applies only matching root custom-property variants with CSS last-wins precedence":
         val html = "<html data-mode='Glass'><head><style>:root[data-mode=glass i]{--panel:#22c55e}:root{--panel:#ef4444}:root[data-mode=opaque]{--panel:#1d4ed8}:root[data-mode=glass i] .unrelated{--panel:#7c3aed}#card{display:block;width:12px;height:8px;background-color:var(--panel)}</style></head><body><section id='card'></section></body></html>"

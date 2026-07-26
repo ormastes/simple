@@ -39,3 +39,88 @@ describe "simple web css cascade":
         val height = simple_web_layout_debug_style_by_id(html, "target", "height")
         step("Assert the later class rule still wins after the selector-list rule is merged once")
         expect(height).to_equal("23")
+
+    it "retains ordinary translucent backdrop CSS in the computed Style":
+        step("Build ordinary backdrop CSS with an alpha surface, a normalized linear gradient, and a radial layer stack")
+        val html = "<html><head><style>" +
+            "#target{background-color:rgba(18,52,86,0.5);background-image:linear-gradient(#112233,#445566);backdrop-filter:blur(4px) saturate(120%)}" +
+            "#layers{background:radial-gradient(#010203,#040506),#102030;backdrop-filter:blur(2px)}" +
+            "</style></head><body><div id=\"target\">row</div><div id=\"layers\">layers</div></body></html>"
+        step("Resolve the material fields through the normal CSS cascade")
+        expect(simple_web_layout_debug_style_by_id(html, "target", "background_color")).to_equal("2148676694")
+        expect(simple_web_layout_debug_style_by_id(html, "target", "background_gradient_from")).to_equal("4279312947")
+        expect(simple_web_layout_debug_style_by_id(html, "target", "background_gradient_to")).to_equal("4282668390")
+        expect(simple_web_layout_debug_style_by_id(html, "target", "backdrop_filter_raw")).to_equal("blur(4px) saturate(120%)")
+        expect(simple_web_layout_debug_style_by_id(html, "layers", "background_layers_raw")).to_equal("radial-gradient(#010203,#040506),#102030")
+        expect(simple_web_layout_debug_style_by_id(html, "layers", "backdrop_filter_raw")).to_equal("blur(2px)")
+
+    it "preserves Aetheric shorthand base and gradient stop alpha in Style":
+        step("Build the Aetheric translucent surface through the background shorthand")
+        val html = "<html><head><style>#aetheric{background:linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.025)),rgba(31,31,33,0.80)}</style></head><body><div id=\"aetheric\"></div></body></html>"
+        step("Inspect the raw ARGB material values after shorthand parsing")
+        expect(simple_web_layout_debug_style_by_id(html, "aetheric", "background_color")).to_equal("3424591649")
+        expect(simple_web_layout_debug_style_by_id(html, "aetheric", "background_gradient_from")).to_equal("352321535")
+        expect(simple_web_layout_debug_style_by_id(html, "aetheric", "background_gradient_to")).to_equal("117440511")
+
+    it "normalizes one typed linear image and retains unsupported image syntax as a rejection witness":
+        step("Build exact, radial, multiple, URL, unknown, malformed, override, and reset image declarations")
+        val html = "<html><head><style>" +
+            "#single{background-image:linear-gradient(#112233,#445566)}" +
+            "#radial{background-image:radial-gradient(#112233,#445566)}" +
+            "#multiple{background:linear-gradient(#112233,#445566),linear-gradient(#778899,#aabbcc)}" +
+            "#url{background-image:url(hero.png)}" +
+            "#unknown{background-image:conic-gradient(#112233,#445566)}" +
+            "#malformed{background-image:linear-gradient(#112233)}" +
+            "#override{background-image:linear-gradient(#112233,#445566);background-image:radial-gradient(#778899,#aabbcc)}" +
+            "#reset{background-image:radial-gradient(#112233,#445566);background-image:none}" +
+            "</style></head><body>" +
+            "<div id=\"single\"></div><div id=\"radial\"></div><div id=\"multiple\"></div>" +
+            "<div id=\"url\"></div><div id=\"unknown\"></div><div id=\"malformed\"></div>" +
+            "<div id=\"override\"></div><div id=\"reset\"></div>" +
+            "</body></html>"
+        step("Inspect the canonical typed pair and every unsupported raw witness")
+        expect(simple_web_layout_debug_style_by_id(html, "single", "background_layers_raw")).to_equal("")
+        expect(simple_web_layout_debug_style_by_id(html, "single", "background_gradient_from")).to_equal("4279312947")
+        expect(simple_web_layout_debug_style_by_id(html, "single", "background_gradient_to")).to_equal("4282668390")
+        expect(simple_web_layout_debug_style_by_id(html, "radial", "background_layers_raw")).to_equal("radial-gradient(#112233,#445566)")
+        expect(simple_web_layout_debug_style_by_id(html, "multiple", "background_layers_raw")).to_equal("linear-gradient(#112233,#445566),linear-gradient(#778899,#aabbcc)")
+        expect(simple_web_layout_debug_style_by_id(html, "url", "background_layers_raw")).to_equal("url(hero.png)")
+        expect(simple_web_layout_debug_style_by_id(html, "unknown", "background_layers_raw")).to_equal("conic-gradient(#112233,#445566)")
+        expect(simple_web_layout_debug_style_by_id(html, "malformed", "background_layers_raw")).to_equal("linear-gradient(#112233)")
+        expect(simple_web_layout_debug_style_by_id(html, "override", "background_layers_raw")).to_equal("radial-gradient(#778899,#aabbcc)")
+        expect(simple_web_layout_debug_style_by_id(html, "override", "background_gradient_from")).to_equal("0")
+        expect(simple_web_layout_debug_style_by_id(html, "override", "background_gradient_to")).to_equal("0")
+        expect(simple_web_layout_debug_style_by_id(html, "reset", "background_layers_raw")).to_equal("")
+        expect(simple_web_layout_debug_style_by_id(html, "reset", "background_gradient_from")).to_equal("0")
+        expect(simple_web_layout_debug_style_by_id(html, "reset", "background_gradient_to")).to_equal("0")
+
+    it "keeps the named WM solid fallback opaque without an explicit composited mode":
+        step("Build a WM-decorated panel without the explicit CPU-composited material mode")
+        val html = "<html><head><style>#target{background-color:rgba(18,52,86,0.5);background-image:linear-gradient(#112233,#445566);backdrop-filter:blur(4px)}</style></head><body><div id=\"target\" data-wm-theme-fallback=\"solid-material\" data-wm-theme-bg=\"#102030\">row</div></body></html>"
+        step("Resolve the fallback after the normal cascade")
+        expect(simple_web_layout_debug_style_by_id(html, "target", "background_color")).to_equal("4279246896")
+        expect(simple_web_layout_debug_style_by_id(html, "target", "background_gradient_from")).to_equal("0")
+        expect(simple_web_layout_debug_style_by_id(html, "target", "background_gradient_to")).to_equal("0")
+        expect(simple_web_layout_debug_style_by_id(html, "target", "backdrop_filter_raw")).to_equal("")
+
+    it "preserves authored CSS for the exact CPU-composited WM material mode":
+        step("Build a WM-decorated panel that explicitly opts into the CPU-composited material mode")
+        val html = "<html><head><style>#target{background-color:rgba(18,52,86,0.5);background-image:linear-gradient(#112233,#445566);backdrop-filter:blur(4px)}</style></head><body><div id=\"target\" data-wm-theme-fallback=\"solid-material\" data-wm-theme-bg=\"#102030\" data-wm-theme-material-mode=\"engine2d-cpu-composited-material-v1\">row</div></body></html>"
+        step("Resolve the authored material fields without the named solid rewrite")
+        expect(simple_web_layout_debug_style_by_id(html, "target", "background_color")).to_equal("2148676694")
+        expect(simple_web_layout_debug_style_by_id(html, "target", "background_gradient_from")).to_equal("4279312947")
+        expect(simple_web_layout_debug_style_by_id(html, "target", "background_gradient_to")).to_equal("4282668390")
+        expect(simple_web_layout_debug_style_by_id(html, "target", "backdrop_filter_raw")).to_equal("blur(4px)")
+
+    it "rejects a whitespace-padded CPU-composited WM material mode":
+        step("Build a WM panel whose opt-in token is not byte-exact")
+        val html = "<html><head><style>#target{background-color:rgba(18,52,86,0.5);background-image:linear-gradient(#112233,#445566);backdrop-filter:blur(4px)}</style></head><body><div id=\"target\" data-wm-theme-fallback=\"solid-material\" data-wm-theme-bg=\"#102030\" data-wm-theme-material-mode=\" engine2d-cpu-composited-material-v1 \">row</div></body></html>"
+        step("Resolve the named opaque fallback instead of accepting the padded token")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "target", "background_color")).to_equal("4279246896")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "target", "background_gradient_from")).to_equal("0")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "target", "background_gradient_to")).to_equal("0")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "target", "backdrop_filter_raw")).to_equal("")

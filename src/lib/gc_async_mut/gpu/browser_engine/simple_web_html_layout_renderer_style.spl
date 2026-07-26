@@ -439,25 +439,12 @@ fn paren_matching_close(s: text, open_idx: i32) -> i32:
         i = i + 1
     -1
 
-# src-over composite an rgba color (alpha 0..255) onto an opaque base color
-fn composite_over_base(col: u32, alpha: i32, base: u32) -> u32:
-    if alpha >= 255 or base == 0u32:
-        return col
-    val sr = (((col >> 16) & 255u32) as i32)
-    val sg = (((col >> 8) & 255u32) as i32)
-    val sb = ((col & 255u32) as i32)
-    val dr = (((base >> 16) & 255u32) as i32)
-    val dg = (((base >> 8) & 255u32) as i32)
-    val db = ((base & 255u32) as i32)
-    val inv = 255 - alpha
-    argb((sr * alpha + dr * inv + 127) / 255, (sg * alpha + dg * inv + 127) / 255, (sb * alpha + db * inv + 127) / 255)
-
 class BgLayers:
     base_color: u32
     gradient_from: u32
     gradient_to: u32
 
-fn _gradient_stop_color(stop_raw: text, base: u32) -> u32:
+fn _gradient_stop_color(stop_raw: text) -> u32:
     # strip a trailing position ("... 0%" / "... 34%")
     var stop = stop_raw.trim()
     val pct = text_index_of(stop, "%")
@@ -476,11 +463,9 @@ fn _gradient_stop_color(stop_raw: text, base: u32) -> u32:
             k = k - 1
         if seen_pct and cut < stop.len():
             stop = stop.substring(0, cut).trim()
-    val col = parse_color_any(stop)
-    if col == 0u32:
-        return 0u32
-    val alpha = shadow_layer_alpha(stop)
-    composite_over_base(col, alpha, base)
+    # Keep rgba stop alpha in Style. The software painter composites the
+    # interpolated pixel over the already-painted background color.
+    parse_color_alpha(stop)
 
 fn _bg_layer_is_direction(part: text) -> bool:
     val p = part.trim().lower()
@@ -493,10 +478,9 @@ fn _bg_layer_is_direction(part: text) -> bool:
     false
 # Parse a (possibly multi-layer) CSS `background` shorthand value:
 #   background: linear-gradient(...), radial-gradient(...), #f5f5f5
-# Returns the opaque base color layer (if any) plus the last linear-gradient
-# layer's first/last stops composited over that base (so translucent
-# rgba() gradient fills match Chromium's src-over result). Radial layers are
-# not paintable by this engine and are skipped.
+# Returns the alpha-preserving base color layer (if any) plus the last
+# linear-gradient layer's first/last ARGB stops. Radial layers are not
+# paintable by this engine and are skipped.
 fn parse_background_layers(value: text) -> BgLayers:
     val layers = split_top_level_commas(value)
     val lc = layers.len()
@@ -506,7 +490,7 @@ fn parse_background_layers(value: text) -> BgLayers:
     while li >= 0:
         val lay = layers[li].trim()
         if not lay.contains("gradient(") and not lay.contains("url("):
-            val col = parse_color_any(lay)
+            val col = parse_color_alpha(lay)
             if col != 0u32:
                 base = col
                 break
@@ -537,8 +521,8 @@ fn parse_background_layers(value: text) -> BgLayers:
                         first_stop = part
                     last_stop = part
                 if first_stop != "" and last_stop != "":
-                    val cf = _gradient_stop_color(first_stop, base)
-                    val ct = _gradient_stop_color(last_stop, base)
+                    val cf = _gradient_stop_color(first_stop)
+                    val ct = _gradient_stop_color(last_stop)
                     if cf != 0u32 and ct != 0u32:
                         g_from = cf
                         g_to = ct
