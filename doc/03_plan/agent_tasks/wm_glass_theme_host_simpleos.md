@@ -71,7 +71,7 @@ overlapping dirty work and remains read-only for this lane.
 
 | Lane | Current state | First unresolved boundary |
 |---|---|---|
-| Host production WM | SOURCE FIXED; recapture blocked by cycle cap | an earlier frozen-revision Stage 3 diagnostic passed, but no current Wave 0 capsule is admitted; bootstrap/theme/bridge/provider wiring is fixed and must be rebuilt from the newly admitted capsule before one fresh host capture |
+| Host production WM | SOURCE FIXED; recapture blocked by Wave 0 | fresh hosted startup now installs the registry-default Stitch package through the package-owned snapshot projection (and preserves an explicit prior selection through the native-safe presence/plain-return pair), but no current Wave 0 capsule is admitted; the path must be rebuilt from an admitted capsule before one fresh host capture |
 | Host events | SOURCE PARTIAL; product proof pending | real key down/up and pointer move/button-edge receipts are retained; title-command/body-input remain unsupported because HostCompositor exposes no canonical API |
 | Simple Web glass | SEMANTICS IMPLEMENTED, LIVE PROOF PENDING | current-source computed-style/Draw-IR/framebuffer proof has not passed; Chromium fixture timing is not Simple Web animation evidence |
 | SimpleOS x86_64 QEMU | STATIC PREFLIGHT PASS, FRESH BOOT PENDING | legacy render/event command now delegates to canonical `gui_entry_desktop.spl` evidence; host gate, exact-current rebuild, and one OVMF capture remain |

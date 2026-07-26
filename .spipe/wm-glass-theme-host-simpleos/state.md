@@ -560,3 +560,23 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   compiler/runtime provenance. Independent highest-capability Sol review
   ACCEPTS both repaired plans. Runtime evidence remains open; this planning
   repair does not claim native, host, or QEMU execution.
+
+- continuation-2026-07-26-host-package-activation: Current-source and history
+  audits found that hosted bootstrap still bypassed the registry package on a
+  fresh launch and installed the generated bare-metal Aetheric snapshot.
+  `install_host_wm_theme(theme_id)` now consumes only
+  `theme_package_render_snapshot(theme_id)` and installs that immutable
+  projection before backend/compositor creation; the default path resolves
+  `default_theme_id()`, so Stitch package CSS/material changes reach WM, GUI,
+  and Web through one identity. Existing explicit selection is preserved
+  through `active_wm_theme_snapshot_present()` plus the native-safe plain
+  snapshot getter, never the Cranelift-broken optional aggregate return.
+  Freestanding SimpleOS still uses its generated snapshot and dynamic
+  ThemeService notification remains explicitly out of this checkpoint.
+
+  The focused bootstrap contract passes 7/7 in interpreter mode, the direct
+  environment/runtime guard and diff checks pass, and independent
+  highest-capability Sol review ACCEPTS after rejecting and correcting the
+  unsafe optional-return branch. Lint reached unrelated current compiler
+  semantic failures and supplies no positive result. This is a reviewed
+  hosted source fix, not native framebuffer/event or QEMU proof.
