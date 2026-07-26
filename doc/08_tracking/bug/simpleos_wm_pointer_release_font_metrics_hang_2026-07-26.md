@@ -147,7 +147,39 @@ wm-text at=resolved:   valid=0 x74,  valid=1 x1
 legacy bitmap fallback (`draw_ir_text`) rather than real font metrics. Exactly
 one real measurement happened in the entire run — and it completed.
 
-## Probable root cause: module-global caches do not persist
+## REFUTED: "module-global caches do not persist" (rerun52)
+
+The direct measurement killed it. `from_cache` / `has_ttf` across one session:
+
+```
+  74  from_cache=1 has_ttf=0     <- cache HIT, cached renderer has no font
+  43  from_cache=0 has_ttf=0     <- miss, freshly loaded renderer also has no font
+   1  from_cache=0 has_ttf=1     <- the single successful font load
+```
+
+The loaded-face module-global cache **does** persist and serve — 74 hits. So
+there is no per-text re-parse of a 17MB face, and the "every node reloads the
+font" cost model below is wrong. Retained here as a corrected record rather
+than deleted, because it was reasoned from two real observations (`keys=0
+values=0`, `has_sffi_ttf()` false) and both were consistent with it.
+
+## The actual anomaly: the font never loads
+
+`has_ttf=0` on **117 of 118** resolves — including on cache hits, which means
+the cache is faithfully caching a renderer that carries no font. Exactly one
+load in the whole session succeeded. Consequences:
+
+- Nearly all WM text is drawn by the legacy bitmap fallback, not real metrics.
+- Those 117 calls return EARLY and are therefore CHEAP, so the "resolve path is
+  slow" story does not hold either — the stall is not explained by work done in
+  the resolver.
+
+Why the face fails to load is now the open question, and it is well-defined and
+independent of the pointer-release stall. It is also a product-quality defect in
+its own right: the desktop is rendering essentially all of its text without the
+font it reports using.
+
+## Old (superseded) cost model: module-global caches do not persist
 
 Three independent observations point at one defect:
 
@@ -186,6 +218,27 @@ with array-typed module-global writes degrading on this lane. It is NOT the
 hang (an empty cache makes the scan trivial), but it is a real and expensive
 perf defect — the cache exists precisely because re-resolving is the dominant
 render cost.
+
+## Stall point is build-dependent (layout-sensitive), stable within a build
+
+| run | stops at |
+|---|---|
+| rerun50 | past `at=candidate` and `at=resolve`, inside the resolver |
+| rerun51 | `at=begin` — inside `simpleos_default_font_asset_candidate()` |
+| rerun52 | `at=begin` — same as rerun51 (same build shape) |
+
+Always the **76th** `_wm_draw_ir_text` call, but the sub-step moves when
+unrelated code is added. Same layout sensitivity that made probing inside
+font_renderer.spl regress the lane outright. Any future attribution must
+account for this: a single run's stop line names a symptom position, not the
+defect.
+
+Worth noting for whoever picks this up: `simpleos_default_font_asset_candidate()`
+rebuilds the entire 16-entry candidate catalog on EVERY call — each entry
+constructed with several long string literals (copyright, table list, subsets,
+sha256 hex) — and the lookup path calls that builder more than once per
+invocation. It is called once per text draw. That is a genuine and easily fixed
+inefficiency (hoist to a cached catalog) regardless of whether it is this stall.
 
 ## What must NOT be done to "fix" this
 
