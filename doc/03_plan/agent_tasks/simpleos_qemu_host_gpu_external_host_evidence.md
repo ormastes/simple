@@ -4,6 +4,20 @@
 ## Status
 
 **Unavailable native-host rows are postponed until a prepared host is available.**
+This plan is the P1 execution owner for the critical pure-Simple
+`WM -> GUI/Web -> DrawIrComposition -> Engine2D` chain. CPU-SIMD is the exact
+oracle; Vulkan and Metal must retain device-origin readback and the same ordered
+input/event sequence. Electron is not a prerequisite and remains separately
+postponed under TODO 583.
+
+The parent acceptance and design links are:
+
+- `doc/03_plan/agent_tasks/wm_glass_theme_host_simpleos.md`
+- `doc/03_plan/agent_tasks/engine2d_four_backend_capture.md`
+- `doc/03_plan/sys_test/engine2d_four_backend_capture.md`
+- `doc/04_architecture/engine2d_four_backend_capture.md`
+- `doc/05_design/engine2d_four_backend_capture.md`
+
 QEMU receipts require a valid pure-Simple compiler. Diagnostic Stage3 hash
 `ff192f9d90af905c6ff460646afa380b4af7bb212106ab72195d07015239df9c`
 passes admission, and the Vulkan/CUDA daemon links through the corrected

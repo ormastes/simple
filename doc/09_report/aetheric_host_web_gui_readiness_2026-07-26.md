@@ -1,6 +1,13 @@
 # Aetheric host Web/GUI proof readiness — 2026-07-26
 
-Status: **BLOCKED before live production capture; no proof was created.**
+Status: **POSTPONED as noncritical; no live proof was created.**
+
+User priority now places the pure-Simple WM/GUI/Web/Engine2D chain ahead of
+Electron. The strict repository-local Electron 42.5.0 resolver and Aetheric
+runtime-identity admission were integrated through `7a03de1b4d`, but no
+compiler/provider input was admitted and no Electron process was launched.
+The separate WM-event provenance candidate did not pass final review and was
+not pushed. TODO 583 remains open at lower priority.
 
 This audit used the sparse linked worktree at `92ae794ba7` and the only
 eligible pure-Simple macOS binary:
@@ -74,16 +81,18 @@ events, device readback, or QEMU.
 
 ## Resume boundary
 
-The current-host scope is now Electron/Aetheric only. Install the pinned
-dependency without an implicit `npx` download:
+Resume this noncritical lane only after the critical pure WM/GUI/Web/Engine2D
+plan reaches an appropriate checkpoint and the user explicitly reactivates
+TODO 583. Install the pinned dependency without an implicit `npx` download:
 
 ```sh
 npm ci --prefix tools/electron-shell
-export PATH="$PWD/tools/electron-shell/node_modules/.bin:$PATH"
 ```
 
-Do not fabricate any item above or run the producer until its admitted inputs
-exist. The live owner must use the canonical command:
+The strict resolver uses only that worktree-local pinned installation; PATH,
+global, `npx`, and network fallback are rejected. Do not fabricate any item
+above or run the producer until its admitted inputs exist. The future live
+owner must use the canonical command:
 
 ```sh
 SIMPLE_BIN=/Users/ormastes/simple/bin/release/macos-arm64/simple \
@@ -97,6 +106,6 @@ Only after that command produces a retained proof may the pinned admission and
 then `check-wm-browser-event-routing-evidence.shs` be considered. This report
 claims readiness of source contracts only, never a live rendering PASS.
 
-Compiler-bridge, native GPU comparison, and x86/ARM QEMU execution are
-postponed to prepared external hosts. They remain open and are not prerequisites
-that Electron provisioning may silently replace.
+Compiler-bridge, native CPU-SIMD/Vulkan/Metal comparison, and x86/ARM QEMU
+execution are the critical prepared-host work. They remain open and cannot be
+replaced or closed by Electron provisioning.

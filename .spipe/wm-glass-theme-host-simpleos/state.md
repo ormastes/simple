@@ -508,3 +508,20 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   independent review. Missing Electron or producer prerequisites on this host
   remains a fail-closed blocker; it does not authorize implicit `npx`
   downloads, a seed compiler, fixture rendering, or synthetic evidence.
+- continuation-2026-07-26-pure-line-priority: User reprioritized Electron WM as
+  noncritical and postponed its live run. TODO 583 is now P3 and remains open;
+  no compiler/provider admission was requested, no Electron process launched,
+  and no live proof or PASS exists. Strict local Electron resolution and
+  Aetheric identity admission are integrated through `7a03de1b4d`; the
+  separate WM-event provenance candidate failed final review and was not
+  pushed.
+
+  The critical P1 lane is explicit under TODO 580:
+  pure-Simple WM -> GUI/Web semantic owners -> DrawIrComposition -> Engine2D
+  CPU-SIMD/Vulkan/Metal -> device-origin capture and ordered events -> x86/ARM
+  QEMU parity. It resumes only on prepared hosts with an admitted
+  source-matched pure-Simple compiler, immutable provider/runtime provenance,
+  frozen manifests, exact CPU oracle parity, backend/device identity, timing,
+  RSS, and independently reviewed artifacts. The authoritative plan and links
+  are `doc/03_plan/agent_tasks/wm_glass_theme_host_simpleos.md` and
+  `doc/03_plan/agent_tasks/simpleos_qemu_host_gpu_external_host_evidence.md`.

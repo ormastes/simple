@@ -1,8 +1,15 @@
 # WM Glass Theme Agent Tasks — TLDR
 
+- 2026-07-26 priority: the critical lane is pure-Simple
+  `WM -> GUI/Web -> DrawIrComposition -> Engine2D`, with exact CPU-SIMD,
+  Vulkan, and Metal capture/event comparison. It resumes on prepared hosts
+  under TODO 580 and the external-host plan.
+- Electron is a noncritical presentation/evidence wrapper. Resolver and
+  Aetheric identity hardening are integrated, but the live Electron run is
+  postponed under TODO 583 and does not gate the pure line.
 - 2026-07-25: hosted 16x16 pixels are diagnostic-only; x86 and ARM preflights
   pass without QEMU. Next: native `to_i64` fixture -> exact-current binary ->
-  production host -> x86 QEMU -> ARM QEMU -> aggregate SSpec.
+  CPU-SIMD oracle -> Vulkan/Metal -> x86 QEMU -> ARM QEMU -> aggregate SSpec.
 
 - Active integration worktree: `build/worktrees/wm-glass-theme`.
 - Host and SimpleOS bootstrap ownership is now unified: host installs the
@@ -23,6 +30,7 @@
   and push.
 
 ```text
-compiler preflight -> host capture -> x86 QEMU -> ARM QEMU/input
-                   -> aggregate artifact reader -> final review
+compiler preflight -> WM/GUI/Web scene -> CPU-SIMD oracle
+                   -> Vulkan + Metal device captures
+                   -> x86 + ARM QEMU/input -> aggregate -> final review
 ```

@@ -98,28 +98,56 @@ overlapping dirty work and remains read-only for this lane.
 
 #### Scope decision — 2026-07-26
 
-The only active execution lane on this host is the Electron/Aetheric browser
-surface. Provision the repository-pinned Electron dependency with:
+The critical product lane is the pure-Simple rendering chain:
 
-```sh
-npm ci --prefix tools/electron-shell
-export PATH="$PWD/tools/electron-shell/node_modules/.bin:$PATH"
+```text
+WM -> canonical GUI widget/scene semantics
+   -> Web semantic/layout owner
+   -> DrawIrComposition
+   -> Engine2D CPU-SIMD / Vulkan / Metal
+   -> device-origin capture + ordered input/event receipt
 ```
 
-Then run the full canonical producer command documented in
-`doc/09_report/aetheric_host_web_gui_readiness_2026-07-26.md`; missing inputs
-must fail closed. Retain its generated HTML, ARGB files, PNG, computed-style
-observation, Electron log, UI-access history, proof envelope, exact hashes, and
-event-routing receipt. TODO 583 owns this current-host work.
+Electron is only an optional presentation/evidence wrapper around that chain.
+Its live Aetheric render/event/capture run is noncritical and postponed under
+TODO 583. The pinned resolver and Aetheric identity/admission hardening are
+integrated, but no Electron admission, launch, screenshot, event receipt, or
+PASS is required before the critical pure line proceeds.
 
-All non-Electron native execution is postponed to prepared external hosts:
-the final pure-Simple bridge/runtime capsule, Vulkan/Metal/SIMD device
-comparison, x86 QEMU capture/events, and ARM64 QMP framebuffer/input/NEON
-receipt. These rows remain open under their existing TODOs and acceptance
-criteria; postponement is not completion or exclusion.
+The pure line stays P1 and open under TODO 580. Execution is postponed only
+until a prepared host has the matching device/runtime and an admitted
+source-matched pure-Simple compiler; postponement is not completion:
+
+1. Restore the source-matched pure-Simple compiler/runtime/provider capsule.
+   Reject Rust seed, fallback, dirty-source, or mutable-provider inputs.
+2. Establish the CPU-SIMD exact-pixel oracle and real event sequence on native
+   x86_64, then retain the equivalent x86 QEMU and ARM64 QEMU SIMD receipts.
+3. Run Vulkan on a prepared Vulkan host and Metal on macOS. Each row must prove
+   backend selection, submission/completion, device-origin readback, exact
+   parity with the CPU oracle, stable device identity, timing, and RSS.
+4. Drive the same Aetheric scene and focus/pointer/key/text sequence through
+   WM, GUI, and Web owners; compare dimensions, ARGB, material/font witnesses,
+   state transitions, and ordered event receipts across backends.
+5. Admit a row only after independent high review; then update the aggregate
+   SSpec/manual. A missing backend or host remains explicitly open.
 
 - External compiler/GPU owner: prepared-host operator under TODO 580 and
   `doc/03_plan/agent_tasks/simpleos_qemu_host_gpu_external_host_evidence.md`.
+- Backend capture contract:
+  `doc/03_plan/agent_tasks/engine2d_four_backend_capture.md`,
+  `doc/03_plan/sys_test/engine2d_four_backend_capture.md`,
+  `doc/04_architecture/engine2d_four_backend_capture.md`, and
+  `doc/05_design/engine2d_four_backend_capture.md`.
+- WM/GUI/Web contracts:
+  `doc/04_architecture/wm_glass_theme_host_simpleos.md`,
+  `doc/05_design/wm_glass_theme_host_simpleos.md`, and
+  `doc/03_plan/sys_test/wm_glass_theme_host_simpleos.md`.
+- Current blocker/evidence reports:
+  `doc/09_report/cpu_simd_engine2d_evidence_2026-07-26.md`,
+  `doc/09_report/wm_current_vulkan_live_2026-07-26.md`,
+  `doc/09_report/macos_vulkan_provider_micro_probe_2026-07-26.md`,
+  `doc/09_report/wm_current_metal_live_probe_2026-07-26.md`, and
+  `doc/09_report/macos_metal_msl_library_micro_diagnostic_2026-07-26.md`.
 - x86 resume command:
   `BUILD_DIR=build/simpleos_wm_fullscreen_evidence SIMPLE_BIN=<admitted-simple> sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs`.
 - ARM resume commands:
@@ -137,12 +165,14 @@ criteria; postponement is not completion or exclusion.
 2026-07-26 current checkpoint: source/interpreter regression is complete for
 theme-package loading (11/11), Web CSS authority (5/5), and retained native
 linker policy (15/15). The canonical archive owner repair is integrated, but
-native/live rows remain open: Electron is active on this host, while the
-compiler/GPU/QEMU rows are externally postponed. No current native Aetheric
-producer or Electron proof exists, and neither x86 nor ARM has an admitted
-compiler/frozen manifest for a canonical QEMU launch. The external seed-driven
-x86 job is not admissible evidence. Current details and remaining gates are recorded in
-`.spipe/wm-glass-theme-host-simpleos/state.md` and
+native/live rows remain open. The pure WM/GUI/Web/Engine2D line is the critical
+priority and resumes on prepared hosts; Electron is noncritical and postponed.
+No current native Aetheric producer or Electron proof exists, and neither x86
+nor ARM has an admitted compiler/frozen manifest for a canonical QEMU launch.
+The external seed-driven x86 job is not admissible evidence. Current details
+and remaining gates are recorded in
+`.spipe/wm-glass-theme-host-simpleos/state.md`,
+`doc/03_plan/agent_tasks/simpleos_qemu_host_gpu_external_host_evidence.md`, and
 `doc/09_report/aetheric_host_web_gui_readiness_2026-07-26.md`.
 
 2026-07-25 checkpoint: the 16x16 hosted capture is **DIAGNOSTIC ONLY**.

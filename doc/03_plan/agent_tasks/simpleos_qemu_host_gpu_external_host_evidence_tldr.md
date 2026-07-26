@@ -1,8 +1,12 @@
 <!-- codex-plan -->
 # SimpleOS QEMU Host-GPU External Hosts — TLDR
 
-Status: **external rows postponed; current-host work active; not complete**.
+Status: **critical pure WM/GUI/Web/Engine2D rows postponed to prepared hosts;
+not complete**.
 
+- This is the P1 execution handoff for CPU-SIMD oracle, Vulkan, Metal, x86
+  QEMU, and ARM64 QEMU capture/event parity. Electron is noncritical and
+  separately postponed under TODO 583.
 - GPU TODO119 (`mac_gpu_backend_evidence_2026-07-10.md`) owns macOS deployment.
 - TODO544 owns Windows DirectX, macOS Metal, current-source CUDA, and CUDA QEMU receipts; retained-PTX CUDA readback passed locally.
 - TODO564 retains two distinct local UUID-hash identities; MIG and CUDA QEMU evidence remain open.
