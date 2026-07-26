@@ -210,6 +210,25 @@ fn finalize_decl_visibility(decl_id: i64, visibility: text) -> i64:
     decl_set_visibility_text(decl_id, visibility)
     decl_id
 
+fn parse_mod_decl_with_visibility(visibility: text) -> i64:
+    parser_advance()
+    var mod_last_seg = ""
+    for i in 0..100:
+        var segment = ""
+        if par_kind_get() == 6:
+            segment = par_text_get()
+        else:
+            segment = use_kw_segment_text(par_kind_get())
+        if segment == "":
+            parser_error("expected module name after 'mod'")
+            return -1
+        mod_last_seg = segment
+        parser_advance()
+        if par_kind_get() != 164:
+            break
+        parser_advance()
+    finalize_decl_visibility(decl_use_import("." + mod_last_seg, [], 0), visibility)
+
 fn parse_module_decl_with_visibility(loop_index: i64, visibility: text) -> i64:
     if par_kind_get() == 53:
         parser_advance()
@@ -262,6 +281,8 @@ fn parse_module_decl_with_visibility(loop_index: i64, visibility: text) -> i64:
     if par_kind_get() == 26:
         # `pub export ...` — delegate to export-decl parser
         return parse_export_decl()
+    if par_kind_get() == 6 and par_text_get() == "mod":
+        return parse_mod_decl_with_visibility(visibility)
     parser_error("expected declaration after visibility modifier")
     -1
 
@@ -433,20 +454,8 @@ fn parse_module_body():
             # SIBLING import (`.member`) — the path after `mod` is rooted at
             # the declaring file's own package, so the last segment names the
             # sibling file; the relative-import machinery resolves the rest.
-            parser_advance()
-            var mod_last_seg = ""
-            if par_kind_get() == 6:
-                mod_last_seg = par_text_get()
-                parser_advance()
-                while par_kind_get() == 164:
-                    parser_advance()
-                    if par_kind_get() == 6:
-                        mod_last_seg = par_text_get()
-                        parser_advance()
-                    else:
-                        break
-            if mod_last_seg != "":
-                val mod_d = decl_use_import("." + mod_last_seg, [], 0)
+            val mod_d = parse_mod_decl_with_visibility("private")
+            if mod_d >= 0:
                 module_add_decl(mod_d)
                 parser_reset_pending_vhdl_decorators()
         elif par_kind_get() == 6 and is_domain_block_kind(par_text_get()) and current_ident_followed_by_lbrace():

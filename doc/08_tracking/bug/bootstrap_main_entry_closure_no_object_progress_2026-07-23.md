@@ -82,3 +82,21 @@ specific diagnostic within the bootstrap verification window.
 Continue from the Stage 2 interpreter bug. Reuse the bounded worker command
 with its isolated cache and keep `SIMPLE_NO_STUB_FALLBACK=1`; do not repeat the
 now-resolved entry-closure profiling cycle.
+
+## 2026-07-26 native incremental follow-up
+
+The retained native pure-Simple compiler bypassed the seed-interpreter timing
+wall and parsed the standalone driver closure in 44 seconds. It then failed
+specifically on `pub mod` declarations because the parser's visibility
+dispatcher handled public functions, types, values, uses, and exports but
+omitted the existing soft-keyword `mod` path.
+
+`parse_module_decl_with_visibility` now lowers `pub mod` through the same
+relative sibling import representation as private `mod`; the focused parser
+regression passes 1/1. A temporary private-`mod` bridge let the older compiler
+consume the fixed parser source and parse the full closure in 65 seconds, but
+that generation segfaulted while lowering `src/compiler/80.driver/main.spl`
+in HIR. Canonical `pub mod` source was restored immediately and no bridge
+artifact was retained. The next incremental generation must start from a
+compiler that has the existing standalone-main HIR repair; do not return to
+the seed-interpreted closure path.
