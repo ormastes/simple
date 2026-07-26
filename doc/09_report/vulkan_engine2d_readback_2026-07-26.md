@@ -53,11 +53,18 @@ The first cross-module `Engine2DReadback` return is then corrupted:
 `pixels.len()` is `-1`, handle and device identity are zero, and GDB records a
 segfault in `write_u32_pixels`. No readback pass is claimed.
 
+Disassembly identifies the cause: the returned class pointer carries
+`TAG_HEAP`, but LLVM aggregate field reads and writes used it directly.
+`untag_aggregate_base_ptr` now conditionally strips that tag before field GEP.
+The focused x86_64/RV32 IR regression passes 2/2. The cached Stage3 predates
+this source fix, so hardware evidence remains blocked pending a bounded
+source-matched compiler build.
+
 ## Resume
 
-Fix the cached LLVM aggregate-return ABI described in
-`doc/08_tracking/bug/native_engine2d_readback_aggregate_abi_2026-07-26.md`,
-then run:
+Deploy the source fix described in
+`doc/08_tracking/bug/native_engine2d_readback_aggregate_abi_2026-07-26.md`
+through the bounded incremental compiler lane, then run:
 
 ```sh
 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json \

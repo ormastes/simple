@@ -55,7 +55,9 @@ count as hardware passes.
   owner-module probe helper fixes the cached enum comparison and strict Vulkan
   creation passes. The next cached LLVM defect corrupts the cross-module
   `Engine2DReadback` aggregate (`pixels.len() == -1`) and segfaults the evidence
-  serializer. See
+  serializer. Source now conditionally removes `TAG_HEAP` before LLVM aggregate
+  field GEP, with x86_64/RV32 read/write IR regressions passing 2/2. A bounded
+  source-matched compiler build and hardware rerun remain. See
   `doc/08_tracking/bug/native_engine2d_readback_aggregate_abi_2026-07-26.md`.
 - Cached-native Metal source emission succeeds with four hash markers. Live
   Metal submit/readback remains blocked on a prepared macOS host; resume with
