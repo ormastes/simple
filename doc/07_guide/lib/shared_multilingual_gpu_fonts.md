@@ -803,7 +803,7 @@ native device-loss injection remains the NFR-007 execution gate.
 
 Keep the five primary SSpec steps exact: `Load the pinned multilingual
 font manifest`; `Accept exact-face-bound simple-script shaping`; `Prepare one
-shared font batch for 2D`; `Emit the selected font composite program and
+shared font batch for 2D and 3D`; `Emit the selected font composite program and
 plan compilation`; `Prove native submission and device readback`. Resolved-host,
 completion, and folded secondary detail steps use the vocabulary recorded in
 the authoritative system-test plan below.
@@ -817,8 +817,9 @@ SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/03_system/app/simple_2d/feature/s
 SIMPLE_NO_STUB_FALLBACK=1 bin/simple test test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl --mode=native
 ```
 
-For each of the 11 pairs in the authoritative plan, generate its mirrored
-scenario manual after that executable spec passes with
+For each acceptance pair and every changed SSpec listed in the current
+[all-items verification report](../../09_report/shared_multilingual_gpu_fonts_all_items_verification.md),
+generate its mirrored scenario manual after that executable spec passes with
 `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`. Accept the
 manual only when docgen reports completion with `0 stubs`, it reads as a useful
 operator manual, and `find doc/06_spec -name '*_spec.spl' | wc -l` prints `0`.

@@ -14,6 +14,9 @@ use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 use std.nogc_sync_mut.io.font_sffi.{FontHandle, load_font, free_font, glyph_index, font_face_identity, font_face_is_live}
 use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer, resolve_font_metrics_with_language, font_renderer_register_selected_bytes, font_renderer_use_registered_selected_bytes_only}
 use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels}
+use std.common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, draw_ir_batch, draw_ir_composition,
+    draw_ir_embedding_config, draw_ir_text_shaped_font}
+use std.common.ui.draw_ir_sdn.{draw_ir_to_sdn, sdn_to_draw_ir}
 use std.skia.entity.font.{SkFont, sk_font_new, sk_font_style_normal, sk_typeface_from_attached_font}
 use std.skia.feature.glyph.ot_parser.{OtFont, find_table, parse_offset_table, read_u16_be}
 use std.skia.feature.glyph.ot_parser_cmap.{cmap_glyph_id}
@@ -417,11 +420,28 @@ describe "shared font shaping acceptance":
         val hindi = resolve_font_metrics_with_language("sans-serif", "हिन्दी", 32, "hi")
         expect(arabic.reason).to_equal("resolved")
         expect(arabic.glyph_run.valid).to_be(true)
+        var positioned = false
+        for y in arabic.glyph_run.ys:
+            if y != 0: positioned = true
+        expect(positioned).to_be(true)
         expect(hindi.reason).to_equal("resolved")
         expect(hindi.glyph_run.valid).to_be(true)
         var renderer = FontRenderer.new()
         expect(renderer.try_load_registered_identity(arabic.identity)).to_be(true)
-        val arabic_batch = renderer.prepare_selected_glyph_run(arabic.glyph_run, 0xFFFFFFFFu32, 32)
+        val command = draw_ir_text_shaped_font("arabic", 0, 0, "العربية", 0xFFFFFFFFu32,
+            arabic.family, arabic.identity, arabic.advances, arabic.width, arabic.line_height,
+            32, arabic.glyph_run)
+        val encoded = draw_ir_to_sdn(draw_ir_composition("shaping", "arabic",
+            DRAW_IR_BACKEND_GPU, [draw_ir_batch("shaping", DRAW_IR_BACKEND_GPU,
+                draw_ir_embedding_config("surface", "arabic", 0, 0, arabic.width,
+                    arabic.line_height, 0, 1000, false), [command])]))
+        val round_tripped = sdn_to_draw_ir(encoded).batches[0].commands[0].glyph_run
+        expect(round_tripped.valid).to_be(true)
+        expect(round_tripped.glyph_ids).to_equal(arabic.glyph_run.glyph_ids)
+        expect(round_tripped.xs).to_equal(arabic.glyph_run.xs)
+        expect(round_tripped.ys).to_equal(arabic.glyph_run.ys)
+        expect(round_tripped.clusters).to_equal(arabic.glyph_run.clusters)
+        val arabic_batch = renderer.prepare_selected_glyph_run(round_tripped, 0xFFFFFFFFu32, 32)
         expect(arabic_batch.valid).to_be(true)
         expect(arabic_batch.quads.len()).to_be_greater_than(0)
         expect(renderer.try_load_registered_identity(hindi.identity)).to_be(true)

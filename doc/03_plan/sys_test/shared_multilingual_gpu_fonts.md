@@ -44,8 +44,8 @@ Focused exact-face unit gates (execution pending; per-row manual status):
 |---|---|
 | `test/01_unit/lib/skia/selected_devanagari_spec.spl` | `doc/06_spec/01_unit/lib/skia/selected_devanagari_spec.md` |
 | `test/01_unit/lib/skia/selected_arabic_spec.spl` | `doc/06_spec/01_unit/lib/skia/selected_arabic_spec.md` |
-| `test/01_unit/app/release/install_font_assets_spec.spl` | `doc/06_spec/01_unit/app/release/install_font_assets_spec.md` (manual draft; canonical generation pending) |
-| `test/01_unit/app/release/release_archive_layout_spec.spl` | `doc/06_spec/01_unit/app/release/release_archive_layout_spec.md` (manual draft; canonical generation pending) |
+| `test/01_unit/app/release/install_font_assets_spec.spl` | `doc/06_spec/01_unit/app/release/install_font_assets_spec.md` (manual present; current zero-stub generation proof pending) |
+| `test/01_unit/app/release/release_archive_layout_spec.spl` | `doc/06_spec/01_unit/app/release/release_archive_layout_spec.md` (manual present; current zero-stub generation proof pending) |
 
 Supporting conditional pair: `test/02_integration/rendering/vulkan_font_composite_classification_spec.spl`
 and `doc/06_spec/02_integration/rendering/vulkan_font_composite_classification_spec.md`.
@@ -142,6 +142,12 @@ with the one `FontRenderConfig`; no parallel step/helper vocabulary is added.
 
 Each listed case count is a minimum and includes happy, boundary, and failure
 behavior.
+
+The current all-items classification, missing GSUB/GPOS mirrors, owner commands,
+and runtime/native blockers are authoritative in
+`doc/09_report/shared_multilingual_gpu_fonts_all_items_verification.md`.
+Historical rows below remain useful evidence history, but do not override that
+current report or promote a row from static evidence.
 
 | Requirement | Executable/manual | Required cases | Current evidence |
 |---|---|---|---:|

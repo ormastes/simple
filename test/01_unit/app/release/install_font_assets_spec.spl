@@ -5,13 +5,14 @@ immutable font bundle, root license, and notices in canonical installed/package 
 """
 
 use std.spec.*
-use std.io_runtime.{rt_file_read_text}
+use std.io_runtime.{dir_create, dir_remove, file_read, is_dir}
+use std.process.{run}
 
 describe "release installer font assets":
     # @req REQ-004 REQ-014
     it "should install only the preflighted immutable font bundle through one share root":
-        step("Verify immutable font assets and notices in release layouts")
-        val source = rt_file_read_text("src/app/release/install.spl") ?? ""
+        step("Load the pinned multilingual font manifest")
+        val source = file_read("src/app/release/install.spl")
         val font_copy = source.slice(source.index_of("fn copy_font_tree"), source.index_of("fn copy_file_unchanged"))
 
         expect(source).to_contain("copy_font_tree(src: script_dir + \"/assets/fonts\"")
@@ -38,9 +39,9 @@ describe "release installer font assets":
 
     # @req REQ-004 REQ-014
     it "should stage fonts and root notices in every host release package":
-        step("Verify immutable font assets and notices in release layouts")
-        val workflow = rt_file_read_text(".github/workflows/release.yml") ?? ""
-        val nsis = rt_file_read_text("config/packaging/windows/simple.nsi") ?? ""
+        step("Load the pinned multilingual font manifest")
+        val workflow = file_read(".github/workflows/release.yml")
+        val nsis = file_read("config/packaging/windows/simple.nsi")
 
         expect(workflow).to_contain("cp -r assets \"${PKG_DIR}/\"")
         expect(workflow).to_contain("cp -r assets \"$PKG_ROOT/\"")
@@ -58,19 +59,22 @@ describe "release installer font assets":
         expect(nsis).to_contain("File \"${SOURCE_DIR}\\THIRD_PARTY_NOTICES.md\"")
         expect(nsis).to_contain("\"SIMPLE_ASSET_ROOT\" \"$INSTDIR\"")
 
-        val dist = rt_file_read_text("src/lib/nogc_sync_mut/package/dist.spl") ?? ""
+        val dist = file_read("src/lib/nogc_sync_mut/package/dist.spl")
         expect(dist).to_contain("[\"-r\", \"assets\", \"\{pkg_dir\}/\"]")
         expect(dist).to_contain("[\"LICENSE\", \"THIRD_PARTY_NOTICES.md\", \"\{pkg_dir\}/\"]")
         expect(dist).to_contain("else: \"simple-runtime\"")
         expect(dist).to_contain("set SIMPLE_ASSET_ROOT=%SCRIPT_DIR%..")
         expect(dist).to_contain("export SIMPLE_ASSET_ROOT=\"$SCRIPT_DIR/..\"")
+        expect(dist.index_of("self.copy_sources(pkg_dir)") < dist.index_of("self.create_archive(platform_name, pkg_dir, platform)")).to_be(true)
+        expect(dist).to_contain("zip -0 -r -q --symlinks")
+        expect(dist).to_contain("rt_process_run(\"tar\", [\"-czf\", archive, \"-C\", self.config.output_dir, pkg_name])")
 
         for path in [
             "src/lib/nogc_sync_mut/package/build.spl",
             "src/lib/nogc_async_mut/package/build.spl",
             "src/lib/gc_async_mut/package/build.spl"
         ]:
-            val build = rt_file_read_text(path) ?? ""
+            val build = file_read(path)
             expect(build).to_contain("val assets_result = process_run(\"cp\", [\"-r\", \"assets\", tmp_dir])")
             expect(build).to_contain("file_copy(\"THIRD_PARTY_NOTICES.md\", tmp_dir + \"/THIRD_PARTY_NOTICES.md\")")
             expect(build).to_contain("if platform.starts_with(\"windows\"): \"simple.exe\" else: \"simple\"")
@@ -86,9 +90,47 @@ describe "release installer font assets":
             "src/lib/nogc_async_mut/package/installer/staging.spl",
             "src/lib/gc_async_mut/package/installer/staging.spl"
         ]:
-            val staging = rt_file_read_text(path) ?? ""
+            val staging = file_read(path)
             expect(staging).to_contain("\{staging\}/usr/local/share/simple/assets/fonts/")
             expect(staging).to_contain("\{staging\}/usr/local/share/simple/THIRD_PARTY_NOTICES.md")
             expect(staging).to_contain("\{staging\}/assets/fonts/")
             expect(staging).to_contain("\{staging\}/THIRD_PARTY_NOTICES.md")
             expect(staging).to_contain("export SIMPLE_ASSET_ROOT=/usr/local/share/simple")
+
+    # @req REQ-004 REQ-005
+    # @req NFR-001 NFR-003
+    it "should preserve every font and legal byte through install package and archive layouts":
+        step("Load the pinned multilingual font manifest")
+        val work = "/tmp/simple_font_distribution_byte_identity_spec"
+        if is_dir(work):
+            expect(dir_remove(work, recursive: true)).to_be(true)
+        expect(dir_create(work + "/install/share/simple/assets", recursive: true)).to_be(true)
+        expect(dir_create(work + "/package/assets", recursive: true)).to_be(true)
+        expect(dir_create(work + "/extract", recursive: true)).to_be(true)
+        expect(dir_create(work + "/zip-extract", recursive: true)).to_be(true)
+        val command = "set -eu; " +
+            "cp -R assets/fonts \"{work}/install/share/simple/assets/\"; " +
+            "cp LICENSE THIRD_PARTY_NOTICES.md \"{work}/install/share/simple/\"; " +
+            "cp -R \"{work}/install/share/simple/assets/fonts\" \"{work}/package/assets/\"; " +
+            "cp \"{work}/install/share/simple/LICENSE\" \"{work}/install/share/simple/THIRD_PARTY_NOTICES.md\" \"{work}/package/\"; " +
+            "diff -qr assets/fonts \"{work}/install/share/simple/assets/fonts\" >/dev/null; " +
+            "diff -qr assets/fonts \"{work}/package/assets/fonts\" >/dev/null; " +
+            "cmp -s LICENSE \"{work}/install/share/simple/LICENSE\"; " +
+            "cmp -s THIRD_PARTY_NOTICES.md \"{work}/install/share/simple/THIRD_PARTY_NOTICES.md\"; " +
+            "cmp -s LICENSE \"{work}/package/LICENSE\"; " +
+            "cmp -s THIRD_PARTY_NOTICES.md \"{work}/package/THIRD_PARTY_NOTICES.md\"; " +
+            "tar -czf \"{work}/package.tar.gz\" -C \"{work}\" package; " +
+            "tar -xzf \"{work}/package.tar.gz\" -C \"{work}/extract\"; " +
+            "diff -qr assets/fonts \"{work}/extract/package/assets/fonts\" >/dev/null; " +
+            "cmp -s LICENSE \"{work}/extract/package/LICENSE\"; " +
+            "cmp -s THIRD_PARTY_NOTICES.md \"{work}/extract/package/THIRD_PARTY_NOTICES.md\"; " +
+            "(cd \"{work}\" && zip -0 -r -q package.zip package); " +
+            "unzip -q \"{work}/package.zip\" -d \"{work}/zip-extract\"; " +
+            "diff -qr assets/fonts \"{work}/zip-extract/package/assets/fonts\" >/dev/null; " +
+            "cmp -s LICENSE \"{work}/zip-extract/package/LICENSE\"; " +
+            "cmp -s THIRD_PARTY_NOTICES.md \"{work}/zip-extract/package/THIRD_PARTY_NOTICES.md\"; " +
+            "printf 'font_distribution_byte_identity=pass\\n'"
+        val result = run("/bin/sh", ["-c", command])
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout).to_contain("font_distribution_byte_identity=pass")
+        expect(dir_remove(work, recursive: true)).to_be(true)

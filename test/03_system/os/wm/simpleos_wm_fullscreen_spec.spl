@@ -1,5 +1,5 @@
 # codex-system-test
-# @req REQ-2 REQ-5 REQ-7 REQ-8 NFR-7
+# @req REQ-011
 # @evidence-display: links
 """# SimpleOS WM Fullscreen
 
@@ -7,6 +7,15 @@ Runs the existing fail-closed x86_64 QEMU evidence wrapper once. An unavailable
 runtime remains an explicit nonzero, non-PASS result. A successful run must
 retain the production guest font crop, corrupt-copy rejection, three QMP
 captures, and correlated keyboard and pointer evidence in one bundle.
+
+Resume a blocked row only with an admitted pure-Simple CLI:
+
+```bash
+BUILD_DIR=build/test-simpleos-wm-fullscreen-live \
+REPORT_PATH=build/test-simpleos-wm-fullscreen-live/report.md \
+SIMPLE_BIN=/path/to/admitted/pure-simple \
+sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs
+```
 """
 use std.io_runtime.{file_exists, file_hash_sha256, file_read, file_read_bytes, process_run}
 use std.spec.*
@@ -36,7 +45,8 @@ describe "SimpleOS production WM fullscreen":
     # @capture(gui)
     # @capture(artifact)
     it "should retain one valid QEMU font and input bundle or report runtime unavailability":
-        step("Boot the canonical pure-Simple x86_64 desktop through the production QEMU wrapper")
+        step("Capture SimpleOS pinned-font pixels")
+        step("Trace the production font and event boundary")
         val (out, _err, code) = process_run(
             "/usr/bin/env",
             [
@@ -46,9 +56,13 @@ describe "SimpleOS production WM fullscreen":
                 WRAPPER
             ]
         )
+        val scene_route = file_read("src/lib/common/ui/window_scene_draw_ir.spl")
+        expect(scene_route).to_contain("fn _wm_draw_ir_text(")
+        expect(scene_route).to_contain("draw_ir_text_resolved_font(component_id, x, legacy_y, value, color, metrics.family, metrics.identity, metrics.advances")
+        expect(scene_route).to_contain("_wm_draw_ir_text(\"taskbar-clock\"")
 
         if code == 0:
-            step("Load the retained production evidence bundle")
+            step("Submit the boundary output to its canonical consumer")
             val evidence = file_read(EVIDENCE_PATH)
             val report = file_read(REPORT_PATH)
             expect(file_exists(BUILD_DIR + "/font-region.rgb")).to_be(true)
@@ -58,7 +72,7 @@ describe "SimpleOS production WM fullscreen":
             expect(file_exists(BUILD_DIR + "/restored.ppm")).to_be(true)
             expect(file_exists(BUILD_DIR + "/browser-event.ppm")).to_be(true)
 
-            step("Prove the pinned guest font crop and corrupt-copy rejection")
+            step("Correlate visible pixels and input with one frame identity")
             expect(out).to_contain("simpleos_wm_fullscreen_status=pass")
             expect(evidence).to_contain("simpleos_wm_fullscreen_font_guest_path=/SYS/FONTS/NOTOSANS")
             expect(evidence).to_contain("simpleos_wm_fullscreen_font_asset_bytes=1708408")
@@ -81,7 +95,6 @@ describe "SimpleOS production WM fullscreen":
                 "status=engine2d_rendered"
             )
 
-            step("Prove detected scanout and retained QMP frames")
             val scanout_pitch = evidence_i64(evidence, "simpleos_wm_fullscreen_scanout_byte_pitch")
             val scanout_height = evidence_i64(evidence, "simpleos_wm_fullscreen_scanout_height")
             expect(evidence_i64(evidence, "simpleos_wm_fullscreen_scanout_address")).to_be_greater_than(0)
@@ -196,7 +209,7 @@ describe "SimpleOS production WM fullscreen":
             expect(evidence).to_contain("simpleos_wm_fullscreen_simple_bin_status=pass")
             expect(report).to_contain("- status: pass")
         else:
-            step("Keep an unavailable runtime explicit and reject PASS promotion")
+            step("Reject disconnected stale or replayed evidence")
             expect(code).to_be_greater_than(0)
             expect(out).to_contain("simpleos_wm_fullscreen_status=fail")
             expect(out).to_contain("simpleos_wm_fullscreen_reason=")

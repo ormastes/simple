@@ -6,6 +6,7 @@ use std.skia.feature.shaper.feature_tags.{OpenTypeFeature, feature_tag}
 use std.skia.feature.shaper.font_fallback.{FallbackChain, fallback_chain_new, fallback_chain_add, fallback_chain_font_for_script, fallback_chain_font_for_run, system_default_chain}
 use std.skia.feature.shaper.shaper.{Shaper, ShapedRun, ShapedGlyph, ArabicJoinForm, IndicClass, ThaiClass, MyanmarClass, KhmerClass, TibetanClass, HangulClass, HebrewClass, MongolianClass, shaper_new, shaper_with_features, shaper_with_ot_font, shaper_with_ot_face, shaped_run_to_font_glyph_run, ascii_to_codepoints, shaper_shape, shaper_shape_with_language, arabic_join_form, devanagari_classify, classify_thai_char, classify_myanmar_char, classify_khmer_char, classify_tibetan_char, classify_hangul_char, classify_hebrew_char, classify_mongolian_char}
 use std.skia.feature.glyph.ot_parser.{parse_offset_table, find_table, read_u16_be, read_u32_be}
+use std.skia.feature.glyph.ot_parser_cmap.{cmap_glyph_id}
 use std.skia.feature.glyph.ot_parser_metrics.{parse_hmtx}
 use std.skia.entity.font.{sk_font_default, sk_typeface_from_name, sk_typeface_from_attached_font, sk_font_new, sk_font_style_normal}
 use std.skia.entity.geometry.{SkPoint}
@@ -323,8 +324,7 @@ describe "Shaper":
         expect(handle.is_live()).to_equal(false)
         expect(get_line_height(handle, 12.0)).to_equal(0)
         free_font(handle)
-
-    it "keeps a bound identity run incomplete when OpenType features were requested":
+    it "applies a requested feature through the selected OpenType plan":
         val path = "assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf"
         val loaded = load_font(path)
         expect(loaded).to_not_be_nil()
@@ -335,11 +335,10 @@ describe "Shaper":
         val bound = shaper_with_ot_face(shaper_with_features(shaper_new(fallback_chain_new(font)), [OpenTypeFeature.Kerning]), handle.handle, parsed.unwrap())
         val run = shaper_shape(bound, [65u32], font, 0.0, 0.0)[0]
         expect(run.glyph_indices_valid).to_equal(true)
-        expect(run.substitution_complete).to_equal(false)
-        expect(run.positioning_complete).to_equal(false)
-        expect(shaped_run_to_font_glyph_run(run).valid).to_equal(false)
+        expect(run.substitution_complete).to_equal(true)
+        expect(run.positioning_complete).to_equal(true)
+        expect(shaped_run_to_font_glyph_run(run).valid).to_equal(true)
         free_font(handle)
-
     it "matches the pinned HarfBuzz Arabic and Urdu default-instance oracles":
         val path = "assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf"
         val loaded = load_font(path)
@@ -349,7 +348,8 @@ describe "Shaper":
         expect(parsed).to_not_equal(None)
         val font = sk_font_new(sk_typeface_from_attached_font("Noto Sans Arabic", sk_font_style_normal(), path, handle.handle), 32.0)
         val bound = shaper_with_ot_face(shaper_new(fallback_chain_new(font)), handle.handle, parsed.unwrap())
-        val arabic = shaper_shape_with_language(bound, [1575u32, 1604u32, 1593u32, 1585u32, 1576u32, 1610u32, 1577u32], font, 0.0, 0.0, "ar")[0]
+        val arabic_codepoints = [1575u32, 1604u32, 1593u32, 1585u32, 1576u32, 1610u32, 1577u32]
+        val arabic = shaper_shape_with_language(bound, arabic_codepoints, font, 0.0, 0.0, "ar")[0]
         expect arabic.language to_equal "ar"
         expect arabic.is_rtl to_equal true
         expect arabic.glyph_indices_valid to_equal true
@@ -368,9 +368,9 @@ describe "Shaper":
             expect arabic.glyphs[oracle_index].x_offset to_equal arabic_offsets[oracle_index]
             expect arabic.glyphs[oracle_index].y_offset to_equal arabic_y_offsets[oracle_index]
             expect arabic.positions[oracle_index].y to_equal -arabic_y_offsets[oracle_index]
+            expect arabic.glyphs[oracle_index].join_form to_equal arabic_join_form(arabic_codepoints, arabic.glyphs[oracle_index].source_index)
             oracle_index = oracle_index + 1
         expect shaped_run_to_font_glyph_run(arabic).valid to_equal true
-
         val urdu = shaper_shape_with_language(bound, [1575u32, 1585u32, 1583u32, 1608u32], font, 0.0, 0.0, "ur")[0]
         expect urdu.language to_equal "ur"
         expect urdu.glyph_indices_valid to_equal true
@@ -389,13 +389,25 @@ describe "Shaper":
             expect urdu.glyphs[oracle_index].y_offset to_equal 0.0
             oracle_index = oracle_index + 1
         expect shaped_run_to_font_glyph_run(urdu).valid to_equal true
-
         val marked = shaper_shape_with_language(bound, [1576u32, 1614u32], font, 0.0, 0.0, "ar")[0]
         expect marked.substitution_complete to_equal false
         expect marked.positioning_complete to_equal false
         expect shaped_run_to_font_glyph_run(marked).valid to_equal false
         free_font(handle)
-
+    it "keeps GSUB completion independent and rolls back when GPOS is invalid":
+        val path = "assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf"
+        val handle = load_font(path) as std.nogc_sync_mut.io.font_ffi.FontHandle
+        var parsed = parse_offset_table(rt_file_read_bytes(path)).unwrap()
+        val codepoints = [1575u32, 1604u32, 1593u32, 1585u32, 1576u32, 1610u32, 1577u32]
+        val gpos = find_table(parsed, 1196445523u32).unwrap()
+        parsed.blob[gpos.offset as i64 + 1] = 0u8
+        val font = sk_font_new(sk_typeface_from_attached_font("Noto Sans Arabic", sk_font_style_normal(), path, handle.handle), 32.0)
+        val run = shaper_shape_with_language(shaper_with_ot_face(shaper_new(fallback_chain_new(font)), handle.handle, parsed), codepoints, font, 0.0, 0.0, "ar")[0]
+        expect run.substitution_complete to_equal true
+        expect run.positioning_complete to_equal false
+        expect run.glyph_ids to_equal [cmap_glyph_id(parsed, 1577u32), cmap_glyph_id(parsed, 1610u32), cmap_glyph_id(parsed, 1576u32), cmap_glyph_id(parsed, 1585u32), cmap_glyph_id(parsed, 1593u32), cmap_glyph_id(parsed, 1604u32), cmap_glyph_id(parsed, 1575u32)]
+        expect shaped_run_to_font_glyph_run(run).valid to_equal false
+        free_font(handle)
     it "accepts one bound emoji witness but rejects an unshaped emoji sequence":
         val path = "assets/fonts/google-fonts/ofl/notoemoji/NotoEmoji[wght].ttf"
         val loaded = load_font(path)
@@ -427,7 +439,6 @@ describe "Shaper":
         expect wrong_face.substitution_complete to_equal false
         expect shaped_run_to_font_glyph_run(wrong_face).valid to_equal false
         free_font(handle)
-
     it "uses OpenType data bound to the face selected by fallback":
         val primary_path = "src/compiler_rust/vendor/ttf-parser/tests/fonts/demo.ttf"
         val emoji_path = "assets/fonts/google-fonts/ofl/notoemoji/NotoEmoji[wght].ttf"
@@ -467,7 +478,6 @@ describe "Shaper":
         expect(stale.glyph_indices_valid).to_equal(false)
         expect(stale.glyph_ids[0]).to_equal(128512u32)
         free_font(primary_handle)
-
 describe "ascii_to_codepoints":
     it "hello produces 5 codepoints":
         val cps = ascii_to_codepoints("hello")

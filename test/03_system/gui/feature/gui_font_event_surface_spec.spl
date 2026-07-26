@@ -32,6 +32,10 @@ use common.ui.widget.{UIEvent, WidgetNode, UITree}
 use nogc_sync_mut.ui.session.{UISession}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.common.encoding.font_registry.{
+    selected_font_asset_candidates,
+    selected_font_asset_identity
+}
 
 val WIDTH: i32 = 192
 val HEIGHT: i32 = 80
@@ -64,6 +68,14 @@ fn style_value(command: DrawIrCommand, key: text) -> text:
     for prop in command.computed_style:
         if prop.key == key:
             return prop.value
+    ""
+
+fn pinned_mono_identity() -> text:
+    for candidate in selected_font_asset_candidates():
+        if candidate.family == "Noto Sans Mono":
+            expect(candidate.sha256).to_equal("2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081")
+            return selected_font_asset_identity(candidate)
+    fail("pinned Noto Sans Mono manifest entry is missing")
     ""
 
 fn glyph_region_differences(pixels: [u32], blank_pixels: [u32], command: DrawIrCommand) -> i32:
@@ -99,7 +111,7 @@ describe "GUI font and event surface":
 
     # @manual_section: Primary GUI font and event flow
     # @capture(artifact)
-    # @req AC-3 AC-6 AC-7 AC-8 AC-9
+    # @req REQ-011
     it "renders selected glyphs and delivers pointer focus and keyboard events to the visible input":
         step("Load the pinned multilingual font manifest")
         val fixture = gui_fixture("gui", "GUI42")
@@ -117,7 +129,7 @@ describe "GUI font and event surface":
         step("Prepare one shared font batch for 2D and 3D")
         expect(title.text_value).to_equal("GUI42")
         expect(style_value(title, "font-family")).to_equal("Noto Sans Mono")
-        expect(style_value(title, "font-identity")).to_start_with("sha256=")
+        expect(style_value(title, "font-identity")).to_equal(pinned_mono_identity())
         expect(style_value(title, "font-advance-widths")).to_equal("7,7,7,7,7")
         expect(title.x).to_equal(3)
         expect(title.y).to_equal(9)
@@ -132,11 +144,10 @@ describe "GUI font and event surface":
         expect(submitted.batches[0].source.source_id).to_equal("gui-root")
         expect(submitted.batches[0].source.style_key).to_equal("widget-tree")
 
-        step("Build the production surface composition")
         var engine = Engine2D.create_with_backend(WIDTH, HEIGHT, "cpu")
         engine.clear(0xff000000u32)
 
-        step("Submit the exact composition")
+        step("Submit the boundary output to its canonical consumer")
         val rendered = engine2d_draw_ir_adv_composition(engine, submitted, false)
         engine.shutdown()
         expect(rendered.selected_backend).to_equal(DRAW_IR_BACKEND_CPU)
@@ -171,7 +182,7 @@ describe "GUI font and event surface":
         print("gui_font_glyph_region_differences={glyph_differences}")
         expect(glyph_differences).to_be_greater_than(20)
 
-        step("Deliver correlated focus keyboard and pointer events")
+        step("Correlate visible pixels and input with one frame identity")
         val pointer_context = draw_ir_event_target_context(
             submitted, submitted.scene_key, "pointer-down-1", "pointer_down",
             "gui-input", "input", 10, 45, DRAW_IR_BACKEND_CPU
@@ -239,7 +250,7 @@ describe "GUI font and event surface":
         expect(input.get_prop("value")).to_equal("ReadyZ")
         val replayed_scene_rejected = if replayed_context.stale_scene_rejected: "true" else: "false"
 
-        step("Capture backend and framebuffer evidence")
+        step("Submit the boundary output to its canonical consumer")
         val updated = session.submit_widget_draw_ir(WIDTH, HEIGHT, DRAW_IR_BACKEND_CPU)
         val updated_text = text_command(updated, "ReadyZ")
         expect(updated_text.text_value).to_equal("ReadyZ")
