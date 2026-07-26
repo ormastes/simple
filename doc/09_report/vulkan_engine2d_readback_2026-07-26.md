@@ -88,3 +88,12 @@ and dynamic discoverability. This repair was produced on macOS without a
 Linux/Vulkan live cycle. The blocked Linux execution above remains the current
 device evidence; no availability, handle, readback, checksum, or parity PASS is
 added by the owner fixture.
+
+The next Linux session isolated the compiler blocker further. Native
+`OptimizationConfig.Enabled(2)` lost its payload and entered the backend
+optimizer as `NoOpt`; the driver now uses scalar level transport and direct
+`OptLevel` literals. Three bounded commands using the retained cache then
+failed at the admitted `core-c-bootstrap` link. Missing providers include
+`str.to_lowercase`, `rt_string_free`, and `rt_cranelift_*`; the historical
+runtime-path attempt added unresolved `spl_*` dependencies. No stub fallback,
+full bootstrap, `84` oracle, or Vulkan run was accepted.

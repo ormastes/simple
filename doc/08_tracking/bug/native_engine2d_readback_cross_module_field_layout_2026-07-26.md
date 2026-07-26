@@ -73,3 +73,28 @@ path and directly regress the native CLI mode transport, then compile the
 existing two-module oracle and expect `84`. Only after that passes, regenerate
 the retained Vulkan evidence closure, verify that the caller loads `pixels` at
 offset 0, and run one live readback.
+
+## Optimizer transport follow-up
+
+GDB at `optimizationpipeline_for_backend` showed `OptLevel.NoOpt` arriving as
+`rdi=0`, even though the driver unconditionally created
+`OptimizationConfig.Enabled(2)`. Its nested `level` payload was lost across
+the native boundary. The pass-name helper consequently returned the native
+empty-array immediate `0x8`, and generated `.len()` code dereferenced address
+`0x10`.
+
+The driver now transports a scalar `i64` optimization level, returns before
+level 0, and passes direct `OptLevel.Size`, `Speed`, or `Aggressive` literals.
+The focused source regression passes 1/1, but its runner selected the Rust
+seed, so that result is syntax/source evidence only.
+
+Three build commands used the existing
+`build/gpu-goal/current/native_cache`, set `SIMPLE_NO_STUB_FALLBACK=1`, and
+did not request bootstrap or cache reset. Their logs independently prove final
+link failure, but do not print cache summaries or the invocations. The
+compiler entry closure is forced onto `core-c-bootstrap`; unresolved providers
+include `str.to_lowercase`, `rt_string_free`, and the `rt_cranelift_*` surface.
+An explicit historical runtime directory also introduced unresolved
+`spl_*`/filesystem/process dependencies but did not admit
+`libsimple_native_all.a`; using that removed fallback is forbidden. No new
+driver, `73`, `84`, or Vulkan receipt was produced.

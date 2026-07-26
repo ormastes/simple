@@ -17,7 +17,7 @@ use compiler.backend.codegen.{CodegenPipeline, CompiledModule}
 use compiler.backend.backend_types.{BackendResult}
 use compiler.borrow.borrow_check.*
 use compiler.tools.async_integration.{AsyncIntegration, AsyncStateMachine, process_async_mir}
-use compiler.mir_opt.mir_opt_integration.{OptimizationConfig, optimize_mir_module, optimize_mir_module_for_backend, optimizationconfig_speed}
+use compiler.mir_opt.mod.{OptLevel, optimize_module_for_backend}
 use compiler.frontend.core.aop.{weave_function, weavingconfig_all_rules, WeavingConfig, MirBlockInfo, InstructionInfo}
 use compiler.frontend.core.aop_log_policy.{AopLogInstrumentationConfig, aop_log_weaving_rules, aop_log_with_compile_level, aop_log_with_runtime_level}
 use compiler.mir.mir_aop_injection.{extract_mir_block_info, apply_weaving_result, aop_weave_accounting_reset, aop_weave_accounting_add}
@@ -160,8 +160,8 @@ impl CompilerDriver:
         # Process async functions (generate state machines for await/yield)
         val _async_state_machines = self.process_async()
 
-        # Optimize MIR (speed optimization for JIT)
-        self.optimize_mir(optimizationconfig_speed())
+        # Use the normalized CLI/project optimization level for JIT too.
+        self.optimize_mir_level(self.ctx.options.opt_level ?? 0)
 
         # AOP weaving (after optimization, before codegen)
         self.weave_aop()
@@ -268,7 +268,7 @@ impl CompilerDriver:
     # MIR Optimization
     # --------------------------------------------------------------------------
 
-    me optimize_mir(config: OptimizationConfig):
+    me optimize_mir_level(level: i64):
         """Apply MIR optimization passes to all modules.
 
         Routes through the backend-aware pipeline (self.ctx.options.backend)
@@ -280,6 +280,9 @@ impl CompilerDriver:
         every skip reason), so this is behavior-identical to the previous
         backend-unaware optimize_mir_module call for every non-LLVM backend.
         """
+        if level <= 0:
+            return
+
         val log = self.ctx.logger
         log_debug("optimizing MIR modules")
         val backend_name = self.ctx.options.backend
@@ -290,7 +293,12 @@ impl CompilerDriver:
 
         for name in self.ctx.mir_modules.keys():
             val mir_module = self.ctx.mir_modules[name]
-            val optimized = optimize_mir_module_for_backend(mir_module, config, backend_name)
+            val optimized = if level == 1:
+                optimize_module_for_backend(mir_module, OptLevel.Size, backend_name)
+            elif level == 2:
+                optimize_module_for_backend(mir_module, OptLevel.Speed, backend_name)
+            else:
+                optimize_module_for_backend(mir_module, OptLevel.Aggressive, backend_name)
             # Direct mutation (avoids copy-modify-reassign bug in compiled mode)
             self.ctx.mir_modules[name] = optimized
 
@@ -401,10 +409,6 @@ impl CompilerDriver:
             val mir_module = self.ctx.mir_modules[name]
             val instrumented = inject_debug_trace(mir_module, level)
             self.ctx.mir_modules[name] = instrumented
-
-    fn get_optimization_config() -> OptimizationConfig:
-        """Get optimization config from compiler options."""
-        optimizationconfig_speed()
 
     # --------------------------------------------------------------------------
     # MIR Lowering

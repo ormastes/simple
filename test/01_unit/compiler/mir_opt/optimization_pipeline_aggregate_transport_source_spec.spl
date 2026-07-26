@@ -1,23 +1,29 @@
 # OptimizationPipeline aggregate transport regression.
 #
-# The source-matched native driver currently crashes while returning or
-# projecting this aggregate. Keep this test red until the optimizer repair
-# removes the temporary aggregate projection and the native AOT probe passes.
+# The source-matched native driver lost OptimizationConfig.Enabled(level)'s
+# payload, entered the backend pipeline as NoOpt, and dereferenced the native
+# empty-array immediate. Keep the hot driver path on scalar level transport.
 #
 # @cover src/compiler/60.mir_opt/mir_opt/mod.spl
 
 use std.io.{file_read}
 
 describe "OptimizationPipeline aggregate transport":
-    it "removes the crashing aggregate return from backend optimization":
-        val source = file_read("src/compiler/60.mir_opt/mir_opt/mod.spl")
-        val consumer_start = source.index_of(
-            "fn optimize_module_for_backend(module: MirModule, level: OptLevel, backend_name: text) -> MirModule:"
+    it "uses a scalar level and direct OptLevel literals in the driver":
+        val pipeline = file_read("src/compiler/80.driver/driver_pipeline.spl")
+        val driver = file_read("src/compiler/80.driver/driver.spl")
+        expect(pipeline).to_contain("me optimize_mir_level(level: i64):")
+        expect(pipeline).to_contain("if level <= 0:")
+        expect(pipeline).to_contain("OptLevel.Size")
+        expect(pipeline).to_contain("OptLevel.Speed")
+        expect(pipeline).to_contain("OptLevel.Aggressive")
+        expect(pipeline.contains("OptimizationConfig")).to_equal(false)
+        expect(pipeline).to_contain(
+            "self.optimize_mir_level(self.ctx.options.opt_level ?? 0)"
         )
-        val consumer_end = source.index_of(
-            "fn optimize_module_for_backend_budget(", consumer_start
+        expect(driver).to_contain(
+            "val mir_opt_level = self.ctx.options.opt_level ?? 0"
         )
-        val consumer = source.slice(consumer_start, consumer_end)
-        expect(consumer.contains(
-            "optimizationpipeline_for_backend(level, backend_name)"
-        )).to_equal(false)
+        expect(driver).to_contain("self.optimize_mir_level(mir_opt_level)")
+        expect(driver.contains("mir_opt_level = 2")).to_equal(false)
+        expect(driver.contains("get_optimization_config")).to_equal(false)
