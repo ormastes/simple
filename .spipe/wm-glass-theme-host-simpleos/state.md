@@ -502,3 +502,32 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   has no non-seed compiler carrying all three row externs. Active work therefore
   fixes ARM SIMD receipt admission, aligns GPU manifest identities, and enables
   low-memory pure compiler promotion before spending any launch cycle.
+- continuation-2026-07-26-final-admission-and-bridge-status: Pushed GPU
+  trusted-manifest admission as `ca911ba081`; independent high review ACCEPTS
+  its exact current/legacy identity-source pairs, canonical builder `--verify`
+  delegation, complete legacy recomputation, fixed compiler/provider paths and
+  hashes, override and seed/debug rejection, shell safety, and static-only
+  native-claim boundary.
+
+  Pushed the ARM64 QMP SIMD gate as `d63f205ccf` and the generated-manual
+  quality repair as `04bc5fa4f4`. High review ACCEPTS the functional gate:
+  exactly one AArch64/NEON receipt, positive native fill hits/vector chunks,
+  complete required `fill` execution, no fallback, bit-exact scalar parity,
+  final-transcript uniqueness, and evidence/report binding. The initial review
+  rejected only malformed manual presentation; the follow-up restores the
+  prominent no-live-evidence disclaimer and readable operator steps without
+  changing the gate.
+
+  The low-memory circularity tracking stack `8ac0150d38..7f9815a929` is
+  ACCEPTED. `f2c216...` is seed-marked and forbidden as compiler, driver,
+  delegate, or fallback. `277f...` is the only eligible pure-Simple binary but
+  cannot import the current compiler graph. The next bounded action is one of
+  the two remaining micro cycles in a clean linked worktree: pin only
+  `277f...`, attempt a minimal historical-compatible bridge, admit it through
+  canonical path/hash, bounded version, negative seed classifiers, and native
+  `rt_string_free` symbol proof, then run only the focused current-graph
+  positive opt-in and negative no-opt-in controls with
+  `SIMPLE_NO_STUB_FALLBACK=1`. If that bridge cannot be produced, stop and
+  retain the bug; never substitute `f2c...` or run full Stage4 for diagnosis.
+  No fresh compiler promotion, host/QEMU launch, SIMD PASS, or rendering/event
+  claim is added by this checkpoint.
