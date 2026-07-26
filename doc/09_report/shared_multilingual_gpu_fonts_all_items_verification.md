@@ -1,8 +1,8 @@
 # Shared Multilingual GPU Fonts — All-Items Verification
 
-Date: 2026-07-26  
+Date: 2026-07-26
 Authority: selected requirements and NFRs in
-`doc/02_requirements/{feature,nfr}/shared_multilingual_gpu_fonts.md`  
+`doc/02_requirements/{feature,nfr}/shared_multilingual_gpu_fonts.md`
 Final done-mark owner: highest-capability `/root`
 
 ## Result

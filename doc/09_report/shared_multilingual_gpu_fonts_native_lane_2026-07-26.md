@@ -1,7 +1,7 @@
 # Shared Multilingual GPU Fonts — Native Lane Evidence
 
-Date: 2026-07-26  
-Owner: `native_gpu_perf`  
+Date: 2026-07-26
+Owner: `native_gpu_perf`
 Revision inspected: `14f46d1045e78e0d45532b620a0c4482e51d0e1b`
 
 ## Current classification
