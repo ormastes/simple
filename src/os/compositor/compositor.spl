@@ -164,12 +164,15 @@ class Compositor:
         id
 
     me add_surface(title: text, x: i32, y: i32, width: i32, height: i32) -> WindowId:
-        WindowId(value: self.create_window(title, x, y, width, height).to_u64())
+        # Typed intermediate + `as` cast — no conversion dispatch chained on
+        # a function return (freestanding_safe_channels.md).
+        val created_id = self.create_window(title, x, y, width, height)
+        WindowId(value: created_id as u64)
 
     me create_window_with_tree(title: text, x: i32, y: i32, width: i32, height: i32, tree: any) -> WindowId:
         val id = self.create_window(title, x, y, width, height)
-        self.update_window_tree(id.to_u64(), tree)
-        WindowId(value: id.to_u64())
+        self.update_window_tree(id as u64, tree)
+        WindowId(value: id as u64)
 
     me create_windows_from_shared_scene(scene: SharedWmScene) -> [WindowId]:
         var ids: [WindowId] = []
@@ -192,12 +195,12 @@ class Compositor:
 
     me create_remote_window(title: text, x: i32, y: i32, width: i32, height: i32, owner_port: u64) -> WindowId:
         val id = self.create_window(title, x, y, width, height)
-        val i = self.surface_index(id.to_u64())
+        val i = self.surface_index(id as u64)
         if i >= 0:
             var surface = self.surfaces[i]
             surface.owner_port = owner_port.to_i64()
             self.surfaces[i] = surface
-        WindowId(value: id.to_u64())
+        WindowId(value: id as u64)
 
     me destroy_window(id: i32):
         var out: [WindowSurface] = []
@@ -213,7 +216,7 @@ class Compositor:
             self.focused_idx = self.surfaces.len() - 1
 
     me focus_window(id: i32):
-        val found = self.surface_index(id.to_u64())
+        val found = self.surface_index(id as u64)
         if found < 0:
             return
         val chosen = self.surfaces[found]
@@ -238,7 +241,7 @@ class Compositor:
         self.focus_window(self.surfaces[idx].id)
 
     me move_window(id: i32, x: i32, y: i32):
-        val i = self.surface_index(id.to_u64())
+        val i = self.surface_index(id as u64)
         if i >= 0:
             var surface = self.surfaces[i]
             surface.x = x
@@ -322,7 +325,7 @@ class Compositor:
                 self.surfaces[i] = surface
 
     me set_window_identity(id: i32, process_id: i64, app_id: text):
-        val i = self.surface_index(id.to_u64())
+        val i = self.surface_index(id as u64)
         if i >= 0:
             var surface = self.surfaces[i]
             surface.process_id = process_id
@@ -333,7 +336,7 @@ class Compositor:
         val id = self.create_window(title, x, y, width, height)
         if id <= 0:
             return 0
-        val i = self.surface_index(id.to_u64())
+        val i = self.surface_index(id as u64)
         if i >= 0:
             var surface = self.surfaces[i]
             surface.process_id = process_id
@@ -347,9 +350,19 @@ class Compositor:
     fn compositor_process_owned_surface_count_scalar() -> i64:
         var count: i64 = 0
         # cpu-lane-loop-ok: bounded startup/readiness ownership count, not a frame or pixel path
-        for surface in self.surfaces:
-            if surface.process_id > 0 and surface.app_id != "":
-                count = count + 1
+        # Index-based loop with scalar intermediates: the for-loop form copies
+        # each WindowSurface aggregate into the loop var and the guest faulted
+        # inside this function reading the copied element (rerun13, rip
+        # symbolized here). Element field reads via self.surfaces[i] plus a
+        # bound text length check stay on proven channels.
+        var i = 0
+        while i < self.surfaces.len():
+            val surface_pid: i64 = self.surfaces[i].process_id
+            if surface_pid > 0:
+                val surface_app: text = self.surfaces[i].app_id
+                if surface_app.len() > 0:
+                    count = count + 1
+            i = i + 1
         count
 
     fn window_count() -> i32:
@@ -365,7 +378,8 @@ class Compositor:
         var i = 0
         # cpu-lane-loop-ok: bounded compositor window-table identity lookup
         while i < self.surfaces.len():
-            if self.surfaces[i].id.to_u64() == id:
+            val surface_id = self.surfaces[i].id
+            if (surface_id as u64) == id:
                 return i
             i = i + 1
         -1
@@ -385,17 +399,18 @@ class Compositor:
     fn window_owner_port(id: u64) -> u64:
         val i = self.surface_index(id)
         if i >= 0:
-            return self.surfaces[i].owner_port.to_u64()
+            val port = self.surfaces[i].owner_port
+            return port as u64
         0
 
     fn window_process_id(id: i32) -> i64:
-        val i = self.surface_index(id.to_u64())
+        val i = self.surface_index(id as u64)
         if i >= 0:
             return self.surfaces[i].process_id
         0
 
     fn window_app_id(id: i32) -> text:
-        val i = self.surface_index(id.to_u64())
+        val i = self.surface_index(id as u64)
         if i >= 0:
             return self.surfaces[i].app_id
         ""
@@ -423,7 +438,8 @@ class Compositor:
         var i = 0
         while i < self.surfaces.len():
             if self.surfaces[i].process_id == process_id:
-                out = out.push(self.surfaces[i].id.to_u64())
+                val surface_id = self.surfaces[i].id
+                out = out.push(surface_id as u64)
             i = i + 1
         out
 
@@ -432,7 +448,8 @@ class Compositor:
         var i = 0
         while i < self.surfaces.len():
             if self.surfaces[i].app_id == app_id:
-                out = out.push(self.surfaces[i].id.to_u64())
+                val surface_id = self.surfaces[i].id
+                out = out.push(surface_id as u64)
             i = i + 1
         out
 
