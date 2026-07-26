@@ -76,3 +76,70 @@ full table: build/test-artifacts/vhdl_gen_ghdl_evidence_2026-07-26/core_sha256.t
 Board lane remains explicitly BLOCKED on 3.3V PMOD UART adapter (AC-4/AC-11) —
 hardware procurement; resume = program KV260 bitstream built from build/os/rtl cores
 via scripts/fpga/build_k26_rv32_ddr_bitstream.shs once adapter present.
+
+## lane6 silicon evidence
+
+FULL SILICON PROOF: KV260 (xck26) bitstreams built FROM THE GENERATED exec cores
+and booted on the physical board. Evidence:
+`build/test-artifacts/vhdl_gen_silicon_evidence_2026-07-26/` (see README.md there).
+
+Provenance: `sh scripts/fpga/generate_exec_core_vhdl.shs` ->
+`sh scripts/check/check-vhdl-golden-match.shs --require-generated` = all 6 cores
+PASS (only drift is the working-copy TESTBENCH `tb_rv64_k26_ddr_boot.vhd`, not a
+core). Generated cores staged into `build/fpga/rtl_gen_rv32/` and
+`build/fpga/rtl_gen_rv64/` with the unmodified SoC/adapter/ctrl-slave files;
+`cmp` proves each staged core byte-identical to its golden. `examples/` untouched.
+Both DDR build scripts gained one env-overridable line
+`RTL_DIR="${RTL_DIR:-examples/09_embedded/fpga_riscv/rtl}"` (default unchanged).
+
+### Lane 6a — rv32-DDR: PASS (silicon)
+- core sha256 4c19ffe470f7e3bd81d346f283605b96c0060dfa75fe42817b60b6d8f2b00be0
+  (`build/os/rtl/rv32_exec_core_axi.vhd`, == golden)
+- bitstream sha256 3ca189ba73d898c805baaac7c1fad08de43ec01bcb9f930d9ef37e28b6afcc4b
+  (`build/fpga/k26_rv32_ddr/k26_rv32_ddr.bit`)
+- build: `ALLOW_CONCURRENT_BUILD=1 RTL_DIR=build/fpga/rtl_gen_rv32 bash scripts/fpga/build_k26_rv32_ddr_bitstream.shs`
+- boot: `bash scripts/fpga/bringup_kv260_rv32_ddr.shs` (full psu_init from XSA,
+  ELF-derived .bss zero-fill: BSS_HEAPOFF_PRE=0x260 -> POST=0x0), rc=0
+- markers: CTRL_MAGIC=0x52563332, UART_BYTE_COUNT=445, FINAL_PC=0x8000002A,
+  AXI_READS=17341264 / AXI_WRITES=95898, transcript reached
+  `SIMPLEOS_RISCV_SMF_FS_PASS` + `TEST PASSED`
+- verdict line: `PASS: rv32 SimpleOS reached TEST PASSED on KV260 silicon`
+
+### Lane 6b — rv64-DDR: PASS (silicon)
+- core sha256 c83c0869eab5e37e5d02bd9a3fc215279dc9ecbbfd17ea2e2d72af5fe14600c8
+  (`build/os/rtl/rv64_exec_core_axi.vhd`, == golden)
+- bitstream sha256 3ffb79f0d2709dc3218a8870f9e9bea1b41251c28fe2c04fb74aebee5924f686
+  (`build/fpga/k26_rv64_ddr/k26_rv64_ddr.bit`), Vivado TIMING_MET
+- build: `ALLOW_CONCURRENT_BUILD=1 RTL_DIR=build/fpga/rtl_gen_rv64 bash scripts/fpga/build_k26_rv64_ddr_bitstream.shs`
+- first bring-up hit the documented WEDGED-PS zero-fetch (CTRL_MAGIC ok, loads
+  verified, CORE_RELEASED, but AXI_READS=0 / UART_BYTE_COUNT=0) — see
+  `rv64_bringup_attempt1_wedged.log`. Fix applied exactly once: xsdb
+  `targets -filter {name =~ "PSU"}; rst -system` (`rv64_rst_system.log`), then
+  re-ran the bring-up unmodified.
+- markers after reset: UART_BYTE_COUNT=546, FINAL_PC_LO32=0x80200028,
+  AXI_READS=10374602 / AXI_WRITES=85007, transcript reached
+  `SIMPLEOS_RISCV_SMF_FS_PASS` + `TEST PASSED`
+- verdict line: `PASS: rv64 SimpleOS reached TEST PASSED on KV260 silicon`
+
+### Timing finding (recorded honestly)
+rv32-DDR misses timing at IMPL_WNS=-0.115377 / WHS=+0.017749 and Vivado prints
+TIMING_NOT_MET. The retained GOLDEN-RTL build log
+(`build/fpga/k26_rv32_ddr/vivado_1302320.backup.log`) reports the **identical**
+WNS/WHS, so this is PRE-EXISTING SoC design timing, NOT a generator regression
+(`rv32_ddr_timing_parity.txt`). The board is the arbiter and it booted. rv64-DDR
+MEETS timing (`rv64_ddr_timing_parity.txt`). Follow-up (not a lane-6 blocker):
+close the -0.115ns path on soc_top_rv32_k26_ddr.
+
+### Still blocked (unchanged, accepted)
+Interactive UART login on the board needs a 3.3 V PMOD adapter (AC-4/AC-11,
+hardware procurement) — the KV260 carrier does not route fabric UART H12/PMOD J2
+to the FT4232H. JTAG status-word / UART-capture markers remain the accepted
+silicon bar, same as the prior golden silicon PASSes. Resume when the adapter
+arrives: `bash scripts/fpga/capture_kv260_uart_ila.shs`.
+
+Reproduce either lane end to end:
+```
+sh scripts/fpga/generate_exec_core_vhdl.shs
+ALLOW_CONCURRENT_BUILD=1 RTL_DIR=build/fpga/rtl_gen_rv32 bash scripts/fpga/build_k26_rv32_ddr_bitstream.shs
+bash scripts/fpga/bringup_kv260_rv32_ddr.shs     # rv64: swap 32->64 in both
+```
