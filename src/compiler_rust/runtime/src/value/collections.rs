@@ -3623,3 +3623,90 @@ pub extern "C" fn __simple_intrinsic_bounds_check(index: i64, len: i64) -> i64 {
 #[cfg(test)]
 #[path = "collection_tests.rs"]
 mod tests;
+
+/// Rust-side twin of `src/runtime/test/rt_string_free_selfcheck.c`.
+///
+/// The C runtime and this one must agree bit for bit on rt_string_free's
+/// contract, or the same .spl leaks on one backend and frees on the other.
+/// The C side had 16 assertions and this side had none, so a divergence here
+/// would have been invisible. These mirror the C cases.
+///
+/// The heap registry is process-global and `cargo test` runs tests in parallel,
+/// so every case here serializes on GUARD and asserts on RETURN VALUES and
+/// readability rather than absolute registry counts. Count deltas are taken
+/// under the lock; an unlocked absolute count would flake against other tests.
+#[cfg(test)]
+mod string_free_contract_tests {
+    use super::{rt_string_free, rt_string_len, rt_string_new, rt_string_new_literal};
+    use crate::value::heap::rt_heap_registry_count;
+    use std::sync::Mutex;
+
+    static GUARD: Mutex<()> = Mutex::new(());
+
+    fn mkstr(s: &str) -> crate::value::RuntimeValue {
+        rt_string_new(s.as_ptr(), s.len() as u64)
+    }
+
+    #[test]
+    fn ordinary_string_is_reclaimed_and_registry_shrinks() {
+        let _g = GUARD.lock().unwrap();
+        let before = rt_heap_registry_count();
+        let s = mkstr("a reasonably long unique string for the rust twin");
+        assert_eq!(rt_heap_registry_count(), before + 1, "new string registers");
+        assert_eq!(rt_string_free(s), 1, "ordinary string is freed");
+        assert_eq!(rt_heap_registry_count(), before, "registry returns to baseline");
+    }
+
+    #[test]
+    fn double_free_is_refused_without_decrementing() {
+        let _g = GUARD.lock().unwrap();
+        let s = mkstr("string freed exactly once, rust twin");
+        assert_eq!(rt_string_free(s), 1);
+        let after_first = rt_heap_registry_count();
+        assert_eq!(rt_string_free(s), 0, "double free refused");
+        assert_eq!(rt_heap_registry_count(), after_first, "refusal does not decrement");
+    }
+
+    #[test]
+    fn short_cached_string_is_refused_and_stays_usable() {
+        let _g = GUARD.lock().unwrap();
+        // len <= 1 comes from the process-wide SHORT_STRING_CACHE and is shared
+        // by every caller; freeing one would corrupt all the others.
+        let sh = mkstr("x");
+        assert_eq!(rt_string_free(sh), 0, "short/cached string refused");
+        assert_eq!(rt_string_len(mkstr("x")), 1, "still usable after refused free");
+    }
+
+    #[test]
+    fn interned_literal_is_refused_and_stays_interned() {
+        let _g = GUARD.lock().unwrap();
+        const LIT: &[u8] = b"an interned literal value for the rust twin";
+        let a = rt_string_new_literal(LIT.as_ptr(), LIT.len() as u64);
+        assert_eq!(rt_string_free(a), 0, "interned literal refused");
+        let b = rt_string_new_literal(LIT.as_ptr(), LIT.len() as u64);
+        assert_eq!(a.to_raw(), b.to_raw(), "interning still returns the same object");
+        assert_eq!(rt_string_len(b), LIT.len() as i64, "interned literal intact");
+    }
+
+    /// The case a tombstone-less registry erase would fail: free every other
+    /// entry out of a batch, then confirm each survivor is still readable AND
+    /// still freeable, i.e. no live entry was stranded by a deletion.
+    #[test]
+    fn interleaved_frees_do_not_strand_survivors() {
+        let _g = GUARD.lock().unwrap();
+        const N: usize = 512;
+        let mut v = Vec::with_capacity(N);
+        for i in 0..N {
+            v.push(mkstr(&format!("probe-chain-integrity-rust-{i}")));
+        }
+        let freed = (0..N).step_by(2).filter(|&i| rt_string_free(v[i]) == 1).count();
+        assert_eq!(freed, N / 2, "every even-indexed string freed");
+
+        for i in (1..N).step_by(2) {
+            let expect = format!("probe-chain-integrity-rust-{i}").len() as i64;
+            assert_eq!(rt_string_len(v[i]), expect, "survivor {i} still readable");
+        }
+        let refreed = (1..N).step_by(2).filter(|&i| rt_string_free(v[i]) == 1).count();
+        assert_eq!(refreed, N / 2, "every survivor still found and freed");
+    }
+}
