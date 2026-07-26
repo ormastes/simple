@@ -122,6 +122,56 @@ and inserting code flips a miscompile.
 **Instrument from the CALLER (`_wm_draw_ir_text` in window_scene_draw_ir.spl),
 never from inside font_renderer.spl.** The revert is 81d8d41e68f.
 
+## rerun51: it is SLOWNESS, not a fixed infinite loop — and the font is unavailable
+
+Phase receipts inside the resolver changed the picture twice over.
+
+**1. The stall MOVES between builds.** rerun50 stopped inside
+`resolve_font_metrics_with_language`; rerun51 stopped one step earlier, inside
+`simpleos_default_font_asset_candidate()` (`begin=76, candidate=75`). Same 76th
+call, different sub-step. A fixed infinite loop does not relocate when
+unrelated code is added — this is the deadline landing wherever the guest
+happens to be, i.e. pathological SLOWNESS. The earlier "300s of total silence"
+is consistent: a single slow call emits nothing for its whole duration.
+
+**2. The font is unavailable for essentially every text.** Counts across one
+session:
+
+```
+rfm: default-font=118  renderer-bound=118  cache-lookup=1  measure=1  measured=1
+wm-text at=resolved:   valid=0 x74,  valid=1 x1
+```
+
+117 of 118 resolves return early at `if not renderer.has_sffi_ttf()` with
+`reason="font-runtime-unavailable"`, so nearly all WM text is drawn by the
+legacy bitmap fallback (`draw_ir_text`) rather than real font metrics. Exactly
+one real measurement happened in the entire run — and it completed.
+
+## Probable root cause: module-global caches do not persist
+
+Three independent observations point at one defect:
+
+- `_resolved_font_metric_keys` / `_resolved_font_metric_values` read `keys=0
+  values=0` after many stores (see side finding below).
+- `has_sffi_ttf()` is false on 117/118 calls, i.e. the loaded-face cache
+  (`_browser_default_font_families` / `_browser_default_font_renderers`) is not
+  serving anything either.
+- Both are **module-global arrays**, and array-typed module globals are a
+  documented broken channel here — `.push()` writes degrade and do not persist
+  (see the project memory entry for module-global MIR lowering: array globals
+  were fixed for the same-module case, cross-import globals are still broken).
+
+If those caches never persist, then per the comment above
+`_browser_default_font_families`, **every single text node re-attempts a real
+dlopen + TTF parse of a 17MB face** — "quadratic for a real page and the
+dominant web-render cost under the interpreter", by that comment's own
+admission. That is more than enough to push one WM frame past 300s under TCG,
+and it explains why the stall lands at a different sub-step each build.
+
+This root cause sits in the COMPILER (module-global lowering), whose campaign is
+parked under the standing no-bootstrap-unless-essential rule. It is not fixable
+from the WM/font side.
+
 ## Side finding: the resolved-metric cache never populates
 
 The one watchdog line that did print before the revert read:
