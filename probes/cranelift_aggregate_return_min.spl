@@ -1,0 +1,95 @@
+# Minimal repro: Dict.get() loses its Option payload (doc/08_tracking/bug/
+# cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md).
+# 2026-07-26 findings, bisected probe-by-probe:
+#   - Probes 1 (direct aggregate return), 2 (Option-fn Some path) and
+#     4 (nested projection) PASS in this minimal layout on the cranelift
+#     native lane (--entry-closure --mode dynload). At hosted-WM scale the
+#     same shapes crashed — the aggregate half of the defect is
+#     layout-sensitive.
+#   - Probe 3 (struct-valued Dict.get + match Some + payload field access)
+#     crashes DETERMINISTICALLY: "field access on nil receiver", 14 lines
+#     is enough, struct width irrelevant.
+#   - Probe 3 fails IDENTICALLY under the Rust seed interpreter, and a
+#     text-valued Dict.get silently yields nil for a present key on both
+#     lanes — this is the long-known "Dict.get()->nil on present keys"
+#     defect, now with a deterministic cross-lane repro. The match takes
+#     the Some arm with a nil payload.
+# Build shape for the native lane:
+#   native-build --source <this> --entry <this> --entry-closure --strip \
+#     --backend cranelift --mode dynload
+# Expected on a good compiler: prints AGG_MIN_PASS.
+
+class WideAgg:
+    id: text
+    display_name: text
+    family_id: text
+    registry_path: text
+    theme_path: text
+    family_path: text
+    base_css: text
+    shape_css: text
+    widget_css: text
+    icon_css: text
+    source_reference: text
+    source_paths: [text]
+    fingerprint: text
+    mtime_key: text
+    token_map: Dict<text, text>
+    numbers: [i64]
+
+fn make_wide(id: text) -> WideAgg:
+    WideAgg(
+        id: id, display_name: "d", family_id: "f", registry_path: "r",
+        theme_path: "t", family_path: "fp", base_css: "b", shape_css: "s",
+        widget_css: "w", icon_css: "i", source_reference: "sr",
+        source_paths: ["a", "b"], fingerprint: "fp-{id}", mtime_key: "m",
+        token_map: {}, numbers: [1, 2, 3]
+    )
+
+fn maybe_wide(id: text) -> WideAgg?:
+    if id == "":
+        return nil
+    make_wide(id)
+
+fn main() -> i64:
+    var failures = 0
+
+    # Probe 1: direct aggregate return + field projection.
+    val direct = make_wide("direct")
+    if direct.fingerprint != "fp-direct":
+        print "AGG_MIN_FAIL probe=direct got={direct.fingerprint}"
+        failures = failures + 1
+
+    # Probe 2: Option-returning helper, Some path, pattern binding + field.
+    if val some_agg = maybe_wide("opt"):
+        if some_agg.fingerprint != "fp-opt":
+            print "AGG_MIN_FAIL probe=option-some got={some_agg.fingerprint}"
+            failures = failures + 1
+    else:
+        print "AGG_MIN_FAIL probe=option-some got=None"
+        failures = failures + 1
+
+    # Probe 3: struct-valued Dict.get + match Some + payload field access —
+    # the exact _icons_to_css shape.
+    var cache: Dict<text, WideAgg> = {}
+    cache["k"] = make_wide("dict")
+    match cache.get("k"):
+        case Some(hit):
+            if hit.fingerprint != "fp-dict":
+                print "AGG_MIN_FAIL probe=dict-get got={hit.fingerprint}"
+                failures = failures + 1
+        case _:
+            print "AGG_MIN_FAIL probe=dict-get got=None"
+            failures = failures + 1
+
+    # Probe 4: nested projection through two aggregate-returning calls.
+    val nested = maybe_wide(make_wide("outer").id) ?? make_wide("fallback")
+    if nested.fingerprint != "fp-outer":
+        print "AGG_MIN_FAIL probe=nested got={nested.fingerprint}"
+        failures = failures + 1
+
+    if failures == 0:
+        print "AGG_MIN_PASS"
+        return 0
+    print "AGG_MIN_FAIL total={failures}"
+    1

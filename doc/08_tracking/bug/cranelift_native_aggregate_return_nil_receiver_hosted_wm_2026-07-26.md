@@ -67,6 +67,32 @@ served stale from the native cache (verified: rebuilt binary lacked newly
 added string literals until the cache dir was deleted). Bisections must
 `rm -rf $BUILD_DIR/native-cache $BUILD_DIR/hosted_entry` per cycle.
 
+## Minimal repro + cross-lane reframe (2026-07-26, later same day)
+
+`probes/cranelift_aggregate_return_min.spl` reduces the deterministic half to
+14 lines: **struct-valued `Dict.get(key)` + `match ... case Some(hit)` +
+`hit.field`** crashes with the production error; struct width is irrelevant.
+Two decisive controls:
+
+- The **Rust seed interpreter fails the identical probe identically** — this
+  half is NOT cranelift-specific. It is the long-known "Dict.get() -> nil on
+  present keys" defect (memory: `reference_interpreter_dict_and_value_quirks`;
+  `mode.spl` carries the workaround comment), now with a deterministic repro:
+  the match takes the Some arm with a **nil payload**.
+- A text-valued `Dict.get` on a present key silently yields nil on both lanes
+  (`hit=` / `hit=nil`) — silent corruption, worse than the crash.
+
+Direct aggregate returns and Option-fn Some paths PASS in the minimal layout
+(probes 1, 2, 4) yet crashed at hosted-WM scale — the aggregate-return half
+remains layout-sensitive and is still only reproducible at scale.
+
+So two defects share the symptom:
+1. `Dict.get` Option-payload loss — deterministic, cross-lane (interp +
+   cranelift native), minimal repro in hand. Fix belongs in the shared
+   `Dict.get` lowering/Option-wrapping, both compilers.
+2. Layout-sensitive aggregate-return nil across the native call ABI — still
+   scale-only.
+
 ## Proper fix
 
 In the cranelift lowering: make aggregate returns (direct and Option-wrapped)
