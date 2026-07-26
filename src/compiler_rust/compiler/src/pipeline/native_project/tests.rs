@@ -2870,6 +2870,7 @@ fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry()
     let _guard = runtime_bundle_env_lock().lock().unwrap();
     let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
     let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
+    let old_compiler_entry = std::env::var_os("SIMPLE_COMPILER_ENTRY_STAGE4");
     let temp = tempfile::tempdir().unwrap();
     let entry = temp.path().join("src/app/cli/native_build_main.spl");
     std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
@@ -2879,8 +2880,18 @@ fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry()
     unsafe {
         std::env::remove_var("SIMPLE_BOOTSTRAP");
         std::env::remove_var("SIMPLE_BOOTSTRAP_STAGE4");
+        std::env::remove_var("SIMPLE_COMPILER_ENTRY_STAGE4");
     }
     assert!(!builder.is_authorized_stage4_compiler_entry());
+    let driver_entry = temp.path().join("src/compiler/80.driver/main.spl");
+    std::fs::create_dir_all(driver_entry.parent().unwrap()).unwrap();
+    std::fs::write(&driver_entry, "fn main() -> i64: 0\n").unwrap();
+    let driver_builder =
+        NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("driver-out")).entry_file(driver_entry);
+    assert!(!driver_builder.is_authorized_stage4_compiler_entry());
+    unsafe { std::env::set_var("SIMPLE_COMPILER_ENTRY_STAGE4", "1") };
+    assert!(driver_builder.is_authorized_stage4_compiler_entry());
+    unsafe { std::env::remove_var("SIMPLE_COMPILER_ENTRY_STAGE4") };
     unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", "1") };
     assert!(!builder.is_authorized_stage4_compiler_entry());
     unsafe { std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", "1") };
@@ -2930,6 +2941,57 @@ fn test_stage4_compiler_entry_authorization_requires_both_envs_and_exact_entry()
     match old_stage4 {
         Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", value) },
         None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP_STAGE4") },
+    }
+    match old_compiler_entry {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_COMPILER_ENTRY_STAGE4", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_COMPILER_ENTRY_STAGE4") },
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn test_standalone_compiler_driver_selects_dedicated_backfill_without_bootstrap_env() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap();
+    let old_bootstrap = std::env::var_os("SIMPLE_BOOTSTRAP");
+    let old_stage4 = std::env::var_os("SIMPLE_BOOTSTRAP_STAGE4");
+    let old_compiler_entry = std::env::var_os("SIMPLE_COMPILER_ENTRY_STAGE4");
+    unsafe {
+        std::env::remove_var("SIMPLE_BOOTSTRAP");
+        std::env::remove_var("SIMPLE_BOOTSTRAP_STAGE4");
+        std::env::set_var("SIMPLE_COMPILER_ENTRY_STAGE4", "1");
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let runtime_path = temp.path().join("runtime");
+    std::fs::create_dir_all(&runtime_path).unwrap();
+    let backfill = runtime_path.join("libsimple_compiler_backfill.a");
+    std::fs::write(&backfill, b"dedicated-backfill").unwrap();
+    let entry = temp.path().join("src/compiler/80.driver/main.spl");
+    std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    std::fs::write(&entry, "fn main() -> i64: 0\n").unwrap();
+    let builder = NativeProjectBuilder::new(temp.path().to_path_buf(), temp.path().join("driver-out"))
+        .config(NativeBuildConfig {
+            runtime_path: Some(runtime_path),
+            ..Default::default()
+        })
+        .entry_file(entry);
+
+    assert_eq!(
+        builder.selected_stage4_compiler_backfill_archive().unwrap(),
+        Some(backfill)
+    );
+
+    match old_bootstrap {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP") },
+    }
+    match old_stage4 {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_BOOTSTRAP_STAGE4", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_BOOTSTRAP_STAGE4") },
+    }
+    match old_compiler_entry {
+        Some(value) => unsafe { std::env::set_var("SIMPLE_COMPILER_ENTRY_STAGE4", value) },
+        None => unsafe { std::env::remove_var("SIMPLE_COMPILER_ENTRY_STAGE4") },
     }
 }
 

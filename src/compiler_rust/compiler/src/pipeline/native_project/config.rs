@@ -106,15 +106,22 @@ pub(crate) fn runtime_archive_has_bootstrap_cli_symbols(path: &Path) -> bool {
 
 impl NativeProjectBuilder {
     pub(crate) fn is_authorized_stage4_compiler_entry(&self) -> bool {
-        if !cfg!(any(target_os = "linux", target_os = "macos"))
-            || std::env::var("SIMPLE_BOOTSTRAP").as_deref() != Ok("1")
-            || std::env::var("SIMPLE_BOOTSTRAP_STAGE4").as_deref() != Ok("1")
-        {
+        if !cfg!(any(target_os = "linux", target_os = "macos")) {
             return false;
         }
         let Some(entry) = self.entry_file.as_ref().map(|entry| super::safe_canonicalize(entry)) else {
             return false;
         };
+        if std::env::var("SIMPLE_COMPILER_ENTRY_STAGE4").as_deref() == Ok("1")
+            && entry == super::safe_canonicalize(&self.project_root.join("src/compiler/80.driver/main.spl"))
+        {
+            return true;
+        }
+        if std::env::var("SIMPLE_BOOTSTRAP").as_deref() != Ok("1")
+            || std::env::var("SIMPLE_BOOTSTRAP_STAGE4").as_deref() != Ok("1")
+        {
+            return false;
+        }
         [
             "src/app/cli/main.spl",
             "src/app/cli/native_build_main.spl",
