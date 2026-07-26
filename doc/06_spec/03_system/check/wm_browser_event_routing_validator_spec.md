@@ -21,7 +21,10 @@ Required live proof includes the canonical host-pointer/focus/move/title/maximiz
 text/pointer-down/pointer-up sequence, matching aggregate counts, positive
 `performance.now()` and input-to-paint measurements, animation evidence, real
 JSON booleans and numbers, DOM payload/UI readback, Electron/Chrome identity,
-and a correlated Simple font-composition receipt at the configured path.
+and a correlated Simple font-composition receipt at the configured path. It
+also requires the retained canonical Aetheric production envelope and generated
+HTML hash, exact theme snapshot fingerprints, mirrored computed glass witnesses,
+and explicit non-synthetic/non-compatibility flags.
 
 ## Primary changed flow
 

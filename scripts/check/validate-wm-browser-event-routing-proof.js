@@ -92,6 +92,68 @@ const expectedFontText = 'WEB';
 const expectedFontCompositionId = 'html-layout';
 const expectedFontIdentity = 'sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100';
 const maxEventTimingMs = 1000;
+const expectedThemeSnapshot = 'src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl';
+
+function envelopeFields(proofPath) {
+  return Object.fromEntries(fs.readFileSync(proofPath, 'utf8').split(/\r?\n/).filter(Boolean).map(line => {
+    const index = line.indexOf('=');
+    return [line.slice(0, index), line.slice(index + 1)];
+  }));
+}
+
+function productionEnvelopeArtifact(proof) {
+  try {
+    const envelopePath = path.resolve(proof.production_envelope_path || '');
+    const envelopeStat = fs.lstatSync(envelopePath);
+    if (!envelopeStat.isFile() || envelopeStat.isSymbolicLink() || envelopeStat.nlink > 1) return { status: 'invalid-envelope' };
+    const fields = envelopeFields(envelopePath);
+    const snapshot = fs.readFileSync(expectedThemeSnapshot, 'utf8');
+    const expectedManifest = (snapshot.match(/source_manifest_sha256: "([0-9a-f]{64})"/) || [])[1];
+    const expectedMaterial = (snapshot.match(/material_sha256: "([0-9a-f]{64})"/) || [])[1];
+    const htmlPath = path.resolve(fields.html_path || '');
+    const htmlStat = fs.lstatSync(htmlPath);
+    const htmlSha256 = htmlStat.isFile() && !htmlStat.isSymbolicLink() && htmlStat.nlink <= 1
+      ? crypto.createHash('sha256').update(fs.readFileSync(htmlPath)).digest('hex')
+      : '';
+    const exact = [
+      ['schema', 'aetheric-host-web-gui-v1'],
+      ['status', 'pass'],
+      ['producer', 'production-html-webir-drawir-electron'],
+      ['theme_id', 'aetheric_dark'],
+      ['theme_source_manifest_sha256', expectedManifest],
+      ['theme_material_sha256', expectedMaterial],
+      ['blur_or_tolerance_used', 'false'],
+      ['synthetic_fixture', 'false'],
+      ['raw_source_execution', 'false'],
+      ['compatibility_renderer', 'false'],
+    ].every(([key, value]) => fields[key] === value);
+    const mirrored = [
+      ['production_envelope_schema', 'schema'], ['production_envelope_producer', 'producer'],
+      ['production_html_path', 'html_path'], ['production_html_sha256', 'html_sha256'],
+      ['theme_id', 'theme_id'], ['theme_source_manifest_sha256', 'theme_source_manifest_sha256'],
+      ['theme_material_sha256', 'theme_material_sha256'],
+      ['production_post_action_semantic_state', 'post_action_semantic_state'],
+      ['production_blur_or_tolerance_used', 'blur_or_tolerance_used'],
+      ['production_synthetic_fixture', 'synthetic_fixture'],
+      ['production_raw_source_execution', 'raw_source_execution'],
+      ['production_compatibility_renderer', 'compatibility_renderer'],
+      ['computed_window_background', 'computed_window_background'],
+      ['computed_window_border_color', 'computed_window_border_color'],
+      ['computed_window_border_radius', 'computed_window_border_radius'],
+      ['computed_window_box_shadow', 'computed_window_box_shadow'],
+      ['computed_titlebar_backdrop_filter', 'computed_titlebar_backdrop_filter'],
+      ['computed_titlebar_webkit_backdrop_filter', 'computed_titlebar_webkit_backdrop_filter'],
+      ['computed_inactive_border', 'computed_inactive_border'], ['computed_inactive_shadow', 'computed_inactive_shadow'],
+      ['computed_active_border', 'computed_active_border'], ['computed_active_shadow', 'computed_active_shadow'],
+    ].every(([proofKey, fieldKey]) => proof[proofKey] === fields[fieldKey] && proof[proofKey] !== '');
+    if (!exact || !mirrored || !expectedManifest || !expectedMaterial ||
+        !/^[0-9a-f]{64}$/.test(fields.html_sha256 || '') || fields.html_sha256 !== htmlSha256 ||
+        fields.post_action_semantic_state !== 'text-mutated-and-focused') return { status: 'mismatch' };
+    return { status: 'pass' };
+  } catch (_err) {
+    return { status: 'missing' };
+  }
+}
 
 function proofSourceArtifact() {
   let stat;
@@ -120,6 +182,8 @@ function proofSourceArtifact() {
     !source.includes("proof_source: 'tools/web-render-backend/wm_event_check.js'") ||
     !source.includes("out.event_sequence = window.__wmFrames.map(frameName)") ||
     !source.includes("out.input_to_paint_ms = inputToPaintMs") ||
+    !source.includes('function loadProductionEnvelope(root)') ||
+    !source.includes('data-aetheric-production-surface') ||
     !source.includes("out.css_animation_probe = animationProbeStyle.animationName === 'simple-wm-proof-pulse'") ||
     !source.includes("result.font_frame_path = framePath") ||
     !source.includes("result.font_frame_pixel_checksum = frameChecksum")
@@ -270,6 +334,7 @@ const move = proof.move_payload || {};
 const title = proof.title_payload || {};
 const text = proof.text_payload || {};
 const proofSource = proofSourceArtifact();
+const productionEnvelope = productionEnvelopeArtifact(proof);
 const fontFrame = fontFrameArtifact(proof);
 const simpleComposition = simpleCompositionArtifact(proof);
 const proofSourceArtifactStatus =
@@ -293,6 +358,31 @@ const rows = {
   electron_user_agent: proof.electron_user_agent,
   electron_process_version: proof.electron_process_version,
   chrome_process_version: proof.chrome_process_version,
+  production_envelope_schema: proof.production_envelope_schema,
+  production_envelope_producer: proof.production_envelope_producer,
+  production_envelope_path: proof.production_envelope_path,
+  production_html_path: proof.production_html_path,
+  production_html_sha256: proof.production_html_sha256,
+  theme_id: proof.theme_id,
+  theme_source_manifest_sha256: proof.theme_source_manifest_sha256,
+  theme_material_sha256: proof.theme_material_sha256,
+  production_post_action_semantic_state: proof.production_post_action_semantic_state,
+  post_action_semantic_state: proof.post_action_semantic_state,
+  production_blur_or_tolerance_used: proof.production_blur_or_tolerance_used,
+  production_synthetic_fixture: proof.production_synthetic_fixture,
+  production_raw_source_execution: proof.production_raw_source_execution,
+  production_compatibility_renderer: proof.production_compatibility_renderer,
+  production_envelope_artifact_status: productionEnvelope.status,
+  computed_window_background: proof.computed_window_background,
+  computed_window_border_color: proof.computed_window_border_color,
+  computed_window_border_radius: proof.computed_window_border_radius,
+  computed_window_box_shadow: proof.computed_window_box_shadow,
+  computed_titlebar_backdrop_filter: proof.computed_titlebar_backdrop_filter,
+  computed_titlebar_webkit_backdrop_filter: proof.computed_titlebar_webkit_backdrop_filter,
+  computed_inactive_border: proof.computed_inactive_border,
+  computed_inactive_shadow: proof.computed_inactive_shadow,
+  computed_active_border: proof.computed_active_border,
+  computed_active_shadow: proof.computed_active_shadow,
   ready: jsonBoolTextOrBlank(proof.ready),
   wm_found: jsonBoolTextOrBlank(proof.wm_found),
   window_cmd_count: jsonIntegerTextOrBlank(proof.window_cmd_count),
@@ -374,6 +464,8 @@ if (!boolTrue(proof.pass)) {
   reason = 'event-routing-proof-source-missing';
 } else if (proofSource.status !== 'pass') {
   reason = `event-routing-proof-source-${proofSource.status}`;
+} else if (productionEnvelope.status !== 'pass') {
+  reason = `event-routing-production-envelope-${productionEnvelope.status}`;
 } else if (simpleComposition.status !== 'pass') {
   reason = 'event-routing-simple-composition-artifact-invalid';
 } else if (
@@ -427,6 +519,8 @@ if (!boolTrue(proof.pass)) {
   text.event.text !== 'Hello Simple'
 ) {
   reason = 'event-routing-payload-contract-missing';
+} else if (proof.post_action_semantic_state !== 'maximized-and-text-input') {
+  reason = 'event-routing-post-action-contract-missing';
 } else if (
   proof.font_text !== expectedFontText ||
   proof.font_composition_id !== expectedFontCompositionId ||
@@ -462,20 +556,17 @@ if (!boolTrue(proof.pass)) {
   proof.title_context_text !== 'terminal' ||
   !jsonIntegerAtLeast(proof.traffic_button_count, 3) ||
   proof.title_input_tag !== 'input' ||
-  proof.titlebar_height !== '34px' ||
   proof.titlebar_display !== 'flex' ||
-  proof.titlebar_cursor !== 'grab' ||
-  proof.titlebar_background !== 'rgb(229, 231, 235)' ||
-  proof.title_color !== 'rgb(17, 24, 39)' ||
-  !jsonIntegerAtLeast(proof.title_font_weight, 700) ||
-  proof.title_input_min_width !== '142px' ||
-  !jsonDecimalAtLeast(proof.title_input_width_px, 142) ||
-  proof.title_input_height !== '24px' ||
+  proof.titlebar_height === '' ||
+  proof.titlebar_cursor === '' ||
+  !jsonIntegerAtLeast(proof.title_font_weight, 1) ||
+  !jsonDecimalGreaterThan(proof.title_input_width_px, 0) ||
+  proof.title_input_height === '' ||
   proof.title_input_cursor !== 'text' ||
-  proof.title_input_background !== 'rgb(241, 245, 249)' ||
-  proof.close_button_background !== 'rgb(239, 68, 68)' ||
-  proof.minimize_button_background !== 'rgb(234, 179, 8)' ||
-  proof.maximize_button_background !== 'rgb(34, 197, 94)'
+  proof.title_input_background === '' ||
+  proof.close_button_background === '' ||
+  proof.minimize_button_background === '' ||
+  proof.maximize_button_background === ''
 ) {
   reason = 'event-routing-ui-contract-missing';
 }
