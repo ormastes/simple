@@ -93,6 +93,29 @@ So two defects share the symptom:
 2. Layout-sensitive aggregate-return nil across the native call ABI — still
    scale-only.
 
+## Pinpoint diagnosis for defect 1 (Dict.get)
+
+`src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl:608`:
+
+```
+if method_name == "get":
+    ...
+    val field_value = val_struct_get_field(receiver, val_to_text(key))
+    if field_value >= 0: return field_value   # raw value, NOT Some(value)
+    return val_make_nil()                     # nil, NOT None
+```
+
+`get` never constructs Option encoding, while `match ... case Some(hit)`
+decodes its scrutinee as an Option — so the Some arm fires with a nil/garbage
+payload. The Rust seed interpreter exhibits identical behavior (probe-proven),
+so it mirrors the same raw-or-nil contract. Any fix must either (a) wrap
+`get`'s result in proper Some/None encoding in BOTH compilers plus the native
+lowering, auditing `??`-based call sites that currently rely on nil-or-raw, or
+(b) teach the match decoder to treat a raw non-Option scrutinee as
+`Some(raw)`/`nil as None` consistently. Either way it is a semantic change to
+Option runtime encoding — bootstrap + extended smoke matrix required before
+deploy (see `.claude/memory` stage-4 rollback precedent).
+
 ## Proper fix
 
 In the cranelift lowering: make aggregate returns (direct and Option-wrapped)
