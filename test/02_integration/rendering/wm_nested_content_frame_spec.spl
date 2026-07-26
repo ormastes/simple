@@ -102,10 +102,10 @@ impl CompositorBackend for TestPixelBackend:
             yy = yy + 1
 
     me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
-        pass_do_nothing
+        pass_do_nothing("this pixel-only content-frame fixture never draws text")
 
     me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
-        pass_do_nothing
+        pass_do_nothing("this pixel-only content-frame fixture never draws bitmap characters")
 
     me put_pixel(x: i32, y: i32, color: u32):
         if x < 0 or y < 0 or x >= self.w or y >= self.h:
@@ -125,10 +125,10 @@ impl CompositorBackend for TestPixelBackend:
             yy = yy + 1
 
     me present():
-        pass_do_nothing
+        pass_do_nothing("the in-memory fixture has no display presentation side effect")
 
     me present_rect(x: i32, y: i32, w: i32, h: i32):
-        pass_do_nothing
+        pass_do_nothing("the in-memory fixture has no display presentation side effect")
 
     fn as_glass_capable() -> CompositorGlassCapable?:
         nil
@@ -304,6 +304,50 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         expect(result.fallback_required).to_be(false)
         expect(result.readback_source).to_equal("cpu_mirror")
         cpu.shutdown()
+
+    it "lowers a clipped nested frame to IMAGE and Engine2D renders it without skips":
+        step("Build a child whose right edge extends past its parent")
+        val window = _borderless_window("win-parent", 10, 10, 20, 20)
+        val scene = simple_gui_internal_window_scene(50, 50, "nested-g", [window])
+        val parent_frame = _top_level_web_frame(
+            "win-parent", 7, 20, 20, 0xFF111111u32)
+        val child_pixels = _solid_pixels(10 * 8, 0xFF22CC44u32)
+        val child_frame = wm_gui_content_frame_from_pixels(
+            "win-child", "win-parent", 15, 5, 10, 8,
+            child_pixels, 7, 1)
+        val taskbar = TaskbarModel(pinned: [], running: [], tray: [])
+        val composition = shared_wm_scene_draw_ir_composition_with_content(
+            scene, taskbar, [parent_frame, child_frame], "cpu", 1000, "", 0)
+        var found_surface = false
+        var found_image = false
+        for batch in composition.batches:
+            if batch.embedding.surface_id == "win-child":
+                found_surface = true
+                expect(batch.embedding.component_id).to_equal("win-parent")
+                expect(batch.embedding.x).to_equal(25)
+                expect(batch.embedding.width).to_equal(5)
+                for command in batch.commands:
+                    if command.kind == DRAW_IR_COMMAND_IMAGE and command.image_uri == shared_wm_content_frame_image_uri(child_frame):
+                        found_image = true
+        expect(found_surface).to_equal(true)
+        expect(found_image).to_equal(true)
+
+        step("Execute both resolved images through Engine2D")
+        val parent_image = engine2d_resolved_draw_ir_image(
+            shared_wm_content_frame_image_uri(parent_frame),
+            parent_frame.width, parent_frame.height, parent_frame.pixels)
+        val child_image = engine2d_resolved_draw_ir_image(
+            shared_wm_content_frame_image_uri(child_frame),
+            child_frame.width, child_frame.height, child_frame.pixels)
+        var engine = Engine2D.create_with_backend(50, 50, "cpu")
+        val result = engine2d_draw_ir_adv_composition_with_images(
+            engine, composition, false, [parent_image, child_image])
+        expect(result.skipped_command_count).to_equal(0)
+        step("The visible child pixels replace the parent, but never cross its clip")
+        expect(result.pixels[17 * 50 + 27]).to_equal(0xFF22CC44u32)
+        expect(result.pixels[12 * 50 + 12]).to_equal(0xFF111111u32)
+        expect(result.pixels[17 * 50 + 30]).to_equal(0xFF5A7FB5u32)
+        engine.shutdown()
 
     it "paints invalid nested Draw IR metadata magenta without resolving fabricated pixels":
         step("Build a valid parent with one visible child whose checksum is invalid")

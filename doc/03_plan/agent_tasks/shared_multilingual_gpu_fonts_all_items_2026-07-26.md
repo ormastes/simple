@@ -21,11 +21,11 @@ atlas, cache, process/env facade, or device-success path.
 | Area | Current evidence | Required next state |
 |---|---|---|
 | GSUB/GPOS | reviewed completion is integrated on the isolated branch; superseded stage1 duplicates were not imported | execute the frozen shaping/parser specs on the admitted CLI |
-| Bootstrap | `dd1d266dc9e` cleared the GPOS parse blocker; cached cycles 2 and 3 reached HIR but exited 132 on a nil receiver; cycle 3 ends after `compiler.spl` implementation methods with bootstrap function count zero; full CLI absent | stop this session at the three-cycle cap; diagnose the zero-count/nil boundary before a fresh-session retry |
+| Bootstrap | `e331a5700ab`, integrated as HEAD `7a161abfabb`, fixed impl-only bootstrap accumulation and added direct 0+2/1+2 coverage. The final cycle-3 check reached `compiler.spl` count 15 and failed after `driver:errors-read:done`, localizing the nil receiver inside the HIR error collector. A typed-index collector fix and direct regression are implemented but bootstrap-unverified; full CLI absent | stop at the three-check cap; in a fresh session run the exact bounded bootstrap command below and require exit 0 before admission |
 | Focused tests | implementation and static coverage exist; prior runner exited before examples | calibrated, nonzero, authoritative runtime results |
 | Native GPU | source/emission and partial backend evidence exist | one real 2D+3D promoted device route and current perf record |
 | Surfaces | source contracts and retained artifacts exist | live canonical Web/GUI/WM/SimpleOS evidence and honest blocked rows |
-| Docs/manuals | many drafts/history entries exist | current zero-stub manuals and one requirement/evidence matrix |
+| Docs/manuals | 26 sources; 18 mirrors present, eight missing, 12 stale, six same-revision but unverified, zero retained docgen logs | current zero-stub manuals and one requirement/evidence matrix |
 
 ## Parallel lanes
 
@@ -57,13 +57,29 @@ atlas, cache, process/env facade, or device-success path.
 
 | TODO | Status | Implementation owner | Acceptance evidence |
 |---|---|---|---|
-| `HIR-BOOTSTRAP-NIL-001` | FAIL — three-cycle cap reached | compiler/bootstrap owner in a fresh session | Commit `dd1d266dc9e` contains the GPOS block rewrite. Cached cycle 2 cleared parsing, reached HIR, and exited 132 on a nil receiver. Cycle 3 evidence is `build/native_probe/stage4-cycle3.log`, exit 132. Its last module is `src/compiler/backend/backend/compiler.spl`; all implementation methods, including `process_function`, complete lowering before `bootstrap-functions:count module=src/compiler/backend/backend/compiler.spl count=0` and the immediate `runtime error: field access on nil receiver`. Diagnose that boundary before authorizing any future retry. |
+| `HIR-BOOTSTRAP-NIL-001` | FAIL — fixes implemented, bootstrap unverified, three-check cap reached | compiler/bootstrap owner in a fresh session | `e331a5700ab`/HEAD `7a161abfabb` retains impl methods in the bootstrap accumulator and adds `bootstrap_impl_function_accumulation_spec.spl`. The final cycle-3 check reached `bootstrap-functions:count ... count=15`, completed wrapper/store/function-field access, then failed after `driver:errors-read:done`. The current typed-index `_driver_collect_hir_errors` change plus `hir_lowering_error_collection_spec.spl` addresses that localized boundary but has not been exercised by a post-fix bootstrap. |
 
-The three-cycle cap is reached. No further Stage 4 retry is permitted this
-session. No full CLI was produced, so immutable CLI/core-C publication,
+The three-check cap is reached. No further Stage 4 retry is permitted this
+session. In a fresh session, run exactly:
+
+```bash
+timeout -k 30s 3600s env SIMPLE_NO_STUB_FALLBACK=1 \
+  scripts/bootstrap/bootstrap-from-scratch.sh \
+  --backend=cranelift \
+  --output=build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap \
+  --full-bootstrap --full-cli --no-mcp --jobs=4
+```
+
+Require a nonzero real-module bootstrap-function count, no error-collector nil
+receiver, and wrapper exit 0. No full CLI was produced, so immutable CLI/core-C publication,
 essential-tools and deliberate-red/empty-runner admission, focused font
 execution, owner docgen, native promotion, and surface evidence remain
 blocked.
+
+The working tree additionally implements HIP-to-ROCm prepared-batch
+canonicalization, fail-closed degenerate Simple Web results, and ancestor-clipped
+nested WM IMAGE projection. Their direct specs are present, but none has
+authoritative execution evidence; they remain active source changes.
 
 ## Required handoff format
 

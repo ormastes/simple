@@ -1,0 +1,49 @@
+# @tag: browser_engine, draw_ir, fail_closed
+
+use std.spec.{describe, it, expect, step}
+use common.ui.draw_ir.{DRAW_IR_COMMAND_GROUP}
+use common.ui.web_render_api.{
+    WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE,
+    WEB_RENDER_TARGET_PURE_SIMPLE,
+    WebRenderRequest
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{
+    SimpleWebEngine2DStaticPixelCache
+}
+use std.gc_async_mut.ui.web_render_pixel_backend.{
+    web_render_html_request_to_pixel_artifact_with_backend
+}
+
+describe "Simple Web HTML layout result":
+
+    it "fails closed when HTML parsing produces only the synthetic root":
+        step("Render a degenerate HTML document through the layout owner")
+        val result = simple_web_layout_render_html_draw_ir_result("", 32, 24)
+        expect(result.status).to_equal(WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE)
+        expect(result.reason).to_equal("degenerate-html-parse")
+        expect(result.composition.batches.len()).to_equal(1)
+        expect(result.composition.batches[0].commands.len()).to_equal(1)
+        expect(result.composition.batches[0].commands[0].kind).to_equal(
+            DRAW_IR_COMMAND_GROUP)
+
+        step("Reject the same document through the production pixel artifact route")
+        val request = WebRenderRequest.html(
+            WEB_RENDER_TARGET_PURE_SIMPLE, "", "", "", "", 32, 24
+        ).with_pixel_output()
+        val artifact = web_render_html_request_to_pixel_artifact_with_backend(
+            request, "", "cpu")
+        expect(artifact.engine2d_status).to_equal(
+            WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE)
+        expect(artifact.engine2d_reason).to_equal("degenerate-html-parse")
+        expect(artifact.pixels.len()).to_equal(0)
+
+        step("Keep an empty cache sentinel from masquerading as a rendered viewport")
+        var cache = SimpleWebEngine2DStaticPixelCache.create(0, 24, "cpu")
+        val invalid_viewport = cache.result_for_html("")
+        expect(invalid_viewport.status).to_equal(
+            WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE)
+        expect(invalid_viewport.reason).to_equal("invalid viewport")
+        expect(invalid_viewport.readback.pixels.len()).to_equal(0)

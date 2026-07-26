@@ -9,13 +9,17 @@ Final done-mark owner: highest-capability `/root`
 
 `STATUS: FAIL`
 
-This is the current all-lane audit, not a runtime or native PASS. Static source
-and executable coverage is broad, but no fresh pure-Simple full CLI has been
-admitted. The fresh continuation admitted bootstrap Stage 2 and Stage 3 for
-stage progression, parsed the prior `SyscallId` enum blocker successfully,
-and commit `dd1d266dc9e` cleared the GPOS-data block-form parse error. Cached
-Stage 4 cycles 2 and 3 then reached HIR but exited 132 on a nil receiver.
-Those stage compilers are not a full font-test CLI.
+This is the current all-lane audit at HEAD `7a161abfabb` plus the current
+working changes, not a runtime or native PASS. Static source and executable
+coverage is broad, but no fresh pure-Simple full CLI has been admitted. The
+continuation admitted bootstrap Stage 2 and Stage 3 for stage progression,
+parsed the prior `SyscallId` enum blocker successfully, and cleared the
+GPOS-data block-form parse error. `e331a5700ab`, integrated as HEAD
+`7a161abfabb`, fixed impl-only bootstrap function accumulation. The final
+cycle-3 Stage 4 check then localized the remaining nil receiver inside the HIR
+error collector. The typed-index collector fix and its direct regression are
+implemented in the working tree but bootstrap-unverified. Those stage
+compilers are not a full font-test CLI.
 The retained history and resume contract are in
 `doc/08_tracking/bug/shared_font_stage4_stale_compiler_backfill_2026-07-26.md`.
 Consequently runner calibration, focused execution, zero-stub docgen, native
@@ -35,22 +39,28 @@ promotion, QEMU pixels, and performance remain unaccepted.
   `dd1d266dc9e` then rewrote the GPOS block form.
 - Stage 4/full CLI is absent. Cached cycle 2 cleared parsing, reached HIR, and
   exited 132 on a nil receiver.
-- Cycle 3 retained `build/native_probe/stage4-cycle3.log` and exited 132. Its
-  final exact markers show module
-  `src/compiler/backend/backend/compiler.spl`; all implementation methods,
-  including `process_function`, completed their body markers; then
-  `bootstrap-functions:count module=src/compiler/backend/backend/compiler.spl count=0`
-  was immediately followed by
-  `runtime error: field access on nil receiver`.
+- The retained pre-fix log showed that
+  `src/compiler/backend/backend/compiler.spl` completed all fifteen impl
+  methods but published zero accumulated functions. `e331a5700ab`/HEAD
+  `7a161abfabb` adds impl methods to the bootstrap accumulator and adds direct
+  0+2/1+2 no-drop/no-duplication coverage.
+- The final cycle-3 check reached
+  `bootstrap-functions:count module=src/compiler/backend/backend/compiler.spl count=15`,
+  completed constructor, wrapper, module-store, and functions-field markers,
+  then failed immediately after `driver:errors-read:done`. This localizes the
+  nil receiver inside `_driver_collect_hir_errors`.
+- The current working change uses a typed indexed `LoweringError` loop and adds
+  `hir_lowering_error_collection_spec.spl` for empty, recovered, and fatal
+  arrays. It has not been exercised by a post-fix bootstrap.
 
 No Stage 4 CLI/core-C identity was published and no global runner calibration
-ran. The three-cycle cap is reached; no further retry is permitted this
-session. A fresh session must diagnose the zero bootstrap-function count and
-nil-receiver boundary before it may authorize another bootstrap attempt.
+ran. The three-check cap is reached; no further retry is permitted this
+session. A fresh session must verify the integrated accumulator and typed-index
+collector before any downstream evidence can be accepted.
 
 | Open TODO | Status | Required evidence before retry | Bounded continuation |
 |---|---|---|---|
-| `HIR-BOOTSTRAP-NIL-001` | FAIL — three-cycle cap reached | Diagnose why `compiler.spl` completes all implementation method bodies but publishes `bootstrap-functions:count ... count=0`, then immediately dereferences a nil receiver | No further retry this session. A fresh-session retry remains gated on a focused diagnosis/fix. Only exit 0 may unlock immutable CLI/core-C identity, essential-tools smoke, and deliberate-red/empty-runner gates; all downstream work stays blocked. |
+| `HIR-BOOTSTRAP-NIL-001` | FAIL — fixes implemented, bootstrap unverified, three-check cap reached | Verify `compiler.spl` retains its 15 impl methods and `_driver_collect_hir_errors` handles typed empty/recovered/fatal arrays without a nil receiver | No further retry this session. In a fresh session, run the exact bounded command below. Only exit 0 may unlock immutable CLI/core-C identity, essential-tools smoke, direct HIR specs, and deliberate-red/empty-runner gates; all downstream work stays blocked. |
 
 ## Requirement matrix
 
@@ -71,11 +81,11 @@ Current count: `0 pass`, `14 active`, `9 blocked`.
 | REQ-008 | active | B+C manifest/shaping | manifest and parser/loader specs cover `glyf`, default instance, bitmap, and rejection policy | admitted CLI; run B/C command sets | `/root` |
 | REQ-009 | active | C+E material/native | renderer, aggregate surface, emission, backend and perf specs contain cache identity/lifecycle oracles | admitted CLI and native record; run C/E sets | `/root` |
 | REQ-010 | active | E native/emission | GPU emission and CUDA handoff executable/manual pairs cover source/artifact contracts; emission is not execution | admitted CLI; run E source commands; retained native artifact required for promotion | `/root` |
-| REQ-011 | active | D+E surfaces/native | aggregate surfaces/route plus canonical Web, GUI, hosted WM, SimpleOS and RV64 pairs exist | admitted CLI, hosted frame and QEMU pixels; run D/E sets | `/root` |
+| REQ-011 | active | D+E surfaces/native | aggregate surfaces/route plus canonical Web, GUI, hosted WM, SimpleOS and RV64 pairs exist; working changes add fail-closed degenerate Web status and ancestor-clipped nested IMAGE projection | changes are unverified; admitted CLI, hosted frame and QEMU pixels required; run D/E sets | `/root` |
 | REQ-012 | blocked | E native 2D/3D/perf | native readback spec contains HUD/world, handles, submit, fence, depth/transform and readback gates | admitted CLI plus real graphics device; run E native command | `/root` |
 | REQ-013 | blocked | E native 2D/3D/perf | native readback spec rejects unavailable and forged promotion | one real backend must pass both 2D and 3D through E native command | `/root` |
 | REQ-014 | blocked | B–E generation / F audit | eight assigned mirrors are missing; the other 18 assigned mirrors require fresh docgen, and no retained log proves `0 stubs` | admitted CLI; run every docgen command below; review manuals | `/root` |
-| REQ-015 | active | C shaping/material/config | aggregate surfaces and focused config specs cover identity, policies, target order and pre-mutation rejection | admitted CLI; run aggregate/C commands | `/root` |
+| REQ-015 | active | C shaping/material/config | aggregate surfaces and focused config specs cover identity, policies, target order and pre-mutation rejection; working changes canonicalize HIP to ROCm on the prepared batch | batch change is unverified; admitted CLI required; run aggregate/C commands | `/root` |
 | NFR-001 | active | B manifest/distribution | manifest and SimpleOS bundle source gates cover immutable hashes, deterministic generation and corruption rejection | admitted CLI; run B command set | `/root` |
 | NFR-002 | blocked | E native/perf | native readback and perf specs define exact packed-ARGB comparator and provenance fields | admitted CLI plus real device; run E native/perf commands | `/root` |
 | NFR-003 | active | B manifest/distribution | manifest/bundle gates encode the 80 MiB and SimpleOS projection limits | admitted CLI; run B command set | `/root` |
@@ -90,6 +100,12 @@ source, CPU mirror, simulation, or a crashed command cannot prove the selected
 runtime/native requirement.
 
 ## Canonical executable/manual audit
+
+The frozen inventory contains all 26 executable sources. It currently has 18
+present mirrors, eight missing mirrors, 12 demonstrably stale mirrors whose
+sources changed later, six same-revision but still unverified mirrors, and zero
+retained owner docgen `{out,err}` files. Therefore zero manuals have accepted
+current `0 stubs` evidence.
 
 The eleven original acceptance specs are accounted for, but their mirrors are
 not all current: `install_font_assets_spec.md` lacks one current scenario title,
@@ -117,7 +133,7 @@ Eight required focused specs currently lack mirrors:
 - `doc/06_spec/01_unit/lib/common/text_layout/font_render_config_spec.md`
 - `doc/06_spec/01_unit/lib/gpu/engine3d/font_compat_spec.md`
 
-Existing mirrors are stale because their executable sources changed in this
+Twelve existing mirrors are stale because their executable sources changed in this
 all-items worktree and no current pure-Simple docgen result exists:
 
 - `install_font_assets_spec.md`
@@ -143,6 +159,17 @@ Static scans found no `pass_todo`, `expect(true).to_equal(true)`,
 `pass_do_nothing`, or `pass_dn` in the aggregate acceptance specs.
 `find doc/06_spec -name '*_spec.spl' -print` returned no paths. These are static
 checks only.
+
+The remaining six present mirrors are from the same revision as their sources:
+`selected_devanagari_spec`, `selected_arabic_spec`, `font_renderer_spec`,
+`gpu_font_emission_spec`, `cuda_generated_font_handoff_spec`, and
+`native_gpu_font_readback_spec`. Without retained docgen logs they remain
+unverified, not accepted.
+
+The current HIP-to-ROCm batch, degenerate-Web fail-closed, and nested WM IMAGE
+source/spec changes do not alter this frozen 26-manual count. They remain
+unverified implementation evidence and may make their affected owner manuals
+stale when those manuals are regenerated.
 
 ## Exact owner commands
 

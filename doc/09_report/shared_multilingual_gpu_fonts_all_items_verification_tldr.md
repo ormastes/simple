@@ -6,7 +6,14 @@ All 23 requirement/NFR rows are mapped, but the umbrella result remains
 ## Current State
 
 - source/spec lanes and reviewed GSUB/GPOS integration are checkpointed;
-- the stale CLI crashes before examples, so runtime and docgen are not PASS;
+- HEAD `7a161abfabb` fixes impl accumulation; the final cycle-3 check reached
+  15 functions and localized the remaining nil receiver inside HIR error
+  collection;
+- the typed-index collector, HIP-to-ROCm batch, fail-closed degenerate Web, and
+  nested IMAGE changes are implemented but unverified;
+- the inventory is 26 sources, 18 present mirrors, eight missing, 12 stale,
+  six unverified, and zero docgen logs;
+- no full CLI exists, so runtime and docgen are not PASS;
 - current GPU hardware exists, but native readback/performance remain blocked on admission;
 - hosted WM needs a clean tree and reviewed glyph pin; RV64 needs ELF, disk, and crop hash.
 

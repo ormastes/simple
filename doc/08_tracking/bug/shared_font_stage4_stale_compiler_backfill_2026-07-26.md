@@ -1,7 +1,7 @@
 # Shared-font Stage 4 bootstrap admission blocker
 
 - Date: 2026-07-26
-- Status: BLOCKED at the three-cycle cap
+- Status: BLOCKED at the three-check cap; fixes implemented, bootstrap unverified
 - Scope: pure-Simple Stage 4 admission and essential-tools runner calibration
 
 The existing deployed Linux CLI is not admissible: SHA-256
@@ -99,22 +99,45 @@ No Stage 4 CLI/core-C admission artifact exists, so essential-tools,
 deliberate-red/empty calibration, docgen, and font execution remain blocked.
 
 Commit `dd1d266dc9e` then rewrote the GPOS block form. Cached Stage 4 cycle 2
-cleared parsing, reached HIR, and exited 132 on a nil receiver. Cycle 3
-captured the authoritative terminal evidence in
-`build/native_probe/stage4-cycle3.log` and also exited 132.
+cleared parsing, reached HIR, and exited 132 on a nil receiver. The retained
+pre-fix trace in `build/native_probe/stage4-cycle3.log` first localized the
+failure after the implementation-only
+`src/compiler/backend/backend/compiler.spl` module.
 
-The last exact cycle-3 markers identify
-`src/compiler/backend/backend/compiler.spl`. All implementation methods,
-including `process_function`, reached their body-done marker. The terminal
-sequence is:
+That module has zero top-level functions and fifteen impl methods. The HIR
+bootstrap branch inserted those methods into the returned `HirModule.functions`
+but did not add them to the `_bootstrap_hir_functions` accumulator consumed by
+the wrapper/module snapshot. Commit `e331a5700ab`, integrated as HEAD
+`7a161abfabb`, now adds each typed `HirFunction` to both stores, retains typed
+`HirModule` wrapper values, and adds
+`test/01_unit/compiler/hir/bootstrap_impl_function_accumulation_spec.spl`.
+The regression covers both 0 free + 2 impl and 1 free + 2 impl methods across
+the returned HIR, accumulator, and per-module snapshot without drops or
+duplicates.
+
+The final cycle-3 check proved that boundary advanced:
 
 ```text
 [hir-lower] lower_function:body process_function
-[hir-lower] bootstrap-functions:count module=src/compiler/backend/backend/compiler.spl count=0
+[hir-lower] bootstrap-functions:count module=src/compiler/backend/backend/compiler.spl count=15
+[HIR-BND] constructor:done
+[HIR-BND] wrapper:return-received
+[HIR-BND] store:add:done
+[HIR-BND] driver:return-received
+[HIR-BND] driver:errors-read:start
+[HIR-BND] driver:errors-read:done
 runtime error: field access on nil receiver
 ```
 
-The three-cycle cap is reached. No further bootstrap retry is permitted this
+The nil receiver is therefore inside `_driver_collect_hir_errors`, after the
+typed `[LoweringError]` array is read and before collection completes. The
+current working change replaces its `for err in errors` traversal with an
+indexed loop and an explicit `LoweringError` binding. The direct
+`test/01_unit/compiler/bootstrap/hir_lowering_error_collection_spec.spl`
+regression covers empty, recovered, and fatal arrays through the shared driver
+path. Both the fix and regression are implemented but bootstrap-unverified.
+
+The three-check cap is reached. No further bootstrap retry is permitted this
 session. No Stage 4 CLI/core-C admission artifact exists, so essential-tools,
 deliberate-red/empty calibration, docgen, font execution, native promotion,
 and surface evidence remain blocked.
@@ -123,12 +146,12 @@ and surface evidence remain blocked.
 
 | TODO | Status | Required change and evidence |
 |---|---|---|
-| `HIR-BOOTSTRAP-NIL-001` | FAIL — three-cycle cap reached | In a fresh session, diagnose why `compiler.spl` completes every implementation method but reports zero bootstrap functions and immediately dereferences a nil receiver. Retain the cycle-3 log and exit 132 as the starting evidence. |
+| `HIR-BOOTSTRAP-NIL-001` | FAIL — fixes implemented, bootstrap unverified, three-check cap reached | In a fresh session, verify the integrated impl accumulator and current typed-index error collector. Require `compiler.spl` to retain a nonzero function count, pass error collection without a nil receiver, and produce an exit-0 full CLI. Retain the prior cycle-3 and final Stage 4 logs as starting evidence. |
 
-Only a focused diagnosis/fix in a fresh session may authorize the command
-below. Only exit 0 permits publishing immutable CLI/core-C paths and SHA-256
-values, then running essential-tools and deliberate-red/empty-runner
-admission. All downstream work remains blocked until admission.
+Only a fresh session may run the command below. Only exit 0 permits publishing
+immutable CLI/core-C paths and SHA-256 values, then running essential-tools,
+the two direct HIR regressions, and deliberate-red/empty-runner admission. All
+downstream work remains blocked until admission.
 
 Future fresh-session command after that prerequisite:
 
@@ -139,3 +162,18 @@ timeout -k 30s 3600s env SIMPLE_NO_STUB_FALLBACK=1 \
   --output=build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap \
   --full-bootstrap --full-cli --no-mcp --jobs=4
 ```
+
+## Unverified downstream source changes
+
+The same working tree contains three source-level follow-ups that do not alter
+the blocker or constitute runtime evidence:
+
+- prepared font batches now canonicalize the `hip` alias to `rocm`, with a
+  direct configuration regression;
+- degenerate Simple Web parsing now returns typed unavailable evidence and an
+  intentionally unsupported GROUP so Engine2D cannot present blank pixels as a
+  successful render;
+- nested WM content frames now lower to ancestor-clipped IMAGE commands with
+  resolved Engine2D image inputs instead of unsupported GROUP metadata.
+
+All three remain unverified until the admitted CLI runs their focused specs.

@@ -9,13 +9,18 @@ use common.ui.draw_ir.{
     draw_ir_batch_with_source,
     draw_ir_composition,
     draw_ir_embedding_config,
+    draw_ir_group_command,
     draw_ir_source_html_ast
 }
 use std.common.web.browser_renderer_protocol.{
     BrowserTextInputOverlay, browser_text_input_overlay_empty
 }
 use common.render_scene.scene.{SceneCommand, scene_fill_rect}
-use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
+use common.ui.web_render_api.{
+    WEB_RENDER_ENGINE2D_STATUS_RENDERED,
+    WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE,
+    WebRenderMaterialFallbackProvenance
+}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.animation.timing.{evaluate_timing, parse_timing_function}
 use std.gc_async_mut.gpu.browser_engine.style_block_parse.{extract_keyframes, KeyframeRegistry}
@@ -212,6 +217,8 @@ class SimpleWebLayoutDrawIrResult:
     animation_end_ms: i64
     hit_index: SimpleWebLayoutHitIndex
     resolved_input_view_start_byte: i64
+    status: text
+    reason: text
 
 class SimpleWebLayoutMaterialWitness:
     cpu_composited_count: i32
@@ -545,6 +552,43 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
                 pc = pc + 1
             print "[web-layout] degenerate-part i={part_i} len={part.len()} codes{part_codes}"
             part_i = part_i + 1
+        # GROUP is intentionally unsupported by Engine2D, so the existing
+        # skipped-command/status gates reject this frame instead of presenting
+        # blank pixels as a successful render.
+        val failed_source = draw_ir_source_html_ast(
+            "simple_web_html_layout_renderer", "html", "", "", "",
+            "degenerate-parse", "1")
+        val failed_embedding = draw_ir_embedding_config(
+            "html", "document", 0, 0, width, height, 0, 1000, true)
+        val failed_batch = draw_ir_batch_with_source(
+            "html-layout", DRAW_IR_BACKEND_CPU, failed_embedding,
+            [draw_ir_group_command("degenerate-html-parse", "document")],
+            failed_source)
+        return SimpleWebLayoutDrawIrResult(
+            composition: draw_ir_composition(
+                "html-layout", "simple-web-html-layout",
+                DRAW_IR_BACKEND_CPU, [failed_batch]),
+            material_fallback: WebRenderMaterialFallbackProvenance.none(),
+            material_witness: SimpleWebLayoutMaterialWitness(
+                cpu_composited_count: 0,
+                cpu_composited_sha256: "",
+                solid_material_count: 0,
+                solid_material_sha256: ""),
+            animation_end_ms: -1,
+            hit_index: SimpleWebLayoutHitIndex(
+                nodes: [],
+                styles: [],
+                child_index: HtmlChildIndex(
+                    first_child: [], next_sibling: [], child_count: []),
+                boxes: LayoutResult(
+                    bx: [], by: [], bw: [], bh: [],
+                    wrap_starts: [], wrap_ends: [],
+                    intrinsic_widths: [], height: 0),
+                input_text_hits: []),
+            resolved_input_view_start_byte: 0,
+            status: WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE,
+            reason: "degenerate-html-parse"
+        )
     val child_index = build_child_index(nodes)
     _web_budget_rearm(render_start_us + budget_us * 7 / 10)
     var material_entries: [text] = ["", ""]
@@ -611,7 +655,9 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
             input_text_hits: input_hit_build.hits
         ),
         resolved_input_view_start_byte:
-            input_hit_build.resolved_view_start_byte
+            input_hit_build.resolved_view_start_byte,
+        status: WEB_RENDER_ENGINE2D_STATUS_RENDERED,
+        reason: ""
     )
 
 fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height: i32, vector_fonts: bool) -> SimpleWebLayoutDrawIrResult:

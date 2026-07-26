@@ -20,12 +20,18 @@ use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult, engine2d_draw_ir_adv_composition}
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
-use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
+use common.ui.web_render_api.{
+    WEB_RENDER_ENGINE2D_STATUS_RENDERED,
+    WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE,
+    WebRenderMaterialFallbackProvenance
+}
 use common.ui.draw_ir.{DrawIrComposition}
 
 class SimpleWebLayoutEngine2DExecutionResult:
     render: Engine2dDrawIrAdvResult
     material_fallback: WebRenderMaterialFallbackProvenance
+    status: text
+    reason: text
     vector_font_identity: text
     vector_font_pixel_size: i32
     vector_font_execution_target: text
@@ -40,6 +46,8 @@ class SimpleWebLayoutEngine2DExecutionResult:
 class SimpleWebLayoutEngine2DReadbackResult:
     readback: Engine2DReadback
     material_fallback: WebRenderMaterialFallbackProvenance
+    status: text
+    reason: text
     vector_font_identity: text
     vector_font_pixel_size: i32
     vector_font_execution_target: text
@@ -98,6 +106,7 @@ fn _simple_web_layout_render_html_engine2d_execution(html: text, width: i32, hei
     )
     SimpleWebLayoutEngine2DExecutionResult(
         render: render, material_fallback: material_fallback,
+        status: layout_result.status, reason: layout_result.reason,
         vector_font_identity: render.font_identity,
         vector_font_pixel_size: vector_font.pixel_size,
         vector_font_execution_target: render.font_execution_target,
@@ -130,7 +139,8 @@ pub fn simple_web_layout_render_html_pixels_engine2d(html: text, width: i32, hei
     val execution = _simple_web_layout_render_html_engine2d_execution(
         html, width, height, backend_name, -1
     )
-    if execution.render.skipped_command_count != 0:
+    if (execution.status != WEB_RENDER_ENGINE2D_STATUS_RENDERED or
+            execution.render.skipped_command_count != 0):
         return []
     execution.render.pixels
 
@@ -149,6 +159,8 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
         return SimpleWebLayoutEngine2DReadbackResult(
             readback: engine2d_readback([], "unavailable"),
             material_fallback: WebRenderMaterialFallbackProvenance.none(),
+            status: WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE,
+            reason: "invalid viewport",
             vector_font_identity: "", vector_font_pixel_size: 0,
             vector_font_execution_target: "", vector_font_batch_identity: "",
             vector_font_readback_source: "", vector_font_device_checksum: 0,
@@ -160,10 +172,13 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
     val execution = _simple_web_layout_render_html_engine2d_execution(
         html, width, height, backend_name, animation_time_ms
     )
-    if execution.render.skipped_command_count != 0:
+    if (execution.status != WEB_RENDER_ENGINE2D_STATUS_RENDERED or
+            execution.render.skipped_command_count != 0):
         return SimpleWebLayoutEngine2DReadbackResult(
             readback: engine2d_readback([], "unavailable"),
             material_fallback: execution.material_fallback,
+            status: WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE,
+            reason: if execution.reason != "": execution.reason else: "Draw IR execution incomplete",
             vector_font_identity: execution.vector_font_identity,
             vector_font_pixel_size: execution.vector_font_pixel_size,
             vector_font_execution_target: execution.vector_font_execution_target,
@@ -182,6 +197,7 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
         pixel_count: pixel_count, checksum: execution.render.readback_checksum)
     SimpleWebLayoutEngine2DReadbackResult(
         readback: readback, material_fallback: execution.material_fallback,
+        status: execution.status, reason: execution.reason,
         vector_font_identity: execution.vector_font_identity,
         vector_font_pixel_size: execution.vector_font_pixel_size,
         vector_font_execution_target: execution.vector_font_execution_target,

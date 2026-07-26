@@ -9,6 +9,10 @@ Six non-overlapping lanes own every selected REQ-001–015 and NFR-001–008 row
 - frozen `FontRenderer`/`FontRenderBatch` interfaces and SSpec step/checker vocabulary;
 - static/source work proceeds independently, but runtime claims require one admitted Stage 4 CLI;
 - unavailable hardware stays blocked with exact owner, artifact, and resume command.
+- HEAD `7a161abfabb` fixes impl accumulation; the remaining error-collector
+  typed-index fix and all font/Web/nested-IMAGE changes are bootstrap-unverified;
+- the manual inventory is 26 sources, 18 present, eight missing, 12 stale,
+  six unverified, and zero retained docgen logs.
 
 ## Open Next
 

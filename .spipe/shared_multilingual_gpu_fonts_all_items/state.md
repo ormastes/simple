@@ -58,10 +58,24 @@ verify-pending
 
 | ID | Status | Owner | Required evidence and bounded continuation |
 |---|---|---|---|
-| HIR-BOOTSTRAP-NIL-001 | FAIL — three-cycle cap reached | compiler/bootstrap owner in a fresh session | Commit `dd1d266dc9e` rewrote the GPOS block form. Cached Stage 4 cycle 2 cleared parsing, reached HIR, then exited 132 on a nil receiver. Cycle 3 retained `build/native_probe/stage4-cycle3.log` and also exited 132: the final module was `src/compiler/backend/backend/compiler.spl`; every implementation method, including `process_function`, reached its body-done marker; then `bootstrap-functions:count module=src/compiler/backend/backend/compiler.spl count=0` was immediately followed by `runtime error: field access on nil receiver`. No further retry is permitted this session. The full CLI is absent; all admission, font, docgen, native, and surface gates remain blocked. |
+| HIR-BOOTSTRAP-NIL-001 | FAIL — fixes implemented, bootstrap unverified, three-check cap reached | compiler/bootstrap owner in a fresh session | The impl-only boundary was fixed in `e331a5700ab` and integrated as HEAD `7a161abfabb`: impl methods now enter the bootstrap function accumulator, typed wrapper values are retained, and `bootstrap_impl_function_accumulation_spec.spl` covers 0 free + 2 impl and 1 free + 2 impl methods without drops or duplicates. The final cycle-3 Stage 4 check then reported `bootstrap-functions:count module=src/compiler/backend/backend/compiler.spl count=15`, completed the typed wrapper/store/function-field markers, and failed immediately after `driver:errors-read:done`, localizing the nil receiver inside `_driver_collect_hir_errors`. The current working change replaces that `for` traversal with a typed indexed loop and adds `hir_lowering_error_collection_spec.spl`; both are bootstrap-unverified. No further check is permitted this session. The full CLI is absent; all admission, font, docgen, native, and surface gates remain blocked. |
+
+Fresh-session resume command:
+
+```sh
+timeout -k 30s 3600s env SIMPLE_NO_STUB_FALLBACK=1 \
+  scripts/bootstrap/bootstrap-from-scratch.sh \
+  --backend=cranelift \
+  --output=build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap \
+  --full-bootstrap --full-cli --no-mcp --jobs=4
+```
+
+Only wrapper exit 0 may admit the CLI and authorize essential-tools, direct
+HIR regressions, runner calibration, focused specs, or docgen.
 
 ## Log
 
 - dev: Remade the goal around all selected requirements and NFRs with twelve testable acceptance criteria, six parallel lanes, frozen shared interfaces, and explicit unavailable-host policy.
-- verify: At revision `dd1d266dc9e`, no fresh Stage 4 CLI is admitted. The frozen B4+C13+D5+E4 docgen set has eight missing mirrors and 18 existing mirrors awaiting fresh `0 stubs` evidence; no requirement is marked pass.
-- bootstrap: The GPOS block rewrite at `dd1d266dc9e` cleared parsing. Cached cycle 2 reached HIR and exited 132 on a nil receiver. Cycle 3 retained `build/native_probe/stage4-cycle3.log`, completed all implementation methods through `process_function`, then recorded `bootstrap-functions:count module=src/compiler/backend/backend/compiler.spl count=0` immediately before `runtime error: field access on nil receiver`; exit 132. The three-cycle cap is reached, no further retry is permitted this session, and the full CLI is absent.
+- verify: At HEAD `7a161abfabb` plus the current working changes, no fresh Stage 4 CLI is admitted. The frozen B4+C13+D5+E4 inventory is 26 executable sources, 18 present mirrors, eight missing mirrors, 12 stale mirrors, six same-revision but unverified mirrors, and zero retained docgen logs; no requirement is marked pass. Static scans found no prohibited placeholder pass, and `doc/06_spec` contains no executable `_spec.spl`.
+- bootstrap: `e331a5700ab`, integrated as `7a161abfabb`, fixed impl-method accumulation and added direct 0+2/1+2 regression coverage. The final cycle-3 Stage 4 check advanced `compiler.spl` from count 0 to count 15 and localized the remaining nil receiver after `driver:errors-read:done`, inside the error collector. A typed-index collector fix and direct recovered/fatal error regression now exist in the working tree but are bootstrap-unverified. The three-check cap is reached, no further retry is permitted this session, and the full CLI is absent.
+- implementation: The working tree also canonicalizes HIP to ROCm on the prepared font batch, makes degenerate Simple Web parsing fail closed instead of presenting blank success, and lowers nested WM content frames as clipped IMAGE commands. These changes and their direct specs remain unverified and do not change any REQ/NFR status.
