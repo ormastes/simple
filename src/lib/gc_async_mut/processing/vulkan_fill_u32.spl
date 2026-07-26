@@ -1,6 +1,7 @@
 """Vulkan executor for the validated ProcessingIR FillU32 operation."""
 
 use std.common.processing.processing_ir.{ProcessingIr, processing_ir_validate}
+use std.gc_async_mut.processing.fault_injection.{processing_ir_fault_reason}
 use std.gc_async_mut.io.vulkan_sffi.{
     vulkan_init, vulkan_alloc_storage, vulkan_free_buffer,
     vulkan_compile_spirv, vulkan_destroy_shader,
@@ -61,6 +62,9 @@ fn processing_ir_execute_vulkan(ir: ProcessingIr) -> ProcessingVulkanResult:
     val valid = processing_ir_validate(ir)
     if not valid.valid:
         return ProcessingVulkanResult(completed: false, reason: valid.reason, values: [], backend_handle: 0, device_identity: 0)
+    val init_fault = processing_ir_fault_reason("vulkan", "init")
+    if init_fault != "":
+        return ProcessingVulkanResult(completed: false, reason: init_fault, values: [], backend_handle: 0, device_identity: 0)
     if not vulkan_init():
         return ProcessingVulkanResult(completed: false, reason: vulkan_last_error(), values: [], backend_handle: 0, device_identity: 0)
     if not vulkan_sffi_reap_dependency_quarantine():
@@ -87,15 +91,36 @@ fn processing_ir_execute_vulkan(ir: ProcessingIr) -> ProcessingVulkanResult:
         vulkan_free_buffer(buffer)
         vulkan_sffi_shutdown_reaped()
         return ProcessingVulkanResult(completed: false, reason: reason, values: [], backend_handle: 0, device_identity: 0)
+    val submit_fault = processing_ir_fault_reason("vulkan", "submit")
+    if submit_fault != "":
+        vulkan_destroy_pipeline(pipeline)
+        vulkan_destroy_shader(shader)
+        vulkan_free_buffer(buffer)
+        vulkan_sffi_shutdown_reaped()
+        return ProcessingVulkanResult(completed: false, reason: submit_fault, values: [], backend_handle: 0, device_identity: 0)
     val dispatch_status = vulkan_sffi_dispatch_buffer_compute_checked(
         buffer.handle, pipeline.handle, _processing_fill_push_constants(ir),
         (ir.element_count + 255) / 256, 1, 1)
     if dispatch_status < 0:
         vulkan_sffi_quarantine_dependencies(0, buffer.handle, pipeline.handle, shader.handle)
         return ProcessingVulkanResult(completed: false, reason: "vulkan-dispatch-completion-unknown", values: [], backend_handle: 0, device_identity: 0)
+    val readback_fault = processing_ir_fault_reason("vulkan", "readback")
+    if dispatch_status == 1 and readback_fault != "":
+        vulkan_destroy_pipeline(pipeline)
+        vulkan_destroy_shader(shader)
+        vulkan_free_buffer(buffer)
+        vulkan_sffi_shutdown_reaped()
+        return ProcessingVulkanResult(completed: false, reason: readback_fault, values: [], backend_handle: 0, device_identity: 0)
     val bytes = if dispatch_status == 1: vulkan_sffi_read_buffer_bytes(buffer.handle, byte_count, 0) else: []
     val read = bytes.len().to_i64() == byte_count
     val failure_reason = if dispatch_status == 0: "vulkan-dispatch-ineligible" else: if read: "ok" else: vulkan_last_error()
+    val mismatch_fault = processing_ir_fault_reason("vulkan", "mismatch")
+    if read and mismatch_fault != "":
+        vulkan_destroy_pipeline(pipeline)
+        vulkan_destroy_shader(shader)
+        vulkan_free_buffer(buffer)
+        vulkan_sffi_shutdown_reaped()
+        return ProcessingVulkanResult(completed: false, reason: mismatch_fault, values: [], backend_handle: 0, device_identity: 0)
     val handle = buffer.handle
     # Known-safe dispatch statuses may release their dependent resources.
     vulkan_destroy_pipeline(pipeline)

@@ -1,6 +1,7 @@
 """CUDA executor for the validated ProcessingIR FillU32 operation."""
 
 use std.common.processing.processing_ir.{ProcessingIr, processing_ir_validate}
+use std.gc_async_mut.processing.fault_injection.{processing_ir_fault_reason}
 use std.gc_async_mut.cuda.{
     cuda_available, cuda_init, cuda_device_count, cuda_device_get,
     cuda_ctx_create, cuda_ctx_destroy,
@@ -42,6 +43,9 @@ fn processing_ir_execute_cuda(ir: ProcessingIr) -> ProcessingCudaResult:
     val valid = processing_ir_validate(ir)
     if not valid.valid:
         return ProcessingCudaResult(completed: false, reason: valid.reason, values: [], backend_handle: 0, device_identity: 0)
+    val init_fault = processing_ir_fault_reason("cuda", "init")
+    if init_fault != "":
+        return ProcessingCudaResult(completed: false, reason: init_fault, values: [], backend_handle: 0, device_identity: 0)
     if not cuda_available() or cuda_init() != CUDA_SUCCESS or cuda_device_count() < 1:
         return ProcessingCudaResult(completed: false, reason: "cuda-init-failed", values: [], backend_handle: 0, device_identity: 0)
     val device_handle = cuda_device_get(0)
@@ -70,14 +74,27 @@ fn processing_ir_execute_cuda(ir: ProcessingIr) -> ProcessingCudaResult:
     raw_write_i64(args_ptr, 0, values_ptr)
     raw_write_i64(args_ptr, 8, values_ptr + 8)
     raw_write_i64(args_ptr, 16, values_ptr + 16)
+    val submit_fault = processing_ir_fault_reason("cuda", "submit")
+    if submit_fault != "":
+        _processing_cuda_cleanup(ctx, module, device, values_ptr, args_ptr, host_ptr, byte_count)
+        return ProcessingCudaResult(completed: false, reason: submit_fault, values: [], backend_handle: 0, device_identity: 0)
     val launched = cuda_launch_kernel(module, "processing_fill_u32", (ir.element_count + PROCESSING_CUDA_BLOCK_SIZE - 1) / PROCESSING_CUDA_BLOCK_SIZE, 1, 1, PROCESSING_CUDA_BLOCK_SIZE, 1, 1, args_ptr) == CUDA_SUCCESS
-    val copied = launched and cuda_sync() == CUDA_SUCCESS and cuda_memcpy_dtoh(host_ptr, device, byte_count) == CUDA_SUCCESS
+    val synced = launched and cuda_sync() == CUDA_SUCCESS
+    val readback_fault = processing_ir_fault_reason("cuda", "readback")
+    if synced and readback_fault != "":
+        _processing_cuda_cleanup(ctx, module, device, values_ptr, args_ptr, host_ptr, byte_count)
+        return ProcessingCudaResult(completed: false, reason: readback_fault, values: [], backend_handle: 0, device_identity: 0)
+    val copied = synced and cuda_memcpy_dtoh(host_ptr, device, byte_count) == CUDA_SUCCESS
     var values: [u32] = []
     if copied:
         var i: i64 = 0
         while i < ir.element_count:
             values.push(raw_read_i32(host_ptr, i * 4) as u32)
             i = i + 1
+    val mismatch_fault = processing_ir_fault_reason("cuda", "mismatch")
+    if copied and mismatch_fault != "":
+        _processing_cuda_cleanup(ctx, module, device, values_ptr, args_ptr, host_ptr, byte_count)
+        return ProcessingCudaResult(completed: false, reason: mismatch_fault, values: [], backend_handle: 0, device_identity: 0)
     val handle = device_handle + 1
     val identity = cuda_device_identity(device_handle)
     _processing_cuda_cleanup(ctx, module, device, values_ptr, args_ptr, host_ptr, byte_count)

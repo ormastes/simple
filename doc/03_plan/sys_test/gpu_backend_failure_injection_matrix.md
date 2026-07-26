@@ -34,8 +34,12 @@ The production receipt is written by `_finish` in
 `src/app/simpleos_gpu_host/main.spl`. The checker receipt is constructed by
 `receipt(...)` in
 `test/03_system/app/simpleos_gpu_host/native_backend_failure_fallback_spec.spl`.
-The latter is the only current way to inject `submit-failed` and a synthetic
-readback mismatch without changing source or hardware state.
+The executor-level companion
+`gpu_backend_failure_injection_spec.spl` also exercises the guarded
+`SIMPLE_GPU_TEST=1` and `SIMPLE_GPU_FAULT_INJECT=<backend>:<phase>` seam.
+CUDA init/submit/readback/mismatch passes live. Vulkan is implemented but the
+current runtime artifact lacks `rt_vulkan_dependency_quarantine_lock`; the
+same tests remain skipped until that artifact is incrementally rebuilt.
 
 ## Backend Injection Matrix
 
@@ -140,10 +144,9 @@ The following are the exact remaining implementation gaps. They are not
 covered by the checker-level spec and must not be marked complete from
 synthetic receipts:
 
-1. Add one test-only, disabled-by-default adapter seam (environment or
-   injected provider) for `unavailable`, `init`, `submit`, `readback`, and
-   `mismatch`, with the same names for CUDA, Vulkan, and Metal. Do not add
-   backend-specific production policy to the protocol.
+1. Extend the disabled-by-default executor seam to Metal and unavailable
+   injection. CUDA and Vulkan now implement `init`, `submit`, `readback`, and
+   `mismatch`; Vulkan live completion waits for an updated runtime artifact.
 2. Preserve the failure phase in the result/receipt. In particular, split
    CUDA `cuda-dispatch-or-readback-failed` and Metal
    `metal-readback-failed`/`metal-dispatch-failed` at the injection boundary,

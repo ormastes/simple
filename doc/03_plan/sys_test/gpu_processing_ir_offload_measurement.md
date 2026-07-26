@@ -20,22 +20,20 @@ before it can claim a live result.
 
 ## Current Commands
 
-Run the existing helper self-test first. This is a contract check and does not
-claim a GPU result:
+Run the producer self-test first. This checks receipt validation without
+claiming a GPU result:
 
 ```sh
-sh scripts/check/check-local-gpu-perf-summary.shs --self-test
+sh scripts/check/check-processing-ir-offload-break-even.shs --self-test
 ```
 
-The existing raw CUDA/Vulkan smoke is useful for device availability, but its
-single 1080p output is not break-even evidence because it has no three-row
-receipt:
+Run the live Linux CUDA producer:
 
 ```sh
-SIMPLE_BIN=bin/simple sh scripts/check/check-local-gpu-perf-summary.shs
+sh scripts/check/check-processing-ir-offload-break-even.shs
 ```
 
-The native ProcessingIR benchmark owner must write the structured receipt at:
+It writes the structured receipt at:
 
 ```text
 build/simpleos_gpu_host/offload_break_even/evidence.env
@@ -50,9 +48,9 @@ SIMPLE_GPU_OFFLOAD_BREAK_EVEN_RECEIPT=build/<run>/evidence.env \
   --mode=interpreter --no-daemon
 ```
 
-The current repository has no dedicated producer that emits this structured
-multi-batch receipt. Until one exists, the Linux spec fails at the missing
-receipt gate; the raw helper output must not be promoted into a pass.
+The retained 2026-07-26 run measured CPU decisions at 64 and 65,536 elements,
+CUDA decisions at 1,048,576 and 8,388,608 elements, and a break-even batch of
+1,048,576 with 1,832 us median communication overhead.
 
 ## Unavailable Protocol
 
@@ -63,9 +61,8 @@ producer must write a diagnostic receipt instead of fabricating timings:
 processing_ir_offload_status=unavailable
 processing_ir_offload_schema=processing-ir-offload-v1
 processing_ir_offload_execution=processing_ir
-processing_ir_offload_backend=unavailable
-processing_ir_offload_unavailable_reason=<non-empty stable token>
-processing_ir_offload_host=linux|macos
+processing_ir_offload_backend=cuda
+processing_ir_offload_reason=<non-empty stable token>
 ```
 
 An unavailable receipt must contain no rows, break-even batch, or measured
@@ -83,9 +80,10 @@ postponed-host phase. Neither host may promote it to a GPU result.
 - Use identical input and output work for the CPU baseline and GPU path.
 - Keep batch sizes strictly increasing and choose sizes that bracket a measured
   transition from slower to faster GPU round-trip.
-- `total_us` is required to equal `device_us + transfer_us` exactly for every
-  row. `transfer_us` covers submission synchronization and all host/device
-  communication needed by the result.
+- `total_us` is the median measured end-to-end round trip and is required to
+  equal `device_us + transfer_us` exactly for every row. The compatibility
+  field `transfer_us` is the non-device remainder, covering launch,
+  synchronization, and all host/device communication needed by the result.
 - The break-even batch is the smallest row whose measured `total_us` is less
   than `cpu_us`. At least one smaller row must be non-faster and choose CPU.
 - A row with `total_us >= cpu_us` must report `decision=cpu`; it is not allowed
@@ -131,8 +129,9 @@ model, driver, power state, and memory topology vary by host.
 
 ## Metrics and Acceptance
 
-Record both CPU and GPU process RSS in KB and the peak of the two. On Linux,
-`rss_source=procfs` means the values came from `/proc`, not a guessed constant.
+Record CPU-phase and GPU-phase process RSS plus the maximum of those values and
+the sampled process high-water RSS in KB. On Linux, `rss_source=procfs` means
+the values came from `/proc`, not a guessed constant.
 Record communication separately from device execution and include it in every
 row's `total_us`. Preserve the raw receipt and command stdout with the run.
 

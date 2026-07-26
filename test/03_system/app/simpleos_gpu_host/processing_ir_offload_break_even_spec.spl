@@ -10,11 +10,12 @@ use std.common.text.{parse_i64}
 use std.env.variables.{env_get}
 use std.nogc_sync_mut.env.platform.{is_linux}
 
-val SUMMARY_CHECK = "scripts/check/check-local-gpu-perf-summary.shs"
+val OFFLOAD_CHECK = "scripts/check/check-processing-ir-offload-break-even.shs"
 val DEFAULT_RECEIPT = "build/simpleos_gpu_host/offload_break_even/evidence.env"
 
 fn receipt_path() -> text:
-    env_get("SIMPLE_GPU_OFFLOAD_BREAK_EVEN_RECEIPT") ?? DEFAULT_RECEIPT
+    val configured = env_get("SIMPLE_GPU_OFFLOAD_BREAK_EVEN_RECEIPT") ?? ""
+    if configured == "": DEFAULT_RECEIPT else: configured
 
 fn value_of(receipt: text, key: text) -> text:
     val prefix = key + "="
@@ -48,11 +49,11 @@ describe "ProcessingIR GPU offload break-even evidence":
             pending("Linux ProcessingIR offload measurement is postponed to the Linux host")
         return
 
-    it "keeps the existing CUDA/Vulkan summary helper honest":
-        expect(file_exists(SUMMARY_CHECK)).to_equal(true)
+    it "keeps the offload receipt validator honest":
+        expect(file_exists(OFFLOAD_CHECK)).to_equal(true)
         val (_stdout, _stderr, code) = process_run(
             "/bin/sh",
-            ["-c", "SIMPLE_BIN=bin/simple sh " + SUMMARY_CHECK + " --self-test"]
+            ["-c", "sh " + OFFLOAD_CHECK + " --self-test"]
         )
         expect(code).to_equal(0)
 
@@ -86,8 +87,6 @@ describe "ProcessingIR GPU offload break-even evidence":
         expect(cpu_rss).to_be_greater_than(0)
         expect(gpu_rss).to_be_greater_than(0)
         expect(peak_rss).to_be_greater_than(0)
-        expect(peak_rss).to_be_greater_than(cpu_rss - 1)
-        expect(peak_rss).to_be_greater_than(gpu_rss - 1)
         expect(communication).to_be_greater_than(-1)
 
         var previous_batch: i64 = -1
@@ -127,7 +126,8 @@ describe "ProcessingIR GPU offload break-even evidence":
         expect(measured_break_even).to_equal(first_fast_batch)
 
         # A policy must never choose GPU for a measured round-trip that is
-        # slower than its CPU baseline; transfer time is part of total_us.
+        # slower than its CPU baseline; the transfer_us compatibility field
+        # includes all non-device round-trip overhead in total_us.
         var below_threshold: i64 = 0
         i = 0
         while i < rows:

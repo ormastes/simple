@@ -1,0 +1,223 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/simpleos_gpu_host/offload_break_even}"
+READBACK_DIR="${READBACK_DIR:-$BUILD_DIR/current_emitter_cuda}"
+EVIDENCE="$BUILD_DIR/evidence.env"
+RAW_SAMPLES="$BUILD_DIR/raw-samples.tsv"
+HARNESS_SOURCE="test/05_perf/local_gpu_check/c_cuda/processing_ir_offload_break_even.c"
+HARNESS="$BUILD_DIR/processing_ir_offload_break_even"
+CC_TOOL="${CC_TOOL:-cc}"
+WARMUPS="${WARMUPS:-3}"
+SAMPLES="${SAMPLES:-5}"
+BATCHES="${BATCHES:-64 65536 1048576 8388608}"
+
+mkdir -p "$BUILD_DIR"
+
+value_of() {
+    key="$1"
+    file="$2"
+    grep "^$key=" "$file" 2>/dev/null | head -1 | cut -d= -f2- || true
+}
+
+is_positive() { printf '%s\n' "$1" | grep -Eq '^[1-9][0-9]*$'; }
+is_nonnegative() { printf '%s\n' "$1" | grep -Eq '^[0-9]+$'; }
+
+write_unavailable() {
+    reason="$1"
+    {
+        echo "processing_ir_offload_status=unavailable"
+        echo "processing_ir_offload_reason=$reason"
+        echo "processing_ir_offload_schema=processing-ir-offload-v1"
+        echo "processing_ir_offload_execution=processing_ir"
+        echo "processing_ir_offload_backend=cuda"
+        echo "processing_ir_offload_raw_samples=$RAW_SAMPLES"
+        echo "processing_ir_offload_provenance_env=$READBACK_DIR/evidence.env"
+    } >"$EVIDENCE"
+}
+
+mark_failed() {
+    reason="$1"
+    tmp="$EVIDENCE.tmp"
+    if [ ! -s "$EVIDENCE" ]; then
+        {
+            echo "processing_ir_offload_status=fail"
+            echo "processing_ir_offload_reason=$reason"
+            echo "processing_ir_offload_schema=processing-ir-offload-v1"
+            echo "processing_ir_offload_execution=processing_ir"
+            echo "processing_ir_offload_backend=cuda"
+        } >"$EVIDENCE"
+        return
+    fi
+    awk -F= -v reason="$reason" '
+        /^processing_ir_offload_status=/ { print "processing_ir_offload_status=fail"; seen_status=1; next }
+        /^processing_ir_offload_reason=/ { print "processing_ir_offload_reason=" reason; seen_reason=1; next }
+        { print }
+        END { if (!seen_status) print "processing_ir_offload_status=fail"; if (!seen_reason) print "processing_ir_offload_reason=" reason }
+    ' "$EVIDENCE" >"$tmp"
+    mv "$tmp" "$EVIDENCE"
+}
+
+validate_receipt() {
+    [ -s "$EVIDENCE" ] || return 1
+    [ "$(value_of processing_ir_offload_status "$EVIDENCE")" = "pass" ] || return 1
+    for key in schema execution backend aggregate timing_unit rss_source warmup_samples measured_samples row_count cpu_rss_kb gpu_rss_kb peak_rss_kb communication_overhead_us break_even_batch raw_samples provenance_env ptx_path ptx_sha256 ptx_status ptx_artifact_validated ptx_source_hash_equal; do
+        [ "$(grep -c "^processing_ir_offload_$key=" "$EVIDENCE" || true)" -eq 1 ] || return 1
+    done
+    [ "$(value_of processing_ir_offload_schema "$EVIDENCE")" = "processing-ir-offload-v1" ] || return 1
+    [ "$(value_of processing_ir_offload_execution "$EVIDENCE")" = "processing_ir" ] || return 1
+    [ "$(value_of processing_ir_offload_backend "$EVIDENCE")" = "cuda" ] || return 1
+    [ "$(value_of processing_ir_offload_aggregate "$EVIDENCE")" = "median" ] || return 1
+    [ "$(value_of processing_ir_offload_timing_unit "$EVIDENCE")" = "us" ] || return 1
+    [ "$(value_of processing_ir_offload_rss_source "$EVIDENCE")" = "procfs" ] || return 1
+    warmups="$(value_of processing_ir_offload_warmup_samples "$EVIDENCE")"
+    samples="$(value_of processing_ir_offload_measured_samples "$EVIDENCE")"
+    rows="$(value_of processing_ir_offload_row_count "$EVIDENCE")"
+    is_positive "$warmups" && [ "$warmups" -ge 3 ] || return 1
+    is_positive "$samples" && [ "$samples" -ge 5 ] || return 1
+    is_positive "$rows" && [ "$rows" -ge 3 ] || return 1
+    for key in cpu_rss_kb gpu_rss_kb peak_rss_kb; do is_positive "$(value_of processing_ir_offload_$key "$EVIDENCE")" || return 1; done
+    is_nonnegative "$(value_of processing_ir_offload_communication_overhead_us "$EVIDENCE")" || return 1
+    [ -s "$(value_of processing_ir_offload_raw_samples "$EVIDENCE")" ] || return 1
+    [ -s "$(value_of processing_ir_offload_provenance_env "$EVIDENCE")" ] || return 1
+    [ "$(value_of processing_ir_offload_ptx_status "$EVIDENCE")" = "compiled_artifact_verified" ] || return 1
+    [ "$(value_of processing_ir_offload_ptx_artifact_validated "$EVIDENCE")" = "true" ] || return 1
+    [ "$(value_of processing_ir_offload_ptx_source_hash_equal "$EVIDENCE")" = "true" ] || return 1
+    printf '%s\n' "$(value_of processing_ir_offload_ptx_sha256 "$EVIDENCE")" | grep -Eq '^[0-9a-f]{64}$' || return 1
+    previous=0
+    first_fast=0
+    i=0
+    while [ "$i" -lt "$rows" ]; do
+        for field in batch cpu_us device_us transfer_us total_us decision; do
+            [ "$(grep -c "^processing_ir_offload_row_${i}_${field}=" "$EVIDENCE" || true)" -eq 1 ] || return 1
+        done
+        batch="$(value_of processing_ir_offload_row_${i}_batch "$EVIDENCE")"
+        cpu="$(value_of processing_ir_offload_row_${i}_cpu_us "$EVIDENCE")"
+        device="$(value_of processing_ir_offload_row_${i}_device_us "$EVIDENCE")"
+        transfer="$(value_of processing_ir_offload_row_${i}_transfer_us "$EVIDENCE")"
+        total="$(value_of processing_ir_offload_row_${i}_total_us "$EVIDENCE")"
+        decision="$(value_of processing_ir_offload_row_${i}_decision "$EVIDENCE")"
+        is_positive "$batch" && is_positive "$cpu" && is_positive "$device" && is_positive "$transfer" && is_positive "$total" || return 1
+        [ "$batch" -gt "$previous" ] || return 1
+        [ "$total" -eq $((device + transfer)) ] || return 1
+        if [ "$total" -lt "$cpu" ]; then
+            [ "$decision" = "gpu" ] || return 1
+            [ "$first_fast" -eq 0 ] && first_fast="$batch"
+        else
+            [ "$decision" = "cpu" ] || return 1
+        fi
+        previous="$batch"
+        i=$((i + 1))
+    done
+    [ "$first_fast" -gt 0 ] || return 1
+    [ "$(value_of processing_ir_offload_break_even_batch "$EVIDENCE")" = "$first_fast" ] || return 1
+    return 0
+}
+
+self_test() {
+    self_dir="$BUILD_DIR/self-test"
+    mkdir -p "$self_dir"
+    old_evidence="$EVIDENCE"
+    EVIDENCE="$self_dir/evidence.env"
+    raw="$self_dir/raw.tsv"
+    provenance="$self_dir/provenance.env"
+    printf 'sample\n' >"$raw"
+    cat >"$provenance" <<'EOF'
+cuda_generated_2d_readback_status=pass
+EOF
+    cat >"$EVIDENCE" <<EOF
+processing_ir_offload_status=pass
+processing_ir_offload_reason=self-test
+processing_ir_offload_schema=processing-ir-offload-v1
+processing_ir_offload_execution=processing_ir
+processing_ir_offload_backend=cuda
+processing_ir_offload_aggregate=median
+processing_ir_offload_timing_unit=us
+processing_ir_offload_rss_source=procfs
+processing_ir_offload_warmup_samples=3
+processing_ir_offload_measured_samples=5
+processing_ir_offload_row_count=3
+processing_ir_offload_cpu_rss_kb=1
+processing_ir_offload_gpu_rss_kb=1
+processing_ir_offload_peak_rss_kb=1
+processing_ir_offload_communication_overhead_us=0
+processing_ir_offload_break_even_batch=2
+processing_ir_offload_raw_samples=$raw
+processing_ir_offload_provenance_env=$provenance
+processing_ir_offload_ptx_path=build/test.ptx
+processing_ir_offload_ptx_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+processing_ir_offload_ptx_status=compiled_artifact_verified
+processing_ir_offload_ptx_artifact_validated=true
+processing_ir_offload_ptx_source_hash_equal=true
+processing_ir_offload_row_0_batch=1
+processing_ir_offload_row_0_cpu_us=1
+processing_ir_offload_row_0_device_us=1
+processing_ir_offload_row_0_transfer_us=1
+processing_ir_offload_row_0_total_us=2
+processing_ir_offload_row_0_decision=cpu
+processing_ir_offload_row_1_batch=2
+processing_ir_offload_row_1_cpu_us=4
+processing_ir_offload_row_1_device_us=1
+processing_ir_offload_row_1_transfer_us=1
+processing_ir_offload_row_1_total_us=2
+processing_ir_offload_row_1_decision=gpu
+processing_ir_offload_row_2_batch=3
+processing_ir_offload_row_2_cpu_us=5
+processing_ir_offload_row_2_device_us=2
+processing_ir_offload_row_2_transfer_us=1
+processing_ir_offload_row_2_total_us=3
+processing_ir_offload_row_2_decision=gpu
+EOF
+    validate_receipt || { EVIDENCE="$old_evidence"; return 1; }
+    sed 's/^processing_ir_offload_row_1_total_us=.*/processing_ir_offload_row_1_total_us=3/' "$EVIDENCE" >"$EVIDENCE.bad"
+    mv "$EVIDENCE.bad" "$EVIDENCE"
+    if validate_receipt; then EVIDENCE="$old_evidence"; return 1; fi
+    EVIDENCE="$old_evidence"
+    echo "processing_ir_offload_self_test=pass"
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    self_test
+    exit 0
+fi
+
+rm -f "$EVIDENCE" "$RAW_SAMPLES" "$BUILD_DIR"/harness.out "$BUILD_DIR"/harness.err
+if ! command -v "$CC_TOOL" >/dev/null 2>&1; then
+    write_unavailable "missing-c-compiler"
+elif ! BUILD_DIR="$READBACK_DIR" REPORT_PATH="$READBACK_DIR/report.md" \
+    sh scripts/check/check-cuda-generated-2d-readback.shs >"$BUILD_DIR/provenance.out" 2>"$BUILD_DIR/provenance.err"; then
+    write_unavailable "current-emitter-cuda-provenance-or-device-failed"
+elif [ "$(value_of cuda_generated_2d_readback_status "$READBACK_DIR/evidence.env")" != "pass" ] ||
+     [ "$(value_of cuda_generated_2d_readback_ptx_status "$READBACK_DIR/evidence.env")" != "compiled_artifact_verified" ] ||
+     [ "$(value_of cuda_generated_2d_readback_ptx_artifact_validated "$READBACK_DIR/evidence.env")" != "true" ] ||
+     [ "$(value_of cuda_generated_2d_readback_ptx_source_hash_equal "$READBACK_DIR/evidence.env")" != "true" ]; then
+    write_unavailable "current-emitter-cuda-provenance-invalid"
+elif ! "$CC_TOOL" -O2 -std=c99 -Wall -Wextra -Werror "$HARNESS_SOURCE" -lcuda -o "$HARNESS" >"$BUILD_DIR/cc.out" 2>"$BUILD_DIR/cc.err"; then
+    write_unavailable "cuda-harness-compile-failed"
+else
+    ptx="$(value_of cuda_generated_2d_readback_ptx_path "$READBACK_DIR/evidence.env")"
+    if ! "$HARNESS" "$ptx" "$WARMUPS" "$SAMPLES" "$RAW_SAMPLES" $BATCHES >"$EVIDENCE" 2>"$BUILD_DIR/harness.err"; then
+        if [ "$(value_of processing_ir_offload_status "$EVIDENCE")" != "fail" ]; then
+            mark_failed "cuda-harness-run-failed"
+        fi
+    fi
+    {
+        echo "processing_ir_offload_raw_samples=$RAW_SAMPLES"
+        echo "processing_ir_offload_provenance_env=$READBACK_DIR/evidence.env"
+        echo "processing_ir_offload_ptx_path=$ptx"
+        echo "processing_ir_offload_ptx_sha256=$(value_of cuda_generated_2d_readback_ptx_sha256_after "$READBACK_DIR/evidence.env")"
+        echo "processing_ir_offload_ptx_status=$(value_of cuda_generated_2d_readback_ptx_status "$READBACK_DIR/evidence.env")"
+        echo "processing_ir_offload_ptx_artifact_validated=$(value_of cuda_generated_2d_readback_ptx_artifact_validated "$READBACK_DIR/evidence.env")"
+        echo "processing_ir_offload_ptx_source_hash_equal=$(value_of cuda_generated_2d_readback_ptx_source_hash_equal "$READBACK_DIR/evidence.env")"
+    } >>"$EVIDENCE"
+    if [ "$(value_of processing_ir_offload_status "$EVIDENCE")" = "pass" ] &&
+       ! validate_receipt; then
+        mark_failed "receipt-validation-failed"
+    fi
+fi
+
+cat "$EVIDENCE"
+[ "$(value_of processing_ir_offload_status "$EVIDENCE")" = "pass" ]
