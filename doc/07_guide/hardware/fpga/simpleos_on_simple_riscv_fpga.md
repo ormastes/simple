@@ -7,8 +7,7 @@ first in GHDL simulation (the early-bug-finding gate), then on the Kria KV260
 > Status (2026-07-26): **rv32 SimpleOS boots to `TEST PASSED` on REAL KV260
 > silicon on TWO paths** — PS-DDR4 (`747c27de111`) and BRAM-only tiny config
 > (`0331115d223`, no DDR / no block design / no FSBL). All four sim cores
-> (rv32/rv64 × flat/AXI) pass in GHDL. **rv64 also `TEST PASSED` on silicon**
-> (`57bbf3d3cb35`) — all three silicon lanes green.
+> (rv32/rv64 × flat/AXI) pass in GHDL. rv64 silicon bring-up in progress.
 
 ## 1. What runs where
 
@@ -19,7 +18,7 @@ first in GHDL simulation (the early-bug-finding gate), then on the Kria KV260
 | GHDL rv64 | `rv64_exec_core_flat.vhd` / `rv64_exec_core_axi.vhd` | **full boot → `TEST PASSED`** |
 | **Silicon KV260, DDR** | `soc_top_rv32_k26_ddr.vhd` → PS-DDR4 via AXI-HP | **`TEST PASSED`** (446-byte chain, byte-matching GHDL) |
 | **Silicon KV260, BRAM** | `soc_top_rv32_tiny_bram.vhd`, 125.5/144 BRAM36 | **`TEST PASSED`** (568 bytes, soft-reset re-run passes) |
-| **Silicon KV260, rv64** | `soc_top_rv64_k26_ddr.vhd` → PS-DDR4 | **`TEST PASSED`** (547 bytes, 10.56M AXI reads, 50 MHz WNS +2.78) |
+| Silicon KV260, rv64 | `soc_top_rv64_k26_ddr.vhd` | bring-up in progress (bitstream timing MET) |
 
 The rv32 core itself was first hardened by running the **minimal NVMe firmware**
 against it under a QEMU↔GHDL per-instruction difftest, which found and fixed
@@ -156,6 +155,21 @@ The bring-up script does, in order — every step is load-bearing:
    DDR powers up as garbage; GHDL RAM powers up zeroed and MASKS this. Un-zeroed
    `.bss` ⇒ `g_heap_off` trash ⇒ every alloc fails ⇒ only the canary prints
    (exactly 71 bytes) then the core parks in the `_start` wfi loop.
+   **Note (2026-07-26): this loader-side zeroing is now redundant-but-kept.**
+   The kernels self-zero `.bss` in `_start` (crt0) before any C runs — rv32 `sw`
+   loop / rv64 `sd` loop over `[_sbss, _ebss)` in
+   `examples/09_embedded/simple_os/arch/riscv{32,64}/boot/baremetal_stubs.c`,
+   with `_ebss` padded to `ALIGN(8)` in `common/linker_riscv_common.ld` — so
+   the image no longer depends on loader cooperation (board-runnable rule).
+   Keep the script step as belt-and-suspenders; verify the crt0 path with
+   `GARBAGE_FILL=1 sh scripts/fpga/ghdl_rv32_k26_ddr_boot.shs` (the rv32 tb
+   never zeroes .bss, so garbage-fill alone exercises the crt0 loop) and
+   `GARBAGE_FILL=1 SKIP_BSS_ZERO=1 sh scripts/fpga/ghdl_rv64_k26_ddr_boot.shs`
+   (the rv64 tb emulates board step 5b zeroing; `SKIP_BSS_ZERO=1` disables it
+   via the tb's `G_SKIP_BSS_ZERO` generic). The tiny BRAM gate gained the same
+   knob: `GARBAGE_FILL=1 sh scripts/fpga/ghdl_rv32_tiny_bram_soc.shs` pads the
+   `.mem` image with garbage beyond the kernel (loader-side, synthesizable RTL
+   untouched).
 5. Release the core via the ctrl slave (`0xA000_0000`, magic `0x52563332`
    "RV32"), then poll UART-capture obs regs over JTAG (`hw_server`, NOT openocd)
    and dump the transcript.
@@ -190,26 +204,9 @@ baseline (DDR: 446, tiny: 568).
 
 The minimal NVMe firmware PASSES on the rv32 core in GHDL
 (`build/ghdl/rv32_nvme_verify/verify.log`) — it was the difftest workload that
-hardened the core (§4) — **and PASSES ON KV260 SILICON** (2026-07-26):
-`ALL RV32 NVME FW CHECKS PASS` read via the BSCANE2 JTAG tunnel, deterministic
-across a soft-reset re-run. Transcripts:
-`build/fpga/jtag_readout/tiny_bram_transcript_20260726_0546*.txt`.
-
-Launch: the fw is fully self-contained (selftests + 16550 THR; no NVMe device
-model needed), so the tiny-BRAM SoC is reused with RTL unchanged — only `.mem`
-images and generics (`RAM_WORDS=16384`, `RDISK_WORDS=1024`):
-
-```bash
-sh scripts/fpga/ghdl_rv32_nvme_bram_soc.shs        # rehearsal (also GARBAGE_FILL=1)
-sh scripts/fpga/build_rv32_nvme_bram_bitstream.shs # WNS +17.5 ns
-bash scripts/fpga/read_rv32_tiny_bram_obs.shs transcript > run.log 2>&1
-```
-
-The fw's `.bss` is empty (`_sbss==_ebss`), so the un-zeroed-memory killer
-cannot bite; the GARBAGE_FILL rehearsal confirms it behaviorally. Known bug
-(filed): the tiny-BRAM SoC runs the image TWICE per reset on silicon (byte
-count = 2× the GHDL baseline) — harmless for marker verdicts; see
-`doc/08_tracking/bug/kv260_tiny_bram_double_run_per_reset_2026-07-26.md`.
+hardened the core (§4). A silicon lane (same load-and-release flow, tiny-BRAM
+SoC preferred since the fw is small) is in progress; the same `.bss`/GARBAGE_FILL
+discipline applies.
 
 ## 7. rv64
 
@@ -224,18 +221,13 @@ port** (the main new work; RV64C differs: `C.JAL`→`C.ADDIW`, `C.FLW/FSW`→`C.
 the same ramdisk bank. FPU is a *false* gap (the `fld` bytes are misdisassembled
 address constants). See `doc/09_report/rv64_simpleos_ghdl_soc_scope_2026-07-25.md`.
 
-Status 2026-07-26: **rv64 SimpleOS `TEST PASSED` on KV260 silicon from
-PS-DDR4** (log `build/fpga/k26_rv64_ddr/bringup/bringup_PASS_2026-07-26.log`;
-547 UART bytes, 10.56M AXI reads; 50 MHz, WNS +2.783 MET). Launch mirrors §6a:
-GHDL rehearsal (`ghdl_rv64_k26_ddr_boot.shs`, zeroed AND `GARBAGE_FILL=1`) →
-`build_k26_rv64_ddr_bitstream.shs` → `bash bringup_kv260_rv64_ddr.shs` — same
-psu_init + `.bss`-zero flow; kernel at DDR `0x1020_0000` (64-bit AXI adapter,
-AxSIZE=3). Two rv64-specific landmines: (1) the rv64 top reuses the rv32 ctrl
-slave, so `CTRL_MAGIC` reads "RV32" on BOTH bitstreams and cannot identify
-which is loaded; (2) **wedged-PS zero-fetch** — after a BRAM-only bitstream ran
-(HP ports unused by its psu_init), all probes read green but the core's first
-HP0 fetch never completes (`AXI_READS=0`); a fresh full psu_init does NOT
-recover it — fix is xsdb `rst -system`, then the full bring-up re-run.
+Status 2026-07-26: rv64 passes GHDL on both `rv64_exec_core_flat.vhd` and the
+synthesizable `rv64_exec_core_axi.vhd` (incl. GARBAGE_FILL). Silicon: bitstream
+built (`soc_top_rv64_k26_ddr.vhd`, timing MET), bring-up via
+`bash scripts/fpga/bringup_kv260_rv64_ddr.shs` — same psu_init + `.bss`-zero
+flow; kernel loads at DDR `0x1020_0000`. First run: core released but zero AXI
+fetches — debug in progress. Note the rv64 top reuses the rv32 ctrl slave, so
+`CTRL_MAGIC` reads "RV32" on BOTH bitstreams and cannot identify which is loaded.
 
 ## Related
 

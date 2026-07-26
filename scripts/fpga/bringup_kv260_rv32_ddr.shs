@@ -77,13 +77,31 @@ if ! pgrep -f '[h]w_server' >/dev/null 2>&1; then
     sleep 5
 fi
 
-# .bss zero-fill image: the kernel relies on zero-initialized .bss but nothing
-# zeroes it — GHDL masks this (sim RAM powers up zeroed); real DDR4 is garbage,
-# so g_heap_off (.bss, kernel+0x7004) reads trash and EVERY allocation fails
-# (canary-only 71-byte transcript, core parks in _start's wfi loop). Proven by
-# garbage-fill GHDL repro (run_garbage_fill.log). Zero .bss before release.
-# .bss: core 0x80004000 size 0x1A004 (llvm-readelf) -> DDR kernel_base+0x4000.
-dd if=/dev/zero of="$OUT_DIR/bss_zeros.bin" bs=4096 count=27 2>/dev/null
+# .bss zero-fill image (belt-and-suspenders since 2026-07-26: the kernel now
+# self-zeroes .bss in _start/crt0, so this loader step is redundant-but-kept).
+# History: un-zeroed real DDR4 made g_heap_off read trash and EVERY allocation
+# fail (canary-only 71-byte transcript, core parked in _start's wfi loop);
+# GHDL masked it (sim RAM powers up zeroed). Proven by garbage-fill GHDL repro.
+#
+# The span/probe offsets are derived from the ELF AT RUN TIME. The original
+# hardcoded 0x4000 / 27 pages / 0x7004 went stale on the first kernel relink
+# (crt0 fix shifted _sbss 0x4000->0x5000) — with stale offsets this dow would
+# CORRUPT the last loaded page of .data instead of zeroing .bss.
+#
+# SKIP_BSS_ZERO=1 skips the dow (crt0 self-zero silicon proof); default keeps it.
+NM_TOOL="${NM_TOOL:-riscv64-unknown-elf-nm}"
+command -v "$NM_TOOL" >/dev/null 2>&1 || NM_TOOL=llvm-nm
+SBSS_HEX=$("$NM_TOOL" "$KERNEL_ELF" | awk '$3=="_sbss"{print $1}')
+EBSS_HEX=$("$NM_TOOL" "$KERNEL_ELF" | awk '$3=="_ebss"{print $1}')
+HEAPOFF_HEX=$("$NM_TOOL" "$KERNEL_ELF" | awk '$3=="g_heap_off"{print $1}')
+[ -n "$SBSS_HEX" ] && [ -n "$EBSS_HEX" ] || { echo "FAIL: _sbss/_ebss not found in $KERNEL_ELF"; exit 1; }
+BSS_OFF=$(( 0x$SBSS_HEX - 0x80000000 ))
+BSS_PAGES=$(( ( 0x$EBSS_HEX - 0x$SBSS_HEX + 4095 ) / 4096 ))
+if [ -n "$HEAPOFF_HEX" ]; then HEAPOFF_OFF=$(( 0x$HEAPOFF_HEX - 0x80000000 )); else HEAPOFF_OFF=$BSS_OFF; fi
+SKIP_BSS_ZERO="${SKIP_BSS_ZERO:-0}"
+printf '  .bss: kernel+0x%x, %d pages; heap-off probe kernel+0x%x; skip_zero=%s\n' \
+  "$BSS_OFF" "$BSS_PAGES" "$HEAPOFF_OFF" "$SKIP_BSS_ZERO"
+dd if=/dev/zero of="$OUT_DIR/bss_zeros.bin" bs=4096 count="$BSS_PAGES" 2>/dev/null
 
 cat > "$OUT_DIR/bringup.tcl" <<TCL
 set bit          "$ROOT_DIR/$BIT"
@@ -175,14 +193,19 @@ puts [format "DDR_RAMDISK_WORD0=0x%08X" [lindex [mrd -force -value \$ddr_ramdisk
 # expect 0x203D3D3D "=== "): if THIS is wrong the coherency fix did not hold.
 puts [format "DDR_BANNER_WORD=0x%08X" [lindex [mrd -force -value [expr {\$ddr_kernel + 0x20E0}] 1] 0]]
 
-# ---- 5b. zero .bss (root cause of the canary-only park: un-zeroed DDR) -----
-# g_heap_off lives at kernel+0x7004; pre-value shows the garbage that broke
-# every allocation, post-value must be 0.
-puts [format "BSS_HEAPOFF_PRE=0x%08X" [lindex [mrd -force -value [expr {\$ddr_kernel + 0x7004}] 1] 0]]
-set bss_zeros "$ROOT_DIR/$OUT_DIR/bss_zeros.bin"
-puts "ZEROING_BSS -> [format 0x%08X [expr {\$ddr_kernel + 0x4000}]]"
-if {[catch { dow -data \$bss_zeros [expr {\$ddr_kernel + 0x4000}] } e]} { puts "BSS_ZERO_FAIL:\$e"; exit 1 }
-puts [format "BSS_HEAPOFF_POST=0x%08X" [lindex [mrd -force -value [expr {\$ddr_kernel + 0x7004}] 1] 0]]
+# ---- 5b. zero .bss (belt-and-suspenders; kernel crt0 also self-zeroes) -----
+# Offsets are ELF-derived by the shell wrapper (see bss_zeros.bin generation).
+# Pre-value shows power-up garbage; post-value must be 0 when zeroing ran.
+# SKIP_BSS_ZERO=1 leaves .bss as garbage to prove the crt0 loop on silicon.
+puts [format "BSS_HEAPOFF_PRE=0x%08X" [lindex [mrd -force -value [expr {\$ddr_kernel + $HEAPOFF_OFF}] 1] 0]]
+if {"$SKIP_BSS_ZERO" ne "1"} {
+    set bss_zeros "$ROOT_DIR/$OUT_DIR/bss_zeros.bin"
+    puts "ZEROING_BSS -> [format 0x%08X [expr {\$ddr_kernel + $BSS_OFF}]]"
+    if {[catch { dow -data \$bss_zeros [expr {\$ddr_kernel + $BSS_OFF}] } e]} { puts "BSS_ZERO_FAIL:\$e"; exit 1 }
+} else {
+    puts "BSS_ZERO_SKIPPED (crt0 self-zero proof)"
+}
+puts [format "BSS_HEAPOFF_POST=0x%08X" [lindex [mrd -force -value [expr {\$ddr_kernel + $HEAPOFF_OFF}] 1] 0]]
 
 # ---- 6. release the core ----------------------------------------------
 mwr -force \$ctrl 0x1

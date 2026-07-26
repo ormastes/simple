@@ -83,6 +83,15 @@ placeholder stub today)**.
   (`build_k26_rv32_ddr_bitstream.shs` / `build_rv32_tiny_bram_bitstream.shs`),
   then `bash bringup_kv260_rv32_ddr.shs` (full psu_init BEFORE `fpga -file`,
   `.bss` zeroing with PRE/POST readback, JTAG via hw_server only).
+  **Since 2026-07-26 the kernels self-zero `.bss` in `_start` (crt0)** —
+  rv32 `sw`/rv64 `sd` loop over `[_sbss,_ebss)` in
+  `examples/09_embedded/simple_os/arch/riscv{32,64}/boot/baremetal_stubs.c`
+  (`_ebss` is `ALIGN(8)` in `common/linker_riscv_common.ld`); loader-side
+  zeroing in the bringup scripts is redundant-but-kept, now ELF-derived
+  (never hardcode `.bss` offsets — a relink shifts them and a stale span
+  corrupts loaded `.data`), skippable via `SKIP_BSS_ZERO=1` for crt0 proof
+  runs. GHDL proofs: rv32/tiny `GARBAGE_FILL=1`; rv64 `GARBAGE_FILL=1
+  SKIP_BSS_ZERO=1` (its tb emulates board step 5b zeroing).
 
 ## Sanity gates (probe = capability)
 

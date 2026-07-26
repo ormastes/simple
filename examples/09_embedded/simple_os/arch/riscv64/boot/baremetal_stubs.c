@@ -1480,9 +1480,22 @@ __attribute__((naked, section(".text.entry"))) void _start(void)
 {
     __asm__ volatile(
         "la sp, _stack_top\n"
-        "call spl_start\n"
-        "1: wfi\n"
+        /* Zero .bss BEFORE any C code runs. Real DDR powers up as garbage;
+         * un-zeroed .bss => g_heap_off trash => every alloc fails (proven on
+         * KV260 silicon for rv32, 2026-07-26). Kernel self-zeroes so it never
+         * depends on loader cooperation (board-runnable rule). _sbss/_ebss
+         * come from linker_riscv_common.ld; _ebss is ALIGN(8) so the
+         * doubleword loop terminates exactly. Handles empty .bss. */
+        "la t0, _sbss\n"
+        "la t1, _ebss\n"
+        "1: bgeu t0, t1, 2f\n"
+        "sd zero, 0(t0)\n"
+        "addi t0, t0, 8\n"
         "j 1b\n"
+        "2:\n"
+        "call spl_start\n"
+        "3: wfi\n"
+        "j 3b\n"
     );
 }
 

@@ -38,7 +38,13 @@ entity tb_rv64_k26_ddr_boot is
     -- beyond the .bss span the bring-up explicitly zeroes. Set true to fill
     -- all DDR words beyond the loaded kernel image with deterministic nonzero
     -- pseudo-random garbage, rehearsing what silicon actually provides.
-    G_GARBAGE_FILL : boolean := false
+    G_GARBAGE_FILL : boolean := false;
+    -- Skip the tb's board-step-5b .bss zeroing. Combined with
+    -- G_GARBAGE_FILL=true this hands the kernel garbage .bss — the run
+    -- passing then proves the kernel's own crt0 .bss-zero loop works with
+    -- ZERO loader cooperation (board-runnable rule). Default false keeps the
+    -- historical board-flow rehearsal unchanged.
+    G_SKIP_BSS_ZERO : boolean := false
   );
 end entity tb_rv64_k26_ddr_boot;
 
@@ -138,10 +144,14 @@ architecture sim of tb_rv64_k26_ddr_boot is
       if idx < RAM_WORDS then mem_v(idx) := word_v; end if;
       idx := idx + 1;
     end loop;
-    -- Board step 5b: zero .bss (the kernel relies on it; DDR powers up trash).
-    for i in BSS_W0 to BSS_W0 + BSS_WORDS - 1 loop
-      mem_v(i) := (others => '0');
-    end loop;
+    -- Board step 5b: zero .bss (belt-and-suspenders; the kernel now also
+    -- self-zeroes .bss in _start). G_SKIP_BSS_ZERO=true disables this to
+    -- prove the kernel's crt0 loop alone suffices under garbage DDR.
+    if not G_SKIP_BSS_ZERO then
+      for i in BSS_W0 to BSS_W0 + BSS_WORDS - 1 loop
+        mem_v(i) := (others => '0');
+      end loop;
+    end if;
     return mem_v;
   end function;
 

@@ -58,6 +58,26 @@ fi
 # also EXACTLY what the Vivado build feeds the BRAM INIT impure functions).
 riscv64-unknown-elf-objcopy -O binary "$KERNEL_ELF" "$WORK_DIR/kernel.bin"
 od -An -v -tx4 -w4 "$WORK_DIR/kernel.bin" | awk 'NF{print $1}' > "$WORK_DIR/rv32_flat.mem"
+# GARBAGE_FILL=1: pad the .mem image with deterministic nonzero pseudo-random
+# words out to the full BRAM depth. Real BRAM powers up from the INIT file
+# (zeros) so silicon is safe, but this knob unmasks any reliance on implicit
+# zero .bss/heap/stack — the kernel's crt0 .bss-zero loop must cope. Done in
+# the .mem (loader side), so the SYNTHESIZABLE rv32_bram_soc.vhd stays
+# untouched. xorshift32 seeded 0xDEADBEEF, matching the DDR tbs.
+if [ "${GARBAGE_FILL:-0}" = "1" ]; then
+  kwords=$(wc -l < "$WORK_DIR/rv32_flat.mem")
+  awk -v have="$kwords" -v total="$RAM_WORDS" 'BEGIN{
+    x = 3735928559;                       # 0xDEADBEEF
+    for (i = have; i < total; i++) {
+      x = xor(x, (x * 8192) % 4294967296);        # x ^= x << 13 (mod 2^32)
+      x = xor(x, int(x / 131072));                # x ^= x >> 17
+      x = xor(x, (x * 32) % 4294967296);          # x ^= x << 5  (mod 2^32)
+      if (x == 0) x = 3735928559;
+      printf "%08x\n", x;
+    }
+  }' >> "$WORK_DIR/rv32_flat.mem"
+  echo "  BRAM model: GARBAGE FILL beyond kernel image ($kwords -> $RAM_WORDS words)"
+fi
 echo "  Kernel image: $(wc -l < "$WORK_DIR/rv32_flat.mem") words (rv32_flat.mem)"
 head -c "$RAMDISK_BYTES" "$FAT32_IMG" > "$WORK_DIR/rv32_ramdisk.img"
 od -An -v -tx4 -w4 "$WORK_DIR/rv32_ramdisk.img" | awk 'NF{print $1}' > "$WORK_DIR/rv32_ramdisk.mem"

@@ -396,13 +396,27 @@ __attribute__((naked, section(".text.entry"))) void _start(void)
 {
     __asm__ volatile(
         "la sp, _stack_top\n"
+        /* Zero .bss BEFORE any C code runs. Real DDR powers up as garbage;
+         * un-zeroed .bss => g_heap_off trash => every alloc fails => only the
+         * canary prints (proven on KV260 silicon 2026-07-26). The kernel must
+         * not depend on loader cooperation (board-runnable rule); the bringup
+         * script's dow-zeroing stays as belt-and-suspenders. _sbss/_ebss come
+         * from linker_riscv_common.ld and _ebss is ALIGN(8), so a word loop
+         * terminates exactly. Handles empty .bss (_sbss == _ebss). */
+        "la t0, _sbss\n"
+        "la t1, _ebss\n"
+        "1: bgeu t0, t1, 2f\n"
+        "sw zero, 0(t0)\n"
+        "addi t0, t0, 4\n"
+        "j 1b\n"
+        "2:\n"
         /* Paint the stack before any Simple code runs, so the high-water mark
          * reported at the end of the marker chain covers the whole boot.
          * No-ops unless the linker reserved a BRAM-sized stack. */
         "call tiny_stack_paint\n"
         "call spl_start\n"
-        "1: wfi\n"
-        "j 1b\n"
+        "3: wfi\n"
+        "j 3b\n"
     );
 }
 

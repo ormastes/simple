@@ -61,12 +61,16 @@ SECTIONS {
         PROVIDE(__global_pointer$ = . + 0x800);
     } > RAM
 
-    /* Uninitialized data (zeroed by startup code) */
+    /* Uninitialized data — zeroed by the kernel itself in _start (crt0).
+     * _sbss is 4K-aligned via the section ALIGN; _ebss is padded to 8 bytes
+     * so both the rv32 word loop and the rv64 doubleword loop terminate
+     * exactly (loop condition: bgeu t0, t1). */
     .bss (NOLOAD) : ALIGN(4K) {
         _sbss = .;
         *(.bss*)
         *(.sbss*)
         *(COMMON)
+        . = ALIGN(8);
         _ebss = .;
     } > RAM
 
