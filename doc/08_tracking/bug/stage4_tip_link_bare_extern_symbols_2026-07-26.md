@@ -39,6 +39,31 @@ documented mangle.rs single-candidate erased-receiver rebind and the
 "seed stale = old extern registry" failure mode (seed backfill rebuild:
 `-p simple-compiler-backfill`, no-LTO runtime last).
 
+## Sharpened diagnosis (2026-07-26 late) — THREE independent defects, NOT a seed regression
+Attempt with YESTERDAY's seed (`bin/release/aarch64-apple-darwin-macho/simple_seed`,
+Jul 25 13:12) fails IDENTICALLY to today's rebuilt seed, at every source sha from
+`3a6982e89c` through tip. So this is not the 2026-07-26 seed rebuild; it is a set of
+pre-existing, repo-wide stage4-build breakages:
+
+1. **`simple_contract_check` / `simple_contract_check_msg` missing from the
+   `core-c-bootstrap` bundle.** These are runtime `extern "C"` symbols defined in
+   `src/compiler_rust/runtime/src/value/sffi/contracts.rs` — present in the full
+   runtime, absent from the core-C ABI bundle. Frontend code
+   (`_frontend___FlatAstBridge__convert_nodes__op_kind_to_binop`) now emits contract
+   checks, so the core-C link can't resolve them. Fix path (the build note itself says
+   so): add these symbols to `simple-core/core-c-bootstrap`, OR stop emitting contract
+   checks in code compiled under that bundle.
+2. **`_text_index_len` bare/global extern** while two mangled definitions exist
+   (`90.tools/fix/rules/helpers.spl`, `easy_fix/rules_helpers.spl`) — the
+   ambiguous-multi-candidate mangler fallback emits a bare extern instead of the
+   module-scoped symbol. mangle.rs family.
+3. **`simple_asm_blocks.c` `in(reg)` unexpected token** — Simple `asm` blocks are
+   lowered into generated C carrying Rust inline-asm operand syntax (`in(reg)`).
+   Codegen lowering bug, separate from the two link failures.
+
 ## Impact
-No stage4 candidate can be built from tip → runtime perf fix (`3da818508d29`)
-and any future compiler fix cannot deploy until this is resolved.
+No stage4 candidate can be built from ANY recent sha with ANY seed → the runtime
+perf fix (`3da818508d29`) and any compiler fix cannot deploy until at least defects
+#1 and #3 are resolved. This blocks all sessions' deploys, not just this one. The
+currently-deployed binary predates these breakages. Delegated to Codex (compiler/
+runtime) with all three delineated.
