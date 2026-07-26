@@ -10,11 +10,13 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 . scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs
+. scripts/check/lib/qemu-frozen-source-admission.shs
 
 KERNEL="build/os/simpleos_arm64_desktop_engine2d.elf"
 DISK="build/os/fat32-arm64-desktop.img"
 DISK_PRODUCER="build/os/make_os_disk"
 BUILD_MANIFEST="build/os/simpleos_arm64_desktop_engine2d.build-manifest.env"
+FROZEN_BUILD_MANIFEST="${BUILD_MANIFEST}.frozen-source-admission.env"
 EVIDENCE_DIR="${SIMPLEOS_ARM64_QMP_EVIDENCE_DIR:-build/os/arm64_qmp_input_evidence}"
 EVIDENCE_ENV="$EVIDENCE_DIR/evidence.env"
 SERIAL_LOG="$EVIDENCE_DIR/serial.log"
@@ -40,7 +42,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 sha256_file() {
-    sha256_line="$(shasum -a 256 "$1")" || return 1
+    sha256_line="$(qemu_admission_sha256 "$1")" || return 1
     sha256_value="${sha256_line%% *}"
     case "$sha256_value" in
         *[!0-9a-f]*|"") return 1 ;;
@@ -72,6 +74,20 @@ fail_evidence() {
     fail_evidence "canonical-desktop-disk-missing"
 [ -f "$BUILD_MANIFEST" ] && [ -s "$BUILD_MANIFEST" ] ||
     fail_evidence "canonical-build-manifest-missing"
+[ -f "$FROZEN_BUILD_MANIFEST" ] && [ -s "$FROZEN_BUILD_MANIFEST" ] ||
+    fail_evidence "canonical-frozen-source-admission-missing"
+
+for frozen_key in schema repo_revision dirty_state_policy frozen_worktree \
+    entry_path entry_sha256 source_roots source_fingerprint source_file_count \
+    compiler_path compiler_sha256 build_command output_path output_sha256
+do
+    frozen_count="$(grep -c "^${frozen_key}=" "$FROZEN_BUILD_MANIFEST" || true)"
+    [ "$frozen_count" -eq 1 ] || fail_evidence "canonical-frozen-source-admission-invalid"
+done
+
+frozen_field() {
+    sed -n "s/^$1=//p" "$FROZEN_BUILD_MANIFEST"
+}
 
 for key in \
     artifact_kind \
@@ -79,6 +95,8 @@ for key in \
     source_roots \
     source_fingerprint \
     source_file_count \
+    entry_path \
+    entry_sha256 \
     kernel_path \
     kernel_sha256 \
     disk_path \
@@ -106,6 +124,8 @@ MANIFEST_SOURCE_REVISION="$(manifest_field source_revision)"
 MANIFEST_SOURCE_ROOTS="$(manifest_field source_roots)"
 MANIFEST_SOURCE_FINGERPRINT="$(manifest_field source_fingerprint)"
 MANIFEST_SOURCE_FILE_COUNT="$(manifest_field source_file_count)"
+MANIFEST_ENTRY_PATH="$(manifest_field entry_path)"
+MANIFEST_ENTRY_SHA256="$(manifest_field entry_sha256)"
 MANIFEST_KERNEL_PATH="$(manifest_field kernel_path)"
 MANIFEST_KERNEL_SHA256="$(manifest_field kernel_sha256)"
 MANIFEST_DISK_PATH="$(manifest_field disk_path)"
@@ -121,6 +141,36 @@ MANIFEST_BUILD_COMMAND="$(manifest_field build_command)"
 MANIFEST_BUILD_ENVIRONMENT="$(manifest_field build_environment)"
 HOST_SOURCE_REVISION="$(git rev-parse --verify HEAD 2>/dev/null)" ||
     fail_evidence "host-source-revision-unavailable"
+[ "$(frozen_field schema)" = "qemu-frozen-source-admission-v1" ] ||
+    fail_evidence "canonical-frozen-source-admission-schema-mismatch"
+[ "$(frozen_field repo_revision)" = "$HOST_SOURCE_REVISION" ] ||
+    fail_evidence "canonical-frozen-source-admission-revision-mismatch"
+[ "$(frozen_field dirty_state_policy)" = "scoped-tracked-and-untracked-clean" ] ||
+    fail_evidence "canonical-frozen-source-admission-dirty-policy-mismatch"
+[ "$(frozen_field frozen_worktree)" = "linked-clean" ] ||
+    fail_evidence "canonical-frozen-source-admission-worktree-mismatch"
+[ "$(frozen_field arch)" = "arm64" ] ||
+    fail_evidence "canonical-frozen-source-admission-arch-mismatch"
+[ "$(frozen_field entry_path)" = "$MANIFEST_ENTRY_PATH" ] ||
+    fail_evidence "canonical-frozen-source-admission-entry-path-mismatch"
+[ "$(frozen_field entry_sha256)" = "$MANIFEST_ENTRY_SHA256" ] ||
+    fail_evidence "canonical-frozen-source-admission-entry-sha256-mismatch"
+[ "$(frozen_field source_roots)" = "$MANIFEST_SOURCE_ROOTS" ] ||
+    fail_evidence "canonical-frozen-source-admission-source-roots-mismatch"
+[ "$(frozen_field source_fingerprint)" = "$MANIFEST_SOURCE_FINGERPRINT" ] ||
+    fail_evidence "canonical-frozen-source-admission-source-fingerprint-mismatch"
+[ "$(frozen_field source_file_count)" = "$MANIFEST_SOURCE_FILE_COUNT" ] ||
+    fail_evidence "canonical-frozen-source-admission-source-file-count-mismatch"
+[ "$(frozen_field compiler_path)" = "$MANIFEST_COMPILER_PATH" ] ||
+    fail_evidence "canonical-frozen-source-admission-compiler-path-mismatch"
+[ "$(frozen_field compiler_sha256)" = "$MANIFEST_COMPILER_SHA256" ] ||
+    fail_evidence "canonical-frozen-source-admission-compiler-sha256-mismatch"
+[ "$(frozen_field build_command)" = "$MANIFEST_BUILD_COMMAND" ] ||
+    fail_evidence "canonical-frozen-source-admission-build-command-mismatch"
+[ "$(frozen_field output_path)" = "$KERNEL" ] ||
+    fail_evidence "canonical-frozen-source-admission-output-path-mismatch"
+[ "$(frozen_field output_sha256)" = "$MANIFEST_KERNEL_SHA256" ] ||
+    fail_evidence "canonical-frozen-source-admission-output-sha256-mismatch"
 
 [ "$MANIFEST_ARTIFACT_KIND" = "simpleos-arm64-desktop-engine2d" ] ||
     fail_evidence "canonical-build-manifest-artifact-kind-mismatch"
@@ -134,6 +184,15 @@ printf '%s\n' "$MANIFEST_SOURCE_FINGERPRINT" |
 printf '%s\n' "$MANIFEST_SOURCE_FILE_COUNT" |
     grep -Eq '^[1-9][0-9]*$' ||
     fail_evidence "canonical-build-manifest-source-file-count-invalid"
+[ "$MANIFEST_ENTRY_PATH" = "examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl" ] ||
+    fail_evidence "canonical-build-manifest-entry-path-mismatch"
+[ -f "$MANIFEST_ENTRY_PATH" ] && [ ! -L "$MANIFEST_ENTRY_PATH" ] ||
+    fail_evidence "canonical-build-manifest-entry-unavailable"
+printf '%s\n' "$MANIFEST_ENTRY_SHA256" |
+    grep -Eq '^[0-9a-f]{64}$' ||
+    fail_evidence "canonical-build-manifest-entry-sha256-invalid"
+[ "$(sha256_file "$MANIFEST_ENTRY_PATH")" = "$MANIFEST_ENTRY_SHA256" ] ||
+    fail_evidence "canonical-build-manifest-entry-sha256-mismatch"
 [ "$MANIFEST_KERNEL_PATH" = "$KERNEL" ] ||
     fail_evidence "canonical-build-manifest-kernel-path-mismatch"
 [ "$MANIFEST_DISK_PATH" = "$DISK" ] ||
@@ -170,9 +229,9 @@ printf '%s\n' "$MANIFEST_COMPILER_SHA256" |
     fail_evidence "canonical-build-manifest-compiler-sha256-invalid"
 [ -n "$MANIFEST_COMPILER_VERSION" ] ||
     fail_evidence "canonical-build-manifest-compiler-version-missing"
-[ "$MANIFEST_BUILD_COMMAND" = "$MANIFEST_COMPILER_PATH os build --scenario=arm64-desktop-engine2d" ] ||
+[ "$MANIFEST_BUILD_COMMAND" = "env -u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000 $MANIFEST_COMPILER_PATH os build --scenario=arm64-desktop-engine2d" ] ||
     fail_evidence "canonical-build-manifest-command-mismatch"
-[ "$MANIFEST_BUILD_ENVIRONMENT" = "SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000" ] ||
+[ "$MANIFEST_BUILD_ENVIRONMENT" = "-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000" ] ||
     fail_evidence "canonical-build-manifest-environment-mismatch"
 
 if arm64_guest_source_dirty; then

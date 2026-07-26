@@ -4,6 +4,8 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+. scripts/check/lib/qemu-frozen-source-admission.shs
+
 BUILD_DIR="${BUILD_DIR:-build/simpleos_wm_fullscreen_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/simpleos_wm_fullscreen_evidence_$(date -u +%F).md}"
 WRAPPER="scripts/check/check-simpleos-wm-fullscreen-evidence.shs"
@@ -449,6 +451,42 @@ LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
 KERNEL_OUTPUT="${SIMPLEOS_WM_KERNEL_ARTIFACT:-$BUILD_DIR/simpleos_wm_production_desktop.elf}"
 KERNEL_CANDIDATE="$KERNEL_OUTPUT.candidate"
 KERNEL_ADMISSION="$KERNEL_OUTPUT.admission"
+KERNEL_FROZEN_ADMISSION="$KERNEL_OUTPUT.frozen-source-admission.env"
+GENERATED_LOG_CONFIG="build/os/generated/generated/simpleos_log_config.spl"
+
+# `native-build --source build/os/generated` consumes this deterministic source.
+# Materialize it before the source fingerprint is admitted, then leave it
+# untouched through qemu_admission_publish so a fresh linked worktree and the
+# post-build publication observe the same complete source set.
+ensure_generated_log_config() {
+    mkdir -p "$(dirname -- "$GENERATED_LOG_CONFIG")" || return 1
+    cat >"$GENERATED_LOG_CONFIG" <<'SPL'
+val SIMPLEOS_LOG_COMPILED: bool = false
+
+fn simpleos_log_compile_enabled() -> bool:
+    SIMPLEOS_LOG_COMPILED
+
+fn simpleos_log_compile_mode_name() -> text:
+    if SIMPLEOS_LOG_COMPILED:
+        return "on"
+    "off"
+SPL
+}
+
+ensure_generated_log_config || {
+    emit_failure "generated-log-config-normalization-failed"
+    exit 1
+}
+QEMU_ADMISSION_COMMAND="env SIMPLE_BOOTSTRAP=1 SIMPLE_LIB=$ROOT_DIR/src SIMPLE_OS_LOG_MODE=off SIMPLE_ALLOW_FREESTANDING_STUBS=1 $SIMPLE_BIN native-build --source build/os/generated --source $ENTRY --timeout $NATIVE_BUILD_WORKER_TIMEOUT_SECONDS --backend cranelift --cpu x86-64-v1 --opt-level=none --log off --cache-dir $BUILD_DIR/native-cache --mode dynload --entry-closure --entry $ENTRY --target x86_64-unknown-none -o $KERNEL_CANDIDATE --linker-script $LINKER_SCRIPT"
+qemu_admission_begin x86_64 "$ENTRY" "$SIMPLE_BIN_RESOLVED" "$QEMU_ADMISSION_COMMAND" \
+    build/os/generated src/os src/lib examples/09_embedded/simple_os \
+    scripts/os/make_os_disk.shs scripts/os/make_os_disk.c \
+    scripts/os/simpleos_font_bundle_companion.sha256 assets/fonts \
+    scripts/check/check-simpleos-wm-fullscreen-evidence.shs \
+    scripts/check/lib/qemu-frozen-source-admission.shs || {
+    emit_failure "frozen-source-admission-rejected"
+    exit 1
+}
 if [ -z "${SIMPLEOS_WM_KERNEL_ARTIFACT:-}" ] && [ -f "$KERNEL_OUTPUT" ]; then
     KERNEL_SOURCE_REVISION="$(kernel_source_revision)"
 fi
@@ -468,6 +506,22 @@ if [ -n "${SIMPLEOS_WM_KERNEL_ARTIFACT:-}" ]; then
         emit_failure "explicit-wm-kernel-artifact-invalid"
         exit 1
     fi
+    [ -f "$KERNEL_FROZEN_ADMISSION" ] && \
+        grep -Fxq "schema=qemu-frozen-source-admission-v1" "$KERNEL_FROZEN_ADMISSION" && \
+        grep -Fxq "repo_revision=$QEMU_ADMISSION_REVISION" "$KERNEL_FROZEN_ADMISSION" && \
+        grep -Fxq "entry_path=$ENTRY" "$KERNEL_FROZEN_ADMISSION" && \
+        grep -Fxq "entry_sha256=$QEMU_ADMISSION_ENTRY_SHA256" "$KERNEL_FROZEN_ADMISSION" && \
+        grep -Fxq "source_roots=$QEMU_ADMISSION_SOURCE_ROOTS" "$KERNEL_FROZEN_ADMISSION" && \
+        grep -Fxq "source_fingerprint=$QEMU_ADMISSION_SOURCE_FINGERPRINT" "$KERNEL_FROZEN_ADMISSION" && \
+        grep -Fxq "source_file_count=$QEMU_ADMISSION_SOURCE_FILE_COUNT" "$KERNEL_FROZEN_ADMISSION" && \
+        grep -Fxq "compiler_path=$SIMPLE_BIN_RESOLVED" "$KERNEL_FROZEN_ADMISSION" && \
+        grep -Fxq "compiler_sha256=$QEMU_ADMISSION_COMPILER_SHA256" "$KERNEL_FROZEN_ADMISSION" && \
+        grep -Fxq "build_command=$QEMU_ADMISSION_COMMAND" "$KERNEL_FROZEN_ADMISSION" && \
+        grep -Fxq "output_sha256=$(file_sha256 "$KERNEL_OUTPUT")" "$KERNEL_FROZEN_ADMISSION" || {
+        KERNEL_BUILD_STATUS=external-elf-frozen-source-admission-missing
+        emit_failure "explicit-wm-kernel-frozen-source-admission-missing"
+        exit 1
+    }
     KERNEL_ADMISSION=""
     KERNEL_BUILD_STATUS=external-elf-validated
 elif [ ! -f "$KERNEL_OUTPUT" ]; then
@@ -478,10 +532,31 @@ elif ! is_sha256 "$KERNEL_SOURCE_REVISION" || \
      ! grep -Fxq "simple_bin_sha256=$SIMPLE_BIN_SHA256" "$KERNEL_ADMISSION" || \
      ! grep -Fxq "profile=cranelift|x86-64-v1|none|dynload" "$KERNEL_ADMISSION" || \
      ! grep -Fxq "source_revision_sha256=$KERNEL_SOURCE_REVISION" "$KERNEL_ADMISSION" || \
-     ! grep -Fxq "kernel_sha256=$(file_sha256 "$KERNEL_OUTPUT")" "$KERNEL_ADMISSION"; then
+     ! grep -Fxq "entry_path=$ENTRY" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "entry_sha256=$QEMU_ADMISSION_ENTRY_SHA256" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "source_roots=$QEMU_ADMISSION_SOURCE_ROOTS" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "source_fingerprint=$QEMU_ADMISSION_SOURCE_FINGERPRINT" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "source_file_count=$QEMU_ADMISSION_SOURCE_FILE_COUNT" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "compiler_path=$SIMPLE_BIN_RESOLVED" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "compiler_sha256=$QEMU_ADMISSION_COMPILER_SHA256" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "build_command=$QEMU_ADMISSION_COMMAND" "$KERNEL_ADMISSION" || \
+     ! grep -Fxq "kernel_sha256=$(file_sha256 "$KERNEL_OUTPUT")" "$KERNEL_ADMISSION" || \
+     [ ! -f "$KERNEL_FROZEN_ADMISSION" ] || \
+     ! grep -Fxq "schema=qemu-frozen-source-admission-v1" "$KERNEL_FROZEN_ADMISSION" || \
+     ! grep -Fxq "repo_revision=$QEMU_ADMISSION_REVISION" "$KERNEL_FROZEN_ADMISSION" || \
+     ! grep -Fxq "entry_path=$ENTRY" "$KERNEL_FROZEN_ADMISSION" || \
+     ! grep -Fxq "entry_sha256=$QEMU_ADMISSION_ENTRY_SHA256" "$KERNEL_FROZEN_ADMISSION" || \
+     ! grep -Fxq "source_roots=$QEMU_ADMISSION_SOURCE_ROOTS" "$KERNEL_FROZEN_ADMISSION" || \
+     ! grep -Fxq "source_fingerprint=$QEMU_ADMISSION_SOURCE_FINGERPRINT" "$KERNEL_FROZEN_ADMISSION" || \
+     ! grep -Fxq "source_file_count=$QEMU_ADMISSION_SOURCE_FILE_COUNT" "$KERNEL_FROZEN_ADMISSION" || \
+     ! grep -Fxq "compiler_path=$SIMPLE_BIN_RESOLVED" "$KERNEL_FROZEN_ADMISSION" || \
+     ! grep -Fxq "compiler_sha256=$QEMU_ADMISSION_COMPILER_SHA256" "$KERNEL_FROZEN_ADMISSION" || \
+     ! grep -Fxq "build_command=$QEMU_ADMISSION_COMMAND" "$KERNEL_FROZEN_ADMISSION" || \
+     ! grep -Fxq "output_sha256=$(file_sha256 "$KERNEL_OUTPUT")" "$KERNEL_FROZEN_ADMISSION"; then
     kernel_stale=true
 fi
 if [ "$kernel_stale" = true ]; then
+    rm -f "$KERNEL_FROZEN_ADMISSION"
     TIMEOUT_BIN=""
     if command -v timeout >/dev/null 2>&1; then
         TIMEOUT_BIN=timeout
@@ -491,18 +566,6 @@ if [ "$kernel_stale" = true ]; then
         emit_failure "native-build-watchdog-not-found"
         exit 1
     fi
-    mkdir -p build/os/generated/generated
-    cat >build/os/generated/generated/simpleos_log_config.spl <<'SPL'
-val SIMPLEOS_LOG_COMPILED: bool = false
-
-fn simpleos_log_compile_enabled() -> bool:
-    SIMPLEOS_LOG_COMPILED
-
-fn simpleos_log_compile_mode_name() -> text:
-    if SIMPLEOS_LOG_COMPILED:
-        return "on"
-    "off"
-SPL
     KERNEL_SOURCE_REVISION="$(kernel_source_revision)"
     if ! is_sha256 "$KERNEL_SOURCE_REVISION"; then
         KERNEL_BUILD_STATUS=source-revision-unavailable
@@ -575,9 +638,28 @@ SPL
         echo "simple_bin_sha256=$SIMPLE_BIN_SHA256"
         echo "profile=cranelift|x86-64-v1|none|dynload"
         echo "source_revision_sha256=$KERNEL_SOURCE_REVISION"
+        echo "entry_path=$ENTRY"
+        echo "entry_sha256=$QEMU_ADMISSION_ENTRY_SHA256"
+        echo "source_roots=$QEMU_ADMISSION_SOURCE_ROOTS"
+        echo "source_fingerprint=$QEMU_ADMISSION_SOURCE_FINGERPRINT"
+        echo "source_file_count=$QEMU_ADMISSION_SOURCE_FILE_COUNT"
+        echo "compiler_path=$SIMPLE_BIN_RESOLVED"
+        echo "compiler_sha256=$QEMU_ADMISSION_COMPILER_SHA256"
+        echo "build_command=$QEMU_ADMISSION_COMMAND"
         echo "kernel_sha256=$KERNEL_SHA256"
     } >"$KERNEL_ADMISSION.candidate"
     mv "$KERNEL_ADMISSION.candidate" "$KERNEL_ADMISSION"
+    qemu_admission_publish "$KERNEL_OUTPUT" "$KERNEL_FROZEN_ADMISSION" \
+        build/os/generated src/os src/lib examples/09_embedded/simple_os \
+        scripts/os/make_os_disk.shs scripts/os/make_os_disk.c \
+        scripts/os/simpleos_font_bundle_companion.sha256 assets/fonts \
+        scripts/check/check-simpleos-wm-fullscreen-evidence.shs \
+        scripts/check/lib/qemu-frozen-source-admission.shs || {
+        rm -f "$KERNEL_OUTPUT" "$KERNEL_ADMISSION" "$KERNEL_FROZEN_ADMISSION"
+        KERNEL_BUILD_STATUS=frozen-source-admission-rejected
+        emit_failure "frozen-source-admission-rejected"
+        exit 1
+    }
     KERNEL_BUILD_STATUS=current-source-built
 elif [ -z "${SIMPLEOS_WM_KERNEL_ARTIFACT:-}" ]; then
     KERNEL_BUILD_STATUS=current-source-cache
