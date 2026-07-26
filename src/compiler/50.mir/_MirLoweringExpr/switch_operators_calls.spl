@@ -52,14 +52,20 @@ fn int_list_contains(xs: [i64], v: i64) -> bool:
         i = i + 1
     false
 
-fn enum_variant_disc(names: [text], variant: text) -> i64:
-    """Discriminant = index of `variant` in the enum's declared variant order."""
-    var i = 0
-    while i < names.len():
-        if names[i] == variant:
-            return i
-        i = i + 1
-    -1
+impl MirLowering:
+    me enum_variant_discriminant(enum_name: text, variant: text) -> i64:
+        if not self.enum_variant_index.has(enum_name):
+            return -1
+        if not self.enum_variant_discriminants.has(enum_name):
+            return -1
+        val names = self.enum_variant_index[enum_name]
+        val discriminants = self.enum_variant_discriminants[enum_name]
+        var i = 0
+        while i < names.len() and i < discriminants.len():
+            if names[i] == variant:
+                return discriminants[i]
+            i = i + 1
+        -1
 
 fn enum_pat_binding_sym(payload: HirPatternPayload?) -> SymbolId?:
     """The single payload-binding symbol of `case Circle(r):` (Tuple([Binding(r)])),
@@ -1188,7 +1194,7 @@ impl MirLowering:
                             case _: ""
                     var d: i64 = -1
                     if self.enum_variant_index.has(enum_name):
-                        d = enum_variant_disc(self.enum_variant_index[enum_name], variant)
+                        d = self.enum_variant_discriminant(enum_name, variant)
                     if d < 0:
                         # Bare pattern (`case Circle(r)` — no qualifier survived
                         # to HIR) or variant missing from the presumed enum:
@@ -1198,11 +1204,11 @@ impl MirLowering:
                         var owner = ""
                         var owner_count = 0
                         for ename in self.enum_variant_index.keys():
-                            if enum_variant_disc(self.enum_variant_index[ename], variant) >= 0:
+                            if self.enum_variant_discriminant(ename, variant) >= 0:
                                 owner = ename
                                 owner_count = owner_count + 1
                         if owner_count == 1:
-                            d = enum_variant_disc(self.enum_variant_index[owner], variant)
+                            d = self.enum_variant_discriminant(owner, variant)
                             if enum_name == "":
                                 enum_name = owner
                         elif owner_count > 1:
@@ -1544,7 +1550,7 @@ impl MirLowering:
                     b_boxed.switch_to_block(boxed_block)
                     var none_disc = 1
                     if self.enum_variant_index.has("Option"):
-                        none_disc = enum_variant_disc(self.enum_variant_index["Option"], "None")
+                        none_disc = self.enum_variant_discriminant("Option", "None")
                     val none_key = b_boxed.emit_const_int(none_disc)
                     val is_boxed_none = b_boxed.emit_binop(MirBinOp.Eq, mir_operand_copy(disc_local), mir_operand_copy(none_key), MirType.bool())
                     val boxed_some_block = b_boxed.new_block(Some("try_opt_boxed_some"))
@@ -1722,8 +1728,7 @@ impl MirLowering:
             val te = be.new_temp(MirType.i64())
             self.builder = be
             return te
-        val variant_names = self.enum_variant_index[enum_name]
-        val disc = enum_variant_disc(variant_names, variant)
+        val disc = self.enum_variant_discriminant(enum_name, variant)
         var b = self.builder
         # I64 (not I32): the cranelift lane is uniformly i64 (see the Bool
         # note in cranelift_codegen_adapter mir_type_to_cl); I32 consts here
@@ -1819,8 +1824,7 @@ impl MirLowering:
         `Shape.Circle(7)` arrives as receiver=`Shape`, method=`Circle`. The enum
         is known by NAME (registered in enum_variant_index); the single tuple
         payload is args[0] (0 for Unit variants)."""
-        val variant_names = self.enum_variant_index[enum_name]
-        val disc = enum_variant_disc(variant_names, variant)
+        val disc = self.enum_variant_discriminant(enum_name, variant)
         var b = self.builder
         val enum_id_local = b.new_temp(MirType(kind: MirTypeKind.I32))
         b.emit_const(enum_id_local, MirConstValue.Int(self.enum_runtime_id(enum_name)), MirType(kind: MirTypeKind.I32))
@@ -2680,6 +2684,7 @@ impl MirLowering:
                 lw.struct_method_return_is_array = self.struct_method_return_is_array
                 lw.enum_payload_struct_names = self.enum_payload_struct_names
                 lw.enum_variant_index = self.enum_variant_index
+                lw.enum_variant_discriminants = self.enum_variant_discriminants
                 lw.canonical_type_symbols = self.canonical_type_symbols
                 lw.next_canonical_type_symbol = self.next_canonical_type_symbol
                 lw.global_symbol_ids = self.global_symbol_ids
@@ -2863,6 +2868,7 @@ impl MirLowering:
             if direct_name == "Some" or direct_name == "None":
                 if not self.enum_variant_index.has("Option"):
                     self.enum_variant_index["Option"] = ["Some", "None"]
+                    self.enum_variant_discriminants["Option"] = [0, 1]
                 return self.lower_enum_construct_named("Option", direct_name, args)
 
         if is_direct:

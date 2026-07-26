@@ -54,6 +54,12 @@ Finish every selected shared-multilingual-font requirement and NFR by integratin
 
 verify-pending
 
+## Open bootstrap TODO
+
+| ID | Status | Owner | Required evidence and bounded continuation |
+|---|---|---|---|
+| ENUM-DISC-001 | FAIL — implementation in progress; evidence not admitted | compiler/bootstrap owners | Preserve explicit enum discriminants through the pure parser, flat AST, bridge/typed `Variant`, and HIR/MIR lowering. First pass focused parser/bridge/lowering tests against a non-sequential enum and the real `SyscallId` values (`Exit=0`, `Mmap=10`, `IpcSend=20`, `Rename=44`), including implicit-after-explicit behavior. Only then make one cache-preserving Stage 4 retry with the existing output tree. Only an exit-0 Stage 4 may publish CLI/core-C hashes and unlock essential-tools plus deliberate-red/empty-runner admission. Font runs and docgen remain prohibited until that admission. |
+
 ## Log
 
 - dev: Remade the goal around all selected requirements and NFRs with twelve testable acceptance criteria, six parallel lanes, frozen shared interfaces, and explicit unavailable-host policy.

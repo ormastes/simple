@@ -53,6 +53,19 @@ atlas, cache, process/env facade, or device-success path.
 6. H reviews every handoff. A failed criterion returns only to its owner for at
    most three fix/verify cycles.
 
+### Bounded Stage 4 continuation
+
+| TODO | Status | Implementation owner | Acceptance evidence |
+|---|---|---|---|
+| `ENUM-DISC-001` | FAIL — implementation in progress; evidence not admitted | compiler/bootstrap owners, then lane A for bootstrap only | Add full explicit discriminant propagation through parser, flat AST, bridge/typed `Variant`, and HIR/MIR lowering. Required focused coverage includes parser, bridge, and lowering specs; it must prove a literal non-sequential enum, the actual `SyscallId` source, exact `Exit=0`, `Mmap=10`, `IpcSend=20`, `Rename=44`, and implicit-after-explicit behavior. Concurrent source/test changes are work in progress, not current PASS evidence. |
+
+The bounded order is: focused parser/HIR/MIR tests once; one
+cache-preserving Stage 4 retry using the existing full-bootstrap output tree;
+and, only after exit 0, immutable CLI/core-C hashes, essential-tools smoke, and
+deliberate-red/empty-runner admission. Focused font execution follows
+admission. Owner docgen follows passing runtime specs; lane F only audits it.
+No generated manual is admitted before the CLI.
+
 ## Required handoff format
 
 Each lane reports:

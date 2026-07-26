@@ -53,6 +53,10 @@ prerequisite, rerun the documented command with the same
 `--output=build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap`
 and preserve the Stage 2/3/native caches.
 
+| Open TODO | Status | Required evidence before retry | Bounded continuation |
+|---|---|---|---|
+| `ENUM-DISC-001` | FAIL — no implementation/test evidence | Parser acceptance of `TOK_ASSIGN`; discriminant storage in flat AST and typed `Variant`; bridge plus HIR/MIR preservation; focused tests proving a non-sequential enum, actual `SyscallId`, exact `Exit=0`, `Mmap=10`, `IpcSend=20`, `Rename=44`, and implicit-after-explicit behavior | Run the focused parser/HIR/MIR tests once, then exactly one cache-preserving Stage 4 retry. Only exit 0 may unlock immutable CLI/core-C identity, essential-tools smoke, and deliberate-red/empty-runner gates. Font commands and docgen stay blocked until admission. |
+
 ## Requirement matrix
 
 Every non-pass row names its owner, dependency, exact acceptance surface, and

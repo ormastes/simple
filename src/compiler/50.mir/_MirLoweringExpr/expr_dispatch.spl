@@ -1208,6 +1208,46 @@ impl MirLowering:
             loaded
 
 
+    me lower_cast_expr(operand: HirExpr, target: HirType, span: Span) -> LocalId:
+        """Lower casts, extracting a runtime enum's resolved discriminant."""
+        val operand_local = self.lower_expr(operand)
+        val mir_target = self.lower_type(target)
+        var target_is_integer = false
+        match target.kind:
+            case HirTypeKind.Int(_, _): target_is_integer = true
+            case _: ()
+        var operand_is_enum = false
+        if operand.has_type_:
+            match operand.type_.kind:
+                case HirTypeKind.Named(symbol, _):
+                    val symbol_info = self.symbols.get_symbol_raw(symbol.id)
+                    if val info = symbol_info:
+                        operand_is_enum = self.enum_variant_index.has(info.name)
+                case HirTypeKind.Optional(_): operand_is_enum = true
+                case HirTypeKind.Result(_, _): operand_is_enum = true
+                case _: ()
+        if target_is_integer and operand_is_enum:
+            var enum_builder = self.builder
+            val disc_func = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_enum_discriminant"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            val disc_result = enum_builder.emit_call(disc_func, [mir_operand_copy(operand_local)], MirType.i64())
+            self.builder = enum_builder
+            if val resolved_disc = disc_result:
+                if rt_enum_discriminant(mir_target.kind) == rt_enum_discriminant(MirTypeKind.I64):
+                    return resolved_disc
+                var cast_builder = self.builder
+                val narrowed = cast_builder.emit_cast(mir_operand_copy(resolved_disc), mir_target)
+                self.builder = cast_builder
+                return narrowed
+            self.error("enum-to-integer cast could not read runtime discriminant", Some(span))
+            return operand_local
+        var cast_builder = self.builder
+        val result = cast_builder.emit_cast(mir_operand_copy(operand_local), mir_target)
+        self.builder = cast_builder
+        result
+
     me lower_expr(expr: HirExpr) -> LocalId:
         """Lower HIR expression to MIR, return result local."""
         val nil_span = Span.empty()
@@ -1350,12 +1390,7 @@ impl MirLowering:
         if expr_disc == cast_disc:
             match expr_value.kind:
                 case HirExprKind.Cast(operand, target):
-                    val operand_local = self.lower_expr(operand)
-                    val mir_target = self.lower_type(target)
-                    var cast_builder = self.builder
-                    val cast_result = cast_builder.emit_cast(mir_operand_copy(operand_local), mir_target)
-                    self.builder = cast_builder
-                    return cast_result
+                    return self.lower_cast_expr(operand, target, expr.span)
                 case _:
                     pass
         val call_disc = rt_enum_discriminant(HirExprKind.Call(nil_expr, [], []))
@@ -2793,12 +2828,7 @@ impl MirLowering:
 
             # Type cast: expr as Type
             case Cast(operand, target):
-                val operand_local = self.lower_expr(operand)
-                val mir_target = self.lower_type(target)
-                var b = self.builder
-                val result = b.emit_cast(mir_operand_copy(operand_local), mir_target)
-                self.builder = b
-                result
+                self.lower_cast_expr(operand, target, expr.span)
 
             # B5b Phase 1: lower MatchCase on integer-literal patterns to
             # MirTerminator.Switch (dense >=4 arms, span <= 1024) or to a
@@ -2872,7 +2902,7 @@ impl MirLowering:
                     var owner_count = 0
                     if bname != "":
                         for ename in self.enum_variant_index.keys():
-                            if enum_variant_disc(self.enum_variant_index[ename], bname) >= 0:
+                            if self.enum_variant_discriminant(ename, bname) >= 0:
                                 owner = ename
                                 owner_count = owner_count + 1
                     if owner_count == 1:

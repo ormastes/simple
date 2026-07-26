@@ -115,6 +115,19 @@ alternative is an architecturally reviewed exclusion of this OS module from
 the CLI closure. Then rerun the exact command above with the same output path,
 preserving Stage 2/3 and native-cache trees.
 
+## Open TODO and bounded continuation
+
+| TODO | Status | Required change and evidence |
+|---|---|---|
+| `ENUM-DISC-001` | FAIL — implementation and tests outstanding | The compiler/bootstrap owner must accept `TOK_ASSIGN`, store the discriminant in the flat AST, propagate it through the bridge/typed `Variant` and HIR/MIR lowering, and prove exact values with focused parser/bridge/lowering tests. Evidence must include a literal non-sequential enum, parsing the actual `src/os/kernel/types/syscall_types.spl`, `Exit=0`, `Mmap=10`, `IpcSend=20`, `Rename=44`, and implicit-after-explicit behavior. |
+
+After those focused tests pass once, lane A may run exactly one
+cache-preserving Stage 4 retry with the command below. Only exit 0 permits
+publishing immutable CLI/core-C paths and SHA-256 values, then running
+essential-tools and deliberate-red/empty-runner admission. Focused font tests
+come next. Docgen remains prohibited until the CLI is admitted and the
+corresponding runtime spec passes.
+
 Exact next-continuation command after that prerequisite:
 
 ```sh
