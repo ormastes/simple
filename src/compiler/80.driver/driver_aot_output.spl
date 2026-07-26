@@ -52,6 +52,7 @@ extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_copy(src: text, dst: text) -> bool
 extern fn rt_file_size(path: text) -> i64
 extern fn rt_hash_text(content: text) -> i64
+extern fn rt_stdout_flush()
 
 fn driver_log_debug(log: Logger, message: text):
     if log.level >= 10:
@@ -334,6 +335,11 @@ impl CompilerDriver:
             rt_dir_remove_all(base_cache_scope_root)
             rt_env_set("SIMPLE_NATIVE_BUILD_CLEAN", "")
         rt_dir_create(cache_scope_root, true)
+        # Phase marker: frontend parsing + MIR construction already completed
+        # (compile_to_native is only reached after that phase finishes), so a
+        # killed run that leaves this file behind proves it died in codegen,
+        # not frontend. See doc/08_tracking/bug/simpleos_harness_silent_native_build_2026-07-26.md.
+        rt_file_write_text(rt_path_join(cache_scope_root, "phase.marker"), "frontend-done, codegen-started\n")
         val cache_path = driver_native_build_cache_path(cache_dir)
         val object_base = rt_path_join(cache_scope_root, "object")
         var build_cache: BuildCache = BuildCache.load(cache_path)
@@ -348,6 +354,7 @@ impl CompilerDriver:
         val total_modules = module_names.len()
         if trace:
             print "[NATIVE] compiling {total_modules} modules..."
+            rt_stdout_flush()
 
         # Guard (bug #119): refuse empty mir_modules. A requested --entry that
         # produces no modules is likely a misconfiguration (isolated entry with
@@ -403,7 +410,7 @@ impl CompilerDriver:
         if uncached_names.len() > 0:
             if uncached_names.len() == 1:
                 val name = uncached_names[0]
-                val direct_result = _compile_one_module(ctx, backend_name, is_release, driver_opt_level, object_base, name)
+                val direct_result = _compile_one_module_and_cache(ctx, build_cache, backend_name, is_release, driver_opt_level, object_base, name)
                 match direct_result:
                     case Ok(_):
                         cache_miss_count = 1
@@ -421,7 +428,7 @@ impl CompilerDriver:
                 for name in uncached_names:
                     builder.add_unit(name, [])
 
-                val build_result = builder.build(_compile_one_module(ctx, backend_name, is_release, driver_opt_level, object_base, _1))
+                val build_result = builder.build(_compile_one_module_and_cache(ctx, build_cache, backend_name, is_release, driver_opt_level, object_base, _1))
                 cache_miss_count = build_result.stats.completed + build_result.stats.failed
 
                 if not build_result.success:
@@ -465,6 +472,7 @@ impl CompilerDriver:
         build_cache.save()
         if trace and (cache_hit_count > 0 or cache_miss_count > 0):
             print "[NATIVE] cache: {cache_hit_count} hits, {cache_miss_count} misses"
+            rt_stdout_flush()
 
         # Link object files into final executable
         # Guard (bug #119): refuse to silently fallback when no object files were produced.
@@ -921,11 +929,37 @@ impl CompilerDriver:
 # Single-Module Compilation Helper (for ParallelBuilder)
 # ============================================================================
 
+fn _compile_one_module_and_cache(ctx: any, build_cache: BuildCache, backend_name: text, is_release: bool, opt_level: i64, output_base: text, name: text) -> Result<text, text>:
+    """Compile a single module and immediately persist its cache entry.
+
+    Wraps _compile_one_module so the build_cache index is updated (and
+    periodically saved) as each module finishes, not only after the whole
+    Phase-2 loop returns. Without this, a mid-build kill leaves orphan .o
+    files with no index entry and every rerun stays cold (see
+    doc/08_tracking/bug/native_build_cache_never_written_on_timeout_2026-07-26.md).
+    """
+    val result = _compile_one_module(ctx, backend_name, is_release, opt_level, output_base, name)
+    match result:
+        case Ok(obj_path):
+            val cache_source = driver_native_module_cache_source(ctx, name)
+            if cache_source != "":
+                val source_fp = FileFingerprint.from_file(cache_source)
+                if val source_fp_val = source_fp:
+                    build_cache.update_entry(cache_source, source_fp_val, [], [obj_path])
+                    # Batch the (whole-file-rewrite) save every 5 entries so a
+                    # kill mid-build still leaves a mostly-current index.
+                    if build_cache.entries.len() % 5 == 0:
+                        build_cache.save()
+        case Err(_):
+            ()
+    result
+
 fn _compile_one_module(ctx: any, backend_name: text, is_release: bool, opt_level: i64, output_base: text, name: text) -> Result<text, text>:
     """Compile a single module by name, write object file, return path."""
     val trace = (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
     if trace:
         print "[NATIVE] compiling module: {name}"
+        rt_stdout_flush()
         print "[NATIVE] select module:start"
     if name == bootstrap_entry_module_name(ctx):
         if trace:

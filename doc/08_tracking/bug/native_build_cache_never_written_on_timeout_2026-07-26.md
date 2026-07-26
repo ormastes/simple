@@ -52,3 +52,21 @@ frontend/MIR pass over the full compositor/engine2d/vulkan graph — invisible t
 ## Non-finding
 `build_native_from_cache()` (`src/compiler/70.backend/build_native.spl:44`) is dead
 code — exported, never called; ignore it when fixing.
+
+## Fix status (2026-07-26, same day)
+Items 1-3 implemented and seed-lane-verified: incremental `build_cache.save()`
+every 5 modules via `_compile_one_module_and_cache` (kill mid-Phase-2 leaves a
+valid populated index), per-line `rt_stdout_flush()` after `[NATIVE]` prints
+(log grows live under redirects), `phase.marker` written at cache-scope creation,
+and `--kill-after` grace 5s→10s. Correction to the original analysis: the kill
+was already two-stage (`timeout --kill-after`), not hard — but no SIGTERM handler
+exists, so incremental persistence (not grace) is the effective fix. NOTE: takes
+effect on the deployed lane only after the next stage4 redeploy.
+
+## Related quirk found during verification
+On the SEED lane, `native_build_compiler_identity()` fell back to
+`uncacheable-{pid}-{timestamp}` (`driver_build/incremental.spl:120`), making every
+seed invocation its own cache scope — seed-lane reruns can never warm regardless
+of the fixes above. The deployed-binary lane hashes `argv[0]` and should scope
+stably; if a harness cache stays cold after redeploy, check this identity path
+first.
