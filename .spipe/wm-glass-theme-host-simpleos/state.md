@@ -471,3 +471,22 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   independent source review accepts the boundary repair. The underlying generic
   aggregate-return compiler bug remains open and the production bypass must stay
   until its native regression passes.
+- continuation-2026-07-26-bounded-metal-and-phase2-gates: Pushed reviewed
+  diagnostics through `eca95ca8cf`. The Metal gate compiles the exact production
+  MSL source through the typed provider API, supervises the complete process
+  group/FIFO drains, and requires exact availability/init/device/compiler/
+  library/cleanup semantics; it remains explicitly blocked before native run
+  because the trusted Metal manifest is absent. The phase-2 source-reclamation
+  gate now avoids the heavyweight compiler test closure, scopes source-order
+  checks to exact bodies with false-green controls, attests the pure-Simple
+  artifact, and bounds the entire process tree and streams. It remains runtime
+  BLOCKED until a compatible self-hosted binary produces alias free results
+  exactly `1,0`; no Stage-4 or historic 0/0 result is accepted.
+- continuation-2026-07-26-frozen-qemu-source-admission: Pushed `cb0eb1d818`.
+  x86 and ARM producers now require a clean linked worktree, exact revision,
+  entry/compiler/build-command/output identities, and pre/post source
+  fingerprints. The ignored generated source tree is included after
+  deterministic normalization, while ARM QMP consumption cross-checks the
+  build and frozen manifests. This prevents the prior changing-root build from
+  becoming evidence. No new build or QEMU launch was performed, so x86/ARM
+  pixels, SIMD receipts, and ordered input events remain open.
