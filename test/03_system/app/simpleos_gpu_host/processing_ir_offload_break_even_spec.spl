@@ -1,0 +1,139 @@
+# @tag: system, gpu, processing-ir, offload, performance, linux
+#
+# This is an evidence consumer, not a synthetic benchmark. The receipt must
+# be produced by a native CUDA/Vulkan ProcessingIR run. Missing evidence is a
+# failure on Linux; non-Linux hosts are explicitly postponed.
+
+use std.spec.{describe, it, expect, pending, fail_test}
+use std.io_runtime.{file_exists, file_read, process_run}
+use std.common.text.{parse_i64}
+use std.env.variables.{env_get}
+use std.nogc_sync_mut.env.platform.{is_linux}
+
+val SUMMARY_CHECK = "scripts/check/check-local-gpu-perf-summary.shs"
+val DEFAULT_RECEIPT = "build/simpleos_gpu_host/offload_break_even/evidence.env"
+
+fn receipt_path() -> text:
+    env_get("SIMPLE_GPU_OFFLOAD_BREAK_EVEN_RECEIPT") ?? DEFAULT_RECEIPT
+
+fn value_of(receipt: text, key: text) -> text:
+    val prefix = key + "="
+    for line in receipt.split("\n"):
+        val trimmed = line.trim()
+        if trimmed.starts_with(prefix):
+            return trimmed.slice(prefix.len(), trimmed.len())
+    ""
+
+fn number_of(receipt: text, key: text) -> i64:
+    val raw = value_of(receipt, key)
+    if raw == "":
+        return -1
+    parse_i64(raw)
+
+fn row_key(index: i64, field: text) -> text:
+    "processing_ir_offload_row_" + index.to_text() + "_" + field
+
+fn row_number(receipt: text, index: i64, field: text) -> i64:
+    number_of(receipt, row_key(index, field))
+
+fn row_text(receipt: text, index: i64, field: text) -> text:
+    value_of(receipt, row_key(index, field))
+
+describe "ProcessingIR GPU offload break-even evidence":
+    if not is_linux():
+        it "requires a Linux CUDA/Vulkan measurement host":
+            pending("Linux ProcessingIR offload measurement is postponed to the Linux host")
+        return
+
+    it "keeps the existing CUDA/Vulkan summary helper honest":
+        expect(file_exists(SUMMARY_CHECK)).to_equal(true)
+        val (_stdout, _stderr, code) = process_run(
+            "/bin/sh",
+            ["-c", "SIMPLE_BIN=bin/simple sh " + SUMMARY_CHECK + " --self-test"]
+        )
+        expect(code).to_equal(0)
+
+    it "requires measured rows and rejects slower GPU offload below break-even":
+        val path = receipt_path()
+        if not file_exists(path):
+            fail_test("missing native ProcessingIR offload receipt: " + path)
+            return
+        val receipt = file_read(path)
+
+        expect(value_of(receipt, "processing_ir_offload_status")).to_equal("pass")
+        expect(value_of(receipt, "processing_ir_offload_schema")).to_equal("processing-ir-offload-v1")
+        expect(value_of(receipt, "processing_ir_offload_execution")).to_equal("processing_ir")
+        val backend = value_of(receipt, "processing_ir_offload_backend")
+        expect(backend == "cuda" or backend == "vulkan" or backend == "cuda+vulkan").to_equal(true)
+        expect(value_of(receipt, "processing_ir_offload_aggregate")).to_equal("median")
+        expect(value_of(receipt, "processing_ir_offload_timing_unit")).to_equal("us")
+        expect(value_of(receipt, "processing_ir_offload_rss_source")).to_equal("procfs")
+
+        val warmup = number_of(receipt, "processing_ir_offload_warmup_samples")
+        val samples = number_of(receipt, "processing_ir_offload_measured_samples")
+        val rows = number_of(receipt, "processing_ir_offload_row_count")
+        expect(warmup).to_be_greater_than(2)
+        expect(samples).to_be_greater_than(4)
+        expect(rows).to_be_greater_than(2)
+
+        val cpu_rss = number_of(receipt, "processing_ir_offload_cpu_rss_kb")
+        val gpu_rss = number_of(receipt, "processing_ir_offload_gpu_rss_kb")
+        val peak_rss = number_of(receipt, "processing_ir_offload_peak_rss_kb")
+        val communication = number_of(receipt, "processing_ir_offload_communication_overhead_us")
+        expect(cpu_rss).to_be_greater_than(0)
+        expect(gpu_rss).to_be_greater_than(0)
+        expect(peak_rss).to_be_greater_than(0)
+        expect(peak_rss).to_be_greater_than(cpu_rss - 1)
+        expect(peak_rss).to_be_greater_than(gpu_rss - 1)
+        expect(communication).to_be_greater_than(-1)
+
+        var previous_batch: i64 = -1
+        var first_fast_batch: i64 = -1
+        var slower_rows: i64 = 0
+        var faster_rows: i64 = 0
+        var i: i64 = 0
+        while i < rows:
+            val batch = row_number(receipt, i, "batch")
+            val cpu = row_number(receipt, i, "cpu_us")
+            val device = row_number(receipt, i, "device_us")
+            val transfer = row_number(receipt, i, "transfer_us")
+            val total = row_number(receipt, i, "total_us")
+            val decision = row_text(receipt, i, "decision")
+
+            expect(batch).to_be_greater_than(previous_batch)
+            expect(cpu).to_be_greater_than(0)
+            expect(device).to_be_greater_than(0)
+            expect(transfer).to_be_greater_than(0)
+            expect(total).to_be_greater_than(0)
+            expect(total).to_equal(device + transfer)
+
+            if total >= cpu:
+                slower_rows = slower_rows + 1
+                expect(decision).to_equal("cpu")
+            else:
+                faster_rows = faster_rows + 1
+                if first_fast_batch < 0:
+                    first_fast_batch = batch
+                expect(decision).to_equal("gpu")
+            previous_batch = batch
+            i = i + 1
+
+        val measured_break_even = number_of(receipt, "processing_ir_offload_break_even_batch")
+        expect(slower_rows).to_be_greater_than(0)
+        expect(faster_rows).to_be_greater_than(0)
+        expect(measured_break_even).to_equal(first_fast_batch)
+
+        # A policy must never choose GPU for a measured round-trip that is
+        # slower than its CPU baseline; transfer time is part of total_us.
+        var below_threshold: i64 = 0
+        i = 0
+        while i < rows:
+            val batch = row_number(receipt, i, "batch")
+            val total = row_number(receipt, i, "total_us")
+            val cpu = row_number(receipt, i, "cpu_us")
+            if batch < measured_break_even:
+                below_threshold = below_threshold + 1
+                expect(total >= cpu).to_equal(true)
+                expect(row_text(receipt, i, "decision")).to_equal("cpu")
+            i = i + 1
+        expect(below_threshold).to_be_greater_than(0)

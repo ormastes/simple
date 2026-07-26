@@ -50,8 +50,26 @@ enum-discriminant comparisons did not alter that result, proving the
 `CompileMode` value is already corrupted before phase dispatch; those
 ineffective workarounds were removed.
 
+A second bounded session transported the standalone CLI mode as canonical text
+through the dedicated `CompileOptions.cli_mode_text` field while preserving
+the semantic `build_mode`. `CompileContext.create` now selects the backend
+from that text after its aggregate argument copy, and
+`CompilerDriver.compile` uses the same text for fingerprinting, Check, and
+phase dispatch. `-m/--mode` is now accepted, aliases are canonicalized, and
+invalid modes fail loudly. The focused source contract passed before the final
+backend/alias review fixes; `native_cli_mode_transport_regression_spec.spl`
+adds the executable `73` oracle.
+
+Three more retained-cache builds completed (5 compiled/730 cached, 4/731,
+5/730). The diagnostic stage proved canonical mode text survives every
+aggregate copy; the reviewed source now carries it in the dedicated field.
+The final driver enters AOT instead of falling through, then segfaults in
+`optimizationpipeline_for_backend` through `optimize_module_for_backend` and
+`CompilerDriver.optimize_mir`. No oracle binary was emitted.
+
 The three-cycle cap is reached. Resume from the retained cache; do not run a
-full bootstrap. Repair and directly regress native `CompileMode` transport,
-then compile the existing two-module oracle and expect `84`. Only after that
-passes, regenerate the retained Vulkan evidence closure, verify that the caller
-loads `pixels` at offset 0, and run one live readback.
+full bootstrap. Repair the `OptimizationPipeline` aggregate return/consumer
+path and directly regress the native CLI mode transport, then compile the
+existing two-module oracle and expect `84`. Only after that passes, regenerate
+the retained Vulkan evidence closure, verify that the caller loads `pixels` at
+offset 0, and run one live readback.

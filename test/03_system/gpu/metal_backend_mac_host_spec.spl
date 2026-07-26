@@ -1,0 +1,69 @@
+# @tag: system, gpu, metal, macos, host
+#
+# This is a host-local contract. Non-macOS runs register one explicit pending
+# test and do not execute Metal assertions. A macOS run must prove both the
+# current Metal source-emission contract and the canonical native receipt.
+
+use std.spec.{describe, it, expect, pending, fail_test}
+use std.io_runtime.{file_exists, file_read, process_run}
+use std.nogc_sync_mut.env.platform.{is_macos}
+
+val EMITTER = "src/compiler/70.backend/backend/gpu_portable_compute.spl"
+val MSL = "src/lib/gc_async_mut/gpu/engine2d/backend_metal_msl.spl"
+val GENERATED_CHECK = "scripts/check/check-metal-generated-2d-readback.shs"
+val GENERATED_HARNESS = "scripts/check/metal_generated_2d_readback_harness.spl"
+val RECEIPT_DIR = "build/metal_backend_mac_host"
+val RECEIPT = RECEIPT_DIR + "/evidence.env"
+
+fn canonical_helpers_exist() -> bool:
+    file_exists(GENERATED_CHECK) and file_exists(GENERATED_HARNESS)
+
+fn run_native_receipt() -> (text, text, i64):
+    val command = "BUILD_DIR=" + RECEIPT_DIR +
+        " REPORT_PATH=" + RECEIPT_DIR + "/report.md" +
+        " SIMPLE_BIN=bin/simple" +
+        " sh " + GENERATED_CHECK
+    process_run("/bin/sh", ["-c", command])
+
+fn receipt_has(lines: text, key: text, value: text) -> bool:
+    lines.contains(key + "=" + value)
+
+describe "macOS Metal backend host verification":
+    if not is_macos():
+        it "requires an explicit macOS Metal host capability":
+            pending("macOS host capability unavailable; live Metal evidence is postponed")
+        return
+
+    it "requires canonical Metal source-emission markers":
+        expect(file_exists(EMITTER)).to_equal(true)
+        expect(file_exists(MSL)).to_equal(true)
+        val emitter = file_read(EMITTER)
+        val msl = file_read(MSL)
+        expect(emitter).to_contain("PortableComputeTarget.Metal")
+        expect(emitter).to_contain("emit_portable_2d_optimization_module")
+        expect(emitter).to_contain("metal-shading-language")
+        expect(emitter).to_contain("kernel void {name}(")
+        expect(msl).to_contain("#include <metal_stdlib>")
+        expect(msl).to_contain("using namespace metal;")
+        expect(msl).to_contain("kernel void kernel_clear(")
+        expect(msl).to_contain("kernel void kernel_draw_rect_filled(")
+        expect(msl).to_contain("kernel void kernel_blit_image(")
+        expect(msl).to_contain("kernel void kernel_indexed_fill(")
+        expect(msl).to_contain("kernel void kernel_glyph_atlas_blit(")
+
+    it "requires the canonical native compile and readback receipt":
+        if not canonical_helpers_exist():
+            fail_test("canonical Metal compile/readback helpers are missing")
+            return
+        val (_stdout, _stderr, code) = run_native_receipt()
+        expect(code).to_equal(0)
+        expect(file_exists(RECEIPT)).to_equal(true)
+        val receipt = file_read(RECEIPT)
+        expect(receipt_has(receipt, "metal_generated_2d_readback_status", "pass")).to_equal(true)
+        expect(receipt_has(receipt, "metal_generated_2d_readback_module_verified", "true")).to_equal(true)
+        expect(receipt_has(receipt, "metal_generated_2d_readback_submit_attempted", "true")).to_equal(true)
+        expect(receipt_has(receipt, "metal_generated_2d_readback_readback_available", "true")).to_equal(true)
+        expect(receipt).to_contain("metal_generated_2d_readback_fill_checksum=")
+        expect(receipt).to_contain("metal_generated_2d_readback_copy_checksum=")
+        expect(receipt).to_contain("metal_generated_2d_readback_alpha_checksum=")
+        expect(receipt).to_contain("metal_generated_2d_readback_scroll_checksum=")

@@ -32,6 +32,15 @@ fn _compile_mode_or(mode_text: text, fallback_text: text) -> CompileMode:
         return parsed_fallback
     CompileMode.Interpret
 
+fn _canonical_compile_mode_text(mode_text: text) -> text:
+    match mode_text:
+        case "interpret" | "i": "interpret"
+        case "jit" | "j": "jit"
+        case "aot" | "a" | "compile" | "c": "aot"
+        case "check" | "k": "check"
+        case "sdn" | "s" | "data": "sdn"
+        case _: mode_text
+
 struct CliArgs:
     mode: CompileMode
     input_files: [text]
@@ -422,6 +431,7 @@ fn main() -> i32:
     print "[boot] args.len={args.len()} first={if args.len() > 0: args[0] else: \"(none)\"}"
     var idx = 1
     var cli_args = CliArgs.default()
+    var requested_mode_text = "jit"
 
     while idx < args.len():
         print "[boot] loop idx={idx} len={args.len()}"
@@ -440,14 +450,19 @@ fn main() -> i32:
             print_version()
             return 0
         elif arg == "-c" or arg == "--aot" or arg == "--compile" or arg == "--native":
+            requested_mode_text = "aot"
             cli_args.mode = _compile_mode_or("aot", "jit")
         elif arg == "-i" or arg == "--interpret":
+            requested_mode_text = "interpret"
             cli_args.mode = _compile_mode_or("interpret", "jit")
         elif arg == "-j" or arg == "--jit":
+            requested_mode_text = "jit"
             cli_args.mode = _compile_mode_or("jit", "interpret")
         elif arg == "-k" or arg == "--check":
+            requested_mode_text = "check"
             cli_args.mode = _compile_mode_or("check", "jit")
         elif arg == "-s" or arg == "--sdn":
+            requested_mode_text = "sdn"
             cli_args.mode = _compile_mode_or("sdn", "jit")
         elif arg == "-O" or arg == "--optimize":
             cli_args.optimize = true
@@ -495,7 +510,24 @@ fn main() -> i32:
             val text = arg.slice(7, arg.len())
             val m = CompileMode.from_text(text)
             if val parsed_mode = m:
+                requested_mode_text = _canonical_compile_mode_text(text)
                 cli_args.mode = parsed_mode
+            else:
+                print "Error: Unknown mode: {text}"
+                return 1
+        elif arg == "-m" or arg == "--mode":
+            if idx >= args.len():
+                print "Error: {arg} requires a value"
+                return 1
+            val text = args[idx]
+            idx = idx + 1
+            val m = CompileMode.from_text(text)
+            if val parsed_mode = m:
+                requested_mode_text = _canonical_compile_mode_text(text)
+                cli_args.mode = parsed_mode
+            else:
+                print "Error: Unknown mode: {text}"
+                return 1
         elif arg.starts_with("--profile="):
             cli_args.profile = arg.slice(10, arg.len())
         elif arg == "-p":
@@ -547,12 +579,15 @@ fn main() -> i32:
     print "[boot] parsed args ok; files={cli_args.input_files.len()} optimize={cli_args.optimize}"
 
     # Build compile options from CLI args
-    val options = cli_args.to_options()
+    var options = cli_args.to_options()
+    # Text survives the native aggregate copies that currently corrupt the
+    # CompileMode enum field. CompilerDriver restores it after the final copy.
+    options.cli_mode_text = requested_mode_text
     val result = run_compile_entry(options)
 
     match result:
         case CompileResult.Success(_):
-            if options.mode == CompileMode.Aot:
+            if requested_mode_text == "aot":
                 val out_path = options.output_file ?? "a.out"
                 print "AOT output written to {out_path}"
             return 0

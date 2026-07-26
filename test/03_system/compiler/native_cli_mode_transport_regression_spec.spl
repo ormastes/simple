@@ -1,0 +1,47 @@
+"""Incremental native-build CLI mode transport regression."""
+
+use std.spec.*
+use std.io_runtime.{dir_create_all, file_exists, file_write, remove_file_if_exists, shell}
+
+val BUILD_DIR = "build/native_cli_mode_transport"
+val ENTRY_PATH = BUILD_DIR + "/main.spl"
+val BINARY_PATH = BUILD_DIR + "/main"
+val DRIVER_PATH = BUILD_DIR + "/simple-driver"
+val CACHE_DIR = BUILD_DIR + "/cache"
+
+fn write_cli_mode_transport_fixture() -> bool:
+    val source = r"""fn main():
+    print(73)
+"""
+    dir_create_all(BUILD_DIR) and
+        file_write(ENTRY_PATH, source) and
+        remove_file_if_exists(BINARY_PATH)
+
+fn run_cli_mode_transport_probe() -> (i64, bool, i64, text):
+    val driver = shell(
+        "env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 " +
+        "bin/simple native-build --source src/compiler --source src/app --source src/lib " +
+        "--entry src/compiler/80.driver/main.spl --entry-closure " +
+        "--cache-dir " + CACHE_DIR + " -o " + DRIVER_PATH
+    )
+    if driver.exit_code != 0:
+        return (driver.exit_code, false, -1, driver.stderr)
+    val compiled = shell(
+        "env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 " +
+        DRIVER_PATH + " --aot --output=" + BINARY_PATH + " " + ENTRY_PATH
+    )
+    if compiled.exit_code != 0:
+        return (compiled.exit_code, false, -1, compiled.stderr)
+    if not file_exists(BINARY_PATH):
+        return (compiled.exit_code, false, -1, "")
+    val ran = shell(BINARY_PATH)
+    (compiled.exit_code, true, ran.exit_code, ran.stdout)
+
+describe "incremental native CLI mode transport":
+    it "builds and runs a one-file program through the cached native path":
+        expect(write_cli_mode_transport_fixture()).to_equal(true)
+        val (compile_code, binary_exists, run_code, stdout) = run_cli_mode_transport_probe()
+        expect(compile_code).to_equal(0)
+        expect(binary_exists).to_equal(true)
+        expect(run_code).to_equal(0)
+        expect(stdout).to_equal("73")

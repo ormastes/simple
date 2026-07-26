@@ -1,0 +1,139 @@
+# ProcessingIR GPU Offload Break-Even Measurement
+
+## Scope
+
+This plan measures whether a real ProcessingIR submission should stay on the
+CPU or be offloaded to CUDA/Vulkan. The decision uses device execution plus
+host/device communication, including the measured transfer/readback phase.
+Device-kernel time alone is not an offload win.
+
+The executable consumer is:
+
+```text
+test/03_system/app/simpleos_gpu_host/processing_ir_offload_break_even_spec.spl
+```
+
+It accepts no synthetic rows and does not use `pass_todo`. On Linux, missing
+or malformed evidence fails. On macOS, this lane is postponed to the macOS
+Metal host owner; the macOS host test must produce the same receipt shape
+before it can claim a live result.
+
+## Current Commands
+
+Run the existing helper self-test first. This is a contract check and does not
+claim a GPU result:
+
+```sh
+sh scripts/check/check-local-gpu-perf-summary.shs --self-test
+```
+
+The existing raw CUDA/Vulkan smoke is useful for device availability, but its
+single 1080p output is not break-even evidence because it has no three-row
+receipt:
+
+```sh
+SIMPLE_BIN=bin/simple sh scripts/check/check-local-gpu-perf-summary.shs
+```
+
+The native ProcessingIR benchmark owner must write the structured receipt at:
+
+```text
+build/simpleos_gpu_host/offload_break_even/evidence.env
+```
+
+For retained or alternate evidence, the consumer accepts an explicit path:
+
+```sh
+SIMPLE_GPU_OFFLOAD_BREAK_EVEN_RECEIPT=build/<run>/evidence.env \
+  bin/simple test \
+  test/03_system/app/simpleos_gpu_host/processing_ir_offload_break_even_spec.spl \
+  --mode=interpreter --no-daemon
+```
+
+The current repository has no dedicated producer that emits this structured
+multi-batch receipt. Until one exists, the Linux spec fails at the missing
+receipt gate; the raw helper output must not be promoted into a pass.
+
+## Measurement Rules
+
+- Use a native ProcessingIR path and record the selected backend (`cuda`,
+  `vulkan`, or `cuda+vulkan`); do not use a CPU mirror as device evidence.
+- Run at least 3 warmup samples and at least 5 measured samples per batch.
+- Discard warmups. Report the median of the measured samples for every field.
+- Use a monotonic microsecond clock for CPU, device, transfer, and total time.
+- Use identical input and output work for the CPU baseline and GPU path.
+- Keep batch sizes strictly increasing and choose sizes that bracket a measured
+  transition from slower to faster GPU round-trip.
+- `total_us` is required to equal `device_us + transfer_us` exactly for every
+  row. `transfer_us` covers submission synchronization and all host/device
+  communication needed by the result.
+- The break-even batch is the smallest row whose measured `total_us` is less
+  than `cpu_us`. At least one smaller row must be non-faster and choose CPU.
+- A row with `total_us >= cpu_us` must report `decision=cpu`; it is not allowed
+  to claim a GPU win based only on device time.
+
+## Receipt Schema
+
+The file is newline-delimited `key=value` text. Required header fields:
+
+```text
+processing_ir_offload_status=pass
+processing_ir_offload_schema=processing-ir-offload-v1
+processing_ir_offload_execution=processing_ir
+processing_ir_offload_backend=cuda|vulkan|cuda+vulkan
+processing_ir_offload_aggregate=median
+processing_ir_offload_timing_unit=us
+processing_ir_offload_warmup_samples=<integer >= 3>
+processing_ir_offload_measured_samples=<integer >= 5>
+processing_ir_offload_row_count=<integer >= 3>
+processing_ir_offload_break_even_batch=<integer>
+processing_ir_offload_rss_source=procfs
+processing_ir_offload_cpu_rss_kb=<positive integer>
+processing_ir_offload_gpu_rss_kb=<positive integer>
+processing_ir_offload_peak_rss_kb=<positive integer>
+processing_ir_offload_communication_overhead_us=<non-negative integer>
+```
+
+For each zero-based row index from `0` through `row_count - 1`, emit:
+
+```text
+processing_ir_offload_row_N_batch=<positive integer>
+processing_ir_offload_row_N_cpu_us=<positive integer>
+processing_ir_offload_row_N_device_us=<positive integer>
+processing_ir_offload_row_N_transfer_us=<positive integer>
+processing_ir_offload_row_N_total_us=<positive integer>
+processing_ir_offload_row_N_decision=cpu|gpu
+```
+
+The consumer checks strictly increasing batch sizes, exact total accounting,
+CPU/GPU decision consistency, a slower row below the threshold, and a faster
+row at or above it. It does not impose an absolute speed target because GPU
+model, driver, power state, and memory topology vary by host.
+
+## Metrics and Acceptance
+
+Record both CPU and GPU process RSS in KB and the peak of the two. On Linux,
+`rss_source=procfs` means the values came from `/proc`, not a guessed constant.
+Record communication separately from device execution and include it in every
+row's `total_us`. Preserve the raw receipt and command stdout with the run.
+
+Acceptance is `pass` only when all of the following hold:
+
+1. The existing helper self-test exits zero.
+2. At least three measured batch rows exist with warmup and sample counts above.
+3. Every row satisfies `total_us = device_us + transfer_us`.
+4. The first GPU-faster row is the recorded break-even batch.
+5. At least one lower batch is non-faster and is assigned to CPU.
+6. RSS and communication fields are present and measured.
+
+## Ownership
+
+Linux owns the CUDA/Vulkan ProcessingIR producer, native receipt generation,
+and this system spec. Linux verification must run on the target host with its
+real driver and retain the receipt; CI without a device is a failure for this
+evidence lane, not a synthetic pass.
+
+macOS owns the postponed Metal live producer and host execution. It should
+reuse this schema with `processing_ir_offload_backend=metal` only after the
+Metal shader/queue/readback gate is live. macOS source/host contracts may be
+checked separately, but they do not satisfy the Linux CUDA/Vulkan measurement.

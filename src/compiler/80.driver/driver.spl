@@ -229,6 +229,13 @@ pub class CompilerDriver:
     me compile() -> CompileResult:
         val log = self.ctx.logger
 
+        # Standalone native CLI convergence bridge: CompileOptions crosses
+        # several aggregate boundaries before reaching this method, and the
+        # enum mode can be corrupted while text fields remain intact.
+        var compile_mode_text = self.ctx.options.mode.to_text()
+        if self.ctx.options.cli_mode_text != "":
+            compile_mode_text = self.ctx.options.cli_mode_text
+
         # Phase 1: Load source files
         log_phase("compile:start")
         log_phase("phase1:load_sources:start")
@@ -237,7 +244,7 @@ pub class CompilerDriver:
         if not load_ok:
             log_error("phase 1 FAILED")
             return CompileResult.ParseError(self.ctx.errors)
-        if self.ctx.options.mode == CompileMode.Aot:
+        if compile_mode_text == "aot":
             self.ctx.native_sources_fingerprint = driver_native_sources_fingerprint(self.ctx.sources)
         log_phase("phase1:load_sources:done n_sources={self.ctx.sources.len()}")
 
@@ -289,7 +296,7 @@ pub class CompilerDriver:
 
         # Check is analysis-only. Monomorphization mutates HIR but contributes
         # no diagnostics, so stop after the fatal phase-3 gates above.
-        if self.ctx.options.mode == CompileMode.Check:
+        if compile_mode_text == "check":
             log_debug("check mode")
             return CompileResult.Success(nil)
 
@@ -306,30 +313,24 @@ pub class CompilerDriver:
         # Phase 5: Mode-specific processing
         log_phase("phase5:mode_dispatch:start")
         log_debug("phase 5: mode-specific processing...")
-        match self.ctx.options.mode:
-            case CompileMode.Check:
-                log_debug("check mode")
-                return CompileResult.Success(nil)
-
-            case CompileMode.Sdn:
-                log_debug("sdn mode")
-                return self.process_sdn()
-
-            case CompileMode.Interpret:
-                log_debug("interpret mode")
-                return self.interpret()
-
-            case CompileMode.Jit:
-                log_debug("jit mode")
-                return self.jit_compile_and_run()
-
-            case CompileMode.Aot:
-                log_debug("aot mode")
-                return self.aot_compile()
-
-            case CompileMode.SmfExec:
-                log_debug("smf_exec mode — loading pre-compiled SMF")
-                return self.execute_smf()
+        if compile_mode_text == "check":
+            log_debug("check mode")
+            return CompileResult.Success(nil)
+        if compile_mode_text == "sdn":
+            log_debug("sdn mode")
+            return self.process_sdn()
+        if compile_mode_text == "interpret":
+            log_debug("interpret mode")
+            return self.interpret()
+        if compile_mode_text == "jit":
+            log_debug("jit mode")
+            return self.jit_compile_and_run()
+        if compile_mode_text == "aot":
+            log_debug("aot mode")
+            return self.aot_compile()
+        if compile_mode_text == "smf_exec":
+            log_debug("smf_exec mode — loading pre-compiled SMF")
+            return self.execute_smf()
 
         log_warn("no mode matched, falling through")
         CompileResult.Success(nil)

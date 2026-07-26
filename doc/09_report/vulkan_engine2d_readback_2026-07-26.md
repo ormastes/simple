@@ -52,15 +52,20 @@ Dict-dispatch source contract passes 3/3: nonstatic Dict builtins now validate
 the lowered receiver even when stale resolution names an unrelated `.has`, and
 the first-stage HIR membership checks use the direct runtime owner.
 
-Three bounded retained-cache builds completed (6 compiled/729 cached, 3/732,
-4/731). The resulting driver removes the `DiContainer.has` segfault and reaches
-phase 3. With both oracle modules supplied it completes analysis, but its
-`CompileMode` value is corrupted before phase dispatch: it logs `no mode
-matched, falling through`, returns success, and emits no binary. Post-return
-mode reassignment and discriminant dispatch did not change the behavior and
-were removed. The native same-name regression is present but therefore remains
-unexecuted. No additional hardware run was made, and readback/checksum/parity
-pass is not claimed.
+The first three bounded retained-cache builds completed at 6 compiled/729
+cached, 3/732, and 4/731. A second bounded session completed at 5/730, 4/731,
+and 5/730. Canonical text mode transport now survives every aggregate copy and
+the driver enters AOT instead of falsely succeeding without output. The next
+crash is in `optimizationpipeline_for_backend`, called by
+`optimize_module_for_backend` and `CompilerDriver.optimize_mir`; no oracle
+binary was emitted. The executable same-name and CLI-mode regressions are
+present but remain unexecuted behind that optimizer aggregate-path defect.
+
+macOS Metal live evidence is explicitly postponed to a prepared host by
+`gpu_backend_mac_host_remaining.md`; its host-gated system spec requires real
+source markers and native receipt fields and does not claim Linux evidence. No
+additional hardware run was made, and readback/checksum/parity pass is not
+claimed.
 
 See
 `doc/08_tracking/bug/native_engine2d_readback_cross_module_field_layout_2026-07-26.md`.
