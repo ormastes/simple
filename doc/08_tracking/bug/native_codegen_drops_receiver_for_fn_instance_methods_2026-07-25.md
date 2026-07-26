@@ -1,9 +1,9 @@
 # Native codegen drops the receiver for non-`me` (`fn`) instance methods — SIGSEGV in `native-build --entry-closure`
 
 - **ID:** native_codegen_drops_receiver_for_fn_instance_methods_2026-07-25
-- **Status:** OPEN (root-caused with disassembly, NOT fixed)
-- **Severity:** high — silent ABI mismatch; any natively-compiled caller of a
-  `fn`-declared instance method passes arguments into the `self` slot
+- **Status:** SOURCE FIXED; native self-host execution pending
+- **Severity:** high — the defective compiler silently passed explicit
+  arguments into the `self` slot for `fn`-declared instance methods
 - **Found via:** `native-build` crashing on a showcase entry (showcase was a red
   herring — see minimal repro)
 
@@ -65,36 +65,39 @@ string.
 | `HashSet.contains` (`hashset.spl:112`) | `fn` | 1 | **no** |
 | `HashMap.contains_key` (`hashmap.spl:99`) | `fn` | 1 | **no** |
 
-`src/compiler/50.mir/_MirLowering/function_lowering.spl:194` gates the receiver on
-`fn_.is_mutable` (`is_me_receiver`) — consistent with the observed divergence.
+The historical lowering gated receiver emission on mutability. In current
+source, `is_me_receiver` at
+`src/compiler/50.mir/_MirLowering/function_lowering.spl:194` only controls
+value-copy semantics; both method-call routes unconditionally prepend the
+receiver operand.
 
 Pre-bridge crash sites in the CLI were the `resolve_cache.contains_key` calls;
 the `discovered.contains` calls carried the same latent receiver bug.
 
 ## Scope
 
-`bin/simple` → `bin/release/x86_64-unknown-linux-gnu/simple` is **Rust-built**, so
-it runs this path interpreted and is **unaffected**. Only natively-compiled
-self-hosted binaries are miscompiled. This is why the defect is invisible in
-normal tooling use and only appears once a self-hosted CLI is built and used to
-`native-build`.
+Native artifacts produced by the defective compiler were miscompiled. The
+interpreter path did not exercise this native calling convention, which is why
+the defect was invisible there.
 
 **Not** related to `bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md`:
 the crash is in the CLI's import-closure BFS, before any parsing (that doc has
 zero hits for `contains_key|entry_closure|hashmap|HashMap`).
 
-## Fix
+## Source repair and pending execution
 
-**Correct fix:** pass the receiver for **all** instance methods, not just `me`
-ones. This changes the calling convention for every non-`me` method in the
-codebase — caller and callee must flip **atomically**, or every native binary
-breaks. It needs its own bootstrap-verified change, not a patch tucked inside
-unrelated work.
+`lower_receiver_and_args` and the pre-lowered writeback route
+`build_args_from_receiver` both explicitly push `mir_operand_copy(receiver_local)`
+before explicit arguments. The existing source regression
+`test/01_unit/compiler/backend/cranelift_aggregate_runtime_abi_spec.spl` pins
+both routes and the cross-module `fn` fixture: zero-argument `read()` and
+one-argument `matches(...)`. `scripts/check/check-native-immutable-fn-receiver.shs`
+is the native execution receipt and forbids the Rust seed.
 
 **Known stopgap, deliberately NOT applied:** changing `fn contains_key` → `me
 contains_key` (`hashmap.spl:99`, `hashset.spl:112`) would unblock the immediate
 crash. That is a workaround masking a general ABI defect — every other `fn`
-instance method in the codebase stays miscompiled and will fail the same way.
+instance method would have remained miscompiled under the defective compiler.
 Recorded here rather than normalized, per the project rule against silently
 absorbing a broken form.
 
@@ -104,9 +107,9 @@ discovery and resolution tables. This keeps hashed lookup while avoiding the
 seed-generated `HashSet.contains` and `HashMap.contains_key` calls in this
 bootstrap-only walker. A rebuilt generation-1 CLI traversed 908 closure sources
 and entered generation-2 parsing instead of crashing. The full build remains
-blocked by the separately tracked self-host parse performance problem. This is
-not the ABI fix: custom non-`me` instance methods remain affected, so this bug
-stays OPEN until caller and callee ABI change atomically.
+blocked by the separately tracked self-host parse performance problem. A
+fresh admitted pure-Simple executable must run the existing native receipt
+before this can be closed; the Rust seed is not valid evidence.
 
 The walker retains an explicit `HashMap` import because built-in `Dict.entries`
 currently lowers to that implementation. Removing the import omitted its object
@@ -115,5 +118,6 @@ source contract protects this non-obvious closure root.
 
 ## Impact on current work
 
-The showcase-matrix "compiled lane" does **not** need this fixed first: use the
-Rust-built `bin/simple` for `native-build` instead of a session-built native CLI.
+The showcase-matrix compiled lane requires an admitted pure-Simple executable.
+Until that executable runs the native receipt, execution evidence remains
+pending.

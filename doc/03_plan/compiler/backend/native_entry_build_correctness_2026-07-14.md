@@ -1018,8 +1018,11 @@ the shared binary — deploys require explicit user go-ahead).
   traversed 908 closure sources and entered parsing rather than crashing.
   Generation-2 parsing remained too slow (roughly 10–50 seconds per early CLI
   file), so the bounded run was stopped; full generation-2 link, staged F64,
-  and C9 remain uncredited. The generic non-`me` receiver ABI bug remains OPEN;
-  this change is only a bootstrap bridge. Next: fix the self-host parse
+  and C9 remain uncredited. The generic non-`me` receiver ABI is source-fixed:
+  both MIR method-call routes prepend the receiver and the existing cross-module
+  `fn` source contract covers zero and explicit arguments. Native self-host
+  execution remains pending an admitted pure-Simple executable; this change is
+  only a bootstrap bridge. Next: fix the self-host parse
   performance blocker, resume the fresh generation-2 build, then run staged
   F64 once and C9 only after F64 exits 42.
 
