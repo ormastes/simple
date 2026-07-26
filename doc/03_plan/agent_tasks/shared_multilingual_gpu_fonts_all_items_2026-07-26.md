@@ -21,7 +21,7 @@ atlas, cache, process/env facade, or device-success path.
 | Area | Current evidence | Required next state |
 |---|---|---|
 | GSUB/GPOS | reviewed completion is integrated on the isolated branch; superseded stage1 duplicates were not imported | execute the frozen shaping/parser specs on the admitted CLI |
-| Bootstrap | deployed/runtime candidates have crashed or failed admission; no fresh Stage 4 PASS | fresh admitted full CLI plus essential-tools smoke |
+| Bootstrap | at commit `033c0f9e6ae`, Stage 2 `63523bc1...` and Stage 3 `efe45572...` passed sanity; the sole Stage 4 retry parsed `SyscallId`, then failed on `ot_layout_gpos_data.spl:139` unexpected `Indent`; full CLI absent | verify the minimal block-form fix, then permit the next gated retry |
 | Focused tests | implementation and static coverage exist; prior runner exited before examples | calibrated, nonzero, authoritative runtime results |
 | Native GPU | source/emission and partial backend evidence exist | one real 2D+3D promoted device route and current perf record |
 | Surfaces | source contracts and retained artifacts exist | live canonical Web/GUI/WM/SimpleOS evidence and honest blocked rows |
@@ -57,14 +57,14 @@ atlas, cache, process/env facade, or device-success path.
 
 | TODO | Status | Implementation owner | Acceptance evidence |
 |---|---|---|---|
-| `ENUM-DISC-001` | FAIL — implementation in progress; evidence not admitted | compiler/bootstrap owners, then lane A for bootstrap only | Add full explicit discriminant propagation through parser, flat AST, bridge/typed `Variant`, and HIR/MIR lowering. Required focused coverage includes parser, bridge, and lowering specs; it must prove a literal non-sequential enum, the actual `SyscallId` source, exact `Exit=0`, `Mmap=10`, `IpcSend=20`, `Rename=44`, and implicit-after-explicit behavior. Concurrent source/test changes are work in progress, not current PASS evidence. |
+| `GPOS-DATA-BLOCK-001` | FAIL — minimal block-form fix pending verification | shaping owner, then lane A for bootstrap only | Retained commit `033c0f9e6ae`: Stage 2 SHA `63523bc1f33c4705512279d126b1083b75296982699c5d51ca8d65b586b5b0ea` and Stage 3 SHA `efe455723c76643c327312292769262f0a9326d91d424773e11d45611742103b` passed sanity. The sole Stage 4 retry proves the enum fix reached the CLI closure because `SyscallId` parsed successfully; its first error is `src/std/skia/feature/shaper/ot_layout_gpos_data.spl:139:1: unexpected token in expression: Indent`. Verify the minimal block-form correction before handing the next retry to lane A. |
 
-The bounded order is: focused parser/HIR/MIR tests once; one
+The current Stage 4 attempt exited 1 and produced no full CLI. The bounded
+order is: verify the minimal block-form fix once; permit the next
 cache-preserving Stage 4 retry using the existing full-bootstrap output tree;
-and, only after exit 0, immutable CLI/core-C hashes, essential-tools smoke, and
-deliberate-red/empty-runner admission. Focused font execution follows
-admission. Owner docgen follows passing runtime specs; lane F only audits it.
-No generated manual is admitted before the CLI.
+and, only after exit 0, publish immutable CLI/core-C hashes and run
+essential-tools plus deliberate-red/empty-runner admission. Focused font
+execution and owner docgen remain blocked until admission.
 
 ## Required handoff format
 

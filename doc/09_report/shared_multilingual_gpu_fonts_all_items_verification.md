@@ -12,9 +12,9 @@ Final done-mark owner: highest-capability `/root`
 This is the current all-lane audit, not a runtime or native PASS. Static source
 and executable coverage is broad, but no fresh pure-Simple full CLI has been
 admitted. The fresh continuation admitted bootstrap Stage 2 and Stage 3 for
-stage progression, cleared the prior GPOS parse blocker, then failed Stage 4
-on an explicit syscall enum discriminant. Those stage compilers are not a full
-font-test CLI.
+stage progression, parsed the prior `SyscallId` enum blocker successfully,
+then failed Stage 4 on a GPOS-data block-form parse error. Those stage
+compilers are not a full font-test CLI.
 The retained history and resume contract are in
 `doc/08_tracking/bug/shared_font_stage4_stale_compiler_backfill_2026-07-26.md`.
 Consequently runner calibration, focused execution, zero-stub docgen, native
@@ -25,37 +25,30 @@ promotion, QEMU pixels, and performance remain unaccepted.
 - Stage 2:
   `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap/stage2/x86_64-unknown-linux-gnu/simple`,
   SHA-256
-  `1c1631f7b99a0d38205174a0ce50b68d2be194f38b28f8e6c11fc450bdc9dc96`.
+  `63523bc1f33c4705512279d126b1083b75296982699c5d51ca8d65b586b5b0ea`.
 - Stage 3:
   `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap/stage3/x86_64-unknown-linux-gnu/simple`,
   SHA-256
-  `2ab52126d893ddd3706d24818e83a9207bcec97e9f135ce6b2e401097e368be7`.
-- Stage 4 is absent. The documented full-bootstrap command exited 1; retained
+  `efe455723c76643c327312292769262f0a9326d91d424773e11d45611742103b`.
+  Both stages passed their sanity gates at commit `033c0f9e6ae`.
+- Stage 4/full CLI is absent. The sole retry exited 1; retained
   diagnostics are in
   `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`.
-  Retry 3 cleared the font GPOS source, retaining
-  `phase2:parse:file:done src/std/skia/feature/shaper/ot_layout_gpos.spl`.
-  The first real failure is
-  `src/os/kernel/types/syscall_types.spl:8:10: expected enum variant name, got =`
-  (`kind 100`, text `=`), followed by line 8:12 `got IntLit` for `Exit = 0`.
-- Root cause: the pure enum parser accepts a variant name and optional payload
-  but not `TOK_ASSIGN` plus an explicit discriminant. A token skip is invalid:
-  the flat enum record and typed `Variant` currently preserve names but no
-  numeric value, so syscall ABI discriminants would be lost.
+  The log records
+  `phase2:parse:file:done src/os/kernel/types/syscall_types.spl`, proving the
+  enum blocker cleared. Its first error is
+  `src/std/skia/feature/shaper/ot_layout_gpos_data.spl:139:1: unexpected token in expression: Indent`.
 
 No Stage 4 CLI/core-C identity was published and no global runner calibration
-ran. The hard three-retry cap is exhausted. A fresh continuation requires
-end-to-end explicit discriminant preservation through pure flat AST,
-bridge/typed `Variant`, and downstream enum lowering, with a focused
-non-sequential `SyscallId` regression; an architecturally reviewed exclusion
-of the OS module from the CLI closure is the only alternative. After that
-prerequisite, rerun the documented command with the same
+ran. The minimal GPOS-data block-form fix is pending verification; the next
+retry remains gated until that verification passes. Then rerun the documented
+command with the same
 `--output=build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap`
 and preserve the Stage 2/3/native caches.
 
 | Open TODO | Status | Required evidence before retry | Bounded continuation |
 |---|---|---|---|
-| `ENUM-DISC-001` | FAIL — no implementation/test evidence | Parser acceptance of `TOK_ASSIGN`; discriminant storage in flat AST and typed `Variant`; bridge plus HIR/MIR preservation; focused tests proving a non-sequential enum, actual `SyscallId`, exact `Exit=0`, `Mmap=10`, `IpcSend=20`, `Rename=44`, and implicit-after-explicit behavior | Run the focused parser/HIR/MIR tests once, then exactly one cache-preserving Stage 4 retry. Only exit 0 may unlock immutable CLI/core-C identity, essential-tools smoke, and deliberate-red/empty-runner gates. Font commands and docgen stay blocked until admission. |
+| `GPOS-DATA-BLOCK-001` | FAIL — minimal block-form fix pending verification | Verify the correction for the line 139 unexpected `Indent`; retain proof that `SyscallId` parses and Stage 2/3 sanity still passes | Only after fix verification may the next cache-preserving Stage 4 retry run. Only exit 0 may unlock immutable CLI/core-C identity, essential-tools smoke, and deliberate-red/empty-runner gates. Font commands and docgen stay blocked until admission. |
 
 ## Requirement matrix
 

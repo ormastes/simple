@@ -1,7 +1,7 @@
-# Shared-font Stage 4 blocked by stale compiler-backfill authority
+# Shared-font Stage 4 bootstrap admission blocker
 
 - Date: 2026-07-26
-- Status: BLOCKED after the final three-retry continuation
+- Status: BLOCKED after the sole current Stage 4 retry
 - Scope: pure-Simple Stage 4 admission and essential-tools runner calibration
 
 The existing deployed Linux CLI is not admissible: SHA-256
@@ -65,63 +65,51 @@ coverage in
 `test/01_unit/compiler/bootstrap/pub_mod_parser_spec.spl`. The retained hosted
 probe prints `pub_mod_parser_probe=pass`.
 
-After the shaping owner corrected the canonical multiline GPOS expression, the
-final retry 3 produced and admitted:
+At commit `033c0f9e6ae`, the current continuation produced and admitted for
+stage progression:
 
 - Stage 2:
   `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap/stage2/x86_64-unknown-linux-gnu/simple`,
   SHA-256
-  `1c1631f7b99a0d38205174a0ce50b68d2be194f38b28f8e6c11fc450bdc9dc96`
+  `63523bc1f33c4705512279d126b1083b75296982699c5d51ca8d65b586b5b0ea`
 - Stage 3:
   `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap/stage3/x86_64-unknown-linux-gnu/simple`,
   SHA-256
-  `2ab52126d893ddd3706d24818e83a9207bcec97e9f135ce6b2e401097e368be7`
+  `efe455723c76643c327312292769262f0a9326d91d424773e11d45611742103b`
 
-The retained Stage 4 log proves the prior GPOS blocker cleared:
-
-```text
-phase2:parse:file:done src/std/skia/feature/shaper/ot_layout_gpos.spl heap_registry=7739886
-```
-
-Stage 4 then first failed on an explicit syscall enum value:
+Both Stage 2 and Stage 3 passed their recorded sanity gates. The retained
+Stage 4 log proves the explicit-enum blocker cleared:
 
 ```text
-src/os/kernel/types/syscall_types.spl:8:10: expected enum variant name, got =
-[parser_error_ctx] kind 100 text '='
-src/os/kernel/types/syscall_types.spl:8:12: expected enum variant name, got IntLit
-[parser_error_ctx] kind 1 text '0'
+phase2:parse:file:done src/os/kernel/types/syscall_types.spl
 ```
 
-The source is `Exit = 0`. The pure enum parser at
-`src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl` consumes a
-variant identifier, optionally parses only a payload, then records the name.
-Unlike the Rust parser, it never accepts `TOK_ASSIGN` plus a discriminant.
-Merely skipping `= N` is invalid because the flat `decl_enum_def` and typed
-`Variant` carry no discriminant, which would silently lose numeric syscall ABI
-values.
+The sole Stage 4 retry exited 1. Its first error is:
 
-Retry 3 exited 1 at `stage4-native-build`. The 302125-byte terminal log is:
+```text
+src/std/skia/feature/shaper/ot_layout_gpos_data.spl:139:1:
+unexpected token in expression: Indent
+```
+
+The retained terminal log is:
 
 `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`
 
-The hard retry cap is exhausted; there is no retry 4 in this continuation.
 No Stage 4 CLI/core-C admission artifact exists, so essential-tools,
 deliberate-red/empty calibration, docgen, and font execution remain blocked.
 
-Before a fresh continuation, implement end-to-end explicit discriminant
-preservation in the pure flat AST, bridge/typed `Variant`, and downstream enum
-lowering, with a focused non-sequential `SyscallId` regression. The only
-alternative is an architecturally reviewed exclusion of this OS module from
-the CLI closure. Then rerun the exact command above with the same output path,
-preserving Stage 2/3 and native-cache trees.
+The shaping owner has a minimal block-form correction pending verification.
+The next bootstrap retry remains gated until that verification passes. Then
+rerun the exact command below with the same output path, preserving the
+available authority and cache trees.
 
 ## Open TODO and bounded continuation
 
 | TODO | Status | Required change and evidence |
 |---|---|---|
-| `ENUM-DISC-001` | FAIL — implementation and tests outstanding | The compiler/bootstrap owner must accept `TOK_ASSIGN`, store the discriminant in the flat AST, propagate it through the bridge/typed `Variant` and HIR/MIR lowering, and prove exact values with focused parser/bridge/lowering tests. Evidence must include a literal non-sequential enum, parsing the actual `src/os/kernel/types/syscall_types.spl`, `Exit=0`, `Mmap=10`, `IpcSend=20`, `Rename=44`, and implicit-after-explicit behavior. |
+| `GPOS-DATA-BLOCK-001` | FAIL — minimal block-form fix pending verification | Verify that the correction removes the line 139 unexpected `Indent` without weakening the GPOS data contract. Retain Stage 2/3 sanity and successful `SyscallId` parsing as prerequisites. |
 
-After those focused tests pass once, lane A may run exactly one
+After that focused verification passes once, lane A may run the next
 cache-preserving Stage 4 retry with the command below. Only exit 0 permits
 publishing immutable CLI/core-C paths and SHA-256 values, then running
 essential-tools and deliberate-red/empty-runner admission. Focused font tests
