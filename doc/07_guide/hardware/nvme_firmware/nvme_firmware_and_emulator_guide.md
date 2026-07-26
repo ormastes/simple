@@ -275,3 +275,14 @@ for full-width counter stress.
   `doc/03_plan/hardware/nvme_fw_emulated_nand_plan.md`.
 - rv32 native-build blocker: `doc/08_tracking/bug/native_build_rv32_baremetal_silent_255_2026-06-30.md`.
 - Newtype + Lean caveats: `doc/08_tracking/bug/newtype_run_path_and_enforcement_gaps_2026-06-29.md`.
+
+## Running the fw on the Simple rv32 FPGA core
+
+The minimal NVMe firmware PASSES on the Simple-generated rv32 soft-core in GHDL
+(`build/ghdl/rv32_nvme_verify/verify.log`); it was the difftest workload that
+found and fixed three real core RTL bugs. Launch procedure (GHDL rehearsal →
+Vivado bitstream → KV260 board via JTAG, incl. the mandatory `GARBAGE_FILL=1`
+run and `.bss`-zero step): see
+`doc/07_guide/hardware/fpga/simpleos_on_simple_riscv_fpga.md` §5–6.5 — the fw
+uses the same load-and-release flow as SimpleOS (tiny-BRAM SoC preferred; the
+fw is small). Silicon lane in progress 2026-07-26.

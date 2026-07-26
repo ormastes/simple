@@ -66,10 +66,23 @@ placeholder stub today)**.
   `openocd_kv260_bscan.cfg`, `check_kv260_jtag_debug.shs` verify/soak). THE
   debugging guide (both paths + troubleshooting):
   `doc/07_guide/hardware/fpga/simple_riscv_jtag_debugging.md`.
-- **Synthesizable RTL** `examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd`
-  is the ONLY real synthesizable CPU (rv32, no MMU, reference/oracle). The
-  `fpga_linux` bundle generator (`src/lib/hardware/fpga_linux/riscv_fpga_linux.spl`)
+- **Synthesizable RTL** `examples/09_embedded/fpga_riscv/rtl/` — the real,
+  SILICON-PROVEN cores (2026-07-26): `rv32_exec_core_flat.vhd` (GHDL lane),
+  `rv32_exec_core_axi.vhd` + `rv32_axi4_mem_adapter.vhd` +
+  `soc_top_rv32_k26_ddr.vhd` (KV260 PS-DDR4, **SimpleOS TEST PASSED on
+  silicon**), `soc_top_rv32_tiny_bram.vhd`/`rv32_bram_soc.vhd` (BRAM-only,
+  **TEST PASSED on silicon**, no FSBL), `rv64_exec_core_{flat,axi}.vhd` +
+  `soc_top_rv64_k26_ddr.vhd` (GHDL green; silicon bring-up in progress). The
+  legacy `rv32_exec_core.vhd` is the 64 KB reference/oracle. The `fpga_linux`
+  bundle generator (`src/lib/hardware/fpga_linux/riscv_fpga_linux.spl`) still
   emits `GENERATED_RTL_NOT_IMPLEMENTED` placeholders — NOT a working core.
+  **Launch guide (SimpleOS + NVMe fw on the FPGA cores):**
+  `doc/07_guide/hardware/fpga/simpleos_on_simple_riscv_fpga.md` §5–6 — GHDL
+  rehearsal (ALWAYS also `GARBAGE_FILL=1`; sim RAM zeroes for free, real DDR is
+  garbage — un-zeroed `.bss` was THE silicon killer), then bitstream
+  (`build_k26_rv32_ddr_bitstream.shs` / `build_rv32_tiny_bram_bitstream.shs`),
+  then `bash bringup_kv260_rv32_ddr.shs` (full psu_init BEFORE `fpga -file`,
+  `.bss` zeroing with PRE/POST readback, JTAG via hw_server only).
 
 ## Sanity gates (probe = capability)
 
@@ -94,11 +107,12 @@ placeholder stub today)**.
 - **rv64 product:** `core64_imac_product_entry` owns Sv39/PMP and emits the CPU
   bus; `_SocVhdlGen` owns the same PS-DDR board path. The old handwritten RV64
   synthesis entry is no longer the product path.
-- **Either on FPGA:** `build_k26_rv32.shs` and `build_k26_rv64.shs` are thin
-  XLEN selectors for `build_k26_vexriscv.shs`. Neither architecture is
-  board-qualified until its Simple-emitted core passes GHDL, Vivado, PS-DDR
-  load, and DUT-origin bidirectional login/`ls` capture. The connected KV260
-  still needs an external 3.3 V PMOD UART adapter for the PL console.
+- **Either on FPGA:** the handwritten-RTL lane IS board-qualified for rv32 as
+  of 2026-07-26 (SimpleOS `TEST PASSED` on KV260 silicon, DDR + BRAM-only; NVMe
+  fw PASS in GHDL, silicon lane in progress) — but the *Simple-emitted*
+  (`_SocVhdlGen`) core path remains pending Stage 4 for both XLENs. The PL UART
+  is still not host-routed; markers are read via JTAG obs regs / BSCANE2 tunnel,
+  or wire a 3.3 V PMOD UART.
 
 ## Landmines
 
