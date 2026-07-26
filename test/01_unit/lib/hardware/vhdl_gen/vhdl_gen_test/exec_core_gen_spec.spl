@@ -1,0 +1,106 @@
+# @cover src/lib/hardware/vhdl_gen/exec_core_gen.spl 80%
+# @req REQ-VHDL-GEN-001
+"""
+# Exec-Core VHDL Generator (rv32/rv64 silicon lanes)
+
+**Category:** Tooling
+**Status:** Implemented
+**Design:** doc/01_research/hardware/riscv/python_rtl_generation_survey_2026-07-26.md
+
+## Overview
+
+The structured VHDL generator in `src/lib/hardware/vhdl_gen/` emits BOTH
+silicon-lane exec cores byte-identical to the proven goldens in
+`examples/09_embedded/fpga_riscv/rtl/`, from one shared template source
+parameterized by XlenConfig. Entity/ports/generics/constants, memory-init
+impure functions, the top-level instruction-decode case arms (opcode table),
+CSR read-mux cases, and all dbg_* taps (AOP debug aspect) are structurally
+generated; irreducible per-core paragraphs are named literal sections.
+
+## Key Concepts
+
+| Concept | Description |
+|---------|-------------|
+| Golden match | Generated text must equal the proven .vhd byte-for-byte |
+| Debug aspect | dbg_* tap emission is advice at named join points, default ON |
+| Determinism | Arrays only, no Dict iteration; runs are byte-identical |
+"""
+
+use std.spec
+use lib.hardware.riscv_common.xlen.XlenConfig
+use lib.hardware.vhdl_gen.exec_core_gen.{generate_exec_core, generate_rv32_exec_core, generate_rv64_exec_core}
+
+extern fn rt_file_read_text(path: text) -> text
+
+val RV32_GOLDEN_PATH = "examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd"
+val RV64_GOLDEN_PATH = "examples/09_embedded/fpga_riscv/rtl/rv64_exec_core.vhd"
+
+# ============================================================================
+# Step Helpers (assert through returned values — no module-global mutation)
+# ============================================================================
+
+@step "Generate the rv32 core from the shared template"
+fn generate_rv32_text() -> text:
+    generate_rv32_exec_core("")
+
+@step "Generate the rv64 core from the shared template"
+fn generate_rv64_text() -> text:
+    generate_rv64_exec_core("")
+
+@step "Read a golden core from examples"
+fn read_golden(path: text) -> text:
+    rt_file_read_text(path)
+
+@step "Then the generated text matches the golden byte-for-byte"
+fn Then_matches_golden(generated: text, golden: text):
+    expect(generated.len()).to_equal(golden.len())
+    assert_true(generated == golden)
+
+# ============================================================================
+# Primary Scenarios
+# ============================================================================
+# @manual_section: Silicon-Lane Core Generation
+
+describe "Exec-core VHDL generator":
+    it "emits rv32_exec_core byte-identical to the golden":
+        val generated = generate_rv32_text()
+        val golden = read_golden(RV32_GOLDEN_PATH)
+        Then_matches_golden(generated, golden)
+
+    it "emits rv64_exec_core byte-identical to the golden":
+        val generated = generate_rv64_text()
+        val golden = read_golden(RV64_GOLDEN_PATH)
+        Then_matches_golden(generated, golden)
+
+    it "drops dbg ports when the debug aspect is off":
+        val off32 = generate_exec_core(XlenConfig.rv32(), "", false)
+        val off64 = generate_exec_core(XlenConfig.rv64(), "", false)
+        assert_false(off32.contains("dbg_reg_addr"))
+        assert_false(off32.contains("debug_uart_valid : out"))
+        assert_false(off64.contains("dbg_reg_addr"))
+        # aspect ON restores the taps
+        val on32 = generate_exec_core(XlenConfig.rv32(), "", true)
+        assert_true(on32.contains("dbg_reg_addr : in std_logic_vector(4 downto 0) := (others => '0');"))
+
+    it "is deterministic across repeated generation":
+        val a32 = generate_rv32_text()
+        val b32 = generate_rv32_text()
+        val a64 = generate_rv64_text()
+        val b64 = generate_rv64_text()
+        assert_true(a32 == b32)
+        assert_true(a64 == b64)
+
+# ============================================================================
+# Edge Cases
+# ============================================================================
+
+# @manual-file: folded
+describe "Exec-core VHDL generator edge cases":
+    # @manual: folded
+    it "applies the optional .mem path prefix to memory-init functions":
+        val prefixed = generate_exec_core(XlenConfig.rv32(), "/tmp/fw/", true)
+        assert_true(prefixed.contains("is \"/tmp/fw/rv32_payload.mem\";"))
+        assert_true(prefixed.contains("is \"/tmp/fw/rv32_fat32.mem\";"))
+        # default stays the golden's relative form
+        val plain = generate_rv32_text()
+        assert_true(plain.contains("is \"rv32_payload.mem\";"))
