@@ -68,17 +68,47 @@ same input succeeded six times and hung the seventh.
 | 7 | Facade mutex deadlock | `_font_mutex_acquire` skips lock/unlock entirely when `_registered_selected_fonts_only`; and the filed defect for those locks faults rather than hangs |
 | 8 | Window ordering / `visible_windows_by_layer` | returned `layer_windows=3` and completed |
 
-## Remaining suspects (inside `resolve_font_metrics_with_language`)
+## Precise failure point
 
-Both loops there LOOK bounded, which is why they are suspects — their bounds
-depend on values this lane is known to corrupt:
+Caller-side receipts (rerun49/50) pin it to a single call:
+
+```
+[wm-text] at=begin id=taskbar-tray-label-clock value_len=5
+[wm-text] at=candidate
+[wm-text] at=resolve family=Noto Sans Mono      <- last line, forever
+```
+
+Counts across a whole session: **begin=76, resolve=76, resolved=75.** All 76
+calls use the same family. So the 76th `resolve_font_metrics_with_language`
+never returns; 75 identical-shaped calls before it did. The failing one happens
+to be the tray clock label only because that is the 76th text drawn.
+
+## Remaining suspects (inside `resolve_font_metrics_with_language`)
 
 1. `_resolved_font_metric_cached`'s scan is bounded by a **module-global
    array's `.len()`**, and array-typed module globals are a documented broken
-   channel here.
-2. `GlyphCache.insert`'s eviction loop exits only if `me` field mutations
-   (`self.entries` shrinking, `self.payload_bytes` dropping) actually commit —
-   the copy-commit landmine, hit twice elsewhere in this same campaign.
+   channel here. (Weakened: the one watchdog reading that length reported
+   `keys=0 values=0`, i.e. an empty array and a trivial scan — see side finding.)
+2. `renderer.measure_text_advances(content, font_size)` and the glyph
+   rasterization/atlas path beneath it. This is now the leading suspect: it is
+   the only remaining unmeasured heavy step, it owns the state that accumulates
+   across calls (glyph cache, atlas — `FontRenderer._reset_font_atlas` was seen
+   allocating 1M elements twice), and it is where the separately filed
+   `font_renderer_glyph_loop_heap_corruption_segv_2026-07-20.md` also lives.
+
+### ELIMINATED: `GlyphCache.insert` eviction loop (was suspect 2)
+
+The old loop used `self.entries`/`self.payload_bytes` as both its bound and its
+mutation target, so it terminated only if those method-receiver writes
+committed — a perfect fit for the copy-commit landmine, and the call count (76)
+lands exactly where ~75 labels first fill `max_entries=512` and make the loop
+run at all. It was rewritten to count on locals and apply one bulk slice
+(6b7451f319a), making it structurally unable to spin.
+
+**The hang did not move: still begin=76, resolved=75, same call.** So this loop
+was never the cause. The rewrite is kept on its own merits — it removes an
+unbounded loop and an O(N^2) slice path from a kernel hot loop, and is verified
+by `probes/dg_glyph_cache_evict.spl`.
 
 ## CRITICAL: probing inside font_renderer.spl REGRESSES the lane
 

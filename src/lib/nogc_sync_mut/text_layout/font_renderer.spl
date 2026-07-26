@@ -1800,7 +1800,15 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
         _resolve_selected_shaped_glyph_run(selected_candidate.?, content, font_size, normalized_language)
     else:
         _resolved_font_empty_shaped()
+    # Phase receipts for the WM pointer-release hang: the 76th call here never
+    # returns while 75 identical-shaped calls did. Placed at phase boundaries
+    # only. NOTE: a previous attempt to probe INSIDE _resolved_font_metric_cached
+    # regressed the whole lane (rerun48 lost every PPM to a re-broken font
+    # execution plan) because this region is layout-sensitive — if that recurs,
+    # revert these immediately rather than reading the regression as new data.
+    print("[rfm] at=default-font family={resolved_family}")
     val default_font = _browser_default_for_family_cached(resolved_family)
+    print("[rfm] at=renderer-bound")
     var renderer = default_font.0
     val renderer_from_cache = default_font.1
     if not renderer.has_sffi_ttf():
@@ -1812,12 +1820,16 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
         )
     else:
         ""
+    print("[rfm] at=cache-lookup cacheable={cacheable}")
     if cacheable:
         if val cached = _resolved_font_metric_cached(cache_key):
             if not renderer_from_cache:
                 renderer.clear_ttf()
+            print("[rfm] at=cache-hit")
             return cached
+    print("[rfm] at=measure shaped_valid={shaped.valid}")
     val advances = if shaped.valid: shaped.advances else: renderer.measure_text_advances(content, font_size)
+    print("[rfm] at=measured advances={advances.len()}")
     var width = 0
     if shaped.valid:
         width = shaped.width
