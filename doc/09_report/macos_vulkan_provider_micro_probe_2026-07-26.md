@@ -62,3 +62,9 @@ Not produced because the native probe never launched:
 No full-live Vulkan command, window, framebuffer, or input evidence was
 attempted. The three-cycle micro verification limit was reached, so this
 report does not claim provider admission or device enumeration.
+
+The subsequent manifest-admission repair was static only. The checker now
+selects the manifest-recorded compiler/provider through the shared canonical
+admission contract, requires current repository/source provenance and exact
+hashes, and rejects seed/debug artifacts and caller path overrides. It did not
+run a fourth native build or reopen the exhausted three-cycle limit.

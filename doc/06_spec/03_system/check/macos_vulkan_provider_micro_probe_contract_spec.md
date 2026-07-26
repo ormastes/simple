@@ -21,21 +21,32 @@ It must not reference Engine2D, VulkanBackend, or winit.
 
 The checker must:
 
-1. Require a trusted build manifest that binds the canonical repository release
-   compiler path and SHA-256, and reject `compiler_rust/target` overrides.
-2. Build with `SIMPLE_NO_STUB_FALLBACK=1`.
-3. Record the provider path and SHA-256, an exactly shell-quoted native-build
+1. Select the exact compiler and provider recorded by the canonical trusted
+   build manifest; caller compiler, provider, and manifest overrides are
+   forbidden.
+2. Accept only producer-issued identity/source-kind pairs: the current frozen
+   Stage-3 admission or the legacy canonical repository release admission.
+   Current Stage-3 manifests are reverified by the canonical producer; legacy
+   manifests must match current repository and complete source-input
+   fingerprints.
+3. Require an executable, non-symlinked compiler with its exact manifest SHA-256,
+   reject Rust seed/bootstrap-seed/debug identities, and require the canonical
+   default provider paths and hashes.
+4. Build with `SIMPLE_NO_STUB_FALLBACK=1`.
+5. Record the provider path and SHA-256, an exactly shell-quoted native-build
    command (environment, compiler, and every argument), plus bounded, hashed
    native-build and probe-output evidence. The native-build stream is drained
    through a deterministic bounded transcript: complete output through 8 KiB,
    then a 4 KiB head + 4 KiB tail with an omission marker. The retained log has
    an 8,256-byte hard cap; no unbounded raw build log is retained.
    The cap is checked on both successful and failed native-build attempts.
-4. Use `DYLD_PRINT_LIBRARIES=1` to verify the provider image loaded.
-5. Avoid the full-live Vulkan checker.
+6. Use `DYLD_PRINT_LIBRARIES=1` to verify the provider image loaded.
+7. Avoid the full-live Vulkan checker.
 
 ## Current result
 
 The focused source contract passed 2/2 on 2026-07-26. The subsequent native
 build stopped in the self-hosted compiler before probe execution; see
 `doc/09_report/macos_vulkan_provider_micro_probe_2026-07-26.md`.
+The three-cycle native limit remains closed; the manifest-admission repair was
+reviewed statically and did not launch another compiler or probe.

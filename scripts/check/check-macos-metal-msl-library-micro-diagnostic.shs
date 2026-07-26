@@ -4,6 +4,13 @@ set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)"
 cd "$ROOT_DIR"
+ADMISSION_HELPER=\
+"$ROOT_DIR/scripts/check/lib/macos-gpu-trusted-build-admission.shs"
+[ -f "$ADMISSION_HELPER" ] || {
+    echo "macOS Metal MSL diagnostic: FAIL (manifest-admission-helper-missing)" >&2
+    exit 1
+}
+. "$ADMISSION_HELPER"
 
 BUILD_DIR="${METAL_MSL_DIAGNOSTIC_BUILD_DIR:-$ROOT_DIR/build/macos_metal_msl_library_micro_diagnostic}"
 ENTRY="test/02_integration/rendering/macos_metal_msl_library_micro_diagnostic.spl"
@@ -13,7 +20,7 @@ PROBE_STDERR="$BUILD_DIR/probe.stderr"
 BUILD_STDOUT="$BUILD_DIR/native-build.stdout"
 BUILD_STDERR="$BUILD_DIR/native-build.stderr"
 EVIDENCE="$BUILD_DIR/evidence.env"
-TRUSTED_MANIFEST="${METAL_MSL_DIAGNOSTIC_TRUSTED_MANIFEST:-$ROOT_DIR/build/macos_gpu_2d_live_native/metal/trusted-build.env}"
+TRUSTED_MANIFEST="$ROOT_DIR/build/macos_gpu_2d_live_native/metal/trusted-build.env"
 PROCESS_TIMEOUT_SECS="${METAL_MSL_DIAGNOSTIC_TIMEOUT_SECS:-240}"
 PROCESS_TERM_GRACE_SECS="${METAL_MSL_DIAGNOSTIC_TERM_GRACE_SECS:-10}"
 STREAM_HEAD_BYTES=4096
@@ -44,13 +51,6 @@ nonnegative_integer() {
     esac
 }
 
-canonical_file() {
-    [ -f "$1" ] || return 1
-    [ ! -L "$1" ] || return 1
-    file_dir="$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P)"
-    printf '%s/%s\n' "$file_dir" "$(basename -- "$1")"
-}
-
 manifest_value() {
     key="$1"
     file="$2"
@@ -59,44 +59,17 @@ manifest_value() {
     sed -n "s/^${key}=//p" "$file"
 }
 
-resolve_compiler() {
-    case "$(uname -m)" in
-        arm64|aarch64)
-            candidates="
-$ROOT_DIR/bin/release/aarch64-apple-darwin-macho/simple
-$ROOT_DIR/bin/release/aarch64-apple-darwin/simple
-$ROOT_DIR/bin/release/macos-arm64/simple
-$ROOT_DIR/bin/release/darwin-aarch64/simple"
-            ;;
-        x86_64)
-            candidates="
-$ROOT_DIR/bin/release/macos-x86_64/simple
-$ROOT_DIR/bin/release/x86_64-apple-darwin/simple"
-            ;;
-        *) return 1 ;;
-    esac
-    for candidate in $candidates; do
-        if [ -x "$candidate" ] && [ ! -L "$candidate" ]; then
-            canonical_file "$candidate"
-            return
-        fi
-    done
-    return 1
-}
-
 verify_trusted_manifest() {
-    [ -f "$TRUSTED_MANIFEST" ] && [ ! -L "$TRUSTED_MANIFEST" ] || return 1
-    [ "$(manifest_value status "$TRUSTED_MANIFEST")" = pass ] || return 1
-    [ "$(manifest_value backend "$TRUSTED_MANIFEST")" = metal ] || return 1
-    [ "$(manifest_value compiler_source_kind "$TRUSTED_MANIFEST")" = canonical-repo-release-path ] || return 1
-
-    COMPILER="$(canonical_file "$(manifest_value compiler_abs_path "$TRUSTED_MANIFEST")")" || return 1
-    PROVIDER="$(canonical_file "$(manifest_value simple_runtime_provider_path "$TRUSTED_MANIFEST")")" || return 1
-    RUNTIME_C_PROVIDER="$(canonical_file "$(manifest_value simple_runtime_c_provider_path "$TRUSTED_MANIFEST")")" || return 1
-    [ "$COMPILER" = "$(resolve_compiler)" ] || return 1
-    [ "$(manifest_value compiler_sha256 "$TRUSTED_MANIFEST")" = "$(sha256_file "$COMPILER")" ] || return 1
-    [ "$(manifest_value simple_runtime_provider_sha256 "$TRUSTED_MANIFEST")" = "$(sha256_file "$PROVIDER")" ] || return 1
-    [ "$(manifest_value simple_runtime_c_provider_sha256 "$TRUSTED_MANIFEST")" = "$(sha256_file "$RUNTIME_C_PROVIDER")" ] || return 1
+    macos_gpu_trusted_manifest_admit \
+        "$TRUSTED_MANIFEST" metal "$ROOT_DIR" || return 1
+    COMPILER="$MACOS_GPU_ADMISSION_COMPILER"
+    PROVIDER="$MACOS_GPU_ADMISSION_PROVIDER"
+    RUNTIME_C_PROVIDER="$MACOS_GPU_ADMISSION_RUNTIME_C_PROVIDER"
+    COMPILER_IDENTITY="$MACOS_GPU_ADMISSION_COMPILER_IDENTITY"
+    COMPILER_SOURCE_KIND="$MACOS_GPU_ADMISSION_COMPILER_SOURCE_KIND"
+    MANIFEST_REPO_REVISION="$MACOS_GPU_ADMISSION_REPO_REVISION"
+    MANIFEST_SOURCE_INPUT_FINGERPRINT=\
+"$MACOS_GPU_ADMISSION_SOURCE_INPUT_FINGERPRINT"
 }
 
 bounded_stream() {
@@ -264,6 +237,10 @@ write_evidence() {
         echo "metal_msl_library_diagnostic_trusted_manifest_sha256=$(if [ -f "$TRUSTED_MANIFEST" ]; then sha256_file "$TRUSTED_MANIFEST"; fi)"
         echo "metal_msl_library_diagnostic_compiler=${COMPILER:-}"
         echo "metal_msl_library_diagnostic_compiler_sha256=$(if [ -f "${COMPILER:-}" ]; then sha256_file "$COMPILER"; fi)"
+        echo "metal_msl_library_diagnostic_compiler_identity=${COMPILER_IDENTITY:-}"
+        echo "metal_msl_library_diagnostic_compiler_source_kind=${COMPILER_SOURCE_KIND:-}"
+        echo "metal_msl_library_diagnostic_manifest_repo_revision=${MANIFEST_REPO_REVISION:-}"
+        echo "metal_msl_library_diagnostic_manifest_source_input_fingerprint=${MANIFEST_SOURCE_INPUT_FINGERPRINT:-}"
         echo "metal_msl_library_diagnostic_provider=${PROVIDER:-}"
         echo "metal_msl_library_diagnostic_provider_sha256=$(if [ -f "${PROVIDER:-}" ]; then sha256_file "$PROVIDER"; fi)"
         echo "metal_msl_library_diagnostic_runtime_c_provider=${RUNTIME_C_PROVIDER:-}"

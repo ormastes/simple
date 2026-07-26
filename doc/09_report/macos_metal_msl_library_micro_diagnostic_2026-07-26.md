@@ -26,3 +26,12 @@ typed error ABI, cleanup/reporting contract, process supervision, and
 manifest-admission rules. They are not evidence that macOS created the library,
 loaded the provider, or rendered a frame. Native evidence remains blocked until
 a current passing trusted manifest and its exact bound providers are present.
+
+## Static manifest-admission repair
+
+The micro-checker now selects the exact compiler and providers recorded by the
+canonical manifest. It accepts only the producer-issued frozen Stage-3 or
+legacy repository-release identity/source-kind pairs, requires current
+repository and complete source-input provenance, exact hashes, non-symlink
+executables, and rejects seed/debug artifacts. No native diagnostic or
+full-live/window command was run for this repair; the blocked status remains.
