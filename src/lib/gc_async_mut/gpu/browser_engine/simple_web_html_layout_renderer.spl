@@ -68,6 +68,23 @@ class SimpleWebLayoutDrawIrResult:
 pub fn simple_web_material_fallback_realized(declared: bool, bg: u32, gradient_from: u32, gradient_to: u32, layers_raw: text) -> bool:
     declared and ((bg >> 24) & 255u32) == 255u32 and gradient_from == 0u32 and gradient_to == 0u32 and layers_raw == ""
 
+fn _simple_web_material_fallback_provenance(nodes: [HNode], styles: [Style], entries: text) -> WebRenderMaterialFallbackProvenance:
+    # entries is built inside compute_styles_with_material from loop-local
+    # style state and crosses here as plain text — the channel that survives
+    # freestanding builds. Non-empty entries are authoritative; the legacy
+    # [Style]-reading reducer below stays as the diagnostic fallback so a
+    # missing contract still emits its attribution receipts.
+    if entries != "":
+        val canonical = "simple-web-realized-solid-material-v1" + entries
+        val material_sha = sha256_text(canonical)
+        if material_sha.len() != 64:
+            print "[web-material-fallback] digest-degenerate len={material_sha.len()} canonical_len={canonical.len()}"
+        return WebRenderMaterialFallbackProvenance.solid(
+            "cpu-raster-backdrop-sampling-unavailable",
+            material_sha
+        )
+    _simple_web_realized_material_fallback(nodes, styles)
+
 fn _simple_web_realized_material_fallback(nodes: [HNode], styles: [Style]) -> WebRenderMaterialFallbackProvenance:
     var canonical = "simple-web-realized-solid-material-v1"
     var material_count = 0
@@ -247,7 +264,8 @@ fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height:
             part_i = part_i + 1
     val child_index = build_child_index(nodes)
     _web_budget_rearm(render_start_us + budget_us * 7 / 10)
-    val styles = compute_styles(nodes, rules, child_index, false, vector_fonts)
+    var material_entries: [text] = [""]
+    val styles = compute_styles_with_material(nodes, rules, child_index, false, vector_fonts, material_entries)
     _web_budget_rearm(render_start_us + budget_us * 9 / 10)
     val node_count = nodes.len() as i32
     val empty_starts = empty_i32_lists(node_count)
@@ -279,7 +297,7 @@ fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height:
     val composition = draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, batches)
     SimpleWebLayoutDrawIrResult(
         composition: composition,
-        material_fallback: _simple_web_realized_material_fallback(nodes, styles)
+        material_fallback: _simple_web_material_fallback_provenance(nodes, styles, material_entries[0])
     )
 
 pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
@@ -364,7 +382,8 @@ pub fn simple_web_layout_render_html_software_result(html: text, width: i32, hei
     val child_index = build_child_index(nodes)
     # Style gets at most 70% of the total budget.
     _web_budget_rearm(render_start_us + budget_us * 7 / 10)
-    val styles = compute_styles(nodes, rules, child_index, false, true)
+    var material_entries: [text] = [""]
+    val styles = compute_styles_with_material(nodes, rules, child_index, false, true, material_entries)
     # Layout always gets a slice up to 90%, even if style spent its whole 70%.
     _web_budget_rearm(render_start_us + budget_us * 9 / 10)
     val node_count = nodes.len() as i32
@@ -398,7 +417,7 @@ pub fn simple_web_layout_render_html_software_result(html: text, width: i32, hei
     painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
     SimpleWebLayoutPixelResult(
         pixels: painted,
-        material_fallback: _simple_web_realized_material_fallback(nodes, styles)
+        material_fallback: _simple_web_material_fallback_provenance(nodes, styles, material_entries[0])
     )
 
 pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> [u32]:

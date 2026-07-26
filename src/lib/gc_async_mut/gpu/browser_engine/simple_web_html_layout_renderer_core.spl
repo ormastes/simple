@@ -1742,6 +1742,17 @@ fn presentational_attr_decls(node: HNode) -> text:
 # ---------------------------------------------------------------------------
 
 fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool = false, vector_fonts: bool = true) -> [Style]:
+    var material_entries_unused: [text] = [""]
+    compute_styles_with_material(nodes, rules, child_index, trace_stages, vector_fonts, material_entries_unused)
+
+# Freestanding-safe material provenance channel: the realized solid-material
+# entries are built HERE from the loop-local style (before any aggregate
+# element store, array return, or array param crossing — all of which lose
+# Style field contents on the freestanding lane) and handed out through a
+# mut one-slot [text] param (the apply_advances idiom). Consumers derive the
+# material digest from the entries text instead of re-reading [Style].
+fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool, vector_fonts: bool, mut material_entries: [text]) -> [Style]:
+    var material_entry_count = 0
     val rule_buckets = build_rule_buckets(rules, trace_stages)
     if trace_stages:
         print "[layout-trace] style_stage=rule-buckets-ready"
@@ -1869,6 +1880,20 @@ fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, tra
                 st.resolved_font_advances = metrics.advances
                 st.resolved_font_width = metrics.width
                 st.resolved_font_line_height = metrics.line_height
+        # Realized solid-material entry, evaluated on the loop-local st (the
+        # only channel proven to hold field contents on freestanding builds).
+        # Mirrors _simple_web_realized_material_fallback's realized predicate.
+        val mat_declared = wm_fallback == "solid-material"
+        val mat_css = st.backdrop_filter_raw != ""
+        if mat_declared or mat_css:
+            val mat_bg: u32 = st.bg
+            val mat_fg: u32 = st.fg
+            val mat_gf: u32 = st.background_gradient_from
+            val mat_gt: u32 = st.background_gradient_to
+            val mat_layers: text = st.bg_layers_raw
+            if ((mat_bg >> 24) & 255u32) == 255u32 and mat_gf == 0u32 and mat_gt == 0u32 and mat_layers == "":
+                material_entries[0] = material_entries[0] + "\n{material_entry_count}|kind=solid-material|bg={mat_bg}|fg={mat_fg}|backdrop=none|background-image=none"
+                material_entry_count = material_entry_count + 1
         styles[i] = st
         if trace_stages:
             print "[layout-trace] style_stage=node-complete index={i}"
