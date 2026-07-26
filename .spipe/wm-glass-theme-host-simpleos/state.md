@@ -448,3 +448,14 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   All relevant x86/ARM sibling commits are already patch-equivalent to, or
   superseded on, `origin/main`; nothing should be cherry-picked. Live x86 and
   ARM capture/event rows therefore remain open.
+- continuation-2026-07-26-vulkan-provider-micro-probe: Pushed the reviewed
+  windowless provider diagnostic through `763453420e`. It binds the exact
+  provider and canonical self-hosted compiler to trusted paths/hashes, resolves
+  availability/init/device-count/error/shutdown symbols, gates calls in
+  fail-closed order, records a reproducible command, and retains bounded
+  build/probe logs with hashes. The dynamic loader exposes provider error as
+  tagged `text`, while `DynLib.call0` returns `i64`, so the unsafe conversion
+  was removed and `provider_error_abi=blocked` is explicit. Source contract
+  2/2 and shell/audit checks pass. The exhausted native/full-live cycles were
+  not rerun, so availability/device count and Vulkan rendering/events remain
+  unobserved rather than inferred.
