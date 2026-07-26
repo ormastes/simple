@@ -459,3 +459,15 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   2/2 and shell/audit checks pass. The exhausted native/full-live cycles were
   not rerun, so availability/device count and Vulkan rendering/events remain
   unobserved rather than inferred.
+- continuation-2026-07-26-theme-package-native-boundary-regression: Current
+  origin still projected `ResolvedThemePackage` across the known-broken native
+  aggregate return ABI in hosted WM startup and Web CSS generation, allowing a
+  nil-receiver trap before generated fallback/theme application. Hosted startup
+  now uses only an active durable snapshot or the generated immutable Aetheric
+  snapshot. Web package ownership remains dynamic but crosses the module
+  boundary only as scalar CSS/fingerprint text, and installed CSS is accepted
+  only on exact fingerprint equality. The owner exports both scalar projections.
+  Focused host bootstrap contract passes 6/6 and Web CSS authority passes 5/5;
+  independent source review accepts the boundary repair. The underlying generic
+  aggregate-return compiler bug remains open and the production bypass must stay
+  until its native regression passes.

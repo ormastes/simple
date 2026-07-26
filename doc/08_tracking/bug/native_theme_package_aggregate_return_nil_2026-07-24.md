@@ -27,6 +27,9 @@ lifetime issue.
 
 - Native startup must not call `load_theme_package()` and then project the
   returned aggregate class.
+- Hosted WM and Web production consumers enforce that boundary: hosted startup
+  uses active/generated immutable snapshots, while Web receives only owner-
+  projected scalar CSS/fingerprint text from the package module.
 - Native theme compiler execution cannot currently regenerate the tracked
   snapshot.
 - Interpreted development tooling can still compile the folder package; the
