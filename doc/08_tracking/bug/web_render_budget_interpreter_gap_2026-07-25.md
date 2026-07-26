@@ -44,9 +44,11 @@ For contrast, the widget cell's child frame has 13 distinct colours, so that cel
 PASS is real; this masking only turned a *blank* child into a green cell.
 
 Fixed by gating the child frame separately (`reason=child-frame-uniform`) in the web
-wrapper. **`wm_widget_showcase_gui.spl` and `wm_graphics_2d_showcase_gui.spl` still
-have the unguarded composite-only check** and would mask the same way the moment their
-child goes blank — they pass today on content, not on gate strength.
+wrapper. **Update 2026-07-26: `wm_widget_showcase_gui.spl` and
+`wm_graphics_2d_showcase_gui.spl` are now guarded the same way** — both apply the same
+child-frame-separate check (`reason=child-frame-uniform`) before trusting the
+composite-only `blank-or-uniform` gate, so a blank child can no longer mask as a pass
+in either wrapper.
 
 ## Resolution
 - Standalone web lane catches this honestly (`blank-or-uniform`); the host-WM
