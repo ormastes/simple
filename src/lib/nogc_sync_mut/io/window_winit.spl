@@ -190,6 +190,12 @@ fn winit_poll_close_requested(lp: WinitLoop) -> bool:
         ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     close_requested
 
+# One owned event record in native delivery order. Committed text is copied
+# while the runtime event handle is alive; all non-text records carry "".
+struct WinitInputEvent:
+    kind: i64
+    committed_text: text
+
 # Input drained from one poll: a close request plus the key codes pressed this
 # frame (drains + frees every pending event, like winit_poll_close_requested).
 # Lets an app be interactive (scroll, keys) without touching raw rt_* externs.
@@ -200,7 +206,9 @@ struct WinitInput:
     focus_events: i64
     focus_kind: i64
     focused: bool
-    # Raw event kinds in exact delivery order for cross-class receipt ordering.
+    # Owned records in exact delivery order. `event_kinds` remains the legacy
+    # compatibility view and is derived from these same records after draining.
+    events: [WinitInputEvent]
     event_kinds: [i64]
     keys: [i64]
     scroll_y: f64
@@ -223,9 +231,11 @@ fn winit_input_empty() -> WinitInput:
     var cp: [bool] = []
     var cx: [f64] = []
     var cy: [f64] = []
+    var events: [WinitInputEvent] = []
     var event_kinds: [i64] = []
     WinitInput(close: false, focus_events: 0, focus_kind: 0, focused: false,
-               event_kinds: event_kinds, keys: keys, scroll_y: 0.0,
+               events: events, event_kinds: event_kinds,
+               keys: keys, scroll_y: 0.0,
                mouse_x: 0.0, mouse_y: 0.0, mouse_moves: 0,
                click_buttons: cb, click_pressed: cp, click_x: cx, click_y: cy)
 
@@ -234,6 +244,7 @@ fn winit_poll_input(lp: WinitLoop) -> WinitInput:
     var focus_events: i64 = 0
     var focus_kind: i64 = 0
     var focused = false
+    var events: [WinitInputEvent] = []
     var event_kinds: [i64] = []
     var keys: [i64] = []
     var scroll_y = 0.0
@@ -249,7 +260,15 @@ fn winit_poll_input(lp: WinitLoop) -> WinitInput:
     var ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     while ev != 0:
         val kind = rt_winit_event_get_type(ev)
-        event_kinds.push(kind)
+        # Decode before rt_winit_event_free: text accessors borrow this handle.
+        val committed_text = if kind == EVT_TEXT:
+            winit_event_text(ev)
+        else:
+            ""
+        val event = WinitInputEvent(
+            kind: kind, committed_text: committed_text)
+        events.push(event)
+        event_kinds.push(event.kind)
         if kind == EVT_CLOSE:
             close_requested = true
         elif kind == EVT_FOCUSED or kind == EVT_UNFOCUSED:
@@ -277,7 +296,8 @@ fn winit_poll_input(lp: WinitLoop) -> WinitInput:
         ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     WinitInput(close: close_requested, focus_events: focus_events,
                focus_kind: focus_kind, focused: focused,
-               event_kinds: event_kinds, keys: keys, scroll_y: scroll_y,
+               events: events, event_kinds: event_kinds,
+               keys: keys, scroll_y: scroll_y,
                mouse_x: mouse_x, mouse_y: mouse_y, mouse_moves: mouse_moves,
                click_buttons: click_buttons, click_pressed: click_pressed,
                click_x: click_x, click_y: click_y)
@@ -287,6 +307,7 @@ fn winit_wait_input(lp: WinitLoop, timeout_ms: i64) -> WinitInput:
     var focus_events: i64 = 0
     var focus_kind: i64 = 0
     var focused = false
+    var events: [WinitInputEvent] = []
     var event_kinds: [i64] = []
     var keys: [i64] = []
     var scroll_y = 0.0
@@ -302,7 +323,15 @@ fn winit_wait_input(lp: WinitLoop, timeout_ms: i64) -> WinitInput:
     var ev = rt_winit_event_loop_wait_events(lp.handle, timeout_ms)
     while ev != 0:
         val kind = rt_winit_event_get_type(ev)
-        event_kinds.push(kind)
+        # Decode before rt_winit_event_free: text accessors borrow this handle.
+        val committed_text = if kind == EVT_TEXT:
+            winit_event_text(ev)
+        else:
+            ""
+        val event = WinitInputEvent(
+            kind: kind, committed_text: committed_text)
+        events.push(event)
+        event_kinds.push(event.kind)
         if kind == EVT_CLOSE:
             close_requested = true
         elif kind == EVT_FOCUSED or kind == EVT_UNFOCUSED:
@@ -330,7 +359,8 @@ fn winit_wait_input(lp: WinitLoop, timeout_ms: i64) -> WinitInput:
         ev = rt_winit_event_loop_poll_events(lp.handle, 1)
     WinitInput(close: close_requested, focus_events: focus_events,
                focus_kind: focus_kind, focused: focused,
-               event_kinds: event_kinds, keys: keys, scroll_y: scroll_y,
+               events: events, event_kinds: event_kinds,
+               keys: keys, scroll_y: scroll_y,
                mouse_x: mouse_x, mouse_y: mouse_y, mouse_moves: mouse_moves,
                click_buttons: click_buttons, click_pressed: click_pressed,
                click_x: click_x, click_y: click_y)
