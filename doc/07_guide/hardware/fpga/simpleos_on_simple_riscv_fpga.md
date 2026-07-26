@@ -190,9 +190,26 @@ baseline (DDR: 446, tiny: 568).
 
 The minimal NVMe firmware PASSES on the rv32 core in GHDL
 (`build/ghdl/rv32_nvme_verify/verify.log`) — it was the difftest workload that
-hardened the core (§4). A silicon lane (same load-and-release flow, tiny-BRAM
-SoC preferred since the fw is small) is in progress; the same `.bss`/GARBAGE_FILL
-discipline applies.
+hardened the core (§4) — **and PASSES ON KV260 SILICON** (2026-07-26):
+`ALL RV32 NVME FW CHECKS PASS` read via the BSCANE2 JTAG tunnel, deterministic
+across a soft-reset re-run. Transcripts:
+`build/fpga/jtag_readout/tiny_bram_transcript_20260726_0546*.txt`.
+
+Launch: the fw is fully self-contained (selftests + 16550 THR; no NVMe device
+model needed), so the tiny-BRAM SoC is reused with RTL unchanged — only `.mem`
+images and generics (`RAM_WORDS=16384`, `RDISK_WORDS=1024`):
+
+```bash
+sh scripts/fpga/ghdl_rv32_nvme_bram_soc.shs        # rehearsal (also GARBAGE_FILL=1)
+sh scripts/fpga/build_rv32_nvme_bram_bitstream.shs # WNS +17.5 ns
+bash scripts/fpga/read_rv32_tiny_bram_obs.shs transcript > run.log 2>&1
+```
+
+The fw's `.bss` is empty (`_sbss==_ebss`), so the un-zeroed-memory killer
+cannot bite; the GARBAGE_FILL rehearsal confirms it behaviorally. Known bug
+(filed): the tiny-BRAM SoC runs the image TWICE per reset on silicon (byte
+count = 2× the GHDL baseline) — harmless for marker verdicts; see
+`doc/08_tracking/bug/kv260_tiny_bram_double_run_per_reset_2026-07-26.md`.
 
 ## 7. rv64
 
