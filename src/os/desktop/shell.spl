@@ -1032,6 +1032,32 @@ impl DesktopShell:
 
     me handle_wm_pointer_event_loop_step(x: i32, y: i32, button: text, kind: text) -> text:
         val scene = self.runtime_scene_snapshot()
+        # Attribution receipt: a correctly decoded press (button_code=1
+        # kind_code=1) at a position genuinely inside the restored window still
+        # produced command=ignored handled=false with EMPTY target/app/window
+        # (rerun37, click at 730,274 vs window rect 520,260 420x260). Empty
+        # identity fields read as "hit-test found no window", so the suspect is
+        # the scene arriving empty: runtime_scene_snapshot is an immutable `fn`
+        # that reads self.compositor.surfaces and returns an aggregate holding
+        # a [SharedWmWindow] array — fn-receiver reads, [T] returns and
+        # aggregate returns are all documented broken channels on the
+        # freestanding entry-closure lane. Bind every field to a local (no
+        # chains) and print unconditionally, so a healthy scene is proven
+        # rather than assumed.
+        val dbg_scene_windows = scene.windows.len()
+        val dbg_scene_w = scene.width
+        val dbg_scene_h = scene.height
+        val dbg_live_surfaces = self.compositor.surfaces.len()
+        serial_println("[wm-pointer-dispatch] x={x} y={y} button='{button}' kind='{kind}' scene_windows={dbg_scene_windows} scene={dbg_scene_w}x{dbg_scene_h} live_surfaces={dbg_live_surfaces}")
+        if dbg_scene_windows > 0:
+            val dbg_w0 = scene.windows[0]
+            val dbg_w0_x = dbg_w0.x
+            val dbg_w0_y = dbg_w0.y
+            val dbg_w0_w = dbg_w0.width
+            val dbg_w0_h = dbg_w0.height
+            val dbg_w0_id = dbg_w0.window_id
+            val dbg_w0_min = if dbg_w0.minimized: 1 else: 0
+            serial_println("[wm-pointer-dispatch] w0 id='{dbg_w0_id}' rect={dbg_w0_x},{dbg_w0_y} {dbg_w0_w}x{dbg_w0_h} minimized={dbg_w0_min}")
         val taskbar = self.runtime_taskbar_model()
         val command = simpleos_wm_pointer_runtime_command(scene, taskbar, x, y, button, kind, 1000, self.clock_text, 2)
         self.wm_runtime_state = simpleos_wm_apply_pointer(self.wm_runtime_state, scene, taskbar, x, y, button, kind, 1000, self.clock_text, 2)
