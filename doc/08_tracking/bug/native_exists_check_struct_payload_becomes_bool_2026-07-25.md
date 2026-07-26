@@ -1,7 +1,7 @@
 # Native ExistsCheck uses its presence boolean as a struct payload
 
 - **ID:** native_exists_check_struct_payload_becomes_bool_2026-07-25
-- **Status:** OPEN
+- **Status:** SOURCE FIXED; native fixture wired, execution pending
 - **Severity:** high for native `optional_struct.?.field` expressions
 - **Lane:** native-build / Cranelift
 
@@ -21,9 +21,12 @@ the resulting address. It never emits or calls `rt_unwrap_or_self`.
 The resulting exit 132 (`field access on nil receiver`) is therefore downstream
 of the getter and independent of receiver marshalling.
 
-## Expected correction
+## Correction and verification
 
-Preserve the ExistsCheck payload local through its some/none merge and attach
-the inner struct provenance to that merged local. Do not substitute the
-`rt_is_some` condition local for the expression result. Add a focused native
-fixture for `optional_struct.?.field` before closing this issue.
+`ExistsCheck` now keeps a payload result local through its some/none merge and
+attaches its inner struct provenance; it does not use the `rt_is_some` condition
+as the expression result. `test/fixtures/native_exists_struct_payload_field/`
+reproduces the imported getter form with the literal `evidence.?.marker` and
+expects output `42`. It is registered in strict LLVM/Cranelift parity and the
+shared cross-target object gate. The admitted pure-Simple candidate is not
+available in this workspace, so this issue remains execution-pending.
