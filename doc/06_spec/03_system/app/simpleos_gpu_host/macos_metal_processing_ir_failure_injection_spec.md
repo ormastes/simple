@@ -3,7 +3,8 @@
 ## Purpose
 
 On a prepared macOS Metal host, verify the production executor's default path
-and deterministic `init`, `submit`, `readback`, and `mismatch` failures.
+and deterministic `unavailable`, `init`, `submit`, `readback`, and `mismatch`
+failures.
 
 ## Prerequisites
 

@@ -43,6 +43,9 @@ fn processing_ir_execute_cuda(ir: ProcessingIr) -> ProcessingCudaResult:
     val valid = processing_ir_validate(ir)
     if not valid.valid:
         return ProcessingCudaResult(completed: false, reason: valid.reason, values: [], backend_handle: 0, device_identity: 0)
+    val unavailable_fault = processing_ir_fault_reason("cuda", "unavailable")
+    if unavailable_fault != "":
+        return ProcessingCudaResult(completed: false, reason: unavailable_fault, values: [], backend_handle: 0, device_identity: 0)
     val init_fault = processing_ir_fault_reason("cuda", "init")
     if init_fault != "":
         return ProcessingCudaResult(completed: false, reason: init_fault, values: [], backend_handle: 0, device_identity: 0)
@@ -84,7 +87,8 @@ fn processing_ir_execute_cuda(ir: ProcessingIr) -> ProcessingCudaResult:
     if synced and readback_fault != "":
         _processing_cuda_cleanup(ctx, module, device, values_ptr, args_ptr, host_ptr, byte_count)
         return ProcessingCudaResult(completed: false, reason: readback_fault, values: [], backend_handle: 0, device_identity: 0)
-    val copied = synced and cuda_memcpy_dtoh(host_ptr, device, byte_count) == CUDA_SUCCESS
+    val dispatch_ok = launched and synced
+    val copied = dispatch_ok and cuda_memcpy_dtoh(host_ptr, device, byte_count) == CUDA_SUCCESS
     var values: [u32] = []
     if copied:
         var i: i64 = 0
@@ -98,8 +102,10 @@ fn processing_ir_execute_cuda(ir: ProcessingIr) -> ProcessingCudaResult:
     val handle = device_handle + 1
     val identity = cuda_device_identity(device_handle)
     _processing_cuda_cleanup(ctx, module, device, values_ptr, args_ptr, host_ptr, byte_count)
+    if not dispatch_ok:
+        return ProcessingCudaResult(completed: false, reason: "cuda-dispatch-failed", values: [], backend_handle: 0, device_identity: 0)
     if not copied:
-        return ProcessingCudaResult(completed: false, reason: "cuda-dispatch-or-readback-failed", values: [], backend_handle: 0, device_identity: 0)
+        return ProcessingCudaResult(completed: false, reason: "cuda-readback-failed", values: [], backend_handle: 0, device_identity: 0)
     if identity <= 0:
         return ProcessingCudaResult(completed: false, reason: "cuda-device-identity-unavailable", values: [], backend_handle: 0, device_identity: 0)
     ProcessingCudaResult(completed: true, reason: "ok", values: values, backend_handle: handle, device_identity: identity)

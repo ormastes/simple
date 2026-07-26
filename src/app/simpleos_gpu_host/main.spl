@@ -197,6 +197,14 @@ fn _processing_backend_mask_supported(selected: i64) -> i64:
 
 fn _process_hello(base: i64, generation: i64, version: i64, guest_isa_code: i64, render_mask: i64, processing_mask: i64, render_code: i64, processing_selector: text, requested_capability_mask: i64) -> i64:
     val started = time_now_nanos()
+    # Rejecting this HELLO must not leave a previous session negotiated.
+    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_RENDER_MASK, 0)
+    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK, 0)
+    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_PAYLOAD, 0)
+    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_READBACK, 0)
+    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION, 0)
+    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_CAPABILITY_MASK, 0)
+    memory_barrier_required()
     val negotiated_processing_mask = _processing_backend_mask(processing_mask, processing_selector)
     val hello = SimpleOsHostGpuHello(
         version: version,
@@ -212,6 +220,9 @@ fn _process_hello(base: i64, generation: i64, version: i64, guest_isa_code: i64,
     if valid.status != "pass":
         print("HOST_GPU_DAEMON_HELLO_INVALID reason={valid.reason} readback={hello.max_readback_bytes} max={simpleos_host_gpu_max_readback_bytes()}\n")
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO, 0, 0, 0, _elapsed_us_since(started), 0, 0)
+        return 1
+    if processing_selector != "auto" and negotiated_processing_mask == 0:
+        _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_UNSUPPORTED_BACKEND, 0, 0, 0, _elapsed_us_since(started), 0, 0)
         return 1
     if negotiated_render_mask == 0 or not _render_backend_available(render_code):
         _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO, 0, 0, 0, _elapsed_us_since(started), 0, 0)
@@ -332,30 +343,34 @@ fn _process_request(base: i64, processing_selector: text, retained: [SimpleOsHos
         val cpu_elapsed_us = _elapsed_us_since(cpu_started)
         val device_started = time_now_nanos()
         var completed = false
+        var executor_reason = ""
         var values: [u32] = []
         var backend_handle: i64 = 0
         var device_identity: i64 = 0
         if backend == "cuda":
             val result = processing_ir_execute_cuda(ir)
             completed = result.completed
+            executor_reason = result.reason
             values = result.values
             backend_handle = result.backend_handle
             device_identity = result.device_identity
         elif backend == "vulkan":
             val result = processing_ir_execute_vulkan(ir)
             completed = result.completed
+            executor_reason = result.reason
             values = result.values
             backend_handle = result.backend_handle
             device_identity = result.device_identity
         elif backend == "metal":
             val result = processing_ir_execute_metal(ir)
             completed = result.completed
+            executor_reason = result.reason
             values = result.values
             backend_handle = result.backend_handle
             device_identity = result.device_identity
         val device_elapsed_us = _elapsed_us_since(device_started)
         if not completed or backend_handle <= 0 or device_identity <= 0:
-            _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK, 0, 0, 0, 1, 0, 0)
+            _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, simpleos_host_gpu_processing_reason(executor_reason), 0, 0, 0, 1, 0, 0)
             return _loop_state(1, retained)
         if not processing_ir_outputs_equal(values, oracle):
             _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH, 0, 0, 0, 1, 0, 0)

@@ -1,0 +1,92 @@
+# @tag: system, gpu, simpleos, processing-ir, reason-mapping, source-contract
+
+use std.io_runtime.{file_exists, file_read}
+use std.spec.{describe, it, expect}
+use std.common.gpu.simpleos_host_gpu_protocol.{
+    SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH,
+    SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK,
+    SIMPLEOS_HOST_GPU_REASON_BACKEND_SUBMIT_FAILED,
+    SIMPLEOS_HOST_GPU_REASON_BACKEND_READBACK_FAILED,
+    simpleos_host_gpu_processing_reason
+}
+
+val PROTOCOL = "src/lib/common/gpu/simpleos_host_gpu_protocol.spl"
+val HOST = "src/app/simpleos_gpu_host/main.spl"
+
+describe "ProcessingIR executor failure wire-code mapping":
+    it "exports stable submit and readback reason constants":
+        val source = file_read(PROTOCOL)
+        expect(file_exists(PROTOCOL)).to_equal(true)
+        expect(source).to_contain("val SIMPLEOS_HOST_GPU_REASON_BACKEND_SUBMIT_FAILED: i64 = 16")
+        expect(source).to_contain("val SIMPLEOS_HOST_GPU_REASON_BACKEND_READBACK_FAILED: i64 = 17")
+        expect(source).to_contain(
+            "export SIMPLEOS_HOST_GPU_REASON_UNKNOWN_IMAGE_RESOURCE, SIMPLEOS_HOST_GPU_REASON_BACKEND_SUBMIT_FAILED")
+        expect(source).to_contain(
+            "export SIMPLEOS_HOST_GPU_REASON_BACKEND_READBACK_FAILED, simpleos_host_gpu_processing_reason")
+
+    it "maps typed executor reasons without changing checksum fallback":
+        val source = file_read(PROTOCOL)
+        expect(source).to_contain("if reason == \"checksum-mismatch\":\n        return SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH")
+        expect(source).to_contain("reason.ends_with(\"-submit-failed\")")
+        expect(source).to_contain("reason.ends_with(\"-dispatch-failed\")")
+        expect(source).to_contain("reason.ends_with(\"-readback-failed\")")
+        expect(source).to_contain("reason == \"readback-size-mismatch\"")
+        expect(source).to_contain("SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK")
+
+    it "executes the typed mapping for every backend reason shape":
+        expect(simpleos_host_gpu_processing_reason("cuda-submit-failed")).to_equal(
+            SIMPLEOS_HOST_GPU_REASON_BACKEND_SUBMIT_FAILED)
+        expect(simpleos_host_gpu_processing_reason("vulkan-dispatch-failed")).to_equal(
+            SIMPLEOS_HOST_GPU_REASON_BACKEND_SUBMIT_FAILED)
+        expect(simpleos_host_gpu_processing_reason("vulkan-dispatch-completion-unknown")).to_equal(
+            SIMPLEOS_HOST_GPU_REASON_BACKEND_SUBMIT_FAILED)
+        expect(simpleos_host_gpu_processing_reason("vulkan-dispatch-ineligible")).to_equal(
+            SIMPLEOS_HOST_GPU_REASON_BACKEND_SUBMIT_FAILED)
+        expect(simpleos_host_gpu_processing_reason("metal-readback-failed")).to_equal(
+            SIMPLEOS_HOST_GPU_REASON_BACKEND_READBACK_FAILED)
+        expect(simpleos_host_gpu_processing_reason("metal-readback-size-mismatch")).to_equal(
+            SIMPLEOS_HOST_GPU_REASON_BACKEND_READBACK_FAILED)
+        expect(simpleos_host_gpu_processing_reason("checksum-mismatch")).to_equal(
+            SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH)
+        expect(simpleos_host_gpu_processing_reason("cuda-init-failed")).to_equal(
+            SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK)
+
+    it "retains every executor result reason and finishes with the mapper":
+        expect(file_exists(HOST)).to_equal(true)
+        val source = file_read(HOST)
+        expect(source).to_contain("var executor_reason = \"\"")
+        for backend in ["cuda", "vulkan", "metal"]:
+            expect(source).to_contain(
+                "val result = processing_ir_execute_" + backend + "(ir)\n            completed = result.completed\n            executor_reason = result.reason"
+            )
+        expect(source).to_contain("simpleos_host_gpu_processing_reason(executor_reason)")
+        expect(source).to_contain(
+            "_finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, simpleos_host_gpu_processing_reason(executor_reason), 0, 0, 0, 1, 0, 0)"
+        )
+
+    it "rejects strict zero-mask negotiation as unsupported":
+        val source = file_read(HOST)
+        expect(source).to_contain(
+            "# Rejecting this HELLO must not leave a previous session negotiated.")
+        for field in [
+            "SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_RENDER_MASK",
+            "SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK",
+            "SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_PAYLOAD",
+            "SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_READBACK",
+            "SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION",
+            "SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_CAPABILITY_MASK"
+        ]:
+            expect(source).to_contain("_write(base, " + field + ", 0)")
+        expect(source).to_contain(
+            "_write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_RENDER_MASK, 0)\n" +
+            "    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_PROCESSING_MASK, 0)\n" +
+            "    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_PAYLOAD, 0)\n" +
+            "    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_MAX_READBACK, 0)\n" +
+            "    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION, 0)\n" +
+            "    _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_CAPABILITY_MASK, 0)\n" +
+            "    memory_barrier_required()\n" +
+            "    val negotiated_processing_mask = _processing_backend_mask(processing_mask, processing_selector)")
+        expect(source).to_contain(
+            "if processing_selector != \"auto\" and negotiated_processing_mask == 0:")
+        expect(source).to_contain(
+            "_finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_UNSUPPORTED_BACKEND, 0, 0, 0, _elapsed_us_since(started), 0, 0)")

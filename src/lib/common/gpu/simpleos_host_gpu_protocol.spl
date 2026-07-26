@@ -113,6 +113,19 @@ val SIMPLEOS_HOST_GPU_REASON_UNSUPPORTED_COMMAND: i64 = 12
 val SIMPLEOS_HOST_GPU_REASON_BACKEND_MISMATCH: i64 = 13
 val SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK: i64 = 14
 val SIMPLEOS_HOST_GPU_REASON_UNKNOWN_IMAGE_RESOURCE: i64 = 15
+val SIMPLEOS_HOST_GPU_REASON_BACKEND_SUBMIT_FAILED: i64 = 16
+val SIMPLEOS_HOST_GPU_REASON_BACKEND_READBACK_FAILED: i64 = 17
+
+fn simpleos_host_gpu_processing_reason(reason: text) -> i64:
+    if reason == "checksum-mismatch":
+        return SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH
+    if reason.ends_with("-submit-failed") or reason.ends_with("-dispatch-failed") or
+       reason == "vulkan-dispatch-completion-unknown" or
+       reason == "vulkan-dispatch-ineligible":
+        return SIMPLEOS_HOST_GPU_REASON_BACKEND_SUBMIT_FAILED
+    if reason == "readback-size-mismatch" or reason.ends_with("-readback-failed") or reason.ends_with("-readback-size-mismatch"):
+        return SIMPLEOS_HOST_GPU_REASON_BACKEND_READBACK_FAILED
+    SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK
 
 struct SimpleOsHostGpuWireCommand:
     op: i64
@@ -132,22 +145,20 @@ fn simpleos_host_gpu_backend_code(backend: text) -> i64:
         _: 0
 
 fn simpleos_host_gpu_backend_name(code: i64) -> text:
-    match code:
-        SIMPLEOS_HOST_GPU_BACKEND_VULKAN: "vulkan"
-        SIMPLEOS_HOST_GPU_BACKEND_METAL: "metal"
-        SIMPLEOS_HOST_GPU_BACKEND_DIRECTX: "directx"
-        SIMPLEOS_HOST_GPU_BACKEND_CUDA: "cuda"
-        SIMPLEOS_HOST_GPU_BACKEND_CPU: "cpu"
-        _: "unsupported"
+    if code == SIMPLEOS_HOST_GPU_BACKEND_VULKAN: return "vulkan"
+    if code == SIMPLEOS_HOST_GPU_BACKEND_METAL: return "metal"
+    if code == SIMPLEOS_HOST_GPU_BACKEND_DIRECTX: return "directx"
+    if code == SIMPLEOS_HOST_GPU_BACKEND_CUDA: return "cuda"
+    if code == SIMPLEOS_HOST_GPU_BACKEND_CPU: return "cpu"
+    "unsupported"
 
 fn simpleos_host_gpu_backend_mask(code: i64) -> i64:
-    match code:
-        SIMPLEOS_HOST_GPU_BACKEND_VULKAN: SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN
-        SIMPLEOS_HOST_GPU_BACKEND_METAL: SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
-        SIMPLEOS_HOST_GPU_BACKEND_DIRECTX: SIMPLEOS_HOST_GPU_BACKEND_MASK_DIRECTX
-        SIMPLEOS_HOST_GPU_BACKEND_CUDA: SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA
-        SIMPLEOS_HOST_GPU_BACKEND_CPU: SIMPLEOS_HOST_GPU_BACKEND_MASK_CPU
-        _: 0
+    if code == SIMPLEOS_HOST_GPU_BACKEND_VULKAN: return SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN
+    if code == SIMPLEOS_HOST_GPU_BACKEND_METAL: return SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
+    if code == SIMPLEOS_HOST_GPU_BACKEND_DIRECTX: return SIMPLEOS_HOST_GPU_BACKEND_MASK_DIRECTX
+    if code == SIMPLEOS_HOST_GPU_BACKEND_CUDA: return SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA
+    if code == SIMPLEOS_HOST_GPU_BACKEND_CPU: return SIMPLEOS_HOST_GPU_BACKEND_MASK_CPU
+    0
 
 fn simpleos_host_gpu_guest_isa_code(guest_isa: text) -> i64:
     match guest_isa:
@@ -157,11 +168,10 @@ fn simpleos_host_gpu_guest_isa_code(guest_isa: text) -> i64:
         _: 0
 
 fn simpleos_host_gpu_guest_isa_name(code: i64) -> text:
-    match code:
-        SIMPLEOS_HOST_GPU_ISA_X86_64: "x86_64"
-        SIMPLEOS_HOST_GPU_ISA_AARCH64: "aarch64"
-        SIMPLEOS_HOST_GPU_ISA_RISCV64: "riscv64"
-        _: "unsupported"
+    if code == SIMPLEOS_HOST_GPU_ISA_X86_64: return "x86_64"
+    if code == SIMPLEOS_HOST_GPU_ISA_AARCH64: return "aarch64"
+    if code == SIMPLEOS_HOST_GPU_ISA_RISCV64: return "riscv64"
+    "unsupported"
 
 fn simpleos_host_gpu_generation_is_fresh(request_generation: i64, completion_generation: i64) -> bool:
     request_generation > 0 and request_generation > completion_generation
@@ -334,6 +344,11 @@ fn simpleos_host_gpu_validate_receipt(batch: SimpleOsHostGpuBatch, receipt: Simp
             return simpleos_host_gpu_validation_reject("fail", "invalid-fallback-backend")
         if receipt.native_handle != 0 or receipt.readback_source != "cpu_reference":
             return simpleos_host_gpu_validation_reject("fail", "dishonest-fallback-provenance")
+    else:
+        if receipt.native_handle != 0 or receipt.native_device_identity != "" or
+           receipt.readback_source != "none" or receipt.output_bytes != 0 or
+           receipt.output_checksum != 0:
+            return simpleos_host_gpu_validation_reject("fail", "dishonest-failure-provenance")
     simpleos_host_gpu_validation_ok()
 
 export SIMPLEOS_HOST_GPU_PROTOCOL_MAGIC, SIMPLEOS_HOST_GPU_PROTOCOL_VERSION, SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US
@@ -371,7 +386,8 @@ export SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, SIMPLEOS_HOST_GPU_REASON_UNSUPP
 export SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION, SIMPLEOS_HOST_GPU_REASON_HELLO_REQUIRED, SIMPLEOS_HOST_GPU_REASON_INVALID_HELLO
 export SIMPLEOS_HOST_GPU_REASON_CORRELATION_MISMATCH, SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH
 export SIMPLEOS_HOST_GPU_REASON_UNSUPPORTED_COMMAND, SIMPLEOS_HOST_GPU_REASON_BACKEND_MISMATCH, SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK
-export SIMPLEOS_HOST_GPU_REASON_UNKNOWN_IMAGE_RESOURCE
+export SIMPLEOS_HOST_GPU_REASON_UNKNOWN_IMAGE_RESOURCE, SIMPLEOS_HOST_GPU_REASON_BACKEND_SUBMIT_FAILED
+export SIMPLEOS_HOST_GPU_REASON_BACKEND_READBACK_FAILED, simpleos_host_gpu_processing_reason
 export simpleos_host_gpu_backend_code, simpleos_host_gpu_backend_name, simpleos_host_gpu_backend_mask
 export simpleos_host_gpu_guest_isa_code, simpleos_host_gpu_guest_isa_name, simpleos_host_gpu_generation_is_fresh
 export simpleos_host_gpu_wire_correlation_valid

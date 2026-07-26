@@ -114,6 +114,9 @@ src/lib/gc_async_mut/gpu/engine2d/directx_backend.spl
 - **Vulkan-Backed Web/GUI RenderDoc:** `doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md`
 - **ProcessingIR Backend Fault Matrix:** `doc/03_plan/sys_test/gpu_backend_failure_injection_matrix.md`
 - **Three-Backend Fault Contract Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_ir_fault_source_contract_spec.md`
+- **Executor Wire-Reason Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_ir_executor_reason_mapping_contract_spec.md`
+- **Failure/Fallback Receipt Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/native_backend_failure_fallback_spec.md`
+- **SimpleOS Host GPU Protocol Manual:** `doc/06_spec/01_unit/lib/common/gpu/simpleos_host_gpu_protocol_spec.md`
 - **Prepared macOS Metal Fault Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/macos_metal_processing_ir_failure_injection_spec.md`
 
 ### Bug Tracking (Critical Blockers)

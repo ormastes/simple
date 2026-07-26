@@ -17,11 +17,13 @@ SIMPLE_LIB=src bin/simple test \
 ## Checks
 
 1. Every executor imports `processing_ir_fault_reason`.
-2. Every executor checks all four backend-specific phases.
+2. Every executor checks `unavailable`, `init`, `submit`, `readback`, and
+   `mismatch`.
 3. The helper requires both `SIMPLE_GPU_TEST=1` and an exact
    `SIMPLE_GPU_FAULT_INJECT=<backend>:<phase>` value.
 4. Vulkan and Metal return non-owning device provenance rather than freed
    resource identifiers.
+5. CUDA keeps real dispatch and readback failures distinct.
 
 This is a host-independent source contract. It does not replace live device
 execution.
