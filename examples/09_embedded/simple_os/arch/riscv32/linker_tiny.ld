@@ -36,13 +36,16 @@
  * instructions materialising an address in the .heap range. It is kept here at
  * a token 4 KB purely so the __heap_start/__heap_end symbols keep resolving.
  *
- * STACK: 256 KB, measured — not guessed. baremetal_stubs.c paints the whole
- * [_stack_bottom, _stack_top) span with 0xADDECA5E at _start whenever the
- * linker reserved a BRAM-sized stack, and reports the high-water mark over the
- * UART as `[tiny] stack_used=<bytes> of=<bytes>` once the full marker chain has
- * run. A 64 KB stack measured as fully consumed (65536 of 65536), so this
- * reserves 256 KB; see scripts/fpga/ghdl_rv32_simpleos_boot_tiny.shs for the
- * captured transcript.
+ * STACK: 256 KB. baremetal_stubs.c paints the whole [_stack_bottom,
+ * _stack_top) span with 0xADDECA5E at _start whenever the linker reserved a
+ * BRAM-sized stack, and reports the high-water mark over the UART as
+ * `[tiny] stack_used=<bytes> of=<bytes>` once the full marker chain has run.
+ * NOTE: the original probe scanned for the first SURVIVING sentinel (which is
+ * _stack_bottom on any healthy boot), so it reported exactly 100% used at
+ * every size — the earlier "64 KB fully consumed" reading was that bug, not a
+ * real overflow. The corrected probe (2026-07-26) measures the true boot
+ * high-water at 344 bytes, so even 64 KB is ample: see linker_tiny64.ld and
+ * build/ghdl/tiny/tiny64_256k_boot.log (256 KB RAM + 320 KB ramdisk, PASS).
  *
  * RESULTING LAYOUT (ORIGIN 0x80000000):
  *     .text .rodata .data .bss   -> ends 0x8001f004  (~124 KB)

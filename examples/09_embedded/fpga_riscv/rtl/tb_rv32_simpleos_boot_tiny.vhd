@@ -25,12 +25,17 @@ use ieee.numeric_std.all;
 use std.env.all;
 
 entity tb_rv32_simpleos_boot_tiny is
+  generic (
+    -- 512 KB main RAM: the whole BRAM-only budget for code+data+stack+heap.
+    -- Overridable from ghdl -r (-gTINY_RAM_WORDS=...) so smaller BRAM budgets
+    -- can be proven without editing the testbench; defaults match the
+    -- original constants exactly.
+    TINY_RAM_WORDS   : natural := 131072;
+    TINY_RDISK_WORDS : natural := 262144
+  );
 end entity tb_rv32_simpleos_boot_tiny;
 
 architecture sim of tb_rv32_simpleos_boot_tiny is
-  -- 512 KB main RAM: the whole BRAM-only budget for code+data+stack+heap.
-  constant TINY_RAM_WORDS   : natural := 131072;
-  constant TINY_RDISK_WORDS : natural := 262144;
   signal clk : std_logic := '0';
   signal rst : std_logic := '1';
   signal uart_tx : std_logic;

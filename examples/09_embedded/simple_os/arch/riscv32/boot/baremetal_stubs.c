@@ -94,8 +94,11 @@ static void uart_put_u32(uint32_t v)
  * ------------------------------------------------------------------------ */
 #define TINY_STACK_PAINT 0xADDECA5EU
 /* Leave the topmost slots alone: sp already points there and this function's
- * own frame lives in them, so painting them would corrupt our return path. */
-#define TINY_STACK_PAINT_SKIP_TOP 512U
+ * own frame lives in them, so painting them would corrupt our return path.
+ * tiny_stack_paint() is a small leaf (frame well under 64 B) called from the
+ * naked _start with sp == _stack_top, so 64 B of headroom is enough and keeps
+ * the measurement resolution at +-64 B instead of +-512 B. */
+#define TINY_STACK_PAINT_SKIP_TOP 64U
 /* Only BRAM-sized stacks get probed. */
 #define TINY_STACK_PROBE_MAX_BYTES (1024U * 1024U)
 
@@ -118,20 +121,80 @@ __attribute__((used, noinline)) void tiny_stack_paint(void)
     }
 }
 
-/* Scan upward from _stack_bottom for the first surviving sentinel: everything
- * above it was touched, so used = _stack_top - that address. */
+static void uart_put_hex32(uint32_t v)
+{
+    static const char digits[] = "0123456789abcdef";
+    uart_putc('0');
+    uart_putc('x');
+    for (int shift = 28; shift >= 0; shift -= 4) {
+        uart_putc(digits[(v >> shift) & 0xFU]);
+    }
+}
+
+/* Scan upward from _stack_bottom PAST the surviving sentinels: the first
+ * NON-painted word above the surviving run marks the deepest stack touch, so
+ * used = _stack_top - that address.
+ *
+ * (The original probe scanned for the first SURVIVING sentinel — which is
+ * _stack_bottom itself whenever the stack did NOT overflow — so it reported
+ * exactly 100% used on every healthy boot, at 64 KB and 256 KB alike. The
+ * inverted condition was the whole bug; the paint itself survives intact.
+ * Measured 2026-07-26 in GHDL with the corrected scan: 344 bytes of 262144.)
+ *
+ * Diagnostics kept from the investigation:
+ *   first_surv  = address of first surviving sentinel scanning UP from bottom
+ *                 (== _stack_bottom on a healthy boot)
+ *   surv_words  = surviving sentinel count in [bottom, top-skip) — 0 means the
+ *                 whole span was overwritten after tiny_stack_paint()
+ *   high_water  = _stack_top - (address of highest surviving PAINTED word,
+ *                 scanning DOWN from top-skip) = true stack depth from the top
+ *   bottom_val  = word at _stack_bottom (0x00000000 => memset-zero wiper,
+ *                 ELF-looking bytes => loader, frame-like => real stack). */
 static void tiny_stack_report(void)
 {
     if (tiny_stack_span() > TINY_STACK_PROBE_MAX_BYTES) return;
-    const volatile uint32_t *lo = (const volatile uint32_t *)_stack_bottom;
-    const volatile uint32_t *hi = (const volatile uint32_t *)_stack_top;
-    while (lo < hi && *lo != TINY_STACK_PAINT) {
+    const volatile uint32_t *bottom = (const volatile uint32_t *)_stack_bottom;
+    const volatile uint32_t *top = (const volatile uint32_t *)_stack_top;
+    const volatile uint32_t *paint_hi =
+        (const volatile uint32_t *)(_stack_top - TINY_STACK_PAINT_SKIP_TOP);
+    const volatile uint32_t *first_surv = bottom;
+    while (first_surv < top && *first_surv != TINY_STACK_PAINT) {
+        first_surv++;
+    }
+    /* Deepest touch: first word ABOVE the contiguous surviving run. */
+    const volatile uint32_t *lo = first_surv;
+    while (lo < paint_hi && *lo == TINY_STACK_PAINT) {
         lo++;
     }
+    uint32_t surviving = 0;
+    for (const volatile uint32_t *p = bottom; p < paint_hi; p++) {
+        if (*p == TINY_STACK_PAINT) surviving++;
+    }
+    /* Scan DOWN from just below the unpainted top skip for the first
+     * still-painted word: everything above it was genuinely touched. */
+    const volatile uint32_t *dp = paint_hi;
+    while (dp > bottom) {
+        dp--;
+        if (*dp == TINY_STACK_PAINT) break;
+    }
+    uint32_t high_water;
+    if (*dp == TINY_STACK_PAINT) {
+        high_water = (uint32_t)((uintptr_t)top - (uintptr_t)dp) - 4U;
+    } else {
+        high_water = tiny_stack_span(); /* nothing painted survives */
+    }
     uart_puts("[tiny] stack_used=");
-    uart_put_u32((uint32_t)((uintptr_t)hi - (uintptr_t)lo));
+    uart_put_u32((uint32_t)((uintptr_t)top - (uintptr_t)lo));
     uart_puts(" of=");
     uart_put_u32(tiny_stack_span());
+    uart_puts("\n[tiny] probe first_surv=");
+    uart_put_hex32((uint32_t)(uintptr_t)first_surv);
+    uart_puts(" surv_words=");
+    uart_put_u32(surviving);
+    uart_puts(" high_water=");
+    uart_put_u32(high_water);
+    uart_puts(" bottom_val=");
+    uart_put_hex32(*bottom);
     uart_puts("\n");
 }
 

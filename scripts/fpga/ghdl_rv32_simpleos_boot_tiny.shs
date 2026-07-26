@@ -39,15 +39,20 @@ WORK_DIR="$ROOT_DIR/build/ghdl/rv32_simpleos_boot_tiny"
 KERNEL_ELF="${KERNEL_ELF:-$ROOT_DIR/build/os/simpleos_riscv32_smf_fs_tiny.elf}"
 FAT32_IMG="${FAT32_IMG:-$ROOT_DIR/build/os/fat32-riscv32.img}"
 RAMDISK_BYTES="${RAMDISK_BYTES:-1048576}"
-# Must match TINY_RAM_WORDS in tb_rv32_simpleos_boot_tiny.vhd (131072 * 4).
-TINY_RAM_BYTES=524288
+# Testbench generic overrides (defaults identical to the tb's own defaults, so
+# the lane is behavior-identical unless explicitly overridden):
+#   RAM_WORDS   — main-RAM words   (default 131072 = 512 KB)
+#   RDISK_WORDS — ramdisk words    (default 262144 = 1 MiB)
+RAM_WORDS="${RAM_WORDS:-131072}"
+RDISK_WORDS="${RDISK_WORDS:-262144}"
+TINY_RAM_BYTES=$((RAM_WORDS * 4))
 
 command -v ghdl >/dev/null 2>&1 || { echo "ERROR: ghdl not found in PATH"; exit 1; }
 [ -f "$KERNEL_ELF" ] || { echo "ERROR: tiny kernel ELF missing: $KERNEL_ELF"; exit 1; }
 [ -f "$FAT32_IMG" ] || { echo "ERROR: FAT32 ramdisk image missing: $FAT32_IMG"; exit 1; }
 
 mkdir -p "$WORK_DIR"
-echo "=== GHDL RV32 SimpleOS TINY boot (512KB BRAM core + 1MB ramdisk bank) ==="
+echo "=== GHDL RV32 SimpleOS TINY boot ($((RAM_WORDS * 4)) B BRAM core + $((RDISK_WORDS * 4)) B ramdisk bank) ==="
 echo "  Kernel ELF: $KERNEL_ELF"
 echo "  Ramdisk img: $FAT32_IMG (first $RAMDISK_BYTES bytes -> 0x88000000)"
 
@@ -97,7 +102,9 @@ echo "OK"
 STOP_TIME="${STOP_TIME:-200ms}"
 printf "  Running simulation (stop-time=%s) ... \n" "$STOP_TIME"
 sim="$(cd "$WORK_DIR" && ghdl -r --std=08 --workdir="$WORK_DIR" \
-  tb_rv32_simpleos_boot_tiny --stop-time="$STOP_TIME" 2>&1)" || true
+  tb_rv32_simpleos_boot_tiny \
+  -gTINY_RAM_WORDS="$RAM_WORDS" -gTINY_RDISK_WORDS="$RDISK_WORDS" \
+  --stop-time="$STOP_TIME" 2>&1)" || true
 echo "$sim" | grep -E "RV32_TINY_BUDGET" | tail -1
 echo "----- UART transcript -----"
 echo "$sim" | grep -E "RV32_TINY_UART_LINE:" | sed 's/.*RV32_TINY_UART_LINE: //'
