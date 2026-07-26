@@ -60,11 +60,22 @@ The focused x86_64/RV32 IR regression passes 2/2. The cached Stage3 predates
 this source fix, so hardware evidence remains blocked pending a bounded
 source-matched compiler build.
 
+The bounded source-matched self-rebuild has now compiled and cached all 685
+compiler-closure objects without running Stage2, Stage4, Cargo, or a bootstrap
+script. The narrow runtime failed on the retained Cranelift SFFI family; the
+existing bootstrap runtime path reduced the final link gap to one symbol,
+`rt_string_free`. That symbol already exists in the isolated Vulkan runtime
+archive. A provider overlay containing that archive plus the existing
+native-all/compiler-backfill archives is prepared under
+`build/gpu-goal/source-matched/runtime-overlay`. The three-attempt cap prevents
+another link in this session; no hardware pass is claimed.
+
 ## Resume
 
 Deploy the source fix described in
 `doc/08_tracking/bug/native_engine2d_readback_aggregate_abi_2026-07-26.md`
-through the bounded incremental compiler lane, then run:
+through one cached incremental link using the prepared runtime overlay, then
+run:
 
 ```sh
 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json \

@@ -27,7 +27,18 @@ IR-generation regression passes 2/2 for x86_64 and RV32 read/write lowering.
 
 ## Resume
 
-Build the source-matched compiler through the existing bounded incremental
-lane, then rerun the no-stub evidence archive. Require device readback,
-positive handle/device identity, zero mismatches, and passing strict/parity
-specs.
+The 2026-07-26 bounded self-rebuild populated the existing native cache with
+all 685 source-matched compiler objects. Its first real link exposed the
+expected missing Cranelift providers under `core-c-bootstrap`; adding the
+existing bootstrap runtime path reduced the gap to only `rt_string_free`.
+No bootstrap stage or cache reset ran.
+
+The retained objects are under
+`build/gpu-goal/current/native-objects-vnQiNE`. A prepared runtime overlay at
+`build/gpu-goal/source-matched/runtime-overlay` combines the existing
+provider-complete archives and proves ownership of both `rt_string_free` and
+`rt_cranelift_iadd`. The three-attempt cap was reached before relinking.
+
+Resume with one cached native-build using that overlay as `--runtime-path`,
+then rerun the no-stub evidence archive. Require device readback, positive
+handle/device identity, zero mismatches, and passing strict/parity specs.
