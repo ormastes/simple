@@ -520,6 +520,14 @@ fn _u8_blob_to_i64_array(blob: [u8]) -> [i64]:
         index = index + 1
     out
 
+# Set once by freestanding kernel entries (no env available there) to route
+# asset digests through sha256_u8_hex, the freestanding-safe channel. Hosted
+# lanes keep the SIMPLE_RUNTIME_MODE-based selection unchanged.
+var _font_digest_native_route_forced: bool = false
+
+pub fn font_registry_force_native_digest_route():
+    _font_digest_native_route_forced = true
+
 fn _validate_selected_font_asset(path: text, blob: [u8]) -> FontAssetRuntimeValidation:
     _validate_selected_font_asset_with_digest(path, blob, "")
 
@@ -554,9 +562,18 @@ fn _validate_selected_font_asset_with_digest(path: text, blob: [u8],
     # Self-hosted builds keep the allocator-light sha256_u8_hex path for
     # throughput; interpreter-mode fallback computes the same digest through
     # sha256_bytes for parity over byte data.
+    # Freestanding kernels have no env, so the unset-env default would send
+    # them into the sha256_bytes fallback — whose [i64] digest return is a
+    # lost channel on freestanding builds (wrong hex -> honest asset rejected
+    # with reason=sha256). The kernel entry declares the native route
+    # explicitly via font_registry_force_native_digest_route().
+    val digest_route_interp = if _font_digest_native_route_forced:
+        false
+    else:
+        runtime_mode == nil or runtime_mode == "" or runtime_mode == "interpreter"
     val actual_sha256 = if _font_sha256_hex_valid(precomputed_sha256_hex):
         precomputed_sha256_hex
-    else if runtime_mode == nil or runtime_mode == "" or runtime_mode == "interpreter":
+    else if digest_route_interp:
         bytes_to_hex(sha256_bytes(_u8_blob_to_i64_array(blob)))
     else:
         sha256_u8_hex(blob)
