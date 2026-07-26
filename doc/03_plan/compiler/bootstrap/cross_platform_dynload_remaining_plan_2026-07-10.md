@@ -26,8 +26,11 @@
   stopped before log creation because its Perl helper was not installed; the
   wrapper now installs and verifies `perl5`, and fingerprint failures are
   explicit. Third bounded run `30181936568` passed the Perl preflight but the
-  fingerprint still returned failure before creating an artifact. No further
-  FreeBSD run is permitted in this session; Stage 3 evidence remains open.
+  fingerprint still returned failure before creating an artifact. The later
+  CI run `30183860271` reproduced the same provenance failure after QEMU,
+  dependency, SSH, repository-sync, and LLVM setup passed. No further FreeBSD
+  implementation change is permitted in this session; Stage 3 evidence remains
+  open.
 - Commit `d3f77e847aa1` routes production `.smf` execution through the real
   loader, resolves `main`, and calls its executable address without the Rust
   delegate. Commit `1c8b26de9b48` adds a real cache reuse/mutation/launcher
@@ -77,6 +80,13 @@
    and archive/tool selection, and clang-cl whole-archive handling are now
    fixed. Incremental Rust checks and focused regression tests pass; rerun this
    terminal lane once on native Windows before marking Stage 2/3 complete.
+
+   Run `30183860262` reached strict bootstrap on both MSVC and MinGW, passed
+   the target-specific seed and `native_all` builds, then failed because the
+   private offline Cargo config wrote a Git-Bash `/d/.../vendor` path. Cargo
+   interpreted it as `D:\d\...` on both lanes. The bootstrap now writes that
+   one directory path through `cygpath -m`; terminal Stage 2/3 evidence remains
+   open until the next native run completes.
 
 4. Prove the deployed dynload consumer boundary. The current fast path avoids
    Stage 4 and produces staged/cache artifacts; it must not claim hot deployment

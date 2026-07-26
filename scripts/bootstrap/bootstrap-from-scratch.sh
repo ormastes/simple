@@ -775,6 +775,12 @@ prepare_rust_authority_workspace() {
   vendored_sources_absolute=$(
     CDPATH= cd -- "${repo_root}/src/compiler_rust/vendor" && pwd -P
   )
+  if [ "${os}" = "windows" ]; then
+    vendored_sources_absolute=$(cygpath -m "${vendored_sources_absolute}") || {
+      echo "error: could not convert vendored Cargo source path for Windows" >&2
+      exit 1
+    }
+  fi
   cargo_authority_config="${rust_authority_cargo_home}/config.toml"
   awk -v vendored_sources="${vendored_sources_absolute}" '
     {
