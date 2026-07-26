@@ -22,7 +22,10 @@
 - FreeBSD run `30180339652` retained the complete `rust-seed-build.log` and
   proved the seed linker could not find `libffi` or `zstd`. The canonical QEMU
   wrapper now installs both packages and exports FreeBSD's `/usr/local/lib`
-  and pkg-config paths. Terminal Stage 3 and artifact evidence remains open.
+  and pkg-config paths. Run `30181046440` then reached seed provenance and
+  stopped before log creation because its Perl helper was not installed; the
+  wrapper now installs and verifies `perl5`, and fingerprint failures are
+  explicit. Terminal Stage 3 and artifact evidence remains open.
 - Commit `d3f77e847aa1` routes production `.smf` execution through the real
   loader, resolves `main`, and calls its executable address without the Rust
   delegate. Commit `1c8b26de9b48` adds a real cache reuse/mutation/launcher

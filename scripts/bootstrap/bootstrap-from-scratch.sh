@@ -664,7 +664,10 @@ fi
 # Content-hash staleness gate (see seed_inputs_hash above). Runs here so the
 # backend/features are final before they enter the fingerprint. If the seed or
 # runtime library is missing, the cargo branch below rebuilds regardless.
-seed_inputs_fingerprint=$(seed_inputs_hash)
+seed_inputs_fingerprint=$(seed_inputs_hash) || {
+  echo "error: failed to fingerprint Rust seed inputs" >&2
+  exit 1
+}
 if [ -x "${seed_bin}" ] && [ -f "${native_all_lib}" ]; then
   if ! bootstrap_stage3_verify_seed_stamp "${seed_stamp}" \
     "${seed_inputs_fingerprint}" "${seed_bin}" "${native_all_lib}" \
