@@ -91,43 +91,54 @@ fn _simple_web_realized_material_fallback(nodes: [HNode], styles: [Style]) -> We
         # backend and can make this reducer disagree with the already-lowered
         # Draw IR style for the same node.
         val node = nodes[i]
-        val st = styles[i]
+        # Freestanding lane: a whole-aggregate element copy (val st = styles[i])
+        # loses field contents on this build even when the producer realized
+        # them (proven by the silent wm-contract-unrealized producer receipt vs
+        # the rejected consumer receipt). Bind each needed field directly from
+        # the held array element — the channel proven safe in the compositor's
+        # surface-count fix.
+        val st_backdrop: text = styles[i].backdrop_filter_raw
+        val st_bg: u32 = styles[i].bg
+        val st_fg: u32 = styles[i].fg
+        val st_gradient_from: u32 = styles[i].background_gradient_from
+        val st_gradient_to: u32 = styles[i].background_gradient_to
+        val st_layers_raw: text = styles[i].bg_layers_raw
         # This is an internal WM contract with one canonical spelling. Exact
         # comparison avoids method dispatch through the nil representation
         # used by empty text on nodes that do not declare the contract.
         val declared_raw = attr_value(node.attrs_raw, "data-wm-theme-fallback")
         val declared = declared_raw == "solid-material"
-        val css_requested = st.backdrop_filter_raw != ""
-        val bg_alpha = (st.bg >> 24) & 255u32
+        val css_requested = st_backdrop != ""
+        val bg_alpha = (st_bg >> 24) & 255u32
         # compute_styles realizes the explicit WM contract immediately after
         # the cascade by clearing backdrop/image layers and applying the named
         # bg/fg. Provenance still requires the resulting surface to be opaque
         # and free of residual image layers.
         # Unannotated CSS backdrop requests use the same strict post-style
         # evidence before they may claim a solid fallback.
-        val layers_cleared = st.background_gradient_from == 0u32 and st.background_gradient_to == 0u32 and st.bg_layers_raw == ""
+        val layers_cleared = st_gradient_from == 0u32 and st_gradient_to == 0u32 and st_layers_raw == ""
         # Use the same realized-state proof emitted into Draw IR by
         # _html_draw_ir_style_props. Re-parsing data-wm-theme-bg and requiring
         # a second exact equality made this parallel provenance path reject the
         # already-executed opaque material on freestanding x86 even though the
         # Draw IR command recorded solid-material and its image layers were
         # cleared. The computed style is the renderer-owned execution state.
-        val declared_realized = simple_web_material_fallback_realized(declared, st.bg, st.background_gradient_from, st.background_gradient_to, st.bg_layers_raw)
-        val css_realized = simple_web_material_fallback_realized(css_requested, st.bg, st.background_gradient_from, st.background_gradient_to, st.bg_layers_raw)
+        val declared_realized = simple_web_material_fallback_realized(declared, st_bg, st_gradient_from, st_gradient_to, st_layers_raw)
+        val css_realized = simple_web_material_fallback_realized(css_requested, st_bg, st_gradient_from, st_gradient_to, st_layers_raw)
         val realized = declared_realized or css_realized
         if realized:
-            canonical = canonical + "\n{material_count}|kind=solid-material|bg={st.bg}|fg={st.fg}|backdrop=none|background-image=none"
+            canonical = canonical + "\n{material_count}|kind=solid-material|bg={st_bg}|fg={st_fg}|backdrop=none|background-image=none"
             material_count = material_count + 1
         elif declared_raw != "" and not rejected_contract:
             # Emit at most one rejection receipt per render invocation. This
             # is diagnostic evidence only: provenance remains fail-closed.
             rejected_contract = true
             rejected_declared = declared
-            rejected_bg = st.bg
+            rejected_bg = st_bg
             rejected_bg_alpha = bg_alpha
-            rejected_gradient_from = st.background_gradient_from
-            rejected_gradient_to = st.background_gradient_to
-            rejected_layers_len = st.bg_layers_raw.len()
+            rejected_gradient_from = st_gradient_from
+            rejected_gradient_to = st_gradient_to
+            rejected_layers_len = st_layers_raw.len()
             rejected_layers_cleared = layers_cleared
         i = i + 1
     if material_count == 0:
