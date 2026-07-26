@@ -25,13 +25,13 @@ evidence.
 | CompileMode | Source transport, `pub mod`, and MIR isolation fixes are committed; focused coverage passes. Three distinct bridge shapes proved the old compiler crashes on bootstrap-reachable `CompileOptions` aggregate construction: the general dispatcher, mutate-after-default helper, and direct full literal all fail during HIR. Canonical source was restored after every attempt; no bridge or `73` executable was produced. | OPEN; old-generation bootstrap aggregate HIR crash |
 | Optimizer | Scalar-level repair is committed and its source guard passes, but no source-matched native driver exists after the closure-owner repair. | OPEN |
 | `84` | No two-module `84` oracle binary or exact output exists after the optimizer repair. | BLOCKED by source-matched CLI generation |
-| Vulkan | Real device is present. The SFFI owner routes interpreter arrays through typed upload/SPIR-V/push/readback externs and preserves raw core-C native ABI; the unsafe generic TLS shim remains rejected. The live interpreter/device upload plus nonzero-offset exact readback and OOB rejection passes 1/1. | INTERPRETER DEVICE PASS; source-matched native evidence pending |
+| Vulkan | Real device is present. The SFFI owner routes interpreter arrays through typed upload/SPIR-V/push/readback externs and preserves raw core-C native ABI; the unsafe generic TLS shim remains rejected. Interpreter and native Rust runtime device tests pass nonzero-offset exact readback plus OOB rejection. | INTERPRETER + NATIVE RUNTIME DEVICE PASS; source-matched Simple native evidence pending |
 
 ## Ten Tasks
 
 | ID | Agent | Task and file | Acceptance evidence | Host | Status |
 |---:|---|---|---|---|---|
-| 1 | McClintock | Linux CUDA/Vulkan parity: `test/03_system/app/simple_2d/native_processing_ir_cuda_vulkan_readback_parity_spec.spl` | Real device receipts, exact pixels/checksums, zero mismatches, no CPU fallback. | Linux CUDA/Vulkan GPU | PARTIAL: Vulkan interpreter device byte round-trip passes 1/1; CUDA verified PTX and source-matched native Vulkan processing receipt remain open |
+| 1 | McClintock | Linux CUDA/Vulkan parity: `test/03_system/app/simple_2d/native_processing_ir_cuda_vulkan_readback_parity_spec.spl` | Real device receipts, exact pixels/checksums, zero mismatches, no CPU fallback. | Linux CUDA/Vulkan GPU | PARTIAL: CUDA current-emitter -> verified `nvcc` PTX -> device readback passes with zero mismatches; Vulkan interpreter and native runtime byte round-trips pass; source-matched Simple native Vulkan processing receipt remains open |
 | 2 | McClintock | Backend selector contract: `test/03_system/app/simpleos_gpu_host/backend_selector_contract_spec.spl` | Owner accepts `auto`, `cuda`, `vulkan`, `metal`; rejects unknown selectors; explicit selectors narrow to one backend before probing. | Any host; source contract only | GREEN: focused contract passes 3/3 |
 | 3 | Confucius | Offload break-even: `test/03_system/app/simpleos_gpu_host/processing_ir_offload_break_even_spec.spl` | Native receipt records CPU/device/transfer/total/RSS medians and measured decisions. | Linux CUDA/Vulkan GPU | RED: helper check passed, but the required native measurement receipt is missing |
 | 4 | Confucius | Measurement plan: `doc/03_plan/sys_test/gpu_processing_ir_offload_measurement.md` | Defines samples, schema, overhead, RSS, unavailable status, and pass/fail policy. | Linux CUDA/Vulkan GPU; macOS measurement postponed | PLAN UPDATED; UNMEASURED |
@@ -53,12 +53,16 @@ pointers:
 3. Empty arrays must match the native runtime's null-pointer contract.
 
 The array-valued Vulkan readback extern is selected by the immutable runtime
-kind intrinsic; native runs retain the raw core-C ABI. Keep this task open until upload,
-empty/OOB, and device-readback tests pass in interpreter and source-matched
-native modes without a bootstrap-only claim.
+kind intrinsic; native runs retain the raw core-C ABI. Interpreter and native
+runtime upload/readback checks pass. Keep this task open until the same
+empty/OOB and device-readback checks pass from a source-matched Simple native
+executable without a bootstrap-only claim.
 
 Retained interpreter evidence:
 `build/gpu-goal/dual-abi/vulkan-live-readback-cycle3.log`.
+
+Retained CUDA source/toolchain/device evidence:
+`build/native_processing_ir_cuda_vulkan_readback_parity/cuda/evidence.env`.
 
 ## Merge Gate
 

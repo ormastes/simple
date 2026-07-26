@@ -72,9 +72,18 @@ impl BufferUsage {
     }
 }
 
+fn checked_upload_end(buffer_size: u64, data_len: usize, offset: u64) -> VulkanResult<u64> {
+    let data_len = u64::try_from(data_len).map_err(|_| VulkanError::BufferTooSmall)?;
+    let end = offset.checked_add(data_len).ok_or(VulkanError::BufferTooSmall)?;
+    if end > buffer_size {
+        return Err(VulkanError::BufferTooSmall);
+    }
+    Ok(end)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::BufferUsage;
+    use super::{checked_upload_end, BufferUsage};
     use ash::vk;
 
     #[test]
@@ -92,6 +101,14 @@ mod tests {
         assert!(flags.contains(vk::BufferUsageFlags::STORAGE_BUFFER));
         assert!(flags.contains(vk::BufferUsageFlags::TRANSFER_SRC));
         assert!(flags.contains(vk::BufferUsageFlags::TRANSFER_DST));
+    }
+
+    #[test]
+    fn upload_range_accepts_offsets_and_rejects_overflow() {
+        assert_eq!(checked_upload_end(16, 6, 5).unwrap(), 11);
+        assert_eq!(checked_upload_end(16, 0, 16).unwrap(), 16);
+        assert!(checked_upload_end(16, 2, 15).is_err());
+        assert!(checked_upload_end(16, 1, u64::MAX).is_err());
     }
 }
 
@@ -163,16 +180,21 @@ impl VulkanBuffer {
 
     /// Upload data to this buffer (creates staging buffer internally)
     pub fn upload(&self, data: &[u8]) -> VulkanResult<()> {
-        if data.len() > self.size as usize {
-            return Err(VulkanError::BufferTooSmall);
-        }
+        self.upload_at(data, 0)
+    }
 
+    /// Upload data at a byte offset (creates staging buffer internally).
+    pub fn upload_at(&self, data: &[u8], offset: u64) -> VulkanResult<()> {
+        checked_upload_end(self.size, data.len(), offset)?;
+        if data.is_empty() {
+            return Ok(());
+        }
         // Create staging buffer
         let staging = StagingBuffer::new(self.device.clone(), data.len() as u64)?;
         staging.write(data)?;
 
         // Copy from staging to device buffer
-        self.copy_from_staging(&staging, data.len() as u64)?;
+        self.copy_from_staging(&staging, data.len() as u64, offset)?;
 
         Ok(())
     }
@@ -184,10 +206,10 @@ impl VulkanBuffer {
         staging.read(size as usize)
     }
 
-    fn copy_from_staging(&self, staging: &StagingBuffer, size: u64) -> VulkanResult<()> {
+    fn copy_from_staging(&self, staging: &StagingBuffer, size: u64, dst_offset: u64) -> VulkanResult<()> {
         let cmd = self.device.begin_transfer_command()?;
 
-        let region = vk::BufferCopy::default().size(size);
+        let region = vk::BufferCopy::default().dst_offset(dst_offset).size(size);
 
         unsafe {
             self.device
@@ -217,7 +239,7 @@ impl VulkanBuffer {
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .buffer(self.buffer)
-                .offset(0)
+                .offset(dst_offset)
                 .size(size);
             self.device.handle().cmd_pipeline_barrier(
                 cmd,

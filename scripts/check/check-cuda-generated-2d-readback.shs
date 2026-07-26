@@ -20,6 +20,24 @@ FONT_EXPECTED_PIXELS_PATH="$BUILD_DIR/font-expected-u32.json"
 FONT_ACTUAL_PIXELS_PATH="$BUILD_DIR/font-actual-u32.json"
 PTX_SHA256_BEFORE=""
 FONT_PTX_SHA256_BEFORE=""
+CUDA_TOOLCHAIN_RECEIPT="$TOOLCHAIN_BUILD_DIR/evidence.env"
+CUDA_TOOLCHAIN_STATUS="unavailable"
+CUDA_TOOLCHAIN_CANDIDATE_COMPILED="false"
+CUDA_TOOLCHAIN_ARTIFACT_VALIDATED="false"
+CUDA_TOOLCHAIN_ARTIFACT=""
+CUDA_TOOLCHAIN_ARTIFACT_SHA256=""
+CUDA_TOOLCHAIN_EMITTER_MODE=""
+CUDA_TOOLCHAIN_EMITTER_PATH=""
+CUDA_TOOLCHAIN_EMITTER_SHA256=""
+CUDA_TOOLCHAIN_EMITTER_SOURCE_SHA256=""
+CUDA_TOOLCHAIN_GENERATED_SOURCE_SHA256=""
+CUDA_TOOLCHAIN_COMPILER_REQUESTED=""
+CUDA_TOOLCHAIN_COMPILER_PATH=""
+CUDA_TOOLCHAIN_COMPILER_VERSION=""
+CUDA_TOOLCHAIN_COMPILER_SHA256=""
+CUDA_TOOLCHAIN_SOURCE_HASH_EQUAL="false"
+CUDA_TOOLCHAIN_REASON="cuda-toolchain-provenance-unavailable"
+CUDA_HELPER_EXIT_STATUS="not-run"
 
 mkdir -p "$BUILD_DIR" "$TOOLCHAIN_BUILD_DIR" "$(dirname "$REPORT_PATH")"
 
@@ -73,6 +91,142 @@ cuda_artifact_sha256() {
 
 cuda_sha256_valid() {
     printf '%s\n' "$1" | grep -Eq '^[0-9a-f]{64}$'
+}
+
+cuda_toolchain_value() {
+    key="$1"
+    grep "^$key=" "$CUDA_TOOLCHAIN_RECEIPT" 2>/dev/null | head -1 | cut -d= -f2- || true
+}
+
+cuda_load_toolchain_provenance() {
+    CUDA_TOOLCHAIN_STATUS="$(cuda_toolchain_value cuda_status)"
+    CUDA_TOOLCHAIN_CANDIDATE_COMPILED="$(cuda_toolchain_value cuda_candidate_compiled)"
+    CUDA_TOOLCHAIN_ARTIFACT_VALIDATED="$(cuda_toolchain_value cuda_artifact_validated)"
+    CUDA_TOOLCHAIN_ARTIFACT="$(cuda_toolchain_value cuda_artifact)"
+    CUDA_TOOLCHAIN_ARTIFACT_SHA256="$(cuda_toolchain_value cuda_artifact_sha256)"
+    CUDA_TOOLCHAIN_EMITTER_MODE="$(cuda_toolchain_value portable_compute_emitter_mode)"
+    CUDA_TOOLCHAIN_EMITTER_PATH="$(cuda_toolchain_value portable_compute_emitter_path)"
+    CUDA_TOOLCHAIN_EMITTER_SHA256="$(cuda_toolchain_value portable_compute_emitter_sha256)"
+    CUDA_TOOLCHAIN_EMITTER_SOURCE_SHA256="$(cuda_toolchain_value cuda_emitter_source_sha256)"
+    CUDA_TOOLCHAIN_GENERATED_SOURCE_SHA256="$(cuda_toolchain_value cuda_generated_source_sha256)"
+    CUDA_TOOLCHAIN_COMPILER_REQUESTED="$(cuda_toolchain_value cuda_compiler_requested)"
+    CUDA_TOOLCHAIN_COMPILER_PATH="$(cuda_toolchain_value cuda_compiler_path)"
+    CUDA_TOOLCHAIN_COMPILER_VERSION="$(cuda_toolchain_value cuda_compiler_version)"
+    CUDA_TOOLCHAIN_COMPILER_SHA256="$(cuda_toolchain_value cuda_compiler_sha256)"
+    CUDA_TOOLCHAIN_SOURCE_HASH_EQUAL="false"
+    if cuda_sha256_valid "$CUDA_TOOLCHAIN_EMITTER_SOURCE_SHA256" \
+        && cuda_sha256_valid "$CUDA_TOOLCHAIN_GENERATED_SOURCE_SHA256" \
+        && [ "$CUDA_TOOLCHAIN_EMITTER_SOURCE_SHA256" = "$CUDA_TOOLCHAIN_GENERATED_SOURCE_SHA256" ]; then
+        CUDA_TOOLCHAIN_SOURCE_HASH_EQUAL="true"
+    fi
+}
+
+cuda_run_toolchain_provenance() {
+    rm -f "$CUDA_TOOLCHAIN_RECEIPT"
+    if ! SIMPLE_RUNTIME_MODE=interpreter \
+        SIMPLE_EXECUTION_MODE=interpreter \
+        PORTABLE_COMPUTE_EMITTER_BIN= \
+        NVCC_TOOL=nvcc \
+        PORTABLE_COMPUTE_TARGETS=cuda \
+        PORTABLE_COMPUTE_REQUIRE_VERIFIED=0 \
+        BUILD_DIR="$TOOLCHAIN_BUILD_DIR" \
+        REPORT_PATH="$TOOLCHAIN_BUILD_DIR/report.md" \
+        sh scripts/check/check-portable-compute-toolchains.shs \
+        >"$TOOLCHAIN_BUILD_DIR/cuda_provenance.out" \
+        2>"$TOOLCHAIN_BUILD_DIR/cuda_provenance.err"; then
+        cuda_load_toolchain_provenance
+        CUDA_TOOLCHAIN_REASON="cuda-toolchain-provenance-command-failed"
+        return 1
+    fi
+    cuda_load_toolchain_provenance
+    if [ "$CUDA_TOOLCHAIN_STATUS" != "compiled_artifact_verified" ]; then
+        CUDA_TOOLCHAIN_REASON="cuda-ptx-status-not-verified"
+        return 1
+    elif [ "$CUDA_TOOLCHAIN_CANDIDATE_COMPILED" != "true" ]; then
+        CUDA_TOOLCHAIN_REASON="cuda-ptx-candidate-not-compiled"
+        return 1
+    elif [ "$CUDA_TOOLCHAIN_ARTIFACT_VALIDATED" != "true" ]; then
+        CUDA_TOOLCHAIN_REASON="cuda-ptx-artifact-not-validated"
+        return 1
+    elif [ "$CUDA_TOOLCHAIN_SOURCE_HASH_EQUAL" != "true" ]; then
+        CUDA_TOOLCHAIN_REASON="cuda-ptx-source-hash-mismatch"
+        return 1
+    elif [ "$CUDA_TOOLCHAIN_ARTIFACT" != "$PTX_PATH" ]; then
+        CUDA_TOOLCHAIN_REASON="cuda-ptx-artifact-path-mismatch"
+        return 1
+    elif ! cuda_sha256_valid "$CUDA_TOOLCHAIN_ARTIFACT_SHA256"; then
+        CUDA_TOOLCHAIN_REASON="cuda-ptx-artifact-hash-missing"
+        return 1
+    elif [ "$CUDA_TOOLCHAIN_EMITTER_MODE" != "source-cli" ] \
+        || [ "$CUDA_TOOLCHAIN_EMITTER_PATH" != "$ROOT_DIR/src/app/portable_compute_emit/main.spl" ] \
+        || ! cuda_sha256_valid "$CUDA_TOOLCHAIN_EMITTER_SHA256" \
+        || [ "$(cuda_artifact_sha256 "$CUDA_TOOLCHAIN_EMITTER_PATH")" != "$CUDA_TOOLCHAIN_EMITTER_SHA256" ]; then
+        CUDA_TOOLCHAIN_REASON="cuda-emitter-identity-invalid"
+        return 1
+    elif [ "$CUDA_TOOLCHAIN_COMPILER_REQUESTED" != "nvcc" ] \
+        || [ "$CUDA_TOOLCHAIN_COMPILER_PATH" = "" ] \
+        || [ ! -f "$CUDA_TOOLCHAIN_COMPILER_PATH" ] \
+        || ! printf '%s\n' "$CUDA_TOOLCHAIN_COMPILER_VERSION" | grep -F "NVIDIA" >/dev/null 2>&1 \
+        || ! cuda_sha256_valid "$CUDA_TOOLCHAIN_COMPILER_SHA256" \
+        || [ "$(cuda_artifact_sha256 "$CUDA_TOOLCHAIN_COMPILER_PATH")" != "$CUDA_TOOLCHAIN_COMPILER_SHA256" ]; then
+        CUDA_TOOLCHAIN_REASON="cuda-compiler-identity-invalid"
+        return 1
+    fi
+    CUDA_TOOLCHAIN_REASON="pass"
+    return 0
+}
+
+cuda_append_toolchain_provenance() {
+    {
+        echo "cuda_generated_2d_readback_ptx_path=$PTX_PATH"
+        echo "cuda_generated_2d_readback_ptx_status=$CUDA_TOOLCHAIN_STATUS"
+        echo "cuda_generated_2d_readback_ptx_candidate_compiled=$CUDA_TOOLCHAIN_CANDIDATE_COMPILED"
+        echo "cuda_generated_2d_readback_ptx_artifact_validated=$CUDA_TOOLCHAIN_ARTIFACT_VALIDATED"
+        echo "cuda_generated_2d_readback_ptx_toolchain_artifact=$CUDA_TOOLCHAIN_ARTIFACT"
+        echo "cuda_generated_2d_readback_ptx_toolchain_artifact_sha256=$CUDA_TOOLCHAIN_ARTIFACT_SHA256"
+        echo "cuda_generated_2d_readback_ptx_emitter_mode=$CUDA_TOOLCHAIN_EMITTER_MODE"
+        echo "cuda_generated_2d_readback_ptx_emitter_path=$CUDA_TOOLCHAIN_EMITTER_PATH"
+        echo "cuda_generated_2d_readback_ptx_emitter_sha256=$CUDA_TOOLCHAIN_EMITTER_SHA256"
+        echo "cuda_generated_2d_readback_ptx_emitter_source_sha256=$CUDA_TOOLCHAIN_EMITTER_SOURCE_SHA256"
+        echo "cuda_generated_2d_readback_ptx_generated_source_sha256=$CUDA_TOOLCHAIN_GENERATED_SOURCE_SHA256"
+        echo "cuda_generated_2d_readback_ptx_compiler_requested=$CUDA_TOOLCHAIN_COMPILER_REQUESTED"
+        echo "cuda_generated_2d_readback_ptx_compiler_path=$CUDA_TOOLCHAIN_COMPILER_PATH"
+        echo "cuda_generated_2d_readback_ptx_compiler_version=$CUDA_TOOLCHAIN_COMPILER_VERSION"
+        echo "cuda_generated_2d_readback_ptx_compiler_sha256=$CUDA_TOOLCHAIN_COMPILER_SHA256"
+        echo "cuda_generated_2d_readback_ptx_source_hash_equal=$CUDA_TOOLCHAIN_SOURCE_HASH_EQUAL"
+        echo "cuda_generated_2d_readback_helper_exit_status=$CUDA_HELPER_EXIT_STATUS"
+    } >>"$BUILD_DIR/evidence.env"
+}
+
+cuda_validate_toolchain_provenance() {
+    [ "$(cuda_env_value cuda_generated_2d_readback_ptx_status)" = "compiled_artifact_verified" ] || return 1
+    [ "$(cuda_env_value cuda_generated_2d_readback_ptx_candidate_compiled)" = "true" ] || return 1
+    [ "$(cuda_env_value cuda_generated_2d_readback_ptx_artifact_validated)" = "true" ] || return 1
+    [ "$(cuda_env_value cuda_generated_2d_readback_ptx_source_hash_equal)" = "true" ] || return 1
+    [ "$(cuda_env_value cuda_generated_2d_readback_ptx_emitter_mode)" = "source-cli" ] || return 1
+    [ "$(cuda_env_value cuda_generated_2d_readback_ptx_emitter_path)" = \
+      "$ROOT_DIR/src/app/portable_compute_emit/main.spl" ] || return 1
+    [ "$(cuda_env_value cuda_generated_2d_readback_ptx_compiler_requested)" = "nvcc" ] || return 1
+    [ "$(cuda_env_value cuda_generated_2d_readback_helper_exit_status)" = "0" ] || return 1
+    [ "$(cuda_env_value cuda_generated_2d_readback_ptx_toolchain_artifact)" = \
+      "$(cuda_env_value cuda_generated_2d_readback_ptx_path)" ] || return 1
+    [ "$(cuda_env_value cuda_generated_2d_readback_ptx_emitter_source_sha256)" = \
+      "$(cuda_env_value cuda_generated_2d_readback_ptx_generated_source_sha256)" ] || return 1
+    [ "$(cuda_env_value cuda_generated_2d_readback_ptx_toolchain_artifact_sha256)" = \
+      "$(cuda_env_value cuda_generated_2d_readback_ptx_sha256_before)" ] || return 1
+    [ "$(cuda_env_value cuda_generated_2d_readback_ptx_toolchain_artifact_sha256)" = \
+      "$(cuda_env_value cuda_generated_2d_readback_ptx_sha256_after)" ] || return 1
+    [ "$(cuda_artifact_sha256 "$(cuda_env_value cuda_generated_2d_readback_ptx_emitter_path)")" = \
+      "$(cuda_env_value cuda_generated_2d_readback_ptx_emitter_sha256)" ] || return 1
+    [ "$(cuda_artifact_sha256 "$(cuda_env_value cuda_generated_2d_readback_ptx_compiler_path)")" = \
+      "$(cuda_env_value cuda_generated_2d_readback_ptx_compiler_sha256)" ] || return 1
+    printf '%s\n' "$(cuda_env_value cuda_generated_2d_readback_ptx_compiler_version)" |
+        grep -F "NVIDIA" >/dev/null 2>&1 || return 1
+    cuda_sha256_valid "$(cuda_env_value cuda_generated_2d_readback_ptx_emitter_source_sha256)" &&
+        cuda_sha256_valid "$(cuda_env_value cuda_generated_2d_readback_ptx_generated_source_sha256)" &&
+        cuda_sha256_valid "$(cuda_env_value cuda_generated_2d_readback_ptx_toolchain_artifact_sha256)" &&
+        cuda_sha256_valid "$(cuda_env_value cuda_generated_2d_readback_ptx_emitter_sha256)" &&
+        cuda_sha256_valid "$(cuda_env_value cuda_generated_2d_readback_ptx_compiler_sha256)"
 }
 
 cuda_append_artifact_hashes() {
@@ -140,7 +294,7 @@ cuda_mark_claimed_pass_failed() {
 cuda_validate_evidence() {
     [ -s "$BUILD_DIR/evidence.env" ] || return 0
     if grep -q '^cuda_generated_2d_readback_status=pass$' "$BUILD_DIR/evidence.env"; then
-        for field in status reason submit_attempted readback_available device_identity device_count ptx_sha256_before ptx_sha256_after expected_pixels_sha256 actual_pixels_sha256 expected_checksum actual_checksum mismatch_count fill_expected_checksum fill_actual_checksum fill_mismatch_count copy_expected_checksum copy_actual_checksum copy_mismatch_count alpha_expected_checksum alpha_actual_checksum alpha_mismatch_count scroll_expected_checksum scroll_actual_checksum scroll_mismatch_count; do
+        for field in status reason submit_attempted readback_available device_identity device_count ptx_path ptx_status ptx_candidate_compiled ptx_artifact_validated ptx_toolchain_artifact ptx_toolchain_artifact_sha256 ptx_emitter_mode ptx_emitter_path ptx_emitter_sha256 ptx_emitter_source_sha256 ptx_generated_source_sha256 ptx_compiler_requested ptx_compiler_path ptx_compiler_version ptx_compiler_sha256 ptx_source_hash_equal helper_exit_status ptx_sha256_before ptx_sha256_after expected_pixels_sha256 actual_pixels_sha256 expected_checksum actual_checksum mismatch_count fill_expected_checksum fill_actual_checksum fill_mismatch_count copy_expected_checksum copy_actual_checksum copy_mismatch_count alpha_expected_checksum alpha_actual_checksum alpha_mismatch_count scroll_expected_checksum scroll_actual_checksum scroll_mismatch_count; do
             count="$(grep -c "^cuda_generated_2d_readback_${field}=" "$BUILD_DIR/evidence.env" || true)"
             if [ "$count" -gt 1 ]; then
                 cuda_mark_claimed_pass_failed "duplicate-evidence-field"
@@ -206,6 +360,11 @@ cuda_validate_evidence() {
                 break
             fi
         done
+    fi
+
+    if [ "$(cuda_env_value cuda_generated_2d_readback_status)" = "pass" ] \
+        && ! cuda_validate_toolchain_provenance; then
+        cuda_mark_claimed_pass_failed "invalid-ptx-toolchain-provenance"
     fi
 
     if [ "$(cuda_env_value cuda_generated_2d_readback_status)" = "pass" ] && [ "$FONT_PTX_PATH" != "" ]; then
@@ -346,7 +505,11 @@ EOF
         exit 1
     fi
 
-    cat >"$BUILD_DIR/evidence.env" <<'EOF'
+    self_emitter_path="$ROOT_DIR/src/app/portable_compute_emit/main.spl"
+    self_emitter_sha="$(cuda_artifact_sha256 "$self_emitter_path")"
+    self_compiler_path="/bin/sh"
+    self_compiler_sha="$(cuda_artifact_sha256 "$self_compiler_path")"
+    cat >"$BUILD_DIR/evidence.env" <<EOF
 cuda_generated_2d_readback_status=pass
 cuda_generated_2d_readback_reason=readback-pixels-matched
 cuda_generated_2d_readback_submit_attempted=true
@@ -355,6 +518,23 @@ cuda_generated_2d_readback_device_identity=123
 cuda_generated_2d_readback_device_count=2
 cuda_generated_2d_readback_device_identity_0=123
 cuda_generated_2d_readback_device_identity_1=456
+cuda_generated_2d_readback_ptx_path=build/cuda_generated_2d_readback/toolchains/simple_2d_optimization.ptx
+cuda_generated_2d_readback_ptx_status=compiled_artifact_verified
+cuda_generated_2d_readback_ptx_candidate_compiled=true
+cuda_generated_2d_readback_ptx_artifact_validated=true
+cuda_generated_2d_readback_ptx_toolchain_artifact=build/cuda_generated_2d_readback/toolchains/simple_2d_optimization.ptx
+cuda_generated_2d_readback_ptx_toolchain_artifact_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+cuda_generated_2d_readback_ptx_emitter_mode=source-cli
+cuda_generated_2d_readback_ptx_emitter_path=$self_emitter_path
+cuda_generated_2d_readback_ptx_emitter_sha256=$self_emitter_sha
+cuda_generated_2d_readback_ptx_emitter_source_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+cuda_generated_2d_readback_ptx_generated_source_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+cuda_generated_2d_readback_ptx_compiler_requested=nvcc
+cuda_generated_2d_readback_ptx_compiler_path=$self_compiler_path
+cuda_generated_2d_readback_ptx_compiler_version=nvcc: NVIDIA test compiler
+cuda_generated_2d_readback_ptx_compiler_sha256=$self_compiler_sha
+cuda_generated_2d_readback_ptx_source_hash_equal=true
+cuda_generated_2d_readback_helper_exit_status=0
 cuda_generated_2d_readback_ptx_sha256_before=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 cuda_generated_2d_readback_ptx_sha256_after=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 cuda_generated_2d_readback_expected_pixels_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -402,6 +582,26 @@ EOF
     cuda_inventory_case_rejected 's/^cuda_generated_2d_readback_device_identity=123$/cuda_generated_2d_readback_device_identity=456/' primary-device-identity-mismatch-accepted
     cuda_inventory_case_rejected 's/^cuda_generated_2d_readback_device_count=2$/cuda_generated_2d_readback_device_count=0/' zero-device-count-accepted
     cuda_inventory_case_rejected 's/^cuda_generated_2d_readback_device_count=2$/cuda_generated_2d_readback_device_count=65/' excessive-device-count-accepted
+    cp "$valid_inventory" "$BUILD_DIR/evidence.env"
+
+    cuda_provenance_case_rejected() {
+        mutation="$1"
+        label="$2"
+        expected_reason="${3:-invalid-ptx-toolchain-provenance}"
+        sed "$mutation" "$valid_inventory" >"$BUILD_DIR/evidence.env"
+        cuda_validate_evidence
+        if ! grep -q '^cuda_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
+            || ! grep -q "^cuda_generated_2d_readback_reason=$expected_reason$" "$BUILD_DIR/evidence.env"; then
+            echo "self_test_status=fail"
+            echo "self_test_reason=$label"
+            exit 1
+        fi
+    }
+    cuda_provenance_case_rejected 's/^cuda_generated_2d_readback_ptx_status=.*/cuda_generated_2d_readback_ptx_status=candidate_compiled/' unverified-ptx-status-accepted
+    cuda_provenance_case_rejected 's/^cuda_generated_2d_readback_ptx_source_hash_equal=true$/cuda_generated_2d_readback_ptx_source_hash_equal=false/' source-hash-mismatch-accepted
+    cuda_provenance_case_rejected 's/^cuda_generated_2d_readback_ptx_emitter_mode=source-cli$/cuda_generated_2d_readback_ptx_emitter_mode=cached-native/' stale-emitter-mode-accepted
+    cuda_provenance_case_rejected 's/^cuda_generated_2d_readback_helper_exit_status=0$/cuda_generated_2d_readback_helper_exit_status=9/' nonzero-helper-exit-accepted
+    cuda_provenance_case_rejected 's/^cuda_generated_2d_readback_ptx_sha256_after=.*/cuda_generated_2d_readback_ptx_sha256_after=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/' ptx-hash-drift-accepted invalid-artifact-provenance
     cp "$valid_inventory" "$BUILD_DIR/evidence.env"
 
     echo 'cuda_generated_2d_readback_device_identity=0' >>"$BUILD_DIR/evidence.env"
@@ -485,11 +685,9 @@ if [ "$FONT_PTX_PATH" != "" ]; then
     rm -f "$FONT_EXPECTED_PIXELS_PATH" "$FONT_ACTUAL_PIXELS_PATH"
 fi
 
-if ! generated_2d_module_verified "$PTX_PATH"; then
-    REPORT_PATH="$BUILD_DIR/toolchains.md" BUILD_DIR="$TOOLCHAIN_BUILD_DIR" sh scripts/check/check-portable-compute-toolchains.shs >/dev/null
-fi
-
-if ! generated_2d_module_verified "$PTX_PATH"; then
+if ! cuda_run_toolchain_provenance; then
+    emit_unavailable "$CUDA_TOOLCHAIN_REASON"
+elif ! generated_2d_module_verified "$PTX_PATH"; then
     emit_unavailable "missing-verified-ptx"
 elif [ "$FONT_PTX_PATH" != "" ] && ! generated_2d_contains_symbol "$FONT_PTX_PATH" simple_font_atlas_composite_v1_u32; then
     emit_unavailable "missing-verified-font-ptx"
@@ -957,19 +1155,20 @@ C_EOF
         emit_unavailable "cuda-driver-compile-failed"
     elif [ "$FONT_PTX_PATH" != "" ]; then
         if "$BUILD_DIR/cuda_generated_2d_readback" "$PTX_PATH" "$CUDA_ELEMENT_COUNT" "$CUDA_FILL_VALUE" "$EXPECTED_PIXELS_PATH" "$ACTUAL_PIXELS_PATH" "$FONT_PTX_PATH" "$FONT_EXPECTED_PIXELS_PATH" "$FONT_ACTUAL_PIXELS_PATH" >"$BUILD_DIR/evidence.env" 2>"$BUILD_DIR/run.err"; then
-            :
-        elif [ ! -s "$BUILD_DIR/evidence.env" ]; then
+            CUDA_HELPER_EXIT_STATUS=0
+        else
+            CUDA_HELPER_EXIT_STATUS=$?
             emit_unavailable "cuda-font-readback-run-failed"
         fi
     elif "$BUILD_DIR/cuda_generated_2d_readback" "$PTX_PATH" "$CUDA_ELEMENT_COUNT" "$CUDA_FILL_VALUE" "$EXPECTED_PIXELS_PATH" "$ACTUAL_PIXELS_PATH" >"$BUILD_DIR/evidence.env" 2>"$BUILD_DIR/run.err"; then
-        :
+        CUDA_HELPER_EXIT_STATUS=0
     else
-        if [ ! -s "$BUILD_DIR/evidence.env" ]; then
-            emit_unavailable "cuda-readback-run-failed"
-        fi
+        CUDA_HELPER_EXIT_STATUS=$?
+        emit_unavailable "cuda-readback-run-failed"
     fi
 fi
 
+cuda_append_toolchain_provenance
 cuda_append_artifact_hashes
 cuda_validate_evidence
 
@@ -978,7 +1177,7 @@ cuda_validate_evidence
     echo
     echo "Date: $(date -u +%F)"
     echo
-    echo "This gate proves device execution of the exact hash-bound artifacts below; source-generation provenance is a separate requirement."
+    echo "This gate proves current-emitter source generation, verified PTX compilation, and device execution of the exact hash-bound artifact below."
     echo
     echo "| Field | Value |"
     echo "|---|---|"

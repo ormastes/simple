@@ -117,8 +117,6 @@ pub extern "C" fn rt_vulkan_unmap_memory(_handle: i64) -> i64 {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Upload raw bytes from `data_ptr` (host memory) into a Vulkan buffer.
-///
-/// `data_ptr` is the address of a byte array. `offset` is currently unused.
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_copy_to_buffer(handle: i64, data: RuntimeValue, offset: i64) -> i64 {
@@ -130,10 +128,9 @@ pub extern "C" fn rt_vulkan_copy_to_buffer(handle: i64, data: RuntimeValue, offs
 
 #[cfg(feature = "vulkan")]
 fn copy_to_buffer_bytes(handle: i64, data: &[u8], offset: i64) -> i64 {
-    let len = data.len();
-    if offset != 0 {
+    let Ok(offset) = u64::try_from(offset) else {
         return 0;
-    }
+    };
     let mut state = STATE.lock();
     let buf = match state.buffers.get(&handle) {
         Some(b) => b,
@@ -143,14 +140,11 @@ fn copy_to_buffer_bytes(handle: i64, data: &[u8], offset: i64) -> i64 {
         }
     };
 
-    if len > buf.size() as usize {
-        state.set_error("copy_to_buffer: source exceeds buffer".to_string());
-        return 0;
-    }
-    match buf.upload(&data) {
+    match buf.upload_at(data, offset) {
         Ok(()) => 1,
         Err(e) => {
             let err_msg = format!("copy_to_buffer: {e}");
+            state.set_error(err_msg.clone());
             tracing::error!("{}", err_msg);
             0
         }
@@ -161,17 +155,26 @@ fn copy_to_buffer_bytes(handle: i64, data: &[u8], offset: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "vulkan")]
 pub extern "C" fn rt_vulkan_copy_to_buffer_raw(handle: i64, data_ptr: i64, byte_count: i64, offset: i64) -> i64 {
-    if data_ptr <= 0 || byte_count < 0 || byte_count > 64 * 1024 * 1024 || offset != 0 {
+    if byte_count < 0 || offset < 0 || byte_count > 64 * 1024 * 1024 {
         return 0;
     }
+    let Some(end) = offset.checked_add(byte_count) else {
+        return 0;
+    };
     {
         let state = STATE.lock();
         let Some(buf) = state.buffers.get(&handle) else {
             return 0;
         };
-        if byte_count as u64 > buf.size() {
+        if end as u64 > buf.size() {
             return 0;
         }
+    }
+    if byte_count == 0 {
+        return copy_to_buffer_bytes(handle, &[], offset);
+    }
+    if data_ptr <= 0 {
+        return 0;
     }
     let data = unsafe { std::slice::from_raw_parts(data_ptr as *const u8, byte_count as usize) };
     copy_to_buffer_bytes(handle, data, offset)
@@ -346,13 +349,46 @@ pub extern "C" fn rt_vulkan_copy_buffer(_dst: i64, _src: i64, _size: i64) -> i64
 
 #[cfg(test)]
 mod tests {
-    use super::rt_vulkan_read_buffer_bytes;
-    use crate::value::rt_array_len;
+    use super::{rt_vulkan_read_buffer_bytes, rt_vulkan_copy_to_buffer_raw};
+    use crate::value::{byte_array_bytes, rt_array_len};
 
     #[test]
     fn read_buffer_bytes_rejects_invalid_ranges_with_empty_bytes() {
         assert_eq!(rt_array_len(rt_vulkan_read_buffer_bytes(0, 1, 0)), 0);
         assert_eq!(rt_array_len(rt_vulkan_read_buffer_bytes(1, -1, 0)), 0);
         assert_eq!(rt_array_len(rt_vulkan_read_buffer_bytes(1, 1, -1)), 0);
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    #[ignore = "requires a live Vulkan device"]
+    fn native_vulkan_upload_honors_nonzero_offset() {
+        use super::{rt_vulkan_alloc_buffer, rt_vulkan_free_buffer};
+        use super::super::vulkan_graphics_runtime_core::{rt_vulkan_init, rt_vulkan_shutdown};
+
+        struct VulkanShutdown;
+        impl Drop for VulkanShutdown {
+            fn drop(&mut self) {
+                rt_vulkan_shutdown();
+            }
+        }
+
+        assert_eq!(rt_vulkan_init(), 1);
+        let _shutdown = VulkanShutdown;
+        let buffer = rt_vulkan_alloc_buffer(16, 0x80);
+        assert!(buffer > 0);
+        let payload = [0u8, 1, 127, 128, 254, 255];
+        assert_eq!(
+            rt_vulkan_copy_to_buffer_raw(buffer, payload.as_ptr() as i64, payload.len() as i64, 5),
+            1
+        );
+        assert_eq!(
+            byte_array_bytes(rt_vulkan_read_buffer_bytes(buffer, payload.len() as i64, 5)).unwrap(),
+            payload
+        );
+        assert_eq!(rt_array_len(rt_vulkan_read_buffer_bytes(buffer, 4, 14)), 0);
+        assert_eq!(rt_vulkan_copy_to_buffer_raw(buffer, 0, 0, 16), 1);
+        assert_eq!(rt_vulkan_copy_to_buffer_raw(buffer, 0, 0, 17), 0);
+        assert_eq!(rt_vulkan_free_buffer(buffer), 1);
     }
 }

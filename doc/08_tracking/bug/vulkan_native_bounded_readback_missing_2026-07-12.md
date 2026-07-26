@@ -1,18 +1,18 @@
 # Vulkan native bounded readback API is missing
 
-- **Status:** interpreter device pass; source-matched native receipt pending
+- **Status:** interpreter and native runtime device pass; source-matched Simple native receipt pending
 
 ## Problem
 
 `vulkan_sffi_read_buffer_bytes(handle, byte_count, offset)` originally declared
 `rt_vulkan_read_buffer_bytes` before every native runtime exported a compatible
 symbol. Native callers therefore reached address zero during device framebuffer
-readback. The symbol now exists; the remaining native gap is source-matched
-device evidence and nonzero-offset upload support.
+readback. The symbol and nonzero-offset upload now exist; the remaining native
+gap is a source-matched Simple executable receipt.
 
-The older `rt_vulkan_copy_from_buffer` export accepts a raw destination pointer,
-ignores `offset`, and copies the complete buffer. The SFFI owner currently
-adapts a packed byte array to that ABI only for exact-size, offset-zero reads.
+The legacy typed `rt_vulkan_copy_from_buffer` export still cannot safely mutate
+interpreter arrays. New callers use array-returning bounded readback, while
+compiled callers use the raw core-C destination ABI.
 
 ## Required fix
 
@@ -35,11 +35,12 @@ Legacy in-place readback fails closed in the interpreter because interpreter
 arrays use copy-on-write values; callers must use
 `vulkan_sffi_read_buffer_bytes`.
 
-The interpreter device round trip now passes with exact nonzero-offset bytes
-and OOB rejection. Its retained log is
-`build/gpu-goal/dual-abi/vulkan-live-readback-cycle3.log`. The remaining
-acceptance evidence is one source-matched native device round trip with the
-same checks.
+The interpreter device round trip passes with exact nonzero-offset bytes and
+OOB rejection. Its retained log is
+`build/gpu-goal/dual-abi/vulkan-live-readback-cycle3.log`. The native Rust
+runtime test `native_vulkan_upload_honors_nonzero_offset` passes the same real
+device checks. The remaining acceptance evidence is one source-matched Simple
+native executable round trip.
 
 
 ## Evidence
