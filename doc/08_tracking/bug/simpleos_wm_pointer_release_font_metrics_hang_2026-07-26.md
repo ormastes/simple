@@ -1,32 +1,49 @@
 # SimpleOS WM: pointer-release render hangs forever in taskbar-tray text measurement (2026-07-26)
 
-Status: LANE UNBLOCKED (rerun53 passes) — underlying font defect STILL OPEN
+Status: UNVERIFIED — an unretained local x86 fullscreen run reportedly passed;
+the latest canonical tracked report is FAIL, and ARM/SIMD remain unverified
 
-## Resolution (2026-07-26, rerun53)
+## Local rerun53 observation (2026-07-26; not retained evidence)
 
-The lane passes: `status=pass reason=pass`, zero production faults,
-`changed_bytes=23054033`, and `restored_sha256 == baseline_sha256` byte for byte
-(restore returns the screen exactly to its pre-maximize state), with the font
-region still matching its pinned oracle.
+An unretained local x86 fullscreen-wrapper run was reported with
+`status=pass reason=pass`, zero production faults, `changed_bytes=23054033`,
+and `restored_sha256 == baseline_sha256` byte for byte (the screen reportedly
+returned exactly to its pre-maximize state), with the font region still
+matching its pinned oracle.
 
-What actually unblocked it was **memoizing the font asset catalog**
-(cf09420b88e). `selected_font_asset_candidates()` rebuilt 16 structs from long
-string literals on every call, and the by-path lookup calls it more than once
-per invocation, so a single frame rebuilt that catalog hundreds of times. With
-that removed, the release render finishes inside the correlation budget.
+That observation is useful for directing the next rerun, but it is not
+acceptance evidence. No rerun53 report, capture artifacts, artifact hashes, or
+build/runtime attestation were committed, so the result cannot be reproduced
+or independently verified from this repository. It proves neither the ARM
+QEMU lane nor the required x86/ARM SIMD receipts.
 
-**Be precise about what this means: the render got FAST ENOUGH, it was never a
-hang.** That matches the evidence that finally made sense of it — the stall
-point moved between builds, which no fixed infinite loop does.
+The latest canonical tracked report remains
+`doc/09_report/simpleos_wm_fullscreen_evidence_2026-07-24.md`, which records
+`status: fail` and `reason: wm-simple-web-build-failed`. Therefore the
+SimpleOS-WM x QEMU lane must remain unverified until a fresh canonical run
+retains its report, captures, hashes, provenance/attestation, and applicable
+SIMD receipts.
+
+The local timing improvement was associated with **memoizing the font asset
+catalog** (cf09420b88e). `selected_font_asset_candidates()` rebuilt 16 structs
+from long string literals on every call, and the by-path lookup calls it more
+than once per invocation, so a single frame rebuilt that catalog hundreds of
+times. In the reported local run, removing that repeated work allowed the
+release render to finish inside the correlation budget.
+
+**Be precise about what the local observation suggests: the render got fast
+enough in that run; it does not establish a canonical lane PASS.** The moving
+stall point across builds remains evidence against a fixed infinite loop and
+supports pathological slowness as the working diagnosis.
 
 ### Still open, and NOT fixed by this
 
 `has_ttf=0` on **117 of 118** metric resolves, including on cache hits. Nearly
 all WM text is still drawn by the legacy bitmap fallback rather than real font
-metrics; exactly one real font load succeeded in the whole session. The lane is
-green because the frame now completes in time, not because the font pipeline is
-healthy. That anomaly deserves its own investigation — see "The actual anomaly"
-below.
+metrics; exactly one real font load succeeded in the whole reported session.
+The unretained local run reportedly completed because the frame finished in
+time, not because the font pipeline was healthy. That anomaly deserves its own
+investigation — see "The actual anomaly" below.
 
 Also unfixed and unaffected: the resolved-metric cache reading `keys=0
 values=0` (side finding below).
