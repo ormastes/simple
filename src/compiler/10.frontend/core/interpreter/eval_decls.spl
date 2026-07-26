@@ -9,6 +9,7 @@
 # All evaluation returns a value_id (i64). Errors indicated by -1 (VAL_NONE).
 
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
+use compiler.core.enum_discriminant_eval.{eval_enum_discriminant_expr}
 
 # ===== Declaration Evaluation =====
 
@@ -84,13 +85,13 @@ fn eval_decl(did: i64) -> i64:
         for variant_name in variants:
             var discriminant = next_discriminant
             if vi < discriminant_exprs.len() and discriminant_exprs[vi] >= 0:
-                val discriminant_value = eval_expr(discriminant_exprs[vi])
-                if eval_had_error:
+                val evaluated = eval_enum_discriminant_expr(
+                    discriminant_exprs[vi], name, variants[0:vi], resolved_discriminants
+                )
+                if not evaluated.valid:
+                    eval_set_error("enum " + name + " variant " + variant_name + ": " + evaluated.error)
                     return -1
-                if val_get_kind(discriminant_value) != VAL_INT:
-                    eval_set_error("enum " + name + " variant " + variant_name + " discriminant must evaluate to an integer")
-                    return -1
-                discriminant = val_get_int(discriminant_value)
+                discriminant = evaluated.value
             if discriminant < 0 or discriminant > 2147483647:
                 eval_set_error("enum " + name + " variant " + variant_name + " discriminant is outside 0..2147483647")
                 return -1
@@ -98,7 +99,9 @@ fn eval_decl(did: i64) -> i64:
                 if prior_discriminant == discriminant:
                     eval_set_error("enum " + name + " variant " + variant_name + " has a duplicate discriminant")
                     return -1
-            env_define_global(variant_name, val_make_int(discriminant))
+            val discriminant_value = val_make_int(discriminant)
+            env_define_global(variant_name, discriminant_value)
+            env_define_global(name + "." + variant_name, discriminant_value)
             resolved_discriminants.push(discriminant)
             next_discriminant = discriminant + 1
             vi = vi + 1

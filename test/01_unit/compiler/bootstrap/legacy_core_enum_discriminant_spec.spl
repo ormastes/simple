@@ -1,0 +1,42 @@
+use std.spec.{describe, it, expect, step}
+use compiler.core.frontend.{core_frontend_parse_reset}
+use compiler.core.compiler.c_codegen.{codegen_program}
+use compiler.core.interpreter.{core_interpret, eval_get_error, val_get_int}
+
+val enum_declarations = """
+val BASE: i64 = 4
+enum ExitCode:
+    Ready = BASE * 2
+    Running
+    Done = (ExitCode.Running as i64) + 2
+"""
+val enum_source = enum_declarations + """
+fn main() -> i64:
+    ExitCode.Done as i64
+"""
+
+describe "legacy core enum discriminants":
+    it "shares constant folding and qualified enum names across interpreter and C":
+        step("Resolve module constants, implicit continuation, and enum-to-int casts")
+        val interpreted = core_interpret(enum_source, "legacy_core_enum_discriminant_spec.spl")
+        expect(val_get_int(interpreted)).to_equal(11)
+
+        step("Emit declarations and qualified references with one C identifier spelling")
+        expect(core_frontend_parse_reset(enum_source, "legacy_core_enum_codegen_spec.spl")).to_equal(true)
+        val generated = codegen_program()
+        expect(generated).to_contain("static const int64_t ExitCode_Ready = 8;")
+        expect(generated).to_contain("static const int64_t ExitCode_Running = 9;")
+        expect(generated).to_contain("static const int64_t ExitCode_Done = 11;")
+        expect(generated).to_contain("((int64_t)(ExitCode_Done))")
+        expect(generated.contains("ExitCode.Done")).to_equal(false)
+
+    it "rejects runtime calls as enum discriminants":
+        step("Keep declaration-time evaluation free of runtime calls")
+        val invalid = """
+fn runtime_value() -> i64:
+    7
+enum Bad:
+    Value = runtime_value()
+"""
+        expect(core_interpret(invalid, "legacy_core_enum_runtime_call_spec.spl")).to_equal(-1)
+        expect(eval_get_error()).to_contain("not a constant integer expression")

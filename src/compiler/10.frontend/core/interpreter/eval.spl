@@ -29,6 +29,7 @@ fn record_decision(file: text, line: i64, taken: bool):
 # Basic runtime type checking for function parameters
 
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ANY}
+use compiler.core.types.{TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32}
 use compiler.core.types.{TYPE_NAMED_BASE, TYPE_STRUCT, named_type_name, type_tag_name}
 
 # ===== Structural Subtyping =====
@@ -245,6 +246,34 @@ fn eval_has_error() -> bool:
 
 # ===== Expression Evaluation =====
 
+fn eval_integer_cast_type(type_tag: i64) -> bool:
+    if type_tag == TYPE_I64 or type_tag == TYPE_U8 or type_tag == TYPE_U16: return true
+    if type_tag == TYPE_U32 or type_tag == TYPE_U64 or type_tag == TYPE_I8: return true
+    type_tag == TYPE_I16 or type_tag == TYPE_I32
+
+fn eval_cast_expr(eid: i64) -> i64:
+    val cast_node = expr_get(eid)
+    if not eval_integer_cast_type(cast_node.i_val):
+        eval_set_error("core interpreter only supports enum/integer casts to integer types")
+        return -1
+    val operand_id = cast_node.left
+    val operand = expr_get(operand_id)
+    if operand.tag == EXPR_FIELD_ACCESS:
+        val base = expr_get(operand.left)
+        if base.tag == EXPR_IDENT:
+            val variants = enum_table_lookup(base.s_val)
+            if variants != "":
+                for variant_name in variants.split(","):
+                    if variant_name == operand.s_val:
+                        val discriminant = env_lookup_global(base.s_val + "." + variant_name)
+                        if val_is_int(discriminant):
+                            return discriminant
+    val value = eval_expr(operand_id)
+    if val_is_int(value):
+        return value
+    eval_set_error("cast operand is not an enum discriminant or integer")
+    -1
+
 fn eval_expr(eid: i64) -> i64:
     if eid < 0: return val_make_nil()
     if eval_had_error: return -1
@@ -294,6 +323,7 @@ fn eval_expr(eid: i64) -> i64:
         if tag == EXPR_INTERPOLATED_STRING: return eval_interpolated_string(eid)
         if tag == EXPR_SLICE: return eval_slice_expr(eid)
         if tag == EXPR_NULL_COALESCE: return eval_null_coalesce(eid)
+        if tag == EXPR_CAST: return eval_cast_expr(eid)
         if tag == EXPR_UNIT: return val_make_nil()
         if tag == EXPR_PASS: return val_make_nil()
         if tag == EXPR_PASS_TODO: return val_make_nil()

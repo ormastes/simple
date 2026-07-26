@@ -1,0 +1,153 @@
+use std.spec.{describe, it, expect, fail, step}
+use std.io_runtime.{file_read}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types_expr.{ExprKind}
+use compiler.core.parser.{parser_has_errors, parser_set_had_error}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.config.{Logger}
+
+fn lower_enum_source(source: text, filename: text) -> (HirModule, MirLowering):
+    parser_set_had_error(false)
+    val ast = parse_and_build_module(source, filename)
+    expect(parser_has_errors()).to_equal(false)
+
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(ast)
+    expect(hir_lowering.errors.len()).to_equal(0)
+
+    var mir_lowering = MirLowering.new(hir.symbols)
+    mir_lowering.lower_module(hir)
+    (hir, mir_lowering)
+
+fn enum_discriminant(lowering: MirLowering, enum_name: text, variant_name: text) -> i64:
+    val names = lowering.enum_variant_index[enum_name]
+    val discriminants = lowering.enum_variant_discriminants[enum_name]
+    var i = 0
+    while i < names.len():
+        if names[i] == variant_name:
+            return discriminants[i]
+        i = i + 1
+    -1
+
+fn lowering_errors_contain(lowering: MirLowering, fragment: text) -> bool:
+    for error in lowering.errors:
+        if error.message.contains(fragment):
+            return true
+    false
+
+describe "explicit enum discriminants through HIR and MIR", tag: ["only-compiled"]:
+    it "preserves expressions and resolves sparse implicit values":
+        step("Lower the frozen sparse enum")
+        val source = (
+            "enum SparseCode:\n" +
+            "    Start = 4\n" +
+            "    Next\n" +
+            "    Sparse = 23\n" +
+            "    AfterSparse\n" +
+            "    Rewind = 2\n"
+        )
+        val lowered = lower_enum_source(source, "explicit_enum_sparse.spl")
+        val hir = lowered.0
+        val mir_lowering = lowered.1
+
+        step("Confirm HIR retained explicit expressions")
+        val enum_def = hir.enums.values()[0]
+        expect(enum_def.variants.len()).to_equal(5)
+        expect(enum_def.variants[0].has_discriminant).to_equal(true)
+        match enum_def.variants[0].discriminant.kind:
+            case IntLit(value): expect(value).to_equal(4)
+            case _: fail("Start discriminant was not preserved in HIR")
+        expect(enum_def.variants[1].has_discriminant).to_equal(false)
+        expect(enum_def.variants[2].has_discriminant).to_equal(true)
+        expect(enum_def.variants[3].has_discriminant).to_equal(false)
+        match enum_def.variants[4].discriminant.kind:
+            case IntLit(value): expect(value).to_equal(2)
+            case _: fail("Rewind discriminant was not preserved in HIR")
+
+        step("Confirm MIR resolved explicit and implicit values")
+        expect(mir_lowering.errors.len()).to_equal(0)
+        expect(mir_lowering.enum_variant_discriminants["SparseCode"]).to_equal([4, 5, 23, 24, 2])
+
+    it "materializes an aliased imported enum with provider-private ABI constants":
+        step("Parse a provider and an aliased explicit-import consumer")
+        val logger = Logger(level: 0)
+        val provider = parse_full_frontend(
+            "val SYSINFO_ABI_BASE: i64 = 4\n" +
+            "pub enum SysInfoKind:\n    Memory = SYSINFO_ABI_BASE\n    CpuCount\n    Uptime = 20\n    Next(SysInfoKind)\n",
+            "os.kernel.types.syscall_types",
+            "os.kernel.types.syscall_types",
+            logger
+        )
+        val consumer = parse_full_frontend(
+            "use os.kernel.types.syscall_types.{SysInfoKind as SysKind}\n" +
+            "fn memory_kind() -> i64:\n    SysKind.Memory as i64\n",
+            "os.userlib.system",
+            "os.userlib.system",
+            logger
+        )
+
+        step("Lower the consumer with the provider import surface")
+        var modules: Dict<text, any> = {}
+        modules["os.kernel.types.syscall_types"] = provider
+        var hir_lowering = HirLowering.with_filename("os.userlib.system")
+        hir_lowering.modules_by_name = modules
+        val hir = hir_lowering.lower_module(consumer)
+
+        step("Confirm the imported definition reaches a fresh MIR lowering")
+        expect(hir_lowering.errors.len()).to_equal(0)
+        expect(hir.enums.len()).to_equal(1)
+        val imported_enum = hir.enums.values()[0]
+        expect(imported_enum.name).to_equal("SysKind")
+        expect(imported_enum.runtime_name).to_equal("os.kernel.types.syscall_types.SysInfoKind")
+        var mir_lowering = MirLowering.new(hir.symbols)
+        mir_lowering.lower_module(hir)
+        expect(mir_lowering.errors.len()).to_equal(0)
+        expect(mir_lowering.enum_variant_index["SysKind"]).to_equal(["Memory", "CpuCount", "Uptime", "Next"])
+        expect(mir_lowering.enum_variant_discriminants["SysKind"]).to_equal([4, 5, 20, 21])
+
+    it "preserves the SyscallId ABI from its real source":
+        step("Lower the canonical syscall type module")
+        val source = file_read("src/os/kernel/types/syscall_types.spl")
+        val lowered = lower_enum_source(source, "src/os/kernel/types/syscall_types.spl")
+        val mir_lowering = lowered.1
+
+        expect(mir_lowering.errors.len()).to_equal(0)
+        expect(enum_discriminant(mir_lowering, "SyscallId", "Exit")).to_equal(0)
+        expect(enum_discriminant(mir_lowering, "SyscallId", "Mmap")).to_equal(10)
+        expect(enum_discriminant(mir_lowering, "SyscallId", "IpcSend")).to_equal(20)
+        expect(enum_discriminant(mir_lowering, "SyscallId", "Rename")).to_equal(44)
+        expect(enum_discriminant(mir_lowering, "SyscallId", "Ftruncate")).to_equal(43)
+        expect(enum_discriminant(mir_lowering, "SyscallId", "DevEnumerate")).to_equal(80)
+
+    it "fails closed during MIR semantic resolution":
+        step("Reject a non-integer constant")
+        val text_value = lower_enum_source(
+            "enum Bad:\n    Value = \"four\"\n",
+            "explicit_enum_text.spl"
+        ).1
+        expect(lowering_errors_contain(text_value, "must be an integer constant")).to_equal(true)
+
+        step("Reject a non-constant call")
+        val call_value = lower_enum_source(
+            "fn runtime_value() -> i64:\n    4\n\nenum Bad:\n    Value = runtime_value()\n",
+            "explicit_enum_call.spl"
+        ).1
+        expect(lowering_errors_contain(call_value, "must be a constant integer expression")).to_equal(true)
+
+        step("Reject duplicate values")
+        val duplicate = lower_enum_source(
+            "enum Bad:\n    First = 4\n    Second = 4\n",
+            "explicit_enum_duplicate.spl"
+        ).1
+        expect(lowering_errors_contain(duplicate, "duplicate discriminant 4")).to_equal(true)
+
+        step("Reject values outside the portable runtime range")
+        val out_of_range = lower_enum_source(
+            "enum Bad:\n    Value = 2147483648\n",
+            "explicit_enum_out_of_range.spl"
+        ).1
+        expect(lowering_errors_contain(out_of_range, "outside portable runtime range 0..2147483647")).to_equal(true)

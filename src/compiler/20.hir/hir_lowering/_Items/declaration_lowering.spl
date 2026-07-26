@@ -25,6 +25,67 @@ use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
+fn imported_enum_discriminant_value(expr: Expr, enum_name: text, constants: Dict<text, Const>, prior_names: [text], prior_values: [i64], depth: i64) -> i64?:
+    """Resolve an imported enum ABI value in its defining module."""
+    if depth > 64:
+        return nil
+    match expr.kind:
+        case ExprKind.IntLit(value):
+            return Some(value)
+        case ExprKind.Ident(name):
+            var i = 0
+            while i < prior_names.len():
+                if prior_names[i] == name:
+                    return Some(prior_values[i])
+                i = i + 1
+            if val const_def = constants.get(name):
+                return imported_enum_discriminant_value(const_def.value, enum_name, constants, prior_names, prior_values, depth + 1)
+            return nil
+        case ExprKind.Field(base, field):
+            match base.kind:
+                case ExprKind.Ident(base_name):
+                    if base_name == enum_name:
+                        var i = 0
+                        while i < prior_names.len():
+                            if prior_names[i] == field:
+                                return Some(prior_values[i])
+                            i = i + 1
+                case _: ()
+            return nil
+        case ExprKind.Cast(value, _):
+            return imported_enum_discriminant_value(value, enum_name, constants, prior_names, prior_values, depth + 1)
+        case ExprKind.Unary(op, value):
+            if val operand = imported_enum_discriminant_value(value, enum_name, constants, prior_names, prior_values, depth + 1):
+                match op:
+                    case UnaryOp.Neg: return Some(0 - operand)
+                    case UnaryOp.BitNot: return Some(~operand)
+                    case _: return nil
+            return nil
+        case ExprKind.Binary(op, left, right):
+            val resolved_left = imported_enum_discriminant_value(left, enum_name, constants, prior_names, prior_values, depth + 1)
+            val resolved_right = imported_enum_discriminant_value(right, enum_name, constants, prior_names, prior_values, depth + 1)
+            if val lhs = resolved_left:
+                if val rhs = resolved_right:
+                    match op:
+                        case BinOp.Add: return Some(lhs + rhs)
+                        case BinOp.Sub: return Some(lhs - rhs)
+                        case BinOp.Mul: return Some(lhs * rhs)
+                        case BinOp.Div:
+                            if rhs != 0: return Some(lhs / rhs)
+                        case BinOp.Mod:
+                            if rhs != 0: return Some(lhs % rhs)
+                        case BinOp.BitAnd: return Some(lhs & rhs)
+                        case BinOp.BitOr: return Some(lhs | rhs)
+                        case BinOp.BitXor: return Some(lhs ^ rhs)
+                        case BinOp.Shl:
+                            if rhs >= 0 and rhs < 63: return Some(lhs << rhs)
+                        case BinOp.Shr:
+                            if rhs >= 0 and rhs < 63: return Some(lhs >> rhs)
+                        case _: ()
+            return nil
+        case _:
+            return nil
+
 extern fn rt_env_get(key: text) -> text
 
 fn hir_lower_env_get(key: text) -> text:

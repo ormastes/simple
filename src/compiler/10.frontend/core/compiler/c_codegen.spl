@@ -38,12 +38,14 @@ use compiler.core.types.{fn_sig_param_count, fn_sig_get_param_names, fn_sig_get_
 use compiler.core.types.{int_to_str}
 use compiler.core.compiler.cg_helpers.{cg_emit, cg_emit_line, cg_emit_blank, cg_indent_inc, cg_indent_dec}
 use compiler.core.compiler.cg_helpers.{cg_output_get, cg_reset}
+use compiler.core.compiler.cg_helpers.{et_reset, et_add}
 use compiler.core.compiler.cg_helpers.{vt_reset, vt_push_scope, vt_pop_scope, vt_add, vt_find}
 use compiler.core.compiler.cg_helpers.{st_reset, st_add, st_find}
 use compiler.core.compiler.cg_helpers.{sa_reset}
 use compiler.core.compiler.cg_helpers.{cg_infer_expr_type}
 use compiler.core.compiler.cg_expr.{cg_expr, cg_stmt}
 use compiler.core.compiler.cg_expr.{cg_emit_if_as_stmt, cg_emit_for_as_stmt, cg_emit_while_as_stmt}
+use compiler.core.enum_discriminant_eval.{eval_enum_discriminant_expr}
 
 # ===== Declaration Codegen =====
 
@@ -85,6 +87,9 @@ fn cg_register_pass():
                 val m_ptypes = decl_get_param_types(m_idx)
                 val m_ret = decl_get_ret_type(m_idx)
                 fn_sig_register(m_name, decl_get_param_names(m_idx), m_ptypes, m_ret, 0)
+
+        if tag == DECL_ENUM:
+            et_add(decl_get_name(decl_idx))
 
 fn cg_emit_preamble():
     val lb = "{"
@@ -266,11 +271,13 @@ fn cg_emit_enums():
                 val v_name: text = variants[j]
                 var discriminant = next_discriminant
                 if j < discriminant_exprs.len() and discriminant_exprs[j] >= 0:
-                    val discriminant_expr = discriminant_exprs[j]
-                    if expr_get_tag(discriminant_expr) != EXPR_INT_LIT:
-                        cg_emit_line("#error enum " + name + " variant " + v_name + " discriminant is not an integer literal")
+                    val evaluated = eval_enum_discriminant_expr(
+                        discriminant_exprs[j], name, variants[0:j], resolved_discriminants
+                    )
+                    if not evaluated.valid:
+                        cg_emit_line("#error enum " + name + " variant " + v_name + ": " + evaluated.error)
                         return
-                    discriminant = expr_get_int(discriminant_expr)
+                    discriminant = evaluated.value
                 if discriminant < 0 or discriminant > 2147483647:
                     cg_emit_line("#error enum " + name + " variant " + v_name + " discriminant is outside 0..2147483647")
                     return
@@ -742,6 +749,7 @@ fn cg_emit_main():
 
 fn codegen_program() -> text:
     cg_reset()
+    et_reset()
     vt_reset()
     st_reset()
     sa_reset()
