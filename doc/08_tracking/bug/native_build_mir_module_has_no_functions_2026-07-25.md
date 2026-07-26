@@ -53,7 +53,46 @@ src/compiler_rust/target/debug/simple native-build <file>.spl \
 | `ctrl_probe.spl` — extern + `fn main() -> i64` + `val` | rc=1, no functions |
 | `free_probe.spl` — externs + `fn main() -> i64` + `var`/loops | rc=1, no functions |
 
-## TRIGGER ISOLATED: a module-level `extern fn` declaration
+## BLAST RADIUS IS WIDER THAN FIRST FILED — module-level `val` triggers it too
+
+A second, independent investigation reproduced the same failure with **no
+extern at all**. A module-level `val` is sufficient, *even when never
+referenced*:
+
+| fixture | source | rc |
+|---|---|---|
+| `triv` | `fn main(): print(5)` | **0** |
+| `valunref` | `val BASE: i64 = 5` + `fn main(): print(5)` — val NEVER referenced | **1** |
+| `ctl` | `val BASE: i64 = 5` + `fn main(): print(BASE)` | **1** |
+| `imp` | `use owner.{BASE}` | **1** |
+| `fnw` | accessor-function workaround | **1** |
+| `scripts/check/check-seed-native-build-invariant.shs` | the repo's own gate | **1** |
+
+So the trigger is not specifically `extern fn` — it is a module-level ITEM
+(extern or `val`) alongside `main`. The unreferenced case is the sharpest clue:
+nothing *uses* the item, so this is about how module-level items are collected,
+not about resolving a reference to one.
+
+This also means **the repo's own seed native-build gate cannot pass right now**,
+and any `.spl` module with a module-level `val` or `extern` is affected — far
+beyond the deep-free work that surfaced it.
+
+### Related harness trap: `_skip_dirs` silently excludes whole trees
+
+`src/compiler/80.driver/driver_source_loading.spl:24`:
+
+```
+val _skip_dirs = ["test", "tests", "doc", "docs", "verification", "resources", "scripts", "build"]
+```
+
+Fixtures under `scripts/`, `build/`, `test/`, or `doc/` are **never compiled**.
+Consequence worth acting on separately: the seed gate's fixture lives at
+`scripts/check/cert/redeploy_gate/fixtures/seed_cross_module`, i.e. inside a
+skipped tree — **it cannot work where it currently lives**, independent of the
+gate's other defects. Put probe fixtures in a non-skipped path such as
+`probes/`.
+
+## FIRST ISOLATION: a module-level `extern fn` declaration
 
 Single-variable result. A return-typed `main` is RULED OUT (`varA` passes);
 adding nothing but an `extern fn` at module scope makes the build fail:
