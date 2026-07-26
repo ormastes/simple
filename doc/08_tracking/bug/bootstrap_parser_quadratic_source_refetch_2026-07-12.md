@@ -2,7 +2,7 @@
 
 ## Status
 
-Partially fixed; scaling and RSS acceptance remain open. Blocks bounded pure-Simple bootstrap and therefore the imported-enum,
+Parser scaling fixed; full bootstrap acceptance remains open. Blocks bounded pure-Simple bootstrap and therefore the imported-enum,
 UI/TUI, GUI, and WM runtime evidence gates.
 
 ## Evidence
@@ -49,6 +49,12 @@ UI/TUI, GUI, and WM runtime evidence gates.
   three-cycle lane is exhausted. Next fresh cycle: time lexer-only 440/880
   inputs through public `lex_init`/`lex_next`/`TOK_EOF`; only then select a
   lexer or parser/AST fix.
+- The fresh lexer-only probe measured 539ms/5,272ms and isolated the owner:
+  `scan_ident` and `scan_number` each bound `self.source_chars` to a local
+  array, so value-copy lowering cloned the entire source once per identifier
+  or number token. Direct indexed field reads remove those copies without
+  changing array semantics. The unchanged parser oracle now passes at
+  33ms/75ms (2.27x), 205,192 KiB max RSS, and exit 0.
 - A higher-requested, environment-gated mutable-object COW diagnostic was
   attempted three times against an isolated 22 KiB parse (exact generator and
   warm-up variants). Each SIGSEGVed before emitting a counter. All diagnostic

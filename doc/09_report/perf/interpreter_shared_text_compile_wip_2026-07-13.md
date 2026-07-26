@@ -81,3 +81,11 @@ An equal-size, disjoint-identifier control measured 500ms/504ms, ruling out
 growth of the global short-token cache. No production optimization is
 authorized until a fresh bounded cycle separates lexer-only 440/880 timing
 from parser/AST timing.
+
+That fresh cycle measured lexer-only 440/880 at 539ms/5,272ms. Two
+field-to-local array bindings in `scan_ident` and `scan_number` were cloning
+the complete `source_chars` array for every identifier and number. Replacing
+the aliases with direct indexed field reads made the unchanged parser oracle
+pass at 33ms/75ms (2.27x), 4.62s wall time, and 205,192 KiB max RSS. The
+small-fixture latency, ratio, and 220,321 KiB RSS gates are now green; the
+493-source and pure-compiler acceptance gates remain pending.

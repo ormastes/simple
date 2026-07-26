@@ -1066,6 +1066,13 @@ the shared binary — deploys require explicit user go-ahead).
   and duplicate-declaration scans are also inactive on this JIT path. The
   three-cycle cap is reached; the next fresh session must run one lexer-only
   440/880 timing discriminator before changing production code.
+  That discriminator measured 539ms/5,272ms and isolated two
+  field-to-local array copies in `scan_ident` and `scan_number`; value-copy
+  lowering cloned the whole source per identifier/number token. Direct
+  indexed field reads remove the copies. The unchanged parser oracle now
+  passes at 33ms/75ms (2.27x), 205,192 KiB max RSS, and exit 0. A source
+  contract forbids restoring either hot whole-array alias. The 493-source
+  phase-2 and imported-enum gates remain pending.
 
   The retained generation-1 pure-Simple candidate could not run the focused
   scaling fixture because HIR resolution rejected exported `parse_module` and
