@@ -15,8 +15,11 @@ bootstrap-unverified. The three-check cap is exhausted.
 - explicit enum discriminants and impl-only function accumulation are
   implemented with direct regressions;
 - the final markers are `driver:errors-read:done` followed by the nil receiver;
-- HIP-to-ROCm batches, fail-closed degenerate Web, and nested IMAGE projection
-  are source-complete but unverified;
+- HIP-to-ROCm batches, fail-closed degenerate Web, nested IMAGE projection, and
+  shared nested collection (valid plus stale/duplicate/orphan rejection) are
+  source-present but runtime-unverified;
+- 32 changed/new specs require post-admission docgen: 18 mirrors are missing,
+  14 are stale, and zero are current;
 - retained Stage 2/3 and native caches must be preserved;
 - do not use the Rust seed or stale CLI as evidence.
 

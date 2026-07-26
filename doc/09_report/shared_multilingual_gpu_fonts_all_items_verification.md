@@ -81,10 +81,10 @@ Current count: `0 pass`, `14 active`, `9 blocked`.
 | REQ-008 | active | B+C manifest/shaping | manifest and parser/loader specs cover `glyf`, default instance, bitmap, and rejection policy | admitted CLI; run B/C command sets | `/root` |
 | REQ-009 | active | C+E material/native | renderer, aggregate surface, emission, backend and perf specs contain cache identity/lifecycle oracles | admitted CLI and native record; run C/E sets | `/root` |
 | REQ-010 | active | E native/emission | GPU emission and CUDA handoff executable/manual pairs cover source/artifact contracts; emission is not execution | admitted CLI; run E source commands; retained native artifact required for promotion | `/root` |
-| REQ-011 | active | D+E surfaces/native | aggregate surfaces/route plus canonical Web, GUI, hosted WM, SimpleOS and RV64 pairs exist; working changes add fail-closed degenerate Web status and ancestor-clipped nested IMAGE projection | changes are unverified; admitted CLI, hosted frame and QEMU pixels required; run D/E sets | `/root` |
+| REQ-011 | active | D+E surfaces/native | aggregate surfaces/route plus canonical Web, GUI, hosted WM, SimpleOS and RV64 pairs exist; working changes add fail-closed degenerate Web status, ancestor-clipped nested IMAGE projection, and shared nested-collector cases for valid collection plus stale/duplicate/orphan rejection | changes are source-present but runtime-unverified; admitted CLI, hosted frame and QEMU pixels required; run D/E sets | `/root` |
 | REQ-012 | blocked | E native 2D/3D/perf | native readback spec contains HUD/world, handles, submit, fence, depth/transform and readback gates | admitted CLI plus real graphics device; run E native command | `/root` |
 | REQ-013 | blocked | E native 2D/3D/perf | native readback spec rejects unavailable and forged promotion | one real backend must pass both 2D and 3D through E native command | `/root` |
-| REQ-014 | blocked | B–E generation / F audit | eight assigned mirrors are missing; the other 18 assigned mirrors require fresh docgen, and no retained log proves `0 stubs` | admitted CLI; run every docgen command below; review manuals | `/root` |
+| REQ-014 | blocked | A–E generation / F audit | among 32 changed/new specs, 18 mirrors are missing, 14 are stale, zero are current, and no retained log proves `0 stubs` | admitted CLI; run all 32 docgen commands below; review manuals | `/root` |
 | REQ-015 | active | C shaping/material/config | aggregate surfaces and focused config specs cover identity, policies, target order and pre-mutation rejection; working changes canonicalize HIP to ROCm on the prepared batch | batch change is unverified; admitted CLI required; run aggregate/C commands | `/root` |
 | NFR-001 | active | B manifest/distribution | manifest and SimpleOS bundle source gates cover immutable hashes, deterministic generation and corruption rejection | admitted CLI; run B command set | `/root` |
 | NFR-002 | blocked | E native/perf | native readback and perf specs define exact packed-ARGB comparator and provenance fields | admitted CLI plus real device; run E native/perf commands | `/root` |
@@ -101,11 +101,11 @@ runtime/native requirement.
 
 ## Canonical executable/manual audit
 
-The frozen inventory contains all 26 executable sources. It currently has 18
-present mirrors, eight missing mirrors, 12 demonstrably stale mirrors whose
-sources changed later, six same-revision but still unverified mirrors, and zero
-retained owner docgen `{out,err}` files. Therefore zero manuals have accepted
-current `0 stubs` evidence.
+The authoritative inventory contains 32 executable specs changed or added since
+`origin/main`, including current working-tree changes. Eighteen mirrored manuals
+are missing, 14 are present but stale, zero are current, and zero retained owner
+docgen `{out,err}` files exist. Therefore all 32 require post-admission docgen
+and zero manuals have accepted current `0 stubs` evidence.
 
 The eleven original acceptance specs are accounted for, but their mirrors are
 not all current: `install_font_assets_spec.md` lacks one current scenario title,
@@ -122,23 +122,35 @@ production-surface acceptance mirrors exist for:
 evidence, not an independent REQ-011 producer acceptance row; its absent manual
 does not replace any canonical pair.
 
-Eight required focused specs currently lack mirrors:
+Eighteen changed/new specs currently lack mirrors:
 
+- `doc/06_spec/01_unit/compiler/bootstrap/address_of_parser_spec.md`
+- `doc/06_spec/01_unit/compiler/bootstrap/explicit_enum_discriminant_parser_spec.md`
+- `doc/06_spec/01_unit/compiler/bootstrap/hir_lowering_error_collection_spec.md`
+- `doc/06_spec/01_unit/compiler/bootstrap/legacy_core_enum_discriminant_spec.md`
+- `doc/06_spec/01_unit/compiler/bootstrap/pub_mod_parser_spec.md`
+- `doc/06_spec/01_unit/compiler/hir/bootstrap_impl_function_accumulation_spec.md`
+- `doc/06_spec/01_unit/compiler/mir/address_of_lowering_spec.md`
+- `doc/06_spec/01_unit/compiler/parser/explicit_enum_discriminant_spec.md`
+- `doc/06_spec/01_unit/lib/common/text_layout/font_render_config_spec.md`
+- `doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_result_spec.md`
 - `doc/06_spec/01_unit/lib/skia/ot_layout_apply_spec.md`
 - `doc/06_spec/01_unit/lib/skia/ot_layout_gpos_spec.md`
 - `doc/06_spec/01_unit/lib/skia/ot_layout_pinned_inventory_spec.md`
 - `doc/06_spec/01_unit/lib/skia/ot_parser_layout_selector_spec.md`
 - `doc/06_spec/01_unit/lib/skia/ot_parser_spec.md`
 - `doc/06_spec/01_unit/lib/skia/shaper_spec.md`
-- `doc/06_spec/01_unit/lib/common/text_layout/font_render_config_spec.md`
-- `doc/06_spec/01_unit/lib/gpu/engine3d/font_compat_spec.md`
+- `doc/06_spec/02_integration/compiler/explicit_enum_discriminant_runtime_spec.md`
+- `doc/06_spec/02_integration/rendering/wm_nested_content_frame_spec.md`
 
-Twelve existing mirrors are stale because their executable sources changed in this
+Fourteen existing mirrors are stale because their executable sources changed in this
 all-items worktree and no current pure-Simple docgen result exists:
 
 - `install_font_assets_spec.md`
 - `font_asset_manifest_spec.md`
+- `gui_entry_desktop_production_render_contract_spec.md`
 - `simpleos_font_asset_staging_spec.md`
+- `legacy_web_gui_wm_font_route_spec.md`
 - `shared_font_manifest_spec.md`
 - `shared_font_shaping_acceptance_spec.md`
 - `shared_font_surfaces_spec.md`
@@ -160,28 +172,17 @@ Static scans found no `pass_todo`, `expect(true).to_equal(true)`,
 `find doc/06_spec -name '*_spec.spl' -print` returned no paths. These are static
 checks only.
 
-The remaining six present mirrors are from the same revision as their sources:
-`selected_devanagari_spec`, `selected_arabic_spec`, `font_renderer_spec`,
-`gpu_font_emission_spec`, `cuda_generated_font_handoff_spec`, and
-`native_gpu_font_readback_spec`. Without retained docgen logs they remain
-unverified, not accepted.
-
-The current HIP-to-ROCm batch, degenerate-Web fail-closed, and nested WM IMAGE
-source/spec changes do not alter this frozen 26-manual count. They remain
-unverified implementation evidence and may make their affected owner manuals
-stale when those manuals are regenerated.
+The current HIP-to-ROCm batch, degenerate-Web fail-closed, nested WM IMAGE, and
+shared nested-frame collector changes remain unverified implementation evidence.
+The collector's source spec covers a valid reachable collection plus
+fail-closed stale, duplicate, and orphan rejection; its mirror is missing and
+the behavioral cases have not run on an admitted CLI.
 
 ## Exact owner commands
 
-The frozen docgen ownership is 26 specs: B4 + C13 + D5 + E4. Each owner retains
-stdout and stderr separately:
-
-| Lane | Assigned spec basenames | Retained output |
-|---|---|---|
-| B (4) | `install_font_assets_spec`, `font_asset_manifest_spec`, `simpleos_font_asset_staging_spec`, `shared_font_manifest_spec` | `docgen/lane-b/<basename>.{out,err}` |
-| C (13) | `ot_layout_apply_spec`, `ot_layout_gpos_spec`, `ot_layout_pinned_inventory_spec`, `ot_parser_layout_selector_spec`, `ot_parser_spec`, `shaper_spec`, `selected_devanagari_spec`, `selected_arabic_spec`, `font_renderer_spec`, `font_render_config_spec`, `font_compat_spec`, `shared_font_shaping_acceptance_spec`, `shared_font_surfaces_spec` | `docgen/lane-c/<basename>.{out,err}` |
-| D (5) | `web_font_rendering_surface_spec`, `gui_font_event_surface_spec`, `linux_hosted_wm_live_window_spec`, `rv64_simpleos_wm_font_input_spec`, `simpleos_wm_fullscreen_spec` | `docgen/lane-d/<basename>.{out,err}` |
-| E (4) | `gpu_font_emission_spec`, `cuda_generated_font_handoff_spec`, `native_gpu_font_readback_spec`, `shared_multilingual_gpu_fonts_perf_spec` | `docgen/lane-e/<basename>.{out,err}` |
+The authoritative docgen scope is the 32 changed/new specs classified above.
+Each source owner retains stdout and stderr separately under
+`docgen/preflight/<path-derived-basename>.{out,err}`; lane F audits all 32.
 
 All retained paths are below
 `build/test-artifacts/shared_multilingual_gpu_fonts/`. For each assigned source
@@ -293,7 +294,7 @@ run_focused_spec test/03_system/app/simple_2d/feature/native_gpu_font_readback_s
 run_focused_spec test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl
 ```
 
-Each of the 26 docgen commands must exit zero and report the affected spec
+Each of the 32 docgen commands must exit zero and report the affected spec
 complete with `0 stubs`. The owner retains both output streams; lane F reviews
 the generated operator flow.
 

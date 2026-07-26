@@ -11,8 +11,10 @@ All 23 requirement/NFR rows are mapped, but the umbrella result remains
   collection;
 - the typed-index collector, HIP-to-ROCm batch, fail-closed degenerate Web, and
   nested IMAGE changes are implemented but unverified;
-- the inventory is 26 sources, 18 present mirrors, eight missing, 12 stale,
-  six unverified, and zero docgen logs;
+- shared nested collection has source coverage for a valid collection and
+  stale, duplicate, and orphan rejection, but remains runtime-unverified;
+- the inventory is 32 changed/new specs: 18 mirrors missing, 14 stale, zero
+  current, and all 32 require post-admission docgen;
 - no full CLI exists, so runtime and docgen are not PASS;
 - current GPU hardware exists, but native readback/performance remain blocked on admission;
 - hosted WM needs a clean tree and reviewed glyph pin; RV64 needs ELF, disk, and crop hash.

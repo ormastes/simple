@@ -142,6 +142,10 @@ session. No Stage 4 CLI/core-C admission artifact exists, so essential-tools,
 deliberate-red/empty calibration, docgen, font execution, native promotion,
 and surface evidence remain blocked.
 
+The current docgen backlog is 32 changed/new specs since `origin/main`: 18
+mirrors are missing, 14 are stale, zero are current, and all 32 require
+post-admission regeneration with retained output and `0 stubs`.
+
 ## Open TODO and bounded continuation
 
 | TODO | Status | Required change and evidence |
@@ -174,6 +178,9 @@ the blocker or constitute runtime evidence:
   intentionally unsupported GROUP so Engine2D cannot present blank pixels as a
   successful render;
 - nested WM content frames now lower to ancestor-clipped IMAGE commands with
-  resolved Engine2D image inputs instead of unsupported GROUP metadata.
+  resolved Engine2D image inputs instead of unsupported GROUP metadata;
+- the shared nested-frame collector has behavioral source coverage for one
+  valid reachable collection and fail-closed stale, duplicate, and orphan
+  rejection.
 
-All three remain unverified until the admitted CLI runs their focused specs.
+All four remain unverified until the admitted CLI runs their focused specs.

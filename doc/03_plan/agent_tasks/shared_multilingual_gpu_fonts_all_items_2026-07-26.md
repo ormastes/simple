@@ -25,7 +25,7 @@ atlas, cache, process/env facade, or device-success path.
 | Focused tests | implementation and static coverage exist; prior runner exited before examples | calibrated, nonzero, authoritative runtime results |
 | Native GPU | source/emission and partial backend evidence exist | one real 2D+3D promoted device route and current perf record |
 | Surfaces | source contracts and retained artifacts exist | live canonical Web/GUI/WM/SimpleOS evidence and honest blocked rows |
-| Docs/manuals | 26 sources; 18 mirrors present, eight missing, 12 stale, six same-revision but unverified, zero retained docgen logs | current zero-stub manuals and one requirement/evidence matrix |
+| Docs/manuals | 32 changed/new sources since `origin/main`; 18 mirrors missing, 14 stale, zero current, and zero retained docgen logs | regenerate all 32 mirrors after CLI admission, require `0 stubs`, and update one requirement/evidence matrix |
 
 ## Parallel lanes
 
@@ -36,7 +36,7 @@ atlas, cache, process/env facade, or device-success path.
 | C shaping/material/config | `shaping_material` | `src/lib/skia/feature/{glyph,shaper}/**`, canonical text-layout/font-renderer files, their unit specs | integrate GSUB/GPOS, exact selected-script shaping, shared batch/cache/config-policy evidence |
 | D production surfaces | `surface_simpleos` | Web/GUI/WM/SimpleOS producer adapters and their dedicated system specs/manuals; no renderer internals | canonical Draw IR identity plus hosted and QEMU pixel/input evidence |
 | E native 2D/3D/perf | `native_gpu_perf` | existing Engine2D/Engine3D native adapters, font native-readback/perf specs, retained native evidence | REQ-012/013 and NFR-002/004–008 real device proof or exact blocked-host contracts |
-| F specs/docs/audit | `spec_docs_audit` | aggregate test plan, guides, state/traceability reports; no product code or owner-specific manuals | map every REQ/NFR, audit the frozen 26 owner-generated manuals/logs, and reject stale, missing, stubbed, or premature PASS evidence |
+| F specs/docs/audit | `spec_docs_audit` | aggregate test plan, guides, state/traceability reports; no product code or owner-specific manuals | map every REQ/NFR, audit all 32 changed/new source-to-manual pairs and owner logs, and reject stale, missing, stubbed, or premature PASS evidence |
 | H merge/final verify | `/root` | integration conflict resolution, final evidence report, branch history | primary review, direct-runtime guards, scoped verification once, status, rebase/file-count guard, push |
 
 ## Dependency and execution order
@@ -77,9 +77,11 @@ execution, owner docgen, native promotion, and surface evidence remain
 blocked.
 
 The working tree additionally implements HIP-to-ROCm prepared-batch
-canonicalization, fail-closed degenerate Simple Web results, and ancestor-clipped
-nested WM IMAGE projection. Their direct specs are present, but none has
-authoritative execution evidence; they remain active source changes.
+canonicalization, fail-closed degenerate Simple Web results, ancestor-clipped
+nested WM IMAGE projection, and a shared nested-frame collector whose behavioral
+spec covers a valid reachable collection plus stale, duplicate, and orphan
+rejection. Their direct specs are present, but none has authoritative execution
+evidence; they remain active source changes.
 
 ## Required handoff format
 
@@ -99,8 +101,8 @@ Each lane reports:
 - `git diff --check`.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` equals `0`.
 - Changed specs generate mirrored manuals with `0 stubs`.
-- Frozen docgen ownership is B4+C13+D5+E4; lane F reviews all 26 retained
-  `{out,err}` pairs but does not replace owner generation.
+- Post-admission docgen covers all 32 changed/new specs; lane F reviews all 32
+  retained `{out,err}` pairs but does not replace owner generation.
 - `sh scripts/audit/direct-env-runtime-guard.shs --working` and `--staged`.
 - Every REQ-001–015 and NFR-001–008 has current evidence or remains an explicit
   completion blocker; a blocked required row prevents overall `STATUS: PASS`.

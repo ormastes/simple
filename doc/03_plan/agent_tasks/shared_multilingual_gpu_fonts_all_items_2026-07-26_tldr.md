@@ -11,8 +11,10 @@ Six non-overlapping lanes own every selected REQ-001–015 and NFR-001–008 row
 - unavailable hardware stays blocked with exact owner, artifact, and resume command.
 - HEAD `7a161abfabb` fixes impl accumulation; the remaining error-collector
   typed-index fix and all font/Web/nested-IMAGE changes are bootstrap-unverified;
-- the manual inventory is 26 sources, 18 present, eight missing, 12 stale,
-  six unverified, and zero retained docgen logs.
+- shared nested-frame collection has source coverage for a valid collection and
+  stale, duplicate, and orphan rejection, but no authoritative runtime result;
+- the manual inventory is 32 changed/new specs: 18 mirrors missing, 14 stale,
+  zero current, and all 32 require post-admission docgen.
 
 ## Open Next
 
