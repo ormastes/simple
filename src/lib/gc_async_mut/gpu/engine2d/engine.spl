@@ -163,6 +163,18 @@ val _VEC_TEXT_PROBE: bool = false
 var _vec_text_probe_count: i32 = 0
 var _vec_blit_probe_count: i32 = 0
 var _vec_entry_probe_count: i32 = 0
+# Always-on (but silent-on-healthy) receipt for the FontRenderBatch aggregate
+# still crossing font_renderer.spl -> here by RETURN value. That crossing is
+# the one rank-1 site of doc/08_tracking/bug/
+# cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md that
+# is NOT yet converted to a safe channel: moving the blit loop into
+# font_renderer.spl would need Engine2D (gc_async_mut) inside nogc_sync_mut,
+# an import inversion. Until then this names the failure instead of letting it
+# degrade to a blank frame: a batch that reports `valid` yet carries zero quads
+# for non-empty content is the payload-loss signature. Capped so a busy frame
+# cannot flood serial. (Benign trigger: text whose every glyph is blank, e.g.
+# whitespace-only — rare, and a printed line never gates the draw.)
+var _font_batch_receipt_count: i32 = 0
 # ============================================================================
 # Engine2D
 # ============================================================================
@@ -1062,6 +1074,14 @@ class Engine2D:
             quad_index = quad_index + 1
         quad_index
 
+    me _font_batch_receipt(source: text, batch: FontRenderBatch, content_count: i64):
+        """Print only when a prepared batch lost its payload (see _font_batch_receipt_count)."""
+        if _font_batch_receipt_count >= 8:
+            return
+        if batch.valid and batch.quads.len() == 0 and content_count > 0:
+            _font_batch_receipt_count = _font_batch_receipt_count + 1
+            print("[font-batch] degenerate source={source} content={content_count} quads=0 atlas_pixels={batch.atlas_pixels.len()} identity={batch.font_identity} generation={batch.face_generation}")
+
     me _draw_font_batch_plan(x: i32, y: i32, batch: FontRenderBatch, plan: [text]) -> bool:
         # Snapshot once, up front: the same `batch.material_supported()` call
         # expression also appears inside the probe's print() interpolation
@@ -1220,6 +1240,7 @@ class Engine2D:
         val fonts = self.fonts()
         val batch = fonts.prepare_glyph_run(run, color, font_size)
         self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
+        self._font_batch_receipt("glyph-run", batch, run.glyph_ids.len())
         self._draw_font_batch(x, y, batch)
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
@@ -1279,6 +1300,7 @@ class Engine2D:
         val fonts = self.fonts()
         val batch = fonts.prepare_text_configured(text_val, color, config)
         self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
+        self._font_batch_receipt("text", batch, text_val.len())
         self._draw_font_batch_plan(x, y, batch, plan)
 
     me draw_text_with_advances(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, font_size: i32) -> bool:
@@ -1294,6 +1316,7 @@ class Engine2D:
         val fonts = self.fonts()
         val batch = fonts.prepare_text_with_advances_configured(text_val, advance_widths, color, config)
         self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
+        self._font_batch_receipt("text-advances", batch, text_val.len())
         self._draw_font_batch_plan(x, y, batch, plan)
 
     me draw_shaped_text(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> bool:
@@ -1309,6 +1332,7 @@ class Engine2D:
         val fonts = self.fonts()
         val batch = fonts.prepare_selected_glyph_run_configured(glyph_run, color, config)
         self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
+        self._font_batch_receipt("shaped", batch, glyph_run.glyph_ids.len())
         self._draw_font_batch_plan(x, y, batch, plan)
 
     me load_font(path: text) -> bool:

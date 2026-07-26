@@ -1,0 +1,75 @@
+# Probe: paint text through the Engine2D software backend and its FontRenderer
+# and assert real pixels landed.
+#
+# Guards the present-path aggregate-return conversions in font_renderer.spl
+# (get_glyph / get_glyph_index / _selected_glyph_index_cached now mutate
+# self.cache in place instead of returning a (CachedGlyph, GlyphCache) tuple)
+# and in draw_ir_adv.spl (Engine2D threads as a `mut` parameter instead of
+# riding inside Engine2dDrawIrRenderOutcome). A lost glyph or cache payload
+# shows up here as glyph_nonzero=0 / render_nonzero=0 / measured_width=0.
+use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, draw_ir_batch, draw_ir_embedding_config, draw_ir_rect}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_batch}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+fn main():
+    val engine = Engine2D.create_offscreen(160, 48)
+    engine.clear(0xFF000000u32)
+    val fonts = engine.fonts()
+
+    # Converted path 1: get_glyph (cache mutated in place, CachedGlyph returned)
+    val glyph = fonts.get_glyph(83, 20)
+    var glyph_nonzero: i64 = 0
+    var gi: i64 = 0
+    while gi < glyph.pixels.len():
+        if glyph.pixels[gi] != 0u8:
+            glyph_nonzero = glyph_nonzero + 1
+        gi = gi + 1
+
+    # Converted path 2: measure_text_width / render_text (both drop the tuple)
+    val measured = fonts.measure_text_width("Simple", 20)
+    val advances = fonts.measure_text_advances("Simple", 20)
+    var buffer: [u32] = [0u32; 160 * 48]
+    val painted = fonts.render_text(buffer, 160, 48, 4, 32, "Simple", 0xFFFFFFFFu32, 20)
+    var render_nonzero: i64 = 0
+    var pi: i64 = 0
+    while pi < painted.len():
+        if painted[pi] != 0u32:
+            render_nonzero = render_nonzero + 1
+        pi = pi + 1
+    engine.install_font_renderer(fonts)
+
+    # Converted path 3: the whole Engine2D software text entry point
+    engine.draw_text(4, 32, "Simple", 0xFFFFFFFFu32, 20)
+    val readback = engine.read_pixels_with_source()
+    var frame_nonzero: i64 = 0
+    var fi: i64 = 0
+    while fi < readback.pixels.len():
+        if readback.pixels[fi] != 0xFF000000u32:
+            frame_nonzero = frame_nonzero + 1
+        fi = fi + 1
+
+    # Converted path 4: the translucent embedded-surface Draw IR route, whose
+    # parent engine now only reaches the caller through the `mut` parameter.
+    # If that write-back were lost the composite would never land in the
+    # readback below.
+    val embed_engine = Engine2D.create_with_backend(32, 24, "cpu")
+    val embed_batch = draw_ir_batch("probe-embed", DRAW_IR_BACKEND_CPU,
+        draw_ir_embedding_config("surf", "win", 2, 2, 16, 12, 1, 500, false), [
+        draw_ir_rect("r", 0, 0, 8, 8, 0xff3366ffu32)])
+    val embed_result = engine2d_draw_ir_adv_batch(embed_engine, embed_batch, false)
+    # Pixel (0,0) sits outside the embedding (which starts at 2,2), so it is
+    # the untouched background: anything differing from it was composited.
+    var embed_nonzero: i64 = 0
+    var ei: i64 = 0
+    val embed_background = if embed_result.pixels.len() > 0: embed_result.pixels[0] else: 0u32
+    while ei < embed_result.pixels.len():
+        if embed_result.pixels[ei] != embed_background:
+            embed_nonzero = embed_nonzero + 1
+        ei = ei + 1
+
+    print "ENGINE2D_TEXT glyph_w={glyph.width} glyph_h={glyph.height} glyph_nonzero={glyph_nonzero} measured_width={measured} advances={advances.len()} render_nonzero={render_nonzero} frame_nonzero={frame_nonzero} embed_rendered={embed_result.rendered_command_count} embed_nonzero={embed_nonzero}"
+    if (glyph_nonzero > 0 and measured > 0 and advances.len() == 6 and render_nonzero > 0 and
+        frame_nonzero > 0 and embed_result.rendered_command_count == 1 and embed_nonzero > 0):
+        print "ENGINE2D_TEXT_PIXELS_OK"
+    else:
+        print "ENGINE2D_TEXT_PIXELS_FAIL"

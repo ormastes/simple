@@ -717,10 +717,18 @@ class FontRenderer:
     # -----------------------------------------------------------------------
     # Get glyph (cached) — returns rasterized alpha bitmap
     # -----------------------------------------------------------------------
-    fn glyph_with_cache(codepoint: i32, font_size: i32, initial_cache: GlyphCache) -> (CachedGlyph, GlyphCache):
+    # Returns ONE aggregate (the CachedGlyph); the GlyphCache is updated in
+    # place on `self` rather than riding back beside it. The former
+    # `glyph_with_cache(...) -> (CachedGlyph, GlyphCache)` shape returned a
+    # tuple of two array-bearing aggregates — a confirmed-lost channel on the
+    # freestanding/cranelift lane (doc/08_tracking/bug/
+    # cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md),
+    # where losing the cache half degrades silently to blank glyphs.
+    me get_glyph(codepoint: i32, font_size: i32) -> CachedGlyph:
+        var cache = self.cache
         # GLYPH-FIX-4 diagnostic: cache state on entry, printed before any
         # other call in this function (the safest possible read -- a first
-        # touch of the `initial_cache` parameter, not a re-read after an
+        # touch of the `cache` snapshot taken above, not a re-read after an
         # intervening call). Discriminates whether a same-codepoint second
         # call re-rasterizes because the cache is genuinely empty (miss is
         # legitimate/expected) or because it holds a stale entry that
@@ -728,17 +736,17 @@ class FontRenderer:
         # rasterize path at all).
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
-            print("[vec-glyph-probe] gwc-entry cp={codepoint} font_size={font_size} cache_entries={initial_cache.entries.len()} cache_rcfg_id_len={initial_cache.observed_render_config_identity.len()}")
+            print("[vec-glyph-probe] gwc-entry cp={codepoint} font_size={font_size} cache_entries={cache.entries.len()} cache_rcfg_id_len={cache.observed_render_config_identity.len()}")
         if codepoint < 0 or codepoint > 1114111 or font_size <= 0 or font_size > 512:
-            return (CachedGlyph.empty(codepoint, font_size), initial_cache)
+            return CachedGlyph.empty(codepoint, font_size)
         val active_rasterizer = self.ttf_rasterizer
-        var cache = initial_cache
         if active_rasterizer != nil:
             cache.sync_face_identity(active_rasterizer.cache_identity_generation(), active_rasterizer.cache_identity())
         # Check cache first
         val cached = cache.lookup(codepoint, font_size)
         if cached != nil:
-            return (cached, cache)
+            self.cache = cache
+            return cached
 
         # Rasterize
         cache.record_rasterization()
@@ -817,44 +825,38 @@ class FontRenderer:
                 glyph = rasterize_bitmap(codepoint, font_size)
 
         # GLYPH-FIX-4 checkpoint probe: last print before cache.insert(glyph)
-        # / the (glyph, cache) tuple return / get_glyph's unpack. `glyph`
-        # here is a same-module local (freshly reconstructed above for the
-        # SFFI path, or freshly returned by rasterize_ttf/vector/bitmap for
-        # the fallback path) so this read is not expected to hit the
-        # cross-module landmine above -- if the fault still reproduces AFTER
-        # this probe prints, it names cache.insert/the tuple return/
-        # get_glyph's unpack as the real site instead.
+        # / the CachedGlyph return. `glyph` here is a same-module local
+        # (freshly reconstructed above for the SFFI path, or freshly returned
+        # by rasterize_ttf/vector/bitmap for the fallback path) so this read
+        # is not expected to hit the cross-module landmine above -- if the
+        # fault still reproduces AFTER this probe prints, it names
+        # cache.insert or the CachedGlyph return as the real site instead.
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
             print("[vec-glyph-probe] gwc-pre-insert cp={codepoint} w={glyph.width} h={glyph.height} adv={glyph.advance} plen={glyph.pixels.len()}")
         val expected_pixels = glyph.width.to_i64() * glyph.height.to_i64()
         if glyph.advance > 0 and expected_pixels == glyph.pixels.len().to_i64():
             cache.insert(glyph)
-        (glyph, cache)
+        self.cache = cache
+        glyph
 
-    me get_glyph(codepoint: i32, font_size: i32) -> CachedGlyph:
-        val result = self.glyph_with_cache(codepoint, font_size, self.cache)
-        self.cache = result.1
-        result.0
-
-    fn glyph_index_with_cache(face_id: i64, face_generation: i64, glyph_index: i32, font_size: i32, initial_cache: GlyphCache) -> (CachedGlyph, GlyphCache):
-        var cache = initial_cache
+    # Same single-aggregate-return shape as get_glyph above (was
+    # `glyph_index_with_cache(...) -> (CachedGlyph, GlyphCache)`).
+    me get_glyph_index(face_id: i64, face_generation: i64, glyph_index: i32, font_size: i32) -> CachedGlyph:
+        var cache = self.cache
         if not font_face_is_live(face_id, face_generation) or glyph_index < 0 or font_size <= 0 or font_size > 512:
-            return (CachedGlyph(codepoint: -1, face_id: face_id, face_generation: face_generation, glyph_index: glyph_index, font_size: font_size, width: 0, height: 0, advance: 0, bearing_x: 0, bearing_y: 0, pixels: []), cache)
+            return CachedGlyph(codepoint: -1, face_id: face_id, face_generation: face_generation, glyph_index: glyph_index, font_size: font_size, width: 0, height: 0, advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
         val cached = cache.lookup_index(face_id, face_generation, glyph_index, font_size)
         if cached != nil:
-            return (cached, cache)
+            self.cache = cache
+            return cached
         cache.record_rasterization()
         val glyph = rasterize_ttf_index(face_id, face_generation, glyph_index, font_size)
         val expected_pixels = glyph.width.to_i64() * glyph.height.to_i64()
         if glyph.advance > 0 and expected_pixels == glyph.pixels.len().to_i64():
             cache.insert(glyph)
-        (glyph, cache)
-
-    me get_glyph_index(face_id: i64, face_generation: i64, glyph_index: i32, font_size: i32) -> CachedGlyph:
-        val result = self.glyph_index_with_cache(face_id, face_generation, glyph_index, font_size, self.cache)
-        self.cache = result.1
-        result.0
+        self.cache = cache
+        glyph
 
     # -----------------------------------------------------------------------
     # Measure text width using actual glyph advances
@@ -862,7 +864,6 @@ class FontRenderer:
     me measure_text_width(content: text, font_size: i32) -> i32:
         var total_w = 0
         var prev_cp = -1
-        var cache = self.cache
         # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
         var ci = 0
         val content_len = content.len()
@@ -870,9 +871,7 @@ class FontRenderer:
             val cp = content.char_code_at(ci)
             if prev_cp >= 0:
                 total_w = total_w + self.horizontal_kern(prev_cp, cp, font_size)
-            val result = self.glyph_with_cache(cp, font_size, cache)
-            val glyph = result.0
-            cache = result.1
+            val glyph = self.get_glyph(cp, font_size)
             if glyph.advance > 0:
                 total_w = total_w + glyph.advance
             else:
@@ -880,13 +879,11 @@ class FontRenderer:
                 total_w = total_w + font_size * 55 / 100
             prev_cp = cp
             ci = ci + 1
-        self.cache = cache
         total_w
 
     me measure_text_advances(content: text, font_size: i32) -> [i32]:
         var advances: [i32] = []
         var prev_cp = -1
-        var cache = self.cache
         # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
         var ci = 0
         val content_len = content.len()
@@ -895,14 +892,12 @@ class FontRenderer:
             if prev_cp >= 0:
                 val previous = advances.len() - 1
                 advances[previous] = advances[previous] + self.horizontal_kern(prev_cp, cp, font_size)
-            val result = self.glyph_with_cache(cp, font_size, cache)
-            cache = result.1
-            val glyph_advance = result.0.advance
+            val glyph = self.get_glyph(cp, font_size)
+            val glyph_advance = glyph.advance
             val advance = if glyph_advance > 0: glyph_advance else: font_size * 55 / 100
             advances.push(advance)
             prev_cp = cp
             ci = ci + 1
-        self.cache = cache
         advances
 
     # -----------------------------------------------------------------------
@@ -915,7 +910,6 @@ class FontRenderer:
         var out = buffer
         var cx = x
         var prev_cp = -1
-        var cache = self.cache
         # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
         var ci = 0
         val content_len = content.len()
@@ -923,15 +917,12 @@ class FontRenderer:
             val cp = content.char_code_at(ci)
             if prev_cp >= 0:
                 cx = cx + self.horizontal_kern(prev_cp, cp, font_size)
-            val result = self.glyph_with_cache(cp, font_size, cache)
-            val glyph = result.0
-            cache = result.1
+            val glyph = self.get_glyph(cp, font_size)
             if glyph.width > 0 and glyph.height > 0:
                 out = blit_glyph(out, buf_w, buf_h, cx, y, glyph, color)
             cx = cx + glyph.advance
             prev_cp = cp
             ci = ci + 1
-        self.cache = cache
         out
 
     me render_text_payload(content: text, color: u32, font_size: i32) -> FontTextPayload:
@@ -964,13 +955,10 @@ class FontRenderer:
         var min_y = 2147483647
         var max_x = -2147483647
         var max_y = -2147483647
-        var cache = self.cache
         var i = 0
         while i < layout.len():
             val positioned = layout[i]
-            val result = self.glyph_with_cache(positioned.codepoint.to_i32(), font_size, cache)
-            val glyph = result.0
-            cache = result.1
+            val glyph = self.get_glyph(positioned.codepoint.to_i32(), font_size)
             glyphs.push(glyph)
             if glyph.width > 0 and glyph.height > 0:
                 val gx = positioned.x.to_i32()
@@ -984,7 +972,6 @@ class FontRenderer:
                 if gy + glyph.height > max_y:
                     max_y = gy + glyph.height
             i = i + 1
-        self.cache = cache
         if max_x <= min_x or max_y <= min_y:
             return FontTextPayload(valid: true, width: 0, height: 0, offset_x: 0, offset_y: 0, pixels: [])
         val width = max_x - min_x
@@ -1158,7 +1145,7 @@ class FontRenderer:
             # `ch.char_code_at(0)`, hoping to route around a suspected
             # char_code_at bug (cp printed as 0 for a command that can't
             # legitimately be U+0000). That "fix" is retracted: the raw byte
-            # read back 11 while `glyph_with_cache` further downstream showed
+            # read back 11 while `get_glyph` further downstream showed
             # the SAME logical value as 88 (11 << 3) -- i.e. char_code_at's 0
             # (88 & 7), bytes()'s 11 (88 >> 3), and 88 itself are three
             # tag-shifted views of one pervasive integer-boxing codegen
@@ -1320,17 +1307,22 @@ class FontRenderer:
                 self._prepare_text_active(content, color, config.size)), config
         )
 
-    fn _selected_glyph_index_with_cache(rasterizer: FontRasterizer, generation: i64, glyph_index: i32, font_size: i32, initial_cache: GlyphCache) -> (CachedGlyph, GlyphCache):
-        var cache = initial_cache
+    # Single-aggregate return (was `(CachedGlyph, GlyphCache)`); the cache half
+    # now updates `self.cache` in place — see get_glyph above for the channel
+    # rationale.
+    me _selected_glyph_index_cached(rasterizer: FontRasterizer, generation: i64, glyph_index: i32, font_size: i32) -> CachedGlyph:
+        var cache = self.cache
         val cached = cache.lookup_index(0, generation, glyph_index, font_size)
         if cached != nil:
-            return (cached.?, cache)
+            self.cache = cache
+            return cached.?
         cache.record_rasterization()
         val bitmap = rasterizer.rasterize_glyph_index(glyph_index.to_i64(), font_size.to_i64())
         if bitmap == nil:
-            return (CachedGlyph(codepoint: -1, face_id: 0, face_generation: generation,
+            self.cache = cache
+            return CachedGlyph(codepoint: -1, face_id: 0, face_generation: generation,
                 glyph_index: glyph_index, font_size: font_size, width: 0, height: 0,
-                advance: 0, bearing_x: 0, bearing_y: 0, pixels: []), cache)
+                advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
         val owned = bitmap.?
         # `owned` is a GlyphBitmap crossing a module boundary (declared in
         # spl_fonts.spl); use its `gbm_*`-prefixed fields, not the ambiguous
@@ -1344,7 +1336,8 @@ class FontRenderer:
             bearing_y: owned.gbm_bearing_y.to_i32(), pixels: owned.gbm_pixels)
         if glyph.width > 0 and glyph.height > 0 and glyph.pixels.len() == glyph.width.to_i64() * glyph.height.to_i64():
             cache.insert(glyph)
-        (glyph, cache)
+        self.cache = cache
+        glyph
 
     me prepare_selected_glyph_run(payload: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> FontRenderBatch:
         self.prepare_selected_glyph_run_configured(
@@ -1389,9 +1382,7 @@ class FontRenderer:
                 if raw_gid == 0u32 or raw_gid > 2147483647u32 or payload.clusters[i] < 0:
                     return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
                 val glyph_id = raw_gid.to_i32()
-                val selected = self._selected_glyph_index_with_cache(rasterizer, generation, glyph_id, font_size, self.cache)
-                val glyph = selected.0
-                self.cache = selected.1
+                val glyph = self._selected_glyph_index_cached(rasterizer, generation, glyph_id, font_size)
                 if glyph.width <= 0 or glyph.height <= 0:
                     return FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: [])
                 var atlas_index = self._font_atlas_entry_index(0, generation, glyph_id, -1, font_size)
