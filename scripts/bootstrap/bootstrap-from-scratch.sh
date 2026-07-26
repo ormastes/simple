@@ -635,7 +635,7 @@ compiler_backfill_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simpl
 seed_stamp="${seed_bin}.inputs.sha256"
 seed_inputs_hash() {
   bootstrap_stage3_seed_inputs_fingerprint "${repo_root}" \
-    "${backend}" "${llvm_features}" "${PATH}"
+    "${backend}" "${llvm_features}" "${PATH}" "${PLATFORM}"
 }
 seed_stale=0
 rust_rebuilt=0
@@ -692,10 +692,7 @@ fi
 if [ "${full_bootstrap}" -eq 1 ]; then
   rust_authority_root="${output_dir}/rust-authority-${seed_inputs_fingerprint}"
   rust_authority_target="${rust_authority_root}/target"
-  rust_authority_profile_dir="${rust_authority_target}/bootstrap"
-  if [ "${os}" = "windows" ]; then
-    rust_authority_profile_dir="${rust_authority_target}/${PLATFORM}/bootstrap"
-  fi
+  rust_authority_profile_dir="${rust_authority_target}/${PLATFORM}/bootstrap"
   rust_authority_home="${rust_authority_root}/home"
   rust_authority_cargo_home="${rust_authority_root}/cargo-home"
   rust_authority_tmp="${rust_authority_root}/tmp"
@@ -721,7 +718,18 @@ if [ "${full_bootstrap}" -eq 1 ]; then
     echo "error: Rust toolchain binaries missing under sysroot: ${rust_sysroot}" >&2
     exit 1
   }
-  cc_abs=$(command -v cc)
+  mingw_linker="${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-gcc}"
+  mingw_cc="${CC_x86_64_pc_windows_gnu:-gcc}"
+  mingw_ar="${AR_x86_64_pc_windows_gnu:-ar}"
+  cc_abs=$(bootstrap_stage3_target_c_compiler "${PLATFORM}") || {
+    echo "error: no C compiler found for Rust authority target ${PLATFORM}" >&2
+    exit 1
+  }
+  windows_include="${INCLUDE:-}"
+  windows_lib="${LIB:-}"
+  windows_libpath="${LIBPATH:-}"
+  windows_system_root="${SystemRoot:-}"
+  windows_temp="${TEMP:-${rust_authority_tmp}}"
   rust_llvm_authority=$(
     bootstrap_stage3_resolve_llvm_build_authority \
       "${PATH}" "${llvm_features}"
@@ -804,6 +812,12 @@ run_rust_authority_cargo() {
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
         TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
         RUSTC="${rustc_abs}" CC="${cc_abs}" LC_ALL=C LANG=C \
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
+        CC_x86_64_pc_windows_gnu="${mingw_cc}" \
+        AR_x86_64_pc_windows_gnu="${mingw_ar}" \
+        INCLUDE="${windows_include}" LIB="${windows_lib}" \
+        LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
+        TEMP="${windows_temp}" \
         "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
         "LIBRARY_PATH=${rust_llvm_library_path}" \
@@ -816,6 +830,12 @@ run_rust_authority_cargo() {
         CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
         TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
         RUSTC="${rustc_abs}" CC="${cc_abs}" LC_ALL=C LANG=C \
+        CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
+        CC_x86_64_pc_windows_gnu="${mingw_cc}" \
+        AR_x86_64_pc_windows_gnu="${mingw_ar}" \
+        INCLUDE="${windows_include}" LIB="${windows_lib}" \
+        LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
+        TEMP="${windows_temp}" \
         "LLVM_SYS_${rust_llvm_major}0_PREFIX=${rust_llvm_prefix}" \
         "HOMEBREW_PREFIX=${rust_llvm_homebrew_prefix}" \
         "LIBRARY_PATH=${rust_llvm_library_path}" \
@@ -829,6 +849,12 @@ run_rust_authority_cargo() {
       CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
       TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
       RUSTC="${rustc_abs}" CC="${cc_abs}" LC_ALL=C LANG=C \
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
+      CC_x86_64_pc_windows_gnu="${mingw_cc}" \
+      AR_x86_64_pc_windows_gnu="${mingw_ar}" \
+      INCLUDE="${windows_include}" LIB="${windows_lib}" \
+      LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
+      TEMP="${windows_temp}" \
       CARGO_PROFILE_BOOTSTRAP_LTO=off "${cargo_abs}" "$@"
   else
     run_logged "${rust_authority_log}" env -i \
@@ -837,6 +863,12 @@ run_rust_authority_cargo() {
       CARGO_TARGET_DIR="$(absolute_path "${rust_authority_target}")" \
       TMPDIR="$(absolute_path "${rust_authority_tmp}")" PATH="${PATH}" \
       RUSTC="${rustc_abs}" CC="${cc_abs}" LC_ALL=C LANG=C \
+      CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${mingw_linker}" \
+      CC_x86_64_pc_windows_gnu="${mingw_cc}" \
+      AR_x86_64_pc_windows_gnu="${mingw_ar}" \
+      INCLUDE="${windows_include}" LIB="${windows_lib}" \
+      LIBPATH="${windows_libpath}" SystemRoot="${windows_system_root}" \
+      TEMP="${windows_temp}" \
       "${cargo_abs}" "$@"
   fi
 }
@@ -878,11 +910,11 @@ elif [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ] || [ "${seed_stale}"
   run_rust_authority_cargo rust-seed-build default \
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
-    -p simple-driver ${llvm_features}
+    --target "${PLATFORM}" -p simple-driver ${llvm_features}
   run_rust_authority_cargo rust-native-all-build default \
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
-    -p simple-native-all ${llvm_features}
+    --target "${PLATFORM}" -p simple-native-all ${llvm_features}
   # Rebuild simple-runtime LAST with LTO off so deps/libsimple_runtime.a holds
   # machine-code symbol definitions. Under the bootstrap profile's thin-LTO the
   # rlib members export symbols only inside embedded `__bitcode` sections, which
@@ -892,13 +924,14 @@ elif [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ] || [ "${seed_stale}"
   run_rust_authority_cargo rust-runtime-nolto-build off \
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
-    -p simple-runtime --features runtime-symbol-table
+    --target "${PLATFORM}" -p simple-runtime --features runtime-symbol-table
   mkdir -p "$(dirname -- "${seed_bin}")"
   cp -p "${rust_authority_profile_dir}/simple${exe_suffix}" "${seed_bin}"
   cp -p "${rust_authority_profile_dir}/${archive_prefix}simple_native_all${archive_suffix}" \
     "${native_all_lib}"
   for rust_runtime_artifact in \
-    "${rust_authority_profile_dir}/${archive_prefix}simple_runtime"*; do
+    "${rust_authority_profile_dir}/${archive_prefix}simple_runtime"* \
+    "${rust_authority_profile_dir}/simple_runtime.dll"; do
     [ -f "${rust_runtime_artifact}" ] || continue
     cp -p "${rust_runtime_artifact}" "$(dirname -- "${seed_bin}")/"
   done
@@ -910,7 +943,7 @@ if [ "${full_bootstrap}" -eq 1 ] \
   run_rust_authority_cargo rust-compiler-backfill-build default \
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
-    -p simple-compiler-backfill
+    --target "${PLATFORM}" -p simple-compiler-backfill
   cp -p "${rust_authority_profile_dir}/${archive_prefix}simple_compiler_backfill${archive_suffix}" \
     "${compiler_backfill_lib}"
   compiler_backfill_rebuilt=1

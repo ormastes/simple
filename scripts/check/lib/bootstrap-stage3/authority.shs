@@ -73,14 +73,31 @@ bootstrap_stage3_host_platform() {
         arm64:Linux|aarch64:Linux) echo aarch64-unknown-linux-gnu ;;
         x86_64:FreeBSD) echo x86_64-unknown-freebsd ;;
         arm64:FreeBSD|aarch64:FreeBSD) echo aarch64-unknown-freebsd ;;
-        x86_64:MINGW*|x86_64:MSYS*|x86_64:CYGWIN*)
-            case "${SIMPLE_WINDOWS_ABI:-msvc}" in
+        x86_64:MINGW*|x86_64:MSYS*|x86_64:CYGWIN*|x86_64:Windows*)
+            case "${SIMPLE_WINDOWS_ABI:-${MSYSTEM:+gnu}}" in
                 gnu) echo x86_64-pc-windows-gnu ;;
-                msvc) echo x86_64-pc-windows-msvc ;;
+                ""|msvc) echo x86_64-pc-windows-msvc ;;
                 *) return 1 ;;
             esac
             ;;
         *) return 1 ;;
+    esac
+}
+
+bootstrap_stage3_target_c_compiler() {
+    case "$1" in
+        *-pc-windows-msvc)
+            command -v cl 2>/dev/null ||
+                command -v cl.exe 2>/dev/null ||
+                command -v clang-cl 2>/dev/null ||
+                command -v clang-cl.exe 2>/dev/null
+            ;;
+        x86_64-pc-windows-gnu)
+            command -v "${CC_x86_64_pc_windows_gnu:-gcc}" 2>/dev/null
+            ;;
+        *)
+            command -v cc 2>/dev/null
+            ;;
     esac
 }
 
@@ -475,8 +492,20 @@ bootstrap_stage3_tool_authority_snapshot() (
     ) || return 1
     [ -n "$bootstrap_stage3_real_rustc" ] &&
         [ -n "$bootstrap_stage3_real_cargo" ] || return 1
+    bootstrap_stage3_tool_c_name=cc
+    case "$(bootstrap_stage3_host_platform)" in
+        *-pc-windows-msvc)
+            bootstrap_stage3_tool_c_path=$(
+                bootstrap_stage3_target_c_compiler \
+                    "$(bootstrap_stage3_host_platform)"
+            ) || return 1
+            bootstrap_stage3_tool_c_name=$(basename \
+                "$bootstrap_stage3_tool_c_path")
+            bootstrap_stage3_tool_c_name=${bootstrap_stage3_tool_c_name%.exe}
+            ;;
+    esac
     for bootstrap_stage3_tool_name in \
-        cargo rustc cc clang ld ar ranlib sh env perl sed file \
+        cargo rustc "$bootstrap_stage3_tool_c_name" clang ld ar ranlib sh env perl sed file \
         shasum openssl; do
         bootstrap_stage3_tool_requested=$(
             command -v "$bootstrap_stage3_tool_name" 2>/dev/null
@@ -833,11 +862,24 @@ bootstrap_stage3_git_state() {
 # identity is re-derived from that recorded PATH, never from verifier ambient
 # state.
 bootstrap_stage3_seed_inputs_fingerprint() (
-    [ "$#" -eq 4 ] || return 1
+    case "$#" in
+        4|5) ;;
+        *) return 1 ;;
+    esac
     bootstrap_stage3_seed_root=$1
     bootstrap_stage3_seed_backend=$2
     bootstrap_stage3_seed_features=$3
     bootstrap_stage3_seed_tool_path=$4
+    bootstrap_stage3_seed_target=${5:-}
+    if [ -z "$bootstrap_stage3_seed_target" ]; then
+        bootstrap_stage3_seed_target=$(bootstrap_stage3_host_platform) ||
+            return 1
+    fi
+    case "$bootstrap_stage3_seed_target" in
+        *-pc-windows-gnu|*-pc-windows-msvc|*-unknown-linux-gnu|\
+        *-apple-darwin|*-unknown-freebsd) ;;
+        *) return 1 ;;
+    esac
     case "$bootstrap_stage3_seed_tool_path" in
         /*) ;;
         *) return 1 ;;
@@ -993,8 +1035,22 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         printf 'profile=bootstrap backend=%s features=%s target=%s\n' \
             "$bootstrap_stage3_seed_backend" \
             "$bootstrap_stage3_seed_features" \
-            "$(bootstrap_stage3_host_platform)" \
+            "$bootstrap_stage3_seed_target" \
             >>"$bootstrap_stage3_seed_records" || exit 1
+        if [ "$bootstrap_stage3_seed_target" = \
+            x86_64-pc-windows-gnu ]; then
+            printf 'target-linker=%s\ntarget-cc=%s\ntarget-ar=%s\n' \
+                "${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-gcc}" \
+                "${CC_x86_64_pc_windows_gnu:-gcc}" \
+                "${AR_x86_64_pc_windows_gnu:-ar}" \
+                >>"$bootstrap_stage3_seed_records" || exit 1
+        elif [ "$bootstrap_stage3_seed_target" = \
+            x86_64-pc-windows-msvc ]; then
+            printf 'windows-INCLUDE=%s\nwindows-LIB=%s\nwindows-LIBPATH=%s\nwindows-SystemRoot=%s\nwindows-TEMP=%s\n' \
+                "${INCLUDE:-}" "${LIB:-}" "${LIBPATH:-}" \
+                "${SystemRoot:-}" "${TEMP:-}" \
+                >>"$bootstrap_stage3_seed_records" || exit 1
+        fi
         bootstrap_stage3_seed_llvm_authority=$(
             bootstrap_stage3_resolve_llvm_build_authority \
                 "$PATH" "$bootstrap_stage3_seed_features"
@@ -1002,16 +1058,15 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         printf '%s\n' "$bootstrap_stage3_seed_llvm_authority" \
             >>"$bootstrap_stage3_seed_records" || exit 1
         printf '%s\n' \
-            'recipe.1=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-driver <selected-llvm-features>' \
-            'recipe.2=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-native-all <selected-llvm-features>' \
-            'recipe.3=env CARGO_PROFILE_BOOTSTRAP_LTO=off cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-runtime --features runtime-symbol-table' \
-            'recipe.4=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap -p simple-compiler-backfill' \
+            'recipe.1=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-driver <selected-llvm-features>' \
+            'recipe.2=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-native-all <selected-llvm-features>' \
+            'recipe.3=env CARGO_PROFILE_BOOTSTRAP_LTO=off cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-runtime --features runtime-symbol-table' \
+            'recipe.4=cargo build --locked --offline --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap --target <selected-platform> -p simple-compiler-backfill' \
             >>"$bootstrap_stage3_seed_records" || exit 1
         # Rust authority builds execute under env -i with explicit RUSTC/CC
-        # paths. Ambient SDK/LLVM/flag variables are therefore not build
-        # inputs and must not make standalone verification disagree with the
-        # producer. Tool versions and the selected backend/features are bound
-        # separately below.
+        # paths. Ambient SDK/LLVM/general flag variables are therefore not
+        # build inputs. The target and its MinGW tool selections are bound
+        # above; tool versions and backend/features are bound below.
         bootstrap_stage3_seed_rust_authority=$(
             bootstrap_stage3_resolve_rust_toolchain \
                 "$bootstrap_stage3_seed_root" "$PATH"
@@ -1044,8 +1099,11 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         env -i PATH="$PATH" LC_ALL=C LANG=C \
             "$bootstrap_stage3_seed_cargo" -V \
             >>"$bootstrap_stage3_seed_records" 2>/dev/null || exit 1
-        if command -v cc >/dev/null 2>&1; then
-            bootstrap_stage3_seed_cc=$(command -v cc) || exit 1
+        bootstrap_stage3_seed_cc=$(
+            bootstrap_stage3_target_c_compiler \
+                "$bootstrap_stage3_seed_target"
+        ) || exit 1
+        if [ -n "$bootstrap_stage3_seed_cc" ]; then
             bootstrap_stage3_seed_cc_canonical=$(
                 perl -MCwd=abs_path -e \
                     'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
@@ -1058,13 +1116,16 @@ bootstrap_stage3_seed_inputs_fingerprint() (
                 >>"$bootstrap_stage3_seed_records" || exit 1
             bootstrap_stage3_seed_cc_version=\
 "$bootstrap_stage3_seed_tmp/cc-version"
+            bootstrap_stage3_seed_cc_status=0
             env -i PATH="$PATH" LC_ALL=C LANG=C \
                 "$bootstrap_stage3_seed_cc" --version \
-                >"$bootstrap_stage3_seed_cc_version" 2>&1 || exit 1
+                >"$bootstrap_stage3_seed_cc_version" 2>&1 ||
+                bootstrap_stage3_seed_cc_status=$?
+            printf 'cc-version-status=%s\n' \
+                "$bootstrap_stage3_seed_cc_status" \
+                >>"$bootstrap_stage3_seed_records" || exit 1
             sed -n '1p' "$bootstrap_stage3_seed_cc_version" \
                 >>"$bootstrap_stage3_seed_records" || exit 1
-        else
-            echo "cc=absent" >>"$bootstrap_stage3_seed_records" || exit 1
         fi
         if command -v llvm-config >/dev/null 2>&1; then
             bootstrap_stage3_seed_llvm_config=$(command -v llvm-config) ||

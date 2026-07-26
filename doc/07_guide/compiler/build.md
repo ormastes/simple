@@ -268,6 +268,11 @@ Windows stage outputs are executable paths (`stage2/<triple>/simple.exe` and
 override automatic ABI selection. Normal Windows bootstrap uses the same
 dynload-only default and explicit full-build policy.
 
+The selected ABI is authoritative for the full strict build: Cargo receives
+the matching target triple, Rust artifacts stay under that target directory,
+and compiler, linker, archive name, manifest, and provenance checks must all
+agree. MinGW consumes GNU `.a` archives; MSVC consumes `.lib` archives.
+
 On Windows, stripped native links normalize volatile PE metadata after the
 hosted linker returns. The normalizer zeroes the COFF `TimeDateStamp` and PE
 optional-header `CheckSum` fields so repeated stripped native-build and

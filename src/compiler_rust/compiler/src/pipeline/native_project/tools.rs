@@ -182,13 +182,13 @@ pub(crate) fn hosted_linux_cross_compiler(
 pub(crate) fn target_c_compiler(target: simple_common::target::Target) -> String {
     hosted_linux_cross_compiler(target, false)
         .map(str::to_string)
-        .unwrap_or_else(find_c_compiler)
+        .unwrap_or_else(|| simple_common::platform::cc_detect::detect_c_compiler_for_target(&target))
 }
 
 pub(crate) fn target_cxx_compiler(target: simple_common::target::Target) -> String {
     hosted_linux_cross_compiler(target, true)
         .map(str::to_string)
-        .unwrap_or_else(find_cxx_compiler)
+        .unwrap_or_else(|| simple_common::platform::cc_detect::detect_cxx_compiler_for_target(&target))
 }
 
 /// Return the linker arguments for terminfo symbols used by hosted LLVM.

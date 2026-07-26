@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+use simple_common::target::LinkerFlavor;
+
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
 use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
 use super::tools::{
@@ -14,6 +16,14 @@ use super::tools::{
     strip_llvm_constructors, target_c_compiler, target_cxx_compiler, terminfo_link_args,
     validate_stage4_cli_c_provider_archive_disjointness,
 };
+
+fn uses_msvc_flags(flavor: LinkerFlavor) -> bool {
+    flavor == LinkerFlavor::Msvc
+}
+
+fn clang_cl_whole_archive_args(path: &Path) -> [String; 2] {
+    ["-Xlinker".to_string(), format!("/WHOLEARCHIVE:{}", path.display())]
+}
 
 fn link_failure_output(stdout: &[u8], stderr: &[u8]) -> String {
     let stdout = String::from_utf8_lossy(stdout);
@@ -38,11 +48,7 @@ fn add_macos_runtime_host_support(cmd: &mut std::process::Command) {
     }
 }
 
-fn macos_runtime_host_support_required(
-    selected_runtime: bool,
-    host_gpu_lane: bool,
-    exact_stage4: bool,
-) -> bool {
+fn macos_runtime_host_support_required(selected_runtime: bool, host_gpu_lane: bool, exact_stage4: bool) -> bool {
     // `libsimple_runtime.a` contains the macOS Metal runtime even on the
     // core-c-bootstrap lane. Static archives do not preserve rustc's
     // framework-link directives for their final consumer, so every selected
@@ -707,8 +713,10 @@ impl NativeProjectBuilder {
     /// Compile the C++ main stub to an object file.
     pub(crate) fn compile_main_stub(&self, temp_dir: &Path) -> Result<PathBuf, String> {
         let main_cpp = temp_dir.join("_main_stub.cpp");
-        let cxx = target_cxx_compiler(effective_target());
-        let is_msvc = cxx.contains("clang-cl") || simple_common::platform::cc_detect::is_msvc_target(&cxx);
+        let target = effective_target();
+        let cxx = target_cxx_compiler(target);
+        let is_msvc = uses_msvc_flags(target.linker_flavor());
+        let is_clang_cl = is_msvc && cxx.contains("clang-cl");
 
         let has_entry = self.entry_file.is_some();
         let stub_code = if is_msvc {
@@ -768,7 +776,7 @@ int main(int argc, char** argv) {
         std::fs::write(&main_cpp, stub_code).map_err(|e| format!("write main stub: {e}"))?;
 
         let main_o = temp_dir.join("_main_stub.o");
-        let output = if cxx.contains("clang-cl") {
+        let output = if is_clang_cl {
             std::process::Command::new(&cxx)
                 .arg("/c")
                 .arg(format!("/Fo{}", main_o.display()))
@@ -831,7 +839,8 @@ int main(int argc, char** argv) {
 
         let cross_target = effective_target();
         let cxx = target_cxx_compiler(cross_target);
-        let is_clang_cl = cxx.contains("clang-cl");
+        let is_msvc = uses_msvc_flags(cross_target.linker_flavor());
+        let is_clang_cl = is_msvc && cxx.contains("clang-cl");
         let use_llvm_backend = self.config.backend == "llvm";
         let init_target_triple = if cross_target.is_host() {
             None
@@ -840,7 +849,7 @@ int main(int argc, char** argv) {
         };
 
         let mut code = String::from("// Auto-generated: calls all __module_init_* functions\n");
-        if is_clang_cl {
+        if is_msvc {
             code.push_str("extern \"C\" {\n");
             for name in &init_names {
                 code.push_str(&format!("    void {}(void);\n", name));
@@ -1019,9 +1028,7 @@ int main(int argc, char** argv) {
             // that force-loads every native-all member.  Selective archive
             // extraction must retain LLVM's non-registration constructors;
             // removing them corrupts module creation in the packaged compiler.
-            Some((runtime_lib, true))
-                if std::env::var("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE").as_deref() == Ok("1") =>
-            {
+            Some((runtime_lib, true)) if std::env::var("SIMPLE_NATIVE_FORCE_WHOLE_ARCHIVE").as_deref() == Ok("1") => {
                 let filtered = strip_llvm_constructors(&runtime_lib, temp_dir).map_err(|err| {
                     format!(
                         "failed to strip LLVM constructors from {}: {:?}",
@@ -1168,8 +1175,8 @@ int main(int argc, char** argv) {
         } else {
             target_c_compiler(cross_target)
         };
-        let is_clang_cl = cc.contains("clang-cl");
-        let is_msvc = simple_common::platform::cc_detect::is_msvc_target(&cc);
+        let is_msvc = uses_msvc_flags(cross_target.linker_flavor());
+        let is_clang_cl = is_msvc && cc.contains("clang-cl");
         let mut cmd = std::process::Command::new(&cc);
         if !is_msvc {
             cmd.arg("-fPIC");
@@ -1266,8 +1273,7 @@ int main(int argc, char** argv) {
                 #[cfg(target_os = "windows")]
                 {
                     if is_clang_cl {
-                        cmd.arg("-Xlinker")
-                            .arg(format!("/WHOLEARCHIVE:{}", archive_path.display()));
+                        cmd.args(clang_cl_whole_archive_args(&archive_path));
                     } else if is_msvc {
                         cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", archive_path.display()));
                     } else {
@@ -1332,8 +1338,7 @@ int main(int argc, char** argv) {
                     #[cfg(target_os = "windows")]
                     {
                         if is_clang_cl {
-                            cmd.arg("-Xlinker")
-                                .arg(format!("/WHOLEARCHIVE:{}", runtime_lib.display()));
+                            cmd.args(clang_cl_whole_archive_args(runtime_lib));
                         } else if is_msvc {
                             cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", runtime_lib.display()));
                         } else {
@@ -1394,10 +1399,6 @@ int main(int argc, char** argv) {
             }
         }
 
-        #[cfg(target_os = "windows")]
-        if is_clang_cl || is_msvc {
-            std::env::set_var("SIMPLE_LINKER_FLAVOR", "msvc");
-        }
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         if !is_clang_cl && !is_msvc {
             cmd.arg("-Wl,--gc-sections");
@@ -1464,11 +1465,7 @@ int main(int argc, char** argv) {
             }
         }
         #[cfg(target_os = "macos")]
-        if macos_runtime_host_support_required(
-            selected_runtime.is_some(),
-            host_gpu_lane,
-            exact_stage4,
-        ) {
+        if macos_runtime_host_support_required(selected_runtime.is_some(), host_gpu_lane, exact_stage4) {
             add_macos_runtime_host_support(&mut cmd);
         }
 
@@ -2335,6 +2332,21 @@ mod linker_tests {
         );
         assert!(diagnostics.contains("LNK2019: unresolved external symbol missing_provider"));
         assert!(diagnostics.contains("clang-cl: error: linker command failed"));
+    }
+
+    #[test]
+    fn linker_flags_follow_target_flavor_not_compiler_probe() {
+        assert!(simple_common::platform::cc_detect::is_msvc_target("clang-cl"));
+        assert!(!uses_msvc_flags(LinkerFlavor::Gnu));
+        assert!(uses_msvc_flags(LinkerFlavor::Msvc));
+    }
+
+    #[test]
+    fn clang_cl_retains_each_required_archive() {
+        assert_eq!(
+            clang_cl_whole_archive_args(Path::new("simple_native_all.lib")),
+            ["-Xlinker", "/WHOLEARCHIVE:simple_native_all.lib"]
+        );
     }
 
     #[cfg(target_os = "macos")]

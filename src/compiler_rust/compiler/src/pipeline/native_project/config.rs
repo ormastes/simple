@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use simple_common::target::LinkerFlavor;
+
 use super::tools::{
     archive_defined_symbols, build_core_c_runtime_library, find_abi_complete_simple_core_runtime_library,
     find_runtime_library, find_simple_core_runtime_library, runtime_archive_has_core_required_symbols,
@@ -46,6 +48,13 @@ fn runtime_bundle_requests_hosted(value: &str) -> bool {
         value,
         "all" | "hosted" | "rust-hosted" | "hosted-runtime" | "rust-runtime"
     )
+}
+
+fn runtime_archive_names(flavor: LinkerFlavor) -> (&'static str, &'static str) {
+    match flavor {
+        LinkerFlavor::Msvc => ("simple_native_all.lib", "simple_runtime.lib"),
+        LinkerFlavor::Gnu | LinkerFlavor::WasmLd => ("libsimple_native_all.a", "libsimple_runtime.a"),
+    }
 }
 
 fn is_compiler_like_entry(path: &Path) -> bool {
@@ -233,19 +242,7 @@ impl NativeProjectBuilder {
             return Ok(Some((core, false)));
         }
         let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
-        let target = super::effective_target();
-        let windows_msvc = target.os == simple_common::target::TargetOS::Windows
-            && target.linker_flavor() == simple_common::target::LinkerFlavor::Msvc;
-        let native_all_name = if windows_msvc {
-            "simple_native_all.lib"
-        } else {
-            "libsimple_native_all.a"
-        };
-        let runtime_name = if windows_msvc {
-            "simple_runtime.lib"
-        } else {
-            "libsimple_runtime.a"
-        };
+        let (native_all_name, runtime_name) = runtime_archive_names(super::effective_target().linker_flavor());
 
         if is_bootstrap_main_entry(&self.entry_file) {
             if let Some(ref rp) = self.config.runtime_path {
@@ -386,5 +383,22 @@ impl NativeProjectBuilder {
         }
 
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_archive_names_follow_linker_flavor() {
+        assert_eq!(
+            runtime_archive_names(LinkerFlavor::Gnu),
+            ("libsimple_native_all.a", "libsimple_runtime.a")
+        );
+        assert_eq!(
+            runtime_archive_names(LinkerFlavor::Msvc),
+            ("simple_native_all.lib", "simple_runtime.lib")
+        );
     }
 }

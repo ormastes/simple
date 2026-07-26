@@ -1176,3 +1176,19 @@ the shared binary — deploys require explicit user go-ahead).
   diagnostics to stdout. Both linker failure paths now preserve both streams,
   with a focused regression test. The next strict Windows run must identify
   the actual missing provider before any link fix is selected.
+
+  Windows run `30180656177` exposed both provider boundaries. MinGW rebuilt
+  host-MSVC Rust archives because strict authority omitted Cargo's explicit
+  target, then selected MSVC linker conventions from the host compiler. MSVC
+  passed its aggregate Simple objects and `simple_native_all.lib` to
+  `clang-cl` without per-archive `/WHOLEARCHIVE`, leaving 92 providers
+  unresolved. Strict authority now binds all four Rust builds, cache paths,
+  preserved compiler tools, manifest verification, and provenance
+  fingerprints to the selected target. Rust and pure-Simple archive discovery
+  use the same linker flavor (`.a` for MinGW, `.lib` for MSVC), including
+  `SIMPLE_WINDOWS_ABI`, and strict `clang-cl` retains both required archives.
+  The focused Rust/Simple checks and bootstrap portability contract pass. A
+  fresh hosted Windows run remains required before either ABI receives
+  execution credit. The admitted July 25 pure-Simple binary exits `139` during
+  the broader `check src/compiler` gate, before diagnostics, so it provides no
+  local core/MCP acceptance evidence and was not replaced with the Rust seed.

@@ -16,6 +16,10 @@ for script in \
   scripts/check/check-freebsd-bootstrap-qemu.shs \
   scripts/check/check-native-seed-parity.shs \
   scripts/check/check-stage4-hosted-dynload-provider-archive.shs \
+  scripts/check/lib/bootstrap-stage3/authority.shs \
+  scripts/check/lib/bootstrap-stage3/manifest-write.shs \
+  scripts/check/lib/bootstrap-stage3/manifest-verify.shs \
+  scripts/check/lib/bootstrap-stage3/self-test.shs \
   scripts/setup/platform-detect.shs \
   scripts/setup/setup.shs; do
   sh -n "${script}" || fail "shell syntax: ${script}"
@@ -50,7 +54,8 @@ if grep -q -- '--backend cranelift' scripts/bootstrap/bootstrap-from-scratch.sh;
 fi
 grep -q 'bootstrap_stage_sanity "${stage2_bin}"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing Stage 2 compiler sanity"
 grep -q 'bootstrap_stage_sanity "${stage3_bin}"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing Stage 3 compiler sanity"
-grep -Fq 'CANDIDATE_FRONTEND_BACKEND="${backend}" candidate_frontend_smoke "${candidate}"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "stage sanity does not run native fixture with the selected backend"
+grep -Fq 'CANDIDATE_FRONTEND_BACKEND="${backend}" \' scripts/bootstrap/bootstrap-from-scratch.sh || fail "stage sanity does not export the selected backend"
+grep -Fq 'candidate_frontend_smoke "${candidate}" >"${frontend_log}" 2>&1 ||' scripts/bootstrap/bootstrap-from-scratch.sh || fail "stage sanity does not run the native fixture"
 grep -Fq '__SIMPLE_CANDIDATE_ENV_ABI__' scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs || fail "candidate admission does not exercise the four-argument environment ABI"
 generic_smoke_line=$(grep -n '^candidate_frontend_smoke() (' scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs | cut -d: -f1)
 full_admission_line=$(grep -n '^simple_binary_is_valid() (' scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs | cut -d: -f1)
@@ -117,6 +122,35 @@ windows_workflow=.github/workflows/windows-build.yml
 release_workflow=.github/workflows/release.yml
 grep -Fq "group: \${{ github.workflow }}-\${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}" "${freebsd_workflow}" || fail "manual FreeBSD runs are not isolated"
 grep -Fq -- '--backend=cranelift' "${windows_workflow}" || fail "Windows strict bootstrap does not select Cranelift"
+grep -Fq 'uses: dtolnay/rust-toolchain@stable' "${windows_workflow}" || fail "Windows workflow does not install the policy Rust toolchain"
+grep -Fq 'rustc --target "${{ matrix.rust-target }}" --print target-libdir' "${windows_workflow}" || fail "Windows workflow does not fail early on a missing policy target"
+for mingw_env in \
+  CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER \
+  CC_x86_64_pc_windows_gnu \
+  AR_x86_64_pc_windows_gnu; do
+  grep -Fq "${mingw_env}=" "${windows_workflow}" || fail "Windows MinGW environment missing: ${mingw_env}"
+  grep -Fq "${mingw_env}=" scripts/bootstrap/bootstrap-from-scratch.sh || fail "Rust authority drops MinGW environment: ${mingw_env}"
+done
+[ "$(grep -Fc -- '--target "${PLATFORM}" -p simple-' scripts/bootstrap/bootstrap-from-scratch.sh)" -eq 4 ] ||
+  fail "not all four Rust authority builds select the detected platform"
+grep -Fq 'rust_authority_profile_dir="${rust_authority_target}/${PLATFORM}/bootstrap"' scripts/bootstrap/bootstrap-from-scratch.sh ||
+  fail "Rust authority artifacts do not come from the target profile directory"
+grep -Fq '"${backend}" "${llvm_features}" "${PATH}" "${PLATFORM}"' scripts/bootstrap/bootstrap-from-scratch.sh ||
+  fail "Rust authority fingerprint does not bind the selected platform"
+[ "$(grep -Fc -- '--target <selected-platform>' scripts/check/lib/bootstrap-stage3/authority.shs)" -eq 4 ] ||
+  fail "Rust authority fingerprint recipes do not bind all Cargo targets"
+grep -Fq 'bootstrap_stage3_target_c_compiler "${PLATFORM}"' scripts/bootstrap/bootstrap-from-scratch.sh ||
+  fail "Rust authority still assumes a host cc command"
+for msvc_env in INCLUDE LIB LIBPATH SystemRoot TEMP; do
+  grep -Fq "${msvc_env}=" scripts/bootstrap/bootstrap-from-scratch.sh ||
+    fail "Rust authority drops MSVC environment: ${msvc_env}"
+done
+grep -Fq '"${rust_authority_profile_dir}/simple_runtime.dll"' scripts/bootstrap/bootstrap-from-scratch.sh ||
+  fail "MinGW runtime DLL is not staged"
+grep -Fq '"$bootstrap_stage3_platform"' scripts/check/lib/bootstrap-stage3/manifest-verify.shs ||
+  fail "manifest verification does not replay the recorded Rust target"
+grep -Fq 'x86_64-pc-windows-msvc' scripts/check/lib/bootstrap-stage3/self-test.shs ||
+  fail "MSVC authority fingerprint self-test missing"
 if grep -Eq 'choco install llvm|LLVM_SYS_180_PREFIX|--backend=llvm' "${windows_workflow}"; then
   fail "Windows workflow still provisions or selects unsupported LLVM"
 fi
