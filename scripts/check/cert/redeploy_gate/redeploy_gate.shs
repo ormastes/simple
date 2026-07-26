@@ -27,8 +27,10 @@ FIX="$SCRIPT_DIR/fixtures"
 # Ordered list of every blocking check name (used by --list and as documentation).
 CHECK_NAMES="val-scalar add print-literal enum-payload qmark twofn struct-field struct-copy-isolation class-in-array-mutation cfg-arch-dispatch-a cfg-arch-dispatch-b cfg-lowered-funcs=2"
 
-# Advisory checks: run and reported, but never counted toward PASS/TOTAL and
-# never affect the gate's exit status (see the native-build-smoke block below).
+# Ratchet checks: advisory (not counted toward PASS/TOTAL) only while the
+# incumbent binary also fails them; they self-promote to blocking the
+# instant a passing binary becomes the incumbent (see the native-build-smoke
+# block below).
 ADVISORY_CHECK_NAMES="native-build-smoke"
 
 case "${1:-}" in
@@ -56,6 +58,15 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
+# Incumbent binary: the currently-deployed binary the candidate is ratcheted
+# against for native-build-smoke (see below). Override for testing via
+# REDEPLOY_GATE_INCUMBENT_BIN; default: bin/simple (the live deploy symlink).
+INCUMBENT_ARG="${REDEPLOY_GATE_INCUMBENT_BIN:-bin/simple}"
+case "$INCUMBENT_ARG" in
+    /*) INCUMBENT_BIN="$INCUMBENT_ARG" ;;
+    *)  INCUMBENT_BIN="$REPO_ROOT/$INCUMBENT_ARG" ;;
+esac
+
 PASS=0
 TOTAL=0
 SKIP=0
@@ -76,6 +87,34 @@ advise_fail() { ADV_TOTAL=$((ADV_TOTAL + 1)); printf 'FAIL  %-24s %s [advisory]\
 have() { command -v "$1" >/dev/null 2>&1; }
 run_with_timeout_180() {
     if have timeout; then timeout 180 "$@"; else "$@"; fi
+}
+
+# native_build_smoke_check BIN_PATH — builds+runs the native-build-smoke
+# fixture (cranelift backend, 180s timeout) against BIN_PATH. Sets
+# NB_LAST_MSG to a human-readable result and returns 0 on the exact marker,
+# 1 otherwise (build failure, no executable produced, timeout, or wrong
+# output). Used for both the incumbent and the candidate so the ratchet
+# below can compare them.
+native_build_smoke_check() {
+    nb_bin="$1"
+    nb_tmpdir=$(mktemp -d 2>/dev/null || printf '%s/redeploy_gate_nbsmoke.%s' "${TMPDIR:-/tmp}" "$$")
+    mkdir -p "$nb_tmpdir" 2>/dev/null
+    nb_out="$nb_tmpdir/nbsmoke.bin"
+    nb_result=1
+    NB_LAST_MSG="native-build failed or produced no executable (see $nb_tmpdir/build.log)"
+    if run_with_timeout_180 "$nb_bin" native-build --backend=cranelift \
+        --entry "$FIX/native_build_smoke.spl" --output "$nb_out" >"$nb_tmpdir/build.log" 2>&1 \
+        && [ -x "$nb_out" ]; then
+        nb_run_out=$("$nb_out" 2>/dev/null)
+        if [ "$nb_run_out" = "NATIVE_BUILD_SMOKE_OK" ]; then
+            nb_result=0
+            NB_LAST_MSG="= NATIVE_BUILD_SMOKE_OK"
+        else
+            NB_LAST_MSG="built but ran wrong output [$(printf '%s' "$nb_run_out" | tr '\n' ';')]"
+        fi
+    fi
+    rm -rf "$nb_tmpdir" 2>/dev/null
+    return "$nb_result"
 }
 
 # assert_eq NAME EXPECTED ACTUAL  — exact stdout match (command substitution
@@ -139,7 +178,7 @@ fi
 
 printf -- '---------------------------------------------------------------\n'
 
-# --- ADVISORY: native-build-smoke (doc/08_tracking/bug/native_build_nil_receiver_crash_2026-07-25.md) ---
+# --- native-build-smoke: self-promoting RATCHET (doc/08_tracking/bug/native_build_nil_receiver_crash_2026-07-25.md) ---
 # The gate previously ran NO native-build check at all, so a binary whose
 # native-build lane was completely dead (LLVM-backend nil-receiver trap,
 # see the bug doc) still gated 10-11/11 and shipped. This check exercises
@@ -148,29 +187,37 @@ printf -- '---------------------------------------------------------------\n'
 # a false discriminator) end-to-end: compile the fixture, then run the
 # produced binary and check for its marker.
 #
-# It is ADVISORY (advise_pass/advise_fail, not pass/fail) rather than
-# blocking: as of this writing even the deployed incumbent binary is
-# known to fail native-build in some configurations, and gate policy is
-# "a new check that both candidate and incumbent fail must not block
-# deploys." Promote this to a real pass/fail check (swap advise_pass/
-# advise_fail for pass/fail above) once a binary that PASSES it has
-# shipped as the incumbent.
-NB_TMPDIR=$(mktemp -d 2>/dev/null || printf '%s/redeploy_gate_nbsmoke.%s' "${TMPDIR:-/tmp}" "$$")
-mkdir -p "$NB_TMPDIR" 2>/dev/null
-NB_OUT="$NB_TMPDIR/nbsmoke.bin"
-if run_with_timeout_180 "$BIN" native-build --backend=cranelift \
-    --entry "$FIX/native_build_smoke.spl" --output "$NB_OUT" >"$NB_TMPDIR/build.log" 2>&1 \
-    && [ -x "$NB_OUT" ]; then
-    NB_RUN_OUT=$("$NB_OUT" 2>/dev/null)
-    if [ "$NB_RUN_OUT" = "NATIVE_BUILD_SMOKE_OK" ]; then
-        advise_pass "native-build-smoke" "= NATIVE_BUILD_SMOKE_OK"
+# It is a RATCHET, not a fixed advisory: run the same smoke fixture against
+# the INCUMBENT (currently-deployed) binary. If the incumbent already
+# passes, a regressing candidate is a BLOCKING failure (pass/fail, counted
+# in PASS/TOTAL) — this check can never silently go dark again once a
+# passing binary has shipped. If the incumbent still fails (today's case:
+# every currently-deployed binary fails this check), the candidate's result
+# stays informational (advise_pass/advise_fail) so today's deploys are not
+# blocked by a check nothing has ever passed. No human step is needed to
+# flip modes — it flips itself the moment a passing binary becomes the
+# incumbent.
+if [ -x "$INCUMBENT_BIN" ] && native_build_smoke_check "$INCUMBENT_BIN"; then
+    INCUMBENT_SMOKE_OK=1
+    printf 'native-build-smoke: RATCHET (incumbent=pass)\n'
+else
+    INCUMBENT_SMOKE_OK=0
+    printf 'native-build-smoke: ADVISORY (incumbent=fail)\n'
+fi
+
+if native_build_smoke_check "$BIN"; then
+    if [ "$INCUMBENT_SMOKE_OK" -eq 1 ]; then
+        pass "native-build-smoke" "$NB_LAST_MSG"
     else
-        advise_fail "native-build-smoke" "built but ran wrong output [$(printf '%s' "$NB_RUN_OUT" | tr '\n' ';')]"
+        advise_pass "native-build-smoke" "$NB_LAST_MSG"
     fi
 else
-    advise_fail "native-build-smoke" "native-build failed or produced no executable (see $NB_TMPDIR/build.log)"
+    if [ "$INCUMBENT_SMOKE_OK" -eq 1 ]; then
+        fail "native-build-smoke" "$NB_LAST_MSG"
+    else
+        advise_fail "native-build-smoke" "$NB_LAST_MSG"
+    fi
 fi
-rm -rf "$NB_TMPDIR" 2>/dev/null
 
 printf -- '---------------------------------------------------------------\n'
 printf 'GATE: %d/%d PASS' "$PASS" "$TOTAL"
