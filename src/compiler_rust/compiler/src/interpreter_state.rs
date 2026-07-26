@@ -573,6 +573,7 @@ pub use simple_common::fault_detection::set_max_recursion_depth;
 pub use simple_common::fault_detection::reset_recursion_depth;
 pub use simple_common::fault_detection::is_timeout_exceeded;
 pub use simple_common::fault_detection::reset_timeout;
+pub use simple_common::fault_detection::timeout_limit_secs;
 
 //==============================================================================
 // Configuration Management

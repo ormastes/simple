@@ -19,7 +19,7 @@ use simple_runtime::debug;
 macro_rules! check_timeout {
     () => {
         if crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
     };
 }

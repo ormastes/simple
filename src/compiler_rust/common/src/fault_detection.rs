@@ -65,6 +65,12 @@ pub fn reset_recursion_depth() {
 /// Flag set by the watchdog thread when wall-clock timeout is exceeded.
 pub static TIMEOUT_EXCEEDED: AtomicBool = AtomicBool::new(false);
 
+/// The wall-clock timeout (in seconds) the currently running watchdog was
+/// configured with. Set by `watchdog::start_watchdog` so that
+/// `CompileError::TimeoutExceeded` can report the real configured limit
+/// instead of a hardcoded placeholder. 0 means "no watchdog configured".
+pub static TIMEOUT_LIMIT_SECS: AtomicU64 = AtomicU64::new(0);
+
 /// Check if timeout has been exceeded.
 #[inline]
 pub fn is_timeout_exceeded() -> bool {
@@ -75,6 +81,19 @@ pub fn is_timeout_exceeded() -> bool {
 #[inline]
 pub fn reset_timeout() {
     TIMEOUT_EXCEEDED.store(false, Ordering::Release);
+}
+
+/// Record the configured watchdog timeout (seconds) for error reporting.
+#[inline]
+pub fn set_timeout_limit_secs(secs: u64) {
+    TIMEOUT_LIMIT_SECS.store(secs, Ordering::Release);
+}
+
+/// Read the configured watchdog timeout (seconds). 0 if no watchdog is
+/// currently configured.
+#[inline]
+pub fn timeout_limit_secs() -> u64 {
+    TIMEOUT_LIMIT_SECS.load(Ordering::Acquire)
 }
 
 #[cfg(test)]

@@ -44,7 +44,7 @@ macro_rules! check_execution_limit {
 macro_rules! check_timeout {
     () => {
         if crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
     };
 }
@@ -698,7 +698,7 @@ fn try_exec_direct_float_while_loop(while_stmt: &WhileStmt, env: &mut Env) -> Re
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         let left_value = eval_float_operand(&loop_shape.left, target);
         let right_value = eval_float_operand(&loop_shape.right, target);
@@ -822,7 +822,7 @@ fn try_exec_indexed_float_array_while_loop(
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         let element = match values.get(index as usize) {
             Some(Value::Float(value)) => *value,
@@ -975,7 +975,7 @@ fn try_exec_indexed_string_match_count_while_loop(
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         let byte = bytes[index as usize];
         if (byte == needle) == loop_shape.match_when_equal {
@@ -1117,7 +1117,7 @@ fn try_exec_indexed_float_array_match_count_while_loop(
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         let element = match values.get(index as usize) {
             Some(Value::Float(value)) => *value,
@@ -1258,7 +1258,7 @@ fn try_exec_indexed_int_array_match_count_while_loop(
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         let element = match values.get(index as usize) {
             Some(Value::Int(value)) => *value,
@@ -1399,7 +1399,7 @@ fn try_exec_indexed_int_array_while_loop(
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         let element = match values.get(index as usize) {
             Some(Value::Int(value)) => *value,
@@ -1687,7 +1687,7 @@ fn try_exec_direct_int_match_count_while_loop(
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         if eval_direct_int_branch_predicate(&loop_shape.predicate, index) {
             let left_value = eval_inline_operand(&left, target, index);
@@ -1822,7 +1822,7 @@ fn try_exec_direct_int_while_loop(while_stmt: &WhileStmt, env: &mut Env) -> Resu
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         let left_value = eval_inline_operand(&left, target, index);
         let right_value = eval_inline_operand(&right, target, index);
@@ -1946,7 +1946,7 @@ fn try_exec_one_arg_int_helper_while_loop(
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         let left_value = eval_inline_operand(&left, target, index);
         let right_value = eval_inline_operand(&right, target, index);
@@ -2096,7 +2096,7 @@ fn try_exec_two_arg_int_helper_while_loop(
     let mut iterations = 0u64;
     while index < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         let left_value = eval_inline_operand(&left, target, index);
         let right_value = eval_inline_operand(&right, target, index);
@@ -3455,7 +3455,7 @@ fn try_exec_enumerated_int_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> 
     let mut iterations = 0u64;
     for (idx, item) in values.iter().enumerate() {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         let loop_value = if uses_item {
             let Value::Int(loop_value) = item else {
@@ -3616,7 +3616,7 @@ fn try_exec_string_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Re
     let mut iterations = 0u64;
     for ch in text.chars() {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         if (ch == loop_shape.needle) == loop_shape.match_when_equal {
             let left_value = eval_single_range_for_operand(&left, target, 0);
@@ -3777,7 +3777,7 @@ fn try_exec_string_count_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<O
     let mut iterations = 0u64;
     for ch in text.chars() {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         let left_value = eval_single_range_for_operand(&left, target, 0);
         let right_value = eval_single_range_for_operand(&right, target, 0);
@@ -3894,7 +3894,7 @@ fn try_exec_float_array_match_count_for_loop(
     let mut iterations = 0u64;
     for item in values.iter() {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         let Value::Float(loop_value) = item else {
             return Ok(None);
@@ -4035,7 +4035,7 @@ fn try_exec_float_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Op
     let mut iterations = 0u64;
     for item in values.iter() {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         let Value::Float(loop_value) = item else {
             return Ok(None);
@@ -4168,7 +4168,7 @@ fn try_exec_int_array_match_count_for_loop(for_stmt: &ForStmt, env: &mut Env) ->
     let mut iterations = 0u64;
     for item in values.iter() {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         let Value::Int(loop_value) = item else {
             return Ok(None);
@@ -4330,7 +4330,7 @@ fn try_exec_int_array_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
     let mut iterations = 0u64;
     for item in values.iter() {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         let Value::Int(loop_value) = item else {
             return Ok(None);
@@ -4440,7 +4440,7 @@ fn try_exec_int_range_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
         let mut iterations = 0u64;
         while current < end {
             if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-                return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+                return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
             }
             let left_value = eval_single_range_for_operand(&left, target, current);
             let right_value = eval_single_range_for_operand(&right, target, current);
@@ -4486,7 +4486,7 @@ fn try_exec_int_range_for_loop(for_stmt: &ForStmt, env: &mut Env) -> Result<Opti
     let mut iterations = 0u64;
     while current < end {
         if iterations & 0x3ff == 0 && crate::interpreter::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
         }
         for assignment in &loop_shape.assignments {
             let left = eval_range_for_operand(&assignment.left, &locals, current)?;

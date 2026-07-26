@@ -56,6 +56,7 @@ pub use interpreter_state::{
     // Timeout detection
     is_timeout_exceeded,
     reset_timeout,
+    timeout_limit_secs,
 };
 pub(crate) use interpreter_state::{
     ACTOR_INBOX, ACTOR_OUTBOX, ACTOR_SPAWNER, AOP_CONFIG, BASE_UNIT_DIMENSIONS, BDD_REGISTRY_CONTEXTS,

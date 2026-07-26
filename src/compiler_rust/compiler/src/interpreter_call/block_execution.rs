@@ -958,7 +958,7 @@ pub(super) fn exec_block_closure_into(
                 if crate::interpreter::is_timeout_exceeded() {
                     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
                     IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
-                    return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+                    return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
                 }
                 let cond = evaluate_expr(
                     &while_stmt.condition,
@@ -992,7 +992,7 @@ pub(super) fn exec_block_closure_into(
                 if crate::interpreter::is_timeout_exceeded() {
                     CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names.clone());
                     IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars.clone());
-                    return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+                    return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
                 }
                 match exec_block_closure_mut(
                     &loop_stmt.body.statements,
@@ -1579,7 +1579,7 @@ fn exec_block_closure_mut(
             }
             Node::While(while_stmt) => loop {
                 if crate::interpreter::is_timeout_exceeded() {
-                    return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+                    return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
                 }
                 let cond = evaluate_expr(
                     &while_stmt.condition,
@@ -1611,7 +1611,7 @@ fn exec_block_closure_mut(
             },
             Node::Loop(loop_stmt) => loop {
                 if crate::interpreter::is_timeout_exceeded() {
-                    return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+                    return Err(CompileError::TimeoutExceeded { timeout_secs: crate::interpreter::timeout_limit_secs() });
                 }
                 match exec_block_closure_mut(
                     &loop_stmt.body.statements,

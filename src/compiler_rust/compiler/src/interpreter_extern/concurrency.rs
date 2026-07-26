@@ -102,7 +102,7 @@ pub fn rt_thread_sleep(args: &[Value]) -> Result<Value, CompileError> {
     let mut remaining = millis;
     while remaining > 0 {
         if simple_common::fault_detection::is_timeout_exceeded() {
-            return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+            return Err(CompileError::TimeoutExceeded { timeout_secs: simple_common::fault_detection::timeout_limit_secs() });
         }
         let chunk = remaining.min(100);
         thread::sleep(Duration::from_millis(chunk));
@@ -576,7 +576,7 @@ pub fn rt_channel_recv(args: &[Value]) -> Result<Value, CompileError> {
         // Poll with short timeout instead of blocking forever, so watchdog can interrupt.
         loop {
             if simple_common::fault_detection::is_timeout_exceeded() {
-                return Err(CompileError::TimeoutExceeded { timeout_secs: 0 });
+                return Err(CompileError::TimeoutExceeded { timeout_secs: simple_common::fault_detection::timeout_limit_secs() });
             }
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(value) => return Ok(value),

@@ -86,6 +86,7 @@ pub fn start_watchdog(timeout_secs: u64) {
     stop_watchdog();
 
     TIMEOUT_EXCEEDED.store(false, Ordering::Release);
+    simple_common::fault_detection::set_timeout_limit_secs(timeout_secs);
 
     let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop_flag);
@@ -170,6 +171,7 @@ pub fn stop_watchdog() {
             }
         }
     }
+    simple_common::fault_detection::set_timeout_limit_secs(0);
 }
 
 #[cfg(test)]
@@ -186,6 +188,29 @@ mod tests {
         assert!(!fault_detection::is_timeout_exceeded());
         stop_watchdog();
         assert!(!fault_detection::is_timeout_exceeded());
+    }
+
+    /// Regression test: `start_watchdog(secs)` must record the configured
+    /// limit so `CompileError::TimeoutExceeded` can report the real value
+    /// instead of a hardcoded 0 (see doc/08_tracking/bug — "timeout: execution
+    /// exceeded 0 second limit" reported despite SIMPLE_TIMEOUT_SECONDS=3000).
+    #[test]
+    fn test_watchdog_records_configured_timeout_limit() {
+        fault_detection::reset_timeout();
+        assert_eq!(fault_detection::timeout_limit_secs(), 0);
+
+        start_watchdog(3000);
+        assert_eq!(fault_detection::timeout_limit_secs(), 3000);
+
+        // Restarting with a different value updates the recorded limit.
+        start_watchdog(5400);
+        assert_eq!(fault_detection::timeout_limit_secs(), 5400);
+
+        stop_watchdog();
+        // Stopping clears the limit: no watchdog is configured anymore, so
+        // a stray check_timeout! site (if any fired late) reports "no limit"
+        // rather than a stale prior value.
+        assert_eq!(fault_detection::timeout_limit_secs(), 0);
     }
 
     #[test]
