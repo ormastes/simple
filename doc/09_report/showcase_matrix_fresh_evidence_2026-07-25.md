@@ -16,7 +16,7 @@ collection: `a5e5afb8`…`b5a009cc`.
 | widget × host-WM | window | **BLOCKED** | wrappers are window-only (`SIMPLE_GUI=1` + `GuiRenderer.create`); concurrent live window-evidence loops own the single-window capture lane. Gap filed: `doc/08_tracking/bug/wm_showcase_no_headless_lane_2026-07-25.md` |
 | 2D × host-WM | window | **BLOCKED** | same; ancillary offscreen synthetic WM-chrome capture PASS (`check-hosted-wm-capture-evidence.shs`: 16x16 crop, 90/256 non-background px, checksum 473142143, theme aetheric_dark) |
 | web × host-WM | window | **BLOCKED** | same |
-| SimpleOS-WM × QEMU | native-build+boot | **FAIL (new regression found)** | harness `check-simpleos-wm-fullscreen-evidence.shs`: provenance/font/qemu/grub/OVMF stages PASS; kernel native-build FAILS — `cpu.spl:105 fn cli():` → `expected Ident, got cli 'cli'` (lexer has a `cli` token in the native-build lane only; plain `run` parses it fine on both binaries). QEMU never launched. Last PASS 07-18/19 → regression window since |
+| SimpleOS-WM × QEMU | native-build+boot | **FAIL (build-timeout; parser regressions fixed)** | `cli` soft-keyword (`d5a6312d`) and pipe-enum (`5b04d2f5`) parser regressions FIXED; harness now reaches the kernel cranelift build, which exceeds every budget tried (2700s run 5, 7200s run 7) with `--cache-dir` writing NOTHING (0-byte cache after 2h — reruns never warm) and zero progress output under `--log off`. Run 7 2026-07-26: `fail reason=wm-simple-web-build-timeout`. Run 8 in flight with 10800s budget; cache + observability analyses filed separately |
 
 ## Defects fixed during collection (all pushed)
 - `--timeout` not propagated to `SIMPLE_TIMEOUT_SECONDS` (`a5a4f8250`)
