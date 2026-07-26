@@ -120,12 +120,12 @@ extern fn rt_ptr_write_i32(addr: i64, offset: i64, value: i32)
 # only write_i32/read_i64 exist. Readback therefore uses rt_ptr_read_i64
 # low-32-bit extraction over a 4-byte-padded allocation.
 extern fn rt_ptr_read_i64(addr: i64, offset: i64) -> i64
-# Raw byte copy/fill for row replication: per-pixel extern-call loops cost
+# Runtime byte copy/fill for row replication: per-pixel extern-call loops cost
 # ~800k calls per 1024x768 frame, which under QEMU TCG exceeds the evidence
-# wrapper's 10s input-correlation windows. memcpy/memset are strong libc
-# symbols on hosts and strong boot-stub symbols in the freestanding kernel.
-extern fn memcpy(dst: i64, src: i64, n: i64) -> i64
-extern fn memset(dst: i64, value: i64, n: i64) -> i64
+# wrapper's 10s input-correlation windows. The rt_* owners are available in
+# both interpreter and native runtimes.
+extern fn rt_memcpy(dst: i64, src: i64, n: i64) -> i64
+extern fn rt_memset(dst: i64, value: i64, n: i64) -> i64
 
 var _shared_wm_px_addr: i64 = 0
 var _shared_wm_px_count: i64 = 0
@@ -144,7 +144,7 @@ fn _shared_wm_px_alloc(width: i32, height: i32):
     # +4 tail padding keeps the final pixel's 8-byte rt_ptr_read_i64 readback
     # in bounds (per-pixel low-32-bit extraction; see extern note above).
     _shared_wm_px_addr = rt_alloc(count * 4 + 4)
-    memset(_shared_wm_px_addr, 0, count * 4 + 4)
+    rt_memset(_shared_wm_px_addr, 0, count * 4 + 4)
 
 fn _shared_wm_px_store(x: i64, y: i64, color: u32):
     if _shared_wm_px_addr == 0:
@@ -193,7 +193,7 @@ class SharedWmPixelBufferBackend:
         val row_bytes = _shared_wm_px_width * 4
         var y: i64 = 1
         while y < _shared_wm_px_height:
-            memcpy(_shared_wm_px_addr + y * row_bytes, _shared_wm_px_addr, row_bytes)
+            rt_memcpy(_shared_wm_px_addr + y * row_bytes, _shared_wm_px_addr, row_bytes)
             y = y + 1
 
     me _px_fill_rect(x: i32, y: i32, width: i32, height: i32, color: u32):
@@ -223,7 +223,7 @@ class SharedWmPixelBufferBackend:
         val span_bytes = (x1 - x0) * 4
         var cy = y0 + 1
         while cy < y1:
-            memcpy(_shared_wm_px_addr + cy * buf_row_bytes + x0 * 4, _shared_wm_px_addr + first_row_off, span_bytes)
+            rt_memcpy(_shared_wm_px_addr + cy * buf_row_bytes + x0 * 4, _shared_wm_px_addr + first_row_off, span_bytes)
             cy = cy + 1
 
     me _px_fill_titlebar_gradient(x: i32, y: i32, width: i32, height: i32, base_color: u32):
@@ -963,6 +963,14 @@ fn shared_wm_scene_draw_ir_composition(scene: SharedWmScene, taskbar: TaskbarMod
 # _shared_wm_render_child_content_frames's traversal, but for Draw IR
 # projection instead of direct-to-backend pixels.
 fn _wm_draw_ir_child_content_batches_recursive(content_frames: [WmContentFrame], parent_id: text, backend_target: text, depth: i32) -> [DrawIrBatch]:
+    # Bounded stall receipt (depth <= 3 only, so a runaway cannot flood serial):
+    # the pointer-release composition never returns. Interpolating the module
+    # val DIRECTLY is deliberate — it reports the cap value actually used by
+    # the guard below, and module-level val initializers are a documented
+    # freestanding-lane failure (a garbage cap would defeat the depth guard,
+    # a zero cap would silently drop all nested frames).
+    if depth <= 3:
+        print("[wm-comp] recurse parent='{parent_id}' depth={depth} cap={WM_CONTENT_FRAME_MAX_NESTING_DEPTH} frames={content_frames.len()}")
     if depth > WM_CONTENT_FRAME_MAX_NESTING_DEPTH:
         return []
     var out: [DrawIrBatch] = []
@@ -979,11 +987,20 @@ fn _wm_draw_ir_child_content_batches_recursive(content_frames: [WmContentFrame],
 # frames retain their GROUP metadata and therefore fail closed in Engine2D
 # until clipped nested IMAGE projection is implemented.
 fn shared_wm_scene_draw_ir_composition_with_content(scene: SharedWmScene, taskbar: TaskbarModel, content_frames: [WmContentFrame], backend_target: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> DrawIrComposition:
+    # Stall receipts: the executor logs at=composition-begin and never
+    # at=composition-end on the pointer release, while the press completed this
+    # same call with an identical scene_revision. base is built by a far larger
+    # builder than the loop below, so both need to be distinguishable.
+    print("[wm-comp] at=base-begin")
     val base = shared_wm_scene_draw_ir_composition(scene, taskbar, backend_target, dpi_scale_milli, clock_label, right_icon_count)
+    val dbg_base_batches = base.batches.len()
+    val dbg_frames = content_frames.len()
+    print("[wm-comp] at=base-done base_batches={dbg_base_batches} frames={dbg_frames}")
     if content_frames.len() == 0:
         return base
     var batches: [DrawIrBatch] = []
     for batch in base.batches:
+        print("[wm-comp] at=batch id={batch.batch_id}")
         batches.push(batch)
         for window in scene.windows:
             if not window.minimized and batch.batch_id == "window-{window.window_id}":
