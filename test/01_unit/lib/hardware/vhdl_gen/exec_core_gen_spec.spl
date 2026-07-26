@@ -9,13 +9,17 @@
 
 ## Overview
 
-The structured VHDL generator in `src/lib/hardware/vhdl_gen/` emits BOTH
+The structured VHDL generator in `src/lib/hardware/vhdl_gen/` emits all SIX
 silicon-lane exec cores byte-identical to the proven goldens in
-`examples/09_embedded/fpga_riscv/rtl/`, from one shared template source
-parameterized by XlenConfig. Entity/ports/generics/constants, memory-init
-impure functions, the top-level instruction-decode case arms (opcode table),
-CSR read-mux cases, and all dbg_* taps (AOP debug aspect) are structurally
-generated; irreducible per-core paragraphs are named literal sections.
+`examples/09_embedded/fpga_riscv/rtl/`: the rv32/rv64 base cores plus the
+flat (full-RAM behavioral, GHDL boot-tiny / NVMe-fw testbenches) and axi
+(synthesizable AXI-master-shaped, SoC tops) sibling variants — all from one
+shared template source parameterized by XlenConfig. Entity/ports/generics/
+constants, memory-init impure functions, the top-level instruction-decode
+case arms (opcode table), CSR read-mux cases, and all dbg_* taps (AOP debug
+aspect) are structurally generated; irreducible per-core paragraphs are named
+literal sections. Variant cores share flat/axi-common paragraphs (fa##
+sections) and reuse base decode arms where byte-identical.
 
 ## Key Concepts
 
@@ -29,30 +33,35 @@ generated; irreducible per-core paragraphs are named literal sections.
 use std.spec
 use lib.hardware.riscv_common.xlen.XlenConfig
 use lib.hardware.vhdl_gen.exec_core_gen.{generate_exec_core, generate_rv32_exec_core, generate_rv64_exec_core}
+use lib.hardware.vhdl_gen.exec_core_variant_gen.{generate_exec_core_flat, generate_exec_core_axi}
 
 extern fn rt_file_read_text(path: text) -> text
 
 val RV32_GOLDEN_PATH = "examples/09_embedded/fpga_riscv/rtl/rv32_exec_core.vhd"
 val RV64_GOLDEN_PATH = "examples/09_embedded/fpga_riscv/rtl/rv64_exec_core.vhd"
+val RV32_FLAT_GOLDEN_PATH = "examples/09_embedded/fpga_riscv/rtl/rv32_exec_core_flat.vhd"
+val RV64_FLAT_GOLDEN_PATH = "examples/09_embedded/fpga_riscv/rtl/rv64_exec_core_flat.vhd"
+val RV32_AXI_GOLDEN_PATH = "examples/09_embedded/fpga_riscv/rtl/rv32_exec_core_axi.vhd"
+val RV64_AXI_GOLDEN_PATH = "examples/09_embedded/fpga_riscv/rtl/rv64_exec_core_axi.vhd"
 
 # ============================================================================
 # Step Helpers (assert through returned values — no module-global mutation)
 # ============================================================================
 
-@step "Generate the rv32 core from the shared template"
 fn generate_rv32_text() -> text:
+    step("Generate the rv32 core from the shared template")
     generate_rv32_exec_core("")
 
-@step "Generate the rv64 core from the shared template"
 fn generate_rv64_text() -> text:
+    step("Generate the rv64 core from the shared template")
     generate_rv64_exec_core("")
 
-@step "Read a golden core from examples"
 fn read_golden(path: text) -> text:
+    step("Read the golden core from examples: " + path)
     rt_file_read_text(path)
 
-@step "Then the generated text matches the golden byte-for-byte"
 fn Then_matches_golden(generated: text, golden: text):
+    step("Compare generated text against the golden byte-for-byte")
     expect(generated.len()).to_equal(golden.len())
     assert_true(generated == golden)
 
@@ -89,6 +98,45 @@ describe "Exec-core VHDL generator":
         val b64 = generate_rv64_text()
         assert_true(a32 == b32)
         assert_true(a64 == b64)
+
+# @manual_section: Flat/AXI Variant Core Generation
+
+describe "Exec-core VHDL generator — flat/axi variants":
+    it "emits rv32_exec_core_flat byte-identical to the golden":
+        val generated = generate_exec_core_flat(XlenConfig.rv32(), "")
+        val golden = read_golden(RV32_FLAT_GOLDEN_PATH)
+        Then_matches_golden(generated, golden)
+
+    it "emits rv64_exec_core_flat byte-identical to the golden":
+        val generated = generate_exec_core_flat(XlenConfig.rv64(), "")
+        val golden = read_golden(RV64_FLAT_GOLDEN_PATH)
+        Then_matches_golden(generated, golden)
+
+    it "emits rv32_exec_core_axi byte-identical to the golden":
+        val generated = generate_exec_core_axi(XlenConfig.rv32())
+        val golden = read_golden(RV32_AXI_GOLDEN_PATH)
+        Then_matches_golden(generated, golden)
+
+    it "emits rv64_exec_core_axi byte-identical to the golden":
+        val generated = generate_exec_core_axi(XlenConfig.rv64())
+        val golden = read_golden(RV64_AXI_GOLDEN_PATH)
+        Then_matches_golden(generated, golden)
+
+    it "is deterministic across repeated variant generation":
+        val f1 = generate_exec_core_flat(XlenConfig.rv32(), "")
+        val f2 = generate_exec_core_flat(XlenConfig.rv32(), "")
+        val x1 = generate_exec_core_axi(XlenConfig.rv64())
+        val x2 = generate_exec_core_axi(XlenConfig.rv64())
+        assert_true(f1 == f2)
+        assert_true(x1 == x2)
+
+    it "applies the optional .mem path prefix to flat RAM and ramdisk loads":
+        val p32 = generate_exec_core_flat(XlenConfig.rv32(), "/tmp/fw/")
+        assert_true(p32.contains("is \"/tmp/fw/rv32_flat.mem\";"))
+        assert_true(p32.contains("file_open(fstatus, f, \"/tmp/fw/rv32_ramdisk.mem\", read_mode);"))
+        val p64 = generate_exec_core_flat(XlenConfig.rv64(), "/tmp/fw/")
+        assert_true(p64.contains("is \"/tmp/fw/rv64_flat.mem\";"))
+        assert_true(p64.contains("file_open(fstat, f, \"/tmp/fw/rv64_ramdisk.mem\", read_mode);"))
 
 # ============================================================================
 # Edge Cases

@@ -69,6 +69,26 @@ struct VgCoreGeometry:
     case_indent: i64       # indent of `case op is` in the decode FSM
     csr_indent: i64        # indent of the CSR read-mux case
 
+# Variant-entity descriptors (flat/axi cores): the variant goldens use
+# GROUP-LOCAL column alignment (e.g. the AXI mem_* port group aligns to its own
+# width while the debug_* group does not), which a single `aligned` flag cannot
+# express. Each item carries its explicit field widths instead.
+struct VgGenericSpec:
+    pre_comments: [text]   # verbatim full lines emitted before the generic line
+    name: text
+    name_w: i64            # width of the name field before ": " (>= name.len())
+    ty: text
+    default_val: text
+
+struct VgPortSpec:
+    pre_comments: [text]
+    name: text
+    name_w: i64            # width of the name field before ": "
+    dir: text              # "in" / "out"
+    dir_w: i64             # width of the dir field before the type
+    ty: text
+    default_val: text      # "" when the port has no default
+
 fn no_lines() -> [text]:
     var l: [text] = []
     l
@@ -99,6 +119,20 @@ fn vg_append(dst: [text], src: [text]) -> [text]:
 
 fn vg_spaces(n: i64) -> text:
     vg_pad("", n)
+
+# Re-emit a section shifted right by `delta` spaces (blank lines stay blank).
+# Lets a variant core reuse a base-core section that sits at a different
+# nesting depth (e.g. rv64 flat/axi decode arms are 2 deeper than the base).
+fn vg_reindent(lines: [text], delta: i64) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < lines.len():
+        if lines[i] == "":
+            out = out.push("")
+        else:
+            out = out.push(vg_spaces(delta) + lines[i])
+        i = i + 1
+    out
 
 fn emit_library_header() -> [text]:
     var l: [text] = []
@@ -156,6 +190,37 @@ fn emit_entity(name: text, gens: [VgGeneric], ports: [VgPort], aligned: bool) ->
             pname = vg_pad(p.name, pw)
             pdir = vg_pad(p.dir, 3)
         var line = "    " + pname + " : " + pdir + " " + p.ty
+        if p.default_val != "":
+            line = line + " := " + p.default_val
+        if i < ports.len() - 1:
+            line = line + ";"
+        l = l.push(line)
+        i = i + 1
+    l = l.push("  );")
+    l = l.push("end entity " + name + ";")
+    l
+
+# Variant sibling of emit_entity driven by explicit per-item field widths.
+fn emit_entity_spec(name: text, gens: [VgGenericSpec], ports: [VgPortSpec]) -> [text]:
+    var l: [text] = []
+    l = l.push("entity " + name + " is")
+    l = l.push("  generic (")
+    var i = 0
+    while i < gens.len():
+        val g = gens[i]
+        l = vg_append(l, g.pre_comments)
+        var line = "    " + vg_pad(g.name, g.name_w) + ": " + g.ty + " := " + g.default_val
+        if i < gens.len() - 1:
+            line = line + ";"
+        l = l.push(line)
+        i = i + 1
+    l = l.push("  );")
+    l = l.push("  port (")
+    i = 0
+    while i < ports.len():
+        val p = ports[i]
+        l = vg_append(l, p.pre_comments)
+        var line = "    " + vg_pad(p.name, p.name_w) + ": " + vg_pad(p.dir, p.dir_w) + " " + p.ty
         if p.default_val != "":
             line = line + " := " + p.default_val
         if i < ports.len() - 1:

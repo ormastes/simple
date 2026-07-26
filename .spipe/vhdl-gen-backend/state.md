@@ -22,3 +22,41 @@
 - Landmine hit: a parallel jj session (snapshot/commit/fetch/rebase at ~05:50Z) swept ALL
   uncommitted new files mid-task (src files + spec + this state.md); recreated from
   scratchpad masters and re-verified green. Keep scratchpad backups until landed.
+
+## Lane 4 — flat/axi variant cores (2026-07-26)
+- DONE: generator extended to emit ALL SIX cores byte-identical to goldens: base rv32/rv64
+  plus rv32/rv64_exec_core_flat.vhd (806/934 lines; GHDL boot-tiny + NVMe-fw testbenches)
+  and rv32/rv64_exec_core_axi.vhd (840/1047; AXI SoC tops). One driver run
+  (`sh scripts/fpga/generate_exec_core_vhdl.shs`) writes all 6 into build/os/rtl/;
+  diff vs golden = 0 for each; two runs byte-identical (md5 sets equal).
+- Factoring (variants are siblings of EACH OTHER, not of the base: verbatim base-section
+  reuse is only ~32/16 lines per rv32/rv64 variant, but flat<->axi share 521 (rv32) / 660
+  (rv64) lines): fa## sections shared flat<->axi + fl##/ax## variant-only literals in NEW
+  rv32_variant_sections.spl / rv64_variant_sections.spl; assembly + entity descriptor tables
+  in NEW exec_core_variant_gen.spl; NEW gen_types primitives VgGenericSpec/VgPortSpec/
+  emit_entity_spec (per-item name_w/dir_w column widths — the goldens use GROUP-LOCAL port
+  alignment a single aligned flag can't express) + vg_reindent (rv64 variants reuse base
+  decode arms shifted +2). .mem references (init_ram "rvNN_flat.mem" + file_open
+  "rvNN_ramdisk.mem") emitted in the assembly so --mem-prefix covers them.
+- Coverage stats: of 3627 total variant-golden lines, 68.2% emitted from sections shared
+  with another core (fa## + base-arm reuse + library headers), 3.2% descriptor/structured
+  (entity/ports/generics, arch line, mem-file lines), 28.6% variant-only literals
+  (per-variant: flat32 69.2%/rv64 72.9% shared). No whole-core forks of shared sections.
+- check-vhdl-golden-match.shs: CORES extended to 6; new keys vhdl_golden_match_rv32_flat/
+  rv64_flat/rv32_axi/rv64_axi; --selftest gained a variant deliberate-red phase
+  (rv32_flat mutant -> fail, proven). Gate run: all 6 keys=pass; overall ok=false ONLY from
+  a PRE-EXISTING manifest drift on tb_rv64_k26_ddr_boot.vhd — an UNCOMMITTED parallel-lane
+  edit (rv64 KV260 DDR session); HEAD gate fails identically, so not this lane's regression.
+  With that single external entry factored out (scratch manifest, repo untouched):
+  manifest=ok, all 6 pass, ok=true, selftest=ok. The landing lane for the tb edit must
+  regenerate the manifest in its own commit.
+- check-riscv-rtl-truth.shs: all 6 build/os/rtl cores classify generated-real,
+  riscv_rtl_truth_generated_real=6, riscv_rtl_truth_ok=true.
+- Tests: spec extended with 6 variant scenarios (golden-match x4, determinism, flat
+  mem-prefix incl. ramdisk file_open); probe extended, prints EXEC_CORE_GEN PROBE: ALL PASS
+  (14 PASS lines). NOTE pre-existing: deployed seed's `simple test` cannot parse `@step "..."`
+  decorators (HEAD spec fails identically: "expected Fn, found FString") — probe is the
+  runnable evidence lane until a self-hosted redeploy.
+- Lint note (pre-existing class): seed linter fires COLL006 "string concat in loop" on the
+  bounded padding/joining loops this generator family deliberately uses (14 hits already at
+  HEAD in gen_types/generate_main); new code follows the same landed style.

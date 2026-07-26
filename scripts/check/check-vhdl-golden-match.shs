@@ -10,7 +10,8 @@
 #      accompanied by a manifest regeneration, not silently absorbed here.
 #
 #   2. Generated match: for each backend-generated core present in
-#      build/os/rtl/ (rv32_exec_core.vhd, rv64_exec_core.vhd), the file must
+#      build/os/rtl/ (rv32/rv64 base cores plus the _flat and _axi sibling
+#      variants — 6 files), the file must
 #      be BYTE-IDENTICAL to the same-named golden under
 #      examples/09_embedded/fpga_riscv/rtl/. A missing generated file is
 #      reported as "not-generated" (the generator may not have run) and does
@@ -31,6 +32,10 @@
 #   vhdl_golden_match_manifest=ok|drift
 #   vhdl_golden_match_rv32=pass|fail|not-generated
 #   vhdl_golden_match_rv64=pass|fail|not-generated
+#   vhdl_golden_match_rv32_flat=pass|fail|not-generated
+#   vhdl_golden_match_rv64_flat=pass|fail|not-generated
+#   vhdl_golden_match_rv32_axi=pass|fail|not-generated
+#   vhdl_golden_match_rv64_axi=pass|fail|not-generated
 #   vhdl_golden_match_ok=true|false
 #
 # Exit 0 = all good, 1 = any fail (drift, byte mismatch, or missing under
@@ -42,7 +47,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 MANIFEST="$ROOT/doc/08_tracking/hardware/golden_vhdl_manifest_2026-07-26.txt"
 GOLDEN_DIR="$ROOT/examples/09_embedded/fpga_riscv/rtl"
 GEN_DIR="${VHDL_GEN_DIR:-$ROOT/build/os/rtl}"
-CORES="rv32_exec_core.vhd rv64_exec_core.vhd"
+CORES="rv32_exec_core.vhd rv64_exec_core.vhd rv32_exec_core_flat.vhd rv64_exec_core_flat.vhd rv32_exec_core_axi.vhd rv64_exec_core_axi.vhd"
 
 REQUIRE_GENERATED=0
 SELFTEST=0
@@ -111,6 +116,36 @@ if [ "$SELFTEST" = "1" ]; then
         exit 1
     fi
     echo "selftest: deliberate-red ok (1-byte mutant -> rv32=fail, rc=$rc)"
+
+    # Phase 3 (variant red): same calibration for a flat/axi variant core —
+    # exact copy of the rv32 flat golden passes, a 1-byte mutant must fail.
+    rm -f "$tmp/rv32_exec_core.vhd"
+    vgolden="$GOLDEN_DIR/rv32_exec_core_flat.vhd"
+    if [ ! -f "$vgolden" ]; then
+        echo "selftest: golden missing: $vgolden" >&2
+        exit 2
+    fi
+    cp "$vgolden" "$tmp/rv32_exec_core_flat.vhd"
+    out=$(VHDL_GEN_DIR="$tmp" "$0" 2>&1)
+    rc=$?
+    if [ $rc -ne 0 ] || ! printf '%s\n' "$out" | grep -q '^vhdl_golden_match_rv32_flat=pass$'; then
+        echo "selftest: FAIL — exact flat golden copy did not classify pass (rc=$rc)" >&2
+        printf '%s\n' "$out" | sed 's/^/selftest|/' >&2
+        exit 1
+    fi
+    printf 'X' | dd of="$tmp/rv32_exec_core_flat.vhd" bs=1 seek=100 conv=notrunc 2>/dev/null
+    if cmp -s "$vgolden" "$tmp/rv32_exec_core_flat.vhd"; then
+        echo "selftest: FAIL — flat mutation did not change the file" >&2
+        exit 1
+    fi
+    out=$(VHDL_GEN_DIR="$tmp" "$0" 2>&1)
+    rc=$?
+    if [ $rc -eq 0 ] || ! printf '%s\n' "$out" | grep -q '^vhdl_golden_match_rv32_flat=fail$'; then
+        echo "selftest: FAIL — 1-byte flat mutant was NOT caught (rc=$rc); gate cannot go red" >&2
+        printf '%s\n' "$out" | sed 's/^/selftest|/' >&2
+        exit 1
+    fi
+    echo "selftest: deliberate-red ok (1-byte mutant -> rv32_flat=fail, rc=$rc)"
     echo "vhdl_golden_match_selftest=ok"
     exit 0
 fi
@@ -170,6 +205,10 @@ overall_fail=0
 
 core_status_rv32="not-generated"
 core_status_rv64="not-generated"
+core_status_rv32_flat="not-generated"
+core_status_rv64_flat="not-generated"
+core_status_rv32_axi="not-generated"
+core_status_rv64_axi="not-generated"
 
 for core in $CORES; do
     gen="$GEN_DIR/$core"
@@ -199,6 +238,10 @@ for core in $CORES; do
     case "$core" in
         rv32_exec_core.vhd) core_status_rv32="$status" ;;
         rv64_exec_core.vhd) core_status_rv64="$status" ;;
+        rv32_exec_core_flat.vhd) core_status_rv32_flat="$status" ;;
+        rv64_exec_core_flat.vhd) core_status_rv64_flat="$status" ;;
+        rv32_exec_core_axi.vhd) core_status_rv32_axi="$status" ;;
+        rv64_exec_core_axi.vhd) core_status_rv64_axi="$status" ;;
     esac
 done
 
@@ -208,6 +251,10 @@ done
 echo "vhdl_golden_match_manifest=$manifest_status"
 echo "vhdl_golden_match_rv32=$core_status_rv32"
 echo "vhdl_golden_match_rv64=$core_status_rv64"
+echo "vhdl_golden_match_rv32_flat=$core_status_rv32_flat"
+echo "vhdl_golden_match_rv64_flat=$core_status_rv64_flat"
+echo "vhdl_golden_match_rv32_axi=$core_status_rv32_axi"
+echo "vhdl_golden_match_rv64_axi=$core_status_rv64_axi"
 if [ "$overall_fail" = "1" ]; then
     echo "vhdl_golden_match_ok=false"
     exit 1
