@@ -90,6 +90,7 @@ placeholder stub today)**.
   61-bit defect, `seed_jit_boxed_int_61bit_drops_high_bits_2026-07-22.md`).
 - `addr4g_probe` → `ADDR4G_PROBE: ALL PASS` (4 GiB rv32 + rv64 ≥2^31).
 - `check_linux_loading_rv32.shs` → `CHECK_LINUX_LOADING_RV32: PASS`.
+- `check-kv260-simpleos-boot-release.shs` — REAL-BOARD release gate: fresh KV260 bring-up via `scripts/fpga/systest_kv260_bringup.shs` (outside the test runner — board runs outlive child timeouts), then the 3-tier spec `test/03_system/app/hardware/feature/kv260_simpleos_boot_silicon_spec.spl`; wired into `check-simpleos-mission-critical-release.shs` (board absent = visible SKIP).
 - `check-riscv-hardware-gates.shs` — bundle (JTAG tbs + soc/core/mux/fpu probes;
   FP probes run interpreter via the `INTERP_PROBES` list).
 

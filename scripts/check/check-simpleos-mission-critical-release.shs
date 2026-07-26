@@ -9,8 +9,12 @@ MATRIX="${MATRIX:-$CANONICAL_MATRIX}"
 OUT="$BUILD_DIR/matrix.out"
 ERR="$BUILD_DIR/matrix.err"
 prereq_gate="scripts/check/check-simpleos-mission-critical-prereqs.shs"
+kv260_gate="scripts/check/check-kv260-simpleos-boot-release.shs"
 
 if [ "${1:-}" = "--self-test" ]; then
+    # Self-test drives fake matrices recursively; never touch the real board.
+    KV260_BOOT_LANE=off
+    export KV260_BOOT_LANE
     SELF_TEST_DIR="$BUILD_DIR/self-test.$$"
     mkdir -p "$SELF_TEST_DIR"
 
@@ -224,12 +228,38 @@ if [ "$matrix_rc" -ne 0 ] && [ -z "$matrix_status" ]; then
     matrix_status=matrix-run-failed
 fi
 
+# ---- KV260 real-board SimpleOS boot lane ---------------------------------
+# Semantics: board absent => visible SKIP (does not block a boardless release
+# host); board present + spec red => release blocker. KV260_BOOT_LANE=off
+# (self-test recursion) bypasses the lane entirely.
+KV260_LANE_OUT="$BUILD_DIR/kv260_lane.out"
+kv260_lane=off
+if [ "${KV260_BOOT_LANE:-auto}" != off ]; then
+    set +e
+    sh "$kv260_gate" >"$KV260_LANE_OUT" 2>&1
+    set -e
+    if grep -Fq "STATUS: PASS kv260-simpleos-boot-release" "$KV260_LANE_OUT"; then
+        kv260_lane=pass
+    elif grep -Fq "STATUS: SKIP kv260-simpleos-boot-release" "$KV260_LANE_OUT"; then
+        kv260_lane=skipped
+        grep -F "STATUS: SKIP kv260-simpleos-boot-release" "$KV260_LANE_OUT"
+    else
+        kv260_lane=fail
+        grep -F "STATUS: FAIL kv260-simpleos-boot-release" "$KV260_LANE_OUT" >&2 || \
+            echo "kv260 lane produced no STATUS line; see $KV260_LANE_OUT" >&2
+    fi
+fi
+
 case "$matrix_rc:$matrix_status:$status:$blockers:$prereq_status:$prereq_missing:$prereq_next_action" in
     0:pass:pass:none:ready:none:none)
-        echo "STATUS: PASS simpleos-mission-critical-release matrix_status=pass release_status=pass release_blockers=none prereq_status=ready prereq_missing=${prereq_missing:-missing} prereq_next_action=${prereq_next_action:-missing}"
+        if [ "$kv260_lane" = fail ]; then
+            echo "STATUS: FAIL simpleos-mission-critical-release kv260_boot_lane=fail kv260_gate=$kv260_gate kv260_lane_log=$KV260_LANE_OUT matrix_status=pass release_status=pass" >&2
+            exit 1
+        fi
+        echo "STATUS: PASS simpleos-mission-critical-release matrix_status=pass release_status=pass release_blockers=none prereq_status=ready prereq_missing=${prereq_missing:-missing} prereq_next_action=${prereq_next_action:-missing} kv260_boot_lane=$kv260_lane"
         exit 0
         ;;
 esac
 
-echo "STATUS: FAIL simpleos-mission-critical-release matrix_status=${matrix_status:-missing} matrix_exit=$matrix_exit release_status=${status:-missing} release_blockers=${blockers:-missing} status=${status:-missing} blockers=${blockers:-missing} prereq_status=${prereq_status:-missing} prereq_missing=${prereq_missing:-missing} prereq_next_action=${prereq_next_action:-missing} prereq_gate=$prereq_gate" >&2
+echo "STATUS: FAIL simpleos-mission-critical-release matrix_status=${matrix_status:-missing} matrix_exit=$matrix_exit release_status=${status:-missing} release_blockers=${blockers:-missing} status=${status:-missing} blockers=${blockers:-missing} prereq_status=${prereq_status:-missing} prereq_missing=${prereq_missing:-missing} prereq_next_action=${prereq_next_action:-missing} prereq_gate=$prereq_gate kv260_boot_lane=$kv260_lane kv260_gate=$kv260_gate" >&2
 exit 1
