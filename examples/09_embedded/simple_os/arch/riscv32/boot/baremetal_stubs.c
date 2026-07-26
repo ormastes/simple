@@ -76,6 +76,65 @@ static void uart_put_u32(uint32_t v)
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * TINY (BRAM-only) build: stack high-water measurement.
+ *
+ * The tiny linker script (../linker_tiny.ld) shrinks .stack from the default
+ * 8 MB down to something that fits in on-chip block RAM. That number has to be
+ * MEASURED, not guessed, so this paints the whole stack span with a sentinel
+ * before jumping into spl_start and reports the deepest word actually
+ * clobbered once the marker chain has run.
+ *
+ * Self-configuring rather than -D gated: the probe keys off the linker's own
+ * _stack_bottom/_stack_top and does nothing at all unless the reserved stack
+ * is small enough to be a BRAM configuration. The default 8 MB QEMU images
+ * take the early-out on both halves, so their observable behaviour (and the
+ * marker chain) is unchanged; painting 8 MB would also be pointlessly slow in
+ * simulation.
+ * ------------------------------------------------------------------------ */
+#define TINY_STACK_PAINT 0xADDECA5EU
+/* Leave the topmost slots alone: sp already points there and this function's
+ * own frame lives in them, so painting them would corrupt our return path. */
+#define TINY_STACK_PAINT_SKIP_TOP 512U
+/* Only BRAM-sized stacks get probed. */
+#define TINY_STACK_PROBE_MAX_BYTES (1024U * 1024U)
+
+extern char _stack_bottom[];
+
+static uint32_t tiny_stack_span(void)
+{
+    return (uint32_t)((uintptr_t)_stack_top - (uintptr_t)_stack_bottom);
+}
+
+/* Called from _start's inline asm before spl_start. Non-static + used so the
+ * reference from the naked entry stub is never garbage-collected. */
+__attribute__((used, noinline)) void tiny_stack_paint(void)
+{
+    if (tiny_stack_span() > TINY_STACK_PROBE_MAX_BYTES) return;
+    volatile uint32_t *lo = (volatile uint32_t *)_stack_bottom;
+    volatile uint32_t *hi = (volatile uint32_t *)(_stack_top - TINY_STACK_PAINT_SKIP_TOP);
+    while (lo < hi) {
+        *lo++ = TINY_STACK_PAINT;
+    }
+}
+
+/* Scan upward from _stack_bottom for the first surviving sentinel: everything
+ * above it was touched, so used = _stack_top - that address. */
+static void tiny_stack_report(void)
+{
+    if (tiny_stack_span() > TINY_STACK_PROBE_MAX_BYTES) return;
+    const volatile uint32_t *lo = (const volatile uint32_t *)_stack_bottom;
+    const volatile uint32_t *hi = (const volatile uint32_t *)_stack_top;
+    while (lo < hi && *lo != TINY_STACK_PAINT) {
+        lo++;
+    }
+    uart_puts("[tiny] stack_used=");
+    uart_put_u32((uint32_t)((uintptr_t)hi - (uintptr_t)lo));
+    uart_puts(" of=");
+    uart_put_u32(tiny_stack_span());
+    uart_puts("\n");
+}
+
 static uint32_t riscv32_harden_mix32(uint32_t value)
 {
     value ^= value >> 16;
@@ -262,6 +321,11 @@ RuntimeValue rt_riscv_native_gui_process_render(void)
         i++;
     }
     g_riscv_gui_surface[i] = 0;
+    /* Last C call on the marker chain (SMF_WM_GUI_LAUNCH_OK) — by here the
+     * deepest boot frames have all been and gone, so this is the right place
+     * to publish the measured stack high-water mark. No-ops on the default
+     * (8 MB stack) images. */
+    tiny_stack_report();
     return bytes_contains((const unsigned char *)g_riscv_gui_surface, sizeof(g_riscv_gui_surface), "pid=1002") ? 1 : 0;
 }
 
@@ -269,6 +333,10 @@ __attribute__((naked, section(".text.entry"))) void _start(void)
 {
     __asm__ volatile(
         "la sp, _stack_top\n"
+        /* Paint the stack before any Simple code runs, so the high-water mark
+         * reported at the end of the marker chain covers the whole boot.
+         * No-ops unless the linker reserved a BRAM-sized stack. */
+        "call tiny_stack_paint\n"
         "call spl_start\n"
         "1: wfi\n"
         "j 1b\n"
