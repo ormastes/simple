@@ -571,13 +571,13 @@ impl MirLowering:
                     val static_def = self.symbols.get_symbol_raw(static_symbol.id)
                     if static_def != nil:
                         match static_def.kind:
-                            case Class | Struct | Enum: static_receiver_name = static_name
+                            case Class | Struct | Enum | Import: static_receiver_name = static_name
                             case _: ()
                 case Var(static_symbol):
                     val static_def = self.symbols.get_symbol_raw(static_symbol.id)
                     if static_def != nil:
                         match static_def.kind:
-                            case Class | Struct | Enum: static_receiver_name = static_def.name
+                            case Class | Struct | Enum | Import: static_receiver_name = static_def.name
                             case _: ()
                 case _: ()
 
@@ -2205,13 +2205,37 @@ impl MirLowering:
                 # previously re-lowered it) to avoid double-evaluating a
                 # side-effecting receiver expression.
                 val static_method_key = "static::{static_receiver_name}::{method}"
+                var static_method_id: SymbolId? = nil
                 if static_receiver_name != "" and self.struct_method_syms.contains(static_method_key):
-                    val static_method_id = self.struct_method_syms[static_method_key]
+                    static_method_id = Some(self.struct_method_syms[static_method_key])
+                elif static_receiver_name != "":
+                    match receiver.kind:
+                        case NamedVar(static_symbol, _):
+                            val static_candidate = self.symbols.lookup_method_in_type(static_symbol, method)
+                            if static_candidate != nil:
+                                val static_candidate_id = static_candidate ?? SymbolId(id: -1)
+                                val static_candidate_symbol = self.symbols.get_symbol_raw(static_candidate_id.id)
+                                if static_candidate_symbol != nil:
+                                    match static_candidate_symbol.kind:
+                                        case Function: static_method_id = Some(static_candidate_id)
+                                        case _: ()
+                        case Var(static_symbol):
+                            val static_candidate = self.symbols.lookup_method_in_type(static_symbol, method)
+                            if static_candidate != nil:
+                                val static_candidate_id = static_candidate ?? SymbolId(id: -1)
+                                val static_candidate_symbol = self.symbols.get_symbol_raw(static_candidate_id.id)
+                                if static_candidate_symbol != nil:
+                                    match static_candidate_symbol.kind:
+                                        case Function: static_method_id = Some(static_candidate_id)
+                                        case _: ()
+                        case _: ()
+                if static_method_id != nil:
+                    val resolved_static_method_id = static_method_id ?? SymbolId(id: -1)
                     var static_args: [MirOperand] = []
                     for arg in args:
                         val static_arg = self.lower_expr(arg.value)
                         static_args.push(mir_operand_copy(static_arg))
-                    var static_return_type = self.resolved_call_return_type(static_method_id)
+                    var static_return_type = self.resolved_call_return_type(resolved_static_method_id)
                     val static_result_name = self.struct_method_return_names.get("{static_receiver_name}::{method}")
                     if static_result_name != nil and static_result_name != "":
                         for static_result_symbol in self.symbols.symbols.values():
@@ -2223,8 +2247,9 @@ impl MirLowering:
                                                 self.canonical_mir_type_symbol(
                                                     static_result_symbol.id)))
                                     case _: ()
-                    val static_result = self.emit_resolved_direct_call(self.symbol_to_operand(static_method_id), static_args, static_return_type)
-                    self.remember_call_hir_return(static_result, static_method_id)
+                    val static_result = self.emit_resolved_direct_call(self.symbol_to_operand(resolved_static_method_id), static_args, static_return_type)
+                    self.remember_call_hir_return(static_result, resolved_static_method_id)
+                    self.remember_method_return_provenance(static_result, "{static_receiver_name}::{method}")
                     return static_result
 
                 val unresolved_receiver_local = if wb_kind != 0:
@@ -2238,8 +2263,26 @@ impl MirLowering:
                     val unresolved_method_key = "{unresolved_struct_name}::{method}"
                     # Method symbols are owner-qualified during HIR lowering,
                     # so unrelated types may safely expose the same method name.
+                    var unresolved_method_id: SymbolId? = nil
                     if self.struct_method_syms.contains(unresolved_method_key):
-                        val resolved_method_id = self.struct_method_syms[unresolved_method_key]
+                        unresolved_method_id = Some(self.struct_method_syms[unresolved_method_key])
+                    else:
+                        val declared_receiver_type = self.receiver_declared_type(receiver)
+                        if declared_receiver_type != nil:
+                            val found_receiver_type = declared_receiver_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+                            match found_receiver_type.kind:
+                                case Named(receiver_type_symbol, _):
+                                    val instance_candidate = self.symbols.lookup_method_in_type(receiver_type_symbol, method)
+                                    if instance_candidate != nil:
+                                        val instance_candidate_id = instance_candidate ?? SymbolId(id: -1)
+                                        val instance_candidate_symbol = self.symbols.get_symbol_raw(instance_candidate_id.id)
+                                        if instance_candidate_symbol != nil:
+                                            match instance_candidate_symbol.kind:
+                                                case Method: unresolved_method_id = Some(instance_candidate_id)
+                                                case _: ()
+                                case _: ()
+                    if unresolved_method_id != nil:
+                        val resolved_method_id = unresolved_method_id ?? SymbolId(id: -1)
                         # Cross-module flat HIR reaches this unresolved-owner
                         # recovery path. Preserve the sole implicit receiver
                         # with the same explicit-push construction used by the
@@ -2261,32 +2304,7 @@ impl MirLowering:
                         self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, im_wb_value)
                         if val im_result_local = im_result:
                             self.remember_call_hir_return(im_result_local, resolved_method_id)
-                            # Thread the callee's declared return struct name
-                            # onto the result local (methchain lane fix) so a
-                            # chained `.m2()` on THIS call's result resolves
-                            # via the same struct_value_syms lookup the
-                            # receiver used above. Looked up text-keyed (NOT
-                            # via the method SymbolId's HIR .type_, which is
-                            # nil here -- native-build's --entry path never
-                            # runs the HIR type-inference pass that would
-                            # populate it) from struct_method_return_names,
-                            # built at HIR-lowering time in
-                            # trait_impl_lowering.spl where the method's
-                            # `-> Pt` annotation IS resolved regardless of
-                            # path -- see HirImpl.method_return_struct_names.
-                            val im_ret_struct_name = self.struct_method_return_names.get(unresolved_method_key)
-                            if im_ret_struct_name != nil and im_ret_struct_name != "":
-                                self.struct_value_syms[im_result_local.id] = im_ret_struct_name
-                            # Methchain lane construct #5 (`obj.items()[0]`):
-                            # register the result into runtime_array_locals
-                            # when the method's declared return type is
-                            # Array/Slice, so a chained `[idx]` on this call's
-                            # result indexes through the runtime array path
-                            # (see struct_method_return_is_array doc comment)
-                            # instead of silently misreading the raw boxed
-                            # handle as an offset.
-                            if self.struct_method_return_is_array.contains(unresolved_method_key):
-                                self.runtime_array_locals[im_result_local.id] = true
+                            self.remember_method_return_provenance(im_result_local, unresolved_method_key)
                             return im_result_local
                         var im_b2 = self.builder
                         val im_temp = im_b2.new_temp(MirType.i64())
@@ -2535,6 +2553,15 @@ impl MirLowering:
             val arg_local = self.lower_expr(arg.value)
             arg_operands = arg_operands.push(mir_operand_copy(arg_local))
         arg_operands
+
+    me remember_method_return_provenance(result_local: LocalId, method_key: text):
+        """Preserve owner-qualified aggregate/array identity on method results."""
+        if not self.struct_value_syms.contains(result_local.id) and self.struct_method_return_names.contains(method_key):
+            val result_name = self.struct_method_return_names[method_key]
+            if result_name != "":
+                self.struct_value_syms[result_local.id] = result_name
+        if self.struct_method_return_is_array.contains(method_key):
+            self.runtime_array_locals[result_local.id] = true
 
     me emit_method_writeback(wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64, receiver_value: LocalId):
         """Emit the post-call store-back for a mutating method on an

@@ -156,6 +156,12 @@ impl MirLowering:
     fn symbol_id_value(symbol: SymbolId) -> i64:
         symbol.id
 
+    fn composite_layout_key(symbol: Symbol) -> text:
+        val defining_module = symbol.defining_module ?? ""
+        if defining_module != "":
+            return "{defining_module}::{symbol.name}"
+        symbol.name
+
     me canonical_mir_type_symbol(symbol: SymbolId) -> SymbolId:
         val symbol_info = self.symbols.get_symbol_raw(symbol.id)
         match symbol_info:
@@ -484,12 +490,22 @@ impl MirLowering:
             # / native_bool_array_element_interpolation_special_garbage,
             # 2026-07-17) -- no separate inline loop needed here.
             self.register_composite_field_metadata(struct_def.name, struct_def.fields, module.symbols, false)
+            val struct_symbol = module.symbols.get_symbol_raw(struct_def.symbol.id)
+            if struct_symbol != nil:
+                val struct_key = self.composite_layout_key(struct_symbol)
+                if struct_key != struct_def.name:
+                    self.register_composite_field_metadata(struct_key, struct_def.fields, module.symbols, false)
             psi = psi + 1
         val prescan_class_values = module.classes.values()
         psi = 0
         while psi < prescan_class_values.len():
             val class_def = prescan_class_values[psi]
             self.register_composite_field_metadata(class_def.name, class_def.fields, module.symbols, false)
+            val class_symbol = module.symbols.get_symbol_raw(class_def.symbol.id)
+            if class_symbol != nil:
+                val class_key = self.composite_layout_key(class_symbol)
+                if class_key != class_def.name:
+                    self.register_composite_field_metadata(class_key, class_def.fields, module.symbols, false)
             psi = psi + 1
         # Same ordering gap for CALL RETURN TYPES: the entry module lowers
         # before its dependency modules, so a cross-module call's declared
@@ -500,6 +516,20 @@ impl MirLowering:
         # declared HIR return type name-keyed (ambiguous duplicates are
         # never answered — see mir_data.spl).
         for prescan_fn in module.functions.values():
+            var prescan_call_name = prescan_fn.name
+            val prescan_fn_symbol = module.symbols.get_symbol_raw(prescan_fn.symbol.id)
+            if prescan_fn_symbol != nil:
+                prescan_call_name = prescan_fn_symbol.name
+            var prescan_return_shape = ""
+            match prescan_fn.return_type.kind:
+                case Named(prescan_return_symbol_id, _):
+                    val prescan_return_symbol = module.symbols.get_symbol_raw(prescan_return_symbol_id.id)
+                    if prescan_return_symbol != nil:
+                        prescan_return_shape = self.composite_layout_key(prescan_return_symbol)
+                case Array(_, _) | Slice(_):
+                    prescan_return_shape = "__runtime_array__"
+                case _: ()
+            bootstrap_fn_ret_shape_register(prescan_call_name, prescan_return_shape)
             if not prescan_fn.is_method:
                 bootstrap_fn_ret_hir_type_register(prescan_fn.name, prescan_fn.return_type)
                 var prescan_param_tys: [HirType] = []
@@ -521,12 +551,22 @@ impl MirLowering:
         while local_meta_i < local_struct_values.len():
             val struct_def = local_struct_values[local_meta_i]
             self.register_composite_field_metadata(struct_def.name, struct_def.fields, module.symbols, true)
+            val struct_symbol = module.symbols.get_symbol_raw(struct_def.symbol.id)
+            if struct_symbol != nil:
+                val struct_key = self.composite_layout_key(struct_symbol)
+                if struct_key != struct_def.name:
+                    self.register_composite_field_metadata(struct_key, struct_def.fields, module.symbols, true)
             local_meta_i = local_meta_i + 1
         val local_class_values = module.classes.values()
         local_meta_i = 0
         while local_meta_i < local_class_values.len():
             val class_def = local_class_values[local_meta_i]
             self.register_composite_field_metadata(class_def.name, class_def.fields, module.symbols, true)
+            val class_symbol = module.symbols.get_symbol_raw(class_def.symbol.id)
+            if class_symbol != nil:
+                val class_key = self.composite_layout_key(class_symbol)
+                if class_key != class_def.name:
+                    self.register_composite_field_metadata(class_key, class_def.fields, module.symbols, true)
             local_meta_i = local_meta_i + 1
         # Entry-closure lowering reuses one MirLowering while replacing its
         # active SymbolTable for every module. Method SymbolIds are therefore
@@ -730,13 +770,17 @@ impl MirLowering:
         while impl_mi < module.impls.len():
             val impl_def = module.impls[impl_mi]
             var impl_type_name = ""
+            var impl_type_key = ""
             match impl_def.type_.kind:
                 case Named(impl_type_sym, _):
                     val impl_type_symbol = self.symbols.get_symbol_raw(impl_type_sym.id)
                     if impl_type_symbol.?:
                         impl_type_name = impl_type_symbol.name
+                        impl_type_key = self.composite_layout_key(impl_type_symbol)
                 case _: ()
             if impl_type_name != "":
+                if impl_type_key == "":
+                    impl_type_key = impl_type_name
                 val impl_method_names = impl_def.methods.keys()
                 var mni = 0
                 while mni < impl_method_names.len():
@@ -744,6 +788,8 @@ impl MirLowering:
                     val impl_method_id = impl_def.methods[impl_method_name]
                     val impl_method_key = "{impl_type_name}::{impl_method_name}"
                     self.struct_method_syms[impl_method_key] = impl_method_id
+                    if impl_type_key != impl_type_name:
+                        self.struct_method_syms["{impl_type_key}::{impl_method_name}"] = impl_method_id
                     val impl_method_is_static = static_method_symbol_ids.has(self.symbol_id_value(impl_method_id))
                     if impl_method_is_static:
                         self.struct_method_syms["static::{impl_method_key}"] = impl_method_id
@@ -755,6 +801,8 @@ impl MirLowering:
                     val impl_ret_struct_name = impl_def.method_return_struct_names.get(impl_method_name)
                     if impl_ret_struct_name != nil and impl_ret_struct_name != "":
                         self.struct_method_return_names["{impl_type_name}::{impl_method_name}"] = impl_ret_struct_name
+                        if impl_type_key != impl_type_name:
+                            self.struct_method_return_names["{impl_type_key}::{impl_method_name}"] = impl_ret_struct_name
                     # Methchain lane construct #5 (`obj.items()[0]`): thread
                     # whether the method returns an Array/Slice so the call
                     # result registers into runtime_array_locals (see
@@ -762,6 +810,8 @@ impl MirLowering:
                     val impl_ret_is_array = impl_def.method_return_is_array.get(impl_method_name)
                     if impl_ret_is_array != nil and impl_ret_is_array:
                         self.struct_method_return_is_array["{impl_type_name}::{impl_method_name}"] = true
+                        if impl_type_key != impl_type_name:
+                            self.struct_method_return_is_array["{impl_type_key}::{impl_method_name}"] = true
                     mni = mni + 1
             impl_mi = impl_mi + 1
 

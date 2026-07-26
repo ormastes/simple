@@ -46,10 +46,15 @@ untagged, so this is a field-layout metadata mismatch caused by per-module
 numeric `SymbolId` collision.
 
 The MIR source now prefers name-keyed lowered-value provenance before numeric
-HIR IDs. Its isolated regression passes 1/1. Three bounded incremental compiler
-build attempts did not produce a usable source-matched CLI; the final attempt
-stopped on 14 unrelated cached LLVM undeclared-global failures. No additional
-hardware run was made, and readback/checksum/parity pass is not claimed.
+HIR IDs and preserves owner-qualified aggregate returns across every method
+dispatch path. Its source contract passed 2/2 before the final canonical-shape
+review fixes; the extended assertions remain unrun after the three-cycle cap.
+The typed instance plus imported static-factory interpreter oracle returns
+`84`; the incremental native assertion remains unrun. Three
+bounded incremental compiler build attempts did not produce a usable
+source-matched CLI; the final attempt stopped on 14 unrelated cached LLVM
+undeclared-global failures. No additional hardware run was made, and
+readback/checksum/parity pass is not claimed.
 
 See
 `doc/08_tracking/bug/native_engine2d_readback_cross_module_field_layout_2026-07-26.md`.
