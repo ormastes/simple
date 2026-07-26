@@ -22,9 +22,9 @@ evidence.
 
 | Gate | Current evidence | State |
 |---|---|---|
-| CompileMode | Source transport fix is committed. A trace proved explicit `--entry-closure` admitted only three direct modules because the standalone entry resolved the documentation-only `compiler.driver` facade instead of the concrete driver owner, then rejected empty MIR. Source changes now use `compiler.driver.driver` directly and avoid optional facade transport; the focused test passes, but native runtime verification is still open. An unsafe duplicate-walk attempt remained in phase 1 for more than 31 minutes and was reverted after review. No `73` executable oracle was produced. | OPEN; native rebuild required |
-| Optimizer | Scalar-level repair is committed and its source guard passes, but no source-matched native driver exists after the closure-walk repair. | OPEN |
-| `84` | No two-module `84` oracle binary or exact output exists after the optimizer repair. | BLOCKED by native driver rebuild |
+| CompileMode | Source transport fix and concrete `compiler.driver.driver` ownership are committed. A trace proved the prior ambiguous facade admitted only three direct modules and then rejected empty MIR; the focused scanner/owner/facade test now passes. The corrected canonical CLI closure BFS then remained CPU-active for more than 30 minutes before its first compiler phase marker and was terminated at cycle 3/3. No `73` executable oracle was produced. | OPEN; CLI closure-BFS performance blocker |
+| Optimizer | Scalar-level repair is committed and its source guard passes, but no source-matched native driver exists after the closure-owner repair. | OPEN |
+| `84` | No two-module `84` oracle binary or exact output exists after the optimizer repair. | BLOCKED by CLI closure-BFS performance |
 | Vulkan | Real device is present, but the native compiler gate failed at `rt_array_data_ptr_u8`; no submit/readback receipt exists. | BLOCKED by `84` |
 
 ## Ten Tasks
