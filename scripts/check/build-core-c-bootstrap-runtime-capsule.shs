@@ -116,7 +116,13 @@ hosted_cocoa.c
 hosted_win32.c
 "
         ;;
-    Darwin) ;;
+    Darwin)
+        HEADER_FILES="${HEADER_FILES}
+platform/platform_macos.h
+platform/unix_common.h
+stb_truetype.h
+"
+        ;;
     *) die "unsupported-host:$PLATFORM" ;;
 esac
 
@@ -127,16 +133,24 @@ done
 TMP_DIR=$(mktemp -d "$OUTPUT_ROOT/.core-c-bootstrap.tmp.XXXXXX")
 trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
 OBJECT_DIR="$TMP_DIR/objects"
-mkdir -p "$OBJECT_DIR"
+REPEAT_OBJECT_DIR="$TMP_DIR/repeat-objects"
+LOCAL_INPUTS_FILE="$TMP_DIR/local-runtime-inputs.txt"
+mkdir -p "$OBJECT_DIR" "$REPEAT_OBJECT_DIR"
+: >"$LOCAL_INPUTS_FILE"
 
 CC_VERSION_FILE="$TMP_DIR/cc.version.txt"
 AR_VERSION_FILE="$TMP_DIR/ar.version.txt"
+NM_VERSION_FILE="$TMP_DIR/nm.version.txt"
 "$CC_PATH" --version >"$CC_VERSION_FILE" 2>&1 ||
     die "cc-version-failed"
 if ! "$AR_PATH" --version >"$AR_VERSION_FILE" 2>&1; then
     "$AR_PATH" -V >"$AR_VERSION_FILE" 2>&1 || true
 fi
 [ -s "$AR_VERSION_FILE" ] || printf '%s\n' "version-output-unavailable" >"$AR_VERSION_FILE"
+if ! "$NM_PATH" --version >"$NM_VERSION_FILE" 2>&1; then
+    "$NM_PATH" -V >"$NM_VERSION_FILE" 2>&1 || true
+fi
+[ -s "$NM_VERSION_FILE" ] || printf '%s\n' "version-output-unavailable" >"$NM_VERSION_FILE"
 
 COMMON_FLAGS="-c -Os -ffunction-sections -fdata-sections -fno-unwind-tables -fno-asynchronous-unwind-tables -fno-stack-protector -fPIC -std=gnu11 -DSIMPLE_CORE_C_STANDALONE=1"
 TARGET_FLAGS=""
@@ -147,14 +161,33 @@ esac
 OBJECTS=""
 for source in $SOURCE_FILES; do
     object="$OBJECT_DIR/$(basename "$source" .c).o"
+    depfile="$OBJECT_DIR/$(basename "$source" .c).d"
     # Deliberate word splitting applies the frozen flag vectors above.
     # shellcheck disable=SC2086
     "$CC_PATH" $COMMON_FLAGS $TARGET_FLAGS \
+        -MMD -MF "$depfile" \
         -I"$RUNTIME_DIR" -I"$RUNTIME_DIR/platform" \
         "$RUNTIME_DIR/$source" -o "$object" ||
         die "compile-failed:$source"
     OBJECTS="$OBJECTS $object"
+    sed 's/\\$//' "$depfile" |
+        tr '\n' ' ' |
+        cut -d: -f2- |
+        tr ' ' '\n' |
+        while IFS= read -r dependency; do
+            case "$dependency" in
+                "$RUNTIME_DIR"/*) printf '%s\n' "$dependency" ;;
+                "$ROOT_DIR/$RUNTIME_DIR"/*)
+                    printf '%s\n' "${dependency#"$ROOT_DIR/"}"
+                    ;;
+            esac
+        done >>"$LOCAL_INPUTS_FILE"
 done
+for declared_input in $SOURCE_FILES $HEADER_FILES; do
+    printf '%s\n' "$RUNTIME_DIR/$declared_input" >>"$LOCAL_INPUTS_FILE"
+done
+printf '%s\n' "$RUNTIME_DIR/test/rt_string_free_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
+sort -u -o "$LOCAL_INPUTS_FILE" "$LOCAL_INPUTS_FILE"
 
 ARCHIVE="$TMP_DIR/libsimple_runtime.a"
 # Deliberate word splitting preserves canonical source/object order.
@@ -174,6 +207,39 @@ fi
 [ -s "$ARCHIVE" ] || die "archive-empty"
 "$AR_PATH" t "$ARCHIVE" >"$TMP_DIR/archive.members.txt" ||
     die "archive-members-failed"
+
+# Repeat the complete compile and archive pass into a distinct directory.
+# Equality is retained in the manifest instead of inferred from archive mode.
+REPEAT_OBJECTS=""
+for source in $SOURCE_FILES; do
+    repeat_object="$REPEAT_OBJECT_DIR/$(basename "$source" .c).o"
+    # shellcheck disable=SC2086
+    "$CC_PATH" $COMMON_FLAGS $TARGET_FLAGS \
+        -I"$RUNTIME_DIR" -I"$RUNTIME_DIR/platform" \
+        "$RUNTIME_DIR/$source" -o "$repeat_object" ||
+        die "repeat-compile-failed:$source"
+    REPEAT_OBJECTS="$REPEAT_OBJECTS $repeat_object"
+done
+REPEAT_ARCHIVE="$TMP_DIR/libsimple_runtime.repeat.a"
+if [ "$PLATFORM" = "Darwin" ]; then
+    # shellcheck disable=SC2086
+    ZERO_AR_DATE=1 "$AR_PATH" rcs "$REPEAT_ARCHIVE" $REPEAT_OBJECTS ||
+        die "repeat-archive-failed"
+else
+    # shellcheck disable=SC2086
+    "$AR_PATH" rcsD "$REPEAT_ARCHIVE" $REPEAT_OBJECTS ||
+        die "repeat-archive-failed"
+fi
+[ -s "$REPEAT_ARCHIVE" ] || die "repeat-archive-empty"
+ARCHIVE_SHA256=$(hash_file "$ARCHIVE")
+REPEAT_ARCHIVE_SHA256=$(hash_file "$REPEAT_ARCHIVE")
+[ "$ARCHIVE_SHA256" = "$REPEAT_ARCHIVE_SHA256" ] ||
+    die "repeat-build-archive-mismatch"
+{
+    echo "repeated_build_equal=true"
+    echo "archive_sha256=$ARCHIVE_SHA256"
+    echo "repeat_archive_sha256=$REPEAT_ARCHIVE_SHA256"
+} >"$TMP_DIR/repeated-build.receipt"
 
 "$NM_PATH" -g "$ARCHIVE" >"$TMP_DIR/archive.nm.txt" 2>&1 ||
     die "archive-nm-failed"
@@ -233,7 +299,7 @@ HEAD_REVISION=$(git rev-parse HEAD)
 RUNTIME_TREE=$(git rev-parse HEAD:src/runtime)
 SOURCE_LIST_SHA256=$(printf '%s\n' $SOURCE_FILES | hash_stream)
 HEADER_LIST_SHA256=$(printf '%s\n' $HEADER_FILES | hash_stream)
-ARCHIVE_SHA256=$(hash_file "$ARCHIVE")
+LOCAL_INPUT_LIST_SHA256=$(hash_file "$LOCAL_INPUTS_FILE")
 
 MANIFEST="$TMP_DIR/capsule.manifest"
 {
@@ -244,26 +310,34 @@ MANIFEST="$TMP_DIR/capsule.manifest"
     echo "platform=$PLATFORM"
     echo "arch=$ARCH"
     echo "cc_path=$CC_PATH"
+    echo "cc_binary_sha256=$(hash_file "$CC_PATH")"
     echo "cc_version_sha256=$(hash_file "$CC_VERSION_FILE")"
     echo "ar_path=$AR_PATH"
+    echo "ar_binary_sha256=$(hash_file "$AR_PATH")"
     echo "ar_version_sha256=$(hash_file "$AR_VERSION_FILE")"
     echo "nm_path=$NM_PATH"
+    echo "nm_binary_sha256=$(hash_file "$NM_PATH")"
+    echo "nm_version_sha256=$(hash_file "$NM_VERSION_FILE")"
     echo "common_flags=$COMMON_FLAGS"
     echo "target_flags=$TARGET_FLAGS"
     echo "archive_mode=$ARCHIVE_MODE"
     echo "source_list_sha256=$SOURCE_LIST_SHA256"
     echo "header_list_sha256=$HEADER_LIST_SHA256"
+    echo "local_input_list_sha256=$LOCAL_INPUT_LIST_SHA256"
     echo "archive_sha256=$ARCHIVE_SHA256"
+    echo "repeat_archive_sha256=$REPEAT_ARCHIVE_SHA256"
+    echo "repeated_build_equal=true"
+    echo "repeated_build_receipt_sha256=$(hash_file "$TMP_DIR/repeated-build.receipt")"
     echo "archive_members_sha256=$(hash_file "$TMP_DIR/archive.members.txt")"
     echo "rt_string_free_archive_symbol=T"
     echo "rt_string_free_provider=runtime_native.o"
     echo "rt_string_free_selfcheck=pass"
     echo "rt_string_free_selfcheck_output_sha256=$(hash_file "$SELF_CHECK_LOG")"
     echo "producer_script_sha256=$(hash_file scripts/check/build-core-c-bootstrap-runtime-capsule.shs)"
-    for input in $SOURCE_FILES $HEADER_FILES; do
-        key=$(printf '%s' "$input" | tr '/.' '__')
-        echo "input_${key}_sha256=$(hash_file "$RUNTIME_DIR/$input")"
-    done
+    while IFS= read -r input; do
+        key=$(printf '%s' "${input#"$RUNTIME_DIR/"}" | tr '/.' '__')
+        echo "input_${key}_sha256=$(hash_file "$input")"
+    done <"$LOCAL_INPUTS_FILE"
     for object in $OBJECT_DIR/*.o; do
         member=$(basename "$object")
         key=$(printf '%s' "$member" | tr '/.' '__')
