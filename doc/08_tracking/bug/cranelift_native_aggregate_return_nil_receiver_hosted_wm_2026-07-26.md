@@ -146,6 +146,47 @@ fix in 952d2ca34d7 — that fix does not cover this build). Builtin returns
 scan is now INLINED into `parse_html` (it was the only caller) so the event
 arrays are locals and never cross the ABI.
 
+## Compiler-side RCA (2026-07-26, freestanding array-loss investigation)
+
+Build pipeline for the guest: self-hosted binary, `native-build --backend
+cranelift --mode dynload --entry-closure --target x86_64-unknown-none` with
+`SIMPLE_BOOTSTRAP=1` + `SIMPLE_ALLOW_FREESTANDING_STUBS=1` (the hosted lane
+shares cranelift+dynload without those env vars — that is the discriminator).
+
+**Array-typed module globals — pinpointed 3-file chain:**
+1. `src/compiler/50.mir/_MirLowering/module_lowering.spl:62-81` —
+   `runtime_module_initializer_supported` returns false for any array type
+   and an ArrayLit never const-folds, so `lower_static` (930-939)
+   early-returns and **no `MirStatic` is emitted**.
+2. `src/compiler/50.mir/mir_lowering_stmts.spl:794` — the global-write hook
+   requires `find_global_static(...)`; absent, the store silently degrades
+   to a function-local SSA copy.
+3. `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:190-192` — reads
+   hit 952d2ca34d7's fallback, **re-lowering the original initializer fresh
+   at every reference** — hence `module=0`. 952d2ca34d7's "safe because the
+   binding is immutable" argument is violated by any mutated array global;
+   it converted a loud undefined-variable error into silent data loss.
+   Cranelift additionally rejects non-scalar statics
+   (`cranelift_codegen_adapter.spl:263-315`) and never runs `__module_init_*`
+   (that constructor wiring exists only in `llvm_native_link.spl`).
+
+**Nested `[[text]]` returns — ranked candidates:** (A1)
+`expr_dispatch.spl:1094-1139` registers indexed-element runtime-array
+identity only for named structs, never when the element is itself an array,
+so `events[i]` falls through `local_is_runtime_array` into the no-emit path;
+(A2) `expr_dispatch.spl:1084-1085` — under `SIMPLE_BOOTSTRAP=1` an
+underivable element type is forced to `text`, explaining the guest-only
+severity. `split` survives because builtin results are hand-registered;
+locals survive because construction registers them (why inlining fixes it);
+the hosted lane's layout sensitivity is these per-local-id side tables
+shifting with block shape.
+
+Fix order (each needs bootstrap + extended smoke): A1 element registration →
+refuse the re-lowering fallback for mutated globals (restore the loud
+error) → real null-init static slots + cranelift module-init wiring → gate
+the bootstrap text default. Full report: session scratchpad
+`freestanding_array_loss_rca.md` (2026-07-26).
+
 ## Proper fix
 
 In the cranelift lowering: make aggregate returns (direct and Option-wrapped)
