@@ -68,10 +68,17 @@ scope. All other rows reuse their existing authoritative TODOs.
    `3ed22008284c9c2dc2cba5dc42d6a69aed7d5c00`; any source change is a new compiler Wave 0
    admission. The first blocker is the low-memory bridge circularity in
    `doc/08_tracking/bug/bootstrap_low_memory_positional_bridge_circularity_2026-07-26.md`:
-   the immutable runtime prerequisite is now accepted, but one micro-cycle
-   remains unspent until a tracked compatible bridge entry exists, the fixed
-   bootstrap API preserves the three-opt-in/no-opt-in distinction, and
-   high-capability review accepts either `compile --native` or a pure positional route. Use
+   the immutable runtime prerequisite is now accepted. The tracked focused
+   bridge/live probe and fixed bootstrap API now preserve the exact
+   three-opt-in/no-opt-in distinction, their static contract passes, and
+   independent high-capability source review accepts the preparation. One
+   micro-cycle remains unspent until a fail-closed admission runner and exact
+   native command receive high-capability review. Use
+   `test/02_integration/compiler/phase2_low_memory_source_reclaim_bridge.spl`,
+   `test/02_integration/compiler/phase2_low_memory_source_reclaim_live_probe.spl`,
+   and
+   `test/03_system/compiler/phase2_low_memory_bridge_admission_contract_spec.spl`
+   for the prepared current-driver contract. The future runner must also use
    `scripts/check/check-phase2-low-memory-source-reclaim.shs`,
    `test/02_integration/compiler/phase2_low_memory_source_reclaim_probe.spl`,
    and

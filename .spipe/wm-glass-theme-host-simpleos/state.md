@@ -604,9 +604,14 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   source revision.
 
   Compiler Wave 0 remains NOT ADMITTED and its final micro-cycle remains
-  unspent. No tracked bridge entry matches the current bootstrap API, and
-  `aot_native_project_with_backend_fixed` currently forces low-memory on, so
-  it cannot prove positive all-three-opt-ins versus negative no-opt-in. The
-  historical pure compiler also cannot pass the necessary `native-build`
-  validator or implement current no-stub semantics. Host/device/QEMU execution
-  rows therefore remain closed.
+  unspent. A tracked focused bridge and live probe now call the current
+  `CompilerDriver`, and the fixed bootstrap API enables low-memory mode only
+  when all three canonical opt-ins equal `"1"`; the pure 8-case predicate spec
+  and four-scenario fail-closed system contract pass. Independent
+  high-capability source review ACCEPTS this preparation. The mirrored manual
+  is
+  `doc/06_spec/03_system/compiler/phase2_low_memory_bridge_admission_contract_spec.md`.
+  No admission runner exists or has executed, and the historical pure compiler
+  still cannot pass the necessary `native-build` validator or implement
+  current no-stub semantics. Host/device/QEMU execution rows therefore remain
+  closed until the runner and exact native route receive independent review.

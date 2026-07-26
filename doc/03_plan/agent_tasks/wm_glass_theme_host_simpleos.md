@@ -121,10 +121,15 @@ core-C runtime capsule is independently ACCEPTED at source
 `3dd0db9de03e225a0e16164e0a52a40cc4774902`, archive
 `c4f39c1a74e1979d2680153476199b0d70b626fabb0b01d22cedc4505ca46e74`, and
 manifest `5773db91727ce05bde7c100a64ef77206e4b166c1efc36534e7196d2fadf0003`.
-This accepts the runtime only, not a compiler. The final bridge micro-cycle
-remains unspent because no tracked compatible bridge entry exists and the
-current fixed bootstrap API forces low-memory on, preventing the required
-positive-three-opt-in versus negative-no-opt-in control.
+This accepts the runtime only, not a compiler. A tracked focused bridge and
+live probe now invoke the current `CompilerDriver`, while the fixed bootstrap
+API uses the exact three-opt-in predicate and defaults to disabled. The pure
+predicate spec and the four-scenario fail-closed admission-preparation contract
+pass, and independent high-capability source review ACCEPTS the preparation.
+Its manual is
+`doc/06_spec/03_system/compiler/phase2_low_memory_bridge_admission_contract_spec.md`.
+The final bridge micro-cycle remains unspent because no reviewed admission
+runner exists and no exact native route has been approved or executed.
 The runtime tree remains unchanged at `3ed2200828`, so the accepted runtime
 archive is reusable; the compiler and source admission must bind to the newer
 revision.
