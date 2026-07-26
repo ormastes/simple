@@ -42,13 +42,59 @@ TUI and GUI modes. A capability added to an Office capsule must update:
 - `test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl`
 - `doc/06_spec/03_system/app/ide/feature/ide_office_plugin_suite_spec.md`
 
+The deployed operator commands are:
+
+```bash
+simple ide --feature-check --tui
+simple ide --feature-check --gui
+```
+
+Command-specific mode flags are owned by the IDE/Office entry points and must
+be delegated before global CLI option filtering. Production commands use
+startup-light compiled/in-process owners; raw source execution and Rust-seed
+fallback are not accepted deployment paths.
+
+## Calc TUI and LLM Debug Access
+
+The preferred live Calc command is:
+
+```bash
+simple office calc [FILE] --tui
+```
+
+`FILE` is optional for a new workbook. Existing `sheets` and
+`edit-sheet FILE --tui` commands remain compatibility aliases.
+
+Calc exposes its real sheet model through the shared `simple.access/v1`
+operator protocol:
+
+```text
+simple ui windows
+simple ui snapshot
+simple ui surface main
+simple ui find ...
+simple ui act ... --value ...
+simple ui history --surface main
+```
+
+The semantic tree uses stable cell IDs such as `main#cell_A1`, plus
+`main#formula_input` and `main#confirm_edit`. Screen coordinates and a TUI
+capture are supporting evidence; independent semantic post-state and correlated
+history are the behavioral oracle.
+
+Formula compatibility includes ordinary multiplication and the pure
+`AVG(...)` alias of `AVERAGE(...)`. The canonical manual example enters
+`A1=6`, `A2=8`, `B1=A1*A2` (result `48`), and
+`C1=AVG(A1:A2)` (result `7`).
+
 ## Verification
 
 ```bash
-bin/simple-interp src/app/ide/main.spl --feature-check --tui
-bin/simple-interp src/app/ide/main.spl --feature-check --gui
-SIMPLE_LIB=src bin/simple-interp test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl
-simple spipe-docgen test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl --output doc/06_spec --no-index
+bin/simple ide --feature-check --tui
+bin/simple ide --feature-check --gui
+bin/simple test test/03_system/app/ide/feature/ide_office_plugin_suite_spec.spl
+bin/simple test test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl
+bin/simple spipe-docgen test/03_system/app/office/feature/office_cli_tui_ui_access_spec.spl --output doc/06_spec --no-index
 find doc/06_spec -name '*_spec.spl' | wc -l
 ```
 
