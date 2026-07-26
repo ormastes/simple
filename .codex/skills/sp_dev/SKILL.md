@@ -547,12 +547,24 @@ font GPU emission, or GUI/Web/2D/3D text.
    validated registered bytes bind through the existing shaper with
    handle/generation `0`, then only a handle-free glyph payload may cross Draw
    IR to the existing selected-byte `FontRenderer`/`FontRenderBatch` path.
+   For pinned-corpus GSUB/GPOS work, follow
+   `doc/03_plan/lib/shared_multilingual_gpu_fonts_gsub_gpos_completion_2026-07-25.md`.
+   Freeze the per-face ordered lookup/type/format/flag inventory first,
+   including explicit valid-empty Latin/Han/Cyrillic rows. Preserve
+   feature-to-lookup activation masks; extract Arabic/Indic logical
+   preprocessing without letting compatibility shapers promote completion.
+   Nested lookups inherit the invoking mask and apply only at eligible matched
+   targets. Validate both complete plans before mutation.
 8. Freeze these five primary SSpec phrases exactly:
    `Load the pinned multilingual font manifest`;
    `Accept exact-face-bound simple-script shaping`;
    `Prepare one shared font batch for 2D and 3D`;
    `Emit the selected font composite program and plan compilation`;
    `Prove native submission and device readback`.
+   GSUB/GPOS completion also freezes
+   `Shape selected Unicode scripts with the pinned face`,
+   `setup_selected_shaping_face`, and
+   `expect_selected_unicode_shaping`.
    Resolved-host, completion, and folded secondary detail phrases are defined
    by `doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md`; do not introduce
    vocabulary outside that plan. Mirrored manuals under `doc/06_spec` are `.md`
@@ -598,14 +610,22 @@ font GPU emission, or GUI/Web/2D/3D text.
     submit-through-device-completion interval, never sum it with the later
     fence-observation `sync` interval, and record offscreen presentation as
     `not-applicable-offscreen` while still requiring device readback.
-14. Interpreter diagnostics reuse `build_interpreter_result_wrapper` through
-    the canonical test runner or `src/app/test/font_evidence_runner.spl`.
-    Before trusting them, require exit 1 and the distinct canonical failure
-    markers from
+14. Direct interpreter diagnostics reuse `build_interpreter_result_wrapper`
+    through the canonical test runner. Focused native evidence separately uses
+    `preprocess_spipe_native_result_file` through
+    `src/app/test/font_evidence_runner.spl`; never substitute one wrapper for
+    the other. Admit one pure-Simple binary, retain its SHA-256, and calibrate
+    direct interpreter execution with
+    `--mode=interpreter --no-session-daemon --sequential --no-db --no-cache
+    --assert-ran --fail-fast`. Require the deliberate-red fixture to exit 1
+    with `Results: 1 total, 0 passed, 1 failed` plus `FAIL`, and the empty
+    fixture to exit 1 with `--assert-ran: no BDD examples executed` and no
+    completion marker. Use
     `scripts/check/fixtures/font_evidence_runner_fail_spec.spl` and
     `scripts/check/fixtures/font_evidence_runner_empty_spec.spl`; reject
-    2/124/139 and retain commands, binary SHA-256, and logs per `$system_test`.
-    They never replace native evidence.
+    2/124/132/139 and retain commands, binary SHA-256, and logs under the
+    lane's canonical `build/test-artifacts/` path. Interpreter calibration
+    never replaces native evidence.
 15. AC-13 source review must reject font owners that import raw `rt_mutex_*`
     calls instead of the existing mutex facade, mutable module-global engine
     pools, or unsynchronized scalar generation counters used by hosted paths.

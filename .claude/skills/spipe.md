@@ -451,6 +451,12 @@ shared font batch for 2D and 3D`; `Emit the selected font composite program and
 plan compilation`; `Prove native submission and device readback`. Engine3D
 HUD/world stays a separate consumer lane. Full rules live in `$sp_dev` under
 “Shared multilingual font work.”
+Pinned-corpus GSUB/GPOS work additionally freezes
+`Shape selected Unicode scripts with the pinned face`,
+`setup_selected_shaping_face`, and `expect_selected_unicode_shaping`. It must
+pin the per-face ordered active-plan inventory, including explicit valid-empty
+Latin/Han/Cyrillic rows, preserve feature activation masks through nested
+lookups, and validate complete GSUB/GPOS plans before mutation.
 The final irreversible registered-only SimpleOS shaping scenario uses exact
 validated Arabic/Devanagari registered bytes, no host font ABI or filesystem
 access after the mode switch, handle-free Draw IR, and the existing
@@ -721,13 +727,20 @@ observe a pass:
   Run shared multilingual font acceptance SSpecs with
   `SIMPLE_NO_STUB_FALLBACK=1 bin/simple test <spec> --mode=native`; interpreter runs are diagnostics and cannot
   promote a manifest cell, backend, or performance row.
-  The pure test runner and canonical `src/app/test/font_evidence_runner.spl`
-  must share `build_interpreter_result_wrapper`, which appends `print_summary`,
-  `get_executed_test_count`, and `get_exit_code` checks to the interpreted source.
+  The pure test runner uses `build_interpreter_result_wrapper`, which appends
+  `print_summary`, `get_executed_test_count`, and `get_exit_code` checks to
+  interpreted source. The separate native
+  `src/app/test/font_evidence_runner.spl` path uses
+  `preprocess_spipe_native_result_file`; tests must reject either wrapper being
+  substituted for the other.
   `CompileResult.Success` alone is false green: matcher failures only update
-  spec state. Require exit 1 plus `test-runner: spec failed` for deliberate-red
-  and exit 1 plus `test-runner: no examples executed` for zero-executed before
-  using that runner as diagnostic evidence; reject 2/124/139. Use
+  spec state. Admit and hash one pure-Simple binary, then calibrate with
+  `--mode=interpreter --no-session-daemon --sequential --no-db --no-cache
+  --assert-ran --fail-fast`. Require exit 1 plus
+  `Results: 1 total, 0 passed, 1 failed` and `FAIL` for deliberate-red, and exit
+  1 plus `--assert-ran: no BDD examples executed` with no completion marker for
+  zero-executed before using that runner as diagnostic evidence; reject
+  2/124/132/139. Use
   `scripts/check/fixtures/font_evidence_runner_fail_spec.spl` and
   `scripts/check/fixtures/font_evidence_runner_empty_spec.spl`. It must use the
   existing file facade, map every non-success `CompileResult` nonzero, and
