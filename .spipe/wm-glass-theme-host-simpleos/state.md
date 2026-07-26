@@ -537,10 +537,12 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   Draw IR semantic-theme (2), and host bootstrap (6) source/interpreter
   regressions once. The scalar package CSS/fingerprint boundary and generated
   Aetheric snapshot owner contain no remaining CSS parser/cascade defect.
-  AC-7 remains blocked before a production capture: the canonical browser-event
-  probe constructs an inline fixed light CSS fixture instead of the production
-  generated Aetheric document, does not bind the theme fingerprint or computed
-  glass properties, and therefore cannot prove production rendering. It is
-  retained only as a diagnostic event bridge; see
-  `doc/09_report/wm_glass_theme_web_gui_audit_2026-07-26.md`. No host/browser
-  launch occurred because the native host-cycle cap is already exhausted.
+  AC-7 remains blocked before a production capture: the former inline fixed-light
+  event fixture has been removed. The canonical browser-event probe now admits
+  the retained `aetheric-host-web-gui-v1` proof through the pinned canonical
+  checker, loads its exact production HTML, serializes only an immutable
+  admitted envelope into the renderer, and validates theme fingerprints,
+  generated-HTML hash, computed glass witnesses, and explicit non-synthetic /
+  non-compatibility flags. The source-only validator regression passes; no
+  browser was launched, so there is still no current live Chromium event or
+  capture evidence. Native host-cycle limits remain exhausted.
