@@ -114,9 +114,11 @@ src/lib/gc_async_mut/gpu/engine2d/directx_backend.spl
 - **Vulkan-Backed Web/GUI RenderDoc:** `doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md`
 - **ProcessingIR Backend Fault Matrix:** `doc/03_plan/sys_test/gpu_backend_failure_injection_matrix.md`
 - **Three-Backend Fault Contract Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_ir_fault_source_contract_spec.md`
+- **Fault Gate Unit Manual:** `doc/06_spec/01_unit/lib/gc_async_mut/processing/fault_injection_spec.md`
 - **Executor Wire-Reason Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_ir_executor_reason_mapping_contract_spec.md`
 - **Failure/Fallback Receipt Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/native_backend_failure_fallback_spec.md`
 - **CPU Fallback Policy Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_cpu_fallback_policy_contract_spec.md`
+- **Native CPU Fallback Wire Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_cpu_fallback_daemon_wire_spec.md`
 - **ivshmem Fallback Receipt Manual:** `doc/06_spec/01_unit/os/host_gpu_ivshmem_fallback_receipt_spec.md`
 - **SimpleOS Host GPU Protocol Manual:** `doc/06_spec/01_unit/lib/common/gpu/simpleos_host_gpu_protocol_spec.md`
 - **Prepared macOS Metal Fault Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/macos_metal_processing_ir_failure_injection_spec.md`
@@ -125,6 +127,7 @@ src/lib/gc_async_mut/gpu/engine2d/directx_backend.spl
 - **RenderDoc Blockers:** `doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md`
 - **Electron RenderDoc Diagnostics:** `doc/08_tracking/bug/electron_renderdoc_vulkan_widget_capture_launch_diagnostics_2026-06-28.md`
 - **GUI RenderDoc Performance:** `doc/08_tracking/bug/gui_renderdoc_aggregate_spec_static_cache_artifact_bloat_2026-06-27.md`
+- **SimpleOS Fallback Wire Native Probe:** `doc/08_tracking/bug/simpleos_gpu_fallback_wire_native_probe_segfault_2026-07-26.md`
 
 ## Coverage Summary
 

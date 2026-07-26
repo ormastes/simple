@@ -1,0 +1,27 @@
+"""Host-only end-to-end CPU fallback over the real file-backed wire."""
+
+use std.spec.{describe, it, expect, pending}
+use std.io_runtime.{env_get, process_run, remove_file_if_exists, time_now_unix_micros}
+use common.gpu.simpleos_host_gpu_protocol.{SIMPLEOS_HOST_GPU_REGION_BYTES}
+
+describe "SimpleOS processing CPU fallback daemon wire":
+    it "negotiates CUDA then publishes an explicit CPU fallback receipt":
+        val daemon = env_get("SIMPLEOS_GPU_HOST_BIN")
+        val probe = env_get("SIMPLEOS_GPU_FALLBACK_WIRE_PROBE_BIN")
+        if daemon == "" or probe == "":
+            pending("native mmap evidence requires host and fallback probe binaries")
+            return
+        val path = "/tmp/simpleos_gpu_fallback_" + time_now_unix_micros().to_text() + ".shm"
+        val (_truncate_out, _truncate_err, truncate_code) =
+            process_run("truncate", ["-s", SIMPLEOS_HOST_GPU_REGION_BYTES.to_text(), path])
+        expect(truncate_code).to_equal(0)
+        val (out, err, code) = process_run(
+            probe, ["--daemon=" + daemon, "--shm=" + path])
+        remove_file_if_exists(path)
+        expect(code).to_equal(0)
+        expect(err).to_equal("")
+        expect(out).to_contain("GPU_FALLBACK_WIRE status=pass")
+        expect(out).to_contain("hello_completed=true hello_status=1 hello_mask=8")
+        expect(out).to_contain("receipt_completed=true receipt_status=4 reason=16 source=2")
+        expect(out).to_contain("handle=0 identity=0 bytes=32")
+        expect(out).to_contain("backend=4")

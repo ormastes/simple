@@ -167,10 +167,15 @@ unavailability is not a Metal pass.
 
 The policy implementation and guest validator are covered by
 `processing_cpu_fallback_policy_contract_spec.spl` and
-`host_gpu_ivshmem_fallback_receipt_spec.spl`. The exact remaining evidence
-gaps are:
+`host_gpu_ivshmem_fallback_receipt_spec.spl`. The native daemon-wire harness is
+implemented by `processing_cpu_fallback_daemon_wire_spec.spl` and
+`simpleos_gpu_fallback_wire_probe.spl`; both native binaries compile, but the
+probe currently exits `139` before receipt publication. The exact remaining
+evidence gaps are:
 
-1. Add end-to-end daemon tests that assert the wire fields at
+1. Resolve
+   `simpleos_gpu_fallback_wire_native_probe_segfault_2026-07-26.md`, then run
+   the end-to-end daemon test asserting the wire fields at
    `SIMPLEOS_HOST_GPU_WIRE_STATUS`, `...REASON`, `...NATIVE_HANDLE`,
    `...OUTPUT_BYTES`, `...OUTPUT_CHECKSUM`, `...READBACK_SOURCE`, and
    `...DEVICE_IDENTITY`, plus generation/run/frame correlation.
