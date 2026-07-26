@@ -477,10 +477,21 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
 
   The low-memory compiler bridge remains circular: the current compiler
   promotion needs an admitted low-memory-capable bridge, while producing that
-  bridge depends on the compiler path being promoted. The bootstrap-boundary
-  explanation and resulting blocked-state wording remain pending document
-  review. Binary `f2c216...` is seed-marked and forbidden; it is not a next
-  action or admissible bridge. Binary `277f...` is the only eligible
-  pure-Simple candidate, but its imports are incompatible with the required
-  promotion path. No compiler promotion, host/QEMU launch, SIMD parity PASS,
+  bridge depends on the compiler path being promoted. The tracking document
+  `bootstrap_low_memory_positional_bridge_circularity_2026-07-26.md`, pushed
+  through `8ac0150d38..7f9815a929`, is now ACCEPTED by high review. Binary
+  `f2c216...` is seed-marked and forbidden as compiler, driver, delegate, or
+  fallback. Binary `277f...` is the only eligible pure-Simple candidate, but
+  it cannot import the current compiler graph.
+
+  The corrected next action uses one of the two remaining bounded micro cycles
+  in a clean linked worktree: pin only `277f...` and attempt a minimal
+  historical-compatible bridge within that capsule's import/syntax surface.
+  Before use, require a canonical regular path and exact hash, bounded version,
+  negative seed-classifier checks, and `nm` proof of native `rt_string_free`.
+  Only an admitted non-seed bridge may build the focused current-graph probe
+  with `SIMPLE_NO_STUB_FALLBACK=1`; positive opt-in reclaim and negative
+  no-opt-in controls must both pass. If `277f...` cannot produce that bridge,
+  stop and retain the bug. Do not use `f2c...` or run full Stage4 to diagnose
+  the circularity. No compiler promotion, host/QEMU launch, SIMD parity PASS,
   or native rendering/event claim is added by this checkpoint.
