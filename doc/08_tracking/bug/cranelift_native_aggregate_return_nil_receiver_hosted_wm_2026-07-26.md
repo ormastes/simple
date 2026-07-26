@@ -183,6 +183,23 @@ misroute). Both fixed: draw_text now binds `present_fonts`, and
 `_engine2d_draw_ir_nth_int` stays entirely in i64 (no `.to_i32()`
 dispatch).
 
+**Rerun10 — correction: the typed intermediate did NOT save draw_text.**
+Same fault (has_sffi_ttf cr2=0x0 from Engine2D.draw_text) with
+`val present_fonts: FontRenderer = engine2d_font_owner_get_or_create(owner)`
+bound — so at THIS site the helper's **plain aggregate return itself** is
+null in the guest (rerun9's "intermediate sites survived" was overdrawn:
+those sites simply weren't reached in the first frame). Fix: draw_text now
+reads the owner slot directly (`owner.active[0]` — field + array-element
+access, proven channels; no function return crosses). Note
+`engine2d_font_owner_get_or_create`'s other callers (fonts(),
+selected_font_identity) still cross its return and remain candidate next
+peels in the guest. Host lane, same day: crash advanced to the next
+chained `char_code_at().to_i32()` site (`_engine2d_draw_ir_text_font_size`
+draw_ir_adv.spl:126, 8-frame stack recovered) — ALL enumerated sibling
+sites converted to i64 bindings in one pass (draw_ir_adv:126,
+simple_web_layout_engine2d_cpu:17/21/29, host_gpu_draw_ir_event_flow:54,
+glyph:162).
+
 **Hosted-WM Xvfb retest (2026-07-26, current main): frontier MOVED past
 `request_to_pixel_artifact`.** Fresh clean-cache build (265 compiled / 0
 cached), same progression (theme OK → windows-ready count=5), first frame
