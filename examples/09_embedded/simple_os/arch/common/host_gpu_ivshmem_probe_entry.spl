@@ -90,20 +90,29 @@ fn _host_gpu_probe_negotiation_done(isa: text, result: text, backend: text, atte
     serial_println("HOST_GPU_NEGOTIATION_DONE scope=probe isa={isa} result={result} backend={backend} attempts={attempts} first_generation={first_generation} final_generation={final_generation} elapsed_us={elapsed_us} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={reason}")
 
 pub fn host_gpu_ivshmem_probe_main():
-    val isa = _host_gpu_probe_isa()
-    boot_monotonic_prepare()
     val mapped_slot = map_qemu_host_gpu_ivshmem_bar2()
     if mapped_slot <= 0:
-        _host_gpu_probe_fail(isa, "map-bar2-{mapped_slot}")
+        _host_gpu_probe_fail(_host_gpu_probe_isa(), "map-bar2-{mapped_slot}")
         return
     val device = mapped_slot - 1
     # The boot probe stays in the initial address space, where crt0 identity-maps
     # this MMIO window. Unlike the canonical alias, this value fits Simple's
     # tagged integer ABI when passed through the guest bridge.
-    val base = _host_gpu_probe_window_base(device)
+    _host_gpu_probe_main_at(_host_gpu_probe_window_base(device), device, "ivshmem-bar2")
+
+# The file-backed-RAM-tail entry is selected only by the macOS AArch64 QEMU
+# wrapper.  It reuses the exact bounded wire protocol; it is not a VirtIO-GPU
+# or guest-native Vulkan path.
+pub fn host_gpu_file_backed_ram_tail_probe_main():
+    _host_gpu_probe_main_at(0x5F800000u64, 1, "file-backed-ram-tail")
+
+fn _host_gpu_probe_main_at(base: u64, device: i64, transport: text):
+    val isa = _host_gpu_probe_isa()
+    boot_monotonic_prepare()
     val negotiation_started_us = boot_monotonic_now_us()
     val deadline_us = boot_monotonic_deadline_us(negotiation_started_us, SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US)
     serial_println("HOST_GPU_MAP_OK isa={isa} device={device}")
+    serial_println("HOST_GPU_TRANSPORT isa={isa} transport={transport} base={base}")
 
     var hello_generation = _host_gpu_probe_generation() - 1
     var render_backend = "metal"

@@ -479,20 +479,27 @@ fn _arg_value(args: [text], prefix: text) -> text:
 fn main() -> i64:
     val args = get_args()
     val path = _arg_value(args, "--shm=")
+    val requested_offset = _arg_value(args, "--shm-offset=")
+    # macOS AArch64 file-backed-RAM-tail mode maps the final 8 MiB of the
+    # 512 MiB guest-RAM backing file.  Keep the offset fixed until a versioned
+    # transport negotiation exists; arbitrary offsets would make a receipt
+    # indistinguishable from a mismatched guest map.
+    val offset = if requested_offset == "": 0 elif requested_offset == "528482304": 528482304 else: -1
     val requested_processing_selector = _arg_value(args, "--processing-backend=")
     val processing_selector = if requested_processing_selector == "": "auto" else: requested_processing_selector
     val once = args.contains("--once")
     if processing_selector != "auto" and processing_selector != "vulkan":
         print("simpleos_gpu_host: --processing-backend must be auto or vulkan\n")
         return 2
-    if path == "" or not file_exists(path) or file_size(path) < SIMPLEOS_HOST_GPU_REGION_BYTES:
-        print("simpleos_gpu_host: --shm=<8MiB backing file> required\n")
+    if offset < 0 or path == "" or not file_exists(path) or file_size(path) < offset + SIMPLEOS_HOST_GPU_REGION_BYTES:
+        print("simpleos_gpu_host: --shm=<backing file> with an optional supported --shm-offset required\n")
         return 2
-    val base = file_mmap(path, SIMPLEOS_HOST_GPU_REGION_BYTES, 0, false)
+    val base = file_mmap(path, SIMPLEOS_HOST_GPU_REGION_BYTES, offset, false)
     if base <= 0:
         print("simpleos_gpu_host: mmap failed\n")
         return 3
     print("HOST_GPU_DAEMON_SELECTOR processing_backend={processing_selector}\n")
+    print("HOST_GPU_DAEMON_TRANSPORT shm_offset={offset}\n")
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION, 0)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_CAPABILITY_MASK, 0)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_REQUESTED_CAPABILITY_MASK, 0)

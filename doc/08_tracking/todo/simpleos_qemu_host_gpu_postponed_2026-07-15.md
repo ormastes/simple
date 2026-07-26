@@ -48,14 +48,34 @@ three QEMU binaries are blocked because `ivshmem-plain` is absent. Accelerated
 GL/rutabaga devices are also absent. Default VirtIO-GPU 2D remains available
 for presentation only.
 
-Resume this row only after a macOS QEMU deployment passes:
+This is not a Homebrew configure-option omission that can be repaired by a
+package upgrade: upstream QEMU documents traditional `ivshmem-plain` as a
+Linux-host shared-memory device. The installed macOS binaries do expose
+`virtio-serial`, and the preflight records that fact as
+`virtio-serial-unimplemented`; it is not a host-GPU transport until SimpleOS
+has a real framed VirtIO-console guest adapter, a host-daemon socket endpoint,
+fence/completion semantics, and device-origin readback. It must never be
+treated as Metal offload, guest-native Vulkan, or a scanout substitute.
+
+The macOS AArch64 replacement is `file-backed-ram-tail`: QEMU realizes a
+512 MiB `memory-backend-file` as the complete `virt` RAM region under HVF, and
+SimpleOS reserves its final 8 MiB at GPA `0x5f800000` (file offset
+`528482304`) for the existing bounded host-GPU wire protocol. The host daemon
+maps only that exact 8 MiB offset. `pc-dimm` is not an alternative here: the
+installed `virt` machine rejects it because `acpi-ged` is unavailable, even
+with `acpi=on`. This remains host-Metal offload only; it neither accelerates
+VirtIO-GPU scanout nor gives the guest native Vulkan.
+
+Run the read-only classification command after any QEMU deployment change:
 
 ```sh
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --preflight
 ```
 
-Then repair the independently failing Metal shader-provider initialization and
-the pure-Simple CPU-SIMD evidence lane before running one fresh capped live
-guest gate. Required promotion evidence remains: HVF in the executed AArch64
-argv, guest negotiation, Metal device identity, device-origin readback, and
-bit-exact parity with the CPU-SIMD oracle.
+Only an upstream-compatible replacement transport with a completed SimpleOS
+guest/host adapter may replace this blocked `ivshmem` row. Then repair the
+independently failing Metal shader-provider initialization and the pure-Simple
+CPU-SIMD evidence lane before running one fresh capped live guest gate.
+Required promotion evidence remains: HVF in the executed AArch64 argv, guest
+negotiation, Metal device identity, device-origin readback, and bit-exact
+parity with the CPU-SIMD oracle.
