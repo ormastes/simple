@@ -1,0 +1,67 @@
+use std.spec.{describe, it, expect, step}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+
+fn function_name_count(hir: HirModule, name: text) -> i64:
+    var count = 0
+    for function in hir.functions.values():
+        if function.name == name:
+            count = count + 1
+    count
+
+fn lower_bootstrap_module(source: text, filename: text) -> HirModule:
+    val module = parse_and_build_module(source, filename)
+    var lowering: HirLowering = HirLowering.with_filename(filename)
+    val wrapped: HirModule? = lowering.lower_parser_module_unstub(module)
+    expect(wrapped != nil).to_equal(true)
+    wrapped.unwrap()
+
+describe "bootstrap impl function accumulation", tag: ["only-compiled"]:
+    it "keeps impl-only and mixed module functions exactly once":
+        val old_bootstrap = rt_env_get("SIMPLE_BOOTSTRAP") ?? ""
+        val old_closure = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""
+        defer:
+            rt_env_set("SIMPLE_BOOTSTRAP", old_bootstrap)
+            rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_closure)
+
+        expect(rt_env_set("SIMPLE_BOOTSTRAP", "1")).to_equal(true)
+        expect(rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")).to_equal(true)
+        bootstrap_hir_modules_reset()
+        bootstrap_hir_functions_reset()
+
+        step("Lower a module with no free functions and two impl methods")
+        val impl_only = lower_bootstrap_module(
+            "struct ImplOnly:\n" +
+            "    value: i64\n\n" +
+            "impl ImplOnly:\n" +
+            "    fn first(self) -> i64: self.value\n" +
+            "    fn second(self) -> i64: self.value + 1\n",
+            "impl_only.spl"
+        )
+        expect(impl_only.functions.len()).to_equal(2)
+        expect(bootstrap_hir_function_count()).to_equal(2)
+        expect(bootstrap_hir_module_functions_at(bootstrap_hir_module_count() - 1).len()).to_equal(2)
+        expect(function_name_count(impl_only, "first")).to_equal(1)
+        expect(function_name_count(impl_only, "second")).to_equal(1)
+
+        step("Lower a mixed module without dropping or duplicating functions")
+        val mixed = lower_bootstrap_module(
+            "struct Mixed:\n" +
+            "    value: i64\n\n" +
+            "fn free_value() -> i64: 7\n\n" +
+            "impl Mixed:\n" +
+            "    fn first(self) -> i64: self.value\n" +
+            "    fn second(self) -> i64: self.value + 1\n",
+            "mixed_impl.spl"
+        )
+        expect(mixed.functions.len()).to_equal(3)
+        expect(bootstrap_hir_function_count()).to_equal(3)
+        expect(bootstrap_hir_module_functions_at(bootstrap_hir_module_count() - 1).len()).to_equal(3)
+        expect(function_name_count(mixed, "free_value")).to_equal(1)
+        expect(function_name_count(mixed, "first")).to_equal(1)
+        expect(function_name_count(mixed, "second")).to_equal(1)
