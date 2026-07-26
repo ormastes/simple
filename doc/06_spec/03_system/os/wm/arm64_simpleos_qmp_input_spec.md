@@ -24,6 +24,10 @@
   attested builder, and live evidence wrapper.
 - Verify source admission uses byte-safe, NUL-delimited path enumeration and
   binds the complete guest source fingerprint.
+- Verify compiler admission rejects `compiler_rust`/debug paths and embedded
+  `Rust-built`, `bootstrap seed only`, or `debug build` classifiers before the
+  attested build starts; `--self-test` must admit a clean host-format fixture
+  and reject seed/debug fixtures.
 - Verify the guest emits the exact AArch64/NEON SIMD receipt with positive
   native fill hits, positive vector chunks, and bit-exact scalar parity.
 - Verify the live wrapper rejects missing, duplicate, fallback, mismatched, or
@@ -259,6 +263,15 @@ expect(source_fingerprint).to_contain(
     "arm64_guest_validate_native_compiler"
 )
 expect(source_fingerprint).to_contain(
+    "ARM64_GUEST_COMPILER_ADMISSION_REASON"
+)
+expect(source_fingerprint).to_contain(
+    "Rust-built|bootstrap seed only|debug build"
+)
+expect(source_fingerprint).to_contain(
+    "rust-seed-or-debug-forbidden"
+)
+expect(source_fingerprint).to_contain(
     "arm64_guest_compiler_magic"
 )
 expect(source_fingerprint).to_contain(
@@ -272,6 +285,15 @@ expect(build_wrapper).to_contain(
 )
 expect(build_wrapper).to_contain(
     "compiler_arch=$COMPILER_ARCH"
+)
+expect(build_wrapper).to_contain(
+    "run_compiler_admission_self_test"
+)
+expect(build_wrapper).to_contain(
+    "arm64_compiler_admission_self_test_status=pass"
+)
+expect(build_wrapper).to_contain(
+    "COMPILER_REJECTION_REASON"
 )
 expect(live_wrapper).to_contain(
     "canonical-build-manifest-compiler-format-arch-invalid"

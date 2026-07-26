@@ -12,6 +12,7 @@ cd "$ROOT_DIR"
 . scripts/check/lib/qemu-frozen-source-admission.shs
 
 COMPILER=""
+COMPILER_REJECTION_REASON=""
 KERNEL="build/os/simpleos_arm64_desktop_engine2d.elf"
 DISK="build/os/fat32-arm64-desktop.img"
 DISK_PRODUCER="build/os/make_os_disk"
@@ -23,9 +24,16 @@ BUILD_COMMAND=""
 BUILD_ENVIRONMENT="-u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000"
 ENTRY="examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl"
 MANIFEST_TMP="${BUILD_MANIFEST}.tmp.$$"
+SELF_TEST_DIR=""
 
 cleanup() {
     rm -f "$MANIFEST_TMP" "$GENERATED_LOG_CONFIG"
+    if [ -n "$SELF_TEST_DIR" ]; then
+        rm -f "$SELF_TEST_DIR/clean-simple" \
+            "$SELF_TEST_DIR/seed-simple" \
+            "$SELF_TEST_DIR/debug-simple"
+        rmdir "$SELF_TEST_DIR" >/dev/null 2>&1 || true
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -44,6 +52,70 @@ sha256_file() {
     [ "${#sha256_value}" -eq 64 ] || return 1
     printf '%s\n' "$sha256_value"
 }
+
+write_self_test_native_header() {
+    case "$(uname -s):$(uname -m)" in
+        Darwin:arm64)
+            printf '\317\372\355\376\014\000\000\001' >"$1"
+            ;;
+        Darwin:x86_64)
+            printf '\317\372\355\376\007\000\000\001' >"$1"
+            ;;
+        Linux:aarch64|Linux:arm64)
+            printf '\177ELF\002\001\000\000\000\000\000\000\000\000\000\000\000\000\267\000' >"$1"
+            ;;
+        Linux:x86_64)
+            printf '\177ELF\002\001\000\000\000\000\000\000\000\000\000\000\000\000\076\000' >"$1"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    chmod +x "$1"
+}
+
+run_compiler_admission_self_test() {
+    SELF_TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/simple-arm64-compiler-admission.XXXXXX")" ||
+        fail_build "compiler-admission-self-test-tempdir-failed"
+    clean_fixture="$SELF_TEST_DIR/clean-simple"
+    seed_fixture="$SELF_TEST_DIR/seed-simple"
+    debug_fixture="$SELF_TEST_DIR/debug-simple"
+    write_self_test_native_header "$clean_fixture" ||
+        fail_build "compiler-admission-self-test-host-unsupported"
+    cp "$clean_fixture" "$seed_fixture"
+    cp "$clean_fixture" "$debug_fixture"
+    printf '%s\n' \
+        'WARNING: this Rust-built Simple binary is a bootstrap seed only' \
+        >>"$seed_fixture"
+    printf '%s\n' 'debug build' >>"$debug_fixture"
+
+    arm64_guest_validate_native_compiler "$clean_fixture" ||
+        fail_build "compiler-admission-self-test-clean-rejected"
+    [ "$ARM64_GUEST_COMPILER_ADMISSION_REASON" = pass ] ||
+        fail_build "compiler-admission-self-test-clean-reason-invalid"
+    if arm64_guest_validate_native_compiler "$seed_fixture"; then
+        fail_build "compiler-admission-self-test-seed-accepted"
+    fi
+    [ "$ARM64_GUEST_COMPILER_ADMISSION_REASON" = \
+        rust-seed-or-debug-forbidden ] ||
+        fail_build "compiler-admission-self-test-seed-reason-invalid"
+    if arm64_guest_validate_native_compiler "$debug_fixture"; then
+        fail_build "compiler-admission-self-test-debug-accepted"
+    fi
+    [ "$ARM64_GUEST_COMPILER_ADMISSION_REASON" = \
+        rust-seed-or-debug-forbidden ] ||
+        fail_build "compiler-admission-self-test-debug-reason-invalid"
+
+    echo "arm64_compiler_admission_clean_status=pass"
+    echo "arm64_compiler_admission_seed_rejection_status=pass"
+    echo "arm64_compiler_admission_debug_rejection_status=pass"
+    echo "arm64_compiler_admission_self_test_status=pass"
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+    run_compiler_admission_self_test
+    exit 0
+fi
 
 resolve_compiler() {
     compiler_os="$(uname -s)" || return 1
@@ -68,14 +140,18 @@ resolve_compiler() {
     [ -x "$compiler_candidate" ] && [ -f "$compiler_candidate" ] ||
         return 1
     [ ! -L "$compiler_candidate" ] || return 1
-    arm64_guest_validate_native_compiler "$compiler_candidate" || return 1
+    if ! arm64_guest_validate_native_compiler "$compiler_candidate"; then
+        COMPILER_REJECTION_REASON="$ARM64_GUEST_COMPILER_ADMISSION_REASON"
+        return 1
+    fi
     COMPILER="$compiler_candidate"
     COMPILER_FORMAT="$ARM64_GUEST_COMPILER_FORMAT"
     COMPILER_ARCH="$ARM64_GUEST_COMPILER_ARCH"
     BUILD_COMMAND="env $BUILD_ENVIRONMENT $COMPILER os build --scenario=arm64-desktop-engine2d"
 }
 
-resolve_compiler || fail_build "canonical-pure-simple-compiler-unavailable"
+resolve_compiler ||
+    fail_build "${COMPILER_REJECTION_REASON:-canonical-pure-simple-compiler-unavailable}"
 [ -x "$COMPILER" ] || fail_build "canonical-compiler-missing"
 [ ! -L "$COMPILER" ] || fail_build "canonical-compiler-symlink-rejected"
 # The runner owns this transient source and recreates/removes it around every

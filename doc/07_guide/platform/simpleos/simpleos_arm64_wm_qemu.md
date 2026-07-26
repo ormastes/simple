@@ -110,6 +110,7 @@ canonical Engine2D desktop entry while retaining their distinct output and
 QEMU launch contracts:
 
 ```bash
+sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs --self-test
 sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
 bin/simple os run --scenario=arm64-desktop-engine2d
 bin/simple os test --scenario=arm64-desktop-engine2d
@@ -118,7 +119,12 @@ bin/simple os test --scenario=arm64-desktop-engine2d
 The attested wrapper resolves and directly executes an allowlisted deployed
 `bin/release/<host-triple>/simple os build --scenario=arm64-desktop-engine2d`
 executable. It rejects scripts, symlinks, foreign binaries, and mismatched host
-architectures by checking Mach-O/ELF magic plus native architecture bytes; the
+architectures by checking Mach-O/ELF magic plus native architecture bytes. It
+also rejects compiler paths under `compiler_rust`/debug trees and binary images
+containing the canonical `Rust-built`, `bootstrap seed only`, or `debug build`
+classifiers before any build starts. The `--self-test` command proves a
+host-format clean fixture is admitted while seed-marked and debug-marked
+fixtures are rejected. The
 manifest records and the consumer independently revalidates that format,
 architecture, hash, and version. This is deployed-binary identity evidence, not
 a claim that a canonical Stage3 source-provenance manifest exists. It then publishes
