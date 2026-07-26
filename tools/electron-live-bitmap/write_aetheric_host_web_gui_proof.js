@@ -8,6 +8,9 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const {
+  resolveElectronIdentity,
+} = require("./aetheric_electron_identity");
 
 function option(name) {
   const index = process.argv.indexOf(name);
@@ -26,14 +29,6 @@ function sha256(file) {
 
 function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
-}
-
-function canonicalRegularFile(file, label) {
-  const canonical = fs.realpathSync(file);
-  if (!path.isAbsolute(canonical) || !fs.statSync(canonical).isFile()) {
-    throw new Error(`invalid-${label}`);
-  }
-  return canonical;
 }
 
 function line(log, key) {
@@ -102,13 +97,13 @@ function main() {
   const rendererCWmProviderPath = required("--renderer-c-wm-provider");
   const uiSqliteProviderPath = required("--ui-sqlite-provider");
   const uiSqliteSystemProviderPath = required("--ui-sqlite-system-provider");
-  const electronLauncherPath = canonicalRegularFile(required("--electron-launcher"), "electron-launcher");
-  const electronAppExecutablePath = canonicalRegularFile(
-    required("--electron-app-executable"),
-    "electron-app-executable"
-  );
-  const electronPackagePath = canonicalRegularFile(required("--electron-package"), "electron-package");
-  const electronLockPath = canonicalRegularFile(required("--electron-lock"), "electron-lock");
+  const electronIdentity = resolveElectronIdentity({
+    root: process.cwd(),
+    launcher: required("--electron-launcher"),
+    appExecutable: required("--electron-app-executable"),
+    package: required("--electron-package"),
+    lock: required("--electron-lock"),
+  });
   const revision = required("--revision");
   const uiAccessDir = required("--ui-access-dir");
   const outputPath = required("--output");
@@ -209,8 +204,7 @@ function main() {
     String(observation.status || "") === "pass" &&
     value(observation, "electron_process_version") === "42.5.0" &&
     /^[0-9]+(?:\.[0-9]+)*$/.test(value(observation, "chrome_process_version")) &&
-    (fs.statSync(electronLauncherPath).mode & 0o111) !== 0 &&
-    (fs.statSync(electronAppExecutablePath).mode & 0o111) !== 0 &&
+    electronIdentity.version === "42.5.0" &&
     electronNonblank > 0 &&
     fs.statSync(screenshotPath).size > 0;
 
@@ -251,14 +245,14 @@ function main() {
     observation_sha256: sha256(observationPath),
     electron_process_version: value(observation, "electron_process_version"),
     chrome_process_version: value(observation, "chrome_process_version"),
-    electron_launcher_path: electronLauncherPath,
-    electron_launcher_sha256: sha256(electronLauncherPath),
-    electron_app_executable_path: electronAppExecutablePath,
-    electron_app_executable_sha256: sha256(electronAppExecutablePath),
-    electron_package_path: electronPackagePath,
-    electron_package_sha256: sha256(electronPackagePath),
-    electron_lock_path: electronLockPath,
-    electron_lock_sha256: sha256(electronLockPath),
+    electron_launcher_path: electronIdentity.launcherPath,
+    electron_launcher_sha256: electronIdentity.launcherSha256,
+    electron_app_executable_path: electronIdentity.appExecutablePath,
+    electron_app_executable_sha256: electronIdentity.appExecutableSha256,
+    electron_package_path: electronIdentity.packagePath,
+    electron_package_sha256: electronIdentity.packageSha256,
+    electron_lock_path: electronIdentity.lockPath,
+    electron_lock_sha256: electronIdentity.lockSha256,
     backend: resolvedBackend,
     simple_renderer_producer: simpleProducer,
     simple_requested_backend: requestedBackend,

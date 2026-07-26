@@ -120,6 +120,15 @@ contains "$(field simple_renderer_producer)" simple-web-core-renderer-cpu_simd- 
 [ "$(field electron_producer)" = electron-chromium-capture ] || { emit fail electron-producer-mismatch; exit 1; }
 [ "$(field electron_process_version)" = "$EXPECTED_ELECTRON_VERSION" ] || { emit fail electron-version-mismatch; exit 1; }
 numeric_version "$(field chrome_process_version)" || { emit fail chrome-version-invalid; exit 1; }
+command -v node >/dev/null 2>&1 || { emit fail electron-identity-validator-missing; exit 1; }
+if ! electron_identity_output="$(node tools/electron-live-bitmap/aetheric_electron_identity.js \
+    verify-proof --root "$ROOT_DIR" --proof "$PROOF_PATH" 2>/dev/null)"; then
+    electron_identity_reason="$(printf '%s\n' "$electron_identity_output" |
+        sed -n 's/^aetheric_electron_identity_reason=//p' | tail -n 1)"
+    [ -n "$electron_identity_reason" ] || electron_identity_reason="electron-identity-validation-failed"
+    emit fail "$electron_identity_reason"
+    exit 1
+fi
 [ "$(field simple_width)" = "$(field electron_width)" ] && [ "$(field simple_height)" = "$(field electron_height)" ] || { emit fail renderer-dimension-mismatch; exit 1; }
 sha256 "$(field binary_sha256)" && sha256 "$(field pixel_checksum)" || { emit fail invalid-binary-or-pixel-sha256; exit 1; }
 [ "$(field binary_sha256)" = "$(sha256_file "$SIMPLE_BIN")" ] || { emit fail binary-sha256-mismatch; exit 1; }
@@ -128,14 +137,6 @@ for path_key in generator_binary_path renderer_binary_path ui_driver_binary_path
 [ "$(field generator_binary_sha256)" = "$(sha256_file "$(field generator_binary_path)")" ] || { emit fail generator-binary-sha256-mismatch; exit 1; }
 [ "$(field renderer_binary_sha256)" = "$(sha256_file "$(field renderer_binary_path)")" ] || { emit fail renderer-binary-sha256-mismatch; exit 1; }
 [ "$(field ui_driver_binary_sha256)" = "$(sha256_file "$(field ui_driver_binary_path)")" ] || { emit fail ui-driver-binary-sha256-mismatch; exit 1; }
-for electron_key in electron_launcher electron_app_executable electron_package electron_lock; do
-    electron_path="$(field "${electron_key}_path")"
-    canonical_regular_file "$electron_path" || { emit fail "electron-path-not-canonical:$electron_key"; exit 1; }
-    [ "$(field "${electron_key}_sha256")" = "$(sha256_file "$electron_path")" ] ||
-        { emit fail "electron-sha256-mismatch:$electron_key"; exit 1; }
-done
-[ -x "$(field electron_launcher_path)" ] && [ -x "$(field electron_app_executable_path)" ] ||
-    { emit fail electron-launcher-not-executable; exit 1; }
 for provider_key in renderer_wm_provider renderer_c_wm_provider ui_sqlite_provider ui_sqlite_system_provider; do
     provider_path="$(field "${provider_key}_path")"
     canonical_regular_file "$provider_path" || { emit fail "provider-path-not-canonical:$provider_key"; exit 1; }

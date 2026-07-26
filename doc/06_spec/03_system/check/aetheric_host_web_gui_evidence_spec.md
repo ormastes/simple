@@ -12,6 +12,12 @@ It also binds the launched Electron runtime to exact version `42.5.0`: the
 capture records Electron and Chrome process versions, while the proof retains
 canonical launcher, application executable, installed package, and lockfile
 paths with SHA-256 hashes that admission independently revalidates.
+Those paths must resolve to the physical repo-local
+`node_modules/electron/cli.js`, macOS application executable, installed
+`package.json`, and source `package-lock.json`; another canonical file with a
+matching substituted hash is rejected. Admission also parses the source
+manifest dependency, lock root dependency, lock installed-package row, and
+installed package version, all of which must equal `42.5.0`.
 
 Run after the exact-current binary is available:
 
