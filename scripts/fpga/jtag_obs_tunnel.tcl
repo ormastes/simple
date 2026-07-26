@@ -67,18 +67,23 @@ run_state_hw_jtag RESET
 run_state_hw_jtag IDLE
 scan_ir_hw_jtag 16 -tdi 923f
 
-# --- Alignment probe: issue magic reads, find the A55A|echo window. ---------
+# --- Alignment probe: calibrate BOTH the shift-in position of the command and
+# the bit offset of the response window. The probe command MUST be non-zero
+# (cmd 0 is shift-invariant and once mis-calibrated shift=1: every command
+# arrived right-shifted by one — cmd 2 decoded as 1, 7 as 3). Command 1
+# (status) makes the correct shift unambiguous via ECHO=0001. On the proven
+# KV260 chain the answer is cmd_shift=2, resp_off=1 (1 DAP bypass bit + 1
+# TDI->DR pipeline bit).
 set mode ""
 set aoff -1
-foreach try_shift {1 0} {
-    obs_scan 0 $try_shift            ;# command 0 = magic read
-    set bits [obs_scan 0 $try_shift] ;# response appears in this scan
+foreach try_shift {2 1 0 3} {
+    obs_scan 1 $try_shift            ;# command 1 = status read
+    set bits [obs_scan 1 $try_shift] ;# response appears in this scan
     for {set o 0} {$o <= 2} {incr o} {
         set w [bits64 $bits $o]
         set sig  [expr {($w >> 48) & 0xffff}]
         set echo [expr {($w >> 32) & 0xffff}]
-        set data [expr {$w & 0xffffffff}]
-        if {$sig == 0xA55A && $echo == 0x0000 && $data == 0x51F0B007} {
+        if {$sig == 0xA55A && $echo == 0x0001} {
             set mode $try_shift
             set aoff $o
             break

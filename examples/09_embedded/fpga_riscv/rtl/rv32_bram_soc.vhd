@@ -84,56 +84,175 @@ architecture rtl of rv32_bram_soc is
   constant RAM_BASE   : unsigned(31 downto 0) := x"80000000";
   constant RDISK_BASE : unsigned(31 downto 0) := x"88000000";
 
-  type ram_t     is array (0 to RAM_WORDS - 1)     of std_logic_vector(31 downto 0);
-  type rdisk_t   is array (0 to RDISK_WORDS - 1)   of std_logic_vector(31 downto 0);
+  -- --------------------------------------------------------------------------
+  -- Power-of-2 bank split. Vivado pads a non-power-of-2 BRAM depth to the next
+  -- power of 2 (a 77824-word array elaborated as 131072x32 = 512KB of BRAM),
+  -- which blows the 144-tile xck26 budget. Splitting each memory into at most
+  -- three power-of-2 banks makes the mapping exact:
+  --   51200 words = 32768 + 16384 + 2048   (RAM,   50 BRAM36)
+  --   77824 words = 65536 + 8192  + 4096   (rdisk, 76 BRAM36)
+  -- A power-of-2 total (e.g. the GHDL default 131072/262144) degenerates to a
+  -- single bank. Totals needing more than 3 banks are rejected by an assert.
+  -- --------------------------------------------------------------------------
+  function bank_words(total : natural; bank : natural) return natural is
+    variable remw : natural := total;
+    variable sz : natural;
+  begin
+    for i in 0 to 2 loop
+      sz := 0;
+      if remw > 0 then
+        sz := 1;
+        while sz * 2 <= remw loop sz := sz * 2; end loop;
+      end if;
+      if i = bank then return sz; end if;
+      remw := remw - sz;
+    end loop;
+    return 0;
+  end function;
+  function at_least_1(n : natural) return natural is
+  begin
+    if n > 0 then return n; end if;
+    return 1;
+  end function;
+
+  constant RAM_B0W : natural := bank_words(RAM_WORDS, 0);
+  constant RAM_B1W : natural := bank_words(RAM_WORDS, 1);
+  constant RAM_B2W : natural := bank_words(RAM_WORDS, 2);
+  constant RD_B0W  : natural := bank_words(RDISK_WORDS, 0);
+  constant RD_B1W  : natural := bank_words(RDISK_WORDS, 1);
+  constant RD_B2W  : natural := bank_words(RDISK_WORDS, 2);
+
+  type ram0_t is array (0 to at_least_1(RAM_B0W) - 1) of std_logic_vector(31 downto 0);
+  type ram1_t is array (0 to at_least_1(RAM_B1W) - 1) of std_logic_vector(31 downto 0);
+  type ram2_t is array (0 to at_least_1(RAM_B2W) - 1) of std_logic_vector(31 downto 0);
+  type rd0_t  is array (0 to at_least_1(RD_B0W) - 1)  of std_logic_vector(31 downto 0);
+  type rd1_t  is array (0 to at_least_1(RD_B1W) - 1)  of std_logic_vector(31 downto 0);
+  type rd2_t  is array (0 to at_least_1(RD_B2W) - 1)  of std_logic_vector(31 downto 0);
   type uartbuf_t is array (0 to UARTBUF_WORDS - 1) of std_logic_vector(31 downto 0);
 
   -- NOTE: both init files must exist (the GHDL runner and the Vivado build
   -- script always generate them). The direct `open read_mode is` form is the
-  -- UG901-blessed synthesizable BRAM-init pattern.
-  impure function init_ram(fname : string) return ram_t is
+  -- UG901-blessed synthesizable BRAM-init pattern. Each bank reads the same
+  -- file, skipping `skip` leading words and taking `depth` words.
+  impure function init_ram0(fname : string; skip, depth : natural) return ram0_t is
     file f : text open read_mode is fname;
     variable line_v : line;
     variable word_v : std_logic_vector(31 downto 0);
-    variable mem_v : ram_t := (others => x"00000000");
+    variable mem_v : ram0_t := (others => x"00000000");
     variable idx : natural := 0;
   begin
     while not endfile(f) loop
       readline(f, line_v);
       hread(line_v, word_v);
-      if idx < RAM_WORDS then
-        mem_v(idx) := word_v;
+      if idx >= skip and idx < skip + depth then
+        mem_v(idx - skip) := word_v;
+      end if;
+      idx := idx + 1;
+    end loop;
+    return mem_v;
+  end function;
+  impure function init_ram1(fname : string; skip, depth : natural) return ram1_t is
+    file f : text open read_mode is fname;
+    variable line_v : line;
+    variable word_v : std_logic_vector(31 downto 0);
+    variable mem_v : ram1_t := (others => x"00000000");
+    variable idx : natural := 0;
+  begin
+    while not endfile(f) loop
+      readline(f, line_v);
+      hread(line_v, word_v);
+      if idx >= skip and idx < skip + depth then
+        mem_v(idx - skip) := word_v;
+      end if;
+      idx := idx + 1;
+    end loop;
+    return mem_v;
+  end function;
+  impure function init_ram2(fname : string; skip, depth : natural) return ram2_t is
+    file f : text open read_mode is fname;
+    variable line_v : line;
+    variable word_v : std_logic_vector(31 downto 0);
+    variable mem_v : ram2_t := (others => x"00000000");
+    variable idx : natural := 0;
+  begin
+    while not endfile(f) loop
+      readline(f, line_v);
+      hread(line_v, word_v);
+      if idx >= skip and idx < skip + depth then
+        mem_v(idx - skip) := word_v;
+      end if;
+      idx := idx + 1;
+    end loop;
+    return mem_v;
+  end function;
+  impure function init_rd0(fname : string; skip, depth : natural) return rd0_t is
+    file f : text open read_mode is fname;
+    variable line_v : line;
+    variable word_v : std_logic_vector(31 downto 0);
+    variable mem_v : rd0_t := (others => x"00000000");
+    variable idx : natural := 0;
+  begin
+    while not endfile(f) loop
+      readline(f, line_v);
+      hread(line_v, word_v);
+      if idx >= skip and idx < skip + depth then
+        mem_v(idx - skip) := word_v;
+      end if;
+      idx := idx + 1;
+    end loop;
+    return mem_v;
+  end function;
+  impure function init_rd1(fname : string; skip, depth : natural) return rd1_t is
+    file f : text open read_mode is fname;
+    variable line_v : line;
+    variable word_v : std_logic_vector(31 downto 0);
+    variable mem_v : rd1_t := (others => x"00000000");
+    variable idx : natural := 0;
+  begin
+    while not endfile(f) loop
+      readline(f, line_v);
+      hread(line_v, word_v);
+      if idx >= skip and idx < skip + depth then
+        mem_v(idx - skip) := word_v;
+      end if;
+      idx := idx + 1;
+    end loop;
+    return mem_v;
+  end function;
+  impure function init_rd2(fname : string; skip, depth : natural) return rd2_t is
+    file f : text open read_mode is fname;
+    variable line_v : line;
+    variable word_v : std_logic_vector(31 downto 0);
+    variable mem_v : rd2_t := (others => x"00000000");
+    variable idx : natural := 0;
+  begin
+    while not endfile(f) loop
+      readline(f, line_v);
+      hread(line_v, word_v);
+      if idx >= skip and idx < skip + depth then
+        mem_v(idx - skip) := word_v;
       end if;
       idx := idx + 1;
     end loop;
     return mem_v;
   end function;
 
-  impure function init_rdisk(fname : string) return rdisk_t is
-    file f : text open read_mode is fname;
-    variable line_v : line;
-    variable word_v : std_logic_vector(31 downto 0);
-    variable mem_v : rdisk_t := (others => x"00000000");
-    variable idx : natural := 0;
-  begin
-    while not endfile(f) loop
-      readline(f, line_v);
-      hread(line_v, word_v);
-      if idx < RDISK_WORDS then
-        mem_v(idx) := word_v;
-      end if;
-      idx := idx + 1;
-    end loop;
-    return mem_v;
-  end function;
-
-  signal ram   : ram_t   := init_ram(RAM_INIT_FILE);
-  signal rdisk : rdisk_t := init_rdisk(RDISK_INIT_FILE);
+  signal ram0 : ram0_t := init_ram0(RAM_INIT_FILE, 0, RAM_B0W);
+  signal ram1 : ram1_t := init_ram1(RAM_INIT_FILE, RAM_B0W, RAM_B1W);
+  signal ram2 : ram2_t := init_ram2(RAM_INIT_FILE, RAM_B0W + RAM_B1W, RAM_B2W);
+  signal rdisk0 : rd0_t := init_rd0(RDISK_INIT_FILE, 0, RD_B0W);
+  signal rdisk1 : rd1_t := init_rd1(RDISK_INIT_FILE, RD_B0W, RD_B1W);
+  signal rdisk2 : rd2_t := init_rd2(RDISK_INIT_FILE, RD_B0W + RD_B1W, RD_B2W);
   signal uartbuf : uartbuf_t := (others => x"00000000");
   attribute ram_style : string;
-  attribute ram_style of ram     : signal is "block";
-  attribute ram_style of rdisk   : signal is "block";
-  attribute ram_style of uartbuf : signal is "block";
+  attribute ram_style of ram0   : signal is "block";
+  attribute ram_style of ram1   : signal is "block";
+  attribute ram_style of ram2   : signal is "block";
+  attribute ram_style of rdisk0 : signal is "block";
+  attribute ram_style of rdisk1 : signal is "block";
+  attribute ram_style of rdisk2 : signal is "block";
+  -- The capture buffer is tiny; keep it out of the contended BRAM budget.
+  attribute ram_style of uartbuf : signal is "distributed";
 
   -- Core <-> memory slave.
   signal mem_req    : std_logic;
@@ -148,13 +267,22 @@ architecture rtl of rv32_bram_soc is
   signal mstate_q : mstate_t := M_IDLE;
   type region_t is (R_RAM, R_RDISK, R_NONE);
   signal region_q : region_t := R_NONE;
-  signal ram_idx_q   : natural range 0 to RAM_WORDS - 1 := 0;
-  signal rdisk_idx_q : natural range 0 to RDISK_WORDS - 1 := 0;
-  signal wr_pend_q   : std_logic := '0';
+  signal bank_q : natural range 0 to 2 := 0;
+  signal ram0_idx_q : natural range 0 to at_least_1(RAM_B0W) - 1 := 0;
+  signal ram1_idx_q : natural range 0 to at_least_1(RAM_B1W) - 1 := 0;
+  signal ram2_idx_q : natural range 0 to at_least_1(RAM_B2W) - 1 := 0;
+  signal rd0_idx_q  : natural range 0 to at_least_1(RD_B0W) - 1 := 0;
+  signal rd1_idx_q  : natural range 0 to at_least_1(RD_B1W) - 1 := 0;
+  signal rd2_idx_q  : natural range 0 to at_least_1(RD_B2W) - 1 := 0;
+  -- Per-bank registered write enables (one clean UG901 byte-we template per
+  -- bank process; a shared case-select write breaks Vivado RAM inference).
+  signal ram0_we_q : std_logic := '0';
+  signal ram1_we_q : std_logic := '0';
+  signal ram2_we_q : std_logic := '0';
   signal wdata_q     : std_logic_vector(31 downto 0) := (others => '0');
   signal wstrb_q     : std_logic_vector(3 downto 0) := (others => '0');
-  signal ram_q   : std_logic_vector(31 downto 0) := (others => '0');
-  signal rdisk_q : std_logic_vector(31 downto 0) := (others => '0');
+  signal ram0_q, ram1_q, ram2_q : std_logic_vector(31 downto 0) := (others => '0');
+  signal rd0_q, rd1_q, rd2_q    : std_logic_vector(31 downto 0) := (others => '0');
   signal rvalid_cnt_q : unsigned(31 downto 0) := (others => '0');
 
   -- UART capture.
@@ -191,6 +319,11 @@ architecture rtl of rv32_bram_soc is
     return std_logic_vector(to_unsigned(character'pos(c), 8));
   end function;
 begin
+  assert RAM_B0W + RAM_B1W + RAM_B2W = RAM_WORDS
+    report "RAM_WORDS needs more than 3 power-of-2 banks" severity failure;
+  assert RD_B0W + RD_B1W + RD_B2W = RDISK_WORDS
+    report "RDISK_WORDS needs more than 3 power-of-2 banks" severity failure;
+
   core_rst <= '1' when (rst = '1' or soft_cnt_q /= 0) else '0';
   debug_uart_valid <= dbg_uart_valid;
   debug_uart_byte  <= dbg_uart_byte;
@@ -209,33 +342,93 @@ begin
       debug_ra => dbg_ra, debug_sp => dbg_sp);
 
   -- --------------------------------------------------------------------------
-  -- Memory slave: BRAM-backed, fixed pipeline, one transaction at a time.
+  -- Memory banks: one process per bank, plain UG901 byte-write-enable /
+  -- registered-read templates so Vivado infers BRAM exactly.
+  -- --------------------------------------------------------------------------
+  p_ram0 : process(clk)
+  begin
+    if rising_edge(clk) then
+      if ram0_we_q = '1' then
+        for i in 0 to 3 loop
+          if wstrb_q(i) = '1' then
+            ram0(ram0_idx_q)(i * 8 + 7 downto i * 8) <= wdata_q(i * 8 + 7 downto i * 8);
+          end if;
+        end loop;
+      end if;
+      ram0_q <= ram0(ram0_idx_q);
+    end if;
+  end process;
+
+  p_ram1 : process(clk)
+  begin
+    if rising_edge(clk) then
+      if ram1_we_q = '1' then
+        for i in 0 to 3 loop
+          if wstrb_q(i) = '1' then
+            ram1(ram1_idx_q)(i * 8 + 7 downto i * 8) <= wdata_q(i * 8 + 7 downto i * 8);
+          end if;
+        end loop;
+      end if;
+      ram1_q <= ram1(ram1_idx_q);
+    end if;
+  end process;
+
+  p_ram2 : process(clk)
+  begin
+    if rising_edge(clk) then
+      if ram2_we_q = '1' then
+        for i in 0 to 3 loop
+          if wstrb_q(i) = '1' then
+            ram2(ram2_idx_q)(i * 8 + 7 downto i * 8) <= wdata_q(i * 8 + 7 downto i * 8);
+          end if;
+        end loop;
+      end if;
+      ram2_q <= ram2(ram2_idx_q);
+    end if;
+  end process;
+
+  p_rd0 : process(clk)
+  begin
+    if rising_edge(clk) then
+      rd0_q <= rdisk0(rd0_idx_q);
+    end if;
+  end process;
+
+  p_rd1 : process(clk)
+  begin
+    if rising_edge(clk) then
+      rd1_q <= rdisk1(rd1_idx_q);
+    end if;
+  end process;
+
+  p_rd2 : process(clk)
+  begin
+    if rising_edge(clk) then
+      rd2_q <= rdisk2(rd2_idx_q);
+    end if;
+  end process;
+
+  -- --------------------------------------------------------------------------
+  -- Memory slave FSM: fixed pipeline, one transaction at a time.
   -- --------------------------------------------------------------------------
   process(clk)
     variable off : unsigned(31 downto 0);
     variable widx : natural;
   begin
     if rising_edge(clk) then
-      -- Synchronous BRAM ports (always clocked; enables inference).
-      ram_q   <= ram(ram_idx_q);
-      rdisk_q <= rdisk(rdisk_idx_q);
-      if wr_pend_q = '1' and region_q = R_RAM then
-        for i in 0 to 3 loop
-          if wstrb_q(i) = '1' then
-            ram(ram_idx_q)(i * 8 + 7 downto i * 8) <= wdata_q(i * 8 + 7 downto i * 8);
-          end if;
-        end loop;
-      end if;
-
       mem_rvalid <= '0';
       if rst = '1' then
         mstate_q <= M_IDLE;
-        wr_pend_q <= '0';
+        ram0_we_q <= '0';
+        ram1_we_q <= '0';
+        ram2_we_q <= '0';
         rvalid_cnt_q <= (others => '0');
       else
         case mstate_q is
           when M_IDLE =>
-            wr_pend_q <= '0';
+            ram0_we_q <= '0';
+            ram1_we_q <= '0';
+            ram2_we_q <= '0';
             if mem_req = '1' then
               off := unsigned(mem_addr) - RAM_BASE;
               region_q <= R_NONE;
@@ -243,20 +436,36 @@ begin
                  and unsigned(mem_addr) < RAM_BASE + to_unsigned(RAM_WORDS, 32) * 4 then
                 region_q <= R_RAM;
                 widx := to_integer(off(22 downto 2));
-                if widx < RAM_WORDS then
-                  ram_idx_q <= widx;
+                if widx < RAM_B0W then
+                  bank_q <= 0;
+                  ram0_idx_q <= widx;
+                  ram0_we_q <= mem_we;
+                elsif widx < RAM_B0W + RAM_B1W then
+                  bank_q <= 1;
+                  ram1_idx_q <= widx - RAM_B0W;
+                  ram1_we_q <= mem_we;
+                elsif widx < RAM_WORDS then
+                  bank_q <= 2;
+                  ram2_idx_q <= widx - RAM_B0W - RAM_B1W;
+                  ram2_we_q <= mem_we;
                 end if;
               elsif unsigned(mem_addr) >= RDISK_BASE
                  and unsigned(mem_addr) < RDISK_BASE + to_unsigned(RDISK_WORDS, 32) * 4 then
                 off := unsigned(mem_addr) - RDISK_BASE;
                 region_q <= R_RDISK;
                 widx := to_integer(off(22 downto 2));
-                if widx < RDISK_WORDS then
-                  rdisk_idx_q <= widx;
+                if widx < RD_B0W then
+                  bank_q <= 0;
+                  rd0_idx_q <= widx;
+                elsif widx < RD_B0W + RD_B1W then
+                  bank_q <= 1;
+                  rd1_idx_q <= widx - RD_B0W;
+                elsif widx < RDISK_WORDS then
+                  bank_q <= 2;
+                  rd2_idx_q <= widx - RD_B0W - RD_B1W;
                 end if;
               end if;
               if mem_we = '1' then
-                wr_pend_q <= '1';
                 wdata_q <= mem_wdata;
                 wstrb_q <= mem_wstrb;
               end if;
@@ -264,12 +473,24 @@ begin
             end if;
           when M_READ =>
             -- BRAM output registers load this cycle (write commits this cycle).
-            wr_pend_q <= '0';
+            ram0_we_q <= '0';
+            ram1_we_q <= '0';
+            ram2_we_q <= '0';
             mstate_q <= M_RESP;
           when M_RESP =>
             case region_q is
-              when R_RAM   => mem_rdata <= ram_q;
-              when R_RDISK => mem_rdata <= rdisk_q;
+              when R_RAM =>
+                case bank_q is
+                  when 0 => mem_rdata <= ram0_q;
+                  when 1 => mem_rdata <= ram1_q;
+                  when 2 => mem_rdata <= ram2_q;
+                end case;
+              when R_RDISK =>
+                case bank_q is
+                  when 0 => mem_rdata <= rd0_q;
+                  when 1 => mem_rdata <= rd1_q;
+                  when 2 => mem_rdata <= rd2_q;
+                end case;
               when R_NONE  => mem_rdata <= (others => '0');
             end case;
             mem_rvalid <= '1';

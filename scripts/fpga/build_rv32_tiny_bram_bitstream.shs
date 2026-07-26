@@ -29,8 +29,11 @@ BUILD_DIR="build/fpga/k26_rv32_tiny_bram"
 OUT_BIT="build/fpga/k26_rv32_tiny_bram/gateware/rv32_tiny_bram.bit"
 KERNEL_ELF="${KERNEL_ELF:-build/os/simpleos_riscv32_smf_fs_tiny64.elf}"
 FAT32_IMG="${FAT32_IMG:-build/os/fat32-riscv32.img}"
-RAM_WORDS="${RAM_WORDS:-65536}"
-RDISK_WORDS="${RDISK_WORDS:-81920}"
+# 51200 words = 200 KB = exactly the tiny64 image footprint (0x80031000),
+# split into 32768+16384+2048 power-of-2 BRAM banks (50 BRAM36).
+RAM_WORDS="${RAM_WORDS:-51200}"
+# 77824 words = 304 KB FAT32 slice, split 65536+8192+4096 (76 BRAM36).
+RDISK_WORDS="${RDISK_WORDS:-77824}"
 RAM_BYTES=$((RAM_WORDS * 4))
 RAMDISK_BYTES=$((RDISK_WORDS * 4))
 SYNTH_ONLY="0"
@@ -74,6 +77,14 @@ create_clock -name cfgmclk -period 20.000 [get_pins u_startup/CFGMCLK]
 set_false_path -to [get_ports uart_tx]
 XDC
 
+# Synth pre-hook: the BRAM INIT impure functions iterate once per .mem line
+# (65536 for RAM, 77824 for the ramdisk), which exceeds Vivado's default
+# elaboration loop limit of 65536 -> ERROR [Synth 8-403]. Raise it in the
+# synth run's own process (TCL.PRE runs there).
+cat > "$BUILD_DIR/synth_pre.tcl" <<'PRE'
+set_param synth.elaboration.rodinMoreOptions {rt::set_parameter max_loop_limit 8000000}
+PRE
+
 RTL="examples/09_embedded/fpga_riscv/rtl"
 cat > "$BUILD_DIR/build_rv32_tiny_bram.tcl" <<TCL
 set synth_only $SYNTH_ONLY
@@ -87,6 +98,7 @@ add_files -fileset constrs_1 $BUILD_DIR/k26_tiny_bram.xdc
 set_property top soc_top_rv32_tiny_bram [current_fileset]
 set_property generic "G_RAM_WORDS=$RAM_WORDS G_RDISK_WORDS=$RDISK_WORDS G_RAM_INIT_FILE=$RAM_MEM G_RDISK_INIT_FILE=$RDISK_MEM" [current_fileset]
 update_compile_order -fileset sources_1
+set_property STEPS.SYNTH_DESIGN.TCL.PRE [file normalize $BUILD_DIR/synth_pre.tcl] [get_runs synth_1]
 launch_runs synth_1 -jobs 8
 wait_on_run synth_1
 if {[get_property PROGRESS [get_runs synth_1]] != "100%"} { puts "SYNTH_FAILED"; exit 5 }
