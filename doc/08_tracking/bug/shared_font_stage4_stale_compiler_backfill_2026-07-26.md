@@ -1,7 +1,7 @@
 # Shared-font Stage 4 bootstrap admission blocker
 
 - Date: 2026-07-26
-- Status: BLOCKED after the sole current Stage 4 retry
+- Status: BLOCKED at the three-cycle cap
 - Scope: pure-Simple Stage 4 admission and essential-tools runner calibration
 
 The existing deployed Linux CLI is not admissible: SHA-256
@@ -84,39 +84,53 @@ Stage 4 log proves the explicit-enum blocker cleared:
 phase2:parse:file:done src/os/kernel/types/syscall_types.spl
 ```
 
-The sole Stage 4 retry exited 1. Its first error is:
+That attempt exited 1. Its first error was:
 
 ```text
 src/std/skia/feature/shaper/ot_layout_gpos_data.spl:139:1:
 unexpected token in expression: Indent
 ```
 
-The retained terminal log is:
+Its retained terminal log is:
 
 `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`
 
 No Stage 4 CLI/core-C admission artifact exists, so essential-tools,
 deliberate-red/empty calibration, docgen, and font execution remain blocked.
 
-The shaping owner has a minimal block-form correction pending verification.
-The next bootstrap retry remains gated until that verification passes. Then
-rerun the exact command below with the same output path, preserving the
-available authority and cache trees.
+Commit `dd1d266dc9e` then rewrote the GPOS block form. Cached Stage 4 cycle 2
+cleared parsing, reached HIR, and exited 132 on a nil receiver. Cycle 3
+captured the authoritative terminal evidence in
+`build/native_probe/stage4-cycle3.log` and also exited 132.
+
+The last exact cycle-3 markers identify
+`src/compiler/backend/backend/compiler.spl`. All implementation methods,
+including `process_function`, reached their body-done marker. The terminal
+sequence is:
+
+```text
+[hir-lower] lower_function:body process_function
+[hir-lower] bootstrap-functions:count module=src/compiler/backend/backend/compiler.spl count=0
+runtime error: field access on nil receiver
+```
+
+The three-cycle cap is reached. No further bootstrap retry is permitted this
+session. No Stage 4 CLI/core-C admission artifact exists, so essential-tools,
+deliberate-red/empty calibration, docgen, font execution, native promotion,
+and surface evidence remain blocked.
 
 ## Open TODO and bounded continuation
 
 | TODO | Status | Required change and evidence |
 |---|---|---|
-| `GPOS-DATA-BLOCK-001` | FAIL — minimal block-form fix pending verification | Verify that the correction removes the line 139 unexpected `Indent` without weakening the GPOS data contract. Retain Stage 2/3 sanity and successful `SyscallId` parsing as prerequisites. |
+| `HIR-BOOTSTRAP-NIL-001` | FAIL — three-cycle cap reached | In a fresh session, diagnose why `compiler.spl` completes every implementation method but reports zero bootstrap functions and immediately dereferences a nil receiver. Retain the cycle-3 log and exit 132 as the starting evidence. |
 
-After that focused verification passes once, lane A may run the next
-cache-preserving Stage 4 retry with the command below. Only exit 0 permits
-publishing immutable CLI/core-C paths and SHA-256 values, then running
-essential-tools and deliberate-red/empty-runner admission. Focused font tests
-come next. Docgen remains prohibited until the CLI is admitted and the
-corresponding runtime spec passes.
+Only a focused diagnosis/fix in a fresh session may authorize the command
+below. Only exit 0 permits publishing immutable CLI/core-C paths and SHA-256
+values, then running essential-tools and deliberate-red/empty-runner
+admission. All downstream work remains blocked until admission.
 
-Exact next-continuation command after that prerequisite:
+Future fresh-session command after that prerequisite:
 
 ```sh
 timeout -k 30s 3600s env SIMPLE_NO_STUB_FALLBACK=1 \

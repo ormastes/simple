@@ -13,8 +13,9 @@ This is the current all-lane audit, not a runtime or native PASS. Static source
 and executable coverage is broad, but no fresh pure-Simple full CLI has been
 admitted. The fresh continuation admitted bootstrap Stage 2 and Stage 3 for
 stage progression, parsed the prior `SyscallId` enum blocker successfully,
-then failed Stage 4 on a GPOS-data block-form parse error. Those stage
-compilers are not a full font-test CLI.
+and commit `dd1d266dc9e` cleared the GPOS-data block-form parse error. Cached
+Stage 4 cycles 2 and 3 then reached HIR but exited 132 on a nil receiver.
+Those stage compilers are not a full font-test CLI.
 The retained history and resume contract are in
 `doc/08_tracking/bug/shared_font_stage4_stale_compiler_backfill_2026-07-26.md`.
 Consequently runner calibration, focused execution, zero-stub docgen, native
@@ -30,25 +31,26 @@ promotion, QEMU pixels, and performance remain unaccepted.
   `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap/stage3/x86_64-unknown-linux-gnu/simple`,
   SHA-256
   `efe455723c76643c327312292769262f0a9326d91d424773e11d45611742103b`.
-  Both stages passed their sanity gates at commit `033c0f9e6ae`.
-- Stage 4/full CLI is absent. The sole retry exited 1; retained
-  diagnostics are in
-  `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`.
-  The log records
-  `phase2:parse:file:done src/os/kernel/types/syscall_types.spl`, proving the
-  enum blocker cleared. Its first error is
-  `src/std/skia/feature/shaper/ot_layout_gpos_data.spl:139:1: unexpected token in expression: Indent`.
+  Both stages passed their sanity gates at commit `033c0f9e6ae`; commit
+  `dd1d266dc9e` then rewrote the GPOS block form.
+- Stage 4/full CLI is absent. Cached cycle 2 cleared parsing, reached HIR, and
+  exited 132 on a nil receiver.
+- Cycle 3 retained `build/native_probe/stage4-cycle3.log` and exited 132. Its
+  final exact markers show module
+  `src/compiler/backend/backend/compiler.spl`; all implementation methods,
+  including `process_function`, completed their body markers; then
+  `bootstrap-functions:count module=src/compiler/backend/backend/compiler.spl count=0`
+  was immediately followed by
+  `runtime error: field access on nil receiver`.
 
 No Stage 4 CLI/core-C identity was published and no global runner calibration
-ran. The minimal GPOS-data block-form fix is pending verification; the next
-retry remains gated until that verification passes. Then rerun the documented
-command with the same
-`--output=build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap`
-and preserve the Stage 2/3/native caches.
+ran. The three-cycle cap is reached; no further retry is permitted this
+session. A fresh session must diagnose the zero bootstrap-function count and
+nil-receiver boundary before it may authorize another bootstrap attempt.
 
 | Open TODO | Status | Required evidence before retry | Bounded continuation |
 |---|---|---|---|
-| `GPOS-DATA-BLOCK-001` | FAIL — minimal block-form fix pending verification | Verify the correction for the line 139 unexpected `Indent`; retain proof that `SyscallId` parses and Stage 2/3 sanity still passes | Only after fix verification may the next cache-preserving Stage 4 retry run. Only exit 0 may unlock immutable CLI/core-C identity, essential-tools smoke, and deliberate-red/empty-runner gates. Font commands and docgen stay blocked until admission. |
+| `HIR-BOOTSTRAP-NIL-001` | FAIL — three-cycle cap reached | Diagnose why `compiler.spl` completes all implementation method bodies but publishes `bootstrap-functions:count ... count=0`, then immediately dereferences a nil receiver | No further retry this session. A fresh-session retry remains gated on a focused diagnosis/fix. Only exit 0 may unlock immutable CLI/core-C identity, essential-tools smoke, and deliberate-red/empty-runner gates; all downstream work stays blocked. |
 
 ## Requirement matrix
 

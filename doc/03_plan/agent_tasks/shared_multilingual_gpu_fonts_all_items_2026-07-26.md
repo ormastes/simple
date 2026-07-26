@@ -21,7 +21,7 @@ atlas, cache, process/env facade, or device-success path.
 | Area | Current evidence | Required next state |
 |---|---|---|
 | GSUB/GPOS | reviewed completion is integrated on the isolated branch; superseded stage1 duplicates were not imported | execute the frozen shaping/parser specs on the admitted CLI |
-| Bootstrap | at commit `033c0f9e6ae`, Stage 2 `63523bc1...` and Stage 3 `efe45572...` passed sanity; the sole Stage 4 retry parsed `SyscallId`, then failed on `ot_layout_gpos_data.spl:139` unexpected `Indent`; full CLI absent | verify the minimal block-form fix, then permit the next gated retry |
+| Bootstrap | `dd1d266dc9e` cleared the GPOS parse blocker; cached cycles 2 and 3 reached HIR but exited 132 on a nil receiver; cycle 3 ends after `compiler.spl` implementation methods with bootstrap function count zero; full CLI absent | stop this session at the three-cycle cap; diagnose the zero-count/nil boundary before a fresh-session retry |
 | Focused tests | implementation and static coverage exist; prior runner exited before examples | calibrated, nonzero, authoritative runtime results |
 | Native GPU | source/emission and partial backend evidence exist | one real 2D+3D promoted device route and current perf record |
 | Surfaces | source contracts and retained artifacts exist | live canonical Web/GUI/WM/SimpleOS evidence and honest blocked rows |
@@ -57,14 +57,13 @@ atlas, cache, process/env facade, or device-success path.
 
 | TODO | Status | Implementation owner | Acceptance evidence |
 |---|---|---|---|
-| `GPOS-DATA-BLOCK-001` | FAIL — minimal block-form fix pending verification | shaping owner, then lane A for bootstrap only | Retained commit `033c0f9e6ae`: Stage 2 SHA `63523bc1f33c4705512279d126b1083b75296982699c5d51ca8d65b586b5b0ea` and Stage 3 SHA `efe455723c76643c327312292769262f0a9326d91d424773e11d45611742103b` passed sanity. The sole Stage 4 retry proves the enum fix reached the CLI closure because `SyscallId` parsed successfully; its first error is `src/std/skia/feature/shaper/ot_layout_gpos_data.spl:139:1: unexpected token in expression: Indent`. Verify the minimal block-form correction before handing the next retry to lane A. |
+| `HIR-BOOTSTRAP-NIL-001` | FAIL — three-cycle cap reached | compiler/bootstrap owner in a fresh session | Commit `dd1d266dc9e` contains the GPOS block rewrite. Cached cycle 2 cleared parsing, reached HIR, and exited 132 on a nil receiver. Cycle 3 evidence is `build/native_probe/stage4-cycle3.log`, exit 132. Its last module is `src/compiler/backend/backend/compiler.spl`; all implementation methods, including `process_function`, complete lowering before `bootstrap-functions:count module=src/compiler/backend/backend/compiler.spl count=0` and the immediate `runtime error: field access on nil receiver`. Diagnose that boundary before authorizing any future retry. |
 
-The current Stage 4 attempt exited 1 and produced no full CLI. The bounded
-order is: verify the minimal block-form fix once; permit the next
-cache-preserving Stage 4 retry using the existing full-bootstrap output tree;
-and, only after exit 0, publish immutable CLI/core-C hashes and run
-essential-tools plus deliberate-red/empty-runner admission. Focused font
-execution and owner docgen remain blocked until admission.
+The three-cycle cap is reached. No further Stage 4 retry is permitted this
+session. No full CLI was produced, so immutable CLI/core-C publication,
+essential-tools and deliberate-red/empty-runner admission, focused font
+execution, owner docgen, native promotion, and surface evidence remain
+blocked.
 
 ## Required handoff format
 
