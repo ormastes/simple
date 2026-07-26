@@ -1007,6 +1007,17 @@ int cosmos_ftl_commit_page(struct cosmos_ftl *ftl, unsigned int lpn,
         ftl, lpn, COSMOS_FTL_PPA_NONE, 0U, ppa);
 }
 
+int cosmos_ftl_refresh_page(struct cosmos_ftl *ftl, unsigned int lpn,
+                            unsigned int source_ppa, unsigned int *ppa) {
+    unsigned int mapped;
+    int status = cosmos_ftl_lookup(ftl, lpn, &mapped);
+
+    if (status != COSMOS_OK || mapped != source_ppa) {
+        return status == COSMOS_OK ? COSMOS_INVALID : status;
+    }
+    return commit_page_internal(ftl, lpn, source_ppa, 1U, ppa);
+}
+
 int cosmos_ftl_discard_page(struct cosmos_ftl *ftl, unsigned int lpn) {
     struct cosmos_ftl_journal_record record;
     unsigned long long generation;
@@ -1220,6 +1231,7 @@ int cosmos_ftl_gc_step(struct cosmos_ftl *ftl, unsigned int max_moves) {
             unsigned long long generation;
             unsigned int lpn;
             unsigned int destination;
+            unsigned int needs_refresh;
             unsigned int source;
 
             if (cosmos_ftl_ppa_encode(
@@ -1227,7 +1239,8 @@ int cosmos_ftl_gc_step(struct cosmos_ftl *ftl, unsigned int max_moves) {
                 return COSMOS_HW_ERROR;
             }
             status = ftl->backend.read_page_tag(
-                ftl->backend.context, source, &lpn, &generation);
+                ftl->backend.context, source, &lpn, &generation,
+                &needs_refresh);
             if (status == COSMOS_UNAVAILABLE) {
                 continue;
             }
@@ -1239,6 +1252,7 @@ int cosmos_ftl_gc_step(struct cosmos_ftl *ftl, unsigned int max_moves) {
                 continue;
             }
             (void)generation;
+            (void)needs_refresh;
             status = commit_page_internal(
                 ftl, lpn, source, 1U, &destination);
             if (status != COSMOS_OK) {

@@ -126,6 +126,8 @@ sh test/02_integration/os/cosmos/run_cosmos_ftl_nfc_dma_isolation_test.shs
 sh test/02_integration/os/cosmos/run_cosmos_nvme_ftl_media_contract_test.shs
 sh test/02_integration/os/cosmos/run_cosmos_nvme_ftl_physical_composition_test.shs
 sh test/02_integration/os/cosmos/run_cosmos_nvme_media_tag_validation_test.shs
+sh test/02_integration/os/cosmos/run_cosmos_nvme_ecc_refresh_test.shs
+sh test/02_integration/os/cosmos/run_cosmos_ecc_refresh_build_contract_test.shs
 sh test/02_integration/os/cosmos/run_cosmos_storage_startup_contract_test.shs
 sh test/02_integration/os/cosmos/run_cosmos_storage_link_contract_test.shs
 ```
@@ -133,9 +135,14 @@ sh test/02_integration/os/cosmos/run_cosmos_storage_link_contract_test.shs
 Requires all host/ARM PASS pairs. It covers explicit little-endian metadata,
 program-once page tags, checkpoint/journal persistence and reclamation,
 4 KiB NVMe staging across 16 KiB NAND pages, LR retry policy, DSM discard, and
-QEMU fail-closed startup. Silicon mounts and recovers existing metadata only;
-it never formats NAND automatically. Physical NAND, ECC refresh, PCIe DMA data
-integrity, and power-loss behavior remain board-evidence requirements.
+QEMU fail-closed startup. Corrected-ECC reads relocate the current page through
+the FTL transaction path after host DMA completes; the old mapping remains
+authoritative if relocation fails. The focused runner rereads the relocated
+data, rejects a stale source PPA, injects a failed copy, and remounts/replays
+the surviving mapping. Silicon mounts and recovers existing metadata only; it
+never formats NAND automatically. Physical NAND correction, PCIe DMA data
+integrity, power-loss behavior, and endurance remain board-evidence
+requirements.
 
 ### 7. PCIe-to-NVMe adapter contract
 
@@ -281,18 +288,18 @@ that `cosmos_uart.c` executes `cosmos_runtime_selftest()` and reports the
 | REQ-008 | Host FSBL/fail-closed MMIO; QEMU boot | Host checked; board pending |
 | REQ-009 | Exact QEMU verdict; bound silicon build | Host checked; board pending |
 | REQ-010 | Package positive/rejection self-test | Host checked |
-| REQ-011 | All ten executable scenarios | Host checks passed individually; final SSpec blocked |
+| REQ-011 | All fourteen executable scenarios | Host checks passed individually; final SSpec blocked |
 | REQ-012 | No executable claim; BT-001..BT-006 board campaign | **Board pending; excluded from `@req`** |
 | NFR-001 | Host runners; bounded QEMU statuses | Host checked |
 | NFR-002 | Host fail-closed cases; QEMU unbound; package rejection | Host checked |
-| NFR-003 | Fail-closed host case and QEMU startup ordering | Partial; abort injection and board evidence pending |
+| NFR-003 | Fail-closed host case, QEMU startup ordering, abort injection | Partial; board evidence pending |
 | NFR-004 | Host NFC DMA/ECC/quarantine, PCIe DMA, and IO DMA-span contracts | Host checked; board pending |
 | NFR-005 | Host SMP/cache coherency contract | Host checked; board pending |
 | NFR-006 | ARM link closure and ABI edge scenario | Host checked |
 | NFR-007 | ELF identity/profile note and package checks | Host checked |
 | NFR-008 | Package manifest/hash self-test | Partial; full board/tool provenance pending |
 | NFR-009 | Exact QEMU lane statuses and terminal verdict | Host checked |
-| NFR-010 | This matrix plus all ten scenarios | Host checks passed individually; final SSpec blocked |
+| NFR-010 | This matrix plus all fourteen scenarios | Host checks passed individually; final SSpec blocked |
 | NFR-011 | No executable claim; BT-003/BT-006 endurance campaign | **Board pending; excluded from `@req`** |
 | NFR-012 | QEMU silicon-PASS rejection and this claim boundary | Host checked |
 
@@ -315,7 +322,7 @@ includes admin Abort/queue/SMART fields, zero-write-only completion retry,
 non-retryable post-start completion behavior, and PRP edges. Real Bootgen is
 unavailable. Strict bootstrap reached Stage 3, but the third/final Stage 4
 attempt reached about 64 GiB RSS and was terminated by signal 15. There is no
-current deployed `bin/release/simple`, so the ten-scenario SSpec and generated
+current deployed `bin/release/simple`, so the fourteen-scenario SSpec and generated
 manual have not been executed/generated with the current tree. Production is
-therefore **BLOCKED/FAIL**, not accepted. Physical FTL/NFC integration,
-UART polling/build binding, real Bootgen, and physical board proof remain open.
+therefore **BLOCKED/FAIL**, not accepted. Real Bootgen, current SSpec/docgen,
+and physical board proof remain open.

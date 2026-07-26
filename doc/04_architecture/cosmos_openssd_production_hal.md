@@ -171,7 +171,10 @@ program-once/erase-before-reuse behavior. The media adapter stages four 4 KiB
 LBAs per 16 KiB NAND page and implements read-modify-write, Write Zeroes, DSM
 discard, FUA flush, and LR retry policy. The single-owner dispatcher runs from
 the UART foreground after silicon mounts and recovers existing metadata; it
-never auto-formats NAND. ECC refresh policy and board proof remain pending.
+never auto-formats NAND. A corrected-ECC read returns data first, then asks the
+FTL to transactionally relocate the still-current PPA; failed relocation does
+not replace the old mapping. Physical correction margin and board proof remain
+pending.
 
 ## Current Production Gate
 
@@ -182,5 +185,4 @@ post-start non-retry, and PRP edges. Real Bootgen is unavailable. Strict bootstr
 Stage 3 passed, but the third/final Stage 4 attempt grew to about 64 GiB RSS and
 was signal-15 terminated; no current pure-Simple runner exists for final
 SSpec/doc generation. Production status is **BLOCKED/FAIL**.
-Fresh SSpec/docgen, ECC refresh evidence, real Bootgen, and H2 board proof
-remain required.
+Fresh SSpec/docgen, real Bootgen, and H2 board proof remain required.

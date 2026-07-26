@@ -89,9 +89,10 @@ PCIe bridge and NVMe admin cores, SMP/cache, QEMU boot, silicon build, and
 package self-test. Corrected bridge/admin evidence covers Abort bits,
 Number-of-Queues NSID/max, CQ IEN/IV, SQ QPRIO, SMART NSID/RAE, zero-write-only
 completion retry, non-retryable post-start completion, and PRP edges. The
-bridge remains callback-only, with no persistent
-FTL/media adapter or UART foreground polling/build binding. Real Bootgen is not
-installed; no current `bin/release/simple` exists after the Stage-4 bootstrap
-termination at about 64 GiB RSS. All physical board evidence remains absent.
+silicon composition now binds persistent FTL/NFC media, 4 KiB-to-16 KiB
+staging, fail-closed UART foreground dispatch, page-tag validation, and
+transactional ECC refresh relocation. Real Bootgen is not installed; no
+current `bin/release/simple` exists after the Stage-4 bootstrap termination at
+about 64 GiB RSS. All physical board evidence remains absent.
 The supported claim is **production BLOCKED/FAIL; silicon acceptance is not
 established**.

@@ -57,8 +57,10 @@ controller command/completion and host-DMA FIFOs, bounded IO callback core,
 corrected bridge/admin behavior, SMP/cache W^X contracts, QEMU boot, and
 packaging self-test. Corrective evidence covers admin Abort/queue/SMART fields,
 zero-write-only completion retry, non-retryable post-start completion, and PRP
-edges. Those results do not satisfy persistence, full
-end-to-end media durability, installed Bootgen, or H2 evidence. The PCIe IRQ covers
+edges. Those results do not satisfy physical persistence, full end-to-end
+board durability, installed Bootgen, or H2 evidence. The persistent
+NFC/media composition, startup binding, tag validation, and transactional ECC
+refresh relocation have host/ARM evidence. The PCIe IRQ covers
 configuration/link/error state only, not command arrival; CPU0 targeting is
 local policy and board-unproven. Strict bootstrap Stage 3 passed, but the
 third/final Stage 4 attempt was signal-15 terminated at about 64 GiB RSS, so
@@ -66,5 +68,5 @@ there is no current pure-Simple runner for final SSpec/doc generation.
 
 Current status: **BLOCKED/FAIL for production acceptance**. REQ-012 and
 NFR-011 remain board-only and excluded from passing executable `@req` claims.
-Persistent FTL/media integration, UART polling/build binding, current Stage-4
-SSpec/docgen evidence, real Bootgen, and board proof remain required.
+Current Stage-4 SSpec/docgen evidence, real Bootgen, and board proof remain
+required.

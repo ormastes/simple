@@ -50,6 +50,7 @@ struct mock_nfc {
 
 static struct mock_nfc mock_storage;
 static int forced_read_status;
+static unsigned int mock_needs_refresh;
 
 #if defined(COSMOS_NVME_FTL_PHYSICAL_COMPOSITION_TEST)
 static int mock_read(void *context, const struct cosmos_nfc_io *io,
@@ -58,6 +59,10 @@ static int mock_program(void *context, const struct cosmos_nfc_io *io);
 static unsigned char host_dma[COSMOS_FTL_NVME_BLOCK_BYTES];
 static unsigned int composition_l2p[8U];
 static struct cosmos_ftl_block composition_blocks[COSMOS_FTL_BLOCK_COUNT];
+#if defined(COSMOS_NVME_FTL_ECC_REFRESH_TEST)
+static unsigned int recovered_l2p[8U];
+static struct cosmos_ftl_block recovered_blocks[COSMOS_FTL_BLOCK_COUNT];
+#endif
 
 int cosmos_test_media_dma_h2d(unsigned int slot, unsigned int offset,
                               unsigned int device_address) {
@@ -121,6 +126,9 @@ static int mock_read(void *context, const struct cosmos_nfc_io *io,
            COSMOS_NFC_PAGE_DATA_BYTES);
     memset((void *)(uintptr_t)io->spare_address, 0xFF,
            COSMOS_NFC_PAGE_SPARE_BYTES);
+    if (ecc != 0) {
+        memset(ecc, 0, sizeof(*ecc));
+    }
     if (forced_read_status != COSMOS_OK) {
         return forced_read_status;
     }
@@ -136,7 +144,7 @@ static int mock_read(void *context, const struct cosmos_nfc_io *io,
         ecc->spare_valid = 1U;
         ecc->page_valid = 1U;
         ecc->worst_chunk_errors = 0U;
-        ecc->needs_refresh = 0U;
+        ecc->needs_refresh = mock_needs_refresh;
     }
     return COSMOS_OK;
 }
@@ -218,6 +226,15 @@ static int composition_test(void) {
     struct cosmos_ftl ftl;
     struct cosmos_nvme_ftl_media media;
     struct cosmos_nvme_command command;
+#if defined(COSMOS_NVME_FTL_ECC_REFRESH_TEST)
+    struct cosmos_ftl_nfc_backend recovered_backend;
+    struct cosmos_ftl recovered_ftl;
+    struct cosmos_nvme_ftl_media recovered_media;
+    unsigned int recovered_ppa;
+    unsigned int destination;
+#endif
+    unsigned int mapped_after;
+    unsigned int mapped_before;
     unsigned int index;
 
     memset(&mock_storage, 0, sizeof(mock_storage));
@@ -242,14 +259,65 @@ static int composition_test(void) {
     command.data_bytes = COSMOS_FTL_NVME_BLOCK_BYTES;
     memset(host_dma, 0x5AU, sizeof(host_dma));
     CHECK(cosmos_nvme_ftl_media_program(&media, &command) == COSMOS_OK);
+    CHECK(cosmos_ftl_lookup(&ftl, 0U, &mapped_before) == COSMOS_OK);
 
     memset(host_dma, 0U, sizeof(host_dma));
     command.opcode = COSMOS_NVME_OPCODE_READ;
+#if defined(COSMOS_NVME_FTL_ECC_REFRESH_TEST)
+    mock_needs_refresh = 1U;
+#endif
+    CHECK(cosmos_nvme_ftl_media_read(&media, &command) == COSMOS_OK);
+    mock_needs_refresh = 0U;
+    for (index = 0U; index < sizeof(host_dma); ++index) {
+        CHECK(host_dma[index] == 0x5AU);
+    }
+#if defined(COSMOS_NVME_FTL_ECC_REFRESH_TEST)
+    CHECK(cosmos_ftl_lookup(&ftl, 0U, &mapped_after) == COSMOS_OK);
+    CHECK(mapped_after != mapped_before);
+
+    memset(host_dma, 0U, sizeof(host_dma));
     CHECK(cosmos_nvme_ftl_media_read(&media, &command) == COSMOS_OK);
     for (index = 0U; index < sizeof(host_dma); ++index) {
         CHECK(host_dma[index] == 0x5AU);
     }
+    CHECK(cosmos_ftl_refresh_page(
+        &ftl, 0U, mapped_before, &destination) == COSMOS_INVALID);
+    CHECK(cosmos_ftl_lookup(&ftl, 0U, &destination) == COSMOS_OK);
+    CHECK(destination == mapped_after);
+
+    forced_read_status = COSMOS_HW_ERROR;
+    CHECK(cosmos_ftl_refresh_page(
+        &ftl, 0U, mapped_after, &destination) == COSMOS_HW_ERROR);
+    forced_read_status = COSMOS_OK;
+    CHECK(cosmos_ftl_lookup(&ftl, 0U, &destination) == COSMOS_OK);
+    CHECK(destination == mapped_after);
+
+    CHECK(cosmos_ftl_nfc_backend_init(
+        &recovered_backend, &dma, &ops, 8U, COSMOS_FTL_BLOCK_COUNT,
+        256ULL) == COSMOS_OK);
+    CHECK(cosmos_ftl_nfc_backend_mount(&recovered_backend) == COSMOS_OK);
+    CHECK(cosmos_ftl_init(
+        &recovered_ftl, &recovered_backend.ftl, recovered_l2p, 8U,
+        recovered_blocks, COSMOS_FTL_BLOCK_COUNT) == COSMOS_OK);
+    CHECK(cosmos_ftl_recover(&recovered_ftl) == COSMOS_OK);
+    CHECK(cosmos_ftl_lookup(
+        &recovered_ftl, 0U, &recovered_ppa) == COSMOS_OK);
+    CHECK(recovered_ppa == mapped_after);
+    CHECK(cosmos_nvme_ftl_media_init(
+        &recovered_media, &recovered_ftl, dma.payload_address,
+        dma.spare_address, dma.completion_address, dma.status_report_address,
+        dma.error_info_address) == COSMOS_OK);
+    memset(host_dma, 0U, sizeof(host_dma));
+    CHECK(cosmos_nvme_ftl_media_read(
+        &recovered_media, &command) == COSMOS_OK);
+    for (index = 0U; index < sizeof(host_dma); ++index) {
+        CHECK(host_dma[index] == 0x5AU);
+    }
+    puts("cosmos NVMe ECC refresh relocation: PASS");
+#else
+    (void)mapped_after;
     puts("cosmos NVMe physical media composition: PASS");
+#endif
     return 0;
 }
 #endif
@@ -383,6 +451,7 @@ static int main_test(void) {
     unsigned int way;
     unsigned int row;
     unsigned int lpn;
+    unsigned int needs_refresh;
     unsigned int index;
     unsigned int byte;
     unsigned int previous_crc = 0U;
@@ -424,15 +493,17 @@ static int main_test(void) {
     CHECK(remounted.ftl.program_data(
         &remounted, source_ppa, 3U, 9ULL) == COSMOS_OK);
     CHECK(remounted.ftl.read_page_tag(
-        &remounted, source_ppa, &lpn, &generation) == COSMOS_OK);
-    CHECK(lpn == 3U && generation == 9ULL);
+        &remounted, source_ppa, &lpn, &generation,
+        &needs_refresh) == COSMOS_OK);
+    CHECK(lpn == 3U && generation == 9ULL && needs_refresh == 0U);
     CHECK(remounted.ftl.program_data(
         &remounted, source_ppa, 3U, 10ULL) != COSMOS_OK);
     CHECK(remounted.ftl.copy_data(
         &remounted, source_ppa, destination_ppa, 3U, 10ULL) == COSMOS_OK);
     CHECK(remounted.ftl.read_page_tag(
-        &remounted, destination_ppa, &lpn, &generation) == COSMOS_OK);
-    CHECK(lpn == 3U && generation == 10ULL);
+        &remounted, destination_ppa, &lpn, &generation,
+        &needs_refresh) == COSMOS_OK);
+    CHECK(lpn == 3U && generation == 10ULL && needs_refresh == 0U);
 
     CHECK(cosmos_ftl_ppa_row(
         source_ppa, &channel, &way, &row) == COSMOS_OK);
@@ -444,7 +515,8 @@ static int main_test(void) {
     }
     page->spare[0] ^= 1U;
     CHECK(remounted.ftl.read_page_tag(
-        &remounted, source_ppa, &lpn, &generation) == COSMOS_HW_ERROR);
+        &remounted, source_ppa, &lpn, &generation,
+        &needs_refresh) == COSMOS_HW_ERROR);
     page->spare[0] ^= 1U;
 
     for (index = 0U; index < 128U; ++index) {

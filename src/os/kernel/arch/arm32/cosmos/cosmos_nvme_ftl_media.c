@@ -127,7 +127,8 @@ static int media_page_row(unsigned int ppa, unsigned int *channel,
 }
 
 static int media_nfc_read(struct cosmos_nvme_ftl_media *media,
-                          unsigned int ppa) {
+                          unsigned int ppa,
+                          unsigned int *needs_refresh) {
     struct cosmos_nfc_io io;
     struct cosmos_nfc_ecc ecc;
     unsigned int attempt;
@@ -135,6 +136,9 @@ static int media_nfc_read(struct cosmos_nvme_ftl_media *media,
         ? COSMOS_NVME_FTL_MEDIA_DEFAULT_RETRIES : media->nfc_retry_limit;
     int status;
 
+    if (needs_refresh != 0) {
+        *needs_refresh = 0U;
+    }
     if (media_page_row(ppa, &io.channel, &io.way, &io.row_address) !=
             COSMOS_OK) {
         return COSMOS_HW_ERROR;
@@ -147,6 +151,9 @@ static int media_nfc_read(struct cosmos_nvme_ftl_media *media,
     for (attempt = 0U; attempt < limit; ++attempt) {
         status = COSMOS_NVME_FTL_MEDIA_NFC_READ(&io, &ecc);
         if (status != COSMOS_RETRY || attempt + 1U == limit) {
+            if (status == COSMOS_OK && needs_refresh != 0) {
+                *needs_refresh = ecc.needs_refresh != 0U ? 1U : 0U;
+            }
             return status;
         }
     }
@@ -154,7 +161,8 @@ static int media_nfc_read(struct cosmos_nvme_ftl_media *media,
 }
 
 static int media_read_mapped_page(struct cosmos_nvme_ftl_media *media,
-                                  unsigned int ppa, unsigned int lpn) {
+                                  unsigned int ppa, unsigned int lpn,
+                                  unsigned int *needs_refresh) {
     unsigned int actual_lpn;
     unsigned int attempt;
     unsigned int limit = media->nfc_retry_limit == 0U
@@ -162,12 +170,16 @@ static int media_read_mapped_page(struct cosmos_nvme_ftl_media *media,
     unsigned long long generation;
     int status;
 
+    if (needs_refresh != 0) {
+        *needs_refresh = 0U;
+    }
     if (media->ftl->backend.read_page_tag == 0) {
-        return media_nfc_read(media, ppa);
+        return media_nfc_read(media, ppa, needs_refresh);
     }
     for (attempt = 0U; attempt < limit; ++attempt) {
         status = media->ftl->backend.read_page_tag(
-            media->ftl->backend.context, ppa, &actual_lpn, &generation);
+            media->ftl->backend.context, ppa, &actual_lpn, &generation,
+            needs_refresh);
         if (status != COSMOS_RETRY || attempt + 1U == limit) {
             return status == COSMOS_OK && actual_lpn != lpn
                 ? COSMOS_HW_ERROR : status;
@@ -228,11 +240,15 @@ static int media_dma(struct cosmos_nvme_ftl_media *media,
 
 static int media_page_prepare(struct cosmos_nvme_ftl_media *media,
                               unsigned int lpn, unsigned int page_offset,
-                              unsigned int page_count, int write) {
+                              unsigned int page_count, int write,
+                              unsigned int *refresh_ppa) {
     unsigned int ppa;
     int status;
     int mapped = 0;
 
+    if (refresh_ppa != 0) {
+        *refresh_ppa = COSMOS_FTL_PPA_NONE;
+    }
     status = cosmos_ftl_lookup(media->ftl, lpn, &ppa);
     if (status == COSMOS_OK) {
         mapped = 1;
@@ -245,7 +261,15 @@ static int media_page_prepare(struct cosmos_nvme_ftl_media *media,
         return COSMOS_OK;
     }
     if (mapped) {
-        return media_read_mapped_page(media, ppa, lpn);
+        unsigned int needs_refresh;
+
+        status = media_read_mapped_page(
+            media, ppa, lpn, &needs_refresh);
+        if (status == COSMOS_OK && needs_refresh != 0U &&
+            refresh_ppa != 0) {
+            *refresh_ppa = ppa;
+        }
+        return status;
     }
     media_zero(media->data_address, COSMOS_NFC_PAGE_DATA_BYTES);
     media_zero(media->spare_address, COSMOS_NFC_PAGE_SPARE_BYTES);
@@ -301,13 +325,14 @@ static int media_rw(struct cosmos_nvme_ftl_media *media,
             COSMOS_NVME_FTL_MEDIA_PAGE_LBAS);
         unsigned int page_count = COSMOS_NVME_FTL_MEDIA_PAGE_LBAS -
             page_offset;
+        unsigned int refresh_ppa = COSMOS_FTL_PPA_NONE;
         unsigned int index;
 
         if (page_count > remaining) {
             page_count = remaining;
         }
         status = media_page_prepare(media, lpn, page_offset, page_count,
-                                    write);
+                                    write, write ? 0 : &refresh_ppa);
         if (status != COSMOS_OK) {
             break;
         }
@@ -318,6 +343,13 @@ static int media_rw(struct cosmos_nvme_ftl_media *media,
                 if (status != COSMOS_OK) {
                     break;
                 }
+            }
+            if (status == COSMOS_OK &&
+                refresh_ppa != COSMOS_FTL_PPA_NONE) {
+                unsigned int destination;
+
+                status = cosmos_ftl_refresh_page(
+                    media->ftl, lpn, refresh_ppa, &destination);
             }
         } else {
             for (index = 0U; index < page_count; ++index) {
@@ -389,7 +421,7 @@ static int media_zeroes(struct cosmos_nvme_ftl_media *media,
             status = cosmos_ftl_discard_page(media->ftl, lpn);
         } else {
             status = media_page_prepare(media, lpn, page_offset, page_count,
-                                        1);
+                                        1, 0);
             if (status == COSMOS_OK) {
                 for (index = 0U; index < page_count; ++index) {
                     media_zero(media->data_address +
@@ -549,7 +581,7 @@ int cosmos_nvme_ftl_media_deallocate(
                     status = cosmos_ftl_discard_page(media->ftl, lpn);
                 } else {
                     status = media_page_prepare(media, lpn, page_offset,
-                                                page_count, 1);
+                                                page_count, 1, 0);
                     if (status == COSMOS_OK) {
                         unsigned int lane;
                         for (lane = 0U; lane < page_count; ++lane) {
@@ -593,7 +625,7 @@ int cosmos_nvme_ftl_media_copy_data(
     if (status != COSMOS_OK) {
         return status;
     }
-    status = media_nfc_read(media, source_ppa);
+    status = media_nfc_read(media, source_ppa, 0);
     if (status == COSMOS_OK) {
         cosmos_data_sync_barrier();
         status = media_nfc_program(media, destination_ppa);

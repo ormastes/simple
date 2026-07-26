@@ -116,7 +116,8 @@ struct cosmos_ftl_backend {
                      unsigned long long generation);
     int (*read_page_tag)(void *context, unsigned int ppa,
                          unsigned int *lpn,
-                         unsigned long long *generation);
+                         unsigned long long *generation,
+                         unsigned int *needs_refresh);
     int (*erase_block)(void *context, unsigned int block_index);
     enum cosmos_ftl_append_result (*append_journal)(
         void *context, unsigned long long index,
@@ -185,6 +186,8 @@ int cosmos_ftl_lookup(const struct cosmos_ftl *ftl, unsigned int lpn,
                       unsigned int *ppa);
 int cosmos_ftl_commit_page(struct cosmos_ftl *ftl, unsigned int lpn,
                            unsigned int *ppa);
+int cosmos_ftl_refresh_page(struct cosmos_ftl *ftl, unsigned int lpn,
+                            unsigned int source_ppa, unsigned int *ppa);
 int cosmos_ftl_discard_page(struct cosmos_ftl *ftl, unsigned int lpn);
 int cosmos_ftl_retire_block(struct cosmos_ftl *ftl, unsigned int ppa);
 int cosmos_ftl_gc_step(struct cosmos_ftl *ftl, unsigned int max_moves);

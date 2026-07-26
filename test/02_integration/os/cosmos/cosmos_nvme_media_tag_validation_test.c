@@ -43,11 +43,13 @@ int cosmos_test_tag_nfc_program(const struct cosmos_nfc_io *io) {
 
 static int mismatched_tag(void *context, unsigned int ppa,
                           unsigned int *lpn,
-                          unsigned long long *generation) {
+                          unsigned long long *generation,
+                          unsigned int *needs_refresh) {
     (void)context;
     (void)ppa;
     *lpn = 1U;
     *generation = 1ULL;
+    *needs_refresh = 0U;
     return COSMOS_OK;
 }
 

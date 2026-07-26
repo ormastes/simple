@@ -48,7 +48,8 @@ static struct mock_media media;
 
 static int read_page_tag(void *context, unsigned int ppa,
                          unsigned int *lpn,
-                         unsigned long long *generation);
+                         unsigned long long *generation,
+                         unsigned int *needs_refresh);
 
 static int program_data(void *context, unsigned int ppa, unsigned int lpn,
                         unsigned long long generation) {
@@ -70,14 +71,17 @@ static int copy_data(void *context, unsigned int source_ppa,
                      unsigned long long generation) {
     struct mock_media *mock = context;
     unsigned int source_lpn;
+    unsigned int needs_refresh;
     unsigned long long source_generation;
 
     if (read_page_tag(
-            context, source_ppa, &source_lpn, &source_generation) !=
+            context, source_ppa, &source_lpn, &source_generation,
+            &needs_refresh) !=
             COSMOS_OK ||
         source_lpn != lpn) {
         return COSMOS_HW_ERROR;
     }
+    (void)needs_refresh;
     (void)source_generation;
     return program_data(
         mock, destination_ppa, lpn, generation);
@@ -85,7 +89,8 @@ static int copy_data(void *context, unsigned int source_ppa,
 
 static int read_page_tag(void *context, unsigned int ppa,
                          unsigned int *lpn,
-                         unsigned long long *generation) {
+                         unsigned long long *generation,
+                         unsigned int *needs_refresh) {
     struct mock_media *mock = context;
     unsigned int index;
 
@@ -94,6 +99,7 @@ static int read_page_tag(void *context, unsigned int ppa,
             mock->page[index].ppa == ppa) {
             *lpn = mock->page[index].lpn;
             *generation = mock->page[index].generation;
+            *needs_refresh = 0U;
             return COSMOS_OK;
         }
     }

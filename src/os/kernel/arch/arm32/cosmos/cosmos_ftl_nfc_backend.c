@@ -251,7 +251,8 @@ static int header_payload_valid(const unsigned char *page,
 
 static int read_page_state(struct cosmos_ftl_nfc_backend *backend,
                            unsigned int ppa, unsigned int spare_header,
-                           struct media_header *header) {
+                           struct media_header *header,
+                           unsigned int *needs_refresh) {
     struct cosmos_nfc_io io;
     struct cosmos_nfc_ecc ecc;
     unsigned char *data;
@@ -260,6 +261,9 @@ static int read_page_state(struct cosmos_ftl_nfc_backend *backend,
     unsigned int index;
     int all_ff = 1;
 
+    if (needs_refresh != 0) {
+        *needs_refresh = 0U;
+    }
     if ((spare_header != 0U
             ? data_ppa_io(backend, ppa, &io)
             : ppa_io(backend, ppa, &io)) != COSMOS_OK) {
@@ -277,6 +281,9 @@ static int read_page_state(struct cosmos_ftl_nfc_backend *backend,
     }
     if (status != COSMOS_OK) {
         return METADATA_PAGE_IO_ERROR;
+    }
+    if (needs_refresh != 0) {
+        *needs_refresh = ecc.needs_refresh != 0U ? 1U : 0U;
     }
     for (index = 0U; index < COSMOS_NFC_PAGE_DATA_BYTES; ++index) {
         if (data[index] != 0xFFU) {
@@ -357,7 +364,7 @@ static int read_metadata_page(struct cosmos_ftl_nfc_backend *backend,
     if (metadata_ppa(page, &ppa) != COSMOS_OK) {
         return COSMOS_INVALID;
     }
-    return read_page_state(backend, ppa, 0U, header);
+    return read_page_state(backend, ppa, 0U, header, 0);
 }
 
 static unsigned int checkpoint_total_bytes(
@@ -559,7 +566,7 @@ static int read_superblock(struct cosmos_ftl_nfc_backend *backend) {
     if (metadata_ppa(0U, &ppa) != COSMOS_OK) {
         return COSMOS_INVALID;
     }
-    state = read_page_state(backend, ppa, 0U, &header);
+    state = read_page_state(backend, ppa, 0U, &header, 0);
     if (state == METADATA_PAGE_RETRY) {
         return COSMOS_RETRY;
     }
@@ -886,7 +893,7 @@ static int ftl_write_checkpoint(
 static int data_page_blank(struct cosmos_ftl_nfc_backend *backend,
                            unsigned int ppa) {
     struct media_header header;
-    int state = read_page_state(backend, ppa, 1U, &header);
+    int state = read_page_state(backend, ppa, 1U, &header, 0);
 
     return state == METADATA_PAGE_BLANK ? COSMOS_OK : COSMOS_INVALID;
 }
@@ -908,14 +915,16 @@ static int ftl_program_data(void *context, unsigned int ppa,
 
 static int read_data_page(struct cosmos_ftl_nfc_backend *backend,
                           unsigned int ppa, unsigned int *lpn,
-                          unsigned long long *generation) {
+                          unsigned long long *generation,
+                          unsigned int *needs_refresh) {
     struct media_header header;
     int state;
 
     if (lpn == 0 || generation == 0) {
         return COSMOS_INVALID;
     }
-    state = read_page_state(backend, ppa, 1U, &header);
+    state = read_page_state(
+        backend, ppa, 1U, &header, needs_refresh);
     if (state == METADATA_PAGE_RETRY) {
         return COSMOS_RETRY;
     }
@@ -934,19 +943,22 @@ static int read_data_page(struct cosmos_ftl_nfc_backend *backend,
 
 static int ftl_read_page_tag(void *context, unsigned int ppa,
                              unsigned int *lpn,
-                             unsigned long long *generation) {
+                             unsigned long long *generation,
+                             unsigned int *needs_refresh) {
     struct cosmos_ftl_nfc_backend *backend = context;
 
     if (require_mounted(backend) != COSMOS_OK) {
         return COSMOS_UNAVAILABLE;
     }
-    return read_data_page(backend, ppa, lpn, generation);
+    return read_data_page(
+        backend, ppa, lpn, generation, needs_refresh);
 }
 
 static int ftl_copy_data(void *context, unsigned int source_ppa,
                          unsigned int destination_ppa, unsigned int lpn,
                          unsigned long long generation) {
     struct cosmos_ftl_nfc_backend *backend = context;
+    unsigned int needs_refresh;
     unsigned int source_lpn;
     unsigned long long source_generation;
     int status;
@@ -960,10 +972,12 @@ static int ftl_copy_data(void *context, unsigned int source_ppa,
         return status;
     }
     status = read_data_page(
-        backend, source_ppa, &source_lpn, &source_generation);
+        backend, source_ppa, &source_lpn, &source_generation,
+        &needs_refresh);
     if (status != COSMOS_OK || source_lpn != lpn) {
         return status == COSMOS_OK ? COSMOS_HW_ERROR : status;
     }
+    (void)needs_refresh;
     (void)source_generation;
     return write_page(backend, destination_ppa,
                       COSMOS_FTL_NFC_PAGE_DATA_TAG, lpn, generation,
@@ -1021,7 +1035,7 @@ static enum cosmos_ftl_append_result ftl_append_journal(
         return COSMOS_FTL_APPEND_HARD_FAILED;
     }
     page_state = read_page_state(
-        backend, ppa, 0U, &(struct media_header){0});
+        backend, ppa, 0U, &(struct media_header){0}, 0);
     if (page_state != METADATA_PAGE_BLANK) {
         if (page_state == METADATA_PAGE_RETRY) {
             return COSMOS_FTL_APPEND_NOT_COMMITTED;
@@ -1062,7 +1076,7 @@ static int ftl_read_journal(
         journal_page_ppa(backend, index, &ppa) != COSMOS_OK) {
         return COSMOS_UNAVAILABLE;
     }
-    state = read_page_state(backend, ppa, 0U, &header);
+    state = read_page_state(backend, ppa, 0U, &header, 0);
     if (state == METADATA_PAGE_RETRY) {
         return COSMOS_RETRY;
     }

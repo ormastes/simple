@@ -220,12 +220,18 @@ tags data pages, and preserves program-once semantics. The media adapter maps
 discard, FUA, and LR behavior. `cosmos_storage` mounts and recovers the FTL,
 binds IO/admin/dispatch services, and runs foreground polling only after NFC
 and PCIe are ready. QEMU returns `UNAVAILABLE`; silicon never auto-formats
-missing metadata. ECC refresh and physical queue behavior remain H2 work. PCIe
+missing metadata. Corrected-ECC reads preserve the delivered host data and then
+relocate the page through the existing append-before-map transaction, provided
+the source PPA is still current. Relocation failure leaves the old mapping
+authoritative and fails the command before completion. Physical ECC margin and
+queue behavior remain H2 work. PCIe
 IRQ 61 is level-high configuration/link/error handling, not command arrival.
 W^X is implemented with firmware small pages. H1 proves the vector/handler
 contract; physical-board abort behavior remains H2.
-Final SSpec/doc generation is blocked by the Stage-4 bootstrap termination at
-about 64 GiB RSS, and real Bootgen/board evidence are pending.
+Focused host/ARM ECC relocation, destination reread, stale-source rejection,
+failure preservation, remount/replay, and relocatable-link checks pass. Final
+SSpec/doc generation is blocked by the Stage-4 bootstrap termination at about
+64 GiB RSS, and real Bootgen/board evidence are pending.
 
 ## Error and Evidence Rules
 

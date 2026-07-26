@@ -10,7 +10,7 @@ to the upstream 8-channel/8-way v3.0.0 PL contract at commit
 Production requires all host and board gates below. Current production status
 is **BLOCKED/FAIL**: the persistent NFC backend, media adapter, and UART
 foreground dispatcher are implemented and ARM-compiled, but fresh SSpec/docgen,
-ECC refresh evidence, Bootgen, and all board evidence remain pending.
+Bootgen, and all board evidence remain pending.
 
 ## Safety
 
@@ -267,23 +267,23 @@ zero-write-only completion retry, non-retryable post-start completion, and PRP
 edges. The FTL path now covers explicit persistent wire formats, dual
 checkpoints, journal reclamation, tagged NAND data, bounded relocation, and
 foreground UART dispatch. These objects compile for both profiles. ECC refresh
-and physical persistence behavior still require board evidence. MMU W^X small pages passed
+relocation has focused host/ARM evidence; physical correction margin and
+persistence behavior still require board evidence. MMU W^X small pages passed
 host/SMP contracts and QEMU plus silicon builds. Real Bootgen is unavailable.
-Do not represent these host/ARM results as persistence or board proof.
+Do not represent these host/ARM results as physical persistence or board proof.
 
 ## Current Software Gate
 
 Do not execute the fourteen-scenario SSpec with a stale binary. The source/manual
 now describe the current runners, but final execution and generated-manual
-evidence are blocked until a fresh pure-Simple bootstrap deploys
-`bin/release/simple`. The final Stage-4 bootstrap attempt already consumed the
-third/final allowed cycle and was signal-15 terminated at about 64 GiB RSS.
+evidence are blocked until a current pure-Simple `bin/release/simple` is
+available. The prior Stage-4 bootstrap attempt consumed the third/final allowed
+cycle and was signal-15 terminated at about 64 GiB RSS.
 
 Before production can move from **BLOCKED/FAIL**, complete:
 
-1. ECC refresh verification and physical durability/recovery evidence.
-2. One current pure-Simple SSpec run/docgen when a current runner is available.
-3. Installed Bootgen package evidence and the retained BT-001..BT-006 board
+1. One current pure-Simple SSpec run/docgen when a current runner is available.
+2. Installed Bootgen package evidence and the retained BT-001..BT-006 board
    campaign. REQ-012 and NFR-011 remain board-only.
 
 ## Build the Board Package
@@ -536,7 +536,7 @@ ID | PASS/FAIL/PENDING | command/procedure | raw evidence path | reviewer
 
 Production PASS requires, after the current software blockers are resolved:
 
-- ST-001..ST-016 and BT-001..BT-006 all PASS;
+- ST-001..ST-019 and BT-001..BT-006 all PASS;
 - exact source/FSBL/bitstream/firmware/boot hashes;
 - immutable profile binding and reserved DMA proof;
 - no abort, timeout, unknown status, FAIL marker, silent data mismatch, stale
@@ -546,5 +546,5 @@ Production PASS requires, after the current software blockers are resolved:
 Current report:
 
 > Cosmos+ software integration is present, but production is BLOCKED/FAIL
-> pending fresh pure-Simple SSpec/docgen, ECC refresh evidence, real Bootgen,
+> pending fresh pure-Simple SSpec/docgen, real Bootgen,
 > and retained board evidence.

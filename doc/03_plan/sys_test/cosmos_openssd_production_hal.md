@@ -25,12 +25,13 @@
 | ST-010 | Bounded QEMU injections execute the production prefetch/data-abort vectors and verify kind, syndrome, fault address, PC, and terminal non-resumption. | H1 executed |
 | ST-011 | Packager accepts explicit valid fixtures and rejects missing/empty/aliased input, non-ELF, wrong endian/machine/type, zero entry, no `PT_LOAD`, QEMU identity, absent silicon identity, unsynchronized bitstream, malformed/truncated/empty Bootgen output, and unparseable partition metadata. Manifest hashes must match. | H1 executed |
 | ST-012 | Profile note, contract-token, receipt, and package checks bind the approved source/bitstream identity; real approved-bitstream/Bootgen provenance remains external evidence. | H1 partial |
-| ST-013 | NVMe IO callback core executes empty/success/invalid/media-failure/budget/retry paths, preserves queue/slot/sequence/CID, validates SCT/SC/DNR and contiguous DMA spans, and compiles for ARM; physical media is not bound. | H1 executed |
-| ST-014 | PCIe bridge runner decodes DW0/DW1/DW6..DW12, validates contiguous PRP edges, preserves identity, retries only before any completion write, and treats post-start failure as non-retryable; required media callbacks are mocked. | H1 corrected host/ARM PASS |
+| ST-013 | NVMe IO callback core executes empty/success/invalid/media-failure/budget/retry paths, preserves queue/slot/sequence/CID, validates SCT/SC/DNR and controller AUTO-DMA spans, and compiles for ARM. | H1 executed |
+| ST-014 | PCIe bridge runner decodes DW0/DW1/DW6..DW12, validates direct PRP2 and controller-managed PRP-list edges, preserves identity, retries only before any completion write, and treats post-start failure as non-retryable. | H1 corrected host/ARM PASS |
 | ST-015 | NVMe admin runner covers bounded Identify/SMART, queue lifecycle, Number-of-Queues NSID/max, Abort result bits, CQ IEN/IV, SQ QPRIO, SMART NSID/RAE, AER, publication retry/latching, and unsupported format/firmware rejection. | H1 corrected host/ARM PASS |
-| ST-016 | FTL runners check PPA geometry, append-before-map ordering, dual checkpoints, replay validation, torn tails, retirement guards, 10% capacity reserve, bounded relocation, erase-after-move, and host/ARM compilation. Physical persistence and journal compaction remain pending. | H1 metadata/GC core PASS |
+| ST-016 | FTL/NFC runners check PPA geometry, append-before-map ordering, dual checkpoints, replay validation, torn tails, retirement, reserve/GC, explicit media formats, journal reclamation, DMA isolation, tag validation, startup binding, and host/ARM composition. | H1 PASS |
 | ST-017 | Dispatcher runner proves one destructive FIFO fetch per entry, queue-zero admin routing, nonzero IO routing, reserved-field rejection, and completion retry/terminal blocking. | H1 host/ARM PASS before final compile-only cleanup |
-| ST-018 | Strict bootstrap produces/deploys the current pure-Simple runner, then executes the thirteen-scenario SSpec and generated manual. | **Blocked:** Stage 3 passed; third/final Stage 4 reached about 64 GiB RSS and signal-15 terminated. |
+| ST-018 | A current pure-Simple runner executes the fourteen-scenario SSpec and generates its manual. | **Blocked:** no current runner; prior Stage 4 reached about 64 GiB RSS and signal-15 terminated. |
+| ST-019 | Focused host composition injects corrected ECC, returns intact data, relocates and rereads the page, rejects a stale PPA, preserves L2P on injected copy failure, remounts/replays the destination, and passes strict ARM compile plus relocatable link. | H1 PASS |
 
 The host MMIO, ARM abort, and SMP/cache runners are executable H1 evidence. Static source
 guards and synthetic package fixtures remain supplementary; they do not replace
@@ -48,6 +49,11 @@ sh test/02_integration/os/cosmos/run_cosmos_pcie_contract_test.shs
 sh test/02_integration/os/cosmos/run_cosmos_nvme_firmware_contract_test.shs
 sh test/02_integration/os/cosmos/run_cosmos_nvme_pcie_adapter_contract_test.shs
 sh test/02_integration/os/cosmos/run_cosmos_nvme_admin_contract_test.shs
+sh test/02_integration/os/cosmos/run_cosmos_ftl_nfc_backend_test.shs
+sh test/02_integration/os/cosmos/run_cosmos_nvme_ftl_physical_composition_test.shs
+sh test/02_integration/os/cosmos/run_cosmos_nvme_ecc_refresh_test.shs
+sh test/02_integration/os/cosmos/run_cosmos_ecc_refresh_build_contract_test.shs
+sh test/02_integration/os/cosmos/run_cosmos_storage_link_contract_test.shs
 sh test/02_integration/os/cosmos/run_cosmos_smp_cache_contract_test.shs
 readelf -hW build/os/simpleos_cosmos_openssd_silicon.elf
 test -z "$(nm -u build/os/simpleos_cosmos_openssd_silicon.elf)"
@@ -57,10 +63,9 @@ bin/release/simple test \
   --mode=interpreter
 ```
 
-`bin/release/simple` must be rebuilt/deployed from the current tree before the
-SSpec is run. A stale binary with the obsolete `rt_env_set` ABI is not evidence.
-The NVMe runner is host/ARM callback-service evidence with mock adapters. Real
-PCIe/NFC adapter binding, physical NVMe IO, and board acceptance remain pending.
+`bin/release/simple` must be current before the SSpec is run. A stale binary
+with the obsolete `rt_env_set` ABI is not evidence. Host/ARM composition proves
+software binding only; physical NVMe IO and board acceptance remain pending.
 
 ## Board Scenarios
 
@@ -82,20 +87,20 @@ Detailed execution and evidence retention are in
 |---|---|---|
 | REQ-001 | ST-002, ST-003, ST-012 | BT-001 |
 | REQ-002 | ST-005 | BT-002 |
-| REQ-003 | ST-005 | BT-002, BT-003 |
-| REQ-004 | ST-006, ST-014, ST-015 | BT-004 |
+| REQ-003 | ST-005, ST-016, ST-019 | BT-002, BT-003 |
+| REQ-004 | ST-006, ST-013..ST-017 | BT-004 |
 | REQ-005 | ST-001, ST-004 | BT-001 |
 | REQ-006 | ST-008 | BT-005 |
 | REQ-007 | ST-009 | BT-005 |
 | REQ-008 | ST-007, ST-010 | BT-001 |
 | REQ-009 | ST-002, ST-003, ST-010 | BT-001 |
 | REQ-010 | ST-011, ST-012 | BT-001 |
-| REQ-011 | ST-001..ST-018 | N/A |
+| REQ-011 | ST-001..ST-019 | N/A |
 | REQ-012 | N/A | BT-001..BT-006 |
-| NFR-001 | ST-005..ST-018 | BT-002, BT-004, BT-005 |
+| NFR-001 | ST-005..ST-019 | BT-002, BT-004, BT-005 |
 | NFR-002 | ST-002, ST-003, ST-007, ST-012 | BT-001 |
 | NFR-003 | ST-010 | BT-001 |
-| NFR-004 | ST-005, ST-006, ST-013, ST-014 | BT-002..BT-004 |
+| NFR-004 | ST-005, ST-006, ST-013, ST-014, ST-016, ST-019 | BT-002..BT-004 |
 | NFR-005 | ST-008, ST-009 | BT-005 |
 | NFR-006 | ST-001, ST-004 | BT-001 |
 | NFR-007 | ST-001, ST-011, ST-012 | BT-001 |
@@ -103,17 +108,14 @@ Detailed execution and evidence retention are in
 | NFR-009 | ST-002, ST-003 | BT-001 |
 | NFR-010 | This matrix, ST-018 after execution | BT-001..BT-006 |
 | NFR-011 | N/A | BT-003, BT-006 |
-| NFR-012 | ST-001..ST-018 | BT-001..BT-006 |
+| NFR-012 | ST-001..ST-019 | BT-001..BT-006 |
 
 ## Current Evidence, 2026-07-26
 
-`ST-001` through `ST-011` package self-test, and `ST-013` through
-`ST-015` have scoped host/build evidence, including corrected bridge/admin
-runner PASS. External provenance in `ST-012` remains partial. `ST-018` is
-blocked: no current pure-Simple runner
-exists after the Stage-4 64 GiB/signal-15 bootstrap termination, so final SSpec
-and doc generation were not run. Installed Bootgen and all `BT-*` evidence are
-pending. Production is **BLOCKED/FAIL**; REQ-012/NFR-011 remain excluded from
-passing executable `@req` declarations. Physical FTL/NFC integration,
-UART service startup, current Stage-4 SSpec/docgen, real Bootgen, and
-board proof remain required.
+Scoped H0/H1 runners pass through persistent FTL/NFC composition, UART startup,
+dispatcher routing, ECC refresh relocation, and strict ARM linkage. External
+provenance in `ST-012` remains partial. `ST-018` is blocked because no current
+pure-Simple runner exists after the prior Stage-4 64 GiB/signal-15 termination,
+so final SSpec execution and doc generation were not run. Installed Bootgen and
+all `BT-*` evidence are pending. Production is **BLOCKED/FAIL**;
+REQ-012/NFR-011 remain excluded from passing executable `@req` declarations.
