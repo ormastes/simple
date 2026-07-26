@@ -253,6 +253,32 @@ shaping. The identity subset is the 54-native/1-fallback evidence above; exact
 Hindi and the exact pinned Arabic/Urdu lookup-vector cases are separately
 bounded to their proven witnesses.
 
+### Pinned-corpus GSUB/GPOS completion
+
+Selected-corpus completion is planned and remains NO-GO; do not infer it from
+the accepted compatibility witnesses. Follow the reviewed
+[completion plan](../../03_plan/lib/shared_multilingual_gpu_fonts_gsub_gpos_completion_2026-07-25.md).
+Before application changes, pin a per-face SDN inventory for Noto Sans/Serif
+SC, Devanagari, and Arabic/Naskh. It must contain explicit valid-empty Latin,
+Han, and Cyrillic GSUB/GPOS rows plus every active ordered lookup index, type,
+format, flag, and MarkFilteringSet for Hindi and Arabic/Urdu.
+
+The generic path keeps feature-to-lookup activation masks. Existing
+Arabic/Indic code contributes only logical joining/reordering and per-record
+feature eligibility; it must not directly substitute, position, or promote
+completion. Validate the complete GSUB and GPOS plans before mutation, apply
+GSUB, recompute font-unit advances, apply GPOS, then scale and convert Y once.
+Nested contextual lookups inherit the invoking mask and may touch only the
+matched eligible target. Any unsupported active operation, malformed table,
+work-budget exhaustion, or late failure retains the original records and keeps
+the corresponding completion flag false.
+
+Keep `step("Shape selected Unicode scripts with the pinned face")`,
+`setup_selected_shaping_face`, and `expect_selected_unicode_shaping` unchanged.
+Acceptance requires exact generic parity with the pinned Arabic/Devanagari
+oracles, a handle-free Draw IR SDN round-trip, and positioned material through
+the canonical `FontRenderer`.
+
 REQ-009 source cases are complete: selected checksum/default-axis identity now fences the
 glyph cache, atlas, and resolved-metrics cache; stats expose that identity, and
 generation-bound wrappers over the process-global face are revocable so stale
@@ -754,9 +780,12 @@ Keep the remaining work on the frozen public seams:
 1. `FontRenderer` prepares metrics, shaped runs, and `FontRenderBatch`.
 2. Web/GUI/WM producers emit semantic `DrawIrComposition`; Engine2D alone
    materializes vector glyphs and retains bitmap fallback.
-3. Selected Latin, Han, exact Hindi, exact Arabic/Urdu, and Cyrillic fixtures must
-   prove face, glyph, cluster, advance, offset, direction, language, and script
-   identity before a matrix cell is accepted.
+3. The six Noto faces in the selected GSUB/GPOS witness set must match the
+   pinned per-face active-plan inventory and prove face, glyph, cluster,
+   advance, offset, direction, language, and script identity before a
+   complex-script shaping row is accepted. No-feature identity cells for mono,
+   display, rounded, handwriting, slab, blackletter, pixel, and emoji remain
+   governed by their existing exact-face corpus gates.
 4. Engine3D HUD/world promotion requires texture, sampler, pipeline, draw,
    completed fence, depth/transform behavior, and device-origin readback.
 5. SimpleOS proof names the packaged candidate/hash and checks literal guest
@@ -803,7 +832,7 @@ native device-loss injection remains the NFR-007 execution gate.
 
 Keep the five primary SSpec steps exact: `Load the pinned multilingual
 font manifest`; `Accept exact-face-bound simple-script shaping`; `Prepare one
-shared font batch for 2D`; `Emit the selected font composite program and
+shared font batch for 2D and 3D`; `Emit the selected font composite program and
 plan compilation`; `Prove native submission and device readback`. Resolved-host,
 completion, and folded secondary detail steps use the vocabulary recorded in
 the authoritative system-test plan below.
@@ -828,12 +857,16 @@ substitute for submission, SimpleOS pixel, Engine3D, or performance gates.
 
 A focused runner is trustworthy only when it receives the admitted pure-Simple
 compiler path and SHA-256, core-C runtime directory and archive SHA-256, and the
-spec path. `font_evidence_runner.spl` atomically creates a compiler-safe native
+spec path. `font_evidence_runner.spl` uses
+`preprocess_spipe_native_result_file`, atomically creates a compiler-safe native
 wrapper, verifies its hash and the provider identities before and after build,
-and admits one exact summary/completion marker. The fail fixture must exit 1
-with the exact `error: test-runner: spec failed` suffix; the empty fixture must
-exit 1 with `test-runner: no examples executed` and no completion marker.
-Reject 2/124/132/139 and retain exact commands, runner SHA-256, and logs under
+and admits one exact native summary/completion marker. Separately, calibrate
+direct interpreter runs with `--mode=interpreter --no-session-daemon --sequential --no-db
+--no-cache --assert-ran --fail-fast`. The deliberate-red fixture must exit 1
+with `Results: 1 total, 0 passed, 1 failed` and `FAIL`; the empty fixture must
+exit 1 with `--assert-ran: no BDD examples executed` and no completion marker.
+Reject 2/124/132/139 and retain exact commands, admitted binary SHA-256, and
+logs under
 `build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/`.
 Calibration alone may be labeled only `native-runner-calibration`; it cannot
 promote manifest, native GPU, SimpleOS pixel, Engine3D, or performance evidence.
@@ -843,9 +876,8 @@ ordinary missing-fixture failure with a nil-field SIGILL, which is never valid
 test evidence.
 Use the pass/fail/empty calibration fixtures under
 `scripts/check/fixtures/font_evidence_runner_{pass,fail,empty}_spec.spl`.
-The focused runner uses
-`std.test_runner.test_result_wrapper.preprocess_spipe_native_result_file`; do
-not fork another harness or bypass its summary and fail-closed checks. It has no
+Do not fork either harness or bypass its summary and fail-closed checks. The
+native path has no
 implicit compiler/runtime fallback, preserves child stdout/stderr, maps timeout
 to 124, and reports launch/build failure as nonzero.
 
