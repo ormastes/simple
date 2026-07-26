@@ -1,6 +1,83 @@
 # macOS Vulkan/Metal and SimpleOS QEMU Rendering Completion
 
-Updated: 2026-07-25
+Updated: 2026-07-27
+
+## 2026-07-27 Authoritative Status and Remaining Work
+
+This checkpoint supersedes stale status wording in the historical notes below.
+The overall goal remains **FAIL / INCOMPLETE**. No current-revision,
+manifest-bound Vulkan 2D live PASS exists, so no downstream lane may be marked
+complete from source review, retained diagnostics, CPU mirrors, or unretained
+peer reports.
+
+### Verified current state
+
+- GitHub `main` contains three focused, semantics-preserving parser repairs in
+  `draw_ir_adv.spl`: grouped multiline gradient comparison, intact material
+  count assignment, and intact result count assignment. Each repair advanced
+  the focused current-source font producer to the next parse site.
+- The third and final focused producer attempt stopped at a fourth split
+  assignment near line 1064 (`result.cpu_composited_material_count`). Therefore
+  the current-source font producer has **not compiled**, no runtime probe ran,
+  and no Vulkan render/readback/font/300-DPI evidence was produced.
+- A retained pure-Simple Stage3 artifact can diagnose source, but its provenance
+  is bound to an older revision. It cannot authenticate the current `main`.
+  A canonical bootstrap may be run later only if essential or required by the
+  production builder, and only after the focused current-source producer
+  passes.
+- Ordered committed-text ownership changes are on `main`. Exact key/text
+  correlation is still incomplete because the exposed input record does not
+  yet bind committed text to the precise keycode/pressed event.
+- QEMU SimpleOS/WM PASS claims remain unsupported: no retained canonical live
+  receipt proves guest framebuffer, input, SIMD, ARM, and artifact identity.
+  Treat the affected matrix cell and the goal as FAIL until such evidence is
+  generated and retained.
+- Vulkan web/GUI/host-WM, all Metal parity work, and x86/ARM QEMU acceptance
+  remain pending behind the Vulkan 2D gate.
+
+### Ordered remaining tasks
+
+1. In a fresh session, repair the fourth split assignment in
+   `draw_ir_adv.spl`; run the focused current-source font producer once and
+   require a clean compile before any bootstrap or live launch.
+2. After that focused PASS, produce one canonical, manifest-attested
+   pure-Simple Stage3 only if required by the production builder. Do not use
+   the Rust seed as normal tooling and do not synthesize or reuse stale
+   provenance.
+3. Build and run the manifest-bound Vulkan 2D gate. Require MoltenVK identity,
+   positive backend/device handles, same-frame device readback, semantic
+   pixels, durable capture, canonical `FontRenderer` vector text at 300 DPI,
+   cold/warm font-cache receipts, and ordered focus/pointer/key/text events.
+4. Close exact key/text correlation in the shared winit event record and prove
+   ordered delivery without a synthetic shortcut.
+5. Run Vulkan web, then Vulkan widget GUI, then host-WM live gates. Each must
+   preserve Draw IR ownership, use real device output, and retain capture and
+   event receipts; GUI must repeat the vector-font proof at 300 DPI.
+6. Only after all Vulkan host lanes pass, run like-for-like Metal
+   2D/web/GUI/host-WM gates and require pixel/event/font parity without a CPU
+   mirror.
+7. Only after host-WM passes, run x86 QEMU SimpleOS 2D/SIMD, ARM QEMU
+   SimpleOS 2D/SIMD, and QEMU WM. Retain canonical artifact hashes, guest
+   framebuffer dimensions/bounds, input receipts, runtime SIMD receipts, and
+   captures. Correct any unsupported PASS documentation before acceptance.
+8. Run the scoped verification/audit gates once, obtain `STATUS: PASS`, then
+   linearly sync and push the isolated verified changes.
+
+### Agent lanes and acceptance ownership
+
+| Lane | Sidecar task | Merge owner | Final reviewer |
+|---|---|---|---|
+| Focused Draw IR/font producer | Repair the fourth parse blocker and report one bounded compile result | Primary rendering agent | Highest-capability primary reviewer |
+| Vulkan 2D + ordered events | Produce manifest-bound live render/readback/font/event evidence | Primary rendering agent | Highest-capability primary reviewer |
+| Vulkan web/GUI/host-WM | Run sequentially after Vulkan 2D PASS; parallel source-only preparation is allowed | Primary rendering agent | Highest-capability primary reviewer |
+| Metal parity | Prepare source/contracts only until Vulkan host PASS, then run parity gates | Existing local comparison agent; primary integrates only committed isolated work | Highest-capability primary reviewer |
+| x86/ARM QEMU + WM | Audit contracts/evidence in parallel; live acceptance follows host-WM PASS | Primary rendering agent | Highest-capability primary reviewer |
+| Documentation/evidence audit | Remove unsupported PASS claims and bind reports to retained artifacts | Primary rendering agent | Highest-capability primary reviewer |
+
+Parallel agents may prepare independent source/contracts and audit retained
+evidence, but the live acceptance order is strict: Vulkan 2D → Vulkan web →
+Vulkan GUI → host WM → Metal parity → QEMU. Merge only isolated, reviewed
+commits; never absorb another agent's unrelated dirty files.
 
 ## 2026-07-25 Live iteration notes
 
