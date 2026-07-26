@@ -2,46 +2,75 @@
 # @req REQ-020 REQ-021
 # @evidence-display: links
 """
-# x86 Engine2D SIMD Execution
+# Native Engine2D SIMD execution
 
-Requires the production facade to execute real SSE2 or AVX2 rendering chunks,
-not wrapper calls or scalar aliases, and compares the result exactly with an
-independently executed scalar oracle.
+Requires the production CPU-SIMD facade to execute native fill, copy, and
+alpha provider rows, then compares its complete framebuffer bit-for-bit with
+an independently rendered scalar oracle. The host may use SSE/AVX, NEON, or
+RVV; the provider operations must execute before this spec can pass.
 """
 
 use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend_cpu.{CpuBackend}
+use std.gc_async_mut.gpu.engine2d.simd_provider.{reset_simd_hits, simd_hit_counts}
+use std.gpu.engine2d.simd_kernels.{native_pixel_rows_enabled}
 
-fn pending_x86_simd_execution():
-    fail("strict cpu_simd_x86 execution evidence is required")
+val CANVAS: i32 = 48
 
-describe "x86 Engine2D target-native SIMD":
+fn frame_checksum(pixels: [u32]) -> i64:
+    var checksum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        checksum = (checksum + pixels[i].to_i64()) % 2147483647
+        i = i + 1
+    checksum
+
+fn mismatch_count(left: [u32], right: [u32]) -> i64:
+    if left.len() != right.len():
+        return -1
+    var mismatches: i64 = 0
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            mismatches = mismatches + 1
+        i = i + 1
+    mismatches
+
+fn render_scene(mut backend: CpuBackend) -> [u32]:
+    backend.init(CANVAS, CANVAS)
+    backend.clear(0xFF102030u32)
+    backend.draw_rect_filled(2, 2, 28, 20, 0xFFFF0000u32)
+    backend.draw_rect(4, 5, 30, 24, 0x80112233u32)
+    val image: [u32] = [0xFF00CC44u32; 12 * 10]
+    backend.draw_image(24, 3, 12, 10, image)
+    backend.present()
+    backend.read_pixels()
+
+describe "native Engine2D SIMD execution":
     # @capture(log)
-    it "should render fill copy alpha and scroll with native vector chunks":
-        step("Prepare the cpu_simd_x86 backend and deterministic scene")
-        val operations = ["fill", "copy", "alpha", "scroll"]
-        step("Capture per-operation vector execution counters")
-        expect(operations.len()).to_equal(4)
-        step("Compare readback against the independent scalar oracle")
-        pending_x86_simd_execution()
-
-    # @manual: folded
-    it "should reject wrapper hits when actual vector chunks remain zero":
-        step("Provide positive wrapper calls and zero vector chunks")
-        val vector_chunks = 0
-        expect(vector_chunks).to_equal(0)
-        pending_x86_simd_execution()
-
-    # @manual: folded
-    it "should reject scalar fallback for a required SIMD operation":
-        step("Force alpha blend onto the scalar fallback")
-        val fallback_calls = 1
-        expect(fallback_calls).to_equal(1)
-        pending_x86_simd_execution()
-
-    # @manual: folded
-    it "should require the expected SIMD instruction family in the guest binary":
-        step("Inspect the built x86 rendering entry for SSE2 or AVX2 instructions")
-        val accepted_families = ["sse2", "avx2"]
-        expect(accepted_families.len()).to_equal(2)
-        pending_x86_simd_execution()
-
+    it "executes fill copy alpha and matches scalar pixels bit-for-bit":
+        step("Require an enabled native SIMD row provider")
+        expect(native_pixel_rows_enabled()).to_equal(true)
+        step("Render fill, copy, and alpha through cpu_simd")
+        reset_simd_hits()
+        var simd = CpuBackend.create_simd()
+        val simd_pixels = render_scene(simd)
+        val simd_checksum = frame_checksum(simd_pixels)
+        val simd_hits = simd_hit_counts()
+        step("Render the independent scalar oracle")
+        reset_simd_hits()
+        var scalar = CpuBackend.create()
+        val scalar_pixels = render_scene(scalar)
+        val scalar_checksum = frame_checksum(scalar_pixels)
+        val scalar_hits = simd_hit_counts()
+        step("Require each provider operation and zero bit mismatches")
+        expect(simd_checksum).to_be_greater_than(0)
+        expect(scalar_checksum).to_be_greater_than(0)
+        expect(simd_hits.fill_hits).to_be_greater_than(0)
+        expect(simd_hits.copy_hits).to_be_greater_than(0)
+        expect(simd_hits.alpha_hits).to_be_greater_than(0)
+        expect(scalar_hits.fill_hits).to_equal(0)
+        expect(scalar_hits.copy_hits).to_equal(0)
+        expect(scalar_hits.alpha_hits).to_equal(0)
+        expect(mismatch_count(simd_pixels, scalar_pixels)).to_equal(0)
+        expect(simd_checksum).to_equal(scalar_checksum)
