@@ -22,9 +22,9 @@ evidence.
 
 | Gate | Current evidence | State |
 |---|---|---|
-| CompileMode | Source transport fix and concrete `compiler.driver.driver` ownership are committed. The seed-interpreted worker remains slow, but the retained native pure-Simple compiler parsed the full closure in 44 seconds and exposed a real grammar gap: `pub mod` was missing from the visibility dispatcher. The root parser fix passes its focused 1/1 regression. A temporary bootstrap bridge then parsed the closure in 65 seconds and reached HIR before the older compiler generation segfaulted while lowering standalone `main`; no bridge or `73` executable was produced. | OPEN; parser fixed in source, old-generation HIR bridge crash |
+| CompileMode | Source transport and `pub mod` parser fixes are committed. The retained native compiler's normal path exposed a redundant post-MIR VHDL metadata traversal after `MirLowering.lower_module`; that traversal is removed, and MIR module isolation/metadata regression coverage passes 4/4. Bootstrap mode plus native arenas parsed the 546-source bridge closure in about 63 seconds, then the older generation segfaulted while HIR-lowering `run_compile_bootstrap`. Canonical `pub mod` source was restored; no bridge or `73` executable was produced. | OPEN; old-generation bootstrap HIR expression crash |
 | Optimizer | Scalar-level repair is committed and its source guard passes, but no source-matched native driver exists after the closure-owner repair. | OPEN |
-| `84` | No two-module `84` oracle binary or exact output exists after the optimizer repair. | BLOCKED by CLI closure-BFS performance |
+| `84` | No two-module `84` oracle binary or exact output exists after the optimizer repair. | BLOCKED by source-matched CLI generation |
 | Vulkan | Real device is present, but the native compiler gate failed at `rt_array_data_ptr_u8`; no submit/readback receipt exists. | BLOCKED by `84` |
 
 ## Ten Tasks

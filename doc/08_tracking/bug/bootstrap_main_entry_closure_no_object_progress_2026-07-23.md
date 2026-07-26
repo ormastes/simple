@@ -100,3 +100,32 @@ in HIR. Canonical `pub mod` source was restored immediately and no bridge
 artifact was retained. The next incremental generation must start from a
 compiler that has the existing standalone-main HIR repair; do not return to
 the seed-interpreted closure path.
+
+## 2026-07-26 retained compiler MIR follow-up
+
+A one-file explicit-return `main` probe proved HIR lowering completes before
+the retained compiler crashes in `CompilerDriver.lower_to_mir`. GDB places the
+fault immediately after `MirLowering.lower_module` returns; the phase log shows
+the returned function dictionary already has invalid length `-1`.
+
+The next statement was a duplicate driver-side traversal that recopied VHDL
+metadata from HIR into the returned MIR aggregate. `MirLowering.lower_module`
+already preserves that metadata in both bootstrap and normal paths, and the
+VHDL design catalog also reconciles HIR provenance. The duplicate traversal is
+removed, with an executable regression asserting the lowerer retains hardware
+metadata. Resume through one cache-preserving bootstrap-mode incremental
+generation so the old binary does not re-enter its broken normal MIR transport.
+
+Three bounded generation attempts used the retained cache without reset:
+
+1. Legacy expression-environment mirroring aborted on a NUL string literal.
+2. `SIMPLE_NATIVE_ARENA_DECLS=1` removed that transport and parsed the closure
+   in 47 seconds, then stopped at the old binary's known `pub mod` gap.
+3. A temporary private-`mod` bridge parsed all 546 closure sources in about
+   63 seconds, entered real bootstrap HIR, and segfaulted while lowering
+   `run_compile_bootstrap`.
+
+Canonical `pub mod` declarations were restored and no bridge artifact exists.
+The three-cycle cap is reached. Resume by isolating the expression in
+`run_compile_bootstrap` that trips the old HIR lowerer; retain native arenas,
+the current cache, and `SIMPLE_NO_STUB_FALLBACK=1`.
