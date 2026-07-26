@@ -2,8 +2,9 @@
 
 ## Status
 
-Source fixed; source-matched compiler deployment and Vulkan rerun remain open
-under TODO 580.
+Source fixed and deployed in a source-matched compiler. Vulkan readback remains
+unverified because the evidence link selects the weak availability fallback
+before extracting the strong Vulkan provider member.
 
 ## Evidence
 
@@ -25,20 +26,24 @@ when the low tag equals `TAG_HEAP` (`1`), preserving legitimate raw pointers,
 including 4-byte-aligned pointers on 32-bit targets. The focused executable
 IR-generation regression passes 2/2 for x86_64 and RV32 read/write lowering.
 
+## Deployment
+
+The bounded self-rebuild produced
+`build/gpu-goal/source-matched/simple`: 3 modules compiled, 682 reused, and no
+bootstrap stage or cache reset. A projected C owner supplied the sole missing
+`rt_string_free` definition without exporting unrelated runtime symbols.
+
+That compiler emitted the 184-module source-matched Vulkan evidence closure.
+A direct no-stub link succeeded with the existing optional-GPU provider and
+current quarantine-lock provider. Execution did not crash, but availability
+failed before readback because archive order satisfied
+`rt_vulkan_is_available` from the weak core-C member and never extracted the
+strong `rt_vulkan_provider_is_available` member.
+
 ## Resume
 
-The 2026-07-26 bounded self-rebuild populated the existing native cache with
-all 685 source-matched compiler objects. Its first real link exposed the
-expected missing Cranelift providers under `core-c-bootstrap`; adding the
-existing bootstrap runtime path reduced the gap to only `rt_string_free`.
-No bootstrap stage or cache reset ran.
-
-The retained objects are under
-`build/gpu-goal/current/native-objects-vnQiNE`. A prepared runtime overlay at
-`build/gpu-goal/source-matched/runtime-overlay` combines the existing
-provider-complete archives and proves ownership of both `rt_string_free` and
-`rt_cranelift_iadd`. The three-attempt cap was reached before relinking.
-
-Resume with one cached native-build using that overlay as `--runtime-path`,
-then rerun the no-stub evidence archive. Require device readback, positive
-handle/device identity, zero mismatches, and passing strict/parity specs.
+Fix provider extraction at the linker owner, for example by retaining the
+provider-only symbol whenever a Vulkan provider archive is selected. Then
+relink the retained source-matched evidence objects and require device
+readback, positive handle/device identity, zero mismatches, and passing
+strict/parity specs.
