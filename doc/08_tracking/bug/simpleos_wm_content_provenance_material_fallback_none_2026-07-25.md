@@ -212,3 +212,92 @@ snap; sleep 45; snap    # must match
 
 With 5 parallel jj processes live on this repo, this is a real and recurring
 failure mode, not a one-off.
+
+## RESOLVED (diagnosis) 2026-07-26 — root cause is a collapsed HTML parse in the guest, not provenance
+
+Three hypotheses were on the table: (a) the WM frame does not go through the
+wrapping function that emits `data-wm-theme-fallback`; (b) `attr_value` fails to
+find the attribute when `class=` is the first attribute; (c) the freestanding
+guest build lowers this path differently than the host.
+
+**(c) is true. (a) and (b) are both refuted with evidence.**
+
+### Refuting (a)
+
+`os.compositor.simple_web_window_renderer.simple_web_content_full_html_with_theme`
+was run on the host for the exact production window. The emitted document does
+carry the contract, with `class=` first exactly as suspected:
+
+```
+...<body><div id="app"><div class='wm-app-content'
+  data-wm-theme-fallback='solid-material' data-wm-theme-bg='#1F1F21'
+  data-wm-theme-fg='#E4E2E4'>...
+```
+
+The guest path is also confirmed to reach the reducer:
+`os.desktop.shell.runtime_content_frames` -> `simple_web_content_frame_cached`
+-> `simple_web_content_render_request_with_theme` ->
+`WebRenderPixelArtifactCache.request_to_pixel_artifact` ->
+`SimpleWebEngine2DStaticPixelCache.result_for_html` ->
+`simple_web_layout_render_html_readback_engine2d_result` ->
+`simple_web_layout_render_html_draw_ir_result` ->
+`_simple_web_realized_material_fallback`. Every branch of that chain propagates
+`material_fallback`.
+
+### Refuting (b), and the actual root cause
+
+A permanent shape receipt was added to `_simple_web_realized_material_fallback`
+(fires whenever `material_count == 0`). The guest reports:
+
+```
+[web-material-fallback] none nodes=1 styles=1 attr_nodes=0 declared_nodes=0 rejected=0
+[web-layout]  degenerate-parse html_len=5794 nodes=1 split_parts=18
+```
+
+`nodes=1` is the `#root` node alone: **`parse_html` produces no element nodes at
+all for a 5794-byte document in the freestanding SimpleOS x86_64 kernel build.**
+`attr_nodes=0` (a raw substring scan, not `attr_value`) proves the contract node
+is absent from the parsed DOM entirely, so attribute ordering and `attr_value`
+are not implicated — (b) is refuted.
+
+The provenance gate is therefore CORRECT and must not be relaxed: it is
+fail-closing on a genuinely empty DOM. The frame still reports
+`engine2d_rendered` only because an empty DOM still paints a canvas.
+
+The collapse is inside `parse_html` / `_html_scan_events`, downstream of
+`text.split`: `html.split("<")` returns 18 parts, which is plausible for this
+document (its ~5 KB `<style>` block contains no `<`), yet `_html_scan_events`
+yields zero node-making events. `parse_html` has no budget guard, so this is not
+a deadline bail.
+
+### Second, independent freestanding defect found: omitted default arguments
+
+`extract_css_vw(html, viewport_w, trace_stages: bool = false)` was emitting its
+`trace_stages` receipts in the guest:
+
+```
+[layout-trace] css_scan candidates=0 declarations=0 wrappers=0
+[layout-trace] css_result rules=0 decls=0
+```
+
+The only caller that passes `trace_stages=true` is
+`simple_web_layout_render_html_software_pixels_traced`, and none of its earlier
+prints (`parse_html_ms`, `extract_css_ms`, ...) appear in the log, so it never
+ran. `compute_styles`, called on the same path with an explicit `false`, stayed
+silent. Passing the argument explicitly made the spurious receipts disappear.
+
+So **an omitted trailing default argument materializes as a non-default
+(truthy) value in this build.** All `extract_css_vw` / `compute_styles` call
+sites in the two renderer files now pass every parameter explicitly.
+
+### Where the fix belongs
+
+Not in the renderer and not in the gate. Two freestanding
+codegen/runtime defects need fixing:
+
+1. `parse_html` / `_html_scan_events` produce no element nodes for a valid
+   document (host produces a full DOM for the identical string).
+2. Omitted default arguments do not receive their declared default.
+
+Until (1) is fixed, `SimpleOS-WM x QEMU` stays `reason=guest-render-fault` with
+`fallback=none`, and that verdict is honest.
