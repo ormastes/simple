@@ -14,19 +14,13 @@ diagnostic (now a level-gated probe).
 | I2 | 25 pre-existing `pipeline::native_project` failures | `tests.rs` + selection code | M | yes | 5 root causes; 4 need a decision |
 | I3 | staging dirs leak into `.simple/` unbounded | `scripts/resource/disk-retention.shs` | S | no | premise corrected; diff ready |
 | I4 | fallback asymmetry: `~354` unfiltered vs `~371` filtered | `config.rs` | S | no | **CLOSED — leave as-is** |
-| I5 | 238 crate-wide failures; panic `no entry found for key` | `codegen/instr/body.rs:613` | L | yes | lane running |
+| I5 | 238 crate-wide failures; panic `no entry found for key` | `codegen/common_backend.rs:937` | L | yes | **ROOT-CAUSED + FIXED** (238 → 108) |
 | I6 | `pending()` false-green: `it` block still counts as pass | `bdd.rs`, `runtime_native.c`, `spec.spl` | M | no | 3 lanes needed, not 2 |
 
-### I1 — core-C rename ENOENT (open, NOT root-caused)
+### I1 — core-C rename ENOENT (ROOT-CAUSED + FIXED, see Round 1 results)
 Filed: `doc/08_tracking/bug/core_c_runtime_archive_rename_enoent_flaky_2026-07-26.md`.
-Reproduces 2-in-6 unobserved, **0-in-22 under any external observer**, and 0-in-15
-in a later loop — the rate is low and variable. Eight hypotheses eliminated with
-evidence (see the bug's table); notably *both* structural explanations are dead:
-no in-process race, and no external deleter (13 orphaned staging dirs from
-Jul 22-25 survived, which any sweeper would have taken).
-**Next step:** in-process probe only — `SIMPLE_NATIVE_BUILD_RUST_TRACE=1` now
-dumps `read_dir(build_dir)` at the failure. External tracing is proven useless here.
-**Do not** add a retry loop; that hides an unexplained failure.
+The "no external deleter" elimination in that bug's table turned out to be wrong
+reasoning — see Round 1 below for the actual cause and why the evidence misled.
 
 ### I2 — the 25 native_project failures
 Present on pristine `origin/main`; confirmed unrelated to the 2026-07-26 change
@@ -173,6 +167,40 @@ Filtering `~354` by `runtime_archive_has_bootstrap_cli_symbols` buys nothing:
 runtime the warning is about — shows **all 9** required symbols defined, so it
 passes the filter anyway. Filtering would instead break the legitimate deployed
 case. Only a lane-identity check would discriminate; no evidence justifies one.
+
+### I5 — ROOT-CAUSED and FIXED (238 → 108, 0 regressions)
+One drifted hand-maintained mirror explains **130 of the 238**.
+`common_backend.rs:937/964` prunes runtime-import declarations to the names in
+`referenced_call_names(&functions)` (a size optimization keeping baremetal links
+lean). That collector mirrors the codegen lowering table by hand and had drifted:
+~20 `MirInst` variants handled, everything else dropped via `_ => {}`. Codegen
+then indexes the map directly (`runtime_funcs["rt_generator_get_state"]` at
+`codegen/instr/body.rs:613`, `ctx.runtime_funcs[..]` in `collections.rs`,
+`resolve_runtime_func` in `helpers.rs:308`) — a missing name is a panic, caught
+by the stub-fallback wrapper as `[CODEGEN PANIC] ... no entry found for key`.
+
+Two structural gaps: (1) **function-level metadata is invisible to a
+per-instruction walk** — generator/async state machines lower from
+`MirFunction::{generator,async}_states`, not from any `MirInst`, so
+`rt_generator_get_state` could never be collected; (2) missing instruction arms
+(all `Vec*`/`Gpu*`, `BuiltinMethod`, `FStringFormat`, `TupleLit`,
+`Pointer{New,Ref,Deref}`, probes, `Par*`, contract/unit checks, `NeighborLoad`).
+Control: with the filter bypassed, both big clusters went to ~1 failure each —
+one cause, both clusters.
+
+A second, independent bug fixed alongside: `codegen/instr/units.rs:117`
+`compile_unit_widen` emitted `sextend.i64` gated only on MIR `from_bits`; when
+the value was already materialized as i64 the Cranelift verifier rejected it.
+Now gated on `builder.func.dfg.value_type(val).bits() < 64`.
+
+Fix is purely additive to `referenced_call_names` (+299) + the widen gate.
+Verified twice: by the lane on the tree (3350 passed / 108 failed, was
+3219/238) and by the parent on an origin/main worktree rebase (674/0 across
+both codegen modules, real recompile). Remaining 108 are separate items:
+53 `mir::lower` (51 = gpu_errors tests expecting `Err` where lowering now
+succeeds), 25 = I2, 12 `lint::tests` (parser rejects `Parallel` attribute in
+fixtures), 6 `hir::lower`, 12 singletons (incl. a *different*
+`no entry found for key` at `mir_inline.rs:237`).
 
 ### I6 — three lanes, not two
 `std.spec` (`spec.spl:186`) has the same defect, so Rust + C + `std.spec` must

@@ -114,9 +114,19 @@ pub(crate) fn compile_unit_widen<M: Module>(
 
     // For widening, we just need to extend the value
     let result = if signed {
-        // Sign-extend for signed types
+        // Sign-extend for signed types. `sextend` requires the source to be
+        // strictly narrower than the destination — the MIR `from_bits` is the
+        // *unit* width, which may already have been materialized as an i64
+        // value (e.g. an i64 constant). Extending in that case produces a
+        // Cranelift verifier error ("failed to satisfy type set"), so gate on
+        // the actual value type, mirroring `safe_extend_to_i64` on the
+        // unsigned side below.
         match (from_bits, to_bits) {
-            (8, 16) | (8, 32) | (8, 64) | (16, 32) | (16, 64) | (32, 64) => builder.ins().sextend(types::I64, val),
+            (8, 16) | (8, 32) | (8, 64) | (16, 32) | (16, 64) | (32, 64)
+                if builder.func.dfg.value_type(val).bits() < 64 =>
+            {
+                builder.ins().sextend(types::I64, val)
+            }
             _ => val, // Same size, just copy
         }
     } else {

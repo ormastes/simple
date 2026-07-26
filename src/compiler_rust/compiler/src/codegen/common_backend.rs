@@ -49,6 +49,44 @@ pub type BackendResult<T> = Result<T, BackendError>;
 pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String> {
     let mut names = HashSet::new();
     for func in functions {
+        // Generator / async state machines are lowered from *function-level*
+        // metadata (`MirFunction::generator_states` / `async_states`), not from
+        // any `MirInst`, so the per-instruction walk below can never see them.
+        // `codegen/instr/body.rs` indexes these names unconditionally once the
+        // metadata is present (body.rs:552/559/613/773/931/936/1051/1059), so
+        // they must be declared or body compilation panics with
+        // "no entry found for key".
+        if func.generator_states.is_some() {
+            for n in [
+                "rt_generator_get_state",
+                "rt_generator_get_ctx",
+                "rt_generator_set_state",
+                "rt_generator_mark_done",
+                "rt_generator_load_slot",
+                "rt_generator_store_slot",
+                "rt_array_get",
+                "rt_array_new",
+                "rt_array_push",
+                "rt_value_int",
+                "rt_value_nil",
+            ] {
+                names.insert(n.to_string());
+            }
+        }
+        if func.async_states.is_some() {
+            for n in [
+                "rt_future_get_state",
+                "rt_future_get_ctx",
+                "rt_future_set_state",
+                "rt_array_get",
+                "rt_array_new",
+                "rt_array_push",
+                "rt_value_int",
+                "rt_value_nil",
+            ] {
+                names.insert(n.to_string());
+            }
+        }
         for block in &func.blocks {
             for inst in &block.instructions {
                 match inst {
@@ -153,6 +191,267 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                     }
                     MirInst::Wait { .. } => {
                         names.insert("rt_wait".to_string());
+                    }
+                    // SIMD vector ops lower straight to `rt_vec_*` runtime calls
+                    // in codegen/instr/{collections,simd_stubs}.rs. Several of
+                    // those sites index `ctx.runtime_funcs[..]` directly, so a
+                    // missing declaration is a panic, not a graceful error.
+                    MirInst::VecLit { .. } => {
+                        names.insert("rt_array_new".to_string());
+                        names.insert("rt_array_push".to_string());
+                    }
+                    MirInst::VecSum { .. } => {
+                        names.insert("rt_vec_sum".to_string());
+                    }
+                    MirInst::VecProduct { .. } => {
+                        names.insert("rt_vec_product".to_string());
+                    }
+                    MirInst::VecMin { .. } => {
+                        names.insert("rt_vec_min".to_string());
+                    }
+                    MirInst::VecMax { .. } => {
+                        names.insert("rt_vec_max".to_string());
+                    }
+                    MirInst::VecAll { .. } => {
+                        names.insert("rt_vec_all".to_string());
+                    }
+                    MirInst::VecAny { .. } => {
+                        names.insert("rt_vec_any".to_string());
+                    }
+                    MirInst::VecExtract { .. } => {
+                        names.insert("rt_vec_extract".to_string());
+                    }
+                    MirInst::VecWith { .. } => {
+                        names.insert("rt_vec_with".to_string());
+                    }
+                    MirInst::VecSqrt { .. } => {
+                        names.insert("rt_vec_sqrt".to_string());
+                    }
+                    MirInst::VecAbs { .. } => {
+                        names.insert("rt_vec_abs".to_string());
+                    }
+                    MirInst::VecFloor { .. } => {
+                        names.insert("rt_vec_floor".to_string());
+                    }
+                    MirInst::VecCeil { .. } => {
+                        names.insert("rt_vec_ceil".to_string());
+                    }
+                    MirInst::VecRound { .. } => {
+                        names.insert("rt_vec_round".to_string());
+                    }
+                    MirInst::VecShuffle { .. } => {
+                        names.insert("rt_vec_shuffle".to_string());
+                    }
+                    MirInst::VecBlend { .. } => {
+                        names.insert("rt_vec_blend".to_string());
+                    }
+                    MirInst::VecSelect { .. } => {
+                        names.insert("rt_vec_select".to_string());
+                    }
+                    MirInst::VecLoad { .. } => {
+                        names.insert("rt_vec_load".to_string());
+                    }
+                    MirInst::VecStore { .. } => {
+                        names.insert("rt_vec_store".to_string());
+                    }
+                    MirInst::VecGather { .. } => {
+                        names.insert("rt_vec_gather".to_string());
+                    }
+                    MirInst::VecScatter { .. } => {
+                        names.insert("rt_vec_scatter".to_string());
+                    }
+                    MirInst::VecFma { .. } => {
+                        names.insert("rt_vec_fma".to_string());
+                    }
+                    MirInst::VecRecip { .. } => {
+                        names.insert("rt_vec_recip".to_string());
+                    }
+                    MirInst::VecMaskedLoad { .. } => {
+                        names.insert("rt_vec_masked_load".to_string());
+                    }
+                    MirInst::VecMaskedStore { .. } => {
+                        names.insert("rt_vec_masked_store".to_string());
+                    }
+                    MirInst::VecMinVec { .. } => {
+                        names.insert("rt_vec_min_vec".to_string());
+                    }
+                    MirInst::VecMaxVec { .. } => {
+                        names.insert("rt_vec_max_vec".to_string());
+                    }
+                    MirInst::VecClamp { .. } => {
+                        names.insert("rt_vec_clamp".to_string());
+                    }
+                    MirInst::NeighborLoad { .. } => {
+                        names.insert("rt_neighbor_load".to_string());
+                    }
+                    // GPU intrinsics lower to `rt_gpu_*`; `compile_gpu_atomic`
+                    // picks the concrete symbol from the op at codegen time, so
+                    // declare the whole atomic family for a GpuAtomic inst.
+                    MirInst::GpuAtomic { .. } => {
+                        for n in [
+                            "rt_gpu_atomic_add",
+                            "rt_gpu_atomic_add_i64",
+                            "rt_gpu_atomic_sub",
+                            "rt_gpu_atomic_sub_i64",
+                            "rt_gpu_atomic_min",
+                            "rt_gpu_atomic_min_i64",
+                            "rt_gpu_atomic_max",
+                            "rt_gpu_atomic_max_i64",
+                            "rt_gpu_atomic_and",
+                            "rt_gpu_atomic_and_i64",
+                            "rt_gpu_atomic_or",
+                            "rt_gpu_atomic_or_i64",
+                            "rt_gpu_atomic_xor",
+                            "rt_gpu_atomic_xor_i64",
+                            "rt_gpu_atomic_exchange",
+                            "rt_gpu_atomic_xchg_i64",
+                        ] {
+                            names.insert(n.to_string());
+                        }
+                    }
+                    MirInst::GpuAtomicCmpXchg { .. } => {
+                        names.insert("rt_gpu_atomic_cmpxchg".to_string());
+                    }
+                    MirInst::GpuGlobalId { .. } => {
+                        names.insert("rt_gpu_global_id".to_string());
+                    }
+                    MirInst::GpuLocalId { .. } => {
+                        names.insert("rt_gpu_local_id".to_string());
+                    }
+                    MirInst::GpuGroupId { .. } => {
+                        names.insert("rt_gpu_group_id".to_string());
+                    }
+                    MirInst::GpuGlobalSize { .. } => {
+                        names.insert("rt_gpu_global_size".to_string());
+                    }
+                    MirInst::GpuLocalSize { .. } => {
+                        names.insert("rt_gpu_local_size".to_string());
+                    }
+                    MirInst::GpuNumGroups { .. } => {
+                        names.insert("rt_gpu_num_groups".to_string());
+                    }
+                    MirInst::GpuBarrier => {
+                        names.insert("rt_gpu_barrier".to_string());
+                    }
+                    MirInst::GpuMemFence { .. } => {
+                        names.insert("rt_gpu_mem_fence".to_string());
+                    }
+                    MirInst::GpuSharedAlloc { .. } => {
+                        names.insert("rt_gpu_shared_alloc".to_string());
+                    }
+                    MirInst::GpuLoadF64 { .. } => {
+                        names.insert("rt_gpu_load_f64".to_string());
+                    }
+                    MirInst::GpuStoreF64 { .. } => {
+                        names.insert("rt_gpu_store_f64".to_string());
+                    }
+                    MirInst::GpuLoadI64 { .. } => {
+                        names.insert("rt_gpu_load_i64".to_string());
+                    }
+                    MirInst::GpuStoreI64 { .. } => {
+                        names.insert("rt_gpu_store_i64".to_string());
+                    }
+                    // `compile_builtin_method` (codegen/instr/methods.rs) picks
+                    // the concrete symbol from the receiver type + method name
+                    // at codegen time, so the whole bounded family it can emit
+                    // must be declared. Keep in sync with the `"rt_*"` literals
+                    // in methods.rs.
+                    MirInst::BuiltinMethod { .. } => {
+                        for n in [
+                            "rt_array_clear",
+                            "rt_array_extend_i64",
+                            "rt_array_len",
+                            "rt_array_pop",
+                            "rt_array_push",
+                            "rt_box_float",
+                            "rt_box_int",
+                            "rt_contains",
+                            "rt_dict_clear",
+                            "rt_dict_keys",
+                            "rt_dict_len",
+                            "rt_dict_set",
+                            "rt_dict_values",
+                            "rt_index_get",
+                            "rt_index_set",
+                            "rt_len",
+                            "rt_method_not_found",
+                            "rt_slice",
+                            "rt_string_concat",
+                            "rt_string_ends_with",
+                            "rt_string_len",
+                            "rt_string_starts_with",
+                            "rt_string_to_float",
+                            "rt_tuple_get",
+                            "rt_tuple_len",
+                            "rt_tuple_set",
+                            "rt_value_bool",
+                        ] {
+                            names.insert(n.to_string());
+                        }
+                    }
+                    MirInst::FStringFormat { .. } => {
+                        for n in [
+                            "rt_string_new",
+                            "rt_string_new_literal",
+                            "rt_string_concat",
+                            "rt_value_to_string",
+                            "rt_value_format_string",
+                        ] {
+                            names.insert(n.to_string());
+                        }
+                    }
+                    MirInst::TupleLit { .. } => {
+                        names.insert("rt_tuple_new".to_string());
+                        names.insert("rt_tuple_set".to_string());
+                    }
+                    // codegen/instr/pointers.rs selects by PointerKind.
+                    MirInst::PointerNew { .. } | MirInst::PointerRef { .. } | MirInst::PointerDeref { .. } => {
+                        for n in [
+                            "rt_shared_new",
+                            "rt_shared_get",
+                            "rt_shared_downgrade",
+                            "rt_unique_new",
+                            "rt_unique_get",
+                            "rt_handle_new",
+                            "rt_handle_get",
+                            "rt_weak_upgrade",
+                        ] {
+                            names.insert(n.to_string());
+                        }
+                    }
+                    MirInst::DecisionProbe { .. } => {
+                        names.insert("rt_decision_probe".to_string());
+                    }
+                    MirInst::ConditionProbe { .. } => {
+                        names.insert("rt_condition_probe".to_string());
+                    }
+                    MirInst::PathProbe { .. } => {
+                        names.insert("rt_path_probe".to_string());
+                    }
+                    MirInst::ParMap { .. } => {
+                        names.insert("rt_par_map".to_string());
+                        names.insert("rt_array_len".to_string());
+                    }
+                    MirInst::ParReduce { .. } => {
+                        names.insert("rt_par_reduce".to_string());
+                        names.insert("rt_array_len".to_string());
+                    }
+                    MirInst::ParFilter { .. } => {
+                        names.insert("rt_par_filter".to_string());
+                        names.insert("rt_array_len".to_string());
+                    }
+                    MirInst::ParForEach { .. } => {
+                        names.insert("rt_par_for_each".to_string());
+                        names.insert("rt_array_len".to_string());
+                    }
+                    MirInst::UnitBoundCheck { .. } => {
+                        names.insert("simple_unit_bound_check".to_string());
+                    }
+                    MirInst::ContractCheck { .. } => {
+                        names.insert("simple_contract_check".to_string());
+                    }
+                    MirInst::ContractOldCapture { .. } => {
+                        names.insert("rt_interp_eval".to_string());
                     }
                     _ => {}
                 }
