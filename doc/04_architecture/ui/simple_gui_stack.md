@@ -13,6 +13,9 @@ Related:
 - `doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md`
 - `doc/04_architecture/compiler/graphics/gui_layer_contract.md`
 - `doc/05_design/compiler/graphics/accelerated_shared_ui_backend_architecture.md`
+- `doc/04_architecture/wm_glass_theme_host_simpleos.md`
+- `doc/05_design/wm_glass_theme_host_simpleos.md`
+- `doc/03_plan/agent_tasks/wm_glass_theme_host_simpleos.md`
 
 ## Purpose
 

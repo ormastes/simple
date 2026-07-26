@@ -1,5 +1,11 @@
 # Engine2D Four-Backend Capture Agent Tasks
 
+Related WM/Web material plan:
+`doc/03_plan/agent_tasks/wm_glass_theme_host_simpleos.md`, with architecture
+and detail design in `doc/04_architecture/wm_glass_theme_host_simpleos.md` and
+`doc/05_design/wm_glass_theme_host_simpleos.md`. That plan produces semantic
+material input; this plan alone owns backend/device/capture admission.
+
 Base revision: `a6497a60` working-copy snapshot on 2026-07-25. The shared
 checkout also contains unrelated MCP, theme, parser, and wrapper work owned by
 other sessions; none of those files belong to this plan.

@@ -71,10 +71,57 @@ that return constant opacity/radius/shadow/blur/gradient values are defects,
 not capability declarations. Unsupported realized effects select a named solid
 fallback and emit capability evidence; they do not disappear silently.
 
-Draw IR extends existing style properties/commands where necessary. Engine2D
-must composite backdrop-dependent effects after prior scene content and before
-surface/border/text. Host-GPU protocol changes, if needed, are versioned and
-fail closed rather than accepting unknown style keys.
+Draw IR extends existing style properties/commands where necessary. The current
+styled-rectangle material request uses the existing `backdrop-filter`,
+`wm-material-surface-alpha-milli`, `background-image`, radius, border, and
+fallback style keys; it adds no new Draw IR command or transient buffer.
+Engine2D owns the CPU-composited realization: it samples already-painted
+backdrop pixels, applies bounded blur and saturation, clips the translucent
+surface or two-stop gradient to the rounded shape, then paints the existing
+border. The resulting pixel buffer is transient Engine2D material, not a
+serialized Draw IR resource.
+
+For native-safe transport, `DrawIrCommand.color` remains opaque
+`solid_fallback_rgba`. The translucent `window_fill_rgba` request remains in
+the existing `background-color` style and is consumed only by the enabled CPU
+material lowerer. Requested blur `30px` is explicitly realized as bounded blur
+`4px`, with realized blur/saturation keys and a reduction reason; it is never
+silently represented as an identical device effect. The helper uses `i64`
+intermediates and caps output plus horizontal work at 67,108,864 pixels.
+
+`engine2d-cpu-composited-material-v1` is a source-level CPU realization
+capability only. It is not a Vulkan or Metal device-material capability, a
+CPU-SIMD receipt, or a host/QEMU capture claim. Native device backends remain
+unavailable until their own submit, completion, device-origin readback, and
+independent evidence rows are accepted. Host-GPU protocol changes, if needed,
+are versioned and fail closed rather than accepting unknown style keys.
+
+### Simple Web material-policy boundary
+
+Simple Web must stop destroying authored glass semantics inside
+`apply_decls`. The cascade retains translucent `background-color`, normalized
+background layers, radius, shadow, and backdrop-filter requests independent of
+the eventual executor. A typed material policy then selects realization at the
+Draw IR boundary:
+
+- `engine2d-cpu-composited-material-v1` emits the retained request plus explicit
+  realized blur/saturation/reduction keys for canonical `draw_ir_adv`;
+- the legacy CPU-bitmap executor ignores those material keys and paints
+  `DrawIrCommand.color`, which remains the declared opaque fallback;
+- an unsupported or malformed layered request also keeps the opaque fallback
+  and emits a specific unavailable/reduction reason.
+
+The WM Web adapter may carry the selected policy and named fallback through
+its existing root semantic attributes, but it may not synthesize visual values
+that disagree with the package CSS. The Web semantic/layout owner derives the
+requested material from the cascaded CSS and preserves both the request and
+fallback in one Draw IR command. Provenance distinguishes
+`cpu-composited-material` from `solid-material`; neither is device execution.
+
+Aetheric's layered surface is base translucent color followed by a two-stop
+alpha gradient. Engine2D must composite in that order after the backdrop pass.
+Treating the gradient as an opaque replacement for the base is not parity and
+must remain fail-closed.
 
 ## Canonical Routes
 

@@ -1,5 +1,13 @@
 # Feature: WM Glass Theme on Host and SimpleOS
 
+## Authoritative Documents
+
+- Plan: `doc/03_plan/agent_tasks/wm_glass_theme_host_simpleos.md`
+- System-test plan: `doc/03_plan/sys_test/wm_glass_theme_host_simpleos.md`
+- Architecture: `doc/04_architecture/wm_glass_theme_host_simpleos.md`
+- Detail design: `doc/05_design/wm_glass_theme_host_simpleos.md`
+- Manual: `doc/06_spec/03_system/app/simple_wm/feature/wm_glass_theme_host_simpleos_spec.md`
+
 ## Raw Request
 `$sp_dev check wm on host and simple os on qemu. and fix unwired and unimpled and bug. specially simple gui and simpwl wm does not apply theme properly which created from stitch in glass theme like mac fill. research current files and git history check theme apply plan if web renderer does not apply css properly fix the bugs in root cause. do things in pherallel and use smalll model agents with detail guide and higher model review.`
 
@@ -615,3 +623,29 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   still cannot pass the necessary `native-build` validator or implement
   current no-stub semantics. Host/device/QEMU execution rows therefore remain
   closed until the runner and exact native route receive independent review.
+
+- continuation-2026-07-26-cpu-composited-glass-material: **SOURCE PREPARED /
+  UNVERIFIED.** The dirty shared Engine2D slice keeps canonical WM
+  `DrawIrCommand.color` as opaque `solid_fallback_rgba` for native-safe
+  transport; the translucent package `window_fill_rgba` remains in the
+  existing `background-color` style and feeds the enabled CPU material helper.
+  The helper samples the pre-surface framebuffer, applies bounded
+  blur/saturation, clips a rounded surface, and alpha-composites the style
+  material or two-stop gradient before existing borders. Requested blur 30 is
+  explicitly realized as blur 4 with realized blur/saturation/reduction
+  witnesses; `i64` arithmetic and a 67,108,864-pixel output/working cap bound
+  the helper.
+  It is deliberately not a new Draw IR command, private renderer, GUI/Web
+  implementation, CPU-SIMD receipt, native Vulkan/Metal implementation,
+  host/QEMU capture, device readback, event receipt, or timing/RSS result.
+
+  The focused source tests define the intended WM-style request and CPU pixel
+  arithmetic, but no passing receipt exists for this dirty checkpoint. The
+  third verification cycle had an opaque-material test failure; post-run static
+  review identified and corrected the saturation-zero luminance rounding
+  mismatch, but the session retry cap prevents a post-fix run. Normal Web
+  lowering still intentionally erases glass to named solid fallback, so
+  GUI/Web realization remains open and needs a mode-aware provenance-preserving
+  patch. Independent review and a fresh-session PASS remain required before
+  integration. Existing aggregate system evidence remains fail-closed; all
+  host/device/QEMU rows remain open.

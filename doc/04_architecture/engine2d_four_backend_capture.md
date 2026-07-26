@@ -1,11 +1,27 @@
 <!-- codex-design -->
 # Engine2D Four-Backend Capture Architecture
 
+Related semantic/material architecture:
+`doc/04_architecture/wm_glass_theme_host_simpleos.md`, implemented according to
+`doc/03_plan/agent_tasks/wm_glass_theme_host_simpleos.md`. This document begins
+at the backend capture boundary and does not redefine Web/WM material policy.
+
 ## Boundary
 
 `DrawIrComposition` remains the common semantic input. Hosted GPU, hosted CPU,
 and SimpleOS framebuffer owners lower it independently. The comparison layer
 observes immutable evidence and never becomes a renderer.
+
+The CPU-composited glass material helper is an Engine2D implementation detail
+below this boundary: it consumes existing styled-rectangle keys and produces
+ordinary CPU pixels before a capture adapter observes them. It creates no
+`Backend2dCaptureEvidence`, does not select a backend, and cannot establish
+CPU-SIMD, Vulkan, Metal, host, or QEMU execution.
+
+Its native-safe transport color remains opaque fallback while translucent
+material stays in style metadata; requested blur 30 is reduced to bounded blur
+4 and the helper caps output/working storage at 67,108,864 pixels. These are
+implementation witnesses only, not capture evidence.
 
 ## Layers
 

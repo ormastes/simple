@@ -188,6 +188,50 @@ source-matched pure-Simple compiler; postponement is not completion:
 5. Admit a row only after independent high review; then update the aggregate
    SSpec/manual. A missing backend or host remains explicitly open.
 
+### CPU-composited material sub-lane — SOURCE PREPARED / UNVERIFIED
+
+The shared-owner material slice is limited to the existing styled-RECT Draw IR
+path: `window_scene_draw_ir.spl`, `draw_ir_adv.spl`, and the new
+`draw_ir_glass_material.spl` helper. `DrawIrCommand.color` remains opaque
+`solid_fallback_rgba` for native-safe transport, while existing
+`background-color` carries the translucent package request. The helper realizes
+a bounded CPU backdrop sample/blur/saturation/alpha-composite path while
+retaining existing borders; requested blur `30px` is realized as blur `4px`
+with realized blur/saturation/reduction witnesses, `i64` arithmetic, and a
+67,108,864-pixel output/working cap.
+It does not modify GUI, Simple Web, backend-native Vulkan/Metal, capture,
+event, or QEMU owners.
+
+Merge owner must obtain independent high-capability source review. The third
+cycle had an opaque-material test failure; its reviewed correction has no
+post-fix run because the session cap is reached. Normal Web lowering still
+intentionally erases glass to named fallback, so GUI/Web realization needs a
+mode-aware provenance-preserving patch. A fresh-session PASS is required before
+source acceptance. This slice is only a prerequisite for a later scalar/SIMD
+oracle; it cannot
+self-admit CPU-SIMD, native Vulkan/Metal, host/QEMU framebuffer, device
+readback, input-event, timing, or RSS evidence.
+
+### Web CSS material repair — documentation-first execution plan
+
+| Phase | Owner and file range | Exit condition |
+|---|---|---|
+| W1 semantic retention | Web semantic owner: `simple_web_html_layout_renderer_declarations.spl` and `_core.spl` | Cascaded translucent base, backdrop, radius, and ordered layers survive; named solid fallback is retained separately |
+| W2 Draw IR policy | Web Draw IR owner: `_paint_layout.spl` plus focused specs | `DrawIrCommand.color` is opaque fallback; style carries requested and realized CPU material values; missing/incomplete policy fails closed |
+| W3 layered CPU material | Engine2D merge owner: `draw_ir_glass_material.spl` and `draw_ir_adv.spl` | Backdrop -> translucent base -> alpha-gradient -> border order has exact pixel oracles and bounded work |
+| W4 provenance | Web artifact and shared WM owners: `simple_web_html_layout_renderer.spl`, `simple_web_layout_engine2d_fast.spl`, `simple_web_window_renderer.spl`, `window_scene.spl` | CPU-composited and solid fallback kinds/hashes are distinct and validated end to end |
+| W5 evidence | Evidence owner, then independent highest-capability reviewer | CSS/computed-style/Draw IR/pixel receipts pass; no backend/device claim is inferred |
+
+Lower-capability sidecars may own W1, W2, and test fixture preparation only
+after the merge owner freezes the exact style keys:
+`wm-material-request`, `background-color`,
+`backdrop-filter-capability`, `backdrop-filter-realized`,
+`backdrop-filter-realized-blur-radius-px`,
+`backdrop-filter-realized-saturation-milli`, and
+`backdrop-filter-reduction-reason`. W3/W4 integration and all done marks require
+highest-capability review. No lane may edit the legacy CPU executor into a
+second material renderer.
+
 - External compiler/GPU owner: prepared-host operator under TODO 580 and
   `doc/03_plan/agent_tasks/simpleos_qemu_host_gpu_external_host_evidence.md`.
 - Backend capture contract:

@@ -61,6 +61,72 @@ surface; paint inset shadows, border, then content/text. When unavailable or
 reduced transparency is requested, paint the declared solid fallback and emit
 realized capability state. Never silently substitute opaque default colors.
 
+### CPU-composited Draw IR material slice
+
+`draw_ir_adv` is the canonical styled-rectangle lowerer. When its existing
+`backdrop-filter-capability` value is
+`engine2d-cpu-composited-material-v1`, it constructs an
+`Engine2dGlassMaterialConfig` and delegates the pixel math to
+`engine2d_draw_ir_glass_material_pixels`. The helper accepts only an in-bounds
+rectangle and a framebuffer whose length matches the declared dimensions. It
+uses `i64` intermediates and caps output plus horizontal work at 67,108,864
+pixels; it clamps blur to `0..4`, saturation to `0..3000` thousandths, and
+radius to half of both surface extents.
+
+The helper reads the pre-surface framebuffer, performs a deterministic
+separable box blur, applies saturation, clips each output pixel to the rounded
+surface, and alpha-composites the translucent `background-color`
+(`window_fill_rgba`) or the normalized two-stop vertical gradient.
+`DrawIrCommand.color` remains opaque `solid_fallback_rgba` for native-safe
+transport; it is not the selected glass tint. Requested blur `30px` is
+explicitly realized as blur `4px`, with realized blur/saturation keys and a
+reduction reason. `draw_ir_adv` then paints the existing border logic. The WM
+body is the requested material surface; the titlebar remains `not-requested`
+for backdrop material in this slice. The fallback witness
+`cpu-composited-material` with reason `native-device-backdrop-path-pending`
+means CPU realization exists while native device realization is still pending;
+it must never be reported as a device fallback/readback receipt.
+
+Normal Simple Web lowering still intentionally erases glass layers to the
+named solid-material fallback. GUI and Web realization remain open and require
+a mode-aware provenance-preserving patch that retains material only when the
+selected canonical mode can realize it, while preserving the named fallback in
+all other modes.
+
+### Planned Simple Web CSS-to-material repair
+
+The implementation order is fixed:
+
+1. Remove the unconditional opacity/gradient destruction from
+   `simple_web_html_layout_renderer_declarations.spl`. `Style` retains cascaded
+   backdrop text, translucent base color, normalized gradient stops, raw layer
+   order, and radius.
+2. Replace the unconditional `data-wm-theme-fallback=solid-material` rewrite in
+   `simple_web_html_layout_renderer_core.spl` with an explicit material policy.
+   The named `data-wm-theme-bg`/`fg` values remain fallback inputs, not
+   replacements for retained CSS semantics.
+3. In `simple_web_html_layout_renderer_paint_layout.spl`, keep the opaque
+   fallback in `DrawIrCommand.color`; place the cascaded translucent base in
+   `background-color`; emit the material request, required realized
+   blur/saturation keys, reduction reason, and normalized layer metadata.
+   Missing realized keys fail back to the opaque command color.
+4. Extend the canonical Engine2D helper from “surface or gradient” to ordered
+   “surface then alpha-gradient” composition so Aetheric's layered CSS is not
+   flattened. Clamp/reduction and work-cap witnesses remain inspectable.
+5. Keep `simple_web_layout_engine2d_cpu.spl` fallback-only. The advanced
+   Engine2D path consumes the material keys; the legacy executor consumes only
+   `DrawIrCommand.color`.
+6. Extend `WebRenderMaterialFallbackProvenance`, `WebRenderArtifact`, and
+   `wm_content_frame_web_provenance_valid` with a distinct
+   `cpu-composited-material` realization and semantic hash. Existing
+   `solid-material` receipts remain valid only for the fallback lane.
+
+No source phase may promote Web support until a focused
+CSS -> computed Style -> Draw IR -> independent CPU pixel test proves base,
+gradient alpha, rounded corner, backdrop sample, and opaque fallback from the
+same request. Native Vulkan/Metal, SIMD, event, host, and QEMU evidence remain
+separate later phases.
+
 ## Evidence Model
 
 `wm-glass-theme-evidence-v1` separates requested semantics from realized
@@ -77,6 +143,10 @@ The typed evidence travels beside pixels in `WebRenderArtifact`.
 GPU proof order is BAR2 mapped, hello acknowledged, backend selected, Draw IR
 submission accepted, device receipt valid, readback presented, independent QMP
 `pmemsave`. Record highest passed and first unavailable.
+
+The CPU-composited unit algorithm is not itself a CPU-SIMD execution witness,
+native Vulkan/Metal execution, host framebuffer capture, QEMU screenshot, or
+event/performance measurement. Those evidence rungs remain separately gated.
 
 ## Error Handling
 
