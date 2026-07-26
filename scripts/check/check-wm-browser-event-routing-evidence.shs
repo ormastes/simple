@@ -3,6 +3,8 @@ set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
+ELECTRON_RESOLVER_ROOT="$ROOT_DIR"
+. "$ROOT_DIR/scripts/check/lib/pinned-electron-resolver.shs"
 
 BUILD_DIR="${BUILD_DIR:-build/wm_browser_event_routing_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/wm_browser_event_routing_evidence_$(date -u +%F).md}"
@@ -197,15 +199,17 @@ REPLAY_GUARD="${SIMPLE_WEB_FONT_COMPOSITION_RECEIPT}.consumed.${SIMPLE_WEB_FONT_
 [ ! -e "$REPLAY_GUARD" ] || fail "simple-web-font-run-id-replayed"
 
 [ -f "$VALIDATOR" ] || fail "missing-validator:$VALIDATOR"
-
-RUNNER="npx electron --no-sandbox --disable-gpu"
-if [ -z "${DISPLAY:-}" ] && [ "$(uname -s)" != "Darwin" ]; then
-    command -v xvfb-run >/dev/null 2>&1 || fail "missing-command:xvfb-run"
-    RUNNER="xvfb-run -a --server-args=\"-screen 0 1280x720x24\" $RUNNER"
-fi
+resolve_electron_bin || fail "$ELECTRON_RESOLVER_REASON"
 
 set +e
-ELECTRON_DISABLE_SANDBOX=1 sh -c "$RUNNER tools/web-render-backend/wm_event_check.js" >"$OUT" 2>&1
+if [ -z "${DISPLAY:-}" ] && [ "$(uname -s)" != Darwin ]; then
+    command -v xvfb-run >/dev/null 2>&1 || fail "missing-command:xvfb-run"
+    ELECTRON_DISABLE_SANDBOX=1 xvfb-run -a --server-args="-screen 0 1280x720x24" \
+        "$ELECTRON_RESOLVED_BIN" --no-sandbox --disable-gpu tools/web-render-backend/wm_event_check.js >"$OUT" 2>&1
+else
+    ELECTRON_DISABLE_SANDBOX=1 "$ELECTRON_RESOLVED_BIN" --no-sandbox --disable-gpu \
+        tools/web-render-backend/wm_event_check.js >"$OUT" 2>&1
+fi
 code=$?
 set -e
 
