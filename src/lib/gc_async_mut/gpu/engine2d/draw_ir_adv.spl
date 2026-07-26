@@ -20,6 +20,10 @@ use common.ui.draw_ir.{
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
+use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
+    Engine2dGlassMaterialConfig,
+    engine2d_draw_ir_glass_material_pixels
+}
 use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_destination_origin}
 
 # Level-gated serial probe for TEXT command dispatch (shaped/resolved/plain
@@ -42,6 +46,7 @@ struct Engine2dDrawIrAdvResult:
     backend_handle: i64
     device_identity: i64
     readback_checksum: i64
+    cpu_composited_material_count: i32 = 0
     # Post-execution font evidence copied from the Engine2D/FontRenderer and,
     # for Vulkan, its completed FontRenderBatch device receipt. Transient
     # atlas/cache payloads remain owned by Engine2D and never enter Draw IR.
@@ -69,9 +74,24 @@ struct Engine2dDrawIrRenderOutcome:
     rendered: i32
     skipped: i32
     unsupported_kinds: text
+    cpu_composited_material_count: i32
 
-fn _engine2d_draw_ir_render_outcome(engine: Engine2D, rendered: i32, skipped: i32, unsupported_kinds: text) -> Engine2dDrawIrRenderOutcome:
-    Engine2dDrawIrRenderOutcome(engine: engine, rendered: rendered, skipped: skipped, unsupported_kinds: unsupported_kinds)
+struct Engine2dDrawIrBoxOutcome:
+    engine: Engine2D
+    cpu_composited_material: bool
+
+struct Engine2dDrawIrGlassOutcome:
+    engine: Engine2D
+    composited: bool
+
+fn _engine2d_draw_ir_render_outcome(engine: Engine2D, rendered: i32, skipped: i32, unsupported_kinds: text, cpu_composited_material_count: i32) -> Engine2dDrawIrRenderOutcome:
+    Engine2dDrawIrRenderOutcome(
+        engine: engine,
+        rendered: rendered,
+        skipped: skipped,
+        unsupported_kinds: unsupported_kinds,
+        cpu_composited_material_count: cpu_composited_material_count
+    )
 
 fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, readback: Engine2DReadback) -> Engine2dDrawIrAdvResult:
     Engine2dDrawIrAdvResult(
@@ -261,6 +281,86 @@ fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], 
         eng.draw_rect_filled(x + w - right_w, y, right_w, h, right_c)
     eng
 
+fn _engine2d_draw_ir_render_glass_material(engine: Engine2D, command: DrawIrCommand, x: i32, y: i32, w: i32, h: i32, radius: i32) -> Engine2dDrawIrGlassOutcome:
+    var eng = engine
+    val style: [DrawIrStyleProp] = command.computed_style
+    val capability = _engine2d_draw_ir_style_value(
+        style, "backdrop-filter-capability")
+    if capability != "engine2d-cpu-composited-material-v1":
+        return Engine2dDrawIrGlassOutcome(engine: eng, composited: false)
+    val framebuffer_width = eng.width()
+    val framebuffer_height = eng.height()
+    if (x < 0 or y < 0 or w <= 0 or h <= 0 or
+        x.to_i64() + w.to_i64() > framebuffer_width.to_i64() or
+        y.to_i64() + h.to_i64() > framebuffer_height.to_i64()):
+        return Engine2dDrawIrGlassOutcome(engine: eng, composited: false)
+    val backdrop = _engine2d_draw_ir_style_value(style, "backdrop-filter")
+    val requested_blur = _engine2d_draw_ir_nth_int(backdrop, 0, 0)
+    val realized_blur_text = _engine2d_draw_ir_style_value(
+        style, "backdrop-filter-realized-blur-radius-px")
+    val realized_saturation_text = _engine2d_draw_ir_style_value(
+        style, "backdrop-filter-realized-saturation-milli")
+    if realized_blur_text == "" or realized_saturation_text == "":
+        return Engine2dDrawIrGlassOutcome(engine: eng, composited: false)
+    val realized_blur = _engine2d_draw_ir_nth_int(
+        realized_blur_text,
+        0,
+        requested_blur
+    ) as i32
+    val requested_saturation_percent = _engine2d_draw_ir_nth_int(
+        backdrop, 1, 100)
+    val realized_saturation_milli = _engine2d_draw_ir_nth_int(
+        realized_saturation_text,
+        0,
+        requested_saturation_percent * 10
+    ) as i32
+    val command_alpha: u32 = (command.color >> 24) & 0xFFu32
+    val command_color_i64: i64 = command.color as i64
+    val surface_alpha_milli = _engine2d_draw_ir_nth_int(
+        _engine2d_draw_ir_style_value(
+            style, "wm-material-surface-alpha-milli"),
+        0,
+        (command_alpha as i64) * 1000 / 255
+    ) as i32
+    val surface_color = _engine2d_draw_ir_nth_int(
+        _engine2d_draw_ir_style_value(style, "background-color"),
+        0,
+        command_color_i64
+    ) as u32
+    val background_image = _engine2d_draw_ir_style_value(
+        style, "background-image")
+    val gradient_enabled = background_image.starts_with("linear-gradient(")
+    val gradient_layered_over_surface = _engine2d_draw_ir_style_value(
+        style, "background-image-composite-mode") ==
+        "surface-then-alpha-gradient"
+    val gradient_from = _engine2d_draw_ir_nth_int(
+        background_image, 0, command_color_i64) as u32
+    val gradient_to = _engine2d_draw_ir_nth_int(
+        background_image, 1, command_color_i64) as u32
+    val config = Engine2dGlassMaterialConfig(
+        framebuffer_width: framebuffer_width,
+        framebuffer_height: framebuffer_height,
+        x: x,
+        y: y,
+        width: w,
+        height: h,
+        radius: radius,
+        blur_radius: realized_blur,
+        saturation_milli: realized_saturation_milli,
+        surface_alpha_milli: surface_alpha_milli,
+        surface_color: surface_color,
+        gradient_from: gradient_from,
+        gradient_to: gradient_to,
+        gradient_enabled: gradient_enabled,
+        gradient_layered_over_surface: gradient_layered_over_surface
+    )
+    val pixels = engine2d_draw_ir_glass_material_pixels(
+        eng.read_pixels(), config)
+    if pixels.len() != w.to_i64() * h.to_i64():
+        return Engine2dDrawIrGlassOutcome(engine: eng, composited: false)
+    eng.draw_image(x, y, w, h, pixels)
+    Engine2dDrawIrGlassOutcome(engine: eng, composited: true)
+
 # Render a single HTML/CSS box honestly instead of collapsing it to one flat
 # fill: box-shadow first (behind), then background (linear-gradient beats a solid
 # fill; a corner radius routes the solid fill to a rounded rect), then per-side
@@ -268,7 +368,7 @@ fn _engine2d_draw_ir_render_borders(engine: Engine2D, style: [DrawIrStyleProp], 
 # box that still has a border or shadow paints instead of vanishing. Engine2D is
 # value-copied across this free-function boundary, so the caller MUST reassign
 # from the returned engine.
-fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32, y: i32, w: i32, h: i32) -> Engine2D:
+fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32, y: i32, w: i32, h: i32) -> Engine2dDrawIrBoxOutcome:
     var eng = engine
     val style: [DrawIrStyleProp] = command.computed_style
     val shadow = _engine2d_draw_ir_style_value(style, "box-shadow")
@@ -280,6 +380,14 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
         if _engine2d_draw_ir_has_visible_alpha(scolor):
             eng.draw_shadow_rect(x, y, w, h, sx, sy, sblur, scolor)
     val radius = _engine2d_draw_ir_nth_int(_engine2d_draw_ir_style_value(style, "border-radius"), 0, 0) as i32
+    val glass = _engine2d_draw_ir_render_glass_material(
+        eng, command, x, y, w, h, radius)
+    eng = glass.engine
+    if glass.composited:
+        eng = _engine2d_draw_ir_render_borders(
+            eng, style, x, y, w, h, radius)
+        return Engine2dDrawIrBoxOutcome(
+            engine: eng, cpu_composited_material: true)
     val bg_image = _engine2d_draw_ir_style_value(style, "background-image")
     if bg_image.starts_with("linear-gradient(") and radius <= 0:
         val g_from = _engine2d_draw_ir_nth_int(bg_image, 0, 0) as u32
@@ -296,7 +404,8 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
         else:
             eng.draw_rect_filled(x, y, w, h, command.color)
     eng = _engine2d_draw_ir_render_borders(eng, style, x, y, w, h, radius)
-    eng
+    Engine2dDrawIrBoxOutcome(
+        engine: eng, cpu_composited_material: false)
 
 fn engine2d_resolved_draw_ir_image(image_uri: text, width: i32, height: i32, pixels: [u32]) -> Engine2dResolvedDrawIrImage:
     Engine2dResolvedDrawIrImage(image_uri: image_uri, width: width, height: height, pixels: pixels)
@@ -567,6 +676,7 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
     var rendered = 0
     var skipped = 0
     var unsupported_kinds = ""
+    var cpu_composited_material_count = 0
     for command in commands:
         # A nil display-list element must be skipped before any field access.
         # Keep the explicit comparison: freestanding codegen has miscompiled
@@ -578,7 +688,12 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
         val x = offset_x + command.x
         val y = offset_y + command.y
         if command_kind == DRAW_IR_COMMAND_RECT:
-            eng = _engine2d_draw_ir_render_box(eng, command, x, y, command.width, command.height)
+            val box = _engine2d_draw_ir_render_box(
+                eng, command, x, y, command.width, command.height)
+            eng = box.engine
+            if box.cpu_composited_material:
+                cpu_composited_material_count =
+                    cpu_composited_material_count + 1
             rendered = rendered + 1
         elif command_kind == DRAW_IR_COMMAND_TEXT:
             val font_identity = _engine2d_draw_ir_style_value(command.computed_style, "font-identity")
@@ -659,7 +774,13 @@ fn _engine2d_draw_ir_render_commands(engine: Engine2D, commands: [DrawIrCommand]
         else:
             skipped = skipped + 1
             unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, command_kind)
-    _engine2d_draw_ir_render_outcome(eng, rendered, skipped, unsupported_kinds)
+    _engine2d_draw_ir_render_outcome(
+        eng,
+        rendered,
+        skipped,
+        unsupported_kinds,
+        cpu_composited_material_count
+    )
 
 # Render one batch onto `engine`, honoring a real embedded render target when
 # the batch declares a non-empty embedding.surface_id: the batch's commands
@@ -682,7 +803,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
     # unannotated field projection as a generic runtime value here.
     val embedding: DrawIrEmbeddingConfig = batch.embedding
     if batch.commands.len() == 0:
-        return _engine2d_draw_ir_render_outcome(eng, 0, 0, "")
+        return _engine2d_draw_ir_render_outcome(eng, 0, 0, "", 0)
     # Perf short-circuit: a batch whose embedding is (0,0) at full opacity and
     # EXACTLY the size of the target it renders onto composites as a plain 1:1
     # copy with no cropping/offset/alpha effect — offscreen-then-blit would be
@@ -741,7 +862,13 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         eng = direct.engine
         if apply_clip:
             eng.clear_clip()
-        return _engine2d_draw_ir_render_outcome(eng, direct.rendered, direct.skipped, direct.unsupported_kinds)
+        return _engine2d_draw_ir_render_outcome(
+            eng,
+            direct.rendered,
+            direct.skipped,
+            direct.unsupported_kinds,
+            direct.cpu_composited_material_count
+        )
 
     # Seed-JIT compatibility (hot path): a mutable `Engine2D? = nil` binding
     # trips the seed's W1003 shared-pointer check, and `?? return` has no seed
@@ -756,7 +883,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         val offscreen_result = eng.create_shared_vulkan_offscreen(embedding.width, embedding.height)
         match offscreen_result:
             Err(reason):
-                return _engine2d_draw_ir_render_outcome(eng, 0, batch.commands.len().to_i32(), reason)
+                return _engine2d_draw_ir_render_outcome(
+                    eng, 0, batch.commands.len().to_i32(), reason, 0)
             Ok(created):
                 offscreen = created
                 offscreen_created = true
@@ -764,7 +892,8 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         val offscreen_result = eng.create_shared_metal_offscreen(embedding.width, embedding.height)
         match offscreen_result:
             Err(reason):
-                return _engine2d_draw_ir_render_outcome(eng, 0, batch.commands.len().to_i32(), reason)
+                return _engine2d_draw_ir_render_outcome(
+                    eng, 0, batch.commands.len().to_i32(), reason, 0)
             Ok(created):
                 offscreen = created
                 offscreen_created = true
@@ -782,7 +911,13 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             offscreen = Engine2D.create_offscreen(embedding.width, embedding.height)
             offscreen_created = true
     if not offscreen_created:
-        return _engine2d_draw_ir_render_outcome(eng, 0, batch.commands.len().to_i32(), "embedded-offscreen-not-created")
+        return _engine2d_draw_ir_render_outcome(
+            eng,
+            0,
+            batch.commands.len().to_i32(),
+            "embedded-offscreen-not-created",
+            0
+        )
     val inner = _engine2d_draw_ir_render_commands(offscreen, batch.commands, 0, 0, images, true)
     offscreen = inner.engine
     var composited = true
@@ -812,8 +947,25 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
     if not offscreen_pooled:
         offscreen.shutdown()
     if not composited:
-        return _engine2d_draw_ir_render_outcome(eng, 0, batch.commands.len().to_i32(), "embedded-device-composite-not-proven")
-    _engine2d_draw_ir_render_outcome(eng, inner.rendered, inner.skipped, inner.unsupported_kinds)
+        return _engine2d_draw_ir_render_outcome(
+            eng,
+            0,
+            batch.commands.len().to_i32(),
+            "embedded-device-composite-not-proven",
+            0
+        )
+    _engine2d_draw_ir_render_outcome(
+        eng,
+        inner.rendered,
+        inner.skipped,
+        inner.unsupported_kinds,
+        # A material receipt proves composition against the destination pixels
+        # visible to the material helper. An embedded/offscreen surface starts
+        # transparent and does not sample its already-painted parent backdrop,
+        # so its inner helper result is deliberately not a parent receipt.
+        # Keep rendering/accounting intact but fail closed on this evidence.
+        0
+    )
 
 fn engine2d_draw_ir_adv_batch(engine: Engine2D, batch: DrawIrBatch, gpu_available: bool) -> Engine2dDrawIrAdvResult:
     var images: [Engine2dResolvedDrawIrImage] = []
@@ -826,7 +978,16 @@ fn engine2d_draw_ir_adv_batch_with_images(engine: Engine2D, batch: DrawIrBatch, 
     var unsupported_kinds = outcome.unsupported_kinds
     if unsupported_kinds == "":
         unsupported_kinds = "none"
-    _engine2d_draw_ir_result_from_plan_with_unsupported(plan, outcome.rendered, outcome.skipped, unsupported_kinds, eng.read_pixels_with_source())
+    var result = _engine2d_draw_ir_result_from_plan_with_unsupported(
+        plan,
+        outcome.rendered,
+        outcome.skipped,
+        unsupported_kinds,
+        eng.read_pixels_with_source()
+    )
+    result.cpu_composited_material_count =
+        outcome.cpu_composited_material_count
+    result
 
 fn engine2d_draw_ir_adv_composition(engine: Engine2D, composition: DrawIrComposition, gpu_available: bool) -> Engine2dDrawIrAdvResult:
     var images: [Engine2dResolvedDrawIrImage] = []
@@ -870,6 +1031,7 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
     var rendered = 0
     var skipped = 0
     var unsupported_kinds = ""
+    var cpu_composited_material_count = 0
     # NOTE(layer ordering): batches composite in array order, not re-sorted by
     # embedding.layer. Every real producer (e.g. window_scene_draw_ir.spl)
     # already emits batches desktop-first/chrome-next/windows-by-ascending-
@@ -883,6 +1045,10 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
         eng = outcome.engine
         rendered = rendered + outcome.rendered
         skipped = skipped + outcome.skipped
+        cpu_composited_material_count = (
+            cpu_composited_material_count +
+            outcome.cpu_composited_material_count
+        )
         if outcome.unsupported_kinds != "" and outcome.unsupported_kinds != "none":
             if unsupported_kinds != "":
                 unsupported_kinds = unsupported_kinds + ","
@@ -896,6 +1062,8 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
         readback = eng.read_pixels_with_source()
     var result = _engine2d_draw_ir_result_from_composition_plan_with_unsupported(
         plan, rendered, skipped, unsupported_kinds, readback)
+    result.cpu_composited_material_count =
+        cpu_composited_material_count
     val rendered_fonts = eng.fonts()
     result.font_identity = rendered_fonts.current_font_identity()
     eng.install_font_renderer(rendered_fonts)

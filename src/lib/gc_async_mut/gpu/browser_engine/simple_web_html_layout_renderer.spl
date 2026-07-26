@@ -64,129 +64,161 @@ pub fn simple_web_layout_debug_layout_by_id(html: text, width: i32, height: i32,
 class SimpleWebLayoutDrawIrResult:
     composition: DrawIrComposition
     material_fallback: WebRenderMaterialFallbackProvenance
+    material_witness: SimpleWebLayoutMaterialWitness
+
+class SimpleWebLayoutMaterialWitness:
+    cpu_composited_count: i32
+    cpu_composited_sha256: text
+    solid_material_count: i32
+    solid_material_sha256: text
+
+struct SimpleWebBackdropAdmission:
+    admitted: bool
+    realized_blur_px: i64
+    realized_saturation_milli: i64
+
+fn _simple_web_backdrop_admission(backdrop: text) -> SimpleWebBackdropAdmission:
+    # This is intentionally a byte-exact grammar, not a best-effort number
+    # extractor. Unsupported syntax must remain unavailable rather than gain a
+    # material receipt through a lossy normalization.
+    val terms = backdrop.split(" ")
+    if terms.len() != 2:
+        return SimpleWebBackdropAdmission(
+            admitted: false, realized_blur_px: 0,
+            realized_saturation_milli: 0)
+    val blur_term = terms[0]
+    val saturation_term = terms[1]
+    if not blur_term.starts_with("blur(") or not blur_term.ends_with("px)"):
+        return SimpleWebBackdropAdmission(
+            admitted: false, realized_blur_px: 0,
+            realized_saturation_milli: 0)
+    if (not saturation_term.starts_with("saturate(") or
+        not saturation_term.ends_with("%)")):
+        return SimpleWebBackdropAdmission(
+            admitted: false, realized_blur_px: 0,
+            realized_saturation_milli: 0)
+    val blur_text = blur_term.slice(5, blur_term.len() - 3)
+    val saturation_text = saturation_term.slice(9, saturation_term.len() - 2)
+    val blur = blur_text.to_i64()
+    val saturation_percent = saturation_text.to_i64()
+    if (blur == nil or saturation_percent == nil or blur < 0 or blur > 1000000 or
+        saturation_percent < 0 or saturation_percent > 300):
+        return SimpleWebBackdropAdmission(
+            admitted: false, realized_blur_px: 0,
+            realized_saturation_milli: 0)
+    # Reject signs, leading zeros, decimals, whitespace, and extra filters by
+    # requiring the authored spelling to reconstruct exactly.
+    if backdrop != "blur({blur}px) saturate({saturation_percent}%)":
+        return SimpleWebBackdropAdmission(
+            admitted: false, realized_blur_px: 0,
+            realized_saturation_milli: 0)
+    val realized_blur = if blur > 4: 4 else: blur
+    SimpleWebBackdropAdmission(
+        admitted: true,
+        realized_blur_px: realized_blur,
+        realized_saturation_milli: saturation_percent * 10)
+
+pub fn simple_web_layout_material_provenance_after_execution(witness: SimpleWebLayoutMaterialWitness, skipped_command_count: i32, pixel_count: i32, expected_pixel_count: i32, executed_cpu_material_count: i32) -> WebRenderMaterialFallbackProvenance:
+    if skipped_command_count != 0 or pixel_count != expected_pixel_count:
+        return WebRenderMaterialFallbackProvenance.none()
+    if witness.cpu_composited_count > 0:
+        if (witness.cpu_composited_count == executed_cpu_material_count and
+            witness.cpu_composited_sha256.len() == 64):
+            return WebRenderMaterialFallbackProvenance.cpu_composited(
+                witness.cpu_composited_sha256)
+        return WebRenderMaterialFallbackProvenance.none()
+    if executed_cpu_material_count != 0:
+        return WebRenderMaterialFallbackProvenance.none()
+    if (witness.solid_material_count > 0 and
+        witness.solid_material_sha256.len() == 64):
+        return WebRenderMaterialFallbackProvenance.solid(
+            "cpu-raster-backdrop-sampling-unavailable",
+            witness.solid_material_sha256)
+    WebRenderMaterialFallbackProvenance.none()
 
 pub fn simple_web_material_fallback_realized(declared: bool, bg: u32, gradient_from: u32, gradient_to: u32, layers_raw: text) -> bool:
     declared and ((bg >> 24) & 255u32) == 255u32 and gradient_from == 0u32 and gradient_to == 0u32 and layers_raw == ""
 
-fn _simple_web_material_fallback_provenance(nodes: [HNode], styles: [Style], entries: text) -> WebRenderMaterialFallbackProvenance:
-    # entries is built inside compute_styles_with_material from loop-local
-    # style state and crosses here as plain text — the channel that survives
-    # freestanding builds. Non-empty entries are authoritative; the legacy
-    # [Style]-reading reducer below stays as the diagnostic fallback so a
-    # missing contract still emits its attribution receipts.
-    if entries != "":
-        val canonical = "simple-web-realized-solid-material-v1" + entries
-        val material_sha = sha256_text(canonical)
-        if material_sha.len() != 64:
-            print "[web-material-fallback] digest-degenerate len={material_sha.len()} canonical_len={canonical.len()}"
-        return WebRenderMaterialFallbackProvenance.solid(
-            "cpu-raster-backdrop-sampling-unavailable",
-            material_sha
-        )
-    _simple_web_realized_material_fallback(nodes, styles)
-
-fn _simple_web_realized_material_fallback(nodes: [HNode], styles: [Style]) -> WebRenderMaterialFallbackProvenance:
-    var canonical = "simple-web-realized-solid-material-v1"
-    var material_count = 0
-    var rejected_contract = false
-    var rejected_declared = false
-    var rejected_bg = 0u32
-    var rejected_bg_alpha = 0u32
-    var rejected_gradient_from = 0u32
-    var rejected_gradient_to = 0u32
-    var rejected_layers_len = 0
-    var rejected_layers_cleared = false
+fn _simple_web_material_witness(nodes: [HNode], styles: [Style]) -> SimpleWebLayoutMaterialWitness:
+    var cpu_canonical = "simple-web-realized-cpu-composited-material-v1"
+    var cpu_count = 0
+    var solid_canonical = "simple-web-realized-solid-material-v1"
+    var solid_count = 0
     var i = 0
     while i < nodes.len() and i < styles.len():
-        # Derive provenance from the authoritative computed style before
-        # lowering. Recovering it from DrawIrCommand.computed_style requires a
-        # wide struct-in-array plus nested-array-field round trip that can lose
-        # optional metadata on freestanding builds even while primary draw
-        # fields and pixels remain correct.
-        # Snapshot each aggregate once. Direct repeated field loads through an
-        # indexed wide aggregate are not reliable on every freestanding
-        # backend and can make this reducer disagree with the already-lowered
-        # Draw IR style for the same node.
-        val node = nodes[i]
-        # Freestanding lane: a whole-aggregate element copy (val st = styles[i])
-        # loses field contents on this build even when the producer realized
-        # them (proven by the silent wm-contract-unrealized producer receipt vs
-        # the rejected consumer receipt). Bind each needed field directly from
-        # the held array element — the channel proven safe in the compositor's
-        # surface-count fix.
+        # Direct per-field binds are required here: whole Style aggregate
+        # copies lose members on the freestanding renderer (d9fc7e864d).
         val st_backdrop: text = styles[i].backdrop_filter_raw
         val st_bg: u32 = styles[i].bg
         val st_fg: u32 = styles[i].fg
         val st_gradient_from: u32 = styles[i].background_gradient_from
         val st_gradient_to: u32 = styles[i].background_gradient_to
         val st_layers_raw: text = styles[i].bg_layers_raw
-        # This is an internal WM contract with one canonical spelling. Exact
-        # comparison avoids method dispatch through the nil representation
-        # used by empty text on nodes that do not declare the contract.
-        val declared_raw = attr_value(node.attrs_raw, "data-wm-theme-fallback")
-        val declared = declared_raw == "solid-material"
-        val css_requested = st_backdrop != ""
-        val bg_alpha = (st_bg >> 24) & 255u32
-        # compute_styles realizes the explicit WM contract immediately after
-        # the cascade by clearing backdrop/image layers and applying the named
-        # bg/fg. Provenance still requires the resulting surface to be opaque
-        # and free of residual image layers.
-        # Unannotated CSS backdrop requests use the same strict post-style
-        # evidence before they may claim a solid fallback.
-        val layers_cleared = st_gradient_from == 0u32 and st_gradient_to == 0u32 and st_layers_raw == ""
-        # Use the same realized-state proof emitted into Draw IR by
-        # _html_draw_ir_style_props. Re-parsing data-wm-theme-bg and requiring
-        # a second exact equality made this parallel provenance path reject the
-        # already-executed opaque material on freestanding x86 even though the
-        # Draw IR command recorded solid-material and its image layers were
-        # cleared. The computed style is the renderer-owned execution state.
-        val declared_realized = simple_web_material_fallback_realized(declared, st_bg, st_gradient_from, st_gradient_to, st_layers_raw)
-        val css_realized = simple_web_material_fallback_realized(css_requested, st_bg, st_gradient_from, st_gradient_to, st_layers_raw)
-        val realized = declared_realized or css_realized
-        if realized:
-            canonical = canonical + "\n{material_count}|kind=solid-material|bg={st_bg}|fg={st_fg}|backdrop=none|background-image=none"
-            material_count = material_count + 1
-        elif declared_raw != "" and not rejected_contract:
-            # Emit at most one rejection receipt per render invocation. This
-            # is diagnostic evidence only: provenance remains fail-closed.
-            rejected_contract = true
-            rejected_declared = declared
-            rejected_bg = st_bg
-            rejected_bg_alpha = bg_alpha
-            rejected_gradient_from = st_gradient_from
-            rejected_gradient_to = st_gradient_to
-            rejected_layers_len = st_layers_raw.len()
-            rejected_layers_cleared = layers_cleared
+        # The internal WM contract has exact, byte-stable spellings. Do not
+        # trim/lower these values: accepting a normalized near-match would make
+        # an unsupported exact-mode contract look realized.
+        val fallback_attr = attr_value(
+            nodes[i].attrs_raw, "data-wm-theme-fallback")
+        val mode_attr = attr_value(
+            nodes[i].attrs_raw, "data-wm-theme-material-mode")
+        val declared_bg_attr = attr_value(
+            nodes[i].attrs_raw, "data-wm-theme-bg")
+        val declared_argb = parse_color_any(declared_bg_attr)
+        val declared_opaque = (
+            declared_bg_attr != "" and
+            ((declared_argb >> 24) & 255u32) == 255u32
+        )
+        val surface_alpha = (st_bg >> 24) & 255u32
+        val translucent_surface = surface_alpha > 0u32 and surface_alpha < 255u32
+        val opaque_surface = surface_alpha == 255u32
+        val typed_stops_absent = (
+            st_gradient_from == 0u32 and st_gradient_to == 0u32)
+        val typed_stops_present = (
+            st_gradient_from != 0u32 and st_gradient_to != 0u32)
+        val typed_stops_valid = typed_stops_absent or typed_stops_present
+        val backdrop = _simple_web_backdrop_admission(st_backdrop)
+        val cpu_admitted = (
+            mode_attr == "engine2d-cpu-composited-material-v1" and
+            fallback_attr == "solid-material" and declared_opaque and
+            translucent_surface and st_layers_raw == "" and
+            typed_stops_valid and backdrop.admitted
+        )
+        if cpu_admitted:
+            val realized = "blur({backdrop.realized_blur_px}px) saturate({backdrop.realized_saturation_milli / 10}%)"
+            cpu_canonical = (
+                cpu_canonical +
+                "\n{cpu_count}|kind=cpu-composited-material" +
+                "|reason=native-device-backdrop-path-pending" +
+                "|mode={mode_attr}|fallback={fallback_attr}" +
+                "|declared={declared_argb}|surface={st_bg}" +
+                "|surface-alpha-milli={(surface_alpha as i64) * 1000 / 255}" +
+                "|backdrop={st_backdrop}|realized={realized}" +
+                "|blur={backdrop.realized_blur_px}" +
+                "|saturation={backdrop.realized_saturation_milli}" +
+                "|stops={st_gradient_from},{st_gradient_to}"
+            )
+            cpu_count = cpu_count + 1
+        # Solid reduction is not a lossy fallback for a failed CPU contract:
+        # exact mode must be absent; all material fields must already be gone.
+        val solid_admitted = (
+            mode_attr == "" and fallback_attr == "solid-material" and
+            declared_opaque and opaque_surface and st_backdrop == "" and
+            st_layers_raw == "" and typed_stops_absent
+        )
+        if solid_admitted:
+            solid_canonical = (
+                solid_canonical +
+                "\n{solid_count}|kind=solid-material" +
+                "|reason=cpu-raster-backdrop-sampling-unavailable" +
+                "|bg={st_bg}|fg={st_fg}|backdrop=none|background-image=none"
+            )
+            solid_count = solid_count + 1
         i = i + 1
-    if material_count == 0:
-        # Fail-closed provenance is silent by construction, which made a
-        # freestanding regression (empty reducer inputs / an unparsed contract
-        # attribute) indistinguishable from an honest rejection. Emit one
-        # bounded shape receipt so `fallback=none` can always be attributed to
-        # a specific stage instead of guessed at from the WM frame line.
-        var attr_nodes = 0
-        var declared_nodes = 0
-        var scan_i = 0
-        while scan_i < nodes.len():
-            if nodes[scan_i].attrs_raw.contains("data-wm-theme-fallback"):
-                attr_nodes = attr_nodes + 1
-                if attr_value(nodes[scan_i].attrs_raw, "data-wm-theme-fallback") != "":
-                    declared_nodes = declared_nodes + 1
-            scan_i = scan_i + 1
-        print "[web-material-fallback] none nodes={nodes.len()} styles={styles.len()} attr_nodes={attr_nodes} declared_nodes={declared_nodes} rejected={rejected_contract}"
-        if rejected_contract:
-            print "[web-material-fallback] rejected declared={rejected_declared} bg={rejected_bg} bg_alpha={rejected_bg_alpha} gradient_from={rejected_gradient_from} gradient_to={rejected_gradient_to} layers_len={rejected_layers_len} layers_cleared={rejected_layers_cleared}"
-        return WebRenderMaterialFallbackProvenance.none()
-    val material_sha = sha256_text(canonical)
-    if material_sha.len() != 64:
-        # Attributes an empty frame material digest to the PRODUCER (a broken
-        # sha256_text in this build) rather than the artifact transit. Silent
-        # on any healthy build.
-        print "[web-material-fallback] digest-degenerate len={material_sha.len()} canonical_len={canonical.len()}"
-    WebRenderMaterialFallbackProvenance.solid(
-        "cpu-raster-backdrop-sampling-unavailable",
-        material_sha
-    )
+    SimpleWebLayoutMaterialWitness(
+        cpu_composited_count: cpu_count,
+        cpu_composited_sha256: if cpu_count > 0: sha256_text(cpu_canonical) else: "",
+        solid_material_count: solid_count,
+        solid_material_sha256: if solid_count > 0: sha256_text(solid_canonical) else: "")
 
 fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height: i32, vector_fonts: bool) -> SimpleWebLayoutDrawIrResult:
     val render_start_us = rt_time_now_unix_micros()
@@ -264,8 +296,7 @@ fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height:
             part_i = part_i + 1
     val child_index = build_child_index(nodes)
     _web_budget_rearm(render_start_us + budget_us * 7 / 10)
-    var material_entries: [text] = [""]
-    val styles = compute_styles_with_material(nodes, rules, child_index, false, vector_fonts, material_entries)
+    val styles = compute_styles(nodes, rules, child_index, false, vector_fonts)
     _web_budget_rearm(render_start_us + budget_us * 9 / 10)
     val node_count = nodes.len() as i32
     val empty_starts = empty_i32_lists(node_count)
@@ -295,9 +326,12 @@ fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height:
     val batch = draw_ir_batch_with_source("html-layout", DRAW_IR_BACKEND_CPU, embedding, commands, source)
     val batches = [batch]
     val composition = draw_ir_composition("html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, batches)
+    val material_witness = _simple_web_material_witness(nodes, styles)
     SimpleWebLayoutDrawIrResult(
         composition: composition,
-        material_fallback: _simple_web_material_fallback_provenance(nodes, styles, material_entries[0])
+        material_fallback: simple_web_layout_material_provenance_after_execution(
+            material_witness, 0, 1, 1, 0),
+        material_witness: material_witness
     )
 
 pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
@@ -382,8 +416,7 @@ pub fn simple_web_layout_render_html_software_result(html: text, width: i32, hei
     val child_index = build_child_index(nodes)
     # Style gets at most 70% of the total budget.
     _web_budget_rearm(render_start_us + budget_us * 7 / 10)
-    var material_entries: [text] = [""]
-    val styles = compute_styles_with_material(nodes, rules, child_index, false, true, material_entries)
+    val styles = compute_styles(nodes, rules, child_index, false, true)
     # Layout always gets a slice up to 90%, even if style spent its whole 70%.
     _web_budget_rearm(render_start_us + budget_us * 9 / 10)
     val node_count = nodes.len() as i32
@@ -415,9 +448,11 @@ pub fn simple_web_layout_render_html_software_result(html: text, width: i32, hei
     val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
     var painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
     painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
+    val material_witness = _simple_web_material_witness(nodes, styles)
     SimpleWebLayoutPixelResult(
         pixels: painted,
-        material_fallback: _simple_web_material_fallback_provenance(nodes, styles, material_entries[0])
+        material_fallback: simple_web_layout_material_provenance_after_execution(
+            material_witness, 0, painted.len(), width * height, 0)
     )
 
 pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> [u32]:

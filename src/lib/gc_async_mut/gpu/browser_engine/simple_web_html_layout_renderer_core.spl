@@ -1836,11 +1836,10 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             if inline_empty_cells_decl.trim().lower() == "hide":
                 empty_cells_hide = true
             st = apply_decls(st, nd.style_attr, em_base)
-        # The shared WM supplies the package's named solid material when this
-        # renderer cannot sample a backdrop. Apply that explicit contract
-        # after the normal cascade: merely forcing the translucent surface's
-        # existing RGB opaque can produce a different color from the theme's
-        # declared fallback.
+        # The shared WM supplies the package's named solid material for the
+        # legacy fallback mode. A producer may opt into the CPU-composited
+        # material contract only with the exact mode value, preserving the
+        # authored translucent background and backdrop declaration for W2.
         # Freestanding lane: method calls chained onto a function-call return
         # (attr_value(...).trim().lower()) misroute/corrupt on this backend —
         # the char_code_at().to_i32() defect class. Bind each hop to a typed
@@ -1855,7 +1854,12 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             val probe_raw_match = wm_fallback_attr == "solid-material"
             val probe_final_match = wm_fallback == "solid-material"
             print "[web-style-producer] contract-attr index={i} attrs_len={nd.attrs_raw.len()} raw_len={wm_fallback_attr.len()} trimmed_len={wm_fallback_trimmed.len()} lower_len={wm_fallback.len()} raw_match={probe_raw_match} final_match={probe_final_match}"
-        if wm_fallback == "solid-material":
+        val wm_material_mode: text = attr_value(
+            nd.attrs_raw, "data-wm-theme-material-mode")
+        if (
+            wm_fallback == "solid-material" and
+            wm_material_mode != "engine2d-cpu-composited-material-v1"
+        ):
             val wm_bg_attr: text = attr_value(nd.attrs_raw, "data-wm-theme-bg")
             val wm_bg: text = wm_bg_attr.trim()
             val wm_fg_attr: text = attr_value(nd.attrs_raw, "data-wm-theme-fg")
@@ -1867,15 +1871,18 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 wm_fallback_decls = wm_fallback_decls + "color:" + wm_fg + ";"
             st = apply_decls(st, wm_fallback_decls, em_base)
             # Producer-side provenance attribution (silent on healthy): the
-            # material reducer downstream reads these same fields through the
-            # [Style] return crossing. If this line stays silent while the
-            # reducer still sees bg=0, the loss is in the array-return channel,
-            # not the cascade.
+            # material witness downstream reads these same fields through the
+            # returned [Style] array. Keep this diagnostic inside the legacy
+            # fallback branch; exact CPU mode is intentionally translucent.
             val wm_realized_bg: u32 = st.bg
             val wm_realized_gf: u32 = st.background_gradient_from
             val wm_realized_gt: u32 = st.background_gradient_to
             val wm_realized_layers: i64 = st.bg_layers_raw.len()
-            if ((wm_realized_bg >> 24) & 255u32) != 255u32 or wm_realized_gf != 0u32 or wm_realized_gt != 0u32 or wm_realized_layers != 0:
+            if (
+                ((wm_realized_bg >> 24) & 255u32) != 255u32 or
+                wm_realized_gf != 0u32 or wm_realized_gt != 0u32 or
+                wm_realized_layers != 0
+            ):
                 print "[web-style-producer] wm-contract-unrealized index={i} bg={wm_realized_bg} gradient_from={wm_realized_gf} gradient_to={wm_realized_gt} layers_len={wm_realized_layers} wm_bg_len={wm_bg.len()}"
         if trace_stages:
             print "[layout-trace] style_stage=inline-ready index={i}"
@@ -1899,8 +1906,14 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         # Realized solid-material entry, evaluated on the loop-local st (the
         # only channel proven to hold field contents on freestanding builds).
         # Mirrors _simple_web_realized_material_fallback's realized predicate.
-        val mat_declared = wm_fallback == "solid-material"
-        val mat_css = st.backdrop_filter_raw != ""
+        # This side channel belongs to the legacy solid reducer only. Exact
+        # CPU material mode is witnessed after style return and must not emit
+        # a misleading legacy entry-rejected receipt.
+        val legacy_material_mode = wm_material_mode == ""
+        val mat_declared = (
+            legacy_material_mode and wm_fallback == "solid-material")
+        val mat_css = (
+            legacy_material_mode and st.backdrop_filter_raw != "")
         if mat_declared or mat_css:
             val mat_bg: u32 = st.bg
             val mat_fg: u32 = st.fg
@@ -2005,5 +2018,15 @@ pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) ->
                 return st.flex_direction
             if field == "font_size":
                 return st.font_size.to_string()
+            if field == "background_color":
+                return st.bg.to_string()
+            if field == "background_gradient_from":
+                return st.background_gradient_from.to_string()
+            if field == "background_gradient_to":
+                return st.background_gradient_to.to_string()
+            if field == "background_layers_raw":
+                return st.bg_layers_raw
+            if field == "backdrop_filter_raw":
+                return st.backdrop_filter_raw
         i = i + 1
     ""

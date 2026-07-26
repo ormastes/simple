@@ -1,0 +1,164 @@
+"""Engine2D canonical CPU-composited glass material pixel specification."""
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
+    Engine2dGlassMaterialConfig,
+    engine2d_draw_ir_glass_material_pixels
+}
+
+describe "Engine2D Draw IR glass material pixels":
+
+    it "preserves rounded corners and alpha-composites the surface":
+        val black: u32 = 0xFF000000u32
+        val white: u32 = 0xFFFFFFFFu32
+        val framebuffer: [u32] = [black; 64]
+        val pixels = engine2d_draw_ir_glass_material_pixels(
+            framebuffer,
+            Engine2dGlassMaterialConfig(
+                framebuffer_width: 8,
+                framebuffer_height: 8,
+                x: 2,
+                y: 2,
+                width: 4,
+                height: 4,
+                radius: 1,
+                blur_radius: 0,
+                saturation_milli: 1000,
+                surface_alpha_milli: 500,
+                surface_color: white,
+                gradient_from: white,
+                gradient_to: white,
+                gradient_enabled: false,
+                gradient_layered_over_surface: false
+            )
+        )
+
+        expect(pixels.len()).to_equal(16)
+        expect(pixels[0]).to_equal(black)
+        expect(pixels[5]).to_equal(0xFF7F7F7Fu32)
+
+    it "samples the existing framebuffer with bounded box blur":
+        val white: u32 = 0xFFFFFFFFu32
+        var framebuffer: [u32] = [white; 25]
+        framebuffer[12] = 0xFF000000u32
+        val pixels = engine2d_draw_ir_glass_material_pixels(
+            framebuffer,
+            Engine2dGlassMaterialConfig(
+                framebuffer_width: 5,
+                framebuffer_height: 5,
+                x: 2,
+                y: 2,
+                width: 1,
+                height: 1,
+                radius: 0,
+                blur_radius: 1,
+                saturation_milli: 1000,
+                surface_alpha_milli: 0,
+                surface_color: 0u32,
+                gradient_from: 0u32,
+                gradient_to: 0u32,
+                gradient_enabled: false,
+                gradient_layered_over_surface: false
+            )
+        )
+
+        expect(pixels).to_equal([0xFFE2E2E2u32])
+
+    it "clips and alpha-composites both gradient endpoints":
+        val black: u32 = 0xFF000000u32
+        val framebuffer: [u32] = [black; 4]
+        val pixels = engine2d_draw_ir_glass_material_pixels(
+            framebuffer,
+            Engine2dGlassMaterialConfig(
+                framebuffer_width: 2,
+                framebuffer_height: 2,
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 2,
+                radius: 0,
+                blur_radius: 0,
+                saturation_milli: 1000,
+                surface_alpha_milli: 500,
+                surface_color: 0u32,
+                gradient_from: 0xFFFF0000u32,
+                gradient_to: 0xFF00FF00u32,
+                gradient_enabled: true,
+                gradient_layered_over_surface: false
+            )
+        )
+
+        expect(pixels).to_equal([0xFF7F0000u32, 0xFF007F00u32])
+
+    it "applies backdrop saturation before the surface tint":
+        val framebuffer: [u32] = [0xFFFF0000u32]
+        val pixels = engine2d_draw_ir_glass_material_pixels(
+            framebuffer,
+            Engine2dGlassMaterialConfig(
+                framebuffer_width: 1,
+                framebuffer_height: 1,
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+                radius: 0,
+                blur_radius: 0,
+                saturation_milli: 0,
+                surface_alpha_milli: 0,
+                surface_color: 0u32,
+                gradient_from: 0u32,
+                gradient_to: 0u32,
+                gradient_enabled: false,
+                gradient_layered_over_surface: false
+            )
+        )
+
+        expect(pixels).to_equal([0xFF363636u32])
+
+    it "rejects oversized blur work before allocating an intermediate buffer":
+        val pixels = engine2d_draw_ir_glass_material_pixels(
+            [],
+            Engine2dGlassMaterialConfig(
+                framebuffer_width: 8388608,
+                framebuffer_height: 1,
+                x: 0,
+                y: 0,
+                width: 8388608,
+                height: 1,
+                radius: 0,
+                blur_radius: 4,
+                saturation_milli: 1000,
+                surface_alpha_milli: 0,
+                surface_color: 0u32,
+                gradient_from: 0u32,
+                gradient_to: 0u32,
+                gradient_enabled: false,
+                gradient_layered_over_surface: false
+            )
+        )
+
+        expect(pixels).to_equal([])
+
+    it "composites an alpha gradient over the translucent base surface":
+        val pixels = engine2d_draw_ir_glass_material_pixels(
+            [0xFF000000u32],
+            Engine2dGlassMaterialConfig(
+                framebuffer_width: 1,
+                framebuffer_height: 1,
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+                radius: 0,
+                blur_radius: 0,
+                saturation_milli: 1000,
+                surface_alpha_milli: 500,
+                surface_color: 0xFFFF0000u32,
+                gradient_from: 0x800000FFu32,
+                gradient_to: 0x800000FFu32,
+                gradient_enabled: true,
+                gradient_layered_over_surface: true
+            )
+        )
+
+        expect(pixels).to_equal([0xFF3F0080u32])

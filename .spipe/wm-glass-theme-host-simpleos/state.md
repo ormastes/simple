@@ -66,7 +66,7 @@ No new drawing IR, private widget renderer, font atlas/cache, Engine3D shortcut,
   capability-declared pixel evidence.
 
 ## Phase
-implementation-blocked-native-to-i64-and-exact-current-live-evidence
+implementation-source-prepared-web-cpu-material-verification-blocked
 
 ## Log
 - dev: Created state file with 10 acceptance criteria (type: bug); defined bounded cooperative lanes, canonical interface constraints, evidence steps, and fail-fast policy.
@@ -649,3 +649,52 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   patch. Independent review and a fresh-session PASS remain required before
   integration. Existing aggregate system evidence remains fail-closed; all
   host/device/QEMU rows remain open.
+
+- continuation-2026-07-26-web-material-w1-w4: **SOURCE PREPARED /
+  UNVERIFIED.** The canonical Simple Web cascade now preserves the exact
+  opt-in glass semantics, retains unsupported image syntax as a fail-closed
+  raw witness, and normalizes the Aetheric
+  `linear-gradient(...), rgba(...base...)` stack into one typed gradient plus
+  translucent surface. Draw IR keeps the named opaque command fallback and
+  carries explicit requested/realized material witnesses.
+
+  Engine2D now receipts only successful CPU glass execution. Web provenance is
+  derived after rendering and requires a complete Draw IR witness count to
+  equal the Engine2D execution receipt count; incomplete execution, skipped
+  commands, unsupported layers, or receipt mismatch remain `none`. The WM
+  validator accepts only the exact solid/CPU reason pairs and lowercase
+  SHA-256 formatting. No native-device, SIMD, host, event, or QEMU claim was
+  added.
+
+  `git diff --check` passes. The focused SSpec runner exhausted its three-cycle
+  cap with only `0 passed, 1 failed` and no child diagnostic. The repository
+  launcher then identified as a Rust bootstrap seed, so source checking stopped
+  without bootstrap per user instruction. The harness defect is tracked in
+  `doc/08_tracking/bug/sspec_runner_suppresses_child_failure_diagnostic_2026-07-26.md`.
+  Fresh pure-Simple focused PASS and retained host/device/QEMU evidence remain
+  required.
+
+- continuation-2026-07-26-web-material-review-repair: Highest-capability review
+  rejected the first integration and drove five owner fixes. Draw IR now uses
+  the real `rect` command identity; Aetheric snapshot/Web shorthand values keep
+  base `0xCC1F1F21` and raw alpha stops `0x14FFFFFF`/`0x06FFFFFF`; the updated
+  material SHA-256 is
+  `0ad3df8e5f6169cb83a2554fbe0823ec470070ae43a47eae701c4f9321cdda37`.
+  Software and Engine2D material paths composite base then alpha gradient.
+  Embedded/offscreen execution returns zero material receipts until a
+  parent-backdrop-aware path exists.
+
+  Web provenance now uses a typed producer witness built through direct
+  per-field Style binds and is admitted only after exact pixel/skipped/count
+  execution checks. Generic Draw IR has no such witness and remains
+  fail-closed. Exact backdrop grammar and strict legacy solid witnesses prevent
+  malformed exact mode from downgrading to an accepted solid receipt. Focused
+  source assertions cover the complete public Aetheric shorthand route, but a
+  usable pure-Simple runner PASS remains outstanding.
+
+- continuation-2026-07-26-web-material-final-review: **ACCEPTED FOR SOURCE
+  CHECKPOINT.** A final highest-capability read-only review accepted the W1-W4
+  implementation after correcting the centered first-row software-gradient
+  expectation to `0xFF595959`. This is source-review acceptance only; it does
+  not replace the outstanding pure-Simple runner, backend, host, event, or QEMU
+  evidence.
