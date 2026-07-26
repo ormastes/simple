@@ -53,7 +53,7 @@ use std.gpu.engine2d.backend_rocm.{RocmBackend}
 use std.gpu.engine2d.backend_intel.{IntelBackend}
 use std.gpu.engine2d.backend_webgpu.{WebGpuBackend}
 use std.gpu.engine2d.backend_qualcomm.{QualcommBackend}
-use std.gpu.engine2d.backend_probe.{BackendProbeResult, backend_probe_initialized}
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus}
 use std.gpu.engine2d.compute_dispatch.{ComputeDispatchResult, compute_dispatch_auto, compute_dispatch_for_backend}
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name, backend_default_priority_order}
 use std.gpu.engine2d.wm_frame_pacing.{FramePacingCounters, make_frame_pacing_counters, tick_once}
@@ -70,8 +70,8 @@ use std.gc_async_mut.text_layout.font_renderer.{
 use std.gc_async_mut.gpu.engine2d.font_owner.{
     Engine2DFontOwner,
     engine2d_font_owner_clear,
-    engine2d_font_owner_current,
     engine2d_font_owner_get_or_create,
+    engine2d_font_owner_has,
     engine2d_font_owner_store
 }
 use std.common.encoding.font_registry.{selected_font_asset_local_path_for_identity}
@@ -235,14 +235,12 @@ class Engine2D:
 
     me selected_font_identity() -> text:
         val owner: Engine2DFontOwner = self.font_owner
-        val selected = engine2d_font_owner_current(owner)
-        match selected:
-            case Some(fonts):
-                val identity = fonts.current_font_identity()
-                self.font_owner = engine2d_font_owner_store(owner, fonts)
-                return identity
-            case None:
-                return ""
+        if not engine2d_font_owner_has(owner):
+            return ""
+        val fonts = engine2d_font_owner_get_or_create(owner)
+        val identity = fonts.current_font_identity()
+        self.font_owner = engine2d_font_owner_store(owner, fonts)
+        identity
 
     fn font_execution_attempts() -> [text]: self.last_font_execution_attempts
     fn font_execution_target() -> text: self.last_font_execution_target
@@ -693,7 +691,7 @@ class Engine2D:
         BackendProbeResult explaining exactly why the requested backend is unavailable.
         """
         var probe = Engine2D.probe_backend(width, height, backend_name)
-        if backend_probe_initialized(probe):
+        if probe.status == BackendStatus.Initialized:
             match Engine2D.create_requested_backend(width, height, backend_name):
                 Ok(engine):
                     Ok(engine)
@@ -833,7 +831,7 @@ class Engine2D:
         if override_name != "":
             val override_canon = backend_canonical_name(override_name)
             val override_probe = Engine2D.probe_backend(1, 1, override_canon)
-            if backend_probe_initialized(override_probe):
+            if override_probe.status == BackendStatus.Initialized:
                 return override_canon
         val order = backend_default_priority_order()
         var idx = 0
@@ -841,7 +839,7 @@ class Engine2D:
         while idx < order_len:
             val name = order[idx]
             val probe = Engine2D.probe_backend(1, 1, name)
-            if backend_probe_initialized(probe):
+            if probe.status == BackendStatus.Initialized:
                 return name
             idx = idx + 1
         "cpu"
@@ -860,7 +858,7 @@ class Engine2D:
         while idx < order_len:
             val name = order[idx]
             val probe = Engine2D.probe_backend(1, 1, name)
-            if backend_probe_initialized(probe):
+            if probe.status == BackendStatus.Initialized:
                 available.push(name)
             idx = idx + 1
 
@@ -1228,15 +1226,12 @@ class Engine2D:
         """Draw a selected vector face fail-closed, or use the bitmap default."""
         var has_ttf = false
         val owner: Engine2DFontOwner = self.font_owner
-        val current_fonts = engine2d_font_owner_current(owner)
-        match current_fonts:
-            case Some(fonts):
-                has_ttf = fonts.has_sffi_ttf()
-            case None:
-                pass_do_nothing("bitmap fallback needs no selected vector renderer")
+        val renderer_present = engine2d_font_owner_has(owner)
+        if renderer_present:
+            has_ttf = engine2d_font_owner_get_or_create(owner).has_sffi_ttf()
         if _VEC_TEXT_PROBE and _vec_entry_probe_count < 8:
             _vec_entry_probe_count = _vec_entry_probe_count + 1
-            print("[vec-text-probe] draw_text-entry text_len={text_val.len()} font_renderer_nil={current_fonts == nil} has_sffi_ttf={has_ttf} vulkan_font_state_unknown={self.vulkan_font_state_unknown} selected_backend={self.selected_backend_name}")
+            print("[vec-text-probe] draw_text-entry text_len={text_val.len()} font_renderer_nil={not renderer_present} has_sffi_ttf={has_ttf} vulkan_font_state_unknown={self.vulkan_font_state_unknown} selected_backend={self.selected_backend_name}")
         if has_ttf:
             if _VEC_TEXT_PROBE and _vec_entry_probe_count < 24:
                 _vec_entry_probe_count = _vec_entry_probe_count + 1
@@ -1350,15 +1345,12 @@ class Engine2D:
         if identity == "":
             return false
         val owner: Engine2DFontOwner = self.font_owner
-        val current_fonts = engine2d_font_owner_current(owner)
-        match current_fonts:
-            case Some(fonts):
-                val current_identity = fonts.current_font_identity()
-                self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
-                if current_identity == identity:
-                    return true
-            case None:
-                pass_do_nothing("no loaded renderer identity to compare")
+        if engine2d_font_owner_has(owner):
+            val owner_fonts = engine2d_font_owner_get_or_create(owner)
+            val current_identity = owner_fonts.current_font_identity()
+            self.font_owner = engine2d_font_owner_store(self.font_owner, owner_fonts)
+            if current_identity == identity:
+                return true
         val selected_path = selected_font_asset_local_path_for_identity(identity)
         if selected_path == "":
             return false
@@ -1419,10 +1411,9 @@ class Engine2D:
         and other GUI wrappers should call.
         """
         val owner: Engine2DFontOwner = self.font_owner
-        val current_fonts = engine2d_font_owner_current(owner)
-        match current_fonts:
-            case Some(fonts):
-                if fonts.has_sffi_ttf() and font_size > 0 and font_size <= 512:
+        if engine2d_font_owner_has(owner):
+            val fonts = engine2d_font_owner_get_or_create(owner)
+            if fonts.has_sffi_ttf() and font_size > 0 and font_size <= 512:
                     val text_width = fonts.measure_text_width(text_val, font_size)
                     var line_height = fonts.horizontal_line_metric(font_size, 3)
                     self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
@@ -1432,8 +1423,6 @@ class Engine2D:
                         self.draw_rect_filled(x, y, text_width, line_height, bg)
                     self.draw_text(x, y, text_val, fg, font_size)
                     return
-            case None:
-                pass_do_nothing("bitmap text background fallback handles this case")
         if val Some(vg) = self.virtio_gpu_backend:
             emu_draw_text_bg(self.backend, x, y, text_val, fg, bg, font_size)
         elif val Some(bm) = self.baremetal_backend:

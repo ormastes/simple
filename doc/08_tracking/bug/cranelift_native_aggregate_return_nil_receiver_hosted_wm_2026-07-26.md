@@ -157,6 +157,36 @@ the tuple with two scalar projections (`cache_identity_generation() -> i64`
 double-check inline) and converting all seven font_renderer consumers.
 Tuple returns join nested arrays and array globals in the lost-channel set.
 
+**Rerun8 — receiver itself corrupt; producer is the Option-wrapped loader:**
+with the tuple gone, the guest faults INSIDE `cache_identity_generation`
+at multiple field-read offsets, all returning to `is_current` — the
+rasterizer RECEIVER is garbage (cr2 bases look like tagged scalars, e.g.
+`0x11_00000098`, `0x2d_00000098`). The object came from
+`FontRasterizer.load_selected_bytes` → `_load_selected_bytes`, two
+`FontRasterizer?` **Option-aggregate return** hops (the deterministic
+Option-payload-loss shape). Fixed: all three loaders return plain
+`FontRasterizer` with a `loaded_generation: 0` sentinel
+(`FontRasterizer.invalid()`), `_try_install_ttf` takes a plain param, all
+callers (incl. shared_font_manifest_spec) test `loaded_generation > 0`.
+
+**Hosted-WM Xvfb retest (2026-07-26, current main): frontier MOVED past
+`request_to_pixel_artifact`.** Fresh clean-cache build (265 compiled / 0
+cached), same progression (theme OK → windows-ready count=5), first frame
+now dies `field access on nil receiver` with the stack (recovered from the
+stripped binary via frame-pointer walk + native-cache object symbol
+matching): `Px.to_i32` ← `_engine2d_draw_ir_nth_int`
+(draw_ir_adv.spl:187, call sites 192/196/204
+`value.char_code_at(idx).to_i32()`) ← `_engine2d_draw_ir_render_box`
+border-style parsing ← render_commands ← render_batch_embedded ←
+adv_composition. Shape: a chained `.to_i32()` on an erased
+`char_code_at` result mis-dispatches into `Px.to_i32` (field-loading
+method) with a receiver that masks to null — the tag-box/erased-receiver
+dispatch class (cf. `char.to_i64` tag-box landmine), stacked on this
+defect. Also fixed same day: `Engine2DFontOwner.active` moved off
+`FontRenderer?` (one-slot `[FontRenderer]` list + scalar presence check) —
+the owner's match-Some-return was the deterministic minimal-repro shape on
+every font op.
+
 ## Compiler-side RCA (2026-07-26, freestanding array-loss investigation)
 
 Build pipeline for the guest: self-hosted binary, `native-build --backend
