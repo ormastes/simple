@@ -117,6 +117,29 @@ function loadProductionEnvelope(root) {
   return { ...fields, proof_path: proofPath, html_path: htmlPath };
 }
 
+function serializeForRenderer(value) {
+  return JSON.stringify(value)
+    .replace(/</g, '\\u003c')
+    .replace(/>/g, '\\u003e')
+    .replace(/&/g, '\\u0026')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+}
+
+function admittedRendererEnvelope(envelope) {
+  const keys = [
+    'schema', 'producer', 'proof_path', 'html_path', 'html_sha256', 'theme_id',
+    'theme_source_manifest_sha256', 'theme_material_sha256', 'post_action_semantic_state',
+    'blur_or_tolerance_used', 'synthetic_fixture', 'raw_source_execution',
+    'compatibility_renderer', 'computed_window_background', 'computed_window_border_color',
+    'computed_window_border_radius', 'computed_window_box_shadow',
+    'computed_titlebar_backdrop_filter', 'computed_titlebar_webkit_backdrop_filter',
+    'computed_inactive_border', 'computed_inactive_shadow', 'computed_active_border',
+    'computed_active_shadow'
+  ];
+  return Object.freeze(Object.fromEntries(keys.map(key => [key, envelope[key]])));
+}
+
 function makeHtml(root, receipt, envelope) {
   const wmJs = fs.readFileSync(path.join(root, 'src/app/ui.web/wm.js'), 'utf8');
   const html = fs.readFileSync(envelope.html_path, 'utf8');
@@ -149,6 +172,7 @@ async function main() {
   const root = process.env.SIMPLE_REPO_ROOT || process.cwd();
   const receipt = loadCompositionReceipt(root);
   const envelope = loadProductionEnvelope(root);
+  const rendererEnvelope = admittedRendererEnvelope(envelope);
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'simple-wm-event-check-'));
   const htmlPath = path.join(tmpDir, 'wm_event_check.html');
   fs.writeFileSync(htmlPath, makeHtml(root, receipt, envelope));
@@ -178,6 +202,7 @@ async function main() {
   })`);
 
   const result = await win.webContents.executeJavaScript(`(async function(){
+    const productionEnvelope = Object.freeze(${serializeForRenderer(rendererEnvelope)});
     const out = {
       target: 'electron',
       surface_id: 'wm-browser-event-routing',
@@ -185,19 +210,19 @@ async function main() {
       browser_engine: 'chromium',
       electron_user_agent: navigator.userAgent,
       ready: !!window.__wmReady,
-      production_envelope_schema: envelope.schema,
-      production_envelope_producer: envelope.producer,
-      production_envelope_path: envelope.proof_path,
-      production_html_path: envelope.html_path,
-      production_html_sha256: envelope.html_sha256,
-      theme_id: envelope.theme_id,
-      theme_source_manifest_sha256: envelope.theme_source_manifest_sha256,
-      theme_material_sha256: envelope.theme_material_sha256,
-      production_post_action_semantic_state: envelope.post_action_semantic_state,
-      production_blur_or_tolerance_used: envelope.blur_or_tolerance_used,
-      production_synthetic_fixture: envelope.synthetic_fixture,
-      production_raw_source_execution: envelope.raw_source_execution,
-      production_compatibility_renderer: envelope.compatibility_renderer
+      production_envelope_schema: productionEnvelope.schema,
+      production_envelope_producer: productionEnvelope.producer,
+      production_envelope_path: productionEnvelope.proof_path,
+      production_html_path: productionEnvelope.html_path,
+      production_html_sha256: productionEnvelope.html_sha256,
+      theme_id: productionEnvelope.theme_id,
+      theme_source_manifest_sha256: productionEnvelope.theme_source_manifest_sha256,
+      theme_material_sha256: productionEnvelope.theme_material_sha256,
+      production_post_action_semantic_state: productionEnvelope.post_action_semantic_state,
+      production_blur_or_tolerance_used: productionEnvelope.blur_or_tolerance_used,
+      production_synthetic_fixture: productionEnvelope.synthetic_fixture,
+      production_raw_source_execution: productionEnvelope.raw_source_execution,
+      production_compatibility_renderer: productionEnvelope.compatibility_renderer
     };
     const wm = window.simpleWM;
     out.wm_found = !!wm;
@@ -422,16 +447,16 @@ async function main() {
       out.production_synthetic_fixture === 'false' &&
       out.production_raw_source_execution === 'false' &&
       out.production_compatibility_renderer === 'false' &&
-      out.computed_window_background === envelope.computed_window_background &&
-      out.computed_window_border_color === envelope.computed_window_border_color &&
-      out.computed_window_border_radius === envelope.computed_window_border_radius &&
-      out.computed_window_box_shadow === envelope.computed_window_box_shadow &&
-      out.computed_titlebar_backdrop_filter === envelope.computed_titlebar_backdrop_filter &&
-      out.computed_titlebar_webkit_backdrop_filter === envelope.computed_titlebar_webkit_backdrop_filter &&
-      out.computed_inactive_border === envelope.computed_inactive_border &&
-      out.computed_inactive_shadow === envelope.computed_inactive_shadow &&
-      out.computed_active_border === envelope.computed_active_border &&
-      out.computed_active_shadow === envelope.computed_active_shadow &&
+      out.computed_window_background === productionEnvelope.computed_window_background &&
+      out.computed_window_border_color === productionEnvelope.computed_window_border_color &&
+      out.computed_window_border_radius === productionEnvelope.computed_window_border_radius &&
+      out.computed_window_box_shadow === productionEnvelope.computed_window_box_shadow &&
+      out.computed_titlebar_backdrop_filter === productionEnvelope.computed_titlebar_backdrop_filter &&
+      out.computed_titlebar_webkit_backdrop_filter === productionEnvelope.computed_titlebar_webkit_backdrop_filter &&
+      out.computed_inactive_border === productionEnvelope.computed_inactive_border &&
+      out.computed_inactive_shadow === productionEnvelope.computed_inactive_shadow &&
+      out.computed_active_border === productionEnvelope.computed_active_border &&
+      out.computed_active_shadow === productionEnvelope.computed_active_shadow &&
       out.post_action_semantic_state === 'maximized-and-text-input' &&
       out.move_payload.window_id_hint === 'win1' &&
       out.move_payload.source === 'native_event' &&
