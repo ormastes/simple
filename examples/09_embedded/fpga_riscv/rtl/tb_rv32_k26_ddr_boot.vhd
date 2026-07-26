@@ -24,6 +24,16 @@ use ieee.std_logic_textio.all;
 use std.env.all;
 
 entity tb_rv32_k26_ddr_boot is
+  generic (
+    -- Real PS DDR4 is NOT zeroed at power-up. GHDL/QEMU always hand the
+    -- kernel pristine zero RAM, which masks any reliance on implicit
+    -- zero-initialised .bss (e.g. g_heap_off at 0x80007004: garbage there
+    -- makes every rv_alloc return null and every rt_string-based println
+    -- print an empty line). Set true to fill all DDR words beyond the
+    -- loaded kernel image with a deterministic nonzero pseudo-random
+    -- pattern, rehearsing what silicon actually provides.
+    G_GARBAGE_FILL : boolean := false
+  );
 end entity tb_rv32_k26_ddr_boot;
 
 architecture sim of tb_rv32_k26_ddr_boot is
@@ -94,7 +104,20 @@ architecture sim of tb_rv32_k26_ddr_boot is
     variable word_v : std_logic_vector(31 downto 0);
     variable mem_v : ram_t := (others => x"00000000");
     variable idx : natural := 0;
+    variable lfsr : unsigned(31 downto 0) := x"DEADBEEF";
   begin
+    if G_GARBAGE_FILL then
+      -- xorshift32: deterministic nonzero garbage in every word, standing in
+      -- for un-zeroed power-up DDR4 content. The kernel image is loaded OVER
+      -- this below, so only .bss/heap/stack and unused DDR stay garbage --
+      -- exactly the silicon situation (board loads only kernel + ramdisk).
+      for i in 0 to RAM_WORDS - 1 loop
+        lfsr := lfsr xor shift_left(lfsr, 13);
+        lfsr := lfsr xor shift_right(lfsr, 17);
+        lfsr := lfsr xor shift_left(lfsr, 5);
+        mem_v(i) := std_logic_vector(lfsr);
+      end loop;
+    end if;
     while not endfile(f) loop
       readline(f, line_v);
       hread(line_v, word_v);
