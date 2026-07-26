@@ -40,7 +40,27 @@ costs ~30s+. Regression window: stage3 (07-17) → current stage4 deploys.
 - Masked until today by the zero-observability defect (fixed 2026-07-26,
   `simpleos_harness_silent_native_build_2026-07-26.md`).
 
-## Next
-Isolate with a 2-file probe under the exact harness env vs plain env; bisect
-which env knob (SIMPLE_BOOTSTRAP / SIMPLE_LIB / freestanding stubs / target)
-triggers the collapse; then profile the parse loop hot path.
+## Root cause CONFIRMED (2026-07-26 evening, correlation test on run-9 rows)
+`src/runtime/runtime_native.c` (core-c-bootstrap bundle): enum and closure
+objects are registered in flat arrays that are **linearly scanned on every
+`match`/`Option`/`Result` read (`rt_core_is_registered_enum`, :995) and every
+closure invocation (`rt_core_as_closure`, :1128)** — and there is NO
+unregister path for either (only arrays/mutexes have one) and no GC. Registry
+size grows monotonically with total allocations, so per-file cost is
+O(chars × registry_size): a moving-target O(n²) over the run. The `run` lane
+is fast simply because a single invocation never reaches the multi-million
+registry sizes where the scan dominates.
+
+Falsification test on the 47 complete `phase2:parse:file` rows from run 9:
+`wall/(chars×heap_registry)` cv=0.91 (spread ~4x) vs `wall/chars²` cv=1.72
+(spread ~70x) — the registry model fits; the pure file-size model does not.
+
+Secondary contributors on record: lexer full-text reslice per char (O(size²)
+in-file term, `bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md`)
+and the write-only `lex_source_codes` accumulation (leak, lexer.spl:198-212).
+
+## Fix direction
+O(1) membership for enum/closure discrimination (header-tag check like the
+O(1) `rt_core_as_array` path, or a hash set), plus unregister-on-free if
+lifetime allows. Lives in the C runtime — takes effect for the compiler
+itself only after the next stage4 rebuild+redeploy.
