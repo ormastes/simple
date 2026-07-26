@@ -47,13 +47,15 @@ numeric `SymbolId` collision.
 
 The MIR source now prefers name-keyed lowered-value provenance before numeric
 HIR IDs and preserves owner-qualified aggregate returns across every method
-dispatch path. Its source contract passed 2/2 before the final canonical-shape
-review fixes; the extended assertions remain unrun after the three-cycle cap.
-The typed instance plus imported static-factory interpreter oracle returns
-`84`; the incremental native assertion remains unrun. Three
-bounded incremental compiler build attempts did not produce a usable
-source-matched CLI; the final attempt stopped on 14 unrelated cached LLVM
-undeclared-global failures. No additional hardware run was made, and
+dispatch path. Its final source contract passes 2/2. The third bounded
+incremental build reused 732 objects, compiled three, and linked a
+source-matched compiler driver. The driver help smoke passes, but its first
+two-module native compile segfaults: GDB shows typed-map `.has(...)` lowering
+misbound to `DiContainer.has` from `HirLowering.lower_hir_expr`. The focused
+system spec separately timed out after selecting the Rust seed and supplies no
+native evidence. The typed instance plus imported static-factory oracle remains
+expected to return `84`, but its native assertion is blocked by this method
+selection defect. No additional hardware run was made, and
 readback/checksum/parity pass is not claimed.
 
 See
