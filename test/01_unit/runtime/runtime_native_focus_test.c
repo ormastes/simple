@@ -88,6 +88,8 @@ static void* transient_scope_worker(void* unused) {
 }
 
 int main(void) {
+    assert(!rt_is_interpreter_runtime());
+
     const uint8_t bounded_env_key[] = {
         'S', 'I', 'M', 'P', 'L', 'E', '_', 'E', 'N', 'V', '_', 'A', 'B', 'I'
     };
