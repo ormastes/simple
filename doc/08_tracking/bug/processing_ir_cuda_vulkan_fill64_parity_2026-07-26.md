@@ -31,25 +31,45 @@ A new direct CUDA native probe initially failed at module load because the
 Simple wrapper passed native text to C-string runtime entry points. Routing
 compiled calls through the existing length-tracked PTX and kernel-name ABIs
 fixed module load and launch. CUDA then completed device readback but returned
-the same 64 mismatches and checksum `8657438720` as Vulkan. Its native identity
-was negative despite the runtime's positive 63-bit contract. Exact-size result
-array allocation did not change either result and was removed. This narrows the
-shared defect to scalar/device-buffer transport rather than array growth or one
-backend shader.
+the same 64 mismatches and checksum `8657438720` as Vulkan. Exact-size result
+array allocation did not change either result and was removed.
+
+The focused native `processing_u32_array_transport_probe.spl` isolated the
+shared result:
+
+```text
+case=local-push  first=135272480 iterator_mismatches=0 indexed_mismatches=64
+case=local-fixed first=135272480 iterator_mismatches=0 indexed_mismatches=64
+case=returned    first=135272480 iterator_mismatches=0 indexed_mismatches=64
+case=wrapped     first=135272480 iterator_mismatches=0 indexed_mismatches=64
+```
+
+Iteration decodes all 64 host-generated values exactly while direct indexing
+returns each tagged integer (`value << 3`). Disassembly confirms iteration calls
+`rt_index_get` and untags its result, while direct indexing loads tagged array
+storage without an untag. This reproduces the 8x symptom without a GPU and
+narrows the blocker to the retained compiler's native read path. It does not
+prove that CUDA/Vulkan device bytes were correct.
+
+Current source marks array parameters as runtime arrays and routes that path
+through `rt_array_get` plus `decode_runtime_value`; built-in `u32` is already a
+primitive HIR type, so the earlier proposed struct-provenance guard was
+withdrawn. A fresh source-matched compiler is required to determine whether the
+retained compiler is stale or current lowering still loses runtime-array
+classification.
 
 ## Required repair
 
-1. Move the clear push-constant packer to an acyclic shared module, or reproduce
-   its value-return/reassignment semantics locally without importing the
-   Engine2D backend-helper cycle.
-2. Compare raw device bytes before Simple `u32` conversion and inspect native
-   scalar argument packing; both direct backends currently show 64 mismatches
-   and an aggregate checksum multiplied by eight.
-3. Repair the native CUDA identity ABI without masking or fabricating failed
-   identity `0`.
-4. Normalize the existing direct CUDA probe and the Vulkan probe on the same
-   64-element fill after the transport repair.
-5. Require exact count/value/checksum, zero mismatches, device readback,
+1. Regenerate a source-matched pure-Simple compiler incrementally on an admitted
+   host; do not run a full bootstrap.
+2. Run the focused transport probe once with that compiler and require zero
+   iterator and indexed mismatches for all four recorded cases.
+3. Re-run the direct CUDA and Vulkan 64-element probes with that compiler.
+4. If direct indexing still loads raw storage, trace the lost runtime-array
+   classification and repair the shared Index lowering before backend retries.
+5. Repair CUDA identity reporting separately if it remains negative after
+   scalar indexing is corrected.
+6. Require exact count/value/checksum, zero mismatches, device readback,
    positive backend provenance, no CPU fallback, and source-matched freshness
    from both probes before publishing a unified parity receipt.
 
@@ -59,5 +79,6 @@ Retained build logs:
 - `build/simpleos_gpu_host/vulkan_fault_native/build-parity64-cycle2.log`
 - `build/simpleos_gpu_host/vulkan_fault_native/build-parity64-cycle3.log`
 - `build/simpleos_gpu_host/cuda_fill_native/build-cycle3.log`
+- `build/simpleos_gpu_host/u32_transport/processing_u32_array_transport_probe`
 
 No compiler bootstrap was run.
