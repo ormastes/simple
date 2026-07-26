@@ -379,6 +379,12 @@ cluster, advance, and offsets; GPOS then adjusts that same sequence. It becomes
 the existing public `ShapedGlyph` sequence only after every active lookup
 validates and applies.
 
+`src/lib/skia/feature/shaper/ot_layout_shaper.spl` owns that canonical
+selected-run transaction and returns independent substitution and positioning
+completion truth to `shaper.spl`.
+The GPOS semantic owner shares its table-bounded readers and single work budget
+through `ot_layout_gpos_data.spl`.
+
 The selector is common to GSUB and GPOS and owns Script/LangSys/Feature/Lookup
 bounds, fallback, uniqueness, indices, and order. Unsupported active flags,
 types, formats, nested calls, device data, or GDEF dependencies make the plan

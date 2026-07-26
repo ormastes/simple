@@ -20,12 +20,11 @@ Exercises the selected bundled face through loading, Pure Simple shaping, and
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.spl` |
-| Updated | 2026-07-19 |
+| Updated | 2026-07-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Exercises the selected bundled face through loading, Pure Simple shaping, and
-the canonical FontRenderer material path. Complex-script completion stays an
-explicit release blocker until GSUB/GPOS is complete.
+the canonical FontRenderer material path.
 
 ## Scenarios
 
@@ -368,14 +367,23 @@ free_font(fixture.handle)
    - Expected: registered equals `2`
 - font renderer use registered selected bytes only
    - Expected: arabic.reason equals `resolved`
+   - Expected: arabic.glyph_run.valid equals `true`
+   - Expected: positioned equals `true`
    - Expected: hindi.reason equals `resolved`
+   - Expected: hindi.glyph_run.valid equals `true`
+- Round-trip the positioned Arabic glyph run through handle-free Draw IR SDN
+   - Expected: round_tripped.valid equals `true`
+   - Expected: round_tripped.glyph_ids equals `arabic.glyph_run.glyph_ids`
+   - Expected: round_tripped.xs equals `arabic.glyph_run.xs`
+   - Expected: round_tripped.ys equals `arabic.glyph_run.ys`
+   - Expected: round_tripped.clusters equals `arabic.glyph_run.clusters`
 - var renderer = FontRenderer new
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -391,11 +399,28 @@ val arabic = resolve_font_metrics_with_language("sans-serif", "العربية", 
 val hindi = resolve_font_metrics_with_language("sans-serif", "हिन्दी", 32, "hi")
 expect(arabic.reason).to_equal("resolved")
 expect(arabic.glyph_run.valid).to_be(true)
+var positioned = false
+for y in arabic.glyph_run.ys:
+    if y != 0: positioned = true
+expect(positioned).to_be(true)
 expect(hindi.reason).to_equal("resolved")
 expect(hindi.glyph_run.valid).to_be(true)
 var renderer = FontRenderer.new()
 expect(renderer.try_load_registered_identity(arabic.identity)).to_be(true)
-val arabic_batch = renderer.prepare_selected_glyph_run(arabic.glyph_run, 0xFFFFFFFFu32, 32)
+val command = draw_ir_text_shaped_font("arabic", 0, 0, "العربية", 0xFFFFFFFFu32,
+    arabic.family, arabic.identity, arabic.advances, arabic.width, arabic.line_height,
+    32, arabic.glyph_run)
+val encoded = draw_ir_to_sdn(draw_ir_composition("shaping", "arabic",
+    DRAW_IR_BACKEND_GPU, [draw_ir_batch("shaping", DRAW_IR_BACKEND_GPU,
+        draw_ir_embedding_config("surface", "arabic", 0, 0, arabic.width,
+            arabic.line_height, 0, 1000, false), [command])]))
+val round_tripped = sdn_to_draw_ir(encoded).batches[0].commands[0].glyph_run
+expect(round_tripped.valid).to_be(true)
+expect(round_tripped.glyph_ids).to_equal(arabic.glyph_run.glyph_ids)
+expect(round_tripped.xs).to_equal(arabic.glyph_run.xs)
+expect(round_tripped.ys).to_equal(arabic.glyph_run.ys)
+expect(round_tripped.clusters).to_equal(arabic.glyph_run.clusters)
+val arabic_batch = renderer.prepare_selected_glyph_run(round_tripped, 0xFFFFFFFFu32, 32)
 expect(arabic_batch.valid).to_be(true)
 expect(arabic_batch.quads.len()).to_be_greater_than(0)
 expect(renderer.try_load_registered_identity(hindi.identity)).to_be(true)

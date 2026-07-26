@@ -513,6 +513,12 @@ lookups, before either phase mutates a copied sequence. Multiple substitutions
 retain source/cluster provenance; ligatures retain the first source and minimum
 participating cluster. GPOS changes only advances/offsets.
 
+`ot_layout_shaper.spl` selects the pinned feature plans, builds nominal records,
+applies GSUB, recomputes substituted advances, applies GPOS, and hands the
+font-unit records to `shaper.spl` for one final scale and RTL visual ordering.
+`ot_layout_gpos_data.spl` holds the bounded Coverage, ClassDef, ValueRecord,
+anchor, GDEF-filter, and shared-budget readers used by the GPOS semantic owner.
+
 Work is capped by run, lookup, and subtable counts, with bounded nested depth.
 Failure returns the original nominal sequence with `complete=false`. The shaper
 scales successful font-unit records into the existing `ShapedGlyph`; no new

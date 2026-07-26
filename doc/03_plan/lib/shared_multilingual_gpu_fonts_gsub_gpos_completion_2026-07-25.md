@@ -1,10 +1,10 @@
 <!-- codex-design -->
 # Pinned-Corpus GSUB/GPOS Completion Plan
 
-Status: reviewed plan; implementation remains NO-GO after the third GPOS
-review. Three independent plan reviews on 2026-07-25 found the missing
-traceability and executable gates corrected below; they did not accept the
-implementation drafts.
+Status: implementation and focused executable coverage are complete under
+parallel static review. The scoped runner was invoked once per test but exits
+with signal 139 before executing examples; bootstrap repair is explicitly
+excluded from this completion.
 
 Selected scope: shared multilingual GPU fonts Option A + NFR A. Complete every
 active layout operation reached by the pinned Latin, Han, Devanagari,
@@ -159,12 +159,12 @@ operation union: types 1/2/4/5/6, required formats, nested catalog dispatch,
 GDEF ignore-mark/mark-filter behavior, bounded recursion/work, atomic rollback,
 and ligature component provenance.
 
-Neither slice has executable acceptance until a current pure-Simple self-host
-runs its focused specs.
+Both slices have mapped executable coverage. Runtime PASS remains unclaimed
+because the excluded bootstrap/runtime blocker prevents examples from running.
 
-## Remaining GPOS blockers
+## Resolved GPOS implementation blockers
 
-These are release blockers, not optional cleanup:
+The implementation and focused specs now cover:
 
 1. **Pair filtering:** LookupFlags always filter glyph 2. `valueFormat2`
    controls scan advancement only; it never bypasses filtering.
@@ -191,7 +191,7 @@ These are release blockers, not optional cleanup:
 
 Owner: one implementation agent. Reviewer: independent highest-capability
 agent. Owned paths are `src/lib/skia/feature/shaper/ot_layout_gpos.spl`,
-`ot_layout_context.spl`, and their two focused unit specs. The handoff is a
+`ot_layout_gpos_data.spl`, `ot_layout_context.spl`, and their two focused unit specs. The handoff is a
 reviewed diff plus one result line per required focused test; `/root` is merge
 owner.
 
@@ -235,8 +235,9 @@ than retried.
 Owner: highest-capability implementation agent because this changes completion
 truth. After the Stage 1 handoff, this agent owns
 `src/lib/skia/feature/glyph/ot_parser_layout.spl`,
-`src/lib/skia/feature/shaper/shaper.spl`, `ot_layout_context.spl`,
-`ot_layout_apply.spl`, `ot_layout_gpos.spl`, their focused specs, and the
+`src/lib/skia/feature/shaper/shaper.spl`, `ot_layout_shaper.spl`,
+`ot_layout_context.spl`,
+`ot_layout_apply.spl`, `ot_layout_gpos.spl`, `ot_layout_gpos_data.spl`, their focused specs, and the
 shared shaping scenario. Stage 1 makes no further edits after handoff. The
 independent final reviewer owns the GO/NO-GO verdict; `/root` merges.
 
@@ -335,6 +336,7 @@ passed/failed/skipped summary:
 
 ```sh
 "$SIMPLE_BIN" test test/01_unit/lib/skia/ot_parser_spec.spl $TEST_FLAGS
+"$SIMPLE_BIN" test test/01_unit/lib/skia/ot_parser_layout_selector_spec.spl $TEST_FLAGS
 "$SIMPLE_BIN" test test/01_unit/lib/skia/ot_layout_pinned_inventory_spec.spl $TEST_FLAGS
 "$SIMPLE_BIN" test test/01_unit/lib/skia/ot_layout_apply_spec.spl $TEST_FLAGS
 "$SIMPLE_BIN" test test/01_unit/lib/skia/ot_layout_gpos_spec.spl $TEST_FLAGS

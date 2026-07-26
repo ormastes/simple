@@ -5,6 +5,10 @@ All notable changes to Simple Language will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Pinned-corpus GSUB/GPOS shaping** — validate and apply the selected
+  Latin, Han, Devanagari, Arabic/Urdu, and Cyrillic OpenType layout plans with
+  bounded work, feature-mask provenance, atomic failure, and canonical
+  font-unit-to-shaped-glyph integration.
 - **LLM Caret Electron and native Metal GUIs** — launch the semantic browser
   chat in the canonical Electron shell or lower pure-Simple HTML/layout through
   Draw IR to Engine2D Metal with keyboard, click, and fail-closed device-readback
