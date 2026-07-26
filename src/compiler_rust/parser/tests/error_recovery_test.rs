@@ -272,16 +272,19 @@ fn test_typescript_let_detection() {
 }
 
 #[test]
-fn test_python_self_detection() {
+fn test_explicit_self_field_access_is_valid_simple() {
     use simple_parser::token::{NamePattern, Span, Token, TokenKind};
 
     let self_token = Token::new(TokenKind::Self_, Span::new(0, 4, 1, 1), "self".to_string());
     let prev = Token::new(TokenKind::Newline, Span::new(0, 0, 1, 1), "\n".to_string());
     let dot_token = Token::new(TokenKind::Dot, Span::new(4, 5, 1, 5), ".".to_string());
 
-    let mistake = detect_common_mistake(&self_token, &prev, Some(&dot_token));
-    assert_eq!(mistake, Some(CommonMistake::PythonSelf));
-    assert!(CommonMistake::PythonSelf.message().contains("implicit"));
+    assert_eq!(detect_common_mistake(&self_token, &prev, Some(&dot_token)), None);
+
+    let mut parser =
+        Parser::new("class Point:\n    x: i64\n    me set_x(value: i64):\n        self.x = value\n");
+    assert!(parser.parse().is_ok());
+    assert!(parser.error_hints().is_empty());
 }
 
 #[test]

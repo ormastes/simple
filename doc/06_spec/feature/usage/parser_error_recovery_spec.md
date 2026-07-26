@@ -28,7 +28,7 @@ programming languages and provide helpful suggestions.
 
 ## Common Mistakes Detected
 
-- Python: `def`, `None`, `True`, `False`, `self.`
+- Python: `def`, `None`, `True`, `False`
 - Rust: `let mut`, `.<T>` turbofish, `!` macros
 - TypeScript: `const`, `function`, `let`, `=>`
 - Java: `public class`
@@ -70,8 +70,8 @@ are documented; actual parser error recovery is tested via compiled mode.
 - suggests nil instead of None
 - detects Python True
 - detects Python False
-- detects explicit self parameter
-- suggests implicit self
+- accepts explicit self field access
+- keeps explicit self for unambiguous mutation
 - detects Rust let mut
 - suggests var instead of let mut
 - detects Rust turbofish .<T>

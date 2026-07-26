@@ -62,3 +62,18 @@ The post-migration release seed rebuild now passes at the documented
 Cargo job while foreign native builds were active, so its elapsed time is not
 performance evidence. The two one-shot RSS/timing fixtures remain pending a
 quiet host.
+
+## 2026-07-26 bounded parser result
+
+The current release seed completed the 11/22 KiB parser oracle after two
+harness defects were removed: valid `self.field` no longer emits
+`PythonSelf`, and the fixture uses the seed-exported microsecond clock instead
+of an unavailable monotonic-millisecond symbol that forced JIT fallback.
+
+- 11 KiB: 1,061 ms
+- 22 KiB: 4,172 ms
+- Wall time: 9.90 s
+- Maximum RSS: 968,524 KiB
+
+Absolute latency now passes the 15-second ceiling. The 3.93x scaling ratio and
+RSS ceiling remain red, so the 493-source bootstrap is still unauthorized.

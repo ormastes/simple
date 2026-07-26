@@ -90,7 +90,7 @@ impl<'a> Parser<'a> {
                     | CommonMistake::SemicolonAfterBlock => ErrorHintLevel::Warning,
 
                     // Info for style preferences
-                    CommonMistake::TsLet | CommonMistake::PythonSelf | CommonMistake::RustFnMut => ErrorHintLevel::Info,
+                    CommonMistake::TsLet | CommonMistake::RustFnMut => ErrorHintLevel::Info,
 
                     // Hints for advanced features
                     CommonMistake::RustLifetime

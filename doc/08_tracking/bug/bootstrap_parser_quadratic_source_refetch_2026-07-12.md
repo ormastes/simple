@@ -2,7 +2,7 @@
 
 ## Status
 
-Partially fixed; absolute-performance acceptance remains open. Blocks bounded pure-Simple bootstrap and therefore the imported-enum,
+Partially fixed; scaling and RSS acceptance remain open. Blocks bounded pure-Simple bootstrap and therefore the imported-enum,
 UI/TUI, GUI, and WM runtime evidence gates.
 
 ## Evidence
@@ -35,6 +35,12 @@ UI/TUI, GUI, and WM runtime evidence gates.
 - The approved post-root oracle measured 12.276s/27.631s (2.25x), so linearity
   remains acceptable but the 22 KiB absolute ceiling still fails. The
   493-source bootstrap was not launched.
+- A current SharedText seed initially failed before the oracle because valid
+  `self.field` syntax produced hundreds of false Python-mistake hints, then an
+  unavailable monotonic-millisecond extern forced JIT/interpreter double load.
+  Removing the invalid hint and using the exported microsecond clock made the
+  oracle complete in 1.061s/4.172s. The 22 KiB absolute ceiling now passes;
+  the 3.93x ratio and 968,524 KiB maximum RSS remain open.
 - A higher-requested, environment-gated mutable-object COW diagnostic was
   attempted three times against an isolated 22 KiB parse (exact generator and
   warm-up variants). Each SIGSEGVed before emitting a counter. All diagnostic

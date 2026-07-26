@@ -159,7 +159,7 @@ impl<'a> Parser<'a> {
                 | CommonMistake::WrongBrackets
                 | CommonMistake::CSemicolon
                 | CommonMistake::SemicolonAfterBlock => ErrorHintLevel::Warning,
-                CommonMistake::TsLet | CommonMistake::PythonSelf | CommonMistake::RustFnMut => ErrorHintLevel::Info,
+                CommonMistake::TsLet | CommonMistake::RustFnMut => ErrorHintLevel::Info,
                 CommonMistake::RustLifetime
                 | CommonMistake::RustMacro
                 | CommonMistake::RustTurbofish

@@ -1053,6 +1053,15 @@ the shared binary — deploys require explicit user go-ahead).
   not credit the outstanding 22 KiB parser-time gate or authorize another full
   generation build.
 
+  The completed SharedText seed now reaches the bounded parser oracle. A false
+  `PythonSelf` recovery hint had diagnosed valid—and sometimes required—
+  `self.field` mutation hundreds of times; the scaling fixture also requested
+  a clock symbol absent from the seed, forcing a second interpreter graph load
+  after JIT failure. Both roots are fixed with focused regressions. The current
+  oracle improved to 1.061s/4.172s, so the 22 KiB absolute gate passes, but its
+  3.93x ratio and 968,524 KiB RSS remain uncredited. Do not launch the
+  493-source generation until those measured owners are addressed.
+
   The retained generation-1 pure-Simple candidate could not run the focused
   scaling fixture because HIR resolution rejected exported `parse_module` and
   `parser_has_errors`; both parser module spellings failed. The bounded

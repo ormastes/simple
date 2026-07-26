@@ -49,7 +49,7 @@ use std.parser.{Parser, CommonMistake, detect_common_mistake}
 
 ## Common Mistakes Detected
 
-- Python: `def`, `None`, `True`, `False`, `self.`
+- Python: `def`, `None`, `True`, `False`
 - Rust: `let mut`, `.<T>` turbofish, `!` macros
 - TypeScript: `const`, `function`, `let`, `=>`
 - Java: `public class`
@@ -188,9 +188,9 @@ expect true
 
 </details>
 
-#### self parameter
+#### self field access
 
-#### detects explicit self parameter
+#### accepts explicit self field access
 
 <details>
 <summary>Executable SSpec</summary>
@@ -199,13 +199,13 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# Python uses explicit 'self.', Simple has implicit self
-expect true
+val recovery = read_file("src/compiler/10.frontend/parser/recovery.spl")
+expect(recovery.contains("PythonSelf")).to_equal(false)
 ```
 
 </details>
 
-#### suggests implicit self
+#### keeps explicit self for unambiguous mutation
 
 <details>
 <summary>Executable SSpec</summary>
@@ -214,8 +214,8 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# CommonMistake.PythonSelf would mention 'implicit'
-expect true
+val guide = read_file("doc/07_guide/quick_reference/syntax_quick_reference.md")
+expect(guide.contains("self._stop_tracking()")).to_equal(true)
 ```
 
 </details>

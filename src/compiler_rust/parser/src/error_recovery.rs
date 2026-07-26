@@ -14,7 +14,6 @@ use crate::token::{NamePattern, Span, Token, TokenKind};
 pub enum CommonMistake {
     // Python-style
     PythonDef,   // def instead of fn
-    PythonSelf,  // self. instead of implicit self
     PythonTrue,  // True instead of true
     PythonFalse, // False instead of false
     PythonElif,  // elif is correct (not else if)
@@ -69,11 +68,6 @@ impl CommonMistake {
                  \n\
                  Python:  def add(a, b):\n\
                  Simple:  fn add(a, b):"
-                .to_string(),
-            Self::PythonSelf => "In Simple, 'self' is implicit in methods. Don't write 'self.'.\n\
-                 \n\
-                 Python:  self.x = value\n\
-                 Simple:  x = value     # self is implicit in methods"
                 .to_string(),
             Self::PythonTrue | Self::PythonFalse => "Use lowercase 'true' and 'false' in Simple.\n\
                  \n\
@@ -408,16 +402,6 @@ pub fn detect_common_mistake(current: &Token, previous: &Token, next: Option<&To
             }
         } else {
             return Some(CommonMistake::TsLet);
-        }
-    }
-
-    // Check for Python-style explicit self.x (when 'self' keyword is followed by dot)
-    if matches!(current.kind, TokenKind::Self_) && !matches!(previous.kind, TokenKind::Fn | TokenKind::Me) {
-        // This is 'self' being used explicitly (not in method signature)
-        if let Some(next_token) = next {
-            if matches!(next_token.kind, TokenKind::Dot) {
-                return Some(CommonMistake::PythonSelf);
-            }
         }
     }
 
