@@ -6,15 +6,60 @@ use compiler.backend.linker.linker_wrapper.{
     cc_fallback_object_args,
     msvc_duplicate_symbol_flag,
     macos_homebrew_prefix,
+    native_retained_symbol_direct_args,
+    native_retained_symbol_cc_args,
+    native_retained_symbol_msvc_args,
     native_all_input_present,
     native_all_gnu_support_args,
     native_all_msvc_support_libraries
 }
+use compiler.backend.backend.llvm_native_link.{llvm_nm_output_has_strong_definition}
 use testing.{describe, it, expect}
 
 extern fn rt_file_read_text(path: text) -> text
 
 describe "Native linker hardening":
+    it "recognizes only strong Vulkan provider definitions":
+        expect(llvm_nm_output_has_strong_definition(
+            "weak.o:\n                 w rt_vulkan_provider_is_available\nstrong.o:\n0000000000000000 T rt_vulkan_provider_is_available\n",
+            "rt_vulkan_provider_is_available"
+        )).to_be(true)
+        expect(llvm_nm_output_has_strong_definition(
+            "                 W rt_vulkan_provider_is_available\n",
+            "rt_vulkan_provider_is_available"
+        )).to_be(false)
+        expect(llvm_nm_output_has_strong_definition(
+            "                 U rt_vulkan_provider_is_available\n",
+            "rt_vulkan_provider_is_available"
+        )).to_be(false)
+        expect(llvm_nm_output_has_strong_definition(
+            "0000000000000000 T _rt_vulkan_provider_is_available\n",
+            "rt_vulkan_provider_is_available"
+        )).to_be(true)
+
+    it "renders archive roots for each native linker family":
+        val roots = ["rt_vulkan_provider_is_available"]
+        expect(native_retained_symbol_direct_args(roots, "linux")).to_equal([
+            "--undefined=rt_vulkan_provider_is_available",
+            "--export-dynamic-symbol=rt_vulkan_provider_is_available"
+        ])
+        expect(native_retained_symbol_direct_args(roots, "macos")).to_equal([
+            "-u", "_rt_vulkan_provider_is_available",
+            "-export_dynamic"
+        ])
+        expect(native_retained_symbol_cc_args(roots, "linux")).to_equal([
+            "-Wl,--undefined=rt_vulkan_provider_is_available",
+            "-Wl,--export-dynamic-symbol=rt_vulkan_provider_is_available"
+        ])
+        expect(native_retained_symbol_cc_args(roots, "darwin")).to_equal([
+            "-Wl,-u,_rt_vulkan_provider_is_available",
+            "-Wl,-export_dynamic"
+        ])
+        expect(native_retained_symbol_msvc_args(roots)).to_equal([
+            "/INCLUDE:rt_vulkan_provider_is_available",
+            "/EXPORT:rt_vulkan_provider_is_available"
+        ])
+
     it "preserves every object in cc fallback arguments":
         expect(cc_fallback_object_args(["user.o", "runtime.o", "entry.o"])).to_equal([
             "user.o", "runtime.o", "entry.o"

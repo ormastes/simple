@@ -70,6 +70,55 @@ fn llvm_external_provider_rpath_flags(providers: [text]) -> [text]:
             flags = flags.push(directory)
     flags
 
+pub fn llvm_nm_output_has_strong_definition(nm_output: text, symbol: text) -> bool:
+    """Return true only for a concrete global definition in portable nm output."""
+    for line in nm_output.split("\n"):
+        val raw_parts = line.trim().split(" ")
+        var parts: [text] = []
+        for part in raw_parts:
+            if part != "":
+                parts = parts.push(part)
+        if parts.len() < 2:
+            continue
+        var defined_name = parts[parts.len() - 1]
+        if defined_name.starts_with("_"):
+            defined_name = defined_name.substring(1)
+        if defined_name != symbol:
+            continue
+        val kind = parts[parts.len() - 2]
+        if kind != "U" and kind != "u" and kind != "W" and kind != "w" and kind != "V" and kind != "v":
+            return true
+    false
+
+fn llvm_external_provider_retained_symbols(providers: [text]) -> Result<[text], text>:
+    """Discover exact roots exported by explicitly selected static providers.
+
+    Dynamic providers do not need archive extraction. Static providers are
+    scanned rather than selected by filename so unrelated optional GPU
+    archives remain ordinary quarantined inputs.
+    """
+    var static_providers: [text] = []
+    for provider in providers:
+        val lower = provider.lower()
+        if lower.ends_with(".a") or lower.ends_with(".lib"):
+            static_providers = static_providers.push(provider)
+    if static_providers.len() == 0:
+        return Ok([])
+
+    val nm = find_nm_portable()
+    if nm == "":
+        return Err("SIMPLE_LINK_OBJECTS static provider retention requires llvm-nm or nm")
+
+    val vulkan_availability = "rt_vulkan_provider_is_available"
+    for provider in static_providers:
+        val (stdout, stderr, code) = process_run(nm, ["-g", provider])
+        if code != 0:
+            val detail = if stderr.trim() == "": "symbol scan failed" else: stderr.trim()
+            return Err("SIMPLE_LINK_OBJECTS static provider symbol scan failed for '" + provider + "': " + detail)
+        if llvm_nm_output_has_strong_definition(stdout, vulkan_availability):
+            return Ok([vulkan_availability])
+    Ok([])
+
 fn llvm_stage4_final_requested_symbols(objects: [text]) -> Result<[text], text>:
     if objects.len() == 0:
         return Err("Stage4 final object closure is empty")
@@ -1485,8 +1534,8 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         all_objects = all_objects.push(entry_obj_path)
     # External providers are intentionally not temporary runtime objects: do
     # not pass them to cleanup_runtime_objects or delete them after linking.
-    # They remain caller-owned and must stay present in the final artifact's
-    # dynamic dependency table.
+    # They remain caller-owned; dynamic providers stay in the dependency table
+    # while static providers contribute only extracted members.
     val external_providers = match llvm_configured_external_link_objects():
         case Ok(paths): paths
         case Err(err):
@@ -1500,6 +1549,17 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
             return Err(err)
     for provider in external_providers:
         all_objects = all_objects.push(provider)
+    val retained_symbols = match llvm_external_provider_retained_symbols(external_providers):
+        case Ok(symbols): symbols
+        case Err(err):
+            cleanup_runtime_objects(runtime_objects)
+            if bootstrap_support_obj != "":
+                file_delete(bootstrap_support_obj)
+            if stage4_requested:
+                remove_file_if_exists(entry_obj_path)
+            else:
+                file_delete(entry_obj_path)
+            return Err(err)
     if trace:
         print "[LLVM-LINK] total objects: {all_objects.len()}"
 
@@ -1514,6 +1574,7 @@ fn link_llvm_native(user_objects: [text], output: text, options: NativeLinkOptio
         verbose: options.verbose,
         allow_duplicate_definitions: not stage4_requested,
         allow_cc_fallback: not stage4_requested,
+        retained_symbols: retained_symbols,
         extra_flags: llvm_external_provider_rpath_flags(external_providers)
     )
     if trace:

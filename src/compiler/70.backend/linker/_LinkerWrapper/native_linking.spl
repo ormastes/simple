@@ -61,6 +61,7 @@ struct NativeLinkConfig:
     verbose: bool
     allow_duplicate_definitions: bool
     allow_cc_fallback: bool
+    retained_symbols: [text]
     extra_flags: [text]
 
 impl NativeLinkConfig:
@@ -74,6 +75,7 @@ impl NativeLinkConfig:
             verbose: false,
             allow_duplicate_definitions: true,
             allow_cc_fallback: true,
+            retained_symbols: [],
             extra_flags: []
         )
 
@@ -292,6 +294,11 @@ fn link_native_unix(object_files: [text], output: text, config: NativeLinkConfig
     args.push(crt.crt1)
     args.push(crt.crti)
     args.push(crt.crtbegin)
+
+    # Explicit roots must precede archives. This retains only the member that
+    # owns each requested symbol and preserves ordinary archive quarantine.
+    for flag in native_retained_symbol_direct_args(config.retained_symbols, os):
+        args.push(flag)
 
     # User object files
     for obj in object_files:
@@ -646,7 +653,9 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         # Link ALL object files (user objects + compiled runtime objects +
         # generated entry shim). Passing only obj0 dropped the entry-point
         # object -> "Undefined symbols: _main" on Mach-O.
-        var args = cc_fallback_object_args(object_files)
+        var args = native_retained_symbol_cc_args(config.retained_symbols, os_name)
+        for obj in cc_fallback_object_args(object_files):
+            args.push(obj)
         val brew_prefix = macos_homebrew_prefix(env_get("HOMEBREW_PREFIX") ?? "", host_arch())
         # sdl2-compat lives in the Homebrew lib dir, which cc does not search
         # by default — add it before -lSDL2 resolves.
@@ -668,7 +677,9 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
         val err_msg = if stderr != "": stderr else: "Unknown linking error"
         return Err("cc linking failed: {err_msg}")
     elif os_name == "freebsd":
-        var args = cc_fallback_object_args(object_files)
+        var args = native_retained_symbol_cc_args(config.retained_symbols, os_name)
+        for obj in cc_fallback_object_args(object_files):
+            args.push(obj)
         if not config.pie:
             args.push("-no-pie")
         for flag in _cc_fallback_runtime_lib_args(config):
@@ -699,6 +710,8 @@ fn link_native_cc(object_files: [text], output: text, config: NativeLinkConfig) 
             args.push("-fuse-ld=lld")
         if not config.pie:
             args.push("-no-pie")
+        for flag in native_retained_symbol_cc_args(config.retained_symbols, os_name):
+            args.push(flag)
         for obj in object_files:
             args.push(obj)
         for flag in _cc_fallback_runtime_lib_args(config):
@@ -787,7 +800,9 @@ fn _link_native_msvc(object_files: [text], output: text, config: NativeLinkConfi
         msvc_config.libs.push("simple_compiler.lib")
 
     # Extra flags
-    var extra = config.extra_flags
+    var extra = native_retained_symbol_msvc_args(config.retained_symbols)
+    for flag in config.extra_flags:
+        extra.push(flag)
     # Size optimization: remove unreferenced data + fold identical COMDATs
     if not config.debug:
         extra.push("/OPT:REF,ICF")

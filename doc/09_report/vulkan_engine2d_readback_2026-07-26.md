@@ -53,3 +53,21 @@ hardware run was made, and readback/checksum/parity pass is not claimed.
 
 See
 `doc/08_tracking/bug/native_engine2d_readback_cross_module_field_layout_2026-07-26.md`.
+
+## Link-Owner Repair
+
+The canonical native link owner now scans only explicitly selected static
+provider archives, roots the strong `rt_vulkan_provider_is_available` member,
+and supplies the platform's executable dynamic-export visibility for the core
+runtime's `dlsym(RTLD_DEFAULT, ...)` lookup. ELF and MSVC export the named
+symbol; Darwin uses executable-wide dynamic export. The root still retains
+only one named member rather than force-loading the complete optional-GPU
+archive.
+
+The host-independent weak-first archive fixture mirrors that runtime lookup
+without a direct unresolved provider reference. It records baseline
+availability `0` and retained-provider availability `73`, proving extraction
+and dynamic discoverability. This repair was produced on macOS without a
+Linux/Vulkan live cycle. The blocked Linux execution above remains the current
+device evidence; no availability, handle, readback, checksum, or parity PASS is
+added by the owner fixture.

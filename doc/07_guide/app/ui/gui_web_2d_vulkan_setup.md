@@ -191,6 +191,24 @@ readback probe instead of the Unix `.shs` wrapper:
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check\check-vulkan-engine2d-readback.ps1 -SimpleBinary bin\simple.exe
 ```
 
+Before spending a Linux/Vulkan device cycle after changing provider packaging,
+run the host-independent archive extraction check:
+
+```sh
+sh scripts/check/check-vulkan-provider-archive-retention.shs
+```
+
+It proves that a weak compatibility member using the production
+`dlsym(RTLD_DEFAULT, ...)` path does not hide the later strong
+`rt_vulkan_provider_is_available` member. Its `73` receipt proves both
+exact-member extraction and runtime symbol discoverability; it is only an
+object/linker fixture, never Vulkan availability, rendering, event, capture,
+present, or readback evidence. The native linker roots only that exact symbol
+from an explicitly selected static `SIMPLE_LINK_OBJECTS` provider and supplies
+the platform's executable dynamic-export visibility (exact-symbol on ELF and
+MSVC; executable-wide on Darwin). It must not replace this policy with
+`--whole-archive`.
+
 The SimpleOS Engine2D/RenderDoc normalizer can run that probe directly:
 
 ```powershell

@@ -595,3 +595,16 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   Electron is not installed locally. The next action is a separately authorized
   live producer cycle with the exact `277f` binary and explicit provider paths;
   no browser, GUI, capture, QEMU, or false PASS was added.
+- continuation-2026-07-26-vulkan-provider-archive-owner-repair: Implemented
+  host-independent native-link support for the retained Linux evidence lane.
+  Only explicitly selected static `SIMPLE_LINK_OBJECTS` providers are scanned;
+  a strong `rt_vulkan_provider_is_available` definition becomes one exact
+  pre-archive linker root plus platform dynamic-export visibility
+  (exact-symbol on ELF/MSVC; executable-wide on Darwin). The policy does not
+  force-load the provider archive, so unrelated optional GPU members remain
+  quarantined. The weak-first object fixture mirrors production
+  `dlsym(RTLD_DEFAULT, ...)` lookup without a direct provider reference and
+  distinguishes baseline availability `0` from retained-provider availability
+  `73`. No Linux/Vulkan device, rendering, event, capture, present, readback,
+  handle, or parity execution is claimed. AC-2, AC-3, AC-5, AC-7, AC-8, and
+  AC-10 remain open pending current live evidence.
