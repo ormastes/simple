@@ -169,11 +169,11 @@ snapshot fingerprints, HTML hash, computed glass/window witnesses, and explicit
 `compatibility_renderer=false` flags. Missing, linked, stale, or mismatched
 production evidence fails before Electron is launched.
 
-Both production wrappers resolve Electron only through an explicit
-`ELECTRON_BIN` or the worktree-local
-`tools/electron-shell/node_modules/.bin/electron`. The executable must report
-the exact version locked in `tools/electron-shell/package-lock.json`; `npx`,
-PATH/global discovery, and network installation are intentionally excluded.
+Both production wrappers resolve Electron only through the worktree-local
+`tools/electron-shell/node_modules/.bin/electron` symlink to its installed
+package target. The executable must report the exact version locked in
+`tools/electron-shell/package-lock.json`; `ELECTRON_BIN`, `npx`, PATH/global
+discovery, and network installation are intentionally excluded.
 The fail-closed reasons are `missing-pinned-electron`,
 `invalid-electron-command`, and `electron-version-mismatch`.
 
