@@ -338,8 +338,18 @@ impl NativeProjectBuilder {
                     }
                 }
                 NativeRuntimeLane::CoreCBootstrap => {
-                    if let Some(runtime) = build_core_c_runtime_library(&temp_dir.join("core_c_runtime")) {
-                        candidates.push((runtime, false));
+                    // When the core-C archive fails to build we still link whatever
+                    // find_runtime_library() turns up -- a generic runtime roughly 28x
+                    // larger. Say so here; otherwise the only symptom is a binary-size
+                    // assertion far away from the real cause.
+                    let core_c_dir = temp_dir.join("core_c_runtime");
+                    match build_core_c_runtime_library(&core_c_dir) {
+                        Some(runtime) => candidates.push((runtime, false)),
+                        None => eprintln!(
+                            "warning: core-C runtime archive failed to build in {}; \
+                             falling back to a generic runtime (expect a much larger binary)",
+                            core_c_dir.display()
+                        ),
                     }
                     if let Some(runtime) = find_runtime_library() {
                         if !candidates.iter().any(|(p, _)| p == &runtime) {
