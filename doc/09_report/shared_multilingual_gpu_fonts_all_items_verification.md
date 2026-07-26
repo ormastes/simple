@@ -9,12 +9,15 @@ Final done-mark owner: highest-capability `/root`
 
 `STATUS: FAIL`
 
-This is the current lane-F audit, not a runtime or native PASS. Static source
+This is the current all-lane audit, not a runtime or native PASS. Static source
 and executable coverage is broad, but no fresh pure-Simple full CLI has been
-admitted. The only retained all-items runtime logs currently say
-`error=rust_seed_binary` and `timeout: the monitored command dumped core`.
-Consequently no focused execution, zero-stub docgen, native promotion, QEMU
-pixel, or performance row is accepted.
+admitted. Three bounded bootstrap cycles rejected the deployed Rust-built CLI,
+removed an isolated symlink-authority defect, and then stopped fail-closed
+before Stage 2 because the stale compiler backfill requires a fresh
+`--full-bootstrap`. The retained summary and exact next-session command are in
+`doc/08_tracking/bug/shared_font_stage4_stale_compiler_backfill_2026-07-26.md`.
+Consequently runner calibration, focused execution, zero-stub docgen, native
+promotion, QEMU pixels, and performance remain unaccepted.
 
 ## Requirement matrix
 
@@ -37,7 +40,7 @@ row; `blocked` means the required runtime/device evidence is unavailable.
 | REQ-011 | active | D+E surfaces/native | aggregate surfaces/route plus canonical Web, GUI, hosted WM, SimpleOS and RV64 pairs exist | admitted CLI, hosted frame and QEMU pixels; run D/E sets | `/root` |
 | REQ-012 | blocked | E native 2D/3D/perf | native readback spec contains HUD/world, handles, submit, fence, depth/transform and readback gates | admitted CLI plus real graphics device; run E native command | `/root` |
 | REQ-013 | blocked | E native 2D/3D/perf | native readback spec rejects unavailable and forged promotion | one real backend must pass both 2D and 3D through E native command | `/root` |
-| REQ-014 | blocked | F specs/docs/audit | baseline mirrors exist and contain current scenario titles; six integrated GSUB/GPOS mirrors are missing and no retained docgen log proves `0 stubs` | admitted CLI; run every docgen command below; review manuals | `/root` |
+| REQ-014 | blocked | F specs/docs/audit | baseline mirrors exist and contain current scenario titles; eight required focused mirrors are missing and no retained docgen log proves `0 stubs` | admitted CLI; run every docgen command below; review manuals | `/root` |
 | REQ-015 | active | C shaping/material/config | aggregate surfaces and focused config specs cover identity, policies, target order and pre-mutation rejection | admitted CLI; run aggregate/C commands | `/root` |
 | NFR-001 | active | B manifest/distribution | manifest and SimpleOS bundle source gates cover immutable hashes, deterministic generation and corruption rejection | admitted CLI; run B command set | `/root` |
 | NFR-002 | blocked | E native/perf | native readback and perf specs define exact packed-ARGB comparator and provenance fields | admitted CLI plus real device; run E native/perf commands | `/root` |
@@ -68,7 +71,7 @@ production-surface acceptance mirrors also exist for:
 evidence, not an independent REQ-011 producer acceptance row; its absent manual
 does not replace any canonical pair.
 
-The six integrated GSUB/GPOS unit specs currently lack mirrors:
+Eight required focused specs currently lack mirrors:
 
 - `doc/06_spec/01_unit/lib/skia/ot_layout_apply_spec.md`
 - `doc/06_spec/01_unit/lib/skia/ot_layout_gpos_spec.md`
@@ -76,6 +79,8 @@ The six integrated GSUB/GPOS unit specs currently lack mirrors:
 - `doc/06_spec/01_unit/lib/skia/ot_parser_layout_selector_spec.md`
 - `doc/06_spec/01_unit/lib/skia/ot_parser_spec.md`
 - `doc/06_spec/01_unit/lib/skia/shaper_spec.md`
+- `doc/06_spec/01_unit/lib/common/text_layout/font_render_config_spec.md`
+- `doc/06_spec/01_unit/lib/gpu/engine3d/font_compat_spec.md`
 
 Existing mirrors are stale because their executable sources changed in this
 all-items worktree and no current pure-Simple docgen result exists:
@@ -104,16 +109,22 @@ checks only.
 
 ## Exact owner commands
 
-Lane A must first produce and admit one pure-Simple full CLI:
+Lane A must first produce and admit one pure-Simple full CLI in a fresh bounded
+session, using the retained resume contract:
 
 ```bash
-env SIMPLE_NO_STUB_FALLBACK=1 scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --deploy --no-mcp --jobs=min
-SIMPLE_BINARY=build/bootstrap/full/x86_64-unknown-linux-gnu/simple sh scripts/check/check-bootstrap-essential-tools-smoke.shs
+timeout -k 30s 3600s env SIMPLE_NO_STUB_FALLBACK=1 \
+  scripts/bootstrap/bootstrap-from-scratch.sh \
+  --backend=cranelift \
+  --output=build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap \
+  --full-bootstrap --full-cli --no-mcp --jobs=4
 ```
 
-It must retain the absolute CLI path, CLI SHA-256, core-C directory and
-`libsimple_runtime.a` SHA-256. A Rust seed or an exit `2`, `124`, `132`, or
-`139` is a blocker.
+Only an exit-0 wrapper result may publish the candidate. It must then run
+`scripts/check/check-bootstrap-essential-tools-smoke.shs` against that exact
+candidate and retain the absolute CLI path, CLI SHA-256, core-C directory and
+`libsimple_runtime.a` SHA-256. A Rust seed or exit `2`, `124`, `132`, or `139`
+is a blocker.
 
 After lane A publishes those immutable values, set:
 
