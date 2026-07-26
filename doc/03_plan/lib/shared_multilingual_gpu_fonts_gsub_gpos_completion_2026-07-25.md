@@ -42,15 +42,17 @@ indices before implementation begins:
 | English | `latn`/default | required features only; no optional defaults | valid-empty GSUB/GPOS |
 | Simplified Chinese | `hani`/default | required features only; no optional defaults | valid-empty GSUB/GPOS, including the inactive v1.1 FeatureVariations table |
 | Russian | `cyrl`/default | required features only; no optional defaults | valid-empty GSUB/GPOS |
-| Hindi `हिन्दी` | `dev2`/`HIN ` | the pinned Indic GSUB list and GPOS `abvm blwm dist kern` | GSUB 2/4/5/6 and GPOS 2/4/6/8 |
+| Hindi `हिन्दी` | `dev2`/`HIN ` (resolved default) | the pinned Indic GSUB list and GPOS `abvm blwm dist kern` | GSUB 2/4/5/6 and GPOS 2/4/6/8/9 |
 | Arabic witness | `arab`/default | pinned Arabic defaults | GSUB 1/2/4/5/6 and GPOS 2/4/5/6/8 |
 | Urdu witness | `arab`/`URD ` | pinned Urdu defaults | GSUB 1/2/4/5/6 and GPOS 2/4/5/6/8 |
 
-The exact formats are GSUB 1.1/1.2, 2.1, 4.1, 5.2/5.3, 6.1/6.2/6.3;
-GPOS 2.1/2.2, 4.1/5.1/6.1, 8.3; and LookupFlags `0`, `0x0008`, and
-`0x0010`. GPOS ExtensionPos type 9 is not active in this frozen inventory. If a
-regenerated pinned plan contains type 9 or any other unlisted operation, the
-run remains incomplete until the inventory and selected scope are reviewed.
+The exact selected formats are GSUB 1.1/1.2, 2.1, 4.1, 5.1/5.2/5.3, and
+6.1/6.2/6.3; GPOS 2.1/2.2, 4.1/5.1/6.1, 8.3, and ExtensionPos 9.1 wrapping
+PairPos 2.1/2.2. Active LookupFlags are `0`, `0x0008`, and `0x0010`.
+ExtensionPos remains a top-level inventory entry and must be validated and
+applied fail-closed. Any regenerated pinned plan containing another unlisted
+operation remains incomplete until the inventory and selected scope are
+reviewed.
 
 Required LangSys features are always active. The script defaults above are
 additive. `Shaper.features_enabled` adds only its existing boolean optional
@@ -59,6 +61,15 @@ this API and cannot be silently approximated. Selection must retain enough
 feature-to-lookup provenance for script preprocessing to restrict positional
 features to eligible glyphs even after the final lookup union is deduplicated
 and sorted.
+
+For RTL `arab` selection, required LangSys features remain additive. Request
+GSUB tags `rtlm ccmp locl isol fina fin2 fin3 medi med2 init rlig calt rclt
+liga clig mset stch` and GPOS tags `curs kern mark mkmk`. Activate a requested
+tag only when advertised by the resolved LangSys; an absent tag is a no-op.
+Deduplicate and execute the resulting union in ascending LookupList order. This
+is the pinned Simple policy derived from HarfBuzz commit
+`d65aa90ea656aa1e31ff26b7d052ef2eaa1f418a`, not full HarfBuzz pause/stage
+parity.
 
 ### Runtime prerequisite for every executable stage
 
@@ -101,8 +112,12 @@ inputs, not acceptance truth.
 Add `test/01_unit/lib/skia/ot_layout_pinned_inventory_spec.spl`. It loads each
 registry-pinned blob, independently selects the required/default/explicit
 features, compares every ordered field to the SDN row, and asserts both that
-all fixture rows, including all six valid-empty table rows, were consumed and
-that no selected lookup was omitted. Run:
+all fixture rows, including all twelve valid-empty table rows—six per SC
+face—were consumed and that no selected lookup was omitted.
+The Stage 0 oracle reads the pinned Layout tables directly and must compile
+against committed `HEAD`; it does not depend on uncommitted production-selector
+fields. Production selector parity remains a Stage 2 gate against this frozen
+oracle. Run:
 
 ```sh
 SIMPLE_LIB=src SIMPLE_NO_STUB_FALLBACK=1 "$SIMPLE_BIN" test \
@@ -189,6 +204,12 @@ owner.
   with RTL handled by logical clusters rather than visual array order.
 - Thread one mutable work budget through every variable-count reader.
 - Permit one shared PairPos2 ClassDef while rejecting unrelated overlap.
+- Implement bounded ContextSubst format 1 rule-set validation/application
+  through the existing nested dispatcher.
+- Implement GPOS ExtensionPos format 1 as a validated wrapper over the shared
+  semantic GPOS handlers, preserving the outer LookupFlag and shared work
+  budget. Reject recursive type 9, invalid extension offsets, unsupported
+  wrapped types/formats, and cross-table reads before mutation.
 - Keep all late failures transactional.
 
 Required focused tests:
@@ -198,7 +219,12 @@ Required focused tests:
 - ChainContextPos matched-input advancement;
 - ignored mark between ligature components;
 - shared ClassDef legal case plus illegal overlap;
-- table-sized Coverage/ClassDef/PairSet work exhaustion; and
+- table-sized Coverage/ClassDef/PairSet work exhaustion;
+- ContextSubst 5.1 match, miss, malformed rule-set, and malformed nested
+  dispatch;
+- exact validation of Noto Serif Devanagari lookup 36's three ExtensionPos
+  wrappers plus malformed, recursive, unsupported, and out-of-range targets;
+  and
 - malformed late lookup returning the original record vector.
 
 Stop after at most three repair/review cycles. A third NO-GO is reported rather
