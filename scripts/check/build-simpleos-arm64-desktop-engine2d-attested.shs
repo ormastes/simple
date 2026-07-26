@@ -9,12 +9,14 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 . scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs
+. scripts/check/lib/qemu-frozen-source-admission.shs
 
 COMPILER=""
 KERNEL="build/os/simpleos_arm64_desktop_engine2d.elf"
 DISK="build/os/fat32-arm64-desktop.img"
 DISK_PRODUCER="build/os/make_os_disk"
 BUILD_MANIFEST="build/os/simpleos_arm64_desktop_engine2d.build-manifest.env"
+FROZEN_BUILD_MANIFEST="${BUILD_MANIFEST}.frozen-source-admission.env"
 BUILD_STAMP="${KERNEL}.build_stamp"
 GENERATED_LOG_CONFIG="build/os/generated/generated/simpleos_log_config.spl"
 BUILD_COMMAND=""
@@ -103,6 +105,13 @@ PRE_COMPILER_VERSION="$(printf '%s\n' "$PRE_COMPILER_VERSION_OUTPUT" |
     sed -n '1p')"
 [ -n "$PRE_COMPILER_VERSION" ] ||
     fail_build "canonical-compiler-version-missing"
+QEMU_ADMISSION_COMMAND="env $BUILD_ENVIRONMENT $BUILD_COMMAND"
+qemu_admission_begin arm64 \
+    examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl \
+    "$COMPILER" "$QEMU_ADMISSION_COMMAND" \
+    src/os src/lib examples/09_embedded/simple_os scripts/os/make_os_disk.shs \
+    scripts/os/make_os_disk.c scripts/os/simpleos_font_bundle_companion.sha256 assets/fonts ||
+    fail_build "frozen-source-admission-rejected"
 
 # Remove a previously valid receipt before starting: a failed or interrupted
 # rebuild must never leave stale provenance beside new/partial artifacts.
@@ -200,9 +209,16 @@ umask 077
     echo "build_environment=$BUILD_ENVIRONMENT"
 } >"$MANIFEST_TMP"
 mv "$MANIFEST_TMP" "$BUILD_MANIFEST"
+qemu_admission_publish "$KERNEL" "$FROZEN_BUILD_MANIFEST" \
+    src/os src/lib examples/09_embedded/simple_os scripts/os/make_os_disk.shs \
+    scripts/os/make_os_disk.c scripts/os/simpleos_font_bundle_companion.sha256 assets/fonts || {
+    rm -f "$BUILD_MANIFEST" "$FROZEN_BUILD_MANIFEST"
+    fail_build "frozen-source-admission-rejected"
+}
 
 echo "arm64_desktop_engine2d_attested_build_status=pass"
 echo "arm64_desktop_engine2d_attested_build_manifest=$BUILD_MANIFEST"
+echo "arm64_desktop_engine2d_attested_frozen_source_admission=$FROZEN_BUILD_MANIFEST"
 echo "arm64_desktop_engine2d_attested_source_revision=$PRE_HEAD"
 echo "arm64_desktop_engine2d_attested_source_fingerprint=$PRE_SOURCE_FINGERPRINT"
 echo "arm64_desktop_engine2d_attested_source_file_count=$PRE_SOURCE_FILE_COUNT"

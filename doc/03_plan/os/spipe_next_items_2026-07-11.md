@@ -259,3 +259,10 @@ Implementation result (2026-07-11, committed 9feb36cb72a2):
   `doc/08_tracking/bug/self_hosted_simpleos_target_native_build_crash_2026-07-11.md` —
   cranelift output must be proven non-stub-collapsed; the seed external-llc path is the
   memory-documented real route (llc blockers #131/#133 apply to full-app scope).
+# Frozen QEMU source admission — 2026-07-26
+
+Before accepting an x86_64 WM render/event or ARM64 QMP input capture, require
+the producer-side `qemu-frozen-source-admission-v1` sidecar. It is published
+only by a linked, clean worktree and binds revision, scoped-source fingerprint,
+entry, compiler, exact build command, and output digest. This is an admission
+precondition; retain all existing x86/ARM SIMD, render, and input capture rows.

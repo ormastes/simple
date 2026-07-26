@@ -15,6 +15,7 @@ KERNEL="build/os/simpleos_arm64_desktop_engine2d.elf"
 DISK="build/os/fat32-arm64-desktop.img"
 DISK_PRODUCER="build/os/make_os_disk"
 BUILD_MANIFEST="build/os/simpleos_arm64_desktop_engine2d.build-manifest.env"
+FROZEN_BUILD_MANIFEST="${BUILD_MANIFEST}.frozen-source-admission.env"
 EVIDENCE_DIR="${SIMPLEOS_ARM64_QMP_EVIDENCE_DIR:-build/os/arm64_qmp_input_evidence}"
 EVIDENCE_ENV="$EVIDENCE_DIR/evidence.env"
 SERIAL_LOG="$EVIDENCE_DIR/serial.log"
@@ -72,6 +73,20 @@ fail_evidence() {
     fail_evidence "canonical-desktop-disk-missing"
 [ -f "$BUILD_MANIFEST" ] && [ -s "$BUILD_MANIFEST" ] ||
     fail_evidence "canonical-build-manifest-missing"
+[ -f "$FROZEN_BUILD_MANIFEST" ] && [ -s "$FROZEN_BUILD_MANIFEST" ] ||
+    fail_evidence "canonical-frozen-source-admission-missing"
+
+for frozen_key in schema repo_revision dirty_state_policy frozen_worktree \
+    entry_path entry_sha256 source_roots source_fingerprint source_file_count \
+    compiler_path compiler_sha256 build_command output_path output_sha256
+do
+    frozen_count="$(grep -c "^${frozen_key}=" "$FROZEN_BUILD_MANIFEST" || true)"
+    [ "$frozen_count" -eq 1 ] || fail_evidence "canonical-frozen-source-admission-invalid"
+done
+
+frozen_field() {
+    sed -n "s/^$1=//p" "$FROZEN_BUILD_MANIFEST"
+}
 
 for key in \
     artifact_kind \
@@ -121,6 +136,18 @@ MANIFEST_BUILD_COMMAND="$(manifest_field build_command)"
 MANIFEST_BUILD_ENVIRONMENT="$(manifest_field build_environment)"
 HOST_SOURCE_REVISION="$(git rev-parse --verify HEAD 2>/dev/null)" ||
     fail_evidence "host-source-revision-unavailable"
+[ "$(frozen_field schema)" = "qemu-frozen-source-admission-v1" ] ||
+    fail_evidence "canonical-frozen-source-admission-schema-mismatch"
+[ "$(frozen_field repo_revision)" = "$HOST_SOURCE_REVISION" ] ||
+    fail_evidence "canonical-frozen-source-admission-revision-mismatch"
+[ "$(frozen_field dirty_state_policy)" = "scoped-tracked-and-untracked-clean" ] ||
+    fail_evidence "canonical-frozen-source-admission-dirty-policy-mismatch"
+[ "$(frozen_field frozen_worktree)" = "linked-clean" ] ||
+    fail_evidence "canonical-frozen-source-admission-worktree-mismatch"
+[ "$(frozen_field output_path)" = "$KERNEL" ] ||
+    fail_evidence "canonical-frozen-source-admission-output-path-mismatch"
+[ "$(frozen_field output_sha256)" = "$(sha256_file "$KERNEL")" ] ||
+    fail_evidence "canonical-frozen-source-admission-output-sha256-mismatch"
 
 [ "$MANIFEST_ARTIFACT_KIND" = "simpleos-arm64-desktop-engine2d" ] ||
     fail_evidence "canonical-build-manifest-artifact-kind-mismatch"
