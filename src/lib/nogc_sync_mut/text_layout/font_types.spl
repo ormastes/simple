@@ -160,7 +160,18 @@ fn font_render_config_valid(config: FontRenderConfig) -> bool:
     if not font_execution_target_supported(target):
         return false
     if target == "auto":
-        if config.execution_policy != FontExecutionPolicy.Suggested:
+        # Direct ==/!= between the enum FIELD and a fresh variant literal
+        # miscompiles on the freestanding entry-closure lane: a config
+        # constructed with Suggested compared != Suggested here
+        # ([font-plan] config-dump policy_suggested=0, rerun34 2026-07-26).
+        # match on the field switches on the tag and works — same idiom
+        # font_execution_policy_name relies on. Semantics identical.
+        var policy_suggested = false
+        match config.execution_policy:
+            FontExecutionPolicy.Suggested: policy_suggested = true
+            FontExecutionPolicy.Preferred: policy_suggested = false
+            FontExecutionPolicy.Required: policy_suggested = false
+        if not policy_suggested:
             return false
     true
 
@@ -218,7 +229,14 @@ pub fn font_execution_plan_into(config: FontRenderConfig, executable_targets: [t
         val d_aa: text = config.antialiasing
         val d_atlas: text = config.atlas_policy
         val d_policy_suggested = if config.execution_policy == FontExecutionPolicy.Suggested: 1 else: 0
-        print("[font-plan] config-dump size={d_size} family='{d_family}' category='{d_category}' language='{d_language}' script='{d_script}' weight='{d_weight}' style='{d_style}' hinting='{d_hinting}' aa='{d_aa}' atlas='{d_atlas}' policy_suggested={d_policy_suggested}")
+        val d_eq_p = if config.execution_policy == FontExecutionPolicy.Preferred: 1 else: 0
+        val d_eq_r = if config.execution_policy == FontExecutionPolicy.Required: 1 else: 0
+        var d_policy_match = "none"
+        match config.execution_policy:
+            FontExecutionPolicy.Suggested: d_policy_match = "suggested"
+            FontExecutionPolicy.Preferred: d_policy_match = "preferred"
+            FontExecutionPolicy.Required: d_policy_match = "required"
+        print("[font-plan] config-dump size={d_size} family='{d_family}' category='{d_category}' language='{d_language}' script='{d_script}' weight='{d_weight}' style='{d_style}' hinting='{d_hinting}' aa='{d_aa}' atlas='{d_atlas}' policy_suggested={d_policy_suggested} policy_eq_pr={d_eq_p}{d_eq_r} policy_match='{d_policy_match}'")
         return 0
     var order: [text] = []
     for raw in executable_targets:
