@@ -133,6 +133,19 @@ aggregate survives. Mitigation landed: the scanner now hands events to
 `degenerate-arena`/`degenerate-event` dump if events arrive but none make a
 node (`simple_web_html_layout_renderer_foundation.spl`).
 
+**Rerun5 receipt — CONFIRMED, and the globals fallback fails too:**
+`[web-parse] scan-handoff-loss returned=15 module=0`. The scanner produced
+exactly 15 events (hand-count of the part dump agrees: 15 tag events for
+this document — the scan logic is fully correct in the guest), the scalar
+i64 return survived the call boundary, but the **same-module `[text]`
+global arrays read back 0 entries**. So in the freestanding SimpleOS build
+BOTH cross-function channels for array data lose it: nested-array `[[text]]`
+returns AND array-typed module globals (the latter contradicts the host-lane
+fix in 952d2ca34d7 — that fix does not cover this build). Builtin returns
+(`split`) and locals are the only proven channels. Second mitigation: the
+scan is now INLINED into `parse_html` (it was the only caller) so the event
+arrays are locals and never cross the ABI.
+
 ## Proper fix
 
 In the cranelift lowering: make aggregate returns (direct and Option-wrapped)
