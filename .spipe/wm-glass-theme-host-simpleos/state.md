@@ -531,3 +531,16 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   retain the bug; never substitute `f2c...` or run full Stage4 for diagnosis.
   No fresh compiler promotion, host/QEMU launch, SIMD PASS, or rendering/event
   claim is added by this checkpoint.
+- continuation-2026-07-26-web-gui-owner-audit: In a clean `origin/main`
+  linked worktree, the only eligible macOS pure-Simple binary
+  (`277f8ac9...`) passed the focused Web CSS authority (5 assertions), widget
+  Draw IR semantic-theme (2), and host bootstrap (6) source/interpreter
+  regressions once. The scalar package CSS/fingerprint boundary and generated
+  Aetheric snapshot owner contain no remaining CSS parser/cascade defect.
+  AC-7 remains blocked before a production capture: the canonical browser-event
+  probe constructs an inline fixed light CSS fixture instead of the production
+  generated Aetheric document, does not bind the theme fingerprint or computed
+  glass properties, and therefore cannot prove production rendering. It is
+  retained only as a diagnostic event bridge; see
+  `doc/09_report/wm_glass_theme_web_gui_audit_2026-07-26.md`. No host/browser
+  launch occurred because the native host-cycle cap is already exhausted.
