@@ -608,3 +608,17 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   `73`. No Linux/Vulkan device, rendering, event, capture, present, readback,
   handle, or parity execution is claimed. AC-2, AC-3, AC-5, AC-7, AC-8, and
   AC-10 remain open pending current live evidence.
+- continuation-2026-07-26-current-interpreter-and-admission-checkpoint: After
+  advancing the clean integration worktree to `65c6618eb3`, the pinned eligible
+  pure-Simple binary `277f8ac9...` (`Simple v1.0.0-beta`) passed
+  `theme_package_spec.spl` 11/11 and `web_theme_css_authority_spec.spl` 5/5 in
+  interpreter mode. This covers package/cache/icon lookup, owner-local
+  `UITheme` construction, BrowserBackend scalar glass colors, package CSS,
+  fingerprint, and root attributes. The newly integrated retained-symbol
+  linker unit spec also passes 15/15. These are interpreter/link-contract
+  regressions only: they do not prove Cranelift Option lowering, a current
+  native producer, live WM/Electron rendering or events, device readback, or
+  QEMU. No new admitted x86/ARM compiler, frozen manifest, kernel, framebuffer,
+  or event evidence exists; the external x86 job still uses a dirty worktree
+  and forbidden seed-marked compiler and cannot become acceptance evidence.
+  AC-2, AC-3, AC-5, AC-7, AC-8, and AC-10 therefore remain active.

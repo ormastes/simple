@@ -19,14 +19,28 @@ Source-only checks passed once:
   proof, failed as required with `missing-production-proof` before any native
   renderer, Electron, browser, GUI, QEMU, or capture command.
 
+## Post-457 interpreter regression
+
+At clean integration revision `65c6618eb3`, the same pinned `277f8ac9...`
+pure-Simple binary (`Simple v1.0.0-beta`) passed:
+
+- `test/unit/lib/common/ui/theme_package_spec.spl`: 11 passed, 0 failed.
+- `test/01_unit/app/ui/web_theme_css_authority_spec.spl`: 5 passed, 0 failed.
+
+This covers package/cache/icon lookup, owner-local `UITheme` construction,
+BrowserBackend scalar glass colors, canonical package CSS/fingerprint, and
+root attributes. It is interpreter-only evidence. It does not prove Cranelift
+Option lowering, a current native producer, WM launch, Electron capture or
+events, device readback, or QEMU.
+
 ## Exact retained prerequisite chain
 
 1. Produce the exact-current proof from the production owner with the eligible
-   binary, current revision `92ae794ba7`, macOS `xcrun`/`nm`, and an installed
-   Electron command. The producer builds the generator, CPU-SIMD renderer, and
-   UI-access driver; creates SQLite/provider provenance; writes the generated
-   Aetheric HTML and Engine2D pixels; then performs the single real Electron
-   capture and canonical UI-access actions.
+   binary, the exact revision at the eventual producer run, macOS `xcrun`/`nm`,
+   and an installed Electron command. The producer builds the generator,
+   CPU-SIMD renderer, and UI-access driver; creates SQLite/provider provenance;
+   writes the generated Aetheric HTML and Engine2D pixels; then performs the
+   single real Electron capture and canonical UI-access actions.
 2. The result must be a regular, single-link
    `aetheric-host-web-gui-v1` envelope under its producer `BUILD_DIR`, with all
    referenced generated binaries/artifacts, exact current source revision and

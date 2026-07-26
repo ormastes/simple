@@ -96,6 +96,16 @@ overlapping dirty work and remains read-only for this lane.
 
 ### Next execution order
 
+2026-07-26 current checkpoint: source/interpreter regression is complete for
+theme-package loading (11/11), Web CSS authority (5/5), and retained native
+linker policy (15/15). The canonical archive owner repair is integrated, but
+native/live rows remain active: no current native Aetheric producer or
+Electron proof exists, and neither x86 nor ARM has an admitted compiler/frozen
+manifest for a canonical QEMU launch. The external seed-driven x86 job is not
+admissible evidence. Current details and remaining gates are recorded in
+`.spipe/wm-glass-theme-host-simpleos/state.md` and
+`doc/09_report/aetheric_host_web_gui_readiness_2026-07-26.md`.
+
 2026-07-25 checkpoint: the 16x16 hosted capture is **DIAGNOSTIC ONLY**.
 x86 SSE2/static and ARM VirtIO/C preflights pass, but neither launched QEMU.
 Resume in this order: native `to_i64` fixture, exact-current self-hosted

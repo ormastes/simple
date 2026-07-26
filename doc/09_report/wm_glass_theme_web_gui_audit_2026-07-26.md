@@ -1,5 +1,10 @@
 # WM Glass Theme Web/GUI Audit — 2026-07-26
 
+> Superseded for current status by
+> `doc/09_report/aetheric_host_web_gui_readiness_2026-07-26.md`. This document
+> preserves the historical `3b7a11b6cd` audit. Canonical event admission now
+> requires a retained Aetheric production proof; no live proof exists.
+
 - Source revision: `3b7a11b6cdf61ce2180886d6ae17fa0e1d9c8204` (`origin/main` at audit start).
 - Scope: AC-1, AC-4, AC-5, and AC-7 of `.spipe/wm-glass-theme-host-simpleos/state.md`.
 - Status: **BLOCKED before a production browser/host capture; no production PASS is claimed.**
