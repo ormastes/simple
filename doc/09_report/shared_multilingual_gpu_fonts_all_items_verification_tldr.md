@@ -13,6 +13,8 @@ All 23 requirement/NFR rows are mapped, but the umbrella result remains
   nested IMAGE changes are implemented but unverified;
 - shared nested collection has source coverage for a valid collection and
   stale, duplicate, and orphan rejection, but remains runtime-unverified;
+- selected-memory binding rejects unregistered paths and selected-path/hash
+  mismatches, but its regression remains runtime-unverified;
 - the inventory is 32 changed/new specs: 18 mirrors missing, 14 stale, zero
   current, and all 32 require post-admission docgen;
 - no full CLI exists, so runtime and docgen are not PASS;

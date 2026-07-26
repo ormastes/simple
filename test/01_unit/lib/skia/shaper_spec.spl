@@ -4,7 +4,7 @@ use std.spipe.*
 use std.skia.feature.shaper.script_detect.{Script, script_of, script_is_rtl}
 use std.skia.feature.shaper.feature_tags.{OpenTypeFeature, feature_tag}
 use std.skia.feature.shaper.font_fallback.{FallbackChain, fallback_chain_new, fallback_chain_add, fallback_chain_font_for_script, fallback_chain_font_for_run, system_default_chain}
-use std.skia.feature.shaper.shaper.{Shaper, ShapedRun, ShapedGlyph, ArabicJoinForm, IndicClass, ThaiClass, MyanmarClass, KhmerClass, TibetanClass, HangulClass, HebrewClass, MongolianClass, shaper_new, shaper_with_features, shaper_with_ot_font, shaper_with_ot_face, shaped_run_to_font_glyph_run, ascii_to_codepoints, shaper_shape, shaper_shape_with_language, arabic_join_form, devanagari_classify, classify_thai_char, classify_myanmar_char, classify_khmer_char, classify_tibetan_char, classify_hangul_char, classify_hebrew_char, classify_mongolian_char}
+use std.skia.feature.shaper.shaper.{Shaper, ShapedRun, ShapedGlyph, ArabicJoinForm, IndicClass, ThaiClass, MyanmarClass, KhmerClass, TibetanClass, HangulClass, HebrewClass, MongolianClass, shaper_new, shaper_with_features, shaper_with_ot_font, shaper_with_selected_ot_font, shaper_with_ot_face, shaped_run_to_font_glyph_run, ascii_to_codepoints, shaper_shape, shaper_shape_with_language, arabic_join_form, devanagari_classify, classify_thai_char, classify_myanmar_char, classify_khmer_char, classify_tibetan_char, classify_hangul_char, classify_hebrew_char, classify_mongolian_char}
 use std.skia.feature.glyph.ot_parser.{parse_offset_table, find_table, read_u16_be, read_u32_be}
 use std.skia.feature.glyph.ot_parser_cmap.{cmap_glyph_id}
 use std.skia.feature.glyph.ot_parser_metrics.{parse_hmtx}
@@ -276,14 +276,45 @@ describe "Shaper":
         val shaper = shaper_new(chain)
         expect shaper.fallback.primary.size to_equal 12.0
 
+    it "rejects arbitrary paths and bytes from selected in-memory binding":
+        val demo_path = "src/compiler_rust/vendor/ttf-parser/tests/fonts/demo.ttf"
+        val parsed = parse_offset_table(rt_file_read_bytes(demo_path))
+        expect(parsed != None).to_be(true)
+        val arbitrary_font = sk_font_new(sk_typeface_from_attached_font("Demo", sk_font_style_normal(), demo_path, 0), 12.0)
+        val arbitrary = shaper_with_selected_ot_font(shaper_new(fallback_chain_new(arbitrary_font)), parsed.unwrap(), demo_path)
+        expect(arbitrary.ot_font_handle).to_equal(0)
+        val selected_path = "assets/fonts/google-fonts/apache/robotoslab/RobotoSlab[wght].ttf"
+        val mismatched_font = sk_font_new(sk_typeface_from_attached_font("Roboto Slab", sk_font_style_normal(), selected_path, 0), 12.0)
+        val mismatched = shaper_with_selected_ot_font(shaper_new(fallback_chain_new(mismatched_font)), parsed.unwrap(), selected_path)
+        expect(mismatched.ot_font_handle).to_equal(0)
+        val fabricated = Shaper(fallback: fallback_chain_new(mismatched_font), features_enabled: [],
+            ot_font: Some(parsed.unwrap()), ot_font_handle: -1, ot_font_generation: 0, ot_faces: [])
+        val fabricated_run = shaper_shape(fabricated, [65u32], mismatched_font, 0.0, 0.0)[0]
+        expect(fabricated_run.glyph_indices_valid).to_be(false)
+
+    it "rejects a selected binding when the shape-time face path changes":
+        val selected_path = "assets/fonts/google-fonts/apache/robotoslab/RobotoSlab[wght].ttf"
+        val parsed = parse_offset_table(rt_file_read_bytes(selected_path))
+        expect(parsed != None).to_be(true)
+        val selected_font = sk_font_new(sk_typeface_from_attached_font("Roboto Slab", sk_font_style_normal(), selected_path, 0), 12.0)
+        val bound = shaper_with_selected_ot_font(shaper_new(fallback_chain_new(selected_font)), parsed.unwrap(), selected_path)
+        expect(bound.ot_font_handle).to_equal(-1)
+        val other_path = "src/compiler_rust/vendor/ttf-parser/tests/fonts/demo.ttf"
+        val other_font = sk_font_new(sk_typeface_from_attached_font("Demo", sk_font_style_normal(), other_path, 0), 12.0)
+        val changed = Shaper(fallback: fallback_chain_new(other_font), features_enabled: bound.features_enabled,
+            ot_font: bound.ot_font, ot_font_handle: bound.ot_font_handle,
+            ot_font_generation: bound.ot_font_generation, ot_faces: bound.ot_faces)
+        val changed_run = shaper_shape(changed, [65u32], other_font, 0.0, 0.0)[0]
+        expect(changed_run.glyph_indices_valid).to_be(false)
+
     it "marks glyph indices valid only for a cmap bound to the selected face":
         val path = "assets/fonts/google-fonts/apache/robotoslab/RobotoSlab[wght].ttf"
         val loaded = load_font(path)
-        expect(loaded).to_not_be_nil()
+        expect(loaded != nil).to_be(true)
         val handle = loaded as std.nogc_sync_mut.io.font_ffi.FontHandle
         expect(handle.is_live()).to_equal(true)
         val parsed = parse_offset_table(rt_file_read_bytes(path))
-        expect(parsed).to_not_equal(None)
+        expect(parsed != None).to_be(true)
         val font = sk_font_new(sk_typeface_from_attached_font("Roboto Slab", sk_font_style_normal(), path, handle.handle), 12.0)
         val bound = shaper_with_ot_face(shaper_new(fallback_chain_new(font)), handle.handle, parsed.unwrap())
         val runs = shaper_shape(bound, [65u32], font, 0.0, 0.0)
@@ -327,10 +358,10 @@ describe "Shaper":
     it "applies a requested feature through the selected OpenType plan":
         val path = "assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf"
         val loaded = load_font(path)
-        expect(loaded).to_not_be_nil()
+        expect(loaded != nil).to_be(true)
         val handle = loaded as std.nogc_sync_mut.io.font_ffi.FontHandle
         val parsed = parse_offset_table(rt_file_read_bytes(path))
-        expect(parsed).to_not_equal(None)
+        expect(parsed != None).to_be(true)
         val font = sk_font_new(sk_typeface_from_attached_font("Nunito", sk_font_style_normal(), path, handle.handle), 12.0)
         val bound = shaper_with_ot_face(shaper_with_features(shaper_new(fallback_chain_new(font)), [OpenTypeFeature.Kerning]), handle.handle, parsed.unwrap())
         val run = shaper_shape(bound, [65u32], font, 0.0, 0.0)[0]
@@ -342,10 +373,10 @@ describe "Shaper":
     it "matches the pinned HarfBuzz Arabic and Urdu default-instance oracles":
         val path = "assets/fonts/google-fonts/ofl/notosansarabic/NotoSansArabic[wdth,wght].ttf"
         val loaded = load_font(path)
-        expect(loaded).to_not_be_nil()
+        expect(loaded != nil).to_be(true)
         val handle = loaded as std.nogc_sync_mut.io.font_ffi.FontHandle
         val parsed = parse_offset_table(rt_file_read_bytes(path))
-        expect(parsed).to_not_equal(None)
+        expect(parsed != None).to_be(true)
         val font = sk_font_new(sk_typeface_from_attached_font("Noto Sans Arabic", sk_font_style_normal(), path, handle.handle), 32.0)
         val bound = shaper_with_ot_face(shaper_new(fallback_chain_new(font)), handle.handle, parsed.unwrap())
         val arabic_codepoints = [1575u32, 1604u32, 1593u32, 1585u32, 1576u32, 1610u32, 1577u32]
@@ -411,10 +442,10 @@ describe "Shaper":
     it "accepts one bound emoji witness but rejects an unshaped emoji sequence":
         val path = "assets/fonts/google-fonts/ofl/notoemoji/NotoEmoji[wght].ttf"
         val loaded = load_font(path)
-        expect(loaded).to_not_be_nil()
+        expect(loaded != nil).to_be(true)
         val handle = loaded as std.nogc_sync_mut.io.font_ffi.FontHandle
         val parsed = parse_offset_table(rt_file_read_bytes(path))
-        expect(parsed).to_not_equal(None)
+        expect(parsed != None).to_be(true)
         val font = sk_font_new(sk_typeface_from_attached_font("Noto Emoji", sk_font_style_normal(), path, handle.handle), 12.0)
         val bound = shaper_with_ot_face(shaper_new(fallback_chain_new(font)), handle.handle, parsed.unwrap())
         val single = shaper_shape_with_language(bound, [128512u32], font, 0.0, 0.0, "und")[0]
@@ -444,14 +475,14 @@ describe "Shaper":
         val emoji_path = "assets/fonts/google-fonts/ofl/notoemoji/NotoEmoji[wght].ttf"
         val primary_loaded = load_font(primary_path)
         val emoji_loaded = load_font(emoji_path)
-        expect(primary_loaded).to_not_be_nil()
-        expect(emoji_loaded).to_not_be_nil()
+        expect(primary_loaded != nil).to_be(true)
+        expect(emoji_loaded != nil).to_be(true)
         val primary_handle = primary_loaded as std.nogc_sync_mut.io.font_ffi.FontHandle
         val emoji_handle = emoji_loaded as std.nogc_sync_mut.io.font_ffi.FontHandle
         val primary_parsed = parse_offset_table(rt_file_read_bytes(primary_path))
         val emoji_parsed = parse_offset_table(rt_file_read_bytes(emoji_path))
-        expect(primary_parsed).to_not_equal(None)
-        expect(emoji_parsed).to_not_equal(None)
+        expect(primary_parsed != None).to_be(true)
+        expect(emoji_parsed != None).to_be(true)
         val primary = sk_font_new(sk_typeface_from_attached_font("Demo Latin", sk_font_style_normal(), primary_path, primary_handle.handle), 12.0)
         val emoji = sk_font_new(sk_typeface_from_attached_font("Noto Emoji", sk_font_style_normal(), emoji_path, emoji_handle.handle), 12.0)
         val chain = fallback_chain_add(fallback_chain_new(primary), emoji)
@@ -461,7 +492,7 @@ describe "Shaper":
         expect(cross_bound.ot_faces.len()).to_equal(0)
         val run = shaper_shape_with_language(bound, [128512u32], primary, 0.0, 0.0, "und")[0]
         expect(run.font_handle).to_equal(emoji_handle.handle)
-        expect(run.glyph_ids[0]).to_not_equal(128512u32)
+        expect(run.glyph_ids[0] == 128512u32).to_be(false)
         expect(run.glyph_indices_valid).to_equal(true)
         expect(run.substitution_complete).to_equal(true)
         expect(run.positioning_complete).to_equal(true)

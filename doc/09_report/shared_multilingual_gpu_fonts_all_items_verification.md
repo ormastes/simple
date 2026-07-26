@@ -77,7 +77,7 @@ Current count: `0 pass`, `14 active`, `9 blocked`.
 | REQ-004 | active | B manifest/distribution | manifest, asset-manifest, installer, archive, SimpleOS bundle/staging specs exist; mirrors exist for the acceptance pairs | admitted CLI; run B command set and zero-stub docgen | `/root` |
 | REQ-005 | active | B manifest/distribution | manifest and SimpleOS bundle specs cover the pinned candidate catalog and unchanged bytes | admitted CLI; run B command set | `/root` |
 | REQ-006 | active | C+D shaping/surfaces | `shared_font_surfaces_spec.spl` and legacy Web/GUI/WM route pair cover the shared owner/material seam | admitted CLI; run aggregate and D command sets | `/root` |
-| REQ-007 | active | C shaping/material | shaping acceptance plus selected Arabic/Devanagari and six integrated GSUB/GPOS unit specs exist | admitted CLI; run C command set; generate six missing unit mirrors | `/root` |
+| REQ-007 | active | C shaping/material | shaping acceptance plus selected Arabic/Devanagari and six integrated GSUB/GPOS unit specs exist; selected-memory binding rejects unregistered paths and selected-path/hash mismatches | source-present but runtime-unverified; admitted CLI; run C command set; generate six missing unit mirrors | `/root` |
 | REQ-008 | active | B+C manifest/shaping | manifest and parser/loader specs cover `glyf`, default instance, bitmap, and rejection policy | admitted CLI; run B/C command sets | `/root` |
 | REQ-009 | active | C+E material/native | renderer, aggregate surface, emission, backend and perf specs contain cache identity/lifecycle oracles | admitted CLI and native record; run C/E sets | `/root` |
 | REQ-010 | active | E native/emission | GPU emission and CUDA handoff executable/manual pairs cover source/artifact contracts; emission is not execution | admitted CLI; run E source commands; retained native artifact required for promotion | `/root` |
@@ -177,6 +177,52 @@ shared nested-frame collector changes remain unverified implementation evidence.
 The collector's source spec covers a valid reachable collection plus
 fail-closed stale, duplicate, and orphan rejection; its mirror is missing and
 the behavioral cases have not run on an admitted CLI.
+
+### Lane F static source/manual-quality audit
+
+The 23-source audit found 282 `it` blocks and 2,150 source lines containing
+`expect`. Every scenario contains a direct assertion or calls a reviewed
+assertion helper. No `pass_todo`, tautological
+`expect(true).to_equal(true)`, `to_raise`, or empty scenario body was found.
+The four `pass_do_nothing` calls in
+`wm_nested_content_frame_spec.spl` are explicitly justified no-op methods on
+the pixel-only fixture (`draw_text`, `draw_char_8x16`, `present`, and
+`present_rect`), not scenario passes.
+
+All eight frozen manual steps remain present in their owning acceptance sources:
+manifest load, exact-face shaping, shared 2D/3D batch preparation, portable
+emission, native submission/readback, legacy Web/GUI/WM Draw IR, SimpleOS pixel
+capture, and warm rendering/resource measurement.
+
+Lane C resolved all 19 previously reported noncanonical matchers. It also
+repaired two short-expression parse defects: the split GSUB context-rule
+inequality in `ot_layout_apply.spl`, and wrapped boolean continuations in the
+canonical layout shaper. These are source-present but runtime-unverified.
+
+The selected-memory binder now accepts parsed bytes only when the fallback
+primary has no live handle, its path is an exact selected-registry path, and
+the registry identity starts with the parsed blob's exact SHA-256 plus its
+axis identity. Arbitrary paths and selected-path/mismatched-byte combinations
+remain unbound. This hardening and its direct regression are also
+source-present but runtime-unverified.
+
+The pinned GSUB/GPOS support map is deliberately narrow:
+
+- Noto Sans SC and Noto Serif SC: `latn`, `hani`, and `cyrl`, default language;
+- Noto Sans Devanagari and Noto Serif Devanagari: `dev2` / `HIN `;
+- Noto Sans Arabic and Noto Naskh Arabic: `arab` / default and `arab` / `URD `.
+
+Each row selects both GSUB and GPOS plans. Acceptance remains limited to the
+exact pinned Hindi, Arabic, and Urdu witnesses and the recorded simple-script
+identity cases; it does not claim general GSUB/GPOS, BiDi, mark, language, or
+arbitrary-font support.
+
+Of the 14 stale manuals, six still contain every current scenario title and
+eight omit at least one current title. `font_asset_manifest_spec.md` and
+`gui_entry_desktop_production_render_contract_spec.md` explicitly identify
+themselves as manually synchronized/docgen-pending. Hand synchronization is not
+generated evidence. The nine absent mirrors and all 14 stale mirrors therefore
+remain rejected until deterministic docgen succeeds with `0 stubs`.
 
 ## Exact owner commands
 
