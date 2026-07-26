@@ -14,6 +14,25 @@ const FONT_COMPOSITION_ID = 'html-layout';
 const FONT_IDENTITY = 'sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100';
 const EXPECTED_RUN_ID = process.env.SIMPLE_WEB_FONT_RUN_ID || '';
 const AETHERIC_PROOF_PATH = process.env.AETHERIC_HOST_WEB_GUI_PROOF || '';
+const ELECTRON_IDENTITY = Object.freeze({
+  electron_launcher_path: process.env.WM_EVENT_ELECTRON_LAUNCHER_PATH || '',
+  electron_launcher_sha256: process.env.WM_EVENT_ELECTRON_LAUNCHER_SHA256 || '',
+  electron_executable_path: process.env.WM_EVENT_ELECTRON_EXECUTABLE_PATH || '',
+  electron_executable_sha256: process.env.WM_EVENT_ELECTRON_EXECUTABLE_SHA256 || '',
+  electron_manifest_path: process.env.WM_EVENT_ELECTRON_MANIFEST_PATH || '',
+  electron_manifest_sha256: process.env.WM_EVENT_ELECTRON_MANIFEST_SHA256 || '',
+  electron_installed_package_path:
+    process.env.WM_EVENT_ELECTRON_INSTALLED_PACKAGE_PATH || '',
+  electron_installed_package_sha256:
+    process.env.WM_EVENT_ELECTRON_INSTALLED_PACKAGE_SHA256 || '',
+  electron_source_lock_path: process.env.WM_EVENT_ELECTRON_SOURCE_LOCK_PATH || '',
+  electron_source_lock_sha256: process.env.WM_EVENT_ELECTRON_SOURCE_LOCK_SHA256 || '',
+  electron_manifest_version: process.env.WM_EVENT_ELECTRON_MANIFEST_VERSION || '',
+  electron_lock_root_version: process.env.WM_EVENT_ELECTRON_LOCK_ROOT_VERSION || '',
+  electron_lock_nested_version: process.env.WM_EVENT_ELECTRON_LOCK_NESTED_VERSION || '',
+  electron_installed_package_version:
+    process.env.WM_EVENT_ELECTRON_INSTALLED_PACKAGE_VERSION || '',
+});
 
 app.commandLine.appendSwitch('force-color-profile', 'srgb');
 app.disableHardwareAcceleration();
@@ -521,6 +540,7 @@ async function main() {
     frameNonBackgroundPixels > 0;
   result.electron_process_version = process.versions.electron || '';
   result.chrome_process_version = process.versions.chrome || '';
+  Object.assign(result, ELECTRON_IDENTITY);
   console.log('WM_EVENT_CHECK ' + JSON.stringify(result));
   win.destroy();
   app.exit(result.pass ? 0 : 1);

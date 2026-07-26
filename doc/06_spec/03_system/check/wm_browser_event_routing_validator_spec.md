@@ -1,8 +1,11 @@
 # WM browser event-routing proof validator
 
-> **Runtime status: BLOCKED.** This manual mirrors the executable contract, but
-> no current focused SSpec receipt was produced for this documentation update.
-> The fixture assertions below are not live Electron/Chromium evidence.
+> **Runtime status: BLOCKED.** The focused interpreter run passed the complete
+> strict-identity acceptance and eight existing rejection scenarios, then the
+> available self-hosted runtime rejected the pre-existing `expect_not` helper
+> before later scenarios could execute. Direct validator checks passed for the
+> new path, hash, metadata, and process-version rejection matrix. These fixtures
+> are not live Electron/Chromium evidence.
 
 Source: `test/03_system/check/wm_browser_event_routing_validator_spec.spl`.
 
@@ -16,6 +19,12 @@ Electron Chromium event-routing surface and the regular producer
 runtime, event-sequence, count, timing, animation, payload, UI, and font-frame
 rows. Any missing, forged, stale, aliased, malformed, fractional, unsafe, or
 out-of-budget value fails closed; `pass=true` alone never passes.
+Electron runtime identity is physical evidence, not a producer source marker:
+the proof must retain the exact canonical repo-local `node_modules/electron/cli.js`,
+platform executable, source manifest and lock, and installed package paths with
+their current SHA-256 values. The source manifest dependency, lock root
+dependency, nested lock package, installed package, and launched process must
+all report exactly Electron `42.5.0`.
 
 Required live proof includes the canonical host-pointer/focus/move/title/maximize/
 text/pointer-down/pointer-up sequence, matching aggregate counts, positive
@@ -69,6 +78,7 @@ it "rejects a valid alternate receipt outside the configured proof path":
 | rejects pass true proof without the live event-check source marker | FAIL: proof source missing. |
 | rejects pass true proof when the live event-check source artifact is missing | FAIL: proof source missing. |
 | rejects substituted live event-check source artifacts | FAIL: hardlink, non-regular, or marker-missing producer. |
+| rejects swapped Electron paths hashes metadata and process identity | FAIL: exact physical Electron identity mismatch. |
 | rejects pass true proof without live Electron Chromium runtime evidence | FAIL: browser runtime missing. |
 | rejects pass true proof when the frame sequence is missing or reordered | FAIL: event-routing contract missing. |
 | rejects pass true proof when Chromium timing or animation is malformed | FAIL: event-routing contract missing. |
@@ -89,7 +99,8 @@ it "rejects a valid alternate receipt outside the configured proof path":
 
 The acceptance scenario retains normalized validator output, including proof
 symlink/hardlink checks, producer source status and both source sizes, runtime
-identity, counts, timing, animation, event sequence, payload/UI fields, and
+identity with canonical Electron artifact paths, hashes, and exact `42.5.0`
+metadata, counts, timing, animation, event sequence, payload/UI fields, and
 font-frame/composition correlation. A live admission is BLOCKED until the
-focused SSpec produces that receipt with its passing scenario and all rejection
-scenarios observed as expected.
+focused SSpec completes all scenarios under a runtime that supports its existing
+matcher surface.

@@ -93,6 +93,114 @@ const expectedFontCompositionId = 'html-layout';
 const expectedFontIdentity = 'sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100';
 const maxEventTimingMs = 1000;
 const expectedThemeSnapshot = 'src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl';
+const expectedElectronVersion = '42.5.0';
+const repositoryRoot = fs.realpathSync(path.resolve(__dirname, '../..'));
+
+function electronExecutableParts() {
+  if (process.platform === 'darwin') {
+    return ['dist', 'Electron.app', 'Contents', 'MacOS', 'Electron'];
+  }
+  if (process.platform === 'win32') return ['dist', 'electron.exe'];
+  return ['dist', 'electron'];
+}
+
+function sha256File(file) {
+  return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+}
+
+function exactPhysicalFile(supplied, expected, label) {
+  if (typeof supplied !== 'string' || supplied !== expected) {
+    throw new Error(`${label}-path-mismatch`);
+  }
+  const stat = fs.lstatSync(expected);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink > 1 ||
+      fs.realpathSync(expected) !== expected) {
+    throw new Error(`${label}-not-physical`);
+  }
+  return expected;
+}
+
+function electronIdentityArtifact(proof) {
+  const shellRoot = path.join(repositoryRoot, 'tools', 'electron-shell');
+  const packageRoot = path.join(shellRoot, 'node_modules', 'electron');
+  const expected = {
+    launcher: path.join(packageRoot, 'cli.js'),
+    executable: path.join(packageRoot, ...electronExecutableParts()),
+    manifest: path.join(shellRoot, 'package.json'),
+    installedPackage: path.join(packageRoot, 'package.json'),
+    sourceLock: path.join(shellRoot, 'package-lock.json'),
+  };
+  try {
+    for (const directory of [
+      shellRoot,
+      path.join(shellRoot, 'node_modules'),
+      packageRoot,
+      path.dirname(expected.executable),
+    ]) {
+      const stat = fs.lstatSync(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink() ||
+          fs.realpathSync(directory) !== directory) {
+        throw new Error('directory-not-physical');
+      }
+    }
+    const files = {
+      launcher: exactPhysicalFile(
+        proof.electron_launcher_path, expected.launcher, 'launcher'
+      ),
+      executable: exactPhysicalFile(
+        proof.electron_executable_path, expected.executable, 'executable'
+      ),
+      manifest: exactPhysicalFile(
+        proof.electron_manifest_path, expected.manifest, 'manifest'
+      ),
+      installedPackage: exactPhysicalFile(
+        proof.electron_installed_package_path,
+        expected.installedPackage,
+        'installed-package'
+      ),
+      sourceLock: exactPhysicalFile(
+        proof.electron_source_lock_path, expected.sourceLock, 'source-lock'
+      ),
+    };
+    const hashes = {
+      electron_launcher_sha256: sha256File(files.launcher),
+      electron_executable_sha256: sha256File(files.executable),
+      electron_manifest_sha256: sha256File(files.manifest),
+      electron_installed_package_sha256: sha256File(files.installedPackage),
+      electron_source_lock_sha256: sha256File(files.sourceLock),
+    };
+    for (const [field, hash] of Object.entries(hashes)) {
+      if (proof[field] !== hash) throw new Error(`${field.replace(/_/g, '-')}-mismatch`);
+    }
+    const manifest = JSON.parse(fs.readFileSync(files.manifest, 'utf8'));
+    const lock = JSON.parse(fs.readFileSync(files.sourceLock, 'utf8'));
+    const installed = JSON.parse(fs.readFileSync(files.installedPackage, 'utf8'));
+    const versions = {
+      electron_manifest_version: manifest.dependencies && manifest.dependencies.electron,
+      electron_lock_root_version:
+        lock.packages && lock.packages[''] && lock.packages[''].dependencies &&
+        lock.packages[''].dependencies.electron,
+      electron_lock_nested_version:
+        lock.packages && lock.packages['node_modules/electron'] &&
+        lock.packages['node_modules/electron'].version,
+      electron_installed_package_version: installed.version,
+    };
+    for (const [field, version] of Object.entries(versions)) {
+      if (version !== expectedElectronVersion || proof[field] !== expectedElectronVersion) {
+        throw new Error(`${field.replace(/_/g, '-')}-mismatch`);
+      }
+    }
+    if (proof.electron_process_version !== expectedElectronVersion) {
+      throw new Error('electron-process-version-mismatch');
+    }
+    return { status: 'pass', reason: 'pass' };
+  } catch (err) {
+    return {
+      status: 'fail',
+      reason: err && err.message ? err.message : 'identity-invalid',
+    };
+  }
+}
 
 function envelopeFields(proofPath) {
   return Object.fromEntries(fs.readFileSync(proofPath, 'utf8').split(/\r?\n/).filter(Boolean).map(line => {
@@ -335,6 +443,7 @@ const title = proof.title_payload || {};
 const text = proof.text_payload || {};
 const proofSource = proofSourceArtifact();
 const productionEnvelope = productionEnvelopeArtifact(proof);
+const electronIdentity = electronIdentityArtifact(proof);
 const fontFrame = fontFrameArtifact(proof);
 const simpleComposition = simpleCompositionArtifact(proof);
 const proofSourceArtifactStatus =
@@ -358,6 +467,22 @@ const rows = {
   electron_user_agent: proof.electron_user_agent,
   electron_process_version: proof.electron_process_version,
   chrome_process_version: proof.chrome_process_version,
+  electron_identity_status: electronIdentity.status,
+  electron_identity_reason: electronIdentity.reason,
+  electron_launcher_path: proof.electron_launcher_path,
+  electron_launcher_sha256: proof.electron_launcher_sha256,
+  electron_executable_path: proof.electron_executable_path,
+  electron_executable_sha256: proof.electron_executable_sha256,
+  electron_manifest_path: proof.electron_manifest_path,
+  electron_manifest_sha256: proof.electron_manifest_sha256,
+  electron_installed_package_path: proof.electron_installed_package_path,
+  electron_installed_package_sha256: proof.electron_installed_package_sha256,
+  electron_source_lock_path: proof.electron_source_lock_path,
+  electron_source_lock_sha256: proof.electron_source_lock_sha256,
+  electron_manifest_version: proof.electron_manifest_version,
+  electron_lock_root_version: proof.electron_lock_root_version,
+  electron_lock_nested_version: proof.electron_lock_nested_version,
+  electron_installed_package_version: proof.electron_installed_package_version,
   production_envelope_schema: proof.production_envelope_schema,
   production_envelope_producer: proof.production_envelope_producer,
   production_envelope_path: proof.production_envelope_path,
@@ -466,6 +591,8 @@ if (!boolTrue(proof.pass)) {
   reason = `event-routing-proof-source-${proofSource.status}`;
 } else if (productionEnvelope.status !== 'pass') {
   reason = `event-routing-production-envelope-${productionEnvelope.status}`;
+} else if (electronIdentity.status !== 'pass') {
+  reason = `event-routing-electron-identity-${electronIdentity.reason}`;
 } else if (simpleComposition.status !== 'pass') {
   reason = 'event-routing-simple-composition-artifact-invalid';
 } else if (
@@ -473,8 +600,7 @@ if (!boolTrue(proof.pass)) {
   typeof proof.electron_user_agent !== 'string' ||
   !/Chrome\/[0-9]/.test(proof.electron_user_agent) ||
   !/Electron\/[0-9]/.test(proof.electron_user_agent) ||
-  typeof proof.electron_process_version !== 'string' ||
-  !/^[0-9]+(?:\.[0-9]+)*$/.test(proof.electron_process_version) ||
+  proof.electron_process_version !== expectedElectronVersion ||
   typeof proof.chrome_process_version !== 'string' ||
   !/^[0-9]+(?:\.[0-9]+)*$/.test(proof.chrome_process_version)
 ) {
