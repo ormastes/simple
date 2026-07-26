@@ -73,11 +73,12 @@ native_build_command() {
 }
 
 bounded_native_build_log() {
-    # Keep only a deterministic 8 KiB head+tail transcript while draining the
-    # full compiler stream. This never writes an unbounded raw build log.
+    # Retain the complete stream through 8 KiB, then a deterministic head+tail
+    # transcript while draining the full compiler stream. No raw build log is
+    # ever written unbounded.
     perl -e '
         my ($head_max, $tail_max) = @ARGV;
-        my ($head, $tail, $total) = ("", "", 0);
+        my ($head, $tail, $full, $total) = ("", "", "", 0);
         while (1) {
             my $read = read(STDIN, my $chunk, 4096);
             last if !defined($read) || $read == 0;
@@ -87,15 +88,18 @@ bounded_native_build_log() {
                 $take = $read if $take > $read;
                 $head .= substr($chunk, 0, $take);
             }
+            if (length($full) < $head_max + $tail_max) {
+                my $take = $head_max + $tail_max - length($full);
+                $take = $read if $take > $read;
+                $full .= substr($chunk, 0, $take);
+            }
             $tail .= $chunk;
             if (length($tail) > $tail_max) {
                 substr($tail, 0, length($tail) - $tail_max, "");
             }
         }
-        if ($total <= $head_max) {
-            print $head;
-        } elsif ($total <= $head_max + $tail_max) {
-            print $tail;
+        if ($total <= $head_max + $tail_max) {
+            print $full;
         } else {
             print $head;
             print "\\n--- omitted ", $total - $head_max - $tail_max,
@@ -120,7 +124,7 @@ run_native_build_bounded() {
             --entry "$ENTRY" \
             --output "$OUTPUT" \
             2>&1
-        printf '%s\\n' "$?" >"$NATIVE_STATUS"
+        printf '%s\n' "$?" >"$NATIVE_STATUS"
     ) | bounded_native_build_log >"$NATIVE_LOG"
     [ -f "$NATIVE_STATUS" ] || return 1
     native_status="$(sed -n '1p' "$NATIVE_STATUS")"

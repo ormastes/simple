@@ -46,8 +46,9 @@ Retained local artifacts:
 
 Future checker attempts retain no unbounded native-build transcript. Evidence
 records an exactly shell-quoted `env` + compiler + argument command and hashes
-a deterministic 4 KiB head plus 4 KiB tail transcript (8,256-byte hard cap),
-adding an omission marker when compiler output exceeds that bound.
+a deterministic complete transcript through 8 KiB, then a 4 KiB head plus 4
+KiB tail transcript (8,256-byte hard cap), adding an omission marker only when
+compiler output exceeds that bound.
 
 Not produced because the native probe never launched:
 
