@@ -58,6 +58,16 @@ withdrawn. A fresh source-matched compiler is required to determine whether the
 retained compiler is stale or current lowering still loses runtime-array
 classification.
 
+CUDA identity was a separate three-bit tag-width overflow: the UUID hash used
+the full positive 63-bit range, so native Simple tagging could make it negative.
+The Rust runtime and generated C evidence producer now share a positive 60-bit
+mask. The focused native Simple probe passes with identity
+`1002905313239842438`, and the live generated CUDA checker reports two distinct
+positive identities plus exact fill/copy/alpha/scroll device readback.
+This width change intentionally changes previously recorded 63-bit identities;
+cross-version receipts and identity-keyed caches must not compare old and new
+values as the same algorithm version.
+
 ## Required repair
 
 1. Regenerate a source-matched pure-Simple compiler incrementally on an admitted
@@ -67,9 +77,7 @@ classification.
 3. Re-run the direct CUDA and Vulkan 64-element probes with that compiler.
 4. If direct indexing still loads raw storage, trace the lost runtime-array
    classification and repair the shared Index lowering before backend retries.
-5. Repair CUDA identity reporting separately if it remains negative after
-   scalar indexing is corrected.
-6. Require exact count/value/checksum, zero mismatches, device readback,
+5. Require exact count/value/checksum, zero mismatches, device readback,
    positive backend provenance, no CPU fallback, and source-matched freshness
    from both probes before publishing a unified parity receipt.
 
@@ -80,5 +88,7 @@ Retained build logs:
 - `build/simpleos_gpu_host/vulkan_fault_native/build-parity64-cycle3.log`
 - `build/simpleos_gpu_host/cuda_fill_native/build-cycle3.log`
 - `build/simpleos_gpu_host/u32_transport/processing_u32_array_transport_probe`
+- `build/simpleos_gpu_host/cuda_identity/cuda_device_identity_probe`
+- `doc/09_report/cuda_generated_2d_readback_2026-07-26.md`
 
 No compiler bootstrap was run.

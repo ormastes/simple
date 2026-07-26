@@ -269,7 +269,7 @@ int64_t rt_rocm_device_identity(int64_t device) {
         hash ^= uuid[i];
         hash *= UINT64_C(1099511628211);
     }
-    hash &= INT64_MAX;
+    hash &= ((uint64_t)INT64_MAX >> 3);
     return hash ? (int64_t)hash : 1;
 }
 

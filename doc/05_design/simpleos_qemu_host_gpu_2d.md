@@ -210,11 +210,14 @@ open while TODO 548 blocks Simple compiler execution.
 
 CUDA device provenance comes from preferred `cuDeviceGetUuid_v2` with legacy
 symbol fallback behind the canonical CUDA runtime facade. The runtime rejects
-the all-zero sentinel and otherwise returns a stable nonzero 63-bit UUID hash.
+the all-zero sentinel and otherwise returns a stable nonzero 60-bit UUID hash
+that remains positive through Simple's three-bit integer tagging.
 The ProcessingIR executor and daemon both reject zero identity; the native
 readback gate checks the shared fixed hash vector, repeatability, and pairwise
 distinction when multiple devices are present. Aggregate PASS also requires a
 positive identity and a nonempty backend report.
+ROCm and DirectX apply the same 60-bit bound to native UUID/adapter hashes;
+Vulkan and Metal keep their existing tagged-safe 31-bit identities.
 
 ## Observability and NFRs
 

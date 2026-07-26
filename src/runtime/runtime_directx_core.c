@@ -79,7 +79,7 @@ static int64_t rt_directx_adapter_identity(ID3D11Device *device) {
     hash = rt_directx_hash_u32(hash, desc.Revision);
     hash = rt_directx_hash_u32(hash, desc.AdapterLuid.LowPart);
     hash = rt_directx_hash_u32(hash, (uint32_t)desc.AdapterLuid.HighPart);
-    hash &= INT64_MAX;
+    hash &= ((uint64_t)INT64_MAX >> 3);
     if (hash == 0) hash = 1;
 
     IDXGIAdapter_Release(adapter);

@@ -76,6 +76,10 @@ cuda_positive_decimal() {
     printf '%s\n' "$1" | grep -Eq '[1-9]'
 }
 
+cuda_tagged_identity_decimal() {
+    cuda_positive_decimal "$1" && [ "$1" -le 1152921504606846975 ]
+}
+
 cuda_artifact_sha256() {
     path="$1"
     if [ ! -f "$path" ]; then
@@ -257,7 +261,7 @@ cuda_identity_inventory_valid() {
     seen=""
     while [ "$ordinal" -lt "$count" ]; do
         identity="$(cuda_env_value "cuda_generated_2d_readback_device_identity_$ordinal")"
-        cuda_positive_decimal "$identity" || return 1
+        cuda_tagged_identity_decimal "$identity" || return 1
         case ",$seen," in
             *",$identity,"*) return 1 ;;
         esac
@@ -328,7 +332,7 @@ cuda_validate_evidence() {
         cuda_mark_claimed_pass_failed "missing-submit-attempt"
     elif [ "$readback" != "true" ]; then
         cuda_mark_claimed_pass_failed "missing-readback"
-    elif ! cuda_positive_decimal "$identity"; then
+    elif ! cuda_tagged_identity_decimal "$identity"; then
         cuda_mark_claimed_pass_failed "missing-device-identity"
     elif ! cuda_identity_inventory_valid; then
         cuda_mark_claimed_pass_failed "invalid-device-inventory"
@@ -579,6 +583,7 @@ EOF
     cuda_inventory_case_rejected '/^cuda_generated_2d_readback_device_identity_1=/d' missing-device-inventory-accepted
     cuda_inventory_case_rejected 's/^cuda_generated_2d_readback_device_identity_1=456$/cuda_generated_2d_readback_device_identity_1=123/' duplicate-device-identity-accepted
     cuda_inventory_case_rejected 's/^cuda_generated_2d_readback_device_identity_1=456$/cuda_generated_2d_readback_device_identity_0=456/' duplicate-device-ordinal-accepted
+    cuda_inventory_case_rejected 's/^cuda_generated_2d_readback_device_identity_1=456$/cuda_generated_2d_readback_device_identity_1=1152921504606846976/' oversized-device-identity-accepted
     cuda_inventory_case_rejected 's/^cuda_generated_2d_readback_device_identity=123$/cuda_generated_2d_readback_device_identity=456/' primary-device-identity-mismatch-accepted
     cuda_inventory_case_rejected 's/^cuda_generated_2d_readback_device_count=2$/cuda_generated_2d_readback_device_count=0/' zero-device-count-accepted
     cuda_inventory_case_rejected 's/^cuda_generated_2d_readback_device_count=2$/cuda_generated_2d_readback_device_count=65/' excessive-device-count-accepted
@@ -751,7 +756,7 @@ static uint64_t cuda_uuid_identity(const CUuuid *uuid) {
         hash *= UINT64_C(1099511628211);
     }
     if (all_zero) return 0;
-    hash &= INT64_MAX;
+    hash &= ((uint64_t)INT64_MAX >> 3);
     return hash == 0 ? 1 : hash;
 }
 
@@ -845,7 +850,7 @@ int main(int argc, char **argv) {
     if (!device_get_uuid) device_get_uuid = (CudaDeviceGetUuidFn)dlsym(RTLD_DEFAULT, "cuDeviceGetUuid");
     if (!device_get_uuid) { fail("cuDeviceGetUuid-symbol-missing", -1, 0, 0); free(ptx); return 3; }
     CUuuid identity_vector = {{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
-    if (cuda_uuid_identity(&identity_vector) != UINT64_C(4116863941369023524)) { fail("cuda-device-identity-hash-self-check-failed", -1, 0, 0); free(ptx); return 3; }
+    if (cuda_uuid_identity(&identity_vector) != UINT64_C(658099427548482596)) { fail("cuda-device-identity-hash-self-check-failed", -1, 0, 0); free(ptx); return 3; }
 
     int device_count = 0;
     rc = cuDeviceGetCount(&device_count);

@@ -128,7 +128,7 @@ fn cuda_device_uuid_identity(bytes: &[u8; 16]) -> i64 {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(1_099_511_628_211_u64);
     }
-    let identity = hash & i64::MAX as u64;
+    let identity = hash & ((i64::MAX as u64) >> 3);
     if identity == 0 {
         1
     } else {
@@ -1452,7 +1452,7 @@ pub extern "C" fn rt_cuda_device_compute_capability(_device: i64) -> i64 {
     0
 }
 
-/// Get a stable nonzero 63-bit identity derived from the CUDA device UUID.
+/// Get a stable nonzero tagged-i64-safe identity derived from the CUDA device UUID.
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_device_identity(device: i64) -> i64 {
@@ -2589,8 +2589,9 @@ mod tests {
         second[15] = 1;
         let identity = cuda_device_uuid_identity(&first);
         assert_eq!(cuda_device_uuid_identity(&zero), 0);
-        assert_eq!(identity, 4_116_863_941_369_023_524);
+        assert_eq!(identity, 658_099_427_548_482_596);
         assert!(identity > 0);
+        assert!(identity <= (i64::MAX >> 3));
         assert_eq!(identity, cuda_device_uuid_identity(&first));
         assert_ne!(identity, cuda_device_uuid_identity(&second));
     }
