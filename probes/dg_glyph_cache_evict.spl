@@ -1,0 +1,42 @@
+use std.nogc_sync_mut.text_layout.font_renderer.{GlyphCache}
+use std.nogc_sync_mut.text_layout.font_types.{CachedGlyph}
+
+# Direct check of GlyphCache.insert eviction semantics.
+#
+# Deliberately TINY (max_entries=8, 9 inserts, 1-byte glyphs). The first
+# version mirrored the spec exactly — 512 entries plus a 33MB oversized glyph —
+# and timed out at 300s with no output, which cannot distinguish "the rewrite
+# loops forever" from "the interpreter is slow at 513 O(N^2) cloning pushes and
+# a 33.5M-element array literal". At this size the entry-bound eviction path and
+# FIFO order are exercised in milliseconds, so a timeout here means a real hang.
+#
+# Written because `bin/simple test <spec>` exited 0 while producing no summary
+# and left test_result.md 11.5h stale — an unrun spec is not a passing spec.
+fn glyph_for(cp: i32) -> CachedGlyph:
+    CachedGlyph(codepoint: cp, face_id: 0, face_generation: 0, glyph_index: -1, font_size: 16, width: 1, height: 1, advance: 1, bearing_x: 0, bearing_y: 0, pixels: [1u8])
+
+fn main():
+    var cache = GlyphCache.new(8)
+    print("GLYPH_EVICT start max_entries={cache.max_entries}")
+    var cp = 0
+    while cp < 8:
+        cache.insert(glyph_for(cp))
+        cp = cp + 1
+    val filled = cache.stats()
+    print("GLYPH_EVICT filled entries={filled.entries} bytes={filled.bytes} evictions={filled.evictions}")
+
+    # The 9th insert must evict exactly one entry (the oldest) and stay at cap.
+    cache.insert(glyph_for(8))
+    val after = cache.stats()
+    val entries_ok = if after.entries == 8: 1 else: 0
+    val bytes_ok = if after.bytes == 8: 1 else: 0
+    val evict_ok = if after.evictions == 1: 1 else: 0
+    print("GLYPH_EVICT after entries={after.entries} bytes={after.bytes} evictions={after.evictions} entries_ok={entries_ok} bytes_ok={bytes_ok} evict_ok={evict_ok}")
+
+    # FIFO: oldest (0) gone, newest (8) resident. The rewrite replaced repeated
+    # single-element slices with one bulk slice, so a wrong drop count or order
+    # would corrupt the cache silently rather than fail loudly.
+    val newest = cache.lookup(8, 16)
+    val oldest = cache.lookup(0, 16)
+    val fifo_ok = if newest != nil and oldest == nil: 1 else: 0
+    print("GLYPH_EVICT fifo newest_present={newest != nil} oldest_evicted={oldest == nil} fifo_ok={fifo_ok}")

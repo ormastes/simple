@@ -405,18 +405,54 @@ class GlyphCache:
         val glyph_bytes = glyph.pixels.len().to_i64()
         if glyph_bytes > self.max_bytes:
             return false
-        while self.entries.len() >= self.max_entries or self.payload_bytes + glyph_bytes > self.max_bytes:
-            if self.entries.len() == 0:
-                return false
-            self.payload_bytes = self.payload_bytes - self.entries[0].pixels.len().to_i64()
-            self.entries = self.entries.slice(1, self.entries.len())
-            self.evictions = self.evictions + 1
+        # Eviction is counted on LOCALS first, then applied as one slice.
+        #
+        # The former loop re-read self.entries/self.payload_bytes as its own
+        # bound and mutated them in place each pass, so it could only terminate
+        # if those `me` field writes committed. On the freestanding
+        # entry-closure lane a mutation invoked through a method receiver can
+        # land on a discardable copy (the copy-commit landmine, hit twice
+        # elsewhere in this campaign) — and then neither entries.len() nor
+        # payload_bytes ever changed and this spun forever, silently: no fault,
+        # no allocation, no progress. That is the signature of the WM
+        # pointer-release hang, which wedged on the 76th text metric resolve of
+        # a session — right where ~75 labels first fill max_entries and make
+        # this loop run at all (doc/08_tracking/bug/
+        # simpleos_wm_pointer_release_font_metrics_hang_2026-07-26.md).
+        #
+        # drop_count is a plain local and increments unconditionally every
+        # pass, bounded by entries.len(), so the loop is now incapable of
+        # spinning no matter how the field writes behave. It also replaces
+        # repeated one-element slices (O(N^2)) with a single slice.
         var entries = self.entries
+        var payload = self.payload_bytes
+        var drop_count: i64 = 0
+        var dropping = true
+        while dropping:
+            if drop_count >= entries.len():
+                dropping = false
+            else:
+                val remaining = entries.len() - drop_count
+                var over = false
+                if remaining >= self.max_entries:
+                    over = true
+                if payload + glyph_bytes > self.max_bytes:
+                    over = true
+                if not over:
+                    dropping = false
+                else:
+                    payload = payload - entries[drop_count].pixels.len().to_i64()
+                    drop_count = drop_count + 1
+        if drop_count > 0:
+            entries = entries.slice(drop_count, entries.len())
+            self.evictions = self.evictions + drop_count
+        if payload < 0:
+            payload = 0
         var configured = glyph
         configured.render_config_identity = self.observed_render_config_identity
         entries.push(configured)
         self.entries = entries
-        self.payload_bytes = self.payload_bytes + glyph_bytes
+        self.payload_bytes = payload + glyph_bytes
         true
 
     me invalidate():
