@@ -172,3 +172,23 @@ The deployed pure-Simple tool segfaulted before the focused tests, optimizer,
 or source check could report results. No seed substitution or retry was made;
 the earlier 456 ms receipt remains historical evidence, not performance credit
 for this follow-up.
+
+## 2026-07-26 interpreted shared-scanner repair
+
+The shared byte scanner regressed the seed-interpreted native-build worker:
+after 180 seconds it had visited only 25 files. The existing text scanner uses
+native `split` and `find` operations and preserves the same comment, docstring,
+lazy-import, and token rules, so the byte loop and its compatibility fallback
+were collapsed to that implementation.
+
+With the same source roots, entry, cache, backend, and 180-second cap, closure
+discovery completed all 404 files and entered `CompilerDriver`; at 71 seconds
+it had visited 175 files, versus 25 in the baseline run. The focused behavioral
+and source gate passes 4/4. The bounded run ended in the driver phase, so the
+source-matched compiler and downstream `73`/`84` gates remain open.
+
+The final allowed incremental cycle confirmed the next boundary: phase-one
+loading completed 402 unique sources in 6.9 seconds, but seed-interpreted
+parsing took 179 seconds for the 25 KB entry and remained on the 67 KB driver
+module when the ten-minute cap expired. Closure discovery is no longer the
+build blocker; parser performance is. No fourth build cycle was started.

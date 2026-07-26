@@ -22,7 +22,7 @@ evidence.
 
 | Gate | Current evidence | State |
 |---|---|---|
-| CompileMode | Source transport fix and concrete `compiler.driver.driver` ownership are committed. A trace proved the prior ambiguous facade admitted only three direct modules and then rejected empty MIR; the focused scanner/owner/facade test now passes. The corrected canonical CLI closure BFS then remained CPU-active for more than 30 minutes before its first compiler phase marker and was terminated at cycle 3/3. No `73` executable oracle was produced. | OPEN; CLI closure-BFS performance blocker |
+| CompileMode | Source transport fix and concrete `compiler.driver.driver` ownership are committed. The seed-interpreted shared byte scanner reached only 25 closure files in 180 seconds. Reusing its existing text `split`/`find` scanner completed all 404 files and entered `CompilerDriver` within the same cap (about 7x more progress at the 71-second checkpoint). The final bounded run loaded 402 unique sources in 6.9 seconds, parsed the 25 KB entry in 179 seconds, then hit the ten-minute cap while parsing the 67 KB driver module. The focused scanner/owner/facade test passes 4/4. No `73` executable oracle exists yet. | OPEN; closure fixed, seed-interpreted parse performance blocker |
 | Optimizer | Scalar-level repair is committed and its source guard passes, but no source-matched native driver exists after the closure-owner repair. | OPEN |
 | `84` | No two-module `84` oracle binary or exact output exists after the optimizer repair. | BLOCKED by CLI closure-BFS performance |
 | Vulkan | Real device is present, but the native compiler gate failed at `rt_array_data_ptr_u8`; no submit/readback receipt exists. | BLOCKED by `84` |
