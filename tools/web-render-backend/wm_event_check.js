@@ -37,6 +37,15 @@ const ELECTRON_IDENTITY = Object.freeze({
 app.commandLine.appendSwitch('force-color-profile', 'srgb');
 app.disableHardwareAcceleration();
 
+function launchedElectronIdentity() {
+  const executablePath = fs.realpathSync(process.execPath);
+  return {
+    electron_process_exec_path: executablePath,
+    electron_process_exec_sha256:
+      crypto.createHash('sha256').update(fs.readFileSync(executablePath)).digest('hex'),
+  };
+}
+
 function escapeScriptEnd(source) {
   return String(source || '').replace(/<\/script/gi, '<\\/script');
 }
@@ -541,6 +550,7 @@ async function main() {
   result.electron_process_version = process.versions.electron || '';
   result.chrome_process_version = process.versions.chrome || '';
   Object.assign(result, ELECTRON_IDENTITY);
+  Object.assign(result, launchedElectronIdentity());
   console.log('WM_EVENT_CHECK ' + JSON.stringify(result));
   win.destroy();
   app.exit(result.pass ? 0 : 1);

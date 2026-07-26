@@ -94,14 +94,16 @@ const expectedFontIdentity = 'sha256=2cb2adb378a8f574213e23df697050b83c54c27df46
 const maxEventTimingMs = 1000;
 const expectedThemeSnapshot = 'src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl';
 const expectedElectronVersion = '42.5.0';
-const repositoryRoot = fs.realpathSync(path.resolve(__dirname, '../..'));
+const repositoryRoot = fs.realpathSync(
+  process.env.WM_EVENT_VALIDATOR_ROOT || path.resolve(__dirname, '../..')
+);
 
 function electronExecutableParts() {
   if (process.platform === 'darwin') {
     return ['dist', 'Electron.app', 'Contents', 'MacOS', 'Electron'];
   }
-  if (process.platform === 'win32') return ['dist', 'electron.exe'];
-  return ['dist', 'electron'];
+  if (process.platform === 'linux') return ['dist', 'electron'];
+  throw new Error('electron-platform-unsupported');
 }
 
 function sha256File(file) {
@@ -123,14 +125,14 @@ function exactPhysicalFile(supplied, expected, label) {
 function electronIdentityArtifact(proof) {
   const shellRoot = path.join(repositoryRoot, 'tools', 'electron-shell');
   const packageRoot = path.join(shellRoot, 'node_modules', 'electron');
-  const expected = {
-    launcher: path.join(packageRoot, 'cli.js'),
-    executable: path.join(packageRoot, ...electronExecutableParts()),
-    manifest: path.join(shellRoot, 'package.json'),
-    installedPackage: path.join(packageRoot, 'package.json'),
-    sourceLock: path.join(shellRoot, 'package-lock.json'),
-  };
   try {
+    const expected = {
+      launcher: path.join(packageRoot, 'cli.js'),
+      executable: path.join(packageRoot, ...electronExecutableParts()),
+      manifest: path.join(shellRoot, 'package.json'),
+      installedPackage: path.join(packageRoot, 'package.json'),
+      sourceLock: path.join(shellRoot, 'package-lock.json'),
+    };
     for (const directory of [
       shellRoot,
       path.join(shellRoot, 'node_modules'),
@@ -171,6 +173,14 @@ function electronIdentityArtifact(proof) {
     };
     for (const [field, hash] of Object.entries(hashes)) {
       if (proof[field] !== hash) throw new Error(`${field.replace(/_/g, '-')}-mismatch`);
+    }
+    if (proof.electron_process_exec_path !== expected.executable ||
+        proof.electron_process_exec_path !== proof.electron_executable_path) {
+      throw new Error('electron-process-exec-path-mismatch');
+    }
+    if (proof.electron_process_exec_sha256 !== hashes.electron_executable_sha256 ||
+        proof.electron_process_exec_sha256 !== proof.electron_executable_sha256) {
+      throw new Error('electron-process-exec-sha256-mismatch');
     }
     const manifest = JSON.parse(fs.readFileSync(files.manifest, 'utf8'));
     const lock = JSON.parse(fs.readFileSync(files.sourceLock, 'utf8'));
@@ -466,6 +476,8 @@ const rows = {
   browser_engine: proof.browser_engine,
   electron_user_agent: proof.electron_user_agent,
   electron_process_version: proof.electron_process_version,
+  electron_process_exec_path: proof.electron_process_exec_path,
+  electron_process_exec_sha256: proof.electron_process_exec_sha256,
   chrome_process_version: proof.chrome_process_version,
   electron_identity_status: electronIdentity.status,
   electron_identity_reason: electronIdentity.reason,

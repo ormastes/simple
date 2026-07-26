@@ -1,11 +1,12 @@
 # WM browser event-routing proof validator
 
-> **Runtime status: BLOCKED.** The focused interpreter run passed the complete
-> strict-identity acceptance and eight existing rejection scenarios, then the
-> available self-hosted runtime rejected the pre-existing `expect_not` helper
-> before later scenarios could execute. Direct validator checks passed for the
-> new path, hash, metadata, and process-version rejection matrix. These fixtures
-> are not live Electron/Chromium evidence.
+> **Runtime status: BLOCKED.** The one bounded focused interpreter run stopped
+> after two scenarios because Simple interpreted a shell cleanup expression as
+> language interpolation. The cleanup expression was then rewritten without
+> named shell-variable expansion and was not rerun under the bounded-test guard.
+> Earlier direct validator checks passed for path, hash, metadata, and
+> process-version rejection. These fixtures are not live Electron/Chromium
+> evidence.
 
 Source: `test/03_system/check/wm_browser_event_routing_validator_spec.spl`.
 
@@ -24,7 +25,17 @@ the proof must retain the exact canonical repo-local `node_modules/electron/cli.
 platform executable, source manifest and lock, and installed package paths with
 their current SHA-256 values. The source manifest dependency, lock root
 dependency, nested lock package, installed package, and launched process must
-all report exactly Electron `42.5.0`.
+all report exactly Electron `42.5.0`. The launched Electron process separately
+derives `fs.realpathSync(process.execPath)` and hashes those executable bytes;
+both self-observed values must exactly equal the wrapper-provided canonical
+executable identity and the validator's current local executable. This evidence
+path supports macOS and Linux only. Windows and other platforms fail closed
+because the strict resolver requires the Unix `.bin/electron` symlink contract.
+
+Executable fixtures are created only under each test's isolated build root.
+`WM_EVENT_VALIDATOR_ROOT` selects that fixture for standalone validator tests,
+and a validated trap removes every fixture root when the scenario shell exits.
+The production evidence wrapper rejects this environment variable.
 
 Required live proof includes the canonical host-pointer/focus/move/title/maximize/
 text/pointer-down/pointer-up sequence, matching aggregate counts, positive
@@ -78,7 +89,7 @@ it "rejects a valid alternate receipt outside the configured proof path":
 | rejects pass true proof without the live event-check source marker | FAIL: proof source missing. |
 | rejects pass true proof when the live event-check source artifact is missing | FAIL: proof source missing. |
 | rejects substituted live event-check source artifacts | FAIL: hardlink, non-regular, or marker-missing producer. |
-| rejects swapped Electron paths hashes metadata and process identity | FAIL: exact physical Electron identity mismatch. |
+| rejects swapped Electron paths hashes metadata and process identity | FAIL: exact physical Electron identity mismatch, including self-observed process executable path/hash. |
 | rejects pass true proof without live Electron Chromium runtime evidence | FAIL: browser runtime missing. |
 | rejects pass true proof when the frame sequence is missing or reordered | FAIL: event-routing contract missing. |
 | rejects pass true proof when Chromium timing or animation is malformed | FAIL: event-routing contract missing. |
