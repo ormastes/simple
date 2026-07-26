@@ -15,6 +15,12 @@ use super::tools::{
     validate_stage4_cli_c_provider_archive_disjointness,
 };
 
+fn link_failure_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    format!("{}{}", stdout, stderr)
+}
+
 #[cfg(target_os = "macos")]
 fn add_macos_base_link_args(cmd: &mut std::process::Command) {
     cmd.arg("-Wl,-ld_classic").arg("-Wl,-dead_strip");
@@ -1556,7 +1562,7 @@ int main(int argc, char** argv) {
             }
             Ok(())
         } else {
-            let stderr = String::from_utf8_lossy(&output_result.stderr);
+            let diagnostics = link_failure_output(&output_result.stdout, &output_result.stderr);
             if selected_runtime
                 .as_ref()
                 .is_some_and(|(_, is_native_all)| !is_native_all)
@@ -1567,11 +1573,11 @@ int main(int argc, char** argv) {
 \nnote: the selected core lane (`{}`) is intentionally limited to the Simple/C core ABI. \
 If this entry needs a symbol outside that ABI, add it to simple-core/core-c-bootstrap or \
 select a supported specialized lane; removed rust-hosted/hosted/all bundles are not fallback options.",
-                    stderr,
+                    diagnostics,
                     self.resolve_runtime_lane().display_name()
                 ))
             } else {
-                Err(format!("link failed: {}", stderr))
+                Err(format!("link failed: {}", diagnostics))
             }
         }
     }
@@ -2253,8 +2259,10 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
             }
             Ok(())
         } else {
-            let stderr = String::from_utf8_lossy(&output_result.stderr);
-            Err(format!("link failed: {}", stderr))
+            Err(format!(
+                "link failed: {}",
+                link_failure_output(&output_result.stdout, &output_result.stderr)
+            ))
         }
     }
 }
@@ -2316,6 +2324,16 @@ mod linker_tests {
     use super::*;
     use crate::pipeline::native_project::tools::hosted_linux_cross_compiler;
     use simple_common::target::{Target, TargetArch, TargetOS};
+
+    #[test]
+    fn linker_failure_diagnostics_preserve_both_streams() {
+        let diagnostics = link_failure_output(
+            b"fake.obj : error LNK2019: unresolved external symbol missing_provider\n",
+            b"clang-cl: error: linker command failed\n",
+        );
+        assert!(diagnostics.contains("LNK2019: unresolved external symbol missing_provider"));
+        assert!(diagnostics.contains("clang-cl: error: linker command failed"));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

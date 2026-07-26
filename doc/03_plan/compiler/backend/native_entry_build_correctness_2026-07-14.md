@@ -1148,3 +1148,10 @@ the shared binary — deploys require explicit user go-ahead).
   false-green path from returning. Real support needs a pinned compatible seed
   provider or a designed Cranelift-seed to pure-Simple Stage 2 bridge before
   the dynamic LLVM Stage 3 gate can become mandatory.
+
+  Windows run `30178515336` reached Stage 2 in both MSVC and MinGW, then failed
+  with `LNK1120`. The missing symbols were lost because the Rust bootstrap
+  linker returned only stderr while `link.exe` writes unresolved-symbol
+  diagnostics to stdout. Both linker failure paths now preserve both streams,
+  with a focused regression test. The next strict Windows run must identify
+  the actual missing provider before any link fix is selected.

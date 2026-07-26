@@ -64,6 +64,12 @@
    ABI, or a separately designed Cranelift-seed to pure-Simple Stage 2 bridge
    reaches the existing dynamic `LLVM-C.dll` loader for Stage 3.
 
+   The prerequisite Cranelift lane still fails at Stage 2 on both Windows
+   toolchains (`30178515336`). That run discarded the unresolved-symbol detail
+   emitted on linker stdout; the bootstrap linker now retains stdout and
+   stderr. Rerun the strict lane and use the recovered symbol evidence before
+   changing providers or link arguments.
+
 4. Prove the deployed dynload consumer boundary. The current fast path avoids
    Stage 4 and produces staged/cache artifacts; it must not claim hot deployment
    until the production CLI demonstrably loads the refreshed SMF/native module
