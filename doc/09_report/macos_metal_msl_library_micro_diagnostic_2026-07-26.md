@@ -35,3 +35,30 @@ legacy repository-release identity/source-kind pairs, requires current
 repository and complete source-input provenance, exact hashes, non-symlink
 executables, and rejects seed/debug artifacts. No native diagnostic or
 full-live/window command was run for this repair; the blocked status remains.
+
+## Clean-current-host preflight
+
+On the clean linked worktree at repository revision
+`3b7a11b6cdf61ce2180886d6ae17fa0e1d9c8204`, the canonical checker was run
+once as an admission preflight:
+
+```text
+sh scripts/check/check-macos-metal-msl-library-micro-diagnostic.shs
+```
+
+It exited `1` before any `native-build` or probe process. Its retained
+evidence is ignored build output at:
+
+```text
+build/macos_metal_msl_library_micro_diagnostic/evidence.env
+```
+
+The fail-closed reason is `trusted-compiler-provider-manifest-invalid`: the
+required `build/macos_gpu_2d_live_native/metal/trusted-build.env` is absent,
+as are the manifest-bound `build/sffi/libsimple_runtime_wm.dylib`,
+`build/sffi/libspl_winit.dylib`, and
+`build/sffi/libsimple_runtime_c_wm.dylib` providers. Consequently no compiler
+was selected, all build/probe exit fields remain empty, and this did not
+consume the one permitted native micro-diagnostic attempt. Commit `ca911ba081`
+supplies the admission logic only; it does not create or attest these
+machine-local artifacts.
