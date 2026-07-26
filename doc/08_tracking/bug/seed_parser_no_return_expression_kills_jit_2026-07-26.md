@@ -54,13 +54,20 @@ runs interpreted on every frame because of one line, `draw_ir_adv.spl:739`:
 var offscreen = pending_offscreen ?? return _engine2d_draw_ir_render_outcome(eng, 0, batch.commands.len().to_i32(), "embedded-offscreen-not-created")
 ```
 
-This is a strong candidate cause for the `web × headless` showcase cell's
-`reason=blank-or-uniform` verdict, which is attributed to the 10 s paint budget
-expiring with only the canvas background painted
-(`web_render_budget_interpreter_gap_2026-07-25.md`). A hot renderer forced out
-of the JIT is exactly how that budget gets exhausted. **Not yet confirmed** —
-confirming it means measuring the cell with the construct removed, or with a
-redeployed self-hosted binary.
+This is the cause of the `web × headless` showcase cell's failure.
+**Confirmed 2026-07-26:** a full cell run (`web_standards_showcase_gui.spl`,
+320x240, `SIMPLE_TIMEOUT_SECONDS=0`) emitted exactly this opt-out receipt at
+startup, parsed the document correctly (`nodes=151 styles=151`), and then
+failed to complete a single frame before an external 40-minute timeout killed
+it (EXIT=124, no evidence line). A control run with
+`SIMPLE_WEB_RENDER_BUDGET_MS=1800000` (30-minute paint budget) behaved
+identically — same receipt, same healthy parse, killed at a 45-minute wall cap
+with no evidence line — so the paint budget is not the limiting factor.
+The earlier `reason=blank-or-uniform` verdict
+(`web_render_budget_interpreter_gap_2026-07-25.md`) is the 10 s-budget face of
+the same problem: the interpreted batch renderer cannot finish inside any
+practical budget. Remaining unmeasured: the same cell on a self-hosted binary
+(which parses `return`-expressions and can JIT the path).
 
 ## Root cause
 
