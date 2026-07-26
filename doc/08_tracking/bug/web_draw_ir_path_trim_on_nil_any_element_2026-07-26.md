@@ -7,8 +7,10 @@
   `..._paint_layout.spl` (`_html_draw_ir_commands`)
 - **Severity:** high — DrawIR is the path the SimpleOS WM compositor and the web
   showcase cells render through.
-- **Status:** OPEN. Minimal repro + bisection below; the offending `.trim()` site
-  is narrowed to three candidates but not yet pinned.
+- **Status:** **FIXED 2026-07-26.** Root cause was none of the three candidate
+  sites below — see the resolution section at the end. The underlying
+  interpreter defect is filed separately as
+  `interp_env_get_name_collision_nil_root_2026-07-26.md` and remains OPEN.
 
 ## Minimal repro
 
@@ -90,6 +92,28 @@ recorded in session memory.
 ```bash
 bin/simple run probes/dg_draw_ir_min.spl        # rc=1
 ```
+
+## Resolution (2026-07-26)
+
+The three candidate sites above were all innocent — `attrs_raw` is initialized
+on every `HNode` constructor path. Receipt-probe descent pinned the crash to
+`font_registry.spl` `_font_asset_normalized_root`, reached only on the DrawIR
+path because it passes `vector_fonts=true` into `compute_styles`, which resolves
+font metrics for every `#text` node (the software path passes `false` — that is
+the real software/DrawIR delta, not the DrawIR command builders).
+
+The nil came from `env_get("SIMPLE_ASSET_ROOT")` returning **nil** instead of
+`""` for the unset variable: the interpreter resolves the module's explicit
+`use std.io_runtime.{env_get}` to a same-named Option-returning `env_get` from
+another module in the graph
+(`interp_env_get_name_collision_nil_root_2026-07-26.md`). Environments that
+export `SIMPLE_ASSET_ROOT` never crash, which is why the fixture suite stayed
+green.
+
+**Fix:** nil-guard in `_font_asset_normalized_root` (nil root ⇒ unset ⇒ `""`),
+the single chokepoint all `SIMPLE_ASSET_ROOT` reads funnel through. Verified:
+`probes/dg_draw_ir_min.spl` now prints `DRAW_IR_MIN_OK batches=1`;
+`probes/font_load_perf_probe.spl` unchanged (`FONT_PROBE_PASS`, ~1 s).
 
 ## Related
 
