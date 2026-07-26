@@ -227,6 +227,11 @@ fn text_matches_at(haystack: text, needle: text, offset: i32) -> bool:
         j = j + 1
     true
 
+# Freestanding-safe replacement for `s.starts_with(literal)`. Same rationale as
+# text_matches_at: no boolean crosses a runtime call boundary.
+fn text_starts_with_portable(s: text, prefix: text) -> bool:
+    text_matches_at(s, prefix, 0)
+
 fn find_from(s: text, needle: text, pos: i32) -> i32:
     # O(n*m) portable positional search. Do not emulate this through
     # substring(start).index_of(): native substring can be represented as an
@@ -522,7 +527,33 @@ fn html_text_range_has_non_ws(html: text, start: i32, end: i32) -> bool:
 # a raw-text element with no closer falling back to normal scanning.
 # ---------------------------------------------------------------------------
 
-fn _html_scan_events(html: text) -> [[text]]:
+# Scan results cross to parse_html through same-module globals plus a scalar
+# event count instead of a nested-array `[[text]]` return: aggregate returns
+# across the native call ABI can decode as nil/empty in the freestanding
+# SimpleOS build (doc/08_tracking/bug/
+# cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md),
+# which collapsed the 2026-07-26 guest arena to the bare #root while every
+# scanner receipt below stayed silent — the scanner ran correctly and its
+# return value was lost. parse_html cross-checks the scalar count against the
+# global-array read so a loss on either path prints instead of degrading.
+var _scan_kinds: [text] = []
+var _scan_payloads: [text] = []
+
+fn _scan_events_finish(kinds: [text], payloads: [text], out: i64) -> i64:
+    # Inline prefix copies: text_list_prefix's own [text] return would cross
+    # the same unreliable ABI boundary this handoff exists to avoid.
+    var pk: [text] = [""; out]
+    var pp: [text] = [""; out]
+    var i = 0
+    while i < out:
+        pk[i] = kinds[i]
+        pp[i] = payloads[i]
+        i = i + 1
+    _scan_kinds = pk
+    _scan_payloads = pp
+    out
+
+fn _html_scan_events(html: text) -> i64:
     val parts = html.split("<")
     val np = parts.len() as i32
     val cap = np * 2 + 2
@@ -574,7 +605,7 @@ fn _html_scan_events(html: text) -> [[text]]:
             if not terminated:
                 # Unterminated comment: old scanner broke out, discarding the rest.
                 print "[web-scan] bail reason=unterminated-comment np={np} out={out}"
-                return [text_list_prefix(kinds, out), text_list_prefix(payloads, out)]
+                return _scan_events_finish(kinds, payloads, out)
             val ctail = seg.substring(cidx + 3, seg.len())
             if ctail.len() > 0 and out < cap:
                 kinds[out] = if k == np - 1: "e" else: "x"
@@ -590,7 +621,7 @@ fn _html_scan_events(html: text) -> [[text]]:
             if k >= np:
                 # No ">" until EOF: old scanner broke out, discarding the rest.
                 print "[web-scan] bail reason=no-tag-close np={np} out={out} seg_len={seg.len()}"
-                return [text_list_prefix(kinds, out), text_list_prefix(payloads, out)]
+                return _scan_events_finish(kinds, payloads, out)
             seg = seg + "<" + parts[k]
             gt = find_from(seg, ">", 0)
         val inner = seg.substring(0, gt)
@@ -625,7 +656,7 @@ fn _html_scan_events(html: text) -> [[text]]:
                                 # Closer without ">": old scanner re-scanned from
                                 # "</name", found no ">", and broke out.
                                 print "[web-scan] bail reason=raw-text-closer-unterminated np={np} out={out} tag={name}"
-                                return [text_list_prefix(kinds, out), text_list_prefix(payloads, out)]
+                                return _scan_events_finish(kinds, payloads, out)
                             seg2 = seg2 + "<" + parts[found]
                             gt2 = find_from(seg2, ">", 0)
                         rest = seg2.substring(gt2 + 1, seg2.len())
@@ -638,7 +669,7 @@ fn _html_scan_events(html: text) -> [[text]]:
             payloads[out] = rest
             out = out + 1
         k = k + 1
-    [text_list_prefix(kinds, out), text_list_prefix(payloads, out)]
+    _scan_events_finish(kinds, payloads, out)
 
 # True if a tag event's inner text produces an element node in the arena
 # (mirrors the skip rules in parse_html's build pass).
@@ -778,35 +809,54 @@ fn text_list_prefix(values: [text], count: i32) -> [text]:
     out
 
 fn parse_html(html: text) -> [HNode]:
-    val ev = _html_scan_events(html)
-    val kinds = ev[0]
-    val payloads = ev[1]
+    val scan_out = _html_scan_events(html)
+    val kinds = _scan_kinds
+    val payloads = _scan_payloads
     val ev_count = kinds.len() as i32
+    if (ev_count as i64) != scan_out:
+        # The same-module global read disagrees with the scanner's scalar
+        # count: one of the two handoff paths lost data. Attributable, loud.
+        print "[web-parse] scan-handoff-loss returned={scan_out} module={ev_count}"
     # Counting pass: arena size, mirroring the node-creation rules below.
     # (Replaces the old count_html_nodes second full scan of the document.)
+    # Kind comparisons use code points ("g" 103, "x" 120): 1-char text
+    # equality routes a boolean through the runtime call boundary the
+    # freestanding build mis-marshals at depth (see text_matches_at).
     var node_count = 1
     var e = 0
     while e < ev_count:
-        if kinds[e] == "g":
+        if kinds[e].char_code_at(0) == 103:
             if _html_tag_event_makes_node(payloads[e]):
                 node_count = node_count + 1
         else:
             val ctxt = decode_html_entities(payloads[e])
-            if ctxt.trim().len() > 0 or (kinds[e] == "x" and ctxt == " "):
+            if ctxt.trim().len() > 0 or (kinds[e].char_code_at(0) == 120 and ctxt == " "):
                 node_count = node_count + 1
         e = e + 1
+    if node_count <= 1 and ev_count > 0:
+        # Events arrived but none made a node: dump each event's kind code,
+        # payload length, and the makes-node verdict so a degenerate arena is
+        # attributable to a specific classification instead of guessed at.
+        print "[web-parse] degenerate-arena ev_count={ev_count} scan_out={scan_out}"
+        var de = 0
+        while de < ev_count and de < 8:
+            val kk = kinds[de]
+            val kc = if kk.len() > 0: kk.char_code_at(0) else: -1
+            val mk = if kc == 103 and _html_tag_event_makes_node(payloads[de]): 1 else: 0
+            print "[web-parse] degenerate-event i={de} kind_code={kc} payload_len={payloads[de].len()} makes_node={mk}"
+            de = de + 1
     var nodes: [HNode] = [mk_node("#root", -1); node_count]
     var node_i = 1
     var pstack: [i64] = [0; node_count]
     var stack_len = 1
     e = 0
     while e < ev_count:
-        val kind = kinds[e]
+        val kind_code = kinds[e].char_code_at(0)
         e = e + 1
-        if kind != "g":
+        if kind_code != 103:
             val txt = decode_html_entities(payloads[e - 1])
             val txt_trimmed = txt.trim()
-            if txt_trimmed.len() > 0 or (kind == "x" and txt == " "):
+            if txt_trimmed.len() > 0 or (kind_code == 120 and txt == " "):
                 var tn = mk_node("#text", pstack[stack_len - 1])
                 tn.text_data = txt
                 tn.text_trimmed = txt_trimmed

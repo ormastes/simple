@@ -116,6 +116,23 @@ lowering, auditing `??`-based call sites that currently rely on nil-or-raw, or
 Option runtime encoding — bootstrap + extended smoke matrix required before
 deploy (see `.claude/memory` stage-4 rollback precedent).
 
+## SimpleOS guest parser instance (2026-07-26, rerun4)
+
+The guest WM render collapse (`degenerate-parse html_len=5794 nodes=1
+split_parts=18 lt_portable=17 rules=0`) fits this class: the per-part receipt
+dump proved the document well-formed (doctype, 663-byte `<html>` attribute
+payload, head/meta/title, 4,786-byte style, body, two divs), every scanner
+bail/divergence receipt stayed silent, yet `parse_html` built only the bare
+`#root` — consistent with `_html_scan_events`'s nested-array `[[text]]`
+return being lost across the call boundary, sizing the arena from zero
+events. `rules=0` with a valid outer struct fits the layout-sensitive
+character: inner `[text]` helper returns collapse to empty while the outer
+aggregate survives. Mitigation landed: the scanner now hands events to
+`parse_html` via same-module globals plus a scalar count, with a
+`[web-parse] scan-handoff-loss` cross-check receipt and a
+`degenerate-arena`/`degenerate-event` dump if events arrive but none make a
+node (`simple_web_html_layout_renderer_foundation.spl`).
+
 ## Proper fix
 
 In the cranelift lowering: make aggregate returns (direct and Option-wrapped)
