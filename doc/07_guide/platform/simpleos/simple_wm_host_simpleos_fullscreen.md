@@ -79,6 +79,9 @@ The production QEMU evidence wrapper is
 correlated keyboard and pointer input, authority revision, backend, font crop,
 and framebuffer evidence. Source inspection, demo markers, Rust-seed execution,
 fixed QEMU metadata, or unverified screenshots cannot satisfy the scenarios.
+The wrapper rejects both seed paths and seed/debug classifiers embedded in the
+binary image before it executes `--version`; a plain `Simple v...` version line
+cannot qualify an otherwise seed-marked compiler.
 
 ## Current Verification Limits
 

@@ -32,7 +32,10 @@ The focused font/input scenario uses the shared steps:
    `1708408`, and SHA-256
    `2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081`.
 3. Boot only the production x86_64 `gui_entry_desktop.spl` with an accepted
-   pure-Simple self-hosted binary. Its live `SharedWmScene` snapshot is rendered
+   pure-Simple self-hosted binary. Before executing `--version`, reject
+   `compiler_rust` paths and binary images containing `Rust-built`,
+   `bootstrap seed only`, or `debug build`; this prevents a clean-looking
+   version line from disguising a seed. Its live `SharedWmScene` snapshot is rendered
    through Draw IR and the `Engine2dWmFrameExecutor`; the guest emits the pinned
    taskbar-clock `route=shared-wm-draw-ir` marker rather than a private font path.
 4. Derive framebuffer address, dimensions, pitch, format, and size only from
@@ -56,13 +59,12 @@ The focused font/input scenario uses the shared steps:
 
 ## Fail-closed rows
 
-- Rust seed paths, symlinks resolving to a seed, seed-identifying version
-  output, and failed version probes reject before QEMU.
+- Rust seed paths, symlinks resolving to a seed, seed/debug markers embedded in
+  the binary image, seed-identifying version output, and failed version probes
+  reject before QEMU.
 - Missing or stale kernel/disk artifacts, invalid scanout metadata, QMP errors,
   serial-only markers, missing guest correlations, blank captures, duplicate
   hashes, and crop-oracle mismatches remain failures.
-<<<<<<< Conflict 1 of 1
-+++++++ Contents of side #1
 - A current-source kernel build uses the same unoptimized WM target profile as
   the canonical QEMU runner, runs under a 900-second host watchdog, writes to a
   candidate ELF, validates ELF64 little-endian identity and x86_64 machine
@@ -82,11 +84,6 @@ The focused font/input scenario uses the shared steps:
 - A closed QMP connection fails the capture; maximize, restore, press, and
   release markers must be strictly newer than their preceding guest `input_seq`,
   so replayed markers cannot satisfy the correlation.
-%%%%%%% Changes from base to side #2
-+- A closed QMP connection fails the capture; maximize, restore, press, and
-+  release markers must be strictly newer than their preceding guest `input_seq`,
-+  so replayed markers cannot satisfy the correlation.
->>>>>>> Conflict 1 of 1 ends
 - The deliberate corrupt crop must exist, retain the expected byte count,
   produce a valid SHA-256 different from the unmodified crop, and be rejected.
   A missing corrupt file cannot count as successful calibration.
