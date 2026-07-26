@@ -19,10 +19,10 @@
 - The release workflow no longer installs the incompatible Chocolatey LLVM
   package or runs an optional Windows `llvm-lib` stage. The portability
   contract rejects restoring that false evidence.
-- FreeBSD run `30154805541` reached the canonical full bootstrap with KVM and
-  failed at `rust-seed-build` with exit 101. The guest log was not retained.
-  The QEMU wrapper now copies bounded bootstrap failure logs to
-  `build/freebsd/bootstrap-logs`; terminal Stage 3 evidence remains open.
+- FreeBSD run `30180339652` retained the complete `rust-seed-build.log` and
+  proved the seed linker could not find `libffi` or `zstd`. The canonical QEMU
+  wrapper now installs both packages and exports FreeBSD's `/usr/local/lib`
+  and pkg-config paths. Terminal Stage 3 and artifact evidence remains open.
 - Commit `d3f77e847aa1` routes production `.smf` execution through the real
   loader, resolves `main`, and calls its executable address without the Rust
   delegate. Commit `1c8b26de9b48` adds a real cache reuse/mutation/launcher
