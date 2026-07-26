@@ -653,14 +653,34 @@ impl FramebufferSurface for FramebufferDriver:
         # call. MMIO surfaces therefore render straight to the authoritative
         # front buffer; host-backed surfaces retain the buffered hosted path.
         if self.front_addr != 0u64:
-            var row: u32 = 0u32
-            while row < h and y + row < self.height:
-                var col: u32 = 0u32
-                while col < w and x + col < self.width:
-                    val offset = (y + row).to_u64() * self.pitch.to_u64() + (x + col).to_u64() * 4u64
-                    mmio_write32(self.front_addr + offset, color)
-                    col = col + 1u32
-                row = row + 1u32
+            # Single C-side SSE2 rect fill (rt_gui_fill4) instead of a
+            # per-pixel mmio_write32 double loop: the loop was ~8.3M extern
+            # calls for one 4K background and left the production SIMD fill
+            # receipt at zero ([engine2d-simd] fatal zero-runtime-receipt).
+            # rt_gui_set_fb registers the authoritative LFB before any frame
+            # fill (gui entry, right after scanout init), the same premise
+            # fill_rect's direct path already relies on.
+            # Explicit branches (no `and`): the entry-closure freestanding
+            # codegen drops the left operand of mixed boolean `and`.
+            var fill_in_bounds = false
+            if x < self.width:
+                if y < self.height:
+                    fill_in_bounds = true
+            if fill_in_bounds:
+                var clamped_w = w
+                if x + clamped_w > self.width:
+                    clamped_w = self.width - x
+                var clamped_h = h
+                if y + clamped_h > self.height:
+                    clamped_h = self.height - y
+                var fill_nonempty = false
+                if clamped_w > 0u32:
+                    if clamped_h > 0u32:
+                        fill_nonempty = true
+                if fill_nonempty:
+                    val xy = (x.to_i64() << 32) | y.to_i64()
+                    val wh = (clamped_w.to_i64() << 32) | clamped_h.to_i64()
+                    rt_gui_fill4(xy, wh, color.to_i64(), 0)
         else:
             self.fill_rect(x, y, w, h, framebuffer_argb_to_color(color))
 
