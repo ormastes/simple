@@ -2,8 +2,9 @@
 
 ## Status
 
-Open. This blocks execution of the focused Engine2D staged-font native probe
-without rebuilding the compiler.
+Fix prepared in the Vulkan integration lane. The core-C archive and focused
+Rust admission tests pass; the Engine2D staged-font native probe still needs
+one fresh build/run after the session verification cap resets.
 
 ## Reproduction
 
@@ -40,6 +41,10 @@ still does not supply `_rt_is_interpreter_runtime`.
 Make `rt_is_interpreter_runtime` part of the supported
 `core-c-bootstrap` ABI, or remove the unconditional native closure dependency
 from GPU SFFI dispatch. Do not restore removed hosted/Rust fallback bundles.
+
+The prepared fix exports a native-false implementation from the existing
+`runtime_native.c` standalone owner, promotes the symbol into
+`CORE_REQUIRED_RUNTIME_SYMBOLS`, and adds archive and behavior assertions.
 
 ## Acceptance
 
