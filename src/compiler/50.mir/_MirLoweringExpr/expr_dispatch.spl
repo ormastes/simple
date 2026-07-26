@@ -53,6 +53,13 @@ fn hir_expr_static_unsigned(e: HirExpr) -> bool:
         case _:
             false
 
+fn mir_type_is_unsafe_address_handle(t: MirType) -> bool:
+    match t.kind:
+        case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_) | MirTypeKind.Struct(_):
+            true
+        case _:
+            false
+
 # ============================================================================
 # Expression Lowering
 # ============================================================================
@@ -2249,7 +2256,65 @@ impl MirLowering:
                         binop_result
 
             case Unary(op, operand):
-
+                val unary_disc = rt_enum_discriminant(op)
+                if unary_disc == rt_enum_discriminant(HirUnaryOp.Ref):
+                    # Stage4 compatibility for the existing OS ABI only:
+                    # `&aggregate as u64` parses as Ref(Cast(aggregate, u64)).
+                    # Arrays/slices/structs are pointer-sized runtime handles,
+                    # and unsafe_addr_of is the audited identity conversion.
+                    # Reject scalar/general Ref instead of silently returning
+                    # the scalar value as though it were an address.
+                    match operand.kind:
+                        case Cast(addressed, target):
+                            var target_is_u64 = false
+                            match target.kind:
+                                case HirTypeKind.Int(bits, signed):
+                                    target_is_u64 = bits == 64 and not signed
+                                case _:
+                                    ()
+                            if target_is_u64:
+                                val addressed_local = self.lower_expr(addressed)
+                                val addressed_type = self.local_mir_type_of(addressed_local)
+                                if val aggregate_type = addressed_type:
+                                    if mir_type_is_unsafe_address_handle(aggregate_type):
+                                        var ref_builder = self.builder
+                                        val ref_operand = ref_builder.emit_cast(mir_operand_copy(addressed_local), MirType(kind: MirTypeKind.U64))
+                                        val unsafe_addr_of = MirOperand(kind: MirOperandKind.Const(
+                                            MirConstValue.Str("unsafe_addr_of"),
+                                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                                        ))
+                                        val ref_result = ref_builder.emit_call(unsafe_addr_of, [mir_operand_copy(ref_operand)], MirType.i64())
+                                        self.builder = ref_builder
+                                        if val ref_local = ref_result:
+                                            return ref_local
+                        case _:
+                            ()
+                    val ref_msg = "native MIR lowering supports address-of only for `&aggregate as u64`; refusing scalar/general Ref"
+                    self.error(ref_msg, Some(expr_value.span))
+                    var ref_error_builder = self.builder
+                    val ref_panic_msg = ref_error_builder.emit_const_str(ref_msg)
+                    val ref_panic_fn = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_panic"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.unit(), is_variadic: false)))
+                    ))
+                    ref_error_builder.emit_call(ref_panic_fn, [mir_operand_copy(ref_panic_msg)], MirType.unit())
+                    val missing_ref = ref_error_builder.new_temp(MirType.unit())
+                    self.builder = ref_error_builder
+                    return missing_ref
+                if unary_disc == rt_enum_discriminant(HirUnaryOp.RefMut) or unary_disc == rt_enum_discriminant(HirUnaryOp.Deref):
+                    val unsupported_unary = if unary_disc == rt_enum_discriminant(HirUnaryOp.RefMut): "&mut" else: "*"
+                    val unsupported_msg = "native MIR lowering does not support unary {unsupported_unary}; refusing to lower it as numeric negation"
+                    self.error(unsupported_msg, Some(expr_value.span))
+                    var unsupported_builder = self.builder
+                    val panic_msg = unsupported_builder.emit_const_str(unsupported_msg)
+                    val panic_fn = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_panic"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.unit(), is_variadic: false)))
+                    ))
+                    unsupported_builder.emit_call(panic_fn, [mir_operand_copy(panic_msg)], MirType.unit())
+                    val unsupported_result = unsupported_builder.new_temp(MirType.unit())
+                    self.builder = unsupported_builder
+                    return unsupported_result
                 val operand_local = self.lower_expr(operand)
                 var b = self.builder
                 val operand_type = self.local_mir_type_of(operand_local) ?? MirType.i64()

@@ -10,6 +10,7 @@ use std.sdn.{SdnValue, parse_file}
 use std.common.crypto.sha256.{sha256_u8_hex}
 use std.common.encoding.font_registry.{load_selected_font_file}
 use std.skia.feature.glyph.ot_parser.{OtFont, parse_offset_table, find_table, read_u16_be, read_u32_be}
+use std.skia.feature.glyph.ot_parser_layout.{select_gsub_lookup_plan, select_gpos_lookup_plan}
 
 fn _inventory_field(value: SdnValue, key: text) -> SdnValue:
     value.get(key) ?? SdnValue.Null
@@ -211,7 +212,8 @@ fn _inventory_plan_key(path: text, table: text, script: text, language: text) ->
 
 describe "pinned OpenType layout inventory":
     # @req REQ-007 REQ-014
-    it "consumes every pinned GSUB and GPOS plan row in LookupList order":
+    it "should keep production layout selection equal to the pinned font inventory":
+        step("Accept exact-face-bound simple-script shaping")
         val fixture_path = "test/fixtures/fonts/shared_multilingual_gpu_fonts/active_layout_plan_inventory.sdn"
         val fixture = match parse_file(fixture_path):
             Ok(value): value
@@ -293,6 +295,18 @@ describe "pinned OpenType layout inventory":
                 Some(value): value
                 None: fail("pinned layout selection is invalid: " + key)
             expect(plan.len()).to_equal(expected_count)
+            val production_plan = if table == "GSUB":
+                select_gsub_lookup_plan(font, script, language, requested_features)
+            else:
+                select_gpos_lookup_plan(font, script, language, requested_features)
+            expect(production_plan.valid).to_equal(true)
+            expect(production_plan.lookup_indices).to_equal(plan)
+            expect(production_plan.activations.len()).to_equal(plan.len())
+            var activation_index: i64 = 0
+            while activation_index < production_plan.activations.len():
+                expect(production_plan.activations[activation_index].lookup_index).to_equal(plan[activation_index])
+                expect(production_plan.activations[activation_index].feature_mask).to_be_greater_than(0u64)
+                activation_index = activation_index + 1
             val resolved_plan = match _inventory_select_indices(font, table_tag, script, resolved_tag, requested_features):
                 Some(value): value
                 None: fail("resolved pinned layout selection is invalid: " + key)

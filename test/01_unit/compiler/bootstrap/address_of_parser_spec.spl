@@ -1,0 +1,53 @@
+use std.spec.{describe, it, expect, step}
+use compiler.core.parser.{parse_expr, parse_module, parser_has_errors, parser_init, parser_set_had_error}
+use compiler.core.ast.{EXPR_CAST, EXPR_UNARY, expr_get_int, expr_get_left, expr_get_tag}
+use compiler.core.tokens.{TOK_AMPERSAND}
+
+describe "bootstrap address-of parser":
+    it "accepts address-of syscall arguments followed by a cast":
+        step("Parse the aggregate address passed to a syscall")
+        parser_set_had_error(false)
+        parse_module(
+            "fn probe(buf: [u64]) -> i64:\n    syscall(80, 1, 0, &buf as u64, 0, 0)\n",
+            "address_of_parser_spec.spl"
+        )
+
+        expect(parser_has_errors()).to_equal(false)
+
+    it "retains address-of around its cast in the flat AST":
+        step("Inspect the address and cast nodes")
+        parser_set_had_error(false)
+        parser_init("&buf as u64")
+        val ref_expr = parse_expr()
+        val cast_expr = expr_get_left(ref_expr)
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(expr_get_tag(ref_expr)).to_equal(EXPR_UNARY)
+        expect(expr_get_int(ref_expr)).to_equal(TOK_AMPERSAND)
+        expect(expr_get_tag(cast_expr)).to_equal(EXPR_CAST)
+
+    it "retains ampersand as a binary operator":
+        step("Parse an unchanged binary ampersand expression")
+        parser_set_had_error(false)
+        parse_module(
+            "fn mask(value: u64) -> u64:\n    value & 255\n",
+            "ampersand_binary_parser_spec.spl"
+        )
+
+        expect(parser_has_errors()).to_equal(false)
+
+    it "rejects unsupported mutable-ref and dereference syntax":
+        step("Reject reference forms without safe native lowering")
+        parser_set_had_error(false)
+        parse_module(
+            "fn mutable_ref(buf: [u64]):\n    &mut buf\n",
+            "mutable_ref_parser_spec.spl"
+        )
+        expect(parser_has_errors()).to_equal(true)
+
+        parser_set_had_error(false)
+        parse_module(
+            "fn dereference(buf: [u64]):\n    *buf\n",
+            "deref_parser_spec.spl"
+        )
+        expect(parser_has_errors()).to_equal(true)

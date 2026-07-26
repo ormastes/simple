@@ -2,7 +2,7 @@
 
 Date: 2026-07-26
 Owner: `native_gpu_perf`
-Revision inspected: `14f46d1045e78e0d45532b620a0c4482e51d0e1b`
+Revision inspected: `744281e7f897b4e7f775b8bc192635c3e6923cfb`
 
 ## Current classification
 
@@ -44,27 +44,59 @@ discovery.
 - Available rejected CLI:
   `release/x86_64-unknown-linux-gnu/simple`,
   SHA-256 `04a38e21d6fbd86149d46d3ee2d761349f8ad29b02c5037a8eb589b6a1b9e4e0`.
-- Attempted command:
+- Attempted launcher and command:
 
   ```sh
   SIMPLE_NO_STUB_FALLBACK=1 timeout 180 bin/release/simple test test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl --mode=native
   ```
 
 - Result: exit `139` before any authoritative SSpec summary.
+- The attempt did not retain the launcher's resolved binary path and SHA-256.
+  It is therefore unverified crash provenance and is not bound to the rejected
+  CLI SHA listed above.
 - Retained log:
   `build/test-artifacts/shared_multilingual_gpu_fonts/lane-e/native_gpu_font_readback.log`.
 
 ## Exact resume contract
 
 Prerequisite: lane A publishes an admitted fresh pure-Simple Stage 4 full CLI
-path and SHA-256. From this worktree, set `ADMITTED_SIMPLE` to that immutable
-path, verify its SHA against lane A's record, then run each command once:
+path and SHA-256 plus the admitted core-C runtime directory and archive
+SHA-256. Admission is still pending. From this worktree, set:
 
 ```sh
-SIMPLE_NO_STUB_FALLBACK=1 "$ADMITTED_SIMPLE" test test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$ADMITTED_SIMPLE" test test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl --mode=native
-"$ADMITTED_SIMPLE" spipe-docgen test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl --output doc/06_spec --no-index
-"$ADMITTED_SIMPLE" spipe-docgen test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl --output doc/06_spec --no-index
+CLI=/absolute/path/to/admitted/pure-simple
+CLI_SHA=<published-cli-sha256>
+CORE_C_DIR=/absolute/path/to/admitted/core-c
+CORE_C_SHA=<published-libsimple_runtime.a-sha256>
+LOG_ROOT="build/test-artifacts/shared_multilingual_gpu_fonts/lane-e/$CLI_SHA"
+DOCGEN_ROOT="build/test-artifacts/shared_multilingual_gpu_fonts/docgen/lane-e"
+mkdir -p "$LOG_ROOT" "$DOCGEN_ROOT"
+```
+
+Verify the published hashes and the single global lane-A calibration under
+`build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/`.
+`fail.exit` must contain `1` with `test-runner: spec failed` in its retained
+streams; `empty.exit` must contain `1` with
+`test-runner: no examples executed`. Lane E references that calibration and
+must not rerun it. A missing or mismatched artifact keeps all lane-E rows
+blocked.
+
+After calibration, run the four current lane-E tests once each:
+
+```sh
+"$CLI" run src/app/test/font_evidence_runner.spl -- "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl >"$LOG_ROOT/gpu_font_emission.native.log" 2>&1
+"$CLI" run src/app/test/font_evidence_runner.spl -- "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl >"$LOG_ROOT/cuda_generated_font_handoff.native.log" 2>&1
+"$CLI" run src/app/test/font_evidence_runner.spl -- "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl >"$LOG_ROOT/native_gpu_font_readback.native.log" 2>&1
+"$CLI" run src/app/test/font_evidence_runner.spl -- "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl >"$LOG_ROOT/shared_multilingual_gpu_fonts_perf.native.log" 2>&1
+```
+
+Then generate the four mirrored manuals once:
+
+```sh
+"$CLI" spipe-docgen test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl --output doc/06_spec --no-index >"$DOCGEN_ROOT/gpu_font_emission_spec.out" 2>"$DOCGEN_ROOT/gpu_font_emission_spec.err"
+"$CLI" spipe-docgen test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl --output doc/06_spec --no-index >"$DOCGEN_ROOT/cuda_generated_font_handoff_spec.out" 2>"$DOCGEN_ROOT/cuda_generated_font_handoff_spec.err"
+"$CLI" spipe-docgen test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl --output doc/06_spec --no-index >"$DOCGEN_ROOT/native_gpu_font_readback_spec.out" 2>"$DOCGEN_ROOT/native_gpu_font_readback_spec.err"
+"$CLI" spipe-docgen test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl --output doc/06_spec --no-index >"$DOCGEN_ROOT/shared_multilingual_gpu_fonts_perf_spec.out" 2>"$DOCGEN_ROOT/shared_multilingual_gpu_fonts_perf_spec.err"
 ```
 
 Pass requires nonzero examples and an authoritative successful summary; a

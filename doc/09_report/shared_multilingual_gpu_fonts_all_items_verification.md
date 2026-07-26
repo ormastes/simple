@@ -11,19 +11,54 @@ Final done-mark owner: highest-capability `/root`
 
 This is the current all-lane audit, not a runtime or native PASS. Static source
 and executable coverage is broad, but no fresh pure-Simple full CLI has been
-admitted. Three bounded bootstrap cycles rejected the deployed Rust-built CLI,
-removed an isolated symlink-authority defect, and then stopped fail-closed
-before Stage 2 because the stale compiler backfill requires a fresh
-`--full-bootstrap`. The retained summary and exact next-session command are in
+admitted. The fresh continuation admitted bootstrap Stage 2 and Stage 3 for
+stage progression, cleared the prior GPOS parse blocker, then failed Stage 4
+on an explicit syscall enum discriminant. Those stage compilers are not a full
+font-test CLI.
+The retained history and resume contract are in
 `doc/08_tracking/bug/shared_font_stage4_stale_compiler_backfill_2026-07-26.md`.
 Consequently runner calibration, focused execution, zero-stub docgen, native
 promotion, QEMU pixels, and performance remain unaccepted.
+
+### Current bootstrap blocker
+
+- Stage 2:
+  `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap/stage2/x86_64-unknown-linux-gnu/simple`,
+  SHA-256
+  `1c1631f7b99a0d38205174a0ce50b68d2be194f38b28f8e6c11fc450bdc9dc96`.
+- Stage 3:
+  `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap/stage3/x86_64-unknown-linux-gnu/simple`,
+  SHA-256
+  `2ab52126d893ddd3706d24818e83a9207bcec97e9f135ce6b2e401097e368be7`.
+- Stage 4 is absent. The documented full-bootstrap command exited 1; retained
+  diagnostics are in
+  `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`.
+  Retry 3 cleared the font GPOS source, retaining
+  `phase2:parse:file:done src/std/skia/feature/shaper/ot_layout_gpos.spl`.
+  The first real failure is
+  `src/os/kernel/types/syscall_types.spl:8:10: expected enum variant name, got =`
+  (`kind 100`, text `=`), followed by line 8:12 `got IntLit` for `Exit = 0`.
+- Root cause: the pure enum parser accepts a variant name and optional payload
+  but not `TOK_ASSIGN` plus an explicit discriminant. A token skip is invalid:
+  the flat enum record and typed `Variant` currently preserve names but no
+  numeric value, so syscall ABI discriminants would be lost.
+
+No Stage 4 CLI/core-C identity was published and no global runner calibration
+ran. The hard three-retry cap is exhausted. A fresh continuation requires
+end-to-end explicit discriminant preservation through pure flat AST,
+bridge/typed `Variant`, and downstream enum lowering, with a focused
+non-sequential `SyscallId` regression; an architecturally reviewed exclusion
+of the OS module from the CLI closure is the only alternative. After that
+prerequisite, rerun the documented command with the same
+`--output=build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap`
+and preserve the Stage 2/3/native caches.
 
 ## Requirement matrix
 
 Every non-pass row names its owner, dependency, exact acceptance surface, and
 final reviewer. `active` means the owning parallel lane can still change the
 row; `blocked` means the required runtime/device evidence is unavailable.
+Current count: `0 pass`, `14 active`, `9 blocked`.
 
 | Row | Status | Owner / writable scope | Current executable and manual evidence | Dependency and exact completion command | Final reviewer |
 |---|---|---|---|---|---|
@@ -40,7 +75,7 @@ row; `blocked` means the required runtime/device evidence is unavailable.
 | REQ-011 | active | D+E surfaces/native | aggregate surfaces/route plus canonical Web, GUI, hosted WM, SimpleOS and RV64 pairs exist | admitted CLI, hosted frame and QEMU pixels; run D/E sets | `/root` |
 | REQ-012 | blocked | E native 2D/3D/perf | native readback spec contains HUD/world, handles, submit, fence, depth/transform and readback gates | admitted CLI plus real graphics device; run E native command | `/root` |
 | REQ-013 | blocked | E native 2D/3D/perf | native readback spec rejects unavailable and forged promotion | one real backend must pass both 2D and 3D through E native command | `/root` |
-| REQ-014 | blocked | F specs/docs/audit | baseline mirrors exist and contain current scenario titles; eight required focused mirrors are missing and no retained docgen log proves `0 stubs` | admitted CLI; run every docgen command below; review manuals | `/root` |
+| REQ-014 | blocked | B–E generation / F audit | eight assigned mirrors are missing; the other 18 assigned mirrors require fresh docgen, and no retained log proves `0 stubs` | admitted CLI; run every docgen command below; review manuals | `/root` |
 | REQ-015 | active | C shaping/material/config | aggregate surfaces and focused config specs cover identity, policies, target order and pre-mutation rejection | admitted CLI; run aggregate/C commands | `/root` |
 | NFR-001 | active | B manifest/distribution | manifest and SimpleOS bundle source gates cover immutable hashes, deterministic generation and corruption rejection | admitted CLI; run B command set | `/root` |
 | NFR-002 | blocked | E native/perf | native readback and perf specs define exact packed-ARGB comparator and provenance fields | admitted CLI plus real device; run E native/perf commands | `/root` |
@@ -57,9 +92,10 @@ runtime/native requirement.
 
 ## Canonical executable/manual audit
 
-The eleven original acceptance spec/manual pairs exist, and every current
-scenario title in those executable specs is present in its mirror. The
-production-surface acceptance mirrors also exist for:
+The eleven original acceptance specs are accounted for, but their mirrors are
+not all current: `install_font_assets_spec.md` lacks one current scenario title,
+and every assigned mirror still requires fresh zero-stub docgen evidence. The
+production-surface acceptance mirrors exist for:
 
 - `web_font_rendering_surface_spec`
 - `gui_font_event_surface_spec`
@@ -86,8 +122,10 @@ Existing mirrors are stale because their executable sources changed in this
 all-items worktree and no current pure-Simple docgen result exists:
 
 - `install_font_assets_spec.md`
+- `font_asset_manifest_spec.md`
 - `simpleos_font_asset_staging_spec.md`
 - `shared_font_manifest_spec.md`
+- `shared_font_shaping_acceptance_spec.md`
 - `shared_font_surfaces_spec.md`
 - `web_font_rendering_surface_spec.md`
 - `gui_font_event_surface_spec.md`
@@ -109,6 +147,26 @@ checks only.
 
 ## Exact owner commands
 
+The frozen docgen ownership is 26 specs: B4 + C13 + D5 + E4. Each owner retains
+stdout and stderr separately:
+
+| Lane | Assigned spec basenames | Retained output |
+|---|---|---|
+| B (4) | `install_font_assets_spec`, `font_asset_manifest_spec`, `simpleos_font_asset_staging_spec`, `shared_font_manifest_spec` | `docgen/lane-b/<basename>.{out,err}` |
+| C (13) | `ot_layout_apply_spec`, `ot_layout_gpos_spec`, `ot_layout_pinned_inventory_spec`, `ot_parser_layout_selector_spec`, `ot_parser_spec`, `shaper_spec`, `selected_devanagari_spec`, `selected_arabic_spec`, `font_renderer_spec`, `font_render_config_spec`, `font_compat_spec`, `shared_font_shaping_acceptance_spec`, `shared_font_surfaces_spec` | `docgen/lane-c/<basename>.{out,err}` |
+| D (5) | `web_font_rendering_surface_spec`, `gui_font_event_surface_spec`, `linux_hosted_wm_live_window_spec`, `rv64_simpleos_wm_font_input_spec`, `simpleos_wm_fullscreen_spec` | `docgen/lane-d/<basename>.{out,err}` |
+| E (4) | `gpu_font_emission_spec`, `cuda_generated_font_handoff_spec`, `native_gpu_font_readback_spec`, `shared_multilingual_gpu_fonts_perf_spec` | `docgen/lane-e/<basename>.{out,err}` |
+
+All retained paths are below
+`build/test-artifacts/shared_multilingual_gpu_fonts/`. For each assigned source
+path, the owner runs:
+
+```bash
+"$CLI" spipe-docgen <assigned-spec> --output doc/06_spec --no-index \
+  > "build/test-artifacts/shared_multilingual_gpu_fonts/docgen/lane-<owner>/<basename>.out" \
+  2> "build/test-artifacts/shared_multilingual_gpu_fonts/docgen/lane-<owner>/<basename>.err"
+```
+
 Lane A must first produce and admit one pure-Simple full CLI in a fresh bounded
 session, using the retained resume contract:
 
@@ -120,11 +178,11 @@ timeout -k 30s 3600s env SIMPLE_NO_STUB_FALLBACK=1 \
   --full-bootstrap --full-cli --no-mcp --jobs=4
 ```
 
-Only an exit-0 wrapper result may publish the candidate. It must then run
+Only an exit-0 wrapper result may publish the candidate. Run
 `scripts/check/check-bootstrap-essential-tools-smoke.shs` against that exact
-candidate and retain the absolute CLI path, CLI SHA-256, core-C directory and
-`libsimple_runtime.a` SHA-256. A Rust seed or exit `2`, `124`, `132`, or `139`
-is a blocker.
+candidate, then retain its absolute path and SHA-256 plus the core-C directory
+and `libsimple_runtime.a` SHA-256. A Rust seed or exit `2`, `124`, `132`, or
+`139` is a blocker.
 
 After lane A publishes those immutable values, set:
 
@@ -135,69 +193,83 @@ CORE_C_DIR=/absolute/path/to/admitted/core-c
 CORE_C_SHA=<published-libsimple_runtime.a-sha256>
 ```
 
-Calibrate the runner before any focused result:
+Lane A calibrates the runner once globally before any focused result:
 
 ```bash
-"$CLI" run src/app/test/font_evidence_runner.spl -- "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" scripts/check/fixtures/font_evidence_runner_fail_spec.spl
-"$CLI" run src/app/test/font_evidence_runner.spl -- "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" scripts/check/fixtures/font_evidence_runner_empty_spec.spl
+CAL_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration
+mkdir -p "$CAL_ROOT"
+"$CLI" run src/app/test/font_evidence_runner.spl -- "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" scripts/check/fixtures/font_evidence_runner_fail_spec.spl >"$CAL_ROOT/fail.out" 2>"$CAL_ROOT/fail.err"
+printf '%s\n' "$?" >"$CAL_ROOT/fail.exit"
+"$CLI" run src/app/test/font_evidence_runner.spl -- "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" scripts/check/fixtures/font_evidence_runner_empty_spec.spl >"$CAL_ROOT/empty.out" 2>"$CAL_ROOT/empty.err"
+printf '%s\n' "$?" >"$CAL_ROOT/empty.exit"
 ```
 
 The first command must exit 1 with `test-runner: spec failed`; the second must
 exit 1 with `test-runner: no examples executed`. Retain both logs and the exact
 command lines under
 `build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/`.
+Lanes B–E reference that one immutable calibration set; they do not rerun it.
+
+Every focused spec uses the same hash-bound runner:
+
+```bash
+run_focused_spec() {
+  "$CLI" run src/app/test/font_evidence_runner.spl -- \
+    "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" "$1"
+}
+```
 
 Lane B executes once each:
 
 ```bash
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/01_unit/app/release/install_font_assets_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/01_unit/app/release/release_archive_layout_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/01_unit/lib/common/encoding/font_asset_manifest_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/01_unit/os/port/simpleos_font_bundle_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/02_integration/os/port/simpleos_font_asset_staging_spec.spl --mode=native
+run_focused_spec test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl
+run_focused_spec test/01_unit/app/release/install_font_assets_spec.spl
+run_focused_spec test/01_unit/app/release/release_archive_layout_spec.spl
+run_focused_spec test/01_unit/lib/common/encoding/font_asset_manifest_spec.spl
+run_focused_spec test/01_unit/os/port/simpleos_font_bundle_spec.spl
+run_focused_spec test/02_integration/os/port/simpleos_font_asset_staging_spec.spl
 ```
 
 Lane C executes the aggregate and integrated shaping gates once each:
 
 ```bash
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/01_unit/lib/skia/ot_layout_apply_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/01_unit/lib/skia/ot_layout_gpos_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/01_unit/lib/skia/ot_layout_pinned_inventory_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/01_unit/lib/skia/ot_parser_layout_selector_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/01_unit/lib/skia/ot_parser_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/01_unit/lib/skia/shaper_spec.spl --mode=native
+run_focused_spec test/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.spl
+run_focused_spec test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl
+run_focused_spec test/01_unit/lib/skia/ot_layout_apply_spec.spl
+run_focused_spec test/01_unit/lib/skia/ot_layout_gpos_spec.spl
+run_focused_spec test/01_unit/lib/skia/ot_layout_pinned_inventory_spec.spl
+run_focused_spec test/01_unit/lib/skia/ot_parser_layout_selector_spec.spl
+run_focused_spec test/01_unit/lib/skia/ot_parser_spec.spl
+run_focused_spec test/01_unit/lib/skia/shaper_spec.spl
+run_focused_spec test/01_unit/lib/skia/selected_devanagari_spec.spl
+run_focused_spec test/01_unit/lib/skia/selected_arabic_spec.spl
+run_focused_spec test/01_unit/lib/common/text_layout/font_renderer_spec.spl
+run_focused_spec test/01_unit/lib/common/text_layout/font_render_config_spec.spl
+run_focused_spec test/01_unit/lib/gpu/engine3d/font_compat_spec.spl
 ```
 
 Lane D executes its independent producer rows once each:
 
 ```bash
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/03_system/app/simple_web/feature/web_font_rendering_surface_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/03_system/gui/feature/gui_font_event_surface_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/03_system/gui/linux_hosted_wm_live_window_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/03_system/os/wm/rv64_simpleos_wm_font_input_spec.spl --mode=native
+run_focused_spec test/03_system/app/simple_web/feature/web_font_rendering_surface_spec.spl
+run_focused_spec test/03_system/gui/feature/gui_font_event_surface_spec.spl
+run_focused_spec test/03_system/gui/linux_hosted_wm_live_window_spec.spl
+run_focused_spec test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl
+run_focused_spec test/03_system/os/wm/rv64_simpleos_wm_font_input_spec.spl
 ```
 
 Lane E executes once each on a real graphics device:
 
 ```bash
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl --mode=native
-SIMPLE_NO_STUB_FALLBACK=1 "$CLI" test test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl --mode=native
+run_focused_spec test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl
+run_focused_spec test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl
+run_focused_spec test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl
+run_focused_spec test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl
 ```
 
-For every changed or acceptance SSpec above, the owning lane then runs exactly:
-
-```bash
-"$CLI" spipe-docgen <spec> --output doc/06_spec --no-index
-```
-
-Each command must exit zero and report the affected spec complete with
-`0 stubs`. The owner retains output; lane F reviews the generated operator flow.
+Each of the 26 docgen commands must exit zero and report the affected spec
+complete with `0 stubs`. The owner retains both output streams; lane F reviews
+the generated operator flow.
 
 ## Final gates owned by `/root`
 

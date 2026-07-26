@@ -36,7 +36,7 @@ Finish every selected shared-multilingual-font requirement and NFR by integratin
 ## Cooperative Review
 
 - Merge owner: `/root` in `/tmp/simple-shared-font-all-items-20260726`.
-- Final reviewer and generated-manual owner: highest-capability primary model after all lane handoffs.
+- Final reviewer and generated-manual acceptance owner: highest-capability primary model after all lane handoffs; lanes B–E run their frozen docgen sets and lane F audits all 26 results.
 - Parallel lanes: bootstrap/runner; manifests/distribution; shaping/material/configuration; production surfaces/SimpleOS; native 2D/3D/performance; specs/manuals/evidence audit.
 - Frozen owners/interfaces: `FontRenderer`, `FontRenderQuad`, `FontRenderBatch`, `FontRenderConfig`, `FontExecutionPolicy`, `emit_portable_font_atlas_composite_kernel`, `draw_text_hud`, and `draw_text_world`. No parallel renderer, emitter, atlas, cache, or runtime facade.
 - Frozen manual steps: `step("Load the pinned multilingual font manifest")`, `step("Accept exact-face-bound simple-script shaping")`, `step("Prepare one shared font batch for 2D and 3D")`, `step("Emit the selected font composite program and plan compilation")`, `step("Prove native submission and device readback")`, `step("Render legacy Web GUI and WM text through DrawIR")`, `step("Capture SimpleOS pinned-font pixels")`, and `step("Measure warm font rendering and resource bounds")`.
@@ -52,8 +52,10 @@ Finish every selected shared-multilingual-font requirement and NFR by integratin
 
 ## Phase
 
-dev-done
+verify-pending
 
 ## Log
 
 - dev: Remade the goal around all selected requirements and NFRs with twelve testable acceptance criteria, six parallel lanes, frozen shared interfaces, and explicit unavailable-host policy.
+- verify: At revision `744281e7f897`, no fresh Stage 4 CLI is admitted. The frozen B4+C13+D5+E4 docgen set has eight missing mirrors and 18 existing mirrors awaiting fresh `0 stubs` evidence; no requirement is marked pass.
+- bootstrap: Final retry 3 admitted bootstrap Stage 2 SHA `1c1631f7...` and Stage 3 SHA `2ab52126...` for stage progression only. GPOS parsing cleared, then Stage 4 first failed on explicit enum value `Exit = 0` in `src/os/kernel/types/syscall_types.spl:8`; pure flat AST/typed variants do not preserve discriminants. The hard retry cap is exhausted. No Stage 4 CLI/core-C identity, global runner calibration, docgen, or font execution exists; a fresh continuation requires end-to-end discriminant preservation plus a non-sequential `SyscallId` regression, or an architecturally reviewed CLI-closure exclusion.

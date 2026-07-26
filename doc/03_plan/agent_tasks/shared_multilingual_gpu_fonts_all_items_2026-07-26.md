@@ -20,7 +20,7 @@ atlas, cache, process/env facade, or device-success path.
 
 | Area | Current evidence | Required next state |
 |---|---|---|
-| GSUB/GPOS | `codex/gsub-gpos-complete-20260725` at `cd600a18d06`; stage1 worktree contains superseded duplicates | integrate reviewed completion commit once |
+| GSUB/GPOS | reviewed completion is integrated on the isolated branch; superseded stage1 duplicates were not imported | execute the frozen shaping/parser specs on the admitted CLI |
 | Bootstrap | deployed/runtime candidates have crashed or failed admission; no fresh Stage 4 PASS | fresh admitted full CLI plus essential-tools smoke |
 | Focused tests | implementation and static coverage exist; prior runner exited before examples | calibrated, nonzero, authoritative runtime results |
 | Native GPU | source/emission and partial backend evidence exist | one real 2D+3D promoted device route and current perf record |
@@ -36,7 +36,7 @@ atlas, cache, process/env facade, or device-success path.
 | C shaping/material/config | `shaping_material` | `src/lib/skia/feature/{glyph,shaper}/**`, canonical text-layout/font-renderer files, their unit specs | integrate GSUB/GPOS, exact selected-script shaping, shared batch/cache/config-policy evidence |
 | D production surfaces | `surface_simpleos` | Web/GUI/WM/SimpleOS producer adapters and their dedicated system specs/manuals; no renderer internals | canonical Draw IR identity plus hosted and QEMU pixel/input evidence |
 | E native 2D/3D/perf | `native_gpu_perf` | existing Engine2D/Engine3D native adapters, font native-readback/perf specs, retained native evidence | REQ-012/013 and NFR-002/004–008 real device proof or exact blocked-host contracts |
-| F specs/docs/audit | `spec_docs_audit` | aggregate shared-font system spec/manual, test plan, guides, state/traceability report; no product code | map every REQ/NFR, detect placeholders/stale manuals, generate only aggregate docs after owner specs land |
+| F specs/docs/audit | `spec_docs_audit` | aggregate test plan, guides, state/traceability reports; no product code or owner-specific manuals | map every REQ/NFR, audit the frozen 26 owner-generated manuals/logs, and reject stale, missing, stubbed, or premature PASS evidence |
 | H merge/final verify | `/root` | integration conflict resolution, final evidence report, branch history | primary review, direct-runtime guards, scoped verification once, status, rebase/file-count guard, push |
 
 ## Dependency and execution order
@@ -48,8 +48,8 @@ atlas, cache, process/env facade, or device-success path.
    commands to A for execution on the admitted CLI.
 4. A publishes the immutable CLI path and SHA once. Each owning lane runs its
    acceptance command once; unchanged green commands are never repeated.
-5. F updates the matrix/manuals from owner evidence; it never promotes static
-   inspection, cached logs, simulation, or unavailable hardware.
+5. F updates the matrix and manual-audit status from owner evidence; it never
+   promotes static inspection, cached logs, simulation, or unavailable hardware.
 6. H reviews every handoff. A failed criterion returns only to its owner for at
    most three fix/verify cycles.
 
@@ -71,6 +71,8 @@ Each lane reports:
 - `git diff --check`.
 - `find doc/06_spec -name '*_spec.spl' | wc -l` equals `0`.
 - Changed specs generate mirrored manuals with `0 stubs`.
+- Frozen docgen ownership is B4+C13+D5+E4; lane F reviews all 26 retained
+  `{out,err}` pairs but does not replace owner generation.
 - `sh scripts/audit/direct-env-runtime-guard.shs --working` and `--staged`.
 - Every REQ-001–015 and NFR-001–008 has current evidence or remains an explicit
   completion blocker; a blocked required row prevents overall `STATUS: PASS`.

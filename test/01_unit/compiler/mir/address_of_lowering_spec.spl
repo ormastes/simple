@@ -1,0 +1,92 @@
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.frontend.parser_types.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_serialization.{serialize_mir_module}
+
+val ADDRESS_SOURCE = "fn address(buf: [u64]) -> u64:\n    &buf as u64\n"
+val SCALAR_ADDRESS_SOURCE = "fn address(value: i64) -> u64:\n    &value as u64\n"
+
+fn bridged_address_kind() -> text:
+    val module = parse_and_build_module(ADDRESS_SOURCE, "address_of_lowering.spl")
+    val function = module.functions["address"] ?? panic("missing address")
+    for stmt in function.body.stmts:
+        match stmt.kind:
+            case StmtKind.Expr(expr):
+                match expr.kind:
+                    case ExprKind.Unary(op, inner):
+                        match op:
+                            case UnaryOp.Ref:
+                                match inner.kind:
+                                    case ExprKind.Cast(_, _):
+                                        return "ref-cast"
+                                    case _:
+                                        return "ref-other"
+                            case _:
+                                return "unary-other"
+                    case _:
+                        return "other"
+            case _:
+                pass
+    "missing"
+
+fn address_mir() -> (text, i64):
+    val module = parse_and_build_module(ADDRESS_SOURCE, "address_of_lowering.spl")
+    var hir_lowering = HirLowering.with_filename("address_of_lowering.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    (serialize_mir_module(mir), mir_lowering.errors.len())
+
+fn scalar_address_mir() -> (text, i64):
+    val module = parse_and_build_module(SCALAR_ADDRESS_SOURCE, "scalar_address_of_lowering.spl")
+    var hir_lowering = HirLowering.with_filename("scalar_address_of_lowering.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    (serialize_mir_module(mir), mir_lowering.errors.len())
+
+describe "address-of frontend and MIR lowering", tag: ["only-compiled"]:
+    it "preserves Ref around the flat-bridge cast":
+        step("Bridge the aggregate address expression")
+        expect(bridged_address_kind()).to_equal("ref-cast")
+
+    it "routes Ref through unsafe_addr_of rather than numeric negation":
+        step("Lower the aggregate address through the audited runtime ABI")
+        val result = address_mir()
+        expect(result.1).to_equal(0)
+        expect(result.0).to_contain("unsafe_addr_of")
+        expect(result.0).to_contain("\"Cast\"")
+        expect(result.0.contains("\"UnaryOp\"")).to_be(false)
+
+    it "rejects scalar identity as an address":
+        step("Reject scalar identity masquerading as an address")
+        val result = scalar_address_mir()
+        expect(result.1).to_be_greater_than(0)
+        expect(result.0.contains("unsafe_addr_of")).to_be(false)
+        expect(result.0.contains("\"UnaryOp\"")).to_be(false)
+
+describe "bootstrap-flat address-of source contract":
+    it "handles unary and cast nodes instead of falling through to NilLit":
+        step("Inspect bootstrap lowering for address and cast nodes")
+        val source = file_read("src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl")
+
+        expect(source).to_contain("if tag == EXPR_UNARY:")
+        expect(source).to_contain("hir_unary_op = HirUnaryOp.Ref")
+        expect(source).to_contain("if tag == EXPR_CAST:")
+        expect(source).to_contain("self.bootstrap_hir_type_from_tag(expr_get_int(expr_idx))")
+        expect(source).to_contain("if tag == TYPE_U64:")
+        expect(source).to_contain("HirTypeKind.Int(64, false)")
+
+    it "fails closed for unsupported mutable-ref and dereference lowering":
+        step("Inspect unsupported reference forms for fail-closed lowering")
+        val source = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+
+        expect(source).to_contain("HirUnaryOp.RefMut")
+        expect(source).to_contain("HirUnaryOp.Deref")
+        expect(source).to_contain("refusing to lower it as numeric negation")
+        expect(source).to_contain("MirConstValue.Str(\"rt_panic\")")
+        expect(source).to_contain("refusing scalar/general Ref")
