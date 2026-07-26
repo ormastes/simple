@@ -763,12 +763,27 @@ impl DesktopShell:
 
     me render_baremetal_frame(executor: Engine2dWmFrameExecutor) -> i64:
         """Render one authoritative WM snapshot through Draw IR + Engine2D."""
+        # Step receipts: the pointer RELEASE render never returns (seq 8 logged
+        # at=before-render and no at=after-render, then 300s of total guest
+        # silence — exactly the web render budget floor, which is not a spin
+        # cause since every _web_budget_expired() guard EXITS a loop early; the
+        # floor merely permits work to run that long). The press render on the
+        # identical path completed moments earlier, so one of these six calls
+        # is pathologically slow only in the post-drag-begin state. Six lines
+        # per frame is negligible next to a 4K repaint.
+        serial_println("[wm-render-step] at=scene-snapshot")
         val scene = self.runtime_scene_snapshot()
+        serial_println("[wm-render-step] at=taskbar-model")
         val taskbar = self.runtime_taskbar_model()
+        serial_println("[wm-render-step] at=scene-revision")
         val scene_revision = self.runtime_scene_revision()
+        serial_println("[wm-render-step] at=taskbar-revision")
         val taskbar_revision = self.runtime_taskbar_revision()
+        serial_println("[wm-render-step] at=content-frames scene_revision={scene_revision}")
         val content_frames = self.runtime_content_frames(scene_revision)
+        serial_println("[wm-render-step] at=executor-render")
         val rendered_revision = executor.render(scene, taskbar, content_frames, scene_revision, taskbar_revision, self.clock_text)
+        serial_println("[wm-render-step] at=done rendered={rendered_revision}")
         if rendered_revision <= 0:
             return 0
         self.last_rendered_scene_revision = scene_revision
