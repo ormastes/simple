@@ -439,3 +439,12 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   cap, so the report remains `BLOCKED`; the unchanged architecture-matrix
   scenario also remains a release blocker. This is an integrated correctness
   and evidence-hardening checkpoint, not a fresh native parity PASS.
+- continuation-2026-07-26-sibling-qemu-audit: A read-only sibling audit found
+  one external x86 desktop native build still CPU-bound after roughly 49
+  minutes, with no candidate ELF, QEMU process, cache output, or new receipt.
+  It started from the changing dirty root and source files changed afterward,
+  so any eventual result is diagnostic-only without frozen-source admission.
+  Existing x86 reports remain stale FAIL and no ARM sibling has new evidence.
+  All relevant x86/ARM sibling commits are already patch-equivalent to, or
+  superseded on, `origin/main`; nothing should be cherry-picked. Live x86 and
+  ARM capture/event rows therefore remain open.
