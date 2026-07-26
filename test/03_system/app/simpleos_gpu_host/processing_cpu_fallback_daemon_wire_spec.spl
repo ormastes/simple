@@ -1,27 +1,17 @@
-"""Host-only end-to-end CPU fallback over the real file-backed wire."""
+"""Source contract for host-only CPU fallback over the file-backed wire."""
 
-use std.spec.{describe, it, expect, pending}
-use std.io_runtime.{env_get, process_run, remove_file_if_exists, time_now_unix_micros}
-use common.gpu.simpleos_host_gpu_protocol.{SIMPLEOS_HOST_GPU_REGION_BYTES}
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_exists, file_read}
 
 describe "SimpleOS processing CPU fallback daemon wire":
-    it "negotiates CUDA then publishes an explicit CPU fallback receipt":
-        val daemon = env_get("SIMPLEOS_GPU_HOST_BIN")
-        val probe = env_get("SIMPLEOS_GPU_FALLBACK_WIRE_PROBE_BIN")
-        if daemon == "" or probe == "":
-            pending("native mmap evidence requires host and fallback probe binaries")
-            return
-        val path = "/tmp/simpleos_gpu_fallback_" + time_now_unix_micros().to_text() + ".shm"
-        val (_truncate_out, _truncate_err, truncate_code) =
-            process_run("truncate", ["-s", SIMPLEOS_HOST_GPU_REGION_BYTES.to_text(), path])
-        expect(truncate_code).to_equal(0)
-        val (out, err, code) = process_run(
-            probe, ["--daemon=" + daemon, "--shm=" + path])
-        remove_file_if_exists(path)
-        expect(code).to_equal(0)
-        expect(err).to_equal("")
-        expect(out).to_contain("GPU_FALLBACK_WIRE status=pass")
-        expect(out).to_contain("hello_completed=true hello_status=1 hello_mask=8")
-        expect(out).to_contain("receipt_completed=true receipt_status=4 reason=16 source=2")
-        expect(out).to_contain("handle=0 identity=0 bytes=32")
-        expect(out).to_contain("backend=4")
+    it "owns the daemon lifetime outside the native array ABI":
+        val wrapper = file_read("scripts/check/check-simpleos-gpu-fallback-wire.shs")
+        val probe = file_read("src/app/test/simpleos_gpu_fallback_wire_probe.spl")
+        expect(file_exists("scripts/check/check-simpleos-gpu-fallback-wire.shs")).to_equal(true)
+        expect(wrapper).to_contain("DAEMON_TIMEOUT_SECONDS=$((TEST_TIMEOUT_SECONDS + 10))")
+        expect(wrapper).to_contain("timeout -k 2 \"$DAEMON_TIMEOUT_SECONDS\" env")
+        expect(wrapper).to_contain("SIMPLE_GPU_FAULT_INJECT_SKIP_MATCHES=1")
+        expect(wrapper).to_contain("trap cleanup EXIT INT TERM")
+        expect(wrapper).to_contain("receipt_status=4 reason=16 source=2")
+        expect(probe.contains("process_spawn_async")).to_equal(false)
+        expect(probe).to_contain("host_gpu_ivshmem_fallback_receipt_valid")

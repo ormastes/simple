@@ -4,13 +4,12 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT_DIR"
 
-SIMPLE_BIN=${SIMPLE_BIN:-bin/simple}
 HOST_BIN=${SIMPLEOS_GPU_HOST_BIN:-build/simpleos_gpu_host/fallback_wire/simpleos_gpu_host}
 PROBE_BIN=${SIMPLEOS_GPU_FALLBACK_WIRE_PROBE_BIN:-build/simpleos_gpu_host/fallback_wire/fallback_wire_probe}
 TEST_TIMEOUT_SECONDS=${SIMPLEOS_GPU_FALLBACK_WIRE_TIMEOUT_SECONDS:-60}
-SPEC=test/03_system/app/simpleos_gpu_host/processing_cpu_fallback_daemon_wire_spec.spl
 
 case "$TEST_TIMEOUT_SECONDS" in ''|0|*[!0-9]*) exit 2 ;; esac
+DAEMON_TIMEOUT_SECONDS=$((TEST_TIMEOUT_SECONDS + 10))
 
 if [ ! -x "$HOST_BIN" ] || [ ! -x "$PROBE_BIN" ]; then
     echo "simpleos_gpu_fallback_wire_status=blocked"
@@ -18,7 +17,44 @@ if [ ! -x "$HOST_BIN" ] || [ ! -x "$PROBE_BIN" ]; then
     exit 1
 fi
 
-timeout -k 5 "$TEST_TIMEOUT_SECONDS" env \
-SIMPLEOS_GPU_HOST_BIN="$HOST_BIN" \
-SIMPLEOS_GPU_FALLBACK_WIRE_PROBE_BIN="$PROBE_BIN" \
-SIMPLE_LIB=src "$SIMPLE_BIN" test "$SPEC" --mode=interpreter
+SHM=${TMPDIR:-/tmp}/simpleos_gpu_fallback_wire_$$.shm
+DAEMON_LOG=${SIMPLEOS_GPU_FALLBACK_WIRE_DAEMON_LOG:-build/simpleos_gpu_host/fallback_wire/daemon-live.log}
+mkdir -p "$(dirname "$DAEMON_LOG")"
+truncate -s 8388608 "$SHM"
+
+daemon_pid=
+cleanup() {
+    if [ -n "$daemon_pid" ]; then
+        kill "$daemon_pid" 2>/dev/null || true
+        wait "$daemon_pid" 2>/dev/null || true
+    fi
+    rm -f "$SHM"
+}
+trap cleanup EXIT INT TERM
+
+timeout -k 2 "$DAEMON_TIMEOUT_SECONDS" env \
+    SIMPLE_GPU_TEST=1 \
+    SIMPLE_GPU_FAULT_INJECT=cuda:submit \
+    SIMPLE_GPU_FAULT_INJECT_SKIP_MATCHES=1 \
+    "$HOST_BIN" \
+    "--shm=$SHM" \
+    --processing-backend=cuda \
+    --processing-fallback=cpu >"$DAEMON_LOG" 2>&1 &
+daemon_pid=$!
+
+set +e
+output=$(timeout -k 5 "$TEST_TIMEOUT_SECONDS" "$PROBE_BIN" "--shm=$SHM" 2>&1)
+probe_rc=$?
+set -e
+printf '%s\n' "$output"
+if [ "$probe_rc" -ne 0 ]; then
+    echo "simpleos_gpu_fallback_wire_status=fail"
+    echo "simpleos_gpu_fallback_wire_reason=probe-failed"
+    exit "$probe_rc"
+fi
+printf '%s\n' "$output" | grep -q 'GPU_FALLBACK_WIRE status=pass'
+printf '%s\n' "$output" | grep -q 'hello_completed=true hello_status=1 hello_mask=8'
+printf '%s\n' "$output" | grep -q 'receipt_completed=true receipt_status=4 reason=16 source=2'
+printf '%s\n' "$output" | grep -q 'handle=0 identity=0 bytes=32 checksum=135272480'
+printf '%s\n' "$output" | grep -q 'backend=4'
+echo "simpleos_gpu_fallback_wire_status=pass"

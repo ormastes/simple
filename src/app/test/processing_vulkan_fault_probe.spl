@@ -1,0 +1,46 @@
+"""Native Vulkan ProcessingIR success and fault-phase probe."""
+
+use app.io.args_ops.{get_args}
+use std.common.processing.processing_ir.{processing_ir_fill_u32}
+use std.gc_async_mut.processing.fault_injection.{processing_ir_fault_injected}
+use std.gc_async_mut.processing.vulkan_fill_u32.{processing_ir_execute_vulkan}
+
+fn _arg_value(args: [text], prefix: text) -> text:
+    for arg in args:
+        if arg.starts_with(prefix):
+            return arg[prefix.len():]
+    ""
+
+fn _expected_reason(phase: text) -> text:
+    if phase == "unavailable": return "vulkan-unavailable"
+    if phase == "init": return "vulkan-init-failed"
+    if phase == "submit": return "vulkan-submit-failed"
+    if phase == "readback": return "vulkan-readback-failed"
+    if phase == "mismatch": return "checksum-mismatch"
+    "ok"
+
+fn main() -> i64:
+    val phase = _arg_value(get_args(), "--phase=")
+    if phase != "none" and phase != "unavailable" and phase != "init" and
+       phase != "submit" and phase != "readback" and phase != "mismatch":
+        print("VULKAN_FAULT_NATIVE status=fail reason=invalid-phase\n")
+        return 2
+    val value = 0x01020304u32
+    val result = processing_ir_execute_vulkan(processing_ir_fill_u32(8, value))
+    val fault_active = phase != "none" and processing_ir_fault_injected("vulkan", phase)
+    var values_exact = result.values.len() == 8
+    var index: i64 = 0
+    while values_exact and index < result.values.len().to_i64():
+        values_exact = result.values[index] == value
+        index = index + 1
+    val valid = if phase == "none":
+        result.completed and result.reason == "ok" and values_exact and
+            result.backend_handle > 0 and result.device_identity > 0 and
+            not fault_active
+    else:
+        not result.completed and result.reason == _expected_reason(phase) and
+            result.values.len() == 0 and result.backend_handle == 0 and
+            result.device_identity == 0 and fault_active
+    val status = if valid: "pass" else: "fail"
+    print("VULKAN_FAULT_NATIVE status={status} phase={phase} fault_active={fault_active} completed={result.completed} reason={result.reason} values={result.values.len()} values_exact={values_exact} handle={result.backend_handle} identity={result.device_identity}\n")
+    if valid: 0 else: 1

@@ -23,12 +23,14 @@ sh scripts/check/check-simpleos-gpu-fallback-wire.shs
 3. Native handle and device identity are zero.
 4. All eight readback values equal `0x01020304`; output bytes, exact checksum,
    and elapsed time are validated by the guest bridge.
-5. The canonical wrapper fails if either native binary is missing; ordinary
-   test discovery marks the native-only row pending. The wrapper bounds the
-   complete test/probe run to 60 seconds.
+5. The executable spec checks wrapper/probe ownership and receipt assertions.
+   The canonical wrapper fails if either native binary is missing, bounds the
+   probe to 60 seconds by default, and keeps the daemon guard 10 seconds longer.
 
 ## Current Evidence
 
-The native daemon and probe compile incrementally. The current Linux probe
-exits with SIGSEGV before emitting its first marker; live receipt evidence
-remains blocked by the tracked native-probe bug.
+The native daemon and probe compile incrementally against the current
+Vulkan/CUDA runtime. Linux HELLO completes with CUDA mask `8`; the following
+processing request timed out with reason `3` before the daemon published a
+fallback receipt. That run used a shorter daemon guard; the ordering is fixed,
+but the live row remains unverified after reaching the three-cycle session cap.

@@ -1,14 +1,14 @@
-# Vulkan native bounded readback API is missing
+# Vulkan Native Bounded Readback Repair
 
-- **Status:** interpreter and native runtime device pass; source-matched Simple native receipt pending
+- **Status:** resolved on Linux 2026-07-26
 
 ## Problem
 
 `vulkan_sffi_read_buffer_bytes(handle, byte_count, offset)` originally declared
 `rt_vulkan_read_buffer_bytes` before every native runtime exported a compatible
 symbol. Native callers therefore reached address zero during device framebuffer
-readback. The symbol and nonzero-offset upload now exist; the remaining native
-gap is a source-matched Simple executable receipt.
+readback. The symbol, nonzero-offset upload, and source-matched Simple native
+receipt now exist.
 
 The legacy typed `rt_vulkan_copy_from_buffer` export still cannot safely mutate
 interpreter arrays. New callers use array-returning bounded readback, while
@@ -39,8 +39,10 @@ The interpreter device round trip passes with exact nonzero-offset bytes and
 OOB rejection. Its retained log is
 `build/gpu-goal/dual-abi/vulkan-live-readback-cycle3.log`. The native Rust
 runtime test `native_vulkan_upload_honors_nonzero_offset` passes the same real
-device checks. The remaining acceptance evidence is one source-matched Simple
-native executable round trip.
+device checks. A source-matched Simple native executable now returns eight
+exact `0x01020304` values with positive handle and identity. The same executable
+passes unavailable, init, submit, readback, and mismatch fault phases with exact
+typed reasons, empty output, and zero failure provenance.
 
 
 ## Evidence
@@ -48,3 +50,8 @@ native executable round trip.
 The x86 QEMU host-GPU daemon backtrace stopped at
 `vulkan_sffi_read_buffer_bytes -> 0x0`. `nm` showed the symbol undefined while
 `rt_vulkan_copy_from_buffer` was strongly defined in the Vulkan runtime archive.
+
+Current native evidence is retained under
+`build/simpleos_gpu_host/vulkan_fault_native/`. The runtime archive SHA-256 is
+`2e760130f98d14e7498c29903f9bd2605d55e0e3d7d9224282c1661c107ff704`.
+Run `sh scripts/check/check-processing-vulkan-fault-native.shs`.

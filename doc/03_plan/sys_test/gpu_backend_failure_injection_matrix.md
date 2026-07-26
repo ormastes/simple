@@ -50,9 +50,10 @@ The production receipt is written by `_finish` in
 The executor-level companion
 `gpu_backend_failure_injection_spec.spl` also exercises the guarded
 `SIMPLE_GPU_TEST=1` and `SIMPLE_GPU_FAULT_INJECT=<backend>:<phase>` seam.
-CUDA init/submit/readback/mismatch passes live. Vulkan is implemented but the
-current runtime artifact lacks `rt_vulkan_dependency_quarantine_lock`; the
-same tests remain skipped until that artifact is incrementally rebuilt.
+CUDA init/submit/readback/mismatch passes live. The source-matched Simple native
+Vulkan probe now passes real device output plus unavailable, init, submit,
+readback, and mismatch phases. The retained runtime archive exports both
+`rt_vulkan_dependency_quarantine_lock` and `rt_is_interpreter_runtime`.
 
 ## Backend Injection Matrix
 
@@ -75,10 +76,10 @@ future adapter hook cannot silently cover only one implementation.
 
 | Fault | Concrete injection point | Status and receipt fields | Fail-closed assertion | State |
 |---|---|---|---|---|
-| Unavailable | Guarded `unavailable` phase before `vulkan_init`; render admission also reaches `_create_render_backend` `Err` | `unsupported`; `backend=unavailable`; handle `0`; no device readback | Do not promote an unavailable request to pass or silently rewrite `batch.backend` | Guarded live control implemented |
-| Init/submit | Init: `vulkan_alloc_storage`, `vulkan_compile_spirv`, `vulkan_create_pipeline_with_push`; submit: `vulkan_sffi_dispatch_buffer_compute_checked` | `fail`; `backend=vulkan`; wire reason `16` for submit/dispatch; handle `0`; no device readback | Assert no positive provenance/identity, no device readback, and no pass status | Guarded seams implemented; live completion waits for updated runtime artifact |
-| Readback | `vulkan_sffi_read_buffer_bytes` and `bytes.len() == byte_count`; render path `engine.read_pixels_with_source` | `fail`; wire reason `17`; handle `0`; no output checksum | Reject short/empty bytes and every pass whose source is not device readback | Guarded seam implemented; live completion waits for updated runtime artifact |
-| Mismatch | Processing `processing_ir_outputs_equal(values, oracle)`; Draw IR canonical checksum check before render | `fail`; wire reason `11`; handle `0`; no device-backed pass | Assert mismatch is non-pass and forged output is rejected | Guarded seam and wire mapping implemented; live completion waits for updated runtime artifact |
+| Unavailable | Guarded `unavailable` phase before `vulkan_init`; render admission also reaches `_create_render_backend` `Err` | `unsupported`; `backend=unavailable`; handle `0`; no device readback | Do not promote an unavailable request to pass or silently rewrite `batch.backend` | Source-matched native phase passes with exact reason and zero provenance |
+| Init/submit | Init: `vulkan_alloc_storage`, `vulkan_compile_spirv`, `vulkan_create_pipeline_with_push`; submit: `vulkan_sffi_dispatch_buffer_compute_checked` | `fail`; `backend=vulkan`; wire reason `16` for submit/dispatch; handle `0`; no device readback | Assert no positive provenance/identity, no device readback, and no pass status | Source-matched native init and submit phases pass |
+| Readback | `vulkan_sffi_read_buffer_bytes` and `bytes.len() == byte_count`; render path `engine.read_pixels_with_source` | `fail`; wire reason `17`; handle `0`; no output checksum | Reject short/empty bytes and every pass whose source is not device readback | Source-matched native readback phase passes |
+| Mismatch | Processing `processing_ir_outputs_equal(values, oracle)`; Draw IR canonical checksum check before render | `fail`; wire reason `11`; handle `0`; no device-backed pass | Assert mismatch is non-pass and forged output is rejected | Source-matched native mismatch phase passes |
 | Explicit fallback | `_process_request` calls `_processing_cpu_fallback` after executor failure or mismatch only when `--processing-fallback=cpu` | `fallback`; CPU readback; original GPU reason; zero native handle/identity; correlated generation/run/frame/backend | Reject a CPU-backed `pass`; accept fallback only when policy explicitly requests it and correlation fields match | Policy and guest wire validator implemented; end-to-end daemon wire run pending |
 
 ### Metal
@@ -169,9 +170,11 @@ The policy implementation and guest validator are covered by
 `processing_cpu_fallback_policy_contract_spec.spl` and
 `host_gpu_ivshmem_fallback_receipt_spec.spl`. The native daemon-wire harness is
 implemented by `processing_cpu_fallback_daemon_wire_spec.spl` and
-`simpleos_gpu_fallback_wire_probe.spl`; both native binaries compile, but the
-probe currently exits `139` before receipt publication. The exact remaining
-evidence gaps are:
+`simpleos_gpu_fallback_wire_probe.spl`; both native binaries compile against
+the current runtime. HELLO passes with CUDA mask `8`; the last processing
+request timed out before fallback completion. Its daemon guard was shorter than
+the probe guard, which is now fixed but not rerun after the three-cycle cap.
+The exact remaining evidence gaps are:
 
 1. Resolve
    `simpleos_gpu_fallback_wire_native_probe_segfault_2026-07-26.md`, then run

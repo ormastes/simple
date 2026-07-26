@@ -1,12 +1,10 @@
 """Native host probe for explicit CPU fallback over file-backed ivshmem."""
 
 use std.io_runtime.{
-    remove_file_if_exists,
-    thread_sleep
+    remove_file_if_exists
 }
 use app.io.args_ops.{get_args}
 use app.io.file_ops.{file_mmap, file_munmap}
-use app.io.process_ops.{process_spawn_async, process_kill, process_wait}
 use os.kernel.boot.mmio_hardware.{mmio_read32}
 use os.kernel.boot.monotonic_hardware.{boot_monotonic_now_us}
 use os.lib.gpu_bridge.host_gpu_ivshmem.{
@@ -30,42 +28,20 @@ fn _arg_value(args: [text], prefix: text) -> text:
             return arg[prefix.len():]
     ""
 
-fn _cleanup(pid: i64, mapped: i64, path: text):
-    if pid > 1:
-        val _ = process_kill(pid)
-        val _ = process_wait(pid, 2000)
-        thread_sleep(20)
+fn _cleanup(mapped: i64, path: text):
     if mapped > 0:
         val _ = file_munmap(mapped, SIMPLEOS_HOST_GPU_REGION_BYTES)
-    remove_file_if_exists(path)
 
 fn main() -> i64:
-    val daemon = _arg_value(get_args(), "--daemon=")
     val path = _arg_value(get_args(), "--shm=")
-    if daemon == "" or path == "":
-        print("GPU_FALLBACK_WIRE status=fail reason=daemon-and-shm-required\n")
+    if path == "":
+        print("GPU_FALLBACK_WIRE status=fail reason=shm-required\n")
         return 2
     val mapped = file_mmap(path, SIMPLEOS_HOST_GPU_REGION_BYTES, 0, false)
     if mapped <= 0:
         remove_file_if_exists(path)
         print("GPU_FALLBACK_WIRE status=fail reason=mmap-failed\n")
         return 3
-    val pid = process_spawn_async("timeout", [
-        "-k", "2", "35",
-        "env",
-        "SIMPLE_GPU_TEST=1",
-        "SIMPLE_GPU_FAULT_INJECT=cuda:submit",
-        "SIMPLE_GPU_FAULT_INJECT_SKIP_MATCHES=1",
-        daemon,
-        "--shm=" + path,
-        "--processing-backend=cuda",
-        "--processing-fallback=cpu"
-    ])
-    if pid <= 1:
-        _cleanup(pid, mapped, path)
-        print("GPU_FALLBACK_WIRE status=fail reason=daemon-spawn-failed\n")
-        return 4
-
     val base = mapped as u64
     val hello = host_gpu_ivshmem_negotiate(
         base, 1, "x86_64", "vulkan", SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA,
@@ -91,5 +67,5 @@ fn main() -> i64:
             receipt, 2, 7001, 91, SIMPLEOS_HOST_GPU_BACKEND_CUDA, 32)
     val status = if valid: "pass" else: "fail"
     print("GPU_FALLBACK_WIRE status={status} hello_completed={hello.completed} hello_status={hello.status} hello_mask={hello.processing_mask} receipt_completed={receipt.completed} receipt_status={receipt.status} reason={receipt.reason} source={receipt.readback_source} handle={receipt.native_handle} identity={receipt.device_identity} bytes={receipt.output_bytes} checksum={receipt.output_checksum} elapsed_us={receipt.elapsed_us} backend={receipt.backend_code}\n")
-    _cleanup(pid, mapped, path)
+    _cleanup(mapped, path)
     if valid: 0 else: 1
