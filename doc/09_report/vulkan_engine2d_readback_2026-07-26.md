@@ -1,7 +1,7 @@
 # Vulkan Engine2D Readback Evidence
 
 - status: blocked
-- reason: Vulkan provider archive member not extracted
+- reason: cross-module `Engine2DReadback.pixels` field index mismatch
 - host: Linux x86_64
 - ICD: `/usr/share/vulkan/icd.d/nvidia_icd.json`
 - execution mode: native, no stub fallback
@@ -26,22 +26,30 @@ The guarded core link correctly rejected unrelated optional GPU symbols. A
 direct no-stub link of the retained objects then succeeded with the existing
 optional-GPU provider archive and current quarantine-lock provider.
 
-## Execution
+## Latest Execution
 
-The binary starts without the prior aggregate-field crash, but stops before
-readback:
+Retaining the provider-only archive member reaches live hardware:
 
 ```text
-vulkan_probe_available=false
-vulkan_probe_diagnostic=requested=vulkan;selected=vulkan;status=Unavailable;api=vulkan;gate=vulkan_runtime;shader=spirv;compute=false;graphics=false;present=false;reason=Vulkan shared session initialization failed: availability
-overall=fail
+vulkan_probe_available=true
+status=Initialized
+compute=true
+graphics=true
+strict_create_status=pass
+backend_name=vulkan
 ```
 
-The archive contains a weak compatibility `rt_vulkan_is_available` and a
-strong provider-only `rt_vulkan_provider_is_available`. The weak member is
-extracted first, leaving no unresolved reference that pulls the provider-only
-member. Hardware readback, handle/identity, checksum, and parity pass are not
-claimed.
+The next instruction path segfaults. Static disassembly shows the producer
+allocating a 48-byte `Engine2DReadback` with `pixels` at offset 0, while the
+caller loads `pixels` from offset `0x50`. The aggregate pointer is already
+untagged, so this is a field-layout metadata mismatch caused by per-module
+numeric `SymbolId` collision.
+
+The MIR source now prefers name-keyed lowered-value provenance before numeric
+HIR IDs. Its isolated regression passes 1/1. Three bounded incremental compiler
+build attempts did not produce a usable source-matched CLI; the final attempt
+stopped on 14 unrelated cached LLVM undeclared-global failures. No additional
+hardware run was made, and readback/checksum/parity pass is not claimed.
 
 See
-`doc/08_tracking/bug/vulkan_provider_archive_extraction_2026-07-26.md`.
+`doc/08_tracking/bug/native_engine2d_readback_cross_module_field_layout_2026-07-26.md`.

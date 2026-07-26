@@ -2,9 +2,10 @@
 
 ## Status
 
-Source fixed and deployed in a source-matched compiler. Vulkan readback remains
-unverified because the evidence link selects the weak availability fallback
-before extracting the strong Vulkan provider member.
+The tagged aggregate base fix is deployed. Provider retention now reaches live
+Vulkan initialization and strict creation. Readback remains unverified because
+the caller resolves `Engine2DReadback.pixels` through a colliding module-local
+type ID.
 
 ## Evidence
 
@@ -35,15 +36,15 @@ bootstrap stage or cache reset. A projected C owner supplied the sole missing
 
 That compiler emitted the 184-module source-matched Vulkan evidence closure.
 A direct no-stub link succeeded with the existing optional-GPU provider and
-current quarantine-lock provider. Execution did not crash, but availability
-failed before readback because archive order satisfied
-`rt_vulkan_is_available` from the weak core-C member and never extracted the
-strong `rt_vulkan_provider_is_available` member.
+current quarantine-lock provider. With provider retention forced, execution
+reaches `backend_name=vulkan` and then crashes at the first readback field
+access. Disassembly confirms the aggregate pointer is untagged correctly; the
+producer allocates 48 bytes with `pixels` at offset 0, while the caller loads
+`pixels` from offset `0x50`.
 
 ## Resume
 
-Fix provider extraction at the linker owner, for example by retaining the
-provider-only symbol whenever a Vulkan provider archive is selected. Then
-relink the retained source-matched evidence objects and require device
-readback, positive handle/device identity, zero mismatches, and passing
+Deploy the name-keyed field-layout precedence fix from
+`native_engine2d_readback_cross_module_field_layout_2026-07-26.md`, then require
+device readback, positive handle/device identity, zero mismatches, and passing
 strict/parity specs.

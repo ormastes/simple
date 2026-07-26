@@ -732,9 +732,22 @@ impl MirLowering:
     me resolve_field_index(base: HirExpr, base_local: LocalId, field_name: text, resolved: SymbolId?) -> i64:
         """Resolve field index within a struct/class type.
 
-        Uses the base expression's type to look up field ordering.
+        Uses lowered value provenance before the base expression's type.
         Falls back to 0 if type cannot be determined.
         """
+        # Numeric SymbolIds are local to each module and can collide in an
+        # entry-closure build. A lowered local's name-keyed provenance is
+        # therefore authoritative when available.
+        if self.struct_value_syms.contains(base_local.id):
+            val value_name = self.struct_value_syms[base_local.id]
+            if self.struct_field_order.contains(value_name):
+                val value_fields = self.struct_field_order[value_name]
+                var value_idx = 0
+                while value_idx < value_fields.len():
+                    if value_fields[value_idx] == field_name:
+                        return value_idx
+                    value_idx = value_idx + 1
+
         # Try to get the type symbol from the base expression's type
         val type_sym = self.expr_type_symbol(base)
         if val found_type_sym = type_sym:
@@ -756,21 +769,6 @@ impl MirLowering:
                         return named_idx
                     named_idx = named_idx + 1
 
-        # Fallback: the base is a locally-constructed struct value with no HIR
-        # type annotation (`val p = Point(...)`). Recover the struct name from
-        # struct_value_syms keyed by the base local (mirrors bitfield_value_syms).
-        val vname = self.struct_value_syms.get(base_local.id)
-        if vname != nil:
-            val nm = vname ?? ""
-            if self.struct_field_order.has(nm):
-                val vfields = self.struct_field_order[nm]
-                val vn = vfields.len()
-                var vidx = 0
-                while vidx < vn:
-                    if vfields[vidx] == field_name:
-                        return vidx
-                    vidx = vidx + 1
-
         0  # Default fallback when type is unknown
 
     me resolve_base_struct_name(base: HirExpr, base_local: LocalId) -> text?:
@@ -785,12 +783,14 @@ impl MirLowering:
         that `r.origin` is itself a `P`, and resolve_field_index silently
         defaults the second lookup to field index 0.
         """
+        if self.struct_value_syms.contains(base_local.id):
+            return Some(self.struct_value_syms[base_local.id])
         val type_sym = self.expr_type_symbol(base)
         if val found_type_sym = type_sym:
             val type_symbol = self.symbols.get_symbol_raw(found_type_sym.id)
             if type_symbol != nil:
                 return type_symbol.name
-        self.struct_value_syms.get(base_local.id)
+        nil
 
     fn expr_type_symbol(expr: HirExpr) -> SymbolId?:
         """Determine the type symbol of an expression from its HIR type annotation."""

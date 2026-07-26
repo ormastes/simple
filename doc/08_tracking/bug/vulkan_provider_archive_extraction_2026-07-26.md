@@ -2,16 +2,21 @@
 
 ## Status
 
-Open. Blocks source-matched Engine2D readback evidence under TODO 580.
+Source fixed. The focused linker regression passes 13/13. Deployment is folded
+into TODO 580's next source-matched incremental compiler build.
 
 ## Evidence
 
-The source-matched no-stub evidence binary links successfully, but both it and
-the prior reference binary report:
+Forcing the provider-only member during the retained no-stub link changed the
+hardware result to:
 
 ```text
-vulkan_probe_available=false
-reason=Vulkan shared session initialization failed: availability
+vulkan_probe_available=true
+status=Initialized
+compute=true
+graphics=true
+strict_create_status=pass
+backend_name=vulkan
 ```
 
 The provider archive contains both a weak core-C `rt_vulkan_is_available` and
@@ -20,9 +25,10 @@ can pull the weak member first; after that no unresolved public symbol remains
 to extract the provider member. The core-C function then resolves the
 provider-only name with `dlsym`, finds nothing, and returns unavailable.
 
-## Required Fix
+## Fix
 
-The native linker must retain `rt_vulkan_provider_is_available` whenever it
-selects a Vulkan provider archive. Add a focused archive-order regression:
-weak compatibility owner first, strong provider in a later member, and a
-runtime assertion that availability reaches the provider.
+`native_all_gnu_support_args` now retains
+`rt_vulkan_provider_is_available` on ELF/MinGW and
+`_rt_vulkan_provider_is_available` on macOS whenever native-all is selected.
+The remaining readback failure is tracked separately in
+`native_engine2d_readback_cross_module_field_layout_2026-07-26.md`.
