@@ -7,7 +7,8 @@ first in GHDL simulation (the early-bug-finding gate), then on the Kria KV260
 > Status (2026-07-26): **rv32 SimpleOS boots to `TEST PASSED` on REAL KV260
 > silicon on TWO paths** — PS-DDR4 (`747c27de111`) and BRAM-only tiny config
 > (`0331115d223`, no DDR / no block design / no FSBL). All four sim cores
-> (rv32/rv64 × flat/AXI) pass in GHDL. rv64 silicon bring-up in progress.
+> (rv32/rv64 × flat/AXI) pass in GHDL. **rv64 also `TEST PASSED` on silicon**
+> (`57bbf3d3cb35`) — all three silicon lanes green.
 
 ## 1. What runs where
 
@@ -18,7 +19,7 @@ first in GHDL simulation (the early-bug-finding gate), then on the Kria KV260
 | GHDL rv64 | `rv64_exec_core_flat.vhd` / `rv64_exec_core_axi.vhd` | **full boot → `TEST PASSED`** |
 | **Silicon KV260, DDR** | `soc_top_rv32_k26_ddr.vhd` → PS-DDR4 via AXI-HP | **`TEST PASSED`** (446-byte chain, byte-matching GHDL) |
 | **Silicon KV260, BRAM** | `soc_top_rv32_tiny_bram.vhd`, 125.5/144 BRAM36 | **`TEST PASSED`** (568 bytes, soft-reset re-run passes) |
-| Silicon KV260, rv64 | `soc_top_rv64_k26_ddr.vhd` | bring-up in progress (bitstream timing MET) |
+| **Silicon KV260, rv64** | `soc_top_rv64_k26_ddr.vhd` → PS-DDR4 | **`TEST PASSED`** (547 bytes, 10.56M AXI reads, 50 MHz WNS +2.78) |
 
 The rv32 core itself was first hardened by running the **minimal NVMe firmware**
 against it under a QEMU↔GHDL per-instruction difftest, which found and fixed
@@ -206,13 +207,18 @@ port** (the main new work; RV64C differs: `C.JAL`→`C.ADDIW`, `C.FLW/FSW`→`C.
 the same ramdisk bank. FPU is a *false* gap (the `fld` bytes are misdisassembled
 address constants). See `doc/09_report/rv64_simpleos_ghdl_soc_scope_2026-07-25.md`.
 
-Status 2026-07-26: rv64 passes GHDL on both `rv64_exec_core_flat.vhd` and the
-synthesizable `rv64_exec_core_axi.vhd` (incl. GARBAGE_FILL). Silicon: bitstream
-built (`soc_top_rv64_k26_ddr.vhd`, timing MET), bring-up via
-`bash scripts/fpga/bringup_kv260_rv64_ddr.shs` — same psu_init + `.bss`-zero
-flow; kernel loads at DDR `0x1020_0000`. First run: core released but zero AXI
-fetches — debug in progress. Note the rv64 top reuses the rv32 ctrl slave, so
-`CTRL_MAGIC` reads "RV32" on BOTH bitstreams and cannot identify which is loaded.
+Status 2026-07-26: **rv64 SimpleOS `TEST PASSED` on KV260 silicon from
+PS-DDR4** (log `build/fpga/k26_rv64_ddr/bringup/bringup_PASS_2026-07-26.log`;
+547 UART bytes, 10.56M AXI reads; 50 MHz, WNS +2.783 MET). Launch mirrors §6a:
+GHDL rehearsal (`ghdl_rv64_k26_ddr_boot.shs`, zeroed AND `GARBAGE_FILL=1`) →
+`build_k26_rv64_ddr_bitstream.shs` → `bash bringup_kv260_rv64_ddr.shs` — same
+psu_init + `.bss`-zero flow; kernel at DDR `0x1020_0000` (64-bit AXI adapter,
+AxSIZE=3). Two rv64-specific landmines: (1) the rv64 top reuses the rv32 ctrl
+slave, so `CTRL_MAGIC` reads "RV32" on BOTH bitstreams and cannot identify
+which is loaded; (2) **wedged-PS zero-fetch** — after a BRAM-only bitstream ran
+(HP ports unused by its psu_init), all probes read green but the core's first
+HP0 fetch never completes (`AXI_READS=0`); a fresh full psu_init does NOT
+recover it — fix is xsdb `rst -system`, then the full bring-up re-run.
 
 ## Related
 
