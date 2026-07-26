@@ -109,17 +109,29 @@ through the canonical scene`; `Apply glass CSS and widget computed styles`;
 `Boot the canonical SimpleOS desktop in QEMU`; `Capture and compare semantic
 and framebuffer evidence`.
 
-**Wave 0 is not currently admitted at `db9faf0936`.** The forbidden Rust seed
+**Compiler Wave 0 is not currently admitted at `3ed2200828`.** The forbidden Rust seed
 hash is `f2c216a660da83da1a253d2e8191a3059a66b1d9dc11bbcbaf237fe7e5b8d2bc`.
 Historical-only pure hash
 `277f8ac9e14ae266ce380a5890d434ce27b47cee9378e2b337cbcc8cd4086767` cannot
 import the current graph. The reviewed runtime capsule
 `02775039b26c80ad5858976ad0761ab331cd6454bee202b6dfb3a25310a19d85` at source
-`4e1ddd3afe` is absent and is neither current nor admitted.
+`4e1ddd3afe` is absent and is neither current nor admitted. Its replacement
+core-C runtime capsule is independently ACCEPTED at source
+`088da06413217edec9454cd0c24de417a8cd5e65`, runtime tree
+`3dd0db9de03e225a0e16164e0a52a40cc4774902`, archive
+`c4f39c1a74e1979d2680153476199b0d70b626fabb0b01d22cedc4505ca46e74`, and
+manifest `5773db91727ce05bde7c100a64ef77206e4b166c1efc36534e7196d2fadf0003`.
+This accepts the runtime only, not a compiler. The final bridge micro-cycle
+remains unspent because no tracked compatible bridge entry exists and the
+current fixed bootstrap API forces low-memory on, preventing the required
+positive-three-opt-in versus negative-no-opt-in control.
+The runtime tree remains unchanged at `3ed2200828`, so the accepted runtime
+archive is reusable; the compiler and source admission must bind to the newer
+revision.
 
 | Wave/lane | Exclusive owner and boundary | Required independent review and admission evidence |
 |---|---|---|
-| **Wave 0 — compiler capsule / CompileMode transport** | `/root/compiler_capsule_owner` owns only restoration/re-admission of a runtime capsule or a new immutable current one, its manifest and admission checker. It must set `SIMPLE_NO_STUB_FALLBACK=1`; it may not change WM, GUI, Web, Engine2D, or device code. Any rebase creates a fresh admission requirement. | An independent highest-capability reviewer must first approve an eligible `compile --native` route or classifier-clean pure positional builder, then admit exact source/compiler/runtime/provider hashes and `nm` gates. Required unspent micro-cycle gates: `scripts/check/check-phase2-low-memory-source-reclaim.shs`, `test/03_system/check/phase2_low_memory_source_reclaim_gate_contract_spec.spl`, and `scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs` as necessary-only; positive 3 opt-ins/reclaim/`first-free=1`/`alias=0`, negative no-optin false/no-marker, `test/03_system/compiler/native_cli_mode_transport_regression_spec.spl` output `73`, and `test/03_system/compiler/native_cross_module_class_field_layout_regression_spec.spl` output `84`. This excludes the seed and historical hashes above. Follow `doc/08_tracking/bug/bootstrap_low_memory_positional_bridge_circularity_2026-07-26.md` and `doc/08_tracking/bug/native_engine2d_readback_cross_module_field_layout_2026-07-26.md`. |
+| **Wave 0 — compiler capsule / CompileMode transport** | `/root/compiler_capsule_owner` owns the tracked bridge entry, opt-in-sensitive bootstrap option plumbing, compiler admission checker, and accepted runtime-capsule handoff from `scripts/check/build-core-c-bootstrap-runtime-capsule.shs`. It must set `SIMPLE_NO_STUB_FALLBACK=1`; it may not change WM, GUI, Web, Engine2D, or device code. Any source change creates a fresh compiler admission requirement, while unchanged runtime tree/archive identities remain reusable. | Runtime provenance is ACCEPTED in `doc/09_report/wm_wave0_core_c_runtime_capsule_2026-07-26.md`. An independent highest-capability reviewer must still approve an eligible `compile --native` route or classifier-clean pure positional builder, then admit exact source/compiler/runtime/provider hashes and `nm` gates. Required unspent micro-cycle gates: `scripts/check/check-phase2-low-memory-source-reclaim.shs`, `test/03_system/check/phase2_low_memory_source_reclaim_gate_contract_spec.spl`, and `scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs` as necessary-only; positive 3 opt-ins/reclaim/`first-free=1`/`alias=0`, negative no-optin false/no-marker, `test/03_system/compiler/native_cli_mode_transport_regression_spec.spl` output `73`, and `test/03_system/compiler/native_cross_module_class_field_layout_regression_spec.spl` output `84`. This excludes the seed and historical hashes above. Follow `doc/08_tracking/bug/bootstrap_low_memory_positional_bridge_circularity_2026-07-26.md` and `doc/08_tracking/bug/native_engine2d_readback_cross_module_field_layout_2026-07-26.md`. |
 | **Wave A — theme semantics and parity** | `/root/theme_semantics_owner` owns canonical selected-snapshot propagation and focused GUI/Web semantics. `src/app/ui.browser/backend.spl` is permitted only as the canonical selected-snapshot semantic owner; it must not receive GPU, renderer, provider, readback, or backend implementation edits. | Independent high-capability review verifies the selected package CSS and widget snapshot reach `DrawIrComposition`, and runs/reviews `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` with real cascade/layout plus independent framebuffer evidence. |
 | **Wave A — CPU-SIMD host oracle/events** | `/root/cpu_simd_owner` owns CPU-SIMD evidence/checker/report files only; shared Engine2D changes require merge-owner assignment. | Independent high-capability review requires exact scalar/SIMD pixels, focus/pointer/key/text ordered receipts, timing, RSS, and revision-bound artifacts. |
 | **Wave B — Vulkan / Metal** | Prepared-host owners separately own only their provider/checker/manifest/report rows; no cross-backend edits. | Each device row has its own independent high-capability review: immutable device/provider/library identity, selected backend, submit/complete, device-origin readback, CPU-oracle parity, ordered events, timing and RSS. |

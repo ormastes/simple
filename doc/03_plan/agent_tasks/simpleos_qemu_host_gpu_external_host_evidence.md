@@ -20,13 +20,19 @@ The parent acceptance and design links are:
 
 QEMU receipts require a source-matched, pure-Simple compiler admitted by the
 Wave 0 capsule below. No such compiler is currently admitted at
-`db9faf0936a1991a8cc1e07b05847c4fbb125e07`: the forbidden seed is
+`3ed22008284c9c2dc2cba5dc42d6a69aed7d5c00`: the forbidden seed is
 `f2c216a660da83da1a253d2e8191a3059a66b1d9dc11bbcbaf237fe7e5b8d2bc`, while
 the historical-only pure candidate
 `277f8ac9e14ae266ce380a5890d434ce27b47cee9378e2b337cbcc8cd4086767` cannot
 import the current graph. The reviewed runtime
 `02775039b26c80ad5858976ad0761ab331cd6454bee202b6dfb3a25310a19d85` from
-source `4e1ddd3afe` is absent and non-current. The Vulkan/CUDA daemon links through the corrected
+source `4e1ddd3afe` is absent and non-current. A replacement direct core-C
+runtime capsule is independently ACCEPTED at runtime tree `3dd0db9de03e...`,
+archive `c4f39c1a74e...`, and manifest `5773db91727c...`; see
+`doc/09_report/wm_wave0_core_c_runtime_capsule_2026-07-26.md`. It is runtime
+provenance only and does not admit a compiler. The current source retains the
+same runtime tree, so the archive is reusable while compiler admission must
+bind to `3ed2200828`. The Vulkan/CUDA daemon links through the corrected
 section-retention boundary, but that does not admit a compiler or a receipt.
 Current-host CUDA readback and two-device UUID-hash distinction from
 2026-07-14 retain historical PTX evidence only; current-source regeneration
@@ -59,12 +65,13 @@ scope. All other rows reuse their existing authoritative TODOs.
 
 1. **Wave 0: admit an immutable current pure-Simple compiler capsule
    (TODO535/TODO548).** Freeze the source at
-   `db9faf0936a1991a8cc1e07b05847c4fbb125e07`; any rebase is a new Wave 0
+   `3ed22008284c9c2dc2cba5dc42d6a69aed7d5c00`; any source change is a new compiler Wave 0
    admission. The first blocker is the low-memory bridge circularity in
    `doc/08_tracking/bug/bootstrap_low_memory_positional_bridge_circularity_2026-07-26.md`:
-   one micro-cycle remains unspent until the reviewed runtime is restored or a
-   new immutable runtime is produced, and high-capability review accepts either
-   `compile --native` or a pure positional route. Use
+   the immutable runtime prerequisite is now accepted, but one micro-cycle
+   remains unspent until a tracked compatible bridge entry exists, the fixed
+   bootstrap API preserves the three-opt-in/no-opt-in distinction, and
+   high-capability review accepts either `compile --native` or a pure positional route. Use
    `scripts/check/check-phase2-low-memory-source-reclaim.shs`,
    `test/02_integration/compiler/phase2_low_memory_source_reclaim_probe.spl`,
    and

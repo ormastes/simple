@@ -580,3 +580,33 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   unsafe optional-return branch. Lint reached unrelated current compiler
   semantic failures and supplies no positive result. This is a reviewed
   hosted source fix, not native framebuffer/event or QEMU proof.
+
+- continuation-2026-07-26-wave0-runtime-capsule: The compiler driver now emits
+  ordered `phase2:source_reclaim:start` and `phase2:source_reclaim:done`
+  markers inside the existing low-memory reclaim branch; focused exact-body
+  contracts pass 2/2 and 3/3. This makes the required live receipt observable
+  without changing reclaim behavior or claiming admission.
+
+  The committed direct-C producer
+  `scripts/check/build-core-c-bootstrap-runtime-capsule.shs` compiles the
+  canonical runtime graph twice, hashes all 24 declared/transitive local
+  inputs, CC/AR/NM binaries and version receipts, requires byte-identical
+  deterministic archives, proves sole `rt_string_free` ownership in
+  `runtime_native.o`, and runs the C tombstone/alias self-check. Independent
+  review ACCEPTS the clean pushed capsule at source
+  `088da06413217edec9454cd0c24de417a8cd5e65`, runtime tree
+  `3dd0db9de03e225a0e16164e0a52a40cc4774902`, archive
+  `c4f39c1a74e1979d2680153476199b0d70b626fabb0b01d22cedc4505ca46e74`,
+  and manifest
+  `5773db91727ce05bde7c100a64ef77206e4b166c1efc36534e7196d2fadf0003`.
+  The remote later advanced to `3ed2200828` with the same runtime tree, so the
+  runtime capsule remains reusable while compiler admission must use the newer
+  source revision.
+
+  Compiler Wave 0 remains NOT ADMITTED and its final micro-cycle remains
+  unspent. No tracked bridge entry matches the current bootstrap API, and
+  `aot_native_project_with_backend_fixed` currently forces low-memory on, so
+  it cannot prove positive all-three-opt-ins versus negative no-opt-in. The
+  historical pure compiler also cannot pass the necessary `native-build`
+  validator or implement current no-stub semantics. Host/device/QEMU execution
+  rows therefore remain closed.
