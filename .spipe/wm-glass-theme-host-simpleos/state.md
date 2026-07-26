@@ -525,3 +525,34 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   RSS, and independently reviewed artifacts. The authoritative plan and links
   are `doc/03_plan/agent_tasks/wm_glass_theme_host_simpleos.md` and
   `doc/03_plan/agent_tasks/simpleos_qemu_host_gpu_external_host_evidence.md`.
+
+- continuation-2026-07-26-package-owned-theme-projection: A parallel
+  source/history audit found that `UISession.submit_widget_draw_ir` accepted a
+  tree-selected theme but repainted a mismatch through the compatibility
+  widget lowerer and process-global WM material. Browser/session/theme-service
+  callers also carried `ResolvedThemePackage` or `ResolvedThemeColors`
+  aggregates across the native boundary documented by the current hosted-WM
+  failure.
+
+  The source fix keeps `ResolvedThemePackage` inside `theme_package.spl` and
+  exports only snapshot, fingerprint, scalar material/color, token, and
+  canonical-id projections. Default-id, alias, and package caches now prevent
+  registry/package rereads after warmup and preserve targeted/global
+  invalidation. `UISession` reuses an installed generated snapshot only after
+  a non-empty scalar identity match, through an owner-local non-optional list
+  projection; mismatches load the tree's own canonical package snapshot.
+  BrowserBackend and the SimpleOS browser compositor now use the same
+  package-owned snapshot/scalar authority, and production callers no longer
+  invoke `load_theme_package` outside its owner module.
+
+  Focused session, package, render-snapshot, and Web authority specs were
+  updated; the Web authority manual now matches all six scenarios. Static
+  diff, generated-spec-layout, and direct-runtime guards pass, and independent
+  Terra plus highest-capability Sol reviews ACCEPT the final boundary. The one
+  bounded session-spec run timed out before assertions, while a corrected
+  self-hosted source check reached unrelated pre-existing compiler frontend
+  errors; therefore this checkpoint is source-fixed and reviewed, not an
+  executable native/host/QEMU PASS. The concurrent 59-line runtime-assignment
+  plan draft remains uncommitted and REJECTED pending its compiler-admission
+  Wave 0, browser ownership boundary, checker/manual links, and external-host
+  admission wording repairs.

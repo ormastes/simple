@@ -85,34 +85,76 @@ class ThemeValidationIssue:
     message: text
 
 var _theme_package_cache: Dict<text, ResolvedThemePackage> = {}
+var _theme_alias_cache: Dict<text, text> = {}
+var _default_theme_id_cache: text = ""
 
 fn default_theme_id() -> text:
+    if _default_theme_id_cache != "":
+        return _default_theme_id_cache
     val content = _read_if_exists(THEME_REGISTRY_PATH)
     val value = _root_value(content, "default_theme")
-    if value == "":
-        return "aetheric_dark"
-    value
+    _default_theme_id_cache = if value == "": "aetheric_dark" else: value
+    _default_theme_id_cache
 
 fn resolve_theme_alias(theme_id: text) -> text:
     val requested = if theme_id == "": default_theme_id() else: theme_id
+    if _theme_alias_cache.contains_key(requested):
+        return _theme_alias_cache[requested]
     val content = _read_if_exists(THEME_REGISTRY_PATH)
     val alias = _section_value(content, "aliases", requested)
-    if alias != "":
-        return alias
-    requested
+    val resolved = if alias == "": requested else: alias
+    _theme_alias_cache[requested] = resolved
+    resolved
 
 # Scalar accessors: project package fields inside the owning module so
 # callers never carry the ResolvedThemePackage aggregate across the native
 # call ABI, where it decodes as a nil receiver (cranelift lane, 2026-07-26;
 # same class the host_wm_theme_bootstrap comment records).
 fn theme_package_fingerprint(theme_id: text) -> text:
-    load_theme_package(theme_id).fingerprint
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.fingerprint
 
 fn theme_package_material_solid_fallback_rgba(theme_id: text) -> u32:
-    load_theme_package(theme_id).snapshot.material.solid_fallback_rgba
+    val snapshot: ThemeRenderSnapshot = theme_package_render_snapshot(theme_id)
+    snapshot.material.solid_fallback_rgba
 
 fn theme_package_material_text_rgba(theme_id: text) -> u32:
-    load_theme_package(theme_id).snapshot.material.text_rgba
+    val snapshot: ThemeRenderSnapshot = theme_package_render_snapshot(theme_id)
+    snapshot.material.text_rgba
+
+fn theme_package_color_bg(theme_id: text) -> u32:
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.colors.bg
+
+fn theme_package_color_fg(theme_id: text) -> u32:
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.colors.fg
+
+fn theme_package_color_accent(theme_id: text) -> u32:
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.colors.accent
+
+fn theme_package_color_panel(theme_id: text) -> u32:
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.colors.panel
+
+fn theme_package_color_border(theme_id: text) -> u32:
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.colors.border
+
+fn theme_package_color_button(theme_id: text) -> u32:
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.colors.button
+
+fn theme_package_color_status(theme_id: text) -> u32:
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.colors.status
+
+fn theme_package_render_snapshot(theme_id: text) -> ThemeRenderSnapshot:
+    # Keep the ResolvedThemePackage aggregate inside its owning module. Native
+    # callers consume only the canonical snapshot projection.
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.snapshot
 
 fn load_default_theme_package() -> ResolvedThemePackage:
     load_theme_package(default_theme_id())
@@ -220,29 +262,41 @@ fn load_theme_package(theme_id: text) -> ResolvedThemePackage:
     pkg
 
 fn resolved_theme_css(theme_id: text) -> text:
-    load_theme_package(theme_id).snapshot.composed_css
+    val snapshot: ThemeRenderSnapshot = theme_package_render_snapshot(theme_id)
+    snapshot.composed_css
 
 fn invalidate_theme_package_cache(theme_id: text):
+    val requested = if theme_id == "": default_theme_id() else: theme_id
     val resolved_id = resolve_theme_alias(theme_id)
     _theme_package_cache.remove(resolved_id)
+    _theme_alias_cache.remove(requested)
+    if theme_id == "":
+        _default_theme_id_cache = ""
 
 fn invalidate_all_theme_package_cache():
     _theme_package_cache = {}
+    _theme_alias_cache = {}
+    _default_theme_id_cache = ""
 
 fn theme_ui_theme(theme_id: text) -> UITheme:
-    load_theme_package(theme_id).ui_theme
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.ui_theme
 
 fn theme_design_tokens(theme_id: text) -> GlassDesignTokens:
-    load_theme_package(theme_id).tokens
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.tokens
 
 fn theme_numeric_colors(theme_id: text) -> ResolvedThemeColors:
-    load_theme_package(theme_id).colors
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.colors
 
 fn theme_glass_config(theme_id: text) -> ResolvedThemeGlassConfig:
-    load_theme_package(theme_id).glass_config
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.glass_config
 
 fn theme_icon_defaults(theme_id: text) -> Dict<text, ResolvedThemeIcon>:
-    load_theme_package(theme_id).icons
+    val package: ResolvedThemePackage = load_theme_package(theme_id)
+    package.icons
 
 fn validate_default_theme_package() -> [ThemeValidationIssue]:
     validate_theme_package(THEME_REGISTRY_PATH)
@@ -1015,7 +1069,10 @@ fn render_theme_validation_report(issues: [ThemeValidationIssue]) -> text:
     lines.join("\n")
 
 export ResolvedThemePackage, ResolvedThemeColors, ResolvedThemeGlassConfig, ResolvedWmWindowGradient, ResolvedThemeIcon, ThemeValidationIssue
-export default_theme_id, resolve_theme_alias, load_default_theme_package, load_theme_package
+export default_theme_id, resolve_theme_alias, load_default_theme_package, load_theme_package, theme_package_render_snapshot
+export theme_package_fingerprint, theme_package_material_solid_fallback_rgba, theme_package_material_text_rgba
+export theme_package_color_bg, theme_package_color_fg, theme_package_color_accent, theme_package_color_panel
+export theme_package_color_border, theme_package_color_button, theme_package_color_status
 export resolve_wm_window_gradient_for_css
 export invalidate_theme_package_cache, invalidate_all_theme_package_cache
 export resolved_theme_css, theme_ui_theme, theme_design_tokens, theme_numeric_colors, theme_glass_config, theme_icon_defaults
