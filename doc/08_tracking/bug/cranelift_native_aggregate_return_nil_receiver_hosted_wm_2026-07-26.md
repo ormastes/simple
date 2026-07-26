@@ -146,6 +146,17 @@ fix in 952d2ca34d7 — that fix does not cover this build). Builtin returns
 scan is now INLINED into `parse_html` (it was the only caller) so the event
 arrays are locals and never cross the ABI.
 
+**Rerun7 — sha256 fix VERIFIED in guest; next site symbolized and fixed:**
+provenance now passes (no content-provenance-rejected, digest receipts
+silent), frames compose, and the guest instead PAGE-FAULTS
+(`cr2=0x11000000a0`, garbage pointer + field offset) at symbolized
+`FontRasterizer.is_current -> cache_identity_snapshot` — a `(i64, text)`
+TUPLE return crossing the ABI on the glyph-paint path. Fixed by replacing
+the tuple with two scalar projections (`cache_identity_generation() -> i64`
++ guarded `cache_identity() -> text`, each carrying the full generation
+double-check inline) and converting all seven font_renderer consumers.
+Tuple returns join nested arrays and array globals in the lost-channel set.
+
 ## Compiler-side RCA (2026-07-26, freestanding array-loss investigation)
 
 Build pipeline for the guest: self-hosted binary, `native-build --backend

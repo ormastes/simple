@@ -446,29 +446,41 @@ impl FontRasterizer:
         var args: [i64] = []
         spl_wffi_call_i64(self.generation_fp, args, 0)
 
-    fn cache_identity_snapshot() -> (i64, text):
+    # Freestanding-safe scalar projections of the cache-identity snapshot.
+    # The old cache_identity_snapshot() -> (i64, text) tuple return crossed
+    # the native call ABI and arrived corrupt in the freestanding SimpleOS
+    # build: guest page fault inside is_current -> cache_identity_snapshot,
+    # cr2 = garbage pointer + field offset — the aggregate-return loss class
+    # of doc/08_tracking/bug/
+    # cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md.
+    # Each projection re-runs the full generation double-check inline, so a
+    # stale or reloading rasterizer yields 0 / "" exactly as the tuple did;
+    # callers that need pairing guarantees re-read the generation afterwards
+    # (the atlas producer already does).
+    fn cache_identity_generation() -> i64:
         if self.loaded_generation <= 0:
-            return (0, "")
+            return 0
         if self.lib_handle == 0:
             if self.selected_blob.len() == 0:
-                return (0, "")
-            return (self.loaded_generation, self.font_cache_identity)
+                return 0
+            return self.loaded_generation
         if self.generation_fp == 0:
-            return (0, "")
+            return 0
         val generation_before = self.generation()
         if generation_before != self.loaded_generation:
-            return (0, "")
-        val identity = self.font_cache_identity
+            return 0
         val generation_after = self.generation()
-        if generation_after != generation_before or generation_after != self.loaded_generation:
-            return (0, "")
-        (generation_after, identity)
+        if generation_after != generation_before:
+            return 0
+        generation_after
 
     fn is_current() -> bool:
-        self.cache_identity_snapshot().0 > 0
+        self.cache_identity_generation() > 0
 
     fn cache_identity() -> text:
-        self.cache_identity_snapshot().1
+        if self.cache_identity_generation() <= 0:
+            return ""
+        self.font_cache_identity
 
     fn rasterize_subpixel(codepoint: i64, size_px: i64) -> SubpixelGlyphBitmap?:
         if not self.is_current() or self.subpixel_raster_fp == 0 or self.subpixel_pixel_fp == 0:
