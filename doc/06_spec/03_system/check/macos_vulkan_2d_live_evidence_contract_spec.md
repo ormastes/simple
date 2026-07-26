@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 10 | 10 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -343,6 +343,16 @@ expect(fixture.contains("MetalBackend")).to_equal(false)
 
 </details>
 
+#### require Vulkan font device evidence and warm atlas reuse
+
+The Vulkan receipt fails closed unless the canonical Draw IR font batch reports
+a Vulkan target, a nonempty batch identity, true device execution/promotion/
+parity, device readback, equal positive device/oracle checksums, nonblank font
+pixels, and positive atlas upload count/bytes with a lowercase SHA-256 payload
+identity. A second identical Draw IR draw must have zero FontRenderer
+rasterizations, positive cache hits, and unchanged atlas upload count, bytes,
+batch identity, and payload identity.
+
 ## At a Glance
 
 | Field | Value |
@@ -350,7 +360,7 @@ expect(fixture.contains("MetalBackend")).to_equal(false)
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/check/macos_vulkan_2d_live_evidence_contract_spec.spl` |
-| Updated | 2026-07-25 |
+| Updated | 2026-07-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -362,8 +372,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 10 |
-| Active scenarios | 10 |
+| Total scenarios | 11 |
+| Active scenarios | 11 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

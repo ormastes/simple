@@ -93,6 +93,30 @@ fn dpi_points_to_pixels(points: i32, dpi: i32) -> i32:
     # This does not claim that the scene's other geometry is DPI-scaled.
     (points * dpi + 36) / 72
 
+fn lower_hex_sha256_valid(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    val allowed = "0123456789abcdef"
+    var i = 0
+    while i < value.len():
+        if not allowed.contains(value[i].to_text()):
+            return false
+        i = i + 1
+    true
+
+fn vulkan_font_device_evidence_valid(result: Engine2dDrawIrAdvResult) -> bool:
+    (result.font_execution_target == "vulkan" and
+     result.font_batch_identity != "" and
+     result.font_readback_source == "device_readback" and
+     result.font_device_checksum > 0 and
+     result.font_device_checksum == result.font_oracle_checksum and
+     result.font_readback_nonblank_pixels > 0 and
+     result.font_parity and result.font_device_executed and
+     result.font_promotion_ready and
+     result.font_atlas_upload_count > 0 and
+     result.font_atlas_upload_bytes > 0 and
+     lower_hex_sha256_valid(result.font_atlas_payload_sha256))
+
 fn write_runtime_receipt(path: text, backend: text, capture_path: text,
                          repo_revision: text, shared_scene_fingerprint: text,
                          source_revision: text, backend_handle: i64,
@@ -105,7 +129,8 @@ fn write_runtime_receipt(path: text, backend: text, capture_path: text,
                          font_target: text, font_attempts: text,
                          event_sequence: text, event_count: i64,
                          fixture: MacosGpu2dDrawIrEventFixture,
-                         draw_ir_result: Engine2dDrawIrAdvResult) -> bool:
+                         draw_ir_result: Engine2dDrawIrAdvResult,
+                         warm_draw_ir_result: Engine2dDrawIrAdvResult) -> bool:
     val mutation = fixture.mutation
     file_write(path,
         "gpu_2d_live_status=pass\n" +
@@ -136,6 +161,22 @@ fn write_runtime_receipt(path: text, backend: text, capture_path: text,
         "gpu_2d_live_font_pixel_size={font_pixel_size}\n" +
         "gpu_2d_live_font_execution_target={font_target}\n" +
         "gpu_2d_live_font_execution_attempts={font_attempts}\n" +
+        "gpu_2d_live_font_batch_identity={draw_ir_result.font_batch_identity}\n" +
+        "gpu_2d_live_font_readback_source={draw_ir_result.font_readback_source}\n" +
+        "gpu_2d_live_font_device_checksum={draw_ir_result.font_device_checksum}\n" +
+        "gpu_2d_live_font_oracle_checksum={draw_ir_result.font_oracle_checksum}\n" +
+        "gpu_2d_live_font_readback_nonblank_pixels={draw_ir_result.font_readback_nonblank_pixels}\n" +
+        "gpu_2d_live_font_parity={draw_ir_result.font_parity}\n" +
+        "gpu_2d_live_font_device_executed={draw_ir_result.font_device_executed}\n" +
+        "gpu_2d_live_font_promotion_ready={draw_ir_result.font_promotion_ready}\n" +
+        "gpu_2d_live_font_atlas_upload_count={draw_ir_result.font_atlas_upload_count}\n" +
+        "gpu_2d_live_font_atlas_upload_bytes={draw_ir_result.font_atlas_upload_bytes}\n" +
+        "gpu_2d_live_font_atlas_payload_sha256={draw_ir_result.font_atlas_payload_sha256}\n" +
+        "gpu_2d_live_font_warm_batch_identity={warm_draw_ir_result.font_batch_identity}\n" +
+        "gpu_2d_live_font_warm_atlas_upload_count={warm_draw_ir_result.font_atlas_upload_count}\n" +
+        "gpu_2d_live_font_warm_atlas_upload_bytes={warm_draw_ir_result.font_atlas_upload_bytes}\n" +
+        "gpu_2d_live_font_warm_atlas_payload_sha256={warm_draw_ir_result.font_atlas_payload_sha256}\n" +
+        "gpu_2d_live_font_warm_atlas_upload_delta={warm_draw_ir_result.font_atlas_upload_count - draw_ir_result.font_atlas_upload_count}\n" +
         "gpu_2d_live_event_sequence={event_sequence}\n" +
         "gpu_2d_live_event_count={event_count}\n" +
         "gpu_2d_live_event_backend={backend}\n" +
@@ -229,25 +270,11 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
     val physical_font_path = selected_font_asset_physical_path(font_candidate.local_path)
     val font_loaded = engine.load_font(physical_font_path)
     val font_pixel_size = dpi_points_to_pixels(LIVE_FONT_POINTS, LIVE_DPI)
-    val font_before = engine.font_cache_stats()
-    engine.draw_text(
-        360, 370, "Simple GPU Vector 300 DPI", 0xFFF3F6FCu32, font_pixel_size)
-    val font_cold = engine.font_cache_stats()
-    engine.draw_text(
-        360, 560, "Simple GPU Vector 300 DPI", 0xFFF3F6FCu32, font_pixel_size)
-    val font_warm = engine.font_cache_stats()
     val loaded_fonts = engine.fonts()
     val font_identity = loaded_fonts.current_font_identity()
     engine.install_font_renderer(loaded_fonts)
-    val font_target = engine.font_execution_target()
-    val font_attempts = engine.font_execution_attempts().join(",")
-    val cold_rasterizations = font_cold.rasterizations - font_before.rasterizations
-    val warm_rasterizations = font_warm.rasterizations - font_cold.rasterizations
-    val warm_hits = font_warm.hits - font_cold.hits
     if (not font_loaded or font_identity != expected_font_identity or
-        font_pixel_size <= 0 or cold_rasterizations <= 0 or
-        warm_rasterizations != 0 or warm_hits <= 0 or
-        font_target != backend or not font_attempts.contains(backend)):
+        font_pixel_size <= 0):
         engine.shutdown()
         return write_failure_receipt(
             receipt_path, backend, "font-validation-failed", 5, 5)
@@ -364,8 +391,18 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
     # Execute the exact same frozen DrawIrComposition on Vulkan and Metal via
     # the canonical Engine2D lowering. Unsupported commands are encoded as a
     # skipped count plus non-empty fallback reason by draw_ir_adv.
+    val font_before = engine.font_cache_stats()
     val draw_ir_result = engine2d_draw_ir_adv_composition(
         engine, fixture.composition, true)
+    val font_cold = engine.font_cache_stats()
+    val warm_draw_ir_result = engine2d_draw_ir_adv_composition(
+        engine, fixture.composition, true)
+    val font_warm = engine.font_cache_stats()
+    val font_target = engine.font_execution_target()
+    val font_attempts = engine.font_execution_attempts().join(",")
+    val cold_rasterizations = font_cold.rasterizations - font_before.rasterizations
+    val warm_rasterizations = font_warm.rasterizations - font_cold.rasterizations
+    val warm_hits = font_warm.hits - font_cold.hits
     val expected_draw_ir_commands = fixture.composition.batches[0].commands.len()
     if (draw_ir_result.readback_source != "device_readback" or
         draw_ir_result.backend_handle != backend_handle or
@@ -379,6 +416,33 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
         engine.shutdown()
         return write_failure_receipt(
             receipt_path, backend, "shared-draw-ir-device-render-failed", 13, 13)
+    if (warm_draw_ir_result.readback_source != "device_readback" or
+        warm_draw_ir_result.backend_handle != backend_handle or
+        warm_draw_ir_result.readback_checksum <= 0 or
+        warm_draw_ir_result.pixels.len() != (live_width * live_height).to_i64() or
+        warm_draw_ir_result.rendered_command_count != expected_draw_ir_commands or
+        warm_draw_ir_result.skipped_command_count != 0 or
+        warm_draw_ir_result.fallback_required or
+        warm_draw_ir_result.fallback_reason != "" or
+        cold_rasterizations <= 0 or warm_rasterizations != 0 or warm_hits <= 0 or
+        font_target != backend or not font_attempts.contains(backend)):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "shared-draw-ir-warm-font-render-failed", 13, 13)
+    if (backend == "vulkan" and
+        (not vulkan_font_device_evidence_valid(draw_ir_result) or
+         not vulkan_font_device_evidence_valid(warm_draw_ir_result) or
+         warm_draw_ir_result.font_batch_identity != draw_ir_result.font_batch_identity or
+         warm_draw_ir_result.font_atlas_upload_count != draw_ir_result.font_atlas_upload_count or
+         warm_draw_ir_result.font_atlas_upload_bytes != draw_ir_result.font_atlas_upload_bytes or
+         warm_draw_ir_result.font_atlas_payload_sha256 != draw_ir_result.font_atlas_payload_sha256)):
+        winit_window_free(win)
+        winit_loop_free(lp)
+        engine.shutdown()
+        return write_failure_receipt(
+            receipt_path, backend, "vulkan-font-device-evidence-failed", 13, 13)
 
     if not winit_present_rgba(
         win, PREVIEW_WIDTH.to_i64(), PREVIEW_HEIGHT.to_i64(), event_preview(true)):
@@ -428,7 +492,7 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
         initial_checksum, interaction_readback.checksum, bounds, live_width, live_height,
         font_loaded, expected_font_identity, font_identity, cold_rasterizations,
         warm_rasterizations, warm_hits, font_pixel_size, font_target, font_attempts,
-        event_sequence, event_count, fixture, draw_ir_result):
+        event_sequence, event_count, fixture, draw_ir_result, warm_draw_ir_result):
         winit_window_free(win)
         winit_loop_free(lp)
         engine.shutdown()

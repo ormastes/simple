@@ -67,6 +67,13 @@ positive_integer() {
     esac
 }
 
+sha256_valid() {
+    case "${1:-}" in
+        *[!0-9a-f]*|"") return 1 ;;
+        *) [ "${#1}" -eq 64 ] ;;
+    esac
+}
+
 pid_matches_executable() {
     target_pid="$1"
     target_executable="$2"
@@ -537,6 +544,66 @@ printf '%s' "$font_attempts" | grep -Fq "$BACKEND" ||
     fail "vector-font-backend-attempt-missing"
 font_cold="$(value_of gpu_2d_live_font_cold_rasterizations "$RECEIPT")"
 font_hits="$(value_of gpu_2d_live_font_warm_hits "$RECEIPT")"
+font_batch_identity=""
+font_readback_source=""
+font_device_checksum=""
+font_oracle_checksum=""
+font_nonblank_pixels=""
+font_atlas_upload_count=""
+font_atlas_upload_bytes=""
+font_atlas_payload_sha256=""
+font_warm_batch_identity=""
+font_warm_atlas_upload_count=""
+font_warm_atlas_upload_bytes=""
+font_warm_atlas_payload_sha256=""
+font_warm_atlas_upload_delta=""
+if [ "$BACKEND" = vulkan ]; then
+    font_batch_identity="$(value_of gpu_2d_live_font_batch_identity "$RECEIPT")"
+    font_readback_source="$(value_of gpu_2d_live_font_readback_source "$RECEIPT")"
+    font_device_checksum="$(value_of gpu_2d_live_font_device_checksum "$RECEIPT")"
+    font_oracle_checksum="$(value_of gpu_2d_live_font_oracle_checksum "$RECEIPT")"
+    font_nonblank_pixels="$(value_of gpu_2d_live_font_readback_nonblank_pixels "$RECEIPT")"
+    font_atlas_upload_count="$(value_of gpu_2d_live_font_atlas_upload_count "$RECEIPT")"
+    font_atlas_upload_bytes="$(value_of gpu_2d_live_font_atlas_upload_bytes "$RECEIPT")"
+    font_atlas_payload_sha256="$(value_of gpu_2d_live_font_atlas_payload_sha256 "$RECEIPT")"
+    font_warm_batch_identity="$(value_of gpu_2d_live_font_warm_batch_identity "$RECEIPT")"
+    font_warm_atlas_upload_count="$(value_of gpu_2d_live_font_warm_atlas_upload_count "$RECEIPT")"
+    font_warm_atlas_upload_bytes="$(value_of gpu_2d_live_font_warm_atlas_upload_bytes "$RECEIPT")"
+    font_warm_atlas_payload_sha256="$(value_of gpu_2d_live_font_warm_atlas_payload_sha256 "$RECEIPT")"
+    font_warm_atlas_upload_delta="$(value_of gpu_2d_live_font_warm_atlas_upload_delta "$RECEIPT")"
+    [ "$(value_of gpu_2d_live_font_execution_target "$RECEIPT")" = vulkan ] ||
+        fail "vulkan-font-target-mismatch"
+    [ -n "$font_batch_identity" ] || fail "vulkan-font-batch-identity-missing"
+    [ "$font_readback_source" = device_readback ] ||
+        fail "vulkan-font-device-readback-missing"
+    positive_integer "$font_device_checksum" ||
+        fail "vulkan-font-device-checksum-missing"
+    [ "$font_device_checksum" = "$font_oracle_checksum" ] ||
+        fail "vulkan-font-oracle-parity-mismatch"
+    positive_integer "$font_nonblank_pixels" ||
+        fail "vulkan-font-nonblank-pixels-missing"
+    [ "$(value_of gpu_2d_live_font_parity "$RECEIPT")" = true ] ||
+        fail "vulkan-font-parity-missing"
+    [ "$(value_of gpu_2d_live_font_device_executed "$RECEIPT")" = true ] ||
+        fail "vulkan-font-device-execution-missing"
+    [ "$(value_of gpu_2d_live_font_promotion_ready "$RECEIPT")" = true ] ||
+        fail "vulkan-font-promotion-missing"
+    positive_integer "$font_atlas_upload_count" ||
+        fail "vulkan-font-atlas-upload-count-missing"
+    positive_integer "$font_atlas_upload_bytes" ||
+        fail "vulkan-font-atlas-upload-bytes-missing"
+    sha256_valid "$font_atlas_payload_sha256" ||
+        fail "vulkan-font-atlas-payload-sha256-invalid"
+    [ "$font_warm_batch_identity" = "$font_batch_identity" ] ||
+        fail "vulkan-font-warm-batch-identity-mismatch"
+    [ "$font_warm_atlas_upload_count" = "$font_atlas_upload_count" ] &&
+        [ "$font_warm_atlas_upload_delta" = 0 ] ||
+        fail "vulkan-font-warm-atlas-reuploaded"
+    [ "$font_warm_atlas_upload_bytes" = "$font_atlas_upload_bytes" ] ||
+        fail "vulkan-font-warm-atlas-bytes-changed"
+    [ "$font_warm_atlas_payload_sha256" = "$font_atlas_payload_sha256" ] ||
+        fail "vulkan-font-warm-atlas-payload-changed"
+fi
 backend_handle="$(value_of gpu_2d_live_backend_handle "$RECEIPT")"
 initial_checksum="$(value_of gpu_2d_live_initial_checksum "$RECEIPT")"
 interaction_checksum="$(value_of gpu_2d_live_interaction_checksum "$RECEIPT")"
@@ -638,6 +705,24 @@ png_dpi_height="$(sips -g dpiHeight "$CAPTURE_PNG" |
     echo "${PREFIX}_font_dpi=$font_dpi"
     echo "${PREFIX}_font_pixel_size=$font_pixel_size"
     echo "${PREFIX}_font_execution_target=$BACKEND"
+    if [ "$BACKEND" = vulkan ]; then
+        echo "${PREFIX}_font_batch_identity=$font_batch_identity"
+        echo "${PREFIX}_font_readback_source=$font_readback_source"
+        echo "${PREFIX}_font_device_checksum=$font_device_checksum"
+        echo "${PREFIX}_font_oracle_checksum=$font_oracle_checksum"
+        echo "${PREFIX}_font_readback_nonblank_pixels=$font_nonblank_pixels"
+        echo "${PREFIX}_font_parity=true"
+        echo "${PREFIX}_font_device_executed=true"
+        echo "${PREFIX}_font_promotion_ready=true"
+        echo "${PREFIX}_font_atlas_upload_count=$font_atlas_upload_count"
+        echo "${PREFIX}_font_atlas_upload_bytes=$font_atlas_upload_bytes"
+        echo "${PREFIX}_font_atlas_payload_sha256=$font_atlas_payload_sha256"
+        echo "${PREFIX}_font_warm_batch_identity=$font_warm_batch_identity"
+        echo "${PREFIX}_font_warm_atlas_upload_count=$font_warm_atlas_upload_count"
+        echo "${PREFIX}_font_warm_atlas_upload_bytes=$font_warm_atlas_upload_bytes"
+        echo "${PREFIX}_font_warm_atlas_payload_sha256=$font_warm_atlas_payload_sha256"
+        echo "${PREFIX}_font_warm_atlas_upload_delta=$font_warm_atlas_upload_delta"
+    fi
     echo "${PREFIX}_source_revision=$source_revision"
     echo "${PREFIX}_pid=$app_pid"
     echo "${PREFIX}_executable=$app_executable"
