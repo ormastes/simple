@@ -1,14 +1,16 @@
 # Shared-Font Stage 4 Stale Compiler Backfill — TLDR
 
-Three bounded attempts produced no admissible CLI. The fail-closed bootstrap
-requires one fresh `--full-bootstrap --full-cli` run before font evidence.
+Three bounded continuation attempts admitted Stage 2/3 but produced no Stage 4
+CLI. The fail-closed bootstrap requires one fresh cache-preserving
+`--full-bootstrap --full-cli` run before font evidence.
 
 ## Core Shape
 
-- deployed CLI is Rust-built and rejected by essential-tools admission;
-- isolated provenance now passes after removing a worktree-only symlink input;
-- final attempt stopped before Stage 2 because stale backfill requires `--full-bootstrap`;
-- do not use the Rust seed, stale CLI, or a fourth unchanged retry as evidence.
+- directory symlink source snapshots now pass with regression coverage;
+- `pub mod` now uses the shared module parser path with a focused spec;
+- the final Stage 4 grammar blocker is corrected in canonical multiline form;
+- retained Stage 2/3 and bootstrap caches are ready for a fresh continuation;
+- do not use the Rust seed or stale CLI as evidence.
 
 ## Open Next
 
