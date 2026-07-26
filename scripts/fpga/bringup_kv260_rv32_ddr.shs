@@ -11,13 +11,21 @@
 #
 # Sequence (order matters -- the core must never fetch from uninitialised DDR):
 #   1. connect, confirm the JTAG chain and xck26 IDCODE
-#   2. halt APU so nothing else writes our DDR window
+#   2. halt APU so nothing else writes our DDR window, then run the FULL psu_init
 #   3. program the PL bitstream, remove PS-PL isolation
 #   4. confirm the control slave MAGIC, and that the core is still in reset
 #   5. load kernel -> DDR 0x10000000, FAT32 ramdisk -> DDR 0x18000000
 #      (the adapter remaps core 0x80000000 -> 0x10000000, 0x88000000 -> 0x18000000)
 #   6. release the core (CTRL bit0)
 #   7. poll UART_COUNT and dump the capture buffer
+#
+# The FULL psu_init in step 2 is MANDATORY, not optional. Skipping it (and doing
+# only psu_ps_pl_isolation_removal) leaves the PS-PL interfaces and the
+# AXI-HP/HPM ports unconfigured: the control slave then reads back 0x00000000
+# for every register except the single-bit CTRL flip-flop, and the soft-core
+# never completes its first instruction fetch. With psu_init the SAME bitstream
+# reports CTRL_MAGIC=0x52563332 and the core executes. This cost a long debug
+# session -- do not "optimise" it away.
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -90,6 +98,17 @@ puts "BOARD_JTAG_CHAIN_END"
 catch { targets -set -nocase -filter {name =~ "*Cortex-A53 #0*"} ; stop ; puts "APU_HALTED" } e
 if {[info exists e] && \$e ne ""} { puts "APU_HALT_NOTE:\$e" }
 
+# ---- 2b. FULL psu_init: configures PS clocks and the PS-PL AXI ports ----
+# Without this the PL is configured but unreachable/dead (see header note).
+targets -set -nocase -filter {name =~ "*PSU*"}
+if {\$psu_init ne "" && [file exists \$psu_init]} {
+  source \$psu_init
+  if {[catch { psu_init } e]} { puts "PSU_INIT_ERR:\$e" } else { puts "PSU_INIT_DONE" }
+  after 1000
+} else {
+  puts "PSU_INIT_MISSING -- bring-up will very likely fail"
+}
+
 # ---- 3. program the PL -------------------------------------------------
 targets -set -nocase -filter {name =~ "*PL*"}
 puts "PROGRAMMING_BITSTREAM \$bit"
@@ -108,14 +127,14 @@ if {\$psu_init ne "" && [file exists \$psu_init]} {
 after 500
 
 # ---- 4. control slave reachable, core still held in reset --------------
-if {[catch { set magic [lindex [mrd -force -value \$ctrl+0x24 1] 0] } e]} {
+if {[catch { set magic [lindex [mrd -force -value [expr {\$ctrl + 0x24}] 1] 0] } e]} {
   puts "CTRL_READ_FAIL:\$e"; exit 1
 }
 puts [format "CTRL_MAGIC=0x%08X" \$magic]
 if {\$magic != 0x52563332} {
   puts "CTRL_MAGIC_MISMATCH -- PL not configured or AXI path blocked"; exit 1
 }
-set prerun [lindex [mrd -force -value \$ctrl+0x1C 1] 0]
+set prerun [lindex [mrd -force -value [expr {\$ctrl + 0x1C}] 1] 0]
 puts "PRERUN_AXI_READS=\$prerun"
 if {\$prerun != 0} { puts "WARN_CORE_ALREADY_RAN" }
 
@@ -138,19 +157,19 @@ set deadline [expr {[clock seconds] + \$poll_seconds}]
 set last -1
 set stable 0
 while {[clock seconds] < \$deadline} {
-  set n [lindex [mrd -force -value \$ctrl+0x04 1] 0]
+  set n [lindex [mrd -force -value [expr {\$ctrl + 0x04}] 1] 0]
   if {\$n == \$last} { incr stable } else { set stable 0 ; set last \$n }
   if {\$stable > 8 && \$n > 0} { break }
   after 500
 }
 set count \$last
 puts "UART_BYTE_COUNT=\$count"
-puts [format "FINAL_PC=0x%08X"    [lindex [mrd -force -value \$ctrl+0x08 1] 0]]
-puts [format "FINAL_INS=0x%08X"   [lindex [mrd -force -value \$ctrl+0x0C 1] 0]]
-puts [format "FINAL_A0=0x%08X"    [lindex [mrd -force -value \$ctrl+0x10 1] 0]]
-puts [format "FINAL_SP=0x%08X"    [lindex [mrd -force -value \$ctrl+0x14 1] 0]]
-puts [format "AXI_READS=%d"       [lindex [mrd -force -value \$ctrl+0x1C 1] 0]]
-puts [format "AXI_WRITES=%d"      [lindex [mrd -force -value \$ctrl+0x20 1] 0]]
+puts [format "FINAL_PC=0x%08X"    [lindex [mrd -force -value [expr {\$ctrl + 0x08}] 1] 0]]
+puts [format "FINAL_INS=0x%08X"   [lindex [mrd -force -value [expr {\$ctrl + 0x0C}] 1] 0]]
+puts [format "FINAL_A0=0x%08X"    [lindex [mrd -force -value [expr {\$ctrl + 0x10}] 1] 0]]
+puts [format "FINAL_SP=0x%08X"    [lindex [mrd -force -value [expr {\$ctrl + 0x14}] 1] 0]]
+puts [format "AXI_READS=%d"       [lindex [mrd -force -value [expr {\$ctrl + 0x1C}] 1] 0]]
+puts [format "AXI_WRITES=%d"      [lindex [mrd -force -value [expr {\$ctrl + 0x20}] 1] 0]]
 
 if {\$count > 0} {
   set words [expr {(\$count + 3) / 4}]
