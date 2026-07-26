@@ -580,3 +580,15 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   `4e294c95d9`; its focused validator passes 27/27, but AC-2, AC-3, AC-5,
   AC-7, AC-8, and AC-10 still lack current live host/QEMU/device evidence and
   the goal remains active.
+- continuation-2026-07-26-aetheric-proof-readiness: A sparse linked worktree
+  at `92ae794ba7` audited the exact retained prerequisite chain for the
+  canonical `aetheric-host-web-gui-v1` envelope and its pinned browser-event
+  consumer. The eligible `277f8ac9...` binary passed the focused admission
+  source spec (4/4), and a no-proof admission check failed closed with
+  `missing-production-proof` before any native or Electron command. No proof,
+  current producer binaries, generated HTML/pixels, capture/observation/UI
+  history, or font receipt exists. Sparse-local provider paths are absent, but
+  the shared-root explicit provider artifacts and required symbols are present;
+  Electron is not installed locally. The next action is a separately authorized
+  live producer cycle with the exact `277f` binary and explicit provider paths;
+  no browser, GUI, capture, QEMU, or false PASS was added.
