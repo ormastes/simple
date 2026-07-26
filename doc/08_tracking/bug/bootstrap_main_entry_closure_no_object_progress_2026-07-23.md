@@ -129,3 +129,23 @@ Canonical `pub mod` declarations were restored and no bridge artifact exists.
 The three-cycle cap is reached. Resume by isolating the expression in
 `run_compile_bootstrap` that trips the old HIR lowerer; retain native arenas,
 the current cache, and `SIMPLE_NO_STUB_FALLBACK=1`.
+
+## 2026-07-26 aggregate bridge isolation
+
+The next bounded session tested three non-equivalent bridge entries:
+
+1. Replacing only `run_compile_bootstrap` let that function and `main` finish
+   HIR, then the general `run_native_build_bootstrap` body segfaulted.
+2. A fixed-purpose entry calling `aot_native_file_with_backend` finished its
+   own HIR, then segfaulted at the helper's initial mutate-after-default
+   `CompileOptions` construction.
+3. Inlining a complete immutable `CompileOptions(...)` literal removed that
+   helper and segfaulted while lowering the entry's literal itself.
+
+All runs used native arenas, the retained cache, and
+`SIMPLE_NO_STUB_FALLBACK=1`; all parsed the closure and reached real HIR.
+Canonical `bootstrap_main.spl` and public module declarations were restored,
+and no bridge artifact exists. The failure is now classified as old-generation
+bootstrap aggregate HIR transport, not CLI dispatch. Do not run another bridge
+generation until a focused aggregate-construction regression and source repair
+exist.
