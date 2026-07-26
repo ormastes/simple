@@ -49,6 +49,11 @@ count as hardware passes.
   families plus Vulkan. Relative, absolute, and direct-environment runtime-path
   attempts all remain forced onto `core-c-bootstrap` by the cached Stage3, so
   the archive is not admitted and no hardware run is claimed.
+- An isolated Vulkan/CUDA `simple-runtime` provider plus the emitted
+  184-module Simple archive links without stubs. Hardware initialization reaches
+  `Initialized` with compute and graphics enabled on the NVIDIA ICD, but cached
+  Stage3 returns false for both method and direct comparisons against that enum.
+  See `doc/08_tracking/bug/native_backend_probe_enum_comparison_2026-07-26.md`.
 - Cached-native Metal source emission succeeds with four hash markers. Live
   Metal submit/readback remains blocked on a prepared macOS host; resume with
   `GPU_2D_LIVE_BACKEND=metal sh scripts/check/check-macos-gpu-2d-live-evidence.shs`.

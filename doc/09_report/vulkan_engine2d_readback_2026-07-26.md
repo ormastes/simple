@@ -1,7 +1,7 @@
 # Vulkan Engine2D Readback Evidence
 
 - status: blocked
-- reason: cached-stage3-forces-core-c-runtime
+- reason: cached-stage3-probe-status-compare
 - host: Linux x86_64
 - compiler: `build/gpu-goal/current/stage3/x86_64-unknown-linux-gnu/simple`
 - compiler version: `simple-bootstrap 1.0.0-beta`
@@ -34,10 +34,25 @@ archive by relative CLI path, absolute CLI path, and direct
 `SIMPLE_RUNTIME_PATH`. The cached Stage3 still selected `core-c-bootstrap` and
 did not admit the archive, so no provider-complete executable was produced.
 
+An isolated incremental `simple-runtime` build with `vulkan,cuda` produced a
+non-stub Vulkan provider. Manual no-stub linking with the emitted 184-module
+Simple archive succeeded. On the NVIDIA ICD, the native probe then reported:
+
+```text
+status=Initialized
+compute=true
+graphics=true
+reason=Vulkan initialized
+```
+
+The cached Stage3 miscompares that returned `BackendStatus`: both
+`probe.is_ok()` and `probe.status == BackendStatus.Initialized` evaluate false
+while `backend_status_text(probe.status)` prints `Initialized`. The evidence
+therefore stops before present/readback and does not claim a pass.
+
 ## Resume
 
-Make the source-matched CLI admit the existing provider-complete archive, or
-provide an explicit no-stub Vulkan runtime lane, then run:
+Use a source-matched CLI with correct cross-module enum comparison, then run:
 
 ```sh
 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json \
