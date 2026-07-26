@@ -112,6 +112,9 @@ src/lib/gc_async_mut/gpu/engine2d/directx_backend.spl
 ### Plans
 - **Full GPU Render Offload Strategy:** `doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md`
 - **Vulkan-Backed Web/GUI RenderDoc:** `doc/03_plan/agent_tasks/vulkan_backed_web_gui_renderdoc_parallel_plan.md`
+- **ProcessingIR Backend Fault Matrix:** `doc/03_plan/sys_test/gpu_backend_failure_injection_matrix.md`
+- **Three-Backend Fault Contract Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_ir_fault_source_contract_spec.md`
+- **Prepared macOS Metal Fault Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/macos_metal_processing_ir_failure_injection_spec.md`
 
 ### Bug Tracking (Critical Blockers)
 - **RenderDoc Blockers:** `doc/08_tracking/bug/gui_web_2d_vulkan_renderdoc_blockers_2026-06-23.md`

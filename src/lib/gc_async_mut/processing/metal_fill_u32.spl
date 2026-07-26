@@ -2,6 +2,7 @@
 
 use std.common.processing.processing_ir.{ProcessingIr, processing_ir_validate}
 use std.common.hash.djb2.{djb2_hash_text}
+use std.gc_async_mut.processing.fault_injection.{processing_ir_fault_reason}
 use std.gc_async_mut.io.metal_sffi.{
     metal_device_info, metal_sffi_init, metal_sffi_is_available, metal_sffi_device_count,
     metal_sffi_create_device, metal_sffi_destroy_device,
@@ -71,6 +72,9 @@ fn processing_ir_execute_metal(ir: ProcessingIr) -> ProcessingMetalResult:
     val valid = processing_ir_validate(ir)
     if not valid.valid:
         return _processing_metal_failure(valid.reason)
+    val init_fault = processing_ir_fault_reason("metal", "init")
+    if init_fault != "":
+        return _processing_metal_failure(init_fault)
     if not metal_sffi_is_available() or not metal_sffi_init() or metal_sffi_device_count() <= 0:
         return _processing_metal_failure(_processing_metal_last_error("metal-init-failed"))
 
@@ -108,17 +112,36 @@ fn processing_ir_execute_metal(ir: ProcessingIr) -> ProcessingMetalResult:
         return _processing_metal_failure(reason)
 
     val groups = (ir.element_count + PROCESSING_METAL_BLOCK_SIZE - 1) / PROCESSING_METAL_BLOCK_SIZE
+    val submit_fault = processing_ir_fault_reason("metal", "submit")
+    if submit_fault != "":
+        _processing_metal_cleanup(device, queue, shader, pipeline, output, dummy, host, byte_count)
+        return _processing_metal_failure(submit_fault)
     val dispatched = metal_sffi_run_compute_frame(queue, pipeline, output, dummy, _processing_metal_params(ir), groups, 1, 1, PROCESSING_METAL_BLOCK_SIZE, 1, 1)
-    if not dispatched or metal_buffer_download_ptr(host, output, byte_count) != 1:
-        val reason = _processing_metal_last_error(if dispatched: "metal-readback-failed" else: "metal-dispatch-failed")
+    if not dispatched:
+        val reason = _processing_metal_last_error("metal-dispatch-failed")
+        _processing_metal_cleanup(device, queue, shader, pipeline, output, dummy, host, byte_count)
+        return _processing_metal_failure(reason)
+    val readback_fault = processing_ir_fault_reason("metal", "readback")
+    if readback_fault != "":
+        _processing_metal_cleanup(device, queue, shader, pipeline, output, dummy, host, byte_count)
+        return _processing_metal_failure(readback_fault)
+    val copied = metal_buffer_download_ptr(host, output, byte_count) == 1
+    if not copied:
+        val reason = _processing_metal_last_error("metal-readback-failed")
         _processing_metal_cleanup(device, queue, shader, pipeline, output, dummy, host, byte_count)
         return _processing_metal_failure(reason)
 
     val values = metal_u32s_from_ptr(host, ir.element_count)
-    val handle = output
-    _processing_metal_cleanup(device, queue, shader, pipeline, output, dummy, host, byte_count)
     if values.len().to_i64() != ir.element_count:
+        _processing_metal_cleanup(device, queue, shader, pipeline, output, dummy, host, byte_count)
         return _processing_metal_failure("metal-readback-size-mismatch")
+    val mismatch_fault = processing_ir_fault_reason("metal", "mismatch")
+    if mismatch_fault != "":
+        _processing_metal_cleanup(device, queue, shader, pipeline, output, dummy, host, byte_count)
+        return _processing_metal_failure(mismatch_fault)
+    # The receipt token is non-owning; output is released before returning.
+    val handle = identity
+    _processing_metal_cleanup(device, queue, shader, pipeline, output, dummy, host, byte_count)
     ProcessingMetalResult(completed: true, reason: "ok", values: values, backend_handle: handle, device_identity: identity)
 
 export ProcessingMetalResult, processing_metal_device_identity, processing_ir_execute_metal

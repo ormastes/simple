@@ -18,6 +18,8 @@ real batch and receipt checkers. It does not claim a live GPU fault run.
 
 A requested CUDA/Vulkan/Metal batch must never receive `status=pass` with
 `backend=cpu`, `readback_source=cpu_reference`, or a missing native handle.
+The positive native handle field is a non-owning execution-provenance token;
+it must not expose a buffer or device resource after executor cleanup.
 The requested backend is `batch.backend`; the actual backend is
 `receipt.backend`. A fallback is therefore visible rather than silently
 reported as accelerated execution.
@@ -73,9 +75,9 @@ future adapter hook cannot silently cover only one implementation.
 | Fault | Concrete injection point | Status and receipt fields | Fail-closed assertion | State |
 |---|---|---|---|---|
 | Unavailable | `processing_ir_execute_metal`: `metal_sffi_is_available`, `metal_sffi_init`, or `metal_sffi_device_count`; render creation is the platform Engine2D owner | `unsupported`; `backend=unavailable`; `reason=backend-unavailable`; handle `0`; `readback_source=none`; zero output | Linux/unavailable output is not a Metal pass; reject any pass without Metal handle, identity, and device readback | `implemented` branches; `checker-only` injection; live runtime `TODO`, postponed to prepared macOS |
-| Init/submit | Init: `metal_sffi_create_device`, queue, shader, pipeline, or allocation; submit: `metal_sffi_run_compute_frame` | `fail`; `backend=metal`; non-empty init/submit reason; handle `0`; no device readback | Accept only as failed; assert no pass, positive provenance, or device readback is emitted after the injected error | Init branches `implemented`; submit failure is present but not externally injectable; `checker-only` submit injection; `TODO` live hook, macOS |
-| Readback | `metal_buffer_download_ptr` and `values.len() == element_count`; render `read_pixels_with_source` | `fail`; `reason=readback-failed` or `readback-size-mismatch`; handle `0`; zero output | Reject short readback, absent checksum, absent identity, or any source other than `device_readback` | `implemented` branches; `TODO` deterministic readback-only hook, macOS |
-| Mismatch | Host `processing_ir_outputs_equal(values, oracle)` / Draw IR canonical checksum; synthetic checker `mismatch` receipt | `fail`; `backend=metal`; `reason=checksum-mismatch`; handle `0`; no device-backed pass | Assert failed status and exact reason; reject CPU masquerading and altered output checksum | Comparison/checker injection `implemented`; live provider corruption hook `TODO`, macOS |
+| Init/submit | Init: `metal_sffi_create_device`, queue, shader, pipeline, or allocation; submit: `metal_sffi_run_compute_frame` | `fail`; `backend=metal`; non-empty init/submit reason; handle `0`; no device readback | Accept only as failed; assert no pass, positive provenance, or device readback is emitted after the injected error | Guarded init/submit seams implemented; prepared-macOS live run pending |
+| Readback | `metal_buffer_download_ptr` and `values.len() == element_count`; render `read_pixels_with_source` | `fail`; `reason=readback-failed` or `readback-size-mismatch`; handle `0`; zero output | Reject short readback, absent checksum, absent identity, or any source other than `device_readback` | Guarded readback seam implemented after successful dispatch; prepared-macOS live run pending |
+| Mismatch | Host `processing_ir_outputs_equal(values, oracle)` / Draw IR canonical checksum; synthetic checker `mismatch` receipt | `fail`; `backend=metal`; `reason=checksum-mismatch`; handle `0`; no device-backed pass | Assert failed status and exact reason; reject CPU masquerading and altered output checksum | Guarded mismatch seam implemented after valid readback size; prepared-macOS live run pending |
 | Explicit fallback | No automatic Metal-to-CPU path in the SimpleOS host; checker fallback constructor | `fallback`; `backend=cpu`; `reason` non-empty; handle `0`; `readback_source=cpu_reference` | Reject `status=pass` with CPU provenance; fallback is valid only with explicit policy and correlated IDs | Checker-only `implemented`; live policy hook `TODO`, macOS |
 
 Metal rows above are deliberately not closed by Linux interpreter or
@@ -138,19 +140,31 @@ sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
 Until a macOS host runs these, Metal live status is postponed; Linux
 unavailability is not a Metal pass.
 
+### Prepared macOS ProcessingIR Resume
+
+- Prerequisites: current pure-Simple runtime with Metal SFFI, an available
+  Metal device, Xcode command-line tools, and `SIMPLE_LIB=src`.
+- Command:
+  `mkdir -p build/simpleos_gpu_host && SIMPLE_LIB=src bin/simple test test/03_system/app/simpleos_gpu_host/macos_metal_processing_ir_failure_injection_spec.spl --mode=interpreter > build/simpleos_gpu_host/gpu_backend_failure_injection_macos.log 2>&1`.
+- Retain:
+  `build/simpleos_gpu_host/gpu_backend_failure_injection_macos.log`.
+- Owner: prepared macOS host operator.
+- Final reviewer: high-capability model comparing all four Metal phase results
+  with the disabled-default case and zero failure handles/identities.
+
 ## Open Hooks
 
 The following are the exact remaining implementation gaps. They are not
 covered by the checker-level spec and must not be marked complete from
 synthetic receipts:
 
-1. Extend the disabled-by-default executor seam to Metal and unavailable
-   injection. CUDA and Vulkan now implement `init`, `submit`, `readback`, and
-   `mismatch`; Vulkan live completion waits for an updated runtime artifact.
-2. Preserve the failure phase in the result/receipt. In particular, split
-   CUDA `cuda-dispatch-or-readback-failed` and Metal
-   `metal-readback-failed`/`metal-dispatch-failed` at the injection boundary,
-   and map host `_finish` fields deterministically.
+1. Add unavailable injection if deterministic unavailable-path coverage is
+   still needed. CUDA, Vulkan, and Metal implement `init`, `submit`,
+   `readback`, and `mismatch`; Vulkan waits for an updated runtime artifact
+   and Metal waits for the prepared macOS live run.
+2. Preserve the failure phase in the result/receipt. Split CUDA
+   `cuda-dispatch-or-readback-failed` at the injection boundary and map host
+   `_finish` fields deterministically.
 3. Add a live explicit-fallback policy input to the host only after the
    requested GPU failure is observed; never infer fallback from a missing
    handle. The fallback receipt must carry `cpu_reference`, zero handle, and
