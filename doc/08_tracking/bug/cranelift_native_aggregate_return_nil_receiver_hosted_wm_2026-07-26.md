@@ -169,6 +169,20 @@ Option-payload-loss shape). Fixed: all three loaders return plain
 (`FontRasterizer.invalid()`), `_try_install_ttf` takes a plain param, all
 callers (incl. shared_font_manifest_spec) test `loaded_generation > 0`.
 
+**Rerun9 — fault storm reduced to ONE fault; chained-dispatch class
+isolated:** the loader/owner conversions eliminated all prior faults. The
+single remaining fault: `FontRenderer.has_sffi_ttf` on cr2=0x0, called
+from `Engine2D.draw_text` — the one converted site written as a CHAINED
+call on the helper's return (`engine2d_font_owner_get_or_create(owner)
+.has_sffi_ttf()`), while the two sites that bound a typed intermediate
+`val` survived. That is a clean controlled comparison: chained method
+dispatch on an erased function-return receiver null-masks; a typed
+intermediate binding does not (matches the documented language-rule
+workaround and the hosted `char_code_at().to_i32()` → `Px.to_i32`
+misroute). Both fixed: draw_text now binds `present_fonts`, and
+`_engine2d_draw_ir_nth_int` stays entirely in i64 (no `.to_i32()`
+dispatch).
+
 **Hosted-WM Xvfb retest (2026-07-26, current main): frontier MOVED past
 `request_to_pixel_artifact`.** Fresh clean-cache build (265 compiled / 0
 cached), same progression (theme OK → windows-ready count=5), first frame
