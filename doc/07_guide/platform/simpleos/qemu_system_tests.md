@@ -71,6 +71,33 @@ qemu-system-riscv64 \
   -kernel build/os/simpleos_riscv64_smf_fs.elf
 ```
 
+## Visible-display UEFI boot ladder
+
+`scripts/check/check-simpleos-wm-visible-display-evidence.shs` keeps QEMU alive
+from launch through renderer-marker readiness and QMP screendump. It must not
+evaluate GRUB or `_start` rungs merely because the QMP socket exists. The normal
+observation point is after the shared-renderer serial markers establish that
+the serial log exists and is current. Failure paths first quiesce QEMU through
+the wrapper’s cleanup owner, then inspect the stable log.
+
+Read the exported ladder fields together:
+
+- `simpleos_wm_visible_display_boot_ladder_status`
+- `simpleos_wm_visible_display_boot_ladder_reason`
+- `simpleos_wm_visible_display_boot_ladder_observation`
+- `simpleos_wm_visible_display_boot_ladder_grub`
+- `simpleos_wm_visible_display_boot_ladder_kernel`
+
+`serial-log-not-created-at-check-time` means no file existed at the stable
+observation point. `marker-absent-in-existing-serial-log` means a regular log
+existed but lacked a rung. Do not report the first state as a marker miss.
+
+Run the no-QEMU contract before a live capture:
+
+```sh
+sh scripts/check/check-simpleos-wm-visible-display-evidence.shs --self-test
+```
+
 ## RV64 Desktop Service/GPU Profile
 
 The multi-config Vulkan/WM lane owns the pure QEMU RV64 desktop descriptor in

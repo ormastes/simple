@@ -6,7 +6,7 @@
   section of the production spec lane
 - **Severity:** medium — no product defect; it corrupts *evidence*, sending
   investigations to the wrong subsystem.
-- **Status:** OPEN
+- **Status:** FIXED IN SOURCE — bounded self-test passes; fresh live QEMU evidence remains separate
 
 ## What happens
 
@@ -36,6 +36,41 @@ all of which worked. The real fault that run was in the guest renderer
 Evaluate ladder markers only after QEMU exit (or after the serial log exists
 and is quiescent), and make "log file absent at check time" its own explicit
 ladder state distinct from "marker absent in log".
+
+## Resolution
+
+`scripts/check/check-simpleos-wm-visible-display-evidence.shs` now owns one
+`evaluate_boot_ladder` classifier. The successful production path calls it only
+after the renderer serial-marker gate establishes that `serial.log` exists and
+is current, while preserving the same QEMU process for QMP capture. A marker
+failure first quiesces QEMU through the existing cleanup owner and only then
+evaluates the ladder.
+
+The evidence output distinguishes:
+
+- `serial-log-not-created-at-check-time`: no serial file existed at the stable
+  observation point, so no rung is called missing;
+- `marker-absent-in-existing-serial-log`: the file existed but one or both
+  boot markers were absent.
+
+The wrapper’s bounded `--self-test` uses temporary fixtures to prove both
+classifications, the complete case, and source call ordering. It performs no
+build, QEMU launch, browser action, or capture. A fresh live QEMU run is still
+required for new rendering evidence; this source fix does not manufacture one.
+
+Focused verification at source revision `34761e566e`:
+
+```text
+sh -n scripts/check/check-simpleos-wm-visible-display-evidence.shs
+shell_syntax=pass
+
+sh scripts/check/check-simpleos-wm-visible-display-evidence.shs --self-test
+simpleos_wm_boot_ladder_self_test_absent_log=pass
+simpleos_wm_boot_ladder_self_test_marker_absent=pass
+simpleos_wm_boot_ladder_self_test_complete=pass
+simpleos_wm_boot_ladder_self_test_order=pass
+simpleos_wm_boot_ladder_self_test_status=pass
+```
 
 ## Related
 

@@ -4,9 +4,21 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+SELF_TEST_MODE=0
+SELF_TEST_ROOT=
+if [ "${1:-}" = "--self-test" ]; then
+    SELF_TEST_MODE=1
+    SELF_TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/simpleos-wm-boot-ladder-self-test.XXXXXX")"
+fi
+
 REPORT_DATE="${REPORT_DATE:-$(date -u +%F)}"
-BUILD_DIR="${BUILD_DIR:-build/simpleos_wm_visible_display_evidence}"
-REPORT_PATH="${REPORT_PATH:-doc/09_report/simpleos_wm_visible_display_evidence_${REPORT_DATE}.md}"
+if [ "$SELF_TEST_MODE" = "1" ]; then
+    BUILD_DIR="$SELF_TEST_ROOT/build"
+    REPORT_PATH="$SELF_TEST_ROOT/report.md"
+else
+    BUILD_DIR="${BUILD_DIR:-build/simpleos_wm_visible_display_evidence}"
+    REPORT_PATH="${REPORT_PATH:-doc/09_report/simpleos_wm_visible_display_evidence_${REPORT_DATE}.md}"
+fi
 ENV_PATH="$BUILD_DIR/evidence.env"
 BUILD_LOG="$BUILD_DIR/native-build.log"
 DISPLAY_HELP="$BUILD_DIR/qemu-display-help.txt"
@@ -62,6 +74,12 @@ cleanup_status=not-run
 cleanup_reason=not-run
 cleanup_qemu_process=not-started
 cleanup_qmp_socket=not-created
+boot_ladder_status=not-run
+boot_ladder_reason=not-run
+boot_ladder_observation=not-run
+boot_ladder_grub=not-run
+boot_ladder_kernel=not-run
+boot_ladder_pending_on_fail=0
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$ENV_PATH" "$BUILD_LOG" "$DISPLAY_HELP" "$QEMU_STDOUT_LOG" "$QEMU_STDERR_LOG" "$QMP_LOG" "$PPM_PATH" "$SERIAL_LOG" "$QMP_SOCKET"
@@ -164,6 +182,49 @@ have_marker() {
     [ -f "$SERIAL_LOG" ] && grep -aFq "$1" "$SERIAL_LOG"
 }
 
+evaluate_boot_ladder() {
+    boot_ladder_observation="$1"
+    echo "===== UEFI boot ladder ====="
+    if [ ! -e "$SERIAL_LOG" ]; then
+        boot_ladder_status=unavailable
+        boot_ladder_reason=serial-log-not-created-at-check-time
+        boot_ladder_grub=not-observed
+        boot_ladder_kernel=not-observed
+        echo "  [UNAVAILABLE] serial-log-not-created-at-check-time"
+        return 0
+    fi
+    if [ ! -f "$SERIAL_LOG" ]; then
+        boot_ladder_status=unavailable
+        boot_ladder_reason=serial-log-not-regular-file-at-check-time
+        boot_ladder_grub=not-observed
+        boot_ladder_kernel=not-observed
+        echo "  [UNAVAILABLE] serial-log-not-regular-file-at-check-time"
+        return 0
+    fi
+
+    if grep -aFq "[grub-uefi] multiboot loading" "$SERIAL_LOG"; then
+        boot_ladder_grub=pass
+        echo "  [ok]   GRUB EFI app ran (OVMF -> bootloader OK)"
+    else
+        boot_ladder_grub=missing
+        echo "  [MISS] GRUB EFI app ran (OVMF -> bootloader OK)"
+    fi
+    if grep -aFq "[BOOT64] call _start" "$SERIAL_LOG"; then
+        boot_ladder_kernel=pass
+        echo "  [ok]   multiboot handoff -> kernel _start (shared crt0.s)"
+    else
+        boot_ladder_kernel=missing
+        echo "  [MISS] multiboot handoff -> kernel _start (shared crt0.s)"
+    fi
+    if [ "$boot_ladder_grub" = pass ] && [ "$boot_ladder_kernel" = pass ]; then
+        boot_ladder_status=pass
+        boot_ladder_reason=pass
+    else
+        boot_ladder_status=fail
+        boot_ladder_reason=marker-absent-in-existing-serial-log
+    fi
+}
+
 refresh_marker_state() {
     theme=false
     probe=false
@@ -190,6 +251,54 @@ refresh_marker_state() {
     marker_state="theme:$theme probe:$probe web:$web backend:$backend present:$present mdi:$mdi windows:$windows top:$top taskbar:$taskbar html:$html render:$render"
     [ "$theme" = true ] && [ "$probe" = true ] && [ "$web" = true ] && [ "$backend" = true ] && [ "$present" = true ] && [ "$mdi" = true ] && [ "$windows" = true ] && [ "$top" = true ] && [ "$taskbar" = true ] && [ "$html" = true ] && [ "$render" = true ]
 }
+
+run_boot_ladder_self_test() {
+    SERIAL_LOG="$SELF_TEST_ROOT/missing.log"
+    evaluate_boot_ladder "self-test-absent" >"$SELF_TEST_ROOT/absent.out"
+    [ "$boot_ladder_status" = unavailable ]
+    [ "$boot_ladder_reason" = serial-log-not-created-at-check-time ]
+    [ "$boot_ladder_grub" = not-observed ]
+    [ "$boot_ladder_kernel" = not-observed ]
+
+    printf '%s\n' "[grub-uefi] multiboot loading /boot/kernel.elf" >"$SERIAL_LOG"
+    evaluate_boot_ladder "self-test-marker-absent" >"$SELF_TEST_ROOT/marker-absent.out"
+    [ "$boot_ladder_status" = fail ]
+    [ "$boot_ladder_reason" = marker-absent-in-existing-serial-log ]
+    [ "$boot_ladder_grub" = pass ]
+    [ "$boot_ladder_kernel" = missing ]
+
+    printf '%s\n' "[BOOT64] call _start" >>"$SERIAL_LOG"
+    evaluate_boot_ladder "self-test-complete" >"$SELF_TEST_ROOT/complete.out"
+    [ "$boot_ladder_status" = pass ]
+    [ "$boot_ladder_reason" = pass ]
+
+    marker_loop_line="$(grep -n '^while \[ "\$waited" -le "\$MARKER_TIMEOUT_SECS" \]; do$' "$0" | cut -d: -f1)"
+    success_call_line="$(grep -n '^evaluate_boot_ladder "serial-markers-established"$' "$0" | cut -d: -f1)"
+    qmp_capture_line="$(grep -n '^python3 - "\$QMP_SOCKET" "\$PPM_PATH"' "$0" | cut -d: -f1)"
+    [ -n "$marker_loop_line" ]
+    [ -n "$success_call_line" ]
+    [ -n "$qmp_capture_line" ]
+    [ "$success_call_line" -gt "$marker_loop_line" ]
+    [ "$success_call_line" -lt "$qmp_capture_line" ]
+    fail_block="$(sed -n '/^fail_now() {/,/^}/p' "$0")"
+    cleanup_line="$(printf '%s\n' "$fail_block" | grep -n '^    cleanup$' | cut -d: -f1)"
+    failure_call_line="$(printf '%s\n' "$fail_block" | grep -n 'evaluate_boot_ladder "failure-after-qemu-quiescence"' | cut -d: -f1)"
+    [ -n "$cleanup_line" ]
+    [ -n "$failure_call_line" ]
+    [ "$failure_call_line" -gt "$cleanup_line" ]
+
+    echo "simpleos_wm_boot_ladder_self_test_absent_log=pass"
+    echo "simpleos_wm_boot_ladder_self_test_marker_absent=pass"
+    echo "simpleos_wm_boot_ladder_self_test_complete=pass"
+    echo "simpleos_wm_boot_ladder_self_test_order=pass"
+    echo "simpleos_wm_boot_ladder_self_test_status=pass"
+    rm -rf "$SELF_TEST_ROOT"
+}
+
+if [ "$SELF_TEST_MODE" = "1" ]; then
+    run_boot_ladder_self_test
+    exit 0
+fi
 
 write_outputs() {
     emit_env="${1:-1}"
@@ -220,6 +329,11 @@ write_outputs() {
         echo "simpleos_wm_visible_display_marker_status=$serial_marker_status"
         echo "simpleos_wm_visible_display_marker_reason=$serial_marker_reason"
         echo "simpleos_wm_visible_display_marker_state=$marker_state"
+        echo "simpleos_wm_visible_display_boot_ladder_status=$boot_ladder_status"
+        echo "simpleos_wm_visible_display_boot_ladder_reason=$boot_ladder_reason"
+        echo "simpleos_wm_visible_display_boot_ladder_observation=$boot_ladder_observation"
+        echo "simpleos_wm_visible_display_boot_ladder_grub=$boot_ladder_grub"
+        echo "simpleos_wm_visible_display_boot_ladder_kernel=$boot_ladder_kernel"
         echo "simpleos_wm_visible_display_qmp_capture_status=$qmp_capture_status"
         echo "simpleos_wm_visible_display_qmp_capture_reason=$qmp_capture_reason"
         echo "simpleos_wm_visible_display_qmp_capture_method=$qmp_capture_method"
@@ -255,6 +369,7 @@ write_outputs() {
         echo "- real display surface: $display_surface_status ($display_surface_reason)"
         echo "- kernel: $KERNEL_PATH"
         echo "- serial markers: $serial_marker_status ($serial_marker_reason)"
+        echo "- UEFI boot ladder: $boot_ladder_status ($boot_ladder_reason; observation=$boot_ladder_observation; grub=$boot_ladder_grub; kernel=$boot_ladder_kernel)"
         echo "- shared-renderer serial evidence: generated Aetheric theme installed, web-demo renderer, backend selected, direct-mmio present, html renderable, render-ready"
         echo "- marker state: $marker_state"
         echo "- QMP capture: $qmp_capture_status ($qmp_capture_reason; method=$qmp_capture_method)"
@@ -280,6 +395,9 @@ fail_now() {
     reason="$1"
     status=fail
     cleanup
+    if [ "$boot_ladder_pending_on_fail" = "1" ] && [ "$boot_ladder_status" = not-run ]; then
+        evaluate_boot_ladder "failure-after-qemu-quiescence"
+    fi
     trap - EXIT INT TERM
     write_outputs
     exit 1
@@ -494,6 +612,7 @@ QEMU_PID=$!
 set -e
 qemu_launch_status=pass
 qemu_launch_reason=spawned
+boot_ladder_pending_on_fail=1
 
 i=0
 while [ ! -S "$QMP_SOCKET" ] && [ "$i" -lt 100 ]; do
@@ -510,13 +629,6 @@ if [ ! -S "$QMP_SOCKET" ]; then
     qemu_launch_reason=qmp-socket-timeout
     fail_now "qmp-socket-timeout"
 fi
-
-# --- Migration-correctness ladder (isolates OVMF boot-path success from
-# kernel render correctness, which is tracked separately) ---
-rung() { grep -aq "$1" "$SERIAL_LOG" 2>/dev/null && echo "  [ok]   $2" || echo "  [MISS] $2"; }
-echo "===== UEFI boot ladder ====="
-rung "\[grub-uefi\] multiboot loading" "GRUB EFI app ran (OVMF -> bootloader OK)"
-rung "\[BOOT64\] call _start"           "multiboot handoff -> kernel _start (shared crt0.s)"
 
 waited=0
 while [ "$waited" -le "$MARKER_TIMEOUT_SECS" ]; do
@@ -539,6 +651,12 @@ if [ "$serial_marker_status" != "pass" ]; then
     serial_marker_reason=marker-timeout
     fail_now "serial-marker-timeout"
 fi
+
+# The serial-marker gate above proves this log exists and is current while QEMU
+# stays persistent for the QMP capture. Failure paths evaluate only after
+# fail_now has quiesced QEMU, so an absent log is never reported as a missing
+# boot marker.
+evaluate_boot_ladder "serial-markers-established"
 
 set +e
 python3 - "$QMP_SOCKET" "$PPM_PATH" >"$QMP_LOG" 2>&1 <<'PY'
