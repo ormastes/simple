@@ -23,16 +23,19 @@ against a pure-built runtime capsule that exports the registry-checked
 
 ## Exact circularity
 
-No currently available pure-built macOS/arm64 binary has both capabilities
-needed by the live gate.
+No currently available **eligible** pure-built macOS/arm64 binary has both
+capabilities needed by the live gate.
 
-| Pure-built binary | SHA-256 | Current compiler imports | Native `rt_string_free` |
-|---|---|---|---|
-| `/Users/ormastes/simple/bin/release/aarch64-apple-darwin-macho/simple` | `f2c216a660da83da1a253d2e8191a3059a66b1d9dc11bbcbaf237fe7e5b8d2bc` | Compatible enough to load and diagnose the current probe/driver graph | Absent from `nm` |
-| `/Users/ormastes/simple/bin/release/macos-arm64/simple` | `277f8ac9e14ae266ce380a5890d434ce27b47cee9378e2b337cbcc8cd4086767` | Historical interpreter cannot resolve the current compiler imports | Present in `nm` |
+| Observed binary | SHA-256 | Eligibility | Current compiler imports | Native `rt_string_free` |
+|---|---|---|---|---|
+| `/Users/ormastes/simple/bin/release/aarch64-apple-darwin-macho/simple` | `f2c216a660da83da1a253d2e8191a3059a66b1d9dc11bbcbaf237fe7e5b8d2bc` | **Forbidden seed**: its image contains `Rust-built` / `bootstrap seed only` classifiers | Compatible enough to load and diagnose the current probe/driver graph, but this diagnostic is not acceptance evidence | Absent from `nm` |
+| `/Users/ormastes/simple/bin/release/macos-arm64/simple` | `277f8ac9e14ae266ce380a5890d434ce27b47cee9378e2b337cbcc8cd4086767` | **Eligible pure-built capsule** | Historical interpreter cannot resolve the current compiler imports | Present in `nm` |
 
 Both files are regular, non-symlink Mach-O arm64 executables and report
-`Simple v1.0.0-beta`. Neither is a Rust seed.
+`Simple v1.0.0-beta`, but that version string is insufficient provenance.
+The forbidden classifier embedded in `f2c…` overrides its release-looking path
+and version output. It must not compile, run, or attest any bridge artifact.
+`277f…` is the only currently eligible pure-built capsule in this comparison.
 
 The `277f…` capsule returns only:
 
@@ -40,16 +43,18 @@ The `277f…` capsule returns only:
 [STDERR] Error running test/02_integration/compiler/bootstrap_low_memory_phase2_reclaim_probe.spl
 ```
 
-The `f2c…` capsule provides the discriminating failure: it reaches current
-source analysis, then reports unresolved current-graph names including
+For diagnosis only, the forbidden `f2c…` seed reaches current source analysis,
+then reports unresolved current-graph names including
 `bootstrap_low_memory_requested`, `driver_core_compile_options_default`,
 `CompileMode`, `compiler_driver_create`, `compiler_driver_run_compile`,
 `compile_result_is_success`, and `compile_result_errors`. It cannot be used
-for the final live call because its own runtime lacks `rt_string_free`.
+for the final live call or any preparatory build. Its seed identity already
+disqualifies it; its missing `rt_string_free` is an additional incompatibility.
 
 This is a real bootstrap circularity, not permission to substitute
-`src/compiler_rust/target/bootstrap/simple`: the compatible compiler and the
-fresh runtime primitive currently live in different pure-built capsules.
+`src/compiler_rust/target/bootstrap/simple` or the seed disguised at the
+`f2c…` release path. The only eligible pure-built capsule has the fresh runtime
+primitive but cannot consume the current compiler graph.
 
 ## Cycle-1 evidence
 
@@ -92,12 +97,17 @@ Use one of the two remaining bounded micro cycles to build only a focused
 bridge/probe executable, not the full current compiler:
 
 1. start from a clean linked worktree at the reviewed current-origin commit;
-2. pin the `f2c…` pure compiler because it can consume the current compiler
-   graph;
-3. explicitly link the fresh pure runtime capsule/archive that contains
-   `rt_string_free`, with `SIMPLE_NO_STUB_FALLBACK=1`;
-4. record compiler path/hash, runtime path/hash, exact command, bounded logs,
-   output hash, and `nm` proof before execution;
+2. pin only the eligible `277f…` pure compiler and build a minimal
+   historical-compatible bridge that stays within the imports and syntax that
+   capsule can consume; never invoke `f2c…` as compiler, driver, delegate, or
+   fallback;
+3. prove the resulting bridge is non-seed before use: canonical regular-file
+   path, exact SHA-256, bounded `--version`, rejection of `Rust-built`,
+   `bootstrap seed only`, and other seed classifiers, plus `nm` proof of native
+   `rt_string_free`;
+4. use that admitted non-seed bridge to build only the focused current-graph
+   probe with `SIMPLE_NO_STUB_FALLBACK=1`; record bridge/runtime paths and
+   hashes, exact commands, bounded logs, output hash, and symbol proof;
 5. execute the focused probe with all three bootstrap opt-in variables and
    require a positive
    `phase2:source_reclaim:done reclaimed=<n>` trace plus direct
@@ -105,8 +115,9 @@ bridge/probe executable, not the full current compiler:
 6. run the same focused executable with the opt-in absent and require
    low-memory false with no reclaim marker.
 
-If a pure fresh runtime cannot be linked without a Rust seed, stop and retain
-this bug as the blocker. Only after the positive and negative micro controls
-pass may the source bridge be committed and a separately authorized, bounded
+If `277f…` cannot produce a historical-compatible, classifier-clean bridge,
+stop and retain this bug as the blocker. Do not use `f2c…` to escape that
+failure. Only after the positive and negative micro controls pass may the
+source bridge be committed and a separately authorized, bounded
 current-compiler promotion be considered. Do not run full Stage4 to diagnose
 this circularity.
