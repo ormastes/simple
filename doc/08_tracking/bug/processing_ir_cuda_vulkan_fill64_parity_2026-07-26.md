@@ -58,6 +58,16 @@ withdrawn. A fresh source-matched compiler is required to determine whether the
 retained compiler is stale or current lowering still loses runtime-array
 classification.
 
+The bounded incremental regeneration compiled the current
+`src/app/cli/bootstrap_main.spl` closure, then failed at link because the
+admitted `core-c-bootstrap` runtime lane does not own compiler-host symbols
+such as `rt_native_build` and the Cranelift bridge. Omitting the explicit
+runtime path selected the same core lane. A manual retained-object link was
+also rejected because the closure currently emits duplicate Simple symbols and
+no native `main`; it is not an admissible replacement for the canonical linker.
+The three-cycle cap is exhausted. No full bootstrap, seed fallback, cache
+deletion, or further retry ran.
+
 CUDA identity was a separate three-bit tag-width overflow: the UUID hash used
 the full positive 63-bit range, so native Simple tagging could make it negative.
 The Rust runtime and generated C evidence producer now share a positive 60-bit
@@ -70,8 +80,9 @@ values as the same algorithm version.
 
 ## Required repair
 
-1. Regenerate a source-matched pure-Simple compiler incrementally on an admitted
-   host; do not run a full bootstrap.
+1. Provide an admitted compiler-host runtime bundle/extra-archive route for
+   incremental `bootstrap_main` linking, or regenerate on a prepared host that
+   already has that owner; do not run a full bootstrap.
 2. Run the focused transport probe once with that compiler and require zero
    iterator and indexed mismatches for all four recorded cases.
 3. Re-run the direct CUDA and Vulkan 64-element probes with that compiler.
