@@ -521,16 +521,19 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   The low-memory circularity tracking stack `8ac0150d38..7f9815a929` is
   ACCEPTED. `f2c216...` is seed-marked and forbidden as compiler, driver,
   delegate, or fallback. `277f...` is the only eligible pure-Simple binary but
-  cannot import the current compiler graph. The next bounded action is one of
-  the two remaining micro cycles in a clean linked worktree: pin only
+  cannot import the current compiler graph. At this checkpoint, the next
+  bounded action was one of the two then-reserved micro cycles in a clean
+  linked worktree: pin only
   `277f...`, attempt a minimal historical-compatible bridge, admit it through
   canonical path/hash, bounded version, negative seed classifiers, and native
   `rt_string_free` symbol proof, then run only the focused current-graph
   positive opt-in and negative no-opt-in controls with
   `SIMPLE_NO_STUB_FALLBACK=1`. If that bridge cannot be produced, stop and
   retain the bug; never substitute `f2c...` or run full Stage4 for diagnosis.
+  The cycle-2 record below consumed one of those two cycles; the later
+  read-only final preflight consumed none, so exactly one micro cycle remains.
   No fresh compiler promotion, host/QEMU launch, SIMD PASS, or rendering/event
-  claim is added by this checkpoint.
+  claim is added by this checkpoint or preflight.
 - continuation-2026-07-26-web-gui-owner-audit: In a clean `origin/main`
   linked worktree, the only eligible macOS pure-Simple binary
   (`277f8ac9...`) passed the focused Web CSS authority (5 assertions), widget

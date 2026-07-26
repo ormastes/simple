@@ -1,7 +1,7 @@
 # Bug: bootstrap low-memory positional bridge is blocked by split pure-binary capabilities
 
 Date: 2026-07-26  
-Status: **BLOCKED — cycle 2 did not reach the requested bridge entry; source reverted**
+Status: **BLOCKED — final preflight found no admissible distinct route; one cycle remains unspent**
 Scope: current-main compiler promotion only; normal compilation must remain unchanged
 
 ## Intended behavior
@@ -158,10 +158,99 @@ All three unverified product-source edits were reverted byte-for-byte. No
 bridge, probe executable, Stage 4 build, fallback, delegate, or native runtime
 claim survived this cycle. Exactly one bounded micro cycle remains.
 
+## Final-cycle preflight — cycle not consumed
+
+Worktree/base:
+
+```text
+/Users/ormastes/simple/build/worktrees/wm-bridge-final-20260726
+92ae794ba712587f636a14374917d9789e453d6f
+```
+
+The eligible capsule remains pinned and classifier-clean:
+
+```text
+sha256=277f8ac9e14ae266ce380a5890d434ce27b47cee9378e2b337cbcc8cd4086767
+rt_string_free=present
+Rust-built/bootstrap seed only/seed compiler/simple_seed=absent
+```
+
+The prior checkpoint reserved two micro cycles. The bounded cycle-2 build
+described above consumed one, and the state record now says exactly one remains.
+This read-only preflight did not consume that final cycle. It found one command
+shape materially distinct from cycle 2, but not an admissible way to use it:
+
+1. At historical source `cd1e0f81a7221b3178b08af568dc42e32a6e726a`,
+   `src/compiler_rust/driver/src/main.rs` routes `compile` to
+   `src/compiler_rust/driver/src/cli/commands/compile_commands.rs`.
+   Its `handle_compile` recognizes `--native`, but does not parse the
+   advertised `--format=self-contained`.
+2. Non-native `compile` emits SMF. The matching
+   `src/app/cli/cli_helpers.spl` explicitly reports that self-contained
+   execution is not fully implemented. An SMF cannot pass native path/hash,
+   `--version`, and `nm` admission as a standalone bridge.
+3. `compile --native` calls
+   `src/compiler_rust/driver/src/cli/compile.rs::compile_file_native`, which
+   then calls `CompilerPipeline::compile_file_to_native_binary`; it therefore
+   avoids the failed `native-build -> src/app/repl/main.spl` dispatch.
+4. Runtime lookup is implemented in
+   `src/compiler_rust/compiler/src/linker/native_binary.rs`.
+   `find_runtime_library_path` returns `Option<PathBuf>` after checking
+   `SIMPLE_RUNTIME_PATH`, the compile-time setting, executable-adjacent
+   `lib`/`deps`, and Cargo target trees. Absence is not an immediate error:
+   option construction also checks `target/debug`, the link step conditionally
+   adds a found runtime archive, and bootstrap mode has unresolved-symbol and
+   generated-stub paths. Those fallbacks make the command technically
+   reachable, but they cannot establish this lane's required real,
+   registry-backed `rt_string_free` semantics and are inadmissible evidence.
+5. No runtime archive exists adjacent to `277f…`, in its `deps` or sibling
+   `lib` directory, or in the clean sparse worktree's Rust target tree. The
+   archives under the primary `src/compiler_rust/target/**` tree are Rust
+   seed/build artifacts and are forbidden in every role.
+6. Indexed core-C cache archives that remain elsewhere have hashes
+   `f7bd5ea5…`, `558df909…`, `62e939e7…`, `25e62621…`, or `d131d40a…`.
+   None matches the independently reviewed composite capsule
+   `02775039b26c80ad5858976ad0761ab331cd6454bee202b6dfb3a25310a19d85`,
+   and none has a current-lane immutable source/command manifest. Reusing one
+   would be an unreviewed runtime shortcut. That hash remains valid reviewed
+   provenance in the state record for source `4e1ddd3afe`, Apple clang 17, and
+   source-list fingerprint
+   `16e6153aefabbaa93fbe32e071308543a7e64ea884677874b3448ee783acf5ab`;
+   it is not a claim that the archive is still retained. The artifact was
+   absent from the inspected canonical capsule location, so this preflight
+   could not supply or re-admit it.
+7. The historical positional `bootstrap_main.spl` at the same revision merely
+   calls `rt_native_build`; that is the raw runtime shortcut forbidden by this
+   lane, not a pure historical bridge.
+
+The historical linker can continue without finding the reviewed archive, but
+any output obtained through omitted-runtime, unresolved-symbol, or generated
+bootstrap-stub behavior cannot prove the required registry-backed
+`rt_string_free` first-free `1` and alias-refusal `0`. Running that
+preflight-known inadmissible route would consume the last cycle without
+satisfying the gate.
+
+No `277f…` compile/run/native-build command, bridge build, product-source edit,
+Stage 4 build, seed, delegate, fallback, or runtime shortcut was used during
+this preflight. The final micro cycle therefore remains available.
+
 ## Next safe action
 
-Use the one remaining bounded micro cycle to build only a focused
-bridge/probe executable, not the full current compiler:
+Do not spend the remaining cycle until both prerequisites exist:
+
+1. restore and re-admit the formerly retained, reviewed pure runtime capsule
+   whose recorded composite SHA-256 is
+   `02775039b26c80ad5858976ad0761ab331cd6454bee202b6dfb3a25310a19d85`,
+   or produce a newly reviewed current-source capsule with an immutable source
+   list, build command, compiler/tool versions, archive hash, and real native
+   `rt_string_free`; place it at a dedicated canonical `SIMPLE_RUNTIME_PATH`;
+2. obtain high-capability approval that using the eligible capsule's historical
+   Rust-coded `compile --native` handler is acceptable for this bootstrap
+   bridge, or provide a classifier-clean pure positional builder that does not
+   call `rt_native_build`.
+
+After those prerequisites, use the one remaining bounded micro cycle to build
+only a focused bridge/probe executable, not the full current compiler:
 
 1. start from a clean linked worktree at the reviewed current-origin commit;
 2. pin only the eligible `277f…` pure compiler and build a minimal
