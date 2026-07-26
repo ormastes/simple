@@ -544,11 +544,38 @@ are blockers, not evidence. See
 The canonical multi-ISA wrapper is:
 
 ```sh
+sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --preflight
+sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test-qemu-accel
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test-metrics
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --validate-report build/simpleos_host_gpu_2d/report.env
 ```
+
+Run `--preflight` first. It does not compile or boot SimpleOS. For each ISA it
+records the selected accelerator, default VirtIO-GPU 2D availability,
+`ivshmem-plain`, and accelerated GL/rutabaga device availability. A same-ISA
+guest selects KVM on Linux, HVF on macOS, or WHPX on Windows only when the
+selected QEMU binary advertises it; cross-ISA rows use TCG. Native AArch64 uses
+`-cpu host`, while AArch64 TCG uses `-cpu cortex-a72`.
+
+Interpret the fields strictly:
+
+- `virtio_gpu_2d=yes` proves a scanout/presentation device only;
+- `ivshmem_plain=yes` is required by the supported host-offload transport;
+- `gl_or_rutabaga=yes` is informational and does not prove Venus, Metal,
+  Vulkan, or device-origin readback;
+- `status=ready` permits the bounded build/boot gate to start, but is not a GPU
+  PASS.
+
+The 2026-07-26 Apple Silicon preflight is retained in
+`doc/09_report/simpleos_qemu_macos_gpu_preflight_2026-07-26.md`. Homebrew QEMU
+10.2.2 selects HVF for AArch64 and TCG for x86_64/RISC-V, but its three
+system-emulator binaries expose neither `ivshmem-plain` nor accelerated
+GL/rutabaga devices. Do not start the live gate with that deployment. Install
+or build a QEMU deployment that actually reports `ivshmem_plain=yes`, then run
+the wrapper again; package presence or configure flags are not substitutes for
+the executed preflight.
 
 Before building a guest, both compiler selectors use the same private
 candidate-admission contract. Shell `candidate_frontend_smoke` and
@@ -836,3 +863,30 @@ is therefore `unavailable`; the separately verified ivshmem design remains the
 viable implementation path, while this checker reports only its presence.
 TODO575 owns future direct-passthrough work and cannot be closed by host Vulkan,
 CUDA, QEMU flags, or host-daemon receipts.
+
+### Cross-host and native-board GPU extension
+
+The shared architecture and nonduplicating execution plan are:
+
+- `doc/04_architecture/simpleos_qemu_host_gpu_2d.md`;
+- `doc/05_design/simpleos_qemu_host_gpu_2d.md`;
+- `doc/03_plan/agent_tasks/simpleos_cross_host_qemu_board_gpu_2d_parity.md`.
+
+Linux, macOS, and Windows QEMU reuse the existing host-GPU protocol, fixture,
+receipt, and CPU SIMD oracle. Physical boards reuse the same artifact and
+evidence ladder through a board adapter; they do not create another Simple 2D
+or Draw IR interface.
+
+Default VirtIO-GPU 2D is presentation-only. Current upstream accelerated
+virgl/Venus/rutabaga host requirements are Linux-scoped. macOS Venus remains
+unsupported by current upstream Venus requirements; UTM Venus/MoltenVK is a
+separate pinned experiment. Windows accelerated upstream virtio-gpu remains
+blocked pending a maintained port. Never infer GPU readiness from HVF, KVM,
+WHPX, SDL/GTK/Cocoa display, or QMP output.
+
+Linux, Windows, UNO Q, VisionFive 2, and UP Squared execution unavailable in
+the current environment is postponed under
+`doc/08_tracking/todo/simpleos_qemu_host_gpu_postponed_2026-07-15.md`.
+Every row remains required and manual-visible. Resume only with the
+prerequisites, exact commands, artifact paths, owner, and final reviewer listed
+in the extension plan.

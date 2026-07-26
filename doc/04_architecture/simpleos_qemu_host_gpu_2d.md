@@ -322,3 +322,112 @@ Provider order is fixed: first make timeout/capture available in every hosted
 runtime family, then prove Unix process-group and Windows Job Object cleanup,
 then add child-env overlay and atomic host-temp ownership, and only then remove
 the runner's POSIX `env`/`mktemp` use. A Rust-runtime-only wrapper is not parity.
+
+## Cross-host QEMU and native-board extension (2026-07-26)
+
+### Compatibility decision
+
+This extension is below the existing Simple 2D boundary. It must not change:
+
+- `DrawIrComposition` or its SDN representation;
+- the `RenderBackend` trait or `Engine2DReadback` compatibility fields;
+- `engine2d_backend_lane_plan` drawing/processing ownership;
+- strict `"metal"` and `"vulkan"` backend selection;
+- the canonical `FontRenderer`/transient `FontRenderBatch` path;
+- host-input -> Simple event dispatch -> dirty Draw IR -> Engine2D flow;
+- CPU SIMD and software fallback behavior.
+
+The QEMU and board paths consume the same already-formed composition or bounded
+processing batch. They do not introduce a second renderer, event router, font
+atlas, command collector, or platform-specific Simple 2D API. Existing
+Metal/Vulkan source and live-evidence work remains independently owned and is a
+regression prerequisite.
+
+### Shared capsule and private adapters
+
+`SimpleOsHostGpuSession` remains the QEMU capsule. A new common target
+capability layer composes private adapters:
+
+```text
+DrawIrComposition / ProcessingIR
+  -> existing Engine2D backend-lane plan
+  -> TargetGpuCapabilityProvider
+     -> QEMU: SimpleOsGuestGpuTransport
+        -> HostGpuAdapter
+           -> HostResourceInterop
+              -> LinuxVulkan / MacMetal / WindowsDirectX
+     -> physical board: NativeBoardGpuAdapter
+        -> board firmware + MMU/IOMMU/cache owner
+        -> native queue/submission/fence/readback/display owner
+  -> Engine2dParityReceipt
+  -> exact CPU SIMD oracle comparison
+```
+
+`HostResourceInterop` is deliberately separate from `HostGpuAdapter`. Linux
+FD/dma-buf/sync-file, Windows HANDLE/fence, and macOS Metal shared-resource
+semantics must not leak into the common protocol. The shared layer owns only
+bounded resources, stable capability enums, lifecycle state, correlation, and
+evidence.
+
+This is runtime adapter composition, not a feature transform. The existing
+virtual capsule already spans the required guest/host concern; creating one
+capsule per OS or board would duplicate policy and is rejected.
+
+### Host capability matrix
+
+| Host path | Architecture status | Promotion rule |
+|---|---|---|
+| Linux QEMU virgl/Venus/rutabaga | upstream-supported host family; SimpleOS guest 3D/blob/capset driver absent | guest negotiation, submission, fence, device-origin readback, exact parity |
+| Linux QEMU ivshmem host service | selected current architecture | existing correlated Vulkan/device receipt and CPU-oracle gate |
+| macOS QEMU ivshmem -> Metal | selected native host-offload architecture | raw Metal device identity, completion, device-origin readback, exact parity |
+| macOS Venus -> MoltenVK | current upstream Venus requirements unsupported; UTM-specific experiment | pinned UTM/QEMU/Mesa/MoltenVK stack plus SimpleOS guest driver and real memory/sync probes |
+| Windows QEMU ivshmem -> DirectX | selected native host-offload architecture | hardware adapter identity, fence/staging readback, exact parity |
+| Windows virgl/Venus/rutabaga | no upstream-supported host row | maintained port plus capability probe; never inferred from WHPX |
+| Any default VirtIO-GPU 2D | presentation-only | CPU/SIMD render evidence only, never GPU execution |
+
+HVF, KVM, and WHPX determine CPU virtualization applicability. GPU capability
+is negotiated independently.
+
+### Native-board capability matrix
+
+| Board | First adapter target | Current blocker |
+|---|---|---|
+| UNO Q / QRB2210 / Adreno 702 | `UnoQAdrenoNativeBoardGpuAdapter` using the shared Engine2D Vulkan/processing contract | SimpleOS lacks Adreno firmware, MMU/cache, command submission, fence, readback, and DPU/display ownership |
+| VisionFive 2 / JH7110 / BXE-4-32 | `VisionFive2PvrNativeBoardGpuAdapter` | current upstream Mesa PowerVR lists BXE-4-32 unsupported; vendor Linux evidence is not a SimpleOS driver |
+| UP Squared N4200 / Intel HD 505 | `UpSquaredIntelNativeBoardGpuAdapter` | SimpleOS lacks i915/ANV-equivalent GuC/firmware where applicable, GEM/VM, queue, fence, readback, and display ownership |
+
+The first development rung may run the canonical fixture through the board's
+prepared Linux stack to validate hardware and artifact semantics. That is
+`linux-board-readiness`, not `simpleos-native`. Native promotion requires the
+SimpleOS boot and driver path.
+
+### Evidence ladder and exact artifact
+
+Every target climbs:
+
+`boot/initialization -> capability enumeration -> resource allocation ->
+submission -> fence/device completion -> device-origin readback -> exact CPU
+SIMD parity -> presentation`.
+
+The parity artifact is an offscreen logical `u32 0xAARRGGBB` framebuffer in the
+existing Engine2D semantics. Comparison serializes each word in a declared
+canonical byte order without color-management, premultiplication conversion,
+scaling, filtering, MSAA, dithering, or compositor capture. The receipt records
+format/version, dimensions, stride, DPI, alpha semantics, byte length,
+run/frame/submission/fence/resource/readback IDs, backend and device/driver/
+firmware identity, SHA-256, and mismatch count. PASS requires equal metadata,
+equal length, equal SHA-256, and `mismatch_count=0`.
+
+A screenshot, QMP screendump, display surface, guest DMA mirror, CPU mirror, or
+positive synthetic handle may diagnose a higher rung but cannot satisfy
+device-origin readback.
+
+### Startup, hot path, and invalidation
+
+Capability discovery runs once per device/session. The hot frame path performs
+no full-tree scan, driver probe subprocess, or backend reinitialization. Cache
+keys include target identity, protocol version, driver/firmware identity,
+resource format, and device generation. Device reset/loss, firmware or driver
+change, protocol change, or backend loss invalidates the session before the
+next submission. Fallback is explicit and retains the existing Engine2D
+backend preference order.

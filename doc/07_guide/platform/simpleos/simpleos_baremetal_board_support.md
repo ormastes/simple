@@ -172,6 +172,24 @@ This audit built `build/os/simpleos_ra4m1.elf` but did not flash it.
 
 This audit built `build/os/simpleos_stm32u585.elf`; no matching ST-Link or STM32U585 USB identity was confirmed.
 
+The STM32U585 lane is the UNO Q real-time MCU, not its QRB2210 Linux MPU or
+Adreno 702 GPU. Do not promote this build as UNO Q GPU evidence.
+
+### Native GPU board extension
+
+UNO Q/QRB2210, VisionFive 2/JH7110, and UP Squared N4200 are planned through
+one shared Engine2D artifact/receipt and board-adapter contract:
+
+`doc/03_plan/agent_tasks/simpleos_cross_host_qemu_board_gpu_2d_parity.md`.
+
+The three open requests are in
+`doc/08_tracking/feature/simpleos_cross_host_board_gpu_requests_2026-07-26.md`.
+Vendor Linux/Windows GPU utilities are readiness only. A SimpleOS-native pass
+requires the physical board identity, boot/download transcript, exact GPU and
+firmware identity, submission/fence/resource correlation, device-origin
+readback, and zero-mismatch CPU SIMD parity. VisionFive 2 remains blocked while
+the exact BXE-4-32 support contract is unavailable in current upstream Mesa.
+
 ### Cortex-M33 QEMU / MPS2-AN505
 
 Run:

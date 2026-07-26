@@ -20,3 +20,61 @@ Primary references:
 - [Vulkan specification](https://registry.khronos.org/vulkan/specs/latest/html/vkspec.html)
 - [NVIDIA vGPU guide](https://docs.nvidia.com/vgpu/latest/pdf/grid-vgpu-user-guide.pdf)
 
+## Deep cross-host and board research (2026-07-26)
+
+### QEMU host acceleration
+
+Current upstream QEMU documents accelerated virgl, Venus, and rutabaga host
+requirements for Linux. Default VirtIO-GPU 2D is guest software rendering plus
+scanout. Venus additionally assumes Linux Vulkan external-memory FD, dma-buf,
+KVM user-memory registration, and sync-FD-style ownership. Consequently:
+
+- Linux can support virgl GL, Venus Vulkan, or rutabaga/gfxstream after a
+  SimpleOS guest 3D/blob/capset driver exists.
+- macOS Venus is unsupported by the current upstream Venus requirements.
+  UTM 5's Venus -> MoltenVK -> Metal path is product-specific experimental
+  evidence for Linux guests, not generic QEMU or SimpleOS support.
+- Windows and macOS virgl/rutabaga are `blocked`: upstream has no supported
+  host row, but a separately maintained port could be researched.
+- HVF and WHPX accelerate CPUs; neither supplies a guest GPU protocol.
+- QEMU Cocoa does not document `gl=on`. SDL/GTK host GL presentation does not
+  prove the guest work ran on a GPU.
+- Zink implements OpenGL over Vulkan. It cannot translate a Vulkan guest
+  application into OpenGL.
+
+Primary sources:
+
+- [QEMU VirtIO-GPU](https://www.qemu.org/docs/master/system/devices/virtio/virtio-gpu.html)
+- [Mesa Venus](https://docs.mesa3d.org/drivers/venus.html)
+- [Mesa Zink](https://docs.mesa3d.org/drivers/zink.html)
+- [MoltenVK](https://github.com/KhronosGroup/MoltenVK)
+- [UTM Venus tracking](https://github.com/utmapp/UTM/issues/4551)
+- [Apple Virtio graphics configuration](https://developer.apple.com/documentation/virtualization/vzvirtiographicsdeviceconfiguration)
+
+### Physical boards
+
+| Target | Primary-source capability | Current honest classification |
+|---|---|---|
+| Arduino UNO Q / QRB2210 / Adreno 702 | Arduino documents Debian, freedreno GL/GLES, Turnip, OpenCL 2.0, Vulkan 1.1 hardware and a current Vulkan 1.0.318 driver | Linux-board acceleration is available; direct SimpleOS acceleration is blocked on Adreno kernel/userspace driver and firmware ownership |
+| VisionFive 2 / JH7110 / BXE-4-32 | StarFive advertises OpenGL ES 3.2, OpenCL 3.0, and Vulkan 1.2/1.3 in vendor releases | Vendor Linux stack is experimental input; current Mesa PowerVR documentation lists BXE-4-32 as unsupported and the upstream kernel support list does not establish this board |
+| UP Squared N4200 / Intel HD 505 | Intel confirms Apollo Lake HD 505; UP documents Windows 10/Linux and the Gen9 display block | Linux/Windows host acceleration is plausible through existing OS drivers; direct SimpleOS acceleration is blocked on i915/ANV-equivalent memory, submission, fence, and display ownership |
+
+Primary sources:
+
+- [Arduino UNO Q datasheet](https://docs.arduino.cc/resources/datasheets/ABX00162-datasheet.pdf)
+- [Qualcomm QRB2210 datasheet](https://docs.qualcomm.com/bundle/publicresource/80-30843-1.pdf)
+- [StarFive VisionFive 2](https://www.starfivetech.com/en/index.php?c=show&id=14&s=hardware)
+- [Mesa PowerVR support](https://docs.mesa3d.org/drivers/powervr.html)
+- [Linux imagination driver](https://docs.kernel.org/gpu/imagination/index.html)
+- [Intel N4200 specification](https://www.intel.com/content/www/us/en/products/sku/95592/intel-pentium-processor-n4200-2m-cache-up-to-2-50-ghz/specifications.html)
+- [UP Squared datasheet](https://www.up-board.org/wp-content/uploads/2016/05/UP-Square-DatasheetV0.5.pdf)
+
+### Shared conclusion
+
+Do not port Linux DRM/Mesa into the Simple 2D public surface. Reuse one
+fixed-point Draw IR/Engine2D command and evidence contract. QEMU hosts use
+`SimpleOsGuestGpuTransport` plus private host adapters. Physical boards use a
+`NativeBoardGpuAdapter` with board-specific firmware, MMU/IOMMU, cache
+coherency, submission, fence, readback, and display owners. Both return the
+same exact parity artifact and receipt. CPU SIMD remains the oracle and
+fallback, never native-GPU evidence.

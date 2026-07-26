@@ -226,3 +226,49 @@ The same boundary admits resolved pinned-font TEXT only after the complete glyph
 batch is prepared within a framebuffer-area pixel-work cap, then requires exact
 software parity, changed pixels, device readback, a positive handle, and no
 fallback.
+
+## Cross-host and native-board extension coverage (2026-07-26)
+
+The existing QEMU spec remains canonical. A future board spec shall reuse its
+fixture/checkers and mirror to
+`doc/06_spec/03_system/os/board/simpleos_native_board_gpu_2d_spec.md`; it shall
+not copy the QEMU protocol implementation.
+
+| Scenario | Requirements |
+|---|---|
+| preserve existing Draw IR, RenderBackend, Metal/Vulkan selection, font, event, and CPU fallback contracts | REQ-016; NFR-011 |
+| classify Linux/macOS/Windows QEMU transports independently from KVM/HVF/WHPX | REQ-013,014,020 |
+| record exact ARGB metadata, identities, SHA-256, and zero mismatches | REQ-006,017; NFR-001,010 |
+| boot and identify UNO Q before Adreno submission/readback | REQ-015,018,019,020 |
+| retain VisionFive 2 BXE as blocked while upstream support is absent | REQ-015,018,019,020 |
+| boot and identify UP Squared before Intel GPU submission/readback | REQ-015,018,019,020 |
+| distinguish board Linux readiness from SimpleOS-native execution | REQ-018,019 |
+| invalidate cached capability after device loss or identity change | NFR-013 |
+| run 20 warm exact-parity samples on every supported native row | NFR-003,005,012 |
+
+All environment-unavailable rows remain executable/manual-visible as
+`blocked` or `unsupported`; none may use `skip()`. A board pass requires board
+identity, boot/download path, SimpleOS transcript, GPU/firmware identity,
+submission/fence/resource IDs, device-origin readback, and exact CPU SIMD
+parity. A Linux vendor image may close only the board-readiness scenario.
+
+The additional manual steps are:
+
+```text
+Boot SimpleOS with the requested QEMU GPU transport
+Observe guest GPU negotiation and backend selection
+Boot the selected physical board and identify its native GPU stack
+Render the deterministic Simple 2D parity fixture
+Wait for submission and device completion
+Read back device-origin ARGB bytes
+Compare GPU bytes with the CPU SIMD oracle
+Classify unavailable host capabilities without promoting them
+```
+
+Temporary helpers named
+`setup_simpleos_macos_qemu_gpu_fixture`,
+`setup_simpleos_native_board_gpu_fixture`,
+`check_guest_gpu_negotiation`, `check_device_origin_readback`,
+`check_engine2d_argb_metadata`, `check_exact_argb_parity`, and
+`check_unavailable_gpu_row` must call `fail("not implemented: <helper>")`
+until backed by real evidence.

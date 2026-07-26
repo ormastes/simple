@@ -156,3 +156,12 @@ fixture bypasses, synthetic handles, or passing placeholders.
   RECT/IMAGE admission plus preflighted canonical TEXT glyph compositing are
   implemented. Smaller/offscreen device surfaces and opacity are covered by the
   canonical WM integration boundary.
+
+## Cross-host and physical-board extension
+
+The nonduplicating extension plan is
+`doc/03_plan/agent_tasks/simpleos_cross_host_qemu_board_gpu_2d_parity.md`.
+This canonical QEMU plan continues to own the guest/host protocol, fixture,
+receipt, wrapper, and host/ISA rows. The extension plan owns only shared
+capability/artifact additions and native-board adapters. It may not fork the
+Simple 2D, Draw IR, Metal, Vulkan, font, event, or CPU oracle contracts.

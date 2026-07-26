@@ -340,3 +340,108 @@ lane must wait for that owner path rather than adding a feature-local runner.
 4. macOS Metal and Windows DirectX adapters only on prepared native hosts.
 5. Wire canonical row output into the hardening matrix without changing its
    existing 26-row pass contract.
+
+## Cross-host and native-board adapter design (2026-07-26)
+
+### Planned internal contracts
+
+These are private composition points below `RenderBackend`; they do not replace
+or extend the public Simple 2D interface.
+
+| Contract | Responsibility |
+|---|---|
+| `TargetGpuCapabilityProvider` | enumerate one target once and return stable render, processing, readback, presentation, and interop capabilities |
+| `SimpleOsGuestGpuTransport` | bounded QEMU negotiation, resource publication, submission, completion, and guest-visible receipt |
+| `HostGpuAdapter` | execute a validated batch on one host API without exposing OS handles to the guest |
+| `HostResourceInterop` | own Linux FD/dma-buf, Windows HANDLE/fence, or macOS Metal resource mapping and synchronization |
+| `NativeBoardGpuAdapter` | own board firmware, address spaces, cache coherency, queue, fence, readback, and display integration |
+| `Engine2dParityArtifact` | immutable canonical framebuffer bytes plus complete format/provenance metadata |
+| `Engine2dParityReceipt` | correlated lifecycle IDs, backend/device identity, timing, SHA-256, mismatch count, and stable status/reason |
+
+The planned common adapters use composition. Backend-specific types remain
+private children and may not be imported by UI, Draw IR, or event modules.
+
+### Lifecycle
+
+1. Produce the canonical `DrawIrComposition` and event result through the
+   existing owners.
+2. Ask `engine2d_backend_lane_plan` for drawing/processing ownership.
+3. Resolve the cached target capability and select either QEMU transport,
+   native-board adapter, or the existing CPU/SIMD fallback.
+4. Validate all commands/resources before device mutation.
+5. Submit one coarse batch and capture positive submission, resource, and fence
+   identities.
+6. Wait for terminal device completion.
+7. Copy the offscreen result into a declared readback buffer.
+8. Serialize logical `0xAARRGGBB` words in the canonical evidence byte order,
+   compute SHA-256, and compare every byte with the independent CPU SIMD oracle.
+9. Present only after the exact artifact is retained; presentation pixels do
+   not replace the artifact.
+10. On any unknown completion, poison the target session and retain dependent
+    resources until the backend owner proves terminal cleanup.
+
+### Bit-level fixture
+
+The shared deterministic fixture contains:
+
+- opaque clear and overlapping filled rectangles;
+- half-open clip boundaries and partially offscreen work;
+- straight-alpha src-over at edge alpha values;
+- one exact-size and one nearest-neighbor scaled image;
+- one canonical bitmap-text row and one resolved vector-font row through the
+  existing `FontRenderer`;
+- event-driven state change rendered in a second correlated frame;
+- 96-DPI and 300-DPI metadata rows without implicit scaling.
+
+The oracle and target use the existing Engine2D integer rules. The gate compares
+the logical packed words and their canonical serialization, not a Metal,
+Vulkan, D3D, DRM, QMP, Cocoa, Wayland, or Windows presentation surface.
+Metadata mismatch fails before byte comparison. Byte mismatch reports first
+offset, expected/actual byte, pixel coordinate, channel, and total
+`mismatch_count`; it never applies tolerance or blur.
+
+### Target-specific design notes
+
+- Linux QEMU: retain the ivshmem service as the first vertical slice. A future
+  Venus/virgl/rutabaga adapter is a new private transport implementation and
+  requires SimpleOS capset/blob/context support.
+- macOS QEMU: use strict native Metal host offload. Keep UTM Venus/MoltenVK as
+  an experimental compatibility adapter with its exact revisions in evidence.
+- Windows QEMU: use the existing DirectX host-offload direction. WHPX is CPU
+  acceleration and has no bearing on GPU admission.
+- UNO Q: first validate the artifact with the shipped Debian Adreno stack, then
+  implement a SimpleOS-native adapter. Debian results remain readiness only.
+- VisionFive 2: preserve a vendor-driver experiment separately; do not begin
+  native promotion until the exact BXE BVNC, firmware, kernel, and Mesa support
+  are proven. Current upstream Mesa classification is unsupported.
+- UP Squared: use Linux/Windows driver evidence for readiness, then implement
+  the SimpleOS-native Intel memory/submission/fence/display owners without
+  embedding Mesa or a Linux UAPI in Engine2D.
+
+### Compatibility and regression gate
+
+Before merging any adapter:
+
+1. existing `DrawIrComposition` and SDN round trips are unchanged;
+2. `RenderBackend` and `Engine2DReadback` source compatibility is unchanged;
+3. strict host Metal/Vulkan creation and readback tests pass;
+4. CPU SIMD/software exact parity passes;
+5. event focus, keyboard, pointer, click, state mutation, and rerender receipts
+   remain owned by the existing Simple dispatcher;
+6. vector fonts still lower through `FontRenderer`/`draw_text`;
+7. 96-DPI and 300-DPI existing fixtures retain identical logical output;
+8. unavailable transport selects the existing fallback without changing
+   backend priority or claiming acceleration.
+
+### Extension implementation order
+
+1. Freeze the compatibility tests and add the common artifact/receipt validator.
+2. Extend the existing Linux QEMU ivshmem row to the full bit-level fixture.
+3. Complete native macOS Metal and Windows DirectX host rows on prepared hosts.
+4. Add one shared native-board wrapper and capability schema.
+5. Add UNO Q Debian readiness, then SimpleOS-native Adreno bring-up.
+6. Add UP Squared Linux/Windows readiness, then SimpleOS-native Intel bring-up.
+7. Add VisionFive 2 vendor readiness; start native BXE work only after the
+   upstream/vendor driver and firmware contract is explicit.
+8. Run the same exact artifact and operator-manual gate for every row; retain
+   unavailable rows as blocked.

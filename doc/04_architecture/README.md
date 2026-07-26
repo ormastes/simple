@@ -94,3 +94,4 @@ Relevant current feature slices:
 - [SimpleOS NVFS Submodule Migration](os/storage/simpleos_nvfs_submodule_migration.md) - OS-owned NVFS service package migration
 - [KAIROS-Like Simple MCP + LLM Dashboard](app/ui/kairos_like_simple_mcp_llm_dashboard.md) - Assistant/dashboard architecture, live bridge, and web-login/PBP bootstrap notes
 - [Graphics 3D Session Managed Backend](compiler/graphics/graphics_3d_session_managed_backend.md) - Common session architecture for 2D, 2D game, 3D, 3D game, web renderer, GUI, WM, and CPU/CUDA/Vulkan/Metal/WebGPU backends
+- [SimpleOS Cross-Host QEMU/Board GPU 2D](simpleos_qemu_host_gpu_2d.md) ([TLDR](simpleos_qemu_host_gpu_2d_tldr.md)) - Shared Engine2D transport, host/board adapters, and exact CPU-SIMD parity evidence

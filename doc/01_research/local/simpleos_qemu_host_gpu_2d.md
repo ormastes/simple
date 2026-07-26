@@ -31,3 +31,38 @@ No current SimpleOS/QEMU path negotiates 3D contexts, capsets, blobs, virgl, Ven
 
 VirtIO-GPU driver and Engine2D files are concurrently dirty. This lane must preserve those changes and first add its protocol at a separate owner boundary, integrating into shared files only after reviewing the live diff.
 
+## Cross-host and physical-board extension (2026-07-26)
+
+The reusable repository seam is already present:
+
+`DrawIrComposition -> Engine2dWmFrameExecutor -> Engine2D backend lane ->
+SimpleOsHostGpuSession/native surface -> correlated readback`.
+
+The shared QEMU offload contract lives in
+`src/lib/common/gpu/simpleos_host_gpu_protocol.spl` and the guest mapping path
+in `src/os/lib/gpu_bridge/host_gpu_ivshmem*.spl`. It is distinct from
+`src/os/drivers/virtio/virtio_gpu*.spl`, which remains a 2D scanout transport.
+Linux, macOS, and Windows host execution should therefore share this session
+and evidence schema while isolating native resource interop in host adapters.
+
+The Simple 2D public boundary must remain unchanged:
+
+- `src/lib/common/ui/draw_ir.spl` owns `DrawIrComposition`;
+- `src/lib/gc_async_mut/gpu/engine2d/backend.spl` owns `RenderBackend` and
+  `Engine2DReadback`;
+- `src/lib/gc_async_mut/gpu/engine2d/backend_lane.spl` owns drawing versus
+  processing selection;
+- `backend_metal.spl`, `backend_vulkan.spl`, and `backend_software.spl` remain
+  private backend implementations;
+- event routing remains host input -> Simple dispatcher -> state/dirty Draw IR
+  -> Engine2D. GPU transport never owns event policy.
+
+No native-board GPU owner exists for the named targets. UNO Q repository
+coverage currently concerns the STM32U585 MCU lane, not QRB2210/Adreno. No
+VisionFive 2 BXE or UP Squared N4200 i915/ANV driver, boot matrix, readback
+wrapper, or physical-board artifact is present. These must be new platform
+adapters below the same Engine2D/evidence contract, not new Simple 2D APIs.
+
+Current host Metal/Vulkan evidence and dirty live wrappers are host-only. They
+must be retained as regression prerequisites but cannot prove a SimpleOS guest
+or physical-board GPU row.
