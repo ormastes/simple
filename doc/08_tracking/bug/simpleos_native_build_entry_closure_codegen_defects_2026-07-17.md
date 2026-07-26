@@ -49,6 +49,28 @@ building `gui_entry_desktop.spl`. Each verified by objdump disassembly of `build
 - Workaround landed: match-based predicate `nvme_namespace_mode_is_system()`
   (src/os/drivers/nvme/nvme_storage_model.spl).
 
+### C5 RE-CONFIRMED 2026-07-26 (desktop-WM lane) — still open, cost 5 reruns
+- `config.execution_policy != FontExecutionPolicy.Suggested` in
+  `font_render_config_valid` returned true for a config *constructed* with
+  `execution_policy: FontExecutionPolicy.Suggested`, rejecting the healthy
+  default config and emptying the font execution plan. One `text-font-batch`
+  draw command was skipped every frame -> `frame-degraded skipped=1
+  rendered=46` -> the fail-closed WM classifier failed the whole cell.
+- Attribution took 5 reruns because the enum was the LAST suspect: the same
+  gate had two genuine C3-class mixed-boolean faults stacked in front of it,
+  and `[T]` array returns were lost in between. The decisive receipt was a
+  field dump binding every validator input to a local — all ten text/scalar
+  fields crossed the aggregate param hops intact, isolating the enum field.
+- Diagnostic worth reusing: print BOTH forms side by side —
+  `if field == Variant: 1 else: 0` and a `match field:` arm — in the same
+  frame. The `==` form reads 0 where the match arm fires. Silence proves
+  nothing; only the disagreement of the two forms attributes it.
+- Workaround landed (3f615b34bb3): match-based `policy_suggested` local in
+  `font_render_config_valid` (src/lib/nogc_sync_mut/text_layout/font_types.spl).
+- **Root fix still not attempted** — C5 has now cost two separate campaigns.
+  The `==`/`!=` path on an enum-typed *struct field* (vs a local) is the
+  common factor in both sites and is where a root fix should start.
+
 ## C6. Fused byte-combine drops the second term when inlined
 - `b0 | (b1 << 8)` (and `b0 + b1*256`, incl. named-intermediate forms) loses the high-byte term
   when inlined into the FAT dirent scan: first-cluster 0x0f70 read as 0x70 -> exec probe read the
