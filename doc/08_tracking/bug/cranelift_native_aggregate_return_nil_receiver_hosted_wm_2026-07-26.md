@@ -1,0 +1,82 @@
+# Cranelift native lane decodes aggregate/Option returns as nil receivers — hosted WM first frame dies site-by-site
+
+- **ID:** cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26
+- **Date:** 2026-07-26
+- **Area:** native-build `--backend cranelift --entry-closure --mode dynload`
+  (the hosted-WM production lane); compiler aggregate-return/Option lowering
+- **Severity:** high — blocks the host-WM showcase cells and any first frame of
+  the hosted compositor. The SimpleOS guest compositor shares this pipeline.
+- **Status:** OPEN (systemic). Five consumer sites converted to the
+  owning-module accessor idiom (each verifiably moved the crash); the next
+  site is inside the web render artifact pipeline, where aggregates are
+  passed pervasively — chasing further sites is the wrong fix.
+
+## Shape of the defect
+
+A function returning a struct aggregate (`ResolvedThemePackage`,
+`WebRenderArtifact`, …) or an Option of one (`ThemeRenderSnapshot?`,
+`Dict<K, StructV>.get`) is called across the native call ABI; the callee runs,
+but the caller receives **nil**, and the first field access dies with
+`runtime error: field access on nil receiver` (SIGILL after the message).
+
+Confirmed instances, each isolated by receipt-probe bisection under Xvfb
+(`sh scripts/check/check-wm-production-fullscreen-evidence.shs`):
+
+| site | shape | fixed by |
+|---|---|---|
+| `theme_package._icons_to_css` | `match icons.get(role): case Some(icon)` → `icon.icon_id` | contains_key + bracket (`457a435787d`) |
+| `theme_package.load_theme_package` cache | same `.get()` + match | same commit |
+| `theme_package._ui_theme_from_css` | calls nested in struct-field position | typed intermediates (same commit) |
+| `host_compositor_core._taskbar_render_input` | `if val snapshot = active_wm_theme_render_snapshot(): snapshot.id` | `active_wm_theme_id()` accessor (`39d3880cdd5`) |
+| `simple_web_window_renderer` ×4 | `load_theme_package(t).fingerprint`, `.snapshot.material.*` | new scalar accessors in owning module (same commit) |
+
+Next unfixed site: inside `WebRenderPixelArtifactCache.request_to_pixel_artifact`
+(crash after receipt `c2`, i.e. past request construction, inside the render →
+artifact pipeline, which returns/wraps `WebRenderArtifact` aggregates at every
+stage).
+
+## Key observations
+
+- **Only the Some/present path faults.** The identical Option pattern binding
+  in `host_wm_theme_bootstrap` survives at startup because no theme is
+  installed yet (None); the first frame, with a theme installed, dies. Tests
+  that exercise empty paths systematically miss this.
+- **Layout-sensitive.** Adding print-only receipts inside `_px_int` moved the
+  crash from the `_ui_theme_from_css` region to the r7/r8 region with no
+  logic change — the mis-lowering depends on code layout, so single-site
+  verdicts are unstable and A/B tests must re-run the oracle, not diff one run.
+- **Interpreted lane is fine.** The same entry runs past all these sites under
+  the stage3 interpreter (it stops later only for the missing
+  `rt_winit_event_loop_new` extern, which is native-only by design).
+- Origin already carries the same diagnosis in prose:
+  `host_wm_theme_bootstrap.spl` — "Native package aggregates still cross the
+  call ABI as a nil receiver" — and dodges `load_theme_package` at startup.
+
+## Progression evidence (one run each, clean cache)
+
+banner → theme-evidence → window-created → raster-backend →
+`windows-ready count=5` → first frame crash. Each landed conversion moved the
+crash strictly later; current frontier is the per-window content render
+(`simple_web_content_frame_cached` → `request_to_pixel_artifact`).
+
+## Harness caveat found while bisecting
+
+`check-wm-production-fullscreen-evidence.shs` only rebuilds when a source file
+is newer than the binary AND reuses `--cache-dir` modules; a source edit can be
+served stale from the native cache (verified: rebuilt binary lacked newly
+added string literals until the cache dir was deleted). Bisections must
+`rm -rf $BUILD_DIR/native-cache $BUILD_DIR/hosted_entry` per cycle.
+
+## Proper fix
+
+In the cranelift lowering: make aggregate returns (direct and Option-wrapped)
+ABI-stable regardless of layout — not more caller-side accessor conversions.
+The accessor idiom is a legitimate API shape for the theme modules, but the
+web render pipeline passes aggregates by design and should not be rewritten
+around a codegen defect.
+
+## Related
+
+- `doc/08_tracking/bug/interp_env_get_name_collision_nil_root_2026-07-26.md` — different defect, same session, also nil-from-infrastructure
+- `.claude/memory` `reference_jit_option_i64_value3_none_collision` — earlier Option-decode defect in the JIT lane
+- Xvfb note: with `xvfb-run` the host-WM lane is NOT environment-blocked — hooks ready, WM launches, 5 windows created; the blocker is this defect.
