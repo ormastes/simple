@@ -60,3 +60,19 @@
 - Lint note (pre-existing class): seed linter fires COLL006 "string concat in loop" on the
   bounded padding/joining loops this generator family deliberately uses (14 hits already at
   HEAD in gen_types/generate_main); new code follows the same landed style.
+
+## lane5 evidence (2026-07-26, GHDL gates on GENERATED cores)
+All three lanes ran against staged rtl where the exec cores are the vhdl_gen
+GENERATED artifacts (sha256 generated==staged==golden IDENTICAL for all 6 cores;
+full table: build/test-artifacts/vhdl_gen_ghdl_evidence_2026-07-26/core_sha256.txt).
+- lane1 rv32 SimpleOS boot (tiny): PASS — `RV32_TINY_BOOT_DONE reached=TEST_PASSED`,
+  kernel ladder through `SIMPLEOS_RISCV_SMF_FS_PASS` / `TEST PASSED`, stack_used=344.
+  Transcript: build/test-artifacts/vhdl_gen_ghdl_evidence_2026-07-26/lane1_rv32_tiny_boot.log
+- lane2 rv32 NVMe fw smoke: PASS — `RV32_NVME_FW_PASS`, `STATUS: PASS ghdl-rv32-nvme-fw`
+  (firmware ran on soft-core, marker matches QEMU).
+  Transcript: .../lane2_rv32_nvme_fw.log
+- lane3 rv64 SimpleOS K26-DDR boot: PASS — `RESULT: PASS - rv64 SimpleOS booted through
+  the AXI4/DDR path`, rc=0. Transcript: .../lane3_rv64_k26_ddr_boot.log
+Board lane remains explicitly BLOCKED on 3.3V PMOD UART adapter (AC-4/AC-11) —
+hardware procurement; resume = program KV260 bitstream built from build/os/rtl cores
+via scripts/fpga/build_k26_rv32_ddr_bitstream.shs once adapter present.
