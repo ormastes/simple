@@ -312,16 +312,12 @@ fn _css_scan_rules_simple(css: text) -> CssRuleScan:
         # block is a leaf rule (opener not an @-wrapper) with a non-empty
         # selector, emit it. Its wrapper prelude is the nearest enclosing
         # @-ancestor, if any (depth-1 child of a depth-0 @-wrapper).
-        # Portable prefix test, not the `starts_with` builtin: a spurious TRUE
-        # here suppresses EVERY rule (the guest reported `css_scan
-        # candidates=0` on a document with a ~5 KB style block), which is the
-        # same collapse shape `_html_scan_events` showed. See text_matches_at.
-        val is_wrapper = text_matches_at(opener, "@", 0)
+        val is_wrapper = opener.starts_with("@")
         if (not is_wrapper) and opener.len() > 0 and out < cap:
             var wrapper = ""
             if depth >= 2 and (depth - 2) < stack.len():
                 val parent: text = stack[depth - 2]
-                if text_matches_at(parent, "@", 0):
+                if parent.starts_with("@"):
                     wrapper = parent
             sels[out] = opener
             decls[out] = subs[0].trim()
@@ -383,6 +379,7 @@ fn extract_css_vw(html: text, viewport_w: i32, trace_stages: bool = false) -> Ru
     var decls: [text] = []
     var pos = 0
     var guard = 0
+    var total_candidates = 0
     while guard < 1000:
         guard = guard + 1
         val sp = find_from(html, "<style", pos)
@@ -406,6 +403,7 @@ fn extract_css_vw(html: text, viewport_w: i32, trace_stages: bool = false) -> Ru
         val b_decl_text: [text] = bounds.declarations
         val b_wrapper: [text] = bounds.wrappers
         val candidate_count = b_sel_text.len()
+        total_candidates = total_candidates + candidate_count
         if trace_stages:
             print "[layout-trace] css_scan candidates={candidate_count} declarations={b_decl_text.len()} wrappers={b_wrapper.len()}"
             var trace_rule_i = 0
@@ -429,16 +427,42 @@ fn extract_css_vw(html: text, viewport_w: i32, trace_stages: bool = false) -> Ru
                 val sel: text = b_sel_text[bi]
                 val decl: text = b_decl_text[bi]
                 val rule_groups = split_selector_groups(sel)
-                block_group_parts[out_i] = split_selector_group_parts(rule_groups)
+                # INLINED on purpose (was split_selector_group_parts): a
+                # [[text]] return crossing a Simple-function boundary loses
+                # data in the freestanding SimpleOS build (see
+                # doc/08_tracking/bug/
+                # cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md).
+                # Building the nested array as a local and assigning it
+                # in-place keeps the handoff inside one call frame.
+                val rule_group_count = rule_groups.len()
+                var rule_parts: [[text]] = [[]; rule_group_count]
+                var rgi = 0
+                while rgi < rule_group_count:
+                    rule_parts[rgi] = selector_group_parts(rule_groups[rgi])
+                    rgi = rgi + 1
+                block_group_parts[out_i] = rule_parts
                 block_decls[out_i] = decl
                 out_i = out_i + 1
             bi = bi + 1
-        group_parts = group_parts + group_parts_list_prefix(block_group_parts, out_i)
+        # INLINED on purpose (was group_parts_list_prefix): same aggregate
+        # cross-function-return hazard as above — append each element
+        # directly instead of returning a [[[text]]] prefix slice.
+        var gi = 0
+        while gi < out_i:
+            group_parts = group_parts + [block_group_parts[gi]]
+            gi = gi + 1
         decls = decls + text_list_prefix(block_decls, out_i)
         pos = close + 1
     val result = Rules(group_parts: group_parts, decls: decls)
     if trace_stages:
         print "[layout-trace] css_result rules={result.group_parts.len()} decls={result.decls.len()}"
+    # Silent-on-healthy attribution receipt: scanned at least one candidate
+    # rule but the Rules struct came back with zero selector groups. The
+    # split/inline handoffs above are proven-local now; if this still fires,
+    # the remaining suspect is the Rules struct return itself (see
+    # doc/08_tracking/bug/cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md).
+    if total_candidates > 0 and group_parts.len() == 0:
+        print "[css-extract] degenerate candidates={total_candidates} groups=0"
     result
 
 fn unquote_css_attr_value(raw: text) -> text:
@@ -1009,15 +1033,6 @@ fn selector_group_parts(group: text) -> [text]:
             parts[part_i] = tail
     parts
 
-fn split_selector_group_parts(groups: [text]) -> [[text]]:
-    val group_count = groups.len()
-    var parts: [[text]] = [[]; group_count]
-    var i = 0
-    while i < group_count:
-        parts[i] = selector_group_parts(groups[i])
-        i = i + 1
-    parts
-
 fn selector_rightmost_part(parts: [text]) -> text:
     var right = parts.len() - 1
     while right >= 0:
@@ -1092,14 +1107,6 @@ fn text_key_index_count(keys: [text], key: text, key_count: i32) -> i32:
         i = i + 1
     -1
 
-
-fn group_parts_list_prefix(values: [[[text]]], count: i32) -> [[[text]]]:
-    var out: [[[text]]] = [[[]]; count]
-    var i = 0
-    while i < count:
-        out[i] = values[i]
-        i = i + 1
-    out
 
 fn i32_list_prefix(values: [i32], count: i32) -> [i32]:
     var out: [i32] = [0; count]
