@@ -27,6 +27,10 @@ launch artifacts are produced.
 - REQ-SIMPLEOS-WM-FULLSCREEN-005: Each host action maps to a newer guest
   `input_seq` shared by IRQ, WM-state, and frame markers; restore reproduces
   the baseline hash.
+- REQ-SIMPLEOS-WM-FULLSCREEN-006: The x86_64 guest contributes exactly one
+  normalized SSE2 receipt with positive fill hits and chunks. Missing,
+  duplicate, malformed, wrong-ISA, disabled, fallback, and fatal receipts fail
+  closed, and normalized fields are retained in evidence.env and the report.
 
 ## Plan
 
@@ -63,6 +67,57 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/simpleos_wm_fullscreen_evide
 
 use std.io_runtime.{file_read, process_run}
 use std.spec.*
+
+# Test-side reference oracle for the normalized guest receipt. The live checker
+# must implement the same fail-closed contract before this spec can pass.
+fn positive_decimal_field(token: text, prefix: text) -> bool:
+    if not token.starts_with(prefix):
+        return false
+    val value = token.substring(prefix.len(), token.len())
+    if value == "":
+        return false
+    for digit in value.split(""):
+        if not "0123456789".contains(digit):
+            return false
+    (value.to_i64() ?? 0) > 0
+
+fn nonnegative_decimal_field(token: text, prefix: text) -> bool:
+    if not token.starts_with(prefix):
+        return false
+    val value = token.substring(prefix.len(), token.len())
+    if value == "":
+        return false
+    for digit in value.split(""):
+        if not "0123456789".contains(digit):
+            return false
+    (value.to_i64() ?? -1) >= 0
+
+fn x86_simd_receipt_valid(transcript: text) -> bool:
+    var receipts: [text] = []
+    for raw_line in transcript.split("\n"):
+        val line = raw_line.trim()
+        if line.starts_with("[engine2d-simd]"):
+            receipts.push(line)
+    if receipts.len() != 1:
+        return false
+
+    val receipt = receipts[0]
+    if receipt.contains("fallback") or receipt.contains("fatal"):
+        return false
+    val fields = receipt.split(" ")
+    if fields.len() != 8:
+        return false
+    if fields[0] != "[engine2d-simd]" or fields[1] != "arch=x86_64":
+        return false
+    if fields[2] != "isa=sse2" or fields[3] != "enabled=1":
+        return false
+    if not positive_decimal_field(fields[4], "fill_hits="):
+        return false
+    if not positive_decimal_field(fields[5], "fill_chunks="):
+        return false
+    if not nonnegative_decimal_field(fields[6], "fill_tail_pixels="):
+        return false
+    fields[7] == "scalar_parity=bit-exact"
 
 describe "SimpleOS WM fullscreen evidence Simple binary contract":
 
@@ -235,6 +290,49 @@ describe "SimpleOS WM fullscreen evidence Simple binary contract":
         expect(script).to_contain("font_region_corrupt_rejection_status=pass")
         expect(script).to_contain("simpleos_wm_fullscreen_font_region_device_origin=qemu-pmemsave")
         expect(script).to_contain("simpleos_wm_fullscreen_delta changed_bytes=")
+
+    it "accepts exactly one normalized positive x86_64 SSE2 receipt":
+        val receipt = "[engine2d-simd] arch=x86_64 isa=sse2 enabled=1 fill_hits=2 fill_chunks=7 fill_tail_pixels=3 scalar_parity=bit-exact"
+        expect(x86_simd_receipt_valid(receipt)).to_equal(true)
+
+    it "rejects missing duplicate malformed wrong ISA and disabled receipts":
+        val valid = "[engine2d-simd] arch=x86_64 isa=sse2 enabled=1 fill_hits=2 fill_chunks=7 fill_tail_pixels=3 scalar_parity=bit-exact"
+        expect(x86_simd_receipt_valid("desktop-ready")).to_equal(false)
+        expect(x86_simd_receipt_valid(valid + "\n" + valid)).to_equal(false)
+        expect(x86_simd_receipt_valid("[engine2d-simd] arch=x86_64 isa=sse2 enabled=1 fill_hits=many fill_chunks=7 fill_tail_pixels=3 scalar_parity=bit-exact")).to_equal(false)
+        expect(x86_simd_receipt_valid("[engine2d-simd] arch=x86_64 isa=avx2 enabled=1 fill_hits=2 fill_chunks=7 fill_tail_pixels=3 scalar_parity=bit-exact")).to_equal(false)
+        expect(x86_simd_receipt_valid("[engine2d-simd] arch=x86_64 isa=sse2 enabled=0 fill_hits=2 fill_chunks=7 fill_tail_pixels=3 scalar_parity=bit-exact")).to_equal(false)
+        expect(x86_simd_receipt_valid("[engine2d-simd] arch=x86_64 isa=sse2 enabled=1 fill_hits=0 fill_chunks=7 fill_tail_pixels=3 scalar_parity=bit-exact")).to_equal(false)
+        expect(x86_simd_receipt_valid("[engine2d-simd] arch=x86_64 isa=sse2 enabled=1 fill_hits=2 fill_chunks=0 fill_tail_pixels=3 scalar_parity=bit-exact")).to_equal(false)
+        expect(x86_simd_receipt_valid("[engine2d-simd] arch=x86_64 isa=sse2 enabled=1 fill_hits=2 fill_chunks=7 fill_tail_pixels= scalar_parity=bit-exact")).to_equal(false)
+        expect(x86_simd_receipt_valid("[engine2d-simd] arch=x86_64 isa=sse2 enabled=1 fill_hits=2 fill_chunks=7 fill_tail_pixels=many scalar_parity=bit-exact")).to_equal(false)
+        expect(x86_simd_receipt_valid("[engine2d-simd] arch=x86_64 isa=sse2 enabled=1 fill_hits=2 fill_chunks=7 fill_tail_pixels=-1 scalar_parity=bit-exact")).to_equal(false)
+
+    it "rejects fallback and fatal SIMD receipts":
+        expect(x86_simd_receipt_valid("[engine2d-simd] arch=x86_64 isa=sse2 enabled=1 fill_hits=2 fill_chunks=7 fill_tail_pixels=3 scalar_parity=bit-exact fallback=scalar")).to_equal(false)
+        expect(x86_simd_receipt_valid("[engine2d-simd] arch=x86_64 isa=sse2 enabled=1 fill_hits=2 fill_chunks=7 fill_tail_pixels=3 scalar_parity=bit-exact fatal=simd-runtime-fault")).to_equal(false)
+
+    it "requires the checker to normalize one receipt into evidence and report fields":
+        val script = file_read("scripts/check/check-simpleos-wm-fullscreen-evidence.shs")
+        expect(script).to_contain("simd_receipt_count")
+        expect(script).to_contain("expected exactly one guest Engine2D SIMD receipt")
+        expect(script).to_contain("arch=x86_64 isa=sse2 enabled=1")
+        expect(script).to_contain("fill_hits")
+        expect(script).to_contain("fill_chunks")
+        expect(script).to_contain("guest-simd-receipt-missing")
+        expect(script).to_contain("guest-simd-receipt-duplicate")
+        expect(script).to_contain("guest-simd-receipt-invalid")
+        expect(script).to_contain("guest-simd-receipt-fallback")
+        expect(script).to_contain("guest-simd-receipt-fatal")
+        expect(script).to_contain("simpleos_wm_fullscreen_simd_receipt_count=")
+        expect(script).to_contain("simpleos_wm_fullscreen_simd_status=")
+        expect(script).to_contain("simpleos_wm_fullscreen_simd_arch=")
+        expect(script).to_contain("simpleos_wm_fullscreen_simd_isa=")
+        expect(script).to_contain("simpleos_wm_fullscreen_simd_enabled=")
+        expect(script).to_contain("simpleos_wm_fullscreen_simd_fill_hits=")
+        expect(script).to_contain("simpleos_wm_fullscreen_simd_fill_chunks=")
+        expect(script).to_contain("- guest SIMD status:")
+        expect(script).to_contain("- guest SIMD receipt count:")
 
     it "implements F11 sequence-correlated maximize and restore in the guest":
         val compositor = file_read("src/os/compositor/compositor.spl")

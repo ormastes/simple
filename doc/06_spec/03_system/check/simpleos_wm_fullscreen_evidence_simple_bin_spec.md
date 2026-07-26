@@ -13,6 +13,10 @@ This SSpec checks the fail-closed source and launcher contract around
 assertions are supporting evidence. Only a fresh successful wrapper run can
 prove guest font pixels and correlated QEMU input.
 
+The executable spec also defines a test-side reference oracle for the x86_64
+SIMD receipt. It deliberately remains red until the live checker implements
+the same exact-one normalization and durable report schema.
+
 The focused font/input scenario uses the shared steps:
 
 - Load the pinned multilingual font manifest
@@ -38,22 +42,26 @@ The focused font/input scenario uses the shared steps:
    version line from disguising a seed. Its live `SharedWmScene` snapshot is rendered
    through Draw IR and the `Engine2dWmFrameExecutor`; the guest emits the pinned
    taskbar-clock `route=shared-wm-draw-ir` marker rather than a private font path.
-4. Derive framebuffer address, dimensions, pitch, format, and size only from
+4. Admit exactly one normalized
+   `[engine2d-simd] arch=x86_64 isa=sse2 enabled=1` receipt. Require positive
+   `fill_hits` and `fill_chunks`, a nonnegative scalar-tail field, and
+   `scalar_parity=bit-exact`.
+5. Derive framebuffer address, dimensions, pitch, format, and size only from
    the guest `[scanout-evidence]` marker.
-5. Capture baseline, maximized, and restored frames through QMP `pmemsave`;
+6. Capture baseline, maximized, and restored frames through QMP `pmemsave`;
    extract the 8,064-byte taskbar-clock RGB crop from that device-origin
    baseline.
-6. Correlate F11 maximize/restore through guest IRQ, WM state, and frame
+7. Correlate F11 maximize/restore through guest IRQ, WM state, and frame
    generation with strictly increasing `input_seq` values.
-7. Move to the center of the guest-reported restored-window titlebar and press
+8. Move to the center of the guest-reported restored-window titlebar and press
    the left button. Accept only `window_focus` or `window_drag_begin` when the
    command window equals the positive focused window.
-8. Release the left button. Require a newer sequence, the same focused window,
+9. Release the left button. Require a newer sequence, the same focused window,
    `command=ignored`, `handled=false`, and a positive frame generation.
-9. Copy the crop, XOR exactly one byte, preserve its 8,064-byte length, compute
+10. Copy the crop, XOR exactly one byte, preserve its 8,064-byte length, compute
    its SHA-256 with the wrapper’s existing hash helper, and require the shared
    crop oracle to reject it before PASS.
-10. Retain only valid PPM captures: maximize must change more than 4,096 scanout
+11. Retain only valid PPM captures: maximize must change more than 4,096 scanout
     bytes and restore must reproduce the baseline hash. The evidence record names
     all three PPM magic statuses and the QMP `pmemsave` device origin.
 
@@ -65,6 +73,12 @@ The focused font/input scenario uses the shared steps:
 - Missing or stale kernel/disk artifacts, invalid scanout metadata, QMP errors,
   serial-only markers, missing guest correlations, blank captures, duplicate
   hashes, and crop-oracle mismatches remain failures.
+- Missing, duplicate, malformed, wrong-ISA, disabled, zero-hit, zero-chunk,
+  empty/non-numeric/negative scalar-tail, scalar-fallback, and fatal SIMD
+  receipts reject before pixels or input can be admitted. A PASS must retain
+  receipt count, status, architecture, ISA, enabled flag, fill hits, and fill
+  chunks in `evidence.env`, plus normalized status and receipt-count rows in
+  the Markdown report.
 - A current-source kernel build uses the same unoptimized WM target profile as
   the canonical QEMU runner, runs under a 900-second host watchdog, writes to a
   candidate ELF, validates ELF64 little-endian identity and x86_64 machine
@@ -118,6 +132,7 @@ focused contract ran. No Rust seed or external artifact was substituted.
 |---|---|---|
 | Pure-Simple launcher provenance | Source-covered | Fresh executable hash/version still required in live PASS |
 | ELF/image admission contract | Source-covered | Executable cases added; current pure-Simple test runner exits 139 |
+| Exact-one x86_64 SSE2 receipt | RED contract | Checker lacks receipt count, exact-one parser, duplicate/fallback/fatal rejection, and normalized status fields |
 | Pinned guest font path/length/hash | Source-covered | Guest marker and device crop missing |
 | Dynamic QMP `pmemsave` crop | BLOCKED | QEMU did not launch |
 | F11 IRQ/state/frame correlation | BLOCKED | No guest execution |
