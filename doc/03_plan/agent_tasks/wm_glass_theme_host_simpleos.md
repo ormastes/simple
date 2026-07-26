@@ -507,3 +507,24 @@ is historical.
   build must not be repeated in this session. Continue from
   `doc/08_tracking/bug/stage4_selfhost_log_modes_lexer_state_corruption_2026-07-24.md`;
   the deployed stale runner remains unchanged.
+
+## 2026-07-26 No-Bootstrap Evidence Audit
+
+- W1-W4 is remotely saved at checkpoint branch
+  `codex/wm-glass-theme-host-simpleos-20260726`; source review is accepted,
+  runtime verification remains open.
+- The generic `bin/release/simple` wrapper fails its deployed-runtime identity
+  probe. The architecture-specific Mach-O binary also emits the forbidden
+  Rust-seed warning when it executes current source. Neither is admissible.
+- x86_64 and AArch64 QEMU plus firmware are installed. Static x86 WM/QMP/SSE2
+  preflight passes, but live x86 evidence lacks an admitted current
+  kernel/disk and `grub-mkstandalone`.
+- ARM live evidence lacks the admitted kernel, FAT disk, manifest, and frozen
+  source receipt. Building those is intentionally postponed because it
+  requires the long attested build and crosses the user's no-bootstrap limit.
+- Existing 16x16 hosted captures, stale native WM binaries, generic
+  SIMD/Metal evidence, and generic Vulkan event captures are diagnostic only:
+  none binds the current Aetheric shorthand, Draw IR witness, backend receipt,
+  device readback, and native event sequence into one proof.
+- Resume W5 on a host with an admitted deployed pure-Simple runtime and current
+  guest artifacts. Do not substitute the Rust seed or stale diagnostic images.
