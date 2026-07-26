@@ -106,10 +106,13 @@ fn load_default_theme_package() -> ResolvedThemePackage:
 
 fn load_theme_package(theme_id: text) -> ResolvedThemePackage:
     val resolved_id = resolve_theme_alias(theme_id)
-    match _theme_package_cache.get(resolved_id):
-        case Some(cached):
-            return cached
-        case _: pass_dn
+    # Bracket + contains_key, not `.get()`: matching the struct-valued Option
+    # from dict `.get()` faults with "field access on nil receiver" under the
+    # cranelift native lane (same class as the mode.spl workaround; observed
+    # 2026-07-26 in the hosted-WM entry, where it killed the process before
+    # the first frame).
+    if _theme_package_cache.contains_key(resolved_id):
+        return _theme_package_cache[resolved_id]
 
     val registry = _read_if_exists(THEME_REGISTRY_PATH)
     val theme_path = _section_value(registry, "themes", resolved_id)
@@ -205,12 +208,6 @@ fn load_theme_package(theme_id: text) -> ResolvedThemePackage:
 
 fn resolved_theme_css(theme_id: text) -> text:
     load_theme_package(theme_id).snapshot.composed_css
-
-fn resolved_theme_fingerprint(theme_id: text) -> text:
-    # Keep the aggregate projection in its owning module. Native callers must
-    # not receive ResolvedThemePackage until its cross-module return ABI is
-    # fixed; scalar text results remain safe.
-    load_theme_package(theme_id).fingerprint
 
 fn invalidate_theme_package_cache(theme_id: text):
     val resolved_id = resolve_theme_alias(theme_id)
@@ -476,14 +473,18 @@ fn _resolved_icons(icon_sdn: text, roles: [text]) -> Dict<text, ResolvedThemeIco
 fn _icons_to_css(icons: Dict<text, ResolvedThemeIcon>, roles: [text]) -> text:
     var css = ":root {\n"
     for role in roles:
-        match icons.get(role):
-            case Some(icon):
-                val key = role.replace("_", "-")
-                css = "{css}  --theme-icon-{key}: \"{icon.icon_id}\";\n"
-                css = "{css}  --theme-icon-{key}-label: \"{icon.label}\";\n"
-                css = "{css}  --theme-icon-{key}-color: {icon.color_token};\n"
-                css = "{css}  --theme-icon-{key}-size: \"{icon.size_role}\";\n"
-            case _: pass_dn
+        # Bracket + contains_key, not `.get()` + match: the struct-valued
+        # Option payload from dict `.get()` decodes as nil under the cranelift
+        # native lane, so `icon.icon_id` faulted with "field access on nil
+        # receiver" and killed the hosted WM before its first frame
+        # (2026-07-26; same class and same fix as mode.spl).
+        if icons.contains_key(role):
+            val icon = icons[role]
+            val key = role.replace("_", "-")
+            css = "{css}  --theme-icon-{key}: \"{icon.icon_id}\";\n"
+            css = "{css}  --theme-icon-{key}-label: \"{icon.label}\";\n"
+            css = "{css}  --theme-icon-{key}-color: {icon.color_token};\n"
+            css = "{css}  --theme-icon-{key}-size: \"{icon.size_role}\";\n"
     css = "{css}\}\n"
     css
 
@@ -519,29 +520,36 @@ fn _token_map_from_css(css: text) -> Dict<text, text>:
     out
 
 fn _ui_theme_from_css(name: text, base_css: text, colors: ResolvedThemeColors) -> UITheme:
-    UITheme(
-        name: name,
-        colors: UIThemeColors(
-            background: UIColor.from_hex(_css_var(base_css, "--ui-bg", "#0e0e10")),
-            foreground: UIColor.from_hex(_css_var(base_css, "--ui-fg", "#e4e2e4")),
-            border: _css_var(base_css, "--app-border", "rgba(139,144,160,0.20)"),
-            accent: UIColor.from_hex(_css_var(base_css, "--ui-accent", "#adc6ff")),
-            panel_bg: _css_var(base_css, "--app-surface", "rgba(31,31,33,0.80)"),
-            hover_bg: _css_var(base_css, "--app-surface-hover", "rgba(53,52,55,0.80)"),
-            error: UIColor.from_hex(_css_var(base_css, "--ui-error", "#ffb4ab")),
-            warning: UIColor.from_hex(_css_var(base_css, "--ui-warning", "#f4bd78")),
-            success: UIColor.from_hex(_css_var(base_css, "--ui-success", "#b1b1ff")),
-            info: UIColor.from_hex(_css_var(base_css, "--ui-info", "#9bdcff"))
-        ),
-        spacing: Spacing.default_spacing(),
-        border: BorderStyle(width: 1, radius: _px_int(_css_var(base_css, "--widget-radius", "8px"), 8), style: "solid"),
-        font: FontStyle(
-            family: _css_var(base_css, "--font-main", "\"Inter\", sans-serif"),
-            size: _px_int(_css_var(base_css, "--font-size-base", "14px"), 14),
-            weight: _css_var(base_css, "--font-weight-normal", "400"),
-            line_height: 1.5
-        )
+    val v_bg: text = _css_var(base_css, "--ui-bg", "#0e0e10")
+    val v_fg: text = _css_var(base_css, "--ui-fg", "#e4e2e4")
+    val v_border: text = _css_var(base_css, "--app-border", "rgba(139,144,160,0.20)")
+    val v_accent: text = _css_var(base_css, "--ui-accent", "#adc6ff")
+    val v_panel: text = _css_var(base_css, "--app-surface", "rgba(31,31,33,0.80)")
+    val v_hover: text = _css_var(base_css, "--app-surface-hover", "rgba(53,52,55,0.80)")
+    val v_error: text = _css_var(base_css, "--ui-error", "#ffb4ab")
+    val v_warning: text = _css_var(base_css, "--ui-warning", "#f4bd78")
+    val v_success: text = _css_var(base_css, "--ui-success", "#b1b1ff")
+    val v_info: text = _css_var(base_css, "--ui-info", "#9bdcff")
+    val theme_colors = UIThemeColors(
+        background: UIColor.from_hex(v_bg),
+        foreground: UIColor.from_hex(v_fg),
+        border: v_border,
+        accent: UIColor.from_hex(v_accent),
+        panel_bg: v_panel,
+        hover_bg: v_hover,
+        error: UIColor.from_hex(v_error),
+        warning: UIColor.from_hex(v_warning),
+        success: UIColor.from_hex(v_success),
+        info: UIColor.from_hex(v_info)
     )
+    val spacing = Spacing.default_spacing()
+    val radius_px = _px_int(_css_var(base_css, "--widget-radius", "8px"), 8)
+    val border_style = BorderStyle(width: 1, radius: radius_px, style: "solid")
+    val font_family: text = _css_var(base_css, "--font-main", "\"Inter\", sans-serif")
+    val font_size = _px_int(_css_var(base_css, "--font-size-base", "14px"), 14)
+    val font_weight: text = _css_var(base_css, "--font-weight-normal", "400")
+    val font_style = FontStyle(family: font_family, size: font_size, weight: font_weight, line_height: 1.5)
+    UITheme(name: name, colors: theme_colors, spacing: spacing, border: border_style, font: font_style)
 
 fn _glass_config_from_colors(colors: ResolvedThemeColors, shape_css: text) -> ResolvedThemeGlassConfig:
     ResolvedThemeGlassConfig(
@@ -997,5 +1005,5 @@ export ResolvedThemePackage, ResolvedThemeColors, ResolvedThemeGlassConfig, Reso
 export default_theme_id, resolve_theme_alias, load_default_theme_package, load_theme_package
 export resolve_wm_window_gradient_for_css
 export invalidate_theme_package_cache, invalidate_all_theme_package_cache
-export resolved_theme_css, resolved_theme_fingerprint, theme_ui_theme, theme_design_tokens, theme_numeric_colors, theme_glass_config, theme_icon_defaults
+export resolved_theme_css, theme_ui_theme, theme_design_tokens, theme_numeric_colors, theme_glass_config, theme_icon_defaults
 export validate_default_theme_package, validate_theme_package, render_theme_validation_report
