@@ -1,11 +1,11 @@
 # Vulkan Engine2D Readback Evidence
 
 - status: blocked
-- reason: cached-stage3-probe-status-compare
+- reason: cached-stage3-readback-aggregate-abi
 - host: Linux x86_64
 - compiler: `build/gpu-goal/current/stage3/x86_64-unknown-linux-gnu/simple`
 - compiler version: `simple-bootstrap 1.0.0-beta`
-- execution evidence: not run
+- execution evidence: initialization and strict creation pass; readback crashes
 
 ## Incremental Build
 
@@ -45,14 +45,19 @@ graphics=true
 reason=Vulkan initialized
 ```
 
-The cached Stage3 miscompares that returned `BackendStatus`: both
-`probe.is_ok()` and `probe.status == BackendStatus.Initialized` evaluate false
-while `backend_status_text(probe.status)` prints `Initialized`. The evidence
-therefore stops before present/readback and does not claim a pass.
+`backend_probe_initialized` now performs the enum comparison in its owner
+module. The same executable reports `vulkan_available=true`,
+`strict_create_status=pass`, and `backend_name=vulkan`.
+
+The first cross-module `Engine2DReadback` return is then corrupted:
+`pixels.len()` is `-1`, handle and device identity are zero, and GDB records a
+segfault in `write_u32_pixels`. No readback pass is claimed.
 
 ## Resume
 
-Use a source-matched CLI with correct cross-module enum comparison, then run:
+Fix the cached LLVM aggregate-return ABI described in
+`doc/08_tracking/bug/native_engine2d_readback_aggregate_abi_2026-07-26.md`,
+then run:
 
 ```sh
 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json \
