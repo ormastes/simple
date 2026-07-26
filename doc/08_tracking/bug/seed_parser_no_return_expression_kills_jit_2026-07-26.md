@@ -1,5 +1,21 @@
 # Rust seed has no `return` in expression position — `x ?? return e` hard-fails, and every function using it is dropped from the JIT
 
+> **2026-07-26 hot-path rewrite landed + scope finding.** The one hot-path
+> user (`_engine2d_draw_ir_render_batch_embedded`, draw_ir_adv.spl) is
+> rewritten to statement form (plus its W1003 mutable-`Engine2D?` binding,
+> the next opt-out in the same function); probe
+> `probes/dg_draw_ir_embedded_jit.spl` verifies the "Unknown variable:
+> return" line is gone. HOWEVER: the seed JIT is whole-program
+> all-or-nothing (`exec_core.rs:629` + `codegen/jit.rs:84`) — 0 functions
+> finalize for the showcase even after the fix, because two module-fatal
+> blockers remain: (1) CODEGEN-AMBIGUOUS-METHOD on trait-object
+> `core.draw_image_blend` (backend_emu_adv.spl:66,70, the filed
+> RenderBackend trait-dispatch defect); (2) unresolved runtime externs in
+> the deployed binary (`rt_directx_execute_readback_checked`,
+> `rt_sleep_ms`). The web×headless cell therefore stays interpreted until
+> seed rebuild/redeploy with current runtime symbols, per-function JIT
+> granularity, or self-hosted redeploy.
+
 - **ID:** seed_parser_no_return_expression_kills_jit_2026-07-26
 - **Date:** 2026-07-26
 - **Area:** `src/compiler_rust/parser/` (no `return` expression form) →

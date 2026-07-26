@@ -709,7 +709,14 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             eng.clear_clip()
         return _engine2d_draw_ir_render_outcome(eng, direct.rendered, direct.skipped, direct.unsupported_kinds)
 
-    var pending_offscreen: Engine2D? = nil
+    # Seed-JIT compatibility (hot path): a mutable `Engine2D? = nil` binding
+    # trips the seed's W1003 shared-pointer check, and `?? return` has no seed
+    # parse — either one silently drops this per-frame function from the JIT,
+    # leaving every DrawIR batch interpreted. Track the offscreen as a plain
+    # var + created flag instead. See
+    # doc/08_tracking/bug/seed_parser_no_return_expression_kills_jit_2026-07-26.md
+    var offscreen = eng
+    var offscreen_created = false
     var offscreen_pooled = false
     if eng.backend_name() == "vulkan":
         val offscreen_result = eng.create_shared_vulkan_offscreen(embedding.width, embedding.height)
@@ -717,14 +724,16 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
             Err(reason):
                 return _engine2d_draw_ir_render_outcome(eng, 0, batch.commands.len().to_i32(), reason)
             Ok(created):
-                pending_offscreen = Some(created)
+                offscreen = created
+                offscreen_created = true
     elif eng.backend_name() == "metal":
         val offscreen_result = eng.create_shared_metal_offscreen(embedding.width, embedding.height)
         match offscreen_result:
             Err(reason):
                 return _engine2d_draw_ir_render_outcome(eng, 0, batch.commands.len().to_i32(), reason)
             Ok(created):
-                pending_offscreen = Some(created)
+                offscreen = created
+                offscreen_created = true
     else:
         # Software/baremetal offscreen: borrow the shared single-slot pool at
         # the (non-reentrant) top level so a fresh ~8 MB surface is not charged
@@ -733,10 +742,13 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: Engine2D, batch: DrawIrBatch,
         # surface so an in-flight parent buffer is never clobbered.
         if depth == 0:
             offscreen_pooled = true
-            pending_offscreen = Some(_engine2d_embed_offscreen_acquire(embedding.width, embedding.height))
+            offscreen = _engine2d_embed_offscreen_acquire(embedding.width, embedding.height)
+            offscreen_created = true
         else:
-            pending_offscreen = Some(Engine2D.create_offscreen(embedding.width, embedding.height))
-    var offscreen = pending_offscreen ?? return _engine2d_draw_ir_render_outcome(eng, 0, batch.commands.len().to_i32(), "embedded-offscreen-not-created")
+            offscreen = Engine2D.create_offscreen(embedding.width, embedding.height)
+            offscreen_created = true
+    if not offscreen_created:
+        return _engine2d_draw_ir_render_outcome(eng, 0, batch.commands.len().to_i32(), "embedded-offscreen-not-created")
     val inner = _engine2d_draw_ir_render_commands(offscreen, batch.commands, 0, 0, images, true)
     offscreen = inner.engine
     var composited = true
