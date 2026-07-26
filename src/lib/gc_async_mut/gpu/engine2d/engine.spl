@@ -64,7 +64,7 @@ use std.gc_async_mut.io.mod_stub.{env_get}
 use std.gc_async_mut.text_layout.font_renderer.{
     FontCacheStats, FontGlyphRun, FontRenderBatch, FontRenderConfig, FontRenderer,
     FontExecutionPolicy,
-    font_execution_plan, font_render_config_selection_supported,
+    font_execution_plan, font_execution_plan_into, font_render_config_selection_supported,
     font_renderer_registered_selected_bytes_only
 }
 use std.gc_async_mut.gpu.engine2d.font_owner.{
@@ -1288,11 +1288,18 @@ class Engine2D:
         )
 
     me draw_text_with_advances_configured(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, config: FontRenderConfig) -> bool:
-        val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
+        # Mut-param plan (font_execution_plan_into): the [text] array RETURN of
+        # font_execution_plan arrived empty at THIS call site on the
+        # freestanding lane while the identical shaped-path call survived
+        # (rerun31 [e2d-batch] plan-empty for text='X' size=12). The variant
+        # fills a caller-local list and returns a scalar count, both proven
+        # channels, and its per-gate receipts attribute any honest rejection.
+        var plan: [text] = []
+        val plan_count = font_execution_plan_into(config, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"], plan)
         # Explicit branches (no mixed boolean or) + per-exit receipts: rerun30
         # proved the caller sees false while the batch-path receipt below stays
         # silent — the failure is in one of these two early exits.
-        if plan.len() == 0:
+        if plan_count == 0:
             print("[e2d-batch] plan-empty text_len={text_val.len()}")
             return false
         if not font_render_config_selection_supported(config):

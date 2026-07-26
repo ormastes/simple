@@ -167,6 +167,55 @@ fn font_execution_plan(config: FontRenderConfig, executable_targets: [text]) -> 
             suggested.push(target)
     suggested
 
+pub fn font_execution_plan_into(config: FontRenderConfig, executable_targets: [text], mut plan_out: [text]) -> i64:
+    """Freestanding-safe variant of font_execution_plan: fills the caller's
+    plan_out (mut array param, proven channel) and returns the count as a
+    scalar. The [text] array RETURN of font_execution_plan arrived empty at
+    one engine call site on the freestanding lane while the identical call
+    in the shaped path survived (layout-dependent loss; [e2d-batch]
+    plan-empty, 2026-07-26). Logic mirrors font_execution_plan exactly.
+    Per-gate receipts are silent on healthy configs and attribute WHICH
+    gate rejected when the plan comes back empty."""
+    if not font_render_config_valid(config):
+        print("[font-plan] config-invalid size={config.size} target={config.execution_target}")
+        return 0
+    var order: [text] = []
+    for raw in executable_targets:
+        val target = font_execution_target_name(raw)
+        if target == "auto" or not font_execution_target_supported(target):
+            print("[font-plan] target-unsupported target={target}")
+            return 0
+        if not order.contains(target):
+            order.push(target)
+    val requested = font_execution_target_name(config.execution_target)
+    if order.len() == 0 or (requested != "auto" and not order.contains(requested)):
+        print("[font-plan] requested-not-executable requested={requested} order_len={order.len()}")
+        return 0
+    if config.execution_policy == FontExecutionPolicy.Required:
+        plan_out.push(requested)
+        return 1
+    if config.execution_policy == FontExecutionPolicy.Preferred:
+        plan_out.push(requested)
+        var preferred_count: i64 = 1
+        if requested != "cpu":
+            if order.contains("cpu"):
+                plan_out.push("cpu")
+                preferred_count = 2
+        return preferred_count
+    var plan_count: i64 = 0
+    if requested == "auto":
+        for target in order:
+            plan_out.push(target)
+            plan_count = plan_count + 1
+        return plan_count
+    plan_out.push(requested)
+    plan_count = 1
+    for target in order:
+        if target != requested:
+            plan_out.push(target)
+            plan_count = plan_count + 1
+    plan_count
+
 # Free-function form of FontRenderConfig.default_for_size: the seed compiler's
 # semantic analyzer rejects the static path call `FontRenderConfig.default_for_size(...)`
 # ("unsupported path call") in the interpreted web-render path, while free
