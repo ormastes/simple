@@ -9,6 +9,7 @@ use std.spec.{describe, it, expect, pending}
 use std.nogc_sync_mut.env.platform.{is_macos}
 
 val HARNESS = "test/02_integration/rendering/macos_gpu_2d_live_harness.spl"
+val WRAPPER = "scripts/check/check-macos-gpu-2d-live-evidence.shs"
 val VULKAN_STRICT = "test/02_integration/rendering/vulkan_strict_spec.spl"
 val METAL_STRICT = "test/02_integration/rendering/metal_strict_spec.spl"
 
@@ -42,6 +43,48 @@ describe "macOS GPU backend failure and fallback receipts":
         expect(harness).to_contain("return 4")
         expect(harness.contains("gpu_2d_live_status=pass\\n" +
             "gpu_2d_live_backend=cpu")).to_equal(false)
+
+    it "requires typed stage failures and rejects stale or forged passes":
+        val harness = file_read(HARNESS)
+        val wrapper = file_read(WRAPPER)
+        for field in [
+            "gpu_2d_live_status=fail\\n",
+            "gpu_2d_live_reason={reason}\\n",
+            "gpu_2d_live_backend={backend}\\n",
+            "gpu_2d_live_stage={stage}\\n",
+            "gpu_2d_live_exit_code={exit_code}\\n"
+        ]:
+            expect(harness).to_contain(field)
+        for reason in [
+            "initial-window-present-failed",
+            "interaction-window-present-failed",
+            "initial-device-readback-failed",
+            "interaction-device-readback-failed",
+            "interaction-pixel-count-mismatch",
+            "shared-draw-ir-device-render-failed"
+        ]:
+            expect(harness).to_contain(reason)
+        # The unavailable/init branch must use the same typed writer as later
+        # stages; its current ad-hoc receipt is intentionally caught here.
+        expect(harness).to_contain(
+            "receipt_path, backend, \"backend-create-failed\", 4, 4")
+        for hook in ["submit-failed", "readback-failed", "checksum-mismatch"]:
+            expect(harness).to_contain(hook)
+        for rejection in [
+            "runtime-failure-receipt-without-reason",
+            "backend-mismatch",
+            "repo-revision-mismatch",
+            "shared-scene-fingerprint-mismatch",
+            "source-revision-mismatch",
+            "device-readback-missing",
+            "shared-draw-ir-command-skipped",
+            "shared-draw-ir-fallback-required",
+            "shared-draw-ir-unsupported-command"
+        ]:
+            expect(wrapper).to_contain(rejection)
+        expect(wrapper).to_contain("gpu_2d_live_status")
+        expect(wrapper).to_contain("gpu_2d_live_backend")
+        expect(wrapper).to_contain("gpu_2d_live_source")
 
     it "keeps strict Metal and Vulkan failures typed and explicit":
         val vulkan = file_read(VULKAN_STRICT)

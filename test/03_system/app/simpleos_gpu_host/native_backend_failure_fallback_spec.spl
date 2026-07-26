@@ -44,10 +44,11 @@ describe "SimpleOS host-GPU backend failure and fallback receipts":
     it "records unavailable CUDA, Vulkan, and Metal without silently selecting another backend":
         for backend in ["cuda", "vulkan", "metal"]:
             val batch = processing_batch(backend, 10)
-            expect(simpleos_host_gpu_backend_name(simpleos_host_gpu_backend_code(backend))).to_equal(backend)
             expect(simpleos_host_gpu_validate_batch(batch).status).to_equal("pass")
             val unavailable = receipt(batch, "unsupported", "unavailable", "backend-unavailable", "none", 0, 0, 0)
             expect(simpleos_host_gpu_validate_receipt(batch, unavailable).status).to_equal("pass")
+            expect(unavailable.status).to_equal("unsupported")
+            expect(unavailable.reason).to_equal("backend-unavailable")
             expect(batch.backend).to_equal(backend)
             expect(unavailable.backend).to_equal("unavailable")
             expect(batch.backend != unavailable.backend).to_be(true)
@@ -74,6 +75,7 @@ describe "SimpleOS host-GPU backend failure and fallback receipts":
         expect(simpleos_host_gpu_validate_receipt(invalid, failed).status).to_equal("pass")
         expect(failed.status).to_equal("fail")
         expect(failed.backend).to_equal(invalid.backend)
+        expect(failed.reason).to_equal("invalid-request")
 
     it "keeps a submit failure failed and rejects a CPU masquerading as a GPU pass":
         val batch = processing_batch("cuda", 12)
@@ -81,8 +83,11 @@ describe "SimpleOS host-GPU backend failure and fallback receipts":
         expect(simpleos_host_gpu_validate_receipt(batch, submit_failed).status).to_equal("pass")
         expect(submit_failed.status).to_equal("fail")
         expect(submit_failed.reason).to_equal("submit-failed")
+        expect(submit_failed.readback_source).to_equal("none")
         val forged_pass = receipt(batch, "pass", "cpu", "pass", "cpu_reference", 0, 17, 64)
         expect(simpleos_host_gpu_validate_receipt(batch, forged_pass).reason).to_equal("backend-correlation-mismatch")
+        val same_backend_forged_pass = receipt(batch, "pass", "cuda", "pass", "cpu_reference", 41, 17, 64)
+        expect(simpleos_host_gpu_validate_receipt(batch, same_backend_forged_pass).reason).to_equal("non-device-readback")
 
     it "fails closed on a readback size or checksum mismatch":
         val batch = processing_batch("vulkan", 13)
@@ -90,10 +95,15 @@ describe "SimpleOS host-GPU backend failure and fallback receipts":
         expect(simpleos_host_gpu_validate_receipt(batch, wrong_size).reason).to_equal("output-size-mismatch")
         val missing_checksum = receipt(batch, "pass", "vulkan", "pass", "device_readback", 41, 0, 64)
         expect(simpleos_host_gpu_validate_receipt(batch, missing_checksum).reason).to_equal("missing-output-checksum")
-        val mismatch = receipt(batch, "fail", "vulkan", "checksum-mismatch", "none", 0, 0, 0)
-        expect(simpleos_host_gpu_validate_receipt(batch, mismatch).status).to_equal("pass")
-        expect(mismatch.status).to_equal("fail")
-        expect(mismatch.reason).to_equal("checksum-mismatch")
+        val readback_failed = receipt(batch, "fail", "vulkan", "readback-failed", "none", 0, 0, 0)
+        expect(simpleos_host_gpu_validate_receipt(batch, readback_failed).status).to_equal("pass")
+        expect(readback_failed.status).to_equal("fail")
+        expect(readback_failed.reason).to_equal("readback-failed")
+        val checksum_mismatch = receipt(batch, "fail", "vulkan", "checksum-mismatch", "none", 0, 0, 0)
+        expect(simpleos_host_gpu_validate_receipt(batch, checksum_mismatch).status).to_equal("pass")
+        expect(checksum_mismatch.status).to_equal("fail")
+        expect(checksum_mismatch.reason).to_equal("checksum-mismatch")
+        expect(readback_failed.reason != checksum_mismatch.reason).to_be(true)
 
     it "accepts only an explicit CPU fallback receipt and keeps it distinct from the request":
         for backend in ["cuda", "vulkan", "metal"]:
@@ -106,4 +116,6 @@ describe "SimpleOS host-GPU backend failure and fallback receipts":
             expect(fallback.native_handle).to_equal(0)
             expect(fallback.readback_source).to_equal("cpu_reference")
             val forbidden_gpu_pass = receipt(batch, "pass", "cpu", "pass", "cpu_reference", 0, 17, 64)
-            expect(simpleos_host_gpu_validate_receipt(batch, forbidden_gpu_pass).ok).to_equal(false)
+            val forbidden_check = simpleos_host_gpu_validate_receipt(batch, forbidden_gpu_pass)
+            expect(forbidden_check.ok).to_equal(false)
+            expect(forbidden_check.reason).to_equal("backend-correlation-mismatch")

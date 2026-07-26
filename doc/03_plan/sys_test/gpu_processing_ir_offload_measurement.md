@@ -54,6 +54,25 @@ The current repository has no dedicated producer that emits this structured
 multi-batch receipt. Until one exists, the Linux spec fails at the missing
 receipt gate; the raw helper output must not be promoted into a pass.
 
+## Unavailable Protocol
+
+If the requested native device, driver, or runtime is unavailable, the
+producer must write a diagnostic receipt instead of fabricating timings:
+
+```text
+processing_ir_offload_status=unavailable
+processing_ir_offload_schema=processing-ir-offload-v1
+processing_ir_offload_execution=processing_ir
+processing_ir_offload_backend=unavailable
+processing_ir_offload_unavailable_reason=<non-empty stable token>
+processing_ir_offload_host=linux|macos
+```
+
+An unavailable receipt must contain no rows, break-even batch, or measured
+RSS/timing values. It is diagnostic evidence only: the Linux consumer remains
+non-pass and exits nonzero, while macOS may retain this status during its
+postponed-host phase. Neither host may promote it to a GPU result.
+
 ## Measurement Rules
 
 - Use a native ProcessingIR path and record the selected backend (`cuda`,
@@ -125,6 +144,8 @@ Acceptance is `pass` only when all of the following hold:
 4. The first GPU-faster row is the recorded break-even batch.
 5. At least one lower batch is non-faster and is assigned to CPU.
 6. RSS and communication fields are present and measured.
+7. An unavailable host has a typed `status=unavailable` receipt with a
+   non-empty reason, and it is never counted as a measurement pass.
 
 ## Ownership
 

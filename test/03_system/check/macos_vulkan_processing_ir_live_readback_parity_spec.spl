@@ -14,7 +14,23 @@ val RECEIPT = "build/tmp/macos_vulkan_2d_live_evidence/runtime_receipt.env"
 val EVIDENCE = "build/tmp/macos_vulkan_2d_live_evidence/evidence.env"
 
 fn nonempty_field(lines: text, key: text) -> bool:
-    lines.contains(key + "=") and not lines.contains(key + "=\n")
+    receipt_value(lines, key) != ""
+
+fn receipt_value(lines: text, key: text) -> text:
+    val prefix = key + "="
+    for line in lines.split("\n"):
+        if line.starts_with(prefix):
+            return line.substring(prefix.len(), line.len())
+    ""
+
+fn positive_field(lines: text, key: text) -> bool:
+    val value = receipt_value(lines, key)
+    value != "" and value != "0" and value.to_i64() > 0
+
+fn equal_nonempty_fields(lines: text, expected_key: text, actual_key: text) -> bool:
+    val expected = receipt_value(lines, expected_key)
+    val actual = receipt_value(lines, actual_key)
+    expected != "" and actual != "" and expected == actual
 
 describe "macOS Vulkan ProcessingIR 2D live readback parity":
     if not is_macos():
@@ -50,6 +66,32 @@ describe "macOS Vulkan ProcessingIR 2D live readback parity":
         expect(nonempty_field(receipt, "gpu_2d_live_draw_ir_readback_checksum")).to_equal(true)
         expect(nonempty_field(evidence, "macos_vulkan_2d_live_pixel_sha256")).to_equal(true)
 
+        # A pass is admitted only when the receipt binds the exact device and
+        # proves pixel parity. These fields are intentionally host-produced;
+        # Linux must never manufacture them.
+        val device_identity = receipt_value(receipt, "gpu_2d_live_device_identity")
+        expect(device_identity.len()).to_be_greater_than(0)
+        expect(receipt_value(receipt, "gpu_2d_live_device_identity_expected"))
+            .to_equal(device_identity)
+        expect(device_identity.contains("unknown")).to_equal(false)
+        expect(equal_nonempty_fields(receipt,
+            "gpu_2d_live_pixel_expected_checksum",
+            "gpu_2d_live_pixel_actual_checksum")).to_equal(true)
+        expect(equal_nonempty_fields(receipt,
+            "gpu_2d_live_pixel_expected_sha256",
+            "gpu_2d_live_pixel_actual_sha256")).to_equal(true)
+        expect(receipt_value(receipt, "gpu_2d_live_pixel_mismatch_count"))
+            .to_equal("0")
+        expect(receipt_value(receipt, "gpu_2d_live_pixel_max_channel_delta"))
+            .to_equal("0")
+        expect(positive_field(receipt, "gpu_2d_live_timing_submit_ns"))
+            .to_equal(true)
+        expect(positive_field(receipt, "gpu_2d_live_timing_readback_ns"))
+            .to_equal(true)
+        expect(positive_field(receipt, "gpu_2d_live_timing_total_ns"))
+            .to_equal(true)
+        expect(receipt_value(receipt, "gpu_2d_live_fallback")).to_equal("false")
+
     it "keeps device-only admission in the canonical checker":
         val frontend = file_read(FRONTEND)
         val checker = file_read(CHECKER)
@@ -58,6 +100,20 @@ describe "macOS Vulkan ProcessingIR 2D live readback parity":
         expect(checker).to_contain("backend-handle-missing")
         expect(checker).to_contain("capture-header-mismatch")
         expect(checker).to_contain("pixel-sha256-invalid")
+        expect(checker).to_contain("device-identity-missing")
+        expect(checker).to_contain("device-identity-mismatch")
+        expect(checker).to_contain("pixel-parity-mismatch")
+        expect(checker).to_contain("pixel-mismatch-count")
+        expect(checker).to_contain("pixel-timing-missing")
         expect(checker).to_contain("shared-draw-ir-fallback-required")
         expect(checker).to_contain("device_readback")
         expect(checker.contains("cpu_mirror")).to_equal(false)
+
+    it "invalidates stale or caller-forged receipts before admission":
+        val checker = file_read(CHECKER)
+        expect(checker).to_contain("rm -f \"$CAPTURE_PPM\"")
+        expect(checker).to_contain("repo-revision-mismatch")
+        expect(checker).to_contain("source-revision-mismatch")
+        expect(checker).to_contain("trusted-build-manifest-invalid")
+        expect(checker).to_contain("arbitrary-native-driver-supplied")
+        expect(checker).to_contain("runtime-receipt-timeout")
