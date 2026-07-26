@@ -137,40 +137,9 @@ impl<'a> Parser<'a> {
 
         use crate::error_recovery::detect_common_mistake;
         if let Some(mistake) = detect_common_mistake(&parser.current, &parser.previous, next_token) {
-            use crate::error_recovery::{CommonMistake, ErrorHint, ErrorHintLevel};
-            let level = match mistake {
-                CommonMistake::PythonDef
-                | CommonMistake::PythonTrue
-                | CommonMistake::PythonFalse
-                | CommonMistake::RustLetMut
-                | CommonMistake::JavaPublicClass
-                | CommonMistake::JavaVoid
-                | CommonMistake::JavaNew
-                | CommonMistake::JavaThis
-                | CommonMistake::TsFunction
-                | CommonMistake::TsConst
-                | CommonMistake::TsInterface
-                | CommonMistake::CppNamespace
-                | CommonMistake::CppTemplate
-                | CommonMistake::CTypeFirst
-                | CommonMistake::MissingColon => ErrorHintLevel::Error,
-                CommonMistake::VerboseReturnType
-                | CommonMistake::ExplicitSelf
-                | CommonMistake::WrongBrackets
-                | CommonMistake::CSemicolon
-                | CommonMistake::SemicolonAfterBlock => ErrorHintLevel::Warning,
-                CommonMistake::TsLet | CommonMistake::RustFnMut => ErrorHintLevel::Info,
-                CommonMistake::RustLifetime
-                | CommonMistake::RustMacro
-                | CommonMistake::RustTurbofish
-                | CommonMistake::TsArrowFunction
-                | CommonMistake::PythonElif => ErrorHintLevel::Hint,
-                CommonMistake::MissingCommaInArgs
-                | CommonMistake::MissingColonBeforeBlock
-                | CommonMistake::DictInsteadOfStruct
-                | CommonMistake::MissingIndentAfterColon
-                | CommonMistake::WrongIndentLevel => ErrorHintLevel::Error,
-            };
+            use crate::error_recovery::ErrorHint;
+            // Shared classification - see CommonMistake::hint_level.
+            let level = mistake.hint_level();
 
             let hint = ErrorHint {
                 level,

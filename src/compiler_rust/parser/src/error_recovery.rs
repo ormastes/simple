@@ -267,6 +267,55 @@ impl CommonMistake {
             _ => "See error message for details".to_string(),
         }
     }
+
+    /// Severity this mistake is reported at.
+    ///
+    /// Single source of truth. `parser_impl::core` (initial token) and
+    /// `parser_helpers::advance` (every subsequent token) both classify the
+    /// same detections and previously carried byte-identical copies of this
+    /// `match`, which could silently diverge. Both now call this.
+    pub fn hint_level(&self) -> ErrorHintLevel {
+        match self {
+            // Errors for wrong keywords/syntax
+            Self::PythonDef
+            | Self::PythonTrue
+            | Self::PythonFalse
+            | Self::RustLetMut
+            | Self::JavaPublicClass
+            | Self::JavaVoid
+            | Self::JavaNew
+            | Self::JavaThis
+            | Self::TsFunction
+            | Self::TsConst
+            | Self::TsInterface
+            | Self::CppNamespace
+            | Self::CppTemplate
+            | Self::CTypeFirst
+            | Self::MissingColon => ErrorHintLevel::Error,
+
+            // Warnings for verbose but valid syntax
+            Self::VerboseReturnType
+            | Self::ExplicitSelf
+            | Self::WrongBrackets
+            | Self::CSemicolon
+            | Self::SemicolonAfterBlock => ErrorHintLevel::Warning,
+
+            // Info for style preferences
+            Self::TsLet | Self::RustFnMut => ErrorHintLevel::Info,
+
+            // Hints for advanced features
+            Self::RustLifetime | Self::RustMacro | Self::RustTurbofish | Self::TsArrowFunction | Self::PythonElif => {
+                ErrorHintLevel::Hint
+            }
+
+            // Colon-specific mistakes
+            Self::MissingCommaInArgs
+            | Self::MissingColonBeforeBlock
+            | Self::DictInsteadOfStruct
+            | Self::MissingIndentAfterColon
+            | Self::WrongIndentLevel => ErrorHintLevel::Error,
+        }
+    }
 }
 
 /// Detect common mistakes from token sequences

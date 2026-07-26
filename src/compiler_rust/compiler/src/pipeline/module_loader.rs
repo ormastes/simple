@@ -828,6 +828,10 @@ fn display_parser_hints(parser: &Parser, source: &str, path: &Path) {
     let suppress_non_errors =
         std::env::var("SIMPLE_ALLOW_DEPRECATED").is_ok() || std::env::var("SIMPLE_NO_DEPRECATED_WARNINGS").is_ok();
 
+    // Index the source lines ONCE. `source.lines().nth(n)` re-walks the file
+    // from byte 0 for every hint, making the printer O(hints x file lines).
+    let source_lines: Vec<&str> = source.lines().collect();
+
     // Display hints to stderr
     for hint in hints {
         if suppress_non_errors && !matches!(hint.level, ErrorHintLevel::Error) {
@@ -845,7 +849,7 @@ fn display_parser_hints(parser: &Parser, source: &str, path: &Path) {
         eprintln!("  --> {}:{}:{}", path.display(), hint.span.line, hint.span.column);
 
         // Show source line with caret
-        if let Some(line) = source.lines().nth(hint.span.line - 1) {
+        if let Some(line) = hint.span.line.checked_sub(1).and_then(|i| source_lines.get(i)) {
             eprintln!("   |");
             eprintln!("{:3} | {}", hint.span.line, line);
             eprintln!("   | {}^", " ".repeat(hint.span.column - 1));

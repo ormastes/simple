@@ -5,7 +5,9 @@
   `src/compiler_rust/compiler/src/pipeline/module_loader.rs` (hint printer)
 - **Severity:** medium — not a correctness bug, but it buries every real
   diagnostic and costs ~16% of a short interpreted run.
-- **Status:** OPEN. Found while root-causing the 2D × headless showcase cell
+- **Status:** **STILL OPEN** — the false positives themselves are not fixed. The
+  printer's O(hints x file-lines) cost was fixed 2026-07-26; see "Partial work
+  landed" at the end. Found while root-causing the 2D × headless showcase cell
   (see `engine2d_load_font_interpreter_3kb_per_sec_2026-07-25.md`).
 
 ## What happens
@@ -109,3 +111,42 @@ bin/simple run <any .spl importing std.gpu.engine2d.engine>   # ~150k lines
 # quiet + ~16% faster
 SIMPLE_NO_DEPRECATED_WARNINGS=1 bin/simple run <same file>    # 7 lines
 ```
+
+## Partial work landed 2026-07-26 — printer cost, NOT the false positives
+
+The agent working this was cut off partway. What landed is real but does not
+close the bug:
+
+1. **`display_parser_hints` was O(hints x file-lines).** It called
+   `source.lines().nth(hint.span.line - 1)` per hint, re-walking the file from
+   byte 0 every time. With ~11.5k hints on a large stdlib file that is quadratic.
+   The source is now indexed into a `Vec<&str>` once.
+2. **Underflow hardening.** The same expression computed `hint.span.line - 1` on
+   a `usize`, so a hint reported at line 0 would panic. Now `checked_sub`.
+3. **Duplicated severity classification unified.** `parser_impl::core` (initial
+   token) and `parser_helpers::advance` (every subsequent token) carried
+   byte-identical 40-line `match` blocks mapping `CommonMistake` to
+   `ErrorHintLevel`. Both now call one `CommonMistake::hint_level()`. Behaviour
+   is unchanged — this removes a silent-divergence hazard, it does not alter any
+   severity.
+
+Verified: `cargo check -p simple-parser -p simple-compiler` rc=0 with no new
+warnings; `cargo test -p simple-parser` 236 + 20 further suites, **0 failed**.
+
+**What is still broken.** The false positives are undiminished and the message
+is still content-free. A 17-line probe importing `std.common.encoding.font_registry`
+emits 41 copies of:
+
+```
+info: Common mistake detected: See error message for details
+See error message for details
+```
+
+Two defects remain: the `PythonSelf`-class detection fires on valid Simple, and
+the hint carries no actionable text (`_ => "See error message for details"` in
+`CommonMistake::message`), so even a true positive would be unactionable. Both
+are untouched.
+
+**Not verifiable against a deployed binary.** These are Rust-seed parser
+changes; the shipped `bin/simple` still contains the old code. The evidence
+above is a source-level build and test, not a redeploy — no deploy was made.

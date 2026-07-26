@@ -19,6 +19,13 @@ use std.io_runtime.{env_get}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_exists(path: text) -> bool
+# Host-only, and ONLY ever called from load_selected_font_file() — the same
+# function that already calls rt_file_read_bytes. Freestanding/baremetal
+# consumers never reach either: they run under
+# font_renderer_use_registered_selected_bytes_only(), which routes every load
+# through validate_selected_font_asset(path, blob) instead. Do NOT call this
+# from any other site without re-checking that gate.
+extern fn rt_file_hash_sha256(path: text) -> text
 
 # Pinned CLDR 48.2 literate-functional reach evidence. The annotated tag object
 # peels to the source commit below. Totals use per-territory fixed-decimal
@@ -508,6 +515,15 @@ fn _u8_blob_to_i64_array(blob: [u8]) -> [i64]:
     out
 
 fn _validate_selected_font_asset(path: text, blob: [u8]) -> FontAssetRuntimeValidation:
+    _validate_selected_font_asset_with_digest(path, blob, "")
+
+# `precomputed_sha256_hex` is a digest of the SAME bytes, obtained by a cheaper
+# route than hashing `blob` in interpreted Simple. It is used only when it is a
+# well-formed 64-char lowercase hex string; anything else (including the ""
+# default and any host-extern failure return) falls back to hashing the blob
+# here, so a broken or absent fast path can never turn into an accepted asset.
+fn _validate_selected_font_asset_with_digest(path: text, blob: [u8],
+                                             precomputed_sha256_hex: text) -> FontAssetRuntimeValidation:
     val root = env_get("SIMPLE_ASSET_ROOT")
     val candidates = selected_font_asset_candidates()
     val candidate_index = _selected_font_asset_candidate_index_for_path_with_root(path, root)
@@ -517,12 +533,24 @@ fn _validate_selected_font_asset(path: text, blob: [u8]) -> FontAssetRuntimeVali
     if blob.len() != candidate.byte_len:
         return _font_asset_validation(true, false, candidate.family, "byte-length")
     val runtime_mode = env_get("SIMPLE_RUNTIME_MODE")
+    # PERF (2026-07-26): hashing the blob here is ~99% of Engine2D.load_font on
+    # the interpreter lane — measured 43.4s of a 41.6s load for the 119KB Bungee
+    # face (~2.9 KB/s), and the pinned default is the 17.8MB NotoSansSC, i.e.
+    # ~1.7 hours. It is not an antipattern in the SHA-256 code (sha256_u8_hex,
+    # the allocation-light variant, measures within 2% of sha256_bytes) — 64-byte
+    # blocks of interpreted bit-twiddling simply cost ~23ms each. So the fix is
+    # to not do it interpreted at all when a native digest of the same bytes is
+    # available; see load_selected_font_file. Digest value is unchanged.
+    # doc/08_tracking/bug/engine2d_load_font_interpreter_3kb_per_sec_2026-07-25.md
+    #
     # Seed-mode compatibility path: avoid the u8-tail implementation's deep
     # interpreter crash in selected-font validation (seed/JIT stack-depth pressure).
     # Self-hosted builds keep the allocator-light sha256_u8_hex path for
     # throughput; interpreter-mode fallback computes the same digest through
     # sha256_bytes for parity over byte data.
-    val actual_sha256 = if runtime_mode == nil or runtime_mode == "" or runtime_mode == "interpreter":
+    val actual_sha256 = if _font_sha256_hex_valid(precomputed_sha256_hex):
+        precomputed_sha256_hex
+    else if runtime_mode == nil or runtime_mode == "" or runtime_mode == "interpreter":
         bytes_to_hex(sha256_bytes(_u8_blob_to_i64_array(blob)))
     else:
         sha256_u8_hex(blob)
@@ -575,8 +603,18 @@ fn load_selected_font_file(path: text) -> ([u8], FontAssetRuntimeValidation):
     if not exists:
         val missing_validation = _validate_selected_font_asset(path, [])
         return ([], missing_validation)
+    # Native digest sandwich around the read (see the PERF note in
+    # _validate_selected_font_asset_with_digest). Hashing the file rather than
+    # the in-memory blob would otherwise open a read-vs-hash race, so the file
+    # is digested BEFORE and AFTER the read and the two must agree: the bytes
+    # returned then came from a file that did not change across the read. A
+    # disagreement, or any non-hex return (missing/failed extern yields ""),
+    # yields "" and validation falls back to hashing the blob itself.
+    val digest_before = rt_file_hash_sha256(physical_path)
     val blob = rt_file_read_bytes(physical_path)
-    val validation = _validate_selected_font_asset(path, blob)
+    val digest_after = rt_file_hash_sha256(physical_path)
+    val file_digest = if digest_before == digest_after: digest_before else: ""
+    val validation = _validate_selected_font_asset_with_digest(path, blob, file_digest)
     (blob, validation)
 
 class FontCoverageCell:

@@ -208,12 +208,21 @@ fn text_index_of(haystack: text, needle: text) -> i32:
     find_from(haystack, needle, 0)
 
 fn text_matches_at(haystack: text, needle: text, offset: i32) -> bool:
+    # Compare CODE POINTS, not 1-char `text` handles. `char_at` allocates a
+    # fresh heap string per character and the `!=` between two of them crosses
+    # a runtime boolean-return boundary; `char_code_at` yields a plain integer
+    # so the decision stays in generated code. Besides removing two allocations
+    # per compared byte, this is the freestanding-safe form: the SimpleOS
+    # x86_64 kernel build mis-marshals boolean results from text builtins at
+    # depth (doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md,
+    # residual item 3), which is what collapsed `_html_scan_events` to zero
+    # events in the guest while the host produced a full DOM.
     val needle_len = needle.len()
     if offset < 0 or offset + needle_len > haystack.len():
         return false
     var j = 0
     while j < needle_len:
-        if haystack.char_at(offset + j) != needle.char_at(j):
+        if haystack.char_code_at(offset + j) != needle.char_code_at(j):
             return false
         j = j + 1
     true
@@ -525,22 +534,46 @@ fn _html_scan_events(html: text) -> [[text]]:
         payloads[out] = parts[0]
         out = out + 1
     var k = 1
+    var divergence_reported = false
     while k < np:
         var seg: text = parts[k]
-        if seg.starts_with("!--"):
+        # ONE-SHOT builtin-vs-portable divergence receipt. `starts_with` and
+        # `index_of` are the only two runtime text builtins this scanner needs,
+        # and both were suspected of mis-marshalling their result in the
+        # freestanding SimpleOS kernel build. Comparing them against the
+        # in-Simple equivalents costs one extra segment scan and stays SILENT
+        # on a healthy build, so it is a permanent attribution receipt rather
+        # than a probe: a future "nodes=1" report says which builtin lied.
+        if not divergence_reported:
+            val sw_builtin = if seg.starts_with("!--"): 1 else: 0
+            val sw_portable = if text_matches_at(seg, "!--", 0): 1 else: 0
+            val gt_builtin = (seg.index_of(">") ?? -1) as i32
+            val gt_portable = find_from(seg, ">", 0)
+            if sw_builtin != sw_portable or gt_builtin != gt_portable:
+                divergence_reported = true
+                print "[web-scan] builtin-divergence k={k} np={np} seg_len={seg.len()} starts_with_builtin={sw_builtin} starts_with_portable={sw_portable} index_of_builtin={gt_builtin} index_of_portable={gt_portable}"
+        # Every text predicate below goes through the portable helpers. A
+        # boolean or index that crosses the runtime call boundary is not
+        # trustworthy in the freestanding build (see text_matches_at), and a
+        # single wrong answer here discards the whole document: both early
+        # returns bail with `out` events already emitted, so one false
+        # `starts_with("!--")` yields ZERO events and parse_html returns the
+        # bare `#root` node.
+        if text_matches_at(seg, "!--", 0):
             # Comment: content may contain "<" (spanning later parts), but
             # "-->" contains no "<" so it always lies within a single part.
-            var cidx = (seg.index_of("-->") ?? -1) as i32
+            var cidx = find_from(seg, "-->", 0)
             var terminated = cidx >= 0
             while not terminated:
                 k = k + 1
                 if k >= np:
                     break
                 seg = parts[k]
-                cidx = (seg.index_of("-->") ?? -1) as i32
+                cidx = find_from(seg, "-->", 0)
                 terminated = cidx >= 0
             if not terminated:
                 # Unterminated comment: old scanner broke out, discarding the rest.
+                print "[web-scan] bail reason=unterminated-comment np={np} out={out}"
                 return [text_list_prefix(kinds, out), text_list_prefix(payloads, out)]
             val ctail = seg.substring(cidx + 3, seg.len())
             if ctail.len() > 0 and out < cap:
@@ -551,14 +584,15 @@ fn _html_scan_events(html: text) -> [[text]]:
             continue
         # Normal tag: the old scanner searched ">" from the "<" across any
         # embedded "<", so accumulate parts until the segment holds a ">".
-        var gt = (seg.index_of(">") ?? -1) as i32
+        var gt = find_from(seg, ">", 0)
         while gt < 0:
             k = k + 1
             if k >= np:
                 # No ">" until EOF: old scanner broke out, discarding the rest.
+                print "[web-scan] bail reason=no-tag-close np={np} out={out} seg_len={seg.len()}"
                 return [text_list_prefix(kinds, out), text_list_prefix(payloads, out)]
             seg = seg + "<" + parts[k]
-            gt = (seg.index_of(">") ?? -1) as i32
+            gt = find_from(seg, ">", 0)
         val inner = seg.substring(0, gt)
         var rest = seg.substring(gt + 1, seg.len())
         if out < cap:
@@ -567,8 +601,9 @@ fn _html_scan_events(html: text) -> [[text]]:
             out = out + 1
         # Raw-text elements: consume content + closing tag, no events.
         if inner.len() > 0:
-            val first = inner.char_at(0)
-            if first != "!" and first != "/":
+            # Code points, not 1-char `text` handles: "!" is 33, "/" is 47.
+            val first_code = inner.char_code_at(0)
+            if first_code != 33 and first_code != 47:
                 val name = tag_name_of(inner)
                 if name == "style" or name == "script" or name == "title":
                     val closer = "/" + name
@@ -576,22 +611,23 @@ fn _html_scan_events(html: text) -> [[text]]:
                     var found = -1
                     while j < np:
                         val pj: text = "{parts[j]}"
-                        if pj.starts_with(closer):
+                        if text_matches_at(pj, closer, 0):
                             found = j
                             break
                         j = j + 1
                     if found >= 0:
                         # First ">" from the closer on (may cross a "<").
                         var seg2: text = parts[found]
-                        var gt2 = (seg2.index_of(">") ?? -1) as i32
+                        var gt2 = find_from(seg2, ">", 0)
                         while gt2 < 0:
                             found = found + 1
                             if found >= np:
                                 # Closer without ">": old scanner re-scanned from
                                 # "</name", found no ">", and broke out.
+                                print "[web-scan] bail reason=raw-text-closer-unterminated np={np} out={out} tag={name}"
                                 return [text_list_prefix(kinds, out), text_list_prefix(payloads, out)]
                             seg2 = seg2 + "<" + parts[found]
-                            gt2 = (seg2.index_of(">") ?? -1) as i32
+                            gt2 = find_from(seg2, ">", 0)
                         rest = seg2.substring(gt2 + 1, seg2.len())
                         k = found
                     # Closer missing entirely: old scanner left pos after the
@@ -609,8 +645,11 @@ fn _html_scan_events(html: text) -> [[text]]:
 fn _html_tag_event_makes_node(inner: text) -> bool:
     if inner.len() == 0:
         return false
-    val first = inner.char_at(0)
-    if first == "!" or first == "/":
+    # Code points, not 1-char `text` handles: "!" is 33, "/" is 47. Comparing
+    # allocated 1-char strings routes the answer through a runtime boolean the
+    # freestanding build mis-marshals at depth (see text_matches_at).
+    val first_code = inner.char_code_at(0)
+    if first_code == 33 or first_code == 47:
         return false
     val name = tag_name_of(inner)
     if name == "style" or name == "script" or name == "title" or name == "head" or name == "meta" or name == "link" or name == "base":
@@ -777,10 +816,12 @@ fn parse_html(html: text) -> [HNode]:
         val inner = payloads[e - 1]
         if inner.len() == 0:
             continue
-        val first = inner.char_at(0)
-        if first == "!":
+        # Code points, not 1-char `text` handles ("!" 33, "/" 47) — this must
+        # agree exactly with _html_tag_event_makes_node, which sizes the arena.
+        val first_code = inner.char_code_at(0)
+        if first_code == 33:
             continue
-        if first == "/":
+        if first_code == 47:
             var k = stack_len - 1
             var found = -1
             while k >= 1:

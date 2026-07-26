@@ -62,50 +62,9 @@ impl<'a> Parser<'a> {
 
         if !skip_check {
             if let Some(mistake) = detect_common_mistake(&self.current, &self.previous, next_token) {
-                // Determine error hint level based on mistake type
-                use crate::error_recovery::CommonMistake;
-                let level = match mistake {
-                    // Errors for wrong keywords/syntax
-                    CommonMistake::PythonDef
-                    | CommonMistake::PythonTrue
-                    | CommonMistake::PythonFalse
-                    | CommonMistake::RustLetMut
-                    | CommonMistake::JavaPublicClass
-                    | CommonMistake::JavaVoid
-                    | CommonMistake::JavaNew
-                    | CommonMistake::JavaThis
-                    | CommonMistake::TsFunction
-                    | CommonMistake::TsConst
-                    | CommonMistake::TsInterface
-                    | CommonMistake::CppNamespace
-                    | CommonMistake::CppTemplate
-                    | CommonMistake::CTypeFirst
-                    | CommonMistake::MissingColon => ErrorHintLevel::Error,
-
-                    // Warnings for verbose but valid syntax
-                    CommonMistake::VerboseReturnType
-                    | CommonMistake::ExplicitSelf
-                    | CommonMistake::WrongBrackets
-                    | CommonMistake::CSemicolon
-                    | CommonMistake::SemicolonAfterBlock => ErrorHintLevel::Warning,
-
-                    // Info for style preferences
-                    CommonMistake::TsLet | CommonMistake::RustFnMut => ErrorHintLevel::Info,
-
-                    // Hints for advanced features
-                    CommonMistake::RustLifetime
-                    | CommonMistake::RustMacro
-                    | CommonMistake::RustTurbofish
-                    | CommonMistake::TsArrowFunction
-                    | CommonMistake::PythonElif => ErrorHintLevel::Hint,
-
-                    // Colon-specific mistakes
-                    CommonMistake::MissingCommaInArgs
-                    | CommonMistake::MissingColonBeforeBlock
-                    | CommonMistake::DictInsteadOfStruct
-                    | CommonMistake::MissingIndentAfterColon
-                    | CommonMistake::WrongIndentLevel => ErrorHintLevel::Error,
-                };
+                // Determine error hint level based on mistake type.
+                // Shared classification - see CommonMistake::hint_level.
+                let level = mistake.hint_level();
 
                 let hint = ErrorHint {
                     level,

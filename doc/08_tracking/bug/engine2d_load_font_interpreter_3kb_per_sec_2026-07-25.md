@@ -4,8 +4,8 @@
 - **Area:** `src/lib/gc_async_mut/gpu/engine2d/` font loading + `src/lib/common/encoding/font_registry.spl`
 - **Severity:** high — makes the showcase-matrix cell **2D × headless** unrunnable
   on the interpreter lane at *any* resolution, including 320x240.
-- **Status:** OPEN. Root-caused with measurements; not fixed (fix belongs in
-  `src/lib/**`, which this session was scoped out of).
+- **Status:** **FIXED 2026-07-26** in `src/lib/common/encoding/font_registry.spl`.
+  See "Fix" below for the change and the verifying measurement.
 - **Platform measured:** linux-x86_64, `bin/simple` =
   `bin/release/x86_64-unknown-linux-gnu/simple` (currently a **Rust bootstrap
   seed** build — it prints the seed warning on every run). Originally recorded on
@@ -132,7 +132,12 @@ consistent with that; the regression is the font-loading step, not the renderer.
 `showcase_mask()` (76,800-iteration write loop) was also suspected and cleared:
 a standalone repro (`probe_c_mask.spl`) completes in **0 s**.
 
-## Proposed fixes (not applied — `src/lib` was out of scope this session)
+## Proposed fixes as first written (superseded — kept for the record)
+
+**Hypothesis 1 below turned out to be WRONG.** The cost was not TTF walking at
+all; it was the SHA-256 digest of the whole blob computed in interpreted Simple.
+See "Fix (2026-07-26)" at the end of this document for what actually landed.
+Item 2 (catalog ordering) is unaffected by the fix and remains open.
 
 1. **Primary — make `load_font` lazy / table-driven.** ~3 KB/s implies the TTF
    is being walked byte-at-a-time in interpreted Simple at load time. A face
@@ -198,3 +203,64 @@ mis-diagnose it again:
 A protected end-to-end run at full font size was still executing at 1,224 s when
 this was written (7,200 s cap). If it completes, replace the extrapolated
 "~25-95 min" band with the measured wall-clock.
+
+## Fix (2026-07-26)
+
+The cost was never in the SHA-256 code — `sha256_u8_hex`, the allocation-light
+variant, measures within 2% of `sha256_bytes`. Interpreted 64-byte block
+bit-twiddling simply costs ~23 ms per block, and
+`_validate_selected_font_asset` hashed the whole blob that way.
+
+So the fix is to not hash interpreted at all when a native digest of the same
+bytes is available:
+
+- `_validate_selected_font_asset_with_digest(path, blob, precomputed_sha256_hex)`
+  accepts a digest obtained by a cheaper route. It is used **only** when it is a
+  well-formed 64-char lowercase hex string; `""`, or anything malformed, falls
+  back to hashing the blob. A broken or absent fast path therefore degrades to
+  the old behaviour and can never turn into an accepted asset.
+- `load_selected_font_file` digests the file with the existing
+  `rt_file_hash_sha256` extern **before and after** the read and requires the
+  two to agree, so the bytes returned came from a file that did not change
+  across the read. Disagreement yields `""` and falls back.
+
+The digest is still compared against the pinned `candidate.sha256` exactly as
+before, so a wrong digest from any source is rejected rather than trusted.
+
+### Verifying measurement — linux-x86_64, `probes/font_load_perf_probe.spl`
+
+```
+FONT_PROBE candidates=16
+FONT_PROBE bytes=51764704 bad=0
+FONT_PROBE_PASS
+real    0m0.852s
+```
+
+All 16 pinned faces — including the 17,772,300-byte NotoSansSC default and a
+25,125,512-byte face, 51.8 MB total — load and validate in **0.85 s**, every one
+`valid=true`. At the measured 2.9 KB/s that set was ~5 hours. `valid=true` is
+the strong check here: it means the native digest equalled the pinned digest,
+i.e. the fast path returns the same value the slow path did.
+
+`probes/font_load_perf_probe.spl` is the runnable regression check.
+
+### The blocked cell now runs
+
+`examples/06_io/ui/graphics_2d_showcase.spl` at `SHOWCASE_RESOLUTION=320x240`,
+linux-x86_64, previously "no evidence line after 40+ minutes, killed":
+
+```
+graphics_2d_font_loaded=true
+graphics_2d_font_expected_identity=sha256=a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da;axes=wght=100
+graphics_2d_font_identity=sha256=a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da;axes=wght=100
+graphics_2d_font_cold_rasterizations=11
+graphics_2d_font_warm_rasterizations=0
+graphics_2d_font_warm_hits=22
+graphics_2d_checksum=1108808631  graphics_2d_nonzero=76789  graphics_2d_pixels=76800
+real    1m38.475s   rc=0
+```
+
+Full evidence block, `rc=0`, **98 seconds**. The identity assertion still holds —
+`font_identity` equals `font_expected_identity`, so the cell is proving what it
+always proved, on the real 17.8 MB face. It was not made to pass by swapping in
+a smaller font.
