@@ -45,6 +45,10 @@ count as hardware passes.
   link has zero unresolved Vulkan symbols and fails on 70 unrelated optional
   OpenCL, OpenGL, oneAPI, Intel, and WebGPU runtime symbols retained by the
   monolithic Engine2D closure.
+- The retained TODO 580 `v7` native-all archive exports every one of those
+  families plus Vulkan. Relative, absolute, and direct-environment runtime-path
+  attempts all remain forced onto `core-c-bootstrap` by the cached Stage3, so
+  the archive is not admitted and no hardware run is claimed.
 - Cached-native Metal source emission succeeds with four hash markers. Live
   Metal submit/readback remains blocked on a prepared macOS host; resume with
   `GPU_2D_LIVE_BACKEND=metal sh scripts/check/check-macos-gpu-2d-live-evidence.shs`.

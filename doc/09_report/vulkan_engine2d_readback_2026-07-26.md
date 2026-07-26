@@ -1,7 +1,7 @@
 # Vulkan Engine2D Readback Evidence
 
 - status: blocked
-- reason: provider-incomplete-engine2d-closure
+- reason: cached-stage3-forces-core-c-runtime
 - host: Linux x86_64
 - compiler: `build/gpu-goal/current/stage3/x86_64-unknown-linux-gnu/simple`
 - compiler version: `simple-bootstrap 1.0.0-beta`
@@ -16,8 +16,8 @@ The cached Stage3 compiled all 184 modules in the Vulkan evidence closure after
 not accepted as hardware evidence.
 
 With `SIMPLE_NO_STUB_FALLBACK=1`, the same bounded build reached the linker with
-zero unresolved Vulkan symbols. It failed on 70 unrelated optional runtime
-symbols retained by the monolithic Engine2D closure:
+zero unresolved Vulkan symbols when using the core-C runtime. It failed on 70
+unrelated optional runtime symbols retained by the monolithic Engine2D closure:
 
 | Family | Unresolved symbols |
 |---|---:|
@@ -27,9 +27,17 @@ symbols retained by the monolithic Engine2D closure:
 | Intel GPU | 11 |
 | WebGPU | 8 |
 
+The existing
+`build/todo580_transient_scope_runtime_v7/libsimple_native_all.a` exports all
+five families plus 88 Vulkan symbols. Three bounded attempts supplied that
+archive by relative CLI path, absolute CLI path, and direct
+`SIMPLE_RUNTIME_PATH`. The cached Stage3 still selected `core-c-bootstrap` and
+did not admit the archive, so no provider-complete executable was produced.
+
 ## Resume
 
-Provide a no-stub Vulkan-only closure/runtime lane, then run:
+Make the source-matched CLI admit the existing provider-complete archive, or
+provide an explicit no-stub Vulkan runtime lane, then run:
 
 ```sh
 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json \
