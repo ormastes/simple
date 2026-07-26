@@ -10,7 +10,7 @@ use super::{
     BITFIELDS, BLANKET_IMPL_METHODS, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, TRAIT_IMPLS,
 };
 use crate::error::{codes, typo, CompileError, ErrorContext};
-use crate::value::{Env, Value};
+use crate::value::{format_f32_display, Env, Value};
 use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef};
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -726,7 +726,7 @@ pub(crate) fn evaluate_method_call(
             match method {
                 "to_f32" => return Ok(Value::Float32(*f)),
                 "to_f64" | "to_float" => return Ok(Value::Float(*f as f64)),
-                "to_string" | "to_text" => return Ok(Value::text(f.to_string())),
+                "to_string" | "to_text" => return Ok(Value::text(format_f32_display(*f))),
                 _ => {}
             }
             // Delegate to handle_float_methods for arithmetic helpers; if it

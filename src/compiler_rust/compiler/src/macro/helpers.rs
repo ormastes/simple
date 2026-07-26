@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::error::CompileError;
 use crate::interpreter::{evaluate_expr, Enums, ImplMethods};
-use crate::value::{Env, Value};
+use crate::value::{format_f64_display, Env, Value};
 
 /// Build constant bindings for macro parameters.
 ///
@@ -80,7 +80,7 @@ pub(crate) fn const_value_to_string(value: &Value) -> Option<String> {
         Value::Str(s) => Some(s.as_ref().clone()),
         Value::Symbol(s) => Some(s.clone()),
         Value::Int(i) => Some(i.to_string()),
-        Value::Float(f) => Some(f.to_string()),
+        Value::Float(f) => Some(format_f64_display(*f)),
         Value::Bool(b) => Some(b.to_string()),
         Value::Nil => Some("nil".to_string()),
         _ => None,

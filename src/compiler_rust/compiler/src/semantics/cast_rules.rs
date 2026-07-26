@@ -148,9 +148,10 @@ pub mod string_cast {
         i.to_string()
     }
 
-    /// Convert a float to string.
+    /// Convert a float to string. Same rendering as interpolation and
+    /// `.to_text()` — see `crate::value::format_f64_display` for the rule.
     pub fn from_float(f: f64) -> String {
-        f.to_string()
+        crate::value::format_f64_display(f)
     }
 
     /// Convert a bool to string.

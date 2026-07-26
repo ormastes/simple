@@ -347,7 +347,7 @@ fn build_expect_failure_message(
 fn format_value_for_message(val: &Value) -> String {
     match val {
         Value::Int(n) => n.to_string(),
-        Value::Float(f) => f.to_string(),
+        Value::Float(f) => format_f64_display(*f),
         Value::Bool(b) => b.to_string(),
         Value::Str(s) => format!("\"{}\"", s),
         Value::Nil => "nil".to_string(),

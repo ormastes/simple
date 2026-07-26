@@ -10,6 +10,59 @@ fn is_dict_entry_marker(items: &[Value]) -> bool {
     items.len() == 3 && matches!(&items[0], Value::Symbol(s) if s == DICT_ENTRY_MARKER)
 }
 
+/// Whether a rendered float came out looking like a plain integer (`1`, `-3`,
+/// `0`) and therefore needs a `.0` appended to stay recognisable as a float.
+///
+/// Deliberately a whitelist of digits and a leading `-`, not a "contains no
+/// `.`" test: `inf`, `-inf` and `NaN` carry letters, so they fall out here and
+/// pass through untouched.
+fn float_text_is_integer_looking(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit() || b == b'-')
+}
+
+/// Render an `f64` the way a float has to read in text.
+///
+/// **Rule: the shortest decimal string that parses back to the exact same
+/// `f64`, with `.0` forced onto anything that came out integer-looking.**
+///
+/// Rust's `{}` for `f64` is already a shortest-round-trip renderer and never
+/// falls back to scientific notation, so it supplies the round-trip half of the
+/// rule for free; all this adds is the `.0`, so `1.0` renders as `"1.0"` rather
+/// than `"1"` and a serialized float cannot read back as an integer.
+///
+/// Why not the obvious alternatives: `%g`-style formatting silently drops the
+/// trailing `.0` (that is the defect this fixes,
+/// `doc/08_tracking/bug/f64_integral_to_text_drops_fraction_2026-07-25.md`),
+/// while switching to a fixed `%f`/`{:.N}` precision would turn `1.5` into
+/// `"1.500000"` and -- far worse -- turn `1e-300` into `"0.000...0"`, a string
+/// that parses back to `0.0`. Round-trip fidelity outranks prettiness, so
+/// neither is acceptable.
+///
+/// This is the same rule the native runtime's `rt_raw_f64_to_string`
+/// (`src/runtime/runtime_native.c`) applies, so interpreted and compiled output
+/// agree on `1.0` -> `"1.0"`, `0.1` -> `"0.1"`, `inf`/`NaN` verbatim.
+pub fn format_f64_display(f: f64) -> String {
+    let s = f.to_string();
+    if float_text_is_integer_looking(&s) {
+        s + ".0"
+    } else {
+        s
+    }
+}
+
+/// `f32` sibling of [`format_f64_display`], applying the identical rule to
+/// `f32`'s own shortest-round-trip renderer -- widening to `f64` first would
+/// expose the single-precision value's binary-expansion digits (`0.1f32` ->
+/// `"0.10000000149011612"`), which is not what the value is.
+pub fn format_f32_display(f: f32) -> String {
+    let s = f.to_string();
+    if float_text_is_integer_looking(&s) {
+        s + ".0"
+    } else {
+        s
+    }
+}
+
 impl Value {
     pub fn as_int(&self) -> Result<i64, CompileError> {
         match self {
@@ -297,8 +350,8 @@ impl Value {
             Value::Symbol(s) => format!(":{s}"),
             Value::Int(i) => i.to_string(),
             Value::UInt { value, .. } => value.to_string(),
-            Value::Float(f) => f.to_string(),
-            Value::Float32(f) => f.to_string(),
+            Value::Float(f) => format_f64_display(*f),
+            Value::Float32(f) => format_f32_display(*f),
             Value::Bool(b) => b.to_string(),
             Value::Array(items) => {
                 let parts: Vec<String> = items.iter().map(|v| v.to_display_string()).collect();

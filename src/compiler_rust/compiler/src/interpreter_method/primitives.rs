@@ -4,7 +4,7 @@ use std::sync::Arc;
 use super::super::{eval_arg, eval_arg_int, eval_arg_usize, evaluate_expr, Enums, ImplMethods};
 use crate::error::CompileError;
 use crate::semantics::{cast_float_to_numeric, cast_int_to_numeric, CastNumericResult, NumericType};
-use crate::value::{Env, Value};
+use crate::value::{format_f64_display, Env, Value};
 use simple_parser::ast::{Argument, ClassDef, FunctionDef};
 use std::collections::HashMap;
 
@@ -277,7 +277,7 @@ pub fn handle_float_methods(
                 CastNumericResult::Float(v) => Value::Float(v),
             }
         }
-        "to_string" | "to_text" => Value::text(f.to_string()),
+        "to_string" | "to_text" => Value::text(format_f64_display(f)),
         "floor" => Value::Float(f.floor()),
         "ceil" => Value::Float(f.ceil()),
         "round" => Value::Float(f.round()),

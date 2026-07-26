@@ -494,14 +494,36 @@ fn heap_value_to_display_string(v: RuntimeValue) -> String {
     }
 }
 
+/// Render an `f64` for display.
+///
+/// **Rule: the shortest decimal string that parses back to the exact same
+/// `f64`, with `.0` forced onto anything that came out integer-looking.**
+/// Rust's `{}` for `f64` is already a shortest-round-trip renderer and never
+/// falls back to scientific notation, so it supplies the round-trip half of the
+/// rule; the `.0` keeps a float recognisable as a float (`1.0` -> `"1.0"`, not
+/// `"1"`). Non-finite values render as letters (`inf`, `-inf`, `NaN`), never
+/// look integer-like, and pass through untouched.
+///
+/// This is deliberately identical to the interpreter's
+/// `crate::value::format_f64_display` in the compiler crate and to the native
+/// runtime's `rt_raw_f64_to_string` (`src/runtime/runtime_native.c`), so all
+/// three lanes agree -- see
+/// `doc/08_tracking/bug/f64_integral_to_text_drops_fraction_2026-07-25.md`.
+///
+/// Replaces a fixed-precision search (`{:.1}`..`{:.17}`, first that
+/// round-trips, else `{:.17}`). That search was wrong twice over: it could not
+/// reach a small enough magnitude, so `1e-300` fell through to the `{:.17}`
+/// fallback and rendered as `"0.00000000000000000"` -- a string that parses
+/// back to `0.0`, silently losing the entire value -- and at the top end it
+/// emitted a double's full 300-digit binary expansion instead of the short
+/// form.
 fn format_float_display(value: f64) -> String {
-    for precision in 1..=17 {
-        let candidate = format!("{value:.precision$}");
-        if candidate.parse::<f64>().ok() == Some(value) {
-            return candidate;
-        }
+    let s = value.to_string();
+    if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit() || b == b'-') {
+        s + ".0"
+    } else {
+        s
     }
-    format!("{value:.17}")
 }
 
 fn format_runtime_value(v: RuntimeValue, spec: &str) -> String {

@@ -1987,6 +1987,10 @@ int64_t rt_len(int64_t value) {
     return a ? a->len : 0;
 }
 
+/* Defined further below in this file; declared here so rt_to_string's float
+ * arm can share the one correct f64 renderer. */
+int64_t rt_raw_f64_to_string(double v);
+
 int64_t rt_to_string(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
     if (s) return value;
@@ -2001,8 +2005,12 @@ int64_t rt_to_string(int64_t value) {
         uint64_t bits = ((uint64_t)value) & ~RT_VALUE_TAG_MASK;
         double f;
         memcpy(&f, &bits, sizeof(f));
-        int len = snprintf(buf, sizeof(buf), "%.17g", f);
-        return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
+        /* Share rt_raw_f64_to_string rather than formatting here: the old
+         * "%.17g" rendered 1.0 as "1" (dropping the fraction -- see
+         * doc/08_tracking/bug/f64_integral_to_text_drops_fraction_2026-07-25.md)
+         * and 0.1 as "0.10000000000000001" (longest, not shortest, round-trip).
+         * A tagged/boxed-ANY float must read the same as an unboxed one. */
+        return rt_raw_f64_to_string(f);
     }
     if (rt_core_is_special(value)) {
         switch (rt_core_special_payload(value)) {
@@ -2097,8 +2105,9 @@ int64_t rt_raw_bool_to_string(int64_t raw) {
  * broken: the oracle prints the 0.1 literal as "0.09999999999999998" (a string
  * that parses to a DIFFERENT double -- it does not round-trip), so native is
  * correct-by-construction with 0.1 -> "0.1", 1.0/3.0 -> "0.3333333333333333"
- * (16 3's). rt_to_string()'s existing tagged/boxed-ANY float path uses raw
- * %.17g (0.1 -> "0.10000000000000001") and does NOT match -- do not reuse it.
+ * (16 3's). rt_to_string()'s tagged/boxed-ANY float path used to format its own
+ * raw %.17g here (0.1 -> "0.10000000000000001", 1.0 -> "1") and did NOT match;
+ * it now delegates to this function so boxed and unboxed floats read alike.
  * Algorithm: (1) try the fewest fixed decimal places (0..324) whose %.*f
  * rendering round-trips (strtod) back to the exact same double -- %f (never
  * %e) avoids mismatches like 100.0 -> "1e+02"; (2) if that shortest rendering

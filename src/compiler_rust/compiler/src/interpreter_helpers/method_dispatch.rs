@@ -2,7 +2,10 @@
 
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::semantics::{cast_float_to_numeric, cast_int_to_numeric, CastNumericResult, NumericType};
-use crate::value::{Env, OptionVariant, ResultVariant, Value, METHOD_MISSING};
+use crate::value::{
+    format_f32_display, format_f64_display, Env, OptionVariant, ResultVariant, Value,
+    METHOD_MISSING,
+};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -553,7 +556,7 @@ pub(crate) fn call_method_on_value(
             "floor" => return Ok(Value::Float(f.floor())),
             "ceil" => return Ok(Value::Float(f.ceil())),
             "round" => return Ok(Value::Float(f.round())),
-            "to_string" | "to_text" => return Ok(Value::text(f.to_string())),
+            "to_string" | "to_text" => return Ok(Value::text(format_f64_display(*f))),
             "to_int" | "truncate" => return Ok(Value::Int(f.trunc() as i64)),
             "to_f64" => return Ok(Value::Float(*f)),
             "to_f32" => return Ok(Value::Float32(*f as f32)),
@@ -575,7 +578,7 @@ pub(crate) fn call_method_on_value(
             "floor" => return Ok(Value::Float32(f.floor())),
             "ceil" => return Ok(Value::Float32(f.ceil())),
             "round" => return Ok(Value::Float32(f.round())),
-            "to_string" | "to_text" => return Ok(Value::text(f.to_string())),
+            "to_string" | "to_text" => return Ok(Value::text(format_f32_display(*f))),
             "to_int" | "truncate" => return Ok(Value::Int(f.trunc() as i64)),
             "to_f64" => return Ok(Value::Float(*f as f64)),
             "to_f32" => return Ok(Value::Float32(*f)),
