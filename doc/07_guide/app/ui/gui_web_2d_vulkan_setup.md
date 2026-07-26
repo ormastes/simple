@@ -206,8 +206,9 @@ object/linker fixture, never Vulkan availability, rendering, event, capture,
 present, or readback evidence. The native linker roots only that exact symbol
 from an explicitly selected static `SIMPLE_LINK_OBJECTS` provider and supplies
 the platform's executable dynamic-export visibility (exact-symbol on ELF and
-MSVC; executable-wide on Darwin). It must not replace this policy with
-`--whole-archive`.
+MSVC; executable-wide on Darwin). MinGW receives retention only because its
+runtime lookup owner is separate; it must not receive ELF export flags. Do not
+replace this policy with `--whole-archive`.
 
 The SimpleOS Engine2D/RenderDoc normalizer can run that probe directly:
 

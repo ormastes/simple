@@ -59,10 +59,11 @@ See
 The canonical native link owner now scans only explicitly selected static
 provider archives, roots the strong `rt_vulkan_provider_is_available` member,
 and supplies the platform's executable dynamic-export visibility for the core
-runtime's `dlsym(RTLD_DEFAULT, ...)` lookup. ELF and MSVC export the named
-symbol; Darwin uses executable-wide dynamic export. The root still retains
-only one named member rather than force-loading the complete optional-GPU
-archive.
+runtime's lookup. ELF and MSVC export the named symbol; Darwin uses
+executable-wide dynamic export. MinGW retains the member but does not receive
+the ELF-only export flag because its provider lookup owner is separate. The
+root still retains only one named member rather than force-loading the complete
+optional-GPU archive.
 
 The host-independent weak-first archive fixture mirrors that runtime lookup
 without a direct unresolved provider reference. It records baseline

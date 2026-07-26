@@ -600,9 +600,10 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   Only explicitly selected static `SIMPLE_LINK_OBJECTS` providers are scanned;
   a strong `rt_vulkan_provider_is_available` definition becomes one exact
   pre-archive linker root plus platform dynamic-export visibility
-  (exact-symbol on ELF/MSVC; executable-wide on Darwin). The policy does not
-  force-load the provider archive, so unrelated optional GPU members remain
-  quarantined. The weak-first object fixture mirrors production
+  (exact-symbol on ELF/MSVC; executable-wide on Darwin); MinGW uses
+  retention-only flags pending its separate runtime lookup owner. The policy
+  does not force-load the provider archive, so unrelated optional GPU members
+  remain quarantined. The weak-first object fixture mirrors production
   `dlsym(RTLD_DEFAULT, ...)` lookup without a direct provider reference and
   distinguishes baseline availability `0` from retained-provider availability
   `73`. No Linux/Vulkan device, rendering, event, capture, present, readback,

@@ -54,9 +54,9 @@ archive in weak-first order. The weak member mirrors the production
 baseline reaches availability `0`; the canonical root-plus-export policy
 reaches the strong provider value `73`. This is link/archive/runtime-symbol
 evidence only. It does not execute Vulkan, enumerate a device, render, present,
-or read back pixels. Windows receives the equivalent exact extraction/export
-flags, while its provider lookup implementation remains a separate runtime
-concern.
+or read back pixels. MSVC receives exact extraction/export flags. MinGW
+receives retention only and no ELF export flag because its provider lookup
+implementation remains a separate runtime concern.
 
 The remaining readback failure is tracked separately in
 `native_engine2d_readback_cross_module_field_layout_2026-07-26.md`.
