@@ -552,7 +552,11 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   bounded session-spec run timed out before assertions, while a corrected
   self-hosted source check reached unrelated pre-existing compiler frontend
   errors; therefore this checkpoint is source-fixed and reviewed, not an
-  executable native/host/QEMU PASS. The concurrent 59-line runtime-assignment
-  plan draft remains uncommitted and REJECTED pending its compiler-admission
-  Wave 0, browser ownership boundary, checker/manual links, and external-host
-  admission wording repairs.
+  executable native/host/QEMU PASS. The concurrent rejected 59-line draft was
+  not committed. Its replacement plans now freeze the exact current revision,
+  admit no current Wave 0 compiler capsule, constrain BrowserBackend edits to
+  semantic snapshot ownership, link the five fixed manual steps and parity
+  checker, and gate every render/device/QEMU execution row on immutable
+  compiler/runtime provenance. Independent highest-capability Sol review
+  ACCEPTS both repaired plans. Runtime evidence remains open; this planning
+  repair does not claim native, host, or QEMU execution.

@@ -18,25 +18,24 @@ The parent acceptance and design links are:
 - `doc/04_architecture/engine2d_four_backend_capture.md`
 - `doc/05_design/engine2d_four_backend_capture.md`
 
-QEMU receipts require a valid pure-Simple compiler. Diagnostic Stage3 hash
-`ff192f9d90af905c6ff460646afa380b4af7bb212106ab72195d07015239df9c`
-passes admission, and the Vulkan/CUDA daemon links through the corrected
-section-retention boundary. Final source removes a rejected x86 runtime
-admission and still needs one source-matched rebuild under TODO548. Remaining blockers are daemon
-startup/HELLO progress under TODO577 and single-owner x86 minimal runtime
-composition under TODO578.
-Current-host CUDA
-readback and two-device UUID-hash distinction passed on 2026-07-14 using a
-hash-bound retained PTX; current-source regeneration still needs that compiler.
-Implemented backends remain fail-closed, and the full SimpleOS host-GPU goal
-remains incomplete.
+QEMU receipts require a source-matched, pure-Simple compiler admitted by the
+Wave 0 capsule below. No such compiler is currently admitted at
+`db9faf0936a1991a8cc1e07b05847c4fbb125e07`: the forbidden seed is
+`f2c216a660da83da1a253d2e8191a3059a66b1d9dc11bbcbaf237fe7e5b8d2bc`, while
+the historical-only pure candidate
+`277f8ac9e14ae266ce380a5890d434ce27b47cee9378e2b337cbcc8cd4086767` cannot
+import the current graph. The reviewed runtime
+`02775039b26c80ad5858976ad0761ab331cd6454bee202b6dfb3a25310a19d85` from
+source `4e1ddd3afe` is absent and non-current. The Vulkan/CUDA daemon links through the corrected
+section-retention boundary, but that does not admit a compiler or a receipt.
+Current-host CUDA readback and two-device UUID-hash distinction from
+2026-07-14 retain historical PTX evidence only; current-source regeneration
+waits for Wave 0. Implemented backends remain fail-closed, and the full
+SimpleOS host-GPU goal remains incomplete.
 
-The current Linux host is prepared for KVM, Vulkan, and CUDA. The earlier
-retained candidates remain rejected; diagnostic Stage3 hash
-`ff192f9d90af905c6ff460646afa380b4af7bb212106ab72195d07015239df9c`
-passes the shared admission gate. Direct guest GPU passthrough is a
-separate requested lane under TODO575; it must not be inferred from the working
-ivshmem host-daemon protocol.
+The current Linux host has KVM/Vulkan/CUDA capability, not execution readiness.
+Direct guest GPU passthrough is a separate requested lane under TODO575; it
+must not be inferred from the ivshmem host-daemon protocol.
 
 ## Existing TODO ownership
 
@@ -58,26 +57,51 @@ scope. All other rows reuse their existing authoritative TODOs.
 
 ## Current-host execution order
 
-1. **Recover the pure-Simple compiler (TODO535/TODO548).** A source-matched
-   strict Stage 3 now passes `simple_binary_is_valid` after the bootstrap entry
-   adopted the shared invalid-mode contract. Keep full-CLI deployment separate:
-   Stage 4 still requires TODO535's exact-entry provider set and must not fall
-   back to the seed or native-all.
-2. **Classify direct passthrough (TODO575).** Use the implemented read-only checker
+1. **Wave 0: admit an immutable current pure-Simple compiler capsule
+   (TODO535/TODO548).** Freeze the source at
+   `db9faf0936a1991a8cc1e07b05847c4fbb125e07`; any rebase is a new Wave 0
+   admission. The first blocker is the low-memory bridge circularity in
+   `doc/08_tracking/bug/bootstrap_low_memory_positional_bridge_circularity_2026-07-26.md`:
+   one micro-cycle remains unspent until the reviewed runtime is restored or a
+   new immutable runtime is produced, and high-capability review accepts either
+   `compile --native` or a pure positional route. Use
+   `scripts/check/check-phase2-low-memory-source-reclaim.shs`,
+   `test/02_integration/compiler/phase2_low_memory_source_reclaim_probe.spl`,
+   and
+   `test/03_system/check/phase2_low_memory_source_reclaim_gate_contract_spec.spl`
+   with `SIMPLE_NO_STUB_FALLBACK=1`. Retain exact source/tree/compiler/runtime/
+   provider hashes, a dedicated `SIMPLE_RUNTIME_PATH` with real
+   `rt_string_free`, classifier and `nm` provider manifests, exact command/argv,
+   bounded cache state, peak RSS, and elapsed timing. The positive control needs
+   all three bootstrap opt-ins,
+   `test/03_system/compiler/native_cli_mode_transport_regression_spec.spl`
+   output `73`,
+   `test/03_system/compiler/native_cross_module_class_field_layout_regression_spec.spl`
+   output `84`, reclaim,
+   and direct first-free=`1` / alias=`0`; the negative control has no opt-in,
+   low-memory false, and no reclaim marker. `simple_binary_is_valid` and
+   `scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs` are
+   necessary but not sufficient. Reject the
+   seed `f2c...`, Stage3 diagnostic, native-all, stubs, dirty input, full Stage4,
+   and imported historical graph. No Vulkan, Metal, SIMD, x86, ARM, render,
+   device, or QEMU execution row may start or PASS before acceptance;
+   independent provider/static preflights may proceed only as non-execution
+   evidence.
+2. **Classify direct passthrough (TODO575).** After Wave 0, use the implemented read-only checker
    `scripts/check/check-simpleos-qemu-guest-gpu-passthrough.shs` with
    `--self-test` and `--preflight`. It must distinguish VFIO, virtio-gpu
    Vulkan/venus, and ivshmem offload; it must not unbind a live host device.
    The 2026-07-15 current-host result is `unavailable`: trusted QEMU VFIO help
    exists, virtio-gpu-gl is broken, the selected NVIDIA IOMMU group remains
    host-bound, and no canonical SimpleOS guest Vulkan/CUDA producer exists.
-3. **Resume the daemon HELLO service loop (TODO577).** TODO576 is complete:
+3. **Resume the daemon HELLO service loop (TODO577).** After Wave 0, TODO576 is complete:
    ordinary strong runtime references are no longer forced roots, section GC
    drops optional backends, and the tagged Vulkan/CUDA daemon links without
    core-C ABI mixing. The retained AArch64 run sees generation zero and no
    negotiation attempts; diagnose daemon startup before a new CUDA-required
    matrix. TODO578 must first replace the rejected x86 `rt_extras.c` whole-file
    admission with one duplicate-free minimal runtime owner.
-4. **Attempt passthrough only when safe.** A live VFIO run requires an explicitly
+4. **Attempt passthrough only when safe and after Wave 0.** A live VFIO run requires an explicitly
    selected spare GPU or approved maintenance window, complete IOMMU-group
    ownership, recovery console access, and a matching SimpleOS guest driver.
 
@@ -85,16 +109,16 @@ scope. All other rows reuse their existing authoritative TODOs.
 
 | Host | Prerequisites | First commands | Required retained artifacts |
 |---|---|---|---|
-| Current Linux/x86_64 | KVM for the native x86_64 row, QEMU x86_64/AArch64/RISC-V, Vulkan device, optional NVIDIA CUDA, and a current pure-Simple compiler accepted by `simple_binary_is_valid` | `SIMPLE_BIN=bin/release/x86_64-unknown-linux-gnu/simple sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs`; then `SIMPLE_BIN=bin/release/x86_64-unknown-linux-gnu/simple SIMPLEOS_HOST_GPU_PROCESSING_BACKEND=vulkan sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs` | x86_64 KVM native receipt; AArch64/RV64 TCG correctness receipts; exact argv, serial/daemon logs, device identities, checksums, 20-sample p95 applicability, and daemon/QEMU/combined RSS |
-| Windows/MSYS | D3D11 hardware adapter, QEMU with WHPX for the matching native ISA, current pure-Simple compiler and host daemon | Run `scripts/check/check-simpleos-qemu-host-gpu-2d.shs`; validate the emitted report | wrapper report, serial logs, daemon log, exact encoded QEMU argv including `-accel`, protocol/backend/device IDs, checksums, elapsed times, QEMU/daemon/combined RSS |
-| macOS | Metal device, QEMU with HVF for the matching native ISA, current pure-Simple compiler and host daemon | Set `SIMPLE_BIN=bin/release/<triple>/simple`; run `"$SIMPLE_BIN" test test/04_smoke/simpleos_metal_processing_ir.spl`, then `SIMPLE_BIN="$SIMPLE_BIN" scripts/check/check-simpleos-qemu-host-gpu-2d.shs` | Metal smoke output plus the same correlated wrapper artifacts for rendering and ProcessingIR, including executed accelerator |
-| NVIDIA Linux | CUDA driver/device; multiple GPUs or MIG where available; current pure-Simple compiler for source regeneration and QEMU | Retained-PTX evidence is already recorded; after compiler recovery run `sh scripts/check/check-cuda-generated-2d-readback.shs && grep -qx 'cuda_generated_2d_readback_status=pass' build/cuda_generated_2d_readback/evidence.env`, then `SIMPLEOS_HOST_GPU_REQUIRE_CUDA=1 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs` | UUID stability/distinction report, CUDA device readback, QEMU receipts, CPU oracle parity, preference timing, and RSS |
-| Current Linux direct guest passthrough | One safely assignable GPU, complete IOMMU-group ownership, VFIO or a proven paravirtual Vulkan transport, matching SimpleOS guest driver, and recovery access | Run the read-only `sh scripts/check/check-simpleos-qemu-guest-gpu-passthrough.shs --preflight`; run a live mode only after it reports ready and device reassignment is explicitly approved | Exact QEMU argv, PCI/transport identity, guest driver/device identity, guest-side Vulkan/CUDA enumeration, submission/completion, device-origin readback, and exact CPU parity |
+| Current Linux/x86_64 | Accepted Wave 0 capsule, then KVM for the native x86_64 row, QEMU x86_64/AArch64/RISC-V, Vulkan device, and optional NVIDIA CUDA | `SIMPLE_BIN=<Wave-0-admitted-binary> sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs`; then `SIMPLE_BIN=<Wave-0-admitted-binary> SIMPLEOS_HOST_GPU_PROCESSING_BACKEND=vulkan sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs` | Wave 0 provenance plus x86_64 KVM native receipt; AArch64/RV64 TCG correctness receipts; exact argv, serial/daemon logs, device identities, checksums, 20-sample p95 applicability, and daemon/QEMU/combined RSS |
+| Windows/MSYS | Accepted Wave 0 capsule, D3D11 hardware adapter, QEMU with WHPX for the matching native ISA, and host daemon | Run `scripts/check/check-simpleos-qemu-host-gpu-2d.shs`; validate the emitted report | Wave 0 provenance, wrapper report, serial logs, daemon log, exact encoded QEMU argv including `-accel`, protocol/backend/device IDs, checksums, elapsed times, QEMU/daemon/combined RSS |
+| macOS | Accepted Wave 0 capsule, Metal device, QEMU with HVF for the matching native ISA, and host daemon | Set `SIMPLE_BIN=<Wave-0-admitted-binary>`; run `"$SIMPLE_BIN" test test/04_smoke/simpleos_metal_processing_ir.spl`, then `SIMPLE_BIN="$SIMPLE_BIN" scripts/check/check-simpleos-qemu-host-gpu-2d.shs` | Wave 0 provenance, Metal smoke output, and the same correlated wrapper artifacts for rendering and ProcessingIR, including executed accelerator |
+| NVIDIA Linux | Accepted Wave 0 capsule, CUDA driver/device, and multiple GPUs or MIG where available | Retained-PTX evidence is historical only; after Wave 0 run `sh scripts/check/check-cuda-generated-2d-readback.shs && grep -qx 'cuda_generated_2d_readback_status=pass' build/cuda_generated_2d_readback/evidence.env`, then `SIMPLEOS_HOST_GPU_REQUIRE_CUDA=1 sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs` | Wave 0 provenance, UUID stability/distinction report, CUDA device readback, QEMU receipts, CPU oracle parity, preference timing, and RSS |
+| Current Linux direct guest passthrough | Accepted Wave 0 capsule, one safely assignable GPU, complete IOMMU-group ownership, VFIO or a proven paravirtual Vulkan transport, matching SimpleOS guest driver, and recovery access | Run the read-only `sh scripts/check/check-simpleos-qemu-guest-gpu-passthrough.shs --preflight`; run a live mode only after it reports ready and device reassignment is explicitly approved | Wave 0 provenance, exact QEMU argv, PCI/transport identity, guest driver/device identity, guest-side Vulkan/CUDA enumeration, submission/completion, device-origin readback, and exact CPU parity |
 
-Run compiler-independent CUDA checks as soon as their native prerequisites
-exist. Resume QEMU or other Simple-compiled rows only when
-`simple_binary_is_valid` accepts the selected pure-Simple compiler. Patch source
-only if a fresh native run exposes a reproducible implementation failure.
+Do not run a backend, SIMD, host, or QEMU execution row before Wave 0. Resume
+only when its current source-matched capsule satisfies the complete provenance
+set above, not merely `simple_binary_is_valid`. Patch source only if a fresh
+native run exposes a reproducible implementation failure.
 
 ## Fail-closed evidence rules
 
@@ -129,7 +153,7 @@ only if a fresh native run exposes a reproducible implementation failure.
 | TODO540 | Fix target-gated duplicate global selection affecting AArch64 PCI/ECAM builds. |
 | TODO542 | Consolidate aggregate argv behind the narrow standard facade used by small native apps. |
 | TODO547 | Continue raw-pointer leaf migration through the existing no-GC owner facade rather than adding direct `rt_*`. |
-| TODO548 | Diagnostic strict Stage2/3 runs without SIGSEGV and AArch64 reaches QEMU; after the rejected x86 admission was removed, one final source-matched rebuild remains. X86/RV64 runtime ownership stays under TODO578/TODO537. |
+| TODO548 | Wave 0 has no admitted current compiler: produce one exact-source, strict pure-Simple capsule with `SIMPLE_NO_STUB_FALLBACK=1`, source/binary hashes, classifier, `nm` provider manifest, cache/RSS/timing bounds, and no seed/diagnostic/imported graph. X86/RV64 runtime ownership stays under TODO578/TODO537. |
 | TODO576 | DONE: relocation-derived roots were removed, explicit weak/indirect roots remain, section GC drops optional backends, and the tagged Vulkan/CUDA daemon links without core-C ABI mixing. |
 | TODO577 | Make the linked daemon enter the ivshmem service loop and advance HELLO generation; retain the first correlated Vulkan/CUDA receipt in one bounded rerun. |
 | TODO578 | Extract or select one duplicate-free x86 minimal freestanding runtime owner; never rely on `-z muldefs` ordering between `baremetal_stubs.c` and `rt_extras.c`. |
@@ -152,11 +176,11 @@ The compiler's foreign-parser/Stage-4 recovery remains owned by
 `doc/08_tracking/bug/native_build_stage4_pre_object_spin_2026-07-13.md`; this
 host-evidence plan does not create or duplicate that lane.
 
-The current-host retained-PTX run provides fresh partial CUDA readback and
+The current-host retained-PTX run provides historical partial CUDA readback and
 two-device stability/distinction evidence with hash-bound PTX and pixel
 artifacts. The gate now exits nonzero for every non-PASS. TODO564 still owns MIG
-and correlated QEMU evidence. Diagnostic Stage3 admission and the daemon link
-pass; final-source bootstrap remains under TODO548. TODO577 owns the observed zero-generation HELLO blocker; TODO578
+and correlated QEMU evidence. Diagnostic Stage3 admission is non-current and
+non-admissible; final-source Wave 0 bootstrap remains under TODO548. TODO577 owns the observed zero-generation HELLO blocker; TODO578
 owns x86 minimal runtime composition and TODO537 owns the RV64 provider closure.
 TODO550's forced Vulkan receipt and
 CUDA-required QEMU work remain open because the three-cycle live cap was

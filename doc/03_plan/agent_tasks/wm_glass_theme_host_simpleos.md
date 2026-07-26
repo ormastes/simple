@@ -71,7 +71,7 @@ overlapping dirty work and remains read-only for this lane.
 
 | Lane | Current state | First unresolved boundary |
 |---|---|---|
-| Host production WM | SOURCE FIXED; recapture blocked by cycle cap | exact-current Stage 3 passed; bootstrap/theme/bridge/provider wiring is fixed, but the compiler containing the provider-link fix must be rebuilt before one fresh host capture |
+| Host production WM | SOURCE FIXED; recapture blocked by cycle cap | an earlier frozen-revision Stage 3 diagnostic passed, but no current Wave 0 capsule is admitted; bootstrap/theme/bridge/provider wiring is fixed and must be rebuilt from the newly admitted capsule before one fresh host capture |
 | Host events | SOURCE PARTIAL; product proof pending | real key down/up and pointer move/button-edge receipts are retained; title-command/body-input remain unsupported because HostCompositor exposes no canonical API |
 | Simple Web glass | SEMANTICS IMPLEMENTED, LIVE PROOF PENDING | current-source computed-style/Draw-IR/framebuffer proof has not passed; Chromium fixture timing is not Simple Web animation evidence |
 | SimpleOS x86_64 QEMU | STATIC PREFLIGHT PASS, FRESH BOOT PENDING | legacy render/event command now delegates to canonical `gui_entry_desktop.spl` evidence; host gate, exact-current rebuild, and one OVMF capture remain |
@@ -82,7 +82,7 @@ overlapping dirty work and remains read-only for this lane.
 | WM glass material projection | SOURCE FIXED; focused spec timed out | Draw IR retains durable identity/radius/border/shadows/backdrop request and named fallback; broad focused spec timed out at 120 seconds without assertions |
 | Runtime theme switching | ABI BLOCKED; fail-fast system contract | numeric subscriber ports have no `IpcOutputPort`/send adapter, message schema, source identity, or delivery-failure policy |
 
-### Current parallel ownership
+### Historical parallel ownership — completed
 
 1. Sidecar A: theme/CSS/WebIR/Draw-IR and Git-history audit, read-only.
 2. Sidecar B: hosted production route and event/capture diagnosis, read-only;
@@ -93,6 +93,46 @@ overlapping dirty work and remains read-only for this lane.
    and Simple GUI widget theme handoff, with non-overlapping source ownership.
 5. `/root`: merge owner, host bootstrap regression/fix, compiler preflight,
    documentation, final high-capability review, sync and push.
+
+### Runtime-proof parallel assignments — 2026-07-26
+
+The historical lanes above are completed ownership records, not active proof
+claims. The remaining critical work is **TODO 580 (P1)**. **TODO 583 (P3)**
+keeps Electron as a postponed optional wrapper and cannot gate the pure-Simple
+WM/GUI/Web/Engine2D proof.
+
+All rows use package-owned `ThemeRenderSnapshot`/scalar projections,
+`SharedWmScene`, `DrawIrComposition`, `Engine2D`, the production
+HTML/WebIR-to-DrawIR owner, and `widget_tree_to_draw_ir`. The five manual
+steps are fixed: `Load the Stitch glass theme`; `Render the hosted WM
+through the canonical scene`; `Apply glass CSS and widget computed styles`;
+`Boot the canonical SimpleOS desktop in QEMU`; `Capture and compare semantic
+and framebuffer evidence`.
+
+**Wave 0 is not currently admitted at `db9faf0936`.** The forbidden Rust seed
+hash is `f2c216a660da83da1a253d2e8191a3059a66b1d9dc11bbcbaf237fe7e5b8d2bc`.
+Historical-only pure hash
+`277f8ac9e14ae266ce380a5890d434ce27b47cee9378e2b337cbcc8cd4086767` cannot
+import the current graph. The reviewed runtime capsule
+`02775039b26c80ad5858976ad0761ab331cd6454bee202b6dfb3a25310a19d85` at source
+`4e1ddd3afe` is absent and is neither current nor admitted.
+
+| Wave/lane | Exclusive owner and boundary | Required independent review and admission evidence |
+|---|---|---|
+| **Wave 0 — compiler capsule / CompileMode transport** | `/root/compiler_capsule_owner` owns only restoration/re-admission of a runtime capsule or a new immutable current one, its manifest and admission checker. It must set `SIMPLE_NO_STUB_FALLBACK=1`; it may not change WM, GUI, Web, Engine2D, or device code. Any rebase creates a fresh admission requirement. | An independent highest-capability reviewer must first approve an eligible `compile --native` route or classifier-clean pure positional builder, then admit exact source/compiler/runtime/provider hashes and `nm` gates. Required unspent micro-cycle gates: `scripts/check/check-phase2-low-memory-source-reclaim.shs`, `test/03_system/check/phase2_low_memory_source_reclaim_gate_contract_spec.spl`, and `scripts/check/cert/redeploy_gate/candidate_frontend_admission.shs` as necessary-only; positive 3 opt-ins/reclaim/`first-free=1`/`alias=0`, negative no-optin false/no-marker, `test/03_system/compiler/native_cli_mode_transport_regression_spec.spl` output `73`, and `test/03_system/compiler/native_cross_module_class_field_layout_regression_spec.spl` output `84`. This excludes the seed and historical hashes above. Follow `doc/08_tracking/bug/bootstrap_low_memory_positional_bridge_circularity_2026-07-26.md` and `doc/08_tracking/bug/native_engine2d_readback_cross_module_field_layout_2026-07-26.md`. |
+| **Wave A — theme semantics and parity** | `/root/theme_semantics_owner` owns canonical selected-snapshot propagation and focused GUI/Web semantics. `src/app/ui.browser/backend.spl` is permitted only as the canonical selected-snapshot semantic owner; it must not receive GPU, renderer, provider, readback, or backend implementation edits. | Independent high-capability review verifies the selected package CSS and widget snapshot reach `DrawIrComposition`, and runs/reviews `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` with real cascade/layout plus independent framebuffer evidence. |
+| **Wave A — CPU-SIMD host oracle/events** | `/root/cpu_simd_owner` owns CPU-SIMD evidence/checker/report files only; shared Engine2D changes require merge-owner assignment. | Independent high-capability review requires exact scalar/SIMD pixels, focus/pointer/key/text ordered receipts, timing, RSS, and revision-bound artifacts. |
+| **Wave B — Vulkan / Metal** | Prepared-host owners separately own only their provider/checker/manifest/report rows; no cross-backend edits. | Each device row has its own independent high-capability review: immutable device/provider/library identity, selected backend, submit/complete, device-origin readback, CPU-oracle parity, ordered events, timing and RSS. |
+| **Wave B — x86_64 QEMU** | `/root/x86_qemu_owner` owns only canonical x86 checker, frozen manifest, serial/QMP/`pmemsave` captures and report. | Independent high-capability review requires the admitted Wave 0 capsule, fresh canonical boot, independent capture, themed crop/checksum, ordered input and SIMD receipts. |
+| **Wave C — ARM64 QEMU** | `/root/arm_qemu_owner` owns only ARM desktop/QMP checker, frozen manifest, RAMFB/QMP captures and report. | Independent high-capability review requires the same accepted Wave 0 compiler capsule, a self-hosted payload, fresh boot, themed capture/checksum, VirtIO ordering and NEON receipt. |
+| **Aggregate/manual** | `/root/wm_evidence_aggregate` owns only aggregate checkers, executable SSpec, manuals, state/plan/report links. | Independent highest-capability final review accepts only revision-bound rows, no placeholder pass, all five manual steps, and retained evidence links. |
+
+Wave order: Wave 0 first; then Wave A lanes may run in parallel; after their
+accepted capsule/oracle, Vulkan, Metal, and x86 QEMU may run in parallel; ARM
+and aggregation start only from accepted prerequisite rows. An unavailable
+host/device records its first missing rung and exact handoff, leaves the row
+open, and does not block independent lanes. Owners never self-admit; every
+device and QEMU row requires the independent high-capability review above.
 
 ### Next execution order
 
