@@ -77,6 +77,14 @@ if ! pgrep -f '[h]w_server' >/dev/null 2>&1; then
     sleep 5
 fi
 
+# .bss zero-fill image: the kernel relies on zero-initialized .bss but nothing
+# zeroes it — GHDL masks this (sim RAM powers up zeroed); real DDR4 is garbage,
+# so g_heap_off (.bss, kernel+0x7004) reads trash and EVERY allocation fails
+# (canary-only 71-byte transcript, core parks in _start's wfi loop). Proven by
+# garbage-fill GHDL repro (run_garbage_fill.log). Zero .bss before release.
+# .bss: core 0x80004000 size 0x1A004 (llvm-readelf) -> DDR kernel_base+0x4000.
+dd if=/dev/zero of="$OUT_DIR/bss_zeros.bin" bs=4096 count=27 2>/dev/null
+
 cat > "$OUT_DIR/bringup.tcl" <<TCL
 set bit          "$ROOT_DIR/$BIT"
 set kernel_bin   "$ROOT_DIR/$OUT_DIR/kernel.bin"
@@ -166,6 +174,15 @@ puts [format "DDR_RAMDISK_WORD0=0x%08X" [lindex [mrd -force -value \$ddr_ramdisk
 # verify the exact word that read NUL on silicon (banner rodata, kernel+0x20E0,
 # expect 0x203D3D3D "=== "): if THIS is wrong the coherency fix did not hold.
 puts [format "DDR_BANNER_WORD=0x%08X" [lindex [mrd -force -value [expr {\$ddr_kernel + 0x20E0}] 1] 0]]
+
+# ---- 5b. zero .bss (root cause of the canary-only park: un-zeroed DDR) -----
+# g_heap_off lives at kernel+0x7004; pre-value shows the garbage that broke
+# every allocation, post-value must be 0.
+puts [format "BSS_HEAPOFF_PRE=0x%08X" [lindex [mrd -force -value [expr {\$ddr_kernel + 0x7004}] 1] 0]]
+set bss_zeros "$ROOT_DIR/$OUT_DIR/bss_zeros.bin"
+puts "ZEROING_BSS -> [format 0x%08X [expr {\$ddr_kernel + 0x4000}]]"
+if {[catch { dow -data \$bss_zeros [expr {\$ddr_kernel + 0x4000}] } e]} { puts "BSS_ZERO_FAIL:\$e"; exit 1 }
+puts [format "BSS_HEAPOFF_POST=0x%08X" [lindex [mrd -force -value [expr {\$ddr_kernel + 0x7004}] 1] 0]]
 
 # ---- 6. release the core ----------------------------------------------
 mwr -force \$ctrl 0x1
