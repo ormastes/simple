@@ -560,6 +560,10 @@ pub fn rt_is_debug_mode_enabled(_args: &[Value]) -> Result<Value, CompileError> 
     Ok(Value::Bool(sffi_is_debug_mode_enabled()))
 }
 
+pub fn rt_is_interpreter_runtime(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Bool(true))
+}
+
 /// Run a command and capture output
 ///
 /// Callable from Simple as: `rt_process_run(cmd, args)`
@@ -1350,6 +1354,14 @@ mod tests {
         assert_eq!(
             rt_lexer_source_slice(&[Value::Int(1), Value::Int(99)]).unwrap(),
             Value::Nil
+        );
+    }
+
+    #[test]
+    fn interpreter_runtime_reports_interpreter_abi() {
+        assert_eq!(
+            rt_is_interpreter_runtime(&[]).unwrap(),
+            Value::Bool(true)
         );
     }
 

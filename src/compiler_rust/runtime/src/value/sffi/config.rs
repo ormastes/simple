@@ -22,6 +22,11 @@ pub extern "C" fn rt_is_debug_mode_enabled() -> bool {
     DEBUG_MODE_ENABLED.load(Ordering::SeqCst)
 }
 
+#[no_mangle]
+pub extern "C" fn rt_is_interpreter_runtime() -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40,5 +45,10 @@ mod tests {
         assert!(rt_is_debug_mode_enabled());
         rt_set_debug_mode(false);
         assert!(!rt_is_debug_mode_enabled());
+    }
+
+    #[test]
+    fn compiled_runtime_does_not_report_interpreter_abi() {
+        assert!(!rt_is_interpreter_runtime());
     }
 }

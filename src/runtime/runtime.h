@@ -39,6 +39,7 @@ void rt_set_macro_trace(bool enabled);
 bool rt_is_macro_trace_enabled(void);
 void rt_set_debug_mode(bool enabled);
 bool rt_is_debug_mode_enabled(void);
+bool rt_is_interpreter_runtime(void);
 
 /* Runtime-owned gate for Simple's Vulkan dependency quarantine. */
 int64_t rt_vulkan_dependency_quarantine_lock(void);

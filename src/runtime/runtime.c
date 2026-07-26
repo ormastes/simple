@@ -74,6 +74,10 @@ bool rt_is_debug_mode_enabled(void) {
     return spl_debug_mode_enabled;
 }
 
+bool rt_is_interpreter_runtime(void) {
+    return false;
+}
+
 /* ================================================================
  * Value Constructors
  * ================================================================ */

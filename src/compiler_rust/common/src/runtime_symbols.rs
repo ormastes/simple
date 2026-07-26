@@ -887,6 +887,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_is_macro_trace_enabled",
     "rt_set_debug_mode",
     "rt_is_debug_mode_enabled",
+    "rt_is_interpreter_runtime",
     // File I/O operations - metadata
     "rt_file_exists",
     "rt_file_stat",

@@ -1755,6 +1755,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_is_macro_trace_enabled", &[], &[I8]), // () -> bool
     RuntimeFuncSpec::new("rt_set_debug_mode", &[I8], &[]),  // enable -> ()
     RuntimeFuncSpec::new("rt_is_debug_mode_enabled", &[], &[I8]), // () -> bool
+    RuntimeFuncSpec::new("rt_is_interpreter_runtime", &[], &[I8]), // () -> bool
     // =========================================================================
     // Regex Operations
     // =========================================================================

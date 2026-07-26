@@ -361,7 +361,10 @@ pub use sffi::{
 };
 
 // Re-export runtime configuration SFFI functions
-pub use sffi::{rt_is_debug_mode_enabled, rt_is_macro_trace_enabled, rt_set_debug_mode, rt_set_macro_trace};
+pub use sffi::{
+    rt_is_debug_mode_enabled, rt_is_interpreter_runtime, rt_is_macro_trace_enabled,
+    rt_set_debug_mode, rt_set_macro_trace,
+};
 
 // Re-export CLI SFFI functions
 pub use cli_sffi::{

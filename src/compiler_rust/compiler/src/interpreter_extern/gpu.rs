@@ -2796,7 +2796,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
     use std::ptr;
     let fns = match vulkan_dlopen::load_vulkan() {
         Some(f) => f,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     unsafe {
         let app_name = std::ffi::CString::new("simple").unwrap();
@@ -2828,7 +2828,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         };
         let mut instance: VkInstance = ptr::null_mut();
         if (fns.create_instance)(&create_info, ptr::null(), &mut instance) != VK_SUCCESS {
-            return Ok(Value::Int(0));
+            return Ok(Value::Bool(false));
         }
 
         // Enumerate physical devices
@@ -2836,7 +2836,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         (fns.enumerate_physical_devices)(instance, &mut count, ptr::null_mut());
         if count == 0 {
             (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Int(0));
+            return Ok(Value::Bool(false));
         }
         let mut phys_devs: Vec<VkPhysicalDevice> = vec![ptr::null_mut(); count as usize];
         (fns.enumerate_physical_devices)(instance, &mut count, phys_devs.as_mut_ptr());
@@ -2860,7 +2860,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         }
         if chosen_phys.is_null() {
             (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Int(0));
+            return Ok(Value::Bool(false));
         }
 
         let priority: f32 = 1.0;
@@ -2888,7 +2888,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         let mut device: VkDevice = ptr::null_mut();
         if (fns.create_device)(chosen_phys, &dev_ci, ptr::null(), &mut device) != VK_SUCCESS {
             (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Int(0));
+            return Ok(Value::Bool(false));
         }
 
         let mut queue: VkQueue = ptr::null_mut();
@@ -2917,7 +2917,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         if (fns.create_command_pool)(device, &pool_ci, ptr::null(), &mut cmd_pool) != VK_SUCCESS {
             (fns.destroy_device)(device, ptr::null());
             (fns.destroy_instance)(instance, ptr::null());
-            return Ok(Value::Int(0));
+            return Ok(Value::Bool(false));
         }
 
         let state = VulkanState {
@@ -2943,7 +2943,7 @@ pub fn rt_vulkan_init_fn(_args: &[Value]) -> Result<Value, CompileError> {
         };
         *VK_STATE.lock().unwrap() = Some(state);
     }
-    Ok(Value::Int(1))
+    Ok(Value::Bool(true))
 }
 
 #[cfg(test)]
@@ -2980,7 +2980,7 @@ pub fn rt_vulkan_shutdown_fn(_args: &[Value]) -> Result<Value, CompileError> {
             let f = &st.fns;
             if (f.device_wait_idle)(st.device) != VK_SUCCESS {
                 *guard = Some(st);
-                return Ok(Value::Int(0));
+                return Ok(Value::Bool(false));
             }
             for (fence, cmd) in &st.quarantined_commands {
                 (f.free_command_buffers)(st.device, st.command_pool, 1, cmd);
@@ -3020,7 +3020,7 @@ pub fn rt_vulkan_shutdown_fn(_args: &[Value]) -> Result<Value, CompileError> {
     }
     // Match the native runtime ABI: a completed (including idempotent)
     // shutdown is success. The wait-idle failure path above remains false.
-    Ok(Value::Int(1))
+    Ok(Value::Bool(true))
 }
 
 /// `rt_vulkan_device_count() -> i64`
@@ -3310,11 +3310,11 @@ pub fn rt_vulkan_free_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
                 // Match the native runtime ABI: true means this call owned and
                 // completed the resource release. Image-composite provenance
                 // requires this receipt before it can remain device-backed.
-                return Ok(Value::Int(1));
+                return Ok(Value::Bool(true));
             }
         }
     }
-    Ok(Value::Int(0))
+    Ok(Value::Bool(false))
 }
 
 /// `rt_vulkan_copy_to_buffer(handle: i64, data: [u8], offset: i64) -> bool`
@@ -3325,30 +3325,30 @@ pub fn rt_vulkan_copy_to_buffer_fn(args: &[Value]) -> Result<Value, CompileError
     let (bytes, _ptr) = arg_bytes_ptr(args, 1, "rt_vulkan_copy_to_buffer", 3)?;
     let offset = arg_i64(args, 2, "rt_vulkan_copy_to_buffer", 3)?;
     if handle == 0 || offset < 0 {
-        return Ok(Value::Int(0));
+        return Ok(Value::Bool(false));
     }
 
     let guard = VK_STATE.lock().unwrap();
     let s = match guard.as_ref() {
         Some(s) => s,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     if handle > s.buffers.len() {
-        return Ok(Value::Int(0));
+        return Ok(Value::Bool(false));
     }
     let buffer = match s.buffers[handle - 1].as_ref() {
         Some(buffer) => buffer,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     let offset_u = offset as u64;
     let count_u = bytes.len() as u64;
     if offset_u > buffer.size || count_u > buffer.size.saturating_sub(offset_u) {
-        return Ok(Value::Int(0));
+        return Ok(Value::Bool(false));
     }
 
     unsafe {
         if buffer.mapped.is_null() {
-            return Ok(Value::Int(0));
+            return Ok(Value::Bool(false));
         }
         let dst = std::slice::from_raw_parts_mut((buffer.mapped as *mut u8).add(offset_u as usize), bytes.len());
         dst.copy_from_slice(&bytes);
@@ -3361,7 +3361,7 @@ pub fn rt_vulkan_copy_to_buffer_fn(args: &[Value]) -> Result<Value, CompileError
         };
         let _ = (s.fns.flush_mapped_memory_ranges)(s.device, 1, &range);
     }
-    Ok(Value::Int(1))
+    Ok(Value::Bool(true))
 }
 
 /// `rt_vulkan_compile_glsl(glsl_source: text) -> i64`
@@ -3945,22 +3945,22 @@ pub fn rt_vulkan_push_constants_fn(args: &[Value]) -> Result<Value, CompileError
     let mut guard = VK_STATE.lock().unwrap();
     let s = match guard.as_mut() {
         Some(s) => s,
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     if ch == 0 || ch > s.command_buffers.len() {
-        return Ok(Value::Int(0));
+        return Ok(Value::Bool(false));
     }
     let (cmd, ph) = match s.command_buffers[ch - 1].as_ref() {
         Some(e) => (e.cmd, e.pipeline_handle as usize),
-        None => return Ok(Value::Int(0)),
+        None => return Ok(Value::Bool(false)),
     };
     let layout = if ph > 0 && ph <= s.pipelines.len() {
         match s.pipelines[ph - 1].as_ref() {
             Some(p) => p.layout,
-            None => return Ok(Value::Int(0)),
+            None => return Ok(Value::Bool(false)),
         }
     } else {
-        return Ok(Value::Int(0));
+        return Ok(Value::Bool(false));
     };
     unsafe {
         (s.fns.cmd_push_constants)(
@@ -3972,7 +3972,7 @@ pub fn rt_vulkan_push_constants_fn(args: &[Value]) -> Result<Value, CompileError
             bytes.as_ptr() as *const _,
         );
     }
-    Ok(Value::Int(1))
+    Ok(Value::Bool(true))
 }
 
 /// `rt_vulkan_dispatch(cmd: i64, x: i64, y: i64, z: i64) -> bool`

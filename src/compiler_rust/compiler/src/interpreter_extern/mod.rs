@@ -1376,6 +1376,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         interpreter_native_net::rt_io_tcp_write_text_read_exact_len_interp
     );
     insert_simple!("rt_is_debug_mode_enabled", system::rt_is_debug_mode_enabled);
+    insert_simple!("rt_is_interpreter_runtime", system::rt_is_interpreter_runtime);
     insert_simple!("rt_is_error", sffi_value::rt_is_error_fn);
     insert_simple!("rt_is_macro_trace_enabled", system::rt_is_macro_trace_enabled);
     #[cfg(not(doctest))]
