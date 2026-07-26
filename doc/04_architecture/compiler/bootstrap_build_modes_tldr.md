@@ -10,6 +10,9 @@ inside pure-Simple tooling.
 - `one-binary` is the conservative monolithic native executable path.
 - Normal bootstrap never rebuilds Rust; `--full-bootstrap` is the only cargo
   rebuild path.
+- Treat full bootstrap as a final gate only for compiler, interpreter,
+  bootstrap, or bootstrap/runtime implementation changes—not app, IDE, Office,
+  ordinary tooling, documentation, or test-only work.
 - `--entry-closure` is a reducer, not authoritative dependency tracing.
 - AOP/MDSOC weaving, module resolver, interpreter cache, loader ABI, or compiler
   ABI changes invalidate broadly.

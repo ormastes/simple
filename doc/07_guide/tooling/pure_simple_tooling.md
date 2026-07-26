@@ -55,6 +55,12 @@ Use `--full-cli` when a new monolithic CLI is required, `--deploy` to build and
 install it, and `--full-bootstrap` only when Rust seed/runtime inputs changed.
 `--mode=one-binary` also implies a full CLI relink.
 
+Do not add a full-bootstrap “final check” to app, IDE, Office, ordinary tooling,
+documentation, or test-only changes. The final full-bootstrap gate applies only
+when the goal changes compiler/interpreter, bootstrap, or bootstrap/runtime
+implementation. Other goals use focused checks with the existing deployed
+pure-Simple runtime.
+
 Dependency tracing remains conservative around AOP/MDSOC weaving. The native
 cache fingerprints module sources, while the wrapper broadly invalidates on
 platform/backend/mode and AOP/MDSOC/weaving/loader environment changes. Use

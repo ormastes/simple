@@ -21,6 +21,12 @@ relinking requires `--full-cli`, `--deploy`, or `--mode=one-binary`.
 after the dynload stages unless combined with a full-CLI option. The Rust seed
 is a bootstrap input, not the production toolchain.
 
+A full bootstrap is a completion gate only for changes to the compiler,
+interpreter, bootstrap machinery, or bootstrap/runtime implementation. App,
+IDE, Office, ordinary tooling, documentation, and test-only changes complete
+with focused checks against the existing deployed pure-Simple runtime; they do
+not require a bootstrap solely because they are ready to finish.
+
 ## Dependency Tracing
 
 `--entry-closure` is a reducer, not an authority. It scans imports from the

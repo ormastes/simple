@@ -105,9 +105,13 @@ right gate ships a stale binary. **A small change is NOT a full bootstrap.**
   layout changes, entry-closure set changes, linker-script or flag/target/opt-level
   changes. (Under T1 these auto-trigger a full rebuild anyway; run T2 directly when
   you know the change is structural.)
-- **T3 — full bootstrap.** ONLY when the compiler itself changed
-  (`src/compiler_rust` seed or `src/compiler` pure-Simple), or as the final
-  pre-goal-complete gate. A seed change invalidates T1's cache, so T3 subsumes it.
+- **T3 — full bootstrap.** ONLY when compiler, interpreter, or bootstrap/runtime
+  implementation changed (`src/compiler_rust`, `src/compiler`, or bootstrap
+  runtime sources). Use T3 as the final pre-goal-complete gate only for goals
+  that include such changes. App, IDE, Office, tooling, documentation, and
+  test-only changes must use their focused deployed-runtime checks and must not
+  trigger T3 merely because the goal is otherwise complete. A seed change
+  invalidates T1's cache, so T3 subsumes it.
 
 **Follow-up (not yet done):** `SIMPLE_NATIVE_INCREMENTAL` safe per-module reuse is
 implemented only in the Rust seed's native-build pipeline
