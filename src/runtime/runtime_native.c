@@ -463,6 +463,10 @@ SPL_HOSTED_UNAVAILABLE_WEAK void rt_sdl2_present(int64_t handle) {
 }
 
 #if defined(SIMPLE_CORE_C_STANDALONE)
+bool rt_is_interpreter_runtime(void) {
+    return false;
+}
+
 int64_t rt_cli_run_file(int64_t path, int64_t args, uint8_t gc_log, uint8_t gc_off) {
     (void)path; (void)args; (void)gc_log; (void)gc_off;
     fprintf(stderr, "simple: --fork requires hosted interpreter support\n");

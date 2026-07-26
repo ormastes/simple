@@ -118,6 +118,7 @@ pub enum RuntimeSymbolClass {
 pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "__simple_runtime_init",
     "__simple_runtime_shutdown",
+    "rt_is_interpreter_runtime",
     "rt_alloc",
     "rt_free",
     "rt_realloc",

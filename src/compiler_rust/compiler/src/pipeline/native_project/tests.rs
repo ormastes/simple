@@ -1780,6 +1780,10 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
         core_c_symbols.contains("spl_thread_cpu_count"),
         "core-c runtime archive must include the legacy thread CPU-count ABI used by std.thread_sffi"
     );
+    assert!(
+        core_c_symbols.contains("rt_is_interpreter_runtime"),
+        "core-c runtime archive must expose its native/interpreter identity ABI"
+    );
     assert!(core_c_symbols.contains("rt_crc32_text"));
     assert!(core_c_symbols.contains("rt_file_create_excl"));
     assert!(core_c_symbols.contains("rt_file_sync"));
