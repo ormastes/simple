@@ -187,6 +187,21 @@ sh scripts/fpga/build_rv32_tiny_bram_bitstream.shs    # bitstream, .mem-initiali
 bash scripts/fpga/read_rv32_tiny_bram_obs.shs transcript > run.log 2>&1
 ```
 
+**Console transport ("jtagterminal") is configurable.** The readout above is
+the cable-free path: the soft-UART bytes are captured on-chip and read back
+over the same FT4232H JTAG chain that programs the board — no PMOD wiring at
+all. `CONSOLE_MODE=uart` instead points you at the PMOD J2 pins (H12 tx / E10
+rx, LVCMOS33, 115200 8N1), which need a **3.3V USB-TTL cable** (never a 5V or
+RS-232 one). `BUF_WORDS` must match the bitstream's `UARTBUF_WORDS` generic.
+
+Decoding and the completeness verdict are pure Simple
+(`src/lib/hardware/fpga_k26/jtag_console.spl`, spec in `test/`), so the script
+now ends with a `COMPLETE:`/`INCOMPLETE:` line and a matching exit code instead
+of a hand-compared byte count. The capture buffer is finite (2048 words = 8 KB)
+while the core's byte counter keeps running past the end, so an overrun is
+reported as `INCOMPLETE ... N bytes LOST` rather than printing a capped prefix
+that reads like a whole boot log.
+
 Vivado BRAM landmines: non-pow2 depth pads to the next power of two
 (77824 → 131072 words!) — split arrays into ≤3 pow2 banks; shared case-select
 writes break BRAM inference (Synth 8-3391); `.mem` INIT needs the elaboration

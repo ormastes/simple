@@ -1,7 +1,7 @@
 # Shared RISC-V backend target contracts
 
 use compiler.backend.backend.backend_types.{CodegenTarget}
-use compiler.backend.target_presets.{preset_riscv64_linux, preset_riscv32_baremetal}
+use compiler.backend.target_presets.{preset_riscv64_linux, preset_riscv32_baremetal, preset_riscv64_baremetal}
 use compiler.backend.portable_numeric_capabilities.{portable_numeric_capabilities_for_preset}
 use hardware.riscv_common.pkg.riscv_linux_pkg.{RiscvTargetAbi}
 
@@ -116,17 +116,27 @@ fn riscv_baremetal_target_contract(target: CodegenTarget) -> RiscvTargetContract
             arg_register_count: 8,
             call_plt_reloc: 19
         )
+    # Riscv64: derive ABI, march, and features from the capability registry,
+    # exactly as the Riscv32 path above does. Baremetal RV64 is the SimpleOS
+    # soft-core lane (RV64IM / RV64IMAC, no FPU); an unconditional `rv64gc` /
+    # `lp64d` here is a hard-float capability claim that would emit FP
+    # instructions those cores trap on.
+    val preset64 = preset_riscv64_baremetal()
+    val caps64 = portable_numeric_capabilities_for_preset(preset64)
+    val abi64 = if caps64.has_riscv_d: RiscvTargetAbi.LP64D else: RiscvTargetAbi.LP64
+    val march64 = if caps64.has_riscv_d: "rv64gc" elif caps64.has_riscv_f: "rv64imafc" else: "rv64imac"
+    val features64 = if caps64.has_riscv_d: ["+m", "+a", "+f", "+d", "+c"] elif caps64.has_riscv_f: ["+m", "+a", "+f", "+c"] else: ["+m", "+a", "+c"]
     RiscvTargetContract(
         target: CodegenTarget.Riscv64,
         arch: "riscv64",
         vendor: "unknown",
         os: "none",
         env: Some("elf"),
-        abi: RiscvTargetAbi.LP64D,
-        abi_text_value: "lp64d",
+        abi: abi64,
+        abi_text_value: if caps64.has_riscv_d: "lp64d" else: "lp64",
         cpu: "generic-rv64",
-        features: ["+m", "+a", "+f", "+d", "+c"],
-        march: "rv64gc",
+        features: features64,
+        march: march64,
         linker: "ld",
         sysroot: "",
         crt_dir: "",

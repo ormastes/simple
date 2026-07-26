@@ -158,6 +158,29 @@ pub(crate) fn call_method_on_value(
             match method {
                 "is_ok" => return Ok(Value::Bool(res_variant == Some(ResultVariant::Ok))),
                 "is_err" => return Ok(Value::Bool(res_variant == Some(ResultVariant::Err))),
+                // Result -> Option conversion. Mirrors handle_result_methods in
+                // interpreter_method/special/types.rs; without it a chained
+                // `Type.static_fn(x).ok().unwrap()` fell through to
+                // "method 'ok' not found on value of type enum in nested call
+                // context" because this dispatcher only knew is_ok/is_err/unwrap.
+                "ok" => {
+                    if res_variant == Some(ResultVariant::Ok) {
+                        return Ok(payload
+                            .as_ref()
+                            .map(|p| Value::some(p.as_ref().clone()))
+                            .unwrap_or_else(Value::none));
+                    }
+                    return Ok(Value::none());
+                }
+                "err" => {
+                    if res_variant == Some(ResultVariant::Err) {
+                        return Ok(payload
+                            .as_ref()
+                            .map(|p| Value::some(p.as_ref().clone()))
+                            .unwrap_or_else(Value::none));
+                    }
+                    return Ok(Value::none());
+                }
                 "unwrap" => {
                     if res_variant == Some(ResultVariant::Ok) {
                         if let Some(val) = payload {

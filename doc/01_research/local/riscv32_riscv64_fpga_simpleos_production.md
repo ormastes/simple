@@ -51,6 +51,16 @@ historical evidence only.
 
 ## Executive Finding
 
+> **STALE IN PART — read with the 2026-07-27 audit.** The findings below are
+> accurate as of 2026-07-18 but the generated-core lane has since moved. The
+> pure-Simple `vhdl_gen` generator now emits all six rv32/rv64 variants
+> byte-identical to goldens, and the KV260 has booted SimpleOS from
+> generated-core bitstreams — so "emits empty VHDL CPU architectures and
+> testbenches that report PASS without executing instructions" no longer
+> describes the current generated-core path. The privilege/MMU/PMP gaps below
+> **do** still hold. Current state, with five blockers re-verified in-tree:
+> [`../domain/riscv_gen2_production_audit_2026-07-27.md`](../domain/riscv_gen2_production_audit_2026-07-27.md).
+
 The requested end state is not implemented.
 
 - Simple contains real behavioral RV32 and RV64 CPU/MMU/SoC models and a real

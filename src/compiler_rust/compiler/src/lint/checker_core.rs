@@ -571,6 +571,11 @@ impl LintChecker {
         // Determinism guard (GAME-DET-LINT-001)
         "deterministic",
         "name_checked",
+        // VHDL hardware backend directives (parse_vhdl_hardware_attrs)
+        "hardware",
+        "clocked",
+        "generic",
+        "flatten_struct_output",
     ];
 
     /// Known attribute names (whitelist)

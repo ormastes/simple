@@ -19,7 +19,7 @@ architecture tb of tb_rv64_product_wb_axi is
 begin
   clk <= not clk after 5 ns;
   process begin wait for 20 ns; rst <= '0'; wait for 1 us; assert false report "timeout" severity failure; end process;
-  u_core: entity work.rv64gc_core_product_wb port map (
+  u_core: entity work.rv64imac_core_product_wb port map (
     clk=>clk, rst=>rst, msip_i=>'0', mtip_i=>'0', meip_i=>'0', stip_i=>'0', seip_i=>'0', time_value_i=>(others=>'0'),
     wb_adr_o=>adr, wb_dat_o=>dat_o, wb_dat_i=>dat_i, wb_we_o=>we, wb_sel_o=>sel, wb_stb_o=>stb, wb_cyc_o=>cyc, wb_lock_o=>lock, wb_ack_i=>ack, wb_err_i=>err);
   u_bridge: entity work.wb64_axi_hp_bridge port map (

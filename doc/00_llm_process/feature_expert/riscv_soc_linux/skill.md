@@ -143,3 +143,25 @@ placeholder stub today)**.
   `bin/release/<triple>/simple` with a compile-only bootstrap binary; if
   `bin/simple` suddenly has no `run` command, restore the full CLI (backup at
   `simple.bootstrap-clobber-bak`, known-good at `build/native_probe/simple`).
+
+## 2026-07-27 hardening campaign (gates 12/22 → 21/22)
+
+- **Seed `@hardware` gap was the master failure**: the Rust seed's interpreter
+  directive skip-list omitted `hardware`/`clocked`/`generic`/
+  `flatten_struct_output` (`interpreter_eval.rs:606+`), so `@hardware` sources
+  died with ``variable `hardware` not found`` — blocking 9 probes + the formal
+  gate. Fixed in-seed; **takes effect only after full bootstrap redeploy**.
+- **`X test <spec>` executes the spec under `bin/simple`, not X** —
+  `find_simple_binary()` falls through (`cli_get_args()[0]` is the subcommand).
+  Set `SIMPLE_BINARY=<binary>` for test-run evidence. Bug:
+  `test_runner_child_binary_ignores_invoking_binary_2026-07-27.md`.
+- rv32 generated core has **no trap machinery** (`csr_mcause`/`mepc` absent in
+  all 3 lanes); C.EBREAK/illegal/AMO/unknown-op red specs live in
+  `rv32_trap_completeness_spec.spl` — trap infra is the prerequisite. Flat/axi
+  lanes come from `rv32_variant_sections.spl`, not `rv32_sections.spl`.
+- `rv64gc_core_product*` renamed `rv64imac_core_product*` (was a false `gc`
+  claim over an IMAC netlist). The `simple_rv{32,64}gc_core` family remains
+  unrenamed (woven into formal gates; needs its own lane).
+- Payload addresses `0x8002AB5C/6C/8C` in `rv32_exec_core.vhd` are UNREACHABLE
+  dead code (`SCRATCH_BASE_WORD=16384` vs `word_index()` max 16383).
+- Full ledger: `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md`.

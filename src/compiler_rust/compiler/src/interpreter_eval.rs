@@ -607,12 +607,19 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         // Skip compiler-directive decorators that aren't evaluated at runtime
                         // @extern is a codegen directive, not a runtime decorator
                         // @deprecated is handled at compile time via HIR lowering
+                        // @hardware/@clocked/@generic/@flatten_struct_output are VHDL
+                        // backend directives consumed by parse_vhdl_hardware_attrs; they
+                        // have no runtime binding and must not be looked up in env.
                         if let Expr::Identifier(name) = &decorator.name {
                             if name == "extern"
                                 || name == "deprecated"
                                 || name == "gpu_kernel"
                                 || name == "gpu_device"
                                 || name == "gpu_shared"
+                                || name == "hardware"
+                                || name == "clocked"
+                                || name == "generic"
+                                || name == "flatten_struct_output"
                             {
                                 continue;
                             }

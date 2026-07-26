@@ -65,7 +65,7 @@ begin
     assert false report "RV64 Sv39/PMP product test timed out" severity failure;
   end process;
 
-  dut : entity work.rv64gc_core_product_wb
+  dut : entity work.rv64imac_core_product_wb
     port map (
       clk => clk, rst => rst, msip_i => '0', mtip_i => '0', meip_i => '0',
       stip_i => '0', seip_i => '0', time_value_i => (others => '0'),

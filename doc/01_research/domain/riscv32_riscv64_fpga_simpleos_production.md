@@ -213,6 +213,40 @@ The recommended strategy is compiler-first modular integration of the existing
 Simple models, with QEMU as artifact/platform oracle and VexRiscv as optional
 differential oracle, followed by generated-RTL and physical-board proof.
 
+### 2026-07-27 update — see the companion production audit
+
+Two things changed after this document was written (2026-07-18).
+
+**Progress.** The pure-Simple `vhdl_gen` generator now emits all six rv32/rv64
+core variants byte-identical to their goldens, and the KV260 has booted SimpleOS
+from generated-core bitstreams. The "empty architecture / unconditional PASS"
+condition described in the companion local research is **no longer the current
+state** for the generated-core lane.
+
+**Correction.** Two claims in this document's framing must not be carried
+forward:
+
+1. **`RVA22.RV64GCV` is not a valid designation.** The target is
+   **RVA22S64 + V**. RVA22 is a 64-bit application-processor profile family
+   (RVA22U64 / RVA22S64 only); `V` is an option, not part of the mandatory
+   base. RV64GC compiler output does not imply RVA22 compliance — RVA22U64 also
+   mandates Zba/Zbb/Zbs, Zicbom/Zicbop/Zicboz, Zfhmin, 64-byte cache-block
+   semantics, misaligned main-memory access, reservation-set requirements, and
+   Zkt; RVA22S64 adds Zifencei, priv 1.12, Sv39, Svade, hardware page-table
+   accesses, Svpbmt, and Svinval. There is no RVA22 RV32 profile — RV32 is a
+   separate product line.
+2. **Byte-identical golden comparison is not ISA correctness evidence.** It
+   proves the emitter is reproducible, which is a different property.
+
+Five correctness blockers were verified in-tree on 2026-07-27: payload-specific
+load addresses in the RV32 datapath, `null` AMO and unknown-instruction
+handlers, ECALL/EBREAK that halt instead of trapping, a 63-bit `XlenConfig.mask`
+documented as 64-bit, and C.EBREAK decoded only in the behavioral oracle.
+
+Full audit and gap analysis against public SiFive feature classes:
+[`riscv_gen2_production_audit_2026-07-27.md`](riscv_gen2_production_audit_2026-07-27.md).
+Roadmap: `doc/03_plan/hardware/riscv/riscv_gen2_production_roadmap_2026-07-27.md`.
+
 <!-- codex-research -->
 ## Stage-Boundary Metadata ABI
 

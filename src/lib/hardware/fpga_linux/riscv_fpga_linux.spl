@@ -722,8 +722,8 @@ fn write_bundle_readme(output_dir: text) -> text:
     lines = lines.push("- `board_linux_boot_products.sdn` — per-arch boot products manifest; per-arch boot products manifest: `board_linux_boot_products.sdn`")
     lines = lines.push("- `riscv_product.byl` — generated product proof-model surface")
     lines = lines.push("- `synth/rv32_synth.sdn`, `synth/rv64_synth.sdn` — synthesis report templates for budget evidence")
-    lines = lines.push("- `rv32/rtl/` — generated RV32GC Linux lane RTL plus emitted runner testbenches")
-    lines = lines.push("- `rv64/rtl/` — generated RV64GC Linux lane RTL plus emitted runner testbenches")
+    lines = lines.push("- `rv32/rtl/` — generated rv32imc_zicsr (soft-float ilp32) Linux lane RTL plus emitted runner testbenches")
+    lines = lines.push("- `rv64/rtl/` — generated rv64im_zicsr (soft-float lp64) Linux lane RTL plus emitted runner testbenches")
     lines = lines.push("")
     lines = lines.push("## Provenance")
     lines = lines.push("")
@@ -736,14 +736,23 @@ fn write_bundle_readme(output_dir: text) -> text:
     rtl_file_write_text(path, lines.join("\n"))
     return path
 
+fn generated_core_lane_isa(lane: text) -> text:
+    """Honest ISA string for a generated FPGA lane — soft-float, no F/D.
+
+    Mirrors `Xlen.isa_string()`. FPGA board lanes must never advertise a `G`/`gc`
+    march string or a hard-float `*d` ABI: the exec cores have no FPU.
+    """
+    if lane == "rv32": "rv32imc_zicsr" else: "rv64im_zicsr"
+
 fn generated_core_source(lane: text) -> text:
-    "proof_lane: generated_{lane}_linux\nscope: repo-native {lane.upper()}GC generated-core Linux lane\n"
+    val isa = generated_core_lane_isa(lane)
+    "proof_lane: generated_{lane}_linux\nscope: repo-native {isa} generated-core Linux lane\n"
 
 fn rv32_generated_hardware_source_spl() -> text:
     """Generated RV32I decode/control hardware helpers used by the VHDL lane."""
     var src = ""
     src = src + "# proof_lane: generated_rv32_linux\n"
-    src = src + "# scope: repo-native RV32GC generated-core Linux lane\n\n"
+    src = src + "# scope: repo-native rv32imc_zicsr generated-core Linux lane\n\n"
     src = src + "@hardware\nfn simple_rv32i_core_decode_writeback(imem_rdata: u32, next_rd: u32) -> u32:\n"
     src = src + "    val v_opcode = imem_rdata & 127\n"
     src = src + "    val v_funct3 = (imem_rdata >> 12) & 7\n"
@@ -880,7 +889,7 @@ fn formal_manifest_text(lane: text, core: text) -> text:
     "lane = \"{lane}\"\nstatus = \"contract-not-ready\"\nreason = \"placeholder-core-no-semantic-rvfi\"\nproof_style = \"placeholder-rejected\"\nrunner = \"sby -f {core}.sby\"\nharness = \"{core}_formal.vhd\"\nsby = \"{core}.sby\"\n"
 
 fn sidecar_json(output_dir: text, lane: text, product: RiscvFpgaProductProfile) -> text:
-    val xlen = if lane == "rv32": "32" else: "64"
+    val isa = generated_core_lane_isa(lane)
     val abi = if lane == "rv32": "ilp32" else: "lp64"
     val mmu = if lane == "rv32": "sv32" else: "sv39"
     val luts = if lane == "rv32": product.rv32_luts else: product.rv64_luts
@@ -893,7 +902,7 @@ fn sidecar_json(output_dir: text, lane: text, product: RiscvFpgaProductProfile) 
     val runners = "{}"
     val core = "simple_{lane}gc_core"
     val observability = "{\"fetch\": false, \"trap\": false, \"halt\": false, \"memoryAccess\": false, \"registerProbes\": false, \"debugProbes\": false, \"proofFailureReports\": true}"
-    "{\"schemaVersion\": \"riscv_rtl_debuggability_lint/v1\", \"laneId\": \"{lane}\", \"proofLane\": \"generated_{lane}_linux\", \"xlen\": \"{lane}\", \"generatedFrom\": \"{core}.spl\", \"topModule\": \"{core}\", \"rtlDir\": \"{output_dir}/{lane}/rtl\", \"shellSummary\": \"generated_{lane}_linux shell=none\", \"readiness\": \"contract-not-ready\", \"reason\": \"placeholder-core-no-semantic-rvfi\", \"linuxBootValidated\": false, \"platform\": \"qemu_virt_{lane}\", \"scope\": \"repo-native RV{xlen}GC generated-core Linux lane\", \"linuxPolicy\": \"repo-native-{lane}-linux\", \"productLevel\": \"{product.product_level}\", \"configurationProfile\": \"{product.configuration_profile}\", \"authoritative\": false, \"provenance\": {\"authoritativeRtl\": \"none\", \"contractFiles\": [\"{output_dir}/{lane}/rtl/{core}.spl\", \"{output_dir}/{lane}/rtl/{core}_pkg.vhd\", \"{output_dir}/{lane}/rtl/{core}.vhd\", \"{output_dir}/{lane}/rtl/{core}.debug.json\"], \"auxiliaryVhdl\": \"emitted-text-vhdl\", \"runnerTestbenches\": \"emitted-text-vhdl\", \"pureSimpleAuthoritativeRtl\": false}, \"abi\": \"{abi}\", \"mmu\": \"{mmu}\", \"rtlBudget\": {\"maxLuts\": {luts}, \"targetMhz\": {mhz}}, \"formal\": {\"flow\": \"rvfi+sby\", \"gate\": \"placeholder-rejected\", \"status\": \"{formal_status}\", \"reason\": \"{formal_reason}\", \"rvfiPortCount\": 17, \"observedRvfiPortCount\": {observed_rvfi_ports}, \"harness\": \"{output_dir}/{lane}/rtl/{core}_formal.vhd\", \"sby\": \"{output_dir}/{lane}/rtl/{core}.sby\", \"manifest\": \"{output_dir}/{lane}/rtl/{core}_formal.sdn\"}, \"firmwareMode\": \"fw_jump\", \"acceptanceMarkers\": [\"OpenSBI\", \"Linux version\", \"OF: fdt\", \"Freeing unused kernel memory\", \"init started\"], \"observability\": {observability}, \"reportMarkers\": {report_markers}, \"runnerSuccessMarkers\": {runners}, \"runnerTestbenches\": {runner_testbenches}, \"sourceMap\": [], \"debugOutputs\": [\"semi_trigger\", \"semi_op\", \"semi_param\", \"debug_pc\"], \"shellServices\": {\"semihost\": false, \"mailbox\": false}}\n"
+    "{\"schemaVersion\": \"riscv_rtl_debuggability_lint/v1\", \"laneId\": \"{lane}\", \"proofLane\": \"generated_{lane}_linux\", \"xlen\": \"{lane}\", \"generatedFrom\": \"{core}.spl\", \"topModule\": \"{core}\", \"rtlDir\": \"{output_dir}/{lane}/rtl\", \"shellSummary\": \"generated_{lane}_linux shell=none\", \"readiness\": \"contract-not-ready\", \"reason\": \"placeholder-core-no-semantic-rvfi\", \"linuxBootValidated\": false, \"platform\": \"qemu_virt_{lane}\", \"scope\": \"repo-native {isa} generated-core Linux lane\", \"linuxPolicy\": \"repo-native-{lane}-linux\", \"productLevel\": \"{product.product_level}\", \"configurationProfile\": \"{product.configuration_profile}\", \"authoritative\": false, \"provenance\": {\"authoritativeRtl\": \"none\", \"contractFiles\": [\"{output_dir}/{lane}/rtl/{core}.spl\", \"{output_dir}/{lane}/rtl/{core}_pkg.vhd\", \"{output_dir}/{lane}/rtl/{core}.vhd\", \"{output_dir}/{lane}/rtl/{core}.debug.json\"], \"auxiliaryVhdl\": \"emitted-text-vhdl\", \"runnerTestbenches\": \"emitted-text-vhdl\", \"pureSimpleAuthoritativeRtl\": false}, \"isa\": \"{isa}\", \"abi\": \"{abi}\", \"mmu\": \"{mmu}\", \"rtlBudget\": {\"maxLuts\": {luts}, \"targetMhz\": {mhz}}, \"formal\": {\"flow\": \"rvfi+sby\", \"gate\": \"placeholder-rejected\", \"status\": \"{formal_status}\", \"reason\": \"{formal_reason}\", \"rvfiPortCount\": 17, \"observedRvfiPortCount\": {observed_rvfi_ports}, \"harness\": \"{output_dir}/{lane}/rtl/{core}_formal.vhd\", \"sby\": \"{output_dir}/{lane}/rtl/{core}.sby\", \"manifest\": \"{output_dir}/{lane}/rtl/{core}_formal.sdn\"}, \"firmwareMode\": \"fw_jump\", \"acceptanceMarkers\": [\"OpenSBI\", \"Linux version\", \"OF: fdt\", \"Freeing unused kernel memory\", \"init started\"], \"observability\": {observability}, \"reportMarkers\": {report_markers}, \"runnerSuccessMarkers\": {runners}, \"runnerTestbenches\": {runner_testbenches}, \"sourceMap\": [], \"debugOutputs\": [\"semi_trigger\", \"semi_op\", \"semi_param\", \"debug_pc\"], \"shellServices\": {\"semihost\": false, \"mailbox\": false}}\n"
 
 fn write_generated_core_lane(output_dir: text, lane: text, rtl_dir: text, product: RiscvFpgaProductProfile) -> [text]:
     val core = "simple_{lane}gc_core"

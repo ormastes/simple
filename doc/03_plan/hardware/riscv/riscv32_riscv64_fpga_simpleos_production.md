@@ -2,6 +2,10 @@
 
 Date: 2026-07-18
 Status: **F1 + N3 selected; design complete; implementation in progress**
+Scope note (2026-07-27): this plan remains authoritative for the **V1 Linux
+bring-up lane**. Production-grade core work (`riscv_gen2`: HWIR, hardware DI,
+declarative ISA database, in-order → OoO → vector) is planned separately in
+[`riscv_gen2_production_roadmap_2026-07-27.md`](riscv_gen2_production_roadmap_2026-07-27.md).
 
 This is the detailed implementation plan for the user-selected **F1 + N3**
 path. Unchosen options were deleted after selection.
