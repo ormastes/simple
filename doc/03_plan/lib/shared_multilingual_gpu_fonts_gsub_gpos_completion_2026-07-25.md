@@ -204,8 +204,6 @@ owner.
   with RTL handled by logical clusters rather than visual array order.
 - Thread one mutable work budget through every variable-count reader.
 - Permit one shared PairPos2 ClassDef while rejecting unrelated overlap.
-- Implement bounded ContextSubst format 1 rule-set validation/application
-  through the existing nested dispatcher.
 - Implement GPOS ExtensionPos format 1 as a validated wrapper over the shared
   semantic GPOS handlers, preserving the outer LookupFlag and shared work
   budget. Reject recursive type 9, invalid extension offsets, unsupported
@@ -220,8 +218,6 @@ Required focused tests:
 - ignored mark between ligature components;
 - shared ClassDef legal case plus illegal overlap;
 - table-sized Coverage/ClassDef/PairSet work exhaustion;
-- ContextSubst 5.1 match, miss, malformed rule-set, and malformed nested
-  dispatch;
 - exact validation of Noto Serif Devanagari lookup 36's three ExtensionPos
   wrappers plus malformed, recursive, unsupported, and out-of-range targets;
   and
@@ -246,42 +242,46 @@ independent final reviewer owns the GO/NO-GO verdict; `/root` merges.
 3. Use the pinned default feature sets for Hindi and Arabic/Urdu plus explicit
    user features. Assign one stable bit per active feature within the bounded
    selected plan.
-4. Extract the joining/reordering decisions from the existing pinned Arabic and
+4. Implement bounded ContextSubst format 1 rule-set validation/application
+   through the existing nested dispatcher. Cover match, miss, malformed
+   rule-set, malformed nested dispatch, and shared-budget exhaustion before
+   integration.
+5. Extract the joining/reordering decisions from the existing pinned Arabic and
    Devanagari shapers into logical preprocessing functions. They return nominal
    `LayoutGlyphRecord` values and feature masks; they no longer substitute,
    position, reverse, or promote completion. Unsupported text outside the exact
    witnesses remains incomplete.
-5. Arabic preprocessing assigns `isol`/`init`/`medi`/`fina` eligibility in
+6. Arabic preprocessing assigns `isol`/`init`/`medi`/`fina` eligibility in
    logical order. Indic preprocessing assigns the pinned syllable-stage
    eligibility and reorder while preserving source/cluster provenance.
    Run-wide required and explicit optional features set their bits on every
    eligible record.
-6. Expand `LayoutLookupPlan` from bare indices to ordered
+7. Expand `LayoutLookupPlan` from bare indices to ordered
    `LayoutLookupActivation` values. Each activation contains the union of
    feature bits that selected the lookup; applying a lookup requires an
    intersection with the current record's mask. Single/multiple replacements
    inherit the source mask; a ligature keeps the intersection of consumed
    component masks.
-7. Contextual substitution/positioning passes the invoking activation mask into
+8. Contextual substitution/positioning passes the invoking activation mask into
    nested catalog dispatch. The nested lookup applies only at the matched target
    and only when that target record intersects the inherited mask; it cannot
    regain a feature bit removed by preprocessing or a prior substitution.
-8. Build nominal font-unit advances from hmtx and retain the preprocessing
+9. Build nominal font-unit advances from hmtx and retain the preprocessing
    eligibility on records and lookup activations.
-9. Validate GSUB and GPOS, including reachable catalog lookups, before mutation.
-10. Apply GSUB, recompute font-unit advances for substituted glyph IDs, then
+10. Validate GSUB and GPOS, including reachable catalog lookups, before mutation.
+11. Apply GSUB, recompute font-unit advances for substituted glyph IDs, then
    apply GPOS.
-11. Convert font units to `ShapedGlyph` values once after GPOS and before
+12. Convert font units to `ShapedGlyph` values once after GPOS and before
    `ShapedRun` position construction. Use the existing deterministic integer
    rounding and convert positive-up OpenType Y to positive-down Draw IR Y once.
-12. Reverse visual RTL output only after logical shaping; preserve logical
+13. Reverse visual RTL output only after logical shaping; preserve logical
    clusters and component provenance.
-13. Set substitution and positioning completion independently. An incomplete
+14. Set substitution and positioning completion independently. An incomplete
    phase makes `FontGlyphRun.valid=false` and retains
    `font-shaping-unavailable`.
-14. Integrate through `_resolve_selected_shaped_glyph_run`; retain its live face
+15. Integrate through `_resolve_selected_shaped_glyph_run`; retain its live face
     identity check and keep Draw IR handle-free.
-15. Keep pinned Arabic/Devanagari implementations as regression oracles until
+16. Keep pinned Arabic/Devanagari implementations as regression oracles until
     generic parity passes; they no longer independently promote completion.
 
 Required Stage 2 tests add:
