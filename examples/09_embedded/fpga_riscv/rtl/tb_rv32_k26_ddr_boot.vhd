@@ -316,12 +316,18 @@ begin
       l_awvalid <= '0';
       l_wdata   <= dat;
       l_wvalid  <= '1';
-      l_bready  <= '1';
       loop
         wait until rising_edge(clk);
         exit when l_wready = '1';
       end loop;
       l_wvalid <= '0';
+      -- BVALID is asserted at WREADY time and held only until BREADY: with
+      -- BREADY pre-asserted it is a single-cycle pulse landing on the exact
+      -- edge the WREADY loop exits on, so waiting one more edge missed it
+      -- forever (the original tb hang). Assert BREADY only now, after the W
+      -- handshake -- the slave holds BVALID until it sees BREADY, so the
+      -- handshake below cannot be missed.
+      l_bready <= '1';
       loop
         wait until rising_edge(clk);
         exit when l_bvalid = '1';
