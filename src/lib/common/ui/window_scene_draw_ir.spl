@@ -46,7 +46,7 @@ use common.ui.window_scene.{
     shared_wm_scene_layout_key,
     shared_wm_scene_resolve_background
 }
-use common.ui.wm_chrome_theme.{active_wm_theme_render_snapshot, wm_chrome_theme, WmChromeColors}
+use common.ui.wm_chrome_theme.{active_wm_theme_material_sha256, active_wm_theme_snapshot_present, active_wm_theme_snapshot_unchecked, wm_chrome_theme, WmChromeColors}
 use common.ui.theme_render_snapshot.{ThemeRenderSnapshot, ThemeShadowLayer}
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
 use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
@@ -506,7 +506,11 @@ fn _wm_draw_ir_chrome_revision(scene: SharedWmScene, taskbar: TaskbarModel, dpi_
 fn _wm_draw_ir_window_revision(window: SharedWmWindow) -> text:
     val focused = if window.focused: "1" else: "0"
     val minimized = if window.minimized: "1" else: "0"
-    val material_revision = if val snapshot = active_wm_theme_render_snapshot(): snapshot.material_sha256 else: "wm-chrome-default-solid"
+    # Scalar accessor, not the Option-returning snapshot helper: the Some
+    # payload masks to null across the hosted cranelift ABI (instruction-
+    # proven here — first hosted-WM frame died on this exact line).
+    val active_material_sha = active_wm_theme_material_sha256()
+    val material_revision = if active_material_sha != "": active_material_sha else: "wm-chrome-default-solid"
     "wm.window:{window.window_id}:surface={window.surface_id}:xy={window.x},{window.y}:size={window.width}x{window.height}:z={window.z_index}:focused={focused}:minimized={minimized}:title={window.title}:lang={window.language}:material={material_revision}"
 
 fn _wm_draw_ir_window_opacity(window: SharedWmWindow) -> i32:
@@ -866,16 +870,22 @@ fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backen
     # Restored to the single flat box below until the underlying compiler bug
     # is fixed; do not re-attempt this pattern without new pixel evidence.
     var commands: [DrawIrCommand] = []
-    if val snapshot = active_wm_theme_render_snapshot():
-        commands.push(_wm_draw_ir_window_box(snapshot, window, "{window.window_id}-body", "body", 0, 0, window.width, window.height, snapshot.material.solid_fallback_rgba))
-        val title_fallback = if window.focused: _wm_draw_ir_opaque(snapshot.material.active_title_fill_rgba) else: _wm_draw_ir_opaque(snapshot.material.inactive_title_fill_rgba)
-        commands.push(_wm_draw_ir_window_box(snapshot, window, "{window.window_id}-titlebar", "titlebar", 0, 0, window.width, 28, title_fallback))
+    # Presence check + plain slot read instead of the Option-returning
+    # helper (whose Some payload masks to null on the hosted cranelift ABI);
+    # the binding avoids the name `snapshot`, which native freestanding
+    # lowering can confuse with a same-named method symbol (see
+    # active_wm_theme_id's doc).
+    if active_wm_theme_snapshot_present():
+        val chrome_snapshot = active_wm_theme_snapshot_unchecked()
+        commands.push(_wm_draw_ir_window_box(chrome_snapshot, window, "{window.window_id}-body", "body", 0, 0, window.width, window.height, chrome_snapshot.material.solid_fallback_rgba))
+        val title_fallback = if window.focused: _wm_draw_ir_opaque(chrome_snapshot.material.active_title_fill_rgba) else: _wm_draw_ir_opaque(chrome_snapshot.material.inactive_title_fill_rgba)
+        commands.push(_wm_draw_ir_window_box(chrome_snapshot, window, "{window.window_id}-titlebar", "titlebar", 0, 0, window.width, 28, title_fallback))
         commands.push(draw_ir_rect("{window.window_id}-traffic-red", 12, 9, 10, 10, 0xFFE74C3Cu32))
         commands.push(draw_ir_rect("{window.window_id}-traffic-yellow", 30, 9, 10, 10, 0xFFF1C40Fu32))
         commands.push(draw_ir_rect("{window.window_id}-traffic-green", 48, 9, 10, 10, 0xFF27AE60u32))
-        commands.push(_wm_draw_ir_window_title_text(snapshot, window, snapshot.material.text_rgba))
+        commands.push(_wm_draw_ir_window_title_text(chrome_snapshot, window, chrome_snapshot.material.text_rgba))
         commands.push(draw_ir_rect("{window.window_id}-close", window.width - 24, 2, 20, 20, theme.close_button))
-        commands.push(_wm_draw_ir_text("{window.window_id}-close-label", window.width - 18, 17, 2, 20, "X", snapshot.material.text_rgba, "und"))
+        commands.push(_wm_draw_ir_text("{window.window_id}-close-label", window.width - 18, 17, 2, 20, "X", chrome_snapshot.material.text_rgba, "und"))
     else:
         # No resolved package means the historic DrawIR stream is retained
         # exactly: plain RECT commands with no style metadata or geometry box.
