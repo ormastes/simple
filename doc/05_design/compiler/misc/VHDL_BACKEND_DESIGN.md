@@ -454,9 +454,26 @@ Co-simulation with Verilog backend outputs via GHDL + Verilator for cross-verifi
 
 ---
 
+## Update 2026-07-26 — Two-Lane Generation Architecture (vhdl-gen-backend campaign)
+
+This compiler backend (`src/compiler/70.backend/backend/vhdl*`, `@hardware fn` →
+semantic VHDL, GHDL-verified) is now **lane (a)** of a two-lane architecture. A
+complementary **lane (b)** — the structured exec-core generator
+`src/lib/hardware/vhdl_gen/` — emits `rv32_exec_core.vhd`/`rv64_exec_core.vhd`
+from one `XlenConfig`-parameterized template source, byte-identical to the
+silicon-proven goldens in `examples/09_embedded/fpga_riscv/rtl/` (gated by
+`scripts/check/check-vhdl-golden-match.shs` + `check-riscv-rtl-truth.shs`).
+Long-term, a netlist-IR eDSL (per the 2026-07-26 Python-RTL survey) unifies
+both lanes. Full design:
+`doc/05_design/hardware/riscv/vhdl_exec_core_generator_design.md`; plan:
+`doc/03_plan/hardware/riscv/vhdl_exec_core_generator_plan.md`.
+
+---
+
 ## See Also
 
 - [VHDL Support Research](../research/VHDL_SUPPORT_RESEARCH.md) - Research and toolchain analysis
 - [VHDL Backend Plan](../plan/VHDL_BACKEND_PLAN.md) - Implementation milestones
 - [GPU Backend Design](gpu_backend_design.md) - Pattern reference (CUDA/Vulkan)
 - [Pipeline Operators Design](pipeline_operators_design.md) - Related: `~>` layer connect
+- [Exec-Core Generator Design](../../hardware/riscv/vhdl_exec_core_generator_design.md) - Lane (b), 2026-07-26

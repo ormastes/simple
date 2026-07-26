@@ -1,0 +1,216 @@
+#!/bin/sh
+# check-vhdl-golden-match.shs — vhdl_gen backend output vs pinned golden VHDL.
+#
+# Two layers, both fail-closed:
+#
+#   1. Golden drift: every file listed in the golden manifest
+#      (doc/08_tracking/hardware/golden_vhdl_manifest_2026-07-26.txt) must
+#      still hash to its pinned sha256. The goldens are the silicon-tested
+#      baseline — if one changed, that is a deliberate event that must be
+#      accompanied by a manifest regeneration, not silently absorbed here.
+#
+#   2. Generated match: for each backend-generated core present in
+#      build/os/rtl/ (rv32_exec_core.vhd, rv64_exec_core.vhd), the file must
+#      be BYTE-IDENTICAL to the same-named golden under
+#      examples/09_embedded/fpga_riscv/rtl/. A missing generated file is
+#      reported as "not-generated" (the generator may not have run) and does
+#      not fail the gate — unless --require-generated is passed, in which
+#      case missing = fail.
+#
+# Usage: check-vhdl-golden-match.shs [--require-generated] [--selftest]
+#   --require-generated   missing build/os/rtl/<core>.vhd counts as fail
+#   --selftest            deliberate-red calibration: prove that a 1-byte
+#                         mutation of a golden is caught (and that an exact
+#                         copy passes), then clean up. Exits 0 only if the
+#                         gate demonstrably fails on the mutant.
+#
+# Env: VHDL_GEN_DIR overrides the generated-output dir (default build/os/rtl).
+#      Used by --selftest to point the gate at a scratch dir.
+#
+# Summary keys (always printed):
+#   vhdl_golden_match_manifest=ok|drift
+#   vhdl_golden_match_rv32=pass|fail|not-generated
+#   vhdl_golden_match_rv64=pass|fail|not-generated
+#   vhdl_golden_match_ok=true|false
+#
+# Exit 0 = all good, 1 = any fail (drift, byte mismatch, or missing under
+# --require-generated), 2 = environment problem (missing manifest/golden).
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+MANIFEST="$ROOT/doc/08_tracking/hardware/golden_vhdl_manifest_2026-07-26.txt"
+GOLDEN_DIR="$ROOT/examples/09_embedded/fpga_riscv/rtl"
+GEN_DIR="${VHDL_GEN_DIR:-$ROOT/build/os/rtl}"
+CORES="rv32_exec_core.vhd rv64_exec_core.vhd"
+
+REQUIRE_GENERATED=0
+SELFTEST=0
+for arg in "$@"; do
+    case "$arg" in
+        --require-generated) REQUIRE_GENERATED=1 ;;
+        --selftest) SELFTEST=1 ;;
+        *)
+            echo "check-vhdl-golden-match: unknown argument: $arg" >&2
+            echo "usage: check-vhdl-golden-match.shs [--require-generated] [--selftest]" >&2
+            exit 2
+            ;;
+    esac
+done
+
+sha256_of() {
+    # Portable sha256: prefer sha256sum, fall back to shasum -a 256.
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo "check-vhdl-golden-match: no sha256sum/shasum available" >&2
+        exit 2
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# --selftest: deliberate-red calibration of the byte-diff branch.
+# Copies the rv32 golden into a scratch dir, first verifies an exact copy
+# PASSES, then flips one byte and verifies the gate FAILS. Cleans up either
+# way. This proves the gate can actually go red — a gate that cannot fail is
+# not a gate.
+# ---------------------------------------------------------------------------
+if [ "$SELFTEST" = "1" ]; then
+    golden="$GOLDEN_DIR/rv32_exec_core.vhd"
+    if [ ! -f "$golden" ]; then
+        echo "selftest: golden missing: $golden" >&2
+        exit 2
+    fi
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/vhdl-golden-selftest.XXXXXX") || exit 2
+    trap 'rm -rf "$tmp"' EXIT INT TERM
+
+    # Phase 1 (green control): exact copy must classify rv32=pass.
+    cp "$golden" "$tmp/rv32_exec_core.vhd"
+    out=$(VHDL_GEN_DIR="$tmp" "$0" 2>&1)
+    rc=$?
+    if [ $rc -ne 0 ] || ! printf '%s\n' "$out" | grep -q '^vhdl_golden_match_rv32=pass$'; then
+        echo "selftest: FAIL — exact golden copy did not classify pass (rc=$rc)" >&2
+        printf '%s\n' "$out" | sed 's/^/selftest|/' >&2
+        exit 1
+    fi
+    echo "selftest: green control ok (exact copy -> rv32=pass, rc=0)"
+
+    # Phase 2 (deliberate red): flip one byte, gate MUST fail.
+    printf 'X' | dd of="$tmp/rv32_exec_core.vhd" bs=1 seek=100 conv=notrunc 2>/dev/null
+    if cmp -s "$golden" "$tmp/rv32_exec_core.vhd"; then
+        echo "selftest: FAIL — mutation did not change the file" >&2
+        exit 1
+    fi
+    out=$(VHDL_GEN_DIR="$tmp" "$0" 2>&1)
+    rc=$?
+    if [ $rc -eq 0 ] || ! printf '%s\n' "$out" | grep -q '^vhdl_golden_match_rv32=fail$'; then
+        echo "selftest: FAIL — 1-byte mutant was NOT caught (rc=$rc); gate cannot go red" >&2
+        printf '%s\n' "$out" | sed 's/^/selftest|/' >&2
+        exit 1
+    fi
+    echo "selftest: deliberate-red ok (1-byte mutant -> rv32=fail, rc=$rc)"
+    echo "vhdl_golden_match_selftest=ok"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Layer 1: golden manifest drift check.
+# ---------------------------------------------------------------------------
+if [ ! -f "$MANIFEST" ]; then
+    echo "check-vhdl-golden-match: manifest missing: $MANIFEST" >&2
+    exit 2
+fi
+
+manifest_status="ok"
+drift_count=0
+checked=0
+while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+        ''|\#*) continue ;;
+    esac
+    want=$(printf '%s\n' "$line" | awk '{print $1}')
+    path=$(printf '%s\n' "$line" | awk '{print $2}')
+    [ -n "$want" ] && [ -n "$path" ] || continue
+    checked=$((checked + 1))
+    if [ ! -f "$ROOT/$path" ]; then
+        echo "GOLDEN DRIFT: $path — file missing (pinned $want)"
+        manifest_status="drift"
+        drift_count=$((drift_count + 1))
+        continue
+    fi
+    got=$(sha256_of "$ROOT/$path")
+    if [ "$got" != "$want" ]; then
+        echo "GOLDEN DRIFT: $path"
+        echo "  pinned:  $want"
+        echo "  current: $got"
+        manifest_status="drift"
+        drift_count=$((drift_count + 1))
+    fi
+done < "$MANIFEST"
+
+if [ "$checked" -eq 0 ]; then
+    echo "check-vhdl-golden-match: manifest has no hash entries: $MANIFEST" >&2
+    exit 2
+fi
+
+if [ "$manifest_status" = "drift" ]; then
+    echo "check-vhdl-golden-match: $drift_count golden file(s) no longer match the pinned manifest." >&2
+    echo "  Goldens are the silicon-tested baseline. If the change is deliberate," >&2
+    echo "  regenerate $MANIFEST" >&2
+    echo "  in the same change and say so in the commit message. Do NOT edit hashes ad hoc." >&2
+fi
+
+# ---------------------------------------------------------------------------
+# Layer 2: generated cores vs goldens (byte-identical).
+# ---------------------------------------------------------------------------
+overall_fail=0
+[ "$manifest_status" = "drift" ] && overall_fail=1
+
+core_status_rv32="not-generated"
+core_status_rv64="not-generated"
+
+for core in $CORES; do
+    gen="$GEN_DIR/$core"
+    golden="$GOLDEN_DIR/$core"
+    status="not-generated"
+    if [ ! -f "$golden" ]; then
+        echo "check-vhdl-golden-match: golden missing: $golden" >&2
+        exit 2
+    fi
+    if [ -f "$gen" ]; then
+        if cmp -s "$golden" "$gen"; then
+            status="pass"
+        else
+            status="fail"
+            overall_fail=1
+            echo "MISMATCH: $gen differs from golden $golden"
+            # First differing byte/line for triage (short, bounded output).
+            cmp "$golden" "$gen" 2>&1 | head -1 | sed 's/^/  /'
+        fi
+    else
+        if [ "$REQUIRE_GENERATED" = "1" ]; then
+            status="fail"
+            overall_fail=1
+            echo "MISSING: $gen not present and --require-generated was passed"
+        fi
+    fi
+    case "$core" in
+        rv32_exec_core.vhd) core_status_rv32="$status" ;;
+        rv64_exec_core.vhd) core_status_rv64="$status" ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Summary (stable keys, one per line).
+# ---------------------------------------------------------------------------
+echo "vhdl_golden_match_manifest=$manifest_status"
+echo "vhdl_golden_match_rv32=$core_status_rv32"
+echo "vhdl_golden_match_rv64=$core_status_rv64"
+if [ "$overall_fail" = "1" ]; then
+    echo "vhdl_golden_match_ok=false"
+    exit 1
+fi
+echo "vhdl_golden_match_ok=true"
+exit 0
