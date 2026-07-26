@@ -890,14 +890,36 @@ impl DesktopShell:
                 if self.compositor.focused_idx >= 0 and self.compositor.focused_idx < self.compositor.surfaces.len():
                     pointer_window_id = self.compositor.surfaces[self.compositor.focused_idx].id
                 serial_println("[wm-pointer-state] input_seq={pointer_sequence} window={pointer_window_id} marker={self.last_wm_loop_marker}")
+            # Step receipts between the pointer state and frame receipts. The
+            # pointer RELEASE (kind_code=2) hangs here: seq 8 printed its state
+            # line and then the guest emitted NOTHING for a full 300s — serial
+            # log last write 13:35:13, harness gave up 13:40:13, no panic, no
+            # fault, no reset, empty qemu.out, and not even a heap allocation.
+            # The identical path completed for the press (seq 7) moments
+            # earlier, so this is a state-dependent stall, NOT slow rendering
+            # (a 30s->300s budget raise changed nothing). Gated on
+            # pointer_sequence so only pointer steps pay the serial cost.
+            if pointer_sequence > 0:
+                serial_println("[wm-loop-step] seq={pointer_sequence} at=before-shell-input")
             self.handle_pending_shell_input(true)
+            if pointer_sequence > 0:
+                serial_println("[wm-loop-step] seq={pointer_sequence} at=before-reconcile")
             self.reconcile_dead_process_windows()
+            if pointer_sequence > 0:
+                serial_println("[wm-loop-step] seq={pointer_sequence} at=before-scene-revision")
             val scene_revision = self.runtime_scene_revision()
+            if pointer_sequence > 0:
+                serial_println("[wm-loop-step] seq={pointer_sequence} at=before-taskbar-revision scene_revision={scene_revision}")
             val taskbar_revision = self.runtime_taskbar_revision()
             val need_render = pointer_sequence > 0 or (fullscreen_sequence > 0 and fullscreen_action != "") or scene_revision != self.last_rendered_scene_revision or taskbar_revision != self.last_rendered_taskbar_revision
             var rendered_revision = scene_revision
+            if pointer_sequence > 0:
+                val need_render_code = if need_render: 1 else: 0
+                serial_println("[wm-loop-step] seq={pointer_sequence} at=before-render need_render={need_render_code} taskbar_revision={taskbar_revision}")
             if need_render:
                 rendered_revision = self.render_baremetal_frame(executor)
+            if pointer_sequence > 0:
+                serial_println("[wm-loop-step] seq={pointer_sequence} at=after-render rendered={rendered_revision}")
             if pointer_sequence > 0:
                 serial_println("[wm-pointer-frame] input_seq={pointer_sequence} generation={rendered_revision}")
             if fullscreen_sequence > 0 and fullscreen_action != "":
