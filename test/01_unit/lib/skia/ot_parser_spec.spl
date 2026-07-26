@@ -1,13 +1,14 @@
 # @cover src/lib/skia/feature/glyph/ot_parser.spl 80%
 
 use std.spipe.*
+use std.io_runtime.{file_read}
 use std.skia.entity.path.{sk_path_new}
 use std.skia.feature.glyph.ot_parser.{read_u16_be, read_i16_be, read_u32_be, read_fixed_1616, read_f2dot14, OtTable, OtFont, parse_offset_table, find_table}
 use std.skia.feature.glyph.ot_parser_cmap.{CmapFormat4, parse_cmap_format12, cmap_lookup, cmap12_lookup, cmap_glyph_id}
 use std.skia.feature.glyph.ot_parser_metrics.{HorizontalMetrics, parse_hmtx}
 use std.skia.feature.glyph.ot_parser_glyf.{parse_glyf_outline, parse_glyf_simple, parse_glyf_compound, rasterize_glyf_bitmap}
 use std.skia.feature.glyph.ot_parser_cff.{parse_cff_charstring}
-use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, GposLookup, GsubSingleResult, apply_gsub_single, parse_gsub_skeleton, parse_gpos_skeleton, GlyphClass, parse_gdef_glyph_class}
+use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, GposLookup, GsubSingleResult, apply_gsub_single, parse_gsub_skeleton, parse_gpos_skeleton, select_gsub_lookup_plan, select_gpos_lookup_plan, select_gsub_lookups, select_gpos_lookups, GlyphClass, parse_gdef_glyph_class}
 use std.skia.feature.glyph.ot_parser_fvar.{FvarAxis, parse_fvar_axes, parse_avar_mapping}
 use std.skia.feature.glyph.ot_parser_gvar.{GvarTable, parse_gvar, apply_glyph_deltas, decode_packed_point_numbers, decode_packed_deltas, TupleVariationHeader, parse_tuple_variation_header, _compute_tuple_scalar}
 
@@ -317,6 +318,125 @@ fn _put_u32(bytes: [u8], offset: i64, value: u32) -> [u8]:
     out[offset + 3] = (value & 255) as u8
     out
 
+fn _put_u16(bytes: [u8], offset: i64, value: u32) -> [u8]:
+    var out = bytes
+    out[offset] = ((value >> 8) & 255) as u8
+    out[offset + 1] = (value & 255) as u8
+    out
+
+fn _selected_layout_font(table_tag: u32) -> OtFont:
+    var blob: [u8] = []
+    var i: i64 = 0
+    while i < 208:
+        blob.push(0)
+        i = i + 1
+    blob = _put_u32(blob, 0, 65536u32)
+    blob = _put_u16(blob, 4, 10)
+    blob = _put_u16(blob, 6, 100)
+    blob = _put_u16(blob, 8, 160)
+    # ScriptList: requested latn plus DFLT.
+    blob = _put_u16(blob, 10, 2)
+    blob = _put_u32(blob, 12, 1145457748u32)
+    blob = _put_u16(blob, 16, 60)
+    blob = _put_u32(blob, 18, 1818326126u32)
+    blob = _put_u16(blob, 22, 14)
+    # latn: exact ENG, another sorted LangSys, and DefaultLangSys.
+    blob = _put_u16(blob, 24, 32)
+    blob = _put_u16(blob, 26, 2)
+    blob = _put_u32(blob, 28, 1162757920u32)
+    blob = _put_u16(blob, 32, 16)
+    blob = _put_u32(blob, 34, 1163087904u32)
+    blob = _put_u16(blob, 38, 24)
+    blob = _put_u16(blob, 42, 3)
+    blob = _put_u16(blob, 44, 1)
+    blob = _put_u16(blob, 46, 2)
+    blob = _put_u16(blob, 50, 65535)
+    blob = _put_u16(blob, 56, 0)
+    blob = _put_u16(blob, 58, 65535)
+    blob = _put_u16(blob, 60, 1)
+    blob = _put_u16(blob, 62, 1)
+    # DFLT DefaultLangSys.
+    blob = _put_u16(blob, 70, 4)
+    blob = _put_u16(blob, 74, 0)
+    blob = _put_u16(blob, 76, 65535)
+    blob = _put_u16(blob, 78, 1)
+    blob = _put_u16(blob, 80, 0)
+    # Four sorted features; duplicate tags are permitted by the parser.
+    blob = _put_u16(blob, 100, 4)
+    blob = _put_u32(blob, 102, 1667329140u32)
+    blob = _put_u16(blob, 106, 26)
+    blob = _put_u32(blob, 108, 1801810542u32)
+    blob = _put_u16(blob, 112, 32)
+    blob = _put_u32(blob, 114, 1818847073u32)
+    blob = _put_u16(blob, 118, 38)
+    blob = _put_u32(blob, 120, 1919707495u32)
+    blob = _put_u16(blob, 124, 46)
+    blob = _put_u16(blob, 128, 1)
+    blob = _put_u16(blob, 130, 0)
+    blob = _put_u16(blob, 134, 1)
+    blob = _put_u16(blob, 136, 1)
+    blob = _put_u16(blob, 140, 2)
+    blob = _put_u16(blob, 142, 1)
+    blob = _put_u16(blob, 144, 2)
+    blob = _put_u16(blob, 148, 2)
+    blob = _put_u16(blob, 150, 2)
+    blob = _put_u16(blob, 152, 0)
+    # Three minimal lookups with distinct subtables.
+    blob = _put_u16(blob, 160, 3)
+    blob = _put_u16(blob, 162, 8)
+    blob = _put_u16(blob, 164, 22)
+    blob = _put_u16(blob, 166, 36)
+    for lookup in [168, 182, 196]:
+        blob = _put_u16(blob, lookup, 1)
+        blob = _put_u16(blob, lookup + 4, 1)
+        blob = _put_u16(blob, lookup + 6, 8)
+        blob = _put_u16(blob, lookup + 8, 1)
+    # Lookup 1 uses MarkFilteringSet 5 and moves its subtable past that field.
+    blob = _put_u16(blob, 184, 16)
+    blob = _put_u16(blob, 188, 10)
+    blob = _put_u16(blob, 190, 5)
+    blob = _put_u16(blob, 192, 1)
+    OtFont(blob: blob, tables: [OtTable(tag: table_tag, offset: 0, length: blob.len() as u32)])
+
+fn _selected_layout_font_v11(table_tag: u32) -> OtFont:
+    val v10 = _selected_layout_font(table_tag)
+    var blob: [u8] = []
+    var index: i64 = 0
+    while index < 280:
+        blob.push(0)
+        index = index + 1
+    index = 0
+    while index < 10:
+        blob[index] = v10.blob[index]
+        index = index + 1
+    index = 10
+    while index < v10.blob.len():
+        blob[index + 4] = v10.blob[index]
+        index = index + 1
+    blob = _put_u32(blob, 0, 65537u32)
+    blob = _put_u16(blob, 4, 14)
+    blob = _put_u16(blob, 6, 104)
+    blob = _put_u16(blob, 8, 164)
+    blob = _put_u32(blob, 10, 212u32)
+    OtFont(blob: blob, tables: [OtTable(tag: table_tag, offset: 0, length: blob.len() as u32)])
+
+fn _with_valid_feature_substitution(font: OtFont) -> OtFont:
+    var result = font
+    # FeatureVariations: one no-condition record with one empty alternate feature.
+    result.blob = _put_u16(result.blob, 212, 1)
+    result.blob = _put_u16(result.blob, 214, 0)
+    result.blob = _put_u32(result.blob, 216, 1u32)
+    result.blob = _put_u32(result.blob, 220, 0u32)
+    result.blob = _put_u32(result.blob, 224, 16u32)
+    result.blob = _put_u16(result.blob, 228, 1)
+    result.blob = _put_u16(result.blob, 230, 0)
+    result.blob = _put_u16(result.blob, 232, 1)
+    result.blob = _put_u16(result.blob, 234, 0)
+    result.blob = _put_u32(result.blob, 236, 12u32)
+    result.blob = _put_u16(result.blob, 240, 0)
+    result.blob = _put_u16(result.blob, 242, 0)
+    result
+
 fn _glyf_font(offsets: [u32], glyphs: [u8]) -> OtFont:
     val count = offsets.len() - 1
     val loca_length = offsets.len() * 4
@@ -608,7 +728,7 @@ describe "parse_gsub_skeleton":
         # GSUB begins at 2; LookupList at 12; lookup at 16; subtable at 24.
         val blob: [u8] = [
             99, 99,
-            0, 1, 0, 0, 0, 0, 0, 0, 0, 10,
+            0, 1, 0, 0, 0, 30, 0, 32, 0, 10,
             0, 1, 0, 4,
             0, 1, 0, 0, 0, 1, 0, 8,
             0, 1, 0, 6, 0, 1, 0, 1, 0, 1, 0, 7
@@ -627,6 +747,95 @@ describe "parse_gsub_skeleton":
         ]
         val font = OtFont(blob: blob, tables: [OtTable(tag: 1196643650, offset: 0, length: 20)])
         expect(parse_gsub_skeleton(font).len()).to_equal(0)
+
+describe "select layout lookups":
+    it "uses exact, then Script default, then absent-script DFLT in LookupList order":
+        val gsub = _selected_layout_font(1196643650u32)
+        val plan = select_gsub_lookup_plan(gsub, 1818326126u32, 1162757920u32, [1818847073u32])
+        expect(plan.valid).to_equal(true)
+        expect(plan.lookup_indices).to_equal([0, 1, 2])
+        val exact = select_gsub_lookups(gsub, 1818326126u32, 1162757920u32, [1818847073u32])
+        expect(exact.len()).to_equal(3)
+        expect(exact[0].lookup_index).to_equal(0)
+        expect(exact[1].lookup_index).to_equal(1)
+        expect(exact[2].lookup_index).to_equal(2)
+        expect(exact[0].mark_filtering_set).to_equal(-1)
+        expect(exact[1].mark_filtering_set).to_equal(5)
+        val default_language = select_gsub_lookups(gsub, 1818326126u32, 1515870810u32, [1801810542u32])
+        expect(default_language.len()).to_equal(1)
+        expect(default_language[0].lookup_index).to_equal(1)
+        val default_script = select_gsub_lookups(gsub, 1515870810u32, 1515870810u32, [1667329140u32])
+        expect(default_script.len()).to_equal(1)
+        expect(default_script[0].lookup_index).to_equal(0)
+        val gpos = _selected_layout_font(1196445523u32)
+        val positioned_plan = select_gpos_lookup_plan(gpos, 1818326126u32, 1162757920u32, [1818847073u32])
+        expect(positioned_plan.valid).to_equal(true)
+        expect(positioned_plan.lookup_indices).to_equal([0, 1, 2])
+        val positioned = select_gpos_lookups(gpos, 1818326126u32, 1162757920u32, [1818847073u32])
+        expect(positioned.len()).to_equal(3)
+        expect(positioned[0].lookup_index).to_equal(0)
+        expect(positioned[2].lookup_index).to_equal(2)
+
+    it "fails closed for malformed exact Script and LangSys instead of falling back":
+        var bad_script = _selected_layout_font(1196643650u32)
+        # latn's DefaultLangSys points into its Script header; DFLT stays valid.
+        bad_script.blob = _put_u16(bad_script.blob, 24, 2)
+        val script_plan = select_gsub_lookup_plan(bad_script, 1818326126u32, 1162757920u32, [])
+        expect(script_plan.valid).to_equal(false)
+        expect(script_plan.lookup_indices.len()).to_equal(0)
+        var bad_language = _selected_layout_font(1196643650u32)
+        bad_language.blob[41] = 1
+        val language_plan = select_gsub_lookup_plan(bad_language, 1818326126u32, 1162757920u32, [1801810542u32])
+        expect(language_plan.valid).to_equal(false)
+        expect(language_plan.lookup_indices.len()).to_equal(0)
+
+    it "distinguishes a missing table from a malformed table and uses the real GPOS tag":
+        val empty_font = OtFont(blob: [], tables: [])
+        val empty = select_gsub_lookup_plan(empty_font, 1818326126u32, 1162757920u32, [])
+        expect(empty.valid).to_equal(true)
+        expect(empty.lookup_indices.len()).to_equal(0)
+        var bad_version = _selected_layout_font(1196643650u32)
+        bad_version.blob = _put_u32(bad_version.blob, 0, 131072u32)
+        expect(select_gsub_lookup_plan(bad_version, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        val real = _selected_layout_font(1196445523u32)
+        expect(select_gpos_lookup_plan(real, 1818326126u32, 1162757920u32, [1818847073u32]).lookup_indices.len()).to_equal(3)
+        val typo = _selected_layout_font(1196643155u32)
+        val absent = select_gpos_lookup_plan(typo, 1818326126u32, 1162757920u32, [1818847073u32])
+        expect(absent.valid).to_equal(true)
+        expect(absent.lookup_indices.len()).to_equal(0)
+
+    it "validates v1.1 FeatureTableSubstitution records and fails closed when active":
+        # A syntactically valid substitution is harmless for an empty selected plan.
+        val empty_fixture = _with_valid_feature_substitution(_selected_layout_font_v11(1196643650u32))
+        val empty_plan = select_gsub_lookup_plan(empty_fixture, 1751215726u32, 1515870810u32, [])
+        expect(empty_plan.valid).to_equal(true)
+        expect(empty_plan.lookup_indices.len()).to_equal(0)
+        var malformed = _with_valid_feature_substitution(_selected_layout_font_v11(1196643650u32))
+        malformed.blob = _put_u32(malformed.blob, 236, 0u32)
+        expect(select_gsub_lookup_plan(malformed, 1751215726u32, 1515870810u32, []).valid).to_equal(false)
+        # Default-instance substitution evaluation is intentionally not implemented.
+        val active_fixture = _with_valid_feature_substitution(_selected_layout_font_v11(1196643650u32))
+        expect(select_gsub_lookup_plan(active_fixture, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        var base_empty_alternate_active = _with_valid_feature_substitution(
+            _selected_layout_font_v11(1196643650u32))
+        # DFLT/calt feature 0 has no base lookups; its alternate has lookup 0.
+        base_empty_alternate_active.blob = _put_u16(base_empty_alternate_active.blob, 132, 0)
+        base_empty_alternate_active.blob = _put_u16(base_empty_alternate_active.blob, 242, 1)
+        base_empty_alternate_active.blob = _put_u16(base_empty_alternate_active.blob, 244, 0)
+        expect(select_gsub_lookup_plan(
+            base_empty_alternate_active, 1515870810u32, 1515870810u32,
+            [1667329140u32]).valid).to_equal(false)
+
+    it "rejects duplicate and out-of-range indices":
+        var duplicate_lookup = _selected_layout_font(1196643650u32)
+        duplicate_lookup.blob = _put_u16(duplicate_lookup.blob, 164, 8)
+        expect(parse_gsub_skeleton(duplicate_lookup).len()).to_equal(0)
+        var duplicate_feature = _selected_layout_font(1196643650u32)
+        duplicate_feature.blob = _put_u16(duplicate_feature.blob, 112, 26)
+        expect(select_gsub_lookup_plan(duplicate_feature, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        var optional_index = _selected_layout_font(1196643650u32)
+        optional_index.blob = _put_u16(optional_index.blob, 46, 9)
+        expect(select_gsub_lookup_plan(optional_index, 1818326126u32, 1162757920u32, [1818847073u32]).valid).to_equal(false)
 
 describe "apply_gsub_single":
     it "decodes format 1 through Coverage format 1 using absolute offsets":
@@ -676,6 +885,14 @@ describe "parse_gpos_skeleton":
         val empty_font = OtFont(blob: buf, tables: [])
         val result = parse_gpos_skeleton(empty_font)
         expect(result.len()).to_equal(0)
+
+    it "keeps GPOS lookup metadata within u32":
+        val source = file_read("src/lib/skia/feature/glyph/ot_parser_layout.spl")
+        val start = source.index_of("fn parse_gpos_skeleton") ?? 0
+        val finish = source.index_of("fn _active_layout_lookup_indices") ?? source.len()
+        expect(start).to_be_greater_than(0)
+        expect(finish).to_be_greater_than(start)
+        expect(source.slice(start, finish)).to_contain("end > 4294967295")
 
 describe "parse_gdef_glyph_class":
     it "returns Unknown when GDEF table is absent":
