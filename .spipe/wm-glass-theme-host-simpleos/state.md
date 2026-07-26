@@ -495,3 +495,16 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   stop and retain the bug. Do not use `f2c...` or run full Stage4 to diagnose
   the circularity. No compiler promotion, host/QEMU launch, SIMD parity PASS,
   or native rendering/event claim is added by this checkpoint.
+- continuation-2026-07-26-electron-only-current-host-scope: By user direction,
+  the current host now owns only repository-pinned Electron provisioning and
+  the canonical Aetheric browser render/event/capture lane under TODO 583.
+  The pure-Simple bridge/runtime capsule, native Vulkan/Metal/SIMD comparison,
+  x86 QEMU evidence, and ARM64 QMP framebuffer/input/NEON evidence are
+  postponed to prepared external hosts through their existing open TODOs and
+  external-host plan. No acceptance criterion is closed, excluded, skipped,
+  or counted as PASS by this decision. External execution must retain admitted
+  compiler/provider identities, frozen manifests, serial/QMP logs,
+  framebuffer/device readback, checksums, events, font/DPI/SIMD receipts, and
+  independent review. Missing Electron or producer prerequisites on this host
+  remains a fail-closed blocker; it does not authorize implicit `npx`
+  downloads, a seed compiler, fixture rendering, or synthetic evidence.

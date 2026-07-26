@@ -74,8 +74,16 @@ events, device readback, or QEMU.
 
 ## Resume boundary
 
-Do not fabricate any item above or rerun the producer until a distinct live
-host cycle is authorized. The future live owner must use the canonical command:
+The current-host scope is now Electron/Aetheric only. Install the pinned
+dependency without an implicit `npx` download:
+
+```sh
+npm ci --prefix tools/electron-shell
+export PATH="$PWD/tools/electron-shell/node_modules/.bin:$PATH"
+```
+
+Do not fabricate any item above or run the producer until its admitted inputs
+exist. The live owner must use the canonical command:
 
 ```sh
 SIMPLE_BIN=/Users/ormastes/simple/bin/release/macos-arm64/simple \
@@ -88,3 +96,7 @@ sh scripts/check/produce-aetheric-host-web-gui-evidence.shs
 Only after that command produces a retained proof may the pinned admission and
 then `check-wm-browser-event-routing-evidence.shs` be considered. This report
 claims readiness of source contracts only, never a live rendering PASS.
+
+Compiler-bridge, native GPU comparison, and x86/ARM QEMU execution are
+postponed to prepared external hosts. They remain open and are not prerequisites
+that Electron provisioning may silently replace.

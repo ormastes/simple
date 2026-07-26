@@ -96,20 +96,59 @@ overlapping dirty work and remains read-only for this lane.
 
 ### Next execution order
 
+#### Scope decision — 2026-07-26
+
+The only active execution lane on this host is the Electron/Aetheric browser
+surface. Provision the repository-pinned Electron dependency with:
+
+```sh
+npm ci --prefix tools/electron-shell
+export PATH="$PWD/tools/electron-shell/node_modules/.bin:$PATH"
+```
+
+Then run the full canonical producer command documented in
+`doc/09_report/aetheric_host_web_gui_readiness_2026-07-26.md`; missing inputs
+must fail closed. Retain its generated HTML, ARGB files, PNG, computed-style
+observation, Electron log, UI-access history, proof envelope, exact hashes, and
+event-routing receipt. TODO 583 owns this current-host work.
+
+All non-Electron native execution is postponed to prepared external hosts:
+the final pure-Simple bridge/runtime capsule, Vulkan/Metal/SIMD device
+comparison, x86 QEMU capture/events, and ARM64 QMP framebuffer/input/NEON
+receipt. These rows remain open under their existing TODOs and acceptance
+criteria; postponement is not completion or exclusion.
+
+- External compiler/GPU owner: prepared-host operator under TODO 580 and
+  `doc/03_plan/agent_tasks/simpleos_qemu_host_gpu_external_host_evidence.md`.
+- x86 resume command:
+  `BUILD_DIR=build/simpleos_wm_fullscreen_evidence SIMPLE_BIN=<admitted-simple> sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs`.
+- ARM resume commands:
+  `sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs`, then
+  `sh scripts/check/check-simpleos-arm64-qmp-input-evidence.shs`.
+- Prerequisites: clean revision, classifier-clean pure-Simple compiler,
+  runtime/provider hashes, target QEMU plus KVM/HVF/WHPX where native timing is
+  claimed, and a frozen build manifest.
+- Retained artifacts: compiler admission, commands, manifests, serial/QMP
+  logs, framebuffer/device captures and checksums, events, font/DPI/SIMD
+  receipts, timing, and RSS.
+- Merge owner: `/root`; final reviewer: an independent normal/highest-capability
+  reviewer.
+
 2026-07-26 current checkpoint: source/interpreter regression is complete for
 theme-package loading (11/11), Web CSS authority (5/5), and retained native
 linker policy (15/15). The canonical archive owner repair is integrated, but
-native/live rows remain active: no current native Aetheric producer or
-Electron proof exists, and neither x86 nor ARM has an admitted compiler/frozen
-manifest for a canonical QEMU launch. The external seed-driven x86 job is not
-admissible evidence. Current details and remaining gates are recorded in
+native/live rows remain open: Electron is active on this host, while the
+compiler/GPU/QEMU rows are externally postponed. No current native Aetheric
+producer or Electron proof exists, and neither x86 nor ARM has an admitted
+compiler/frozen manifest for a canonical QEMU launch. The external seed-driven
+x86 job is not admissible evidence. Current details and remaining gates are recorded in
 `.spipe/wm-glass-theme-host-simpleos/state.md` and
 `doc/09_report/aetheric_host_web_gui_readiness_2026-07-26.md`.
 
 2026-07-25 checkpoint: the 16x16 hosted capture is **DIAGNOSTIC ONLY**.
 x86 SSE2/static and ARM VirtIO/C preflights pass, but neither launched QEMU.
-Resume in this order: native `to_i64` fixture, exact-current self-hosted
-binary, production host evidence, x86 QEMU, ARM QEMU, then aggregate SSpec.
+The historical order below is retained for handoff; postponed rows now execute
+only under the external-host ownership above.
 
 1. Focused current-source Rust HIR regression: COMPLETE. The corrected
    name-filtered run passed the intended test (`1 passed; 3346 filtered out`);
