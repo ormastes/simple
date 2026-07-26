@@ -98,6 +98,22 @@ puts "BOARD_JTAG_CHAIN_END"
 catch { targets -set -nocase -filter {name =~ "*Cortex-A53 #0*"} ; stop ; puts "APU_HALTED" } e
 if {[info exists e] && \$e ne ""} { puts "APU_HALT_NOTE:\$e" }
 
+# Reset ALL A53 cores: U-Boot ran before we halted, so the A53 caches can hold
+# dirty lines covering our DDR window; a later eviction would overwrite the
+# DAP-loaded image with stale bytes (patchy per-64B-line corruption — exactly
+# the observed banner-dead/canary-alive symptom). Core reset INVALIDATES the
+# caches, discarding dirty lines so nothing can evict over the image.
+foreach n {0 1 2 3} {
+  # separate catches: "Already stopped" from stop must NOT abort the rst
+  catch { targets -set -nocase -filter "name =~ \\"*Cortex-A53 #\$n*\\"" }
+  catch { stop } se
+  if {[catch { rst -processor } re]} {
+    puts "A53_\${n}_RESET_NOTE:\$re"
+  } else {
+    puts "A53_\${n}_RESET_CACHES_INVALIDATED"
+  }
+}
+
 # ---- 2b. FULL psu_init: configures PS clocks and the PS-PL AXI ports ----
 # Without this the PL is configured but unreachable/dead (see header note).
 targets -set -nocase -filter {name =~ "*PSU*"}
@@ -147,6 +163,9 @@ if {[catch { dow -data \$ramdisk_bin \$ddr_ramdisk } e]} { puts "RAMDISK_LOAD_FA
 # verify the first words actually landed
 puts [format "DDR_KERNEL_WORD0=0x%08X" [lindex [mrd -force -value \$ddr_kernel 1] 0]]
 puts [format "DDR_RAMDISK_WORD0=0x%08X" [lindex [mrd -force -value \$ddr_ramdisk 1] 0]]
+# verify the exact word that read NUL on silicon (banner rodata, kernel+0x20E0,
+# expect 0x203D3D3D "=== "): if THIS is wrong the coherency fix did not hold.
+puts [format "DDR_BANNER_WORD=0x%08X" [lindex [mrd -force -value [expr {\$ddr_kernel + 0x20E0}] 1] 0]]
 
 # ---- 6. release the core ----------------------------------------------
 mwr -force \$ctrl 0x1
