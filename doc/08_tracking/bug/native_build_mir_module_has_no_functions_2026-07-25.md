@@ -77,20 +77,49 @@ This also means **the repo's own seed native-build gate cannot pass right now**,
 and any `.spl` module with a module-level `val` or `extern` is affected — far
 beyond the deep-free work that surfaced it.
 
-### Related harness trap: `_skip_dirs` silently excludes whole trees
+### RETRACTED: the `_skip_dirs` "harness trap" — my claim was WRONG
 
-`src/compiler/80.driver/driver_source_loading.spl:24`:
+An earlier revision of this document (and its commit message) claimed that
+`_skip_dirs` at `driver_source_loading.spl:24` excludes `scripts/` and `build/`
+from compilation, and therefore that the seed gate's fixture "cannot work where
+it lives". **That is false. Do not act on it. Do not relocate the fixture.**
 
-```
-val _skip_dirs = ["test", "tests", "doc", "docs", "verification", "resources", "scripts", "build"]
-```
+Disproof, static and empirical:
 
-Fixtures under `scripts/`, `build/`, `test/`, or `doc/` are **never compiled**.
-Consequence worth acting on separately: the seed gate's fixture lives at
-`scripts/check/cert/redeploy_gate/fixtures/seed_cross_module`, i.e. inside a
-skipped tree — **it cannot work where it currently lives**, independent of the
-gate's other defects. Put probe fixtures in a non-skipped path such as
-`probes/`.
+- `_skip_dirs` feeds only `_driver_should_skip_dir` (`driver_source_loading.spl:29`),
+  which has **no live caller** — `driver.spl:71` imports the name but never
+  calls it. A second copy at `driver_helpers.spl:77` *is* called (line 115), but
+  `driver_helpers.spl` is imported by **nothing** (orphan), so that path is
+  unreachable too.
+- The LIVE collector `_driver_collect_sources` filters on substrings
+  `/test/ /tests/ /testdata/ /doc/ /verification/` **only** (lines 689, 715,
+  750). `scripts`, `build`, `docs`, `resources` are NOT among them.
+- Empirical A/B, identical minimal fixture, same flags, fresh cache each:
+  under `probes/` → `undefined symbol: __simple_main`; under
+  `scripts/check/cert/redeploy_gate/fixtures/` → **identical** error.
+- Positive control: a single-file fixture *under `scripts/`* builds `rc=0` and
+  prints `5`. Files under `scripts/` compile fine.
+- The gate's own failure names the module
+  `...simple.scripts.check.cert.redeploy_gate.fixtures.seed_cross_module.owner`,
+  which is itself proof the fixture under `scripts/` WAS read, parsed, and
+  reached AOT.
+
+Lesson: reading a `val` list is not evidence it is wired. Check for live callers
+before filing a "silently excludes" claim.
+
+### SECOND, INDEPENDENT BLOCKER — fixing this bug will NOT make the gate pass
+
+A fixture with **no module-level globals at all** still fails:
+
+| invocation | failure |
+|---|---|
+| `--source` + `--entry` | `ld.lld: error: undefined symbol: __simple_main` |
+| positional entry | `native-build produced no code-bearing MIR modules` |
+
+So the seed native-build gate is blocked by **two** distinct defects: the
+module-level-item bug documented here, and this multi-module `__simple_main`
+failure. Both must be fixed before the gate can pass on a good seed — which is
+still only half its contract.
 
 ## FIRST ISOLATION: a module-level `extern fn` declaration
 
