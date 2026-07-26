@@ -143,16 +143,36 @@ Latin, Han, and Cyrillic witnesses keep valid empty GSUB/GPOS plans under the
 selected explicit-feature policy. Advertised discretionary/default features are
 not activated merely because a font lists them.
 
-The Hindi `dev2/HIN ` plan activates GSUB types 2, 4, 5, and 6 (formats 1–3 as
-applicable) plus GPOS types 2, 4, 6, and 8. Arabic/Urdu activates GSUB types 1,
-2, 4, 5, and 6 plus GPOS types 2, 4, 5, 6, and 8. Active flags include ignore
-marks and mark-filtering-set behavior; GDEF MarkGlyphSets and bounded nested
-lookup dispatch are therefore required. The operation union for Option A is:
+The Hindi `dev2/HIN ` plan resolves to the `dev2` default LangSys because the
+pinned faces do not contain an explicit `HIN ` record. It activates GSUB types
+2, 4, 5, and 6 (formats 1–3 as applicable) plus GPOS types 2, 4, 6, 8, and 9.
+Arabic/Urdu activates GSUB types 1, 2, 4, 5, and 6 plus GPOS types 2, 4, 5, 6,
+and 8. Active flags include ignore marks and mark-filtering-set behavior; GDEF
+MarkGlyphSets and bounded nested lookup dispatch are therefore required. The
+operation union for Option A is:
 
-- GSUB 1 formats 1/2, 2 format 1, 4 format 1, 5 formats 2/3, and 6 formats
+- GSUB 1 formats 1/2, 2 format 1, 4 format 1, 5 formats 1/2/3, and 6 formats
   1/2/3;
-- GPOS 2 formats 1/2, 4/5/6 format 1, and 8 format 3; and
+- GPOS 2 formats 1/2, 4/5/6 format 1, 8 format 3, and ExtensionPos 9 format 1
+  wrapping PairPos 2 formats 1/2; and
 - LookupFlags `0`, `0x0008`, and `0x0010`.
+
+The ExtensionPos entry is Noto Serif Devanagari `dist` lookup 36. Its three
+format-1 wrappers target PairPos formats 1, 1, and 2. It remains a top-level
+inventory row: validation and application must preserve the outer lookup flag,
+share the run work budget, reject recursive extensions, and fail before
+mutation on an invalid target.
+
+For RTL `arab`, the bounded Simple default policy requests GSUB
+`rtlm ccmp locl isol fina fin2 fin3 medi med2 init rlig calt rclt liga clig
+mset stch` and GPOS `curs kern mark mkmk`, with required LangSys features
+additive. Only tags advertised by the resolved LangSys activate lookups. This
+policy is derived from HarfBuzz commit
+`d65aa90ea656aa1e31ff26b7d052ef2eaa1f418a`; it does not claim HarfBuzz
+pause/stage parity. On both pinned Arabic faces the active GSUB tags are
+`rtlm ccmp fina medi init rlig liga`, with `locl` added for `URD `.
+Noto Sans Arabic activates GPOS `kern mark mkmk`; Noto Naskh Arabic activates
+`mark mkmk`.
 
 Noto Sans SC has a nonzero GPOS FeatureVariations offset, but the selected Han
 plan is empty. It is valid only because no selected feature can be substituted;
