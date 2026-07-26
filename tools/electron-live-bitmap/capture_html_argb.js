@@ -1135,6 +1135,10 @@ async function main() {
   stage("after-event-proof");
   stage("before-aetheric-observation");
   const aethericObservation = aethericObservationPath ? await collectAethericObservation(win) : null;
+  if (aethericObservation) {
+    aethericObservation.electron_process_version = process.versions.electron || "";
+    aethericObservation.chrome_process_version = process.versions.chrome || "";
+  }
   stage("after-aetheric-observation");
   let image = null;
   if (useOffscreenPaint && latestPaintImage) {

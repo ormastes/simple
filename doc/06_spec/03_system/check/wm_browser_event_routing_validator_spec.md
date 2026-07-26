@@ -16,6 +16,8 @@ Electron Chromium event-routing surface and the regular producer
 runtime, event-sequence, count, timing, animation, payload, UI, and font-frame
 rows. Any missing, forged, stale, aliased, malformed, fractional, unsafe, or
 out-of-budget value fails closed; `pass=true` alone never passes.
+The Electron process version must be exactly `42.5.0`; a merely numeric but
+different version is rejected as missing canonical browser runtime identity.
 
 Required live proof includes the canonical host-pointer/focus/move/title/maximize/
 text/pointer-down/pointer-up sequence, matching aggregate counts, positive
@@ -70,6 +72,7 @@ it "rejects a valid alternate receipt outside the configured proof path":
 | rejects pass true proof when the live event-check source artifact is missing | FAIL: proof source missing. |
 | rejects substituted live event-check source artifacts | FAIL: hardlink, non-regular, or marker-missing producer. |
 | rejects pass true proof without live Electron Chromium runtime evidence | FAIL: browser runtime missing. |
+| rejects Electron process version `43.0.0` | FAIL: browser runtime missing; exact `42.5.0` is required. |
 | rejects pass true proof when the frame sequence is missing or reordered | FAIL: event-routing contract missing. |
 | rejects pass true proof when Chromium timing or animation is malformed | FAIL: event-routing contract missing. |
 | rejects pass true proof when Chromium timing does not advance or exceeds budget | FAIL: event-routing contract missing. |

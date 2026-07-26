@@ -8,6 +8,10 @@ the production HTML/WebIR-to-DrawIR Electron route. It must retain resolved
 `aetheric_dark` snapshot hashes, computed glass CSS, Engine2D pixels, canonical
 snapshot/surface/find/act/history receipts, focus/pointer/key/text state,
 animation/performance facts, and capture/binary/source provenance.
+It also binds the launched Electron runtime to exact version `42.5.0`: the
+capture records Electron and Chrome process versions, while the proof retains
+canonical launcher, application executable, installed package, and lockfile
+paths with SHA-256 hashes that admission independently revalidates.
 
 Run after the exact-current binary is available:
 

@@ -466,19 +466,19 @@ if (!boolTrue(proof.pass)) {
   reason = `event-routing-proof-source-${proofSource.status}`;
 } else if (productionEnvelope.status !== 'pass') {
   reason = `event-routing-production-envelope-${productionEnvelope.status}`;
-} else if (simpleComposition.status !== 'pass') {
-  reason = 'event-routing-simple-composition-artifact-invalid';
 } else if (
   proof.browser_engine !== 'chromium' ||
   typeof proof.electron_user_agent !== 'string' ||
   !/Chrome\/[0-9]/.test(proof.electron_user_agent) ||
   !/Electron\/[0-9]/.test(proof.electron_user_agent) ||
   typeof proof.electron_process_version !== 'string' ||
-  !/^[0-9]+(?:\.[0-9]+)*$/.test(proof.electron_process_version) ||
+  proof.electron_process_version !== '42.5.0' ||
   typeof proof.chrome_process_version !== 'string' ||
   !/^[0-9]+(?:\.[0-9]+)*$/.test(proof.chrome_process_version)
 ) {
   reason = 'event-routing-browser-runtime-missing';
+} else if (simpleComposition.status !== 'pass') {
+  reason = 'event-routing-simple-composition-artifact-invalid';
 } else if (!boolTrue(proof.ready) || !boolTrue(proof.wm_found)) {
   reason = 'event-routing-ready-missing';
 } else if (
