@@ -57,7 +57,7 @@ use std.fs_driver.types.{Path, MountOptions, OpenFlags, FileHandle}
 use os.kernel.types.fs_types.{FileFlags, DirEntry, FsNodeKind}
 use std.fs_driver.nvfs_hosted_driver.{NvfsHostedDriver}
 use os.kernel.log.klog_api.{log_raw_println}
-use os.kernel.loader.app_registry.{app_registry_load, app_registry_load_hardcoded_fallback, app_registry_fat32_alias, app_registry_root_alias, app_registry_cached_bytes, app_registry_cache_bytes, app_registry_cache_boot_app_id, app_registry_boot_seed_entries, app_registry_lookup}
+use os.kernel.loader.app_registry.{app_registry_load, app_registry_load_hardcoded_fallback, app_registry_fat32_alias, app_registry_root_alias, app_registry_cached_bytes, app_registry_cache_bytes, app_registry_cache_boot_app_id, app_registry_boot_seed_entries, app_registry_leaf_for_canonical}
 
 val PURE_FAT32_FILE_READ_MAX: u64 = 33554432
 extern fn serial_println(msg: text)
@@ -1130,10 +1130,15 @@ fn _vfs_boot_short_name_for_path(path: text) -> text:
         val seed_leaf_upper: text = seed_leaf.upper()
         if upper.ends_with("/" + seed_leaf_upper) or upper == seed_leaf_upper:
             return seed_leaf_upper
-    val lookup = app_registry_lookup(path)
-    if lookup != nil:
-        val lookup_entry = lookup.unwrap()
-        val lookup_leaf: text = lookup_entry.fat32_leaf
+    # Direct-scan leaf lookup. The previous app_registry_lookup() + .unwrap()
+    # here faulted cr2=0x0 for EVERY unregistered path: native-build miscompiles
+    # the `Option<AppEntry> != nil` guard for a by-value struct payload, so the
+    # None guard falls through and unwrap yields a null entry (the defect is
+    # documented on app_registry_fat32_alias). It stayed latent only because no
+    # live caller reached this tail until the executable path began probing the
+    # direct reader with canonical names like "/sys/apps/browser_demo".
+    val lookup_leaf: text = app_registry_leaf_for_canonical(path)
+    if lookup_leaf.len() > 0:
         return lookup_leaf.upper()
     ""
 

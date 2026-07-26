@@ -389,6 +389,39 @@ pub fn g_vfs_read_executable_bytes(name: text) -> [u8]:
         val root_cached = app_registry_cached_bytes(root_name)
         if root_cached.len() > 0:
             return root_cached
+    # 1b. Pure-Simple scalar/direct FAT32 reader, BEFORE the g_vfs_initialized
+    # gate below -- exactly mirroring g_vfs_read_file_bytes (which is what makes
+    # /SYS/FONTS/<short-name> readable on this same boot). Without this the
+    # executable path was the ONLY disk consumer still gated on the hosted
+    # Fat32Core mount, which x86_64 skips for the C8
+    # "blockdevice-dispatch-codegen-bug"; every process spawn then failed with a
+    # clean negative even though the disk carried /SYS/APPS/<leaf>.SMF and the
+    # direct reader resolves those paths explicitly (see
+    # vfs_boot_read_pure_nvme_fat32_path_bytes' /SYS/APPS/ branch). The direct
+    # reader never touches g_root_fat32 / the BlockDevice trait object and
+    # internally no-ops (returns []) when it is not ready, so this stays a
+    # harmless probe on virtio-blk and disk-less boots. No _clone_bytes: the
+    # reader returns a freshly-built, unaliased array.
+    val direct_exec_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(name)
+    if direct_exec_bytes.len() > 0:
+        return direct_exec_bytes
+    if root_name != name:
+        val direct_root_exec_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(root_name)
+        if direct_root_exec_bytes.len() > 0:
+            return direct_root_exec_bytes
+    # 1c. Same reader via the registry's 8.3 aliases, so a canonical logical
+    # name ("/sys/apps/browser_demo") resolves without the caller having to
+    # retry each alias itself.
+    val direct_fat32_alias = app_registry_fat32_alias(name)
+    if direct_fat32_alias != nil:
+        val direct_alias_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(direct_fat32_alias.unwrap())
+        if direct_alias_bytes.len() > 0:
+            return direct_alias_bytes
+    val direct_root_alias = app_registry_root_alias(name)
+    if direct_root_alias != nil:
+        val direct_root_alias_bytes = vfs_boot_read_pure_nvme_fat32_path_bytes(direct_root_alias.unwrap())
+        if direct_root_alias_bytes.len() > 0:
+            return direct_root_alias_bytes
     # No root filesystem mounted (disk-less WM harness): every disk-backed
     # candidate below dispatches through g_root_fat32.unwrap().stat(), and
     # native-build miscompiles the `Option<SharedFat32Driver> != nil` guard so a
