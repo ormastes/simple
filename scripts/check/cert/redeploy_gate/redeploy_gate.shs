@@ -24,12 +24,17 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../.." && pwd)
 FIX="$SCRIPT_DIR/fixtures"
 
-# Ordered list of every check name (used by --list and as documentation).
+# Ordered list of every blocking check name (used by --list and as documentation).
 CHECK_NAMES="val-scalar add print-literal enum-payload qmark twofn struct-field struct-copy-isolation class-in-array-mutation cfg-arch-dispatch-a cfg-arch-dispatch-b cfg-lowered-funcs=2"
+
+# Advisory checks: run and reported, but never counted toward PASS/TOTAL and
+# never affect the gate's exit status (see the native-build-smoke block below).
+ADVISORY_CHECK_NAMES="native-build-smoke"
 
 case "${1:-}" in
     --list|-l)
         for n in $CHECK_NAMES; do printf '%s\n' "$n"; done
+        for n in $ADVISORY_CHECK_NAMES; do printf '%s (advisory)\n' "$n"; done
         exit 0
         ;;
     --help|-h)
@@ -54,10 +59,24 @@ fi
 PASS=0
 TOTAL=0
 SKIP=0
+ADV_PASS=0
+ADV_TOTAL=0
 
 pass() { PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1)); printf 'PASS  %-24s %s\n' "$1" "$2"; }
 fail() { TOTAL=$((TOTAL + 1)); printf 'FAIL  %-24s %s\n' "$1" "$2"; }
 skip() { SKIP=$((SKIP + 1)); printf 'SKIP  %-24s %s\n' "$1" "$2"; }
+
+# advise_pass/advise_fail — same shape as pass/fail but for ADVISORY checks
+# (see the native-build-smoke block below): they print PASS/FAIL and are
+# counted in their own ADV_PASS/ADV_TOTAL tally, but deliberately do NOT
+# touch PASS/TOTAL, so they cannot flip the gate's overall exit status.
+advise_pass() { ADV_PASS=$((ADV_PASS + 1)); ADV_TOTAL=$((ADV_TOTAL + 1)); printf 'PASS  %-24s %s [advisory]\n' "$1" "$2"; }
+advise_fail() { ADV_TOTAL=$((ADV_TOTAL + 1)); printf 'FAIL  %-24s %s [advisory]\n' "$1" "$2"; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+run_with_timeout_180() {
+    if have timeout; then timeout 180 "$@"; else "$@"; fi
+}
 
 # assert_eq NAME EXPECTED ACTUAL  — exact stdout match (command substitution
 # already strips trailing newlines from the captured output).
@@ -119,9 +138,45 @@ else
 fi
 
 printf -- '---------------------------------------------------------------\n'
+
+# --- ADVISORY: native-build-smoke (doc/08_tracking/bug/native_build_nil_receiver_crash_2026-07-25.md) ---
+# The gate previously ran NO native-build check at all, so a binary whose
+# native-build lane was completely dead (LLVM-backend nil-receiver trap,
+# see the bug doc) still gated 10-11/11 and shipped. This check exercises
+# `native-build --backend=cranelift` (the lane that must work; the LLVM
+# lane has a known separate open miscompile, so testing it here would be
+# a false discriminator) end-to-end: compile the fixture, then run the
+# produced binary and check for its marker.
+#
+# It is ADVISORY (advise_pass/advise_fail, not pass/fail) rather than
+# blocking: as of this writing even the deployed incumbent binary is
+# known to fail native-build in some configurations, and gate policy is
+# "a new check that both candidate and incumbent fail must not block
+# deploys." Promote this to a real pass/fail check (swap advise_pass/
+# advise_fail for pass/fail above) once a binary that PASSES it has
+# shipped as the incumbent.
+NB_TMPDIR=$(mktemp -d 2>/dev/null || printf '%s/redeploy_gate_nbsmoke.%s' "${TMPDIR:-/tmp}" "$$")
+mkdir -p "$NB_TMPDIR" 2>/dev/null
+NB_OUT="$NB_TMPDIR/nbsmoke.bin"
+if run_with_timeout_180 "$BIN" native-build --backend=cranelift \
+    --entry "$FIX/native_build_smoke.spl" --output "$NB_OUT" >"$NB_TMPDIR/build.log" 2>&1 \
+    && [ -x "$NB_OUT" ]; then
+    NB_RUN_OUT=$("$NB_OUT" 2>/dev/null)
+    if [ "$NB_RUN_OUT" = "NATIVE_BUILD_SMOKE_OK" ]; then
+        advise_pass "native-build-smoke" "= NATIVE_BUILD_SMOKE_OK"
+    else
+        advise_fail "native-build-smoke" "built but ran wrong output [$(printf '%s' "$NB_RUN_OUT" | tr '\n' ';')]"
+    fi
+else
+    advise_fail "native-build-smoke" "native-build failed or produced no executable (see $NB_TMPDIR/build.log)"
+fi
+rm -rf "$NB_TMPDIR" 2>/dev/null
+
+printf -- '---------------------------------------------------------------\n'
 printf 'GATE: %d/%d PASS' "$PASS" "$TOTAL"
 [ "$SKIP" -gt 0 ] && printf ' (%d skipped)' "$SKIP"
 printf '\n'
+[ "$ADV_TOTAL" -gt 0 ] && printf 'ADVISORY: %d/%d PASS (informational; does not affect gate exit status)\n' "$ADV_PASS" "$ADV_TOTAL"
 
 [ "$PASS" -eq "$TOTAL" ] || exit 1
 exit 0
