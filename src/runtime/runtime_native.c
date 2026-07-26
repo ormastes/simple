@@ -3456,6 +3456,254 @@ void rt_array_free(SplArray* value) {
     free(array);
 }
 
+/* ===========================================================================
+ * rt_array_free_deep -- deep (recursive) array free
+ * ===========================================================================
+ *
+ * rt_array_free above is SHALLOW: it releases the outer buffer and the header
+ * and leaks every heap element the buffer pointed at. That makes the confirmed
+ * eviction leaks over `[u8]` / `[u32]` / element-bearing arrays inexpressible,
+ * since the payload is exactly what the shallow free refuses to touch.
+ *
+ * Contract -- identical bias to rt_string_free: return 1 only if the object was
+ * reclaimed, 0 if refused, and REFUSE rather than trust the caller. There is no
+ * GC and no refcount here, so nothing can prove a pointer is unaliased; every
+ * rule below is a conservative approximation that errs toward leaking.
+ *
+ * PARTIAL-FREE POLICY: ALL-OR-NOTHING, decided in two phases.
+ *   Phase 1 walks the whole structure READ-ONLY and classifies every reachable
+ *   node, freeing nothing. If any node is not provably freeable the call
+ *   returns 0 having freed NOTHING AT ALL. Only a fully-provable structure
+ *   reaches phase 2, which then frees every planned node.
+ *
+ *   Justification for rejecting the "free the outer buffer anyway" alternative:
+ *   a refused element is reachable ONLY through the buffer that holds it. Free
+ *   the buffer and that element becomes simultaneously unreachable AND
+ *   unfreeable -- a permanent leak that no later, smarter caller can ever
+ *   reclaim, plus a silently corrupted registry accounting. Refusing also
+ *   leaks, but reversibly: the caller still holds the root and can retry, free
+ *   the elements individually first, or fall back to rt_array_free. A
+ *   reversible leak strictly dominates an irreversible one, so refusal wins.
+ *   Because no partial state can exist, the return value is an honest binary:
+ *   1 == the entire structure is gone, 0 == nothing was touched.
+ *
+ * What counts as provably freeable:
+ *   - BYTES / U64_PACKED arrays: the payload is packed uint8_t / raw u64 with
+ *     no heap references BY CONSTRUCTION, so the element scan is skipped
+ *     entirely. This is the trivially-safe tier and covers `[u8]` payloads such
+ *     as GlyphBitmap.pixels.
+ *   - a generic array whose every element is an immediate (TAG_INT, TAG_FLOAT,
+ *     TAG_SPECIAL/nil, or any value below 4096) -- nothing to free, nothing to
+ *     strand. Covers `[u32]` and ordinary `[i64]`.
+ *   - a non-shared registered heap string element (rt_string_free's own rule:
+ *     RT_CORE_STRING_FLAG_SHARED marks the process-wide short-string cache and
+ *     the literal intern table, whose objects are handed to unrelated holders,
+ *     so freeing one corrupts all of them).
+ *   - a registered array element, recursively, under all of these same rules.
+ *
+ * Everything else refuses the WHOLE call, in particular:
+ *   - any HEAP-tagged element that is not a registered string or registered
+ *     array. That set includes registered enums / closures / mutexes /
+ *     heap-boxed f64 (owned, but with no free path here -- freeing the buffer
+ *     would strand them), RtCoreDict (which has NO registry at all, so it is
+ *     indistinguishable from garbage and must never be assumed away), foreign
+ *     pointers, and raw i64 payloads that merely alias the tag bits. The last
+ *     case is a FALSE refusal for a generic array carrying raw i64s >= 4096
+ *     with low bits 0b001 -- accepted deliberately: a false refusal leaks (the
+ *     status quo), a false accept corrupts every other holder.
+ *   - ALIASING AND CYCLES. RuntimeValue is Copy over a u64, so an element may
+ *     be the array itself or appear twice. Phase 1 keeps a `seen` pointer set;
+ *     the second sighting of any node refuses the whole call. This proves the
+ *     reachable structure is a TREE, which is what makes freeing it bottom-up
+ *     safe -- but note it can only rule out aliases INTERNAL to the structure.
+ *
+ * LIMIT, stated plainly: an interior node aliased from OUTSIDE the structure is
+ * undetectable here, exactly as rt_string_free cannot detect a second holder of
+ * its string. The caller must own the whole subtree, not merely the root. The
+ * refusals above shrink the blast radius; they do not remove that obligation.
+ * Likewise not thread-safe against a concurrent free of the same objects.
+ */
+
+#define RT_CORE_DEEP_FREE_LEAF 0
+#define RT_CORE_DEEP_FREE_STRING 1
+#define RT_CORE_DEEP_FREE_ARRAY 2
+#define RT_CORE_DEEP_FREE_REFUSE 3
+
+/* Bounds the planner's own memory; exceeding it refuses rather than grows. */
+#define RT_CORE_DEEP_FREE_MAX_NODES ((size_t)1 << 22)
+
+typedef struct RtCoreDeepFreeNode {
+    void* ptr;
+    int kind; /* RT_CORE_DEEP_FREE_STRING or RT_CORE_DEEP_FREE_ARRAY */
+} RtCoreDeepFreeNode;
+
+typedef struct RtCoreDeepFreePlan {
+    RtCoreDeepFreeNode* nodes; /* also the BFS worklist, in free order */
+    size_t len;
+    size_t cap;
+    uintptr_t* seen; /* open-addressed pointer set, 0 = empty; no deletes, so */
+    size_t seen_cap; /* no tombstones are needed (unlike the immortal table)  */
+    size_t seen_len;
+} RtCoreDeepFreePlan;
+
+/* caller-local table, no lock needed */
+static int rt_core_deep_free_seen_grow(RtCoreDeepFreePlan* plan) {
+    size_t new_cap = plan->seen_cap == 0 ? 256 : plan->seen_cap * 2;
+    if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
+    uintptr_t* fresh = (uintptr_t*)calloc(new_cap, sizeof(uintptr_t));
+    if (!fresh) return 0;
+    size_t mask = new_cap - 1;
+    for (size_t i = 0; i < plan->seen_cap; i++) {
+        uintptr_t e = plan->seen[i];
+        if (e == 0) continue;
+        size_t j = rt_core_immortal_hash_ptr(e) & mask;
+        while (fresh[j] != 0) j = (j + 1) & mask;
+        fresh[j] = e;
+    }
+    free(plan->seen);
+    plan->seen = fresh;
+    plan->seen_cap = new_cap;
+    return 1;
+}
+
+/* 1 = newly inserted, 0 = already present (alias or cycle), -1 = out of memory */
+static int rt_core_deep_free_seen_insert(RtCoreDeepFreePlan* plan, uintptr_t p) {
+    if ((plan->seen_len + 1) * 10 >= plan->seen_cap * 7) {
+        if (!rt_core_deep_free_seen_grow(plan)) return -1;
+    }
+    size_t mask = plan->seen_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    for (;;) {
+        uintptr_t e = plan->seen[i];
+        if (e == 0) {
+            plan->seen[i] = p;
+            plan->seen_len++;
+            return 1;
+        }
+        if (e == p) return 0;
+        i = (i + 1) & mask;
+    }
+}
+
+static int rt_core_deep_free_plan_push(RtCoreDeepFreePlan* plan, void* ptr, int kind) {
+    if (plan->len == plan->cap) {
+        size_t next_cap = plan->cap == 0 ? 32 : plan->cap * 2;
+        if (next_cap > RT_CORE_DEEP_FREE_MAX_NODES) return 0;
+        RtCoreDeepFreeNode* fresh = (RtCoreDeepFreeNode*)realloc(
+            plan->nodes, next_cap * sizeof(RtCoreDeepFreeNode));
+        if (!fresh) return 0;
+        plan->nodes = fresh;
+        plan->cap = next_cap;
+    }
+    plan->nodes[plan->len].ptr = ptr;
+    plan->nodes[plan->len].kind = kind;
+    plan->len++;
+    return 1;
+}
+
+/* Classify one element slot. Every dereference is gated on a registry
+ * membership test (a PURE POINTER COMPARISON), so a raw i64 that merely aliases
+ * the HEAP tag is never dereferenced -- same guard rt_core_as_string and
+ * rt_core_as_enum use. Requiring RT_VALUE_TAG_HEAP (rather than also accepting
+ * the untagged array form rt_core_as_array tolerates) additionally keeps a
+ * TAG_INT payload from ever being mistaken for an array pointer. */
+static int rt_core_deep_free_classify(int64_t value, void** out_ptr) {
+    uintptr_t raw = (uintptr_t)value;
+    *out_ptr = NULL;
+    if (raw < 4096) return RT_CORE_DEEP_FREE_LEAF;
+    if ((raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return RT_CORE_DEEP_FREE_LEAF;
+    void* p = (void*)(raw & ~RT_VALUE_TAG_MASK);
+    if (rt_core_is_registered_immortal_ptr(p)) {
+        /* strings and heap-boxed f64 share this registry; disambiguate by kind,
+         * which is safe to read now that membership is established */
+        RtCoreString* s = (RtCoreString*)p;
+        if (s->kind != RT_VALUE_HEAP_STRING) return RT_CORE_DEEP_FREE_REFUSE;
+        if (s->reserved & RT_CORE_STRING_FLAG_SHARED) return RT_CORE_DEEP_FREE_REFUSE;
+        *out_ptr = s;
+        return RT_CORE_DEEP_FREE_STRING;
+    }
+    if (rt_core_is_registered_array((RtCoreArray*)p)) {
+        RtCoreArray* a = rt_core_as_array((int64_t)raw);
+        if (!a) return RT_CORE_DEEP_FREE_REFUSE; /* header failed sanity checks */
+        *out_ptr = a;
+        return RT_CORE_DEEP_FREE_ARRAY;
+    }
+    return RT_CORE_DEEP_FREE_REFUSE;
+}
+
+int64_t rt_array_free_deep(int64_t value) {
+    uintptr_t root_raw = (uintptr_t)value;
+    if (root_raw < 4096) return 0;
+    /* the root must be an explicitly heap-tagged, registered array; a string
+     * root belongs to rt_string_free, not here */
+    if ((root_raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return 0;
+    RtCoreArray* root = rt_core_as_registered_array(value);
+    if (!root) return 0;
+
+    RtCoreDeepFreePlan plan;
+    plan.nodes = NULL;
+    plan.len = 0;
+    plan.cap = 0;
+    plan.seen = NULL;
+    plan.seen_cap = 0;
+    plan.seen_len = 0;
+
+    int refused = 0;
+    if (rt_core_deep_free_seen_insert(&plan, (uintptr_t)root) != 1) refused = 1;
+    if (!refused && !rt_core_deep_free_plan_push(&plan, root, RT_CORE_DEEP_FREE_ARRAY)) refused = 1;
+
+    /* Phase 1: read-only breadth-first classification. plan.nodes doubles as
+     * the worklist, so this is iterative -- a deeply nested structure cannot
+     * blow the C stack. */
+    for (size_t i = 0; !refused && i < plan.len; i++) {
+        if (plan.nodes[i].kind != RT_CORE_DEEP_FREE_ARRAY) continue;
+        RtCoreArray* a = (RtCoreArray*)plan.nodes[i].ptr;
+        if (a->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) continue;
+        if (!a->data) continue;
+        const int64_t* slots = (const int64_t*)a->data;
+        for (int64_t k = 0; k < a->len; k++) {
+            void* child = NULL;
+            int kind = rt_core_deep_free_classify(slots[k], &child);
+            if (kind == RT_CORE_DEEP_FREE_LEAF) continue;
+            if (kind == RT_CORE_DEEP_FREE_REFUSE) {
+                refused = 1;
+                break;
+            }
+            /* 0 = alias or cycle, -1 = planner out of memory: both refuse */
+            if (rt_core_deep_free_seen_insert(&plan, (uintptr_t)child) != 1) {
+                refused = 1;
+                break;
+            }
+            if (!rt_core_deep_free_plan_push(&plan, child, kind)) {
+                refused = 1;
+                break;
+            }
+        }
+    }
+
+    /* Phase 2: commit. Reached only when every node is provably freeable, so no
+     * partial state is observable. Freeing top-down is safe because phase 1
+     * already copied out every child pointer. */
+    if (!refused) {
+        for (size_t i = 0; i < plan.len; i++) {
+            if (plan.nodes[i].kind == RT_CORE_DEEP_FREE_ARRAY) {
+                RtCoreArray* a = (RtCoreArray*)plan.nodes[i].ptr;
+                if (rt_core_unregister_array(a)) {
+                    free(a->data);
+                    free(a);
+                }
+            } else {
+                RtCoreString* s = (RtCoreString*)plan.nodes[i].ptr;
+                if (rt_core_unregister_string(s)) free(s);
+            }
+        }
+    }
+
+    free(plan.nodes);
+    free(plan.seen);
+    return refused ? 0 : 1;
+}
+
 /* Free a heap string. Returns 1 if the object was reclaimed, 0 if it was
  * refused. This runtime has no refcounting and RuntimeValue is Copy, so the
  * CALLER must own the only reference -- see

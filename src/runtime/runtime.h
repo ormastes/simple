@@ -333,6 +333,13 @@ SplArray* rt_array_new(int64_t cap);
 SplArray* rt_array_new_uninit(int64_t cap);
 SplArray* rt_array_new_with_cap_u64(int64_t cap);
 void      rt_array_free(SplArray* array);  /* shallow: preserves element handles */
+/* Deep array free. Returns 1 only if the ENTIRE structure was reclaimed, 0 if
+ * refused -- and a refusal frees nothing at all (all-or-nothing, so the result
+ * can never describe a half-freed object). Refuses unregistered/already-freed
+ * arrays, shared or interned string elements, any heap element that is not a
+ * registered string or array, and any internal alias or cycle. See the contract
+ * comment in runtime_native.c. */
+int64_t   rt_array_free_deep(int64_t value);
 SplArray* rt_byte_array_new(uint64_t cap);
 SplArray* rt_byte_array_new_len(uint64_t len);
 SplArray* rt_bytes_alloc(int64_t len);
