@@ -1061,6 +1061,11 @@ the shared binary — deploys require explicit user go-ahead).
   oracle improved to 1.061s/4.172s, so the 22 KiB absolute gate passes, but its
   3.93x ratio and 968,524 KiB RSS remain uncredited. Do not launch the
   493-source generation until those measured owners are addressed.
+  A 500ms/504ms equal-size disjoint-token control rejects the global token
+  interner as the scaling owner. Native arena mutation, bootstrap env mirrors,
+  and duplicate-declaration scans are also inactive on this JIT path. The
+  three-cycle cap is reached; the next fresh session must run one lexer-only
+  440/880 timing discriminator before changing production code.
 
   The retained generation-1 pure-Simple candidate could not run the focused
   scaling fixture because HIR resolution rejected exported `parse_module` and

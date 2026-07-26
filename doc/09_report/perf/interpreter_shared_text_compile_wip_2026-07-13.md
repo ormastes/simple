@@ -77,3 +77,7 @@ of an unavailable monotonic-millisecond symbol that forced JIT fallback.
 
 Absolute latency now passes the 15-second ceiling. The 3.93x scaling ratio and
 RSS ceiling remain red, so the 493-source bootstrap is still unauthorized.
+An equal-size, disjoint-identifier control measured 500ms/504ms, ruling out
+growth of the global short-token cache. No production optimization is
+authorized until a fresh bounded cycle separates lexer-only 440/880 timing
+from parser/AST timing.

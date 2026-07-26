@@ -41,6 +41,14 @@ UI/TUI, GUI, and WM runtime evidence gates.
   Removing the invalid hint and using the exported microsecond clock made the
   oracle complete in 1.061s/4.172s. The 22 KiB absolute ceiling now passes;
   the 3.93x ratio and 968,524 KiB maximum RSS remain open.
+- One equal-size discriminator parsed two 440-function modules with disjoint
+  identifier vocabularies in 500ms/504ms. This rejects cumulative
+  `core_token_text_intern` growth as the ratio owner; the cache stays.
+  Static review also rejects bootstrap environment mirrors, duplicate-name
+  scans, and native arena-array copying on this ordinary JIT path. The bounded
+  three-cycle lane is exhausted. Next fresh cycle: time lexer-only 440/880
+  inputs through public `lex_init`/`lex_next`/`TOK_EOF`; only then select a
+  lexer or parser/AST fix.
 - A higher-requested, environment-gated mutable-object COW diagnostic was
   attempted three times against an isolated 22 KiB parse (exact generator and
   warm-up variants). Each SIGSEGVed before emitting a counter. All diagnostic
