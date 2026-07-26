@@ -161,4 +161,19 @@ level-gated probes. See log-retention policy
   (module-global counters, not a readback buffer) and should not be reused
   outside `host_compositor_entry_spec.spl`.
 
+## Theme snapshot access + frame provenance (2026-07-26)
+
+Never consume `active_wm_theme_render_snapshot()` (Option return) on native
+lanes — its Some payload masks to null (instruction-proven at
+`_wm_draw_ir_window_revision`). Use the owning-module accessors in
+`wm_chrome_theme.spl`: `active_wm_theme_id()`,
+`active_wm_theme_material_sha256()`, `active_theme_solid_fallback_rgba()`,
+or `active_wm_theme_snapshot_present()` + `_unchecked()` for the full
+aggregate (bind it to a name other than `snapshot`). The guest WM now
+presents frames end-to-end (`content-presented` with 64-char material
+digest); its remaining lane gap is app provisioning — `[production-
+readiness]` needs 3 spawned app surfaces and `make_os_disk.shs` mode 26
+stages no app binaries. Full channel rules:
+`doc/07_guide/compiler/backends/freestanding_safe_channels.md`.
+
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`

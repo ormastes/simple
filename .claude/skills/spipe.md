@@ -26,13 +26,6 @@ mirrored through SPipe.
 > bug/feature request — don't switch the runner back to the seed. See
 > `.claude/rules/bootstrap.md` § "Default tooling runs on pure-Simple".
 
-> **Simple MCP is source-hosted.** Local AI-client registrations run
-> `bin/simple src/app/mcp/main.spl` for `simple-mcp` and `simple-pipe-mcp`.
-> Restart the client after MCP source changes; do not native-build the MCP
-> server unless the lane explicitly changes packaging, deployment, or release
-> artifacts. The app MCP surface replaces external context-mode and exposes
-> its own one-shot `node_repl` tool.
-
 For installed UI/GUI/TUI CLI evidence, drive the production command (for
 example `simple ui gui` or `simple ui tui_web`) and bind the receipt to the
 resolved compiled sibling artifact path and digest. Running a raw
@@ -1063,6 +1056,25 @@ prints found it immediately.
 
 Detail: `doc/08_tracking/bug/env_get_nil_coalesce_dead_fallback_2026-07-25.md`.
 Glossary: *Dead Nil-Coalesce Fallback*, *Same-Name Divergence*.
+
+## Native-lane data-channel landmines (aggregate/Option/tuple returns)
+
+On cranelift native and freestanding SimpleOS lanes, a spec or probe can
+fail (or silently blank) because DATA never arrived, not because logic is
+wrong: Option-aggregate returns lose their Some payload deterministically,
+tuple and nested-array returns arrive empty, array-typed module globals
+read back zero-length, and chaining a method on an erased function return
+(`f().to_i32()`) mis-dispatches with a null receiver. The interpreter lane
+hides all of this — treat interp green as non-regression only, and re-run
+the native lane as the oracle (it is layout-sensitive; never diff a single
+run). When writing specs/probes for these lanes: route data through scalar
+or text returns, builtin returns, locals, or self-mutation; add a
+silent-on-healthy receipt at every conversion and verify it with a
+negative control; and before trusting any lane result, verify build
+authenticity (parallel sessions sweep the shared WC — grep a distinctive
+landed-fix marker in the source AND the built objects; a "reproduced"
+crash at a fixed site usually means a stale build). Channel table + fix
+idioms: `doc/07_guide/compiler/backends/freestanding_safe_channels.md`.
 
 ## Watchdogs and isolation wrappers can eat your evidence
 

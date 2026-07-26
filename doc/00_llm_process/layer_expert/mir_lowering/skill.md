@@ -93,4 +93,21 @@ registry hunk presence. After any expr_dispatch refactor, re-verify:
 After changes to method lowering, array handling, or runtime_array_locals
 registry, refresh this skill with new patterns and any regressions found.
 
+## Array-loss RCA pinpoints + pending fix drafts (2026-07-26)
+
+The freestanding array-loss class is pinpointed: array-typed module globals
+emit no `MirStatic` (`module_lowering.spl:62-81` rejects array types) →
+writes degrade to SSA locals (`mir_lowering_stmts.spl:794` write hook needs
+`find_global_static`) → reads RE-LOWER the initializer
+(`expr_dispatch.spl:190-192`, 952d2ca34d7's immutable-only fallback
+violated by mutation). Nested-array returns lose runtime-array identity for
+array-typed elements (`expr_dispatch.spl:1094-1139` registers named structs
+only); `SIMPLE_BOOTSTRAP=1` forces underivable element types to `text`
+(`:1084-1085`). Also: `match case Some(x)` never learned Option's FLAT
+raw-or-nil lane (`Dict.get` is correct; the decoder is not) and the
+interpreter's `match_pattern` had no enum-variant case at all. Fix drafts
+(A1+B2, match-decoder) exist in the 2026-07-26 session scratchpad — each
+needs bootstrap + extended smoke. Full evidence:
+`doc/08_tracking/bug/cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md`.
+
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`

@@ -147,4 +147,19 @@ When this layer's public contract, source ownership, tests, architecture, or
 verification requirements change, update this skill with the new links and
 handoff notes before committing.
 
+## Freestanding data-channel hardening (2026-07-26)
+
+The freestanding/cranelift lanes lose arrays crossing Simple-function
+boundaries (guide:
+`doc/07_guide/compiler/backends/freestanding_safe_channels.md`). Landed in
+this layer: the HTML scan is INLINED into `parse_html` (foundation.spl —
+both a nested `[[text]]` return and a same-module global handoff lost the
+event arrays; receipt `scan-handoff-loss returned=15 module=0`);
+`sha256_text` is a single function (digest `[i64]` return arrived empty →
+provenance `material=""`); CSS `group_parts` helpers are inlined with a
+`[css-extract] degenerate` receipt; `_cpu_draw_ir_nth_int`-style scanners
+bind `char_code_at` as i64 (never chain `.to_i32()`). When touching parse/
+CSS/render handoffs, keep arrays local or project scalars — and keep the
+receipts (each is negative-control verified).
+
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`

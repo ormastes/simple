@@ -41,3 +41,13 @@ Specs: `test/01_unit/compiler/cache/{action_key,file_stamp,cas_store,compile_opt
 2: process-global immutable cache behind flag + shadow strict compare;
 3: wire CAS write-through; 4: ArtifactId resolver; 5: SMF manifests;
 6: interpreter realization from cached plan; 7: retire path-keyed caches.
+
+## Font cache identity is now scalar-projected (2026-07-26)
+
+`FontRasterizer.cache_identity_snapshot() -> (i64, text)` was removed: the
+tuple return arrives corrupt on freestanding lanes. Use
+`cache_identity_generation() -> i64` and the guarded `cache_identity() ->
+text` — each carries the full generation double-check inline; callers
+needing pairing re-read the generation after (the atlas producer does).
+The double-read staleness guarantee is preserved per projection, not per
+pair. See `doc/07_guide/compiler/backends/freestanding_safe_channels.md`.
