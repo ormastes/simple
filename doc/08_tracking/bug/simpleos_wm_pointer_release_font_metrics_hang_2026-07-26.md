@@ -1,6 +1,41 @@
 # SimpleOS WM: pointer-release render hangs forever in taskbar-tray text measurement (2026-07-26)
 
-Status: OPEN — localized to one call, root cause not yet identified
+Status: LANE UNBLOCKED (rerun53 passes) — underlying font defect STILL OPEN
+
+## Resolution (2026-07-26, rerun53)
+
+The lane passes: `status=pass reason=pass`, zero production faults,
+`changed_bytes=23054033`, and `restored_sha256 == baseline_sha256` byte for byte
+(restore returns the screen exactly to its pre-maximize state), with the font
+region still matching its pinned oracle.
+
+What actually unblocked it was **memoizing the font asset catalog**
+(cf09420b88e). `selected_font_asset_candidates()` rebuilt 16 structs from long
+string literals on every call, and the by-path lookup calls it more than once
+per invocation, so a single frame rebuilt that catalog hundreds of times. With
+that removed, the release render finishes inside the correlation budget.
+
+**Be precise about what this means: the render got FAST ENOUGH, it was never a
+hang.** That matches the evidence that finally made sense of it — the stall
+point moved between builds, which no fixed infinite loop does.
+
+### Still open, and NOT fixed by this
+
+`has_ttf=0` on **117 of 118** metric resolves, including on cache hits. Nearly
+all WM text is still drawn by the legacy bitmap fallback rather than real font
+metrics; exactly one real font load succeeded in the whole session. The lane is
+green because the frame now completes in time, not because the font pipeline is
+healthy. That anomaly deserves its own investigation — see "The actual anomaly"
+below.
+
+Also unfixed and unaffected: the resolved-metric cache reading `keys=0
+values=0` (side finding below).
+
+---
+
+Original report follows.
+
+Status when filed: OPEN — localized to one call, root cause not yet identified
 Lane: `scripts/check/check-simpleos-wm-fullscreen-evidence.shs` (SimpleOS-WM x QEMU showcase cell)
 
 ## Symptom
