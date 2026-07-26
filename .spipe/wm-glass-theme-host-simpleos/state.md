@@ -546,3 +546,37 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   non-compatibility flags. The source-only validator regression passes; no
   browser was launched, so there is still no current live Chromium event or
   capture evidence. Native host-cycle limits remain exhausted.
+- continuation-2026-07-26-reviewed-admission-and-evidence-ordering: Pushed the
+  high-reviewed ARM compiler admission, x86 fullscreen admission, and manual
+  correction as `7656a4ed06`, `24a83ac9fd`, and `a861c4301a`. Both canonical
+  QEMU build paths now scan resolved compiler images for seed/debug classifiers
+  before executing the compiler or starting QEMU. The focused ARM self-test
+  admits a clean host-format fixture, rejects seed/debug fixtures, rejects the
+  actual `f2c216...` image, and admits the eligible `277f8ac9...` image. The x86
+  wrapper likewise reports `simple-bin-forbidden` for `f2c216...` before QEMU.
+  The unrelated external x86 build using that now-forbidden image was not
+  interrupted and cannot become acceptance evidence.
+
+  Pushed the reviewed boot-ladder ordering repair as `5db66260c6`. The visible
+  display wrapper evaluates successful GRUB/kernel rungs only after serial
+  readiness while the same QEMU remains alive for QMP capture; failure paths
+  quiesce first. `serial-log-not-created-at-check-time` is now distinct from
+  `marker-absent-in-existing-serial-log`, and the bounded self-test covers both
+  plus complete-log and source-order cases. No QEMU run or framebuffer PASS was
+  added.
+
+  Pushed the accepted bridge cycle-2 record as `34761e566e`. The eligible
+  `277f8ac9...` capsule passed path/hash/Mach-O/version/negative-seed and
+  `rt_string_free` admission, but its single bounded historical bridge build
+  exited before output with `Error running src/app/repl/main.spl`. No bridge,
+  admission, focused positive/negative controls, Stage4, fallback, or product
+  source change survived; exactly one micro cycle remains.
+
+  The reviewed Metal preflight report at `9a73869ac1` records the first
+  unavailable rung: the canonical trusted manifest and exact runtime, winit,
+  and C providers are absent. It exited before native build/probe, so the one
+  fresh Metal micro attempt remains available once a valid producer bundle
+  exists. The production Aetheric browser-event source repair is pushed through
+  `4e294c95d9`; its focused validator passes 27/27, but AC-2, AC-3, AC-5,
+  AC-7, AC-8, and AC-10 still lack current live host/QEMU/device evidence and
+  the goal remains active.
