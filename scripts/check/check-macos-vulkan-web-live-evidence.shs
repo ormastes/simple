@@ -17,9 +17,16 @@ LAUNCHER_LOG="$BUILD_DIR/launcher.log"
 WINDOW_ENV="$BUILD_DIR/window.env"
 BEFORE_PNG="$BUILD_DIR/before.png"
 AFTER_PNG="$BUILD_DIR/after.png"
+BEFORE_DECODED_BMP="$BUILD_DIR/before.bmp"
+AFTER_DECODED_BMP="$BUILD_DIR/after.bmp"
 EVIDENCE_ENV="$BUILD_DIR/evidence.env"
 CHILD_STDOUT="$BUILD_DIR/child.stdout"
 CHILD_STDERR="$BUILD_DIR/child.stderr"
+LAUNCHED_PID_ENV="$BUILD_DIR/launched-pid.env"
+case "$LAUNCHED_PID_ENV" in
+    /*) LAUNCHED_PID_ENV_PATH="$LAUNCHED_PID_ENV" ;;
+    *) LAUNCHED_PID_ENV_PATH="$ROOT_DIR/$LAUNCHED_PID_ENV" ;;
+esac
 launch_stdout=""
 launch_stderr=""
 launch_app_bundle=""
@@ -32,14 +39,36 @@ case "$HTML_SAMPLE" in
 esac
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
-rm -f "$EVENTS" "$LAUNCHER_LOG" "$WINDOW_ENV" "$BEFORE_PNG" "$AFTER_PNG" "$EVIDENCE_ENV" \
-    "$CHILD_STDOUT" "$CHILD_STDERR"
+rm -f "$EVENTS" "$LAUNCHER_LOG" "$WINDOW_ENV" "$BEFORE_PNG" "$AFTER_PNG" \
+    "$BEFORE_DECODED_BMP" "$AFTER_DECODED_BMP" "$EVIDENCE_ENV" \
+    "$CHILD_STDOUT" "$CHILD_STDERR" "$LAUNCHED_PID_ENV"
 
 app_pid=""
 peak_rss_kb=0
-cleanup() {
-    [ -n "$app_pid" ] || return 0
-    osascript - "$app_pid" >/dev/null 2>&1 <<'OSA' || true
+cleanup_status="not-needed"
+
+process_matches_launched_executable() {
+    [ -n "$app_pid" ] || return 1
+    actual_executable="$(
+        ps -p "$app_pid" -o command= 2>/dev/null |
+            awk 'NR == 1 { print $1 }'
+    )"
+    [ "$actual_executable" = "$launch_app_executable" ]
+}
+
+wait_for_process_exit() {
+    wait_pid="$1"
+    wait_secs="$2"
+    wait_deadline=$(($(date +%s) + wait_secs))
+    while kill -0 "$wait_pid" 2>/dev/null &&
+            [ "$(date +%s)" -lt "$wait_deadline" ]; do
+        sleep 0.1
+    done
+    ! kill -0 "$wait_pid" 2>/dev/null
+}
+
+request_quit_bounded() {
+    osascript - "$app_pid" >/dev/null 2>&1 <<'OSA' &
 on run argv
   set targetPid to (item 1 of argv) as integer
   tell application "System Events"
@@ -52,9 +81,57 @@ on run argv
   end tell
 end run
 OSA
+    osascript_pid=$!
+    if wait_for_process_exit "$osascript_pid" 2; then
+        wait "$osascript_pid" || true
+        return 0
+    fi
+    kill -TERM "$osascript_pid" 2>/dev/null || true
+    wait_for_process_exit "$osascript_pid" 1 ||
+        kill -KILL "$osascript_pid" 2>/dev/null || true
+    wait_for_process_exit "$osascript_pid" 1 || return 1
+    wait "$osascript_pid" 2>/dev/null || true
+    return 1
+}
+
+cleanup() {
+    [ -n "$app_pid" ] || return 0
+    # A PID record is trusted only while its executable remains the exact
+    # launch path; PID reuse must never target another application.
+    if ! process_matches_launched_executable; then
+        app_pid=""
+        cleanup_status="identity-lost"
+        return 0
+    fi
+    request_quit_bounded || true
+    if ! process_matches_launched_executable; then
+        app_pid=""
+        cleanup_status="complete"
+        return 0
+    fi
     if kill -0 "$app_pid" 2>/dev/null; then
         kill -TERM "$app_pid" 2>/dev/null || true
+        if wait_for_process_exit "$app_pid" 5; then
+            app_pid=""
+            cleanup_status="complete"
+            return 0
+        fi
+        if ! process_matches_launched_executable; then
+            app_pid=""
+            cleanup_status="identity-lost"
+            return 0
+        fi
+        if kill -0 "$app_pid" 2>/dev/null; then
+            kill -KILL "$app_pid" 2>/dev/null || true
+        fi
+        if wait_for_process_exit "$app_pid" 2; then
+            app_pid=""
+            cleanup_status="complete"
+            return 0
+        fi
     fi
+    cleanup_status="incomplete"
+    return 1
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -70,6 +147,8 @@ write_report() {
         echo
         echo "- Before interaction: \`$BEFORE_PNG\`"
         echo "- After interaction: \`$AFTER_PNG\`"
+        echo "- Decoded before pixels: \`$BEFORE_DECODED_BMP\`"
+        echo "- Decoded after pixels: \`$AFTER_DECODED_BMP\`"
         echo "- Event receipt: \`$EVENTS\`"
         echo "- Launcher log: \`$LAUNCHER_LOG\`"
         if [ -f "$CHILD_STDOUT" ]; then
@@ -88,11 +167,17 @@ write_report() {
 fail() {
     reason="$1"
     preserve_child_logs || true
+    # Finish PID-scoped termination before publishing a durable failure report.
+    if ! cleanup; then
+        reason="cleanup-incomplete-$reason"
+    fi
+    app_pid=""
     {
         echo "macos_vulkan_web_live_status=fail"
         echo "macos_vulkan_web_live_reason=$reason"
         echo "macos_vulkan_web_live_peak_rss_kb=$peak_rss_kb"
         echo "macos_vulkan_web_live_max_rss_kb=$MAX_RSS_KB"
+        echo "macos_vulkan_web_live_cleanup_status=$cleanup_status"
         if [ -n "$child_exit_cause" ]; then
             echo "macos_vulkan_web_live_child_exit_cause=$child_exit_cause"
         fi
@@ -143,6 +228,30 @@ file_cksum() {
     fi
 }
 
+# `sips` decodes the screen PNG to BMP. Hash only bytes beginning at BMP's
+# little-endian pixel-data offset, never the BMP container header.
+bmp_pixel_offset() {
+    [ -f "$1" ] || { echo 0; return 0; }
+    offset="$(od -An -tu1 -j 10 -N 4 "$1" 2>/dev/null |
+        awk 'NF >= 4 { print $1 + $2 * 256 + $3 * 65536 + $4 * 16777216; exit }')"
+    case "$offset" in ""|*[!0-9]*) echo 0 ;; *) echo "$offset" ;; esac
+}
+
+bmp_pixel_bytes() {
+    offset="$(bmp_pixel_offset "$1")"
+    total="$(file_bytes "$1")"
+    case "$offset:$total" in *[!0-9:]*|:|*:) echo 0; return 0 ;; esac
+    [ "$offset" -lt "$total" ] || { echo 0; return 0; }
+    echo $((total - offset))
+}
+
+bmp_pixel_cksum() {
+    offset="$(bmp_pixel_offset "$1")"
+    case "$offset" in ""|*[!0-9]*) echo 0; return 0 ;; esac
+    [ "$offset" -gt 0 ] || { echo 0; return 0; }
+    tail -c +$((offset + 1)) "$1" 2>/dev/null | cksum | awk '{print $1}'
+}
+
 file_present() {
     if [ -f "$1" ]; then
         echo 1
@@ -189,24 +298,6 @@ capture_child_exit_cause() {
         printf '%s' "${child_exit_cause:-SimpleGui exited without captured output}" |
             tr '\r\n' '  ' | cut -c 1-500
     )"
-}
-
-child_logs_have_terminal_failure() {
-    for child_log in "$CHILD_STDERR" "$CHILD_STDOUT" \
-            "$launch_stderr" "$launch_stdout"; do
-        [ -n "$child_log" ] && [ -f "$child_log" ] || continue
-        grep -Eq '^(error:|fatal:|panic:)' "$child_log" 2>/dev/null && return 0
-    done
-    return 1
-}
-
-find_launched_pid() {
-    ps -axo pid=,command= | awk -v executable="$launch_app_executable" '
-        $2 == executable {
-            print $1
-            exit
-        }
-    '
 }
 
 process_rss_kb() {
@@ -261,13 +352,10 @@ sample_peak_rss() {
 }
 
 assert_launched_process() {
-    [ -n "$app_pid" ] || fail "launched-pid-missing"
-    actual_executable="$(
-        ps -p "$app_pid" -o command= 2>/dev/null |
-            awk 'NR == 1 { print $1 }'
-    )"
-    [ "$actual_executable" = "$launch_app_executable" ] ||
+    if ! process_matches_launched_executable; then
+        app_pid=""
         fail "launched-pid-executable-mismatch"
+    fi
 }
 
 if ! TIMEOUT_SECS="$(normalize_positive_integer "$TIMEOUT_SECS")"; then
@@ -298,6 +386,9 @@ fi
 if ! command -v screencapture >/dev/null 2>&1; then
     fail "screencapture-missing"
 fi
+if ! command -v sips >/dev/null 2>&1; then
+    fail "sips-missing"
+fi
 if ! command -v cliclick >/dev/null 2>&1; then
     fail "cliclick-missing"
 fi
@@ -306,6 +397,7 @@ if ! SIMPLE_GUI_RUN_SKIP_NUDGE=1 \
 SIMPLE_GUI_BACKEND=vulkan \
 SIMPLE_GUI_EXIT_AFTER_INTERACTION=0 \
 SIMPLE_GUI_EVENT_EVIDENCE_PATH="$ROOT_DIR/$EVENTS" \
+SIMPLE_GUI_LAUNCHED_PID_PATH="$LAUNCHED_PID_ENV_PATH" \
 SIMPLE_ASSET_ROOT="$ROOT_DIR" \
 SHOWCASE_RESOLUTION="${SHOWCASE_RESOLUTION:-320x240}" \
 SHOWCASE_DPI="$REQUESTED_DPI" \
@@ -328,19 +420,26 @@ launch_app_executable="$(
     CDPATH= cd -- "$launch_app_bundle/Contents/MacOS" && pwd -P
 )/SimpleGui"
 [ -x "$launch_app_executable" ] || fail "launch-app-executable-missing"
+[ -s "$LAUNCHED_PID_ENV_PATH" ] || fail "launched-pid-record-missing"
+published_pid="$(value_of launched_pid "$LAUNCHED_PID_ENV_PATH")"
+published_executable="$(value_of launched_executable "$LAUNCHED_PID_ENV_PATH")"
+published_bundle="$(value_of launched_bundle "$LAUNCHED_PID_ENV_PATH")"
+case "$published_pid" in ""|*[!0-9]*) fail "invalid-launched-pid" ;; esac
+[ "$published_executable" = "$launch_app_executable" ] ||
+    fail "launched-pid-record-executable-mismatch"
+[ "$published_bundle" = "$launch_app_bundle" ] ||
+    fail "launched-pid-record-bundle-mismatch"
+app_pid="$published_pid"
 
 deadline=$(($(date +%s) + TIMEOUT_SECS))
-saw_app_process=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
-    candidate_pid="$(find_launched_pid)"
-    if [ -n "$candidate_pid" ]; then
-        app_pid="$candidate_pid"
-        saw_app_process=1
-        assert_launched_process
-        sample_peak_rss
+    if ! kill -0 "$app_pid" 2>/dev/null; then
+        capture_child_exit_cause
+        fail "app-exited-before-window"
     fi
-    if [ -n "$app_pid" ] &&
-        osascript - "$app_pid" >"$WINDOW_ENV" 2>/dev/null <<'OSA'
+    assert_launched_process
+    sample_peak_rss
+    if osascript - "$app_pid" >"$WINDOW_ENV" 2>/dev/null <<'OSA'
 on run argv
   set targetPid to (item 1 of argv) as integer
 tell application "System Events"
@@ -367,16 +466,6 @@ end run
 OSA
     then
         break
-    fi
-    if [ "$saw_app_process" -eq 1 ] &&
-        ! kill -0 "$app_pid" 2>/dev/null; then
-        capture_child_exit_cause
-        fail "app-exited-before-window"
-    fi
-    if [ "$saw_app_process" -eq 0 ] &&
-        child_logs_have_terminal_failure; then
-        capture_child_exit_cause
-        fail "app-exited-before-window"
     fi
     sleep 0.25
 done
@@ -405,6 +494,9 @@ window_rect="$window_x,$window_y,$window_w,$window_h"
 sample_peak_rss
 if ! screencapture -x -R"$window_rect" "$BEFORE_PNG"; then
     fail "before-capture-failed"
+fi
+if ! sips -s format bmp "$BEFORE_PNG" --out "$BEFORE_DECODED_BMP" >/dev/null; then
+    fail "before-capture-decode-failed"
 fi
 
 old_ifs=$IFS
@@ -567,14 +659,25 @@ assert_launched_process
 if ! screencapture -x -R"$window_rect" "$AFTER_PNG"; then
     fail "after-capture-failed"
 fi
+if ! sips -s format bmp "$AFTER_PNG" --out "$AFTER_DECODED_BMP" >/dev/null; then
+    fail "after-capture-decode-failed"
+fi
 
 before_bytes="$(file_bytes "$BEFORE_PNG")"
 after_bytes="$(file_bytes "$AFTER_PNG")"
 before_cksum="$(file_cksum "$BEFORE_PNG")"
 after_cksum="$(file_cksum "$AFTER_PNG")"
+before_pixel_bytes="$(bmp_pixel_bytes "$BEFORE_DECODED_BMP")"
+after_pixel_bytes="$(bmp_pixel_bytes "$AFTER_DECODED_BMP")"
+before_pixel_cksum="$(bmp_pixel_cksum "$BEFORE_DECODED_BMP")"
+after_pixel_cksum="$(bmp_pixel_cksum "$AFTER_DECODED_BMP")"
 [ "$before_bytes" -gt 1000 ] || fail "before-capture-empty"
 [ "$after_bytes" -gt 1000 ] || fail "after-capture-empty"
 [ "$before_cksum" != "$after_cksum" ] || fail "capture-unchanged"
+[ "$before_pixel_bytes" -gt 1000 ] || fail "before-decoded-pixels-empty"
+[ "$after_pixel_bytes" -gt 1000 ] || fail "after-decoded-pixels-empty"
+[ "$before_pixel_cksum" != "$after_pixel_cksum" ] ||
+    fail "decoded-pixels-unchanged"
 
 [ -f "$launch_stdout" ] || fail "launch-stdout-missing"
 renderer_line="$(grep '^web_standards_showcase status=pass ' "$launch_stdout" | tail -n 1 || true)"
@@ -686,6 +789,11 @@ event_font_nonblank="$(
     fail "event-vector-font-focus-revision-mismatch"
 
 preserve_child_logs || fail "child-log-preservation-failed"
+completed_app_pid="$app_pid"
+if ! cleanup || [ "$cleanup_status" != "complete" ]; then
+    app_pid=""
+    fail "cleanup-not-complete"
+fi
 {
     echo "macos_vulkan_web_live_status=pass"
     echo "macos_vulkan_web_live_reason=pass"
@@ -741,7 +849,8 @@ preserve_child_logs || fail "child-log-preservation-failed"
     echo "macos_vulkan_web_live_max_rss_kb=$MAX_RSS_KB"
     echo "macos_vulkan_web_live_app_bundle=$launch_app_bundle"
     echo "macos_vulkan_web_live_app_executable=$launch_app_executable"
-    echo "macos_vulkan_web_live_app_pid=$app_pid"
+    echo "macos_vulkan_web_live_app_pid=$completed_app_pid"
+    echo "macos_vulkan_web_live_cleanup_status=$cleanup_status"
     echo "macos_vulkan_web_live_window_rect=$window_rect"
     echo "macos_vulkan_web_live_before_png=$BEFORE_PNG"
     echo "macos_vulkan_web_live_after_png=$AFTER_PNG"
@@ -749,6 +858,12 @@ preserve_child_logs || fail "child-log-preservation-failed"
     echo "macos_vulkan_web_live_after_bytes=$after_bytes"
     echo "macos_vulkan_web_live_before_cksum=$before_cksum"
     echo "macos_vulkan_web_live_after_cksum=$after_cksum"
+    echo "macos_vulkan_web_live_before_decoded_bmp=$BEFORE_DECODED_BMP"
+    echo "macos_vulkan_web_live_after_decoded_bmp=$AFTER_DECODED_BMP"
+    echo "macos_vulkan_web_live_before_decoded_bytes=$before_pixel_bytes"
+    echo "macos_vulkan_web_live_after_decoded_bytes=$after_pixel_bytes"
+    echo "macos_vulkan_web_live_before_decoded_cksum=$before_pixel_cksum"
+    echo "macos_vulkan_web_live_after_decoded_cksum=$after_pixel_cksum"
     echo "macos_vulkan_web_live_child_stdout=$CHILD_STDOUT"
     echo "macos_vulkan_web_live_child_stdout_present=$(file_present "$CHILD_STDOUT")"
     echo "macos_vulkan_web_live_child_stdout_bytes=$(file_bytes "$CHILD_STDOUT")"
@@ -759,10 +874,6 @@ preserve_child_logs || fail "child-log-preservation-failed"
     echo "macos_vulkan_web_live_child_stderr_cksum=$(file_cksum "$CHILD_STDERR")"
 } >"$EVIDENCE_ENV"
 write_report
-
-# Q closes through the application's own event route after evidence is durable.
-cleanup
-app_pid=""
 
 echo "macOS Vulkan web live evidence: PASS"
 echo "report=$REPORT_PATH"

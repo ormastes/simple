@@ -61,8 +61,8 @@ describe "macOS Vulkan web live evidence wrapper contract":
         expect(source).to_contain("[ \"$renderer_checksum\" = \"$initial_checksum\" ]")
         expect(source).to_contain("fail \"renderer-event-checksum-mismatch\"")
 
-    it "should prove interaction changes both device and visible captures":
-        step("Inspect the before/after readback and screen-capture checks")
+    it "should prove interaction changes both device and decoded visible pixels":
+        step("Inspect the before/after readback, capture, and decoded-pixel checks")
         val source = file_read(WRAPPER)
         expect(source).to_contain("[ \"" + SHELL_OPEN + "initial_checksum:-0}\" -gt 0 ] || fail \"initial-checksum-missing\"")
         expect(source).to_contain("[ \"" + SHELL_OPEN + "interaction_checksum:-0}\" -gt 0 ] || fail \"interaction-checksum-missing\"")
@@ -70,6 +70,13 @@ describe "macOS Vulkan web live evidence wrapper contract":
         expect(source).to_contain("[ \"$before_bytes\" -gt 1000 ] || fail \"before-capture-empty\"")
         expect(source).to_contain("[ \"$after_bytes\" -gt 1000 ] || fail \"after-capture-empty\"")
         expect(source).to_contain("[ \"$before_cksum\" != \"$after_cksum\" ] || fail \"capture-unchanged\"")
+        expect(source).to_contain("sips -s format bmp \"$BEFORE_PNG\" --out \"$BEFORE_DECODED_BMP\"")
+        expect(source).to_contain("sips -s format bmp \"$AFTER_PNG\" --out \"$AFTER_DECODED_BMP\"")
+        expect(source).to_contain("bmp_pixel_cksum()")
+        expect(source).to_contain("tail -c +$((offset + 1)) \"$1\"")
+        expect(source).to_contain("[ \"$before_pixel_bytes\" -gt 1000 ] || fail \"before-decoded-pixels-empty\"")
+        expect(source).to_contain("[ \"$after_pixel_bytes\" -gt 1000 ] || fail \"after-decoded-pixels-empty\"")
+        expect(source).to_contain("fail \"decoded-pixels-unchanged\"")
 
     it "should route focus keyboard pointer and click input through the live window":
         step("Inspect input injection and application receipt checks")
@@ -211,16 +218,21 @@ describe "macOS Vulkan web live evidence wrapper contract":
         expect(rss_evidence).to_contain("macos_vulkan_web_live_status=fail")
         expect(rss_evidence).to_contain("macos_vulkan_web_live_reason=invalid-max-rss-kb")
 
-    it "should fail closed when the launched child exits before its window":
-        step("Inspect child discovery, early-exit detection, and bounded diagnostics")
+    it "should fail closed when the published launched child exits before its window":
+        step("Inspect exact PID publication, early-exit detection, and bounded diagnostics")
         val source = file_read(WRAPPER)
         expect(source).to_contain("app_pid=\"\"")
-        expect(source).to_contain("find_launched_pid()")
+        expect(source).to_contain("LAUNCHED_PID_ENV=\"$BUILD_DIR/launched-pid.env\"")
+        expect(source).to_contain("SIMPLE_GUI_LAUNCHED_PID_PATH=\"$LAUNCHED_PID_ENV_PATH\"")
+        expect(source).to_contain("published_pid=\"$(value_of launched_pid \"$LAUNCHED_PID_ENV_PATH\")\"")
+        expect(source).to_contain("published_executable=\"$(value_of launched_executable \"$LAUNCHED_PID_ENV_PATH\")\"")
+        expect(source).to_contain("fail \"launched-pid-record-executable-mismatch\"")
+        expect(source).to_contain("fail \"launched-pid-record-bundle-mismatch\"")
         expect(source).to_contain("capture_child_exit_cause()")
-        expect(source).to_contain("child_logs_have_terminal_failure()")
         expect(source).to_contain("! kill -0 \"$app_pid\" 2>/dev/null")
         expect(source).to_contain("fail \"app-exited-before-window\"")
         expect(source).to_contain("macos_vulkan_web_live_child_exit_cause=$child_exit_cause")
+        expect(source.index_of("published_pid=\"$(value_of launched_pid \"$LAUNCHED_PID_ENV_PATH\")\"")).to_be_less_than(source.index_of("app_pid=\"$published_pid\""))
 
     it "should preserve child logs before reporting a launcher failure":
         step("Inspect launcher-path parsing and durable child-log evidence")
@@ -240,16 +252,21 @@ describe "macOS Vulkan web live evidence wrapper contract":
         expect(source).to_contain("- Preserved child stdout: \\`$CHILD_STDOUT\\`")
         expect(source).to_contain("- Preserved child stderr: \\`$CHILD_STDERR\\`")
 
-    it "should clean up the exact launched child on every exit path":
-        step("Inspect unique executable discovery and PID-scoped ownership")
+    it "should clean up the exact published child within a bounded interval":
+        step("Inspect PID-scoped ownership and bounded termination")
         val source = file_read(WRAPPER)
         expect(source).to_contain("launch_app_bundle=")
         expect(source).to_contain("launch_app_executable=")
-        expect(source).to_contain("$2 == executable")
         expect(source).to_contain("assert_launched_process()")
         expect(source).to_contain("fail \"launched-pid-executable-mismatch\"")
         expect(source).to_contain("cleanup()")
         expect(source).to_contain("trap cleanup EXIT HUP INT TERM")
+        expect(source).to_contain("process_matches_launched_executable()")
+        expect(source).to_contain("if ! process_matches_launched_executable; then\n        app_pid=\"\"")
+        expect(source).to_contain("request_quit_bounded()")
+        expect(source).to_contain("wait_for_process_exit \"$osascript_pid\" 2")
+        expect(source).to_contain("wait_for_process_exit \"$app_pid\" 5")
+        expect(source).to_contain("wait_for_process_exit \"$app_pid\" 2")
         expect(source).to_contain("set targetPid to (item 1 of argv) as integer")
         expect(source).to_contain("processes whose unix id is targetPid")
         expect(source).to_contain("osascript - \"$app_pid\" >/dev/null")
@@ -257,4 +274,11 @@ describe "macOS Vulkan web live evidence wrapper contract":
         expect(source).to_contain("fail \"invalid-window-pid\"")
         expect(source).to_contain("if kill -0 \"$app_pid\" 2>/dev/null; then")
         expect(source).to_contain("kill -TERM \"$app_pid\" 2>/dev/null || true")
-        expect(source).to_contain("cleanup\napp_pid=\"\"")
+        expect(source).to_contain("kill -KILL \"$app_pid\" 2>/dev/null || true")
+        expect(source).to_contain("if ! cleanup; then\n        reason=\"cleanup-incomplete-$reason\"")
+        expect(source).to_contain("reason=\"cleanup-incomplete-$reason\"\n    fi\n    app_pid=\"\"")
+        expect(source.index_of("if ! process_matches_launched_executable; then")).to_be_less_than(source.index_of("kill -TERM \"$app_pid\" 2>/dev/null || true"))
+        expect(source).to_contain("if ! cleanup || [ \"$cleanup_status\" != \"complete\" ]; then")
+        expect(source).to_contain("fail \"cleanup-not-complete\"")
+        expect(source).to_contain("macos_vulkan_web_live_cleanup_status=$cleanup_status")
+        expect(source.index_of("if ! cleanup || [ \"$cleanup_status\" != \"complete\" ]; then")).to_be_less_than(source.index_of("macos_vulkan_web_live_status=pass"))
