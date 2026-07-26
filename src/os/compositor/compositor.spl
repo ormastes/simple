@@ -102,6 +102,13 @@ class Compositor:
     # key lifecycle without treating release as a second WM action.
     pending_fullscreen_sequence: i64
     pending_fullscreen_release_sequence: i64
+    # Maintained at materialize time instead of scanning surface elements:
+    # rerun24 faulted inside the scan (element text-field read produced a
+    # tagged wild pointer, cr2=0xa1000000...) after the vector-font path
+    # shifted the build layout. Scalar counter writes/reads stay on proven
+    # channels. Ceiling: window close does not decrement (startup readiness
+    # evidence only); revisit if runtime ownership counts are ever needed.
+    owned_surface_scalar_count: i64
 
     static fn with_backends(backend: CompositorBackend, input: InputBackend?, width: i32, height: i32) -> Compositor:
         Compositor(
@@ -129,7 +136,8 @@ class Compositor:
             prev_wm_pointer_button_code: 0,
             input_sequence: 0,
             pending_fullscreen_sequence: 0,
-            pending_fullscreen_release_sequence: 0
+            pending_fullscreen_release_sequence: 0,
+            owned_surface_scalar_count: 0
         )
 
     me create_window(title: text, x: i32, y: i32, width: i32, height: i32) -> i32:
@@ -345,25 +353,21 @@ class Compositor:
             surface.content_revision = surface.content_revision + 1
             surface.dirty = true
             self.surfaces[i] = surface
+            # Params only (scalar + text params are proven channels); a just-
+            # created surface cannot double-count.
+            if process_id > 0:
+                if app_id.len() > 0:
+                    self.owned_surface_scalar_count = self.owned_surface_scalar_count + 1
         id
 
     fn compositor_process_owned_surface_count_scalar() -> i64:
-        var count: i64 = 0
-        # cpu-lane-loop-ok: bounded startup/readiness ownership count, not a frame or pixel path
-        # Index-based loop with scalar intermediates: the for-loop form copies
-        # each WindowSurface aggregate into the loop var and the guest faulted
-        # inside this function reading the copied element (rerun13, rip
-        # symbolized here). Element field reads via self.surfaces[i] plus a
-        # bound text length check stay on proven channels.
-        var i = 0
-        while i < self.surfaces.len():
-            val surface_pid: i64 = self.surfaces[i].process_id
-            if surface_pid > 0:
-                val surface_app: text = self.surfaces[i].app_id
-                if surface_app.len() > 0:
-                    count = count + 1
-            i = i + 1
-        count
+        # Maintained scalar, not a surface scan: the rerun13 for-loop copy
+        # faulted, the rerun14 index-based scalar-bind rewrite read zeros, and
+        # the rerun24 build (vector-font layout shift) faulted inside the
+        # rewritten scan on an element text-field read (cr2=0xa1000000...).
+        # Surface-element reads are not a stable channel on this lane; the
+        # counter is updated at materialize time from call params instead.
+        self.owned_surface_scalar_count
 
     fn window_count() -> i32:
         self.surfaces.len()
