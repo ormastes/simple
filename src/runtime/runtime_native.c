@@ -867,9 +867,6 @@ static _Atomic uint32_t rt_core_transient_array_scope_next_id = 1;
 static _Thread_local uint32_t rt_core_transient_array_scope_id = 0;
 static _Thread_local int rt_core_transient_array_scope_active = 0;
 static _Thread_local int rt_core_transient_array_scope_paused = 0;
-static RtCoreEnum** rt_core_enum_registry = NULL;
-static size_t rt_core_enum_registry_len = 0;
-static size_t rt_core_enum_registry_cap = 0;
 static RtCoreMutex** rt_core_mutex_registry = NULL;
 static size_t rt_core_mutex_registry_len = 0;
 static size_t rt_core_mutex_registry_cap = 0;
@@ -1011,31 +1008,36 @@ static int rt_core_is_registered_mutex(RtCoreMutex* mutex) {
  * -- before ever reading ->kind. A flat payload that merely aliases the HEAP
  * tag bits is never a member of this registry, so it now resolves to "not an
  * enum" (NULL) instead of being dereferenced. Real heap-boxed enums (Option
- * or otherwise) are unaffected since they are always registered at creation. */
+ * or otherwise) are unaffected since they are always registered at creation.
+ *
+ * PERF (native_build_parser_100cps_regression_2026-07-26): the comment above
+ * always said "mirror the string registry" but the code below instead kept a
+ * flat RtCoreEnum* array scanned linearly on every membership test -- unlike
+ * the string/dict/float registries, which already share the O(1) open-
+ * addressing hash table (rt_core_register/is_registered_immortal_ptr). Since
+ * this registry is NEVER pruned (no unregister_enum exists -- every enum ever
+ * boxed for the life of the process stays a member) and Option/Result enums
+ * are created continuously by ordinary Simple code (every `if val x = opt`,
+ * `?` propagation, etc.), rt_core_is_registered_enum's cost grew with total
+ * cumulative enum allocations for the process, not live count. In a
+ * long-running process (e.g. native-build parsing hundreds of kernel-closure
+ * files in one run) this turned every `rt_is_none`/`rt_enum_discriminant`
+ * call -- which is on the hot path of essentially all Option/Result-using
+ * code, including the parser's own use of Option -- into an O(n) scan over an
+ * ever-growing array, producing per-file parse times that degraded as
+ * heap_registry grew into the millions (measured: ~190 chars/sec early in a
+ * run collapsing to ~28 chars/sec after 48 files / heap_registry=4.1M). Route
+ * through the shared immortal hash table instead, exactly like
+ * rt_core_register_dict/rt_core_register_float above, restoring amortized
+ * O(1) membership tests. */
 static void rt_core_register_enum(RtCoreEnum* e) {
     if (!e) return;
-    if (rt_core_enum_registry_len == rt_core_enum_registry_cap) {
-        size_t next_cap = rt_core_enum_registry_cap == 0 ? 64 : rt_core_enum_registry_cap * 2;
-        RtCoreEnum** next = (RtCoreEnum**)realloc(rt_core_enum_registry, next_cap * sizeof(RtCoreEnum*));
-        if (!next) return;
-        rt_core_enum_registry = next;
-        rt_core_enum_registry_cap = next_cap;
-    }
-    rt_core_enum_registry[rt_core_enum_registry_len++] = e;
-    atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    rt_core_register_immortal_ptr(e);
 }
 
 static int rt_core_is_registered_enum(RtCoreEnum* e) {
-    for (size_t i = 0; i < rt_core_enum_registry_len; i++) {
-        if (rt_core_enum_registry[i] == e) return 1;
-    }
-    return 0;
+    return rt_core_is_registered_immortal_ptr(e);
 }
-
-static RtCoreClosure** rt_core_closure_registry = NULL;
-static size_t rt_core_closure_registry_len = 0;
-static size_t rt_core_closure_registry_cap = 0;
-static atomic_flag rt_core_closure_registry_lock = ATOMIC_FLAG_INIT;
 
 int64_t rt_heap_registry_count(void) {
     return (int64_t)atomic_load_explicit(&rt_core_heap_registry_count, memory_order_relaxed);
@@ -1093,54 +1095,29 @@ int8_t rt_transient_array_scope_end(void) {
     return 1;
 }
 
-static void rt_core_closure_registry_acquire(void) {
-    while (atomic_flag_test_and_set_explicit(&rt_core_closure_registry_lock, memory_order_acquire)) {}
-}
-
-static void rt_core_closure_registry_release(void) {
-    atomic_flag_clear_explicit(&rt_core_closure_registry_lock, memory_order_release);
-}
-
+/* PERF (native_build_parser_100cps_regression_2026-07-26): closures were
+ * tracked in a flat RtCoreClosure* array scanned linearly under a spinlock on
+ * EVERY closure invocation (rt_core_as_closure), exactly the same O(n) growth
+ * pattern as the enum registry above -- closures have no unregister path
+ * either (created once at rt_closure_new and immortal for the life of the
+ * process), so this table only ever grows and every call site paid for the
+ * full cumulative allocation count. Route through the same shared O(1)
+ * open-addressing immortal-pointer hash table used by strings/dicts/floats/
+ * enums instead of a bespoke array+lock. */
 static int rt_core_register_closure(RtCoreClosure* closure) {
     if (!closure) return 0;
-    rt_core_closure_registry_acquire();
-    if (rt_core_closure_registry_len == rt_core_closure_registry_cap) {
-        if (rt_core_closure_registry_cap > SIZE_MAX / 2 / sizeof(RtCoreClosure*)) {
-            rt_core_closure_registry_release();
-            return 0;
-        }
-        size_t next_cap = rt_core_closure_registry_cap == 0 ? 32 : rt_core_closure_registry_cap * 2;
-        RtCoreClosure** next =
-            (RtCoreClosure**)realloc(rt_core_closure_registry, next_cap * sizeof(RtCoreClosure*));
-        if (!next) {
-            rt_core_closure_registry_release();
-            return 0;
-        }
-        rt_core_closure_registry = next;
-        rt_core_closure_registry_cap = next_cap;
-    }
-    rt_core_closure_registry[rt_core_closure_registry_len++] = closure;
-    atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
-    rt_core_closure_registry_release();
-    return 1;
+    return rt_core_register_immortal_ptr(closure);
 }
 
 static RtCoreClosure* rt_core_as_closure(int64_t value) {
     if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
     RtCoreClosure* closure = (RtCoreClosure*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
     if (!closure) return NULL;
-    /* Membership is a pointer-only comparison. Do not dereference a raw
-     * function pointer that merely collides with the heap tag. */
-    rt_core_closure_registry_acquire();
-    for (size_t i = 0; i < rt_core_closure_registry_len; i++) {
-        if (rt_core_closure_registry[i] == closure) {
-            RtCoreClosure* result = closure->kind == RT_VALUE_HEAP_CLOSURE ? closure : NULL;
-            rt_core_closure_registry_release();
-            return result;
-        }
-    }
-    rt_core_closure_registry_release();
-    return NULL;
+    /* Membership is a pointer-only comparison inside
+     * rt_core_is_registered_immortal_ptr. Do not dereference a raw function
+     * pointer that merely collides with the heap tag. */
+    if (!rt_core_is_registered_immortal_ptr(closure)) return NULL;
+    return closure->kind == RT_VALUE_HEAP_CLOSURE ? closure : NULL;
 }
 
 /* ----------------------------------------------------------------------------
