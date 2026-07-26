@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use super::{effective_target, safe_canonicalize, RUNTIME_PATH_OVERRIDE};
+use super::{effective_target, native_project_rust_trace_enabled, safe_canonicalize, RUNTIME_PATH_OVERRIDE};
 use simple_common::CORE_REQUIRED_RUNTIME_SYMBOLS;
 
 fn has_nonempty_archive_payload(path: &Path) -> bool {
@@ -255,7 +255,7 @@ pub(crate) fn core_c_target_flags(
     flags
 }
 
-fn find_core_c_runtime_source_root() -> Option<PathBuf> {
+pub(crate) fn find_core_c_runtime_source_root() -> Option<PathBuf> {
     let mut candidates = Vec::new();
 
     if let Ok(cwd) = std::env::current_dir() {
@@ -359,6 +359,26 @@ fn build_c_runtime_library(build_dir: &Path, include_stage4_hosted: bool) -> Opt
             .status()
             .ok()?;
         if !status.success() {
+            // A transient failure here silently degrades the whole link (see
+            // doc/08_tracking/bug/core_c_runtime_archive_rename_enoent_flaky_2026-07-26.md).
+            // External tracing suppresses that race, so record the directory state
+            // from inside the process. Off unless SIMPLE_NATIVE_BUILD_RUST_TRACE=1.
+            if native_project_rust_trace_enabled() {
+                eprintln!(
+                    "[core-c-probe] compile failed source={source} object={}\n\
+                     [core-c-probe]   build_dir={} exists={}\n\
+                     [core-c-probe]   entries={:?}",
+                    object.display(),
+                    build_dir.display(),
+                    build_dir.is_dir(),
+                    std::fs::read_dir(build_dir)
+                        .map(|entries| entries
+                            .filter_map(Result::ok)
+                            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                            .collect::<Vec<_>>())
+                        .unwrap_or_else(|e| vec![format!("<read_dir failed: {e}>")]),
+                );
+            }
             return None;
         }
         objects.push(object);

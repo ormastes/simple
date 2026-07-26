@@ -6,7 +6,8 @@ use simple_common::target::LinkerFlavor;
 
 use super::tools::{
     archive_defined_symbols, build_core_c_runtime_library, find_abi_complete_simple_core_runtime_library,
-    find_runtime_library, find_simple_core_runtime_library, runtime_archive_has_core_required_symbols,
+    find_core_c_runtime_source_root, find_runtime_library, find_simple_core_runtime_library,
+    runtime_archive_has_core_required_symbols,
 };
 
 use super::NativeProjectBuilder;
@@ -345,10 +346,26 @@ impl NativeProjectBuilder {
                     let core_c_dir = temp_dir.join("core_c_runtime");
                     match build_core_c_runtime_library(&core_c_dir) {
                         Some(runtime) => candidates.push((runtime, false)),
+                        // In a source checkout the core-C archive MUST build; a failure
+                        // there is a toolchain defect, not a supported configuration.
+                        // Falling through to find_runtime_library() links a generic
+                        // archive ~28x larger and only surfaces as a distant
+                        // binary-size assertion. A deployed compiler ships a prebuilt
+                        // core-c-bootstrap archive and has no src/runtime, so it
+                        // legitimately keeps the fallback.
+                        None if find_core_c_runtime_source_root().is_some() => {
+                            return Err(format!(
+                                "native-build could not build the core-C runtime archive in {}. \
+                                 core-C runtime sources are present, so this is a toolchain \
+                                 failure rather than a missing prebuilt runtime. Re-run with \
+                                 SIMPLE_NATIVE_BUILD_RUST_TRACE=1 to see the failing compile.",
+                                core_c_dir.display()
+                            ));
+                        }
                         None => eprintln!(
-                            "warning: core-C runtime archive failed to build in {}; \
-                             falling back to a generic runtime (expect a much larger binary)",
-                            core_c_dir.display()
+                            "warning: no core-C runtime sources found; falling back to a \
+                             prebuilt runtime from find_runtime_library() (expect a much \
+                             larger binary if it is not the core-c-bootstrap lane)"
                         ),
                     }
                     if let Some(runtime) = find_runtime_library() {
