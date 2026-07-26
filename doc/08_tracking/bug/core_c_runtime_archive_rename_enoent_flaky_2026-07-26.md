@@ -1,7 +1,51 @@
 # core-C runtime archive build flakes with rename ENOENT, silently degrading to a 28x runtime
 
 - **Filed:** 2026-07-26
-- **Status:** OPEN — reproducible, trigger NOT root-caused
+- **Status:** ROOT-CAUSED AND FIXED (2026-07-26) — see *Root cause* below.
+  The elimination table further down is kept because it records why several
+  confident readings of the evidence were wrong.
+
+## Root cause
+
+`cleanup_stale_db_files()` — `src/compiler_rust/driver/src/cli/init.rs:184`,
+called unconditionally from `init_runtime()` on **every** `simple` CLI startup —
+recursively walks `.simple/` and deletes every file whose extension is `tmp`,
+even though its own doc comment names only `*.sdn.tmp` and `*.cache.tmp`.
+
+clang writes each object to `<name>-<hash>.o.tmp` in the output directory and
+renames it into place at the end. native-build stages objects in
+`.simple/native-objects-XXXXXX/`. So **any `simple` process starting anywhere in
+the repo deleted the live `.o.tmp` of any concurrently running compile**, and the
+victim reported `unable to rename temporary ... 'No such file or directory'`.
+
+Canary proof (no compiler involved):
+
+```
+mkdir -p .simple/mycanary/core_c_runtime && cd $_
+touch runtime_native-9dd12f74.o.tmp runtime_native.o notes.txt db.sdn.tmp
+bin/simple --version          # any simple invocation
+# -> both *.tmp deleted; runtime_native.o and notes.txt survive
+```
+
+**Fix:** match only `*.sdn.tmp` / `*.cache.tmp` via `is_stale_db_temp()`, guarded
+by `stale_db_cleanup_spares_native_build_object_temporaries`. The pure-Simple
+twin (`lib/std/src/db/persistence.spl:247`) was already correctly scoped.
+The deployed `bin/simple` retains the old behaviour until rebuilt and redeployed.
+
+### Why the earlier evidence was misread
+
+- The deleter is a **different process**. `strace -f` on the test process
+  correctly showed no mid-build unlink; that was read as "nothing deletes it".
+- "13 orphaned staging dirs survived, so there is no sweeper" was **invalid**:
+  the sweep removes `*.tmp` *files*, never directories. Surviving directories
+  said nothing about a file-level sweeper.
+- The apparent timing-sensitivity was a second process starting inside the
+  seconds-long window of one clang invocation — observers changed that window
+  rather than suppressing a race.
+
+---
+
+- **Original status:** OPEN — reproducible, trigger NOT root-caused
 - **Component:** `src/compiler_rust/compiler/src/pipeline/native_project/{tools.rs,config.rs}`
 - **Severity:** medium (flaky CI; the silent-degradation half is fixed, the race is not)
 

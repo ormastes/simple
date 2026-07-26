@@ -7,7 +7,7 @@
 //! - Signal handler setup
 
 use crate::StartupMetrics;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::fs;
 use walkdir::WalkDir;
 
@@ -179,6 +179,22 @@ pub fn init_execution_limit(metrics: &mut StartupMetrics) {
     metrics.record(crate::StartupPhase::ExecutionLimitInit, limit_start.elapsed());
 }
 
+/// True for the atomic-write artifacts this cleanup owns: `*.sdn.tmp` and
+/// `*.cache.tmp`.
+///
+/// Matching every `*.tmp` instead was a real bug: `.simple/` is also where
+/// native-build stages its object directories, and clang writes each object as
+/// `<name>-<hash>.o.tmp` before renaming it into place. Any `simple` startup in
+/// the repo deleted those live temporaries out from under a running compile,
+/// which surfaced as an unrelated-looking `unable to rename temporary ...
+/// 'No such file or directory'` in whichever build happened to be in flight.
+/// See doc/08_tracking/bug/core_c_runtime_archive_rename_enoent_flaky_2026-07-26.md.
+fn is_stale_db_temp(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".sdn.tmp") || name.ends_with(".cache.tmp"))
+}
+
 /// Clean up stale temporary database files from crashed writes
 /// This removes any .sdn.tmp and .cache.tmp files left over from interrupted atomic writes
 pub fn cleanup_stale_db_files(metrics: &mut StartupMetrics) {
@@ -199,11 +215,11 @@ pub fn cleanup_stale_db_files(metrics: &mut StartupMetrics) {
             continue;
         }
 
-        // Search for .tmp files (atomic write artifacts)
+        // Search for stale atomic-write artifacts
         if let Ok(entries) = fs::read_dir(&location) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().is_some_and(|ext| ext == "tmp") {
+                if is_stale_db_temp(&path) {
                     let _ = fs::remove_file(&path);
                 }
             }
@@ -216,7 +232,7 @@ pub fn cleanup_stale_db_files(metrics: &mut StartupMetrics) {
             .filter(|e| e.file_type().is_file())
             .for_each(|entry| {
                 let path = entry.path();
-                if path.extension().is_some_and(|ext| ext == "tmp") {
+                if is_stale_db_temp(path) {
                     let _ = fs::remove_file(path);
                 }
             });
@@ -274,4 +290,28 @@ pub fn init_runtime(metrics: &mut StartupMetrics) {
     init_execution_limit(metrics);
     init_stack_overflow_detection(metrics);
     init_timeout_watchdog(metrics);
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::is_stale_db_temp;
+    use std::path::Path;
+
+    #[test]
+    fn stale_db_cleanup_spares_native_build_object_temporaries() {
+        // The artifacts this cleanup owns.
+        assert!(is_stale_db_temp(Path::new("doc/08_tracking/todo/todo_db.sdn.tmp")));
+        assert!(is_stale_db_temp(Path::new(".simple/cache/index.cache.tmp")));
+
+        // clang stages every object as `<name>-<hash>.o.tmp` next to its output,
+        // and native-build stages objects under `.simple/`. Deleting these out
+        // from under a live compile produced a rename ENOENT in an unrelated build.
+        assert!(!is_stale_db_temp(Path::new(
+            ".simple/native-objects-NJkdgG/core_c_runtime/runtime_native-9dd12f74.o.tmp"
+        )));
+        assert!(!is_stale_db_temp(Path::new("x/mod_0.o.tmp")));
+        // Anything else ending in .tmp is likewise not ours to delete.
+        assert!(!is_stale_db_temp(Path::new(".simple/scratch/whatever.tmp")));
+        assert!(!is_stale_db_temp(Path::new(".simple/a/runtime_native.o")));
+    }
 }
