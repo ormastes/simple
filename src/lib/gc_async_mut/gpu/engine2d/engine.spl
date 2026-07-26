@@ -1074,13 +1074,41 @@ class Engine2D:
             quad_index = quad_index + 1
         quad_index
 
-    me _font_batch_receipt(source: text, batch: FontRenderBatch, content_count: i64):
-        """Print only when a prepared batch lost its payload (see _font_batch_receipt_count)."""
+    me _font_batch_receipt(source: text, fonts: FontRenderer, content_count: i64):
+        """Print only when a staged batch lost its payload (see _font_batch_receipt_count)."""
         if _font_batch_receipt_count >= 8:
             return
-        if batch.valid and batch.quads.len() == 0 and content_count > 0:
+        if fonts.staged_valid and fonts.staged_quads.len() == 0 and content_count > 0:
             _font_batch_receipt_count = _font_batch_receipt_count + 1
-            print("[font-batch] degenerate source={source} content={content_count} quads=0 atlas_pixels={batch.atlas_pixels.len()} identity={batch.font_identity} generation={batch.face_generation}")
+            print("[font-batch] degenerate source={source} content={content_count} quads=0 atlas_pixels={fonts.atlas_pixels.len()} identity={fonts.staged_font_identity} generation={fonts.staged_face_generation}")
+
+    # Materialize the staged payload the renderer just wrote and hand it to the
+    # blit planner. The FontRenderBatch is built HERE, as a function-local
+    # struct literal read field-by-field off a live FontRenderer, and only ever
+    # travels onward as an INBOUND parameter — it is never returned across a
+    # call. That is what removes the rank-1 crossing of doc/08_tracking/bug/
+    # cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md,
+    # where a returned batch kept its scalars but arrived with `quads` empty.
+    me _draw_font_batch_staged(x: i32, y: i32, fonts: FontRenderer, plan: [text]) -> bool:
+        var atlas: [u32] = []
+        if not fonts.staged_atlas_empty:
+            atlas = fonts.atlas_pixels
+        val batch = FontRenderBatch(
+            program_version: fonts.staged_program_version,
+            transform_identity: fonts.staged_transform_identity,
+            font_identity: fonts.staged_font_identity,
+            face_generation: fonts.staged_face_generation,
+            valid: fonts.staged_valid,
+            atlas_width: fonts.staged_atlas_width, atlas_height: fonts.staged_atlas_height,
+            atlas_pixels: atlas, quads: fonts.staged_quads,
+            atlas_generation: fonts.staged_atlas_generation,
+            dirty_rects: fonts.staged_dirty_rects,
+            atlas_owner_generation: fonts.staged_atlas_owner_generation,
+            render_config_identity: fonts.staged_render_config_identity,
+            execution_target: fonts.staged_execution_target,
+            execution_policy: fonts.staged_execution_policy
+        )
+        self._draw_font_batch_plan(x, y, batch, plan)
 
     me _draw_font_batch_plan(x: i32, y: i32, batch: FontRenderBatch, plan: [text]) -> bool:
         # Snapshot once, up front: the same `batch.material_supported()` call
@@ -1238,10 +1266,10 @@ class Engine2D:
 
     me draw_glyph_run(x: i32, y: i32, run: FontGlyphRun, color: u32, font_size: i32) -> bool:
         val fonts = self.fonts()
-        val batch = fonts.prepare_glyph_run(run, color, font_size)
+        fonts.stage_glyph_run(run, color, font_size)
         self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
-        self._font_batch_receipt("glyph-run", batch, run.glyph_ids.len())
-        self._draw_font_batch(x, y, batch)
+        self._font_batch_receipt("glyph-run", fonts, run.glyph_ids.len())
+        self._draw_font_batch_staged(x, y, fonts, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
 
     me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         """Draw a selected vector face fail-closed, or use the bitmap default."""
@@ -1298,10 +1326,10 @@ class Engine2D:
         if plan.len() == 0 or not font_render_config_selection_supported(config):
             return false
         val fonts = self.fonts()
-        val batch = fonts.prepare_text_configured(text_val, color, config)
+        fonts.stage_text_configured(text_val, color, config)
         self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
-        self._font_batch_receipt("text", batch, text_val.len())
-        self._draw_font_batch_plan(x, y, batch, plan)
+        self._font_batch_receipt("text", fonts, text_val.len())
+        self._draw_font_batch_staged(x, y, fonts, plan)
 
     me draw_text_with_advances(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, font_size: i32) -> bool:
         """Draw producer-resolved text through the selected vector face."""
@@ -1314,10 +1342,10 @@ class Engine2D:
         if plan.len() == 0 or not font_render_config_selection_supported(config):
             return false
         val fonts = self.fonts()
-        val batch = fonts.prepare_text_with_advances_configured(text_val, advance_widths, color, config)
+        fonts.stage_text_with_advances_configured(text_val, advance_widths, color, config)
         self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
-        self._font_batch_receipt("text-advances", batch, text_val.len())
-        self._draw_font_batch_plan(x, y, batch, plan)
+        self._font_batch_receipt("text-advances", fonts, text_val.len())
+        self._draw_font_batch_staged(x, y, fonts, plan)
 
     me draw_shaped_text(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> bool:
         """Draw a semantic shaped run through the canonical selected face."""
@@ -1330,10 +1358,10 @@ class Engine2D:
         if plan.len() == 0 or not font_render_config_selection_supported(config):
             return false
         val fonts = self.fonts()
-        val batch = fonts.prepare_selected_glyph_run_configured(glyph_run, color, config)
+        fonts.stage_selected_glyph_run_configured(glyph_run, color, config)
         self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
-        self._font_batch_receipt("shaped", batch, glyph_run.glyph_ids.len())
-        self._draw_font_batch_plan(x, y, batch, plan)
+        self._font_batch_receipt("shaped", fonts, glyph_run.glyph_ids.len())
+        self._draw_font_batch_staged(x, y, fonts, plan)
 
     me load_font(path: text) -> bool:
         """Select one trusted TTF/OTF for process-wide Simple 2D text."""

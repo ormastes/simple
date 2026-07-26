@@ -8,6 +8,7 @@
 # riding inside Engine2dDrawIrRenderOutcome). A lost glyph or cache payload
 # shows up here as glyph_nonzero=0 / render_nonzero=0 / measured_width=0.
 use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, draw_ir_batch, draw_ir_embedding_config, draw_ir_rect}
+use std.common.encoding.font_registry.{selected_font_asset_candidates}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_batch}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 
@@ -67,9 +68,44 @@ fn main():
             embed_nonzero = embed_nonzero + 1
         ei = ei + 1
 
+    # Converted path 5: the STAGED FontRenderBatch route. Loading a real TTF
+    # sends draw_text through draw_text_configured -> stage_text_configured ->
+    # _draw_font_batch_staged, i.e. the quads now travel as staged_* fields on
+    # the renderer instead of inside a returned aggregate. Non-zero
+    # staged_quads with pixels on the canvas is the receipt that the handoff
+    # kept its array payload.
+    var staged_quads: i64 = 0
+    var staged_nonzero: i64 = 0
+    var staged_advance_quads: i64 = 0
+    val candidates = selected_font_asset_candidates()
+    if candidates.len() > 0:
+        val face = candidates[0]
+        val face_path: text = face.local_path
+        val ttf_engine = Engine2D.create_offscreen(220, 48)
+        ttf_engine.clear(0xFF000000u32)
+        if ttf_engine.load_font(face_path):
+            ttf_engine.draw_text(4, 34, "Simple", 0xFFFFFFFFu32, 22)
+            val ttf_fonts = ttf_engine.fonts()
+            staged_quads = ttf_fonts.staged_quads.len()
+            ttf_engine.install_font_renderer(ttf_fonts)
+            # The advances route is the one that fired the production receipt.
+            val widths = ttf_fonts.measure_text_advances("Simple", 22)
+            ttf_engine.draw_text_with_advances(4, 34, "Simple", widths, 0xFF44FF44u32, 22)
+            val advance_fonts = ttf_engine.fonts()
+            staged_advance_quads = advance_fonts.staged_quads.len()
+            ttf_engine.install_font_renderer(advance_fonts)
+            val ttf_readback = ttf_engine.read_pixels_with_source()
+            var ti: i64 = 0
+            while ti < ttf_readback.pixels.len():
+                if ttf_readback.pixels[ti] != 0xFF000000u32:
+                    staged_nonzero = staged_nonzero + 1
+                ti = ti + 1
+
+    print "ENGINE2D_TEXT_STAGED staged_quads={staged_quads} staged_advance_quads={staged_advance_quads} staged_nonzero={staged_nonzero}"
     print "ENGINE2D_TEXT glyph_w={glyph.width} glyph_h={glyph.height} glyph_nonzero={glyph_nonzero} measured_width={measured} advances={advances.len()} render_nonzero={render_nonzero} frame_nonzero={frame_nonzero} embed_rendered={embed_result.rendered_command_count} embed_nonzero={embed_nonzero}"
     if (glyph_nonzero > 0 and measured > 0 and advances.len() == 6 and render_nonzero > 0 and
-        frame_nonzero > 0 and embed_result.rendered_command_count == 1 and embed_nonzero > 0):
+        frame_nonzero > 0 and embed_result.rendered_command_count == 1 and embed_nonzero > 0 and
+        staged_quads > 0 and staged_advance_quads > 0 and staged_nonzero > 0):
         print "ENGINE2D_TEXT_PIXELS_OK"
     else:
         print "ENGINE2D_TEXT_PIXELS_FAIL"

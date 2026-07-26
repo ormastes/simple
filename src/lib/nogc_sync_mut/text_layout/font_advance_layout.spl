@@ -1,4 +1,4 @@
-use std.nogc_sync_mut.text_layout.font_types.{FontRenderBatch, FontRenderQuad}
+use std.nogc_sync_mut.text_layout.font_types.{FontRenderQuad}
 
 # Apply the producer-resolved per-character advances to an already rasterized
 # font batch. Atlas ownership stays in FontRenderer; only destination positions
@@ -16,8 +16,21 @@ fn _font_character_index(byte_offsets: [i64], byte_offset: i64) -> i64:
         return low
     -1
 
-fn font_batch_apply_advances(content: text, natural_advances: [i32], advance_widths: [i32], batch: FontRenderBatch) -> FontRenderBatch:
-    var result = batch
+# Rewrites `quads` IN PLACE and answers whether the re-layout held.
+#
+# This used to take a FontRenderBatch and RETURN a copy with `quads` replaced.
+# On the freestanding/cranelift host-WM lane that returned aggregate arrived
+# with every scalar intact but an EMPTY `quads` array -- the inner-array-field
+# collapse of doc/08_tracking/bug/
+# cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md, seen
+# live as `[font-batch] degenerate source=text-advances ... quads=0
+# atlas_pixels=1048576`. A `mut` array parameter plus element assignment and a
+# scalar return are all proven-safe channels.
+#
+# On any failure `quads` is left EXACTLY as it came in (all validation happens
+# before the first write), matching the old "return the un-adjusted batch with
+# valid=false" contract.
+fn font_batch_apply_advances(content: text, natural_advances: [i32], advance_widths: [i32], mut quads: [FontRenderQuad]) -> bool:
     var byte_offsets: [i64] = []
     var shifts: [i32] = []
     var byte_offset: i64 = 0
@@ -26,15 +39,13 @@ fn font_batch_apply_advances(content: text, natural_advances: [i32], advance_wid
     var character_count: i64 = 0
     for ch in content:
         if character_count >= advance_widths.len() or character_count >= natural_advances.len():
-            result.valid = false
-            return result
+            return false
         val advance = advance_widths[character_count]
         val natural_advance = natural_advances[character_count]
         if (advance < 0 or natural_advance < 0 or
             target_x > 2147483647 - advance.to_i64() or
             natural_x > 2147483647 - natural_advance.to_i64()):
-            result.valid = false
-            return result
+            return false
         byte_offsets.push(byte_offset)
         shifts.push((target_x - natural_x).to_i32())
         byte_offset = byte_offset + ch.len()
@@ -42,25 +53,31 @@ fn font_batch_apply_advances(content: text, natural_advances: [i32], advance_wid
         natural_x = natural_x + natural_advance.to_i64()
         character_count = character_count + 1
     if character_count != advance_widths.len() or character_count != natural_advances.len():
-        result.valid = false
-        return result
+        return false
 
-    var adjusted: [FontRenderQuad] = []
-    for quad in result.quads:
+    # Resolve every destination first; only commit once all of them are valid,
+    # so a late rejection cannot leave a half-shifted run behind.
+    var shifted_xs: [i32] = []
+    var index: i64 = 0
+    while index < quads.len():
+        val quad = quads[index]
         val character_index = _font_character_index(byte_offsets, quad.byte_offset)
         if character_index < 0:
-            result.valid = false
-            return result
+            return false
         val shifted_x = quad.dst_x.to_i64() + shifts[character_index].to_i64()
         if shifted_x < -2147483648 or shifted_x > 2147483647:
-            result.valid = false
-            return result
-        adjusted.push(FontRenderQuad(
+            return false
+        shifted_xs.push(shifted_x.to_i32())
+        index = index + 1
+    index = 0
+    while index < quads.len():
+        val quad = quads[index]
+        quads[index] = FontRenderQuad(
             codepoint: quad.codepoint, byte_offset: quad.byte_offset,
-            dst_x: shifted_x.to_i32(), dst_y: quad.dst_y,
+            dst_x: shifted_xs[index], dst_y: quad.dst_y,
             width: quad.width, height: quad.height,
             atlas_x: quad.atlas_x, atlas_y: quad.atlas_y,
             color: quad.color, cluster: quad.cluster
-        ))
-    result.quads = adjusted
-    result
+        )
+        index = index + 1
+    true
