@@ -698,3 +698,18 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   expectation to `0xFF595959`. This is source-review acceptance only; it does
   not replace the outstanding pure-Simple runner, backend, host, event, or QEMU
   evidence.
+
+- continuation-2026-07-26-no-bootstrap-evidence-audit: **W5 POSTPONED TO AN
+  ADMITTED HOST/ARTIFACT SET.** Both macOS QEMU executables and firmware are
+  installed, and static x86 WM/QMP/SSE2 preflight passes. Live x86 lacks an
+  admitted current kernel/disk plus `grub-mkstandalone`; ARM lacks the admitted
+  kernel, FAT disk, manifest, and frozen-source receipt. Producing them requires
+  the long attested build, so it was not started.
+
+  The generic deployed-runtime wrapper fails identity. The architecture-specific
+  Mach-O binary reports `Simple v1.0.0-beta` but announces the forbidden Rust
+  bootstrap seed when executing current source; its hosted capture admission
+  correctly failed and the generated invalid report was removed. Existing
+  captures and stale binaries remain diagnostic only. The reviewed source is
+  remotely preserved on `codex/wm-glass-theme-host-simpleos-20260726`; no
+  backend, native event, or QEMU PASS is claimed.

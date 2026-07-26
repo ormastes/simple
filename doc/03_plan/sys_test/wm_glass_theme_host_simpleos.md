@@ -103,3 +103,17 @@ Extend theme-package, WM-chrome, Simple-Web-window, Web glass-feature-gap,
 Engine2D glass, canonical GUI-entry contract and QEMU evidence-contract specs.
 Each test uses built-in matchers and concrete values. Missing runtime helpers
 must call `fail("wm glass theme evidence not implemented")` until implemented.
+
+### 2026-07-26 no-bootstrap host/backend disposition
+
+| Lane | Current disposition |
+|---|---|
+| Pure-Simple focused specs | Blocked: generic wrapper fails identity; architecture-specific binary announces the forbidden Rust seed at execution |
+| Hosted Aetheric capture | Historical 16x16 local-raster capture only; missing theme-manifest receipt and device path, therefore not admitted |
+| CPU/SIMD and Metal | Generic backend checker exists, but it does not bind the current Web/Draw-IR glass material to a device readback |
+| Vulkan host events | Generic Web/widget capture scripts exist; current paired Vulkan/Metal glass captures are absent |
+| x86_64 QEMU | Static WM/QMP/SSE2 preflight passes; live proof postponed for missing admitted kernel/disk and `grub-mkstandalone` |
+| AArch64 QEMU | QEMU/firmware available; live proof postponed for missing admitted kernel/FAT/manifest/frozen-source admission |
+
+No row may be promoted by rebuilding through the Rust seed. W5 resumes only
+with an admitted existing runtime/artifact set or on the appropriate host.
