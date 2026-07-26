@@ -8,7 +8,7 @@ standalone portable runtime bundle.
 Runtime:
 
 ```bash
-bin/simple_mcp_server
+bin/simple src/app/mcp/main.spl
 ```
 
 Provides the main Simple MCP tool surface for code reading, diagnostics, build, test, and project automation.

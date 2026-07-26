@@ -14,25 +14,23 @@ claude plugin install simple-mcp@simple-local
 This plugin is not a standalone portable bundle. It expects to run from a
 Simple repository root that contains:
 
-- `bin/simple_mcp_server`
+- `bin/simple`
+- `src/app/mcp/main.spl`
 
 The plugin launches:
 
 ```bash
-bin/simple_mcp_server
+bin/simple src/app/mcp/main.spl
 ```
 
 from the workspace root.
 
-If you want a direct non-plugin install, register the wrapper from the
+If you want a direct non-plugin install, register the script from the
 repository checkout:
 
 ```bash
-claude mcp add simple-mcp -- /absolute/path/to/simple/bin/simple_mcp_server
+claude mcp add simple-mcp -- /absolute/path/to/simple/bin/simple /absolute/path/to/simple/src/app/mcp/main.spl
 ```
-
-Hosted `bin/simple ... src/app/mcp/main.spl` execution is a legacy/debug path,
-not the default registration model.
 
 ## Included Server
 

@@ -1,19 +1,19 @@
 # MCP / Tool-Server Startup Performance Guide
 
-Date: 2026-06-11. Latest re-verification taken on linux x86_64 in the shared
-repo worktree after the rt-forward/interface-cache MCP fixes were pushed on
-2026-06-10.
+Date: 2026-06-11. Launch-contract update: 2026-07-26.
 
 ## Why this guide
 
-`bin/simple_mcp_server` now answers a framed `initialize` + `tools/list`
-handshake in **1366 ms** while `bin/simple_lsp_mcp_server` does it in **50 ms**
-on the current local deploy. Both are native servers behind the same wrapper
-pattern. The remaining gap is not the language or the runtime — it is *how
-much work happens before the first response* and *how many times that work
-happens*.
+Local `simple-mcp` and `simple-pipe-mcp` registrations now execute
+`bin/simple src/app/mcp/main.spl` directly. A 2026-07-26 macOS probe completed
+initialize, tools/list, and a quoted `node_repl` call in about **1.26 s**.
+Restarting the MCP client is sufficient after source changes; native MCP
+artifact builds are reserved for package/deployment/release lanes.
 
-## Measured breakdown (2026-06-11)
+The native measurements below remain the distribution baseline. Simple LSP
+MCP continues to use its native wrapper.
+
+## Native distribution breakdown (2026-06-11)
 
 | Path | Handshake time | Note |
 |------|---------------|------|
@@ -136,8 +136,8 @@ That is the baseline to preserve when touching `src/app/mcp`,
 **Diagnosis knobs:**
 
 ```bash
-SIMPLE_LOADER_TRACE=1 bin/simple run src/app/mcp/main.spl   # module load trace
-SIMPLE_PROFILE=1      bin/simple run src/app/mcp/main.spl   # interpreter profile
+SIMPLE_LOADER_TRACE=1 bin/simple src/app/mcp/main.spl       # module load trace
+SIMPLE_PROFILE=1      bin/simple src/app/mcp/main.spl       # interpreter profile
 bin/simple deps normal src/app/mcp/main.spl                 # exclusive/shared per import
 ```
 

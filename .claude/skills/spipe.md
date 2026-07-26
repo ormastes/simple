@@ -26,6 +26,13 @@ mirrored through SPipe.
 > bug/feature request — don't switch the runner back to the seed. See
 > `.claude/rules/bootstrap.md` § "Default tooling runs on pure-Simple".
 
+> **Simple MCP is source-hosted.** Local AI-client registrations run
+> `bin/simple src/app/mcp/main.spl` for `simple-mcp` and `simple-pipe-mcp`.
+> Restart the client after MCP source changes; do not native-build the MCP
+> server unless the lane explicitly changes packaging, deployment, or release
+> artifacts. The app MCP surface replaces external context-mode and exposes
+> its own one-shot `node_repl` tool.
+
 For installed UI/GUI/TUI CLI evidence, drive the production command (for
 example `simple ui gui` or `simple ui tui_web`) and bind the receipt to the
 resolved compiled sibling artifact path and digest. Running a raw

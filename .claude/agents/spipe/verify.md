@@ -176,6 +176,10 @@
   `--sql`/`--db` behavior, `--source-filter`/MCP `source_filter`,
   file-optional SQL query shape, embedded SQLite facade boundary, explicit
   absence statuses, and public-absence guard.
+- **Simple MCP launch fresh:** local registration must use
+  `bin/simple src/app/mcp/main.spl`; require a native MCP build only for
+  packaging/deployment/release changes, and reject stale external
+  context-mode or native `node_repl` registrations.
 - **Cooperative review complete:** Broad lanes must finish the recorded
   lower-model sidecars or mark them `N/A`, then pass normal/highest-capability
   review before PASS

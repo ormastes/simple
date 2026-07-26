@@ -49,20 +49,19 @@ claude plugin install simple-mcp@simple-local
 ### Direct MCP Registration (no marketplace)
 
 ```bash
-claude mcp add simple-mcp -- bin/simple_mcp_server
+claude mcp add simple-mcp -- bin/simple src/app/mcp/main.spl
 claude mcp add simple-lsp-mcp -- bin/simple_lsp_mcp_server
 ```
 
-These checked-in launchers are the production boundary. They select a probed
-cached native server from `bin/release/<triple>/` and fail closed when no valid
-artifact exists. They do not execute raw `.spl` server sources or a Rust
-bootstrap/debug compiler. Run `sh config/mcp/install.shs` to register the same
-wrappers for supported local AI CLIs; do not register `bin/simple run
-src/app/.../main.spl` directly.
+Simple MCP is source-hosted: local registrations execute
+`bin/simple src/app/mcp/main.spl`, so app MCP changes require only a client
+restart. Do not native-build Simple MCP for local tool discovery. Run
+`sh config/mcp/install.shs` to register the same script for supported local AI
+CLIs.
 
-Each native server has an adjacent `.sha256` sidecar emitted by bootstrap and
-deployed with it. The wrapper verifies that hash before its protocol probe or
-`exec`; a missing or mismatched sidecar is a provenance failure.
+Simple LSP MCP and distribution/package artifacts retain the native admission
+and `.sha256` provenance rules below. Those rules do not change the local
+Simple MCP script contract.
 
 The LSP wrapper always changes to the canonical repository root before probing
 or executing its admitted native server. Admission is bounded and correlated:

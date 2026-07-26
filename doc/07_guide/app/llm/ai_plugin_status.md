@@ -6,17 +6,18 @@ Status of all MCP servers, LSP plugins, agent plugins, and their cross-platform 
 
 | Server | Binary | Config Key | Status | Startup |
 |--------|--------|-----------|--------|---------|
-| simple-mcp | `bin/simple_mcp_server` -> `bin/release/<platform>/simple_mcp_server` | `simple-mcp` | Working | Platform wrapper + background cache |
+| simple-mcp | `bin/simple src/app/mcp/main.spl` | `simple-mcp` | Working | Source-hosted Simple script |
 | simple-lsp-mcp | `bin/simple_lsp_mcp_server` -> `bin/release/<platform>/simple_lsp_mcp_server` | `simple-lsp-mcp` | Working | Platform wrapper + background cache |
 | t32-mcp | `bin/t32_mcp_server` -> `bin/release/<platform>/t32_mcp_server` | `t32-mcp` | Working | Platform wrapper + native probe + cold/full frontend |
 | t32-lsp-mcp | `bin/t32_lsp_mcp_server` -> `bin/release/<platform>/t32_lsp_mcp_server` | `t32-lsp-mcp` | Working | Platform wrapper + native probe + daemon support |
 | obsidian-lsp-mcp | `bin/obsidian_lsp_mcp_server` | `obsidian-lsp-mcp` | Working | Direct exec |
 
-**Shared startup library:** `config/mcp/mcp_startup_lib.shs`
+**Native-server startup library:** `config/mcp/mcp_startup_lib.shs`
 - Compile cache (background, >1KB size check)
 - Debug logging (env: `<SERVER>_DEBUG_LOG=1`)
 - Native binary health probe with caching
-- Native-first startup chain: native server binary first; hosted `simple` fallback is legacy-only via `SIMPLE_ALLOW_HOSTED_FALLBACK=1`
+- Native-first startup applies to LSP/T32 and packaged artifacts. Local
+  `simple-mcp` intentionally runs the Simple source script.
 
 ## LSP Plugins (Claude Code Marketplace)
 
@@ -55,7 +56,7 @@ Step 7: verify-agent (Claude+MCP) → verification report
 
 | Component | Linux | macOS | Windows (Git Bash) | Windows (native) |
 |-----------|-------|-------|-------------------|------------------|
-| MCP servers | Shell wrappers | Shell wrappers | Shell via bash | .cmd wrappers needed |
+| MCP servers | Simple script + wrappers | Simple script + wrappers | Simple script via bash | .cmd wrappers needed |
 | LSP plugins | Via MCP | Via MCP | Via MCP | Via MCP |
 | Agent plugins | CLI tools | CLI tools | CLI tools | CLI tools |
 | Setup | `scripts/setup/setup.shs` | `scripts/setup/setup.shs` | `scripts/setup/setup.shs` (Git Bash) | `scripts\setup.cmd` |

@@ -10,6 +10,20 @@ Ponytail paths with shared Simple-owned surfaces. Operators should use the
 checked-in CLI, app MCP, lower MCP, and dashboard paths before adding another
 plugin, daemon, or shell-backed shortcut.
 
+## Local MCP Registration
+
+Run the replacement surface directly as a Simple script:
+
+```bash
+bin/simple src/app/mcp/main.spl
+```
+
+Claude, Codex, and Gemini registrations use that command for both
+`simple-mcp` and `simple-pipe-mcp`. Do not register external `context-mode` or
+the separate native `node_repl` MCP server: app MCP provides the replacement
+context surfaces plus its own one-shot `node_repl` tool. Restart the MCP client
+after source or registration changes; no native MCP build is required.
+
 Use this guide with:
 
 - `doc/02_requirements/feature/llm_tooling_context_ponytail_mimic.md`

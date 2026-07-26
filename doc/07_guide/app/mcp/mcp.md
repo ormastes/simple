@@ -31,8 +31,8 @@ The MCP server is configured via `.mcp.json` in the project root (auto-detected 
 {
   "mcpServers": {
     "simple-mcp": {
-      "command": "bin/simple_mcp_server",
-      "args": []
+      "command": "bin/simple",
+      "args": ["src/app/mcp/main.spl"]
     }
   }
 }
@@ -65,8 +65,8 @@ Configure in the Claude Desktop config file:
 {
   "mcpServers": {
     "simple-lang": {
-      "command": "/path/to/simple/bin/simple_mcp_server",
-      "args": [],
+      "command": "/path/to/simple/bin/simple",
+      "args": ["/path/to/simple/src/app/mcp/main.spl"],
       "env": {
         "SIMPLE_PROJECT_ROOT": "/path/to/simple"
       }
@@ -80,8 +80,8 @@ Restart Claude Desktop after config changes.
 ### Verify Installation
 
 ```bash
-# Test the deployed server pair with the full protocol sequence and feature probes
-sh scripts/check/check-mcp-native-smoke.shs
+# Check the source-hosted Simple MCP entry
+bin/simple check src/app/mcp
 
 # Run integration tests
 SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
@@ -94,8 +94,8 @@ SIMPLE_LIB=src bin/simple test test/03_system/app/mcp_cmdline/mcp_cmdline_handsh
 bin/simple test test/03_system/app/mcp_cmdline/mcp_cmdline_handshake_spec.spl --native
 ```
 
-That spec builds and launches the exact pure-Simple MCP artifact, runs `--json`
-readiness, sends `initialize`, `notifications/initialized`, and `tools/list`,
+That spec launches the pure-Simple MCP script, runs `--json` readiness, sends
+`initialize`, `notifications/initialized`, and `tools/list`,
 and requires two successful core feature calls inside the configured time
 limit. Bootstrap Stage 5 separately applies the same fail-closed protocol to
 the exact fresh MCP and LSP artifact pair before deploy, including successful
@@ -121,7 +121,7 @@ shows raw test mechanics as the primary content, revise step helpers,
 ### Repair Broken Tool Discovery
 
 If an MCP client starts the server but refuses to load tools, first verify the
-native protocol output instead of reinstalling blindly:
+script protocol output instead of rebuilding a native artifact:
 
 ```bash
 bin/simple check src/app/mcp
@@ -161,13 +161,13 @@ If schema validation fails:
    metadata. Static fallback schemas should stay conservative and valid; rich
    per-tool schemas belong in the tool table.
 
-4. Rebuild and rerun the native smoke:
+4. Recheck the source-hosted server:
 
    ```bash
    bin/simple check src/app/mcp
    bin/simple check src/app/simple_lsp_mcp
    SIMPLE_LIB=src bin/simple test test/02_integration/app/mcp_stdio_integration_spec.spl --mode=interpreter
-   scripts/check/check-mcp-native-smoke.shs
+   bin/simple src/app/mcp/main.spl
    ```
 
 5. If the npm package or registry wrapper changed, also run the core-lane
@@ -193,7 +193,7 @@ Do not publish npm, registry metadata, or plugin bundles while either
 Claude Code / Claude Desktop
     | JSON-RPC 2.0 over stdio
     v
-bin/simple_mcp_server
+bin/simple src/app/mcp/main.spl
     |-> Tool handlers (lazy loaded)
     |-> Bug/Feature/Test DB resources
     |-> Debug session manager
@@ -202,13 +202,14 @@ bin/simple_mcp_server
 - **Protocol**: JSON-RPC 2.0 over stdio
 - **MCP Version**: 2025-06-18
 - **Startup**: < 1s (optimized single-process)
-- **Tool count**: determined from the deployed native server's `tools/list`
-- **MCP wrapper behavior**: the generated POSIX `simple_mcp_server` launches a
-  hash-admitted compiled artifact and has no source fallback. The Windows
-  `.cmd` launcher retains `SIMPLE_MCP_ALLOW_SOURCE_FALLBACK=1` for debugging
-  only; it supplies no production or bootstrap evidence. LSP wrapper policy is
-  separate; the Stage 5 gate bypasses both wrappers and probes the exact fresh
-  native pair.
+- **Tool count**: determined from the running script's `tools/list`
+- **Simple MCP launch behavior**: local Claude, Codex, and Gemini registrations
+  execute `bin/simple src/app/mcp/main.spl`. Source changes therefore take
+  effect after the MCP client restarts; rebuilding `simple_mcp_server` is not
+  part of the normal Simple MCP development loop.
+- **Native packaging**: `bin/simple_mcp_server` and the Stage 5 native smoke
+  remain distribution/release evidence only. Simple LSP MCP retains its
+  separate native-wrapper policy.
 
 ---
 
