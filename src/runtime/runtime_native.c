@@ -886,6 +886,25 @@ static int rt_core_is_registered_string(RtCoreString* s) {
     return rt_core_is_registered_immortal_ptr(s);
 }
 
+/* RtCoreDict membership, mirroring the string/float registries above.
+ *
+ * Before this existed, rt_core_as_dict trusted the TAG_HEAP bits alone and read
+ * (masked_value)->kind directly. That is the same flaw that produced the enum
+ * SIGSEGV documented at rt_core_register_enum below: a flat i64 payload
+ * congruent to 1 mod 8 (9, 17, -7, ...) aliases RT_VALUE_TAG_HEAP without being
+ * a heap object at all, so the dereference lands on a wild address. Every dict
+ * is created at exactly one choke point (rt_dict_new) and registered there, so
+ * rt_core_as_dict can now perform a PURE POINTER COMPARISON before touching
+ * ->kind. Dicts have no free primitive yet, so the immortal registry (which
+ * strings and heap floats already use) is the right backing store. */
+static int rt_core_register_dict(RtCoreDict* d) {
+    return rt_core_register_immortal_ptr(d);
+}
+
+static int rt_core_is_registered_dict(RtCoreDict* d) {
+    return rt_core_is_registered_immortal_ptr(d);
+}
+
 static void rt_core_array_registry_acquire(void) {
     while (atomic_flag_test_and_set_explicit(&rt_core_array_registry_lock, memory_order_acquire)) {}
 }
@@ -3505,8 +3524,10 @@ void rt_array_free(SplArray* value) {
  *   - any HEAP-tagged element that is not a registered string or registered
  *     array. That set includes registered enums / closures / mutexes /
  *     heap-boxed f64 (owned, but with no free path here -- freeing the buffer
- *     would strand them), RtCoreDict (which has NO registry at all, so it is
- *     indistinguishable from garbage and must never be assumed away), foreign
+ *     would strand them), RtCoreDict (now registered, hence identifiable, but
+ *     still refused here: it owns an entries buffer and has no free primitive,
+ *     so freeing the array would strand it exactly as for the types above),
+ *     foreign
  *     pointers, and raw i64 payloads that merely alias the tag bits. The last
  *     case is a FALSE refusal for a generic array carrying raw i64s >= 4096
  *     with low bits 0b001 -- accepted deliberately: a false refusal leaks (the
@@ -4584,11 +4605,17 @@ int8_t rt_index_set(int64_t collection, int64_t idx, int64_t val) {
 
 #define RT_CORE_DICT_INIT_CAP 8
 
+/* Return the RtCoreDict if `value` is a registered dict, else NULL.
+ * Registry membership is checked BEFORE ->kind is read, so a non-dict value
+ * that merely carries the HEAP tag bits (another heap type, or a flat i64
+ * payload aliasing the tag) resolves to "not a dict" instead of being
+ * dereferenced. Structure mirrors rt_core_as_string. */
 static RtCoreDict* rt_core_as_dict(int64_t value) {
     uintptr_t raw = (uintptr_t)value;
     if (raw < 4096) return NULL;
     if ((raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
     RtCoreDict* d = (RtCoreDict*)(raw & ~RT_VALUE_TAG_MASK);
+    if (!rt_core_is_registered_dict(d)) return NULL;
     if (!d || d->kind != RT_VALUE_HEAP_DICT) return NULL;
     return d;
 }
@@ -4743,6 +4770,15 @@ int64_t rt_dict_new(int64_t cap_hint) {
     d->tombstones = 0;
     d->entries = (RtCoreDictEntry*)calloc((size_t)d->cap, sizeof(RtCoreDictEntry));
     if (!d->entries) {
+        free(d);
+        return rt_core_nil();
+    }
+    /* Sole RtCoreDict allocation site -- registering here is what lets
+     * rt_core_as_dict test membership before dereferencing ->kind. An
+     * unregistered dict would read back as "not a dict", so a failed
+     * registration must not produce a live handle. */
+    if (!rt_core_register_dict(d)) {
+        free(d->entries);
         free(d);
         return rt_core_nil();
     }
