@@ -576,74 +576,115 @@ class Compositor:
             var next_status = port_inb(0x64)
             status = next_status
 
-        var mstatus = port_inb(0x64)
-        if ((mstatus as i32) & 0x21) == 0x21:
-            var b0 = port_inb(0x60)
-            var ms1 = port_inb(0x64)
-            if ((ms1 as i32) & 1) != 0:
-                var b1 = port_inb(0x60)
-                var ms2 = port_inb(0x64)
-                if ((ms2 as i32) & 1) != 0:
-                    var b2 = port_inb(0x60)
-                    var dx = b1 as i32
-                    var dy = b2 as i32
-                    if ((b0 as i32) & 0x10) != 0:
-                        dx = dx - 256
-                    if ((b0 as i32) & 0x20) != 0:
-                        dy = dy - 256
-                    var new_x = self.cursor.x + dx
-                    var new_y = self.cursor.y - dy
-                    if new_x < 0:
-                        new_x = 0
-                    if new_x >= self.screen_width:
-                        new_x = self.screen_width - 1
-                    if new_y < 0:
-                        new_y = 0
-                    if new_y >= self.screen_height:
-                        new_y = self.screen_height - 1
-                    var cursor_ref = self.cursor
-                    cursor_ref.x = new_x
-                    cursor_ref.y = new_y
-                    self.cursor = cursor_ref
-                    val left_btn = ((b0 as i32) & 0x01) != 0
-                    val right_btn = ((b0 as i32) & 0x02) != 0
-                    val middle_btn = ((b0 as i32) & 0x04) != 0
-                    self.input_sequence = self.input_sequence + 1
-                    val cur_wm_pointer_button_code = _ps2_wm_pointer_button_code(left_btn, right_btn, middle_btn)
-                    val prev_wm_pointer_button_code = self.prev_wm_pointer_button_code
-                    if cur_wm_pointer_button_code != 0:
-                        self.note_pending_wm_pointer_step(new_x, new_y, cur_wm_pointer_button_code, 1)
-                    elif prev_wm_pointer_button_code != 0:
-                        self.note_pending_wm_pointer_step(new_x, new_y, prev_wm_pointer_button_code, 2)
+        # PS/2 mouse: drain the whole pending packet burst, then emit ONE
+        # pointer step for it. QEMU splits a single large QMP rel-motion into
+        # many 3-byte packets each capped at +/-127, and the shell re-renders
+        # once per emitted pointer step. Consuming one packet per poll therefore
+        # cost a full 4K render per 127 pixels of travel, and the button-press
+        # packet starved behind a motion backlog the guest could never drain
+        # (evidence lane rerun36: motion observed at x=1666,1539,1412 stepping
+        # -127, press never seen, capture died on
+        # guest-pointer-irq-state-frame-correlation-missing kind_code=1).
+        # Draining STOPS at a button-state change so a press or release always
+        # keeps its own step, sequence and frame — that irq/state/frame triple
+        # is the WM contract the evidence wrapper correlates on.
+        var pointer_saw_packet = false
+        var pointer_x = self.cursor.x
+        var pointer_y = self.cursor.y
+        var pointer_left_btn = false
+        var pointer_right_btn = false
+        var pointer_middle_btn = false
+        var pointer_code = 0
+        var pointer_drained = 0
+        var pointer_draining = true
+        while pointer_draining:
+            if pointer_drained >= 64:
+                pointer_draining = false
+            else:
+                var mstatus = port_inb(0x64)
+                if ((mstatus as i32) & 0x21) != 0x21:
+                    pointer_draining = false
+                else:
+                    var b0 = port_inb(0x60)
+                    var ms1 = port_inb(0x64)
+                    if ((ms1 as i32) & 1) == 0:
+                        pointer_draining = false
                     else:
-                        self.note_pending_wm_pointer_step(new_x, new_y, 0, 3)
-                    self.prev_wm_pointer_button_code = cur_wm_pointer_button_code
-                    if left_btn:
-                        if self.dragging:
-                            val new_win_x = new_x - self.drag_offset_x
-                            val new_win_y = new_y - self.drag_offset_y
-                            self.move_window(self.drag_window_id, new_win_x, new_win_y)
+                        var b1 = port_inb(0x60)
+                        var ms2 = port_inb(0x64)
+                        if ((ms2 as i32) & 1) == 0:
+                            pointer_draining = false
                         else:
-                            var hit_idx = -1
-                            var wi = 0
-                            while wi < self.surfaces.len():
-                                val s = self.surfaces[wi]
-                                if (new_x >= s.x and new_x < s.x + s.width and
-                                    new_y >= s.y and new_y < s.y + s.height):
-                                    hit_idx = wi
-                                wi = wi + 1
-                            if hit_idx >= 0:
-                                val hit = self.surfaces[hit_idx]
-                                if new_y < hit.y + 24:
-                                    self.dragging = true
-                                    self.drag_window_id = hit.id
-                                    self.drag_offset_x = new_x - hit.x
-                                    self.drag_offset_y = new_y - hit.y
-                                    self.focus_window(hit.id)
-                                else:
-                                    self.focus_window(hit.id)
-                    else:
-                        self.dragging = false
+                            var b2 = port_inb(0x60)
+                            var dx = b1 as i32
+                            var dy = b2 as i32
+                            if ((b0 as i32) & 0x10) != 0:
+                                dx = dx - 256
+                            if ((b0 as i32) & 0x20) != 0:
+                                dy = dy - 256
+                            var new_x = pointer_x + dx
+                            var new_y = pointer_y - dy
+                            if new_x < 0:
+                                new_x = 0
+                            if new_x >= self.screen_width:
+                                new_x = self.screen_width - 1
+                            if new_y < 0:
+                                new_y = 0
+                            if new_y >= self.screen_height:
+                                new_y = self.screen_height - 1
+                            pointer_x = new_x
+                            pointer_y = new_y
+                            pointer_left_btn = ((b0 as i32) & 0x01) != 0
+                            pointer_right_btn = ((b0 as i32) & 0x02) != 0
+                            pointer_middle_btn = ((b0 as i32) & 0x04) != 0
+                            pointer_code = _ps2_wm_pointer_button_code(pointer_left_btn, pointer_right_btn, pointer_middle_btn)
+                            pointer_saw_packet = true
+                            pointer_drained = pointer_drained + 1
+                            # Button transition ends the burst so this packet is
+                            # reported on its own; remaining packets are picked
+                            # up by the next poll.
+                            if pointer_code != self.prev_wm_pointer_button_code:
+                                pointer_draining = false
+        if pointer_saw_packet:
+            var cursor_ref = self.cursor
+            cursor_ref.x = pointer_x
+            cursor_ref.y = pointer_y
+            self.cursor = cursor_ref
+            self.input_sequence = self.input_sequence + 1
+            val prev_wm_pointer_button_code = self.prev_wm_pointer_button_code
+            if pointer_code != 0:
+                self.note_pending_wm_pointer_step(pointer_x, pointer_y, pointer_code, 1)
+            elif prev_wm_pointer_button_code != 0:
+                self.note_pending_wm_pointer_step(pointer_x, pointer_y, prev_wm_pointer_button_code, 2)
+            else:
+                self.note_pending_wm_pointer_step(pointer_x, pointer_y, 0, 3)
+            self.prev_wm_pointer_button_code = pointer_code
+            if pointer_left_btn:
+                if self.dragging:
+                    val new_win_x = pointer_x - self.drag_offset_x
+                    val new_win_y = pointer_y - self.drag_offset_y
+                    self.move_window(self.drag_window_id, new_win_x, new_win_y)
+                else:
+                    var hit_idx = -1
+                    var wi = 0
+                    while wi < self.surfaces.len():
+                        val s = self.surfaces[wi]
+                        if (pointer_x >= s.x and pointer_x < s.x + s.width and
+                            pointer_y >= s.y and pointer_y < s.y + s.height):
+                            hit_idx = wi
+                        wi = wi + 1
+                    if hit_idx >= 0:
+                        val hit = self.surfaces[hit_idx]
+                        if pointer_y < hit.y + 24:
+                            self.dragging = true
+                            self.drag_window_id = hit.id
+                            self.drag_offset_x = pointer_x - hit.x
+                            self.drag_offset_y = pointer_y - hit.y
+                            self.focus_window(hit.id)
+                        else:
+                            self.focus_window(hit.id)
+            else:
+                self.dragging = false
 
     me render_all():
         # Project the live SimpleOS compositor into the same shared-MDI model
