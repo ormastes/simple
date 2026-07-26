@@ -19,7 +19,8 @@ fn empty_cstr() -> *const c_char {
 
 #[cfg(target_os = "macos")]
 mod metal_impl {
-    use crate::value::{rt_interp_cstr, RuntimeValue};
+    use crate::value::heap::with_typed_ptr;
+    use crate::value::{rt_interp_cstr, HeapObjectType, RuntimeString, RuntimeValue};
     use std::collections::HashMap;
     use std::ffi::{CStr, CString};
     use std::os::raw::c_char;
@@ -171,6 +172,37 @@ mod metal_impl {
                 None => CString::new("").unwrap().into_raw() as *const c_char,
             }
         })
+    }
+
+    /// Convert a Simple text value without assuming its byte storage is NUL
+    /// terminated. RuntimeString allocation deliberately stores exactly `len`
+    /// bytes, so treating it as a C string can read unrelated trailing memory
+    /// into an MSL source or a Metal entry-point name.
+    fn runtime_text(value_raw: i64, argument: &str) -> Result<String, String> {
+        let value = RuntimeValue::from_raw(value_raw as u64);
+        if value.is_heap() {
+            let bytes = with_typed_ptr(
+                value,
+                HeapObjectType::String,
+                |string_ptr: *const RuntimeString| unsafe { (*string_ptr).as_bytes().to_vec() },
+            )
+            .ok_or_else(|| format!("{argument}: invalid RuntimeString"))?;
+            return std::str::from_utf8(&bytes)
+                .map(str::to_owned)
+                .map_err(|_| format!("{argument}: RuntimeString is not valid UTF-8"));
+        }
+
+        // Keep the established raw-C-string compatibility path for callers
+        // outside the Simple heap representation, but reject a null pointer
+        // before constructing CStr.
+        let cstr = rt_interp_cstr(value) as *const c_char;
+        if cstr.is_null() {
+            return Err(format!("{argument}: null C string"));
+        }
+        unsafe { CStr::from_ptr(cstr) }
+            .to_str()
+            .map(str::to_owned)
+            .map_err(|_| format!("{argument}: C string is not valid UTF-8"))
     }
 
     // -------------------------------------------------------------------------
@@ -413,10 +445,14 @@ mod metal_impl {
         let dev = with_devices(|m| m.get(&device_handle).map(|w| w.0.clone()));
         match dev {
             Some(dev) => {
-                let source_value = RuntimeValue::from_raw(source as u64);
-                let source_ptr = rt_interp_cstr(source_value) as *const c_char;
-                let src_str = unsafe { CStr::from_ptr(source_ptr) }.to_string_lossy();
-                let ns_src = NSString::from_str(src_str.as_ref());
+                let src_str = match runtime_text(source, "compile_shader source") {
+                    Ok(value) => value,
+                    Err(error) => {
+                        set_last_error(&error);
+                        return 0;
+                    }
+                };
+                let ns_src = NSString::from_str(&src_str);
                 match dev.newLibraryWithSource_options_error(&ns_src, None) {
                     Ok(lib) => {
                         let id = next_id();
@@ -450,10 +486,14 @@ mod metal_impl {
         let lib = with_libraries(|m| m.get(&library_handle).map(|w| w.0.clone()));
         match (dev, lib) {
             (Some(dev), Some(lib)) => {
-                let entry_value = RuntimeValue::from_raw(entry as u64);
-                let entry_ptr = rt_interp_cstr(entry_value) as *const c_char;
-                let entry_str = unsafe { CStr::from_ptr(entry_ptr) }.to_string_lossy();
-                let ns_entry = NSString::from_str(entry_str.as_ref());
+                let entry_str = match runtime_text(entry, "create_compute_pipeline entry") {
+                    Ok(value) => value,
+                    Err(error) => {
+                        set_last_error(&error);
+                        return 0;
+                    }
+                };
+                let ns_entry = NSString::from_str(&entry_str);
                 let func: Option<Retained<ProtocolObject<dyn MTLFunction>>> =
                     unsafe { lib.newFunctionWithName(&ns_entry) };
                 match func {
@@ -773,6 +813,60 @@ mod metal_impl {
                 set_last_error("run_compute_frame: invalid queue, pipeline, or buffer handle");
                 0
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::value::{rt_string_free, rt_string_new};
+
+        fn runtime_string(text: &str) -> RuntimeValue {
+            rt_string_new(text.as_ptr(), text.len() as u64)
+        }
+
+        #[test]
+        fn runtime_text_reads_runtime_string_by_length() {
+            let text = "length-delimited Metal source, not a C string";
+            let value = runtime_string(text);
+
+            assert_eq!(runtime_text(value.to_raw() as i64, "test source"), Ok(text.to_owned()));
+            assert!(
+                runtime_text(0x10001, "invalid tagged source").is_err(),
+                "an unregistered heap-tagged value must not fall through to CStr"
+            );
+            assert_eq!(rt_string_free(value), 1);
+        }
+
+        #[test]
+        fn metal_compiles_non_nul_runtime_string_and_reports_nserror() {
+            let device = create_device(0);
+            assert_ne!(device, 0, "the macOS test host must expose a Metal device");
+
+            let source = runtime_string(
+                "#include <metal_stdlib>\nusing namespace metal;\nkernel void exact_length_kernel(uint gid [[thread_position_in_grid]]) {}\n",
+            );
+            let entry = runtime_string("exact_length_kernel");
+            let library = compile_shader(device, source.to_raw() as i64);
+            assert_ne!(library, 0, "a non-NUL RuntimeString MSL source must compile");
+
+            let pipeline = create_compute_pipeline(device, library, entry.to_raw() as i64);
+            assert_ne!(pipeline, 0, "a non-NUL RuntimeString entry name must resolve");
+
+            let invalid_source = runtime_string("kernel void intentionally_broken(");
+            assert_eq!(compile_shader(device, invalid_source.to_raw() as i64), 0);
+            let diagnostic = unsafe { CStr::from_ptr(get_last_error()) }.to_string_lossy();
+            assert!(
+                !diagnostic.trim().is_empty(),
+                "Metal NSError must be retained after a shader compilation failure"
+            );
+
+            assert_eq!(destroy_pipeline(pipeline), 1);
+            assert_eq!(destroy_shader(library), 1);
+            assert_eq!(destroy_device(device), 1);
+            assert_eq!(rt_string_free(source), 1);
+            assert_eq!(rt_string_free(entry), 1);
+            assert_eq!(rt_string_free(invalid_source), 1);
         }
     }
 }

@@ -67,6 +67,7 @@ class MetalSession:
     is_initialized: bool      # True after a successful init() (matches CUDA/Vulkan/CPU naming)
     generation: i64           # Stale-resource detection; incremented on init and cleanup
     last_error: i64            # Last init failure code; 0 means success
+    last_runtime_error: text   # Native Metal diagnostic captured before cleanup
 
     static fn create(mode: text) -> MetalSession:
         """Return a zero-initialised, uninitialised session. Call init() before use."""
@@ -93,12 +94,14 @@ class MetalSession:
             ref_count: 0,
             is_initialized: false,
             generation: 0,
-            last_error: 0
+            last_error: 0,
+            last_runtime_error: ""
         )
 
     me init() -> bool:
         """Initialize the Simple-owned Metal session through seeded SFFI calls."""
         self._cleanup()
+        self.last_runtime_error = ""
         val available = metal_sffi_is_available()
         if not available:
             self.last_error = 1
@@ -124,6 +127,7 @@ class MetalSession:
         self.shader_lib = metal_sffi_compile_shader(self.device, shader_source)
         if self.shader_lib == 0:
             self.last_error = 6
+            self.last_runtime_error = metal_last_error()
             self._cleanup()
             return false
         self.pipe_clear = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_clear")
@@ -140,6 +144,7 @@ class MetalSession:
         self.pipe_image_composite = metal_sffi_create_compute_pipeline(self.device, self.shader_lib, "kernel_composite_image")
         if self.pipe_clear == 0 or self.pipe_rect_filled == 0 or self.pipe_rect_outline == 0 or self.pipe_line == 0 or self.pipe_circle == 0 or self.pipe_circle_filled == 0 or self.pipe_rounded_rect == 0 or self.pipe_rounded_rect_outline == 0 or self.pipe_triangle == 0 or self.pipe_gradient == 0 or self.pipe_blit == 0 or self.pipe_image_composite == 0:
             self.last_error = 7
+            self.last_runtime_error = metal_last_error()
             self._cleanup()
             return false
         # GPU-dict pilot pipeline: deliberately NOT part of the gate above.
@@ -206,8 +211,12 @@ class MetalSession:
         if self.last_error == 5:
             return "Metal command queue creation failed"
         if self.last_error == 6:
+            if self.last_runtime_error != "":
+                return "Metal shader compilation failed: " + self.last_runtime_error
             return "Metal shader compilation failed"
         if self.last_error == 7:
+            if self.last_runtime_error != "":
+                return "Metal compute pipeline creation failed: " + self.last_runtime_error
             return "Metal compute pipeline creation failed"
         if self.last_error == 0:
             return ""

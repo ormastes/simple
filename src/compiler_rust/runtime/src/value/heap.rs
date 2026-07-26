@@ -266,6 +266,33 @@ pub fn get_typed_ptr<T>(val: RuntimeValue, expected: HeapObjectType) -> Option<*
     validate_heap_obj(val, expected).map(|ptr| ptr as *const T)
 }
 
+/// Read a typed heap object while holding the allocation registry lock.
+///
+/// This is for FFI adapters that must copy data from a RuntimeValue while a
+/// concurrent free could otherwise invalidate the pointer after validation.
+pub fn with_typed_ptr<T, R>(
+    val: RuntimeValue,
+    expected: HeapObjectType,
+    read: impl FnOnce(*const T) -> R,
+) -> Option<R> {
+    if !val.is_heap() {
+        return None;
+    }
+    let ptr = val.as_heap_ptr();
+    let addr = ptr as usize;
+    if ptr.is_null() || addr < MIN_VALID_HEAP_ADDR || addr & 0x7 != 0 {
+        return None;
+    }
+    let registry = heap_allocation_registry().lock().ok()?;
+    if !registry.contains(&addr) {
+        return None;
+    }
+    if unsafe { (*ptr).object_type != expected } {
+        return None;
+    }
+    Some(read(ptr as *const T))
+}
+
 /// Get mutable typed pointer from heap object with validation.
 /// Returns None if the value is not a valid heap object of the expected type.
 #[inline]
