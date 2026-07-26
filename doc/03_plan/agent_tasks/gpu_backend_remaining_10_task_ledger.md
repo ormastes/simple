@@ -22,9 +22,9 @@ evidence.
 
 | Gate | Current evidence | State |
 |---|---|---|
-| CompileMode | Source transport fix is committed; the source-matched driver reaches AOT, but `compiler.common.driver_core_types` is rejected because its MIR module has no functions. No `73` executable oracle was produced. | OPEN |
-| Optimizer | Scalar-level repair is committed and its source guard passes, but the source-matched native driver is blocked by the empty-MIR AOT failure. | OPEN |
-| `84` | No two-module `84` oracle binary or exact output exists after the optimizer repair. | BLOCKED by empty-MIR AOT gate |
+| CompileMode | Source transport fix is committed. A trace proved explicit `--entry-closure` admitted only three direct modules because the standalone entry resolved the documentation-only `compiler.driver` facade instead of the concrete driver owner, then rejected empty MIR. Source changes now use `compiler.driver.driver` directly and avoid optional facade transport; the focused test passes, but native runtime verification is still open. An unsafe duplicate-walk attempt remained in phase 1 for more than 31 minutes and was reverted after review. No `73` executable oracle was produced. | OPEN; native rebuild required |
+| Optimizer | Scalar-level repair is committed and its source guard passes, but no source-matched native driver exists after the closure-walk repair. | OPEN |
+| `84` | No two-module `84` oracle binary or exact output exists after the optimizer repair. | BLOCKED by native driver rebuild |
 | Vulkan | Real device is present, but the native compiler gate failed at `rt_array_data_ptr_u8`; no submit/readback receipt exists. | BLOCKED by `84` |
 
 ## Ten Tasks
