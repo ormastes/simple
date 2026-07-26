@@ -120,6 +120,7 @@ src/lib/gc_async_mut/gpu/engine2d/directx_backend.spl
 - **CPU Fallback Policy Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_cpu_fallback_policy_contract_spec.md`
 - **Native CPU Fallback Wire Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_cpu_fallback_daemon_wire_spec.md`
 - **Native Vulkan Fault Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_vulkan_fault_native_contract_spec.md`
+- **Direct CUDA ProcessingIR Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_cuda_fill_native_contract_spec.md`
 - **ivshmem Fallback Receipt Manual:** `doc/06_spec/01_unit/os/host_gpu_ivshmem_fallback_receipt_spec.md`
 - **SimpleOS Host GPU Protocol Manual:** `doc/06_spec/01_unit/lib/common/gpu/simpleos_host_gpu_protocol_spec.md`
 - **Prepared macOS Metal Fault Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/macos_metal_processing_ir_failure_injection_spec.md`

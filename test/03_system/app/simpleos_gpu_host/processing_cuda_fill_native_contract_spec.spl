@@ -1,0 +1,37 @@
+# @tag: system, gpu, cuda, processing-ir, native, source-contract
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_exists, file_read}
+
+val PROBE = "src/app/test/processing_cuda_fill_probe.spl"
+val WRAPPER = "scripts/check/check-processing-cuda-fill-native.shs"
+val CUDA = "src/lib/gc_async_mut/cuda.spl"
+
+describe "direct CUDA ProcessingIR native evidence contract":
+    it "requires the exact shared 64-element fill fixture":
+        val source = file_read(PROBE)
+        expect(file_exists(PROBE)).to_equal(true)
+        expect(source).to_contain("processing_ir_execute_cuda(processing_ir_fill_u32(count, value))")
+        expect(source).to_contain("expected_checksum: u64 = 1082179840")
+        expect(source).to_contain("checksum == expected_checksum and mismatches == 0")
+
+    it "requires device provenance and rejects fallback":
+        val source = file_read(PROBE)
+        val wrapper = file_read(WRAPPER)
+        expect(source).to_contain("result.backend_handle > 0 and result.device_identity > 0")
+        expect(wrapper).to_contain("backend=cuda readback_source=device_readback")
+        expect(wrapper).to_contain("handle=[1-9][0-9]* identity=[1-9][0-9]*")
+        expect(wrapper).to_contain("count=64 value=16909060 expected_checksum=1082179840 actual_checksum=1082179840 mismatch_count=0 values_exact=true")
+        expect(wrapper).to_contain("cpu_fallback=false")
+        expect(wrapper).to_contain("timeout -k 5 \"$TIMEOUT_SECONDS\"")
+        expect(wrapper).to_contain("probe_rc=$?")
+        expect(wrapper).to_contain("exit \"$probe_rc\"")
+        expect(wrapper).to_contain("processing_cuda_fill_native_reason=probe-failed")
+        expect(wrapper).to_contain("processing_cuda_fill_native_reason=invalid-receipt")
+
+    it "uses length-tracked native PTX and kernel-name ABIs":
+        val source = file_read(CUDA)
+        expect(source).to_contain("if rt_is_interpreter_runtime()")
+        expect(source).to_contain("rt_cuda_module_load_data_bytes(rt_array_data_ptr_u8(bytes)")
+        expect(source).to_contain("rt_cuda_launch_kernel_name(")
+        expect(source).to_contain("rt_array_data_ptr_u8(name_bytes)")

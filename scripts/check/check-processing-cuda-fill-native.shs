@@ -1,0 +1,36 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+
+PROBE_BIN=${PROCESSING_CUDA_FILL_PROBE_BIN:-build/simpleos_gpu_host/cuda_fill_native/processing_cuda_fill_probe}
+TIMEOUT_SECONDS=${PROCESSING_CUDA_FILL_TIMEOUT_SECONDS:-30}
+case "$TIMEOUT_SECONDS" in ''|0|*[!0-9]*) exit 2 ;; esac
+
+if [ ! -x "$PROBE_BIN" ]; then
+    echo "processing_cuda_fill_native_status=blocked"
+    echo "processing_cuda_fill_native_reason=probe-binary-missing"
+    exit 1
+fi
+
+set +e
+output=$(timeout -k 5 "$TIMEOUT_SECONDS" env \
+    -u SIMPLE_GPU_TEST \
+    -u SIMPLE_GPU_FAULT_INJECT \
+    -u SIMPLE_GPU_FAULT_INJECT_SKIP_MATCHES \
+    "$PROBE_BIN" 2>&1)
+probe_rc=$?
+set -e
+printf '%s\n' "$output"
+if [ "$probe_rc" -ne 0 ]; then
+    echo "processing_cuda_fill_native_status=fail"
+    echo "processing_cuda_fill_native_reason=probe-failed"
+    exit "$probe_rc"
+fi
+if ! printf '%s\n' "$output" | grep -Eq '^PROCESSING_CUDA_NATIVE status=pass reason=ok op=fill_u32 completed=true count=64 value=16909060 expected_checksum=1082179840 actual_checksum=1082179840 mismatch_count=0 values_exact=true backend=cuda readback_source=device_readback handle=[1-9][0-9]* identity=[1-9][0-9]* cpu_fallback=false$'; then
+    echo "processing_cuda_fill_native_status=fail"
+    echo "processing_cuda_fill_native_reason=invalid-receipt"
+    exit 1
+fi
+echo "processing_cuda_fill_native_status=pass"
