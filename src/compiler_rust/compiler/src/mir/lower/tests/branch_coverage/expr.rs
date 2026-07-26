@@ -392,11 +392,15 @@ fn global_variable_load() {
 #[test]
 fn dict_with_values() {
     let mir = compile_to_mir("fn test():\n    val d = {\"x\": 1, \"y\": 2, \"z\": 3}\n").unwrap();
-    let insert_count = count_inst(
+    let set_count = count_inst(
+        &mir,
+        |i| matches!(i, MirInst::Call { target, .. } if target.name() == "rt_dict_set"),
+    );
+    assert_eq!(set_count, 3);
+    assert!(!has_inst(
         &mir,
         |i| matches!(i, MirInst::Call { target, .. } if target.name() == "rt_dict_insert"),
-    );
-    assert!(insert_count >= 3, "expected >= 3 dict inserts, got {}", insert_count);
+    ));
 }
 
 // =============================================================================

@@ -170,6 +170,12 @@ mod tests {
     }
 
     #[test]
+    fn collection_aliases_resolve_to_runtime_symbols() {
+        assert_eq!(sffi_alias_target("rt_string_contains"), Some("rt_contains"));
+        assert_eq!(sffi_alias_target("rt_dict_insert"), Some("rt_dict_set"));
+    }
+
+    #[test]
     fn only_defined_local_functions_shadow_runtime_symbols() {
         assert!(linkage_is_defined_local(Some(Linkage::Export)));
         assert!(linkage_is_defined_local(Some(Linkage::Local)));
@@ -2776,11 +2782,7 @@ pub fn sffi_alias_target(name: &str) -> Option<&'static str> {
         "sys_exit" => Some("rt_exit"),
         "rt_file_read_text" => Some("rt_file_read_text_rv"),
         "rt_file_delete" => Some("rt_file_remove"),
-        // Dict-literal lowering emits rt_dict_insert(dict, key, value), but the
-        // runtime defines only rt_dict_set (same 3-arg shape); without this the
-        // cranelift path declared an undefined import and dict literals could
-        // not JIT (the LLVM backend has the same remap inline). cf.
-        // mir/lower/lowering_expr_collection.rs, runtime/src/value/dict.rs.
+        "rt_string_contains" => Some("rt_contains"),
         "rt_dict_insert" => Some("rt_dict_set"),
         "rt_println" => Some("rt_println_value"),
         "rt_print" => Some("rt_print_value"),

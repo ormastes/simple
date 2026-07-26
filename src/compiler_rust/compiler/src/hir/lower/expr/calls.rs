@@ -427,6 +427,34 @@ impl Lowerer {
         }
 
         match name {
+            "range" => {
+                if !(1..=3).contains(&args.len()) {
+                    return Err(LowerError::Unsupported(
+                        "range expects one to three arguments".to_string(),
+                    ));
+                }
+                let mut args_hir = self.lower_call_args(args, ctx)?;
+                if args_hir.len() == 1 {
+                    args_hir.insert(
+                        0,
+                        HirExpr {
+                            kind: HirExprKind::Integer(0),
+                            ty: TypeId::I64,
+                        },
+                    );
+                }
+                Ok(Some(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: if args_hir.len() == 3 {
+                            "rt_array_range".to_string()
+                        } else {
+                            "rt_range".to_string()
+                        },
+                        args: args_hir,
+                    },
+                    ty: TypeId::ANY,
+                }))
+            }
             "abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "pow" => {
                 Ok(Some(self.lower_builtin_call(name, args, TypeId::I64, ctx)?))
             }

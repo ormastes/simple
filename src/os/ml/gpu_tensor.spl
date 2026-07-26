@@ -9,8 +9,8 @@ use os.ml.kernels.{get_kernel, MATMUL_F64_PTX, ADD_F64_PTX, MUL_F64_PTX, RELU_F6
 # CUDA SFFI Externs
 # =============================================================================
 
-extern fn rt_cuda_malloc(size: i64) -> i64
-extern fn rt_cuda_free(ptr: i64) -> bool
+extern fn rt_cuda_mem_alloc(size: i64) -> i64
+extern fn rt_cuda_mem_free(ptr: i64) -> i64
 extern fn rt_cuda_memcpy_h2d(dst_device: i64, src_host: [u8], size: i64) -> bool
 extern fn rt_cuda_memcpy_d2h(dst_host: [u8], src_device: i64, size: i64) -> bool
 extern fn rt_cuda_launch_kernel(func: i64, gx: i64, gy: i64, gz: i64, blk_x: i64, blk_y: i64, blk_z: i64, shared_mem: i64, args: [i64]) -> bool
@@ -43,7 +43,7 @@ impl GpuTensor:
         while i < shape.len():
             n = n * shape[i]
             i = i + 1
-        val ptr = rt_cuda_malloc(n * 8)
+        val ptr = rt_cuda_mem_alloc(n * 8)
         return GpuTensor { device_ptr: ptr, shape: shape, numel: n }
 
     # Create GPU tensor from host f64 array
@@ -54,7 +54,7 @@ impl GpuTensor:
             n = n * shape[i]
             i = i + 1
         val byte_size = n * 8
-        val ptr = rt_cuda_malloc(byte_size)
+        val ptr = rt_cuda_mem_alloc(byte_size)
         val bytes = rt_f64_array_to_bytes(data)
         rt_cuda_memcpy_h2d(ptr, bytes, byte_size)
         return GpuTensor { device_ptr: ptr, shape: shape, numel: n }
@@ -68,7 +68,7 @@ impl GpuTensor:
 
     # Free GPU memory
     fn free(self):
-        rt_cuda_free(self.device_ptr)
+        rt_cuda_mem_free(self.device_ptr)
 
     # Reshape (logical only, no data movement)
     fn reshape(self, new_shape: [i64]) -> GpuTensor:
@@ -77,7 +77,7 @@ impl GpuTensor:
     # Clone tensor (deep copy on device)
     fn clone(self) -> GpuTensor:
         val byte_size = self.numel * 8
-        val new_ptr = rt_cuda_malloc(byte_size)
+        val new_ptr = rt_cuda_mem_alloc(byte_size)
         # Use add kernel with zero to copy (device-to-device via identity)
         # Simpler: download and re-upload
         var buf: [u8] = [0; byte_size]

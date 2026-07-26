@@ -958,7 +958,7 @@ impl Lowerer {
     #[allow(clippy::only_used_in_recursion)] // reason: parameter threaded for consistency with sibling function signatures
     fn should_import_symbol(&self, name: &str, target: &ImportTarget) -> bool {
         match target {
-            ImportTarget::Glob => true,           // Import everything
+            ImportTarget::Glob => !name.starts_with('_'),
             ImportTarget::Single(n) => n == name, // Import if matches
             ImportTarget::Group(targets) => {
                 // Check if any target in the group matches
@@ -1208,6 +1208,36 @@ fn pressed(backend: InputBackend) -> bool:
             ImportTarget::Single("shell".to_string()),
         ]);
         assert!(Lowerer::import_target_intersects(&requested, &available));
+    }
+
+    #[test]
+    fn private_glob_import_keeps_public_symbols_only() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let owner = src.join("owner");
+        fs::create_dir_all(&owner).unwrap();
+        fs::write(
+            owner.join("state.spl"),
+            "var _yield_cache: i64 = 0\nval public_value: i64 = 7\nfn public_api() -> i64:\n    public_value\n",
+        )
+        .unwrap();
+        let main_path = src.join("main.spl");
+        fs::write(
+            &main_path,
+            "use owner.state.*\nfn read_public() -> i64:\n    public_api()\n",
+        )
+        .unwrap();
+
+        let source = fs::read_to_string(&main_path).unwrap();
+        let ast = Parser::new(&source).parse().expect("parse failed");
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+        let lowered = Lowerer::with_module_resolver(resolver, main_path)
+            .lower_module(&ast)
+            .expect("HIR lowering should succeed");
+
+        assert!(lowered.imported_function_names.contains("public_api"));
+        assert!(lowered.globals.iter().any(|(name, _)| name == "public_value"));
+        assert!(!lowered.globals.iter().any(|(name, _)| name == "_yield_cache"));
     }
 
     #[test]

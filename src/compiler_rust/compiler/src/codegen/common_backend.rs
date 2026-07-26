@@ -1244,6 +1244,15 @@ impl<M: Module> CodegenBackend<M> {
                 let import_hit = self.import_map.get(name.as_str());
                 if use_hit.is_none()
                     && import_hit.is_none()
+                    && name.starts_with('_')
+                    && self.ambiguous_names.contains(name)
+                {
+                    return Err(BackendError::ModuleError(format!(
+                        "ambiguous private global `{name}` must be imported explicitly"
+                    )));
+                }
+                if use_hit.is_none()
+                    && import_hit.is_none()
                     && std::env::var_os("SIMPLE_NO_DEPRECATED_WARNINGS").is_none()
                 {
                     eprintln!(
@@ -2445,6 +2454,30 @@ mod tests {
         assert!(runtime_symbol_is_codegen_root("rt_string_bytes"));
         assert!(runtime_symbol_is_codegen_root("rt_enum_discriminant"));
         assert!(runtime_symbol_is_codegen_root("rt_enum_id"));
+    }
+
+    #[test]
+    fn private_glob_import_cannot_fabricate_consumer_owner() {
+        let mut backend = test_backend();
+        backend.set_module_prefix("frontend__core__interpreter__module_loader_core".to_string());
+        backend.set_ambiguous_names(std::sync::Arc::new(std::collections::HashSet::from([
+            "_yield_cache".to_string()
+        ])));
+
+        let err = backend
+            .declare_globals(
+                &[("_yield_cache".to_string(), TypeId::ANY, true)],
+                &std::collections::HashSet::new(),
+                &std::collections::HashMap::new(),
+                &std::collections::HashSet::new(),
+                &std::collections::HashSet::new(),
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("ambiguous private global `_yield_cache`"));
+        assert!(!backend
+            .global_ids
+            .contains_key("frontend__core__interpreter__module_loader_core___yield_cache"));
     }
 
     #[test]

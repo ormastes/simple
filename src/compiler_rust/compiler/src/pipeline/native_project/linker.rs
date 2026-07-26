@@ -1266,7 +1266,8 @@ int main(int argc, char** argv) {
                 #[cfg(target_os = "windows")]
                 {
                     if is_clang_cl {
-                        cmd.arg(&archive_path);
+                        cmd.arg("-Xlinker")
+                            .arg(format!("/WHOLEARCHIVE:{}", archive_path.display()));
                     } else if is_msvc {
                         cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", archive_path.display()));
                     } else {
@@ -1331,7 +1332,8 @@ int main(int argc, char** argv) {
                     #[cfg(target_os = "windows")]
                     {
                         if is_clang_cl {
-                            cmd.arg(runtime_lib);
+                            cmd.arg("-Xlinker")
+                                .arg(format!("/WHOLEARCHIVE:{}", runtime_lib.display()));
                         } else if is_msvc {
                             cmd.arg(format!("-Wl,/WHOLEARCHIVE:{}", runtime_lib.display()));
                         } else {

@@ -233,12 +233,15 @@ impl NativeProjectBuilder {
             return Ok(Some((core, false)));
         }
         let mut candidates: Vec<(PathBuf, bool)> = Vec::new();
-        let native_all_name = if cfg!(target_os = "windows") {
+        let target = super::effective_target();
+        let windows_msvc = target.os == simple_common::target::TargetOS::Windows
+            && target.linker_flavor() == simple_common::target::LinkerFlavor::Msvc;
+        let native_all_name = if windows_msvc {
             "simple_native_all.lib"
         } else {
             "libsimple_native_all.a"
         };
-        let runtime_name = if cfg!(target_os = "windows") {
+        let runtime_name = if windows_msvc {
             "simple_runtime.lib"
         } else {
             "libsimple_runtime.a"

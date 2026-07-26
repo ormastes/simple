@@ -167,6 +167,8 @@ impl PlatformLinkConfig {
                 "iphlpapi",
                 "d3d11",
                 "dxgi",
+                "user32",
+                "gdi32",
                 "ucrt",
                 "msvcrt",
                 "vcruntime",

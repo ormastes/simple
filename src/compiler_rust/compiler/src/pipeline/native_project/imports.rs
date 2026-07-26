@@ -659,7 +659,11 @@ pub(crate) fn build_import_map(
                     let names: Vec<String> = if *bare_only {
                         item.bare_exports.clone()
                     } else {
-                        raw_to_mangled.keys().cloned().collect()
+                        raw_to_mangled
+                            .keys()
+                            .filter(|name| !name.starts_with('_'))
+                            .cloned()
+                            .collect()
                     };
                     bindings.extend(names.into_iter().map(|name| (name.clone(), name)));
                 }
@@ -1004,7 +1008,7 @@ fn collect_use_imports(
             }
         }
         simple_parser::ast::ImportTarget::Glob => {
-            for raw_name in all_mangled.keys() {
+            for raw_name in all_mangled.keys().filter(|name| !name.starts_with('_')) {
                 if let Some(mangled) = resolve_import_name_strict(raw_name, &segments, all_mangled, re_exports) {
                     use_map.insert(raw_name.clone(), mangled);
                 }

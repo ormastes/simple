@@ -394,7 +394,7 @@ impl<'a> MirLowerer<'a> {
         for (key_expr, value_expr) in pairs {
             let key_reg = self.lower_expr(key_expr)?;
             let value_reg = self.lower_expr(value_expr)?;
-            let insert_target = CallTarget::from_name("rt_dict_insert");
+            let insert_target = CallTarget::from_name("rt_dict_set");
             self.with_func(|func, current_block| {
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {

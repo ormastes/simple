@@ -266,18 +266,24 @@ archive_prefix="lib"
 archive_suffix=".a"
 if [ "${os}" = "windows" ]; then
   exe_suffix=".exe"
-  if [ "${SIMPLE_LINKER_FLAVOR:-}" = "msvc" ]; then
+  case "${SIMPLE_LINKER_FLAVOR:-${PLATFORM_ABI}}" in
+    gnu|mingw) windows_linker_abi="gnu" ;;
+    msvc) windows_linker_abi="msvc" ;;
+    *) echo "error: SIMPLE_LINKER_FLAVOR must be gnu, mingw, or msvc on Windows" >&2; exit 1 ;;
+  esac
+  if [ "${windows_linker_abi}" != "${PLATFORM_ABI}" ]; then
+    echo "error: SIMPLE_LINKER_FLAVOR conflicts with SIMPLE_WINDOWS_ABI=${PLATFORM_ABI}" >&2
+    exit 1
+  fi
+  SIMPLE_WINDOWS_ABI="${PLATFORM_ABI}"
+  SIMPLE_LINKER_FLAVOR="${windows_linker_abi}"
+  export SIMPLE_WINDOWS_ABI SIMPLE_LINKER_FLAVOR
+  if [ "${PLATFORM_ABI}" = "msvc" ]; then
     archive_prefix=""
     archive_suffix=".lib"
-  elif [ "${SIMPLE_LINKER_FLAVOR:-}" = "gnu" ]; then
-    archive_prefix="lib"
-    archive_suffix=".a"
-  elif [ "${PLATFORM_ABI}" = "gnu" ]; then
-    archive_prefix="lib"
-    archive_suffix=".a"
   else
-    archive_prefix=""
-    archive_suffix=".lib"
+    archive_prefix="lib"
+    archive_suffix=".a"
   fi
 fi
 
@@ -686,6 +692,10 @@ fi
 if [ "${full_bootstrap}" -eq 1 ]; then
   rust_authority_root="${output_dir}/rust-authority-${seed_inputs_fingerprint}"
   rust_authority_target="${rust_authority_root}/target"
+  rust_authority_profile_dir="${rust_authority_target}/bootstrap"
+  if [ "${os}" = "windows" ]; then
+    rust_authority_profile_dir="${rust_authority_target}/${PLATFORM}/bootstrap"
+  fi
   rust_authority_home="${rust_authority_root}/home"
   rust_authority_cargo_home="${rust_authority_root}/cargo-home"
   rust_authority_tmp="${rust_authority_root}/tmp"
@@ -782,6 +792,9 @@ run_rust_authority_cargo() {
   rust_authority_log=$1
   rust_authority_lto=$2
   shift 2
+  if [ "${os}" = "windows" ]; then
+    set -- "$@" --target "${PLATFORM}"
+  fi
   prepare_rust_authority_workspace
   if [ "${rust_llvm_status:-disabled}" = enabled ]; then
     if [ "${rust_authority_lto}" = off ]; then
@@ -881,11 +894,11 @@ elif [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ] || [ "${seed_stale}"
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
     -p simple-runtime --features runtime-symbol-table
   mkdir -p "$(dirname -- "${seed_bin}")"
-  cp -p "${rust_authority_target}/bootstrap/simple${exe_suffix}" "${seed_bin}"
-  cp -p "${rust_authority_target}/bootstrap/${archive_prefix}simple_native_all${archive_suffix}" \
+  cp -p "${rust_authority_profile_dir}/simple${exe_suffix}" "${seed_bin}"
+  cp -p "${rust_authority_profile_dir}/${archive_prefix}simple_native_all${archive_suffix}" \
     "${native_all_lib}"
   for rust_runtime_artifact in \
-    "${rust_authority_target}/bootstrap/${archive_prefix}simple_runtime"*; do
+    "${rust_authority_profile_dir}/${archive_prefix}simple_runtime"*; do
     [ -f "${rust_runtime_artifact}" ] || continue
     cp -p "${rust_runtime_artifact}" "$(dirname -- "${seed_bin}")/"
   done
@@ -898,7 +911,7 @@ if [ "${full_bootstrap}" -eq 1 ] \
     build --locked --offline \
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
     -p simple-compiler-backfill
-  cp -p "${rust_authority_target}/bootstrap/${archive_prefix}simple_compiler_backfill${archive_suffix}" \
+  cp -p "${rust_authority_profile_dir}/${archive_prefix}simple_compiler_backfill${archive_suffix}" \
     "${compiler_backfill_lib}"
   compiler_backfill_rebuilt=1
 fi

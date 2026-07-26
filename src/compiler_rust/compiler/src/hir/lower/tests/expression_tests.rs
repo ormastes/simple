@@ -17,6 +17,57 @@ fn test_lower_literals() {
 }
 
 #[test]
+fn range_calls_lower_to_canonical_runtime_symbol() {
+    let module =
+        parse_and_lower("fn one_arg():\n    val values = range(4)\n\nfn two_args():\n    val values = range(1, 4)\n")
+            .unwrap();
+
+    for (function_name, expected_start) in [("one_arg", 0), ("two_args", 1)] {
+        let function = module
+            .functions
+            .iter()
+            .find(|function| function.name == function_name)
+            .expect(function_name);
+        let value = function
+            .body
+            .iter()
+            .find_map(|statement| match statement {
+                HirStmt::Let { value: Some(value), .. } => Some(value),
+                _ => None,
+            })
+            .expect("range value");
+        match &value.kind {
+            HirExprKind::BuiltinCall { name, args } => {
+                assert_eq!(name, "rt_range");
+                assert_eq!(args.len(), 2);
+                assert!(matches!(args[0].kind, HirExprKind::Integer(value) if value == expected_start));
+            }
+            other => panic!("expected canonical range builtin, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn stepped_range_lowers_to_array_range() {
+    let module = parse_and_lower("fn values():\n    return range(0, 10, 2)\n").unwrap();
+    let returned = module.functions[0]
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Return(Some(expr)) => Some(expr),
+            _ => None,
+        })
+        .unwrap();
+    match &returned.kind {
+        HirExprKind::BuiltinCall { name, args } => {
+            assert_eq!(name, "rt_array_range");
+            assert_eq!(args.len(), 3);
+        }
+        other => panic!("expected stepped range builtin, got {other:?}"),
+    }
+}
+
+#[test]
 fn shared_keyword_local_read_does_not_become_global_variant() {
     let module = parse_and_lower("fn value() -> i64:\n    val shared = 1\n    return shared\n").unwrap();
     let function = &module.functions[0];

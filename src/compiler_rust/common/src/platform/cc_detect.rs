@@ -15,6 +15,10 @@ pub fn find_c_compiler() -> String {
         return cc;
     }
 
+    if is_gnu_linker_flavor() {
+        return "gcc".to_string();
+    }
+
     // When SIMPLE_LINKER_FLAVOR=msvc, prefer MSVC-compatible compilers
     // to ensure the linker driver invokes lld-link (not MinGW ld).
     if is_msvc_linker_flavor() {
@@ -50,6 +54,9 @@ pub fn detect_c_compiler_for_target(target: &Target) -> String {
     if let Ok(cc) = std::env::var("CC") {
         return cc;
     }
+    if is_gnu_linker_flavor() {
+        return "gcc".to_string();
+    }
     // When SIMPLE_LINKER_FLAVOR=msvc, prefer MSVC-compatible compilers
     if is_msvc_linker_flavor() {
         for cc in &["clang-cl", "clang", "cl.exe"] {
@@ -80,6 +87,9 @@ pub fn detect_c_compiler_for_target(target: &Target) -> String {
 pub fn find_cxx_compiler() -> String {
     if let Ok(cxx) = std::env::var("CXX") {
         return cxx;
+    }
+    if is_gnu_linker_flavor() {
+        return "g++".to_string();
     }
     // When SIMPLE_LINKER_FLAVOR=msvc, prefer MSVC-compatible C++ compilers.
     // Try clang-cl first, then clang++ (may target MSVC), then plain clang
@@ -192,6 +202,11 @@ pub fn is_msvc_target(cc: &str) -> bool {
 /// (`clang-cl`, `lld-link`) over MinGW tools (`gcc`, `g++`, `ld`).
 pub fn is_msvc_linker_flavor() -> bool {
     std::env::var("SIMPLE_LINKER_FLAVOR").is_ok_and(|v| v.eq_ignore_ascii_case("msvc"))
+}
+
+pub fn is_gnu_linker_flavor() -> bool {
+    std::env::var("SIMPLE_LINKER_FLAVOR")
+        .is_ok_and(|v| v.eq_ignore_ascii_case("gnu") || v.eq_ignore_ascii_case("mingw"))
 }
 
 /// Check if a command exists and works by running `--version`.

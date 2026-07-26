@@ -3506,6 +3506,49 @@ fn test_build_use_map_glob_import_populates_symbol_entries() {
 }
 
 #[test]
+fn private_glob_import_does_not_acquire_native_ownership() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let app_root = src_root.join("app");
+    std::fs::create_dir_all(&app_root).unwrap();
+
+    let left_path = app_root.join("left.spl");
+    let right_path = app_root.join("right.spl");
+    let consumer_path = app_root.join("consumer.spl");
+    std::fs::write(
+        &left_path,
+        "var _yield_cache: i64 = 1\nfn left_public() -> i64:\n    _yield_cache\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &right_path,
+        "var _yield_cache: i64 = 2\nfn right_public() -> i64:\n    _yield_cache\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &consumer_path,
+        "use app.left.*\nuse app.right.*\nfn main() -> i64:\n    left_public() + right_public()\n",
+    )
+    .unwrap();
+
+    let file_sources = [&left_path, &right_path, &consumer_path]
+        .into_iter()
+        .map(|path| (path.clone(), std::fs::read_to_string(path).unwrap()))
+        .collect::<Vec<_>>();
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&app_root), &src_root);
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&consumer_path).unwrap())
+        .parse()
+        .unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
+
+    assert!(result.ambiguous.contains("_yield_cache"));
+    assert!(!result.map.contains_key("_yield_cache"));
+    assert!(!use_map.contains_key("_yield_cache"));
+    assert!(use_map.contains_key("left_public"));
+    assert!(use_map.contains_key("right_public"));
+}
+
+#[test]
 fn test_build_use_map_keeps_production_check_modules() {
     let temp = tempfile::tempdir().unwrap();
     let src_root = temp.path().join("project/src");
