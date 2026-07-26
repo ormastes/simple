@@ -103,10 +103,34 @@ typedef VkResult (*PFN_vkDeviceWaitIdle)(VkDevice);
 
 #define DLSYM(h, name) (PFN_##name)dlsym(h, #name)
 
-static long long now_ms(void) {
+static long long now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+static void* (*volatile measured_memset)(void*, int, size_t) = memset;
+static void* (*volatile measured_memcpy)(void*, const void*, size_t) = memcpy;
+
+static int offload_preferred(long long cpu_ns, long long device_ns) {
+    return cpu_ns > 0 && device_ns > 0 && cpu_ns >= device_ns &&
+        cpu_ns - device_ns >= device_ns / 2 + device_ns % 2;
+}
+
+static int self_test(void) {
+    unsigned char buf[8] = {0};
+    struct timespec delay = { .tv_nsec = 1000000 };
+    long long started = now_ns();
+    nanosleep(&delay, NULL);
+    measured_memset(buf, 0x1E, sizeof(buf));
+    if (now_ns() <= started || buf[0] != 0x1E || buf[7] != 0x1E ||
+            !offload_preferred(150, 100) || offload_preferred(149, 100) ||
+            !offload_preferred(152, 101) || offload_preferred(151, 101)) {
+        printf("vulkan_bench_self_test=fail\n");
+        return 1;
+    }
+    printf("vulkan_bench_self_test=pass\n");
+    return 0;
 }
 
 static int32_t find_mem_type(const VkPhysicalDeviceMemoryProperties* p, uint32_t bits, VkFlags flags) {
@@ -116,7 +140,9 @@ static int32_t find_mem_type(const VkPhysicalDeviceMemoryProperties* p, uint32_t
     return -1;
 }
 
-int main(void) {
+int main(int argc, char** argv) {
+    if (argc == 2 && strcmp(argv[1], "--self-test") == 0) return self_test();
+
     printf("========================================\n");
     printf("Vulkan GPU Bench (vkCmdFillBuffer)\n");
     printf("========================================\n");
@@ -161,11 +187,11 @@ int main(void) {
     /* --- Instance --- */
     VkInstanceCreateInfo ici = { .sType = 1 };
     VkInstance instance = NULL;
-    long long t0 = now_ms();
+    long long t0 = now_ns();
     VkResult res = f_ci(&ici, NULL, &instance);
-    long long init_ms = now_ms() - t0;
+    double init_ms = (double)(now_ns() - t0) / 1000000.0;
     if (res) { printf("FAIL: vkCreateInstance = %u\n", res); return 1; }
-    printf("  Instance created: %lld ms\n", init_ms);
+    printf("  Instance created: %.3f ms\n", init_ms);
 
     /* --- Enumerate --- */
     uint32_t dev_count = 0;
@@ -242,51 +268,64 @@ int main(void) {
 
     /* --- Record: vkCmdFillBuffer --- */
     VkCommandBufferBeginInfo cbbi = { .sType = 42 };
-    f_bcb(cmd, &cbbi);
+    res = f_bcb(cmd, &cbbi);
+    if (res) { printf("FAIL: vkBeginCommandBuffer = %u\n", res); return 1; }
     f_cfb(cmd, buf, 0, bytes, 0xFF);
-    f_ecb(cmd);
+    res = f_ecb(cmd);
+    if (res) { printf("FAIL: vkEndCommandBuffer = %u\n", res); return 1; }
 
     VkSubmitInfo si = { .sType = 4, .commandBufferCount = 1, .pCommandBuffers = &cmd };
     uint64_t timeout = 10000000000ULL;
 
     /* Warmup */
-    f_qs(queue, 1, &si, fence);
-    f_wf(dev, 1, &fence, 1, timeout);
-    f_rf(dev, 1, &fence);
+    res = f_qs(queue, 1, &si, fence);
+    if (!res) res = f_wf(dev, 1, &fence, 1, timeout);
+    if (!res) res = f_rf(dev, 1, &fence);
+    if (res) { printf("FAIL: Vulkan warmup = %u\n", res); return 1; }
 
     /* --- Timed fill (100 iterations) --- */
     printf("\n--- GPU vkCmdFillBuffer 1080p (100 iterations) ---\n");
-    t0 = now_ms();
+    t0 = now_ns();
     for (int i = 0; i < 100; i++) {
-        f_qs(queue, 1, &si, fence);
-        f_wf(dev, 1, &fence, 1, timeout);
-        f_rf(dev, 1, &fence);
+        res = f_qs(queue, 1, &si, fence);
+        if (!res) res = f_wf(dev, 1, &fence, 1, timeout);
+        if (!res) res = f_rf(dev, 1, &fence);
+        if (res) { printf("FAIL: Vulkan timed fill = %u\n", res); return 1; }
     }
-    long long gpu_ms = now_ms() - t0;
-    printf("  Total: %lld ms\n", gpu_ms);
-    printf("  Avg:   %.2f ms/frame\n", (double)gpu_ms / 100.0);
+    long long gpu_ns = now_ns() - t0;
+    printf("  Total: %.3f ms\n", (double)gpu_ns / 1000000.0);
+    printf("  Avg:   %.3f ms/frame\n", (double)gpu_ns / 100000000.0);
 
     /* --- Readback --- */
     printf("\n--- Readback ---\n");
     void* mapped = NULL;
+    unsigned char* host = malloc((size_t)bytes);
+    if (!host) { printf("  FAIL: host readback allocation\n"); return 1; }
+    t0 = now_ns();
     res = f_mm(dev, mem, 0, bytes, 0, &mapped);
     if (!res) {
-        uint32_t px0 = *(uint32_t*)mapped;
-        printf("  First pixel (u32): %u\n", px0);
+        measured_memcpy(host, mapped, (size_t)bytes);
         f_um(dev, mem);
     } else {
-        printf("  WARN: vkMapMemory failed = %u\n", res);
+        printf("  FAIL: vkMapMemory = %u\n", res);
+        return 1;
     }
+    long long rb_ns = now_ns() - t0;
+    uint32_t px0;
+    memcpy(&px0, host, sizeof(px0));
+    printf("  First pixel (u32): %u\n", px0);
+    printf("  Full mapped readback: %.3f ms\n", (double)rb_ns / 1000000.0);
 
     /* --- CPU baseline --- */
     printf("\n--- CPU memset comparison (100 iterations) ---\n");
     unsigned char* cpu_buf = malloc(bytes);
-    t0 = now_ms();
-    for (int i = 0; i < 100; i++) memset(cpu_buf, 0x1E, bytes);
-    long long cpu_ms = now_ms() - t0;
-    printf("  Total: %lld ms\n", cpu_ms);
-    printf("  Avg:   %.2f ms/frame\n", (double)cpu_ms / 100.0);
+    t0 = now_ns();
+    for (int i = 0; i < 100; i++) measured_memset(cpu_buf, 0x1E, bytes);
+    long long cpu_ns = now_ns() - t0;
+    printf("  Total: %.3f ms\n", (double)cpu_ns / 1000000.0);
+    printf("  Avg:   %.3f ms/frame\n", (double)cpu_ns / 100000000.0);
     free(cpu_buf);
+    free(host);
 
     /* --- Cleanup --- */
     if (f_dwi) f_dwi(dev);
@@ -303,14 +342,20 @@ int main(void) {
     printf("VULKAN VERDICT\n");
     printf("========================================\n");
     printf("  Vulkan available: YES (%u devices)\n", dev_count);
-    printf("  Init time: %lld ms (target < 500 ms)\n", init_ms);
+    printf("  Init time: %.3f ms (target < 500 ms)\n", init_ms);
     if (init_ms < 500) printf("  PASS: init within NFR target\n");
     else printf("  WARN: init exceeds 500ms target\n");
-    printf("  GPU fill avg: %.2f ms\n", (double)gpu_ms / 100.0);
-    printf("  CPU memset avg: %.2f ms\n", (double)cpu_ms / 100.0);
-    if (gpu_ms > 0 && cpu_ms > gpu_ms) printf("  GPU speedup: %lldx\n", cpu_ms / gpu_ms);
-    if (gpu_ms > 0 && gpu_ms >= cpu_ms) printf("  NOTE: host-visible mem slower than CPU (expected on discrete GPU)\n");
-    if (gpu_ms / 100 < 17) printf("  PASS: GPU < 16.7ms/frame -> 60Hz capable\n");
+    printf("  GPU fill avg: %.2f ms\n", (double)gpu_ns / 100000000.0);
+    printf("  CPU memset avg: %.2f ms\n", (double)cpu_ns / 100000000.0);
+    printf("  GPU fill + full mapped readback: %.2f ms\n",
+        (double)gpu_ns / 100000000.0 + (double)rb_ns / 1000000.0);
+    if (gpu_ns > 0 && cpu_ns > gpu_ns) printf("  GPU speedup: %.1fx\n", (double)cpu_ns / gpu_ns);
+    if (gpu_ns > 0 && gpu_ns >= cpu_ns) printf("  NOTE: host-visible mem slower than CPU (expected on discrete GPU)\n");
+    if (offload_preferred(cpu_ns, gpu_ns)) printf("  Fill offload: preferred\n");
+    else printf("  Fill offload: available-not-preferred\n");
+    if (offload_preferred(cpu_ns, gpu_ns + rb_ns * 100)) printf("  Roundtrip offload: preferred\n");
+    else printf("  Roundtrip offload: available-not-preferred (communication overhead)\n");
+    if ((double)gpu_ns / 100000000.0 < 16.7) printf("  PASS: GPU < 16.7ms/frame -> 60Hz capable\n");
     else printf("  WARN: GPU > 16.7ms/frame\n");
     printf("========================================\n");
     return 0;
