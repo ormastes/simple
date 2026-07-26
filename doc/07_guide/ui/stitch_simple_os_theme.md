@@ -157,6 +157,18 @@ This is why the live Web WM and the Stitch token set now move together. If the
 obsidian theme changes, the Web WM should pick up the new background, borders,
 taskbar, app-window content, and window chrome through the shared CSS generation path.
 
+#### Production event-evidence admission
+
+`scripts/check/check-wm-browser-event-routing-evidence.shs` does not create a
+standalone theme fixture. It first requires the retained proof accepted by
+`check-aetheric-host-web-gui-evidence.shs`, then
+`tools/web-render-backend/wm_event_check.js` loads that exact generated HTML and
+adds only the WM event harness. The emitted event proof mirrors the Aetheric
+snapshot fingerprints, HTML hash, computed glass/window witnesses, and explicit
+`synthetic_fixture=false`, `raw_source_execution=false`, and
+`compatibility_renderer=false` flags. Missing, linked, stale, or mismatched
+production evidence fails before Electron is launched.
+
 ### Stitch round-trip
 
 - **Pull**: the local `theme_sync` pull workflow fetches the active design system from the Stitch

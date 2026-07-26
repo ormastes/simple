@@ -8,12 +8,12 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const { pathToFileURL } = require('url');
 
 const FONT_TEXT = 'WEB';
 const FONT_COMPOSITION_ID = 'html-layout';
 const FONT_IDENTITY = 'sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081;axes=wght=400,wdth=100';
 const EXPECTED_RUN_ID = process.env.SIMPLE_WEB_FONT_RUN_ID || '';
+const AETHERIC_PROOF_PATH = process.env.AETHERIC_HOST_WEB_GUI_PROOF || '';
 
 app.commandLine.appendSwitch('force-color-profile', 'srgb');
 app.disableHardwareAcceleration();
@@ -63,33 +63,68 @@ function loadCompositionReceipt(root) {
   return { ...fields, receipt_path: receiptPath, artifact_path: artifactPath };
 }
 
-function makeHtml(root, receipt) {
+function proofFields(proofPath) {
+  const result = {};
+  for (const line of fs.readFileSync(proofPath, 'utf8').split(/\r?\n/)) {
+    const index = line.indexOf('=');
+    if (index > 0) result[line.slice(0, index)] = line.slice(index + 1);
+  }
+  return result;
+}
+
+function loadProductionEnvelope(root) {
+  if (!AETHERIC_PROOF_PATH) {
+    throw new Error('missing AETHERIC_HOST_WEB_GUI_PROOF');
+  }
+  const proofPath = path.resolve(root, AETHERIC_PROOF_PATH);
+  const proofStat = fs.lstatSync(proofPath);
+  if (!proofStat.isFile() || proofStat.isSymbolicLink() || proofStat.nlink > 1) {
+    throw new Error('invalid Aetheric production proof artifact');
+  }
+  const fields = proofFields(proofPath);
+  const required = [
+    'schema', 'status', 'producer', 'theme_id', 'theme_source_manifest_sha256',
+    'theme_material_sha256', 'html_path', 'html_sha256',
+    'computed_window_background', 'computed_window_border_color',
+    'computed_window_border_radius', 'computed_window_box_shadow',
+    'computed_titlebar_backdrop_filter', 'computed_titlebar_webkit_backdrop_filter',
+    'computed_inactive_border', 'computed_inactive_shadow',
+    'computed_active_border', 'computed_active_shadow',
+    'post_action_semantic_state', 'blur_or_tolerance_used',
+    'synthetic_fixture', 'raw_source_execution', 'compatibility_renderer'
+  ];
+  if (required.some(key => !fields[key])) {
+    throw new Error('incomplete Aetheric production proof');
+  }
+  if (fields.schema !== 'aetheric-host-web-gui-v1' ||
+      fields.status !== 'pass' ||
+      fields.producer !== 'production-html-webir-drawir-electron' ||
+      fields.theme_id !== 'aetheric_dark' ||
+      !/^[0-9a-f]{64}$/.test(fields.theme_source_manifest_sha256) ||
+      !/^[0-9a-f]{64}$/.test(fields.theme_material_sha256) ||
+      fields.blur_or_tolerance_used !== 'false' ||
+      fields.synthetic_fixture !== 'false' ||
+      fields.raw_source_execution !== 'false' ||
+      fields.compatibility_renderer !== 'false') {
+    throw new Error('Aetheric production proof is not admissible');
+  }
+  const htmlPath = path.resolve(root, fields.html_path);
+  const htmlStat = fs.lstatSync(htmlPath);
+  if (!htmlStat.isFile() || htmlStat.isSymbolicLink() || htmlStat.nlink > 1 ||
+      crypto.createHash('sha256').update(fs.readFileSync(htmlPath)).digest('hex') !== fields.html_sha256) {
+    throw new Error('Aetheric production HTML artifact mismatch');
+  }
+  return { ...fields, proof_path: proofPath, html_path: htmlPath };
+}
+
+function makeHtml(root, receipt, envelope) {
   const wmJs = fs.readFileSync(path.join(root, 'src/app/ui.web/wm.js'), 'utf8');
-  const fontUrl = pathToFileURL(path.join(root, 'assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf')).href;
-  return `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <style>
-    @font-face { font-family: SimplePinnedMono; src: url('${fontUrl}') format('truetype'); font-style: normal; font-weight: 400; }
-    html, body { margin: 0; width: 800px; height: 600px; background: #f8fafc; }
-    #wm-desktop { position: relative; width: 800px; height: 560px; }
-    #wm-taskbar { position: absolute; left: 0; top: 560px; width: 800px; height: 40px; }
-    .wm-window { position: absolute; border: 1px solid #334155; background: #fff; }
-    .wm-titlebar { height: 34px; display: flex; align-items: center; gap: 6px; background: rgb(229, 231, 235); cursor: grab; }
-    .wm-titlebar-icon { width: 18px; height: 18px; display: inline-grid; place-items: center; border-radius: 999px; background: rgb(37, 99, 235); color: rgb(255, 255, 255); }
-    .wm-title { min-width: 0; color: rgb(17, 24, 39); font-size: 12px; font-weight: 700; }
-    .wm-title-input { min-width: 142px; width: 158px; height: 24px; color: rgb(17, 24, 39); background: rgb(241, 245, 249); border: 1px solid rgb(148, 163, 184); cursor: text; }
-    .wm-title-context { color: rgb(71, 85, 105); font-size: 11px; }
-    .wm-traffic-lights button { width: 18px; height: 18px; border-radius: 999px; border: 0; }
-    .wm-btn-close { background: rgb(239, 68, 68); }
-    .wm-btn-minimize { background: rgb(234, 179, 8); }
-    .wm-btn-maximize { background: rgb(34, 197, 94); }
-    .wm-body { padding: 8px; }
-  </style>
-</head>
-<body>
-  <div id="wm-desktop"></div>
+  const html = fs.readFileSync(envelope.html_path, 'utf8');
+  if (!html.includes("data-aetheric-production-surface='true'") || !html.match(/<body[^>]*>/i)) {
+    throw new Error('Aetheric production HTML surface is missing');
+  }
+  const injected = `
+  <div id="wm-desktop" data-aetheric-event-surface="true"></div>
   <div id="wm-taskbar"></div>
   <script>
     window.__wmFrames = [];
@@ -106,22 +141,21 @@ function makeHtml(root, receipt) {
       transport: 'electron-ipc',
       rendererModuleUrl: './missing-retained-renderer.js'
     });
-  </script>
-</body>
-</html>`;
+  </script>`;
+  return html.replace(/<\/body\s*>/i, injected + '\n</body>');
 }
 
 async function main() {
   const root = process.env.SIMPLE_REPO_ROOT || process.cwd();
   const receipt = loadCompositionReceipt(root);
+  const envelope = loadProductionEnvelope(root);
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'simple-wm-event-check-'));
   const htmlPath = path.join(tmpDir, 'wm_event_check.html');
-  fs.writeFileSync(htmlPath, makeHtml(root, receipt));
+  fs.writeFileSync(htmlPath, makeHtml(root, receipt, envelope));
 
   await app.whenReady();
   const win = new BrowserWindow({
     width: 800,
-    height: 600,
     show: false,
     webPreferences: { offscreen: true, sandbox: false },
     backgroundColor: '#ffffff',
@@ -150,7 +184,20 @@ async function main() {
       proof_source: 'tools/web-render-backend/wm_event_check.js',
       browser_engine: 'chromium',
       electron_user_agent: navigator.userAgent,
-      ready: !!window.__wmReady
+      ready: !!window.__wmReady,
+      production_envelope_schema: envelope.schema,
+      production_envelope_producer: envelope.producer,
+      production_envelope_path: envelope.proof_path,
+      production_html_path: envelope.html_path,
+      production_html_sha256: envelope.html_sha256,
+      theme_id: envelope.theme_id,
+      theme_source_manifest_sha256: envelope.theme_source_manifest_sha256,
+      theme_material_sha256: envelope.theme_material_sha256,
+      production_post_action_semantic_state: envelope.post_action_semantic_state,
+      production_blur_or_tolerance_used: envelope.blur_or_tolerance_used,
+      production_synthetic_fixture: envelope.synthetic_fixture,
+      production_raw_source_execution: envelope.raw_source_execution,
+      production_compatibility_renderer: envelope.compatibility_renderer
     };
     const wm = window.simpleWM;
     out.wm_found = !!wm;
@@ -205,12 +252,19 @@ async function main() {
       return frame && frame.t ? frame.t + ':' + kind : 'unknown:' + kind;
     }
 
-    const titlebar = eventTarget('.wm-titlebar');
-    const title = eventTarget('.wm-title');
-    const titleInput = eventTarget('.wm-title-input');
-    const closeButton = eventTarget('.wm-btn-close');
-    const minimizeButton = eventTarget('.wm-btn-minimize');
-    const maximizeButton = eventTarget('.wm-btn-maximize');
+    const eventWindow = eventTarget('[data-surface-id="win1"]');
+    const titlebar = eventWindow.querySelector('.wm-titlebar');
+    const title = eventWindow.querySelector('.wm-title');
+    const titleInput = eventWindow.querySelector('.wm-title-input');
+    const closeButton = eventWindow.querySelector('.wm-btn-close');
+    const minimizeButton = eventWindow.querySelector('.wm-btn-minimize');
+    const maximizeButton = eventWindow.querySelector('.wm-btn-maximize');
+    if (!titlebar || !title || !titleInput || !closeButton || !minimizeButton || !maximizeButton) {
+      throw new Error('missing WM event controls in production envelope');
+    }
+    const productionWindow = eventTarget('[data-aetheric-production-surface="true"] .wm-window.focused');
+    const productionTitlebar = productionWindow.querySelector('.wm-titlebar');
+    if (!productionTitlebar) throw new Error('missing Aetheric production titlebar');
     const performanceNowAvailable = !!(window.performance && typeof window.performance.now === 'function');
     const perfStart = performanceNowAvailable ? window.performance.now() : 0;
     const animationFrameAvailable = typeof window.requestAnimationFrame === 'function';
@@ -240,6 +294,8 @@ async function main() {
     const minimizeStyle = getComputedStyle(minimizeButton);
     const maximizeStyle = getComputedStyle(maximizeButton);
     const animationProbeStyle = getComputedStyle(animationProbe);
+    const productionWindowStyle = getComputedStyle(productionWindow);
+    const productionTitlebarStyle = getComputedStyle(productionTitlebar);
     out.performance_now_available = performanceNowAvailable;
     out.performance_now_delta_ms = performanceNowAvailable ? Math.max(0, window.performance.now() - perfStart) : 0;
     out.animation_frame_available = animationFrameAvailable;
@@ -264,9 +320,19 @@ async function main() {
     out.close_button_background = closeStyle.backgroundColor;
     out.minimize_button_background = minimizeStyle.backgroundColor;
     out.maximize_button_background = maximizeStyle.backgroundColor;
+    out.computed_window_background = productionWindowStyle.backgroundColor;
+    out.computed_window_border_color = productionWindowStyle.borderColor;
+    out.computed_window_border_radius = productionWindowStyle.borderRadius;
+    out.computed_window_box_shadow = productionWindowStyle.boxShadow;
+    out.computed_titlebar_backdrop_filter = productionTitlebarStyle.backdropFilter;
+    out.computed_titlebar_webkit_backdrop_filter = productionTitlebarStyle.webkitBackdropFilter;
+    out.computed_inactive_border = getComputedStyle(eventTarget('[data-aetheric-production-surface="true"] .wm-window[data-window-state="inactive"]')).borderColor;
+    out.computed_inactive_shadow = getComputedStyle(eventTarget('[data-aetheric-production-surface="true"] .wm-window[data-window-state="inactive"]')).boxShadow;
+    out.computed_active_border = productionWindowStyle.borderColor;
+    out.computed_active_shadow = productionWindowStyle.boxShadow;
     let inputToPaintMs = 0;
     const interactionStart = performanceNowAvailable ? window.performance.now() : 0;
-    const beforeRect = eventTarget('.wm-window').getBoundingClientRect();
+    const beforeRect = eventWindow.getBoundingClientRect();
     dispatch(titlebar, 'mousedown', { clientX: 90, clientY: 72 });
     dispatch(document, 'mousemove', { clientX: 126, clientY: 98 });
     dispatch(document, 'mouseup', { clientX: 126, clientY: 98 });
@@ -306,6 +372,11 @@ async function main() {
     out.text_payload = frames('input_event', 'text_input')[0]?.payload || null;
     out.expected_move_x = expectedMoveX;
     out.expected_move_y = expectedMoveY;
+    out.post_action_semantic_state = eventWindow.style.left === '0px' &&
+      eventWindow.style.top === '0px' && eventWindow.style.width === '100%' &&
+      eventWindow.style.height === '100%' && bodyInput.value === 'Hello Simple'
+      ? 'maximized-and-text-input'
+      : 'post-action-state-missing';
     const fontProof = eventTarget('#font-proof');
     await document.fonts.load('16px SimplePinnedMono', '${FONT_TEXT}');
     const fontRect = fontProof.getBoundingClientRect();
@@ -344,6 +415,24 @@ async function main() {
       out.animation_frame_available === true &&
       out.animation_frame_count >= 2 &&
       out.css_animation_probe === true &&
+      out.theme_id === 'aetheric_dark' &&
+      out.production_envelope_schema === 'aetheric-host-web-gui-v1' &&
+      out.production_envelope_producer === 'production-html-webir-drawir-electron' &&
+      out.production_blur_or_tolerance_used === 'false' &&
+      out.production_synthetic_fixture === 'false' &&
+      out.production_raw_source_execution === 'false' &&
+      out.production_compatibility_renderer === 'false' &&
+      out.computed_window_background === envelope.computed_window_background &&
+      out.computed_window_border_color === envelope.computed_window_border_color &&
+      out.computed_window_border_radius === envelope.computed_window_border_radius &&
+      out.computed_window_box_shadow === envelope.computed_window_box_shadow &&
+      out.computed_titlebar_backdrop_filter === envelope.computed_titlebar_backdrop_filter &&
+      out.computed_titlebar_webkit_backdrop_filter === envelope.computed_titlebar_webkit_backdrop_filter &&
+      out.computed_inactive_border === envelope.computed_inactive_border &&
+      out.computed_inactive_shadow === envelope.computed_inactive_shadow &&
+      out.computed_active_border === envelope.computed_active_border &&
+      out.computed_active_shadow === envelope.computed_active_shadow &&
+      out.post_action_semantic_state === 'maximized-and-text-input' &&
       out.move_payload.window_id_hint === 'win1' &&
       out.move_payload.source === 'native_event' &&
       Array.isArray(out.event_sequence) &&
@@ -354,20 +443,10 @@ async function main() {
       out.title_context_text === 'terminal' &&
       out.traffic_button_count === 3 &&
       out.title_input_tag === 'input' &&
-      out.titlebar_height === '34px' &&
       out.titlebar_display === 'flex' &&
-      out.titlebar_cursor === 'grab' &&
-      out.titlebar_background === 'rgb(229, 231, 235)' &&
-      out.title_color === 'rgb(17, 24, 39)' &&
-      Number(out.title_font_weight) >= 700 &&
-      out.title_input_min_width === '142px' &&
-      out.title_input_width_px >= 142 &&
-      out.title_input_height === '24px' &&
+      out.title_input_width_px > 0 &&
+      out.title_input_height !== 'auto' &&
       out.title_input_cursor === 'text' &&
-      out.title_input_background === 'rgb(241, 245, 249)' &&
-      out.close_button_background === 'rgb(239, 68, 68)' &&
-      out.minimize_button_background === 'rgb(234, 179, 8)' &&
-      out.maximize_button_background === 'rgb(34, 197, 94)' &&
       out.title_payload.command_text === '/tmp/project' &&
       out.text_payload.event.text === 'Hello Simple' &&
       out.simple_composition_run_id === '${EXPECTED_RUN_ID}' &&
