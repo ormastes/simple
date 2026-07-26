@@ -65,30 +65,49 @@ separated first — a retained/long-lived allocation path distinct from the
 frame-local one — otherwise the reset silently frees live objects and the
 failure mode becomes corruption rather than an honest panic.
 
-## Companion finding: the 62MB allocation is itself suspicious
+## Companion finding: the 62MB allocations are LEGITIMATE (a wrong guess, corrected)
 
 Both allocations are `sz=0x3b2c620` = 62,047,776 bytes from `rt_array_repeat`
 (`caller=0x800a0b6` symbolizes to the `call malloc` inside it). Its size math
 is `count*8 + 32`, so `count` = **7,755,968** elements.
 
-That count factors as `2^6 * 11 * 23 * 479`, and **no divisor pair resembles a
-screen rectangle** — the nearest to the 3840-wide scanout gives 2019.78. A
-legitimate full-screen surface would be 3840*2160 = 8,294,400. So the count
-looks like a corrupted length crossing a channel, in line with the other
-channel-loss defects on this lane, rather than a real surface allocation.
+I first argued this count had to be corrupted: it factors as
+`2^6 * 11 * 23 * 479` and **no divisor pair resembles a screen rectangle** (the
+nearest to the 3840-wide scanout gives 2019.78, and a full 4K surface would be
+3840*2160 = 8,294,400). That reasoning was **wrong**.
 
-An attribution receipt now names the .spl-level caller:
+The attribution receipt settled it on rerun36 — the real callers are:
+
+| count | caller |
+|---|---|
+| 7,755,968 | `engine2d::backend_software::SoftwareBackend.init` |
+| 7,755,968 | `engine2d::backend_software::SoftwareBackend.read_pixels_with_source` |
+| 1,048,576 | `text_layout::font_renderer::FontRenderer._reset_font_atlas` |
+
+These are real surface and glyph-atlas buffers, not corrupted lengths. The
+factorization argument was numerology: "this integer has no pretty divisor
+pair" is not evidence about a buffer whose size need not be a bare `w*h`.
+
+**Lesson, and the reason the receipt existed at all:** the receipt was added
+INSTEAD of acting on the inference, and it immediately refuted the inference.
+Two other misattributions in the same campaign (a fake clock that was dead
+code, and five reruns spent on a boolean-operand defect that was actually the
+C5 enum-compare bug) came from acting on a strong prior without a control.
+
+The receipt stays — it is cheap, silent below 1M elements, and it is the only
+way to attribute a big repeat, because `[heap] alloc caller=` always resolves
+to `rt_array_repeat` itself:
 
 ```
 [array-repeat] big count=<n> caller=<return address>   # counts >= 1M elements
 ```
 
 `caller=` is `__builtin_return_address(0)` of `rt_array_repeat`, symbolizable
-with `nm <kernel.elf>`. Needed because the `[heap] alloc caller=` field always
-resolves to `rt_array_repeat` itself and cannot identify the real site.
+with `nm <kernel.elf>`.
 
-If the count is confirmed garbage and fixed, per-render cost collapses and the
-heap sizing question largely goes away.
+Because the allocations are legitimate, sizing does NOT become unnecessary —
+per-frame reclamation is the only real fix, and every render genuinely costs
+~124MB of unreclaimed surface until it lands.
 
 ## Also sighted (pre-existing, diagnostic-only here)
 
