@@ -459,167 +459,28 @@ implementation-blocked-native-to-i64-and-exact-current-live-evidence
   2/2 and shell/audit checks pass. The exhausted native/full-live cycles were
   not rerun, so availability/device count and Vulkan rendering/events remain
   unobserved rather than inferred.
-- continuation-2026-07-26-theme-package-native-boundary-regression: Current
-  origin still projected `ResolvedThemePackage` across the known-broken native
-  aggregate return ABI in hosted WM startup and Web CSS generation, allowing a
-  nil-receiver trap before generated fallback/theme application. Hosted startup
-  now uses only an active durable snapshot or the generated immutable Aetheric
-  snapshot. Web package ownership remains dynamic but crosses the module
-  boundary only as scalar CSS/fingerprint text, and installed CSS is accepted
-  only on exact fingerprint equality. The owner exports both scalar projections.
-  Focused host bootstrap contract passes 6/6 and Web CSS authority passes 5/5;
-  independent source review accepts the boundary repair. The underlying generic
-  aggregate-return compiler bug remains open and the production bypass must stay
-  until its native regression passes.
-- continuation-2026-07-26-bounded-metal-and-phase2-gates: Pushed reviewed
-  diagnostics through `eca95ca8cf`. The Metal gate compiles the exact production
-  MSL source through the typed provider API, supervises the complete process
-  group/FIFO drains, and requires exact availability/init/device/compiler/
-  library/cleanup semantics; it remains explicitly blocked before native run
-  because the trusted Metal manifest is absent. The phase-2 source-reclamation
-  gate now avoids the heavyweight compiler test closure, scopes source-order
-  checks to exact bodies with false-green controls, attests the pure-Simple
-  artifact, and bounds the entire process tree and streams. It remains runtime
-  BLOCKED until a compatible self-hosted binary produces alias free results
-  exactly `1,0`; no Stage-4 or historic 0/0 result is accepted.
-- continuation-2026-07-26-frozen-qemu-source-admission: Pushed `cb0eb1d818`.
-  x86 and ARM producers now require a clean linked worktree, exact revision,
-  entry/compiler/build-command/output identities, and pre/post source
-  fingerprints. The ignored generated source tree is included after
-  deterministic normalization, while ARM QMP consumption cross-checks the
-  build and frozen manifests. This prevents the prior changing-root build from
-  becoming evidence. No new build or QEMU launch was performed, so x86/ARM
-  pixels, SIMD receipts, and ordered input events remain open.
-- continuation-2026-07-26-current-readiness-audit: No backend has a valid
-  acceptance launch yet. The external x86 run remains an unadmitted,
-  changing-root native build with no output and has exhausted the three-cycle
-  session budget. ARM tooling/fonts/QEMU devices and render/event contracts are
-  ready, but no clean current-origin linked worktree carries the attested
-  compiler and the canonical QMP wrapper does not yet assert its existing NEON
-  parity receipt. Metal has zero native micro attempts available, but its
-  consumer rejects the canonical producer's trusted Stage-3 manifest identity;
-  Vulkan shares that admission mismatch and its cycle cap is closed. CPU-SIMD
-  has no non-seed compiler carrying all three row externs. Active work therefore
-  fixes ARM SIMD receipt admission, aligns GPU manifest identities, and enables
-  low-memory pure compiler promotion before spending any launch cycle.
-- continuation-2026-07-26-final-admission-and-bridge-status: Pushed GPU
-  trusted-manifest admission as `ca911ba081`; independent high review ACCEPTS
-  its exact current/legacy identity-source pairs, canonical builder `--verify`
-  delegation, complete legacy recomputation, fixed compiler/provider paths and
-  hashes, override and seed/debug rejection, shell safety, and static-only
-  native-claim boundary.
+- continuation-2026-07-26-gpu-manifest-and-arm-simd-admission: Pushed GPU
+  trusted-manifest admission as `ca911ba081`. Independent high review ACCEPTS
+  its exact current/legacy identity-source pairs, canonical builder
+  `--verify` delegation, legacy provenance recomputation, fixed
+  compiler/provider paths and hashes, caller-override rejection, seed/debug
+  rejection, shell safety, and static-only native-claim boundary.
 
-  Pushed the ARM64 QMP SIMD gate as `d63f205ccf` and the generated-manual
+  Pushed the ARM64 QMP SIMD receipt gate as `d63f205ccf` and its manual-only
   quality repair as `04bc5fa4f4`. High review ACCEPTS the functional gate:
   exactly one AArch64/NEON receipt, positive native fill hits/vector chunks,
-  complete required `fill` execution, no fallback, bit-exact scalar parity,
-  final-transcript uniqueness, and evidence/report binding. The initial review
-  rejected only malformed manual presentation; the follow-up restores the
-  prominent no-live-evidence disclaimer and readable operator steps without
-  changing the gate.
+  complete required `fill` kernel-kind execution, no fallback, bit-exact
+  scalar parity, final-transcript uniqueness, and evidence/report binding.
+  The first review REJECTED only the generated manual presentation; the follow-
+  up restores the prominent no-live-evidence disclaimer and removes malformed
+  pseudo-steps without changing the gate.
 
-  The low-memory circularity tracking stack `8ac0150d38..7f9815a929` is
-  ACCEPTED. `f2c216...` is seed-marked and forbidden as compiler, driver,
-  delegate, or fallback. `277f...` is the only eligible pure-Simple binary but
-  cannot import the current compiler graph. At this checkpoint, the next
-  bounded action was one of the two then-reserved micro cycles in a clean
-  linked worktree: pin only
-  `277f...`, attempt a minimal historical-compatible bridge, admit it through
-  canonical path/hash, bounded version, negative seed classifiers, and native
-  `rt_string_free` symbol proof, then run only the focused current-graph
-  positive opt-in and negative no-opt-in controls with
-  `SIMPLE_NO_STUB_FALLBACK=1`. If that bridge cannot be produced, stop and
-  retain the bug; never substitute `f2c...` or run full Stage4 for diagnosis.
-  The cycle-2 record below consumed one of those two cycles; the later
-  read-only final preflight consumed none, so exactly one micro cycle remains.
-  No fresh compiler promotion, host/QEMU launch, SIMD PASS, or rendering/event
-  claim is added by this checkpoint or preflight.
-- continuation-2026-07-26-web-gui-owner-audit: In a clean `origin/main`
-  linked worktree, the only eligible macOS pure-Simple binary
-  (`277f8ac9...`) passed the focused Web CSS authority (5 assertions), widget
-  Draw IR semantic-theme (2), and host bootstrap (6) source/interpreter
-  regressions once. The scalar package CSS/fingerprint boundary and generated
-  Aetheric snapshot owner contain no remaining CSS parser/cascade defect.
-  AC-7 remains blocked before a production capture: the former inline fixed-light
-  event fixture has been removed. The canonical browser-event probe now admits
-  the retained `aetheric-host-web-gui-v1` proof through the pinned canonical
-  checker, loads its exact production HTML, serializes only an immutable
-  admitted envelope into the renderer, and validates theme fingerprints,
-  generated-HTML hash, computed glass witnesses, and explicit non-synthetic /
-  non-compatibility flags. The source-only validator regression passes; no
-  browser was launched, so there is still no current live Chromium event or
-  capture evidence. Native host-cycle limits remain exhausted.
-- continuation-2026-07-26-reviewed-admission-and-evidence-ordering: Pushed the
-  high-reviewed ARM compiler admission, x86 fullscreen admission, and manual
-  correction as `7656a4ed06`, `24a83ac9fd`, and `a861c4301a`. Both canonical
-  QEMU build paths now scan resolved compiler images for seed/debug classifiers
-  before executing the compiler or starting QEMU. The focused ARM self-test
-  admits a clean host-format fixture, rejects seed/debug fixtures, rejects the
-  actual `f2c216...` image, and admits the eligible `277f8ac9...` image. The x86
-  wrapper likewise reports `simple-bin-forbidden` for `f2c216...` before QEMU.
-  The unrelated external x86 build using that now-forbidden image was not
-  interrupted and cannot become acceptance evidence.
-
-  Pushed the reviewed boot-ladder ordering repair as `5db66260c6`. The visible
-  display wrapper evaluates successful GRUB/kernel rungs only after serial
-  readiness while the same QEMU remains alive for QMP capture; failure paths
-  quiesce first. `serial-log-not-created-at-check-time` is now distinct from
-  `marker-absent-in-existing-serial-log`, and the bounded self-test covers both
-  plus complete-log and source-order cases. No QEMU run or framebuffer PASS was
-  added.
-
-  Pushed the accepted bridge cycle-2 record as `34761e566e`. The eligible
-  `277f8ac9...` capsule passed path/hash/Mach-O/version/negative-seed and
-  `rt_string_free` admission, but its single bounded historical bridge build
-  exited before output with `Error running src/app/repl/main.spl`. No bridge,
-  admission, focused positive/negative controls, Stage4, fallback, or product
-  source change survived; exactly one micro cycle remains.
-
-  The reviewed Metal preflight report at `9a73869ac1` records the first
-  unavailable rung: the canonical trusted manifest and exact runtime, winit,
-  and C providers are absent. It exited before native build/probe, so the one
-  fresh Metal micro attempt remains available once a valid producer bundle
-  exists. The production Aetheric browser-event source repair is pushed through
-  `4e294c95d9`; its focused validator passes 27/27, but AC-2, AC-3, AC-5,
-  AC-7, AC-8, and AC-10 still lack current live host/QEMU/device evidence and
-  the goal remains active.
-- continuation-2026-07-26-aetheric-proof-readiness: A sparse linked worktree
-  at `92ae794ba7` audited the exact retained prerequisite chain for the
-  canonical `aetheric-host-web-gui-v1` envelope and its pinned browser-event
-  consumer. The eligible `277f8ac9...` binary passed the focused admission
-  source spec (4/4), and a no-proof admission check failed closed with
-  `missing-production-proof` before any native or Electron command. No proof,
-  current producer binaries, generated HTML/pixels, capture/observation/UI
-  history, or font receipt exists. Sparse-local provider paths are absent, but
-  the shared-root explicit provider artifacts and required symbols are present;
-  Electron is not installed locally. The next action is a separately authorized
-  live producer cycle with the exact `277f` binary and explicit provider paths;
-  no browser, GUI, capture, QEMU, or false PASS was added.
-- continuation-2026-07-26-vulkan-provider-archive-owner-repair: Implemented
-  host-independent native-link support for the retained Linux evidence lane.
-  Only explicitly selected static `SIMPLE_LINK_OBJECTS` providers are scanned;
-  a strong `rt_vulkan_provider_is_available` definition becomes one exact
-  pre-archive linker root plus platform dynamic-export visibility
-  (exact-symbol on ELF/MSVC; executable-wide on Darwin); MinGW uses
-  retention-only flags pending its separate runtime lookup owner. The policy
-  does not force-load the provider archive, so unrelated optional GPU members
-  remain quarantined. The weak-first object fixture mirrors production
-  `dlsym(RTLD_DEFAULT, ...)` lookup without a direct provider reference and
-  distinguishes baseline availability `0` from retained-provider availability
-  `73`. No Linux/Vulkan device, rendering, event, capture, present, readback,
-  handle, or parity execution is claimed. AC-2, AC-3, AC-5, AC-7, AC-8, and
-  AC-10 remain open pending current live evidence.
-- continuation-2026-07-26-current-interpreter-and-admission-checkpoint: After
-  advancing the clean integration worktree to `65c6618eb3`, the pinned eligible
-  pure-Simple binary `277f8ac9...` (`Simple v1.0.0-beta`) passed
-  `theme_package_spec.spl` 11/11 and `web_theme_css_authority_spec.spl` 5/5 in
-  interpreter mode. This covers package/cache/icon lookup, owner-local
-  `UITheme` construction, BrowserBackend scalar glass colors, package CSS,
-  fingerprint, and root attributes. The newly integrated retained-symbol
-  linker unit spec also passes 15/15. These are interpreter/link-contract
-  regressions only: they do not prove Cranelift Option lowering, a current
-  native producer, live WM/Electron rendering or events, device readback, or
-  QEMU. No new admitted x86/ARM compiler, frozen manifest, kernel, framebuffer,
-  or event evidence exists; the external x86 job still uses a dirty worktree
-  and forbidden seed-marked compiler and cannot become acceptance evidence.
-  AC-2, AC-3, AC-5, AC-7, AC-8, and AC-10 therefore remain active.
+  The low-memory compiler bridge remains circular: the current compiler
+  promotion needs an admitted low-memory-capable bridge, while producing that
+  bridge depends on the compiler path being promoted. The bootstrap-boundary
+  explanation and resulting blocked-state wording remain pending document
+  review. Binary `f2c216...` is seed-marked and forbidden; it is not a next
+  action or admissible bridge. Binary `277f...` is the only eligible
+  pure-Simple candidate, but its imports are incompatible with the required
+  promotion path. No compiler promotion, host/QEMU launch, SIMD parity PASS,
+  or native rendering/event claim is added by this checkpoint.
