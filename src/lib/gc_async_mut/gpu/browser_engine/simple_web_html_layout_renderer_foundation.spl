@@ -67,6 +67,26 @@ val WEB_IFRAME_PLACEHOLDER: u32 = 0xFF888888u32
 var _web_render_deadline_us: i64 = 0
 var _web_render_degraded: bool = false
 
+# Platform budget floor: slow/emulated platforms (e.g. SimpleOS under QEMU
+# TCG, ~30x slower than native) legitimately need more wall-clock than the
+# native-tuned defaults. The platform entry point may raise the floor once at
+# startup; 0 means no floor. This is a calibration knob, not a budget bypass —
+# the budget still expires past the floored deadline.
+var _web_render_budget_floor_ms: i64 = 0
+# Absolute floor deadline for the current render (begin-time + floor); rearm
+# never lowers the deadline below this.
+var _web_render_floor_deadline_us: i64 = 0
+
+pub fn simple_web_layout_set_render_budget_floor_ms(ms: i64):
+    if ms > 0:
+        _web_render_budget_floor_ms = ms
+
+# Diagnostic: current clock vs armed deadline, as text (safe channel), for
+# budget-break attribution receipts.
+pub fn web_budget_now_and_deadline() -> text:
+    val now = rt_time_now_unix_micros()
+    "now_us={now} deadline_us={_web_render_deadline_us}"
+
 # True iff the most recent render tripped its wall-clock budget (a phase stopped
 # early). Quota drops do NOT set this — they are silent by design.
 pub fn simple_web_layout_last_render_degraded() -> bool:
@@ -83,7 +103,10 @@ fn _web_budget_begin(budget_ms: i64):
         if env_override > 0: env_override else: WEB_RENDER_BUDGET_MS
     else:
         budget_ms
-    _web_render_deadline_us = rt_time_now_unix_micros() + ms * 1000
+    val floored_ms = if ms < _web_render_budget_floor_ms: _web_render_budget_floor_ms else: ms
+    val begin_now = rt_time_now_unix_micros()
+    _web_render_deadline_us = begin_now + floored_ms * 1000
+    _web_render_floor_deadline_us = if _web_render_budget_floor_ms > 0: begin_now + _web_render_budget_floor_ms * 1000 else: 0
     _web_render_degraded = false
 
 # Re-arm the deadline mid-render to hand the NEXT stage its own slice of the
@@ -97,7 +120,7 @@ fn _web_budget_begin(budget_ms: i64):
 # next stage its fresh slice; it never un-expires a stage's own past work.
 fn _web_budget_rearm(deadline_us: i64):
     if _web_render_deadline_us > 0:
-        _web_render_deadline_us = deadline_us
+        _web_render_deadline_us = if _web_render_floor_deadline_us > deadline_us: _web_render_floor_deadline_us else: deadline_us
 
 # True once the wall-clock deadline has passed; latches the degraded flag so
 # callers can report the render as degraded. A deadline of 0 means "not armed"
