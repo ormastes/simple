@@ -1067,6 +1067,24 @@ else
     }
     rm -f "${runtime_bootstrap_self_link}"
   fi
+  runtime_compiler_archive_link="${runtime_origin_absolute}/libsimple_compiler.a"
+  if [ -L "${runtime_compiler_archive_link}" ]; then
+    runtime_compiler_archive_target=$(readlink \
+      "${runtime_compiler_archive_link}") || exit 1
+    [ "${runtime_compiler_archive_target}" = "deps/libsimple_compiler.a" ] || {
+      echo "error: unexpected Rust compiler archive authority symlink" >&2
+      exit 1
+    }
+    [ -f "${runtime_origin_absolute}/${runtime_compiler_archive_target}" ] || {
+      echo "error: missing Rust compiler archive authority target" >&2
+      exit 1
+    }
+    runtime_compiler_archive_materialized="${runtime_compiler_archive_link}.materialized.$$"
+    cp -pL "${runtime_compiler_archive_link}" \
+      "${runtime_compiler_archive_materialized}" || exit 1
+    mv -f "${runtime_compiler_archive_materialized}" \
+      "${runtime_compiler_archive_link}" || exit 1
+  fi
   bootstrap_stage3_directory_snapshot \
     "$(absolute_path "${runtime_origin_before}")" \
     "${runtime_origin_absolute}" || {
@@ -1144,9 +1162,36 @@ else
     echo "error: bootstrap PATH must contain absolute entries only" >&2
     exit 1
   fi
+  bootstrap_link_library_path=""
+  bootstrap_link_compat_sha256=absent
+  if [ "${os}" = "linux" ]; then
+    bootstrap_unwind_link_name=$(
+      "${cc_abs:-cc}" -print-file-name=libunwind.so 2>/dev/null || true
+    )
+    bootstrap_unwind_runtime=$(
+      "${cc_abs:-cc}" -print-file-name=libunwind.so.8 2>/dev/null || true
+    )
+    if [ "${bootstrap_unwind_link_name}" = "libunwind.so" ] &&
+       [ -f "${bootstrap_unwind_runtime}" ]; then
+      bootstrap_link_compat_dir="${stage3_provenance_dir}/link-compat"
+      rm -rf "${bootstrap_link_compat_dir}"
+      mkdir -p "${bootstrap_link_compat_dir}"
+      cp -pL "${bootstrap_unwind_runtime}" \
+        "${bootstrap_link_compat_dir}/libunwind.so"
+      bootstrap_link_library_path=$(
+        absolute_path "${bootstrap_link_compat_dir}"
+      )
+      bootstrap_link_compat_sha256=$(
+        bootstrap_stage3_hash_file \
+          "${bootstrap_link_compat_dir}/libunwind.so"
+      ) || exit 1
+    fi
+  fi
   stage2_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
       "RUST_LOG=${stage_build_rust_log}" \
+      "LIBRARY_PATH=${bootstrap_link_library_path}" \
+      "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=${bootstrap_link_compat_sha256}" \
       "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
       "SIMPLE_NATIVE_BUILD_RUST=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
@@ -1163,6 +1208,8 @@ else
   stage3_build_args_sha256=$(
     bootstrap_stage3_args_sha256 \
       "RUST_LOG=${stage_build_rust_log}" \
+      "LIBRARY_PATH=${bootstrap_link_library_path}" \
+      "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256=${bootstrap_link_compat_sha256}" \
       "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
       "SIMPLE_NATIVE_BUILD_RUST=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
@@ -1189,6 +1236,8 @@ else
     "$(absolute_path "${log_dir}/stage2-native-build.log")" \
     "${stage2_home_absolute}" "${stage2_tmp_absolute}" "${stage_build_path}" \
     RUST_LOG="${stage_build_rust_log}" \
+    LIBRARY_PATH="${bootstrap_link_library_path}" \
+    SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256="${bootstrap_link_compat_sha256}" \
     SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_NATIVE_BUILD_RUST=1 \
@@ -1280,6 +1329,8 @@ else
     "$(absolute_path "${log_dir}/stage3-native-build.log")" \
     "${stage3_home_absolute}" "${stage3_tmp_absolute}" "${stage_build_path}" \
     RUST_LOG="${stage_build_rust_log}" \
+    LIBRARY_PATH="${bootstrap_link_library_path}" \
+    SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256="${bootstrap_link_compat_sha256}" \
     SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_NATIVE_BUILD_RUST=1 \

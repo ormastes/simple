@@ -44,6 +44,10 @@ type HirLocalTupleTypes = {i64: [HirType]}
 class HirLowering:
     symbols: SymbolTable
     errors: [LoweringError]
+    # Flat diagnostic projections avoid reading a nested Span back out of an
+    # array-of-struct element on the no-GC bootstrap ABI.
+    diagnostic_messages: [text]
+    diagnostic_recovered: [bool]
     current_function: SymbolId?
     loop_depth: i64
     type_inference_config: TypeInferenceConfig?
@@ -128,8 +132,7 @@ enum LoweringErrorKind:
     Other
     Recovered
 
-fn hirlowering_new() -> HirLowering:
-    val empty_errors: [LoweringError] = []
+fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages: [text], diagnostic_recovered: [bool]) -> HirLowering:
     val empty_loaded_modules: [text] = []
     val empty_modules_by_name: HirModulesByName = {}
     val empty_impl_functions: HirImplFunctions = {}
@@ -142,7 +145,9 @@ fn hirlowering_new() -> HirLowering:
     val empty_fn_tuple_returns: {text: [HirType]} = {}
     HirLowering(
         symbols: SymbolTable.new(),
-        errors: empty_errors,
+        errors: errors,
+        diagnostic_messages: diagnostic_messages,
+        diagnostic_recovered: diagnostic_recovered,
         current_function: nil,
         loop_depth: 0,
         type_inference_config: nil,
@@ -162,8 +167,20 @@ fn hirlowering_new() -> HirLowering:
         fn_tuple_returns: empty_fn_tuple_returns
     )
 
+fn hirlowering_new() -> HirLowering:
+    val empty_errors: [LoweringError] = []
+    val empty_diagnostic_messages: [text] = []
+    val empty_diagnostic_recovered: [bool] = []
+    hirlowering_new_with_diagnostics(empty_errors, empty_diagnostic_messages, empty_diagnostic_recovered)
+
 fn hirlowering_for_module(filename: text, modules_by_name: HirModulesByName) -> HirLowering:
-    var lowering = hirlowering_new()
+    var lowering: HirLowering = hirlowering_new()
+    lowering.module_filename = filename
+    lowering.modules_by_name = modules_by_name
+    lowering
+
+fn hirlowering_for_module_with_diagnostics(filename: text, modules_by_name: HirModulesByName, errors: [LoweringError], diagnostic_messages: [text], diagnostic_recovered: [bool]) -> HirLowering:
+    var lowering: HirLowering = hirlowering_new_with_diagnostics(errors, diagnostic_messages, diagnostic_recovered)
     lowering.module_filename = filename
     lowering.modules_by_name = modules_by_name
     lowering
@@ -173,17 +190,17 @@ impl HirLowering:
         hirlowering_new()
 
     static fn with_filename(filename: text) -> HirLowering:
-        var lowering = hirlowering_new()
+        var lowering: HirLowering = hirlowering_new()
         lowering.module_filename = filename
         lowering
 
     static fn with_config(config: TypeInferenceConfig) -> HirLowering:
-        var lowering = hirlowering_new()
+        var lowering: HirLowering = hirlowering_new()
         lowering.type_inference_config = Some(config)
         lowering
 
     static fn with_resolver(resolver: ModuleResolverPort, filename: text) -> HirLowering:
-        var lowering = hirlowering_new()
+        var lowering: HirLowering = hirlowering_new()
         lowering.module_filename = filename
         lowering.module_resolver = resolver
         lowering
@@ -231,6 +248,12 @@ impl HirLowering:
             span: span,
             kind: LoweringErrorKind.Other
         ))
+        # Do not project Span fields here. Span can arrive through a nested
+        # aggregate ABI path during self-hosting; message/severity are the
+        # stable diagnostic contract needed by the driver.
+        val rendered = "HIR lowering error in {self.module_filename}: {message}"
+        self.diagnostic_messages = self.diagnostic_messages.push(rendered)
+        self.diagnostic_recovered = self.diagnostic_recovered.push(false)
 
     me recovered(message: text, span: Span):
         self.errors = self.errors.push(LoweringError(
@@ -238,6 +261,28 @@ impl HirLowering:
             span: span,
             kind: LoweringErrorKind.Recovered
         ))
+        val rendered = "HIR lowering error in {self.module_filename}: {message}"
+        self.diagnostic_messages = self.diagnostic_messages.push(rendered)
+        self.diagnostic_recovered = self.diagnostic_recovered.push(true)
+
+    # Keep the aggregate LoweringError array inside its HIR owner. Stage4 can
+    # Any-erase an array-of-struct field when it is read through a class field
+    # in another module under full-closure allocation pressure. Expose only
+    # scalar/text projections across that boundary.
+    me lowering_error_count() -> i64:
+        val focused_future_errors = self.module_filename == "src/lib/nogc_async_mut/async/future.spl"
+        if focused_future_errors:
+            eprint("[hir-errors] receiver valid")
+        val count: i64 = self.diagnostic_messages.len()
+        if focused_future_errors:
+            eprint("[hir-errors] array valid count={count}")
+        count
+
+    me lowering_error_is_recovered_at(index: i64) -> bool:
+        self.diagnostic_recovered[index]
+
+    me lowering_error_message_at(index: i64, module_name: text) -> text:
+        self.diagnostic_messages[index]
 
     me compute_visibility(type_name: text, declared_visibility: Visibility) -> Visibility:
         if (hir_type_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
