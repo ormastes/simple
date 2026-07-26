@@ -1086,17 +1086,34 @@ impl DesktopShell:
         serial_println("[desktop-gui] system-window-created id={sys_id}")
 
     me handle_pending_wm_pointer_step():
-        if not self.compositor.has_pending_wm_pointer_step():
+        # Read the pending step by DIRECT FIELD ACCESS off a local copy, never
+        # through the compositor's `fn` accessors: immutable-fn receiver reads
+        # are miscompiled on the freestanding entry-closure lane and delivered
+        # garbage here, while the very same fields read correctly ~240 lines
+        # above in the event loop (which already uses this idiom).
+        # rerun38 dispatched x=2866688 y=162665157 button='none' for a press
+        # the loop had just receipted as x=730 y=274 button_code=1: the WM
+        # hit-test then found no window at those coordinates and answered
+        # command=ignored handled=false, which is exactly what blocked the
+        # pointer half of the evidence lane. kind_code survived the same call,
+        # so corruption is PER-FIELD and layout-dependent — do not trust any
+        # of those accessors on this lane.
+        # Copy-commit idiom (see ensure_baremetal_system_window below): a
+        # mutation invoked as self.compositor.method() lands on a discardable
+        # copy, so clear on the local and assign it back.
+        var pending_compositor = self.compositor
+        if not pending_compositor.pending_wm_pointer_valid:
             return
-        val x = self.compositor.pending_wm_pointer_x_value()
-        val y = self.compositor.pending_wm_pointer_y_value()
+        val x = pending_compositor.pending_wm_pointer_x
+        val y = pending_compositor.pending_wm_pointer_y
         # The compositor carries i32 codes (text through that struct field
         # reached rt_string_eq as a raw integer on baremetal); convert to the
         # literal strings at this call site via the pure decode helpers
         # above (kept in sync with compositor.spl's encode side).
-        val button_code = self.compositor.pending_wm_pointer_button_code_value()
-        val kind_code = self.compositor.pending_wm_pointer_kind_code_value()
-        self.compositor.clear_pending_wm_pointer_step()
+        val button_code = pending_compositor.pending_wm_pointer_button_code
+        val kind_code = pending_compositor.pending_wm_pointer_kind_code
+        pending_compositor.clear_pending_wm_pointer_step()
+        self.compositor = pending_compositor
         val button: text = wm_pointer_button_from_code(button_code)
         val kind: text = wm_pointer_kind_from_code(kind_code)
         self.handle_wm_pointer_event_loop_step(x, y, button, kind)
