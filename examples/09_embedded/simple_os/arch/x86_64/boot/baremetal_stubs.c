@@ -561,10 +561,20 @@ RuntimeValue rt_value_format_string(RuntimeValue val, RuntimeValue fmt_ptr, Runt
 RuntimeValue rt_string_format(RuntimeValue fmt, RuntimeValue val);
 void rt_print_value(RuntimeValue val);
 
-static const size_t BAREMETAL_HEAP_SIZE = 192ULL * 1024ULL * 1024ULL;
-static const size_t BAREMETAL_HEAP_WARN_SIZE = 144ULL * 1024ULL * 1024ULL;
+/* 512MB, raised from 192MB on 2026-07-26. free() below is a no-op bump
+ * allocator, so EVERY render's allocations are permanent for the session.
+ * Boot + the first desktop frame already reach ~142MB, so the first
+ * interaction (F11 maximize) re-ran the layout, asked for 2x62MB and
+ * panicked "heap exhausted" — the WM evidence lane could never reach its
+ * maximize/restore captures. Sizing buys the session's render count; the
+ * real fix is per-frame reclamation (frame arena mark/release) tracked in
+ * doc/08_tracking/bug/simpleos_bump_heap_no_free_interactive_session_2026-07-26.md.
+ * The identity map covers 4GiB (crt0.s boot_pd 2048 x 2MiB), and the lane's
+ * VM has 2GB, so 512MB of .bss is mapped and physically present. */
+static const size_t BAREMETAL_HEAP_SIZE = 512ULL * 1024ULL * 1024ULL;
+static const size_t BAREMETAL_HEAP_WARN_SIZE = 448ULL * 1024ULL * 1024ULL;
 
-static char   _heap[192ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
+static char   _heap[512ULL * 1024ULL * 1024ULL] __attribute__((aligned(16)));
 static size_t _heap_off = 0;
 
 void *malloc(size_t sz);
@@ -8751,6 +8761,20 @@ RuntimeValue rt_array_repeat(RuntimeValue v, RuntimeValue n)
     /* Permit a full 64 MiB ARGB32 framebuffer aperture.  The former
      * 0x100000-element limit truncated 3840x2160 fills after 4 MiB. */
     if (count > 0x1000000) count = 0x1000000;
+    /* Attribution receipt for multi-megabyte repeats: malloc's caller= is
+     * always this function, so a huge array-repeat cannot be traced to its
+     * .spl site from the heap log alone. Print the count and OUR caller's
+     * return address (nm-symbolizable) for counts >= 1M elements. Silent on
+     * every normal repeat; a 7755968-element repeat (2^6*11*23*479 — no
+     * divisor pair resembling a screen rectangle, so not a real surface)
+     * exhausted the 192MB heap on the first maximize, 2026-07-26. */
+    if (count >= 0x100000) {
+        serial_puts("[array-repeat] big count=");
+        serial_put_hex((uint64_t)count);
+        serial_puts(" caller=");
+        serial_put_hex((uint64_t)(uintptr_t)__builtin_return_address(0));
+        serial_puts("\r\n");
+    }
     uint64_t cap = count > 0 ? (uint64_t)count : 1ULL;
     size_t bytes = sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue);
     RuntimeArray *a = (RuntimeArray *)malloc(bytes);
