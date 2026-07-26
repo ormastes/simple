@@ -1,7 +1,7 @@
 # Bug: bootstrap low-memory positional bridge is blocked by split pure-binary capabilities
 
 Date: 2026-07-26  
-Status: **BLOCKED — source bridge unverified and intentionally uncommitted**  
+Status: **BLOCKED — cycle 2 did not reach the requested bridge entry; source reverted**
 Scope: current-main compiler promotion only; normal compilation must remain unchanged
 
 ## Intended behavior
@@ -91,9 +91,76 @@ The source bridge, trace markers, probe, and wrapper remain working-tree-only.
 They are not accepted implementation evidence and must not be folded into this
 documentation commit.
 
+## Cycle-2 evidence
+
+Worktree/base used:
+
+```text
+/Users/ormastes/simple/build/worktrees/wm-bridge-micro-20260726
+3b7a11b6cdf61ce2180886d6ae17fa0e1d9c8204
+```
+
+The sole eligible compiler was admitted before use:
+
+```text
+canonical_path=/Users/ormastes/simple/bin/release/macos-arm64/simple
+sha256=277f8ac9e14ae266ce380a5890d434ce27b47cee9378e2b337cbcc8cd4086767
+file=Mach-O 64-bit executable arm64
+regular_executable_non_symlink=pass
+version_exit=0
+version_stdout=Simple v1.0.0-beta
+Rust-built=absent
+bootstrap seed only=absent
+seed compiler=absent
+simple_seed=absent
+rt_string_free_symbol=pass
+```
+
+One bounded attempt used one worker, an isolated cache, exact entry closure,
+`SIMPLE_NO_STUB_FALLBACK=1`, and the pure `CompilerDriver` bridge entry. The
+temporary entry contained no `rt_native_build` call:
+
+```text
+gtimeout -k 10s 600s env \
+  SIMPLE_NO_STUB_FALLBACK=1 \
+  SIMPLE_LIB=<worktree>/src \
+  SIMPLE_NATIVE_FORCE_NO_STUBS=1 \
+  /Users/ormastes/simple/bin/release/macos-arm64/simple native-build \
+  --backend cranelift --threads 1 \
+  --cache-dir <worktree>/build/wm_bridge_micro_20260726/bridge-cache \
+  --runtime-bundle core-c-bootstrap \
+  --source src/compiler --source src/lib --entry-closure \
+  --entry <worktree>/build/wm_bridge_micro_20260726/bridge_main.spl \
+  --output <worktree>/build/wm_bridge_micro_20260726/bridge
+```
+
+The historical command dispatcher exited `1` immediately, produced no bridge,
+and exposed only:
+
+```text
+[STDERR] Error running src/app/repl/main.spl
+```
+
+This is the first blocker. The requested `bridge_main.spl` was never entered,
+so output admission, focused probe construction, and positive/negative controls
+were correctly not attempted. Retained ignored evidence:
+
+- `build/wm_bridge_micro_20260726/bridge-build.stdout`
+  (`051bee39cd3034ae32a28d5aea8434bd2ef4ea97e5534b4c79c7aeb75b73ec4d`)
+- `build/wm_bridge_micro_20260726/bridge-build.stderr`
+  (`e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`)
+- temporary bridge source
+  (`2ab24460e6a4962ea248eb67e55cf4ff63a6f30d7b75132c5278682fc2362b24`)
+- temporary probe source
+  (`16effe684f5b6df0be32d66836f1a3355b0c07d4cc254e969db19e055ca5c9c3`)
+
+All three unverified product-source edits were reverted byte-for-byte. No
+bridge, probe executable, Stage 4 build, fallback, delegate, or native runtime
+claim survived this cycle. Exactly one bounded micro cycle remains.
+
 ## Next safe action
 
-Use one of the two remaining bounded micro cycles to build only a focused
+Use the one remaining bounded micro cycle to build only a focused
 bridge/probe executable, not the full current compiler:
 
 1. start from a clean linked worktree at the reviewed current-origin commit;
