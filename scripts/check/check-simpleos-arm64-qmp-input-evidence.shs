@@ -19,6 +19,7 @@ BUILD_MANIFEST="build/os/simpleos_arm64_desktop_engine2d.build-manifest.env"
 FROZEN_BUILD_MANIFEST="${BUILD_MANIFEST}.frozen-source-admission.env"
 EVIDENCE_DIR="${SIMPLEOS_ARM64_QMP_EVIDENCE_DIR:-build/os/arm64_qmp_input_evidence}"
 EVIDENCE_ENV="$EVIDENCE_DIR/evidence.env"
+EVIDENCE_REPORT="$EVIDENCE_DIR/report.md"
 SERIAL_LOG="$EVIDENCE_DIR/serial.log"
 QEMU_LOG="$EVIDENCE_DIR/qemu.stderr.log"
 QMP_LOG="$EVIDENCE_DIR/qmp-input.log"
@@ -29,7 +30,7 @@ MAX_CHECKSUM_US="${SIMPLEOS_ARM64_QMP_MAX_CHECKSUM_US:-5000000}"
 QEMU_PID=""
 
 mkdir -p "$EVIDENCE_DIR"
-rm -f "$EVIDENCE_ENV" "$SERIAL_LOG" "$QEMU_LOG" "$QMP_LOG" \
+rm -f "$EVIDENCE_ENV" "$EVIDENCE_REPORT" "$SERIAL_LOG" "$QEMU_LOG" "$QMP_LOG" \
     "$BEFORE_PPM" "$AFTER_PPM" "$QMP_SOCKET"
 
 cleanup() {
@@ -59,6 +60,7 @@ fail_evidence() {
         echo "arm64_qmp_input_kernel=$KERNEL"
         echo "arm64_qmp_input_disk=$DISK"
         echo "arm64_qmp_input_build_manifest=$BUILD_MANIFEST"
+        echo "arm64_qmp_input_report=$EVIDENCE_REPORT"
         echo "arm64_qmp_input_serial_log=$SERIAL_LOG"
         echo "arm64_qmp_input_qmp_log=$QMP_LOG"
         echo "arm64_qmp_input_before_ppm=$BEFORE_PPM"
@@ -431,6 +433,51 @@ ready, _ = wait_serial(
     r"^\[desktop-gui-arm64\] desktop-ready revision=(\d+)\r?$", 45
 )
 baseline_revision = int(ready.group(1))
+
+def require_simd_receipt(text):
+    receipt_lines = [
+        line.rstrip("\r") for line in text.splitlines()
+        if line.startswith("[engine2d-simd]")
+    ]
+    if len(receipt_lines) != 1:
+        raise RuntimeError(
+            "expected exactly one guest Engine2D SIMD receipt, found %d"
+            % len(receipt_lines)
+        )
+    match = re.fullmatch(
+        r"\[engine2d-simd\] arch=aarch64 isa=neon enabled=1 "
+        r"fill_hits=(\d+) fill_chunks=(\d+) fill_tail_pixels=(\d+) "
+        r"scalar_parity=bit-exact",
+        receipt_lines[0],
+    )
+    if not match:
+        raise RuntimeError(
+            "guest Engine2D SIMD receipt reports fallback or contract mismatch"
+        )
+    native_hits, vector_chunks, scalar_tail_pixels = (
+        int(value) for value in match.groups()
+    )
+    if native_hits <= 0 or vector_chunks <= 0 or scalar_tail_pixels < 0:
+        raise RuntimeError(
+            "guest Engine2D SIMD receipt lacks native vector execution"
+        )
+    return {
+        "arch": "aarch64",
+        "isa": "neon",
+        "enabled": 1,
+        "native_hits": native_hits,
+        "vector_chunks": vector_chunks,
+        "scalar_tail_pixels": scalar_tail_pixels,
+        "required_kernel_kinds": "fill",
+        "executed_kernel_kinds": "fill",
+        "fallback": "none",
+        "scalar_parity": "bit-exact",
+    }
+
+# The freestanding ARM64 Engine2D desktop has one required target-native
+# kernel kind: fill. Reject missing, duplicate, fallback, wrong-ISA, or
+# non-vector receipts before any QMP input or capture can be admitted.
+simd_receipt = require_simd_receipt(serial_text())
 wait_serial(
     r"^\[backend2d-event-blocker\] backend=simpleos-qemu-arm64 "
     r"event_backend=virtio-mmio keyboard=transport-ready "
@@ -759,8 +806,30 @@ if (
 ):
     raise RuntimeError("uncorrelated RAMFB commit occurred before after capture")
 
+# Recheck the whole final transcript so a duplicate or fallback receipt emitted
+# after desktop-ready cannot survive into the PASS record.
+final_simd_receipt = require_simd_receipt(serial_text())
+if final_simd_receipt != simd_receipt:
+    raise RuntimeError("guest Engine2D SIMD receipt changed during run")
+
 print("qmp_transport=input-send-event")
 print("capture_origin=qemu-ramfb-screendump")
+print("simd_arch=%s" % final_simd_receipt["arch"])
+print("simd_isa=%s" % final_simd_receipt["isa"])
+print("simd_enabled=%d" % final_simd_receipt["enabled"])
+print("simd_native_hits=%d" % final_simd_receipt["native_hits"])
+print("simd_vector_chunks=%d" % final_simd_receipt["vector_chunks"])
+print("simd_scalar_tail_pixels=%d" % final_simd_receipt["scalar_tail_pixels"])
+print(
+    "simd_required_kernel_kinds=%s"
+    % final_simd_receipt["required_kernel_kinds"]
+)
+print(
+    "simd_executed_kernel_kinds=%s"
+    % final_simd_receipt["executed_kernel_kinds"]
+)
+print("simd_fallback=%s" % final_simd_receipt["fallback"])
+print("simd_scalar_parity=%s" % final_simd_receipt["scalar_parity"])
 print("baseline_revision=%d" % baseline_revision)
 print("pointer_sequences=%d,%d,%d" % (move_seq, down_seq, up_seq))
 print("key_sequences=%d,%d" % (key_down_seq, key_up_seq))
@@ -837,6 +906,17 @@ arm64_guest_source_snapshot ||
     echo "arm64_qmp_input_transport=input-send-event"
     echo "arm64_qmp_input_capture_origin=qemu-ramfb-screendump"
     echo "arm64_qmp_input_build_manifest=$BUILD_MANIFEST"
+    echo "arm64_qmp_input_report=$EVIDENCE_REPORT"
+    echo "arm64_qmp_input_simd_arch=$(field simd_arch)"
+    echo "arm64_qmp_input_simd_isa=$(field simd_isa)"
+    echo "arm64_qmp_input_simd_enabled=$(field simd_enabled)"
+    echo "arm64_qmp_input_simd_native_hits=$(field simd_native_hits)"
+    echo "arm64_qmp_input_simd_vector_chunks=$(field simd_vector_chunks)"
+    echo "arm64_qmp_input_simd_scalar_tail_pixels=$(field simd_scalar_tail_pixels)"
+    echo "arm64_qmp_input_simd_required_kernel_kinds=$(field simd_required_kernel_kinds)"
+    echo "arm64_qmp_input_simd_executed_kernel_kinds=$(field simd_executed_kernel_kinds)"
+    echo "arm64_qmp_input_simd_fallback=$(field simd_fallback)"
+    echo "arm64_qmp_input_simd_scalar_parity=$(field simd_scalar_parity)"
     echo "arm64_qmp_input_guest_source_revision=$MANIFEST_SOURCE_REVISION"
     echo "arm64_qmp_input_host_source_revision=$HOST_SOURCE_REVISION"
     echo "arm64_qmp_input_guest_source_roots=$MANIFEST_SOURCE_ROOTS"
@@ -878,5 +958,24 @@ arm64_guest_source_snapshot ||
     echo "arm64_qmp_input_serial_log=$SERIAL_LOG"
     echo "arm64_qmp_input_qmp_log=$QMP_LOG"
 } >"$EVIDENCE_ENV"
+
+{
+    echo "# ARM64 SimpleOS QMP input evidence"
+    echo
+    echo "- status: pass"
+    echo "- SIMD architecture: $(field simd_arch)"
+    echo "- SIMD ISA: $(field simd_isa)"
+    echo "- SIMD enabled: $(field simd_enabled)"
+    echo "- SIMD native hits: $(field simd_native_hits)"
+    echo "- SIMD vector chunks: $(field simd_vector_chunks)"
+    echo "- SIMD scalar tail pixels: $(field simd_scalar_tail_pixels)"
+    echo "- SIMD required kernel kinds: $(field simd_required_kernel_kinds)"
+    echo "- SIMD executed kernel kinds: $(field simd_executed_kernel_kinds)"
+    echo "- SIMD fallback: $(field simd_fallback)"
+    echo "- SIMD scalar parity: $(field simd_scalar_parity)"
+    echo "- baseline capture SHA-256: $BEFORE_SHA256"
+    echo "- post-input capture SHA-256: $AFTER_SHA256"
+    echo "- changed RGB bytes: $CHANGED_RGB_BYTES"
+} >"$EVIDENCE_REPORT"
 
 cat "$EVIDENCE_ENV"

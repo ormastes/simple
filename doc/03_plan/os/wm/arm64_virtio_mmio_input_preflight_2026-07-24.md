@@ -38,13 +38,25 @@ pointer motion, left-button down/up, matching guest `input_seq` device/WM/frame
 markers, and distinct baseline/post-input RAMFB captures.  Source wiring is
 not a substitute for that evidence.
 
+Before that input sequence begins, the live checker must admit exactly one
+target-native SIMD receipt. For this freestanding ARM64 compositor the required
+kernel-kind set is exactly `fill`: the receipt must report AArch64/NEON,
+enabled execution, positive native fill hits and vector chunks, no fallback,
+and bit-exact scalar parity. The checker rejects missing, duplicate, malformed,
+fallback, wrong-ISA, and zero-execution receipts, rechecks uniqueness against
+the final transcript, and records the normalized fields in both the evidence
+environment and human-readable report.
+
 ## Bounded preflight result
 
 - PASS: `clang --target=aarch64-none-elf -ffreestanding -fsyntax-only
   examples/09_embedded/simple_os/arch/arm64/boot/baremetal_stubs.c`
 - PASS: `git diff --check`
 - PASS: `sh scripts/check/check-arm64-virtio-input-preflight.shs`
-- BLOCKED before Simple entry compilation: the diagnostic ARM64 build invokes
-  `scripts/os/make_os_disk.shs`, which fails because
-  `bin/release/aarch64-unknown-simpleos/simple` is missing.  No QEMU launch or
-  capture occurred.
+- STATIC IMPLEMENTED: fail-closed ARM QMP SIMD receipt parsing, ordering before
+  input injection, final-transcript uniqueness recheck, and evidence/report
+  field binding. A live QEMU run remains required for PASS.
+- HISTORICAL BLOCKER: the 2026-07-24 diagnostic disk path requested a missing
+  `bin/release/aarch64-unknown-simpleos/simple`. The current `desktop-fonts`
+  disk profile does not require that guest payload. This static SIMD-gate
+  change does not claim a replacement build, QEMU launch, or capture.

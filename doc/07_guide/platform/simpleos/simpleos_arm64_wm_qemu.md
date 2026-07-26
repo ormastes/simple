@@ -160,6 +160,17 @@ as localized-damage proof, and the receipt contract alone is not a live PASS.
 (default 5,000,000 microseconds); exceeding it rejects the run rather than
 silently extending the evidence timeout.
 
+Before injecting any input, the gate requires exactly one guest
+`[engine2d-simd]` receipt. The receipt must identify `aarch64`/NEON, report
+SIMD enabled, positive target-native fill hits and vector chunks, the complete
+required/executed kernel-kind set (`fill` for this freestanding compositor),
+no fallback, and bit-exact scalar parity. Missing, duplicate, fallback, wrong
+architecture/ISA, zero-execution, and malformed receipts fail the run before
+render/event admission. The same receipt is rechecked against the complete
+serial transcript before PASS. Its normalized fields are retained in
+`build/os/arm64_qmp_input_evidence/evidence.env`, `qmp-input.log`, and
+`report.md`.
+
 The host-GPU evidence owner remains
 `scripts/check/check-simpleos-qemu-host-gpu-2d.shs`. Its AArch64 row must first
 pass the existing 64x48 raw-render, Draw IR, and independent ProcessingIR probe.
@@ -207,6 +218,7 @@ The serial log must include:
 [WM] fw_cfg sig: 81 69 77 85
 [WM] Found etc/ramfb in fw_cfg
 [WM] ramfb configured successfully via fw_cfg DMA
+[engine2d-simd] arch=aarch64 isa=neon enabled=1 fill_hits=<positive> fill_chunks=<positive> fill_tail_pixels=<nonnegative> scalar_parity=bit-exact
 [desktop-gui-arm64] desktop-ready revision=<positive>
 ```
 

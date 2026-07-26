@@ -1,8 +1,6 @@
 # Arm64 Simpleos Qmp Input Specification
 
-> Defines the fail-closed source and evidence contract for ARM64 SimpleOS QMP
-> input. The final scenario invokes the live checker; this manual alone is not
-> a QEMU rendering or event-delivery PASS.
+> <details>
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -22,12 +20,15 @@
 - Inspect the canonical ARM64 desktop, runtime owner, and QEMU target
 - "find \"$snapshot root\" \\
 - "simpleos host gpu readback checksum " + "finalize
+- "final simd receipt = require simd receipt
+- "arm64 qmp input simd scalar parity=$
+- "simd receipt = require simd receipt
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source folded for reproduction.
+Runnable source: 334 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -134,6 +135,41 @@ expect(live_wrapper).to_contain(
 expect(live_wrapper).to_contain(
     "[ramfb-visual-commit\\] input_seq="
 )
+expect(entry).to_contain(
+    "[engine2d-simd] arch=aarch64 isa=neon enabled=1"
+)
+expect(entry).to_contain("scalar_parity=bit-exact")
+expect(live_wrapper).to_contain("def require_simd_receipt(text):")
+expect(live_wrapper).to_contain(
+    "expected exactly one guest Engine2D SIMD receipt"
+)
+expect(live_wrapper).to_contain(
+    "guest Engine2D SIMD receipt reports fallback or contract mismatch"
+)
+expect(live_wrapper).to_contain(
+    "guest Engine2D SIMD receipt lacks native vector execution"
+)
+expect(live_wrapper).to_contain(
+    "\"required_kernel_kinds\": \"fill\""
+)
+expect(live_wrapper).to_contain(
+    "\"executed_kernel_kinds\": \"fill\""
+)
+expect(live_wrapper).to_contain("\"fallback\": \"none\"")
+expect(live_wrapper).to_contain(
+    "final_simd_receipt = require_simd_receipt(serial_text())"
+)
+expect(live_wrapper).to_contain(
+    "arm64_qmp_input_simd_scalar_parity=$(field simd_scalar_parity)"
+)
+val simd_gate = live_wrapper.index_of(
+    "simd_receipt = require_simd_receipt(serial_text())"
+) ?? -1
+val input_gate = live_wrapper.index_of(
+    "event_backend=virtio-mmio keyboard=transport-ready"
+) ?? -1
+expect(simd_gate).to_be_greater_than(-1)
+expect(input_gate).to_be_greater_than(simd_gate)
 expect(live_wrapper).to_contain(
     "QMP pixel delta is outside guest-declared damage bounds"
 )
@@ -357,7 +393,7 @@ expect(entry.contains("[wm-pointer-irq]")).to_be(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -380,7 +416,7 @@ require_arm64_live_qmp_input_evidence()
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/03_system/os/wm/arm64_simpleos_qmp_input_spec.spl` |
-| Updated | 2026-07-25 |
+| Updated | 2026-07-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
