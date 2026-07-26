@@ -46,6 +46,14 @@ use os.lib.gpu_bridge.host_gpu_ivshmem.{
 
 extern fn serial_println(msg: text)
 
+# Level gate for the frame-executor trace receipts. DEFAULT OFF — flip to true
+# to re-arm the window-loop/composition/present bisection from the 2026-07-26
+# pointer-release investigation. Kept rather than deleted per the log-retention
+# policy. Does NOT cover [wm-frame] content-presented / frame-degraded /
+# engine2d-draw-ir-rejected — those are evidence and fail-closed receipts that
+# must always print.
+val _WM_TRACE: bool = false
+
 class Engine2dWmFrameExecutor:
     engine: Engine2D
     framebuffer: FramebufferDriver
@@ -209,9 +217,9 @@ class Engine2dWmFrameExecutor:
         # hang cannot be attributed to a callee. One line per window plus four
         # phase markers is negligible beside a 4K repaint.
         val dbg_window_total = scene.windows.len()
-        serial_println("[wm-exec] at=window-loop-begin windows={dbg_window_total} content_frames={content_frames.len()}")
+        if _WM_TRACE: serial_println("[wm-exec] at=window-loop-begin windows={dbg_window_total} content_frames={content_frames.len()}")
         for window in scene.windows:
-            serial_println("[wm-exec] at=window-begin id={window.window_id}")
+            if _WM_TRACE: serial_println("[wm-exec] at=window-begin id={window.window_id}")
             val content = shared_wm_scene_window_content_rect_with_titlebar(window, 28)
             val needs_surface = not window.minimized and content.width > 0 and content.height > 0
             if not needs_surface:
@@ -241,15 +249,15 @@ class Engine2dWmFrameExecutor:
                     degraded_window_count = degraded_window_count + 1
                     serial_println("[wm-frame] window-degraded window_id={window.window_id} reason=unresolved-or-duplicate-content")
 
-        serial_println("[wm-exec] at=window-loop-end images={images.len()} good_windows={good_windows.len()} degraded={degraded_window_count}")
+        if _WM_TRACE: serial_println("[wm-exec] at=window-loop-end images={images.len()} good_windows={good_windows.len()} degraded={degraded_window_count}")
         val renderable_images = expected_images - degraded_window_count
         if images.len() != renderable_images or good_content_frames.len() != renderable_images:
             serial_println("[wm-frame] engine2d-draw-ir-rejected resolved_images={images.len()} expected_images={expected_images} degraded={degraded_window_count} content_frames={content_frames.len()} reason=resource-coverage")
             return 0
         val filtered_scene = SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: good_windows, background: scene.background)
-        serial_println("[wm-exec] at=composition-begin")
+        if _WM_TRACE: serial_println("[wm-exec] at=composition-begin")
         val composition = shared_wm_scene_draw_ir_composition_with_content(filtered_scene, taskbar, good_content_frames, DRAW_IR_BACKEND_AUTO, 1000, clock_label, 0)
-        serial_println("[wm-exec] at=composition-end")
+        if _WM_TRACE: serial_println("[wm-exec] at=composition-end")
         if self.host_gpu_base != 0u64:
             if self._render_host_gpu(composition, host_images):
                 if degraded_window_count > 0:
@@ -257,9 +265,9 @@ class Engine2dWmFrameExecutor:
                 for frame in good_content_frames:
                     serial_println("[wm-frame] content-presented scene_revision={scene_revision} path=host-gpu window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
                 return scene_revision
-        serial_println("[wm-exec] at=present-begin")
+        if _WM_TRACE: serial_println("[wm-exec] at=present-begin")
         val result = engine2d_draw_ir_adv_composition_present_with_images(self.engine, composition, false, images)
-        serial_println("[wm-exec] at=present-end rendered={result.rendered_command_count} skipped={result.skipped_command_count}")
+        if _WM_TRACE: serial_println("[wm-exec] at=present-end rendered={result.rendered_command_count} skipped={result.skipped_command_count}")
         # A partially-unsupported composition (e.g. one taskbar icon whose
         # image never resolved because the backing disk lease is degraded)
         # must still show the commands that DID render -- rejecting the

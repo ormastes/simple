@@ -58,6 +58,15 @@ use os.desktop.shell_types.{
 
 extern fn serial_println(msg: text)
 
+# Level gate for the WM event-loop trace receipts. DEFAULT OFF — flip to true to
+# re-arm the loop-step/render-step/pointer-dispatch bisection from the
+# 2026-07-26 pointer-release investigation. Kept rather than deleted per the
+# log-retention policy. Gated at each CALL SITE so the interpolated string is
+# never built when off. Does NOT cover [wm-pointer-irq]/[wm-pointer-state]/
+# [wm-pointer-frame]/[wm-input-irq] — those are the evidence receipts the
+# fullscreen wrapper correlates on and must always print.
+val _WM_TRACE: bool = false
+
 fn _simpleos_revision_mix_i64(seed: i64, value: i64) -> i64:
     ((seed * 131 + value) % 2147483647) + 1
 
@@ -771,19 +780,19 @@ impl DesktopShell:
         # identical path completed moments earlier, so one of these six calls
         # is pathologically slow only in the post-drag-begin state. Six lines
         # per frame is negligible next to a 4K repaint.
-        serial_println("[wm-render-step] at=scene-snapshot")
+        if _WM_TRACE: serial_println("[wm-render-step] at=scene-snapshot")
         val scene = self.runtime_scene_snapshot()
-        serial_println("[wm-render-step] at=taskbar-model")
+        if _WM_TRACE: serial_println("[wm-render-step] at=taskbar-model")
         val taskbar = self.runtime_taskbar_model()
-        serial_println("[wm-render-step] at=scene-revision")
+        if _WM_TRACE: serial_println("[wm-render-step] at=scene-revision")
         val scene_revision = self.runtime_scene_revision()
-        serial_println("[wm-render-step] at=taskbar-revision")
+        if _WM_TRACE: serial_println("[wm-render-step] at=taskbar-revision")
         val taskbar_revision = self.runtime_taskbar_revision()
-        serial_println("[wm-render-step] at=content-frames scene_revision={scene_revision}")
+        if _WM_TRACE: serial_println("[wm-render-step] at=content-frames scene_revision={scene_revision}")
         val content_frames = self.runtime_content_frames(scene_revision)
-        serial_println("[wm-render-step] at=executor-render")
+        if _WM_TRACE: serial_println("[wm-render-step] at=executor-render")
         val rendered_revision = executor.render(scene, taskbar, content_frames, scene_revision, taskbar_revision, self.clock_text)
-        serial_println("[wm-render-step] at=done rendered={rendered_revision}")
+        if _WM_TRACE: serial_println("[wm-render-step] at=done rendered={rendered_revision}")
         if rendered_revision <= 0:
             return 0
         self.last_rendered_scene_revision = scene_revision
@@ -915,26 +924,26 @@ impl DesktopShell:
             # (a 30s->300s budget raise changed nothing). Gated on
             # pointer_sequence so only pointer steps pay the serial cost.
             if pointer_sequence > 0:
-                serial_println("[wm-loop-step] seq={pointer_sequence} at=before-shell-input")
+                if _WM_TRACE: serial_println("[wm-loop-step] seq={pointer_sequence} at=before-shell-input")
             self.handle_pending_shell_input(true)
             if pointer_sequence > 0:
-                serial_println("[wm-loop-step] seq={pointer_sequence} at=before-reconcile")
+                if _WM_TRACE: serial_println("[wm-loop-step] seq={pointer_sequence} at=before-reconcile")
             self.reconcile_dead_process_windows()
             if pointer_sequence > 0:
-                serial_println("[wm-loop-step] seq={pointer_sequence} at=before-scene-revision")
+                if _WM_TRACE: serial_println("[wm-loop-step] seq={pointer_sequence} at=before-scene-revision")
             val scene_revision = self.runtime_scene_revision()
             if pointer_sequence > 0:
-                serial_println("[wm-loop-step] seq={pointer_sequence} at=before-taskbar-revision scene_revision={scene_revision}")
+                if _WM_TRACE: serial_println("[wm-loop-step] seq={pointer_sequence} at=before-taskbar-revision scene_revision={scene_revision}")
             val taskbar_revision = self.runtime_taskbar_revision()
             val need_render = pointer_sequence > 0 or (fullscreen_sequence > 0 and fullscreen_action != "") or scene_revision != self.last_rendered_scene_revision or taskbar_revision != self.last_rendered_taskbar_revision
             var rendered_revision = scene_revision
             if pointer_sequence > 0:
                 val need_render_code = if need_render: 1 else: 0
-                serial_println("[wm-loop-step] seq={pointer_sequence} at=before-render need_render={need_render_code} taskbar_revision={taskbar_revision}")
+                if _WM_TRACE: serial_println("[wm-loop-step] seq={pointer_sequence} at=before-render need_render={need_render_code} taskbar_revision={taskbar_revision}")
             if need_render:
                 rendered_revision = self.render_baremetal_frame(executor)
             if pointer_sequence > 0:
-                serial_println("[wm-loop-step] seq={pointer_sequence} at=after-render rendered={rendered_revision}")
+                if _WM_TRACE: serial_println("[wm-loop-step] seq={pointer_sequence} at=after-render rendered={rendered_revision}")
             if pointer_sequence > 0:
                 serial_println("[wm-pointer-frame] input_seq={pointer_sequence} generation={rendered_revision}")
             if fullscreen_sequence > 0 and fullscreen_action != "":
@@ -1085,7 +1094,7 @@ impl DesktopShell:
         val dbg_scene_w = scene.width
         val dbg_scene_h = scene.height
         val dbg_live_surfaces = self.compositor.surfaces.len()
-        serial_println("[wm-pointer-dispatch] x={x} y={y} button='{button}' kind='{kind}' scene_windows={dbg_scene_windows} scene={dbg_scene_w}x{dbg_scene_h} live_surfaces={dbg_live_surfaces}")
+        if _WM_TRACE: serial_println("[wm-pointer-dispatch] x={x} y={y} button='{button}' kind='{kind}' scene_windows={dbg_scene_windows} scene={dbg_scene_w}x{dbg_scene_h} live_surfaces={dbg_live_surfaces}")
         if dbg_scene_windows > 0:
             val dbg_w0 = scene.windows[0]
             val dbg_w0_x = dbg_w0.x
@@ -1094,7 +1103,7 @@ impl DesktopShell:
             val dbg_w0_h = dbg_w0.height
             val dbg_w0_id = dbg_w0.window_id
             val dbg_w0_min = if dbg_w0.minimized: 1 else: 0
-            serial_println("[wm-pointer-dispatch] w0 id='{dbg_w0_id}' rect={dbg_w0_x},{dbg_w0_y} {dbg_w0_w}x{dbg_w0_h} minimized={dbg_w0_min}")
+            if _WM_TRACE: serial_println("[wm-pointer-dispatch] w0 id='{dbg_w0_id}' rect={dbg_w0_x},{dbg_w0_y} {dbg_w0_w}x{dbg_w0_h} minimized={dbg_w0_min}")
         val taskbar = self.runtime_taskbar_model()
         val command = simpleos_wm_pointer_runtime_command(scene, taskbar, x, y, button, kind, 1000, self.clock_text, 2)
         self.wm_runtime_state = simpleos_wm_apply_pointer(self.wm_runtime_state, scene, taskbar, x, y, button, kind, 1000, self.clock_text, 2)

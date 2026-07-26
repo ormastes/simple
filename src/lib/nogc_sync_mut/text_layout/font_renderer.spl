@@ -292,6 +292,14 @@ fn _browser_default_for_family_cached(family: text) -> (FontRenderer, bool):
 # mirrored consumer-side probe in engine.spl to localize whether atlas
 # coverage is lost before or during that cross-layer struct transfer.
 val _VEC_ATLAS_PROBE: bool = false
+# Level gate for the metrics-resolver trace receipts ([rfm] ...). DEFAULT OFF.
+# These reported the cache-hit/has_ttf distribution that refuted the
+# "module-globals never persist" theory and exposed has_ttf=0 on 117/118
+# resolves (still open). Kept rather than deleted per the log-retention policy.
+# WARNING: adding NEW prints inside this file's hot paths has regressed the WM
+# lane before (probing _resolved_font_metric_cached re-broke the font execution
+# plan and lost every PPM) — this region is layout-sensitive.
+val _WM_TRACE: bool = false
 var _vec_atlas_probe_count: i32 = 0
 var _vec_glyph_probe_count: i32 = 0
 
@@ -1806,7 +1814,7 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
     # regressed the whole lane (rerun48 lost every PPM to a re-broken font
     # execution plan) because this region is layout-sensitive — if that recurs,
     # revert these immediately rather than reading the regression as new data.
-    print("[rfm] at=default-font family={resolved_family}")
+    if _WM_TRACE: print("[rfm] at=default-font family={resolved_family}")
     val default_font = _browser_default_for_family_cached(resolved_family)
     var renderer = default_font.0
     val renderer_from_cache = default_font.1
@@ -1816,7 +1824,7 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
     # render cost by this file's own comment). has_ttf is bound once and
     # reused by the guard below rather than calling the predicate twice.
     val dbg_has_ttf = renderer.has_sffi_ttf()
-    print("[rfm] at=renderer-bound from_cache={renderer_from_cache} has_ttf={dbg_has_ttf}")
+    if _WM_TRACE: print("[rfm] at=renderer-bound from_cache={renderer_from_cache} has_ttf={dbg_has_ttf}")
     if not dbg_has_ttf:
         return ResolvedFontMetrics(valid: false, family: resolved_family, identity: "", advances: [], width: 0, line_height: 0, reason: "font-runtime-unavailable", glyph_run: draw_ir_empty_glyph_run_payload(), shaping_required: complex_script != 0)
     val identity = renderer.current_font_identity()
@@ -1826,16 +1834,16 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
         )
     else:
         ""
-    print("[rfm] at=cache-lookup cacheable={cacheable}")
+    if _WM_TRACE: print("[rfm] at=cache-lookup cacheable={cacheable}")
     if cacheable:
         if val cached = _resolved_font_metric_cached(cache_key):
             if not renderer_from_cache:
                 renderer.clear_ttf()
-            print("[rfm] at=cache-hit")
+            if _WM_TRACE: print("[rfm] at=cache-hit")
             return cached
-    print("[rfm] at=measure shaped_valid={shaped.valid}")
+    if _WM_TRACE: print("[rfm] at=measure shaped_valid={shaped.valid}")
     val advances = if shaped.valid: shaped.advances else: renderer.measure_text_advances(content, font_size)
-    print("[rfm] at=measured advances={advances.len()}")
+    if _WM_TRACE: print("[rfm] at=measured advances={advances.len()}")
     var width = 0
     if shaped.valid:
         width = shaped.width

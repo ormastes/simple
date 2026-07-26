@@ -51,6 +51,15 @@ use common.ui.theme_render_snapshot.{ThemeRenderSnapshot, ThemeShadowLayer}
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
 use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
 
+# Level gate for the WM render-path trace receipts. DEFAULT OFF — flip to true
+# to re-arm the composition/taskbar/text bisection that mapped the 2026-07-26
+# pointer-release stall (doc/08_tracking/bug/
+# simpleos_wm_pointer_release_font_metrics_hang_2026-07-26.md). Kept rather than
+# deleted per the log-retention policy: these are reusable probes, not one-off
+# dumps. Gated at each CALL SITE so the interpolated string is never built when
+# off — this path runs per text and the baremetal heap never frees.
+val _WM_TRACE: bool = false
+
 val WM_DRAW_IR_COMPOSITION_ID: text = "wm-composite"
 val WM_DRAW_IR_DESKTOP_SURFACE: text = "wm-desktop"
 val WM_DRAW_IR_CHROME_SURFACE: text = "wm-chrome"
@@ -549,20 +558,15 @@ fn _wm_draw_ir_engine_shadow_blur(shadows: [ThemeShadowLayer]) -> i32:
 fn _wm_draw_ir_window_snapshot_style(snapshot: ThemeRenderSnapshot, window: SharedWmWindow, part: text) -> [DrawIrStyleProp]:
     val material = snapshot.material
     val shadows = if window.focused: material.active_shadows else: material.inactive_shadows
-    val surface_color = if part == "body": material.window_fill_rgba else if window.focused: _wm_draw_ir_opaque(material.active_title_fill_rgba) else: _wm_draw_ir_opaque(material.inactive_title_fill_rgba)
+    val surface_color = if part == "body": material.solid_fallback_rgba else if window.focused: _wm_draw_ir_opaque(material.active_title_fill_rgba) else: _wm_draw_ir_opaque(material.inactive_title_fill_rgba)
     val gradient_requested = part == "body"
     val has_window_gradient = gradient_requested and material.window_gradient_available
-    # The canonical Engine2D styled-RECT material pass now clips its
-    # CPU-composited gradient and backdrop to the same rounded surface.
-    # Native device material execution remains a distinct evidence rung.
-    val gradient_realized = has_window_gradient
+    # Engine2D has no rounded-gradient clip. Preserve the typed request but
+    # realize the existing opaque rounded fallback rather than leaking a
+    # square gradient outside the window radius.
+    val gradient_realized = has_window_gradient and material.corner_radius_px <= 0
     val background_image = if gradient_realized: "linear-gradient({material.window_gradient_start_rgba},{material.window_gradient_end_rgba})" else: "none"
-    val background_capability = if not gradient_requested: "not-requested" else if gradient_realized: "engine2d-cpu-rounded-material-v1" else: "unavailable"
-    val backdrop_requested = part == "body"
-    val backdrop_filter = if backdrop_requested: "blur({material.backdrop_blur_px}px) saturate({material.backdrop_saturation_milli / 10}%)" else: "none"
-    val backdrop_capability = if backdrop_requested: "engine2d-cpu-composited-material-v1" else: "not-requested"
-    val realized_blur_px = if material.backdrop_blur_px < 0: 0 else if material.backdrop_blur_px > 4: 4 else: material.backdrop_blur_px
-    val realized_saturation_milli = if material.backdrop_saturation_milli < 0: 0 else if material.backdrop_saturation_milli > 3000: 3000 else: material.backdrop_saturation_milli
+    val background_capability = if not gradient_requested: "not-requested" else if gradient_realized: "engine2d-two-stop" elif has_window_gradient: "unavailable-rounded-clip" else: "unavailable"
     var style = [
         draw_ir_style_prop("wm-theme-schema", "theme-render-snapshot-v1"),
         draw_ir_style_prop("wm-theme-id", snapshot.id),
@@ -587,20 +591,15 @@ fn _wm_draw_ir_window_snapshot_style(snapshot: ThemeRenderSnapshot, window: Shar
         draw_ir_style_prop("border-right-color", material.border_rgba.to_string()),
         draw_ir_style_prop("border-bottom-color", material.border_rgba.to_string()),
         draw_ir_style_prop("border-left-color", material.border_rgba.to_string()),
-        draw_ir_style_prop("backdrop-filter", backdrop_filter),
-        draw_ir_style_prop("backdrop-filter-capability", backdrop_capability)
+        draw_ir_style_prop("backdrop-filter", "blur({material.backdrop_blur_px}px) saturate({material.backdrop_saturation_milli / 10}%)"),
+        # Engine2D has no backdrop sampling pass. Keep the requested material
+        # inspectable and explicitly realize the opaque fallback above.
+        draw_ir_style_prop("backdrop-filter-capability", "unavailable"),
+        draw_ir_style_prop("backdrop-filter-fallback", "solid-material"),
+        draw_ir_style_prop("backdrop-filter-fallback-reason", "cpu-raster-backdrop-sampling-unavailable")
     ]
-    if backdrop_requested:
-        style.push(draw_ir_style_prop("backdrop-filter-realized", "blur({realized_blur_px}px) saturate({realized_saturation_milli / 10}%)"))
-        style.push(draw_ir_style_prop("backdrop-filter-realized-blur-radius-px", realized_blur_px.to_string()))
-        style.push(draw_ir_style_prop("backdrop-filter-realized-saturation-milli", realized_saturation_milli.to_string()))
-        if realized_blur_px != material.backdrop_blur_px:
-            style.push(draw_ir_style_prop("backdrop-filter-reduction-reason", "cpu-blur-radius-bounded-to-4"))
-        style.push(draw_ir_style_prop("backdrop-filter-fallback", "cpu-composited-material"))
-        style.push(draw_ir_style_prop("backdrop-filter-fallback-reason", "native-device-backdrop-path-pending"))
     if has_window_gradient:
         style.push(draw_ir_style_prop("background-image-source-css", material.window_gradient_source_css))
-        style.push(draw_ir_style_prop("background-image-composite-mode", "surface-then-alpha-gradient"))
     if gradient_requested and not gradient_realized:
         style.push(draw_ir_style_prop("background-image-fallback", "solid-material"))
         val fallback_reason = if has_window_gradient: "rounded-gradient-clip-unavailable" else: "typed-theme-gradient-unavailable"
@@ -644,14 +643,14 @@ fn _wm_draw_ir_text(component_id: text, x: i32, legacy_y: i32, box_y: i32, box_h
     # frame-degraded skipped=1 text-font-batch and captured no PPMs at all).
     # This lane is layout-sensitive — adding code inside a miscompiled region
     # flips it — so instrument from outside the blast radius.
-    print("[wm-text] at=begin id={component_id} value_len={value.len()}")
+    if _WM_TRACE: print("[wm-text] at=begin id={component_id} value_len={value.len()}")
     val candidate = simpleos_default_font_asset_candidate()
-    print("[wm-text] at=candidate")
+    if _WM_TRACE: print("[wm-text] at=candidate")
     val normalized_language = language.trim().lower()
     val family = if normalized_language != "" and normalized_language != "und": "sans" else: candidate.family
-    print("[wm-text] at=resolve family={family}")
+    if _WM_TRACE: print("[wm-text] at=resolve family={family}")
     val metrics = resolve_font_metrics_with_language(family, value, 12, language)
-    print("[wm-text] at=resolved valid={metrics.valid} shaping={metrics.shaping_required}")
+    if _WM_TRACE: print("[wm-text] at=resolved valid={metrics.valid} shaping={metrics.shaping_required}")
     var command = if metrics.valid and metrics.shaping_required:
         draw_ir_text_shaped_font(component_id, x, legacy_y, value, color, metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, 12, metrics.glyph_run)
     else if metrics.valid:
@@ -834,11 +833,11 @@ fn _wm_draw_ir_taskbar_objects_batch(scene: SharedWmScene, taskbar: TaskbarModel
     val dbg_pinned = taskbar.pinned.len()
     val dbg_running = taskbar.running.len()
     val dbg_tray = taskbar.tray.len()
-    print("[wm-tbar] at=begin pinned={dbg_pinned} running={dbg_running} tray={dbg_tray} scene={scene.width}x{scene.height}")
+    if _WM_TRACE: print("[wm-tbar] at=begin pinned={dbg_pinned} running={dbg_running} tray={dbg_tray} scene={scene.width}x{scene.height}")
     val theme = wm_chrome_theme()
-    print("[wm-tbar] at=theme-done")
+    if _WM_TRACE: print("[wm-tbar] at=theme-done")
     val chrome = shared_wm_scene_chrome(scene, dpi_scale_milli, clock_label, right_icon_count, taskbar.pinned.len() + taskbar.running.len())
-    print("[wm-tbar] at=chrome-done")
+    if _WM_TRACE: print("[wm-tbar] at=chrome-done")
     val metrics = WmRenderMetrics(scale_milli: dpi_scale_milli, top_lane_height: chrome.command_lane.height, titlebar_height: 28, taskbar_height: chrome.taskbar.height, min_hit_target: 56)
     val slot_w = metrics.min_hit_target
     val reserved_right = (taskbar.tray.len() + 1) * slot_w
@@ -858,7 +857,7 @@ fn _wm_draw_ir_taskbar_objects_batch(scene: SharedWmScene, taskbar: TaskbarModel
             commands.push(draw_ir_rect("taskbar-running-{window.window_id}", rect.x + 2, rect.y + 4, rect.width - 4, rect.height - 8, color))
             commands.push(_wm_draw_ir_text("taskbar-running-label-{window.window_id}", rect.x + 6, rect.y + 14, rect.y + 4, rect.height - 8, window.title, theme.text_primary, "und"))
         object_index = object_index + 1
-    print("[wm-tbar] at=objects-done object_index={object_index} commands={commands.len()}")
+    if _WM_TRACE: print("[wm-tbar] at=objects-done object_index={object_index} commands={commands.len()}")
     var tray_index = 0
     for tray in taskbar.tray:
         # The pointer-release render never leaves this loop, with tray.len()==1
@@ -871,23 +870,23 @@ fn _wm_draw_ir_taskbar_objects_batch(scene: SharedWmScene, taskbar: TaskbarModel
         # probe becomes a second hang.
         val dbg_item_len = tray.item_id.len()
         val dbg_label_len = tray.label.len()
-        print("[wm-tbar] at=tray-item index={tray_index} item_len={dbg_item_len} label_len={dbg_label_len}")
+        if _WM_TRACE: print("[wm-tbar] at=tray-item index={tray_index} item_len={dbg_item_len} label_len={dbg_label_len}")
         val rect = shared_wm_taskbar_tray_object_rect(metrics, scene.width, scene.height, tray_index)
-        print("[wm-tbar] at=tray-rect x={rect.x} y={rect.y} w={rect.width} h={rect.height}")
+        if _WM_TRACE: print("[wm-tbar] at=tray-rect x={rect.x} y={rect.y} w={rect.width} h={rect.height}")
         if rect.x >= 0 and rect.x + rect.width <= scene.width - slot_w:
             commands.push(draw_ir_rect("taskbar-tray-{tray.item_id}", rect.x + 2, rect.y + 4, rect.width - 4, rect.height - 8, theme.host_window_body))
-            print("[wm-tbar] at=tray-rect-pushed")
+            if _WM_TRACE: print("[wm-tbar] at=tray-rect-pushed")
             commands.push(_wm_draw_ir_text("taskbar-tray-label-{tray.item_id}", rect.x + 6, rect.y + 14, rect.y + 4, rect.height - 8, tray.label, theme.text_primary, "und"))
-            print("[wm-tbar] at=tray-text-pushed")
+            if _WM_TRACE: print("[wm-tbar] at=tray-text-pushed")
         tray_index = tray_index + 1
-    print("[wm-tbar] at=tray-done tray_index={tray_index} commands={commands.len()}")
+    if _WM_TRACE: print("[wm-tbar] at=tray-done tray_index={tray_index} commands={commands.len()}")
     if scene.width >= slot_w:
         commands.push(_wm_draw_ir_text("taskbar-clock", scene.width - slot_w + 4, chrome.taskbar.y + 14, chrome.taskbar.y, chrome.taskbar.height, clock_label, theme.text_primary, "und"))
-    print("[wm-tbar] at=clock-done commands={commands.len()}")
+    if _WM_TRACE: print("[wm-tbar] at=clock-done commands={commands.len()}")
     val embedding = draw_ir_embedding_config("wm-taskbar-objects", "wm-taskbar-objects", 0, 0, scene.width, scene.height, 10000, 1000, false)
-    print("[wm-tbar] at=revision")
+    if _WM_TRACE: print("[wm-tbar] at=revision")
     val dbg_revision = _wm_draw_ir_chrome_revision(scene, taskbar, dpi_scale_milli, clock_label, right_icon_count)
-    print("[wm-tbar] at=batch-build")
+    if _WM_TRACE: print("[wm-tbar] at=batch-build")
     draw_ir_batch_with_source("wm-taskbar-objects", backend_target, embedding, commands, _wm_draw_ir_source("wm.taskbar.objects", "wm.taskbar", dbg_revision))
 
 fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backend_target: text) -> DrawIrBatch:
@@ -1005,22 +1004,22 @@ fn shared_wm_scene_draw_ir_composition(scene: SharedWmScene, taskbar: TaskbarMod
     # ([wm-comp] at=base-begin with no at=base-done, then total guest silence),
     # having completed for the press render moments earlier. Six lines per
     # composition, negligible beside a 4K repaint.
-    print("[wm-base] at=desktop-batch")
+    if _WM_TRACE: print("[wm-base] at=desktop-batch")
     val desktop_batch = _wm_draw_ir_desktop_batch(scene, backend_target)
-    print("[wm-base] at=visible-windows-by-layer")
+    if _WM_TRACE: print("[wm-base] at=visible-windows-by-layer")
     val windows = _wm_draw_ir_visible_windows_by_layer(scene)
     val dbg_layer_windows = windows.len()
-    print("[wm-base] at=chrome-batch layer_windows={dbg_layer_windows}")
+    if _WM_TRACE: print("[wm-base] at=chrome-batch layer_windows={dbg_layer_windows}")
     var batches: [DrawIrBatch] = [desktop_batch, _wm_draw_ir_chrome_batch(scene, taskbar, backend_target, dpi_scale_milli, clock_label, right_icon_count)]
-    print("[wm-base] at=window-batches")
+    if _WM_TRACE: print("[wm-base] at=window-batches")
     for window in windows:
-        print("[wm-base] at=window-batch id={window.window_id}")
+        if _WM_TRACE: print("[wm-base] at=window-batch id={window.window_id}")
         batches.push(_wm_draw_ir_window_batch(scene, window, backend_target))
-    print("[wm-base] at=taskbar-objects-batch")
+    if _WM_TRACE: print("[wm-base] at=taskbar-objects-batch")
     batches.push(_wm_draw_ir_taskbar_objects_batch(scene, taskbar, backend_target, dpi_scale_milli, clock_label, right_icon_count))
-    print("[wm-base] at=layout-key")
+    if _WM_TRACE: print("[wm-base] at=layout-key")
     val dbg_layout_key = shared_wm_scene_layout_key(scene)
-    print("[wm-base] at=compose")
+    if _WM_TRACE: print("[wm-base] at=compose")
     draw_ir_composition(WM_DRAW_IR_COMPOSITION_ID, dbg_layout_key, backend_target, batches)
 
 # Recursively collects Draw IR batches for the content frames nested under
@@ -1037,7 +1036,7 @@ fn _wm_draw_ir_child_content_batches_recursive(content_frames: [WmContentFrame],
     # freestanding-lane failure (a garbage cap would defeat the depth guard,
     # a zero cap would silently drop all nested frames).
     if depth <= 3:
-        print("[wm-comp] recurse parent='{parent_id}' depth={depth} cap={WM_CONTENT_FRAME_MAX_NESTING_DEPTH} frames={content_frames.len()}")
+        if _WM_TRACE: print("[wm-comp] recurse parent='{parent_id}' depth={depth} cap={WM_CONTENT_FRAME_MAX_NESTING_DEPTH} frames={content_frames.len()}")
     if depth > WM_CONTENT_FRAME_MAX_NESTING_DEPTH:
         return []
     var out: [DrawIrBatch] = []
@@ -1058,16 +1057,16 @@ fn shared_wm_scene_draw_ir_composition_with_content(scene: SharedWmScene, taskba
     # at=composition-end on the pointer release, while the press completed this
     # same call with an identical scene_revision. base is built by a far larger
     # builder than the loop below, so both need to be distinguishable.
-    print("[wm-comp] at=base-begin")
+    if _WM_TRACE: print("[wm-comp] at=base-begin")
     val base = shared_wm_scene_draw_ir_composition(scene, taskbar, backend_target, dpi_scale_milli, clock_label, right_icon_count)
     val dbg_base_batches = base.batches.len()
     val dbg_frames = content_frames.len()
-    print("[wm-comp] at=base-done base_batches={dbg_base_batches} frames={dbg_frames}")
+    if _WM_TRACE: print("[wm-comp] at=base-done base_batches={dbg_base_batches} frames={dbg_frames}")
     if content_frames.len() == 0:
         return base
     var batches: [DrawIrBatch] = []
     for batch in base.batches:
-        print("[wm-comp] at=batch id={batch.batch_id}")
+        if _WM_TRACE: print("[wm-comp] at=batch id={batch.batch_id}")
         batches.push(batch)
         for window in scene.windows:
             if not window.minimized and batch.batch_id == "window-{window.window_id}":
