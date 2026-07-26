@@ -134,6 +134,15 @@ fn _write_pixels(base: i64, pixels: [u32], count: i64) -> i64:
         i = i + 2
     simpleos_host_gpu_readback_checksum_finalize(checksum)
 
+fn _processing_cpu_fallback(base: i64, generation: i64, reason: i64, oracle: [u32], count: i64, cpu_elapsed_us: i64) -> bool:
+    if not _request_generation_matches(base, generation):
+        return false
+    val checksum = _write_pixels(base, oracle, count)
+    _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FALLBACK, reason, 0,
+        count * 4, checksum, if cpu_elapsed_us > 0: cpu_elapsed_us else: 1,
+        SIMPLEOS_HOST_GPU_READBACK_CPU, 0)
+    true
+
 fn _render_device_identity(backend: text) -> i64:
     if backend == "vulkan":
         return processing_vulkan_device_identity(vulkan_sffi_selected_device_driver_identity())
@@ -237,7 +246,7 @@ fn _process_hello(base: i64, generation: i64, version: i64, guest_isa_code: i64,
     _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_PASS, 0, 0, 0, 0, _elapsed_us_since(started), 0, 0)
     1
 
-fn _process_request(base: i64, processing_selector: text, retained: [SimpleOsHostGpuImageResource]) -> SimpleOsGpuHostLoopState:
+fn _process_request(base: i64, processing_selector: text, processing_fallback_cpu: bool, retained: [SimpleOsHostGpuImageResource]) -> SimpleOsGpuHostLoopState:
     val generation = _read(base, SIMPLEOS_HOST_GPU_WIRE_REQUEST_GENERATION)
     val completion = _read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
     if not simpleos_host_gpu_generation_is_fresh(generation, completion):
@@ -370,9 +379,14 @@ fn _process_request(base: i64, processing_selector: text, retained: [SimpleOsHos
             device_identity = result.device_identity
         val device_elapsed_us = _elapsed_us_since(device_started)
         if not completed or backend_handle <= 0 or device_identity <= 0:
-            _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, simpleos_host_gpu_processing_reason(executor_reason), 0, 0, 0, 1, 0, 0)
+            val failure_reason = simpleos_host_gpu_processing_reason(executor_reason)
+            if processing_fallback_cpu:
+                return _loop_state(if _processing_cpu_fallback(base, generation, failure_reason, oracle, element_count, cpu_elapsed_us): 1 else: 0, retained)
+            _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, failure_reason, 0, 0, 0, 1, 0, 0)
             return _loop_state(1, retained)
         if not processing_ir_outputs_equal(values, oracle):
+            if processing_fallback_cpu:
+                return _loop_state(if _processing_cpu_fallback(base, generation, SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH, oracle, element_count, cpu_elapsed_us): 1 else: 0, retained)
             _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH, 0, 0, 0, 1, 0, 0)
             return _loop_state(1, retained)
         if not _request_generation_matches(base, generation):
@@ -511,9 +525,15 @@ fn main() -> i64:
     val offset = if requested_offset == "": 0 elif requested_offset == "528482304": 528482304 else: -1
     val requested_processing_selector = _arg_value(args, "--processing-backend=")
     val processing_selector = if requested_processing_selector == "": "auto" else: requested_processing_selector
+    val requested_processing_fallback = _arg_value(args, "--processing-fallback=")
+    val processing_fallback = if requested_processing_fallback == "": "none" else: requested_processing_fallback
+    val processing_fallback_cpu = processing_fallback == "cpu"
     val once = args.contains("--once")
     if processing_selector != "auto" and processing_selector != "cuda" and processing_selector != "vulkan" and processing_selector != "metal":
         print("simpleos_gpu_host: --processing-backend must be auto, cuda, vulkan, or metal\n")
+        return 2
+    if processing_fallback != "none" and processing_fallback != "cpu":
+        print("simpleos_gpu_host: --processing-fallback must be none or cpu\n")
         return 2
     if offset < 0 or path == "" or not file_exists(path) or file_size(path) < offset + SIMPLEOS_HOST_GPU_REGION_BYTES:
         print("simpleos_gpu_host: --shm=<backing file> with an optional supported --shm-offset required\n")
@@ -523,17 +543,18 @@ fn main() -> i64:
         print("simpleos_gpu_host: mmap failed\n")
         return 3
     print("HOST_GPU_DAEMON_SELECTOR processing_backend={processing_selector}\n")
+    print("HOST_GPU_DAEMON_FALLBACK processing_fallback={processing_fallback}\n")
     print("HOST_GPU_DAEMON_TRANSPORT shm_offset={offset}\n")
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_VERSION, 0)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_NEGOTIATED_CAPABILITY_MASK, 0)
     _write(base, SIMPLEOS_HOST_GPU_WIRE_REQUESTED_CAPABILITY_MASK, 0)
     if once:
-        val state = _process_request(base, processing_selector, [])
+        val state = _process_request(base, processing_selector, processing_fallback_cpu, [])
         file_munmap(base, SIMPLEOS_HOST_GPU_REGION_BYTES)
         return if state.processed > 0: 0 else: 4
     var retained: [SimpleOsHostGpuImageResource] = []
     while true:
-        val state = _process_request(base, processing_selector, retained)
+        val state = _process_request(base, processing_selector, processing_fallback_cpu, retained)
         retained = state.retained
         if state.processed == 0:
             thread_sleep_ms(1)

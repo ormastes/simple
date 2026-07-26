@@ -116,6 +116,8 @@ src/lib/gc_async_mut/gpu/engine2d/directx_backend.spl
 - **Three-Backend Fault Contract Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_ir_fault_source_contract_spec.md`
 - **Executor Wire-Reason Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_ir_executor_reason_mapping_contract_spec.md`
 - **Failure/Fallback Receipt Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/native_backend_failure_fallback_spec.md`
+- **CPU Fallback Policy Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/processing_cpu_fallback_policy_contract_spec.md`
+- **ivshmem Fallback Receipt Manual:** `doc/06_spec/01_unit/os/host_gpu_ivshmem_fallback_receipt_spec.md`
 - **SimpleOS Host GPU Protocol Manual:** `doc/06_spec/01_unit/lib/common/gpu/simpleos_host_gpu_protocol_spec.md`
 - **Prepared macOS Metal Fault Manual:** `doc/06_spec/03_system/app/simpleos_gpu_host/macos_metal_processing_ir_failure_injection_spec.md`
 
