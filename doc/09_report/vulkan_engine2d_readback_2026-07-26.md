@@ -47,16 +47,20 @@ numeric `SymbolId` collision.
 
 The MIR source now prefers name-keyed lowered-value provenance before numeric
 HIR IDs and preserves owner-qualified aggregate returns across every method
-dispatch path. Its final source contract passes 2/2. The third bounded
-incremental build reused 732 objects, compiled three, and linked a
-source-matched compiler driver. The driver help smoke passes, but its first
-two-module native compile segfaults: GDB shows typed-map `.has(...)` lowering
-misbound to `DiContainer.has` from `HirLowering.lower_hir_expr`. The focused
-system spec separately timed out after selecting the Rust seed and supplies no
-native evidence. The typed instance plus imported static-factory oracle remains
-expected to return `84`, but its native assertion is blocked by this method
-selection defect. No additional hardware run was made, and
-readback/checksum/parity pass is not claimed.
+dispatch path. Its final layout source contract passes 2/2. The follow-up
+Dict-dispatch source contract passes 3/3: nonstatic Dict builtins now validate
+the lowered receiver even when stale resolution names an unrelated `.has`, and
+the first-stage HIR membership checks use the direct runtime owner.
+
+Three bounded retained-cache builds completed (6 compiled/729 cached, 3/732,
+4/731). The resulting driver removes the `DiContainer.has` segfault and reaches
+phase 3. With both oracle modules supplied it completes analysis, but its
+`CompileMode` value is corrupted before phase dispatch: it logs `no mode
+matched, falling through`, returns success, and emits no binary. Post-return
+mode reassignment and discriminant dispatch did not change the behavior and
+were removed. The native same-name regression is present but therefore remains
+unexecuted. No additional hardware run was made, and readback/checksum/parity
+pass is not claimed.
 
 See
 `doc/08_tracking/bug/native_engine2d_readback_cross_module_field_layout_2026-07-26.md`.

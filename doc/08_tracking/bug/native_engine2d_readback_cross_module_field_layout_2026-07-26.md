@@ -29,18 +29,29 @@ available before field resolution on every dispatch path.
 `cross_module_field_layout_source_spec.spl` passes 2/2 with the final
 canonical-shape and imported-method fallback assertions.
 
-The third bounded incremental build reused 732 objects, compiled three, and
-linked `build/gpu-goal/source-matched/simple.driver.stubbed`. Its `--help`
-smoke passes, but compiling the two-module native regression segfaults after
-argument parsing. GDB resolves the crash to `DiContainer.has`, called from
-`HirLowering.lower_hir_expr`; typed-map `.has(...)` calls in that function were
-misbound to the unrelated DI method in the native compiler capsule. The
-release-runner system spec also timed out after selecting the forbidden Rust
-seed path, so neither result is native acceptance evidence.
+The Dict/DI collision is now repaired in source. MIR probes the lowered
+receiver for nonstatic Dict builtins even when method metadata is positively
+but incorrectly resolved, while preserving single evaluation for custom
+instance, trait, free-function, and unresolved dispatch. HIR's seven
+self-host-sensitive dictionary membership checks call the existing
+`rt_dict_contains` owner directly so the first incremental stage can converge.
+The focused source contract passes 3/3, and
+`native_same_name_has_dispatch_regression_spec.spl` requires a Dict and an
+unrelated custom `.has` to both return true.
+
+Three retained-cache driver builds completed without bootstrap or cache reset:
+6 compiled/729 cached, 3/732, then 4/731. The resulting driver no longer
+segfaults; the original one-file invocation reaches phase 3 and reports only
+the expected missing relative import. Supplying both modules parses, lowers,
+and analyzes them, but the standalone native driver then logs `no mode
+matched, falling through`, exits zero, and writes no binary. Reassigning the
+parsed mode after `CliArgs.to_options` and replacing the mode match with direct
+enum-discriminant comparisons did not alter that result, proving the
+`CompileMode` value is already corrupted before phase dispatch; those
+ineffective workarounds were removed.
 
 The three-cycle cap is reached. Resume from the retained cache; do not run a
-full bootstrap. First repair and directly regress native method selection for
-same-named `.has` methods, then compile the existing two-module oracle and
-expect `84`. Only after that passes, regenerate the retained Vulkan evidence
-closure, verify that the caller loads `pixels` at offset 0, and run one live
-readback.
+full bootstrap. Repair and directly regress native `CompileMode` transport,
+then compile the existing two-module oracle and expect `84`. Only after that
+passes, regenerate the retained Vulkan evidence closure, verify that the caller
+loads `pixels` at offset 0, and run one live readback.
