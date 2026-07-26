@@ -12,22 +12,26 @@ peer reports.
 
 ### Verified current state
 
-- GitHub `main` contains three focused, semantics-preserving parser repairs in
-  `draw_ir_adv.spl`: grouped multiline gradient comparison, intact material
-  count assignment, and intact result count assignment. Each repair advanced
-  the focused current-source font producer to the next parse site.
-- The third and final focused producer attempt stopped at a fourth split
-  assignment near line 1064 (`result.cpu_composited_material_count`). Therefore
-  the current-source font producer has **not compiled**, no runtime probe ran,
-  and no Vulkan render/readback/font/300-DPI evidence was produced.
+- GitHub `main` contains four focused, semantics-preserving parser repairs in
+  `draw_ir_adv.spl`: grouped multiline gradient comparison and three intact
+  multiline count assignments. The fourth split assignment near line 1064
+  (`result.cpu_composited_material_count`) was independently repaired by
+  `fcfa6be98e`.
+- The focused current-source font producer was not rerun after the fourth repair
+  because the mandatory three-cycle cap was already exhausted. Therefore it has
+  **not compiled in the bounded checkpoint**, no runtime probe ran, and no
+  Vulkan render/readback/font/300-DPI evidence was produced.
 - A retained pure-Simple Stage3 artifact can diagnose source, but its provenance
   is bound to an older revision. It cannot authenticate the current `main`.
   A canonical bootstrap may be run later only if essential or required by the
   production builder, and only after the focused current-source producer
   passes.
-- Ordered committed-text ownership changes are on `main`. Exact key/text
-  correlation is still incomplete because the exposed input record does not
-  yet bind committed text to the precise keycode/pressed event.
+- Exact runtime-owned key/text origin correlation was high-capability reviewed
+  and pushed to `main` as `d00e71c11d`. Live ordered-event evidence remains
+  required; the accepted source change is not a Vulkan event PASS.
+- The 300-DPI receipt hardening was high-capability reviewed and integrated as
+  contract enforcement. It is not accepted live evidence or a substitute for
+  the canonical live vector-font gate.
 - QEMU SimpleOS/WM PASS claims remain unsupported: no retained canonical live
   receipt proves guest framebuffer, input, SIMD, ARM, and artifact identity.
   Treat the affected matrix cell and the goal as FAIL until such evidence is
@@ -37,9 +41,9 @@ peer reports.
 
 ### Ordered remaining tasks
 
-1. In a fresh session, repair the fourth split assignment in
-   `draw_ir_adv.spl`; run the focused current-source font producer once and
-   require a clean compile before any bootstrap or live launch.
+1. In a fresh session, run the focused current-source font producer once with
+   all four parser repairs present and require a clean compile before any
+   bootstrap or live launch.
 2. After that focused PASS, produce one canonical, manifest-attested
    pure-Simple Stage3 only if required by the production builder. Do not use
    the Rust seed as normal tooling and do not synthesize or reuse stale
@@ -48,8 +52,9 @@ peer reports.
    positive backend/device handles, same-frame device readback, semantic
    pixels, durable capture, canonical `FontRenderer` vector text at 300 DPI,
    cold/warm font-cache receipts, and ordered focus/pointer/key/text events.
-4. Close exact key/text correlation in the shared winit event record and prove
-   ordered delivery without a synthetic shortcut.
+4. Validate the accepted runtime-owned key/text origin correlation from
+   `d00e71c11d` in the live gate and prove ordered delivery without a synthetic
+   shortcut.
 5. Run Vulkan web, then Vulkan widget GUI, then host-WM live gates. Each must
    preserve Draw IR ownership, use real device output, and retain capture and
    event receipts; GUI must repeat the vector-font proof at 300 DPI.
@@ -67,7 +72,7 @@ peer reports.
 
 | Lane | Sidecar task | Merge owner | Final reviewer |
 |---|---|---|---|
-| Focused Draw IR/font producer | Repair the fourth parse blocker and report one bounded compile result | Primary rendering agent | Highest-capability primary reviewer |
+| Focused Draw IR/font producer | Run one bounded compile with all four parser repairs and report the result | Primary rendering agent | Highest-capability primary reviewer |
 | Vulkan 2D + ordered events | Produce manifest-bound live render/readback/font/event evidence | Primary rendering agent | Highest-capability primary reviewer |
 | Vulkan web/GUI/host-WM | Run sequentially after Vulkan 2D PASS; parallel source-only preparation is allowed | Primary rendering agent | Highest-capability primary reviewer |
 | Metal parity | Prepare source/contracts only until Vulkan host PASS, then run parity gates | Existing local comparison agent; primary integrates only committed isolated work | Highest-capability primary reviewer |
