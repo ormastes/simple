@@ -757,12 +757,21 @@ impl HirLowering:
         var glob_imp_idx = 0
         while glob_imp_idx < imported_mod.imports.len():
             val glob_imp = imported_mod.imports[glob_imp_idx]
-            val declaration_count = imported_mod.classes.len() + imported_mod.structs.len() + imported_mod.enums.len() + imported_mod.traits.len() + imported_mod.functions.len() + imported_mod.constants.len()
-            if depth == 0 and declaration_count == 0 and glob_imp.items.len() == 0:
-                val nested_key = self.resolve_module_key(glob_imp.module)
-                val nested_mod: Module? = if nested_key != "": self.modules_by_name.get(nested_key) else: nil
-                if nested_mod != nil and nested_key != imported_mod_name:
-                    self.register_glob_imported_symbols_depth(nested_mod, nested_key, import_span, depth + 1)
+            # NOTE: a transitive star-import sweep used to live here. It was
+            # removed because the version on main did not compile and could not
+            # have worked: it called `register_glob_imported_symbols_depth`,
+            # which is defined nowhere in the tree, and read a `depth` variable
+            # that is not a parameter, field or global. Its own guard was inert
+            # too — `declaration_count` summed six `Dict.len()` calls, and
+            # Dict.len() returns -1 for every dict in native code (see
+            # doc/08_tracking/bug/native_dict_len_returns_minus_one_2026-07-27.md),
+            # so the sum was -6 and never 0. The symbol that motivated the
+            # sweep (mir_operand_copy) is now covered by the facade-export pass
+            # above, since mir_data.spl exports it explicitly. Broadening plain
+            # globs transitively also risks shadowing a local declaration under
+            # first-write-wins; see
+            # doc/09_report/glob_transitive_import_broadening_risk_2026-07-27.md
+            # before reintroducing it.
             var glob_it = 0
             while glob_it < glob_imp.items.len():
                 val glob_item = glob_imp.items[glob_it]
