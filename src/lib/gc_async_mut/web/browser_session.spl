@@ -25,6 +25,11 @@
 use common.string_builder.{StringBuilder}
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_attr, be_dom_get_text_content, be_dom_serialize_children,
+    be_dom_set_children
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     browser_resource_size_allowed, BROWSER_MAX_DOCUMENT_SUBRESOURCES
 }
@@ -60,6 +65,8 @@ use std.gc_async_mut.web.browser_session_context.{
 }
 
 val BROWSER_RUNTIME_FLUSH_ROUND_LIMIT: i32 = 8
+val BROWSER_DOM_BRIDGE_MAX_ELEMENTS: i32 = 4096
+val BROWSER_DOM_BRIDGE_OVERSIZE = "\u0000simple-dom-oversize"
 
 class BrowserHistoryEntry:
     url: text
@@ -285,6 +292,14 @@ class BrowserRuntimeState:
     chrome_id: i64
     session_storage_id: i64
     local_storage_id: i64
+    dom_node_ids: [i64]
+    dom_element_ids: [i64]
+    dom_element_list_id: i64
+    dom_style_ids: [i64]
+    dom_id_snapshots: [text]
+    dom_class_snapshots: [text]
+    dom_value_snapshots: [text]
+    dom_style_snapshots: [text]
 
     static fn create(
         url: text,
@@ -524,7 +539,7 @@ class BrowserRuntimeState:
         if is_guest_runtime:
             print "[BRS] runtime create stage=after-install-storage"
 
-        BrowserRuntimeState(
+        var state = BrowserRuntimeState(
             runtime: runtime,
             window_id: window_id,
             document_id: document_id,
@@ -534,7 +549,307 @@ class BrowserRuntimeState:
             navigator_id: navigator_id,
             chrome_id: chrome_id,
             session_storage_id: session_storage_id,
-            local_storage_id: local_storage_id
+            local_storage_id: local_storage_id,
+            dom_node_ids: [],
+            dom_element_ids: [],
+            dom_element_list_id: -1,
+            dom_style_ids: [],
+            dom_id_snapshots: [],
+            dom_class_snapshots: [],
+            dom_value_snapshots: [],
+            dom_style_snapshots: []
+        )
+        state.bind_dom(html_tree_builder_build(
+            "<html><body>" + body_html + "</body></html>"
+        ))
+        state
+
+fn _browser_dom_js_text(value: JsValue) -> text:
+    match value:
+        JsValue.String(v): v
+        JsValue.Number(v): "{v}"
+        JsValue.Boolean(v):
+            if v: "true"
+            else: "false"
+        JsValue.Null: ""
+        _: ""
+
+fn _browser_dom_css_name(name: text) -> text:
+    if name == "cssFloat":
+        return "float"
+    var out = ""
+    for ch in name:
+        if "ABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(ch):
+            out = out + "-" + ch.lower()
+        else:
+            out = out + ch
+    out
+
+fn _browser_dom_css_js_name(name: text) -> text:
+    if name.starts_with("--"):
+        return name
+    var out = ""
+    var uppercase_next = false
+    for ch in name:
+        if ch == "-":
+            uppercase_next = true
+        elif uppercase_next:
+            out = out + ch.upper()
+            uppercase_next = false
+        else:
+            out = out + ch
+    out
+
+fn _browser_dom_style_snapshot(runtime: JsRuntime, object_id: i64) -> text:
+    val object = runtime.get_host_object(object_id)
+    var out = ""
+    match runtime.get_host_property(object_id, "cssText"):
+        JsValue.String(v):
+            if not browser_resource_size_allowed(v.len()):
+                return BROWSER_DOM_BRIDGE_OVERSIZE
+            out = v.trim()
+        _:
+            pass_dn
+    for prop in object.properties:
+        if (
+            prop.key != "cssText" and prop.key != "setProperty" and
+            prop.key != "getPropertyValue" and prop.key != "removeProperty" and
+            not prop.key.starts_with("__")
+        ):
+            val value = _browser_dom_js_text(prop.value)
+            if value != "":
+                if not browser_resource_size_allowed(
+                    out.len() + prop.key.len() + value.len() + 3
+                ):
+                    return BROWSER_DOM_BRIDGE_OVERSIZE
+                if out != "" and not out.ends_with(";"):
+                    out = out + ";"
+                out = out + _browser_dom_css_name(prop.key) + ":" + value + ";"
+    out
+
+class BrowserDomSyncResult:
+    root: BeDomNode
+    changed: bool
+
+impl BrowserRuntimeState:
+
+    me _bind_dom_node(node: BeDomNode, element_list_id: i64):
+        if self.dom_node_ids.len() >= BROWSER_DOM_BRIDGE_MAX_ELEMENTS:
+            return
+        if node.tag_name == "#document":
+            for child in node.children:
+                self._bind_dom_node(child, element_list_id)
+            return
+        if node.tag_name == "#text":
+            return
+
+        var runtime = self.runtime
+        val element_id = if node.tag_name == "body":
+            self.body_id
+        else:
+            runtime.create_host_object()
+        val style_id = runtime.create_host_object()
+        val text_content = be_dom_get_text_content(node)
+        val inner_html = be_dom_serialize_children(node)
+        val author_id = be_dom_get_attr(node, "id")
+        val class_name = be_dom_get_attr(node, "class")
+        val value = be_dom_get_attr(node, "value")
+        val style_text = be_dom_get_attr(node, "style")
+
+        runtime.set_host_property(style_id, "cssText", JsValue.String(v: ""))
+        for declaration in style_text.split(";"):
+            val separator = declaration.index_of(":")
+            if separator > 0:
+                val property_name = declaration.substring(0, separator).trim()
+                val property_value = declaration.substring(
+                    separator + 1, declaration.len()
+                ).trim()
+                if property_name != "" and property_value != "":
+                    runtime.set_host_property(
+                        style_id, _browser_dom_css_js_name(property_name),
+                        JsValue.String(v: property_value)
+                    )
+        runtime.set_host_property(element_id, "__simple_node_id", JsValue.Number(v: node.node_id.to_f64()))
+        runtime.set_host_property(element_id, "style", JsValue.Object(id: style_id))
+        runtime.set_host_property(element_id, "tagName", JsValue.String(v: node.tag_name.upper()))
+        runtime.set_host_property(element_id, "id", JsValue.String(v: author_id))
+        runtime.set_host_property(element_id, "className", JsValue.String(v: class_name))
+        runtime.set_host_property(element_id, "value", JsValue.String(v: value))
+        runtime.set_host_property(element_id, "textContent", JsValue.String(v: text_content))
+        runtime.set_host_property(element_id, "innerHTML", JsValue.String(v: inner_html))
+        val element_index = self.dom_element_ids.len()
+        runtime.set_host_property(
+            element_list_id, "{element_index}", JsValue.Object(id: element_id)
+        )
+        self.runtime = runtime
+
+        self.dom_node_ids.push(node.node_id)
+        self.dom_element_ids.push(element_id)
+        self.dom_style_ids.push(style_id)
+        self.dom_id_snapshots.push(author_id)
+        self.dom_class_snapshots.push(class_name)
+        self.dom_value_snapshots.push(value)
+        self.dom_style_snapshots.push(
+            _browser_dom_style_snapshot(runtime, style_id)
+        )
+
+        for child in node.children:
+            self._bind_dom_node(child, element_list_id)
+
+    me bind_dom(root: BeDomNode):
+        self.dom_node_ids = []
+        self.dom_element_ids = []
+        self.dom_style_ids = []
+        self.dom_id_snapshots = []
+        self.dom_class_snapshots = []
+        self.dom_value_snapshots = []
+        self.dom_style_snapshots = []
+
+        var runtime = self.runtime
+        val element_list_id = runtime.create_host_object()
+        self.dom_element_list_id = element_list_id
+        self.runtime = runtime
+        self._bind_dom_node(root, element_list_id)
+        runtime = self.runtime
+        runtime.set_host_property(
+            element_list_id, "length",
+            JsValue.Number(v: self.dom_element_ids.len().to_f64())
+        )
+        runtime.set_host_property(
+            self.document_id, "__simple_elements",
+            JsValue.Array(id: element_list_id)
+        )
+        val _ = runtime.eval(
+            "function __simple_dom_matches(el, selector) { if (el === null || el === undefined || selector === '') { return false; } var first = selector.slice(0, 1); if (first === '#') { return el.id === selector.slice(1); } if (first === '.') { return (' ' + el.className + ' ').indexOf(' ' + selector.slice(1) + ' ') >= 0; } return el.tagName.toLowerCase() === selector.toLowerCase(); } function __simple_css_key(name) { name = String(name); if (name.slice(0, 2) === '--') { return name; } var out = ''; var upper = false; for (var i = 0; i < name.length; i = i + 1) { var ch = name.slice(i, i + 1); if (ch === '-') { upper = true; } else { out = out + (upper ? ch.toUpperCase() : ch); upper = false; } } return out; } document.getElementById = function(id) { var all = document.__simple_elements; for (var i = 0; i < all.length; i = i + 1) { if (all[i].id === String(id)) { return all[i]; } } return null; }; document.querySelector = function(selector) { var all = document.__simple_elements; for (var i = 0; i < all.length; i = i + 1) { if (__simple_dom_matches(all[i], String(selector))) { return all[i]; } } return null; }; document.querySelectorAll = function(selector) { var all = document.__simple_elements; var out = []; for (var i = 0; i < all.length; i = i + 1) { if (__simple_dom_matches(all[i], String(selector))) { out.push(all[i]); } } return out; }; function __simple_dom_install(el) { el.style.setProperty = function(name, value) { this[__simple_css_key(name)] = String(value); }; el.style.getPropertyValue = function(name) { var value = this[__simple_css_key(name)]; return value === undefined || value === null ? '' : String(value); }; el.style.removeProperty = function(name) { var key = __simple_css_key(name); var old = this.getPropertyValue(name); this[key] = ''; return old; }; } for (var __simple_i = 0; __simple_i < document.__simple_elements.length; __simple_i = __simple_i + 1) { __simple_dom_install(document.__simple_elements[__simple_i]); }"
+        )
+        self.runtime = runtime
+
+    me disable_dom_bridge():
+        if self.dom_element_list_id >= 0:
+            var runtime = self.runtime
+            runtime.set_host_property(
+                self.dom_element_list_id, "length",
+                JsValue.Number(v: 0.0)
+            )
+            self.runtime = runtime
+        self.dom_node_ids = []
+        self.dom_element_ids = []
+        self.dom_style_ids = []
+        self.dom_id_snapshots = []
+        self.dom_class_snapshots = []
+        self.dom_value_snapshots = []
+        self.dom_style_snapshots = []
+
+    me _apply_dom_element(node: BeDomNode, index: i32) -> BeDomNode:
+        var next = node
+        val element_id = self.dom_element_ids[index]
+        val style_id = self.dom_style_ids[index]
+        var next_id = _browser_dom_js_text(
+            self.runtime.get_host_property(element_id, "id")
+        )
+        var next_class = _browser_dom_js_text(
+            self.runtime.get_host_property(element_id, "className")
+        )
+        var next_value = _browser_dom_js_text(
+            self.runtime.get_host_property(element_id, "value")
+        )
+        var next_style = _browser_dom_style_snapshot(self.runtime, style_id)
+        if not browser_resource_size_allowed(next_id.len()):
+            next_id = self.dom_id_snapshots[index]
+        if not browser_resource_size_allowed(next_class.len()):
+            next_class = self.dom_class_snapshots[index]
+        if not browser_resource_size_allowed(next_value.len()):
+            next_value = self.dom_value_snapshots[index]
+        if next_style == BROWSER_DOM_BRIDGE_OVERSIZE:
+            next_style = self.dom_style_snapshots[index]
+
+        if next_id != self.dom_id_snapshots[index]:
+            if next_id == "":
+                next.remove_attr("id")
+            else:
+                next.set_attr("id", next_id)
+        if next_class != self.dom_class_snapshots[index]:
+            if next_class == "":
+                next.remove_attr("class")
+            else:
+                next.set_attr("class", next_class)
+        if next_value != self.dom_value_snapshots[index]:
+            next.set_attr("value", next_value)
+        if next_style != self.dom_style_snapshots[index]:
+            if next_style == "":
+                next.remove_attr("style")
+            else:
+                next.set_attr("style", next_style)
+        self.dom_id_snapshots[index] = next_id
+        self.dom_class_snapshots[index] = next_class
+        self.dom_value_snapshots[index] = next_value
+        self.dom_style_snapshots[index] = next_style
+        next
+
+    me _apply_dom_changes(
+        node: BeDomNode, changes: Dict<i64, i32>
+    ) -> BeDomNode:
+        var next = node
+        val index = changes.get(node.node_id) ?? -1
+        if index >= 0:
+            next = self._apply_dom_element(next, index)
+        var children: [BeDomNode] = []
+        for child in next.children:
+            children.push(self._apply_dom_changes(child, changes))
+        be_dom_set_children(next, children)
+
+    me sync_dom(root: BeDomNode) -> BrowserDomSyncResult:
+        var changes: Dict<i64, i32> = {}
+        var mutation_bytes: i64 = 0
+        val document_bytes = be_dom_serialize_children(root).len()
+        var index = 0
+        while index < self.dom_element_ids.len():
+            val element_id = self.dom_element_ids[index]
+            var next_id = _browser_dom_js_text(
+                self.runtime.get_host_property(element_id, "id")
+            )
+            var next_class = _browser_dom_js_text(
+                self.runtime.get_host_property(element_id, "className")
+            )
+            var next_value = _browser_dom_js_text(
+                self.runtime.get_host_property(element_id, "value")
+            )
+            var next_style = _browser_dom_style_snapshot(
+                self.runtime, self.dom_style_ids[index]
+            )
+            if not browser_resource_size_allowed(next_id.len()):
+                next_id = self.dom_id_snapshots[index]
+            if not browser_resource_size_allowed(next_class.len()):
+                next_class = self.dom_class_snapshots[index]
+            if not browser_resource_size_allowed(next_value.len()):
+                next_value = self.dom_value_snapshots[index]
+            if next_style == BROWSER_DOM_BRIDGE_OVERSIZE:
+                next_style = self.dom_style_snapshots[index]
+            val element_changed = (
+                next_id != self.dom_id_snapshots[index] or
+                next_class != self.dom_class_snapshots[index] or
+                next_value != self.dom_value_snapshots[index] or
+                next_style != self.dom_style_snapshots[index]
+            )
+            if element_changed and element_id != self.body_id:
+                val element_bytes = (
+                    next_id.len() + next_class.len() +
+                    next_value.len() + next_style.len()
+                )
+                if browser_resource_size_allowed(
+                    document_bytes + mutation_bytes + element_bytes
+                ):
+                    changes[self.dom_node_ids[index]] = index
+                    mutation_bytes = mutation_bytes + element_bytes
+            index = index + 1
+        val changed = changes.len() > 0
+        val next_root = if changed:
+            self._apply_dom_changes(root, changes)
+        else:
+            root
+        BrowserDomSyncResult(
+            root: next_root,
+            changed: changed
         )
 
 fn _browser_session_inline_fetch_url(html: text) -> text?:
