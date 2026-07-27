@@ -12,6 +12,8 @@ parse+hash -> snapshot -> install -> CSS/scene -> Draw IR -> realized evidence
 ```
 
 - Hosted refresh is a parent-owned, injected-store sequence: capture once,
-  stage immutable wire, locked swap, WM/GUI scalar apply, `ThemeChangedV1`,
-  worker acknowledgement, then matching Web frame. Failed handoff exposes no
-  stale frame as current.
+  stage revision-free immutable wire, atomically swap exactly
+  `(revision, wire_text)`, admit migrated WM/GUI/Web store readers,
+  `ThemeChangedV1`, exact worker envelope/ack, then a frame carrying explicit
+  theme revision/hash. Initial revision is `1`; changed revisions are
+  consecutive and a documented unchanged no-op consumes none.

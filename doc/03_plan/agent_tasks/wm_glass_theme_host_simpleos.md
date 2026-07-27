@@ -81,23 +81,29 @@ overlapping dirty work and remains read-only for this lane.
 | Simple GUI theme handoff | SOURCE FIXED; product proof pending | resolved snapshot now reaches canonical widget Draw IR; 2 bootstrap-driver scenarios pass diagnostically |
 | Simple Web theme authority | SOURCE FIXED; REVIEW ACCEPTED; RUNTIME UNVERIFIED | canonical package output keeps the complete structural/event adapter while Aetheric package CSS owns every paint/material token; live parser/Draw-IR/pixel/event proof still requires an admitted runtime |
 | WM glass material projection | SOURCE FIXED; REVIEW ACCEPTED; RUNTIME UNVERIFIED | CPU preserves parent sampling/500/930 opacity; opaque Metal uses session-owned identity and exact per-request receipts; sub-opaque Metal fails before dispatch until a GPU-only delta path exists |
-| Runtime theme switching | PROTOCOL/CACHE + K1 OWNED-QUEUE SOURCE ACCEPTED; K2/CATALOG/PACKAGE SERIES STOPPED; fail-fast system contract | `ThemeChangedV1`, BrowserBackend cache identity, and K1 copied-payload queues are landed. K2 exhausted three cycles on cross-architecture registration/entry stability gaps; generated catalog exhausted three cycles on stale active/frame authority; package cycle 3 was reverted without commit because the host lacks a persistent pre-worker theme session, canonical immutable package/snapshot wire codec, and scalar transaction consumer surface. The proposed parent-owned `HostedThemeRuntime`/`theme_init` worker handoff is now specified in the architecture/detail-design and test-plan links below; it is not source implemented. ThemeService/consumer wiring remains unsafe; see the linked K2, catalog, and package blocker docs |
+| Runtime theme switching | PROTOCOL/CACHE + K1 OWNED-QUEUE SOURCE ACCEPTED; K2/CATALOG/PACKAGE SERIES STOPPED; fail-fast system contract | `ThemeChangedV1`, BrowserBackend cache identity, and K1 copied-payload queues are landed. K2 exhausted three cycles on cross-architecture registration/entry stability gaps; generated catalog exhausted three cycles on stale active/frame authority; package cycle 3 was reverted without commit because the host lacks a persistent pre-worker theme session, canonical immutable package/snapshot wire codec, and scalar transaction consumer surface. The proposed parent-owned `HostedThemeRuntime` plus exact `theme_init(generation, revision, wire_text)` handoff is now specified in the architecture/detail-design and test-plan links below; it is not source implemented. ThemeService/consumer wiring remains unsafe; see the linked K2, catalog, and package blocker docs |
 
 ### Hosted theme runtime prerequisite — design handoff (2026-07-27)
 
 Shared interface names are fixed for implementation: `HostedThemeRuntime`,
 `ThemePackageTransactionStore`, `theme_package_install_wire_v1`,
-`theme_init`, `theme_ready`, and `theme_apply`. The parent hosted process (or
-its `HostWmHandle` route) owns the one real-mutex store. Browser workers are
-wire consumers only and must receive `ready -> theme_init -> theme_ready`
-before `init(html)` or any frame.
+`HostedWmSession`, `init_host_wm_with_runtime`, `HostedBrowserReplayPayload`,
+`theme_init(generation, revision, wire_text)`, `theme_ready`, and
+`theme_apply(generation, expected_predecessor_revision, revision, wire_text)`.
+The parent hosted process owns one real-mutex store whose sole payload is
+`(revision, wire_text)`; it never enters shared `HostWmHandle`/core and is
+never constructed per handle. Browser workers are wire consumers only.
+`theme_package_install_wire_v1` is immutable `text`, contains no revision, and
+is bounded by UTF-8 bytes at
+`THEME_PACKAGE_INSTALL_WIRE_V1_MAX_UTF8_BYTES = 1_048_576`.
 
 | Lane | Scope | Owner/review |
 |---|---|---|
-| Runtime/store | Hosted creation, injected mutex, canonical wire/scalar reads, transaction ordering | Implementation sidecar; merge owner `/root` |
-| Worker protocol | Parent/worker state transition, acknowledgement, restart/revision fence | Implementation sidecar; independent highest-capability review |
-| Consumers | WM/GUI/Web scalar reads, cache invalidation, post-commit `ThemeChangedV1` delivery | Implementation sidecar; independent highest-capability review |
-| Tests/manual | Focused source/protocol checks and generated-manual quality | `N/A` until source contracts exist; final reviewer is independent highest-capability reviewer |
+| Runtime/store | `create_initial(source_reader, registry_path, requested_id)`, once-captured default/source bytes, initial revision `1`, exact mutex tuple, consecutive changed revisions, explicit unchanged no-op | Implementation sidecar; merge owner `/root` |
+| Hosted caller migration | Add hosted wrapper/session; migrate `ui.browser`, `ui.electron`, `ui.tauri`, `ui.tui`, and `ui.tui_web`; explicitly exclude non-rendering `wm_daemon` | Implementation sidecar; merge owner `/root` |
+| Worker/frame protocol | Exact init/apply envelopes and ack, explicit browser/WmContentFrame theme fields, parent-owned replay payload, restart/revision fence | Implementation sidecar; independent highest-capability review |
+| Consumers | Migrate WM/GUI/Web off sequential globals to one store projection before parent admission and post-commit `ThemeChangedV1` delivery | Implementation sidecar; independent highest-capability review |
+| Tests/manual | Focused envelope/bounds/frame/restart/admission checks and generated-manual quality | `N/A` until source contracts exist; final reviewer is independent highest-capability reviewer |
 
 Merge only after the detailed contract in
 `doc/04_architecture/wm_glass_theme_host_simpleos.md#hosted-runtime-theme-ownership-proposed-prerequisite`,

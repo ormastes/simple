@@ -38,10 +38,11 @@
   WM/GUI/Web transaction reads must land first. The session's three-cycle cap
   is exhausted.
 - The implementation prerequisite is now explicit: parent-owned
-  `HostedThemeRuntime` creates one injected store before package/backend/worker
-  activity; workers consume `theme_package_install_wire_v1` through
-  `ready -> theme_init -> theme_ready -> init(html)` and are generation/revision
-  fenced. This is a design handoff, not a landed implementation or runtime PASS.
+  `HostedThemeRuntime` creates one injected `(revision, wire_text)` store before
+  package/backend/worker activity. A hosted wrapper—not shared
+  `HostWmHandle`—owns it. Workers consume exact init/apply envelopes, frames
+  carry explicit theme revision/hash, and restart requires a parent replay
+  payload. This is a design handoff, not implementation or runtime PASS.
 - K2 also exhausted three cycles unintegrated: x86 compatibility IDs/entry
   state are incomplete, direct-x86 copyout stability is not universal, the ABI
   audit misses C paths, and RV32 compat wrappers regress to `ENOSYS`.

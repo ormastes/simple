@@ -16,5 +16,9 @@ package -> immutable snapshot -> WM + Web -> Draw IR -> Engine2D
 - Runtime switching additionally needs a parent-owned `HostedThemeRuntime`:
   one injected real-mutex store and canonical `theme_package_install_wire_v1`
   created before reads/backends/workers. Worker processes receive
-  `ready -> theme_init -> theme_ready -> init(html)`, own no store/files, and
-  are revision/generation fenced on restart.
+  `theme_init(generation, revision, wire_text)` before HTML and later
+  `theme_apply(generation, expected_predecessor_revision, revision, wire_text)`.
+  The wire is
+  revision-free immutable text; explicit frame revision/hash fields and a
+  parent-owned replay payload fence restarts. Hosted wrapper/session owns the
+  runtime; shared `HostWmHandle`/core and workers own no store.

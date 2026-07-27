@@ -11,9 +11,10 @@
 - Evidence combines structured semantics with host/QEMU framebuffer captures.
 - Missing helpers fail explicitly; no placeholder pass is allowed.
 - Before runtime switching can be tested, focused protocol tests must pin the
-  parent-owned injected store, `theme_package_install_wire_v1`, ordered
-  `ready -> theme_init -> theme_ready -> init`, post-commit notification, and
-  worker restart/revision fence. This is planned only, not a runtime PASS.
+  parent-owned exact `(revision, wire_text)` store, UTF-8 wire bound, exact
+  init/apply envelopes, migrated-parent admission before notification, explicit
+  frame revision/hash, and replay-payload restart fence. This is planned only,
+  not a runtime PASS.
 
 ```text
 theme -> host/CSS/QEMU -> interaction -> evidence -> fail-closed verdict

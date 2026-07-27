@@ -60,16 +60,20 @@ HTML, GUI, binary, log and artifact. The generated manual uses linked evidence.
 
 This is a design/test-plan handoff only; it creates no executable spec or
 runtime PASS yet. The future focused tests use `HostedThemeRuntime` and the
-named protocol helper flow `ready -> theme_init -> theme_ready -> init`:
+named protocol helper flow
+`ready -> theme_init(generation, revision, wire_text) -> theme_ready -> init`:
 
 | Required focused test | Concrete assertion |
 |---|---|
-| Parent construction ordering | One injected runtime/store is created after heap availability and before every package read, backend/compositor creation, or worker spawn; no module-global/lazy store is reachable. |
-| Initial worker handoff | Worker rejects HTML/frame before `theme_init`; exact `theme_package_install_wire_v1` produces exact scalar `theme_ready` before first HTML/frame. |
-| Wire isolation | Bounded malformed/unknown/mismatched wire is rejected; public WM/GUI/Web reads expose copied scalar/wire values only, never aggregate/map aliases. |
-| Transaction publication | Counting/changing reader proves one canonical read per path; competing/stale/max-revision/no-op cases prove one locked old-or-new aggregate and no notification/write on failure. |
-| Commit ordering | Successful store swap precedes parent WM/GUI scalar application, then `ThemeChangedV1`, then worker apply/ack, then revision-matching Web frame publication. |
-| Restart fence | Replacement worker receives current wire before HTML replay; old generation/revision acknowledgement or frame is rejected; failed handoff leaves `web-frame-unavailable`. |
+| Parent construction ordering | `create_initial(source_reader, registry_path, requested_id)` captures registry once, derives an empty requested ID from those bytes, captures each source once, commits revision `1`, and precedes package/backend/compositor/worker activity; no cached default lookup or module-global/per-handle store is reachable. |
+| Hosted callers | Browser, Electron, Tauri, TUI, and TUI-Web reuse one app-owned runtime through `HostedWmSession`/`init_host_wm_with_runtime`; the headless WM daemon remains explicitly excluded. |
+| Initial worker envelope | Worker rejects HTML/frame before exact `theme_init(generation, revision, wire_text)`; `theme_ready` echoes generation/revision plus derived identity/hashes before first HTML/frame. |
+| Apply envelope | Exact `theme_apply(generation, expected_predecessor_revision, revision, wire_text)` rejects wrong generation, stale predecessor, skip/coalescing, duplicate revision, and unknown version; changed revisions are consecutive and `theme_ready` echoes all envelope scalars plus derived identity/hashes. |
+| Wire isolation/bound | Canonical immutable `text` contains no revision; UTF-8 byte length at `1_048_576` passes and `1_048_577` fails; public reads expose one copied `(revision, wire_text)` or derived scalars, never aggregate/map aliases or duplicate current fields. |
+| Transaction publication | Counting/changing reader proves one canonical read per path; competing/stale/max-revision and explicit unchanged no-op prove one locked `(revision, wire_text)` old-or-new payload and no notification/write on failure/no-op. |
+| Parent admission | Refresh fails before swap while any WM/GUI/Web consumer uses sequential globals; migrated consumers observe one store revision before `ThemeChangedV1`. |
+| Frame identity | Browser frame protocol and `WmContentFrame` carry explicit `theme_revision` and `theme_material_sha256`; mismatches are rejected and `content_revision` remains independently unchanged. |
+| Restart fence | Replacement worker receives current envelope first and initializes only from an explicit parent-owned replay payload; absent replay, old generation/revision frame, or hash mismatch leaves `web-frame-unavailable`. |
 
 These tests must be introduced as real source/unit or protocol specs with
 concrete assertions and fail-fast placeholders where implementation is absent.

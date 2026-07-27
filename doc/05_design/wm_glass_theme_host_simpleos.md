@@ -43,31 +43,55 @@ unaccepted emergency fallback.
 
 Add a hosted-only composition type, `HostedThemeRuntime`, constructed exactly
 once by the parent branch of `os.hosted.hosted_entry.main()` after runtime heap
-availability and before `install_default_host_wm_theme`, winit/backend creation,
+availability and before any theme read/install, winit/backend creation,
 `HostCompositor` creation, or `HostedBrowserRendererProcess.start()`. The
 worker-argument branch is intentionally excluded: it is a separate process and
 receives an already-canonical wire from its parent rather than opening theme
 files or owning a transaction store.
 
-The normal host-compositor constructor receives the same explicit runtime
-through `HostWmHandle`; direct hosted entry passes it into `_run_hosted_wm`.
-There is no lazy/eager module-global mutex and no installer-local store.
+Construction is
+`HostedThemeRuntime.create_initial(source_reader, registry_path, requested_id)`.
+The constructor reads `registry_path` exactly once, derives the default ID from
+that captured registry when `requested_id` is empty, reads each referenced
+canonical source exactly once, and commits revision `1`. It replaces/refactors
+the legacy `install_default_host_wm_theme` flow: neither initialization nor
+refresh may call cached `default_theme_id()` or reread the registry.
+
+The runtime stays out of shared `HostWmHandle` and `host_compositor_core`.
+Hosted code adds `HostedWmSession(handle, theme_runtime)` and
+`init_host_wm_with_runtime(cfg, theme_runtime)`. App entry owns the runtime and
+passes the same instance to every handle, so a handle constructor cannot create
+a per-handle store. Migrate the five current callers:
+
+- `src/app/ui.browser/app.spl`;
+- `src/app/ui.electron/async_app.spl`;
+- `src/app/ui.tauri/async_app.spl`;
+- `src/app/ui.tui/async_app.spl`;
+- `src/app/ui.tui_web/app.spl`.
+
+`src/app/play/wm_daemon.spl` remains outside this wrapper because its
+`init_headless_host_wm` route is a non-rendering control daemon. It must not
+create another store. There is no lazy/eager module-global mutex and no
+installer-local store.
 
 ```text
 HostedThemeRuntime
-  store: ThemePackageTransactionStore       # real hosted mutex, one aggregate
-  current_install_wire: text                # copied theme_package_install_wire_v1
-  current_revision/theme_id/manifest/material: scalar identity
-  wm_projection: scalar-only read surface
-  gui_projection: scalar-only read surface
-  web_projection: scalar-only read surface
+  store: ThemePackageTransactionStore
+    mutex payload: (revision: u64, wire_text: text)  # exact, sole payload
+  current_*(): copied scalar/wire accessors derived from one store read
 ```
 
-The store is injected at construction. It exposes `read_wire_copy()` and typed
-scalar projection reads, not package/snapshot aggregates, dictionaries, arrays,
-locks, or cache handles. Private decoded objects are reconstructed from copied
-canonical wire only inside their owner boundary. Source capture is injectable
-so one-read-per-canonical-path behavior can be tested.
+The immutable `wire_text` is `theme_package_install_wire_v1` and contains no
+transaction revision. The revision is store/envelope metadata. The store
+exposes `read_wire_copy()` and typed scalar projection reads, not
+package/snapshot aggregates, dictionaries, arrays, locks, cache handles, or
+duplicate current fields. Private decoded objects are reconstructed from one
+copied `(revision, wire_text)` only inside their owner boundary. Source capture
+is injectable so one-read-per-canonical-path behavior can be tested.
+
+`THEME_PACKAGE_INSTALL_WIRE_V1_MAX_UTF8_BYTES` is exactly `1_048_576`.
+Encoder, store, parent protocol, and worker protocol measure
+`rt_text_to_bytes(wire_text).len()`; Simple character length is not the bound.
 
 #### Browser renderer state changes
 
@@ -83,23 +107,50 @@ to:
 new -> starting -> await-theme-init -> await-init -> active
 ```
 
-After `ready`, the parent sends `theme_init` containing exactly one bounded
-`theme_package_install_wire_v1`. The worker copies and validates the wire,
-builds only its process-local snapshot/cache, then replies `theme_ready` with
-the scalar `(generation, revision, theme_id, source_manifest_sha256,
-material_sha256)`. Only an exact parent-store match transitions to
+After `ready`, the parent sends exactly one bounded envelope:
+
+```text
+theme_init(generation, revision, wire_text)
+```
+
+The worker copies and validates `wire_text`, builds only its process-local
+snapshot/cache, then replies `theme_ready` echoing `(generation, revision)`
+plus derived `(theme_id, source_manifest_sha256, material_sha256)`. Only an
+exact parent-store match transitions to
 `await-init`; otherwise the parent closes the worker and exposes no external
 Web frame. `init(html)` is therefore the first HTML message but not the first
 protocol message.
 
-For a committed later revision, `theme_apply` carries the same canonical wire
-and its expected predecessor revision. Worker accepts only the next current
-revision, clears revision-keyed CSS/layout/Draw-IR artifact caches, replies
-`theme_ready`, and renders a frame tagged with that revision. The parent
-accepts that frame only when its active store revision and worker generation
-match. On worker crash/restart, parent creates a new generation, repeats
-`ready -> theme_init -> theme_ready -> init/replay`, and drops all old
-generation frames. The worker never reads the package filesystem.
+For a committed later revision the exact envelope is:
+
+```text
+theme_apply(
+  generation,
+  expected_predecessor_revision,
+  revision,
+  wire_text
+)
+```
+
+The worker accepts only `revision == expected_predecessor_revision + 1` and an
+expected predecessor equal to its current revision. `theme_ready` echoes all
+three envelope scalars plus derived identity/hashes, but not `wire_text`.
+Worker clears revision-keyed CSS/layout/Draw-IR artifact caches and renders a
+frame tagged with that revision.
+
+Add explicit `theme_revision: u64` and `theme_material_sha256: text` to both
+the browser frame protocol and `WmContentFrame`. Parent acceptance requires
+generation, theme revision, and material hash to match its current store read.
+`content_revision` remains content/layout identity and is never overloaded
+with theme revision.
+
+On worker crash/restart, parent creates a new generation and repeats
+`ready -> theme_init(generation, current_revision, wire_text) -> theme_ready`.
+It may then call `init` only from a parent-owned `HostedBrowserReplayPayload`
+that stores the exact document HTML/payload. It does not reconstruct full
+session state from URL or history and does not promise form, timer, history, or
+script-heap replay. If no replay payload exists, the external Web frame remains
+`web-frame-unavailable`. The worker never reads the package filesystem.
 
 #### Commit, application, and notification sequence
 
@@ -109,19 +160,34 @@ algorithm:
 1. capture registry and every referenced file once into owned bytes;
 2. validate, resolve, normalize, and encode immutable
    `theme_package_install_wire_v1` from those bytes outside the lock;
-3. lock the injected store, check expected revision/nonoverflow, atomically
-   replace its sole wire-backed aggregate, then unlock;
-4. apply exact scalar projection to parent WM and GUI;
-5. emit `ThemeChangedV1` with committed identity/revision;
-6. hand wire to each worker, invalidate revision-keyed Web artifacts, and
-   publish a Web external frame only after matching acknowledgement and frame.
+3. verify every parent WM/GUI/Web consumer has migrated to one copied
+   store-revision projection; otherwise return `parent-consumer-not-migrated`
+   before mutation;
+4. acquire the blocking injected mutex, check expected revision/nonoverflow
+   and `next == expected + 1`, atomically replace exactly
+   `(revision, wire_text)`, then unlock;
+5. confirm parent admission by reading the committed revision/projection from
+   the same store (never by sequentially updating WM globals);
+6. emit `ThemeChangedV1` with committed identity/revision;
+7. send `theme_apply(generation, expected_predecessor_revision, revision,
+   wire_text)`, invalidate
+   revision-keyed Web artifacts, and publish an external Web frame only after
+   matching acknowledgement and explicit frame theme fields.
 
-No-op identity/content, invalid source/wire, stale revision, max revision, or
-lock failure returns a typed error and performs no write or notification. A
-post-commit worker failure is `web-frame-unavailable` for the new revision,
-never a stale old frame masquerading as current. `ThemeChangedV1` remains a
-post-commit notification only; it is neither a mutable candidate nor a
-synchronization primitive.
+The real hosted mutex is blocking; acquisition has no recoverable lock-failure
+result. Invalid
+source/wire, stale predecessor, nonconsecutive revision, maximum revision, or
+unmigrated parent consumers fails before writes/notification. Identical content
+has one explicit no-op: return `unchanged` at the current revision, emit
+nothing, and consume no revision. No other skip or coalescing is allowed.
+
+Legacy sequential WM global application is valid only during single-threaded
+initial migration and cannot admit runtime refresh. Until WM, GUI, and Web read
+through the store, refresh fails before swap; it does not swap and then attempt
+an unverifiable rollback. A post-commit worker failure is
+`web-frame-unavailable` for the new revision, never a stale old frame
+masquerading as current. `ThemeChangedV1` remains a post-commit notification
+only; it is neither a mutable candidate nor a synchronization primitive.
 
 ## Web and CSS Changes
 
