@@ -247,3 +247,42 @@ The bounded source checkpoint now:
 No fourth native producer run or bootstrap is permitted in this session.
 Therefore exact Bungee 100-pixel quads, ROI alpha, cold/warm cache behavior,
 Vulkan execution, and device readback all remain unproven.
+
+## 2026-07-27 bounded producer cycles 4–6
+
+Three fresh no-bootstrap producer builds each compiled 184 modules with zero
+failures using the admitted pure-Simple Stage3 compiler and the canonical
+Winit/WM/C runtime providers.
+
+Cycle 4 proved the atomic reset receipt reaches configured staging. It then
+faulted in `Engine2D.font_receipt_size_100px`; the crash report records
+`x0=0` at the immutable zero-argument method. Converting the diagnostic
+receipts to the proven mutable-receiver ABI removes that fault.
+
+Cycle 5 exits normally at the exact receipt
+`engine2d_font_state_native_status=fail-positive-quads`. Typed renderer
+staging/write-back is now explicit. Cycle 6 repeats that exact result after
+rebinding every returned array used by fallback layout, atlas metadata,
+quad/dirty construction, and `GlyphCache.insert`. The Cycle-6 binary SHA-256
+is `746a2a08148b9b12ca41aa62ca932341418ac00c92cdebd40ff31fea89ccd283`.
+
+The strongest current evidence is therefore:
+
+- exact Bungee load and identity: PASS;
+- function-local 24 pt at 300 DPI equals the 100-pixel receipt: PASS;
+- cold reset, draw admission, plan admission, and staged-valid state: PASS;
+- staged quads: FAIL (zero);
+- atlas ROI alpha, cold rasterization count, warm cache hit, Vulkan execution,
+  and device readback: not reached.
+
+The three-cycle cap is exhausted. Preserve Cycle 6 and inspect the glyph
+aggregate/raster material in a fresh session; do not convert the allocated but
+empty 1024² atlas into positive evidence.
+
+The next bounded diagnostic should use three boolean-only phase receipts:
+local `quads` nonempty immediately before constructing `FontRenderBatch`,
+inbound `batch.quads` nonempty on entry to `_stage_batch`, and stored
+`self.staged_quads` nonempty after assignment. This distinguishes local append,
+array-bearing aggregate transport, and staged-field assignment without relying
+on untrusted numeric or aggregate returns. The allocated atlas length alone
+does **not** prove glyph insertion or alpha coverage.

@@ -690,6 +690,41 @@ same failure.
 Refresh shared font documentation only after the current provider behavior is
 proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
 
+### 2026-07-27 Bungee producer cycles 4–6 and Vulkan installation
+
+- macOS Vulkan installation is complete and healthy. Homebrew reports
+  MoltenVK 1.4.1 plus Vulkan loader/tools 1.4.350.1. With
+  `VK_ICD_FILENAMES=/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json`,
+  `vulkaninfo --summary` enumerates Apple M4 with
+  `DRIVER_ID_MOLTENVK`, driver name MoltenVK, and driver info 1.4.1.
+- All three fresh no-bootstrap producer builds used the retained pinned
+  pure-Simple Stage3 diagnostic compiler (SHA-256
+  `d030566ddab91c85606d9e209524d402cd30df5b4c1a92971732690cbadfa5d1`)
+  and compiled
+  184 modules with zero failures. This is diagnostic evidence, not
+  current-main manifest attestation.
+- Cycle 4 advanced past atomic cold-cache reset and configured staging, then
+  faulted in the immutable zero-argument
+  `Engine2D.font_receipt_size_100px` receiver. The crash report shows `x0=0`.
+  Receipt methods now use the proven mutable-receiver ABI.
+- Cycle 5 no longer faults and exits exactly at
+  `engine2d_font_state_native_status=fail-positive-quads`. It proves exact
+  Bungee identity, the local 24-point/300-DPI derivation, cold reset, draw
+  admission, and the 100-pixel boolean receipt.
+- Cycle 6 retains the same clean `fail-positive-quads` result after rebinding
+  every returned array in the fallback layout, atlas metadata, quad, dirty,
+  and glyph-cache insertion paths. Its binary SHA-256 is
+  `746a2a08148b9b12ca41aa62ca932341418ac00c92cdebd40ff31fea89ccd283`.
+- The selected renderer has exact Bungee identity; independently, the batch is
+  staged-valid with a 1024² atlas allocation but still has zero quads. The
+  three-cycle cap is exhausted.
+  Do not rerun this producer in the same session. The next session must add
+  boolean-only local/inbound/stored quad receipts around the
+  `FontRenderBatch -> _stage_batch` boundary before attempting Vulkan live
+  evidence. Atlas allocation alone is not glyph/alpha proof.
+- Vulkan 2D/web/GUI/WM live gates remain blocked by the red producer gate and
+  the absent current manifest-attested GUI-capable pure-Simple artifact.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
