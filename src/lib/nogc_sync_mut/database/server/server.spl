@@ -1,0 +1,293 @@
+# Simple DB server tier — MDSOC outer capsule
+#
+# MDSOC+ : this capsule is the ONLY object that touches the outside world.  It
+# owns three ports and nothing else:
+#
+#   store port      SdnDatabase        (std.database.core — the embedded store)
+#   policy port     CapabilityTable    (deny-wins access control)
+#   transport port  DbTransport        (framed message channel)
+#
+# All business logic is the ECS layer below it: entities = sessions, components
+# = SessionRegistry's parallel Dict stores, systems = the sys_* functions here.
+# The capsule never reimplements storage — every durable byte goes through the
+# embedded SDN store.
+
+use std.database.core.{ SdnRow, SdnTable, SdnDatabase }
+use std.database.server.protocol.{
+    DbRequest, DbResponse,
+    parse_request, encode_response, is_decimal_digits,
+    ok_response, ok_with, err_response,
+    ERR_MALFORMED, ERR_UNKNOWN_OP, ERR_MISSING_ARG, ERR_NO_SESSION,
+    ERR_DENIED, ERR_NO_TXN, ERR_TXN_OPEN, ERR_CONFLICT, ERR_NO_TABLE,
+    ERR_NOT_FOUND
+}
+use std.database.server.capability.{
+    DbCapability, CapabilityTable, capability_allows_op, op_access,
+    ACCESS_READ, ACCESS_WRITE
+}
+use std.database.server.session.{ SessionRegistry, SessionIdentity }
+use std.database.server.txn.{
+    TxnState, TxnWrite, CommitOutcome,
+    begin_txn, closed_txn, txn_record, txn_lookup,
+    txn_commit, store_read, store_version,
+    WRITE_PUT, WRITE_DEL
+}
+use std.database.server.transport.{ DbTransport, MemoryTransport }
+
+# ============================================================================
+# DbServerCapsule
+# ============================================================================
+
+class DbServerCapsule:
+    store: SdnDatabase
+    policy: CapabilityTable
+    registry: SessionRegistry
+
+    static fn new(store: SdnDatabase, policy: CapabilityTable) -> DbServerCapsule:
+        DbServerCapsule(store: store, policy: policy, registry: SessionRegistry.new())
+
+    # ------------------------------------------------------------------
+    # Systems
+    # ------------------------------------------------------------------
+
+    me sys_open(request: DbRequest) -> DbResponse:
+        val principal = request.arg("as") ?? ""
+        if principal == "":
+            return err_response(ERR_MISSING_ARG, "OPEN requires as=<principal>")
+        # Unknown principal still opens a session, but with an empty capability:
+        # it can talk, it just cannot reach any data.  Deny-wins, not
+        # authenticate-or-crash.
+        val capability = self.policy.lookup_or_empty(principal)
+        var registry = self.registry
+        val id = registry.open_session(principal, capability)
+        self.registry = registry
+        ok_with("session", "{id}")
+
+    me sys_close(session_id: i64) -> DbResponse:
+        var registry = self.registry
+        val closed = registry.close_session(session_id)
+        self.registry = registry
+        if not closed:
+            return err_response(ERR_NO_SESSION, "session {session_id} is not open")
+        ok_response()
+
+    me sys_begin(session_id: i64) -> DbResponse:
+        if self.registry.has_open_txn(session_id):
+            return err_response(ERR_TXN_OPEN, "session {session_id} already has an open transaction")
+        var registry = self.registry
+        registry.set_txn(session_id, begin_txn())
+        self.registry = registry
+        ok_response()
+
+    me sys_rollback(session_id: i64) -> DbResponse:
+        if not self.registry.has_open_txn(session_id):
+            return err_response(ERR_NO_TXN, "no open transaction")
+        var registry = self.registry
+        registry.clear_txn(session_id)
+        self.registry = registry
+        ok_response()
+
+    me sys_commit(session_id: i64) -> DbResponse:
+        if not self.registry.has_open_txn(session_id):
+            return err_response(ERR_NO_TXN, "no open transaction")
+        val state = self.registry.txn_of(session_id)
+        var store = self.store
+        val outcome: CommitOutcome = txn_commit(store, state)
+        self.store = store
+        var registry = self.registry
+        registry.clear_txn(session_id)
+        self.registry = registry
+        if not outcome.ok:
+            return err_response(ERR_CONFLICT, outcome.message)
+        ok_with("applied", "{outcome.applied}")
+
+    me sys_write(session_id: i64, request: DbRequest, kind: text) -> DbResponse:
+        val table = request.arg("tbl") ?? ""
+        val key = request.arg("id") ?? ""
+        if table == "":
+            return err_response(ERR_MISSING_ARG, "{request.op} requires tbl=<table>")
+        if key == "":
+            return err_response(ERR_MISSING_ARG, "{request.op} requires id=<key>")
+        if not self.store.get_table(table).?:
+            return err_response(ERR_NO_TABLE, "no such table: {table}")
+        if not self.registry.has_open_txn(session_id):
+            return err_response(ERR_NO_TXN, "{request.op} requires an open transaction")
+
+        # Payload = every arg except the routing keys.
+        var fields: Dict<text, text> = {}
+        for (arg_key, arg_value) in request.args:
+            if arg_key != "tbl" and arg_key != "id" and arg_key != "session":
+                fields[arg_key] = arg_value
+
+        var state: TxnState = self.registry.txn_of(session_id)
+        # Base version: the version this txn first observed for the row.  If the
+        # overlay already holds it, txn_record keeps the original base version.
+        val base = store_version(self.store, table, key)
+        val write = TxnWrite(
+            table: table,
+            key: key,
+            kind: kind,
+            fields: fields,
+            base_version: base
+        )
+        val updated = txn_record(state, write)
+        var registry = self.registry
+        registry.set_txn(session_id, updated)
+        self.registry = registry
+        ok_response()
+
+    fn sys_read(session_id: i64, request: DbRequest) -> DbResponse:
+        val table = request.arg("tbl") ?? ""
+        val key = request.arg("id") ?? ""
+        if table == "":
+            return err_response(ERR_MISSING_ARG, "GET requires tbl=<table>")
+        if key == "":
+            return err_response(ERR_MISSING_ARG, "GET requires id=<key>")
+        if not self.store.get_table(table).?:
+            return err_response(ERR_NO_TABLE, "no such table: {table}")
+        val column = request.arg("col") ?? ""
+
+        # Overlay first (a session reads its own uncommitted writes), then the
+        # committed store.  A peer session has no overlay, so it can only ever
+        # observe committed data — that is the isolation guarantee.
+        val state: TxnState = self.registry.txn_of(session_id)
+        if state.open:
+            match txn_lookup(state, table, key):
+                Some(pending):
+                    val typed: TxnWrite = pending
+                    if typed.kind == WRITE_DEL:
+                        return err_response(ERR_NOT_FOUND, "{table}/{key} deleted in this transaction")
+                    if column == "":
+                        return ok_with("id", key)
+                    if typed.fields.contains_key(column):
+                        return ok_with("value", typed.fields[column])
+                    return err_response(ERR_NOT_FOUND, "no column {column} on {table}/{key}")
+                nil:
+                    pass
+
+        match store_read(self.store, table, key):
+            Some(row):
+                val typed_row: SdnRow = row
+                if column == "":
+                    return ok_with("id", key)
+                match typed_row.get(column):
+                    Some(value):
+                        ok_with("value", value)
+                    nil:
+                        err_response(ERR_NOT_FOUND, "no column {column} on {table}/{key}")
+            nil:
+                err_response(ERR_NOT_FOUND, "{table}/{key} not found")
+
+    # ------------------------------------------------------------------
+    # Dispatch — the one place a request becomes an effect
+    # ------------------------------------------------------------------
+
+    me handle_request(request: DbRequest) -> DbResponse:
+        val op = request.op
+
+        if op == "OPEN":
+            return self.sys_open(request)
+
+        if op == "PING":
+            return ok_response()
+
+        # Every remaining op is session-scoped.
+        val session_text = request.arg("session") ?? ""
+        if session_text == "":
+            return err_response(ERR_MISSING_ARG, "{op} requires session=<id>")
+        # Digit gate FIRST: `to_int()` yields 0 (not nil) for a non-numeric
+        # string on this runtime, so a bare to_int() would admit
+        # `session=notanumber` as session 0.  See protocol.is_decimal_digits.
+        if not is_decimal_digits(session_text):
+            return err_response(ERR_MALFORMED, "session id is not a number: {session_text}")
+        val parsed = session_text.to_int()
+        if parsed == nil:
+            return err_response(ERR_MALFORMED, "session id is not a number: {session_text}")
+        val session_id: i64 = parsed
+        if not self.registry.is_open(session_id):
+            return err_response(ERR_NO_SESSION, "session {session_id} is not open")
+
+        # Capability gate BEFORE any data reach.  deny-wins.
+        val table = request.arg("tbl") ?? ""
+        if op_access(op) != "" and table == "":
+            # A data op naming no table is rejected outright.  It is never
+            # treated as "unrestricted" — see capability_allows.
+            return err_response(ERR_MISSING_ARG, "{op} requires tbl=<table>")
+        val capability = self.registry.capability_of(session_id)
+        if not capability_allows_op(capability, op, table):
+            return err_response(
+                ERR_DENIED,
+                "principal {capability.principal} lacks {op_access(op)} on {table}"
+            )
+
+        if op == "CLOSE":
+            return self.sys_close(session_id)
+        if op == "BEGIN":
+            return self.sys_begin(session_id)
+        if op == "COMMIT":
+            return self.sys_commit(session_id)
+        if op == "ROLLBACK":
+            return self.sys_rollback(session_id)
+        if op == "PUT":
+            return self.sys_write(session_id, request, WRITE_PUT)
+        if op == "DEL":
+            return self.sys_write(session_id, request, WRITE_DEL)
+        if op == "GET":
+            return self.sys_read(session_id, request)
+
+        err_response(ERR_UNKNOWN_OP, "unhandled op: {op}")
+
+    # Message-level entry point.  FAIL-CLOSED: a malformed line yields an ERR
+    # response and leaves the store and every session untouched.
+    me handle_message(line: text) -> text:
+        val parsed = parse_request(line)
+        match parsed:
+            Ok(request):
+                encode_response(self.handle_request(request))
+            Err(message):
+                encode_response(err_response(ERR_MALFORMED, message))
+
+    # ------------------------------------------------------------------
+    # Connection lifecycle over a transport port
+    # ------------------------------------------------------------------
+
+    # Drain one connection: read until EOF, answer every message.  Returns the
+    # number of messages served.  The loop never aborts on a bad message — that
+    # is the fail-closed requirement.
+    #
+    # KNOWN COMPILER BUG (already filed, NOT worked around silently): a
+    # trait-typed PARAMETER has no vtable on the JIT — declaring this
+    # `serve(transport: DbTransport)` dies with
+    #   "duck-typed virtual method call (trait has no `impl Trait for ...`)"
+    # (bug jit_game2d_backend_method_dispatch_sigsegv_2026-07-02).  Reproduced
+    # on this tier by build/dbtier_probe.spl: the identical drain loop returns 3
+    # with a concrete parameter and faults with a trait-typed one.
+    # DbTransport therefore remains the PORT CONTRACT (MemoryTransport declares
+    # `with DbTransport`), but serve() is typed concretely until the bug is
+    # fixed.  Making the port dynamically dispatched is next-increment work.
+    # RETURNS THE DRAINED CHANNEL, not a count.  A transport passed as a
+    # parameter is mutated on a COPY here — the caller's handle never sees the
+    # captured replies (the spec "answers every message ..." caught exactly
+    # that: sent_count() was 0 at the call site).  Extract -> mutate -> write
+    # back is the required shape, so the caller must do
+    #     channel = server.serve(channel)
+    # and read channel.all_sent() / sent_count() from the returned value.
+    me serve(transport: MemoryTransport) -> MemoryTransport:
+        var channel = transport
+        var running = true
+        while running:
+            val message = channel.read_message()
+            match message:
+                Some(line):
+                    val reply = self.handle_message(line)
+                    channel.write_message(reply)
+                nil:
+                    running = false
+        channel
+
+# ============================================================================
+# Convenience constructors
+# ============================================================================
+
+fn new_db_server(store: SdnDatabase, policy: CapabilityTable) -> DbServerCapsule:
+    DbServerCapsule.new(store, policy)
