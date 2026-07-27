@@ -212,32 +212,49 @@ for target in targets:
 
 #### rejects deleted or changed retained RenderDoc artifacts
 
-- Bind the retained receipt to current capture and replay XML bytes
+- Bind the retained receipt to current capture, capture log, and replay XML bytes
+- Reject a same-byte capture log symlink
 - Reject a same-byte replay XML symlink
-- Change and remove either retained RenderDoc artifact
+- Change and remove each retained RenderDoc artifact
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: complete scenario folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Bind the retained receipt to current capture and replay XML bytes")
+step("Bind the retained receipt to current capture log and replay XML bytes")
 val capture_path = "/tmp/simple-test-host-env-renderdoc-current.rdc"
+val log_path = "/tmp/simple-test-host-env-renderdoc-current.log"
+val log_target_path = "/tmp/simple-test-host-env-renderdoc-target.log"
 val xml_path = "/tmp/simple-test-host-env-renderdoc-current.xml"
 val xml_target_path = "/tmp/simple-test-host-env-renderdoc-target.xml"
 file_delete(capture_path)
+file_delete(log_path)
+file_delete(log_target_path)
 file_delete(xml_path)
 file_delete(xml_target_path)
 expect(file_write(capture_path, "RDOC-original")).to_be(true)
+expect(file_write(log_path, "capture-log-original")).to_be(true)
 expect(file_write(xml_path, "replay-original")).to_be(true)
+val log_sha = file_hash_sha256(log_path)
 val xml_sha = file_hash_sha256(xml_path)
 val evidence = "rdoc_simple_gate_capture_file=" + capture_path + "\n" +
     "rdoc_simple_gate_capture_file_sha256=" + file_hash_sha256(capture_path) + "\n" +
+    "rdoc_simple_gate_capture_log_path=" + log_path + "\n" +
+    "rdoc_simple_gate_capture_log_file_sha256=" + log_sha + "\n" +
     "rdoc_simple_gate_replay_xml_path=" + xml_path + "\n" +
     "rdoc_simple_gate_replay_xml_file_sha256=" + xml_sha
 expect(host_renderdoc_artifacts_are_current(evidence)).to_be(true)
+step("Reject a same-byte capture log symlink")
+expect(file_write(log_target_path, "capture-log-original")).to_be(true)
+file_delete(log_path)
+expect(create_file_symlink(log_target_path, log_path)).to_equal(0)
+expect(file_hash_sha256(log_path)).to_equal(log_sha)
+expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
+file_delete(log_path)
+expect(file_write(log_path, "capture-log-original")).to_be(true)
 step("Reject a same-byte replay XML symlink")
 expect(file_write(xml_target_path, "replay-original")).to_be(true)
 file_delete(xml_path)
@@ -247,18 +264,26 @@ expect(file_hash_sha256(xml_path)).to_equal(xml_sha)
 expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
 file_delete(xml_path)
 expect(file_write(xml_path, "replay-original")).to_be(true)
-step("Change and remove either retained RenderDoc artifact")
+step("Change and remove each retained RenderDoc artifact")
+expect(file_write(log_path, "capture-log-changed")).to_be(true)
+expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
+expect(file_write(log_path, "capture-log-original")).to_be(true)
 expect(file_write(xml_path, "replay-changed")).to_be(true)
 expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
 expect(file_write(xml_path, "replay-original")).to_be(true)
 expect(file_write(capture_path, "RDOC-changed")).to_be(true)
 expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
 expect(file_write(capture_path, "RDOC-original")).to_be(true)
+file_delete(log_path)
+expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
+expect(file_write(log_path, "capture-log-original")).to_be(true)
 file_delete(xml_path)
 expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
 expect(file_write(xml_path, "replay-original")).to_be(true)
 file_delete(capture_path)
 expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
+file_delete(log_path)
+file_delete(log_target_path)
 file_delete(xml_path)
 file_delete(xml_target_path)
 ```
