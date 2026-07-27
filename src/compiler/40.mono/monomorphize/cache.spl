@@ -114,10 +114,14 @@ class MonoCache:
     entries: {text: CacheEntry}
     stats: MonoCacheStats
     oldest_key: text
+    # Maintained live count of `entries`. Dict.len() is not usable here: it
+    # returns -1 under native codegen, and this is a per-insert hot path where
+    # keys().len() would be O(n) per store anyway.
+    entry_count: i64
 
 impl MonoCache:
     static fn create(config: MonoCacheConfig) -> MonoCache:
-        MonoCache(config: config, entries: {}, stats: MonoCacheStats.empty(), oldest_key: "")
+        MonoCache(config: config, entries: {}, stats: MonoCacheStats.empty(), oldest_key: "", entry_count: 0)
 
     me lookup(key: text) -> Any?:
         if self.entries.has(key):
@@ -128,11 +132,14 @@ impl MonoCache:
             nil
 
     me store(key: text, value: Any, content_hash: i64):
-        if self.entries.len() >= self.config.max_entries:
+        if self.entry_count >= self.config.max_entries:
             self.evict_oldest()
-        val now = self.stats.hits + self.stats.misses + self.stats.evictions + (self.entries.len() as i64) + 1
+        val now = self.stats.hits + self.stats.misses + self.stats.evictions + self.entry_count + 1
+        val is_new_key = not self.entries.has(key)
         self.entries[key] = CacheEntry(key: key, value: value,
             last_access: now, content_hash: content_hash)
+        if is_new_key:
+            self.entry_count = self.entry_count + 1
         # Track oldest: if cache was empty or this is older than current oldest
         if self.oldest_key == "" or not self.entries.has(self.oldest_key):
             self.oldest_key = key
@@ -147,6 +154,7 @@ impl MonoCache:
         # Use tracked oldest_key for O(1) eviction
         if self.oldest_key != "" and self.entries.has(self.oldest_key):
             self.entries = self.entries.remove(self.oldest_key)
+            self.entry_count = self.entry_count - 1
             self.stats.evictions = self.stats.evictions + 1
         else:
             # Fallback: scan for oldest (only if tracked key was invalidated)
@@ -160,6 +168,7 @@ impl MonoCache:
                     scan_key = k
             if scan_key.?:
                 self.entries = self.entries.remove(scan_key)
+                self.entry_count = self.entry_count - 1
                 self.stats.evictions = self.stats.evictions + 1
         # Find new oldest after eviction
         var new_oldest_key = ""
@@ -174,6 +183,7 @@ impl MonoCache:
 
     me clear():
         self.entries = {}
+        self.entry_count = 0
 
     fn get_stats() -> MonoCacheStats:
         self.stats
@@ -198,7 +208,7 @@ impl MonoCache:
 
         val sdn_doc = SdnValue.Dict({
             "max_entries": SdnValue.Int(self.config.max_entries),
-            "entry_count": SdnValue.Int(self.entries.len()),
+            "entry_count": SdnValue.Int(self.entry_count),
             "entries": SdnValue.Array(sdn_entries)
         })
 
