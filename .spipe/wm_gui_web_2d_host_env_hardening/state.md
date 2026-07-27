@@ -1087,6 +1087,12 @@ Tracking split:
   zero/zero decision manifest. Current thresholds are documented as
   observed-decision outcome coverage and are not accepted as the requested
   98-100% full source-coverage proof.
+- coverage-manifest-runner-groundwork: The parent runner now has a strict
+  compiler-manifest ingestion boundary that accepts only zero/zero SDN table
+  rows, pre-registers untouched decisions, and merges later runtime outcomes
+  onto the same key. Focused unit scenarios reject positive-count and event
+  input. TODO594 remains open because the pure-Simple compiler does not yet
+  emit the manifest and no admitted pure-Simple runner was available.
 - event-receipt-duplicate-keys: The WM/browser validator parsed production and
   Simple composition evidence with last-write-wins objects, so a leading
   `status=fail` could be hidden by a later pass row. Both receipts now reuse one
@@ -1135,3 +1141,20 @@ Tracking split:
   syntax/self-test passed;
   PowerShell is unavailable on this host, so no Windows execution PASS is
   claimed.
+- retained-perf-source-closure: The 4K/8K content digest omitted the Engine2D
+  and software-backend owners whose retained `present()` path it times, so a
+  hot-path change could leave old evidence looking current. Producer and
+  aggregate source lists now include both owners; focused fixtures reject rows
+  that omit them. This probe draws once and measures 200 retained static
+  presents only, not WM damage, dirty redraw, or full-frame repaint throughput.
+  Static shell/source checks pass; no live 4K/8K measurement is claimed.
+- display-input-status-admission: `host_display_input_evidence_passes` now
+  requires exact `pass` receipts for focus, pointer, keyboard, move, maximize,
+  and restore. The complete fixture carries all six rows and one focused
+  mutation per row proves that missing or failed interaction evidence cannot
+  inherit display/input or framebuffer admission. No live-host PASS is claimed.
+- renderdoc-simple-resume-chain: The advertised setup entrypoint now passes its
+  exact generated `<setup-build>/renderdoc/simple/evidence.env` to the strict
+  gate, writes the canonical `build/renderdoc/simple-gate/evidence.env`, relays
+  typed status/reason fields, and exits nonzero on capture or gate failure. The
+  host-independent shell/source contract is covered; no live capture is claimed.
