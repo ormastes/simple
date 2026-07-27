@@ -1,303 +1,120 @@
 # Editor Settings Schema
 #
-# Provides SettingDescriptor records describing every EditorConfig field,
-# plus filter/search helpers used by UI settings panels.
+# UI metadata for every configurable editor field, expressed as
+# `std.common.config_core` descriptors.
+#
+# This file used to own a `SettingDescriptor` record that was a strict subset of
+# `ConfigFieldDescriptor` (its `setting_type` is that type's `value_type`), plus
+# 24 hand-written descriptor literals that restated the key, type and default of
+# fields `editor_config_schema()` / `platform_config_schema()` already declared,
+# plus verbatim copies of `config_filter_by_category` / `config_filter_by_platform`
+# / a descriptor search. All of that is deleted: the descriptors are now DERIVED
+# from the loader schemas, so a default exists exactly once, and the filters come
+# from the core.
 
-struct SettingDescriptor:
-    key: text
-    label: text
-    description: text
-    category: text
-    setting_type: text
-    default_value: text
-    enum_options: [text]
+use std.editor.common.config.{editor_config_schema}
+use std.editor.common.platform.{platform_config_schema}
+use std.common.config_core.schema.{ConfigFieldDescriptor, config_ui_field, config_with_ui}
+use std.common.config_core.schema.{config_schema_index, config_filter_by_category}
+use std.common.config_core.schema.{config_filter_by_platform, config_search}
+
+# Decorate the loader descriptor for `key` with UI metadata.
+#
+# When the loader schema does not declare `key` the descriptor is UI-only: it
+# describes a setting the settings panel lists but no layer can currently resolve
+# (see `.spipe/ide_config_swap/state.md` §5 for the three such keys).
+fn _setting(
+    base: [ConfigFieldDescriptor],
+    key: text,
+    value_type: text,
+    default_value: text,
+    label: text,
+    description: text,
+    category: text,
+    options: [text],
     platform: text
-
-fn editor_settings_schema() -> [SettingDescriptor]:
-    [
-        SettingDescriptor(
-            key: "theme",
-            label: "Theme",
-            description: "Color theme for the editor",
-            category: "Appearance",
-            setting_type: "enum",
-            default_value: "dark",
-            enum_options: ["dark", "light", "solarized"],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "font_size",
-            label: "Font Size",
-            description: "Editor font size in points",
-            category: "Appearance",
-            setting_type: "i64",
-            default_value: "14",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "tab_size",
-            label: "Tab Size",
-            description: "Number of spaces per tab stop",
-            category: "Editor",
-            setting_type: "i64",
-            default_value: "4",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "insert_spaces",
-            label: "Insert Spaces",
-            description: "Insert spaces instead of tab characters",
-            category: "Editor",
-            setting_type: "bool",
-            default_value: "true",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "word_wrap",
-            label: "Word Wrap",
-            description: "Wrap long lines at viewport edge",
-            category: "Editor",
-            setting_type: "bool",
-            default_value: "false",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "line_numbers",
-            label: "Line Numbers",
-            description: "Show line numbers in the gutter",
-            category: "Editor",
-            setting_type: "bool",
-            default_value: "true",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "minimap",
-            label: "Minimap",
-            description: "Show minimap overview of the file",
-            category: "Appearance",
-            setting_type: "bool",
-            default_value: "false",
-            enum_options: [],
-            platform: "desktop"
-        ),
-        SettingDescriptor(
-            key: "auto_save",
-            label: "Auto Save",
-            description: "Automatically save files after changes",
-            category: "Files",
-            setting_type: "bool",
-            default_value: "false",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "auto_save_delay_ms",
-            label: "Auto Save Delay",
-            description: "Delay in milliseconds before auto-save triggers",
-            category: "Files",
-            setting_type: "i64",
-            default_value: "30000",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "hover_delay_ms",
-            label: "Hover Delay",
-            description: "Delay in milliseconds before LSP hover requests trigger",
-            category: "Editor",
-            setting_type: "i64",
-            default_value: "300",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "inlay_hint_refresh_delay_ms",
-            label: "Inlay Hint Refresh Delay",
-            description: "Delay in milliseconds before edit-triggered inlay hint refresh requests trigger",
-            category: "Editor",
-            setting_type: "i64",
-            default_value: "300",
-            enum_options: [],
-            platform: "all"
+) -> ConfigFieldDescriptor:
+    val idx = config_schema_index(base, key)
+    if idx < 0:
+        return config_ui_field(
+            key: key,
+            value_type: value_type,
+            default_value: default_value,
+            label: label,
+            description: description,
+            category: category,
+            enum_options: options,
+            platform: platform
         )
+    config_with_ui(base[idx], label, description, category, options, platform)
+
+fn editor_settings_schema() -> [ConfigFieldDescriptor]:
+    val base = editor_config_schema()
+    [
+        _setting(base, "theme", "enum", "dark", "Theme", "Color theme for the editor", "Appearance", ["dark", "light", "solarized"], "all"),
+        _setting(base, "font_size", "i64", "14", "Font Size", "Editor font size in points", "Appearance", [], "all"),
+        _setting(base, "tab_size", "i64", "4", "Tab Size", "Number of spaces per tab stop", "Editor", [], "all"),
+        _setting(base, "insert_spaces", "bool", "true", "Insert Spaces", "Insert spaces instead of tab characters", "Editor", [], "all"),
+        _setting(base, "word_wrap", "bool", "false", "Word Wrap", "Wrap long lines at viewport edge", "Editor", [], "all"),
+        _setting(base, "line_numbers", "bool", "true", "Line Numbers", "Show line numbers in the gutter", "Editor", [], "all"),
+        _setting(base, "minimap", "bool", "false", "Minimap", "Show minimap overview of the file", "Appearance", [], "desktop"),
+        _setting(base, "auto_save", "bool", "false", "Auto Save", "Automatically save files after changes", "Files", [], "all"),
+        _setting(base, "auto_save_delay_ms", "i64", "30000", "Auto Save Delay", "Delay in milliseconds before auto-save triggers", "Files", [], "all"),
+        _setting(base, "hover_delay_ms", "i64", "300", "Hover Delay", "Delay in milliseconds before LSP hover requests trigger", "Editor", [], "all"),
+        # UI-only: no loader schema declares this key yet.
+        _setting(base, "inlay_hint_refresh_delay_ms", "i64", "300", "Inlay Hint Refresh Delay", "Delay in milliseconds before edit-triggered inlay hint refresh requests trigger", "Editor", [], "all")
     ]
 
-fn keybinding_settings_schema() -> [SettingDescriptor]:
+# Keybinding rows. The label is the bound command and the description is a
+# mechanical rendering of the binding, so both are generated instead of restated.
+fn _binding_setting(name: text, key_text: text, command: text) -> ConfigFieldDescriptor:
+    config_ui_field(
+        key: "bind." + name,
+        value_type: "text",
+        default_value: key_text,
+        label: command,
+        description: "Key: " + key_text + " → Command: " + command + " (mode: normal)",
+        category: "Keybindings",
+        enum_options: [],
+        platform: "all"
+    )
+
+fn keybinding_settings_schema() -> [ConfigFieldDescriptor]:
     [
-        SettingDescriptor(
-            key: "bind.h",
-            label: "move-left",
-            description: "Key: h → Command: move-left (mode: normal)",
-            category: "Keybindings",
-            setting_type: "text",
-            default_value: "h",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "bind.j",
-            label: "move-down",
-            description: "Key: j → Command: move-down (mode: normal)",
-            category: "Keybindings",
-            setting_type: "text",
-            default_value: "j",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "bind.k",
-            label: "move-up",
-            description: "Key: k → Command: move-up (mode: normal)",
-            category: "Keybindings",
-            setting_type: "text",
-            default_value: "k",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "bind.l",
-            label: "move-right",
-            description: "Key: l → Command: move-right (mode: normal)",
-            category: "Keybindings",
-            setting_type: "text",
-            default_value: "l",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "bind.i",
-            label: "enter-insert",
-            description: "Key: i → Command: enter-insert (mode: normal)",
-            category: "Keybindings",
-            setting_type: "text",
-            default_value: "i",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "bind.colon",
-            label: "enter-command",
-            description: "Key: : → Command: enter-command (mode: normal)",
-            category: "Keybindings",
-            setting_type: "text",
-            default_value: ":",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "bind.q",
-            label: "quit",
-            description: "Key: q → Command: quit (mode: normal)",
-            category: "Keybindings",
-            setting_type: "text",
-            default_value: "q",
-            enum_options: [],
-            platform: "all"
-        )
+        _binding_setting("h", "h", "move-left"),
+        _binding_setting("j", "j", "move-down"),
+        _binding_setting("k", "k", "move-up"),
+        _binding_setting("l", "l", "move-right"),
+        _binding_setting("i", "i", "enter-insert"),
+        _binding_setting("colon", ":", "enter-command"),
+        _binding_setting("q", "q", "quit")
     ]
 
-fn platform_settings_schema() -> [SettingDescriptor]:
+fn platform_settings_schema() -> [ConfigFieldDescriptor]:
+    val base = platform_config_schema()
     [
-        SettingDescriptor(
-            key: "max_open_files",
-            label: "Max Open Files",
-            description: "Maximum number of files open simultaneously",
-            category: "Platform",
-            setting_type: "i64",
-            default_value: "256",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "max_undo_depth",
-            label: "Max Undo Depth",
-            description: "Maximum number of undo steps retained",
-            category: "Platform",
-            setting_type: "i64",
-            default_value: "128",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "auto_save_interval_ms",
-            label: "Auto Save Interval",
-            description: "Interval in milliseconds between auto-save triggers",
-            category: "Platform",
-            setting_type: "i64",
-            default_value: "30000",
-            enum_options: [],
-            platform: "all"
-        ),
-        SettingDescriptor(
-            key: "file_watcher_enabled",
-            label: "File Watcher",
-            description: "Watch files for external changes on disk",
-            category: "Platform",
-            setting_type: "bool",
-            default_value: "true",
-            enum_options: [],
-            platform: "desktop"
-        ),
-        SettingDescriptor(
-            key: "file_watcher_debounce_ms",
-            label: "File Watcher Debounce",
-            description: "Minimum elapsed milliseconds before polling watched files again",
-            category: "Platform",
-            setting_type: "i64",
-            default_value: "2000",
-            enum_options: [],
-            platform: "desktop"
-        ),
-        SettingDescriptor(
-            key: "file_watcher_ignore_globs",
-            label: "File Watcher Ignore Globs",
-            description: "Comma-separated file watcher ignore globs applied in addition to safe defaults",
-            category: "Platform",
-            setting_type: "text",
-            default_value: ".git,node_modules,.simple-vault-search.cache",
-            enum_options: [],
-            platform: "desktop"
-        )
+        _setting(base, "max_open_files", "i64", "256", "Max Open Files", "Maximum number of files open simultaneously", "Platform", [], "all"),
+        _setting(base, "max_undo_depth", "i64", "128", "Max Undo Depth", "Maximum number of undo steps retained", "Platform", [], "all"),
+        _setting(base, "auto_save_interval_ms", "i64", "30000", "Auto Save Interval", "Interval in milliseconds between auto-save triggers", "Platform", [], "all"),
+        _setting(base, "file_watcher_enabled", "bool", "true", "File Watcher", "Watch files for external changes on disk", "Platform", [], "desktop"),
+        # UI-only: no loader schema declares these two keys yet.
+        _setting(base, "file_watcher_debounce_ms", "i64", "2000", "File Watcher Debounce", "Minimum elapsed milliseconds before polling watched files again", "Platform", [], "desktop"),
+        _setting(base, "file_watcher_ignore_globs", "text", ".git,node_modules,.simple-vault-search.cache", "File Watcher Ignore Globs", "Comma-separated file watcher ignore globs applied in addition to safe defaults", "Platform", [], "desktop")
     ]
 
-fn full_settings_schema() -> [SettingDescriptor]:
+fn full_settings_schema() -> [ConfigFieldDescriptor]:
     editor_settings_schema() + keybinding_settings_schema() + platform_settings_schema()
 
 fn settings_categories() -> [text]:
     ["Editor", "Appearance", "Files", "Keybindings", "Platform"]
 
-fn settings_filter_by_category(schema: [SettingDescriptor], category: text) -> [SettingDescriptor]:
-    var result: [SettingDescriptor] = []
-    var i = 0
-    while i < schema.len():
-        val d = schema[i]
-        if d.category == category:
-            result.push(d)
-        i = i + 1
-    result
+# Thin aliases kept so existing call sites read naturally; the implementations
+# live in `std.common.config_core.schema`.
+fn settings_filter_by_category(schema: [ConfigFieldDescriptor], category: text) -> [ConfigFieldDescriptor]:
+    config_filter_by_category(schema, category)
 
-fn settings_filter_by_platform(schema: [SettingDescriptor], platform: text) -> [SettingDescriptor]:
-    var result: [SettingDescriptor] = []
-    var i = 0
-    while i < schema.len():
-        val d = schema[i]
-        if d.platform == platform or d.platform == "all":
-            result.push(d)
-        i = i + 1
-    result
+fn settings_filter_by_platform(schema: [ConfigFieldDescriptor], platform: text) -> [ConfigFieldDescriptor]:
+    config_filter_by_platform(schema, platform)
 
-fn settings_search(schema: [SettingDescriptor], query: text) -> [SettingDescriptor]:
-    var result: [SettingDescriptor] = []
-    var i = 0
-    while i < schema.len():
-        val d = schema[i]
-        val combined = d.key + " " + d.label + " " + d.description
-        if combined.contains(query):
-            result.push(d)
-        i = i + 1
-    result
+fn settings_search(schema: [ConfigFieldDescriptor], query: text) -> [ConfigFieldDescriptor]:
+    config_search(schema, query)

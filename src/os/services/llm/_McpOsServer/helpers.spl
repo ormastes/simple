@@ -41,47 +41,37 @@ extern fn rt_sleep_ms(ms: i64)
 fn _extract_arg(args_json: text, key: text) -> text:
     """Simple JSON field extraction for tool arguments.
     Expects flat JSON object like {"key": "value", ...}."""
+    # NOTE: index_of returns a nil-able index. Do NOT unwrap it with
+    # `match x: Some(i)`, `if val Some(i) = x`, or `.unwrap_or(..)` — all three
+    # pattern-binding forms currently bind the payload as nil on the
+    # interpreter, which silently turned every extracted argument into "".
+    # Compare against nil and use the value directly instead.
     val search = "\"" + key + "\""
     val idx = args_json.index_of(search)
-    match idx:
-        Some(i):
-            # Find the colon after the key
-            val after_key = args_json[i + search.len():]
-            val colon_idx = after_key.index_of(":")
-            match colon_idx:
-                Some(ci):
-                    val after_colon = after_key[ci + 1:].strip()
-                    if after_colon.starts_with("\""):
-                        # String value: find closing quote
-                        val value_start = 1
-                        val rest = after_colon[1:]
-                        val end_quote = rest.index_of("\"")
-                        match end_quote:
-                            Some(ei):
-                                return rest[0:ei]
-                            _:
-                                return rest
-                    else:
-                        # Number or other: read until comma or }
-                        var end_idx = after_colon.len()
-                        val comma = after_colon.index_of(",")
-                        match comma:
-                            Some(ci2):
-                                end_idx = ci2
-                            _:
-                                pass_dn
-                        val brace = after_colon.index_of("}")
-                        match brace:
-                            Some(bi):
-                                if bi < end_idx:
-                                    end_idx = bi
-                            _:
-                                pass_dn
-                        return after_colon[0:end_idx].strip()
-                _:
-                    return ""
-        _:
-            return ""
+    if idx == nil:
+        return ""
+    # Find the colon after the key
+    val after_key = args_json[idx + search.len():]
+    val colon_idx = after_key.index_of(":")
+    if colon_idx == nil:
+        return ""
+    val after_colon = after_key[colon_idx + 1:].strip()
+    if after_colon.starts_with("\""):
+        # String value: find closing quote
+        val rest = after_colon[1:]
+        val end_quote = rest.index_of("\"")
+        if end_quote == nil:
+            return rest
+        return rest[0:end_quote]
+    # Number or other: read until comma or }
+    var end_idx = after_colon.len()
+    val comma = after_colon.index_of(",")
+    if comma != nil:
+        end_idx = comma
+    val brace = after_colon.index_of("}")
+    if brace != nil and brace < end_idx:
+        end_idx = brace
+    return after_colon[0:end_idx].strip()
 
 fn _is_truthy(value: text) -> bool:
     val lower = value.lower()

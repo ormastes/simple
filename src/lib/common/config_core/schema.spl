@@ -118,6 +118,80 @@ fn config_f64_field(key: text, default_value: text) -> ConfigFieldDescriptor:
         has_max: false
     )
 
+# Full-metadata descriptor. Added for the IDE settings-panel consumer (CFG4),
+# which used to carry its own `SettingDescriptor` record with exactly these
+# fields (`setting_type` was this type's `value_type`).
+fn config_ui_field(
+    key: text,
+    value_type: text,
+    default_value: text,
+    label: text,
+    description: text,
+    category: text,
+    enum_options: [text],
+    platform: text
+) -> ConfigFieldDescriptor:
+    ConfigFieldDescriptor(
+        key: key,
+        label: label,
+        description: description,
+        category: category,
+        value_type: value_type,
+        default_value: default_value,
+        enum_options: enum_options,
+        platform: platform,
+        min_value: 0,
+        max_value: 0,
+        has_min: false,
+        has_max: false
+    )
+
+# Decorate a loader descriptor with UI metadata, preserving its key, type,
+# default and range constraints. This is what lets a UI schema be DERIVED from
+# the loader schema instead of restating every key/type/default a second time.
+#
+# A non-empty `enum_options` promotes `value_type` to "enum": a loader may accept
+# free text for a field the settings panel presents as a fixed choice list
+# (`theme` is exactly that case).
+fn config_with_ui(
+    desc: ConfigFieldDescriptor,
+    label: text,
+    description: text,
+    category: text,
+    enum_options: [text],
+    platform: text
+) -> ConfigFieldDescriptor:
+    var value_type = desc.value_type
+    if enum_options.len() > 0:
+        value_type = "enum"
+    ConfigFieldDescriptor(
+        key: desc.key,
+        label: label,
+        description: description,
+        category: category,
+        value_type: value_type,
+        default_value: desc.default_value,
+        enum_options: enum_options,
+        platform: platform,
+        min_value: desc.min_value,
+        max_value: desc.max_value,
+        has_min: desc.has_min,
+        has_max: desc.has_max
+    )
+
+# The zero descriptor, for "nothing selected" in a UI surface.
+fn config_empty_field() -> ConfigFieldDescriptor:
+    config_ui_field(
+        key: "",
+        value_type: "",
+        default_value: "",
+        label: "",
+        description: "",
+        category: "",
+        enum_options: [],
+        platform: ""
+    )
+
 # ---------------------------------------------------------------------------
 # Type conversion (ported from _ec_parse_int / _ec_int_to_text / _ec_bool_to_text)
 # ---------------------------------------------------------------------------
@@ -292,5 +366,31 @@ fn config_filter_by_platform(schema: [ConfigFieldDescriptor], platform: text) ->
         val d = schema[i]
         if d.platform == platform or d.platform == "all":
             result.push(d)
+        i = i + 1
+    result
+
+# Free-text search over key + label + description (lifted from the IDE's
+# `settings_search`, which was the only remaining descriptor helper the editor
+# still owned).
+fn config_search(schema: [ConfigFieldDescriptor], query: text) -> [ConfigFieldDescriptor]:
+    var result: [ConfigFieldDescriptor] = []
+    var i = 0
+    while i < schema.len():
+        val d = schema[i]
+        val combined = d.key + " " + d.label + " " + d.description
+        if combined.contains(query):
+            result.push(d)
+        i = i + 1
+    result
+
+# Distinct category names in declaration order (lifted from the IDE's
+# `_settings_view_categories` + its private `_settings_view_contains`).
+fn config_categories(schema: [ConfigFieldDescriptor]) -> [text]:
+    var result: [text] = []
+    var i = 0
+    while i < schema.len():
+        val category = schema[i].category
+        if not config_contains_text(result, category):
+            result.push(category)
         i = i + 1
     result
