@@ -25,7 +25,7 @@ production_status:
     owner: os.kernel.ipc.cspace_spawn
     lane: A02
     maturity: model
-    note: root-only ambient-spawn guard wired (3/3 sites); boot seal GATED OFF pending SpawnSpec migration + QEMU boot evidence; live child CSpace injection still pending; P8xP2 profile meet-point landed (spawn_effective_rights_with_profile, contract spec 16 examples 0 failures)
+    note: root-only ambient-spawn guard wired (3/3 sites); SpawnSpec MIGRATION LANDED — spawn_recipes.spl declares least-authority (READ|EXEC only, narrow path prefix) recipes for the 3 real userland spawn callers (shell exec.spl, riscv32/64 console launch, launcher_registry app launch) and all 3 syscall_process gates + the fs-exec bridge now mint through spawn_with_cspace instead of spawn_full when a recipe is declared; WM confirmed NOT a spawn caller (ECS entity spawn only), sshd out of lane scope; boot seal STILL GATED OFF (_seal_ambient_spawn_on_boot -> false, init_services.spl untouched); REMAINING TO ARM = (1) wire spawn_recipe_seed_parent_caps into boot — an ambient full() parent holds ZERO concrete tokens so cspace_spawn._find_source rejects every recipe grant and mints deny-all without it, (2) the one-line flag flip, (3) real-firmware QEMU boot+launch transcript showing a post-seal recipe spawn succeeding and an unmigrated ambient spawn denied; sealed-behaviour proof (no flag flip) = test/01_unit/os/kernel/loader/spawn_seal_readiness_spec.spl; resume plan .spipe/boot_seal_prep/state.md; live child CSpace injection + ring-3 recipe syscall argument still pending; P8xP2 profile meet-point landed (spawn_effective_rights_with_profile, contract spec 16 examples 0 failures)
   loader:
     owner: os.kernel.loader
     lane: A02
@@ -59,12 +59,12 @@ production_status:
     owner: os simple-native sshd
     lane: A06
     maturity: model
-    note: x86_64-only FS-exec arms; OpenSSH port is the production path (multi-week, blocked)
+    note: maturity=model UNDERSTATES this - recommend partial. OpenSSH port RETRACTED as the production path - pure-Simple server src/os/apps/sshd (9576 lines) implements transport+curve25519 KEX+strict-kex+ext-info, ed25519/rsa-sha2-256,512/ecdsa-p256 host keys, aes256/128-gcm + aes256-ctr-etm (note: the LIVE server path ssh_cipher_live.spl is C-accelerated via tls13_aes256_gcm_helper.c; the pure-Simple ssh_cipher.spl is what the client uses), hmac-sha2-etm, channels/pty/exec, and interops with a real OpenSSH client in the x64 QEMU gate; pure-Simple client src/os/tools/net/_SshTool (1045 lines) reuses that core. rt_ssh_* SFFI (ssh_sffi/ssh_ffi) is a dead facade - NOP/weak-nil stubs only, no libssh2 anywhere. GAPS: ssh_kex.spl does not re-export ssh_sign_exchange_hash so ssh_kex_hostkey_matrix_spec is 1/7 (6x 'function not found', its rsa/ecdsa/kexinit describes never run) and ssh_kex_rsa_contract_spec is 0/1 - the whole host-key signing matrix is UNVERIFIED at HEAD on BOTH engines (one-line export fix); publickey userauth signature verify DISABLED (ssh_auth.spl:354), plaintext password store, no server-initiated rekey threshold (client-initiated rekey works), no subsystem/sftp, no port-forward, no chacha20-poly1305, client not wired to guest shell (register_tools.spl:91 stub) and blocked on guest rt_io_tcp_connect being a NOP. Bounded day-scale work, not multi-week. Survey: .spipe/ssh_native_survey/state.md
   containers:
     owner: os container contract
     lane: A07
     maturity: partial
-    note: kernel ContainerNamespaceView rootless deny-by-default enforcement + Lean-proven isolation; Podman-on-MDSOC+ manager (sys_create/pod_wire/start/stop) + OCI edge adapter landed; live lookup-site wiring + boot evidence pending
+    note: kernel ContainerNamespaceView rootless deny-by-default enforcement + Lean-proven isolation; Podman-on-MDSOC+ manager (sys_create/pod_wire/start/stop) + OCI edge adapter landed. ENFORCED LIVE (one lookup family only) — VfsManager path ops (open/stat/readdir/mkdir/rmdir/unlink/rename/symlink/read/preload/write) now converge on enforce_lookup_grants(), which is deny-wins over the ai-cli grant AND container_view_allows_path from the kernel primitive (no second enforcement path); host context (container_view nil) short-circuits to allow, so non-container callers are byte-identical to before; a rootless/stopped container's view resolves nothing (sys_stop and the reaper already reset the view to container_view_rootless). Spec container_lookup_enforcement_spec.spl 13/13 on JIT and interpreter, 2 deliberate-red calibrations (namespace gate off -> 10 red; rootless fail-open -> exactly the 2 fail-closed rows red). STILL MODEL-ONLY: nothing binds a running task to a VfsManager view (no caller of enter_container_view outside the spec — needs a per-container VfsManager or a task-local view slot), pid lookup (pt_ext_lookup / schedctl_op_get_*) is entirely ungated, the g_vfs_* free functions in vfs_write_ops.spl bypass VfsManager and are unenforced, and nothing is armed on a boot path; QEMU/boot evidence still blocked. Plan in .spipe/container_live_wiring/state.md
   web_server:
     owner: os.http
     lane: A09
@@ -74,7 +74,7 @@ production_status:
     owner: simple db embedded (SDN store)
     lane: A09
     maturity: partial
-    note: SQLite sqlite3_vfs contract landed (rollback-journal supported, WAL honestly gated on absent shared mmap); actual SQLite amalgamation build is multi-session (C toolchain blocked); server tier absent
+    note: SQLite sqlite3_vfs contract landed (rollback-journal supported, WAL honestly gated on absent shared mmap); actual SQLite amalgamation build is multi-session (C toolchain blocked); server tier increment 1 (sessions, capabilities, per-session write overlay, read-committed isolation) + increment 2 DURABILITY landed at src/lib/nogc_sync_mut/database/server/ — COMMIT now persists through SdnDatabase.save() (FileLock + temp + fsync + rename) BEFORE it acknowledges, all-or-nothing, crash-point matrix green at before/mid/after-persist and on a recoverable persist failure (16 examples, 3 mutants killed 12/2/1); still MODEL-ONLY: no listener (serve() drains an in-memory transport, no socket), no concurrency primitive, OPEN still trusts the claimed principal, single-row GET/PUT/DEL only, read-committed not snapshot isolation, SdnRow._version is not serialized so the optimistic check resets across a restart, and a crash after persist before ack makes the tier at-least-once (no commit ids)
   config:
     owner: std.config (to extract from IDE config)
     lane: A10
@@ -99,7 +99,7 @@ production_status:
     owner: os.services.update.tuf_metadata
     lane: A07
     maturity: model
-    note: TUF 4-role verifier (rollback/freeze/threshold/snapshot/untrusted-key defenses); real crypto sig verify + A/B transactional install + SLSA provenance blocked on crypto stack
+    note: TUF 4-role verifier (rollback/freeze/threshold/snapshot/untrusted-key defenses) PLUS real Ed25519 signature verification in os.services.update.tuf_signing — the "blocked on crypto stack" note was stale; Ed25519 re-verified byte-exact against RFC 8032 §7.1 T1/T3 (pubkey derivation + signature bytes) on BOTH JIT and interpreter via build/crypto2_kat/ed25519_kat_probe.spl, 9/9 checks; signatures cover an explicit length-prefixed canonical payload ("TUF1" domain tag, signatures_present excluded, targets use "TUFT"); untrusted/unkeyed signers rejected before any crypto, threshold counts DISTINCT cryptographically-verified signers, verification failure fails closed (TUF_BAD_SIGNATURE), rollback/freeze/snapshot checks unchanged; target artifacts digest-verified with real SHA-256; end-to-end proven by build/crypto2_kat/timing_probe.spl (valid update accepted code=0; one tampered signed byte rejected code=6); CAVEAT — the sspec tuf_signing_spec cannot be run under the shared test daemon (its 60s session-startup cap is exhausted by spec compile alone, yielding "no examples executed"); Ed25519 also forces interpreter fallback (JIT: "HIR lowering error: Unknown type: u128"), ~2.8s/op; A/B transactional install + SLSA provenance emission still pending
   formal_verification:
     owner: src.verification (kernel_capabilities + os_enforcement)
     lane: A11

@@ -10,6 +10,7 @@
 use os.kernel.types.fs_types.{FileDescriptor, FileFlags, MountPoint, FsNode, FsNodeKind, DirEntry}
 use os.kernel.fs.vfs_handle_table.{VfsHandleTable, VFS_HANDLE_NO_MOUNT}
 use os.ai_cli_js_node_contract.{AiCliManifest, ai_cli_vfs_file_decision}
+use os.kernel.loader.container_namespace.{ContainerNamespaceView, container_view_rootless, container_view_create, container_view_allows_path}
 use std.nogc_sync_mut.binary_io.{string_to_bytes, bytes_to_string}
 
 # ============================================================================
@@ -73,13 +74,19 @@ class VfsManager:
     next_fd: i32
     ai_cli_manifest: AiCliManifest?
     handles: VfsHandleTable
+    # The container namespace this manager resolves lookups on behalf of.
+    # `nil` == HOST context: every lookup behaves exactly as it did before
+    # container enforcement existed. Never omit this field at construction —
+    # an omitted defaulted field nil-fills to 3 on the JIT, which would read as
+    # a live-but-garbage view.
+    container_view: ContainerNamespaceView?
 
 impl VfsManager:
     static fn new() -> VfsManager:
-        VfsManager(mounts: [], next_fd: 3, ai_cli_manifest: nil, handles: VfsHandleTable.new())  # 0=stdin, 1=stdout, 2=stderr
+        VfsManager(mounts: [], next_fd: 3, ai_cli_manifest: nil, handles: VfsHandleTable.new(), container_view: nil)  # 0=stdin, 1=stdout, 2=stderr
 
     static fn with_ai_cli_manifest(manifest: AiCliManifest) -> VfsManager:
-        VfsManager(mounts: [], next_fd: 3, ai_cli_manifest: manifest, handles: VfsHandleTable.new())
+        VfsManager(mounts: [], next_fd: 3, ai_cli_manifest: manifest, handles: VfsHandleTable.new(), container_view: nil)
 
     me set_ai_cli_manifest(manifest: AiCliManifest):
         self.ai_cli_manifest = manifest
@@ -95,6 +102,61 @@ impl VfsManager:
         if decision.allowed:
             return Ok(true)
         Err(decision.reason)
+
+    # === Container namespace enforcement (LIVE lookup path) ===
+    #
+    # This is the point where the ContainerNamespaceView model stops being
+    # documentation: every path-taking VfsManager operation resolves through
+    # `enforce_lookup_grants` below, and a manager carrying a container view
+    # resolves ONLY what that view allows.
+    #
+    # NO SECOND ENVELOPE: the decision is delegated wholesale to
+    # `container_view_allows_path` in os.kernel.loader.container_namespace —
+    # the same primitive the escape suite and the Lean model cover. Nothing
+    # about roots, prefixes or ".." is re-implemented here.
+
+    me enter_container_view(view: ContainerNamespaceView):
+        """Resolve subsequent lookups inside `view` (the kernel-owned view).
+
+        Pass `ContainerWorld.kernel_view_of(idx)`. A STOPPED or reaped
+        container's view is already `container_view_rootless()`, so entering it
+        resolves nothing — lifecycle failure is fail-closed by construction.
+        """
+        self.container_view = view
+
+    me enter_container(root: text, pids: [u64]):
+        """Convenience: confine to `root` with the declared `pids`."""
+        self.container_view = container_view_create(root, pids)
+
+    me enter_rootless_container():
+        """Enter the deny-everything view (what an unpopulated or stopped
+        container holds). Every lookup then fails closed."""
+        self.container_view = container_view_rootless()
+
+    me leave_container():
+        """Return to HOST context — lookups are unrestricted again."""
+        self.container_view = nil
+
+    fn in_container() -> bool:
+        """True when this manager is resolving on behalf of a container."""
+        self.container_view.?
+
+    fn enforce_container_namespace(operation: text, path: text) -> Result<bool, text>:
+        """Namespace gate. Host context (no view) is always allowed."""
+        if not self.container_view.?:
+            return Ok(true)
+        val view = self.container_view
+        if container_view_allows_path(view, path):
+            return Ok(true)
+        Err("container namespace denies {operation}: {path}")
+
+    fn enforce_lookup_grants(operation: text, path: text) -> Result<bool, text>:
+        """Converged gate every path lookup passes through. DENY WINS:
+        the operation proceeds only if EVERY gate allows it."""
+        val grant_result = self.enforce_ai_cli_file_grant(operation, path)
+        if grant_result.is_err():
+            return grant_result
+        self.enforce_container_namespace(operation, path)
 
     me mount(path: text, fs_type: text, device: text, read_only: bool, fs: Filesystem) -> Result<bool, text>:
         """Mount a filesystem at the given path."""
@@ -187,7 +249,7 @@ impl VfsManager:
         handle-based operation resolves `fd.node` back to its owning mount.
         """
         val operation = if flags.write or flags.create or flags.append or flags.truncate: "write" else: "read"
-        val grant_result = self.enforce_ai_cli_file_grant(operation, path)
+        val grant_result = self.enforce_lookup_grants(operation, path)
         if grant_result.is_err():
             return Err(grant_result.unwrap_err())
         val mount_index = self.resolve_mount_index(path)
@@ -213,7 +275,7 @@ impl VfsManager:
 
     fn stat(path: text) -> Result<FsNode, text>:
         """Get file/directory metadata."""
-        val grant_result = self.enforce_ai_cli_file_grant("stat", path)
+        val grant_result = self.enforce_lookup_grants("stat", path)
         if grant_result.is_err():
             return Err(grant_result.unwrap_err())
         val mount = self.resolve_mount(path)
@@ -225,7 +287,7 @@ impl VfsManager:
 
     fn readdir(path: text) -> Result<[DirEntry], text>:
         """List directory contents."""
-        val grant_result = self.enforce_ai_cli_file_grant("readdir", path)
+        val grant_result = self.enforce_lookup_grants("readdir", path)
         if grant_result.is_err():
             return Err(grant_result.unwrap_err())
         val mount = self.resolve_mount(path)
@@ -237,7 +299,7 @@ impl VfsManager:
 
     fn mkdir(path: text) -> Result<bool, text>:
         """Create directory."""
-        val grant_result = self.enforce_ai_cli_file_grant("mkdir", path)
+        val grant_result = self.enforce_lookup_grants("mkdir", path)
         if grant_result.is_err():
             return Err(grant_result.unwrap_err())
         val mount = self.resolve_mount(path)
@@ -251,7 +313,7 @@ impl VfsManager:
 
     fn rmdir(path: text) -> Result<bool, text>:
         """Remove an empty directory."""
-        val grant_result = self.enforce_ai_cli_file_grant("rmdir", path)
+        val grant_result = self.enforce_lookup_grants("rmdir", path)
         if grant_result.is_err():
             return Err(grant_result.unwrap_err())
         val mount = self.resolve_mount(path)
@@ -296,7 +358,7 @@ impl VfsManager:
 
     me unlink(path: text) -> Result<bool, text>:
         """Delete a file."""
-        val grant_result = self.enforce_ai_cli_file_grant("unlink", path)
+        val grant_result = self.enforce_lookup_grants("unlink", path)
         if grant_result.is_err():
             return Err(grant_result.unwrap_err())
         val mount = self.resolve_mount(path)
@@ -310,10 +372,10 @@ impl VfsManager:
 
     me rename(old_path: text, new_path: text) -> Result<bool, text>:
         """Rename a file or directory."""
-        val old_grant = self.enforce_ai_cli_file_grant("rename", old_path)
+        val old_grant = self.enforce_lookup_grants("rename", old_path)
         if old_grant.is_err():
             return Err(old_grant.unwrap_err())
-        val new_grant = self.enforce_ai_cli_file_grant("rename", new_path)
+        val new_grant = self.enforce_lookup_grants("rename", new_path)
         if new_grant.is_err():
             return Err(new_grant.unwrap_err())
         val mount = self.resolve_mount(old_path)
@@ -328,10 +390,10 @@ impl VfsManager:
 
     me symlink(target: text, link_path: text) -> Result<bool, text>:
         """Create a symbolic link at link_path pointing to target."""
-        val target_grant = self.enforce_ai_cli_file_grant("symlink", target)
+        val target_grant = self.enforce_lookup_grants("symlink", target)
         if target_grant.is_err():
             return Err(target_grant.unwrap_err())
-        val link_grant = self.enforce_ai_cli_file_grant("symlink", link_path)
+        val link_grant = self.enforce_lookup_grants("symlink", link_path)
         if link_grant.is_err():
             return Err(link_grant.unwrap_err())
         val mount = self.resolve_mount(link_path)
@@ -395,7 +457,7 @@ impl VfsManager:
 
     me read_text(path: text) -> Result<text, text>:
         """Read entire file contents as text (open → read → close)."""
-        val grant_result = self.enforce_ai_cli_file_grant("read", path)
+        val grant_result = self.enforce_lookup_grants("read", path)
         if grant_result.is_err():
             return Err(grant_result.unwrap_err())
         val maybe_entry = self.resolve_mount(path)
@@ -429,7 +491,7 @@ impl VfsManager:
         """
         if page_size == 0:
             return Err("page_size must be greater than zero")
-        val grant_result = self.enforce_ai_cli_file_grant("preload", path)
+        val grant_result = self.enforce_lookup_grants("preload", path)
         if grant_result.is_err():
             return Err(grant_result.unwrap_err())
         val maybe_entry = self.resolve_mount(path)
@@ -477,7 +539,7 @@ impl VfsManager:
 
     me write_text(path: text, content: text) -> Result<bool, text>:
         """Write text to a file (open → write → close)."""
-        val grant_result = self.enforce_ai_cli_file_grant("write", path)
+        val grant_result = self.enforce_lookup_grants("write", path)
         if grant_result.is_err():
             return Err(grant_result.unwrap_err())
         val maybe_entry = self.resolve_mount(path)
