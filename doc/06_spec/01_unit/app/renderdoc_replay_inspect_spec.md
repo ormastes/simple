@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -174,6 +174,13 @@ expect(parse_renderdoc_capture_xml(xml, "metadata.rdc", "metadata.xml", 0, "").r
 <details>
 <summary>Advanced: should reject captures without pipeline evidence</summary>
 
+#### should trust only one driver inside the RenderDoc header
+
+- Place a conflicting Vulkan driver inside capture metadata.
+- Keep the authoritative D3D12 header identity and reject Vulkan owner
+  agreement.
+- Reject missing and duplicate authoritative driver records.
+
 #### should reject captures without pipeline evidence
 
 - Remove pipeline creation
@@ -216,8 +223,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -1678,6 +1678,10 @@ The gate passes only when the source evidence contains:
 
 Missing RenderDoc, non-Simple backend evidence, wrong scene/program metadata,
 or a missing `.rdc` file all keep the gate out of `pass`.
+Replay inspection accepts exactly one supported `<driver>` record inside the
+single RenderDoc `<header>`. Driver-like metadata elsewhere in the XML cannot
+override the capture API; missing or duplicate header drivers fail as
+`unsupported-capture-driver` before owner agreement.
 
 Linux note, 2026-06-26: the Simple in-application capture must pass RenderDoc's
 Vulkan device pointer, not `VkDevice`. RenderDoc documents the Vulkan pointer as

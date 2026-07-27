@@ -996,3 +996,10 @@ Tracking split:
   Missing/mismatched checksum, explicit Simple failure, and forged aggregate
   mutations pass their direct shell checks. The unavailable pure-Simple SSpec
   runner and live Vulkan/RenderDoc hosts were not rerun.
+- simple-renderdoc-header-driver: The AC-7 audit found replay driver identity
+  used a whole-document substring, allowing unrelated metadata to spoof Vulkan.
+  The Simple inspector now accepts exactly one supported driver inside the sole
+  RenderDoc header. Unit/system mutations preserve a D3D12 header despite a
+  nested Vulkan metadata driver and reject missing/duplicate header drivers.
+  The admitted pure-Simple runner remains unavailable, so this source/spec
+  regression is not reported as an executable PASS.

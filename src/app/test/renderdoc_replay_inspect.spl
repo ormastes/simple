@@ -35,6 +35,40 @@ fn _count_marker(content: text, marker: text) -> i64:
         offset = offset + relative + marker.len()
     count
 
+fn _renderdoc_header_driver(xml: text) -> text:
+    val header_marker = "<header>"
+    if _count_marker(xml, header_marker) != 1 or
+       _count_marker(xml, "</header>") != 1:
+        return "unknown"
+    val header_start = xml.index_of(header_marker) + header_marker.len()
+    val header_tail = xml[header_start:xml.len()]
+    val header_length = header_tail.index_of("</header>")
+    if header_length < 0:
+        return "unknown"
+    val header = header_tail[0:header_length]
+    val driver_count = (
+        _count_marker(header, "<driver ") + _count_marker(header, "<driver>")
+    )
+    if driver_count != 1 or _count_marker(header, "</driver>") != 1:
+        return "unknown"
+    val driver_start = header.index_of("<driver")
+    val driver_tail = header[driver_start:header.len()]
+    val value_offset = driver_tail.index_of(">")
+    if value_offset < 0:
+        return "unknown"
+    val value_tail = driver_tail[value_offset + 1:driver_tail.len()]
+    val value_length = value_tail.index_of("</driver>")
+    if value_length < 0:
+        return "unknown"
+    val value = value_tail[0:value_length].trim()
+    if value == "Vulkan":
+        return "vulkan"
+    if value == "D3D12":
+        return "d3d12"
+    if value == "D3D11":
+        return "d3d11"
+    "unknown"
+
 fn _inspection_failure(reason: text, capture_path: text, xml_path: text, exit_code: i64, log: text) -> RenderDocReplayInspection:
     RenderDocReplayInspection(
         status: "fail", reason: reason, driver: "", capture_path: capture_path,
@@ -49,13 +83,7 @@ fn parse_renderdoc_capture_xml(xml: text, capture_path: text, xml_path: text, ex
     if exit_code != 0: return _inspection_failure("capture-open-failed", capture_path, xml_path, exit_code, convert_log)
     if not xml.contains("<rdc>") or not xml.contains("<chunks version="):
         return _inspection_failure("invalid-renderdoc-xml", capture_path, xml_path, exit_code, convert_log)
-    var driver = "unknown"
-    if xml.contains(">Vulkan</driver>"):
-        driver = "vulkan"
-    else if xml.contains(">D3D12</driver>"):
-        driver = "d3d12"
-    else if xml.contains(">D3D11</driver>"):
-        driver = "d3d11"
+    val driver = _renderdoc_header_driver(xml)
     val chunks = _count_marker(xml, "<chunk ")
     val dispatches = _count_marker(xml, "<chunk name=\"vkCmdDispatch\"")
     val draws = _count_marker(xml, "<chunk name=\"vkCmdDraw")

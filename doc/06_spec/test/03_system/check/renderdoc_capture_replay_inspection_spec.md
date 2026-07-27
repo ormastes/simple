@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -122,6 +122,15 @@ expect(parsed.reason).to_equal("invalid-renderdoc-xml")
 <details>
 <summary>Advanced: should reject capture and owner-record disagreement</summary>
 
+#### should reject action names that appear only in capture metadata
+
+- Parse structured XML with no action chunk and reject metadata-only names.
+
+#### should reject a metadata driver that disagrees with the capture header
+
+- Parse a D3D12 header with a Vulkan driver nested in metadata.
+- Preserve D3D12 replay identity and reject Vulkan owner agreement.
+
 #### should reject capture and owner-record disagreement
 
 - Pair the capture with a different API or frame record
@@ -168,8 +177,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
