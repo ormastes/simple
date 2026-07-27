@@ -84,15 +84,15 @@ promoting runtime evidence:
   or direct update routes;
 - the macOS full-CLI admission boundary uses a normalized v2 history verifier
   and tracked fail-closed trust-root gate. An Endpoint Security exec/fork/exit
-  collector candidate now exists and passed bounded static review without a
-  remaining P0/P1 source issue. Its final `-lbsm` link/self-test, builder
-  self-test, focused admission contracts, and direct-env gates were not rerun
-  after the last repair; policy remains unavailable and live admission
-  deliberately exits 125.
+  collector candidate now exists and passed bounded static review plus fresh
+  clean-revision source verification: Swift `-lbsm` link/self-test, builder
+  self-test, focused boundary/full-CLI/GPU contracts, direct-env scope guards,
+  and explicit unavailable-policy `--exec-verified` exit 125. Policy remains
+  unavailable, so this is not live admission or GUI evidence.
 
 These are source contracts, not pixels or events. The native macOS row still
-needs fresh collector verification, provisioned signing/entitlement, and the
-exact admitted runtime. The
+needs provisioned signing/entitlement, separately reviewed prepared/admitted
+pins, and the exact admitted runtime. The
 x86_64 QEMU row still needs an admitted kernel/disk/frozen manifest plus
 `grub-mkstandalone`; ARM64 still needs an admitted ELF/FAT/frozen manifest and
 fresh guest receipts. Windows Vulkan/SIMD and Linux

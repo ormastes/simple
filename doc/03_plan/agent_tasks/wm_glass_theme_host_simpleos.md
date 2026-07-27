@@ -621,11 +621,14 @@ candidate now collects exec/fork/exit lineage with sequence-gap and finalization
 checks, runs the driver from an immutable private snapshot in a process group,
 and uses a non-circular unavailable/prepared/admitted policy. Independent
 highest-capability static review found no remaining P0/P1 source issue in the
-bounded pathname-TOCTOU repair. This is **SOURCE CANDIDATE STATIC ACCEPT /
-VERIFICATION BLOCKED**, not a source or runtime PASS: after the final repair,
-the Swift `-lbsm` link/self-test and builder self-test were not rerun, nor were
-the focused contracts and direct-env gates. The policy therefore remains
-`status=unavailable`, and live admission deliberately exits 125.
+bounded pathname-TOCTOU repair. A fresh clean-revision verification then passed
+the Swift `-lbsm` compile/link/self-test, builder self-test, focused
+boundary/full-CLI/GPU contracts, both direct-env modes, and the explicit
+`--exec-verified` unavailable-policy branch with exit 125 and
+`policy-not-admitted`. Independent highest-capability review accepted the
+source verification. The clean direct-env results are scope guards, not
+non-vacuous implementation coverage. Policy remains `status=unavailable`; no
+source verification result is live admission or GUI evidence.
 
 The canonical SimpleOS desktop entries for x86_64, ARM64, and RV64 call
 `install_generated_simpleos_wm_theme()` before compositor and first-frame
@@ -641,13 +644,14 @@ The superseded manifest-v2 gate bound the widget/Web inputs but admitted its
 Stage-3 compiler as the strict GUI driver. Manifest v3 replaces that mismatch
 with a separately provenance-bound canonical full CLI GUI driver, normalized
 history verifier, and fail-closed tracked trust-root gate. The collector
-candidate and immutable-snapshot lifecycle now exist, but final-cycle
-verification is intentionally not inferred. A fresh session must compile/link
-and self-test the collector, run the builder self-test, run the focused
-admission/direct-env gates, and independently review those results before
-changing the policy to `prepared`. Only provisioned signing identity,
-entitlement, pinned hashes, and exact admitted artifacts may promote it to
-`admitted`.
+candidate and immutable-snapshot lifecycle now exist, and the fresh
+source-verification session plus independent review passed. Promotion is still
+deliberately separate: first provision the approved signing identity and
+Endpoint Security entitlement and review a `prepared` policy that pins source,
+toolchain, argv, and environment while output/manifest hashes remain
+unavailable. Then build and review the collector candidate; only its exact
+output and manifest hashes may enter a separate `admitted` policy. The
+canonical full-CLI driver is produced and admitted only after collector trust.
 
 ## 2026-07-27 Metal Receipt and GUI Driver Follow-up
 
@@ -661,14 +665,15 @@ device-operation checkpoint. It is not a native widget/web capture, event
 receipt, GUI admission, or product PASS, and it cannot promote any other row.
 
 GUI-driver admission source is repaired, and the Endpoint Security collector is
-now a fail-closed source candidate. Live artifact production and capture still
-cannot begin: final-cycle compile/link and builder self-tests plus focused
-admission/direct-env gates remain unrun, so the policy stays unavailable. A
-fresh verification session must produce those results before `prepared`, after
-which the security owner can provision the signing team and entitlement, pin
-the reproducible collector and driver artifacts, and independently admit the
-exact-current manifest v3. No admissible current pure-Simple GUI runtime
-exists; the native harness and every seed/delegating driver remain
+now a source-verified fail-closed candidate. Live artifact production and
+capture still cannot begin because the policy stays unavailable. The security
+owner must provision the approved signing team and Endpoint Security
+entitlement and obtain independent review of a source/toolchain-pinned
+`prepared` policy whose output hashes remain unavailable. Next it must build
+and review the reproducible collector candidate, separately admit its exact
+output/manifest hashes, and only then produce and admit the exact canonical
+full-CLI driver before live evidence. No admissible current pure-Simple GUI
+runtime exists; the native harness and every seed/delegating driver remain
 inadmissible.
 
 ## 2026-07-27 Hosted Event and QEMU Contract Review

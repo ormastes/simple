@@ -949,3 +949,15 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   unrun after that final repair. No PASS is inferred. Policy remains
   `status=unavailable`, and a fresh verification session plus separate
   prepared/admitted promotions are required before live evidence.
+
+- continuation-2026-07-27-macos-es-collector-source-verified: **SOURCE
+  VERIFIED / LIVE ADMISSION UNAVAILABLE.** At clean revision `b70aef1dd6`, a
+  fresh non-bootstrap session passed the Swift `-lbsm` compile/link/self-test,
+  builder immutable-snapshot self-test, focused boundary/full-CLI/GPU
+  contracts, both direct-env scope modes, and the explicit `--exec-verified`
+  unavailable-policy branch with exit 125 and `policy-not-admitted`.
+  Independent highest-capability review accepted source verification. The
+  clean direct-env passes are vacuous scope guards and are not implementation
+  coverage. Policy remains `status=unavailable`; no approved signing team,
+  Endpoint Security entitlement, prepared/admitted pinned collector and
+  canonical driver, or live ES/GUI evidence exists.
