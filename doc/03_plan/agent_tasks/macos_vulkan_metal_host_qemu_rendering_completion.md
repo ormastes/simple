@@ -10,14 +10,16 @@ manifest-bound Vulkan 2D live PASS exists, so no downstream lane may be marked
 complete from source review, retained diagnostics, CPU mirrors, or unretained
 peer reports.
 
-The latest bounded producer work is recorded in cycles 22–24 below and
+The latest bounded producer work is recorded in cycles 25–27 below and
 supersedes the older diagnostic summaries. Parsing, cmap, tables, metrics,
-outline geometry, and common-module caller-owned pixel publication are now
-localized. The remaining failure is at the selected-font integration seam:
-all three current builds stop at `fail-glyph-bitmap-return` before
-FontRenderer records a completed bitmap. The attempted method and retained
-FontRenderer-blob transports did not advance that receipt. No source change
-from cycles 22–24 is accepted or pushed as a fix.
+and outline geometry remain localized. A focused cross-module native fixture
+now proves that caller-owned `[i64]`/`[u8]` arrays survive both scalar and
+32-byte aggregate-return calls on Cranelift and LLVM, disproving the prior
+mutable-slice-lifetime diagnosis. The remaining failure is inside the selected
+SFNT measure publication: the isolated Bungee into-probe exits before the
+measure cookie, and the fail-closed producer stops at
+`fail-glyph-bitmap-return`. No cycle-25–27 font integration is accepted as a
+fix.
 
 ### Verified current state
 
@@ -73,13 +75,13 @@ from cycles 22–24 is accepted or pushed as a fix.
 
 ### Ordered remaining tasks
 
-1. In a fresh session, run one minimal compiler regression probe: mutate a
-   caller-owned slice, make one intervening aggregate-return/scalar-helper
-   call, then mutate and validate the same slice again. Do not repeat cycles
-   22–24 unchanged.
-2. Fix native/Cranelift mutable-slice descriptor preservation if that focused
-   probe confirms the high-review diagnosis, then run one
-   focused current-source producer check and require exact Bungee
+1. In a fresh session, add monotonic fixed-slot phase stamps inside
+   `_sfnt_glyf_measure_query_into`: entry, blob/size validation, offset-table
+   parse, cmap/glyph selection, intra-module raster result, and final metadata
+   publication. Run the isolated Bungee into-probe once; do not repeat cycles
+   25–27 unchanged.
+2. Fix only the phase identified by that probe, then run one focused
+   current-source producer check and require exact Bungee
    24 pt at 300 DPI = 100 px, plan admission, positive staged quads, atlas ROI
    alpha, cold rasterizations, warm zero rasterizations plus positive hits,
    stable identity, and CPU producer execution.
@@ -846,9 +848,8 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   caller-owned exact-size pixels, codepoint/glyph-index parity, whitespace
   completion, and the missing value-returning `_add_edge` assignment. It
   compiled 185 modules with zero failures and advanced from
-  `fail-glyph-bitmap-pixels` to `fail-glyph-bitmap-return`. This proves the
-  common-to-SFFI caller-owned pixel publication while isolating the remaining
-  aggregate return.
+  `fail-glyph-bitmap-pixels` to `fail-glyph-bitmap-return`. Later isolated
+  evidence shows that result did not prove final measure publication.
 - Cycle 23 moved selected codepoint and glyph-index consumption into
   FontRenderer and constructed `CachedGlyph` locally, but routed measure and
   render through FontRasterizer instance methods. It compiled 185 modules with
@@ -859,13 +860,13 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   and still retained the exact `fail-glyph-bitmap-return` result. The next
   session must first isolate mutable-slice survival across an intervening call
   in a compiler-only regression probe.
-- Final high review found that cycles 23 and 24 share a call-rich mutable-slice
+- The review after cycle 24 suspected that cycles 23 and 24 shared a
+  call-rich mutable-slice
   lifetime: `mut meta` and `mut pixels` remain live across aggregate-return and
   scalar helper calls before their completion writes. Cycle 16 proved only a
   leaf mutation without intervening calls. The leading root cause is therefore
-  native/Cranelift slice-descriptor preservation across calls, not Bungee
-  parsing or the Engine2D return. Fix the compiler seam rather than adding
-  concurrency-unsafe global font scratch state.
+  native/Cranelift slice-descriptor preservation across calls. Cycles 25–27
+  below disprove that hypothesis; do not patch the compiler on this evidence.
 - Final review rejected the unproven two-pass integration, FontRenderer blob
   retention, and associated protocol hardening for mainline; those edits were
   reverted. The independently definite `_add_edge` dropped-value repair was
@@ -874,6 +875,40 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
 - The mandatory three-cycle cap is exhausted. No bootstrap was run. Do not
   push the current source as a fixed implementation and do not rerun the same
   probe unchanged.
+
+### 2026-07-27 Bungee producer cycles 25–27
+
+- A new cross-module regression mutates preallocated `[i64]` and `[u8]`
+  arrays before and after scalar and 32-byte aggregate-return calls. The
+  retained pure-Simple Stage3 built and ran it successfully with both
+  Cranelift and LLVM, and its focused ownership contract passes 1/1 in the
+  interpreter runner. Arrays are single `SplArray*` handles in this lowering,
+  not fat slice descriptors; the previous leading diagnosis is falsified.
+- The same build exposed a current macOS core-C portability regression:
+  `closefrom` is undeclared and a Linux-only `expected_parent` local is unused.
+  The first workaround compiled, but final review rejected it: this host's
+  `OPEN_MAX` is 1,048,575, so the generic loop would issue about one million
+  closes per spawn and call `sysconf` after `fork`. That workaround and its
+  source-only test were reverted. A fresh runtime session must implement and
+  behaviorally verify an efficient Darwin strategy (for example,
+  `posix_spawn` with `POSIX_SPAWN_CLOEXEC_DEFAULT`) before native builds can
+  rely on current main without a dirty portability patch.
+- Cycle 25 directly consumed caller-owned selected-font metadata and pixels
+  from FontRenderer while still allowing the legacy aggregate fallback. It
+  compiled 192 modules with zero failures and stopped at
+  `fail-glyph-bitmap-pixels`; that result was still reachable through the
+  fallback and did not prove the new render path.
+- Cycle 26 isolated the common two-pass API over exact Bungee `B` at 100 px.
+  It compiled 11 modules with zero failures and exited `2`, before a valid
+  measure status/cookie was published. Allocation and render were not reached.
+- Cycle 27 removed the new helper that accepted `OtFont`, gated the direct
+  path to the built-in selected face, disabled its aggregate fallback, and
+  added fail-closed state/currency validation. It compiled 192 modules with
+  zero failures and stopped exactly at `fail-glyph-bitmap-return`, confirming
+  measure publication still fails before FontRenderer accepts a bitmap.
+- The font cycle cap is exhausted and no bootstrap was run. Revert the
+  unproven font integration before push. The next session must phase-stamp the
+  isolated measure function once rather than redesign another transport.
 
 ## Ownership and Stop Conditions
 
