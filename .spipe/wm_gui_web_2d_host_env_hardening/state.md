@@ -1083,9 +1083,11 @@ Tracking split:
   claimed while the admitted pure-Simple runner remains unavailable.
 - coverage-denominator-gap: The pure-Simple compiler now emits a deterministic
   zero-count decision/condition inventory before execution, including untouched
-  sites and valid header-only inventories for branchless sources. Generated
-  match/wrapper control flow is excluded and wrapper probes retain the authored
-  source path. The runner merges runtime outcomes onto that inventory, closing
+  sites and valid header-only inventories for branchless sources. Authored
+  for-loops and match arms are included; each selected match body records one
+  true plus N-1 false arm outcomes while generated match/wrapper mechanics are
+  excluded and the original dispatch remains unchanged. Wrapper probes retain
+  the authored source path. The runner merges runtime outcomes onto that inventory, closing
   the false-100% denominator gap in code; 98-100% proof remains unclaimed until
   an admitted source-matched pure-Simple runner executes the focused specs.
 - coverage-manifest-runner-groundwork: The parent runner now has a strict

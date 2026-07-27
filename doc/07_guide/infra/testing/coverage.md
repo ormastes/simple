@@ -336,10 +336,10 @@ annotation fail the run even when aggregate coverage passes. Canonical
 `test/03_system/**` specs require at least one annotation unless
 `--no-cover-check` is explicitly selected.
 
-Until TODO594 merges a compiler-owned inventory of all decision sites, this
-percentage is **observed-decision outcome coverage**: it rejects weak outcomes
-for emitted rows but cannot count a function that never emitted any row. Do not
-use it alone to claim 98–100% source branch coverage.
+The compiler-owned zero-count inventory is merged before runtime outcomes, so
+untouched instrumented sites remain in the denominator. A reported percentage
+is still release evidence only when produced by an admitted source-matched
+pure-Simple runtime; TODO589 owns that pending 98-100% execution proof.
 
 ### Source Coverage in CI
 

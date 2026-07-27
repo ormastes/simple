@@ -161,10 +161,12 @@ artifact freshness, bucket derivation, and limit calculation.
 
 ## Coverage Collection
 
-The MIR lowerer inventories user-authored `if`, `while`, and short-circuit
-decision/condition sites with deterministic path/span IDs. Generated match and
-coverage-wrapper control flow is explicitly excluded; wrapper preprocessing
-preserves the authored path. The compiler emits one strict zero-count SDN
+The MIR lowerer inventories user-authored `if`, `while`, `for`, short-circuit,
+and match-arm decision/condition sites with deterministic path/span IDs.
+Generated match mechanics and coverage-wrapper control flow are excluded;
+the selected authored match body emits one true and N-1 false arm outcomes
+without re-evaluating patterns or changing dispatch control flow. Wrapper
+preprocessing preserves the authored path. The compiler emits one strict zero-count SDN
 manifest, including a header-only form for branchless sources. Stage4 text LLVM
 lowers reserved probes to the core-C coverage owner, whose deterministic dump
 is merged by the test runner before it applies the 98/100% thresholds. Coverage

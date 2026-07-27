@@ -479,7 +479,7 @@ executed test files against `CoverageData.files`; both runner entrypoints fail
 closed for malformed annotations, absent targets, or insufficient decision
 coverage. Aggregate thresholds remain a separate gate.
 
-The final source-coverage denominator must merge a compiler-emitted manifest
-that pre-registers every decision as zero/zero. Runtime rows alone cover only
-observed sites and cannot prove that untouched functions or branches exist in
-the denominator (TODO594).
+The source-coverage denominator merges the compiler-emitted zero/zero decision
+manifest before runtime rows. Untouched sites therefore remain visible instead
+of disappearing behind an observed-only 100%. TODO589 still requires an
+admitted pure-Simple run before the requested 98-100% result can be claimed.

@@ -23,6 +23,42 @@ fn lower_logic_function(expr: text) -> text:
     val src = "fn rhs() -> bool:\n    true\n\nfn check(flag: bool, other: bool) -> bool:\n    {expr}\n"
     lower_source_function(src, "check")
 
+fn lower_coverage_constructs(source: text) -> (text, text, text):
+    val source_path = "coverage_constructs.spl"
+    val module = parse_full_frontend(source, source_path, source_path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(source_path)
+    val hir = hir_lowering.lower_module(module)
+    val (resolved_hir, resolve_errors) = resolve_methods(hir)
+    expect(resolve_errors.len()).to_equal(0)
+
+    var mir_lowering = MirLowering.new(resolved_hir.symbols)
+    mir_lowering.enable_coverage_inventory(true)
+    val mir = mir_lowering.lower_module(resolved_hir)
+    var for_rendered = ""
+    var match_rendered = ""
+    for function in mir.functions.values():
+        if function.name == "counted" or function.name.ends_with(".counted"):
+            for_rendered = serialize_mir_function(function)
+        if function.name == "choose" or function.name.ends_with(".choose"):
+            match_rendered = serialize_mir_function(function)
+    (for_rendered, match_rendered, mir_lowering.coverage_manifest_sdn())
+
+fn lower_coverage_function(source: text, target_name: text) -> (text, text):
+    val source_path = "coverage_route.spl"
+    val module = parse_full_frontend(source, source_path, source_path, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(source_path)
+    val hir = hir_lowering.lower_module(module)
+    val (resolved_hir, resolve_errors) = resolve_methods(hir)
+    expect(resolve_errors.len()).to_equal(0)
+    var mir_lowering = MirLowering.new(resolved_hir.symbols)
+    mir_lowering.enable_coverage_inventory(true)
+    val mir = mir_lowering.lower_module(resolved_hir)
+    var rendered = ""
+    for function in mir.functions.values():
+        if function.name == target_name or function.name.ends_with(".{target_name}"):
+            rendered = serialize_mir_function(function)
+    (rendered, mir_lowering.coverage_manifest_sdn())
+
 fn expect_conditional_rhs(mir: text):
     val if_pos = mir.index_of("\"terminator\":{\"If\"") ?? -1
     val rhs_pos = mir.index_of("\"label\":\"logic_rhs\"") ?? -1
@@ -111,14 +147,17 @@ describe "compiler decision inventory", tag: ["only-compiled"]:
 
         expect(rendered.split("__simple_coverage_decision_probe").len()).to_equal(2)
         expect(rendered.split("__simple_coverage_condition_probe").len()).to_equal(3)
-        expect(generated_match.contains("__simple_coverage_decision_probe")).to_equal(false)
+        # Or alternatives converge on one authored body marker. Static body
+        # duplication is route-dependent; the manifest below proves that it
+        # still contributes only two authored-arm IDs.
+        expect(generated_match.contains("__simple_coverage_decision_probe")).to_equal(true)
         expect(generated_match.contains("__simple_coverage_condition_probe")).to_equal(false)
         expect(manifest).to_start_with("version: 1.0\ndecisions |id, file, line, column, true_count, false_count|")
         expect(rendered).to_contain("dir/100%,coverage_logic.spl")
         expect(manifest).to_contain("dir/100%25%2Ccoverage_logic.spl")
         expect(manifest.contains("100%2525")).to_equal(false)
         expect(manifest).to_contain("conditions |decision_id, condition_id, file, line, column, true_count, false_count|")
-        expect(manifest.split(", 0, 0").len()).to_equal(4)
+        expect(manifest.split(", 0, 0").len()).to_equal(6)
 
         val lowering_source = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
         expect(lowering_source).to_contain("print \"__SIMPLE_COMPILER_COVERAGE_MANIFEST_BEGIN__\"")
@@ -167,3 +206,59 @@ describe "compiler decision inventory", tag: ["only-compiled"]:
         expect(wrapper_manifest.split(", 0, 0").len()).to_equal(3)
         expect(wrapper_manifest).to_contain("src/authored_branchless.spl")
         expect(wrapper_manifest.contains("/tmp/simple_cov_branchless.spl")).to_equal(false)
+
+    it "counts authored for and match roots without generated condition probes":
+        val source = "fn counted() -> i64:\n    var total = 0\n    for i in 0..3:\n        total = total + i\n    total\n\nfn choose(value: i64) -> i64:\n    match value:\n        case 1: 10\n        case 2: 20\n        case _: 30\n"
+        val (for_rendered, match_rendered, manifest) = lower_coverage_constructs(source)
+        val (_, _, repeated_manifest) = lower_coverage_constructs(source)
+
+        expect(for_rendered.split("__simple_coverage_decision_probe").len()).to_equal(2)
+        expect(for_rendered.contains("__simple_coverage_condition_probe")).to_equal(false)
+        # Three authored bodies, each carrying one three-arm selection vector.
+        expect(match_rendered.split("__simple_coverage_decision_probe").len()).to_equal(10)
+        expect(match_rendered.contains("__simple_coverage_condition_probe")).to_equal(false)
+        expect(match_rendered).to_contain("\"value\":true")
+        expect(match_rendered).to_contain("\"value\":false")
+        expect(manifest).to_equal(repeated_manifest)
+
+        var decision_ids: [text] = []
+        for line in manifest.split("\n"):
+            if line.contains(", coverage_constructs.spl, "):
+                val fields = line.split(", ")
+                decision_ids = decision_ids.push(fields[0])
+        expect(decision_ids.len()).to_equal(4)
+        var left = 0
+        while left < decision_ids.len():
+            var right = left + 1
+            while right < decision_ids.len():
+                expect(decision_ids[left] == decision_ids[right]).to_equal(false)
+                right = right + 1
+            left = left + 1
+
+    it "retains Switch dispatch while recording one selection vector per authored body":
+        val source = "fn choose(value: i64) -> i64:\n    match value:\n        case 1: 10\n        case 2: 20\n        case 3: 30\n        case 4: 40\n        case _: 50\n"
+        val (rendered, manifest) = lower_coverage_function(source, "choose")
+        expect(rendered).to_contain("\"Switch\"")
+        expect(rendered.split("__simple_coverage_decision_probe").len()).to_equal(26)
+        expect(rendered.contains("__simple_coverage_condition_probe")).to_equal(false)
+        expect(manifest.split(", coverage_route.spl, ").len()).to_equal(6)
+
+    it "preserves authored-arm markers through enum and general fallback routes":
+        val enum_source = "union Choice:\n    A(value: i64)\n    B(value: i64)\n\nfn choose(value: Choice) -> i64:\n    match value:\n        case Choice.A(v): v\n        case Choice.B(v): v\n"
+        val (enum_rendered, enum_manifest) = lower_coverage_function(enum_source, "choose")
+        expect(enum_rendered.split("__simple_coverage_decision_probe").len()).to_equal(5)
+        expect(enum_rendered.contains("__simple_coverage_condition_probe")).to_equal(false)
+        expect(enum_manifest.split(", coverage_route.spl, ").len()).to_equal(3)
+
+        val fallback_source = "fn choose(value: text) -> i64:\n    match value:\n        case \"yes\": 1\n        case _: 0\n"
+        val (fallback_rendered, fallback_manifest) = lower_coverage_function(fallback_source, "choose")
+        expect(fallback_rendered.split("__simple_coverage_decision_probe").len()).to_equal(5)
+        expect(fallback_rendered.contains("__simple_coverage_condition_probe")).to_equal(false)
+        expect(fallback_manifest.split(", coverage_route.spl, ").len()).to_equal(3)
+
+    it "uses one authored decision for range array and text for loops":
+        val source = "fn range_loop() -> i64:\n    var total = 0\n    for i in 0..3:\n        total = total + i\n    total\n\nfn array_loop(values: [i64]) -> i64:\n    var total = 0\n    for value in values:\n        total = total + value\n    total\n\nfn text_loop(value: text) -> i64:\n    var total = 0\n    for ch in value:\n        total = total + 1\n    total\n"
+        for target in ["range_loop", "array_loop", "text_loop"]:
+            val (rendered, _) = lower_coverage_function(source, target)
+            expect(rendered.split("__simple_coverage_decision_probe").len()).to_equal(2)
+            expect(rendered.contains("__simple_coverage_condition_probe")).to_equal(false)

@@ -1567,7 +1567,7 @@ impl MirLowering:
         self.builder = b5
         while_result
 
-    me lower_for(var_: SymbolId, iter: HirExpr, body: HirBlock) -> LocalId:
+    me lower_for(var_: SymbolId, iter: HirExpr, body: HirBlock, source_span: Span) -> LocalId:
         """Lower for expression.
 
         For range-based iteration (for x in start..end), lowers directly to
@@ -1597,12 +1597,12 @@ impl MirLowering:
         # once the bridge fed it a real Range.
         match iter.kind:
             case Range(start, end, inclusive, step):
-                return self.lower_for_range(var_, start, end, inclusive, step, body)
+                return self.lower_for_range(var_, start, end, inclusive, step, body, source_span)
             case _:
                 pass  # Fall through to iterator protocol
 
         # General case: iterator protocol lowering
-        self.lower_for_iterator(var_, iter, body)
+        self.lower_for_iterator(var_, iter, body, source_span)
 
     me lower_for_range(
         var_: SymbolId,
@@ -1610,7 +1610,8 @@ impl MirLowering:
         end: HirExpr?,
         inclusive: bool,
         step: HirExpr?,
-        body: HirBlock
+        body: HirBlock,
+        source_span: Span
     ) -> LocalId:
         """Lower range-based for loop directly to a counted while-loop.
 
@@ -1718,6 +1719,10 @@ impl MirLowering:
             mir_operand_copy(end_local),
             MirType.bool()
         )
+        self.builder = b_cond
+        val for_decision_id = self.coverage_register_decision(source_span, "for", false)
+        self.coverage_emit_decision_probe(for_decision_id, cond_result, source_span)
+        b_cond = self.builder
         b_cond.terminate_if(mir_operand_copy(cond_result), body_block, exit_block)
         b_cond.switch_to_block(body_block)
         self.builder = b_cond
@@ -1763,7 +1768,7 @@ impl MirLowering:
         self.builder = b_exit
         for_result
 
-    me lower_for_iterator(var_: SymbolId, iter: HirExpr, body: HirBlock) -> LocalId:
+    me lower_for_iterator(var_: SymbolId, iter: HirExpr, body: HirBlock, source_span: Span) -> LocalId:
         """Lower `for x in collection` for non-range iterables.
 
         Runtime arrays and text lower to a real counted index loop (see
@@ -1835,14 +1840,15 @@ impl MirLowering:
                     var_,
                     chars_local,
                     MirType(kind: MirTypeKind.Opaque("str")),
-                    body
+                    body,
+                    source_span
                 )
 
         # Runtime-array fast path: lower `for x in arr` to an index-based
         # counted loop over rt_array_len / rt_array_get (mirrors the array
         # index-read call shape in _MirLoweringExpr/expr_dispatch.spl).
         if self.local_is_runtime_array(collection_local):
-            return self.lower_for_array_indexed(var_, collection_local, element_type, body)
+            return self.lower_for_array_indexed(var_, collection_local, element_type, body, source_span)
 
         # Non-array iterable: no supported lowering (#143). Fail loudly.
         val iter_unsupported_msg = "for-in over non-array iterables is not supported by native codegen yet (#143); iterate an array or use while"
@@ -1867,7 +1873,8 @@ impl MirLowering:
         var_: SymbolId,
         collection_local: LocalId,
         element_type: MirType,
-        body: HirBlock
+        body: HirBlock,
+        source_span: Span
     ) -> LocalId:
         """Lower `for x in arr` over a runtime array as a counted index loop.
 
@@ -1940,6 +1947,10 @@ impl MirLowering:
             mir_operand_copy(len_local),
             MirType.bool()
         )
+        self.builder = b_cond
+        val for_decision_id = self.coverage_register_decision(source_span, "for", false)
+        self.coverage_emit_decision_probe(for_decision_id, cond_result, source_span)
+        b_cond = self.builder
         b_cond.terminate_if(mir_operand_copy(cond_result), body_block, exit_block)
         b_cond.switch_to_block(body_block)
         self.builder = b_cond

@@ -53,9 +53,9 @@ event-format runtime row, plus non-decimal and overflowing source locations.
 Rejected input leaves the denominator empty; a valid zero-count manifest still
 pre-registers its decision afterward.
 
-This is runner-side TODO594 groundwork only. The compiler does not yet emit the
-manifest, so these scenarios do not claim full source coverage or close
-TODO594.
+The compiler now emits this manifest and the runner merges it before runtime
+rows. These focused scenarios prove the strict merge contract; TODO589 still
+owns the admitted-runtime 98-100% measurement and retained reports.
 
 <details>
 <summary>Executable SSpec</summary>

@@ -556,6 +556,31 @@ impl MirLowering:
 
     me lower_block_expected(block: HirBlock, expected_type: HirType?) -> LocalId?:
         """Lower HIR block to MIR, return result local if any."""
+        # Match coverage belongs to the selected authored arm body, not to
+        # compiler-generated dispatch predicates. Exactly one arm body runs
+        # per match evaluation, so its vector records one true selection and
+        # false for every other authored arm without evaluating any pattern.
+        if self.coverage_enabled and block.coverage_match_arm:
+            val match_span = Span(
+                start: block.coverage_match_start,
+                end: block.coverage_match_end,
+                line: block.coverage_match_line,
+                col: block.coverage_match_col,
+                file: "",
+                length: block.coverage_match_end - block.coverage_match_start
+            )
+            var coverage_ordinal = 0
+            while coverage_ordinal < block.coverage_match_arm_count:
+                val decision_id = self.coverage_register_decision(
+                    match_span, "match_arm:{coverage_ordinal}", false
+                )
+                var coverage_builder = self.builder
+                val selected = coverage_builder.emit_const_bool(
+                    coverage_ordinal == block.coverage_match_ordinal
+                )
+                self.builder = coverage_builder
+                self.coverage_emit_decision_probe(decision_id, selected, match_span)
+                coverage_ordinal = coverage_ordinal + 1
         # Use struct fields directly. A `val` declared without an initializer and
         # then assigned inside a match case is not bound in the outer scope by the
         # seed interpreter (-> 'variable block_stmts not found'). HirBlock carries
