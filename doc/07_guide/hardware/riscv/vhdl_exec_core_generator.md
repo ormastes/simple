@@ -28,10 +28,15 @@ See also: [`riscv_guide.md`](riscv_guide.md),
 
 ```bash
 sh scripts/fpga/generate_exec_core_vhdl.shs
-sh scripts/check/check-vhdl-golden-match.shs --require-generated
+sh scripts/check/check-vhdl-golden-match.shs
 ```
 
-The first command writes six `.vhd` files into `build/os/rtl/`; the second
+Generation is the **default** expectation: the gate fails if any pinned RTL file
+is missing from `build/os/rtl/`. Pass `--allow-missing` to opt out (missing is
+then reported as `not-generated` instead of failing). `--require-generated` is
+still accepted as a no-op, since that is now the default.
+
+The first command writes all 29 `.vhd` files into `build/os/rtl/`; the second
 proves each is byte-identical to its golden and that no golden has drifted from
 its pinned hash.
 
@@ -167,8 +172,11 @@ hart join points — mirroring the philosophy of
 ### Golden match
 
 ```bash
-sh scripts/check/check-vhdl-golden-match.shs --require-generated
+sh scripts/check/check-vhdl-golden-match.shs
 ```
+
+Covers all 29 pinned RTL files. Missing generated files fail by default; use
+`--allow-missing` to opt out.
 
 Two fail-closed layers:
 

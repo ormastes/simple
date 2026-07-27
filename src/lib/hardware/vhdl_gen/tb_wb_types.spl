@@ -1,0 +1,311 @@
+# Structured descriptors + emitters for the SimpleOS / WB-SoC testbench
+# generators (tb_simpleos_wb_gen.spl).
+#
+# Kept in its own module so the silicon-proven exec-core lane
+# (gen_types.spl / exec_core_gen.spl / exec_core_variant_gen.spl) stays
+# untouched. Same construction-API style: typed descriptor arrays are
+# elaborated at generator time into VHDL text.
+#
+# Column alignment: the testbench goldens align declaration columns
+# GROUP-LOCALLY (the debug_* group aligns to its own width, the mem_* group to
+# another, plain signals not at all), so each descriptor carries its explicit
+# `name_w` field width — same convention as VgPortSpec in gen_types.spl.
+#
+# Determinism: arrays only, never a Dict (seed Dict iteration order is random
+# per process). Repeated generation is byte-identical.
+
+use std.hardware.vhdl_gen.gen_types.{no_lines, vg_pad, vg_append, vg_spaces}
+
+# ---------------------------------------------------------------------------
+# Descriptor types
+# ---------------------------------------------------------------------------
+
+# One VHDL declaration line (signal / constant / variable).
+struct VgDeclSpec:
+    kind: text             # "signal" / "constant" / "variable"
+    pre_comments: [text]   # verbatim full lines emitted before this decl
+    name: text
+    name_w: i64            # width of the name field before ": "
+    ty: text
+    init: text             # "" => no " := ..." tail
+    trail: text            # trailing comment after ";" ("" => none)
+
+# One `formal => actual` association in a vertical port map.
+struct VgAssoc:
+    formal: text
+    actual: text
+
+# One physical line of a grouped (multi-association-per-line) port map.
+# All grouped rows in these goldens are identity associations (`n => n`).
+struct VgAssocRow:
+    names: [text]
+
+# assert <sig> = '1' report "<TAG>_<marker>" severity failure;
+struct VgAssertSpec:
+    sig: text
+    marker: text
+
+# One terminal line-marker the boot testbenches stop on. The compared prefix
+# length is derived from `marker`, never spelled twice.
+struct VgTermMarker:
+    marker: text           # e.g. "TEST FAILED"
+    reached: text          # reached=<...> tail of the BOOT_DONE report
+
+# ---------------------------------------------------------------------------
+# Descriptor constructors
+# ---------------------------------------------------------------------------
+
+# Unaligned declaration: one space between the name and the colon.
+fn vg_decl(kind: text, name: text, ty: text, init: text) -> VgDeclSpec:
+    VgDeclSpec(
+        kind: kind, pre_comments: no_lines(), name: name,
+        name_w: name.len() + 1, ty: ty, init: init, trail: ""
+    )
+
+fn vg_sig(name: text, ty: text, init: text) -> VgDeclSpec:
+    vg_decl(kind: "signal", name: name, ty: ty, init: init)
+
+fn vg_const(name: text, ty: text, init: text) -> VgDeclSpec:
+    vg_decl(kind: "constant", name: name, ty: ty, init: init)
+
+# Column-aligned declaration (explicit group-local field width).
+fn vg_decl_w(kind: text, name: text, name_w: i64, ty: text, init: text) -> VgDeclSpec:
+    VgDeclSpec(
+        kind: kind, pre_comments: no_lines(), name: name,
+        name_w: name_w, ty: ty, init: init, trail: ""
+    )
+
+fn vg_sig_w(name: text, name_w: i64, ty: text, init: text) -> VgDeclSpec:
+    vg_decl_w(kind: "signal", name: name, name_w: name_w, ty: ty, init: init)
+
+fn vg_var_w(name: text, name_w: i64, ty: text, init: text) -> VgDeclSpec:
+    vg_decl_w(kind: "variable", name: name, name_w: name_w, ty: ty, init: init)
+
+# Aligned declaration carrying a trailing end-of-line comment. The comment
+# column is computed per group by emit_decls (max decl width + 3).
+fn vg_const_w_trail(name: text, name_w: i64, ty: text, init: text, trail: text) -> VgDeclSpec:
+    VgDeclSpec(
+        kind: "constant", pre_comments: no_lines(), name: name,
+        name_w: name_w, ty: ty, init: init, trail: trail
+    )
+
+fn vg_with_pre(d: VgDeclSpec, pre: [text]) -> VgDeclSpec:
+    VgDeclSpec(
+        kind: d.kind, pre_comments: pre, name: d.name, name_w: d.name_w,
+        ty: d.ty, init: d.init, trail: d.trail
+    )
+
+fn vg_assoc(formal: text, actual: text) -> VgAssoc:
+    VgAssoc(formal: formal, actual: actual)
+
+fn vg_ident(name: text) -> VgAssoc:
+    VgAssoc(formal: name, actual: name)
+
+fn vg_row(names: [text]) -> VgAssocRow:
+    VgAssocRow(names: names)
+
+fn vg_assert(sig: text, marker: text) -> VgAssertSpec:
+    VgAssertSpec(sig: sig, marker: marker)
+
+fn vg_term(marker: text, reached: text) -> VgTermMarker:
+    VgTermMarker(marker: marker, reached: reached)
+
+# ---------------------------------------------------------------------------
+# Emitters
+# ---------------------------------------------------------------------------
+
+# Body of one declaration line WITHOUT the trailing comment.
+fn decl_core(d: VgDeclSpec, indent: i64) -> text:
+    var line = vg_spaces(indent) + d.kind + " " + vg_pad(d.name, d.name_w) + ": " + d.ty
+    if d.init != "":
+        line = line + " := " + d.init
+    line + ";"
+
+# Emit a declaration group. Trailing comments in the group align to a shared
+# column derived from the widest commented declaration (+3 spaces) — that is
+# how the goldens lay them out, so it is computed, not hardcoded.
+fn emit_decls(decls: [VgDeclSpec], indent: i64) -> [text]:
+    var trail_col = 0
+    var i = 0
+    while i < decls.len():
+        if decls[i].trail != "":
+            val w = decl_core(decls[i], indent).len()
+            if w + 3 > trail_col:
+                trail_col = w + 3
+        i = i + 1
+    var l: [text] = []
+    i = 0
+    while i < decls.len():
+        val d = decls[i]
+        l = vg_append(l, d.pre_comments)
+        var line = decl_core(d, indent)
+        if d.trail != "":
+            line = vg_pad(line, trail_col) + d.trail
+        l = l.push(line)
+        i = i + 1
+    l
+
+# Zero-port testbench entity.
+fn emit_tb_entity(name: text) -> [text]:
+    var l: [text] = []
+    l = l.push("entity " + name + " is")
+    l = l.push("end entity " + name + ";")
+    l
+
+# `use` clauses, verbatim in declaration order.
+fn emit_use_clauses(uses: [text]) -> [text]:
+    var l: [text] = []
+    l = l.push("library ieee;")
+    var i = 0
+    while i < uses.len():
+        l = l.push("use " + uses[i] + ".all;")
+        i = i + 1
+    l
+
+# Vertical port map: one association per line, `);` on its own line.
+#   <label> : entity work.<ent>
+#     port map (
+#       a => b,
+#       ...
+#     );
+fn emit_dut_vertical(pre: [text], label: text, ent: text, assocs: [VgAssoc]) -> [text]:
+    var l = pre
+    l = l.push("  " + label + " : entity work." + ent)
+    l = l.push("    port map (")
+    var i = 0
+    while i < assocs.len():
+        val a = assocs[i]
+        var line = "      " + a.formal + " => " + a.actual
+        if i < assocs.len() - 1:
+            line = line + ","
+        l = l.push(line)
+        i = i + 1
+    l = l.push("    );")
+    l
+
+# Grouped port map: several identity associations per line, closing `);`
+# appended to the last row.
+#   <label> : entity work.<ent>
+#     generic map (<gmap>)
+#     port map (
+#       clk => clk, rst => rst, uart_tx => uart_tx,
+#       ...
+#       debug_ra => debug_ra, debug_sp => debug_sp);
+fn emit_dut_grouped(label: text, ent: text, gmap: text, rows: [VgAssocRow]) -> [text]:
+    var l: [text] = []
+    l = l.push("  " + label + " : entity work." + ent)
+    if gmap != "":
+        l = l.push("    generic map (" + gmap + ")")
+    l = l.push("    port map (")
+    var i = 0
+    while i < rows.len():
+        val names = rows[i].names
+        var line = "      "
+        var j = 0
+        while j < names.len():
+            if j > 0:
+                line = line + ", "
+            line = line + names[j] + " => " + names[j]
+            j = j + 1
+        if i < rows.len() - 1:
+            line = line + ","
+        else:
+            line = line + ");"
+        l = l.push(line)
+        i = i + 1
+    l
+
+fn emit_asserts(indent: i64, tag: text, specs: [VgAssertSpec]) -> [text]:
+    val ind = vg_spaces(indent)
+    var l: [text] = []
+    var i = 0
+    while i < specs.len():
+        val s = specs[i]
+        l = l.push(ind + "assert " + s.sig + " = '1' report \"" + tag + "_" + s.marker + "\" severity failure;")
+        i = i + 1
+    l
+
+fn emit_reports(indent: i64, tag: text, markers: [text]) -> [text]:
+    val ind = vg_spaces(indent)
+    var l: [text] = []
+    var i = 0
+    while i < markers.len():
+        l = l.push(ind + "report \"" + tag + "_" + markers[i] + "\" severity note;")
+        i = i + 1
+    l
+
+# Multi-line `report ... & to_hstring(debug_x) ...` chain over a debug-tap
+# name list:
+#   report "<TAG>_BOOT_STUCK pc=0x" & to_hstring(debug_pc)
+#     & " ins=0x" & to_hstring(debug_ins)
+#     ...
+#     & " sp=0x" & to_hstring(debug_sp) severity note;
+fn emit_hstring_report(indent: i64, tag: text, prefix: text, names: [text]) -> [text]:
+    val ind = vg_spaces(indent)
+    var l: [text] = []
+    var i = 0
+    while i < names.len():
+        val n = names[i]
+        if i == 0:
+            l = l.push(ind + "report \"" + tag + "_" + prefix + " " + n + "=0x\" & to_hstring(debug_" + n + ")")
+        else:
+            var line = ind + "  & \" " + n + "=0x\" & to_hstring(debug_" + n + ")"
+            if i == names.len() - 1:
+                line = line + " severity note;"
+            l = l.push(line)
+        i = i + 1
+    l
+
+# if/elsif chain over the terminal line markers:
+#   if llen >= 11 and lbuf(1 to 11) = "TEST FAILED" then
+#     report "<TAG>_BOOT_DONE reached=<reached>" severity note;
+#     done <= true; stop;
+#   elsif ...
+#   end if;
+fn emit_term_markers(indent: i64, tag: text, markers: [VgTermMarker]) -> [text]:
+    val ind = vg_spaces(indent)
+    var l: [text] = []
+    var i = 0
+    while i < markers.len():
+        val m = markers[i]
+        val n = m.marker.len().to_text()
+        var kw = "elsif"
+        if i == 0:
+            kw = "if"
+        l = l.push(ind + kw + " llen >= " + n + " and lbuf(1 to " + n + ") = \"" + m.marker + "\" then")
+        l = l.push(ind + "  report \"" + tag + "_BOOT_DONE reached=" + m.reached + "\" severity note;")
+        l = l.push(ind + "  done <= true; stop;")
+        i = i + 1
+    l = l.push(ind + "end if;")
+    l
+
+# Memory-init impure function whose file is opened OPTIONALLY (missing file =>
+# all-fill result). Sibling of gen_types.emit_mem_init, which opens the file
+# unconditionally in the declaration.
+fn emit_mem_init_optional(fn_name: text, ret_ty: text, file_name: text, prefix: text,
+                          width: i64, fill_hex: text, bound_const: text) -> [text]:
+    var l: [text] = []
+    l = l.push("  impure function " + fn_name + " return " + ret_ty + " is")
+    l = l.push("    file f : text;")
+    l = l.push("    variable fstatus : file_open_status;")
+    l = l.push("    variable line_v : line;")
+    l = l.push("    variable word_v : std_logic_vector(" + (width - 1).to_text() + " downto 0);")
+    l = l.push("    variable mem_v : " + ret_ty + " := (others => x\"" + fill_hex + "\");")
+    l = l.push("    variable idx : natural := 0;")
+    l = l.push("  begin")
+    l = l.push("    file_open(fstatus, f, \"" + prefix + file_name + "\", read_mode);")
+    l = l.push("    if fstatus /= open_ok then")
+    l = l.push("      return mem_v;")
+    l = l.push("    end if;")
+    l = l.push("    while not endfile(f) loop")
+    l = l.push("      readline(f, line_v);")
+    l = l.push("      hread(line_v, word_v);")
+    l = l.push("      if idx < " + bound_const + " then")
+    l = l.push("        mem_v(idx) := word_v;")
+    l = l.push("      end if;")
+    l = l.push("      idx := idx + 1;")
+    l = l.push("    end loop;")
+    l = l.push("    file_close(f);")
+    l = l.push("    return mem_v;")
+    l = l.push("  end function;")
+    l
