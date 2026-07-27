@@ -41,3 +41,34 @@ describe "Browser TLS negotiated protocol policy":
 
         expect(fetch.fetch(request).is_err()).to_be(true)
         set_mock_registry(MockResponseRegistry.create())
+
+    it "returns one HTTPS redirect hop unchanged for browser policy":
+        var registry = MockResponseRegistry.create()
+        registry.register_with_headers(
+            "https://secure.test/start",
+            302,
+            [Pair("Location", "https://secure.test/final")],
+            ""
+        )
+        registry.register("https://secure.test/final", 200, "final")
+        set_mock_registry(registry)
+        val logger = Logger.new("tls-policy", LogLevel.Error)
+        var fetch = FetchEngine.new_for_origin(
+            logger, "https://secure.test"
+        )
+        val request = FetchRequest(
+            url: Url.parse("https://secure.test/start"),
+            method: "GET",
+            headers: "",
+            body: [],
+            mode: RequestMode.SameOrigin,
+            credentials: "omit"
+        )
+
+        val result = fetch.fetch_single_hop(request)
+        expect(result.is_ok()).to_be(true)
+        expect(result.unwrap().status).to_equal(302)
+        expect(result.unwrap().headers).to_contain(
+            "Location: https://secure.test/final"
+        )
+        set_mock_registry(MockResponseRegistry.create())

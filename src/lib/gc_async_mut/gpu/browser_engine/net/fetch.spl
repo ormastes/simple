@@ -54,6 +54,11 @@ class FetchEngine:
     # The main fetch function. Implements the Fetch specification request lifecycle.
     # Steps: CORS check -> cache -> DNS -> HTTP -> redirects -> cookies -> cache store.
     me fetch(request: FetchRequest) -> Result<FetchResponse>:
+        self.fetch_with_redirect(request, 0)
+
+    # Execute exactly one request URL. Redirect responses are returned unchanged
+    # so higher-level browser policy can inspect and commit every hop.
+    me fetch_single_hop(request: FetchRequest) -> Result<FetchResponse>:
         self.logger.info("fetch: {request.method.to_upper()} {request.url.to_text()}")
 
         # Step 1: CORS preflight if the request mode is Cors
@@ -72,25 +77,14 @@ class FetchEngine:
                 self.logger.debug("fetch: cache hit for {request.url.to_text()}")
                 return Ok(FetchResponse(status: 200, headers: entry.headers, body: entry.body))
 
-        # Step 3: Execute the request with redirect support
-        self.fetch_with_redirect(request, 0)
-
-    # Internal fetch loop that follows redirects up to max_redirects.
-    # Each redirect decrements the remaining count and constructs a new request
-    # targeting the Location header URL.
-    me fetch_with_redirect(request: FetchRequest, redirect_count: i64) -> Result<FetchResponse>:
-        if redirect_count > self.max_redirects:
-            self.logger.error("fetch: exceeded maximum redirects ({self.max_redirects})")
-            return Err(network_error("Too many redirects (max: {self.max_redirects})"))
-
-        # Step 3a: Attach cookies to the request
+        # Step 3: Attach cookies to the request
         val request_with_cookies = self.attach_cookies(request)
 
-        # Step 3b: Perform the actual HTTP request. H1 owns the single DNS
+        # Step 4: Perform the actual HTTP request. H1 owns the single DNS
         # lookup so Fetch does not resolve every URL twice.
         val response = self.execute_http(request_with_cookies)?
 
-        # Step 3d: CORS response validation (for Cors mode)
+        # Step 5: CORS response validation (for Cors mode)
         match request.mode:
             RequestMode.Cors:
                 if not self.cors.is_same_origin(request.url):
@@ -103,13 +97,30 @@ class FetchEngine:
             _:
                 pass_do_nothing
 
-        # Step 3e: Store cookies from Set-Cookie response headers
+        # Step 6: Store cookies from Set-Cookie response headers
         for line in response.headers.split("\r\n"):
             val lower_line = line.to_lower()
             if lower_line.starts_with("set-cookie:"):
                 val cookie_value = line.slice(11, line.len()).trim()
                 val cookie = parse_set_cookie(cookie_value)
                 self.cookie_store.store(cookie)
+
+        # Step 7: Cache the response if eligible
+        if request_cache_eligible(request) and is_cacheable(response):
+            self.logger.debug("fetch: caching response for {request.url.to_text()}")
+            val _ = self.cache.store(request.url.to_text(), response.body, response.headers)
+
+        Ok(response)
+
+    # Internal fetch loop that follows redirects up to max_redirects.
+    # Each redirect decrements the remaining count and constructs a new request
+    # targeting the Location header URL.
+    me fetch_with_redirect(request: FetchRequest, redirect_count: i64) -> Result<FetchResponse>:
+        if redirect_count > self.max_redirects:
+            self.logger.error("fetch: exceeded maximum redirects ({self.max_redirects})")
+            return Err(network_error("Too many redirects (max: {self.max_redirects})"))
+
+        val response = self.fetch_single_hop(request)?
 
         # Step 3f: Handle redirects (301, 302, 303, 307, 308)
         if should_redirect(response.status):
@@ -125,11 +136,6 @@ class FetchEngine:
                 return self.fetch_with_redirect(redirect_request, redirect_count + 1)
             else:
                 self.logger.warn("fetch: redirect status {response.status} but no Location header")
-
-        # Step 3g: Cache the response if eligible
-        if request_cache_eligible(request) and is_cacheable(response):
-            self.logger.debug("fetch: caching response for {request.url.to_text()}")
-            val _ = self.cache.store(request.url.to_text(), response.body, response.headers)
 
         Ok(response)
 

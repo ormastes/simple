@@ -1,7 +1,8 @@
 # Hosted-only semantic Web adapter. BrowserSession stays out of compositor core.
 
 use std.gc_async_mut.web.browser_session.{
-    BrowserSession, BrowserBookmarkSnapshot, BrowserHstsSnapshot
+    BrowserSession, BrowserBookmarkSnapshot, BrowserHstsSnapshot,
+    BrowserRequest, BrowserResponse
 }
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
@@ -10,9 +11,46 @@ use std.gc_async_mut.gpu.browser_engine.layout.{hit_test, layout_tree}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_event_identity, be_dom_focused_id
 }
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
+    FetchRequest, RequestMode
+}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
 use std.database.sql.types.{DbError}
 use os.hosted.browser_profile_store.{BrowserProfileStore}
 use common.ui.access.{WinTextActionRequest}
+
+extern fn rt_text_to_bytes(value: text) -> [u8]
+
+fn _hosted_fetch_mode(kind: text) -> RequestMode:
+    if kind == "document":
+        return RequestMode.Navigate
+    if kind == "style" or kind == "script":
+        return RequestMode.NoCors
+    RequestMode.SameOrigin
+
+fn _hosted_fetch_headers(request: BrowserRequest) -> text:
+    var lines: [text] = []
+    var has_content_type = false
+    for raw_line in request.headers.split("\n"):
+        val line = raw_line.trim()
+        if line == "":
+            continue
+        if line.to_lower().starts_with("content-type:"):
+            has_content_type = true
+        lines.push(line)
+    if request.content_type != "" and not has_content_type:
+        lines.push("Content-Type: {request.content_type}")
+    lines.join("\r\n")
+
+fn _hosted_wasm_hex(data: [u8]) -> text:
+    var out = ""
+    for byte in data:
+        val numeric = byte.to_i64()
+        val piece = numeric.to_hex()
+        out = out + (if piece.len() == 1: "0{piece}" else: piece)
+    out
 
 struct HostedWebContentDispatch:
     event_id: i64
@@ -27,6 +65,7 @@ class HostedWebContentSession:
     width: i32
     height: i32
     browser: BrowserSession
+    network: FetchEngine
     mutation_revision: i64
     failure_reason: text
     last_target_id: text
@@ -56,6 +95,9 @@ class HostedWebContentSession:
             width: width,
             height: height,
             browser: browser,
+            network: FetchEngine.new(
+                Logger.new("hosted-browser-network", LogLevel.Error)
+            ),
             mutation_revision: 0,
             failure_reason: failure_reason,
             last_target_id: "",
@@ -67,6 +109,48 @@ class HostedWebContentSession:
             pressed_chrome_control: "",
             address_replace_on_text: false
         )
+
+    me _pump_network_once():
+        if val Some(request) = self.browser.take_pending_request():
+            val fetch_request = FetchRequest(
+                url: Url.parse(request.url),
+                method: request.method,
+                headers: _hosted_fetch_headers(request),
+                body: rt_text_to_bytes(request.body),
+                mode: _hosted_fetch_mode(request.kind),
+                # BrowserSession owns the cookie jar and already attached the
+                # sanitized Cookie header for this exact request URL.
+                credentials: "omit"
+            )
+            match self.network.fetch_single_hop(fetch_request):
+                Ok(response):
+                    val body = if request.kind == "wasm":
+                        _hosted_wasm_hex(response.body)
+                    else:
+                        response.body_text()
+                    val _ = self.browser.commit_network_response(
+                        BrowserResponse.create(
+                            request_id: request.id,
+                            kind: request.kind,
+                            url: request.url,
+                            status: response.status.to_i32(),
+                            headers: response.headers,
+                            body: body,
+                            error: ""
+                        )
+                    )
+                Err(error):
+                    val _ = self.browser.commit_network_response(
+                        BrowserResponse.create(
+                            request_id: request.id,
+                            kind: request.kind,
+                            url: request.url,
+                            status: 0,
+                            headers: "",
+                            body: "",
+                            error: error.message
+                        )
+                    )
 
     fn address_text() -> text:
         if self.browser.address_draft != "":
@@ -147,6 +231,7 @@ class HostedWebContentSession:
         if self.started_at_ms < 0:
             self.started_at_ms = now_ms
         val _ = self.browser.advance_time(now_ms - self.started_at_ms)
+        self._pump_network_once()
         val body_html = self.browser.current_body_html
         if body_html == self.published_body_html:
             return false

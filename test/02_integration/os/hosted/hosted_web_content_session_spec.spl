@@ -8,6 +8,10 @@ use os.compositor.host_compositor_core.{
     host_compositor_update_window_title
 }
 use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
+    MockResponseRegistry, set_mock_registry
+}
+use std.js.types.pair.{Pair}
 
 fn checksum(pixels: [u32]) -> i64:
     var out: i64 = 0
@@ -40,6 +44,44 @@ describe "hosted Web content session":
         expect(session.browser.current_title).to_equal("Animated")
         expect(count_color(second, 0xFF2563EBu32)).to_be_greater_than(0)
         expect(checksum(second) == checksum(first)).to_be(false)
+
+    it "commits one HTTPS redirect hop per host tick through browser policy":
+        var registry = MockResponseRegistry.create()
+        registry.register_with_headers(
+            "https://secure.test/start",
+            302,
+            [
+                Pair("Location", "http://secure.test/final"),
+                Pair("Strict-Transport-Security", "max-age=3600")
+            ],
+            ""
+        )
+        registry.register(
+            "https://secure.test/final", 200,
+            "<html><body><div id='network-ready'>Secure</div></body></html>"
+        )
+        set_mock_registry(registry)
+        var session = HostedWebContentSession.create(
+            8, "<div id='prior'>Prior</div>", 120, 60
+        )
+        expect(session.browser.begin_network_navigation(
+            "https://secure.test/start", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+
+        expect(session.advance_at(2000)).to_be(false)
+        expect(session.browser.current_body_html).to_contain("prior")
+        expect(session.browser.pending_url).to_equal(
+            "https://secure.test/final"
+        )
+        expect(session.browser.has_pending_requests()).to_be(true)
+
+        expect(session.advance_at(2001)).to_be(true)
+        expect(session.browser.current_url).to_equal(
+            "https://secure.test/final"
+        )
+        expect(session.browser.current_body_html).to_contain("network-ready")
+        expect(session.browser.has_pending_requests()).to_be(false)
+        set_mock_registry(MockResponseRegistry.create())
 
     it "fails closed when no semantic element is hit or focused":
         var session = HostedWebContentSession.create(

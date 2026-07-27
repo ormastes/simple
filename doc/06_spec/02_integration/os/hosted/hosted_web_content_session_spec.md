@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -21,6 +21,15 @@
 - The host monotonic clock keeps requestAnimationFrame pending through 15 ms.
 - At 16 ms JavaScript mutates the live DOM and Engine2D renders a distinct
   blue frame.
+
+#### commits one HTTPS redirect hop per host tick through browser policy
+
+- The hosted adapter returns the raw 302 response to `BrowserSession` instead
+  of consuming the redirect inside Fetch.
+- Strict-Transport-Security upgrades the plaintext Location before the next
+  request is emitted.
+- A second host tick commits the HTTPS document while preserving the previous
+  page until that final response arrives.
 
 #### fails closed when no semantic element is hit or focused
 
@@ -100,8 +109,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
