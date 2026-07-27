@@ -501,6 +501,79 @@ fn be_dom_focused_id(root: BeDomNode) -> text:
             return focused_id
     ""
 
+class _BeDomFocusOrder:
+    positive_ids: [text]
+    positive_tab_indexes: [i64]
+    regular_ids: [text]
+
+fn _be_dom_is_natively_focusable(node: BeDomNode) -> bool:
+    if node.tag_name == "a":
+        return be_dom_get_attr(node, "href") != ""
+    if node.tag_name == "input":
+        return be_dom_get_attr(node, "type").lower() != "hidden"
+    node.tag_name == "button" or node.tag_name == "select" or
+        node.tag_name == "textarea"
+
+fn _be_dom_collect_focus_order(
+    node: BeDomNode, order: _BeDomFocusOrder
+):
+    if be_dom_has_attr(node, "hidden") or be_dom_get_display(node) == "none":
+        return
+    var focusable = (
+        not be_dom_has_attr(node, "disabled") and
+        (_be_dom_is_natively_focusable(node) or
+         (be_dom_has_attr(node, "contenteditable") and
+          be_dom_get_attr(node, "contenteditable").lower() != "false"))
+    )
+    var tab_index: i64 = 0
+    val raw_tab_index = be_dom_get_attr(node, "tabindex").trim()
+    if raw_tab_index != "":
+        if val Some(parsed_tab_index) = raw_tab_index.to_i64():
+            tab_index = parsed_tab_index
+            focusable = tab_index >= 0 and not be_dom_has_attr(node, "disabled")
+    if focusable:
+        val target_id = be_dom_event_identity(node)
+        if tab_index > 0:
+            var insert_at = 0
+            while (
+                insert_at < order.positive_tab_indexes.len() and
+                order.positive_tab_indexes[insert_at] <= tab_index
+            ):
+                insert_at = insert_at + 1
+            order.positive_ids.insert(insert_at, target_id)
+            order.positive_tab_indexes.insert(insert_at, tab_index)
+        else:
+            order.regular_ids.push(target_id)
+    for child in node.children:
+        _be_dom_collect_focus_order(child, order)
+
+fn be_dom_next_focus_id(
+    root: BeDomNode, current_id: text, reverse: bool
+) -> text:
+    val order = _BeDomFocusOrder(
+        positive_ids: [], positive_tab_indexes: [], regular_ids: []
+    )
+    _be_dom_collect_focus_order(root, order)
+    var ids = order.positive_ids
+    for target_id in order.regular_ids:
+        ids.push(target_id)
+    if ids.len() == 0:
+        return ""
+    var current_index = -1
+    var index = 0
+    while index < ids.len():
+        if ids[index] == current_id:
+            current_index = index
+            break
+        index = index + 1
+    if reverse:
+        if current_index <= 0:
+            return ids[ids.len() - 1]
+        return ids[current_index - 1]
+    if current_index < 0 or current_index + 1 >= ids.len():
+        return ids[0]
+    ids[current_index + 1]
+
 fn be_dom_form_owner_id(root: BeDomNode, target_id: text) -> text:
     val path = be_dom_find_path_to_id(root, target_id)
     if path.len() == 0:
@@ -792,6 +865,7 @@ export be_dom_get_event_listener_count
 export be_dom_create_event, be_dom_create_pointer_event, be_dom_create_pointer_event_with_modifiers
 export be_dom_dispatch_event, be_dom_dispatch_event_path, be_dom_dispatch_event_to_id
 export be_dom_find_path_to_id, be_dom_focused_id
+export be_dom_next_focus_id
 export be_dom_form_owner_id, be_dom_submit_form_owner_id
 export be_dom_default_submitter_id
 export be_dom_form_allows_direct_implicit_submit

@@ -21,7 +21,7 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_submit_form_owner_id, be_dom_keyboard_activation_event_for_target,
     be_dom_checked_radio_id_for_target, be_dom_form_owner_id,
     be_dom_default_submitter_id, be_dom_form_allows_direct_implicit_submit,
-    be_dom_input_blocks_implicit_submission
+    be_dom_input_blocks_implicit_submission, be_dom_next_focus_id
 }
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
 use std.gc_async_mut.gpu.browser_engine.script.script_host.{
@@ -448,7 +448,32 @@ impl BrowserSession:
     me dispatch_dom_keyboard_event_with_shift(
         target_id: text, key: text, pressed: bool, shift_key: bool
     ) -> Result<BeDomEventDispatch, text>:
-        self.dispatch_dom_keyboard_event(target_id, key, pressed)
+        val normalized_key = key.trim().lower()
+        val is_tab = normalized_key == "tab" or key == "9"
+        if not is_tab or not pressed:
+            return self.dispatch_dom_keyboard_event(target_id, key, pressed)
+        self.pending_space_activation_target = ""
+        if target_id != "":
+            val key_dispatch = self.dispatch_dom_event(
+                target_id, "keydown", true, true
+            )
+            if key_dispatch.event.default_prevented:
+                return Ok(key_dispatch)
+            val next_id = be_dom_next_focus_id(
+                self.current_dom, target_id, shift_key
+            )
+            if next_id == "" or next_id == target_id:
+                return Ok(key_dispatch)
+            val _ = self._blur_dom_focus(target_id)
+            return Ok(self.dispatch_dom_event(
+                next_id, "focus", false, false
+            ))
+        val next_id = be_dom_next_focus_id(
+            self.current_dom, "", shift_key
+        )
+        if next_id == "":
+            return Err("DOM has no focusable target")
+        Ok(self.dispatch_dom_event(next_id, "focus", false, false))
 
     me set_dom_text_input(target_id: text, value: text) -> Result<BeDomEventDispatch, text>:
         val path = be_dom_find_path_to_id(self.current_dom, target_id)
