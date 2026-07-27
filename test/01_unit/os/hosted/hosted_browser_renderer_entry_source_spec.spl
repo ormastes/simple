@@ -388,3 +388,56 @@ describe "hosted browser renderer entry isolation":
         expect(active_animation).to_be_greater_than(-1)
         expect(advance_call).to_be_greater_than(active_animation)
         expect(advance_failure).to_be_greater_than(advance_call)
+
+    # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017
+    it "persists learned HSTS before processing the completed frame":
+        val entry = executable_source_lines(
+            rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
+        )
+        val poll_pos = entry.find(
+            "val browser_poll = browser_renderer.poll()"
+        )
+        val result_pos = entry.find(
+            "if val Some(browser_result) = browser_poll:"
+        )
+        expect(poll_pos).to_be_greater_than(-1)
+        expect(result_pos).to_be_greater_than(poll_pos)
+        val poll_body = entry.slice(poll_pos, result_pos)
+        val dirty_pos = poll_body.find(
+            "browser_renderer.hsts_dirty and browser_profile != nil"
+        )
+        val gate_pos = poll_body.find(
+            "now_micros >= browser_hsts_save_retry_at_micros"
+        )
+        val save_pos = poll_body.find("_save_hosted_browser_hsts(")
+        val retry_pos = poll_body.find(
+            "browser_hsts_save_retry_at_micros = ("
+        )
+        val retry_delay = poll_body.find("now_micros + 1000000")
+        expect(dirty_pos).to_be_greater_than(-1)
+        expect(gate_pos).to_be_greater_than(dirty_pos)
+        expect(save_pos).to_be_greater_than(gate_pos)
+        expect(retry_pos).to_be_greater_than(save_pos)
+        expect(retry_delay).to_be_greater_than(retry_pos)
+
+        val helper_start = entry.find("fn _save_hosted_browser_hsts(")
+        val helper_end = entry.find("fn _close_hosted_browser_resources(")
+        expect(helper_start).to_be_greater_than(-1)
+        expect(helper_end).to_be_greater_than(helper_start)
+        val helper = entry.slice(helper_start, helper_end)
+        val profile_save = helper.find("profile.save_hsts(")
+        val ok_pos = helper.find("Ok(_):")
+        val clear_dirty = helper.find("renderer.hsts_dirty = false")
+        val error_pos = helper.find("Err(error):")
+        expect(profile_save).to_be_greater_than(-1)
+        expect(ok_pos).to_be_greater_than(profile_save)
+        expect(clear_dirty).to_be_greater_than(ok_pos)
+        expect(error_pos).to_be_greater_than(clear_dirty)
+
+        val close_body = entry.slice(helper_end, entry.find(
+            "fn _run_hosted_wm("
+        ))
+        val close_save = close_body.find("_save_hosted_browser_hsts(")
+        val close_profile = close_body.find("profile.close()")
+        expect(close_save).to_be_greater_than(-1)
+        expect(close_profile).to_be_greater_than(close_save)

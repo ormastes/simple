@@ -840,3 +840,9 @@ implementation in progress / target evidence blocked
   install policy. Focused broker scenarios and a mirrored manual cover CORS
   denial, 404, HTTP, and untrusted HTTPS; executable Simple evidence remains
   compiler-blocked and was not rerun.
+- HSTS durability: The hosted parent now saves dirty HSTS state immediately
+  after broker polling and before frame processing, clears dirty state only
+  after the SQLite transaction succeeds, retries transient failures at a
+  bounded one-second cadence, and retains the shutdown retry. The focused
+  entry-owner contract and mirrored manual cover ordering and retry state;
+  executable Simple evidence remains compiler-blocked and was not rerun.
