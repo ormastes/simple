@@ -6,7 +6,6 @@ use std.gc_async_mut.io.vulkan_sffi.{
     vulkan_init, vulkan_alloc_storage, vulkan_free_buffer,
     vulkan_compile_spirv, vulkan_destroy_shader,
     vulkan_create_pipeline_with_push, vulkan_destroy_pipeline,
-    vulkan_last_error
 }
 use std.gc_async_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_read_buffer_bytes, vulkan_sffi_selected_device_driver_identity,
@@ -69,7 +68,7 @@ fn processing_ir_execute_vulkan(ir: ProcessingIr) -> ProcessingVulkanResult:
     if init_fault != "":
         return ProcessingVulkanResult(completed: false, reason: init_fault, values: [], backend_handle: 0, device_identity: 0)
     if not vulkan_init():
-        return ProcessingVulkanResult(completed: false, reason: vulkan_last_error(), values: [], backend_handle: 0, device_identity: 0)
+        return ProcessingVulkanResult(completed: false, reason: "vulkan-init-failed", values: [], backend_handle: 0, device_identity: 0)
     if not vulkan_sffi_reap_dependency_quarantine():
         return ProcessingVulkanResult(completed: false, reason: "vulkan-dependency-quarantine-pending", values: [], backend_handle: 0, device_identity: 0)
 
@@ -78,22 +77,19 @@ fn processing_ir_execute_vulkan(ir: ProcessingIr) -> ProcessingVulkanResult:
     val byte_count = ir.element_count * 4
     val buffer = vulkan_alloc_storage(byte_count)
     if not buffer.is_valid:
-        val reason = vulkan_last_error()
         vulkan_sffi_shutdown_reaped()
-        return ProcessingVulkanResult(completed: false, reason: reason, values: [], backend_handle: 0, device_identity: 0)
+        return ProcessingVulkanResult(completed: false, reason: "vulkan-allocation-failed", values: [], backend_handle: 0, device_identity: 0)
     val shader = vulkan_compile_spirv(spirv_clear())
     if not shader.is_valid:
-        val reason = vulkan_last_error()
         vulkan_free_buffer(buffer)
         vulkan_sffi_shutdown_reaped()
-        return ProcessingVulkanResult(completed: false, reason: reason, values: [], backend_handle: 0, device_identity: 0)
+        return ProcessingVulkanResult(completed: false, reason: "vulkan-shader-compile-failed", values: [], backend_handle: 0, device_identity: 0)
     val pipeline = vulkan_create_pipeline_with_push(shader, "main", 64)
     if not pipeline.is_valid:
-        val reason = vulkan_last_error()
         vulkan_destroy_shader(shader)
         vulkan_free_buffer(buffer)
         vulkan_sffi_shutdown_reaped()
-        return ProcessingVulkanResult(completed: false, reason: reason, values: [], backend_handle: 0, device_identity: 0)
+        return ProcessingVulkanResult(completed: false, reason: "vulkan-pipeline-create-failed", values: [], backend_handle: 0, device_identity: 0)
     val submit_fault = processing_ir_fault_reason("vulkan", "submit")
     if submit_fault != "":
         vulkan_destroy_pipeline(pipeline)

@@ -12,6 +12,9 @@ use std.common.gpu.simpleos_host_gpu_protocol.{
 
 val PROTOCOL = "src/lib/common/gpu/simpleos_host_gpu_protocol.spl"
 val HOST = "src/app/simpleos_gpu_host/main.spl"
+val CUDA = "src/lib/gc_async_mut/processing/cuda_fill_u32.spl"
+val VULKAN = "src/lib/gc_async_mut/processing/vulkan_fill_u32.spl"
+val METAL = "src/lib/gc_async_mut/processing/metal_fill_u32.spl"
 
 describe "ProcessingIR executor failure wire-code mapping":
     it "exports stable submit and readback reason constants":
@@ -34,22 +37,60 @@ describe "ProcessingIR executor failure wire-code mapping":
         expect(source).to_contain("SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK")
 
     it "executes the typed mapping for every backend reason shape":
-        expect(simpleos_host_gpu_processing_reason("cuda-submit-failed")).to_equal(
-            SIMPLEOS_HOST_GPU_REASON_BACKEND_SUBMIT_FAILED)
-        expect(simpleos_host_gpu_processing_reason("vulkan-dispatch-failed")).to_equal(
-            SIMPLEOS_HOST_GPU_REASON_BACKEND_SUBMIT_FAILED)
-        expect(simpleos_host_gpu_processing_reason("vulkan-dispatch-completion-unknown")).to_equal(
-            SIMPLEOS_HOST_GPU_REASON_BACKEND_SUBMIT_FAILED)
-        expect(simpleos_host_gpu_processing_reason("vulkan-dispatch-ineligible")).to_equal(
-            SIMPLEOS_HOST_GPU_REASON_BACKEND_SUBMIT_FAILED)
-        expect(simpleos_host_gpu_processing_reason("metal-readback-failed")).to_equal(
-            SIMPLEOS_HOST_GPU_REASON_BACKEND_READBACK_FAILED)
-        expect(simpleos_host_gpu_processing_reason("metal-readback-size-mismatch")).to_equal(
-            SIMPLEOS_HOST_GPU_REASON_BACKEND_READBACK_FAILED)
+        for reason in [
+            "cuda-submit-failed", "cuda-dispatch-failed",
+            "vulkan-submit-failed", "vulkan-dispatch-failed",
+            "vulkan-dispatch-completion-unknown", "vulkan-dispatch-ineligible",
+            "metal-submit-failed", "metal-dispatch-failed"
+        ]:
+            expect(simpleos_host_gpu_processing_reason(reason)).to_equal(
+                SIMPLEOS_HOST_GPU_REASON_BACKEND_SUBMIT_FAILED)
+        for reason in [
+            "cuda-readback-failed", "vulkan-readback-failed",
+            "metal-readback-failed", "metal-readback-size-mismatch"
+        ]:
+            expect(simpleos_host_gpu_processing_reason(reason)).to_equal(
+                SIMPLEOS_HOST_GPU_REASON_BACKEND_READBACK_FAILED)
         expect(simpleos_host_gpu_processing_reason("checksum-mismatch")).to_equal(
             SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH)
-        expect(simpleos_host_gpu_processing_reason("cuda-init-failed")).to_equal(
-            SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK)
+        for reason in [
+            "cuda-unavailable", "cuda-init-failed", "cuda-device-get-failed",
+            "cuda-context-create-failed", "cuda-module-load-failed",
+            "cuda-allocation-failed", "cuda-device-identity-unavailable",
+            "vulkan-unavailable", "vulkan-init-failed",
+            "vulkan-dependency-quarantine-pending", "vulkan-allocation-failed",
+            "vulkan-shader-compile-failed", "vulkan-pipeline-create-failed",
+            "vulkan-device-identity-unavailable",
+            "metal-unavailable", "metal-init-failed",
+            "metal-device-identity-unavailable", "metal-device-create-failed",
+            "metal-command-queue-create-failed", "metal-shader-compile-failed",
+            "metal-pipeline-create-failed", "metal-allocation-failed"
+        ]:
+            expect(simpleos_host_gpu_processing_reason(reason)).to_equal(
+                SIMPLEOS_HOST_GPU_REASON_NON_DEVICE_READBACK)
+
+    it "keeps native driver prose behind stable executor reason tokens":
+        val cuda = file_read(CUDA)
+        val vulkan = file_read(VULKAN)
+        val metal = file_read(METAL)
+        expect(file_exists(CUDA)).to_equal(true)
+        expect(file_exists(VULKAN)).to_equal(true)
+        expect(file_exists(METAL)).to_equal(true)
+        expect(cuda).to_not_contain("cuda_last_error")
+        expect(vulkan).to_not_contain("vulkan_last_error")
+        expect(metal).to_not_contain("metal_last_error")
+        for reason in [
+            "vulkan-init-failed", "vulkan-allocation-failed",
+            "vulkan-shader-compile-failed", "vulkan-pipeline-create-failed"
+        ]:
+            expect(vulkan).to_contain("\"" + reason + "\"")
+        for reason in [
+            "metal-init-failed", "metal-device-create-failed",
+            "metal-command-queue-create-failed", "metal-shader-compile-failed",
+            "metal-pipeline-create-failed", "metal-allocation-failed",
+            "metal-dispatch-failed", "metal-readback-failed"
+        ]:
+            expect(metal).to_contain("\"" + reason + "\"")
 
     it "retains every executor result reason and finishes with the mapper":
         expect(file_exists(HOST)).to_equal(true)
@@ -59,9 +100,12 @@ describe "ProcessingIR executor failure wire-code mapping":
             expect(source).to_contain(
                 "val result = processing_ir_execute_" + backend + "(ir)\n            completed = result.completed\n            executor_reason = result.reason"
             )
-        expect(source).to_contain("simpleos_host_gpu_processing_reason(executor_reason)")
         expect(source).to_contain(
-            "_finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, simpleos_host_gpu_processing_reason(executor_reason), 0, 0, 0, 1, 0, 0)"
+            "val failure_reason = simpleos_host_gpu_processing_reason(executor_reason)")
+        expect(source).to_contain(
+            "_processing_cpu_fallback(base, generation, failure_reason, oracle, element_count, cpu_elapsed_us)")
+        expect(source).to_contain(
+            "_finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, failure_reason, 0, 0, 0, 1, 0, 0)"
         )
 
     it "rejects strict zero-mask negotiation as unsupported":
