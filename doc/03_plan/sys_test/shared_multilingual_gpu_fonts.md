@@ -13,8 +13,9 @@ whose three independent live evidence rows remain unavailable.
 Unit/integration suites for the
 existing shaper, Engine2D, Engine3D texture path, emitter, and backend readback
 remain supporting evidence; they do not replace these end-to-end scenarios.
-REQ-016 adds four focused executor/manual pairs and extends the existing parser
-selector and Devanagari pairs; these are release-blocking full-layout evidence,
+REQ-016 adds five focused full-layout executor/manual pairs, including the
+existing parser selector, and extends the Devanagari pair; these are
+release-blocking full-layout evidence,
 not substitutes for the selected-face system scenario.
 The focused Vulkan integration/manual pair exercises the frozen native-proof
 step for Engine2D only; it does not satisfy the Engine3D promotion gate.
@@ -181,9 +182,9 @@ current report or promote a row from static evidence.
 | REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, `wm_nested_content_frame_spec.spl`, production host route contract, `simpleos_wm_qemu_evidence_contract_spec.spl`, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical-owner legacy atlas/pipeline dependency exclusion; shared producer/consumer artifact root; canonical SimpleOS pixels; shared nested-frame collection and fail-closed rejection | canonical-owner exclusion, the `taskbar-clock` route, dynamic crop, shared artifact-root contract, and QEMU hash recomputation are source-covered; the shared nested collector has behavioral source cases for a valid reachable collection and stale, duplicate, and orphan rejection, but is runtime-unverified; hosted image/motion/nested parity and a current retained QEMU PASS remain pending |
 | REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 3/3 source gates with facade selection, distinct HUD/world pipelines, atlas owner/generation/hash, fenced submission, and readback checks; native execution pending |
 | REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 3/3 source gate: live tuple promotion, controlled unavailable classification, and forged-proof rejection are wired; retained native PASS is pending |
-| REQ-014 | eleven executable/manual pairs | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 11/11 canonical manuals now regenerate with zero stubs and preserve module scope prose, but their executable specs remain unadmitted, so 0/11 pairs are accepted |
+| REQ-014 | 34 executable/manual pairs | zero-stub manuals; guide/notice freshness; evidence-recipe audit | the source/manual flows remain unverified on the deployed pure-Simple runtime, so 0/34 pairs are accepted |
 | REQ-015 | `font_render_config_spec.spl`, `shared_font_surfaces_spec.spl`, and focused Engine2D/Engine3D font specs | validation and length-delimited identity; canonical `rocm` target with `hip` alias; bitmap/vector/shaped propagation; Suggested/Preferred/Required behavior; unsupported mode/CTM rejects before cache/backend mutation; legacy default equivalence | source includes ROCm/HIP identity and policy-plan cases; the reduced 2D spec links and the mutex receiver fault is fixed, but all three cycles still exit 132 before results |
-| REQ-016 | four focused full-layout specs plus `ot_parser_layout_selector_spec.spl`, `selected_devanagari_spec.spl`, and generated manuals | GSUB 1–8; GPOS 1–9; all context/extension formats; LookupFlag/GDEF combinations; Device/VariationIndex and anchors; true/false FeatureVariations; non-witness generic input; malformed transactional rollback | source implementation is merged and independent P0/P1 review is clean; admitted-runtime execution and regenerated-manual PASS remain pending |
+| REQ-016 | five focused full-layout specs plus `selected_devanagari_spec.spl` and generated manuals | GSUB 1–8; GPOS 1–9; all context/extension formats; LookupFlag/GDEF combinations; Device/VariationIndex and anchors; true/false FeatureVariations; non-witness generic input; malformed transactional rollback | source implementation is merged and independent P0/P1 review is clean; admitted-runtime execution and regenerated-manual PASS remain pending |
 
 | NFR | Evidence | Pass condition | Current evidence |
 |---|---|---|---|
@@ -232,14 +233,12 @@ collector produces a passing durable record.
 
 ## Environment and order
 
-Use the self-hosted release binary. Run the eleven specs in this order: manifest,
-shaping, shared surfaces, legacy Web/GUI/WM route, emission, CUDA generated
-handoff, native readback, `selected_devanagari_spec.spl`,
-`selected_arabic_spec.spl`, `install_font_assets_spec.spl`, and
-`release_archive_layout_spec.spl`. Native specs require a declared promoted
-graphics backend/driver; other backends may provide compile-only rows. Pin
-fixtures, viewport, premultiplication, rounding, warmups, samples, and percentile
-method.
+Use the admitted self-hosted release binary. Run the authoritative 39-command
+graph in the verification report exactly once: runner preflight, B6, C17, D11,
+then E4. The former eleven-spec order is historical and must not be used.
+Native specs require a declared promoted graphics backend/driver; other
+backends may provide compile-only rows. Pin fixtures, viewport,
+premultiplication, rounding, warmups, samples, and percentile method.
 
 For each changed spec, use the immutable focused and docgen helpers under
 `Exact owner commands` in

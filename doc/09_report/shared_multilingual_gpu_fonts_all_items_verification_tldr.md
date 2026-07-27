@@ -1,7 +1,7 @@
 # Shared Multilingual GPU Fonts All-Items Verification — TLDR
 
-All 23 requirement/NFR rows are mapped, but the umbrella result remains
-`STATUS: FAIL` until a fresh pure-Simple CLI runs the calibrated evidence.
+All 24 requirement/NFR rows are mapped, but the umbrella result remains
+`STATUS: FAIL` until the deployed pure-Simple runtime runs the focused evidence.
 
 ## Current State
 
@@ -30,17 +30,20 @@ All 23 requirement/NFR rows are mapped, but the umbrella result remains
 - the corrected focused graph has 39 commands: one runner-contract preflight,
   B6, C17, D11, and E4. Focused failures return their real exit, while docgen
   retains immutable identity/command/streams/exit/manual-hash evidence and
-  requires an explicit complete/`0 stubs` marker;
-- pushed checkpoint `2eb2bbf93f10` matched the remote feature branch before
+  requires an explicit complete/`0 stubs` marker; the aggregate checker
+  revalidates and seals the complete graph;
+- pushed checkpoint `4a88fee61df3` matched the remote feature branch before
   this pending source/evidence correction; final fetch/rebase/file-count sync
   remains open, while older static guard results are historical only;
 - the final bounded retained-Stage3 cycle cleared the NUL environment panic,
   then trapped at RIP `0x88034b` because its obsolete iterable collector passed
   a lowering error with nil `span` to `_format_hir_lowering_error`; no candidate
-  ELF exists;
+  ELF exists; current source now formats a nil-span diagnostic without
+  dereferencing it, but that repair is execution-unverified;
 - the next fresh verification window uses the Rust seed once as bootstrap-only
   authority to produce current pure-Simple Stage2 in a fresh exclusive cache;
-  Stage2 rebuilds Stage3, and only pure-Simple Stage3/full CLI may supply
+  the canonical producer and manifest replay now hash-bind the native-arena
+  mode, Stage2 rebuilds Stage3, and only pure-Simple Stage3/full CLI may supply
   admission evidence;
 - the three-cycle cap is reached; the compatibility bridge remains isolated
   and uncommitted, and no further build retry is permitted this session;

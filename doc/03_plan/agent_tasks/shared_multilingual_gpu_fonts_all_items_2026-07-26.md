@@ -59,7 +59,7 @@ atlas, cache, process/env facade, or device-success path.
 | E2 native 2D/3D | `native_gpu_perf` | existing Engine2D/Engine3D native adapters, native-readback spec, retained device evidence | D1+E1 plus real device | texture/upload/bind/draw/fence/device-origin readback for 2D and 3D |
 | E3 native performance/manuals | `native_gpu_perf` | native-readback and performance specs/manuals plus retained device/perf evidence | E2 | current `0 stubs` manuals for E's two changed specs; NFR-002/004–008 fixture, p95, hit, CPU/GPU, RSS/VRAM, upload, device/driver record |
 | F1 evidence/manual audit | `spec_docs_audit` | aggregate plan, guide, state/traceability reports; no product code or owner manuals | A2+B2+C2+D7+E3 | audit all 34 source/manual/log triples; reject missing, stale, stubbed, simulated, or premature PASS evidence |
-| H1 final review | `/root` | integration conflict resolution and final evidence report | F1 | independently map REQ-001–015/NFR-001–008 and run final guards once |
+| H1 final review | `/root` | integration conflict resolution and final evidence report | F1 | independently map REQ-001–016/NFR-001–008 and run final guards once |
 | H2 sync/push | `/root` | branch history only | H1 | linear rebase, tracked-file-count guard, owned commit, push |
 
 1. Lanes A–F start together with the frozen contract above.
@@ -94,6 +94,35 @@ authority, `SIMPLE_NATIVE_ARENA_DECLS=1`,
 `SIMPLE_NO_STUB_FALLBACK=1`, runtime bundle `core-c-bootstrap`, and a new
 exclusive `SIMPLE_NATIVE_BUILD_CACHE_DIR`. Stage2 must then rebuild Stage3.
 Rust-seed output is never test, docgen, focused-run, or admission evidence.
+
+Run the canonical producer once from the final pushed checkpoint; do not reuse
+an output root:
+
+```bash
+set -euo pipefail
+CHECKPOINT_SHA=<final-pushed-feature-sha>
+ADMISSION_ROOT="/tmp/simple-font-cli-admission-$CHECKPOINT_SHA"
+ADMISSION_TREE="$ADMISSION_ROOT/worktree"
+test ! -e "$ADMISSION_ROOT"
+mkdir -p "$ADMISSION_ROOT"
+git worktree add --detach "$ADMISSION_TREE" "$CHECKPOINT_SHA"
+(
+  cd "$ADMISSION_TREE"
+  SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_NATIVE_ARENA_DECLS=1 \
+    sh scripts/bootstrap/bootstrap-from-scratch.sh \
+      --backend=cranelift --output="$ADMISSION_ROOT/artifacts" \
+      --full-bootstrap --mode=dynload --full-cli --fresh-cache --jobs=1 --no-mcp
+)
+CLI="$ADMISSION_ROOT/artifacts/full/x86_64-unknown-linux-gnu/simple"
+test -x "$CLI"
+```
+
+The producer first creates the missing Rust bootstrap authority, then uses its
+seed only for the recorded Stage2 build. The immutable admitted pure-Simple
+Stage2 builds Stage3; the producer records both transcripts, source/runtime
+snapshots, and manifest verification. `SIMPLE_NATIVE_ARENA_DECLS=1` is
+hash-bound inside both the producer and its manifest replay; the outer binding
+is only fail-safe clarity.
 
 ```bash
 set -euo pipefail
@@ -216,7 +245,7 @@ Each lane reports:
   reviews all 34 immutable command/output/error/exit/manual-hash sets but does
   not replace owner generation.
 - `sh scripts/audit/direct-env-runtime-guard.shs --working` and `--staged`.
-- Every REQ-001–015 and NFR-001–008 has current evidence or remains an explicit
+- Every REQ-001–016 and NFR-001–008 has current evidence or remains an explicit
   completion blocker; a blocked required row prevents overall `STATUS: PASS`.
 - Independent final review runs once and owns all done marks.
 - Before push: fetch/rebase linearly onto `origin/main`, compare tracked-file

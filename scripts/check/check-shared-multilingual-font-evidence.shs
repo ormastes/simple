@@ -1,0 +1,437 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$repo_root"
+
+evidence_root=${SHARED_FONT_EVIDENCE_ROOT:-build/test-artifacts/shared_multilingual_gpu_fonts}
+focused_attempt=${FOCUSED_ATTEMPT:-1}
+docgen_attempt=${DOCGEN_ATTEMPT:-1}
+runner=src/app/test/font_evidence_runner.spl
+summary="$evidence_root/aggregate.summary"
+manifest="$evidence_root/aggregate.sha256"
+
+fail() {
+  echo "shared-font evidence aggregate: $*" >&2
+  exit 1
+}
+
+case "$focused_attempt" in
+  1|2|3) ;;
+  *) fail "focused attempt must be 1, 2, or 3" ;;
+esac
+case "$docgen_attempt" in
+  1|2|3) ;;
+  *) fail "docgen attempt must be 1, 2, or 3" ;;
+esac
+
+focused_root="$evidence_root/focused/attempt-$focused_attempt"
+docgen_root="$evidence_root/docgen/attempt-$docgen_attempt"
+calibration_root="$evidence_root/runner-calibration"
+essential_root="$evidence_root/essential-tools"
+
+field() {
+  file=$1
+  key=$2
+  count=$(grep -c "^$key=" "$file" || true)
+  [ "$count" -eq 1 ] || fail "$file must contain one $key field"
+  sed -n "s/^$key=//p" "$file"
+}
+
+artifact_name() {
+  name=${1#test/}
+  printf '%s\n' "${name//\//_}"
+}
+
+manifest_members_exact() {
+  local manifest_file=$1
+  shift
+  local actual expected
+  actual=$(awk 'NF != 2 { bad = 1 } { print $2 } END { if (bad) exit 1 }' \
+    "$manifest_file" | sort) || return 1
+  expected=$(printf '%s\n' "$@" | sort)
+  [ "$actual" = "$expected" ]
+}
+
+focused_specs=(
+  test/01_unit/lib/test_runner_result_wrapper_spec.spl
+  test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl
+  test/01_unit/app/release/install_font_assets_spec.spl
+  test/01_unit/app/release/release_archive_layout_spec.spl
+  test/01_unit/lib/common/encoding/font_asset_manifest_spec.spl
+  test/01_unit/os/port/simpleos_font_bundle_spec.spl
+  test/02_integration/os/port/simpleos_font_asset_staging_spec.spl
+  test/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.spl
+  test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl
+  test/01_unit/lib/skia/ot_layout_apply_spec.spl
+  test/01_unit/lib/skia/ot_layout_gsub_full_spec.spl
+  test/01_unit/lib/skia/ot_layout_gpos_spec.spl
+  test/01_unit/lib/skia/ot_layout_gpos_full_spec.spl
+  test/01_unit/lib/skia/ot_layout_gpos_variation_spec.spl
+  test/01_unit/lib/skia/ot_layout_lookup_flags_spec.spl
+  test/01_unit/lib/skia/ot_layout_pinned_inventory_spec.spl
+  test/01_unit/lib/skia/ot_parser_layout_selector_spec.spl
+  test/01_unit/lib/skia/ot_parser_spec.spl
+  test/01_unit/lib/skia/shaper_spec.spl
+  test/01_unit/lib/skia/selected_devanagari_spec.spl
+  test/01_unit/lib/skia/selected_arabic_spec.spl
+  test/01_unit/lib/common/text_layout/font_renderer_spec.spl
+  test/01_unit/lib/common/text_layout/font_render_config_spec.spl
+  test/01_unit/lib/gpu/engine3d/font_compat_spec.spl
+  test/03_system/app/simple_2d/feature/engine2d_font_surface_verification_spec.spl
+  test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_result_spec.spl
+  test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl
+  test/02_integration/rendering/wm_nested_content_frame_spec.spl
+  test/03_system/app/simple_2d/feature/legacy_web_gui_wm_font_route_spec.spl
+  test/03_system/app/simple_web/feature/web_font_rendering_surface_spec.spl
+  test/03_system/gui/feature/gui_font_event_surface_spec.spl
+  test/03_system/gui/linux_hosted_wm_live_window_spec.spl
+  test/01_unit/os/drivers/framebuffer/simpleos_wm_qemu_evidence_contract_spec.spl
+  test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl
+  test/03_system/os/wm/rv64_simpleos_wm_font_input_spec.spl
+  test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl
+  test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl
+  test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl
+  test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl
+)
+
+docgen_specs=(
+  test/01_unit/app/release/install_font_assets_spec.spl
+  test/01_unit/app/release/release_archive_layout_spec.spl
+  test/01_unit/lib/common/encoding/font_asset_manifest_spec.spl
+  test/01_unit/lib/common/text_layout/font_render_config_spec.spl
+  test/01_unit/lib/common/text_layout/font_renderer_spec.spl
+  test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_result_spec.spl
+  test/01_unit/lib/test_runner_result_wrapper_spec.spl
+  test/01_unit/lib/skia/ot_layout_apply_spec.spl
+  test/01_unit/lib/skia/ot_layout_gsub_full_spec.spl
+  test/01_unit/lib/skia/ot_layout_gpos_spec.spl
+  test/01_unit/lib/skia/ot_layout_gpos_full_spec.spl
+  test/01_unit/lib/skia/ot_layout_gpos_variation_spec.spl
+  test/01_unit/lib/skia/ot_layout_lookup_flags_spec.spl
+  test/01_unit/lib/skia/ot_layout_pinned_inventory_spec.spl
+  test/01_unit/lib/skia/ot_parser_layout_selector_spec.spl
+  test/01_unit/lib/skia/ot_parser_spec.spl
+  test/01_unit/lib/skia/selected_devanagari_spec.spl
+  test/01_unit/lib/skia/shaper_spec.spl
+  test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl
+  test/01_unit/os/drivers/framebuffer/simpleos_wm_qemu_evidence_contract_spec.spl
+  test/01_unit/os/port/simpleos_font_bundle_spec.spl
+  test/02_integration/os/port/simpleos_font_asset_staging_spec.spl
+  test/02_integration/rendering/wm_nested_content_frame_spec.spl
+  test/03_system/app/simple_2d/feature/legacy_web_gui_wm_font_route_spec.spl
+  test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl
+  test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl
+  test/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.spl
+  test/03_system/app/simple_2d/feature/shared_font_surfaces_spec.spl
+  test/03_system/app/simple_web/feature/web_font_rendering_surface_spec.spl
+  test/03_system/gui/feature/gui_font_event_surface_spec.spl
+  test/03_system/gui/linux_hosted_wm_live_window_spec.spl
+  test/03_system/os/wm/rv64_simpleos_wm_font_input_spec.spl
+  test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl
+  test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl
+)
+
+[ "${#focused_specs[@]}" -eq 39 ] || fail "focused inventory is not 39"
+[ "${#docgen_specs[@]}" -eq 34 ] || fail "docgen inventory is not 34"
+[ -d "$focused_root" ] || fail "missing $focused_root"
+[ -d "$docgen_root" ] || fail "missing $docgen_root"
+[ -f "$essential_root/evidence.sha256" ] || fail "missing essential-tools hash record"
+manifest_members_exact "$essential_root/evidence.sha256" \
+  identity.env command out err exit summary.env ||
+  fail "essential-tools hash record has an unexpected member inventory"
+(
+  cd "$essential_root"
+  sha256sum -c evidence.sha256 >/dev/null
+) || fail "essential-tools hash verification failed"
+grep -Fqx 'status=pass' "$essential_root/summary.env" ||
+  fail "essential-tools admission did not pass"
+[ "$(cat "$essential_root/exit")" = 0 ] ||
+  fail "essential-tools admission did not exit zero"
+for marker in \
+    essential_test_runner_smoke=true \
+    essential_lint_smoke=true \
+    essential_duplicate_checker_smoke=true \
+    bootstrap_essential_tools_smoke=true; do
+  [ "$(grep -Fxc "$marker" "$essential_root/out")" -eq 1 ] ||
+    fail "essential-tools marker is missing or duplicated: $marker"
+done
+[ -f "$calibration_root/evidence.sha256" ] || fail "missing calibration hash record"
+manifest_members_exact "$calibration_root/evidence.sha256" \
+  identity.env \
+  fail.command fail.out fail.err fail.exit \
+  empty.command empty.out empty.err empty.exit summary.env ||
+  fail "runner calibration hash record has an unexpected member inventory"
+(
+  cd "$calibration_root"
+  sha256sum -c evidence.sha256 >/dev/null
+) || fail "runner calibration hash verification failed"
+grep -Fqx 'status=pass' "$calibration_root/summary.env" ||
+  fail "runner calibration did not pass"
+
+head_sha=$(git rev-parse HEAD)
+runner_sha=$(sha256sum "$runner" | awk '{print $1}')
+common_cli=
+common_cli_sha=
+common_core_dir=
+common_core_sha=
+hash_files=(
+  "$essential_root/evidence.sha256"
+  "$essential_root/identity.env"
+  "$essential_root/command"
+  "$essential_root/out"
+  "$essential_root/err"
+  "$essential_root/exit"
+  "$essential_root/summary.env"
+  "$calibration_root/evidence.sha256"
+  "$calibration_root/identity.env"
+  "$calibration_root/fail.command"
+  "$calibration_root/fail.out"
+  "$calibration_root/fail.err"
+  "$calibration_root/fail.exit"
+  "$calibration_root/empty.command"
+  "$calibration_root/empty.out"
+  "$calibration_root/empty.err"
+  "$calibration_root/empty.exit"
+  "$calibration_root/summary.env"
+)
+hash_files+=(
+  "$runner"
+  scripts/check/fixtures/font_evidence_runner_fail_spec.spl
+  scripts/check/fixtures/font_evidence_runner_empty_spec.spl
+)
+
+[ "$(cat "$calibration_root/fail.exit")" = 1 ] ||
+  fail "deliberate-red calibration did not exit one"
+[ "$(cat "$calibration_root/empty.exit")" = 1 ] ||
+  fail "zero-example calibration did not exit one"
+grep -Fqx 'error: test-runner: spec failed' "$calibration_root/fail.out" ||
+  fail "deliberate-red calibration marker is missing"
+grep -Fqx 'error: test-runner: no examples executed' "$calibration_root/empty.out" ||
+  fail "zero-example calibration marker is missing"
+if grep -Fq 'test-runner: native result wrapper complete' "$calibration_root/empty.out"; then
+  fail "zero-example calibration contains a completion marker"
+fi
+
+for spec in "${focused_specs[@]}"; do
+  [ -f "$spec" ] || fail "missing focused spec $spec"
+  hash_files+=("$spec")
+  name=$(artifact_name "$spec")
+  base="$focused_root/$name"
+  for suffix in command out err exit; do
+    [ -f "$base.$suffix" ] || fail "missing $base.$suffix"
+    hash_files+=("$base.$suffix")
+  done
+  [ "$(cat "$base.exit")" = 0 ] || fail "$spec did not exit zero"
+  [ "$(grep -Fxc 'test-runner: native result wrapper complete' "$base.out")" -eq 1 ] ||
+    fail "$spec lacks one exact completion marker"
+  grep -Eq '^[1-9][0-9]* examples, 0 failures$' "$base.out" ||
+    fail "$spec lacks a nonzero green summary"
+  command_file="$base.command"
+  [ "$(field "$command_file" checkpoint_sha)" = "$head_sha" ] ||
+    fail "$spec checkpoint differs from HEAD"
+  [ "$(field "$command_file" checkpoint_clean)" = true ] ||
+    fail "$spec was not recorded clean"
+  [ "$(field "$command_file" attempt)" = "$focused_attempt" ] ||
+    fail "$spec focused attempt identity mismatch"
+  [ "$(field "$command_file" spec)" = "$spec" ] ||
+    fail "$spec command identity mismatch"
+  [ "$(field "$command_file" spec_sha256)" = "$(sha256sum "$spec" | awk '{print $1}')" ] ||
+    fail "$spec source hash changed"
+  [ "$(field "$command_file" runner_sha256)" = "$runner_sha" ] ||
+    fail "$spec runner hash changed"
+  cli=$(field "$command_file" cli)
+  cli_sha=$(field "$command_file" cli_sha256)
+  core_dir=$(field "$command_file" core_c_dir)
+  core_sha=$(field "$command_file" core_c_sha256)
+  [ "$(sha256sum "$cli" | awk '{print $1}')" = "$cli_sha" ] ||
+    fail "$spec CLI hash mismatch"
+  [ "$(sha256sum "$core_dir/libsimple_runtime.a" | awk '{print $1}')" = "$core_sha" ] ||
+    fail "$spec core-C hash mismatch"
+  if [ -z "$common_cli" ]; then
+    common_cli=$cli
+    common_cli_sha=$cli_sha
+    common_core_dir=$core_dir
+    common_core_sha=$core_sha
+  fi
+  [ "$cli" = "$common_cli" ] && [ "$cli_sha" = "$common_cli_sha" ] &&
+    [ "$core_dir" = "$common_core_dir" ] && [ "$core_sha" = "$common_core_sha" ] ||
+    fail "$spec uses a different CLI/core-C identity"
+done
+
+hash_files+=("$common_cli" "$common_core_dir/libsimple_runtime.a")
+
+essential_identity="$essential_root/identity.env"
+[ "$(field "$essential_identity" checkpoint_sha)" = "$head_sha" ] ||
+  fail "essential-tools checkpoint differs from HEAD"
+[ "$(field "$essential_identity" checkpoint_clean)" = true ] ||
+  fail "essential-tools admission was not recorded clean"
+[ "$(field "$essential_identity" cli)" = "$common_cli" ] ||
+  fail "essential-tools CLI path differs from focused evidence"
+[ "$(field "$essential_identity" cli_sha256)" = "$common_cli_sha" ] ||
+  fail "essential-tools CLI hash differs from focused evidence"
+[ "$(field "$essential_identity" core_c_dir)" = "$common_core_dir" ] ||
+  fail "essential-tools core-C path differs from focused evidence"
+[ "$(field "$essential_identity" core_c_sha256)" = "$common_core_sha" ] ||
+  fail "essential-tools core-C hash differs from focused evidence"
+
+calibration_identity="$calibration_root/identity.env"
+[ "$(field "$calibration_identity" checkpoint_sha)" = "$head_sha" ] ||
+  fail "runner calibration checkpoint differs from HEAD"
+[ "$(field "$calibration_identity" checkpoint_clean)" = true ] ||
+  fail "runner calibration was not recorded clean"
+[ "$(field "$calibration_identity" cli)" = "$common_cli" ] ||
+  fail "runner calibration CLI path differs from focused evidence"
+[ "$(field "$calibration_identity" cli_sha256)" = "$common_cli_sha" ] ||
+  fail "runner calibration CLI hash differs from focused evidence"
+[ "$(field "$calibration_identity" core_c_dir)" = "$common_core_dir" ] ||
+  fail "runner calibration core-C path differs from focused evidence"
+[ "$(field "$calibration_identity" core_c_sha256)" = "$common_core_sha" ] ||
+  fail "runner calibration core-C hash differs from focused evidence"
+[ "$(field "$calibration_identity" runner_sha256)" = "$runner_sha" ] ||
+  fail "runner calibration source hash differs from focused evidence"
+[ "$(field "$calibration_identity" fail_fixture_sha256)" = \
+    "$(sha256sum scripts/check/fixtures/font_evidence_runner_fail_spec.spl | awk '{print $1}')" ] ||
+  fail "runner calibration failure fixture hash changed"
+[ "$(field "$calibration_identity" empty_fixture_sha256)" = \
+    "$(sha256sum scripts/check/fixtures/font_evidence_runner_empty_spec.spl | awk '{print $1}')" ] ||
+  fail "runner calibration empty fixture hash changed"
+
+for suffix in command out err exit; do
+  count=$(find "$focused_root" -maxdepth 1 -type f -name "*.$suffix" | wc -l)
+  [ "$count" -eq 39 ] || fail "focused $suffix count is $count, expected 39"
+done
+
+for spec in "${docgen_specs[@]}"; do
+  [ -f "$spec" ] || fail "missing docgen spec $spec"
+  hash_files+=("$spec")
+  name=$(artifact_name "$spec")
+  base="$docgen_root/$name"
+  manual="doc/06_spec/${spec#test/}"
+  manual=${manual%.spl}.md
+  for suffix in command out err exit manual.sha256; do
+    [ -f "$base.$suffix" ] || fail "missing $base.$suffix"
+    hash_files+=("$base.$suffix")
+  done
+  [ -f "$manual" ] || fail "missing generated manual $manual"
+  hash_files+=("$manual")
+  [ "$(cat "$base.exit")" = 0 ] || fail "$spec docgen did not exit zero"
+  grep -Eq '^DONE Generated [0-9]+ docs \([0-9]+ complete, 0 stubs\)$' "$base.out" ||
+    fail "$spec docgen lacks the complete zero-stub marker"
+  command_file="$base.command"
+  [ "$(field "$command_file" checkpoint_sha)" = "$head_sha" ] ||
+    fail "$spec docgen checkpoint differs from HEAD"
+  [ "$(field "$command_file" checkpoint_clean)" = true ] ||
+    fail "$spec docgen was not recorded clean"
+  [ "$(field "$command_file" attempt)" = "$docgen_attempt" ] ||
+    fail "$spec docgen attempt identity mismatch"
+  [ "$(field "$command_file" spec)" = "$spec" ] ||
+    fail "$spec docgen identity mismatch"
+  [ "$(field "$command_file" spec_sha256)" = "$(sha256sum "$spec" | awk '{print $1}')" ] ||
+    fail "$spec docgen source hash changed"
+  [ "$(field "$command_file" cli)" = "$common_cli" ] ||
+    fail "$spec docgen CLI path mismatch"
+  [ "$(field "$command_file" cli_sha256)" = "$common_cli_sha" ] ||
+    fail "$spec docgen CLI hash mismatch"
+  [ "$(field "$command_file" core_c_dir)" = "$common_core_dir" ] ||
+    fail "$spec docgen core-C path mismatch"
+  [ "$(field "$command_file" core_c_sha256)" = "$common_core_sha" ] ||
+    fail "$spec docgen core-C hash mismatch"
+  [ "$(field "$command_file" manual)" = "$manual" ] ||
+    fail "$spec manual path mismatch"
+  manual_sha=$(sha256sum "$manual" | awk '{print $1}')
+  [ "$(field "$base.manual.sha256" manual_sha256)" = "$manual_sha" ] ||
+    fail "$spec manual hash mismatch"
+  manual_before=$(field "$command_file" manual_before_sha256)
+  [ "$manual_before" = missing ] || [ "$manual_before" != "$manual_sha" ] ||
+    fail "$spec stale manual was unchanged"
+done
+
+for suffix in command out err exit; do
+  count=$(find "$docgen_root" -maxdepth 1 -type f -name "*.$suffix" | wc -l)
+  [ "$count" -eq 34 ] || fail "docgen $suffix count is $count, expected 34"
+done
+count=$(find "$docgen_root" -maxdepth 1 -type f -name "*.manual.sha256" | wc -l)
+[ "$count" -eq 34 ] || fail "docgen manual-hash count is $count, expected 34"
+[ "$(sha256sum "$common_cli" | awk '{print $1}')" = "$common_cli_sha" ] ||
+  fail "CLI changed during aggregate verification"
+[ "$(sha256sum "$common_core_dir/libsimple_runtime.a" | awk '{print $1}')" = "$common_core_sha" ] ||
+  fail "core-C changed during aggregate verification"
+
+is_expected_generated_manual() {
+  local candidate=$1
+  local spec expected
+  for spec in "${docgen_specs[@]}"; do
+    expected="doc/06_spec/${spec#test/}"
+    expected=${expected%.spl}.md
+    if [ "$candidate" = "$expected" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+while IFS= read -r changed_path; do
+  [ -z "$changed_path" ] && continue
+  is_expected_generated_manual "$changed_path" ||
+    fail "worktree change outside generated-manual scope: $changed_path"
+done < <(
+  {
+    git diff --name-only
+    git diff --cached --name-only
+    git ls-files --others --exclude-standard
+  } | sort -u
+)
+
+if [ -e "$summary" ] || [ -e "$manifest" ]; then
+  [ -f "$summary" ] && [ -f "$manifest" ] ||
+    fail "incomplete existing aggregate seal"
+  sha256sum -c "$manifest" >/dev/null ||
+    fail "existing aggregate hash verification failed"
+  [ "$(field "$summary" status)" = pass ] ||
+    fail "existing aggregate is not PASS"
+  [ "$(field "$summary" checkpoint_sha)" = "$head_sha" ] ||
+    fail "existing aggregate checkpoint differs from selected evidence"
+  [ "$(field "$summary" focused_count)" = 39 ] ||
+    fail "existing aggregate focused count is not 39"
+  [ "$(field "$summary" docgen_count)" = 34 ] ||
+    fail "existing aggregate docgen count is not 34"
+  [ "$(field "$summary" focused_attempt)" = "$focused_attempt" ] ||
+    fail "existing aggregate focused attempt differs from this audit"
+  [ "$(field "$summary" docgen_attempt)" = "$docgen_attempt" ] ||
+    fail "existing aggregate docgen attempt differs from this audit"
+  [ "$(field "$summary" cli_sha256)" = "$common_cli_sha" ] ||
+    fail "existing aggregate CLI hash differs from selected evidence"
+  [ "$(field "$summary" core_c_sha256)" = "$common_core_sha" ] ||
+    fail "existing aggregate core-C hash differs from selected evidence"
+  echo "shared_font_evidence_aggregate=pass"
+  exit 0
+fi
+
+mkdir -p "$evidence_root"
+summary_tmp=$(mktemp "$evidence_root/.aggregate.summary.XXXXXX")
+manifest_tmp=$(mktemp "$evidence_root/.aggregate.sha256.XXXXXX")
+cleanup() {
+  rm -f "$summary_tmp" "$manifest_tmp"
+}
+trap cleanup EXIT
+{
+  printf 'status=pass\n'
+  printf 'checkpoint_sha=%s\n' "$head_sha"
+  printf 'focused_count=39\n'
+  printf 'docgen_count=34\n'
+  printf 'focused_attempt=%s\n' "$focused_attempt"
+  printf 'docgen_attempt=%s\n' "$docgen_attempt"
+  printf 'cli_sha256=%s\ncore_c_sha256=%s\n' "$common_cli_sha" "$common_core_sha"
+} >"$summary_tmp"
+while IFS= read -r artifact; do
+  sha256sum "$artifact"
+done < <(printf '%s\n' "${hash_files[@]}" | sort -u) >"$manifest_tmp"
+summary_sha=$(sha256sum "$summary_tmp" | awk '{print $1}')
+printf '%s  %s\n' "$summary_sha" "$summary" >>"$manifest_tmp"
+mv "$summary_tmp" "$summary"
+mv "$manifest_tmp" "$manifest"
+trap - EXIT
+sha256sum -c "$manifest" >/dev/null ||
+  fail "new aggregate hash verification failed"
+echo "shared_font_evidence_aggregate=pass"

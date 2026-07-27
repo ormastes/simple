@@ -228,7 +228,7 @@ Current count: `0 pass`, `14 active`, `9 blocked`.
 | REQ-013 | blocked | E native 2D/3D/perf | native readback source rejects unavailable and forged promotion and now fails promotion closed when durable 3D upload receipts are missing | one real backend must pass both 2D and 3D through E native command | `/root` |
 | REQ-014 | blocked | B–E generation / F audit | among 34 changed/new specs, 14 mirrors are missing, 20 are stale, zero are current, and no retained log proves `0 stubs` | deployed pure-Simple runtime; run all 34 docgen commands below; review manuals | `/root` |
 | REQ-015 | active | C shaping/material/config | aggregate surfaces and focused config specs cover identity, policies, target order and pre-mutation rejection; working changes canonicalize HIP to ROCm on the prepared batch | batch change is unverified; deployed pure-Simple runtime required; run aggregate/C commands | `/root` |
-| REQ-016 | active | I–N full OpenType layout | source integration covers GSUB 1–8, GPOS 1–9, LookupFlag/GDEF filtering, FeatureVariations, Device/VariationIndex and anchors, named context/data facades, nested contextual remaps, ppem/coordinates/LangSys, pixel/design-unit separation, and fail-closed selected preprocessing; focused regressions cover the reviewed P1s | execute all focused specs on an admitted pure-Simple CLI and regenerate/review all affected manuals | `/root` |
+| REQ-016 | active | C shaping/material | source integration covers GSUB 1–8, GPOS 1–9, LookupFlag/GDEF filtering, FeatureVariations, Device/VariationIndex and anchors, named context/data facades, nested contextual remaps, ppem/coordinates/LangSys, pixel/design-unit separation, and fail-closed selected preprocessing; focused regressions cover the reviewed P1s | execute all focused specs on an admitted pure-Simple CLI and regenerate/review all affected manuals | `/root` |
 | NFR-001 | active | B manifest/distribution | manifest and SimpleOS bundle source gates cover immutable hashes, deterministic generation and corruption rejection | deployed pure-Simple runtime; run B command set | `/root` |
 | NFR-002 | blocked | E native/perf | native readback and perf specs define exact packed-ARGB comparator and provenance fields | deployed pure-Simple runtime plus real device; run E native/perf commands | `/root` |
 | NFR-003 | active | B manifest/distribution | manifest/bundle gates encode the 80 MiB and SimpleOS projection limits | deployed pure-Simple runtime; run B command set | `/root` |
@@ -409,6 +409,25 @@ themselves as manually synchronized/docgen-pending. Hand synchronization is not
 generated evidence. The 14 absent mirrors and all 20 stale mirrors therefore
 remain rejected until deterministic docgen succeeds with `0 stubs`.
 
+Nine additional changed compiler/bootstrap specs are prerequisite-enablement
+regressions, not shared-font requirement evidence, and are explicitly excluded
+from the 34-manual and 39-command font graphs:
+`bootstrap_main_source_spec.spl`,
+`cli_native_build_main_contract_spec.spl`,
+`interpreter_backend_spec.spl`,
+`hir_lowering_error_collection_spec.spl`,
+`bootstrap_expr_stmt_arena_spec.spl`,
+`hir_block_tail_invariants_source_spec.spl`,
+`const_eval_spec.spl`,
+`effect_inference_spec.spl`, and
+`resolve_nil_guard_spec.spl`. During this audit, two apparent further diffs
+came only from newer upstream GPU-wire changes:
+`processing_cpu_fallback_daemon_wire_spec.spl` and
+`simpleos_qemu_host_gpu_2d_spec.spl`. Neither contains a font or glyph
+acceptance row, neither is branch-authored shared-font evidence, and both are
+excluded from this scope; the completion-time rebase absorbs that upstream
+drift. Thus the authoritative feature scope remains 34, not 36.
+
 ## Exact owner commands
 
 The authoritative docgen scope is the 34 changed/new specs classified above.
@@ -458,7 +477,8 @@ run_docgen_spec() {
     manual_before=$(sha256sum "$manual" | awk '{print $1}')
   fi
   {
-    printf 'checkpoint_sha=%s\ncheckpoint_clean=true\n' "$CHECKPOINT_SHA"
+    printf 'checkpoint_sha=%s\ncheckpoint_clean=true\nattempt=%s\n' \
+      "$CHECKPOINT_SHA" "$DOCGEN_ATTEMPT"
     printf 'cli=%s\ncli_sha256=%s\n' "$CLI" "$CLI_SHA"
     printf 'core_c_dir=%s\ncore_c_sha256=%s\n' "$CORE_C_DIR" "$CORE_C_SHA"
     printf 'spec=%s\nspec_sha256=%s\n' "$spec" "$spec_sha"
@@ -485,6 +505,15 @@ run_docgen_spec() {
   if [ "$rc" -eq 0 ] && [ ! -f "$manual" ]; then
     rc=1
   fi
+  manual_after=missing
+  if [ "$rc" -eq 0 ]; then
+    manual_after=$(sha256sum "$manual" | awk '{print $1}')
+    if [ "$manual_before" != missing ] &&
+        [ "$manual_after" = "$manual_before" ]; then
+      printf '%s\n' "docgen left a stale manual unchanged" >>"$base.err"
+      rc=1
+    fi
+  fi
   if [ "$rc" -eq 0 ] &&
       { [ "$(sha256sum "$spec" | awk '{print $1}')" != "$spec_sha" ] ||
         [ "$(sha256sum "$CLI" | awk '{print $1}')" != "$CLI_SHA" ] ||
@@ -493,7 +522,7 @@ run_docgen_spec() {
   fi
   if [ "$rc" -eq 0 ]; then
     printf 'manual_sha256=%s\n' \
-      "$(sha256sum "$manual" | awk '{print $1}')" >"$base.manual.sha256"
+      "$manual_after" >"$base.manual.sha256"
   fi
   printf '%s\n' "$rc" >"$base.exit"
   if [ "$rc" -ne 0 ]; then
@@ -560,12 +589,53 @@ Lane A first runs the shared essential-tools admission gate against that exact
 binary and retains both streams:
 
 ```bash
+set -euo pipefail
 ESSENTIAL_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/essential-tools
 mkdir -p "$ESSENTIAL_ROOT"
+for artifact in \
+    identity.env command out err exit summary.env evidence.sha256; do
+  if [ -e "$ESSENTIAL_ROOT/$artifact" ]; then
+    echo "refusing duplicate essential-tools admission: $ESSENTIAL_ROOT/$artifact" >&2
+    exit 125
+  fi
+done
+[ "$(git rev-parse HEAD)" = "$CHECKPOINT_SHA" ]
+[ -z "$(git status --porcelain --untracked-files=normal)" ]
 CLI_ACTUAL_SHA=$(sha256sum "$CLI" | awk '{print $1}')
 [ "$CLI_ACTUAL_SHA" = "$CLI_SHA" ]
-SIMPLE_BINARY="$CLI" sh scripts/check/check-bootstrap-essential-tools-smoke.shs \
-  >"$ESSENTIAL_ROOT/smoke.out" 2>"$ESSENTIAL_ROOT/smoke.err"
+CORE_C_ACTUAL_SHA=$(sha256sum "$CORE_C_DIR/libsimple_runtime.a" | awk '{print $1}')
+[ "$CORE_C_ACTUAL_SHA" = "$CORE_C_SHA" ]
+{
+  printf 'checkpoint_sha=%s\ncheckpoint_clean=true\n' "$CHECKPOINT_SHA"
+  printf 'cli=%s\ncli_sha256=%s\n' "$CLI" "$CLI_SHA"
+  printf 'core_c_dir=%s\ncore_c_sha256=%s\n' "$CORE_C_DIR" "$CORE_C_SHA"
+} >"$ESSENTIAL_ROOT/identity.env"
+{
+  printf 'command env SIMPLE_BINARY=%q sh %q\n' \
+    "$CLI" scripts/check/check-bootstrap-essential-tools-smoke.shs
+} >"$ESSENTIAL_ROOT/command"
+if SIMPLE_BINARY="$CLI" sh scripts/check/check-bootstrap-essential-tools-smoke.shs \
+    >"$ESSENTIAL_ROOT/out" 2>"$ESSENTIAL_ROOT/err"; then
+  essential_rc=0
+else
+  essential_rc=$?
+fi
+printf '%s\n' "$essential_rc" >"$ESSENTIAL_ROOT/exit"
+[ "$essential_rc" -eq 0 ]
+[ "$(sha256sum "$CLI" | awk '{print $1}')" = "$CLI_SHA" ]
+[ "$(sha256sum "$CORE_C_DIR/libsimple_runtime.a" | awk '{print $1}')" = "$CORE_C_SHA" ]
+for marker in \
+    essential_test_runner_smoke=true \
+    essential_lint_smoke=true \
+    essential_duplicate_checker_smoke=true \
+    bootstrap_essential_tools_smoke=true; do
+  [ "$(grep -Fxc "$marker" "$ESSENTIAL_ROOT/out")" -eq 1 ]
+done
+printf 'status=pass\n' >"$ESSENTIAL_ROOT/summary.env"
+(
+  cd "$ESSENTIAL_ROOT"
+  sha256sum identity.env command out err exit summary.env
+) >"$ESSENTIAL_ROOT/evidence.sha256"
 ```
 
 The command must exit zero and its retained stdout must contain
@@ -581,14 +651,31 @@ commands a second time; the retained gate streams are the one admission record.
 Lane A calibrates the runner once globally before any focused result:
 
 ```bash
+set -euo pipefail
 CAL_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration
 mkdir -p "$CAL_ROOT"
+for artifact in \
+    identity.env fail.command fail.out fail.err fail.exit \
+    empty.command empty.out empty.err empty.exit summary.env evidence.sha256; do
+  if [ -e "$CAL_ROOT/$artifact" ]; then
+    echo "refusing duplicate runner calibration: $CAL_ROOT/$artifact" >&2
+    exit 125
+  fi
+done
+[ "$(git rev-parse HEAD)" = "$CHECKPOINT_SHA" ]
+[ -z "$(git status --porcelain --untracked-files=normal)" ]
 CORE_C_ACTUAL_SHA=$(sha256sum "$CORE_C_DIR/libsimple_runtime.a" | awk '{print $1}')
 [ "$CORE_C_ACTUAL_SHA" = "$CORE_C_SHA" ]
+RUNNER_SHA=$(sha256sum src/app/test/font_evidence_runner.spl | awk '{print $1}')
+FAIL_FIXTURE_SHA=$(sha256sum scripts/check/fixtures/font_evidence_runner_fail_spec.spl | awk '{print $1}')
+EMPTY_FIXTURE_SHA=$(sha256sum scripts/check/fixtures/font_evidence_runner_empty_spec.spl | awk '{print $1}')
 {
-  printf 'checkpoint_sha=%s\n' "$CHECKPOINT_SHA"
+  printf 'checkpoint_sha=%s\ncheckpoint_clean=true\n' "$CHECKPOINT_SHA"
   printf 'cli=%s\ncli_sha256=%s\n' "$CLI" "$CLI_SHA"
   printf 'core_c_dir=%s\ncore_c_sha256=%s\n' "$CORE_C_DIR" "$CORE_C_SHA"
+  printf 'runner_sha256=%s\n' "$RUNNER_SHA"
+  printf 'fail_fixture_sha256=%s\nempty_fixture_sha256=%s\n' \
+    "$FAIL_FIXTURE_SHA" "$EMPTY_FIXTURE_SHA"
 } >"$CAL_ROOT/identity.env"
 
 record_command() {
@@ -631,8 +718,18 @@ printf '%s\n' "$empty_rc" >"$CAL_ROOT/empty.exit"
 
 [ "$fail_rc" -eq 1 ]
 [ "$empty_rc" -eq 1 ]
-grep -Fq 'test-runner: spec failed' "$CAL_ROOT/fail.out"
-grep -Fq 'test-runner: no examples executed' "$CAL_ROOT/empty.out"
+grep -Fqx 'error: test-runner: spec failed' "$CAL_ROOT/fail.out"
+grep -Fqx 'error: test-runner: no examples executed' "$CAL_ROOT/empty.out"
+{
+  printf 'status=pass\n'
+  printf 'fail_exit=1\nempty_exit=1\n'
+} >"$CAL_ROOT/summary.env"
+(
+  cd "$CAL_ROOT"
+  sha256sum \
+    identity.env fail.command fail.out fail.err fail.exit \
+    empty.command empty.out empty.err empty.exit summary.env
+) >"$CAL_ROOT/evidence.sha256"
 ```
 
 The first command must exit 1 with `test-runner: spec failed`; the second must
@@ -671,6 +768,11 @@ esac
 
 run_focused_spec() {
   spec=$1
+  if [ "$(git rev-parse HEAD)" != "$CHECKPOINT_SHA" ] ||
+      [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+    echo "refusing focused execution outside the clean checkpoint: $spec" >&2
+    return 126
+  fi
   name=${spec#test/}
   name=${name//\//_}
   spec_sha=$(sha256sum "$spec" | awk '{print $1}')
@@ -712,6 +814,10 @@ run_focused_spec() {
     rc=0
   else
     rc=$?
+  fi
+  if [ "$(git rev-parse HEAD)" != "$CHECKPOINT_SHA" ] ||
+      [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+    rc=1
   fi
   if [ "$rc" -eq 0 ] &&
       { [ "$(sha256sum "$spec" | awk '{print $1}')" != "$spec_sha" ] ||
@@ -836,9 +942,15 @@ sh scripts/audit/direct-env-runtime-guard.shs --staged
 sh scripts/audit/numbered-artifact-guard.shs --working
 sh scripts/audit/numbered-artifact-guard.shs --staged
 git diff --check
+bash scripts/check/check-shared-multilingual-font-evidence.shs
 ```
 
-The first command must print nothing. Final verification remains `STATUS: FAIL`
+The first command must print nothing. The final command revalidates and
+hash-seals exactly 39 focused artifact sets, 34 docgen/manual records, the
+essential-tools admission, and the runner calibration, then verifies the new
+seal before reporting PASS. Existing-seal mode is reserved for a later
+independent audit and must not be invoked immediately as a redundant rerun.
+Final verification remains `STATUS: FAIL`
 until every blocked row has authoritative evidence; unavailable hardware stays
 a blocker rather than a synthetic or static PASS.
 

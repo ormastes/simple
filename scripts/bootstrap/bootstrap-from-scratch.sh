@@ -1195,6 +1195,7 @@ else
       "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
       "SIMPLE_NATIVE_BUILD_RUST=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
+      "SIMPLE_NATIVE_ARENA_DECLS=1" \
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
@@ -1213,6 +1214,7 @@ else
       "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
       "SIMPLE_NATIVE_BUILD_RUST=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
+      "SIMPLE_NATIVE_ARENA_DECLS=1" \
       "LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1" \
       "SIMPLE_BINARY=${stage2_admitted_absolute}" \
       native-build --target "${PLATFORM}" --backend "${backend}" \
@@ -1242,6 +1244,7 @@ else
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_NATIVE_BUILD_RUST=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_BINARY="${stage2_seed_absolute}" -- \
     "${stage2_seed_absolute}" native-build \
     --target "${PLATFORM}" \
@@ -1335,6 +1338,7 @@ else
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_NATIVE_BUILD_RUST=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_NATIVE_ARENA_DECLS=1 \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_BINARY="${stage2_admitted_absolute}" -- \
     "${stage2_admitted_absolute}" native-build \
@@ -1478,6 +1482,10 @@ else
       BSTAGE3_RUST_LOG
     bootstrap_stage3_write_manifest || {
       echo "error: refusing Stage 3 without canonical provenance" >&2
+      exit 1
+    }
+    bootstrap_stage3_verify_manifest "${BSTAGE3_MANIFEST}" "${BSTAGE3_ROOT}" "${BSTAGE3_STAGE3}" || {
+      echo "error: refusing Stage 3 with invalid canonical provenance" >&2
       exit 1
     }
     echo "  Stage 3 provenance: ${stage3_provenance_manifest}"
