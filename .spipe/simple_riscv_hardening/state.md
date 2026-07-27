@@ -112,7 +112,7 @@ release claim. This is itself a blocker row, not a footnote.
 | C `formal-dual-track` | **blocked** on redeploy (same seed cause, confirmed by independent bisect); tree restored clean | plan §1.1b |
 | F `isa-red-specs` | **done** — all 5 blockers RED (`6 total, 0 passed, 6 failed`); found NO-trap-machinery + variant-lane scope gap | `rv32_trap_completeness_spec.spl`, plan §1.1e |
 | G `truth-audit` | **done** — payload addresses = unreachable dead code (downgraded); mask = latent confirmed; 2 false capability claims found | `doc/09_report/riscv_truth_audit_2026-07-27.md` |
-| H `selfhost-redeploy` | **blocked** (P0-CRITICAL) — T3 bootstrap on quiescent host; Lane B's seed fix must ride along | `riscv_gate_evidence_seed_attributed_bin_release_clobbered_2026-07-27.md` |
+| H `selfhost-redeploy` | **ACTIVE / in progress** (P0-CRITICAL) — isolated-worktree bootstrap (pinned `4eb553c`) passed Stage 2+3 + provenance gate; stage-4 blockers found+fixed: 3 parser-compat issues (`val match` identifiers, `&x as u64`, explicit-value ABI enum extraction) pushed and content-verified on remote main; then deterministic stage-4 SIGSEGV in `HirLowering.lower_trait` root-caused to header-only sibling registry entries + nil-dict phantom `.get()` (bug `hir_stub_module_nil_dict_get_phantom_some_2026-07-27.md`); mitigation gate in `resolve_package_sibling_symbols` under verification. Final bootstrap + deploy + gate re-verify PENDING | plan §Lane H execution log |
 | H2 `antiseed-guard` | **filed** | `riscv_sidecar_contract_antiseed_guard_ineffective_2026-07-27.md` |
 | D `product-level-evidence` | **done with a verification DISPUTE open** — classified (a): two real compiler defects, not spec/runner artifacts. Defect 1 = same seed `@hardware` gap (independently reproduced with a no-import minimal repro; `asm volatile` forces the interpreter path). Defect 2 = NEW seed defect, found AND fixed: `.ok()`/`.err()` unsupported in nested static-method call dispatch (`method_dispatch.rs`, +23 lines, mirrors `special/types.rs:556-577`) — verified present by orchestrator diff. Lane D reported the spec at `9 total, 9 passed` under its rebuilt binary (`build/laneD_bin/simple`), **DISPUTE RESOLVED 2026-07-27 — D's 9/9 was genuine but conditional, and the
 orchestrator's "second interpreter" theory was WRONG (retracted).** `simple test`
@@ -143,5 +143,5 @@ positive, filed earlier the same day.)
 - [x] 4-spec (Lane F red specs landed RED — reproduce-first satisfied)
 - [ ] 5-implement (in progress: B done; D/E/I/J running; trap machinery NOT started — reordered as prerequisite per §1.1e)
 - [ ] 6-refactor
-- [ ] 7-verify (blocked on Lane H redeploy for re-attribution)
+- [ ] 7-verify (Lane H redeploy ACTIVE: stage 2+3 + provenance green in isolated worktree; stage-4 parse blockers fixed+pushed; HIR lower_trait SIGSEGV root-caused, mitigation under verification; final bootstrap+deploy+gate-reverify pending)
 - [ ] 8-ship

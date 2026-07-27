@@ -335,6 +335,64 @@ seed-fix-attributed via explicit `SIMPLE_BIN`/`SIMPLE_BINARY`:
 it carries Lane B's + Lane D's seed fixes, flips the default `bin/simple`, and
 re-attributes every row above.
 
+### Lane H execution log (2026-07-27)
+
+1. Campaign changes committed **scoped to the 56 session-owned files** (never
+   whole-WC; ~550 parallel-session files left uncommitted per anti-revert
+   protocol), rebased onto a diverged origin, pushed over SSH after the HTTPS
+   lane silently failed, and **content-verified on the remote tip** (`4eb553c`).
+2. First in-place `bootstrap-from-scratch.sh --full-bootstrap --deploy`: Stages
+   2 and 3 succeeded with sanity passes, then the fail-closed gate refused
+   deploy — `Stage 3 provenance: FAIL (sources-changed-during-bootstrap)`.
+   Cause: parallel sessions write the tree continuously (a coverage-snapshot
+   job was mid-rsync during the run). **The gate worked as designed; it was not
+   overridden.**
+3. Retry strategy: bootstrap in an **isolated git worktree pinned to the pushed
+   commit** (`4eb553c`, seed fix verified present in the checkout) — the same
+   snapshot pattern the repo's own coverage job uses — then copy the deployed
+   binary back via the documented `cp` to `.new` + `mv` pattern and re-verify
+   identity by banner before trusting any gate output.
+4. **(2026-07-27, continued)** Isolated-worktree bootstrap (pinned `4eb553c`)
+   passed Stage 2+3 **and the Stage-3 provenance gate** — confirming the earlier
+   in-place provenance failure was parallel-session writes; isolation fixed it.
+   Stage 4 (full CLI) then failed with **phase-2 parse errors**.
+5. Three parser-compat blockers fixed and pushed (remote main content-verified):
+   - **(a)** `val match` keyword-as-identifier in
+     `src/lib/nogc_sync_mut/compression/gzip/lz77.spl`, `zlib.spl`, and
+     `src/lib/common/compress/lzma2_encoder.spl` — renamed to `matched`.
+   - **(b)** `&x as u64` in `src/os/userlib/device.spl` — replaced with the
+     `unsafe_addr_of` extern idiom.
+   - **(c)** explicit-value ABI enum (`SyscallId`) reachable from the host CLI
+     closure — extracted `DeviceInfoBuf`+`new_device_info_buf` to
+     `src/os/kernel/types/device_info_types.spl`, re-exported from
+     `syscall_types.spl`.
+   Bugs filed: `seed_parser_accepts_match_keyword_as_identifier_2026-07-27.md`,
+   `selfhost_parser_no_explicit_enum_values_2026-07-27.md`.
+6. After parse cleared, stage-4 crashed **deterministically**: SIGSEGV in
+   `HirLowering.lower_trait` after 31 HIR modules (`env_ops.spl`), identical
+   under the stage-2 AND stage-3 binaries ⇒ **compiler-source defect**, not a
+   stage artifact. gdb backtrace: `lower_trait` ← `register_imported_symbol` ←
+   `register_glob_imported_symbols` ← `resolve_package_sibling_symbols`. Probe
+   evidence: `[trait-import-probe] mod=std.io.traits name=Read ntraits=-1`.
+   `SIMPLE_BOOTSTRAP_DIAG` revealed the swept siblings themselves are partial
+   (`fns=-1`): **header-only registry entries** — out-of-closure files parsed
+   for name/imports/exports only, with nil decl dicts — and native `.get()` on
+   a nil dict returns a **phantom non-nil Option**. Bug filed:
+   `hir_stub_module_nil_dict_get_phantom_some_2026-07-27.md`.
+7. Mitigation chosen: skip partial siblings in
+   `resolve_package_sibling_symbols` (a
+   `(sibling_mod ?? module).functions.len() >= 0` gate). Four alternative guard
+   shapes placed inside `register_imported_symbol` all broke the SEED build with
+   `cannot infer field type ... imported_const_decls` — a pristine-file control
+   built clean with a fresh cache, so this is real inference coupling, not
+   cache poisoning. Verification of the final shape in progress at time of
+   writing.
+8. Two evidence-integrity/process landmines hit today, for the record:
+   **(1)** a parallel-session WC sweep silently reverted uncommitted Edit-tool
+   changes — commit-immediately rule re-confirmed; **(2)** `jj squash --into @-`
+   landed in a parallel session's commit because `@-` had moved — always squash
+   into an **explicit commit id**.
+
 ## 5. Exit criteria for the whole lane
 
 - `check-riscv-hardware-gates.shs` improves from 12/22 with every remaining
