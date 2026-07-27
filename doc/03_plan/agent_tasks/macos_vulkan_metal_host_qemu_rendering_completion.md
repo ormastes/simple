@@ -970,13 +970,45 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   first missing phase, then retain a focused native Bungee regression. No
   bootstrap was run.
 
+### 2026-07-27 Vulkan web/GUI launch provenance hardening
+
+- No bootstrap was run. Strict macOS Vulkan web/GUI launch now resolves the
+  Homebrew ICD symlink, parses its one `ICD.library_path`, and hashes both the
+  canonical JSON and canonical `libMoltenVK.dylib`.
+- Receipt v3 binds the admitted compiler, winit provider, build-manifest
+  runtime providers, ICD, MoltenVK image, and the exact library search path.
+  The launched PID must actually map the admitted winit and MoltenVK images;
+  build-only runtime providers remain manifest provenance and are not
+  misreported as loaded rendering images.
+- Caller dyld/driver/layer overrides are rejected in strict mode, pinned plist
+  paths are XML-escaped, and web/GUI wrappers revalidate every receipt path and
+  hash. Focused shell syntax, real installed MoltenVK resolution, strict
+  launcher probe, GUI contract, artifact-layout, env-boundary, and rendering
+  source-coupling checks passed during the bounded cycles. Final review then
+  required restoring the spec terminator and retaining a focused symlink,
+  relative-library, hash, and multi-ICD rejection fixture. Those exact test
+  edits are present locally, but the three-cycle cap was reached before their
+  final rerun; the implementation is not pushed as verified. In a fresh
+  session, run only
+  `test/01_unit/scripts/macos_gui_run_strict_contract_spec.spl`, then the two
+  Vulkan web/GUI contract specs once. The web contract previously executed 11
+  scenarios but had four HTML-fixture failures on the deployed runner; it is
+  not a live Vulkan PASS.
+- Hosted-WM audit found that the existing fullscreen gate still serializes an
+  untyped CPU mirror and drives FIFO actions. Reuse its semantic/fullscreen and
+  checksum logic, but do not claim host-WM Vulkan completion until a typed
+  device-readback receipt, PID-owned macOS window capture, and native OS input
+  sequence replace those authorities.
+- Continue without bootstrap unless a later goal criterion cannot be reached
+  with an already-built, provenance-admitted pure-Simple artifact.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
 |---|---|---|
 | Host Vulkan web/GUI/font provider | Primary rendering agent | Merge only after live device/capture/event PASS. |
 | Host/QEMU 2D Vulkan/Metal/SIMD comparison | Existing local agent | Review committed evidence; do not absorb its dirty worktree. |
-| Host WM/compiler bootstrap | Primary rendering agent | Do not race another bootstrap writer; host PASS precedes QEMU WM. |
+| Host WM/compiler deployment | Primary rendering agent | Avoid bootstrap unless essential; host PASS precedes QEMU WM. |
 | Final verification | Highest-capability primary reviewer | Review all sidecar findings and issue final PASS/FAIL. |
 
 - Verify each acceptance criterion at most once per session.
