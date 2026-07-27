@@ -9,6 +9,12 @@ use std.io_runtime.{dir_create, dir_remove, file_exists, file_read, file_write, 
 use std.process.{run}
 use std.common.encoding.font_registry.{validate_selected_font_bundle_root}
 use std.nogc_sync_mut.package.dist.{DistributionBuilder, DistConfig}
+use lib.gc_async_mut.package.installer.staging as gc_staging
+use lib.gc_async_mut.package.installer.types as gc_types
+use lib.nogc_async_mut.package.installer.staging as nogc_async_staging
+use lib.nogc_async_mut.package.installer.types as nogc_async_types
+use lib.nogc_sync_mut.package.installer.staging as nogc_sync_staging
+use lib.nogc_sync_mut.package.installer.types as nogc_sync_types
 
 describe "release installer font assets":
     # @req REQ-004 REQ-014
@@ -54,6 +60,7 @@ describe "release installer font assets":
         expect(workflow).to_contain("cp -r assets/fonts staging-win/assets/")
         expect(workflow).to_contain("cp LICENSE THIRD_PARTY_NOTICES.md staging-win/")
         expect(workflow).to_contain("sha256sum --check scripts/os/simpleos_font_bundle_companion.sha256")
+        expect(workflow).to_contain("find assets/fonts -type l -print -quit")
         expect(workflow.contains("cp LICENSE \"${PKG_DIR}/\" 2>/dev/null || true")).to_be(false)
         expect(workflow.contains("cp THIRD_PARTY_NOTICES.md \"${PKG_DIR}/\" 2>/dev/null || true")).to_be(false)
         expect(workflow).to_contain("BIN_NAME=\"simple-runtime\"")
@@ -68,20 +75,23 @@ describe "release installer font assets":
 
         val dist = file_read("src/lib/nogc_sync_mut/package/dist.spl")
         expect(dist).to_contain("for pin in selected_font_bundle_asset_pins():")
-        expect(dist).to_contain("\"rm\", [\"-rf\", \"\{pkg_dir\}/assets\"]")
+        expect(dist).to_contain("\"rm\", [\"-rf\", \"--\", pkg_dir]")
+        expect(dist).to_contain("if not self.prepare_package_dir(pkg_dir):")
         expect(dist).to_contain("\"cp\", [source, destination]")
         expect(dist.contains("[\"-r\", \"assets\", \"\{pkg_dir\}/\"]")).to_be(false)
+        expect(dist.contains("\"rm\", [\"-rf\", \"\{pkg_dir\}/assets\"]")).to_be(false)
         expect(dist).to_contain("[\"LICENSE\", \"THIRD_PARTY_NOTICES.md\", \"\{pkg_dir\}/\"]")
         expect(dist).to_contain("if not self.copy_assets_and_legal(pkg_dir): return false")
         expect(dist).to_contain("if not validate_selected_font_bundle_root(pkg_dir)")
         expect(dist).to_contain("if not self.copy_sources(pkg_dir):")
+        expect(dist).to_contain("if not self.create_wrapper(pkg_dir, platform):")
         expect(dist).to_contain("if not self.create_archive(platform_name, pkg_dir, platform):")
         expect(dist).to_contain("else: \"simple-runtime\"")
         expect(dist).to_contain("set SIMPLE_ASSET_ROOT=%SCRIPT_DIR%..")
         expect(dist).to_contain("export SIMPLE_ASSET_ROOT=\"$SCRIPT_DIR/..\"")
         expect(dist.index_of("self.copy_sources(pkg_dir)") < dist.index_of("self.create_archive(platform_name, pkg_dir, platform)")).to_be(true)
         expect(dist).to_contain("zip -0 -r -q --symlinks")
-        expect(dist).to_contain("rt_process_run(\"tar\", [\"-czf\", archive, \"-C\", self.config.output_dir, pkg_name])")
+        expect(dist).to_contain("\"tar\", [\"-czf\", archive, \"-C\", self.config.output_dir, pkg_name]")
 
         for path in [
             "src/lib/nogc_sync_mut/package/build.spl",
@@ -117,6 +127,10 @@ describe "release installer font assets":
             expect(staging.contains("process_run(\"cp\", [\"-r\", \"assets/fonts/.\"")).to_be(false)
             expect(staging).to_contain("validate_selected_font_bundle_root(")
             expect(staging).to_contain("Staged font assets or notices failed immutable validation")
+            expect(staging).to_contain("if not prepare_staging_dir(config, platform):")
+            expect(staging).to_contain("process_run(\"rm\", [\"-rf\", \"--\", staging])")
+            expect(staging).to_contain("prepare_staging_dir(config, platform)")
+            expect(staging).to_contain("if not file_copy(binary_src")
 
     # @req REQ-004 REQ-005
     # @req NFR-001 NFR-003
@@ -127,25 +141,61 @@ describe "release installer font assets":
             expect(dir_remove(work, recursive: true)).to_be(true)
         expect(dir_create(work, recursive: true)).to_be(true)
         val package_root = work + "/simple-font-test-linux-x86_64"
-        expect(dir_create(package_root, recursive: true)).to_be(true)
-        expect(dir_create(package_root + "/assets/fonts", recursive: true)).to_be(true)
-        val extra_asset = package_root + "/assets/fonts/UNMANAGED.txt"
-        val extra_link = package_root + "/assets/fonts/UNMANAGED-LINK"
-        expect(file_write(extra_asset, "unmanaged")).to_be(true)
-        val link_result = run("ln", ["-s", "UNMANAGED.txt", extra_link])
-        expect(link_result.exit_code).to_equal(0)
-        expect(file_exists(extra_asset)).to_be(true)
-        expect(file_exists(extra_link)).to_be(true)
         val builder = DistributionBuilder.new(DistConfig(
             version: "font-test",
             output_dir: work,
             strip_binaries: false,
             exclude_patterns: [],
         ))
+        val external = work + "/external"
+        expect(dir_create(external, recursive: true)).to_be(true)
+        expect(file_write(external + "/sentinel", "keep")).to_be(true)
+        val package_link = run("ln", ["-s", external, package_root])
+        expect(package_link.exit_code).to_equal(0)
+        expect(builder.prepare_package_dir(package_root)).to_be(true)
+        expect(file_exists(external + "/sentinel")).to_be(true)
         expect(builder.copy_assets_and_legal(package_root)).to_be(true)
         expect(validate_selected_font_bundle_root(package_root)).to_be(true)
-        expect(file_exists(extra_asset)).to_be(false)
-        expect(file_exists(extra_link)).to_be(false)
+
+        step("Reject unmanaged files without deleting from the public copy helper")
+        val extra_asset = package_root + "/assets/fonts/UNMANAGED.txt"
+        val extra_link = package_root + "/assets/fonts/UNMANAGED-LINK"
+        expect(file_write(extra_asset, "unmanaged")).to_be(true)
+        val link_result = run("ln", ["-s", "UNMANAGED.txt", extra_link])
+        expect(link_result.exit_code).to_equal(0)
+        expect(validate_selected_font_bundle_root(package_root)).to_be(false)
+        expect(builder.copy_assets_and_legal(package_root)).to_be(false)
+        expect(file_exists(extra_asset)).to_be(true)
+        expect(file_exists(extra_link)).to_be(true)
+        expect(builder.copy_assets_and_legal(".")).to_be(false)
+        expect(file_exists("assets/fonts")).to_be(true)
+        expect(builder.prepare_package_dir(package_root)).to_be(true)
+        expect(builder.copy_assets_and_legal(package_root)).to_be(true)
+
+        step("Reject expected pin and legal-file symlink substitutions")
+        val pin_rel = "assets/fonts/google-fonts/ofl/notosanssc/METADATA.pb"
+        val pin_path = package_root + "/" + pin_rel
+        val external_pin = work + "/external-pin"
+        val pin_copy = run("cp", [pin_path, external_pin])
+        val pin_remove = run("rm", [pin_path])
+        val pin_link = run("ln", ["-s", external_pin, pin_path])
+        expect(pin_copy.exit_code).to_equal(0)
+        expect(pin_remove.exit_code).to_equal(0)
+        expect(pin_link.exit_code).to_equal(0)
+        expect(validate_selected_font_bundle_root(package_root)).to_be(false)
+        expect(builder.prepare_package_dir(package_root)).to_be(true)
+        expect(builder.copy_assets_and_legal(package_root)).to_be(true)
+        val external_license = work + "/external-license"
+        val legal_copy = run("cp", [package_root + "/LICENSE", external_license])
+        val legal_remove = run("rm", [package_root + "/LICENSE"])
+        val legal_link = run("ln", [
+            "-s", external_license, package_root + "/LICENSE"])
+        expect(legal_copy.exit_code).to_equal(0)
+        expect(legal_remove.exit_code).to_equal(0)
+        expect(legal_link.exit_code).to_equal(0)
+        expect(validate_selected_font_bundle_root(package_root)).to_be(false)
+        expect(builder.prepare_package_dir(package_root)).to_be(true)
+        expect(builder.copy_assets_and_legal(package_root)).to_be(true)
 
         step("Reject a corrupted root legal byte")
         expect(file_write(package_root + "/LICENSE", "corrupt")).to_be(true)
@@ -154,6 +204,106 @@ describe "release installer font assets":
         expect(validate_selected_font_bundle_root(package_root)).to_be(true)
 
         step("Propagate a production copy failure")
-        expect(file_write(work + "/blocked", "not a directory")).to_be(true)
-        expect(builder.copy_assets_and_legal(work + "/blocked/package")).to_be(false)
+        val blocked_builder = DistributionBuilder.new(DistConfig(
+            version: "blocked",
+            output_dir: work,
+            strip_binaries: false,
+            exclude_patterns: [],
+        ))
+        val blocked_package = work + "/simple-blocked-linux-x86_64"
+        expect(file_write(blocked_package, "not a directory")).to_be(true)
+        expect(blocked_builder.copy_assets_and_legal(blocked_package)).to_be(false)
+        expect(dir_remove(work, recursive: true)).to_be(true)
+
+    # @req REQ-004 REQ-014
+    # @req NFR-001
+    it "should fail closed in every installer tier before retaining stale assets or missing binaries":
+        val work = "/tmp/simple_font_installer_tier_failure_spec"
+        if is_dir(work):
+            expect(dir_remove(work, recursive: true)).to_be(true)
+        expect(dir_create(work, recursive: true)).to_be(true)
+
+        val gc_config = gc_types.InstallerConfig(
+            version: "test", package_name: "simple", description: "test",
+            maintainer: "test", homepage: "test", license: "MIT",
+            source_dir: work + "/gc-source", output_dir: work + "/gc-output",
+            architecture: "amd64")
+        val async_config = nogc_async_types.InstallerConfig(
+            version: "test", package_name: "simple", description: "test",
+            maintainer: "test", homepage: "test", license: "MIT",
+            source_dir: work + "/async-source", output_dir: work + "/async-output",
+            architecture: "amd64")
+        val sync_config = nogc_sync_types.InstallerConfig(
+            version: "test", package_name: "simple", description: "test",
+            maintainer: "test", homepage: "test", license: "MIT",
+            source_dir: work + "/sync-source", output_dir: work + "/sync-output",
+            architecture: "amd64")
+
+        step("Remove stale staging roots through each production cleanup owner")
+        for stale_root in [
+            work + "/gc-output/staging-windows/assets/fonts",
+            work + "/async-output/staging-windows/assets/fonts",
+            work + "/sync-output/staging-windows/assets/fonts",
+        ]:
+            expect(dir_create(stale_root, recursive: true)).to_be(true)
+            expect(file_write(stale_root + "/EXTRA", "extra")).to_be(true)
+        expect(gc_staging.prepare_staging_dir(
+            gc_config, gc_types.InstallerPlatform.WindowsExe)).to_be(true)
+        expect(nogc_async_staging.prepare_staging_dir(
+            async_config, nogc_async_types.InstallerPlatform.WindowsExe)).to_be(true)
+        expect(nogc_sync_staging.prepare_staging_dir(
+            sync_config, nogc_sync_types.InstallerPlatform.WindowsExe)).to_be(true)
+        expect(file_exists(work + "/gc-output/staging-windows/assets/fonts/EXTRA")).to_be(false)
+        expect(file_exists(work + "/async-output/staging-windows/assets/fonts/EXTRA")).to_be(false)
+        expect(file_exists(work + "/sync-output/staging-windows/assets/fonts/EXTRA")).to_be(false)
+
+        step("Remove staging symlinks without deleting their external targets")
+        for external_root in [
+            work + "/gc-external",
+            work + "/async-external",
+            work + "/sync-external",
+        ]:
+            expect(dir_create(external_root, recursive: true)).to_be(true)
+            expect(file_write(external_root + "/sentinel", "keep")).to_be(true)
+        val gc_link = run("ln", ["-s", work + "/gc-external",
+            work + "/gc-output/staging-windows"])
+        val async_link = run("ln", ["-s", work + "/async-external",
+            work + "/async-output/staging-windows"])
+        val sync_link = run("ln", ["-s", work + "/sync-external",
+            work + "/sync-output/staging-windows"])
+        expect(gc_link.exit_code).to_equal(0)
+        expect(async_link.exit_code).to_equal(0)
+        expect(sync_link.exit_code).to_equal(0)
+        expect(gc_staging.prepare_staging_dir(
+            gc_config, gc_types.InstallerPlatform.WindowsExe)).to_be(true)
+        expect(nogc_async_staging.prepare_staging_dir(
+            async_config, nogc_async_types.InstallerPlatform.WindowsExe)).to_be(true)
+        expect(nogc_sync_staging.prepare_staging_dir(
+            sync_config, nogc_sync_types.InstallerPlatform.WindowsExe)).to_be(true)
+        expect(file_exists(work + "/gc-external/sentinel")).to_be(true)
+        expect(file_exists(work + "/async-external/sentinel")).to_be(true)
+        expect(file_exists(work + "/sync-external/sentinel")).to_be(true)
+
+        step("Reject unsafe cleanup roots and real binary copy failures")
+        val unsafe_gc = gc_types.InstallerConfig(
+            version: "test", package_name: "simple", description: "test",
+            maintainer: "test", homepage: "test", license: "MIT",
+            source_dir: work, output_dir: "/", architecture: "amd64")
+        expect(gc_staging.prepare_staging_dir(
+            unsafe_gc, gc_types.InstallerPlatform.WindowsExe)).to_be(false)
+        for source in [
+            work + "/gc-source/windows-x86_64/simple.exe",
+            work + "/async-source/windows-x86_64/simple.exe",
+            work + "/sync-source/windows-x86_64/simple.exe",
+        ]:
+            expect(dir_create(source, recursive: true)).to_be(true)
+        val gc_result = gc_staging.create_staging_dir(
+            gc_config, gc_types.InstallerPlatform.WindowsExe)
+        val async_result = nogc_async_staging.create_staging_dir(
+            async_config, nogc_async_types.InstallerPlatform.WindowsExe)
+        val sync_result = nogc_sync_staging.create_staging_dir(
+            sync_config, nogc_sync_types.InstallerPlatform.WindowsExe)
+        expect(gc_result.is_err()).to_be(true)
+        expect(async_result.is_err()).to_be(true)
+        expect(sync_result.is_err()).to_be(true)
         expect(dir_remove(work, recursive: true)).to_be(true)

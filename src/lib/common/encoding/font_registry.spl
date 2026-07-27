@@ -15,7 +15,7 @@
 use std.common.encoding.sfnt.{validate_glyf_font_instance, sfnt_manifest_tables_match, sfnt_manifest_names_match}
 use std.common.crypto.sha256.{sha256_bytes, sha256_u8_hex}
 use std.common.crypto.types.{bytes_to_hex}
-use std.io_runtime.{env_get}
+use std.io_runtime.{dir_walk, env_get, process_run}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_exists(path: text) -> bool
@@ -385,14 +385,38 @@ fn validate_selected_font_bundle_bytes(path: text, data: [u8]) -> bool:
     val expected = selected_font_bundle_pin_sha256(path)
     expected != "" and data.len() > 0 and sha256_u8_hex(data) == expected
 
+fn _font_asset_regular_file_without_link(path: text) -> bool:
+    val (_, _, link_exit) = process_run("test", ["-L", path])
+    if link_exit != 1: return false
+    val (_, _, file_exit) = process_run("test", ["-f", path])
+    file_exit == 0
+
 fn validate_selected_font_bundle_root(root: text) -> bool:
     val base = _font_asset_normalized_root(root)
-    for pin in selected_font_bundle_asset_pins():
+    val pins = selected_font_bundle_asset_pins()
+    val assets_root = if base == "": "assets/fonts" else: _font_asset_path_beneath_root(base, "assets/fonts")
+    if base != "":
+        val (_, _, root_link_exit) = process_run("test", ["-L", base])
+        if root_link_exit != 1: return false
+    val (links, _, link_walk_exit) = process_run(
+        "find", [assets_root, "-type", "l", "-print", "-quit"])
+    if link_walk_exit != 0 or links.trim() != "": return false
+    val found = dir_walk(assets_root)
+    if found.len() != pins.len(): return false
+    for found_path in found:
+        val normalized_found: text = found_path.replace("\\", "/")
+        var selected = false
+        for pin in pins:
+            val expected = if base == "": pin.path else: _font_asset_path_beneath_root(base, pin.path)
+            if normalized_found == expected:
+                selected = true
+        if not selected: return false
+    for pin in pins:
         val path = if base == "": pin.path else: _font_asset_path_beneath_root(base, pin.path)
-        if not rt_file_exists(path) or not validate_selected_font_bundle_bytes(pin.path, rt_file_read_bytes(path)): return false
+        if not _font_asset_regular_file_without_link(path) or not validate_selected_font_bundle_bytes(pin.path, rt_file_read_bytes(path)): return false
     for name in ["LICENSE", "THIRD_PARTY_NOTICES.md"]:
         val path = if base == "": name else: _font_asset_path_beneath_root(base, name)
-        if not rt_file_exists(path) or not validate_selected_font_bundle_bytes(name, rt_file_read_bytes(path)): return false
+        if not _font_asset_regular_file_without_link(path) or not validate_selected_font_bundle_bytes(name, rt_file_read_bytes(path)): return false
     true
 
 fn _selected_font_asset_candidate_index_for_path_with_root(path: text, root: text) -> i64:

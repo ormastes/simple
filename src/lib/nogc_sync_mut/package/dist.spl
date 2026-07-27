@@ -158,9 +158,11 @@ class DistributionBuilder:
         val platform_name = platform.to_string()
         val pkg_dir = "{self.config.output_dir}/simple-{self.config.version}-{platform_name}"
 
-        # Create package structure
-        print "  Creating directories..."
-        self.create_dirs(pkg_dir)
+        # Replace only the exact derived package root. Removing the root itself
+        # also removes a stale symlink rather than traversing through it.
+        print "  Preparing package directory..."
+        if not self.prepare_package_dir(pkg_dir):
+            return false
 
         # Copy runtime binary
         print "  Copying runtime binary..."
@@ -175,7 +177,8 @@ class DistributionBuilder:
 
         # Create wrapper script
         print "  Creating wrapper script..."
-        self.create_wrapper(pkg_dir, platform)
+        if not self.create_wrapper(pkg_dir, platform):
+            return false
 
         # Create archive
         print "  Creating archive..."
@@ -184,13 +187,39 @@ class DistributionBuilder:
 
         true
 
-    fn create_dirs(pkg_dir: text):
-        # Use mkdir -p to create nested directories
-        rt_process_run("mkdir", ["-p", pkg_dir])
-        rt_process_run("mkdir", ["-p", "{pkg_dir}/bin"])
-        rt_process_run("mkdir", ["-p", "{pkg_dir}/lib"])
-        rt_process_run("mkdir", ["-p", "{pkg_dir}/src"])
-        rt_process_run("mkdir", ["-p", "{pkg_dir}/examples"])
+    fn is_derived_package_dir(pkg_dir: text) -> bool:
+        val expected_prefix = "{self.config.output_dir}/simple-{self.config.version}-"
+        if self.config.output_dir == "" or self.config.output_dir == "/": return false
+        if pkg_dir == "" or pkg_dir == "/" or not pkg_dir.starts_with(expected_prefix): return false
+        val normalized: text = pkg_dir.replace("\\", "/")
+        for part in normalized.split("/"):
+            if part == "..": return false
+        pkg_dir.len() > expected_prefix.len()
+
+    fn prepare_package_dir(pkg_dir: text) -> bool:
+        if not self.is_derived_package_dir(pkg_dir):
+            print "    ERROR: Package directory is not the exact derived child"
+            return false
+        val (_, cleanup_error, cleanup_exit) = rt_process_run(
+            "rm", ["-rf", "--", pkg_dir])
+        if cleanup_exit != 0:
+            print "    ERROR: Package cleanup failed: {cleanup_error}"
+            return false
+        self.create_dirs(pkg_dir)
+
+    fn create_dirs(pkg_dir: text) -> bool:
+        if not self.is_derived_package_dir(pkg_dir): return false
+        for path in [
+            pkg_dir,
+            "{pkg_dir}/bin",
+            "{pkg_dir}/lib",
+            "{pkg_dir}/src",
+            "{pkg_dir}/examples",
+        ]:
+            if not rt_dir_create(path, true):
+                print "    ERROR: Package directory creation failed: {path}"
+                return false
+        true
 
     fn copy_runtime(platform: Platform, pkg_dir: text) -> bool:
         # Determine runtime binary name
@@ -223,24 +252,27 @@ class DistributionBuilder:
         # Use rsync for better control over exclusions
 
         # Copy src directories (no exclusions needed)
-        rt_process_run("cp", ["-r", "src/compiler", "{pkg_dir}/src/"])
-        rt_process_run("cp", ["-r", "src/app", "{pkg_dir}/src/"])
-        rt_process_run("cp", ["-r", "src/lib", "{pkg_dir}/src/"])
-        rt_process_run("cp", ["-r", "lib", "{pkg_dir}/"])
+        if not self.copy_required_tree("src/compiler", "{pkg_dir}/src/"): return false
+        if not self.copy_required_tree("src/app", "{pkg_dir}/src/"): return false
+        if not self.copy_required_tree("src/lib", "{pkg_dir}/src/"): return false
+        if not self.copy_required_tree("lib", "{pkg_dir}/"): return false
         if not self.copy_assets_and_legal(pkg_dir): return false
 
         # Copy examples with exclusions
-        self.copy_with_exclusions("examples", "{pkg_dir}/examples")
+        if not self.copy_with_exclusions("examples", "{pkg_dir}/examples"):
+            return false
+        true
+
+    fn copy_required_tree(src: text, dst: text) -> bool:
+        val (_, copy_error, copy_exit) = rt_process_run("cp", ["-r", src, dst])
+        if copy_exit != 0:
+            print "    ERROR: Required source copy failed: {copy_error}"
+            return false
         true
 
     fn copy_assets_and_legal(pkg_dir: text) -> bool:
-        if pkg_dir == "" or pkg_dir == "/" or not rt_file_exists(pkg_dir):
+        if not self.is_derived_package_dir(pkg_dir) or not rt_file_exists(pkg_dir):
             print "    ERROR: Package directory missing or unsafe"
-            return false
-        val (_, cleanup_error, cleanup_exit) = rt_process_run(
-            "rm", ["-rf", "{pkg_dir}/assets"])
-        if cleanup_exit != 0:
-            print "    ERROR: Font asset cleanup failed: {cleanup_error}"
             return false
         for pin in selected_font_bundle_asset_pins():
             val source = pin.path
@@ -266,29 +298,28 @@ class DistributionBuilder:
             return false
         true
 
-    fn copy_with_exclusions(src: text, dst: text):
-        # Build rsync command with exclusions
-        var cmd = "rsync -a"
-
-        # Add exclusion patterns
-        cmd = cmd + " --exclude='examples/*/data/'"
-        cmd = cmd + " --exclude='examples/*/data/*'"
-        cmd = cmd + " --exclude='*.arrow'"
-        cmd = cmd + " --exclude='*.parquet'"
-        cmd = cmd + " --exclude='*.h5'"
-        cmd = cmd + " --exclude='*.hdf5'"
-
-        # Add source and destination
-        cmd = cmd + " {src}/ {dst}"
-
-        # Execute rsync via shell
-        val (stdout, stderr, exit) = rt_process_run("sh", ["-c", cmd])
+    fn copy_with_exclusions(src: text, dst: text) -> bool:
+        val (_, stderr, exit) = rt_process_run("rsync", [
+            "-a",
+            "--exclude=examples/*/data/",
+            "--exclude=examples/*/data/*",
+            "--exclude=*.arrow",
+            "--exclude=*.parquet",
+            "--exclude=*.h5",
+            "--exclude=*.hdf5",
+            "{src}/",
+            dst,
+        ])
         if exit != 0:
             print "    Warning: rsync failed, falling back to cp"
-            # Fallback to cp -r if rsync not available
-            rt_process_run("cp", ["-r", src, dst])
+            val (_, fallback_error, fallback_exit) = rt_process_run(
+                "cp", ["-r", "{src}/.", dst])
+            if fallback_exit != 0:
+                print "    ERROR: Example copy failed: {fallback_error}"
+                return false
+        true
 
-    fn create_wrapper(pkg_dir: text, platform: Platform):
+    fn create_wrapper(pkg_dir: text, platform: Platform) -> bool:
         if platform.is_windows():
             # Windows batch file wrapper
             var script = "@echo off\n"
@@ -298,11 +329,20 @@ class DistributionBuilder:
             script = script + "\"%SCRIPT_DIR%simple.exe\" %*\n"
             script = script + "endlocal\n"
 
-            rt_file_write_text("{pkg_dir}/bin/simple.bat", script)
+            if not rt_file_write_text("{pkg_dir}/bin/simple.bat", script):
+                print "    ERROR: Windows launcher write failed"
+                return false
         else:
             val script = "#!/bin/sh\nSCRIPT_DIR=$(dirname \"$0\")\nexport SIMPLE_ASSET_ROOT=\"$SCRIPT_DIR/..\"\nexec \"$SCRIPT_DIR/simple-runtime\" \"$@\"\n"
-            rt_file_write_text("{pkg_dir}/bin/simple", script)
-            rt_process_run("chmod", ["+x", "{pkg_dir}/bin/simple"])
+            if not rt_file_write_text("{pkg_dir}/bin/simple", script):
+                print "    ERROR: Unix launcher write failed"
+                return false
+            val (_, chmod_error, chmod_exit) = rt_process_run(
+                "chmod", ["+x", "{pkg_dir}/bin/simple"])
+            if chmod_exit != 0:
+                print "    ERROR: Unix launcher chmod failed: {chmod_error}"
+                return false
+        true
 
     fn create_archive(name: text, pkg_dir: text, platform: Platform) -> bool:
         val pkg_name = "simple-{self.config.version}-{name}"

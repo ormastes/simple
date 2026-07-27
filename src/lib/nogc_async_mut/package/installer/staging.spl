@@ -3,7 +3,7 @@
 # Creates a common staging directory layout used by all backends.
 # The staging dir mirrors the target filesystem structure.
 
-use std.io_runtime (process_run, file_exists, file_copy, file_write, is_dir, dir_create, dir_remove)
+use std.io_runtime (process_run, file_exists, file_copy, file_write, is_dir, dir_create)
 use std.common.encoding.font_registry (selected_font_bundle_asset_pins, validate_selected_font_bundle_root)
 
 use lib.nogc_async_mut.package.installer.types (InstallerConfig, InstallerPlatform)
@@ -18,11 +18,9 @@ fn create_staging_dir(config: InstallerConfig, platform: InstallerPlatform) -> R
     """Create a staging directory with the standard file layout.
     Returns Ok(staging_path) or Err(message)."""
 
+    if not prepare_staging_dir(config, platform):
+        return Err("Failed to safely clean installer staging directory")
     val staging = staging_dir(config, platform)
-
-    # Clean previous staging
-    if is_dir(staging):
-        dir_remove(staging, recursive: true)
 
     # Determine layout based on platform
     if platform == InstallerPlatform.WindowsExe:
@@ -30,6 +28,17 @@ fn create_staging_dir(config: InstallerConfig, platform: InstallerPlatform) -> R
     else:
         create_unix_layout(config, staging)
 
+fn prepare_staging_dir(config: InstallerConfig, platform: InstallerPlatform) -> bool:
+    val output: text = config.output_dir.replace("\\", "/")
+    if output == "" or output == "/": return false
+    for part in output.split("/"):
+        if part == "..": return false
+    val staging = staging_dir(config, platform)
+    remove_staging_entry(staging)
+
+fn remove_staging_entry(staging: text) -> bool:
+    val (_, _, exit_code) = process_run("rm", ["-rf", "--", staging])
+    exit_code == 0 and not file_exists(staging) and not is_dir(staging)
 
 fn create_unix_layout(config: InstallerConfig, staging: text) -> Result<text, text>:
     """Create FHS-compliant directory layout for Linux/macOS/FreeBSD.
@@ -39,17 +48,22 @@ fn create_unix_layout(config: InstallerConfig, staging: text) -> Result<text, te
       usr/local/lib/simple/lib/         (stdlib)
       usr/local/share/doc/simple-lang/  (docs)
     """
-    dir_create("{staging}/usr/local/bin", recursive: true)
-    dir_create("{staging}/usr/local/lib/simple/lib", recursive: true)
-    dir_create("{staging}/usr/local/share/doc/simple-lang", recursive: true)
-    dir_create("{staging}/usr/local/share/simple/assets/fonts", recursive: true)
+    for path in [
+        "{staging}/usr/local/bin",
+        "{staging}/usr/local/lib/simple/lib",
+        "{staging}/usr/local/share/doc/simple-lang",
+        "{staging}/usr/local/share/simple/assets/fonts",
+    ]:
+        if not dir_create(path, recursive: true):
+            return Err("Failed to create installer directory {path}")
 
     # Copy binary
     val binary_src = "{config.source_dir}/simple"
     if not file_exists(binary_src):
         return Err("Release binary not found at {binary_src}")
 
-    file_copy(binary_src, "{staging}/usr/local/lib/simple/simple")
+    if not file_copy(binary_src, "{staging}/usr/local/lib/simple/simple"):
+        return Err("Failed to stage release binary")
     val (_, _, chmod_code) = process_run("chmod", ["755", "{staging}/usr/local/lib/simple/simple"])
     if chmod_code != 0:
         return Err("Failed to set binary permissions")
@@ -64,11 +78,15 @@ fn create_unix_layout(config: InstallerConfig, staging: text) -> Result<text, te
 
     # Copy stdlib
     if is_dir("src/lib"):
-        val (_, _, _) = process_run("cp", ["-r", "src/lib/.", "{staging}/usr/local/lib/simple/lib/"])
+        val (_, _, lib_copy_code) = process_run(
+            "cp", ["-r", "src/lib/.", "{staging}/usr/local/lib/simple/lib/"])
+        if lib_copy_code != 0:
+            return Err("Failed to stage standard library")
 
     # Copy docs
     if file_exists("README.md"):
-        file_copy("README.md", "{staging}/usr/local/share/doc/simple-lang/README.md")
+        if not file_copy("README.md", "{staging}/usr/local/share/doc/simple-lang/README.md"):
+            return Err("Failed to stage README")
 
     if (not file_copy("LICENSE", "{staging}/usr/local/share/doc/simple-lang/LICENSE") or
             not file_copy("THIRD_PARTY_NOTICES.md", "{staging}/usr/local/share/doc/simple-lang/THIRD_PARTY_NOTICES.md")):
@@ -94,29 +112,39 @@ fn create_windows_layout(config: InstallerConfig, staging: text) -> Result<text,
       lib/                (stdlib)
       doc/                (docs)
     """
-    dir_create("{staging}/bin", recursive: true)
-    dir_create("{staging}/lib", recursive: true)
-    dir_create("{staging}/doc", recursive: true)
-    dir_create("{staging}/assets/fonts", recursive: true)
+    for path in [
+        "{staging}/bin",
+        "{staging}/lib",
+        "{staging}/doc",
+        "{staging}/assets/fonts",
+    ]:
+        if not dir_create(path, recursive: true):
+            return Err("Failed to create installer directory {path}")
 
     # Copy binary (look for Windows binary)
     val binary_src = "{config.source_dir}/windows-x86_64/simple.exe"
     val binary_fallback = "{config.source_dir}/simple.exe"
 
     if file_exists(binary_src):
-        file_copy(binary_src, "{staging}/bin/simple.exe")
+        if not file_copy(binary_src, "{staging}/bin/simple.exe"):
+            return Err("Failed to stage Windows release binary")
     else if file_exists(binary_fallback):
-        file_copy(binary_fallback, "{staging}/bin/simple.exe")
+        if not file_copy(binary_fallback, "{staging}/bin/simple.exe"):
+            return Err("Failed to stage Windows release binary")
     else:
         return Err("Windows binary not found at {binary_src} or {binary_fallback}")
 
     # Copy stdlib
     if is_dir("src/lib"):
-        val (_, _, _) = process_run("cp", ["-r", "src/lib/.", "{staging}/lib/"])
+        val (_, _, lib_copy_code) = process_run(
+            "cp", ["-r", "src/lib/.", "{staging}/lib/"])
+        if lib_copy_code != 0:
+            return Err("Failed to stage standard library")
 
     # Copy docs
     if file_exists("README.md"):
-        file_copy("README.md", "{staging}/doc/README.md")
+        if not file_copy("README.md", "{staging}/doc/README.md"):
+            return Err("Failed to stage README")
 
     if (not file_copy("LICENSE", "{staging}/doc/LICENSE") or
             not file_copy("THIRD_PARTY_NOTICES.md", "{staging}/doc/THIRD_PARTY_NOTICES.md")):
@@ -154,6 +182,4 @@ fn staging_parent_dir(path: text) -> text:
 
 fn clean_staging_dir(config: InstallerConfig, platform: InstallerPlatform):
     """Remove staging directory after package build."""
-    val staging = staging_dir(config, platform)
-    if is_dir(staging):
-        dir_remove(staging, recursive: true)
+    prepare_staging_dir(config, platform)
