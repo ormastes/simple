@@ -61,6 +61,15 @@ startup installs its generated snapshot through
 not legacy `GlassConfig`/`GlassPortConfig` defaults or runtime key switching,
 are the production WM authority.
 
+Runtime package switching is not yet an admitted architecture. A valid hosted
+implementation requires a process-entry-owned theme session that survives
+bootstrap and is available before renderer-worker dispatch. Its mutex may
+publish only one canonical immutable wire aggregate. Readers copy that wire
+while locked, then decode private `ThemeRenderSnapshot` material after unlock;
+public candidates and transaction reads must not expose package maps, arrays,
+or aggregate aliases. See
+[the transaction sync-owner blocker](../../08_tracking/bug/theme_package_transaction_sync_owner_blocker_2026-07-27.md).
+
 The numeric/text Glass token twins and Obsidian presets remain compatibility or
 standalone APIs. They do not replace the registry/package/snapshot path for
 hosted or SimpleOS production rendering. See
@@ -73,6 +82,10 @@ current ownership.
 ## Cache Policy
 
 `load_theme_package(id)` resolves aliases once per call, caches by canonical id, and records source paths plus a startup fingerprint. Render paths receive `ResolvedThemePackage` fields or cached helper values. Explicit reload may refresh package data; render loops must not parse CSS or scan theme folders.
+
+These legacy caches are startup/compatibility state, not an atomic runtime
+transaction store. They must not be relabeled as transactional or mutated
+sequentially during a live theme change.
 
 ## Failure Policy
 

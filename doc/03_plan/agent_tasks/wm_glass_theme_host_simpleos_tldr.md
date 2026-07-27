@@ -32,8 +32,11 @@
 - The generated snapshot-catalog series exhausted three cycles unintegrated:
   active non-default snapshots and external-frame registrations can outlive
   current catalog/theme authority.
-- Theme-package transactions remain unintegrated until hosted bootstrap can
-  inject one race-safe transaction store; cycle 3 is intentionally unused.
+- Theme-package transactions remain unintegrated. Cycle 3 was fully reverted
+  without a commit: a persistent pre-worker hosted theme session, immutable
+  package/snapshot wire codec, counting source-reader seam, and scalar
+  WM/GUI/Web transaction reads must land first. The session's three-cycle cap
+  is exhausted.
 - K2 also exhausted three cycles unintegrated: x86 compatibility IDs/entry
   state are incomplete, direct-x86 copyout stability is not universal, the ABI
   audit misses C paths, and RV32 compat wrappers regress to `ENOSYS`.

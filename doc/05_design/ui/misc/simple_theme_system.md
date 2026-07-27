@@ -89,6 +89,15 @@ installs the generated snapshot through `install_generated_simpleos_wm_theme`
 before its first frame. Engine2D WM and Web adapters consume snapshot
 projections and themed Simple Web HTML.
 
+Runtime switching remains fail-closed. Before implementing it, add a
+persistent hosted theme session at process entry (before renderer-worker
+dispatch), a canonical scalar package/snapshot wire codec, an injectable
+counting source-reader seam, and scalar/wire read APIs shared by WM, GUI, and
+Web. The store mutex protects one wire value; consumers copy it under lock and
+decode private render objects after unlock. A fresh store per install,
+module-global lazy/eager locks, mutable package dictionaries in the published
+state, and aggregate-return reads are invalid designs.
+
 `GlassConfig`, `GlassPortConfig`, and numeric/text Glass tokens are retained
 compatibility or standalone APIs; they are not the production authoring path
 for a new hosted/SimpleOS theme. New packages use registry + family/package

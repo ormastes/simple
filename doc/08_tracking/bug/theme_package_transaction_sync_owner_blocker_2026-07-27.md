@@ -2,7 +2,8 @@
 
 **Status:** open prerequisite  
 **Candidate:** `4f84131c55` rejected and unintegrated  
-**Iteration state:** cycle 2 stopped read-only; cycle 3 intentionally unused
+**Iteration state:** cycle 2 stopped read-only; cycle 3 stopped and fully
+reverted without a commit
 
 ## Finding
 
@@ -26,12 +27,52 @@ viable, but atomic publication is not honest within the current module:
 No repair edits or second commit were made. No runtime, bootstrap, or seed was
 used.
 
-## Required owner before cycle 3
+## Cycle 3 result
+
+Cycle 3 tested the proposed explicit-store boundary in an isolated worktree.
+It was stopped before commit and every source edit was reverted after
+high-capability review found that the current host/package interfaces still
+cannot satisfy the contract:
+
+- `install_default_host_wm_theme` returns only a snapshot. It does not hand a
+  persistent transaction store/session to later refresh consumers.
+- the hosted renderer worker branch dispatches before the current theme
+  bootstrap, so constructing a store inside the installer is too late for a
+  process-wide ownership guarantee;
+- there is no canonical immutable wire codec for the resolved package/render
+  snapshot. `ResolvedThemePackage` and `ThemeRenderSnapshot` retain
+  object/array/map reachability and therefore cannot be the mutex payload or
+  public transaction candidate;
+- current consumer APIs either use legacy module caches or return aggregate
+  objects. Existing fingerprint/color helpers and `ThemeChangedV1` are useful
+  scalar/notification primitives, but there is no scalar-only transaction
+  store/read surface shared by WM, GUI, and Web.
+
+The discarded attempt would have stored mutable dictionaries and package
+objects inside the published aggregate, returned aggregate aliases after
+unlock, and created a fresh local store per install. Those shapes do not prove
+atomic old-or-new visibility and were not committed.
+
+## Required architecture before a fresh implementation lane
 
 Hosted single-threaded bootstrap must create one
 `ThemePackageTransactionStore` and inject it before concurrent readers start.
 The store owns its real hosted mutex and one wire-backed published aggregate.
-Only then may a fresh implementation:
+Before another transaction implementation is opened:
+
+1. define a persistent hosted theme session/store handoff created at process
+   entry before worker dispatch and passed to every runtime refresh consumer;
+2. define and test a canonical scalar theme-package/snapshot wire codec whose
+   decoder reconstructs private render objects only after copying the wire
+   under the store lock;
+3. provide scalar/wire transaction reads for WM, GUI, and Web, and remove
+   aggregate-return transaction APIs;
+4. make source capture injectable so a counting/changing reader test proves
+   one read of each canonical path;
+5. reuse `ThemeChangedV1` only after a successful commit; it is the
+   post-commit notification wire, not the package publication store.
+
+Only after those interfaces land may a fresh session implement:
 
 1. capture the registry and every referenced source exactly once into an owned
    source bundle;
@@ -45,4 +86,7 @@ Only then may a fresh implementation:
 7. test real max-revision rollback and deterministic competing commits against
    an isolated store.
 
-Do not begin cycle 3 until that bootstrap owner/injection boundary is available.
+The three-cycle cap is exhausted for this session. Do not retry the same
+transaction shape. Resume only after the persistent session handoff, immutable
+wire codec, and scalar consumer surface are independently implemented and
+reviewed.
