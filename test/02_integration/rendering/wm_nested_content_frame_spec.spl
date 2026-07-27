@@ -21,7 +21,9 @@ This spec pins:
   (f) a scene with no nested content frames renders byte-identical to the
       pre-nesting executor behavior (regression);
   (g) canonical Draw IR + CPU Engine2D readback contains the nested pixels
-      with no unsupported command skip or fallback.
+      with no unsupported command skip or fallback;
+  (h) invalid nested metadata stays in canonical composition long enough to
+      produce the magenta fail-closed rectangle without an image resource.
 """
 
 use std.spec.{describe, it, expect, step, assert_not_equal}
@@ -301,6 +303,32 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         expect(result.skipped_command_count).to_equal(0)
         expect(result.fallback_required).to_be(false)
         expect(result.readback_source).to_equal("cpu_mirror")
+        cpu.shutdown()
+
+    it "paints invalid nested Draw IR metadata magenta without resolving fabricated pixels":
+        step("Build a valid parent with one visible child whose checksum is invalid")
+        val window = _borderless_window("win-parent-invalid", 10, 10, 100, 70)
+        val scene = simple_gui_internal_window_scene(140, 140, "nested-invalid", [window])
+        val parent_pixels = _solid_pixels(100 * 70, 0xFF112233u32)
+        val parent_frame = WmContentFrame(window_id: "win-parent-invalid", scene_revision: 7, content_revision: 1, origin_kind: WM_CONTENT_ORIGIN_GUI, width: 100, height: 70, pixels: parent_pixels, checksum: wm_content_frame_checksum(parent_pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
+        val child_pixels = _solid_pixels(20 * 15, 0xFF445566u32)
+        val invalid_child = WmContentFrame(window_id: "win-child-invalid", scene_revision: 7, content_revision: 1, origin_kind: WM_CONTENT_ORIGIN_GUI, width: 20, height: 15, pixels: child_pixels, checksum: 0u64, parent_window_id: "win-parent-invalid", offset_x: 10, offset_y: 10)
+
+        step("Resolve only the authoritative parent while retaining child metadata for fail-closed composition")
+        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, TaskbarModel(pinned: [], running: [], tray: []), [parent_frame, invalid_child], "cpu", 1000, "", 0)
+        val parent_image = engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(parent_frame), parent_frame.width, parent_frame.height, parent_frame.pixels)
+        var cpu = Engine2D.create_with_backend(140, 140, "cpu")
+        val result = engine2d_draw_ir_adv_composition_with_images(cpu, composition, false, [parent_image])
+
+        step("Read back the parent and the fail-closed child rectangle from the same CPU frame")
+        expect(result.pixels.len()).to_equal(140 * 140)
+        expect(result.pixels[15 * 140 + 15]).to_equal(0xFF112233u32)
+        expect(result.pixels[25 * 140 + 25]).to_equal(0xFFFF00FFu32)
+        expect(result.skipped_command_count).to_equal(0)
+        expect(result.fallback_required).to_be(false)
+        expect(result.readback_source).to_equal("cpu_mirror")
+        expect(result.backend_handle).to_equal(0)
+        expect(result.readback_checksum).to_be_greater_than(0)
         cpu.shutdown()
 
     it "projects an authoritative top-level content frame as a resolved Draw IR image":

@@ -964,3 +964,12 @@ Tracking split:
   rendering-coupling, and spec-layout gates pass; the exhausted diagnostic
   runner/bootstrap/QEMU lanes were not rerun, so executable qualification is
   deferred to a fresh accepted pure-Simple environment.
+- nested-wm-invalid-fail-closed: A follow-up small-agent review found that both
+  production executors fed their resource-filtered frame list back into
+  composition, making the invalid-child magenta branch unreachable. They now
+  retain raw child metadata for projection while resolving pixels only for
+  strict reachable descendants; invalid Web provenance also selects magenta.
+  The focused CPU Engine2D scenario requires exact parent/magenta pixels, zero
+  skipped commands, no fallback, CPU-mirror provenance, and a nonzero checksum.
+  The accepted executable runner remains unavailable, so no runtime PASS is
+  claimed for this new scenario.
