@@ -83,12 +83,35 @@ implementation." Status values:
   recovery media, long soak, power-cycle, SBOM, release engineering.
   These require physical hardware and release infrastructure absent on this host.
 
-## §21.3 formal-verification layer — **36 sorry-free Lean theorems**
+## §21.3 formal-verification layer — **69 sorry-free Lean theorems**
 `src/verification/os_enforcement/` (ContainerIsolation, DeviceGrant,
-ProfileAttenuation, ServiceRestart, VfsRouting) + `kernel_capabilities/SingleUse`.
+ProfileAttenuation, ServiceRestart, VfsRouting, WalOrdering, VfsTxnRecovery,
+SchedDonation, TufUpdate, OciImport) + `kernel_capabilities/SingleUse`.
 Gate: `cd src/verification/os_enforcement && lake build` (and kernel_capabilities);
-both EXIT 0, no `sorryAx`. Remaining invariants (blocked/next): VFS transaction
-recovery, WAL commit ordering, scheduling-context donation return.
+both EXIT 0, no `sorryAx`. TufUpdate proves no-rollback/no-freeze/
+threshold-distinct-trusted-signers/snapshot-consistency; OciImport proves
+no-traversal/digest-presence/deny-wins-monotonicity/caps-bounded.
+
+## Wave 2 (2026-07-27, "add agents go pherallel") — all six lanes landed
+- **TERM** — termios line discipline (ICANON/ECHO/ISIG, VEOF/VINTR) +
+  controlling-terminal/session/foreground-pgrp model on the PTY boundary
+  (§10.1); also repaired 5 more two-hop-lost component-store sites that had
+  silently turned tty_service_spec red at HEAD (15/18 → 18/0).
+- **ECS2** — two-hop mutation bug boundary narrowed by probe: fires ONLY on
+  cross-module imported struct chains; same-file and class-reference chains
+  safe. Zero live hazards in swept service trees; cross-entity identity
+  regression spec added; handoff list (devfs/procfs/sched/pm/wm/app-loader
+  worlds) recorded in the bug doc.
+- **EVD2** — evidence_receipt first two consumers: arch-guard ledger receipt +
+  lld-gate honesty spec (asserts FAIL on absent lld_static by design — goes red
+  when the artifact lands, forcing the blocked row to update).
+- **CFG3** — second non-IDE std.config consumer: std.test_runner.test_config
+  routed through config_core (~190 lines of hand-rolled merge deleted,
+  including a confirmed missing-`mut` silent-no-op defect).
+- **FVT** — +24 Lean theorems (TufUpdate, OciImport), see above.
+- **SPWN** — P8×P2 meet-point `spawn_effective_rights_with_profile` (triple
+  deny-wins intersection) wired at the SpawnSpec decision point; adapter routes
+  through it; no-profile path bit-identical; boot seal still off.
 
 ## First-tranche items (§24) status
 1 status ledger ✓ · 2 arch guard ✓ · 3 ABI freeze ✓ · 4 global process mgr

@@ -47,6 +47,10 @@ ownership per lane.
 ## Stage Status
 - Stage S: DONE (guard green, re-verified post-lanes: 4+1 examples 0 failures).
 - Stage P: ALL 8 LANES GREEN (first increments). Verdicts below.
+- Wave 2 (2026-07-27): TERM/ECS2/EVD2/CFG3/FVT/SPWN all landed+pushed —
+  see doc/03_plan/agent_tasks/simpleos_production_master_plan_completion_status.md
+  §"Wave 2". Formal layer now 69 sorry-free theorems. Remaining open work is
+  the documented blocked set (QEMU/board/toolchain/multi-week ports).
 
 ## Stage P results (2026-07-27)
 - P1 IPC: 12 ex/0 fail. Single-use guard (`SingleUseLedger`) added to
