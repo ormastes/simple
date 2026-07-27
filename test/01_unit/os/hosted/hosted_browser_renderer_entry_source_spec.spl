@@ -410,6 +410,9 @@ describe "hosted browser renderer entry isolation":
             "now_micros >= browser_hsts_save_retry_at_micros"
         )
         val save_pos = poll_body.find("_save_hosted_browser_hsts(")
+        val restore_pos = poll_body.find(
+            "browser_renderer = saved_renderer.unwrap()"
+        )
         val retry_pos = poll_body.find(
             "browser_hsts_save_retry_at_micros = ("
         )
@@ -417,7 +420,8 @@ describe "hosted browser renderer entry isolation":
         expect(dirty_pos).to_be_greater_than(-1)
         expect(gate_pos).to_be_greater_than(dirty_pos)
         expect(save_pos).to_be_greater_than(gate_pos)
-        expect(retry_pos).to_be_greater_than(save_pos)
+        expect(restore_pos).to_be_greater_than(save_pos)
+        expect(retry_pos).to_be_greater_than(restore_pos)
         expect(retry_delay).to_be_greater_than(retry_pos)
 
         val helper_start = entry.find("fn _save_hosted_browser_hsts(")
@@ -428,16 +432,157 @@ describe "hosted browser renderer entry isolation":
         val profile_save = helper.find("profile.save_hsts(")
         val ok_pos = helper.find("Ok(_):")
         val clear_dirty = helper.find("renderer.hsts_dirty = false")
+        val updated_renderer = helper.find("Some(renderer)")
         val error_pos = helper.find("Err(error):")
         expect(profile_save).to_be_greater_than(-1)
         expect(ok_pos).to_be_greater_than(profile_save)
         expect(clear_dirty).to_be_greater_than(ok_pos)
-        expect(error_pos).to_be_greater_than(clear_dirty)
+        expect(updated_renderer).to_be_greater_than(clear_dirty)
+        expect(error_pos).to_be_greater_than(updated_renderer)
 
         val close_body = entry.slice(helper_end, entry.find(
             "fn _run_hosted_wm("
         ))
         val close_save = close_body.find("_save_hosted_browser_hsts(")
+        val profile_guard = close_body.find("if profile_in != nil:")
         val close_profile = close_body.find("profile.close()")
         expect(close_save).to_be_greater_than(-1)
-        expect(close_profile).to_be_greater_than(close_save)
+        expect(profile_guard).to_be_greater_than(close_save)
+        expect(close_profile).to_be_greater_than(profile_guard)
+        expect(close_body).to_contain("renderer: renderer")
+        expect(close_body).to_contain("raster: browser_raster")
+
+    # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017 REQ-WEB-BROWSER-018
+    it "reconciles titlebar keyboard and evidence browser closes":
+        val entry = executable_source_lines(
+            rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
+        )
+        val mouse = entry.slice(
+            entry.find("elif kind == EVT_MOUSE_BUTTON:"),
+            entry.find("elif kind == EVT_MOUSE_WHEEL:")
+        )
+        expect(mouse).to_contain(
+            "host_compositor_close_release_target("
+        )
+        val mouse_save = mouse.find("_save_hosted_browser_hsts(")
+        val mouse_registry_save = mouse.find(
+            "web_sessions.close_window("
+        )
+        val mouse_dispatch = mouse.find(
+            "comp.handle_mouse_button(button, pressed)"
+        )
+        val mouse_cleanup = mouse.find(
+            "_close_hosted_browser_resources("
+        )
+        expect(mouse_save).to_be_greater_than(-1)
+        expect(mouse_registry_save).to_be_greater_than(mouse_save)
+        expect(mouse_dispatch).to_be_greater_than(mouse_registry_save)
+        expect(mouse_cleanup).to_be_greater_than(mouse_dispatch)
+        expect(mouse).to_contain("if not allow_wm_close:")
+        expect(mouse).to_contain("comp.armed_chrome_target = \"\"")
+        expect(mouse).to_contain(
+            "browser_renderer = saved_renderer.unwrap()"
+        )
+        expect(mouse).to_contain(
+            "browser_renderer = browser_closed.renderer"
+        )
+        expect(mouse).to_contain(
+            "browser_raster = browser_closed.raster"
+        )
+        expect(mouse).to_contain("browser_profile = nil")
+        expect(mouse).to_contain(
+            "comp.require_external_web_frame(0)"
+        )
+
+        val keyboard = entry.slice(
+            entry.find("elif kind == EVT_KEY:"),
+            entry.find("elif kind == EVT_TEXT:")
+        )
+        expect(keyboard).to_contain("elif keycode == KEY_W:")
+        val keyboard_save = keyboard.find(
+            "_save_hosted_browser_hsts("
+        )
+        val keyboard_cleanup = keyboard.find(
+            "_close_hosted_browser_resources("
+        )
+        val keyboard_destroy = keyboard.find(
+            "comp.destroy_window(focused)"
+        )
+        expect(keyboard_save).to_be_greater_than(-1)
+        expect(keyboard_cleanup).to_be_greater_than(keyboard_save)
+        expect(keyboard_destroy).to_be_greater_than(keyboard_cleanup)
+        expect(keyboard).to_contain("browser_profile = nil")
+        expect(keyboard).to_contain(
+            "browser_renderer = browser_closed.renderer"
+        )
+        expect(keyboard).to_contain(
+            "comp.require_external_web_frame(0)"
+        )
+
+        val evidence = entry.slice(
+            entry.find("elif command.action == \"close\":"),
+            entry.find("elif command.action == \"pointer\":")
+        )
+        expect(evidence).to_contain(
+            "if focused == browser_profile_window_id:"
+        )
+        val evidence_save = evidence.find(
+            "_save_hosted_browser_hsts("
+        )
+        val evidence_cleanup = evidence.find(
+            "_close_hosted_browser_resources("
+        )
+        val evidence_destroy = evidence.find(
+            "comp.destroy_window(focused)"
+        )
+        expect(evidence_save).to_be_greater_than(-1)
+        expect(evidence_cleanup).to_be_greater_than(evidence_save)
+        expect(evidence_destroy).to_be_greater_than(evidence_cleanup)
+        expect(evidence).to_contain("\"rejected\"")
+        expect(evidence).to_contain("browser_profile = nil")
+        expect(evidence).to_contain(
+            "browser_renderer = browser_closed.renderer"
+        )
+        expect(evidence).to_contain(
+            "comp.require_external_web_frame(0)"
+        )
+        expect(evidence).to_contain("web_sessions.close_window(")
+
+        val evidence_left = entry.slice(
+            entry.find("elif command.action == \"left\":"),
+            entry.find("elif command.action == \"snapshot\":")
+        )
+        val left_save = evidence_left.find(
+            "_save_hosted_browser_hsts("
+        )
+        val left_dispatch = evidence_left.find(
+            "comp.handle_mouse_button(0, command.down)"
+        )
+        val left_cleanup = evidence_left.find(
+            "_close_hosted_browser_resources("
+        )
+        expect(left_save).to_be_greater_than(-1)
+        expect(left_dispatch).to_be_greater_than(left_save)
+        expect(left_cleanup).to_be_greater_than(left_dispatch)
+        expect(evidence_left).to_contain(
+            "host_compositor_close_release_target("
+        )
+        expect(evidence_left).to_contain(
+            "if not allow_evidence_close:"
+        )
+        expect(evidence_left).to_contain(
+            "browser_renderer = browser_closed.renderer"
+        )
+        expect(evidence_left).to_contain("\"rejected\"")
+        val shutdown = entry.slice(
+            entry.find("val profile_closed = web_sessions.close("),
+            entry.find(
+                "    print \"SimpleOS shared hosted WM closed\""
+            )
+        )
+        expect(shutdown).to_contain(
+            "browser_profile_close_failed"
+        )
+        expect(shutdown).to_contain(
+            "browser_close.profile_closed"
+        )

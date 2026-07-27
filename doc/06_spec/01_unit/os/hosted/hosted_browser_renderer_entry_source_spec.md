@@ -2,7 +2,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|---------|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 ## Covered boundaries
 
@@ -14,8 +14,12 @@
 - Persist learned or removed HSTS state after broker polling and before frame
   processing, clearing dirty state only after success and retrying failures on
   a bounded one-second cadence.
+- Preflight HSTS/profile persistence for titlebar, keyboard, and evidence
+  closes; reject a close when persistence fails, otherwise reconcile renderer,
+  raster, profile, and external-frame ownership through the shared cleanup.
 
-Requirement trace: REQ-WEB-BROWSER-011, REQ-WEB-BROWSER-017.
+Requirement trace: REQ-WEB-BROWSER-011, REQ-WEB-BROWSER-017,
+REQ-WEB-BROWSER-018.
 
 Source:
 `test/01_unit/os/hosted/hosted_browser_renderer_entry_source_spec.spl`

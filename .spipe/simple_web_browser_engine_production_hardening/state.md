@@ -846,3 +846,10 @@ implementation in progress / target evidence blocked
   bounded one-second cadence, and retains the shutdown retry. The focused
   entry-owner contract and mirrored manual cover ordering and retry state;
   executable Simple evidence remains compiler-blocked and was not rerun.
+- Browser close lifecycle: Titlebar, KEY_W, direct evidence close, and evidence
+  left-button closes now save HSTS/profile state before destruction, reject
+  failed persistence while retaining the window, then reconcile renderer,
+  raster, profile, and external-frame ownership. The compositor owns the exact
+  release-inside close hit test shared by native/evidence input. Static source
+  evidence covers all routes; executable Simple evidence remains compiler-
+  blocked and was not rerun.
