@@ -9,7 +9,8 @@ ARM, RISC-V, Vulkan, and RenderDoc rows fail closed and retain their exact
 resume commands instead of becoming passes.
 
 Run this spec with `SIMPLE_BIN` set to the deployed pure-Simple runtime after
-the live-window and retained 4K evidence gates have populated their receipts.
+the live-window and retained 4K/8K evidence gates have populated their
+receipts.
 The primary scenario is production evidence; the owner check is supporting
 structural evidence only and cannot promote a host row.
 
@@ -37,13 +38,29 @@ use std.spec.*
 | Generator | `simple spipe-docgen` (Simple) |
 
 use std.spec.*
-use std.io_runtime.{env_get, file_exists, file_read, process_run}
+use std.io_runtime.{env_get, file_exists, file_read}
+use app.io.mod.{file_hash_sha256, file_is_regular_no_follow, process_run_timeout}
 
 val WRAPPER = "scripts/check/check-linux-hosted-wm-live-window-evidence.shs"
 val HOST_ENV_APP = "src/app/test/test_host_env.spl"
 val HOST_ENV_CONTRACT = "src/lib/common/ui/host_env_contract.spl"
 val LIVE_ENV = "build/linux-hosted-wm-live-window-evidence/evidence.env"
-val PERF_ENV = "build/widget-showcase-4k-200fps/status.env"
+val PERF_4K_ENV = "build/widget-showcase-4k-200fps/status.env"
+val PERF_8K_ENV = "build/widget-showcase-8k-perf/status.env"
+val PERF_AUDIT_DIR = "build/test-host-env-retained-perf-audit"
+val PERF_AUDIT_ENV = PERF_AUDIT_DIR + "/evidence.env"
+
+fn required_unique_env_value(evidence: text, key: text) -> text:
+    val prefix = key + "="
+    var value = ""
+    var found = false
+    for line in evidence.replace("\r\n", "\n").split("\n"):
+        if line.starts_with(prefix):
+            if found or line == prefix:
+                return ""
+            value = line.slice(prefix.len(), line.len())
+            found = true
+    value
 
 describe "production host event and render evidence":
 
@@ -67,7 +84,11 @@ describe "production host event and render evidence":
    - Exec capture: after_step
 - Capture the Vulkan frame with RenderDoc
    - Exec capture: after_step
-- Measure the retained rendering workload
+- Reject missing or duplicate retained 4K and 8K producer fields
+   - Exec capture: after_step
+- Audit both retained workloads with the canonical aggregate validator
+   - Exec capture: after_step
+- Admit current 4K and 8K timing RSS baseline and native-binary evidence
    - Exec capture: after_step
 
 
@@ -142,16 +163,66 @@ step("Capture the Vulkan frame with RenderDoc")
 expect(host_stdout).to_contain("\"name\":\"renderdoc\",\"status\":\"pass\"")
 expect(file_read(HOST_ENV_APP)).to_contain("scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple")
 
-step("Measure the retained rendering workload")
-expect(file_exists(PERF_ENV)).to_be(true)
-val perf = file_read(PERF_ENV)
-expect(perf).to_contain("gui_showcase_4k_200fps_status=pass")
-expect(perf).to_contain("gui_showcase_4k_200fps_frames=200")
-expect(perf).to_contain("gui_showcase_4k_200fps_readback_mode=argb-checksum")
-expect(perf).to_contain("gui_showcase_4k_200fps_fallback_state=none")
-expect(perf).to_contain("gui_showcase_4k_200fps_frame_p50_ns=")
-expect(perf).to_contain("gui_showcase_4k_200fps_frame_p95_ns=")
-expect(perf).to_contain("gui_showcase_4k_200fps_max_rss_kb=")
+step("Reject missing or duplicate retained 4K and 8K producer fields")
+expect(file_is_regular_no_follow(PERF_4K_ENV)).to_be(true)
+expect(file_is_regular_no_follow(PERF_8K_ENV)).to_be(true)
+val perf_4k = file_read(PERF_4K_ENV)
+val perf_8k = file_read(PERF_8K_ENV)
+val required_suffixes = [
+    "status", "source_revision", "source_revision_kind", "source_revision_files",
+    "native_bin", "current_executable_sha256", "frame_p50_ns", "frame_p95_ns",
+    "max_rss_kb", "max_rss_budget_kb", "baseline_path", "baseline_expected_sha256",
+    "baseline_artifact_path", "baseline_artifact_sha256", "baseline_artifact_current_sha256"
+]
+for suffix in required_suffixes:
+    expect(required_unique_env_value(perf_4k, "gui_showcase_4k_200fps_" + suffix) == "").to_be(false)
+    expect(required_unique_env_value(perf_8k, "gui_showcase_8k_perf_" + suffix) == "").to_be(false)
+
+step("Audit both retained workloads with the canonical aggregate validator")
+val perf_command = "rm -rf " + PERF_AUDIT_DIR +
+    " && GUI_SHOWCASE_REQUIRE_CURRENT_SOURCE_REVISION=1" +
+    " GUI_SHOWCASE_4K_PERF_ENV=" + PERF_4K_ENV +
+    " GUI_SHOWCASE_8K_PERF_ENV=" + PERF_8K_ENV +
+    " GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache" +
+    " GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0" +
+    " BUILD_DIR=" + PERF_AUDIT_DIR +
+    " REPORT_PATH=" + PERF_AUDIT_DIR + "/report.md" +
+    " sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
+val (_perf_stdout, _perf_stderr, perf_code) = process_run_timeout(
+    "/bin/sh", ["-c", perf_command], 120000)
+expect(perf_code == 0 or perf_code == 1).to_be(true)
+expect(file_is_regular_no_follow(PERF_AUDIT_ENV)).to_be(true)
+val audited_perf = file_read(PERF_AUDIT_ENV)
+
+step("Admit current 4K and 8K timing RSS baseline and native-binary evidence")
+val audited_prefixes = ["gui_showcase_4k_200fps", "gui_showcase_8k_perf"]
+for prefix in audited_prefixes:
+    expect(required_unique_env_value(audited_perf, prefix + "_status")).to_equal("pass")
+    expect(required_unique_env_value(audited_perf, prefix + "_source_revision_kind")).to_equal("content-sha256")
+    expect(required_unique_env_value(audited_perf, prefix + "_source_revision_status")).to_equal("current")
+    expect(required_unique_env_value(audited_perf, prefix + "_source_revision_files_status")).to_equal("pass")
+    expect(required_unique_env_value(audited_perf, prefix + "_require_current_source_revision")).to_equal("1")
+    expect(required_unique_env_value(audited_perf, prefix + "_rss_status")).to_equal("pass")
+    expect(required_unique_env_value(audited_perf, prefix + "_frame_p50_ns") == "").to_be(false)
+    expect(required_unique_env_value(audited_perf, prefix + "_frame_p95_ns") == "").to_be(false)
+    expect(required_unique_env_value(audited_perf, prefix + "_max_rss_kb") == "").to_be(false)
+    expect(required_unique_env_value(audited_perf, prefix + "_baseline_aggregate_p50_limit") == "").to_be(false)
+    expect(required_unique_env_value(audited_perf, prefix + "_baseline_aggregate_p95_limit") == "").to_be(false)
+    expect(required_unique_env_value(audited_perf, prefix + "_baseline_aggregate_rss_limit") == "").to_be(false)
+    expect(required_unique_env_value(audited_perf, prefix + "_baseline_aggregate_status")).to_equal("pass")
+    expect(required_unique_env_value(audited_perf, prefix + "_baseline_aggregate_reason")).to_equal("pass")
+    expect(required_unique_env_value(audited_perf, prefix + "_native_bin_file_status")).to_equal("pass")
+    expect(required_unique_env_value(audited_perf, prefix + "_native_bin_executable_status")).to_equal("pass")
+    val native_path = required_unique_env_value(audited_perf, prefix + "_native_bin")
+    val recorded_native_sha = required_unique_env_value(
+        audited_perf, prefix + "_baseline_aggregate_current_executable_sha256")
+    expect(file_is_regular_no_follow(native_path)).to_be(true)
+    expect(file_hash_sha256(native_path)).to_equal(recorded_native_sha)
+    val baseline_path = required_unique_env_value(audited_perf, prefix + "_baseline_aggregate_path")
+    val baseline_artifact_path = required_unique_env_value(
+        audited_perf, prefix + "_baseline_aggregate_artifact_path")
+    expect(file_is_regular_no_follow(baseline_path)).to_be(true)
+    expect(file_is_regular_no_follow(baseline_artifact_path)).to_be(true)
 ```
 
 </details>
