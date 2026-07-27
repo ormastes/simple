@@ -336,7 +336,10 @@ or native TLS behavior.
   HTTP job while the renderer sandbox remains socketless. Renderer protocol
   traffic now uses a full-duplex inherited fd 0 while ordinary stdout/stderr
   are discarded, and seccomp denies direct System V shared-memory, message,
-  and semaphore IPC. Validated renderer frames admit only the HTML producer's
+  semaphore IPC, path metadata and xattr enumeration, modern mount and io_uring
+  operations, cross-process memory advice, and kernel-control calls. The
+  focused native containment runner is enforced by the browser renderer
+  sandbox workflow. Validated renderer frames admit only the HTML producer's
   rectangle/text command subset and enforce frame-wide overdraw, text, style,
   and glyph budgets before Draw IR reaches the parent renderer. Fetch now
   rejects `SameOrigin` mode before cache or transport when the request target

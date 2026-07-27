@@ -108,24 +108,86 @@ static int sandbox_probe(int argc, char** argv) {
     if (setpriority(PRIO_PROCESS, getppid(), 1) >= 0 || errno != EPERM) {
         return 20;
     }
+#if defined(SYS_newfstatat) || defined(SYS_fstatat64) || defined(SYS_stat)
     struct stat path_state;
+#endif
+#if defined(SYS_newfstatat)
     errno = 0;
     if (syscall(SYS_newfstatat, AT_FDCWD, "/etc/passwd", &path_state, 0) >= 0 ||
         errno != EPERM) {
         return 29;
     }
+#elif defined(SYS_fstatat64)
+    errno = 0;
+    if (syscall(SYS_fstatat64, AT_FDCWD, "/etc/passwd", &path_state, 0) >= 0 ||
+        errno != EPERM) {
+        return 29;
+    }
+#endif
+#if defined(SYS_stat)
+    errno = 0;
+    if (syscall(SYS_stat, "/etc/passwd", &path_state) >= 0 ||
+        errno != EPERM) {
+        return 33;
+    }
+#endif
+#if defined(SYS_readlink) || defined(SYS_readlinkat)
     char path_target[32];
+#endif
+#if defined(SYS_readlink)
     errno = 0;
     if (syscall(SYS_readlink, "/proc/self/exe", path_target,
             sizeof(path_target)) >= 0 || errno != EPERM) {
         return 30;
     }
+#elif defined(SYS_readlinkat)
+    errno = 0;
+    if (syscall(SYS_readlinkat, AT_FDCWD, "/proc/self/exe", path_target,
+            sizeof(path_target)) >= 0 || errno != EPERM) {
+        return 30;
+    }
+#endif
+#if defined(SYS_name_to_handle_at)
+    errno = 0;
+    if (syscall(SYS_name_to_handle_at, AT_FDCWD, "/etc/passwd",
+            NULL, NULL, 0) >= 0 || errno != EPERM) {
+        return 34;
+    }
+#endif
+#if defined(SYS_getxattr)
+    errno = 0;
+    if (syscall(SYS_getxattr, "/etc/passwd", "user.simple",
+            NULL, 0) >= 0 || errno != EPERM) {
+        return 35;
+    }
+#endif
+#if defined(SYS_statfs)
+    errno = 0;
+    if (syscall(SYS_statfs, "/etc/passwd", NULL) >= 0 || errno != EPERM) {
+        return 36;
+    }
+#endif
+#if defined(SYS_inotify_init1)
     errno = 0;
     if (syscall(SYS_inotify_init1, O_CLOEXEC) >= 0 || errno != EPERM) {
         return 31;
     }
+#endif
+#if defined(SYS_membarrier)
     errno = 0;
     if (syscall(SYS_membarrier, 0, 0) >= 0 || errno != EPERM) return 32;
+#endif
+#if defined(SYS_io_uring_enter)
+    errno = 0;
+    if (syscall(SYS_io_uring_enter, -1, 0, 0, 0, NULL, 0) >= 0 ||
+        errno != EPERM) {
+        return 37;
+    }
+#endif
+#if defined(SYS_personality)
+    errno = 0;
+    if (syscall(SYS_personality, ~0UL) >= 0 || errno != EPERM) return 38;
+#endif
     unsigned long affinity = 1;
     errno = 0;
     if (syscall(

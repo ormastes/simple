@@ -1813,8 +1813,44 @@ static bool browser_renderer_apply_seccomp(void) {
 #ifdef __NR_statx
         BROWSER_RENDERER_DENY_SYSCALL(__NR_statx),
 #endif
+#ifdef __NR_stat
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_stat),
+#endif
+#ifdef __NR_lstat
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_lstat),
+#endif
+#ifdef __NR_oldstat
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_oldstat),
+#endif
+#ifdef __NR_oldlstat
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_oldlstat),
+#endif
+#ifdef __NR_stat64
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_stat64),
+#endif
+#ifdef __NR_lstat64
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_lstat64),
+#endif
 #ifdef __NR_newfstatat
         BROWSER_RENDERER_DENY_SYSCALL(__NR_newfstatat),
+#endif
+#ifdef __NR_fstatat64
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fstatat64),
+#endif
+#ifdef __NR_statfs
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_statfs),
+#endif
+#ifdef __NR_statfs64
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_statfs64),
+#endif
+#ifdef __NR_statmount
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_statmount),
+#endif
+#ifdef __NR_listmount
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_listmount),
+#endif
+#ifdef __NR_name_to_handle_at
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_name_to_handle_at),
 #endif
 #ifdef __NR_access
         BROWSER_RENDERER_DENY_SYSCALL(__NR_access),
@@ -1830,6 +1866,42 @@ static bool browser_renderer_apply_seccomp(void) {
 #endif
 #ifdef __NR_readlinkat
         BROWSER_RENDERER_DENY_SYSCALL(__NR_readlinkat),
+#endif
+#ifdef __NR_getxattr
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_getxattr),
+#endif
+#ifdef __NR_lgetxattr
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_lgetxattr),
+#endif
+#ifdef __NR_fgetxattr
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fgetxattr),
+#endif
+#ifdef __NR_listxattr
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_listxattr),
+#endif
+#ifdef __NR_llistxattr
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_llistxattr),
+#endif
+#ifdef __NR_flistxattr
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_flistxattr),
+#endif
+#ifdef __NR_setxattr
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_setxattr),
+#endif
+#ifdef __NR_lsetxattr
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_lsetxattr),
+#endif
+#ifdef __NR_fsetxattr
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fsetxattr),
+#endif
+#ifdef __NR_removexattr
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_removexattr),
+#endif
+#ifdef __NR_lremovexattr
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_lremovexattr),
+#endif
+#ifdef __NR_fremovexattr
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fremovexattr),
 #endif
 #ifdef __NR_getdents
         BROWSER_RENDERER_DENY_SYSCALL(__NR_getdents),
@@ -1951,6 +2023,12 @@ static bool browser_renderer_apply_seccomp(void) {
 #ifdef __NR_process_vm_writev
         BROWSER_RENDERER_DENY_SYSCALL(__NR_process_vm_writev),
 #endif
+#ifdef __NR_process_madvise
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_process_madvise),
+#endif
+#ifdef __NR_process_mrelease
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_process_mrelease),
+#endif
 #ifdef __NR_pidfd_open
         BROWSER_RENDERER_DENY_SYSCALL(__NR_pidfd_open),
 #endif
@@ -2011,6 +2089,21 @@ static bool browser_renderer_apply_seccomp(void) {
 #ifdef __NR_move_mount
         BROWSER_RENDERER_DENY_SYSCALL(__NR_move_mount),
 #endif
+#ifdef __NR_fsopen
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fsopen),
+#endif
+#ifdef __NR_fsconfig
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fsconfig),
+#endif
+#ifdef __NR_fsmount
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fsmount),
+#endif
+#ifdef __NR_fspick
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fspick),
+#endif
+#ifdef __NR_mount_setattr
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_mount_setattr),
+#endif
 #ifdef __NR_add_key
         BROWSER_RENDERER_DENY_SYSCALL(__NR_add_key),
 #endif
@@ -2031,6 +2124,60 @@ static bool browser_renderer_apply_seccomp(void) {
 #endif
 #ifdef __NR_io_uring_setup
         BROWSER_RENDERER_DENY_SYSCALL(__NR_io_uring_setup),
+#endif
+#ifdef __NR_io_uring_enter
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_io_uring_enter),
+#endif
+#ifdef __NR_io_uring_register
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_io_uring_register),
+#endif
+#ifdef __NR_syslog
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_syslog),
+#endif
+#ifdef __NR_acct
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_acct),
+#endif
+#ifdef __NR_reboot
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_reboot),
+#endif
+#ifdef __NR_kexec_load
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_kexec_load),
+#endif
+#ifdef __NR_kexec_file_load
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_kexec_file_load),
+#endif
+#ifdef __NR_init_module
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_init_module),
+#endif
+#ifdef __NR_finit_module
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_finit_module),
+#endif
+#ifdef __NR_delete_module
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_delete_module),
+#endif
+#ifdef __NR_swapon
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_swapon),
+#endif
+#ifdef __NR_swapoff
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_swapoff),
+#endif
+#ifdef __NR_quotactl
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_quotactl),
+#endif
+#ifdef __NR_personality
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_personality),
+#endif
+#ifdef __NR_modify_ldt
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_modify_ldt),
+#endif
+#ifdef __NR_iopl
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_iopl),
+#endif
+#ifdef __NR_ioperm
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_ioperm),
+#endif
+#ifdef __NR_lookup_dcookie
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_lookup_dcookie),
 #endif
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
     };

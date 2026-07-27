@@ -816,3 +816,11 @@ implementation in progress / target evidence blocked
   navigation permits, canonical HTTP(S) permit issuance, same-origin resource
   mode, simple CORS mode, and preflight-required denial. Executable evidence
   remains target-compiler-blocked; no bootstrap or compiler retry ran.
+- sandbox syscall hardening: Linux renderer seccomp now rejects legacy path
+  metadata and xattr enumeration, modern mount and io_uring operations,
+  cross-process memory advice, and kernel-control calls while retaining
+  descriptor `fstat` for protocol IPC.
+- evidence: The standalone native containment runner compiles with
+  `-Wall -Wextra -Werror`, proves representative denials return `EPERM`, and is
+  wired into the focused GitHub browser-renderer sandbox workflow. No Simple
+  compiler or bootstrap command ran.
