@@ -75,10 +75,9 @@ verification-evaluator disagreement below, both rejected:
 - `rt_char_from_code(code: i64) -> text` — the canonical scalar
   codepoint-in/text-out ABI backing `.chr()`/`.to_char()`
   (`src/runtime/simple_core/core_string.spl`, mirrored in
-  `runtime_native.c`/`runtime.c`). Real runtime symbol, but this seed
-  binary's interpreter has no Rust-side handler for it: both `bin/simple
-  run` and `bin/simple test` fail with `unknown extern function:
-  rt_char_from_code`.
+  `runtime_native.c`/`runtime.c`). Current compiler source now registers a
+  Rust-side interpreter handler; retained binaries still need rebuilding
+  before `bin/simple run` and `bin/simple test` can use it.
 
 ### Verification
 

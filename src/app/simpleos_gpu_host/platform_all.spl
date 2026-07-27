@@ -8,7 +8,6 @@ use app.simpleos_gpu_host.platform_contract.{
 }
 use std.common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA,
-    SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL,
     SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN
 }
 use std.common.processing.processing_ir.{
@@ -30,11 +29,6 @@ use std.gc_async_mut.processing.cuda_fill_u32.{
     ProcessingCudaExecutor,
     processing_ir_execute_cuda_with_executor
 }
-use std.gc_async_mut.processing.metal_fill_u32.{
-    processing_ir_execute_metal,
-    processing_metal_device_identity
-}
-use std.nogc_sync_mut.io.metal_sffi.{metal_device_info}
 use std.nogc_sync_mut.gpu.engine2d.sffi_directx.{
     directx_hardware_adapter_identity
 }
@@ -51,7 +45,7 @@ fn _processing_selector_mask(requested: i64, selector: text, auto_mask: i64) -> 
     if selector == "vulkan":
         return requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN
     if selector == "metal":
-        return requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
+        return 0
     requested & auto_mask
 
 fn _processing_result(completed: bool, reason: text, values: [u32], backend_handle: i64, device_identity: i64) -> SimpleOsGpuHostProcessingResult:
@@ -69,11 +63,6 @@ fn _execute_processing(cuda_executor: ProcessingCudaExecutor, ir: ProcessingIr, 
         return _processing_result(
             result.completed, result.reason, result.values,
             result.backend_handle, result.device_identity)
-    if backend == "metal":
-        val result = processing_ir_execute_metal(ir)
-        return _processing_result(
-            result.completed, result.reason, result.values,
-            result.backend_handle, result.device_identity)
     simpleos_gpu_host_processing_failure("unsupported-processing-backend")
 
 fn _processing_backend_mask_supported(cuda_executor: ProcessingCudaExecutor, selected: i64) -> i64:
@@ -88,10 +77,6 @@ fn _processing_backend_mask_supported(cuda_executor: ProcessingCudaExecutor, sel
         val probe = _execute_processing(cuda_executor, probe_ir, "cuda")
         if probe.completed and probe.reason == "ok" and probe.backend_handle > 0 and probe.device_identity > 0 and processing_ir_outputs_equal(probe.values, oracle):
             available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA
-    if (selected & SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL) != 0:
-        val probe = _execute_processing(cuda_executor, probe_ir, "metal")
-        if probe.completed and probe.reason == "ok" and probe.backend_handle > 0 and probe.device_identity > 0 and processing_ir_outputs_equal(probe.values, oracle):
-            available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
     available
 
 @cfg(linux)
@@ -124,11 +109,6 @@ impl SimpleOsGpuHostPlatform for SimpleOsGpuHostAllPlatform:
         if backend == "vulkan":
             return processing_vulkan_device_identity(
                 vulkan_sffi_selected_device_driver_identity())
-        if backend == "metal":
-            val info = metal_device_info(0)
-            if info.name == "" or info.total_memory <= 0:
-                return 0
-            return processing_metal_device_identity(info.name, info.total_memory)
         if backend == "directx":
             return directx_hardware_adapter_identity()
         0

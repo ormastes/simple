@@ -119,6 +119,22 @@ pub fn rt_byte_char_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::text(String::from(byte_val as char)))
 }
 
+/// Convert a Unicode scalar value to one-character text.
+///
+/// Callable from Simple as: `rt_char_from_code(code: i64) -> text`
+pub fn rt_char_from_code_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let code = match args.first() {
+        Some(Value::Int(value)) => *value,
+        _ => return Ok(Value::text(String::new())),
+    };
+    let text = u32::try_from(code)
+        .ok()
+        .and_then(char::from_u32)
+        .map(|value| value.to_string())
+        .unwrap_or_default();
+    Ok(Value::text(text))
+}
+
 /// Convert a byte array to text
 ///
 /// Callable from Simple as: `rt_bytes_to_text(bytes)`
@@ -435,6 +451,26 @@ mod tests {
         assert_eq!(
             rt_hash_text(&[Value::text("key_7".to_string())]).unwrap(),
             Value::Int(210718207876)
+        );
+    }
+
+    #[test]
+    fn test_rt_char_from_code_matches_native_scalar_policy() {
+        assert_eq!(
+            rt_char_from_code_fn(&[Value::Int(65)]).unwrap(),
+            Value::text("A".to_string())
+        );
+        assert_eq!(
+            rt_char_from_code_fn(&[Value::Int(0x1f642)]).unwrap(),
+            Value::text("\u{1f642}".to_string())
+        );
+        assert_eq!(
+            rt_char_from_code_fn(&[Value::Int(0xd800)]).unwrap(),
+            Value::text(String::new())
+        );
+        assert_eq!(
+            rt_char_from_code_fn(&[Value::Int(-1)]).unwrap(),
+            Value::text(String::new())
         );
     }
 

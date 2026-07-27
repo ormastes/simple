@@ -6,6 +6,9 @@ Drive the native SimpleOS GPU host through file-backed shared memory, allow the
 HELLO CUDA probe, inject the following CUDA submit failure, and validate the
 real fallback receipt.
 
+The same harness also drives repeated device-success requests through one
+daemon-owned CUDA executor.
+
 ## Run
 
 Build the host and
@@ -13,6 +16,15 @@ Build the host and
 
 ```sh
 sh scripts/check/check-simpleos-gpu-fallback-wire.shs
+```
+
+Run retained-session device evidence:
+
+```sh
+SIMPLEOS_GPU_FALLBACK_WIRE_MODE=device-warm \
+  SIMPLEOS_GPU_HOST_BIN=build/simpleos_gpu_host/device_warm_wire/simpleos_gpu_host \
+  SIMPLEOS_GPU_FALLBACK_WIRE_PROBE_BIN=build/simpleos_gpu_host/device_warm_wire/fallback_wire_probe \
+  sh scripts/check/check-simpleos-gpu-fallback-wire.shs
 ```
 
 ## Checks
@@ -38,13 +50,30 @@ sh scripts/check/check-simpleos-gpu-fallback-wire.shs
    rendering keeps the 50-million-poll default; diagnostics may request the
    250-million-poll absolute cap, while every request also has a five-second
    deadline.
+10. Device-warm mode emits eight correlated CUDA device receipts: three
+    warmups and five measured 1,048,576-element requests.
+11. Every device readback value and checksum is exact, handle and identity stay
+    stable, and the five measured samples produce median device, round-trip,
+    and non-device-overhead timings. Non-device overhead includes the daemon's
+    CPU oracle, validation, comparison, wire wait, and shared-memory write.
 
 ## Current Evidence
 
-The four-example source contract is retained but was not executed because the
+The five-example source contract is retained but was not executed because the
 available staged pure-Simple compiler has no `test` command. Fallback receipt
 validation previously passed 13/13. The source-matched daemon (`1 compiled, 212 cached`)
 and final probe (`1 compiled, 18 cached`) complete both native rows: calibrated
 small-request reason `18`, and threshold-`0` CUDA submit-failure reason `16`.
 Both receipts have CPU source `2`, zero handle/identity, 32 bytes, and checksum
 `135272480`.
+
+The device-warm probe builds strictly with `1 compiled, 18 cached, 0 failed`,
+no generated stubs, and its three-case median self-test passes. A refreshed
+CUDA/Vulkan runtime archive and strict daemon build also complete with
+`2 compiled, 215 cached, 0 failed`. The first device-warm execution stopped
+before transport readiness because importing `common.string_core` for byte
+decoding admitted a self-recursive native `str_starts_with`; object relocation
+inspection identified the recursion. The decoder now calls the existing
+`rt_char_from_code` ABI directly, but the three-cycle daemon build cap was
+reached before that final source fix could be rebuilt. Therefore no daemon
+device receipt or warm median is claimed yet.

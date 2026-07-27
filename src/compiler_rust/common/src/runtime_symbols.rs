@@ -930,6 +930,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_simple_sandbox_section_start",
     "rt_simple_sandbox_section_end",
     "rt_bytes_to_text",
+    "rt_char_from_code",
     "rt_text_to_bytes",
     "rt_file_write_bytes",
     "rt_file_wrap_smf_dynlib",
