@@ -91,8 +91,8 @@ Number-of-Queues NSID/max, CQ IEN/IV, SQ QPRIO, SMART NSID/RAE, zero-write-only
 completion retry, non-retryable post-start completion, and PRP edges. The
 silicon composition now binds persistent FTL/NFC media, 4 KiB-to-16 KiB
 staging, fail-closed UART foreground dispatch, page-tag validation, and
-transactional ECC refresh relocation. Real Bootgen is not installed; no
-current `bin/release/simple` exists after the Stage-4 bootstrap termination at
-about 64 GiB RSS. All physical board evidence remains absent.
+transactional ECC refresh relocation. No current `bin/release/simple` exists.
+Official Bootgen v2026.1 and the pinned bitstream are available locally, but
+the approved FSBL/real package and all physical board evidence remain absent.
 The supported claim is **production BLOCKED/FAIL; silicon acceptance is not
 established**.

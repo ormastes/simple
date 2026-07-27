@@ -21,6 +21,15 @@ The MIR interpreter uses a local ID as its reference address, while the native
 backends preserve the local value. That representation difference requires an
 explicit contract and cross-backend tests.
 
+The 2026-07-27 xhigh review confirmed the concrete loss points:
+
+- `MirLowering.lower_expr` lowers the operand to a value local before emitting
+  `MirInstKind.Ref`, so field/index place identity is already gone;
+- `MirBuilder.emit_ref` gives the result the referent type rather than a
+  `MirTypeKind.Ref` type;
+- LLVM and C lower `MirInstKind.Ref` as value copies; and
+- the flat parser currently groups `&value as u64` as `&(value as u64)`.
+
 ## Required Evidence
 
 1. Define reference/cast precedence, including `&value as u64` and

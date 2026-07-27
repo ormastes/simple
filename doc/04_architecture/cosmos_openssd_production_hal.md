@@ -181,13 +181,19 @@ pending.
 H1 runtime, MMIO, PCIe, IO, corrected bridge/admin, QEMU/silicon, package, and
 MMU small-page W^X contracts passed in scoped runs. Corrective bridge/admin
 evidence covers Abort/queue/SMART fields, zero-write-only completion retry,
-post-start non-retry, and PRP edges. Real Bootgen is unavailable. Strict
-bootstrap Stage 2/3 and provenance pass with one worker at source commit
-`3e68805fb09f`. Stage 4 clears the prior browser, Office, and parser blockers,
-then rejects prefix address-of casts in syscall arguments at
-`src/os/userlib/device.spl:26`. No runner was produced or deployed. The active
-defect is tracked in
-`doc/08_tracking/bug/bootstrap_parser_address_of_cast_2026-07-27.md`.
+post-start non-retry, and PRP edges. Official Bootgen v2026.1 is built locally,
+and the pinned upstream HDF/`OpenSSD2.bit` hashes match the profile. The FSBL
+and silicon firmware package inputs remain missing.
+
+The current one-worker bootstrap rebuilt authority and passed Stage 2/3
+sanity with 2,549,240 KiB peak RSS. Strict provenance refused continuation
+because a tracked documentation edit changed the dirty state during the run.
+An isolated Stage 4 check then cleared the prior address-of parser failure and
+segfaulted in `HirLowering.lower_trait` during HIR import resolution at
+2,976,672 KiB peak RSS. A null imported-trait payload is the leading
+hypothesis, not retained backtrace evidence. No runner was produced or
+deployed. The active compiler defect is tracked in
+`doc/08_tracking/bug/bootstrap_stage4_hir_import_crash_2026-07-27.md`.
 No current pure-Simple runner exists for final SSpec/doc generation.
-Production status is **BLOCKED/FAIL**.
-Fresh SSpec/docgen, real Bootgen, and H2 board proof remain required.
+Production status is **BLOCKED/FAIL**. Fresh SSpec/docgen, FSBL/package
+evidence, and H2 board proof remain required.

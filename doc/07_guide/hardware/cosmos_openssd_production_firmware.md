@@ -10,7 +10,7 @@ to the upstream 8-channel/8-way v3.0.0 PL contract at commit
 Production requires all host and board gates below. Current production status
 is **BLOCKED/FAIL**: the persistent NFC backend, media adapter, and UART
 foreground dispatcher are implemented and ARM-compiled, but fresh SSpec/docgen,
-Bootgen, and all board evidence remain pending.
+approved FSBL/package, and all board evidence remain pending.
 
 ## Safety
 
@@ -140,6 +140,7 @@ remain external evidence.
 Required commands:
 
 ```sh
+export PATH="$PWD/build/tools/bin:$PATH"
 clang --version
 ld.lld --version
 readelf --version
@@ -150,15 +151,27 @@ sha256sum --version
 realpath --version
 ```
 
+Current local tool/input evidence:
+
+- Xilinx Bootgen source commit:
+  `eb7256bca6825a1a002cb4d9779d178060036bb0`
+- Bootgen v2026.1 binary SHA-256:
+  `245ca33cee696db58823870f22d6575949a25579e7aab66f3537333cfebc4e80`
+- pinned HDF SHA-256:
+  `03481b19742a3ed8d051dd0ce777e956b446d3986baa05395be5714fcd4b88ba`
+- extracted `OpenSSD2.bit` SHA-256:
+  `66e863b2ff2c0190928e3e71aeba9725551584cffc32854928946b1720cbf5c2`
+
 Use `bin/release/simple` rebuilt and deployed from the current tree. A stale
 release binary that links the obsolete two-argument `rt_env_set` ABI can crash
 before an SSpec runs and is not evidence. There is currently no accepted
-deployed runner. The strict one-worker bootstrap at `3e68805fb09f` passed
-Stage 2/3 sanity, capability, and provenance and cleared the prior Office and
-parser blockers. Stage 4 stopped later at
-`src/os/userlib/device.spl:26` because the bootstrap parser rejects
-`&buf as u64` in a syscall argument. Fix the tracked parser defect and complete
-a new full Stage-4 build before using `bin/release/simple`.
+deployed runner. The current strict one-worker run passed Stage 2/3 sanity but
+stopped at provenance because the tracked dirty state changed during the run.
+The focused Stage 4 continuation cleared the prior address-of parser failure,
+then segfaulted in `HirLowering.lower_trait` during HIR import resolution. A
+null imported-trait payload is the leading hypothesis. Fix the tracked HIR
+defect and complete a clean strict Stage-4 build before using
+`bin/release/simple`.
 
 ## Host Build and QEMU Gate
 
@@ -273,7 +286,9 @@ checkpoints, journal reclamation, tagged NAND data, bounded relocation, and
 foreground UART dispatch. These objects compile for both profiles. ECC refresh
 relocation has focused host/ARM evidence; physical correction margin and
 persistence behavior still require board evidence. MMU W^X small pages passed
-host/SMP contracts and QEMU plus silicon builds. Real Bootgen is unavailable.
+host/SMP contracts and QEMU plus silicon builds. Official Bootgen v2026.1 is
+built at `build/tools/bin/bootgen`; the pinned HDF and `OpenSSD2.bit` hashes
+match the profile. FSBL generation and final real packaging remain pending.
 Do not represent these host/ARM results as physical persistence or board proof.
 
 ## Current Software Gate
@@ -281,15 +296,17 @@ Do not represent these host/ARM results as physical persistence or board proof.
 Do not execute the fourteen-scenario SSpec with a stale binary. The source/manual
 now describe the current runners, but final execution and generated-manual
 evidence are blocked until a current pure-Simple `bin/release/simple` is
-available. The latest bounded bootstrap proved Stage 2/3 sanity, capability,
-and provenance, cleared the prior parser blockers, and exposed the next Stage-4
-parser defect at `device.spl:26`. Do not retry this session.
+available. The latest bounded run passed Stage 2/3 sanity, cleared address-of
+parsing in focused Stage 4, and segfaulted in `HirLowering.lower_trait` during
+HIR import resolution. A null imported-trait payload is the leading
+hypothesis. The strict run itself failed provenance because tracked
+documentation changed during measurement. Do not retry this session.
 
 Before production can move from **BLOCKED/FAIL**, complete:
 
 1. One current pure-Simple SSpec run/docgen when a current runner is available.
-2. Installed Bootgen package evidence and the retained BT-001..BT-006 board
-   campaign. REQ-012 and NFR-011 remain board-only.
+2. Generate the approved FSBL, produce a real Bootgen package, and retain the
+   BT-001..BT-006 board campaign. REQ-012 and NFR-011 remain board-only.
 
 ## Build the Board Package
 
@@ -551,5 +568,5 @@ Production PASS requires, after the current software blockers are resolved:
 Current report:
 
 > Cosmos+ software integration is present, but production is BLOCKED/FAIL
-> pending fresh pure-Simple SSpec/docgen, real Bootgen,
+> pending fresh pure-Simple SSpec/docgen, approved FSBL/real package,
 > and retained board evidence.

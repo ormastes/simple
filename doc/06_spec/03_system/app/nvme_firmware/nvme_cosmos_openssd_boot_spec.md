@@ -319,10 +319,16 @@ contract runner can satisfy them.
 The runtime, MMIO, PCIe, NVMe IO, corrected PCIe bridge/admin, SMP/cache,
 QEMU/silicon, and package results passed in scoped runs. Corrected coverage
 includes admin Abort/queue/SMART fields, zero-write-only completion retry,
-non-retryable post-start completion behavior, and PRP edges. Real Bootgen is
-unavailable. Strict bootstrap reached Stage 3, but the third/final Stage 4
-attempt reached about 64 GiB RSS and was terminated by signal 15. There is no
-current deployed `bin/release/simple`, so the fourteen-scenario SSpec and generated
-manual have not been executed/generated with the current tree. Production is
-therefore **BLOCKED/FAIL**, not accepted. Real Bootgen, current SSpec/docgen,
+non-retryable post-start completion behavior, and PRP edges. Official Bootgen
+v2026.1 and the pinned upstream bitstream are available locally, but the
+approved FSBL and real package are not. The latest strict bootstrap passed
+Stage 2/3 sanity at 2,549,240 KiB peak RSS, then failed provenance because the
+tracked dirty state changed during measurement. A focused Stage 4 continuation
+cleared the address-of parser failure and segfaulted in
+`HirLowering.lower_trait` during HIR import resolution at 2,976,672 KiB peak
+RSS. A null imported-trait payload is the leading hypothesis. There is no
+current deployed `bin/release/simple`, so the fourteen-scenario SSpec and
+generated manual have
+not been executed/generated with the current tree. Production is therefore
+**BLOCKED/FAIL**, not accepted. Current SSpec/docgen, FSBL/package evidence,
 and physical board proof remain open.
