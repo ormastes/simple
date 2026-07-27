@@ -789,3 +789,10 @@ implementation in progress / target evidence blocked
   because `net_tls.rs` has pre-existing formatting drift; the test was not
   executed because target runtime/compiler execution remains blocked and no
   bootstrap was run.
+- sandbox IPC hardening: Linux renderer seccomp now denies the complete direct
+  System V shared-memory, message-queue, and semaphore syscall families,
+  including the multiplexed `ipc` entry used by older architectures.
+- evidence: The focused live containment child enters Landlock/seccomp, is
+  denied access to parent-created shared memory, message queue, and semaphore
+  objects, writes stdout/stderr noise, and exchanges only the bounded protocol
+  response over inherited fd 0. No bootstrap or Simple compiler command ran.

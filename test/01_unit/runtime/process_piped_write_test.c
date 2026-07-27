@@ -10,6 +10,10 @@
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/resource.h>
+#include <sys/ipc.h>
+#include <sys/msg.h>
+#include <sys/sem.h>
+#include <sys/shm.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <sys/types.h>
@@ -56,8 +60,16 @@ static int sandbox_limit_is(int resource, rlim_t current, rlim_t maximum) {
         limit.rlim_cur == current && limit.rlim_max == maximum;
 }
 
+static int remove_sysv_objects(int shmid, int msgid, int semid) {
+    int removed = 1;
+    if (shmid >= 0 && shmctl(shmid, IPC_RMID, NULL) != 0) removed = 0;
+    if (msgid >= 0 && msgctl(msgid, IPC_RMID, NULL) != 0) removed = 0;
+    if (semid >= 0 && semctl(semid, 0, IPC_RMID) != 0) removed = 0;
+    return removed;
+}
+
 static int sandbox_probe(int argc, char** argv) {
-    if (argc != 3 || strcmp(argv[0], "simple-browser-renderer") != 0 ||
+    if (argc != 6 || strcmp(argv[0], "simple-browser-renderer") != 0 ||
         getenv("SIMPLE_BROWSER_RENDERER_SECRET") != NULL) {
         return 10;
     }
@@ -102,25 +114,52 @@ static int sandbox_probe(int argc, char** argv) {
             &affinity) >= 0 || errno != EPERM) {
         return 21;
     }
+    int shmid = atoi(argv[3]);
+    int msgid = atoi(argv[4]);
+    int semid = atoi(argv[5]);
+    struct shmid_ds shm_state;
+    struct msqid_ds msg_state;
+    errno = 0;
+    if (shmctl(shmid, IPC_STAT, &shm_state) >= 0 || errno != EPERM) return 22;
+    errno = 0;
+    if (msgctl(msgid, IPC_STAT, &msg_state) >= 0 || errno != EPERM) return 23;
+    errno = 0;
+    if (semctl(semid, 0, GETVAL) >= 0 || errno != EPERM) return 24;
     const char* input = rt_browser_renderer_read_stdin_some(8192);
-    if (!input || strcmp(input, "small") != 0) return 22;
-    if (write(STDOUT_FILENO, "stdout-leak", 11) < 0) return 23;
-    if (write(STDERR_FILENO, "stderr-leak", 11) < 0) return 24;
+    if (!input || strcmp(input, "small") != 0) return 25;
+    if (write(STDOUT_FILENO, "stdout-leak", 11) < 0) return 26;
+    if (write(STDERR_FILENO, "stderr-leak", 11) < 0) return 27;
     return rt_browser_renderer_write_protocol_some(
-        "sandbox-ok", 10, 0, 10) == 10 ? 0 : 25;
+        "sandbox-ok", 10, 0, 10) == 10 ? 0 : 28;
 }
 
 static int sandboxed_renderer_is_sanitized_and_contained(void) {
     static SplArray placeholder;
     int inherited_fd = open("/etc/passwd", O_RDONLY);
     if (inherited_fd < 3) return 0;
+    int shmid = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0600);
+    int msgid = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
+    int semid = semget(IPC_PRIVATE, 1, IPC_CREAT | 0600);
+    if (shmid < 0 || msgid < 0 || semid < 0) {
+        remove_sysv_objects(shmid, msgid, semid);
+        return 0;
+    }
     char inherited_text[32];
+    char shmid_text[32];
+    char msgid_text[32];
+    char semid_text[32];
     snprintf(inherited_text, sizeof(inherited_text), "%d", inherited_fd);
-    static const char* args[2];
+    snprintf(shmid_text, sizeof(shmid_text), "%d", shmid);
+    snprintf(msgid_text, sizeof(msgid_text), "%d", msgid);
+    snprintf(semid_text, sizeof(semid_text), "%d", semid);
+    static const char* args[5];
     args[0] = "--sandbox-probe";
     args[1] = inherited_text;
+    args[2] = shmid_text;
+    args[3] = msgid_text;
+    args[4] = semid_text;
     test_args = args;
-    test_arg_count = 2;
+    test_arg_count = 5;
     if (setenv("SIMPLE_BROWSER_RENDERER_SECRET", "must-not-leak", 1) != 0) {
         close(inherited_fd);
         return 0;
@@ -129,9 +168,13 @@ static int sandboxed_renderer_is_sanitized_and_contained(void) {
         "/proc/self/exe", &placeholder);
     close(inherited_fd);
     unsetenv("SIMPLE_BROWSER_RENDERER_SECRET");
-    if (pid <= 0) return 0;
+    if (pid <= 0) {
+        remove_sysv_objects(shmid, msgid, semid);
+        return 0;
+    }
     if (!rt_process_write_stdin(pid, "small")) {
         rt_process_close_piped(pid);
+        remove_sysv_objects(shmid, msgid, semid);
         return 0;
     }
     int saw_ok = 0;
@@ -141,7 +184,8 @@ static int sandboxed_renderer_is_sanitized_and_contained(void) {
         if (!saw_ok) usleep(1000);
     }
     int closed = rt_process_close_piped(pid);
-    return saw_ok && closed;
+    int cleaned = remove_sysv_objects(shmid, msgid, semid);
+    return saw_ok && closed && cleaned;
 }
 
 static int stopped(pid_t pid) {

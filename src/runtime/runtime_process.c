@@ -1783,6 +1783,48 @@ static bool browser_renderer_apply_seccomp(void) {
 #ifdef __NR_recvmsg
         BROWSER_RENDERER_DENY_SYSCALL(__NR_recvmsg),
 #endif
+#ifdef __NR_ipc
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_ipc),
+#endif
+#ifdef __NR_shmget
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_shmget),
+#endif
+#ifdef __NR_shmat
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_shmat),
+#endif
+#ifdef __NR_shmdt
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_shmdt),
+#endif
+#ifdef __NR_shmctl
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_shmctl),
+#endif
+#ifdef __NR_msgget
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_msgget),
+#endif
+#ifdef __NR_msgsnd
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_msgsnd),
+#endif
+#ifdef __NR_msgrcv
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_msgrcv),
+#endif
+#ifdef __NR_msgctl
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_msgctl),
+#endif
+#ifdef __NR_semget
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_semget),
+#endif
+#ifdef __NR_semop
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_semop),
+#endif
+#ifdef __NR_semtimedop
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_semtimedop),
+#endif
+#ifdef __NR_semtimedop_time64
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_semtimedop_time64),
+#endif
+#ifdef __NR_semctl
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_semctl),
+#endif
 #ifdef __NR_shutdown
         BROWSER_RENDERER_DENY_SYSCALL(__NR_shutdown),
 #endif

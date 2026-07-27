@@ -332,12 +332,14 @@ or native TLS behavior.
   closes the contained process on any timeout or protocol failure. Renderer
   network requests and broker responses now use bounded length-prefixed fields;
   the parent alone owns Fetch/TLS and uses a public-address-only, response-capped
-  HTTP job while the renderer sandbox remains socketless. A fail-closed
-  external-frame compositor seam now exists, but the hosted entry is not
-  switched to it: the broker transaction is still blocking (so Stop cannot
-  preempt an active fetch), ordinary renderer
-  diagnostics still share stdout with SBR1, and
-  `browser_renderer_protocol_stdout_collision_2026-07-27.md` is a release
-  blocker. Windows AppContainer and the signed macOS helper also remain open.
+  HTTP job while the renderer sandbox remains socketless. Renderer protocol
+  traffic now uses a full-duplex inherited fd 0 while ordinary stdout/stderr
+  are discarded, and seccomp denies direct System V shared-memory, message,
+  and semaphore IPC. A fail-closed external-frame compositor seam exists, but
+  the hosted entry is not switched to it: the broker transaction is still
+  blocking (so Stop cannot preempt an active fetch), the broker still trusts
+  renderer-supplied request kind/origin authority, and resize/scroll plus
+  parent-owned trusted chrome state remain incomplete. Windows AppContainer
+  and the signed macOS helper also remain open.
 - no current GC/RSS/soak or crash-containment evidence exists;
 - existing browser interaction evidence can pass when its artifact is absent.
