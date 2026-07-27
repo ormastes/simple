@@ -1058,3 +1058,17 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   identified as Rust-built and is not admitted PASS. Package transactions,
   generated SimpleOS snapshot catalog, ThemeService/consumer wiring, the
   fail-fast system contract, and live host/QEMU evidence remain open.
+
+- continuation-2026-07-27-textarea-overlay-hard-stop: **THREE-CYCLE CAP /
+  REJECTED / NOT INTEGRATED.** Isolated commits `32063ae68a`, `259c3e07be`,
+  and `87a73e9d0d` extended the existing input overlay owners toward raw
+  multiline textarea text, UTF-8/CRLF navigation, newline-only selection,
+  per-line alignment/RTL, persistent horizontal reveal, clipping, worker state,
+  and sub-800-line cohesive files. Independent review accepted those functional
+  repairs statically but rejected the final series because the Draw IR painter
+  imported the CPU framebuffer painter instead of a neutral shared owner and
+  `browser_text_control.spl` declared two direct `rt_*` text externs outside a
+  runtime/provider facade. The admitted self-hosted runtime was unavailable;
+  no executed spec, live pixel/event, timing, or RSS PASS exists. No fourth
+  cycle, integration, or push ran. Resume only in a fresh lane following
+  `doc/08_tracking/bug/simple_web_textarea_overlay_review_hard_stop_2026-07-27.md`.

@@ -26,6 +26,9 @@
 - The three-cycle BRR2 source series is unintegrated: exact parser reasons are
   lost at the public capture boundary and authoritative requirements/design
   still confuse SimpleOS lifecycle stages with six native event kinds.
+- The three-cycle textarea overlay series is also unintegrated: its functional
+  multiline repairs ended with a DrawIR-to-CPU-painter owner inversion and two
+  forbidden feature-local `rt_*` text externs. See the linked hard-stop bug.
 - Windows Vulkan/SIMD, Linux Vulkan/RenderDoc/SIMD, and unavailable QEMU/native
   rows remain explicit prepared-host requests; postponement is not PASS.
 - Electron remains a noncritical postponed wrapper under TODO 583.
