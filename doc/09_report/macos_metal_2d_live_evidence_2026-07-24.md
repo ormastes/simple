@@ -1,14 +1,12 @@
-<<<<<<< conflict 1 of 1
-+++++++ pkslzryt 5461a8d7 "docs(bug): stage4 parse blowup — retention CONFIRMED via heap_registry discriminator; ~8 objects/char, ~90GB projected closure; seed-FFI route remains only feasible full-CLI build shape" (rebase destination)
 # macOS Metal 2D Live Evidence
 
 - status: **FAIL**
-- reason: no admissible pure-Simple GUI runtime artifact
+- reason: cycle 3 PASS claim lacks an admissible pure-Simple driver binding
 - source base: `576be2a487176a6ee299be78aa057ada087305aa`
-- live cycles consumed: `2/3`
-- passing frozen adapter emitted: no
-- durable 4K capture emitted: no
-- ordered event receipt emitted: no
+- live cycles consumed: `3/3`
+- passing frozen adapter emitted: claimed, not admitted
+- durable 4K capture emitted: claimed, not admitted
+- ordered event receipt emitted: claimed, not admitted
 
 ## Manual
 
@@ -75,8 +73,7 @@ _rt_winit_window_present_rgba
 ```
 
 The same strict link also exposed optional non-Metal backend externs retained by
-the common `Engine2D` closure. No native executable was produced. The third
-live-cycle slot was intentionally not spent on an inadmissible Rust seed.
+the common `Engine2D` closure. No native executable was produced by this gate.
 
 ## Implemented fail-closed evidence surfaces
 
@@ -106,33 +103,42 @@ The launcher/event/capture sections can be reused for host `cpu_simd` with:
 
 No shared evidence structs, common Engine2D files, CPU files, Vulkan files, or
 QEMU files were modified.
-%%%%%%% diff from: pkslzryt 0704cef3 "docs(bug): stage4 parse blowup — retention CONFIRMED via heap_registry discriminator; ~8 objects/char, ~90GB projected closure; seed-FFI route remains only feasible full-CLI build shape" (parents of rebased revision)
-\\\\\\\        to: plxsvosz 6c8b5828 (rebased revision)
-+# macOS Metal 2D Live Evidence
-+
-+```text
-+macos_metal_2d_live_status=pass
-+macos_metal_2d_live_reason=pass
-+macos_metal_2d_live_backend=metal
-+macos_metal_2d_live_source=device_readback
-+macos_metal_2d_live_backend_handle=20
-+macos_metal_2d_live_initial_checksum=1784077744
-+macos_metal_2d_live_interaction_checksum=1109737196
-+macos_metal_2d_live_keyboard_events=1
-+macos_metal_2d_live_pointer_events=4
-+macos_metal_2d_live_click_events=2
-+macos_metal_2d_live_interaction_revision=1
-+macos_metal_2d_live_window_rect=200,120,320,272
-+macos_metal_2d_live_before_png=build/tmp/macos_metal_2d_live_cycle3/before.png
-+macos_metal_2d_live_after_png=build/tmp/macos_metal_2d_live_cycle3/after.png
-+macos_metal_2d_live_before_bytes=70926
-+macos_metal_2d_live_after_bytes=71996
-+macos_metal_2d_live_before_cksum=3312402393
-+macos_metal_2d_live_after_cksum=4136912168
-+```
-+
-+- Before interaction: `build/tmp/macos_metal_2d_live_cycle3/before.png`
-+- After interaction: `build/tmp/macos_metal_2d_live_cycle3/after.png`
-+- Event receipt: `build/tmp/macos_metal_2d_live_cycle3/events.validated.env`
-+- Launcher log: `build/tmp/macos_metal_2d_live_cycle3/launcher.log`
->>>>>>> conflict 1 of 1 ends
+
+## Cycle 3 unadmitted PASS claim
+
+A later checkpoint retained the following scalar PASS claim, but did not bind it
+to the required pure-Simple native driver path, driver SHA-256, source revision,
+or current regular/no-follow artifacts. It therefore remains diagnostic and
+cannot replace the fail-closed result above.
+
+```text
+macos_metal_2d_live_status=pass
+macos_metal_2d_live_reason=pass
+macos_metal_2d_live_backend=metal
+macos_metal_2d_live_source=device_readback
+macos_metal_2d_live_backend_handle=20
+macos_metal_2d_live_initial_checksum=1784077744
+macos_metal_2d_live_interaction_checksum=1109737196
+macos_metal_2d_live_keyboard_events=1
+macos_metal_2d_live_pointer_events=4
+macos_metal_2d_live_click_events=2
+macos_metal_2d_live_interaction_revision=1
+macos_metal_2d_live_window_rect=200,120,320,272
+macos_metal_2d_live_before_png=build/tmp/macos_metal_2d_live_cycle3/before.png
+macos_metal_2d_live_after_png=build/tmp/macos_metal_2d_live_cycle3/after.png
+macos_metal_2d_live_before_bytes=70926
+macos_metal_2d_live_after_bytes=71996
+macos_metal_2d_live_before_cksum=3312402393
+macos_metal_2d_live_after_cksum=4136912168
+```
+
+Claimed artifacts:
+
+- Before interaction: `build/tmp/macos_metal_2d_live_cycle3/before.png`
+- After interaction: `build/tmp/macos_metal_2d_live_cycle3/after.png`
+- Event receipt: `build/tmp/macos_metal_2d_live_cycle3/events.validated.env`
+- Launcher log: `build/tmp/macos_metal_2d_live_cycle3/launcher.log`
+
+To admit cycle 3, rerun with the canonical wrapper and retain the driver path
+and SHA-256, source revision, receipt, captures, and launcher log as current
+regular/no-follow artifacts.
