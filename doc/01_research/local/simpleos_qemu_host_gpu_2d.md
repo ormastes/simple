@@ -66,3 +66,43 @@ adapters below the same Engine2D/evidence contract, not new Simple 2D APIs.
 Current host Metal/Vulkan evidence and dirty live wrappers are host-only. They
 must be retained as regression prerequisites but cannot prove a SimpleOS guest
 or physical-board GPU row.
+
+## Completion refresh (2026-07-27)
+
+Current `main` now contains the dependency-inversion slice that the earlier
+audit identified:
+
+- `DrawIrRenderTarget` is the internal Draw IR execution boundary.
+- Normal applications continue through `Engine2D`.
+- `MetalDrawIrRenderTarget` reuses `MetalBackend`, `FontRenderer`,
+  `Engine2DReadback`, and strict positive device identity.
+- `main_macos.spl` composes the shared daemon runner with
+  `SimpleOsGpuHostMacPlatform`; its measured closure excludes `engine.spl` and
+  non-Metal providers.
+
+The remaining critical path is no longer renderer decomposition:
+
+1. admit a current pure-Simple compiler;
+2. build the Metal-only daemon with no stub fallback;
+3. build fresh ARM64 probe and desktop guest ELFs;
+4. boot through the canonical HVF/file-backed-RAM wrapper;
+5. accept only completed Metal device readback with positive native handles;
+6. compare packed pixels and serialized bytes exactly with the CPU/SIMD oracle;
+7. collect the required warm samples and RSS evidence.
+
+The deployed macOS compiler candidates fail the wrapper's mandatory CLI/env ABI
+admission probe. The repository bootstrap report identifies the supported
+recovery: rebuild the Rust seed from current Rust source in a private target
+directory, use it only to create a current pure-Simple stage, then admit and
+use that pure-Simple artifact for normal build/test work.
+
+No current ARM64 probe or desktop guest ELF is available. Cached guests remain
+inadmissible. The wrapper also lacks a verified ARM64-only selector, so a
+bounded `SIMPLEOS_HOST_GPU_GUEST_ISAS=aarch64` contract is required to avoid
+unrelated x86/RISC-V construction in the macOS completion lane.
+
+Metal font dispatch has a real device framebuffer/readback path and real
+persistent atlas material, but `MetalDrawIrRenderTarget` returns `nil` font
+evidence. Honest promotion requires recording successful atlas upload facts and
+proving exact post-dispatch device pixels against a canonical software replay
+seeded from the actual pre-dispatch device readback.

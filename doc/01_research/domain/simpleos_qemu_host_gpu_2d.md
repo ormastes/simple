@@ -78,3 +78,44 @@ fixed-point Draw IR/Engine2D command and evidence contract. QEMU hosts use
 coherency, submission, fence, readback, and display owners. Both return the
 same exact parity artifact and receipt. CPU SIMD remains the oracle and
 fallback, never native-GPU evidence.
+
+## Primary-source refresh (2026-07-27)
+
+QEMU's current documentation continues to model external accelerators and
+daemons around explicitly shared memory. `memory-backend-file` with `share=on`
+places guest RAM in a writable file visible to another process; ivshmem and
+vhost-user similarly depend on a shared backing object. This supports the
+repository's bounded file-backed-RAM transport, but does not itself prove that
+Metal rendered a frame:
+
+- [QEMU memory-backend-file](https://www.qemu.org/docs/master/system/qemu-manpage.html)
+- [QEMU ivshmem](https://www.qemu.org/docs/master/system/devices/ivshmem.html)
+- [QEMU vhost-user shared memory](https://www.qemu.org/docs/master/system/devices/virtio/vhost-user.html)
+
+Apple documents `MTLStorageModeShared` as CPU/GPU-accessible system memory and
+requires the producer's scheduled work to finish before the other processor
+accesses it. A command buffer reaches a successful terminal state only at
+`MTLCommandBufferStatusCompleted`; `Error` is a distinct unsuccessful terminal
+state. Therefore a positive object handle or writable shared buffer is
+insufficient evidence. The receipt gate must follow completed command work and
+read the actual device resource:
+
+- [Apple Metal shared storage](https://developer.apple.com/documentation/metal/mtlresourceoptions/storagemodeshared)
+- [Apple Metal command-buffer status](https://developer.apple.com/documentation/metal/mtlcommandbuffer/status)
+- [Apple Metal resource fundamentals](https://developer.apple.com/documentation/metal/resource-fundamentals)
+
+MoltenVK remains a Vulkan portability implementation over Metal and documents
+known non-compliance where Vulkan behavior cannot map practically to Metal. Its
+Metal external-object extensions may help native macOS Vulkan applications,
+but they do not supply the SimpleOS guest protocol, Venus resource ownership,
+or the repository's correlated readback receipt:
+
+- [MoltenVK](https://github.com/KhronosGroup/MoltenVK)
+- [MoltenVK runtime guide](https://github.com/KhronosGroup/MoltenVK/blob/main/Docs/MoltenVK_Runtime_UserGuide.md)
+- [Vulkan portability initiative](https://docs.vulkan.org/guide/latest/portability_initiative.html)
+
+The research conclusion is unchanged but more precise: keep Venus/MoltenVK as a
+future compatibility lane, and complete the current macOS goal through the
+existing architecture-neutral SimpleOS protocol plus a strict Metal host
+adapter. Live completion requires actual QEMU argv, current guest artifacts,
+completed Metal commands, device-origin pixels, and exact CPU/SIMD parity.
