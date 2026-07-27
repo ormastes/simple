@@ -41,6 +41,26 @@ seed-compiled code is a strict subset of self-hosted-compilable code. A cheap
 interim guard: a lint/CI grep for `\b(val|var) match =` and keyword-binding
 patterns.
 
+## Interim guard (landed)
+
+`scripts/check/check-keyword-identifier-bindings.shs` (run as
+`sh scripts/check/check-keyword-identifier-bindings.shs`; exit 0 = clean, 1 =
+violations as `file:line`) greps tracked `.spl` files under `src/` and `test/`
+(vendored paths excluded) for keyword-as-identifier bindings. Fatal set:
+`val match =` (the proven Stage-4 detonator class) and `val|var` bindings of
+the hard keywords `if/else/for/while/return/fn/enum/struct/trait/use` in
+`src/`. Deliberately not fatal, verified against both parsers on 2026-07-27 so
+the gate is green on a healthy tree: `var match =` (grammar note G33 sanctions
+it; spec-tested in `test/unit/core/parser_ce_keyword_identifier_spec.spl`),
+`val class =` (accepted by both — no divergence), `val case =` (rejected by
+both — the seed cannot land it). Warnings (non-blocking): the same binding
+patterns in `test/` files (not part of the Stage-4 bootstrap tree; they fail
+locally at test time — one live instance exists at
+`test/03_system/tools/llm/claude_full/ink/screen_spec.spl:56`, left for its
+owner) and function parameters named exactly `match` (one at
+`src/lib/editor/services/md_search.spl:491`). Single grep pass, POSIX tools +
+git only.
+
 ## Related
 
 - Campaign plan: `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md` (Lane H)

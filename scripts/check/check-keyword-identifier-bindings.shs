@@ -1,0 +1,83 @@
+#!/bin/sh
+# Fail-closed grep gate: reserved keywords used as binding identifiers.
+#
+# The Rust seed parser accepts language keywords (notably `match`) as binding
+# names in shapes the self-hosted pure-Simple parser rejects. Such code lands
+# cleanly and then detonates hours later at bootstrap Stage 4 when the freshly
+# built self-hosted compiler parses the full tree
+# ("expected :, got Newline" attributed to an innocent file).
+# See: doc/08_tracking/bug/seed_parser_accepts_match_keyword_as_identifier_2026-07-27.md
+# (2026-07-27: 3 stdlib files carried `val match = ...` and broke bootstrap).
+#
+# Scans tracked .spl files under src/ and test/ (vendored paths excluded) for:
+#   FATAL   `val match =` — the proven Stage-4 detonator class
+#   FATAL   `val|var <hard-keyword> =` for if/else/for/while/return/fn/enum/
+#           struct/trait/use — never legal as identifiers
+#   WARNING the same binding patterns under test/ — test files are not part of
+#           the Stage-4 bootstrap tree; they fail locally at test time, so they
+#           are surfaced for their owners without blocking the gate
+#   WARNING function parameters named exactly `match` (best-effort)
+#
+# Deliberately NOT flagged (verified against both parsers on 2026-07-27, so a
+# fresh tree stays green — see the bug doc "Interim guard" section):
+#   - `var match =`  : grammar note G33 sanctions it; spec-tested in
+#                      test/unit/core/parser_ce_keyword_identifier_spec.spl
+#   - `val class =`  : accepted by BOTH seed and self-hosted (no divergence)
+#   - `val case =`   : rejected by BOTH seed and self-hosted (no divergence —
+#                      the seed cannot land it in the first place)
+#
+# Usage: sh scripts/check/check-keyword-identifier-bindings.shs
+# Exit 0 = clean, 1 = violations listed as file:line, 2 = could not scan.
+
+set -u
+
+# Run from the repo root regardless of invocation directory.
+cd "$(dirname "$0")/../.." || exit 2
+
+HARD_KW='if|else|for|while|return|fn|enum|struct|trait|use'
+BIND_PATTERN="(val|var)[[:space:]]+($HARD_KW)[[:space:]]*=|val[[:space:]]+match[[:space:]]*="
+# Param core is unanchored; anchor is applied per-context below (line start when
+# scanning file content, after the file:line: prefix when splitting grep -n output).
+PARAM_CORE="[[:space:]]*(export[[:space:]]+)?fn[[:space:]][^\"#]*[(,][[:space:]]*match[[:space:]]*[:,)]"
+
+# Tracked .spl files that still exist on disk (parallel sessions delete files
+# ahead of committing; grep noise on those would obscure real findings).
+file_list=$(git ls-files -- src test \
+    ':(exclude)src/compiler_rust/vendor/**' \
+    ':(exclude)src/runtime/vendor/**' \
+    | grep '\.spl$' \
+    | while IFS= read -r f; do [ -f "$f" ] && printf '%s\n' "$f"; done)
+
+if [ -z "$file_list" ]; then
+    echo "check-keyword-identifier-bindings: no tracked .spl files found under src/ test/" >&2
+    exit 2
+fi
+
+# Single grep pass over both patterns; split fatal vs warning afterwards.
+scan=$(printf '%s\n' "$file_list" | tr '\n' '\0' \
+    | xargs -0 grep -nE "$BIND_PATTERN|^$PARAM_CORE" -- /dev/null \
+    | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#')   # drop full-line comments
+
+violations=$(printf '%s\n' "$scan" | grep -E "$BIND_PATTERN")
+src_violations=$(printf '%s\n' "$violations" | grep '^src/')
+test_violations=$(printf '%s\n' "$violations" | grep '^test/')
+param_hits=$(printf '%s\n' "$scan" | grep -E "^[^:]*:[0-9]+:$PARAM_CORE")
+
+if [ -n "$param_hits" ]; then
+    echo "WARNING: function parameter named 'match' (rename before it bites a parser change):"
+    printf '%s\n' "$param_hits"
+fi
+
+if [ -n "$test_violations" ]; then
+    echo "WARNING: keyword binding in test file (fails at test time, not bootstrap; rename to e.g. 'matched'):"
+    printf '%s\n' "$test_violations"
+fi
+
+if [ -n "$src_violations" ]; then
+    echo "FAIL: reserved keyword used as a binding identifier (seed accepts, self-hosted parser rejects — breaks bootstrap Stage 4):" >&2
+    printf '%s\n' "$src_violations" >&2
+    exit 1
+fi
+
+echo "OK: no keyword bindings"
+exit 0
