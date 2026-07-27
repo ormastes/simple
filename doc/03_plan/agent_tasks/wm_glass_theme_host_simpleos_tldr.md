@@ -34,3 +34,9 @@ compiler preflight -> WM/GUI/Web scene -> CPU-SIMD oracle
                    -> Vulkan + Metal device captures
                    -> x86 + ARM QEMU/input -> aggregate -> final review
 ```
+
+- 2026-07-27 routing: macOS remains active locally. Windows Vulkan, Linux
+  Vulkan/RenderDoc, x86 QEMU, and ARM QEMU are explicit P0 external-host
+  requests in
+  `doc/08_tracking/feature/wm_glass_cross_host_evidence_requests_2026-07-27.md`;
+  postponement is not exclusion or PASS.
