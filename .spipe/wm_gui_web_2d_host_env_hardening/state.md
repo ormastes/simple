@@ -1129,7 +1129,9 @@ Tracking split:
   provenance, and one shared device identity. Both wrappers independently
   reject invalid evidence fields; producer PASS also requires the post-present
   host cache to equal the pre-present device receipt, and Windows relays the
-  validated 256-pixel count expected by its downstream strict gate. Linux
-  shell syntax/self-test passed;
+  validated 256-pixel count expected by its downstream strict gate. Both
+  wrappers now require exactly one value for each admitted evidence key, and
+  the Linux self-test rejects a same-value duplicate required key. Linux shell
+  syntax/self-test passed;
   PowerShell is unavailable on this host, so no Windows execution PASS is
   claimed.

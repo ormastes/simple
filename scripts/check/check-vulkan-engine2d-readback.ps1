@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Read-KeyValueFile([string]$path) {
+function Read-ExactOneKeyValueFile([string]$path) {
     $map = @{}
     if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path)) {
         return $map
@@ -21,7 +21,12 @@ function Read-KeyValueFile([string]$path) {
             return
         }
         $idx = $line.IndexOf("=")
-        $map[$line.Substring(0, $idx)] = $line.Substring($idx + 1)
+        $key = $line.Substring(0, $idx)
+        if ($map.ContainsKey($key)) {
+            $map[$key] = $null
+        } else {
+            $map[$key] = $line.Substring($idx + 1)
+        }
     }
     return $map
 }
@@ -39,7 +44,7 @@ function Test-PositiveDecimal([string]$value) {
 }
 
 function Write-Env([string]$status, [string]$reason, [string]$specStatus) {
-    $e = Read-KeyValueFile $EvidenceLog
+    $e = Read-ExactOneKeyValueFile $EvidenceLog
     $rows = @(
         "vulkan_engine2d_readback_status=$status",
         "vulkan_engine2d_readback_reason=$reason",
@@ -199,7 +204,7 @@ if ($evidenceCode -ne 0) {
     exit 1
 }
 
-$evidence = Read-KeyValueFile $EvidenceLog
+$evidence = Read-ExactOneKeyValueFile $EvidenceLog
 if ((Value-Or $evidence "overall") -ne "pass") {
     Write-Env "fail" "evidence-status-not-pass" "not_run"
     exit 1

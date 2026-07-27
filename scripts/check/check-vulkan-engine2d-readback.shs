@@ -65,7 +65,16 @@ emit_file_status() {
 
 value_of() {
     key="$1"
-    sed -n "s/^${key}=//p" "$EVIDENCE_LOG" | tail -n 1
+    awk -v wanted="$key" '
+        index($0, wanted "=") == 1 {
+            matches += 1
+            value = substr($0, length(wanted) + 2)
+        }
+        END {
+            if (matches != 1) exit 1
+            print value
+        }
+    ' "$EVIDENCE_LOG"
 }
 
 is_unsigned_decimal() {
@@ -338,6 +347,28 @@ EOF
         echo "self_test_reason=valid-readback-rejected"
         exit 1
     fi
+
+    printf '%s\n' 'backend_name=vulkan' >>"$EVIDENCE_LOG"
+    write_report pass pass pass
+    if ! grep -q '^vulkan_engine2d_readback_status=fail$' "$ENV_PATH" \
+        || ! grep -q '^vulkan_engine2d_readback_reason=backend-not-vulkan$' "$ENV_PATH"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=duplicate-required-key-accepted"
+        exit 1
+    fi
+    sed '$d' "$EVIDENCE_LOG" >"$EVIDENCE_LOG.mutated"
+    mv "$EVIDENCE_LOG.mutated" "$EVIDENCE_LOG"
+
+    printf '%s\n' 'overall=pass' 'overall=fail' >>"$EVIDENCE_LOG"
+    if [ -n "$(value_of overall)" ]; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=duplicate-overall-key-accepted"
+        exit 1
+    fi
+    sed '$d' "$EVIDENCE_LOG" >"$EVIDENCE_LOG.mutated"
+    mv "$EVIDENCE_LOG.mutated" "$EVIDENCE_LOG"
+    sed '$d' "$EVIDENCE_LOG" >"$EVIDENCE_LOG.mutated"
+    mv "$EVIDENCE_LOG.mutated" "$EVIDENCE_LOG"
 
     sed 's/^rect_device_identity=1$/rect_device_identity=2/' "$EVIDENCE_LOG" >"$EVIDENCE_LOG.mutated"
     mv "$EVIDENCE_LOG.mutated" "$EVIDENCE_LOG"
@@ -633,7 +664,7 @@ if [ "$EVIDENCE_CODE" -ne 0 ]; then
     exit 1
 fi
 
-if ! grep -q '^overall=pass$' "$EVIDENCE_LOG"; then
+if [ "$(value_of overall)" != "pass" ]; then
     echo "spec_status=not_run"
     echo "overall=fail"
     write_report fail evidence-status-not-pass not_run
