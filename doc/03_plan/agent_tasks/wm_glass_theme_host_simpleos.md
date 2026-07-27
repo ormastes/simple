@@ -616,14 +616,16 @@ seed/bootstrap execution may satisfy that gate; old orphan
 `SimpleGui -> simple_seed` processes are inadmissible diagnostic residue.
 
 The manifest-v3 source boundary separates the canonical full CLI GUI driver
-from Stage 3 and keeps admitted hashes authoritative. A fresh scoped repair
-replaced polling/self-attestation with a normalized v2 history verifier plus a
-fail-closed tracked trust-root gate, fixed exact root classification, and added
-topology and drift checks. Independent highest-capability review accepted that
-boundary source. Live admission still exits 125 because the real Endpoint
-Security collector and admitted trust-root branch are not implemented, and
-this host has no approved signing team, entitlement, signed provenance-bound
-collector, or source-matched canonical full CLI GUI artifact.
+from Stage 3 and keeps admitted hashes authoritative. The Endpoint Security
+candidate now collects exec/fork/exit lineage with sequence-gap and finalization
+checks, runs the driver from an immutable private snapshot in a process group,
+and uses a non-circular unavailable/prepared/admitted policy. Independent
+highest-capability static review found no remaining P0/P1 source issue in the
+bounded pathname-TOCTOU repair. This is **SOURCE CANDIDATE STATIC ACCEPT /
+VERIFICATION BLOCKED**, not a source or runtime PASS: after the final repair,
+the Swift `-lbsm` link/self-test and builder self-test were not rerun, nor were
+the focused contracts and direct-env gates. The policy therefore remains
+`status=unavailable`, and live admission deliberately exits 125.
 
 The canonical SimpleOS desktop entries for x86_64, ARM64, and RV64 call
 `install_generated_simpleos_wm_theme()` before compositor and first-frame
@@ -638,13 +640,14 @@ cross-host request and handoff contract above.
 The superseded manifest-v2 gate bound the widget/Web inputs but admitted its
 Stage-3 compiler as the strict GUI driver. Manifest v3 replaces that mismatch
 with a separately provenance-bound canonical full CLI GUI driver, normalized
-history verifier, and fail-closed tracked trust-root gate. That boundary source
-is independently accepted and still fails closed. The live macOS row remains
-runtime-unverified until the real Endpoint Security collector, reproducible
-provenance, and admitted policy/team/entitlement authentication are implemented
-and reviewed; pinned policy hashes/status are updated; identities are
-provisioned; and the exact canonical driver, collector, provenance, and
-manifest are produced on the prepared host.
+history verifier, and fail-closed tracked trust-root gate. The collector
+candidate and immutable-snapshot lifecycle now exist, but final-cycle
+verification is intentionally not inferred. A fresh session must compile/link
+and self-test the collector, run the builder self-test, run the focused
+admission/direct-env gates, and independently review those results before
+changing the policy to `prepared`. Only provisioned signing identity,
+entitlement, pinned hashes, and exact admitted artifacts may promote it to
+`admitted`.
 
 ## 2026-07-27 Metal Receipt and GUI Driver Follow-up
 
@@ -657,16 +660,16 @@ Receipt `801caf` is therefore retained solely as a GPU-only Metal
 device-operation checkpoint. It is not a native widget/web capture, event
 receipt, GUI admission, or product PASS, and it cannot promote any other row.
 
-GUI-driver admission source is repaired and accepted, but live artifact
-production and capture cannot begin with the current placeholders. The prepared
-macOS collector implementation/security owner must first implement and
-independently review the real Endpoint Security collector, reproducible build
-provenance, and admitted policy/team/entitlement authentication; update pinned
-policy hashes/status; then provision the signing team and entitlement, build
-the provenance-bound collector, and produce and admit the exact-current
-canonical full CLI GUI driver and manifest v3. No admissible current
-pure-Simple GUI runtime exists; the native harness and every seed/delegating
-driver remain inadmissible.
+GUI-driver admission source is repaired, and the Endpoint Security collector is
+now a fail-closed source candidate. Live artifact production and capture still
+cannot begin: final-cycle compile/link and builder self-tests plus focused
+admission/direct-env gates remain unrun, so the policy stays unavailable. A
+fresh verification session must produce those results before `prepared`, after
+which the security owner can provision the signing team and entitlement, pin
+the reproducible collector and driver artifacts, and independently admit the
+exact-current manifest v3. No admissible current pure-Simple GUI runtime
+exists; the native harness and every seed/delegating driver remain
+inadmissible.
 
 ## 2026-07-27 Hosted Event and QEMU Contract Review
 

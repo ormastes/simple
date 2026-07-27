@@ -7,6 +7,9 @@
   source-fixed and independently reviewed.
 - Live host pixels/events remain open until an admitted source-matched
   pure-Simple runtime and required native capability are available.
+- The Endpoint Security collector is a fail-closed static source candidate;
+  final link/self-tests and focused admission/direct-env gates remain unrun,
+  so policy stays unavailable and live admission exits 125.
 - The aggregate SSpec intentionally remains fail-closed.
 - QEMU theme-before-first-frame wiring exists, but x86 still needs published
   frozen admission, SSE2 parity, ordered damage/frame receipts, timing, and RSS.

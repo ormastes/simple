@@ -935,3 +935,17 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   correlated WM frame. Exact repair gates are tracked in
   `doc/08_tracking/bug/wm_glass_qemu_evidence_contract_p1_2026-07-27.md`.
   Active sibling changes remain separately owned and are not absorbed.
+
+- continuation-2026-07-27-macos-es-collector-cycle-3: **SOURCE CANDIDATE
+  STATIC ACCEPT / VERIFICATION BLOCKED / LIVE EXIT 125.** The Endpoint Security
+  candidate collects exec/fork/exit lineage with sequence-gap and finalization
+  checks, runs the exact driver from an immutable private snapshot in a process
+  group, and binds immutable builder/policy/source/entitlement/output/manifest
+  inputs to a non-circular unavailable/prepared/admitted policy. Independent
+  highest-capability static review found no remaining P0/P1 in the bounded
+  pathname-TOCTOU repair. The third-cycle cap was reached before the final
+  Swift `-lbsm` link/self-test and repaired builder self-test could be rerun;
+  focused boundary/full-CLI/GPU contracts and direct-env gates also remain
+  unrun after that final repair. No PASS is inferred. Policy remains
+  `status=unavailable`, and a fresh verification session plus separate
+  prepared/admitted promotions are required before live evidence.
