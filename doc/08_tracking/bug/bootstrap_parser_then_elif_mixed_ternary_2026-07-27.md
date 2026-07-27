@@ -2,8 +2,8 @@
 
 ## Status
 
-OPEN. This blocks the full Stage 4 CLI build and deployment of a current
-pure-Simple runner.
+FIXED AND CLEARED IN FULL BOOTSTRAP. The focused nested-AST regression passes,
+and the strict Stage 4 retry parsed beyond `md_renderer.spl`.
 
 ## Reproduction
 
@@ -39,12 +39,16 @@ branch handles only `else`; it does not consume an `elif ... then ...` chain.
   `352fbc3e0792040eac66537dffe5ebf32c67020c3875285bfb87d58bb8201c0e`
 - Stage 3 SHA-256:
   `a4981e84304111d6aa65140a6f59401ff2f9e652c3b12020f7a869cd9c54e42b`
-- Stage 4 log:
+- Original Stage 4 log path, later reused by the successful-progress retry:
   `build/bootstrap/cosmos-production-20260727/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`
 - First failed source: `src/std/editor/render/md_renderer.spl:233`
 
-## Required Fix
+## Fix
 
-Extend the shared expression-level ternary parser to accept `elif` chains in
-the `then` form, add one focused AST regression, then run one bounded strict
-bootstrap. Do not rewrite the valid editor source as a bootstrap workaround.
+The shared expression-level ternary parser now recurses on `elif` exactly as
+the colon form and Rust authority do. The focused regression verifies that the
+else branch is a nested `EXPR_IF`.
+
+The strict retry at source commit `1f27b9be2cb7` cleared this source and later
+stopped at the unrelated `match[0]` keyword-identifier defect tracked in
+`bootstrap_parser_match_keyword_identifier_2026-07-27.md`.

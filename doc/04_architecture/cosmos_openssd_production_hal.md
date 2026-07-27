@@ -183,11 +183,12 @@ MMU small-page W^X contracts passed in scoped runs. Corrective bridge/admin
 evidence covers Abort/queue/SMART fields, zero-write-only completion retry,
 post-start non-retry, and PRP edges. Real Bootgen is unavailable. Strict
 bootstrap Stage 2/3 and provenance pass with one worker at source commit
-`69c7c0fb7b0a`. Stage 4 clears the prior browser, Office tuple, `ce`
-comparison, multiline inline-if, and comma-grouped match blockers, then rejects
-the valid mixed ternary at `src/std/editor/render/md_renderer.spl:233`. No
-runner was produced or deployed. The active defect is tracked in
-`doc/08_tracking/bug/bootstrap_parser_then_elif_mixed_ternary_2026-07-27.md`.
+`1f27b9be2cb7`. Stage 4 clears the prior browser, Office tuple, `ce`,
+inline-if, grouped-match, and mixed-ternary blockers, then rejects indexed use
+of the valid local identifier `match` at
+`src/std/nogc_sync_mut/compression/gzip/lz77.spl:105`. No runner was produced
+or deployed. The active defect is tracked in
+`doc/08_tracking/bug/bootstrap_parser_match_keyword_identifier_2026-07-27.md`.
 No current pure-Simple runner exists for final SSpec/doc generation.
 Production status is **BLOCKED/FAIL**.
 Fresh SSpec/docgen, real Bootgen, and H2 board proof remain required.

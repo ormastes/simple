@@ -231,12 +231,12 @@ contract; physical-board abort behavior remains H2.
 Focused host/ARM ECC relocation, destination reread, stale-source rejection,
 failure preservation, remount/replay, and relocatable-link checks pass. Final
 SSpec/doc generation remains blocked. The strict one-worker build at
-`69c7c0fb7b0a` passed Stage 2/3 sanity, capability, and provenance and parsed
-through the prior browser, Office tuple, `ce`, multiline inline-if, and
-comma-grouped match blockers. Stage 4 then stopped at
-`src/std/editor/render/md_renderer.spl:233`, where the bootstrap parser rejected
-an `if ... then ... elif ... then ... else:` expression. The bounded retry is
-consumed. Real Bootgen/board evidence remains pending.
+`1f27b9be2cb7` passed Stage 2/3 sanity, capability, and provenance and parsed
+through the prior browser, Office, and parser blockers. Stage 4 then stopped at
+`src/std/nogc_sync_mut/compression/gzip/lz77.spl:105`, where the bootstrap
+parser misclassified indexed use of the local identifier `match` as a match
+expression. The bounded attempt is consumed. Real Bootgen/board evidence
+remains pending.
 
 ## Error and Evidence Rules
 
