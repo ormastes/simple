@@ -9,8 +9,9 @@ to the upstream 8-channel/8-way v3.0.0 PL contract at commit
 
 Production requires all host and board gates below. Current production status
 is **BLOCKED/FAIL**: the persistent NFC backend, media adapter, and UART
-foreground dispatcher are implemented and ARM-compiled, but fresh SSpec/docgen,
-approved FSBL/package, and all board evidence remain pending.
+foreground dispatcher are implemented and ARM-compiled, and a pinned FSBL/
+Bootgen package exists, but fresh SSpec/docgen and all board evidence remain
+pending.
 
 ## Safety
 
@@ -103,10 +104,10 @@ Three profile states matter:
    DMA interval come from one immutable platform manifest.
 
 Only state 3 may be flashed for production acceptance. The repository emits
-the bound profile identity and package receipt, but a flashable release still
-requires the approved physical bitstream, real Bootgen output, and retained
-board evidence. Do not work around the gates by defining tokens manually
-without a verified artifact and evidence record.
+the bound profile identity and package receipt, and the pinned package below
+has real Bootgen output. Production acceptance still requires identified-board
+provenance and retained board evidence. Do not work around the gates by
+defining tokens manually without a verified artifact and evidence record.
 
 The production manifest must include at least:
 
@@ -132,8 +133,8 @@ tool.bootgen=<version>
 
 The current receipt/self-test records and checks board/profile identity,
 canonical artifact snapshots, hashes, contract identity, and strict ELF/
-Bootgen metadata. Real installed Bootgen output and physical board provenance
-remain external evidence.
+Bootgen metadata. Installed Bootgen output is retained below; physical board
+provenance remains external evidence.
 
 ## Host Prerequisites
 
@@ -165,11 +166,9 @@ Current local tool/input evidence:
 Use `bin/release/simple` rebuilt and deployed from the current tree. A stale
 release binary that links the obsolete two-argument `rt_env_set` ABI can crash
 before an SSpec runs and is not evidence. There is currently no accepted
-deployed runner. The current strict one-worker run passed Stage 2/3 sanity but
-stopped at provenance because the tracked dirty state changed during the run.
-The focused Stage 4 continuation cleared the prior address-of parser failure,
-then segfaulted in `HirLowering.lower_trait` during HIR import resolution. A
-null imported-trait payload is the leading hypothesis. Fix the tracked HIR
+deployed runner. The unchanged-tree strict run passed Stage 2/3 sanity and
+cleared the prior parser/HIR crashes, then Stage 4 failed on unresolved names
+from partial/header-only import facades. Fix the tracked import-resolution
 defect and complete a clean strict Stage-4 build before using
 `bin/release/simple`.
 
@@ -288,7 +287,14 @@ relocation has focused host/ARM evidence; physical correction margin and
 persistence behavior still require board evidence. MMU W^X small pages passed
 host/SMP contracts and QEMU plus silicon builds. Official Bootgen v2026.1 is
 built at `build/tools/bin/bootgen`; the pinned HDF and `OpenSSD2.bit` hashes
-match the profile. FSBL generation and final real packaging remain pending.
+match the profile. The vendor HSI flow produced FSBL SHA-256
+`baa40ab19de0b14c7851b96385c3b7b281637adfff5ad58f6671ca27f547d351`.
+Real packaging passed with firmware SHA-256
+`5362d5c91551e2b379a6e7a321a112d4604bf91cd6447d27410ca2f4365bbbcb`,
+boot SHA-256
+`c55a679486fdd89cbf1f7f59cae9e1cda4379328e9c429bcbb09c75d8e6191bc`,
+and manifest SHA-256
+`55efec43c8c59f44fb99498ee380af13bd03d0c2d925bf4acef7e541091ba67a`.
 Do not represent these host/ARM results as physical persistence or board proof.
 
 ## Current Software Gate
@@ -296,17 +302,15 @@ Do not represent these host/ARM results as physical persistence or board proof.
 Do not execute the fourteen-scenario SSpec with a stale binary. The source/manual
 now describe the current runners, but final execution and generated-manual
 evidence are blocked until a current pure-Simple `bin/release/simple` is
-available. The latest bounded run passed Stage 2/3 sanity, cleared address-of
-parsing in focused Stage 4, and segfaulted in `HirLowering.lower_trait` during
-HIR import resolution. A null imported-trait payload is the leading
-hypothesis. The strict run itself failed provenance because tracked
-documentation changed during measurement. Do not retry this session.
+available. The latest unchanged-tree run passed Stage 2/3 sanity, cleared the
+prior parser/HIR crashes, and failed Stage 4 on unresolved names from
+partial/header-only import facades. Its peak RSS was 5,492,252 KiB.
 
 Before production can move from **BLOCKED/FAIL**, complete:
 
 1. One current pure-Simple SSpec run/docgen when a current runner is available.
-2. Generate the approved FSBL, produce a real Bootgen package, and retain the
-   BT-001..BT-006 board campaign. REQ-012 and NFR-011 remain board-only.
+2. Execute and retain the BT-001..BT-006 board campaign with the pinned package.
+   REQ-012 and NFR-011 remain board-only.
 
 ## Build the Board Package
 
@@ -567,6 +571,6 @@ Production PASS requires, after the current software blockers are resolved:
 
 Current report:
 
-> Cosmos+ software integration is present, but production is BLOCKED/FAIL
-> pending fresh pure-Simple SSpec/docgen, approved FSBL/real package,
-> and retained board evidence.
+> Cosmos+ software integration and a pinned FSBL/real package are present, but
+> production is BLOCKED/FAIL pending fresh pure-Simple SSpec/docgen and retained
+> board evidence.

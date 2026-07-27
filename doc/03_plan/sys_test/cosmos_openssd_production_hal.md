@@ -30,7 +30,7 @@
 | ST-015 | NVMe admin runner covers bounded Identify/SMART, queue lifecycle, Number-of-Queues NSID/max, Abort result bits, CQ IEN/IV, SQ QPRIO, SMART NSID/RAE, AER, publication retry/latching, and unsupported format/firmware rejection. | H1 corrected host/ARM PASS |
 | ST-016 | FTL/NFC runners check PPA geometry, append-before-map ordering, dual checkpoints, replay validation, torn tails, retirement, reserve/GC, explicit media formats, journal reclamation, DMA isolation, tag validation, startup binding, and host/ARM composition. | H1 PASS |
 | ST-017 | Dispatcher runner proves one destructive FIFO fetch per entry, queue-zero admin routing, nonzero IO routing, reserved-field rejection, and completion retry/terminal blocking. | H1 host/ARM PASS before final compile-only cleanup |
-| ST-018 | A current pure-Simple runner executes the fourteen-scenario SSpec and generates its manual. | **Blocked:** no current runner; Stage 2/3 pass and Stage 4 clears address-of parsing, then segfaults in `HirLowering.lower_trait` during HIR import resolution. |
+| ST-018 | A current pure-Simple runner executes the fourteen-scenario SSpec and generates its manual. | **Blocked:** no current runner; Stage 2/3 pass and Stage 4 clears the prior parser/HIR crashes, then fails on unresolved partial/header-only facade imports. |
 | ST-019 | Focused host composition injects corrected ECC, returns intact data, relocates and rereads the page, rejects a stale PPA, preserves L2P on injected copy failure, remounts/replays the destination, and passes strict ARM compile plus relocatable link. | H1 PASS |
 
 The host MMIO, ARM abort, and SMP/cache runners are executable H1 evidence. Static source
@@ -115,16 +115,14 @@ Detailed execution and evidence retention are in
 Scoped H0/H1 runners pass through persistent FTL/NFC composition, UART startup,
 dispatcher routing, ECC refresh relocation, and strict ARM linkage. External
 provenance in `ST-012` remains partial. `ST-018` is blocked because no current
-pure-Simple runner exists. The current strict one-worker full bootstrap rebuilt
-Rust authority and passed Stage 2/3 sanity. Stage 2 was
-`51c072812d5cd4b5b80ca2ff289d4e13d3a830adf679e58d61da6762066f816f`;
+pure-Simple runner exists. The unchanged-tree strict bootstrap rebuilt Rust
+authority and passed Stage 2/3 sanity. Stage 2 was
+`00fcb65729acfe1f7bd30e113d7d96bea4cd7ff2e4f596667cda8c6a97c89411`;
 Stage 3 was
-`c2a638a51df632e27352543a458289e857c16bfefd79e020bcce39c608f6870a`.
-Strict provenance refused continuation because tracked documentation changed
-during measurement. A focused Stage 4 continuation cleared address-of parsing,
-then segfaulted in `HirLowering.lower_trait` during HIR import resolution; a
-null imported-trait payload is the leading hypothesis.
-Official Bootgen v2026.1 and the pinned bitstream are available locally. The
-bounded attempt is consumed. Final SSpec/doc generation, approved FSBL/package,
-and all `BT-*` evidence remain pending. Production is **BLOCKED/FAIL**;
+`772f9a2e6d104500c5cd1c661c15b6e0083fd9c936787803bb05f5ad824c17b3`.
+Stage 4 cleared the prior parser/HIR crashes, then failed on unresolved names
+from partial/header-only import facades at 5,492,252 KiB peak RSS.
+Official Bootgen v2026.1, the pinned bitstream, vendor-generated FSBL, and real
+package have retained hashes. Final SSpec/doc generation and all `BT-*`
+evidence remain pending. Production is **BLOCKED/FAIL**;
 REQ-012/NFR-011 remain excluded from passing executable `@req` declarations.

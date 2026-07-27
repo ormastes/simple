@@ -125,7 +125,7 @@ verify_snapshot() {
 
 validate_fsbl() {
     _pb_path="$1"
-    _pb_manifest="$2"
+    _pb_fsbl_manifest="$2"
     _pb_readelf="${READELF:-readelf}"
     command -v "$_pb_readelf" >/dev/null 2>&1 ||
         fail "missing readelf: $_pb_readelf"
@@ -164,7 +164,6 @@ validate_fsbl() {
             }
             BEGIN { entry_n = hex(entry) }
             $1 == "LOAD" {
-                count++
                 offset = hex($2)
                 vaddr = hex($3)
                 paddr = hex($4)
@@ -173,23 +172,29 @@ validate_fsbl() {
                 align = hex($NF)
                 flags = ""
                 for (i = 7; i < NF; i++) flags = flags $i
-                if (offset < 0 || vaddr < 0 || paddr < 0 || filesz <= 0 ||
+                if (entry_n < 0 || offset < 0 || vaddr < 0 || paddr < 0 ||
+                    filesz < 0 ||
                     memsz < filesz || offset + filesz > file_size ||
+                    vaddr + memsz > 4294967296 ||
                     vaddr != paddr || !power_of_two(align) ||
-                    offset % align != vaddr % align ||
-                    flags != "RE" ||
-                    entry_n < vaddr || entry_n >= vaddr + memsz)
+                    offset % align != vaddr % align)
                     bad = 1
+                if (filesz > 0 && index(flags, "E") &&
+                    entry_n >= vaddr && entry_n < vaddr + filesz) {
+                    entry_loads++
+                    entry_vaddr = vaddr
+                    entry_filesz = filesz
+                }
             }
             END {
-                if (count != 1 || bad) exit 1
+                if (entry_loads != 1 || bad) exit 1
                 printf "entry=0x%08x\n", entry_n
-                printf "load=0x%08x\n", vaddr
-                printf "filesz=0x%08x\n", filesz
+                printf "load=0x%08x\n", entry_vaddr
+                printf "filesz=0x%08x\n", entry_filesz
             }
-        ' > "$_pb_manifest"; then
-        rm -f "$_pb_manifest"
-        fail "FSBL requires one aligned executable PT_LOAD containing entry"
+        ' > "$_pb_fsbl_manifest"; then
+        rm -f "$_pb_fsbl_manifest"
+        fail "FSBL requires one aligned file-backed executable PT_LOAD containing entry"
     fi
 }
 
@@ -324,11 +329,15 @@ validate_bootgen_metadata() {
             headers++
             next
         }
-        /dest_device[[:space:]]/ && current != "" {
-            destination = $0
-            sub(/^.*dest_device[[:space:]]*/, "", destination)
-            gsub(/[[:space:]\[\]]/, "", destination)
-            if (destination != "PS" && destination != "PL") bad = 1
+        /attributes \(0x18\)/ && current != "" {
+            attributes = hex($4)
+            destination_id = int(attributes / 16) % 16
+            if (destination_id == 1)
+                destination = "PS"
+            else if (destination_id == 2)
+                destination = "PL"
+            else
+                bad = 1
             print current "|" destination
             current = ""
             destinations++
@@ -535,12 +544,16 @@ make_fsbl_fixture() {
         printf '\002\000\050\000\001\000\000\000'
         printf '\000\000\020\000\064\000\000\000'
         dd if=/dev/zero bs=1 count=4 2>/dev/null
-        printf '\000\000\000\005\064\000\040\000\001\000'
+        printf '\000\000\000\005\064\000\040\000\002\000'
         dd if=/dev/zero bs=1 count=6 2>/dev/null
-        printf '\001\000\000\000\124\000\000\000'
+        printf '\001\000\000\000\164\000\000\000'
         printf '\000\000\020\000\000\000\020\000'
         printf '\004\000\000\000\004\000\000\000'
-        printf '\005\000\000\000\004\000\000\000'
+        printf '\007\000\000\000\004\000\000\000'
+        printf '\001\000\000\000\000\000\000\000'
+        printf '\000\000\377\377\000\000\377\377'
+        printf '\000\000\000\000\000\000\001\000'
+        printf '\006\000\000\000\004\000\000\000'
         printf '\000\000\240\343'
     } > "$_pb_path"
 }
@@ -609,11 +622,12 @@ if [ -n "$read_image" ]; then
         }
         {
             destination = $2
-            if (mode == "malformed-metadata" && $1 ~ /OpenSSD2[.]bit/)
-                destination = "PS"
             printf "   PARTITION HEADER TABLE (%s)\n", $1
-            print " attribute list -"
-            printf "exec_state [aarch-32] dest_device [%s]\n", destination
+            attributes = (destination == "PL") ? "0x00000020" : "0x00000010"
+            if (mode == "reserved-destination" && $1 ~ /OpenSSD2[.]bit/)
+                attributes = "0x00000060"
+            printf " attributes (0x18) : %s section_count (0x1C) : 0x00000001\n",
+                   attributes
         }
     ' "$meta"
     exit 0
@@ -690,6 +704,14 @@ EOF
     grep -Fxq "profile.bitstream.sha256=$PROFILE_BITSTREAM_SHA256" \
         "$_pb_manifest" || fail "manifest official bitstream identity mismatch"
 
+    _pb_wrapping_fsbl="$_pb_test_dir/wrapping-fsbl.elf"
+    cp "$_pb_fsbl" "$_pb_wrapping_fsbl"
+    printf '\000\000\002\000' |
+        dd of="$_pb_wrapping_fsbl" bs=1 seek=104 conv=notrunc 2>/dev/null
+    expect_rejected wrapping-FSBL-PT_LOAD "$_pb_test_dir/wrapping-fsbl.bin" \
+        "$_pb_wrapping_fsbl" "$_pb_bitstream" "$_pb_firmware" \
+        "$_pb_test_dir/wrapping-fsbl.bin"
+
     _pb_marker="$_pb_test_dir/copied-marker.elf"
     cp "$_pb_firmware" "$_pb_marker"
     expect_rejected copied-profile-marker "$_pb_test_dir/copied-marker.bin" \
@@ -729,6 +751,13 @@ EOF
     expect_rejected malformed-Bootgen-metadata "$_pb_test_dir/metadata.bin" \
         "$_pb_fsbl" "$_pb_bitstream" "$_pb_firmware" \
         "$_pb_test_dir/metadata.bin"
+
+    COSMOS_FAKE_BOOTGEN_MODE=reserved-destination
+    export COSMOS_FAKE_BOOTGEN_MODE
+    expect_rejected reserved-Bootgen-destination \
+        "$_pb_test_dir/reserved-destination.bin" \
+        "$_pb_fsbl" "$_pb_bitstream" "$_pb_firmware" \
+        "$_pb_test_dir/reserved-destination.bin"
 
     COSMOS_FAKE_BOOTGEN_MODE=mutate-input
     export COSMOS_FAKE_BOOTGEN_MODE

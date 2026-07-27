@@ -167,9 +167,9 @@ Manifest v1 records format, board, silicon profile, firmware identity,
 canonical paths, and SHA-256 for FSBL, bitstream, firmware, and boot output.
 The build receipt now binds the exact bitstream contract, DMA reservation,
 source/profile identity, and immutable artifact snapshots before packaging.
-The synthetic packager self-test proves validation and rejection logic; a real
-Bootgen package invocation and a physical board run are still required for
-production evidence.
+The synthetic packager self-test proves validation and rejection logic, and the
+pinned artifacts pass a real Bootgen v2026.1 invocation. Physical BootROM and
+board runs are still required for production evidence.
 
 ## Host Mock-MMIO Design
 
@@ -230,14 +230,11 @@ W^X is implemented with firmware small pages. H1 proves the vector/handler
 contract; physical-board abort behavior remains H2.
 Focused host/ARM ECC relocation, destination reread, stale-source rejection,
 failure preservation, remount/replay, and relocatable-link checks pass. Final
-SSpec/doc generation remains blocked. The strict one-worker build passed
-Stage 2/3 sanity, then stopped at provenance because tracked documentation
-changed during measurement. A focused Stage 4 continuation cleared the
-address-of parser failure and segfaulted in `HirLowering.lower_trait` during
-HIR import resolution. A null imported-trait payload is the leading
-hypothesis. Official Bootgen v2026.1 and the pinned bitstream are available
-locally; approved FSBL/package and board evidence remain pending. The bounded
-attempt is consumed.
+SSpec/doc generation remains blocked. The unchanged-tree strict build passed
+Stage 2/3 sanity, cleared the prior parser/HIR crashes, and failed Stage 4 on
+unresolved names from partial/header-only import facades. Official Bootgen
+v2026.1, the pinned bitstream, vendor-generated FSBL, and real package are
+available with retained hashes; board evidence remains pending.
 
 ## Error and Evidence Rules
 

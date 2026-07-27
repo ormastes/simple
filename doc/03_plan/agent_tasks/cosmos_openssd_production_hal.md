@@ -15,15 +15,15 @@ FTL, boot integration, or board proof.
 
 | Lane | Primary files | Required delivery | Current state |
 |---|---|---|---|
-| Profile/binding | `build.shs`, NFC/PCIe register headers, `package_boot.shs` | One verified bitstream identity drives compile tokens, DMA reservation, receipt, and manifest; mismatch fails closed. | H0/H1 receipt and rejection checks implemented; physical artifact provenance pending. |
+| Profile/binding | `build.shs`, NFC/PCIe register headers, `package_boot.shs` | One verified bitstream identity drives compile tokens, DMA reservation, receipt, and manifest; mismatch fails closed. | H0/H1 receipt and rejection checks implemented; pinned host artifact hashes retained, physical board provenance pending. |
 | NFC | `cosmos_nfc.c`, `cosmos_nfc_regs.h` | Pinned 8Ch8Way v3.0.0 registers; 8x8 init; bounded status/read/program/erase; ECC decode; DMA validation; timeout quarantine. | H1 host MMIO coverage present; board NAND evidence pending. |
 | PCIe | `cosmos_pcie.c`, `cosmos_pcie_regs.h` | Pinned endpoint aperture/IDs/BAR; IRQ 61 level-high handling; command/completion FIFO and direct/AUTO host-DMA transport. | H1 runner passed; CPU0 target is local policy and board IRQ/DMA evidence pending. |
 | Runtime | `cosmos_runtime.c` | Freestanding memory/string/EABI/division support with edge self-test and no unresolved symbols. | Runtime H1 runner passed; final pure-Simple SSpec remains blocked. |
 | SMP/GIC | `cosmos_start.S`, `cosmos_smp_gic.c` | VBAR/stacks; GICv1 ownership; HDF-bound level-high IRQ 61 route; Zynq CPU1 vector/SEV protocol; generation ACK after secondary MMU/GIC. | H1 IRQ/SMP contract present; CPU0 target is policy and board delivery evidence remains pending. |
 | MMU/cache | `cosmos_mmu_cache.c` | W^X firmware pages; XN DMA/MMIO/RW state; SCU/`ACTLR.SMP`; set/way maintenance; per-core MMU/L1; CPU0 PL310 bounded maintenance. | H1 W^X/SMP/cache contract present; live abort and board coherency stress pending. |
-| FSBL/abort | `cosmos_start.S`, `cosmos_fsbl.c`, `cosmos_uart.c` | Abort containment; read-only SLCR/reset/clock/`PCFG_DONE` validation; no dependent startup after foundational failure. | H1 fail-closed coverage present; dedicated abort injection and BootROM board evidence pending. |
-| Packaging | `package_boot.shs` | Validate explicit artifacts, Bootgen metadata, aliases, hashes, silicon identity, and publish manifest atomically. | Self-test and strict receipt checks present; installed real Bootgen and board package evidence pending. |
-| NVMe bridge/admin | `cosmos_nvme_pcie_adapter.*`, `cosmos_nvme_admin.*` | Decode controller commands, preserve completion identity/publication semantics, and serve bounded admin callbacks. | Corrected host/ARM runners pass Abort/queue/SMART fields, zero-write retry boundary, post-start non-retry, and PRP edges; FTL plus UART polling/build binding pending. |
+| FSBL/abort | `cosmos_start.S`, `cosmos_fsbl.c`, `cosmos_uart.c` | Abort containment; read-only SLCR/reset/clock/`PCFG_DONE` validation; no dependent startup after foundational failure. | H1 fail-closed and bounded QEMU abort injection pass; live-board abort and BootROM evidence pending. |
+| Packaging | `package_boot.shs` | Validate explicit artifacts, Bootgen metadata, aliases, hashes, silicon identity, and publish manifest atomically. | Self-test and official Bootgen v2026.1 package pass; physical BootROM/board evidence pending. |
+| NVMe bridge/admin | `cosmos_nvme_pcie_adapter.*`, `cosmos_nvme_admin.*` | Decode controller commands, preserve completion identity/publication semantics, and serve bounded admin callbacks. | Corrected host/ARM runners pass Abort/queue/SMART fields, retry boundaries, and PRP edges; FTL/UART polling binding is implemented and ARM-compiled, with final SSpec and board service pending. |
 | Host tests | Cosmos SSpec plus native runners | Execute completion, malformed state, timeout, ordering, and callback-service paths without board MMIO. | H1 runners passed: runtime, MMIO, PCIe, NVMe IO, bridge, admin, SMP/cache; final SSpec blocked on bootstrap. |
 | Board tests | Guide procedures and retained evidence bundle | BT-001..BT-006 on identified Cosmos+ hardware. | **Pending:** no board success claimed. |
 
@@ -58,7 +58,7 @@ competing queue, DMA, FTL, status, or MMIO abstractions.
 | W1-A | PCIe command transport | `cosmos_pcie.c`, `cosmos_pcie_regs.h`, PCIe contract C/runner | Pinned command FIFO + 16-DW SRAM fetch, completion commit, IRQ 61, and direct/AUTO DMA; runner and ARM silicon build pass. | Complete |
 | W1-B | Runtime ABI evidence | New runtime contract C/runner only | Host checks for overlap-safe `memmove`, memory/string ABI, signed/unsigned divide/mod and divide-by-zero hooks. | Complete |
 | W1-C | Bootstrap resource fix | Compiler driver/runtime files selected after profiling; existing Stage-4 memory bug doc and one focused regression | Root-fix Stage-4 retention or allocation growth. One bounded resource smoke must produce the full CLI below the agreed RSS ceiling. Never repeat the full bootstrap more than the repository iteration cap. | Unassigned, blocking H0 |
-| W1-D | Abort injection | New abort contract test and the minimum startup test seam; no production exception weakening | Inject data/prefetch aborts, prove IRQ/FIQ masking, captured fault state, no return to corrupt context, and deterministic halt. Host/ARM evidence only; live fault remains H2. | Unassigned |
+| W1-D | Abort injection | New abort contract test and the minimum startup test seam; no production exception weakening | Inject data/prefetch aborts, prove IRQ/FIQ masking, captured fault state, no return to corrupt context, and deterministic halt. Host/ARM evidence only; live fault remains H2. | Complete for H1; H2 pending |
 
 ### Wave 2 - Data Path Components
 
@@ -168,9 +168,10 @@ Do not run the final SSpec with a stale compiler/runtime. Current scoped results
 include runtime, PCIe, NVMe IO, PCIe bridge, and admin contract PASS markers.
 These use host/mock callbacks where media is involved; physical board commands
 are evidence procedures, not host substitutes.
-The latest full-bootstrap attempt passed Stage 3 but Stage 4 was terminated by
-signal 15 near 64 GB RSS; H0 deployment and final SSpec remain blocked until
-W1-C produces a bounded full CLI.
+The latest unchanged-tree bootstrap passed Stage 2/3 and reached the end of HIR
+lowering at 5,492,252 KiB peak RSS, but Stage 4 failed on unresolved names from
+partial/header-only import facades. H0 deployment and final SSpec remain
+blocked until W1-C produces a full CLI.
 
 ## Merge and Review
 

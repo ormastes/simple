@@ -3,7 +3,9 @@
 ## Status
 
 OPEN. The pure-Simple Stage 3 compiler clears the prior address-of parser
-failure, then segfaults during full-CLI HIR import resolution.
+failure and HIR null dereference. The unchanged-tree strict follow-up reaches
+the end of HIR lowering, then fails because partial/header-only import facades
+do not register required glob-exported names.
 
 ## Evidence
 
@@ -32,15 +34,25 @@ core/backtrace proves that this caller supplied the null argument.
 - Focused log:
   `build/bootstrap/cosmos-production-20260727/stage4-focused.log`
 
-The strict wrapper did not reach Stage 4 because a tracked documentation edit
-changed the dirty-state fingerprint during provenance measurement. Stage 2 and
-Stage 3 had already passed sanity.
+The unchanged-tree strict follow-up passed Stage 2/3 sanity and entered Stage
+4. It no longer crashed in `HirLowering.lower_trait`; it reported unresolved
+names beginning with `cli_run_file` in
+`app.cli._CliMain.args_and_os_commands`, followed by other symbols supplied
+through partial/header-only import facades.
+
+- Follow-up Stage 2 SHA-256:
+  `00fcb65729acfe1f7bd30e113d7d96bea4cd7ff2e4f596667cda8c6a97c89411`
+- Follow-up Stage 3 SHA-256:
+  `772f9a2e6d104500c5cd1c661c15b6e0083fd9c936787803bb05f5ad824c17b3`
+- Follow-up peak RSS: 5,492,252 KiB
+- Follow-up elapsed time: 45:32.18
+- Follow-up log:
+  `build/bootstrap/cosmos-production-20260727-current/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`
 
 ## Required Fix
 
-Retain a core/backtrace or focused reproducer that identifies the caller and
-argument source. If the leading hypothesis is confirmed, determine why
-`Dict.get` presents a non-nil imported-trait option with a null payload in the
-full closure. Preserve cross-module default-method lowering from issue #190;
-do not hide corruption by silently skipping the trait. Add one focused
-regression, then run one strict bootstrap from an unchanged tracked tree.
+Preserve the nil-dictionary regression as RED until native reference semantics
+are corrected. Independently fix partial/header-only facade resolution so
+plain and dotted glob re-exports register their symbols, including aliased
+traits and re-exported enums. Add focused regressions, then run one strict
+bootstrap from an unchanged tracked tree.
