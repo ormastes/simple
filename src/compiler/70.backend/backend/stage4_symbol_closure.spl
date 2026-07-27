@@ -61,7 +61,11 @@ fn stage4_provider_symbol(name: text, object_format: text) -> text:
             symbol = symbol.substring(0, decoration)
     symbol
 
-fn stage4_exact_nm_global_symbols(nm_output: text) -> (definitions: [text], undefined: [text]):
+struct Stage4NmGlobalSymbols:
+    definitions: [text]
+    undefined: [text]
+
+fn stage4_exact_nm_global_symbols(nm_output: text) -> Stage4NmGlobalSymbols:
     """Parse the exact two/three-field global-symbol form emitted by portable nm."""
     var definitions: [text] = []
     var undefined: Dict<text, bool> = {}
@@ -80,11 +84,13 @@ fn stage4_exact_nm_global_symbols(nm_output: text) -> (definitions: [text], unde
             undefined[symbol] = true
         else:
             definitions = definitions.push(symbol)
-    (definitions, stage4_sorted_text(undefined.keys()))
+    Stage4NmGlobalSymbols(definitions: definitions, undefined: stage4_sorted_text(undefined.keys()))
 
 pub fn stage4_compiler_backfill_symbol_table_fingerprint(nm_output: text) -> Result<text, text>:
     """Return a deterministic fingerprint input for an exact raw global symbol table."""
-    val (definitions, undefined) = stage4_exact_nm_global_symbols(nm_output)
+    val symbols = stage4_exact_nm_global_symbols(nm_output)
+    val definitions = symbols.definitions
+    val undefined = symbols.undefined
     var definition_counts: Dict<text, i64> = {}
     for symbol in definitions:
         definition_counts[symbol] = (definition_counts[symbol] ?? 0) + 1
@@ -111,7 +117,8 @@ pub fn stage4_validate_compiler_backfill_provider_disjoint(capsule_nm: text, pro
             return Err("Stage4 compiler backfill provider label '" + label + "' is repeated")
         labels_seen[label] = true
 
-    val (capsule_raw_definitions, _) = stage4_exact_nm_global_symbols(capsule_nm)
+    val capsule_symbols = stage4_exact_nm_global_symbols(capsule_nm)
+    val capsule_raw_definitions = capsule_symbols.definitions
     if capsule_raw_definitions.len() == 0:
         return Err("Stage4 compiler backfill capsule defines no global symbols")
     var capsule_definitions: Dict<text, bool> = {}
@@ -121,7 +128,8 @@ pub fn stage4_validate_compiler_backfill_provider_disjoint(capsule_nm: text, pro
     var provider_i = 0
     while provider_i < provider_labels.len():
         val label = provider_labels[provider_i]
-        val (provider_raw_definitions, _) = stage4_exact_nm_global_symbols(provider_nms[provider_i])
+        val provider_symbols = stage4_exact_nm_global_symbols(provider_nms[provider_i])
+        val provider_raw_definitions = provider_symbols.definitions
         if provider_raw_definitions.len() == 0:
             return Err("Stage4 compiler backfill provider '" + label + "' defines no global symbols")
         var provider_definitions: Dict<text, bool> = {}
@@ -246,7 +254,9 @@ pub fn stage4_derive_compiler_backfill_manifest(nm_output: text, object_format: 
 
     var definition_counts: Dict<text, i64> = {}
     var runtime_symbols: Dict<text, bool> = {}
-    val (raw_definitions, raw_undefined) = stage4_exact_nm_global_symbols(nm_output)
+    val raw_symbols = stage4_exact_nm_global_symbols(nm_output)
+    val raw_definitions = raw_symbols.definitions
+    val raw_undefined = raw_symbols.undefined
     for raw_symbol in raw_definitions:
         val symbol = stage4_provider_symbol(raw_symbol, object_format)
         if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
@@ -284,7 +294,9 @@ pub fn stage4_compiler_backfill_localization_symbols(nm_output: text, object_for
             return Err("Stage4 compiler backfill manifest repeats export '" + symbol + "'")
         manifest_symbols[symbol] = true
 
-    val (raw_definitions, raw_undefined) = stage4_exact_nm_global_symbols(nm_output)
+    val raw_symbols = stage4_exact_nm_global_symbols(nm_output)
+    val raw_definitions = raw_symbols.definitions
+    val raw_undefined = raw_symbols.undefined
     for raw_symbol in raw_undefined:
         val symbol = stage4_provider_symbol(raw_symbol, object_format)
         if symbol.starts_with("rt_") or symbol.starts_with("spl_"):
@@ -351,7 +363,9 @@ pub fn stage4_runtime_legacy_compat_localization_symbols(nm_output: text, object
 
     var definition_counts: Dict<text, i64> = {}
     var localize: [text] = []
-    val (raw_definitions, raw_undefined) = stage4_exact_nm_global_symbols(nm_output)
+    val raw_symbols = stage4_exact_nm_global_symbols(nm_output)
+    val raw_definitions = raw_symbols.definitions
+    val raw_undefined = raw_symbols.undefined
     for raw_symbol in raw_definitions:
         if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
             continue
@@ -384,7 +398,9 @@ pub fn stage4_validate_runtime_legacy_compat_symbol_contract(nm_output: text, ob
     for symbol in exports:
         expected[symbol] = true
     var definition_counts: Dict<text, i64> = {}
-    val (raw_definitions, raw_undefined) = stage4_exact_nm_global_symbols(nm_output)
+    val raw_symbols = stage4_exact_nm_global_symbols(nm_output)
+    val raw_definitions = raw_symbols.definitions
+    val raw_undefined = raw_symbols.undefined
     for raw_symbol in raw_definitions:
         if (object_format == "coff-msvc" or object_format == "coff-mingw") and raw_symbol == "@feat.00":
             continue
@@ -421,7 +437,7 @@ pub fn stage4_runtime_native_localization_symbols(nm_output: text, object_format
     ]
     var counts: Dict<text, i64> = {}
     var raw_by_symbol: Dict<text, text> = {}
-    val (raw_definitions, _) = stage4_exact_nm_global_symbols(nm_output)
+    val raw_definitions = stage4_exact_nm_global_symbols(nm_output).definitions
     for raw_symbol in raw_definitions:
         val symbol = stage4_provider_symbol(raw_symbol, object_format)
         counts[symbol] = (counts[symbol] ?? 0) + 1
@@ -448,7 +464,7 @@ pub fn stage4_validate_runtime_native_core_symbol_contract(nm_output: text, obje
         "rt_time_now_nanos", "rt_time_now_unix_micros"
     ]
     var definitions: Dict<text, bool> = {}
-    val (raw_definitions, _) = stage4_exact_nm_global_symbols(nm_output)
+    val raw_definitions = stage4_exact_nm_global_symbols(nm_output).definitions
     for raw_symbol in raw_definitions:
         definitions[stage4_provider_symbol(raw_symbol, object_format)] = true
     for symbol in legacy:
@@ -828,7 +844,9 @@ pub fn stage4_projection_localization_symbols(nm_output: text, object_format: te
 
     var counts: Dict<text, i64> = {}
     var localize: [text] = []
-    val (raw_definitions, raw_undefined) = stage4_exact_nm_global_symbols(nm_output)
+    val raw_symbols = stage4_exact_nm_global_symbols(nm_output)
+    val raw_definitions = raw_symbols.definitions
+    val raw_undefined = raw_symbols.undefined
     for raw_symbol in raw_definitions:
         val symbol = stage4_provider_symbol(raw_symbol, object_format)
         counts[symbol] = (counts[symbol] ?? 0) + 1
