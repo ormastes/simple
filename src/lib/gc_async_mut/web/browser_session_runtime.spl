@@ -368,14 +368,21 @@ impl BrowserSession:
         val key_dispatch = self.dispatch_dom_event(
             target_id, event_type, true, true
         )
-        if not pressed or key_dispatch.event.default_prevented:
+        if key_dispatch.event.default_prevented:
+            self.pending_space_activation_target = ""
             return Ok(key_dispatch)
         val current_path = be_dom_find_path_to_id(self.current_dom, target_id)
         if current_path.len() == 0:
+            self.pending_space_activation_target = ""
             return Err("DOM keyboard target was removed")
         val target = current_path[current_path.len() - 1]
         val normalized_key = key.trim().lower()
-        if normalized_key == "backspace" or key == "8":
+        val is_space = (
+            normalized_key == "space" or normalized_key == "spacebar" or
+            key == " "
+        )
+        if pressed and (normalized_key == "backspace" or key == "8"):
+            self.pending_space_activation_target = ""
             if (
                 (target.tag_name == "input" or target.tag_name == "textarea") and
                 not be_dom_has_attr(target, "disabled") and
@@ -394,7 +401,20 @@ impl BrowserSession:
             target, key
         )
         if activation_event == "":
+            self.pending_space_activation_target = ""
             return Ok(key_dispatch)
+        if is_space:
+            if pressed:
+                self.pending_space_activation_target = target_id
+                return Ok(key_dispatch)
+            val armed = self.pending_space_activation_target == target_id
+            self.pending_space_activation_target = ""
+            if not armed:
+                return Ok(key_dispatch)
+        elif not pressed:
+            return Ok(key_dispatch)
+        else:
+            self.pending_space_activation_target = ""
         Ok(self.dispatch_dom_event(target_id, activation_event, true, true))
 
     me set_dom_text_input(target_id: text, value: text) -> Result<BeDomEventDispatch, text>:
@@ -523,6 +543,7 @@ impl BrowserSession:
         self.loaded_module_urls = []
         self.module_eval_stack = []
         self.wasm_modules = []
+        self.pending_space_activation_target = ""
         self.content_security_policy = self.pending_content_security_policy
         self.pending_content_security_policy = ""
         if url.starts_with("https://guest.runtime/"):
