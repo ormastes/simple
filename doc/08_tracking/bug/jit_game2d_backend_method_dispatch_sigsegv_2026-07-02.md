@@ -104,3 +104,84 @@ Short of that, the existing `_pack_rgba`-style collision detector should be
 extended to (a) cover non-`_`-prefixed / public methods, and (b) hard-fail
 (refuse to JIT, fall back to interpreter) instead of silently emitting a
 possibly-wrong compiled unit that can SIGSEGV.
+
+## 2026-07-27 SimpleOS native entry-closure recurrence
+
+A retained production WM QEMU run reproduced the same impl-less dispatch class
+outside game2d. Kernel ELF
+`9d6da02634c90a1e68e2105b21f35050f3411bd9b85dbb20ec8c42097d3cd1ec`
+booted through scanout, then trapped at `0x08530b3b` in
+`_engine2d_draw_ir_render_batch_embedded`. The instruction is the deliberate
+`ud2` emitted after the compiler's `duck-typed virtual method call` diagnostic,
+not a null-memory page fault.
+
+The first affected expression was `batch.commands.len()`: native entry-closure
+lowering lost the statically declared `[DrawIrCommand]` field type and selected
+an impl-less trait slot. The shared renderer now binds
+`val commands: [DrawIrCommand] = batch.commands` once and uses that typed local
+for every length and render operation in the function. This is a production
+workaround, not proof that structural receiver-type recovery is fixed in the
+compiler; a fresh admitted kernel and QEMU run must show the trap is gone.
+
+## 2026-07-27 verification run: the trap is NOT gone, and the workaround is absent
+
+The section above asks for "a fresh admitted kernel and QEMU run" to confirm the
+trap is gone. That run has now happened, on `fe69fa93afd`:
+
+```
+simpleos_wm_fullscreen_status=fail   reason=guest-render-fault
+baseline/maximized/restored ppm_file_status = missing (all three)
+changed_bytes=0
+serial.log: content-provenance-rejected 0, window-degraded 0, EXCEPTION FRAME 1
+[fault] rip=0x0000000008530b3b errcode=0x0 cs=0x8 cr2=0x0
+```
+
+Same address, same function. Symbolized against the run's own kernel ELF:
+`_engine2d_draw_ir_render_batch_embedded +181`.
+
+Disassembled in 64-bit mode (objdump defaults to 32-bit here and mis-renders the
+REX prefixes as `inc/dec`, which hides the real instruction):
+
+```
+8530b0a:  mov    0x8(%r10),%r9        ; load vtable/impl field
+8530b0e:  test   %r9,%r9
+8530b1c:  jne    8530b3d              ; resolvable -> skip the trap
+8530b22:  lea    0x318f75(%rip),%rdi  ; message @ 0x8849a9e, 210 bytes
+8530b29:  mov    $0xd2,%esi
+8530b2e:  movabs $0x800a750,%r9       ; rt_eprintln_str (NOT noreturn)
+8530b38:  call   *%r9
+8530b3b:  ud2                         ; <- rip
+```
+
+So the `#UD` is the deliberate abort after the compiler's diagnostic, exactly as
+described. The message bytes read:
+
+```
+runtime error: duck-typed virtual method call (trait has no `impl Trait for ...`
+in unit; no vtable) ... run with SIMPLE_EXECUTION_MODE=interpreter; see bug
+jit_game2d_backend_method_dispatch_sigsegv_2026-07-02
+```
+
+### The described workaround is not in the repository
+
+`val commands: [DrawIrCommand] = batch.commands` does not exist at the tested
+tip, at current origin, or in any commit (`git log -S` finds nothing). At origin
+`batch.commands` is still used raw at draw_ir_adv.spl:922, 978, 1014, 1025,
+1033 and 1037. So the section above documents a repair that was never landed;
+this run is not evidence that the typed-local approach fails, only that it was
+never applied.
+
+### Ruled out: the RenderBackend trait mirror
+
+The two `trait RenderBackend` declarations (gc_async_mut and nogc_async_mut) now
+carry IDENTICAL 19-method sets, after `draw_image_blend` was added to the mirror
+(landed 2a8ef679f97). Mirror divergence is therefore no longer a candidate cause
+for this trap; the missing piece is an `impl` absent from the compiled unit, not
+a missing trait method.
+
+### Also cleared, and NOT the cause
+
+The same run shows `content-provenance-rejected 0` and `window-degraded 0`,
+down from 3 and 3. The Aetheric material-admission contract is working; this
+trap is a separate and later failure. Anyone bisecting this cell should not
+confuse the two.
