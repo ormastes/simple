@@ -1,14 +1,31 @@
-# `text.starts_with()` miscompiled into `ByteSpan.starts_with` — HIR resolves methods by NAME ONLY
+# `text.starts_with()` miscompiled into `ByteSpan.starts_with` — cranelift codegen resolves methods by NAME ONLY
 
 - **ID:** text_starts_with_miscompiled_to_bytespan_name_collision_2026-07-27
-- **Date:** 2026-07-27
-- **Area:** `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`
-  (:604-639, :1520) — method resolution for text predicate methods
+- **Date:** 2026-07-27 (root cause corrected 2026-07-27, see *Correction*)
+- **Area:** `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs`
+  (:676-684) — the cross-module `use_map` suffix-scan arm of
+  `compile_method_call_static`
 - **Severity:** high — silent miscompile to an unrelated function, then a page
   fault on garbage. 28 known call sites across the CSS path.
-- **Status:** OPEN, **fix in flight.** Root cause proven by a 1.6s A/B repro.
+- **Status:** OPEN, **fix IN FLIGHT.** Root cause **PROVEN** (five independent
+  proof steps, below). Repro reduced to **0.5s**.
 - **Class:** flat-registry name collision — same family as the known
   `interp env_get` defect (cross-linked below), now for METHODS.
+
+## Correction — the previously recorded location was WRONG (retracted, not deleted)
+
+> **RETRACTED:** earlier revisions of this doc named
+> `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:604-639` and
+> `:1520` as the defect site, and described the fix as widening an
+> "in-tree guard" there. **That is wrong. Do not patch there.**
+>
+> This retraction is kept deliberately. **Two separate sessions already burned
+> themselves patching that Simple file** — each built a FULL compiler and
+> observed **zero effect on all five test cases**. Deleting the wrong location
+> silently would invite a third session to repeat it.
+>
+> `method_calls_literals.spl` never participates in this decision. The real
+> defect is in **Rust**, in `compiler_rust`, downstream of MIR.
 
 ## Symptom
 
@@ -18,8 +35,8 @@ of `.lower()`) binds to **`ByteSpan.starts_with`** — an unrelated struct's
 same-named method. The wrong callee reads the receiver as a `ByteSpan` and
 dereferences garbage.
 
-HIR resolves methods **by name only**. Nothing checks that the receiver is
-actually a `ByteSpan`.
+Method resolution in this codegen arm happens **by name only**. Nothing checks
+that the receiver is actually a `ByteSpan`.
 
 Guest symptom: page fault, `cr2=0x0000001700000008`.
 
@@ -47,16 +64,6 @@ Guest symptom: page fault, `cr2=0x0000001700000008`.
 this is not a missing runtime function — it is resolution picking the wrong
 one when, and only when, the receiver type is unavailable.
 
-## Reproduction (1.6 seconds)
-
-1. Build `dom_color.spl` alone → **all 6 relocations are
-   `rt_string_starts_with`.** Correct.
-2. Add `use common.bytes.span.{ByteSpan}` to the entry graph → the calls on a
-   `.lower()` result **flip to the ByteSpan symbol.**
-
-One variable — whether `ByteSpan` is in the closure. Nothing about the calling
-code changes.
-
 ## Blast radius
 
 **28 affected call sites across the CSS path**, including `apply_decls`,
@@ -68,27 +75,74 @@ Scope is broader in principle: any `text` predicate method (`starts_with`,
 happens to include a struct declaring a same-named method. The CSS path is
 merely where a `ByteSpan` import and `.lower()` results coincide.
 
-## Defect location
+## Proven root cause
 
-`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:604-639` and
-`:1520`. The in-tree guard exists but is **too narrow**: it rescues only
+**Site:** `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:676-684`
+— the `else` arm commented *"Cross-module method: resolve via use_map →
+import_map"* inside `compile_method_call_static` (fn starts ~:289).
 
-- calls that are still *unresolved*, or
-- receivers *already known* to be `str`.
+The loop at **:678** scans **every** `use_map` entry for a key ending in
+`.starts_with`, and **:680** takes the **first hit**, with **no receiver-type
+check whatsoever**:
 
-A receiver whose type was erased is neither, so it falls through to the
-name-keyed custom-method path and binds to `ByteSpan.starts_with`.
+```rust
+let method_suffix = format!(".{}", func_name);
+for (raw, mangled) in ctx.use_map.iter() {
+    if raw.ends_with(&method_suffix) && raw.len() > lookup_name.len() + 1 {
+        resolved_name = Some(mangled.as_str());   // first hit wins
+        break;
+    }
+}
+```
 
-## Diagnostic techniques (both cheap, both general)
+If `common.bytes.span` is in the closure, `ByteSpan.starts_with` is in
+`use_map`, so a bare type-erased `starts_with` resolves to it.
 
-**1. `--emit-archive` instead of a guest lane run.** Build any single module
-with `--emit-archive` for `--target x86_64-unknown-none` (**~6s**, vs ~30
-minutes for the guest lane) and inspect `nm -u` / relocations. This is what
-cracked this bug and the fail-open stub bug. Use it to answer "what does this
-code actually call?" and "did my compiler change do anything?" before
-committing to a long run.
+### Five independent proof steps (do not re-derive)
 
-**2. Two `objdump` traps that produced a wrong conclusion here.**
+1. **It is Rust, not Simple.** The decision lives in `compiler_rust`. This is
+   exactly why the two `.spl` patches were inert.
+2. **MIR is byte-identical** between the working and broken cases.
+   `SIMPLE_DUMP_MIR=probe` shows both emit
+   `MethodCallStatic { func_name: "starts_with" }` — bare and unqualified. No
+   MIR-lowering site *could* be responsible; the divergence is entirely
+   downstream, in codegen.
+3. **Pure-Rust seed reproduces it.** A 20 MB seed
+   (`build/bootstrap/c5-b142/bootstrap-candidate/simple`), containing **no
+   Simple compiler sources at all**, reproduces the exact split — independently
+   confirming the bug lives in `compiler_rust`.
+4. **Marker-symbol proof.** A fresh Rust seed built with five distinct markers,
+   one per candidate resolution branch, fired **exactly one**:
+
+   ```
+   [MARK-A-USEMAP-SUFFIX] fn='probe' lookup='starts_with'
+       raw='ByteSpan.starts_with' -> 'common__bytes__span__ByteSpan_dot_starts_with'
+   ```
+
+   Nothing fired for the control case.
+5. **0.5s repro.** `<scratchpad>/mr/c.spl` (imports `ByteSpan`) vs `mr/g.spl`
+   (no import). One variable; nothing about the calling code changes.
+
+## Verification traps (the reusable value here)
+
+**1. `dom_color.spl` alone does NOT reproduce — verifying with it is a FALSE
+PASS.** Its entry closure never pulls in `common.bytes.span`, so it emits clean
+`rt_string_starts_with` **even on a known-broken compiler**. Any A/B must use
+an entry that imports **both** the text-predicate call site **and**
+`common.bytes.span`. (The earlier "Reproduction" recipe in this doc leaned on
+`dom_color.spl` as step 1 — that step proves nothing on its own.)
+
+**2. Marker-symbol technique.** Emit a **uniquely-named symbol** from a
+candidate site, build, and check with `nm`. This proves execution **without
+relying on stdout**, which can be lost (see
+`reference_native_build_eprint_lost`). This is what finally cracked it.
+
+**3. "Code above executing code did not execute" was the clue the site was
+wrong.** Markers inserted under a condition *strictly weaker* than a
+provably-executing guard **never appeared**. When that happens, stop patching —
+your model of which file runs is wrong, not your patch.
+
+**4. Two `objdump` traps that produced a wrong conclusion here.**
 
 - `objdump` prints **relative call targets WITHOUT an `0x` prefix** — pattern
   matching on `0x` misses them.
@@ -100,22 +154,38 @@ committing to a long run.
 Grep relocations, not disassembly text, when asking whether a symbol is
 referenced.
 
-## Proper fix
+**5. `--emit-archive` instead of a guest lane run.** Build any single module
+with `--emit-archive` for `--target x86_64-unknown-none` (**~6s**, vs ~30
+minutes for the guest lane) and inspect `nm -u` / relocations. Answers "what
+does this code actually call?" and "did my compiler change do anything?"
+before committing to a long run.
 
-Resolve `text` predicate methods by **receiver type**, not by name. Where the
-receiver type is erased, the text lowering must win for `starts_with` /
-`ends_with` / `contains` rather than falling through to a name-keyed struct
-method — i.e. widen the guard at `method_calls_literals.spl:604-639` so an
-erased receiver is not treated as evidence of a custom owner.
+## Fix — IN FLIGHT
 
-A fix is being implemented now. **Do not treat this doc as resolved** until the
-`dom_color.spl` A/B shows `rt_string_starts_with` with `ByteSpan` in the
-closure.
+An agent is implementing an extension of the **`is_bare_builtin_collection_method`
+veto** (`closures_structs.rs:76`, applied at `:364`): add the safe string
+builtins **with arity**, so a **bare, type-erased receiver** reaches
+`rt_string_starts_with` **before** any `use_map` resolution is attempted. The
+veto is the correct layer — it short-circuits the suffix scan rather than
+trying to make the scan smarter.
 
-Regression test: compile a module calling `.starts_with()` on a `.lower()`
-result with `common.bytes.span` in the entry graph, and assert the relocation
-is `rt_string_starts_with`. The `--emit-archive` route makes this a
-seconds-scale test.
+**Do not treat this doc as resolved** until an A/B on an entry importing
+**both** shows `rt_string_starts_with` with `ByteSpan` in the closure.
+
+### Mitigation to REVERT once the real fix lands
+
+The **ByteSpan method-rename mitigation** was applied to dodge the collision by
+renaming the colliding method. It is a workaround, not the fix. **Revert it
+when the veto extension lands** — it must not be left as permanent scar tissue
+in `common.bytes.span`, where a future reader would take the odd name for a
+deliberate API choice.
+
+### Regression test
+
+Compile a module calling `.starts_with()` on a `.lower()` result **with
+`common.bytes.span` in the entry graph**, and assert the relocation is
+`rt_string_starts_with`. The `--emit-archive` route makes this a seconds-scale
+test. Cover `ends_with` and `contains` too.
 
 **Do NOT weaken a gate or a test.** Project rule.
 
