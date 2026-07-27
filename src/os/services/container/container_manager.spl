@@ -22,6 +22,7 @@
 #  - no `{`/`}` literals in strings.
 
 use os.kernel.loader.container_namespace.{ContainerNamespaceView, container_view_rootless, container_view_create, container_view_allows_path, container_view_allows_pid, container_view_path_decision, container_view_pid_decision}
+use os.services.container.container_storage.{LayerStore, ImageLayer, CowSnapshot, Volume}
 
 # ============================================================================
 # Shared-namespace mask bits (which namespaces a pod member shares with its pod)
@@ -82,6 +83,24 @@ struct MonitorHandle:
     one monitor per container, no central root daemon)."""
     handle: u64
     last_state: text
+
+struct MonitorReport:
+    """What the per-container monitor capsule (Podman's `conmon` role) OBSERVED
+    about its workload, waiting to be consumed by sys_monitor. The monitor
+    observes; the manager records. `pending` is true between the monitor
+    posting an observation and sys_monitor consuming it. state is one of
+    "none" | "running" | "exited" | "crashed"; exit_code is meaningful only for
+    exited/crashed (else -1)."""
+    pending: bool
+    state: text
+    exit_code: i64
+
+struct RestartPolicy:
+    """Podman-shaped restart policy: "no" | "on-failure" | "always".
+    `retries` counts restarts already performed against `max_retries`."""
+    policy: text
+    max_retries: i64
+    retries: i64
 
 # ============================================================================
 # Pod side table (a Pod entity owns the shared net/ipc endpoints)
@@ -146,11 +165,19 @@ class ContainerWorld:
     images: [ImageSnapshot]
     lifecycles: [Lifecycle]
     monitors: [MonitorHandle]
+    # Pending observations posted by each container's monitor capsule.
+    reports: [MonitorReport]
+    # Per-container restart policy (default "no").
+    restarts: [RestartPolicy]
     # Authority granted to each container at create time — the parent set the
     # sys_start spawn request must stay a subset of.
     granted_caps: [[text]]
     # Side table of pods.
     pods: [Pod]
+    # §6.4 image/volume store: content-addressed RO layers + COW snapshots +
+    # explicit volumes + ref-tracked GC. Held DIRECTLY (single field hop);
+    # every mutation goes through extract-mutate-writeback.
+    store: LayerStore
     next_id: u64
 
 impl ContainerWorld:
@@ -163,8 +190,11 @@ impl ContainerWorld:
             images: [],
             lifecycles: [],
             monitors: [],
+            reports: [],
+            restarts: [],
             granted_caps: [],
             pods: [],
+            store: LayerStore.new(),
             next_id: 1u64
         )
 
@@ -251,9 +281,26 @@ impl ContainerWorld:
         a_mon = a_mon.push(MonitorHandle(handle: 0u64, last_state: "none"))
         self.monitors = a_mon
 
+        var a_rep = self.reports
+        a_rep = a_rep.push(MonitorReport(pending: false, state: "none", exit_code: -1))
+        self.reports = a_rep
+
+        var a_rs = self.restarts
+        a_rs = a_rs.push(RestartPolicy(policy: "no", max_retries: 0, retries: 0))
+        self.restarts = a_rs
+
         var a_grant = self.granted_caps
         a_grant = a_grant.push(granted)
         self.granted_caps = a_grant
+
+        # §6.4: creating a container branches a COW writable snapshot off the
+        # immutable content-addressed RO base. The base layer itself is added to
+        # the store by the image import path (store_add_layer), not here — a
+        # container may legitimately reference a base that lives in a store the
+        # manager only has a handle to.
+        var st = self.store
+        st.add_snapshot(cow, image_digest, cid, mem)
+        self.store = st
 
         self.next_id = cid + 1u64
         self.ids.len() - 1
@@ -383,3 +430,240 @@ impl ContainerWorld:
         self.granted_caps = a_grant
 
         self.lifecycles[idx]
+
+    # ------------------------------------------------------------------------
+    # sys_monitor — poll each container's MonitorHandle.
+    #
+    # Podman's per-container conmon model: the MONITOR observes the workload,
+    # the MANAGER records the observation. A monitor capsule posts what it saw
+    # (post_monitor_report — this is the model of the monitor's event port; the
+    # capsule is spawned with only that container's caps, so it can observe
+    # nothing else). sys_monitor is the system that sweeps the world and
+    # consumes every pending observation.
+    #
+    # On a workload exit (clean OR crash) we set Lifecycle = exited(code) and
+    # REAP: the monitor handle goes to 0 and the container's authority is torn
+    # down exactly as in sys_stop — view collapsed to rootless, resource domain
+    # freed, granted pouch emptied. That is the §21 rule already proven for
+    # services: a crashed container becomes eligible for its restart policy but
+    # retains NO stale grant. On restart the grants are RE-ACQUIRED
+    # (sys_restart takes a fresh set), never inherited from the dead instance.
+    #
+    # Returns how many containers were reaped by this pass.
+    # ------------------------------------------------------------------------
+    me post_monitor_report(idx: i64, state: text, exit_code: i64):
+        var a_rep = self.reports
+        a_rep[idx] = MonitorReport(pending: true, state: state, exit_code: exit_code)
+        self.reports = a_rep
+
+    fn report_pending(self, idx: i64) -> bool:
+        self.reports[idx].pending
+
+    me sys_monitor() -> i64:
+        var reaped = 0
+        var i = 0
+        while i < self.ids.len():
+            val r = self.reports[i]
+            if r.pending:
+                if r.state == "exited" or r.state == "crashed":
+                    # Record the exact exit code the monitor observed.
+                    var a_life = self.lifecycles
+                    a_life[i] = Lifecycle(state: "exited", exit_code: r.exit_code)
+                    self.lifecycles = a_life
+
+                    # Reap: the per-container monitor is done.
+                    var a_mon = self.monitors
+                    a_mon[i] = MonitorHandle(handle: 0u64, last_state: "reaped")
+                    self.monitors = a_mon
+
+                    # §21 — an exited container retains NO stale grant. Collapse
+                    # the kernel view to rootless (resolves nothing), free the
+                    # resource domain, drop the granted pouch.
+                    var a_views = self.views
+                    a_views[i] = NamespaceView(view: container_view_rootless(), net_handle: 0u64, ipc_handle: 0u64)
+                    self.views = a_views
+
+                    var a_dom = self.domains
+                    a_dom[i] = ResourceDomain(cpu: 0u64, mem: 0u64, io: 0u64, pids: 0u64)
+                    self.domains = a_dom
+
+                    var a_grant = self.granted_caps
+                    a_grant[i] = []
+                    self.granted_caps = a_grant
+
+                    reaped = reaped + 1
+                else:
+                    # Still alive — only the last-known state moves.
+                    var a_mon_live = self.monitors
+                    a_mon_live[i] = MonitorHandle(handle: self.monitors[i].handle, last_state: r.state)
+                    self.monitors = a_mon_live
+
+                # Observation consumed.
+                var a_done = self.reports
+                a_done[i] = MonitorReport(pending: false, state: r.state, exit_code: r.exit_code)
+                self.reports = a_done
+            i = i + 1
+        reaped
+
+    # ------------------------------------------------------------------------
+    # Restart policy — a crashed container is ELIGIBLE for restart, but the
+    # restart re-acquires authority from scratch.
+    # ------------------------------------------------------------------------
+    me set_restart_policy(idx: i64, policy: text, max_retries: i64):
+        var a_rs = self.restarts
+        a_rs[idx] = RestartPolicy(policy: policy, max_retries: max_retries, retries: 0)
+        self.restarts = a_rs
+
+    fn restart_policy_of(self, idx: i64) -> text:
+        self.restarts[idx].policy
+
+    fn restart_retries(self, idx: i64) -> i64:
+        self.restarts[idx].retries
+
+    fn restart_eligible(self, idx: i64) -> bool:
+        val lc = self.lifecycles[idx]
+        if lc.state != "exited":
+            return false
+        val rp = self.restarts[idx]
+        if rp.retries >= rp.max_retries:
+            return false
+        if rp.policy == "always":
+            return true
+        if rp.policy == "on-failure":
+            return lc.exit_code != 0
+        false
+
+    # sys_restart — bring an exited container back. EVERY grant is supplied
+    # afresh by the caller (root/pids/caps/quotas): nothing is inherited from
+    # the dead instance, because sys_monitor already emptied all of it. This is
+    # the §21 service rule applied to containers.
+    me sys_restart(idx: i64, reacquired: [text], root: text, pids: [u64], cpu: u64, mem: u64, io: u64, pid_quota: u64) -> SpawnRequest:
+        # Re-acquire the namespace view from a rootless base + the freshly
+        # declared handles (never the stale collapsed view).
+        var a_views = self.views
+        a_views[idx] = NamespaceView(view: container_view_create(root, pids), net_handle: 0u64, ipc_handle: 0u64)
+        self.views = a_views
+
+        # Re-mint the resource domain.
+        var a_dom = self.domains
+        a_dom[idx] = ResourceDomain(cpu: cpu, mem: mem, io: io, pids: pid_quota)
+        self.domains = a_dom
+
+        # Re-acquire the capability pouch.
+        var a_grant = self.granted_caps
+        a_grant[idx] = reacquired
+        self.granted_caps = a_grant
+
+        var a_rs = self.restarts
+        val rp = self.restarts[idx]
+        a_rs[idx] = RestartPolicy(policy: rp.policy, max_retries: rp.max_retries, retries: rp.retries + 1)
+        self.restarts = a_rs
+
+        # Inlined sys_start (assemble spec → spawn request → running + monitor).
+        val spec = self.build_spec(idx)
+        val req = self.to_spawn_request(spec)
+
+        var a_life = self.lifecycles
+        a_life[idx] = Lifecycle(state: "running", exit_code: -1)
+        self.lifecycles = a_life
+
+        var a_mon = self.monitors
+        a_mon[idx] = MonitorHandle(handle: self.ids[idx].id, last_state: "running")
+        self.monitors = a_mon
+
+        var a_rep = self.reports
+        a_rep[idx] = MonitorReport(pending: false, state: "running", exit_code: -1)
+        self.reports = a_rep
+        req
+
+    # ------------------------------------------------------------------------
+    # §6.4 image / volume store surface (extract-mutate-writeback throughout).
+    # ------------------------------------------------------------------------
+    me store_add_layer(digest: text, parent: text, size: u64) -> bool:
+        var st = self.store
+        val ok = st.add_layer(digest, parent, size)
+        self.store = st
+        ok
+
+    me attach_volume(idx: i64, name: text, dest: text, persistent: bool):
+        var st = self.store
+        st.add_volume(name, dest, persistent, self.ids[idx].id)
+        self.store = st
+
+    # Atomic rollback of a container to its RO base. Returns the base digest,
+    # or "" when nothing changed.
+    me snapshot_rollback_of(idx: i64) -> text:
+        var st = self.store
+        val base = st.rollback_owner(self.ids[idx].id)
+        self.store = st
+        base
+
+    me snapshot_write_of(idx: i64, bytes: u64) -> bool:
+        var st = self.store
+        val ok = st.snapshot_write(self.ids[idx].id, bytes)
+        self.store = st
+        ok
+
+    fn layer_refcount_of(self, digest: text) -> i64:
+        self.store.refcount(digest)
+
+    fn store_layer_count(self) -> i64:
+        self.store.layer_count()
+
+    fn store_has_layer(self, digest: text) -> bool:
+        self.store.has_layer(digest)
+
+    fn snapshot_live_of(self, idx: i64) -> bool:
+        self.store.snapshot_live(self.ids[idx].id)
+
+    fn snapshot_used_of(self, idx: i64) -> u64:
+        self.store.snapshot_used(self.ids[idx].id)
+
+    fn snapshot_layer_of(self, idx: i64) -> text:
+        self.store.snapshot_layer_id(self.ids[idx].id)
+
+    fn live_snapshot_count(self) -> i64:
+        self.store.live_snapshot_count()
+
+    fn volume_live(self, name: text) -> bool:
+        self.store.volume_live(name)
+
+    fn live_volume_count(self) -> i64:
+        self.store.live_volume_count()
+
+    fn was_reclaimed(self, digest: text) -> bool:
+        self.store.was_reclaimed(digest)
+
+    # ------------------------------------------------------------------------
+    # sys_gc — ref-tracked reclaim.
+    #
+    # For every container that is `exited` or `stopped`: release its COW
+    # writable snapshot (dropping the reference it held on its RO base chain)
+    # and drop its NON-persistent volumes. EXPLICIT PERSISTENT VOLUMES SURVIVE
+    # container removal — the Podman/§6.4 rule. Then run the ref-counted layer
+    # collection, which reclaims ONLY layers whose refcount is 0; a layer still
+    # referenced by a live container (directly or through its parent chain) is
+    # never touched.
+    #
+    # Returns the digests reclaimed by this pass.
+    # ------------------------------------------------------------------------
+    me sys_gc() -> [text]:
+        var st = self.store
+        var i = 0
+        while i < self.ids.len():
+            val state = self.lifecycles[i].state
+            if state == "exited" or state == "stopped":
+                val owner = self.ids[i].id
+                st.release_snapshot(owner)
+                st.drop_container_volumes(owner)
+                # The ImageSnapshot component loses its writable layer; the RO
+                # base digest is KEPT so the container can be re-created from
+                # the same content-addressed base.
+                var a_img = self.images
+                val im = a_img[i]
+                a_img[i] = ImageSnapshot(base_digest: im.base_digest, cow_layer: "", quota: 0u64)
+                self.images = a_img
+            i = i + 1
+        val reclaimed = st.gc_run(false)
+        self.store = st
+        reclaimed
