@@ -42,3 +42,67 @@ fix lands; per repo convention for filed defects it stays visibly red (no
 `skip()` — precedent: `rv32_trap_completeness_spec.spl`). Interpreter
 semantics may differ from native; the spec's value is as the native-contract
 pin.
+
+## Refined root cause (SIMPLE_BOOTSTRAP_DIAG run)
+
+The "stub" modules are **header-only registry entries**: files OUTSIDE the
+entry closure get parsed for name/imports/exports only, so their decl dicts
+are nil while `.name`, `.imports`, `.exports` read correctly. Diag evidence —
+the swept siblings themselves are partial:
+
+```
+[reexport-chase] mod=std.nogc_sync_mut.io.pipe wanted=Read ... found=true
+                 mname=src/std/nogc_sync_mut/io/pipe.spl fns=-1
+```
+
+`resolve_package_sibling_symbols` sweeps ALL `modules_by_name` keys under the
+package prefix — including partial entries — and the facade-glob chase then
+walks the partial module's imports into `std.io.traits` (also partial), where
+the trait arm unwraps the phantom.
+
+## Mitigation (landed 2026-07-27)
+
+Skip partial modules in the sibling sweep
+(`resolve_package_sibling_symbols`): register a sibling's glob symbols only
+when `(sibling_mod ?? module).functions.len() >= 0`. A partial sibling
+contributes no compiled symbols, so this is semantically clean — packages'
+bare cross-file calls only ever resolve against closure members.
+`register_imported_symbol` stays byte-pristine.
+
+Why not guard in `register_imported_symbol`: FOUR shapes all break the seed
+build with `hir: Unsupported feature: cannot infer field type ... field
+'imported_const_decls'` (a pristine-file control build compiles clean, so the
+coupling is real, not cache poisoning):
+1. `var ... = nil` + conditional assign on all six lookups
+2. single-line if-expression initializers on all six
+3. single-line if-expression on the trait lookup alone (fresh cache)
+4. `traits.len() > 0` added to the elif condition, and separately as a
+   nested if inside the arm around `lower_trait` (fresh caches)
+Meanwhile an added `eprint` statement at existing nesting compiled fine. The
+seed's field-type inference for `imported_const_decls` is hair-trigger
+sensitive to control-flow shape in this one function — that fragility
+deserves its own fix.
+
+The phantom-Some hazard remains for any OTHER path that hands a partial
+module to `register_imported_symbol` (direct imports of out-of-closure
+modules, glob-import path); the real fix below covers those.
+
+## Real fix
+
+- Make native nil-receiver `Dict.get` return nil (align with `.len()`'s
+  defined -1 behavior), with a deliberate-red spec on a nil-dict receiver.
+- Root-cause why the `std.io.traits` Module object is a stub with nil dicts at
+  sweep time (alias-key registration path in `resolve_module_key`?).
+- Harden seed field-type inference so a guarded initializer among sibling
+  `val`s does not detach `imported_const_decls` from its inferred type.
+
+## Repro
+
+Stage-4 native-build of `src/app/cli/main.spl` (full closure, llvm backend) at
+main ≥ d07208d1c4f without the mitigation; crash at HIR module 32.
+
+## Related
+
+- `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md` (Lane H)
+- `reference_jit_option_i64_value3_none_collision` (memory)
+- Trap D note in `module_lowering.spl` `lower_parser_module_unstub`

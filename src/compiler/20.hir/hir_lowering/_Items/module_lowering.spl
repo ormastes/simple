@@ -834,7 +834,17 @@ impl HirLowering:
                 continue
             val sibling_mod: Module? = self.modules_by_name.get(sibling_name)
             if sibling_mod != nil:
-                self.register_glob_imported_symbols(sibling_mod, sibling_name, sibling_span)
+                # Header-only registry entries (files outside the entry
+                # closure, parsed for name/imports/exports only) carry nil
+                # decl dicts: functions.len() reads -1 and native `.get()` on
+                # those dicts returns a phantom non-nil Option — the sweep
+                # then chases the partial module's imports through the
+                # facade-glob path and lower_trait segfaults unwrapping the
+                # phantom (std.io.traits, stage-4 bootstrap). A partial
+                # sibling contributes no compiled symbols, so skip it. See
+                # doc/08_tracking/bug/hir_stub_module_nil_dict_get_phantom_some_2026-07-27.md
+                if (sibling_mod ?? module).functions.len() >= 0:
+                    self.register_glob_imported_symbols(sibling_mod, sibling_name, sibling_span)
 
     # Uniquely-named entry point for the driver's unstub `-c`/`run` path.
     # `lowering.lower_module(...)` from the driver never enters this impl's body
