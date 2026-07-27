@@ -824,3 +824,12 @@ implementation in progress / target evidence blocked
   `-Wall -Wextra -Werror`, proves representative denials return `EPERM`, and is
   wired into the focused GitHub browser-renderer sandbox workflow. No Simple
   compiler or bootstrap command ran.
+- HTTPS evidence: Focused `simple-runtime` Rust tests prove the platform trust
+  verifier initializes and the TLS client socket installs positive bounded
+  read/write deadlines. These tests do not replace the still-open live
+  certificate identity matrix.
+- HSTS parsing: `max-age` now accepts ASCII digits only, so malformed signed
+  values such as `-1` are ignored before policy mutation instead of clearing a
+  valid policy while valid `max-age=0` still clears it. The focused
+  BrowserSession scenario and mirrored manual cover both outcomes; executable
+  Simple evidence remains compiler-blocked and was not rerun.

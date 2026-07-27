@@ -2,7 +2,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|---------|
-| 20 | 20 | 0 | 0 |
+| 24 | 24 | 0 | 0 |
 
 ## Covered boundaries
 
@@ -23,6 +23,8 @@
   and fetch redirect target before queuing another request.
 - Upgrade HSTS hosts and included subdomains until deterministic max-age
   expiry.
+- Ignore malformed signed HSTS `max-age` directives without clearing an
+  already valid policy while retaining `max-age=0` as explicit removal.
 - Restore only valid, unexpired, unique HSTS policies from wall-clock profile
   state, rejecting public suffixes and IP literals.
 - Bound recursive Promise microtask work to eight 1000-callback batches per
