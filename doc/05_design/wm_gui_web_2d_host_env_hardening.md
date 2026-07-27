@@ -79,7 +79,7 @@ marks damage.
 
 Pure validators return `""` for valid evidence or one stable reason slug.
 Production acceptance rejects empty/mismatched IDs, missing target/callback,
-unchanged revision after mutation, compatibility renderer, fallback, zero
+non-increasing revision after mutation, compatibility renderer, fallback, zero
 handle, incomplete submission, CPU mirror/cache readback, invalid dimensions or
 stride, blank output, checksum zero, and absent/invalid RenderDoc artifacts.
 

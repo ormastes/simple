@@ -177,12 +177,12 @@ expect(receipt(nonblank: 0).validation_reason()).to_equal("blank-frame")
 
 ### live framebuffer evidence classification
 
-#### accepts only a changed device frame tied to the screen event receipt
+#### accepts only a forward device frame tied to the screen event receipt
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -195,6 +195,8 @@ expect(host_readback_evidence_passes(complete.replace("glyph_crop_expected_sha25
 expect(host_readback_evidence_passes(complete.replace("glyph_crop_live_match=true", "glyph_crop_live_match=false"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("baseline_nonce=1", "baseline_nonce=2"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("input_revision=8", "input_revision=7"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("input_revision=8", "input_revision=6"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("baseline_revision=7", "baseline_revision=999999999999999999999999999999"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("input_frame_checksum=101", "input_frame_checksum=99"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("input_backend=vulkan", "input_backend=cpu"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("baseline_readback_source=device_readback", "baseline_readback_source=cpu_mirror"))).to_be(false)

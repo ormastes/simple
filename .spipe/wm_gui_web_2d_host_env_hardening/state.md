@@ -1033,3 +1033,8 @@ Tracking split:
   `status=fail` could be hidden by a later pass row. Both receipts now reuse one
   strict parser that rejects malformed/empty/duplicate keys. The focused Node
   mutation requires the normalized composition-artifact failure.
+- readback-revision-order: The host classifier previously required baseline and
+  input revisions only to differ, so a backwards revision could qualify as a
+  screen-driven render. It now compares validated arbitrary-width decimal
+  values and requires `input_revision > baseline_revision`; equal, backwards,
+  malformed, duplicate, and overflow-sized backwards mutations fail closed.

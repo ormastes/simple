@@ -66,7 +66,8 @@ TestHostEnv -> ExistingCapabilityProbes
    marks damage and advances the existing content revision.
 5. The existing `SharedWmScene -> DrawIrComposition -> Engine2D` path submits.
 6. Existing backend provenance/readback and hosted snapshot fields bind the
-   same event ID to the resulting frame.
+   same event ID to the resulting frame and require its arbitrary-width decimal
+   revision to advance beyond the baseline.
 
 ## Rejected Patterns
 
