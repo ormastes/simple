@@ -1071,6 +1071,41 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   the legacy positive advance fallback; and trim `sfnt_glyf.spl` below 800
   lines. Add stale-cookie, whitespace, asset-root, and renderer cache coverage.
 
+### 2026-07-27 reviewed font PASS and Vulkan availability blocker
+
+- No compiler bootstrap was run. MoltenVK 1.4.1 and Vulkan loader/tools 1.4.350.1
+  are already installed and `vulkaninfo` enumerates the Apple M4 through
+  `DRIVER_ID_MOLTENVK`; installation is not the blocker.
+- The reviewed caller-owned SFNT probe passes a strict zero-stub native build:
+  exact Bungee `B` at 100 px is 62x72 with 4,464 pixels and nonzero alpha;
+  stale measure/render cookies clear, and space remains a valid advance-only
+  glyph. `sfnt_glyf.spl` is 798 lines.
+- A new focused `FontRenderer` native probe also passes through the active
+  scalar staging path: positive quads and atlas alpha, positive cold
+  rasterization, and a warm cache hit with zero rerasterization.
+- With an already-retained diagnostic hosted-GPU projection, the complete
+  `engine2d_font_state_native_probe.spl` links and passes 24 pt at 300 DPI,
+  selected Bungee identity, quads, atlas alpha, and cold/warm cache receipts.
+  This is behavioral evidence only because that runtime projection lacks the
+  canonical trusted-build provenance required for release evidence.
+- The real macOS Vulkan live harness then compiled successfully, but its
+  bounded launch selected `cpu` and wrote
+  `Vulkan shared session initialization failed: availability`. The three live
+  cycles are consumed. Next, build a provenance-bound host-GPU runtime with
+  Vulkan enabled (an app/runtime build, not a compiler bootstrap), extend the
+  trusted manifest with anchored ICD/MoltenVK hashes and live loaded-image
+  binding, then rerun capture and ordered focus/pointer/key evidence. Metal and
+  QEMU remain gated behind host Vulkan PASS.
+- Final review prevents merging the font patch yet: the renderer probe must
+  force `try_load_selected_bytes` rather than allowing an installed font dylib,
+  and must require every direct raster/reconstruction receipt unconditionally
+  so vector/bitmap fallback cannot produce a false PASS. Add asset-root and
+  zero-advance renderer coverage. The deployed interpreter is also stale
+  against the current unit surface (`unwrap on None` in the existing SFNT spec;
+  removed `font_ffi` export in the existing FFI spec), so those runs are not
+  PASS. Keep the implementation local until a fresh bounded session repairs
+  the probe and produces honest native evidence.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
