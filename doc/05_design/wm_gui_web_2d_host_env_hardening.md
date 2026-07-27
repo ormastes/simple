@@ -97,6 +97,9 @@ That snapshot must report completed `1024x720` ARGB8888 readback with stride
 `4096`; the host gate rejects missing or inconsistent receipt geometry.
 The strict Vulkan probe requires 256 pixels and the canonical clear/rectangle
 checksums; empty, short, overlong, or correlated forged checksums fail closed.
+Its Windows scalar receipt is admissible because the producer compares every
+pixel and verifies post-present cache equality; retained pixel files remain
+mandatory only for browser, correlated framebuffer, and RenderDoc rows.
 The host aggregate resolves duplicate-safe baseline/input capture bindings and
 requires regular no-follow paths before re-hashing both current PPMs and
 admitting `framebuffer_readback`.
