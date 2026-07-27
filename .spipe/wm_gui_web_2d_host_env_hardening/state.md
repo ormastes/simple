@@ -886,3 +886,9 @@ Tracking split:
   binds `native_host` or `emulated` into the frame hash, and the aggregate
   accepts retained native ARM/RISC-V receipts from any coordinator while
   keeping emulated receipts blocked.
+- render-matrices: Removed both unconditional integration fail helpers. The
+  provenance matrix now exercises real strict/translated Engine2D facade paths,
+  and the surface matrix retains a frozen 4x3 absolute oracle across 100 real
+  CPU Engine2D present/readback frames. Separate physical/software Vulkan ICD
+  qualification remains in the external-host TODO rather than being fabricated
+  inside one process.

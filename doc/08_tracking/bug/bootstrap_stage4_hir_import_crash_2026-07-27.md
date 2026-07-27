@@ -62,6 +62,15 @@ change instead. An earlier strict-wrapper attempt did not reach Stage 4 because
 a tracked documentation edit changed the dirty-state fingerprint during
 provenance measurement; Stage 2 and Stage 3 had already passed sanity.
 
+The same release executable also dumped core with exit 139 before reporting a
+scenario for:
+
+```text
+timeout 60 release/x86_64-unknown-linux-gnu/simple test --no-session-daemon test/02_integration/rendering/engine2d_render_surface_matrix_spec.spl --mode=interpreter --clean
+```
+
+That command was also not retried.
+
 ## Required Fix
 
 Preserve the nil-dictionary regression as RED until native reference semantics
