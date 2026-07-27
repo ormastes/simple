@@ -54,6 +54,18 @@ pub struct BrowserRendererFrameDecodeResult:
     solid_material_count: i32
     solid_material_sha256: text
 
+pub struct BrowserRendererActionDecodeResult:
+    ok: bool
+    reason: text
+    kind: text
+    now_ms: i64
+    event_id: i64
+    x: i64
+    y: i64
+    key_code: i64
+    pressed: bool
+    value: text
+
 fn _browser_renderer_empty_message() -> BrowserRendererMessage:
     BrowserRendererMessage(kind: "", generation: 0, request_id: 0, payload: "")
 
@@ -71,6 +83,17 @@ fn _browser_renderer_positive_i64(raw: text) -> i64:
     if parsed <= 0 or str(parsed) != raw:
         return -1
     parsed
+
+fn _browser_renderer_canonical_i64(raw: text) -> bool:
+    val parsed = raw.to_i64() ?? 0
+    raw != "" and str(parsed) == raw
+
+fn _browser_renderer_flag(raw: text) -> i64:
+    if raw == "0":
+        return 0
+    if raw == "1":
+        return 1
+    -1
 
 fn _browser_renderer_header_end(buffer: text) -> i64:
     var index: i64 = 0
@@ -191,6 +214,182 @@ pub fn browser_renderer_decoder_feed(decoder: BrowserRendererDecoder, chunk: tex
             payload: _browser_renderer_byte_slice(buffer, payload_start, total)
         )
     )
+
+fn _browser_renderer_action_reject(reason: text) -> BrowserRendererActionDecodeResult:
+    BrowserRendererActionDecodeResult(
+        ok: false,
+        reason: reason,
+        kind: "",
+        now_ms: 0,
+        event_id: 0,
+        x: 0,
+        y: 0,
+        key_code: 0,
+        pressed: false,
+        value: ""
+    )
+
+fn _browser_renderer_action(
+    kind: text,
+    now_ms: i64,
+    event_id: i64,
+    x: i64,
+    y: i64,
+    key_code: i64,
+    pressed: bool,
+    value: text
+) -> BrowserRendererActionDecodeResult:
+    BrowserRendererActionDecodeResult(
+        ok: true,
+        reason: "ok",
+        kind: kind,
+        now_ms: now_ms,
+        event_id: event_id,
+        x: x,
+        y: y,
+        key_code: key_code,
+        pressed: pressed,
+        value: value
+    )
+
+fn _browser_renderer_length_payload(
+    message: BrowserRendererMessage,
+    tag: text,
+    kind: text,
+    max_bytes: i64
+) -> BrowserRendererActionDecodeResult:
+    val header_end = _browser_renderer_header_end(message.payload)
+    if header_end < 0 or header_end >= BROWSER_RENDERER_MAX_HEADER_BYTES:
+        return _browser_renderer_action_reject("malformed-action")
+    val fields = _browser_renderer_byte_slice(message.payload, 0, header_end).split("\t")
+    if fields.len() != 3 or fields[0] != tag:
+        return _browser_renderer_action_reject("malformed-action")
+    val event_id = _browser_renderer_positive_i64(fields[1])
+    val byte_length = fields[2].to_i64() ?? -1
+    if (event_id < 0 or byte_length < 0 or byte_length > max_bytes or
+        str(byte_length) != fields[2] or message.payload.len() != header_end + 1 + byte_length):
+        return _browser_renderer_action_reject("malformed-action")
+    _browser_renderer_action(
+        kind, 0, event_id, 0, 0, 0, false,
+        _browser_renderer_byte_slice(message.payload, header_end + 1, message.payload.len())
+    )
+
+pub fn browser_renderer_advance_encode(
+    generation: i64, request_id: i64, now_ms: i64
+) -> BrowserRendererEncodeResult:
+    if now_ms < 0:
+        return _browser_renderer_reject_encode("invalid-action")
+    browser_renderer_message_encode("advance", generation, request_id, "A1\t{now_ms}")
+
+pub fn browser_renderer_pointer_encode(
+    generation: i64,
+    request_id: i64,
+    event_id: i64,
+    x: i64,
+    y: i64,
+    pressed: bool
+) -> BrowserRendererEncodeResult:
+    if (event_id <= 0 or x < -BROWSER_RENDERER_MAX_COORDINATE or
+        x > BROWSER_RENDERER_MAX_COORDINATE or
+        y < -BROWSER_RENDERER_MAX_COORDINATE or y > BROWSER_RENDERER_MAX_COORDINATE):
+        return _browser_renderer_reject_encode("invalid-action")
+    val flag = if pressed: 1 else: 0
+    browser_renderer_message_encode(
+        "pointer", generation, request_id,
+        "P1\t{event_id}\t{x}\t{y}\t{flag}"
+    )
+
+pub fn browser_renderer_key_encode(
+    generation: i64,
+    request_id: i64,
+    event_id: i64,
+    key_code: i64,
+    pressed: bool
+) -> BrowserRendererEncodeResult:
+    if event_id <= 0 or key_code < 0 or key_code > 1114111:
+        return _browser_renderer_reject_encode("invalid-action")
+    val flag = if pressed: 1 else: 0
+    browser_renderer_message_encode(
+        "key", generation, request_id,
+        "K1\t{event_id}\t{key_code}\t{flag}"
+    )
+
+pub fn browser_renderer_text_encode(
+    generation: i64, request_id: i64, event_id: i64, value: text
+) -> BrowserRendererEncodeResult:
+    val byte_length = text_to_bytes(value).len()
+    if event_id <= 0 or byte_length.to_i64() > BROWSER_RENDERER_MAX_TEXT_BYTES:
+        return _browser_renderer_reject_encode("invalid-action")
+    browser_renderer_message_encode(
+        "text", generation, request_id, "T1\t{event_id}\t{byte_length}\n{value}"
+    )
+
+pub fn browser_renderer_chrome_encode(
+    generation: i64, request_id: i64, event_id: i64, control: text
+) -> BrowserRendererEncodeResult:
+    if (event_id <= 0 or
+        (control != "back" and control != "forward" and control != "stop" and
+        control != "home" and control != "favorite" and control != "address")):
+        return _browser_renderer_reject_encode("invalid-action")
+    val byte_length = text_to_bytes(control).len()
+    browser_renderer_message_encode(
+        "chrome", generation, request_id,
+        "C1\t{event_id}\t{byte_length}\n{control}"
+    )
+
+pub fn browser_renderer_action_decode(
+    message: BrowserRendererMessage
+) -> BrowserRendererActionDecodeResult:
+    if message.kind == "text":
+        return _browser_renderer_length_payload(
+            message, "T1", "text", BROWSER_RENDERER_MAX_TEXT_BYTES
+        )
+    if message.kind == "chrome":
+        val decoded = _browser_renderer_length_payload(message, "C1", "chrome", 16)
+        if (not decoded.ok or
+            (decoded.value != "back" and decoded.value != "forward" and
+             decoded.value != "stop" and decoded.value != "home" and
+             decoded.value != "favorite" and decoded.value != "address")):
+            return _browser_renderer_action_reject("invalid-control")
+        return decoded
+    val fields = message.payload.split("\t")
+    if message.kind == "advance":
+        if fields.len() != 2 or fields[0] != "A1" or not _browser_renderer_canonical_i64(fields[1]):
+            return _browser_renderer_action_reject("malformed-action")
+        val now_ms = fields[1].to_i64() ?? -1
+        if now_ms < 0:
+            return _browser_renderer_action_reject("invalid-time")
+        return _browser_renderer_action("advance", now_ms, 0, 0, 0, 0, false, "")
+    if message.kind == "pointer":
+        if (fields.len() != 5 or fields[0] != "P1" or
+            _browser_renderer_positive_i64(fields[1]) < 0 or
+            not _browser_renderer_canonical_i64(fields[2]) or
+            not _browser_renderer_canonical_i64(fields[3]) or
+            _browser_renderer_flag(fields[4]) < 0):
+            return _browser_renderer_action_reject("malformed-action")
+        val x = fields[2].to_i64() ?? 0
+        val y = fields[3].to_i64() ?? 0
+        if (x < -BROWSER_RENDERER_MAX_COORDINATE or x > BROWSER_RENDERER_MAX_COORDINATE or
+            y < -BROWSER_RENDERER_MAX_COORDINATE or y > BROWSER_RENDERER_MAX_COORDINATE):
+            return _browser_renderer_action_reject("invalid-coordinate")
+        return _browser_renderer_action(
+            "pointer", 0, fields[1].to_i64() ?? 0, x, y, 0,
+            _browser_renderer_flag(fields[4]) == 1, ""
+        )
+    if message.kind == "key":
+        if (fields.len() != 4 or fields[0] != "K1" or
+            _browser_renderer_positive_i64(fields[1]) < 0 or
+            not _browser_renderer_canonical_i64(fields[2]) or
+            _browser_renderer_flag(fields[3]) < 0):
+            return _browser_renderer_action_reject("malformed-action")
+        val key_code = fields[2].to_i64() ?? -1
+        if key_code < 0 or key_code > 1114111:
+            return _browser_renderer_action_reject("invalid-key-code")
+        return _browser_renderer_action(
+            "key", 0, fields[1].to_i64() ?? 0, 0, 0, key_code,
+            _browser_renderer_flag(fields[3]) == 1, ""
+        )
+    _browser_renderer_action_reject("wrong-kind")
 
 fn _browser_renderer_normalize_draw_ir(composition: DrawIrComposition) -> DrawIrComposition:
     var batches: [DrawIrBatch] = []

@@ -4,10 +4,16 @@ use std.spec.*
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_MAX_PAYLOAD_BYTES,
     BrowserRendererMessage,
+    browser_renderer_action_decode,
+    browser_renderer_advance_encode,
+    browser_renderer_chrome_encode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_frame_decode, browser_renderer_frame_encode,
     browser_renderer_frame_encode_with_witness,
-    browser_renderer_message_encode
+    browser_renderer_key_encode,
+    browser_renderer_message_encode,
+    browser_renderer_pointer_encode,
+    browser_renderer_text_encode
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir
@@ -26,6 +32,61 @@ fn _renderer_protocol_fixture() -> DrawIrComposition:
     )
 
 describe "isolated browser renderer protocol":
+    it "round-trips bounded actions and rejects ambiguous payloads":
+        val pointer_wire = browser_renderer_pointer_encode(7, 1, 9, -3, 4, true)
+        expect(pointer_wire.ok).to_be(true)
+        val pointer_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), pointer_wire.wire
+        )
+        val pointer = browser_renderer_action_decode(pointer_message.message)
+        expect(pointer.ok).to_be(true)
+        expect(pointer.kind).to_equal("pointer")
+        expect(pointer.event_id).to_equal(9)
+        expect(pointer.x).to_equal(-3)
+        expect(pointer.y).to_equal(4)
+        expect(pointer.pressed).to_be(true)
+
+        val advance_wire = browser_renderer_advance_encode(7, 1, 1234)
+        val advance_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), advance_wire.wire
+        )
+        expect(browser_renderer_action_decode(advance_message.message).now_ms).to_equal(1234)
+
+        val key_wire = browser_renderer_key_encode(7, 1, 10, 65, false)
+        val key_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), key_wire.wire
+        )
+        expect(browser_renderer_action_decode(key_message.message).key_code).to_equal(65)
+
+        val text_wire = browser_renderer_text_encode(7, 1, 11, "h\u00e9llo\nworld")
+        val text_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), text_wire.wire
+        )
+        expect(browser_renderer_action_decode(text_message.message).value).to_equal("h\u00e9llo\nworld")
+
+        val chrome_wire = browser_renderer_chrome_encode(7, 1, 12, "forward")
+        val chrome_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), chrome_wire.wire
+        )
+        expect(browser_renderer_action_decode(chrome_message.message).value).to_equal("forward")
+
+        expect(browser_renderer_action_decode(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 1,
+            payload: "P1\t09\t0\t0\t1"
+        )).ok).to_be(false)
+        expect(browser_renderer_action_decode(BrowserRendererMessage(
+            kind: "text", generation: 7, request_id: 1,
+            payload: "T1\t1\t2\nthree"
+        )).ok).to_be(false)
+        expect(browser_renderer_action_decode(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 1,
+            payload: "C1\t1\t6\nreload"
+        )).ok).to_be(false)
+        expect(browser_renderer_action_decode(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 1,
+            payload: "A1\t1\ttrailing"
+        )).ok).to_be(false)
+
     it "round-trips canonical DrawIR and fails closed on malformed stale duplicate or oversized frames":
         val encoded = browser_renderer_frame_encode(_renderer_protocol_fixture(), 7, 1)
         expect(encoded.ok).to_be(true)
