@@ -60,13 +60,56 @@ Two independent goal-blocking fixes are stuck behind this:
    chain. Compiler-side; must not be worked around in the library, since `unwrap`
    on `Err` has to abort.
 
-## Candidate resolutions
+## CORRECTION (2026-07-27): it is a stale-artifact problem, not a source defect
 
-1. **Compile stage 1 with the Rust seed directly**, bypassing the wrapper's
-   hardcoded driver — invoke `build/tmp/claude_simple native-build --source ...`
-   with the stage-1 arguments rather than `build bootstrap`. The seed's extern
-   table is in Rust and already carries the symbol. Least invasive if the
-   argument set can be reproduced.
+The original diagnosis below said the deployed pure-Simple binary was at fault
+and that the Rust seed "already carries the symbol". **The second half is wrong**,
+and the first half is incomplete. Both available compiler binaries are stale
+builds that predate the symbol's registration:
+
+```
+grep rt_transient_array_scope_begin src/compiler_rust/common/src/runtime_symbols.rs
+  :130   "rt_transient_array_scope_begin",          <- registered in CURRENT source
+grep ... src/compiler_rust/compiler/src/interpreter_extern/mod.rs
+  :283   "rt_transient_array_scope_begin",          <- wired to memory::rt_transient_array_scope_begin
+
+strings build/tmp/claude_simple                  | grep -c rt_transient_array_scope_begin  ->  0
+strings bin/release/x86_64-unknown-linux-gnu/simple | grep -c rt_transient_array_scope_begin ->  0
+```
+
+The current Rust source registers the extern; neither binary contains the string
+at all. `build/tmp/claude_simple` has an mtime NEWER than the extern commit
+(2026-07-26 01:52 vs 2026-07-25 14:24), which is what misled me — that mtime is
+when the binary was copied, not when it was built.
+
+Running stage 1 with the seed directly therefore fails **identically**, and the
+failure names the seed itself as the interpreter:
+
+```
+error: semantic: unknown extern function: rt_transient_array_scope_begin
+[STDERR]   interpreter: /home/ormastes/dev/pub/simple/build/tmp/claude_simple (exit code 1)
+```
+
+**Actual fix: rebuild the Rust seed from current source**, then drive stage 1
+with the rebuilt binary:
+
+```
+cd src/compiler_rust
+CARGO_TARGET_DIR=<private-dir> cargo build --release -p simple-compiler
+```
+
+Use a private `CARGO_TARGET_DIR` so the shared `src/compiler_rust/target/` is not
+clobbered while other sessions are building.
+
+No `.spl` or Rust source change is required — the source is already correct.
+
+## Candidate resolutions (original, resolution 1 REFUTED — see correction above)
+
+1. ~~**Compile stage 1 with the Rust seed directly**, bypassing the wrapper's
+   hardcoded driver. The seed's extern table is in Rust and already carries the
+   symbol.~~ **REFUTED:** the prebuilt seed predates the registration and rejects
+   the symbol exactly as the deployed binary does. Correct only once the seed is
+   rebuilt.
 2. **Teach `build bootstrap` to accept a driver override** (an env knob for the
    native-build binary). No such knob exists today — searched
    `src/app/build/**` for `SIMPLE_*INTERP*`/`*SEED*`/`*BOOTSTRAP*` and found none.
