@@ -315,37 +315,38 @@ class TemplateChecker:
 
     me check_with_call(template_var: text, provided_keys: [text], location: text) -> Result<(), ConstKeyError>:
         """Check a .with{} call."""
-        match self.templates.get(template_var):
-            case Some(analysis):
-                if analysis.can_validate():
-                    val schema = match analysis.schema:
-                        case Some(value):
-                            value
-                        case nil:
-                            self.warnings = self.warnings.push(
-                                "Cannot validate template keys at compile time (dynamic template)"
-                            )
-                            return Ok(())
-                    val validator = ConstKeyValidator(schema: schema)
-                    match validator.validate(provided_keys):
-                        case Ok(_):
-                            Ok(())
-                        case Err(e):
-                            self.errors = self.errors.push(e)
-                            Err(e)
-                else:
-                    # Dynamic template - can't validate statically
+        # NOTE: native dict `.get()` returns a corrupt payload on a hit; use
+        # contains_key + indexed read. See doc/07_guide/language/dict_native_pitfalls.md
+        if not self.templates.contains_key(template_var):
+            # Unknown template variable
+            self.warnings = self.warnings.push(
+                "Unknown template variable '{template_var}' at {location}"
+            )
+            return Ok(())
+
+        val analysis = self.templates[template_var]
+        if analysis.can_validate():
+            val schema = match analysis.schema:
+                case Some(value):
+                    value
+                case nil:
                     self.warnings = self.warnings.push(
                         "Cannot validate template keys at compile time (dynamic template)"
                     )
+                    return Ok(())
+            val validator = ConstKeyValidator(schema: schema)
+            match validator.validate(provided_keys):
+                case Ok(_):
                     Ok(())
-
-            case nil:
-                # Unknown template variable
-                self.warnings = self.warnings.push(
-                    "Unknown template variable '{template_var}' at {location}"
-                )
-                Ok(())
+                case Err(e):
+                    self.errors = self.errors.push(e)
+                    Err(e)
+        else:
+            # Dynamic template - can't validate statically
+            self.warnings = self.warnings.push(
+                "Cannot validate template keys at compile time (dynamic template)"
+            )
+            Ok(())
 
     fn get_errors() -> [ConstKeyError]:
         self.errors

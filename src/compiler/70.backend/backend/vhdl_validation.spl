@@ -111,12 +111,15 @@ impl VhdlBackend:
         for prior in seen:
             if prior == from:
                 return false
-        val known = self.active_function_by_name.get(from)
-        if not known.? or not self.active_helper_name_by_source.has(from):
+        # NOTE: native dict `.get()` returns a corrupt payload on a hit
+        # (`.unwrap()` segfaults); use contains_key + indexed read.
+        # See doc/07_guide/language/dict_native_pitfalls.md
+        if not self.active_function_by_name.contains_key(from) or not self.active_helper_name_by_source.has(from):
             return false
+        val known = self.active_function_by_name[from]
         var next_seen = seen
         next_seen = next_seen.push(from)
-        for block in known.unwrap().blocks:
+        for block in known.blocks:
             for inst in block.instructions:
                 match inst.kind:
                     case Call(_, operand, _):
@@ -518,15 +521,14 @@ impl VhdlBackend:
             case Err(err): return Err(err)
         val helper_name = self.active_helper_name_by_source.get(target)
         if not helper_name.?:
-            val known = self.active_function_by_name.get(target)
-            match known:
-                case Some(func_def):
-                    if vhdl_function_is_hardware_entity(func_def):
-                        return Ok(())
-                    if not self.helper_subprogram_shape_supported(func_def):
-                        return Err(self.backend_error("VHDL call `{target}` requires an acyclic combinational helper with local-only mutation"))
-                case None:
-                    ()
+            # NOTE: native dict `.get()` returns a corrupt payload on a hit; use
+            # contains_key + indexed read. See doc/07_guide/language/dict_native_pitfalls.md
+            if self.active_function_by_name.contains_key(target):
+                val func_def = self.active_function_by_name[target]
+                if vhdl_function_is_hardware_entity(func_def):
+                    return Ok(())
+                if not self.helper_subprogram_shape_supported(func_def):
+                    return Err(self.backend_error("VHDL call `{target}` requires an acyclic combinational helper with local-only mutation"))
             return Err(self.backend_error("Synthesizable VHDL backend does not support generic Call lowering for `{target}`; only planned pure combinational helpers can be called"))
         Ok(())
 
