@@ -46,13 +46,11 @@ a key toggle is the production authority.
    source, semantic, and rendering evidence. A documentation change is not a
    runtime PASS claim.
 
-Package CSS is the required visual authority. Renderer adapters may supply only
-structural layout, reset, DOM, or interaction rules. The latest Web repair is
-**REVIEW REJECTED / UNCOMMITTED / RUNTIME UNVERIFIED** on malformed rule
-separators and missing traffic-control pseudo-element structure; see the
-[dated blocker](../../08_tracking/bug/web_css_package_authority_adapter_2026-07-27.md).
-Until its focused contract and review pass, this paragraph is a required
-invariant rather than a runtime PASS claim.
+Package CSS is the visual authority. Renderer adapters supply only structural
+layout, reset, DOM, interaction rules, and package-variable references. The Web
+source repair is independently accepted; live parser/render/pixel/event proof
+remains **RUNTIME UNVERIFIED** under the
+[dated handoff](../../08_tracking/bug/web_css_package_authority_adapter_2026-07-27.md).
 
 ## Compatibility and historical APIs
 

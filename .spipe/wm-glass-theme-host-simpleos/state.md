@@ -874,3 +874,13 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   candidate remains uncommitted. Exact fresh-session repairs and focused
   commands are recorded in
   `doc/08_tracking/bug/web_css_package_authority_adapter_2026-07-27.md`.
+
+- continuation-2026-07-27-web-css-repair-accepted: **SOURCE FIXED / REVIEW
+  ACCEPTED / RUNTIME UNVERIFIED.** A fresh origin-based lane repaired real CSS
+  newlines and traffic pseudo-elements, retained the complete production
+  structural/event contract (including window state, resize/hot-corner hit
+  geometry, dialogs/forms, tooltip/tree DOM, taskbar preview/context menus, and
+  responsive breakpoints), and kept all canonical paint/material values in the
+  Aetheric package. Focused static/token/producer contracts and independent
+  highest-capability review passed. No admitted self-hosted runtime exists, so
+  live Simple Web parsing, Draw IR, pixels, events, and timing remain open.
