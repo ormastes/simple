@@ -4,6 +4,7 @@ use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_MAX_VIEWPORT,
     BROWSER_RENDERER_WORKER_ARG,
     BrowserRendererEncodeResult, BrowserRendererMessage,
+    BrowserTextInputOverlay, browser_text_input_overlay_empty,
     browser_renderer_action_decode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_fetch_request_encode,
@@ -15,12 +16,15 @@ use std.common.web.browser_renderer_protocol.{
 use common.ui.access.{WinTextActionRequest}
 use std.common.encoding.utf8.{text_is_valid_utf8, utf8_decode_one}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_event_identity_at_element_path, be_dom_focused_id
+    be_dom_event_identity_at_element_path, be_dom_find_path_to_id,
+    be_dom_focused_id, be_dom_layout_target_key
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
-    SimpleWebLayoutHitIndex,
+    InputTextVisualMap, SimpleWebLayoutHitIndex,
+    input_text_source_byte_at_x,
     simple_web_layout_hit_test_index,
-    simple_web_layout_render_html_draw_ir_result_at_time
+    simple_web_layout_render_html_draw_ir_result_at_time,
+    simple_web_layout_render_html_draw_ir_result_with_overlay_at_time
 }
 use std.gc_async_mut.web.browser_session.{
     BrowserResponse, BrowserSession
@@ -34,6 +38,7 @@ extern fn rt_browser_renderer_write_protocol_some(data: text, data_len: i64, off
 extern fn rt_stdout_flush()
 
 val _WORKER_READ_BYTES: i64 = 8192
+val _WORKER_CARET_HALF_PERIOD_MS: i64 = 500
 
 fn _worker_reject(reason: text) -> BrowserRendererEncodeResult:
     BrowserRendererEncodeResult(ok: false, reason: reason, wire: "")
@@ -62,6 +67,7 @@ pub struct HostedBrowserRendererWorkerResult:
     animation_time_ms: i64
     wire: text
     hit_index: SimpleWebLayoutHitIndex?
+    resolved_input_view_start_byte: i64
 
 fn _worker_result_reject(
     reason: text,
@@ -74,12 +80,14 @@ fn _worker_result_reject(
         initialized: initialized,
         animation_time_ms: animation_time_ms,
         wire: "",
-        hit_index: nil
+        hit_index: nil,
+        resolved_input_view_start_byte: 0
     )
 
 fn _worker_next_animation_ms(
     css_animation_end_ms: i64,
     script_timer_due_ms: i64,
+    caret_due_ms: i64,
     current_time_ms: i64
 ) -> i64:
     var next: i64 = -1
@@ -94,6 +102,8 @@ fn _worker_next_animation_ms(
             script_timer_due_ms
         if next < 0 or timer_next < next:
             next = timer_next
+    if caret_due_ms >= 0 and (next < 0 or caret_due_ms < next):
+        next = caret_due_ms
     next
 
 fn _worker_document_animation_time_ms(
@@ -108,16 +118,19 @@ fn _worker_frame(
     width: i32,
     height: i32,
     animation_time_ms: i64,
-    response_request_id: i64
+    response_request_id: i64,
+    overlay: BrowserTextInputOverlay,
+    caret_due_ms: i64
 ) -> HostedBrowserRendererWorkerResult:
     val document_animation_time_ms = _worker_document_animation_time_ms(
         session, animation_time_ms
     )
-    val layout = simple_web_layout_render_html_draw_ir_result_at_time(
+    val layout = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
         session.render_html_document(),
         width,
         height,
-        document_animation_time_ms
+        document_animation_time_ms,
+        overlay
     )
     val css_animation_end_ms = if layout.animation_end_ms >= 0:
         session.animation_start_time_ms + layout.animation_end_ms
@@ -131,6 +144,7 @@ fn _worker_frame(
         _worker_next_animation_ms(
             css_animation_end_ms,
             session.next_script_timer_due_ms(),
+            caret_due_ms,
             animation_time_ms
         ),
         layout.material_witness.cpu_composited_count,
@@ -148,7 +162,9 @@ fn _worker_frame(
         initialized: true,
         animation_time_ms: animation_time_ms,
         wire: encoded.wire,
-        hit_index: Some(layout.hit_index)
+        hit_index: Some(layout.hit_index),
+        resolved_input_view_start_byte:
+            layout.resolved_input_view_start_byte
     )
 
 pub class HostedBrowserRendererWorkerSession:
@@ -164,6 +180,10 @@ pub class HostedBrowserRendererWorkerSession:
     chrome_focus: text
     address_replace_on_text: bool
     last_hit_index: SimpleWebLayoutHitIndex?
+    input_view_target_key: text
+    input_view_start_byte: i64
+    caret_blink_epoch_ms: i64
+    pressed_pointer_default_prevented: bool
 
     static fn create(width: i32, height: i32) -> HostedBrowserRendererWorkerSession:
         HostedBrowserRendererWorkerSession(
@@ -178,7 +198,11 @@ pub class HostedBrowserRendererWorkerSession:
             pressed_chrome_control: "",
             chrome_focus: "",
             address_replace_on_text: false,
-            last_hit_index: nil
+            last_hit_index: nil,
+            input_view_target_key: "",
+            input_view_start_byte: 0,
+            caret_blink_epoch_ms: 0,
+            pressed_pointer_default_prevented: false
         )
 
     me _target_at(x: i64, y: i64) -> text:
@@ -195,6 +219,79 @@ pub class HostedBrowserRendererWorkerSession:
                 root, target_key.slice(5, target_key.len())
             )
         ""
+
+    me _input_byte_at(target_key: text, x: i64) -> i64:
+        if self.last_hit_index == nil:
+            return 0
+        for hit in self.last_hit_index.unwrap().input_text_hits:
+            if hit.target_key == target_key:
+                return input_text_source_byte_at_x(
+                    InputTextVisualMap(
+                        display_text: "",
+                        source_boundary_bytes: hit.source_boundary_bytes,
+                        boundary_x_px: hit.boundary_x_px
+                    ),
+                    x.to_i32()
+                )
+        0
+
+    me _reset_caret_blink():
+        self.caret_blink_epoch_ms = self.animation_time_ms
+
+    me _text_overlay() -> BrowserTextInputOverlay:
+        val root = self.browser.dom_root()
+        val target_id = be_dom_focused_id(root)
+        if target_id == "":
+            return browser_text_input_overlay_empty()
+        val path = be_dom_find_path_to_id(root, target_id)
+        if path.len() == 0 or
+           not dom_text_control_selectable(path[path.len() - 1]):
+            return browser_text_input_overlay_empty()
+        val _ = self.browser.ensure_dom_text_selection(target_id)
+        val target_key = be_dom_layout_target_key(root, target_id)
+        if target_key == "":
+            return browser_text_input_overlay_empty()
+        if self.input_view_target_key != target_key:
+            self.input_view_target_key = target_key
+            self.input_view_start_byte = 0
+        val collapsed = (
+            self.browser.text_selection_anchor_byte ==
+            self.browser.text_selection_focus_byte
+        )
+        val blink_elapsed = (
+            self.animation_time_ms - self.caret_blink_epoch_ms
+        )
+        val blink_visible = (
+            blink_elapsed < 0 or
+            (blink_elapsed / _WORKER_CARET_HALF_PERIOD_MS) % 2 == 0
+        )
+        BrowserTextInputOverlay(
+            target_key: target_key,
+            anchor_byte: self.browser.text_selection_anchor_byte,
+            focus_byte: self.browser.text_selection_focus_byte,
+            view_start_byte: self.input_view_start_byte,
+            caret_visible: collapsed and blink_visible
+        )
+
+    me _caret_due_ms(overlay: BrowserTextInputOverlay) -> i64:
+        if not overlay.caret_visible and
+           overlay.anchor_byte != overlay.focus_byte:
+            return -1
+        if overlay.target_key == "":
+            return -1
+        val elapsed = self.animation_time_ms - self.caret_blink_epoch_ms
+        val phase = if elapsed > 0:
+            elapsed / _WORKER_CARET_HALF_PERIOD_MS
+        else:
+            0
+        self.caret_blink_epoch_ms +
+            (phase + 1) * _WORKER_CARET_HALF_PERIOD_MS
+
+    me _clear_page_text_focus_state():
+        self.browser.clear_dom_focus()
+        self.input_view_target_key = ""
+        self.input_view_start_byte = 0
+        self.caret_blink_epoch_ms = 0
 
     me _chrome_action(control: text, action: text, value: text):
         val _ = self.browser.ui_access_act(WinTextActionRequest(
@@ -215,18 +312,54 @@ pub class HostedBrowserRendererWorkerSession:
         val target_id = self._target_at(action.x, action.y)
         if target_id == "":
             self.pressed_target_id = ""
+            self.pressed_pointer_default_prevented = false
+            if action.pressed:
+                self._clear_page_text_focus_state()
             return ""
         if action.pressed:
             self.pressed_target_id = target_id
-            val _ = self.browser.dispatch_dom_event(
+            val pointer_down = self.browser.dispatch_dom_event(
                 target_id, "pointerdown", true, true
             )
-            val _ = self.browser.dispatch_dom_event(
+            val mouse_down = self.browser.dispatch_dom_event(
                 target_id, "mousedown", true, true
             )
+            val focused_id = be_dom_focused_id(self.browser.dom_root())
+            val target_path = be_dom_find_path_to_id(
+                self.browser.dom_root(), target_id
+            )
+            val selectable = (
+                target_path.len() > 0 and
+                dom_text_control_selectable(
+                    target_path[target_path.len() - 1]
+                )
+            )
+            val default_allowed = (
+                not pointer_down.event.default_prevented and
+                not mouse_down.event.default_prevented
+            )
+            self.pressed_pointer_default_prevented = not default_allowed
+            if selectable and focused_id == target_id and default_allowed:
+                val target_key = be_dom_layout_target_key(
+                    self.browser.dom_root(), target_id
+                )
+                val source_byte = self._input_byte_at(
+                    target_key, action.x
+                )
+                val _ = self.browser.set_dom_text_selection(
+                    target_id, source_byte, source_byte
+                )
+                self.input_view_target_key = target_key
+                self._reset_caret_blink()
+            elif default_allowed:
+                self._clear_page_text_focus_state()
             return ""
         val pressed_target_id = self.pressed_target_id
+        val pointer_default_prevented = (
+            self.pressed_pointer_default_prevented
+        )
         self.pressed_target_id = ""
+        self.pressed_pointer_default_prevented = false
         val _ = self.browser.dispatch_dom_event(
             target_id, "pointerup", true, true
         )
@@ -237,6 +370,8 @@ pub class HostedBrowserRendererWorkerSession:
             val _ = self.browser.dispatch_dom_event(
                 target_id, "click", true, true
             )
+        if not pointer_default_prevented:
+            self._reset_caret_blink()
         ""
 
     me _dispatch_text(message: BrowserRendererMessage) -> text:
@@ -260,6 +395,7 @@ pub class HostedBrowserRendererWorkerSession:
             val _ = self.browser.append_dom_text_input(
                 target_id, action.value
             )
+        self._reset_caret_blink()
         ""
 
     me _dispatch_key(message: BrowserRendererMessage) -> text:
@@ -283,6 +419,7 @@ pub class HostedBrowserRendererWorkerSession:
                 self.address_replace_on_text = false
                 self._chrome_action("address", "set_value", shortened)
             return ""
+        self._reset_caret_blink()
         val target_id = be_dom_focused_id(self.browser.dom_root())
         if target_id == "" and action.key_code != 9:
             return ""
@@ -304,7 +441,9 @@ pub class HostedBrowserRendererWorkerSession:
         if not action.ok:
             return action.reason
         self.pressed_target_id = ""
+        self.pressed_pointer_default_prevented = false
         if action.pressed:
+            self._clear_page_text_focus_state()
             self.pressed_chrome_control = action.value
             if action.value == "address":
                 self.chrome_focus = "address"
@@ -329,9 +468,11 @@ pub class HostedBrowserRendererWorkerSession:
         if not navigation.ok:
             return navigation.reason
         self.pressed_target_id = ""
+        self.pressed_pointer_default_prevented = false
         self.pressed_chrome_control = ""
         self.chrome_focus = ""
         self.address_replace_on_text = false
+        self._clear_page_text_focus_state()
         if navigation.action == "stop":
             self.browser.stop_loading()
             return ""
@@ -461,14 +602,22 @@ pub class HostedBrowserRendererWorkerSession:
                 initialized: true,
                 animation_time_ms: self.animation_time_ms,
                 wire: encoded.wire,
-                hit_index: nil
+                hit_index: nil,
+                resolved_input_view_start_byte:
+                    self.input_view_start_byte
             )
+        val overlay = self._text_overlay()
         val frame = _worker_frame(
             self.browser, message, self.width, self.height,
-            self.animation_time_ms, response_id
+            self.animation_time_ms, response_id, overlay,
+            self._caret_due_ms(overlay)
         )
         if frame.hit_index != nil:
             self.last_hit_index = frame.hit_index
+        if overlay.target_key != "":
+            self.input_view_target_key = overlay.target_key
+            self.input_view_start_byte =
+                frame.resolved_input_view_start_byte
         frame
 
 pub fn hosted_browser_renderer_handle_request(
@@ -512,7 +661,8 @@ pub fn hosted_browser_renderer_handle_request(
         next_time_ms = requested_time_ms
 
     _worker_frame(
-        session, message, width, height, next_time_ms, message.request_id
+        session, message, width, height, next_time_ms, message.request_id,
+        browser_text_input_overlay_empty(), -1
     )
 
 pub fn hosted_browser_renderer_handle_init(
@@ -552,6 +702,7 @@ pub fn hosted_browser_renderer_handle_init(
         _worker_next_animation_ms(
             css_animation_end_ms,
             session.next_script_timer_due_ms(),
+            -1,
             animation_time_ms
         ),
         layout.material_witness.cpu_composited_count,

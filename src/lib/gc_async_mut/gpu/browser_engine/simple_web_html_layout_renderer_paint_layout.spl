@@ -1,4 +1,9 @@
-use std.common.encoding.utf8.{text_codepoint_len, utf8_seq_len}
+use std.common.encoding.utf8.{
+    text_codepoint_len, text_is_valid_utf8, utf8_seq_len
+}
+use std.common.web.browser_renderer_protocol.{
+    BrowserTextInputOverlay, browser_text_input_overlay_empty
+}
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout.*
 
 fn has_visible_overflow_clip(styles: [Style]) -> bool:
@@ -121,11 +126,35 @@ fn input_uses_accent_color(nd: HNode) -> bool:
 
 fn input_paints_text(nd: HNode) -> bool:
     val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
+    val declared_value = attr_value(nd.attrs_raw, "value")
+    if declared_value != "" and not text_is_valid_utf8(declared_value):
+        return false
     input_type == "" or input_type == "text" or input_type == "search" or
         input_type == "url" or input_type == "tel" or
         input_type == "email" or input_type == "password" or
         input_type == "number" or input_type == "button" or
         input_type == "submit" or input_type == "reset"
+
+pub fn input_accepts_text_overlay(nd: HNode) -> bool:
+    val disabled_at = attr_key_index(nd.attrs_raw, "disabled", 8)
+    if disabled_at >= 0:
+        val disabled_end = disabled_at + 8
+        if disabled_end >= nd.attrs_raw.len():
+            return false
+        val after_disabled = nd.attrs_raw.char_at(disabled_end)
+        if (
+            after_disabled == "=" or after_disabled == " " or
+            after_disabled == "\t" or after_disabled == "\n" or
+            after_disabled == "\r" or after_disabled == "/"
+        ):
+            return false
+    if not text_is_valid_utf8(attr_value(nd.attrs_raw, "value")):
+        return false
+    val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
+    input_type == "" or input_type == "text" or input_type == "search" or
+        input_type == "url" or input_type == "tel" or
+        input_type == "email" or input_type == "password" or
+        input_type == "number"
 
 fn input_text_prefix(value: text, max_glyphs: i32) -> text:
     if max_glyphs <= 0:
@@ -147,6 +176,8 @@ fn input_text_prefix(value: text, max_glyphs: i32) -> text:
 fn input_text_for_paint(nd: HNode, max_glyphs: i32) -> text:
     val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
     val declared_value = attr_value(nd.attrs_raw, "value")
+    if not text_is_valid_utf8(declared_value):
+        return ""
     var value = declared_value
     if value == "":
         if input_type == "submit":
@@ -172,6 +203,136 @@ pub struct InputTextPaintPlan:
     measured_width: i32
     clip: ClipRect
     color: u32
+    source_window_start_byte: i64
+    source_window_end_byte: i64
+    source_boundary_bytes: [i64]
+    boundary_x_px: [i32]
+    selection_present: bool
+    selection_rect: ClipRect
+    selection_color: u32
+    caret_present: bool
+    caret_rect: ClipRect
+    caret_color: u32
+    resolved_view_start_byte: i64
+
+pub struct InputTextVisualMap:
+    display_text: text
+    source_boundary_bytes: [i64]
+    boundary_x_px: [i32]
+
+pub val INPUT_TEXT_SELECTION_ALPHA: u32 = 0x66u32
+
+pub fn input_caret_color(st: Style) -> u32:
+    if st.caret_color != 0u32: st.caret_color else: st.fg
+
+pub fn input_selection_color(st: Style) -> u32:
+    (INPUT_TEXT_SELECTION_ALPHA << 24) |
+        (input_caret_color(st) & 0x00FFFFFFu32)
+
+fn _input_text_empty_rect() -> ClipRect:
+    ClipRect(x0: 0, y0: 0, x1: 0, y1: 0)
+
+fn _input_text_declared_value(nd: HNode) -> text:
+    attr_value(nd.attrs_raw, "value")
+
+fn _input_text_source_boundaries(value: text) -> [i64]:
+    var boundaries: [i64] = [0]
+    val bytes = value.bytes()
+    var cursor: i64 = 0
+    while cursor < bytes.len():
+        var count = utf8_seq_len(bytes[cursor])
+        if count <= 0 or cursor + count > bytes.len():
+            count = 1
+        cursor = cursor + count
+        boundaries.push(cursor)
+    boundaries
+
+pub fn input_text_visual_map(nd: HNode, st: Style) -> InputTextVisualMap:
+    val source = _input_text_declared_value(nd)
+    if not text_is_valid_utf8(source):
+        return InputTextVisualMap(
+            display_text: "",
+            source_boundary_bytes: [],
+            boundary_x_px: []
+        )
+    val source_boundaries = _input_text_source_boundaries(source)
+    val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
+    val transformed = if input_type == "password":
+        "*".repeat(source_boundaries.len() - 1)
+    else:
+        apply_text_transform_for_paint(source, st.text_transform)
+    val display_text = if st.direction_rtl:
+        reverse_text_for_paint(transformed)
+    else:
+        transformed
+    val advance = style_text_advance(st)
+    val space_advance = style_space_advance(st)
+    val total_width = style_text_line_advance_width(
+        transformed, 0, transformed.len(), st, advance, space_advance
+    )
+    var boundary_x_px: [i32] = []
+    var boundary_index = 0
+    while boundary_index < source_boundaries.len():
+        val source_end = source_boundaries[boundary_index]
+        val prefix = if input_type == "password":
+            "*".repeat(boundary_index)
+        else:
+            apply_text_transform_for_paint(
+                source[0:source_end], st.text_transform
+            )
+        val prefix_width = style_text_line_advance_width(
+            prefix, 0, prefix.len(), st, advance, space_advance
+        )
+        boundary_x_px.push(
+            if st.direction_rtl:
+                total_width - prefix_width
+            else:
+                prefix_width
+        )
+        boundary_index = boundary_index + 1
+    InputTextVisualMap(
+        display_text: display_text,
+        source_boundary_bytes: source_boundaries,
+        boundary_x_px: boundary_x_px
+    )
+
+fn _input_text_boundary_index(
+    visual_map: InputTextVisualMap, source_byte: i64
+) -> i32:
+    var i = 0
+    while i < visual_map.source_boundary_bytes.len():
+        if visual_map.source_boundary_bytes[i] == source_byte:
+            return i
+        i = i + 1
+    -1
+
+pub fn input_text_x_at_source_byte(
+    visual_map: InputTextVisualMap, source_byte: i64
+) -> i32:
+    val index = _input_text_boundary_index(visual_map, source_byte)
+    if index < 0:
+        return 0
+    visual_map.boundary_x_px[index]
+
+pub fn input_text_source_byte_at_x(
+    visual_map: InputTextVisualMap, x: i32
+) -> i64:
+    if visual_map.source_boundary_bytes.len() == 0:
+        return 0
+    var best_index = 0
+    var best_distance = visual_map.boundary_x_px[0] - x
+    if best_distance < 0:
+        best_distance = 0 - best_distance
+    var i = 1
+    while i < visual_map.source_boundary_bytes.len():
+        var distance = visual_map.boundary_x_px[i] - x
+        if distance < 0:
+            distance = 0 - distance
+        if distance < best_distance:
+            best_index = i
+            best_distance = distance
+        i = i + 1
+    visual_map.source_boundary_bytes[best_index]
 
 fn _input_text_content_clip(ancestor_clip: ClipRect, x: i32, y: i32, w: i32, h: i32) -> ClipRect:
     val raw_clip = clip_intersect(ancestor_clip, x, y, x + w, y + h)
@@ -216,6 +377,10 @@ pub fn input_text_paint_plan(nd: HNode, st: Style, x: i32, y: i32, w: i32, h: i3
         text_line_aligned_x(
             content_x, content_w, measured_width, st, 0, 1
         )
+    val visual_map = input_text_visual_map(nd, st)
+    var absolute_boundaries: [i32] = []
+    for boundary_x in visual_map.boundary_x_px:
+        absolute_boundaries.push(baseline_x + boundary_x)
     # There is no computed ::placeholder color in Style yet. st.fg is the
     # canonical theme-derived fail-safe rather than a renderer-only gray.
     InputTextPaintPlan(
@@ -226,7 +391,154 @@ pub fn input_text_paint_plan(nd: HNode, st: Style, x: i32, y: i32, w: i32, h: i3
         clip: _input_text_content_clip(
             ancestor_clip, content_x, content_y, content_w, content_h
         ),
-        color: st.fg
+        color: st.fg,
+        source_window_start_byte: 0,
+        source_window_end_byte: if text_is_valid_utf8(
+            _input_text_declared_value(nd)
+        ):
+            _input_text_declared_value(nd).len()
+        else:
+            0,
+        source_boundary_bytes: visual_map.source_boundary_bytes,
+        boundary_x_px: absolute_boundaries,
+        selection_present: false,
+        selection_rect: _input_text_empty_rect(),
+        selection_color: input_selection_color(st),
+        caret_present: false,
+        caret_rect: _input_text_empty_rect(),
+        caret_color: input_caret_color(st),
+        resolved_view_start_byte: 0
+    )
+
+pub fn input_text_paint_plan_with_overlay(
+    nd: HNode, st: Style, x: i32, y: i32, w: i32, h: i32,
+    ancestor_clip: ClipRect, overlay: BrowserTextInputOverlay
+) -> InputTextPaintPlan:
+    if overlay.target_key == "":
+        val content_w = w - st.border_l - st.border_r - st.pad_l - st.pad_r
+        val advance = style_text_advance(st)
+        val glyph_advance = if advance > 0: advance else: 1
+        return input_text_paint_plan(
+            nd, st, x, y, w, h, ancestor_clip,
+            content_w / glyph_advance + 1
+        )
+    val visual_map = input_text_visual_map(nd, st)
+    if visual_map.source_boundary_bytes.len() == 0:
+        return input_text_paint_plan(
+            nd, st, x, y, w, h, ancestor_clip, 0
+        )
+    var view_index = _input_text_boundary_index(
+        visual_map, overlay.view_start_byte
+    )
+    if view_index < 0:
+        view_index = 0
+    var focus_index = _input_text_boundary_index(
+        visual_map, overlay.focus_byte
+    )
+    if focus_index < 0:
+        focus_index = visual_map.source_boundary_bytes.len() - 1
+    val content_x = x + st.border_l + st.pad_l
+    val content_y = y + st.border_t + st.pad_t
+    val content_w = w - st.border_l - st.border_r - st.pad_l - st.pad_r
+    val content_h = h - st.border_t - st.border_b - st.pad_t - st.pad_b
+    if focus_index < view_index:
+        view_index = focus_index
+    var focus_distance = (
+        visual_map.boundary_x_px[focus_index] -
+        visual_map.boundary_x_px[view_index]
+    )
+    if focus_distance < 0:
+        focus_distance = 0 - focus_distance
+    while view_index < focus_index and focus_distance >= content_w:
+        view_index = view_index + 1
+        focus_distance = (
+            visual_map.boundary_x_px[focus_index] -
+            visual_map.boundary_x_px[view_index]
+        )
+        if focus_distance < 0:
+            focus_distance = 0 - focus_distance
+    val resolved_view_start = visual_map.source_boundary_bytes[view_index]
+    var window_end_index = view_index
+    while window_end_index + 1 < visual_map.source_boundary_bytes.len():
+        var window_width = (
+            visual_map.boundary_x_px[window_end_index + 1] -
+            visual_map.boundary_x_px[view_index]
+        )
+        if window_width < 0:
+            window_width = 0 - window_width
+        if window_width > content_w:
+            break
+        window_end_index = window_end_index + 1
+    val resolved_window_end = (
+        visual_map.source_boundary_bytes[window_end_index]
+    )
+    val advance = style_text_advance(st)
+    val space_advance = style_space_advance(st)
+    val visual_width = style_text_line_advance_width(
+        visual_map.display_text, 0, visual_map.display_text.len(),
+        st, advance, space_advance
+    )
+    val glyph_advance = if advance > 0: advance else: 1
+    val static_plan = input_text_paint_plan(
+        nd, st, x, y, w, h, ancestor_clip,
+        content_w / glyph_advance + 1
+    )
+    val baseline_x = if view_index == 0:
+        static_plan.baseline_x
+    elif st.direction_rtl:
+        content_x + content_w - visual_map.boundary_x_px[view_index]
+    else:
+        content_x - visual_map.boundary_x_px[view_index]
+    val scale = glyph_scale(st.font_size)
+    val text_height = 7 * scale
+    val baseline_y = content_y + if content_h > text_height:
+        (content_h - text_height) / 2
+    else:
+        0
+    var absolute_boundaries: [i32] = []
+    for boundary_x in visual_map.boundary_x_px:
+        absolute_boundaries.push(baseline_x + boundary_x)
+    var anchor_x = baseline_x + input_text_x_at_source_byte(
+        visual_map, overlay.anchor_byte
+    )
+    var focus_x = baseline_x + input_text_x_at_source_byte(
+        visual_map, overlay.focus_byte
+    )
+    val selection_present = overlay.anchor_byte != overlay.focus_byte
+    if anchor_x > focus_x:
+        val swap = anchor_x
+        anchor_x = focus_x
+        focus_x = swap
+    val caret_x = baseline_x + input_text_x_at_source_byte(
+        visual_map, overlay.focus_byte
+    )
+    val clip = _input_text_content_clip(
+        ancestor_clip, content_x, content_y, content_w, content_h
+    )
+    InputTextPaintPlan(
+        text_value: visual_map.display_text,
+        baseline_x: baseline_x,
+        baseline_y: baseline_y,
+        measured_width: visual_width,
+        clip: clip,
+        color: st.fg,
+        source_window_start_byte: resolved_view_start,
+        source_window_end_byte: resolved_window_end,
+        source_boundary_bytes: visual_map.source_boundary_bytes,
+        boundary_x_px: absolute_boundaries,
+        selection_present: selection_present,
+        selection_rect: ClipRect(
+            x0: anchor_x, y0: baseline_y,
+            x1: focus_x, y1: baseline_y + text_height
+        ),
+        selection_color: input_selection_color(st),
+        caret_present: overlay.caret_visible and not selection_present,
+        caret_rect: ClipRect(
+            x0: caret_x, y0: baseline_y,
+            x1: caret_x + 1, y1: baseline_y + text_height
+        ),
+        caret_color: input_caret_color(st),
+        resolved_view_start_byte: resolved_view_start
     )
 
 fn fb_input_accent_control_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, accent_color: u32, clip: ClipRect) -> [u32]:
@@ -1083,19 +1395,9 @@ fn _html_draw_ir_has_input_text(
     val glyph_advance = if adv > 0: adv else: 1
     input_text_for_paint(node, content_w / glyph_advance + 1) != ""
 
-fn _html_draw_ir_input_text_command(
-    node: HNode, st: Style, boxes: LayoutResult, i: i32,
-    ancestor_clip: ClipRect
+fn _html_draw_ir_input_text_command_from_plan(
+    node: HNode, st: Style, i: i32, plan: InputTextPaintPlan
 ) -> DrawIrCommand:
-    val content_w = _html_draw_ir_non_negative(
-        boxes.bw[i] - st.border_l - st.border_r - st.pad_l - st.pad_r
-    )
-    val adv = style_text_advance(st)
-    val glyph_advance = if adv > 0: adv else: 1
-    val plan = input_text_paint_plan(
-        node, st, boxes.bx[i], boxes.by[i], boxes.bw[i], boxes.bh[i],
-        ancestor_clip, content_w / glyph_advance + 1
-    )
     draw_ir_text_styled_clipped(
         _html_draw_ir_component_id(node, i) + "_value",
         plan.baseline_x,
@@ -1106,6 +1408,21 @@ fn _html_draw_ir_input_text_command(
         draw_ir_rect_bounds(
             plan.clip.x0, plan.clip.y0,
             plan.clip.x1 - plan.clip.x0, plan.clip.y1 - plan.clip.y0
+        )
+    )
+
+fn _html_draw_ir_overlay_rect(
+    component_id: text, rect: ClipRect, color: u32, clip: ClipRect
+) -> DrawIrCommand:
+    draw_ir_rect_clipped(
+        component_id,
+        rect.x0,
+        rect.y0,
+        rect.x1 - rect.x0,
+        rect.y1 - rect.y0,
+        color,
+        draw_ir_rect_bounds(
+            clip.x0, clip.y0, clip.x1 - clip.x0, clip.y1 - clip.y0
         )
     )
 
@@ -1128,46 +1445,61 @@ fn _html_draw_ir_visible(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
         return false
     true
 
-fn _html_draw_ir_commands(nodes: [HNode], styles: [Style], boxes: LayoutResult, width: i32, height: i32, vector_fonts: bool) -> [DrawIrCommand]:
+fn _html_draw_ir_commands(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    width: i32, height: i32, vector_fonts: bool,
+    target_keys: [text], overlay: BrowserTextInputOverlay
+) -> [DrawIrCommand]:
     val clip_cache = build_ancestor_clip_cache(
         nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height
     )
-    var command_count: i32 = 0
+    var commands: [DrawIrCommand] = []
     var i: i32 = 0
-    var first_visible: i32 = -1
     val node_count = nodes.len()
     while i < node_count:
         if _html_draw_ir_visible(nodes, styles, boxes, i):
-            if first_visible < 0:
-                first_visible = i
-            command_count = command_count + 1
-            if _html_draw_ir_has_input_text(
-                nodes[i], styles[i], boxes.bw[i]
-            ):
-                command_count = command_count + 1
-        i = i + 1
-    if command_count <= 0:
-        return []
-    val first_command = _html_draw_ir_command(
-        nodes, styles, boxes, first_visible, width, height, vector_fonts
-    )
-    var commands: [DrawIrCommand] = [first_command; command_count]
-    var out_i = 0
-    i = first_visible
-    while i < node_count:
-        if _html_draw_ir_visible(nodes, styles, boxes, i):
-            commands[out_i] = _html_draw_ir_command(
+            commands.push(_html_draw_ir_command(
                 nodes, styles, boxes, i, width, height, vector_fonts
+            ))
+            val overlay_target = (
+                i < target_keys.len() and
+                target_keys[i] != "" and
+                target_keys[i] == overlay.target_key and
+                input_accepts_text_overlay(nodes[i])
             )
-            out_i = out_i + 1
-            if _html_draw_ir_has_input_text(
+            if (
+                overlay_target or _html_draw_ir_has_input_text(
                 nodes[i], styles[i], boxes.bw[i]
-            ):
-                commands[out_i] = _html_draw_ir_input_text_command(
-                    nodes[i], styles[i], boxes, i,
-                    paint_clip_at(clip_cache, i)
                 )
-                out_i = out_i + 1
+            ):
+                val node_overlay = if overlay_target:
+                    overlay
+                else:
+                    browser_text_input_overlay_empty()
+                val plan = input_text_paint_plan_with_overlay(
+                    nodes[i], styles[i],
+                    boxes.bx[i], boxes.by[i], boxes.bw[i], boxes.bh[i],
+                    paint_clip_at(clip_cache, i), node_overlay
+                )
+                val component_id = _html_draw_ir_component_id(nodes[i], i)
+                if plan.selection_present:
+                    commands.push(_html_draw_ir_overlay_rect(
+                        component_id + "_selection",
+                        plan.selection_rect,
+                        plan.selection_color,
+                        plan.clip
+                    ))
+                if plan.text_value != "":
+                    commands.push(_html_draw_ir_input_text_command_from_plan(
+                        nodes[i], styles[i], i, plan
+                    ))
+                if plan.caret_present:
+                    commands.push(_html_draw_ir_overlay_rect(
+                        component_id + "_caret",
+                        plan.caret_rect,
+                        plan.caret_color,
+                        plan.clip
+                    ))
         i = i + 1
     commands
 

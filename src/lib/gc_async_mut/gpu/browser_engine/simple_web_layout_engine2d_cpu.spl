@@ -104,13 +104,55 @@ fn _cpu_draw_ir_rect(backend: CpuBackend, command: DrawIrCommand, x: i32, y: i32
 fn _cpu_draw_ir_execute(backend: CpuBackend, composition: DrawIrComposition) -> CpuBackend:
     var out = backend
     for batch in composition.batches:
+        if batch.embedding.clip:
+            out.set_clip(
+                batch.embedding.x, batch.embedding.y,
+                batch.embedding.width, batch.embedding.height
+            )
         for command in batch.commands:
             val x = batch.embedding.x + command.x
             val y = batch.embedding.y + command.y
+            if command.clip_rect.present:
+                var clip_x = batch.embedding.x + command.clip_rect.x
+                var clip_y = batch.embedding.y + command.clip_rect.y
+                var clip_right = clip_x + command.clip_rect.width
+                var clip_bottom = clip_y + command.clip_rect.height
+                if batch.embedding.clip:
+                    val batch_right = (
+                        batch.embedding.x + batch.embedding.width
+                    )
+                    val batch_bottom = (
+                        batch.embedding.y + batch.embedding.height
+                    )
+                    if batch.embedding.x > clip_x:
+                        clip_x = batch.embedding.x
+                    if batch.embedding.y > clip_y:
+                        clip_y = batch.embedding.y
+                    if batch_right < clip_right:
+                        clip_right = batch_right
+                    if batch_bottom < clip_bottom:
+                        clip_bottom = batch_bottom
+                if clip_right < clip_x:
+                    clip_right = clip_x
+                if clip_bottom < clip_y:
+                    clip_bottom = clip_y
+                out.set_clip(
+                    clip_x, clip_y,
+                    clip_right - clip_x, clip_bottom - clip_y
+                )
             if command.kind == DRAW_IR_COMMAND_RECT:
                 out = _cpu_draw_ir_rect(out, command, x, y)
             elif command.kind == DRAW_IR_COMMAND_TEXT:
                 out.draw_text(x, y, command.text_value, command.color, _cpu_draw_ir_font_size(command.computed_style))
+            if command.clip_rect.present:
+                if batch.embedding.clip:
+                    out.set_clip(
+                        batch.embedding.x, batch.embedding.y,
+                        batch.embedding.width, batch.embedding.height
+                    )
+                else:
+                    out.clear_clip()
+        out.clear_clip()
     out
 
 pub fn simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
@@ -118,6 +160,20 @@ pub fn simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(html: text, wid
         return []
     val composition = simple_web_layout_render_html_draw_ir_cpu_bitmap(html, width, height)
     var backend = if backend_name == "cpu_simd": CpuBackend.create_simd() else: CpuBackend.create()
+    if not backend.init(width, height):
+        return []
+    backend.clear(0u32)
+    backend = _cpu_draw_ir_execute(backend, composition)
+    val pixels = backend.read_pixels()
+    backend.shutdown()
+    pixels
+
+pub fn simple_web_render_draw_ir_composition_with_cpu_backend(
+    composition: DrawIrComposition, width: i32, height: i32
+) -> [u32]:
+    if width <= 0 or height <= 0:
+        return []
+    var backend = CpuBackend.create()
     if not backend.init(width, height):
         return []
     backend.clear(0u32)
