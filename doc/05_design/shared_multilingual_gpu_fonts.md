@@ -109,8 +109,9 @@ offset values so reordering cannot detach metadata. `ShapedRun.language` is
 caller metadata (`und` when omitted); script direction remains a per-run flag,
 not UAX#9. Substitution and positioning completeness are true for the executed
 no-feature Latin/Han/Cyrillic identity profile and the exact Hindi `hi`
-witness. A bounded, table-derived Arabic/Urdu path covers only the two pinned
-default-instance witnesses and is cataloged for those exact tuples. A whole-run
+witness. The generic transaction no longer uses those literals as an
+allow-list; current promoted Arabic/Urdu evidence still covers only the two
+pinned default-instance witnesses and catalogs those exact tuples. A whole-run
 single `U+1F600` scalar has passed the self-hosted exact-face monochrome material
 gate for every selected language tag and is cataloged only as that exact corpus
 tuple. Other
