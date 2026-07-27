@@ -19,14 +19,14 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{
     simpleos_host_gpu_image_resources_decode_retained,
     simpleos_host_gpu_resolve_retained_images
 }
-use std.common.processing.processing_ir.{ProcessingIr, processing_ir_fill_u32, processing_ir_validate, processing_ir_cpu_execute, processing_ir_outputs_equal, processing_ir_output_matches}
+use std.common.processing.processing_ir.{ProcessingIr, processing_ir_fill_u32, processing_ir_validate, processing_ir_cpu_execute, processing_ir_outputs_equal}
 use app.io.file_ops.{file_exists, file_size, file_mmap, file_munmap}
 use app.io.volatile_ops.{volatile_read_u64_required, volatile_write_u64_required, memory_barrier_required}
 use app.io.time_ops.{time_now_nanos}
 use app.io.args_ops.{get_args}
 use app.io.thread.{thread_sleep_ms}
 use std.common.text.{parse_i64}
-use std.nogc_sync_mut.ptr.raw.{raw_read_i32, raw_write_u32s_checksum}
+use std.nogc_sync_mut.ptr.raw.{raw_read_i32, raw_write_u32s_checksum, raw_write_fill_u32s_checksum}
 
 val SIMPLEOS_GPU_PROCESSING_MIN_OFFLOAD_ELEMENTS: i64 = 1048576
 
@@ -112,6 +112,10 @@ fn _request_generation_matches(base: i64, generation: i64) -> bool:
 fn _write_pixels(base: i64, pixels: [u32], count: i64) -> i64:
     raw_write_u32s_checksum(
         base + simpleos_host_gpu_wire_readback_offset(), pixels, count)
+
+fn _write_fill_pixels(base: i64, pixels: [u32], count: i64, expected: u32) -> i64:
+    raw_write_fill_u32s_checksum(
+        base + simpleos_host_gpu_wire_readback_offset(), pixels, count, expected)
 
 fn _processing_cpu_fallback(base: i64, generation: i64, reason: i64, ir: ProcessingIr) -> bool:
     if not _request_generation_matches(base, generation):
@@ -303,14 +307,19 @@ fn _process_request(platform: SimpleOsGpuHostPlatform, base: i64, processing_sel
                 return _loop_state(if _processing_cpu_fallback(base, generation, failure_reason, ir): 1 else: 0, retained)
             _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, failure_reason, 0, 0, 0, 1, 0, 0)
             return _loop_state(1, retained)
-        if not processing_ir_output_matches(ir, values) or (processing_verify_cpu and not processing_ir_outputs_equal(values, oracle)):
+        if processing_verify_cpu and not processing_ir_outputs_equal(values, oracle):
             if processing_fallback_cpu:
                 return _loop_state(if _processing_cpu_fallback(base, generation, SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH, ir): 1 else: 0, retained)
             _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH, 0, 0, 0, 1, 0, 0)
             return _loop_state(1, retained)
         if not _request_generation_matches(base, generation):
             return _loop_state(0, retained)
-        val checksum = _write_pixels(base, values, element_count)
+        val checksum = _write_fill_pixels(base, values, element_count, ir.value)
+        if checksum <= 0:
+            if processing_fallback_cpu:
+                return _loop_state(if _processing_cpu_fallback(base, generation, SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH, ir): 1 else: 0, retained)
+            _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH, 0, 0, 0, 1, 0, 0)
+            return _loop_state(1, retained)
         if processing_verify_cpu:
             val preference = _processing_preference(cpu_elapsed_us, device_elapsed_us)
             print("HOST_GPU_PROCESS_PERF isa={simpleos_host_gpu_guest_isa_name(guest_isa_code)} backend={backend} generation={generation} run={run_id_hash} frame={frame_id} cpu_us={cpu_elapsed_us} device_us={device_elapsed_us} preference={preference}\n")

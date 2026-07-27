@@ -1068,6 +1068,36 @@ pub unsafe extern "C" fn rt_write_u32s_to_raw_checksum(ptr: i64, values: Runtime
     }
 }
 
+/// Copy an exact FillU32 result and return its wire checksum, or `-1` on mismatch.
+#[no_mangle]
+pub unsafe extern "C" fn rt_write_fill_u32s_to_raw_checksum(
+    ptr: i64,
+    values: RuntimeValue,
+    count: i64,
+    expected: i64,
+) -> i64 {
+    if ptr == 0 || count <= 0 || count != rt_array_len(values) || expected < 0 || expected > i64::from(u32::MAX) {
+        return 0;
+    }
+    let dst = ptr as usize as *mut u32;
+    let expected = expected as u32;
+    let mut checksum = 0i64;
+    let mut exact = true;
+    for index in 0..count {
+        let value = rt_array_get(values, index).as_int() as u32;
+        dst.add(index as usize).write(value);
+        checksum = (checksum + i64::from(value & 0x7fff_ffff)) % 2_147_483_647;
+        exact &= value == expected;
+    }
+    if !exact {
+        -1
+    } else if checksum == 0 {
+        1
+    } else {
+        checksum
+    }
+}
+
 /// Convert a text RuntimeValue to a byte array ([u8]).
 #[no_mangle]
 pub extern "C" fn rt_text_to_bytes(text: RuntimeValue) -> RuntimeValue {
@@ -1727,6 +1757,64 @@ sandbox_lowering:
             1
         );
         assert_eq!(zero_output, [0]);
+    }
+
+    #[test]
+    fn test_write_fill_u32s_to_raw_checksum_fuses_exact_validation() {
+        let values = rt_array_new(3);
+        for value in [0x0102_0304, 0x0102_0304, 0x0102_0304] {
+            rt_array_push(values, RuntimeValue::from_int(value));
+        }
+        let mut output = [0u32; 3];
+        assert_eq!(
+            unsafe { rt_write_fill_u32s_to_raw_checksum(output.as_mut_ptr() as i64, values, 3, 0x0102_0304,) },
+            50_727_180
+        );
+        assert_eq!(output, [0x0102_0304; 3]);
+
+        let mismatch = rt_array_new(3);
+        for value in [0x0102_0304, 7, 0x0102_0304] {
+            rt_array_push(mismatch, RuntimeValue::from_int(value));
+        }
+        assert_eq!(
+            unsafe { rt_write_fill_u32s_to_raw_checksum(output.as_mut_ptr() as i64, mismatch, 3, 0x0102_0304,) },
+            -1
+        );
+        assert_eq!(output, [0x0102_0304, 7, 0x0102_0304]);
+
+        let extra = rt_array_new(4);
+        for value in [0x0102_0304, 0x0102_0304, 0x0102_0304, 0x0102_0304] {
+            rt_array_push(extra, RuntimeValue::from_int(value));
+        }
+        assert_eq!(
+            unsafe { rt_write_fill_u32s_to_raw_checksum(output.as_mut_ptr() as i64, extra, 3, 0x0102_0304,) },
+            0
+        );
+        assert_eq!(
+            unsafe { rt_write_fill_u32s_to_raw_checksum(0, values, 3, 0x0102_0304) },
+            0
+        );
+        assert_eq!(
+            unsafe { rt_write_fill_u32s_to_raw_checksum(output.as_mut_ptr() as i64, values, 0, 0x0102_0304,) },
+            0
+        );
+        assert_eq!(
+            unsafe { rt_write_fill_u32s_to_raw_checksum(output.as_mut_ptr() as i64, values, 3, -1,) },
+            0
+        );
+        assert_eq!(
+            unsafe {
+                rt_write_fill_u32s_to_raw_checksum(output.as_mut_ptr() as i64, values, 3, i64::from(u32::MAX) + 1)
+            },
+            0
+        );
+
+        let high_bit = rt_array_new(1);
+        rt_array_push(high_bit, RuntimeValue::from_int(i64::from(u32::MAX)));
+        assert_eq!(
+            unsafe { rt_write_fill_u32s_to_raw_checksum(output.as_mut_ptr() as i64, high_bit, 1, i64::from(u32::MAX)) },
+            1
+        );
     }
 
     #[test]

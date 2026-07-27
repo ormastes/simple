@@ -78,7 +78,10 @@ the policy correctly reports `available-not-preferred`.
 The daemon now runs that independent CPU allocation only when the evidence
 harness passes `--processing-verify-cpu`, or lazily when CPU fallback is
 actually selected. Default strict GPU requests validate FillU32 output directly
-and no longer duplicate the full processing workload on the CPU.
+and no longer duplicate the full processing workload on the CPU. Exact FillU32
+validation is fused into the runtime-owned wire copy/checksum pass, eliminating
+another full production-side array scan while preserving fail-closed mismatch
+handling.
 
 Use the retained-session wrapper in two distinct modes:
 
@@ -110,6 +113,15 @@ the valid multiline initializer at
 current daemon closure. Resume with an admitted current-source compiler and the
 second command; do not treat the retained-daemon rejection as performance
 evidence.
+
+The fused runtime helper passes its focused unit 1/1 and the policy contract
+passes 10/10. A newer provenance-bound pure-Simple Stage3 with SHA-256
+`af6a3e1b19156793bba13f7294ba60319cca1c31abdfffed68a7f49472f862e9`
+reproduces the same parser failure, so it is not an admitted daemon producer.
+The refreshed runtime capsule SHA-256 is
+`0efd7e3f0f8e2aeda7eb5720df5c67717348772b56bc29ba4f6efaa174591658`;
+its symbol table includes both checksum helpers, and a two-module pure-Simple
+native probe passes exact copy/checksum, mismatch, and extra-length rejection.
 
 ## Unavailable Protocol
 

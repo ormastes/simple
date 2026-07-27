@@ -75,6 +75,8 @@ if the daemon emits any `HOST_GPU_PROCESS_PERF` record.
     Every record must contain positive CPU and device times. Production mode
     requires an explicit verifier-disabled startup receipt and zero comparison
     records.
+13. Production FillU32 validation and wire copy use one runtime pass. A wrong
+    value returns mismatch before a successful device receipt is published.
 
 ## Current Evidence
 
@@ -133,3 +135,14 @@ pure-Simple compiler rejects the valid multiline initializer at
 `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl:847`. Resume with a compiler
 that admits current source, build the daemon incrementally, and rerun
 `device-warm-production`; no bootstrap is required by this measurement plan.
+
+The fused copy/validation runtime unit passes 1/1 and the policy source
+contract passes 10/10. Runtime ABI manifest/generated symbol-table tests pass,
+and refreshed capsule SHA-256
+`0efd7e3f0f8e2aeda7eb5720df5c67717348772b56bc29ba4f6efaa174591658`
+exports both checksum helpers. Its pure-Simple native smoke passes exact
+copy/checksum, mismatch, and extra-length rejection. Provenance-bound Stage3
+`af6a3e1b19156793bba13f7294ba60319cca1c31abdfffed68a7f49472f862e9`
+still fails at the same `draw_ir_adv.spl:847` parser boundary. The macOS host
+provider's formerly empty class body now has the canonical explicit
+`create()` constructor; its focused parse check and selector contract pass.

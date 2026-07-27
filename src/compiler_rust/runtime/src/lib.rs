@@ -323,6 +323,16 @@ fn runtime_symbol_table_contains_vulkan_discard_command() {
         .any(|entry| entry.name == "rt_vulkan_discard_command" && !entry.ptr.is_null()));
 }
 
+#[cfg(all(test, feature = "runtime-symbol-table"))]
+#[test]
+fn runtime_symbol_table_contains_processing_wire_helpers() {
+    for name in ["rt_write_u32s_to_raw_checksum", "rt_write_fill_u32s_to_raw_checksum"] {
+        assert!(RUNTIME_SYMBOL_ENTRIES
+            .iter()
+            .any(|entry| entry.name == name && !entry.ptr.is_null()));
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rt_memory_barrier() {
     std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
