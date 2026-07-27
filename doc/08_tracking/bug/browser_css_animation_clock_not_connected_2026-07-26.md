@@ -49,6 +49,11 @@ against a content-local epoch, and dirties visible animated windows on a
 bounded 16ms cadence. Finite animations schedule their exact final frame and
 then become quiescent; minimized windows do not request frames.
 
+The 2026-07-27 mainline repair also removed accidentally committed jj conflict
+blocks from the at-time renderer/Engine2D chain and restored the animation-aware
+methods on the shared pixel cache. The compositor regression covers red start,
+distinct midpoint, blue endpoint, cadence, and quiescence.
+
 Other production surfaces that bypass both BrowserSession and the hosted
 compositor still need an equivalent host-owned clock contract. In particular,
 the stdin-driven Electron browser example has no frame IPC.

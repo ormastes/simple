@@ -690,5 +690,19 @@ implementation in progress / target evidence blocked
   rejection, expiry, and durable removal. Scoped whitespace, conflict-marker,
   manual-layout, and direct-runtime-access checks pass; target-process
   execution remains compiler-blocked and no runtime PASS is claimed.
+- rendering/animation repair: Removed four accidentally committed jj conflict
+  blocks from the canonical at-time HTML/Draw IR and Engine2D files, retaining
+  both material provenance and CSS animation sampling. Restored the missing
+  animation-aware pixel-cache owner used by hosted repaint scheduling.
+- evidence: The existing compositor regression asserts red start pixels,
+  a distinct midpoint, blue endpoint pixels, 16ms scheduling, and finite
+  quiescence. Source-wide Simple conflict-marker and exact owner/caller scans
+  pass; executable evidence remains compiler-blocked and was not rerun.
+- security audit: Current-main review keeps the missing site-renderer process
+  sandbox as critical and found additional open trust-boundary defects:
+  unenforced compositor window ownership, cross-origin location/storage
+  planting, CSP checks skipped after active-resource redirects, incomplete
+  SameSite/HttpOnly overwrite isolation, and unauthenticated response delivery.
+  These remain active AC-6..AC-8 work; no false PASS is recorded.
 - constraint: Do not bootstrap or change the compiler unless a confirmed
   compiler defect prevents producing/running the target browser binary.

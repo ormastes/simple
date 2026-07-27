@@ -30,10 +30,14 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_html_to_pixels,
     simple_web_render_html_to_pixels_with_engine2d_backend,
     simple_web_render_html_to_readback_result_with_engine2d_backend,
+    simple_web_render_html_to_readback_result_with_engine2d_backend_at_time,
     simple_web_render_url_to_pixels,
     simple_web_resolved_engine2d_backend_name
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{SimpleWebEngine2DStaticPixelCache}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_animation_end_ms
+}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
 use std.gc_async_mut.gpu.engine2d.backend_lane.{
@@ -136,6 +140,10 @@ class WebRenderPixelArtifactCache:
     backend_name: text
     resolved_backend_name: text
     pixel_cache: SimpleWebEngine2DStaticPixelCache
+    animation_revision: i64
+    animation_epoch_ms: i64
+    animation_end_ms: i64
+    animation_next_frame_ms: i64
 
 impl WebRenderPixelArtifactCache:
     static fn create(width: i32, height: i32, backend_name: text) -> WebRenderPixelArtifactCache:
@@ -145,7 +153,11 @@ impl WebRenderPixelArtifactCache:
             height: height,
             backend_name: backend_name,
             resolved_backend_name: resolved,
-            pixel_cache: SimpleWebEngine2DStaticPixelCache.create(width, height, resolved)
+            pixel_cache: SimpleWebEngine2DStaticPixelCache.create(width, height, resolved),
+            animation_revision: -1,
+            animation_epoch_ms: 0,
+            animation_end_ms: -1,
+            animation_next_frame_ms: -1
         )
 
     me html_request_to_pixel_artifact(req: WebRenderRequest, full_html: text) -> WebRenderArtifact:
@@ -160,6 +172,60 @@ impl WebRenderPixelArtifactCache:
 
     me request_to_pixel_artifact(req: WebRenderRequest) -> WebRenderArtifact:
         self.html_request_to_pixel_artifact(req, web_render_full_html(req))
+
+    me request_to_pixel_artifact_at_time(
+        req: WebRenderRequest, content_revision: i64, now_ms: i64
+    ) -> WebRenderArtifact:
+        val full_html = web_render_full_html(req)
+        if self.animation_revision != content_revision:
+            self.animation_revision = content_revision
+            self.animation_epoch_ms = now_ms
+            self.animation_end_ms = simple_web_layout_animation_end_ms(
+                full_html, req.viewport_w
+            )
+        if self.animation_end_ms == -1:
+            self.animation_next_frame_ms = -1
+            return self.html_request_to_pixel_artifact(req, full_html)
+        val elapsed = if now_ms > self.animation_epoch_ms:
+            now_ms - self.animation_epoch_ms
+        else:
+            0
+        val result = (
+            simple_web_render_html_to_readback_result_with_engine2d_backend_at_time(
+                full_html, req.viewport_w, req.viewport_h,
+                self.backend_name, elapsed
+            )
+        )
+        if self.animation_end_ms == -2:
+            self.animation_next_frame_ms = now_ms + 16
+        elif elapsed >= self.animation_end_ms:
+            self.animation_next_frame_ms = -1
+        else:
+            val final_frame_ms = self.animation_epoch_ms + self.animation_end_ms
+            val cadence_frame_ms = now_ms + 16
+            self.animation_next_frame_ms = if cadence_frame_ms < final_frame_ms:
+                cadence_frame_ms
+            else:
+                final_frame_ms
+        val artifact = web_render_artifact_with_backend_readback_source_evidence(
+            web_render_engine2d_rendered_artifact(
+                web_render_pixel_artifact(
+                    req.with_pixel_output(), result.readback.pixels
+                ),
+                self.resolved_backend_name
+            ),
+            self.resolved_backend_name,
+            result.readback.source
+        )
+        val queued = web_render_artifact_with_runtime_queue_evidence(
+            artifact, self.resolved_backend_name
+        )
+        web_render_artifact_with_material_fallback(
+            queued, result.material_fallback
+        )
+
+    fn animation_frame_due(now_ms: i64) -> bool:
+        self.animation_next_frame_ms >= 0 and now_ms >= self.animation_next_frame_ms
 
     fn hits() -> i32:
         self.pixel_cache.hits
