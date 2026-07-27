@@ -1,11 +1,36 @@
-# WM windows can realize NO material on the software/freestanding backend — every content frame is provenance-rejected
+# Historical report: WM windows realized no material on one software/freestanding guest run
 
 - **Filed:** 2026-07-26
-- **Status:** open, root-caused, not fixed
-- **Regressed by:** `6b18dcd874f fix(wm): preserve Aetheric Web glass material`
+- **Status:** source contract reconciled; current-runtime verification open
+- **Historical attribution (superseded by the reconciliation below):**
+  `6b18dcd874f fix(wm): preserve Aetheric Web glass material`
 - **Blast radius:** SimpleOS-WM x QEMU showcase cell went PASS -> `guest-render-fault`.
   Every window in the composition is dropped, so the lane never reaches capture
   and produces no PPMs.
+
+## 2026-07-27 source reconciliation
+
+The retained guest A/B output below remains useful diagnostic history, but its
+original CSS-admission diagnosis no longer describes current source.
+`6b18dcd874f` added two pieces the diagnosis omits:
+
+- custom properties are resolved before declaration parsing; and
+- exactly one linear highlight plus one base color is normalized to typed
+  gradient/base fields with an empty raw-layer rejection witness.
+
+The committed production Aetheric spec exercises that exact package CSS and
+requires resolved `blur(30px) saturate(170%)`, the typed two-stop gradient, and
+one material witness. A later one-file change removed the producer mode while
+leaving those requirements intact, making the source and its tests
+contradictory. The producer mode is restored, and the production spec now
+continues through Engine2D software execution and requires the matching CPU
+receipt.
+
+No current, source-matched pure-Simple GUI runtime is available on this host;
+the active GUI launcher delegates to `simple_seed`. Therefore neither the old
+guest failure nor the repaired source is promoted to a current runtime result.
+The sections below describe the historical observation and hypothesis; the
+remaining bug is obtaining revision-bound native/guest execution evidence.
 
 ## Symptom
 

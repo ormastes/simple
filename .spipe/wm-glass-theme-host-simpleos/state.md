@@ -763,3 +763,18 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   The existing row SIMD ABI can use real NEON for blend rows but lacks
   operation-specific proof and does not accelerate blur/saturation, so no NEON
   glass claim was added. Vulkan and external-host/QEMU rows remain postponed.
+
+- continuation-2026-07-27-aetheric-mode-source-reconciliation: **SOURCE
+  REPAIRED / RUNTIME UNVERIFIED.** A later one-file change removed the WM
+  material mode based on guest output but retained both committed production
+  specs that require the mode and exact resolved Aetheric material. Parallel
+  source/history review found that the stated CSS limitations had already
+  been repaired in `6b18dcd874`: the Web cascade resolves package variables
+  before declaration parsing and normalizes exactly one linear highlight plus
+  translucent base into typed fields while preserving unsupported layers as
+  rejection witnesses. The wrapper again carries the exact mode, and the
+  production full-package spec now continues through Engine2D software
+  execution and requires a matching CPU material receipt. The guest output is
+  retained as diagnostic-only because no revision-bound current pure-Simple
+  executable is available; active host GUI processes delegate to
+  `simple_seed`. No runtime PASS, native capture, or QEMU claim is made.

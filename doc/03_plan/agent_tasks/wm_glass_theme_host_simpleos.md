@@ -254,6 +254,14 @@ itself as the forbidden Rust bootstrap seed, and no bootstrap was started.
 M1-M3 therefore remain SOURCE PREPARED / RUNTIME UNVERIFIED until independent
 review and an admitted pure-Simple runtime execute the focused specs.
 
+The subsequent one-file mode removal at `28a5b56b59` contradicted the retained
+production adapter and full-package Draw IR specs. Source/history review
+confirmed that `6b18dcd874` already provides the required `var()` resolution
+and exact typed normalization for Aetheric's one linear highlight over its
+translucent base. The mode is restored at source, and the production package
+spec now also requires Engine2D software execution plus a matching material
+receipt. A source-matched pure-Simple run is still required for M4.
+
 Lower-capability sidecars may own W1, W2, and test fixture preparation only
 after the merge owner freezes the exact style keys:
 `wm-material-request`, `background-color`,
