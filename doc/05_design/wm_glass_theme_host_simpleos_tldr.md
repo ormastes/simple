@@ -10,3 +10,8 @@
 ```text
 parse+hash -> snapshot -> install -> CSS/scene -> Draw IR -> realized evidence
 ```
+
+- Hosted refresh is a parent-owned, injected-store sequence: capture once,
+  stage immutable wire, locked swap, WM/GUI scalar apply, `ThemeChangedV1`,
+  worker acknowledgement, then matching Web frame. Failed handoff exposes no
+  stale frame as current.

@@ -56,6 +56,28 @@ HTML, GUI, binary, log and artifact. The generated manual uses linked evidence.
 
 ## Focused Regression Specs
 
+### Hosted persistent-theme-runtime prerequisite (planned)
+
+This is a design/test-plan handoff only; it creates no executable spec or
+runtime PASS yet. The future focused tests use `HostedThemeRuntime` and the
+named protocol helper flow `ready -> theme_init -> theme_ready -> init`:
+
+| Required focused test | Concrete assertion |
+|---|---|
+| Parent construction ordering | One injected runtime/store is created after heap availability and before every package read, backend/compositor creation, or worker spawn; no module-global/lazy store is reachable. |
+| Initial worker handoff | Worker rejects HTML/frame before `theme_init`; exact `theme_package_install_wire_v1` produces exact scalar `theme_ready` before first HTML/frame. |
+| Wire isolation | Bounded malformed/unknown/mismatched wire is rejected; public WM/GUI/Web reads expose copied scalar/wire values only, never aggregate/map aliases. |
+| Transaction publication | Counting/changing reader proves one canonical read per path; competing/stale/max-revision/no-op cases prove one locked old-or-new aggregate and no notification/write on failure. |
+| Commit ordering | Successful store swap precedes parent WM/GUI scalar application, then `ThemeChangedV1`, then worker apply/ack, then revision-matching Web frame publication. |
+| Restart fence | Replacement worker receives current wire before HTML replay; old generation/revision acknowledgement or frame is rejected; failed handoff leaves `web-frame-unavailable`. |
+
+These tests must be introduced as real source/unit or protocol specs with
+concrete assertions and fail-fast placeholders where implementation is absent.
+They must not use a bootstrap seed, package-file reads in a worker, a synthetic
+frame as a current-revision receipt, or a hand-edited generated manual. The
+aggregate WM glass system spec remains fail-closed until these protocol tests
+and current-source host/QEMU evidence are accepted.
+
 ### 2026-07-25 admission checkpoint
 
 | Evidence | Admission |

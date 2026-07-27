@@ -159,3 +159,97 @@ legacy/direct routes, stale evidence and missing accessibility fallback fail
 before accepting a frame. Startup logs one structured theme record; each frame
 reports route/fallback and theme generation without serializing full CSS.
 Evidence records the highest GPU/readback proof rung and first unavailable rung.
+
+## Hosted Runtime Theme Ownership (proposed prerequisite)
+
+`install_default_host_wm_theme()` is sufficient for one-shot startup, but it is
+not a lifetime owner for runtime package refresh. The hosted parent process
+must create exactly one `HostedThemeRuntime` after its runtime heap is
+available and **before** any package read, compositor/backend construction, or
+browser-worker spawn. The canonical host-bootstrap route stores that value in
+`HostWmHandle`; direct hosted entry keeps the same value as the parent-process
+lifetime owner and passes an explicit borrow to `_run_hosted_wm`. Neither route
+may use a module-global store or construct a store in an installer.
+
+```text
+parent hosted process
+  -> HostedThemeRuntime.create_initial(source_reader, default_theme_id)
+       -> ThemePackageTransactionStore(real hosted mutex + one wire state)
+       -> install parent WM/GUI scalar projection
+  -> create winit/compositor/backends
+  -> spawn browser worker
+       ready -> theme_init(theme_package_install_wire_v1) -> theme_ready
+       -> init(html) -> first frame
+```
+
+`HostedThemeRuntime` is an ordinary composition boundary, not a new common
+theme authority. The package owner retains parsing, source capture, validation,
+and private aggregate reconstruction. The runtime owns the injected
+`ThemePackageTransactionStore`, current immutable
+`theme_package_install_wire_v1` bytes, and revision-bound scalar read
+projections. Its public WM, GUI, and Web surfaces return copied scalar fields
+or copied canonical wire only; they never return `ResolvedThemePackage`,
+`ThemeRenderSnapshot`, maps, arrays, mutexes, or cache objects. The parent is
+the sole store owner. A worker is a wire consumer with a process-local
+reconstructed snapshot/cache.
+
+### Worker initialization and restart protocol
+
+The existing worker branch is a separate process that currently receives HTML
+from its parent; it must not be described as reading theme package files.
+Extend its ordered handshake:
+
+1. worker emits `ready`;
+2. parent sends `theme_init` with exactly one bounded canonical
+   `theme_package_install_wire_v1` for the committed revision;
+3. worker copies and validates schema/version/identity/hash/revision,
+   constructs its private snapshot, and replies `theme_ready` echoing revision,
+   theme ID, manifest hash, and material hash;
+4. parent checks that echo against its store read, then may send `init(html)`
+   and accept the first frame.
+
+`init`, resize, navigation, input, and frame production before a valid
+`theme_init` are protocol violations. Parent and worker reject unknown wire
+versions, duplicate/out-of-order revisions, hash mismatches, oversized wire,
+or a frame whose theme revision differs from the active parent revision. A
+worker restart receives the current parent-owned wire before HTML replay; its
+new generation cannot reuse an old frame, cache, or acknowledgement. If handoff
+or replay fails after a parent commit, the external Web frame is unavailable
+and fail-closed rather than labeled as the new revision.
+
+### Refresh publication ordering
+
+Refresh captures each canonical source once into owned bytes, resolves and
+hashes only that bundle, stages an immutable wire-backed candidate outside the
+store lock, then locks the injected store, rechecks expected revision, swaps
+the single aggregate, and advances one nonwrapping revision. Only a successful
+swap may emit `ThemeChangedV1`; identical content is a no-op and stale,
+overflow, invalid, or source-read failure writes nothing.
+
+```text
+store swap(revision N) -> parent WM/GUI scalar apply(N)
+  -> ThemeChangedV1(N) -> worker theme_apply(N, canonical wire)
+  -> matching theme_ready/frame(N) -> publish external Web frame(N)
+```
+
+The notification is a post-commit invalidation signal, not the publication
+store or proof that the worker rendered a frame. Cache keys include canonical
+revision plus manifest/material identities; all old-generation worker frames
+and old-revision artifacts are rejected at the parent boundary. No worker owns
+a refresh mutex, file reader, or transaction state.
+
+### Fail-closed and migration boundary
+
+Startup fails before a visible frame if initial store creation, wire encoding,
+parent projection, or worker initialization fails. Runtime refresh keeps the
+last committed parent state only until the next successful commit; a failed new
+commit leaves it unchanged. A committed revision with no acknowledged worker
+frame suppresses the stale external Web frame. Diagnostics record only
+schema/revision/theme/hash/status, never package maps or CSS payloads.
+
+Migration order is: (1) canonical immutable wire codec and scalar read API;
+(2) injected parent runtime/store before all reads/spawns; (3) worker
+`theme_init`/ack and restart fence; (4) WM/GUI/Web read migration and
+revision-keyed caches; (5) transaction refresh plus post-commit notification.
+This is an adapter/lifetime repair, not an MDSOC weave; it preserves package
+authority and avoids a common-to-owner dependency cycle.

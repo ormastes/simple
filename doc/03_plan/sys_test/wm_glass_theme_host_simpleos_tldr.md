@@ -10,6 +10,10 @@
 - Every REQ-001..010 and NFR-001..008 is traced.
 - Evidence combines structured semantics with host/QEMU framebuffer captures.
 - Missing helpers fail explicitly; no placeholder pass is allowed.
+- Before runtime switching can be tested, focused protocol tests must pin the
+  parent-owned injected store, `theme_package_install_wire_v1`, ordered
+  `ready -> theme_init -> theme_ready -> init`, post-commit notification, and
+  worker restart/revision fence. This is planned only, not a runtime PASS.
 
 ```text
 theme -> host/CSS/QEMU -> interaction -> evidence -> fail-closed verdict

@@ -37,6 +37,11 @@
   package/snapshot wire codec, counting source-reader seam, and scalar
   WM/GUI/Web transaction reads must land first. The session's three-cycle cap
   is exhausted.
+- The implementation prerequisite is now explicit: parent-owned
+  `HostedThemeRuntime` creates one injected store before package/backend/worker
+  activity; workers consume `theme_package_install_wire_v1` through
+  `ready -> theme_init -> theme_ready -> init(html)` and are generation/revision
+  fenced. This is a design handoff, not a landed implementation or runtime PASS.
 - K2 also exhausted three cycles unintegrated: x86 compatibility IDs/entry
   state are incomplete, direct-x86 copyout stability is not universal, the ABI
   audit misses C paths, and RV32 compat wrappers regress to `ENOSYS`.

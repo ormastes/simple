@@ -81,7 +81,31 @@ overlapping dirty work and remains read-only for this lane.
 | Simple GUI theme handoff | SOURCE FIXED; product proof pending | resolved snapshot now reaches canonical widget Draw IR; 2 bootstrap-driver scenarios pass diagnostically |
 | Simple Web theme authority | SOURCE FIXED; REVIEW ACCEPTED; RUNTIME UNVERIFIED | canonical package output keeps the complete structural/event adapter while Aetheric package CSS owns every paint/material token; live parser/Draw-IR/pixel/event proof still requires an admitted runtime |
 | WM glass material projection | SOURCE FIXED; REVIEW ACCEPTED; RUNTIME UNVERIFIED | CPU preserves parent sampling/500/930 opacity; opaque Metal uses session-owned identity and exact per-request receipts; sub-opaque Metal fails before dispatch until a GPU-only delta path exists |
-| Runtime theme switching | PROTOCOL/CACHE + K1 OWNED-QUEUE SOURCE ACCEPTED; K2/CATALOG/PACKAGE SERIES STOPPED; fail-fast system contract | `ThemeChangedV1`, BrowserBackend cache identity, and K1 copied-payload queues are landed. K2 exhausted three cycles on cross-architecture registration/entry stability gaps; generated catalog exhausted three cycles on stale active/frame authority; package cycle 3 was reverted without commit because the host lacks a persistent pre-worker theme session, canonical immutable package/snapshot wire codec, and scalar transaction consumer surface. ThemeService/consumer wiring remains unsafe; see the linked K2, catalog, and package blocker docs |
+| Runtime theme switching | PROTOCOL/CACHE + K1 OWNED-QUEUE SOURCE ACCEPTED; K2/CATALOG/PACKAGE SERIES STOPPED; fail-fast system contract | `ThemeChangedV1`, BrowserBackend cache identity, and K1 copied-payload queues are landed. K2 exhausted three cycles on cross-architecture registration/entry stability gaps; generated catalog exhausted three cycles on stale active/frame authority; package cycle 3 was reverted without commit because the host lacks a persistent pre-worker theme session, canonical immutable package/snapshot wire codec, and scalar transaction consumer surface. The proposed parent-owned `HostedThemeRuntime`/`theme_init` worker handoff is now specified in the architecture/detail-design and test-plan links below; it is not source implemented. ThemeService/consumer wiring remains unsafe; see the linked K2, catalog, and package blocker docs |
+
+### Hosted theme runtime prerequisite — design handoff (2026-07-27)
+
+Shared interface names are fixed for implementation: `HostedThemeRuntime`,
+`ThemePackageTransactionStore`, `theme_package_install_wire_v1`,
+`theme_init`, `theme_ready`, and `theme_apply`. The parent hosted process (or
+its `HostWmHandle` route) owns the one real-mutex store. Browser workers are
+wire consumers only and must receive `ready -> theme_init -> theme_ready`
+before `init(html)` or any frame.
+
+| Lane | Scope | Owner/review |
+|---|---|---|
+| Runtime/store | Hosted creation, injected mutex, canonical wire/scalar reads, transaction ordering | Implementation sidecar; merge owner `/root` |
+| Worker protocol | Parent/worker state transition, acknowledgement, restart/revision fence | Implementation sidecar; independent highest-capability review |
+| Consumers | WM/GUI/Web scalar reads, cache invalidation, post-commit `ThemeChangedV1` delivery | Implementation sidecar; independent highest-capability review |
+| Tests/manual | Focused source/protocol checks and generated-manual quality | `N/A` until source contracts exist; final reviewer is independent highest-capability reviewer |
+
+Merge only after the detailed contract in
+`doc/04_architecture/wm_glass_theme_host_simpleos.md#hosted-runtime-theme-ownership-proposed-prerequisite`,
+`doc/05_design/wm_glass_theme_host_simpleos.md#persistent-hosted-runtime-and-explicit-worker-handoff-proposed-prerequisite`,
+and the planned checks in
+`doc/03_plan/sys_test/wm_glass_theme_host_simpleos.md#hosted-persistent-theme-runtime-prerequisite-planned`
+are satisfied. No lane may retry the rejected package transaction shape,
+introduce a global store, or call the worker a file/package owner.
 
 ### Historical parallel ownership — completed
 
