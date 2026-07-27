@@ -15,7 +15,7 @@
 use std.test_runner.test_runner_types.{TestFileResult, TestOptions, TEST_OUTPUT_CAPTURE_BYTES}
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.test_runner.test_runner_fork.{run_test_file_fork}
-use std.test_runner.test_runner_coverage.{record_coverage_sdn}
+use std.test_runner.test_runner_coverage.{record_coverage_sdn, record_compiler_decision_manifest_sdn}
 use std.io.{file_exists, file_write, file_delete}
 use std.io.{env_set, env_get}
 use std.io.{file_size_raw, file_modified_time}
@@ -32,6 +32,7 @@ use std.test_runner.test_executor_parsing.{
     make_result_from_structured_evidence,
     coverage_wrapper_suffix, build_coverage_wrapper,
     extract_coverage_sdn, strip_coverage_blocks,
+    extract_compiler_coverage_manifest_sdn, strip_compiler_coverage_manifest_blocks,
     COVERAGE_BEGIN, COVERAGE_END,
     list_tests_static, extract_static_test_name
 }
@@ -164,10 +165,17 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
         exit_code = code
     val end = time_now_unix_micros()
     val duration_ms = (end - start) / 1000
+    var compiler_manifest_error = ""
     if options.coverage:
         val combined = stdout + "\n" + stderr
-        val sdn = extract_coverage_sdn(combined)
-        record_coverage_sdn(sdn)
+        val (compiler_manifest, compiler_manifest_valid) = extract_compiler_coverage_manifest_sdn(combined)
+        if not compiler_manifest_valid or not record_compiler_decision_manifest_sdn(compiler_manifest):
+            compiler_manifest_error = "test-runner: missing or malformed compiler coverage manifest"
+        else:
+            val sdn = extract_coverage_sdn(combined)
+            record_coverage_sdn(sdn)
+        stdout = strip_compiler_coverage_manifest_blocks(stdout)
+        stderr = strip_compiler_coverage_manifest_blocks(stderr)
         stdout = strip_coverage_blocks(stdout)
         stderr = strip_coverage_blocks(stderr)
 
@@ -182,6 +190,15 @@ fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileR
             path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
             duration_ms: duration_ms, setup_ms: setup_ms,
             error: "test-runner: cannot restore structured result environment", timed_out: false, cached: false
+        )
+
+    if compiler_manifest_error != "":
+        if evidence_path != "" and file_exists(evidence_path):
+            file_delete(evidence_path)
+        return TestFileResult(
+            path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+            duration_ms: duration_ms, setup_ms: setup_ms,
+            error: compiler_manifest_error, timed_out: false, cached: false
         )
 
     val result = make_result_from_structured_evidence(file_path, stdout, stderr, exit_code, duration_ms, options.timeout, evidence_path)
@@ -685,6 +702,24 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
             cached: false
         )
 
+    if options.coverage:
+        val compile_output = compile_stdout + "\n" + compile_stderr
+        val (compiler_manifest, compiler_manifest_valid) = extract_compiler_coverage_manifest_sdn(compile_output)
+        if not compiler_manifest_valid or not record_compiler_decision_manifest_sdn(compiler_manifest):
+            val end = time_now_unix_micros()
+            val duration_ms = (end - start) / 1000
+            if not options.keep_artifacts:
+                if file_exists(smf_path):
+                    file_delete(smf_path)
+                if cleanup_path != "" and file_exists(cleanup_path):
+                    file_delete(cleanup_path)
+            return TestFileResult(
+                path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
+                duration_ms: duration_ms, setup_ms: 0,
+                error: "test-runner: missing or malformed compiler coverage manifest",
+                timed_out: false, cached: false
+            )
+
     # Step 3: Run the compiled .smf
     if options.verbose:
         print "[native] Running {smf_path}"
@@ -789,7 +824,7 @@ fn run_test_file_safe_mode(file_path: text, options: TestOptions) -> TestFileRes
 # =========================================================================
 
 # Re-export from test_executor_parsing.spl
-export use std.test_runner.test_executor_parsing.{find_simple_binary, find_simple_new_binary, find_runtime_lib_dir, make_result_from_output, build_child_args, coverage_wrapper_suffix, build_coverage_wrapper, extract_coverage_sdn, strip_coverage_blocks, COVERAGE_BEGIN, COVERAGE_END, list_tests_static, extract_static_test_name, extract_error_message, parse_test_output, extract_number_before, extract_number_after_colon}
+export use std.test_runner.test_executor_parsing.{find_simple_binary, find_simple_new_binary, find_runtime_lib_dir, make_result_from_output, build_child_args, coverage_wrapper_suffix, build_coverage_wrapper, extract_coverage_sdn, strip_coverage_blocks, extract_compiler_coverage_manifest_sdn, strip_compiler_coverage_manifest_blocks, COVERAGE_BEGIN, COVERAGE_END, COMPILER_COVERAGE_BEGIN, COMPILER_COVERAGE_END, list_tests_static, extract_static_test_name, extract_error_message, parse_test_output, extract_number_before, extract_number_after_colon}
 
 # Re-export from test_executor_composite.spl
 export use std.test_runner.test_executor_composite.{run_test_file_composite, extract_base_runtime, extract_platform_layer, extract_arch_from_spec, run_test_file_baremetal, run_test_file_remote, run_test_file_baremetal_via_interpreter, run_test_file_baremetal_qemu, find_baremetal_elf, qemu_binary_for_arch, qemu_machine_for_arch}
