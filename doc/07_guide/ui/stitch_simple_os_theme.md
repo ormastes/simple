@@ -47,10 +47,12 @@ a key toggle is the production authority.
    runtime PASS claim.
 
 Package CSS is the required visual authority. Renderer adapters may supply only
-structural layout, reset, DOM, or interaction rules. The active Web repair is
-removing remaining adapter-owned material recipes; until its focused contract
-and review pass, this paragraph is a required invariant rather than a runtime
-PASS claim.
+structural layout, reset, DOM, or interaction rules. The latest Web repair is
+**REVIEW REJECTED / UNCOMMITTED / RUNTIME UNVERIFIED** on malformed rule
+separators and missing traffic-control pseudo-element structure; see the
+[dated blocker](../../08_tracking/bug/web_css_package_authority_adapter_2026-07-27.md).
+Until its focused contract and review pass, this paragraph is a required
+invariant rather than a runtime PASS claim.
 
 ## Compatibility and historical APIs
 

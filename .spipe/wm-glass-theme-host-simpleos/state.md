@@ -864,3 +864,13 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   Aetheric snapshot before compositor/first-frame construction. External
   QEMU/Windows/Linux evidence remains fail-closed under the prepared-host
   handoff. The current session did not bootstrap or substitute the Rust seed.
+
+- continuation-2026-07-27-web-css-final-review: **SOURCE REVIEW REJECTED /
+  RUNTIME UNVERIFIED.** The final bounded candidate separated canonical
+  package output from the literal compatibility sheet and supplied all
+  referenced Aetheric tokens. Review still rejected it because the canonical
+  builder emits literal `\\n` separators and its traffic-light pseudo-elements
+  lack content/geometry. The review-cycle cap is reached, so the Web source
+  candidate remains uncommitted. Exact fresh-session repairs and focused
+  commands are recorded in
+  `doc/08_tracking/bug/web_css_package_authority_adapter_2026-07-27.md`.

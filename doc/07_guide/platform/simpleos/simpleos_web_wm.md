@@ -73,9 +73,11 @@ Expected runtime truth for a healthy first load:
 ## Theme Path
 
 The package/snapshot model is the intended sole Web WM visual authority.
-Source repair is still active while remaining adapter-owned material recipes
-are moved behind package variables; consult the agent plan before claiming
-that invariant is complete.
+The latest source candidate is **REVIEW REJECTED / UNCOMMITTED / RUNTIME
+UNVERIFIED** because its canonical adapter emits literal `\\n` separators and
+omits traffic-light pseudo-element structure. Consult the
+[dated blocker](../../../08_tracking/bug/web_css_package_authority_adapter_2026-07-27.md)
+before claiming that invariant is complete.
 
 Theme flow:
 
@@ -84,7 +86,7 @@ Theme flow:
 2. `nogc_sync_mut.ui.theme_package` resolves the family/package CSS and icons,
    then creates the immutable `ThemeRenderSnapshot`.
 3. `src/app/ui.web/html.spl::generate_css()` consumes the resolved package CSS.
-   Its remaining adapter-owned visual recipes are an active bug, not a second
+   Its package-authority adapter remains a fail-closed bug, not a second
    accepted authority.
 4. Simple Web app-window HTML is wrapped by
    `src/os/compositor/simple_web_window_renderer.spl` with the same generated CSS
