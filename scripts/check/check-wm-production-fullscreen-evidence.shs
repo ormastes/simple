@@ -30,6 +30,12 @@ esac
 SPL_WINIT_LIB="${SIMPLE_WM_WINIT_LIB:-$ROOT_DIR/build/sffi/libspl_winit.$RUNTIME_DYLIB_EXT}"
 SIMPLE_RUNTIME_DYLIB="${SIMPLE_WM_RUNTIME_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_wm.$RUNTIME_DYLIB_EXT}"
 SIMPLE_RUNTIME_C_DYLIB="${SIMPLE_WM_RUNTIME_C_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_c_wm.$RUNTIME_DYLIB_EXT}"
+# The hosted entry's closure reaches std.io.sqlite_sffi through the browser
+# session's database layer. rt_sqlite_* lives in src/runtime/runtime_sqlite.c,
+# which the core-c runtime lane deliberately excludes (it needs -lsqlite3), so
+# it has to arrive as an explicit provider or the link dies on 24 undefined
+# rt_sqlite_* symbols.
+SIMPLE_RUNTIME_SQLITE_DYLIB="${SIMPLE_WM_RUNTIME_SQLITE_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_sqlite_wm.$RUNTIME_DYLIB_EXT}"
 DRIVER_TIMEOUT_SECS="${WM_EVIDENCE_TIMEOUT_SECS:-20}"
 REQUESTED_GUI_BACKEND="$(printf '%s' "${SIMPLE_GUI_BACKEND:-}" | tr '[:upper:]' '[:lower:]')"
 VULKAN_EVIDENCE_REQUIRED=false
@@ -220,8 +226,20 @@ if [ ! -s "$SIMPLE_RUNTIME_DYLIB" ] || [ ! -s "$SIMPLE_RUNTIME_C_DYLIB" ] || \
         exit 1
     fi
 fi
-if [ ! -s "$SPL_WINIT_LIB" ] || [ ! -s "$SIMPLE_RUNTIME_DYLIB" ] || [ ! -s "$SIMPLE_RUNTIME_C_DYLIB" ]; then
+if [ ! -s "$SIMPLE_RUNTIME_SQLITE_DYLIB" ] || \
+    [ "$ROOT_DIR/src/runtime/runtime_sqlite.c" -nt "$SIMPLE_RUNTIME_SQLITE_DYLIB" ]; then
+    if ! sh scripts/build/build_simple_runtime_sqlite_sffi.shs >"$BUILD_DIR/build-simple-runtime-sqlite-sffi.log" 2>&1; then
+        emit_failure host-sqlite-provider-build-failed "$snapshot_hook" "$capture_hook" "$input_hook"
+        exit 1
+    fi
+fi
+if [ ! -s "$SPL_WINIT_LIB" ] || [ ! -s "$SIMPLE_RUNTIME_DYLIB" ] || [ ! -s "$SIMPLE_RUNTIME_C_DYLIB" ] || \
+    [ ! -s "$SIMPLE_RUNTIME_SQLITE_DYLIB" ]; then
     emit_failure host-runtime-bridge-missing "$snapshot_hook" "$capture_hook" "$input_hook"
+    exit 1
+fi
+if ! nm -g "$SIMPLE_RUNTIME_SQLITE_DYLIB" 2>/dev/null | grep -Eq '(_| )rt_sqlite_open$'; then
+    emit_failure host-sqlite-provider-incomplete "$snapshot_hook" "$capture_hook" "$input_hook"
     exit 1
 fi
 if ! nm -g "$SIMPLE_RUNTIME_C_DYLIB" 2>/dev/null | grep -Eq '(_| )rt_engine2d_rocm_download_pixels$'; then
@@ -237,7 +255,7 @@ if [ -n "${HOSTED_WM_ARTIFACT:-}" ]; then
 elif [ ! -x "$NATIVE_BIN" ] || find src/os/hosted src/os/compositor src/lib/common/ui \
     -type f -name '*.spl' -newer "$NATIVE_BIN" -print -quit | grep -q .; then
     if ! SIMPLE_NO_STUB_FALLBACK=1 \
-        SIMPLE_LINK_OBJECTS="$SPL_WINIT_LIB:$SIMPLE_RUNTIME_DYLIB:$SIMPLE_RUNTIME_C_DYLIB" \
+        SIMPLE_LINK_OBJECTS="$SPL_WINIT_LIB:$SIMPLE_RUNTIME_DYLIB:$SIMPLE_RUNTIME_C_DYLIB:$SIMPLE_RUNTIME_SQLITE_DYLIB" \
         SIMPLE_LIB="$ROOT_DIR/src" "$SIMPLE_BIN" native-build \
         --source "$ENTRY" --entry "$ENTRY" --entry-closure --strip \
         --backend cranelift \
@@ -267,7 +285,7 @@ provider_linked() {
         *) return 1 ;;
     esac
 }
-for provider in "$SPL_WINIT_LIB" "$SIMPLE_RUNTIME_DYLIB" "$SIMPLE_RUNTIME_C_DYLIB"; do
+for provider in "$SPL_WINIT_LIB" "$SIMPLE_RUNTIME_DYLIB" "$SIMPLE_RUNTIME_C_DYLIB" "$SIMPLE_RUNTIME_SQLITE_DYLIB"; do
     if ! provider_linked "$NATIVE_BIN" "$provider"; then
         emit_failure host-runtime-provider-not-linked "$snapshot_hook" "$capture_hook" "$input_hook"
         exit 1
