@@ -7,9 +7,11 @@ use std.gc_async_mut.web.browser_session.{
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_ui_access.*
-use std.gc_async_mut.gpu.browser_engine.layout.{hit_test, layout_tree}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_event_identity, be_dom_focused_id
+    be_dom_event_identity_at_element_path, be_dom_focused_id
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_hit_test_target_at_time
 }
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     FetchRequest, FetchResponse, RequestMode
@@ -370,11 +372,25 @@ class HostedWebContentSession:
                 callback_count: 0,
                 mutation_revision: self.mutation_revision,
                 reason: self.failure_reason
-            )
+        )
         val root = self.browser.dom_root()
-        val layout = layout_tree(root, self.width.to_f64(), self.height.to_f64())
-        val target = hit_test(layout, root, x.to_f64(), y.to_f64())
-        if target == nil:
+        val animation_time_ms = (
+            self.browser.monotonic_time_ms -
+            self.browser.animation_start_time_ms
+        )
+        val target_key = simple_web_layout_hit_test_target_at_time(
+            self.browser.render_html_document(),
+            self.width, self.height, x, y, animation_time_ms
+        )
+        val target_id = if target_key.starts_with("id:"):
+            target_key.slice(3, target_key.len())
+        elif target_key.starts_with("path:"):
+            be_dom_event_identity_at_element_path(
+                root, target_key.slice(5, target_key.len())
+            )
+        else:
+            ""
+        if target_id == "":
             self.pressed_target_id = ""
             return HostedWebContentDispatch(
                 event_id: event_id,
@@ -384,7 +400,6 @@ class HostedWebContentSession:
                 mutation_revision: self.mutation_revision,
                 reason: "no-semantic-target"
             )
-        val target_id = be_dom_event_identity(target.unwrap())
         val before = self.browser.current_body_html
         if down:
             self.pressed_target_id = target_id

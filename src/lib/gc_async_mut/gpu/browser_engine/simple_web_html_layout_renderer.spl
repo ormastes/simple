@@ -64,6 +64,108 @@ pub fn simple_web_layout_debug_layout_by_id(html: text, width: i32, height: i32,
         i = i + 1
     ""
 
+fn _simple_web_element_child_ordinal(
+    nodes: [HNode], child_index: HtmlChildIndex,
+    parent_index: i32, target_index: i32
+) -> i32:
+    var ordinal = 0
+    var child = child_index.first_child[parent_index]
+    while child >= 0:
+        if nodes[child].tag != "#text":
+            if child == target_index:
+                return ordinal
+            ordinal = ordinal + 1
+        child = child_index.next_sibling[child]
+    -1
+
+fn _simple_web_hit_target_key(
+    nodes: [HNode], styles: [Style], child_index: HtmlChildIndex,
+    boxes: LayoutResult, x: i32, y: i32
+) -> text:
+    var best = -1
+    var best_z = -2147483647
+    var i = 0
+    while i < nodes.len():
+        val node = nodes[i]
+        val style = styles[i]
+        val inside = (
+            boxes.bw[i] > 0 and boxes.bh[i] > 0 and
+            x >= boxes.bx[i] and y >= boxes.by[i] and
+            x < boxes.bx[i] + boxes.bw[i] and
+            y < boxes.by[i] + boxes.bh[i]
+        )
+        if (
+            inside and node.tag != "#text" and node.tag != "#root" and
+            style.display != "none" and not style.visibility_hidden and
+            not content_hidden_by_ancestor(nodes, styles, i) and
+            (best < 0 or style.z_index > best_z or
+             (style.z_index == best_z and i > best))
+        ):
+            best = i
+            best_z = style.z_index
+        i = i + 1
+    if best < 0:
+        return ""
+    if nodes[best].id_attr != "":
+        return "id:{nodes[best].id_attr}"
+
+    var body = best
+    while body >= 0 and nodes[body].tag != "body":
+        body = nodes[body].parent.to_i32()
+    if body < 0:
+        return ""
+    if best == body:
+        return "path:"
+
+    var reversed: [i32] = [0; nodes.len()]
+    var depth = 0
+    var current = best
+    while current != body and current >= 0:
+        val parent = nodes[current].parent.to_i32()
+        if parent < 0:
+            return ""
+        val ordinal = _simple_web_element_child_ordinal(
+            nodes, child_index, parent, current
+        )
+        if ordinal < 0:
+            return ""
+        reversed[depth] = ordinal
+        depth = depth + 1
+        current = parent
+    var path = "path:"
+    var part = depth - 1
+    while part >= 0:
+        if part < depth - 1:
+            path = path + "/"
+        path = path + reversed[part].to_text()
+        part = part - 1
+    path
+
+pub fn simple_web_layout_hit_test_target_at_time(
+    html: text, width: i32, height: i32,
+    x: i32, y: i32, animation_time_ms: i64
+) -> text:
+    _web_budget_begin(WEB_RENDER_BUDGET_MS)
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(html, width, false)
+    val child_index = build_child_index(nodes)
+    var styles = compute_styles(nodes, rules, child_index, false, true)
+    if animation_time_ms >= 0:
+        styles = _apply_css_animations(
+            styles, extract_keyframes(html), animation_time_ms
+        )
+    val node_count = nodes.len() as i32
+    val boxes = layout(
+        nodes, styles, child_index, 0, 0, 0, width, height,
+        zero_i32_list(node_count), zero_i32_list(node_count),
+        zero_i32_list(node_count), zero_i32_list(node_count),
+        empty_i32_lists(node_count), empty_i32_lists(node_count),
+        neg_one_i32_list(node_count)
+    )
+    _simple_web_hit_target_key(
+        nodes, styles, child_index, boxes, x, y
+    )
+
 class SimpleWebLayoutDrawIrResult:
     composition: DrawIrComposition
     material_fallback: WebRenderMaterialFallbackProvenance
