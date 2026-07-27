@@ -58,15 +58,23 @@ withdrawn. A fresh source-matched compiler is required to determine whether the
 retained compiler is stale or current lowering still loses runtime-array
 classification.
 
-The bounded incremental regeneration compiled the current
-`src/app/cli/bootstrap_main.spl` closure, then failed at link because the
-admitted `core-c-bootstrap` runtime lane does not own compiler-host symbols
-such as `rt_native_build` and the Cranelift bridge. Omitting the explicit
-runtime path selected the same core lane. A manual retained-object link was
-also rejected because the closure currently emits duplicate Simple symbols and
-no native `main`; it is not an admissible replacement for the canonical linker.
-The three-cycle cap is exhausted. No full bootstrap, seed fallback, cache
-deletion, or further retry ran.
+The 2026-07-27 bounded incremental regeneration used the focused compiler
+route. The CLI entry parsed current source until the retained parser rejected a
+named tuple expression in an unrelated Office closure. The narrower positional
+`bootstrap_main.spl` route avoided Office but stopped on the retained parser's
+known `pub mod` gap. One temporary private-`mod` source projection parsed the
+compiler closure, then the process terminated while lowering
+`run_compile_bootstrap`; canonical `pub mod` source was restored immediately.
+The three-cycle cap is exhausted.
+
+The same session reran live device evidence. Standalone CUDA
+fill/copy/alpha/scroll readback passes with two devices, positive identity,
+exact checksum, and zero mismatches. The later ProcessingIR CUDA probe reaches
+device readback with positive handle/identity and `cpu_fallback=false`, but
+still reports 64 mismatches and checksum `8657438720`. The retained
+source-matched Vulkan evidence reaches `backend_name=vulkan` and strict
+creation before crashing; the later ProcessingIR Vulkan probe also crashes
+before publishing a receipt.
 
 CUDA identity was a separate three-bit tag-width overflow: the UUID hash used
 the full positive 63-bit range, so native Simple tagging could make it negative.
@@ -80,9 +88,9 @@ values as the same algorithm version.
 
 ## Required repair
 
-1. Provide an admitted compiler-host runtime bundle/extra-archive route for
-   incremental `bootstrap_main` linking, or regenerate on a prepared host that
-   already has that owner; do not run a full bootstrap.
+1. Repair or bypass the retained generation's HIR crash while lowering current
+   `run_compile_bootstrap`, or regenerate on a prepared host with a current
+   source-matched pure-Simple compiler; do not run a full bootstrap.
 2. Run the focused transport probe once with that compiler and require zero
    iterator and indexed mismatches for all four recorded cases.
 3. Re-run the direct CUDA and Vulkan 64-element probes with that compiler.
@@ -100,6 +108,13 @@ Retained build logs:
 - `build/simpleos_gpu_host/cuda_fill_native/build-cycle3.log`
 - `build/simpleos_gpu_host/u32_transport/processing_u32_array_transport_probe`
 - `build/simpleos_gpu_host/cuda_identity/cuda_device_identity_probe`
+- `build/gpu-goal/source-matched/logs/refresh.log`
+- `build/gpu-goal/source-matched/logs/positional-refresh.log`
+- `build/gpu-goal/source-matched/logs/positional-refresh-pubmod-bridge.log`
+- `build/gpu-goal/final-checks/cuda-live.env`
+- `build/gpu-goal/final-checks/cuda-processing-live.log`
+- `build/gpu-goal/final-checks/vulkan-source-matched-live.log`
+- `build/gpu-goal/final-checks/vulkan-processing-live.log`
 - `doc/09_report/cuda_generated_2d_readback_2026-07-26.md`
 
 No compiler bootstrap was run.
