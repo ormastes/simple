@@ -173,3 +173,28 @@ Only then may the Bungee 24 pt / 300 DPI producer check resume.
 
 Bootstrap is permitted only if it is essential after the focused producer
 passes and a new immutable trusted binary is required.
+
+## 2026-07-27 compiler receiver channel repaired
+
+The exact compiler defect is now fixed and behaviorally proven. MIR already
+carried the receiver first, but the direct and indirect Cranelift call
+translation loops used bare `arg_vals.push(...)` expressions and discarded
+the returned argument vector. Rebinding the returned vector at both sites
+preserves the computed receiver for the native call ABI.
+
+The regression uses a distinct target receiver behind `Owner.active[0]`,
+binds it to a typed local inside an owner method, and calls a zero-argument
+marker method. The target returns `73`; a stale enclosing owner has the same
+leading field layout but returns poison marker `11`. The old deployed
+compiler faults with exit 132. The patched pure-Simple Stage 3 compiler
+(SHA-256
+`d030566ddab91c85606d9e209524d402cd30df5b4c1a92971732690cbadfa5d1`)
+returns the exact PASS receipt
+`native_consecutive_zero_arg_receiver_status=pass`.
+
+This closes acceptance item 1's receiver channel prerequisite but does not
+prove the font producer or any Vulkan gate. Stage 4 deployment is separately
+blocked by the stale `examples.browser.entity.dom.css_types` import in
+`custom_properties.spl`; the shared deployed compiler was left untouched.
+Resume at acceptance item 2 using the proven Stage 3 compiler, then continue
+through the remaining items in order.

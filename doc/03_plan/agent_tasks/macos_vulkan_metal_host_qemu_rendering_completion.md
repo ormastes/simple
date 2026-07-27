@@ -601,6 +601,38 @@ same failure.
   Vulkan GUI; host WM; Metal parity in the same order; finally x86/ARM QEMU
   SimpleOS/WM.
 
+### 2026-07-27 Cranelift receiver-argument fix and proof
+
+- The missing receiver was localized below MIR lowering. Both Cranelift call
+  builders evaluated each MIR argument and then discarded the array returned
+  by `push`: the `CallIndirect` path and `cl_translate_call` in
+  `cranelift_codegen_adapter.spl`. Both now rebind
+  `arg_vals = arg_vals.push(...)`, preserving the receiver handle for ABI
+  argument placement.
+- The focused cross-module regression reproduces the exact failing shape
+  inside an owner method: `Owner.active[0]` is bound to a typed receiver local
+  and a zero-explicit-argument method is called. The target marker is `73`;
+  the layout-compatible enclosing owner carries poison marker `11`, so a
+  stale `self` cannot pass.
+- The old deployed compiler failed this fixture with exit 132 and
+  `field access on nil receiver`. An essential isolated bootstrap produced a
+  pure-Simple Stage 3 compiler, passed Stage 2/Stage 3 compiler sanity, and
+  emitted Stage 3 SHA-256
+  `d030566ddab91c85606d9e209524d402cd30df5b4c1a92971732690cbadfa5d1`.
+  That compiler passed the exact native fixture with
+  `native_consecutive_zero_arg_receiver_status=pass`.
+- Stage 4 did not deploy: full-CLI closure discovery stopped on the unrelated
+  stale import `examples.browser.entity.dom.css_types` from
+  `custom_properties.spl`. The shared root runtime and running MCP/LSP
+  deployment were not changed. The broad Cranelift unit file also remains
+  non-green on an existing adapter semantic failure (`variable name not
+  found`), with 6 of 13 examples passing; it is not counted as PASS.
+- Next: compile and run the existing focused Bungee 100 px producer with the
+  proven Stage 3 compiler. Require positive quads, atlas/alpha, cold/warm cache
+  evidence, and selected-renderer identity before the Vulkan device-readback
+  gate. The ordered Vulkan -> web -> GUI -> host WM -> Metal -> QEMU sequence
+  remains unchanged.
+
 ## Required Evidence and Documentation
 
 - `doc/04_architecture/shared_multilingual_gpu_fonts.md`
