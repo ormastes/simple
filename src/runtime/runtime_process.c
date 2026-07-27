@@ -928,6 +928,16 @@ int64_t rt_browser_renderer_write_stdout_some(
     return (int64_t)written;
 }
 
+int64_t rt_browser_renderer_write_protocol_some(
+        const char* data, int64_t data_len, int64_t offset,
+        int64_t max_bytes) {
+    (void)data;
+    (void)data_len;
+    (void)offset;
+    (void)max_bytes;
+    return -1;
+}
+
 #else /* POSIX */
 
 #include "runtime_fork.h"
@@ -1075,6 +1085,31 @@ static bool proc_pipe_cloexec(int fds[2]) {
     return true;
 }
 
+#ifdef __linux__
+static bool proc_renderer_socketpair(int stdin_pipe[2], int stdout_pipe[2]) {
+    int sockets[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets) != 0) {
+        return false;
+    }
+    int parent_read = fcntl(
+        sockets[0], F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+    int child_write = fcntl(
+        sockets[1], F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+    if (parent_read < 0 || child_write < 0) {
+        if (parent_read >= 0) close(parent_read);
+        if (child_write >= 0) close(child_write);
+        close(sockets[0]);
+        close(sockets[1]);
+        return false;
+    }
+    stdin_pipe[0] = sockets[1];
+    stdin_pipe[1] = sockets[0];
+    stdout_pipe[0] = parent_read;
+    stdout_pipe[1] = child_write;
+    return true;
+}
+#endif
+
 #ifdef __APPLE__
 static bool proc_move_pipe_fds_above_stdio(int fds[2]) {
     for (int i = 0; i < 2; i++) {
@@ -1179,10 +1214,17 @@ static int64_t rt_process_spawn_piped_argv(
     /* stdout_pipe[0] = parent reads, stdout_pipe[1] = child writes */
     int stdout_pipe[2];
 
-    if (!proc_pipe_cloexec(stdin_pipe)) return -1;
-    if (!proc_pipe_cloexec(stdout_pipe)) {
-        close(stdin_pipe[0]); close(stdin_pipe[1]);
-        return -1;
+#ifdef __linux__
+    if (sandboxed_renderer) {
+        if (!proc_renderer_socketpair(stdin_pipe, stdout_pipe)) return -1;
+    } else
+#endif
+    {
+        if (!proc_pipe_cloexec(stdin_pipe)) return -1;
+        if (!proc_pipe_cloexec(stdout_pipe)) {
+            close(stdin_pipe[0]); close(stdin_pipe[1]);
+            return -1;
+        }
     }
 #ifdef __APPLE__
     if (!proc_move_pipe_fds_above_stdio(stdin_pipe) ||
@@ -1234,7 +1276,9 @@ static int64_t rt_process_spawn_piped_argv(
 
         /* Wire pipes to stdio */
         if (dup2(stdin_pipe[0], STDIN_FILENO) < 0 ||
-            dup2(stdout_pipe[1], STDOUT_FILENO) < 0 ||
+            dup2(
+                sandboxed_renderer ? null_fd : stdout_pipe[1],
+                STDOUT_FILENO) < 0 ||
             (sandboxed_renderer && dup2(null_fd, STDERR_FILENO) < 0)) {
             _exit(127);
         }
@@ -1588,6 +1632,31 @@ int64_t rt_browser_renderer_write_stdout_some(
         written = write(STDOUT_FILENO, data + offset, request);
     } while (written < 0 && errno == EINTR);
     return written < 0 ? -1 : (int64_t)written;
+}
+
+int64_t rt_browser_renderer_write_protocol_some(
+        const char* data, int64_t data_len, int64_t offset,
+        int64_t max_bytes) {
+#ifndef __linux__
+    (void)data;
+    (void)data_len;
+    (void)offset;
+    (void)max_bytes;
+    return -1;
+#else
+    if (!data || data_len < 0 || offset < 0 || offset > data_len ||
+        max_bytes <= 0) return -1;
+    if (offset == data_len) return 0;
+    int64_t remaining = data_len - offset;
+    if (max_bytes > 1048576) max_bytes = 1048576;
+    size_t request = (size_t)(
+        remaining < max_bytes ? remaining : max_bytes);
+    ssize_t written;
+    do {
+        written = write(STDIN_FILENO, data + offset, request);
+    } while (written < 0 && errno == EINTR);
+    return written < 0 ? -1 : (int64_t)written;
+#endif
 }
 
 #ifdef __linux__
