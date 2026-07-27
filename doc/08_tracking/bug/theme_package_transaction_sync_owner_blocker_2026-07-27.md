@@ -39,10 +39,10 @@ cannot satisfy the contract:
 - the hosted renderer worker branch dispatches before the current theme
   bootstrap, so constructing a store inside the installer is too late for a
   process-wide ownership guarantee;
-- there is no canonical immutable wire codec for the resolved package/render
-  snapshot. `ResolvedThemePackage` and `ThemeRenderSnapshot` retain
-  object/array/map reachability and therefore cannot be the mutex payload or
-  public transaction candidate;
+- at that time there was no canonical immutable wire codec for the resolved
+  package/render snapshot. `ResolvedThemePackage` and `ThemeRenderSnapshot`
+  retain object/array/map reachability and therefore cannot themselves be the
+  mutex payload or public transaction candidate;
 - current consumer APIs either use legacy module caches or return aggregate
   objects. Existing fingerprint/color helpers and `ThemeChangedV1` are useful
   scalar/notification primitives, but there is no scalar-only transaction
@@ -58,17 +58,20 @@ atomic old-or-new visibility and were not committed.
 Hosted single-threaded bootstrap must create one
 `ThemePackageTransactionStore` and inject it before concurrent readers start.
 The store owns its real hosted mutex and one wire-backed published aggregate.
+The canonical `theme-package-install-wire-v1` text codec has since landed at
+`b1d0b3e27ff8e9c751ee8cbb7ec8f5e41bd4aaeb`. Its aggregate native ABI remains
+unverified, so transaction candidates/publication must stay canonical text.
 Before another transaction implementation is opened:
 
 1. define a persistent hosted theme session/store handoff created at process
    entry before worker dispatch and passed to every runtime refresh consumer;
-2. define and test a canonical scalar theme-package/snapshot wire codec whose
-   decoder reconstructs private render objects only after copying the wire
-   under the store lock;
+2. admit the landed codec's incremental native encoder/decoder ABI probe before
+   using decoded aggregates across module boundaries;
 3. provide scalar/wire transaction reads for WM, GUI, and Web, and remove
    aggregate-return transaction APIs;
-4. make source capture injectable so a counting/changing reader test proves
-   one read of each canonical path;
+4. resolve the source-capture design hard stop: add a cache-owning production
+   wrapper that constructs the reader only on misses, and select strict versus
+   legacy missing-core validation semantics;
 5. reuse `ThemeChangedV1` only after a successful commit; it is the
    post-commit notification wire, not the package publication store.
 
@@ -87,6 +90,7 @@ Only after those interfaces land may a fresh session implement:
    an isolated store.
 
 The three-cycle cap is exhausted for this session. Do not retry the same
-transaction shape. Resume only after the persistent session handoff, immutable
-wire codec, and scalar consumer surface are independently implemented and
-reviewed.
+transaction shape. Resume only after the persistent session handoff,
+source-capture hard stop, native codec ABI evidence, and scalar consumer
+surface are independently implemented and reviewed. See
+[source-capture hard stop](theme_package_source_capture_design_hard_stop_2026-07-27.md).

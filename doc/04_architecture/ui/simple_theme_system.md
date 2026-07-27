@@ -70,6 +70,12 @@ public candidates and transaction reads must not expose package maps, arrays,
 or aggregate aliases. See
 [the transaction sync-owner blocker](../../08_tracking/bug/theme_package_transaction_sync_owner_blocker_2026-07-27.md).
 
+Canonical `theme-package-install-wire-v1` text is now implemented in
+`common.ui.theme_package_wire` and statically accepted. Native aggregate
+encoder/decoder use still requires its incremental ABI probe. Exactly-once
+source preparation remains design-blocked; see
+[the source-capture hard stop](../../08_tracking/bug/theme_package_source_capture_design_hard_stop_2026-07-27.md).
+
 The numeric/text Glass token twins and Obsidian presets remain compatibility or
 standalone APIs. They do not replace the registry/package/snapshot path for
 hosted or SimpleOS production rendering. See

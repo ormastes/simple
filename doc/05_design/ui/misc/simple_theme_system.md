@@ -91,12 +91,17 @@ projections and themed Simple Web HTML.
 
 Runtime switching remains fail-closed. Before implementing it, add a
 persistent hosted theme session at process entry (before renderer-worker
-dispatch), a canonical scalar package/snapshot wire codec, an injectable
-counting source-reader seam, and scalar/wire read APIs shared by WM, GUI, and
-Web. The store mutex protects one wire value; consumers copy it under lock and
+dispatch), an injectable counting source-reader seam, and scalar/wire read APIs
+shared by WM, GUI, and Web. Canonical package/snapshot wire text is landed; its
+native aggregate ABI remains an explicit incremental gate. The store mutex
+protects one wire value; consumers copy it under lock and
 decode private render objects after unlock. A fresh store per install,
 module-global lazy/eager locks, mutable package dictionaries in the published
 state, and aggregate-return reads are invalid designs.
+
+The source-reader seam is not yet admitted because a cache-owning wrapper and
+strict-versus-legacy missing-core validation contract remain unresolved. See
+[the source-capture hard stop](../../../08_tracking/bug/theme_package_source_capture_design_hard_stop_2026-07-27.md).
 
 `GlassConfig`, `GlassPortConfig`, and numeric/text Glass tokens are retained
 compatibility or standalone APIs; they are not the production authoring path

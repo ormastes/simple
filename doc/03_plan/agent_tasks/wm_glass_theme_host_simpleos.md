@@ -81,7 +81,7 @@ overlapping dirty work and remains read-only for this lane.
 | Simple GUI theme handoff | SOURCE FIXED; product proof pending | resolved snapshot now reaches canonical widget Draw IR; 2 bootstrap-driver scenarios pass diagnostically |
 | Simple Web theme authority | SOURCE FIXED; REVIEW ACCEPTED; RUNTIME UNVERIFIED | canonical package output keeps the complete structural/event adapter while Aetheric package CSS owns every paint/material token; live parser/Draw-IR/pixel/event proof still requires an admitted runtime |
 | WM glass material projection | SOURCE FIXED; REVIEW ACCEPTED; RUNTIME UNVERIFIED | CPU preserves parent sampling/500/930 opacity; opaque Metal uses session-owned identity and exact per-request receipts; sub-opaque Metal fails before dispatch until a GPU-only delta path exists |
-| Runtime theme switching | PROTOCOL/CACHE + K1 OWNED-QUEUE SOURCE ACCEPTED; K2/CATALOG/PACKAGE SERIES STOPPED; fail-fast system contract | `ThemeChangedV1`, BrowserBackend cache identity, and K1 copied-payload queues are landed. K2 exhausted three cycles on cross-architecture registration/entry stability gaps; generated catalog exhausted three cycles on stale active/frame authority; package cycle 3 was reverted without commit because the host lacks a persistent pre-worker theme session, canonical immutable package/snapshot wire codec, and scalar transaction consumer surface. The proposed parent-owned `HostedThemeRuntime` plus exact `theme_init(generation, revision, wire_text)` handoff is now specified in the architecture/detail-design and test-plan links below; it is not source implemented. ThemeService/consumer wiring remains unsafe; see the linked K2, catalog, and package blocker docs |
+| Runtime theme switching | PROTOCOL/CACHE + K1 + CANONICAL WIRE SOURCE ACCEPTED; K2/CATALOG/PACKAGE/SOURCE-CAPTURE SERIES STOPPED; fail-fast system contract | `ThemeChangedV1`, BrowserBackend cache identity, K1 copied-payload queues, and canonical `theme-package-install-wire-v1` text are landed. K2 exhausted three cycles on cross-architecture registration/entry stability gaps; generated catalog exhausted three cycles on stale active/frame authority; package transactions remain unintegrated; source-capture design exhausted three cycles on the missing cache-owning wrapper and contradictory strict-versus-legacy missing-core semantics. The proposed parent-owned `HostedThemeRuntime` handoff is specified but not source implemented. ThemeService/consumer wiring remains unsafe; see the linked K2, catalog, package, and source-capture blocker docs |
 
 ### Hosted theme runtime prerequisite — design handoff (2026-07-27)
 
@@ -777,3 +777,30 @@ fallback identity and finalize
 events only after the correlated frame. Both rows still require timing/RSS.
 Active sibling changes in those files remain separately owned and must be
 re-reviewed only after their owner commits them.
+
+## 2026-07-27 Source-only Delta Audit
+
+Three later commits improve prerequisites but do not admit a host or QEMU
+runtime:
+
+- `e0daceb361e88583be711dc97584e469b518e505` preserves negative filesystem WM
+  coordinates through the app-process contract. It is a narrow source repair,
+  not native input-backend, capture, or live event evidence.
+- `bd7f63edb8597d6b5ae51a873f3f91a7fc634bfe` reserves the complete x86_64
+  desktop heap before page-table allocation. It fixes the triple-fault path
+  where the enlarged heap overlapped active PMM page tables. It changes no ARM
+  source and does not alter frozen admission, BRR2, K2, event ordering,
+  timing/RSS, or theme-before-first-frame requirements.
+- `67024e9c0a51722812f295cfd7170364f2f031d2` improves Stage 4 HIR import
+  resolution, and `a7ac45b72f5d894d416482bf4d2f31e0d7378bbf` restores a missing
+  runtime-contract source input, but neither produces an admitted
+  source-matched compiler/runtime artifact. Receiver/module-key failures and
+  the generated `_dispatch_function` code-generation split remain.
+
+No safe incremental QEMU run follows from these changes. Retained x86
+ELF/admission sets predate the heap fix and lack its marker; rebuilding only a
+kernel and combining it with their disk/manifest would violate frozen
+admission. ARM is unaffected. Resume x86 with one fresh, source-matched admitted
+OVMF capture that proves the reserved heap covers the entire heap, the VMM root
+lies outside it, and PMM/VMM startup survives. Until then host runtime, x86
+QEMU, and ARM QEMU rows remain postponed rather than passed.

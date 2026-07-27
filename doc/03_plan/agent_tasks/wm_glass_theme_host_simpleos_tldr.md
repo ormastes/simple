@@ -13,6 +13,8 @@
   snapshots, and ThemeService delivery remain blocked.
 - Live host pixels/events remain open until an admitted source-matched
   pure-Simple runtime and required native capability are available.
+- Current HIR/runtime deltas still produce no admitted source-matched artifact:
+  receiver/module-key failures and the generated dispatch split remain.
 - The Endpoint Security collector is source-verified and fail-closed; policy
   stays unavailable until signing/entitlement enable a source-pinned prepared
   policy, followed by collector admission and then canonical-driver admission.
@@ -21,6 +23,10 @@
   frozen admission, SSE2 parity, ordered damage/frame receipts, timing, and RSS.
 - ARM direct-`-kernel` firmware is N/A; it still needs theme/backend identity,
   non-synthetic receipt finalization after its frame, timing, and RSS.
+- The x86 heap/page-table overlap is source-fixed, but retained x86 artifacts
+  predate it and cannot be mixed with old frozen media; ARM is unaffected.
+- Signed filesystem WM coordinates are source-fixed, but native input/capture
+  evidence remains open.
 - QEMU P1 details:
   `doc/08_tracking/bug/wm_glass_qemu_evidence_contract_p1_2026-07-27.md`.
 - The three-cycle BRR2 source series is unintegrated: exact parser reasons are
@@ -32,11 +38,11 @@
 - The generated snapshot-catalog series exhausted three cycles unintegrated:
   active non-default snapshots and external-frame registrations can outlive
   current catalog/theme authority.
-- Theme-package transactions remain unintegrated. Cycle 3 was fully reverted
-  without a commit: a persistent pre-worker hosted theme session, immutable
-  package/snapshot wire codec, counting source-reader seam, and scalar
-  WM/GUI/Web transaction reads must land first. The session's three-cycle cap
-  is exhausted.
+- Canonical package/snapshot wire text is landed and statically accepted.
+  Theme-package transactions remain unintegrated: the persistent hosted
+  runtime is design-only, native aggregate codec evidence is pending, and the
+  source-capture design exhausted three rejected cycles over cache-owner and
+  missing-core validation contradictions.
 - The implementation prerequisite is now explicit: parent-owned
   `HostedThemeRuntime` creates one injected `(revision, wire_text)` store before
   package/backend/worker activity. A hosted wrapper—not shared
