@@ -167,7 +167,7 @@ production owners. Live event and device proof belongs to the primary scenario.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 53 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -175,16 +175,22 @@ step("Verify the retained contract binds a forward Vulkan revision")
 val wrapper = file_read(WRAPPER)
 val app = file_read(HOST_ENV_APP)
 val contract = file_read(HOST_ENV_CONTRACT)
+val setup = file_read("scripts/setup/setup-gui-web-2d-vulkan-env.shs")
+val browser_backing = file_read("scripts/check/gui-web-2d-vulkan-browser-backing-status.js")
+val diff_argb = file_read("tools/pixel_compare/diff_argb.js")
 expect(wrapper).to_contain("linux_hosted_wm_live_window")
 expect(app).to_contain("host_simd_capability_row")
 expect(app).to_contain("build/cpu-simd-engine2d-arch-matrix/aarch64/out/evidence.env")
 expect(app).to_contain("build/cpu-simd-engine2d-arch-matrix/riscv64/out/evidence.env")
 expect(app.contains("native_simd_pixel_evidence")).to_be(false)
-expect(app).to_contain("build/gui-web-2d-vulkan-env/simple-vulkan-readback/evidence.env")
+expect(app).to_contain("build/gui-web-2d-vulkan-env-run-current/simple-vulkan-readback/evidence.env")
+expect(app).to_contain("build/gui-web-2d-vulkan-env-run-current/evidence.env")
+expect(app).to_contain("build/gui-web-2d-vulkan-env-browser-backing/evidence.env")
 expect(app).to_contain("build/renderdoc/simple-gate/evidence.env")
 expect(app).to_contain("build/linux-hosted-wm-live-window-evidence/evidence.env")
 expect(app).to_contain("HostCapabilityRow")
 expect(app).to_contain("host_renderdoc_evidence_passes(renderdoc) and host_renderdoc_artifacts_are_current(renderdoc)")
+expect(app).to_contain("host_vulkan_evidence_passes(vulkan) and host_browser_vulkan_parity_evidence_passes(vulkan_browser, vulkan_run)")
 expect(app).to_contain("host_readback_evidence_passes(live) and host_readback_captures_are_current(live)")
 expect(contract).to_contain("linux_hosted_wm_live_window_input_readback_source=device_readback")
 expect(contract).to_contain("linux_hosted_wm_live_window_glyph_crop_live_match=true")
@@ -195,6 +201,27 @@ expect(contract).to_contain(
     "_host_evidence_values_increase(evidence, \"linux_hosted_wm_live_window_baseline_revision\", \"linux_hosted_wm_live_window_input_revision\")")
 expect(contract).to_contain(
     "_host_evidence_value_matches(evidence, \"linux_hosted_wm_live_window_baseline_backend\", \"vulkan\")")
+expect(contract).to_contain("fn host_browser_vulkan_parity_evidence_passes")
+expect(contract).to_contain("gui_web_2d_vulkan_electron_browser_backing_source_file_status")
+expect(contract).to_contain("gui_web_2d_vulkan_chrome_browser_backing_source_file_status")
+expect(contract).to_contain("gui_web_2d_vulkan_electron_chrome_pairwise_diff_status")
+expect(contract).to_contain("gui_web_2d_vulkan_electron_simple_pairwise_diff_status")
+expect(contract).to_contain("gui_web_2d_vulkan_chrome_simple_pairwise_diff_status")
+expect(contract).to_contain("gui_web_2d_vulkan_pixel_comparison_status")
+expect(contract).to_contain("pixel_count == width * height")
+expect(contract).to_contain("nonblank > 0 and nonblank <= pixel_count")
+expect(contract).to_contain("gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_status")
+expect(setup).to_contain("pixels.length === expectedPixelCount")
+expect(setup).to_contain("nonblank > 0 && nonblank <= pixels.length")
+expect(setup).to_contain("Number.isInteger(value) && value >= 0 && value <= 0xffffffff")
+expect(setup).to_contain("for (let i = 0; pixelsValid && i < pixels.length; i += 1)")
+expect(browser_backing).to_contain("electronBrowserGpuInfoStatus === \"pass\"")
+expect(browser_backing).to_contain("const electronHardware = Boolean(electronAux.hardwareSupportsVulkan);")
+expect(browser_backing.contains("electronAux.hardwareSupportsVulkan || electronAppAux.hardwareSupportsVulkan")).to_be(false)
+expect(diff_argb).to_contain("ref.pixels.length !== total || test.pixels.length !== total")
+expect(diff_argb).to_contain("Pixel array length mismatch")
+expect(diff_argb).to_contain("Number.isInteger(value) && value >= 0 && value <= 0xFFFFFFFF")
+expect(diff_argb).to_contain("!ref.pixels.every(validArgbPixel) || !test.pixels.every(validArgbPixel)")
 expect(app.contains("argb_mismatch_count=0")).to_be(false)
 expect(app).to_contain("blocked")
 ```

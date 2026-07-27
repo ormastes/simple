@@ -144,10 +144,17 @@ function emit(k, v) {
 try {
   const payload = JSON.parse(fs.readFileSync(argbPath, "utf8"));
   const pixels = Array.isArray(payload.pixels) ? payload.pixels : [];
+  const width = payload.width;
+  const height = payload.height;
+  const expectedPixelCount = width * height;
+  const pixelsValid = pixels.every((value) => Number.isInteger(value) && value >= 0 && value <= 0xffffffff);
+  const shapeOk = Number.isSafeInteger(width) && width > 0 &&
+    Number.isSafeInteger(height) && height > 0 &&
+    Number.isSafeInteger(expectedPixelCount) && pixels.length === expectedPixelCount && pixelsValid;
   let nonblank = 0;
   let checksum = 0n;
   let weighted = 0n;
-  for (let i = 0; i < pixels.length; i += 1) {
+  for (let i = 0; pixelsValid && i < pixels.length; i += 1) {
     const value = pixels[i];
     const pixel = Number(value) >>> 0;
     checksum += BigInt(pixel);
@@ -155,10 +162,11 @@ try {
     const alpha = (pixel >>> 24) & 255;
     if (alpha !== 0 && pixel !== 0xffffffff) nonblank++;
   }
-  emit("status", pixels.length > 0 && nonblank > 0 ? "pass" : "fail");
+  emit("status", shapeOk && nonblank > 0 && nonblank <= pixels.length ? "pass" : "fail");
+  emit("reason", !pixelsValid ? "invalid-argb-pixel-value" : (shapeOk ? (nonblank > 0 && nonblank <= pixels.length ? "pass" : "blank-pixels") : "pixel-count-dimension-mismatch"));
   emit("path", argbPath);
-  emit("width", Number(payload.width || 0));
-  emit("height", Number(payload.height || 0));
+  emit("width", width);
+  emit("height", height);
   emit("format", String(payload.format || ""));
   emit("producer", String(payload.producer || ""));
   emit("pixel_count", pixels.length);
@@ -653,30 +661,28 @@ const electronArgbFileStatus = sourceFileStatus(electronArgbPath);
 const chromeProofFileStatus = sourceFileStatus(chromeProofPath);
 const electronFeatureStatus = electronProof && electronProof.gpu_feature_status ? electronProof.gpu_feature_status : (electronArgb && electronArgb.gpuFeatureStatus ? electronArgb.gpuFeatureStatus : {});
 const electronBrowserGpuInfo = electronProof && electronProof.browser_target_gpu_info ? electronProof.browser_target_gpu_info : (electronArgb && electronArgb.browserTargetGpuInfo ? electronArgb.browserTargetGpuInfo : {});
-const electronAppGpuInfo = electronProof && electronProof.gpu_info ? electronProof.gpu_info : (electronArgb && electronArgb.gpuInfo ? electronArgb.gpuInfo : {});
-const electronGpuInfo = electronBrowserGpuInfo && !electronBrowserGpuInfo.error ? electronBrowserGpuInfo : electronAppGpuInfo;
 const electronBrowserGpuInfoStatus = electronProof && electronProof.browser_target_gpu_info_status ? String(electronProof.browser_target_gpu_info_status) : (electronBrowserGpuInfo && !electronBrowserGpuInfo.error ? "pass" : (electronBrowserGpuInfo && electronBrowserGpuInfo.error ? "fail" : "not-run"));
 const electronBrowserGpuInfoReason = electronBrowserGpuInfo && electronBrowserGpuInfo.error ? String(electronBrowserGpuInfo.error) : electronBrowserGpuInfoStatus;
+const electronGpuInfo = electronBrowserGpuInfoStatus === "pass" ? electronBrowserGpuInfo : {};
 const electronVulkan = String(electronFeatureStatus.vulkan || "");
 const electronGpuCompositing = String(electronFeatureStatus.gpu_compositing || "");
 function gpuAux(info) {
   return info && info.gpu && info.gpu.auxAttributes ? info.gpu.auxAttributes : (info && info.auxAttributes ? info.auxAttributes : {});
 }
 const electronAux = gpuAux(electronGpuInfo);
-const electronAppAux = gpuAux(electronAppGpuInfo);
 const electronDisplay = String(electronAux.displayType || "");
-const electronHardware = Boolean(electronAux.hardwareSupportsVulkan || electronAppAux.hardwareSupportsVulkan);
-const electronGlParts = String(electronAux.glImplementationParts || electronAppAux.glImplementationParts || "");
-const electronSkiaBackend = String(electronAux.skiaBackendType || electronAppAux.skiaBackendType || "");
-const electronGlRenderer = String(electronAux.glRenderer || electronAppAux.glRenderer || "");
+const electronHardware = Boolean(electronAux.hardwareSupportsVulkan);
+const electronGlParts = String(electronAux.glImplementationParts || "");
+const electronSkiaBackend = String(electronAux.skiaBackendType || "");
+const electronGlRenderer = String(electronAux.glRenderer || "");
 const electronEnabled = /enabled/i.test(electronVulkan);
 const electronGpuEnabled = /enabled/i.test(electronGpuCompositing);
 const electronMentionsVulkan = /vulkan/i.test(`${electronDisplay} ${electronGlParts} ${electronSkiaBackend} ${electronGlRenderer}`);
 const electronProofFileOk = electronProofFileStatus === "pass";
-const electronStatus = electronEnabled && electronGpuEnabled && electronHardware && electronMentionsVulkan && electronProofFileOk ? "pass" : "fail";
+const electronStatus = electronBrowserGpuInfoStatus === "pass" && electronEnabled && electronGpuEnabled && electronHardware && electronMentionsVulkan && electronProofFileOk ? "pass" : "fail";
 const electronReason = electronStatus === "pass"
   ? "electron-vulkan-backed"
-  : (!electronProofFileOk ? `electron-source-file-${electronProofFileStatus}` : (electronEnabled && !electronGpuEnabled ? "electron-vulkan-gpu-compositing-disabled" : (electronEnabled ? "electron-vulkan-enabled-without-angle-vulkan-proof" : `electron-vulkan-${electronVulkan || "unknown"}`)));
+  : (electronBrowserGpuInfoStatus !== "pass" ? `electron-browser-target-gpu-info-${electronBrowserGpuInfoStatus}` : (!electronProofFileOk ? `electron-source-file-${electronProofFileStatus}` : (electronEnabled && !electronGpuEnabled ? "electron-vulkan-gpu-compositing-disabled" : (electronEnabled ? "electron-vulkan-enabled-without-angle-vulkan-proof" : `electron-vulkan-${electronVulkan || "unknown"}`))));
 const chromeGpuInfo = chrome ? chrome.gpu_info : null;
 const chromeFeatureStatus = chromeGpuInfo && chromeGpuInfo.gpu ? chromeGpuInfo.gpu.featureStatus || {} : {};
 const chromeAux = chromeGpuInfo && chromeGpuInfo.gpu ? chromeGpuInfo.gpu.auxAttributes || {} : {};

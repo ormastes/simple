@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 14 | 14 | 0 | 0 |
+| 15 | 15 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -389,6 +389,92 @@ expect(host_vulkan_evidence_passes(complete + "\nvulkan_engine2d_readback_status
 
 </details>
 
+#### requires browser Vulkan backing and exact three-way ARGB parity
+
+The pure classifier consumes the setup producer's separate browser-backing and
+direct-run receipts, rejects malformed pixel cardinality and nonblank counts,
+and requires all three pairwise comparisons to pass.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 69 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val browser = complete_browser_vulkan_evidence()
+val run = complete_browser_vulkan_parity_run_evidence()
+expect(host_browser_vulkan_parity_evidence_passes(browser, run)).to_be(true)
+
+step("Reject incomplete or non-Vulkan browser receipts")
+expect(host_browser_vulkan_parity_evidence_passes(browser.replace("browser_backing_mode=gpu-feature-status", "browser_backing_mode=unknown"), run)).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser.replace("gui_web_2d_vulkan_browser_backing_status=pass", "gui_web_2d_vulkan_browser_backing_status=fail"), run)).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser.replace("electron_browser_backing_status=pass", "electron_browser_backing_status=fail"), run)).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser.replace("electron_browser_backing_browser_target_gpu_info_status=pass", "electron_browser_backing_browser_target_gpu_info_status=fail"), run)).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser.replace("electron_browser_backing_vulkan=enabled", "electron_browser_backing_vulkan=disabled"), run)).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser.replace("electron_browser_backing_gpu_compositing=enabled", "electron_browser_backing_gpu_compositing=disabled"), run)).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser.replace("electron_browser_backing_hardware_supports_vulkan=true", "electron_browser_backing_hardware_supports_vulkan=false"), run)).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser.replace("electron_browser_backing_source=/tmp/electron-proof.json", "electron_browser_backing_source="), run)).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser.replace("electron_browser_backing_source_file_status=pass", "electron_browser_backing_source_file_status=symlink"), run)).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser.replace("electron_browser_backing_argb_source=/tmp/electron-argb.json", "electron_browser_backing_argb_source="), run)).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser.replace("electron_browser_backing_argb_source_file_status=pass", "electron_browser_backing_argb_source_file_status=hardlink"), run)).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser.replace("chrome_browser_backing_status=pass", "chrome_browser_backing_status=fail"), run)).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser.replace("chrome_browser_backing_gpu_compositing=enabled", "chrome_browser_backing_gpu_compositing=disabled"), run)).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser.replace("chrome_browser_backing_hardware_supports_vulkan=true", "chrome_browser_backing_hardware_supports_vulkan=false"), run)).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser.replace("chrome_browser_backing_source=/tmp/chrome-proof.json", "chrome_browser_backing_source="), run)).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser.replace("chrome_browser_backing_source_file_status=pass", "chrome_browser_backing_source_file_status=empty"), run)).to_be(false)
+
+step("Reject unbound, mismatched, or blank ARGB artifacts")
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("gui_web_2d_vulkan_width=1280", "gui_web_2d_vulkan_width=0"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("gui_web_2d_vulkan_height=720", "gui_web_2d_vulkan_height=0"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_argb_status=pass", "electron_argb_status=fail"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_argb_path=/tmp/electron-argb.json", "electron_argb_path="))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_argb_width=1280", "electron_argb_width=1279"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_argb_height=720", "electron_argb_height=719"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_argb_format=argb-u32", "electron_argb_format=rgba-u8"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_argb_pixel_count=921600", "electron_argb_pixel_count=0"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_argb_pixel_count=921600", "electron_argb_pixel_count=921599"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_argb_nonblank_pixel_count=900000", "electron_argb_nonblank_pixel_count=0"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_argb_nonblank_pixel_count=900000", "electron_argb_nonblank_pixel_count=921601"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("chrome_argb_status=pass", "chrome_argb_status=fail"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("chrome_argb_path=/tmp/chrome-argb.json", "chrome_argb_path="))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("chrome_argb_width=1280", "chrome_argb_width=1279"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("chrome_argb_height=720", "chrome_argb_height=719"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("chrome_argb_format=argb-u32", "chrome_argb_format=rgba-u8"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("chrome_argb_pixel_count=921600", "chrome_argb_pixel_count=0"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("chrome_argb_pixel_count=921600", "chrome_argb_pixel_count=921599"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("chrome_argb_nonblank_pixel_count=900000", "chrome_argb_nonblank_pixel_count=0"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("chrome_argb_nonblank_pixel_count=900000", "chrome_argb_nonblank_pixel_count=921601"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("simple_argb_status=pass", "simple_argb_status=fail"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("simple_argb_backend=vulkan", "simple_argb_backend=cpu"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("simple_argb_path=/tmp/simple-argb.json", "simple_argb_path="))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("simple_argb_width=1280", "simple_argb_width=1279"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("simple_argb_height=720", "simple_argb_height=719"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("simple_argb_format=argb-u32", "simple_argb_format=rgba-u8"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("simple_argb_pixel_count=921600", "simple_argb_pixel_count=0"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("simple_argb_pixel_count=921600", "simple_argb_pixel_count=921599"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("simple_argb_nonblank_pixel_count=900000", "simple_argb_nonblank_pixel_count=0"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("simple_argb_nonblank_pixel_count=900000", "simple_argb_nonblank_pixel_count=921601"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run + "\ngui_web_2d_vulkan_electron_argb_pixel_count=921600")).to_be(false)
+
+step("Reject any missing or nonzero pairwise result and aggregate failure")
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_chrome_diff_path=/tmp/electron-chrome.ppm", "electron_chrome_diff_path="))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_chrome_pairwise_diff_status=pass", "electron_chrome_pairwise_diff_status=fail"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_chrome_mismatch_count=0", "electron_chrome_mismatch_count=1"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_simple_diff_path=/tmp/electron-simple.ppm", "electron_simple_diff_path="))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_simple_pairwise_diff_status=pass", "electron_simple_pairwise_diff_status=fail"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_simple_mismatch_count=0", "electron_simple_mismatch_count=1"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("chrome_simple_diff_path=/tmp/chrome-simple.ppm", "chrome_simple_diff_path="))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("chrome_simple_pairwise_diff_status=pass", "chrome_simple_pairwise_diff_status=fail"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("chrome_simple_mismatch_count=0", "chrome_simple_mismatch_count=1"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("pixel_comparison_mode=pairwise-argb-diff", "pixel_comparison_mode=unknown"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("pixel_comparison_status=pass", "pixel_comparison_status=fail"))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser + "\ngui_web_2d_vulkan_browser_backing_status=pass", run)).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run + "\ngui_web_2d_vulkan_pixel_comparison_status=pass")).to_be(false)
+```
+
+</details>
+
 #### requires genuine correlated RenderDoc replay evidence
 
 <details>
@@ -521,8 +607,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

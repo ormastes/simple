@@ -27,7 +27,7 @@ gui_vulkan_pairwise_mismatch_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -160,6 +160,40 @@ be strict and deterministic enough that a `pass` row means actual pixel parity.
 
 ### GUI Vulkan pairwise mismatch contract
 
+#### rejects string ARGB dimensions before pixel comparison
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-gui-vulkan-string-argb-dimension"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"producer\":\"valid\",\"pixels\":[0,1,2,3]}' > " + root + "/valid.json && printf '%s\\n' '{\"width\":\"2\",\"height\":2,\"producer\":\"invalid\",\"pixels\":[0,1,2,3]}' > " + root + "/string-width.json && if node tools/pixel_compare/diff_argb.js " + root + "/valid.json " + root + "/string-width.json > " + root + "/diff.out 2> " + root + "/diff.err; then exit 1; fi && grep -F 'Size mismatch' " + root + "/diff.err >/dev/null"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+```
+
+</details>
+
+#### rejects non-u32 ARGB elements before pixel comparison
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val root = "build/test-gui-vulkan-invalid-argb-elements"
+val command = "rm -rf " + root + " && mkdir -p " + root + " && printf '%s\\n' '{\"width\":2,\"height\":2,\"producer\":\"valid\",\"pixels\":[0,1,2,3]}' > " + root + "/valid.json && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[0,1,2,\"3\"]}' > " + root + "/string.json && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[0,1,2,null]}' > " + root + "/null.json && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[0,1,2,3.5]}' > " + root + "/float.json && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[0,1,2,-1]}' > " + root + "/negative.json && printf '%s\\n' '{\"width\":2,\"height\":2,\"pixels\":[0,1,2,4294967296]}' > " + root + "/overflow.json && for fixture in string null float negative overflow; do if node tools/pixel_compare/diff_argb.js " + root + "/valid.json " + root + "/$fixture.json > " + root + "/$fixture.out 2> " + root + "/$fixture.err; then exit 1; fi; grep -F 'Invalid ARGB pixel value' " + root + "/$fixture.err >/dev/null || exit 1; done"
+val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+expect(code).to_equal(0)
+```
+
+</details>
+
 #### keeps the shared Vulkan capture fixture deterministic for pairwise ARGB
 
 - Read the shared RenderDoc/Vulkan HTML fixture
@@ -227,8 +261,8 @@ expect(evidence).to_contain("gui_web_2d_vulkan_pixel_comparison_mode=pairwise-ar
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

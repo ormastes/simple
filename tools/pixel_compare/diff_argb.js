@@ -26,6 +26,17 @@ if (ref.width !== test.width || ref.height !== test.height) {
 const w = ref.width;
 const h = ref.height;
 const total = w * h;
+if (!Number.isSafeInteger(w) || w <= 0 || !Number.isSafeInteger(h) || h <= 0 ||
+    !Number.isSafeInteger(total) || !Array.isArray(ref.pixels) || !Array.isArray(test.pixels) ||
+    ref.pixels.length !== total || test.pixels.length !== total) {
+  console.error(`Pixel array length mismatch: expected=${total} ref=${Array.isArray(ref.pixels) ? ref.pixels.length : "not-array"} test=${Array.isArray(test.pixels) ? test.pixels.length : "not-array"}`);
+  process.exit(1);
+}
+const validArgbPixel = (value) => Number.isInteger(value) && value >= 0 && value <= 0xFFFFFFFF;
+if (!ref.pixels.every(validArgbPixel) || !test.pixels.every(validArgbPixel)) {
+  console.error("Invalid ARGB pixel value: expected integer in [0,0xffffffff]");
+  process.exit(1);
+}
 
 let differing = 0;
 let maxDelta = 0;
