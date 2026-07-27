@@ -182,7 +182,7 @@ expect(receipt(nonblank: 0).validation_reason()).to_equal("blank-frame")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 30 lines folded for reproduction.
+Runnable source: 34 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -212,6 +212,10 @@ expect(host_readback_evidence_passes(complete.replace("baseline_readback_source=
 expect(host_readback_evidence_passes(complete.replace("input_backend_handle=41", "input_backend_handle=42"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("input_render_event_id=7", "input_render_event_id=8"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("input_render_mutation_revision=1", "input_render_mutation_revision=2"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("input_composition_id=wm-composite", "input_composition_id=other"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("input_web_content_image_count=1", "input_web_content_image_count=0"))).to_be(false)
+expect(host_readback_evidence_passes(complete + "\nlinux_hosted_wm_live_window_input_composition_id=wm-composite")).to_be(false)
+expect(host_readback_evidence_passes(complete + "\nlinux_hosted_wm_live_window_input_web_content_image_count=1")).to_be(false)
 expect(host_readback_evidence_passes(complete.replace(
     "input_capture_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "input_capture_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

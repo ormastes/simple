@@ -205,7 +205,7 @@ capture helper, and compatibility renderers are not accepted here.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 98 lines folded for reproduction.
+Runnable source: 102 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -293,6 +293,10 @@ expect(wrapper).to_contain(".render.engine2d_backend == $backend")
 expect(wrapper).to_contain(".render.readback_source == $source")
 expect(wrapper).to_contain(".render.backend_handle == $handle")
 expect(wrapper).to_contain(".render.checksum == $checksum")
+expect(wrapper).to_contain(".render.composition_id == $composition")
+expect(wrapper).to_contain(".render.scene_key == $scene")
+expect(wrapper).to_contain(".render.web_content_image_count == $web_images")
+expect(wrapper).to_contain(";composition_id=$composition_id;scene_key=$scene_key;web_content_image_count=$web_content_image_count identity=")
 expect(wrapper).to_contain("capture_argb_checksum")
 expect(wrapper).to_contain("[ \"$(capture_argb_checksum \"$CAPTURE_LIVE\")\" = \"$frame_checksum\" ]")
 expect(wrapper).to_contain("grep -Fq '[hosted-wm] draw-ir-rejected'")
@@ -322,7 +326,7 @@ expect(wrapper).to_contain("[ \"$input_capture_sha\" != \"$baseline_capture_sha\
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 36 lines folded for reproduction.
+Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -335,6 +339,9 @@ step("Submit the exact composition")
 expect(entry).to_contain("route=shared-wm-scene-draw-ir")
 expect(entry).to_contain("fallback=false revision={comp.render_revision}")
 expect(entry).to_contain("draw-ir-rejected evidence=fail-closed")
+expect(entry).to_contain("raster.last_composition_id")
+expect(entry).to_contain("raster.last_scene_key")
+expect(entry).to_contain("raster.last_web_content_image_count")
 
 step("Deliver correlated focus keyboard text and pointer events")
 val winit_runtime = file_read("src/runtime/spl_winit/src/lib.rs")
@@ -359,6 +366,8 @@ expect(evidence).to_contain("linux_hosted_wm_live_window_restore_status=pass")
 
 step("Capture backend and framebuffer evidence")
 expect(evidence).to_contain("linux_hosted_wm_live_window_frame_correlation_status=pass")
+expect(evidence).to_contain("linux_hosted_wm_live_window_input_composition_id=wm-composite")
+expect(evidence).to_contain("linux_hosted_wm_live_window_input_web_content_image_count=")
 expect(evidence).to_contain("linux_hosted_wm_live_window_window_png=present")
 expect(evidence).to_contain("linux_hosted_wm_live_window_framebuffer_ppm=present")
 expect(evidence).to_contain("linux_hosted_wm_live_window_snapshot=present")

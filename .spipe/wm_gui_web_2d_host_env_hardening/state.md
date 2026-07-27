@@ -1058,6 +1058,12 @@ Tracking split:
   retained RenderDoc/framebuffer paths can claim path-integrity revalidation;
   tracked in
   `doc/08_tracking/bug/test_host_env_artifact_symlink_revalidation_2026-07-27.md`.
+- submitted-composition-provenance: The Engine2D compositor now retains the
+  successful composition ID, scene key, and executed `wm.content` IMAGE count.
+  Hosted snapshots and the live wrapper correlate those values; shared host
+  admission requires `wm-composite` plus a positive Web content-image count.
+  Focused structural and mutation specs were updated; no live host PASS is
+  claimed while the admitted pure-Simple runner remains unavailable.
 - coverage-denominator-gap: Review confirmed the runtime aggregate contains
   only decision sites that emitted rows; completely untouched functions can be
   absent while the report says 100%. TODO594 requires a compiler-owned

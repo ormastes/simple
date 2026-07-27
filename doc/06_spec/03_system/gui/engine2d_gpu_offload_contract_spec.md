@@ -245,13 +245,16 @@ expect(src).to_contain(guard + "\"ERROR: hosted WM motion pure-Simple frame pres
 - comp apply bridge request
    - Expected: pixels.len() equals `240 * 180`
    - Expected: pixels[0] equals `wm_chrome_theme().command_lane`
+   - Expected: raster.last_composition_id equals `"wm-composite"`
+   - Expected: raster.last_scene_key is not blank
+   - Expected: raster.last_web_content_image_count is greater than `0`
 - raster shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -264,6 +267,11 @@ val pixels = comp.pure_simple_pixel_buffer()
 expect(pixels.len()).to_equal(240 * 180)
 expect(pixels[0]).to_equal(wm_chrome_theme().command_lane)
 expect(pixels[90 * 240 + 30] == wm_chrome_theme().command_lane).to_be(false)
+expect(raster.last_composition_id).to_equal("wm-composite")
+expect(raster.last_scene_key == "").to_be(false)
+expect(raster.last_web_content_image_count).to_be_greater_than(0)
+expect(raster.frame_provenance()).to_contain("composition_id=wm-composite;scene_key=")
+expect(raster.frame_provenance()).to_contain(";web_content_image_count=1")
 raster.shutdown()
 ```
 

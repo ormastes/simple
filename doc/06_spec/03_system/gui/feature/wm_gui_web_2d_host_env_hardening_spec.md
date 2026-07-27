@@ -74,7 +74,7 @@ describe "production host event and render evidence":
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 63 lines folded for reproduction.
+Runnable source: 65 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -113,6 +113,8 @@ expect(live).to_contain("linux_hosted_wm_live_window_restore_status=pass")
 step("Render the resulting canonical composition")
 expect(live).to_contain("linux_hosted_wm_live_window_frame_marker=pass")
 expect(live).to_contain("linux_hosted_wm_live_window_frame_correlation_status=pass")
+expect(live).to_contain("linux_hosted_wm_live_window_input_composition_id=wm-composite")
+expect(live).to_contain("linux_hosted_wm_live_window_input_web_content_image_count=")
 
 step("Read back and compare the backend buffer")
 expect(live).to_contain("linux_hosted_wm_live_window_framebuffer_status=pass")
