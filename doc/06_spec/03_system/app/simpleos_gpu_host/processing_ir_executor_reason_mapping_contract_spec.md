@@ -18,7 +18,8 @@ SIMPLE_LIB=src bin/simple test \
 
 ## Checks
 
-1. Submit/dispatch and readback wire constants are stable and exported.
+1. Submit/dispatch, readback, and measured offload-overhead wire constants are
+   stable and exported (`16`, `17`, and `18`).
 2. The mapper executes every stable setup, submit/dispatch, and readback reason
    shape emitted by the CUDA, Vulkan, and Metal executors.
 3. Checksum mismatch retains its existing code.

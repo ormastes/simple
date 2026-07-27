@@ -2,12 +2,11 @@
 
 ## Status
 
-Open. Linux CUDA measurement proves CPU is faster below 1,048,576 ProcessingIR
-elements, but `src/app/simpleos_gpu_host/main.spl` still executes both the CPU
-oracle and requested GPU backend for every valid processing request. A
-calibrated pre-device CPU policy was implemented and withdrawn because the
-retained source-matched compiler produced a daemon that exits `139` before CLI
-validation.
+Resolved for policy admission and calibrated small-batch bypass. Linux CUDA
+measurement now drives a default `1,048,576`-element threshold; CPU fallback
+requests below it publish reason `18` before device execution. Exact native
+threshold-`0` fallback completion remains part of the separate request-wait
+tracker.
 
 ## Evidence
 
@@ -25,27 +24,29 @@ validation.
   `--processing-min-offload-elements=bad` before printing validation output.
 - After the shared mmap native-ABI repair, the incrementally rebuilt current
   daemon now reaches existing CLI validation and exits `2` with the expected
-  invalid-processing-backend diagnostic. The withdrawn offload option itself
-  has not yet been reapplied or rerun, so this tracker remains open.
+  invalid-processing-backend diagnostic.
+- The reapplied option uses canonical integer round-trip validation; malformed
+  input exits `2` with the expected threshold diagnostic.
+- Policy source contract passes 8/8.
+- Native 8-element calibrated request passes with fallback status `4`, reason
+  `18`, CPU source `2`, zero handle/identity, 32 bytes, and exact checksum.
+- Threshold `0` does not return reason `18`; HELLO succeeds, but the request
+  times out before retained evidence can identify the admitted backend.
 - Build logs:
   `build/simpleos_gpu_host/offload_policy/native-build.out` and
   `native-build-cycle2.out`.
 
 No bootstrap was run. The policy source, protocol reason, tests, and manuals
-were withdrawn rather than pushing unverified production behavior. Three
-focused native build/run cycles are exhausted.
+retain only the verified small-request bypass claim. Three focused native
+build/run cycles are exhausted. The post-review incremental rebuild stopped in
+the existing runtime closure at unknown extern `rt_transient_array_scope_begin`;
+it did not produce additional policy evidence.
 
-## Resume
+## Remaining Gate
 
-1. Repair or replace the source-matched compiler/runtime route so an
-   incrementally rebuilt host daemon passes basic CLI validation without
-   unresolved generated helpers or SIGSEGV.
-2. Add a calibrated `--processing-min-offload-elements` knob, defaulting to
-   the measured 1,048,576-element Linux CUDA break-even; allow `0` to disable.
-3. When CPU fallback is enabled and the request is below threshold, publish an
-   explicit CPU fallback receipt before device execution. Strict fallback
-   `none` must continue executing the requested GPU backend.
-4. Run the focused policy contract and native daemon-wire small/large batch
-   checks once against the admitted binary.
+After the shared HELLO/request wait is repaired in a fresh bounded session, run
+the threshold-`0` injected-submit row and a batch at or above `1,048,576` to
+retain an exact device-path receipt. Strict fallback `none` remains covered by
+the executable source contract until then.
 
 Owner: Linux GPU host operator. Final reviewer: high-capability model.

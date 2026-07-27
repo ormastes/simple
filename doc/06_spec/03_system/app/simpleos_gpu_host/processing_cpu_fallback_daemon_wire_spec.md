@@ -27,7 +27,11 @@ sh scripts/check/check-simpleos-gpu-fallback-wire.shs
    probe's `--mmap-smoke` path writes and reads the protocol magic directly.
 6. The executable spec checks wrapper/probe ownership and receipt assertions.
    The canonical wrapper fails if either native binary is missing, bounds the
-   probe to 60 seconds by default, and keeps the daemon guard 10 seconds longer.
+   probe to 60 seconds by default, keeps the daemon guard 10 seconds longer,
+   and waits up to five seconds for the daemon's transport-ready marker.
+7. `SIMPLEOS_GPU_FALLBACK_WIRE_MIN_OFFLOAD_ELEMENTS` and
+   `SIMPLEOS_GPU_FALLBACK_WIRE_EXPECT_REASON` reuse the same wire harness for
+   reason `16` failure injection and reason `18` calibrated policy evidence.
 
 ## Current Evidence
 
