@@ -1040,6 +1040,12 @@ Tracking split:
   later fields to overwrite process failure with `met-200fps`. Every nonzero
   probe exit now fails before row parsing; the focused zero/nonzero/124
   classifier self-test passes without launching the renderer.
+- test-host-env-readback-freshness: Retained live-WM text previously stayed
+  admissible after its baseline or input PPM was deleted or changed. The pure
+  contract now exposes one duplicate-safe four-value binding, and
+  `test_host_env` re-hashes both current files before admitting framebuffer
+  readback. Focused file mutations cover current, tampered, and deleted bytes;
+  no live host PASS is claimed.
 - coverage-denominator-gap: Review confirmed the runtime aggregate contains
   only decision sites that emitted rows; completely untouched functions can be
   absent while the report says 100%. TODO594 requires a compiler-owned

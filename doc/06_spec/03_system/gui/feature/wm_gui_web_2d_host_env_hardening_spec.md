@@ -159,7 +159,7 @@ production owners. Live event and device proof belongs to the primary scenario.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -176,6 +176,7 @@ expect(app).to_contain("build/gui-web-2d-vulkan-env/simple-vulkan-readback/evide
 expect(app).to_contain("build/renderdoc/simple-gate/evidence.env")
 expect(app).to_contain("build/linux-hosted-wm-live-window-evidence/evidence.env")
 expect(app).to_contain("HostCapabilityRow")
+expect(app).to_contain("host_readback_evidence_passes(live) and host_readback_captures_are_current(live)")
 expect(contract).to_contain("linux_hosted_wm_live_window_input_readback_source=device_readback")
 expect(contract).to_contain("linux_hosted_wm_live_window_glyph_crop_live_match=true")
 expect(contract).to_contain("host_display_input_evidence_passes(evidence)")

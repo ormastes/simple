@@ -182,11 +182,19 @@ expect(receipt(nonblank: 0).validation_reason()).to_equal("blank-frame")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val complete = complete_readback_evidence()
+val (baseline_path, baseline_sha, input_path, input_sha) = host_readback_capture_bindings(complete)
+expect(baseline_path).to_equal("/tmp/baseline.ppm")
+expect(baseline_sha).to_equal("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+expect(input_path).to_equal("/tmp/input.ppm")
+expect(input_sha).to_equal("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+val (duplicate_path, _, _, _) = host_readback_capture_bindings(
+    complete + "\nlinux_hosted_wm_live_window_baseline_capture=/tmp/stale.ppm")
+expect(duplicate_path).to_equal("")
 expect(host_readback_evidence_passes(complete)).to_be(true)
 expect(host_readback_evidence_passes(complete.replace("event_origin=screen", "event_origin=synthetic"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("framebuffer_status=pass", "framebuffer_status=fail"))).to_be(false)

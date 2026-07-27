@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -56,23 +56,62 @@ expect(source.contains("if env.validation_reason() == \"\":")).to_equal(false)
 
 #### rejects a deleted or changed retained RenderDoc capture
 
+- Bind the retained receipt to current RenderDoc bytes
+- Change and remove the retained RenderDoc capture
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Bind the retained receipt to current RenderDoc bytes")
 val path = "/tmp/simple-test-host-env-renderdoc-current.rdc"
 file_delete(path)
 expect(file_write(path, "RDOC-original")).to_be(true)
 val evidence = "rdoc_simple_gate_capture_file=" + path + "\n" +
     "rdoc_simple_gate_capture_file_sha256=" + file_hash_sha256(path)
 expect(host_renderdoc_capture_is_current(evidence)).to_be(true)
+step("Change and remove the retained RenderDoc capture")
 expect(file_write(path, "RDOC-changed")).to_be(true)
 expect(host_renderdoc_capture_is_current(evidence)).to_be(false)
 file_delete(path)
 expect(host_renderdoc_capture_is_current(evidence)).to_be(false)
+```
+
+</details>
+
+#### rejects deleted or changed retained framebuffer captures
+
+- Bind baseline and input receipts to current PPM bytes
+- Change and remove the retained framebuffer captures
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Bind baseline and input receipts to current PPM bytes")
+val baseline_path = "/tmp/simple-test-host-env-baseline.ppm"
+val input_path = "/tmp/simple-test-host-env-input.ppm"
+file_delete(baseline_path)
+file_delete(input_path)
+expect(file_write(baseline_path, "P6-baseline")).to_be(true)
+expect(file_write(input_path, "P6-input")).to_be(true)
+val evidence = "linux_hosted_wm_live_window_baseline_capture=" + baseline_path + "\n" +
+    "linux_hosted_wm_live_window_baseline_capture_sha256=" + file_hash_sha256(baseline_path) + "\n" +
+    "linux_hosted_wm_live_window_input_capture=" + input_path + "\n" +
+    "linux_hosted_wm_live_window_input_capture_sha256=" + file_hash_sha256(input_path)
+expect(host_readback_captures_are_current(evidence)).to_be(true)
+step("Change and remove the retained framebuffer captures")
+expect(file_write(input_path, "P6-tampered")).to_be(true)
+expect(host_readback_captures_are_current(evidence)).to_be(false)
+file_delete(baseline_path)
+expect(host_readback_captures_are_current(evidence)).to_be(false)
+file_delete(input_path)
 ```
 
 </details>
@@ -96,8 +135,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

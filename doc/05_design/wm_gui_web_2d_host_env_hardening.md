@@ -86,6 +86,8 @@ The host aggregate also re-hashes the retained RenderDoc capture path and
 blocks when the current bytes no longer match its exact-one gate binding.
 Framebuffer admission requires both correlated backend values to be `vulkan`;
 matching CPU fallback values remain blocked.
+The host aggregate resolves duplicate-safe baseline/input capture bindings and
+re-hashes both current PPMs before admitting `framebuffer_readback`.
 
 For the SimpleOS remote-client row, validation also rejects owner port `0`,
 resident placeholder apps, missing focus/input IPC sends, missing
