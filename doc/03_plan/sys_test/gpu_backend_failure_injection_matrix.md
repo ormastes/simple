@@ -21,8 +21,8 @@ identifies backend readback failure. Checksum mismatch retains reason `11`.
 Every `fail`, `unsupported`, or `blocked` receipt must have zero handle,
 identity, output bytes, and checksum with `readback_source=none`.
 The host defaults to `--processing-fallback=none`. Explicit
-`--processing-fallback=cpu` may write the already-computed CPU oracle only
-after a GPU executor failure or output mismatch. On the numeric wire this is
+`--processing-fallback=cpu` computes and writes the CPU oracle only after a GPU
+executor failure, output mismatch, or calibrated below-threshold decision. On the numeric wire this is
 `status=4`, `readback_source=2`, zero native handle/identity, and the original
 GPU failure reason. The completion backend remains the requested GPU code for
 request correlation.
@@ -68,8 +68,8 @@ future adapter hook cannot silently cover only one implementation.
 |---|---|---|---|---|
 | Unavailable | `processing_ir_execute_cuda`: guarded `unavailable` phase before runtime probing; host admission is `_processing_backend_mask_supported` | `unsupported`; `backend=unavailable`; `reason=backend-unavailable`; `native_handle=0`; `readback_source=none`; zero output fields | No `status=pass` receipt may have CPU backend/readback | Guarded live control implemented; HELLO removes the unavailable backend |
 | Init/submit | Init: `cuda_device_get`, `cuda_ctx_create`, or `cuda_module_load_data`; submit: `cuda_launch_kernel`/`cuda_sync` | `fail`; requested backend remains `cuda`; wire reason `16` for submit/dispatch; handle `0`; no device readback | Assert failed status, exact reason code, handle `0`, and no device readback | Guarded init/submit seams and real `cuda-dispatch-failed` split implemented |
-| Readback | `cuda_memcpy_dtoh` in `copied`, followed by host value extraction | `fail`; wire reason `17`; handle `0`; `readback_source=none`; zero output | Reject any pass lacking positive provenance, identity, exact output size/checksum, and `device_readback` | Guarded readback seam and real `cuda-readback-failed` split implemented |
-| Mismatch | Host `processing_ir_outputs_equal(values, oracle)` in `_process_request`; checker `mismatch` receipt constructor | `fail`; `backend=cuda`; wire reason `11`; handle `0`; no device-backed pass | Assert mismatch is non-pass and reject forged pass output | Guarded mismatch seam, production comparison, and wire mapping implemented |
+| Readback | `cuda_memcpy_dtoh` in `copied`, followed by host value extraction | `fail`; wire reason `17`; handle `0`; `readback_source=none`; zero output | Reject any pass lacking positive provenance, identity, exact output size/checksum, and `device_readback` | Same-process native baseline/readback-failure/recovery passes with exact 64-value output, zero failure provenance, and unchanged positive identity |
+| Mismatch | Host `processing_ir_output_matches(ir, values)` in `_process_request`; checker `mismatch` receipt constructor | `fail`; `backend=cuda`; wire reason `11`; handle `0`; no device-backed pass | Assert mismatch is non-pass and reject forged pass output | Guarded mismatch seam, production comparison, and wire mapping implemented |
 | Explicit fallback | `_process_request` calls `_processing_cpu_fallback` after executor failure or mismatch only when `--processing-fallback=cpu`; checker also covers the textual receipt | `fallback`; CPU readback; original GPU reason; zero native handle/identity; correlated generation/run/frame/backend | Accept only explicit `fallback`; reject the same fields with `status=pass`, nonzero provenance, device readback, or wrong correlation | Policy and guest wire validator implemented; end-to-end daemon wire run pending |
 
 ### Vulkan
@@ -79,7 +79,7 @@ future adapter hook cannot silently cover only one implementation.
 | Unavailable | Guarded `unavailable` phase before `vulkan_init`; render admission also reaches `_create_render_backend` `Err` | `unsupported`; `backend=unavailable`; handle `0`; no device readback | Do not promote an unavailable request to pass or silently rewrite `batch.backend` | Source-matched native phase passes with exact reason and zero provenance |
 | Init/submit | Init: `vulkan_alloc_storage`, `vulkan_compile_spirv`, `vulkan_create_pipeline_with_push`; submit: `vulkan_sffi_dispatch_buffer_compute_checked` | `fail`; `backend=vulkan`; wire reason `16` for submit/dispatch; handle `0`; no device readback | Assert no positive provenance/identity, no device readback, and no pass status | Source-matched native init and submit phases pass |
 | Readback | `vulkan_sffi_read_buffer_bytes` and `bytes.len() == byte_count`; render path `engine.read_pixels_with_source` | `fail`; wire reason `17`; handle `0`; no output checksum | Reject short/empty bytes and every pass whose source is not device readback | Source-matched native readback phase passes |
-| Mismatch | Processing `processing_ir_outputs_equal(values, oracle)`; Draw IR canonical checksum check before render | `fail`; wire reason `11`; handle `0`; no device-backed pass | Assert mismatch is non-pass and forged output is rejected | Source-matched native mismatch phase passes |
+| Mismatch | Processing `processing_ir_output_matches(ir, values)`; Draw IR canonical checksum check before render | `fail`; wire reason `11`; handle `0`; no device-backed pass | Assert mismatch is non-pass and forged output is rejected | Source-matched native mismatch phase passes |
 | Explicit fallback | `_process_request` calls `_processing_cpu_fallback` after executor failure or mismatch only when `--processing-fallback=cpu` | `fallback`; CPU readback; original GPU reason; zero native handle/identity; correlated generation/run/frame/backend | Reject a CPU-backed `pass`; accept fallback only when policy explicitly requests it and correlation fields match | Policy and guest wire validator implemented; end-to-end daemon wire run pending |
 
 ### Metal
@@ -89,7 +89,7 @@ future adapter hook cannot silently cover only one implementation.
 | Unavailable | Guarded `unavailable` phase before Metal availability/init; render creation is the platform Engine2D owner | `unsupported`; `backend=unavailable`; handle `0`; no device readback | Linux/unavailable output is not a Metal pass; reject any pass without Metal provenance, identity, and device readback | Guarded seam implemented; prepared-macOS live run pending |
 | Init/submit | Init: `metal_sffi_create_device`, queue, shader, pipeline, or allocation; submit: `metal_sffi_run_compute_frame` | `fail`; `backend=metal`; non-empty init/submit reason; handle `0`; no device readback | Accept only as failed; assert no pass, positive provenance, or device readback is emitted after the injected error | Guarded init/submit seams implemented; prepared-macOS live run pending |
 | Readback | `metal_buffer_download_ptr` and `values.len() == element_count`; render `read_pixels_with_source` | `fail`; `reason=readback-failed` or `readback-size-mismatch`; handle `0`; zero output | Reject short readback, absent checksum, absent identity, or any source other than `device_readback` | Guarded readback seam implemented after successful dispatch; prepared-macOS live run pending |
-| Mismatch | Host `processing_ir_outputs_equal(values, oracle)` / Draw IR canonical checksum; synthetic checker `mismatch` receipt | `fail`; `backend=metal`; `reason=checksum-mismatch`; handle `0`; no device-backed pass | Assert failed status and exact reason; reject CPU masquerading and altered output checksum | Guarded mismatch seam implemented after valid readback size; prepared-macOS live run pending |
+| Mismatch | Host `processing_ir_output_matches(ir, values)` / Draw IR canonical checksum; synthetic checker `mismatch` receipt | `fail`; `backend=metal`; `reason=checksum-mismatch`; handle `0`; no device-backed pass | Assert failed status and exact reason; reject CPU masquerading and altered output checksum | Guarded mismatch seam implemented after valid readback size; prepared-macOS live run pending |
 | Explicit fallback | `_process_request` calls `_processing_cpu_fallback` after executor failure or mismatch only when `--processing-fallback=cpu` | `fallback`; CPU readback; original GPU reason; zero native handle/identity; correlated generation/run/frame/backend | Reject a CPU-backed `pass`; fallback is valid only with explicit policy and correlated IDs | Policy and guest wire validator implemented; prepared-macOS end-to-end run pending |
 
 Metal rows above are deliberately not closed by Linux interpreter or
@@ -174,8 +174,10 @@ implemented by `processing_cpu_fallback_daemon_wire_spec.spl` and
 native mmap smoke, and separately bounded HELLO/request waits pass
 incrementally. The Linux CUDA submit-injection row publishes exact fallback
 reason `16`, CPU source `2`, zero handle/identity, 32 bytes, and checksum
-`135272480`. Linux Vulkan now passes unavailable, init, submit, readback, and
-mismatch injection through the retained native transport, plus one same-process
-success/failure/recovery sequence with stable device identity. The remaining
-evidence gap is the Metal live row on prepared macOS. Linux may run the
+`135272480`. Linux CUDA now also passes one same-process exact
+success/readback-failure/recovery sequence with stable device identity. Linux
+Vulkan passes unavailable, init, submit, readback, and mismatch injection
+through the retained native transport, plus its same-process
+success/failure/recovery sequence. The remaining evidence gap is the Metal live
+row on prepared macOS. Linux may run the
 validator and source-contract cases, but cannot close Metal runtime evidence.

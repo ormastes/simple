@@ -31,6 +31,14 @@ PROCESSING_CUDA_FILL_MODE=warm \
   sh scripts/check/check-processing-cuda-fill-native.shs
 ```
 
+Run same-process readback-failure recovery:
+
+```sh
+PROCESSING_CUDA_FILL_MODE=recovery \
+PROCESSING_CUDA_FILL_PROBE_BIN=build/simpleos_gpu_host/cuda_fill_native/processing_cuda_fill_probe-recovery \
+  sh scripts/check/check-processing-cuda-fill-native.shs
+```
+
 ## Checks
 
 1. Every returned value exactly matches `0x01020304`.
@@ -44,6 +52,9 @@ PROCESSING_CUDA_FILL_MODE=warm \
    `rt_u32s_from_raw` conversion, not a per-element `push` loop.
 8. Warm mode requires the second exact device request to complete faster than
    the cold request through the same executor.
+9. Recovery mode requires exact baseline output, a post-sync
+   `cuda-readback-failed` result with empty output and zero provenance, then
+   exact output with the same positive handle and device identity.
 
 ## Current Evidence
 
@@ -56,3 +67,11 @@ improvement, with exact values and unchanged device provenance. Those timings
 precede the subsequent retained-context activation repair; its two-context
 runtime test passes, but the capped Simple probe was not rebuilt a fourth time.
 Correlated daemon-wire and multi-sample evidence remain open.
+
+The 2026-07-27 recovery candidate
+`10323c8438ed987a2610793aa6af680933ae20e933ce0f3c11fcdbc281259519`
+passes baseline/failure/recovery in one process. Baseline and recovery each
+return 64 exact values with checksum `1082179840`, handle `1`, and device
+identity `1002905313239842438`; the injected synchronized readback failure
+returns `cuda-readback-failed`, zero values, zero handle, and zero identity.
+The same candidate also passes ordinary parity mode.

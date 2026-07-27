@@ -27,7 +27,7 @@ describe "direct CUDA ProcessingIR native evidence contract":
     it "keeps the policy-threshold workload on the same direct executor":
         val source = file_read(PROBE)
         val wrapper = file_read(WRAPPER)
-        expect(source).to_contain("((large or warm) and args.len() != 2)")
+        expect(source).to_contain("((large or warm or recover) and args.len() != 2)")
         expect(source).to_contain("if started_nanos <= 0: return 0")
         expect(source).to_contain("val elapsed_us = _elapsed_us(started)")
         expect(source).to_contain("elapsed_us > 0")
@@ -36,6 +36,25 @@ describe "direct CUDA ProcessingIR native evidence contract":
         expect(wrapper).to_contain("mode=$MODE completed=true count=$COUNT")
         expect(wrapper).to_contain("elapsed_us=[1-9][0-9]*")
         expect(wrapper).to_contain("warm_improved=true")
+
+    it "requires same-session recovery after synchronized readback failure":
+        val source = file_read(PROBE)
+        val wrapper = file_read(WRAPPER)
+        expect(source).to_contain("val recover = args.contains(\"--recover=readback\")")
+        expect(source).to_contain("env_set(\"SIMPLE_GPU_FAULT_INJECT\", \"cuda:readback\")")
+        expect(source).to_contain("failed.reason == \"cuda-readback-failed\" and failed.values.len() == 0")
+        expect(source).to_contain("recovered.device_identity == before.device_identity")
+        expect(source).to_contain("recovered.backend_handle == before.backend_handle")
+        expect(source).to_contain("executor.shutdown()")
+        expect(wrapper).to_contain("recovery) PROBE_ARG=--recover=readback")
+        expect(wrapper).to_contain("PROCESSING_CUDA_RECOVERY status=pass phase=readback")
+        expect(wrapper).to_contain(
+            "receipt_count=$(printf '%s\\n' \"$output\" | grep -Ec '^PROCESSING_CUDA_RECOVERY ' || true)")
+        expect(wrapper).to_contain(
+            "if [ \"$receipt_count\" -ne 1 ] || [ \"$valid\" -ne 1 ]; then")
+        expect(wrapper).to_contain("failed_reason=cuda-readback-failed failed_count=0 failed_handle=0 failed_identity=0")
+        expect(wrapper).to_contain("recovered_count=64 recovered_checksum=1082179840 recovered_exact=true")
+        expect(wrapper).to_contain("identity_stable=true cpu_fallback=false")
 
     it "reuses one CUDA session for the measured warm request":
         val source = file_read(PROBE)
@@ -46,11 +65,12 @@ describe "direct CUDA ProcessingIR native evidence contract":
         val entry = file_read(ENTRY)
         expect(source).to_contain("var executor = ProcessingCudaExecutor.create()")
         expect(source).to_contain("val cold = processing_ir_execute_cuda_with_executor(")
-        expect(source).to_contain("cold_reason={cold.reason} cold_count={cold.values.len()}")
+        expect(source).to_contain(
+            "cold_reason=" + "{" + "cold.reason} cold_count=" + "{" + "cold.values.len()}")
         expect(source).to_contain("val result = processing_ir_execute_cuda_with_executor(")
         expect(source).to_contain("executor.shutdown()")
         expect(executor).to_contain("if self.session.module_cache > 0:")
-        expect(executor).to_contain("self.session.launch_kernel_args(")
+        expect(executor).to_contain("executor.session.launch_kernel_args(")
         expect(executor).to_contain("self.session.shutdown()")
         expect(executor).to_contain("reason: \"cuda-readback-size-mismatch\"")
         expect(executor).to_contain("return \"cuda-executor-closed\"")
@@ -77,7 +97,10 @@ describe "direct CUDA ProcessingIR native evidence contract":
         expect(executor.contains("processing_ir_execute_cpu")).to_equal(false)
         expect(wrapper).to_contain("backend=cuda readback_source=device_readback")
         expect(wrapper).to_contain("handle=[1-9][0-9]* identity=[1-9][0-9]*")
-        expect(wrapper).to_contain("count=64 value=16909060 expected_checksum=1082179840 actual_checksum=1082179840 mismatch_count=0 values_exact=true")
+        expect(wrapper).to_contain(
+            "before_count=64 before_checksum=1082179840 before_exact=true")
+        expect(wrapper).to_contain(
+            "recovered_count=64 recovered_checksum=1082179840 recovered_exact=true")
         expect(wrapper).to_contain("cpu_fallback=false")
         expect(wrapper).to_contain("timeout -k 5 \"$TIMEOUT_SECONDS\"")
         expect(wrapper).to_contain("probe_rc=$?")
