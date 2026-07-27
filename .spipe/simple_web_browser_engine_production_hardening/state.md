@@ -969,3 +969,16 @@ implementation in progress / target evidence blocked
   Maximum-payload fragmentation evidence also preserves a trailing second
   frame and request ordering. Executable Simple evidence remains
   compiler-blocked and was not rerun.
+- DOM target event order: The canonical event-path dispatcher now invokes
+  target capture listeners before inline and non-capture target listeners.
+  `stopPropagation` still permits remaining listeners on the same target,
+  while `stopImmediatePropagation` suppresses them. Focused approved-matcher
+  coverage proves ordering and same-target propagation; executable Simple
+  evidence remains compiler-blocked and was not rerun.
+- Production static-frame reuse: Session-assigned `ui-session-*` Draw IR
+  identities no longer disable the existing unchanged-state pixel cache.
+  Submission identity still advances for input replay protection while stable
+  UI state reuses the prior framebuffer, avoiding repeated full-frame
+  allocation and lowering. Focused session-path counter coverage and its
+  manual were updated; no runtime/performance PASS is claimed because the
+  compiler retry cap remains exhausted.

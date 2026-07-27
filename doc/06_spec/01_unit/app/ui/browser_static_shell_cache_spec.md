@@ -64,12 +64,15 @@ browser_static_shell_cache_spec -> app
    - Expected: backend.render_cached_static_frame() is true
    - Expected: backend.static_frame_hits equals `2`
    - Expected: backend.static_frame_fast_hits equals `1`
+5. identical session submissions
+   - Expected: session draw-IR submission revision equals `2`
+   - Expected: backend static-frame fast hits equals `1`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 51 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -99,6 +102,30 @@ match backend_result:
 
         expect(backend.render_cached_static_frame()).to_equal(true)
         expect(backend.static_frame_hits).to_equal(2)
+        expect(backend.static_frame_fast_hits).to_equal(1)
+
+val session = UISession.new(state.tree)
+val session_backend_result = BrowserBackend.create(64, 48, "software")
+match session_backend_result:
+    Err(e):
+        expect(e).to_equal("")
+    Ok(backend):
+        val first = session.submit_widget_draw_ir(
+            64, 48, DRAW_IR_BACKEND_GPU
+        )
+        backend.render_frame_with_composition(
+            state.tree, state, first
+        )
+        expect(session.draw_ir_submission_revision).to_equal(1)
+        expect(backend.static_frame_fast_hits).to_equal(0)
+
+        val second = session.submit_widget_draw_ir(
+            64, 48, DRAW_IR_BACKEND_GPU
+        )
+        backend.render_frame_with_composition(
+            state.tree, state, second
+        )
+        expect(session.draw_ir_submission_revision).to_equal(2)
         expect(backend.static_frame_fast_hits).to_equal(1)
 ```
 
