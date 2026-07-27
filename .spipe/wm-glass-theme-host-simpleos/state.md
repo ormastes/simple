@@ -961,3 +961,16 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   coverage. Policy remains `status=unavailable`; no approved signing team,
   Endpoint Security entitlement, prepared/admitted pinned collector and
   canonical driver, or live ES/GUI evidence exists.
+
+- continuation-2026-07-27-browser-input-draw-ir-parity: **SOURCE FIXED /
+  REVIEW ACCEPTED / RUNTIME UNVERIFIED.** CPU and Draw IR input text now share
+  one `InputTextPaintPlan` for transformed/RTL/aligned/vertically placed text,
+  theme-derived foreground, and intersected content/ancestor clips. Engine2D
+  scopes and restores the clip while retaining canonical `draw_text` and font
+  batch routes. Hosted address Backspace validates the full UTF-8 draft,
+  removes one trailing scalar for valid Korean/`é`, and leaves malformed or
+  truncated byte sequences unchanged. Behavioral specs pin exact Draw IR
+  geometry/color/clip and pixel restoration. Independent highest-capability
+  source review accepted commit `b51e27442f`. The admitted runtime was
+  unavailable; live caret/selection, pixels, events, timing, and RSS remain
+  open.

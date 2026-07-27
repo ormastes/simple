@@ -81,7 +81,11 @@ promoting runtime evidence:
   keeps address/title commands on the compositor, routes page pointer/key/text
   and active-animation work through that renderer, and re-submits the resulting
   external frame; a scoped, comment-filtered source contract rejects private
-  or direct update routes;
+  or direct update routes. Address Backspace validates complete UTF-8 before
+  deleting one trailing scalar and leaves malformed drafts unchanged. CPU and
+  Draw IR input text share computed transform/RTL/alignment/vertical placement,
+  theme foreground, and content/ancestor clipping; Engine2D restores the
+  enclosing clip through its canonical text/font routes;
 - the macOS full-CLI admission boundary uses a normalized v2 history verifier
   and tracked fail-closed trust-root gate. An Endpoint Security exec/fork/exit
   collector candidate now exists and passed bounded static review plus fresh

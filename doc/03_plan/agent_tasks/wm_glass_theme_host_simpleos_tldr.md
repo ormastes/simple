@@ -3,8 +3,8 @@
 - Critical line: `WM -> GUI/Web -> DrawIrComposition -> Engine2D`, then exact
   CPU-SIMD, Vulkan, Metal, x86 QEMU, and ARM QEMU render/event comparison.
 - Aetheric package/snapshot authority, Web CSS structure, CPU material, opaque
-  Metal receipt identity, and canonical hosted browser event routing are
-  source-fixed and independently reviewed.
+  Metal receipt identity, canonical hosted browser event routing, UTF-8 input,
+  and clipped theme-derived input Draw IR are source-fixed and reviewed.
 - Live host pixels/events remain open until an admitted source-matched
   pure-Simple runtime and required native capability are available.
 - The Endpoint Security collector is source-verified and fail-closed; policy
