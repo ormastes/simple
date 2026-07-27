@@ -2,9 +2,15 @@
 
 use std.spipe.*
 use std.skia.feature.glyph.ot_parser.{OtFont, OtTable}
+use std.skia.feature.glyph.ot_parser_layout.{GposLookup, LayoutLookupActivation}
+use std.skia.feature.shaper.ot_layout_context.LayoutGlyphRecord
+use std.skia.feature.shaper.ot_layout_gpos.gpos_apply
 use std.skia.feature.shaper.ot_layout_gpos_data.{GposDataBudget, gpos_data_context,
     gpos_data_device_delta, gpos_data_variation_delta, gpos_data_value, gpos_data_value_adjusted,
     gpos_data_anchor, gpos_data_anchor_adjusted}
+use std.skia.feature.shaper.ot_layout_shaper.CanonicalLayoutRun
+use std.skia.feature.shaper.script_detect.Script
+use std.skia.feature.shaper.shaper.canonical_shaped
 
 fn _font(blob: [u8]) -> OtFont:
     OtFont(blob: blob, tables: [])
@@ -25,6 +31,20 @@ fn _with_tail(font: OtFont, tail: [u8]) -> OtFont:
     var blob = font.blob
     for byte in tail: blob.push(byte)
     OtFont(blob: blob, tables: font.tables)
+
+fn _lookup(kind: u32, start: i64, end: i64, index: i64) -> GposLookup:
+    GposLookup(lookup_index: index, lookup_type: kind, flag: 0u32,
+        lookup_offset: start as u32, table_start: 0u32, table_end: end as u32,
+        subtable_offsets: [start as u32], subtable_ends: [end as u32],
+        mark_filtering_set: -1)
+
+fn _active(index: i64) -> LayoutLookupActivation:
+    LayoutLookupActivation(lookup_index: index, feature_mask: 1u64)
+
+fn _record(glyph: u32) -> LayoutGlyphRecord:
+    LayoutGlyphRecord(glyph_id: glyph, source_index: 0, cluster: 0,
+        feature_mask: 1u64, x_advance_units: 0, y_advance_units: 0,
+        x_offset_units: 0, y_offset_units: 0, component_clusters: [0])
 
 fn _two_axis_font() -> OtFont:
     val blob: [u8] = [
@@ -60,6 +80,7 @@ describe "GPOS variation data":
         val outside = gpos_data_device_delta(font, 0, 24, gpos_data_context(9))
         expect(outside.valid).to_equal(true)
         expect(outside.delta).to_equal(0)
+        expect(outside.device_pixels).to_equal(true)
 
     it "evaluates VariationIndex outer and inner rows with region interpolation":
         val font = _variation_font()
@@ -93,7 +114,16 @@ describe "GPOS variation data":
             gpos_data_context(0, [0.5]))
         expect(adjusted.valid).to_equal(true)
         expect(adjusted.x_place).to_equal(15)
+        expect(adjusted.x_place_device_pixels).to_equal(0)
         expect(adjusted.size).to_equal(4)
+
+    it "keeps packed Device adjustment separate from design units":
+        val font = _font([0,5,0,4, 0,10,0,10,0,1,0x80,0])
+        val adjusted = gpos_data_value_adjusted(font, 0, 0, font.blob.len(), 17u32,
+            gpos_data_context(10))
+        expect(adjusted.valid).to_equal(true)
+        expect(adjusted.x_place).to_equal(5)
+        expect(adjusted.x_place_device_pixels).to_equal(-2)
 
     it "uses format 2 anchor coordinates as the contour-point fallback":
         val font = _font([0, 0,2,0,7,0xFF,0xFD,0,9])
@@ -108,10 +138,11 @@ describe "GPOS variation data":
             0,0,0,0,0x80,0
         ])
         val anchor = gpos_data_anchor_adjusted(font, 58, 74,
-            GposDataBudget(remaining: 2), gpos_data_context(0, [0.5]))
+            GposDataBudget(remaining: 64), gpos_data_context(0, [0.5]))
         expect(anchor.valid).to_equal(true)
         expect(anchor.x).to_equal(20)
         expect(anchor.y).to_equal(20)
+        expect(anchor.x_device_pixels).to_equal(0)
 
     it "fails closed on malformed Device, VariationIndex, and anchor offsets":
         val packed = _font([0,10,0,13,0,1,0xB1,0])
@@ -121,7 +152,7 @@ describe "GPOS variation data":
             gpos_data_context(12)).valid).to_equal(false)
         val anchor = _font([0, 0,3,0,10,0,20,0,30,0,0])
         expect(gpos_data_anchor_adjusted(anchor, 1, 11,
-            GposDataBudget(remaining: 2), gpos_data_context(16)).valid).to_equal(false)
+            GposDataBudget(remaining: 64), gpos_data_context(16)).valid).to_equal(false)
         val variation = _variation_font()
         expect(gpos_data_device_delta(variation, 52, 57,
             gpos_data_context(0, [0.5])).valid).to_equal(false)
@@ -143,3 +174,73 @@ describe "GPOS variation data":
         val short_rows = OtFont(blob: _variation_font().blob,
             tables: [OtTable(tag: 1195656006u32, offset: 0u32, length: 51u32)])
         expect(gpos_data_variation_delta(short_rows, 0, 0, [0.5]).valid).to_equal(false)
+
+    it "charges region and delta work to the supplied shared budget":
+        val exhausted = gpos_data_variation_delta(_variation_font(), 0, 0, [0.5],
+            Some(GposDataBudget(remaining: 2)))
+        expect(exhausted.valid).to_equal(false)
+
+describe "GPOS variation end to end":
+    it "applies packed Device pixels through SinglePos":
+        val font = _font([
+            0,1,0,10,0,17,0,5,0,16,
+            0,1,0,1,0,1,
+            0,10,0,10,0,1,0x80,0])
+        val result = gpos_apply(font, [_active(0)], [_lookup(1u32, 0, 24, 0)],
+            [_record(1u32)], Some(gpos_data_context(10)))
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[0].x_offset_units).to_equal(5)
+        expect(result.glyphs[0].x_offset_device_pixels).to_equal(-2)
+
+    it "applies VariationIndex design units through SinglePos":
+        val font = _with_tail(_variation_font(), [
+            0,1,0,10,0,17,0,5,0,16,
+            0,1,0,1,0,1,
+            0,0,0,0,0x80,0])
+        val result = gpos_apply(font, [_active(0)], [_lookup(1u32, 52, 74, 0)],
+            [_record(1u32)], Some(gpos_data_context(0, [0.5])))
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[0].x_offset_units).to_equal(15)
+        expect(result.glyphs[0].x_offset_device_pixels).to_equal(0)
+
+    it "applies Anchor format 3 packed pixels through CursivePos":
+        val font = _font([
+            0,1,0,14,0,2, 0,0,0,22, 0,40,0,0,
+            0,1,0,2,0,1,0,2,
+            0,3,0,10,0,20,0,10,0,0,
+            0,10,0,10,0,1,0x40,0,
+            0,1,0,3,0,5])
+        val result = gpos_apply(font, [_active(0)], [_lookup(3u32, 0, 46, 0)],
+            [_record(1u32), _record(2u32)], Some(gpos_data_context(10)))
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[0].x_advance_units).to_equal(10)
+        expect(result.glyphs[0].x_advance_device_pixels).to_equal(1)
+        expect(result.glyphs[1].y_offset_units).to_equal(15)
+
+    it "rolls back both design units and packed pixels after a later malformed lookup":
+        val font = _font([
+            0,1,0,10,0,17,0,5,0,16,
+            0,1,0,1,0,1, 0,10,0,10,0,1,0x80,0,
+            0,1,0,10,0,17,0,9,0,60,
+            0,1,0,1,0,1])
+        val original = _record(1u32)
+        original.x_offset_units = 3
+        original.x_offset_device_pixels = 4
+        val result = gpos_apply(font, [_active(0), _active(1)],
+            [_lookup(1u32, 0, 24, 0), _lookup(1u32, 24, 40, 1)], [original],
+            Some(gpos_data_context(10)))
+        expect(result.complete).to_equal(false)
+        expect(result.glyphs[0].x_offset_units).to_equal(3)
+        expect(result.glyphs[0].x_offset_device_pixels).to_equal(4)
+
+    it "maps design units by scale and adds device pixels after scaling":
+        val record = _record(1u32)
+        record.x_advance_units = 500
+        record.x_advance_device_pixels = 2
+        record.x_offset_units = 100
+        record.x_offset_device_pixels = -1
+        val run = CanonicalLayoutRun(glyphs: [record], units_per_em: 1000u32,
+            substitution_complete: true, positioning_complete: true)
+        val shaped = canonical_shaped(run, Script.Latin, [65u32], 20.0)
+        expect(shaped[0].x_advance).to_equal(12.0)
+        expect(shaped[0].x_offset).to_equal(1.0)

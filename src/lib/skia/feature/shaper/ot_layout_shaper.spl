@@ -9,6 +9,7 @@ use std.skia.feature.shaper.ot_layout_context.{LayoutGlyphRecord, LayoutApplyRes
 use std.skia.feature.shaper.ot_layout_apply.{layout_validate_gsub_with_catalog,
     layout_apply_gsub_with_catalog}
 use std.skia.feature.shaper.ot_layout_gpos.{gpos_validate, gpos_apply}
+use std.skia.feature.shaper.ot_layout_gpos_data.gpos_data_context
 
 class CanonicalLayoutRun:
     glyphs: [LayoutGlyphRecord]
@@ -156,12 +157,17 @@ fn _recompute(font: OtFont, records: [LayoutGlyphRecord], plan: LayoutLookupPlan
             cluster: record.cluster, component_clusters: record.component_clusters,
             feature_mask: _gpos_mask(plan, script, codepoints[record.source_index]),
             x_advance_units: metrics.advance_width as i64, y_advance_units: 0,
-            x_offset_units: 0, y_offset_units: 0))
+            x_offset_units: 0, y_offset_units: 0,
+            x_advance_device_pixels: record.x_advance_device_pixels,
+            y_advance_device_pixels: record.y_advance_device_pixels,
+            x_offset_device_pixels: record.x_offset_device_pixels,
+            y_offset_device_pixels: record.y_offset_device_pixels))
     Some(result)
 
 fn resolve_canonical_layout_run(font: OtFont, script: u32, language: text, codepoints: [u32],
                                 start: i64, end_idx: i64, explicit_features: [u32],
-                                normalized_coords: [f64] = []) -> Option<CanonicalLayoutRun>:
+                                normalized_coords: [f64] = [], ppem: i64 = 0,
+                                language_system_tag: u32 = 0u32) -> Option<CanonicalLayoutRun>:
     if (start < 0 or end_idx > codepoints.len() or start >= end_idx or
         not _selected_text(script, language, codepoints, start, end_idx)):
         return None
@@ -171,8 +177,13 @@ fn resolve_canonical_layout_run(font: OtFont, script: u32, language: text, codep
     for tag in explicit_features:
         gsub_tags.push(tag)
         gpos_tags.push(tag)
-    val gsub_plan = select_gsub_lookup_plan(font, script, defaults.2, gsub_tags, normalized_coords)
-    val gpos_plan = select_gpos_lookup_plan(font, script, defaults.2, gpos_tags, normalized_coords)
+    val selected_language_system =
+        if language_system_tag != 0u32: language_system_tag else: defaults.2
+    val gsub_plan = select_gsub_lookup_plan(font, script, selected_language_system,
+        gsub_tags, normalized_coords)
+    val gpos_plan = select_gpos_lookup_plan(font, script, selected_language_system,
+        gpos_tags, normalized_coords)
+    val data_context = gpos_data_context(ppem, normalized_coords)
     val nominal = match _nominal(font, gsub_plan, script, codepoints, start, end_idx):
         Some(value): value
         None: return None
@@ -185,7 +196,8 @@ fn resolve_canonical_layout_run(font: OtFont, script: u32, language: text, codep
     val gpos_nominal = match _recompute(font, nominal, gpos_plan, script, codepoints):
         Some(value): value
         None: return None
-    val gpos_valid = gpos_plan.valid and gpos_validate(font, gpos_plan.activations, gpos_catalog, gpos_nominal)
+    val gpos_valid = gpos_plan.valid and gpos_validate(font, gpos_plan.activations,
+        gpos_catalog, gpos_nominal, Some(data_context))
     val substituted = if gsub_valid:
         layout_apply_gsub_with_catalog(font, gsub_plan.activations, gsub_catalog, nominal)
     else:
@@ -194,7 +206,7 @@ fn resolve_canonical_layout_run(font: OtFont, script: u32, language: text, codep
         Some(value): value
         None: return None
     val positioned = if gpos_valid:
-        gpos_apply(font, gpos_plan.activations, gpos_catalog, advanced)
+        gpos_apply(font, gpos_plan.activations, gpos_catalog, advanced, Some(data_context))
     else:
         LayoutApplyResult(glyphs: advanced, complete: false)
     val committed = if substituted.complete and positioned.complete: positioned.glyphs else: nominal

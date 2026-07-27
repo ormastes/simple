@@ -2,11 +2,10 @@ use std.skia.feature.glyph.ot_parser.{OtFont, read_u16_be, read_u32_be}
 use std.skia.feature.glyph.ot_parser_layout.{GposLookup, LayoutLookupActivation}
 use std.skia.feature.shaper.ot_layout_context.{LayoutGlyphRecord, LayoutApplyResult,
     layout_context_lookup_flag_valid}
-use std.skia.feature.shaper.ot_layout_gpos_data.{GposDataBudget, gpos_data_budget,
-    gpos_data_take, gpos_data_coverage, gpos_data_class, gpos_data_class_valid}
-use std.skia.feature.shaper.ot_layout_gpos_basic.{GposBasicStep, GposBasicState,
-    gpos_basic_next, gpos_basic_previous, gpos_basic_match, gpos_basic_apply,
-    gpos_basic_validate}
+use std.skia.feature.shaper.ot_layout_gpos_data.{GposDataBudget, GposDataContext, gpos_data_context,
+    gpos_data_budget, gpos_data_take, gpos_data_coverage, gpos_data_class, gpos_data_class_valid}
+use std.skia.feature.shaper.ot_layout_gpos_basic.{GposBasicStep, GposBasicState, gpos_basic_next,
+    gpos_basic_previous, gpos_basic_match, gpos_basic_apply, gpos_basic_validate}
 class _Extension:
     kind: u32
     subtable: i64
@@ -24,7 +23,10 @@ fn _copy(records: [LayoutGlyphRecord]) -> [LayoutGlyphRecord]:
         copied.push(LayoutGlyphRecord(glyph_id: record.glyph_id, source_index: record.source_index,
             cluster: record.cluster, feature_mask: record.feature_mask, x_advance_units: record.x_advance_units,
             y_advance_units: record.y_advance_units, x_offset_units: record.x_offset_units,
-            y_offset_units: record.y_offset_units, component_clusters: record.component_clusters))
+            y_offset_units: record.y_offset_units, x_advance_device_pixels: record.x_advance_device_pixels,
+            y_advance_device_pixels: record.y_advance_device_pixels,
+            x_offset_device_pixels: record.x_offset_device_pixels, y_offset_device_pixels: record.y_offset_device_pixels,
+            component_clusters: record.component_clusters))
     copied
 fn _end(lookup: GposLookup, subtable: i64) -> i64:
     if subtable < 0 or subtable >= lookup.subtable_ends.len(): return -1
@@ -41,7 +43,8 @@ fn _extension(blob: [u8], subtable: i64, limit: i64) -> _Extension:
     _Extension(kind: kind, subtable: target, valid: true)
 fn _apply_records(font: OtFont, lookups: [GposLookup], records: [LayoutGlyphRecord],
                   positions: [i64], at: i64, count: i64, limit: i64, depth: i64,
-                  budget: GposDataBudget, activation_mask: u64) -> bool:
+                  budget: GposDataBudget, context: GposDataContext,
+                  activation_mask: u64) -> bool:
     if at < 0 or count < 0 or at + count * 4 > limit: return false
     var record: i64 = 0
     while record < count:
@@ -53,13 +56,14 @@ fn _apply_records(font: OtFont, lookups: [GposLookup], records: [LayoutGlyphReco
             Some(value): value
             None: return false
         val nested_advance = GposBasicStep(next: positions[sequence] + 1, valid: true)
-        if not _lookup_at(font, lookups, target, records, positions[sequence], depth + 1,
-                          budget, nested_advance, activation_mask): return false
+        if not _lookup_at(font, lookups, target, records, positions[sequence], depth + 1, budget,
+                          context, nested_advance, activation_mask): return false
         record = record + 1
     true
 fn _context(font: OtFont, lookups: [GposLookup], lookup: GposLookup, sub: i64, limit: i64,
             records: [LayoutGlyphRecord], index: i64, depth: i64, budget: GposDataBudget,
-            advance: GposBasicStep, activation_mask: u64) -> GposBasicState:
+            context: GposDataContext, advance: GposBasicStep,
+            activation_mask: u64) -> GposBasicState:
     if depth > 16 or sub + 6 > limit:
         return GposBasicState(valid: false, matched: false, applied: false)
     val format = read_u16_be(font.blob, sub)
@@ -90,7 +94,7 @@ fn _context(font: OtFont, lookups: [GposLookup], lookup: GposLookup, sub: i64, l
             probe = next.next
             input = input + 1
         if not _apply_records(font, lookups, records, positions, records_offset, record_count,
-                              limit, depth, budget, activation_mask):
+                              limit, depth, budget, context, activation_mask):
             return GposBasicState(valid: false, matched: true, applied: false)
         advance.next = probe + 1
         return GposBasicState(valid: true, matched: true, applied: true)
@@ -162,15 +166,15 @@ fn _context(font: OtFont, lookups: [GposLookup], lookup: GposLookup, sub: i64, l
             input = input + 1
         if matched and positions.len() == glyph_count:
             if not _apply_records(font, lookups, records, positions, records_offset, record_count,
-                                  limit, depth, budget, activation_mask):
+                                  limit, depth, budget, context, activation_mask):
                 return GposBasicState(valid: false, matched: true, applied: false)
             advance.next = probe + 1
             return GposBasicState(valid: true, matched: true, applied: true)
         rule_index = rule_index + 1
     GposBasicState(valid: true, matched: false, applied: false)
 fn _lookup_at(font: OtFont, lookups: [GposLookup], lookup: GposLookup, records: [LayoutGlyphRecord],
-              index: i64, depth: i64, budget: GposDataBudget, advance: GposBasicStep,
-              activation_mask: u64) -> bool:
+              index: i64, depth: i64, budget: GposDataBudget, context: GposDataContext,
+              advance: GposBasicStep, activation_mask: u64) -> bool:
     if depth > 16 or index < 0 or index >= records.len() or not gpos_data_take(budget): return false
     if (records[index].feature_mask & activation_mask) == 0u64: return true
     var sub_index: i64 = 0
@@ -186,10 +190,10 @@ fn _lookup_at(font: OtFont, lookups: [GposLookup], lookup: GposLookup, records: 
         val kind = wrapped.kind
         val actual = wrapped.subtable
         val state = if kind >= 1u32 and kind <= 6u32:
-            gpos_basic_match(font, lookup, kind, actual, limit, records, index, budget)
+            gpos_basic_match(font, lookup, kind, actual, limit, records, index, budget, context)
         else if kind == 7u32:
             _context(font, lookups, lookup, actual, limit, records, index, depth + 1,
-                budget, advance, activation_mask)
+                budget, context, advance, activation_mask)
         else if kind == 8u32:
             _chain_match(font, lookup, actual, limit, records, index, budget)
         else:
@@ -200,10 +204,10 @@ fn _lookup_at(font: OtFont, lookups: [GposLookup], lookup: GposLookup, records: 
             sub_index = sub_index + 1
             continue
         val okay = if kind >= 1u32 and kind <= 6u32:
-            gpos_basic_apply(font, lookup, kind, actual, limit, records, index, budget)
+            gpos_basic_apply(font, lookup, kind, actual, limit, records, index, budget, context)
         else if kind == 8u32:
             _chain(font, lookups, lookup, actual, limit, records, index, depth + 1,
-                budget, advance, activation_mask)
+                budget, context, advance, activation_mask)
         else:
             false
         val applied = GposBasicState(valid: okay, matched: true, applied: okay)
@@ -451,18 +455,18 @@ fn _chain_match(font: OtFont, lookup: GposLookup, sub: i64, limit: i64,
     GposBasicState(valid: state.valid, matched: state.matched, applied: false)
 fn _chain(font: OtFont, lookups: [GposLookup], lookup: GposLookup, sub: i64, limit: i64,
           records: [LayoutGlyphRecord], index: i64, depth: i64, budget: GposDataBudget,
-          advance: GposBasicStep, activation_mask: u64) -> bool:
+          context: GposDataContext, advance: GposBasicStep, activation_mask: u64) -> bool:
     if depth > 16: return false
     val state = _chain_rule(font, lookup, sub, limit, records, index, budget)
     if not state.valid: return false
     if not state.matched: return true
     if not _apply_records(font, lookups, records, state.positions, state.records,
-                          state.record_count, limit, depth, budget, activation_mask): return false
+        state.record_count, limit, depth, budget, context, activation_mask): return false
     advance.next = state.next
     true
 fn _validate_records(font: OtFont, catalog: [GposLookup], at: i64, count: i64,
                      glyph_count: i64, limit: i64, depth: i64,
-                     budget: GposDataBudget) -> bool:
+                     budget: GposDataBudget, context: GposDataContext) -> bool:
     if count < 0 or glyph_count <= 0 or at < 0 or at + count * 4 > limit: return false
     var record: i64 = 0
     while record < count:
@@ -472,12 +476,12 @@ fn _validate_records(font: OtFont, catalog: [GposLookup], at: i64, count: i64,
         if sequence < 0 or sequence >= glyph_count: return false
         match _catalog_lookup(catalog, nested_index):
             case Some(value):
-                if not _validate_lookup(font, catalog, value, depth + 1, budget): return false
+                if not _validate_lookup(font, catalog, value, depth + 1, budget, context): return false
             case None: return false
         record = record + 1
     true
 fn _validate_context(font: OtFont, catalog: [GposLookup], sub: i64, limit: i64,
-                     depth: i64, budget: GposDataBudget) -> bool:
+                     depth: i64, budget: GposDataBudget, context: GposDataContext) -> bool:
     if depth > 16 or sub + 6 > limit: return false
     val format = read_u16_be(font.blob, sub)
     if format == 3u32:
@@ -495,7 +499,7 @@ fn _validate_context(font: OtFont, catalog: [GposLookup], sub: i64, limit: i64,
                 return false
             i = i + 1
         return _validate_records(font, catalog, records_offset, record_count, glyph_count,
-            limit, depth, budget)
+            limit, depth, budget, context)
     if format != 1u32 and format != 2u32: return false
     val coverage_offset = read_u16_be(font.blob, sub + 2) as i64
     val coverage = gpos_data_coverage(font.blob, sub + coverage_offset, limit, 0u32, budget)
@@ -550,13 +554,13 @@ fn _validate_context(font: OtFont, catalog: [GposLookup], sub: i64, limit: i64,
                             return false
                         input = input + 1
                 if not _validate_records(font, catalog, records_offset, record_count, glyph_count,
-                                         limit, depth, budget): return false
+                                         limit, depth, budget, context): return false
                 rule_index = rule_index + 1
         set_index = set_index + 1
     true
 fn _validate_chain_rule(font: OtFont, catalog: [GposLookup], rule: i64, limit: i64,
                         class_rules: bool, input_class_count: i64, depth: i64,
-                        budget: GposDataBudget) -> bool:
+                        budget: GposDataBudget, context: GposDataContext) -> bool:
     if rule + 2 > limit: return false
     var cursor = rule
     val back_count = read_u16_be(font.blob, cursor) as i64
@@ -579,9 +583,10 @@ fn _validate_chain_rule(font: OtFont, catalog: [GposLookup], rule: i64, limit: i
     cursor = cursor + ahead_count * 2
     val record_count = read_u16_be(font.blob, cursor) as i64
     cursor = cursor + 2
-    _validate_records(font, catalog, cursor, record_count, input_count, limit, depth, budget)
+    _validate_records(font, catalog, cursor, record_count, input_count, limit, depth,
+        budget, context)
 fn _validate_chain(font: OtFont, catalog: [GposLookup], sub: i64, limit: i64,
-                   depth: i64, budget: GposDataBudget) -> bool:
+                   depth: i64, budget: GposDataBudget, context: GposDataContext) -> bool:
     if depth > 16 or sub + 4 > limit: return false
     val format = read_u16_be(font.blob, sub)
     if format == 3u32:
@@ -650,7 +655,7 @@ fn _validate_chain(font: OtFont, catalog: [GposLookup], sub: i64, limit: i64,
             if sub + read_u16_be(font.blob, at + coverage_index * 2) as i64 < records_end: return false
             coverage_index = coverage_index + 1
         return _validate_records(font, catalog, cursor, record_count, input_count,
-                                 limit, depth, budget)
+                                 limit, depth, budget, context)
     if format != 1u32 and format != 2u32: return false
     val coverage_offset = read_u16_be(font.blob, sub + 2) as i64
     val coverage = gpos_data_coverage(font.blob, sub + coverage_offset, limit, 0u32, budget)
@@ -700,13 +705,13 @@ fn _validate_chain(font: OtFont, catalog: [GposLookup], sub: i64, limit: i64,
                 val rule = set + rule_offset
                 if rule_offset == 0 or seen_rules.contains(rule) or
                     not _validate_chain_rule(font, catalog, rule, limit, class_rules,
-                                             set_count, depth, budget): return false
+                                             set_count, depth, budget, context): return false
                 seen_rules.push(rule)
                 rule_index = rule_index + 1
         set_index = set_index + 1
     true
 fn _validate_lookup(font: OtFont, catalog: [GposLookup], lookup: GposLookup,
-                    depth: i64, budget: GposDataBudget) -> bool:
+                    depth: i64, budget: GposDataBudget, context: GposDataContext) -> bool:
     if (depth > 16 or lookup.lookup_type < 1u32 or lookup.lookup_type > 9u32 or
         not layout_context_lookup_flag_valid(font, lookup.flag, lookup.mark_filtering_set) or
         lookup.subtable_offsets.len() == 0 or
@@ -725,15 +730,19 @@ fn _validate_lookup(font: OtFont, catalog: [GposLookup], lookup: GposLookup,
         val kind = wrapped.kind
         val actual = wrapped.subtable
         if kind >= 1u32 and kind <= 6u32:
-            if not gpos_basic_validate(font, kind, actual, limit, budget): return false
+            if not gpos_basic_validate(font, kind, actual, limit, budget, context): return false
         else if kind == 7u32:
-            if not _validate_context(font, catalog, actual, limit, depth + 1, budget): return false
+            if not _validate_context(font, catalog, actual, limit, depth + 1,
+                                     budget, context): return false
         else if kind == 8u32:
-            if not _validate_chain(font, catalog, actual, limit, depth + 1, budget): return false
+            if not _validate_chain(font, catalog, actual, limit, depth + 1,
+                                   budget, context): return false
         else: return false
         i = i + 1
     true
-fn _lookup(font: OtFont, lookups: [GposLookup], lookup: GposLookup, records: [LayoutGlyphRecord], depth: i64, budget: GposDataBudget, activation_mask: u64) -> bool:
+fn _lookup(font: OtFont, lookups: [GposLookup], lookup: GposLookup, records: [LayoutGlyphRecord],
+           depth: i64, budget: GposDataBudget,
+           context: GposDataContext, activation_mask: u64) -> bool:
     if depth > 16 or lookup.subtable_offsets.len() == 0 or lookup.subtable_offsets.len() != lookup.subtable_ends.len(): return false
     if lookup.lookup_type < 1u32 or lookup.lookup_type > 9u32: return false
     var checked: i64 = 0
@@ -746,7 +755,8 @@ fn _lookup(font: OtFont, lookups: [GposLookup], lookup: GposLookup, records: [La
     while index < records.len():
         if not gpos_data_take(budget): return false
         val advance = GposBasicStep(next: index + 1, valid: true)
-        if not _lookup_at(font, lookups, lookup, records, index, depth, budget, advance, activation_mask): return false
+        if not _lookup_at(font, lookups, lookup, records, index, depth, budget, context,
+                          advance, activation_mask): return false
         if advance.next <= index: return false
         index = advance.next
     true
@@ -757,7 +767,9 @@ fn _catalog_lookup(catalog: [GposLookup], lookup_index: i64) -> Option<GposLooku
             if found.?: return None
             found = Some(candidate)
     found
-fn gpos_validate(font: OtFont, active: [LayoutLookupActivation], catalog: [GposLookup], records: [LayoutGlyphRecord]) -> bool:
+fn gpos_validate(font: OtFont, active: [LayoutLookupActivation], catalog: [GposLookup],
+                 records: [LayoutGlyphRecord], context: Option<GposDataContext> = None) -> bool:
+    val data_context = context ?? gpos_data_context()
     for candidate in catalog:
         if not _catalog_lookup(catalog, candidate.lookup_index).?: return false
     val scratch = _copy(records)
@@ -767,19 +779,22 @@ fn gpos_validate(font: OtFont, active: [LayoutLookupActivation], catalog: [GposL
         val lookup = match _catalog_lookup(catalog, activation.lookup_index):
             Some(value): value
             None: return false
-        if (not _validate_lookup(font, catalog, lookup, 0, budget) or
-            not _lookup(font, catalog, lookup, scratch, 0, budget, activation.feature_mask)):
+        if (not _validate_lookup(font, catalog, lookup, 0, budget, data_context) or
+            not _lookup(font, catalog, lookup, scratch, 0, budget, data_context, activation.feature_mask)):
             return false
     true
-fn gpos_apply(font: OtFont, active: [LayoutLookupActivation], catalog: [GposLookup], records: [LayoutGlyphRecord]) -> LayoutApplyResult:
-    if not gpos_validate(font, active, catalog, records): return LayoutApplyResult(glyphs: _copy(records), complete: false)
+fn gpos_apply(font: OtFont, active: [LayoutLookupActivation], catalog: [GposLookup],
+              records: [LayoutGlyphRecord], context: Option<GposDataContext> = None) -> LayoutApplyResult:
+    val data_context = context ?? gpos_data_context()
+    if not gpos_validate(font, active, catalog, records, Some(data_context)):
+        return LayoutApplyResult(glyphs: _copy(records), complete: false)
     val result = _copy(records)
     val budget = gpos_data_budget(records, catalog)
     for activation in active:
         val lookup = match _catalog_lookup(catalog, activation.lookup_index):
             Some(value): value
             None: return LayoutApplyResult(glyphs: _copy(records), complete: false)
-        if not _lookup(font, catalog, lookup, result, 0, budget, activation.feature_mask):
+        if not _lookup(font, catalog, lookup, result, 0, budget, data_context, activation.feature_mask):
             return LayoutApplyResult(glyphs: _copy(records), complete: false)
     LayoutApplyResult(glyphs: result, complete: true)
 export gpos_validate, gpos_apply
