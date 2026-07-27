@@ -278,6 +278,38 @@ fn main() -> i64:
     val raster = Engine2dCompositorBackend.create_from_env(WINDOW_WIDTH, WINDOW_HEIGHT)
     _run_hosted_wm(comp, raster, backend, el, win, args[0])
 
+fn _close_hosted_browser_resources(
+    renderer_in: HostedBrowserRendererProcess,
+    browser_raster_in: Engine2dCompositorBackend,
+    browser_raster_active: bool,
+    profile_in: BrowserProfileStore?
+) -> bool:
+    var renderer = renderer_in
+    var browser_raster = browser_raster_in
+    var profile_closed = true
+    if profile_in != nil:
+        var profile = profile_in.unwrap()
+        if renderer.hsts_dirty:
+            val wall_clock_ms = rt_time_now_unix_micros() / 1000
+            match profile.save_hsts(
+                renderer.hsts_snapshot(wall_clock_ms), wall_clock_ms
+            ):
+                Ok(_):
+                    pass
+                Err(error):
+                    profile_closed = false
+                    print "ERROR: hosted browser HSTS save failed reason={error.message()}"
+        match profile.close():
+            Ok(_):
+                pass
+            Err(error):
+                profile_closed = false
+                print "ERROR: hosted browser profile close failed reason={error.message()}"
+    renderer.close()
+    if browser_raster_active:
+        browser_raster.shutdown()
+    profile_closed
+
 # Dependency-light production event loop. Pure Simple owns scene, Web/GUI/2D
 # raster, and the pixel mirror; winit only presents that final buffer.
 fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend, presenter: HostedWinitBufferBackend, el: i64, win: i64, executable: text) -> i64:
@@ -289,6 +321,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     if evidence.enabled and not evidence.valid:
         print "ERROR: hosted WM evidence configuration rejected: {evidence.failure_reason}"
         raster.shutdown()
+        rt_winit_window_free(win)
+        rt_winit_event_loop_free(el)
         return 2
     val live_proof = _live_proof_mode()
     if live_proof:
@@ -409,13 +443,25 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     if not comp.render_frame_engine2d(raster):
         if live_proof or evidence.enabled:
             print "[hosted-wm] draw-ir-rejected evidence=fail-closed"
+            val _ = _close_hosted_browser_resources(
+                browser_renderer, browser_raster,
+                browser_raster_active, browser_profile
+            )
             raster.shutdown()
+            rt_winit_window_free(win)
+            rt_winit_event_loop_free(el)
             return 4
         print "[hosted-wm] draw-ir-rejected retry=compatibility"
         comp.render_frame()
     if not hosted_winit_present_pure_simple_pixels(presenter, comp.pure_simple_pixel_buffer(), comp.width, comp.height):
         print "ERROR: hosted WM initial pure-Simple frame presentation failed"
+        val _ = _close_hosted_browser_resources(
+            browser_renderer, browser_raster,
+            browser_raster_active, browser_profile
+        )
         raster.shutdown()
+        rt_winit_window_free(win)
+        rt_winit_event_loop_free(el)
         return 3
     print "[hosted-wm] frame-presented renderer=engine2d-draw-ir content=simple-web route=shared-wm-scene-draw-ir host=linux-windowed width={WINDOW_WIDTH} height={WINDOW_HEIGHT} raster=simple-2d-winit-buffer fallback=false revision={comp.render_revision} {raster.frame_provenance()} {raster.font_provenance()}"
     print "Frame presented: shared lifecycle windows + Simple Web MDI content"
@@ -435,7 +481,13 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
         )
         if not host_wm_evidence_write_snapshot(evidence.snapshot_path, initial_snapshot) or not host_wm_evidence_write_capture(evidence.capture_path, comp.width, comp.height, initial_pixels):
             print "ERROR: hosted WM initial evidence write failed"
+            val _ = _close_hosted_browser_resources(
+                browser_renderer, browser_raster,
+                browser_raster_active, browser_profile
+            )
             raster.shutdown()
+            rt_winit_window_free(win)
+            rt_winit_event_loop_free(el)
             return 2
         print "[hosted-wm] evidence-ready nonce=0 phase=presented"
 
@@ -1073,29 +1125,10 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     val profile_closed = web_sessions.close(
         rt_time_now_unix_micros() / 1000
     )
-    var browser_profile_closed = true
-    if browser_profile != nil:
-        var profile = browser_profile.unwrap()
-        if browser_renderer.hsts_dirty:
-            val wall_clock_ms = rt_time_now_unix_micros() / 1000
-            match profile.save_hsts(
-                browser_renderer.hsts_snapshot(wall_clock_ms),
-                wall_clock_ms
-            ):
-                Ok(_):
-                    pass
-                Err(error):
-                    browser_profile_closed = false
-                    print "ERROR: hosted browser HSTS save failed reason={error.message()}"
-        match profile.close():
-            Ok(_):
-                pass
-            Err(error):
-                browser_profile_closed = false
-                print "ERROR: hosted browser profile close failed reason={error.message()}"
-    browser_renderer.close()
-    if browser_raster_active:
-        browser_raster.shutdown()
+    val browser_profile_closed = _close_hosted_browser_resources(
+        browser_renderer, browser_raster,
+        browser_raster_active, browser_profile
+    )
     raster.shutdown()
     rt_winit_window_free(win)
     rt_winit_event_loop_free(el)
