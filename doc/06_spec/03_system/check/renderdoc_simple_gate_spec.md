@@ -27,7 +27,7 @@ renderdoc_simple_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -81,6 +81,8 @@ sh scripts/check/check-renderdoc-simple-gate.shs || true
 - Passing gate evidence also requires the probe log-derived runtime backend to
   be `vulkan`, RenderDoc availability/start markers, at least one recorded
   capture, and a positive pixel count.
+- The producer's lowercase SHA-256 must equal hashes recomputed from the
+  regular `.rdc` file before and after replay inspection.
 
 ## Scenarios
 
@@ -108,6 +110,7 @@ expect(evidence).to_contain("rdoc_simple_gate_required_scene=vulkan-engine2d")
 expect(evidence).to_contain("rdoc_simple_gate_required_program=src/app/test/renderdoc_vulkan_capture.spl")
 expect(evidence).to_contain("rdoc_simple_gate_required_status=pass")
 expect(evidence).to_contain("rdoc_simple_gate_required_magic=RDOC")
+expect(evidence).to_contain("rdoc_simple_gate_required_capture_sha256=lower-hex-64-match")
 expect(evidence).to_contain("rdoc_simple_gate_required_runtime_backend=vulkan")
 expect(evidence).to_contain("rdoc_simple_gate_required_renderdoc_available=1")
 expect(evidence).to_contain("rdoc_simple_gate_required_renderdoc_start=1")
@@ -156,7 +159,7 @@ Reproduction: this block contains the complete executable scenario source.
 val hash_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 val hash_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 val hash_c = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-val command = "rm -rf build/test-renderdoc-simple-gate-pass && mkdir -p build/test-renderdoc-simple-gate-pass/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7_0.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7_0.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_renderdoc_home=build/missing-renderdoc\\nrdoc_simple_renderdoc_capture_template=build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7\\nrdoc_simple_renderdoc_capture_template_set=1\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_capturing_before_end=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_renderdoc_device=41\\nrdoc_simple_record_valid=1\\nrdoc_simple_semantic_hash=" + hash_a + "\\nrdoc_simple_record_hash=" + hash_b + "\\nrdoc_simple_pixel_hash=" + hash_c + "\\nrdoc_simple_owner_frame_id=frame-7\\nrdoc_simple_capture_frame_id=frame-7\\n' > build/test-renderdoc-simple-gate-pass/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-pass/out REPORT_PATH=build/test-renderdoc-simple-gate-pass/report.md sh scripts/check/check-renderdoc-simple-gate.shs"
+val command = "rm -rf build/test-renderdoc-simple-gate-pass && mkdir -p build/test-renderdoc-simple-gate-pass/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7_0.rdc && . scripts/lib/renderdoc-evidence-common.shs && capture_sha=$(rdoc_sha256_file build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7_0.rdc) && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7_0.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_capture_sha256=%s\\nrdoc_renderdoc_home=build/missing-renderdoc\\nrdoc_simple_renderdoc_capture_template=build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7\\nrdoc_simple_renderdoc_capture_template_set=1\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_capturing_before_end=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_renderdoc_device=41\\nrdoc_simple_record_valid=1\\nrdoc_simple_semantic_hash=" + hash_a + "\\nrdoc_simple_record_hash=" + hash_b + "\\nrdoc_simple_pixel_hash=" + hash_c + "\\nrdoc_simple_owner_frame_id=frame-7\\nrdoc_simple_capture_frame_id=frame-7\\n' \"$capture_sha\" > build/test-renderdoc-simple-gate-pass/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-pass/out REPORT_PATH=build/test-renderdoc-simple-gate-pass/report.md sh scripts/check/check-renderdoc-simple-gate.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(1)
 
@@ -168,6 +171,7 @@ expect(evidence).to_contain("rdoc_simple_gate_scene=vulkan-engine2d")
 expect(evidence).to_contain("rdoc_simple_gate_program=src/app/test/renderdoc_vulkan_capture.spl")
 expect(evidence).to_contain("rdoc_simple_gate_capture_magic=RDOC")
 expect(evidence).to_contain("rdoc_simple_gate_capture_file_magic=RDOC")
+expect(evidence).to_contain("rdoc_simple_gate_capture_hash_status=pass")
 expect(evidence).to_contain("rdoc_simple_gate_runtime_backend=vulkan")
 expect(evidence).to_contain("rdoc_simple_gate_renderdoc_available=1")
 expect(evidence).to_contain("rdoc_simple_gate_renderdoc_start=1")
@@ -300,12 +304,21 @@ expect(evidence).to_contain("rdoc_simple_gate_runtime_backend=software")
 
 </details>
 
+#### binds passing replay evidence to unchanged capture bytes
+
+The executable SSpec builds one deterministic fake replay seam. Its complete
+evidence passes with equal 64-character producer/file hashes; removing the
+hash, replacing it with malformed text, or appending a byte to the `.rdc`
+produces `missing-capture-sha256`, `invalid-capture-sha256`, and
+`capture-sha256-mismatch`, respectively. Runnable source:
+`test/03_system/check/renderdoc_simple_gate_spec.spl`.
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

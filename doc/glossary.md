@@ -438,10 +438,12 @@ counterpart for versioned backend render records, validation, canonical
 serialization, field-level diff, exact pixel equivalence, QEMU/board receipts,
 and pure-Simple inspection of external RenderDoc captures. It is not a
 RenderDoc fork and is not synonymous with the `capture-simple` wrapper.
+Capture evidence is byte-bound: the producer records a lowercase SHA-256 and
+the Simple gate recomputes it before and after replay inspection.
 
-The record/diff/equivalence and RDC-inspection cores exist; production backend,
-QEMU, aggregate, and manual-contract lanes remain incomplete while their specs
-contain explicit fail placeholders.
+The record/diff/equivalence and RDC-inspection cores exist. Completion still
+requires fresh admitted pure-Simple, QEMU/native-host, and live capture evidence
+for the target environment.
 
 - Architecture: `doc/04_architecture/simple_2d_renderdoc_backend_equivalence.md`
 - Core: `src/lib/common/renderdoc/backend_render_record.spl`

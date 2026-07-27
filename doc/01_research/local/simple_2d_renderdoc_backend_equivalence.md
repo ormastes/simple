@@ -58,11 +58,12 @@ MissingDetailedRecord -> MissingStructuredDiff
 
 - Reuse `Engine2D.create_requested_backend`, `Engine2DReadback`, `ReadbackSource`, production web-render facade, Draw IR diff/layout, exact ARGB comparison, canonical capture launchers, and native platform aggregates.
 - Add the missing versioned detailed record, validation, deterministic serialization, field diff, RenderDoc-open/replay inspection, and equivalence gate.
-- Add the referenced-but-missing `test/helpers/renderdoc_capture_helper.shs`; keep app/spec code behind facades.
+- 2026-07-27 correction: reuse `scripts/tool/renderdoc-evidence.shs` and
+  `scripts/lib/renderdoc-evidence-common.shs`; a test-only compatibility wrapper
+  adds no behavior and is not needed. Keep app/spec code behind facades.
 - Linux host evidence: NVIDIA TITAN RTX + RTX A6000, Mesa llvmpipe, Vulkan layer, repo RenderDoc 1.44, and three existing `RDOC` artifacts. Native Metal/DirectX remain external-host checkpoints.
 - Open questions: NONE; “Vulkan emulation infra of Metal/DirectX” is interpreted as explicit Vulkan translation/emulation lanes whose provenance must never be called native Metal/DirectX.
 
 ## Cooperative Review
 
 Read-only sidecars audited RenderDoc/schema, web/SSpec coverage, and Linux backend feasibility. Primary Codex reconciled their findings and rejected simulated, magic-only, same-path, and mislabeled-device evidence.
-

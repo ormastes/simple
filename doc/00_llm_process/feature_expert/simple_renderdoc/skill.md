@@ -30,17 +30,18 @@ RDOC_SIMPLE_EVIDENCE_ENV=build/renderdoc/canonical-probe/simple/evidence.env \
 ```
 
 External `.rdc` replay-open/action evidence corroborates the Simple record; it
-does not replace the record, exact pixel oracle, or independent producer.
+does not replace the record, exact pixel oracle, or independent producer. The
+producer emits a lowercase SHA-256 and the Simple gate recomputes it before and
+after replay so substituted or concurrently changed capture bytes fail closed.
 
 ## Current Gaps
 
-- Backend provenance and render-surface matrices contain fail placeholders.
-- x86 SIMD integration and SimpleOS QEMU SIMD specs contain fail placeholders.
-- Guest QMP/serial receipt and physical-board specs contain fail placeholders.
-- The replay-inspection system spec contains fail placeholders.
-- The implemented manual-contract audit remains red until all of those helpers
-  are removed and their manuals are refreshed.
-- Native Windows/macOS and physical-board evidence remains external.
+- Fresh native Windows/macOS, physical-board, and live RenderDoc evidence
+  remains external to a Linux-only run.
+- A host-matched deployed pure-Simple release binary is mandatory; a Rust seed
+  is rejected rather than accepted as capture or SSpec evidence.
+- QEMU and full bootstrap qualification must run in a fresh environment after
+  their bounded retry caps are exhausted.
 
 Until these are implemented, report the counterpart as **core implemented,
 aggregate incomplete**.
@@ -56,9 +57,8 @@ The wrapper reports all focused, QEMU, and external rows, rejects non-Stage-4
 Simple binaries, preserves leaf logs/artifacts, measures elapsed time and RSS,
 and exposes every explicit fail helper as a blocker. Its SSpec contract is
 `test/03_system/check/simple_2d_renderdoc_backend_equivalence_aggregate_spec.spl`.
-The 2026-07-27 focused run is correctly blocked because deployed `bin/simple`
-is a Rust seed, RenderDoc capture is unavailable, and local placeholder specs
-remain.
+The 2026-07-27 focused lane remains blocked where a deployed pure-Simple runner
+or live RenderDoc/native-host artifact is unavailable.
 
 ## Owners
 
@@ -70,7 +70,8 @@ remain.
 - QEMU/board schemas: `src/lib/common/renderdoc/simpleos_render_target_evidence.spl`,
   `src/lib/common/renderdoc/simpleos_simd_render_evidence.spl`
 - Guide: `doc/07_guide/tooling/renderdoc_capture_infra.md`
-- Shared helper: `scripts/tool/renderdoc-evidence.shs`
+- Shared tool: `scripts/tool/renderdoc-evidence.shs`
+- Shared capture/schema helper: `scripts/lib/renderdoc-evidence-common.shs`
 - Glossary: `doc/glossary.md`
 
 ## Update Rule

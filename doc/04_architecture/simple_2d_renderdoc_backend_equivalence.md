@@ -86,7 +86,7 @@ Equivalence gate -> canonical aggregate checker
 | Strict CPU SIMD facade | `src/lib/gc_async_mut/gpu/engine2d/{backend_cpu,engine}.spl` | Strict `cpu_simd_x86/arm/riscv` creation and honest fallback | Modified |
 | QEMU/board entry | `examples/09_embedded/simple_os/arch/common/engine2d_backend_equivalence.spl` plus arch entrypoints | Render deterministic guest scene and emit receipt | New/Modified |
 | Capture evidence | `src/app/test/renderdoc_replay_inspect.spl` | Process-facade invocation of repo RenderDoc CLI; replay-open/action evidence | New |
-| Capture helper | `test/helpers/renderdoc_capture_helper.shs` | Compatibility entrypoint delegating to canonical evidence tool | New |
+| Capture helper | `scripts/lib/renderdoc-evidence-common.shs` | Shared schema, capture validation, and portable SHA-256 owner used by the canonical evidence tool | Existing |
 | Aggregate | `scripts/check/check-simple-2d-renderdoc-backend-equivalence.shs` | Bounded profile orchestration, timings/RSS, blockers, artifact rows | New |
 | Existing wrappers | `scripts/{lib,tool,check}/renderdoc-*`, platform render-log wrappers | Consume record/replay fields; reject magic-only and synthetic evidence | Modified |
 

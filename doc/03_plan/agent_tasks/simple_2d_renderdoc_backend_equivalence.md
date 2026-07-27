@@ -4,7 +4,9 @@
 
 - Interfaces: `BackendRenderRecord`, `BackendRenderRecordDiff`, `BackendRenderEquivalenceResult`, `capture_backend_render_record`, `compare_backend_render_records`, `verify_backend_render_equivalence`.
 - Manual steps: prepare fixture; capture records; validate provenance/completion; compare detailed state; compare absolute pixels; report mismatch/host limitation.
-- Helpers: existing setup/evidence tools, `test/helpers/renderdoc_capture_helper.shs`, and `scripts/check/check-simple-2d-renderdoc-backend-equivalence.shs`.
+- Helpers: existing setup/evidence tool, shared
+  `scripts/lib/renderdoc-evidence-common.shs`, and
+  `scripts/check/check-simple-2d-renderdoc-backend-equivalence.shs`.
 - Any unresolved helper fails explicitly with `fail(...)`; no pass-shaped placeholder or synthetic positive evidence.
 
 ## Lanes

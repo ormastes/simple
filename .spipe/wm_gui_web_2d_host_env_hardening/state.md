@@ -46,7 +46,7 @@ plans and do not become PASS.
 - Final reviewer: root normal/highest-capability Codex after sidecar evidence is reconciled against the live tree.
 - Shared interfaces: `TestHostEnv`, `test_host_env()`, `HostCapabilityRow`, `RenderPipelineReceipt`, and `EventPropagationReceipt`; reuse existing names instead if an equivalent owner already exists.
 - Manual step flow: `Inspect the real host capabilities`; `Inject one screen-originated event`; `Follow the event through WM and GUI dispatch`; `Render the resulting canonical composition`; `Read back and compare the backend buffer`; `Capture the Vulkan frame with RenderDoc`; `Measure the retained rendering workload`.
-- Setup/checker helpers: reuse `scripts/setup/setup-gui-web-2d-vulkan-env.shs`, `test/helpers/renderdoc_capture_helper.shs`, `scripts/check/check-wm-browser-event-routing-evidence.shs`, and existing renderer parity/coverage gates; add only the smallest missing owner helper.
+- Setup/checker helpers: reuse `scripts/setup/setup-gui-web-2d-vulkan-env.shs`, `scripts/tool/renderdoc-evidence.shs`, `scripts/lib/renderdoc-evidence-common.shs`, `scripts/check/check-wm-browser-event-routing-evidence.shs`, and existing renderer parity/coverage gates; add only the smallest missing owner helper.
 - Fail-fast placeholders: any temporary executable helper must use `assert(false)` or `fail(...)` until real evidence is wired.
 - Generated-manual review owner: root Codex agent.
 
@@ -1003,3 +1003,10 @@ Tracking split:
   nested Vulkan metadata driver and reject missing/duplicate header drivers.
   The admitted pure-Simple runner remains unavailable, so this source/spec
   regression is not reported as an executable PASS.
+- simple-renderdoc-capture-hash: The shared producer now records a portable
+  lowercase SHA-256 for each `.rdc`. The Simple gate rejects symlinks first,
+  recomputes the digest before and after replay, and the host-env contract
+  requires equal producer/file hashes plus a passing hash status. A synthetic
+  replay seam passes; missing, malformed, and byte-tampered hash mutations fail
+  with typed reasons. Live RenderDoc and the unavailable pure-Simple SSpec
+  runner were not rerun.

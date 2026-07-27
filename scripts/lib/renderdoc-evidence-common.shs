@@ -230,6 +230,23 @@ rdoc_prepare_output_dir() {
     mkdir -p "$out_dir"
 }
 
+rdoc_sha256_file() {
+    sha_file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha_output="$(sha256sum "$sha_file")" || return 1
+    elif command -v shasum >/dev/null 2>&1; then
+        sha_output="$(shasum -a 256 "$sha_file")" || return 1
+    else
+        return 1
+    fi
+    sha_digest="${sha_output%% *}"
+    case "$sha_digest" in
+        *[!0-9a-f]*|'') return 1 ;;
+    esac
+    [ "${#sha_digest}" -eq 64 ] || return 1
+    printf '%s\n' "$sha_digest"
+}
+
 rdoc_write_unavailable_capture() {
     out_dir="$1"
     backend="$2"
@@ -245,6 +262,7 @@ rdoc_write_unavailable_capture() {
         echo "rdoc_capture_file="
         echo "rdoc_capture_size=0"
         echo "rdoc_capture_magic="
+        echo "rdoc_capture_sha256="
     } | tee "$env_path"
     return 1
 }
@@ -450,6 +468,7 @@ rdoc_write_electron_html_unavailable() {
         echo "rdoc_capture_file="
         echo "rdoc_capture_size=0"
         echo "rdoc_capture_magic="
+        echo "rdoc_capture_sha256="
         rdoc_emit_electron_html_metadata "$root" "$electron_bin" "$out_dir"
     } | tee "$env_path"
     return 1
@@ -465,18 +484,32 @@ rdoc_validate_rdc_magic() {
             echo "rdoc_capture_file="
             echo "rdoc_capture_size=0"
             echo "rdoc_capture_magic="
+            echo "rdoc_capture_sha256="
         } | tee ${validate_env_path:+"$validate_env_path"}
         return 1
     fi
     magic="$(dd if="$validate_rdc_file" bs=4 count=1 2>/dev/null || true)"
     size="$(wc -c < "$validate_rdc_file")"
+    capture_sha256="$(rdoc_sha256_file "$validate_rdc_file" || true)"
     if [ "$magic" = "RDOC" ]; then
+        if [ "$capture_sha256" = "" ]; then
+            {
+                echo "rdoc_capture_status=fail"
+                echo "rdoc_capture_reason=missing-rdc-sha256"
+                echo "rdoc_capture_file=$validate_rdc_file"
+                echo "rdoc_capture_size=$size"
+                echo "rdoc_capture_magic=RDOC"
+                echo "rdoc_capture_sha256="
+            } | tee ${validate_env_path:+"$validate_env_path"}
+            return 1
+        fi
         {
             echo "rdoc_capture_status=pass"
             echo "rdoc_capture_reason=pass"
             echo "rdoc_capture_file=$validate_rdc_file"
             echo "rdoc_capture_size=$size"
             echo "rdoc_capture_magic=RDOC"
+            echo "rdoc_capture_sha256=$capture_sha256"
         } | tee ${validate_env_path:+"$validate_env_path"}
         return 0
     fi
@@ -486,6 +519,7 @@ rdoc_validate_rdc_magic() {
         echo "rdoc_capture_file=$validate_rdc_file"
         echo "rdoc_capture_size=$size"
         echo "rdoc_capture_magic=$magic"
+        echo "rdoc_capture_sha256=$capture_sha256"
     } | tee ${validate_env_path:+"$validate_env_path"}
     return 1
 }
@@ -806,17 +840,27 @@ rdoc_emit_simple_runtime_metadata() {
     echo "rdoc_simple_unavailable_marker=$unavailable_marker"
 }
 
-rdoc_build_simple_interpreter() {
+rdoc_resolve_simple_interpreter() {
     root="$1"
-    fresh="$root/src/compiler_rust/target/release/simple"
-    ( cd "$root/src/compiler_rust" \
-        && unset MAKEFLAGS CARGO_MAKEFLAGS MFLAGS \
-        && cargo build --release --bin simple >/dev/null 2>&1 )
-    if [ ! -x "$fresh" ]; then
-        echo "FAIL: interpreter binary not built at $fresh" >&2
-        return 1
-    fi
-    printf '%s\n' "$fresh"
+    case "$(uname -s):$(uname -m)" in
+        Linux:x86_64) set -- "$root/bin/release/x86_64-unknown-linux-gnu/simple" ;;
+        Linux:aarch64|Linux:arm64) set -- "$root/bin/release/aarch64-unknown-linux-gnu/simple" ;;
+        Linux:riscv64) set -- "$root/bin/release/riscv64-unknown-linux-gnu/simple" ;;
+        FreeBSD:x86_64) set -- "$root/bin/release/x86_64-unknown-freebsd/simple" ;;
+        FreeBSD:aarch64|FreeBSD:arm64) set -- "$root/bin/release/aarch64-unknown-freebsd/simple" ;;
+        Darwin:arm64|Darwin:aarch64) set -- "$root/bin/release/aarch64-apple-darwin/simple" "$root/bin/release/aarch64-apple-darwin-macho/simple" ;;
+        Darwin:x86_64) set -- "$root/bin/release/x86_64-apple-darwin/simple" "$root/bin/release/x86_64-apple-darwin-macho/simple" ;;
+        MINGW*:x86_64|MSYS*:x86_64|CYGWIN*:x86_64) set -- "$root/bin/release/x86_64-pc-windows-msvc/simple.exe" "$root/bin/release/x86_64-pc-windows-gnu/simple.exe" ;;
+        MINGW*:aarch64|MSYS*:aarch64|CYGWIN*:aarch64|MINGW*:arm64|MSYS*:arm64|CYGWIN*:arm64) set -- "$root/bin/release/aarch64-pc-windows-msvc/simple.exe" "$root/bin/release/aarch64-pc-windows-gnu/simple.exe" ;;
+        *) return 1 ;;
+    esac
+    for release_bin in "$@"; do
+        if [ -x "$release_bin" ]; then
+            printf '%s\n' "$release_bin"
+            return 0
+        fi
+    done
+    return 1
 }
 
 rdoc_prepare_vulkan_layer_manifest() {
@@ -857,8 +901,12 @@ rdoc_capture_simple_vulkan() {
     capture_template="$out_dir/simple_gui_app-$capture_frame_id"
     env_path="$out_dir/evidence.env"
     if [ "$simple_bin" = "" ]; then
-        simple_bin="$(rdoc_build_simple_interpreter "$root")"
-        simple_bin_reason="built-rust-interpreter-with-renderdoc-externs"
+        if ! simple_bin="$(rdoc_resolve_simple_interpreter "$root")"; then
+            rdoc_write_unavailable_capture "$out_dir" "simple" \
+                "${RDOC_SCENE:-vulkan-engine2d}" "missing-pure-simple-release-binary"
+            return 1
+        fi
+        simple_bin_reason="canonical-pure-simple-release"
     else
         simple_bin_reason="provided-rdoc-simple-bin"
     fi

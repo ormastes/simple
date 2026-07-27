@@ -30,12 +30,8 @@ RDOC_SIMPLE_EVIDENCE_ENV=build/renderdoc/canonical-probe/simple/evidence.env \
 ```
 
 Current status is partial. Record validation/diff/equivalence and RDC XML
-inspection are executable. Production backend matrices, SimpleOS QEMU receipt
-execution, replay inspection, and SIMD integration specs still contain explicit
-fail placeholders; do not claim a completed counterpart until those are
-implemented and their native evidence passes. The manual-contract audit itself
-is implemented and deliberately stays red while any counterpart spec retains a
-`pending_*` helper.
+inspection exist, but completion still requires fresh admitted pure-Simple,
+QEMU/native-host, and live capture evidence for the target environment.
 
 The canonical aggregate is now:
 
@@ -46,8 +42,8 @@ sh scripts/check/check-simple-2d-renderdoc-backend-equivalence.shs --profile=foc
 
 It reuses the pure-Simple record/equivalence/inspector specs and the existing
 Simple RenderDoc capture gate. Every row retains status/reason, paths,
-timing/RSS, and REQ traceability. Explicit fail helpers, a Rust seed, missing
-capture evidence, QEMU gaps, and native-host gaps remain typed blockers.
+timing/RSS, and REQ traceability. A Rust seed, missing capture evidence, QEMU
+gaps, and native-host gaps remain typed blockers.
 
 Architecture and requirements:
 `doc/04_architecture/simple_2d_renderdoc_backend_equivalence.md` and
@@ -101,8 +97,8 @@ per-run output.
 - `scripts/tool/renderdoc-evidence.shs capture-electron-html` runs original
   `renderdoccmd capture` around Electron's bundled Chromium for the HTML/CSS
   fixture.
-- `test/helpers/renderdoc_capture_helper.shs` exposes the same interface for
-  test scripts.
+- `scripts/lib/renderdoc-evidence-common.shs` owns the shared capture schema,
+  validation, and portable SHA-256 helper used by the tool and Simple gate.
 - `scripts/setup/setup-gui-web-2d-vulkan-env.shs` records host readiness and,
   when requested, launches the direct Electron Chromium, Chrome, and Simple
   Engine2D Vulkan probes before optional RenderDoc captures.
@@ -169,15 +165,15 @@ Common variables:
   Electron capture viewport and settle controls.
 - `RDOC_SIMPLE_PROG`: Simple capture program for `capture-simple`.
 - `RDOC_SIMPLE_BIN`: optional Simple binary for `capture-simple`. Leave unset
-  for normal operator runs so the helper builds
-  `src/compiler_rust/target/release/simple`, which carries the current
-  `rt_renderdoc_*` extern table. Focused evidence reruns may set this to an
-  already-built `src/compiler_rust/target/release/simple` when that binary is
-  current and the lane is only refreshing capture artifacts.
+  for normal operator runs so the helper uses the canonical deployed
+  pure-Simple release binary. Focused evidence reruns may set this to another
+  current pure-Simple release binary; the Rust seed is bootstrap-only.
 
-The helper validates `.rdc` files by checking the `RDOC` magic header. If a host
-cannot provide Chrome Vulkan or a non-CPU Vulkan device, record the concrete
-reason in `doc/09_report/` instead of duplicating ad hoc capture commands.
+The helper validates `.rdc` files by checking the `RDOC` magic header and emits
+`rdoc_capture_sha256`. The Simple gate rejects symlinks, recomputes that digest
+before and after replay, and passes only when both values remain equal. If a
+host cannot provide Chrome Vulkan or a non-CPU Vulkan device, record the
+concrete reason in `doc/09_report/` instead of duplicating ad hoc commands.
 
 ## GUI/Web/2D Vulkan Setup Probe
 
@@ -1090,7 +1086,7 @@ ARGB captures plus three pairwise diff lanes into the
 `gui_web_2d_vulkan_*` evidence namespace:
 
 ```sh
-SIMPLE_BIN=src/compiler_rust/target/release/simple \
+SIMPLE_BIN=bin/release/x86_64-unknown-linux-gnu/simple \
   scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple
 
 SIMPLE_VULKAN_READBACK_WORK_DIR=build/renderdoc/simple-vulkan-readback \
@@ -1139,7 +1135,7 @@ without exposing ANGLE Vulkan even when MoltenVK is installed.
 Current local macOS result on 2026-06-21:
 
 - `vulkaninfo --summary` reports Apple M4 through `driverName = MoltenVK`.
-- `SIMPLE_BIN=src/compiler_rust/target/release/simple
+- `SIMPLE_BIN=bin/release/aarch64-apple-darwin/simple
   scripts/setup/setup-gui-web-2d-vulkan-env.shs --run` proves the Simple
   Engine2D Vulkan lane with `gui_web_2d_vulkan_simple_bin_selection_reason=macos-vulkan-loader-paths-present`,
   `gui_web_2d_vulkan_simple_status=pass`,
@@ -1877,7 +1873,7 @@ fixture with the dedicated Simple program:
 
 ```sh
 RDOC_OUTPUT_DIR=build/renderdoc/widget-probe-small \
-RDOC_SIMPLE_BIN="$PWD/src/compiler_rust/target/release/simple" \
+RDOC_SIMPLE_BIN="$PWD/bin/release/x86_64-unknown-linux-gnu/simple" \
 RDOC_SIMPLE_PROG="$PWD/src/app/test/renderdoc_vulkan_widget_capture.spl" \
 RDOC_HTML_PATH="$PWD/test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html" \
   scripts/tool/renderdoc-evidence.shs capture-simple

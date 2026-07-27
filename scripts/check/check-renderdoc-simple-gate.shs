@@ -114,6 +114,9 @@ write_evidence() {
         echo "rdoc_simple_gate_capture_file_status=${capture_file_status:-}"
         echo "rdoc_simple_gate_capture_magic=${capture_magic:-}"
         echo "rdoc_simple_gate_capture_file_magic=${capture_file_magic:-}"
+        echo "rdoc_simple_gate_capture_sha256=${capture_sha256:-}"
+        echo "rdoc_simple_gate_capture_file_sha256=${capture_file_sha256:-}"
+        echo "rdoc_simple_gate_capture_hash_status=${capture_hash_status:-fail}"
         echo "rdoc_simple_gate_runtime_backend=${runtime_backend:-}"
         echo "rdoc_simple_gate_renderdoc_available=${renderdoc_available:-}"
         echo "rdoc_simple_gate_renderdoc_start=${renderdoc_start:-}"
@@ -159,6 +162,7 @@ write_evidence() {
         echo "rdoc_simple_gate_required_program=$REQUIRED_PROGRAM"
         echo "rdoc_simple_gate_required_status=pass"
         echo "rdoc_simple_gate_required_magic=RDOC"
+        echo "rdoc_simple_gate_required_capture_sha256=lower-hex-64-match"
         echo "rdoc_simple_gate_required_runtime_backend=vulkan"
         echo "rdoc_simple_gate_required_renderdoc_available=1"
         echo "rdoc_simple_gate_required_renderdoc_start=1"
@@ -183,6 +187,9 @@ write_evidence() {
         echo "- capture file: ${capture_file:-}"
         echo "- capture magic: ${capture_magic:-}"
         echo "- capture file magic: ${capture_file_magic:-}"
+        echo "- capture SHA-256: ${capture_sha256:-}"
+        echo "- capture file SHA-256: ${capture_file_sha256:-}"
+        echo "- capture hash status: ${capture_hash_status:-fail}"
         echo "- runtime backend: ${runtime_backend:-}"
         echo "- RenderDoc available: ${renderdoc_available:-}"
         echo "- RenderDoc start: ${renderdoc_start:-}"
@@ -208,6 +215,9 @@ if [ ! -s "$SOURCE_ENV" ]; then
     capture_file_status="missing"
     capture_magic=""
     capture_file_magic=""
+    capture_sha256=""
+    capture_file_sha256=""
+    capture_hash_status="fail"
     runtime_backend=""
     renderdoc_available=""
     renderdoc_start=""
@@ -232,6 +242,7 @@ capture_reason="$(value_of rdoc_capture_reason "$SOURCE_ENV")"
 capture_file="$(value_of rdoc_capture_file "$SOURCE_ENV")"
 capture_file_status="$(file_exists_status "$capture_file")"
 capture_magic="$(value_of rdoc_capture_magic "$SOURCE_ENV")"
+capture_sha256="$(value_of rdoc_capture_sha256 "$SOURCE_ENV")"
 runtime_backend="$(value_of rdoc_simple_runtime_backend "$SOURCE_ENV")"
 renderdoc_available="$(value_of rdoc_simple_renderdoc_available "$SOURCE_ENV")"
 renderdoc_start="$(value_of rdoc_simple_renderdoc_start "$SOURCE_ENV")"
@@ -255,8 +266,16 @@ widget_html_bytes="$(value_of rdoc_simple_widget_html_bytes "$SOURCE_ENV")"
 widget_width="$(value_of rdoc_simple_widget_width "$SOURCE_ENV")"
 widget_height="$(value_of rdoc_simple_widget_height "$SOURCE_ENV")"
 capture_file_magic=""
+capture_file_sha256=""
+capture_hash_status="fail"
 if [ "$capture_file_status" = "pass" ]; then
     capture_file_magic="$(dd if="$capture_file" bs=4 count=1 2>/dev/null || true)"
+    capture_file_sha256="$(rdoc_sha256_file "$capture_file" || true)"
+    if is_lower_hex_64 "$capture_sha256" \
+        && is_lower_hex_64 "$capture_file_sha256" \
+        && [ "$capture_sha256" = "$capture_file_sha256" ]; then
+        capture_hash_status="pass"
+    fi
 fi
 capture_identity_status="fail"
 if [ "$renderdoc_capture_template_set" = "1" ] \
@@ -288,6 +307,7 @@ replay_command_exit=-1
 
 if [ "$capture_file_status" = "pass" ] \
     && [ "$capture_file_magic" = "RDOC" ] \
+    && [ "$capture_hash_status" = "pass" ] \
     && [ "$renderdoc_device" != "" ] \
     && [ "$record_valid" = "1" ] \
     && [ "$owner_frame_id" != "" ] \
@@ -322,6 +342,10 @@ if [ "$capture_file_status" = "pass" ] \
         replay_convert_exit_code="$(value_of rdoc_simple_replay_convert_exit_code "$REPLAY_ENV")"
         owner_agreement_status="$(value_of rdoc_simple_owner_agreement_status "$REPLAY_ENV")"
         owner_api="$(value_of rdoc_simple_owner_api "$REPLAY_ENV")"
+        capture_file_sha256="$(rdoc_sha256_file "$capture_file" || true)"
+        if ! is_lower_hex_64 "$capture_file_sha256" || [ "$capture_sha256" != "$capture_file_sha256" ]; then
+            capture_hash_status="fail"
+        fi
     fi
 fi
 
@@ -340,6 +364,7 @@ if [ "$backend" = "simple" ] \
     && [ "$capture_status" = "pass" ] \
     && [ "$capture_magic" = "RDOC" ] \
     && [ "$capture_file_magic" = "RDOC" ] \
+    && [ "$capture_hash_status" = "pass" ] \
     && [ "$runtime_backend" = "vulkan" ] \
     && [ "$renderdoc_available" = "1" ] \
     && [ "$renderdoc_start" = "1" ] \
@@ -423,6 +448,14 @@ elif [ "$owner_frame_id" = "" ] || [ "$owner_frame_id" != "$capture_frame_id" ];
     write_evidence "fail" "capture-record-mismatch"
 elif [ "$capture_identity_status" != "pass" ]; then
     write_evidence "fail" "capture-frame-path-mismatch"
+elif [ "$capture_sha256" = "" ]; then
+    write_evidence "fail" "missing-capture-sha256"
+elif ! is_lower_hex_64 "$capture_sha256"; then
+    write_evidence "fail" "invalid-capture-sha256"
+elif ! is_lower_hex_64 "$capture_file_sha256"; then
+    write_evidence "fail" "capture-sha256-unavailable"
+elif [ "$capture_hash_status" != "pass" ]; then
+    write_evidence "fail" "capture-sha256-mismatch"
 elif [ "$replay_status" != "pass" ] || [ "$replay_reason" != "pass" ]; then
     write_evidence "fail" "${replay_reason:-capture-replay-failed}"
 elif [ "$replay_driver" != "vulkan" ] || [ "$owner_api" != "vulkan" ]; then
