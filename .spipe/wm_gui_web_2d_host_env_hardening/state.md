@@ -925,9 +925,12 @@ Tracking split:
   coverage admission remains deferred behind TODO580/TODO585/TODO590.
 - stage4-return-contracts: Five small read-only lanes corrected the retained
   inventory to 97 physical untyped-return declarations and reviewed exact owner
-  contracts. Twenty-five safe scalar/narrow returns are now annotated. Strict
-  no-stub probes print 42 for AOP/color, VHDL metadata, and array_chunk. Unsafe
+  contracts. Twenty-seven safe scalar/narrow returns are now annotated. Strict
+  no-stub probes print 42 for AOP/color, VHDL metadata/call lowering, and array_chunk. Unsafe
   bulk Any annotations were reverted after a broad array crash and a real gzip
-  fixed-Huffman round-trip decoded zero bytes. TODO591 owns gzip behavior;
-  TODO592 owns the unrelated platform-path codegen blocker; TODO590 retains the
-  remaining 72 declarations. No full bootstrap, rendering, or QEMU run occurred.
+  fixed-Huffman round-trip decoded zero bytes. An explicit gzip header-size
+  contract did not repair it, so TODO591 remains after its third bounded cycle.
+  Direct platform path re-exports remove the production undeclared global; strict
+  four- and 362-module closures link and print 42. TODO592 retains only the generic
+  compiler namespace-call proof, while TODO590 retains 70 declarations. No full
+  bootstrap, rendering, or QEMU run occurred.

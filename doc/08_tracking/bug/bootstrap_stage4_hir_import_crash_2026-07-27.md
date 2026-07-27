@@ -141,11 +141,13 @@ their physical-source count is corrected below. No fourth bootstrap was run.
 ## Bounded Return-Contract Slice
 
 Parallel owner review corrected the inventory to 97 physical declarations;
-hardlink/module aliases inflated the 107 retained emissions. Twenty-five
+hardlink/module aliases inflated the 107 retained emissions. Twenty-seven
 body-proven declarations now have explicit returns. Strict no-stub native probes
-print `42` for AOP/color, VHDL metadata, and `array_chunk`. The broader generic
+print `42` for AOP/color, VHDL metadata/call lowering, and `array_chunk`. The broader generic
 array probe crashed, so its other annotations were reverted. The fixed-Huffman
 gzip probe linked without stubs but compressed 11 bytes to 31 and decoded zero;
-dynamic Huffman/state annotations were reverted and the behavior bug is TODO591.
-VHDL call-lowering reaches codegen but its umbrella closure stops at the separate
-undeclared `path` global in `platform.spl` (TODO592). Full Stage 4 was not rerun.
+an explicit `gzip_header_size -> i64` did not change that behavior, and TODO591
+owns the remaining diagnosis after three cycles. The platform facade's direct
+named re-exports remove its undeclared `path` global: strict four- and 362-module
+closures link and print `42`. TODO592 now tracks the generic compiler-level
+namespace-call lowering proof. Full Stage 4 was not rerun.
