@@ -2,6 +2,25 @@
 
 Updated: 2026-07-27
 
+## 2026-07-27 Stage 3 admission attempt
+
+- The existing clean-worktree bootstrap at commit `98082021c3` completed
+  Stage 2 and Stage 3 native compilation with 687 files, zero compile
+  failures, and a passing Stage 3 sanity receipt.
+- It did **not** emit the required adjacent `provenance.env`. The 128 MB
+  Stage 3 binary is therefore untrusted and must not be selected by the
+  macOS GPU builder or used to claim live evidence.
+- Post-run admission inspection found the producer's original seed,
+  `libsimple_native_all.a`, and seed input stamp absent from
+  `src/compiler_rust/target/bootstrap`, while their private Stage 2 runtime
+  snapshot remained. The manifest writer correctly rejects a missing original
+  authority input; this was a concurrent authority-lifecycle failure, not a
+  Stage 2/3 compile or sanity failure.
+- The source snapshot is also behind the current GitHub revision, including
+  later compiler, browser, WM, and GPU-evidence changes. Do not backfill or
+  synthesize provenance. Diagnose the producer-side manifest failure, then
+  run one clean current-source Stage 3 admission before Vulkan 2D.
+
 ## 2026-07-27 Authoritative Status and Remaining Work
 
 This checkpoint supersedes stale status wording in the historical notes below.
