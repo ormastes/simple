@@ -82,6 +82,8 @@ Production acceptance rejects empty/mismatched IDs, missing target/callback,
 non-increasing revision after mutation, compatibility renderer, fallback, zero
 handle, incomplete submission, CPU mirror/cache readback, invalid dimensions or
 stride, blank output, checksum zero, and absent/invalid RenderDoc artifacts.
+The host aggregate also re-hashes the retained RenderDoc capture path and
+blocks when the current bytes no longer match its exact-one gate binding.
 
 For the SimpleOS remote-client row, validation also rejects owner port `0`,
 resident placeholder apps, missing focus/input IPC sends, missing

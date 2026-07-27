@@ -98,6 +98,9 @@ Linux x86 is the first mandatory live slice. ARM NEON and RISC-V RVV accept
 complete retained `native_host` receipts on any coordinator; absent or
 emulated receipts remain active blocked rows with exact resume commands.
 Browser Vulkan and RenderDoc-native rows use their existing retained evidence.
+Before admitting a retained RenderDoc row, `test_host_env` resolves its unique
+capture-file/hash binding and recomputes the current `.rdc` digest. Deleted or
+changed captures therefore cannot inherit an earlier passing gate receipt.
 Emulation and source inspection alone are correctness support only.
 
 ## SimpleOS Remote-Client Admission

@@ -1022,6 +1022,13 @@ Tracking split:
   `multiple-rdc-candidates` with a candidate count while leaving path/hash
   blank. The focused shell mutation is host-independent; no live browser or
   RenderDoc run is claimed.
+- test-host-env-renderdoc-freshness: The host aggregate previously trusted a
+  retained passing RenderDoc receipt after its referenced `.rdc` was removed or
+  changed. The pure contract now exposes one duplicate-safe capture path/hash
+  binding, and `test_host_env` recomputes the current file SHA-256 before
+  admitting the row. Focused specs cover duplicate bindings plus current,
+  changed, and deleted capture bytes; the admitted pure-Simple runner remains
+  unavailable.
 - coverage-denominator-gap: Review confirmed the runtime aggregate contains
   only decision sites that emitted rows; completely untouched functions can be
   absent while the report says 100%. TODO594 requires a compiler-owned

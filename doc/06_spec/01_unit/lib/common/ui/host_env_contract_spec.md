@@ -372,11 +372,22 @@ expect(host_vulkan_evidence_passes(complete + "\nvulkan_engine2d_readback_status
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 35 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val complete = complete_renderdoc_gate_evidence()
+val (capture_path, capture_sha256) = host_renderdoc_capture_binding(complete)
+expect(capture_path).to_equal("/tmp/frame.rdc")
+expect(capture_sha256).to_equal("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+val (duplicate_path, duplicate_sha256) = host_renderdoc_capture_binding(
+    complete + "\nrdoc_simple_gate_capture_file=/tmp/stale.rdc")
+expect(duplicate_path).to_equal("")
+expect(duplicate_sha256).to_equal("")
+val (missing_path, missing_sha256) = host_renderdoc_capture_binding(
+    complete.replace("rdoc_simple_gate_capture_file=/tmp/frame.rdc\n", ""))
+expect(missing_path).to_equal("")
+expect(missing_sha256).to_equal("")
 expect(host_renderdoc_evidence_passes(complete)).to_be(true)
 expect(host_renderdoc_evidence_passes(complete.replace("\n", "\r\n"))).to_be(true)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_status=pass", "rdoc_simple_gate_status=fail"))).to_be(false)

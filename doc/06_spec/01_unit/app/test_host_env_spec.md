@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -26,7 +26,7 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -39,6 +39,7 @@ expect(source).to_contain(
 expect(source).to_contain(
     "val RISCV_SIMD_PATH = \"build/cpu-simd-engine2d-arch-matrix/riscv64/out/evidence.env\"")
 expect(source).to_contain("if host_x86_simd_evidence_passes(cpu_simd):")
+expect(source).to_contain("host_renderdoc_evidence_passes(renderdoc) and host_renderdoc_capture_is_current(renderdoc)")
 expect(source).to_contain("host_simd_capability_row(")
 expect(source).to_contain("\"arm_simd\", arm_simd, \"aarch64\", \"neon\", ARM_SIMD_PATH")
 expect(source).to_contain("\"riscv_simd\", riscv_simd, \"riscv64\", \"rvv\", RISCV_SIMD_PATH")
@@ -49,6 +50,29 @@ expect(source.contains("native_simd_pixel_evidence")).to_equal(false)
 expect(source.contains("detect_simd_level")).to_equal(false)
 expect(source).to_contain("if env.ready():")
 expect(source.contains("if env.validation_reason() == \"\":")).to_equal(false)
+```
+
+</details>
+
+#### rejects a deleted or changed retained RenderDoc capture
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val path = "/tmp/simple-test-host-env-renderdoc-current.rdc"
+file_delete(path)
+expect(file_write(path, "RDOC-original")).to_be(true)
+val evidence = "rdoc_simple_gate_capture_file=" + path + "\n" +
+    "rdoc_simple_gate_capture_file_sha256=" + file_hash_sha256(path)
+expect(host_renderdoc_capture_is_current(evidence)).to_be(true)
+expect(file_write(path, "RDOC-changed")).to_be(true)
+expect(host_renderdoc_capture_is_current(evidence)).to_be(false)
+file_delete(path)
+expect(host_renderdoc_capture_is_current(evidence)).to_be(false)
 ```
 
 </details>
