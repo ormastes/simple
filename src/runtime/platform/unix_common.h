@@ -283,12 +283,12 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
  * Memory-Mapped File I/O
  * ---------------------------------------------------------------- */
 
-void* rt_mmap(const char* path, int64_t size, int64_t offset, bool readonly) {
+void* rt_mmap(const char* path, int64_t size, int64_t offset, int64_t readonly) {
     if (!path || size <= 0 || offset < 0) return NULL;
 
-    int prot = readonly ? PROT_READ : (PROT_READ | PROT_WRITE);
+    int prot = readonly != 0 ? PROT_READ : (PROT_READ | PROT_WRITE);
     int flags = MAP_SHARED;
-    int open_flags = readonly ? O_RDONLY : O_RDWR;
+    int open_flags = readonly != 0 ? O_RDONLY : O_RDWR;
 
     int fd = open(path, open_flags);
     if (fd < 0) return NULL;

@@ -429,13 +429,13 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
  * Memory-Mapped File I/O
  * ---------------------------------------------------------------- */
 
-void* rt_mmap(const char* path, int64_t size, int64_t offset, bool readonly) {
+void* rt_mmap(const char* path, int64_t size, int64_t offset, int64_t readonly) {
     if (!path || size <= 0 || offset < 0) return NULL;
 
-    DWORD access = readonly ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
+    DWORD access = readonly != 0 ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
     DWORD share = FILE_SHARE_READ | FILE_SHARE_WRITE;
-    DWORD protect = readonly ? PAGE_READONLY : PAGE_READWRITE;
-    DWORD map_access = readonly ? FILE_MAP_READ : FILE_MAP_WRITE;
+    DWORD protect = readonly != 0 ? PAGE_READONLY : PAGE_READWRITE;
+    DWORD map_access = readonly != 0 ? FILE_MAP_READ : FILE_MAP_WRITE;
 
     HANDLE hFile = CreateFileA(path, access, share, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return NULL;

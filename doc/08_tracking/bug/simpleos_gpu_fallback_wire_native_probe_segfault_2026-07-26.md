@@ -2,10 +2,9 @@
 
 ## Status
 
-Open. The retained current-runtime probe reaches HELLO with CUDA mask `8`, but
-the following processing request times out before fallback completion.
-Recompiling the shared ivshmem bridge with the retained source-matched compiler
-reintroduces the native `file_mmap`/MMIO ABI SIGSEGV before HELLO completes.
+Open, with the mmap SIGSEGV resolved. The native writable-map path is proven,
+but deterministic HELLO/request completion still needs a separately bounded
+wait repair.
 
 ## Evidence
 
@@ -43,17 +42,37 @@ reintroduces the native `file_mmap`/MMIO ABI SIGSEGV before HELLO completes.
 No compiler bootstrap was run. One essential incremental runtime-only Cargo
 build used the repository's `bootstrap` optimization profile.
 
+## Mmap Resolution
+
+- GDB showed the first `rt_volatile_write_u64` received the correct mapped
+  address and `0x53484750` value, but `rt_mmap` received tagged Simple false
+  (`0x13`) for its native `readonly` argument.
+- Both `file_ops` facades now declare that extern argument as `i64` and lower
+  the public `bool` to explicit `0/1`.
+- The existing fallback probe has a bounded `--mmap-smoke` mode. Its
+  incrementally rebuilt native binary writes and reads
+  `0x0000000053484750` through the writable mapping successfully.
+- Incremental builds: probe `2 compiled, 17 cached`; daemon `12 compiled,
+  200 cached`; both `0 failed`.
+- Two intermediate uncommitted request-wait variants produced:
+  `GPU_FALLBACK_WIRE status=pass hello_completed=true hello_status=1
+  hello_mask=8 receipt_completed=true receipt_status=4 reason=16 source=2
+  handle=0 identity=0 bytes=32 checksum=135272480 backend=4`.
+- High-capability review rejected deriving a 50-second wall budget from
+  `timeout_polls` and required a hard bound for frozen/backward hosted clocks.
+- The third and final bounded cycle exhausted HELLO before daemon admission:
+  `hello_completed=false hello_status=3 receipt_completed=false reason=7`.
+  The request-wait edits were withdrawn under the three-cycle cap; the mmap ABI
+  fix remains independently proven.
+
+The broad QEMU source contract remains independently red at 6/12 due stale
+assertions outside this mmap/fallback lane; it is not evidence against the
+focused writable-mmap PASS above.
+
 ## Resume
 
-Prerequisites: Linux x86_64, CUDA, Vulkan, the retained current-runtime
-daemon/probe binaries, and the source-matched compiler above.
-
-1. Repair or replace the source-matched compiler so recompiling
-   `host_gpu_ivshmem.spl` preserves the working `file_mmap`/MMIO ABI.
-2. Reapply a clock-bounded wait in shared `_host_gpu_publish_payload`; keep
-   poll count as the invalid-clock fallback.
-3. Incrementally rebuild only the probe, then run
-   `sh scripts/check/check-simpleos-gpu-fallback-wire.shs` once and retain the
-   passing `GPU_FALLBACK_WIRE` receipt.
+In a fresh bounded session, give HELLO and request publication separate
+measured wall-time budgets with hard poll ceilings, then run the daemon-wire
+gate once. Do not reintroduce a 50-second synchronous compositor wait.
 
 Owner: Linux GPU host operator. Final reviewer: high-capability model.

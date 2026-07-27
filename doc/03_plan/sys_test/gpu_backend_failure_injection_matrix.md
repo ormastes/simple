@@ -170,17 +170,13 @@ The policy implementation and guest validator are covered by
 `processing_cpu_fallback_policy_contract_spec.spl` and
 `host_gpu_ivshmem_fallback_receipt_spec.spl`. The native daemon-wire harness is
 implemented by `processing_cpu_fallback_daemon_wire_spec.spl` and
-`simpleos_gpu_fallback_wire_probe.spl`; both native binaries compile against
-the current runtime. HELLO passes with CUDA mask `8`; the last processing
-request timed out before fallback completion. Its daemon guard was shorter than
-the probe guard, which is now fixed but not rerun after the three-cycle cap.
-The exact remaining evidence gaps are:
+`simpleos_gpu_fallback_wire_probe.spl`. Writable mmap ABI normalization and the
+native mmap smoke pass incrementally. Two uncommitted request-wait variants
+published the exact Linux CUDA fallback receipt, but the final bounded cycle
+exhausted HELLO before admission and the wait edits were withdrawn. The exact
+remaining evidence gaps are:
 
-1. Resolve
-   `simpleos_gpu_fallback_wire_native_probe_segfault_2026-07-26.md`, then run
-   the end-to-end daemon test asserting the wire fields at
-   `SIMPLEOS_HOST_GPU_WIRE_STATUS`, `...REASON`, `...NATIVE_HANDLE`,
-   `...OUTPUT_BYTES`, `...OUTPUT_CHECKSUM`, `...READBACK_SOURCE`, and
-   `...DEVICE_IDENTITY`, plus generation/run/frame correlation.
+1. Implement separately measured, hard-bounded HELLO/request waits and rerun
+   the Linux daemon-wire gate in a fresh bounded session.
 2. Run Metal live rows only on prepared macOS. Linux may run the validator and
    synthetic receipt cases, but cannot close Metal runtime evidence.

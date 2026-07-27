@@ -5,7 +5,7 @@ use std.io_runtime.{
 }
 use app.io.args_ops.{get_args}
 use app.io.file_ops.{file_mmap, file_munmap}
-use os.kernel.boot.mmio_hardware.{mmio_read32}
+use os.kernel.boot.mmio_hardware.{mmio_read32, mmio_read64, mmio_write64}
 use os.kernel.boot.monotonic_hardware.{boot_monotonic_now_us}
 use os.lib.gpu_bridge.host_gpu_ivshmem.{
     host_gpu_ivshmem_negotiate,
@@ -33,7 +33,8 @@ fn _cleanup(mapped: i64, path: text):
         val _ = file_munmap(mapped, SIMPLEOS_HOST_GPU_REGION_BYTES)
 
 fn main() -> i64:
-    val path = _arg_value(get_args(), "--shm=")
+    val args = get_args()
+    val path = _arg_value(args, "--shm=")
     if path == "":
         print("GPU_FALLBACK_WIRE status=fail reason=shm-required\n")
         return 2
@@ -43,6 +44,12 @@ fn main() -> i64:
         print("GPU_FALLBACK_WIRE status=fail reason=mmap-failed\n")
         return 3
     val base = mapped as u64
+    if args.contains("--mmap-smoke"):
+        mmio_write64(base, 0x53484750u64)
+        val exact = mmio_read64(base) == 0x53484750u64
+        _cleanup(mapped, path)
+        print("GPU_FALLBACK_MMAP status={if exact: \"pass\" else: \"fail\"}\n")
+        return if exact: 0 else: 1
     val hello = host_gpu_ivshmem_negotiate(
         base, 1, "x86_64", "vulkan", SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA,
         50000000, boot_monotonic_now_us() + 30000000)

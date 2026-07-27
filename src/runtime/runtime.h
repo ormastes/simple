@@ -211,7 +211,7 @@ int         rt_file_fsync_cached(const char* path);
 
 /* ===== Memory-Mapped File I/O ===== */
 
-void*    rt_mmap(const char* path, int64_t size, int64_t offset, bool readonly);
+void*    rt_mmap(const char* path, int64_t size, int64_t offset, int64_t readonly);
 bool     rt_munmap(void* addr, int64_t size);
 void     rt_invlpg(uint64_t addr);
 uint64_t unsafe_addr_of(int64_t value);

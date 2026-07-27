@@ -23,6 +23,10 @@ validation.
 - The resulting
   `build/simpleos_gpu_host/offload_policy/simpleos_gpu_host` exited `139` for
   `--processing-min-offload-elements=bad` before printing validation output.
+- After the shared mmap native-ABI repair, the incrementally rebuilt current
+  daemon now reaches existing CLI validation and exits `2` with the expected
+  invalid-processing-backend diagnostic. The withdrawn offload option itself
+  has not yet been reapplied or rerun, so this tracker remains open.
 - Build logs:
   `build/simpleos_gpu_host/offload_policy/native-build.out` and
   `native-build-cycle2.out`.
