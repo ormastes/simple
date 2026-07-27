@@ -10,6 +10,17 @@ manifest-bound Vulkan 2D live PASS exists, so no downstream lane may be marked
 complete from source review, retained diagnostics, CPU mirrors, or unretained
 peer reports.
 
+The latest bounded producer work supersedes the older three-cycle diagnostic
+summary immediately below. The pushed receiver-vector repair
+`fba1e6bcab` remains valid, but a narrower consecutive-call defect is now
+proven: after `FontRenderer.reset_cache_stats()` returns unit, native code calls
+`receipt_cache_rasterizations_zero()` without reloading the same typed receiver
+into `x0`. Cycles 2 and 3 both exited 132 at that exact call. The source
+checkpoint therefore uses one atomic mutating reset receipt, direct in-frame
+`FontRenderConfig` construction, boolean-only 100-pixel state, mut-out plan
+construction, and typed-local boolean wrappers. It is not native-verified
+because the three producer cycles are exhausted.
+
 ### Verified current state
 
 - Source parser, runtime-owned ordered-event correlation, and 300-DPI receipt
@@ -64,15 +75,16 @@ peer reports.
 
 ### Ordered remaining tasks
 
-1. In a fresh session, use the existing tracked native aggregate-return bug
-   evidence to localize and fix the aggregate/owner nil-receiver channel. Do
-   not retry scalar fields/getters on the same untrusted owner path first.
-2. Establish one trustworthy typed checkpoint through the repaired channel and
-   use it to distinguish layout/raster production from the
-   `local quads -> FontRenderBatch.quads -> _stage_batch` transfer seam.
-3. Run one focused current-source producer check and require exact Bungee at
-   100 px, positive quads, consistent atlas/alpha state, and non-nil renderer
-   retrieval.
+1. In a fresh session, run the focused pure-Simple native regression for the
+   atomic reset receipt once. Do not repeat the exhausted cycle directories.
+   Preserve the missing-`x0` disassembly as an open compiler regression.
+2. Run one focused current-source producer check and require exact Bungee
+   24 pt at 300 DPI = 100 px, plan admission, positive staged quads, atlas ROI
+   alpha, cold rasterizations, warm zero rasterizations plus positive hits,
+   stable identity, and CPU producer execution.
+3. If the producer fails, distinguish cache write-back from
+   `local quads -> FontRenderBatch.quads -> _stage_batch` with the existing
+   boolean receipts; stop after the bounded cycle rather than broad retries.
 4. After that focused producer PASS, produce one canonical, manifest-attested
    pure-Simple Stage3 only if required by the production builder. Do not use
    the Rust seed as normal tooling and do not synthesize or reuse stale

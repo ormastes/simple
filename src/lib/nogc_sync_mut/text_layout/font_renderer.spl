@@ -677,6 +677,11 @@ class FontRenderer:
         self.atlas_face_generation = -1
 
     fn cache_stats() -> FontCacheStats: self.cache.stats()
+    fn receipt_cache_rasterizations_positive() -> bool: self.cache.rasterizations > 0
+    fn receipt_cache_rasterizations_zero() -> bool: self.cache.rasterizations == 0
+    fn receipt_cache_hits_positive() -> bool: self.cache.hits > 0
+    fn receipt_cache_hits_zero() -> bool: self.cache.hits == 0
+
     me current_font_identity() -> text:
         val rasterizer = self.ttf_rasterizer
         if rasterizer == nil:
@@ -692,6 +697,13 @@ class FontRenderer:
         var cache = self.cache
         cache.reset_stats()
         self.cache = cache
+
+    me reset_cache_stats_receipt() -> bool:
+        """Reset and verify both counters in one mutating receiver call."""
+        var cache = self.cache
+        cache.reset_stats()
+        self.cache = cache
+        self.cache.rasterizations == 0 and self.cache.hits == 0
 
     me _activate_render_config(config: FontRenderConfig):
         val identity = font_render_config_identity(config)
@@ -724,6 +736,50 @@ class FontRenderer:
         self.staged_execution_target = batch.execution_target
         self.staged_execution_policy = batch.execution_policy
         self.staged_quads.len()
+
+    me receipt_identity_matches(expected_identity: text) -> bool:
+        val identity = self.current_font_identity()
+        identity == expected_identity
+
+    fn receipt_staged_valid() -> bool: self.staged_valid
+    fn receipt_staged_quads_nonempty() -> bool: self.staged_quads.len() > 0
+    fn receipt_staged_atlas_nonempty() -> bool:
+        if self.staged_atlas_empty:
+            return false
+        self.atlas_pixels.len() > 0
+
+    fn receipt_staged_atlas_has_alpha() -> bool:
+        if not self.staged_valid:
+            return false
+        if self.staged_quads.len() == 0:
+            return false
+        if self.staged_atlas_empty:
+            return false
+        for quad in self.staged_quads:
+            val atlas_x = quad.atlas_x
+            val atlas_y = quad.atlas_y
+            val width = quad.width
+            val height = quad.height
+            if width > 0:
+                if height > 0:
+                    var row = 0
+                    while row < height:
+                        var col = 0
+                        while col < width:
+                            val px_x = atlas_x + col
+                            val px_y = atlas_y + row
+                            if px_x >= 0:
+                                if px_x < self.staged_atlas_width:
+                                    if px_y >= 0:
+                                        if px_y < self.staged_atlas_height:
+                                            val index = px_y * self.staged_atlas_width + px_x
+                                            if index.to_i64() < self.atlas_pixels.len():
+                                                val pixel = self.atlas_pixels[index]
+                                                if ((pixel >> 24) & 0xFFu32) > 0u32:
+                                                    return true
+                            col = col + 1
+                        row = row + 1
+        false
 
     # Config-derived overrides, applied exactly as _font_render_batch_with_config
     # used to apply them on the way out.

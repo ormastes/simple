@@ -224,6 +224,8 @@ class Engine2D:
     font_owner: Engine2DFontOwner
     last_font_execution_attempts: [text] = []
     last_font_execution_target: text = ""
+    last_font_plan_admitted: bool = false
+    last_font_size_is_100: bool = false
 
     me fonts() -> FontRenderer:
         val owner: Engine2DFontOwner = self.font_owner
@@ -1311,22 +1313,54 @@ class Engine2D:
             self.backend.draw_text(x, y, text_val, color, font_size)
 
     me draw_text_configured(x: i32, y: i32, text_val: text, color: u32, config: FontRenderConfig) -> bool:
+        self.last_font_plan_admitted = false
         if _VEC_TEXT_PROBE and _vec_entry_probe_count < 24:
             _vec_entry_probe_count = _vec_entry_probe_count + 1
             print("[vec-text-probe] draw_text_configured-FIRST-LINE")
-        val plan = font_execution_plan(config, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"])
+        # Use the caller-owned plan channel proven by the advances path below.
+        # The returned [text] from font_execution_plan can arrive empty on the
+        # native aggregate-return lane before staging begins.
+        var plan: [text] = []
+        val plan_count = font_execution_plan_into(
+            config, ["cuda", "metal", "opencl", "vulkan", "rocm", "cpu"], plan)
         if _VEC_TEXT_PROBE and _vec_entry_probe_count < 24:
             _vec_entry_probe_count = _vec_entry_probe_count + 1
             val policy_is_suggested = config.execution_policy == FontExecutionPolicy.Suggested
             val policy_is_preferred = config.execution_policy == FontExecutionPolicy.Preferred
             val policy_is_required = config.execution_policy == FontExecutionPolicy.Required
-            print("[vec-text-probe] draw_text_configured-entry plan_len={plan.len()} selection_supported={font_render_config_selection_supported(config)} family={config.family} category={config.category} exec_target={config.execution_target} size={config.size} weight={config.weight} style={config.style} hinting={config.hinting} antialiasing={config.antialiasing} atlas_policy={config.atlas_policy} language={config.language} script={config.script} policy_suggested={policy_is_suggested} policy_preferred={policy_is_preferred} policy_required={policy_is_required}")
-        if plan.len() == 0 or not font_render_config_selection_supported(config):
+            print("[vec-text-probe] draw_text_configured-entry plan_len={plan_count} selection_supported={font_render_config_selection_supported(config)} family={config.family} category={config.category} exec_target={config.execution_target} size={config.size} weight={config.weight} style={config.style} hinting={config.hinting} antialiasing={config.antialiasing} atlas_policy={config.atlas_policy} language={config.language} script={config.script} policy_suggested={policy_is_suggested} policy_preferred={policy_is_preferred} policy_required={policy_is_required}")
+        if plan_count <= 0:
             return false
+        if plan.len() == 0:
+            return false
+        if not font_render_config_selection_supported(config):
+            return false
+        self.last_font_plan_admitted = true
         self.ensure_font_renderer()
         self.font_owner.active[0].stage_text_configured(text_val, color, config)
         self._font_batch_receipt("text", text_val.len())
         self._draw_font_batch_staged(x, y, plan)
+
+    me draw_text_points_dpi(x: i32, y: i32, text_val: text, color: u32, points: i32, dpi: i32) -> bool:
+        self.last_font_size_is_100 = false
+        if points <= 0:
+            return false
+        if dpi <= 0:
+            return false
+        val font_size: i32 = (points * dpi + 36) / 72
+        if font_size <= 0:
+            return false
+        if font_size > 512:
+            return false
+        self.last_font_size_is_100 = font_size == 100
+        val config = FontRenderConfig(
+            family: "auto", category: "auto", language: "und", script: "auto",
+            size: font_size, weight: "normal", style: "normal", hinting: "none",
+            antialiasing: "grayscale", atlas_policy: "shared-alpha-1024",
+            execution_target: "auto",
+            execution_policy: FontExecutionPolicy.Suggested
+        )
+        self.draw_text_configured(x, y, text_val, color, config)
 
     me draw_text_with_advances(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, font_size: i32) -> bool:
         """Draw producer-resolved text through the selected vector face."""
@@ -1401,9 +1435,10 @@ class Engine2D:
             self.rocm_backend = rocm
             if rocm.initialized:
                 self.backend = rocm
-        val fonts = self.fonts()
+        self.ensure_font_renderer()
+        val fonts: FontRenderer = self.font_owner.active[0]
         val loaded = fonts.try_load_runtime_ttf(path)
-        self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
+        self.font_owner.active[0] = fonts
         loaded
 
     me load_font_bytes(path: text, blob: [u8]) -> bool:
@@ -1470,6 +1505,70 @@ class Engine2D:
     me font_cache_stats() -> FontCacheStats:
         val fonts = self.fonts()
         fonts.cache_stats()
+
+    me font_receipt_reset_cache_stats() -> bool:
+        if self.font_owner.active.len() == 0:
+            return false
+        var fonts: FontRenderer = self.font_owner.active[0]
+        val reset_ok = fonts.reset_cache_stats_receipt()
+        self.font_owner.active[0] = fonts
+        reset_ok
+
+    fn font_receipt_plan_admitted() -> bool: self.last_font_plan_admitted
+    fn font_receipt_size_100px() -> bool: self.last_font_size_is_100
+
+    me font_receipt_identity_matches(expected_identity: text) -> bool:
+        if self.font_owner.active.len() == 0:
+            return false
+        val fonts: FontRenderer = self.font_owner.active[0]
+        val matches = fonts.receipt_identity_matches(expected_identity)
+        self.font_owner.active[0] = fonts
+        matches
+
+    fn font_receipt_staged_valid() -> bool:
+        if self.font_owner.active.len() == 0:
+            return false
+        val fonts: FontRenderer = self.font_owner.active[0]
+        fonts.receipt_staged_valid()
+
+    fn font_receipt_staged_quads_nonempty() -> bool:
+        if self.font_owner.active.len() == 0:
+            return false
+        val fonts: FontRenderer = self.font_owner.active[0]
+        fonts.receipt_staged_quads_nonempty()
+
+    fn font_receipt_staged_atlas_nonempty() -> bool:
+        if self.font_owner.active.len() == 0:
+            return false
+        val fonts: FontRenderer = self.font_owner.active[0]
+        fonts.receipt_staged_atlas_nonempty()
+
+    fn font_receipt_staged_atlas_has_alpha() -> bool:
+        if self.font_owner.active.len() == 0:
+            return false
+        val fonts: FontRenderer = self.font_owner.active[0]
+        fonts.receipt_staged_atlas_has_alpha()
+
+    fn font_receipt_cache_rasterizations_positive() -> bool:
+        if self.font_owner.active.len() == 0:
+            return false
+        val fonts: FontRenderer = self.font_owner.active[0]
+        fonts.receipt_cache_rasterizations_positive()
+
+    fn font_receipt_cache_rasterizations_zero() -> bool:
+        if self.font_owner.active.len() == 0:
+            return false
+        val fonts: FontRenderer = self.font_owner.active[0]
+        fonts.receipt_cache_rasterizations_zero()
+
+    fn font_receipt_cache_hits_positive() -> bool:
+        if self.font_owner.active.len() == 0:
+            return false
+        val fonts: FontRenderer = self.font_owner.active[0]
+        fonts.receipt_cache_hits_positive()
+
+    fn font_receipt_execution_target_cpu() -> bool:
+        self.last_font_execution_target == "cpu"
 
     fn vulkan_font_performance_evidence() -> VulkanFontCompositeEvidence?:
         self.last_vulkan_font_evidence

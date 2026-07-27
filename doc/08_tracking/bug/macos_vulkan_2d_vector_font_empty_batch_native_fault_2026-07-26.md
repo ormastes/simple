@@ -219,3 +219,31 @@ properties to the compatible browser-style CSS types in `style.animation`.
 The incompatible common render-scene CSS types are not used. A new source
 contract pins the required `Initial` variant and `important` declaration
 field. Bootstrap/deploy has not been rerun after this repair.
+
+## 2026-07-27 atomic receipt checkpoint after three producer cycles
+
+The earlier receiver-vector fix is necessary but not sufficient for this new
+source shape. Two fresh producer binaries fault identically before the cold
+draw. Apple crash reports place the top frames at
+`FontRenderer.receipt_cache_rasterizations_zero`,
+`Engine2D.font_receipt_reset_cache_stats`, and `spl_main`.
+
+Cycle-3 disassembly is decisive: the typed renderer is held in `x24`; native
+code moves `x24` to `x0` before `reset_cache_stats`, then calls
+`receipt_cache_rasterizations_zero` without a new `mov x0, x24`. Because the
+unit-returning call may leave nil in `x0`, the receipt faults. This is not the
+older lost-argument-vector bug and remains an open compiler regression.
+
+The bounded source checkpoint now:
+
+- resets and verifies cache counters inside one mutating
+  `FontRenderer.reset_cache_stats_receipt()` call;
+- constructs the 24-point/300-DPI `FontRenderConfig` directly in Engine2D;
+- stores only a boolean `size == 100` receipt across the class boundary;
+- admits a caller-owned plan using independent nonempty gates, without exact
+  cross-boundary numeric equality; and
+- binds every renderer receipt to an explicitly typed local before calling it.
+
+No fourth native producer run or bootstrap is permitted in this session.
+Therefore exact Bungee 100-pixel quads, ROI alpha, cold/warm cache behavior,
+Vulkan execution, and device readback all remain unproven.
