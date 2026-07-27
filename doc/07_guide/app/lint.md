@@ -29,6 +29,10 @@ sh scripts/audit/numbered-artifact-guard.shs --changed-from origin/main
 
 # Check repo script/bin layout policy
 sh scripts/check_script_layout.shs
+
+# Find imports of deleted modules, undefined self.<method> calls, and imported
+# names no file declares (the class of rot that only a full bootstrap reveals)
+sh scripts/check/check-dangling-references.shs [--quiet] [--path FILE|DIR]
 ```
 
 Related guide:
