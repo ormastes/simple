@@ -871,3 +871,8 @@ Tracking split:
   required the retained input snapshot, acknowledgment, emitted environment,
   and host classifier to agree with the screen receipt. Two mismatch negatives
   and the modern system contract fail closed on a bridged unrelated receipt.
+- simple-renderdoc-identity: Reused RenderDoc's capture-path template to embed
+  the owner frame nonce in the actual regular RDC filename. The capture helper
+  now accepts exactly one matching artifact, the gate requires template setup
+  and path agreement, and the host classifier requires the emitted identity
+  status. Equal echoed IDs paired with a different frame path fail closed.

@@ -27,7 +27,7 @@ renderdoc_simple_gate_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -47,8 +47,8 @@ Validates the fail-closed gate for Simple in-application Vulkan RenderDoc eviden
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-25.md |
 | Source | `test/03_system/check/renderdoc_simple_gate_spec.spl` |
-| Updated | 2026-06-01 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-27 |
+| Generator | Manual sync after bounded runtime/docgen limits |
 
 ## Overview
 
@@ -115,6 +115,7 @@ expect(evidence).to_contain("rdoc_simple_gate_required_renderdoc_end_recorded=1"
 expect(evidence).to_contain("rdoc_simple_gate_required_num_captures_min=1")
 expect(evidence).to_contain("rdoc_simple_gate_required_pixel_count_min=1")
 expect(evidence).to_contain("rdoc_simple_gate_capture_file_magic=")
+expect(evidence).to_contain("rdoc_simple_gate_capture_identity_status=")
 expect(evidence).to_contain("rdoc_simple_gate_runtime_backend=")
 expect(evidence).to_contain("rdoc_simple_gate_renderdoc_num_captures=")
 expect(evidence).to_contain("rdoc_simple_gate_pixel_count=")
@@ -143,22 +144,25 @@ else:
 
 </details>
 
-#### passes with controlled Simple Vulkan RDOC evidence
+#### rejects a synthetic magic file even with plausible producer metadata
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val command = "rm -rf build/test-renderdoc-simple-gate-pass && mkdir -p build/test-renderdoc-simple-gate-pass/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-pass/source/simple.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-pass/source/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\n' > build/test-renderdoc-simple-gate-pass/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-pass/out REPORT_PATH=build/test-renderdoc-simple-gate-pass/report.md sh scripts/check/check-renderdoc-simple-gate.shs"
+val hash_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val hash_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val hash_c = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+val command = "rm -rf build/test-renderdoc-simple-gate-pass && mkdir -p build/test-renderdoc-simple-gate-pass/source && printf 'RDOCsynthetic simple capture\\n' > build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7_0.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7_0.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_renderdoc_home=build/missing-renderdoc\\nrdoc_simple_renderdoc_capture_template=build/test-renderdoc-simple-gate-pass/source/simple_gui_app-frame-7\\nrdoc_simple_renderdoc_capture_template_set=1\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_capturing_before_end=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nrdoc_simple_renderdoc_device=41\\nrdoc_simple_record_valid=1\\nrdoc_simple_semantic_hash=" + hash_a + "\\nrdoc_simple_record_hash=" + hash_b + "\\nrdoc_simple_pixel_hash=" + hash_c + "\\nrdoc_simple_owner_frame_id=frame-7\\nrdoc_simple_capture_frame_id=frame-7\\n' > build/test-renderdoc-simple-gate-pass/source/evidence.env && RDOC_SIMPLE_EVIDENCE_ENV=build/test-renderdoc-simple-gate-pass/source/evidence.env BUILD_DIR=build/test-renderdoc-simple-gate-pass/out REPORT_PATH=build/test-renderdoc-simple-gate-pass/report.md sh scripts/check/check-renderdoc-simple-gate.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-expect(code).to_equal(0)
+expect(code).to_equal(1)
 
 val evidence = file_read("build/test-renderdoc-simple-gate-pass/out/evidence.env")
-expect(evidence).to_contain("rdoc_simple_gate_status=pass")
-expect(evidence).to_contain("rdoc_simple_gate_reason=pass")
+expect(evidence).to_contain("rdoc_simple_gate_status=fail")
+expect(evidence).to_contain("rdoc_simple_gate_reason=renderdoccmd-missing")
 expect(evidence).to_contain("rdoc_simple_gate_backend=simple")
 expect(evidence).to_contain("rdoc_simple_gate_scene=vulkan-engine2d")
 expect(evidence).to_contain("rdoc_simple_gate_program=src/app/test/renderdoc_vulkan_capture.spl")
@@ -172,6 +176,40 @@ expect(evidence).to_contain("rdoc_simple_gate_renderdoc_num_captures=1")
 expect(evidence).to_contain("rdoc_simple_gate_pixel_count=3072")
 expect(evidence).to_contain("rdoc_simple_gate_runtime_metadata_status=pass")
 expect(evidence).to_contain("rdoc_simple_gate_missing_runtime_metadata=")
+expect(evidence).to_contain("rdoc_simple_gate_replay_status=fail")
+expect(evidence).to_contain("rdoc_simple_gate_replay_reason=renderdoccmd-missing")
+```
+
+</details>
+
+#### rejects equal echoed IDs when the captured path names another frame
+
+<details>
+<summary>Executable SSpec</summary>
+
+The executable scenario builds a synthetic `frame-8` artifact while both
+caller IDs claim `frame-7`, runs the fail-closed gate, and requires:
+
+```simple
+expect(evidence).to_contain("rdoc_simple_gate_status=fail")
+expect(evidence).to_contain("rdoc_simple_gate_reason=capture-frame-path-mismatch")
+expect(evidence).to_contain("rdoc_simple_gate_capture_identity_status=fail")
+```
+
+</details>
+
+#### rejects symlinked Simple RDOC artifacts before reading magic
+
+<details>
+<summary>Executable SSpec</summary>
+
+The executable scenario points the evidence at a symlink and requires:
+
+```simple
+expect(evidence).to_contain("rdoc_simple_gate_status=fail")
+expect(evidence).to_contain("rdoc_simple_gate_reason=rdc-file-symlink")
+expect(evidence).to_contain("rdoc_simple_gate_capture_file_status=symlink")
+expect(evidence).to_contain("rdoc_simple_gate_capture_file_magic=")
 ```
 
 </details>

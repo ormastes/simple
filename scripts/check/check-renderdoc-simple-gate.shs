@@ -128,6 +128,9 @@ write_evidence() {
         echo "rdoc_simple_gate_pixel_hash=${pixel_hash:-}"
         echo "rdoc_simple_gate_owner_frame_id=${owner_frame_id:-}"
         echo "rdoc_simple_gate_capture_frame_id=${capture_frame_id:-}"
+        echo "rdoc_simple_gate_capture_template=${renderdoc_capture_template:-}"
+        echo "rdoc_simple_gate_capture_template_set=${renderdoc_capture_template_set:-}"
+        echo "rdoc_simple_gate_capture_identity_status=${capture_identity_status:-fail}"
         echo "rdoc_simple_gate_replay_status=${replay_status:-fail}"
         echo "rdoc_simple_gate_replay_reason=${replay_reason:-missing}"
         echo "rdoc_simple_gate_replay_driver=${replay_driver:-}"
@@ -243,6 +246,8 @@ record_hash="$(value_of rdoc_simple_record_hash "$SOURCE_ENV")"
 pixel_hash="$(value_of rdoc_simple_pixel_hash "$SOURCE_ENV")"
 owner_frame_id="$(value_of rdoc_simple_owner_frame_id "$SOURCE_ENV")"
 capture_frame_id="$(value_of rdoc_simple_capture_frame_id "$SOURCE_ENV")"
+renderdoc_capture_template="$(value_of rdoc_simple_renderdoc_capture_template "$SOURCE_ENV")"
+renderdoc_capture_template_set="$(value_of rdoc_simple_renderdoc_capture_template_set "$SOURCE_ENV")"
 renderdoc_home="$(value_of rdoc_renderdoc_home "$SOURCE_ENV")"
 unavailable_marker="$(value_of rdoc_simple_unavailable_marker "$SOURCE_ENV")"
 widget_html_path="$(value_of rdoc_simple_widget_html_path "$SOURCE_ENV")"
@@ -252,6 +257,16 @@ widget_height="$(value_of rdoc_simple_widget_height "$SOURCE_ENV")"
 capture_file_magic=""
 if [ "$capture_file_status" = "pass" ]; then
     capture_file_magic="$(dd if="$capture_file" bs=4 count=1 2>/dev/null || true)"
+fi
+capture_identity_status="fail"
+if [ "$renderdoc_capture_template_set" = "1" ] \
+    && [ "$owner_frame_id" != "" ] \
+    && [ "$owner_frame_id" = "$capture_frame_id" ]; then
+    case "$renderdoc_capture_template:$capture_file" in
+        *"-$owner_frame_id:$renderdoc_capture_template"*.rdc)
+            capture_identity_status="pass"
+            ;;
+    esac
 fi
 
 replay_status="fail"
@@ -276,7 +291,8 @@ if [ "$capture_file_status" = "pass" ] \
     && [ "$renderdoc_device" != "" ] \
     && [ "$record_valid" = "1" ] \
     && [ "$owner_frame_id" != "" ] \
-    && [ "$owner_frame_id" = "$capture_frame_id" ]; then
+    && [ "$owner_frame_id" = "$capture_frame_id" ] \
+    && [ "$capture_identity_status" = "pass" ]; then
     renderdoc_cmd="$(rdoc_renderdoccmd_path "$renderdoc_home")"
     if [ ! -x "$REPLAY_SIMPLE_BIN" ]; then
         replay_reason="simple-replay-inspector-missing"
@@ -338,6 +354,7 @@ if [ "$backend" = "simple" ] \
     && is_lower_hex_64 "$pixel_hash" \
     && [ "$owner_frame_id" != "" ] \
     && [ "$owner_frame_id" = "$capture_frame_id" ] \
+    && [ "$capture_identity_status" = "pass" ] \
     && [ "$replay_command_exit" = "0" ] \
     && [ "$replay_status" = "pass" ] \
     && [ "$replay_reason" = "pass" ] \
@@ -404,6 +421,8 @@ elif ! is_lower_hex_64 "$semantic_hash" || ! is_lower_hex_64 "$record_hash" || !
     write_evidence "fail" "invalid-render-record-hash"
 elif [ "$owner_frame_id" = "" ] || [ "$owner_frame_id" != "$capture_frame_id" ]; then
     write_evidence "fail" "capture-record-mismatch"
+elif [ "$capture_identity_status" != "pass" ]; then
+    write_evidence "fail" "capture-frame-path-mismatch"
 elif [ "$replay_status" != "pass" ] || [ "$replay_reason" != "pass" ]; then
     write_evidence "fail" "${replay_reason:-capture-replay-failed}"
 elif [ "$replay_driver" != "vulkan" ] || [ "$owner_api" != "vulkan" ]; then

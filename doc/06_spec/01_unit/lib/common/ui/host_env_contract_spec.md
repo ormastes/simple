@@ -320,7 +320,7 @@ expect(host_vulkan_evidence_passes(complete + "\nvulkan_engine2d_readback_status
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -336,6 +336,7 @@ expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_semanti
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_record_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "rdoc_simple_gate_record_hash=0000000000000000000000000000000000000000000000000000000000000000"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete + "\nrdoc_simple_gate_pixel_hash=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_frame_id=frame-7", "rdoc_simple_gate_capture_frame_id=frame-8"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_identity_status=pass", "rdoc_simple_gate_capture_identity_status=fail"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_status=pass", "rdoc_simple_gate_replay_status=fail"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_driver=vulkan", "rdoc_simple_gate_replay_driver=d3d12"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_capture_path=/tmp/frame.rdc", "rdoc_simple_gate_replay_capture_path=/tmp/other.rdc"))).to_be(false)

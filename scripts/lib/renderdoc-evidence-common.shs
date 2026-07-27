@@ -854,6 +854,7 @@ rdoc_capture_simple_vulkan() {
     simple_bin="${RDOC_SIMPLE_BIN:-}"
     rdoc_prepare_output_dir "$out_dir"
     capture_frame_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    capture_template="$out_dir/simple_gui_app-$capture_frame_id"
     env_path="$out_dir/evidence.env"
     if [ "$simple_bin" = "" ]; then
         simple_bin="$(rdoc_build_simple_interpreter "$root")"
@@ -880,15 +881,21 @@ rdoc_capture_simple_vulkan() {
     VK_IMPLICIT_LAYER_PATH="$rdoc_layer_dir_abs" \
     VK_INSTANCE_LAYERS=VK_LAYER_RENDERDOC_Capture \
     ENABLE_VULKAN_RENDERDOC_CAPTURE=1 \
-    RDOC_SIMPLE_CAPTURE_PATH="$out_dir/simple_gui_app" \
+    RDOC_SIMPLE_CAPTURE_PATH="$capture_template" \
     RDOC_SIMPLE_OWNER_FRAME_ID="$capture_frame_id" \
     SIMPLE_EXECUTION_MODE=interpret \
         "$rdoc_cmd" capture -d "$root" -c "$out_dir/simple_gui" -w \
         "$simple_bin" run "$prog" >"$out_dir/renderdoc-simple.log" 2>&1 || true
     sed -n '1,120p' "$out_dir/renderdoc-simple.log"
     rdoc_emit_simple_runtime_metadata "$out_dir/renderdoc-simple.log" | tee -a "$env_path"
-    rdc_file="$(find "$out_dir" -name '*.rdc' 2>/dev/null | head -1)"
-    echo "rdoc_simple_capture_frame_id=$capture_frame_id" >> "$env_path"
+    rdc_matches="$(find "$out_dir" -type f -name "$(basename "$capture_template")*.rdc" 2>/dev/null)"
+    if [ "$(printf '%s\n' "$rdc_matches" | sed '/^$/d' | wc -l)" -eq 1 ]; then
+        rdc_file="$rdc_matches"
+        echo "rdoc_simple_capture_frame_id=$capture_frame_id" >> "$env_path"
+    else
+        rdc_file=""
+        echo "rdoc_simple_capture_frame_id=" >> "$env_path"
+    fi
     tmp_env="$out_dir/evidence.status.env"
     set +e
     rdoc_validate_rdc_magic "$rdc_file" "$tmp_env"
