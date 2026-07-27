@@ -1132,6 +1132,29 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   essential for authoritative Vulkan evidence unless another active lane
   supplies that exact admitted pair; do not substitute the Rust seed.
 
+### 2026-07-27 generic glyph selector and shaped-ascent checkpoint
+
+- The local font implementation now exposes one generic caller-owned
+  measure/render contract for both Unicode codepoints and producer-shaped
+  glyph indices. Selector kind and value are bound into the metadata receipt,
+  so render cannot consume a measurement made for a different selector.
+- The low-level strict native selector probe passed codepoint/index parity
+  before the later ascent-receipt extension was added. That PASS does not
+  attest the current ascent-bearing metadata shape.
+- The native `FontRenderer` path no longer crashes. It advanced into shaped
+  batch construction, then failed because the selected pure-SFNT face reported
+  an ascent of zero, so no shaped batch was admitted.
+- The generic measure receipt now publishes scaled `hhea` ascent, and the
+  selected-face shaped path consumes that receipt when its provider line
+  metric is unavailable. This ascent fix is applied locally but remains
+  unverified because the mandatory three-cycle cap is exhausted.
+- Nothing from this checkpoint has been pushed, and no bootstrap was run.
+  Keep the font/ascent result explicitly unproved until a fresh bounded
+  session runs the selector and renderer native evidence once.
+- The Vulkan release-path builder is delegated to a separate lane. Do not
+  duplicate or absorb that builder work while continuing the font evidence
+  lane.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |

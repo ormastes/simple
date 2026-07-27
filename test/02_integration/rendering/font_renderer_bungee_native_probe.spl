@@ -1,0 +1,111 @@
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer, font_render_config_default_for_size}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, sfnt_measure_glyph_into}
+use std.common.ui.draw_ir.{draw_ir_glyph_run_payload}
+use std.io_runtime.{env_get, env_set}
+
+val BUNGEE_PATH = "assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf"
+
+fn main() -> i64:
+    val blob = file_read_bytes(BUNGEE_PATH)
+    print("font_renderer_bungee_native_phase=blob")
+    val previous_asset_root = env_get("SIMPLE_ASSET_ROOT")
+    if not env_set("SIMPLE_ASSET_ROOT", "/dev/null"):
+        print("font_renderer_bungee_native_status=fail-asset-root-setup")
+        return 1
+    var missing_root_renderer = FontRenderer.new()
+    val missing_root_loaded = missing_root_renderer.try_load_runtime_ttf(BUNGEE_PATH)
+    val positive_root_set = env_set("SIMPLE_ASSET_ROOT", ".")
+    var positive_root_renderer = FontRenderer.new()
+    val positive_root_loaded = positive_root_set and positive_root_renderer.try_load_runtime_ttf(BUNGEE_PATH)
+    val asset_root_restored = env_set("SIMPLE_ASSET_ROOT", previous_asset_root)
+    if not asset_root_restored:
+        print("font_renderer_bungee_native_status=fail-asset-root-restore")
+        return 2
+    if missing_root_loaded:
+        print("font_renderer_bungee_native_status=fail-asset-root-enforcement")
+        return 3
+    if not positive_root_loaded:
+        print("font_renderer_bungee_native_status=fail-asset-root-positive")
+        return 4
+    print("font_renderer_bungee_native_phase=runtime-load")
+    var renderer = FontRenderer.new()
+    if not renderer.try_load_selected_bytes(BUNGEE_PATH, blob):
+        print("font_renderer_bungee_native_status=fail-load")
+        return 5
+    print("font_renderer_bungee_native_phase=selected-load")
+    renderer.reset_cache_stats()
+    val cold_count = renderer.stage_text_configured("B", 0xffffffffu32, font_render_config_default_for_size(100))
+    if cold_count <= 0:
+        if not renderer.receipt_glyph_phase_rasterizer_maps(true):
+            print("font_renderer_bungee_native_status=fail-cold-map")
+        elif not renderer.receipt_glyph_phase_bitmap_non_nil(true):
+            print("font_renderer_bungee_native_status=fail-cold-bitmap")
+        elif not renderer.receipt_glyph_phase_bitmap_positive(true):
+            print("font_renderer_bungee_native_status=fail-cold-dimensions")
+        elif not renderer.receipt_glyph_phase_bitmap_pixels_match(true):
+            print("font_renderer_bungee_native_status=fail-cold-pixels")
+        elif not renderer.receipt_glyph_phase_reconstructed_positive(true):
+            print("font_renderer_bungee_native_status=fail-cold-reconstruct")
+        elif not renderer.receipt_glyph_phase_return_positive(true):
+            print("font_renderer_bungee_native_status=fail-cold-return-local")
+        else:
+            print("font_renderer_bungee_native_status=fail-cold-stage")
+        return 6
+    if (not renderer.receipt_glyph_phase_rasterizer_maps(true) or
+        not renderer.receipt_glyph_phase_bitmap_non_nil(true) or
+        not renderer.receipt_glyph_phase_bitmap_positive(true) or
+        not renderer.receipt_glyph_phase_bitmap_pixels_match(true) or
+        not renderer.receipt_glyph_phase_adapter_positive(true) or
+        not renderer.receipt_glyph_phase_adapter_pixels_match(true) or
+        not renderer.receipt_glyph_phase_reconstructed_positive(true) or
+        not renderer.receipt_glyph_phase_return_positive(true)):
+        print("font_renderer_bungee_native_status=fail-direct-receipts")
+        return 7
+    if not renderer.receipt_staged_valid() or not renderer.receipt_staged_quads_nonempty() or not renderer.receipt_staged_atlas_has_alpha():
+        print("font_renderer_bungee_native_status=fail-cold-evidence")
+        return 8
+    if not renderer.receipt_cache_rasterizations_positive():
+        print("font_renderer_bungee_native_status=fail-cold-cache")
+        return 9
+    print("font_renderer_bungee_native_phase=text-cold")
+    renderer.reset_cache_stats()
+    val warm_count = renderer.stage_text_configured("B", 0xffffffffu32, font_render_config_default_for_size(100))
+    if warm_count <= 0 or not renderer.receipt_staged_quads_nonempty():
+        print("font_renderer_bungee_native_status=fail-warm-stage")
+        return 10
+    if not renderer.receipt_cache_rasterizations_zero() or not renderer.receipt_cache_hits_positive():
+        print("font_renderer_bungee_native_status=fail-warm-cache")
+        return 11
+    if not renderer.receipt_glyph_phase_cache_hit(true) or not renderer.receipt_glyph_phase_cache_hit_positive(true):
+        print("font_renderer_bungee_native_status=fail-warm-glyph-hit")
+        return 12
+    print("font_renderer_bungee_native_phase=text-warm")
+    var b_meta: [i64] = [0; 20]
+    sfnt_measure_glyph_into(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 66, 100, b_meta)
+    if b_meta[7] != 310031 or b_meta[6] <= 0:
+        print("font_renderer_bungee_native_status=fail-shaped-measure")
+        return 14
+    print("font_renderer_bungee_native_phase=shaped-measure")
+    val shaped = draw_ir_glyph_run_payload([b_meta[6] as u32], [0i32], [0i32], [0], true)
+    renderer.reset_cache_stats()
+    val shaped_cold = renderer.stage_selected_glyph_run_configured(
+        shaped, 0xffffffffu32, font_render_config_default_for_size(100))
+    if shaped_cold <= 0 or not renderer.receipt_staged_valid() or not renderer.receipt_staged_quads_nonempty() or not renderer.receipt_staged_atlas_has_alpha():
+        print("font_renderer_bungee_native_status=fail-shaped-cold")
+        return 15
+    if not renderer.receipt_cache_rasterizations_positive():
+        print("font_renderer_bungee_native_status=fail-shaped-cold-cache")
+        return 16
+    print("font_renderer_bungee_native_phase=shaped-cold")
+    renderer.reset_cache_stats()
+    val shaped_warm = renderer.stage_selected_glyph_run_configured(
+        shaped, 0xffffffffu32, font_render_config_default_for_size(100))
+    if shaped_warm <= 0 or not renderer.receipt_cache_rasterizations_zero() or not renderer.receipt_cache_hits_positive():
+        print("font_renderer_bungee_native_status=fail-shaped-warm-cache")
+        return 17
+    if not renderer.receipt_glyph_scalar_metrics(768, 100, 42, 22, 43):
+        print("font_renderer_bungee_native_status=fail-zero-advance-parity")
+        return 13
+    print("font_renderer_bungee_native_status=pass")
+    0

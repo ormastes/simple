@@ -1,7 +1,8 @@
-# Neutral bounded OpenType glyf outline parser and rasterizer.
-
 use std.common.encoding.sfnt.{OtFont, OtTable, read_u16_be, read_i16_be, find_table, parse_offset_table}
 use std.common.encoding.sfnt_cmap.{sfnt_cmap_glyph_id}
+
+val SFNT_GLYPH_SELECTOR_CODEPOINT: i64 = 0
+val SFNT_GLYPH_SELECTOR_INDEX: i64 = 1
 
 val SFNT_GLYF_MOVE: i64 = 0
 val SFNT_GLYF_LINE: i64 = 1
@@ -20,18 +21,8 @@ class SfntGlyfOutline:
     components: i64
 
 class SfntGlyfBitmap:
-    # Field names are prefixed (not `width`/`height`/`pixels`/...) to stay
-    # GLOBALLY unique. The native/bootstrap MIR path resolves field access on
-    # an ANY-erased or match-arm-bound receiver via a receiver-blind "struct
-    # declaring this name with the MOST fields wins" scan (documented in
-    # doc/08_tracking/bug/simpleos_native_build_framebufferdriver_crossmodule_field_offset_shift_2026-07-14.md);
-    # `width`/`height`/`advance`/`bearing_x`/`bearing_y`/`pixels` are also
-    # declared (at different indices) by GlyphBitmap (spl_fonts.spl) and the
-    # much-larger CachedGlyph (font_types.spl), so an ambiguous name here
-    # silently resolves to a WRONG struct's field offset — root cause of the
-    # 2026-07-19 pure-sfnt-glyf rasterizer pointer-corruption fault
-    # (cr2 landed inside the font's sha256 identity text). Unique names make
-    # the scan unambiguous regardless of receiver-type erasure.
+    # Unique prefixes prevent receiver-blind native field lookup from selecting
+    # the same-named GlyphBitmap/CachedGlyph offsets after type erasure.
     sgb_width: i64
     sgb_height: i64
     sgb_advance: i64
@@ -39,10 +30,7 @@ class SfntGlyfBitmap:
     sgb_bearing_y: i64
     sgb_pixels: [u8]
 
-# Native ABI canary for the caller-owned output shape used by selected-font
-# rasterization. This deliberately returns unit and mutates only existing
-# indexed elements: no Option, aggregate, array, tuple, receiver, or scalar
-# result crosses the common -> SFFI module boundary.
+# Native canary: unit return with caller-owned fixed-array outputs.
 fn sfnt_glyf_void_transport_probe(mut meta: [i64], mut pixels: [u8]):
     if meta.len() < 6 or pixels.len() < 4:
         return
@@ -580,12 +568,7 @@ fn rasterize_sfnt_glyf(font: OtFont, glyph_id: u32, size_px: i64) -> Option<Sfnt
         if command.verb != SFNT_GLYF_CLOSE:
             has_drawable_point = true
     if not has_drawable_point:
-        # Whitespace/empty glyph: a valid 0x0 bitmap with real advance —
-        # matches the dylib lane's semantics. Also avoids returning None for
-        # a routine case: match None-discrimination is unreliable on the
-        # baremetal lane (a legit None here surfaced in the caller's Some
-        # arm as nil -> "field access on nil receiver" panic at bounds.right,
-        # 2026-07-18; first WM label glyph was a space).
+        # Whitespace is a valid advance-only glyph, not a raster failure.
         return Some(SfntGlyfBitmap(
             sgb_width: 0, sgb_height: 0,
             sgb_advance: _round_glyf_metric(horizontal[0] as f64 * scale),
@@ -600,8 +583,13 @@ fn rasterize_sfnt_glyf(font: OtFont, glyph_id: u32, size_px: i64) -> Option<Sfnt
     val raw_h = em_h * scale
     val width = _ceil_glyf_dimension(raw_w)
     val height = _ceil_glyf_dimension(raw_h)
-    if raw_w < 0.0 or raw_h < 0.0 or width > 4096 or height > 4096 or width > 16777216 / height:
-        return None
+    if raw_w < 0.0: return None
+    if raw_h < 0.0: return None
+    if width <= 0: return None
+    if height <= 0: return None
+    if width > 4096: return None
+    if height > 4096: return None
+    if width > 16777216 / height: return None
     val edges = _outline_edges(commands, scale, bounds.left * scale, -bounds.bottom * scale)
     var pixels: [u8] = []
     var y: i64 = 0
@@ -620,45 +608,178 @@ fn rasterize_sfnt_glyf(font: OtFont, glyph_id: u32, size_px: i64) -> Option<Sfnt
         sgb_pixels: pixels
     ))
 
-# ===== Flat cross-module rasterization API =====
-#
-# Option<struct> results do NOT survive the module boundary on the baremetal
-# native lane (None/Some discrimination breaks and the caller's Some binding
-# arrives nil -> "field access on nil receiver" panic, 2026-07-18 render-fault
-# chain). These wrappers keep every Option intra-module and return only
-# arrays + bool, the kernel-proven cross-module shapes.
-# Metrics layout: [width, height, advance, bearing_x, bearing_y].
-
-fn sfnt_rasterize_codepoint_parts(blob: [u8], codepoint: i64, size_px: i64) -> ([u8], [i64], bool):
-    if blob.len() == 0 or codepoint < 0 or codepoint > 1114111 or size_px <= 0:
-        return ([], [], false)
+# Caller-owned metadata: width, height, advance, bearings, count, glyph, cookies, alpha.
+fn sfnt_measure_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, mut meta: [i64]):
+    if meta.len() > 7:
+        meta[7] = 0
+    if meta.len() > 8:
+        meta[8] = 0
+    if meta.len() > 9:
+        meta[9] = 0
+    if meta.len() < 20: return
+    if blob.len() == 0 or size_px <= 0 or size_px > 512:
+        return
     val font = match parse_offset_table(blob):
         Some(value): value
-        None: return ([], [], false)
-    val glyph_id = sfnt_cmap_glyph_id(font, codepoint as u32)
+        None: return
+    var glyph_id: u32 = 0
+    if selector_kind == SFNT_GLYPH_SELECTOR_CODEPOINT and selector_value >= 0 and selector_value <= 1114111:
+        glyph_id = sfnt_cmap_glyph_id(font, selector_value as u32)
+    else if selector_kind == SFNT_GLYPH_SELECTOR_INDEX and selector_value > 0 and selector_value <= 4294967295:
+        glyph_id = selector_value as u32
+    else:
+        return
     if glyph_id == 0:
-        return ([], [], false)
-    _sfnt_rasterize_glyph_parts(font, glyph_id, size_px)
+        return
+    val head_table = match find_table(font, 1751474532):
+        Some(value): value
+        None: return
+    val hhea_table = match find_table(font, 1751672161):
+        Some(value): value
+        None: return
+    val hmtx_table = match find_table(font, 1752003704):
+        Some(value): value
+        None: return
+    if not _table_is_bounded(font, head_table, 54) or not _table_is_bounded(font, hhea_table, 36) or not _table_is_bounded(font, hmtx_table, 4):
+        return
+    val units_per_em = read_u16_be(font.blob, head_table.offset as i64 + 18) as i64
+    val long_metrics = read_u16_be(font.blob, hhea_table.offset as i64 + 34) as i64
+    if units_per_em == 0 or long_metrics == 0:
+        return
+    var metric_end: i64 = 0
+    if (glyph_id as i64) < long_metrics:
+        metric_end = (glyph_id as i64 + 1) * 4
+    else:
+        metric_end = long_metrics * 4 + (glyph_id as i64 - long_metrics + 1) * 2
+    if metric_end > hmtx_table.length as i64:
+        return
+    val parsed_outline = match parse_sfnt_glyf_outline(font, glyph_id):
+        Some(value): value
+        None: return
+    val horizontal = match _hmtx(font, long_metrics, glyph_id):
+        Some(value): value
+        None: return
+    val commands = parsed_outline.commands
+    val scale = size_px as f64 / units_per_em as f64
+    var has_drawable_point = false
+    for command in commands:
+        if command.verb != SFNT_GLYF_CLOSE:
+            has_drawable_point = true
+    if not has_drawable_point:
+        meta[0] = 0
+        meta[1] = 0
+        meta[2] = _round_glyf_metric(horizontal[0] as f64 * scale)
+        meta[3] = _round_glyf_metric(horizontal[1] as f64 * scale)
+        meta[4] = 0
+        meta[5] = 0
+        meta[6] = glyph_id as i64
+        meta[15] = selector_kind
+        meta[16] = selector_value
+        meta[17] = _round_glyf_metric(read_i16_be(font.blob, hhea_table.offset as i64 + 4) as f64 * scale)
+        meta[7] = 310031
+        return
+    val bounds = match _outline_bounds(commands):
+        Some(value): value
+        None: return
+    val raw_w = (bounds.right - bounds.left) * scale
+    val raw_h = (bounds.bottom - bounds.top) * scale
+    val width = _ceil_glyf_dimension(raw_w)
+    val height = _ceil_glyf_dimension(raw_h)
+    meta[10] = 201
+    meta[11] = raw_w as i64
+    meta[12] = raw_h as i64
+    meta[13] = width
+    meta[14] = height
+    if raw_w < 0.0: return
+    meta[10] = 202
+    if raw_h < 0.0: return
+    meta[10] = 203
+    if width <= 0: return
+    meta[10] = 204
+    if height <= 0: return
+    meta[10] = 205
+    if width > 4096: return
+    meta[10] = 206
+    if height > 4096: return
+    meta[10] = 207
+    if width > 16777216 / height: return
+    meta[10] = 208
+    meta[0] = width
+    meta[1] = height
+    meta[2] = _round_glyf_metric(horizontal[0] as f64 * scale)
+    meta[3] = _round_glyf_metric(horizontal[1] as f64 * scale)
+    meta[4] = _round_glyf_metric(bounds.top * scale)
+    meta[5] = width * height
+    meta[6] = glyph_id as i64
+    meta[15] = selector_kind
+    meta[16] = selector_value
+    meta[17] = _round_glyf_metric(read_i16_be(font.blob, hhea_table.offset as i64 + 4) as f64 * scale)
+    meta[7] = 310031
 
-fn sfnt_rasterize_glyph_index_parts(blob: [u8], glyph_index: i64, size_px: i64) -> ([u8], [i64], bool):
-    if blob.len() == 0 or glyph_index <= 0 or glyph_index > 4294967295 or size_px <= 0:
-        return ([], [], false)
+fn sfnt_render_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, mut meta: [i64], mut pixels: [u8]):
+    if meta.len() >= 10:
+        meta[8] = 0
+        meta[9] = 0
+    if meta.len() < 20 or meta[7] != 310031 or meta[15] != selector_kind or meta[16] != selector_value or pixels.len() != meta[5]:
+        return
+    if size_px <= 0 or size_px > 512:
+        return
     val font = match parse_offset_table(blob):
         Some(value): value
-        None: return ([], [], false)
-    _sfnt_rasterize_glyph_parts(font, glyph_index as u32, size_px)
-
-fn _sfnt_rasterize_glyph_parts(font: OtFont, glyph_id: u32, size_px: i64) -> ([u8], [i64], bool):
-    val bitmap = match rasterize_sfnt_glyf(font, glyph_id, size_px):
+        None: return
+    var glyph_id: u32 = 0
+    if selector_kind == SFNT_GLYPH_SELECTOR_CODEPOINT and selector_value >= 0 and selector_value <= 1114111:
+        glyph_id = sfnt_cmap_glyph_id(font, selector_value as u32)
+    else if selector_kind == SFNT_GLYPH_SELECTOR_INDEX and selector_value > 0 and selector_value <= 4294967295:
+        glyph_id = selector_value as u32
+    else:
+        return
+    if glyph_id == 0 or glyph_id as i64 != meta[6]:
+        return
+    if meta[0] == 0 and meta[1] == 0 and meta[5] == 0:
+        meta[8] = 310032
+        return
+    val head_table = match find_table(font, 1751474532):
         Some(value): value
-        None: return ([], [], false)
-    val bm_width: i64 = bitmap.sgb_width
-    val bm_height: i64 = bitmap.sgb_height
-    val bm_advance: i64 = bitmap.sgb_advance
-    val bm_bearing_x: i64 = bitmap.sgb_bearing_x
-    val bm_bearing_y: i64 = bitmap.sgb_bearing_y
-    val bm_pixels: [u8] = bitmap.sgb_pixels
-    (bm_pixels, [bm_width, bm_height, bm_advance, bm_bearing_x, bm_bearing_y], true)
+        None: return
+    val hhea_table = match find_table(font, 1751672161):
+        Some(value): value
+        None: return
+    val units_per_em = read_u16_be(font.blob, head_table.offset as i64 + 18) as i64
+    val long_metrics = read_u16_be(font.blob, hhea_table.offset as i64 + 34) as i64
+    if units_per_em == 0 or long_metrics == 0:
+        return
+    val parsed_outline = match parse_sfnt_glyf_outline(font, glyph_id):
+        Some(value): value
+        None: return
+    val horizontal = match _hmtx(font, long_metrics, glyph_id):
+        Some(value): value
+        None: return
+    val commands = parsed_outline.commands
+    val bounds = match _outline_bounds(commands):
+        Some(value): value
+        None: return
+    val scale = size_px as f64 / units_per_em as f64
+    val width = _ceil_glyf_dimension((bounds.right - bounds.left) * scale)
+    val height = _ceil_glyf_dimension((bounds.bottom - bounds.top) * scale)
+    if width != meta[0] or height != meta[1] or width * height != meta[5]:
+        return
+    if _round_glyf_metric(horizontal[0] as f64 * scale) != meta[2] or _round_glyf_metric(horizontal[1] as f64 * scale) != meta[3] or _round_glyf_metric(bounds.top * scale) != meta[4]:
+        return
+    val edges = _outline_edges(commands, scale, bounds.left * scale, -bounds.bottom * scale)
+    var nonzero_alpha: i64 = 0
+    var y: i64 = 0
+    while y < height:
+        var x: i64 = 0
+        while x < width:
+            val alpha = _coverage(edges, x as f64, y as f64)
+            pixels[y * width + x] = alpha
+            if alpha > 0:
+                nonzero_alpha = nonzero_alpha + 1
+            x = x + 1
+        y = y + 1
+    meta[9] = nonzero_alpha
+    meta[8] = 310032
 
 fn sfnt_blob_glyph_exists(blob: [u8], codepoint: i64) -> bool:
     if blob.len() == 0 or codepoint < 0 or codepoint > 1114111:

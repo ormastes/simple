@@ -35,7 +35,7 @@
 
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 use std.common.encoding.sfnt.{font_runtime_ttf_default_supported}
-use std.common.encoding.sfnt_glyf.{sfnt_glyf_void_transport_probe, sfnt_rasterize_codepoint_parts, sfnt_rasterize_glyph_index_parts, sfnt_blob_glyph_exists}
+use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_glyf_void_transport_probe, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_blob_glyph_exists}
 use std.common.encoding.font_registry.{selected_font_asset_candidate_for_path, validate_selected_font_asset, load_selected_font_file, selected_font_asset_identity_for_path}
 #
 # Usage:
@@ -336,41 +336,28 @@ impl FontRasterizer:
         args = args.push(handle)
         spl_wffi_call_i64(self.glyph_free_fp, args, 1)
 
-    fn _rasterize_selected_outline(codepoint: i64, size_px: i64) -> GlyphBitmap?:
-        if self.selected_blob.len() == 0 or codepoint < 0 or codepoint > 1114111 or size_px <= 0:
+    fn _rasterize_selected_outline(selector_kind: i64, selector_value: i64, size_px: i64) -> GlyphBitmap?:
+        if self.selected_blob.len() == 0 or size_px <= 0:
             return nil
-        # Flat cross-module API: Option<struct> results do not survive the
-        # module boundary on baremetal (Some binding arrives nil -> "field
-        # access on nil receiver" panic, 2026-07-18). sfnt_glyf keeps all
-        # Option handling intra-module and returns (pixels, metrics, ok).
-        val parts = sfnt_rasterize_codepoint_parts(self.selected_blob, codepoint, size_px)
-        if not parts.2:
+        var meta: [i64] = [0; 20]
+        sfnt_measure_glyph_into(self.selected_blob, selector_kind, selector_value, size_px, meta)
+        val count = meta[5]
+        if meta[7] != 310031 or count < 0 or count > 16777216:
             return nil
-        # Decode every tuple field right away, before any further method call
-        # (is_current() below) gets a chance to run between two `parts.N`
-        # reads. 2026-07-19 render-fault: with is_current() sitting between
-        # parts.2 and parts.1, `parts.1`'s tag-1 pointer resolved to memory
-        # holding self.font_cache_identity's text bytes instead of the
-        # metrics array (cr2 landed inside the hash string) — heap-layout
-        # dependent, not reproducible on every glyph. Snapshot to locals here
-        # so is_current() no longer runs inside the tuple's decode window.
-        val metrics: [i64] = parts.1
-        val gw = metrics[0]
-        val gh = metrics[1]
-        val gadv = metrics[2]
-        val gbx = metrics[3]
-        val gby = metrics[4]
-        val gpixels = parts.0
+        var pixels: [u8] = [0u8; count]
+        sfnt_render_glyph_into(self.selected_blob, selector_kind, selector_value, size_px, meta, pixels)
+        if meta[8] != 310032 or (count > 0 and meta[9] <= 0):
+            return nil
         if not self.is_current():
             return nil
         GlyphBitmap(
-            gbm_width: gw,
-            gbm_height: gh,
-            gbm_advance: gadv,
-            gbm_bearing_x: gbx,
-            gbm_bearing_y: gby,
+            gbm_width: meta[0],
+            gbm_height: meta[1],
+            gbm_advance: meta[2],
+            gbm_bearing_x: meta[3],
+            gbm_bearing_y: meta[4],
             handle: 0,
-            gbm_pixels: gpixels,
+            gbm_pixels: pixels,
         )
 
     # Rasterize the given Unicode codepoint at the given pixel size.
@@ -387,7 +374,7 @@ impl FontRasterizer:
         if not self.is_current():
             return nil
         if self.lib_handle == 0:
-            return self._rasterize_selected_outline(codepoint, size_px)
+            return self._rasterize_selected_outline(SFNT_GLYPH_SELECTOR_CODEPOINT, codepoint, size_px)
         var args: [i64] = []
         args = args.push(codepoint)
         args = args.push(size_px)
@@ -397,7 +384,7 @@ impl FontRasterizer:
         if handle == 0:
             if not self.is_current():
                 return nil
-            return self._rasterize_selected_outline(codepoint, size_px)
+            return self._rasterize_selected_outline(SFNT_GLYPH_SELECTOR_CODEPOINT, codepoint, size_px)
         val w = self._metric(handle, 0)
         val h = self._metric(handle, 1)
         val adv = self._metric(handle, 2)
@@ -433,32 +420,7 @@ impl FontRasterizer:
         if (not self.is_current() or self.selected_blob.len() == 0 or
             glyph_index <= 0 or glyph_index > 4294967295 or size_px <= 0 or size_px > 512):
             return nil
-        # Flat cross-module API (see _rasterize_selected_outline).
-        val parts = sfnt_rasterize_glyph_index_parts(self.selected_blob, glyph_index, size_px)
-        if not parts.2:
-            return nil
-        # Same tuple-decode-window hazard as _rasterize_selected_outline
-        # (2026-07-19 render-fault): snapshot every parts.N field to locals
-        # before calling is_current(), so it never runs between two parts.N
-        # reads.
-        val metrics: [i64] = parts.1
-        val gw = metrics[0]
-        val gh = metrics[1]
-        val gadv = metrics[2]
-        val gbx = metrics[3]
-        val gby = metrics[4]
-        val gpixels = parts.0
-        if not self.is_current():
-            return nil
-        GlyphBitmap(
-            gbm_width: gw,
-            gbm_height: gh,
-            gbm_advance: gadv,
-            gbm_bearing_x: gbx,
-            gbm_bearing_y: gby,
-            handle: 0,
-            gbm_pixels: gpixels,
-        )
+        self._rasterize_selected_outline(SFNT_GLYPH_SELECTOR_INDEX, glyph_index, size_px)
 
     fn has_glyph(codepoint: i64) -> bool:
         if not self.is_current():
