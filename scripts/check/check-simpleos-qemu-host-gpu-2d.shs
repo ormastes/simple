@@ -53,6 +53,32 @@ case "$(uname -m)" in
     *) HOST_ARCH=unknown ;;
 esac
 
+set_guest_isa_contract() {
+    case "${1-}" in
+        x86_64,aarch64,riscv64)
+            GUEST_ISAS="x86_64 aarch64 riscv64"
+            GUEST_ISA_COUNT=3
+            ;;
+        aarch64)
+            GUEST_ISAS=aarch64
+            GUEST_ISA_COUNT=1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+if [ "${SIMPLEOS_HOST_GPU_GUEST_ISAS+x}" = x ]; then
+    GUEST_ISA_REQUEST=$SIMPLEOS_HOST_GPU_GUEST_ISAS
+else
+    GUEST_ISA_REQUEST=x86_64,aarch64,riscv64
+fi
+if ! set_guest_isa_contract "$GUEST_ISA_REQUEST"; then
+    echo "simpleos_qemu_host_gpu_2d: SIMPLEOS_HOST_GPU_GUEST_ISAS must be exactly x86_64,aarch64,riscv64 or aarch64" >&2
+    exit 2
+fi
+
 set_host_contract() {
     ACTIVE_HOST=$1
     case "$ACTIVE_HOST" in
@@ -2238,9 +2264,36 @@ self_test_qemu_accel() {
     echo "simpleos_qemu_host_gpu_2d_qemu_accel_self_test=pass"
 }
 
+self_test_guest_isa_contract() {
+    set_guest_isa_contract x86_64,aarch64,riscv64
+    [ "$GUEST_ISAS" = "x86_64 aarch64 riscv64" ]
+    [ "$GUEST_ISA_COUNT" -eq 3 ]
+    set_guest_isa_contract aarch64
+    [ "$GUEST_ISAS" = aarch64 ]
+    [ "$GUEST_ISA_COUNT" -eq 1 ]
+    if set_guest_isa_contract "" ||
+       set_guest_isa_contract arm64 ||
+       set_guest_isa_contract x86_64 ||
+       set_guest_isa_contract aarch64,riscv64 ||
+       set_guest_isa_contract x86_64,aarch64,riscv64,aarch64
+    then
+        return 1
+    fi
+    set +e
+    env SIMPLEOS_HOST_GPU_GUEST_ISAS= sh "$0" --self-test-guest-isas >/dev/null 2>&1
+    empty_status=$?
+    env SIMPLEOS_HOST_GPU_GUEST_ISAS=arm64 sh "$0" --self-test-guest-isas >/dev/null 2>&1
+    unknown_status=$?
+    set -e
+    [ "$empty_status" -eq 2 ]
+    [ "$unknown_status" -eq 2 ]
+    set_guest_isa_contract x86_64,aarch64,riscv64
+    echo "simpleos_qemu_host_gpu_2d_guest_isa_contract_self_test=pass"
+}
+
 preflight() {
     preflight_status=pass
-    for preflight_isa in x86_64 aarch64 riscv64; do
+    for preflight_isa in $GUEST_ISAS; do
         preflight_prefix="simpleos_qemu_host_gpu_2d_preflight_${preflight_isa}"
         preflight_qemu=$(qemu_bin_for_isa "$preflight_isa")
         if ! command -v "$preflight_qemu" >/dev/null 2>&1; then
@@ -2318,6 +2371,10 @@ if [ "${1:-}" = --self-test-qemu-accel ]; then
     self_test_qemu_accel
     exit 0
 fi
+if [ "${1:-}" = --self-test-guest-isas ]; then
+    self_test_guest_isa_contract
+    exit 0
+fi
 if [ "${1:-}" = --validate-report ]; then
     [ "$#" -eq 2 ] || exit 2
     validate_report "$2"
@@ -2374,14 +2431,14 @@ host=$ACTIVE_HOST
 
 for other_host in linux macos windows; do
     if [ "$other_host" != "$host" ]; then
-        for isa in x86_64 aarch64 riscv64; do
+        for isa in $GUEST_ISAS; do
             emit_row "$other_host" "$isa" unsupported "requires-$other_host-host" none
         done
     fi
 done
 
 if [ "$host" != linux ] && [ "$host" != macos ] && [ "$host" != windows ]; then
-    for isa in x86_64 aarch64 riscv64; do
+    for isa in $GUEST_ISAS; do
         emit_row "$host" "$isa" unsupported host-daemon-backend-not-implemented none
     done
     echo "simpleos_qemu_host_gpu_2d_status=unsupported"
@@ -2393,7 +2450,7 @@ fi
 
 simple_bin=$(find_simple || true)
 if [ -z "$simple_bin" ] && { [ -z "${SIMPLEOS_GPU_HOST_BIN:-}" ] || [ "${SIMPLEOS_HOST_GPU_USE_EXISTING_GUESTS:-0}" != 1 ]; }; then
-    for isa in x86_64 aarch64 riscv64; do emit_row "$host" "$isa" blocked pure-simple-compiler-missing none; done
+    for isa in $GUEST_ISAS; do emit_row "$host" "$isa" blocked pure-simple-compiler-missing none; done
     echo "simpleos_qemu_host_gpu_2d_host=$host"
     echo "simpleos_qemu_host_gpu_2d_host_arch=$HOST_ARCH"
     echo "simpleos_qemu_host_gpu_2d_status=blocked"
@@ -2418,7 +2475,7 @@ if [ -z "${SIMPLEOS_GPU_HOST_BIN:-}" ]; then
         runtime_reason=directx-runtime-artifact-missing
     fi
     if [ ! -d "$RUNTIME_PATH" ] || { [ "$host" = macos ] && ! core_c_bootstrap_runtime_available; }; then
-        for isa in x86_64 aarch64 riscv64; do emit_row "$host" "$isa" blocked "$runtime_reason" none; done
+        for isa in $GUEST_ISAS; do emit_row "$host" "$isa" blocked "$runtime_reason" none; done
         echo "simpleos_qemu_host_gpu_2d_host=$host"
         echo "simpleos_qemu_host_gpu_2d_host_arch=$HOST_ARCH"
         echo "simpleos_qemu_host_gpu_2d_status=blocked"
@@ -2431,7 +2488,7 @@ if [ -z "${SIMPLEOS_GPU_HOST_BIN:-}" ]; then
         --runtime-path "$RUNTIME_PATH" --cache-dir "$BUILD_DIR/daemon-cache" \
         --timeout 90 --output "$daemon" >"$BUILD_DIR/daemon-build.log" 2>&1
     then
-        for isa in x86_64 aarch64 riscv64; do emit_row "$host" "$isa" blocked host-daemon-build-failed "$BUILD_DIR/daemon-build.log"; done
+        for isa in $GUEST_ISAS; do emit_row "$host" "$isa" blocked host-daemon-build-failed "$BUILD_DIR/daemon-build.log"; done
         echo "simpleos_qemu_host_gpu_2d_host=$host"
         echo "simpleos_qemu_host_gpu_2d_host_arch=$HOST_ARCH"
         echo "simpleos_qemu_host_gpu_2d_status=blocked"
@@ -2439,7 +2496,7 @@ if [ -z "${SIMPLEOS_GPU_HOST_BIN:-}" ]; then
         exit 1
     fi
 elif [ ! -x "$daemon" ]; then
-    for isa in x86_64 aarch64 riscv64; do emit_row "$host" "$isa" blocked provided-host-daemon-missing none; done
+    for isa in $GUEST_ISAS; do emit_row "$host" "$isa" blocked provided-host-daemon-missing none; done
     echo "simpleos_qemu_host_gpu_2d_host=$host"
     echo "simpleos_qemu_host_gpu_2d_host_arch=$HOST_ARCH"
     echo "simpleos_qemu_host_gpu_2d_status=blocked"
@@ -2448,16 +2505,16 @@ elif [ ! -x "$daemon" ]; then
 fi
 
 if [ "$host" = macos ] && ! metal_guest_contract_available; then
-    for isa in x86_64 aarch64 riscv64; do emit_row macos "$isa" blocked metal-guest-probe-contract-missing none; done
+    for isa in $GUEST_ISAS; do emit_row macos "$isa" blocked metal-guest-probe-contract-missing none; done
     echo "simpleos_qemu_host_gpu_2d_host=macos"
     echo "simpleos_qemu_host_gpu_2d_host_arch=$HOST_ARCH"
     echo "simpleos_qemu_host_gpu_2d_status=blocked"
     echo "simpleos_qemu_host_gpu_2d_reason=metal-guest-probe-contract-missing"
     echo "simpleos_qemu_host_gpu_2d_backend=metal"
     echo "simpleos_qemu_host_gpu_2d_processing_backend=metal"
-    echo "simpleos_qemu_host_gpu_2d_rows=3"
+    echo "simpleos_qemu_host_gpu_2d_rows=$GUEST_ISA_COUNT"
     echo "simpleos_qemu_host_gpu_2d_passed=0"
-    echo "simpleos_qemu_host_gpu_2d_blocked=3"
+    echo "simpleos_qemu_host_gpu_2d_blocked=$GUEST_ISA_COUNT"
     echo "simpleos_qemu_host_gpu_2d_failed=0"
     echo "simpleos_qemu_host_gpu_2d_daemon=$daemon"
     exit 1
@@ -2668,7 +2725,7 @@ passed=0
 blocked=0
 failed=0
 TIMEOUT_BIN=$(find_timeout || true)
-for isa in x86_64 aarch64 riscv64; do
+for isa in $GUEST_ISAS; do
     qemu_bin=$(qemu_bin_for_isa "$isa")
     case "$isa" in x86_64) qemu_machine=q35 ;; *) qemu_machine=virt ;; esac
     if [ -z "$TIMEOUT_BIN" ]; then
@@ -2710,7 +2767,7 @@ echo "simpleos_qemu_host_gpu_2d_reason=$(if [ "$overall" = pass ]; then echo "al
 echo "simpleos_qemu_host_gpu_2d_backend=$BACKEND"
 echo "simpleos_qemu_host_gpu_2d_processing_backend=$PROCESSING_BACKEND"
 echo "simpleos_qemu_host_gpu_2d_processing_selector=$PROCESSING_SELECTOR"
-echo "simpleos_qemu_host_gpu_2d_rows=3"
+echo "simpleos_qemu_host_gpu_2d_rows=$GUEST_ISA_COUNT"
 echo "simpleos_qemu_host_gpu_2d_passed=$passed"
 echo "simpleos_qemu_host_gpu_2d_blocked=$blocked"
 echo "simpleos_qemu_host_gpu_2d_failed=$failed"

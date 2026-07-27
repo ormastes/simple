@@ -116,6 +116,24 @@ bin/simple os run --scenario=arm64-desktop-engine2d
 bin/simple os test --scenario=arm64-desktop-engine2d
 ```
 
+For the macOS host-GPU evidence lane, select only the current AArch64 probe and
+desktop guest without running the unrelated cross-ISA rows:
+
+```bash
+SIMPLEOS_HOST_GPU_GUEST_ISAS=aarch64 \
+  sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs
+```
+
+The variable is fail-closed: only the exact values `aarch64` and
+`x86_64,aarch64,riscv64` are accepted. Leaving it unset preserves the canonical
+three-ISA matrix. An explicitly empty value, aliases such as `arm64`, reordered
+lists, and partial custom matrices are rejected before daemon selection or
+guest artifact handling. This selector never authorizes
+`SIMPLEOS_HOST_GPU_USE_EXISTING_GUESTS=1` as current evidence; omit that cache
+option for a goal-completion run. The scoped one-row output is live ARM64
+evidence, not a replacement for the canonical three-row cross-ISA report
+accepted by `--validate-report`.
+
 The attested wrapper resolves and directly executes an allowlisted deployed
 `bin/release/<host-triple>/simple os build --scenario=arm64-desktop-engine2d`
 executable. It rejects scripts, symlinks, foreign binaries, and mismatched host
