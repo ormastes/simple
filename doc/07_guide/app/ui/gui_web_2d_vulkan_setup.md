@@ -425,6 +425,16 @@ REPORT_PATH=build/gui-web-2d-final-${RUN_TOKEN}/report.md \
   sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 ```
 
+`--renderdoc-simple` is the complete focused producer path, not a capture-only
+shortcut. It captures to
+`<GUI_WEB_2D_VULKAN_BUILD_DIR>/renderdoc/simple/evidence.env`, supplies that
+exact file to `check-renderdoc-simple-gate.shs`, and by default writes the
+canonical consumer row at `build/renderdoc/simple-gate/evidence.env`. It relays
+the source path, gate path, exit codes, and typed gate/aggregate status and
+reason into the setup evidence env, then exits nonzero unless capture and gate
+both pass. `RDOC_SIMPLE_GATE_BUILD_DIR` may isolate diagnostic output, but leave
+it unset when producing the canonical `test_host_env` row.
+
 For final completion, do not set
 `GUI_RENDERDOC_AGGREGATE_READONLY_STATIC_CACHE_DIR`. Read-only seeded cache is a
 fast repeated-check optimization, not native-host proof. The final aggregate

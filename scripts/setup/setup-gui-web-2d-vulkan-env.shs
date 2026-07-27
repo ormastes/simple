@@ -4,8 +4,8 @@
 # This wrapper is intentionally conservative: --check records host readiness
 # without launching GUI apps, --browser-backing runs focused browser GPU probes,
 # --run launches direct Electron/Chrome/Simple probes, --renderdoc-simple captures
-# only the Simple Vulkan lane, and --renderdoc asks the shared RenderDoc helper
-# for all capture lanes.
+# and gates the Simple Vulkan lane, and --renderdoc asks the shared RenderDoc
+# helper for all capture lanes.
 set -u
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
@@ -29,7 +29,8 @@ usage: scripts/setup/setup-gui-web-2d-vulkan-env.shs [--check|--browser-backing|
                   Launch focused Electron/Chrome GPU feature probes.
   --run           Also launch direct Electron, Chrome, and Simple Engine2D probes.
   --renderdoc-simple
-                  Run the Simple Engine2D probe and Simple RenderDoc capture only.
+                  Capture Simple Engine2D, replay-gate it, and write the
+                  canonical test_host_env RenderDoc evidence row.
   --renderdoc     Run --run plus the shared RenderDoc capture helpers and gates.
   --print-install Print platform setup commands without installing anything.
 
@@ -832,10 +833,39 @@ fi
 
 if [ "$MODE" = "--renderdoc-simple" ]; then
     RDOC_OUT="$BUILD_DIR/renderdoc"
+    RDOC_SIMPLE_SOURCE_ENV="$RDOC_OUT/simple/evidence.env"
+    RDOC_SIMPLE_GATE_BUILD_DIR="${RDOC_SIMPLE_GATE_BUILD_DIR:-$ROOT_DIR/build/renderdoc/simple-gate}"
+    RDOC_SIMPLE_GATE_REPORT_PATH="${RDOC_SIMPLE_GATE_REPORT_PATH:-$ROOT_DIR/doc/09_report/renderdoc_simple_gate_$(date -u +%F).md}"
+    mkdir -p "$RDOC_OUT/simple" "$RDOC_SIMPLE_GATE_BUILD_DIR"
+    rm -f "$RDOC_SIMPLE_SOURCE_ENV" "$RDOC_SIMPLE_GATE_BUILD_DIR/evidence.env"
     RDOC_OUTPUT_DIR="$RDOC_OUT" "$ROOT_DIR/scripts/tool/renderdoc-evidence.shs" capture-simple >"$BUILD_DIR/renderdoc-simple.out" 2>&1
     rdoc_simple_code=$?
+    BUILD_DIR="$RDOC_SIMPLE_GATE_BUILD_DIR" \
+    REPORT_PATH="$RDOC_SIMPLE_GATE_REPORT_PATH" \
+    RDOC_SIMPLE_EVIDENCE_ENV="$RDOC_SIMPLE_SOURCE_ENV" \
+        sh "$ROOT_DIR/scripts/check/check-renderdoc-simple-gate.shs" >"$BUILD_DIR/renderdoc-simple-gate.out" 2>&1
+    rdoc_simple_gate_code=$?
+    rdoc_simple_gate_env="$RDOC_SIMPLE_GATE_BUILD_DIR/evidence.env"
+    rdoc_simple_gate_status="$(sed -n 's/^rdoc_simple_gate_status=//p' "$rdoc_simple_gate_env" 2>/dev/null | tail -n 1)"
+    rdoc_simple_gate_reason="$(sed -n 's/^rdoc_simple_gate_reason=//p' "$rdoc_simple_gate_env" 2>/dev/null | tail -n 1)"
     append_kv "gui_web_2d_vulkan_renderdoc_simple_exit_code" "$rdoc_simple_code"
     append_kv "gui_web_2d_vulkan_renderdoc_output_dir" "$RDOC_OUT"
+    append_kv "gui_web_2d_vulkan_renderdoc_simple_source_env" "$RDOC_SIMPLE_SOURCE_ENV"
+    append_kv "gui_web_2d_vulkan_renderdoc_simple_gate_exit_code" "$rdoc_simple_gate_code"
+    append_kv "gui_web_2d_vulkan_renderdoc_simple_gate_evidence_env" "$rdoc_simple_gate_env"
+    append_kv "gui_web_2d_vulkan_renderdoc_simple_gate_status" "${rdoc_simple_gate_status:-fail}"
+    append_kv "gui_web_2d_vulkan_renderdoc_simple_gate_reason" "${rdoc_simple_gate_reason:-missing-gate-evidence}"
+    renderdoc_simple_status=pass
+    renderdoc_simple_reason=pass
+    if [ "$rdoc_simple_code" -ne 0 ]; then
+        renderdoc_simple_status=fail
+        renderdoc_simple_reason="capture-command-exit-$rdoc_simple_code"
+    elif [ "$rdoc_simple_gate_code" -ne 0 ] || [ "$rdoc_simple_gate_status" != pass ]; then
+        renderdoc_simple_status=fail
+        renderdoc_simple_reason="${rdoc_simple_gate_reason:-gate-command-exit-$rdoc_simple_gate_code}"
+    fi
+    append_kv "gui_web_2d_vulkan_renderdoc_simple_status" "$renderdoc_simple_status"
+    append_kv "gui_web_2d_vulkan_renderdoc_simple_reason" "$renderdoc_simple_reason"
 fi
 
 if [ "$MODE" = "--renderdoc" ]; then
@@ -854,3 +884,6 @@ fi
 
 append_kv "gui_web_2d_vulkan_evidence_env" "$EVIDENCE_ENV"
 cat "$EVIDENCE_ENV"
+if [ "$MODE" = "--renderdoc-simple" ] && [ "$renderdoc_simple_status" != pass ]; then
+    exit 1
+fi

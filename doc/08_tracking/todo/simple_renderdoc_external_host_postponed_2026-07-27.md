@@ -14,6 +14,14 @@ Status: postponed until local implementation and aggregate checks are green.
 | Physical boards | Identity, firmware, boot, receipt, external capture, and oracle evidence | Board-specific lane |
 | Chrome/Electron | Vulkan backing, interaction, RDC capture, and exact ARGB | Prepared browser host |
 
+The prepared-host Simple resume entrypoint now performs both halves of the
+focused lane. It captures
+`<GUI_WEB_2D_VULKAN_BUILD_DIR>/renderdoc/simple/evidence.env`, passes that exact
+file to the strict replay/readback gate, and writes the canonical consumer row
+to `build/renderdoc/simple-gate/evidence.env`. Capture or gate failure is
+reported through typed setup status/reason rows and a nonzero exit. This closes
+the local resume-path gap only; no external-host RenderDoc row is promoted.
+
 ## Concrete external-host handoff
 
 | Row | Owner | Prerequisites | Retained artifacts | Exact resume command |

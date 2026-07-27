@@ -16,6 +16,11 @@ criteria. A child browser pass must therefore prove both GPU state and the
 source proof artifact shape. A copied, linked, empty, or directory-shaped proof
 file is diagnostics only, not completion evidence.
 
+The advertised `--renderdoc-simple` entrypoint must preserve one exact
+producer-to-gate chain: capture writes `<setup-build>/renderdoc/simple/evidence.env`,
+the strict Simple RenderDoc gate consumes that same file, and its canonical
+`build/renderdoc/simple-gate/evidence.env` status/reason is relayed fail-closed.
+
 **Plan:** doc/03_plan/agent_tasks/gui_rendering_parallel_agent_plan_2026-06-27.md
 **Requirements:** N/A
 **Research:** doc/09_report/gui_renderdoc_web_wm_path_fallback_evidence_2026-06-27.md
@@ -27,6 +32,7 @@ file is diagnostics only, not completion evidence.
 SIMPLE_LIB=src bin/simple test test/03_system/check/gui_web_2d_vulkan_setup_simple_bin_spec.spl --mode=interpreter --clean --fail-fast
 sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --check
 sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --browser-backing
+sh scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple
 node scripts/check/gui-web-2d-vulkan-browser-backing-status.js \
   build/gui-web-2d-vulkan-env/electron_argb_proof.json \
   build/gui-web-2d-vulkan-env/electron_argb.json \
@@ -45,6 +51,9 @@ node scripts/check/gui-web-2d-vulkan-browser-backing-status.js \
 - Browser-backing source proof files are typed as `symlink`, `hardlink`,
   `not-regular`, `empty`, `missing`, or `pass`; child browser-backing passes
   require regular single-link proof files.
+- `--renderdoc-simple` passes its exact generated Simple evidence env to the
+  strict gate, writes the canonical gate env, and exits nonzero unless both
+  capture and gate pass.
 
 ## Evidence Fields
 
@@ -65,6 +74,15 @@ Browser-backing source classification must emit:
 - `gui_web_2d_vulkan_electron_browser_backing_status`
 - `gui_web_2d_vulkan_chrome_browser_backing_status`
 - `gui_web_2d_vulkan_browser_backing_status`
+
+Simple RenderDoc capture-to-gate setup must emit:
+
+- `gui_web_2d_vulkan_renderdoc_simple_source_env`
+- `gui_web_2d_vulkan_renderdoc_simple_gate_evidence_env`
+- `gui_web_2d_vulkan_renderdoc_simple_gate_status`
+- `gui_web_2d_vulkan_renderdoc_simple_gate_reason`
+- `gui_web_2d_vulkan_renderdoc_simple_status`
+- `gui_web_2d_vulkan_renderdoc_simple_reason`
 
 ## Source Status Semantics
 
@@ -101,6 +119,11 @@ the corresponding child status to `fail` with a source-file reason.
    is true, Vulkan appears in renderer metadata, and the Chrome source proof
    file status is `pass`.
 8. The top-level browser-backing row passes only when both child rows pass.
+9. `--renderdoc-simple` captures under the setup build directory, passes that
+   exact generated `renderdoc/simple/evidence.env` to the strict gate, and
+   writes the gate result to `build/renderdoc/simple-gate/evidence.env`.
+10. Capture failure, gate failure, missing gate evidence, or any non-`pass`
+    gate status emits a typed reason and makes the setup command exit nonzero.
 
 ## Failure Examples
 
@@ -129,6 +152,8 @@ debugger artifacts.
 The spec contains:
 
 - Static source inspection for Simple binary discovery and helper routing.
+- Static source inspection for the exact Simple capture-to-gate evidence path,
+  canonical consumer output, typed status/reason relay, and nonzero failure.
 - A real `--check` run that verifies default release Simple selection.
 - A direct helper run with synthetic hardlinked and symlinked browser proof
   files to assert typed source statuses and fail-closed child rows.
@@ -156,6 +181,20 @@ describe "GUI Web 2D Vulkan setup Simple binary selection":
         expect(script).to_contain("\"Simple v\"*")
         expect(script).to_contain("repo-bin-canonical-self-hosted")
         expect(script).to_contain("scripts/check/gui-web-2d-vulkan-browser-backing-status.js")
+
+    it "chains the exact Simple RenderDoc capture env into the strict gate":
+        val script = file_read("scripts/setup/setup-gui-web-2d-vulkan-env.shs")
+
+        step("Inspect fail-closed Simple RenderDoc capture-to-gate contract")
+        expect(script).to_contain("RDOC_SIMPLE_SOURCE_ENV=\"$RDOC_OUT/simple/evidence.env\"")
+        expect(script).to_contain("RDOC_SIMPLE_GATE_BUILD_DIR=\"${RDOC_SIMPLE_GATE_BUILD_DIR:-$ROOT_DIR/build/renderdoc/simple-gate}\"")
+        expect(script).to_contain("rm -f \"$RDOC_SIMPLE_SOURCE_ENV\" \"$RDOC_SIMPLE_GATE_BUILD_DIR/evidence.env\"")
+        expect(script.index_of("rm -f \"$RDOC_SIMPLE_SOURCE_ENV\"")).to_be_less_than(script.index_of("capture-simple >\"$BUILD_DIR/renderdoc-simple.out\""))
+        expect(script).to_contain("RDOC_SIMPLE_EVIDENCE_ENV=\"$RDOC_SIMPLE_SOURCE_ENV\"")
+        expect(script).to_contain("sh \"$ROOT_DIR/scripts/check/check-renderdoc-simple-gate.shs\"")
+        expect(script).to_contain("gui_web_2d_vulkan_renderdoc_simple_gate_status")
+        expect(script).to_contain("gui_web_2d_vulkan_renderdoc_simple_gate_reason")
+        expect(script).to_contain("[ \"$renderdoc_simple_status\" != pass ]")
 
     it "prefers canonical pure Simple for default Vulkan evidence setup":
         val root = "build/test-gui-web-2d-vulkan-setup-simple-bin-release"
