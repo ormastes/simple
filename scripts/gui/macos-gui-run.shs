@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
-# macos-gui-run.shs — run a Simple GUI program in a real on-screen window on macOS.
+# macos-gui-run.shs â run a Simple GUI program in a real on-screen window on macOS.
 #
 # Why this exists: a bare CLI process is never registered with the macOS window
 # server, so an interpreter-driven winit window is created but never composites
 # (lsappinfo shows it unregistered). Launching from a proper .app bundle via
 # LaunchServices registers the process in the Aqua session, after which the window
 # displays. (The Simple program must also poll the event loop continuously rather
-# than rt_thread_sleep — see examples/06_io/ui/web_engine2d_gui.spl.)
+# than rt_thread_sleep â see examples/06_io/ui/web_engine2d_gui.spl.)
 # See doc/08_tracking/bug/macos_winit_window_not_displayed_2026-05-28.md.
 #
 # Usage: scripts/macos-gui-run.shs <file.spl|file.smf> [program args...]
 set -euo pipefail
 
 strict_evidence="${SIMPLE_GUI_STRICT_EVIDENCE:-0}"
-strict_probe="${SIMPLE_GUI_STRICT_CONTRACT_PROBE:-0}"
 no_bootstrap_delegate="${SIMPLE_NO_BOOTSTRAP_DELEGATE:-0}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 
@@ -39,39 +38,14 @@ sha256_file() {
   fi
 }
 
-assert_no_simple_seed_descendant() {
-  local root_pid="$1"
-  ps -axo pid=,ppid=,command= | awk -v root="$root_pid" '
-    {
-      pid = $1
-      parent[pid] = $2
-      $1 = ""
-      $2 = ""
-      command[pid] = $0
-    }
-    END {
-      for (pid in command) {
-        if (command[pid] !~ /(^|\/)simple_seed([[:space:]]|$)/) {
-          continue
-        }
-        current = pid
-        for (depth = 0; depth < 512; depth++) {
-          if (parent[current] == root) {
-            exit 1
-          }
-          if (!(parent[current] in parent) || parent[current] == current) {
-            break
-          }
-          current = parent[current]
-        }
-      }
-    }
-  '
+has_winit_marker() {
+  LC_ALL=C grep -aq -e "rt_winit_event_loop_new" -e "window_winitmodule.smf" "$1"
 }
 
 is_forbidden_strict_binary() {
   case "$1" in
-    */simple_seed|*/simple_seed/*|*/src/compiler_rust/*|*/bootstrap/*|*/stage3/*|*/debug/*)
+    */simple_seed|*/simple_seed/*|*/src/compiler_rust/*|\
+    */stage3/*|*/debug/*|*/test/02_integration/rendering/*live_harness*)
       return 0
       ;;
     *)
@@ -84,58 +58,6 @@ strict_contract_error() {
   echo "error: strict GUI evidence: $*" >&2
   return 1
 }
-
-# This probe deliberately runs before the Darwin guard so CI can exercise the
-# strict source/hash/identity invariants without launching an Aqua application.
-if [[ "$strict_probe" = "1" ]]; then
-  [[ "$strict_evidence" = "1" ]] || strict_contract_error "probe requires SIMPLE_GUI_STRICT_EVIDENCE=1"
-  [[ "$no_bootstrap_delegate" = "1" ]] || strict_contract_error "probe requires SIMPLE_NO_BOOTSTRAP_DELEGATE=1"
-  [[ -n "${SIMPLE_GUI_BINARY:-}" ]] || strict_contract_error "SIMPLE_GUI_BINARY must be explicit"
-  [[ -f "$SIMPLE_GUI_BINARY" && -x "$SIMPLE_GUI_BINARY" && ! -L "$SIMPLE_GUI_BINARY" ]] || strict_contract_error "SIMPLE_GUI_BINARY must be a non-symlink regular executable"
-  [[ "${SIMPLE_GUI_ALLOW_RUST_DRIVER:-0}" != "1" ]] || strict_contract_error "SIMPLE_GUI_ALLOW_RUST_DRIVER=1 is forbidden"
-  probe_binary="$(canonical_path "$SIMPLE_GUI_BINARY")" || strict_contract_error "cannot canonicalize SIMPLE_GUI_BINARY"
-  [[ "$SIMPLE_GUI_BINARY" = "$probe_binary" ]] || strict_contract_error "SIMPLE_GUI_BINARY must be canonical"
-  is_forbidden_strict_binary "$probe_binary" && strict_contract_error "forbidden binary path: $probe_binary"
-  probe_hash="$(sha256_file "$probe_binary")"
-  probe_admission="${SIMPLE_GUI_STRICT_PROBE_ADMISSION_PATH:-}"
-  [[ -f "$probe_admission" && ! -L "$probe_admission" ]] ||
-    strict_contract_error "probe requires a non-symlink admission receipt"
-  probe_admission_canonical="$(canonical_path "$probe_admission")"
-  [[ "$probe_admission" = "$probe_admission_canonical" ]] ||
-    strict_contract_error "probe admission receipt must be canonical"
-  [[ "$(manifest_value schema "$probe_admission")" = \
-      "simple-gui-strict-probe-admission-v1" ]] ||
-    strict_contract_error "probe admission schema mismatch"
-  [[ "$(manifest_value status "$probe_admission")" = "pass" ]] ||
-    strict_contract_error "probe admission status mismatch"
-  [[ "$(manifest_value compiler_abs_path "$probe_admission")" = \
-      "$probe_binary" ]] ||
-    strict_contract_error "probe compiler path mismatch"
-  [[ "$(manifest_value compiler_sha256 "$probe_admission")" = \
-      "$probe_hash" ]] ||
-    strict_contract_error "probe compiler hash mismatch"
-  [[ "$(manifest_value compiler_source_kind "$probe_admission")" = \
-      "canonical-pure-simple-bootstrap-stage3" ]] ||
-    strict_contract_error "probe compiler source kind mismatch"
-  probe_root="$(cd "$(mktemp -d)" && pwd -P)"
-  probe_app="$probe_root/SimpleGui.app"
-  trap 'rm -rf "$probe_root"' EXIT
-  mkdir -p "$probe_app/Contents/MacOS"
-  cp "$probe_binary" "$probe_app/Contents/MacOS/SimpleGui"
-  probe_bundled="$(canonical_path "$probe_app/Contents/MacOS/SimpleGui")"
-  [[ "$(sha256_file "$probe_binary")" = "$probe_hash" ]] || strict_contract_error "source changed during copy"
-  [[ "$(sha256_file "$probe_bundled")" = "$probe_hash" ]] || strict_contract_error "bundled hash differs from source"
-  if [[ "${SIMPLE_GUI_STRICT_PROBE_INJECT_SIMPLE_SEED:-0}" = "1" ]]; then
-    mkdir -p "$probe_app/Contents/Resources/seed"
-    : > "$probe_app/Contents/Resources/seed/simple_seed"
-  fi
-  ! find "$probe_app" -name simple_seed -print -quit | grep -q . || strict_contract_error "bundle contains forbidden simple_seed descendant"
-  probe_launcher_pid="4242"
-  probe_window_owner_pid="${SIMPLE_GUI_STRICT_PROBE_WINDOW_OWNER_PID:-4242}"
-  [[ "$probe_launcher_pid" = "$probe_window_owner_pid" ]] || strict_contract_error "launcher PID does not own the window"
-  echo "strict GUI contract probe: PASS source=$probe_binary bundled=$probe_bundled hash=$probe_hash"
-  exit 0
-fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "macos-gui-run.shs is macOS-only; on Linux/Windows run the gui driver directly." >&2
@@ -174,15 +96,20 @@ is_rust_seed_simple() {
   esac
 }
 
-has_winit_marker() {
-  LC_ALL=C grep -aq -e "rt_winit_event_loop_new" -e "window_winitmodule.smf" "$1"
-}
-
-strict_admitted_binary=""
-strict_admitted_hash=""
+strict_admitted_gui_driver=""
+strict_admitted_gui_driver_hash=""
 strict_admitted_manifest=""
 strict_admitted_manifest_hash=""
-strict_admitted_source_kind=""
+strict_admitted_gui_driver_source_kind=""
+
+assert_strict_admitted_inputs_unchanged() {
+  [[ -n "${MACOS_GPU_ADMISSION_GUI_DRIVER_SHA256:-}" ]] || return 1
+  [[ -n "${MACOS_GPU_ADMISSION_MANIFEST_SHA256:-}" ]] || return 1
+  [[ "$(sha256_file "$strict_admitted_gui_driver")" = \
+      "$MACOS_GPU_ADMISSION_GUI_DRIVER_SHA256" ]] || return 1
+  [[ "$(sha256_file "$strict_admitted_manifest")" = \
+      "$MACOS_GPU_ADMISSION_MANIFEST_SHA256" ]] || return 1
+}
 
 admit_strict_runtime() {
   local backend="${SIMPLE_GUI_BACKEND:-}"
@@ -197,14 +124,12 @@ admit_strict_runtime() {
   . "$helper"
   macos_gpu_trusted_manifest_admit \
     "$strict_admitted_manifest" "$backend" "$repo_root" || return 1
-  strict_admitted_binary="$MACOS_GPU_ADMISSION_COMPILER"
-  strict_admitted_hash="$(macos_gpu_admission_sha256_file "$strict_admitted_binary")" ||
-    return 1
-  strict_admitted_manifest_hash="$(
-    macos_gpu_admission_sha256_file "$strict_admitted_manifest"
-  )" || return 1
-  strict_admitted_source_kind="$MACOS_GPU_ADMISSION_COMPILER_SOURCE_KIND"
-  [[ "${SIMPLE_GUI_BINARY:-}" = "$strict_admitted_binary" ]] || return 1
+  strict_admitted_gui_driver="$MACOS_GPU_ADMISSION_GUI_DRIVER"
+  strict_admitted_gui_driver_hash="$MACOS_GPU_ADMISSION_GUI_DRIVER_SHA256"
+  strict_admitted_manifest_hash="$MACOS_GPU_ADMISSION_MANIFEST_SHA256"
+  strict_admitted_gui_driver_source_kind="$MACOS_GPU_ADMISSION_GUI_DRIVER_SOURCE_KIND"
+  assert_strict_admitted_inputs_unchanged || return 1
+  [[ "${SIMPLE_GUI_BINARY:-}" = "$strict_admitted_gui_driver" ]] || return 1
 }
 
 resolve_gui_binary() {
@@ -215,9 +140,9 @@ resolve_gui_binary() {
     [[ "${SIMPLE_GUI_ALLOW_RUST_DRIVER:-0}" != "1" ]] || return 1
     override_candidate="$(canonical_path "$SIMPLE_GUI_BINARY")" || return 1
     [[ "$SIMPLE_GUI_BINARY" = "$override_candidate" ]] || return 1
-    [[ "$override_candidate" = "$strict_admitted_binary" ]] || return 1
+    [[ "$override_candidate" = "$strict_admitted_gui_driver" ]] || return 1
     [[ "$(sha256_file "$override_candidate")" = \
-        "$strict_admitted_hash" ]] || return 1
+        "$strict_admitted_gui_driver_hash" ]] || return 1
     is_forbidden_strict_binary "$override_candidate" && return 1
     has_winit_marker "$override_candidate" || return 1
     echo "$override_candidate"
@@ -265,11 +190,13 @@ resolve_gui_binary() {
 if [[ "$strict_evidence" = "1" ]]; then
   admit_strict_runtime ||
     strict_contract_error "trusted manifest admission failed for SIMPLE_GUI_BINARY"
+  assert_strict_admitted_inputs_unchanged ||
+    strict_contract_error "admitted driver or manifest changed after admission"
 fi
 
 gui_bin="$(resolve_gui_binary)" || {
   if [[ "$strict_evidence" = "1" ]]; then
-    strict_contract_error "requires an explicit, canonical, pure-Simple SIMPLE_GUI_BINARY regular executable (not seed/debug/Rust/bootstrap/stage3), with SIMPLE_GUI_ALLOW_RUST_DRIVER unset"
+    strict_contract_error "requires the exact admitted canonical full-CLI driver hash (not seed/debug/Rust/stage3), with SIMPLE_GUI_ALLOW_RUST_DRIVER unset"
     exit 1
   fi
   if [ -n "${SIMPLE_GUI_BINARY:-${SIMPLE_BIN:-}}" ]; then
@@ -306,9 +233,10 @@ cp "$gui_bin" "$app/Contents/MacOS/SimpleGui"
 app_executable="$(canonical_path "$app/Contents/MacOS/SimpleGui")"
 bundled_binary_hash="$(sha256_file "$app_executable")"
 if [[ "$strict_evidence" = "1" ]]; then
+  assert_strict_admitted_inputs_unchanged ||
+    strict_contract_error "admitted driver or manifest changed before launch"
   [[ "$(sha256_file "$gui_bin")" = "$selected_binary_hash" ]] || strict_contract_error "selected binary changed during bundle copy"
   [[ "$selected_binary_hash" = "$bundled_binary_hash" ]] || strict_contract_error "bundled binary hash differs from selected binary"
-  ! find "$app" -name simple_seed -print -quit | grep -q . || strict_contract_error "bundle contains forbidden simple_seed descendant"
 fi
 case "$no_bootstrap_delegate" in
   0|1) ;;
@@ -364,6 +292,9 @@ else
   open -n --stdout "$app/../launch.out" --stderr "$app/../launch.err" "$app" --args run "$program" --no-daemon
 fi
 
+# This lookup only connects the LaunchServices bundle to its visible window for
+# capture ownership.  Delegation/non-delegation evidence is established earlier
+# by the EndpointSecurity execution-history receipt, never by this ps query.
 find_exact_app_pid() {
   ps -axo pid=,command= | awk -v executable="$app_executable" '
     {
@@ -431,15 +362,13 @@ if [[ "$strict_evidence" = "1" ]]; then
   [[ "$window_owner_pid" = "$launcher_pid" ]] || strict_contract_error "launcher PID does not own the window"
   window_owner_executable="$(pid_executable "$window_owner_pid")"
   [[ "$window_owner_executable" = "$app_executable" ]] || strict_contract_error "window owner executable is not the bundled SimpleGui binary"
-  assert_no_simple_seed_descendant "$launcher_pid" ||
-    strict_contract_error "launched SimpleGui has forbidden simple_seed descendant"
 fi
 
 echo "app pid: $launched_pid  executable: $app_executable"
 if [[ -n "${SIMPLE_GUI_LAUNCHED_PID_PATH:-}" ]]; then
   pid_record_tmp="${SIMPLE_GUI_LAUNCHED_PID_PATH}.tmp.$$"
   {
-    printf 'schema=macos_gui_run_pid_receipt_v2\n'
+    printf 'schema=macos_gui_run_pid_receipt_v3\n'
     printf 'strict_evidence=%s\n' "$strict_evidence"
     printf 'selected_source=%s\n' "$gui_bin"
     printf 'bundled_executable=%s\n' "$app_executable"
@@ -447,7 +376,8 @@ if [[ -n "${SIMPLE_GUI_LAUNCHED_PID_PATH:-}" ]]; then
     printf 'bundled_binary_hash=%s\n' "$bundled_binary_hash"
     printf 'trusted_manifest=%s\n' "$strict_admitted_manifest"
     printf 'trusted_manifest_hash=%s\n' "$strict_admitted_manifest_hash"
-    printf 'trusted_compiler_source_kind=%s\n' "$strict_admitted_source_kind"
+    printf 'trusted_gui_driver_source_kind=%s\n' "$strict_admitted_gui_driver_source_kind"
+    printf 'trusted_gui_driver_sha256=%s\n' "$strict_admitted_gui_driver_hash"
     printf 'launched_pid=%s\n' "$launched_pid"
     printf 'launched_executable=%s\n' "$app_executable"
     printf 'launcher_pid=%s\n' "$launcher_pid"

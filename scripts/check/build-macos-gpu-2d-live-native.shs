@@ -13,7 +13,7 @@ export BOOTSTRAP_STAGE3_FACADE_PATH
 
 BUILD_ROOT="$ROOT_DIR/build/macos_gpu_2d_live_native"
 COMPILER_IDENTITY="canonical-pure-simple-stage3-with-bound-backfill-v1"
-MANIFEST_SCHEMA="macos-gpu-2d-live-native-manifest-v2"
+MANIFEST_SCHEMA="macos-gpu-2d-live-native-manifest-v3"
 SOURCE_INPUT_ROOT_LIB="src/lib"
 SOURCE_INPUT_ROOT_RENDERING="test/02_integration/rendering"
 EVIDENCE_WIDGET_SOURCE=\
@@ -40,6 +40,24 @@ canonical_file() {
     [ ! -L "$1" ] || fail "symlinked-file-not-trusted"
     dir="$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P)"
     printf '%s/%s\n' "$dir" "$(basename -- "$1")"
+}
+
+has_winit_marker() {
+    LC_ALL=C grep -aq -e "rt_winit_event_loop_new" \
+        -e "window_winitmodule.smf" "$1"
+}
+
+reject_gui_driver_substitution() {
+    case "$1" in
+        "$ROOT_DIR"/build/bootstrap/full/*/simple)
+            return 0
+            ;;
+        */simple_seed|*/simple_seed/*|*/compiler_rust/*|*/bootstrap/*|\
+        */stage3/*|*/target/debug/*|*/debug/*|\
+        */test/02_integration/rendering/*live_harness*)
+            return 1
+            ;;
+    esac
 }
 
 digest_args() {
@@ -301,6 +319,131 @@ assert_frozen_compiler() {
         fail "admitted-provenance-mutated"
 }
 
+resolve_gui_driver() {
+    gui_platform="$(bootstrap_stage3_host_platform)" ||
+        fail "gui-driver-platform-unsupported"
+    GUI_DRIVER_ORIGIN_PATH=\
+"$ROOT_DIR/build/bootstrap/full/$gui_platform/simple"
+    GUI_DRIVER_PROVENANCE_ORIGIN_PATH=\
+"$ROOT_DIR/build/bootstrap/full/$gui_platform/provenance/gui-driver.env"
+    GUI_DRIVER_PRODUCER=\
+"$ROOT_DIR/scripts/check/build-macos-full-cli-gui-provenance.shs"
+    [ "$(canonical_file "$GUI_DRIVER_ORIGIN_PATH")" = \
+        "$GUI_DRIVER_ORIGIN_PATH" ] && [ -x "$GUI_DRIVER_ORIGIN_PATH" ] ||
+        fail "canonical-full-cli-gui-driver-missing"
+    [ "$(canonical_file "$GUI_DRIVER_PROVENANCE_ORIGIN_PATH")" = \
+        "$GUI_DRIVER_PROVENANCE_ORIGIN_PATH" ] ||
+        fail "canonical-full-cli-gui-provenance-missing"
+    [ "$(canonical_file "$GUI_DRIVER_PRODUCER")" = \
+        "$GUI_DRIVER_PRODUCER" ] || fail "gui-provenance-producer-missing"
+    gui_origin_sha_before="$(sha256_file "$GUI_DRIVER_ORIGIN_PATH")"
+    gui_provenance_sha_before="$(sha256_file \
+        "$GUI_DRIVER_PROVENANCE_ORIGIN_PATH")"
+    gui_snapshot_dir="$(mktemp -d \
+        "$BUILD_ROOT/$BACKEND/gui-driver-admission.XXXXXX")" ||
+        fail "gui-driver-private-snapshot-create-failed"
+    GUI_DRIVER_PATH="$gui_snapshot_dir/simple"
+    GUI_DRIVER_PROVENANCE_PATH="$gui_snapshot_dir/provenance.env"
+    cp -p "$GUI_DRIVER_ORIGIN_PATH" "$GUI_DRIVER_PATH" ||
+        fail "gui-driver-private-snapshot-copy-failed"
+    cp -p "$GUI_DRIVER_PROVENANCE_ORIGIN_PATH" \
+        "$GUI_DRIVER_PROVENANCE_PATH" ||
+        fail "gui-provenance-private-snapshot-copy-failed"
+    [ ! -L "$GUI_DRIVER_PATH" ] && [ ! -L "$GUI_DRIVER_PROVENANCE_PATH" ] ||
+        fail "gui-driver-private-snapshot-symlinked"
+    gui_origin_sha_after="$(sha256_file "$GUI_DRIVER_ORIGIN_PATH")"
+    gui_provenance_sha_after="$(sha256_file \
+        "$GUI_DRIVER_PROVENANCE_ORIGIN_PATH")"
+    [ "$gui_origin_sha_before" = "$gui_origin_sha_after" ] &&
+        [ "$gui_origin_sha_before" = "$(sha256_file "$GUI_DRIVER_PATH")" ] ||
+        fail "gui-driver-changed-during-private-snapshot"
+    [ "$gui_provenance_sha_before" = "$gui_provenance_sha_after" ] &&
+        [ "$gui_provenance_sha_before" = \
+            "$(sha256_file "$GUI_DRIVER_PROVENANCE_PATH")" ] ||
+        fail "gui-provenance-changed-during-private-snapshot"
+    chmod 500 "$gui_snapshot_dir" "$GUI_DRIVER_PATH" ||
+        fail "gui-driver-private-snapshot-permission-failed"
+    chmod 400 "$GUI_DRIVER_PROVENANCE_PATH" ||
+        fail "gui-provenance-private-snapshot-permission-failed"
+    sh "$GUI_DRIVER_PRODUCER" --verify "$GUI_DRIVER_PROVENANCE_PATH" \
+        "$GUI_DRIVER_PROVENANCE_ORIGIN_PATH" >/dev/null ||
+        fail "canonical-full-cli-gui-provenance-invalid"
+    [ "$(sha256_file "$GUI_DRIVER_ORIGIN_PATH")" = \
+        "$gui_origin_sha_before" ] &&
+        [ "$(sha256_file "$GUI_DRIVER_PROVENANCE_ORIGIN_PATH")" = \
+            "$gui_provenance_sha_before" ] ||
+        fail "gui-origin-changed-during-verification"
+    GUI_DRIVER_SHA256="$gui_origin_sha_before"
+    GUI_DRIVER_PROVENANCE_SHA256="$gui_provenance_sha_before"
+}
+
+verify_manifest_gui_driver() {
+    gui_driver_path="$(manifest_value gui_driver_abs_path "$1")"
+    gui_driver_provenance_path="$(manifest_value gui_driver_provenance_path "$1")"
+    gui_driver_origin_path="$(manifest_value gui_driver_origin_path "$1")"
+    gui_driver_provenance_origin_path="$(
+        manifest_value gui_driver_provenance_origin_path "$1"
+    )"
+    gui_platform="$(bootstrap_stage3_host_platform)" ||
+        fail "manifest-gui-driver-platform-unsupported"
+    [ "$gui_driver_origin_path" = \
+        "$ROOT_DIR/build/bootstrap/full/$gui_platform/simple" ] ||
+        fail "manifest-gui-driver-origin-not-canonical-full-cli"
+    [ "$gui_driver_provenance_origin_path" = \
+        "$ROOT_DIR/build/bootstrap/full/$gui_platform/provenance/gui-driver.env" ] ||
+        fail "manifest-gui-provenance-origin-not-canonical"
+    case "$gui_driver_path:$gui_driver_provenance_path" in
+        "$BUILD_ROOT/$BACKEND"/gui-driver-admission.*/simple:\
+"$BUILD_ROOT/$BACKEND"/gui-driver-admission.*/provenance.env) ;;
+        *) fail "manifest-gui-driver-private-snapshot-path-invalid" ;;
+    esac
+    [ "$(dirname -- "$gui_driver_path")" = \
+        "$(dirname -- "$gui_driver_provenance_path")" ] ||
+        fail "manifest-gui-driver-private-snapshot-directory-mismatch"
+    [ "$(canonical_file "$gui_driver_provenance_path")" = \
+        "$gui_driver_provenance_path" ] ||
+        fail "manifest-gui-driver-provenance-path-not-canonical"
+    [ -x "$gui_driver_path" ] && [ ! -L "$gui_driver_path" ] ||
+        fail "manifest-gui-driver-not-executable"
+    reject_gui_driver_substitution "$gui_driver_path" ||
+        fail "manifest-gui-driver-seed-or-harness-substitution"
+    has_winit_marker "$gui_driver_path" ||
+        fail "manifest-gui-driver-winit-marker-missing"
+    [ "$(manifest_value gui_driver_sha256 "$1")" = \
+        "$(sha256_file "$gui_driver_path")" ] ||
+        fail "manifest-gui-driver-sha256-mismatch"
+    [ "$(manifest_value gui_driver_origin_sha256 "$1")" = \
+        "$(sha256_file "$gui_driver_origin_path")" ] &&
+        [ "$(manifest_value gui_driver_origin_sha256 "$1")" = \
+            "$(manifest_value gui_driver_sha256 "$1")" ] ||
+        fail "manifest-gui-driver-origin-sha256-mismatch"
+    [ "$(manifest_value gui_driver_provenance_sha256 "$1")" = \
+        "$(sha256_file "$gui_driver_provenance_path")" ] ||
+        fail "manifest-gui-driver-provenance-sha256-mismatch"
+    [ "$(manifest_value gui_driver_provenance_origin_sha256 "$1")" = \
+        "$(sha256_file "$gui_driver_provenance_origin_path")" ] &&
+        [ "$(manifest_value gui_driver_provenance_origin_sha256 "$1")" = \
+            "$(manifest_value gui_driver_provenance_sha256 "$1")" ] ||
+        fail "manifest-gui-provenance-origin-sha256-mismatch"
+    [ "$(manifest_value gui_driver_source_revision "$1")" = \
+        "$(manifest_value git_head "$gui_driver_provenance_path")" ] ||
+        fail "manifest-gui-driver-source-revision-mismatch"
+    [ "$(manifest_value gui_driver_source_kind "$1")" = \
+        canonical-pure-simple-full-cli ] ||
+        fail "manifest-gui-driver-source-kind-mismatch"
+    [ "$(manifest_value gui_driver_full_cli_status "$1")" = pass ] ||
+        fail "manifest-gui-driver-full-cli-status-mismatch"
+    [ "$(manifest_value gui_driver_winit_marker "$1")" = \
+        rt_winit_event_loop_new ] || fail "manifest-gui-driver-winit-marker-mismatch"
+    [ "$(manifest_value gui_driver_no_bootstrap_delegate_support "$1")" = \
+        b7 ] || fail "manifest-gui-driver-no-bootstrap-delegate-mismatch"
+    GUI_DRIVER_PRODUCER=\
+"$ROOT_DIR/scripts/check/build-macos-full-cli-gui-provenance.shs"
+    sh "$GUI_DRIVER_PRODUCER" --verify "$gui_driver_provenance_path" \
+        "$gui_driver_provenance_origin_path" >/dev/null ||
+        fail "manifest-canonical-full-cli-gui-provenance-invalid"
+}
+
 configure_backend() {
     BACKEND="$1"
     case "$BACKEND" in
@@ -363,18 +506,30 @@ write_manifest() {
         echo "repo_revision=$(git rev-parse HEAD)"
         echo "repo_fingerprint=$(git rev-parse HEAD | shasum -a 256 | awk '{print $1}')"
         echo "shared_scene_fingerprint=$(cat "$SHARED_HARNESS" "$FIXTURE_SOURCE" | shasum -a 256 | awk '{print $1}')"
-        echo "compiler_abs_path=$COMPILER_PATH"
-        echo "compiler_sha256=$(sha256_file "$COMPILER_PATH")"
-        echo "compiler_origin_path=$COMPILER_ORIGIN_PATH"
-        echo "compiler_origin_sha256=$COMPILER_ORIGIN_SHA256"
-        echo "compiler_identity=$COMPILER_IDENTITY"
-        echo "compiler_source_kind=canonical-pure-simple-bootstrap-stage3"
-        echo "compiler_full_cli_status=separate-not-proven"
-        echo "compiler_native_build_backfill_status=bound-bootstrap-native-all"
-        echo "compiler_provenance_manifest_path=$COMPILER_PROVENANCE_MANIFEST_PATH"
-        echo "compiler_provenance_manifest_sha256=$(sha256_file "$COMPILER_PROVENANCE_MANIFEST_PATH")"
-        echo "compiler_provenance_origin_path=$COMPILER_PROVENANCE_ORIGIN_PATH"
-        echo "compiler_provenance_origin_sha256=$COMPILER_PROVENANCE_ORIGIN_SHA256"
+        echo "build_compiler_abs_path=$COMPILER_PATH"
+        echo "build_compiler_sha256=$(sha256_file "$COMPILER_PATH")"
+        echo "build_compiler_origin_path=$COMPILER_ORIGIN_PATH"
+        echo "build_compiler_origin_sha256=$COMPILER_ORIGIN_SHA256"
+        echo "build_compiler_identity=$COMPILER_IDENTITY"
+        echo "build_compiler_source_kind=canonical-pure-simple-bootstrap-stage3"
+        echo "build_compiler_native_build_backfill_status=bound-bootstrap-native-all"
+        echo "build_compiler_provenance_manifest_path=$COMPILER_PROVENANCE_MANIFEST_PATH"
+        echo "build_compiler_provenance_manifest_sha256=$(sha256_file "$COMPILER_PROVENANCE_MANIFEST_PATH")"
+        echo "build_compiler_provenance_origin_path=$COMPILER_PROVENANCE_ORIGIN_PATH"
+        echo "build_compiler_provenance_origin_sha256=$COMPILER_PROVENANCE_ORIGIN_SHA256"
+        echo "gui_driver_abs_path=$GUI_DRIVER_PATH"
+        echo "gui_driver_sha256=$GUI_DRIVER_SHA256"
+        echo "gui_driver_origin_path=$GUI_DRIVER_ORIGIN_PATH"
+        echo "gui_driver_origin_sha256=$GUI_DRIVER_SHA256"
+        echo "gui_driver_provenance_path=$GUI_DRIVER_PROVENANCE_PATH"
+        echo "gui_driver_provenance_sha256=$GUI_DRIVER_PROVENANCE_SHA256"
+        echo "gui_driver_provenance_origin_path=$GUI_DRIVER_PROVENANCE_ORIGIN_PATH"
+        echo "gui_driver_provenance_origin_sha256=$GUI_DRIVER_PROVENANCE_SHA256"
+        echo "gui_driver_source_revision=$(manifest_value git_head "$GUI_DRIVER_PROVENANCE_PATH")"
+        echo "gui_driver_source_kind=canonical-pure-simple-full-cli"
+        echo "gui_driver_full_cli_status=pass"
+        echo "gui_driver_winit_marker=rt_winit_event_loop_new"
+        echo "gui_driver_no_bootstrap_delegate_support=b7"
         echo "build_environment_sha256=$(build_environment_sha256)"
         echo "build_transcript_path=$BUILD_TRANSCRIPT_PATH"
         echo "build_transcript_sha256=$(sha256_file "$BUILD_TRANSCRIPT_PATH")"
@@ -404,11 +559,17 @@ verify_manifest() {
         evidence_web_source_sha256 evidence_web_html_path \
         evidence_web_html_sha256 source_input_file_count source_input_fingerprint \
         repo_revision repo_fingerprint shared_scene_fingerprint \
-        compiler_abs_path compiler_sha256 compiler_origin_path \
-        compiler_origin_sha256 compiler_identity compiler_source_kind \
-        compiler_full_cli_status compiler_native_build_backfill_status \
-        compiler_provenance_manifest_path compiler_provenance_manifest_sha256 \
-        compiler_provenance_origin_path compiler_provenance_origin_sha256 \
+        build_compiler_abs_path build_compiler_sha256 build_compiler_origin_path \
+        build_compiler_origin_sha256 build_compiler_identity build_compiler_source_kind \
+        build_compiler_native_build_backfill_status \
+        build_compiler_provenance_manifest_path build_compiler_provenance_manifest_sha256 \
+        build_compiler_provenance_origin_path build_compiler_provenance_origin_sha256 \
+        gui_driver_abs_path gui_driver_sha256 gui_driver_origin_path \
+        gui_driver_origin_sha256 gui_driver_provenance_path \
+        gui_driver_provenance_sha256 gui_driver_provenance_origin_path \
+        gui_driver_provenance_origin_sha256 gui_driver_source_revision \
+        gui_driver_source_kind gui_driver_winit_marker \
+        gui_driver_no_bootstrap_delegate_support \
         build_environment_sha256 build_transcript_path \
         build_transcript_sha256 \
         build_args_sha256 winit_provider_path winit_provider_sha256 \
@@ -464,26 +625,26 @@ verify_manifest() {
     expected_scene="$(cat "$SHARED_HARNESS" "$FIXTURE_SOURCE" | shasum -a 256 | awk '{print $1}')"
     [ "$(manifest_value shared_scene_fingerprint "$manifest")" = "$expected_scene" ] || fail "manifest-shared-scene-fingerprint-mismatch"
 
-    compiler_path="$(manifest_value compiler_abs_path "$manifest")"
+    compiler_path="$(manifest_value build_compiler_abs_path "$manifest")"
     case "$compiler_path" in
         "$BUILD_ROOT/$BACKEND"/compiler-admission.*/simple) ;;
         *) fail "manifest-compiler-path-not-private-admission" ;;
     esac
     [ "$(canonical_file "$compiler_path")" = "$compiler_path" ] ||
         fail "manifest-compiler-path-not-canonical"
-    [ "$(manifest_value compiler_sha256 "$manifest")" = "$(sha256_file "$compiler_path")" ] || fail "manifest-compiler-sha256-mismatch"
+    [ "$(manifest_value build_compiler_sha256 "$manifest")" = "$(sha256_file "$compiler_path")" ] || fail "manifest-build-compiler-sha256-mismatch"
     expected_origin_platform="$(bootstrap_stage3_host_platform)" ||
         fail "manifest-compiler-origin-platform-unsupported"
     expected_compiler_origin="$ROOT_DIR/build/wm-to-i64-bootstrap/stage3/$expected_origin_platform/simple"
-    [ "$(manifest_value compiler_origin_path "$manifest")" = \
+    [ "$(manifest_value build_compiler_origin_path "$manifest")" = \
         "$expected_compiler_origin" ] ||
         fail "manifest-compiler-origin-path-mismatch"
-    [ "$(manifest_value compiler_origin_sha256 "$manifest")" = \
-        "$(manifest_value compiler_sha256 "$manifest")" ] ||
+    [ "$(manifest_value build_compiler_origin_sha256 "$manifest")" = \
+        "$(manifest_value build_compiler_sha256 "$manifest")" ] ||
         fail "manifest-compiler-origin-sha256-mismatch"
-    [ "$(manifest_value compiler_identity "$manifest")" = "$COMPILER_IDENTITY" ] || fail "manifest-compiler-identity-mismatch"
+    [ "$(manifest_value build_compiler_identity "$manifest")" = "$COMPILER_IDENTITY" ] || fail "manifest-build-compiler-identity-mismatch"
     compiler_provenance_manifest="$(
-        manifest_value compiler_provenance_manifest_path "$manifest"
+        manifest_value build_compiler_provenance_manifest_path "$manifest"
     )"
     [ "$compiler_provenance_manifest" = \
         "$(dirname -- "$compiler_path")/provenance.env" ] ||
@@ -491,22 +652,22 @@ verify_manifest() {
     [ "$(canonical_file "$compiler_provenance_manifest")" = \
         "$compiler_provenance_manifest" ] ||
         fail "manifest-compiler-provenance-not-canonical"
-    [ "$(manifest_value compiler_provenance_manifest_path "$manifest")" = \
+    [ "$(manifest_value build_compiler_provenance_manifest_path "$manifest")" = \
         "$compiler_provenance_manifest" ] ||
         fail "manifest-compiler-provenance-path-mismatch"
-    [ "$(manifest_value compiler_provenance_manifest_sha256 "$manifest")" = \
+    [ "$(manifest_value build_compiler_provenance_manifest_sha256 "$manifest")" = \
         "$(sha256_file "$compiler_provenance_manifest")" ] ||
         fail "manifest-compiler-provenance-sha256-mismatch"
     expected_provenance_origin="$ROOT_DIR/build/wm-to-i64-bootstrap/stage3/$expected_origin_platform/provenance.env"
-    [ "$(manifest_value compiler_provenance_origin_path "$manifest")" = \
+    [ "$(manifest_value build_compiler_provenance_origin_path "$manifest")" = \
         "$expected_provenance_origin" ] ||
         fail "manifest-compiler-provenance-origin-path-mismatch"
-    [ "$(manifest_value compiler_provenance_origin_sha256 "$manifest")" = \
-        "$(manifest_value compiler_provenance_manifest_sha256 "$manifest")" ] ||
+    [ "$(manifest_value build_compiler_provenance_origin_sha256 "$manifest")" = \
+        "$(manifest_value build_compiler_provenance_manifest_sha256 "$manifest")" ] ||
         fail "manifest-compiler-provenance-origin-sha256-mismatch"
-    compiler_origin_path="$(manifest_value compiler_origin_path "$manifest")"
+    compiler_origin_path="$(manifest_value build_compiler_origin_path "$manifest")"
     compiler_origin_manifest="$(
-        manifest_value compiler_provenance_origin_path "$manifest"
+        manifest_value build_compiler_provenance_origin_path "$manifest"
     )"
     compiler_origin_sha_before="$(sha256_file "$compiler_origin_path")"
     compiler_origin_manifest_sha_before="$(
@@ -521,24 +682,22 @@ verify_manifest() {
     )"
     [ "$compiler_origin_sha_before" = "$compiler_origin_sha_after" ] &&
         [ "$compiler_origin_sha_after" = \
-            "$(manifest_value compiler_origin_sha256 "$manifest")" ] &&
+            "$(manifest_value build_compiler_origin_sha256 "$manifest")" ] &&
         [ "$compiler_origin_sha_after" = \
-            "$(manifest_value compiler_sha256 "$manifest")" ] ||
+            "$(manifest_value build_compiler_sha256 "$manifest")" ] ||
         fail "manifest-compiler-origin-reverification-mismatch"
     [ "$compiler_origin_manifest_sha_before" = \
         "$compiler_origin_manifest_sha_after" ] &&
         [ "$compiler_origin_manifest_sha_after" = \
-            "$(manifest_value compiler_provenance_origin_sha256 \
+            "$(manifest_value build_compiler_provenance_origin_sha256 \
                 "$manifest")" ] &&
         [ "$compiler_origin_manifest_sha_after" = \
-            "$(manifest_value compiler_provenance_manifest_sha256 \
+            "$(manifest_value build_compiler_provenance_manifest_sha256 \
                 "$manifest")" ] ||
         fail "manifest-provenance-origin-reverification-mismatch"
-    [ "$(manifest_value compiler_full_cli_status "$manifest")" = \
-        separate-not-proven ] || fail "manifest-compiler-full-cli-status-mismatch"
-    [ "$(manifest_value compiler_native_build_backfill_status "$manifest")" = \
+    [ "$(manifest_value build_compiler_native_build_backfill_status "$manifest")" = \
         bound-bootstrap-native-all ] ||
-        fail "manifest-compiler-native-build-backfill-status-mismatch"
+        fail "manifest-build-compiler-native-build-backfill-status-mismatch"
     [ "$(manifest_value build_args_sha256 "$manifest")" = "$BUILD_ARGS_SHA256" ] || fail "manifest-build-args-sha256-mismatch"
 
     WINIT_PROVIDER_PATH="$(canonical_file "$WINIT_PROVIDER")"
@@ -550,9 +709,10 @@ verify_manifest() {
     [ "$(manifest_value simple_runtime_provider_sha256 "$manifest")" = "$(sha256_file "$SIMPLE_RUNTIME_PROVIDER_PATH")" ] || fail "manifest-runtime-provider-sha256-mismatch"
     [ "$(manifest_value simple_runtime_c_provider_path "$manifest")" = "$SIMPLE_RUNTIME_C_PROVIDER_PATH" ] || fail "manifest-runtime-c-provider-path-mismatch"
     [ "$(manifest_value simple_runtime_c_provider_sha256 "$manifest")" = "$(sha256_file "$SIMPLE_RUNTIME_C_PROVIDER_PATH")" ] || fail "manifest-runtime-c-provider-sha256-mismatch"
-    [ "$(manifest_value compiler_source_kind "$manifest")" = \
+    [ "$(manifest_value build_compiler_source_kind "$manifest")" = \
         canonical-pure-simple-bootstrap-stage3 ] ||
-        fail "manifest-compiler-source-kind-mismatch"
+        fail "manifest-build-compiler-source-kind-mismatch"
+    verify_manifest_gui_driver "$manifest"
     [ "$(manifest_value build_environment_sha256 "$manifest")" = "$(build_environment_sha256)" ] || fail "manifest-build-environment-sha256-mismatch"
     [ "$(manifest_value build_transcript_path "$manifest")" = \
         "$BUILD_TRANSCRIPT_PATH" ] ||
@@ -580,7 +740,7 @@ verify_manifest() {
 }
 
 usage() {
-    echo "usage: sh scripts/check/build-macos-gpu-2d-live-native.shs --build|--verify <vulkan|metal> [manifest] | --self-test-contract" >&2
+    echo "usage: sh scripts/check/build-macos-gpu-2d-live-native.shs --build <vulkan|metal> | --verify <vulkan|metal> <manifest-snapshot> [canonical-origin] | --self-test-contract" >&2
     exit 2
 }
 
@@ -627,10 +787,21 @@ if [ "${1:-}" = "--self-test-contract" ]; then
     freeze_verified_compiler
     assert_frozen_compiler
     case "$COMPILER_PATH:$COMPILER_PROVENANCE_MANIFEST_PATH" in
-        "$BUILD_ROOT/$BACKEND"/compiler-admission.*/simple:\
-"$BUILD_ROOT/$BACKEND"/compiler-admission.*/provenance.env) ;;
+        "$BUILD_ROOT/$BACKEND"/compiler-admission.*/simple:"$BUILD_ROOT/$BACKEND"/compiler-admission.*/provenance.env) ;;
         *) fail "self-test-private-freeze-path-invalid" ;;
     esac
+    reject_gui_driver_substitution \
+        "$ROOT_DIR/build/bootstrap/full/test-platform/simple" ||
+        fail "self-test-canonical-full-cli-path-rejected"
+    for self_test_rejected_gui_path in \
+        "$ROOT_DIR/build/bootstrap/full/test-platform/simple_seed" \
+        "$ROOT_DIR/build/wm-to-i64-bootstrap/stage3/test-platform/simple" \
+        "$ROOT_DIR/src/compiler_rust/target/debug/simple" \
+        "$ROOT_DIR/test/02_integration/rendering/macos_vulkan_2d_live_harness"; do
+        if reject_gui_driver_substitution "$self_test_rejected_gui_path"; then
+            fail "self-test-gui-driver-substitution-not-rejected"
+        fi
+    done
     chmod 700 "$(dirname -- "$COMPILER_PATH")" "$COMPILER_PATH"
     printf 'tampered\n' >>"$COMPILER_PATH"
     if (assert_frozen_compiler >/dev/null 2>&1); then
@@ -768,6 +939,7 @@ case "$mode" in
         [ -f "$ENTRY" ] && [ -f "$SHARED_HARNESS" ] && [ -f "$FIXTURE_SOURCE" ] && [ -f "$BACKEND_SOURCE" ] || fail "build-input-missing"
         resolve_compiler
         freeze_verified_compiler
+        resolve_gui_driver
         WINIT_PROVIDER_PATH="$(canonical_file "$WINIT_PROVIDER")"
         SIMPLE_RUNTIME_PROVIDER_PATH="$(canonical_file "$SIMPLE_RUNTIME_PROVIDER")"
         SIMPLE_RUNTIME_C_PROVIDER_PATH="$(canonical_file "$SIMPLE_RUNTIME_C_PROVIDER")"
@@ -819,8 +991,14 @@ case "$mode" in
         verify_manifest "$MANIFEST_PATH"
         ;;
     --verify)
-        [ "$#" = 3 ] || usage
-        [ "$3" = "$MANIFEST_PATH" ] || fail "manifest-path-not-canonical"
+        [ "$#" = 3 ] || [ "$#" = 4 ] || usage
+        manifest_origin="${4:-$3}"
+        [ "$manifest_origin" = "$MANIFEST_PATH" ] ||
+            fail "manifest-origin-path-not-canonical"
+        [ -f "$manifest_origin" ] && [ ! -L "$manifest_origin" ] ||
+            fail "manifest-origin-invalid"
+        [ "$(sha256_file "$3")" = "$(sha256_file "$manifest_origin")" ] ||
+            fail "manifest-snapshot-origin-sha256-mismatch"
         verify_manifest "$3"
         ;;
     *) usage ;;

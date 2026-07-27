@@ -323,10 +323,101 @@ macos_gpu_admission_reject_seed_or_debug() {
     fi
 }
 
+# Populate the schema-independent evidence surface from a manifest that has
+# already passed its schema verifier. Tests call this directly with immutable
+# deterministic fixtures so an early successful schema branch cannot bypass it.
+macos_gpu_admission_populate_common_outputs() {
+    macos_gpu_admission_common_manifest=$1
+    MACOS_GPU_ADMISSION_PROVIDER="$(
+        macos_gpu_admission_canonical_file "$(
+            macos_gpu_admission_manifest_value simple_runtime_provider_path \
+                "$macos_gpu_admission_common_manifest"
+        )"
+    )" || return 1
+    MACOS_GPU_ADMISSION_PROVIDER_SHA256="$(
+        macos_gpu_admission_manifest_value simple_runtime_provider_sha256 \
+            "$macos_gpu_admission_common_manifest"
+    )" || return 1
+    MACOS_GPU_ADMISSION_WINIT_PROVIDER="$(
+        macos_gpu_admission_canonical_file "$(
+            macos_gpu_admission_manifest_value winit_provider_path \
+                "$macos_gpu_admission_common_manifest"
+        )"
+    )" || return 1
+    MACOS_GPU_ADMISSION_WINIT_PROVIDER_SHA256="$(
+        macos_gpu_admission_manifest_value winit_provider_sha256 \
+            "$macos_gpu_admission_common_manifest"
+    )" || return 1
+    MACOS_GPU_ADMISSION_RUNTIME_C_PROVIDER="$(
+        macos_gpu_admission_canonical_file "$(
+            macos_gpu_admission_manifest_value simple_runtime_c_provider_path \
+                "$macos_gpu_admission_common_manifest"
+        )"
+    )" || return 1
+    MACOS_GPU_ADMISSION_RUNTIME_C_PROVIDER_SHA256="$(
+        macos_gpu_admission_manifest_value simple_runtime_c_provider_sha256 \
+            "$macos_gpu_admission_common_manifest"
+    )" || return 1
+    MACOS_GPU_ADMISSION_REPO_REVISION="$(
+        macos_gpu_admission_manifest_value repo_revision \
+            "$macos_gpu_admission_common_manifest"
+    )" || return 1
+    MACOS_GPU_ADMISSION_SOURCE_INPUT_FINGERPRINT="$(
+        macos_gpu_admission_manifest_value source_input_fingerprint \
+            "$macos_gpu_admission_common_manifest"
+    )" || return 1
+    MACOS_GPU_ADMISSION_WIDGET_SOURCE="$(
+        macos_gpu_admission_canonical_file "$(
+            macos_gpu_admission_manifest_value evidence_widget_source_path \
+                "$macos_gpu_admission_common_manifest"
+        )"
+    )" || return 1
+    MACOS_GPU_ADMISSION_WIDGET_SOURCE_SHA256="$(
+        macos_gpu_admission_manifest_value evidence_widget_source_sha256 \
+            "$macos_gpu_admission_common_manifest"
+    )" || return 1
+    MACOS_GPU_ADMISSION_WEB_SOURCE="$(
+        macos_gpu_admission_canonical_file "$(
+            macos_gpu_admission_manifest_value evidence_web_source_path \
+                "$macos_gpu_admission_common_manifest"
+        )"
+    )" || return 1
+    MACOS_GPU_ADMISSION_WEB_SOURCE_SHA256="$(
+        macos_gpu_admission_manifest_value evidence_web_source_sha256 \
+            "$macos_gpu_admission_common_manifest"
+    )" || return 1
+    MACOS_GPU_ADMISSION_WEB_HTML="$(
+        macos_gpu_admission_canonical_file "$(
+            macos_gpu_admission_manifest_value evidence_web_html_path \
+                "$macos_gpu_admission_common_manifest"
+        )"
+    )" || return 1
+    MACOS_GPU_ADMISSION_WEB_HTML_SHA256="$(
+        macos_gpu_admission_manifest_value evidence_web_html_sha256 \
+            "$macos_gpu_admission_common_manifest"
+    )" || return 1
+    MACOS_GPU_ADMISSION_OUTPUT="$(
+        macos_gpu_admission_canonical_file "$(
+            macos_gpu_admission_manifest_value output_path \
+                "$macos_gpu_admission_common_manifest"
+        )"
+    )" || return 1
+    MACOS_GPU_ADMISSION_OUTPUT_SHA256="$(
+        macos_gpu_admission_manifest_value output_sha256 \
+            "$macos_gpu_admission_common_manifest"
+    )" || return 1
+}
+
+# V3 is deliberately defined after the historical parser above. Only this
+# entrypoint is public; every consumer gets the same populated output surface.
 macos_gpu_trusted_manifest_admit() {
-    macos_gpu_admission_manifest="$1"
-    macos_gpu_admission_backend="$2"
-    macos_gpu_admission_root="$3"
+    macos_gpu_admission_manifest=$1
+    macos_gpu_admission_backend=$2
+    macos_gpu_admission_root=$3
+    case "$macos_gpu_admission_backend" in
+        vulkan|metal) ;;
+        *) return 1 ;;
+    esac
     macos_gpu_admission_expected_manifest=\
 "$macos_gpu_admission_root/build/macos_gpu_2d_live_native/${macos_gpu_admission_backend}/trusted-build.env"
     [ "$macos_gpu_admission_manifest" = \
@@ -336,168 +427,193 @@ macos_gpu_trusted_manifest_admit() {
     [ "$(macos_gpu_admission_canonical_file \
         "$macos_gpu_admission_manifest")" = \
         "$macos_gpu_admission_manifest" ] || return 1
-
-    MACOS_GPU_ADMISSION_COMPILER_IDENTITY="$(
-        macos_gpu_admission_manifest_value compiler_identity \
-            "$macos_gpu_admission_manifest"
+    macos_gpu_admission_manifest_sha_before="$(
+        macos_gpu_admission_sha256_file "$macos_gpu_admission_manifest"
     )" || return 1
-    MACOS_GPU_ADMISSION_COMPILER_SOURCE_KIND="$(
-        macos_gpu_admission_manifest_value compiler_source_kind \
-            "$macos_gpu_admission_manifest"
+    macos_gpu_admission_snapshot_dir="$(
+        mktemp -d \
+            "$macos_gpu_admission_root/build/macos_gpu_2d_live_native/${macos_gpu_admission_backend}/manifest-admission.XXXXXX"
     )" || return 1
-    case "$MACOS_GPU_ADMISSION_COMPILER_IDENTITY:$MACOS_GPU_ADMISSION_COMPILER_SOURCE_KIND" in
-        canonical-pure-simple-stage3-with-bound-backfill-v1:canonical-pure-simple-bootstrap-stage3)
-            sh "$macos_gpu_admission_root/scripts/check/build-macos-gpu-2d-live-native.shs" \
-                --verify "$macos_gpu_admission_backend" \
-                "$macos_gpu_admission_manifest" >/dev/null 2>&1 ||
-                return 1
-            ;;
-        canonical-repo-release-path-v1:canonical-repo-release-path)
-            macos_gpu_admission_verify_legacy_manifest \
-                "$macos_gpu_admission_manifest" \
-                "$macos_gpu_admission_backend" \
-                "$macos_gpu_admission_root" || return 1
-            ;;
-        *) return 1 ;;
-    esac
+    [ ! -L "$macos_gpu_admission_snapshot_dir" ] || return 1
+    MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT=\
+"$macos_gpu_admission_snapshot_dir/trusted-build.env"
+    cp -p "$macos_gpu_admission_manifest" \
+        "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT" || return 1
+    [ ! -L "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT" ] || return 1
+    macos_gpu_admission_manifest_sha_after="$(
+        macos_gpu_admission_sha256_file "$macos_gpu_admission_manifest"
+    )" || return 1
+    [ "$macos_gpu_admission_manifest_sha_before" = \
+        "$macos_gpu_admission_manifest_sha_after" ] &&
+        [ "$macos_gpu_admission_manifest_sha_before" = "$(
+            macos_gpu_admission_sha256_file \
+                "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+        )" ] || return 1
+    chmod 500 "$macos_gpu_admission_snapshot_dir" || return 1
+    chmod 400 "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT" || return 1
+    [ "$(macos_gpu_admission_manifest_value schema \
+        "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT")" = \
+        macos-gpu-2d-live-native-manifest-v3 ] || return 1
+    sh "$macos_gpu_admission_root/scripts/check/build-macos-gpu-2d-live-native.shs" \
+        --verify "$macos_gpu_admission_backend" \
+        "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT" \
+        "$macos_gpu_admission_manifest" >/dev/null 2>&1 || return 1
+    [ "$(macos_gpu_admission_sha256_file \
+        "$macos_gpu_admission_manifest")" = \
+        "$macos_gpu_admission_manifest_sha_before" ] || return 1
 
-    MACOS_GPU_ADMISSION_COMPILER="$(
+    MACOS_GPU_ADMISSION_MANIFEST="$macos_gpu_admission_manifest"
+    MACOS_GPU_ADMISSION_MANIFEST_SHA256=\
+"$macos_gpu_admission_manifest_sha_before"
+    MACOS_GPU_ADMISSION_BUILD_COMPILER="$(
         macos_gpu_admission_canonical_file "$(
-            macos_gpu_admission_manifest_value compiler_abs_path \
-                "$macos_gpu_admission_manifest"
+            macos_gpu_admission_manifest_value build_compiler_abs_path \
+                "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
         )"
     )" || return 1
-    [ -x "$MACOS_GPU_ADMISSION_COMPILER" ] &&
-        [ ! -L "$MACOS_GPU_ADMISSION_COMPILER" ] || return 1
-    case "$MACOS_GPU_ADMISSION_COMPILER_SOURCE_KIND" in
-        canonical-pure-simple-bootstrap-stage3)
-            case "$MACOS_GPU_ADMISSION_COMPILER" in
-                "$macos_gpu_admission_root/build/macos_gpu_2d_live_native/${macos_gpu_admission_backend}"/compiler-admission.*/simple)
-                    ;;
-                *) return 1 ;;
-            esac
-            ;;
-        canonical-repo-release-path)
-            case "$MACOS_GPU_ADMISSION_COMPILER" in
-                "$macos_gpu_admission_root"/bin/release/*/simple|\
-                "$macos_gpu_admission_root"/release/*/simple)
-                    ;;
-                *) return 1 ;;
-            esac
-            ;;
-        *) return 1 ;;
-    esac
-    [ "$(macos_gpu_admission_manifest_value compiler_sha256 \
-        "$macos_gpu_admission_manifest")" = "$(
-            macos_gpu_admission_sha256_file \
-                "$MACOS_GPU_ADMISSION_COMPILER"
-        )" ] || return 1
-    macos_gpu_admission_reject_seed_or_debug \
-        "$MACOS_GPU_ADMISSION_COMPILER" || return 1
+    MACOS_GPU_ADMISSION_BUILD_COMPILER_SHA256="$(
+        macos_gpu_admission_manifest_value build_compiler_sha256 \
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+    )" || return 1
+    [ "$(macos_gpu_admission_sha256_file \
+        "$MACOS_GPU_ADMISSION_BUILD_COMPILER")" = \
+        "$MACOS_GPU_ADMISSION_BUILD_COMPILER_SHA256" ] || return 1
+    MACOS_GPU_ADMISSION_COMPILER="$MACOS_GPU_ADMISSION_BUILD_COMPILER"
+    MACOS_GPU_ADMISSION_COMPILER_SOURCE_KIND="$(
+        macos_gpu_admission_manifest_value build_compiler_source_kind \
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+    )" || return 1
+    MACOS_GPU_ADMISSION_GUI_DRIVER="$(
+        macos_gpu_admission_canonical_file "$(
+            macos_gpu_admission_manifest_value gui_driver_abs_path \
+                "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+        )"
+    )" || return 1
+    MACOS_GPU_ADMISSION_GUI_DRIVER_SHA256="$(
+        macos_gpu_admission_manifest_value gui_driver_sha256 \
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+    )" || return 1
+    [ "$(macos_gpu_admission_sha256_file \
+        "$MACOS_GPU_ADMISSION_GUI_DRIVER")" = \
+        "$MACOS_GPU_ADMISSION_GUI_DRIVER_SHA256" ] || return 1
+    MACOS_GPU_ADMISSION_GUI_DRIVER_ORIGIN="$(
+        macos_gpu_admission_canonical_file "$(
+            macos_gpu_admission_manifest_value gui_driver_origin_path \
+                "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+        )"
+    )" || return 1
+    MACOS_GPU_ADMISSION_GUI_DRIVER_ORIGIN_SHA256="$(
+        macos_gpu_admission_manifest_value gui_driver_origin_sha256 \
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+    )" || return 1
+    [ "$(macos_gpu_admission_sha256_file \
+        "$MACOS_GPU_ADMISSION_GUI_DRIVER_ORIGIN")" = \
+        "$MACOS_GPU_ADMISSION_GUI_DRIVER_ORIGIN_SHA256" ] || return 1
+    MACOS_GPU_ADMISSION_GUI_DRIVER_PROVENANCE="$(
+        macos_gpu_admission_canonical_file "$(
+            macos_gpu_admission_manifest_value gui_driver_provenance_path \
+                "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+        )"
+    )" || return 1
+    MACOS_GPU_ADMISSION_GUI_DRIVER_PROVENANCE_SHA256="$(
+        macos_gpu_admission_manifest_value gui_driver_provenance_sha256 \
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+    )" || return 1
+    [ "$(macos_gpu_admission_sha256_file \
+        "$MACOS_GPU_ADMISSION_GUI_DRIVER_PROVENANCE")" = \
+        "$MACOS_GPU_ADMISSION_GUI_DRIVER_PROVENANCE_SHA256" ] || return 1
+    MACOS_GPU_ADMISSION_GUI_DRIVER_SOURCE_KIND="$(
+        macos_gpu_admission_manifest_value gui_driver_source_kind \
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+    )" || return 1
+    MACOS_GPU_ADMISSION_GUI_DRIVER_SOURCE_REVISION="$(
+        macos_gpu_admission_manifest_value gui_driver_source_revision \
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+    )" || return 1
 
     MACOS_GPU_ADMISSION_PROVIDER="$(
-        macos_gpu_admission_canonical_file \
-            "$macos_gpu_admission_root/build/sffi/libsimple_runtime_wm.dylib"
+        macos_gpu_admission_canonical_file "$(
+            macos_gpu_admission_manifest_value \
+                simple_runtime_provider_path \
+                "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+        )"
     )" || return 1
-    [ "$(macos_gpu_admission_manifest_value \
-        simple_runtime_provider_path "$macos_gpu_admission_manifest")" = \
-        "$MACOS_GPU_ADMISSION_PROVIDER" ] || return 1
-    [ "$(macos_gpu_admission_manifest_value \
-        simple_runtime_provider_sha256 "$macos_gpu_admission_manifest")" = "$(
-            macos_gpu_admission_sha256_file \
-                "$MACOS_GPU_ADMISSION_PROVIDER"
-        )" ] || return 1
+    MACOS_GPU_ADMISSION_PROVIDER_SHA256="$(
+        macos_gpu_admission_manifest_value simple_runtime_provider_sha256 \
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+    )" || return 1
     MACOS_GPU_ADMISSION_WINIT_PROVIDER="$(
-        macos_gpu_admission_canonical_file \
-            "$macos_gpu_admission_root/build/sffi/libspl_winit.dylib"
+        macos_gpu_admission_canonical_file "$(
+            macos_gpu_admission_manifest_value winit_provider_path \
+                "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+        )"
     )" || return 1
-    [ "$(macos_gpu_admission_manifest_value \
-        winit_provider_path "$macos_gpu_admission_manifest")" = \
-        "$MACOS_GPU_ADMISSION_WINIT_PROVIDER" ] || return 1
-    [ "$(macos_gpu_admission_manifest_value \
-        winit_provider_sha256 "$macos_gpu_admission_manifest")" = "$(
-            macos_gpu_admission_sha256_file \
-                "$MACOS_GPU_ADMISSION_WINIT_PROVIDER"
-        )" ] || return 1
+    MACOS_GPU_ADMISSION_WINIT_PROVIDER_SHA256="$(
+        macos_gpu_admission_manifest_value winit_provider_sha256 \
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+    )" || return 1
     MACOS_GPU_ADMISSION_RUNTIME_C_PROVIDER="$(
-        macos_gpu_admission_canonical_file \
-            "$macos_gpu_admission_root/build/sffi/libsimple_runtime_c_wm.dylib"
+        macos_gpu_admission_canonical_file "$(
+            macos_gpu_admission_manifest_value \
+                simple_runtime_c_provider_path \
+                "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+        )"
     )" || return 1
-    [ "$(macos_gpu_admission_manifest_value \
-        simple_runtime_c_provider_path "$macos_gpu_admission_manifest")" = \
-        "$MACOS_GPU_ADMISSION_RUNTIME_C_PROVIDER" ] || return 1
-    [ "$(macos_gpu_admission_manifest_value \
-        simple_runtime_c_provider_sha256 "$macos_gpu_admission_manifest")" = "$(
-            macos_gpu_admission_sha256_file \
-                "$MACOS_GPU_ADMISSION_RUNTIME_C_PROVIDER"
-        )" ] || return 1
-    if [ "$MACOS_GPU_ADMISSION_COMPILER_SOURCE_KIND" = \
-            canonical-repo-release-path ]; then
-        macos_gpu_admission_expected_build_args="$(
-            macos_gpu_admission_digest_args \
-                native-build --backend cranelift --threads 4 \
-                --cache-dir build/bootstrap/native_cache_wt \
-                --runtime-bundle core-c-bootstrap \
-                --source src/lib \
-                --source test/02_integration/rendering \
-                --entry-closure --entry \
-                "test/02_integration/rendering/macos_${macos_gpu_admission_backend}_2d_live_harness.spl" \
-                --strip --verbose --output \
-                "build/macos_gpu_2d_live_native/${macos_gpu_admission_backend}/macos_${macos_gpu_admission_backend}_2d_live_native"
-        )" || return 1
-        [ "$(macos_gpu_admission_manifest_value build_args_sha256 \
-            "$macos_gpu_admission_manifest")" = \
-            "$macos_gpu_admission_expected_build_args" ] || return 1
-        macos_gpu_admission_expected_environment="$(
-            macos_gpu_admission_digest_args \
-                SIMPLE_BOOTSTRAP=unset \
-                SIMPLE_RUNTIME_PATH=unset \
-                SIMPLE_NO_STUB_FALLBACK=1 \
-                SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1 \
-                SIMPLE_LIB=src \
-                "SIMPLE_LINK_OBJECTS=$MACOS_GPU_ADMISSION_WINIT_PROVIDER:$MACOS_GPU_ADMISSION_PROVIDER:$MACOS_GPU_ADMISSION_RUNTIME_C_PROVIDER"
-        )" || return 1
-        [ "$(macos_gpu_admission_manifest_value \
-            build_environment_sha256 \
-            "$macos_gpu_admission_manifest")" = \
-            "$macos_gpu_admission_expected_environment" ] || return 1
-    fi
+    MACOS_GPU_ADMISSION_RUNTIME_C_PROVIDER_SHA256="$(
+        macos_gpu_admission_manifest_value simple_runtime_c_provider_sha256 \
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+    )" || return 1
     MACOS_GPU_ADMISSION_REPO_REVISION="$(
         macos_gpu_admission_manifest_value repo_revision \
-            "$macos_gpu_admission_manifest"
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
     )" || return 1
     MACOS_GPU_ADMISSION_SOURCE_INPUT_FINGERPRINT="$(
         macos_gpu_admission_manifest_value source_input_fingerprint \
-            "$macos_gpu_admission_manifest"
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
     )" || return 1
     MACOS_GPU_ADMISSION_WIDGET_SOURCE="$(
         macos_gpu_admission_canonical_file "$(
             macos_gpu_admission_manifest_value \
-                evidence_widget_source_path "$macos_gpu_admission_manifest"
+                evidence_widget_source_path \
+                "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
         )"
     )" || return 1
     MACOS_GPU_ADMISSION_WIDGET_SOURCE_SHA256="$(
         macos_gpu_admission_manifest_value \
-            evidence_widget_source_sha256 "$macos_gpu_admission_manifest"
+            evidence_widget_source_sha256 \
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
     )" || return 1
     MACOS_GPU_ADMISSION_WEB_SOURCE="$(
         macos_gpu_admission_canonical_file "$(
-            macos_gpu_admission_manifest_value \
-                evidence_web_source_path "$macos_gpu_admission_manifest"
+            macos_gpu_admission_manifest_value evidence_web_source_path \
+                "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
         )"
     )" || return 1
     MACOS_GPU_ADMISSION_WEB_SOURCE_SHA256="$(
-        macos_gpu_admission_manifest_value \
-            evidence_web_source_sha256 "$macos_gpu_admission_manifest"
+        macos_gpu_admission_manifest_value evidence_web_source_sha256 \
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
     )" || return 1
     MACOS_GPU_ADMISSION_WEB_HTML="$(
         macos_gpu_admission_canonical_file "$(
-            macos_gpu_admission_manifest_value \
-                evidence_web_html_path "$macos_gpu_admission_manifest"
+            macos_gpu_admission_manifest_value evidence_web_html_path \
+                "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
         )"
     )" || return 1
     MACOS_GPU_ADMISSION_WEB_HTML_SHA256="$(
-        macos_gpu_admission_manifest_value \
-            evidence_web_html_sha256 "$macos_gpu_admission_manifest"
+        macos_gpu_admission_manifest_value evidence_web_html_sha256 \
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
     )" || return 1
+    MACOS_GPU_ADMISSION_OUTPUT="$(
+        macos_gpu_admission_canonical_file "$(
+            macos_gpu_admission_manifest_value output_path \
+                "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+        )"
+    )" || return 1
+    MACOS_GPU_ADMISSION_OUTPUT_SHA256="$(
+        macos_gpu_admission_manifest_value output_sha256 \
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+    )" || return 1
+    macos_gpu_admission_populate_common_outputs \
+        "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT" || return 1
+    return 0
 }
