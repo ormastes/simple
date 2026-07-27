@@ -174,6 +174,9 @@ The helper validates `.rdc` files by checking the `RDOC` magic header and emits
 before and after replay, and passes only when both values remain equal. If a
 host cannot provide Chrome Vulkan or a non-CPU Vulkan device, record the
 concrete reason in `doc/09_report/` instead of duplicating ad hoc commands.
+Chrome and Electron capture producers additionally require exactly one regular
+`.rdc`; multiple candidates emit `multiple-rdc-candidates` and no selected path
+or hash.
 
 ## GUI/Web/2D Vulkan Setup Probe
 

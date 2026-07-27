@@ -1016,3 +1016,20 @@ Tracking split:
   missing-target, or below-threshold owner annotations in both entrypoints;
   a 99% aggregate/50% owner mutation is pinned in the unit spec. The admitted
   pure-Simple runner remains unavailable, so no measured percentage is claimed.
+- browser-renderdoc-exact-one: Chrome and Electron capture producers previously
+  accepted the first recursive `.rdc` result, making multi-capture output
+  order-dependent. Both now reuse one shared exact-one validator and emit
+  `multiple-rdc-candidates` with a candidate count while leaving path/hash
+  blank. The focused shell mutation is host-independent; no live browser or
+  RenderDoc run is claimed.
+- coverage-denominator-gap: Review confirmed the runtime aggregate contains
+  only decision sites that emitted rows; completely untouched functions can be
+  absent while the report says 100%. TODO594 requires a compiler-owned
+  zero/zero decision manifest. Current thresholds are documented as
+  observed-decision outcome coverage and are not accepted as the requested
+  98-100% full source-coverage proof.
+- event-receipt-duplicate-keys: The WM/browser validator parsed production and
+  Simple composition evidence with last-write-wins objects, so a leading
+  `status=fail` could be hidden by a later pass row. Both receipts now reuse one
+  strict parser that rejects malformed/empty/duplicate keys. The focused Node
+  mutation requires the normalized composition-artifact failure.

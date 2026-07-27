@@ -66,7 +66,8 @@ describe "cross-process coverage aggregation":
    `src/owned/frame.spl`.
 2. Require the owner's `50%` annotation to pass and its `100%` annotation to
    fail.
-3. Require missing targets and malformed percentages to fail closed.
+3. Require missing targets and malformed percentages, including numeric-prefix
+   forms such as `50junk%` and `50%%`, to fail closed.
 
 The executable assertions are in
 `test/01_unit/lib/nogc_sync_mut/test_runner/test_runner_coverage_aggregation_spec.spl`.

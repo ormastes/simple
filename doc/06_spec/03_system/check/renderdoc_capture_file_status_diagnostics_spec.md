@@ -27,7 +27,7 @@ renderdoc_capture_file_status_diagnostics_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -96,6 +96,8 @@ the report can distinguish a missing raw `.rdc` path from a nested gate failure.
   Electron gate capture file status.
 - Missing or symlinked native `.rdc` artifacts are represented by typed status
   values, not by absent keys.
+- Browser producers reject multiple regular `.rdc` candidates rather than
+  selecting an order-dependent first match.
 
 ## Examples
 
@@ -220,6 +222,13 @@ expect(evidence).to_contain("rdoc_external_host_gate_capture_file_status=missing
 
 </details>
 
+#### rejects ambiguous browser capture sets before selecting bytes
+
+The executable scenario creates two valid-looking regular `.rdc` files and
+calls the shared selector. It requires `multiple-rdc-candidates`, candidate
+count `2`, and blank selected path/SHA-256 fields. Runnable source:
+`test/03_system/check/renderdoc_capture_file_status_diagnostics_spec.spl`.
+
 #### rejects symlinked external Chrome RDOC artifacts
 
 - Create controlled external-host evidence with a symlinked RDOC artifact
@@ -294,8 +303,8 @@ expect(["pass", "missing", "unavailable", "symlink"].contains(electron_gate)).to
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

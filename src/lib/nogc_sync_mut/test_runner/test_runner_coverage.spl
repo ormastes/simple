@@ -7,7 +7,6 @@ use std.io.{env_set, env_get}
 use lib.common.text.{is_empty}
 use std.io.{dir_create_all}
 use std.io.{file_write, file_read, file_exists}
-use std.test_runner.test_runner_files.{extract_cover_annotations}
 
 # Coverage extern declarations (same as coverage_simple.spl)
 extern fn rt_coverage_enabled() -> bool
@@ -497,6 +496,20 @@ fn check_coverage_threshold(data: CoverageData, threshold: i64) -> bool:
     print "[Coverage] Threshold check passed: {data.decision_pct}% >= {threshold}%"
     true
 
+fn extract_cover_annotations_for_coverage(file_path: text) -> [text]:
+    val content = file_read(file_path)
+    val lines = content.split("\n")
+    var covers: [text] = []
+    var i = 0
+    while i < lines.len() and i < 30:
+        val trimmed = lines[i].trim()
+        if trimmed.starts_with("# @cover "):
+            val target = trimmed[9:].trim()
+            if target != "":
+                covers.push(target)
+        i = i + 1
+    covers
+
 fn check_cover_annotation_threshold(data: CoverageData, annotation: text) -> bool:
     val space_idx = annotation.last_index_of(" ") ?? -1
     if space_idx <= 0 or not annotation.ends_with("%"):
@@ -504,6 +517,13 @@ fn check_cover_annotation_threshold(data: CoverageData, annotation: text) -> boo
         return false
     val target_path = annotation.slice(0, space_idx).trim()
     val threshold_text = annotation.slice(space_idx + 1, annotation.len() - 1).trim()
+    var digit_index = 0
+    while digit_index < threshold_text.len():
+        val digit = threshold_text[digit_index:digit_index + 1]
+        if digit < "0" or digit > "9":
+            print "[Coverage] INVALID @cover annotation: {annotation}"
+            return false
+        digit_index = digit_index + 1
     val threshold = parse_i64_safe(threshold_text)
     if target_path == "" or threshold <= 0 or threshold > 100:
         print "[Coverage] INVALID @cover annotation: {annotation}"
@@ -520,7 +540,7 @@ fn check_cover_annotation_threshold(data: CoverageData, annotation: text) -> boo
 fn check_cover_annotation_thresholds(data: CoverageData, test_files: [text]) -> bool:
     var passed = true
     for test_file in test_files:
-        for annotation in extract_cover_annotations(test_file):
+        for annotation in extract_cover_annotations_for_coverage(test_file):
             if not check_cover_annotation_threshold(data, annotation):
                 passed = false
     passed

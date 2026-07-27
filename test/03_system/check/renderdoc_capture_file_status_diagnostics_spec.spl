@@ -47,6 +47,8 @@ the report can distinguish a missing raw `.rdc` path from a nested gate failure.
   Electron gate capture file status.
 - Missing or symlinked native `.rdc` artifacts are represented by typed status
   values, not by absent keys.
+- Browser producers reject multiple regular `.rdc` candidates instead of
+  selecting whichever path `find` returns first.
 
 ## Examples
 
@@ -151,6 +153,21 @@ describe "RenderDoc capture file status diagnostics":
         val evidence = file_read("build/test-renderdoc-capture-file-status-diagnostics/external/out/evidence.env")
         expect(evidence).to_contain("rdoc_external_host_capture_file_status=missing")
         expect(evidence).to_contain("rdoc_external_host_gate_capture_file_status=missing")
+
+    it "rejects ambiguous browser capture sets before selecting bytes":
+        step("Create two otherwise valid regular RDOC candidates")
+        val root = "build/test-renderdoc-capture-file-status-diagnostics/multiple-rdc"
+        val command = "rm -rf " + root + " && mkdir -p " + root + "/captures && printf 'RDOCfirst\\n' > " + root + "/captures/first.rdc && printf 'RDOCsecond\\n' > " + root + "/captures/second.rdc && . scripts/lib/renderdoc-evidence-common.shs && rdoc_validate_single_rdc " + root + "/captures " + root + "/evidence.env || true"
+        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(0)
+
+        step("Require typed ambiguity without trusting either path or hash")
+        val evidence = file_read(root + "/evidence.env")
+        expect(evidence).to_contain("rdoc_capture_status=fail")
+        expect(evidence).to_contain("rdoc_capture_reason=multiple-rdc-candidates")
+        expect(evidence).to_contain("rdoc_capture_candidate_count=2")
+        expect(_value_of(evidence, "rdoc_capture_file")).to_equal("")
+        expect(_value_of(evidence, "rdoc_capture_sha256")).to_equal("")
 
     it "rejects symlinked external Chrome RDOC artifacts":
         step("Create controlled external-host evidence with a symlinked RDOC artifact")

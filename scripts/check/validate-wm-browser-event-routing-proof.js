@@ -95,10 +95,14 @@ const maxEventTimingMs = 1000;
 const expectedThemeSnapshot = 'src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl';
 
 function envelopeFields(proofPath) {
-  return Object.fromEntries(fs.readFileSync(proofPath, 'utf8').split(/\r?\n/).filter(Boolean).map(line => {
+  const fields = Object.create(null);
+  for (const line of fs.readFileSync(proofPath, 'utf8').split(/\r?\n/).filter(Boolean)) {
     const index = line.indexOf('=');
-    return [line.slice(0, index), line.slice(index + 1)];
-  }));
+    const key = line.slice(0, index);
+    if (index <= 0 || Object.hasOwn(fields, key)) throw new Error('invalid evidence row');
+    fields[key] = line.slice(index + 1);
+  }
+  return fields;
 }
 
 function productionEnvelopeArtifact(proof) {
@@ -231,12 +235,7 @@ function simpleCompositionArtifact(proof) {
     if (expectedReceiptPath && receiptPath !== path.resolve(expectedReceiptPath)) {
       return { status: 'receipt-path-mismatch', fields: {} };
     }
-    const fields = Object.fromEntries(
-      fs.readFileSync(receiptPath, 'utf8').split(/\r?\n/).filter(Boolean).map(line => {
-        const split = line.indexOf('=');
-        return [line.slice(0, split), line.slice(split + 1)];
-      })
-    );
+    const fields = envelopeFields(receiptPath);
     const artifactPath = path.resolve(fields.pixel_artifact_path || '');
     const artifactBytes = fs.readFileSync(artifactPath);
     const artifact = JSON.parse(artifactBytes.toString('utf8'));

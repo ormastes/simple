@@ -524,6 +524,30 @@ rdoc_validate_rdc_magic() {
     return 1
 }
 
+rdoc_validate_single_rdc() {
+    scan_dir="$1"
+    scan_env_path="${2:-}"
+    rdc_matches="$(find "$scan_dir" -type f -name '*.rdc' 2>/dev/null)"
+    rdc_count="$(printf '%s\n' "$rdc_matches" | sed '/^$/d' | wc -l | tr -d ' ')"
+    if [ "$rdc_count" -gt 1 ]; then
+        {
+            echo "rdoc_capture_status=fail"
+            echo "rdoc_capture_reason=multiple-rdc-candidates"
+            echo "rdoc_capture_file="
+            echo "rdoc_capture_size=0"
+            echo "rdoc_capture_magic="
+            echo "rdoc_capture_sha256="
+            echo "rdoc_capture_candidate_count=$rdc_count"
+        } | tee ${scan_env_path:+"$scan_env_path"}
+        return 1
+    fi
+    rdc_file="$rdc_matches"
+    rdoc_validate_rdc_magic "$rdc_file" "$scan_env_path"
+    validate_code=$?
+    echo "rdoc_capture_candidate_count=$rdc_count" | tee -a ${scan_env_path:+"$scan_env_path"}
+    return "$validate_code"
+}
+
 rdoc_emit_chromium_gpu_process_exit_metadata() {
     log_path="$1"
 
@@ -1169,10 +1193,9 @@ rdoc_capture_html() {
     rdoc_emit_chromium_angle_metadata "$out_dir/renderdoc-html.log" | tee -a "$env_path"
     rdoc_emit_chromium_angle_metadata "$out_dir/gpu-launcher.log" "rdoc_chromium_gpu_launcher_angle" | tee -a "$env_path"
     rdoc_emit_gpu_autocapture_metadata "$out_dir/gpu-launcher.log" | tee -a "$env_path"
-    rdc_file="$(find "$out_dir" -name '*.rdc' 2>/dev/null | head -1)"
     tmp_env="$out_dir/evidence.status.env"
     set +e
-    rdoc_validate_rdc_magic "$rdc_file" "$tmp_env"
+    rdoc_validate_single_rdc "$out_dir" "$tmp_env"
     validate_code=$?
     set -e
     cat "$tmp_env" >> "$env_path"
@@ -1342,10 +1365,9 @@ rdoc_capture_electron_html() {
     rdoc_emit_chromium_angle_metadata "$out_dir/gpu-launcher.log" "rdoc_chromium_gpu_launcher_angle" | tee -a "$env_path"
     rdoc_emit_gpu_autocapture_metadata "$out_dir/gpu-launcher.log" | tee -a "$env_path"
     rdoc_emit_electron_argb_metadata "$out_dir/electron_argb.json" "$width" "$height" >>"$env_path"
-    rdc_file="$(find "$out_dir" -name '*.rdc' 2>/dev/null | head -1)"
     tmp_env="$out_dir/evidence.status.env"
     set +e
-    rdoc_validate_rdc_magic "$rdc_file" "$tmp_env"
+    rdoc_validate_single_rdc "$out_dir" "$tmp_env"
     validate_code=$?
     set -e
     cat "$tmp_env" >> "$env_path"

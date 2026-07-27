@@ -15,7 +15,9 @@ Electron Chromium event-routing surface and the regular producer
 `tools/web-render-backend/wm_event_check.js`. It normalizes source-artifact,
 runtime, event-sequence, count, timing, animation, payload, UI, and font-frame
 rows. Any missing, forged, stale, aliased, malformed, fractional, unsafe, or
-out-of-budget value fails closed; `pass=true` alone never passes.
+out-of-budget value fails closed; `pass=true` alone never passes. Production
+and Simple composition receipts reject malformed or duplicate keys rather than
+accepting a last-write-wins value.
 The Electron process version must be exactly `42.5.0`; a merely numeric but
 different version is rejected as missing canonical browser runtime identity.
 
@@ -64,6 +66,7 @@ it "rejects a valid alternate receipt outside the configured proof path":
 |---|---|
 | accepts complete event timing animation payload and UI proof | PASS; emits normalized `wm_browser_event_routing_*` evidence. |
 | rejects a composition receipt from a different run | FAIL: composition artifact invalid. |
+| rejects duplicate Simple composition receipt keys | FAIL: composition artifact invalid. |
 | rejects a valid alternate receipt outside the configured proof path | FAIL: composition artifact invalid. |
 | rejects a font frame receipt that is not correlated with the event stream | FAIL: font-frame correlation missing. |
 | rejects pass true proof when required event counts are missing | FAIL: event-routing contract missing. |
