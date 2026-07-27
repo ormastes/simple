@@ -36,8 +36,9 @@ actionable blocker until the matching native host consumes that same receipt.
 
 The Vulkan row accepts only the canonical readback report with an overall and
 spec status of `pass`, Vulkan availability/backend identity, exercised present
-and readback paths, successful clear and rectangle device readbacks, positive
-native backend handles and device identities, and a zero strict-spec exit code.
+and readback paths, positive clear/rectangle pixel counts, exact expected and
+actual checksums, zero mismatches, successful device readbacks, stable positive
+device identity, no blur/tolerance, and zero strict/parity exit codes.
 Missing, duplicate, synthetic, CPU-mirror, unsigned-zero, signed, or malformed
 fields fail closed.
 

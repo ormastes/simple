@@ -876,3 +876,8 @@ Tracking split:
   now accepts exactly one matching artifact, the gate requires template setup
   and path agreement, and the host classifier requires the emitted identity
   status. Equal echoed IDs paired with a different frame path fail closed.
+- vulkan-aggregate: Closed a host-env false-green that trusted producer PASS
+  labels without consuming the retained framebuffer oracle. Vulkan admission
+  now requires positive clear/rect pixel counts, exact expected/actual
+  checksums, zero mismatches, stable device identity, no tolerance, and the
+  CPU/Vulkan parity exit in addition to strict device-origin provenance.
