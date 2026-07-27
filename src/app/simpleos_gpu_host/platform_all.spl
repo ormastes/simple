@@ -80,14 +80,22 @@ fn _processing_backend_mask_supported(cuda_executor: ProcessingCudaExecutor, sel
     available
 
 @cfg(linux)
-fn _create_all_render_target(width: i32, height: i32, backend: text) -> Result<DrawIrRenderTarget, text>:
+fn _create_all_engine(width: i32, height: i32, backend: text) -> Result<Engine2D, text>:
     if backend != "vulkan":
         return Err("linux-host-daemon-requires-vulkan")
     Engine2D.create_vulkan_backend(width, height)
 
 @cfg(not(linux))
-fn _create_all_render_target(width: i32, height: i32, backend: text) -> Result<DrawIrRenderTarget, text>:
+fn _create_all_engine(width: i32, height: i32, backend: text) -> Result<Engine2D, text>:
     Engine2D.create_requested_backend(width, height, backend)
+
+fn _all_render_device_identity(backend: text) -> i64:
+    if backend == "vulkan":
+        return processing_vulkan_device_identity(
+            vulkan_sffi_selected_device_driver_identity())
+    if backend == "directx":
+        return directx_hardware_adapter_identity()
+    0
 
 @cfg(linux)
 fn _all_processing_backend_mask(cuda_executor: ProcessingCudaExecutor, requested: i64, selector: text) -> i64:
@@ -103,15 +111,22 @@ fn _all_processing_backend_mask(cuda_executor: ProcessingCudaExecutor, requested
 
 impl SimpleOsGpuHostPlatform for SimpleOsGpuHostAllPlatform:
     fn create_render_target(width: i32, height: i32, backend: text) -> Result<DrawIrRenderTarget, text>:
-        _create_all_render_target(width, height, backend)
+        match _create_all_engine(width, height, backend):
+            Err(reason): Err(reason)
+            Ok(engine): Ok(engine)
+
+    fn probe_render_backend(backend: text) -> Result<bool, text>:
+        match _create_all_engine(1, 1, backend):
+            Err(reason): Err(reason)
+            Ok(engine):
+                val available = (
+                    engine.backend_name() == backend and
+                    _all_render_device_identity(backend) > 0)
+                engine.shutdown()
+                Ok(available)
 
     fn render_device_identity(backend: text) -> i64:
-        if backend == "vulkan":
-            return processing_vulkan_device_identity(
-                vulkan_sffi_selected_device_driver_identity())
-        if backend == "directx":
-            return directx_hardware_adapter_identity()
-        0
+        _all_render_device_identity(backend)
 
     fn processing_backend_mask(requested: i64, selector: text) -> i64:
         _all_processing_backend_mask(self.cuda_executor, requested, selector)

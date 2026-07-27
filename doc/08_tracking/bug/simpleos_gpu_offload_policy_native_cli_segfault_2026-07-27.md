@@ -68,8 +68,26 @@ over byte-correct `rt_string_find`; its focused test passes, and the refreshed
 CUDA/Vulkan runtime archive exports both string predicates. Cycle 3 linked with
 `2 compiled, 215 cached, 0 failed`, but retained-cache object disassembly still
 showed the prior `str_len` infinite loop and the live daemon again missed
-transport readiness. The three-cycle cap is exhausted. The complete source fix
-remains unbuilt, and no device-wire timing is claimed.
+transport readiness.
+
+The next retained-cache rebuild compiled the complete wrapper source with `4
+compiled, 213 cached, 0 failed`. Its generated `string_core` object has zero
+primitive self-relocations and zero jump-to-self bodies, and the daemon reaches
+CLI validation. The first live HELLO then exposed trait-erased render-probe
+shutdown dispatch. Moving probe creation and concrete shutdown into the
+platform owners rebuilt with `4 compiled, 213 cached, 0 failed` and admitted
+one CUDA device receipt.
+
+The wire probe initially compared that receipt with the direct executor's raw
+64-bit checksum rather than the protocol's modular checksum. The strict probe
+rebuild (`4 compiled, 15 cached, 0 failed`) fixed that expectation. The
+preserved third-cycle receipt proves status `1`, reason `0`, device source `1`,
+handle `1`, positive identity, `4,194,304` output bytes, and exact correlation,
+but every readback word is `135272480` instead of `16909060`. The payload word
+is correct on the wire; `words[5].to_u32()` applies tagged-integer conversion
+to an already-raw MMIO scalar and multiplies it by eight. Source now uses
+`words[5] as u32`. The cap is exhausted before rebuilding this final boundary
+fix, so no exact device-wire receipt or warm timing is claimed.
 
 ## Remaining Gate
 
@@ -80,6 +98,8 @@ multi-sample medians; the single direct warm receipt does not justify the
 lower-level CUDA round-trip threshold by itself. Resume with one strict
 incremental daemon build from the retained cache, verify its `string_core`
 object has no self-relocations or `jmp`-to-self primitive bodies, then run the
-documented device-warm wrapper command with explicit daemon/probe paths.
+documented device-warm wrapper command with explicit daemon/probe paths. The
+next build must contain the raw `words[5] as u32` boundary and retain the
+platform-owned render probe.
 
 Owner: Linux GPU host operator. Final reviewer: high-capability model.

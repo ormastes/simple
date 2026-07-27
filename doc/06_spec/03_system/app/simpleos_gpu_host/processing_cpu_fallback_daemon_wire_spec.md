@@ -73,9 +73,16 @@ no generated stubs, and its three-case median self-test passes. Reusing
 dependencies, and strict daemon cycle 2 linked with `4 compiled, 213 cached, 0
 failed`. A focused Rust runtime test for the missing string predicate passes;
 the refreshed CUDA/Vulkan archive exports it, and cycle 3 links with `2
-compiled, 215 cached, 0 failed`. The retained generated `string_core` object
-still contained same-named primitive self-dispatch, leaving startup in an
-infinite `str_len` loop before transport readiness. Source now routes all
-affected primitives directly to runtime externs, but the three-cycle cap was
-reached before rebuilding that complete fix. Therefore no daemon device
-receipt or warm median is claimed yet.
+compiled, 215 cached, 0 failed`.
+
+A source-complete strict rebuild (`4 compiled, 213 cached, 0 failed`) then
+produced a `string_core` object with zero primitive self-relocations and zero
+jump-to-self bodies. Platform-owned render probing removed the next
+trait-erased shutdown fault and rebuilt strictly with `4 compiled, 213 cached,
+0 failed`. The checksum-corrected probe also rebuilt with `4 compiled, 15
+cached, 0 failed`. Its preserved first CUDA receipt has PASS status, zero
+reason, device readback, positive handle/identity, exact correlation, and
+`4,194,304` bytes, but the output value is 8x the payload because
+`words[5].to_u32()` treated a raw MMIO scalar as tagged. Source now uses
+`words[5] as u32`; the three-cycle cap was reached before rebuilding it.
+Therefore no exact daemon device receipt or warm median is claimed yet.
