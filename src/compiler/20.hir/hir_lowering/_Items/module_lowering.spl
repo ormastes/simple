@@ -12,7 +12,6 @@ use compiler.frontend.parser_types_expr.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
-use compiler.hir.hir_lowering.module_registry.{hir_registry_contains, hir_registry_get}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
@@ -72,12 +71,6 @@ fn hir_module_declares_item(m: Module, name: text) -> bool:
     kind register_imported_symbol knows how to register (functions covers
     `extern fn` too — the parser stores externs in Module.functions with
     is_extern=true)."""
-    # Header-only registry entries carry nil decl dicts; .contains_key on them
-    # is the same phantom family as .get (see the bug doc referenced in
-    # register_imported_symbol). A partial module declares nothing locally —
-    # answering false keeps the re-export chase walking its exports instead.
-    if m.functions.len() < 0:
-        return false
     if m.functions.contains_key(name):
         return true
     if m.classes.contains_key(name):
@@ -458,14 +451,8 @@ impl HirLowering:
 
     me register_imported_symbol(imported_mod: Module, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span):
         # Header-only registry entries (files outside the entry closure,
-        # parsed for name/imports/exports only) carry nil decl dicts; native
-        # `.get()` on them returns a phantom non-nil Option and the trait arm
-        # below segfaults in lower_trait. Same family as the sibling-sweep
-        # guard in resolve_package_sibling_symbols; this second site was hit
-        # via the direct-import path (src/lib/nogc_async_mut/database/test.spl,
-        # stage-4 bootstrap). A partial module declares nothing itself — only
-        # its re-export chain (which header parsing does populate) can satisfy
-        # the import, so chase that and return before any decl-dict lookup.
+        # parsed for name/imports/exports only) carry nil decl dicts. Chase
+        # their re-export chain before any declaration lookup.
         if imported_mod.functions.len() < 0:
             val part_hop = self.find_reexport_source(imported_mod, imported_mod_name, imported_name, 0)
             var part_registered = false
@@ -474,25 +461,15 @@ impl HirLowering:
                 if hir_registry_contains(part_hop.module_name):
                     part_src = Some(hir_registry_get(part_hop.module_name))
                 if part_src != nil:
-                    # Only recurse into a REAL module: a partial hop target
-                    # would re-enter this guard and a facade export cycle
-                    # (partial A <-> partial B) then recurses forever.
                     if (part_src ?? imported_mod).functions.len() >= 0:
                         self.register_imported_symbol(part_src, part_hop.module_name, part_hop.item_name, local_name, import_span)
                         part_registered = true
             if not part_registered:
-                # Focused sub-builds import DECLARATIONS from modules that are
-                # header-only in their registry (only the focus file's closure
-                # is fully parsed): compiler.driver.pipeline_fn's
-                # {OptimizationConfig, CompiledUnit} in stage-4 template
-                # specialization. The decl dicts are nil so the kind is
-                # unknowable here — register an opaque Class-kind symbol so
-                # name resolution binds, matching the accidental pre-guard
-                # behavior (the phantom Option always hit the class arm
-                # first), without dereferencing any phantom decl.
                 val part_opaque = self.symbols.define(local_name, SymbolKind.Class, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
                 self.symbols.rename_symbol(part_opaque, imported_name)
             return
+        # Native Struct-valued Dict.get() payloads are corrupt on a hit; use
+        # contains_key plus indexed reads for every declaration lookup.
         val has_cls = imported_mod.classes.contains_key(imported_name)
         val has_str = imported_mod.structs.contains_key(imported_name)
         val has_enum = imported_mod.enums.contains_key(imported_name)
@@ -559,11 +536,8 @@ impl HirLowering:
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
                 eprint("[reexport-chase] mod={imported_mod_name} wanted={imported_name} imports={imported_mod.imports.len()} exports={imported_mod.exports.len()} found={hop.found} mname={imported_mod.name} fns={imported_mod.functions.len()}")
             if hop.found:
-                var src_mod: Module? = self.modules_by_name.get(hop.module_name)
-                if hir_registry_contains(hop.module_name):
-                    src_mod = Some(hir_registry_get(hop.module_name))
-                if src_mod != nil:
-                    self.register_imported_symbol(src_mod, hop.module_name, hop.item_name, local_name, import_span)
+                if self.modules_by_name.contains_key(hop.module_name):
+                    self.register_imported_symbol(self.modules_by_name[hop.module_name], hop.module_name, hop.item_name, local_name, import_span)
 
     me resolve_module_key(name: text) -> text:
         """Canonical modules_by_name key for an import path, or "".
@@ -631,10 +605,8 @@ impl HirLowering:
                 # inside src/lib/io_runtime.spl names a module registered as
                 # lib.nogc_sync_mut.io_runtime — the literal key always misses.
                 val next_key = self.resolve_module_key(imp.module)
-                var next_mod: Module? = if next_key != "": self.modules_by_name.get(next_key) else: nil
-                if next_key != "" and hir_registry_contains(next_key):
-                    next_mod = Some(hir_registry_get(next_key))
-                if next_mod != nil:
+                if next_key != "" and self.modules_by_name.contains_key(next_key):
+                    val next_mod = self.modules_by_name[next_key]
                     if hir_module_declares_item(next_mod, source_item):
                         return HirReexportSource(found: true, module_name: next_key, item_name: source_item)
                     val deeper = self.find_reexport_source(next_mod, next_key, source_item, depth + 1)
@@ -661,10 +633,8 @@ impl HirLowering:
                         if facade_pkg.ends_with(".__init__"):
                             facade_pkg = facade_pkg[0:facade_pkg.len() - 9]
                         var exp_sib_name = self.resolve_module_key(facade_pkg + "." + exp_base)
-                        var exp_sib: Module? = if exp_sib_name != "": self.modules_by_name.get(exp_sib_name) else: nil
-                        if exp_sib_name != "" and hir_registry_contains(exp_sib_name):
-                            exp_sib = Some(hir_registry_get(exp_sib_name))
-                        if exp_sib != nil:
+                        if exp_sib_name != "" and self.modules_by_name.contains_key(exp_sib_name):
+                            val exp_sib = self.modules_by_name[exp_sib_name]
                             if hir_module_declares_item(exp_sib, wanted):
                                 return HirReexportSource(found: true, module_name: exp_sib_name, item_name: wanted)
                             val exp_deeper = self.find_reexport_source(exp_sib, exp_sib_name, wanted, depth + 1)
@@ -688,8 +658,8 @@ impl HirLowering:
                     self.symbols.define(symbol_name, kind, method_type, import_span, Visibility.Public, false, Some(imported_mod_name))
             if impl_.has_trait_:
                 val trait_name = parser_type_kind_named_name(impl_.trait_.kind)
-                val trait_: Trait? = imported_mod.traits.get(trait_name)
-                if trait_ != nil:
+                if imported_mod.traits.contains_key(trait_name):
+                    val trait_ = imported_mod.traits[trait_name]
                     for trait_method in trait_.methods:
                         val symbol_name = "{owner_module}.{imported_name}::{trait_method.name}"
                         if not self.symbols.lookup_or_invalid(symbol_name).is_valid():
@@ -804,16 +774,18 @@ impl HirLowering:
         var import_idx = 0
         while import_idx < module.imports.len():
             val imp = module.imports[import_idx]
-            var imported_mod: Module? = self.modules_by_name.get(imp.module)
+            # Track the winning REGISTRY KEY, not an Option<Module>: a
+            # struct-valued `.get()` yields a corrupt Option under native
+            # codegen (see register_imported_symbol). "" means not found.
+            var imported_key = if self.modules_by_name.contains_key(imp.module): imp.module else: ""
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
-                val dbg_fns = if imported_mod != nil: (imported_mod ?? module).functions.len() else: -1
-                eprint("[imp] importer={module.name} module={imp.module} items={imp.items.len()} fns={dbg_fns}")
+                eprint("[imp] importer={module.name} module={imp.module} items={imp.items.len()} found={imported_key != ""}")
             # Symbols must register under the DEFINING module's canonical name:
             # a relative alias like ".helper" would otherwise be baked into the
             # call symbol (@.helper.helper_val) while the definition object
             # mangles under the path-derived name -> lld undefined symbol.
             var resolved_module_name = imp.module
-            if imported_mod == nil and imp.module.starts_with("."):
+            if imported_key == "" and imp.module.starts_with("."):
                 # Relative import (`.sibling` / `..pkg.mod`): the module map is
                 # keyed by path-derived dotted names (app.mcp.main_lazy_json),
                 # so a raw leading-dot key always misses. Normalize against the
@@ -842,29 +814,22 @@ impl HirLowering:
                     rel_pkg = rel_pkg + rel_segs[rel_si]
                     rel_si = rel_si + 1
                 val rel_abs = if rel_pkg == "": rel_tail else: rel_pkg + "." + rel_tail
-                imported_mod = self.modules_by_name.get(rel_abs)
-                if imported_mod != nil:
+                if self.modules_by_name.contains_key(rel_abs):
+                    imported_key = rel_abs
                     resolved_module_name = rel_abs
-            if imported_mod == nil:
+            if imported_key == "":
                 # Canonical-key fallbacks (see resolve_module_key): closure
                 # files register ONLY under path-derived names, keeping
                 # resolved_module_name canonical so call symbols match the
                 # definition's mangled name.
                 val fb_key = self.resolve_module_key(imp.module)
-                if fb_key != "":
-                    imported_mod = self.modules_by_name.get(fb_key)
-                    if imported_mod != nil:
-                        resolved_module_name = fb_key
-            if imported_mod == nil and (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
+                if fb_key != "" and self.modules_by_name.contains_key(fb_key):
+                    imported_key = fb_key
+                    resolved_module_name = fb_key
+            if imported_key == "" and (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
                 eprint("[import-miss] importer={module.name} module={imp.module}")
-            # Registry-fresh refetch: the modules_by_name FIELD copy nil-fills
-            # every Module value's nested decl dicts (aggregate deep-copy
-            # defect — see module_registry.spl); the module-global registry
-            # preserves them, so re-read the winning key through it before
-            # registering symbols.
-            if imported_mod != nil and hir_registry_contains(resolved_module_name):
-                imported_mod = Some(hir_registry_get(resolved_module_name))
-            if imported_mod != nil:
+            if imported_key != "":
+                val imported_mod = self.modules_by_name[imported_key]
                 if imp.items.len() == 0:
                     self.register_glob_imported_symbols(imported_mod, resolved_module_name, imp.span)
                     # A module-only import also provides a namespace for
@@ -917,21 +882,8 @@ impl HirLowering:
             # DIRECT siblings only: exactly one segment past the package.
             if sibling_name.substring(pkg_prefix.len()).contains("."):
                 continue
-            var sibling_mod: Module? = self.modules_by_name.get(sibling_name)
-            if hir_registry_contains(sibling_name):
-                sibling_mod = Some(hir_registry_get(sibling_name))
-            if sibling_mod != nil:
-                # Header-only registry entries (files outside the entry
-                # closure, parsed for name/imports/exports only) carry nil
-                # decl dicts: functions.len() reads -1 and native `.get()` on
-                # those dicts returns a phantom non-nil Option — the sweep
-                # then chases the partial module's imports through the
-                # facade-glob path and lower_trait segfaults unwrapping the
-                # phantom (std.io.traits, stage-4 bootstrap). A partial
-                # sibling contributes no compiled symbols, so skip it. See
-                # doc/08_tracking/bug/hir_stub_module_nil_dict_get_phantom_some_2026-07-27.md
-                if (sibling_mod ?? module).functions.len() >= 0:
-                    self.register_glob_imported_symbols(sibling_mod, sibling_name, sibling_span)
+            if self.modules_by_name.contains_key(sibling_name):
+                self.register_glob_imported_symbols(self.modules_by_name[sibling_name], sibling_name, sibling_span)
 
     # Uniquely-named entry point for the driver's unstub `-c`/`run` path.
     # `lowering.lower_module(...)` from the driver never enters this impl's body
@@ -1398,9 +1350,8 @@ impl HirLowering:
         var enum_import_idx = 0
         while enum_import_idx < module.imports.len():
             val imp = module.imports[enum_import_idx]
-            val imported_mod: Module? = self.modules_by_name.get(imp.module)
-            # Partial-module gate: same phantom family as register_imported_symbol.
-            if imported_mod != nil and (imported_mod ?? module).functions.len() >= 0:
+            if self.modules_by_name.contains_key(imp.module):
+                val imported_mod = self.modules_by_name[imp.module]
                 if imp.items.len() == 0:
                     val imported_enum_keys = imported_mod.enums.keys()
                     import_enum_idx = 0
@@ -1416,12 +1367,12 @@ impl HirLowering:
                     var enum_item_idx = 0
                     while enum_item_idx < imp.items.len():
                         val item = imp.items[enum_item_idx]
-                        val imported_enum: Enum? = imported_mod.enums.get(item.name)
+                        val has_imported_enum = imported_mod.enums.contains_key(item.name)
                         # ponytail: alias-aware enum type substitution is still
                         # required for self-referential payloads; keep aliases
                         # on the existing path until that syntax is requested.
-                        if imported_enum != nil and not item.has_alias:
-                            lower_module_enums[item.name] = imported_enum
+                        if has_imported_enum and not item.has_alias:
+                            lower_module_enums[item.name] = imported_mod.enums[item.name]
                             lower_enum_owners[item.name] = hir_module_logical_name_from_path(imported_mod.name)
                         enum_item_idx = enum_item_idx + 1
             enum_import_idx = enum_import_idx + 1
