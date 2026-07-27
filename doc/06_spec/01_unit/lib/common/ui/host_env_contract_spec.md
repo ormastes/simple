@@ -381,7 +381,7 @@ expect(host_vulkan_evidence_passes(complete + "\nvulkan_engine2d_readback_status
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 35 lines folded for reproduction.
+Runnable source: 45 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -397,6 +397,13 @@ val (missing_path, missing_sha256) = host_renderdoc_capture_binding(
     complete.replace("rdoc_simple_gate_capture_file=/tmp/frame.rdc\n", ""))
 expect(missing_path).to_equal("")
 expect(missing_sha256).to_equal("")
+val (xml_path, xml_sha256) = host_renderdoc_replay_xml_binding(complete)
+expect(xml_path).to_equal("/tmp/frame.xml")
+expect(xml_sha256).to_equal("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+val (duplicate_xml_path, duplicate_xml_sha256) = host_renderdoc_replay_xml_binding(
+    complete + "\nrdoc_simple_gate_replay_xml_path=/tmp/stale.xml")
+expect(duplicate_xml_path).to_equal("")
+expect(duplicate_xml_sha256).to_equal("")
 expect(host_renderdoc_evidence_passes(complete)).to_be(true)
 expect(host_renderdoc_evidence_passes(complete.replace("\n", "\r\n"))).to_be(true)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_status=pass", "rdoc_simple_gate_status=fail"))).to_be(false)
@@ -414,6 +421,9 @@ expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_capture_path=/tmp/frame.rdc", "rdoc_simple_gate_replay_capture_path=/tmp/other.rdc"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_xml_path=/tmp/frame.xml", "rdoc_simple_gate_replay_xml_path="))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_xml_hash=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "rdoc_simple_gate_replay_xml_hash=bad"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_xml_file_status=pass", "rdoc_simple_gate_replay_xml_file_status=missing"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_xml_file_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "rdoc_simple_gate_replay_xml_file_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_xml_file_bytes=4096", "rdoc_simple_gate_replay_xml_file_bytes=4095"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_relevant_action_count=1", "rdoc_simple_gate_replay_relevant_action_count=0"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_pipeline_count=1", "rdoc_simple_gate_replay_pipeline_count=0"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_shader_count=1", "rdoc_simple_gate_replay_shader_count=0"))).to_be(false)

@@ -307,9 +307,14 @@ expect(evidence).to_contain("rdoc_simple_gate_runtime_backend=software")
 #### binds passing replay evidence to unchanged capture bytes
 
 The executable SSpec builds one deterministic fake replay seam. Its complete
-evidence passes with equal 64-character producer/file hashes; removing the
-hash, replacing it with malformed text, or appending a byte to the `.rdc`
-produces `missing-capture-sha256`, `invalid-capture-sha256`, and
+evidence creates a regular replay XML file and passes with equal current
+capture/XML hashes and byte counts. The receipt explicitly records passing XML
+file and hash status plus matching claimed/current XML hashes and byte counts.
+Missing, symlinked, or changed replay XML
+produces `replay-xml-missing`, `replay-xml-symlink`, or
+`replay-xml-hash-mismatch`. Removing the capture hash, replacing it with
+malformed text, or appending a byte to the `.rdc` produces
+`missing-capture-sha256`, `invalid-capture-sha256`, and
 `capture-sha256-mismatch`, respectively. Runnable source:
 `test/03_system/check/renderdoc_simple_gate_spec.spl`.
 

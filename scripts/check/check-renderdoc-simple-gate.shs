@@ -30,7 +30,7 @@ file_exists_status() {
         echo "missing"
     elif [ -L "$path" ]; then
         echo "symlink"
-    elif [ -s "$path" ]; then
+    elif [ -f "$path" ] && [ -s "$path" ]; then
         echo "pass"
     else
         echo "missing"
@@ -141,6 +141,10 @@ write_evidence() {
         echo "rdoc_simple_gate_replay_xml_path=${replay_xml_path:-}"
         echo "rdoc_simple_gate_replay_xml_hash=${replay_xml_hash:-}"
         echo "rdoc_simple_gate_replay_xml_bytes=${replay_xml_bytes:-0}"
+        echo "rdoc_simple_gate_replay_xml_file_status=${replay_xml_file_status:-missing}"
+        echo "rdoc_simple_gate_replay_xml_file_sha256=${replay_xml_file_sha256:-}"
+        echo "rdoc_simple_gate_replay_xml_file_bytes=${replay_xml_file_bytes:-0}"
+        echo "rdoc_simple_gate_replay_xml_hash_status=${replay_xml_hash_status:-fail}"
         echo "rdoc_simple_gate_replay_chunk_count=${replay_chunk_count:-0}"
         echo "rdoc_simple_gate_replay_relevant_action_count=${replay_relevant_action_count:-0}"
         echo "rdoc_simple_gate_replay_pipeline_count=${replay_pipeline_count:-0}"
@@ -295,6 +299,10 @@ replay_capture_path=""
 replay_xml_path=""
 replay_xml_hash=""
 replay_xml_bytes=0
+replay_xml_file_status="missing"
+replay_xml_file_sha256=""
+replay_xml_file_bytes=0
+replay_xml_hash_status="fail"
 replay_chunk_count=0
 replay_relevant_action_count=0
 replay_pipeline_count=0
@@ -334,6 +342,14 @@ if [ "$capture_file_status" = "pass" ] \
         replay_xml_path="$(value_of rdoc_simple_replay_xml_path "$REPLAY_ENV")"
         replay_xml_hash="$(value_of rdoc_simple_replay_xml_hash "$REPLAY_ENV")"
         replay_xml_bytes="$(value_of rdoc_simple_replay_xml_bytes "$REPLAY_ENV")"
+        replay_xml_file_status="$(file_exists_status "$replay_xml_path")"
+        if [ "$replay_xml_file_status" = "pass" ]; then
+            replay_xml_file_sha256="$(rdoc_sha256_file "$replay_xml_path" || true)"
+            replay_xml_file_bytes="$(wc -c <"$replay_xml_path" | tr -d ' ')"
+            if is_lower_hex_64 "$replay_xml_file_sha256" && [ "$replay_xml_hash" = "$replay_xml_file_sha256" ]; then
+                replay_xml_hash_status="pass"
+            fi
+        fi
         replay_chunk_count="$(value_of rdoc_simple_replay_chunk_count "$REPLAY_ENV")"
         replay_relevant_action_count="$(value_of rdoc_simple_replay_relevant_action_count "$REPLAY_ENV")"
         replay_pipeline_count="$(value_of rdoc_simple_replay_pipeline_count "$REPLAY_ENV")"
@@ -385,9 +401,11 @@ if [ "$backend" = "simple" ] \
     && [ "$replay_reason" = "pass" ] \
     && [ "$replay_driver" = "vulkan" ] \
     && [ "$replay_capture_path" = "$capture_file" ] \
-    && [ "$replay_xml_path" != "" ] \
+    && [ "$replay_xml_file_status" = "pass" ] \
     && is_lower_hex_64 "$replay_xml_hash" \
+    && [ "$replay_xml_hash_status" = "pass" ] \
     && is_positive_int "$replay_xml_bytes" \
+    && [ "$replay_xml_bytes" = "$replay_xml_file_bytes" ] \
     && is_positive_int "$replay_chunk_count" \
     && is_positive_int "$replay_relevant_action_count" \
     && is_positive_int "$replay_pipeline_count" \
@@ -462,8 +480,18 @@ elif [ "$replay_driver" != "vulkan" ] || [ "$owner_api" != "vulkan" ]; then
     write_evidence "fail" "unexpected-replay-driver"
 elif [ "$replay_capture_path" != "$capture_file" ]; then
     write_evidence "fail" "replay-capture-path-mismatch"
+elif [ "$replay_xml_file_status" = "symlink" ]; then
+    write_evidence "fail" "replay-xml-symlink"
+elif [ "$replay_xml_file_status" != "pass" ]; then
+    write_evidence "fail" "replay-xml-missing"
 elif ! is_lower_hex_64 "$replay_xml_hash"; then
     write_evidence "fail" "invalid-replay-xml-hash"
+elif ! is_lower_hex_64 "$replay_xml_file_sha256"; then
+    write_evidence "fail" "replay-xml-sha256-unavailable"
+elif [ "$replay_xml_hash_status" != "pass" ]; then
+    write_evidence "fail" "replay-xml-hash-mismatch"
+elif [ "$replay_xml_bytes" != "$replay_xml_file_bytes" ]; then
+    write_evidence "fail" "replay-xml-bytes-mismatch"
 elif ! is_positive_int "$replay_xml_bytes" || ! is_positive_int "$replay_chunk_count" || \
      ! is_positive_int "$replay_relevant_action_count" || ! is_positive_int "$replay_pipeline_count" || \
      ! is_positive_int "$replay_shader_count" || ! is_positive_int "$replay_resource_count"; then

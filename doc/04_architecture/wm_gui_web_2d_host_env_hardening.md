@@ -100,8 +100,9 @@ complete retained `native_host` receipts on any coordinator; absent or
 emulated receipts remain active blocked rows with exact resume commands.
 Browser Vulkan and RenderDoc-native rows use their existing retained evidence.
 Before admitting a retained RenderDoc row, `test_host_env` resolves its unique
-capture-file/hash binding and recomputes the current `.rdc` digest. Deleted or
-changed captures therefore cannot inherit an earlier passing gate receipt.
+capture-file/hash and replay-XML/hash bindings, then recomputes both current
+digests. Deleted or changed artifacts therefore cannot inherit an earlier
+passing gate receipt.
 Framebuffer admission applies the same app-boundary rule to both retained PPM
 paths and hashes; the pure contract remains filesystem-independent.
 Emulation and source inspection alone are correctness support only.

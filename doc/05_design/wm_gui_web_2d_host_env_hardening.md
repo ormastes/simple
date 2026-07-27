@@ -83,7 +83,8 @@ non-increasing revision after mutation, compatibility renderer, fallback, zero
 handle, incomplete submission, CPU mirror/cache readback, invalid dimensions or
 stride, blank output, checksum zero, and absent/invalid RenderDoc artifacts.
 The host aggregate also re-hashes the retained RenderDoc capture path and
-blocks when the current bytes no longer match its exact-one gate binding.
+replay XML path, blocking when either current artifact no longer matches its
+exact-one gate binding.
 Framebuffer admission requires both correlated backend values to be `vulkan`;
 matching CPU fallback values remain blocked.
 The host aggregate resolves duplicate-safe baseline/input capture bindings and

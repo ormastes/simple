@@ -1046,6 +1046,18 @@ Tracking split:
   `test_host_env` re-hashes both current files before admitting framebuffer
   readback. Focused file mutations cover current, tampered, and deleted bytes;
   no live host PASS is claimed.
+- renderdoc-replay-xml-freshness: The Simple gate previously trusted claimed
+  replay XML path/hash/count metadata even when the XML was absent. It now
+  requires a regular file, recomputes current SHA-256 and byte size, emits typed
+  missing/symlink/hash/size failures, and `test_host_env` revalidates both the
+  `.rdc` and replay XML. Focused SSpec mutations cover missing, symlinked, and
+  changed XML; the pure-Simple runner remains unavailable, so only shell syntax
+  evidence is claimed this session.
+- retained-artifact-symlink-gap: Current post-producer rehashing follows
+  symlinks. A real app-I/O no-follow regular-file facade is required before
+  retained RenderDoc/framebuffer paths can claim path-integrity revalidation;
+  tracked in
+  `doc/08_tracking/bug/test_host_env_artifact_symlink_revalidation_2026-07-27.md`.
 - coverage-denominator-gap: Review confirmed the runtime aggregate contains
   only decision sites that emitted rows; completely untouched functions can be
   absent while the report says 100%. TODO594 requires a compiler-owned
