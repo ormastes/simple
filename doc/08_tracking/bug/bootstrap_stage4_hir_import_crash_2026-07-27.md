@@ -2,11 +2,13 @@
 
 ## Status
 
-PARTIALLY FIXED. The native `Dict.get()` crash is fixed by using
+PARTIALLY FIXED, pending strict Stage 4 verification. The native `Dict.get()`
+crash is fixed by using
 `contains_key` plus index reads for struct-valued module entries. A fresh
 strict bootstrap now passes Stages 2 and 3 and lowers all Stage-4 modules
 without a segfault, but the full CLI remains blocked by deterministic import
-resolution errors.
+resolution errors. The current facade/import repair has focused closure
+evidence but has not yet completed the required unchanged-tree strict run.
 
 ## Evidence
 
@@ -39,7 +41,7 @@ The unchanged-tree strict follow-up passed Stage 2/3 sanity and entered Stage
 4. It no longer crashed in `HirLowering.lower_trait`; it reported unresolved
 names beginning with `cli_run_file` in
 `app.cli._CliMain.args_and_os_commands`, followed by other symbols supplied
-through partial/header-only import facades.
+through glob import facades.
 
 - Follow-up Stage 2 SHA-256:
   `00fcb65729acfe1f7bd30e113d7d96bea4cd7ff2e4f596667cda8c6a97c89411`
@@ -93,6 +95,25 @@ its linked `rt_env_set` has the obsolete two-argument raw-C-string ABI while
 current generated callers pass pointer/length pairs. GDB observed libc
 `strlen` dereferencing `0x1b`. Current runtime source already has the four-
 argument ABI, so the stale executable must not be used as verification evidence.
+
+The partial/header-only hypothesis was falsified by focused native probes:
+`Dict<text, Module>.get()` corrupts struct-valued hit payloads, while
+`Dict.len()` returns `-1` for ordinary dictionaries. The repair therefore uses
+`contains_key` plus bracket indexing, removes the invalid `len() < 0` gates and
+the missing module-registry experiment, and completes one depth-bounded glob
+surface walker. Enum definitions now follow that same registration path in
+normal and entry-closure bootstrap lowering. Trait defaults remain local to
+each lowering symbol table. Focused regressions cover transitive star facades,
+dotted bare exports, export aliases, conflicting enum aliases, and imported
+trait aliases/defaults.
+
+The retained Stage 3 compiler rebuilt the current
+`src/app/cli/bootstrap_main.spl` closure with
+`SIMPLE_NO_STUB_FALLBACK=1`: 9 modules compiled, 682 came from the preserved
+cache, zero failed, and `build/mini_builds/hir_facade_bootstrap_v3` passed its
+help/sanity entry. The run took 2:47.78 wall time and peaked at 944,796 KiB RSS.
+This is focused diagnostic evidence, not a replacement for the strict full-CLI
+run.
 
 ## Required Fix
 

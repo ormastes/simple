@@ -183,19 +183,21 @@ fn parse_export_decl() -> i64:
     var names: [text] = []
     val first_name = par_text_get()
     parser_expect(6)
-    # G9: export X.* or export X.{names} — glob/brace re-export
-    if par_kind_get() == 164:
+    var export_name = first_name
+    for i in 0..10000:
+        if par_kind_get() != TOK_DOT:
+            break
         parser_advance()  # consume '.'
-        # Wildcard: export X.*
-        if par_kind_get() == 62:
+        # Wildcard: export foo.bar.*
+        if par_kind_get() == TOK_STAR:
             parser_advance()  # consume '*'
-            names.push(first_name + ".*")
+            names.push(export_name + ".*")
             return decl_export_names(names, 0)
         # Brace list: export X.{a, b}  (treat as export use X.{a,b})
         if par_kind_get() == 142:
             var brace_names: [text] = []
             parser_advance()  # consume '{'
-            for i in 0..10000:
+            for j in 0..10000:
                 val at_rb: bool = par_kind_get() == 143
                 if at_rb:
                     break
@@ -208,22 +210,44 @@ fn parse_export_decl() -> i64:
                     parser_advance()
             if par_kind_get() == 143:
                 parser_advance()  # consume '}'
-            return decl_use_import(first_name, brace_names, 0)
+            return decl_use_import(export_name, brace_names, 0)
+        val kw_seg: text = use_kw_segment_text(par_kind_get())
+        if kw_seg != "":
+            export_name = export_name + "." + kw_seg
+            parser_advance()
+        else:
+            export_name = export_name + "." + par_text_get()
+            parser_expect(6)
     # Support aliasing: name as alias
     val first_is_as: bool = par_kind_get() == TOK_KW_AS
     if first_is_as:
         parser_advance()  # consume "as"
         val first_alias = par_text_get()
         parser_advance()  # consume alias
-        names.push(first_name + ":" + first_alias)
+        names.push(export_name + ":" + first_alias)
     else:
-        names.push(first_name)
+        names.push(export_name)
     for i in 0..10000:
         if par_kind_get() != 160:
             break
         parser_advance()
-        val loop_name = par_text_get()
+        var loop_name = par_text_get()
         parser_expect(6)
+        for j in 0..10000:
+            if par_kind_get() != TOK_DOT:
+                break
+            parser_advance()  # consume '.'
+            if par_kind_get() == TOK_STAR:
+                parser_advance()  # consume '*'
+                loop_name = loop_name + ".*"
+                break
+            val loop_kw_seg: text = use_kw_segment_text(par_kind_get())
+            if loop_kw_seg != "":
+                loop_name = loop_name + "." + loop_kw_seg
+                parser_advance()
+            else:
+                loop_name = loop_name + "." + par_text_get()
+                parser_expect(6)
         # Support aliasing: name as alias
         val loop_is_as: bool = par_kind_get() == TOK_KW_AS
         if loop_is_as:

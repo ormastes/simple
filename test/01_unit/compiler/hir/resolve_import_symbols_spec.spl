@@ -8,6 +8,7 @@ requested source module even when another loaded module exports the same name.
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.{SymbolKind}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.common.config.{Logger}
 
@@ -64,12 +65,9 @@ describe "resolve_import_symbols 2-pass import resolver":
 
         val sym = hir_consumer.symbols.get_symbol(resolved_id)
         expect(sym.?).to_equal(true)
-
-        if val sym_value = sym:
-            val defining_mod = sym_value.defining_module
-            expect(defining_mod.?).to_equal(true)
-            # Must resolve to module A (the explicit import target), not B
-            expect(defining_mod.unwrap()).to_equal(path_a)
+        expect(sym.unwrap().defining_module.?).to_equal(true)
+        # Must resolve to module A (the explicit import target), not B
+        expect(sym.unwrap().defining_module.unwrap()).to_equal(path_a)
 
     it "glob import pre-registers all type symbols from imported module":
         val log = make_logger()
@@ -102,42 +100,187 @@ describe "resolve_import_symbols 2-pass import resolver":
         val inner = parse_full_frontend("struct InnerType:\n    value: i64\npub fn inner_fn() -> i64:\n    42", "pkg.inner", "pkg.inner", log)
         val facade = parse_full_frontend("use pkg.inner.*\nexport InnerType, inner_fn", "pkg.facade", "pkg.facade", log)
         val consumer = parse_full_frontend("use pkg.facade.*\nfn main() -> i64:\n    inner_fn()", "consumer_facade", "consumer_facade", log)
-
         var modules: Dict<text, any> = {}
         modules["pkg.inner"] = inner
         modules["pkg.facade"] = facade
-
         var lowering = HirLowering.with_filename("consumer_facade")
         lowering.modules_by_name = modules
         val hir = lowering.lower_module(consumer)
 
         expect(hir.symbols.lookup("InnerType").?).to_equal(true)
         expect(hir.symbols.lookup("inner_fn").?).to_equal(true)
-        expect(hir.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)
 
     it "follows an aliased compatibility re-export to its defining class":
         val log = make_logger()
         val provider = parse_full_frontend("class AccessResult:\n    value: text", "shared.access", "shared.access", log)
         val facade = parse_full_frontend("export use shared.access.{AccessResult as T32BridgeResult}", "compat.types", "compat.types", log)
         val consumer = parse_full_frontend("use compat.types.{T32BridgeResult}\nfn main(value: T32BridgeResult) -> T32BridgeResult:\n    value", "compat.consumer", "compat.consumer", log)
-
         var modules: Dict<text, any> = {}
         modules["shared.access"] = provider
         modules["compat.types"] = facade
-
         var lowering = HirLowering.with_filename("compat.consumer")
         lowering.modules_by_name = modules
         val hir = lowering.lower_module(consumer)
 
         expect(hir.symbols.lookup("T32BridgeResult").?).to_equal(true)
-        expect(hir.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)
 
     it "binds the mutable me receiver in a prefixed class method":
         val log = make_logger()
         val module = parse_full_frontend("class Box:\n    value: i64\n    me set(next: i64) -> i64:\n        me.value = next\n        me.value", "me_receiver", "me_receiver", log)
-        val hir = HirLowering.with_filename("me_receiver").lower_module(module)
+        var lowering = HirLowering.with_filename("me_receiver")
+        val hir = lowering.lower_module(module)
 
-        expect(hir.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "glob import traverses a facade star import":
+        val log = make_logger()
+        val leaf = parse_full_frontend("struct FacadeType:\n    value: i64\npub fn facade_answer() -> i64:\n    42", "leaf", "leaf", log)
+        val facade = parse_full_frontend("use leaf.*", "facade", "facade", log)
+        val consumer = parse_full_frontend("use facade.*", "facade_consumer", "facade_consumer", log)
+        var modules: Dict<text, any> = {}
+        modules["leaf"] = leaf
+        modules["facade"] = facade
+        var lowering = HirLowering.with_filename("facade_consumer")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        expect(hir.symbols.lookup("FacadeType").?).to_equal(true)
+        expect(hir.symbols.lookup("facade_answer").?).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "named import resolves through a dotted bare child glob export":
+        val log = make_logger()
+        val child = parse_full_frontend("pub fn child_answer() -> i64:\n    42", "pkg.nested.child", "pkg.nested.child", log)
+        val facade = parse_full_frontend("export nested.child.*", "pkg.__init__", "pkg.__init__", log)
+        val consumer = parse_full_frontend("use pkg." + "{" + "child_answer" + "}", "export_consumer", "export_consumer", log)
+        var modules: Dict<text, any> = {}
+        modules["pkg.__init__"] = facade
+        modules["pkg.nested.child"] = child
+        var lowering = HirLowering.with_filename("export_consumer")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        expect(hir.symbols.lookup("child_answer").?).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "resolves a sibling export from a non-init facade":
+        val log = make_logger()
+        val sibling = parse_full_frontend("pub fn sibling_answer() -> i64:\n    42", "pkg.args", "pkg.args", log)
+        val facade = parse_full_frontend("export args.*", "pkg.mod", "pkg.mod", log)
+        val consumer = parse_full_frontend("use pkg.mod.{sibling_answer}", "sibling_consumer", "sibling_consumer", log)
+        var modules: Dict<text, any> = {}
+        modules["pkg.args"] = sibling
+        modules["pkg.mod"] = facade
+        var lowering = HirLowering.with_filename("sibling_consumer")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        expect(hir.symbols.lookup("sibling_answer").?).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "aliased trait import lowers defaults with the local symbol":
+        val log = make_logger()
+        val provider = parse_full_frontend("trait Greeter:\n    fn greet(self) -> i64:\n        42", "trait_provider", "trait_provider", log)
+        val consumer = parse_full_frontend("use trait_provider." + "{" + "Greeter as G" + "}", "trait_consumer", "trait_consumer", log)
+        var modules: Dict<text, any> = {}
+        modules["trait_provider"] = provider
+        var lowering = HirLowering.with_filename("trait_consumer")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        expect(hir.symbols.lookup("G").?).to_equal(true)
+        expect(lowering.lowered_traits.contains_key("G")).to_equal(true)
+        val trait_hir = lowering.lowered_traits["G"]
+        expect(trait_hir.defaults.len()).to_equal(1)
+        expect(trait_hir.defaults[0].name).to_equal("greet")
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "keeps an alias distinct after an unaliased trait collision":
+        val log = make_logger()
+        val left = parse_full_frontend("trait Shared:\n    fn left(self) -> i64:\n        1", "left_traits", "left_traits", log)
+        val right = parse_full_frontend("trait Shared:\n    fn right(self) -> i64:\n        2", "right_traits", "right_traits", log)
+        val consumer = parse_full_frontend("use left_traits.{Shared}\nuse right_traits.{Shared}\nuse right_traits.{Shared as RightShared}", "trait_aliases", "trait_aliases", log)
+        var modules: Dict<text, any> = {}
+        modules["left_traits"] = left
+        modules["right_traits"] = right
+        var lowering = HirLowering.with_filename("trait_aliases")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        val left_id = hir.symbols.lookup("Shared")
+        val right_id = hir.symbols.lookup("RightShared")
+        expect(left_id.?).to_equal(true)
+        expect(right_id.?).to_equal(true)
+        expect(left_id.unwrap().id == right_id.unwrap().id).to_equal(false)
+        expect(lowering.lowered_traits.contains_key("Shared")).to_equal(true)
+        expect(lowering.lowered_traits.contains_key("RightShared")).to_equal(true)
+        expect(lowering.lowered_traits["Shared"].defaults[0].name).to_equal("left")
+        expect(lowering.lowered_traits["RightShared"].defaults[0].name).to_equal("right")
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "resolves a named export alias":
+        val log = make_logger()
+        val provider = parse_full_frontend("pub struct Foo:\n    value: i64\nexport Foo as Bar", "export_alias", "export_alias", log)
+        val consumer = parse_full_frontend("use export_alias.{Bar}", "export_alias_consumer", "export_alias_consumer", log)
+        var modules: Dict<text, any> = {}
+        modules["export_alias"] = provider
+        var lowering = HirLowering.with_filename("export_alias_consumer")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        val bar_id = hir.symbols.lookup("Bar")
+        expect(bar_id.?).to_equal(true)
+        val bar = hir.symbols.get_symbol(bar_id)
+        expect(bar.?).to_equal(true)
+        expect(bar.unwrap().kind).to_equal(SymbolKind.Struct)
+        expect(bar.unwrap().defining_module.unwrap()).to_equal("export_alias")
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "resolves an aliased enum":
+        val log = make_logger()
+        val provider = parse_full_frontend("pub enum Color:\n    Red\n    Blue", "enum_provider", "enum_provider", log)
+        val other = parse_full_frontend("pub enum Hue:\n    Light\n    Dark", "enum_other", "enum_other", log)
+        val consumer = parse_full_frontend("use enum_provider.{Color as Shade}\nuse enum_other.{Hue as Shade}", "enum_consumer", "enum_consumer", log)
+        var modules: Dict<text, any> = {}
+        modules["enum_provider"] = provider
+        modules["enum_other"] = other
+        var lowering = HirLowering.with_filename("enum_consumer")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        val shade_id = hir.symbols.lookup("Shade")
+        expect(shade_id.?).to_equal(true)
+        val shade = hir.symbols.get_symbol(shade_id)
+        expect(shade.?).to_equal(true)
+        expect(shade.unwrap().name).to_equal("Color")
+        expect(shade.unwrap().kind).to_equal(SymbolKind.Enum)
+        expect(shade.unwrap().defining_module.unwrap()).to_equal("enum_provider")
+        expect(hir.enums.contains_key(shade_id.unwrap())).to_equal(true)
+        expect(hir.enums[shade_id.unwrap()].name).to_equal("Color")
+        expect(lowering.errors.len()).to_equal(0)
+
+    it "resolves an enum through a facade":
+        val log = make_logger()
+        val leaf = parse_full_frontend("pub enum LeafState:\n    Ready\n    Done", "enum_leaf", "enum_leaf", log)
+        val facade = parse_full_frontend("use enum_leaf.{LeafState}", "enum_facade", "enum_facade", log)
+        val consumer = parse_full_frontend("use enum_facade.{LeafState}", "enum_facade_consumer", "enum_facade_consumer", log)
+        var modules: Dict<text, any> = {}
+        modules["enum_leaf"] = leaf
+        modules["enum_facade"] = facade
+        var lowering = HirLowering.with_filename("enum_facade_consumer")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        val state_id = hir.symbols.lookup("LeafState")
+        expect(state_id.?).to_equal(true)
+        val state = hir.symbols.get_symbol(state_id)
+        expect(state.?).to_equal(true)
+        expect(state.unwrap().kind).to_equal(SymbolKind.Enum)
+        expect(state.unwrap().defining_module.unwrap()).to_equal("enum_leaf")
+        expect(hir.enums.contains_key(state_id.unwrap())).to_equal(true)
+        expect(lowering.errors.len()).to_equal(0)
 
     it "aliased imports keep same-named structs from different modules distinct":
         val log = make_logger()
@@ -172,13 +315,11 @@ describe "resolve_import_symbols 2-pass import resolver":
 
         val driver_sym = hir.symbols.get_symbol(driver_id)
         val backend_sym = hir.symbols.get_symbol(backend_id)
-        if val driver_value = driver_sym:
-            expect(driver_value.defining_module.unwrap()).to_equal(path_driver)
-        if val backend_value = backend_sym:
-            expect(backend_value.defining_module.unwrap()).to_equal(path_backend)
-        if val driver_symbol_id = driver_id:
-            if val backend_symbol_id = backend_id:
-                assert_not_equal(driver_symbol_id.id, backend_symbol_id.id)
+        expect(driver_sym.?).to_equal(true)
+        expect(backend_sym.?).to_equal(true)
+        expect(driver_sym.unwrap().defining_module.unwrap()).to_equal(path_driver)
+        expect(backend_sym.unwrap().defining_module.unwrap()).to_equal(path_backend)
+        expect(driver_id.unwrap().id == backend_id.unwrap().id).to_equal(false)
 
     it "resolves a module-qualified imported function call":
         val log = make_logger()
@@ -191,22 +332,24 @@ describe "resolve_import_symbols 2-pass import resolver":
         val hir = lowering.lower_module(consumer)
 
         expect(hir.symbols.lookup("provider").?).to_equal(true)
-        expect(hir.errors.len()).to_equal(0)
+        expect(lowering.errors.len()).to_equal(0)
+        var found_main = false
         for fn_ in hir.functions.values():
             if fn_.name == "main":
+                found_main = true
                 match fn_.body.stmts[0].kind:
                     case HirStmtKind.Expr(expr):
                         match expr.kind:
                             case HirExprKind.Call(callee, _, _):
                                 match callee.kind:
                                     case HirExprKind.NamedVar(symbol, _):
-                                        if val callable = hir.symbols.get_symbol(symbol):
-                                            expect(callable.defining_module.unwrap()).to_equal("provider")
-                                        else:
-                                            assert_true(false)
+                                        val callable = hir.symbols.get_symbol(symbol)
+                                        expect(callable.?).to_equal(true)
+                                        expect(callable.unwrap().defining_module.unwrap()).to_equal("provider")
                                     case _:
-                                        assert_true(false)
+                                        expect(false).to_equal(true)
                             case _:
-                                assert_true(false)
+                                expect(false).to_equal(true)
                     case _:
-                        assert_true(false)
+                        expect(false).to_equal(true)
+        expect(found_main).to_equal(true)
