@@ -217,6 +217,81 @@ describe "BrowserSession production security boundary":
         expect(warnings).to_contain("CSP blocked script: https://safe.test/app.js")
         expect(warnings).to_contain("CSP blocked fetch: https://safe.test/private")
 
+    # @req REQ-WEB-BROWSER-012
+    it "rechecks CSP before following style and script redirects":
+        var session = BrowserSession.new()
+        val started = session.begin_network_navigation(
+            "https://safe.test/app", "GET", "", "", ""
+        )
+        expect(started.is_ok()).to_be(true)
+        match session.take_pending_request():
+            Some(request):
+                val committed = session.commit_network_response(
+                    BrowserResponse.create(
+                        request_id: request.id,
+                        kind: request.kind,
+                        url: request.url,
+                        status: 200,
+                        headers: "Content-Security-Policy: style-src 'self'; script-src 'self'",
+                        body: "<html><head><link rel='stylesheet' href='/theme.css'></head><body><script src='/app.js'></script></body></html>",
+                        error: ""
+                    )
+                )
+                expect(committed.is_ok()).to_be(true)
+            nil:
+                fail("Expected CSP redirect document request")
+
+        match session.take_pending_request():
+            Some(style_request):
+                expect(style_request.kind).to_equal("style")
+                expect(style_request.url).to_equal(
+                    "https://safe.test/theme.css"
+                )
+                val redirected = session.commit_network_response(
+                    BrowserResponse.create(
+                        request_id: style_request.id,
+                        kind: style_request.kind,
+                        url: style_request.url,
+                        status: 302,
+                        headers: "Location: https://evil.test/theme.css",
+                        body: "",
+                        error: ""
+                    )
+                )
+                expect(redirected.is_ok()).to_be(true)
+            nil:
+                fail("Expected same-origin stylesheet request")
+
+        match session.take_pending_request():
+            Some(script_request):
+                expect(script_request.kind).to_equal("script")
+                expect(script_request.url).to_equal(
+                    "https://safe.test/app.js"
+                )
+                val redirected = session.commit_network_response(
+                    BrowserResponse.create(
+                        request_id: script_request.id,
+                        kind: script_request.kind,
+                        url: script_request.url,
+                        status: 302,
+                        headers: "Location: https://evil.test/app.js",
+                        body: "",
+                        error: ""
+                    )
+                )
+                expect(redirected.is_ok()).to_be(true)
+            nil:
+                fail("Expected same-origin script request")
+
+        expect(session.take_pending_request().is_none()).to_be(true)
+        val warnings = session.warnings.join("|")
+        expect(warnings).to_contain(
+            "stylesheet load error: CSP blocked redirect: https://evil.test/theme.css"
+        )
+        expect(warnings).to_contain(
+            "external script error: CSP blocked redirect: https://evil.test/app.js"
+        )
+
     it "upgrades HSTS hosts and subdomains until max-age expires":
         var session = BrowserSession.new()
         val started = session.begin_network_navigation(

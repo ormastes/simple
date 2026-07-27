@@ -726,3 +726,12 @@ implementation in progress / target evidence blocked
   planting, proves the attacker origin receives no planted cookie or storage,
   and proves the originating document retains its own writes. Runtime evidence
   remains target-compiler-blocked and was not rerun.
+- security/CSP redirects: Active style, classic-script, module, Wasm, and Fetch
+  redirects now re-evaluate the committed document's applicable CSP directive
+  against every normalized/HSTS-upgraded target before another request is
+  queued. HTTPS downgrade, redirect count, and origin checks remain layered.
+- evidence: Focused fail-fast coverage starts same-origin style/script loads
+  under `style-src 'self'; script-src 'self'`, redirects both to a hostile
+  origin, and requires zero redirected requests plus explicit CSP errors. The
+  mirrored security manual now covers all 20 scenarios. Runtime evidence
+  remains target-compiler-blocked and was not rerun.
