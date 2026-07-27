@@ -2,57 +2,57 @@ use std.skia.feature.glyph.ot_parser.{OtFont, find_table, read_u16_be, read_i16_
 use std.skia.feature.glyph.ot_parser_layout.GposLookup
 use std.skia.feature.shaper.ot_layout_context.LayoutGlyphRecord
 
-class _Hit:
+class GposDataHit:
     index: i64
     count: i64
     found: bool
     valid: bool
-class _Value:
+class GposDataValue:
     x_place: i64
     y_place: i64
     x_advance: i64
     y_advance: i64
     size: i64
     valid: bool
-class _Anchor:
+class GposDataAnchor:
     x: i64
     y: i64
     valid: bool
-class _Budget:
+class GposDataBudget:
     remaining: i64
 
-fn _budget(records: [LayoutGlyphRecord], lookups: [GposLookup]) -> _Budget:
+fn gpos_data_budget(records: [LayoutGlyphRecord], lookups: [GposLookup]) -> GposDataBudget:
     var limit = (records.len() + 1) * (lookups.len() + 1) * 64
     if limit > 65536: limit = 65536
-    _Budget(remaining: limit)
-fn _take(budget: _Budget) -> bool:
+    GposDataBudget(remaining: limit)
+fn gpos_data_take(budget: GposDataBudget) -> bool:
     if budget.remaining <= 0: return false
     budget.remaining = budget.remaining - 1
     true
-fn _take_many(budget: _Budget, count: i64) -> bool:
+fn _take_many(budget: GposDataBudget, count: i64) -> bool:
     if count < 0 or count > budget.remaining: return false
     budget.remaining = budget.remaining - count
     true
 
-fn _coverage(blob: [u8], offset: i64, limit: i64, glyph: u32, budget: _Budget) -> _Hit:
-    if offset < 0 or offset + 4 > limit: return _Hit(index: 0, count: 0, found: false, valid: false)
+fn gpos_data_coverage(blob: [u8], offset: i64, limit: i64, glyph: u32, budget: GposDataBudget) -> GposDataHit:
+    if offset < 0 or offset + 4 > limit: return GposDataHit(index: 0, count: 0, found: false, valid: false)
     val format = read_u16_be(blob, offset)
     val count = read_u16_be(blob, offset + 2) as i64
-    if count > 4096 or not _take_many(budget, count): return _Hit(index: 0, count: 0, found: false, valid: false)
+    if count > 4096 or not _take_many(budget, count): return GposDataHit(index: 0, count: 0, found: false, valid: false)
     if format == 1u32:
-        if offset + 4 + count * 2 > limit: return _Hit(index: 0, count: 0, found: false, valid: false)
+        if offset + 4 + count * 2 > limit: return GposDataHit(index: 0, count: 0, found: false, valid: false)
         var previous: i64 = -1
         var found: i64 = -1
         var i: i64 = 0
         while i < count:
             val value = read_u16_be(blob, offset + 4 + i * 2) as i64
-            if value <= previous: return _Hit(index: 0, count: 0, found: false, valid: false)
+            if value <= previous: return GposDataHit(index: 0, count: 0, found: false, valid: false)
             if value == glyph as i64: found = i
             previous = value
             i = i + 1
-        return _Hit(index: found, count: count, found: found >= 0, valid: true)
+        return GposDataHit(index: found, count: count, found: found >= 0, valid: true)
     if format == 2u32:
-        if offset + 4 + count * 6 > limit: return _Hit(index: 0, count: 0, found: false, valid: false)
+        if offset + 4 + count * 6 > limit: return GposDataHit(index: 0, count: 0, found: false, valid: false)
         var previous_end: i64 = -1
         var expected: i64 = 0
         var found: i64 = -1
@@ -63,32 +63,32 @@ fn _coverage(blob: [u8], offset: i64, limit: i64, glyph: u32, budget: _Budget) -
             val last = read_u16_be(blob, at + 2) as i64
             val first_index = read_u16_be(blob, at + 4) as i64
             if first > last or first <= previous_end or first_index != expected:
-                return _Hit(index: 0, count: 0, found: false, valid: false)
+                return GposDataHit(index: 0, count: 0, found: false, valid: false)
             expected = first_index + last - first + 1
-            if expected > 65536: return _Hit(index: 0, count: 0, found: false, valid: false)
+            if expected > 65536: return GposDataHit(index: 0, count: 0, found: false, valid: false)
             if glyph as i64 >= first and glyph as i64 <= last: found = first_index + glyph as i64 - first
             previous_end = last
             i = i + 1
-        return _Hit(index: found, count: expected, found: found >= 0, valid: true)
-    _Hit(index: 0, count: 0, found: false, valid: false)
+        return GposDataHit(index: found, count: expected, found: found >= 0, valid: true)
+    GposDataHit(index: 0, count: 0, found: false, valid: false)
 
-fn _class(blob: [u8], offset: i64, limit: i64, glyph: u32, budget: _Budget) -> _Hit:
-    if offset <= 0 or offset + 4 > limit: return _Hit(index: 0, count: 0, found: false, valid: false)
+fn gpos_data_class(blob: [u8], offset: i64, limit: i64, glyph: u32, budget: GposDataBudget) -> GposDataHit:
+    if offset <= 0 or offset + 4 > limit: return GposDataHit(index: 0, count: 0, found: false, valid: false)
     val format = read_u16_be(blob, offset)
     if format == 1u32:
-        if offset + 6 > limit: return _Hit(index: 0, count: 0, found: false, valid: false)
+        if offset + 6 > limit: return GposDataHit(index: 0, count: 0, found: false, valid: false)
         val start = read_u16_be(blob, offset + 2) as i64
         val count = read_u16_be(blob, offset + 4) as i64
-        if count > 4096 or not _take_many(budget, count): return _Hit(index: 0, count: 0, found: false, valid: false)
-        if offset + 6 + count * 2 > limit: return _Hit(index: 0, count: 0, found: false, valid: false)
+        if count > 4096 or not _take_many(budget, count): return GposDataHit(index: 0, count: 0, found: false, valid: false)
+        if offset + 6 + count * 2 > limit: return GposDataHit(index: 0, count: 0, found: false, valid: false)
         val index = glyph as i64 - start
-        if index < 0 or index >= count: return _Hit(index: 0, count: count, found: false, valid: true)
-        return _Hit(index: read_u16_be(blob, offset + 6 + index * 2) as i64,
+        if index < 0 or index >= count: return GposDataHit(index: 0, count: count, found: false, valid: true)
+        return GposDataHit(index: read_u16_be(blob, offset + 6 + index * 2) as i64,
             count: count, found: true, valid: true)
     if format == 2u32:
         val count = read_u16_be(blob, offset + 2) as i64
-        if count > 4096 or not _take_many(budget, count): return _Hit(index: 0, count: 0, found: false, valid: false)
-        if offset + 4 + count * 6 > limit: return _Hit(index: 0, count: 0, found: false, valid: false)
+        if count > 4096 or not _take_many(budget, count): return GposDataHit(index: 0, count: 0, found: false, valid: false)
+        if offset + 4 + count * 6 > limit: return GposDataHit(index: 0, count: 0, found: false, valid: false)
         var previous: i64 = -1
         var result: i64 = 0
         var i: i64 = 0
@@ -96,15 +96,15 @@ fn _class(blob: [u8], offset: i64, limit: i64, glyph: u32, budget: _Budget) -> _
             val at = offset + 4 + i * 6
             val first = read_u16_be(blob, at) as i64
             val last = read_u16_be(blob, at + 2) as i64
-            if first > last or first <= previous: return _Hit(index: 0, count: 0, found: false, valid: false)
+            if first > last or first <= previous: return GposDataHit(index: 0, count: 0, found: false, valid: false)
             if glyph as i64 >= first and glyph as i64 <= last:
                 result = read_u16_be(blob, at + 4) as i64
             previous = last
             i = i + 1
-        return _Hit(index: result, count: count, found: result != 0, valid: true)
-    _Hit(index: 0, count: 0, found: false, valid: false)
+        return GposDataHit(index: result, count: count, found: result != 0, valid: true)
+    GposDataHit(index: 0, count: 0, found: false, valid: false)
 
-fn _class_valid(blob: [u8], offset: i64, limit: i64, class_count: i64, budget: _Budget) -> bool:
+fn gpos_data_class_valid(blob: [u8], offset: i64, limit: i64, class_count: i64, budget: GposDataBudget) -> bool:
     if class_count <= 0 or offset <= 0 or offset + 4 > limit: return false
     val format = read_u16_be(blob, offset)
     if format == 1u32:
@@ -132,7 +132,7 @@ fn _class_valid(blob: [u8], offset: i64, limit: i64, class_count: i64, budget: _
         return true
     false
 
-fn _coverage_end(blob: [u8], offset: i64, limit: i64) -> i64:
+fn gpos_data_coverage_end(blob: [u8], offset: i64, limit: i64) -> i64:
     if offset + 4 > limit: return -1
     val count = read_u16_be(blob, offset + 2) as i64
     val end = if read_u16_be(blob, offset) == 1u32:
@@ -142,7 +142,7 @@ fn _coverage_end(blob: [u8], offset: i64, limit: i64) -> i64:
     else:
         -1
     if end > limit: -1 else: end
-fn _class_end(blob: [u8], offset: i64, limit: i64) -> i64:
+fn gpos_data_class_end(blob: [u8], offset: i64, limit: i64) -> i64:
     if offset + 4 > limit: return -1
     val format = read_u16_be(blob, offset)
     val end = if format == 1u32:
@@ -151,12 +151,12 @@ fn _class_end(blob: [u8], offset: i64, limit: i64) -> i64:
         offset + 4 + read_u16_be(blob, offset + 2) as i64 * 6
     else: -1
     if end > limit: -1 else: end
-fn _overlap(a0: i64, a1: i64, b0: i64, b1: i64) -> bool:
+fn gpos_data_overlap(a0: i64, a1: i64, b0: i64, b1: i64) -> bool:
     a0 < b1 and b0 < a1
 
-fn _value(blob: [u8], offset: i64, limit: i64, format: u32) -> _Value:
+fn gpos_data_value(blob: [u8], offset: i64, limit: i64, format: u32) -> GposDataValue:
     if (format & 65280u32) != 0u32:
-        return _Value(x_place: 0, y_place: 0, x_advance: 0, y_advance: 0, size: 0, valid: false)
+        return GposDataValue(x_place: 0, y_place: 0, x_advance: 0, y_advance: 0, size: 0, valid: false)
     var cursor = offset
     var x_place: i64 = 0
     var y_place: i64 = 0
@@ -166,10 +166,10 @@ fn _value(blob: [u8], offset: i64, limit: i64, format: u32) -> _Value:
     while bit <= 128u32:
         if (format & bit) != 0u32:
             if cursor + 2 > limit:
-                return _Value(x_place: 0, y_place: 0, x_advance: 0, y_advance: 0, size: 0, valid: false)
+                return GposDataValue(x_place: 0, y_place: 0, x_advance: 0, y_advance: 0, size: 0, valid: false)
             val raw = read_u16_be(blob, cursor)
             if bit >= 16u32 and raw != 0u32:
-                return _Value(x_place: 0, y_place: 0, x_advance: 0, y_advance: 0, size: 0, valid: false)
+                return GposDataValue(x_place: 0, y_place: 0, x_advance: 0, y_advance: 0, size: 0, valid: false)
             val value = read_i16_be(blob, cursor) as i64
             if bit == 1u32: x_place = value
             else if bit == 2u32: y_place = value
@@ -177,59 +177,59 @@ fn _value(blob: [u8], offset: i64, limit: i64, format: u32) -> _Value:
             else if bit == 8u32: y_advance = value
             cursor = cursor + 2
         bit = bit * 2u32
-    _Value(x_place: x_place, y_place: y_place, x_advance: x_advance,
+    GposDataValue(x_place: x_place, y_place: y_place, x_advance: x_advance,
         y_advance: y_advance, size: cursor - offset, valid: true)
 
-fn _anchor(blob: [u8], offset: i64, limit: i64, budget: _Budget) -> _Anchor:
-    if not _take(budget) or offset <= 0 or offset + 6 > limit or read_u16_be(blob, offset) != 1u32:
-        return _Anchor(x: 0, y: 0, valid: false)
-    _Anchor(x: read_i16_be(blob, offset + 2) as i64,
+fn gpos_data_anchor(blob: [u8], offset: i64, limit: i64, budget: GposDataBudget) -> GposDataAnchor:
+    if not gpos_data_take(budget) or offset <= 0 or offset + 6 > limit or read_u16_be(blob, offset) != 1u32:
+        return GposDataAnchor(x: 0, y: 0, valid: false)
+    GposDataAnchor(x: read_i16_be(blob, offset + 2) as i64,
         y: read_i16_be(blob, offset + 4) as i64, valid: true)
 
-fn _glyph_class(font: OtFont, glyph: u32, budget: _Budget) -> _Hit:
+fn gpos_data_glyph_class(font: OtFont, glyph: u32, budget: GposDataBudget) -> GposDataHit:
     val table = match find_table(font, 1195656006u32):
         Some(value): value
-        None: return _Hit(index: 0, count: 0, found: false, valid: false)
+        None: return GposDataHit(index: 0, count: 0, found: false, valid: false)
     val base = table.offset as i64
     val limit = base + table.length as i64
-    if base + 12 > limit: return _Hit(index: 0, count: 0, found: false, valid: false)
+    if base + 12 > limit: return GposDataHit(index: 0, count: 0, found: false, valid: false)
     val offset = read_u16_be(font.blob, base + 4) as i64
-    if offset == 0: return _Hit(index: 0, count: 0, found: false, valid: false)
-    _class(font.blob, base + offset, limit, glyph, budget)
-fn _in_mark_set(font: OtFont, set: i64, glyph: u32, budget: _Budget) -> _Hit:
+    if offset == 0: return GposDataHit(index: 0, count: 0, found: false, valid: false)
+    gpos_data_class(font.blob, base + offset, limit, glyph, budget)
+fn gpos_data_in_mark_set(font: OtFont, set: i64, glyph: u32, budget: GposDataBudget) -> GposDataHit:
     val table = match find_table(font, 1195656006u32):
         Some(value): value
-        None: return _Hit(index: 0, count: 0, found: false, valid: false)
+        None: return GposDataHit(index: 0, count: 0, found: false, valid: false)
     val base = table.offset as i64
     val limit = base + table.length as i64
-    if base + 14 > limit: return _Hit(index: 0, count: 0, found: false, valid: false)
+    if base + 14 > limit: return GposDataHit(index: 0, count: 0, found: false, valid: false)
     val version = read_u32_be(font.blob, base)
-    if version < 65538u32: return _Hit(index: 0, count: 0, found: false, valid: false)
+    if version < 65538u32: return GposDataHit(index: 0, count: 0, found: false, valid: false)
     val offset = read_u16_be(font.blob, base + 12) as i64
     if offset == 0 or base + offset + 4 > limit:
-        return _Hit(index: 0, count: 0, found: false, valid: false)
+        return GposDataHit(index: 0, count: 0, found: false, valid: false)
     val defs = base + offset
     if read_u16_be(font.blob, defs) != 1u32:
-        return _Hit(index: 0, count: 0, found: false, valid: false)
+        return GposDataHit(index: 0, count: 0, found: false, valid: false)
     val count = read_u16_be(font.blob, defs + 2) as i64
     if set < 0 or set >= count or defs + 4 + count * 4 > limit:
-        return _Hit(index: 0, count: 0, found: false, valid: false)
+        return GposDataHit(index: 0, count: 0, found: false, valid: false)
     val coverage_offset = read_u32_be(font.blob, defs + 4 + set * 4) as i64
-    if coverage_offset == 0: return _Hit(index: 0, count: 0, found: false, valid: false)
-    _coverage(font.blob, defs + coverage_offset, limit, glyph, budget)
-fn _eligible(font: OtFont, lookup: GposLookup, glyph: u32, budget: _Budget) -> _Hit:
+    if coverage_offset == 0: return GposDataHit(index: 0, count: 0, found: false, valid: false)
+    gpos_data_coverage(font.blob, defs + coverage_offset, limit, glyph, budget)
+fn gpos_data_eligible(font: OtFont, lookup: GposLookup, glyph: u32, budget: GposDataBudget) -> GposDataHit:
     if lookup.flag != 0u32 and lookup.flag != 8u32 and lookup.flag != 16u32 and lookup.flag != 24u32:
-        return _Hit(index: 0, count: 0, found: false, valid: false)
-    if lookup.flag == 0u32: return _Hit(index: 0, count: 0, found: true, valid: true)
-    val glyph_class = _glyph_class(font, glyph, budget)
+        return GposDataHit(index: 0, count: 0, found: false, valid: false)
+    if lookup.flag == 0u32: return GposDataHit(index: 0, count: 0, found: true, valid: true)
+    val glyph_class = gpos_data_glyph_class(font, glyph, budget)
     if not glyph_class.valid: return glyph_class
     if (lookup.flag & 8u32) != 0u32 and glyph_class.index == 3:
-        return _Hit(index: 0, count: 0, found: false, valid: true)
+        return GposDataHit(index: 0, count: 0, found: false, valid: true)
     if (lookup.flag & 16u32) != 0u32 and glyph_class.index == 3:
-        return _in_mark_set(font, lookup.mark_filtering_set, glyph, budget)
-    _Hit(index: 0, count: 0, found: true, valid: true)
+        return gpos_data_in_mark_set(font, lookup.mark_filtering_set, glyph, budget)
+    GposDataHit(index: 0, count: 0, found: true, valid: true)
 
-export _Hit, _Value, _Anchor, _Budget
-export _budget, _take, _take_many, _coverage, _class, _class_valid
-export _coverage_end, _class_end, _overlap, _value, _anchor
-export _glyph_class, _in_mark_set, _eligible
+export GposDataHit, GposDataValue, GposDataAnchor, GposDataBudget
+export gpos_data_budget, gpos_data_take, gpos_data_coverage, gpos_data_class, gpos_data_class_valid
+export gpos_data_coverage_end, gpos_data_class_end, gpos_data_overlap, gpos_data_value, gpos_data_anchor
+export gpos_data_glyph_class, gpos_data_in_mark_set, gpos_data_eligible

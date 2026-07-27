@@ -1,9 +1,11 @@
 use std.skia.feature.glyph.ot_parser.{OtFont, read_u16_be, read_u32_be}
 use std.skia.feature.glyph.ot_parser_layout.{GposLookup, LayoutLookupActivation}
 use std.skia.feature.shaper.ot_layout_context.{LayoutGlyphRecord, LayoutApplyResult}
-use std.skia.feature.shaper.ot_layout_gpos_data.{_Hit, _Value, _Budget, _budget, _take,
-    _coverage, _class, _class_valid, _coverage_end, _class_end, _overlap, _value,
-    _anchor, _glyph_class, _in_mark_set, _eligible}
+use std.skia.feature.shaper.ot_layout_gpos_data.{GposDataValue, GposDataBudget,
+    gpos_data_budget, gpos_data_take, gpos_data_coverage, gpos_data_class,
+    gpos_data_class_valid, gpos_data_coverage_end, gpos_data_class_end,
+    gpos_data_overlap, gpos_data_value, gpos_data_anchor, gpos_data_glyph_class,
+    gpos_data_in_mark_set, gpos_data_eligible}
 class _Step:
     next: i64
     valid: bool
@@ -36,27 +38,27 @@ fn _extension(blob: [u8], subtable: i64, limit: i64) -> _Extension:
         target < subtable or target + 2 > limit):
         return _Extension(kind: 0u32, subtable: 0, valid: false)
     _Extension(kind: kind, subtable: target, valid: true)
-fn _add(record: LayoutGlyphRecord, value: _Value):
+fn _add(record: LayoutGlyphRecord, value: GposDataValue):
     record.x_offset_units = record.x_offset_units + value.x_place
     record.y_offset_units = record.y_offset_units + value.y_place
     record.x_advance_units = record.x_advance_units + value.x_advance
     record.y_advance_units = record.y_advance_units + value.y_advance
-fn _next(font: OtFont, lookup: GposLookup, records: [LayoutGlyphRecord], start: i64, budget: _Budget) -> _Step:
+fn _next(font: OtFont, lookup: GposLookup, records: [LayoutGlyphRecord], start: i64, budget: GposDataBudget) -> _Step:
     var index = start
     while index < records.len():
-        if not _take(budget): return _Step(next: 0, valid: false)
-        val eligible = _eligible(font, lookup, records[index].glyph_id, budget)
+        if not gpos_data_take(budget): return _Step(next: 0, valid: false)
+        val eligible = gpos_data_eligible(font, lookup, records[index].glyph_id, budget)
         if not eligible.valid: return _Step(next: 0, valid: false)
         if eligible.found: return _Step(next: index, valid: true)
         index = index + 1
     _Step(next: -1, valid: true)
-fn _pair(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records: [LayoutGlyphRecord], index: i64, budget: _Budget) -> bool:
+fn _pair(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records: [LayoutGlyphRecord], index: i64, budget: GposDataBudget) -> bool:
     if sub + 10 > limit: return false
     val format = read_u16_be(font.blob, sub)
     val coverage_offset = read_u16_be(font.blob, sub + 2) as i64
     val vf1 = read_u16_be(font.blob, sub + 4)
     val vf2 = read_u16_be(font.blob, sub + 6)
-    val first = _coverage(font.blob, sub + coverage_offset, limit, records[index].glyph_id, budget)
+    val first = gpos_data_coverage(font.blob, sub + coverage_offset, limit, records[index].glyph_id, budget)
     if coverage_offset == 0 or not first.valid: return false
     if not first.found: return true
     val second = _next(font, lookup, records, index + 1, budget)
@@ -73,13 +75,13 @@ fn _pair(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records: [Layou
         var previous: i64 = -1
         var i: i64 = 0
         while i < pairs:
-            if not _take(budget): return false
+            if not gpos_data_take(budget): return false
             if cursor + 2 > limit: return false
             val glyph = read_u16_be(font.blob, cursor)
             if glyph as i64 <= previous: return false
             previous = glyph as i64
-            val one = _value(font.blob, cursor + 2, limit, vf1)
-            val two = _value(font.blob, cursor + 2 + one.size, limit, vf2)
+            val one = gpos_data_value(font.blob, cursor + 2, limit, vf1)
+            val two = gpos_data_value(font.blob, cursor + 2 + one.size, limit, vf2)
             if not one.valid or not two.valid: return false
             if glyph == records[second.next].glyph_id:
                 _add(records[index], one); _add(records[second.next], two); return true
@@ -94,43 +96,43 @@ fn _pair(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records: [Layou
         val class2 = sub + class2_offset
         val c1count = read_u16_be(font.blob, sub + 12) as i64
         val c2count = read_u16_be(font.blob, sub + 14) as i64
-        val one = _value(font.blob, sub + 16, limit, vf1)
-        val two = _value(font.blob, sub + 16 + one.size, limit, vf2)
+        val one = gpos_data_value(font.blob, sub + 16, limit, vf1)
+        val two = gpos_data_value(font.blob, sub + 16 + one.size, limit, vf2)
         if (class1_offset == 0 or class2_offset == 0 or c1count <= 0 or c2count <= 0 or
             not one.valid or not two.valid or sub + 16 + (one.size + two.size) * c1count * c2count > limit or
-            not _class_valid(font.blob, class1, limit, c1count, budget) or
-            not _class_valid(font.blob, class2, limit, c2count, budget)): return false
-        val first_class = _class(font.blob, class1, limit, records[index].glyph_id, budget)
-        val second_class = _class(font.blob, class2, limit, records[second.next].glyph_id, budget)
+            not gpos_data_class_valid(font.blob, class1, limit, c1count, budget) or
+            not gpos_data_class_valid(font.blob, class2, limit, c2count, budget)): return false
+        val first_class = gpos_data_class(font.blob, class1, limit, records[index].glyph_id, budget)
+        val second_class = gpos_data_class(font.blob, class2, limit, records[second.next].glyph_id, budget)
         if not first_class.valid or not second_class.valid or first_class.index >= c1count or second_class.index >= c2count: return false
         val at = sub + 16 + (first_class.index * c2count + second_class.index) * (one.size + two.size)
-        val value1 = _value(font.blob, at, limit, vf1)
-        val value2 = _value(font.blob, at + value1.size, limit, vf2)
+        val value1 = gpos_data_value(font.blob, at, limit, vf1)
+        val value2 = gpos_data_value(font.blob, at + value1.size, limit, vf2)
         if not value1.valid or not value2.valid: return false
         _add(records[index], value1); _add(records[second.next], value2); true
     else: false
-fn _mark(font: OtFont, lookup: GposLookup, kind: u32, sub: i64, limit: i64, records: [LayoutGlyphRecord], index: i64, budget: _Budget) -> bool:
+fn _mark(font: OtFont, lookup: GposLookup, kind: u32, sub: i64, limit: i64, records: [LayoutGlyphRecord], index: i64, budget: GposDataBudget) -> bool:
     if sub + 12 > limit or read_u16_be(font.blob, sub) != 1u32: return false
     val mark_cov = read_u16_be(font.blob, sub + 2) as i64
     val target_cov = read_u16_be(font.blob, sub + 4) as i64
     val classes = read_u16_be(font.blob, sub + 6) as i64
     val mark_array = sub + read_u16_be(font.blob, sub + 8) as i64
     val target_array = sub + read_u16_be(font.blob, sub + 10) as i64
-    val mark = _coverage(font.blob, sub + mark_cov, limit, records[index].glyph_id, budget)
+    val mark = gpos_data_coverage(font.blob, sub + mark_cov, limit, records[index].glyph_id, budget)
     if mark_cov == 0 or target_cov == 0 or not mark.valid or not mark.found or mark_array + 2 > limit: return mark.valid
     val mark_count = read_u16_be(font.blob, mark_array) as i64
     if mark.count != mark_count or mark.index < 0 or mark.index >= mark_count or mark_array + 2 + mark_count * 4 > limit: return false
     val mark_class = read_u16_be(font.blob, mark_array + 2 + mark.index * 4) as i64
-    val mark_anchor = _anchor(font.blob,
+    val mark_anchor = gpos_data_anchor(font.blob,
         mark_array + read_u16_be(font.blob, mark_array + 4 + mark.index * 4) as i64, limit, budget)
     if mark_class < 0 or mark_class >= classes or not mark_anchor.valid: return false
     var candidate = index - 1
     while candidate >= 0:
-        if not _take(budget): return false
-        val eligible = _eligible(font, lookup, records[candidate].glyph_id, budget)
+        if not gpos_data_take(budget): return false
+        val eligible = gpos_data_eligible(font, lookup, records[candidate].glyph_id, budget)
         if not eligible.valid: return false
         if eligible.found:
-            val target = _coverage(font.blob, sub + target_cov, limit, records[candidate].glyph_id, budget)
+            val target = gpos_data_coverage(font.blob, sub + target_cov, limit, records[candidate].glyph_id, budget)
             if not target.valid: return false
             if target.found:
                 var anchor_offset: i64 = 0
@@ -150,7 +152,7 @@ fn _mark(font: OtFont, lookup: GposLookup, kind: u32, sub: i64, limit: i64, reco
                     var component_cluster: i64 = -1
                     var component_index: i64 = 0
                     while component_index < components:
-                        if not _take(budget): return false
+                        if not gpos_data_take(budget): return false
                         val cluster = records[candidate].component_clusters[component_index]
                         if cluster <= records[index].cluster and cluster >= component_cluster:
                             component = component_index
@@ -164,7 +166,7 @@ fn _mark(font: OtFont, lookup: GposLookup, kind: u32, sub: i64, limit: i64, reco
                     if target.index >= count or target_array + 2 + count * classes * 2 > limit: return false
                     anchor_offset = read_u16_be(font.blob, target_array + 2 + (target.index * classes + mark_class) * 2) as i64
                 if anchor_offset == 0: return true
-                val target_anchor = _anchor(font.blob,
+                val target_anchor = gpos_data_anchor(font.blob,
                     (if kind == 5u32: target_array + read_u16_be(font.blob, target_array + 2 + target.index * 2) as i64
                      else: target_array) + anchor_offset, limit, budget)
                 if not target_anchor.valid: return false
@@ -172,7 +174,7 @@ fn _mark(font: OtFont, lookup: GposLookup, kind: u32, sub: i64, limit: i64, reco
                 var pen_y: i64 = 0
                 var between = candidate
                 while between < index:
-                    if not _take(budget): return false
+                    if not gpos_data_take(budget): return false
                     pen_x = pen_x + records[between].x_advance_units
                     pen_y = pen_y + records[between].y_advance_units
                     between = between + 1
@@ -183,13 +185,13 @@ fn _mark(font: OtFont, lookup: GposLookup, kind: u32, sub: i64, limit: i64, reco
         candidate = candidate - 1
     true
 fn _context(font: OtFont, lookups: [GposLookup], lookup: GposLookup, sub: i64, limit: i64,
-            records: [LayoutGlyphRecord], index: i64, depth: i64, budget: _Budget,
+            records: [LayoutGlyphRecord], index: i64, depth: i64, budget: GposDataBudget,
             advance: _Step, activation_mask: u64) -> _ApplyState:
     if depth > 16 or sub + 6 > limit or read_u16_be(font.blob, sub) != 1u32:
         return _ApplyState(valid: false, matched: false, applied: false)
     val coverage_offset = read_u16_be(font.blob, sub + 2) as i64
     val set_count = read_u16_be(font.blob, sub + 4) as i64
-    val coverage = _coverage(font.blob, sub + coverage_offset, limit, records[index].glyph_id, budget)
+    val coverage = gpos_data_coverage(font.blob, sub + coverage_offset, limit, records[index].glyph_id, budget)
     if (coverage_offset == 0 or not coverage.valid or coverage.count != set_count or
         sub + 6 + set_count * 2 > limit):
         return _ApplyState(valid: false, matched: false, applied: false)
@@ -203,7 +205,7 @@ fn _context(font: OtFont, lookups: [GposLookup], lookup: GposLookup, sub: i64, l
     if set + 2 + rule_count * 2 > limit: return _ApplyState(valid: false, matched: false, applied: false)
     var rule_index: i64 = 0
     while rule_index < rule_count:
-        if not _take(budget): return _ApplyState(valid: false, matched: false, applied: false)
+        if not gpos_data_take(budget): return _ApplyState(valid: false, matched: false, applied: false)
         val rule_offset = read_u16_be(font.blob, set + 2 + rule_index * 2) as i64
         val rule = set + rule_offset
         if rule_offset == 0 or rule + 4 > limit:
@@ -218,7 +220,7 @@ fn _context(font: OtFont, lookups: [GposLookup], lookup: GposLookup, sub: i64, l
         var input: i64 = 1
         var matched = true
         while input < glyph_count:
-            if not _take(budget): return _ApplyState(valid: false, matched: false, applied: false)
+            if not gpos_data_take(budget): return _ApplyState(valid: false, matched: false, applied: false)
             val next = _next(font, lookup, records, probe + 1, budget)
             if not next.valid: return _ApplyState(valid: false, matched: false, applied: false)
             if next.next < 0:
@@ -232,7 +234,7 @@ fn _context(font: OtFont, lookups: [GposLookup], lookup: GposLookup, sub: i64, l
         if matched and positions.len() == glyph_count:
             var record: i64 = 0
             while record < record_count:
-                if not _take(budget): return _ApplyState(valid: false, matched: false, applied: false)
+                if not gpos_data_take(budget): return _ApplyState(valid: false, matched: false, applied: false)
                 val sequence = read_u16_be(font.blob, records_offset + record * 4) as i64
                 val nested_index = read_u16_be(font.blob, records_offset + record * 4 + 2) as i64
                 if sequence < 0 or sequence >= positions.len():
@@ -253,9 +255,9 @@ fn _context(font: OtFont, lookups: [GposLookup], lookup: GposLookup, sub: i64, l
         rule_index = rule_index + 1
     _ApplyState(valid: true, matched: false, applied: false)
 fn _lookup_at(font: OtFont, lookups: [GposLookup], lookup: GposLookup, records: [LayoutGlyphRecord],
-              index: i64, depth: i64, budget: _Budget, advance: _Step,
+              index: i64, depth: i64, budget: GposDataBudget, advance: _Step,
               activation_mask: u64) -> bool:
-    if depth > 16 or index < 0 or index >= records.len() or not _take(budget): return false
+    if depth > 16 or index < 0 or index >= records.len() or not gpos_data_take(budget): return false
     if (records[index].feature_mask & activation_mask) == 0u64: return true
     var sub_index: i64 = 0
     while sub_index < lookup.subtable_offsets.len():
@@ -303,19 +305,19 @@ fn _lookup_at(font: OtFont, lookups: [GposLookup], lookup: GposLookup, records: 
         return applied.valid and applied.matched and applied.applied
     true
 fn _previous(font: OtFont, lookup: GposLookup, records: [LayoutGlyphRecord], start: i64,
-             budget: _Budget) -> _Step:
+             budget: GposDataBudget) -> _Step:
     var index = start
     while index >= 0:
-        if not _take(budget): return _Step(next: 0, valid: false)
-        val eligible = _eligible(font, lookup, records[index].glyph_id, budget)
+        if not gpos_data_take(budget): return _Step(next: 0, valid: false)
+        val eligible = gpos_data_eligible(font, lookup, records[index].glyph_id, budget)
         if not eligible.valid: return _Step(next: 0, valid: false)
         if eligible.found: return _Step(next: index, valid: true)
         index = index - 1
     _Step(next: -1, valid: true)
-fn _pair_match(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records: [LayoutGlyphRecord], index: i64, budget: _Budget) -> _ApplyState:
+fn _pair_match(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records: [LayoutGlyphRecord], index: i64, budget: GposDataBudget) -> _ApplyState:
     if sub + 10 > limit: return _ApplyState(valid: false, matched: false, applied: false)
     val coverage_offset = read_u16_be(font.blob, sub + 2) as i64
-    val coverage = _coverage(font.blob, sub + coverage_offset, limit, records[index].glyph_id, budget)
+    val coverage = gpos_data_coverage(font.blob, sub + coverage_offset, limit, records[index].glyph_id, budget)
     if coverage_offset == 0 or not coverage.valid: return _ApplyState(valid: false, matched: false, applied: false)
     if not coverage.found: return _ApplyState(valid: true, matched: false, applied: false)
     val vf1 = read_u16_be(font.blob, sub + 4)
@@ -336,36 +338,36 @@ fn _pair_match(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records: 
     var cursor = set + 2
     var i: i64 = 0
     while i < pairs:
-        if not _take(budget): return _ApplyState(valid: false, matched: false, applied: false)
+        if not gpos_data_take(budget): return _ApplyState(valid: false, matched: false, applied: false)
         if cursor + 2 > limit: return _ApplyState(valid: false, matched: false, applied: false)
         val glyph = read_u16_be(font.blob, cursor)
-        val one = _value(font.blob, cursor + 2, limit, vf1)
-        val two = _value(font.blob, cursor + 2 + one.size, limit, vf2)
+        val one = gpos_data_value(font.blob, cursor + 2, limit, vf1)
+        val two = gpos_data_value(font.blob, cursor + 2 + one.size, limit, vf2)
         if not one.valid or not two.valid: return _ApplyState(valid: false, matched: false, applied: false)
         if glyph == records[second.next].glyph_id: return _ApplyState(valid: true, matched: true, applied: false)
         cursor = cursor + 2 + one.size + two.size
         i = i + 1
     _ApplyState(valid: true, matched: false, applied: false)
-fn _mark_match(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records: [LayoutGlyphRecord], index: i64, budget: _Budget) -> _ApplyState:
+fn _mark_match(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records: [LayoutGlyphRecord], index: i64, budget: GposDataBudget) -> _ApplyState:
     if sub + 12 > limit: return _ApplyState(valid: false, matched: false, applied: false)
     val mark_offset = read_u16_be(font.blob, sub + 2) as i64
     val target_offset = read_u16_be(font.blob, sub + 4) as i64
-    val mark = _coverage(font.blob, sub + mark_offset, limit, records[index].glyph_id, budget)
+    val mark = gpos_data_coverage(font.blob, sub + mark_offset, limit, records[index].glyph_id, budget)
     if mark_offset == 0 or target_offset == 0 or not mark.valid:
         return _ApplyState(valid: false, matched: false, applied: false)
     if not mark.found: return _ApplyState(valid: true, matched: false, applied: false)
     var candidate = index - 1
     while candidate >= 0:
-        if not _take(budget): return _ApplyState(valid: false, matched: false, applied: false)
-        val eligible = _eligible(font, lookup, records[candidate].glyph_id, budget)
+        if not gpos_data_take(budget): return _ApplyState(valid: false, matched: false, applied: false)
+        val eligible = gpos_data_eligible(font, lookup, records[candidate].glyph_id, budget)
         if not eligible.valid: return _ApplyState(valid: false, matched: false, applied: false)
         if eligible.found:
-            val target = _coverage(font.blob, sub + target_offset, limit, records[candidate].glyph_id, budget)
+            val target = gpos_data_coverage(font.blob, sub + target_offset, limit, records[candidate].glyph_id, budget)
             if not target.valid: return _ApplyState(valid: false, matched: false, applied: false)
             return _ApplyState(valid: true, matched: target.found, applied: false)
         candidate = candidate - 1
     _ApplyState(valid: true, matched: false, applied: false)
-fn _chain_match(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records: [LayoutGlyphRecord], index: i64, budget: _Budget) -> _ApplyState:
+fn _chain_match(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records: [LayoutGlyphRecord], index: i64, budget: GposDataBudget) -> _ApplyState:
     if sub + 4 > limit or read_u16_be(font.blob, sub) != 3u32:
         return _ApplyState(valid: false, matched: false, applied: false)
     var cursor = sub + 2
@@ -375,11 +377,11 @@ fn _chain_match(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records:
     var probe = index - 1
     var i: i64 = 0
     while i < back:
-        if not _take(budget): return _ApplyState(valid: false, matched: false, applied: false)
+        if not gpos_data_take(budget): return _ApplyState(valid: false, matched: false, applied: false)
         val previous = _previous(font, lookup, records, probe, budget)
         if not previous.valid: return _ApplyState(valid: false, matched: false, applied: false)
         if previous.next < 0: return _ApplyState(valid: true, matched: false, applied: false)
-        val hit = _coverage(font.blob, sub + read_u16_be(font.blob, cursor + i * 2) as i64,
+        val hit = gpos_data_coverage(font.blob, sub + read_u16_be(font.blob, cursor + i * 2) as i64,
             limit, records[previous.next].glyph_id, budget)
         if not hit.valid: return _ApplyState(valid: false, matched: false, applied: false)
         if not hit.found: return _ApplyState(valid: true, matched: false, applied: false)
@@ -392,14 +394,14 @@ fn _chain_match(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records:
     probe = index
     i = 0
     while i < inputs:
-        if not _take(budget): return _ApplyState(valid: false, matched: false, applied: false)
+        if not gpos_data_take(budget): return _ApplyState(valid: false, matched: false, applied: false)
         val next = if i == 0:
             _Step(next: index, valid: true)
         else:
             _next(font, lookup, records, probe + 1, budget)
         if not next.valid: return _ApplyState(valid: false, matched: false, applied: false)
         if next.next < 0: return _ApplyState(valid: true, matched: false, applied: false)
-        val hit = _coverage(font.blob, sub + read_u16_be(font.blob, cursor + i * 2) as i64,
+        val hit = gpos_data_coverage(font.blob, sub + read_u16_be(font.blob, cursor + i * 2) as i64,
             limit, records[next.next].glyph_id, budget)
         if not hit.valid: return _ApplyState(valid: false, matched: false, applied: false)
         if not hit.found: return _ApplyState(valid: true, matched: false, applied: false)
@@ -411,11 +413,11 @@ fn _chain_match(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records:
     if cursor + ahead * 2 + 2 > limit: return _ApplyState(valid: false, matched: false, applied: false)
     i = 0
     while i < ahead:
-        if not _take(budget): return _ApplyState(valid: false, matched: false, applied: false)
+        if not gpos_data_take(budget): return _ApplyState(valid: false, matched: false, applied: false)
         val next = _next(font, lookup, records, probe + 1, budget)
         if not next.valid: return _ApplyState(valid: false, matched: false, applied: false)
         if next.next < 0: return _ApplyState(valid: true, matched: false, applied: false)
-        val hit = _coverage(font.blob, sub + read_u16_be(font.blob, cursor + i * 2) as i64,
+        val hit = gpos_data_coverage(font.blob, sub + read_u16_be(font.blob, cursor + i * 2) as i64,
             limit, records[next.next].glyph_id, budget)
         if not hit.valid: return _ApplyState(valid: false, matched: false, applied: false)
         if not hit.found: return _ApplyState(valid: true, matched: false, applied: false)
@@ -423,7 +425,7 @@ fn _chain_match(font: OtFont, lookup: GposLookup, sub: i64, limit: i64, records:
         i = i + 1
     _ApplyState(valid: true, matched: true, applied: false)
 fn _chain(font: OtFont, lookups: [GposLookup], lookup: GposLookup, sub: i64, limit: i64,
-          records: [LayoutGlyphRecord], index: i64, depth: i64, budget: _Budget,
+          records: [LayoutGlyphRecord], index: i64, depth: i64, budget: GposDataBudget,
           advance: _Step, activation_mask: u64) -> bool:
     if depth > 16 or sub + 4 > limit or read_u16_be(font.blob, sub) != 3u32: return false
     var cursor = sub + 2
@@ -433,11 +435,11 @@ fn _chain(font: OtFont, lookups: [GposLookup], lookup: GposLookup, sub: i64, lim
     var probe = index - 1
     var i: i64 = 0
     while i < back_count:
-        if not _take(budget): return false
+        if not gpos_data_take(budget): return false
         val previous = _previous(font, lookup, records, probe, budget)
         if not previous.valid: return false
         if previous.next < 0: return true
-        val covered = _coverage(font.blob, sub + read_u16_be(font.blob, cursor + i * 2) as i64,
+        val covered = gpos_data_coverage(font.blob, sub + read_u16_be(font.blob, cursor + i * 2) as i64,
             limit, records[previous.next].glyph_id, budget)
         if not covered.valid: return false
         if not covered.found: return true
@@ -451,14 +453,14 @@ fn _chain(font: OtFont, lookups: [GposLookup], lookup: GposLookup, sub: i64, lim
     probe = index
     i = 0
     while i < input_count:
-        if not _take(budget): return false
+        if not gpos_data_take(budget): return false
         val next = if i == 0:
             _Step(next: index, valid: true)
         else:
             _next(font, lookup, records, probe + 1, budget)
         if not next.valid: return false
         if next.next < 0: return true
-        val covered = _coverage(font.blob, sub + read_u16_be(font.blob, cursor + i * 2) as i64,
+        val covered = gpos_data_coverage(font.blob, sub + read_u16_be(font.blob, cursor + i * 2) as i64,
             limit, records[next.next].glyph_id, budget)
         if not covered.valid: return false
         if not covered.found: return true
@@ -472,11 +474,11 @@ fn _chain(font: OtFont, lookups: [GposLookup], lookup: GposLookup, sub: i64, lim
     if cursor + ahead_count * 2 + 2 > limit: return false
     i = 0
     while i < ahead_count:
-        if not _take(budget): return false
+        if not gpos_data_take(budget): return false
         val next = _next(font, lookup, records, probe + 1, budget)
         if not next.valid: return false
         if next.next < 0: return true
-        val covered = _coverage(font.blob, sub + read_u16_be(font.blob, cursor + i * 2) as i64,
+        val covered = gpos_data_coverage(font.blob, sub + read_u16_be(font.blob, cursor + i * 2) as i64,
             limit, records[next.next].glyph_id, budget)
         if not covered.valid: return false
         if not covered.found: return true
@@ -488,7 +490,7 @@ fn _chain(font: OtFont, lookups: [GposLookup], lookup: GposLookup, sub: i64, lim
     if cursor + count * 4 > limit: return false
     i = 0
     while i < count:
-        if not _take(budget): return false
+        if not gpos_data_take(budget): return false
         val sequence = read_u16_be(font.blob, cursor + i * 4) as i64
         val nested_index = read_u16_be(font.blob, cursor + i * 4 + 2) as i64
         if sequence < 0 or sequence >= inputs.len(): return false
@@ -503,25 +505,25 @@ fn _chain(font: OtFont, lookups: [GposLookup], lookup: GposLookup, sub: i64, lim
                           budget, nested_advance, activation_mask): return false
         i = i + 1
     true
-fn _validate_pair(font: OtFont, sub: i64, limit: i64, budget: _Budget) -> bool:
+fn _validate_pair(font: OtFont, sub: i64, limit: i64, budget: GposDataBudget) -> bool:
     if sub + 10 > limit: return false
     val format = read_u16_be(font.blob, sub)
     val coverage_offset = read_u16_be(font.blob, sub + 2) as i64
     val vf1 = read_u16_be(font.blob, sub + 4)
     val vf2 = read_u16_be(font.blob, sub + 6)
-    val coverage = _coverage(font.blob, sub + coverage_offset, limit, 0u32, budget)
+    val coverage = gpos_data_coverage(font.blob, sub + coverage_offset, limit, 0u32, budget)
     if coverage_offset == 0 or not coverage.valid: return false
     if format == 1u32:
         val count = read_u16_be(font.blob, sub + 8) as i64
         val header_end = sub + 10 + count * 2
         val coverage_start = sub + coverage_offset
-        val coverage_end = _coverage_end(font.blob, coverage_start, limit)
+        val coverage_end = gpos_data_coverage_end(font.blob, coverage_start, limit)
         if count != coverage.count or header_end > limit or coverage_start < header_end or coverage_end < 0: return false
         var starts: [i64] = []
         var ends: [i64] = []
         var i: i64 = 0
         while i < count:
-            if not _take(budget): return false
+            if not gpos_data_take(budget): return false
             val offset = read_u16_be(font.blob, sub + 10 + i * 2) as i64
             val set = sub + offset
             if offset == 0 or set < header_end or set + 2 > limit or set == coverage_start or starts.contains(set): return false
@@ -530,18 +532,18 @@ fn _validate_pair(font: OtFont, sub: i64, limit: i64, budget: _Budget) -> bool:
             var previous: i64 = -1
             var p: i64 = 0
             while p < pairs:
-                if not _take(budget) or cursor + 2 > limit: return false
+                if not gpos_data_take(budget) or cursor + 2 > limit: return false
                 val second = read_u16_be(font.blob, cursor) as i64
-                val one = _value(font.blob, cursor + 2, limit, vf1)
-                val two = _value(font.blob, cursor + 2 + one.size, limit, vf2)
+                val one = gpos_data_value(font.blob, cursor + 2, limit, vf1)
+                val two = gpos_data_value(font.blob, cursor + 2 + one.size, limit, vf2)
                 if second <= previous or not one.valid or not two.valid: return false
                 previous = second
                 cursor = cursor + 2 + one.size + two.size
                 p = p + 1
-            if _overlap(set, cursor, coverage_start, coverage_end): return false
+            if gpos_data_overlap(set, cursor, coverage_start, coverage_end): return false
             var prior: i64 = 0
             while prior < starts.len():
-                if _overlap(set, cursor, starts[prior], ends[prior]): return false
+                if gpos_data_overlap(set, cursor, starts[prior], ends[prior]): return false
                 prior = prior + 1
             starts.push(set)
             ends.push(cursor)
@@ -552,37 +554,37 @@ fn _validate_pair(font: OtFont, sub: i64, limit: i64, budget: _Budget) -> bool:
     val class2_offset = read_u16_be(font.blob, sub + 10) as i64
     val c1 = read_u16_be(font.blob, sub + 12) as i64
     val c2 = read_u16_be(font.blob, sub + 14) as i64
-    val matrix_end = sub + 16 + (_value(font.blob, sub + 16, limit, vf1).size + _value(font.blob, sub + 16 + _value(font.blob, sub + 16, limit, vf1).size, limit, vf2).size) * c1 * c2
+    val matrix_end = sub + 16 + (gpos_data_value(font.blob, sub + 16, limit, vf1).size + gpos_data_value(font.blob, sub + 16 + gpos_data_value(font.blob, sub + 16, limit, vf1).size, limit, vf2).size) * c1 * c2
     val coverage_start = sub + coverage_offset
     val class1_start = sub + class1_offset
     val class2_start = sub + class2_offset
-    val coverage_end = _coverage_end(font.blob, coverage_start, limit)
-    val class1_end = _class_end(font.blob, class1_start, limit)
-    val class2_end = _class_end(font.blob, class2_start, limit)
+    val coverage_end = gpos_data_coverage_end(font.blob, coverage_start, limit)
+    val class1_end = gpos_data_class_end(font.blob, class1_start, limit)
+    val class2_end = gpos_data_class_end(font.blob, class2_start, limit)
     if (class1_offset == 0 or class2_offset == 0 or
         coverage_start < matrix_end or class1_start < matrix_end or class2_start < matrix_end or
         coverage_end < 0 or class1_end < 0 or class2_end < 0 or
-        _overlap(coverage_start, coverage_end, class1_start, class1_end) or
-        _overlap(coverage_start, coverage_end, class2_start, class2_end) or
-        (class1_start != class2_start and _overlap(class1_start, class1_end, class2_start, class2_end)) or
-        not _class_valid(font.blob, sub + class1_offset, limit, c1, budget) or
-        not _class_valid(font.blob, sub + class2_offset, limit, c2, budget)): return false
+        gpos_data_overlap(coverage_start, coverage_end, class1_start, class1_end) or
+        gpos_data_overlap(coverage_start, coverage_end, class2_start, class2_end) or
+        (class1_start != class2_start and gpos_data_overlap(class1_start, class1_end, class2_start, class2_end)) or
+        not gpos_data_class_valid(font.blob, sub + class1_offset, limit, c1, budget) or
+        not gpos_data_class_valid(font.blob, sub + class2_offset, limit, c2, budget)): return false
     var cursor = sub + 16
     var i: i64 = 0
     while i < c1 * c2:
-        if not _take(budget): return false
-        val one = _value(font.blob, cursor, limit, vf1)
-        val two = _value(font.blob, cursor + one.size, limit, vf2)
+        if not gpos_data_take(budget): return false
+        val one = gpos_data_value(font.blob, cursor, limit, vf1)
+        val two = gpos_data_value(font.blob, cursor + one.size, limit, vf2)
         if not one.valid or not two.valid: return false
         cursor = cursor + one.size + two.size
         i = i + 1
     true
-fn _validate_mark(font: OtFont, kind: u32, sub: i64, limit: i64, budget: _Budget) -> bool:
+fn _validate_mark(font: OtFont, kind: u32, sub: i64, limit: i64, budget: GposDataBudget) -> bool:
     if sub + 12 > limit or read_u16_be(font.blob, sub) != 1u32: return false
     val mark_cov_offset = read_u16_be(font.blob, sub + 2) as i64
     val target_cov_offset = read_u16_be(font.blob, sub + 4) as i64
-    val mark_cov = _coverage(font.blob, sub + mark_cov_offset, limit, 0u32, budget)
-    val target_cov = _coverage(font.blob, sub + target_cov_offset, limit, 0u32, budget)
+    val mark_cov = gpos_data_coverage(font.blob, sub + mark_cov_offset, limit, 0u32, budget)
+    val target_cov = gpos_data_coverage(font.blob, sub + target_cov_offset, limit, 0u32, budget)
     val classes = read_u16_be(font.blob, sub + 6) as i64
     val marks_offset = read_u16_be(font.blob, sub + 8) as i64
     val targets_offset = read_u16_be(font.blob, sub + 10) as i64
@@ -598,10 +600,10 @@ fn _validate_mark(font: OtFont, kind: u32, sub: i64, limit: i64, budget: _Budget
     if mark_count != mark_cov.count or marks + 2 + mark_count * 4 > limit: return false
     var i: i64 = 0
     while i < mark_count:
-        if not _take(budget): return false
+        if not gpos_data_take(budget): return false
         val mark_class = read_u16_be(font.blob, marks + 2 + i * 4) as i64
         val anchor = read_u16_be(font.blob, marks + 4 + i * 4) as i64
-        if mark_class >= classes or anchor == 0 or not _anchor(font.blob, marks + anchor, limit, budget).valid: return false
+        if mark_class >= classes or anchor == 0 or not gpos_data_anchor(font.blob, marks + anchor, limit, budget).valid: return false
         i = i + 1
     val target_count = read_u16_be(font.blob, targets) as i64
     if target_count != target_cov.count: return false
@@ -617,8 +619,8 @@ fn _validate_mark(font: OtFont, kind: u32, sub: i64, limit: i64, budget: _Budget
             var a: i64 = 0
             while a < components * classes:
                 val anchor = read_u16_be(font.blob, lig + 2 + a * 2) as i64
-                if not _take(budget): return false
-                if anchor != 0 and not _anchor(font.blob, lig + anchor, limit, budget).valid: return false
+                if not gpos_data_take(budget): return false
+                if anchor != 0 and not gpos_data_anchor(font.blob, lig + anchor, limit, budget).valid: return false
                 a = a + 1
             i = i + 1
         return true
@@ -626,23 +628,23 @@ fn _validate_mark(font: OtFont, kind: u32, sub: i64, limit: i64, budget: _Budget
     i = 0
     while i < target_count * classes:
         val anchor = read_u16_be(font.blob, targets + 2 + i * 2) as i64
-        if not _take(budget): return false
-        if anchor != 0 and not _anchor(font.blob, targets + anchor, limit, budget).valid: return false
+        if not gpos_data_take(budget): return false
+        if anchor != 0 and not gpos_data_anchor(font.blob, targets + anchor, limit, budget).valid: return false
         i = i + 1
     true
 fn _validate_context(font: OtFont, catalog: [GposLookup], sub: i64, limit: i64,
-                     depth: i64, budget: _Budget) -> bool:
+                     depth: i64, budget: GposDataBudget) -> bool:
     if depth > 16 or sub + 6 > limit or read_u16_be(font.blob, sub) != 1u32: return false
     val coverage_offset = read_u16_be(font.blob, sub + 2) as i64
     val set_count = read_u16_be(font.blob, sub + 4) as i64
-    val coverage = _coverage(font.blob, sub + coverage_offset, limit, 0u32, budget)
+    val coverage = gpos_data_coverage(font.blob, sub + coverage_offset, limit, 0u32, budget)
     val header_end = sub + 6 + set_count * 2
     if coverage_offset == 0 or not coverage.valid or coverage.count != set_count or header_end > limit:
         return false
     var seen_sets: [i64] = []
     var set_index: i64 = 0
     while set_index < set_count:
-        if not _take(budget): return false
+        if not gpos_data_take(budget): return false
         val set_offset = read_u16_be(font.blob, sub + 6 + set_index * 2) as i64
         if set_offset != 0:
             val set = sub + set_offset
@@ -653,7 +655,7 @@ fn _validate_context(font: OtFont, catalog: [GposLookup], sub: i64, limit: i64,
             var seen_rules: [i64] = []
             var rule_index: i64 = 0
             while rule_index < rule_count:
-                if not _take(budget): return false
+                if not gpos_data_take(budget): return false
                 val rule_offset = read_u16_be(font.blob, set + 2 + rule_index * 2) as i64
                 val rule = set + rule_offset
                 if rule_offset == 0 or rule + 4 > limit or seen_rules.contains(rule): return false
@@ -665,7 +667,7 @@ fn _validate_context(font: OtFont, catalog: [GposLookup], sub: i64, limit: i64,
                     return false
                 var record: i64 = 0
                 while record < record_count:
-                    if not _take(budget): return false
+                    if not gpos_data_take(budget): return false
                     val sequence = read_u16_be(font.blob, records_offset + record * 4) as i64
                     val nested_index = read_u16_be(font.blob, records_offset + record * 4 + 2) as i64
                     if sequence < 0 or sequence >= glyph_count: return false
@@ -681,11 +683,11 @@ fn _validate_context(font: OtFont, catalog: [GposLookup], sub: i64, limit: i64,
         set_index = set_index + 1
     true
 fn _validate_lookup(font: OtFont, catalog: [GposLookup], lookup: GposLookup,
-                    depth: i64, budget: _Budget) -> bool:
+                    depth: i64, budget: GposDataBudget) -> bool:
     if depth > 16 or lookup.subtable_offsets.len() == 0 or lookup.subtable_offsets.len() != lookup.subtable_ends.len(): return false
     var i: i64 = 0
     while i < lookup.subtable_offsets.len():
-        if not _take(budget): return false
+        if not gpos_data_take(budget): return false
         val sub = lookup.subtable_offsets[i] as i64
         val limit = _end(lookup, i)
         if sub < lookup.lookup_offset as i64 or sub + 2 > limit or limit > font.blob.len(): return false
@@ -711,7 +713,7 @@ fn _validate_lookup(font: OtFont, catalog: [GposLookup], lookup: GposLookup,
             var coverage_index: i64 = 0
             while coverage_index < back:
                 val offset = read_u16_be(font.blob, cursor + coverage_index * 2) as i64
-                if offset == 0 or not _coverage(font.blob, actual + offset, limit, 0u32, budget).valid: return false
+                if offset == 0 or not gpos_data_coverage(font.blob, actual + offset, limit, 0u32, budget).valid: return false
                 coverage_index = coverage_index + 1
             cursor = cursor + back * 2
             if cursor + 2 > limit: return false
@@ -721,7 +723,7 @@ fn _validate_lookup(font: OtFont, catalog: [GposLookup], lookup: GposLookup,
             coverage_index = 0
             while coverage_index < inputs:
                 val offset = read_u16_be(font.blob, cursor + coverage_index * 2) as i64
-                if offset == 0 or not _coverage(font.blob, actual + offset, limit, 0u32, budget).valid: return false
+                if offset == 0 or not gpos_data_coverage(font.blob, actual + offset, limit, 0u32, budget).valid: return false
                 coverage_index = coverage_index + 1
             cursor = cursor + inputs * 2
             if inputs <= 0 or cursor + 2 > limit: return false
@@ -731,7 +733,7 @@ fn _validate_lookup(font: OtFont, catalog: [GposLookup], lookup: GposLookup,
             coverage_index = 0
             while coverage_index < ahead:
                 val offset = read_u16_be(font.blob, cursor + coverage_index * 2) as i64
-                if offset == 0 or not _coverage(font.blob, actual + offset, limit, 0u32, budget).valid: return false
+                if offset == 0 or not gpos_data_coverage(font.blob, actual + offset, limit, 0u32, budget).valid: return false
                 coverage_index = coverage_index + 1
             cursor = cursor + ahead * 2
             if cursor + 2 > limit: return false
@@ -754,14 +756,14 @@ fn _validate_lookup(font: OtFont, catalog: [GposLookup], lookup: GposLookup,
         else: return false
         i = i + 1
     true
-fn _lookup(font: OtFont, lookups: [GposLookup], lookup: GposLookup, records: [LayoutGlyphRecord], depth: i64, budget: _Budget, activation_mask: u64) -> bool:
+fn _lookup(font: OtFont, lookups: [GposLookup], lookup: GposLookup, records: [LayoutGlyphRecord], depth: i64, budget: GposDataBudget, activation_mask: u64) -> bool:
     if depth > 16 or lookup.subtable_offsets.len() == 0 or lookup.subtable_offsets.len() != lookup.subtable_ends.len(): return false
     if (lookup.lookup_type != 2u32 and lookup.lookup_type != 4u32 and lookup.lookup_type != 5u32 and
         lookup.lookup_type != 6u32 and lookup.lookup_type != 7u32 and lookup.lookup_type != 8u32 and
         lookup.lookup_type != 9u32): return false
     if lookup.flag != 0u32 and lookup.flag != 8u32 and lookup.flag != 16u32 and lookup.flag != 24u32: return false
-    if (lookup.flag & 8u32) != 0u32 and not _glyph_class(font, 0u32, budget).valid: return false
-    if (lookup.flag & 16u32) != 0u32 and not _in_mark_set(font, lookup.mark_filtering_set, 0u32, budget).valid: return false
+    if (lookup.flag & 8u32) != 0u32 and not gpos_data_glyph_class(font, 0u32, budget).valid: return false
+    if (lookup.flag & 16u32) != 0u32 and not gpos_data_in_mark_set(font, lookup.mark_filtering_set, 0u32, budget).valid: return false
     var checked: i64 = 0
     while checked < lookup.subtable_offsets.len():
         val sub = lookup.subtable_offsets[checked] as i64
@@ -770,7 +772,7 @@ fn _lookup(font: OtFont, lookups: [GposLookup], lookup: GposLookup, records: [La
         checked = checked + 1
     var index: i64 = 0
     while index < records.len():
-        if not _take(budget): return false
+        if not gpos_data_take(budget): return false
         val advance = _Step(next: index + 1, valid: true)
         if not _lookup_at(font, lookups, lookup, records, index, depth, budget, advance, activation_mask): return false
         if advance.next <= index: return false
@@ -787,7 +789,7 @@ fn gpos_validate(font: OtFont, active: [LayoutLookupActivation], catalog: [GposL
     for candidate in catalog:
         if not _catalog_lookup(catalog, candidate.lookup_index).?: return false
     val scratch = _copy(records)
-    val budget = _budget(records, catalog)
+    val budget = gpos_data_budget(records, catalog)
     for activation in active:
         if activation.feature_mask == 0u64: return false
         val lookup = match _catalog_lookup(catalog, activation.lookup_index):
@@ -800,7 +802,7 @@ fn gpos_validate(font: OtFont, active: [LayoutLookupActivation], catalog: [GposL
 fn gpos_apply(font: OtFont, active: [LayoutLookupActivation], catalog: [GposLookup], records: [LayoutGlyphRecord]) -> LayoutApplyResult:
     if not gpos_validate(font, active, catalog, records): return LayoutApplyResult(glyphs: _copy(records), complete: false)
     val result = _copy(records)
-    val budget = _budget(records, catalog)
+    val budget = gpos_data_budget(records, catalog)
     for activation in active:
         val lookup = match _catalog_lookup(catalog, activation.lookup_index):
             Some(value): value
