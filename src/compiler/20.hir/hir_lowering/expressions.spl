@@ -203,6 +203,24 @@ impl HirLowering:
         them on first use and emit NamedVar so the HIR interpreter can
         dispatch by name (process_module registers every table symbol as a
         global Function value). Everything else stays an error."""
+        # Receiver aliasing (`me` <-> `self`). The class-body parser
+        # (parser_decls_use.spl parse_class_body_method) synthesizes the
+        # receiver parameter as "self" for a `me`-prefixed method that declares
+        # no explicit receiver (`me build_ui():`), so a body that writes
+        # `me.field` / `me.method()` looked up a name that was never defined and
+        # died here with "unresolved name: me" — 543 times in the stage-4
+        # full-CLI build, all in `class X:` bodies (src/app/office/*). Both
+        # spellings denote the same receiver, so try the counterpart before
+        # failing. Only visible under SIMPLE_BOOTSTRAP_STAGE4=1: the non-stage4
+        # bootstrap lane builds MIR from the flat-AST accumulator and never
+        # surfaces these HIR errors, which is why isolated probes of the same
+        # class shape all reported success. See
+        # doc/08_tracking/bug/stage4_me_receiver_unresolved_in_class_methods_2026-07-27.md
+        if name == "me" or name == "self":
+            val recv_alias = if name == "me": "self" else: "me"
+            val recv_sym = self.symbols.lookup_or_invalid(recv_alias)
+            if recv_sym.is_valid():
+                return HirExprKind.NamedVar(recv_sym, recv_alias)
         # `me method()` historically synthesizes one receiver named `self`,
         # while both `self.field` and `me.field` are accepted source spellings.
         # Resolve `me` to that existing symbol instead of creating a second
