@@ -15,7 +15,7 @@ case "$TEST_TIMEOUT_SECONDS" in ''|0|*[!0-9]*) exit 2 ;; esac
 case "$MIN_OFFLOAD_ELEMENTS" in ''|*[!0-9]*) exit 2 ;; esac
 case "$MIN_OFFLOAD_ELEMENTS" in 0|[1-9]*) ;; *) exit 2 ;; esac
 case "$EXPECTED_REASON" in 16|18) ;; *) exit 2 ;; esac
-case "$MODE" in fallback|device-warm) ;; *) exit 2 ;; esac
+case "$MODE" in fallback|device-warm|device-warm-production) ;; *) exit 2 ;; esac
 DAEMON_TIMEOUT_SECONDS=$((TEST_TIMEOUT_SECONDS + 10))
 
 if [ ! -x "$HOST_BIN" ] || [ ! -x "$PROBE_BIN" ]; then
@@ -49,6 +49,15 @@ if [ "$MODE" = fallback ]; then
         --processing-backend=cuda \
         --processing-fallback=cpu \
         "--processing-min-offload-elements=$MIN_OFFLOAD_ELEMENTS" >"$DAEMON_LOG" 2>&1 &
+elif [ "$MODE" = device-warm ]; then
+    timeout -k 2 "$DAEMON_TIMEOUT_SECONDS" env \
+        SIMPLE_GPU_TEST=1 \
+        "$HOST_BIN" \
+        "--shm=$SHM" \
+        --processing-backend=cuda \
+        --processing-fallback=none \
+        --processing-min-offload-elements=0 \
+        --processing-verify-cpu >"$DAEMON_LOG" 2>&1 &
 else
     timeout -k 2 "$DAEMON_TIMEOUT_SECONDS" env \
         SIMPLE_GPU_TEST=1 \
@@ -101,7 +110,8 @@ else
     printf '%s\n' "$output" | grep -Eq 'GPU_DEVICE_WARM_WIRE status=pass warmups=3 samples=5 requests=8 count=1048576 checksum=809508928'
     printf '%s\n' "$output" | grep -Eq 'median_device_us=[1-9][0-9]* median_roundtrip_us=[1-9][0-9]* median_non_device_us=[0-9]+'
     printf '%s\n' "$output" | grep -Eq 'handle=[1-9][0-9]* identity=[1-9][0-9]* exact=true stable_provenance=true'
-    awk '
+    if [ "$MODE" = device-warm ]; then
+        awk '
         /^HOST_GPU_PROCESS_PERF / {
             cpu = device = generation = run = frame = -1
             backend = preference = ""
@@ -123,10 +133,17 @@ else
             seen++
         }
         END { if (seen != 8) exit 1 }
-    ' "$DAEMON_LOG"
+        ' "$DAEMON_LOG"
+    elif grep -q '^HOST_GPU_PROCESS_PERF ' "$DAEMON_LOG"; then
+        echo "simpleos_gpu_fallback_wire_status=fail"
+        echo "simpleos_gpu_fallback_wire_reason=unexpected-cpu-verification"
+        exit 1
+    fi
 fi
 if [ "$MODE" = fallback ]; then
     echo "simpleos_gpu_fallback_wire_status=pass"
+elif [ "$MODE" = device-warm-production ]; then
+    echo "simpleos_gpu_device_warm_production_wire_status=pass"
 else
     echo "simpleos_gpu_device_warm_wire_status=pass"
 fi
