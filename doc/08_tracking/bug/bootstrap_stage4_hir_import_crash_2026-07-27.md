@@ -121,3 +121,19 @@ unresolved types, and 7 generic diagnostics. The largest remaining groups are
 T32 easy-fix types (36-38 each). The retained log is
 `build/bootstrap/codex-perf-stage4-final/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`.
 This was the third verify/fix cycle, so no further retry was made.
+
+## Post-cap Source Fixes
+
+Five small read-only lanes traced the largest residual clusters without another
+bootstrap. Source fixes now use explicit owner or named-facade imports for the
+TreeSitter `TokenKind` surface, HIR types, flat-AST expression accessors,
+legacy MIR optimizer passes, T32's `AccessResult` compatibility name, EasyFix,
+and C-backend HIR fields. This avoids globally treating private glob imports as
+re-exports, which the current parser cannot distinguish from `export use`.
+
+A strict focused entry-closure probe compiled 142 modules with
+`SIMPLE_NO_STUB_FALLBACK=1`, linked with one resolved `char_from_code`
+compatibility alias, and printed `42`. This proves the repaired import surfaces
+can lower and link in that closure; it does not replace full Stage-4 admission.
+The remaining 101 genuine unannotated value-returning declarations are tracked
+as TODO590. No fourth bootstrap was run.

@@ -115,6 +115,23 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(hir.symbols.lookup("inner_fn").?).to_equal(true)
         expect(hir.errors.len()).to_equal(0)
 
+    it "follows an aliased compatibility re-export to its defining class":
+        val log = make_logger()
+        val provider = parse_full_frontend("class AccessResult:\n    value: text", "shared.access", "shared.access", log)
+        val facade = parse_full_frontend("export use shared.access.{AccessResult as T32BridgeResult}", "compat.types", "compat.types", log)
+        val consumer = parse_full_frontend("use compat.types.{T32BridgeResult}\nfn main(value: T32BridgeResult) -> T32BridgeResult:\n    value", "compat.consumer", "compat.consumer", log)
+
+        var modules: Dict<text, any> = {}
+        modules["shared.access"] = provider
+        modules["compat.types"] = facade
+
+        var lowering = HirLowering.with_filename("compat.consumer")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        expect(hir.symbols.lookup("T32BridgeResult").?).to_equal(true)
+        expect(hir.errors.len()).to_equal(0)
+
     it "binds the mutable me receiver in a prefixed class method":
         val log = make_logger()
         val module = parse_full_frontend("class Box:\n    value: i64\n    me set(next: i64) -> i64:\n        me.value = next\n        me.value", "me_receiver", "me_receiver", log)

@@ -915,3 +915,11 @@ Tracking split:
   groups are led by `TokenKind`, `HirTypeKind`, `Expr`/`ExprKind`, and T32
   easy-fix types. The three-cycle guard is exhausted; rendering, QEMU, coverage,
   and release gates stay postponed to a fresh environment/session.
+- stage4-post-cap-surfaces: Five small read-only lanes traced the largest
+  residual import groups. Explicit owner/named-facade fixes cover TreeSitter
+  TokenKind, HIR types, flat-AST Expr/accessors, legacy MIR optimizer imports,
+  T32BridgeResult, EasyFix, and C-backend HIR fields without widening private
+  glob semantics. A strict no-stub focused closure compiled 142 modules and
+  printed 42; both direct-env runtime guards pass. Full Stage-4 was not rerun.
+  TODO590 owns the 101 genuine missing return annotations; rendering/QEMU/
+  coverage admission remains deferred behind TODO580/TODO585/TODO590.
