@@ -30,5 +30,8 @@ open/fstat/hash-on-fd operation.
   this Linux session has no admitted Windows test host. Run the focused file-ops
   and `test_host_env` specs on Windows before claiming native Windows PASS.
 - The standalone pure-Simple `simple_core` archive has no stable file-type
-  primitive. Add a target-owned no-follow metadata ABI before exporting this
-  facade there; do not guess `struct stat` layouts or treat `fopen` as proof.
+  primitive. `src/runtime/simple_core/core_fs.spl` owns the existing
+  `rt_file_is_regular_no_follow(path_ptr,len)->i8` declaration but needs a
+  layout-opaque platform bridge: POSIX `lstat`/`S_ISREG` and a Windows
+  reparse-aware equivalent. Do not guess `struct stat` layouts, depend on the
+  hosted runtime, or treat `fopen` as proof.
