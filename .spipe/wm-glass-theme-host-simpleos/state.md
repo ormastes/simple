@@ -896,3 +896,20 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   creating a mirror-backed offscreen or claiming a device frame. Independent
   highest-capability review accepted the source; admitted macOS opaque-Metal
   readback/capture evidence remains open.
+
+- continuation-2026-07-27-macos-admission-repair-accepted: **SOURCE FIXED /
+  REVIEW ACCEPTED / LIVE ENDPOINT SECURITY UNAVAILABLE (EXIT 125).** A fresh
+  scoped lane fixed canonical full-CLI root classification and replaced the
+  polling/self-attested process receipt with a normalized v2 history verifier
+  plus a fail-closed tracked trust-root gate. It rejects gaps, malformed
+  lineage, forbidden-role same-PID delegation, short-lived forbidden
+  descendants, incomplete exits, root-order violations, and
+  collector/policy/provenance/signing drift.
+  Widget and Web launchers use the exact admitted GUI driver. Independent
+  highest-capability review accepted the fail-closed source boundary. Live
+  evidence remains open because the real Endpoint Security collector and
+  admitted trust-root branch are not implemented, and this host has no
+  approved signing team, entitlement, signed provenance-bound collector, or
+  source-matched canonical full-CLI GUI artifact. The production branch
+  deliberately exits 125 until the implementation is reviewed, pinned policy
+  hashes/status are updated, and those capabilities are provisioned.

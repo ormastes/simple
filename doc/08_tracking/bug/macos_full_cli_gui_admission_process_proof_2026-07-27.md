@@ -1,44 +1,50 @@
 # macOS Full-CLI GUI Admission Process Proof
 
-**Status:** fail-closed / review-cycle cap reached
+**Status:** source fixed / review accepted / live Endpoint Security evidence unavailable (exit 125)
 **Evidence row:** `MAC-WM-GLASS-LOCAL-001`
 
-The manifest-v3 candidate cannot admit a live GUI driver yet:
+The manifest-v3 source boundary has been repaired and independently accepted:
 
-1. Its forbidden-process check rejects the canonical driver's own
-   `build/bootstrap/full/<platform>/simple` path merely because it contains a
-   `bootstrap` component.
-2. The behavior probe self-reports its PID/path/hash and polls `ps` every
-   50 ms. That cannot exclude a same-PID `exec` delegate after the first sample
-   or a shorter-lived forbidden child between samples.
+1. The canonical `build/bootstrap/full/<platform>/simple` root is classified
+   by exact admitted executable identity and role, not a path substring.
+2. The polling/self-attested receipt was replaced by a normalized v2 history
+   verifier plus a fail-closed trust-root gate. The verifier requires a
+   finalized, gap-free execution history
+   beginning with the exact root PID/path; checks fork/exec/exit ordering,
+   parent identity, live-state transitions, complete descendant exits, and
+   root-last exit; and rejects forbidden-role same-PID delegation, short-lived
+   forbidden descendants, or policy/collector/provenance/signing drift.
+3. Admission accepts only the tracked collector source and policy identity.
+   Arbitrary collector paths or caller-authored receipts cannot cross the
+   production boundary.
 
-The launcher-side immutable hash binding is retained as useful source work, but
-the producer/admission candidate must not be committed or used for live
-evidence until both defects are repaired and independently accepted.
+The source repair is committed and accepted. It intentionally remains
+fail-closed with exit 125 because the checked-in Swift collector and the
+`status=admitted` trust-root branch are deliberate placeholders, and this host
+also has no provisioned signing team, Endpoint Security entitlement, signed
+provenance-bound collector, or source-matched canonical full-CLI GUI artifact.
+This is unavailable live implementation/provisioning, not rejection of the
+accepted verifier and fail-closed boundary.
 
-## Required repair
+## Prepared-host completion
 
-- Classify forbidden descendants by admitted executable identity/role, not a
-  substring in the canonical root path.
-- Replace polling/self-attestation with an OS-backed execution-history
-  boundary that covers root executable identity and every descendant through
-  exit, including same-PID `exec`.
-- Add negative fixtures for same-PID `exec` delegation and a sub-50-ms
-  seed/bootstrap child.
-- Re-run these exact focused admission contracts in a fresh scoped session,
-  then request highest-capability review:
+Implement and independently review the real Endpoint Security exec/fork/exit
+collector, reproducible collector-build provenance, and the admitted
+policy/team/entitlement authentication branch. Update the pinned policy
+hashes/status to those reviewed artifacts. Then provision an approved macOS
+signing team and Endpoint Security entitlement, build/sign the collector with
+those identities, bind its provenance to the canonical full-CLI producer, and
+produce the source-matched GUI driver and manifest. Finally run these exact
+focused contracts:
 
-  ```sh
-  sh test/01_unit/scripts/macos_gpu_trusted_build_admission_contract.shs
-  sh test/01_unit/scripts/macos_gui_full_cli_provenance_contract.shs
-  sh -n scripts/check/build-macos-full-cli-gui-provenance.shs
-  sh -n scripts/check/lib/macos-gpu-trusted-build-admission.shs
-  sh -n scripts/gui/macos-gui-run.shs
-  ```
+```sh
+sh test/01_unit/scripts/macos_gui_execution_history_boundary_contract.shs
+sh test/01_unit/scripts/macos_gui_full_cli_provenance_contract.shs
+sh test/01_unit/scripts/macos_gpu_trusted_build_admission_contract.shs
+```
 
-  Do not bootstrap or substitute the Rust seed.
-
-After acceptance, produce the canonical full CLI and manifest, then run:
+Do not bootstrap or substitute the Rust seed. After the contracts pass against
+the provisioned identities and artifact, run:
 
 ```sh
 sh scripts/check/check-macos-vulkan-gui-widget-live-evidence.shs

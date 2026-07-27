@@ -615,13 +615,15 @@ launcher/window-owner identity with the required native receipts. No
 seed/bootstrap execution may satisfy that gate; old orphan
 `SimpleGui -> simple_seed` processes are inadmissible diagnostic residue.
 
-The manifest-v3 candidate separates the canonical full CLI GUI driver from
-Stage 3 and keeps admitted hashes authoritative, but independent review
-rejected its process-history proof. It both rejects the canonical
-`build/bootstrap/full` root by substring and can miss same-PID exec or
-short-lived descendants. The exact fresh-session repair is recorded in
-`doc/08_tracking/bug/macos_full_cli_gui_admission_process_proof_2026-07-27.md`;
-the candidate scripts are not an admitted source checkpoint.
+The manifest-v3 source boundary separates the canonical full CLI GUI driver
+from Stage 3 and keeps admitted hashes authoritative. A fresh scoped repair
+replaced polling/self-attestation with a normalized v2 history verifier plus a
+fail-closed tracked trust-root gate, fixed exact root classification, and added
+topology and drift checks. Independent highest-capability review accepted that
+boundary source. Live admission still exits 125 because the real Endpoint
+Security collector and admitted trust-root branch are not implemented, and
+this host has no approved signing team, entitlement, signed provenance-bound
+collector, or source-matched canonical full CLI GUI artifact.
 
 The canonical SimpleOS desktop entries for x86_64, ARM64, and RV64 call
 `install_generated_simpleos_wm_theme()` before compositor and first-frame
@@ -634,13 +636,15 @@ retain and use the exact commands and path references in the existing
 cross-host request and handoff contract above.
 
 The superseded manifest-v2 gate bound the widget/Web inputs but admitted its
-Stage-3 compiler as the strict GUI driver. The manifest-v3 candidate attempts
-to replace that mismatch with a separately provenance-bound canonical full CLI
-GUI driver. Its launcher-side immutable hashes are sound, but its live process
-proof is review-rejected and must not admit a driver. The live macOS row
-remains runtime-unverified until the process-proof bug is repaired, the source
-is independently accepted, and the canonical driver/manifest are produced on
-the prepared host.
+Stage-3 compiler as the strict GUI driver. Manifest v3 replaces that mismatch
+with a separately provenance-bound canonical full CLI GUI driver, normalized
+history verifier, and fail-closed tracked trust-root gate. That boundary source
+is independently accepted and still fails closed. The live macOS row remains
+runtime-unverified until the real Endpoint Security collector, reproducible
+provenance, and admitted policy/team/entitlement authentication are implemented
+and reviewed; pinned policy hashes/status are updated; identities are
+provisioned; and the exact canonical driver, collector, provenance, and
+manifest are produced on the prepared host.
 
 ## 2026-07-27 Metal Receipt and GUI Driver Follow-up
 
@@ -653,8 +657,13 @@ Receipt `801caf` is therefore retained solely as a GPU-only Metal
 device-operation checkpoint. It is not a native widget/web capture, event
 receipt, GUI admission, or product PASS, and it cannot promote any other row.
 
-GUI-driver admission remains source-blocked, so artifact production and capture
-must not begin. Repair and independently accept the process-proof bug first,
-then produce and admit the exact-current canonical full CLI GUI driver and
-manifest v3. No admissible current pure-Simple GUI runtime exists; the native
-harness and every seed/delegating driver remain inadmissible.
+GUI-driver admission source is repaired and accepted, but live artifact
+production and capture cannot begin with the current placeholders. The prepared
+macOS collector implementation/security owner must first implement and
+independently review the real Endpoint Security collector, reproducible build
+provenance, and admitted policy/team/entitlement authentication; update pinned
+policy hashes/status; then provision the signing team and entitlement, build
+the provenance-bound collector, and produce and admit the exact-current
+canonical full CLI GUI driver and manifest v3. No admissible current
+pure-Simple GUI runtime exists; the native harness and every seed/delegating
+driver remain inadmissible.
