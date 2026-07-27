@@ -661,15 +661,43 @@ fn write_widget_event_evidence(path: text, backend: text, source: text,
         "widget_showcase_event_click_events={click_events}\n" +
         "widget_showcase_event_interaction_revision={interaction_revision}\n")
 
+fn frame_percentile_ns(values: [i64], percentile: i32) -> i64:
+    if values.len() == 0:
+        return 0
+    var sorted = values
+    var i = 1
+    while i < sorted.len():
+        val key = sorted[i]
+        var j = i - 1
+        while j >= 0 and sorted[j] > key:
+            sorted[j + 1] = sorted[j]
+            j = j - 1
+        sorted[j + 1] = key
+        i = i + 1
+    var index = (percentile * sorted.len()) / 100
+    if index >= sorted.len():
+        index = sorted.len() - 1
+    sorted[index]
+
 fn run_widget_showcase_perf_probe(w: i32, h: i32, frames: i64, prefix: text) -> i64:
     var b = Engine2D.create_with_backend(w, h, showcase_backend_key())
     b = draw_frame(b, w, h, showcase_state_default())
+    val warmup_frames = 12
+    var warmup = 0
+    while warmup < warmup_frames:
+        b.present()
+        warmup = warmup + 1
+    var frame_samples: [i64] = []
     val frame_start_us = time_now_micros()
     var frame = 0
     while frame < frames:
+        val sample_start_us = time_now_micros()
         b.present()
+        frame_samples.push((time_now_micros() - sample_start_us) * 1000)
         frame = frame + 1
     val frame_elapsed_ns = (time_now_micros() - frame_start_us) * 1000
+    val frame_p50_ns = frame_percentile_ns(frame_samples, 50)
+    val frame_p95_ns = frame_percentile_ns(frame_samples, 95)
     val pixels = b.read_pixels()
     val stats = pixel_stats(pixels)
     val nonzero = stats.0
@@ -680,6 +708,10 @@ fn run_widget_showcase_perf_probe(w: i32, h: i32, frames: i64, prefix: text) -> 
     print "{prefix}_height={h}"
     print "{prefix}_frames={frames}"
     print "{prefix}_frame_elapsed_ns={frame_elapsed_ns}"
+    print "{prefix}_warmup_frames={warmup_frames}"
+    print "{prefix}_frame_sample_count={frame_samples.len()}"
+    print "{prefix}_frame_p50_ns={frame_p50_ns}"
+    print "{prefix}_frame_p95_ns={frame_p95_ns}"
     print "{prefix}_redraw_frames=1"
     print "{prefix}_render_mode=retained-static-frame"
     print "{prefix}_pixels={pixel_count}"

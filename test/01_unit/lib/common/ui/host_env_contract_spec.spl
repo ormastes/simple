@@ -1,0 +1,133 @@
+# @cover src/lib/common/ui/host_env_contract.spl 100%
+
+use std.spec.*
+use common.ui.host_env_contract.{
+    HostCapabilityRow,
+    RenderPipelineReceipt,
+    TestHostEnv,
+    host_display_input_evidence_passes,
+    host_readback_evidence_passes,
+    host_renderdoc_evidence_passes,
+    host_vulkan_evidence_passes
+}
+
+fn row(name: text, status: text, reason: text = "", resume: text = "") -> HostCapabilityRow:
+    HostCapabilityRow.create(name, status, reason, "build/evidence/" + name + ".txt", resume)
+
+fn complete_env() -> TestHostEnv:
+    TestHostEnv.create([
+        row("x86_simd", "pass"),
+        row("arm_simd", "blocked", "arm-host-required", "bin/simple test-host-env --row arm_simd"),
+        row("riscv_simd", "blocked", "riscv-host-required", "bin/simple test-host-env --row riscv_simd"),
+        row("vulkan", "pass"),
+        row("renderdoc", "pass"),
+        row("display_input", "pass"),
+        row("framebuffer_readback", "pass")
+    ])
+
+fn receipt(
+    event_id: i64 = 7,
+    frame_id: i64 = 7,
+    backend: text = "vulkan",
+    handle: i64 = 41,
+    completed: bool = true,
+    source: text = "device_readback",
+    width: i32 = 64,
+    height: i32 = 48,
+    stride: i32 = 256,
+    checksum: i64 = 99,
+    nonblank: i64 = 12,
+    fallback: bool = false
+) -> RenderPipelineReceipt:
+    RenderPipelineReceipt.create(
+        event_id, frame_id, 3, backend, handle, completed, source,
+        width, height, stride, "argb8888", checksum, nonblank, fallback
+    )
+
+describe "host environment evidence contract":
+
+    # @req REQ-001 REQ-007 REQ-008 REQ-009 REQ-010
+    it "accepts exactly the required capability rows and explicit cross-host blockers":
+        expect(complete_env().validation_reason()).to_equal("")
+
+    it "rejects missing, duplicate, and unknown capability rows":
+        expect(TestHostEnv.create([]).validation_reason()).to_equal("missing-x86_simd")
+        val duplicated = complete_env().with_row(row("vulkan", "pass"))
+        expect(duplicated.validation_reason()).to_equal("duplicate-vulkan")
+        val unknown = complete_env().with_row(row("cuda", "pass"))
+        expect(unknown.validation_reason()).to_equal("unknown-cuda")
+
+    it "requires actionable evidence for every capability status":
+        expect(row("vulkan", "maybe").validation_reason()).to_equal("invalid-status")
+        expect(row("vulkan", "pass", "unexpected").validation_reason()).to_equal("pass-has-reason")
+        expect(HostCapabilityRow.create("vulkan", "pass", "", "", "").validation_reason()).to_equal("missing-evidence-path")
+        expect(row("arm_simd", "blocked").validation_reason()).to_equal("blocked-without-reason")
+        expect(row("x86_simd", "fail").validation_reason()).to_equal("fail-without-reason")
+        expect(row("arm_simd", "blocked", "arm-host-required").validation_reason()).to_equal("blocked-without-resume-command")
+
+    it "covers accepted fail rows, nested row errors, and aggregate serialization":
+        expect(row("x86_simd", "fail", "probe-failed").validation_reason()).to_equal("")
+        expect(TestHostEnv.create([row("x86_simd", "maybe")]).validation_reason()).to_equal("x86_simd-invalid-status")
+        val json = complete_env().to_json()
+        expect(json).to_contain("\"schema\":\"simple-test-host-env-v1\"")
+        expect(json).to_contain("\"name\":\"framebuffer_readback\"")
+
+describe "render pipeline evidence contract":
+
+    # @req REQ-003 REQ-004 REQ-005 REQ-006 REQ-008 REQ-010
+    it "accepts a correlated completed device readback":
+        expect(receipt().validation_reason()).to_equal("")
+
+    it "fails closed on disconnected event, frame, and mutation identities":
+        expect(receipt(event_id: 0).validation_reason()).to_equal("missing-event-id")
+        expect(receipt(frame_id: 8).validation_reason()).to_equal("event-frame-mismatch")
+        expect(RenderPipelineReceipt.create(7, 7, 0, "vulkan", 41, true, "device_readback", 64, 48, 256, "argb8888", 99, 12, false).validation_reason()).to_equal("missing-mutation-revision")
+
+    it "rejects fallback, synthetic, incomplete, and CPU-mirror backend proof":
+        expect(receipt(fallback: true).validation_reason()).to_equal("fallback-used")
+        expect(receipt(backend: "cpu").validation_reason()).to_equal("not-vulkan-backend")
+        expect(receipt(handle: 0).validation_reason()).to_equal("missing-backend-handle")
+        expect(receipt(completed: false).validation_reason()).to_equal("submission-incomplete")
+        expect(receipt(source: "cpu_mirror").validation_reason()).to_equal("not-device-readback")
+
+    it "rejects malformed or blank framebuffer proof":
+        expect(receipt(width: 0).validation_reason()).to_equal("invalid-dimensions")
+        expect(receipt(height: 0).validation_reason()).to_equal("invalid-dimensions")
+        expect(receipt(stride: 64).validation_reason()).to_equal("invalid-stride")
+        expect(RenderPipelineReceipt.create(7, 7, 3, "vulkan", 41, true, "device_readback", 64, 48, 256, "rgba8888", 99, 12, false).validation_reason()).to_equal("invalid-format")
+        expect(receipt(checksum: 0).validation_reason()).to_equal("missing-checksum")
+        expect(receipt(nonblank: 0).validation_reason()).to_equal("blank-frame")
+
+describe "live framebuffer evidence classification":
+    it "accepts only device readback with a real framebuffer and exact live crop":
+        val complete = "linux_hosted_wm_live_window_input_readback_source=device_readback\nlinux_hosted_wm_live_window_framebuffer_status=pass\nlinux_hosted_wm_live_window_glyph_crop_live_match=true"
+        expect(host_readback_evidence_passes(complete)).to_be(true)
+        expect(host_readback_evidence_passes(complete.replace("device_readback", "cpu_mirror"))).to_be(false)
+        expect(host_readback_evidence_passes(complete.replace("framebuffer_status=pass", "framebuffer_status=fail"))).to_be(false)
+        expect(host_readback_evidence_passes(complete.replace("glyph_crop_live_match=true", "glyph_crop_live_match=false"))).to_be(false)
+        expect(host_readback_evidence_passes("prefixed_" + complete)).to_be(false)
+
+describe "host evidence classification":
+    it "requires complete Vulkan device readback evidence":
+        val complete = "vulkan_engine2d_readback_status=pass\nvulkan_engine2d_readback_clear_source=device_readback\nvulkan_engine2d_readback_rect_source=device_readback"
+        expect(host_vulkan_evidence_passes(complete)).to_be(true)
+        expect(host_vulkan_evidence_passes(complete.replace("readback_status=pass", "readback_status=fail"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("clear_source=device_readback", "clear_source=cpu_mirror"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("rect_source=device_readback", "rect_source=cpu_mirror"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete + "\nvulkan_engine2d_readback_status=fail")).to_be(false)
+
+    it "requires a successful RenderDoc capture":
+        val complete = "rdoc_simple_gate_status=pass\nrdoc_simple_gate_capture_file_magic=RDOC"
+        expect(host_renderdoc_evidence_passes(complete)).to_be(true)
+        expect(host_renderdoc_evidence_passes(complete.replace("\n", "\r\n"))).to_be(true)
+        expect(host_renderdoc_evidence_passes(complete.replace("status=pass", "status=fail"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("magic=RDOC", "magic=bad"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_file_magic", "prefixed_rdoc_simple_gate_capture_file_magic"))).to_be(false)
+
+    it "requires screen-origin semantic mutation evidence":
+        val complete = "linux_hosted_wm_live_window_event_origin=screen\nlinux_hosted_wm_live_window_semantic_target_id=field\nlinux_hosted_wm_live_window_mutation_revision=1"
+        expect(host_display_input_evidence_passes(complete)).to_be(true)
+        expect(host_display_input_evidence_passes(complete.replace("origin=screen", "origin=synthetic"))).to_be(false)
+        expect(host_display_input_evidence_passes(complete.replace("semantic_target_id=field", "other_target=field"))).to_be(false)
+        expect(host_display_input_evidence_passes(complete.replace("mutation_revision=1", "mutation_revision=0"))).to_be(false)
+        expect(host_display_input_evidence_passes(complete.replace("semantic_target_id=field", "semantic_target_id="))).to_be(false)

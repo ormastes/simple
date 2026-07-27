@@ -183,6 +183,12 @@ impl CpuSimdRuntimeEvidence:
     fn diagnostic_text() -> text:
         "arch={self.arch};feature={self.feature};level={self.level};x86={_bool_text(self.x86_available)};arm={_bool_text(self.arm_available)};riscv={_bool_text(self.riscv_available)};executed={_bool_text(self.executed_all())};checksum={self.checksum};hits={self.hit_summary};native_simd_executed={_bool_text(self.native_simd_executed)};native_simd_bit_exact={_bool_text(self.native_simd_bit_exact)};native_simd_hits={self.native_simd_hits};reason={self.reason}"
 
+fn cpu_simd_required_evidence_valid(evidence: CpuSimdRuntimeEvidence, expected_arch: text, fallback_calls: i64) -> bool:
+    """Fail closed for a strict architecture-specific SIMD render lane."""
+    (evidence.arch == expected_arch and evidence.executed_all() and
+        evidence.native_simd_executed and evidence.native_simd_bit_exact and
+        evidence.native_simd_hits > 0 and fallback_calls == 0)
+
 class NativeSimdPixelEvidence:
     """Proof that the native vectorized pixel-row kernels actually ran on
     real SIMD hardware (not the scalar fallback) and stayed bit-identical."""
@@ -395,15 +401,12 @@ pub fn _scalar_blend_row(mut dst: any, src: [u32], offset: i64, count: i64):
     var i: i64 = 0
     while i < count:
         val idx = (offset + i).to_i32()
-        # `dst` is intentionally polymorphic for Engine2D facade callers.
-        # Normalize both packed words before bit arithmetic so the native AOT
-        # path does not retain the boxed/`any` representation in channels.
-        val s = src[idx] as i64
+        val s = src[idx]
         val sa = (s >> 24) & 0xFF
         if sa == 255:
             dst[idx] = s
         elif sa > 0:
-            val d = dst[idx] as i64
+            val d = dst[idx]
             val da = (d >> 24) & 0xFF
             val inv_a = 255 - sa
             val dr = (d >> 16) & 0xFF

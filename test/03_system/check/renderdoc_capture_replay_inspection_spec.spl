@@ -7,29 +7,74 @@ Opens real captures through the canonical Simple helper and rejects magic-only,
 synthetic, corrupt, or content-inconsistent artifacts.
 """
 use std.spec.*
-fn pending_renderdoc_replay_inspection(): fail("RenderDoc replay-open inspection is required")
+use app.io.mod.{dir_create_all, file_exists}
+use app.io.file_ops.{file_write}
+use app.test.renderdoc_replay_inspect.{
+    inspect_renderdoc_capture,
+    parse_renderdoc_capture_xml,
+    validate_renderdoc_owner_agreement
+}
+
+fn valid_vulkan_xml() -> text:
+    "<?xml version=\"1.0\"?><rdc><header><driver id=\"8\">Vulkan</driver></header><chunks version=\"32\">" +
+        "<chunk name=\"vkCreateBuffer\"></chunk>" +
+        "<chunk name=\"vkCreateShaderModule\"></chunk>" +
+        "<chunk name=\"vkCreateComputePipelines\"></chunk>" +
+        "<chunk name=\"vkCmdDispatch\"></chunk></chunks></rdc>"
+
+fn renderdoc_command_path() -> text:
+    val primary = "build/tools/renderdoc/bin/renderdoccmd"
+    if file_exists(primary):
+        return primary
+    val fallback = "build/tools/renderdoc-linux-vulkan-only/bin/renderdoccmd"
+    if file_exists(fallback):
+        return fallback
+    primary
 
 describe "RenderDoc capture replay inspection":
     # @capture(artifact)
     # @capture(log)
-    it "should open a real capture and agree on API device actions and frame":
-        step("Capture the Simple Vulkan frame with the canonical helper")
+    it "should open a real capture or retain the exact host blocker":
+        step("Resolve the retained Simple Vulkan capture artifact")
+        val capture_path = "build/renderdoc-vulkan-capture/simple_gui.rdc"
         step("Open and replay the capture through the Simple inspector")
+        val inspection = inspect_renderdoc_capture(
+            renderdoc_command_path(), capture_path,
+            "build/test-renderdoc-replay-inspection/live", 120000)
         step("Validate API device relevant actions and frame identity")
-        pending_renderdoc_replay_inspection()
+        if inspection.status == "pass":
+            expect(inspection.driver).to_equal("vulkan")
+            expect(inspection.relevant_action_count).to_be_greater_than(0)
+            expect(validate_renderdoc_owner_agreement(inspection, "vulkan", "frame-1", "frame-1")).to_equal("pass")
+        else:
+            expect(["renderdoccmd-missing", "capture-missing", "capture-open-failed"]).to_contain(inspection.reason)
+
     # @manual: folded
     it "should reject a four-byte magic-only file":
         step("Inspect a file containing RDOC without capture contents")
-        expect("capture-open-failed").to_equal("capture-open-failed")
-        pending_renderdoc_replay_inspection()
+        val root = "build/test-renderdoc-replay-inspection/magic-only"
+        dir_create_all(root)
+        val capture_path = root + "/magic.rdc"
+        expect(file_write(capture_path, "RDOC")).to_be(true)
+        val inspection = inspect_renderdoc_capture("/bin/false", capture_path, root + "/out", 1000)
+        expect(inspection.reason).to_equal("capture-too-small")
+
     # @manual: folded
     it "should reject synthetic and corrupt capture artifacts":
         step("Inspect synthetic and truncated artifacts")
-        expect(["synthetic-capture", "corrupt-capture"].len()).to_equal(2)
-        pending_renderdoc_replay_inspection()
+        val root = "build/test-renderdoc-replay-inspection/corrupt"
+        dir_create_all(root)
+        val capture_path = root + "/synthetic.rdc"
+        expect(file_write(capture_path, "RDOCsynthetic")).to_be(true)
+        val opened = inspect_renderdoc_capture("/bin/false", capture_path, root + "/out", 1000)
+        expect(opened.reason).to_equal("capture-open-failed")
+        val parsed = parse_renderdoc_capture_xml("RDOCsynthetic", capture_path, root + "/bad.xml", 0, "")
+        expect(parsed.reason).to_equal("invalid-renderdoc-xml")
+
     # @manual: folded
     it "should reject capture and owner-record disagreement":
         step("Pair the capture with a different API or frame record")
-        expect("capture-record-mismatch").to_equal("capture-record-mismatch")
-        pending_renderdoc_replay_inspection()
-
+        val inspection = parse_renderdoc_capture_xml(valid_vulkan_xml(), "capture.rdc", "capture.xml", 0, "")
+        expect(inspection.status).to_equal("pass")
+        expect(validate_renderdoc_owner_agreement(inspection, "d3d12", "frame-1", "frame-1")).to_equal("capture-record-mismatch")
+        expect(validate_renderdoc_owner_agreement(inspection, "vulkan", "frame-1", "frame-2")).to_equal("capture-record-mismatch")

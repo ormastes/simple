@@ -1,5 +1,55 @@
 # RenderDoc Capture Infrastructure
 
+## Simple RenderDoc counterpart
+
+**Simple RenderDoc** is shorthand for the repo-native
+**Simple 2D RenderDoc Backend Equivalence** capsule. It is Simple's counterpart
+to RenderDoc for deterministic backend evidence: versioned render records,
+validation, canonical serialization, field-level diff, exact equivalence, QEMU
+and board receipts, and a pure-Simple inspector for external `.rdc` contents.
+It is not a RenderDoc fork or merely the `capture-simple` wrapper.
+
+Implemented core:
+
+- `src/lib/common/renderdoc/backend_render_record.spl`
+- `src/app/test/renderdoc_replay_inspect.spl`
+- `src/lib/common/renderdoc/simpleos_render_target_evidence.spl`
+- `src/lib/common/renderdoc/simpleos_simd_render_evidence.spl`
+
+The external RenderDoc bridge remains corroborating evidence:
+
+```sh
+scripts/tool/renderdoc-evidence.shs capture-simple
+RDOC_SIMPLE_EVIDENCE_ENV=build/renderdoc/canonical-probe/simple/evidence.env \
+  sh scripts/check/check-renderdoc-simple-gate.shs
+```
+
+Current status is partial. Record validation/diff/equivalence and RDC XML
+inspection are executable. Production backend matrices, SimpleOS QEMU receipt
+execution, replay inspection, and SIMD integration specs still contain explicit
+fail placeholders; do not claim a completed counterpart until those are
+implemented and their native evidence passes. The manual-contract audit itself
+is implemented and deliberately stays red while any counterpart spec retains a
+`pending_*` helper.
+
+The canonical aggregate is now:
+
+```sh
+sh scripts/check/check-simple-2d-renderdoc-backend-equivalence.shs --self-test
+sh scripts/check/check-simple-2d-renderdoc-backend-equivalence.shs --profile=focused
+```
+
+It reuses the pure-Simple record/equivalence/inspector specs and the existing
+Simple RenderDoc capture gate. Every row retains status/reason, paths,
+timing/RSS, and REQ traceability. Explicit fail helpers, a Rust seed, missing
+capture evidence, QEMU gaps, and native-host gaps remain typed blockers.
+
+Architecture and requirements:
+`doc/04_architecture/simple_2d_renderdoc_backend_equivalence.md` and
+`doc/02_requirements/feature/simple_2d_renderdoc_backend_equivalence.md`.
+LLM/SPipe routing:
+`doc/00_llm_process/feature_expert/simple_renderdoc/skill.md`.
+
 Use the shared RenderDoc interface for both capture styles:
 
 ```sh
@@ -8,6 +58,7 @@ scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 scripts/tool/renderdoc-evidence.shs capture-simple
 scripts/tool/renderdoc-evidence.shs capture-html
 scripts/tool/renderdoc-evidence.shs capture-electron-html
+sh scripts/check/check-simple-2d-renderdoc-backend-equivalence.shs --profile=focused
 sh scripts/check/check-html-css-full-rendering-goal-status.shs
 RDOC_SIMPLE_EVIDENCE_ENV=build/renderdoc/canonical-probe/simple/evidence.env \
   sh scripts/check/check-renderdoc-simple-gate.shs

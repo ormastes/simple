@@ -1,13 +1,5 @@
 # Feature: WM Glass Theme on Host and SimpleOS
 
-## Authoritative Documents
-
-- Plan: `doc/03_plan/agent_tasks/wm_glass_theme_host_simpleos.md`
-- System-test plan: `doc/03_plan/sys_test/wm_glass_theme_host_simpleos.md`
-- Architecture: `doc/04_architecture/wm_glass_theme_host_simpleos.md`
-- Detail design: `doc/05_design/wm_glass_theme_host_simpleos.md`
-- Manual: `doc/06_spec/03_system/app/simple_wm/feature/wm_glass_theme_host_simpleos_spec.md`
-
 ## Raw Request
 `$sp_dev check wm on host and simple os on qemu. and fix unwired and unimpled and bug. specially simple gui and simpwl wm does not apply theme properly which created from stitch in glass theme like mac fill. research current files and git history check theme apply plan if web renderer does not apply css properly fix the bugs in root cause. do things in pherallel and use smalll model agents with detail guide and higher model review.`
 

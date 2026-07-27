@@ -1136,7 +1136,11 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
     # free-function boundary. Native inference has historically treated an
     # unannotated field projection as a generic runtime value here.
     val embedding: DrawIrEmbeddingConfig = batch.embedding
-    if batch.commands.len() == 0:
+    # Keep the command array typed for the same reason. A production SimpleOS
+    # entry-closure build lowered `batch.commands.len()` as an impl-less trait
+    # call and trapped before the first WM frame.
+    val commands: [DrawIrCommand] = batch.commands
+    if commands.len() == 0:
         return _engine2d_draw_ir_render_outcome(eng, 0, 0, "", 0)
     # Perf short-circuit: a batch whose embedding is (0,0) at full opacity and
     # EXACTLY the size of the target it renders onto composites as a plain 1:1
@@ -1274,7 +1278,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
             eng.set_clip(embedding.x, embedding.y, embedding.width, embedding.height)
         val blend_images = allow_parent_image or (embedding.surface_id != "" and fills_target_exactly)
         val direct = _engine2d_draw_ir_render_commands(
-            eng, batch.commands, embedding.x, embedding.y, images,
+            eng, commands, embedding.x, embedding.y, images,
             blend_images, batch.backend_target == "metal",
             if apply_clip:
                 draw_ir_rect_bounds(
@@ -1320,7 +1324,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
         match pooled:
             Err(reason):
                 return _engine2d_draw_ir_render_outcome(
-                    eng, 0, batch.commands.len().to_i32(), reason, 0)
+                    eng, 0, commands.len().to_i32(), reason, 0)
             Ok(created):
                 offscreen = created
                 offscreen_created = true
@@ -1331,7 +1335,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
         match created:
             Err(reason):
                 return _engine2d_draw_ir_render_outcome(
-                    eng, 0, batch.commands.len().to_i32(), reason, 0)
+                    eng, 0, commands.len().to_i32(), reason, 0)
             Ok(target):
                 offscreen = target
                 offscreen_created = true
@@ -1339,12 +1343,12 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
         return _engine2d_draw_ir_render_outcome(
             eng,
             0,
-            batch.commands.len().to_i32(),
+            commands.len().to_i32(),
             "embedded-offscreen-not-created",
             0
         )
     val inner = _engine2d_draw_ir_render_commands(
-        offscreen, batch.commands, 0, 0, images, true,
+        offscreen, commands, 0, 0, images, true,
         batch.backend_target == "metal", draw_ir_no_rect())
     offscreen = inner.engine
     val child = offscreen.read_pixels_with_source()
@@ -1364,7 +1368,7 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
         return _engine2d_draw_ir_render_outcome(
             eng,
             0,
-            batch.commands.len().to_i32(),
+            commands.len().to_i32(),
             "embedded-device-composite-not-proven",
             0
         )
@@ -1445,6 +1449,11 @@ fn engine2d_draw_ir_adv_fresh_device_composition_with_images(engine: DrawIrRende
 
 fn _engine2d_draw_ir_adv_composition_with_images(engine: DrawIrRenderTarget, composition: DrawIrComposition, gpu_available: bool, images: [Engine2dResolvedDrawIrImage], allow_parent_image: bool, present_frame: bool, readback_frame: bool) -> Engine2dDrawIrAdvResult:
     val plan = simple_2d_draw_ir_adv_composition_plan(composition, gpu_available)
+    # Preserve the public fallback invariant from the original inputs. The
+    # native cross-module aggregate path can lose this bool from `plan`.
+    val gpu_fallback_required = (
+        composition.backend_target == DRAW_IR_BACKEND_GPU and
+        not gpu_available)
     # NOTE(2026-07-16): previously this preflight-scanned every batch and, if
     # ANY command anywhere was unresolved (e.g. one missing taskbar icon on a
     # degraded disk), bailed out with rendered=0 for the WHOLE composition.
@@ -1518,6 +1527,10 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: DrawIrRenderTarget, com
         readback = eng.read_pixels_with_source()
     var result = _engine2d_draw_ir_result_from_composition_plan_with_unsupported(
         plan, rendered, skipped, unsupported_kinds, readback)
+    if gpu_fallback_required:
+        result.fallback_required = true
+        if result.fallback_reason == "":
+            result.fallback_reason = "gpu backend unavailable; using cpu fallback"
     # Single line: the parser needs the expression on the same line as `=`;
     # a newline straight after the assignment operator does not continue.
     result.cpu_composited_material_count = cpu_composited_material_count

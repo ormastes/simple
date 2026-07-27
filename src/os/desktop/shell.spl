@@ -25,8 +25,9 @@ use os.drivers.framebuffer.fb_driver.{Color}
 use os.desktop.app_manifest.{AppManifest, load_app_manifests, search_apps}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use os.services.wm.wm_service.{WmService, WmAction}
-use common.window_protocol.geometry.{WindowId, ProcessId, AppId, Point, Size, Rect}
+use common.window_protocol.geometry.{WindowId, ProcessId, AppId, Point, Size, Rect, Modifiers}
 use common.window_protocol.window_protocol.{WM_STATUS_ERROR}
+use common.window_protocol.input_translator.{pointer_to_wm_mouse_event}
 use os.services.launcher.launcher.{
     launcher_init, launcher_launch, launcher_shortcut_dispatch, launcher_register, launcher_terminate,
     launcher_get_app_name, launcher_get_process_app_index, launcher_get_process_app_id_for_pid,
@@ -835,6 +836,13 @@ impl DesktopShell:
         self.compositor.running = true
         serial_println("[wm-loop] polling-active")
 
+        # ponytail: poll one envelope at a time during remote-app bootstrap;
+        # 256 x 4 KiB caps bump-heap cost at 1 MiB, then idle is allocation-free.
+        var remote_bootstrap_poll_ticks: i64 = 0
+        var remote_bootstrap_polls_left: i64 = 256
+        var remote_event_polls_left: i64 = 0
+        var remote_event_window_id: i64 = 0
+        var remote_event_input_seq: i64 = 0
         while self.compositor.running:
             # Idle path must stay ALLOCATION-FREE: the baremetal bump
             # allocator never frees, revision/taskbar recomputation leaks
@@ -867,6 +875,32 @@ impl DesktopShell:
             val ps2_status = port_inb(0x64)
             val ps2_byte_ready = ((ps2_status as i32) & 1) != 0
             if not ps2_byte_ready and not queued_input_active:
+                if remote_bootstrap_polls_left > 0 or remote_event_polls_left > 0:
+                    remote_bootstrap_poll_ticks = remote_bootstrap_poll_ticks + 1
+                    if remote_bootstrap_poll_ticks >= 65536:
+                        remote_bootstrap_poll_ticks = 0
+                        if remote_event_polls_left > 0:
+                            remote_event_polls_left = remote_event_polls_left - 1
+                        else:
+                            remote_bootstrap_polls_left = remote_bootstrap_polls_left - 1
+                        val remote_action = self.wm.poll_once()
+                        if remote_action != nil:
+                            val next_remote_action = remote_action
+                            if next_remote_action.kind != "none":
+                                self.apply_wm_action(next_remote_action)
+                                if remote_event_polls_left > 0 and next_remote_action.kind == "update_tree" and next_remote_action.window_id == remote_event_window_id:
+                                    val presented_generation = self.render_baremetal_frame(executor)
+                                    if presented_generation > 0:
+                                        serial_println("[remote-browser-content-presented] window={next_remote_action.window_id} input_seq={remote_event_input_seq} generation={presented_generation}")
+                                    remote_event_polls_left = 0
+                                    remote_event_window_id = 0
+                                    remote_event_input_seq = 0
+                        if remote_bootstrap_polls_left > 0:
+                            for remote_surface in self.compositor.surfaces:
+                                if remote_surface.owner_port > 0 and remote_surface.app_id == APP_ID_BROWSER_DEMO and remote_surface.content_html != "":
+                                    serial_println("[remote-browser-ready] window={remote_surface.id} x={remote_surface.x} y={remote_surface.y} width={remote_surface.width} height={remote_surface.height} owner_port={remote_surface.owner_port}")
+                                    self.render_baremetal_frame(executor)
+                                    remote_bootstrap_polls_left = 0
                 continue
             # Copy-commit idiom (same fix as materialize_process_launch_scalar
             # / state.md "explicitly committing the nested compositor copy"):
@@ -884,12 +918,19 @@ impl DesktopShell:
             var pointer_y: i32 = 0
             var pointer_button_code: i32 = 0
             var pointer_kind_code: i32 = 0
+            var pointer_window_id: i32 = 0
             if input_compositor.pending_wm_pointer_valid:
                 pointer_sequence = input_compositor.input_sequence
                 pointer_x = input_compositor.pending_wm_pointer_x
                 pointer_y = input_compositor.pending_wm_pointer_y
                 pointer_button_code = input_compositor.pending_wm_pointer_button_code
                 pointer_kind_code = input_compositor.pending_wm_pointer_kind_code
+                pointer_window_id = input_compositor.pending_wm_pointer_window_id
+                if pointer_kind_code == 1 and input_compositor.window_owner_port(input_compositor.pending_wm_pointer_window_id.to_u64()) > 0:
+                    remote_event_polls_left = 256
+                    remote_event_window_id = input_compositor.pending_wm_pointer_window_id
+                    remote_event_input_seq = pointer_sequence
+                    remote_bootstrap_poll_ticks = 0
             val input_active = (fullscreen_sequence > 0 or fullscreen_release_sequence > 0 or input_compositor.pending_meta_key > 0 or input_compositor.pending_shortcut != "" or input_compositor.pending_wm_pointer_valid)
             if not input_active:
                 # A partial PS/2 packet may not have produced a receipt yet,
@@ -941,9 +982,6 @@ impl DesktopShell:
             self.drain_wm_actions()
             self.handle_pending_wm_pointer_step()
             if pointer_sequence > 0:
-                var pointer_window_id: i32 = 0
-                if self.compositor.focused_idx >= 0 and self.compositor.focused_idx < self.compositor.surfaces.len():
-                    pointer_window_id = self.compositor.surfaces[self.compositor.focused_idx].id
                 serial_println("[wm-pointer-state] input_seq={pointer_sequence} window={pointer_window_id} marker={self.last_wm_loop_marker}")
             # Step receipts between the pointer state and frame receipts. The
             # pointer RELEASE (kind_code=2) hangs here: seq 8 printed its state
@@ -966,7 +1004,11 @@ impl DesktopShell:
             if pointer_sequence > 0:
                 if _WM_TRACE: serial_println("[wm-loop-step] seq={pointer_sequence} at=before-taskbar-revision scene_revision={scene_revision}")
             val taskbar_revision = self.runtime_taskbar_revision()
-            val need_render = pointer_sequence > 0 or (fullscreen_sequence > 0 and fullscreen_action != "") or scene_revision != self.last_rendered_scene_revision or taskbar_revision != self.last_rendered_taskbar_revision
+            # Button release alone has no visual state. Retain the last frame
+            # unless the remote app changed content/taskbar state; forcing a
+            # full 4K repaint here was the post-release hang.
+            val pointer_needs_render = pointer_sequence > 0 and pointer_kind_code != 2
+            val need_render = pointer_needs_render or (fullscreen_sequence > 0 and fullscreen_action != "") or scene_revision != self.last_rendered_scene_revision or taskbar_revision != self.last_rendered_taskbar_revision
             var rendered_revision = scene_revision
             if pointer_sequence > 0:
                 val need_render_code = if need_render: 1 else: 0
@@ -1189,11 +1231,26 @@ impl DesktopShell:
         # above (kept in sync with compositor.spl's encode side).
         val button_code = pending_compositor.pending_wm_pointer_button_code
         val kind_code = pending_compositor.pending_wm_pointer_kind_code
+        val target_window_id = pending_compositor.pending_wm_pointer_window_id
+        val local_x = pending_compositor.pending_wm_pointer_local_x
+        val local_y = pending_compositor.pending_wm_pointer_local_y
         pending_compositor.clear_pending_wm_pointer_step()
         self.compositor = pending_compositor
         val button: text = wm_pointer_button_from_code(button_code)
         val kind: text = wm_pointer_kind_from_code(kind_code)
         self.handle_wm_pointer_event_loop_step(x, y, button, kind)
+        if target_window_id > 0 and self.wm.initialized:
+            val window_id = WindowId(value: target_window_id as u64)
+            if kind == "down":
+                self.wm.send_focus_changed(window_id.value, true)
+            val event = pointer_to_wm_mouse_event(
+                window_id,
+                kind,
+                local_x,
+                local_y,
+                Modifiers.none()
+            )
+            self.wm.send_input_to_owner(window_id.value, event)
 
     me drain_wm_actions():
         """Drain pending WM IPC requests into the compositor-owned shell state."""

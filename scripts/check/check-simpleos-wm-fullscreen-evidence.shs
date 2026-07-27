@@ -26,8 +26,10 @@ QMP_SOCKET="$BUILD_DIR/qmp.sock"
 CAPTURE_OUT="$BUILD_DIR/capture.out"
 FULLSCREEN_PPM="$BUILD_DIR/fullscreen.ppm"
 RESTORED_PPM="$BUILD_DIR/restored.ppm"
+BROWSER_EVENT_PPM="$BUILD_DIR/browser-event.ppm"
 FULLSCREEN_RAW="$FULLSCREEN_PPM.raw"
 RESTORED_RAW="$RESTORED_PPM.raw"
+BROWSER_EVENT_RAW="$BROWSER_EVENT_PPM.raw"
 BASELINE_PPM="$BUILD_DIR/baseline.ppm"
 BASELINE_RAW="$BASELINE_PPM.raw"
 FONT_REGION_RGB="$BUILD_DIR/font-region.rgb"
@@ -51,12 +53,17 @@ DISK_IMAGE=""
 DISK_IMAGE_SHA256=""
 disk_image_status=not-staged
 disk_image_provenance=not-staged
+BROWSER_DEMO_BINARY="build/os/apps/browser_demo/browser_demo.elf"
+BROWSER_DEMO_BINARY_SHA256=""
+browser_demo_build_status=not-built
+browser_demo_disk_status=not-checked
 QEMU_PID=""
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$LAUNCH_OUT" "$SERIAL_LOG" "$QMP_SOCKET" "$CAPTURE_OUT" \
     "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" \
-    "$BASELINE_RAW" "$FULLSCREEN_RAW" "$RESTORED_RAW" \
+    "$BROWSER_EVENT_PPM" "$BASELINE_RAW" "$FULLSCREEN_RAW" "$RESTORED_RAW" \
+    "$BROWSER_EVENT_RAW" \
     "$FONT_REGION_RGB" "$FONT_REGION_CORRUPT_COPY" "$BUILD_DIR/evidence.env"
 
 resolve_path() {
@@ -263,6 +270,44 @@ fat32_image_status() {
     fi
 }
 
+browser_demo_disk_payload_status() {
+    disk_path="$1"
+    binary_path="$2"
+    if ! command -v mcopy >/dev/null 2>&1; then
+        echo "mcopy-unavailable"
+        return
+    fi
+    extracted="$(mktemp "$BUILD_DIR/browser-demo-smf.XXXXXX")" || {
+        echo "extract-temp-failed"
+        return
+    }
+    prefix="$(mktemp "$BUILD_DIR/browser-demo-prefix.XXXXXX")" || {
+        rm -f "$extracted"
+        echo "prefix-temp-failed"
+        return
+    }
+    if ! mcopy -o -i "$disk_path" ::/SYS/APPS/BROWSMF.SMF "$extracted" >/dev/null 2>&1; then
+        rm -f "$extracted" "$prefix"
+        echo "browser-smf-missing"
+        return
+    fi
+    binary_bytes="$(file_byte_count "$binary_path")"
+    extracted_bytes="$(file_byte_count "$extracted")"
+    if [ "$binary_bytes" -le 0 ] || [ "$extracted_bytes" -lt "$((binary_bytes + 128))" ]; then
+        rm -f "$extracted" "$prefix"
+        echo "browser-smf-truncated"
+        return
+    fi
+    dd if="$extracted" of="$prefix" bs=1 count="$binary_bytes" 2>/dev/null
+    if [ "$(file_sha256 "$prefix")" != "$(file_sha256 "$binary_path")" ]; then
+        rm -f "$extracted" "$prefix"
+        echo "browser-elf-prefix-mismatch"
+        return
+    fi
+    rm -f "$extracted" "$prefix"
+    echo pass
+}
+
 serial_has_production_fault() {
     grep -Eq '^\[fault\] \*\*\* EXCEPTION FRAME|page[- ]fault|nil receiver|invalid Simple Web frame|\[simple2d-frame-failed\]|^\[wm-frame\] (content-provenance-rejected|engine2d-draw-ir-rejected|frame-degraded)' "$SERIAL_LOG" 2>/dev/null
 }
@@ -317,6 +362,10 @@ emit_failure() {
         echo "simpleos_wm_fullscreen_disk_image_status=$disk_image_status"
         echo "simpleos_wm_fullscreen_disk_image_provenance=$disk_image_provenance"
         echo "simpleos_wm_fullscreen_disk_image_sha256=$DISK_IMAGE_SHA256"
+        echo "simpleos_wm_fullscreen_browser_demo_binary=$BROWSER_DEMO_BINARY"
+        echo "simpleos_wm_fullscreen_browser_demo_binary_sha256=$BROWSER_DEMO_BINARY_SHA256"
+        echo "simpleos_wm_fullscreen_browser_demo_build_status=$browser_demo_build_status"
+        echo "simpleos_wm_fullscreen_browser_demo_disk_status=$browser_demo_disk_status"
         echo "simpleos_wm_fullscreen_font_asset=$FONT_ASSET"
         echo "simpleos_wm_fullscreen_font_asset_bytes=$FONT_ASSET_BYTES"
         echo "simpleos_wm_fullscreen_font_asset_sha256=$FONT_ASSET_SHA256"
@@ -589,6 +638,23 @@ if ! is_sha256 "$KERNEL_SHA256"; then
     exit 1
 fi
 
+set +e
+scripts/os/build_browser_demo_client.shs >"$BUILD_DIR/build-browser-demo.out" 2>&1
+browser_demo_build_code=$?
+set -e
+if [ "$browser_demo_build_code" -ne 0 ] || [ ! -s "$BROWSER_DEMO_BINARY" ]; then
+    browser_demo_build_status=failed
+    emit_failure "browser-demo-client-build-failed"
+    exit 1
+fi
+BROWSER_DEMO_BINARY_SHA256="$(file_sha256 "$BROWSER_DEMO_BINARY")"
+if ! is_sha256 "$BROWSER_DEMO_BINARY_SHA256"; then
+    browser_demo_build_status=invalid-hash
+    emit_failure "browser-demo-client-hash-invalid"
+    exit 1
+fi
+browser_demo_build_status=pass
+
 rm -f "$QMP_SOCKET" "$SERIAL_LOG"
 
 DISK_IMAGE="${SIMPLEOS_WM_DISK_IMAGE:-$BUILD_DIR/fat32-x86_64-font.img}"
@@ -597,7 +663,9 @@ if [ -n "${SIMPLEOS_WM_DISK_IMAGE:-}" ]; then
 fi
 if [ -z "${SIMPLEOS_WM_DISK_IMAGE:-}" ]; then
     set +e
-    SIMPLEOS_FONT_ASSET="$FONT_ASSET" scripts/os/make_os_disk.shs \
+    SIMPLEOS_FONT_ASSET="$FONT_ASSET" \
+    SIMPLEOS_BROWSER_DEMO_BINARY="$BROWSER_DEMO_BINARY" \
+    scripts/os/make_os_disk.shs \
         26 "$DISK_IMAGE" "$KERNEL_OUTPUT" x86_64 \
         >"$BUILD_DIR/make-os-disk.out" 2>&1
     disk_build_code=$?
@@ -634,6 +702,11 @@ fi
 DISK_IMAGE_SHA256="$(file_sha256 "$DISK_IMAGE")"
 if ! is_sha256 "$DISK_IMAGE_SHA256"; then
     emit_failure "artifact-sha256-invalid"
+    exit 1
+fi
+browser_demo_disk_status="$(browser_demo_disk_payload_status "$DISK_IMAGE" "$BROWSER_DEMO_BINARY")"
+if [ "$browser_demo_disk_status" != pass ]; then
+    emit_failure "browser-demo-real-elf-not-staged"
     exit 1
 fi
 
@@ -739,6 +812,15 @@ pointer_frame_marker=""
 pointer_release_irq_marker=""
 pointer_release_state_marker=""
 pointer_release_frame_marker=""
+remote_browser_ready_marker=""
+remote_browser_window=""
+remote_browser_window_valid=false
+browser_event_marker=""
+browser_content_applied_marker=""
+browser_content_presented_generation=0
+browser_content_presented_generation_status=fail
+browser_content_delta_generation=0
+browser_content_delta_generation_status=fail
 baseline_seq=0
 maximize_seq=0
 maximize_release_seq=0
@@ -750,6 +832,9 @@ changed_bytes=0
 before_sha256=
 after_sha256=
 restored_sha256=
+browser_content_before_sha256=
+browser_content_after_sha256=
+browser_content_changed_bytes=0
 
 # Wait for the QMP socket.
 waited=0
@@ -850,7 +935,7 @@ else
         # Capture baseline, inject two F11 make/break pairs, and map the host
         # nonce to the guest's newly observed monotonic input sequences.
         set +e
-        python3 - "$QMP_SOCKET" "$SERIAL_LOG" "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" "$FONT_REGION_RGB" "$FONT_REGION_CORRUPT_COPY" "$scanout_address" "$scanout_width" "$scanout_height" "$scanout_stride" "$scanout_pixel_format" "$scanout_size" "$input_nonce" >"$CAPTURE_OUT" 2>&1 <<'PY'
+        python3 - "$QMP_SOCKET" "$SERIAL_LOG" "$BASELINE_PPM" "$FULLSCREEN_PPM" "$RESTORED_PPM" "$BROWSER_EVENT_PPM" "$FONT_REGION_RGB" "$FONT_REGION_CORRUPT_COPY" "$scanout_address" "$scanout_width" "$scanout_height" "$scanout_stride" "$scanout_pixel_format" "$scanout_size" "$input_nonce" >"$CAPTURE_OUT" 2>&1 <<'PY'
 import hashlib
 import json
 import os
@@ -860,10 +945,10 @@ import sys
 import time
 
 sock_path, serial_path = sys.argv[1], sys.argv[2]
-baseline_ppm, fullscreen_ppm, restored_ppm = sys.argv[3], sys.argv[4], sys.argv[5]
-font_region_path, corrupt_region_path = sys.argv[6], sys.argv[7]
-address, width, height, pitch = map(int, sys.argv[8:12])
-pixel_format, size, nonce = sys.argv[12], int(sys.argv[13]), sys.argv[14]
+baseline_ppm, fullscreen_ppm, restored_ppm, browser_event_ppm = sys.argv[3:7]
+font_region_path, corrupt_region_path = sys.argv[7], sys.argv[8]
+address, width, height, pitch = map(int, sys.argv[9:13])
+pixel_format, size, nonce = sys.argv[13], int(sys.argv[14]), sys.argv[15]
 
 qmp_id = [0]
 
@@ -926,9 +1011,52 @@ def serial_text():
     except OSError:
         return ""
 
+def serial_size():
+    try:
+        return os.path.getsize(serial_path)
+    except OSError:
+        return 0
+
+def serial_text_from(offset):
+    try:
+        with open(serial_path, "rb") as serial:
+            serial.seek(offset)
+            return serial.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
 def max_input_seq():
     values = [int(v) for v in re.findall(r"\[wm-frame\] input_seq=(\d+) generation=\d+", serial_text())]
     return max(values) if values else 0
+
+def wait_remote_browser_ready():
+    deadline = time.monotonic() + 120.0
+    pattern = re.compile(
+        r"^\[remote-browser-ready\] window=([1-9]\d*) x=(-?\d+) y=(-?\d+) "
+        r"width=(\d+) height=(\d+) owner_port=([1-9]\d*)\r?$", re.M)
+    while time.monotonic() < deadline:
+        match = pattern.search(serial_text())
+        if match:
+            rect = tuple(int(match.group(i)) for i in range(2, 6))
+            if rect[2] > 0 and rect[3] > 24:
+                return match.group(0), int(match.group(1)), rect
+        time.sleep(0.05)
+    raise RuntimeError("remote-browser-ready-missing")
+
+def wait_browser_content_presented(window_id, input_seq, serial_offset):
+    deadline = time.monotonic() + 120.0
+    event_marker = "[browser-demo-event] window=%d input_received=true content_mutated=true" % window_id
+    presented_pattern = re.compile(
+        r"^\[remote-browser-content-presented\] window=%d input_seq=%d generation=([1-9]\d*)\r?$" %
+        (window_id, input_seq), re.M)
+    while time.monotonic() < deadline:
+        text = serial_text_from(serial_offset)
+        event_pos = text.find(event_marker)
+        presented_match = presented_pattern.search(text)
+        if event_pos >= 0 and presented_match and presented_match.start() > event_pos:
+            return event_marker, presented_match.group(0), int(presented_match.group(1))
+        time.sleep(0.05)
+    raise RuntimeError("remote-browser-content-mutation-missing")
 
 def wait_press_correlation(after_seq, action, expected_window=None):
     # 300s (was 90s): the maximize re-render now includes pure-Simple sfnt
@@ -969,7 +1097,7 @@ def wait_release_receipt(after_seq):
         time.sleep(0.05)
     raise RuntimeError("guest-input-release-receipt-missing")
 
-def wait_pointer_correlation(after_seq, kind_code, expected_window=""):
+def wait_pointer_correlation(after_seq, kind_code, expected_window="", serial_offset=0):
     # 300s (was 30s), matching wait_press_correlation: every pointer step sets
     # need_render in the shell loop, so correlating one requires a FULL 4K
     # re-render with pure-Simple glyf rasterization under TCG — the exact work
@@ -991,7 +1119,7 @@ def wait_pointer_correlation(after_seq, kind_code, expected_window=""):
     # generation > 0.
     deadline = time.monotonic() + 300.0
     while time.monotonic() < deadline:
-        text = serial_text()
+        text = serial_text_from(serial_offset)
         seqs = sorted({int(v) for v in re.findall(r"^\[wm-pointer-irq\] input_seq=(\d+) x=\d+ y=\d+ button_code=1 kind_code=%d\r?$" % kind_code, text, re.M) if int(v) > after_seq})
         for seq in seqs:
             irq = re.search(r"^\[wm-pointer-irq\] input_seq=%d x=\d+ y=\d+ button_code=1 kind_code=%d\r?$" % (seq, kind_code), text, re.M)
@@ -1011,9 +1139,9 @@ def send_f11(f):
     write_qmp(f, {"execute":"input-send-event", "arguments":{"events":events}})
 
 def send_pointer_click(f, window_rect):
-    window_x, window_y, window_width, _ = window_rect
+    window_x, window_y, window_width, window_height = window_rect
     target_x = window_x + window_width // 2
-    target_y = window_y + 14
+    target_y = window_y + max(36, window_height // 2)
     delta_x = target_x - width // 2
     delta_y = target_y - height // 2
     write_qmp(f, {"execute":"input-send-event", "arguments":{"events":[
@@ -1030,6 +1158,7 @@ s.connect(sock_path)
 f = s.makefile("rwb", buffering=0)
 f.readline()
 write_qmp(f, {"execute": "qmp_capabilities"})
+remote_ready_marker, remote_browser_window, remote_browser_rect = wait_remote_browser_ready()
 baseline_seq = max_input_seq()
 baseline = pmem(f, baseline_ppm)
 if width < 56 or height < 48 or len(baseline) != size:
@@ -1048,6 +1177,8 @@ with open(corrupt_region_path, "wb") as out:
 font_region_hash = hashlib.sha256(font_region).hexdigest()
 send_f11(f)
 max_seq, target_window, max_irq, max_state, max_frame, _ = wait_press_correlation(baseline_seq, "maximize")
+if target_window != remote_browser_window:
+    raise RuntimeError("fullscreen-target-is-not-remote-browser")
 max_release_seq, max_release_irq = wait_release_receipt(max_seq)
 fullscreen = pmem(f, fullscreen_ppm)
 send_f11(f)
@@ -1065,13 +1196,46 @@ if full_hash == base_hash or changed <= 4096:
     raise RuntimeError("maximize-semantic-hash-not-distinct")
 if restored_hash != base_hash:
     raise RuntimeError("restore-semantic-hash-mismatch")
+browser_serial_offset = serial_size()
 send_pointer_click(f, restored_rect)
-pointer_seq, pointer_irq, pointer_state, pointer_frame, pointer_window = wait_pointer_correlation(restore_seq, 1)
+pointer_seq, pointer_irq, pointer_state, pointer_frame, pointer_window = wait_pointer_correlation(restore_release_seq, 1)
+if int(pointer_window) != remote_browser_window:
+    raise RuntimeError("pointer-target-is-not-remote-browser")
+browser_event_marker, browser_applied_marker, browser_presented_generation = wait_browser_content_presented(
+    remote_browser_window, pointer_seq, browser_serial_offset)
+browser_event_frame = pmem(f, browser_event_ppm)
+pointer_release_serial_offset = serial_size()
 write_qmp(f, {"execute":"input-send-event", "arguments":{"events":[
     {"type":"btn","data":{"down":False,"button":"left"}}
 ]}})
-pointer_release_seq, pointer_release_irq, pointer_release_state, pointer_release_frame, _ = wait_pointer_correlation(pointer_seq, 2, pointer_window)
+pointer_release_seq, pointer_release_irq, pointer_release_state, pointer_release_frame, _ = wait_pointer_correlation(pointer_seq, 2, pointer_window, pointer_release_serial_offset)
+
+def content_crop(frame, rect):
+    x, y, w, h = rect
+    x0 = max(0, x)
+    y0 = max(0, y + 24)
+    x1 = min(width, x + w)
+    y1 = min(height, y + h)
+    crop = bytearray()
+    for row_y in range(y0, y1):
+        start = row_y * pitch + x0 * 4
+        crop.extend(frame[start:row_y * pitch + x1 * 4])
+    return bytes(crop)
+
+browser_before = content_crop(restored, restored_rect)
+browser_after = content_crop(browser_event_frame, restored_rect)
+browser_changed = sum(1 for before, after in zip(browser_before, browser_after) if before != after)
+if len(browser_before) == 0 or len(browser_before) != len(browser_after):
+    raise RuntimeError("browser-content-crop-invalid")
+if browser_changed <= 512:
+    raise RuntimeError("browser-content-buffer-did-not-mutate")
+browser_before_hash = hashlib.sha256(browser_before).hexdigest()
+browser_after_hash = hashlib.sha256(browser_after).hexdigest()
 print("simpleos_wm_input_submitted host_nonce=%s baseline_seq=%d maximize_seq=%d maximize_release_seq=%d restore_seq=%d restore_release_seq=%d qcode=f11" % (nonce, baseline_seq, max_seq, max_release_seq, restore_seq, restore_release_seq))
+print("simpleos_wm_remote_browser_ready_marker=" + remote_ready_marker)
+print("simpleos_wm_browser_event_marker=" + browser_event_marker)
+print("simpleos_wm_browser_content_applied_marker=" + browser_applied_marker)
+print("simpleos_wm_browser_content_presented_generation=%d" % browser_presented_generation)
 print("simpleos_wm_maximize_irq_marker=" + max_irq)
 print("simpleos_wm_maximize_state_marker=" + max_state)
 print("simpleos_wm_maximize_frame_marker=" + max_frame)
@@ -1088,6 +1252,7 @@ print("simpleos_wm_pointer_release_irq_marker=" + pointer_release_irq)
 print("simpleos_wm_pointer_release_state_marker=" + pointer_release_state)
 print("simpleos_wm_pointer_release_frame_marker=" + pointer_release_frame)
 print("simpleos_wm_pointer_release_input_seq=%d" % pointer_release_seq)
+print("simpleos_wm_browser_content_delta generation=%d changed_bytes=%d before_sha256=%s after_sha256=%s" % (browser_presented_generation, browser_changed, browser_before_hash, browser_after_hash))
 print("font_region=right56,bottom48 font_region_rgb_bytes=%d font_region_rgb_sha256=%s" % (len(font_region), font_region_hash))
 print("simpleos_wm_fullscreen_delta changed_bytes=%d before_sha256=%s after_sha256=%s restored_sha256=%s" % (changed, base_hash, full_hash, restored_hash))
 PY
@@ -1119,6 +1284,27 @@ PY
             pointer_release_state_marker="$(sed -n 's/^simpleos_wm_pointer_release_state_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
             pointer_release_frame_marker="$(sed -n 's/^simpleos_wm_pointer_release_frame_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
             pointer_release_seq="$(sed -n 's/^simpleos_wm_pointer_release_input_seq=//p' "$CAPTURE_OUT" | tail -n 1)"
+            remote_browser_ready_marker="$(sed -n 's/^simpleos_wm_remote_browser_ready_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            remote_browser_window="$(marker_field "$remote_browser_ready_marker" window)"
+            case "$remote_browser_window" in
+                ''|*[!0-9]*|0) remote_browser_window_valid=false ;;
+                *) remote_browser_window_valid=true ;;
+            esac
+            browser_event_marker="$(sed -n 's/^simpleos_wm_browser_event_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            browser_content_applied_marker="$(sed -n 's/^simpleos_wm_browser_content_applied_marker=//p' "$CAPTURE_OUT" | tail -n 1)"
+            browser_content_presented_generation="$(sed -n 's/^simpleos_wm_browser_content_presented_generation=//p' "$CAPTURE_OUT" | tail -n 1)"
+            case "$browser_content_presented_generation" in
+                ''|*[!0-9]*|0) browser_content_presented_generation_status=fail ;;
+                *) browser_content_presented_generation_status=pass ;;
+            esac
+            browser_delta_line="$(sed -n '/^simpleos_wm_browser_content_delta /p' "$CAPTURE_OUT" | tail -n 1)"
+            browser_content_delta_generation="$(marker_field "$browser_delta_line" generation)"
+            browser_content_changed_bytes="$(marker_field "$browser_delta_line" changed_bytes)"
+            browser_content_before_sha256="$(marker_field "$browser_delta_line" before_sha256)"
+            browser_content_after_sha256="$(marker_field "$browser_delta_line" after_sha256)"
+            if [ "$browser_content_presented_generation_status" = pass ] && [ "$browser_content_delta_generation" = "$browser_content_presented_generation" ]; then
+                browser_content_delta_generation_status=pass
+            fi
             delta_line="$(sed -n '/^simpleos_wm_fullscreen_delta /p' "$CAPTURE_OUT" | tail -n 1)"
             changed_bytes="$(marker_field "$delta_line" changed_bytes)"
             before_sha256="$(marker_field "$delta_line" before_sha256)"
@@ -1129,10 +1315,21 @@ PY
             font_region_sha256="$(marker_field "$font_region_line" font_region_rgb_sha256)"
             font_region_corrupt_copy_bytes="$(file_byte_count "$FONT_REGION_CORRUPT_COPY")"
             font_region_corrupt_copy_sha256="$(file_sha256 "$FONT_REGION_CORRUPT_COPY")"
-            content_provenance_marker="$(tr -d '\r' <"$SERIAL_LOG" | grep -E "^\\[wm-frame\\] content-presented scene_revision=[1-9][0-9]* path=(host-gpu|software) window_id=.* status=engine2d_rendered backend=[^ ]+ fallback=solid-material material=[0-9a-f]{64} theme=$EXPECTED_THEME_ID source=$EXPECTED_THEME_SOURCE_MANIFEST_SHA256$" | tail -n 1 || true)"
+            if [ "$remote_browser_window_valid" = true ] && [ "$browser_content_presented_generation_status" = pass ]; then
+                content_provenance_marker="$(tr -d '\r' <"$SERIAL_LOG" | grep -E "^\\[wm-frame\\] content-presented scene_revision=$browser_content_presented_generation path=(host-gpu|software) window_id=$remote_browser_window status=engine2d_rendered backend=[^ ]+ fallback=solid-material material=[0-9a-f]{64} theme=$EXPECTED_THEME_ID source=$EXPECTED_THEME_SOURCE_MANIFEST_SHA256$" | tail -n 1 || true)"
+            fi
             if serial_has_production_fault; then
                 status=fail
                 reason=guest-render-fault
+            elif [ "$remote_browser_window_valid" != true ]; then
+                status=fail
+                reason=guest-browser-window-identity-invalid
+            elif [ "$browser_content_presented_generation_status" != pass ]; then
+                status=fail
+                reason=guest-browser-presented-generation-invalid
+            elif [ "$browser_content_delta_generation_status" != pass ]; then
+                status=fail
+                reason=guest-browser-content-generation-mismatch
             elif [ -z "$content_provenance_marker" ] || grep -Eq '^\[wm-frame\] content-provenance-rejected|backend=native-safe-fallback' "$SERIAL_LOG"; then
                 status=fail
                 reason=guest-content-provenance-invalid
@@ -1204,6 +1401,10 @@ fi
     echo "simpleos_wm_fullscreen_disk_image_status=$disk_image_status"
     echo "simpleos_wm_fullscreen_disk_image_provenance=$disk_image_provenance"
     echo "simpleos_wm_fullscreen_disk_image_sha256=$DISK_IMAGE_SHA256"
+    echo "simpleos_wm_fullscreen_browser_demo_binary=$BROWSER_DEMO_BINARY"
+    echo "simpleos_wm_fullscreen_browser_demo_binary_sha256=$BROWSER_DEMO_BINARY_SHA256"
+    echo "simpleos_wm_fullscreen_browser_demo_build_status=$browser_demo_build_status"
+    echo "simpleos_wm_fullscreen_browser_demo_disk_status=$browser_demo_disk_status"
     echo "simpleos_wm_fullscreen_font_asset=$FONT_ASSET"
     echo "simpleos_wm_fullscreen_font_guest_path=$FONT_GUEST_PATH"
     echo "simpleos_wm_fullscreen_font_asset_bytes=$FONT_ASSET_BYTES"
@@ -1251,6 +1452,21 @@ fi
     echo "simpleos_wm_fullscreen_pointer_release_irq_marker=$pointer_release_irq_marker"
     echo "simpleos_wm_fullscreen_pointer_release_state_marker=$pointer_release_state_marker"
     echo "simpleos_wm_fullscreen_pointer_release_frame_marker=$pointer_release_frame_marker"
+    echo "simpleos_wm_fullscreen_remote_browser_ready_marker=$remote_browser_ready_marker"
+    echo "simpleos_wm_fullscreen_remote_browser_window=$remote_browser_window"
+    echo "simpleos_wm_fullscreen_browser_event_marker=$browser_event_marker"
+    echo "simpleos_wm_fullscreen_browser_content_applied_marker=$browser_content_applied_marker"
+    echo "simpleos_wm_fullscreen_browser_content_presented_generation=${browser_content_presented_generation:-0}"
+    echo "simpleos_wm_fullscreen_browser_content_presented_generation_status=$browser_content_presented_generation_status"
+    echo "simpleos_wm_fullscreen_browser_content_delta_generation=${browser_content_delta_generation:-0}"
+    echo "simpleos_wm_fullscreen_browser_content_delta_generation_status=$browser_content_delta_generation_status"
+    echo "simpleos_wm_fullscreen_browser_content_changed_bytes=${browser_content_changed_bytes:-0}"
+    echo "simpleos_wm_fullscreen_browser_content_before_sha256=$browser_content_before_sha256"
+    echo "simpleos_wm_fullscreen_browser_content_after_sha256=$browser_content_after_sha256"
+    echo "simpleos_wm_fullscreen_browser_event_ppm=$BROWSER_EVENT_PPM"
+    echo "simpleos_wm_fullscreen_browser_event_ppm_file_status=$(regular_file_status "$BROWSER_EVENT_PPM")"
+    echo "simpleos_wm_fullscreen_browser_event_ppm_magic_status=$(ppm_magic_status "$BROWSER_EVENT_PPM")"
+    echo "simpleos_wm_fullscreen_browser_event_ppm_bytes=$(file_byte_count "$BROWSER_EVENT_PPM")"
     echo "simpleos_wm_fullscreen_baseline_ppm=$BASELINE_PPM"
     echo "simpleos_wm_fullscreen_baseline_ppm_file_status=$(regular_file_status "$BASELINE_PPM")"
     echo "simpleos_wm_fullscreen_baseline_ppm_magic_status=$(ppm_magic_status "$BASELINE_PPM")"
@@ -1285,6 +1501,7 @@ fi
     echo "- kernel: $KERNEL_OUTPUT (sha256=$KERNEL_SHA256)"
     echo "- kernel build: $KERNEL_BUILD_STATUS (wall timeout=${NATIVE_BUILD_TIMEOUT_SECONDS}s)"
     echo "- disk image: $DISK_IMAGE ($disk_image_status, provenance=$disk_image_provenance, sha256=$DISK_IMAGE_SHA256)"
+    echo "- browser demo: $BROWSER_DEMO_BINARY (build=$browser_demo_build_status, disk=$browser_demo_disk_status, sha256=$BROWSER_DEMO_BINARY_SHA256)"
     echo "- pinned font asset: host=$FONT_ASSET guest=$FONT_GUEST_PATH ($FONT_ASSET_BYTES bytes, sha256=$FONT_ASSET_SHA256)"
     echo "- guest font marker: ${font_marker:--}"
     echo "- font region: $FONT_REGION_RGB (${font_region_bytes:-0} bytes, sha256=${font_region_sha256:--}, origin=qemu-pmemsave)"
@@ -1299,6 +1516,9 @@ fi
     echo "- restore release IRQ: ${restore_release_irq_marker:--}"
     echo "- pointer IRQ/state/frame: ${pointer_irq_marker:--} | ${pointer_state_marker:--} | ${pointer_frame_marker:--}"
     echo "- pointer release IRQ/state/frame: ${pointer_release_irq_marker:--} | ${pointer_release_state_marker:--} | ${pointer_release_frame_marker:--}"
+    echo "- remote browser ready: ${remote_browser_ready_marker:--}"
+    echo "- browser event/content apply: ${browser_event_marker:--} | ${browser_content_applied_marker:--}"
+    echo "- browser content delta: changed=${browser_content_changed_bytes:-0} before=${browser_content_before_sha256:--} after=${browser_content_after_sha256:--}"
     echo "- changed bytes (baseline vs maximized): ${changed_bytes:-0}"
     echo "- baseline sha256: ${before_sha256:--}"
     echo "- maximized sha256: ${after_sha256:--}"
@@ -1306,6 +1526,7 @@ fi
     echo "- baseline ppm: $BASELINE_PPM ($(file_byte_count "$BASELINE_PPM") bytes)"
     echo "- maximized ppm: $FULLSCREEN_PPM ($(file_byte_count "$FULLSCREEN_PPM") bytes)"
     echo "- restored ppm: $RESTORED_PPM ($(file_byte_count "$RESTORED_PPM") bytes)"
+    echo "- browser event ppm: $BROWSER_EVENT_PPM ($(file_byte_count "$BROWSER_EVENT_PPM") bytes)"
     echo "- serial log: $SERIAL_LOG ($(file_byte_count "$SERIAL_LOG") bytes)"
     echo
     echo "This wrapper boots the wm-simple-web SimpleOS QEMU target directly"

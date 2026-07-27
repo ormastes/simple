@@ -102,6 +102,15 @@ Existing false-green paths are removed: `engine2d_in_qemu_spec.spl` may not invo
 
 Each operation uses `CpuSimdKernelEvidence(operation, dispatch_calls, vector_chunks, vector_lanes, scalar_tail_pixels, scalar_fallback_calls, output_hash, fallback_reason)`. Runtime-owner counters increment only inside SSE2/AVX2/NEON/RVV vector loops; Simple wrapper/provider hit counters remain diagnostic and cannot satisfy execution. The current single ambiguous hit counter is replaced by per-ISA/per-operation snapshots, including AArch64 blend and x86/RVV operations required by the scene.
 
+The guest carries this through the existing BRR1 protocol as exactly 17 ordered
+events, not a second wire format. Fill, copy, alpha, and scroll each own four
+events whose `value_hash` fields preserve SHA-256 words 0..3. Their state pairs
+carry dispatch/chunk counts, lanes/tail pixels, fallback count/reason code, and
+detected ISA/feature-source code. Event 17 is PRESENT and the trailer carries
+the authoritative framebuffer digest. Every event uses the header surface
+handle; the host rejects wrong order, operation, resource, ISA/source pairing,
+fallback, or zero native work before joining QMP pixels.
+
 Each guest executes scalar and target-vector implementations over independent buffers, then the selected SIMD provider renders the verification scene. PASS requires positive native hits for every required operation, zero fallback for the required path, zero scalar/SIMD mismatches, matching QMP pixels, and expected target instruction-family evidence from the guest ELF. Existing x86 `NOP*` SIMD runtime shims, host reports, provider names, or same-arithmetic helper labels cannot satisfy this gate.
 
 Hosted `Engine2D.create_requested_backend` gains strict `cpu_simd_x86`, `cpu_simd_arm`, and `cpu_simd_riscv` lanes. ISA mismatch or zero vector chunks returns typed unavailable; generic `cpu_simd` may fall back only while reporting actual backend `cpu` and a nonempty reason. SimpleOS uses the freestanding noalloc facade and never imports hosted GC Engine2D.

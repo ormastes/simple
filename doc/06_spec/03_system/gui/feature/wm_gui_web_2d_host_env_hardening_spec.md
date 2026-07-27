@@ -1,0 +1,166 @@
+# wm_gui_web_2d_host_env_hardening_spec
+
+> use std.spec.*
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 2 | 2 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# wm_gui_web_2d_host_env_hardening_spec
+
+use std.spec.*
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Other |
+| Status | Active |
+| Source | `test/03_system/gui/feature/wm_gui_web_2d_host_env_hardening_spec.spl` |
+| Updated | 2026-07-26 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+use std.spec.*
+use std.io_runtime.{env_get, file_exists, file_read, process_run}
+
+val WRAPPER = "scripts/check/check-linux-hosted-wm-live-window-evidence.shs"
+val HOST_ENV_APP = "src/app/test/test_host_env.spl"
+val HOST_ENV_CONTRACT = "src/lib/common/ui/host_env_contract.spl"
+val LIVE_ENV = "build/linux-hosted-wm-live-window-evidence/evidence.env"
+val PERF_ENV = "build/widget-showcase-4k-200fps/status.env"
+
+describe "production host event and render evidence":
+
+## Scenarios
+
+### production host event and render evidence
+
+#### retains one correlated screen-to-Web-to-device frame receipt
+
+- Inspect the real host capabilities
+   - Exec capture: after_step
+   - Evidence: execution result verified by 1 expected check
+   - Expected: host_code equals `0`
+- Inject one screen-originated event
+   - Exec capture: after_step
+- Follow the event through WM and GUI dispatch
+   - Exec capture: after_step
+- Render the resulting canonical composition
+   - Exec capture: after_step
+- Read back and compare the backend buffer
+   - Exec capture: after_step
+- Capture the Vulkan frame with RenderDoc
+   - Exec capture: after_step
+- Measure the retained rendering workload
+   - Exec capture: after_step
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 57 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect the real host capabilities")
+expect(file_exists(HOST_ENV_APP)).to_be(true)
+val simple_bin = env_get("SIMPLE_BIN") ?? ""
+expect(simple_bin == "").to_be(false)
+val (host_stdout, _host_stderr, host_code) = process_run(simple_bin, ["run", HOST_ENV_APP, "--", "--format=json"])
+expect(host_code).to_equal(0)
+expect(host_stdout).to_contain("\"schema\":\"simple-test-host-env-v1\"")
+expect(host_stdout).to_contain("\"name\":\"x86_simd\"")
+expect(host_stdout).to_contain("\"name\":\"arm_simd\"")
+expect(host_stdout).to_contain("\"name\":\"riscv_simd\"")
+expect(host_stdout).to_contain("\"name\":\"vulkan\",\"status\":\"pass\"")
+expect(host_stdout).to_contain("\"name\":\"renderdoc\",\"status\":\"pass\"")
+
+step("Inject one screen-originated event")
+expect(file_exists(LIVE_ENV)).to_be(true)
+val live = file_read(LIVE_ENV)
+expect(live).to_contain("linux_hosted_wm_live_window_status=pass")
+
+step("Follow the event through WM and GUI dispatch")
+expect(live).to_contain("linux_hosted_wm_live_window_focus_status=pass")
+expect(live).to_contain("linux_hosted_wm_live_window_pointer_status=pass")
+expect(live).to_contain("linux_hosted_wm_live_window_keyboard_status=pass")
+expect(live).to_contain("linux_hosted_wm_live_window_text_status=pass")
+expect(live).to_contain("linux_hosted_wm_live_window_event_origin=screen")
+expect(live).to_contain("linux_hosted_wm_live_window_wm_target_id=")
+expect(live).to_contain("linux_hosted_wm_live_window_semantic_target_id=host-proof")
+expect(live).to_contain("linux_hosted_wm_live_window_callback_count=1")
+expect(live).to_contain("linux_hosted_wm_live_window_mutation_revision=1")
+expect(live).to_contain("linux_hosted_wm_live_window_move_status=pass")
+expect(live).to_contain("linux_hosted_wm_live_window_maximize_status=pass")
+expect(live).to_contain("linux_hosted_wm_live_window_restore_status=pass")
+
+step("Render the resulting canonical composition")
+expect(live).to_contain("linux_hosted_wm_live_window_frame_marker=pass")
+expect(live).to_contain("linux_hosted_wm_live_window_frame_correlation_status=pass")
+
+step("Read back and compare the backend buffer")
+expect(live).to_contain("linux_hosted_wm_live_window_framebuffer_status=pass")
+expect(live).to_contain("linux_hosted_wm_live_window_input_readback_source=device_readback")
+expect(live).to_contain("linux_hosted_wm_live_window_input_backend_handle=")
+expect(live).to_contain("linux_hosted_wm_live_window_glyph_crop_live_match=true")
+expect(live).to_contain("linux_hosted_wm_live_window_compatibility_fallback_status=pass")
+
+step("Capture the Vulkan frame with RenderDoc")
+expect(host_stdout).to_contain("\"name\":\"renderdoc\",\"status\":\"pass\"")
+expect(file_read(HOST_ENV_APP)).to_contain("scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple")
+
+step("Measure the retained rendering workload")
+expect(file_exists(PERF_ENV)).to_be(true)
+val perf = file_read(PERF_ENV)
+expect(perf).to_contain("gui_showcase_4k_200fps_status=pass")
+expect(perf).to_contain("gui_showcase_4k_200fps_frames=200")
+expect(perf).to_contain("gui_showcase_4k_200fps_readback_mode=argb-checksum")
+expect(perf).to_contain("gui_showcase_4k_200fps_fallback_state=none")
+expect(perf).to_contain("gui_showcase_4k_200fps_frame_p50_ns=")
+expect(perf).to_contain("gui_showcase_4k_200fps_frame_p95_ns=")
+expect(perf).to_contain("gui_showcase_4k_200fps_max_rss_kb=")
+```
+
+</details>
+
+#### keeps the wrapper and app on existing production owners
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val wrapper = file_read(WRAPPER)
+val app = file_read(HOST_ENV_APP)
+val contract = file_read(HOST_ENV_CONTRACT)
+expect(wrapper).to_contain("linux_hosted_wm_live_window")
+expect(app).to_contain("native_simd_pixel_evidence")
+expect(app).to_contain("build/gui-web-2d-vulkan-env/simple-vulkan-readback/evidence.env")
+expect(app).to_contain("build/renderdoc/simple-gate/evidence.env")
+expect(app).to_contain("build/linux-hosted-wm-live-window-evidence/evidence.env")
+expect(app).to_contain("HostCapabilityRow")
+expect(contract).to_contain("linux_hosted_wm_live_window_input_readback_source=device_readback")
+expect(contract).to_contain("linux_hosted_wm_live_window_glyph_crop_live_match=true")
+expect(app.contains("argb_mismatch_count=0")).to_be(false)
+expect(app).to_contain("blocked")
+```
+
+</details>
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 2 |
+| Active scenarios | 2 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>

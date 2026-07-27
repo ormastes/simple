@@ -56,6 +56,7 @@ describe "SimpleOS production WM fullscreen":
             expect(file_exists(BUILD_DIR + "/baseline.ppm")).to_be(true)
             expect(file_exists(BUILD_DIR + "/fullscreen.ppm")).to_be(true)
             expect(file_exists(BUILD_DIR + "/restored.ppm")).to_be(true)
+            expect(file_exists(BUILD_DIR + "/browser-event.ppm")).to_be(true)
 
             step("Prove the pinned guest font crop and corrupt-copy rejection")
             expect(out).to_contain("simpleos_wm_fullscreen_status=pass")
@@ -92,9 +93,11 @@ describe "SimpleOS production WM fullscreen":
             expect(evidence).to_contain("simpleos_wm_fullscreen_baseline_ppm_magic_status=pass")
             expect(evidence).to_contain("simpleos_wm_fullscreen_maximized_ppm_magic_status=pass")
             expect(evidence).to_contain("simpleos_wm_fullscreen_restored_ppm_magic_status=pass")
+            expect(evidence).to_contain("simpleos_wm_fullscreen_browser_event_ppm_magic_status=pass")
             expect(evidence_i64(evidence, "simpleos_wm_fullscreen_baseline_ppm_bytes")).to_be_greater_than(0)
             expect(evidence_i64(evidence, "simpleos_wm_fullscreen_maximized_ppm_bytes")).to_be_greater_than(0)
             expect(evidence_i64(evidence, "simpleos_wm_fullscreen_restored_ppm_bytes")).to_be_greater_than(0)
+            expect(evidence_i64(evidence, "simpleos_wm_fullscreen_browser_event_ppm_bytes")).to_be_greater_than(0)
             expect(file_read_bytes(BUILD_DIR + "/baseline.ppm").len()).to_equal(
                 evidence_i64(evidence, "simpleos_wm_fullscreen_baseline_ppm_bytes")
             )
@@ -117,16 +120,67 @@ describe "SimpleOS production WM fullscreen":
             expect(maximized_sha256.index_of(baseline_sha256)).to_equal(-1)
             expect(restored_sha256).to_equal(baseline_sha256)
 
+            step("Bind the browser event, content mutation, and rendered frame to one window")
+            val browser_window = evidence_i64(
+                evidence, "simpleos_wm_fullscreen_remote_browser_window")
+            val browser_before = evidence_value(
+                evidence, "simpleos_wm_fullscreen_browser_content_before_sha256")
+            val browser_after = evidence_value(
+                evidence, "simpleos_wm_fullscreen_browser_content_after_sha256")
+            expect(browser_window).to_be_greater_than(0)
+            expect(evidence_value(
+                evidence, "simpleos_wm_fullscreen_remote_browser_ready_marker"
+            )).to_contain("window=" + browser_window.to_string() + " ")
+            expect(evidence_value(
+                evidence, "simpleos_wm_fullscreen_browser_event_marker"
+            )).to_contain("window=" + browser_window.to_string() + " ")
+            expect(evidence_value(
+                evidence, "simpleos_wm_fullscreen_browser_content_applied_marker"
+            )).to_contain(
+                "[remote-browser-content-presented] window=" +
+                browser_window.to_string())
+            expect(evidence_value(
+                evidence, "simpleos_wm_fullscreen_content_provenance"
+            )).to_contain("window_id=" + browser_window.to_string() + " ")
+            expect(evidence_i64(
+                evidence, "simpleos_wm_fullscreen_browser_content_changed_bytes"
+            )).to_be_greater_than(512)
+            expect(browser_before.len()).to_equal(64)
+            expect(browser_after.len()).to_equal(64)
+            expect(browser_after.index_of(browser_before)).to_equal(-1)
+
             step("Prove monotonic keyboard and pointer correlation")
             val baseline_seq = evidence_i64(evidence, "simpleos_wm_fullscreen_baseline_input_seq")
             val maximize_seq = evidence_i64(evidence, "simpleos_wm_fullscreen_maximize_input_seq")
             val restore_seq = evidence_i64(evidence, "simpleos_wm_fullscreen_restore_input_seq")
             val pointer_seq = evidence_i64(evidence, "simpleos_wm_fullscreen_pointer_input_seq")
             val pointer_release_seq = evidence_i64(evidence, "simpleos_wm_fullscreen_pointer_release_input_seq")
+            val presented_generation = evidence_i64(
+                evidence,
+                "simpleos_wm_fullscreen_browser_content_presented_generation")
+            val delta_generation = evidence_i64(
+                evidence,
+                "simpleos_wm_fullscreen_browser_content_delta_generation")
             expect(maximize_seq).to_be_greater_than(baseline_seq)
             expect(restore_seq).to_be_greater_than(maximize_seq)
             expect(pointer_seq).to_be_greater_than(restore_seq)
             expect(pointer_release_seq).to_be_greater_than(pointer_seq)
+            expect(presented_generation).to_be_greater_than(0)
+            expect(delta_generation).to_equal(presented_generation)
+            expect(evidence_value(
+                evidence,
+                "simpleos_wm_fullscreen_browser_content_presented_generation_status"
+            )).to_equal("pass")
+            expect(evidence_value(
+                evidence,
+                "simpleos_wm_fullscreen_browser_content_delta_generation_status"
+            )).to_equal("pass")
+            val presented_marker = evidence_value(
+                evidence, "simpleos_wm_fullscreen_browser_content_applied_marker")
+            expect(presented_marker).to_contain(
+                "input_seq=" + pointer_seq.to_string() + " ")
+            expect(presented_marker).to_contain(
+                "generation=" + presented_generation.to_string())
             expect(evidence_value(evidence, "simpleos_wm_fullscreen_input_irq_marker")).to_contain("input_seq=" + maximize_seq.to_string() + " ")
             expect(evidence_value(evidence, "simpleos_wm_fullscreen_input_state_marker")).to_contain("input_seq=" + maximize_seq.to_string() + " ")
             expect(evidence_value(evidence, "simpleos_wm_fullscreen_input_frame_marker")).to_contain("input_seq=" + maximize_seq.to_string() + " ")

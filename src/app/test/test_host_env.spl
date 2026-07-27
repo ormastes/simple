@@ -1,0 +1,121 @@
+# Aggregate live host evidence without substituting emulation or CPU mirrors.
+
+use app.io.mod.{dir_create_all, file_exists, file_read, file_write}
+use common.ui.host_env_contract.{
+    HostCapabilityRow,
+    TestHostEnv,
+    host_display_input_evidence_passes,
+    host_readback_evidence_passes,
+    host_renderdoc_evidence_passes,
+    host_vulkan_evidence_passes
+}
+use std.gpu.engine2d.simd_kernels.{
+    SimdLevel,
+    detect_simd_level,
+    native_simd_pixel_evidence
+}
+
+val OUT_DIR = "build/test-artifacts/test_host_env"
+val OUT_PATH = "build/test-artifacts/test_host_env/evidence.json"
+val VULKAN_PATH = "build/gui-web-2d-vulkan-env/simple-vulkan-readback/evidence.env"
+val RENDERDOC_PATH = "build/renderdoc/simple-gate/evidence.env"
+val LIVE_WM_PATH = "build/linux-hosted-wm-live-window-evidence/evidence.env"
+val SIMD_MATRIX_PATH = "build/cpu-simd-engine2d-arch-matrix/evidence.env"
+
+fn retained(path: text) -> text:
+    if file_exists(path):
+        return file_read(path)
+    ""
+
+fn blocked(name: text, reason: text, evidence_path: text, command: text) -> HostCapabilityRow:
+    HostCapabilityRow.create(name, "blocked", reason, evidence_path, command)
+
+fn native_simd_row(name: text, expected: bool, executed: bool, exact: bool, matrix: text, matrix_key: text) -> HostCapabilityRow:
+    if expected and executed and exact:
+        return HostCapabilityRow.create(name, "pass", "", OUT_PATH, "")
+    val qemu_path_pass = matrix.contains("cpu_simd_engine2d_arch_matrix_{matrix_key}_target_binary_simd_path_status=pass")
+    val qemu_target_pass = matrix.contains("cpu_simd_engine2d_arch_matrix_{matrix_key}_target_binary_status=pass")
+    if qemu_path_pass and qemu_target_pass:
+        return HostCapabilityRow.create(
+            name, "blocked", "qemu-parity-pass-native-{matrix_key}-host-required",
+            SIMD_MATRIX_PATH, "CPU_SIMD_ARCH_MATRIX_TARGET_BUILD=1 sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs"
+        )
+    if qemu_path_pass:
+        return HostCapabilityRow.create(
+            name, "blocked", "qemu-{matrix_key}-simd-path-pass-runtime-owner-evidence-failed",
+            SIMD_MATRIX_PATH, "CPU_SIMD_ARCH_MATRIX_TARGET_BUILD=1 sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs"
+        )
+    blocked(
+        name, "native-{name}-host-or-executed-path-required", SIMD_MATRIX_PATH,
+        "bin/simple run src/app/test/test_host_env.spl"
+    )
+
+fn main() -> i64:
+    val level = detect_simd_level()
+    val native = native_simd_pixel_evidence()
+    val vulkan = retained(VULKAN_PATH)
+    val renderdoc = retained(RENDERDOC_PATH)
+    val live = retained(LIVE_WM_PATH)
+    val simd_matrix = retained(SIMD_MATRIX_PATH)
+
+    val x86 = native_simd_row(
+        "x86_simd",
+        level == SimdLevel.Avx2 or level == SimdLevel.Sse42,
+        native.executed,
+        native.bit_exact,
+        simd_matrix,
+        "x86_64"
+    )
+    val arm = native_simd_row(
+        "arm_simd", level == SimdLevel.Neon,
+        native.executed, native.bit_exact,
+        simd_matrix, "aarch64"
+    )
+    val riscv = native_simd_row(
+        "riscv_simd", level == SimdLevel.Rvv,
+        native.executed, native.bit_exact,
+        simd_matrix, "riscv64"
+    )
+
+    val vulkan_row = if host_vulkan_evidence_passes(vulkan):
+        HostCapabilityRow.create("vulkan", "pass", "", VULKAN_PATH, "")
+    else:
+        blocked(
+            "vulkan", "validated-device-readback-evidence-required", VULKAN_PATH,
+            "scripts/setup/setup-gui-web-2d-vulkan-env.shs --run"
+        )
+
+    val renderdoc_row = if host_renderdoc_evidence_passes(renderdoc):
+        HostCapabilityRow.create("renderdoc", "pass", "", RENDERDOC_PATH, "")
+    else:
+        blocked(
+            "renderdoc", "valid-rdoc-capture-required", RENDERDOC_PATH,
+            "scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple"
+        )
+
+    val display_row = if host_display_input_evidence_passes(live):
+        HostCapabilityRow.create("display_input", "pass", "", LIVE_WM_PATH, "")
+    else:
+        blocked(
+            "display_input", "screen-to-semantic-event-evidence-required", LIVE_WM_PATH,
+            "scripts/check/check-linux-hosted-wm-live-window-evidence.shs"
+        )
+
+    val readback_row = if host_readback_evidence_passes(live):
+        HostCapabilityRow.create("framebuffer_readback", "pass", "", LIVE_WM_PATH, "")
+    else:
+        blocked(
+            "framebuffer_readback", "device-readback-and-exact-argb-required", LIVE_WM_PATH,
+            "scripts/check/check-linux-hosted-wm-live-window-evidence.shs"
+        )
+
+    val env = TestHostEnv.create([
+        x86, arm, riscv, vulkan_row, renderdoc_row, display_row, readback_row
+    ])
+    val json = env.to_json()
+    dir_create_all(OUT_DIR)
+    file_write(OUT_PATH, json)
+    print json
+    if env.validation_reason() == "":
+        return 0
+    1
