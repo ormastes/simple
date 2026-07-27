@@ -906,3 +906,12 @@ Tracking split:
   and semantics-questionable, so it was not copied and the build was not
   retried. Rendering verification remains postponed until an admitted Stage-4
   binary exists.
+- stage4-import-reduction: Three small read-only lanes classified the Stage-4
+  failures and drove shared resolver fixes for explicit facade exports, `me`
+  receiver lookup, unknown generic written returns, and physical-source alias
+  deduplication. A focused native probe compiled and printed 42. The final
+  canonical bootstrap passed Stages 2 and 3 and reduced Stage-4 HIR diagnostics
+  from 6,144 to 1,701 (646 unique), but did not admit the CLI. The remaining
+  groups are led by `TokenKind`, `HirTypeKind`, `Expr`/`ExprKind`, and T32
+  easy-fix types. The three-cycle guard is exhausted; rendering, QEMU, coverage,
+  and release gates stay postponed to a fresh environment/session.

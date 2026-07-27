@@ -97,6 +97,31 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(foo_id.?).to_equal(true)
         expect(bar_id.?).to_equal(true)
 
+    it "glob import follows a facade's named re-exports":
+        val log = make_logger()
+        val inner = parse_full_frontend("struct InnerType:\n    value: i64\npub fn inner_fn() -> i64:\n    42", "pkg.inner", "pkg.inner", log)
+        val facade = parse_full_frontend("use pkg.inner.*\nexport InnerType, inner_fn", "pkg.facade", "pkg.facade", log)
+        val consumer = parse_full_frontend("use pkg.facade.*\nfn main() -> i64:\n    inner_fn()", "consumer_facade", "consumer_facade", log)
+
+        var modules: Dict<text, any> = {}
+        modules["pkg.inner"] = inner
+        modules["pkg.facade"] = facade
+
+        var lowering = HirLowering.with_filename("consumer_facade")
+        lowering.modules_by_name = modules
+        val hir = lowering.lower_module(consumer)
+
+        expect(hir.symbols.lookup("InnerType").?).to_equal(true)
+        expect(hir.symbols.lookup("inner_fn").?).to_equal(true)
+        expect(hir.errors.len()).to_equal(0)
+
+    it "binds the mutable me receiver in a prefixed class method":
+        val log = make_logger()
+        val module = parse_full_frontend("class Box:\n    value: i64\n    me set(next: i64) -> i64:\n        me.value = next\n        me.value", "me_receiver", "me_receiver", log)
+        val hir = HirLowering.with_filename("me_receiver").lower_module(module)
+
+        expect(hir.errors.len()).to_equal(0)
+
     it "aliased imports keep same-named structs from different modules distinct":
         val log = make_logger()
 

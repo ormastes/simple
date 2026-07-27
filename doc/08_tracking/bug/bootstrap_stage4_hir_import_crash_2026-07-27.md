@@ -101,3 +101,23 @@ numbered/unnumbered module-key resolution without restoring opaque-symbol
 fallbacks. Preserve cross-module default-method lowering from issue #190.
 Then run one strict bootstrap from an unchanged tracked tree and replace the
 stale deployed executable only after the Stage-4 admission gates pass.
+
+## 2026-07-27 Final Bounded Attempt
+
+Small read-only classifier lanes separated the 6,144 diagnostics into facade
+exports, receiver aliases, unknown generic return types, duplicate physical
+module aliases, and residual import defects. The shared fixes added explicit
+facade exports, made `me` fall back to the synthesized `self` receiver, kept an
+unknown written generic return typed as `Any`, and lowered each physical entry
+source once while retaining its logical module aliases. A focused native probe
+covering all three behaviors compiled and printed `42`.
+
+The canonical final command used
+`build/bootstrap/codex-perf-stage4-final`. Stages 2 and 3 passed sanity. Stage
+4 no longer failed in closure loading, but exited 1 with 1,701 HIR diagnostics
+(646 unique messages): 1,576 unresolved names, 107 untyped returns, 10
+unresolved types, and 7 generic diagnostics. The largest remaining groups are
+`TokenKind` (185), `HirTypeKind` (96), `Expr`/`ExprKind` (40 each), and the
+T32 easy-fix types (36-38 each). The retained log is
+`build/bootstrap/codex-perf-stage4-final/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`.
+This was the third verify/fix cycle, so no further retry was made.
