@@ -20,7 +20,8 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_focused_id, be_dom_get_attr, be_dom_has_attr, be_dom_serialize_children,
     be_dom_submit_form_owner_id, be_dom_keyboard_activation_event_for_target,
     be_dom_checked_radio_id_for_target, be_dom_form_owner_id,
-    be_dom_default_submitter_id
+    be_dom_default_submitter_id, be_dom_form_allows_direct_implicit_submit,
+    be_dom_input_blocks_implicit_submission
 }
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
 use std.gc_async_mut.gpu.browser_engine.script.script_host.{
@@ -127,14 +128,7 @@ fn _browser_session_accepts_implicit_submit(target: BeDomNode) -> bool:
     if target.tag_name != "input" or be_dom_has_attr(target, "disabled") or
        be_dom_has_attr(target, "readonly"):
         return false
-    val input_type = be_dom_get_attr(target, "type").lower()
-    (
-        input_type != "button" and input_type != "checkbox" and
-        input_type != "color" and input_type != "file" and
-        input_type != "hidden" and input_type != "image" and
-        input_type != "radio" and input_type != "range" and
-        input_type != "reset" and input_type != "submit"
-    )
+    be_dom_input_blocks_implicit_submission(target)
 
 fn storage_pairs_from_object(state: BrowserRuntimeState, object_id: i64) -> [Pair<text, text>]:
     val obj = state.runtime.get_host_object(object_id)
@@ -147,6 +141,27 @@ fn storage_pairs_from_object(state: BrowserRuntimeState, object_id: i64) -> [Pai
     out
 
 impl BrowserSession:
+
+    me _submit_dom_form(
+        form_id: text, submitter_id: text
+    ) -> BeDomEventDispatch:
+        val submit_dispatch = self.dispatch_dom_event(
+            form_id, "submit", true, true
+        )
+        if submit_dispatch.default_action_allowed:
+            val submission = browser_form_submission(
+                self.current_dom, form_id, submitter_id, self.document_url
+            )
+            if submission.error != "":
+                self.warnings.push(submission.error)
+            else:
+                val started = self.begin_network_navigation(
+                    submission.url, submission.method, "",
+                    submission.body, submission.content_type
+                )
+                if val Err(e) = started:
+                    self.warnings.push("form navigation blocked: {e}")
+        submit_dispatch
 
     me _persist_storage_for_url(url: text):
         if url == "":
@@ -329,25 +344,9 @@ impl BrowserSession:
                     self.current_dom, dispatch.event.target_id
                 )
                 if form_id != "":
-                    val submit_dispatch = self.dispatch_dom_event(
-                        form_id, "submit", true, true
+                    val _ = self._submit_dom_form(
+                        form_id, dispatch.event.target_id
                     )
-                    if submit_dispatch.default_action_allowed:
-                        val submission = browser_form_submission(
-                            self.current_dom, form_id,
-                            dispatch.event.target_id, self.document_url
-                        )
-                        if submission.error != "":
-                            self.warnings.push(submission.error)
-                        else:
-                            val started = self.begin_network_navigation(
-                                submission.url, submission.method, "",
-                                submission.body, submission.content_type
-                            )
-                            if val Err(e) = started:
-                                self.warnings.push(
-                                    "form navigation blocked: {e}"
-                                )
         self._sync_body_html_from_dom()
         dispatch
 
@@ -422,6 +421,10 @@ impl BrowserSession:
                 return Ok(self.dispatch_dom_event(
                     submitter_id, "click", true, true
                 ))
+            if be_dom_form_allows_direct_implicit_submit(
+                self.current_dom, form_id
+            ):
+                return Ok(self._submit_dom_form(form_id, ""))
         val activation_event = be_dom_keyboard_activation_event_for_target(
             target, key
         )
