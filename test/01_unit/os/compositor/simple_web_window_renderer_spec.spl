@@ -1,11 +1,13 @@
 use std.spec.*
 use app.io.mod.{file_read}
-use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_frame_cached_at_time, simple_web_content_full_html_with_theme, simple_web_content_render_request_with_theme, simple_web_content_revision, simple_web_content_revision_with_theme}
+use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_frame_cached_at_time, simple_web_content_full_html_with_theme, simple_web_content_render_request_with_theme, simple_web_content_revision, simple_web_content_revision_with_theme, simple_web_external_content_frame}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, wm_content_frame_web_provenance_valid}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderRequest}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_software_pixels,
-    simple_web_layout_render_html_software_result
+    simple_web_layout_render_html_software_result,
+    simple_web_layout_render_html_draw_ir_result
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_readback_engine2d_result}
 use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_pixel_artifact_cache, web_render_request_to_pixel_artifact}
@@ -151,6 +153,34 @@ describe "Simple Web compositor adapter":
         expect(frame.theme_id).to_equal("glass_dark")
         expect(frame.theme_source_manifest_sha256.len()).to_equal(64)
         expect(wm_content_frame_web_provenance_valid(frame)).to_be(true)
+
+    it "turns validated external DrawIR execution into a web frame":
+        val html = simple_web_content_full_html_with_theme(
+            "glass_dark", "External", "<p>worker-owned</p>", 64, 48
+        )
+        val layout = simple_web_layout_render_html_draw_ir_result(html, 64, 48)
+        val raster = Engine2dCompositorBackend.create_named(
+            64, 48, "software"
+        )
+        val render = raster.render_draw_ir_composition(
+            layout.composition, []
+        )
+        val frame = simple_web_external_content_frame(
+            "external",
+            7,
+            "glass_dark",
+            64,
+            48,
+            render,
+            layout.material_witness.cpu_composited_count,
+            layout.material_witness.cpu_composited_sha256,
+            layout.material_witness.solid_material_count,
+            layout.material_witness.solid_material_sha256
+        )
+        expect(frame.pixels.len()).to_equal(64 * 48)
+        expect(frame.checksum).to_be_greater_than(0u64)
+        expect(wm_content_frame_web_provenance_valid(frame)).to_be(true)
+        raster.shutdown()
 
     it "renders bounded CSS animation frames then becomes quiescent":
         val body = "<style>@keyframes pulse { from { background-color:#ef4444; } to { background-color:#2563eb; } } #stage { width:32px; height:24px; animation:pulse 1000ms linear forwards; }</style><div id='stage'></div>"

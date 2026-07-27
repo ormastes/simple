@@ -1,6 +1,12 @@
 use std.spec.*
 use common.window_protocol.geometry.{Size}
 use common.window_protocol.compositor_methods.{COMP_CREATE_WINDOW}
+use common.ui.window_scene.{
+    WM_CONTENT_ORIGIN_SIMPLE_WEB,
+    WmContentFrame,
+    wm_content_frame_checksum
+}
+use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.host_compositor_core.{
     HostCompositor,
@@ -8,6 +14,9 @@ use os.compositor.host_compositor_core.{
     host_compositor_update_window_title
 }
 use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+use os.compositor.simple_web_window_renderer.{
+    simple_web_content_revision_with_theme
+}
 use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
     MockResponseRegistry, set_mock_registry
 }
@@ -27,6 +36,72 @@ fn count_color(pixels: [u32], color: u32) -> i64:
     count
 
 describe "hosted Web content session":
+
+    it "uses a required external web frame and rejects a missing one":
+        val theme = default_theme_id()
+        val body = "<div style='background:#ef4444'>parent-rendered</div>"
+        val content_revision = simple_web_content_revision_with_theme(
+            theme, "External", body, 92, 44, 0
+        )
+        val pixels = [0xFF22C55Eu32; 92 * 44]
+        val external = WmContentFrame(
+            window_id: "1",
+            scene_revision: 0,
+            content_revision: content_revision,
+            origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB,
+            width: 92,
+            height: 44,
+            pixels: pixels,
+            checksum: wm_content_frame_checksum(pixels),
+            parent_window_id: "",
+            offset_x: 0,
+            offset_y: 0,
+            engine2d_status: "engine2d_rendered",
+            engine2d_backend: "software",
+            engine2d_reason: "sandbox-worker",
+            material_fallback_kind: "solid-material",
+            material_fallback_reason:
+                "cpu-raster-backdrop-sampling-unavailable",
+            material_fallback_sha256:
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            theme_id: theme,
+            theme_source_manifest_sha256:
+                "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        )
+        var comp = HostCompositor.new_headless(Size(
+            width: 160u64, height: 120u64
+        ))
+        comp.apply_bridge_request(
+            1, 1, COMP_CREATE_WINDOW.to_i64(), 0, "External",
+            8, 8, 100, 80, body, 1, "terminal"
+        )
+        comp.require_external_web_frame(1)
+        var wrong_origin = external
+        wrong_origin.origin_kind = "gui"
+        expect(comp.set_external_web_frame(1, wrong_origin)).to_be(false)
+        expect(comp.set_external_web_frame(1, external)).to_be(true)
+        val raster = Engine2dCompositorBackend.create_named(
+            160, 120, "software"
+        )
+        expect(comp.render_frame_engine2d(raster)).to_be(true)
+        expect(count_color(
+            comp.pure_simple_pixel_buffer(), 0xFF22C55Eu32
+        )).to_be_greater_than(1000)
+        raster.shutdown()
+
+        var missing = HostCompositor.new_headless(Size(
+            width: 160u64, height: 120u64
+        ))
+        missing.apply_bridge_request(
+            1, 1, COMP_CREATE_WINDOW.to_i64(), 0, "External",
+            8, 8, 100, 80, body, 1, "terminal"
+        )
+        missing.require_external_web_frame(1)
+        val missing_raster = Engine2dCompositorBackend.create_named(
+            160, 120, "software"
+        )
+        expect(missing.render_frame_engine2d(missing_raster)).to_be(false)
+        missing_raster.shutdown()
 
     it "applies CSS and advances Simple Script and JavaScript animation on the host clock":
         var session = HostedWebContentSession.create(

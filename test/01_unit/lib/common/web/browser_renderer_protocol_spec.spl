@@ -6,6 +6,7 @@ use std.common.web.browser_renderer_protocol.{
     BrowserRendererMessage,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_frame_decode, browser_renderer_frame_encode,
+    browser_renderer_frame_encode_with_witness,
     browser_renderer_message_encode
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
@@ -41,6 +42,50 @@ describe "isolated browser renderer protocol":
         expect(frame.ok).to_be(true)
         expect(frame.composition.backend_target).to_equal(DRAW_IR_BACKEND_AUTO)
         expect(frame.composition.batches[0].backend_target).to_equal(DRAW_IR_BACKEND_AUTO)
+        expect(frame.cpu_composited_count).to_equal(0)
+
+        val witnessed = browser_renderer_frame_encode_with_witness(
+            _renderer_protocol_fixture(),
+            7,
+            2,
+            1,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            0,
+            ""
+        )
+        val witnessed_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), witnessed.wire
+        )
+        val witnessed_frame = browser_renderer_frame_decode(
+            witnessed_message.message, 64, 48
+        )
+        expect(witnessed_frame.ok).to_be(true)
+        expect(witnessed_frame.cpu_composited_count).to_equal(1)
+        expect(witnessed_frame.cpu_composited_sha256).to_equal(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        )
+
+        var incomplete_canvas = _renderer_protocol_fixture()
+        var incomplete_batches = incomplete_canvas.batches
+        var incomplete_batch = incomplete_batches[0]
+        var incomplete_commands = incomplete_batch.commands
+        var incomplete_command = incomplete_commands[0]
+        incomplete_command.width = 63
+        incomplete_commands[0] = incomplete_command
+        incomplete_batch.commands = incomplete_commands
+        incomplete_batches[0] = incomplete_batch
+        incomplete_canvas.batches = incomplete_batches
+        val incomplete_wire = browser_renderer_frame_encode(
+            incomplete_canvas, 7, 3
+        )
+        val incomplete_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), incomplete_wire.wire
+        )
+        val incomplete_frame = browser_renderer_frame_decode(
+            incomplete_message.message, 64, 48
+        )
+        expect(incomplete_frame.ok).to_be(false)
+        expect(incomplete_frame.reason).to_equal("invalid-canvas")
 
         val unicode_first = browser_renderer_message_encode("state", 7, 1, "h\u00e9")
         val unicode_second = browser_renderer_message_encode("state", 7, 2, "ok")

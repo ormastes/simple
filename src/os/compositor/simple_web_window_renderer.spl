@@ -16,6 +16,11 @@ use common.ui.wm_chrome_theme.{
 }
 use os.compositor.web_render_surface.{compositor_render_html_artifact, compositor_render_request_artifact}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    SimpleWebLayoutMaterialWitness,
+    simple_web_layout_material_provenance_after_backend_execution
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult}
 
 fn _active_or_default_wm_theme_id() -> text:
     # Compatibility render entrypoints are still used by the freestanding
@@ -171,6 +176,83 @@ fn _clamp_scroll_px(scroll_y: i32) -> i32:
 # constant/logic.
 fn content_paint_full_height(ch: i32, scroll_y: i32) -> i32:
     ch + _clamp_scroll_px(scroll_y)
+
+fn simple_web_external_content_frame(
+    window_id: text,
+    content_revision: i64,
+    theme: text,
+    width: i32,
+    height: i32,
+    render: Engine2dDrawIrAdvResult,
+    cpu_composited_count: i32,
+    cpu_composited_sha256: text,
+    solid_material_count: i32,
+    solid_material_sha256: text
+) -> WmContentFrame:
+    if (window_id == "" or content_revision <= 0 or width <= 0 or height <= 0 or
+        render.fallback_required or render.skipped_command_count != 0 or
+        render.rendered_command_count <= 0 or
+        render.pixels.len() != width * height):
+        return WmContentFrame(
+            window_id: window_id,
+            scene_revision: 0,
+            content_revision: content_revision,
+            origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB,
+            width: width,
+            height: height,
+            pixels: [],
+            checksum: 0u64,
+            parent_window_id: "",
+            offset_x: 0,
+            offset_y: 0
+        )
+    val witness = SimpleWebLayoutMaterialWitness(
+        cpu_composited_count: cpu_composited_count,
+        cpu_composited_sha256: cpu_composited_sha256,
+        solid_material_count: solid_material_count,
+        solid_material_sha256: solid_material_sha256
+    )
+    val material = simple_web_layout_material_provenance_after_backend_execution(
+        witness,
+        render.skipped_command_count,
+        render.pixels.len(),
+        width * height,
+        render.cpu_composited_material_count,
+        render.metal_device_glass_material_count,
+        render.glass_execution_target,
+        render.readback_source,
+        render.glass_backend_handle,
+        render.glass_device_identity
+    )
+    val installed_fingerprint = active_theme_source_fingerprint(theme)
+    val theme_fingerprint = if installed_fingerprint != "":
+        installed_fingerprint
+    else:
+        theme_package_fingerprint(theme)
+    WmContentFrame(
+        window_id: window_id,
+        scene_revision: 0,
+        content_revision: content_revision,
+        origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB,
+        width: width,
+        height: height,
+        pixels: render.pixels,
+        checksum: wm_content_frame_checksum(render.pixels),
+        parent_window_id: "",
+        offset_x: 0,
+        offset_y: 0,
+        engine2d_status: "engine2d_rendered",
+        engine2d_backend: render.selected_backend,
+        engine2d_reason: if render.fallback_reason == "":
+            "draw-ir-executed"
+        else:
+            render.fallback_reason,
+        material_fallback_kind: material.kind,
+        material_fallback_reason: material.reason,
+        material_fallback_sha256: material.material_sha256,
+        theme_id: theme,
+        theme_source_manifest_sha256: theme_fingerprint
+    )
 
 # Slices the `ch`-tall visible window starting at row `scroll_y` out of a
 # `cw` x `full_h` row-major pixel buffer (full_h >= ch + scroll_y). Rows

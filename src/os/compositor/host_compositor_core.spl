@@ -12,7 +12,7 @@ use common.ui.window_scene.{
     shared_wm_scene_register_motion_background_source,
     shared_wm_scene_resolve_background
 }
-use common.ui.window_scene.{WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput, wm_content_frame_web_provenance_valid}
+use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput, wm_content_frame_checksum, wm_content_frame_web_provenance_valid}
 use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO}
 use common.ui.window_scene_draw_ir.{
     SharedWmPixelBufferBackend,
@@ -253,6 +253,21 @@ struct HostedWebContentTarget:
 struct HostedBrowserChromeTarget:
     window_id: i64
     control: text
+
+fn _host_empty_external_web_frame() -> WmContentFrame:
+    WmContentFrame(
+        window_id: "",
+        scene_revision: 0,
+        content_revision: 0,
+        origin_kind: "",
+        width: 0,
+        height: 0,
+        pixels: [],
+        checksum: 0u64,
+        parent_window_id: "",
+        offset_x: 0,
+        offset_y: 0
+    )
 
 fn host_taskbar_clock_label(now_micros: i64) -> text:
     """Return a stable UTC HH:MM label from the host wall clock."""
@@ -500,6 +515,13 @@ class HostCompositor:
     # it so WebRenderPixelArtifactCache's own content-hash (HTML-equality)
     # check can skip re-rendering unchanged window content every frame.
     content_caches: Dict<i64, WebRenderPixelArtifactCache>
+    # A browser window marked external never re-enters the in-process HTML
+    # renderer. The broker supplies one validated sandbox-worker frame; an
+    # absent, stale, or malformed frame is left invalid so presentation fails
+    # closed at the existing content-frame gate.
+    external_web_required: bool
+    external_web_window_id: i64
+    external_web_frame: WmContentFrame
     # Scene background this compositor resolves at render time (color/image/
     # motion, see common.ui.window_scene.BackgroundSpec). Defaults to a plain
     # color matching the historical hardcoded compositor_bg fill so a
@@ -550,6 +572,9 @@ class HostCompositor:
             _chrome_cache_key: "",
             _chrome_cache_pixels: [],
             content_caches: {},
+            external_web_required: false,
+            external_web_window_id: 0,
+            external_web_frame: _host_empty_external_web_frame(),
             background: shared_wm_background_color(wm_chrome_theme().compositor_bg),
             render_revision: 0,
             dirty: DirtyRegion.new(),
@@ -559,6 +584,34 @@ class HostCompositor:
         # renders even though nothing has "changed" from an empty prior state.
         comp.dirty.add_full_screen(comp.width, comp.height)
         comp
+
+    me require_external_web_frame(window_id: i64):
+        self.external_web_required = window_id > 0
+        self.external_web_window_id = if window_id > 0: window_id else: 0
+        self.external_web_frame = _host_empty_external_web_frame()
+        self.dirty.add_full_screen(self.width, self.height)
+
+    me set_external_web_frame(
+        window_id: i64,
+        frame: WmContentFrame
+    ) -> bool:
+        if (not self.external_web_required or
+            window_id != self.external_web_window_id or
+            frame.window_id != window_id.to_text() or
+            frame.origin_kind != WM_CONTENT_ORIGIN_SIMPLE_WEB or
+            frame.width <= 0 or frame.height <= 0 or
+            frame.width > 4096 or frame.height > 4096 or
+            frame.pixels.len() !=
+                frame.width.to_i64() * frame.height.to_i64() or
+            frame.checksum == 0u64 or
+            frame.checksum != wm_content_frame_checksum(frame.pixels) or
+            frame.parent_window_id != "" or
+            frame.offset_x != 0 or frame.offset_y != 0 or
+            not wm_content_frame_web_provenance_valid(frame)):
+            return false
+        self.external_web_frame = frame
+        self.dirty.add_full_screen(self.width, self.height)
+        true
 
     static fn new_headless(size: Size) -> HostCompositor:
         val concrete = HeadlessHostCompositorBackend.new(size.width as i32, size.height as i32)
@@ -867,16 +920,32 @@ class HostCompositor:
                 val cw = win.w - 8
                 val ch = win.h - 36 - shared_wm_browser_content_extra_height(win.app_id)
                 val scroll = self.scroll_offset_for(win.id) as i32
-                val full_h = content_paint_full_height(ch, scroll)
-                val cache = self._content_cache_for(win.id, cw, full_h, "auto")
                 val content_revision = simple_web_content_revision_with_theme(content_theme_id, win.title, win.content, cw, ch, scroll)
-                content_frames.push(simple_web_content_frame_cached_at_time(
-                    cache, win.id.to_text(), self.render_revision,
-                    content_revision, content_theme_id, win.title, win.content,
-                    cw, ch, scroll, frame_time / 1000
-                ))
-                if not self.native_pixel_lane:
-                    self.content_caches.set(win.id, cache)
+                if self.external_web_required and win.id == self.external_web_window_id:
+                    var external = self.external_web_frame
+                    external.scene_revision = self.render_revision
+                    if (external.content_revision != content_revision or
+                        external.width != cw or external.height != ch or
+                        external.pixels.len() != cw * ch):
+                        external.pixels = []
+                        external.checksum = 0u64
+                    else:
+                        external.checksum = wm_content_frame_checksum(
+                            external.pixels
+                        )
+                    content_frames.push(external)
+                else:
+                    val full_h = content_paint_full_height(ch, scroll)
+                    val cache = self._content_cache_for(
+                        win.id, cw, full_h, "auto"
+                    )
+                    content_frames.push(simple_web_content_frame_cached_at_time(
+                        cache, win.id.to_text(), self.render_revision,
+                        content_revision, content_theme_id, win.title, win.content,
+                        cw, ch, scroll, frame_time / 1000
+                    ))
+                    if not self.native_pixel_lane:
+                        self.content_caches.set(win.id, cache)
             i = i + 1
         val revision = WmSceneRevision(scene_revision: self.render_revision, input_revision: self.render_revision, taskbar_revision: self.render_revision)
         val metrics = WmRenderMetrics(scale_milli: 1000, top_lane_height: 44, titlebar_height: 28, taskbar_height: 56, min_hit_target: 44)

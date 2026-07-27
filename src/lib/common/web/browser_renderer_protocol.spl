@@ -49,6 +49,10 @@ pub struct BrowserRendererFrameDecodeResult:
     ok: bool
     reason: text
     composition: DrawIrComposition
+    cpu_composited_count: i32
+    cpu_composited_sha256: text
+    solid_material_count: i32
+    solid_material_sha256: text
 
 fn _browser_renderer_empty_message() -> BrowserRendererMessage:
     BrowserRendererMessage(kind: "", generation: 0, request_id: 0, payload: "")
@@ -209,7 +213,11 @@ fn _browser_renderer_frame_reject(reason: text) -> BrowserRendererFrameDecodeRes
     BrowserRendererFrameDecodeResult(
         ok: false,
         reason: reason,
-        composition: draw_ir_composition("", "", "", [])
+        composition: draw_ir_composition("", "", "", []),
+        cpu_composited_count: 0,
+        cpu_composited_sha256: "",
+        solid_material_count: 0,
+        solid_material_sha256: ""
     )
 
 fn _browser_renderer_advance_list_valid(value: text) -> bool:
@@ -239,6 +247,13 @@ fn _browser_renderer_frame_validation_reason(composition: DrawIrComposition, wid
         embedding.width != width or embedding.height != height or
         embedding.layer != 0 or embedding.opacity_milli != 1000 or not embedding.clip):
         return "invalid-embedding"
+    if batch.commands.len() == 0:
+        return "invalid-canvas"
+    val canvas = batch.commands[0]
+    if (canvas.kind != "rect" or canvas.component_id != "html-canvas" or
+        canvas.x != 0 or canvas.y != 0 or canvas.width != width or
+        canvas.height != height or ((canvas.color >> 24) & 255u32) != 255u32):
+        return "invalid-canvas"
     for command in batch.commands:
         val x = command.x.to_i64()
         val y = command.y.to_i64()
@@ -270,21 +285,86 @@ fn _browser_renderer_frame_validation_reason(composition: DrawIrComposition, wid
                 return "invalid-command-metadata"
     ""
 
-pub fn browser_renderer_frame_encode(composition: DrawIrComposition, generation: i64, request_id: i64) -> BrowserRendererEncodeResult:
+fn _browser_renderer_material_digest_valid(count: i64, digest: text) -> bool:
+    if count < 0 or count > BROWSER_RENDERER_MAX_COMMANDS:
+        return false
+    if count == 0:
+        return digest == ""
+    if digest.len() != 64:
+        return false
+    val allowed = "0123456789abcdef"
+    var index: i64 = 0
+    while index < digest.len():
+        if not allowed.contains(digest[index].to_text()):
+            return false
+        index = index + 1
+    true
+
+pub fn browser_renderer_frame_encode_with_witness(
+    composition: DrawIrComposition,
+    generation: i64,
+    request_id: i64,
+    cpu_composited_count: i32,
+    cpu_composited_sha256: text,
+    solid_material_count: i32,
+    solid_material_sha256: text
+) -> BrowserRendererEncodeResult:
+    if (not _browser_renderer_material_digest_valid(
+            cpu_composited_count.to_i64(), cpu_composited_sha256) or
+        not _browser_renderer_material_digest_valid(
+            solid_material_count.to_i64(), solid_material_sha256)):
+        return _browser_renderer_reject_encode("invalid-material-witness")
     val encoded = simpleos_host_gpu_draw_ir_encode(
         _browser_renderer_normalize_draw_ir(composition),
-        BROWSER_RENDERER_MAX_PAYLOAD_BYTES,
+        BROWSER_RENDERER_MAX_PAYLOAD_BYTES - BROWSER_RENDERER_MAX_HEADER_BYTES,
         BROWSER_RENDERER_MAX_COMMANDS
     )
     if not encoded.ok:
         return _browser_renderer_reject_encode("draw-ir-" + encoded.reason)
-    browser_renderer_message_encode("frame", generation, request_id, bytes_to_text(encoded.bytes))
+    val cpu_digest = if cpu_composited_sha256 == "": "-" else: cpu_composited_sha256
+    val solid_digest = if solid_material_sha256 == "": "-" else: solid_material_sha256
+    val payload = (
+        "SBRF1\t{cpu_composited_count}\t{cpu_digest}" +
+        "\t{solid_material_count}\t{solid_digest}\n" +
+        bytes_to_text(encoded.bytes)
+    )
+    browser_renderer_message_encode("frame", generation, request_id, payload)
+
+pub fn browser_renderer_frame_encode(
+    composition: DrawIrComposition,
+    generation: i64,
+    request_id: i64
+) -> BrowserRendererEncodeResult:
+    browser_renderer_frame_encode_with_witness(
+        composition, generation, request_id, 0, "", 0, ""
+    )
 
 pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32, height: i32) -> BrowserRendererFrameDecodeResult:
     if message.kind != "frame":
         return _browser_renderer_frame_reject("wrong-kind")
+    val witness_end = _browser_renderer_header_end(message.payload)
+    if witness_end < 0 or witness_end >= BROWSER_RENDERER_MAX_HEADER_BYTES:
+        return _browser_renderer_frame_reject("malformed-material-witness")
+    val fields = _browser_renderer_byte_slice(
+        message.payload, 0, witness_end
+    ).split("\t")
+    if fields.len() != 5 or fields[0] != "SBRF1":
+        return _browser_renderer_frame_reject("malformed-material-witness")
+    val cpu_count = fields[1].to_i64() ?? -1
+    val solid_count = fields[3].to_i64() ?? -1
+    if cpu_count < 0 or solid_count < 0 or
+        str(cpu_count) != fields[1] or str(solid_count) != fields[3]:
+        return _browser_renderer_frame_reject("malformed-material-witness")
+    val cpu_digest = if fields[2] == "-": "" else: fields[2]
+    val solid_digest = if fields[4] == "-": "" else: fields[4]
+    if (not _browser_renderer_material_digest_valid(cpu_count, cpu_digest) or
+        not _browser_renderer_material_digest_valid(
+            solid_count, solid_digest)):
+        return _browser_renderer_frame_reject("invalid-material-witness")
     val decoded = simpleos_host_gpu_draw_ir_decode(
-        text_to_bytes(message.payload),
+        text_to_bytes(_browser_renderer_byte_slice(
+            message.payload, witness_end + 1, message.payload.len()
+        )),
         BROWSER_RENDERER_MAX_PAYLOAD_BYTES,
         BROWSER_RENDERER_MAX_COMMANDS
     )
@@ -293,4 +373,12 @@ pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32
     val reason = _browser_renderer_frame_validation_reason(decoded.composition, width, height)
     if reason != "":
         return _browser_renderer_frame_reject(reason)
-    BrowserRendererFrameDecodeResult(ok: true, reason: "ok", composition: decoded.composition)
+    BrowserRendererFrameDecodeResult(
+        ok: true,
+        reason: "ok",
+        composition: decoded.composition,
+        cpu_composited_count: cpu_count.to_i32(),
+        cpu_composited_sha256: cpu_digest,
+        solid_material_count: solid_count.to_i32(),
+        solid_material_sha256: solid_digest
+    )
