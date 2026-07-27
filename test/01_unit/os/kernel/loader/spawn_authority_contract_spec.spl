@@ -31,7 +31,7 @@ module-level array initializers, no classes, no trait objects on the ring-0
 path), so every assertion goes through an accessor fn.
 """
 
-use std.spec.{describe, it, expect, step}
+use std.spec.{describe, it, expect, step, assert_true}
 use os.kernel.types.capability_types.{CapabilitySet, CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_EXEC, CAP_RIGHT_ADMIN}
 use os.kernel.ipc.cspace_spawn.{SpawnSpec, CapGrant, AttenuationSpec, atten_identity, atten_rights}
 use os.kernel.types.capability_types.{CapabilityKind}
@@ -44,7 +44,9 @@ use os.kernel.loader.spawn_authority.{
     spawn_authority_note_caller, spawn_authority_current_caller,
     spawn_authority_clear_caller,
     spawn_effective_rights, spawn_rights_without, spawn_rights_is_subset,
-    spawn_spec_requested_rights, spawn_spec_effective_rights
+    spawn_spec_requested_rights, spawn_spec_effective_rights,
+    SPAWN_PROFILE_MASK_ALL,
+    spawn_effective_rights_with_profile, spawn_spec_effective_rights_with_profile
 }
 
 fn _grant(label: text, mask: u32) -> CapGrant:
@@ -189,3 +191,60 @@ describe("effective rights are an intersection (no amplification)"):
         val empty_spec = _spec_with([])
         expect(spawn_spec_requested_rights(empty_spec, parent)).to_equal(0u32)
         expect(spawn_spec_effective_rights(empty_spec, parent, parent, parent, 0u32)).to_equal(0u32)
+
+describe("profile meet point (P8 x P2 hand-off: attenuation and spawn rights meet at spawn time)"):
+
+    it("meets all three inputs - result is a subset of parent, request and profile"):
+        step("parent read+write+exec, request read+write, profile read+exec")
+        val parent = CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_EXEC
+        val requested = CAP_RIGHT_READ | CAP_RIGHT_WRITE
+        val profile = CAP_RIGHT_READ | CAP_RIGHT_EXEC
+        val eff = spawn_effective_rights_with_profile(parent, requested, profile)
+        step("only read survives all three - absolute value, not just subset")
+        expect(eff).to_equal(CAP_RIGHT_READ)
+        assert_true(spawn_rights_is_subset(eff, parent))
+        assert_true(spawn_rights_is_subset(eff, requested))
+        assert_true(spawn_rights_is_subset(eff, profile))
+
+    it("keeps the no-profile path identical - SPAWN_PROFILE_MASK_ALL is the meet identity"):
+        val parent = CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_EXEC
+        val requested = CAP_RIGHT_READ | CAP_RIGHT_WRITE
+        step("with the all-rights mask the meet equals the plain intersection")
+        expect(spawn_effective_rights_with_profile(parent, requested, SPAWN_PROFILE_MASK_ALL)).to_equal(parent & requested)
+        step("and the SpawnSpec decision point is bit-for-bit unchanged")
+        val spec = _spec_with([
+            _grant("svc.files", CAP_RIGHT_READ | CAP_RIGHT_WRITE),
+            _grant("svc.admin", CAP_RIGHT_ADMIN)
+        ])
+        val base = spawn_spec_effective_rights(
+            spec, parent, parent, CAP_RIGHT_READ | CAP_RIGHT_WRITE, CAP_RIGHT_WRITE)
+        val with_all = spawn_spec_effective_rights_with_profile(
+            spec, parent, parent, CAP_RIGHT_READ | CAP_RIGHT_WRITE, CAP_RIGHT_WRITE,
+            SPAWN_PROFILE_MASK_ALL)
+        expect(with_all).to_equal(base)
+
+    it("never lets a profile ADD a right the parent lacks"):
+        step("parent holds read only - profile claims write+admin as well")
+        val parent = CAP_RIGHT_READ
+        val requested = CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_ADMIN
+        val profile = CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_ADMIN
+        val eff = spawn_effective_rights_with_profile(parent, requested, profile)
+        expect(eff).to_equal(CAP_RIGHT_READ)
+        assert_true(spawn_rights_is_subset(eff, parent))
+
+    it("yields 0 for an all-deny profile mask (deny wins absolutely)"):
+        val parent = CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_EXEC
+        step("a zero profile mask annihilates every right - even root-ish parents")
+        expect(spawn_effective_rights_with_profile(parent, parent, 0u32)).to_equal(0u32)
+        val spec = _spec_with([_grant_identity("svc.inherit")])
+        expect(spawn_spec_effective_rights_with_profile(spec, parent, parent, parent, 0u32, 0u32)).to_equal(0u32)
+
+    it("meets the SpawnSpec formula with a partial profile mask at the decision point"):
+        val parent = CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_EXEC
+        val spec = _spec_with([_grant("svc.files", CAP_RIGHT_READ | CAP_RIGHT_WRITE)])
+        step("base formula grants read+write; profile mask keeps read only")
+        val eff = spawn_spec_effective_rights_with_profile(
+            spec, parent, parent, parent, 0u32, CAP_RIGHT_READ)
+        expect(eff).to_equal(CAP_RIGHT_READ)
+        assert_true(spawn_rights_is_subset(eff, parent))
+        assert_true(spawn_rights_is_subset(eff, CAP_RIGHT_READ))

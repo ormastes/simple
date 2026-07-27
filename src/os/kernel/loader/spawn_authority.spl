@@ -201,3 +201,50 @@ pub fn spawn_spec_effective_rights(
         spawn_spec_requested_rights(spec, parent_delegable),
         explicit_denials
     )
+
+# ============================================================================
+# Meet point — profile attenuation ∧ spawn rights (P8 × P2 hand-off)
+# ============================================================================
+#
+# Recorded cross-lane hand-off (.spipe/simpleos_production_host_master_plan):
+# "P8 resolve_effective + P2 spawn_spec_effective_rights must meet at spawn
+# time." The LLM profile layer (profile_registry.resolve_effective, mapped into
+# the CAP_RIGHT_* space by profile_spawn_adapter.llm_profile_to_spawn_rights)
+# and the spawn-rights layer (this module) compose HERE, in one pure function,
+# so there is a single provable meet point instead of two independent
+# attenuations that could drift apart.
+#
+# Callers without a profile pass `SPAWN_PROFILE_MASK_ALL` — the identity of the
+# meet under intersection — so non-LLM spawns are bit-for-bit unchanged.
+# Unknown/unmapped profile bits never reach this function as rights: the
+# adapter's mapping resolves them to 0 (fail closed) BEFORE the mask is built.
+
+pub val SPAWN_PROFILE_MASK_ALL: u32 = 0xFFFFFFFFu32
+
+pub fn spawn_effective_rights_with_profile(
+    parent_rights: u32,
+    requested_rights: u32,
+    profile_mask: u32
+) -> u32:
+    """The meet of both attenuations, deny-wins: the result is simultaneously a
+    subset of `parent_rights`, of `requested_rights`, and of `profile_mask`
+    (pure triple intersection — no union step, no IO, provable). A profile can
+    only REMOVE rights relative to the profile-free path; it can never add a
+    right the parent lacks or the request did not ask for."""
+    parent_rights & requested_rights & profile_mask
+
+pub fn spawn_spec_effective_rights_with_profile(
+    spec: SpawnSpec,
+    parent_delegable: u32,
+    executable_ceiling: u32,
+    system_ceiling: u32,
+    explicit_denials: u32,
+    profile_mask: u32
+) -> u32:
+    """The spawn decision point with the profile meet applied: first the §5.4
+    SpawnSpec formula (`spawn_spec_effective_rights`), then the meet with the
+    caller's profile mask. With `SPAWN_PROFILE_MASK_ALL` this is identical to
+    `spawn_spec_effective_rights` (no-profile path unchanged)."""
+    val base = spawn_spec_effective_rights(
+        spec, parent_delegable, executable_ceiling, system_ceiling, explicit_denials)
+    spawn_effective_rights_with_profile(parent_delegable, base, profile_mask)
