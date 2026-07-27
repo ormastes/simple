@@ -31,6 +31,10 @@ mkdir -p "$PAYLOADS_DIR"
 cd "$GHDL_WORK_DIR"
 TESTBENCH="tb_gate"
 
+# tb_gate.vhd lives in the gate dir, not the GHDL work dir, so `ghdl -a` below
+# never found it and the runner failed as shipped. Copy it in first.
+cp "$GATE_DIR/tb_gate.vhd" "$GHDL_WORK_DIR/tb_gate.vhd"
+
 # Compile testbench if not already done
 if ! ghdl -r --std=08 $TESTBENCH --help > /dev/null 2>&1; then
   echo "Compiling testbench $TESTBENCH..."

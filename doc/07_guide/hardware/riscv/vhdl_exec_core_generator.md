@@ -1,11 +1,12 @@
 # VHDL Exec-Core Generator (operator guide)
 
-Date: 2026-07-26 · Status: **generated cores silicon-proven on KV260**
+Date: 2026-07-27 · Status: **generated cores silicon-proven on KV260**
 
 Operator guide for the pure-Simple structured VHDL generator in
-`src/lib/hardware/vhdl_gen/`. It emits the six silicon-lane RISC-V exec cores
-byte-identical to the proven goldens in `examples/09_embedded/fpga_riscv/rtl/`,
-from one shared template parameterized by `XlenConfig`.
+`src/lib/hardware/vhdl_gen/`. It emits **35 RTL files** byte-identical to the
+proven goldens — the six silicon-lane RISC-V exec cores (from one shared
+template parameterized by `XlenConfig`) plus the bus/memory infrastructure, the
+SoC tops and the simulation testbenches that surround them.
 
 ## Not to be confused with the compiler VHDL backend
 
@@ -14,7 +15,7 @@ There are **two** VHDL generation lanes. This guide covers lane (b) only.
 | Lane | Location | Input | Status |
 |---|---|---|---|
 | (a) Compiler VHDL backend | `src/compiler/70.backend/backend/vhdl*`, driven by `bin/simple compile --backend=vhdl` | `@hardware fn` Simple source | `contract-not-ready` — see [`simple_generated_fpga_rtl.md`](simple_generated_fpga_rtl.md) |
-| (b) Structured exec-core generator (this guide) | `src/lib/hardware/vhdl_gen/` | one `XlenConfig`-parameterized template source | six cores, byte diff 0 vs goldens, booted on silicon |
+| (b) Structured exec-core generator (this guide) | `src/lib/hardware/vhdl_gen/` | typed descriptor arrays + one `XlenConfig`-parameterized core template | 35 RTL files, byte diff 0 vs goldens; cores booted on silicon |
 
 Do not mix them. Lane (a) tries to compile Simple semantics into a CPU; lane (b)
 is a structured emitter whose acceptance bar is byte-equality with the
@@ -29,6 +30,7 @@ See also: [`riscv_guide.md`](riscv_guide.md),
 ```bash
 sh scripts/fpga/generate_exec_core_vhdl.shs
 sh scripts/check/check-vhdl-golden-match.shs
+sh scripts/check/check-vhdl-gen-probes.shs
 ```
 
 Generation is the **default** expectation: the gate fails if any pinned RTL file
@@ -36,22 +38,55 @@ is missing from `build/os/rtl/`. Pass `--allow-missing` to opt out (missing is
 then reported as `not-generated` instead of failing). `--require-generated` is
 still accepted as a no-op, since that is now the default.
 
-The first command writes all 29 `.vhd` files into `build/os/rtl/`; the second
-proves each is byte-identical to its golden and that no golden has drifted from
-its pinned hash.
+The first command writes 30 `.vhd` files into `build/os/rtl/` and the 5
+out-of-tree-golden files into `build/os/rtl_external/`; the second proves each
+is byte-identical to its golden and that no golden has drifted from its pinned
+hash; the third runs the generator's own unit probes.
 
 ## What gets generated
 
-One driver run emits all six cores into `build/os/rtl/`:
+One driver run emits **35** files: 30 into `build/os/rtl/` and 5 into
+`build/os/rtl_external/`.
+
+**Six exec cores** — the silicon lane:
 
 | File | Variant | Consumed by |
 |---|---|---|
 | `rv32_exec_core.vhd` | base | GHDL NVMe-fw smoke, WB SoC |
 | `rv64_exec_core.vhd` | base | GHDL WB SoC |
 | `rv32_exec_core_flat.vhd` | flat (full-RAM behavioral) | GHDL boot-tiny / NVMe-fw testbenches |
-| `rv64_exec_core_flat.vhd` | flat | GHDL SimpleOS boot testbenches |
+| `rv64_exec_core_flat.vhd` | flat | GHDL boot-tiny / SimpleOS boot testbenches |
 | `rv32_exec_core_axi.vhd` | axi (synthesizable AXI-master-shaped) | `soc_top_rv32_k26_ddr`, tiny-BRAM SoC |
 | `rv64_exec_core_axi.vhd` | axi | `soc_top_rv64_k26_ddr` |
+
+**24 more files whose goldens live in `examples/09_embedded/fpga_riscv/rtl/`:**
+
+| Group | Count | Files |
+|---|---|---|
+| Bus / memory infra | 4 | `rv32_axi4_mem_adapter.vhd`, `rv64_axi4_mem_adapter.vhd`, `rv32_ctrl_obs_slave.vhd`, `rv32_bram_soc.vhd` |
+| SoC tops | 7 | `soc_top_rv{32,64}.vhd`, `soc_top_rv{32,64}_k26_ddr.vhd`, `soc_top_rv{32,64}_sim.vhd`, `soc_top_rv32_tiny_bram.vhd` |
+| Testbenches | 13 | `tb_rv{32,64}_k26_ddr_boot.vhd`, `tb_rv{32,64}_wb_soc_smoke.vhd`, `tb_rv{32,64}_simpleos_boot.vhd`, `tb_rv{32,64}_simpleos_boot_axi.vhd`, `tb_rv32_nvme_fw_smoke.vhd`, `tb_rv32_simpleos_boot_tiny.vhd`, `tb_rv32_tiny_bram_soc.vhd`, `tb_rv64_soak.vhd`, `tb_rv32_nvme_bram_soc.vhd` |
+
+Together with the cores that is all **30** `.vhd` files under
+`examples/09_embedded/fpga_riscv/rtl/` — the directory is fully generated.
+
+**5 files whose goldens live OUTSIDE that directory.** These are emitted into a
+**separate output dir, `build/os/rtl_external/`**, and matched through an
+explicit basename → golden-path map (Layer 3b below):
+
+| Generated basename | Golden path |
+|---|---|
+| `tb_rv32_payload.vhd` | `examples/09_embedded/fpga_riscv/payload/tb_rv32_payload.vhd` |
+| `tb_gate.vhd` | `test/riscv_isa_gate/tb_gate.vhd` |
+| `tb_rv32_product_sv32_pmp.vhd` | `test/01_unit/lib/hardware/fpga_linux/rv32_product_sv32_pmp_ghdl/` |
+| `tb_rv64_product_sv39_pmp.vhd` | `test/01_unit/lib/hardware/fpga_linux/rv64_product_sv39_pmp_ghdl/` |
+| `tb_rv64_product_wb_axi.vhd` | `test/01_unit/lib/hardware/fpga_linux/rv64_product_wb_axi_ghdl/` |
+
+They get their own directory because `check-riscv-rtl-truth.shs` scans
+`build/os/rtl` as a **single lane** and requires every instantiated entity to be
+defined within it — the three product testbenches instantiate companions that
+exist only in their own golden dirs, so staging them flat produced spurious
+`wrapper instantiates undefined entity` violations.
 
 Roughly 16% of the base-core output lines are structurally generated (entity /
 ports / generics from `VgPort` descriptor arrays, constants from
@@ -76,7 +111,10 @@ is randomised per process). Two runs are byte-identical.
 | `exec_core_variant_gen.spl` | variant assembly; `generate_exec_core_flat(cfg, mem_prefix)`, `generate_exec_core_axi(cfg)` |
 | `rv32_variant_sections.spl` / `rv64_variant_sections.spl` | `fa##` sections shared flat↔axi, `fl##`/`ax##` variant-only literals |
 | `debug_tap_aspect.spl` | AOP debug-tap advice at named join points |
-| `generate_main.spl` | CLI entry used by the driver script |
+| `bus_infra_types.spl`, `axi4_mem_adapter_{gen,sections}.spl`, `ctrl_obs_slave_{gen,sections}.spl`, `bram_soc_{gen,sections}.spl` | bus / memory infrastructure |
+| `soc_top_types.spl`, `soc_top_{gen,sections}.spl` | the 7 SoC tops |
+| `tb_single_lane_*`, `tb_k26_ddr_*`, `tb_wb_*`, `tb_simpleos_wb_gen`, `tb_oneoff_*`, `tb_product_*` (`_gen`/`_sections`/`_types`) | the testbench families |
+| `generate_main.spl` | CLI entry used by the driver script; holds the one authoritative output list |
 
 ## Driver script
 
@@ -84,16 +122,17 @@ is randomised per process). Two runs are byte-identical.
 sh scripts/fpga/generate_exec_core_vhdl.shs [--mem-prefix DIR/] [--out-dir DIR]
 ```
 
-It `cd`s to the repo root, creates `build/os/rtl`, and runs
+It `cd`s to the repo root, creates `build/os/rtl` **and
+`build/os/rtl_external`**, and runs
 `bin/simple run src/lib/hardware/vhdl_gen/generate_main.spl` with your flags.
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--mem-prefix <dir/>` | `""` (golden's relative form, e.g. `rv32_payload.mem`) | Path prefix prepended to the `.mem` filenames in `init_rom` / `init_data_rom` / `init_mem` / `init_ram` / `init_rdisk` and the flat cores' `file_open` ramdisk reference. Use it when a simulator runs from a different working directory. **The axi cores read no `.mem` files**, so this flag does not affect them. Any non-empty prefix necessarily breaks byte-equality with the goldens — that is expected and intended. |
-| `--out-dir <dir>` | `build/os/rtl` | Output directory. |
+| `--out-dir <dir>` | `build/os/rtl` | Output directory for the 30 in-tree-golden files. The 5 out-of-tree-golden files always go to `<out-dir>_external`. |
 
 There are no other flags. Success prints one `VHDL_GEN: wrote <path>` line per
-core followed by `VHDL_GEN: OK`; a write failure prints
+emitted file followed by `VHDL_GEN: OK`; a write failure prints
 `VHDL_GEN: FAILED (write error)`.
 
 `build/os/rtl/` is one of the lane roots scanned by
@@ -175,23 +214,38 @@ hart join points — mirroring the philosophy of
 sh scripts/check/check-vhdl-golden-match.shs
 ```
 
-Covers all 29 pinned RTL files. Missing generated files fail by default; use
-`--allow-missing` to opt out.
+Covers all 35 generated RTL files. **Generation is the default expectation**: a
+missing `build/os/rtl/<file>.vhd` FAILS. Pass `--allow-missing` to opt out and
+have it reported as `not-generated` instead; `--require-generated` is accepted
+as a no-op because it is now the default.
 
-Two fail-closed layers:
+Four fail-closed layers:
 
 1. **Golden drift** — every file in the manifest must still hash to its pinned
    sha256.
-2. **Generated match** — each core present in the generated dir must be
-   byte-identical to its same-named golden.
-
-Without `--require-generated`, a missing generated file reports
-`not-generated` and does not fail (the generator may simply not have run). With
-it, missing = fail. Always pass it in CI or when making a claim.
+2. **Generated match, cores** — each of the 6 cores must be byte-identical to
+   its same-named golden. Reported per core so existing lanes citing those keys
+   keep working.
+3. **Generated match, rest** — the other 24 files under the golden dir, same
+   rules, reported in aggregate.
+   **3b. Out-of-tree goldens** — the 5 files whose golden is not in the golden
+   dir, read from `build/os/rtl_external/` and matched through the explicit
+   basename → golden-path map in the gate.
+4. **Coverage audit** — every `.vhd` in the golden dir must appear in the gate's
+   `CORES` or `RTL_REST` list. Anything else fails as `UNCOVERED GOLDEN`. This
+   exists because a hash check cannot catch a file it was never told about: on
+   2026-07-27 `tb_rv32_nvme_bram_soc.vhd` was live at origin but unpinned and
+   ungenerated, so a stray local deletion went unnoticed. Adding a golden means
+   adding it to **both** the gate and the generator.
 
 Summary keys (always printed, one per line):
 
 ```text
+vhdl_golden_match_external_total=5
+vhdl_golden_match_external_pass=<n>
+vhdl_golden_match_external_fail=<n>
+vhdl_golden_match_external_missing=<n>
+vhdl_golden_match_uncovered=<n>
 vhdl_golden_match_manifest=ok|drift
 vhdl_golden_match_rv32=pass|fail|not-generated
 vhdl_golden_match_rv64=pass|fail|not-generated
@@ -199,14 +253,60 @@ vhdl_golden_match_rv32_flat=pass|fail|not-generated
 vhdl_golden_match_rv64_flat=pass|fail|not-generated
 vhdl_golden_match_rv32_axi=pass|fail|not-generated
 vhdl_golden_match_rv64_axi=pass|fail|not-generated
+vhdl_golden_match_rest_total=24
+vhdl_golden_match_rest_pass=<n>
+vhdl_golden_match_rest_fail=<n>
+vhdl_golden_match_rest_missing=<n>
 vhdl_golden_match_ok=true|false
 ```
 
-Exit `0` = all good, `1` = any fail (drift, byte mismatch, or missing under
-`--require-generated`), `2` = environment problem (missing manifest or golden).
+Green at HEAD: `rest_pass=24`, `external_pass=5`, `uncovered=0`, all six core
+keys `pass`, `manifest=ok`, `ok=true`.
+
+Exit `0` = all good, `1` = any fail (drift, byte mismatch, uncovered golden, or
+a missing generated file), `2` = environment problem (missing manifest or
+golden).
 
 `VHDL_GEN_DIR` overrides the generated-output directory (default
-`build/os/rtl`) — useful for checking a staged tree without regenerating.
+`build/os/rtl`) and `VHDL_GEN_EXT_DIR` the out-of-tree-golden one (default
+`${VHDL_GEN_DIR}_external`) — useful for checking a staged tree without
+regenerating.
+
+### Generator probes
+
+```bash
+sh scripts/check/check-vhdl-gen-probes.shs
+```
+
+Runs every probe under `test/01_unit/lib/hardware/vhdl_gen/`. The probes are
+**discovered by glob** (`probe_*.spl`), never a hardcoded list — a hardcoded
+list is exactly how `tb_rv32_nvme_bram_soc.vhd` stayed invisible to the golden
+gate for weeks. Adding a probe file is all it takes to gate it.
+
+Why it exists: the probes prove byte-identity per family, but nothing ran them
+automatically. Several emitter modules are shared across families (generalized
+rather than forked), so a behaviour-preserving-looking refactor in one family
+can silently break another's byte-identity. A hand-run probe is a snapshot; this
+makes it standing.
+
+Fail-closed on every ambiguous outcome — a probe **fails** (never skips) if the
+runner exits non-zero, if any `FAIL ` line appears, if there are zero `PASS `
+lines, or if the `ALL PASS` banner is missing. That last pair is the guard
+against the false-green that already bit this lane: `ALL PASS` printed while
+every file write had silently failed.
+
+```text
+vhdl_gen_probes_total=8
+vhdl_gen_probes_pass=8
+vhdl_gen_probes_fail=0
+vhdl_gen_probes_ok=true
+```
+
+Currently 8 probes / 72 checks. Exit `0` = all passed, `1` = any probe failed,
+`2` = environment problem (no probes found, no runner).
+
+`--selftest` is the deliberate-red arm: it proves a probe printing a `FAIL` line
+beats an `ALL PASS` banner, and that a silent probe fails rather than skips.
 
 ### Deliberate-red self-test
 
@@ -229,17 +329,23 @@ sh scripts/check/check-riscv-rtl-truth.shs
 Classifies every `.vhd` lane as `reference-handwritten` / `fixture` /
 `generated-contract` / `generated-real` / `absent` and fails closed on fake-CPU
 evidence (empty architecture, step-counter "core", decode-free PC incrementer,
-wrapper instantiating an untracked entity). With the six cores present it
-reports `riscv_rtl_truth_generated_real=6` and `riscv_rtl_truth_ok=true`.
+wrapper instantiating an untracked entity).
+
+Clean at HEAD with the generator's output staged: `riscv_rtl_truth_ok=true`,
+`riscv_rtl_truth_generated_real=8`, `riscv_rtl_truth_unknown=0`, zero
+violations. That is why the 5 out-of-tree-golden files get
+`build/os/rtl_external/` — this gate scans `build/os/rtl` as a single lane and
+requires every instantiated entity to be defined within it.
 
 A VIOLATION is a finding to file, never a reason to weaken the rule.
 
 ## Golden manifest and legitimate drift
 
-`doc/08_tracking/hardware/golden_vhdl_manifest_2026-07-26.txt` pins 50 files by
-sha256: 29 under `examples/09_embedded/fpga_riscv/rtl/` and 21 under
-`src/lib/hardware/debug/`. The header records the repo HEAD the pins were taken
-at.
+`doc/08_tracking/hardware/golden_vhdl_manifest_2026-07-26.txt` pins 56 files by
+sha256: 30 under `examples/09_embedded/fpga_riscv/rtl/`, the 5 out-of-tree
+goldens (payload / ISA gate / three fpga_linux product testbenches), and 21
+under `src/lib/hardware/debug/`. The header records the repo HEAD the pins were
+taken at, and carries the dated notes for every legitimate change.
 
 The goldens are the silicon-tested baseline. When a golden legitimately changes:
 
@@ -332,33 +438,49 @@ route fabric UART H12/PMOD J2 to the FT4232H. JTAG status-word and UART-capture
 markers remain the accepted silicon bar, the same bar the prior golden-RTL
 silicon PASSes met. Resume with `sh scripts/fpga/capture_kv260_uart_ila.shs`.
 
-## Scope limit — what is NOT generated
+## Scope limit — what is deliberately NOT generated
 
-The generator covers the **six exec cores only**. Of the 29 pinned RTL files in
-`examples/09_embedded/fpga_riscv/rtl/`, the other **23 are still hand-written**:
+All 30 `.vhd` files under `examples/09_embedded/fpga_riscv/rtl/` plus the 5
+out-of-tree goldens are generated. Three things are **deliberately** left
+hand-written, and each has a reason that must survive the next agent who notices
+the gap and "finishes the job".
 
-- SoC tops — `soc_top_rv32.vhd`, `soc_top_rv64.vhd`, `soc_top_rv32_sim.vhd`,
-  `soc_top_rv64_sim.vhd`, `soc_top_rv32_k26_ddr.vhd`, `soc_top_rv64_k26_ddr.vhd`,
-  `soc_top_rv32_tiny_bram.vhd`
-- AXI4 memory adapters — `rv32_axi4_mem_adapter.vhd`, `rv64_axi4_mem_adapter.vhd`
-- BRAM SoC — `rv32_bram_soc.vhd`
-- Control/observation slave — `rv32_ctrl_obs_slave.vhd`
-- 12 testbenches (`tb_*.vhd`)
+**1. `core64_imac_product_entry_stub.vhd`** —
+`test/01_unit/lib/hardware/fpga_linux/rv64_product_wb_axi_ghdl/`.
+It declares entity `core64_imac_product_entry`; its basename contains `core` and
+its only `case` is `case state is`, so `scripts/check/check-riscv-rtl-truth.shs`
+reads `decode_present=0` and classifies it as a decode-free "core". Teaching the
+generator to emit it would hand the generator the ability to **mint fake CPUs
+with generated provenance** — precisely what that truth gate and the
+`test/fixtures/riscv_truth/fake_*.vhd` negative fixtures exist to catch. Keep
+negative and stub RTL hand-authored; a generator that can produce it is a
+generator whose `generated-real` verdict means nothing.
 
-The 21 pinned files under `src/lib/hardware/debug/` (TAP, DTM, DMI, Debug
-Module, and their testbenches) are also hand-written and deliberately stay that
-way.
+**2. `examples/09_embedded/vhdl/simulation/bounded_loop_example.vhd`** — a
+hand-written *reference fixture* of the compiler `--backend=vhdl` lane (lane (a)
+above), not of this generator. It has zero consumers, and it does not even
+analyse: it calls `ceil`/`log2`/`real` with no `use ieee.math_real.all`.
+Generating an artefact nothing builds and nothing consumes would only pin a
+broken file in place. `probe_tb_oneoff_gen.spl` records the SKIP with this
+rationale; the manifest header repeats it.
+
+**3. The 21 JTAG transport files under `src/lib/hardware/debug/`** — TAP, DTM,
+DMI, Debug Module and their testbenches stay hand-written, fail-closed VHDL. AOP
+is only for hart join points. They are still **pinned in the manifest**, so
+drift in them is caught even though generation is not attempted.
 
 ## Tests
 
 ```bash
+sh scripts/check/check-vhdl-gen-probes.shs                                  # all 8 probes
 bin/simple test test/01_unit/lib/hardware/vhdl_gen/exec_core_gen_spec.spl
-bin/simple run  test/01_unit/lib/hardware/vhdl_gen/probe_exec_core_gen.spl
+bin/simple run  test/01_unit/lib/hardware/vhdl_gen/probe_exec_core_gen.spl  # one family
 ```
 
-The probe prints per-stage `PASS`/`FAIL` lines and a final
-`EXEC_CORE_GEN PROBE: ALL PASS` (14 PASS lines). It is the runnable evidence
-lane while the deployed binary cannot run the spec (below).
+Each probe prints per-stage `PASS`/`FAIL` lines and a final `... ALL PASS`
+banner (`probe_exec_core_gen.spl`: 14 PASS lines; 72 checks across all 8). They
+are the runnable evidence lane while the deployed binary cannot run the spec
+(below) — prefer the gate, which runs them all and fails closed.
 
 ## Troubleshooting
 
