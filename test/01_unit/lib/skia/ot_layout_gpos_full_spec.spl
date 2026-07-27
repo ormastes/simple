@@ -1,0 +1,152 @@
+"""Complete direct and contextual OpenType GPOS format checks."""
+
+use std.spipe.*
+use std.skia.feature.glyph.ot_parser.OtFont
+use std.skia.feature.glyph.ot_parser_layout.{GposLookup, LayoutLookupActivation}
+use std.skia.feature.shaper.ot_layout_context.LayoutGlyphRecord
+use std.skia.feature.shaper.ot_layout_gpos.gpos_apply
+
+fn _font(blob: [u8]) -> OtFont:
+    OtFont(blob: blob, tables: [])
+fn _lookup(kind: u32, start: i64, end: i64, index: i64, flag: u32) -> GposLookup:
+    GposLookup(lookup_index: index, lookup_type: kind, flag: flag,
+        lookup_offset: start as u32, table_start: 0u32, table_end: end as u32,
+        subtable_offsets: [start as u32], subtable_ends: [end as u32],
+        mark_filtering_set: -1)
+fn _active(index: i64) -> LayoutLookupActivation:
+    LayoutLookupActivation(lookup_index: index, feature_mask: 1u64)
+fn _record(glyph: u32) -> LayoutGlyphRecord:
+    LayoutGlyphRecord(glyph_id: glyph, source_index: glyph as i64, cluster: glyph as i64,
+        feature_mask: 1u64, x_advance_units: 0, y_advance_units: 0,
+        x_offset_units: 0, y_offset_units: 0, component_clusters: [glyph as i64])
+
+# @req REQ-007
+describe "complete GPOS lookup formats":
+    it "applies SinglePos formats 1 and 2":
+        val format1 = _font([0,1,0,8,0,1,0,7, 0,1,0,1,0,1])
+        val one = _lookup(1u32, 0, format1.blob.len(), 0, 0u32)
+        val one_result = gpos_apply(format1, [_active(0)], [one], [_record(1u32)])
+        expect(one_result.complete).to_equal(true)
+        expect(one_result.glyphs[0].x_offset_units).to_equal(7)
+
+        val format2 = _font([0,2,0,12,0,1,0,2,0,3,0,7,
+            0,1,0,2,0,1,0,2])
+        val two = _lookup(1u32, 0, format2.blob.len(), 0, 0u32)
+        val two_result = gpos_apply(format2, [_active(0)], [two], [_record(2u32)])
+        expect(two_result.complete).to_equal(true)
+        expect(two_result.glyphs[0].x_offset_units).to_equal(7)
+
+    it "applies CursivePos format 1 in LTR and RTL attachment directions":
+        val font = _font([
+            0,1,0,14,0,2, 0,0,0,22, 0,28,0,0,
+            0,1,0,2,0,1,0,2,
+            0,1,0,10,0,20, 0,1,0,3,0,5])
+        val ltr_lookup = _lookup(3u32, 0, font.blob.len(), 0, 0u32)
+        val ltr = gpos_apply(font, [_active(0)], [ltr_lookup],
+            [_record(1u32), _record(2u32)])
+        expect(ltr.complete).to_equal(true)
+        expect(ltr.glyphs[0].x_advance_units).to_equal(10)
+        expect(ltr.glyphs[1].x_advance_units).to_equal(-3)
+        expect(ltr.glyphs[1].y_offset_units).to_equal(15)
+
+        val rtl_lookup = _lookup(3u32, 0, font.blob.len(), 0, 1u32)
+        val rtl = gpos_apply(font, [_active(0)], [rtl_lookup],
+            [_record(1u32), _record(2u32)])
+        expect(rtl.complete).to_equal(true)
+        expect(rtl.glyphs[0].x_advance_units).to_equal(10)
+        expect(rtl.glyphs[1].x_advance_units).to_equal(-3)
+        expect(rtl.glyphs[0].y_offset_units).to_equal(-15)
+        expect(rtl.glyphs[1].y_offset_units).to_equal(0)
+
+    it "dispatches ContextPos format 2 class rules":
+        val font = _font([
+            0,2,0,26,0,32,0,2,0,0,0,12,
+            0,1,0,4, 0,2,0,1,0,1,0,1,0,1,
+            0,1,0,1,0,1,
+            0,1,0,1,0,2,0,1,0,1,
+            0,1,0,8,0,1,0,9, 0,1,0,1,0,2])
+        val context = _lookup(7u32, 0, 42, 0, 0u32)
+        val single = _lookup(1u32, 42, font.blob.len(), 1, 0u32)
+        val result = gpos_apply(font, [_active(0)], [context, single],
+            [_record(1u32), _record(2u32)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[1].x_offset_units).to_equal(9)
+
+    it "dispatches every ContextPos format 3 nested record":
+        val font = _font([
+            0,3,0,2,0,2,0,18,0,24, 0,0,0,1,0,1,0,2,
+            0,1,0,1,0,1, 0,1,0,1,0,2,
+            0,1,0,1,0,0,0,8,
+            0,1,0,8,0,1,0,4, 0,1,0,1,0,1,
+            0,1,0,8,0,1,0,6, 0,1,0,1,0,2])
+        val context = _lookup(7u32, 0, 30, 0, 0u32)
+        val first = _lookup(9u32, 30, 52, 1, 0u32)
+        val second = _lookup(1u32, 52, font.blob.len(), 2, 0u32)
+        val result = gpos_apply(font, [_active(0)], [context, first, second],
+            [_record(1u32), _record(2u32)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[0].x_offset_units).to_equal(4)
+        expect(result.glyphs[1].x_offset_units).to_equal(6)
+
+    it "dispatches ChainContextPos format 1 glyph rules":
+        val font = _font([
+            0,1,0,30,0,1,0,8, 0,1,0,4,
+            0,1,0,9, 0,2,0,2, 0,1,0,3, 0,1,0,1,0,1,
+            0,1,0,1,0,1,
+            0,1,0,8,0,1,0,8, 0,1,0,1,0,2])
+        val chain = _lookup(8u32, 0, 36, 0, 0u32)
+        val single = _lookup(1u32, 36, font.blob.len(), 1, 0u32)
+        val result = gpos_apply(font, [_active(0)], [chain, single],
+            [_record(9u32), _record(1u32), _record(2u32), _record(3u32)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[2].x_offset_units).to_equal(8)
+
+    it "dispatches ChainContextPos format 2 class rules":
+        val font = _font([
+            0,2,0,38,0,44,0,52,0,62,0,2,0,0,0,16,
+            0,1,0,4,
+            0,1,0,1, 0,2,0,1, 0,1,0,1, 0,1,0,1,0,1,
+            0,1,0,1,0,1,
+            0,1,0,9,0,1,0,1,
+            0,1,0,1,0,2,0,1,0,1,
+            0,1,0,3,0,1,0,1,
+            0,1,0,8,0,1,0,11, 0,1,0,1,0,2])
+        val chain = _lookup(8u32, 0, 70, 0, 0u32)
+        val single = _lookup(1u32, 70, font.blob.len(), 1, 0u32)
+        val result = gpos_apply(font, [_active(0)], [chain, single],
+            [_record(9u32), _record(1u32), _record(2u32), _record(3u32)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[2].x_offset_units).to_equal(11)
+
+    it "dispatches ExtensionPos targets 1 and 3":
+        val single_font = _font([
+            0,1,0,1,0,0,0,8,
+            0,1,0,8,0,1,0,5, 0,1,0,1,0,1])
+        val single_extension = _lookup(9u32, 0, single_font.blob.len(), 0, 0u32)
+        val single = gpos_apply(single_font, [_active(0)], [single_extension], [_record(1u32)])
+        expect(single.complete).to_equal(true)
+        expect(single.glyphs[0].x_offset_units).to_equal(5)
+
+        val cursive_font = _font([
+            0,1,0,3,0,0,0,8,
+            0,1,0,14,0,2, 0,0,0,22, 0,28,0,0,
+            0,1,0,2,0,1,0,2,
+            0,1,0,10,0,20, 0,1,0,3,0,5])
+        val cursive_extension = _lookup(9u32, 0, cursive_font.blob.len(), 0, 1u32)
+        val cursive = gpos_apply(cursive_font, [_active(0)], [cursive_extension],
+            [_record(1u32), _record(2u32)])
+        expect(cursive.complete).to_equal(true)
+        expect(cursive.glyphs[0].y_offset_units).to_equal(-15)
+
+    it "rolls back earlier positioning when a bounded extension is malformed":
+        val font = _font([
+            0,1,0,8,0,1,0,7, 0,1,0,1,0,1,
+            0,1,0,1,0,0,0,100])
+        val single = _lookup(1u32, 0, 14, 0, 0u32)
+        val bad_extension = _lookup(9u32, 14, font.blob.len(), 1, 0u32)
+        val original = _record(1u32)
+        original.x_offset_units = 3
+        val result = gpos_apply(font, [_active(0), _active(1)],
+            [single, bad_extension], [original])
+        expect(result.complete).to_equal(false)
+        expect(result.glyphs[0].x_offset_units).to_equal(3)
