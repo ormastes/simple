@@ -26,7 +26,13 @@ SIMPLE_LIB=src bin/simple test \
    changing the exact backend/phase target resets that delay.
 4. Vulkan and Metal return non-owning device provenance rather than freed
    resource identifiers.
-5. CUDA keeps real dispatch and readback failures distinct.
+5. Branch-local ordering checks prove Metal cleanup precedes each queue,
+   shader, pipeline, allocation, submit, dispatch, readback, size-mismatch,
+   mismatch-injection, and success return.
+6. CUDA keeps real dispatch and readback failures distinct.
 
 This is a host-independent source contract. It does not replace live device
 execution.
+
+Execution status: Linux Rust-seed interpreter pass, 6/6. Prepared-host Metal
+failure injection remains pending on macOS.

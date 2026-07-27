@@ -35,6 +35,15 @@ fn _assert_guarded_phase(source: text, backend: text, phase: text):
     val call = "val " + phase + "_fault = processing_ir_fault_reason(\"" + backend + "\", \"" + phase + "\")"
     expect(source).to_contain(call + "\n    " + _phase_guard(backend, phase))
 
+fn _assert_cleanup_before_return(source: text, branch_start: text, cleanup: text, return_text: text):
+    val start = source.index_of(branch_start)
+    expect(start).to_be_greater_than(0)
+    val branch = source.slice(start, source.len())
+    val cleanup_at = branch.index_of(cleanup)
+    val return_at = branch.index_of(return_text)
+    expect(cleanup_at).to_be_greater_than(0)
+    expect(return_at).to_be_greater_than(cleanup_at)
+
 describe "ProcessingIR GPU executor fault source contract":
     it "imports the shared fault reason helper in every executor":
         expect(file_read(CUDA_EXECUTOR)).to_contain(FAULT_IMPORT)
@@ -68,6 +77,22 @@ describe "ProcessingIR GPU executor fault source contract":
         expect(metal).to_contain("val handle = identity")
         expect(vulkan.contains("val handle = buffer.handle")).to_equal(false)
         expect(metal.contains("val handle = output")).to_equal(false)
+
+    it "releases exactly the Metal resources owned at each failure boundary":
+        val metal = file_read(METAL_EXECUTOR)
+        expect(metal).to_contain("fn _processing_metal_cleanup")
+        _assert_cleanup_before_return(metal, "if queue == 0:", "_processing_metal_cleanup(device, 0, 0, 0, 0, 0, 0, 0)", "return _processing_metal_failure(reason)")
+        _assert_cleanup_before_return(metal, "if shader == 0:", "_processing_metal_cleanup(device, queue, 0, 0, 0, 0, 0, 0)", "return _processing_metal_failure(reason)")
+        _assert_cleanup_before_return(metal, "if pipeline == 0:", "_processing_metal_cleanup(device, queue, shader, 0, 0, 0, 0, 0)", "return _processing_metal_failure(reason)")
+        val full = "_processing_metal_cleanup(device, queue, shader, pipeline, output, dummy, host, byte_count)"
+        _assert_cleanup_before_return(metal, "if output == 0 or dummy == 0 or host == 0:", full, "return _processing_metal_failure(reason)")
+        _assert_cleanup_before_return(metal, "if submit_fault != \"\":", full, "return _processing_metal_failure(submit_fault)")
+        _assert_cleanup_before_return(metal, "if not dispatched:", full, "return _processing_metal_failure(reason)")
+        _assert_cleanup_before_return(metal, "if readback_fault != \"\":", full, "return _processing_metal_failure(readback_fault)")
+        _assert_cleanup_before_return(metal, "if not copied:", full, "return _processing_metal_failure(reason)")
+        _assert_cleanup_before_return(metal, "if values.len().to_i64() != ir.element_count:", full, "return _processing_metal_failure(\"metal-readback-size-mismatch\")")
+        _assert_cleanup_before_return(metal, "if mismatch_fault != \"\":", full, "return _processing_metal_failure(mismatch_fault)")
+        _assert_cleanup_before_return(metal, "val handle = identity", full, "ProcessingMetalResult(completed: true")
 
     it "keeps real CUDA dispatch and readback failures distinct":
         val cuda = file_read(CUDA_EXECUTOR)
