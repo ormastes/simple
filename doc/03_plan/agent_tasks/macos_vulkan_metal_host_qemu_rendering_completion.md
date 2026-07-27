@@ -1045,6 +1045,27 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   Do not repeat the current coarse trace, do not touch the render body yet,
   and do not bootstrap.
 
+### 2026-07-27 Bungee caller-owned raster cycles 38–40
+
+- No bootstrap was run. Expanding the caller-owned metadata buffer exposed the
+  native fixed-array layout requirement: the strict focused Bungee probe now
+  passes exact `B` at 100 px with width 62, height 72, 4,464 pixels, nonzero
+  alpha, and both completion cookies. It compiled two modules with nine cached,
+  zero failures, and zero generated stubs.
+- The selected-font path is now wired locally into `FontRenderer`: it retains
+  the validated font bytes, measures and renders directly into caller-owned
+  arrays, and constructs `CachedGlyph` in the consuming module. The legacy
+  dylib rasterizer path remains unchanged.
+- The broader Engine2D probe compiled the edited Simple closure, then failed
+  only at link because `core-c-bootstrap` lacks the required GPU symbols. The
+  final bounded attempt selected `host-gpu`, but the preserved Stage 3 runtime
+  capsule does not contain its canonical hosted runtime rlib. No probe run was
+  possible and the three-cycle cap is reached.
+- Do not push the font implementation yet. In a fresh session, use an existing
+  provenance-acceptable `host-gpu` runtime artifact if one is found; do not
+  bootstrap merely to manufacture it. Require the broader Bungee/Engine2D
+  producer receipts before returning to Vulkan device-readback evidence.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
