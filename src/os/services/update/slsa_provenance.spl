@@ -1,0 +1,186 @@
+# SimpleOS Update — SLSA-style build provenance attestation model
+#
+# Master plan §20 (updates/recovery) requires build artifacts to carry
+# verifiable provenance — SLSA-style attestations — as a companion to the
+# TUF-style signed metadata trust model in `tuf_metadata.spl`. TUF answers
+# "is this metadata/artifact trusted, fresh, and not a rollback?"; SLSA
+# answers a different question: "was this exact artifact built by a builder
+# we trust, from pinned source, at a sufficient provenance level?" Both are
+# required together (defense in depth) before an update is accepted.
+#
+# THIS FILE IS A PURE MODEL. It does NOT perform real cryptographic signature
+# verification over an attestation envelope, and it does NOT run or observe a
+# real build. A `Provenance` value stands in for an already-signature-verified
+# in-toto/SLSA provenance predicate: the caller is assumed to have already
+# checked the attestation envelope's signature against a trusted attestor key
+# (out of scope for this model, same simplification `tuf_metadata.spl` makes
+# for `signatures_present`). What this model verifies is the *provenance
+# structure*: builder identity trust, subject binding (so a valid attestation
+# for one artifact cannot be swapped onto another), source pinning, and a
+# minimum SLSA level. Real attestation signature verification and build-time
+# provenance emission are the next increment (see the lane state file).
+
+use os.services.update.tuf_metadata.{VerifyOutcome}
+
+# ============================================================================
+# Reason codes — verify_provenance fails closed with a distinct code per gap.
+# ============================================================================
+
+val SLSA_ACCEPTED:           u32 = 0
+val SLSA_UNTRUSTED_BUILDER:  u32 = 1   # builder_id is not a trusted builder
+val SLSA_SUBJECT_MISMATCH:   u32 = 2   # attestation is not FOR this artifact
+val SLSA_UNPINNED_SOURCE:    u32 = 3   # source_uri/source_digest missing
+val SLSA_LEVEL_TOO_LOW:      u32 = 4   # slsa_level below the required floor
+
+# ============================================================================
+# Model structs (POD)
+# ============================================================================
+
+struct BuilderIdentity:
+    """A build-service identity the SLSA `builder.id` field can reference.
+
+    `trusted` models an out-of-band decision (e.g. an allow-list of build
+    infrastructure operated by SimpleOS itself, or a vetted third party) —
+    the same simplification `tuf_metadata.spl` makes for signing keys.
+    """
+    id:      text
+    trusted: bool
+
+struct Provenance:
+    """A SLSA-style provenance attestation predicate for one build.
+
+    Mirrors the shape of an in-toto/SLSA v1 provenance predicate, flattened
+    for the model: `subject_name`/`subject_digest` identify the artifact the
+    attestation is FOR (the in-toto `subject`); `builder_id` identifies the
+    build platform that produced it; `build_type`, `source_uri`, and
+    `source_digest` identify how and from what it was built; `materials` is
+    the flattened list of build-input identifiers (dependencies, base images,
+    toolchain); `slsa_level` is the self-reported SLSA build level (0-4).
+    """
+    subject_name:   text
+    subject_digest: text
+    builder_id:     text
+    build_type:     text
+    source_uri:     text
+    source_digest:  text
+    materials:      List<text>
+    slsa_level:     u32
+
+struct ProvenanceOutcome:
+    """Result of a full provenance verification.
+
+    Stands in for `Result<accepted, reason>`: `accepted` is the Ok side,
+    `reason_code`/`reason` describe the fail-closed rejection.
+    """
+    accepted:    bool
+    reason_code: u32
+    reason:      text
+
+struct CombinedOutcome:
+    """Result of the combined TUF + SLSA defense-in-depth gate.
+
+    Accepted only when BOTH the TUF metadata-trust outcome and the SLSA
+    provenance outcome accept. `reason` names which side rejected (or both)
+    so operators can tell a metadata-trust failure from a provenance failure.
+    """
+    accepted: bool
+    reason:   text
+
+# ============================================================================
+# Verifier primitives (pure)
+# ============================================================================
+
+fn verify_builder_trusted(prov: Provenance, trusted_builders: List<BuilderIdentity>) -> bool:
+    """Deny unless `prov.builder_id` names a KNOWN and TRUSTED builder.
+
+    An unlisted builder id, or a listed-but-untrusted one, is denied — the
+    core SLSA defense against artifacts produced by unauthorized build
+    infrastructure.
+    """
+    for b in trusted_builders:
+        if b.id == prov.builder_id:
+            return b.trusted
+    return false
+
+fn verify_subject_matches(prov: Provenance, artifact_name: text, artifact_digest: text) -> bool:
+    """Deny unless the attestation's subject is EXACTLY this artifact.
+
+    Prevents an attestation-swap attack: a validly-signed, trusted-builder
+    attestation for a DIFFERENT artifact must not be accepted for this one.
+    Both name and digest must match — a digest match alone is not enough
+    because it would let a same-content-different-name artifact impersonate
+    the attested subject in a naming-sensitive install path.
+    """
+    return prov.subject_name == artifact_name and prov.subject_digest == artifact_digest
+
+fn verify_source_pinned(prov: Provenance) -> bool:
+    """Deny unless the build declares a pinned, non-empty source location.
+
+    An empty `source_uri` or `source_digest` means the attestation does not
+    actually pin what was built FROM — it cannot back a reproducibility or
+    supply-chain claim, so it is treated as absent provenance.
+    """
+    return prov.source_uri != "" and prov.source_digest != ""
+
+fn verify_level(prov: Provenance, required_level: u32) -> bool:
+    """Deny if the attestation's self-reported SLSA level is below the floor."""
+    return prov.slsa_level >= required_level
+
+# ============================================================================
+# Full verification pipeline
+# ============================================================================
+
+fn reject(code: u32, why: text) -> ProvenanceOutcome:
+    """Build a fail-closed rejection outcome."""
+    return ProvenanceOutcome(accepted: false, reason_code: code, reason: why)
+
+fn verify_provenance(
+    prov:              Provenance,
+    artifact_name:     text,
+    artifact_digest:   text,
+    trusted_builders:  List<BuilderIdentity>,
+    required_level:    u32
+) -> ProvenanceOutcome:
+    """Run all provenance checks in order, fail closed with a distinct reason.
+
+    Order: builder trust -> subject binding -> source pinning -> SLSA level.
+    The first failing check decides the rejection reason, so callers can
+    always distinguish "wrong builder" from "wrong artifact" from "unpinned
+    source" from "not enough provenance".
+    """
+    if not verify_builder_trusted(prov, trusted_builders):
+        return reject(SLSA_UNTRUSTED_BUILDER, "builder is not a trusted builder")
+
+    if not verify_subject_matches(prov, artifact_name, artifact_digest):
+        return reject(SLSA_SUBJECT_MISMATCH, "attestation subject does not match artifact")
+
+    if not verify_source_pinned(prov):
+        return reject(SLSA_UNPINNED_SOURCE, "source_uri/source_digest not pinned")
+
+    if not verify_level(prov, required_level):
+        return reject(SLSA_LEVEL_TOO_LOW, "slsa_level below required level")
+
+    return ProvenanceOutcome(accepted: true, reason_code: SLSA_ACCEPTED, reason: "accepted")
+
+# ============================================================================
+# Combined TUF + SLSA defense-in-depth gate
+# ============================================================================
+
+fn verify_tuf_and_slsa(tuf_outcome: VerifyOutcome, slsa_outcome: ProvenanceOutcome) -> CombinedOutcome:
+    """Accept ONLY if both the TUF metadata-trust gate and the SLSA
+    provenance gate accept.
+
+    TUF verifies WHAT is trusted (the signed metadata pointing at this
+    artifact is authentic, fresh, and not a rollback); SLSA verifies HOW it
+    was built (a trusted builder, from pinned source, at a sufficient
+    provenance level). A compromise that defeats only one model — a stolen
+    signing key that still can't fake a trusted builder id, or a rogue build
+    system that still can't forge TUF metadata — is caught by the other.
+    """
+    if not tuf_outcome.accepted and not slsa_outcome.accepted:
+        return CombinedOutcome(accepted: false, reason: "tuf: " + tuf_outcome.reason + "; slsa: " + slsa_outcome.reason)
+    if not tuf_outcome.accepted:
+        return CombinedOutcome(accepted: false, reason: "tuf: " + tuf_outcome.reason)
+    if not slsa_outcome.accepted:
+        return CombinedOutcome(accepted: false, reason: "slsa: " + slsa_outcome.reason)
+    return CombinedOutcome(accepted: true, reason: "accepted")
