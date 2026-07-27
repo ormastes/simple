@@ -15,7 +15,7 @@ peer reports.
 - Source parser, runtime-owned ordered-event correlation, and 300-DPI receipt
   hardening are done and integrated. These source/contract results are not a
   Vulkan live PASS.
-- Two bounded current-source native diagnostics ran without bootstrapping.
+- Three bounded current-source native diagnostics ran without bootstrapping.
   Cycle 1 compiled 185 modules with zero compile failures in approximately
   9.9 seconds, but its standard output was empty. Cycle 2 compiled 184 modules
   in 10.2 seconds; its entry and receipt sentinels succeeded and it selected
@@ -25,6 +25,17 @@ peer reports.
   serialized as empty, while `post_engine_fonts` and
   `post_install_retrieve` reported the nil sentinel
   `2305843009213693951` (`0x1fffffffffffffff`).
+- Cycle 3 started from `bb9a9b60edcc572e86555e8c929bfabc20b74a62`
+  and used explicitly initialized scalar fields plus individual direct-owner
+  `i64` getters. Its no-bootstrap build compiled 184 modules with zero failures
+  and linked a 654 KB binary with SHA-256
+  `8460a54790068788b5c4997b59ad0d04ed73e863f5d281a48f7d34a7f3f1164a`.
+  The run exited 132 with `runtime error: field access on nil receiver` before
+  any checkpoint output.
+- All Cycle 3 diagnostic edits were reverted. The binary hash is an exact
+  failed-diagnostic receipt, not a manifest binding or Vulkan live evidence.
+  The three-cycle cap is exhausted, so there will be no retry, bootstrap,
+  source fix, or live gate in this session.
 - The zero-quad cause therefore remains unproven. The leading suspected seam is
   `local quads -> FontRenderBatch.quads -> _stage_batch`, but a layout or
   raster failure remains possible. Native scalar diagnostic corruption is the
@@ -53,35 +64,37 @@ peer reports.
 
 ### Ordered remaining tasks
 
-1. Establish one typed scalar checkpoint through a trustworthy mechanism that
-   cannot serialize a present scalar as empty or confuse it with the nil
-   sentinel. Use that checkpoint to distinguish layout/raster production from
-   the `local quads -> FontRenderBatch.quads -> _stage_batch` transfer seam.
-2. Run one focused current-source producer check and require exact Bungee at
+1. In a fresh session, use the existing tracked native aggregate-return bug
+   evidence to localize and fix the aggregate/owner nil-receiver channel. Do
+   not retry scalar fields/getters on the same untrusted owner path first.
+2. Establish one trustworthy typed checkpoint through the repaired channel and
+   use it to distinguish layout/raster production from the
+   `local quads -> FontRenderBatch.quads -> _stage_batch` transfer seam.
+3. Run one focused current-source producer check and require exact Bungee at
    100 px, positive quads, consistent atlas/alpha state, and non-nil renderer
    retrieval.
-3. After that focused producer PASS, produce one canonical, manifest-attested
+4. After that focused producer PASS, produce one canonical, manifest-attested
    pure-Simple Stage3 only if required by the production builder. Do not use
    the Rust seed as normal tooling and do not synthesize or reuse stale
    provenance.
-4. Build and run the manifest-bound Vulkan 2D gate. Require MoltenVK identity,
+5. Build and run the manifest-bound Vulkan 2D gate. Require MoltenVK identity,
    positive backend/device handles, same-frame device readback, semantic
    pixels, durable capture, canonical `FontRenderer` vector text at 300 DPI,
    cold/warm font-cache receipts, and ordered focus/pointer/key/text events.
-5. Validate the accepted runtime-owned key/text origin correlation from
+6. Validate the accepted runtime-owned key/text origin correlation from
    `d00e71c11d` in the live gate and prove ordered delivery without a synthetic
    shortcut.
-6. Run Vulkan web, then Vulkan widget GUI, then host-WM live gates. Each must
+7. Run Vulkan web, then Vulkan widget GUI, then host-WM live gates. Each must
    preserve Draw IR ownership, use real device output, and retain capture and
    event receipts; GUI must repeat the vector-font proof at 300 DPI.
-7. Only after all Vulkan host lanes pass, run like-for-like Metal
+8. Only after all Vulkan host lanes pass, run like-for-like Metal
    2D/web/GUI/host-WM gates and require pixel/event/font parity without a CPU
    mirror.
-8. Only after host-WM passes, run x86 QEMU SimpleOS 2D/SIMD, ARM QEMU
+9. Only after host-WM passes, run x86 QEMU SimpleOS 2D/SIMD, ARM QEMU
    SimpleOS 2D/SIMD, and QEMU WM. Retain canonical artifact hashes, guest
    framebuffer dimensions/bounds, input receipts, runtime SIMD receipts, and
    captures. Correct any unsupported PASS documentation before acceptance.
-9. Run the scoped verification/audit gates once, obtain `STATUS: PASS`, then
+10. Run the scoped verification/audit gates once, obtain `STATUS: PASS`, then
    linearly sync and push the isolated verified changes.
 
 ### Agent lanes and acceptance ownership

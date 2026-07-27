@@ -40,7 +40,7 @@ publishing its ready or runtime receipt.
 
 ### 2026-07-27 bounded no-bootstrap diagnostics
 
-Two focused current-source native-build cycles were run without bootstrapping:
+Three focused current-source native-build cycles were run without bootstrapping:
 
 - Cycle 1 compiled 185 modules with zero compile failures in approximately
   9.9 seconds, but the diagnostic process produced empty standard output.
@@ -50,11 +50,27 @@ Two focused current-source native-build cycles were run without bootstrapping:
   scalar checkpoints all serialized as empty values.
 - In the same cycle, `post_engine_fonts` and `post_install_retrieve` serialized
   as the nil sentinel `2305843009213693951` (`0x1fffffffffffffff`).
+- The third and final bounded cycle started from
+  `bb9a9b60edcc572e86555e8c929bfabc20b74a62`. Its scalar-only diagnostic
+  explicitly initialized every checkpoint and exposed individual `i64`
+  getters directly from the live `Engine2D` font owner. The no-bootstrap
+  native build compiled 184 modules with zero failures and linked a 654 KB
+  binary with SHA-256
+  `8460a54790068788b5c4997b59ad0d04ed73e863f5d281a48f7d34a7f3f1164a`.
+  The run exited 132 with `runtime error: field access on nil receiver` before
+  producing any checkpoint output.
+- All third-cycle diagnostic source and probe edits were reverted after that
+  failure. The three-cycle cap is exhausted: no retry, bootstrap, renderer
+  change, or Vulkan live gate is permitted in this session.
 
 These facts are summarized here because the diagnostic directory
 `/private/tmp/simple-font-zero-quads-evidence-448d2a5` is ephemeral. It is not
 a retained, manifest-bound evidence artifact and must not be cited as live
 acceptance provenance.
+
+The third-cycle binary is an ephemeral diagnostic product. Its hash identifies
+the exact failed executable, but it has no trusted manifest binding and is not
+Vulkan live evidence.
 
 ## Interpretation
 
@@ -79,29 +95,40 @@ nil-sentinel renderer retrieval make the diagnostic transport itself
 untrustworthy. No renderer fix, live PASS, or bootstrap resulted from these
 cycles.
 
+The third cycle confirms that adding more scalar fields/getters on the current
+owner path is not a trustworthy next diagnostic step: the process still
+reaches a native nil-receiver fault before an observable checkpoint. It does
+not localize layout, rasterization, quad construction, or staging. In a fresh
+session, first localize and fix the aggregate/owner nil-receiver channel using
+the existing tracked aggregate-return bug evidence. Only then retry the
+focused font producer checkpoint.
+
 ## Required acceptance gate
 
-1. Establish at least one typed scalar checkpoint through a trustworthy
-   mechanism that cannot serialize a present value as empty or confuse it with
-   the nil sentinel. Use it to distinguish layout/raster production from the
+1. In a fresh session, localize and fix the aggregate/owner nil-receiver
+   channel using the tracked native aggregate-return evidence; do not add
+   another scalar checkpoint on the same untrusted owner path.
+2. Establish at least one typed scalar checkpoint through the repaired channel
+   that cannot serialize a present value as empty or confuse it with the nil
+   sentinel. Use it to distinguish layout/raster production from the
    `local quads -> FontRenderBatch.quads -> _stage_batch` transfer seam.
-2. A focused native producer probe must use an exact non-empty Bungee string
+3. A focused native producer probe must use an exact non-empty Bungee string
    at 24 pt / 300 DPI and prove computed font size 100 px, `valid=true`,
    positive quad count, consistent atlas dimensions/pixel count, in-bounds
    nontransparent quad coverage, and matching renderer identity/generation.
-3. An empty or inconsistent `FontRenderBatch` must return a named failure
+4. An empty or inconsistent `FontRenderBatch` must return a named failure
    propagated to the caller, without dereferencing a nil aggregate, with
    evidence that no backend batch method was entered.
-4. `Engine2D.draw_text` must retain the selected renderer and record ordered
+5. `Engine2D.draw_text` must retain the selected renderer and record ordered
    Vulkan execution attempts plus target, prove Vulkan success with no CPU
    fallback, and avoid a native receiver fault while retrieving the selected
    renderer.
-5. Cold draw must increment rasterizations; warm draw must keep
+6. Cold draw must increment rasterizations; warm draw must keep
    rasterizations stable and increment warm hits.
-6. Vulkan device readback after text must prove source `device_readback`, a
+7. Vulkan device readback after text must prove source `device_readback`, a
    positive backend handle, exact framebuffer pixel count, and a text-only
    region-of-interest pre/post delta.
-7. Only after those focused native checks pass may the immutable trusted
+8. Only after those focused native checks pass may the immutable trusted
    harness be rebuilt and the full live capture/event gate retried.
 
 Bootstrap is permitted only if it is essential after the focused producer
