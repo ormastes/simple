@@ -1,5 +1,18 @@
 # wm_gui_web_2d_host_env_hardening_spec
 
+## Overview
+
+Runs the production hosted-window evidence lane. One retained receipt must
+correlate a screen-originated event through WM and semantic Web dispatch to an
+application mutation and the same canonical Engine2D framebuffer. Native x86,
+ARM, RISC-V, Vulkan, and RenderDoc rows fail closed and retain their exact
+resume commands instead of becoming passes.
+
+Run this spec with `SIMPLE_BIN` set to the deployed pure-Simple runtime after
+the live-window and retained 4K evidence gates have populated their receipts.
+The primary scenario is production evidence; the owner check is supporting
+structural evidence only and cannot promote a host row.
+
 > use std.spec.*
 
 | Tests | Active | Skipped | Pending |
@@ -136,13 +149,21 @@ expect(perf).to_contain("gui_showcase_4k_200fps_max_rss_kb=")
 
 #### keeps the wrapper and app on existing production owners
 
+This supporting structural check keeps the evidence app on the selected
+production owners. Live event and device proof belongs to the primary scenario.
+
+- Verify the retained contract binds a forward Vulkan revision
+  - Expected: the exact increasing-revision and Vulkan-backend guards remain at
+    the shared readback admission call site.
+
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Verify the retained contract binds a forward Vulkan revision")
 val wrapper = file_read(WRAPPER)
 val app = file_read(HOST_ENV_APP)
 val contract = file_read(HOST_ENV_CONTRACT)
@@ -160,7 +181,10 @@ expect(contract).to_contain("linux_hosted_wm_live_window_glyph_crop_live_match=t
 expect(contract).to_contain("host_display_input_evidence_passes(evidence)")
 expect(contract).to_contain("linux_hosted_wm_live_window_baseline_capture_sha256")
 expect(contract).to_contain("linux_hosted_wm_live_window_input_capture_sha256")
-expect(contract).to_contain("_host_evidence_values_differ")
+expect(contract).to_contain(
+    "_host_evidence_values_increase(evidence, \"linux_hosted_wm_live_window_baseline_revision\", \"linux_hosted_wm_live_window_input_revision\")")
+expect(contract).to_contain(
+    "_host_evidence_value_matches(evidence, \"linux_hosted_wm_live_window_baseline_backend\", \"vulkan\")")
 expect(app.contains("argb_mismatch_count=0")).to_be(false)
 expect(app).to_contain("blocked")
 ```

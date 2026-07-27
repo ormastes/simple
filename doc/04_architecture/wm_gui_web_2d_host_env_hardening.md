@@ -67,7 +67,8 @@ TestHostEnv -> ExistingCapabilityProbes
 5. The existing `SharedWmScene -> DrawIrComposition -> Engine2D` path submits.
 6. Existing backend provenance/readback and hosted snapshot fields bind the
    same event ID to the resulting frame and require its arbitrary-width decimal
-   revision to advance beyond the baseline.
+   revision to advance beyond the baseline. Both retained frames must name the
+   Vulkan backend; equality alone cannot promote a correlated CPU fallback.
 
 ## Rejected Patterns
 

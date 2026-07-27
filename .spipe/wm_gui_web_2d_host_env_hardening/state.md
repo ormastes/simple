@@ -1029,6 +1029,12 @@ Tracking split:
   admitting the row. Focused specs cover duplicate bindings plus current,
   changed, and deleted capture bytes; the admitted pure-Simple runner remains
   unavailable.
+- readback-vulkan-provenance: The shared live-frame gate previously accepted
+  equal `cpu` baseline/input backends as Vulkan evidence. Admission now requires
+  an exact `vulkan` baseline plus equality with the input backend, and focused
+  mutations reject both one-sided and correlated CPU fallback. The structural
+  system scenario now checks the exact forward-revision and Vulkan call sites
+  under a visible manual step; no live host PASS is claimed.
 - coverage-denominator-gap: Review confirmed the runtime aggregate contains
   only decision sites that emitted rows; completely untouched functions can be
   absent while the report says 100%. TODO594 requires a compiler-owned

@@ -177,12 +177,12 @@ expect(receipt(nonblank: 0).validation_reason()).to_equal("blank-frame")
 
 ### live framebuffer evidence classification
 
-#### accepts only a forward device frame tied to the screen event receipt
+#### accepts only a forward Vulkan device frame tied to the screen event receipt
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 23 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -199,6 +199,7 @@ expect(host_readback_evidence_passes(complete.replace("input_revision=8", "input
 expect(host_readback_evidence_passes(complete.replace("baseline_revision=7", "baseline_revision=999999999999999999999999999999"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("input_frame_checksum=101", "input_frame_checksum=99"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("input_backend=vulkan", "input_backend=cpu"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("baseline_backend=vulkan", "baseline_backend=cpu").replace("input_backend=vulkan", "input_backend=cpu"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("baseline_readback_source=device_readback", "baseline_readback_source=cpu_mirror"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("input_backend_handle=41", "input_backend_handle=42"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("input_render_event_id=7", "input_render_event_id=8"))).to_be(false)
