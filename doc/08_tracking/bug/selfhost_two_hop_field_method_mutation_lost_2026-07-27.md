@@ -28,6 +28,20 @@ s.insert(...)
 self.world.output_bufs = s
 ```
 
+## Second confirmed instance (2026-07-27, lane PTY2) — entity allocator
+`TtyService.tty_create` called `self.world.base.spawn()`, which mutates
+`WorldBase.alloc: EntityAllocator` internally. Because that is also a two-hop
+chained mutating call, **every spawned entity came back as the SAME
+`Entity(id:0, generation:1)`** as soon as one world created more than one TTY.
+Single-TTY specs never noticed; a cross-talk test with 2 PTY pairs (4 entities)
+exposed it. Same workaround applied (`var base = self.world.base; val e =
+base.spawn(); self.world.base = base`).
+
+This makes the defect **systemically dangerous for every ECS service**: it
+silently collapses entity identity rather than merely dropping a write. The root
+fix belongs in the ECS world owner (`src/lib/*/ecs/world.spl`) plus the compiler
+lowering below.
+
 ## Next step
 Root-cause in the self-hosted compiler's place/lvalue lowering for chained
 field receivers of mutating methods; add a regression spec with the minimal

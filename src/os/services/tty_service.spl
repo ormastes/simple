@@ -78,9 +78,32 @@ struct OutputBuf:
     """
     bytes: [u8]
 
+struct InputBuf:
+    """Pending input byte queue drained by the shell/reader side of a PTY.
+
+    Real delivery target for pty_master_write: bytes written by the PTY
+    master are appended to the SLAVE entity's InputBuf so a subsequent
+    tty_read_input() (the "shell read") observes them. Every TTY entity
+    gets one (not just PTY slaves) so the same drain path works uniformly.
+    """
+    bytes: [u8]
+
 struct TtyKind:
     """TTY_CONSOLE=0 | TTY_PTY_MASTER=1 | TTY_PTY_SLAVE=2"""
     kind: u32
+
+struct PtyPair:
+    """Routing link from a PTY master entity to its slave entity.
+
+    This is the endpoint->entity routing layer P4 deferred: previously
+    OutputSink/InputSource only carried an opaque u64 endpoint id with no
+    lookup back to an Entity, so a master write could never reach the
+    linked slave's queue. Keyed by the MASTER entity in TtyWorld.pty_pairs
+    (see tty_create_pty_pair) so pty_master_write/pty_master_read can find
+    the linked slave in one lookup.
+    """
+    master: Entity
+    slave: Entity
 
 # ============================================================================
 # TtyWorld — ECS world for all TTY state
@@ -95,7 +118,9 @@ struct TtyWorld:
     input_sources:  ComponentStore<InputSource>
     output_sinks:   ComponentStore<OutputSink>
     output_bufs:    ComponentStore<OutputBuf>
+    input_bufs:     ComponentStore<InputBuf>
     kinds:          ComponentStore<TtyKind>
+    pty_pairs:      ComponentStore<PtyPair>
 
 # ============================================================================
 # Extern — kernel wires these at boot
@@ -132,7 +157,9 @@ impl TtyService:
                 input_sources:  ComponentStore.new(),
                 output_sinks:   ComponentStore.new(),
                 output_bufs:    ComponentStore.new(),
-                kinds:          ComponentStore.new()
+                input_bufs:     ComponentStore.new(),
+                kinds:          ComponentStore.new(),
+                pty_pairs:      ComponentStore.new()
             ),
             initialized: true,
             default_cc: cc
@@ -144,7 +171,23 @@ impl TtyService:
         Default termios: ICANON | ECHO | ISIG enabled, fg_pgid=0.
         Returns the new entity handle.
         """
-        val e = self.world.base.spawn()
+        # Extract-mutate-writeback (same two-hop chained-mutating-method-call
+        # landmine as output_sinks/output_bufs below, one layer deeper): a
+        # bare `self.world.base.spawn()` mutates a discarded copy of
+        # WorldBase's EntityAllocator, so every entity spawned this way
+        # silently comes back as Entity(id: 0, generation: 1) — the SAME
+        # entity every time once a world creates more than one. Discovered
+        # while wiring the PTY2 cross-talk oracle (two PTY pairs collapsed
+        # onto one shared entity id). Found and fixed in this PTY2
+        # increment; not present in P4's state.md because P4's specs never
+        # created more than one TTY per TtyService instance, so the
+        # collision never manifested there. Filed for the shared
+        # `src/lib/*/ecs/world.spl` owners, same as the ComponentStore
+        # defect below — out of this lane's exclusive-path scope to fix at
+        # the root.
+        var base = self.world.base
+        val e = base.spawn()
+        self.world.base = base
         val t = self.world.base.now()
         val cc: [u8] = [3, 0, 127, 21, 4, 0, 0, 0]
         # NOTE: output_sinks/output_bufs use extract-mutate-writeback (see
@@ -162,6 +205,11 @@ impl TtyService:
         var output_bufs_store = self.world.output_bufs
         output_bufs_store.insert(e, OutputBuf(bytes: []), t)
         self.world.output_bufs = output_bufs_store
+        # Same extract-mutate-writeback requirement as output_bufs above —
+        # see the NOTE on output_sinks_store for the two-hop landmine.
+        var input_bufs_store = self.world.input_bufs
+        input_bufs_store.insert(e, InputBuf(bytes: []), t)
+        self.world.input_bufs = input_bufs_store
         self.world.line_bufs.insert(e,
             LineBuf(bytes: [], cap: 4096), t)
         self.world.termios.insert(e,
@@ -337,12 +385,61 @@ impl TtyService:
         self.world.output_bufs = buf_store
         result
 
+    me tty_write_input(tty: Entity, bytes: [u8]) -> i32:
+        """Append bytes directly to an entity's InputBuf (the raw queue op).
+
+        Real delivery, not an accepted-count bookkeeping op — mirrors
+        tty_write's contract but targets InputBuf instead of OutputBuf.
+        Returns the number of bytes delivered (== len of input array), or
+        -1 if the TTY entity does not exist.
+        """
+        val buf_slot = self.world.input_bufs.get_slot(tty)
+        if buf_slot < 0:
+            return -1
+        val old_buf = self.world.input_bufs.dense[buf_slot]
+        var new_bytes = old_buf.bytes
+        var i = 0
+        val n = bytes.len()
+        while i < n:
+            new_bytes = new_bytes.push(bytes[i])
+            i = i + 1
+        val t = self.world.base.now()
+        # Same extract-mutate-writeback requirement as tty_write/output_bufs
+        # above — two-hop chained `self.world.input_bufs.insert(...)` does
+        # not persist under the current runtime.
+        var buf_store = self.world.input_bufs
+        buf_store.insert(tty, InputBuf(bytes: new_bytes), t)
+        self.world.input_bufs = buf_store
+        bytes.len() as i32
+
+    me tty_read_input(tty: Entity) -> [u8]:
+        """Drain the TTY's InputBuf and return the bytes delivered so far.
+
+        This is the "shell read" side of the PTY master->slave data path —
+        the shell attached to the slave drains this queue to observe bytes
+        written by the PTY master. Returns an empty array if the TTY does
+        not exist or nothing has been written since the last drain.
+        """
+        val buf_slot = self.world.input_bufs.get_slot(tty)
+        if buf_slot < 0:
+            return []
+        val old_buf = self.world.input_bufs.dense[buf_slot]
+        val result = old_buf.bytes
+        val t = self.world.base.now()
+        var buf_store = self.world.input_bufs
+        buf_store.insert(tty, InputBuf(bytes: []), t)
+        self.world.input_bufs = buf_store
+        result
+
     me tty_create_pty_pair(self) -> (Entity, Entity):
         """Create a linked PTY master/slave pair.
 
         The master's InputSource endpoint is used as the slave's OutputSink
-        endpoint and vice versa, forming a bidirectional pipe.
-        Returns (master_entity, slave_entity).
+        endpoint and vice versa, forming a bidirectional pipe. Also wires
+        the real entity->entity routing layer (PtyPair component, keyed by
+        the master entity) that pty_master_write/pty_master_read use — this
+        is what P4 deferred ("needs an endpoint->entity routing layer that
+        did not exist"). Returns (master_entity, slave_entity).
         """
         # Endpoint IDs: use world tick to generate unique values
         val t = self.world.base.now()
@@ -350,7 +447,53 @@ impl TtyService:
         val slave_ep: u64  = (t + 2) as u64
         val master = self.tty_create(TTY_PTY_MASTER, master_ep, slave_ep)
         val slave  = self.tty_create(TTY_PTY_SLAVE,  slave_ep,  master_ep)
+        # Extract-mutate-writeback (see landmine notes above) — insert the
+        # routing link keyed by the master entity only; both directions of
+        # traffic are reachable from `master` via pair.slave.
+        var pair_store = self.world.pty_pairs
+        pair_store.insert(master, PtyPair(master: master, slave: slave), t)
+        self.world.pty_pairs = pair_store
         (master, slave)
+
+    me pty_master_write(master: Entity, bytes: [u8]) -> i32:
+        """PTY master write: append bytes to the linked SLAVE's InputBuf.
+
+        This is "master write -> slave input queue" (master plan §10.1).
+        The shell attached to the slave observes these bytes via
+        tty_read_input(slave). Routes through the PtyPair component keyed
+        by `master` (see tty_create_pty_pair) — cross-talk between unrelated
+        pairs is impossible because each master entity id maps to exactly
+        one PtyPair. Returns the delivered byte count, or -1 if `master` is
+        not a known PTY master (no linked pair) or the slave entity is
+        somehow gone.
+        """
+        val pair_slot = self.world.pty_pairs.get_slot(master)
+        if pair_slot < 0:
+            return -1
+        val pair = self.world.pty_pairs.dense[pair_slot]
+        self.tty_write_input(pair.slave, bytes)
+
+    me pty_slave_write(slave: Entity, bytes: [u8]) -> i32:
+        """PTY slave write ("shell write"): append bytes to the slave's own
+        OutputBuf. This is exactly tty_write — a thin, explicitly-named
+        wrapper for the "shell write -> slave output queue -> PTY master
+        read" direction (master plan §10.1).
+        """
+        self.tty_write(slave, bytes)
+
+    me pty_master_read(master: Entity) -> [u8]:
+        """PTY master read: drain bytes the SLAVE wrote to its OutputBuf.
+
+        This is "shell write -> slave output queue -> PTY master read"
+        (master plan §10.1), the reverse direction of pty_master_write.
+        Routes through the same PtyPair component keyed by `master`.
+        Returns an empty array if `master` has no linked pair.
+        """
+        val pair_slot = self.world.pty_pairs.get_slot(master)
+        if pair_slot < 0:
+            return []
+        val pair = self.world.pty_pairs.dense[pair_slot]
+        self.tty_read_output(pair.slave)
 
     fn tty_count(self) -> i32:
         """Return the number of live TTY entities (tracked via kinds store)."""
