@@ -704,5 +704,15 @@ implementation in progress / target evidence blocked
   planting, CSP checks skipped after active-resource redirects, incomplete
   SameSite/HttpOnly overwrite isolation, and unauthenticated response delivery.
   These remain active AC-6..AC-8 work; no false PASS is recorded.
+- security: Enforced compositor window ownership at the shared lifecycle and
+  SimpleOS action-applier boundaries. Remote destroy, update, focus, geometry,
+  title, minimize, maximize, and restore requests now require `src_port` to
+  match the stored owner, and remote creates cannot assign a different owner;
+  `src_port=0` remains reserved for trusted WM-local actions. Hosted
+  maximize/restore no longer bypass the check.
+- evidence: Focused unit coverage denies all nine remote lifecycle mutations,
+  preserves the victim window, covers the generic compositor, and proves the
+  hosted maximize/restore bypass is closed. Scoped static validation passes;
+  executable evidence remains target-compiler-blocked and was not rerun.
 - constraint: Do not bootstrap or change the compiler unless a confirmed
   compiler defect prevents producing/running the target browser binary.

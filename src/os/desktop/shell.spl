@@ -19,13 +19,14 @@ use common.ui.builder.{
 }
 use os.compositor.compositor.{Compositor, WindowSurface}
 use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_revision_with_theme}
-use os.compositor.wm_action_applier.{apply_wm_action_to_compositor, wm_action_with_app_id}
+use os.compositor.wm_action_applier.{apply_wm_action_to_compositor, wm_action_with_app_id, wm_lifecycle_owner_allows_source}
 use os.compositor.app_content.{app_state_new}
 use os.drivers.framebuffer.fb_driver.{Color}
 use os.desktop.app_manifest.{AppManifest, load_app_manifests, search_apps}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use os.services.wm.wm_service.{WmService, WmAction}
 use common.window_protocol.geometry.{WindowId, ProcessId, AppId, Point, Size, Rect}
+use common.window_protocol.window_protocol.{WM_STATUS_ERROR}
 use os.services.launcher.launcher.{
     launcher_init, launcher_launch, launcher_shortcut_dispatch, launcher_register, launcher_terminate,
     launcher_get_app_name, launcher_get_process_app_index, launcher_get_process_app_id_for_pid,
@@ -633,6 +634,23 @@ impl DesktopShell:
         This method applies them to the single compositor instance
         owned by the shell, ensuring consistent state.
         """
+        val create_action = (
+            action.kind == "create_window" or action.kind == "create_web_window"
+        )
+        val expected_owner = if create_action:
+            action.owner_port.to_i64()
+        else:
+            self.compositor.window_owner_port(action.window_id).to_i64()
+        if not wm_lifecycle_owner_allows_source(
+            expected_owner, action.src_port
+        ):
+            if action.src_port > 0 and self.wm.initialized:
+                self.wm.send_status_reply(action.src_port, WM_STATUS_ERROR)
+            log_warn(
+                "[desktop] [shell] denied cross-owner WM action " +
+                "kind={action.kind} window={action.window_id}"
+            )
+            return
         match action.kind:
             "create_window":
                 var app_id = action.app_id

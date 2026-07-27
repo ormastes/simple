@@ -38,7 +38,7 @@ use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
 use common.ui.wm_chrome_theme.{wm_chrome_theme, active_wm_theme_render_snapshot, active_wm_theme_id, WmChromeColors}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 use common.color.convert.{int_to_hex}
-use os.compositor.wm_action_lifecycle.{WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
+use os.compositor.wm_action_lifecycle.{WmLifecycleWindowState, WmPointerInteractionState, apply_wm_action_to_lifecycle_windows, wm_action_from_bridge_request, wm_destroy_action, wm_focus_action, wm_lifecycle_hit_taskbar, wm_lifecycle_left_button, wm_lifecycle_owner_allows_source, wm_lifecycle_pointer_move, wm_taskbar_dock_width, wm_taskbar_item_width, wm_taskbar_item_x}
 use os.services.wm.wm_action.{WmAction}
 use common.window_protocol.compositor_methods.{COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
 
@@ -939,13 +939,23 @@ class HostCompositor:
             self.skipped_frame_count = self.skipped_frame_count + 1
 
     me apply_bridge_request(seq: i64, owner_port: i64, method: i64, window_id: i64, title: text, x: i32, y: i32, w: i32, h: i32, content: text, process_id: i64, app_id: text):
+        val action = wm_action_from_bridge_request(owner_port, method, window_id, title, x, y, w, h, content, process_id, app_id)
         if method == COMP_MAXIMIZE.to_i64():
+            val i = self._find_window_index(window_id)
+            if i < 0 or not wm_lifecycle_owner_allows_source(
+                self.windows[i].owner_port, action.src_port
+            ):
+                return
             self.maximize_window(window_id)
             return
         if method == COMP_RESTORE.to_i64():
+            val i = self._find_window_index(window_id)
+            if i < 0 or not wm_lifecycle_owner_allows_source(
+                self.windows[i].owner_port, action.src_port
+            ):
+                return
             self.restore_window(window_id)
             return
-        val action = wm_action_from_bridge_request(owner_port, method, window_id, title, x, y, w, h, content, process_id, app_id)
         self.apply_wm_action(action)
 
     me maximize_window(window_id: i64):
