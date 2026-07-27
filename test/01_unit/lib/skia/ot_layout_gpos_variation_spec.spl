@@ -21,8 +21,29 @@ fn _variation_font() -> OtFont:
     ]
     OtFont(blob: blob, tables: [OtTable(tag: 1195656006u32, offset: 0u32, length: 52u32)])
 
+fn _with_tail(font: OtFont, tail: [u8]) -> OtFont:
+    var blob = font.blob
+    for byte in tail: blob.push(byte)
+    OtFont(blob: blob, tables: font.tables)
+
+fn _two_axis_font() -> OtFont:
+    val blob: [u8] = [
+        0,1,0,3, 0,0,0,0,0,0,0,0,0,0, 0,0,0,18,
+        0,1, 0,0,0,12, 0,1, 0,0,0,28,
+        0,2,0,1,
+        0,0,0x40,0,0x40,0,
+        0,0,0x40,0,0x40,0,
+        0,1,0,1,0,1,0,0,0,10
+    ]
+    OtFont(blob: blob, tables: [OtTable(tag: 1195656006u32, offset: 0u32, length: 56u32)])
+
+fn _nan() -> f64:
+    var big = 1.0e308
+    val infinity = big * 10.0
+    infinity - infinity
+
 describe "GPOS variation data":
-    it "decodes packed Device delta formats 1, 2, and 3":
+    it "decodes packed post-scale pixel Device delta formats 1, 2, and 3":
         val font = _font([
             0,10,0,13,0,1,0xB1,0,
             0,20,0,23,0,2,0x8F,0x07,
@@ -49,12 +70,28 @@ describe "GPOS variation data":
         expect(gpos_data_variation_delta(font, 0, 0, [-0.5]).delta).to_equal(0)
         expect(gpos_data_device_delta(font, 52, 58, gpos_data_context(0, [0.5])).delta).to_equal(10)
 
-    it "applies Device deltas from ValueRecords while preserving compatibility parsing":
-        val font = _font([0,5,0,4, 0,12,0,12,0,3,0xFF,0])
-        expect(gpos_data_value(font.blob, 0, 12, 17u32).valid).to_equal(false)
-        val adjusted = gpos_data_value_adjusted(font, 0, 0, 12, 17u32, gpos_data_context(12))
+    it "multiplies two axis scalars and rounds the interpolated design-unit delta":
+        val result = gpos_data_variation_delta(_two_axis_font(), 0, 0, [0.5, 0.5])
+        expect(result.valid).to_equal(true)
+        expect(result.delta).to_equal(3)
+
+    it "treats zero and out-of-range coordinates as zero scalar and rejects NaN":
+        val font = _variation_font()
+        val zero = gpos_data_variation_delta(font, 0, 0, [0.0])
+        val outside = gpos_data_variation_delta(font, 0, 0, [2.0])
+        expect(zero.valid).to_equal(true)
+        expect(zero.delta).to_equal(0)
+        expect(outside.valid).to_equal(true)
+        expect(outside.delta).to_equal(0)
+        expect(gpos_data_variation_delta(font, 0, 0, [_nan()]).valid).to_equal(false)
+
+    it "applies a VariationIndex design-unit delta from a ValueRecord":
+        val font = _with_tail(_variation_font(), [0,5,0,4, 0,0,0,0,0x80,0])
+        expect(gpos_data_value(font.blob, 58, 68, 17u32).valid).to_equal(false)
+        val adjusted = gpos_data_value_adjusted(font, 58, 58, 68, 17u32,
+            gpos_data_context(0, [0.5]))
         expect(adjusted.valid).to_equal(true)
-        expect(adjusted.x_place).to_equal(4)
+        expect(adjusted.x_place).to_equal(15)
         expect(adjusted.size).to_equal(4)
 
     it "uses format 2 anchor coordinates as the contour-point fallback":
@@ -64,18 +101,16 @@ describe "GPOS variation data":
         expect(anchor.x).to_equal(7)
         expect(anchor.y).to_equal(-3)
 
-    it "applies format 3 anchor Device adjustments":
-        val font = _font([
-            0,
-            0,3,0,10,0,20,0,10,0,18,
-            0,16,0,16,0,3,0x03,0,
-            0,16,0,16,0,3,0xFE,0
+    it "applies a VariationIndex design-unit delta from anchor format 3":
+        val font = _with_tail(_variation_font(), [
+            0,3,0,10,0,20,0,10,0,0,
+            0,0,0,0,0x80,0
         ])
-        val anchor = gpos_data_anchor_adjusted(font, 1, 27,
-            GposDataBudget(remaining: 2), gpos_data_context(16))
+        val anchor = gpos_data_anchor_adjusted(font, 58, 74,
+            GposDataBudget(remaining: 2), gpos_data_context(0, [0.5]))
         expect(anchor.valid).to_equal(true)
-        expect(anchor.x).to_equal(13)
-        expect(anchor.y).to_equal(18)
+        expect(anchor.x).to_equal(20)
+        expect(anchor.y).to_equal(20)
 
     it "fails closed on malformed Device, VariationIndex, and anchor offsets":
         val packed = _font([0,10,0,13,0,1,0xB1,0])
@@ -96,3 +131,14 @@ describe "GPOS variation data":
             0,1,0,3, 0,0,0,0,0,0,0,0,0,0, 0,0,0,64
         ], tables: [OtTable(tag: 1195656006u32, offset: 0u32, length: 18u32)])
         expect(gpos_data_variation_delta(bad_store, 0, 0, [0.5]).valid).to_equal(false)
+
+    it "fails closed on a malformed region index and truncated delta rows":
+        val good = _variation_font()
+        var bad_region_blob = good.blob
+        bad_region_blob[47] = 1u8
+        val bad_region = OtFont(blob: bad_region_blob,
+            tables: [OtTable(tag: 1195656006u32, offset: 0u32, length: 52u32)])
+        expect(gpos_data_variation_delta(bad_region, 0, 0, [0.5]).valid).to_equal(false)
+        val short_rows = OtFont(blob: _variation_font().blob,
+            tables: [OtTable(tag: 1195656006u32, offset: 0u32, length: 51u32)])
+        expect(gpos_data_variation_delta(short_rows, 0, 0, [0.5]).valid).to_equal(false)
