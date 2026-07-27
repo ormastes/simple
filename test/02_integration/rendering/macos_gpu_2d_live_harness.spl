@@ -137,6 +137,8 @@ fn vulkan_processing_ir_receipt() -> (bool, text):
     val status = if valid: "pass" else: "fail"
     (valid,
         "gpu_2d_live_processing_ir_status={status}\n" +
+        "gpu_2d_live_processing_ir_reason={result.reason}\n" +
+        "gpu_2d_live_processing_ir_completed={result.completed}\n" +
         "gpu_2d_live_processing_ir_backend=vulkan\n" +
         "gpu_2d_live_processing_ir_count={result.values.len()}\n" +
         "gpu_2d_live_processing_ir_expected_checksum={expected_checksum}\n" +
@@ -233,15 +235,22 @@ fn write_runtime_receipt(path: text, backend: text, capture_path: text,
         "gpu_2d_live_semantic_pointer_key_delivery=observed\n" +
         "gpu_2d_live_semantic_correlation=native-focus-reduced;pointer-key-delivery-observed\n")
 
-fn write_failure_receipt(path: text, backend: text, reason: text,
-                         stage: i64, exit_code: i64) -> i64:
+fn write_failure_receipt_with_diagnostics(
+        path: text, backend: text, reason: text, stage: i64, exit_code: i64,
+        diagnostics: text) -> i64:
     file_write(path,
         "gpu_2d_live_status=fail\n" +
         "gpu_2d_live_reason={reason}\n" +
         "gpu_2d_live_backend={backend}\n" +
         "gpu_2d_live_stage={stage}\n" +
-        "gpu_2d_live_exit_code={exit_code}\n")
+        "gpu_2d_live_exit_code={exit_code}\n" +
+        diagnostics)
     exit_code
+
+fn write_failure_receipt(path: text, backend: text, reason: text,
+                         stage: i64, exit_code: i64) -> i64:
+    write_failure_receipt_with_diagnostics(
+        path, backend, reason, stage, exit_code, "")
 
 fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
     # Keep native framebuffer dimensions function-local and literal-backed.
@@ -265,8 +274,9 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
     if backend == "vulkan":
         val (processing_ir_valid, receipt_lines) = vulkan_processing_ir_receipt()
         if not processing_ir_valid:
-            return write_failure_receipt(
-                receipt_path, backend, "processing-ir-receipt-failed", 4, 4)
+            return write_failure_receipt_with_diagnostics(
+                receipt_path, backend, "processing-ir-receipt-failed", 4, 4,
+                receipt_lines)
         processing_ir_receipt = receipt_lines
     var engine = Engine2D.create_with_backend_fast(live_width, live_height, backend)
     if engine.backend_name() != backend:

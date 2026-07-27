@@ -1295,6 +1295,24 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   removed after their processes exited; Stage 2, logs, providers, and the
   verified tuple remain. Start the incremental retry only with at least 2 GiB
   free and no concurrent bootstrap/native-build writer.
+- The incremental retry at `792af24d9f` reused the verified tuple with Cargo
+  disabled. Stage 2 and Stage 3 compiled and passed sanity, canonical v3
+  provenance was written, and the v4 Vulkan native builder admitted and built
+  its trusted executable.
+- The first trusted live run verified the MoltenVK device/driver but stopped at
+  ProcessingIR stage 4. A diagnostic receipt exposed
+  `vulkan-shader-compile-failed`: the ProcessingIR path imported the I/O Vulkan
+  facade, whose SPIR-V wrapper still passed a Simple array through the
+  interpreter ABI during native execution.
+- The I/O owner now selects the interpreter array ABI only in the interpreter
+  and otherwise calls `rt_vulkan_compile_spirv_raw` with pointer and byte
+  length, matching the established Engine2D owner. A cache-preserving native
+  mini-build recompiled two modules and reused 214; the diagnostic then passed
+  ProcessingIR and advanced to the intentionally unconfigured font stage.
+- The failure receipt now retains ProcessingIR reason, completion, count,
+  checksums, handle, and device identity in one atomic write. Commit this fix,
+  run one incremental exact-HEAD Stage 2/3 provenance refresh, rebuild the
+  trusted executable, and repeat the live Vulkan evidence run.
 - macOS preflight reports both Accessibility UI scripting and Screen Recording
   access enabled. The trusted live run must still prove actual ordered input
   and exact-window capture; these permission probes only remove likely external

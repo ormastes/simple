@@ -50,6 +50,8 @@ receipt, using the native producer field names under the macOS namespace:
 
 ```text
 gpu_2d_live_processing_ir_status=pass
+gpu_2d_live_processing_ir_reason=ok
+gpu_2d_live_processing_ir_completed=true
 gpu_2d_live_processing_ir_backend=vulkan
 gpu_2d_live_processing_ir_count=64
 gpu_2d_live_processing_ir_expected_checksum=1082179840
@@ -64,8 +66,21 @@ gpu_2d_live_processing_ir_cpu_fallback=false
 
 The canonical harness emits this block from
 `processing_ir_execute_vulkan(processing_ir_fill_u32(...))` before Engine2D
-initialization. The canonical checker validates every field before admitting
-the Vulkan receipt.
+initialization. The canonical checker validates every admission field before
+accepting the Vulkan receipt.
+
+On a stage-4 failure, the harness retains result reason, completion, count,
+checksums, exactness, mismatch count, backend handle, and device identity
+together with the generic failure fields in one file write. A failure report
+therefore cannot discard the backend cause or expose a partial receipt.
+
+## Native SPIR-V ABI
+
+The no-GC synchronous Vulkan I/O owner keeps the tagged Simple-array ABI only
+for interpreter execution. Native execution passes the SPIR-V data pointer and
+byte length to `rt_vulkan_compile_spirv_raw`, matching the established
+Engine2D native boundary. This prevents AOT code from presenting a native
+Simple array as the provider's raw byte input.
 
 ## Retained Evidence
 
@@ -89,4 +104,5 @@ On non-macOS hosts the spec emits one pending result and returns. It does not
 run the checker or inspect Linux receipts. On macOS, missing device, missing
 ProcessingIR fields, checksum mismatch, nonpositive provenance, mismatch, or
 fallback is a failure, never a pending success. Prepared-host execution is
-still `PREPARED-HOST UNRUN` until the receipt block is emitted and retained.
+still `PREPARED-HOST UNRUN` until the complete receipt block is emitted and
+retained.
