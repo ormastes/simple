@@ -790,3 +790,10 @@ Tracking split:
   missing seed sibling and then failed inside the diagnostic lint stack with
   `method get not found on type str (receiver value: HNode)`. Direct-runtime
   guards and diff/layout checks remain usable, but lint is not claimed.
+- bugfix: Made the hosted WM's physical framebuffer commit fail closed after
+  both full live-frame and motion-only rendering. A failed winit pixel present
+  now stops the loop before warmup or evidence capture can claim that frame;
+  the focused SSpec pins both guarded paths without a middle mock. Its generated
+  manual is complete with zero stubs. The one diagnostic interpreter run
+  reached the test loop but timed out at 120 seconds before any scenario
+  result, so accepted pure-Simple qualification remains open.
