@@ -252,6 +252,7 @@ function simpleCompositionArtifact(proof) {
       fields.composition_id === expectedFontCompositionId &&
       fields.text === expectedFontText &&
       fields.font_identity === expectedFontIdentity &&
+      /^[1-9][0-9]*(,[1-9][0-9]*){2}$/.test(fields.font_advance_widths || '') &&
       artifact.producer === fields.producer &&
       artifact.format === 'argb-u32' &&
       artifact.width === Number(fields.viewport_width) &&
@@ -265,7 +266,8 @@ function simpleCompositionArtifact(proof) {
       sameJsonInteger(proof.simple_composition_pixel_count, Number(fields.pixel_count)) &&
       sameJsonInteger(proof.simple_composition_pixel_checksum, Number(fields.pixel_checksum)) &&
       sameJsonInteger(proof.simple_composition_artifact_size_bytes, artifactBytes.length) &&
-      proof.simple_composition_artifact_sha256 === sha256;
+      proof.simple_composition_artifact_sha256 === sha256 &&
+      proof.simple_composition_font_advance_widths === fields.font_advance_widths;
     return { status: valid ? 'pass' : 'mismatch', fields };
   } catch (_err) {
     return { status: 'missing', fields: {} };
@@ -451,6 +453,7 @@ const rows = {
   simple_composition_pixel_checksum: jsonIntegerTextOrBlank(proof.simple_composition_pixel_checksum),
   simple_composition_artifact_size_bytes: jsonIntegerTextOrBlank(proof.simple_composition_artifact_size_bytes),
   simple_composition_artifact_sha256: proof.simple_composition_artifact_sha256,
+  simple_composition_font_advance_widths: proof.simple_composition_font_advance_widths,
   simple_composition_artifact_status: simpleComposition.status,
 };
 
