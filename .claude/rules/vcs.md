@@ -86,6 +86,6 @@ origin already supersedes you and the right move is to drop your commit.
 Before committing feature work, refresh the related LLM wiki entries so the
 commit ships with current knowledge links: the affected
 `doc/00_llm_process/feature_expert/<feature>/skill.md` and
-`doc/00_llm_process/layer_expert/<layer>/skill.md` (see
-`doc/00_llm_process/llm_wiki_and_auto_research.md`). Commit the wiki update in
-the same change as the work it describes.
+`doc/00_llm_process/layer_expert/<layer>/skill.md`. Templates:
+`.spipe/spipe/doc/00_llm_process/template/{feature,layer}_skill.md`. Commit the
+wiki update in the same change as the work it describes.
