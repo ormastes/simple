@@ -1242,6 +1242,23 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   bounded cycle at that typed return/field boundary. Do not rerun bootstrap or
   repeat the already-closed parser/import/font-batch probes first.
 
+### 2026-07-27 Draw IR font-evidence optional checkpoint
+
+- The guarded optional font receipt is now concretely rebound as
+  `DrawIrTargetFontEvidence` before its scalar receipt fields are copied into
+  the Draw IR result. This preserves Draw IR's semantic/scalar boundary:
+  transient `FontRenderBatch`, atlas, and cache material remain owned by the
+  renderer/backend.
+- The focused native contract follows the existing guarded-rebind workaround
+  and rejects `.?`, whose freestanding lowering is tracked separately.
+- A diagnostic native build of the complete macOS Vulkan 2D live harness
+  compiled 216 modules and linked successfully with zero failures. This closes
+  the previously recorded `batch_identity` inference failure.
+- The diagnostic used the retained pre-HEAD Stage 3 only to validate lowering;
+  it is not authoritative execution evidence. Next, create one exact-current-
+  HEAD Stage 3 pair, pass canonical admission, and run the trusted v4 Vulkan
+  evidence builder. Do not claim live Vulkan, font, or 300-DPI PASS yet.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
