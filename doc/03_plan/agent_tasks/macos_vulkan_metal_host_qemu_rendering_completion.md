@@ -1270,9 +1270,14 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   This is a storage-capacity failure, not a Simple source/lowering failure.
 - No second bootstrap was attempted. The first-attempt logs remain under
   `build/wm-to-i64-bootstrap/logs/aarch64-apple-darwin/`, and the reusable
-  Cargo target was preserved. Resume only after establishing at least 5 GiB
-  free so the native archive, immutable authority snapshot, and Stage 2/3
-  outputs have bounded headroom.
+  Cargo target was preserved. Safe cleanup raised free space to 5.2 GiB,
+  above the measured 5 GiB launch floor. Recheck that floor immediately before
+  the next single bounded attempt so the native archive, immutable authority
+  snapshot, and Stage 2/3 outputs retain headroom.
+- macOS preflight reports both Accessibility UI scripting and Screen Recording
+  access enabled. The trusted live run must still prove actual ordered input
+  and exact-window capture; these permission probes only remove likely external
+  launch blockers.
 - Canonical Stage 3 and its v3 provenance are still absent. Consequently the
   trusted v4 Vulkan executable and live rendering/capture/event/font/300-DPI
   evidence remain pending; do not run or attest them from partial bootstrap
