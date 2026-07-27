@@ -54,6 +54,69 @@ describe "ECS Entity allocator":
         expect(first).to_equal(true)
         expect(second).to_equal(false)
 
+    it "keeps every earlier handle for a reused slot dead":
+        var alloc = EntityAllocator.new()
+        val a = alloc.alloc()
+        alloc.free(a)
+        val b = alloc.alloc()
+        alloc.free(b)
+        val c = alloc.alloc()
+        # Same slot each round, strictly increasing generation.
+        expect(a.id).to_equal(0)
+        expect(b.id).to_equal(0)
+        expect(c.id).to_equal(0)
+        expect(a.generation).to_equal(1)
+        expect(b.generation).to_equal(2)
+        expect(c.generation).to_equal(3)
+        # Only the newest handle is live; both stale rounds stay dead.
+        expect(alloc.is_live(a)).to_equal(false)
+        expect(alloc.is_live(b)).to_equal(false)
+        expect(alloc.is_live(c)).to_equal(true)
+        expect(alloc.len()).to_equal(1)
+
+    it "reports a freed slot as dead before it is reused":
+        var alloc = EntityAllocator.new()
+        val a = alloc.alloc()
+        alloc.free(a)
+        val current = alloc.generation_of(0)
+        val fabricated = Entity(id: 0, generation: current)
+        # The slot is FREE, so even a handle carrying the current generation
+        # must not validate — state and generation are both required.
+        expect(current).to_equal(2)
+        expect(alloc.is_live(fabricated)).to_equal(false)
+        expect(alloc.len()).to_equal(0)
+
+    it "frees only the handle it was given, leaving siblings live":
+        var alloc = EntityAllocator.new()
+        val a = alloc.alloc()
+        val b = alloc.alloc()
+        alloc.free(a)
+        val c = alloc.alloc()
+        expect(c.id).to_equal(0)
+        expect(c.generation).to_equal(2)
+        expect(b.id).to_equal(1)
+        expect(alloc.is_live(b)).to_equal(true)
+        expect(alloc.is_live(a)).to_equal(false)
+        expect(alloc.len()).to_equal(2)
+
+    it "retires a slot instead of wrapping its generation":
+        # gen_cap is lowered so the wraparound policy is reachable in a test.
+        var alloc = EntityAllocator.with_generation_cap(3)
+        val a = alloc.alloc()
+        alloc.free(a)
+        val b = alloc.alloc()
+        alloc.free(b)
+        val c = alloc.alloc()
+        val last = alloc.free(c)
+        # c held the capped generation, so slot 0 is withdrawn for good.
+        val d = alloc.alloc()
+        expect(c.generation).to_equal(3)
+        expect(last).to_equal(true)
+        expect(alloc.retired_slots()).to_equal(1)
+        expect(alloc.is_live(c)).to_equal(false)
+        expect(d.id).to_equal(1)
+        expect(d.generation).to_equal(1)
+
 describe "ECS ComponentStore":
     """Sparse-set insert / remove / contains with tick stamping."""
 
@@ -94,6 +157,26 @@ describe "ECS ComponentStore":
         expect(tick_before).to_equal(5)
         expect(touched).to_equal(true)
         expect(tick_after).to_equal(9)
+
+    it "does not resolve a stale handle through the checked lookup":
+        var alloc = EntityAllocator.new()
+        var store: ComponentStore<Position> = ComponentStore.new()
+        val a = alloc.alloc()
+        store.insert(a, Position(x: 3, y: 4), 1)
+        alloc.free(a)
+        val b = alloc.alloc()
+        store.insert(b, Position(x: 9, y: 9), 2)
+        # The sparse set is keyed by id alone, so the raw lookup still aliases.
+        val raw_slot = store.get_slot(a)
+        # The generation-checked lookup rejects the stale handle.
+        val checked_stale = store.get_slot_checked(a, alloc)
+        val checked_live = store.get_slot_checked(b, alloc)
+        expect(b.id).to_equal(a.id)
+        expect(raw_slot).to_equal(0)
+        expect(checked_stale).to_equal(-1)
+        expect(checked_live).to_equal(0)
+        expect(store.contains_live(a, alloc)).to_equal(false)
+        expect(store.contains_live(b, alloc)).to_equal(true)
 
 describe "ECS ChangeTracker":
     """Per-system bookmark that drives Added / Changed / Removed."""
