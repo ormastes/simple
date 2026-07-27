@@ -403,6 +403,30 @@ re-attributes every row above.
    Next queued: incremental bootstrap `--deploy`. Bug doc
    `doc/08_tracking/bug/hir_stub_module_nil_dict_get_phantom_some_2026-07-27.md`
    updated with both sites.
+10a. **(2026-07-27, continued)** Stage-4 phantom-Some campaign continued: guard
+    rounds 4+5 landed on origin main as commit `9f8d5a7a1945` and the registry
+    storage hotfix as commit `797497d757bd`.
+    - Round 4: named imports from partial modules now register an opaque
+      Class-kind symbol when the re-export chase fails (deliberately
+      reproducing the benign half of the old phantom behavior); cut stage-4
+      unresolved names from 47,513 to 11,826.
+    - Round 5 root cause: copying `ctx.modules` into the `HirLowering.
+      modules_by_name` struct FIELD nil-fills every Module's nested decl
+      Dicts while array fields survive (native aggregate deep-copy defect);
+      `ctx.modules` itself is intact. Proven by get-vs-index instrumentation
+      (`idx_fns=-1 idx_forder=9` on the same receiver).
+    - Fix: new module-global registry
+      `src/compiler/20.hir/hir_lowering/module_registry.spl` mirrored by the
+      driver at parse time; seven lookup sites in `module_lowering.spl`
+      refetch through it.
+    - Hotfix (`797497d757bd`): the first registry cut used a Dict-typed
+      module-global which lowers to an uninitialized alloca in the bootstrap
+      lane (segfaulted on first read, stage-4 repro18 `hir_done=0`);
+      rewritten on parallel `[text]`/`[Module]` array globals mirroring
+      `bootstrap_globals.spl` (array-typed globals are the only kind proven
+      to work there). Seed-builds 14, 17, 18 all verified.
+    - Stage-4 runtime verification with the array-backed registry (repro19)
+      in flight; incremental bootstrap `--deploy` queued on its success.
 10. **Pre-deploy four-gate baseline (2026-07-27, CURRENT deployed binary).**
     Binary identity: `readlink -f bin/simple` →
     `bin/release/x86_64-unknown-linux-gnu/simple`; `bin/simple --version` prints
