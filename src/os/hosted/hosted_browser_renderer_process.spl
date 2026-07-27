@@ -29,6 +29,9 @@ use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
     build_request_bytes, h1_mock_response, parse_http_response_bytes
 }
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
+use std.gc_async_mut.web.browser_session.{
+    BrowserHstsSnapshot, BrowserSession
+}
 use std.nogc_sync_mut.io.process_ops.{
     browser_renderer_spawn_sandboxed,
     process_close_piped, process_is_piped_alive, process_read_stdout,
@@ -42,11 +45,13 @@ use os.hosted.hosted_browser_renderer_policy.{
     hosted_browser_network_origin,
     hosted_browser_redirect_status,
     hosted_browser_renderer_request_policy,
+    hosted_browser_replace_response_header,
     hosted_browser_response_header_value,
     hosted_browser_sanitize_fetch_headers
 }
 
 extern fn rt_sleep_ms(milliseconds: i64)
+extern fn rt_time_now_monotonic_ms() -> i64
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_text_to_bytes(value: text) -> [u8]
 extern fn rt_browser_http_job_start_public_limited(
@@ -182,6 +187,8 @@ pub class HostedBrowserRendererProcess:
     pending_history_action: text
     pending_document_commit_url: text
     provisional_document_origin: text
+    hsts: BrowserSession
+    hsts_dirty: bool
     state: text
 
     static fn create(
@@ -223,8 +230,25 @@ pub class HostedBrowserRendererProcess:
             pending_history_action: "",
             pending_document_commit_url: "",
             provisional_document_origin: "",
+            hsts: BrowserSession.new_without_runtime(),
+            hsts_dirty: false,
             state: "new"
         )
+
+    me load_hsts_snapshot(
+        snapshot: BrowserHstsSnapshot, wall_clock_ms: i64
+    ) -> i32:
+        val _ = self.hsts.advance_time(rt_time_now_monotonic_ms())
+        self.hsts_dirty = false
+        self.hsts.load_hsts_snapshot(snapshot, wall_clock_ms)
+
+    me hsts_snapshot(wall_clock_ms: i64) -> BrowserHstsSnapshot:
+        val _ = self.hsts.advance_time(rt_time_now_monotonic_ms())
+        self.hsts.hsts_snapshot(wall_clock_ms)
+
+    me _hsts_upgrade_url(url: text) -> text:
+        val _ = self.hsts.advance_time(rt_time_now_monotonic_ms())
+        self.hsts._hsts_upgrade_url(url)
 
     me authorize_navigation(
         url: text,
@@ -233,7 +257,9 @@ pub class HostedBrowserRendererProcess:
         body: text,
         content_type: text
     ) -> bool:
-        val canonical_url = hosted_browser_canonical_http_url(url)
+        val canonical_url = hosted_browser_canonical_http_url(
+            self._hsts_upgrade_url(url)
+        )
         val canonical_method = method.to_upper()
         if (canonical_url == "" or
             (canonical_method != "GET" and canonical_method != "POST") or
@@ -422,6 +448,15 @@ pub class HostedBrowserRendererProcess:
             Err(error):
                 _network_result(0, "", "", error.message)
             Ok(finalized):
+                if (finalized.status >= 200 and finalized.status < 400 and
+                    request.url.scheme == "https"):
+                    val hsts_header = hosted_browser_response_header_value(
+                        finalized.headers, "strict-transport-security"
+                    )
+                    if (hsts_header != "" and self.hsts._apply_hsts_header(
+                        hsts_header, request.url.to_text()
+                    )):
+                        self.hsts_dirty = true
                 self._network_response(kind, finalized)
 
     fn _network_response(
@@ -515,28 +550,32 @@ pub class HostedBrowserRendererProcess:
         policy: HostedBrowserRequestPolicy,
         response: HostedBrowserNetworkResult,
         redirect_count: i64
-    ) -> bool:
+    ) -> Result<text, text>:
         if response.status <= 0:
-            return true
+            return Ok(response.headers)
         if not hosted_browser_redirect_status(response.status):
             self.pending_document_commit_url = policy.canonical_url
             self.provisional_document_origin = hosted_browser_network_origin(
                 policy.canonical_url
             )
-            return true
+            return Ok(response.headers)
         val location = hosted_browser_response_header_value(
             response.headers, "location"
         )
         if location == "" or redirect_count >= 20:
-            return false
+            return Err("invalid-navigation-redirect")
         val base = Url.parse(policy.canonical_url)
         val redirected = resolve_fetch_redirect_url(base, location)
-        val redirected_url = hosted_browser_canonical_http_url(
+        val original_redirected_url = hosted_browser_canonical_http_url(
             redirected.to_text()
         )
+        val redirected_url = hosted_browser_canonical_http_url(
+            self._hsts_upgrade_url(original_redirected_url)
+        )
         if (redirected_url == "" or
-            (base.scheme == "https" and redirected.scheme != "https")):
-            return false
+            (base.scheme == "https" and
+                not redirected_url.starts_with("https://"))):
+            return Err("invalid-navigation-redirect")
         val prior_method = request.method.to_upper()
         val next_method = if response.status == 303 or
             ((response.status == 301 or response.status == 302) and
@@ -567,7 +606,11 @@ pub class HostedBrowserRendererProcess:
             content_type: next_content_type,
             redirect_count: redirect_count + 1
         )
-        true
+        if redirected_url != original_redirected_url:
+            return Ok(hosted_browser_replace_response_header(
+                response.headers, "Location", redirected_url
+            ))
+        Ok(response.headers)
 
     me _write_network_response(
         fetch: BrowserRendererNetworkDecodeResult,
@@ -575,11 +618,15 @@ pub class HostedBrowserRendererProcess:
         response: HostedBrowserNetworkResult,
         redirect_count: i64
     ) -> text:
-        if policy.consumes_navigation and
-            not self._record_document_response(
+        var response_headers = response.headers
+        if policy.consumes_navigation:
+            match self._record_document_response(
                 fetch, policy, response, redirect_count
             ):
-            return "invalid-navigation-redirect"
+                Err(reason):
+                    return reason
+                Ok(headers):
+                    response_headers = headers
         val wire = browser_renderer_network_response_encode(
             self.generation,
             self.next_request_id,
@@ -587,7 +634,7 @@ pub class HostedBrowserRendererProcess:
             fetch.kind,
             fetch.url,
             response.status,
-            response.headers,
+            response_headers,
             response.body,
             response.error
         )

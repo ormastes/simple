@@ -332,8 +332,20 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
             Ok(profile):
                 match profile.load_bookmarks():
                     Ok(bookmarks):
-                        browser_bookmarks = bookmarks
-                        browser_profile = Some(profile)
+                        match profile.load_hsts(
+                            rt_time_now_unix_micros() / 1000
+                        ):
+                            Ok(hsts):
+                                browser_bookmarks = bookmarks
+                                val _ = browser_renderer.load_hsts_snapshot(
+                                    hsts,
+                                    rt_time_now_unix_micros() / 1000
+                                )
+                                browser_profile = Some(profile)
+                            Err(error):
+                                var failed_profile = profile
+                                val _ = failed_profile.close()
+                                print "[hosted-wm] browser-profile-disabled reason={error.message()}"
                     Err(error):
                         var failed_profile = profile
                         val _ = failed_profile.close()
@@ -1051,9 +1063,20 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     var browser_profile_closed = true
     if browser_profile != nil:
         var profile = browser_profile.unwrap()
+        if browser_renderer.hsts_dirty:
+            val wall_clock_ms = rt_time_now_unix_micros() / 1000
+            match profile.save_hsts(
+                browser_renderer.hsts_snapshot(wall_clock_ms),
+                wall_clock_ms
+            ):
+                Ok(_):
+                    pass
+                Err(error):
+                    browser_profile_closed = false
+                    print "ERROR: hosted browser HSTS save failed reason={error.message()}"
         match profile.close():
             Ok(_):
-                browser_profile_closed = true
+                pass
             Err(error):
                 browser_profile_closed = false
                 print "ERROR: hosted browser profile close failed reason={error.message()}"

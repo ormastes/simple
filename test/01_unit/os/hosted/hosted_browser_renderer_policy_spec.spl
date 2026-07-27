@@ -5,13 +5,19 @@ use std.common.web.browser_renderer_protocol.{
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     RequestMode
 }
+use std.gc_async_mut.web.browser_session.{
+    BrowserHstsSnapshot, BrowserHstsSnapshotEntry
+}
 use os.hosted.hosted_browser_renderer_policy.{
     HostedBrowserNavigationPermit,
-    hosted_browser_renderer_request_policy
+    hosted_browser_renderer_request_policy,
+    hosted_browser_replace_response_header
 }
 use os.hosted.hosted_browser_renderer_process.{
     HostedBrowserRendererProcess
 }
+
+extern fn rt_time_now_unix_micros() -> i64
 
 fn permit(
     active: bool,
@@ -67,6 +73,37 @@ describe "hosted browser renderer broker policy":
         )).to_be(true)
         expect(broker.navigation_permit.url).to_equal(
             "https://example.test/path"
+        )
+
+    it "loads persisted HSTS into the trusted navigation permit":
+        val now_ms = rt_time_now_unix_micros() / 1000
+        var entries: [BrowserHstsSnapshotEntry] = []
+        entries.push(BrowserHstsSnapshotEntry(
+            host: "secure.test",
+            received_at_unix_ms: now_ms,
+            expires_at_unix_ms: now_ms + 60000,
+            include_subdomains: true
+        ))
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        expect(broker.load_hsts_snapshot(
+            BrowserHstsSnapshot.create(entries), now_ms
+        )).to_equal(1)
+        expect(broker.authorize_navigation(
+            "http://sub.secure.test/path", "GET", "", "", ""
+        )).to_be(true)
+        expect(broker.navigation_permit.url).to_equal(
+            "https://sub.secure.test/path"
+        )
+
+    it "rewrites one trusted redirect location after HSTS upgrade":
+        val headers = hosted_browser_replace_response_header(
+            "Location: http://secure.test/a\nX-Test: yes\n" +
+            "location: http://evil.test/",
+            "Location",
+            "https://secure.test/a"
+        )
+        expect(headers).to_equal(
+            "Location: https://secure.test/a\r\nX-Test: yes"
         )
 
     it "does not start asynchronous navigation before renderer readiness":
