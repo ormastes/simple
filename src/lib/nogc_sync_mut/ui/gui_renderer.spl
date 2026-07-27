@@ -25,6 +25,7 @@
 # NSApplication activation so the window is frontmost and receives input.
 
 use std.sffi.dynamic.{DynLib}
+use std.diag.{dbg_stage, dbg_event_hop, dbg_events_on}
 
 extern fn spl_wffi_call_i64(fptr: i64, args: [i64], nargs: i64) -> i64
 extern fn spl_str_ptr(s: text) -> i64
@@ -47,6 +48,7 @@ val GUI_EVT_MOUSE_WHEEL: i64 = 22
 
 # Typed event record. kind == GUI_EVT_NONE means "no event pending".
 class GuiEvent:
+    native_id: i64
     kind: i64
     scancode: i64
     keycode: i64
@@ -57,7 +59,7 @@ class GuiEvent:
 
 impl GuiEvent:
     static fn none() -> GuiEvent:
-        GuiEvent(kind: GUI_EVT_NONE, scancode: 0, keycode: 0, btn: 0, pressed: false, x: 0.0, y: 0.0)
+        GuiEvent(native_id: 0, kind: GUI_EVT_NONE, scancode: 0, keycode: 0, btn: 0, pressed: false, x: 0.0, y: 0.0)
 
 class GuiRenderer:
     engine: text
@@ -111,13 +113,17 @@ impl GuiRenderer:
 
     # Open a real window. Returns nil (with one clear log line) on failure.
     static fn create(engine: text, w: i32, h: i32, title: text) -> GuiRenderer?:
+        dbg_stage("gui", "renderer_create_start")
         if engine == "electron":
             print "GuiRenderer: engine 'electron' is an API stub (not implemented) — no window opened"
+            dbg_stage("gui", "renderer_create_failed_electron_stub")
             return nil
         if engine != "winit" and engine != "auto" and engine != "":
             print "GuiRenderer: unknown engine '{engine}' (supported: winit, auto, electron-stub)"
+            dbg_stage("gui", "renderer_create_failed_unknown_engine")
             return nil
 
+        dbg_stage("gui", "winit_dylib_open_start")
         val candidates = gui_renderer_lib_candidates()
         var l = DynLib(handle: 0, path: "")
         var i = 0
@@ -128,22 +134,31 @@ impl GuiRenderer:
             i = i + 1
         if l.handle == 0:
             print "GuiRenderer: cannot load build/sffi/libspl_winit.<dylib|so|dll> — build it with: sh scripts/build/build_spl_winit.shs (or set SIMPLE_SPL_WINIT_PATH)"
+            dbg_stage("gui", "winit_dylib_open_failed")
             return nil
+        dbg_stage("gui", "winit_dylib_open_done")
 
         val fp_loop_new = l.sym("rt_winit_event_loop_new")
         val fp_window_new = l.sym("rt_winit_window_new")
         if fp_loop_new == 0 or fp_window_new == 0:
             print "GuiRenderer: '{l.path}' is missing rt_winit_* exports — rebuild with scripts/build/build_spl_winit.shs"
+            dbg_stage("gui", "winit_symbols_missing")
             return nil
+        dbg_stage("gui", "winit_event_loop_create_start")
         val el = spl_wffi_call_i64(fp_loop_new, [], 0)
         if el == 0:
             print "GuiRenderer: event loop creation failed (macOS needs SIMPLE_GUI=1 for main-thread execution)"
+            dbg_stage("gui", "winit_event_loop_create_failed")
             return nil
+        dbg_stage("gui", "winit_event_loop_create_done")
         val title_ptr = spl_str_ptr(title)
+        dbg_stage("gui", "winit_window_create_start")
         val win = spl_wffi_call_i64(fp_window_new, [el, w.to_i64(), h.to_i64(), title_ptr], 4)
         if win == 0:
             print "GuiRenderer: window creation failed"
+            dbg_stage("gui", "winit_window_create_failed")
             return nil
+        dbg_stage("gui", "winit_window_create_done")
         GuiRenderer(
             engine: "winit-dyn",
             el: el,
@@ -187,26 +202,30 @@ impl GuiRenderer:
         if ev == 0:
             return GuiEvent.none()
         val ty = spl_wffi_call_i64(self.fp_type, [ev], 1)
+        if dbg_events_on():
+            dbg_event_hop("native-{ev}", "winit_poll", "kind={ty}")
         var out = GuiEvent.none()
         if ty == GUI_EVT_KEYBOARD:
             val sc = spl_wffi_call_i64(self.fp_key_scancode, [ev], 1)
             val kc = spl_wffi_call_i64(self.fp_key_keycode, [ev], 1)
             val kp = spl_wffi_call_i64(self.fp_key_pressed, [ev], 1)
-            out = GuiEvent(kind: ty, scancode: sc, keycode: kc, btn: 0, pressed: kp == 1, x: 0.0, y: 0.0)
+            out = GuiEvent(native_id: ev, kind: ty, scancode: sc, keycode: kc, btn: 0, pressed: kp == 1, x: 0.0, y: 0.0)
         elif ty == GUI_EVT_MOUSE_BUTTON:
             val btn = spl_wffi_call_i64(self.fp_mouse_button, [ev], 1)
             val mp = spl_wffi_call_i64(self.fp_mouse_pressed, [ev], 1)
-            out = GuiEvent(kind: ty, scancode: 0, keycode: 0, btn: btn, pressed: mp == 1, x: 0.0, y: 0.0)
+            out = GuiEvent(native_id: ev, kind: ty, scancode: 0, keycode: 0, btn: btn, pressed: mp == 1, x: 0.0, y: 0.0)
         elif ty == GUI_EVT_MOUSE_MOVED:
             val mx = spl_wffi_call_i64(self.fp_mouse_x, [ev], 1)
             val my = spl_wffi_call_i64(self.fp_mouse_y, [ev], 1)
-            out = GuiEvent(kind: ty, scancode: 0, keycode: 0, btn: 0, pressed: false, x: mx.to_f64() / 1000.0, y: my.to_f64() / 1000.0)
+            out = GuiEvent(native_id: ev, kind: ty, scancode: 0, keycode: 0, btn: 0, pressed: false, x: mx.to_f64() / 1000.0, y: my.to_f64() / 1000.0)
         elif ty == GUI_EVT_MOUSE_WHEEL:
             val wx = spl_wffi_call_i64(self.fp_wheel_x, [ev], 1)
             val wy = spl_wffi_call_i64(self.fp_wheel_y, [ev], 1)
-            out = GuiEvent(kind: ty, scancode: 0, keycode: 0, btn: 0, pressed: false, x: wx.to_f64() / 1000.0, y: wy.to_f64() / 1000.0)
+            out = GuiEvent(native_id: ev, kind: ty, scancode: 0, keycode: 0, btn: 0, pressed: false, x: wx.to_f64() / 1000.0, y: wy.to_f64() / 1000.0)
         else:
-            out = GuiEvent(kind: ty, scancode: 0, keycode: 0, btn: 0, pressed: false, x: 0.0, y: 0.0)
+            out = GuiEvent(native_id: ev, kind: ty, scancode: 0, keycode: 0, btn: 0, pressed: false, x: 0.0, y: 0.0)
+        if dbg_events_on():
+            dbg_event_hop("native-{ev}", "gui_event_decode", "kind={out.kind} keycode={out.keycode} button={out.btn} pressed={out.pressed} x={out.x} y={out.y}")
         spl_wffi_call_i64(self.fp_event_free, [ev], 1)
         out
 

@@ -854,10 +854,19 @@ impl DesktopShell:
             # badly it never got back around to observe a QMP-injected key
             # inside the evidence wrapper's 10s correlation window (zero
             # [wm-input-irq]/[wm-state]/[wm-frame] markers ever fired).
-            # Skip the expensive copy entirely until the controller reports
-            # an output byte is actually present (status bit0).
+            # Skip the expensive copy only when the controller has no byte and
+            # the previous poll left no complete logical input to drain.
+            # Pointer, fullscreen, meta-key, and shortcut receipts can outlive
+            # the hardware byte that created them.
+            val queued_input_active = (
+                self.compositor.pending_fullscreen_sequence > 0 or
+                self.compositor.pending_fullscreen_release_sequence > 0 or
+                self.compositor.pending_meta_key > 0 or
+                self.compositor.pending_shortcut != "" or
+                self.compositor.pending_wm_pointer_valid)
             val ps2_status = port_inb(0x64)
-            if ((ps2_status as i32) & 1) == 0:
+            val ps2_byte_ready = ((ps2_status as i32) & 1) != 0
+            if not ps2_byte_ready and not queued_input_active:
                 continue
             # Copy-commit idiom (same fix as materialize_process_launch_scalar
             # / state.md "explicitly committing the nested compositor copy"):
@@ -866,7 +875,8 @@ impl DesktopShell:
             # sequence write was lost and F11 never correlated (proven live).
             # Mutate a local handle and commit it back on any input.
             var input_compositor = self.compositor
-            input_compositor.handle_input_baremetal_ps2()
+            if ps2_byte_ready:
+                input_compositor.handle_input_baremetal_ps2()
             val fullscreen_sequence = input_compositor.pending_fullscreen_sequence
             val fullscreen_release_sequence = input_compositor.pending_fullscreen_release_sequence
             var pointer_sequence: i64 = 0
@@ -882,6 +892,9 @@ impl DesktopShell:
                 pointer_kind_code = input_compositor.pending_wm_pointer_kind_code
             val input_active = (fullscreen_sequence > 0 or fullscreen_release_sequence > 0 or input_compositor.pending_meta_key > 0 or input_compositor.pending_shortcut != "" or input_compositor.pending_wm_pointer_valid)
             if not input_active:
+                # A partial PS/2 packet may not have produced a receipt yet,
+                # but its decoder state must survive until the next byte.
+                self.compositor = input_compositor
                 continue
             var fullscreen_action = ""
             var fullscreen_window_id: i32 = 0

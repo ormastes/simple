@@ -113,6 +113,18 @@ accessors (`dbg_last_emit()`, `dbg_last_breach()`, `dbg_timer_stats(label)`,
 `dbg_provenance_mismatches()`), never by reading module globals directly —
 interpreter `it` blocks see a stale snapshot of globals.
 
+## Wired native GUI boundary
+
+`GuiRenderer.create` records the fallible winit dylib, event-loop, and window
+creation stages. Every nonempty winit event retains its native handle as
+`GuiEvent.native_id`; the events facet records matching `native-<id>` poll and
+decode hops without formatting event details while that facet is disabled.
+
+The macOS LaunchServices wrapper forwards both `SIMPLE_DIAG` and
+`SIMPLE_DIAG_FILE`. When the file path is nonempty, `std.diag` appends every
+emitted stderr line to that durable sink so diagnostics survive detached GUI
+launches.
+
 ## Planned integration points — phase 2 (not yet wired)
 
 - **ui.browser stage chain:** `dbg_stage("browser", ...)` at parse/style/layout/

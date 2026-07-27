@@ -16,6 +16,13 @@ use common.ui.wm_app_process_contract.{
     wm_fs_app_event_decode,
     wm_fs_app_event_encode,
     wm_fs_app_event_seq_path,
+    wm_fs_frame_checksum,
+    wm_fs_frame_receipt_correlation,
+    wm_fs_frame_receipt,
+    wm_fs_frame_receipt_decode,
+    wm_fs_frame_receipt_encode,
+    wm_fs_frame_receipt_path,
+    wm_fs_frame_receipt_valid,
     wm_fs_bridge_decode,
     wm_fs_bridge_encode,
     wm_widget_showcase_bridge_request,
@@ -91,3 +98,32 @@ describe "WM app process contract":
         val decoded = wm_fs_bridge_decode(wm_fs_bridge_encode(req))
         expect(decoded.event_path).to_equal("child.ppm.event")
         expect(decoded.frame_seq_path).to_equal("child.ppm.seq")
+
+    it "round-trips a correlated CPU-SIMD frame receipt":
+        val pixels: [u32] = [0xFF112233u32, 0xFF445566u32, 0xFF778899u32]
+        val checksum = wm_fs_frame_checksum(pixels)
+        val receipt = wm_fs_frame_receipt(7, 8, "cpu_simd", "cpu_mirror", 0, 0, pixels.len(), checksum)
+        val decoded = wm_fs_frame_receipt_decode(wm_fs_frame_receipt_encode(receipt))
+        expect(wm_fs_frame_receipt_path("child.ppm")).to_equal("child.ppm.receipt")
+        expect(decoded.event_seq).to_equal(7)
+        expect(decoded.frame_seq).to_equal(8)
+        expect(decoded.backend).to_equal("cpu_simd")
+        expect(decoded.pixel_count).to_equal(3)
+        expect(decoded.checksum).to_equal(checksum)
+        expect(wm_fs_frame_receipt_valid(decoded, 7, 8, "cpu_simd", 3)).to_equal(true)
+        expect(wm_fs_frame_receipt_valid(decoded, 6, 8, "cpu_simd", 3)).to_equal(false)
+
+    it "correlates RGB payloads and exact event/frame sequence pairs":
+        val opaque: [u32] = [0xFF112233u32, 0x80445566u32]
+        val transparent: [u32] = [0x00112233u32, 0x00445566u32]
+        expect(wm_fs_frame_checksum(opaque)).to_equal(wm_fs_frame_checksum(transparent))
+        expect(wm_fs_frame_receipt_correlation(2, 8, 3, 8)).to_equal("pending")
+        expect(wm_fs_frame_receipt_correlation(3, 9, 3, 8)).to_equal("pending")
+        expect(wm_fs_frame_receipt_correlation(4, 8, 3, 8)).to_equal("invalid")
+        expect(wm_fs_frame_receipt_correlation(3, 8, 3, 8)).to_equal("ready")
+
+    it "requires device readback identity for Vulkan frame receipts":
+        val valid = wm_fs_frame_receipt(4, 5, "vulkan", "device_readback", 91, 92, 2, 123)
+        val missing_device = wm_fs_frame_receipt(4, 5, "vulkan", "cpu_mirror", 0, 0, 2, 123)
+        expect(wm_fs_frame_receipt_valid(valid, 4, 5, "vulkan", 2)).to_equal(true)
+        expect(wm_fs_frame_receipt_valid(missing_device, 4, 5, "vulkan", 2)).to_equal(false)

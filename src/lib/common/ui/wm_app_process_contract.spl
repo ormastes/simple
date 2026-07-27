@@ -22,6 +22,16 @@ struct WmFsAppEvent:
     button: i64
     pressed: bool
 
+struct WmFsFrameReceipt:
+    event_seq: i64
+    frame_seq: i64
+    backend: text
+    readback_source: text
+    backend_handle: i64
+    device_identity: i64
+    pixel_count: i64
+    checksum: i64
+
 val WM_APP_MODE_ENV: text = "SIMPLE_WM_APP_MODE"
 val WM_APP_MODE_CLIENT: text = "client"
 val WM_BRIDGE_FILE_ENV: text = "SIMPLE_WM_BRIDGE_FILE"
@@ -47,6 +57,62 @@ fn wm_widget_showcase_frame_seq_path(frame_path: text) -> text:
 
 fn wm_fs_app_event_seq_path(event_path: text, seq: i64) -> text:
     event_path + "." + seq.to_text()
+
+fn wm_fs_frame_receipt_path(frame_path: text) -> text:
+    frame_path + ".receipt"
+
+fn wm_fs_frame_checksum(pixels: [u32]) -> i64:
+    var checksum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        # PPM transport preserves RGB only, so alpha must not change the
+        # checksum used to correlate the encoded child frame with its receipt.
+        checksum = (checksum + (pixels[i].to_i64() & 0x00FFFFFF) * ((i % 251) + 1)) % 2147483647
+        i = i + 1
+    checksum
+
+fn wm_fs_frame_receipt(event_seq: i64, frame_seq: i64, backend: text, readback_source: text, backend_handle: i64, device_identity: i64, pixel_count: i64, checksum: i64) -> WmFsFrameReceipt:
+    WmFsFrameReceipt(
+        event_seq: event_seq,
+        frame_seq: frame_seq,
+        backend: backend,
+        readback_source: readback_source,
+        backend_handle: backend_handle,
+        device_identity: device_identity,
+        pixel_count: pixel_count,
+        checksum: checksum
+    )
+
+fn wm_fs_frame_receipt_encode(receipt: WmFsFrameReceipt) -> text:
+    "event_seq={receipt.event_seq}\nframe_seq={receipt.frame_seq}\nbackend={receipt.backend}\nreadback_source={receipt.readback_source}\nbackend_handle={receipt.backend_handle}\ndevice_identity={receipt.device_identity}\npixel_count={receipt.pixel_count}\nchecksum={receipt.checksum}\n"
+
+fn wm_fs_frame_receipt_decode(doc: text) -> WmFsFrameReceipt:
+    WmFsFrameReceipt(
+        event_seq: _wm_bridge_value(doc, "event_seq").to_i64() ?? -1,
+        frame_seq: _wm_bridge_value(doc, "frame_seq").to_i64() ?? 0,
+        backend: _wm_bridge_value(doc, "backend"),
+        readback_source: _wm_bridge_value(doc, "readback_source"),
+        backend_handle: _wm_bridge_value(doc, "backend_handle").to_i64() ?? 0,
+        device_identity: _wm_bridge_value(doc, "device_identity").to_i64() ?? 0,
+        pixel_count: _wm_bridge_value(doc, "pixel_count").to_i64() ?? 0,
+        checksum: _wm_bridge_value(doc, "checksum").to_i64() ?? 0
+    )
+
+fn wm_fs_frame_receipt_valid(receipt: WmFsFrameReceipt, event_seq: i64, frame_seq: i64, requested_backend: text, expected_pixel_count: i64) -> bool:
+    if receipt.event_seq != event_seq or receipt.frame_seq != frame_seq:
+        return false
+    if receipt.backend != requested_backend or receipt.pixel_count != expected_pixel_count or receipt.checksum <= 0:
+        return false
+    if requested_backend == "vulkan":
+        return receipt.readback_source == "device_readback" and receipt.backend_handle > 0 and receipt.device_identity > 0
+    receipt.readback_source != ""
+
+fn wm_fs_frame_receipt_correlation(receipt_event_seq: i64, receipt_frame_seq: i64, expected_event_seq: i64, announced_frame_seq: i64) -> text:
+    if receipt_frame_seq != announced_frame_seq or receipt_event_seq < expected_event_seq:
+        return "pending"
+    if receipt_event_seq > expected_event_seq:
+        return "invalid"
+    "ready"
 
 fn wm_widget_showcase_content_text(source_path: text, frame_path: text, pid: i64) -> text:
     "source={source_path} frame={frame_path} pid={pid}"

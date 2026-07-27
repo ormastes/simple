@@ -61,6 +61,8 @@ pub(super) fn keycode_to_simple(code: KeyCode) -> Option<i64> {
         KeyCode::Space => 32,
         KeyCode::Escape => 27,
         KeyCode::Enter => 13,
+        KeyCode::ControlLeft => 162,
+        KeyCode::ControlRight => 163,
         // Function keys
         KeyCode::F1 => 112,
         KeyCode::F2 => 113,
@@ -161,5 +163,17 @@ pub(super) fn dispatch_input(name: &str, args: &[Value]) -> Result<Value, Compil
             }
         }
         _ => unreachable!("dispatch_input called with unexpected name: {name}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keycode_to_simple;
+    use winit::keyboard::KeyCode;
+
+    #[test]
+    fn control_keys_match_the_dynamic_winit_boundary() {
+        assert_eq!(keycode_to_simple(KeyCode::ControlLeft), Some(162));
+        assert_eq!(keycode_to_simple(KeyCode::ControlRight), Some(163));
     }
 }
