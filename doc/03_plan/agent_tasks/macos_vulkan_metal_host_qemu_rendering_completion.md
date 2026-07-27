@@ -1322,6 +1322,28 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   evidence remain pending; do not run or attest them from partial bootstrap
   material.
 
+### 2026-07-27 Vulkan loader-alias checkpoint
+
+- The native ProcessingIR raw-SPIR-V ABI and atomic diagnostic receipt shipped
+  in `cbfc9c44e1`. An incremental `--pure-simple` refresh produced exact-HEAD
+  Stage 2/Stage 3 artifacts, passed Stage 3 sanity and provenance admission,
+  and the trusted v4 Vulkan builder passed.
+- The next trusted live run retained the precise ProcessingIR failure as
+  `vulkan-init-failed`. A bounded direct diagnostic proved the canonical
+  `VK_ICD_FILENAMES` succeeds, while adding empty `VK_DRIVER_FILES` and
+  `VK_ADD_DRIVER_FILES` reproduces the failure. Vulkan loader aliases must be
+  absent, not serialized or assigned with empty values: an empty authoritative
+  `VK_DRIVER_FILES` overrides the pinned ICD.
+- The 2D launchd plist and the later Vulkan web/GUI launch commands now retain
+  the canonical ICD while omitting empty loader, layer, and DYLD aliases.
+  Their caller guards use set-presence checks, so even an exported empty alias
+  is rejected before launch. Contract coverage preserves that boundary with
+  empty-value probes and asserts the empty launch assignments remain absent.
+- After this fix is committed and pushed, perform only an incremental
+  `--pure-simple` exact-HEAD refresh, rebuild through the trusted builder, and
+  run the third and final Vulkan 2D live cycle. If it does not pass, retain the
+  exact receipt and stop this session rather than starting a fourth cycle.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |

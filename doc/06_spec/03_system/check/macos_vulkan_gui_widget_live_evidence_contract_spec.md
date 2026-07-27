@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 17 | 17 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -410,6 +410,237 @@ expect(retina_code).to_equal(0)
 
 </details>
 
+#### should admit only the trusted widget source and strict bundled runtime
+
+- Inspect trusted-manifest admission and strict launcher environment
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect trusted-manifest admission and strict launcher environment")
+val source = file_read(WRAPPER)
+expect(source).to_contain(". scripts/check/lib/macos-gpu-trusted-build-admission.shs")
+expect(source).to_contain("macos_gpu_trusted_manifest_admit \\")
+expect(source).to_contain("macos_gpu_full_cli_gui_admit")
+expect(source).to_contain("build/macos_gpu_2d_live_native/vulkan/trusted-build.env")
+expect(source).to_contain(
+    "build/bootstrap/full/$full_cli_platform/provenance/gui-driver.env"
+)
+expect(source).to_contain("MACOS_GPU_ADMISSION_GUI_DRIVER_SOURCE_REVISION")
+expect(source).to_contain("git -C \"$ROOT_DIR\" rev-parse")
+expect(source).to_contain("git -C \"$ROOT_DIR\" hash-object")
+expect(source).to_contain("trusted-widget-source-revision-mismatch")
+expect(source).to_contain("[ \"$sample_canonical\" = \"$MACOS_GPU_ADMISSION_WIDGET_SOURCE\" ]")
+expect(source).to_contain("SIMPLE_GUI_BINARY=\"$MACOS_GPU_ADMISSION_GUI_DRIVER\"")
+expect(source.contains(
+    "SIMPLE_GUI_BINARY=\"$MACOS_GPU_ADMISSION_COMPILER\""
+)).to_equal(false)
+expect(source).to_contain("strict-selected-source-not-admitted-gui-driver")
+expect(source).to_contain("MACOS_GPU_ADMISSION_GUI_DRIVER_SHA256")
+expect(source).to_contain("SIMPLE_GUI_TRUSTED_MANIFEST_PATH=")
+expect(source).to_contain("SIMPLE_GUI_STRICT_EVIDENCE=1")
+expect(source).to_contain("SIMPLE_NO_BOOTSTRAP_DELEGATE=1")
+expect(source).to_contain("SIMPLE_GUI_LAUNCHED_PID_PATH=")
+```
+
+</details>
+
+#### should reject Vulkan and dynamic-provider overrides
+
+- Inspect canonical MoltenVK and launch-environment pinning
+   - Expected: source does not contain `\n{omitted_assignment}= \\`
+   - Expected: source does not contain `ICD_PATH="" + SHELL_OPEN + "VK_ICD_FILENAMES:-`
+   - Expected: source does not contain `DYLD_LIBRARY_PATH="" + SHELL_OPEN + "DYLD_LIBRARY_PATH:-`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 32 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Inspect canonical MoltenVK and launch-environment pinning")
+val source = file_read(WRAPPER)
+expect(source).to_contain(
+    "ICD_PATH=\"/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json\""
+)
+expect(source).to_contain(
+    "LAUNCH_DYLD_LIBRARY_PATH=\"$ROOT_DIR/build/sffi:/opt/homebrew/lib\""
+)
+expect(source).to_contain("[ -z \"" + SHELL_OPEN + "VK_DRIVER_FILES+x}\" ]")
+expect(source).to_contain("[ -z \"" + SHELL_OPEN + "VK_LOADER_LAYERS_ALLOW+x}\" ]")
+expect(source).to_contain("[ -z \"" + SHELL_OPEN + "DYLD_LIBRARY_PATH+x}\" ]")
+expect(source).to_contain("[ -z \"" + SHELL_OPEN + "DYLD_INSERT_LIBRARIES+x}\" ]")
+expect(source).to_contain("[ -z \"" + SHELL_OPEN + "GPU_2D_LIVE_WINIT_LIB+x}\" ]")
+val empty_alias_probe =
+    "VK_DRIVER_FILES= MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE=environment sh " + WRAPPER
+val (_probe_out, _probe_err, probe_code) =
+    process_run("/bin/sh", ["-c", empty_alias_probe])
+expect(probe_code).to_equal(1)
+expect(source).to_contain("VK_ICD_FILENAMES=\"$ICD_PATH\" \\")
+for omitted_assignment in [
+    "VK_DRIVER_FILES", "VK_ADD_DRIVER_FILES",
+    "VK_LAYER_PATH", "VK_ADD_LAYER_PATH", "VK_INSTANCE_LAYERS",
+    "VK_LOADER_DRIVERS_SELECT", "VK_LOADER_DRIVERS_DISABLE",
+    "VK_LOADER_LAYERS_ENABLE", "VK_LOADER_LAYERS_DISABLE",
+    "VK_LOADER_LAYERS_ALLOW", "DYLD_INSERT_LIBRARIES",
+    "DYLD_FRAMEWORK_PATH", "DYLD_FALLBACK_LIBRARY_PATH"
+]:
+    expect(source.contains("\n{omitted_assignment}= \\")).to_equal(false)
+expect(source).to_contain("DYLD_LIBRARY_PATH=\"$LAUNCH_DYLD_LIBRARY_PATH\"")
+expect(source.contains("ICD_PATH=\"" + SHELL_OPEN + "VK_ICD_FILENAMES:-")).to_equal(false)
+expect(source.contains("DYLD_LIBRARY_PATH=\"" + SHELL_OPEN + "DYLD_LIBRARY_PATH:-")).to_equal(false)
+```
+
+</details>
+
+#### should fail closed on a missing or non-strict runtime receipt before macOS checks
+
+- Run the POSIX strict-record contract probe without a receipt
+- process run
+   - Expected: missing_code equals `1`
+- Inspect the schema, canonical identity, digest, and PID equality gates
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 33 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Run the POSIX strict-record contract probe without a receipt")
+val missing_receipt = "MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE=strict-record " +
+    "MACOS_VULKAN_GUI_WIDGET_STRICT_RECEIPT_PATH=/definitely/missing/receipt.env " +
+    "MACOS_VULKAN_GUI_WIDGET_APP_PID=44 " +
+    "MACOS_VULKAN_GUI_WIDGET_LAUNCHED_EXECUTABLE=/tmp/SimpleGui.app/Contents/MacOS/SimpleGui sh " + WRAPPER
+val (_missing_out, _missing_err, missing_code) =
+    process_run("/bin/sh", ["-c", missing_receipt])
+expect(missing_code).to_equal(1)
+
+step("Inspect the schema, canonical identity, digest, and PID equality gates")
+val source = file_read(WRAPPER)
+expect(source).to_contain("macos_gui_run_pid_receipt_v3")
+expect(source).to_contain("trusted_gui_driver_source_kind")
+expect(source).to_contain("trusted_gui_driver_sha256")
+expect(source).to_contain("MACOS_GPU_ADMISSION_GUI_DRIVER_SOURCE_KIND")
+expect(source).to_contain("value_of strict_evidence")
+expect(source).to_contain("value_of selected_source")
+expect(source).to_contain("value_of bundled_executable")
+expect(source).to_contain("canonical_existing_path")
+expect(source).to_contain("strict-selected-sha256-invalid")
+expect(source).to_contain("strict-sha256-mismatch")
+expect(source).to_contain("strict-selected-source-sha256-mismatch")
+expect(source).to_contain("strict-bundled-executable-sha256-mismatch")
+expect(source).to_contain("strict-trusted-manifest-sha256-mismatch")
+expect(source).to_contain("strict-pid-mismatch")
+expect(source).to_contain("strict-executable-identity-mismatch")
+expect(source).to_contain("strict-window-owner-pid-mismatch")
+expect(source).to_contain("/SimpleGui.app/Contents/MacOS/SimpleGui")
+expect(source).to_contain("assert_admitted_widget_source_unchanged")
+expect(source).to_contain("trusted-widget-source-sha256-drift")
+expect(source).to_contain(
+    "macos_vulkan_gui_widget_live_admitted_source_sha256="
+)
+```
+
+</details>
+
+#### should target input and captures to the same exact AX window number
+
+- "
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 10 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source = file_read(WRAPPER)
+expect(source).to_contain("focus_exact_ax_window")
+expect(source).to_contain(
+    "value of attribute \"AXWindowNumber\" of targetWindow"
+)
+expect(source).to_contain(
+    "(candidateWindowId as integer) = targetWindowId"
+)
+expect(source).to_contain("exact-window-pointer-focus-failed")
+expect(source).to_contain("exact-window-keyboard-focus-failed")
+```
+
+</details>
+
+#### should recursively detect simple_seed descendants in the pure POSIX seed-tree probe
+
+- Supply a descendant tree containing simple_seed and require positive detection
+- process run
+   - Expected: seed_code equals `0`
+- Reject a tree without a seed descendant and inspect each live-operation gate
+- process run
+   - Expected: clean_code equals `1`
+- process run
+   - Expected: reject_clean_code equals `0`
+- process run
+   - Expected: reject_seed_code equals `1`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 38 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Supply a descendant tree containing simple_seed and require positive detection")
+val seed_tree = "tree=$(mktemp); printf '40 1 /tmp/SimpleGui.app/Contents/MacOS/SimpleGui\\n41 40 /tmp/simple_seed child\\n' >\"$tree\"; " +
+    "MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE=seed-tree " +
+    "MACOS_VULKAN_GUI_WIDGET_ROOT_PID=40 " +
+    "MACOS_VULKAN_GUI_WIDGET_PROCESS_TREE=\"$tree\" sh " + WRAPPER + "; code=$?; rm -f \"$tree\"; exit $code"
+val (_seed_out, _seed_err, seed_code) =
+    process_run("/bin/sh", ["-c", seed_tree])
+expect(seed_code).to_equal(0)
+
+step("Reject a tree without a seed descendant and inspect each live-operation gate")
+val clean_tree = "tree=$(mktemp); printf '40 1 /tmp/SimpleGui.app/Contents/MacOS/SimpleGui\\n41 40 helper\\n' >\"$tree\"; " +
+    "MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE=seed-tree " +
+    "MACOS_VULKAN_GUI_WIDGET_ROOT_PID=40 " +
+    "MACOS_VULKAN_GUI_WIDGET_PROCESS_TREE=\"$tree\" sh " + WRAPPER + "; code=$?; rm -f \"$tree\"; exit $code"
+val (_clean_out, _clean_err, clean_code) =
+    process_run("/bin/sh", ["-c", clean_tree])
+expect(clean_code).to_equal(1)
+val reject_clean_tree = "tree=$(mktemp); printf '40 1 /tmp/SimpleGui.app/Contents/MacOS/SimpleGui\\n41 40 helper\\n' >\"$tree\"; " +
+    "MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE=reject-seed-tree " +
+    "MACOS_VULKAN_GUI_WIDGET_ROOT_PID=40 " +
+    "MACOS_VULKAN_GUI_WIDGET_PROCESS_TREE=\"$tree\" sh " + WRAPPER +
+    "; code=$?; rm -f \"$tree\"; exit $code"
+val (_reject_clean_out, _reject_clean_err, reject_clean_code) =
+    process_run("/bin/sh", ["-c", reject_clean_tree])
+expect(reject_clean_code).to_equal(0)
+val reject_seed_tree = "tree=$(mktemp); printf '40 1 /tmp/SimpleGui.app/Contents/MacOS/SimpleGui\\n41 40 /tmp/simple_seed child\\n' >\"$tree\"; " +
+    "MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE=reject-seed-tree " +
+    "MACOS_VULKAN_GUI_WIDGET_ROOT_PID=40 " +
+    "MACOS_VULKAN_GUI_WIDGET_PROCESS_TREE=\"$tree\" sh " + WRAPPER +
+    "; code=$?; rm -f \"$tree\"; exit $code"
+val (_reject_seed_out, _reject_seed_err, reject_seed_code) =
+    process_run("/bin/sh", ["-c", reject_seed_tree])
+expect(reject_seed_code).to_equal(1)
+val source = file_read(WRAPPER)
+expect(source).to_contain("reject_simple_seed_records")
+expect(source).to_contain("reject_simple_seed_descendants")
+expect(source).to_contain("simple-seed-descendant-detected")
+expect(source).to_contain("refusing cleanup with simple_seed descendant")
+```
+
+</details>
+
 ## At a Glance
 
 | Field | Value |
@@ -417,7 +648,7 @@ expect(retina_code).to_equal(0)
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/check/macos_vulkan_gui_widget_live_evidence_contract_spec.spl` |
-| Updated | 2026-07-24 |
+| Updated | 2026-07-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -429,8 +660,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
