@@ -559,6 +559,9 @@ bool     rt_process_kill(int64_t pid);
 /* ===== Process Piped (editor LSP transport) ===== */
 
 int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
+int64_t     rt_browser_renderer_spawn_sandboxed(const char* cmd, SplArray* args);
+bool        rt_browser_renderer_sandbox_enter(void);
+const char* rt_browser_renderer_read_stdin_some(int64_t max_bytes);
 bool        rt_process_write_stdin(int64_t pid, const char* data);
 int64_t     rt_process_write_stdin_some(int64_t pid, const char* data, int64_t data_len, int64_t offset, int64_t max_bytes);
 const char* rt_process_read_stdout(int64_t pid);

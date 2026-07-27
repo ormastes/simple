@@ -1,0 +1,107 @@
+"""Hidden, fail-closed browser renderer worker entry."""
+
+use std.common.base_encoding.utilities.{text_to_bytes}
+use std.common.web.browser_renderer_protocol.{
+    BROWSER_RENDERER_WORKER_ARG,
+    BrowserRendererEncodeResult, BrowserRendererMessage,
+    browser_renderer_decoder_feed, browser_renderer_decoder_new,
+    browser_renderer_frame_encode, browser_renderer_message_encode
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result_at_time
+}
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.nogc_sync_mut.io.process_ops.{browser_renderer_sandbox_enter}
+
+extern fn rt_browser_renderer_read_stdin_some(max_bytes: i64) -> text
+extern fn rt_stdout_write(data: [u8]) -> i64
+extern fn rt_stdout_flush()
+
+val _WORKER_MAX_VIEWPORT: i64 = 4096
+val _WORKER_READ_BYTES: i64 = 8192
+
+fn _worker_reject(reason: text) -> BrowserRendererEncodeResult:
+    BrowserRendererEncodeResult(ok: false, reason: reason, wire: "")
+
+pub fn hosted_browser_renderer_handle_init(
+    message: BrowserRendererMessage,
+    width: i32,
+    height: i32,
+    animation_time_ms: i64,
+    response_request_id: i64
+) -> BrowserRendererEncodeResult:
+    if message.kind != "init":
+        return _worker_reject("expected-init")
+    var session = BrowserSession.new()
+    if val Err(reason) = session.open_html(
+        "simple-renderer://document", message.payload
+    ):
+        return _worker_reject(reason)
+    if animation_time_ms > 0:
+        val _ = session.advance_time(animation_time_ms)
+    val layout = simple_web_layout_render_html_draw_ir_result_at_time(
+        session.current_style_html + session.current_body_html,
+        width,
+        height,
+        animation_time_ms
+    )
+    browser_renderer_frame_encode(
+        layout.composition, message.generation, response_request_id
+    )
+
+fn _worker_write(wire: text) -> bool:
+    val bytes = text_to_bytes(wire)
+    if rt_stdout_write(bytes) != bytes.len():
+        return false
+    rt_stdout_flush()
+    true
+
+pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
+    var marker_index: i64 = -1
+    var index: i64 = 0
+    while index < args.len():
+        if args[index] == BROWSER_RENDERER_WORKER_ARG:
+            if marker_index >= 0:
+                return 64
+            marker_index = index
+        index = index + 1
+    if marker_index < 0 or marker_index + 5 != args.len():
+        return 64
+
+    val generation = args[marker_index + 1].to_i64() ?? -1
+    val width_i64 = args[marker_index + 2].to_i64() ?? -1
+    val height_i64 = args[marker_index + 3].to_i64() ?? -1
+    val animation_time_ms = args[marker_index + 4].to_i64() ?? -1
+    if generation <= 0 or width_i64 <= 0 or height_i64 <= 0 or
+        width_i64 > _WORKER_MAX_VIEWPORT or
+        height_i64 > _WORKER_MAX_VIEWPORT or
+        animation_time_ms < 0:
+        return 64
+    if not browser_renderer_sandbox_enter():
+        return 70
+
+    val ready = browser_renderer_message_encode("ready", generation, 1, "")
+    if not ready.ok or not _worker_write(ready.wire):
+        return 71
+
+    var decoder = browser_renderer_decoder_new(generation)
+    while true:
+        val chunk = rt_browser_renderer_read_stdin_some(_WORKER_READ_BYTES)
+        if chunk == "":
+            return 72
+        val decoded = browser_renderer_decoder_feed(decoder, chunk)
+        decoder = decoded.decoder
+        if decoded.status == "violation":
+            return 73
+        if decoded.status == "message":
+            val frame = hosted_browser_renderer_handle_init(
+                decoded.message,
+                width_i64.to_i32(),
+                height_i64.to_i32(),
+                animation_time_ms,
+                2
+            )
+            if not frame.ok or not _worker_write(frame.wire):
+                return 74
+            return 0

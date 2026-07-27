@@ -8,6 +8,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#include <sys/socket.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -44,6 +47,98 @@ static int64_t spawn_shell(const char* script) {
     test_args = args;
     test_arg_count = 2;
     return rt_process_spawn_piped("/bin/sh", &placeholder);
+}
+
+static int sandbox_limit_is(int resource, rlim_t current, rlim_t maximum) {
+    struct rlimit limit = {0};
+    return syscall(SYS_getrlimit, resource, &limit) == 0 &&
+        limit.rlim_cur == current && limit.rlim_max == maximum;
+}
+
+static int sandbox_probe(int argc, char** argv) {
+    if (argc != 3 || strcmp(argv[0], "simple-browser-renderer") != 0 ||
+        getenv("SIMPLE_BROWSER_RENDERER_SECRET") != NULL) {
+        return 10;
+    }
+    char cwd[8];
+    if (!getcwd(cwd, sizeof(cwd)) || strcmp(cwd, "/") != 0) return 11;
+    int inherited_fd = atoi(argv[2]);
+    errno = 0;
+    if (fcntl(inherited_fd, F_GETFD) >= 0 || errno != EBADF) return 12;
+    if (!rt_browser_renderer_sandbox_enter()) return 13;
+    if (!sandbox_limit_is(RLIMIT_CORE, 0, 0) ||
+        !sandbox_limit_is(
+            RLIMIT_AS, 512U * 1024U * 1024U, 512U * 1024U * 1024U) ||
+        !sandbox_limit_is(RLIMIT_CPU, 30, 30) ||
+        !sandbox_limit_is(RLIMIT_FSIZE, 0, 0) ||
+        !sandbox_limit_is(RLIMIT_NPROC, 0, 0) ||
+        !sandbox_limit_is(RLIMIT_NOFILE, 4, 4)) {
+        return 14;
+    }
+    errno = 0;
+    if (open("/etc/passwd", O_RDONLY) >= 0 || errno != EACCES) return 15;
+    errno = 0;
+    if (socket(AF_INET, SOCK_STREAM, 0) >= 0 || errno != EPERM) return 16;
+    errno = 0;
+    if (fork() >= 0 || errno != EPERM) return 17;
+    errno = 0;
+    if (kill(getpid(), 0) >= 0 || errno != EPERM) return 18;
+    char* exec_args[] = {(char*)"true", NULL};
+    char* exec_env[] = {NULL};
+    errno = 0;
+    if (syscall(SYS_execve, "/bin/true", exec_args, exec_env) >= 0 ||
+        errno != EPERM) {
+        return 19;
+    }
+    errno = 0;
+    if (setpriority(PRIO_PROCESS, getppid(), 1) >= 0 || errno != EPERM) {
+        return 20;
+    }
+    unsigned long affinity = 1;
+    errno = 0;
+    if (syscall(
+            SYS_sched_setaffinity, getppid(), sizeof(affinity),
+            &affinity) >= 0 || errno != EPERM) {
+        return 21;
+    }
+    const char* input = rt_browser_renderer_read_stdin_some(8192);
+    if (!input || strcmp(input, "small") != 0) return 22;
+    if (write(STDERR_FILENO, "stderr-leak", 11) < 0) return 23;
+    return write(STDOUT_FILENO, "sandbox-ok", 10) == 10 ? 0 : 24;
+}
+
+static int sandboxed_renderer_is_sanitized_and_contained(void) {
+    static SplArray placeholder;
+    int inherited_fd = open("/etc/passwd", O_RDONLY);
+    if (inherited_fd < 3) return 0;
+    char inherited_text[32];
+    snprintf(inherited_text, sizeof(inherited_text), "%d", inherited_fd);
+    static const char* args[2];
+    args[0] = "--sandbox-probe";
+    args[1] = inherited_text;
+    test_args = args;
+    test_arg_count = 2;
+    if (setenv("SIMPLE_BROWSER_RENDERER_SECRET", "must-not-leak", 1) != 0) {
+        close(inherited_fd);
+        return 0;
+    }
+    int64_t pid = rt_browser_renderer_spawn_sandboxed(
+        "/proc/self/exe", &placeholder);
+    close(inherited_fd);
+    unsetenv("SIMPLE_BROWSER_RENDERER_SECRET");
+    if (pid <= 0) return 0;
+    if (!rt_process_write_stdin(pid, "small")) {
+        rt_process_close_piped(pid);
+        return 0;
+    }
+    int saw_ok = 0;
+    for (int i = 0; i < 2000 && !saw_ok; i++) {
+        const char* chunk = rt_process_read_stdout(pid);
+        saw_ok = chunk && strcmp(chunk, "sandbox-ok") == 0;
+        if (!saw_ok) usleep(1000);
+    }
+    int closed = rt_process_close_piped(pid);
+    return saw_ok && closed;
 }
 
 static int stopped(pid_t pid) {
@@ -283,7 +378,10 @@ static int parent_death_stops_child(void) {
 #endif
 }
 
-int main(void) {
+int main(int argc, char** argv) {
+    if (argc > 1 && strcmp(argv[1], "--sandbox-probe") == 0) {
+        return sandbox_probe(argc, argv);
+    }
     if (!closed_child_write_is_nonfatal()) return 1;
     if (!interrupted_large_write_completes()) return 2;
     if (!bounded_write_reports_backpressure()) return 3;
@@ -292,5 +390,6 @@ int main(void) {
     if (!reaped_leader_still_kills_group()) return 6;
     if (!close_recycles_slots_and_rejects_unknown_handles()) return 7;
     if (!parent_death_stops_child()) return 8;
+    if (!sandboxed_renderer_is_sanitized_and_contained()) return 9;
     return 0;
 }

@@ -325,6 +325,10 @@ or native TLS behavior.
 - animation code imports research/example style types;
 - BrowserSession page code currently receives Node globals and unrestricted
   `file://`;
-- live browser TLS/HSTS and renderer sandbox paths are missing;
+- Linux now has a fail-closed sanitized renderer launcher, deny-all Landlock,
+  seccomp process/network denial, and a hidden one-shot BrowserSession/Draw IR
+  worker. The accepted worker composition is not yet substituted for the
+  hosted compositor's in-process browser frame; Windows AppContainer and the
+  signed macOS helper also remain open.
 - no current GC/RSS/soak or crash-containment evidence exists;
 - existing browser interaction evidence can pass when its artifact is absent.

@@ -533,6 +533,7 @@ struct WinPipedSlot {
 
 static struct WinPipedSlot win_piped_slots[WIN_PIPED_MAX];
 static char win_piped_read_buf[WIN_PIPED_READ_BUF];
+static char win_browser_renderer_stdin_buf[WIN_PIPED_READ_BUF];
 
 static bool win_random_pipe_name(char* name, size_t name_size) {
     typedef LONG (WINAPI *BCryptGenRandomFn)(
@@ -880,6 +881,34 @@ bool rt_process_close_piped(int64_t pid) {
     return stopped;
 }
 
+int64_t rt_browser_renderer_spawn_sandboxed(
+        const char* cmd, SplArray* args) {
+    (void)cmd;
+    (void)args;
+    return -1;
+}
+
+bool rt_browser_renderer_sandbox_enter(void) {
+    return false;
+}
+
+const char* rt_browser_renderer_read_stdin_some(int64_t max_bytes) {
+    win_browser_renderer_stdin_buf[0] = '\0';
+    if (max_bytes <= 0) return win_browser_renderer_stdin_buf;
+    DWORD request = max_bytes < WIN_PIPED_READ_BUF
+        ? (DWORD)max_bytes : WIN_PIPED_READ_BUF - 1;
+    DWORD read_count = 0;
+    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    if (!input || input == INVALID_HANDLE_VALUE ||
+        !ReadFile(
+            input, win_browser_renderer_stdin_buf, request,
+            &read_count, NULL)) {
+        return win_browser_renderer_stdin_buf;
+    }
+    win_browser_renderer_stdin_buf[read_count] = '\0';
+    return win_browser_renderer_stdin_buf;
+}
+
 #else /* POSIX */
 
 #include "runtime_fork.h"
@@ -896,7 +925,14 @@ bool rt_process_close_piped(int64_t pid) {
 #include <spawn.h>
 #endif
 #ifdef __linux__
+#include <stddef.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/landlock.h>
+#include <linux/seccomp.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #endif
 
@@ -915,6 +951,7 @@ static struct RtProcSlot s_procs[RT_PROC_MAX];
 
 /* Static read buffer — returned pointer is valid until the next call */
 static char s_read_buf[RT_PROC_READ_BUF];
+static char s_browser_renderer_stdin_buf[RT_PROC_READ_BUF];
 
 /* ===== Internal helpers ===== */
 
@@ -1106,8 +1143,14 @@ static void proc_close_inherited_fds(void) {
 
 /* ===== Public API ===== */
 
-static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv) {
+static int64_t rt_process_spawn_piped_argv(
+        const char* cmd, char** argv, bool sandboxed_renderer) {
     if (!cmd || !*cmd) return -1;
+#ifndef __linux__
+    if (sandboxed_renderer) return -1;
+#else
+    if (sandboxed_renderer && cmd[0] != '/') return -1;
+#endif
 
     struct RtProcSlot* slot = proc_alloc();
     if (!slot) return -1;
@@ -1164,9 +1207,16 @@ static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv) {
             _exit(127);
         }
 #endif
+        int null_fd = -1;
+        if (sandboxed_renderer) {
+            null_fd = open("/dev/null", O_WRONLY);
+            if (null_fd < 0) _exit(127);
+        }
+
         /* Wire pipes to stdio */
         if (dup2(stdin_pipe[0], STDIN_FILENO) < 0 ||
-            dup2(stdout_pipe[1], STDOUT_FILENO) < 0) {
+            dup2(stdout_pipe[1], STDOUT_FILENO) < 0 ||
+            (sandboxed_renderer && dup2(null_fd, STDERR_FILENO) < 0)) {
             _exit(127);
         }
 
@@ -1178,7 +1228,16 @@ static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv) {
         signal(SIGTERM, SIG_DFL);
         signal(SIGPIPE, SIG_DFL);
 
-        execvp(cmd, argv);
+        if (sandboxed_renderer) {
+#ifdef __linux__
+            char* empty_environment[] = {NULL};
+            argv[0] = (char*)"simple-browser-renderer";
+            if (chdir("/") != 0) _exit(127);
+            execve(cmd, argv, empty_environment);
+#endif
+        } else {
+            execvp(cmd, argv);
+        }
         _exit(127); /* exec failed */
     }
 #endif
@@ -1228,9 +1287,32 @@ int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
         argv[i + 1] = (char*)(data ? data : (const uint8_t*)"");
     }
     argv[argc + 1] = NULL;
-    int64_t pid = rt_process_spawn_piped_argv(cmd, argv);
+    int64_t pid = rt_process_spawn_piped_argv(cmd, argv, false);
     free(argv);
     return pid;
+}
+
+int64_t rt_browser_renderer_spawn_sandboxed(
+        const char* cmd, SplArray* args) {
+#ifndef __linux__
+    (void)cmd;
+    (void)args;
+    return -1;
+#else
+    int64_t argc = args ? rt_array_len(args) : 0;
+    if (argc < 0 || (uint64_t)argc > SIZE_MAX / sizeof(char*) - 2) return -1;
+    char** argv = (char**)malloc(sizeof(char*) * (size_t)(argc + 2));
+    if (!argv) return -1;
+    argv[0] = (char*)"simple-browser-renderer";
+    for (int64_t i = 0; i < argc; i++) {
+        const uint8_t* data = rt_string_data(rt_array_get(args, i));
+        argv[i + 1] = (char*)(data ? data : (const uint8_t*)"");
+    }
+    argv[argc + 1] = NULL;
+    int64_t pid = rt_process_spawn_piped_argv(cmd, argv, true);
+    free(argv);
+    return pid;
+#endif
 }
 
 static SplArray* posix_process_run_capture(const char* cmd, uint64_t cmd_len, SplArray* args,
@@ -1305,7 +1387,7 @@ int64_t rt_editor_spawn_simple_dap(void) {
         "src/app/dap/simple_dap_main.spl",
         NULL
     };
-    return rt_process_spawn_piped_argv(argv[0], argv);
+    return rt_process_spawn_piped_argv(argv[0], argv, false);
 }
 
 bool rt_editor_start_simple_dap(int64_t pid) {
@@ -1456,6 +1538,313 @@ bool rt_process_close_piped(int64_t pid) {
     proc_free(slot);
     return true;
 }
+
+const char* rt_browser_renderer_read_stdin_some(int64_t max_bytes) {
+    s_browser_renderer_stdin_buf[0] = '\0';
+    if (max_bytes <= 0) return s_browser_renderer_stdin_buf;
+    size_t request = max_bytes < RT_PROC_READ_BUF
+        ? (size_t)max_bytes : RT_PROC_READ_BUF - 1;
+    ssize_t read_count;
+    do {
+        read_count = read(
+            STDIN_FILENO, s_browser_renderer_stdin_buf, request);
+    } while (read_count < 0 && errno == EINTR);
+    if (read_count <= 0) return s_browser_renderer_stdin_buf;
+    s_browser_renderer_stdin_buf[read_count] = '\0';
+    return s_browser_renderer_stdin_buf;
+}
+
+#ifdef __linux__
+
+#if defined(__x86_64__)
+#define BROWSER_RENDERER_AUDIT_ARCH AUDIT_ARCH_X86_64
+#elif defined(__aarch64__)
+#define BROWSER_RENDERER_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#elif defined(__riscv) && __riscv_xlen == 64
+#define BROWSER_RENDERER_AUDIT_ARCH AUDIT_ARCH_RISCV64
+#elif defined(__i386__)
+#define BROWSER_RENDERER_AUDIT_ARCH AUDIT_ARCH_I386
+#elif defined(__arm__)
+#define BROWSER_RENDERER_AUDIT_ARCH AUDIT_ARCH_ARM
+#endif
+
+#define BROWSER_RENDERER_DENY_SYSCALL(number) \
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (number), 0, 1), \
+    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA))
+
+static bool browser_renderer_set_limit(
+        int resource, rlim_t current, rlim_t maximum) {
+    struct rlimit limit = {current, maximum};
+    return setrlimit(resource, &limit) == 0;
+}
+
+static bool browser_renderer_apply_landlock(void) {
+#if !defined(SYS_landlock_create_ruleset) || \
+    !defined(SYS_landlock_restrict_self)
+    return false;
+#else
+    int abi = (int)syscall(
+        SYS_landlock_create_ruleset, NULL, 0,
+        LANDLOCK_CREATE_RULESET_VERSION);
+    if (abi < 1) return false;
+    __u64 access =
+        LANDLOCK_ACCESS_FS_EXECUTE |
+        LANDLOCK_ACCESS_FS_WRITE_FILE |
+        LANDLOCK_ACCESS_FS_READ_FILE |
+        LANDLOCK_ACCESS_FS_READ_DIR |
+        LANDLOCK_ACCESS_FS_REMOVE_DIR |
+        LANDLOCK_ACCESS_FS_REMOVE_FILE |
+        LANDLOCK_ACCESS_FS_MAKE_CHAR |
+        LANDLOCK_ACCESS_FS_MAKE_DIR |
+        LANDLOCK_ACCESS_FS_MAKE_REG |
+        LANDLOCK_ACCESS_FS_MAKE_SOCK |
+        LANDLOCK_ACCESS_FS_MAKE_FIFO |
+        LANDLOCK_ACCESS_FS_MAKE_BLOCK |
+        LANDLOCK_ACCESS_FS_MAKE_SYM;
+#ifdef LANDLOCK_ACCESS_FS_REFER
+    if (abi >= 2) access |= LANDLOCK_ACCESS_FS_REFER;
+#endif
+#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
+    if (abi >= 3) access |= LANDLOCK_ACCESS_FS_TRUNCATE;
+#endif
+#ifdef LANDLOCK_ACCESS_FS_IOCTL_DEV
+    if (abi >= 5) access |= LANDLOCK_ACCESS_FS_IOCTL_DEV;
+#endif
+    struct landlock_ruleset_attr ruleset = {
+        .handled_access_fs = access
+    };
+    int ruleset_fd = (int)syscall(
+        SYS_landlock_create_ruleset, &ruleset, sizeof(ruleset), 0);
+    if (ruleset_fd < 0) return false;
+    bool restricted =
+        syscall(SYS_landlock_restrict_self, ruleset_fd, 0) == 0;
+    close(ruleset_fd);
+    return restricted;
+#endif
+}
+
+static bool browser_renderer_apply_seccomp(void) {
+#if !defined(BROWSER_RENDERER_AUDIT_ARCH) || !defined(SYS_seccomp)
+    return false;
+#else
+    struct sock_filter filter[] = {
+        BPF_STMT(
+            BPF_LD | BPF_W | BPF_ABS,
+            (uint32_t)offsetof(struct seccomp_data, arch)),
+        BPF_JUMP(
+            BPF_JMP | BPF_JEQ | BPF_K,
+            BROWSER_RENDERER_AUDIT_ARCH, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+        BPF_STMT(
+            BPF_LD | BPF_W | BPF_ABS,
+            (uint32_t)offsetof(struct seccomp_data, nr)),
+#if defined(__x86_64__)
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x40000000U, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+#endif
+#ifdef __NR_socket
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_socket),
+#endif
+#ifdef __NR_socketpair
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_socketpair),
+#endif
+#ifdef __NR_socketcall
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_socketcall),
+#endif
+#ifdef __NR_connect
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_connect),
+#endif
+#ifdef __NR_bind
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_bind),
+#endif
+#ifdef __NR_listen
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_listen),
+#endif
+#ifdef __NR_accept
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_accept),
+#endif
+#ifdef __NR_accept4
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_accept4),
+#endif
+#ifdef __NR_sendto
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_sendto),
+#endif
+#ifdef __NR_recvfrom
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_recvfrom),
+#endif
+#ifdef __NR_sendmsg
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_sendmsg),
+#endif
+#ifdef __NR_recvmsg
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_recvmsg),
+#endif
+#ifdef __NR_shutdown
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_shutdown),
+#endif
+#ifdef __NR_setsockopt
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_setsockopt),
+#endif
+#ifdef __NR_getsockopt
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_getsockopt),
+#endif
+#ifdef __NR_fork
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fork),
+#endif
+#ifdef __NR_vfork
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_vfork),
+#endif
+#ifdef __NR_clone
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_clone),
+#endif
+#ifdef __NR_clone3
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_clone3),
+#endif
+#ifdef __NR_execve
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_execve),
+#endif
+#ifdef __NR_execveat
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_execveat),
+#endif
+#ifdef __NR_kill
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_kill),
+#endif
+#ifdef __NR_tkill
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_tkill),
+#endif
+#ifdef __NR_tgkill
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_tgkill),
+#endif
+#ifdef __NR_rt_sigqueueinfo
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_rt_sigqueueinfo),
+#endif
+#ifdef __NR_rt_tgsigqueueinfo
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_rt_tgsigqueueinfo),
+#endif
+#ifdef __NR_ptrace
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_ptrace),
+#endif
+#ifdef __NR_process_vm_readv
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_process_vm_readv),
+#endif
+#ifdef __NR_process_vm_writev
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_process_vm_writev),
+#endif
+#ifdef __NR_pidfd_open
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_pidfd_open),
+#endif
+#ifdef __NR_pidfd_getfd
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_pidfd_getfd),
+#endif
+#ifdef __NR_pidfd_send_signal
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_pidfd_send_signal),
+#endif
+#ifdef __NR_prlimit64
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_prlimit64),
+#endif
+#ifdef __NR_ioprio_set
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_ioprio_set),
+#endif
+#ifdef __NR_setpriority
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_setpriority),
+#endif
+#ifdef __NR_sched_setaffinity
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_sched_setaffinity),
+#endif
+#ifdef __NR_sched_setparam
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_sched_setparam),
+#endif
+#ifdef __NR_sched_setscheduler
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_sched_setscheduler),
+#endif
+#ifdef __NR_sched_setattr
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_sched_setattr),
+#endif
+#ifdef __NR_kcmp
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_kcmp),
+#endif
+#ifdef __NR_setns
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_setns),
+#endif
+#ifdef __NR_unshare
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_unshare),
+#endif
+#ifdef __NR_mount
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_mount),
+#endif
+#ifdef __NR_umount2
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_umount2),
+#endif
+#ifdef __NR_pivot_root
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_pivot_root),
+#endif
+#ifdef __NR_chroot
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_chroot),
+#endif
+#ifdef __NR_open_by_handle_at
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_open_by_handle_at),
+#endif
+#ifdef __NR_open_tree
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_open_tree),
+#endif
+#ifdef __NR_move_mount
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_move_mount),
+#endif
+#ifdef __NR_add_key
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_add_key),
+#endif
+#ifdef __NR_request_key
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_request_key),
+#endif
+#ifdef __NR_keyctl
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_keyctl),
+#endif
+#ifdef __NR_userfaultfd
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_userfaultfd),
+#endif
+#ifdef __NR_bpf
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_bpf),
+#endif
+#ifdef __NR_perf_event_open
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_perf_event_open),
+#endif
+#ifdef __NR_io_uring_setup
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_io_uring_setup),
+#endif
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program = {
+        .len = (unsigned short)(sizeof(filter) / sizeof(filter[0])),
+        .filter = filter
+    };
+    return syscall(
+        SYS_seccomp, SECCOMP_SET_MODE_FILTER,
+        SECCOMP_FILTER_FLAG_TSYNC, &program) == 0;
+#endif
+}
+
+bool rt_browser_renderer_sandbox_enter(void) {
+    if (!browser_renderer_set_limit(RLIMIT_CORE, 0, 0) ||
+        !browser_renderer_set_limit(
+            RLIMIT_AS, 512U * 1024U * 1024U, 512U * 1024U * 1024U) ||
+        !browser_renderer_set_limit(RLIMIT_CPU, 30, 30) ||
+        !browser_renderer_set_limit(RLIMIT_FSIZE, 0, 0) ||
+        !browser_renderer_set_limit(RLIMIT_NPROC, 0, 0) ||
+        !browser_renderer_set_limit(RLIMIT_NOFILE, 4, 4) ||
+        prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
+        !browser_renderer_apply_landlock() ||
+        !browser_renderer_apply_seccomp()) {
+        return false;
+    }
+    return true;
+}
+
+#else
+
+bool rt_browser_renderer_sandbox_enter(void) {
+    return false;
+}
+
+#endif
 
 #endif /* POSIX */
 

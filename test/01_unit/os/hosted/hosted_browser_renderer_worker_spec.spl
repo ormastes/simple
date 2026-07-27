@@ -1,0 +1,63 @@
+# @cover src/os/hosted/hosted_browser_renderer_worker.spl 80%
+
+use std.spec.*
+use std.common.web.browser_renderer_protocol.{
+    BrowserRendererMessage,
+    browser_renderer_decoder_feed, browser_renderer_decoder_new,
+    browser_renderer_frame_decode
+}
+use os.hosted.hosted_browser_renderer_worker.{
+    hosted_browser_renderer_handle_init
+}
+
+val SCRIPT_ANIMATION_HTML = "<!DOCTYPE html><html><head><style>#stage { width:32px; height:24px; background-color:#ef4444; }</style></head><body><script type='text/simple'>title \"SimpleReady\"\nbody_html '<div id=\"stage\"></div>'</script><script>requestAnimationFrame(function(frameTime){ document.body.innerHTML = '<div style=\"width:32px;height:24px;background-color:#2563eb\"></div>'; });</script></body></html>"
+val CSS_ANIMATION_HTML = "<style>@keyframes pulse { from { background-color:#ef4444; } to { background-color:#2563eb; } } #stage { width:32px; height:24px; animation:pulse 1000ms linear forwards; }</style><div id='stage'></div>"
+
+fn _render(html: text, time_ms: i64):
+    hosted_browser_renderer_handle_init(
+        BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 1, payload: html
+        ),
+        64,
+        48,
+        time_ms,
+        2
+    )
+
+describe "hosted browser renderer worker":
+    it "renders HTML CSS Simple Script JavaScript and CSS animation into bounded DrawIR":
+        val script_first = _render(SCRIPT_ANIMATION_HTML, 0)
+        val script_animated = _render(SCRIPT_ANIMATION_HTML, 16)
+        val css_first = _render(CSS_ANIMATION_HTML, 0)
+        val css_middle = _render(CSS_ANIMATION_HTML, 500)
+        val css_last = _render(CSS_ANIMATION_HTML, 1000)
+
+        expect(script_first.ok).to_be(true)
+        expect(script_animated.ok).to_be(true)
+        expect(css_first.ok).to_be(true)
+        expect(css_middle.ok).to_be(true)
+        expect(css_last.ok).to_be(true)
+        expect(script_first.wire == script_animated.wire).to_be(false)
+        expect(css_first.wire == css_middle.wire).to_be(false)
+        expect(css_middle.wire == css_last.wire).to_be(false)
+
+        val decoded = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), script_animated.wire
+        )
+        expect(decoded.status).to_equal("message")
+        val frame = browser_renderer_frame_decode(decoded.message, 64, 48)
+        expect(frame.ok).to_be(true)
+        expect(frame.composition.batches[0].commands.len()).to_be_greater_than(0)
+
+    it "rejects non-init input":
+        val rejected = hosted_browser_renderer_handle_init(
+            BrowserRendererMessage(
+                kind: "state", generation: 7, request_id: 1, payload: ""
+            ),
+            64,
+            48,
+            0,
+            2
+        )
+        expect(rejected.ok).to_be(false)
+        expect(rejected.reason).to_equal("expected-init")

@@ -1,0 +1,127 @@
+"""One-shot broker for a sandboxed browser renderer frame."""
+
+use std.common.ui.draw_ir.{DrawIrComposition, draw_ir_composition}
+use std.common.web.browser_renderer_protocol.{
+    BROWSER_RENDERER_WORKER_ARG,
+    BrowserRendererDecoder,
+    browser_renderer_decoder_feed, browser_renderer_decoder_new,
+    browser_renderer_frame_decode, browser_renderer_message_encode
+}
+use std.nogc_sync_mut.io.process_ops.{
+    browser_renderer_spawn_sandboxed,
+    process_close_piped, process_is_piped_alive, process_read_stdout,
+    process_write_stdin_some
+}
+
+extern fn rt_sleep_ms(milliseconds: i64)
+extern fn rt_time_now_unix_micros() -> i64
+
+pub struct HostedBrowserRendererResult:
+    ok: bool
+    reason: text
+    composition: DrawIrComposition
+
+fn _empty_composition() -> DrawIrComposition:
+    draw_ir_composition("", "", "", [])
+
+fn _renderer_reject(pid: i64, reason: text) -> HostedBrowserRendererResult:
+    if pid > 0:
+        val _ = process_close_piped(pid)
+    HostedBrowserRendererResult(
+        ok: false, reason: reason, composition: _empty_composition()
+    )
+
+fn _deadline_ms(timeout_ms: i64) -> i64:
+    rt_time_now_unix_micros() / 1000 + (
+        if timeout_ms > 0: timeout_ms else: 2000
+    )
+
+fn _write_before(pid: i64, wire: text, deadline_ms: i64) -> bool:
+    var offset: i64 = 0
+    while offset < wire.len() and
+        rt_time_now_unix_micros() / 1000 < deadline_ms:
+        val written = process_write_stdin_some(pid, wire, offset, 8192)
+        if written < 0:
+            return false
+        if written > 0:
+            offset = offset + written
+        else:
+            if not process_is_piped_alive(pid):
+                return false
+            rt_sleep_ms(1)
+    offset == wire.len()
+
+pub fn hosted_browser_renderer_render_once(
+    executable: text,
+    html: text,
+    width: i32,
+    height: i32,
+    animation_time_ms: i64,
+    generation: i64,
+    timeout_ms: i64
+) -> HostedBrowserRendererResult:
+    if executable == "" or generation <= 0 or width <= 0 or height <= 0:
+        return _renderer_reject(0, "invalid-launch")
+    val pid = browser_renderer_spawn_sandboxed(executable, [
+        BROWSER_RENDERER_WORKER_ARG,
+        generation.to_text(),
+        width.to_text(),
+        height.to_text(),
+        animation_time_ms.to_text()
+    ])
+    if pid <= 0:
+        return _renderer_reject(0, "sandbox-unavailable")
+
+    val deadline = _deadline_ms(timeout_ms)
+    var decoder: BrowserRendererDecoder = browser_renderer_decoder_new(
+        generation
+    )
+    var ready = false
+    while not ready and rt_time_now_unix_micros() / 1000 < deadline:
+        val chunk = process_read_stdout(pid)
+        if chunk != "":
+            val decoded = browser_renderer_decoder_feed(decoder, chunk)
+            decoder = decoded.decoder
+            if decoded.status == "violation":
+                return _renderer_reject(pid, decoded.decoder.error)
+            if decoded.status == "message":
+                if decoded.message.kind != "ready":
+                    return _renderer_reject(pid, "expected-ready")
+                ready = true
+        else:
+            if not process_is_piped_alive(pid):
+                return _renderer_reject(pid, "renderer-crashed")
+            rt_sleep_ms(1)
+    if not ready:
+        return _renderer_reject(pid, "renderer-timeout")
+
+    val init = browser_renderer_message_encode(
+        "init", generation, 1, html
+    )
+    if not init.ok:
+        return _renderer_reject(pid, init.reason)
+    if not _write_before(pid, init.wire, deadline):
+        return _renderer_reject(pid, "renderer-write-failed")
+
+    while rt_time_now_unix_micros() / 1000 < deadline:
+        val chunk = process_read_stdout(pid)
+        if chunk != "":
+            val decoded = browser_renderer_decoder_feed(decoder, chunk)
+            decoder = decoded.decoder
+            if decoded.status == "violation":
+                return _renderer_reject(pid, decoded.decoder.error)
+            if decoded.status == "message":
+                val frame = browser_renderer_frame_decode(
+                    decoded.message, width, height
+                )
+                if not frame.ok:
+                    return _renderer_reject(pid, frame.reason)
+                val _ = process_close_piped(pid)
+                return HostedBrowserRendererResult(
+                    ok: true, reason: "ok", composition: frame.composition
+                )
+        else:
+            if not process_is_piped_alive(pid):
+                return _renderer_reject(pid, "renderer-crashed")
+            rt_sleep_ms(1)
+    _renderer_reject(pid, "renderer-timeout")
