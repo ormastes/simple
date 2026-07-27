@@ -200,6 +200,15 @@ class ContainerWorld:
     # Authority granted to each container at create time — the parent set the
     # sys_start spawn request must stay a subset of.
     granted_caps: [[text]]
+    # CEILING columns — the create-time authority, kept for the lifetime of the
+    # entity. granted_caps[i] is emptied on stop/exit (§21, no stale grant), so
+    # it cannot itself bound a RESTART; without a separate ceiling sys_restart
+    # took any caps and any root the caller named and a crash-loop became a
+    # privilege-escalation primitive (bug
+    # container_restart_no_cap_ceiling_2026-07-27). These are set once by
+    # sys_create and never widened.
+    ceiling_caps: [[text]]
+    ceiling_roots: [text]
     # Side table of pods.
     pods: [Pod]
     # §6.4 image/volume store: content-addressed RO layers + COW snapshots +
@@ -225,6 +234,8 @@ impl ContainerWorld:
             reports: [],
             restarts: [],
             granted_caps: [],
+            ceiling_caps: [],
+            ceiling_roots: [],
             pods: [],
             store: LayerStore.new(),
             manifest: container_manager_manifest(),
@@ -284,7 +295,15 @@ impl ContainerWorld:
             view = container_view_create(root, pids)
 
         val cid = self.next_id
-        val cow = image_digest + ":cow"
+        # The COW writable layer id must be UNIQUE PER CONTAINER. It used to be
+        # `image_digest + ":cow"`, so two containers branched off the same
+        # content-addressed base were handed the SAME writable layer id — in a
+        # real COW backend that is one shared writable layer, i.e. container A
+        # reading and writing container B's files (bug
+        # container_cow_layer_id_aliased_across_containers_2026-07-27).
+        # The container id disambiguates; the base digest stays in the name so
+        # the parent chain is still readable.
+        val cow = image_digest + ":cow:" + "{cid}"
 
         var a_ids = self.ids
         a_ids = a_ids.push(ContainerId(id: cid, name: name))
@@ -325,6 +344,18 @@ impl ContainerWorld:
         var a_grant = self.granted_caps
         a_grant = a_grant.push(granted)
         self.granted_caps = a_grant
+
+        # Freeze the create-time authority as this entity's permanent ceiling.
+        # `granted` is the maximum this container may EVER hold; `view.root` the
+        # widest subtree it may ever resolve through. sys_restart attenuates
+        # against these, so a restart can only ever narrow authority.
+        var a_ceil = self.ceiling_caps
+        a_ceil = a_ceil.push(granted)
+        self.ceiling_caps = a_ceil
+
+        var a_croot = self.ceiling_roots
+        a_croot = a_croot.push(view.root)
+        self.ceiling_roots = a_croot
 
         # §6.4: creating a container branches a COW writable snapshot off the
         # immutable content-addressed RO base. The base layer itself is added to
@@ -566,15 +597,63 @@ impl ContainerWorld:
             return lc.exit_code != 0
         false
 
+    # The create-time ceiling this entity can never exceed.
+    fn ceiling_of(self, idx: i64) -> [text]:
+        self.ceiling_caps[idx]
+
+    fn ceiling_root_of(self, idx: i64) -> text:
+        self.ceiling_roots[idx]
+
+    # Attenuate a re-acquisition request against the ceiling: keep only caps the
+    # container was granted at CREATE time. Never amplifies — the result is a
+    # subset of both the request and the ceiling.
+    fn attenuate_caps(self, idx: i64, requested: [text]) -> [text]:
+        val ceiling = self.ceiling_caps[idx]
+        var out: [text] = []
+        var i = 0
+        while i < requested.len():
+            val c = requested[i]
+            var allowed = false
+            var j = 0
+            while j < ceiling.len():
+                if ceiling[j] == c:
+                    allowed = true
+                j = j + 1
+            if allowed:
+                out = out.push(c)
+            i = i + 1
+        out
+
+    # A restart may re-declare a root at or BELOW the create-time root, never
+    # above it (and never the host root "/" unless that is what was created).
+    # Anything wider collapses to the ceiling root — fail-closed, never widened.
+    fn clamp_root(self, idx: i64, root: text) -> text:
+        val ceiling = self.ceiling_roots[idx]
+        if ceiling == "":
+            return ""
+        if root == ceiling:
+            return ceiling
+        if root.starts_with(ceiling + "/"):
+            if not root.contains(".."):
+                return root
+        ceiling
+
     # sys_restart — bring an exited container back. EVERY grant is supplied
     # afresh by the caller (root/pids/caps/quotas): nothing is inherited from
     # the dead instance, because sys_monitor already emptied all of it. This is
     # the §21 service rule applied to containers.
+    #
+    # §21 says nothing may SURVIVE a restart; it does not by itself stop a
+    # restart from asking for MORE. The re-acquisition is therefore attenuated
+    # against the frozen create-time ceiling (caps AND root) — a crash-loop is
+    # not a privilege-escalation primitive.
     me sys_restart(idx: i64, reacquired: [text], root: text, pids: [u64], cpu: u64, mem: u64, io: u64, pid_quota: u64) -> SpawnRequest:
         # Re-acquire the namespace view from a rootless base + the freshly
-        # declared handles (never the stale collapsed view).
+        # declared handles (never the stale collapsed view), clamped to the
+        # create-time root.
+        val safe_root = self.clamp_root(idx, root)
         var a_views = self.views
-        a_views[idx] = NamespaceView(view: container_view_create(root, pids), net_handle: 0u64, ipc_handle: 0u64)
+        a_views[idx] = NamespaceView(view: container_view_create(safe_root, pids), net_handle: 0u64, ipc_handle: 0u64)
         self.views = a_views
 
         # Re-mint the resource domain.
@@ -582,9 +661,9 @@ impl ContainerWorld:
         a_dom[idx] = ResourceDomain(cpu: cpu, mem: mem, io: io, pids: pid_quota)
         self.domains = a_dom
 
-        # Re-acquire the capability pouch.
+        # Re-acquire the capability pouch, attenuated against the ceiling.
         var a_grant = self.granted_caps
-        a_grant[idx] = reacquired
+        a_grant[idx] = self.attenuate_caps(idx, reacquired)
         self.granted_caps = a_grant
 
         var a_rs = self.restarts
