@@ -10,16 +10,14 @@ manifest-bound Vulkan 2D live PASS exists, so no downstream lane may be marked
 complete from source review, retained diagnostics, CPU mirrors, or unretained
 peer reports.
 
-The latest bounded producer work supersedes the older three-cycle diagnostic
-summary immediately below. The pushed receiver-vector repair
-`fba1e6bcab` remains valid, but a narrower consecutive-call defect is now
-proven: after `FontRenderer.reset_cache_stats()` returns unit, native code calls
-`receipt_cache_rasterizations_zero()` without reloading the same typed receiver
-into `x0`. Cycles 2 and 3 both exited 132 at that exact call. The source
-checkpoint therefore uses one atomic mutating reset receipt, direct in-frame
-`FontRenderConfig` construction, boolean-only 100-pixel state, mut-out plan
-construction, and typed-local boolean wrappers. It is not native-verified
-because the three producer cycles are exhausted.
+The latest bounded producer work is recorded in cycles 22–24 below and
+supersedes the older diagnostic summaries. Parsing, cmap, tables, metrics,
+outline geometry, and common-module caller-owned pixel publication are now
+localized. The remaining failure is at the selected-font integration seam:
+all three current builds stop at `fail-glyph-bitmap-return` before
+FontRenderer records a completed bitmap. The attempted method and retained
+FontRenderer-blob transports did not advance that receipt. No source change
+from cycles 22–24 is accepted or pushed as a fix.
 
 ### Verified current state
 
@@ -75,10 +73,13 @@ because the three producer cycles are exhausted.
 
 ### Ordered remaining tasks
 
-1. In a fresh session, run the focused pure-Simple native regression for the
-   atomic reset receipt once. Do not repeat the exhausted cycle directories.
-   Preserve the missing-`x0` disassembly as an open compiler regression.
-2. Run one focused current-source producer check and require exact Bungee
+1. In a fresh session, run one minimal compiler regression probe: mutate a
+   caller-owned slice, make one intervening aggregate-return/scalar-helper
+   call, then mutate and validate the same slice again. Do not repeat cycles
+   22–24 unchanged.
+2. Fix native/Cranelift mutable-slice descriptor preservation if that focused
+   probe confirms the high-review diagnosis, then run one
+   focused current-source producer check and require exact Bungee
    24 pt at 300 DPI = 100 px, plan admission, positive staged quads, atlas ROI
    alpha, cold rasterizations, warm zero rasterizations plus positive hits,
    stable identity, and CPU producer execution.
@@ -838,6 +839,41 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   publication with a raw scalar descriptor/pixel pointer or an owner-local
   void copy. Remove diagnostic double parsing from the glyph hot path before
   push unless high review explicitly accepts a bounded test-only form.
+
+### 2026-07-27 Bungee producer cycles 22–24
+
+- Cycle 22 implemented the canonical 17-slot two-pass SFNT metadata contract,
+  caller-owned exact-size pixels, codepoint/glyph-index parity, whitespace
+  completion, and the missing value-returning `_add_edge` assignment. It
+  compiled 185 modules with zero failures and advanced from
+  `fail-glyph-bitmap-pixels` to `fail-glyph-bitmap-return`. This proves the
+  common-to-SFFI caller-owned pixel publication while isolating the remaining
+  aggregate return.
+- Cycle 23 moved selected codepoint and glyph-index consumption into
+  FontRenderer and constructed `CachedGlyph` locally, but routed measure and
+  render through FontRasterizer instance methods. It compiled 185 modules with
+  zero failures and retained the exact `fail-glyph-bitmap-return` result, so
+  that instance-method mutable-output channel is not accepted.
+- Cycle 24 retained the selected blob on FontRenderer and invoked the common
+  free two-pass functions directly. It compiled 185 modules with zero failures
+  and still retained the exact `fail-glyph-bitmap-return` result. The next
+  session must first isolate mutable-slice survival across an intervening call
+  in a compiler-only regression probe.
+- Final high review found that cycles 23 and 24 share a call-rich mutable-slice
+  lifetime: `mut meta` and `mut pixels` remain live across aggregate-return and
+  scalar helper calls before their completion writes. Cycle 16 proved only a
+  leaf mutation without intervening calls. The leading root cause is therefore
+  native/Cranelift slice-descriptor preservation across calls, not Bungee
+  parsing or the Engine2D return. Fix the compiler seam rather than adding
+  concurrency-unsafe global font scratch state.
+- High review also required and the current source now includes zero-height
+  divide protection, zero-area EMPTY classification, render metadata bounds,
+  measure/render input parity, current-face checks for EMPTY, and canonical
+  magic/version comparisons. These changes are not accepted until the focused
+  producer passes.
+- The mandatory three-cycle cap is exhausted. No bootstrap was run. Do not
+  push the current source as a fixed implementation and do not rerun the same
+  probe unchanged.
 
 ## Ownership and Stop Conditions
 
