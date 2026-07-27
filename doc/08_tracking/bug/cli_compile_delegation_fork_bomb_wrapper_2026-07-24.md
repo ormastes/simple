@@ -36,11 +36,12 @@ self-match). 98,635 → 832 system processes.
 ## Mitigation (in place, tracked)
 
 `bin/release/simple` wrapper now carries a re-entry flag: first pass exports
-`SIMPLE_WRAPPER_REENTERED=1` and execs the CLI; any re-entry execs the Rust
-seed instead (which really implements `--backend=vhdl` and never delegates).
-Verified: the VHDL compile now holds a flat 3 processes and terminates
-(rc=1 with the seed's own pre-existing VHDL-backend error — a separate, known
-degradation; both FPGA lanes bypass it).
+`SIMPLE_WRAPPER_REENTERED=1`, performs the existing bounded identity and test
+ABI probes against the legitimate deployed candidate, and then execs that
+candidate. Any recursive wrapper entry now fails closed with rc=1 before
+candidate probing. It does not execute the Rust seed or any other fallback.
+This bounds wrapper-mediated recursion without silently changing compiler
+authority.
 
 ## Root fix (implemented, `.spl`, requires redeploy to take effect)
 
@@ -76,6 +77,8 @@ covers `aot_file`/`aot_c_file`/`aot_llvm_file`/`aot_vhdl_file`/etc.) and in
 
 Redeploy note: this fix lives in the compiler's own `.spl` source, so it only
 takes effect once the self-hosted binary is rebuilt and redeployed to
-`bin/release/<triple>/simple` — until then, the deployed binaries still rely
-solely on the wrapper-level `SIMPLE_WRAPPER_REENTERED` mitigation described
-above.
+`bin/release/<triple>/simple`. The wrapper-level
+`SIMPLE_WRAPPER_REENTERED` guard remains defense-in-depth, but it cannot prove
+that the deployed compiler contains the `.spl` root fix. A source-matched,
+provenance-admitted pure-Simple CLI is therefore still required before the
+delegation path or downstream VHDL evidence can be accepted.
