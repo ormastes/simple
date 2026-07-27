@@ -178,6 +178,12 @@ pub class HostedBrowserRendererProcess:
     pending_wire: text
     pending_wire_offset: i64
     pending_wire_reply_to_request_id: i64
+    pending_wire_is_command: bool
+    deferred_wire: text
+    deferred_operation: text
+    deferred_timeout_ms: i64
+    deferred_resize_width: i32
+    deferred_resize_height: i32
     document_url: text
     document_origin: text
     navigation_permit: HostedBrowserNavigationPermit
@@ -221,6 +227,12 @@ pub class HostedBrowserRendererProcess:
             pending_wire: "",
             pending_wire_offset: 0,
             pending_wire_reply_to_request_id: 0,
+            pending_wire_is_command: false,
+            deferred_wire: "",
+            deferred_operation: "",
+            deferred_timeout_ms: 0,
+            deferred_resize_width: 0,
+            deferred_resize_height: 0,
             document_url: "",
             document_origin: "",
             navigation_permit: hosted_browser_empty_navigation_permit(),
@@ -344,21 +356,14 @@ pub class HostedBrowserRendererProcess:
     me _replace_pending_navigation() -> bool:
         if self.command_deadline_ms <= 0:
             return true
-        if (self.pending_operation != "navigation" and
-            self.pending_operation != "history" and
-            self.pending_operation != "advance" and
-            self.pending_operation != "pointer" and
-            self.pending_operation != "key" and
-            self.pending_operation != "text" and
-            self.network_job_handle <= 0 and self.pending_wire == ""):
+        if (self.deferred_wire != "" or self.network_job_handle > 0 or
+            self.pending_wire == "" or not self.pending_wire_is_command or
+            self.pending_wire_offset > 0):
             return false
-        if self.pending_wire != "":
-            if self.pending_wire_offset > 0:
-                return false
-            self.pending_wire = ""
-            self.pending_wire_offset = 0
-            self.pending_wire_reply_to_request_id = 0
-        self._cancel_network_job()
+        self.pending_wire = ""
+        self.pending_wire_offset = 0
+        self.pending_wire_reply_to_request_id = 0
+        self.pending_wire_is_command = false
         self.command_deadline_ms = 0
         self.pending_operation = ""
         self.next_animation_ms = -1
@@ -371,14 +376,29 @@ pub class HostedBrowserRendererProcess:
         self.provisional_document_origin = ""
         true
 
-    me _replace_pending_animation() -> bool:
-        if self.command_deadline_ms <= 0:
-            return true
-        if (self.pending_operation != "advance" or
-            self.network_job_handle > 0 or self.pending_wire != ""):
+    me _cancel_pending_for_stop() -> bool:
+        if self.pending_wire != "" and self.pending_wire_offset > 0:
             return false
+        self.pending_wire = ""
+        self.pending_wire_offset = 0
+        self.pending_wire_reply_to_request_id = 0
+        self.pending_wire_is_command = false
+        self.deferred_wire = ""
+        self.deferred_operation = ""
+        self.deferred_timeout_ms = 0
+        self.deferred_resize_width = 0
+        self.deferred_resize_height = 0
+        self._cancel_network_job()
         self.command_deadline_ms = 0
         self.pending_operation = ""
+        self.next_animation_ms = -1
+        self.pending_resize_width = 0
+        self.pending_resize_height = 0
+        self.pending_history_index = -1
+        self.navigation_permit = hosted_browser_empty_navigation_permit()
+        self.pending_history_action = ""
+        self.pending_document_commit_url = ""
+        self.provisional_document_origin = ""
         true
 
     me close():
@@ -396,6 +416,12 @@ pub class HostedBrowserRendererProcess:
         self.pending_wire = ""
         self.pending_wire_offset = 0
         self.pending_wire_reply_to_request_id = 0
+        self.pending_wire_is_command = false
+        self.deferred_wire = ""
+        self.deferred_operation = ""
+        self.deferred_timeout_ms = 0
+        self.deferred_resize_width = 0
+        self.deferred_resize_height = 0
         if self.pid > 0:
             val _ = process_close_piped(self.pid)
         self.pid = 0
@@ -657,6 +683,7 @@ pub class HostedBrowserRendererProcess:
         self.pending_wire = wire.wire
         self.pending_wire_offset = 0
         self.pending_wire_reply_to_request_id = self.next_request_id
+        self.pending_wire_is_command = false
         ""
 
     me _flush_pending_wire_once() -> text:
@@ -685,6 +712,7 @@ pub class HostedBrowserRendererProcess:
             self.pending_wire = ""
             self.pending_wire_offset = 0
             self.pending_wire_reply_to_request_id = 0
+            self.pending_wire_is_command = false
         ""
 
     me _poll_network_job() -> text:
@@ -746,9 +774,65 @@ pub class HostedBrowserRendererProcess:
         self.pending_wire = request.wire
         self.pending_wire_offset = 0
         self.pending_wire_reply_to_request_id = self.next_request_id
+        self.pending_wire_is_command = true
         self.command_deadline_ms = deadline
         self.pending_operation = operation
         Ok(true)
+
+    me _begin_after_animation(
+        request: BrowserRendererEncodeResult,
+        operation: text,
+        timeout_ms: i64,
+        resize_width: i32 = 0,
+        resize_height: i32 = 0
+    ) -> Result<bool, text>:
+        if self.command_deadline_ms <= 0:
+            self.pending_resize_width = resize_width
+            self.pending_resize_height = resize_height
+            return self._begin_frame_request(
+                request, operation, timeout_ms
+            )
+        if (self.pending_operation != "advance" or
+            self.network_job_handle > 0 or self.deferred_wire != "" or
+            not request.ok):
+            return Err(if request.ok: "renderer-busy" else: request.reason)
+        if self.pending_wire != "" and self.pending_wire_is_command:
+            if self.pending_wire_offset > 0:
+                return Err("renderer-busy")
+            self.pending_wire = ""
+            self.pending_wire_offset = 0
+            self.pending_wire_reply_to_request_id = 0
+            self.pending_wire_is_command = false
+            self.command_deadline_ms = 0
+            self.pending_operation = ""
+            self.pending_resize_width = resize_width
+            self.pending_resize_height = resize_height
+            return self._begin_frame_request(
+                request, operation, timeout_ms
+            )
+        self.deferred_wire = request.wire
+        self.deferred_operation = operation
+        self.deferred_timeout_ms = timeout_ms
+        self.deferred_resize_width = resize_width
+        self.deferred_resize_height = resize_height
+        Ok(true)
+
+    me _activate_deferred_command():
+        if self.deferred_wire == "":
+            return
+        self.pending_wire = self.deferred_wire
+        self.pending_wire_offset = 0
+        self.pending_wire_reply_to_request_id = self.next_request_id
+        self.pending_wire_is_command = true
+        self.command_deadline_ms = _deadline_ms(self.deferred_timeout_ms)
+        self.pending_operation = self.deferred_operation
+        self.pending_resize_width = self.deferred_resize_width
+        self.pending_resize_height = self.deferred_resize_height
+        self.deferred_wire = ""
+        self.deferred_operation = ""
+        self.deferred_timeout_ms = 0
+        self.deferred_resize_width = 0
+        self.deferred_resize_height = 0
 
     me poll() -> HostedBrowserRendererResult?:
         if self.command_deadline_ms <= 0:
@@ -857,6 +941,7 @@ pub class HostedBrowserRendererProcess:
             self.next_animation_ms = frame.next_animation_ms
             self.command_deadline_ms = 0
             self.pending_operation = ""
+            self._activate_deferred_command()
             self.state = "active"
             return Some(_renderer_frame_result(
                 frame.composition,
@@ -932,16 +1017,14 @@ pub class HostedBrowserRendererProcess:
             return Err("invalid-renderer-state")
         if width == self.width and height == self.height:
             return Ok(false)
-        if not self._replace_pending_animation():
-            return Err("renderer-busy")
-        self.pending_resize_width = width
-        self.pending_resize_height = height
-        val started = self._begin_frame_request(
+        val started = self._begin_after_animation(
             browser_renderer_resize_encode(
                 self.generation, self.next_request_id, width, height
             ),
             "resize",
-            timeout_ms
+            timeout_ms,
+            width,
+            height
         )
         if val Err(_) = started:
             self.pending_resize_width = 0
@@ -1073,7 +1156,7 @@ pub class HostedBrowserRendererProcess:
         if self.command_deadline_ms > 0:
             if self.pending_operation == "stop":
                 return Ok(false)
-            if not self._replace_pending_navigation():
+            if not self._cancel_pending_for_stop():
                 return Err("renderer-busy")
         else:
             self.navigation_permit = hosted_browser_empty_navigation_permit()
@@ -1150,9 +1233,7 @@ pub class HostedBrowserRendererProcess:
     ) -> Result<bool, text>:
         if self.state != "active":
             return Err("invalid-renderer-state")
-        if not self._replace_pending_animation():
-            return Err("renderer-busy")
-        self._begin_frame_request(browser_renderer_pointer_encode(
+        self._begin_after_animation(browser_renderer_pointer_encode(
             self.generation, self.next_request_id,
             event_id, x, y, pressed
         ), "pointer", timeout_ms)
@@ -1172,9 +1253,7 @@ pub class HostedBrowserRendererProcess:
     ) -> Result<bool, text>:
         if self.state != "active":
             return Err("invalid-renderer-state")
-        if not self._replace_pending_animation():
-            return Err("renderer-busy")
-        self._begin_frame_request(browser_renderer_key_encode(
+        self._begin_after_animation(browser_renderer_key_encode(
             self.generation, self.next_request_id,
             event_id, key_code, pressed
         ), "key", timeout_ms)
@@ -1193,9 +1272,7 @@ pub class HostedBrowserRendererProcess:
     ) -> Result<bool, text>:
         if self.state != "active":
             return Err("invalid-renderer-state")
-        if not self._replace_pending_animation():
-            return Err("renderer-busy")
-        self._begin_frame_request(browser_renderer_text_encode(
+        self._begin_after_animation(browser_renderer_text_encode(
             self.generation, self.next_request_id, event_id, value
         ), "text", timeout_ms)
 

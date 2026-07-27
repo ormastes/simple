@@ -119,13 +119,6 @@ describe "hosted browser renderer broker policy":
 
     it "does not start asynchronous navigation before renderer readiness":
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
-        broker.command_deadline_ms = 100
-        broker.pending_operation = "navigation"
-        broker.pending_history_action = "push"
-        broker.pending_document_commit_url = "https://stale.test/"
-        broker.provisional_document_origin = "https://stale.test"
-        broker.pending_wire = "queued-response"
-        broker.pending_wire_reply_to_request_id = 2
         match broker.begin_navigate(
             "https://example.test/", "GET", "", "", "", 1000
         ):
@@ -178,19 +171,38 @@ describe "hosted browser renderer broker policy":
         expect(broker.state).to_equal("active")
         expect(broker.pending_operation).to_equal("navigation")
 
-    it "lets trusted page input supersede only an animation frame":
+    it "coalesces an unsent animation but defers after it is sent":
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.state = "active"
+        expect(broker.begin_advance(16, 1000).is_ok()).to_be(true)
+        expect(broker.begin_pointer(1, 4, 5, true, 1000).is_ok()).to_be(true)
+        expect(broker.pending_operation).to_equal("pointer")
+        expect(broker.pending_wire).to_start_with("SBR1\tpointer")
+
+        broker.pending_wire = ""
+        broker.pending_wire_is_command = false
+        broker.expected_reply_to_request_id = 2
+        broker.next_request_id = 3
+        broker.pending_operation = "advance"
+        expect(broker.begin_key(2, 65, true, 1000).is_ok()).to_be(true)
+        expect(broker.pending_operation).to_equal("advance")
+        expect(broker.deferred_operation).to_equal("key")
+        expect(broker.deferred_wire).to_start_with("SBR1\tkey")
+        expect(broker.expected_reply_to_request_id).to_equal(2)
+        expect(broker.next_request_id).to_equal(3)
+
+    it "does not erase an animation network response to queue input":
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
         broker.state = "active"
         broker.command_deadline_ms = 100
         broker.pending_operation = "advance"
-        expect(broker._replace_pending_animation()).to_be(true)
-        expect(broker.command_deadline_ms).to_equal(0)
-        expect(broker.pending_operation).to_equal("")
-        broker.command_deadline_ms = 100
-        broker.pending_operation = "navigation"
-        expect(broker._replace_pending_animation()).to_be(false)
-        expect(broker.command_deadline_ms).to_equal(100)
-        expect(broker.pending_operation).to_equal("navigation")
+        broker.pending_wire = "network-response"
+        broker.pending_wire_is_command = false
+        broker.next_request_id = 3
+        expect(broker.begin_text_input(3, "x", 1000).is_ok()).to_be(true)
+        expect(broker.pending_wire).to_equal("network-response")
+        expect(broker.deferred_operation).to_equal("text")
+        expect(broker.deferred_wire).to_start_with("SBR1\ttext")
 
     it "denies a renderer document request without a parent permit":
         val policy = hosted_browser_renderer_request_policy(
