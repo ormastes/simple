@@ -419,6 +419,7 @@ pub(crate) fn mangle_mir(
                                 &name,
                                 use_map,
                                 import_map,
+                                ambiguous_names,
                                 &local_suffix_index,
                                 suffix_index,
                                 &func.name,
@@ -572,6 +573,7 @@ fn resolve_call_target(
     name: &str,
     use_map: &std::collections::HashMap<String, String>,
     import_map: &std::collections::HashMap<String, String>,
+    ambiguous_names: &std::collections::HashSet<String>,
     local_suffix_index: &std::collections::HashMap<String, Vec<String>>,
     suffix_index: &std::collections::HashMap<String, Vec<String>>,
     func_name: &str,
@@ -646,7 +648,9 @@ fn resolve_call_target(
             );
         }
     } else if let Some(resolved) =
-        resolve_by_suffix(lookup_name, local_suffix_index).or_else(|| resolve_by_suffix(lookup_name, suffix_index))
+        resolve_ambiguous_private_call_in_module(lookup_name, prefix, ambiguous_names, suffix_index)
+            .or_else(|| resolve_by_suffix(lookup_name, local_suffix_index))
+            .or_else(|| resolve_by_suffix(lookup_name, suffix_index))
     {
         *target = target.with_name(resolved);
     } else {
@@ -656,6 +660,46 @@ fn resolve_call_target(
             name, func_name, prefix
         );
     }
+}
+
+fn resolve_ambiguous_private_call_in_module(
+    name: &str,
+    prefix: &str,
+    ambiguous_names: &std::collections::HashSet<String>,
+    suffix_index: &std::collections::HashMap<String, Vec<String>>,
+) -> Option<String> {
+    if !name.starts_with('_') || !ambiguous_names.contains(name) {
+        return None;
+    }
+
+    let suffix = format!("__{name}");
+    let mut candidates = std::collections::BTreeSet::new();
+    for candidate in suffix_index.values().flatten() {
+        if candidate.ends_with(&suffix) {
+            candidates.insert(candidate);
+        }
+    }
+
+    let mut best = None;
+    let mut best_score = 0;
+    let mut tied = false;
+    for candidate in candidates {
+        let owner = candidate.strip_suffix(&suffix)?;
+        let score = owner
+            .split("__")
+            .zip(prefix.split("__"))
+            .take_while(|(left, right)| left == right)
+            .count();
+        if score > best_score {
+            best = Some(candidate);
+            best_score = score;
+            tied = false;
+        } else if score == best_score && score != 0 {
+            tied = true;
+        }
+    }
+
+    (best_score != 0 && !tied).then(|| best.unwrap().clone())
 }
 
 /// Resolve a MethodCallStatic target that is still unresolved.

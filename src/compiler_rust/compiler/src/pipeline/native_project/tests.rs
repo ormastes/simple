@@ -4400,6 +4400,95 @@ fn test_llvm_mangle_renames_imported_global_declarations_with_uses() {
 }
 
 #[test]
+fn test_llvm_mangle_resolves_ambiguous_private_call_to_nearest_module() {
+    let mut mir = crate::mir::MirModule::new();
+    let mut func = crate::mir::MirFunction::new(
+        "check_short_grammar_refactor".to_string(),
+        crate::hir::TypeId::VOID,
+        simple_parser::Visibility::Private,
+    );
+    func.blocks[0].instructions.push(crate::mir::MirInst::Call {
+        dest: None,
+        target: crate::mir::CallTarget::Pure("_text_index_len".to_string()),
+        args: vec![],
+    });
+    func.blocks[0].terminator = crate::mir::Terminator::Return(None);
+    mir.functions.push(func);
+
+    let expected = "tools__fix__rules__helpers___text_index_len".to_string();
+    let all_mangled = std::collections::HashMap::from([(
+        "_text_index_len".to_string(),
+        vec![
+            "nogc_sync_mut__tooling__easy_fix__rules_helpers___text_index_len".to_string(),
+            expected.clone(),
+        ],
+    )]);
+    let suffix_index = super::imports::build_suffix_index(&all_mangled);
+    let ambiguous_names = std::collections::HashSet::from(["_text_index_len".to_string()]);
+
+    let unresolved = super::mangle::mangle_mir(
+        &mut mir,
+        "tools__fix__rules__impl___lint_short_grammar",
+        false,
+        &std::collections::HashMap::new(),
+        &ambiguous_names,
+        &std::collections::HashMap::new(),
+        &suffix_index,
+    );
+
+    assert_eq!(unresolved, 0);
+    match &mir.functions[0].blocks[0].instructions[0] {
+        crate::mir::MirInst::Call { target, .. } => assert_eq!(target.name(), expected),
+        other => panic!("expected call, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_llvm_mangle_keeps_equal_distance_ambiguous_private_call_unresolved() {
+    let mut mir = crate::mir::MirModule::new();
+    let mut func = crate::mir::MirFunction::new(
+        "check_short_grammar_refactor".to_string(),
+        crate::hir::TypeId::VOID,
+        simple_parser::Visibility::Private,
+    );
+    func.blocks[0].instructions.push(crate::mir::MirInst::Call {
+        dest: None,
+        target: crate::mir::CallTarget::Pure("_text_index_len".to_string()),
+        args: vec![],
+    });
+    func.blocks[0].terminator = crate::mir::Terminator::Return(None);
+    mir.functions.push(func);
+
+    let all_mangled = std::collections::HashMap::from([(
+        "_text_index_len".to_string(),
+        vec![
+            "tools__fix__alpha___text_index_len".to_string(),
+            "tools__fix__beta___text_index_len".to_string(),
+        ],
+    )]);
+    let suffix_index = super::imports::build_suffix_index(&all_mangled);
+    let ambiguous_names = std::collections::HashSet::from(["_text_index_len".to_string()]);
+
+    let unresolved = super::mangle::mangle_mir(
+        &mut mir,
+        "tools__fix__rules__impl___lint_short_grammar",
+        false,
+        &std::collections::HashMap::new(),
+        &ambiguous_names,
+        &std::collections::HashMap::new(),
+        &suffix_index,
+    );
+
+    assert_eq!(unresolved, 1);
+    match &mir.functions[0].blocks[0].instructions[0] {
+        crate::mir::MirInst::Call { target, .. } => {
+            assert_eq!(target.name(), "_text_index_len")
+        }
+        other => panic!("expected call, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_llvm_mangle_does_not_rebind_qualified_method_to_unrelated_type() {
     let mut mir = crate::mir::MirModule::new();
     let mut func = crate::mir::MirFunction::new(

@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-26 (evening)
 - **Lane:** stage4 one-binary rebuild (seed → libspl_objects.a → clang link, aarch64-apple-darwin)
-- **Status:** open — blocks any stage4 rebuild from current main
+- **Status:** fixed in source; one full Stage-4 rebuild remains pending
 
 ## Symptom
 Link fails with undefined symbols that are BARE (unmangled) references, while the
@@ -61,9 +61,28 @@ pre-existing, repo-wide stage4-build breakages:
    lowered into generated C carrying Rust inline-asm operand syntax (`in(reg)`).
    Codegen lowering bug, separate from the two link failures.
 
+## Source Fixes and Focused Evidence
+
+1. `runtime_native.c` now provides `simple_contract_check` and
+   `simple_contract_check_msg`; the core-C capsule producer requires and attests
+   both global text symbols. A capsule-equivalent compile plus `nm -g` found
+   both providers as `T`.
+2. Native-project mangling now resolves an ambiguous private call only when one
+   candidate has the unique longest module-prefix match. The focused nearest
+   candidate and equal-distance refusal tests pass (2/2).
+3. Generated inline-asm C now filters Simple operand/clobber/options directives
+   while retaining real instruction text. Its focused generated-C compile test
+   passes (1/1).
+
+The release wrapper also executes a bounded test-command ABI probe after
+`--version`. The obsolete deployed binary is now rejected cleanly instead of
+crashing in `rt_env_set`; the wrapper integration test passes.
+
+These are source-level and focused-test results. A current Stage-4 binary,
+full SSpec/docgen, Bootgen output, and board evidence are not implied.
+
 ## Impact
-No stage4 candidate can be built from ANY recent sha with ANY seed → the runtime
-perf fix (`3da818508d29`) and any compiler fix cannot deploy until at least defects
-#1 and #3 are resolved. This blocks all sessions' deploys, not just this one. The
-currently-deployed binary predates these breakages. Delegated to Codex (compiler/
-runtime) with all three delineated.
+
+The previous blockers prevented any recent Stage-4 candidate from linking.
+They are fixed in source; the currently deployed binary still predates the
+environment ABI and must not be used as production evidence.

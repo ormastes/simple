@@ -297,6 +297,20 @@ int64_t  rt_entropy_hardware_ready(void);
 void     rt_sleep_ms(int64_t ms);
 void     rt_sleep_secs(int64_t seconds);
 void     rt_panic(const char* msg);
+void     simple_contract_check(
+    int64_t condition,
+    int64_t kind,
+    const uint8_t* func_name_ptr,
+    int64_t func_name_len
+);
+void     simple_contract_check_msg(
+    int64_t condition,
+    int64_t kind,
+    const uint8_t* func_name_ptr,
+    int64_t func_name_len,
+    const uint8_t* message_ptr,
+    int64_t message_len
+);
 int64_t  rt_string_new(const uint8_t* bytes, uint64_t len);
 /* Interned literal boxing: same ABI as rt_string_new but caches by the
  * literal's stable rodata (ptr, len). Static literal data ONLY. */

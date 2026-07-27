@@ -149,6 +149,46 @@ fn native_inline_asm_skips_unresolved_simple_operands() {
 }
 
 #[test]
+fn native_inline_asm_c_skips_simple_operand_directives() {
+    let _guard = inline_asm_test_lock().lock().expect("inline asm test lock");
+    crate::codegen::inline_asm::clear_inline_asm_blocks();
+    assert!(aot_compiles("inline_asm_simple_operands", |f| {
+        let ret = f.new_vreg();
+        let block = f.block_mut(BlockId(0)).unwrap();
+        block.instructions.push(MirInst::InlineAsm {
+            instructions: vec![
+                "nop".to_string(),
+                "in(reg) id".to_string(),
+                "result = out (reg) result".to_string(),
+                "inout(reg) value".to_string(),
+                "lateout(reg) scratch".to_string(),
+                "clobber(\"x0\")".to_string(),
+                "clobber_abi(\"C\")".to_string(),
+                "options(nostack)".to_string(),
+            ],
+            volatile: true,
+        });
+        block.instructions.push(MirInst::ConstInt { dest: ret, value: 0 });
+        ret
+    }));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let c_path = crate::pipeline::native_project::inline_asm_emit::write_inline_asm_c(dir.path())
+        .expect("write asm c")
+        .expect("asm c");
+    let c = std::fs::read_to_string(c_path).expect("read asm c");
+    assert!(c.contains("\"nop\\n\""));
+    assert!(!c.contains("in(reg) id"));
+    assert!(!c.contains("out (reg) result"));
+    assert!(!c.contains("clobber_abi"));
+
+    let object = crate::pipeline::native_project::inline_asm_emit::compile_inline_asm_c(dir.path(), None)
+        .expect("compile asm c")
+        .expect("valid asm object");
+    assert!(object.exists());
+}
+
+#[test]
 fn hir_inline_asm_volatile_flag_is_preserved() {
     let body = lower_body(
         r#"

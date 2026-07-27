@@ -25,8 +25,21 @@ fn target_uses_x86_intel_asm(target: Option<(&str, &str, &str)>) -> bool {
 }
 
 fn has_unresolved_simple_operand(instruction: &str) -> bool {
+    let directive = instruction
+        .split_once('=')
+        .map_or(instruction, |(_, value)| value)
+        .trim_start();
+    let is_simple_operand_directive = ["in", "out", "inout", "lateout", "clobber", "clobber_abi", "options"]
+        .iter()
+        .any(|keyword| {
+            directive
+                .strip_prefix(keyword)
+                .is_some_and(|rest| rest.trim_start().starts_with('('))
+        });
+
     instruction.contains('{')
         || instruction.contains('}')
+        || is_simple_operand_directive
         // Unresolved Simple asm operands leak as the Rust `{:?}` of the AST
         // operand node, e.g. `li t0, Identifier("mstatus_mie")` or
         // `csrr Integer(0), mhartid` (seen in the riscv/riscv32 baremetal startup

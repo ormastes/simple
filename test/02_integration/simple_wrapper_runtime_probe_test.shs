@@ -68,6 +68,23 @@ SH
     chmod +x "$path"
 }
 
+make_crashing_test_runtime() {
+    path="$1"
+    cat > "$path" <<'SH'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+    echo "Simple fake runtime"
+    exit 0
+fi
+if [ "${1:-}" = "test" ]; then
+    kill -SEGV "$$"
+fi
+echo "crashing-test payload must not execute"
+exit 99
+SH
+    chmod +x "$path"
+}
+
 cp bin/sj "$TMP_ROOT/bin/sj"
 cp bin/simple-interp "$TMP_ROOT/bin/simple-interp"
 chmod +x "$TMP_ROOT/bin/sj" "$TMP_ROOT/bin/simple-interp"
@@ -113,6 +130,18 @@ case "$SEED_OUT" in
 esac
 case "$SEED_OUT" in
     *"seed payload must not execute"* ) fail "release wrapper executed seed payload" ;;
+esac
+
+make_crashing_test_runtime "$TMP_ROOT/bin/release/x86_64-unknown-linux-gnu/simple"
+if CRASH_OUT="$($TMP_ROOT/bin/release/simple --probe 2>&1)"; then
+    fail "release wrapper accepted runtime with broken test ABI"
+fi
+case "$CRASH_OUT" in
+    *"failed its bounded test ABI probe"* ) ;;
+    *) fail "release wrapper test-ABI rejection was unclear" ;;
+esac
+case "$CRASH_OUT" in
+    *"crashing-test payload must not execute"* ) fail "release wrapper executed crashing payload" ;;
 esac
 
 make_empty_identity_runtime "$TMP_ROOT/bin/release/x86_64-unknown-linux-gnu/simple"

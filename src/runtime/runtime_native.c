@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include <errno.h>
 #include <math.h>
 #include <signal.h>
@@ -6530,6 +6531,70 @@ void rt_ptr_write_i64(int64_t addr, int64_t offset, int64_t value) {
 /* ================================================================
  * Error Handling
  * ================================================================ */
+
+static const char* rt_contract_kind_name(int64_t kind) {
+    switch (kind) {
+        case 1: return "Postcondition";
+        case 2: return "Error postcondition";
+        case 3: return "Entry invariant";
+        case 4: return "Exit invariant";
+        case 5: return "Assertion";
+        default: return "Precondition";
+    }
+}
+
+static int rt_contract_arg_len(const uint8_t* ptr, int64_t len) {
+    if (!ptr || len <= 0) return 0;
+    return len > INT_MAX ? INT_MAX : (int)len;
+}
+
+static void rt_contract_fail(
+    int64_t kind,
+    const uint8_t* func_name_ptr,
+    int64_t func_name_len,
+    const uint8_t* message_ptr,
+    int64_t message_len
+) {
+    int func_len = rt_contract_arg_len(func_name_ptr, func_name_len);
+    const char* func_name = func_len ? (const char*)func_name_ptr : "<unknown>";
+    int message_size = rt_contract_arg_len(message_ptr, message_len);
+
+    if (!func_len) func_len = 9;
+    fprintf(
+        stderr,
+        "%s violation in function '%.*s': contract condition failed",
+        rt_contract_kind_name(kind),
+        func_len,
+        func_name
+    );
+    if (message_size) {
+        fprintf(stderr, " (%.*s)", message_size, (const char*)message_ptr);
+    }
+    fputc('\n', stderr);
+    abort();
+}
+
+void simple_contract_check(
+    int64_t condition,
+    int64_t kind,
+    const uint8_t* func_name_ptr,
+    int64_t func_name_len
+) {
+    if (condition != 0) return;
+    rt_contract_fail(kind, func_name_ptr, func_name_len, NULL, 0);
+}
+
+void simple_contract_check_msg(
+    int64_t condition,
+    int64_t kind,
+    const uint8_t* func_name_ptr,
+    int64_t func_name_len,
+    const uint8_t* message_ptr,
+    int64_t message_len
+) {
+    if (condition != 0) return;
+    rt_contract_fail(kind, func_name_ptr, func_name_len, message_ptr, message_len);
+}
 
 void rt_panic(const char* msg) {
     spl_panic(msg);
