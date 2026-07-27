@@ -27,3 +27,15 @@ alwaysApply: true
 - Claude plugins: `tools/claude-plugin/`
 - Gemini extension: `gemini-extension.json`
 - MCP registry: `tools/mcp-registry/`
+
+## Native-Codegen Dict Pitfalls (2026-07-27)
+
+Under **native** codegen (not the interpreter, not the seed): `Dict.len()`
+always returns `-1`, and `.get(k)` on a hit is corrupt (undecoded `i64`, or a
+segfaulting struct/class/enum payload). Details, truth table, and safe
+replacements: `doc/07_guide/language/dict_native_pitfalls.md`.
+
+- **Never call `Dict.len()` / `.length()`.** Use `keys().len()` (cold path) or
+  a maintained counter (hot path).
+- **Never call `.get()` on a dict whose value type is a struct/class/enum.**
+  Use `contains_key(k)` + index read `d[k]` instead.
