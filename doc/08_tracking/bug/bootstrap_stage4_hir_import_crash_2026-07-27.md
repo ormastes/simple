@@ -135,5 +135,17 @@ A strict focused entry-closure probe compiled 142 modules with
 `SIMPLE_NO_STUB_FALLBACK=1`, linked with one resolved `char_from_code`
 compatibility alias, and printed `42`. This proves the repaired import surfaces
 can lower and link in that closure; it does not replace full Stage-4 admission.
-The remaining 101 genuine unannotated value-returning declarations are tracked
-as TODO590. No fourth bootstrap was run.
+The retained unannotated value-returning diagnostics are tracked as TODO590;
+their physical-source count is corrected below. No fourth bootstrap was run.
+
+## Bounded Return-Contract Slice
+
+Parallel owner review corrected the inventory to 97 physical declarations;
+hardlink/module aliases inflated the 107 retained emissions. Twenty-five
+body-proven declarations now have explicit returns. Strict no-stub native probes
+print `42` for AOP/color, VHDL metadata, and `array_chunk`. The broader generic
+array probe crashed, so its other annotations were reverted. The fixed-Huffman
+gzip probe linked without stubs but compressed 11 bytes to 31 and decoded zero;
+dynamic Huffman/state annotations were reverted and the behavior bug is TODO591.
+VHDL call-lowering reaches codegen but its umbrella closure stops at the separate
+undeclared `path` global in `platform.spl` (TODO592). Full Stage 4 was not rerun.

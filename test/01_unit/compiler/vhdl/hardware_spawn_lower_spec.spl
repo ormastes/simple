@@ -7,6 +7,7 @@
 # **Category:** Backend
 # **Difficulty:** 3/5
 
+use std.spec
 use compiler.backend.backend.vhdl.vhdl_hardware_metadata.{HardwareAttr, ReturnLabel, HardwareCallInstance, CallLowerResult, LabelValidation, PortMapEntry, validate_hardware_attr, deterministic_instance_name}
 use compiler.backend.backend.vhdl.vhdl_call_lowering.{CallSite, CallLowerContext, TempSignal, LoweringDiagnostic, lower_call_site, build_instance, allocate_temp_signals}
 use compiler.backend.backend.vhdl.vhdl_bit_semantics.{BitWidth, BitSlice, BitConcat, BitExtension, BitShift, BitMask, BitDiagnostic, InstructionFormat, validate_bit_slice, rv32i_bitwidths}
@@ -40,6 +41,7 @@ describe "HardwareAttr preservation":
     it "attaches two return labels":
         var attr = HardwareAttr.hardware("full_adder")
         var labeled = attr.with_labels("sum", "u1", "cout", "u1")
+        check(labeled.has_labels())
         check(labeled.label_count == 2)
         check(labeled.label_name_at(0) == "sum")
         check(labeled.label_type_at(0) == "u1")
@@ -177,6 +179,9 @@ describe "HardwareCallInstance port map":
         inst = inst.add_port("a", "sig_a")
         inst = inst.add_port("b", "sig_b")
         inst = inst.add_port("sum", "fa_inst0_sum")
+        check(inst.has_port("a"))
+        check(not inst.has_port("missing"))
+        check(inst.is_valid())
         var pm = inst.vhdl_port_map()
         check(pm == "a => sig_a, b => sig_b, sum => fa_inst0_sum")
 
@@ -188,6 +193,17 @@ describe "HardwareCallInstance port map":
         check(vhdl == "fa_inst0 : entity work.full_adder port map (a => sig_a, b => sig_b);")
 
 describe "TempSignal allocation":
+    it "classifies port directions and lowering diagnostics":
+        val input = PortMapEntry.input_port("a", "sig_a", 1)
+        val output = PortMapEntry.output_port("sum", "sig_sum", 1)
+        check(input.is_input())
+        check(not input.is_output())
+        check(output.is_output())
+        check(not output.is_input())
+        val clean = CallLowerContext.create("test_mod")
+        check(not clean.has_errors())
+        check(clean.with_error("bad port").has_errors())
+
     it "allocates output temp signals":
         var attr = HardwareAttr.hardware("adder")
         var labeled = attr.with_labels("sum", "u1", "cout", "u1")

@@ -923,3 +923,11 @@ Tracking split:
   printed 42; both direct-env runtime guards pass. Full Stage-4 was not rerun.
   TODO590 owns the 101 genuine missing return annotations; rendering/QEMU/
   coverage admission remains deferred behind TODO580/TODO585/TODO590.
+- stage4-return-contracts: Five small read-only lanes corrected the retained
+  inventory to 97 physical untyped-return declarations and reviewed exact owner
+  contracts. Twenty-five safe scalar/narrow returns are now annotated. Strict
+  no-stub probes print 42 for AOP/color, VHDL metadata, and array_chunk. Unsafe
+  bulk Any annotations were reverted after a broad array crash and a real gzip
+  fixed-Huffman round-trip decoded zero bytes. TODO591 owns gzip behavior;
+  TODO592 owns the unrelated platform-path codegen blocker; TODO590 retains the
+  remaining 72 declarations. No full bootstrap, rendering, or QEMU run occurred.
