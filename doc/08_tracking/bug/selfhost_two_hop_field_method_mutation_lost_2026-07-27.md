@@ -274,3 +274,122 @@ is the whole mechanism.
 one-hop green, all two-hop cases red. Red is correct and expected: `simple test`
 runs specs on the interpreter, so the suite as a whole executes on the defective
 engine. It goes green when fix 1 or 2 lands.
+
+## Swept 2026-07-27 (lane ECS3 — remaining SimpleOS service worlds)
+
+Executed the ECS2 handoff list: `src/os/services/{ds,devfs,pipefs,clock,procfs,
+sched,rs,pm}_service.spl`, `devfs_filesystem.spl`, `procfs_filesystem.spl`,
+`wm/wm_world.spl`, `wm/wm_service.spl`, `fs_apps/app_loader_world.spl`, and
+`src/os/apps/{calculator,clock,hello_world}/**`. Binary: `build/native_probe/simple`.
+
+### Sites fixed (extract-mutate-writeback)
+All are `self.world.<store>.<mutating>()` / `self.world.base.spawn|despawn|advance()`
+chains crossing the imported `WorldBase` / `ComponentStore<T>` types.
+
+- `ds_service.spl` — `ds_publish` (spawn + 5 inserts + same-owner endpoint/ttl
+  update), `ds_unpublish`/`sys_gc_expired` (factored into new `remove_entry`,
+  5 removes + despawn), `ds_subscribe`, `ds_unsubscribe`, `ds_advance`.
+- `devfs_service.spl:89,117` — `dev_register` (spawn + 5 inserts),
+  `dev_unregister` (5 removes + despawn).
+- `pipefs_service.spl:89,109,123,138` — `pipe_create` (spawn + 5 inserts),
+  `pipe_write_notify`, `pipe_read_notify`, `pipe_close`.
+- `procfs_service.spl:106` — `procfs_node_register` (spawn + 3 inserts).
+- `rs_service.spl:105,128,134,162,178` — `rs_register` (spawn + 5 inserts),
+  `rs_heartbeat`, `rs_advance`, `sys_check_heartbeats`, `rs_restart`.
+- `clock_service.spl:143,154,164,174,187,102,105` — the three `clock_arm_*`
+  methods (factored into one `arm_alarm` helper), `clock_cancel`,
+  `clock_service_tick`, and both branches of `sys_fire_due_alarms`.
+- `sched_service.spl:227,243,260,281,286,139,164,191` — `sched_register_task`,
+  `sched_unregister_task`, `sched_record_usage`, `sched_set_nice`, `sched_tick`,
+  and both systems.
+- `pm_service.spl:250,284,317,330,350` — `pm_fork` (spawn + 8 inserts),
+  `pm_exec`, `pm_waitpid`, `pm_exit`, `pm_kill`.
+- `wm/wm_service.spl:446,500,517,534` — `parse_resize` geometry write and the
+  `parse_minimize`/`parse_maximize`/`parse_restore` state writes.
+
+### Three adjacent defects the fix UNMASKED (all fixed here)
+1. **Struct-valued world passed by value into a system function.**
+   `sys_fire_due_alarms(world: ClockWorld)`, `sys_demote_runaway_drivers` and
+   `sys_age_priorities(world: SchedWorld)` mutated a *copy*; every write was
+   discarded at return. Signatures now take `world_in` and `-> ClockWorld` /
+   `-> SchedWorld`, and callers write the result back. This is the same
+   value-copy class one level up from the two-hop bug and is invisible until
+   entity identity works.
+2. **`Entity(id: 0)` used as a "not found" sentinel.**
+   `sched_service.find_entity_for_task` returned `Entity(id: 0, generation: 0)`
+   when no task matched, and four callers tested `if e.id == 0`. Once spawn
+   stopped collapsing to id 0, the *first registered task* legitimately owns
+   id 0 and became permanently unreachable. Now returns `Entity.null()` and
+   callers use `e.is_null()`. **Any other service using an id-0 sentinel has
+   the same latent bug.**
+3. **Dangling `extern fn` declarations with no implementation anywhere.**
+   `clock_notify` (clock_service) and `sched_mechanism_set_priority`
+   (sched_service) aborted with `unknown extern function` the moment a real
+   alarm fired / a real driver was demoted. Masked because nothing was ever
+   armed or registered. Both replaced with the `ds_notify`-style module stub +
+   counter + `*_count_value()` accessor. (Same shape the TERM lane applied in
+   `tty_service.spl`.)
+
+### Sites audited clean
+- `devfs_filesystem.spl`, `procfs_filesystem.spl`, `fs_apps/app_loader_world.spl`
+  — no `<a>.<b>.<mutating>()` chains at all.
+- `wm/wm_world.spl` — all ECS mutation is one hop from `self` *inside* `WmWorld`
+  (`self.base.spawn()`, `self.win_ids.insert(...)`), the proven-safe shape.
+- `src/os/apps/{calculator,clock,hello_world}/ecs/world.spl` and their
+  top-level `*.spl` — same one-hop-inside-own-world shape; no two-hop chains.
+- `pm_service.PmWorld.spawn_process` — one hop from `self` inside `PmWorld`.
+- `ds/devfs/pipefs/procfs/rs/clock/sched/pm/wm_service` re-grepped after the
+  edits: zero remaining `self.<a>.<b>.<mutating>()` chains.
+
+### Wrong spec expectations corrected
+Six specs asserted `expect(e.id).to_be_greater_than(0)` on the FIRST entity of a
+fresh world. `EntityAllocator` hands out id **0** first, so this expectation was
+always wrong — it only "passed" while two-hop mutation loss made allocator state
+unobservable. Replaced with absolute `id == 0`, `generation == 1`,
+`is_null() == false` in ds / devfs / pipefs / procfs / clock / sched specs.
+
+### Regression specs added (all `build/native_probe/simple run`, every summary
+### line 0 failures)
+| Spec | New block | Verdict |
+|------|-----------|---------|
+| `test/01_unit/os/services/ds_service_spec.spl` | 4 examples: distinct ids 0/1/2, endpoint isolation, unpublish-one, per-entity subscriber lists | 19 examples, 0 failures |
+| `.../devfs_service_spec.spl` | 3 examples: ids 0/1/2, per-device endpoint+mode, unregister-middle | 15 examples, 0 failures |
+| `.../pipefs_service_spec.spl` | 3 examples: ids 0/1/2, per-pipe buffered bytes, per-pipe close bits | 19 examples, 0 failures |
+| `.../procfs_service_spec.spl` | 2 examples: ids 0/1/2, per-node pid isolation | 13 examples, 0 failures |
+| `.../rs_service_spec.spl` | 3 examples: ids 0/1/2, per-capsule restart budget, per-capsule liveness+crash reason | 21 examples, 0 failures |
+| `.../clock_service_spec.spl` | 3 examples: ids 0/1/2, cancel-one, three alarms firing independently over 5 ticks | 15 examples, 0 failures |
+| `.../sched_service_spec.spl` | 4 examples: ids 0/1/2, per-task priorities, id-0-is-not-a-sentinel, runaway demotion hits one task | 12 examples, 0 failures |
+| `.../pm_service/pm_service_spec.spl` | 3 examples: three forks -> pids 2/3/4 + entity ids 1/2/3, exit-one-sibling isolation, pid<->entity round trip | new block 3/3 green |
+| `.../wm/wm_world_multi_window_identity_spec.spl` (**new file**) | 5 examples: ids 256/257/258, per-window owner/process/app, grouped counts, despawn-middle, set_identity isolation | 5 examples, 0 failures |
+
+### Pre-existing reds NOT in this bug class (A/B-proven against `git show HEAD:`)
+- `pm_service_spec.spl` — 3 failures (`pm_exec ... calls loader`,
+  `pm_exit notifies parent via signal_deliver`, `pm_kill ... invokes
+  signal_deliver`). HEAD had **8** failures; the fix cleared 5. The remaining 3
+  are the *test-local extern stub shadowing* class: the spec declares Simple
+  `fn signal_deliver` / `fn loader_exec` stubs plus counters, but
+  `pm_service.spl`'s own `extern fn` declarations win, so the counters stay 0.
+  Real implementations exist (`os/posix/signal_compat.spl:171`,
+  `os/kernel/loader/loader_api.spl:159`) — the same situation the TERM lane
+  resolved in `tty_service.spl` by deleting the local extern declaration.
+  Left alone: not the two-hop class, and pm's exec/vmm externs need a decision
+  about whether unit tests should reach the real kernel loader.
+- `wm/wm_service_metadata_spec.spl` (5 failures) and
+  `wm/wm_service_focus_resize_identity_security_spec.spl` (5 failures) — byte
+  identical before and after the wm_service fix. Failure is
+  `semantic: undefined field 'value': cannot access field on value of type 'i64'`,
+  a typing defect in the raw-IPC-payload path, unrelated to entity identity.
+  This is why the wm regression cover was added at the `WmWorld` level instead.
+- `ds_service_spec.spl` cross-import global read: the spec read the module-level
+  `var ds_notify_count` directly and always saw 0. Fixed here with a
+  `ds_notify_count_value()` accessor (the known cross-import module-global read
+  defect); the same accessor shape was used for the two new clock/sched stubs.
+
+### Before/after failure counts (same binary, same specs)
+| Spec | HEAD | After |
+|------|------|-------|
+| ds_service | 9 | 0 |
+| devfs_service | 5 | 0 |
+| clock_service | 6 | 0 |
+| pm_service | 8 | 3 (unrelated class) |
+| pipefs / procfs / rs / sched | 1 / 1 / 0 / 1 | 0 / 0 / 0 / 0 |

@@ -54,11 +54,17 @@ describe "PipefsService pipe_create":
     entity, and that the new pipe has no closed ends.
     """
 
-    it "create returns entity with positive id":
-        """pipe_create must return an entity with id > 0."""
+    it "create returns the first live entity (id 0, generation 1)":
+        """pipe_create must return a live entity; the first allocated slot is id 0.
+
+        (The old `id > 0` expectation was wrong: EntityAllocator hands out id 0
+        first. It only "passed" while two-hop mutation loss hid allocator state.)
+        """
         var svc = PipefsService.new()
         val pipe = svc.pipe_create(10, 20, 4096)
-        expect(pipe.id).to_be_greater_than(0)
+        expect(pipe.id).to_equal(0)
+        expect(pipe.generation).to_equal(1)
+        expect(pipe.is_null()).to_equal(false)
 
     it "create increments pipe count":
         """After one pipe_create the count must be 1."""
@@ -148,3 +154,52 @@ describe "PipefsService pipe_close and pipe_is_closed":
         val pipe = svc.pipe_create(10, 20, 4096)
         val _ok = svc.pipe_close(pipe, PIPE_READER)
         expect(svc.pipe_is_closed(pipe, PIPE_WRITER)).to_equal(false)
+
+describe "PipefsService cross-entity identity (two-hop mutation-loss regression)":
+    """Regression for bug selfhost_two_hop_field_method_mutation_lost_2026-07-27.
+
+    Before the extract-mutate-writeback fix, `self.world.base.spawn()` returned
+    Entity(id: 0, generation: 1) for every pipe, so a second pipe aliased the
+    first and every per-pipe component write landed on one shared slot.
+    """
+
+    it "three pipes in one world get distinct entity ids 0, 1, 2":
+        var svc = PipefsService.new()
+        val p0 = svc.pipe_create(10, 20, 4096)
+        val p1 = svc.pipe_create(11, 21, 8192)
+        val p2 = svc.pipe_create(12, 22, 1024)
+        expect(p0.id).to_equal(0)
+        expect(p1.id).to_equal(1)
+        expect(p2.id).to_equal(2)
+        expect(p0.generation).to_equal(1)
+        expect(p1.generation).to_equal(1)
+        expect(p2.generation).to_equal(1)
+        expect(svc.pipe_count()).to_equal(3)
+
+    it "buffered byte counts stay isolated per pipe":
+        var svc = PipefsService.new()
+        val p0 = svc.pipe_create(10, 20, 4096)
+        val p1 = svc.pipe_create(11, 21, 8192)
+        val p2 = svc.pipe_create(12, 22, 1024)
+        expect(svc.pipe_write_notify(p0, 100)).to_equal(100)
+        expect(svc.pipe_write_notify(p1, 250)).to_equal(250)
+        expect(svc.pipe_write_notify(p2, 7)).to_equal(7)
+        # A second write on p1 only accumulates on p1
+        expect(svc.pipe_write_notify(p1, 50)).to_equal(300)
+        # Reading from p0 only drains p0
+        svc.pipe_read_notify(p0, 40)
+        expect(svc.pipe_write_notify(p0, 0)).to_equal(60)
+        expect(svc.pipe_write_notify(p1, 0)).to_equal(300)
+        expect(svc.pipe_write_notify(p2, 0)).to_equal(7)
+
+    it "closing one pipe does not close its siblings":
+        var svc = PipefsService.new()
+        val p0 = svc.pipe_create(10, 20, 4096)
+        val p1 = svc.pipe_create(11, 21, 8192)
+        val p2 = svc.pipe_create(12, 22, 1024)
+        expect(svc.pipe_close(p1, PIPE_WRITER)).to_equal(true)
+        expect(svc.pipe_is_closed(p1, PIPE_WRITER)).to_equal(true)
+        expect(svc.pipe_is_closed(p0, PIPE_WRITER)).to_equal(false)
+        expect(svc.pipe_is_closed(p2, PIPE_WRITER)).to_equal(false)
+        expect(svc.pipe_is_closed(p1, PIPE_READER)).to_equal(false)
+        expect(svc.pipe_count()).to_equal(3)

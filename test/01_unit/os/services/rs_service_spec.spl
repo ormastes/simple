@@ -178,3 +178,57 @@ describe "RsService reason constants":
 
     it "RS_REASON_SIGNAL is 3":
         expect(RS_REASON_SIGNAL).to_equal(3)
+
+describe "RsService cross-entity identity (two-hop mutation-loss regression)":
+    """Regression for bug selfhost_two_hop_field_method_mutation_lost_2026-07-27.
+
+    Before the extract-mutate-writeback fix, `self.world.base.spawn()` returned
+    Entity(id: 0, generation: 1) for every registration, so a second supervised
+    capsule aliased the first and per-capsule heartbeat/policy state collapsed.
+    """
+
+    it "three capsule registrations get distinct entity ids 0, 1, 2":
+        var svc = RsService.new()
+        val c0 = svc.rs_register("vfs", "/bin/vfs", 1, 5,  3, true)
+        val c1 = svc.rs_register("pm",  "/bin/pm",  1, 5,  3, true)
+        val c2 = svc.rs_register("ds",  "/bin/ds",  1, 5,  3, true)
+        expect(c0.id).to_equal(0)
+        expect(c1.id).to_equal(1)
+        expect(c2.id).to_equal(2)
+        expect(c0.generation).to_equal(1)
+        expect(c1.generation).to_equal(1)
+        expect(c2.generation).to_equal(1)
+        expect(svc.rs_count()).to_equal(3)
+
+    it "restart budget is tracked per capsule, not shared":
+        var svc = RsService.new()
+        val c0 = svc.rs_register("vfs", "/bin/vfs", 1, 5, 3, true)
+        val c1 = svc.rs_register("pm",  "/bin/pm",  1, 5, 3, true)
+        val c2 = svc.rs_register("ds",  "/bin/ds",  1, 5, 3, true)
+        expect(svc.rs_restart(c1)).to_equal(true)
+        expect(svc.rs_restart(c1)).to_equal(true)
+        expect(svc.rs_restart_count(c1)).to_equal(2)
+        expect(svc.rs_restart_count(c0)).to_equal(0)
+        expect(svc.rs_restart_count(c2)).to_equal(0)
+        # c1 exhausts its budget of 3; siblings are untouched
+        expect(svc.rs_restart(c1)).to_equal(true)
+        expect(svc.rs_restart(c1)).to_equal(false)
+        expect(svc.rs_restart_count(c1)).to_equal(3)
+        expect(svc.rs_restart(c0)).to_equal(true)
+        expect(svc.rs_restart_count(c0)).to_equal(1)
+
+    it "per-capsule liveness and crash reason stay isolated":
+        var svc = RsService.new()
+        # c0 has a generous timeout, c1 a tight one, c2 generous.
+        val c0 = svc.rs_register("vfs", "/bin/vfs", 1, 100, 3, true)
+        val c1 = svc.rs_register("pm",  "/bin/pm",  1, 1,   3, true)
+        val c2 = svc.rs_register("ds",  "/bin/ds",  1, 100, 3, true)
+        val _t1 = svc.rs_advance()
+        val _t2 = svc.rs_advance()
+        val _t3 = svc.rs_advance()
+        expect(svc.rs_is_alive(c0)).to_equal(true)
+        expect(svc.rs_is_alive(c1)).to_equal(false)
+        expect(svc.rs_is_alive(c2)).to_equal(true)
+        expect(svc.rs_last_crash_reason(c1)).to_equal(RS_REASON_HEARTBEAT_TIMEOUT)
+        expect(svc.rs_last_crash_reason(c0)).to_equal(RS_REASON_NONE)
+        expect(svc.rs_last_crash_reason(c2)).to_equal(RS_REASON_NONE)

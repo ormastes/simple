@@ -86,13 +86,26 @@ impl PipefsService:
         fixed at creation time, current buffered bytes starts at 0, and
         the closed bitmask starts at PIPE_OPEN (0).
         """
-        val e = self.world.base.spawn()
+        # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+        var base_s = self.world.base
+        val e = base_s.spawn()
+        self.world.base = base_s
         val tick = self.world.base.now()
-        self.world.readers.insert(e,  ReaderEp(value: reader_ep),   tick)
-        self.world.writers.insert(e,  WriterEp(value: writer_ep),   tick)
-        self.world.bufsizes.insert(e, BufferSize(bytes: buf_size),  tick)
-        self.world.buffered.insert(e, BytesBuffered(value: 0),      tick)
-        self.world.closed.insert(e,   Closed(which: PIPE_OPEN),     tick)
+        var readers_s = self.world.readers
+        readers_s.insert(e, ReaderEp(value: reader_ep), tick)
+        self.world.readers = readers_s
+        var writers_s = self.world.writers
+        writers_s.insert(e, WriterEp(value: writer_ep), tick)
+        self.world.writers = writers_s
+        var bufsizes_s = self.world.bufsizes
+        bufsizes_s.insert(e, BufferSize(bytes: buf_size), tick)
+        self.world.bufsizes = bufsizes_s
+        var buffered_s = self.world.buffered
+        buffered_s.insert(e, BytesBuffered(value: 0), tick)
+        self.world.buffered = buffered_s
+        var closed_s = self.world.closed
+        closed_s.insert(e, Closed(which: PIPE_OPEN), tick)
+        self.world.closed = closed_s
         e
 
     me pipe_write_notify(pipe: Entity, bytes: u32) -> i32:
@@ -106,7 +119,11 @@ impl PipefsService:
             return -1
         val old_val = self.world.buffered.dense[bslot].value
         val new_val = old_val + bytes
-        self.world.buffered.insert(pipe, BytesBuffered(value: new_val), self.world.base.now())
+        # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+        val tick = self.world.base.now()
+        var buffered_s = self.world.buffered
+        buffered_s.insert(pipe, BytesBuffered(value: new_val), tick)
+        self.world.buffered = buffered_s
         new_val as i32
 
     me pipe_read_notify(pipe: Entity, bytes: u32):
@@ -120,7 +137,11 @@ impl PipefsService:
             var new_val: u32 = 0
             if old_val > bytes:
                 new_val = old_val - bytes
-            self.world.buffered.insert(pipe, BytesBuffered(value: new_val), self.world.base.now())
+            # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+            val tick = self.world.base.now()
+            var buffered_s = self.world.buffered
+            buffered_s.insert(pipe, BytesBuffered(value: new_val), tick)
+            self.world.buffered = buffered_s
 
     me pipe_close(pipe: Entity, which: u32) -> bool:
         """OR `which` bitmask into the Closed component.
@@ -135,7 +156,11 @@ impl PipefsService:
         val new_which = old_which | which
         if new_which == old_which:
             return false
-        self.world.closed.insert(pipe, Closed(which: new_which), self.world.base.now())
+        # two-hop mutation workaround: bug selfhost_two_hop_field_method_mutation_lost_2026-07-27
+        val tick = self.world.base.now()
+        var closed_s = self.world.closed
+        closed_s.insert(pipe, Closed(which: new_which), tick)
+        self.world.closed = closed_s
         true
 
     fn pipe_count() -> i32:

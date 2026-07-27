@@ -258,3 +258,67 @@ describe "PmService kill and find":
         pm.pm_init()
         val e = pm.pm_find_entity(9999)
         expect(e.is_null()).to_equal(true)
+
+# ============================================================================
+# Test Group 6: Cross-entity identity (two-hop mutation-loss regression)
+# ============================================================================
+
+describe "PmService cross-entity identity (two-hop mutation-loss regression)":
+    """Regression for bug selfhost_two_hop_field_method_mutation_lost_2026-07-27.
+
+    Before the extract-mutate-writeback fix, `self.world.base.spawn()` returned
+    Entity(id: 0, generation: 1) for every fork, so every child process aliased
+    the init process and per-process pid/parent/state components collapsed.
+    """
+
+    it "three forks produce three distinct pids and entity ids":
+        val pm = PmService.new()
+        pm.pm_init()
+        val pid1 = pm.pm_fork(1)
+        val pid2 = pm.pm_fork(1)
+        val pid3 = pm.pm_fork(1)
+        expect(pid1).to_equal(2)
+        expect(pid2).to_equal(3)
+        expect(pid3).to_equal(4)
+        expect(pm.pm_process_count()).to_equal(4)
+        val e1 = pm.pm_find_entity(pid1.to_u32())
+        val e2 = pm.pm_find_entity(pid2.to_u32())
+        val e3 = pm.pm_find_entity(pid3.to_u32())
+        expect(e1.id).to_equal(1)
+        expect(e2.id).to_equal(2)
+        expect(e3.id).to_equal(3)
+        expect(e1.is_null()).to_equal(false)
+        expect(e2.is_null()).to_equal(false)
+        expect(e3.is_null()).to_equal(false)
+
+    it "exiting one child leaves its two siblings running":
+        val pm = PmService.new()
+        pm.pm_init()
+        val pid1 = pm.pm_fork(1)
+        val pid2 = pm.pm_fork(1)
+        val pid3 = pm.pm_fork(1)
+        pm.pm_exit(pid2.to_u32(), 42)
+        val e1 = pm.pm_find_entity(pid1.to_u32())
+        val e2 = pm.pm_find_entity(pid2.to_u32())
+        val e3 = pm.pm_find_entity(pid3.to_u32())
+        expect(pm.world.state_for_entity(e2)).to_equal(PS_ZOMBIE)
+        expect(pm.world.state_for_entity(e1)).to_equal(PS_RUNNING)
+        expect(pm.world.state_for_entity(e3)).to_equal(PS_RUNNING)
+        # Only the exited child is reapable; the siblings are still running.
+        expect(pm.pm_waitpid(1, pid2.to_u32())).to_equal(42)
+        expect(pm.pm_waitpid(1, pid1.to_u32())).to_equal(-EAGAIN)
+        expect(pm.pm_waitpid(1, pid3.to_u32())).to_equal(-EAGAIN)
+        # Reap is one-shot per child, and does not leak to siblings.
+        expect(pm.pm_waitpid(1, pid2.to_u32())).to_equal(-ECHILD)
+
+    it "pid <-> entity round trip is stable for all three children":
+        val pm = PmService.new()
+        pm.pm_init()
+        val pid1 = pm.pm_fork(1)
+        val pid2 = pm.pm_fork(1)
+        val pid3 = pm.pm_fork(1)
+        expect(pm.pm_get_pid(1)).to_equal(pid1.to_u32())
+        expect(pm.pm_get_pid(2)).to_equal(pid2.to_u32())
+        expect(pm.pm_get_pid(3)).to_equal(pid3.to_u32())
+        expect(pm.world.parent_pid_for_entity(pm.pm_find_entity(pid1.to_u32()))).to_equal(1)
+        expect(pm.world.parent_pid_for_entity(pm.pm_find_entity(pid3.to_u32()))).to_equal(1)

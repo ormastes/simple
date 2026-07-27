@@ -77,11 +77,17 @@ describe "ProcfsService procfs_node_register":
         val _e = svc.procfs_node_register("/proc/1", 1, PROC_DIR)
         expect(svc.procfs_node_count()).to_equal(1)
 
-    it "register returns entity with positive id":
-        """procfs_node_register must return an entity with id > 0."""
+    it "register returns the first live entity (id 0, generation 1)":
+        """procfs_node_register must return a live entity; the first slot is id 0.
+
+        (The old `id > 0` expectation was wrong: EntityAllocator hands out id 0
+        first. It only "passed" while two-hop mutation loss hid allocator state.)
+        """
         var svc = ProcfsService.new()
         val e = svc.procfs_node_register("/proc/1/status", 1, PROC_FILE)
-        expect(e.id).to_be_greater_than(0)
+        expect(e.id).to_equal(0)
+        expect(e.generation).to_equal(1)
+        expect(e.is_null()).to_equal(false)
 
 describe "ProcfsService procfs_node_lookup":
     """
@@ -110,3 +116,34 @@ describe "ProcfsService procfs_node_lookup":
         val _e = svc.procfs_node_register("/proc/1/maps", 1, PROC_FILE)
         val pid = svc.procfs_node_lookup("/proc/1/status")
         expect(pid).to_equal(-2)
+
+describe "ProcfsService cross-entity identity (two-hop mutation-loss regression)":
+    """Regression for bug selfhost_two_hop_field_method_mutation_lost_2026-07-27.
+
+    Before the extract-mutate-writeback fix, `self.world.base.spawn()` returned
+    Entity(id: 0, generation: 1) for every node, so a second /proc node aliased
+    the first and per-node path/pid components collapsed onto one slot.
+    """
+
+    it "three node registrations get distinct entity ids 0, 1, 2":
+        var svc = ProcfsService.new()
+        val e0 = svc.procfs_node_register("/proc/1/status",  1, PROC_FILE)
+        val e1 = svc.procfs_node_register("/proc/42/status", 42, PROC_FILE)
+        val e2 = svc.procfs_node_register("/proc/7",         7, PROC_DIR)
+        expect(e0.id).to_equal(0)
+        expect(e1.id).to_equal(1)
+        expect(e2.id).to_equal(2)
+        expect(e0.generation).to_equal(1)
+        expect(e1.generation).to_equal(1)
+        expect(e2.generation).to_equal(1)
+        expect(svc.procfs_node_count()).to_equal(3)
+
+    it "per-node pid components stay isolated across three nodes":
+        var svc = ProcfsService.new()
+        val _e0 = svc.procfs_node_register("/proc/1/status",  1, PROC_FILE)
+        val _e1 = svc.procfs_node_register("/proc/42/status", 42, PROC_FILE)
+        val _e2 = svc.procfs_node_register("/proc/7",         7, PROC_DIR)
+        expect(svc.procfs_node_lookup("/proc/1/status")).to_equal(1)
+        expect(svc.procfs_node_lookup("/proc/42/status")).to_equal(42)
+        expect(svc.procfs_node_lookup("/proc/7")).to_equal(7)
+        expect(svc.procfs_node_lookup("/proc/999")).to_equal(-2)
