@@ -32,6 +32,14 @@ SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
 
 GPU_2D_LIVE_BACKEND=metal SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
   sh scripts/check/check-macos-gpu-2d-live-evidence.shs
+
+SIMPLE_LIB=src bin/simple test \
+  test/03_system/app/simpleos_gpu_host/macos_metal_processing_ir_failure_injection_spec.spl \
+  --mode=interpreter
+
+SIMPLE_LIB=src bin/simple test \
+  test/03_system/check/macos_vulkan_processing_ir_live_readback_parity_spec.spl \
+  --mode=interpreter
 ```
 
 ## Required evidence
@@ -45,6 +53,11 @@ GPU_2D_LIVE_BACKEND=metal SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
   readback, not a CPU mirror or fallback.
 - The live gate records the native device/queue/submit/readback receipt and
   matching pixels. Linux or unavailable output is not a pass.
+- The Vulkan ProcessingIR receipt records 64 exact values, fixed checksum
+  `1082179840`, positive handle and identity, zero mismatches, device readback,
+  and `cpu_fallback=false`.
+- The Metal failure spec completes each bounded fault child without a timeout
+  marker and preserves typed unavailable/init/submit/readback/mismatch reasons.
 - Add canonical device identity plus exact expected-pixel, mismatch-count, and
   max-channel-delta fields before promoting the Vulkan lane from device-capture
   evidence to exact CPU/Vulkan parity.

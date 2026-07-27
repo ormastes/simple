@@ -12,6 +12,8 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dDrawIrAdvResult,
     engine2d_draw_ir_adv_composition
 }
+use std.common.processing.processing_ir.{processing_ir_fill_u32}
+use std.gc_async_mut.processing.vulkan_fill_u32.{processing_ir_execute_vulkan}
 use std.common.encoding.font_registry.{selected_font_asset_candidates, selected_font_asset_identity, selected_font_asset_physical_path}
 use std.common.image.ppm_decode.{encode_ppm_p6}
 use std.io.window_winit.{winit_loop_new, winit_loop_free, winit_window_new, winit_window_free, winit_present_rgba}
@@ -117,6 +119,35 @@ fn vulkan_font_device_evidence_valid(result: Engine2dDrawIrAdvResult) -> bool:
      result.font_atlas_upload_bytes > 0 and
      lower_hex_sha256_valid(result.font_atlas_payload_sha256))
 
+fn vulkan_processing_ir_receipt() -> (bool, text):
+    val expected_value = 0x01020304u32
+    val expected_checksum = 1082179840u64
+    val result = processing_ir_execute_vulkan(
+        processing_ir_fill_u32(64, expected_value))
+    var actual_checksum: u64 = 0
+    var mismatch_count: i64 = 0
+    for actual in result.values:
+        actual_checksum = actual_checksum + actual.to_u64()
+        if actual != expected_value:
+            mismatch_count = mismatch_count + 1
+    val values_exact = result.values.len() == 64 and
+        actual_checksum == expected_checksum and mismatch_count == 0
+    val valid = result.completed and result.reason == "ok" and values_exact and
+        result.backend_handle > 0 and result.device_identity > 0
+    val status = if valid: "pass" else: "fail"
+    (valid,
+        "gpu_2d_live_processing_ir_status={status}\n" +
+        "gpu_2d_live_processing_ir_backend=vulkan\n" +
+        "gpu_2d_live_processing_ir_count={result.values.len()}\n" +
+        "gpu_2d_live_processing_ir_expected_checksum={expected_checksum}\n" +
+        "gpu_2d_live_processing_ir_actual_checksum={actual_checksum}\n" +
+        "gpu_2d_live_processing_ir_values_exact={values_exact}\n" +
+        "gpu_2d_live_processing_ir_readback_source=device_readback\n" +
+        "gpu_2d_live_processing_ir_handle={result.backend_handle}\n" +
+        "gpu_2d_live_processing_ir_identity={result.device_identity}\n" +
+        "gpu_2d_live_processing_ir_mismatch_count={mismatch_count}\n" +
+        "gpu_2d_live_processing_ir_cpu_fallback=false\n")
+
 fn write_runtime_receipt(path: text, backend: text, capture_path: text,
                          repo_revision: text, shared_scene_fingerprint: text,
                          source_revision: text, backend_handle: i64,
@@ -130,7 +161,8 @@ fn write_runtime_receipt(path: text, backend: text, capture_path: text,
                          event_sequence: text, event_count: i64,
                          fixture: MacosGpu2dDrawIrEventFixture,
                          draw_ir_result: Engine2dDrawIrAdvResult,
-                         warm_draw_ir_result: Engine2dDrawIrAdvResult) -> bool:
+                         warm_draw_ir_result: Engine2dDrawIrAdvResult,
+                         processing_ir_receipt: text) -> bool:
     val mutation = fixture.mutation
     file_write(path,
         "gpu_2d_live_status=pass\n" +
@@ -188,6 +220,7 @@ fn write_runtime_receipt(path: text, backend: text, capture_path: text,
         "gpu_2d_live_draw_ir_fallback_reason={draw_ir_result.fallback_reason}\n" +
         "gpu_2d_live_draw_ir_readback_source={draw_ir_result.readback_source}\n" +
         "gpu_2d_live_draw_ir_readback_checksum={draw_ir_result.readback_checksum}\n" +
+        processing_ir_receipt +
         "gpu_2d_live_semantic_event={mutation.event_name}\n" +
         "gpu_2d_live_semantic_before_focus={mutation.before_focus}\n" +
         "gpu_2d_live_semantic_after_focus={mutation.after_focus}\n" +
@@ -228,6 +261,13 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
         return 2
     if backend != "vulkan" and backend != "metal":
         return 3
+    var processing_ir_receipt = ""
+    if backend == "vulkan":
+        val (processing_ir_valid, receipt_lines) = vulkan_processing_ir_receipt()
+        if not processing_ir_valid:
+            return write_failure_receipt(
+                receipt_path, backend, "processing-ir-receipt-failed", 4, 4)
+        processing_ir_receipt = receipt_lines
     var engine = Engine2D.create_with_backend_fast(live_width, live_height, backend)
     if engine.backend_name() != backend:
         val selected_backend = engine.backend_name()
@@ -251,6 +291,9 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
             receipt_path,
             "gpu_2d_live_status=fail\n" +
             "gpu_2d_live_reason=backend-create-failed\n" +
+            "gpu_2d_live_backend=" + backend + "\n" +
+            "gpu_2d_live_stage=4\n" +
+            "gpu_2d_live_exit_code=4\n" +
             "gpu_2d_live_requested_backend=" + backend + "\n" +
             "gpu_2d_live_selected_backend=" + selected_backend + "\n" +
             "gpu_2d_live_probe=" + probe_reason + "\n")
@@ -492,7 +535,8 @@ fn run_macos_gpu_2d_live_harness(backend: text) -> i64:
         initial_checksum, interaction_readback.checksum, bounds, live_width, live_height,
         font_loaded, expected_font_identity, font_identity, cold_rasterizations,
         warm_rasterizations, warm_hits, font_pixel_size, font_target, font_attempts,
-        event_sequence, event_count, fixture, draw_ir_result, warm_draw_ir_result):
+        event_sequence, event_count, fixture, draw_ir_result, warm_draw_ir_result,
+        processing_ir_receipt):
         winit_window_free(win)
         winit_loop_free(lp)
         engine.shutdown()

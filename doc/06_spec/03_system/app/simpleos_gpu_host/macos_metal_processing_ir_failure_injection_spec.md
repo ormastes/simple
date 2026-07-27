@@ -30,6 +30,8 @@ SIMPLE_LIB=src bin/simple test \
 3. Every injected failure returns empty output, handle `0`, and identity `0`.
 4. Setting only one fault variable leaves injection disabled.
 5. Each probe runs in an isolated child environment without re-entering tests.
+6. Every child is bounded to 30 seconds and 4 MiB per output stream. A timeout
+   emits `GPU_METAL_FAULT_CHILD_TIMEOUT` into the retained test log.
 
 Non-macOS execution records this row as postponed and cannot satisfy the live
 Metal gate.

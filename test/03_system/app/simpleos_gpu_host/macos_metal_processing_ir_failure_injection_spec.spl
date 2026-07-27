@@ -1,13 +1,15 @@
 """Prepared macOS live checks for Metal ProcessingIR failure injection."""
 
 use std.spec.{describe, it, expect, pending}
-use std.io_runtime.{get_args, process_run}
+use std.io_runtime.{get_args, process_run_bounded}
 use std.nogc_sync_mut.env.platform.{is_macos}
 use std.common.processing.processing_ir.{processing_ir_fill_u32}
 use std.gc_async_mut.processing.fault_injection.{processing_ir_fault_injected}
 use std.gc_async_mut.processing.metal_fill_u32.{processing_ir_execute_metal}
 
 val METAL_FAULT_SPEC_PATH: text = "test/03_system/app/simpleos_gpu_host/macos_metal_processing_ir_failure_injection_spec.spl"
+val METAL_FAULT_CHILD_TIMEOUT_MS: i64 = 30000
+val METAL_FAULT_CHILD_OUTPUT_BYTES: i64 = 4194304
 
 fn _arg_value(args: [text], prefix: text) -> text:
     for arg in args:
@@ -46,7 +48,14 @@ fn _run_case(phase: text, test_gate: bool, selector: bool) -> text:
         "bin/simple", "run", METAL_FAULT_SPEC_PATH,
         "--phase=" + phase
     ]
-    val (out, _err, code) = process_run("env", args)
+    val (out, err, code) = process_run_bounded(
+        "env", args, METAL_FAULT_CHILD_TIMEOUT_MS, METAL_FAULT_CHILD_OUTPUT_BYTES)
+    val timed_out = (
+        err.contains("[TIMEOUT: Process killed after") or
+        err.contains("Process timed out") or
+        err == "TIMEOUT")
+    if code == -1 and timed_out:
+        print("GPU_METAL_FAULT_CHILD_TIMEOUT phase={phase} timeout_ms={METAL_FAULT_CHILD_TIMEOUT_MS}\n")
     expect(code).to_equal(0)
     out
 

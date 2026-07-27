@@ -174,9 +174,8 @@ implemented by `processing_cpu_fallback_daemon_wire_spec.spl` and
 native mmap smoke, and separately bounded HELLO/request waits pass
 incrementally. The Linux CUDA submit-injection row publishes exact fallback
 reason `16`, CPU source `2`, zero handle/identity, 32 bytes, and checksum
-`135272480`. The remaining evidence gaps are:
-
-1. Run the Linux Vulkan live injection rows through the same retained native
-   transport.
-2. Run Metal live rows only on prepared macOS. Linux may run the validator and
-   synthetic receipt cases, but cannot close Metal runtime evidence.
+`135272480`. Linux Vulkan now passes unavailable, init, submit, readback, and
+mismatch injection through the retained native transport, plus one same-process
+success/failure/recovery sequence with stable device identity. The remaining
+evidence gap is the Metal live row on prepared macOS. Linux may run the
+validator and source-contract cases, but cannot close Metal runtime evidence.
