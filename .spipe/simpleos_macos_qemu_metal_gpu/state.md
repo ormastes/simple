@@ -60,8 +60,9 @@ parity with the CPU/SIMD oracle.
 - Sidecar C: candidate-admission timeout/self-test behavior.
 - Merge owner: `/root`.
 - Final reviewer: `/root` after fresh HVF evidence.
-- Shared interface: `simpleos_gpu_host_create_render_backend`; common protocol,
-  Draw IR, and readback owners remain unchanged.
+- Shared interfaces: `DrawIrRenderTarget`,
+  `metal_draw_ir_render_target_create`, and `SimpleOsGpuHostPlatform`; common
+  protocol, Draw IR composition, and readback owners remain unchanged.
 - Manual steps: `Build the platform-scoped host daemon`;
   `Boot the ARM64 HVF guest`; `Prove device-origin Metal readback`;
   `Compare CPU SIMD and Metal pixels`.
@@ -84,9 +85,27 @@ dev-blocked
 - dev: Host-daemon dependency audit found Draw IR coupled to monolithic
   `Engine2D`; a cfg-local Metal factory still retains all backend/SFFI
   providers, and the supported core-C build produced no artifact.
+- dev: Added the internal `DrawIrRenderTarget`, retained `Engine2D` as its
+  normal implementation, and added a strict-identity Metal adapter. Focused
+  target tests passed 3/3.
+- dev: Split the daemon wire runner from platform providers. The macOS entry
+  now has a 202-file Metal-only dependency closure with no `engine.spl` or
+  non-Metal provider.
+- dev: One essential bootstrap-only native-build attempt for the macOS entry
+  timed out after 90 seconds without a binary; it is not production evidence.
+- dev: Audited guest artifacts and found neither the ARM64 probe nor production
+  desktop ELF. Existing logs retain `arm64-wm-target-did-not-build` and
+  `canonical-kernel-missing`.
+- dev: Prepared an ARM64-only wrapper selector to avoid unrelated x86/RISC-V
+  work. Shell syntax passed, but the focused sparse-checkout spec was
+  inconclusive (1/12 with unresolved existing modules), so it was not merged.
+- blocked: The Metal adapter's font-evidence hook remains fail-closed (`nil`).
+  It uses the canonical font renderer/Metal batch, but cannot promote a
+  vector-font or 300-DPI receipt until real device/oracle evidence is recorded.
 - dev: Candidate-admission timeout hardening exhausted the three-cycle cap
   without a passing self-test; no unproven patch was accepted.
-- blocked: AC-1, AC-3, AC-4, AC-5, AC-7, and AC-10 remain open. The macOS row
-  requires the shared internal Draw IR render/readback target, a supported
-  Metal-only daemon build, and fresh HVF device-origin parity evidence before
-  commit or push.
+- blocked: AC-1, AC-3, AC-4, AC-5, AC-7, and AC-10 remain open. The shared
+  render-target and Metal-only source closure are complete; the macOS row now
+  requires an admitted pure-Simple compiler, a supported daemon binary,
+  current ARM64 guest artifacts, and fresh HVF device-origin parity evidence
+  before push.

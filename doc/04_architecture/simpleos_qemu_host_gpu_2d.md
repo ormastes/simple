@@ -162,16 +162,9 @@ open, so the Windows QEMU row is not yet classified as accelerated.
 
 ### Host-daemon entry-closure boundary
 
-The macOS host daemon must not import the monolithic `Engine2D` owner merely to
-execute Draw IR. Current dependency evidence shows that
-`draw_ir_adv.spl` and the daemon backend owner share a 100-file closure because
-the Draw IR executor accepts concrete `Engine2D`, while `engine.spl`
-unconditionally imports and stores every backend family. Consequently a
-platform factory or cfg-gated Metal constructor alone still retains Vulkan,
-OpenGL, Intel, WebGPU, and their SFFI providers. That design does not satisfy a
-supported Metal-only native build and must not be hidden with link stubs.
-
-The required seam is one narrow internal Draw IR render/readback target. It
+The macOS host daemon does not import the monolithic `Engine2D` owner merely to
+execute Draw IR. The implemented seam is one narrow internal Draw IR
+render/readback target. It
 owns create/clear/draw/present/read-pixels/shutdown plus strict backend identity
 and checked device provenance. Existing `Engine2D` implements the target for
 normal applications; a Metal-only host adapter implements it for the macOS
@@ -179,6 +172,12 @@ daemon. The Draw IR composition, command semantics, font lowering, readback
 record, protocol, CPU/SIMD oracle, and public Engine2D API remain unchanged.
 This is dependency inversion at the existing renderer boundary, not a private
 renderer or a platform-specific Draw IR fork.
+
+`main_macos.spl` composes the shared daemon runner with
+`SimpleOsGpuHostMacPlatform`. Its verified 202-file dependency closure excludes
+`engine.spl` and Vulkan, CUDA, DirectX, OpenGL, WebGPU, and other non-Metal
+providers. Native artifact production and live HVF receipts remain separate
+verification gates; narrowing the closure alone is not acceleration evidence.
 
 Vulkan ProcessingIR hashes the runtime-selected driver identity, which includes
 device name, vendor/device IDs, driver version, and API version. Storage-buffer handles remain per-request resource handles and

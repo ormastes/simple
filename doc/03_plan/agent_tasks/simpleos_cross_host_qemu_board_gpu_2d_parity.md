@@ -36,7 +36,7 @@ of the artifact producer.
 | 0 | compatibility freeze | unchanged Draw IR, RenderBackend, Metal/Vulkan, font, event, SIMD/software gates | current owned diffs reconciled |
 | 1 | shared artifact | canonical ARGB metadata, SHA-256, mismatch diagnostics, capability cache/invalidation | lane 0 |
 | 2 | Linux QEMU | existing ivshmem Vulkan row upgraded to full fixture; Venus/virgl/rutabaga kept separate | prepared Linux KVM/Vulkan host |
-| 3 | macOS QEMU | extract the shared internal Draw IR render/readback target, build a Metal-only host daemon, then run native Metal host-offload; UTM Venus remains compatibility-only | current macOS owner lane; narrow closure before live evidence |
+| 3 | macOS QEMU | shared Draw IR target and Metal-only source closure complete; produce supported daemon and ARM64 guests, then run native Metal host-offload; UTM Venus remains compatibility-only | admitted pure-Simple compiler and current ARM64 guest build |
 | 4 | Windows QEMU | native DirectX host-offload row; upstream virtio acceleration remains blocked | prepared WHPX/DirectX host |
 | 5 | board wrapper | one board identity/boot/driver/fence/readback schema and wrapper | lane 1 |
 | 6 | UNO Q | Debian Adreno readiness, then SimpleOS-native driver row | physical UNO Q |
@@ -62,13 +62,12 @@ Windows, CUDA, TODO 563, TODO 566, TODO 569, and TODO 570 resumption. Planned
 board commands must fail closed until their wrapper exists; a missing wrapper
 is not an unsupported hardware result.
 
-The 2026-07-27 macOS audit found a current-host implementation blocker rather
-than an unavailable environment: Draw IR is typed to monolithic `Engine2D`, so
-the daemon retains all backend providers and cannot produce the supported
-Metal-only artifact. Resume the macOS row by implementing the internal
-render/readback target in FR-GPU-QEMU-0001, proving its dependency closure, and
-then running the canonical HVF command. macOS is not postponed and cached
-receipts cannot close it.
+The 2026-07-27 macOS implementation removed the monolithic entry-closure
+blocker: Draw IR uses the shared internal target and `main_macos.spl` retains
+only Metal providers. Resume the macOS row by admitting a supported pure-Simple
+compiler, producing the daemon plus current ARM64 probe/desktop guests, and
+then adding a verified ARM64-only wrapper selector and running the canonical
+HVF command. macOS is not postponed and cached receipts cannot close it.
 
 ## Merge gates
 

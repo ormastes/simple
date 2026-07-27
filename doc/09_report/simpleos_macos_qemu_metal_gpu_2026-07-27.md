@@ -12,6 +12,15 @@ current-source host daemon artifact produced a fresh device-origin receipt.
 ## Verified observations
 
 - Host architecture is ARM64 and HVF is supported.
+- Draw IR now executes through the shared internal `DrawIrRenderTarget`;
+  existing `Engine2D` remains its normal application implementation.
+- `MetalDrawIrRenderTarget` reuses the canonical Metal backend, font renderer,
+  readback record, and strict device-identity checks.
+- The macOS daemon now enters through `main_macos.spl`. Its measured 202-file
+  dependency closure contains no monolithic `engine.spl`, Vulkan, CUDA,
+  DirectX, OpenGL, WebGPU, or other non-Metal provider.
+- Focused source checks and contracts passed for the shared target, selector,
+  CPU fallback, reason mapping, and protocol behavior.
 - The canonical 512 MiB backing layout reserves the final 8 MiB host-GPU region
   at guest GPA `0x5f800000`.
 - The former 256 MiB ARM64 link region overflowed the production desktop ELF by
@@ -22,17 +31,27 @@ current-source host daemon artifact produced a fresh device-origin receipt.
 
 ## Blocking evidence
 
-1. `draw_ir_adv.spl` is typed to concrete monolithic `Engine2D`.
-2. The Draw IR and host-backend dependency closures share 100 files and retain
-   Vulkan, OpenGL, Intel, WebGPU, and associated SFFI providers.
-3. A cfg-local Metal factory did not narrow that file-level closure; the
-   supported core-C attempt produced no daemon artifact.
+1. The entry-closure blocker is fixed, but the only bounded provisional
+   bootstrap-seed native build timed out after 90 seconds before producing a
+   daemon binary. No supported pure-Simple compiler candidate is admitted.
+2. No current ARM64 probe or production guest ELF exists. Existing evidence
+   records `arm64-wm-target-did-not-build` and `canonical-kernel-missing`.
+3. Without the daemon and guest artifacts, no fresh Metal device receipt,
+   QEMU HVF frame, or exact CPU/SIMD parity sample can be collected.
 4. Bare module-constant `match` arms lower as capture bindings. MIR builds
    normalized arms but scalar dispatch reads the original arms. A candidate
-   fix could not produce a testable compiler because the available source
-   driver lacks `rt_transient_array_scope_begin`.
+   fix compiled objects but its core-C runtime could not link the required
+   provider symbols, so the unverified patch was not merged.
 5. Candidate-admission timeout changes did not pass the wrapper self-test
    within the three-cycle cap.
+6. The canonical wrapper still defaults to all three guest ISAs. A bounded
+   ARM64-only selector patch passed shell syntax but its focused SPipe run was
+   inconclusive because the sparse test checkout could resolve only one of
+   twelve examples; the patch was not merged.
+7. The Metal target renders through the canonical `FontRenderer` and Metal
+   atlas batch, but its `draw_ir_font_evidence()` currently returns `nil`.
+   Vector-font device parity therefore remains fail-closed and cannot satisfy
+   the existing 300-DPI/font promotion gate.
 
 ## Required completion evidence
 
@@ -41,6 +60,8 @@ current-source host daemon artifact produced a fresh device-origin receipt.
 - correlated render, Draw IR, and ProcessingIR receipts;
 - positive Metal device identity and native resource handles;
 - same-frame device-origin readback, never CPU-mirror promotion;
+- non-nil Metal vector-font execution evidence when a vector-font fixture is
+  requested;
 - exact packed-pixel and serialized-byte equality against the CPU/SIMD oracle;
 - twenty warm samples satisfying latency and RSS limits;
 - one final wrapper/self-test, environment guard, generated-spec layout, and

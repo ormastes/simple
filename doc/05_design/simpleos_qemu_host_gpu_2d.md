@@ -193,15 +193,7 @@ marked verified.
 
 ### Metal-only daemon dependency seam
 
-The current source cannot yet produce the supported host daemon from a narrow
-Metal closure. `draw_ir_adv.spl` takes concrete `Engine2D`; importing it pulls
-the monolithic engine and all backend/SFFI families even when a cfg-local
-factory directly creates Metal. A real core-C build attempt produced no daemon
-artifact, so the existing source and cached binaries are not completion
-evidence.
-
-Refactor the executor around an internal `DrawIrRenderTarget`-shaped contract
-with only:
+The executor now uses the internal `DrawIrRenderTarget` contract with only:
 
 - dimensions and strict backend/device identity;
 - clear and existing primitive/image/text draw operations;
@@ -214,6 +206,10 @@ owners and canonical `draw_text`/`FontRenderer` material; it must not reimplemen
 rasterization, maintain a second framebuffer policy, or change
 `DrawIrComposition`. A dependency check must prove that the macOS daemon closure
 does not retain non-Metal backend providers before native-build admission.
+The implemented `main_macos.spl` closure satisfies that dependency gate:
+202 files with no `engine.spl`, Vulkan, CUDA, DirectX, OpenGL, WebGPU, or other
+non-Metal provider. The bounded provisional native build still timed out before
+producing a daemon, so live Metal and QEMU gates remain open.
 
 ## Checked DirectX D3D11 source
 
