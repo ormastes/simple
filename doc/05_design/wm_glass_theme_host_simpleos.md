@@ -89,9 +89,12 @@ duplicate current fields. Private decoded objects are reconstructed from one
 copied `(revision, wire_text)` only inside their owner boundary. Source capture
 is injectable so one-read-per-canonical-path behavior can be tested.
 
-`THEME_PACKAGE_INSTALL_WIRE_V1_MAX_UTF8_BYTES` is exactly `1_048_576`.
-Encoder, store, parent protocol, and worker protocol measure
-`rt_text_to_bytes(wire_text).len()`; Simple character length is not the bound.
+The codec exports `THEME_PACKAGE_INSTALL_WIRE_V1_MAX_UTF8_BYTES`,
+`theme_package_install_wire_v1_utf8_byte_len(wire_text)`, and
+`theme_package_install_wire_v1_within_bound(wire_text)`. Encoder, store, parent
+protocol, and worker protocol use those public codec surfaces; they do not
+duplicate the numeric limit or use Simple character length. Feature-local or
+direct `rt_text_to_bytes`/other `rt_*` declarations and calls are prohibited.
 
 #### Browser renderer state changes
 

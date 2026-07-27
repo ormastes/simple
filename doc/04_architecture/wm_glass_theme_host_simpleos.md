@@ -236,10 +236,12 @@ Extend its ordered handshake:
 Refresh uses exactly
 `theme_apply(generation, expected_predecessor_revision, revision, wire_text)`.
 The canonical wire is immutable `text`; revision and generation exist only in
-the protocol envelope. Both sides measure
-`rt_text_to_bytes(wire_text).len()` and reject values above
-`THEME_PACKAGE_INSTALL_WIRE_V1_MAX_UTF8_BYTES = 1_048_576`. Character count is
-not an admission bound. `theme_ready` for apply echoes generation, expected
+the protocol envelope. Both sides call the codec-owned public
+`theme_package_install_wire_v1_within_bound(wire_text)` checker, whose limit is
+the codec-exported `THEME_PACKAGE_INSTALL_WIRE_V1_MAX_UTF8_BYTES`; character
+count is not an admission bound. Feature modules must not declare or call
+feature-local/direct `rt_text_to_bytes` or any other `rt_*` conversion to
+enforce this contract. `theme_ready` for apply echoes generation, expected
 predecessor revision, revision, and the derived identity/hashes; it does not
 echo the potentially large wire.
 

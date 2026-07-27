@@ -94,8 +94,9 @@ The parent hosted process owns one real-mutex store whose sole payload is
 `(revision, wire_text)`; it never enters shared `HostWmHandle`/core and is
 never constructed per handle. Browser workers are wire consumers only.
 `theme_package_install_wire_v1` is immutable `text`, contains no revision, and
-is bounded by UTF-8 bytes at
-`THEME_PACKAGE_INSTALL_WIRE_V1_MAX_UTF8_BYTES = 1_048_576`.
+is bounded through codec-owned public byte-length/checker APIs against exported
+`THEME_PACKAGE_INSTALL_WIRE_V1_MAX_UTF8_BYTES`. Implementations must not
+duplicate that literal or add feature-local/direct `rt_*` conversion calls.
 
 | Lane | Scope | Owner/review |
 |---|---|---|

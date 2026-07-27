@@ -11,10 +11,11 @@
 - Evidence combines structured semantics with host/QEMU framebuffer captures.
 - Missing helpers fail explicitly; no placeholder pass is allowed.
 - Before runtime switching can be tested, focused protocol tests must pin the
-  parent-owned exact `(revision, wire_text)` store, UTF-8 wire bound, exact
-  init/apply envelopes, migrated-parent admission before notification, explicit
-  frame revision/hash, and replay-payload restart fence. This is planned only,
-  not a runtime PASS.
+  parent-owned exact `(revision, wire_text)` store, codec-owned public UTF-8
+  bound checker (with no feature-local `rt_*` conversion), exact init/apply
+  envelopes, migrated-parent admission before notification, explicit frame
+  revision/hash, and replay-payload restart fence. This is planned only, not a
+  runtime PASS.
 
 ```text
 theme -> host/CSS/QEMU -> interaction -> evidence -> fail-closed verdict
