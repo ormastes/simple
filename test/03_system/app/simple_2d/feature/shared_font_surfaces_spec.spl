@@ -1,14 +1,15 @@
 # codex-system-test
-# @tag: rendering, font, atlas, engine2d
-"""# Shared Font Material Across 2D Surfaces
+# @tag: rendering, font, atlas, engine2d, engine3d
+"""# Shared Font Material Across 2D and 3D Consumers
 
-Checks one persistent 2D glyph batch, warm atlas reuse, atlas-subrect blending, and fail-closed material behavior.
+Checks one persistent glyph batch reaches Engine2D atlas sampling and the
+Engine3D HUD vertex consumer, with warm atlas reuse and fail-closed material.
 
 CPU output is an oracle and compatibility path, not native GPU proof. This lane
 does not claim native texture upload, submission, fence, device readback, or presentation.
-Engine3D CPU HUD/world compatibility remains in
-`test/01_unit/lib/gpu/engine3d/font_compat_spec.spl` so this 2D system spec does
-not statically close over optional Vulkan symbols. Font configuration remains
+Full Engine3D HUD/world execution remains in
+`test/01_unit/lib/gpu/engine3d/font_compat_spec.spl`; this scenario proves only
+the shared batch seam and does not close over optional Vulkan symbols. Font configuration remains
 transient material input and is not serialized into Draw IR; captured identity
 does not claim atomic process-global font replacement or a global lock.
 """
@@ -17,8 +18,10 @@ use std.spec.*
 use std.nogc_sync_mut.text_layout.font_renderer.{
     FontExecutionPolicy, FontRenderer, FontGlyphRun, FontRenderBatch, FontRenderConfig
 }
+use std.nogc_sync_mut.text_layout.font_types.{font_render_config_identity}
 use std.common.ui.draw_ir.{draw_ir_empty_glyph_run_payload}
 use std.gc_async_mut.gpu.engine2d.engine.{engine2d_font_atlas_subrect_pixels}
+use std.gpu.engine3d.font_hud_material.{font_hud_vertices}
 
 fn setup_shared_font_fixture() -> FontRenderer:
     FontRenderer.new()
@@ -54,10 +57,19 @@ describe "shared font surfaces":
         expect(warm.quads[0].atlas_x).to_equal(cold.quads[0].atlas_x)
         expect(warm.quads[0].byte_offset).to_equal(0)
         expect(warm.quads[1].byte_offset).to_equal(1)
+        val first_quad = cold.quads[0]
+        val engine2d_pixels = engine2d_font_atlas_subrect_pixels(
+            cold.atlas_pixels, cold.atlas_width, cold.atlas_height,
+            first_quad.atlas_x, first_quad.atlas_y, first_quad.width, first_quad.height,
+            first_quad.color
+        )
+        expect(_nonzero_pixels(engine2d_pixels)).to_be_greater_than(0)
+        val engine3d_vertices = font_hud_vertices(cold, 4, 20, 128, 64)
+        expect(engine3d_vertices.len()).to_equal(cold.quads.len() * 6 * 20)
         val dirty = renderer.prepare_text("ABC", 0xFFCC8844u32, 16)
         expect(dirty.dirty_rects.len()).to_be_greater_than(0)
         expect(dirty.atlas_owner_identity()).to_equal(warm.atlas_owner_identity())
-        assert_not_equal(dirty.atlas_cache_identity(), warm.atlas_cache_identity())
+        expect(dirty.atlas_cache_identity() == warm.atlas_cache_identity()).to_be(false)
 
     # @req REQ-015
     it "should carry one validated runtime configuration through every material path":
@@ -75,17 +87,20 @@ describe "shared font surfaces":
         )
         expect_shared_font_batch(text_batch, 1)
         expect_shared_font_batch(advanced_batch, 1)
-        expect(text_batch.render_config_identity).to_equal(config.identity())
+        expect(text_batch.render_config_identity).to_equal(font_render_config_identity(config))
         expect(text_batch.execution_target).to_equal("cpu")
         expect(text_batch.execution_policy).to_equal(FontExecutionPolicy.Required)
         val run = FontGlyphRun(valid: false, face_id: 0, face_generation: 0,
             glyph_ids: [], xs: [], ys: [], clusters: [])
-        expect(renderer.prepare_glyph_run_configured(run, 0xFFFFFFFFu32, config).render_config_identity).to_equal(config.identity())
+        expect(renderer.prepare_glyph_run_configured(
+            run, 0xFFFFFFFFu32, config
+        ).render_config_identity).to_equal(font_render_config_identity(config))
         val selected_config_identity = renderer.prepare_selected_glyph_run_configured(
             draw_ir_empty_glyph_run_payload(), 0xFFFFFFFFu32, config
         ).render_config_identity
-        expect(selected_config_identity).to_equal(config.identity())
+        expect(selected_config_identity).to_equal(font_render_config_identity(config))
 
+    # @req REQ-006 REQ-009
     it "should preserve selected font identity across cold and warm batches":
         var renderer = FontRenderer.browser_serif_default()
         val cold = renderer.prepare_text("A", 0xFFFFFFFFu32, 16)
@@ -121,6 +136,7 @@ describe "shared font surfaces":
         expect(pixels.len()).to_equal((quad.width * quad.height).to_i64())
         expect(_nonzero_pixels(pixels)).to_be_greater_than(0)
 
+    # @req REQ-009
     it "should fail closed for invalid sizes and empty content":
         var renderer = setup_shared_font_fixture()
         val invalid = renderer.prepare_text("A", 0xFFFFFFFFu32, 0)
@@ -134,6 +150,7 @@ describe "shared font surfaces":
         expect(empty.font_identity).to_equal("")
         expect(empty.face_generation).to_equal(0)
 
+    # @req REQ-006 REQ-009
     it "should snapshot supplied glyph-run generation without claiming an identity":
         var renderer = setup_shared_font_fixture()
         val run = FontGlyphRun(valid: false, face_id: 0, face_generation: 37,

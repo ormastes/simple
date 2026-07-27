@@ -158,7 +158,7 @@ fn expect_simple_identity_run(fixture: SelectedShapingFixture, content: text,
     var index: i64 = 0
     while index < codepoints.len():
         val mapped = cmap_glyph_id(fixture.parsed, codepoints[index])
-        assert_not_equal(mapped, 0u32)
+        expect(mapped == 0u32).to_be(false)
         expect(run.glyph_ids[index]).to_equal(mapped)
         expect(glyph_index(fixture.handle, codepoints[index] as i64)).to_equal(mapped as i64)
         expect(run.glyphs[index].source_index).to_equal(index)
@@ -185,7 +185,8 @@ fn expect_complex_run_rejected(fixture: SelectedShapingFixture, content: text, l
         expect(shaped_run_to_font_glyph_run(run).valid).to_be(false)
 
 fn expect_selected_unicode_shaping(fixture: SelectedShapingFixture, content: text,
-                                   language: text, script: Script):
+                                   language: text, script: Script) -> ShapedRun:
+    expect(selected_font_simple_tuple_accepted(fixture.asset.family, language)).to_be(true)
     val runs = shaper_shape_with_language(fixture.shaper, _codepoints(content),
         fixture.font, 0.0, 0.0, language)
     expect(runs.len()).to_equal(1)
@@ -212,6 +213,62 @@ fn expect_selected_unicode_shaping(fixture: SelectedShapingFixture, content: tex
                                                quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color):
             if pixel != 0u32: quad_nonzero = quad_nonzero + 1
         expect(quad_nonzero).to_be_greater_than(0)
+    run
+
+fn _expect_exact_sans_arabic_oracle(run: ShapedRun, language: text):
+    if language == "ar":
+        expect(run.glyph_ids).to_equal(
+            [288u32, 85u32, 319u32, 18u32, 317u32, 19u32, 31u32, 48u32, 72u32, 8u32]
+        )
+        val clusters = [6, 6, 5, 5, 4, 4, 3, 2, 1, 0]
+        val advances = [0.0, 15.552, 0.0, 11.936, 0.0, 8.608, 11.712, 16.672, 8.320, 7.616]
+        val x_offsets = [3.232, 0.0, 1.248, 0.0, 0.992, 0.0, -0.960, 0.0, 0.0, 0.0]
+        val y_offsets = [2.080, 0.0, -0.160, 0.0, -0.096, 0.0, 0.0, 0.0, 0.0, 0.0]
+        var index: i64 = 0
+        while index < run.glyphs.len():
+            expect(run.glyphs[index].cluster).to_equal(clusters[index])
+            expect(run.glyphs[index].x_advance).to_equal(advances[index])
+            expect(run.glyphs[index].x_offset).to_equal(x_offsets[index])
+            expect(run.glyphs[index].y_offset).to_equal(y_offsets[index])
+            index = index + 1
+    elif language == "ur":
+        expect(run.glyph_ids).to_equal([98u32, 28u32, 30u32, 8u32])
+        val clusters = [3, 2, 1, 0]
+        val advances = [14.304, 15.264, 10.784, 7.616]
+        val x_offsets = [0.0, 0.0, -0.960, 0.0]
+        var index: i64 = 0
+        while index < run.glyphs.len():
+            expect(run.glyphs[index].cluster).to_equal(clusters[index])
+            expect(run.glyphs[index].x_advance).to_equal(advances[index])
+            expect(run.glyphs[index].x_offset).to_equal(x_offsets[index])
+            expect(run.glyphs[index].y_offset).to_equal(0.0)
+            index = index + 1
+    else:
+        fail("unsupported exact Arabic oracle language: " + language)
+
+fn _expect_exact_hindi_oracle(run: ShapedRun):
+    expect(run.glyph_ids).to_equal([544u32, 88u32, 245u32, 73u32, 33u32])
+    val advances = [8.288, 16.992, 9.888, 16.992, 8.288]
+    var index: i64 = 0
+    while index < run.glyphs.len():
+        expect(run.glyphs[index].x_advance).to_equal(advances[index])
+        index = index + 1
+
+fn _expect_unaccepted_face_diagnostic(fixture: SelectedShapingFixture, content: text,
+                                      language: text, expected_ids: [u32],
+                                      expected_advances: [f64]) -> ShapedRun:
+    expect(selected_font_simple_tuple_accepted(fixture.asset.family, language)).to_be(false)
+    val runs = shaper_shape_with_language(fixture.shaper, _codepoints(content),
+        fixture.font, 0.0, 0.0, language)
+    expect(runs.len()).to_equal(1)
+    val run = runs[0]
+    expect(run.glyph_ids).to_equal(expected_ids)
+    expect(run.glyphs.len()).to_equal(expected_advances.len())
+    var index: i64 = 0
+    while index < run.glyphs.len():
+        expect(run.glyphs[index].x_advance).to_equal(expected_advances[index])
+        index = index + 1
+    run
 
 fn expect_simple_row_material(fixture: SelectedShapingFixture, row: SimpleShapingRow):
     expect(fixture.asset.family).to_equal(row.family)
@@ -261,13 +318,13 @@ describe "shared font shaping acceptance":
 
         val mono = _fixture_for_family(fixtures, "Noto Sans Mono")
         val sc = _fixture_for_family(fixtures, "Noto Sans SC")
-        assert_not_equal(mono.handle.handle, sc.handle.handle)
+        expect(mono.handle.handle == sc.handle.handle).to_be(false)
         expect(font_face_is_live(mono.handle.handle, mono.handle.generation)).to_be(true)
         expect(font_face_is_live(sc.handle.handle, sc.handle.generation)).to_be(true)
         for codepoint in _codepoints("中文"):
             expect(cmap_glyph_id(mono.parsed, codepoint)).to_equal(0u32)
             expect(glyph_index(mono.handle, codepoint as i64)).to_equal(0)
-            assert_not_equal(cmap_glyph_id(sc.parsed, codepoint), 0u32)
+            expect(cmap_glyph_id(sc.parsed, codepoint) == 0u32).to_be(false)
             expect(glyph_index(sc.handle, codepoint as i64) > 0).to_be(true)
         val fallback_fixture = _zh_mono_fallback_fixture(mono, sc)
         val fallback_row = _simple_row_for_cell(rows, "zh", "mono")
@@ -349,13 +406,29 @@ describe "shared font shaping acceptance":
         expect(selected_font_coverage_cell("ur", "mono").?.status).to_equal("fallback")
         expect(selected_font_coverage_cell("ur", "mono").?.witness_family).to_equal("Noto Sans Arabic")
         val arabic = setup_selected_shaping_face("Noto Sans Arabic")
-        expect_selected_unicode_shaping(arabic, "العربية", "ar", Script.Arabic)
-        expect_selected_unicode_shaping(arabic, "اردو", "ur", Script.Arabic)
+        _expect_exact_sans_arabic_oracle(
+            expect_selected_unicode_shaping(arabic, "العربية", "ar", Script.Arabic), "ar"
+        )
+        _expect_exact_sans_arabic_oracle(
+            expect_selected_unicode_shaping(arabic, "اردو", "ur", Script.Arabic), "ur"
+        )
         expect_complex_run_rejected(arabic, "بَ", "ar")
         free_font(arabic.handle)
         val naskh = setup_selected_shaping_face("Noto Naskh Arabic")
-        expect_selected_unicode_shaping(naskh, "العربية", "ar", Script.Arabic)
-        expect_selected_unicode_shaping(naskh, "اردو", "ur", Script.Arabic)
+        val naskh_scale = 32.0 / 1000.0
+        _expect_unaccepted_face_diagnostic(
+            naskh, "العربية", "ar",
+            [294u32, 81u32, 325u32, 18u32, 323u32, 19u32, 29u32, 46u32, 70u32, 8u32],
+            [0.0 * naskh_scale, 452.0 * naskh_scale, 0.0 * naskh_scale,
+                360.0 * naskh_scale, 0.0 * naskh_scale, 275.0 * naskh_scale,
+                404.0 * naskh_scale, 414.0 * naskh_scale, 212.0 * naskh_scale,
+                238.0 * naskh_scale]
+        )
+        _expect_unaccepted_face_diagnostic(
+            naskh, "اردو", "ur", [94u32, 26u32, 28u32, 8u32],
+            [468.0 * naskh_scale, 414.0 * naskh_scale, 386.0 * naskh_scale,
+                238.0 * naskh_scale]
+        )
         expect_complex_run_rejected(naskh, "العربية", "ur")
         expect_complex_run_rejected(naskh, "اردو", "ar")
         expect_complex_run_rejected(naskh, "بَ", "ar")
@@ -363,6 +436,7 @@ describe "shared font shaping acceptance":
 
     # @req REQ-007
     it "should accept the exact Hindi dev2 witness and reject other complex sequences":
+        step("Shape selected Unicode scripts with the pinned face")
         expect(selected_font_simple_tuple_accepted("Noto Sans Devanagari", "hi")).to_be(true)
         expect(selected_font_simple_tuple_accepted("Noto Serif Devanagari", "hi")).to_be(false)
         expect(selected_font_coverage_cell("hi", "sans").?.status).to_equal("native")
@@ -371,11 +445,18 @@ describe "shared font shaping acceptance":
         expect(selected_font_coverage_cell("hi", "mono").?.status).to_equal("fallback")
         expect(selected_font_coverage_cell("hi", "mono").?.witness_family).to_equal("Noto Sans Devanagari")
         val devanagari = setup_selected_shaping_face("Noto Sans Devanagari")
-        expect_selected_unicode_shaping(devanagari, "हिन्दी", "hi", Script.Devanagari)
+        _expect_exact_hindi_oracle(
+            expect_selected_unicode_shaping(devanagari, "हिन्दी", "hi", Script.Devanagari)
+        )
         expect_complex_run_rejected(devanagari, "र्क", "hi")
         free_font(devanagari.handle)
         val serif_devanagari = setup_selected_shaping_face("Noto Serif Devanagari")
-        expect_selected_unicode_shaping(serif_devanagari, "हिन्दी", "hi", Script.Devanagari)
+        val serif_scale = 32.0 / 1000.0
+        _expect_unaccepted_face_diagnostic(
+            serif_devanagari, "हिन्दी", "hi", [557u32, 90u32, 248u32, 75u32, 33u32],
+            [246.0 * serif_scale, 471.0 * serif_scale, 283.0 * serif_scale,
+                464.0 * serif_scale, 246.0 * serif_scale]
+        )
         expect_complex_run_rejected(serif_devanagari, "र्क", "hi")
         free_font(serif_devanagari.handle)
 
@@ -426,6 +507,7 @@ describe "shared font shaping acceptance":
         expect(positioned).to_be(true)
         expect(hindi.reason).to_equal("resolved")
         expect(hindi.glyph_run.valid).to_be(true)
+        expect(hindi.glyph_run.glyph_ids).to_equal([544u32, 88u32, 245u32, 73u32, 33u32])
         var renderer = FontRenderer.new()
         expect(renderer.try_load_registered_identity(arabic.identity)).to_be(true)
         val command = draw_ir_text_shaped_font("arabic", 0, 0, "العربية", 0xFFFFFFFFu32,
@@ -445,6 +527,21 @@ describe "shared font shaping acceptance":
         expect(arabic_batch.valid).to_be(true)
         expect(arabic_batch.quads.len()).to_be_greater_than(0)
         expect(renderer.try_load_registered_identity(hindi.identity)).to_be(true)
-        val hindi_batch = renderer.prepare_selected_glyph_run(hindi.glyph_run, 0xFFFFFFFFu32, 32)
+        val hindi_command = draw_ir_text_shaped_font("hindi", 0, 0, "हिन्दी", 0xFFFFFFFFu32,
+            hindi.family, hindi.identity, hindi.advances, hindi.width, hindi.line_height,
+            32, hindi.glyph_run)
+        val hindi_encoded = draw_ir_to_sdn(draw_ir_composition("shaping", "hindi",
+            DRAW_IR_BACKEND_GPU, [draw_ir_batch("shaping", DRAW_IR_BACKEND_GPU,
+                draw_ir_embedding_config("surface", "hindi", 0, 0, hindi.width,
+                    hindi.line_height, 0, 1000, false), [hindi_command])]))
+        val hindi_round_tripped = sdn_to_draw_ir(hindi_encoded).batches[0].commands[0].glyph_run
+        expect(hindi_round_tripped.valid).to_be(true)
+        expect(hindi_round_tripped.glyph_ids).to_equal(hindi.glyph_run.glyph_ids)
+        expect(hindi_round_tripped.xs).to_equal(hindi.glyph_run.xs)
+        expect(hindi_round_tripped.ys).to_equal(hindi.glyph_run.ys)
+        expect(hindi_round_tripped.clusters).to_equal(hindi.glyph_run.clusters)
+        val hindi_batch = renderer.prepare_selected_glyph_run(
+            hindi_round_tripped, 0xFFFFFFFFu32, 32
+        )
         expect(hindi_batch.valid).to_be(true)
         expect(hindi_batch.quads.len()).to_be_greater_than(0)
