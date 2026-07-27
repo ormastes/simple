@@ -1042,3 +1042,19 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   hard cap there is no fourth cycle. Resume in a fresh lane only after resolving
   the requirement/design contract and preserving exact parser reasons through
   public capture validation.
+
+- continuation-2026-07-27-theme-ipc-owned-k1: **SOURCE FOUNDATION ACCEPTED /
+  RUNTIME SWITCHING STILL BLOCKED.** Added an owner-local bounded IPC payload
+  queue without changing the repr-C header: the manager copies caller bytes
+  before return, enforces 4 KiB/message plus 64 KiB/64-slot per-port limits,
+  preserves FIFO and exact pop/destroy accounting, distinguishes delivered,
+  unauthorized, missing, empty, metadata-only, and invalid receive states, and
+  rejects capability-bearing metadata until capability transfer is owned.
+  Final high-capability review accepted the cumulative K1 repair with no P0/P1.
+  K1 deliberately makes no authenticated-source claim because its task id is
+  still a manager parameter; K2 must bind the kernel dispatcher’s actual
+  current task, perform syscall copy-in/out, and align the ABI before
+  `ThemeChangedV1` transport can be wired. The only diagnostic test executable
+  identified as Rust-built and is not admitted PASS. Package transactions,
+  generated SimpleOS snapshot catalog, ThemeService/consumer wiring, the
+  fail-fast system contract, and live host/QEMU evidence remain open.

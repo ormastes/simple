@@ -7,8 +7,10 @@
   clipped theme-derived input Draw IR, and single-line caret/selection overlays
   are source-fixed and reviewed.
 - Runtime switching has a reviewed bounded `ThemeChangedV1` protocol and
-  BrowserBackend cache identity; kernel payload/source authentication,
-  transactional package refresh, and ThemeService delivery remain blocked.
+  BrowserBackend cache identity. Reviewed K1 kernel queues now own bounded
+  copied payloads with typed receive states, but K2 dispatcher authentication/
+  syscall copy-in/out, transactional package refresh, generated SimpleOS
+  snapshots, and ThemeService delivery remain blocked.
 - Live host pixels/events remain open until an admitted source-matched
   pure-Simple runtime and required native capability are available.
 - The Endpoint Security collector is source-verified and fail-closed; policy
