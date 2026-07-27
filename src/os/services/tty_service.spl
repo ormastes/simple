@@ -70,6 +70,14 @@ struct OutputSink:
     """Opaque endpoint identifier for the framebuffer or serial output sink."""
     endpoint: u64
 
+struct OutputBuf:
+    """Pending output byte queue drained by the console/serial reader.
+
+    Real delivery target for tty_write: bytes accepted by tty_write are
+    appended here so a subsequent tty_read_output() observes them.
+    """
+    bytes: [u8]
+
 struct TtyKind:
     """TTY_CONSOLE=0 | TTY_PTY_MASTER=1 | TTY_PTY_SLAVE=2"""
     kind: u32
@@ -86,6 +94,7 @@ struct TtyWorld:
     fg_pgids:       ComponentStore<ForegroundPgid>
     input_sources:  ComponentStore<InputSource>
     output_sinks:   ComponentStore<OutputSink>
+    output_bufs:    ComponentStore<OutputBuf>
     kinds:          ComponentStore<TtyKind>
 
 # ============================================================================
@@ -122,6 +131,7 @@ impl TtyService:
                 fg_pgids:       ComponentStore.new(),
                 input_sources:  ComponentStore.new(),
                 output_sinks:   ComponentStore.new(),
+                output_bufs:    ComponentStore.new(),
                 kinds:          ComponentStore.new()
             ),
             initialized: true,
@@ -137,6 +147,21 @@ impl TtyService:
         val e = self.world.base.spawn()
         val t = self.world.base.now()
         val cc: [u8] = [3, 0, 127, 21, 4, 0, 0, 0]
+        # NOTE: output_sinks/output_bufs use extract-mutate-writeback (see
+        # tty_write below) because a two-hop chained mutating method call
+        # (self.world.<store>.insert(...)) does not persist under the
+        # current runtime — reproduced in isolation, filed in
+        # .spipe/simpleos_harden_p4_tty/state.md. The other component
+        # stores below (line_bufs/termios/fg_pgids/input_sources/kinds)
+        # keep the pre-existing direct-call form; they carry the same
+        # latent defect but fixing them is out of this bounded increment's
+        # scope (tty_write delivery only) — see state.md "next increments".
+        var output_sinks_store = self.world.output_sinks
+        output_sinks_store.insert(e, OutputSink(endpoint: output_ep), t)
+        self.world.output_sinks = output_sinks_store
+        var output_bufs_store = self.world.output_bufs
+        output_bufs_store.insert(e, OutputBuf(bytes: []), t)
+        self.world.output_bufs = output_bufs_store
         self.world.line_bufs.insert(e,
             LineBuf(bytes: [], cap: 4096), t)
         self.world.termios.insert(e,
@@ -145,8 +170,6 @@ impl TtyService:
             ForegroundPgid(value: 0), t)
         self.world.input_sources.insert(e,
             InputSource(endpoint: input_ep), t)
-        self.world.output_sinks.insert(e,
-            OutputSink(endpoint: output_ep), t)
         self.world.kinds.insert(e,
             TtyKind(kind: kind), t)
         e
@@ -264,13 +287,55 @@ impl TtyService:
     me tty_write(tty: Entity, bytes: [u8]) -> i32:
         """Write bytes to the TTY output sink.
 
-        Returns the number of bytes accepted (len of input array), or -1 if
-        the TTY entity does not exist.
+        Appends the bytes to the entity's OutputBuf so a subsequent
+        tty_read_output() call observes them (real delivery, not just an
+        accepted-count bookkeeping op). Returns the number of bytes
+        delivered (== len of input array), or -1 if the TTY entity does
+        not exist.
         """
         val sink_slot = self.world.output_sinks.get_slot(tty)
         if sink_slot < 0:
             return -1
+        val buf_slot = self.world.output_bufs.get_slot(tty)
+        if buf_slot < 0:
+            return -1
+        val old_buf = self.world.output_bufs.dense[buf_slot]
+        var new_bytes = old_buf.bytes
+        var i = 0
+        val n = bytes.len()
+        while i < n:
+            new_bytes = new_bytes.push(bytes[i])
+            i = i + 1
+        val t = self.world.base.now()
+        # NOTE: must extract-mutate-writeback rather than call
+        # `self.world.output_bufs.insert(...)` directly — a two-hop chained
+        # mutating method call (self.<struct-field>.<struct-field>.insert())
+        # does not persist under the current interpreter/native runtime
+        # (reproduced in isolation; filed as a runtime defect, out of this
+        # lane's scope to fix — see .spipe/simpleos_harden_p4_tty/state.md).
+        var buf_store = self.world.output_bufs
+        buf_store.insert(tty, OutputBuf(bytes: new_bytes), t)
+        self.world.output_bufs = buf_store
         bytes.len() as i32
+
+    me tty_read_output(tty: Entity) -> [u8]:
+        """Drain the TTY's OutputBuf and return the bytes delivered so far.
+
+        This is the reader side of tty_write's output path — the
+        console/serial reader drains this queue to observe written bytes.
+        Returns an empty array if the TTY does not exist or nothing has
+        been written since the last drain.
+        """
+        val buf_slot = self.world.output_bufs.get_slot(tty)
+        if buf_slot < 0:
+            return []
+        val old_buf = self.world.output_bufs.dense[buf_slot]
+        val result = old_buf.bytes
+        val t = self.world.base.now()
+        var buf_store = self.world.output_bufs
+        buf_store.insert(tty, OutputBuf(bytes: []), t)
+        self.world.output_bufs = buf_store
+        result
 
     me tty_create_pty_pair(self) -> (Entity, Entity):
         """Create a linked PTY master/slave pair.

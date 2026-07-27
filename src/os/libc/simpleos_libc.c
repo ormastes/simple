@@ -44,6 +44,9 @@ typedef long off_t;
 #ifndef ENOSYS
 #define ENOSYS 38
 #endif
+#ifndef EOPNOTSUPP
+#define EOPNOTSUPP 95
+#endif
 #ifndef EBADF
 #define EBADF  9
 #endif
@@ -142,6 +145,12 @@ static int set_errno(int64_t r) {
 #ifndef MAP_FAILED
 #define MAP_FAILED ((void *)-1)
 #endif
+#ifndef MAP_SHARED
+#define MAP_SHARED 0x01
+#endif
+#ifndef PROT_WRITE
+#define PROT_WRITE 0x2
+#endif
 
 void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
     if (running_on_linux_host()) {
@@ -154,7 +163,25 @@ void *mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
         }
         return (void *)(uintptr_t)r;
     }
-    (void)flags; (void)fd; (void)offset;
+    /* SimpleOS L4 kernel path: syscall 10 only implements anonymous,
+     * per-process private mappings (see src/os/posix/mod.spl "What's NOT
+     * supported"). A writable MAP_SHARED request — the profile-C
+     * cross-process/writable-shared case, and any request naming a real
+     * fd for a file-backed mapping — cannot be honored: the kernel has no
+     * shared-page or file-backed-page-cache path behind this syscall.
+     * Previously this function silently discarded `flags`/`fd`/`offset`
+     * and handed back an anonymous private mapping, so callers asking for
+     * shared or file-backed memory got what looked like success but was
+     * neither shared nor backed by the file. Fail closed instead. */
+    if ((flags & MAP_SHARED) != 0 && (prot & PROT_WRITE) != 0) {
+        errno = EOPNOTSUPP;
+        return MAP_FAILED;
+    }
+    if (fd >= 0) {
+        errno = EOPNOTSUPP;
+        return MAP_FAILED;
+    }
+    (void)offset;
     int64_t r = simpleos_syscall(10, (int64_t)(uintptr_t)addr, (int64_t)length,
                                   (int64_t)prot, 0, 0);
     if (r < 0) {

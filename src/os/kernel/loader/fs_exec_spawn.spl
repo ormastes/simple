@@ -14,7 +14,10 @@ use os.kernel.scheduler.scheduler_types.{
 }
 use os.kernel.scheduler.green_carrier.{green_carrier_execution_state_new}
 use os.kernel.scheduler.scheduler_arm_bootstrap.{scheduler_create_bootstrap_user_task_pid}
-use os.kernel.ipc.cspace_spawn.{spawn_full}
+use os.kernel.loader.spawn_authority.{
+    spawn_authority_ambient_caps, spawn_authority_note_caller,
+    spawn_authority_current_caller, spawn_authority_clear_caller
+}
 use os.kernel.types.task_types.{TaskId, TaskPriority, scheduler_flat_topology, user_process_image_entry, user_process_image_segment_count}
 
 @cfg(arm64)
@@ -248,11 +251,17 @@ pub fn fs_exec_prepare_spawn_from_bytes(path: text, bytes: [u8], arch: Architect
         return FsExecPrepareResult(scheduler: _fs_exec_new_bootstrap_scheduler(), pid: -8, entry: 0)
 
     var scheduler = _fs_exec_new_bootstrap_scheduler()
-    # Boot/init compat wrapper (see cspace_spawn.spawn_full): FS-exec bootstrap
-    # spawn still grants ambient authority until per-image SpawnSpec recipes are
-    # wired here. Named + greppable so the ambient grant stays auditable.
+    # Ambient authority is now GATED (master plan §5.4): the loader no longer
+    # calls `spawn_full()` directly. `spawn_authority_ambient_caps` returns the
+    # full set only for the root task or while the bootstrap window is still
+    # open; any other caller after `spawn_authority_seal_bootstrap()` gets the
+    # pledged deny-all set and must spawn through a SpawnSpec recipe instead.
+    # The caller id comes from the scalar recorded by `fs_exec_spawn_as` (the
+    # cross-arch bridge signature is shared, so it is not threaded as a param —
+    # see spawn_authority.spl "Caller propagation").
+    val spawn_caps = spawn_authority_ambient_caps(spawn_authority_current_caller())
     val scheduler_result: SchedulerBootstrapUserTaskResult = scheduler_create_bootstrap_user_task_pid(
-        scheduler, image, TaskPriority.Normal, spawn_full()
+        scheduler, image, TaskPriority.Normal, spawn_caps
     )
     scheduler = scheduler_result.scheduler
     val pid = scheduler_result.pid
@@ -289,7 +298,11 @@ pub fn fs_exec_spawn_as(caller: i64, path: text, argv: [text], envp: [text]) -> 
     if gate != 0:
         serial_println("[fs-exec] spawn:denied caller={caller} path={path} err={gate}")
         return gate as i64
+    # Record the caller for the shared cross-arch bridge so the ambient-spawn
+    # guard sees WHO is spawning (see spawn_authority.spl).
+    spawn_authority_note_caller(caller)
     val prepared = fs_exec_prepare_spawn(path, argv, envp)
+    spawn_authority_clear_caller()
     if prepared.pid <= 0:
         return prepared.pid
     serial_println("[fs-exec] spawn:pid={prepared.pid} path={path}")

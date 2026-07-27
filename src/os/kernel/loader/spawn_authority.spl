@@ -1,0 +1,203 @@
+# Spawn authority guard — root-only ambient (`spawn_full`) authority.
+#
+# Master plan §5.4 ("Remove ambient spawn authority"):
+#   `spawn_full()` is legal ONLY for the root task during bootstrap. Everything
+#   else must go through a SpawnSpec recipe (cspace_spawn.spawn_with_cspace),
+#   and a child's rights are an INTERSECTION, never a widening:
+#
+#     effective_rights = parent_delegable
+#                      & executable_policy_ceiling
+#                      & system_policy_ceiling
+#                      & manifest_request
+#                      - explicit_denials
+#
+# This module is the loader-side gate. It does NOT modify `cspace_spawn.spl`
+# (owned by the IPC lane / ABI freeze) — it wraps the ambient grant so the
+# loader can only hand out `spawn_full()` while the guard says yes, and hands
+# out the pledged deny-all set (`CapabilitySet.empty()`) otherwise.
+#
+# Phase model (two scalars, no structs, no classes):
+#   g_spawn_bootstrap_sealed = false  ->  bootstrap in progress; ambient spawn
+#                                         is allowed (this is the boot path that
+#                                         still predates SpawnSpec wiring).
+#   g_spawn_bootstrap_sealed = true   ->  post-bootstrap; ONLY the root task
+#                                         (`g_spawn_root_task`) may take the
+#                                         ambient path; every other caller is
+#                                         denied EPERM and must use a SpawnSpec.
+#
+# FREESTANDING DISCIPLINE (same rules as fs_exec_resolve.spl's header):
+#   - No module-level array/[text] initializers — they do NOT run under the
+#     freestanding native-build; only scalar module vars are reliable (they land
+#     in zeroed .bss, so `false` / `0` ARE the correct fail-safe defaults here:
+#     an un-run initializer leaves the kernel in "bootstrap not yet sealed,
+#     root == 0 == kernel-origin sentinel", which is exactly the boot state).
+#   - No class construction and no trait-object dispatch on this path (they are
+#     not proven freestanding-safe; see fs_exec_resolve.spl).
+#   - Guards are plain `fn`s over scalar module vars.
+#
+# Caller convention matches the existing loader gate (cap_exec_gate.spl):
+# `caller == 0` is the kernel-origin sentinel, i.e. the root task.
+
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.ipc.cspace_spawn.{SpawnSpec, spawn_full}
+
+extern fn serial_println(msg: text)
+
+# EPERM — an ambient-spawn attempt by a non-root caller after bootstrap.
+pub val SPAWN_AUTHORITY_EPERM: i32 = -1
+
+# ============================================================================
+# Phase / root-task state (scalar module vars only — see FREESTANDING above)
+# ============================================================================
+
+var g_spawn_bootstrap_sealed: bool = false
+var g_spawn_root_task: i64 = 0
+var g_spawn_current_caller: i64 = 0
+var g_spawn_ambient_denials: i64 = 0
+
+pub fn spawn_authority_seal_bootstrap():
+    """Close the bootstrap window. After this, ambient `spawn_full()` is only
+    available to the root task; all other callers must present a SpawnSpec.
+
+    Called once by the boot path after init has been started. Idempotent."""
+    g_spawn_bootstrap_sealed = true
+    serial_println("[spawn-auth] bootstrap sealed root={g_spawn_root_task}")
+
+pub fn spawn_authority_reopen_bootstrap():
+    """Reopen the bootstrap window (boot-phase restart / test harness only)."""
+    g_spawn_bootstrap_sealed = false
+
+pub fn spawn_authority_set_root_task(task: i64):
+    """Declare which task id counts as root for ambient spawn."""
+    g_spawn_root_task = task
+
+pub fn spawn_authority_bootstrap_sealed() -> bool:
+    """Accessor — module vars mutated in fns are not readable from spec
+    `it` blocks directly, so state is always asserted through accessors."""
+    g_spawn_bootstrap_sealed
+
+pub fn spawn_authority_root_task() -> i64:
+    """Accessor for the configured root task id."""
+    g_spawn_root_task
+
+pub fn spawn_authority_is_root(caller: i64) -> bool:
+    """True when `caller` is the root task (0 = kernel-origin sentinel)."""
+    caller == g_spawn_root_task
+
+# ============================================================================
+# The guard
+# ============================================================================
+
+pub fn spawn_authority_check_ambient(caller: i64) -> i32:
+    """0 when `caller` may take the ambient full-authority spawn path,
+    SPAWN_AUTHORITY_EPERM otherwise.
+
+    Allowed when the bootstrap window is still open (boot/init sequence) OR the
+    caller is the root task. Denied for every other caller once bootstrap is
+    sealed — that caller must spawn through a SpawnSpec recipe instead."""
+    if not g_spawn_bootstrap_sealed:
+        return 0
+    if spawn_authority_is_root(caller):
+        return 0
+    serial_println("[spawn-auth] deny ambient spawn caller={caller}")
+    SPAWN_AUTHORITY_EPERM
+
+pub fn spawn_authority_ambient_caps(caller: i64) -> CapabilitySet:
+    """The capability set the loader may install for an ambient spawn.
+
+    Root/bootstrap -> `spawn_full()` (the named, greppable ambient grant).
+    Anyone else after sealing -> `CapabilitySet.empty()`, the PLEDGED deny-all
+    set, so an unauthorized ambient spawn produces a powerless task instead of
+    a god-mode one (fail closed, never fail open)."""
+    if spawn_authority_check_ambient(caller) != 0:
+        g_spawn_ambient_denials = g_spawn_ambient_denials + 1
+        return CapabilitySet.empty()
+    spawn_full()
+
+pub fn spawn_authority_denial_count() -> i64:
+    """How many ambient spawns this guard has refused (accessor for gates)."""
+    g_spawn_ambient_denials
+
+# ============================================================================
+# Caller propagation for the fs-exec bridge
+# ============================================================================
+#
+# `fs_exec_prepare_spawn_from_bytes` is a shared cross-arch bridge with a fixed
+# signature used by every per-arch spawn entry (x86_64/arm64/riscv...). Threading
+# a new `caller` parameter through all of them is a multi-file ABI change and is
+# NOT this increment. Instead the gated entry point (`fs_exec_spawn_as`) records
+# the caller in a scalar before descending, and the bridge reads it back. Boot
+# paths that never set it read 0 = kernel-origin = root, preserving boot.
+
+pub fn spawn_authority_note_caller(caller: i64):
+    """Record the caller about to descend into the fs-exec spawn bridge."""
+    g_spawn_current_caller = caller
+
+pub fn spawn_authority_current_caller() -> i64:
+    """The caller recorded by the most recent `spawn_authority_note_caller`."""
+    g_spawn_current_caller
+
+pub fn spawn_authority_clear_caller():
+    """Reset the recorded caller back to the kernel-origin sentinel."""
+    g_spawn_current_caller = 0
+
+# ============================================================================
+# Effective-rights intersection (pure helper — master plan §5.4 formula)
+# ============================================================================
+
+pub fn spawn_rights_without(base: u32, denials: u32) -> u32:
+    """`base` minus every bit in `denials`. Expressed as xor-of-and so no
+    bitwise-not width assumptions are made about u32."""
+    base ^ (base & denials)
+
+pub fn spawn_effective_rights(
+    parent_delegable: u32,
+    executable_ceiling: u32,
+    system_ceiling: u32,
+    manifest_request: u32,
+    explicit_denials: u32
+) -> u32:
+    """effective = parent & exec_ceiling & system_ceiling & request - denials.
+
+    Pure intersection then subtraction: the result is ALWAYS a subset of every
+    input mask, so a child can never amplify past its parent, past the
+    executable's policy ceiling, or past the system ceiling."""
+    val intersected = parent_delegable & executable_ceiling & system_ceiling & manifest_request
+    spawn_rights_without(intersected, explicit_denials)
+
+pub fn spawn_rights_is_subset(child: u32, parent: u32) -> bool:
+    """True when every right in `child` is also held by `parent`."""
+    (child & parent) == child
+
+pub fn spawn_spec_requested_rights(spec: SpawnSpec, parent_delegable: u32) -> u32:
+    """Rights a SpawnSpec asks for, as a mask.
+
+    Per `AttenuationSpec`, a `rights_mask` of 0 means "keep the parent's rights"
+    — so a zero mask contributes `parent_delegable`, never "all rights". The
+    union is then still bounded by the parent, which is what makes
+    `spawn_spec_effective_rights` provably attenuating."""
+    var acc: u32 = 0u32
+    for g in spec.grants:
+        if g.atten.rights_mask == 0u32:
+            acc = acc | parent_delegable
+        else:
+            acc = acc | (g.atten.rights_mask & parent_delegable)
+    acc
+
+pub fn spawn_spec_effective_rights(
+    spec: SpawnSpec,
+    parent_delegable: u32,
+    executable_ceiling: u32,
+    system_ceiling: u32,
+    explicit_denials: u32
+) -> u32:
+    """Apply the §5.4 formula to a SpawnSpec recipe. The result is always a
+    subset of `parent_delegable` (intersection semantics — no amplification via
+    child creation)."""
+    spawn_effective_rights(
+        parent_delegable,
+        executable_ceiling,
+        system_ceiling,
+        spawn_spec_requested_rights(spec, parent_delegable),
+        explicit_denials
+    )

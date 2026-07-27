@@ -1,0 +1,396 @@
+# LLM Security Profile Registry (Production Harden, Lane P8)
+#
+# Versioned profile model for LLM CLI tool access — master plan §17
+# (doc/01_research/domain/simpleos_production_host_master_plan.md) and tranche
+# item 16 (§24.16). A profile bounds what an LLM-driven CLI session may touch:
+# filesystem read/write/exec roots, network destinations, process spawn,
+# secrets labels, and resource caps.
+#
+# Core law (§17, verbatim): "effective = system ceiling ∩ user ceiling ∩ base
+# grants ∩ overlay grants ∩ executable request − explicit denies (deny wins;
+# never unrestricted union)." This module implements that law as a pure
+# function over plain structs — no kernel coupling, no `extern fn`.
+#
+# Relationship to cspace_spawn.spl (READ ONLY, not modified here): that module
+# mints a CAPABILITY C-SPACE at spawn time from a single parent + one recipe.
+# This module computes the POLICY the recipe should be built from — a
+# profile-level ceiling/base/overlay/deny resolution that happens BEFORE a
+# SpawnSpec is constructed. Wiring `resolve_effective()`'s output into
+# `CapGrant`/`SpawnSpec` construction is the next increment (see
+# .spipe/simpleos_harden_p8_llm/state.md) and does not touch
+# src/os/kernel/ipc/cspace_spawn.spl.
+#
+# Design notes:
+#   - Rights are an i64 bitmask (LLM_RIGHT_*), independently defined from the
+#     kernel's CAP_RIGHT_* bits (capability_types.spl) — same shape, no import,
+#     because this is a policy-layer concept, not a kernel object.
+#   - Filesystem roots / network hosts / secrets labels are plain text lists
+#     with prefix (fs) or exact-or-"*" (net/secrets) matching, gated by the
+#     corresponding rights bit — a profile that has the LLM_RIGHT_FS_READ bit
+#     denied never contributes read roots to the effective set regardless of
+#     what its `fs_read_roots` list contains.
+#   - No module-level array initializers (unreliable under the current
+#     runtime) — profiles are built by functions, never module `val` arrays.
+
+# ============================================================================
+# Rights bitmask — one bit per policy dimension
+# ============================================================================
+
+val LLM_RIGHT_FS_READ: i64 = 1
+val LLM_RIGHT_FS_WRITE: i64 = 2
+val LLM_RIGHT_FS_EXEC: i64 = 4
+val LLM_RIGHT_NET: i64 = 8
+val LLM_RIGHT_PROCESS_SPAWN: i64 = 16
+val LLM_RIGHT_SECRETS: i64 = 32
+val LLM_RIGHT_UI_CLIPBOARD: i64 = 64
+val LLM_RIGHT_UI_SCREENSHOT: i64 = 128
+val LLM_RIGHT_DEVICE: i64 = 256
+val LLM_RIGHT_MODEL_ACCESS: i64 = 512
+
+val LLM_RIGHT_NONE: i64 = 0
+val LLM_RIGHT_ALL: i64 = 1023
+
+# ============================================================================
+# Profile model
+# ============================================================================
+
+struct LlmProfile:
+    """A versioned LLM CLI security profile.
+
+    `rights` is the coarse per-dimension grant bitmask (LLM_RIGHT_*). The list
+    and numeric fields REFINE a granted dimension; they never grant a dimension
+    whose bit is absent from `rights` (see `_gate_by_right` in resolve_effective).
+
+    max_cpu_pct/max_mem_mb/max_wallclock_sec/max_cost_cents/max_tokens are
+    resource caps (§17 "resources" dimension); 0 means "no allowance" for that
+    resource, not "unlimited" — an unlimited resource caps must set an explicit
+    large value, matching the "never unrestricted" law.
+    """
+    name: text
+    version: i64
+    rights: i64
+    fs_read_roots: [text]
+    fs_write_roots: [text]
+    fs_exec_roots: [text]
+    net_hosts: [text]
+    secrets_labels: [text]
+    max_cpu_pct: i64
+    max_mem_mb: i64
+    max_wallclock_sec: i64
+    max_cost_cents: i64
+    max_tokens: i64
+
+struct LlmDenyList:
+    """Explicit denies — always subtracted last, regardless of any grant.
+
+    `deny_rights` clears bits from the effective rights bitmask unconditionally
+    (a bit present here is denied even if every ceiling/base/overlay granted
+    it). `deny_fs_paths`/`deny_net_hosts`/`deny_secrets_labels` remove matching
+    entries from the corresponding effective lists.
+    """
+    deny_rights: i64
+    deny_fs_paths: [text]
+    deny_net_hosts: [text]
+    deny_secrets_labels: [text]
+
+fn empty_deny_list() -> LlmDenyList:
+    """No explicit denies (used by tests/callers that only want ceiling/grant
+    intersection behavior)."""
+    LlmDenyList(deny_rights: LLM_RIGHT_NONE, deny_fs_paths: [], deny_net_hosts: [], deny_secrets_labels: [])
+
+# ============================================================================
+# Subset / attenuation check
+# ============================================================================
+
+fn is_subset(child: i64, parent: i64) -> bool:
+    """True when every bit set in `child` is also set in `parent` — the
+    bitmask attenuation check ("child rights ⊆ parent rights").
+
+    Standard bit trick: `child` is a subset of `parent` iff ANDing with
+    `parent` reproduces `child` exactly. A `child` bit that `parent` lacks
+    survives the AND as 0, so the equality fails and this returns false —
+    exactly the violation `is_subset` is meant to detect."""
+    (child & parent) == child
+
+fn has_right(rights: i64, bit: i64) -> bool:
+    """True when the single bit `bit` is present in `rights`."""
+    is_subset(bit, rights)
+
+# ============================================================================
+# Text-list matching helpers
+# ============================================================================
+
+fn _text_list_contains(items: [text], value: text) -> bool:
+    for item in items:
+        if item == value:
+            return true
+    false
+
+fn _union_text_lists(a: [text], b: [text]) -> [text]:
+    """De-duplicated union, preserving first-seen order."""
+    var out: [text] = []
+    for x in a:
+        if not _text_list_contains(out, x):
+            out.push(x)
+    for x in b:
+        if not _text_list_contains(out, x):
+            out.push(x)
+    out
+
+fn _path_covered_by_root(path: text, root: text) -> bool:
+    """True when `root` authorizes `path` — exact match, `root == "/"`
+    (universal root), or a `root/`-prefixed child path."""
+    if root == "/":
+        return true
+    if path == root:
+        return true
+    path.starts_with(root + "/")
+
+fn _path_covered_by_any(path: text, roots: [text]) -> bool:
+    for r in roots:
+        if _path_covered_by_root(path, r):
+            return true
+    false
+
+fn _text_covered_by_any(value: text, allowed: [text]) -> bool:
+    """Exact match or a literal `"*"` wildcard entry (used for net hosts and
+    secrets labels, which do not have filesystem-style prefix semantics)."""
+    for a in allowed:
+        if a == value or a == "*":
+            return true
+    false
+
+fn _filter_paths_by_ceilings(paths: [text], sys_roots: [text], user_roots: [text]) -> [text]:
+    """Keep only entries covered by BOTH ceilings — the intersection, never a
+    union, of what system and user policy allow."""
+    var out: [text] = []
+    for p in paths:
+        if _path_covered_by_any(p, sys_roots) and _path_covered_by_any(p, user_roots):
+            out.push(p)
+    out
+
+fn _filter_texts_by_ceilings(values: [text], sys_allowed: [text], user_allowed: [text]) -> [text]:
+    var out: [text] = []
+    for v in values:
+        if _text_covered_by_any(v, sys_allowed) and _text_covered_by_any(v, user_allowed):
+            out.push(v)
+    out
+
+fn _remove_denied_paths(paths: [text], deny_roots: [text]) -> [text]:
+    var out: [text] = []
+    for p in paths:
+        if not _path_covered_by_any(p, deny_roots):
+            out.push(p)
+    out
+
+fn _remove_denied_texts(values: [text], deny_list: [text]) -> [text]:
+    var out: [text] = []
+    for v in values:
+        if not _text_covered_by_any(v, deny_list):
+            out.push(v)
+    out
+
+fn _gate_list_by_right(values: [text], effective_rights: i64, bit: i64) -> [text]:
+    """A refinement list only contributes to the effective profile when its
+    governing bit survived intersection + deny; otherwise the dimension is
+    fully closed regardless of what the list contains."""
+    if has_right(effective_rights, bit):
+        values
+    else:
+        []
+
+fn _min_i64(a: i64, b: i64) -> i64:
+    if a < b:
+        a
+    else:
+        b
+
+fn _max_i64(a: i64, b: i64) -> i64:
+    if a > b:
+        a
+    else:
+        b
+
+# ============================================================================
+# Effective-rights resolution — the §17 law
+# ============================================================================
+
+fn resolve_effective(system_ceiling: LlmProfile, user_ceiling: LlmProfile, base: LlmProfile, overlays: [LlmProfile], denies: LlmDenyList) -> LlmProfile:
+    """Resolve the effective profile per master-plan §17:
+
+        effective = system_ceiling ∩ user_ceiling ∩ (base ∪ overlays) − denies
+
+    Order of operations (each step can only narrow, never widen):
+      1. Union base grants with every overlay's grants (overlays ADD, never
+         replace — this is the only union in the whole computation).
+      2. Intersect that union against BOTH ceilings (system AND user) — the
+         result is always a subset of each ceiling individually, proven by
+         `is_subset(effective.rights, system_ceiling.rights)` and the same for
+         `user_ceiling`.
+      3. Subtract explicit denies LAST and unconditionally — a deny bit/path/
+         host/label is removed even if every prior step granted it. Deny
+         always wins.
+
+    List-valued dimensions (fs roots, net hosts, secrets labels) follow the
+    same three steps and are additionally gated by their governing rights bit
+    (`_gate_list_by_right`): a list entry never appears in the effective
+    profile if the corresponding bit did not survive step 2/3.
+
+    Resource caps use `max` across base+overlays (overlays may raise a
+    requested cap) then `min` against both ceilings (a raised request can
+    never exceed either ceiling) — the numeric analogue of the same
+    union-then-intersect law.
+    """
+    # --- Step 1: union base + overlay rights bits ---
+    var granted_rights: i64 = base.rights
+    var fs_read: [text] = base.fs_read_roots
+    var fs_write: [text] = base.fs_write_roots
+    var fs_exec: [text] = base.fs_exec_roots
+    var net_hosts: [text] = base.net_hosts
+    var secrets: [text] = base.secrets_labels
+    var cpu: i64 = base.max_cpu_pct
+    var mem: i64 = base.max_mem_mb
+    var wall: i64 = base.max_wallclock_sec
+    var cost: i64 = base.max_cost_cents
+    var tokens: i64 = base.max_tokens
+
+    for ov in overlays:
+        granted_rights = granted_rights | ov.rights
+        fs_read = _union_text_lists(fs_read, ov.fs_read_roots)
+        fs_write = _union_text_lists(fs_write, ov.fs_write_roots)
+        fs_exec = _union_text_lists(fs_exec, ov.fs_exec_roots)
+        net_hosts = _union_text_lists(net_hosts, ov.net_hosts)
+        secrets = _union_text_lists(secrets, ov.secrets_labels)
+        cpu = _max_i64(cpu, ov.max_cpu_pct)
+        mem = _max_i64(mem, ov.max_mem_mb)
+        wall = _max_i64(wall, ov.max_wallclock_sec)
+        cost = _max_i64(cost, ov.max_cost_cents)
+        tokens = _max_i64(tokens, ov.max_tokens)
+
+    # --- Step 2: intersect with BOTH ceilings ---
+    val ceiling_rights: i64 = system_ceiling.rights & user_ceiling.rights
+    var effective_rights: i64 = granted_rights & ceiling_rights
+
+    fs_read = _filter_paths_by_ceilings(fs_read, system_ceiling.fs_read_roots, user_ceiling.fs_read_roots)
+    fs_write = _filter_paths_by_ceilings(fs_write, system_ceiling.fs_write_roots, user_ceiling.fs_write_roots)
+    fs_exec = _filter_paths_by_ceilings(fs_exec, system_ceiling.fs_exec_roots, user_ceiling.fs_exec_roots)
+    net_hosts = _filter_texts_by_ceilings(net_hosts, system_ceiling.net_hosts, user_ceiling.net_hosts)
+    secrets = _filter_texts_by_ceilings(secrets, system_ceiling.secrets_labels, user_ceiling.secrets_labels)
+
+    cpu = _min_i64(cpu, _min_i64(system_ceiling.max_cpu_pct, user_ceiling.max_cpu_pct))
+    mem = _min_i64(mem, _min_i64(system_ceiling.max_mem_mb, user_ceiling.max_mem_mb))
+    wall = _min_i64(wall, _min_i64(system_ceiling.max_wallclock_sec, user_ceiling.max_wallclock_sec))
+    cost = _min_i64(cost, _min_i64(system_ceiling.max_cost_cents, user_ceiling.max_cost_cents))
+    tokens = _min_i64(tokens, _min_i64(system_ceiling.max_tokens, user_ceiling.max_tokens))
+
+    # --- Step 3: subtract explicit denies, unconditionally, last ---
+    effective_rights = effective_rights & (~denies.deny_rights)
+    fs_read = _remove_denied_paths(fs_read, denies.deny_fs_paths)
+    fs_write = _remove_denied_paths(fs_write, denies.deny_fs_paths)
+    fs_exec = _remove_denied_paths(fs_exec, denies.deny_fs_paths)
+    net_hosts = _remove_denied_texts(net_hosts, denies.deny_net_hosts)
+    secrets = _remove_denied_texts(secrets, denies.deny_secrets_labels)
+
+    # Gate list dimensions by their surviving bit — a closed dimension carries
+    # no roots/hosts/labels regardless of what the raw lists contained.
+    fs_read = _gate_list_by_right(fs_read, effective_rights, LLM_RIGHT_FS_READ)
+    fs_write = _gate_list_by_right(fs_write, effective_rights, LLM_RIGHT_FS_WRITE)
+    fs_exec = _gate_list_by_right(fs_exec, effective_rights, LLM_RIGHT_FS_EXEC)
+    net_hosts = _gate_list_by_right(net_hosts, effective_rights, LLM_RIGHT_NET)
+    secrets = _gate_list_by_right(secrets, effective_rights, LLM_RIGHT_SECRETS)
+
+    LlmProfile(
+        name: "effective(" + base.name + ")",
+        version: base.version,
+        rights: effective_rights,
+        fs_read_roots: fs_read,
+        fs_write_roots: fs_write,
+        fs_exec_roots: fs_exec,
+        net_hosts: net_hosts,
+        secrets_labels: secrets,
+        max_cpu_pct: cpu,
+        max_mem_mb: mem,
+        max_wallclock_sec: wall,
+        max_cost_cents: cost,
+        max_tokens: tokens
+    )
+
+# ============================================================================
+# Built-in profiles (§17 named list) — functions, never module-level arrays
+# ============================================================================
+
+fn profile_offline() -> LlmProfile:
+    """No filesystem, no network, no spawn, no secrets — fully isolated."""
+    LlmProfile(
+        name: "offline", version: 1, rights: LLM_RIGHT_NONE,
+        fs_read_roots: [], fs_write_roots: [], fs_exec_roots: [],
+        net_hosts: [], secrets_labels: [],
+        max_cpu_pct: 25, max_mem_mb: 256, max_wallclock_sec: 60, max_cost_cents: 0, max_tokens: 4000
+    )
+
+fn profile_code_review() -> LlmProfile:
+    """Read-only workspace access; no write, no network, no spawn, no secrets."""
+    LlmProfile(
+        name: "code-review", version: 1, rights: LLM_RIGHT_FS_READ,
+        fs_read_roots: ["/workspace"], fs_write_roots: [], fs_exec_roots: [],
+        net_hosts: [], secrets_labels: [],
+        max_cpu_pct: 50, max_mem_mb: 512, max_wallclock_sec: 300, max_cost_cents: 50, max_tokens: 50000
+    )
+
+fn profile_workspace_write() -> LlmProfile:
+    """Read + write within the workspace tree; no network, no spawn, no secrets."""
+    LlmProfile(
+        name: "workspace-write", version: 1, rights: LLM_RIGHT_FS_READ | LLM_RIGHT_FS_WRITE,
+        fs_read_roots: ["/workspace"], fs_write_roots: ["/workspace"], fs_exec_roots: [],
+        net_hosts: [], secrets_labels: [],
+        max_cpu_pct: 50, max_mem_mb: 512, max_wallclock_sec: 600, max_cost_cents: 100, max_tokens: 100000
+    )
+
+fn profile_network_research() -> LlmProfile:
+    """Read-only workspace + outbound network to an allowlisted research set;
+    no write, no spawn, no secrets."""
+    LlmProfile(
+        name: "network-research", version: 1, rights: LLM_RIGHT_FS_READ | LLM_RIGHT_NET,
+        fs_read_roots: ["/workspace"], fs_write_roots: [], fs_exec_roots: [],
+        net_hosts: ["docs.example.com", "api.example.com"], secrets_labels: [],
+        max_cpu_pct: 50, max_mem_mb: 512, max_wallclock_sec: 300, max_cost_cents: 100, max_tokens: 60000
+    )
+
+fn profile_build_and_test() -> LlmProfile:
+    """Read/write/exec within the workspace and process spawn for build+test
+    tooling; no network, no secrets."""
+    LlmProfile(
+        name: "build-and-test", version: 1,
+        rights: LLM_RIGHT_FS_READ | LLM_RIGHT_FS_WRITE | LLM_RIGHT_FS_EXEC | LLM_RIGHT_PROCESS_SPAWN,
+        fs_read_roots: ["/workspace"], fs_write_roots: ["/workspace"], fs_exec_roots: ["/workspace"],
+        net_hosts: [], secrets_labels: [],
+        max_cpu_pct: 100, max_mem_mb: 4096, max_wallclock_sec: 3600, max_cost_cents: 200, max_tokens: 200000
+    )
+
+fn profile_system_administration() -> LlmProfile:
+    """Broadest built-in profile: full filesystem + network + spawn + a
+    system-secrets label — still subject to the system ceiling at resolution
+    time, never a bypass of it."""
+    LlmProfile(
+        name: "system-administration", version: 1, rights: LLM_RIGHT_ALL,
+        fs_read_roots: ["/"], fs_write_roots: ["/"], fs_exec_roots: ["/"],
+        net_hosts: ["*"], secrets_labels: ["system"],
+        max_cpu_pct: 100, max_mem_mb: 8192, max_wallclock_sec: 7200, max_cost_cents: 1000, max_tokens: 500000
+    )
+
+fn profile_by_name(name: text) -> LlmProfile?:
+    """Look up a built-in profile by name; nil for an unknown name (no Dict
+    involved — a plain if/elif chain avoids the raw-or-nil Dict.get quirk)."""
+    if name == "offline":
+        return profile_offline()
+    if name == "code-review":
+        return profile_code_review()
+    if name == "workspace-write":
+        return profile_workspace_write()
+    if name == "network-research":
+        return profile_network_research()
+    if name == "build-and-test":
+        return profile_build_and_test()
+    if name == "system-administration":
+        return profile_system_administration()
+    nil

@@ -1,0 +1,281 @@
+"""
+# ABI v1 Capability-Transfer Contract (Kernel IPC — lane P1)
+
+**Feature IDs:** #OS-HARDEN-P1-IPC
+**Category:** Kernel / IPC / Security
+**Difficulty:** 4/5
+**Status:** Implemented
+**Plan:** doc/03_plan/agent_tasks/simpleos_production_harden_parallel.md (lane P1)
+**Research:** doc/01_research/domain/simpleos_production_host_master_plan.md (§5.1, §21)
+
+## Overview
+
+This is the CONTRACT spec for the two ABI v1 invariants that every capability
+transfer across the kernel IPC boundary must uphold. It is deliberately written
+against the shipping code (`os.kernel.ipc.cspace_spawn`, `os.kernel.ipc.capability`)
+rather than a model, so a regression in either file turns this spec red.
+
+**Invariant A — rights only attenuate (master plan §21).**
+A transfer may narrow authority and may never widen it. Concretely, for every
+capability the receiver ends up holding, the receiver's rights bits are a SUBSET
+of the rights bits of the sender token that authorized the transfer. Asking for
+rights the sender does not hold does not "clamp to what is available" — the whole
+grant is REJECTED (fail closed), so a caller policy bug is loud, not silent.
+Delegation depth is the second attenuating axis: a child is always minted at
+`depth - 1`, and a spent (depth 0) token can never be delegated again.
+
+**Invariant B — a one-shot authority cannot be used twice.**
+SimpleOS has two one-shot mechanisms, and both are asserted here:
+  - `SingleUseLedger` (this lane): a `single_use` grant arms the minted token id;
+    the first `consume()` succeeds and every later one is DENIED. Before this
+    lane the `single_use` flag on `AttenuationSpec` was documentation only, so a
+    "one-shot" capability could be replayed forever — the guard is new, the flag
+    is not.
+  - `EscrowCap` / `consume_escrow` (pre-existing, in `capability.spl`): a cap
+    escrowed into a receiver session is redeemable exactly once, by the intended
+    receiver, while that receiver's session epoch is still live.
+
+## Scope note (honesty)
+
+These are the transfer-ALGEBRA contracts. They do NOT prove that two isolated
+processes exchanged a handle under QEMU — that is the lane's separate runtime
+gate and is not claimed by this file. `l4_fast_ipc.spl` is a benchmark model and
+is not exercised here; it is not on the syscall path.
+"""
+
+use std.spec.{describe, it, expect, step, assert_true, assert_false}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet, CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_ADMIN, CAP_RIGHT_MAP}
+use os.kernel.types.session_types.{Session, SessionKind}
+use os.kernel.types.task_types.{TaskId}
+use os.kernel.ipc.capability.{CapabilityManager}
+use os.kernel.ipc.cspace_spawn.{SpawnSpec, CapGrant, AttenuationSpec, CspaceMint, SingleUseLedger, spawn_with_cspace, spawn_with_cspace_tracked, fork_cspace, atten_identity, atten_rights, atten_single_use}
+
+# ============================================================================
+# Fixtures
+# ============================================================================
+
+val IMAGE_HASH: text = "blake3:p1-transfer-contract"
+val DS_OBJ: u64 = 900u64
+val DS_GEN: u64 = 3u64
+
+fn _rw_map() -> u32:
+    CAP_RIGHT_READ + CAP_RIGHT_WRITE + CAP_RIGHT_MAP
+
+fn _dataset(rights: u32) -> CapabilityKind:
+    CapabilityKind.SharedDataset(object_id: DS_OBJ, generation: DS_GEN, rights: rights)
+
+fn _rights_of(kind: CapabilityKind) -> u32:
+    """Extract the rights bitmask a capability kind carries (0 when it carries none)."""
+    match kind:
+        case CapabilityKind.SharedDataset(obj, generation, rights):
+            rights
+        case CapabilityKind.ProcessQueue(queue_id, generation, rights):
+            rights
+        case _:
+            0u32
+
+fn _is_subset(child_rights: u32, sender_rights: u32) -> bool:
+    """True when every bit set in `child_rights` is also set in `sender_rights`."""
+    (child_rights & sender_rights) == child_rights
+
+fn _tok(kind: CapabilityKind, generation: u64, tid: u64, depth: i64) -> CapabilityToken:
+    CapabilityToken(kind: kind, generation: generation, owner: 1u64, token_id: tid, parent_token_id: 0u64, depth: depth)
+
+fn sender_pouch(rights: u32) -> CapabilitySet:
+    """A sender holding exactly one delegable dataset token at `rights`."""
+    CapabilitySet(caps: [_tok(_dataset(rights), 1u64, 500u64, 2)], is_pledged: true)
+
+fn one_grant_spec(requested_rights: u32, atten: AttenuationSpec) -> SpawnSpec:
+    SpawnSpec(
+        image_hash: IMAGE_HASH,
+        grants: [CapGrant(label: "mem.dataset", requested: _dataset(requested_rights), atten: atten)],
+        isolation: "sandbox",
+        budget: 0u64
+    )
+
+# ============================================================================
+# Invariant A — rights only attenuate on transfer (master plan §21)
+# ============================================================================
+
+describe("ABI v1 transfer: rights only attenuate, never widen"):
+
+    it("narrows the receiver to a strict subset when the recipe masks rights down"):
+        step("Sender holds read+write+map on the dataset")
+        val sender = sender_pouch(_rw_map())
+        step("Recipe asks for the full kind but masks the transfer down to read-only")
+        val mint = spawn_with_cspace(sender, one_grant_spec(_rw_map(), atten_rights(CAP_RIGHT_READ)), 7u64, 10u64, 800u64)
+        step("The grant is accepted and exactly one capability lands in the child")
+        expect(mint.rejected).to_equal(0)
+        expect(mint.caps.caps.len()).to_equal(1)
+        step("The receiver's rights are a SUBSET of the sender's, and strictly smaller")
+        val child_rights = _rights_of(mint.caps.caps[0].kind)
+        expect(child_rights).to_equal(CAP_RIGHT_READ)
+        assert_true(_is_subset(child_rights, _rw_map()))
+        assert_false(child_rights == _rw_map())
+        step("The narrowed cap really lost write authority")
+        assert_false(mint.caps.has(_dataset(CAP_RIGHT_WRITE)))
+        assert_true(mint.caps.has(_dataset(CAP_RIGHT_READ)))
+
+    it("rejects the transfer outright when the recipe asks for rights the sender lacks"):
+        step("Sender holds read only")
+        val sender = sender_pouch(CAP_RIGHT_READ)
+        step("Recipe asks for read+write with no narrowing — a widening request")
+        val mint = spawn_with_cspace(sender, one_grant_spec(CAP_RIGHT_READ + CAP_RIGHT_WRITE, atten_identity()), 7u64, 10u64, 800u64)
+        step("Fail closed: the grant is DROPPED and counted, not silently clamped")
+        expect(mint.rejected).to_equal(1)
+        expect(mint.caps.caps.len()).to_equal(0)
+        step("The empty pouch is pledged, so it denies every check (not ambient-allow)")
+        assert_true(mint.caps.is_pledged)
+        assert_false(mint.caps.has(_dataset(CAP_RIGHT_READ)))
+
+    it("cannot use the rights mask as a back door to gain a bit the sender never had"):
+        step("Sender holds read only; the mask names write and admin")
+        val sender = sender_pouch(CAP_RIGHT_READ)
+        val mask = CAP_RIGHT_WRITE + CAP_RIGHT_ADMIN
+        val mint = spawn_with_cspace(sender, one_grant_spec(CAP_RIGHT_READ + CAP_RIGHT_WRITE, atten_rights(mask)), 7u64, 10u64, 800u64)
+        step("Masking is an AND, so the result can only ever remove bits — and the")
+        step("residual authority is still not one the sender holds, so it is rejected")
+        expect(mint.rejected).to_equal(1)
+        expect(mint.caps.caps.len()).to_equal(0)
+
+    it("holds the subset invariant across every capability of a multi-grant recipe"):
+        step("Sender holds read+write+map")
+        val sender_rights = _rw_map()
+        val sender = sender_pouch(sender_rights)
+        step("Three grants of the same authority, narrowed three different ways")
+        val spec = SpawnSpec(
+            image_hash: IMAGE_HASH,
+            grants: [
+                CapGrant(label: "ds.ro", requested: _dataset(sender_rights), atten: atten_rights(CAP_RIGHT_READ)),
+                CapGrant(label: "ds.rw", requested: _dataset(sender_rights), atten: atten_rights(CAP_RIGHT_READ + CAP_RIGHT_WRITE)),
+                CapGrant(label: "ds.full", requested: _dataset(sender_rights), atten: atten_identity())
+            ],
+            isolation: "sandbox",
+            budget: 0u64
+        )
+        val mint = spawn_with_cspace(sender, spec, 7u64, 10u64, 800u64)
+        expect(mint.rejected).to_equal(0)
+        expect(mint.caps.caps.len()).to_equal(3)
+        step("EVERY minted capability's rights are a subset of the sender's rights")
+        var violations = 0
+        for tok in mint.caps.caps:
+            if not _is_subset(_rights_of(tok.kind), sender_rights):
+                violations = violations + 1
+        expect(violations).to_equal(0)
+        step("Every minted capability is linked to the sender token that authorized it")
+        var unlinked = 0
+        for tok in mint.caps.caps:
+            if tok.parent_token_id != 500u64:
+                unlinked = unlinked + 1
+        expect(unlinked).to_equal(0)
+
+    it("spends a delegation-depth budget on every hop and refuses to re-delegate a spent token"):
+        step("Sender token has depth 2")
+        val sender = sender_pouch(_rw_map())
+        val hop1 = spawn_with_cspace(sender, one_grant_spec(_rw_map(), atten_identity()), 7u64, 10u64, 800u64)
+        expect(hop1.caps.caps[0].depth).to_equal(1)
+        step("Forking the child spends the last unit of budget")
+        val hop2 = fork_cspace(hop1.caps, 8u64, 20u64, 900u64)
+        expect(hop2.caps.caps.len()).to_equal(1)
+        expect(hop2.caps.caps[0].depth).to_equal(0)
+        step("A depth-0 token is not delegable: the next hop inherits NOTHING")
+        val hop3 = fork_cspace(hop2.caps, 9u64, 30u64, 950u64)
+        expect(hop3.caps.caps.len()).to_equal(0)
+        assert_true(hop3.caps.is_pledged)
+
+    it("refuses a CapabilityManager grant once the delegation budget is exhausted"):
+        step("A depth-0 token is denied delegation by the manager, not clamped")
+        var mgr = CapabilityManager.new()
+        mgr.init_task_record(TaskId(id: 1u64), true)
+        mgr.init_task_record(TaskId(id: 2u64), false)
+        val spent = _tok(_dataset(CAP_RIGHT_READ), 1u64, 600u64, 0)
+        assert_false(mgr.grant(TaskId(id: 1u64), TaskId(id: 2u64), spent))
+
+# ============================================================================
+# Invariant B — a one-shot authority cannot be used twice
+# ============================================================================
+
+describe("ABI v1 transfer: single-use authority is consumable exactly once"):
+
+    it("denies the second use of a single_use capability minted into a child C-Space"):
+        step("Sender delegates a ONE-SHOT dataset capability")
+        val sender = sender_pouch(_rw_map())
+        var ledger = SingleUseLedger.new()
+        val mint = spawn_with_cspace_tracked(sender, one_grant_spec(_rw_map(), atten_single_use()), 7u64, 10u64, 800u64, ledger)
+        expect(mint.rejected).to_equal(0)
+        expect(mint.caps.caps.len()).to_equal(1)
+        step("The minted token id is armed as one-shot")
+        val tid = mint.caps.caps[0].token_id
+        expect(ledger.armed_count()).to_equal(1)
+        assert_true(ledger.is_armed(tid))
+        assert_false(ledger.is_consumed(tid))
+        step("The FIRST use succeeds")
+        assert_true(ledger.consume(tid))
+        assert_true(ledger.is_consumed(tid))
+        step("The SECOND use is DENIED — this is the replay guard")
+        assert_false(ledger.consume(tid))
+        step("...and so is every use after that")
+        assert_false(ledger.consume(tid))
+
+    it("arms nothing when the single_use grant is itself rejected"):
+        step("Sender holds read only but the one-shot recipe asks for read+write")
+        val sender = sender_pouch(CAP_RIGHT_READ)
+        var ledger = SingleUseLedger.new()
+        val mint = spawn_with_cspace_tracked(sender, one_grant_spec(CAP_RIGHT_READ + CAP_RIGHT_WRITE, atten_single_use()), 7u64, 10u64, 800u64, ledger)
+        step("No authority was delegated, so no one-shot exists to spend")
+        expect(mint.rejected).to_equal(1)
+        expect(ledger.armed_count()).to_equal(0)
+        assert_false(ledger.is_armed(800u64))
+
+    it("refuses to re-arm a spent one-shot back into a fresh one"):
+        step("Mint and spend a one-shot")
+        val sender = sender_pouch(_rw_map())
+        var ledger = SingleUseLedger.new()
+        val mint = spawn_with_cspace_tracked(sender, one_grant_spec(_rw_map(), atten_single_use()), 7u64, 10u64, 800u64, ledger)
+        val tid = mint.caps.caps[0].token_id
+        assert_true(ledger.consume(tid))
+        step("Re-arming the same token id is refused, so the spend cannot be refunded")
+        assert_false(ledger.arm(tid))
+        assert_false(ledger.consume(tid))
+        expect(ledger.armed_count()).to_equal(1)
+
+    it("denies a token that was never armed as one-shot (fail closed)"):
+        step("A plain, non-single_use transfer arms nothing")
+        val sender = sender_pouch(_rw_map())
+        var ledger = SingleUseLedger.new()
+        val mint = spawn_with_cspace_tracked(sender, one_grant_spec(_rw_map(), atten_identity()), 7u64, 10u64, 800u64, ledger)
+        expect(ledger.armed_count()).to_equal(0)
+        step("consume() on an unarmed token id denies rather than accidentally allowing")
+        assert_false(ledger.consume(mint.caps.caps[0].token_id))
+        assert_false(ledger.consume(4242u64))
+
+    it("redeems an escrowed capability exactly once, and only by the intended receiver"):
+        step("Two live sessions: a sender holding the dataset cap, and a receiver")
+        var mgr = CapabilityManager.new()
+        val cap = _tok(_dataset(CAP_RIGHT_READ), 1u64, 700u64, 2)
+        val from_s = mgr.login("scheduler", CapabilitySet(caps: [cap], is_pledged: true))
+        val to_s = mgr.login("ticketing", CapabilitySet(caps: [], is_pledged: true))
+        val other = mgr.login("intruder", CapabilitySet(caps: [], is_pledged: true))
+        step("Sender escrows a SINGLE-USE cap into the receiver's arena")
+        val esc_opt = mgr.escrow_cap(from_s.id, to_s.id, cap)
+        assert_true(esc_opt != nil)
+        val esc = esc_opt
+        assert_false(esc.consumed)
+        step("A third party cannot redeem it")
+        assert_true(mgr.consume_escrow(esc.id, other.id) == nil)
+        step("The intended receiver redeems it once — this must succeed")
+        assert_true(mgr.consume_escrow(esc.id, to_s.id) != nil)
+        step("The SECOND redemption is DENIED — one-shot means one shot")
+        assert_true(mgr.consume_escrow(esc.id, to_s.id) == nil)
+        step("...and the third party still cannot redeem the spent escrow")
+        assert_true(mgr.consume_escrow(esc.id, other.id) == nil)
+
+    it("never escrows authority the sender does not currently hold"):
+        step("Sender's session holds read only; it tries to escrow write")
+        var mgr = CapabilityManager.new()
+        val held = _tok(_dataset(CAP_RIGHT_READ), 1u64, 710u64, 2)
+        val wanted = _tok(_dataset(CAP_RIGHT_WRITE), 2u64, 711u64, 2)
+        val from_s = mgr.login("scheduler", CapabilitySet(caps: [held], is_pledged: true))
+        val to_s = mgr.login("ticketing", CapabilitySet(caps: [], is_pledged: true))
+        step("Monotonic guard: an escrow can never exceed the sender's current authority")
+        assert_true(mgr.escrow_cap(from_s.id, to_s.id, wanted) == nil)

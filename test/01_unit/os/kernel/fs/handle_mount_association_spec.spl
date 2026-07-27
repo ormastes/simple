@@ -1,0 +1,195 @@
+"""
+# VFS handle to mount association — contract spec
+
+**Feature:** SimpleOS VFS unify (P3) — one mount namespace, one open-file
+description table.
+
+**Defect under test:** `VfsManager.read/write/close/seek`
+(`src/os/services/vfs/vfs.spl`) route every handle to `self.mounts[0]`,
+documented in the source itself as *"Simplified: use first mount"*. Each
+filesystem driver keeps a private handle namespace starting at 1, so with
+two mounts the *same* handle value `1` exists on both — and the mounts[0]
+route silently reads mount A's file when the caller opened a file on
+mount B.
+
+The oracle here is absolute, never a value compared to itself: each mock
+driver stamps its own filesystem name onto the bytes it returns, so
+`"winfs:beta-payload"` can only have come from mount B and
+`"rootfs:alpha-payload"` can only have come from mount A.
+"""
+
+use std.spec.{describe, it, expect, step}
+use os.kernel.fs.vfs_handle_table.{VfsHandleTable, VFS_HANDLE_NO_MOUNT}
+
+# ============================================================================
+# Mock drivers — each with its OWN handle namespace starting at 1
+# ============================================================================
+
+class MockOpenFile:
+    handle: u64
+    payload: text
+
+class MockFs:
+    """Stand-in for a filesystem driver (FAT32, winfs, ramfs, ...).
+
+    Reproduces the property that matters: handle numbering is driver-local,
+    so two mounted filesystems both hand out handle 1 first.
+    """
+    name: text
+    files: [MockOpenFile]
+    next_handle: u64
+
+impl MockFs:
+    static fn new(name: text) -> MockFs:
+        MockFs(name: name, files: [], next_handle: 1 as u64)
+
+    me open(payload: text) -> u64:
+        val h = self.next_handle
+        self.next_handle = self.next_handle + (1 as u64)
+        self.files = self.files + [MockOpenFile(handle: h, payload: payload)]
+        h
+
+    fn read(handle: u64) -> text:
+        """Content is stamped with the driver name — the absolute oracle."""
+        for f in self.files:
+            if f.handle == handle:
+                return self.name + ":" + f.payload
+        self.name + ":ENOENT"
+
+class MountSet:
+    """Two mounts, addressed by index exactly like `VfsManager.mounts`."""
+    path_a: text
+    fs_a: MockFs
+    path_b: text
+    fs_b: MockFs
+
+impl MountSet:
+    fn driver_read(index: i32, driver_handle: u64) -> text:
+        if index == 0:
+            return self.fs_a.read(driver_handle)
+        if index == 1:
+            return self.fs_b.read(driver_handle)
+        "ENODEV"
+
+class Fixture:
+    mounts: MountSet
+    table: VfsHandleTable
+    h_a: u64
+    h_b: u64
+    drv_a: u64
+    drv_b: u64
+
+fn make_fixture() -> Fixture:
+    """Mount A at "/" and B at "/win", open one file on each."""
+    var fs_a = MockFs.new("rootfs")
+    var fs_b = MockFs.new("winfs")
+    val drv_a = fs_a.open("alpha-payload")
+    val drv_b = fs_b.open("beta-payload")
+    val mounts = MountSet(path_a: "/", fs_a: fs_a, path_b: "/win", fs_b: fs_b)
+    var table = VfsHandleTable.new()
+    val h_a = table.register(0, "/", drv_a)
+    val h_b = table.register(1, "/win", drv_b)
+    Fixture(mounts: mounts, table: table, h_a: h_a, h_b: h_b, drv_a: drv_a, drv_b: drv_b)
+
+fn route_read(fx: Fixture, vfs_handle: u64) -> text:
+    """The FIXED path: resolve handle to its owning mount, then read."""
+    val look = fx.table.lookup(vfs_handle)
+    if not look.found:
+        return "EBADF"
+    fx.mounts.driver_read(look.mount_index, look.driver_handle)
+
+fn first_mount_read(fx: Fixture, driver_handle: u64) -> text:
+    """The PRE-FIX path: `val mount = self.mounts[0]` regardless of owner."""
+    fx.mounts.driver_read(0, driver_handle)
+
+# ============================================================================
+
+describe "VFS handle to mount association":
+
+    it "gives colliding driver handles distinct VFS handles":
+        step("open one file on each of two mounts")
+        val fx = make_fixture()
+
+        step("both drivers issued driver-local handle 1 — the collision")
+        expect(fx.drv_a).to_equal(1 as u64)
+        expect(fx.drv_b).to_equal(1 as u64)
+
+        step("the VFS handles are still distinct")
+        expect(fx.h_a).to_equal(1 as u64)
+        expect(fx.h_b).to_equal(2 as u64)
+        expect(fx.table.open_count()).to_equal(2)
+
+    it "resolves a handle opened on mount B to mount B":
+        val fx = make_fixture()
+
+        step("handle B carries mount index 1 and mount path /win")
+        expect(fx.table.mount_index_of(fx.h_b)).to_equal(1)
+        expect(fx.table.mount_path_of(fx.h_b)).to_equal("/win")
+
+        step("and unwraps back to the driver-local handle B issued")
+        expect(fx.table.driver_handle_of(fx.h_b)).to_equal(1 as u64)
+
+        step("handle A still resolves to mount A")
+        expect(fx.table.mount_index_of(fx.h_a)).to_equal(0)
+        expect(fx.table.mount_path_of(fx.h_a)).to_equal("/")
+
+    it "reads mount B content through a handle opened on mount B":
+        val fx = make_fixture()
+
+        step("read via the handle to mount association")
+        expect(route_read(fx, fx.h_b)).to_equal("winfs:beta-payload")
+
+        step("the mount A handle reads mount A content")
+        expect(route_read(fx, fx.h_a)).to_equal("rootfs:alpha-payload")
+
+    it "never lets a mount B handle reach mount A":
+        val fx = make_fixture()
+
+        step("negative: the B handle must NOT produce mount A bytes")
+        val routed = route_read(fx, fx.h_b)
+        assert_true(routed != "rootfs:alpha-payload")
+        assert_true(routed != "rootfs:ENOENT")
+
+        step("control: the pre-fix mounts[0] route DOES produce mount A bytes")
+        expect(first_mount_read(fx, fx.drv_b)).to_equal("rootfs:alpha-payload")
+
+        step("so the two routes disagree — the fix is load bearing")
+        assert_true(routed != first_mount_read(fx, fx.drv_b))
+
+    it "invalidates a handle on close and leaves the sibling open":
+        var fx = make_fixture()
+
+        step("close the mount B handle")
+        assert_true(fx.table.release(fx.h_b))
+
+        step("it no longer resolves to any mount")
+        expect(fx.table.is_open(fx.h_b)).to_equal(false)
+        expect(fx.table.mount_index_of(fx.h_b)).to_equal(VFS_HANDLE_NO_MOUNT)
+        expect(route_read(fx, fx.h_b)).to_equal("EBADF")
+
+        step("double close is reported, not silently accepted")
+        expect(fx.table.release(fx.h_b)).to_equal(false)
+
+        step("the mount A handle is untouched")
+        expect(route_read(fx, fx.h_a)).to_equal("rootfs:alpha-payload")
+        expect(fx.table.open_count()).to_equal(1)
+
+    it "keeps handles pointing at their filesystem after an unmount renumbers mounts":
+        var fx = make_fixture()
+
+        step("unmount index 0 — VfsManager does mounts.remove(0)")
+        expect(fx.table.release_mount(0)).to_equal(1)
+        fx.table.reindex_after_unmount(0)
+
+        step("the surviving mount B handle now names index 0, still path /win")
+        expect(fx.table.mount_index_of(fx.h_b)).to_equal(0)
+        expect(fx.table.mount_path_of(fx.h_b)).to_equal("/win")
+        expect(fx.table.open_count()).to_equal(1)
+
+    it "rejects a handle that was never issued":
+        val fx = make_fixture()
+
+        step("an unknown handle resolves to no mount")
+        expect(fx.table.is_open(999 as u64)).to_equal(false)
+        expect(fx.table.mount_index_of(999 as u64)).to_equal(VFS_HANDLE_NO_MOUNT)
+        expect(route_read(fx, 999 as u64)).to_equal("EBADF")
