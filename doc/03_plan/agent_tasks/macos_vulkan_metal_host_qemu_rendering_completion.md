@@ -633,6 +633,26 @@ same failure.
   gate. The ordered Vulkan -> web -> GUI -> host WM -> Metal -> QEMU sequence
   remains unchanged.
 
+### 2026-07-27 post-fix font producer checkpoint
+
+- The receiver fix is pushed on `main` as `fba1e6bcab`.
+- Using the patched Stage 3 compiler plus the canonical Winit/WM/runtime
+  providers, `engine2d_font_state_native_probe.spl` compiled 184 modules with
+  zero failures and linked successfully. The native run no longer faults and
+  passes font load, live TTF face, and exact selected-font identity.
+- The run exits 4 at
+  `engine2d_font_state_native_status=fail-cold-cache`: the first
+  `Engine2D.draw_text` does not increase the observable rasterization count.
+  This is the new leading producer seam. The probe still requests 24 px, not
+  the required 24 pt / 300 DPI = 100 px, and it does not prove positive quads,
+  atlas alpha, Vulkan execution, or device readback.
+- Three producer cycles are consumed for this session: two link-only failures
+  identified the required specialized runtime providers, and the third
+  produced the runtime result above. Do not rerun this probe in the same
+  session. A fresh session must distinguish draw/staging failure from
+  cache-state write-back loss, then extend the focused receipt to Bungee
+  100 px and positive batch/atlas evidence.
+
 ## Required Evidence and Documentation
 
 - `doc/04_architecture/shared_multilingual_gpu_fonts.md`

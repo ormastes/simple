@@ -198,3 +198,18 @@ blocked by the stale `examples.browser.entity.dom.css_types` import in
 `custom_properties.spl`; the shared deployed compiler was left untouched.
 Resume at acceptance item 2 using the proven Stage 3 compiler, then continue
 through the remaining items in order.
+
+The first post-fix producer run advances beyond the former fault. With the
+canonical specialized runtime providers it compiles 184 modules with zero
+failures, links, loads the Bungee face, proves the live TTF predicate and exact
+identity, then exits 4 with
+`engine2d_font_state_native_status=fail-cold-cache`. No receiver fault occurs.
+The first draw therefore fails to expose a rasterization increment; whether
+the cause is draw/staging production or cache-state write-back remains
+unproven. This probe used 24 px and is not the required 100 px receipt.
+
+The session's three producer cycles are exhausted (two link-configuration
+failures followed by the runtime result). The next fresh session must inspect
+the cold-draw seam without repeating this command, add trustworthy scalar
+batch/cache evidence, and only then require exact Bungee 100 px positive
+quads/atlas alpha. Vulkan device execution and readback remain unproven.
