@@ -893,6 +893,16 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   behaviorally verify an efficient Darwin strategy (for example,
   `posix_spawn` with `POSIX_SPAWN_CLOEXEC_DEFAULT`) before native builds can
   rely on current main without a dirty portability patch.
+- The fresh Darwin runtime session completed that prerequisite without a
+  bootstrap. Apple piped spawning now uses `posix_spawnp` with atomic process
+  group creation, `POSIX_SPAWN_CLOEXEC_DEFAULT`, explicit stdin/stdout actions,
+  and stderr inheritance when the parent left it open. It does no work after
+  `fork`, preserves the inherited signal mask, and resets INT/TERM/PIPE
+  handlers. The focused macOS runtime suite passes strict `-Werror` compilation,
+  arbitrary non-CLOEXEC descriptor isolation, process-group termination and
+  reaping, bounded writes, 32-slot recycling, and a generous five-second
+  aggregate launch-latency guard. Linux and FreeBSD retain the existing
+  fork/exec implementation.
 - Cycle 25 directly consumed caller-owned selected-font metadata and pixels
   from FontRenderer while still allowing the legacy aggregate fallback. It
   compiled 192 modules with zero failures and stopped at

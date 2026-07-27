@@ -147,27 +147,48 @@ static int bounded_write_reports_backpressure(void) {
 }
 
 static int inherited_descriptor_is_closed(void) {
-#ifndef __linux__
+#if !defined(__linux__) && !defined(__APPLE__)
     return 1;
 #else
-    int inherited_fd = open("/etc/passwd", O_RDONLY);
-    if (inherited_fd < 3) return 0;
+    int source_fd = open("/etc/passwd", O_RDONLY);
+    if (source_fd < 0) return 0;
+    int inherited_fd = fcntl(source_fd, F_DUPFD, 64);
+    close(source_fd);
+    if (inherited_fd < 0 ||
+        fcntl(inherited_fd, F_SETFD, 0) != 0) {
+        if (inherited_fd >= 0) close(inherited_fd);
+        return 0;
+    }
     char script[160];
     snprintf(
         script, sizeof(script),
-        "if [ -e /proc/self/fd/%d ]; then printf leak; else printf clean; fi",
+#ifdef __APPLE__
+        "if [ -e /dev/fd/%d ]; then printf leak; else printf clean; fi; sleep 30",
+#else
+        "if [ -e /proc/self/fd/%d ]; then printf leak; else printf clean; fi; sleep 30",
+#endif
         inherited_fd
     );
     int64_t pid = spawn_shell(script);
-    if (pid <= 0) return 0;
+    if (pid <= 0) {
+        close(inherited_fd);
+        return 0;
+    }
     int clean = 0;
+    int leaked = 0;
     for (int i = 0; i < 1000 && !clean; i++) {
         const char* chunk = rt_process_read_stdout(pid);
         clean = chunk && strstr(chunk, "clean") != NULL;
+        leaked = chunk && strstr(chunk, "leak") != NULL;
         if (!clean) usleep(1000);
     }
     int closed = rt_process_close_piped(pid);
     close(inherited_fd);
+    if (!clean || !closed) {
+        fprintf(
+            stderr, "inherited fd check: clean=%d leak=%d closed=%d\n",
+            clean, leaked, closed);
+    }
     return clean && closed;
 #endif
 }
@@ -177,8 +198,18 @@ static int exact_close_kills_and_reaps_group(void) {
     pid_t grandchild = -1;
     if (pid <= 0 || !read_pid_from_child(pid, &grandchild)) return 0;
     if (!rt_process_close_piped(pid)) return 0;
+#ifdef __APPLE__
+    for (int i = 0; i < 1000; i++) {
+        if (kill(-(pid_t)pid, 0) != 0 && errno == ESRCH) {
+            return stopped((pid_t)pid);
+        }
+        usleep(1000);
+    }
+    return 0;
+#else
     for (int i = 0; i < 1000 && !stopped(grandchild); i++) usleep(1000);
     return stopped((pid_t)pid) && stopped(grandchild);
+#endif
 }
 
 static int reaped_leader_still_kills_group(void) {
@@ -187,12 +218,23 @@ static int reaped_leader_still_kills_group(void) {
     if (pid <= 0 || !read_pid_from_child(pid, &grandchild)) return 0;
     usleep(20000);
     if (!rt_process_close_piped(pid)) return 0;
+#ifdef __APPLE__
+    for (int i = 0; i < 1000; i++) {
+        if (kill(-(pid_t)pid, 0) != 0 && errno == ESRCH) return 1;
+        usleep(1000);
+    }
+    return 0;
+#else
     for (int i = 0; i < 1000 && !stopped(grandchild); i++) usleep(1000);
     return stopped(grandchild);
+#endif
 }
 
 static int close_recycles_slots_and_rejects_unknown_handles(void) {
     if (rt_process_close_piped(-1) || rt_process_close_piped(999999999)) return 0;
+    struct timespec started;
+    struct timespec finished;
+    if (clock_gettime(CLOCK_MONOTONIC, &started) != 0) return 0;
     for (int i = 0; i < 32; i++) {
         int64_t pid = spawn_shell("exit 0");
         if (pid <= 0) return 0;
@@ -200,7 +242,10 @@ static int close_recycles_slots_and_rejects_unknown_handles(void) {
         if (!rt_process_close_piped(pid)) return 0;
         if (rt_process_write_stdin(pid, "late") || rt_process_is_alive(pid)) return 0;
     }
-    return 1;
+    if (clock_gettime(CLOCK_MONOTONIC, &finished) != 0) return 0;
+    double elapsed = (double)(finished.tv_sec - started.tv_sec) +
+        (double)(finished.tv_nsec - started.tv_nsec) / 1000000000.0;
+    return elapsed < 5.0;
 }
 
 static int parent_death_stops_child(void) {

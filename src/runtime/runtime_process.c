@@ -23,6 +23,10 @@
 #endif
 #endif
 
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE
+#endif
+
 #include "runtime.h"
 
 #include <stdio.h>
@@ -887,6 +891,10 @@ bool rt_process_close_piped(int64_t pid) {
 #include <errno.h>
 #include <pthread.h>
 #include <poll.h>
+#ifdef __APPLE__
+#include <crt_externs.h>
+#include <spawn.h>
+#endif
 #ifdef __linux__
 #include <sys/prctl.h>
 #include <sys/syscall.h>
@@ -1011,10 +1019,82 @@ static bool proc_pipe_cloexec(int fds[2]) {
     return true;
 }
 
+#ifdef __APPLE__
+static bool proc_move_pipe_fds_above_stdio(int fds[2]) {
+    for (int i = 0; i < 2; i++) {
+        if (fds[i] > STDERR_FILENO) continue;
+        int moved = fcntl(fds[i], F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+        if (moved < 0) return false;
+        close(fds[i]);
+        fds[i] = moved;
+    }
+    return true;
+}
+
+static pid_t proc_spawn_piped_apple(
+        const char* cmd, char** argv,
+        const int stdin_pipe[2], const int stdout_pipe[2]) {
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
+    bool actions_initialized = false;
+    bool attributes_initialized = false;
+    pid_t pid = -1;
+    sigset_t defaults;
+
+    if (posix_spawn_file_actions_init(&actions) != 0) goto done;
+    actions_initialized = true;
+    if (posix_spawnattr_init(&attributes) != 0) goto done;
+    attributes_initialized = true;
+
+    if (posix_spawn_file_actions_adddup2(
+            &actions, stdin_pipe[0], STDIN_FILENO) != 0 ||
+        posix_spawn_file_actions_adddup2(
+            &actions, stdout_pipe[1], STDOUT_FILENO) != 0) {
+        goto done;
+    }
+    int stderr_flags = fcntl(STDERR_FILENO, F_GETFD);
+    if (stderr_flags >= 0 && (stderr_flags & FD_CLOEXEC) == 0 &&
+        posix_spawn_file_actions_addinherit_np(
+            &actions, STDERR_FILENO) != 0) {
+        goto done;
+    }
+    if (posix_spawn_file_actions_addclose(&actions, stdin_pipe[0]) != 0 ||
+        posix_spawn_file_actions_addclose(&actions, stdin_pipe[1]) != 0 ||
+        posix_spawn_file_actions_addclose(&actions, stdout_pipe[0]) != 0 ||
+        posix_spawn_file_actions_addclose(&actions, stdout_pipe[1]) != 0) {
+        goto done;
+    }
+
+    sigemptyset(&defaults);
+    sigaddset(&defaults, SIGINT);
+    sigaddset(&defaults, SIGTERM);
+    sigaddset(&defaults, SIGPIPE);
+    if (posix_spawnattr_setpgroup(&attributes, 0) != 0 ||
+        posix_spawnattr_setsigdefault(&attributes, &defaults) != 0 ||
+        posix_spawnattr_setflags(
+            &attributes,
+            (short)(POSIX_SPAWN_CLOEXEC_DEFAULT |
+                    POSIX_SPAWN_SETPGROUP |
+                    POSIX_SPAWN_SETSIGDEF)) != 0) {
+        goto done;
+    }
+
+    if (posix_spawnp(
+            &pid, cmd, &actions, &attributes, argv,
+            *_NSGetEnviron()) != 0) {
+        pid = -1;
+    }
+
+done:
+    if (attributes_initialized) (void)posix_spawnattr_destroy(&attributes);
+    if (actions_initialized) (void)posix_spawn_file_actions_destroy(&actions);
+    return pid;
+}
+#else
 static void proc_close_inherited_fds(void) {
 #if defined(__linux__) && defined(SYS_close_range)
     if (syscall(SYS_close_range, 3U, ~0U, 0U) == 0) return;
-#elif defined(__APPLE__) || defined(__FreeBSD__)
+#elif defined(__FreeBSD__)
     closefrom(3);
     return;
 #endif
@@ -1022,6 +1102,7 @@ static void proc_close_inherited_fds(void) {
     if (max_fd < 0 || max_fd > 1048576) max_fd = 1048576;
     for (int fd = 3; fd < max_fd; fd++) close(fd);
 }
+#endif
 
 /* ===== Public API ===== */
 
@@ -1041,6 +1122,14 @@ static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv) {
         close(stdin_pipe[0]); close(stdin_pipe[1]);
         return -1;
     }
+#ifdef __APPLE__
+    if (!proc_move_pipe_fds_above_stdio(stdin_pipe) ||
+        !proc_move_pipe_fds_above_stdio(stdout_pipe)) {
+        close(stdin_pipe[0]); close(stdin_pipe[1]);
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        return -1;
+    }
+#endif
     int stdin_flags = fcntl(stdin_pipe[1], F_GETFL, 0);
     if (stdin_flags < 0 ||
         fcntl(stdin_pipe[1], F_SETFL, stdin_flags | O_NONBLOCK) != 0) {
@@ -1052,7 +1141,13 @@ static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv) {
     fflush(stdout);
     fflush(stderr);
 
+#ifdef __APPLE__
+    pid_t pid = proc_spawn_piped_apple(
+        cmd, argv, stdin_pipe, stdout_pipe);
+#else
+#ifdef __linux__
     pid_t expected_parent = getpid();
+#endif
     pid_t pid = fork();
     if (pid < 0) {
         close(stdin_pipe[0]); close(stdin_pipe[1]);
@@ -1086,8 +1181,10 @@ static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv) {
         execvp(cmd, argv);
         _exit(127); /* exec failed */
     }
+#endif
 
     /* === PARENT === */
+#ifndef __APPLE__
     if (setpgid(pid, pid) != 0 && errno != EACCES && errno != ESRCH) {
         kill(pid, SIGKILL);
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
@@ -1095,6 +1192,13 @@ static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv) {
         close(stdout_pipe[0]); close(stdout_pipe[1]);
         return -1;
     }
+#else
+    if (pid < 0) {
+        close(stdin_pipe[0]); close(stdin_pipe[1]);
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        return -1;
+    }
+#endif
     /* Close child-side ends */
     close(stdin_pipe[0]);
     close(stdout_pipe[1]);
