@@ -1,0 +1,353 @@
+# Simple DB server tier — COMMIT DURABILITY
+#
+# =============================================================================
+# THE DURABILITY CONTRACT
+# =============================================================================
+#
+# Increment 1 of the server tier applied a committed transaction to the
+# IN-MEMORY tables only: `txn_commit` never called `save()`, so a process that
+# died one instruction after replying `OK applied=1` lost the write entirely.
+# This module is the commit's durable half.  It adds NO storage engine and NO
+# locking engine of its own: the durable write is `SdnDatabase.save()`, which
+# is `atomic_write()` from `std.database.atomic` — `FileLock` (O_EXCL + pid
+# liveness) around temp-file -> `rt_file_sync` -> `rt_file_rename`.
+#
+# -----------------------------------------------------------------------------
+# 1. What is guaranteed once COMMIT returns OK
+# -----------------------------------------------------------------------------
+# When `durable_commit` returns `ok == true` and `persisted == true`, EVERY
+# write of that transaction is in the database file on durable media, and a
+# subsequent `SdnDatabase.load(path)` — in this process or in a brand new one,
+# after a power cut — observes ALL of them.  The commit is all-or-nothing:
+# there is no outcome in which some overlay entries are durable and others are
+# not, because the durable step is a single whole-file rename.
+#
+# When `ok == false`, NOTHING of the transaction is durable and the in-memory
+# store has been returned to its last durable state (see §4).
+#
+# EXPLICIT NON-GUARANTEES (do not read more into this than is written):
+#   * `SdnRow._version` is NOT durable.  `SdnTable.to_sdn()` serializes the
+#     declared columns only, so versions restart at 0 after a reload.  The
+#     optimistic-version check therefore protects a single process lifetime,
+#     not a restart.  Filed as a follow-up in .spipe/db_durability/state.md.
+#   * A field whose column is not in `SdnTable.columns` is NOT durable — it
+#     lives in memory and is dropped by `to_sdn()`.  Callers must declare
+#     their columns.  This is a store property, not a server-tier one.
+#   * "Durable" here means the bytes reached the kernel and the file was
+#     fsync'd before the rename.  It does not claim anything about a disk
+#     controller that lies about its own write cache.
+#   * Durability is per-COMMIT, not per-PUT.  A PUT inside an open transaction
+#     is buffered in the session overlay and is not durable until COMMIT.
+#
+# -----------------------------------------------------------------------------
+# 2. What a reader sees mid-commit
+# -----------------------------------------------------------------------------
+# In-process: the capsule serves one message at a time, so a peer session can
+# only ever observe the store BETWEEN commits — never between the overlay
+# apply and the persist.  (When the listener increment introduces real
+# concurrency this stops being free; it is recorded as a listener-increment
+# obligation, not as something already solved here.)
+#
+# Cross-process: a reader goes through `atomic_read`/`SdnDatabase.load`, which
+# takes the SAME `FileLock` on the SAME path that the writer takes, and the
+# visible swap is a `rename(2)`.  A reader therefore observes either the whole
+# pre-commit file or the whole post-commit file.  It can never observe a torn
+# mixture, for two independent reasons:
+#   (a) the partially-written bytes only ever exist at `<path>.tmp`, a name no
+#       reader opens; and
+#   (b) the file body carries a `#sdn-crc32:` header, so even a torn file that
+#       somehow reached `<path>` is REJECTED by `load()` (returns nil) rather
+#       than parsed into a half-new state.
+#
+# -----------------------------------------------------------------------------
+# 3. Crash between overlay-apply and persist
+# -----------------------------------------------------------------------------
+# The commit pipeline is:
+#
+#     P1 precheck   optimistic version check over the whole overlay
+#     P2 undo       snapshot the pre-image of every key the overlay touches
+#     P3 apply      overlay -> in-memory tables
+#     P4 persist    SdnDatabase.save()  == FileLock + temp + fsync + rename
+#     P5 ack        return OK to the client
+#
+# The COMMIT POINT is the rename inside P4.  Crash behaviour, per point:
+#
+#   | crash at            | on-disk state after restart | client saw |
+#   |---------------------|-----------------------------|------------|
+#   | during/after P1-P3  | OLD value everywhere        | nothing    |
+#   | during P4, pre-rename| OLD value everywhere       | nothing    |
+#   |                     | (a stray <path>.tmp may     |            |
+#   |                     |  exist and is ignored)      |            |
+#   | after P4, before P5 | NEW value everywhere        | nothing    |
+#
+# The last row is the honest one: a lost acknowledgement means the client
+# cannot tell whether the commit landed.  This tier is AT-LEAST-ONCE at the
+# connection level — a client that reconnects after a dropped connection MUST
+# re-read to find out, and must not assume its retry is a no-op.  Making that
+# idempotent needs a commit id in the protocol; it is NOT done here.
+#
+# -----------------------------------------------------------------------------
+# 4. Recoverable persist failure (no crash)
+# -----------------------------------------------------------------------------
+# If `save()` returns false (lock not obtainable, disk full, read-only mount)
+# the process is still alive and its memory would otherwise disagree with the
+# disk.  The pre-image captured at P2 is replayed, so the in-memory store is
+# put back to exactly its last durable state, and COMMIT answers
+# `ERR code=durability`.  Memory and disk agree on the OLD value everywhere.
+#
+# -----------------------------------------------------------------------------
+# 5. Why the WAL is deliberately NOT the commit point
+# -----------------------------------------------------------------------------
+# `std.database.wal` has entry types Insert/Update/Delete/Checkpoint and no
+# transaction-boundary record.  A multi-write transaction appended entry by
+# entry is therefore TORN by a crash in the middle of the append run: replay
+# would resurrect a prefix of a transaction that never committed.  Using it as
+# the commit point would need a Begin/Commit marker in `wal.spl`, which this
+# lane does not own.  So the WAL keeps its existing role — it is checkpointed
+# by `save()` — and whole-file atomic rename is the commit point.  Recorded as
+# the reason, not as an oversight.
+
+use std.database.core.{ SdnRow, SdnTable, SdnDatabase }
+use std.database.atomic.{ file_write, file_exists }
+use std.database.server.txn.{ TxnState, TxnWrite, CommitOutcome, txn_precheck, txn_apply }
+
+# ============================================================================
+# Fault-injection points
+#
+# These exist so the crash-point matrix is EXECUTABLE.  They are inert unless
+# a caller explicitly asks for one; production callers use `durability_on()`.
+# ============================================================================
+
+val CRASH_NONE: text = ""
+# Process dies after the overlay is applied in memory, before save() is called.
+val CRASH_BEFORE_PERSIST: text = "before_persist"
+# Process dies inside save(): the temp file exists, the rename never happened.
+val CRASH_MID_PERSIST: text = "mid_persist"
+# Process dies after the rename, before the client is acknowledged.
+val CRASH_AFTER_PERSIST: text = "after_persist"
+# save() returns false and the process keeps running (disk full / lock lost).
+val CRASH_PERSIST_FAILS: text = "persist_fails"
+
+struct DurabilityPolicy:
+    enabled: bool
+    crash_at: text
+
+fn durability_on() -> DurabilityPolicy:
+    DurabilityPolicy(enabled: true, crash_at: CRASH_NONE)
+
+fn durability_off() -> DurabilityPolicy:
+    DurabilityPolicy(enabled: false, crash_at: CRASH_NONE)
+
+fn durability_crash_at(point: text) -> DurabilityPolicy:
+    DurabilityPolicy(enabled: true, crash_at: point)
+
+# ============================================================================
+# Commit outcome, durability-aware
+# ============================================================================
+
+struct DurableOutcome:
+    ok: bool            # true only when the client may be told OK
+    crashed: bool       # a simulated crash fired; no acknowledgement exists
+    persisted: bool     # the durable rename completed
+    applied: i64
+    conflict_key: text
+    message: text
+
+fn durable_ok(applied: i64, persisted: bool, message: text) -> DurableOutcome:
+    DurableOutcome(
+        ok: true, crashed: false, persisted: persisted,
+        applied: applied, conflict_key: "", message: message
+    )
+
+fn durable_err(key: text, message: text) -> DurableOutcome:
+    DurableOutcome(
+        ok: false, crashed: false, persisted: false,
+        applied: 0, conflict_key: key, message: message
+    )
+
+fn durable_crash(point: text, persisted: bool, applied: i64) -> DurableOutcome:
+    DurableOutcome(
+        ok: false, crashed: true, persisted: persisted,
+        applied: applied, conflict_key: "",
+        message: "simulated crash at {point}; the client is never acknowledged"
+    )
+
+# ============================================================================
+# Undo pre-images — how a recoverable persist failure gets memory back in
+# agreement with disk
+# ============================================================================
+
+struct UndoEntry:
+    table: text
+    key: text
+    existed: bool
+    row: SdnRow
+
+# Raw pre-image: unlike `store_read` this does NOT hide a soft-deleted row,
+# because restoring a delete means restoring the row WITH its valid=false.
+fn raw_row(store: SdnDatabase, table_name: text, key: text) -> SdnRow?:
+    match store.get_table(table_name):
+        Some(table):
+            val typed: SdnTable = table
+            typed.get_row(key)
+        nil:
+            nil
+
+fn capture_undo(store: SdnDatabase, state: TxnState) -> [UndoEntry]:
+    var undo: [UndoEntry] = []
+    for write in state.writes:
+        val typed: TxnWrite = write
+        match raw_row(store, typed.table, typed.key):
+            Some(row):
+                val typed_row: SdnRow = row
+                undo.push(UndoEntry(
+                    table: typed.table, key: typed.key,
+                    existed: true, row: typed_row.copy()
+                ))
+            nil:
+                undo.push(UndoEntry(
+                    table: typed.table, key: typed.key,
+                    existed: false, row: SdnRow(fields: {}, _version: 0)
+                ))
+    undo
+
+# Drop one row from a table.  `SdnTable` has no remove, and `core.spl` is not
+# this lane's to change, so the table is rebuilt from its public surface.
+fn drop_row(store: SdnDatabase, table_name: text, key: text):
+    match store.get_table(table_name):
+        Some(table):
+            val typed: SdnTable = table
+            var rebuilt = SdnTable.new(typed.name, typed.columns)
+            for row in typed.rows:
+                val typed_row: SdnRow = row
+                if typed_row.get("id") != Some(key):
+                    rebuilt.add_row(typed_row)
+            store.set_table(table_name, rebuilt)
+        nil:
+            pass_do_nothing("table vanished; nothing to drop")
+
+fn restore_undo(store: SdnDatabase, undo: [UndoEntry]):
+    for entry in undo:
+        val typed: UndoEntry = entry
+        if typed.existed:
+            # Extract -> mutate -> write back; a mutating call through
+            # store.tables[name].update_row(...) loses the write on the
+            # interpreter.
+            match store.get_table_mut(typed.table):
+                Some(table_value):
+                    var table: SdnTable = table_value
+                    table.update_row(typed.key, typed.row)
+                    store.set_table(typed.table, table)
+                nil:
+                    pass_do_nothing("table vanished; nothing to restore")
+        else:
+            drop_row(store, typed.table, typed.key)
+
+# ============================================================================
+# The mid-persist crash model
+# ============================================================================
+
+# `atomic_write` writes `<path>.tmp`, fsyncs it, then renames it over `<path>`.
+# A crash between those two steps leaves exactly this: a torn temp file and an
+# untouched main file.  Reproducing it byte-for-byte is what makes the
+# "reader never sees a torn mixture" claim testable rather than asserted.
+fn write_torn_temp(path: text) -> bool:
+    if path == "":
+        return false
+    file_write(path + ".tmp", "#sdn-crc32:0\nusers |id, name, valid|\n    u1, TRUNCA")
+
+fn temp_path_exists(path: text) -> bool:
+    file_exists(path + ".tmp")
+
+# ============================================================================
+# The durable commit
+# ============================================================================
+
+# Mutates `store` in place; callers use the extract -> mutate -> write back
+# pattern (`var s = self.store; durable_commit(s, ...); self.store = s`).
+fn durable_commit(store: SdnDatabase, state: TxnState, policy: DurabilityPolicy) -> DurableOutcome:
+    if not state.open:
+        return durable_err("", "no open transaction")
+
+    # ---- P1 precheck ----------------------------------------------------
+    val pre: CommitOutcome = txn_precheck(store, state)
+    if not pre.ok:
+        return durable_err(pre.conflict_key, pre.message)
+
+    # ---- P2 undo pre-images ---------------------------------------------
+    val undo = capture_undo(store, state)
+
+    # ---- P3 apply to memory ---------------------------------------------
+    val applied_outcome: CommitOutcome = txn_apply(store, state)
+    if not applied_outcome.ok:
+        restore_undo(store, undo)
+        return durable_err(applied_outcome.conflict_key, applied_outcome.message)
+    val applied = applied_outcome.applied
+
+    # A store with no path is an explicit in-memory model.  Say so; never
+    # report it as durable.
+    val durable_target = policy.enabled and store.path != ""
+    if not durable_target:
+        return durable_ok(applied, false, "in-memory only: durability disabled or store has no path")
+
+    if policy.crash_at == CRASH_BEFORE_PERSIST:
+        return durable_crash(CRASH_BEFORE_PERSIST, false, applied)
+
+    if policy.crash_at == CRASH_MID_PERSIST:
+        write_torn_temp(store.path)
+        return durable_crash(CRASH_MID_PERSIST, false, applied)
+
+    # ---- P4 persist — the commit point ----------------------------------
+    var persisted = true
+    if policy.crash_at == CRASH_PERSIST_FAILS:
+        persisted = false
+    else:
+        persisted = store.save()
+
+    if not persisted:
+        restore_undo(store, undo)
+        return durable_err(
+            "",
+            "commit not persisted; in-memory store rolled back to its last durable state"
+        )
+
+    if policy.crash_at == CRASH_AFTER_PERSIST:
+        return durable_crash(CRASH_AFTER_PERSIST, true, applied)
+
+    # ---- P5 ack ----------------------------------------------------------
+    durable_ok(applied, true, "")
+
+# ============================================================================
+# Durable-state oracle
+#
+# Reads a value straight off disk with a FRESH load, bypassing every in-memory
+# structure the server owns.  Crash-point assertions must use this: asking the
+# server what it thinks it stored proves nothing about durability.
+# ============================================================================
+
+# nil = the key is absent (or soft-deleted, or the file is unreadable).
+fn durable_value(path: text, table_name: text, key: text, column: text) -> text?:
+    match SdnDatabase.load(path):
+        Some(loaded):
+            val db: SdnDatabase = loaded
+            match db.get_table(table_name):
+                Some(table):
+                    val typed: SdnTable = table
+                    match typed.get_row(key):
+                        Some(row):
+                            val typed_row: SdnRow = row
+                            if typed_row.get("valid") == Some("false"):
+                                return nil
+                            typed_row.get(column)
+                        nil:
+                            nil
+                nil:
+                    nil
+        nil:
+            nil
+
+# true when the file on disk parses at all.  A torn file fails its crc32
+# header and loads as nil — that is the fail-closed half of the "never a torn
+# mixture" claim.
+fn durable_file_loads(path: text) -> bool:
+    SdnDatabase.load(path).?

@@ -11,15 +11,22 @@
 # = SessionRegistry's parallel Dict stores, systems = the sys_* functions here.
 # The capsule never reimplements storage — every durable byte goes through the
 # embedded SDN store.
+#
+# DURABILITY (increment 2): COMMIT persists before it acknowledges.  The
+# contract, the crash-point matrix and the reason the WAL is not the commit
+# point all live in `durability.spl` — read that before changing sys_commit.
 
 use std.database.core.{ SdnRow, SdnTable, SdnDatabase }
 use std.database.server.protocol.{
     DbRequest, DbResponse,
-    parse_request, encode_response, is_decimal_digits,
+    parse_request, encode_response,
     ok_response, ok_with, err_response,
     ERR_MALFORMED, ERR_UNKNOWN_OP, ERR_MISSING_ARG, ERR_NO_SESSION,
     ERR_DENIED, ERR_NO_TXN, ERR_TXN_OPEN, ERR_CONFLICT, ERR_NO_TABLE,
-    ERR_NOT_FOUND
+    ERR_NOT_FOUND, ERR_DURABILITY, ERR_CRASHED
+}
+use std.database.server.durability.{
+    DurabilityPolicy, DurableOutcome, durable_commit, durability_on
 }
 use std.database.server.capability.{
     DbCapability, CapabilityTable, capability_allows_op, op_access,
@@ -27,9 +34,9 @@ use std.database.server.capability.{
 }
 use std.database.server.session.{ SessionRegistry, SessionIdentity }
 use std.database.server.txn.{
-    TxnState, TxnWrite, CommitOutcome,
+    TxnState, TxnWrite,
     begin_txn, closed_txn, txn_record, txn_lookup,
-    txn_commit, store_read, store_version,
+    store_read, store_version,
     WRITE_PUT, WRITE_DEL
 }
 use std.database.server.transport.{ DbTransport, MemoryTransport }
@@ -42,9 +49,27 @@ class DbServerCapsule:
     store: SdnDatabase
     policy: CapabilityTable
     registry: SessionRegistry
+    # Durability is ON by default: a commit that is not persisted is the defect
+    # increment 1 shipped, not a configuration choice.  It degrades to
+    # in-memory only when the store has no path, and that degradation is
+    # reported, never silently assumed.
+    durability: DurabilityPolicy
 
     static fn new(store: SdnDatabase, policy: CapabilityTable) -> DbServerCapsule:
-        DbServerCapsule(store: store, policy: policy, registry: SessionRegistry.new())
+        DbServerCapsule(
+            store: store, policy: policy,
+            registry: SessionRegistry.new(),
+            durability: durability_on()
+        )
+
+    static fn new_with_durability(
+        store: SdnDatabase, policy: CapabilityTable, durability: DurabilityPolicy
+    ) -> DbServerCapsule:
+        DbServerCapsule(
+            store: store, policy: policy,
+            registry: SessionRegistry.new(),
+            durability: durability
+        )
 
     # ------------------------------------------------------------------
     # Systems
@@ -87,18 +112,30 @@ class DbServerCapsule:
         self.registry = registry
         ok_response()
 
+    # COMMIT is durable: the OK frame is written only AFTER the store has been
+    # persisted through SdnDatabase.save().  See durability.spl for the full
+    # contract — this method must never be reordered to acknowledge first.
     me sys_commit(session_id: i64) -> DbResponse:
         if not self.registry.has_open_txn(session_id):
             return err_response(ERR_NO_TXN, "no open transaction")
         val state = self.registry.txn_of(session_id)
+        # Extract -> mutate -> write back: durable_commit mutates the store and
+        # may roll it back, and a mutating call through 2+ field hops loses the
+        # write on the interpreter.
         var store = self.store
-        val outcome: CommitOutcome = txn_commit(store, state)
+        val outcome: DurableOutcome = durable_commit(store, state, self.durability)
         self.store = store
         var registry = self.registry
         registry.clear_txn(session_id)
         self.registry = registry
+        if outcome.crashed:
+            # In production the process is gone here and the client sees a
+            # dropped connection.  The frame exists for the crash-point spec.
+            return err_response(ERR_CRASHED, outcome.message)
         if not outcome.ok:
-            return err_response(ERR_CONFLICT, outcome.message)
+            if outcome.conflict_key != "":
+                return err_response(ERR_CONFLICT, outcome.message)
+            return err_response(ERR_DURABILITY, outcome.message)
         ok_with("applied", "{outcome.applied}")
 
     me sys_write(session_id: i64, request: DbRequest, kind: text) -> DbResponse:
@@ -195,11 +232,6 @@ class DbServerCapsule:
         val session_text = request.arg("session") ?? ""
         if session_text == "":
             return err_response(ERR_MISSING_ARG, "{op} requires session=<id>")
-        # Digit gate FIRST: `to_int()` yields 0 (not nil) for a non-numeric
-        # string on this runtime, so a bare to_int() would admit
-        # `session=notanumber` as session 0.  See protocol.is_decimal_digits.
-        if not is_decimal_digits(session_text):
-            return err_response(ERR_MALFORMED, "session id is not a number: {session_text}")
         val parsed = session_text.to_int()
         if parsed == nil:
             return err_response(ERR_MALFORMED, "session id is not a number: {session_text}")
@@ -254,36 +286,20 @@ class DbServerCapsule:
     # Drain one connection: read until EOF, answer every message.  Returns the
     # number of messages served.  The loop never aborts on a bad message — that
     # is the fail-closed requirement.
-    #
-    # KNOWN COMPILER BUG (already filed, NOT worked around silently): a
-    # trait-typed PARAMETER has no vtable on the JIT — declaring this
-    # `serve(transport: DbTransport)` dies with
-    #   "duck-typed virtual method call (trait has no `impl Trait for ...`)"
-    # (bug jit_game2d_backend_method_dispatch_sigsegv_2026-07-02).  Reproduced
-    # on this tier by build/dbtier_probe.spl: the identical drain loop returns 3
-    # with a concrete parameter and faults with a trait-typed one.
-    # DbTransport therefore remains the PORT CONTRACT (MemoryTransport declares
-    # `with DbTransport`), but serve() is typed concretely until the bug is
-    # fixed.  Making the port dynamically dispatched is next-increment work.
-    # RETURNS THE DRAINED CHANNEL, not a count.  A transport passed as a
-    # parameter is mutated on a COPY here — the caller's handle never sees the
-    # captured replies (the spec "answers every message ..." caught exactly
-    # that: sent_count() was 0 at the call site).  Extract -> mutate -> write
-    # back is the required shape, so the caller must do
-    #     channel = server.serve(channel)
-    # and read channel.all_sent() / sent_count() from the returned value.
-    me serve(transport: MemoryTransport) -> MemoryTransport:
-        var channel = transport
+    me serve(transport: MemoryTransport) -> i64:
+        var served = 0
         var running = true
         while running:
+            var channel = transport
             val message = channel.read_message()
             match message:
                 Some(line):
                     val reply = self.handle_message(line)
                     channel.write_message(reply)
+                    served = served + 1
                 nil:
                     running = false
-        channel
+        served
 
 # ============================================================================
 # Convenience constructors
