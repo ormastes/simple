@@ -26,6 +26,27 @@ mirrored through SPipe.
 > bug/feature request — don't switch the runner back to the seed. See
 > `.claude/rules/bootstrap.md` § "Default tooling runs on pure-Simple".
 
+> **Verify at the cheapest tier that actually decides. A full bootstrap is a
+> last resort, not a default.** Before rebuilding anything, ask which tier of
+> `.claude/rules/bootstrap.md` § "Verification tiers" your change needs: T0
+> hosted seed probe (seconds), T1 incremental kernel build, T2 full kernel
+> rebuild, T3 full bootstrap. Most verification — including most compiler-source
+> edits whose effect is observable in a probe or a single spec — is decided at
+> T0/T1. Escalating a one-file change to T3 costs hours and blocks every other
+> lane on the machine.
+>
+> When you do build incrementally, you MUST confirm reuse actually happened:
+> set `SIMPLE_NATIVE_INCREMENTAL=1`, pass a **stable** `--cache-dir`, and read
+> back the `[native-incremental] N reused / M rebuilt` receipt. No receipt, or
+> `N=0`, means you ran a cold full build no matter what you intended.
+>
+> **Worktree trap (cost four cold rebuilds on 2026-07-27):** a fresh
+> `git worktree` gets its own EMPTY `build/`, so every build in it is cold even
+> though a warm cache with thousands of objects sits in the main tree. Symlink
+> `build` to the main tree, or copy `build/native_cache` in, BEFORE the first
+> build — and verify with `find <worktree>/build/native_cache -name '*.o' | wc -l`
+> rather than assuming. A cold cache looks identical to a slow compiler.
+
 For installed UI/GUI/TUI CLI evidence, drive the production command (for
 example `simple ui gui` or `simple ui tui_web`) and bind the receipt to the
 resolved compiled sibling artifact path and digest. Running a raw
@@ -1056,25 +1077,6 @@ prints found it immediately.
 
 Detail: `doc/08_tracking/bug/env_get_nil_coalesce_dead_fallback_2026-07-25.md`.
 Glossary: *Dead Nil-Coalesce Fallback*, *Same-Name Divergence*.
-
-## Native-lane data-channel landmines (aggregate/Option/tuple returns)
-
-On cranelift native and freestanding SimpleOS lanes, a spec or probe can
-fail (or silently blank) because DATA never arrived, not because logic is
-wrong: Option-aggregate returns lose their Some payload deterministically,
-tuple and nested-array returns arrive empty, array-typed module globals
-read back zero-length, and chaining a method on an erased function return
-(`f().to_i32()`) mis-dispatches with a null receiver. The interpreter lane
-hides all of this — treat interp green as non-regression only, and re-run
-the native lane as the oracle (it is layout-sensitive; never diff a single
-run). When writing specs/probes for these lanes: route data through scalar
-or text returns, builtin returns, locals, or self-mutation; add a
-silent-on-healthy receipt at every conversion and verify it with a
-negative control; and before trusting any lane result, verify build
-authenticity (parallel sessions sweep the shared WC — grep a distinctive
-landed-fix marker in the source AND the built objects; a "reproduced"
-crash at a fixed site usually means a stale build). Channel table + fix
-idioms: `doc/07_guide/compiler/backends/freestanding_safe_channels.md`.
 
 ## Watchdogs and isolation wrappers can eat your evidence
 

@@ -82,6 +82,34 @@ Pick the cheapest tier that actually exercises what changed. Escalating to a ful
 bootstrap for a one-line lib edit wastes ~2 minutes+ per iteration; skipping the
 right gate ships a stale binary. **A small change is NOT a full bootstrap.**
 
+> **Prove the tier you think you're on — a cold cache is indistinguishable from
+> a slow compiler.** Whenever you build incrementally, set
+> `SIMPLE_NATIVE_INCREMENTAL=1`, pass a **stable** `--cache-dir`, and READ BACK
+> the `[native-incremental] N reused / M rebuilt` receipt. No receipt, or `N=0`,
+> means it was a cold full build regardless of intent.
+>
+> **The worktree trap (2026-07-27: four consecutive full rebuilds, ~4h, no
+> binary).** A fresh `git worktree` gets its own EMPTY `build/`. A compiler
+> rebuild driven from that worktree recompiles everything every time, while a
+> warm cache (2,610 objects) sits unused in the main tree. Symptom: repeated
+> `native-build worker timed out ... before producing a binary` at 180s, 7200s,
+> and 5400s, across BOTH `llvm-lib` and `cranelift` — the backend swap changing
+> nothing is the tell that the cost is upstream of codegen, exactly as that
+> error message says ("loads the whole compiler + LLVM import graph BEFORE any
+> codegen"). Before the first build in a worktree: symlink `build` to the main
+> tree or copy `build/native_cache` in, then verify with
+> `find <wt>/build/native_cache -name '*.o' | wc -l`.
+>
+> Two corollaries learned the same day:
+> - **Read the whole error message before choosing a lever.** That timeout text
+>   named the load phase AND offered "shrink `--source`"; swapping the codegen
+>   backend was ruled out by the first half of the sentence, and cost 90 minutes
+>   to disprove.
+> - **`--source` is not pruned by `--entry-closure` before the loader walks it.**
+>   `--source src/app` scans 2,465 `.spl` files across 206 app dirs; the
+>   bootstrap entry needs `src/app/cli` (79 files). Point `--source` at the
+>   narrowest directory containing your entry.
+
 - **T0 — hosted seed probe (seconds).** Pure logic changes with no target/ABI
   dependence: run the affected `.spl` through the seed hosted (or `bin/simple`) and
   assert behavior. No kernel build. Cheapest; use it first whenever it can decide.
@@ -105,13 +133,9 @@ right gate ships a stale binary. **A small change is NOT a full bootstrap.**
   layout changes, entry-closure set changes, linker-script or flag/target/opt-level
   changes. (Under T1 these auto-trigger a full rebuild anyway; run T2 directly when
   you know the change is structural.)
-- **T3 — full bootstrap.** ONLY when compiler, interpreter, or bootstrap/runtime
-  implementation changed (`src/compiler_rust`, `src/compiler`, or bootstrap
-  runtime sources). Use T3 as the final pre-goal-complete gate only for goals
-  that include such changes. App, IDE, Office, tooling, documentation, and
-  test-only changes must use their focused deployed-runtime checks and must not
-  trigger T3 merely because the goal is otherwise complete. A seed change
-  invalidates T1's cache, so T3 subsumes it.
+- **T3 — full bootstrap.** ONLY when the compiler itself changed
+  (`src/compiler_rust` seed or `src/compiler` pure-Simple), or as the final
+  pre-goal-complete gate. A seed change invalidates T1's cache, so T3 subsumes it.
 
 **Follow-up (not yet done):** `SIMPLE_NATIVE_INCREMENTAL` safe per-module reuse is
 implemented only in the Rust seed's native-build pipeline
