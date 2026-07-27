@@ -974,9 +974,12 @@ struct RtProcSlot {
     pid_t pid;       /* 0 = empty */
     int   stdin_fd;  /* parent writes here  → child's stdin */
     int   stdout_fd; /* parent reads here   ← child's stdout */
+    bool  sandboxed_renderer;
 };
 
 static struct RtProcSlot s_procs[RT_PROC_MAX];
+static pthread_mutex_t s_renderer_slot_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool s_renderer_slot_active;
 
 /* Static read buffer — returned pointer is valid until the next call */
 static char s_read_buf[RT_PROC_READ_BUF];
@@ -998,10 +1001,26 @@ static struct RtProcSlot* proc_alloc(void) {
     return NULL;
 }
 
+static bool renderer_slot_reserve(void) {
+    if (pthread_mutex_lock(&s_renderer_slot_lock) != 0) return false;
+    bool reserved = !s_renderer_slot_active;
+    if (reserved) s_renderer_slot_active = true;
+    (void)pthread_mutex_unlock(&s_renderer_slot_lock);
+    return reserved;
+}
+
+static void renderer_slot_release(void) {
+    if (pthread_mutex_lock(&s_renderer_slot_lock) != 0) return;
+    s_renderer_slot_active = false;
+    (void)pthread_mutex_unlock(&s_renderer_slot_lock);
+}
+
 static void proc_free(struct RtProcSlot* slot) {
     if (!slot) return;
     if (slot->stdin_fd >= 0)  { close(slot->stdin_fd);  slot->stdin_fd  = -1; }
     if (slot->stdout_fd >= 0) { close(slot->stdout_fd); slot->stdout_fd = -1; }
+    if (slot->sandboxed_renderer) renderer_slot_release();
+    slot->sandboxed_renderer = false;
     slot->pid = 0;
 }
 
@@ -1241,6 +1260,11 @@ static int64_t rt_process_spawn_piped_argv(
         close(stdout_pipe[0]); close(stdout_pipe[1]);
         return -1;
     }
+    if (sandboxed_renderer && !renderer_slot_reserve()) {
+        close(stdin_pipe[0]); close(stdin_pipe[1]);
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        return -1;
+    }
 
     fflush(stdout);
     fflush(stderr);
@@ -1254,6 +1278,7 @@ static int64_t rt_process_spawn_piped_argv(
 #endif
     pid_t pid = fork();
     if (pid < 0) {
+        if (sandboxed_renderer) renderer_slot_release();
         close(stdin_pipe[0]); close(stdin_pipe[1]);
         close(stdout_pipe[0]); close(stdout_pipe[1]);
         return -1;
@@ -1312,6 +1337,7 @@ static int64_t rt_process_spawn_piped_argv(
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
         close(stdin_pipe[0]); close(stdin_pipe[1]);
         close(stdout_pipe[0]); close(stdout_pipe[1]);
+        if (sandboxed_renderer) renderer_slot_release();
         return -1;
     }
 #else
@@ -1332,6 +1358,7 @@ static int64_t rt_process_spawn_piped_argv(
     slot->pid       = pid;
     slot->stdin_fd  = stdin_pipe[1];
     slot->stdout_fd = stdout_pipe[0];
+    slot->sandboxed_renderer = sandboxed_renderer;
 
     return (int64_t)pid;
 }

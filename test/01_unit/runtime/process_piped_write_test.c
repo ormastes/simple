@@ -191,6 +191,8 @@ static int sandboxed_renderer_is_sanitized_and_contained(void) {
         remove_sysv_objects(shmid, msgid, semid);
         return 0;
     }
+    int renderer_slot_bounded = rt_browser_renderer_spawn_sandboxed(
+        "/proc/self/exe", &placeholder) < 0;
     if (!rt_process_write_stdin(pid, "small")) {
         rt_process_close_piped(pid);
         remove_sysv_objects(shmid, msgid, semid);
@@ -203,8 +205,13 @@ static int sandboxed_renderer_is_sanitized_and_contained(void) {
         if (!saw_ok) usleep(1000);
     }
     int closed = rt_process_close_piped(pid);
+    int64_t restarted_pid = rt_browser_renderer_spawn_sandboxed(
+        "/proc/self/exe", &placeholder);
+    int renderer_slot_released = restarted_pid > 0 &&
+        rt_process_close_piped(restarted_pid);
     int cleaned = remove_sysv_objects(shmid, msgid, semid);
-    return saw_ok && closed && cleaned;
+    return saw_ok && closed && cleaned && renderer_slot_bounded &&
+        renderer_slot_released;
 }
 
 static int stopped(pid_t pid) {
