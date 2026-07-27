@@ -4,6 +4,7 @@ use std.spec.*
 use std.test_runner.test_runner_coverage.{
     collect_coverage,
     check_cover_annotation_threshold,
+    record_compiler_decision_manifest_sdn,
     record_coverage_sdn,
     reset_coverage_state
 }
@@ -13,7 +14,43 @@ fn child_decision_sdn(true_count: i64, false_count: i64) -> text:
         "    branch-1, src/owned/frame.spl, 10, 4, {true_count}, {false_count}\n" +
         "conditions |decision_id, condition_id, file, line, column, true_count, false_count|"
 
+fn compiler_decision_manifest_sdn(true_count: i64 = 0, false_count: i64 = 0) -> text:
+    "decisions |id, file, line, column, true_count, false_count|\n" +
+        "    branch-1, src/owned/frame.spl, 10, 4, {true_count}, {false_count}\n" +
+        "conditions |decision_id, condition_id, file, line, column, true_count, false_count|"
+
 describe "cross-process coverage aggregation":
+    it "pre-registers an untouched compiler decision before runtime outcomes merge":
+        reset_coverage_state()
+        expect(record_compiler_decision_manifest_sdn(compiler_decision_manifest_sdn())).to_be(true)
+
+        val untouched = collect_coverage()
+        expect(untouched.total_decisions).to_equal(1)
+        expect(untouched.total_decisions_covered).to_equal(0)
+        expect(untouched.decision_pct).to_equal(0)
+
+        record_coverage_sdn(child_decision_sdn(1, 0))
+        record_coverage_sdn(child_decision_sdn(0, 1))
+        val exercised = collect_coverage()
+        expect(exercised.total_decisions).to_equal(1)
+        expect(exercised.total_decisions_covered).to_equal(1)
+        expect(exercised.decision_pct).to_equal(100)
+        reset_coverage_state()
+
+    it "rejects runtime counts, event rows, and malformed compiler locations":
+        reset_coverage_state()
+        expect(record_compiler_decision_manifest_sdn(compiler_decision_manifest_sdn(1, 1))).to_be(false)
+        expect(record_compiler_decision_manifest_sdn("decision src/owned/frame.spl:10 branch-1 true")).to_be(false)
+        val malformed = compiler_decision_manifest_sdn().replace(", 10, 4,", ", nope, 4,")
+        expect(record_compiler_decision_manifest_sdn(malformed)).to_be(false)
+        val overflow = compiler_decision_manifest_sdn().replace(", 10, 4,", ", 99999999999999999999, 4,")
+        expect(record_compiler_decision_manifest_sdn(overflow)).to_be(false)
+        expect(record_compiler_decision_manifest_sdn(compiler_decision_manifest_sdn())).to_be(true)
+        val coverage = collect_coverage()
+        expect(coverage.total_decisions).to_equal(1)
+        expect(coverage.total_decisions_covered).to_equal(0)
+        reset_coverage_state()
+
     it "merges true and false outcomes retained by separate child runs":
         reset_coverage_state()
         record_coverage_sdn(child_decision_sdn(1, 0))

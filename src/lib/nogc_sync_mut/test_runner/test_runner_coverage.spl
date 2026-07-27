@@ -68,6 +68,8 @@ fn condition_key(file: text, line: text, col: text, decision_id: text, condition
 fn merge_counts(keys: [text], tmap, fmap, key: text, t: i64, f: i64):  # tmap/fmap are Dict<text, i64> - removed type annotation (runtime parser issue)
     if not tmap.has(key) and not fmap.has(key):
         keys.push(key)
+        tmap[key] = 0
+        fmap[key] = 0
     if t > 0:
         val prev_t = tmap[key] ?? 0
         tmap[key] = prev_t + t
@@ -78,6 +80,8 @@ fn merge_counts(keys: [text], tmap, fmap, key: text, t: i64, f: i64):  # tmap/fm
 fn merge_decision_count(key: text, t: i64, f: i64):
     if not decision_true.has(key) and not decision_false.has(key):
         decision_keys.push(key)
+        decision_true[key] = 0
+        decision_false[key] = 0
     if t > 0:
         val prev_t = decision_true[key] ?? 0
         decision_true[key] = prev_t + t
@@ -88,6 +92,8 @@ fn merge_decision_count(key: text, t: i64, f: i64):
 fn merge_condition_count(key: text, t: i64, f: i64):
     if not condition_true.has(key) and not condition_false.has(key):
         condition_keys.push(key)
+        condition_true[key] = 0
+        condition_false[key] = 0
     if t > 0:
         val prev_t = condition_true[key] ?? 0
         condition_true[key] = prev_t + t
@@ -140,6 +146,81 @@ fn record_coverage_sdn(sdn: text):
         return
     coverage_parts.push(sdn)
     accumulate_coverage_sdn(sdn)
+
+fn coverage_manifest_decimal(value: text) -> bool:
+    val trimmed = value.trim()
+    if trimmed == "":
+        return false
+    var i = 0
+    while i < trimmed.len():
+        val digit = trimmed[i:i + 1]
+        if digit < "0" or digit > "9":
+            return false
+        i = i + 1
+    true
+
+fn coverage_manifest_location(value: text) -> bool:
+    val trimmed = value.trim()
+    if not coverage_manifest_decimal(trimmed) or trimmed.len() > 10:
+        return false
+    trimmed.len() < 10 or trimmed <= "2147483647"
+
+fn record_compiler_decision_manifest_sdn(sdn: text) -> bool:
+    """Pre-register compiler-owned decision/condition rows with zero counts.
+
+    This accepts only the existing SDN table format and rejects runtime
+    outcomes, event rows, malformed rows, and manifests without a decision.
+    TODO594 remains open until the compiler emits this manifest.
+    """
+    if sdn == "":
+        return false
+
+    var section = ""
+    var decision_rows = 0
+    for raw_line in sdn.split("\n"):
+        val trimmed = raw_line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        if trimmed == "version: 1.0":
+            if section != "":
+                return false
+            continue
+        if trimmed == "decisions |id, file, line, column, true_count, false_count|":
+            section = "decisions"
+            continue
+        if trimmed == "conditions |decision_id, condition_id, file, line, column, true_count, false_count|":
+            section = "conditions"
+            continue
+
+        val parts = trimmed.split(",")
+        if section == "decisions":
+            if parts.len() != 6:
+                return false
+            if parts[0].trim() == "" or parts[1].trim() == "":
+                return false
+            if not coverage_manifest_location(parts[2]) or not coverage_manifest_location(parts[3]):
+                return false
+            if parts[4].trim() != "0" or parts[5].trim() != "0":
+                return false
+            decision_rows = decision_rows + 1
+            continue
+        if section == "conditions":
+            if parts.len() != 7:
+                return false
+            if parts[0].trim() == "" or parts[1].trim() == "" or parts[2].trim() == "":
+                return false
+            if not coverage_manifest_location(parts[3]) or not coverage_manifest_location(parts[4]):
+                return false
+            if parts[5].trim() != "0" or parts[6].trim() != "0":
+                return false
+            continue
+        return false
+
+    if decision_rows == 0:
+        return false
+    coverage_parts.push(sdn)
+    accumulate_coverage_sdn(sdn)
+    true
 
 fn accumulate_coverage_sdn(sdn: text):
     val lines = sdn.split("\n")
