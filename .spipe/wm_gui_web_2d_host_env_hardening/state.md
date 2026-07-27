@@ -1092,6 +1092,11 @@ Tracking split:
   `status=fail` could be hidden by a later pass row. Both receipts now reuse one
   strict parser that rejects malformed/empty/duplicate keys. The focused Node
   mutation requires the normalized composition-artifact failure.
+- event-target-window-correlation: The live wrapper previously retained only a
+  positive WM target ID. It now requires exactly one matching window in the
+  same compositor snapshot, retains that matched ID, and the shared classifier
+  requires receipt and compositor IDs to agree. Focused mismatch evidence
+  passes; old live evidence needs a fresh host run for the new field.
 - simple-renderdoc-duplicate-keys: The Simple RenderDoc gate previously selected
   the last producer/replay value, so a leading failure could be hidden by a
   later pass row. Its shared extractor now accepts exactly one nonempty value,

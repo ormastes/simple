@@ -185,6 +185,7 @@ emit() {
         echo "linux_hosted_wm_live_window_event_origin=$event_origin"
         echo "linux_hosted_wm_live_window_event_id=$event_id"
         echo "linux_hosted_wm_live_window_wm_target_id=$wm_target_id"
+        echo "linux_hosted_wm_live_window_input_compositor_wm_target_id=$input_compositor_wm_target_id"
         echo "linux_hosted_wm_live_window_semantic_target_id=$semantic_target_id"
         echo "linux_hosted_wm_live_window_callback_count=$callback_count"
         echo "linux_hosted_wm_live_window_mutation_revision=$mutation_revision"
@@ -294,6 +295,7 @@ semantic_status=fail
 event_origin=""
 event_id=""
 wm_target_id=""
+input_compositor_wm_target_id=""
 semantic_target_id=""
 callback_count=""
 mutation_revision=""
@@ -640,6 +642,15 @@ retain_phase() {
         "$SNAPSHOT_LIVE" >/dev/null || return 1
     if [ "$label" = input ]; then
         [ "$render_event_id" -gt 0 ] && [ "$render_mutation_revision" -gt 0 ] || return 1
+        input_compositor_wm_target_id="$(jq -r '
+            .input.receipt.wm_target_id as $target |
+            [.compositor.windows[] | select(.id == $target)] |
+            if length == 1 then .[0].id else empty end
+        ' "$SNAPSHOT_LIVE")"
+        case "$input_compositor_wm_target_id" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        [ "$input_compositor_wm_target_id" -gt 0 ] || return 1
         jq -e '.render.semantic_event_id == .input.receipt.event_id and
                .render.mutation_revision == .input.receipt.mutation_revision' \
             "$SNAPSHOT_LIVE" >/dev/null || return 1
@@ -820,7 +831,8 @@ semantic_target_id="$(jq -r '.input.receipt.semantic_target_id' "$SNAPSHOT_LIVE"
 callback_count="$(jq -r '.input.receipt.callback_count' "$SNAPSHOT_LIVE")"
 mutation_revision="$(jq -r '.input.receipt.mutation_revision' "$SNAPSHOT_LIVE")"
 if [ "$event_origin" = screen ] && [ "$event_id" -gt 0 ] \
-    && [ "$wm_target_id" -gt 0 ] && [ "$semantic_target_id" = host-proof ] \
+    && [ "$wm_target_id" -gt 0 ] && [ "$wm_target_id" = "$input_compositor_wm_target_id" ] \
+    && [ "$semantic_target_id" = host-proof ] \
     && [ "$callback_count" -eq 1 ] && [ "$mutation_revision" -eq 1 ]; then
     semantic_status=pass
 fi

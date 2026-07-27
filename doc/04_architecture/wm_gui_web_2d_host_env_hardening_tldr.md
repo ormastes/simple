@@ -32,7 +32,8 @@ Engine2D -> Readback
 - `test_host_env` aggregates existing probes; it does not own hardware access.
 - Hosted semantic dispatch uses persistent `BrowserSession`, never a mock queue.
 - Rendering stays `SharedWmScene -> DrawIrComposition -> Engine2D`.
-- Existing hosted evidence binds the input receipt to backend readback.
+- Existing hosted evidence requires the receipt target to name exactly one
+  window in the retained compositor snapshot, then binds it to backend readback.
 - SimpleOS content hits now reach WM IPC; a running nonzero-port guest client
   is still required for no-mock QEMU system proof.
 - Linux x86 is first; unavailable native rows remain blockers.

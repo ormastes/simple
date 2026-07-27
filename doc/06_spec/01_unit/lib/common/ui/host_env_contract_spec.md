@@ -448,6 +448,9 @@ expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_owner_a
 
 #### accepts only a complete screen-to-WM semantic frame receipt
 
+A screen event is evidence only when its WM target names the retained
+compositor window and all later receipts agree.
+
 - Classify one complete screen-to-WM semantic frame receipt
 - Reject receipts with any missing or inconsistent hop
 
@@ -455,7 +458,7 @@ expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_owner_a
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 24 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -473,6 +476,10 @@ expect(host_display_input_evidence_passes(complete.replace("text_status=pass", "
 expect(host_display_input_evidence_passes(complete.replace("origin=screen", "origin=synthetic"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("event_id=7", "event_id=0"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("wm_target_id=41", "wm_target_id=-1"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace(
+    "\nlinux_hosted_wm_live_window_wm_target_id=41\n",
+    "\nlinux_hosted_wm_live_window_wm_target_id=42\n"
+))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("semantic_target_id=host-proof", "semantic_target_id=other"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("callback_count=1", "callback_count=0"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("mutation_revision=1", "mutation_revision=0"))).to_be(false)

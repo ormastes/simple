@@ -82,6 +82,10 @@ Production acceptance rejects empty/mismatched IDs, missing target/callback,
 non-increasing revision after mutation, compatibility renderer, fallback, zero
 handle, incomplete submission, CPU mirror/cache readback, invalid dimensions or
 stride, blank output, checksum zero, and absent/invalid RenderDoc artifacts.
+The live wrapper resolves the input receipt's WM target against the same
+snapshot's compositor window list, requires exactly one match, and retains the
+matched ID separately. The pure aggregate requires both retained IDs to be
+positive and equal.
 The host aggregate also re-hashes the retained RenderDoc capture path and
 replay XML path, blocking when either current artifact no longer matches its
 exact-one gate binding or is a symlink/non-regular path.

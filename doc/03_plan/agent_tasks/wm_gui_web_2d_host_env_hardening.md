@@ -23,6 +23,10 @@
 | Generated-manual review | Root Codex normal/highest-capability review | pending |
 | Final verification | Root Codex normal/highest-capability review | pending |
 
+Target-correlation state: wrapper and pure-contract enforcement are implemented;
+a fresh live host evidence run is pending because older evidence lacks the
+retained compositor-match field.
+
 ## Implementation Order
 
 1. Add pure contract and deliberately failing unit specs.

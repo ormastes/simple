@@ -77,7 +77,9 @@ TestHostEnv -> ExistingCapabilityProbes
    submission completion is unknown.
    The executor also retains the submitted `wm-composite` identity, scene key,
    and positive `wm.content` image count so a sibling composition without Web
-   content cannot inherit the frame receipt.
+   content cannot inherit the frame receipt. The input receipt's WM target must
+   match exactly one window ID in that same compositor snapshot; a merely
+   positive target cannot promote display/input evidence.
 
 ## Rejected Patterns
 

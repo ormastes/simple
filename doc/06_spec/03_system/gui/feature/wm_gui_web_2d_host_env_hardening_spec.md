@@ -74,7 +74,7 @@ describe "production host event and render evidence":
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 72 lines folded for reproduction.
+Runnable source: 73 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -103,6 +103,7 @@ expect(live).to_contain("linux_hosted_wm_live_window_keyboard_status=pass")
 expect(live).to_contain("linux_hosted_wm_live_window_text_status=pass")
 expect(live).to_contain("linux_hosted_wm_live_window_event_origin=screen")
 expect(live).to_contain("linux_hosted_wm_live_window_wm_target_id=")
+expect(live).to_contain("linux_hosted_wm_live_window_input_compositor_wm_target_id=")
 expect(live).to_contain("linux_hosted_wm_live_window_semantic_target_id=host-proof")
 expect(live).to_contain("linux_hosted_wm_live_window_callback_count=1")
 expect(live).to_contain("linux_hosted_wm_live_window_mutation_revision=1")
