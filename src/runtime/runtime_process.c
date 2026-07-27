@@ -1903,6 +1903,66 @@ static bool browser_renderer_apply_seccomp(void) {
 #ifdef __NR_fremovexattr
         BROWSER_RENDERER_DENY_SYSCALL(__NR_fremovexattr),
 #endif
+#ifdef __NR_chmod
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_chmod),
+#endif
+#ifdef __NR_fchmod
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fchmod),
+#endif
+#ifdef __NR_fchmodat
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fchmodat),
+#endif
+#ifdef __NR_fchmodat2
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fchmodat2),
+#endif
+#ifdef __NR_chown
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_chown),
+#endif
+#ifdef __NR_lchown
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_lchown),
+#endif
+#ifdef __NR_fchown
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fchown),
+#endif
+#ifdef __NR_fchownat
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fchownat),
+#endif
+#ifdef __NR_chown32
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_chown32),
+#endif
+#ifdef __NR_lchown32
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_lchown32),
+#endif
+#ifdef __NR_fchown32
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fchown32),
+#endif
+#ifdef __NR_utime
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_utime),
+#endif
+#ifdef __NR_utimes
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_utimes),
+#endif
+#ifdef __NR_futimesat
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_futimesat),
+#endif
+#ifdef __NR_utimensat
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_utimensat),
+#endif
+#ifdef __NR_utimensat_time64
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_utimensat_time64),
+#endif
+#ifdef __NR_truncate
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_truncate),
+#endif
+#ifdef __NR_truncate64
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_truncate64),
+#endif
+#ifdef __NR_ftruncate
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_ftruncate),
+#endif
+#ifdef __NR_ftruncate64
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_ftruncate64),
+#endif
 #ifdef __NR_getdents
         BROWSER_RENDERER_DENY_SYSCALL(__NR_getdents),
 #endif

@@ -899,3 +899,9 @@ implementation in progress / target evidence blocked
   rejected alongside public suffixes and IP literals. Profile load also drops
   every case-folded duplicate host so corrupt SQLite rows cannot choose policy
   metadata by collation order.
+- Renderer filesystem-mutation containment: Linux seccomp now denies chmod,
+  chown, timestamp, and truncate syscall families independently of Landlock
+  ABI coverage, including fd and legacy variants. The live native sandbox
+  child attempts chmod, truncate, and utimensat against a parent-created owned
+  file; the focused harness passes and proves its mode, size, and timestamp
+  remain unchanged. No bootstrap or Simple compiler command ran.

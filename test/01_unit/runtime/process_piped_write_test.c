@@ -70,7 +70,7 @@ static int remove_sysv_objects(int shmid, int msgid, int semid) {
 }
 
 static int sandbox_probe(int argc, char** argv) {
-    if (argc != 6 || strcmp(argv[0], "simple-browser-renderer") != 0 ||
+    if (argc != 7 || strcmp(argv[0], "simple-browser-renderer") != 0 ||
         getenv("SIMPLE_BROWSER_RENDERER_SECRET") != NULL) {
         return 10;
     }
@@ -188,6 +188,23 @@ static int sandbox_probe(int argc, char** argv) {
     errno = 0;
     if (syscall(SYS_personality, ~0UL) >= 0 || errno != EPERM) return 38;
 #endif
+#if defined(SYS_chmod)
+    errno = 0;
+    if (syscall(SYS_chmod, argv[6], 0) >= 0 || errno != EPERM) return 39;
+#endif
+#if defined(SYS_truncate)
+    errno = 0;
+    if (syscall(SYS_truncate, argv[6], 0) >= 0 || errno != EPERM) return 40;
+#endif
+#if defined(SYS_utimensat)
+    struct timespec changed_times[2] = {{1, 0}, {1, 0}};
+    errno = 0;
+    if (syscall(
+            SYS_utimensat, AT_FDCWD, argv[6], changed_times, 0) >= 0 ||
+        errno != EPERM) {
+        return 41;
+    }
+#endif
     unsigned long affinity = 1;
     errno = 0;
     if (syscall(
@@ -225,6 +242,22 @@ static int sandboxed_renderer_is_sanitized_and_contained(void) {
         remove_sysv_objects(shmid, msgid, semid);
         return 0;
     }
+    char mutation_path[] = "/tmp/simple-browser-sandbox-mutation-XXXXXX";
+    int mutation_fd = mkstemp(mutation_path);
+    struct timespec fixed_times[2] = {
+        {1234567890, 0}, {1234567890, 0}
+    };
+    if (mutation_fd < 0 ||
+        write(mutation_fd, "safe", 4) != 4 ||
+        fchmod(mutation_fd, 0600) != 0 ||
+        futimens(mutation_fd, fixed_times) != 0 ||
+        close(mutation_fd) != 0) {
+        if (mutation_fd >= 0) close(mutation_fd);
+        unlink(mutation_path);
+        remove_sysv_objects(shmid, msgid, semid);
+        close(inherited_fd);
+        return 0;
+    }
     char inherited_text[32];
     char shmid_text[32];
     char msgid_text[32];
@@ -233,16 +266,19 @@ static int sandboxed_renderer_is_sanitized_and_contained(void) {
     snprintf(shmid_text, sizeof(shmid_text), "%d", shmid);
     snprintf(msgid_text, sizeof(msgid_text), "%d", msgid);
     snprintf(semid_text, sizeof(semid_text), "%d", semid);
-    static const char* args[5];
+    static const char* args[6];
     args[0] = "--sandbox-probe";
     args[1] = inherited_text;
     args[2] = shmid_text;
     args[3] = msgid_text;
     args[4] = semid_text;
+    args[5] = mutation_path;
     test_args = args;
-    test_arg_count = 5;
+    test_arg_count = 6;
     if (setenv("SIMPLE_BROWSER_RENDERER_SECRET", "must-not-leak", 1) != 0) {
         close(inherited_fd);
+        unlink(mutation_path);
+        remove_sysv_objects(shmid, msgid, semid);
         return 0;
     }
     int64_t pid = rt_browser_renderer_spawn_sandboxed(
@@ -250,6 +286,7 @@ static int sandboxed_renderer_is_sanitized_and_contained(void) {
     close(inherited_fd);
     unsetenv("SIMPLE_BROWSER_RENDERER_SECRET");
     if (pid <= 0) {
+        unlink(mutation_path);
         remove_sysv_objects(shmid, msgid, semid);
         return 0;
     }
@@ -257,6 +294,7 @@ static int sandboxed_renderer_is_sanitized_and_contained(void) {
         "/proc/self/exe", &placeholder) < 0;
     if (!rt_process_write_stdin(pid, "small")) {
         rt_process_close_piped(pid);
+        unlink(mutation_path);
         remove_sysv_objects(shmid, msgid, semid);
         return 0;
     }
@@ -271,9 +309,16 @@ static int sandboxed_renderer_is_sanitized_and_contained(void) {
         "/proc/self/exe", &placeholder);
     int renderer_slot_released = restarted_pid > 0 &&
         rt_process_close_piped(restarted_pid);
+    struct stat mutation_state = {0};
+    int mutation_blocked =
+        stat(mutation_path, &mutation_state) == 0 &&
+        mutation_state.st_size == 4 &&
+        (mutation_state.st_mode & 0777) == 0600 &&
+        mutation_state.st_mtime == 1234567890;
+    unlink(mutation_path);
     int cleaned = remove_sysv_objects(shmid, msgid, semid);
     return saw_ok && closed && cleaned && renderer_slot_bounded &&
-        renderer_slot_released;
+        renderer_slot_released && mutation_blocked;
 }
 
 static int stopped(pid_t pid) {
