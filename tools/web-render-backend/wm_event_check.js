@@ -40,7 +40,8 @@ function loadCompositionReceipt(root) {
       fields.producer !== 'pure-simple-html-webir-drawir-engine2d' ||
       fields.composition_id !== FONT_COMPOSITION_ID ||
       fields.text !== FONT_TEXT ||
-      fields.font_identity !== FONT_IDENTITY) {
+      fields.font_identity !== FONT_IDENTITY ||
+      !/^[1-9][0-9]*(,[1-9][0-9]*){2}$/.test(fields.font_advance_widths || '')) {
     throw new Error('invalid Simple Web font composition receipt');
   }
   const artifactPath = path.resolve(root, fields.pixel_artifact_path || '');
@@ -418,6 +419,7 @@ async function main() {
     out.simple_composition_pixel_checksum = ${receipt.pixel_checksum};
     out.simple_composition_artifact_size_bytes = ${receipt.pixel_artifact_size_bytes};
     out.simple_composition_artifact_sha256 = '${receipt.pixel_artifact_sha256}';
+    out.simple_composition_font_advance_widths = '${receipt.font_advance_widths}';
     out.font_rect = {
       x: Math.floor(fontRect.x),
       y: Math.floor(fontRect.y),
