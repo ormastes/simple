@@ -118,3 +118,19 @@ at the top of `register_imported_symbol` when
 `imported_mod.functions.len() < 0`, falling through only to the re-export
 chase (header parsing does populate imports/exports). This gate covers every
 caller (direct import, glob, sibling sweep, re-export recursion).
+
+## Remaining latent sites (audit, 2026-07-27) — not yet observed to fire
+
+1. `register_glob_imported_symbols` (module_lowering.spl:687-717): six `.keys()`
+   on imported_mod dicts; reached from the glob path in
+   `resolve_import_symbols` (:800) whose `modules_by_name.get()` lookups
+   (:745/:783/:793) are ungated. Highest residual risk.
+2. `hir_module_declares_item` (:74-84) via `find_reexport_source` (:602/:630):
+   `.contains_key()` on ungated next-hop modules — the re-export chase can hop
+   into another header-only facade.
+3. `lower_module` imported-enum harvest (:1301-1315): `.enums` reads on the raw
+   `modules_by_name.get(imp.module)` (:1298), no partial gate.
+
+Root cause + one-site decode fix proposal:
+`native_nil_dict_get_phantom_option_rootcause_2026-07-27.md` (nil sentinel 3
+shifted to phantom 0 by decode_runtime_value's integer arm).
