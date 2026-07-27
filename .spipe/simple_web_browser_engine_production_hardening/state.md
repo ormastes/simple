@@ -853,3 +853,11 @@ implementation in progress / target evidence blocked
   release-inside close hit test shared by native/evidence input. Static source
   evidence covers all routes; executable Simple evidence remains compiler-
   blocked and was not rerun.
+- Renderer process close status: `HostedBrowserRendererProcess.close` now
+  returns the native piped-process close result, retains the PID on failure for
+  one bounded hosted-WM shutdown retry, but clears a PID already reaped by a
+  liveness check. The unused one-shot wrapper was removed because it could not
+  return retained process ownership after cleanup failure. Successful mid-loop
+  close returns zeroed renderer/raster owners. Runnable policy coverage and
+  the source contract were updated; executable Simple evidence remains
+  compiler-blocked.

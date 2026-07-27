@@ -309,7 +309,7 @@ fn _save_hosted_browser_hsts(
 struct HostedBrowserResourceClose:
     renderer: HostedBrowserRendererProcess
     raster: Engine2dCompositorBackend
-    profile_closed: bool
+    ok: bool
 
 fn _close_hosted_browser_resources(
     renderer_in: HostedBrowserRendererProcess,
@@ -319,12 +319,12 @@ fn _close_hosted_browser_resources(
 ) -> HostedBrowserResourceClose:
     var renderer = renderer_in
     var browser_raster = browser_raster_in
-    var profile_closed = true
+    var close_ok = true
     val saved_renderer = _save_hosted_browser_hsts(
         renderer, profile_in, rt_time_now_unix_micros() / 1000
     )
     if saved_renderer == nil:
-        profile_closed = false
+        close_ok = false
     else:
         renderer = saved_renderer.unwrap()
     if profile_in != nil:
@@ -333,15 +333,17 @@ fn _close_hosted_browser_resources(
             Ok(_):
                 pass
             Err(error):
-                profile_closed = false
+                close_ok = false
                 print "ERROR: hosted browser profile close failed reason={error.message()}"
-    renderer.close()
+    if not renderer.close():
+        close_ok = false
+        print "ERROR: hosted browser renderer close failed"
     if browser_raster_active:
         browser_raster.shutdown()
     HostedBrowserResourceClose(
         renderer: renderer,
         raster: browser_raster,
-        profile_closed: profile_closed
+        ok: close_ok
     )
 
 # Dependency-light production event loop. Pure Simple owns scene, Web/GUI/2D
@@ -397,7 +399,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     var browser_pressed_control = ""
     var browser_bookmarks = BrowserBookmarkSnapshot.create([])
     var browser_profile: BrowserProfileStore? = nil
-    var browser_profile_close_failed = false
+    var browser_resource_close_failed = false
     var browser_hsts_save_retry_at_micros: i64 = 0
     if browser_profile_window_id > 0:
         match BrowserProfileStore.open_default():
@@ -472,7 +474,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
         else:
             print "[hosted-wm] browser-renderer-start-failed reason={started.reason}"
     if browser_profile_window_id <= 0 or not browser_renderer_ready:
-        browser_renderer.close()
+        if not browser_renderer.close():
+            browser_resource_close_failed = true
         browser_raster.shutdown()
         browser_raster_active = false
     print "[hosted-wm] windows-ready count={comp.windows.len()}"
@@ -801,8 +804,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         )
                         browser_renderer = browser_closed.renderer
                         browser_raster = browser_closed.raster
-                        if not browser_closed.profile_closed:
-                            browser_profile_close_failed = true
+                        if not browser_closed.ok:
+                            browser_resource_close_failed = true
                         browser_renderer_ready = false
                         browser_raster_active = false
                         browser_profile = nil
@@ -1054,8 +1057,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                                         browser_closed.renderer
                                     )
                                     browser_raster = browser_closed.raster
-                                    if not browser_closed.profile_closed:
-                                        browser_profile_close_failed = true
+                                    if not browser_closed.ok:
+                                        browser_resource_close_failed = true
                                     browser_renderer_ready = false
                                     browser_raster_active = false
                                     browser_profile = nil
@@ -1191,8 +1194,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                                 )
                                 browser_renderer = browser_closed.renderer
                                 browser_raster = browser_closed.raster
-                                if not browser_closed.profile_closed:
-                                    browser_profile_close_failed = true
+                                if not browser_closed.ok:
+                                    browser_resource_close_failed = true
                                 browser_renderer_ready = false
                                 browser_raster_active = false
                                 browser_profile = nil
@@ -1251,8 +1254,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         )
                         browser_renderer = browser_closed.renderer
                         browser_raster = browser_closed.raster
-                        if not browser_closed.profile_closed:
-                            browser_profile_close_failed = true
+                        if not browser_closed.ok:
+                            browser_resource_close_failed = true
                         browser_renderer_ready = false
                         browser_raster_active = false
                         browser_profile = nil
@@ -1317,8 +1320,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     raster.shutdown()
     rt_winit_window_free(win)
     rt_winit_event_loop_free(el)
-    if (not profile_closed or not browser_close.profile_closed or
-        browser_profile_close_failed):
+    if (not profile_closed or not browser_close.ok or
+        browser_resource_close_failed):
         print "ERROR: hosted browser profile close failed reason={web_sessions.profile_failure_reason}"
         return 1
     print "SimpleOS shared hosted WM closed"

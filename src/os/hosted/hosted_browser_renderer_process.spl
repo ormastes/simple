@@ -406,7 +406,7 @@ pub class HostedBrowserRendererProcess:
         self.provisional_document_origin = ""
         true
 
-    me close():
+    me close() -> bool:
         self._cancel_network_job()
         self.command_deadline_ms = 0
         self.pending_operation = ""
@@ -428,15 +428,20 @@ pub class HostedBrowserRendererProcess:
         self.deferred_resize_width = 0
         self.deferred_resize_height = 0
         if self.pid > 0:
-            val _ = process_close_piped(self.pid)
+            if not process_close_piped(self.pid):
+                return false
         self.pid = 0
         if self.state != "failed":
             self.state = "closed"
+        true
 
     me fail(reason: text) -> HostedBrowserRendererResult:
         self.state = "failed"
-        self.close()
-        _renderer_result(false, reason, _empty_composition())
+        val close_reason = if self.close():
+            ""
+        else:
+            ";renderer-close-failed"
+        _renderer_result(false, reason + close_reason, _empty_composition())
 
     me start(executable: text, timeout_ms: i64) -> HostedBrowserRendererResult:
         if self.state != "new" or executable == "" or self.generation <= 0 or
@@ -467,6 +472,7 @@ pub class HostedBrowserRendererProcess:
                 return _renderer_result(true, "ok", _empty_composition())
             if chunk == "":
                 if not process_is_piped_alive(self.pid):
+                    self.pid = 0
                     return self.fail("renderer-crashed")
                 rt_sleep_ms(1)
         self.fail("renderer-timeout")
@@ -704,7 +710,8 @@ pub class HostedBrowserRendererProcess:
             return "renderer-write-failed"
         if written == 0:
             if not process_is_piped_alive(self.pid):
-                return "renderer-write-failed"
+                self.pid = 0
+                return "renderer-crashed"
             return ""
         self.pending_wire_offset = self.pending_wire_offset + written
         if self.pending_wire_offset >= self.pending_wire.len():
@@ -958,6 +965,7 @@ pub class HostedBrowserRendererProcess:
                 frame.solid_material_sha256
             ))
         if chunk == "" and not process_is_piped_alive(self.pid):
+            self.pid = 0
             return Some(self.fail("renderer-crashed"))
         nil
 
@@ -1314,26 +1322,3 @@ pub class HostedBrowserRendererProcess:
             self.generation, self.next_request_id,
             event_id, control, pressed
         ), timeout_ms)
-
-pub fn hosted_browser_renderer_render_once(
-    executable: text,
-    html: text,
-    width: i32,
-    height: i32,
-    animation_time_ms: i64,
-    generation: i64,
-    timeout_ms: i64
-) -> HostedBrowserRendererResult:
-    var renderer = HostedBrowserRendererProcess.create(
-        generation, width, height
-    )
-    val started = renderer.start(executable, timeout_ms)
-    if not started.ok:
-        return started
-    var result = renderer.render("init", html, timeout_ms)
-    if result.ok and animation_time_ms > 0:
-        result = renderer.render(
-            "advance", animation_time_ms.to_text(), timeout_ms
-        )
-    renderer.close()
-    result

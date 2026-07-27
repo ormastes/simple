@@ -79,6 +79,20 @@ describe "hosted browser renderer entry isolation":
         expect(poll_body.contains("rt_sleep_ms")).to_be(false)
         expect(poll_body.contains("_write_before")).to_be(false)
         expect(pump_body).to_contain("process_write_stdin_some")
+        val start_body = broker.slice(
+            broker.find("me start("),
+            broker.find("me _finalize_network(")
+        )
+        expect(start_body).to_contain("self.pid = 0")
+        expect(start_body).to_contain(
+            "self.fail(\"renderer-crashed\")"
+        )
+        expect(pump_body).to_contain("self.pid = 0")
+        expect(pump_body).to_contain("\"renderer-crashed\"")
+        expect(poll_body).to_contain("self.pid = 0")
+        expect(poll_body).to_contain(
+            "self.fail(\"renderer-crashed\")"
+        )
         val cancel_start = broker.find("me _cancel_network_job()")
         val replace_start = broker.find("me _replace_pending_navigation()")
         val cancel_body = broker.slice(cancel_start, replace_start)
@@ -90,6 +104,27 @@ describe "hosted browser renderer entry isolation":
         expect(clear_pos).to_be_greater_than(-1)
         expect(cancel_pos).to_be_greater_than(clear_pos)
         expect(free_pos).to_be_greater_than(cancel_pos)
+        val close_start = broker.find("me close() -> bool:")
+        val close_end = broker.find(
+            "me fail(reason: text)"
+        )
+        expect(close_start).to_be_greater_than(-1)
+        expect(close_end).to_be_greater_than(close_start)
+        val close_body = broker.slice(close_start, close_end)
+        val native_close = close_body.find(
+            "process_close_piped(self.pid)"
+        )
+        val failed_close = close_body.find("return false")
+        val clear_pid = close_body.find("self.pid = 0")
+        expect(native_close).to_be_greater_than(-1)
+        expect(failed_close).to_be_greater_than(native_close)
+        expect(clear_pid).to_be_greater_than(failed_close)
+        expect(broker).to_contain(
+            "\"renderer-close-failed\""
+        )
+        expect(broker.contains(
+            "hosted_browser_renderer_render_once"
+        )).to_be(false)
         expect(policy).to_contain(
             "\"unauthorized-document-request\""
         )
@@ -150,7 +185,7 @@ describe "hosted browser renderer entry isolation":
             "fn _close_hosted_browser_resources("
         )
         expect(entry).to_contain(
-            "val browser_profile_closed = _close_hosted_browser_resources("
+            "val browser_close = _close_hosted_browser_resources("
         )
         expect(entry).to_contain(
             "normalize_network_navigation_url("
@@ -581,8 +616,8 @@ describe "hosted browser renderer entry isolation":
             )
         )
         expect(shutdown).to_contain(
-            "browser_profile_close_failed"
+            "browser_resource_close_failed"
         )
         expect(shutdown).to_contain(
-            "browser_close.profile_closed"
+            "browser_close.ok"
         )

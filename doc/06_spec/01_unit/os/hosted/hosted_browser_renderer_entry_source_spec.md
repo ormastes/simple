@@ -17,6 +17,8 @@
 - Preflight HSTS/profile persistence for titlebar, keyboard, and evidence
   closes; reject a close when persistence fails, otherwise reconcile renderer,
   raster, profile, and external-frame ownership through the shared cleanup.
+- Retain native renderer handles when process cleanup fails, propagate closed
+  renderer/raster ownership on success, and report failed cleanup at shutdown.
 
 Requirement trace: REQ-WEB-BROWSER-011, REQ-WEB-BROWSER-017,
 REQ-WEB-BROWSER-018.

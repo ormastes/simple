@@ -2,7 +2,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|---------|
-| 19 | 19 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 ## Covered boundaries
 
@@ -14,10 +14,13 @@
 - Bound response bodies before Wasm hex expansion.
 - Preserve renderer readiness, Stop, Reload, input, animation, and network
   request ordering.
+- Retain a failed native process-close handle for bounded hosted-WM shutdown
+  retry, but clear handles already reaped by a liveness check.
 - Derive same-origin, CORS, mixed-content, and preflight policy from trusted
   broker state rather than renderer-supplied request kinds.
 
-Requirement trace: REQ-WEB-BROWSER-011, REQ-WEB-BROWSER-017.
+Requirement trace: REQ-WEB-BROWSER-011, REQ-WEB-BROWSER-017,
+REQ-WEB-BROWSER-018.
 
 Source:
 `test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl`
