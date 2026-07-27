@@ -107,3 +107,49 @@ describe "container-manager: stop revocation (§21 invariant)":
         # resource domain freed, monitor reaped, granted pouch dropped.
         expect(w.monitor_state(c1)).to_equal("stopped")
         expect(w.granted_of(c1).len()).to_equal(0)
+
+describe "container-manager: cross-entity identity (two-hop mutation-loss regression)":
+    # Regression guard for bug selfhost_two_hop_field_method_mutation_lost_2026-07-27:
+    # a two-hop chained mutating call collapses entity identity (every spawn
+    # returns index 0) once a world holds >1 entity. ContainerWorld avoids the
+    # hazard by holding component arrays directly (single hop) + extract-mutate-
+    # writeback; this proves identities stay distinct and state stays per-entity.
+    it "three containers in one world keep distinct indices and isolated state":
+        var w = ContainerWorld.new()
+        val c0 = w.sys_create("svc-a", "/ca", [100u64], "sha256:aaa", 512u64, 2048u64, 50u64, 32u64, ["cap.fs_read"], false)
+        val c1 = w.sys_create("svc-b", "/cb", [200u64], "sha256:bbb", 512u64, 2048u64, 50u64, 32u64, ["cap.net_scoped"], false)
+        val c2 = w.sys_create("svc-c", "/cc", [300u64], "sha256:ccc", 512u64, 2048u64, 50u64, 32u64, ["cap.fs_read", "cap.net_scoped"], false)
+        # identity: absolute, distinct indices — NOT all zero.
+        expect(c0).to_equal(0)
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(2)
+        expect(w.count()).to_equal(3)
+        # per-entity state isolation: each resolves ONLY its own root/pid.
+        expect(w.allows_path(c0, "/ca/app")).to_equal(true)
+        expect(w.allows_path(c0, "/cb/app")).to_equal(false)
+        expect(w.allows_path(c1, "/cb/app")).to_equal(true)
+        expect(w.allows_path(c1, "/cc/app")).to_equal(false)
+        expect(w.allows_path(c2, "/cc/app")).to_equal(true)
+        expect(w.allows_path(c2, "/ca/app")).to_equal(false)
+        expect(w.allows_pid(c0, 100u64)).to_equal(true)
+        expect(w.allows_pid(c0, 200u64)).to_equal(false)
+        expect(w.allows_pid(c1, 200u64)).to_equal(true)
+        expect(w.allows_pid(c2, 300u64)).to_equal(true)
+        # per-entity granted pouches stay distinct in size and content.
+        expect(w.granted_of(c0).len()).to_equal(1)
+        expect(w.granted_of(c1).len()).to_equal(1)
+        expect(w.granted_of(c2).len()).to_equal(2)
+        # mutating ONE entity's lifecycle must not leak to siblings.
+        val started: SpawnRequest = w.sys_start(c1)
+        expect(w.lifecycle_state(c0)).to_equal("created")
+        expect(w.lifecycle_state(c1)).to_equal("running")
+        expect(w.lifecycle_state(c2)).to_equal("created")
+        val life = w.sys_stop(c1)
+        expect(life.state).to_equal("stopped")
+        expect(w.lifecycle_state(c0)).to_equal("created")
+        expect(w.lifecycle_state(c1)).to_equal("stopped")
+        expect(w.lifecycle_state(c2)).to_equal("created")
+        # stopped sibling revoked, others untouched.
+        expect(w.allows_path(c1, "/cb/app")).to_equal(false)
+        expect(w.allows_path(c0, "/ca/app")).to_equal(true)
+        expect(w.allows_path(c2, "/cc/app")).to_equal(true)
