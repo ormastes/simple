@@ -268,7 +268,7 @@ impl BrowserSession:
                     val _ = self._blur_dom_focus(focused_id)
             if dispatch.default_action.starts_with("navigate:"):
                 val href = dispatch.default_action.substring(9, dispatch.default_action.len())
-                val target = resolve_relative_url(self.current_url, href)
+                val target = resolve_relative_url(self.document_url, href)
                 val started = self.begin_network_navigation(target, "GET", "", "", "")
                 if val Err(e) = started:
                     self.warnings.push("default navigation blocked: {e}")
@@ -297,7 +297,7 @@ impl BrowserSession:
                     if submit_dispatch.default_action_allowed:
                         val submission = browser_form_submission(
                             self.current_dom, form_id,
-                            dispatch.event.target_id, self.current_url
+                            dispatch.event.target_id, self.document_url
                         )
                         if submission.error != "":
                             self.warnings.push(submission.error)
@@ -431,6 +431,7 @@ impl BrowserSession:
         if not browser_resource_size_allowed(html.len()):
             self.stop_loading()
             return Err("document exceeds 50 MiB resource limit")
+        val previous_document_url = self.document_url
         # Atomic document replacement: the previous page survives until all
         # response-level validation above has succeeded.
         self.runtime_state = nil
@@ -471,7 +472,7 @@ impl BrowserSession:
         if url.starts_with("https://guest.runtime/"):
             print "[BRS] style sources={style_sources.len()}"
 
-        self._persist_storage_for_url(self.current_url)
+        self._persist_storage_for_url(previous_document_url)
         self._activate_storage_for_url(url)
         if self.runtime_enabled and script_blocks.len() > 0:
             val cookie_text = document_cookie_text_for_url(self.cookies, url)
@@ -490,6 +491,7 @@ impl BrowserSession:
         else:
             self.runtime_state = nil
         self.current_url = own_text(url)
+        self.document_url = own_text(url)
         self.animation_start_time_ms = self.monotonic_time_ms
         self.current_title = if initial_title.len() > 0: initial_title else: own_text(url)
         self.current_body_html = body_html
@@ -542,9 +544,9 @@ impl BrowserSession:
             return nil
         if val Some(state) = self.runtime_state:
             return Some(state)
-        val cookie_text = document_cookie_text_for_url(self.cookies, self.current_url)
+        val cookie_text = document_cookie_text_for_url(self.cookies, self.document_url)
         val state = BrowserRuntimeState.create(
-            self.current_url,
+            self.document_url,
             self.current_title,
             self.current_body_html,
             self.session_storage,
@@ -570,6 +572,7 @@ impl BrowserSession:
                 pass_dn
 
         val old_url = self.current_url
+        val active_document_url = self.document_url
         var navigation_mode = ""
         val navigation_mode_val = state.runtime.get_host_property(
             state.location_id,
@@ -608,7 +611,9 @@ impl BrowserSession:
         match href_val:
             JsValue.String(href):
                 if href.len() > 0:
-                    var next_href = href
+                    var next_href = resolve_relative_url(
+                        active_document_url, href
+                    )
                     if navigation_mode == "pushState" or navigation_mode == "replaceState":
                         var history_url_val = state.runtime.get_host_property(
                             state.location_id,
@@ -622,14 +627,31 @@ impl BrowserSession:
                         match history_url_val:
                             JsValue.String(history_url):
                                 if history_url.len() > 0:
-                                    next_href = resolve_relative_url(old_url, history_url)
+                                    val candidate = resolve_relative_url(
+                                        active_document_url, history_url
+                                    )
+                                    val document_origin = url_origin(active_document_url)
+                                    if (
+                                        document_origin != "" and
+                                        url_origin(candidate) == document_origin
+                                    ):
+                                        next_href = candidate
+                                    else:
+                                        next_href = active_document_url
+                                        navigation_mode = ""
+                                        self.warnings.push(
+                                            "cross-origin history URL blocked: {candidate}"
+                                        )
                             _:
                                 pass_dn
                         val history_state_val = state.runtime.get_host_property(
                             state.location_id,
                             "__simple_history_state"
                         )
-                        if not strict_equals(history_state_val, JsValue.Undefined):
+                        if (
+                            navigation_mode != "" and
+                            not strict_equals(history_state_val, JsValue.Undefined)
+                        ):
                             state.runtime.set_host_property(
                                 state.history_id,
                                 "state",
@@ -641,6 +663,8 @@ impl BrowserSession:
                             JsValue.String(v: "")
                         )
                     self.current_url = next_href
+                    if navigation_mode == "pushState" or navigation_mode == "replaceState":
+                        self.document_url = next_href
                     browser_session_sync_location_object(state, next_href)
                     state.runtime.set_host_property(
                         state.document_id,
@@ -702,7 +726,7 @@ impl BrowserSession:
             )
         self.session_storage = storage_pairs_from_object(state, state.session_storage_id)
         self.local_storage = storage_pairs_from_object(state, state.local_storage_id)
-        self._persist_storage_for_url(self.current_url)
+        self._persist_storage_for_url(active_document_url)
         state.runtime = sync_storage_runtime_state(state.runtime, state.session_storage_id, self.session_storage)
         state.runtime = sync_storage_runtime_state(state.runtime, state.local_storage_id, self.local_storage)
 
@@ -714,13 +738,13 @@ impl BrowserSession:
             )
         match cookie_val:
             JsValue.String(cookie_text):
-                val visible_cookie_before_sync = document_cookie_text_for_url(self.cookies, self.current_url)
+                val visible_cookie_before_sync = document_cookie_text_for_url(self.cookies, active_document_url)
                 if cookie_text != visible_cookie_before_sync:
-                    self.cookies = merge_cookie_text_for_url(self.cookies, cookie_text, self.current_url, false)
+                    self.cookies = merge_cookie_text_for_url(self.cookies, cookie_text, active_document_url, false)
             _:
                 pass_dn
 
-        val visible_cookie_text = document_cookie_text_for_url(self.cookies, self.current_url)
+        val visible_cookie_text = document_cookie_text_for_url(self.cookies, active_document_url)
         var runtime = state.runtime
         var interpreter = runtime.interpreter
         interpreter.host_document_cookie_value = JsValue.String(v: visible_cookie_text)
@@ -757,7 +781,7 @@ impl BrowserSession:
 
     me _sync_runtime_cookie_string():
         if val Some(state) = self.runtime_state:
-            val visible_cookie_text = document_cookie_text_for_url(self.cookies, self.current_url)
+            val visible_cookie_text = document_cookie_text_for_url(self.cookies, self.document_url)
             var runtime = state.runtime
             var interpreter = runtime.interpreter
             interpreter.host_document_cookie_value = JsValue.String(v: visible_cookie_text)

@@ -716,3 +716,13 @@ implementation in progress / target evidence blocked
   executable evidence remains target-compiler-blocked and was not rerun.
 - constraint: Do not bootstrap or change the compiler unless a confirmed
   compiler defect prevents producing/running the target browser binary.
+- security/origin isolation: Split the displayed/navigation `current_url` from
+  the committed `document_url` security principal. Relative page requests,
+  form actions, Fetch/CORS/CSP/mixed-content checks, cookie mutation, and Web
+  Storage persistence now derive authority from the committed document.
+  Cross-origin `history.pushState`/`replaceState` targets are rejected without
+  changing URL, history, state, cookie, or storage authority.
+- evidence: Focused fail-fast coverage attempts location/history origin
+  planting, proves the attacker origin receives no planted cookie or storage,
+  and proves the originating document retains its own writes. Runtime evidence
+  remains target-compiler-blocked and was not rerun.

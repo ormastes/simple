@@ -46,6 +46,56 @@ describe "BrowserSession production security boundary":
         expect(session.begin_network_navigation("data:text/html,<script>alert(1)</script>", "GET", "", "", "").is_err()).to_equal(true)
         expect(session.has_pending_requests()).to_equal(false)
 
+    # @req REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
+    it "keeps storage and cookies bound to the active document after a cross-origin location write":
+        var session = BrowserSession.new()
+        val opened = session.open_html(
+            "https://bank.test/app",
+            "<html><body><script>localStorage.bank = 'secret'; document.cookie = 'bank=yes; Path=/';</script></body></html>"
+        )
+        expect(opened.is_ok()).to_be(true)
+
+        val attacked = session.eval_script(
+            "location.href = 'https://evil.test/landing'; localStorage.planted = 'yes'; document.cookie = 'planted=yes; Path=/';"
+        )
+        expect(attacked.is_ok()).to_be(true)
+        expect(session.current_url).to_equal("https://evil.test/landing")
+        expect(session.document_url).to_equal("https://bank.test/app")
+
+        val evil = session.open_html(
+            "https://evil.test/landing", "<html><body>evil</body></html>"
+        )
+        expect(evil.is_ok()).to_be(true)
+        expect(session.local_storage_item("planted")).to_be_nil()
+        expect(session.document_cookie()).to_equal("")
+
+        val bank = session.open_html(
+            "https://bank.test/again", "<html><body>bank</body></html>"
+        )
+        expect(bank.is_ok()).to_be(true)
+        expect(session.local_storage_item("bank") ?? "").to_equal("secret")
+        expect(session.local_storage_item("planted") ?? "").to_equal("yes")
+        expect(session.document_cookie()).to_contain("planted=yes")
+
+    # @req REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-013
+    it "rejects cross-origin history state URLs without changing the document principal":
+        var session = BrowserSession.new()
+        val opened = session.open_html(
+            "https://bank.test/app", "<html><body>bank</body></html>"
+        )
+        expect(opened.is_ok()).to_be(true)
+
+        val attacked = session.eval_script(
+            "history.pushState(1, '', 'https://evil.test/planted')"
+        )
+        expect(attacked.is_ok()).to_be(true)
+        expect(session.current_url).to_equal("https://bank.test/app")
+        expect(session.document_url).to_equal("https://bank.test/app")
+        expect(session.history.len()).to_equal(1)
+        expect(session.warnings).to_contain(
+            "cross-origin history URL blocked: https://evil.test/planted"
+        )
+
     it "blocks mixed-content and unvalidated cross-origin executable resources":
         var session = BrowserSession.new()
         val opened = session.open_html(

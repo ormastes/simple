@@ -631,6 +631,7 @@ class BrowserOriginStorage:
 
 class BrowserSession:
     current_url: text
+    document_url: text
     current_title: text
     current_body_html: text
     current_style_html: text
@@ -678,6 +679,7 @@ class BrowserSession:
     static fn _create(runtime_enabled: bool) -> BrowserSession:
         BrowserSession(
             current_url: "about:blank",
+            document_url: "about:blank",
             current_title: "about:blank",
             current_body_html: "",
             current_style_html: "",
@@ -827,13 +829,13 @@ impl BrowserSession:
                 self.subresource_request_count >= BROWSER_MAX_DOCUMENT_SUBRESOURCES
             )
             val is_mixed_content = (
-                is_active_subresource and self.current_url.starts_with("https://") and
+                is_active_subresource and self.document_url.starts_with("https://") and
                 req.url.starts_with("http://") and
                 not browser_session_is_loopback_http(req.url)
             )
             val is_cors_required_resource = (
                 (req.kind == "module" or req.kind == "wasm") and
-                url_origin(req.url) != url_origin(self.current_url)
+                url_origin(req.url) != url_origin(self.document_url)
             )
             if is_subresource and not resource_limit_reached:
                 self.subresource_request_count = self.subresource_request_count + 1
@@ -904,7 +906,7 @@ impl BrowserSession:
                     body: "",
                     error: reason
                 ))
-            elif req.kind == "fetch" and url_origin(req.url) != url_origin(self.current_url):
+            elif req.kind == "fetch" and url_origin(req.url) != url_origin(self.document_url):
                 # ponytail: same-origin fetch only until BrowserRequest carries
                 # request mode and response CORS metadata.
                 self.warnings.push("cross-origin fetch blocked: {req.url}")
@@ -955,7 +957,7 @@ impl BrowserSession:
                         match runtime.get_host_property(req_obj_id, "url"):
                             JsValue.String(v): url = v
                             _: pass_dn("async request keeps empty url when absent")
-                        url = normalize_runtime_request_url(self.current_url, url)
+                        url = normalize_runtime_request_url(self.document_url, url)
                         url = self._hsts_upgrade_url(url)
                         match runtime.get_host_property(req_obj_id, "method"):
                             JsValue.String(v): method = v
@@ -970,17 +972,17 @@ impl BrowserSession:
                             JsValue.String(v): content_type = v
                             _: pass_dn("async request keeps empty content type when absent")
                         val is_mixed_content = (kind == "fetch" and
-                            browser_session_is_secure_context(self.current_url) and
+                            browser_session_is_secure_context(self.document_url) and
                             url.starts_with("http://") and
                             not browser_session_is_loopback_http(url))
                         val is_cross_origin_fetch = (
                             kind == "fetch" and
-                            url_origin(url) != url_origin(self.current_url)
+                            url_origin(url) != url_origin(self.document_url)
                         )
                         val is_csp_blocked = (
                             kind == "fetch" and not browser_csp_allows(
                                 self.content_security_policy, "connect-src",
-                                self.current_url, url, false
+                                self.document_url, url, false
                             )
                         )
                         val request_capacity_reached = (
@@ -1035,9 +1037,9 @@ impl BrowserSession:
                             match interpreter.host_document_cookie_value:
                                 JsValue.String(doc_cookie):
                                     if doc_cookie != "":
-                                        val visible_before = cookie_text_for_url(self.cookies, self.current_url)
+                                        val visible_before = cookie_text_for_url(self.cookies, self.document_url)
                                         if doc_cookie != visible_before:
-                                            self.cookies = merge_cookie_text_for_url(self.cookies, doc_cookie, self.current_url, false)
+                                            self.cookies = merge_cookie_text_for_url(self.cookies, doc_cookie, self.document_url, false)
                                 _: pass_dn("no document cookie to merge before draining request")
                             # Strip any caller-supplied or raw Cookie lines, then attach
                             # only the sanitized session cookie for this request URL.
@@ -1331,7 +1333,7 @@ impl BrowserSession:
                             "redirect-blocked:https-downgrade"
                         )
                         return Ok(true)
-                    if url_origin(next_url) != url_origin(self.current_url):
+                    if url_origin(next_url) != url_origin(self.document_url):
                         self._reject_runtime_fetch(
                             response.request_id, next_url,
                             "cross-origin:{next_url}"
@@ -1586,13 +1588,13 @@ impl BrowserSession:
                     _:
                         pass_dn
             return "runtime=ok"
-        document_cookie_text_for_url(self.cookies, self.current_url)
+        document_cookie_text_for_url(self.cookies, self.document_url)
 
     me cookie_header_for_request(url: text) -> text:
         cookie_text_for_url(self.cookies, url)
 
     me apply_set_cookie_header(header_value: text, response_url: text = ""):
-        val source_url = if response_url != "": response_url else: self.current_url
+        val source_url = if response_url != "": response_url else: self.document_url
         if val Some(cookie) = parse_cookie_line_for_url(header_value, source_url, true):
             self.cookies = upsert_cookie(self.cookies, cookie)
             self._sync_runtime_cookie_string()
