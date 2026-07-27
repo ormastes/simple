@@ -84,6 +84,35 @@ ownership per lane.
   into previous line, silent wrong value. HIGH.
 - lint_coll006_concat_loop_false_positive_negative (P7): COLL006 false +/−.
 
+## Stage INT results (2026-07-27) — enforcement wiring, committed 624e329
+- INT-1 spawn enforce: 6 ex/0 fail. 3/3 ambient sites in syscall_process routed
+  through spawn_authority_check_ambient (EACCES when sealed+non-root). Boot seal
+  wired in init_all_services BUT GATED OFF (`_seal_ambient_spawn_on_boot()->false`)
+  — arming regresses userland launch until SpawnSpec migration + QEMU boot
+  evidence. Root task always registered (harmless).
+- INT-2 VFS wire: 7 ex/0 fail. VfsHandleTable wired into services/vfs
+  open/read/write/close/seek; 8 mounts[0] bypass sites removed; LLM MCP dispatch
+  bypass (dispatch_and_io_tools) also fixed by me directly. fs_driver mount_table
+  was ALREADY correct (brief was wrong) — no second impl created.
+- INT-3 LLM→spawn: 9 ex/0 fail. profile_spawn_adapter: triple attenuation
+  (profile ∩ parent ∩ executable), unmapped LLM rights fail-closed to 0.
+- 5th bug filed: cross-module Result.Ok/Err unresolved in imported method body.
+- jj hazard navigated: stale-WC from parallel session; backed up edits from disk,
+  update-stale, verified md5 survived, committed scoped (no conflict markers).
+
+## Blocked / deferred (Phase 3-8, honest per SPipe forced-PASS ban)
+- Arm the boot seal — needs userland SpawnSpec migration for shell/WM/fs-exec
+  callers + a QEMU boot+launch transcript. Resume: flip _seal_ambient_spawn_on_boot.
+- P6 QEMU lld gate — lld_static not built (multi-hr LLVM cross) + no multi-payload
+  stager. Resume: sh scripts/os/ssh_lld_link_uefi.shs.
+- P3 remaining: services/vfs is one owner now, but src/lib fs_driver + 4 FAT32
+  copies still coexist; full stack collapse is multi-increment.
+- Phase 3 drivers (DeviceGrant runtime ABI, IOMMU/DMA revocation), Phase 4
+  toolchain/OpenSSH, Phase 5 container enforcement + TUF/SLSA, Phase 6 SQLite/web/
+  DB, Phase 7 browser split, Phase 8 hardware qual/secure boot/installer — each a
+  multi-session body; several host-blocked (physical boards, multi-week ports).
+  Tracked in production_status.sdn with owners.
+
 ## Cross-lane hand-offs for next tranche
 - P2 boot seal must be armed by the boot owner (not a P2 path).
 - P2's 3 remaining ambient sites live in P1's syscall_process.spl.
