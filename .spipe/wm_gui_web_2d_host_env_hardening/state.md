@@ -836,3 +836,10 @@ Tracking split:
   suite passes 13/13; docgen updated the unit and umbrella system manuals with
   zero stubs. The umbrella live-host scenario was not rerun because its native
   display/GPU receipts are environment-owned.
+- bugfix: Closed retained-frame percentile fabrication found by the parallel
+  performance audit. The 4K/8K wrapper now consumes the producer's post-warmup
+  p50/p95 and exact sample count instead of copying the average, and the
+  aggregate no longer fills missing percentiles from average timing. Shell
+  syntax and plan-only evidence pass; the existing modern SSpec pins the real
+  producer/wrapper/aggregate flow and docgen reports one complete manual with
+  zero stubs. The capped live 4K/8K environment suite was not rerun.
