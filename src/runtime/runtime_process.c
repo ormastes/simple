@@ -510,25 +510,229 @@ SplArray* rt_process_run_bounded(const char* cmd, uint64_t cmd_len, SplArray* ar
     return win_process_run_capture(cmd, cmd_len, args, timeout_ms, max_output_bytes);
 }
 
+struct WinPipedSlot {
+    DWORD pid;
+    HANDLE process;
+    HANDLE job;
+    HANDLE stdin_write;
+    HANDLE stdout_read;
+};
+
+#define WIN_PIPED_MAX 16
+#define WIN_PIPED_READ_BUF 8192
+
+static struct WinPipedSlot win_piped_slots[WIN_PIPED_MAX];
+static char win_piped_read_buf[WIN_PIPED_READ_BUF];
+
+static struct WinPipedSlot* win_piped_find(DWORD pid) {
+    for (int i = 0; i < WIN_PIPED_MAX; i++) {
+        if (win_piped_slots[i].pid == pid) return &win_piped_slots[i];
+    }
+    return NULL;
+}
+
+static struct WinPipedSlot* win_piped_alloc(void) {
+    for (int i = 0; i < WIN_PIPED_MAX; i++) {
+        if (win_piped_slots[i].pid == 0) return &win_piped_slots[i];
+    }
+    return NULL;
+}
+
+static void win_piped_free(struct WinPipedSlot* slot) {
+    if (!slot) return;
+    win_close_handle(&slot->stdin_write);
+    win_close_handle(&slot->stdout_read);
+    win_close_handle(&slot->process);
+    win_close_handle(&slot->job);
+    memset(slot, 0, sizeof(*slot));
+}
+
 int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
-    (void)cmd; (void)args;
+    const char** child_args = NULL;
+    char* cmdline = NULL;
+    char* environment = NULL;
+    HANDLE stdin_read = NULL;
+    HANDLE stdin_write = NULL;
+    HANDLE stdout_read = NULL;
+    HANDLE stdout_write = NULL;
+    HANDLE job = NULL;
+    LPPROC_THREAD_ATTRIBUTE_LIST attributes = NULL;
+    int attributes_initialized = 0;
+    int assigned_to_job = 0;
+    PROCESS_INFORMATION process = {0};
+    struct WinPipedSlot* slot = win_piped_alloc();
+    if (!cmd || !*cmd || !slot) return -1;
+
+    int64_t argc = args ? rt_array_len(args) : 0;
+    if (argc < 0 || (uint64_t)argc > SIZE_MAX / sizeof(char*)) goto fail;
+    if (argc > 0) {
+        child_args = (const char**)malloc(sizeof(char*) * (size_t)argc);
+        if (!child_args) goto fail;
+        for (int64_t i = 0; i < argc; i++) {
+            const uint8_t* data = rt_string_data(rt_array_get(args, i));
+            child_args[i] = (const char*)(data ? data : (const uint8_t*)"");
+        }
+    }
+    cmdline = win_cmd_build_line(cmd, child_args, argc);
+    environment = win_filtered_environment();
+    if (!cmdline || !environment) goto fail;
+
+    SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
+    if (!CreatePipe(&stdin_read, &stdin_write, &security, 0) ||
+        !SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0) ||
+        !CreatePipe(&stdout_read, &stdout_write, &security, 0) ||
+        !SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0)) {
+        goto fail;
+    }
+
+    job = CreateJobObjectA(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!job || !SetInformationJobObject(
+            job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+        goto fail;
+    }
+
+    SIZE_T attributes_size = 0;
+    (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attributes_size);
+    if (attributes_size == 0) goto fail;
+    attributes = (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(attributes_size);
+    if (!attributes ||
+        !InitializeProcThreadAttributeList(attributes, 1, 0, &attributes_size)) {
+        goto fail;
+    }
+    attributes_initialized = 1;
+    HANDLE inherited[] = {stdin_read, stdout_write};
+    if (!UpdateProcThreadAttribute(
+            attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+            inherited, sizeof(inherited), NULL, NULL)) {
+        goto fail;
+    }
+
+    STARTUPINFOEXA startup = {0};
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = stdin_read;
+    startup.StartupInfo.hStdOutput = stdout_write;
+    startup.StartupInfo.hStdError = stdout_write;
+    DWORD creation_flags =
+        CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW;
+    if (!CreateProcessA(
+            NULL, cmdline, NULL, NULL, TRUE, creation_flags, environment, NULL,
+            &startup.StartupInfo, &process)) {
+        goto fail;
+    }
+    if (!AssignProcessToJobObject(job, process.hProcess)) goto fail;
+    assigned_to_job = 1;
+    if (ResumeThread(process.hThread) == (DWORD)-1) goto fail;
+
+    DWORD pid = process.dwProcessId;
+    win_close_handle(&process.hThread);
+    win_close_handle(&stdin_read);
+    win_close_handle(&stdout_write);
+    if (attributes_initialized) DeleteProcThreadAttributeList(attributes);
+    free(attributes);
+    free(environment);
+    free(cmdline);
+    free(child_args);
+    slot->pid = pid;
+    slot->process = process.hProcess;
+    slot->job = job;
+    slot->stdin_write = stdin_write;
+    slot->stdout_read = stdout_read;
+    return (int64_t)pid;
+
+fail:
+    if (process.hProcess) {
+        if (assigned_to_job) (void)TerminateJobObject(job, 1);
+        else (void)TerminateProcess(process.hProcess, 1);
+        (void)WaitForSingleObject(process.hProcess, 5000);
+    }
+    win_close_handle(&process.hThread);
+    win_close_handle(&process.hProcess);
+    win_close_handle(&stdin_read);
+    win_close_handle(&stdin_write);
+    win_close_handle(&stdout_read);
+    win_close_handle(&stdout_write);
+    win_close_handle(&job);
+    if (attributes_initialized) DeleteProcThreadAttributeList(attributes);
+    free(attributes);
+    free(environment);
+    free(cmdline);
+    free(child_args);
     return -1;
 }
+
 bool rt_process_write_stdin(int64_t pid, const char* data) {
-    (void)pid; (void)data;
-    return false;
+    if (pid <= 0 || pid > UINT32_MAX || !data) return false;
+    struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
+    if (!slot || !slot->stdin_write) return false;
+    size_t length = strlen(data);
+    size_t offset = 0;
+    while (offset < length) {
+        DWORD chunk = length - offset > UINT32_MAX
+            ? UINT32_MAX : (DWORD)(length - offset);
+        DWORD written = 0;
+        if (!WriteFile(
+                slot->stdin_write, data + offset, chunk, &written, NULL) ||
+            written == 0) {
+            return false;
+        }
+        offset += (size_t)written;
+    }
+    return true;
 }
+
 const char* rt_process_read_stdout(int64_t pid) {
-    (void)pid;
-    return "";
+    win_piped_read_buf[0] = '\0';
+    if (pid <= 0 || pid > UINT32_MAX) return win_piped_read_buf;
+    struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
+    if (!slot || !slot->stdout_read) return win_piped_read_buf;
+    DWORD available = 0;
+    if (!PeekNamedPipe(
+            slot->stdout_read, NULL, 0, NULL, &available, NULL) ||
+        available == 0) {
+        return win_piped_read_buf;
+    }
+    DWORD request = available < WIN_PIPED_READ_BUF - 1
+        ? available : WIN_PIPED_READ_BUF - 1;
+    DWORD read_count = 0;
+    if (!ReadFile(
+            slot->stdout_read, win_piped_read_buf, request,
+            &read_count, NULL)) {
+        return win_piped_read_buf;
+    }
+    win_piped_read_buf[read_count] = '\0';
+    return win_piped_read_buf;
 }
+
 bool rt_process_is_alive(int64_t pid) {
-    (void)pid;
+    if (pid <= 0 || pid > UINT32_MAX) return false;
+    struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
+    if (!slot || !slot->process) return false;
+    DWORD wait_result = WaitForSingleObject(slot->process, 0);
+    if (wait_result == WAIT_TIMEOUT) return true;
+    win_piped_free(slot);
     return false;
 }
+
 bool rt_process_close_piped(int64_t pid) {
-    (void)pid;
-    return false;
+    if (pid <= 0 || pid > UINT32_MAX) return false;
+    struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
+    if (!slot) return false;
+    win_close_handle(&slot->stdin_write);
+    DWORD wait_result = WaitForSingleObject(slot->process, 100);
+    if (wait_result == WAIT_TIMEOUT) {
+        if (!TerminateJobObject(slot->job, 1) &&
+            !TerminateProcess(slot->process, 1)) {
+            win_piped_free(slot);
+            return false;
+        }
+        wait_result = WaitForSingleObject(slot->process, 5000);
+    }
+    bool stopped = wait_result == WAIT_OBJECT_0;
+    win_piped_free(slot);
+    return stopped;
 }
 
 #else /* POSIX */
