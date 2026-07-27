@@ -1026,6 +1026,25 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   three-cycle cap. It must not be merged until that contract is isolated in a
   fresh session.
 
+### 2026-07-27 Bungee caller-owned raster cycles 35–37
+
+- No bootstrap was run. Inlining all measure logic into the public owner
+  function still stopped at `fail-measure`.
+- The existing fixed-array/unit-return canary then passed across the exact
+  module boundary. A monotonic trace in the real measure body reached parsed
+  font, cmap, table bounds, outline, hmtx, and outline bounds, then stopped in
+  the dimension checks.
+- Replacing the combined dimension predicate with ordered guards compiled
+  strictly with two modules changed, nine cached, zero failures, and zero
+  stubs, but still stopped at the same coarse dimension trace slot. The final
+  binary is `/private/tmp/simple-sfnt-glyf-bungee-native-ordered-guards`.
+- The three-cycle cap is reached. In the next fresh session, stamp separately
+  after `raw_w`, `raw_h`, `width`, `height`, maximum-width, maximum-height, and
+  pixel-count guards while publishing raw/rounded values into unused metadata
+  slots. Run the focused probe once and fix only the first failing comparison.
+  Do not repeat the current coarse trace, do not touch the render body yet,
+  and do not bootstrap.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
