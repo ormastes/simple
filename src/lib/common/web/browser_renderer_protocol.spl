@@ -6,6 +6,7 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{
 }
 use std.common.ui.draw_ir.{
     DRAW_IR_BACKEND_AUTO,
+    DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT,
     DrawIrBatch, DrawIrComposition,
     draw_ir_batch_with_source, draw_ir_composition
 }
@@ -25,6 +26,10 @@ val BROWSER_RENDERER_MAX_STYLE_KEY_BYTES: i64 = 128
 val BROWSER_RENDERER_MAX_STYLE_VALUE_BYTES: i64 = 65536
 val BROWSER_RENDERER_MAX_GLYPHS: i64 = 4096
 val BROWSER_RENDERER_MAX_FONT_SIZE: i64 = 512
+val BROWSER_RENDERER_MAX_FRAME_OVERDRAW: i64 = 16
+val BROWSER_RENDERER_MAX_FRAME_TEXT_UNITS: i64 = 262144
+val BROWSER_RENDERER_MAX_FRAME_STYLE_PROPS: i64 = 16384
+val BROWSER_RENDERER_MAX_FRAME_GLYPHS: i64 = 65536
 
 pub struct BrowserRendererMessage:
     kind: text
@@ -905,7 +910,18 @@ fn _browser_renderer_frame_validation_reason(composition: DrawIrComposition, wid
         canvas.x != 0 or canvas.y != 0 or canvas.width != width or
         canvas.height != height or ((canvas.color >> 24) & 255u32) != 255u32):
         return "invalid-canvas"
+    val viewport_pixels = width.to_i64() * height.to_i64()
+    val max_paint_pixels = (
+        viewport_pixels * BROWSER_RENDERER_MAX_FRAME_OVERDRAW
+    )
+    var paint_pixels: i64 = 0
+    var text_units: i64 = 0
+    var style_props: i64 = 0
+    var glyphs: i64 = 0
     for command in batch.commands:
+        if (command.kind != DRAW_IR_COMMAND_RECT and
+            command.kind != DRAW_IR_COMMAND_TEXT):
+            return "invalid-command-kind"
         val x = command.x.to_i64()
         val y = command.y.to_i64()
         val right = x + command.width.to_i64()
@@ -916,6 +932,36 @@ fn _browser_renderer_frame_validation_reason(composition: DrawIrComposition, wid
             right < -BROWSER_RENDERER_MAX_COORDINATE or right > BROWSER_RENDERER_MAX_COORDINATE or
             bottom < -BROWSER_RENDERER_MAX_COORDINATE or bottom > BROWSER_RENDERER_MAX_COORDINATE):
             return "invalid-command-bounds"
+        val clipped_left = if x > 0: x else: 0
+        val clipped_top = if y > 0: y else: 0
+        val clipped_right = if right < width.to_i64():
+            right
+        else:
+            width.to_i64()
+        val clipped_bottom = if bottom < height.to_i64():
+            bottom
+        else:
+            height.to_i64()
+        if clipped_right > clipped_left and clipped_bottom > clipped_top:
+            paint_pixels = paint_pixels + (
+                (clipped_right - clipped_left) *
+                (clipped_bottom - clipped_top)
+            )
+        text_units = text_units + command.text_value.len()
+        style_props = style_props + command.computed_style.len()
+        var command_glyphs = command.glyph_run.glyph_ids.len()
+        if command.glyph_run.xs.len() > command_glyphs:
+            command_glyphs = command.glyph_run.xs.len()
+        if command.glyph_run.ys.len() > command_glyphs:
+            command_glyphs = command.glyph_run.ys.len()
+        if command.glyph_run.clusters.len() > command_glyphs:
+            command_glyphs = command.glyph_run.clusters.len()
+        glyphs = glyphs + command_glyphs
+        if (paint_pixels > max_paint_pixels or
+            text_units > BROWSER_RENDERER_MAX_FRAME_TEXT_UNITS or
+            style_props > BROWSER_RENDERER_MAX_FRAME_STYLE_PROPS or
+            glyphs > BROWSER_RENDERER_MAX_FRAME_GLYPHS):
+            return "frame-work-budget-exceeded"
         if (command.text_value.len() > BROWSER_RENDERER_MAX_TEXT_BYTES or
             command.computed_style.len() > BROWSER_RENDERER_MAX_STYLE_PROPS or
             command.glyph_run.glyph_ids.len() > BROWSER_RENDERER_MAX_GLYPHS or

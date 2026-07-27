@@ -335,10 +335,13 @@ or native TLS behavior.
   HTTP job while the renderer sandbox remains socketless. Renderer protocol
   traffic now uses a full-duplex inherited fd 0 while ordinary stdout/stderr
   are discarded, and seccomp denies direct System V shared-memory, message,
-  and semaphore IPC. Fetch now rejects `SameOrigin` mode before cache or
-  transport when the request target differs from the committed requester
-  origin, and every cache hit is revalidated against the current CORS response
-  policy. The renderer broker now rejects every document request unless it
+  and semaphore IPC. Validated renderer frames admit only the HTML producer's
+  rectangle/text command subset and enforce frame-wide overdraw, text, style,
+  and glyph budgets before Draw IR reaches the parent renderer. Fetch now
+  rejects `SameOrigin` mode before cache or transport when the request target
+  differs from the committed requester origin, and every cache hit is
+  revalidated against the current CORS response policy. The renderer broker
+  now rejects every document request unless it
   exactly consumes one parent-issued canonical URL/method/header/body permit,
   derives resource mode from the broker's committed origin instead of the
   renderer's kind, and authorizes only bounded simple CORS requests until
