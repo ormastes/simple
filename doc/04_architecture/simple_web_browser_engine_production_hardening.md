@@ -329,8 +329,10 @@ or native TLS behavior.
   seccomp process/network denial, and a persistent BrowserSession/Draw IR
   worker. The broker permits one request in flight, requires exact monotonic
   IDs, preserves absolute animation time, and closes the contained process on
-  any timeout or protocol failure. The accepted worker composition is not yet
-  substituted for the hosted compositor's in-process browser frame; Windows
-  AppContainer and the signed macOS helper also remain open.
+  any timeout or protocol failure. A fail-closed external-frame compositor seam
+  now exists, but the hosted entry is not switched to it: ordinary renderer
+  diagnostics still share stdout with SBR1, and
+  `browser_renderer_protocol_stdout_collision_2026-07-27.md` is a release
+  blocker. Windows AppContainer and the signed macOS helper also remain open.
 - no current GC/RSS/soak or crash-containment evidence exists;
 - existing browser interaction evidence can pass when its artifact is absent.
