@@ -17,6 +17,7 @@ use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO, DrawIrComposition}
 use common.ui.window_scene_draw_ir.{
     SharedWmPixelBufferBackend,
     shared_wm_content_frame_image_uri,
+    shared_wm_nested_content_frames,
     shared_wm_pixel_buffer_pixels,
     shared_wm_pixel_buffer_resize,
     shared_wm_scene_draw_ir_composition_with_content,
@@ -1043,6 +1044,7 @@ class HostCompositor:
         val scene = taskbar_input.render.scene
         val frames = taskbar_input.render.content_frames
         var images: [Engine2dResolvedDrawIrImage] = []
+        var top_frames: [WmContentFrame] = []
         var expected_images = 0
         var wi = 0
         while wi < scene.windows.len():
@@ -1067,15 +1069,20 @@ class HostCompositor:
                         print "[hosted-wm] draw-ir-reject-detail reason=duplicate-or-empty-content-uri window_id={window.window_id} uri={image_uri}"
                         return self._reject_engine2d_frame()
                     images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))
+                    top_frames.push(frame)
                 else:
                     print "[hosted-wm] draw-ir-reject-detail reason=content-frame-missing window_id={window.window_id} scene_revision={self.render_revision}"
                     return self._reject_engine2d_frame()
             wi = wi + 1
-        if images.len() != expected_images or frames.len() != expected_images:
+        if images.len() != expected_images or top_frames.len() != expected_images:
             print "[hosted-wm] draw-ir-reject-detail reason=content-image-count images={images.len()} frames={frames.len()} expected={expected_images}"
             return self._reject_engine2d_frame()
 
-        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar_input.taskbar, frames, selected_backend, 1000, taskbar_input.clock_label, 0)
+        val nested_frames = shared_wm_nested_content_frames(scene, frames, top_frames, self.render_revision, 28)
+        for frame in nested_frames:
+            images.push(engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(frame), frame.width, frame.height, frame.pixels))
+            top_frames.push(frame)
+        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar_input.taskbar, top_frames, selected_backend, 1000, taskbar_input.clock_label, 0)
         val result = executor.render_draw_ir_composition(composition, images)
         # A concrete Metal WM frame is device-only. The executor must return
         # one valid receipt for every requested glass surface, and that receipt

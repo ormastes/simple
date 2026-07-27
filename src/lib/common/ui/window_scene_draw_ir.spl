@@ -15,7 +15,6 @@ use common.ui.draw_ir.{
     draw_ir_box_with_style,
     draw_ir_composition,
     draw_ir_embedding_config,
-    draw_ir_group_command,
     draw_ir_image_command,
     draw_ir_rect,
     draw_ir_rect_bounds,
@@ -42,6 +41,7 @@ use common.ui.window_scene.{
     WM_CONTENT_ORIGIN_SIMPLE_WEB,
     WM_CONTENT_ORIGIN_GUI,
     wm_content_frame_checksum,
+    wm_content_frame_web_provenance_valid,
     shared_wm_scene_chrome,
     shared_wm_scene_layout_key,
     shared_wm_scene_resolve_background
@@ -408,7 +408,7 @@ class SharedWmPixelBufferBackend:
             if frame.parent_window_id == parent_id:
                 val child_x = parent_rect.x + frame.offset_x
                 val child_y = parent_rect.y + frame.offset_y
-                val valid = scene_revision > 0 and _wm_content_frame_origin_valid(frame.origin_kind) and frame.scene_revision == scene_revision and frame.content_revision > 0 and frame.checksum > 0u64 and frame.width > 0 and frame.height > 0 and frame.pixels.len() == frame.width * frame.height
+                val valid = shared_wm_nested_content_frame_valid(frame, scene_revision) and _wm_nested_content_frame_unique(frames, frame) and wm_content_frame_web_provenance_valid(frame)
                 if valid:
                     val clipped = _wm_content_frame_clip_to_rect(frame.pixels, frame.width, frame.height, child_x, child_y, parent_rect)
                     if clipped.width > 0 and clipped.height > 0:
@@ -1041,14 +1041,6 @@ fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backen
         _wm_draw_ir_source("wm.window.{window.window_id}", "wm.window", _wm_draw_ir_window_revision(window))
     )
 
-# Sibling of _wm_draw_ir_window_batch for a nested content frame (Lane C,
-# "rendering inside rendering"): a GUI-in-GUI or web-in-GUI child embedded in
-# a parent content frame rather than a top-level SharedWmWindow. The
-# embedding surface_id is the CHILD frame's own window_id (so downstream Draw
-# IR consumers can address it as its own surface), while the single command
-# carries parent_id so consumers can still walk the hierarchy up to the
-# parent. Nested pixels remain on the existing clipped compositor path for
-# now; the GROUP fails closed in Engine2D instead of pretending they rendered.
 fn shared_wm_content_frame_image_uri(frame: WmContentFrame) -> text:
     "wm-content://{frame.window_id}/{frame.scene_revision}/{frame.content_revision}/{frame.checksum}"
 
@@ -1072,14 +1064,16 @@ fn _wm_draw_ir_invalid_top_content_frame_batch(window: SharedWmWindow, content: 
         _wm_draw_ir_source("wm.content.{window.window_id}", "wm.content", "invalid")
     )
 
-fn _wm_draw_ir_child_content_frame_batch(frame: WmContentFrame, parent_window_id: text, backend_target: text) -> DrawIrBatch:
-    val embedding = draw_ir_embedding_config(frame.window_id, frame.window_id, frame.offset_x, frame.offset_y, frame.width, frame.height, 0, 1000, true)
+fn _wm_draw_ir_child_content_frame_batch(frame: WmContentFrame, parent_window_id: text, visible: SharedWmRect, child_x: i32, child_y: i32, backend_target: text) -> DrawIrBatch:
+    val embedding = draw_ir_embedding_config(frame.window_id, frame.window_id, visible.x, visible.y, visible.width, visible.height, 0, 1000, true)
+    var image = draw_ir_image_command(frame.window_id, child_x - visible.x, child_y - visible.y, frame.width, frame.height, shared_wm_content_frame_image_uri(frame), [])
+    image.parent_id = parent_window_id
     draw_ir_batch_with_source(
         "content-{frame.window_id}",
         backend_target,
         embedding,
-        [draw_ir_group_command(frame.window_id, parent_window_id)],
-        _wm_draw_ir_source("wm.content.{frame.window_id}", "wm.content", "rev={frame.content_revision}")
+        [image],
+        _wm_draw_ir_source("wm.content.{frame.window_id}", "wm.content", "rev={frame.content_revision};checksum={frame.checksum}")
     )
 
 fn shared_wm_scene_draw_ir_composition(scene: SharedWmScene, taskbar: TaskbarModel, backend_target: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> DrawIrComposition:
@@ -1111,7 +1105,7 @@ fn shared_wm_scene_draw_ir_composition(scene: SharedWmScene, taskbar: TaskbarMod
 # children up to WM_CONTENT_FRAME_MAX_NESTING_DEPTH — mirroring
 # _shared_wm_render_child_content_frames's traversal, but for Draw IR
 # projection instead of direct-to-backend pixels.
-fn _wm_draw_ir_child_content_batches_recursive(content_frames: [WmContentFrame], parent_id: text, backend_target: text, depth: i32) -> [DrawIrBatch]:
+fn _wm_draw_ir_child_content_batches_recursive(content_frames: [WmContentFrame], parent_id: text, parent_origin_x: i32, parent_origin_y: i32, active_clip: SharedWmRect, scene_revision: i64, backend_target: text, depth: i32) -> [DrawIrBatch]:
     # Bounded stall receipt (depth <= 3 only, so a runaway cannot flood serial):
     # the pointer-release composition never returns. Interpolating the module
     # val DIRECTLY is deliberate — it reports the cap value actually used by
@@ -1125,16 +1119,23 @@ fn _wm_draw_ir_child_content_batches_recursive(content_frames: [WmContentFrame],
     var out: [DrawIrBatch] = []
     for frame in content_frames:
         if frame.parent_window_id == parent_id:
-            out.push(_wm_draw_ir_child_content_frame_batch(frame, parent_id, backend_target))
-            for nested in _wm_draw_ir_child_content_batches_recursive(content_frames, frame.window_id, backend_target, depth + 1):
-                out.push(nested)
+            val child_x = parent_origin_x + frame.offset_x
+            val child_y = parent_origin_y + frame.offset_y
+            val visible = _wm_rect_intersect(child_x, child_y, frame.width, frame.height, active_clip)
+            if visible.width > 0 and visible.height > 0:
+                if shared_wm_nested_content_frame_valid(frame, scene_revision) and _wm_nested_content_frame_unique(content_frames, frame):
+                    out.push(_wm_draw_ir_child_content_frame_batch(frame, parent_id, visible, child_x, child_y, backend_target))
+                    for nested in _wm_draw_ir_child_content_batches_recursive(content_frames, frame.window_id, child_x, child_y, visible, scene_revision, backend_target, depth + 1):
+                        out.push(nested)
+                else:
+                    val embedding = draw_ir_embedding_config(frame.window_id, frame.window_id, visible.x, visible.y, visible.width, visible.height, 0, 1000, true)
+                    out.push(draw_ir_batch_with_source("content-{frame.window_id}", backend_target, embedding, [draw_ir_rect("{frame.window_id}-content-invalid", 0, 0, visible.width, visible.height, 0xFFFF00FFu32)], _wm_draw_ir_source("wm.content.{frame.window_id}", "wm.content", "invalid")))
     out
 
 # Content-aware sibling of shared_wm_scene_draw_ir_composition: same
 # desktop/chrome/window batches plus a resolved IMAGE batch for each validated
 # top-level content frame, interleaved directly after its window chrome. Nested
-# frames retain their GROUP metadata and therefore fail closed in Engine2D
-# until clipped nested IMAGE projection is implemented.
+# nested frames use clipped IMAGE batches on the same Engine2D path.
 fn shared_wm_scene_draw_ir_composition_with_content(scene: SharedWmScene, taskbar: TaskbarModel, content_frames: [WmContentFrame], backend_target: text, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> DrawIrComposition:
     # Stall receipts: the executor logs at=composition-begin and never
     # at=composition-end on the pointer release, while the press completed this
@@ -1157,10 +1158,10 @@ fn shared_wm_scene_draw_ir_composition_with_content(scene: SharedWmScene, taskba
                 if content.width > 0 and content.height > 0:
                     if val frame = shared_wm_content_frame_for_window(content_frames, 0, window, 28):
                         batches.push(_wm_draw_ir_top_content_frame_batch(window, frame, content, backend_target))
+                        for child_batch in _wm_draw_ir_child_content_batches_recursive(content_frames, window.window_id, content.x, content.y, content, frame.scene_revision, backend_target, 1):
+                            batches.push(child_batch)
                     else:
                         batches.push(_wm_draw_ir_invalid_top_content_frame_batch(window, content, backend_target))
-                for child_batch in _wm_draw_ir_child_content_batches_recursive(content_frames, window.window_id, backend_target, 1):
-                    batches.push(child_batch)
     draw_ir_composition(WM_DRAW_IR_COMPOSITION_ID, shared_wm_scene_layout_key(scene), backend_target, batches)
 
 # =========================================================================
@@ -1442,6 +1443,45 @@ fn _shared_wm_scene_window_content_pixel_count(window: SharedWmWindow) -> i64:
 fn _wm_content_frame_origin_valid(origin_kind: text) -> bool:
     origin_kind == WM_CONTENT_ORIGIN_SIMPLE_WEB or origin_kind == WM_CONTENT_ORIGIN_GUI
 
+fn shared_wm_nested_content_frame_valid(frame: WmContentFrame, scene_revision: i64) -> bool:
+    scene_revision > 0 and _wm_content_frame_origin_valid(frame.origin_kind) and frame.scene_revision == scene_revision and frame.content_revision > 0 and frame.width > 0 and frame.height > 0 and frame.pixels.len().to_i64() == frame.width.to_i64() * frame.height.to_i64() and frame.checksum > 0u64 and frame.checksum == wm_content_frame_checksum(frame.pixels)
+
+fn _wm_nested_content_frame_unique(content_frames: [WmContentFrame], candidate: WmContentFrame) -> bool:
+    var id_count = 0
+    var uri_count = 0
+    val candidate_uri = shared_wm_content_frame_image_uri(candidate)
+    for frame in content_frames:
+        if frame.window_id == candidate.window_id:
+            id_count = id_count + 1
+        if shared_wm_content_frame_image_uri(frame) == candidate_uri:
+            uri_count = uri_count + 1
+    id_count == 1 and uri_count == 1
+
+fn _shared_wm_nested_content_frames_recursive(content_frames: [WmContentFrame], parent_id: text, parent_origin_x: i32, parent_origin_y: i32, active_clip: SharedWmRect, scene_revision: i64, depth: i32) -> [WmContentFrame]:
+    if depth > WM_CONTENT_FRAME_MAX_NESTING_DEPTH:
+        return []
+    var out: [WmContentFrame] = []
+    for frame in content_frames:
+        if frame.parent_window_id == parent_id:
+            val child_x = parent_origin_x + frame.offset_x
+            val child_y = parent_origin_y + frame.offset_y
+            val visible = _wm_rect_intersect(child_x, child_y, frame.width, frame.height, active_clip)
+            if visible.width > 0 and visible.height > 0 and shared_wm_nested_content_frame_valid(frame, scene_revision) and _wm_nested_content_frame_unique(content_frames, frame) and wm_content_frame_web_provenance_valid(frame):
+                out.push(frame)
+                for nested in _shared_wm_nested_content_frames_recursive(content_frames, frame.window_id, child_x, child_y, visible, scene_revision, depth + 1):
+                    out.push(nested)
+    out
+
+fn shared_wm_nested_content_frames(scene: SharedWmScene, content_frames: [WmContentFrame], top_frames: [WmContentFrame], scene_revision: i64, titlebar_height: i32) -> [WmContentFrame]:
+    var out: [WmContentFrame] = []
+    for window in scene.windows:
+        for frame in top_frames:
+            if frame.window_id == window.window_id:
+                val content = shared_wm_scene_window_content_rect_with_titlebar(window, titlebar_height)
+                for nested in _shared_wm_nested_content_frames_recursive(content_frames, frame.window_id, content.x, content.y, content, scene_revision, 1):
+                    out.push(nested)
+    out
+
 fn shared_wm_content_frame_for_window(content_frames: [WmContentFrame], scene_revision: i64, window: SharedWmWindow, titlebar_height: i32) -> WmContentFrame?:
     var found: WmContentFrame? = nil
     var matching_count = 0
@@ -1530,7 +1570,7 @@ fn _shared_wm_render_child_content_frames(backend: CompositorBackend, input: Sha
         if frame.parent_window_id == parent_id:
             val child_x = parent_rect.x + frame.offset_x
             val child_y = parent_rect.y + frame.offset_y
-            val valid = input.revision.scene_revision > 0 and _wm_content_frame_origin_valid(frame.origin_kind) and frame.scene_revision == input.revision.scene_revision and frame.content_revision > 0 and frame.checksum > 0u64 and frame.width > 0 and frame.height > 0 and frame.pixels.len() == frame.width * frame.height
+            val valid = shared_wm_nested_content_frame_valid(frame, input.revision.scene_revision) and _wm_nested_content_frame_unique(input.content_frames, frame) and wm_content_frame_web_provenance_valid(frame)
             if valid:
                 val clipped = _wm_content_frame_clip_to_rect(frame.pixels, frame.width, frame.height, child_x, child_y, parent_rect)
                 if clipped.width > 0 and clipped.height > 0:

@@ -19,7 +19,9 @@ This spec pins:
   (e) origin "gui" is accepted like "simple_web"; an unrecognized origin is
       rejected (fail-closed, same as an invalid checksum);
   (f) a scene with no nested content frames renders byte-identical to the
-      pre-nesting executor behavior (regression).
+      pre-nesting executor behavior (regression);
+  (g) canonical Draw IR + CPU Engine2D readback contains the nested pixels
+      with no unsupported command skip or fallback.
 """
 
 use std.spec.{describe, it, expect, step, assert_not_equal}
@@ -39,9 +41,11 @@ use common.ui.window_scene.{
 }
 use common.ui.taskbar_model.{TaskbarModel}
 use common.ui.draw_ir.{DRAW_IR_COMMAND_IMAGE}
-use common.ui.window_scene_draw_ir.{shared_wm_content_frame_image_uri, shared_wm_scene_render_context_to_backend, shared_wm_scene_draw_ir_composition_with_content}
+use common.ui.window_scene_draw_ir.{shared_wm_content_frame_image_uri, shared_wm_nested_content_frames, shared_wm_scene_render_context_to_backend, shared_wm_scene_draw_ir_composition_with_content}
 use common.ui.wm_gui_content_frame.{wm_gui_content_frame_from_pixels}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition_with_images, engine2d_resolved_draw_ir_image}
 
 # Minimal in-memory CompositorBackend test double (same shape as the one in
 # window_scene_render_executor_spec.spl) — a fake in-memory backend that
@@ -265,15 +269,19 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
         expect(backend.pixels[20 * 140 + 20]).to_equal(0xFF123456u32)
         expect(stats.content_pixel_count).to_equal(7000)
 
-    it "threads parent/child linkage into the Draw IR projection for a nested content frame":
+    it "renders a linked nested Draw IR image through real CPU Engine2D readback":
         step("Build a scene whose window has a nested GUI content frame")
         val window = _borderless_window("win-parent", 10, 10, 100, 70)
         val scene = simple_gui_internal_window_scene(140, 140, "nested-g", [window])
+        val parent_pixels = _solid_pixels(100 * 70, 0xFF112233u32)
+        val parent_frame = WmContentFrame(window_id: "win-parent", scene_revision: 7, content_revision: 1, origin_kind: WM_CONTENT_ORIGIN_GUI, width: 100, height: 70, pixels: parent_pixels, checksum: wm_content_frame_checksum(parent_pixels), parent_window_id: "", offset_x: 0, offset_y: 0)
         val child_pixels = _solid_pixels(20 * 15, 0xFF222222u32)
         val child_frame = wm_gui_content_frame_from_pixels("win-child", "win-parent", 10, 10, 20, 15, child_pixels, 7, 1)
         val taskbar = TaskbarModel(pinned: [], running: [], tray: [])
-        step("The content-aware composition emits a batch for the child surface with parent_id pointing at the parent window")
-        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar, [child_frame], "test-backend", 1000, "", 0)
+        step("Project both frames and resolve both authoritative pixel resources")
+        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar, [parent_frame, child_frame], "cpu", 1000, "", 0)
+        val nested_frames = shared_wm_nested_content_frames(scene, [parent_frame, child_frame], [parent_frame], 7, 28)
+        expect(nested_frames.len()).to_equal(1)
         var found_surface = false
         var found_parent_id = false
         for batch in composition.batches:
@@ -284,6 +292,16 @@ describe "Nested content frames (Lane C: rendering inside rendering)":
                         found_parent_id = true
         expect(found_surface).to_equal(true)
         expect(found_parent_id).to_equal(true)
+        var cpu = Engine2D.create_with_backend(140, 140, "cpu")
+        val parent_image = engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(parent_frame), parent_frame.width, parent_frame.height, parent_frame.pixels)
+        val child_image = engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(nested_frames[0]), nested_frames[0].width, nested_frames[0].height, nested_frames[0].pixels)
+        val result = engine2d_draw_ir_adv_composition_with_images(cpu, composition, false, [parent_image, child_image])
+        expect(result.pixels[15 * 140 + 15]).to_equal(0xFF112233u32)
+        expect(result.pixels[25 * 140 + 25]).to_equal(0xFF222222u32)
+        expect(result.skipped_command_count).to_equal(0)
+        expect(result.fallback_required).to_be(false)
+        expect(result.readback_source).to_equal("cpu_mirror")
+        cpu.shutdown()
 
     it "projects an authoritative top-level content frame as a resolved Draw IR image":
         val window = _borderless_window("win-image", 10, 10, 20, 20)

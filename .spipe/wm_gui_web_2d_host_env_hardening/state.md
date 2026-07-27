@@ -955,3 +955,12 @@ Tracking split:
   copy-route mutation retains the helper/intrinsics but exits 1 with
   `missing-riscv-copy-dispatch`. Cross-ISA native/QEMU performance rows remain
   blocked and were not promoted by this source contract.
+- nested-wm-draw-ir-image: Three small read-only lanes traced the child-pixel,
+  resource, and regression paths. The shared projection now emits reachable
+  nested frames as cumulatively clipped IMAGE batches with source-preserving
+  negative offsets, and both hosted/SimpleOS executors resolve the same strict
+  descendant resources. The existing integration spec now checks real CPU
+  Engine2D pixels, readback identity, and zero skipped commands. Direct-env,
+  rendering-coupling, and spec-layout gates pass; the exhausted diagnostic
+  runner/bootstrap/QEMU lanes were not rerun, so executable qualification is
+  deferred to a fresh accepted pure-Simple environment.
