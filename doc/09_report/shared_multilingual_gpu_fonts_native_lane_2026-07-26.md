@@ -57,50 +57,10 @@ discovery.
 - Retained log:
   `build/test-artifacts/shared_multilingual_gpu_fonts/lane-e/native_gpu_font_readback.log`.
 
-## Exact resume contract
+## Historical resume contract — superseded
 
-Prerequisite: lane A publishes an admitted fresh pure-Simple Stage 4 full CLI
-path and SHA-256 plus the admitted core-C runtime directory and archive
-SHA-256. Admission is still pending. From this worktree, set:
-
-```sh
-CLI=/absolute/path/to/admitted/pure-simple
-CLI_SHA=<published-cli-sha256>
-CORE_C_DIR=/absolute/path/to/admitted/core-c
-CORE_C_SHA=<published-libsimple_runtime.a-sha256>
-LOG_ROOT="build/test-artifacts/shared_multilingual_gpu_fonts/lane-e/$CLI_SHA"
-DOCGEN_ROOT="build/test-artifacts/shared_multilingual_gpu_fonts/docgen/lane-e"
-mkdir -p "$LOG_ROOT" "$DOCGEN_ROOT"
-```
-
-Verify the published hashes and the single global lane-A calibration under
-`build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration/`.
-`fail.exit` must contain `1` with `test-runner: spec failed` in its retained
-streams; `empty.exit` must contain `1` with
-`test-runner: no examples executed`. Lane E references that calibration and
-must not rerun it. A missing or mismatched artifact keeps all lane-E rows
-blocked.
-
-After calibration, run the four current lane-E tests once each:
-
-```sh
-"$CLI" run src/app/test/font_evidence_runner.spl -- "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl >"$LOG_ROOT/gpu_font_emission.native.log" 2>&1
-"$CLI" run src/app/test/font_evidence_runner.spl -- "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl >"$LOG_ROOT/cuda_generated_font_handoff.native.log" 2>&1
-"$CLI" run src/app/test/font_evidence_runner.spl -- "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl >"$LOG_ROOT/native_gpu_font_readback.native.log" 2>&1
-"$CLI" run src/app/test/font_evidence_runner.spl -- "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl >"$LOG_ROOT/shared_multilingual_gpu_fonts_perf.native.log" 2>&1
-```
-
-Then generate the four mirrored manuals once:
-
-```sh
-"$CLI" spipe-docgen test/03_system/app/simple_2d/feature/gpu_font_emission_spec.spl --output doc/06_spec --no-index >"$DOCGEN_ROOT/gpu_font_emission_spec.out" 2>"$DOCGEN_ROOT/gpu_font_emission_spec.err"
-"$CLI" spipe-docgen test/03_system/app/simple_2d/feature/cuda_generated_font_handoff_spec.spl --output doc/06_spec --no-index >"$DOCGEN_ROOT/cuda_generated_font_handoff_spec.out" 2>"$DOCGEN_ROOT/cuda_generated_font_handoff_spec.err"
-"$CLI" spipe-docgen test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl --output doc/06_spec --no-index >"$DOCGEN_ROOT/native_gpu_font_readback_spec.out" 2>"$DOCGEN_ROOT/native_gpu_font_readback_spec.err"
-"$CLI" spipe-docgen test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl --output doc/06_spec --no-index >"$DOCGEN_ROOT/shared_multilingual_gpu_fonts_perf_spec.out" 2>"$DOCGEN_ROOT/shared_multilingual_gpu_fonts_perf_spec.err"
-```
-
-Pass requires nonzero examples and an authoritative successful summary; a
-signal exit, missing summary, unavailable row, software device, CPU mirror, or
-missing `build/shared_multilingual_gpu_fonts_perf/evidence.env` is a blocker.
-The durable performance record must pass its v5 hash binding and every selected
-numeric budget before NFR-004–008 can be marked pass.
+The former lane-E-only test and docgen commands are stale. Use only
+[Exact owner commands](shared_multilingual_gpu_fonts_all_items_verification.md#exact-owner-commands)
+and its attempt-bound `run_focused_spec` and `run_docgen_spec` helpers. They
+provide the authoritative all-items identity, immutability, retention, and
+completion contract.

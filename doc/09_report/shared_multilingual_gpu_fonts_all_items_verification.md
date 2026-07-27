@@ -17,10 +17,10 @@ produce the pure-Simple prerequisite.
 
 ### Current bootstrap blocker
 
-The last pushed checkpoint before the current source/evidence correction was
-`2eb2bbf93f10`, matching
-`origin/codex/shared-font-all-items-20260726`. Its completion-time identity and
-divergence still require the final fetch/rebase/file-count gate.
+The current synced checkpoint is
+`616454901c666f87e2cb7d70719d8d076ec81a1d`. The earlier pushed checkpoint
+`2eb2bbf93f10` is historical. Completion still requires the final
+fetch/rebase/file-count gate against the then-current `origin/main`.
 At the earlier source checkpoint `deb90cd8a9c`, both direct-runtime guards,
 both numbered-artifact guards, `git diff --check`, and the
 zero-executable-specs-under-`doc/06_spec` layout gate passed. Those retained
