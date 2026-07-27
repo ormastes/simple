@@ -173,9 +173,17 @@ frozen before parallel edits:
 | K — flags/GDEF | `lookup_flags_gdef` | context/data owners, focused lookup-flag unit spec | all defined flag bits, MarkAttachClassDef, combinations, malformed rejection |
 | L — GPOS variation data | `gpos_variation_data` | data/variation owner, focused variation unit spec | Device, VariationIndex, anchors 2/3, ItemVariationStore |
 | M — feature selection | `runtime_rebuild` reassigned after its capped build window | parser-layout owner and selector unit spec | FeatureVariations conditions/substitution and general Script/LangSys selection |
-| N — generic shaper | next free implementation agent | `ot_layout_shaper` and focused integration spec | witness allow-list removed from generic execution; pinned vectors retained as oracles |
+| N — selected shaper boundary | `/root` plus `gpos_full_impl` follow-up | `ot_layout_shaper`, `shaper`, and focused integration specs | generic lookup executor is not witness-gated; selected high-level preprocessing remains fail-closed unless proven |
 
 Each lane commits only its owned files from an isolated worktree and does not
 run the capped pure-Simple build. `/root` is merge owner. A separate
 highest-capability verification agent reviews merged semantics, specs, manuals,
 and requirement evidence before any done mark.
+
+Independent review returned no P0 and six P1s. The active corrective lanes are:
+GPOS context/unit/budget wiring (`gpos_full_impl`), forward-compatible
+FeatureVariations selection (`runtime_rebuild`, merged), selected-shaper
+preprocessing policy (`/root`), and merged GSUB/GPOS semantic review
+(`lookup_flags_gdef`). Packed Device deltas remain post-scale pixels;
+VariationIndex deltas remain design units. GDEF ItemVariationStore rejects the
+reserved `LONG_WORDS` bit.
