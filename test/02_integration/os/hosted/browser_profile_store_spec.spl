@@ -1,0 +1,104 @@
+use std.spec.*
+use std.database.sql.types.{DbValue}
+use std.js.types.pair.{Pair}
+use std.gc_async_mut.web.browser_session.{
+    BrowserBookmarkSnapshot, BrowserHstsSnapshot, BrowserHstsSnapshotEntry
+}
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.web.browser_session_runtime.*
+use os.hosted.browser_profile_store.{BrowserProfileStore}
+use os.hosted.hosted_web_content_session.{HostedWebContentRegistry}
+
+extern fn rt_file_delete(path: text) -> bool
+
+val PROFILE_PATH = "/tmp/simple_browser_profile_store_spec.sqlite3"
+
+fn remove_profile_files():
+    rt_file_delete(PROFILE_PATH)
+    rt_file_delete(PROFILE_PATH + "-wal")
+    rt_file_delete(PROFILE_PATH + "-shm")
+
+describe "hosted browser profile store":
+    it "persists validated bookmarks and HSTS across reopen and removal":
+        remove_profile_files()
+        var bookmarks: [Pair<text, text>] = []
+        bookmarks.push(Pair(
+            first: "https://simple.test/docs", second: "Simple docs"
+        ))
+        var hsts_entries: [BrowserHstsSnapshotEntry] = []
+        hsts_entries.push(BrowserHstsSnapshotEntry(
+            host: "simple.test",
+            received_at_unix_ms: 99500,
+            expires_at_unix_ms: 101000,
+            include_subdomains: true
+        ))
+
+        var first = BrowserProfileStore.open(PROFILE_PATH)?
+        first.save_bookmarks(BrowserBookmarkSnapshot.create(bookmarks))?
+        first.save_hsts(BrowserHstsSnapshot.create(hsts_entries), 100000)?
+        first.close()?
+
+        var reopened = BrowserProfileStore.open(PROFILE_PATH)?
+        val restored_bookmarks = reopened.load_bookmarks()?
+        val restored_hsts = reopened.load_hsts(100000)?
+        expect(restored_bookmarks.entries.len()).to_equal(1)
+        expect(restored_hsts.entries.len()).to_equal(1)
+
+        reopened.db.exec(
+            "INSERT INTO browser_bookmarks (position, url, title) VALUES (?, ?, ?)",
+            [
+                DbValue.Integer(value: 99),
+                DbValue.Text(value: "file:///etc/passwd"),
+                DbValue.Text(value: "invalid")
+            ]
+        )?
+        reopened.db.exec(
+            "INSERT INTO browser_hsts (" +
+            "host, received_at_unix_ms, expires_at_unix_ms, include_subdomains" +
+            ") VALUES (?, ?, ?, ?)",
+            [
+                DbValue.Text(value: "com"),
+                DbValue.Integer(value: 99500),
+                DbValue.Integer(value: 101000),
+                DbValue.Integer(value: 1)
+            ]
+        )?
+        expect(reopened.load_bookmarks()?.entries.len()).to_equal(1)
+        expect(reopened.load_hsts(100000)?.entries.len()).to_equal(1)
+
+        var registry = HostedWebContentRegistry.create_with_profile(
+            reopened, 100000
+        )
+        val changed = registry.advance_window(
+            44, "<div>browser</div>", 64, 48, 100000, true
+        )
+        expect(changed).to_equal(false)
+        expect(registry.sessions.len()).to_equal(1)
+        var session = registry.sessions[0].browser
+        expect(session.is_favorite("https://simple.test/docs")).to_equal(true)
+        val upgraded = session.begin_network_navigation(
+            "http://sub.simple.test/start", "GET", "", "", ""
+        )
+        expect(upgraded.is_ok()).to_equal(true)
+        match session.take_pending_request():
+            Some(request):
+                expect(request.url).to_equal("https://sub.simple.test/start")
+            nil:
+                fail("Expected restored HSTS-upgraded request")
+
+        session.remove_favorite("https://simple.test/docs")
+        var hosted_session = registry.sessions[0]
+        hosted_session.browser = session
+        registry.sessions[0] = hosted_session
+        val _ = registry.advance_window(
+            44, registry.sessions[0].current_body_html(),
+            64, 48, 101001, true
+        )
+        expect(registry.close_window(44, 101001)).to_equal(true)
+        expect(registry.close(101001)).to_equal(true)
+
+        var after_removal = BrowserProfileStore.open(PROFILE_PATH)?
+        expect(after_removal.load_bookmarks()?.entries.len()).to_equal(0)
+        expect(after_removal.load_hsts(101001)?.entries.len()).to_equal(0)
+        after_removal.close()?
+        remove_profile_files()

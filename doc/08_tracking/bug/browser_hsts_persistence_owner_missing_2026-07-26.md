@@ -2,22 +2,22 @@
 
 ## Status
 
-Open production blocker for REQ-WEB-BROWSER-011.
+Implementation fixed; executable cross-process evidence remains blocked by the
+recorded production target compiler/link failure.
 
 ## Evidence
 
 BrowserSession enforces bounded in-session `max-age` and `includeSubDomains`
-policies, but no browser-profile persistence owner currently stores authenticated
-HSTS state across process restarts. No maintained preload-list owner exists.
-The only production `BrowserSession` owner is the hosted web-content registry,
-which currently creates in-memory sessions without a profile lifecycle.
+policies. `BrowserProfileStore` now persists validated wall-clock receipt and
+expiry state in the hosted browser profile, and the production registry
+converts it back to the session monotonic clock only for browser app windows.
+No maintained preload list is claimed.
 
-## Required fix
+## Implemented fix
 
-Persist HSTS policies through the browser profile broker using atomic,
-versioned storage. Retain receipt time/expiry, host, and include-subdomain
-state; reject corrupt or oversized records. Add a maintained preload update
-path if preload support is claimed.
+The versioned SQLite owner retains at most 1024 unique hosts and rejects IPs,
+public suffixes, corrupt booleans, expired policies, and lifetimes above ten
+years. Browser-window close persists before destruction.
 
 Do not serialize the session-monotonic expiry directly. The profile broker must
 own wall-clock receipt/expiry and convert only validated remaining lifetime at
@@ -25,6 +25,7 @@ the BrowserSession boundary.
 
 ## Required evidence
 
-Prove HTTPS-only policy acquisition, restart persistence, expiry/removal,
-subdomain matching, corrupt-store recovery, bounded retention, and no upgrade
-from an HTTP-delivered header.
+The file-backed integration scenario proves reopen persistence, subdomain
+upgrade, corrupt-row rejection, expiry/removal, and durable removal. Existing
+BrowserSession security evidence proves HTTPS-only acquisition. A real
+target-process restart remains required before claiming runtime PASS.

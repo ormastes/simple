@@ -2,8 +2,8 @@
 
 ## Status
 
-Partially resolved; process persistence remains a production blocker for
-REQ-WEB-BROWSER-009.
+Implementation fixed; executable cross-process evidence remains blocked by the
+recorded production target compiler/link failure.
 
 ## Evidence
 
@@ -11,10 +11,11 @@ REQ-WEB-BROWSER-009.
 but it is initialized empty for every new session. No browser/profile owner
 serializes it, and no settings facade is connected above BrowserSession.
 
-BrowserSession now exposes a typed `BrowserBookmarkSnapshot` load/snapshot
-boundary. Loading revalidates every URL through the network-navigation policy,
-rejects oversized URL/title values, caps the restored set at 256 entries, and
-copies arrays across the boundary. The session still performs no profile I/O.
+BrowserSession exposes a typed `BrowserBookmarkSnapshot` load/snapshot
+boundary. `BrowserProfileStore` persists at most 256 ordered entries in a
+versioned SQLite profile outside BrowserSession, and the hosted registry loads
+it only for browser app IDs. Browser-window close saves before destruction;
+save failure keeps the window open.
 
 ## Ownership constraint
 
@@ -23,16 +24,15 @@ Persistence belongs to a browser-profile broker outside the renderer sandbox.
 The hosted web-content registry is currently the only production session owner;
 the similarly named UI browser app is a `.ui.sdn` renderer, not browser chrome.
 
-## Required fix
+## Implemented fix
 
-Add a typed bookmark snapshot/load interface between the browser chrome owner
-and a bounded profile-settings service. Validate URL schemes through the
-existing network navigation boundary, bound entry count and text sizes, write
-atomically, and keep malformed records out of BrowserSession.
+`src/os/hosted/browser_profile_store.spl` uses the existing parameterized SQL
+facade and transactions. Invalid schemes, oversized rows, duplicate URLs, and
+oversized stores fail closed. BrowserSession revalidates every restored URL.
 
 ## Required evidence
 
-A production-surface test must add a bookmark, close the browser process,
-restart it with the same profile, list/open the bookmark, remove it, restart
-again, and prove it remains removed. In-memory session evidence is not
-persistence evidence.
+`browser_profile_store_spec.spl` writes a file-backed profile, closes/reopens
+it, restores the bookmark through the hosted registry, removes it, closes the
+browser window, and proves a second reopen remains empty. A real target-process
+restart is still required before claiming runtime PASS.

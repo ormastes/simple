@@ -78,6 +78,18 @@ restart                    -> new renderer generation, internal recovery page
 Every request/reply includes renderer and navigation generation plus request
 ID. Duplicate, unknown, or late replies are rejected.
 
+## Browser profile persistence
+
+- Default path: the platform data directory under
+  `simple/browser/profile.sqlite3`.
+- Schema version 1 stores at most 256 ordered bookmarks and 1024 HSTS hosts.
+- Bookmark URLs and HSTS hosts are validated before save and again when loaded
+  into BrowserSession.
+- HSTS persists wall-clock receipt/expiry only; BrowserSession converts the
+  remaining lifetime to its monotonic clock.
+- Browser-window close saves before destruction. A failed save keeps the
+  window open; WM shutdown reports failure after closing renderer resources.
+
 ## URL and resource decisions
 
 1. Parse with canonical `Url`; reject control characters and credentials.

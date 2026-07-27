@@ -1,0 +1,231 @@
+# Durable browser profile state. BrowserSession never performs profile I/O.
+
+use std.database.sql.connection.{Database}
+use std.database.sql.types.{DbValue, DbError}
+use std.gc_async_mut.web.browser_session.{
+    BrowserBookmarkSnapshot, BrowserHstsSnapshot, BrowserHstsSnapshotEntry
+}
+use std.gc_async_mut.web.browser_session_url.{normalize_network_navigation_url}
+use std.js.types.pair.{Pair}
+use common.web.host_policy.{is_ip_host_literal}
+use common.web.public_suffix.{is_public_suffix}
+use std.nogc_sync_mut.env.platform.{get_data_dir}
+use std.sffi.io.{dir_create_all}
+
+val BROWSER_PROFILE_SCHEMA_VERSION: i64 = 1
+val BROWSER_PROFILE_MAX_BOOKMARKS: i64 = 256
+val BROWSER_PROFILE_MAX_HSTS: i64 = 1024
+val BROWSER_PROFILE_MAX_HSTS_LIFETIME_MS: i64 = 315360000000
+
+fn browser_profile_default_dir() -> text:
+    get_data_dir() + "/simple/browser"
+
+fn browser_profile_default_path() -> text:
+    browser_profile_default_dir() + "/profile.sqlite3"
+
+class BrowserProfileStore:
+    db: Database
+
+impl BrowserProfileStore:
+    static fn open(path: text) -> Result<BrowserProfileStore, DbError>:
+        BrowserProfileStore.from_database(Database.open(path)?)
+
+    static fn open_default() -> Result<BrowserProfileStore, DbError>:
+        val dir = browser_profile_default_dir()
+        if not dir_create_all(dir):
+            return Err(DbError.ConnectionFailed(
+                path: dir, message: "cannot create browser profile directory"
+            ))
+        BrowserProfileStore.open(browser_profile_default_path())
+
+    static fn memory() -> Result<BrowserProfileStore, DbError>:
+        BrowserProfileStore.from_database(Database.memory()?)
+
+    static fn from_database(db: Database) -> Result<BrowserProfileStore, DbError>:
+        var store = BrowserProfileStore(db: db)
+        match store.init_schema():
+            Ok(_):
+                Ok(store)
+            Err(e):
+                val _ = store.db.close()
+                Err(e)
+
+    me close() -> Result<(), DbError>:
+        self.db.close()
+
+    me init_schema() -> Result<(), DbError>:
+        self.db.exec_sql(
+            "CREATE TABLE IF NOT EXISTS browser_profile_meta (" +
+            "id INTEGER PRIMARY KEY CHECK (id = 1)," +
+            "schema_version INTEGER NOT NULL)"
+        )?
+        self.db.exec_sql(
+            "CREATE TABLE IF NOT EXISTS browser_bookmarks (" +
+            "position INTEGER PRIMARY KEY," +
+            "url TEXT NOT NULL UNIQUE," +
+            "title TEXT NOT NULL)"
+        )?
+        self.db.exec_sql(
+            "CREATE TABLE IF NOT EXISTS browser_hsts (" +
+            "host TEXT PRIMARY KEY," +
+            "received_at_unix_ms INTEGER NOT NULL," +
+            "expires_at_unix_ms INTEGER NOT NULL," +
+            "include_subdomains INTEGER NOT NULL CHECK (include_subdomains IN (0, 1)))"
+        )?
+        self.db.exec(
+            "INSERT OR IGNORE INTO browser_profile_meta (id, schema_version) VALUES (?, ?)",
+            [
+                DbValue.Integer(value: 1),
+                DbValue.Integer(value: BROWSER_PROFILE_SCHEMA_VERSION)
+            ]
+        )?
+        val row = self.db.query_one(
+            "SELECT schema_version FROM browser_profile_meta WHERE id = ?",
+            [DbValue.Integer(value: 1)]
+        )?
+        if row == nil:
+            return Err(DbError.MigrationFailed(
+                id: "browser-profile", reason: "schema version row missing"
+            ))
+        val version = row.unwrap().get_int("schema_version")
+        if version == nil or version.unwrap() != BROWSER_PROFILE_SCHEMA_VERSION:
+            return Err(DbError.MigrationFailed(
+                id: "browser-profile", reason: "unsupported schema version"
+            ))
+        Ok(())
+
+    me save_bookmarks(snapshot: BrowserBookmarkSnapshot) -> Result<(), DbError>:
+        if snapshot.entries.len() > BROWSER_PROFILE_MAX_BOOKMARKS:
+            return Err(DbError.ConstraintViolation("too many browser bookmarks"))
+        var normalized: [Pair<text, text>] = []
+        for entry in snapshot.entries:
+            if entry.first.len() > 2048 or entry.second.len() > 512:
+                return Err(DbError.ConstraintViolation("oversized browser bookmark"))
+            match normalize_network_navigation_url(entry.first):
+                Err(_):
+                    return Err(DbError.ConstraintViolation("invalid browser bookmark URL"))
+                Ok(url):
+                    normalized.push(Pair(first: url, second: entry.second))
+
+        var tx = self.db.begin()?
+        if val Err(e) = self.db.exec("DELETE FROM browser_bookmarks", []):
+            tx.rollback()?
+            return Err(e)
+        var position: i64 = 0
+        for entry in normalized:
+            if val Err(e) = self.db.exec(
+                "INSERT INTO browser_bookmarks (position, url, title) VALUES (?, ?, ?)",
+                [
+                    DbValue.Integer(value: position),
+                    DbValue.Text(value: entry.first),
+                    DbValue.Text(value: entry.second)
+                ]
+            ):
+                tx.rollback()?
+                return Err(e)
+            position = position + 1
+        tx.commit()?
+        Ok(())
+
+    fn load_bookmarks() -> Result<BrowserBookmarkSnapshot, DbError>:
+        val rows = self.db.query(
+            "SELECT position, url, title FROM browser_bookmarks " +
+            "ORDER BY position LIMIT ?",
+            [DbValue.Integer(value: BROWSER_PROFILE_MAX_BOOKMARKS + 1)]
+        )?
+        if rows.len() > BROWSER_PROFILE_MAX_BOOKMARKS:
+            return Err(DbError.ConstraintViolation("browser bookmark store exceeds limit"))
+        var entries: [Pair<text, text>] = []
+        for row in rows:
+            val url = row.get_text("url")
+            val title = row.get_text("title")
+            if url != nil and title != nil:
+                if url.unwrap().len() <= 2048 and title.unwrap().len() <= 512:
+                    match normalize_network_navigation_url(url.unwrap()):
+                        Ok(normalized):
+                            entries.push(Pair(
+                                first: normalized, second: title.unwrap()
+                            ))
+                        Err(_):
+                            pass_dn("ignore corrupt bookmark row")
+        Ok(BrowserBookmarkSnapshot.create(entries))
+
+    me save_hsts(
+        snapshot: BrowserHstsSnapshot, wall_clock_ms: i64
+    ) -> Result<(), DbError>:
+        if snapshot.entries.len() > BROWSER_PROFILE_MAX_HSTS:
+            return Err(DbError.ConstraintViolation("too many HSTS policies"))
+        for entry in snapshot.entries:
+            val host = entry.host.trim().lower()
+            val remaining = entry.expires_at_unix_ms - wall_clock_ms
+            val lifetime = entry.expires_at_unix_ms - entry.received_at_unix_ms
+            if (
+                host.len() == 0 or host.len() > 253 or host.contains("/") or
+                is_ip_host_literal(host) or is_public_suffix(host) or
+                remaining <= 0 or
+                remaining > BROWSER_PROFILE_MAX_HSTS_LIFETIME_MS or
+                lifetime <= 0 or
+                lifetime > BROWSER_PROFILE_MAX_HSTS_LIFETIME_MS
+            ):
+                return Err(DbError.ConstraintViolation("invalid HSTS policy"))
+
+        var tx = self.db.begin()?
+        if val Err(e) = self.db.exec("DELETE FROM browser_hsts", []):
+            tx.rollback()?
+            return Err(e)
+        for entry in snapshot.entries:
+            if val Err(e) = self.db.exec(
+                "INSERT INTO browser_hsts (" +
+                "host, received_at_unix_ms, expires_at_unix_ms, include_subdomains" +
+                ") VALUES (?, ?, ?, ?)",
+                [
+                    DbValue.Text(value: entry.host.trim().lower()),
+                    DbValue.Integer(value: entry.received_at_unix_ms),
+                    DbValue.Integer(value: entry.expires_at_unix_ms),
+                    DbValue.Integer(value: if entry.include_subdomains: 1 else: 0)
+                ]
+            ):
+                tx.rollback()?
+                return Err(e)
+        tx.commit()?
+        Ok(())
+
+    fn load_hsts(wall_clock_ms: i64) -> Result<BrowserHstsSnapshot, DbError>:
+        val rows = self.db.query(
+            "SELECT host, received_at_unix_ms, expires_at_unix_ms, " +
+            "include_subdomains FROM browser_hsts ORDER BY host LIMIT ?",
+            [DbValue.Integer(value: BROWSER_PROFILE_MAX_HSTS + 1)]
+        )?
+        if rows.len() > BROWSER_PROFILE_MAX_HSTS:
+            return Err(DbError.ConstraintViolation("HSTS store exceeds limit"))
+        var entries: [BrowserHstsSnapshotEntry] = []
+        for row in rows:
+            val host = row.get_text("host")
+            val received = row.get_int("received_at_unix_ms")
+            val expires = row.get_int("expires_at_unix_ms")
+            val include_subdomains = row.get_int("include_subdomains")
+            if (
+                host != nil and received != nil and expires != nil and
+                include_subdomains != nil
+            ):
+                val normalized = host.unwrap().trim().lower()
+                val remaining = expires.unwrap() - wall_clock_ms
+                val lifetime = expires.unwrap() - received.unwrap()
+                if (
+                    normalized.len() > 0 and normalized.len() <= 253 and
+                    not normalized.contains("/") and
+                    not is_ip_host_literal(normalized) and
+                    not is_public_suffix(normalized) and
+                    remaining > 0 and
+                    remaining <= BROWSER_PROFILE_MAX_HSTS_LIFETIME_MS and
+                    lifetime > 0 and
+                    lifetime <= BROWSER_PROFILE_MAX_HSTS_LIFETIME_MS and
+                    (include_subdomains.unwrap() == 0 or include_subdomains.unwrap() == 1)
+                ):
+                    entries.push(BrowserHstsSnapshotEntry(
+                        host: normalized,
+                        received_at_unix_ms: received.unwrap(),
+                        expires_at_unix_ms: expires.unwrap(),
+                        include_subdomains: include_subdomains.unwrap() == 1
+                    ))
+        Ok(BrowserHstsSnapshot.create(entries))

@@ -679,5 +679,16 @@ implementation in progress / target evidence blocked
   animation changes. Executable production evidence was not rerun because the
   recorded target compiler/link lane already exhausted its three bounded
   cycles; no bootstrap was attempted and no runtime PASS is claimed.
+- profile persistence: Added a versioned, parameterized SQLite owner above
+  BrowserSession for at most 256 ordered bookmarks and 1024 wall-clock HSTS
+  policies. The hosted entry captures its trusted seeded browser window ID
+  before runtime input, attaches the profile only to that ID, persists before
+  browser-window destruction and WM shutdown, and rejects close when saving
+  would lose profile state.
+- evidence: Added a file-backed close/reopen/corrupt/removal integration
+  scenario covering bookmark restoration, HSTS subdomain upgrade, corrupt-row
+  rejection, expiry, and durable removal. Scoped whitespace, conflict-marker,
+  manual-layout, and direct-runtime-access checks pass; target-process
+  execution remains compiler-blocked and no runtime PASS is claimed.
 - constraint: Do not bootstrap or change the compiler unless a confirmed
   compiler defect prevents producing/running the target browser binary.

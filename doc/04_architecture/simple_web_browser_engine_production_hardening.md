@@ -71,6 +71,7 @@ It owns:
 - Fetch/CORS/CSP/mixed-content/redirect decisions;
 - TLS, HSTS, DNS, response limits, cookie/storage authority;
 - bookmarks/home configuration;
+- versioned profile persistence outside the hostile renderer;
 - renderer IPC validation, resource budgets, crash handling;
 - production Engine2D compositor submission and presentation.
 
@@ -87,6 +88,16 @@ BrowserRendererProcess
 
 No browser-controller factory, navigation facade, or parallel history owner is
 introduced.
+
+### Hosted browser profile
+
+`src/os/hosted/browser_profile_store.spl` owns versioned SQLite persistence
+above BrowserSession. It stores bounded bookmark and wall-clock HSTS snapshots,
+while BrowserSession remains the only validator that converts them into live
+session state. The hosted entry captures the trusted seeded browser window ID
+before processing runtime input and attaches the profile only to that ID;
+page-controlled or later app-ID strings cannot acquire or overwrite browser
+profile state.
 
 ### BrowserSession
 

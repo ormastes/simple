@@ -236,6 +236,11 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
         print "[hosted-wm] live-proof-mode enabled=true"
     else:
         comp = _seed_host_compositor_shared_mdi(comp)
+    var browser_profile_window_id: i64 = 0
+    if not live_proof:
+        for window in comp.windows:
+            if window.app_id == "browser":
+                browser_profile_window_id = window.id
     print "[hosted-wm] windows-ready count={comp.windows.len()}"
     if not comp.render_frame_engine2d(raster):
         if live_proof or evidence.enabled:
@@ -280,6 +285,12 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     var window_move_events: i64 = 0
     var semantic_event_id: i64 = 0
     var web_sessions = HostedWebContentRegistry.create()
+    if browser_profile_window_id > 0:
+        web_sessions = HostedWebContentRegistry.create_with_default_profile(
+            rt_time_now_unix_micros() / 1000
+        )
+    if web_sessions.profile_failure_reason != "":
+        print "[hosted-wm] browser-profile-disabled reason={web_sessions.profile_failure_reason}"
     # Motion-background cadence seam (plan item B): the loop stays dirty-gated
     # (GUI-5a) — a due motion frame is just one more dirty *trigger*, evaluated
     # by the pure shared_wm_motion_dirty_due predicate on the loop's existing
@@ -321,7 +332,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 val changed = web_sessions.advance_window(
                     web_window.id, web_window.content,
                     web_window.w - 8, web_window.h - 36,
-                    now_micros / 1000
+                    now_micros / 1000,
+                    web_window.id == browser_profile_window_id
                 )
                 if changed:
                     comp = host_compositor_update_window_content(
@@ -446,7 +458,12 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                     elif keycode == KEY_W:
                         val focused = host_compositor_focused_window_id(comp)
                         if focused > 0:
-                            comp.destroy_window(focused)
+                            if web_sessions.close_window(
+                                focused, now_micros / 1000
+                            ):
+                                comp.destroy_window(focused)
+                            else:
+                                print "[hosted-wm] browser-window-close-rejected reason={web_sessions.profile_failure_reason}"
                     elif keycode == KEY_M:
                         comp = host_compositor_minimize_focused(comp)
                     elif keycode == KEY_R:
@@ -514,7 +531,13 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                     evidence_phase = "applied"
                 elif command.action == "close":
                     val focused = host_compositor_focused_window_id(comp)
-                    if focused > 0: comp.destroy_window(focused)
+                    if focused > 0:
+                        if web_sessions.close_window(
+                            focused, now_micros / 1000
+                        ):
+                            comp.destroy_window(focused)
+                        else:
+                            print "[hosted-wm] browser-window-close-rejected reason={web_sessions.profile_failure_reason}"
                     evidence_phase = "applied"
                 elif command.action == "pointer":
                     comp.pointer_move(command.x, command.y)
@@ -568,8 +591,14 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 running = false
             else:
                 print "[hosted-wm] evidence-ack nonce={evidence_nonce} phase={evidence_phase} surface_phase={surface.phase} revision={comp.render_revision} {raster.frame_provenance()} {raster.font_provenance()}"
+    val profile_closed = web_sessions.close(
+        rt_time_now_unix_micros() / 1000
+    )
     raster.shutdown()
     rt_winit_window_free(win)
     rt_winit_event_loop_free(el)
+    if not profile_closed:
+        print "ERROR: hosted browser profile close failed reason={web_sessions.profile_failure_reason}"
+        return 1
     print "SimpleOS shared hosted WM closed"
     return 0
