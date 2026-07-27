@@ -12,6 +12,7 @@ use std.nogc_async_mut_noalloc.baremetal.common.backend_render_receipt.{
     BackendRenderReceiptTrailer,
     BackendRenderReceiptHeaderV2,
     BackendRenderReceiptEventV2,
+    BackendRenderReceiptTrailerV2,
     BACKEND_RENDER_RECEIPT_V2_SCHEMA,
     BACKEND_RENDER_RECEIPT_V2_VERSION,
     BACKEND_RENDER_RECEIPT_ENDIAN_BIG,
@@ -32,7 +33,9 @@ use std.nogc_async_mut_noalloc.baremetal.common.backend_render_receipt.{
     backend_render_receipt_v2_trailer_wire_byte_count,
     backend_render_receipt_v2_header_wire_byte_at,
     backend_render_receipt_v2_event_wire_byte_at,
-    backend_render_receipt_v2_trailer_wire_byte_at
+    backend_render_receipt_v2_trailer_wire_byte_at,
+    backend_render_receipt_header_valid,
+    backend_render_receipt_v2_header_valid
 }
 use std.common.string_core.{char_from_code_inline}
 use common.renderdoc.backend_render_receipt_wire.{
@@ -66,7 +69,8 @@ fn wire_header() -> BackendRenderReceiptHeader:
 
 fn wire_event(sequence: u32) -> BackendRenderReceiptEvent:
     BackendRenderReceiptEvent(
-        sequence: sequence, operation_code: sequence, resource_id: 13u64,
+        sequence: sequence, operation_code: BACKEND_RENDER_OPERATION_PRESENT,
+        resource_id: 13u64,
         state_before: sequence - 1u32, state_after: sequence,
         value_hash: sequence.to_u64())
 
@@ -117,6 +121,11 @@ fn wire_header_v2(firmware_status: u32) -> BackendRenderReceiptHeaderV2:
 
 fn wire_event_v2(operation_code: u32, monotonic_event_us: u64) -> BackendRenderReceiptEventV2:
     BackendRenderReceiptEventV2(
+        boot_id: 11u64,
+        source_identity_hash_word0: 9u64,
+        source_identity_hash_word1: 10u64,
+        source_identity_hash_word2: 11u64,
+        source_identity_hash_word3: 12u64,
         input_sequence: 1u64,
         operation_code: operation_code,
         frame_id: 12u64,
@@ -126,6 +135,22 @@ fn wire_event_v2(operation_code: u32, monotonic_event_us: u64) -> BackendRenderR
         state_before: 0u32,
         state_after: 1u32,
         value_hash: operation_code.to_u64())
+
+fn wire_trailer_v2() -> BackendRenderReceiptTrailerV2:
+    BackendRenderReceiptTrailerV2(
+        boot_id: 11u64,
+        source_identity_hash_word0: 9u64,
+        source_identity_hash_word1: 10u64,
+        source_identity_hash_word2: 11u64,
+        source_identity_hash_word3: 12u64,
+        event_count: 4u32,
+        frame_complete: true,
+        pixel_hash_word0: 5u64,
+        pixel_hash_word1: 6u64,
+        pixel_hash_word2: 7u64,
+        pixel_hash_word3: 8u64,
+        nonblank_pixel_count: 16u64,
+        reason_code: 0u32)
 
 fn valid_wire_v2(firmware_status: u32) -> text:
     backend_render_receipt_v2_header_line(wire_header_v2(firmware_status)) + "\n" +
@@ -137,7 +162,7 @@ fn valid_wire_v2(firmware_status: u32) -> text:
             wire_event_v2(BACKEND_RENDER_OPERATION_DAMAGE_COMMIT, 1003u64)) + "\n" +
         backend_render_receipt_v2_event_line(
             wire_event_v2(BACKEND_RENDER_OPERATION_PRESENT, 1004u64)) + "\n" +
-        backend_render_receipt_v2_trailer_line(wire_trailer(4u32)) + "\n"
+        backend_render_receipt_v2_trailer_line(wire_trailer_v2()) + "\n"
 
 fn valid_wire() -> text:
     "unrelated boot log\n" +
@@ -191,7 +216,7 @@ fn event_v2_wire_bytes(event: BackendRenderReceiptEventV2) -> text:
         index = index + 1
     out
 
-fn trailer_v2_wire_bytes(trailer: BackendRenderReceiptTrailer) -> text:
+fn trailer_v2_wire_bytes(trailer: BackendRenderReceiptTrailerV2) -> text:
     var out = ""
     var index: i64 = 0
     while index < backend_render_receipt_v2_trailer_wire_byte_count():
@@ -284,7 +309,7 @@ describe "Backend render receipt serial wire":
         step("Stream checksummed big-endian BRR2 records without allocation")
         val header = wire_header_v2(BACKEND_RENDER_FIRMWARE_HASHED)
         val event = wire_event_v2(BACKEND_RENDER_OPERATION_PRESENT, 1004u64)
-        val trailer = wire_trailer(4u32)
+        val trailer = wire_trailer_v2()
         expect(header_v2_wire_bytes(header)).to_equal(
             backend_render_receipt_v2_header_line(header) + "\n")
         expect(event_v2_wire_bytes(event)).to_equal(
@@ -335,8 +360,8 @@ describe "Backend render receipt serial wire":
     it "rejects BRR2 tamper unknown version operation and status":
         step("Change payload bytes without updating their checksum")
         val tampered = valid_wire_v2(BACKEND_RENDER_FIRMWARE_HASHED).replace(
-            "BRR2 E 0000000000000048 0000000000000001 ",
-            "BRR2 E 0000000000000048 0000000000000002 ")
+            "BRR2 E 0000000000000070 000000000000000b ",
+            "BRR2 E 0000000000000070 000000000000000c ")
         expect(parse_backend_render_receipt_wire(tampered).code).to_equal(
             "checksum-mismatch")
 
@@ -414,9 +439,38 @@ describe "Backend render receipt serial wire":
         expect(parse_backend_render_receipt_wire(mismatch_wire).code).to_equal(
             "event-correlation-mismatch")
 
+        step("Reject event and trailer records spliced from another boot")
+        var cross_boot_event = wire_event_v2(
+            BACKEND_RENDER_OPERATION_INPUT_IRQ, 1001u64)
+        cross_boot_event.boot_id = 99u64
+        val cross_boot_event_wire = backend_render_receipt_v2_header_line(
+            wire_header_v2(BACKEND_RENDER_FIRMWARE_HASHED)) + "\n" +
+            backend_render_receipt_v2_event_line(cross_boot_event) + "\n"
+        expect(parse_backend_render_receipt_wire(
+            cross_boot_event_wire).code).to_equal("receipt-identity-mismatch")
+
+        var cross_source_event = wire_event_v2(
+            BACKEND_RENDER_OPERATION_INPUT_IRQ, 1001u64)
+        cross_source_event.source_identity_hash_word0 = 99u64
+        val cross_source_event_wire = backend_render_receipt_v2_header_line(
+            wire_header_v2(BACKEND_RENDER_FIRMWARE_HASHED)) + "\n" +
+            backend_render_receipt_v2_event_line(cross_source_event) + "\n"
+        expect(parse_backend_render_receipt_wire(
+            cross_source_event_wire).code).to_equal("receipt-identity-mismatch")
+
+        var cross_boot_trailer = wire_trailer_v2()
+        cross_boot_trailer.boot_id = 99u64
+        val cross_boot_trailer_wire = valid_wire_v2(
+            BACKEND_RENDER_FIRMWARE_HASHED).replace(
+                backend_render_receipt_v2_trailer_line(wire_trailer_v2()),
+                backend_render_receipt_v2_trailer_line(cross_boot_trailer))
+        expect(parse_backend_render_receipt_wire(
+            cross_boot_trailer_wire).code).to_equal(
+                "receipt-identity-mismatch")
+
         step("Reject explicit length changes malformed fields and records after trailer")
         val bad_length = valid_wire_v2(BACKEND_RENDER_FIRMWARE_HASHED).replace(
-            "BRR2 E 0000000000000048 ", "BRR2 E 0000000000000049 ")
+            "BRR2 E 0000000000000070 ", "BRR2 E 0000000000000071 ")
         expect(parse_backend_render_receipt_wire(bad_length).code).to_equal(
             "invalid-record-length")
         val malformed = "BRR2 H 00000000000000c8\n"
@@ -427,3 +481,28 @@ describe "Backend render receipt serial wire":
                 wire_event_v2(BACKEND_RENDER_OPERATION_PRESENT, 1005u64)) + "\n"
         expect(parse_backend_render_receipt_wire(trailing).code).to_equal(
             "event-out-of-order")
+
+    it "validates framebuffer geometry in u64 without u32 row-byte overflow":
+        step("Accept the largest width whose four-byte stride fits u32")
+        var v1_boundary = wire_header()
+        v1_boundary.width = 1073741823u32
+        v1_boundary.height = 0xffffffffu32
+        v1_boundary.stride = 0xfffffffcu32
+        expect(backend_render_receipt_header_valid(v1_boundary)).to_be(true)
+
+        var v2_boundary = wire_header_v2(BACKEND_RENDER_FIRMWARE_HASHED)
+        v2_boundary.width = 1073741823u32
+        v2_boundary.height = 0xffffffffu32
+        v2_boundary.stride = 0xfffffffcu32
+        expect(backend_render_receipt_v2_header_valid(v2_boundary)).to_be(true)
+
+        step("Reject a width whose minimum stride exceeds u32")
+        var v1_overflow = wire_header()
+        v1_overflow.width = 1073741824u32
+        v1_overflow.stride = 0xffffffffu32
+        expect(backend_render_receipt_header_valid(v1_overflow)).to_be(false)
+
+        var v2_overflow = wire_header_v2(BACKEND_RENDER_FIRMWARE_HASHED)
+        v2_overflow.width = 1073741824u32
+        v2_overflow.stride = 0xffffffffu32
+        expect(backend_render_receipt_v2_header_valid(v2_overflow)).to_be(false)

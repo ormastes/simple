@@ -1,5 +1,25 @@
 use common.renderdoc.simpleos_render_target_evidence.{SimpleOsRenderTargetEvidence}
 use common.renderdoc.simpleos_simd_render_evidence.{CpuSimdKernelEvidence, SimpleOsSimdRenderEvidence}
+use common.renderdoc.backend_render_receipt_wire.{
+    BackendRenderReceiptWireParse,
+    backend_render_receipt_v2_header_line,
+    backend_render_receipt_v2_event_line,
+    backend_render_receipt_v2_trailer_line,
+    parse_backend_render_receipt_wire
+}
+use std.nogc_async_mut_noalloc.baremetal.common.backend_render_receipt.{
+    BackendRenderReceiptHeaderV2,
+    BackendRenderReceiptEventV2,
+    BackendRenderReceiptTrailerV2,
+    BACKEND_RENDER_RECEIPT_V2_SCHEMA,
+    BACKEND_RENDER_RECEIPT_V2_VERSION,
+    BACKEND_RENDER_RECEIPT_ENDIAN_BIG,
+    BACKEND_RENDER_FIRMWARE_HASHED,
+    BACKEND_RENDER_OPERATION_PRESENT,
+    BACKEND_RENDER_OPERATION_INPUT_IRQ,
+    BACKEND_RENDER_OPERATION_WM_APPLY,
+    BACKEND_RENDER_OPERATION_DAMAGE_COMMIT
+}
 
 val SIMPLEOS_EVIDENCE_HASH: text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 val SIMPLEOS_OTHER_HASH: text = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
@@ -63,3 +83,73 @@ fn simpleos_simd_evidence(arch: text, isa: text, kernels: [CpuSimdKernelEvidence
         boot_id: "boot-1", frame_id: "frame-1", surface_handle: 42, kernels: kernels,
         scalar_oracle_hash: SIMPLEOS_EVIDENCE_HASH, simd_output_hash: simd_hash,
         qmp_capture_hash: SIMPLEOS_EVIDENCE_HASH, mismatch_count: 0)
+
+fn _simpleos_brr2_event(operation_code: u32, monotonic_event_us: u64) -> BackendRenderReceiptEventV2:
+    BackendRenderReceiptEventV2(
+        boot_id: 11u64,
+        source_identity_hash_word0: 0x0123456789abcdefu64,
+        source_identity_hash_word1: 0x0123456789abcdefu64,
+        source_identity_hash_word2: 0x0123456789abcdefu64,
+        source_identity_hash_word3: 0x0123456789abcdefu64,
+        input_sequence: 1u64,
+        operation_code: operation_code,
+        frame_id: 12u64,
+        rendered_revision: 13u64,
+        monotonic_event_us: monotonic_event_us,
+        resource_id: 42u64,
+        state_before: 0u32,
+        state_after: 1u32,
+        value_hash: operation_code.to_u64())
+
+fn simpleos_brr2_receipt() -> BackendRenderReceiptWireParse:
+    val header = BackendRenderReceiptHeaderV2(
+        schema_code: BACKEND_RENDER_RECEIPT_V2_SCHEMA,
+        version: BACKEND_RENDER_RECEIPT_V2_VERSION,
+        endian_code: BACKEND_RENDER_RECEIPT_ENDIAN_BIG,
+        arch_code: 2u32,
+        runtime_code: 1u32,
+        backend_code: 1u32,
+        firmware_status_code: BACKEND_RENDER_FIRMWARE_HASHED,
+        firmware_hash_word0: 0x0123456789abcdefu64,
+        firmware_hash_word1: 0x0123456789abcdefu64,
+        firmware_hash_word2: 0x0123456789abcdefu64,
+        firmware_hash_word3: 0x0123456789abcdefu64,
+        source_identity_hash_word0: 0x0123456789abcdefu64,
+        source_identity_hash_word1: 0x0123456789abcdefu64,
+        source_identity_hash_word2: 0x0123456789abcdefu64,
+        source_identity_hash_word3: 0x0123456789abcdefu64,
+        source_revision_word0: 0x0123456789u64,
+        source_revision_word1: 0u64,
+        source_revision_word2: 0u64,
+        source_revision_nibbles: 10u32,
+        boot_id: 11u64,
+        surface_handle: 42u64,
+        width: 4u32,
+        height: 4u32,
+        stride: 16u32,
+        format_code: 1u32)
+    val trailer = BackendRenderReceiptTrailerV2(
+        boot_id: 11u64,
+        source_identity_hash_word0: 0x0123456789abcdefu64,
+        source_identity_hash_word1: 0x0123456789abcdefu64,
+        source_identity_hash_word2: 0x0123456789abcdefu64,
+        source_identity_hash_word3: 0x0123456789abcdefu64,
+        event_count: 4u32,
+        frame_complete: true,
+        pixel_hash_word0: 0x0123456789abcdefu64,
+        pixel_hash_word1: 0x0123456789abcdefu64,
+        pixel_hash_word2: 0x0123456789abcdefu64,
+        pixel_hash_word3: 0x0123456789abcdefu64,
+        nonblank_pixel_count: 16u64,
+        reason_code: 0u32)
+    val wire = backend_render_receipt_v2_header_line(header) + "\n" +
+        backend_render_receipt_v2_event_line(
+            _simpleos_brr2_event(BACKEND_RENDER_OPERATION_INPUT_IRQ, 1001u64)) + "\n" +
+        backend_render_receipt_v2_event_line(
+            _simpleos_brr2_event(BACKEND_RENDER_OPERATION_WM_APPLY, 1002u64)) + "\n" +
+        backend_render_receipt_v2_event_line(
+            _simpleos_brr2_event(BACKEND_RENDER_OPERATION_DAMAGE_COMMIT, 1003u64)) + "\n" +
+        backend_render_receipt_v2_event_line(
+            _simpleos_brr2_event(BACKEND_RENDER_OPERATION_PRESENT, 1004u64)) + "\n" +
+        backend_render_receipt_v2_trailer_line(trailer) + "\n"
+    parse_backend_render_receipt_wire(wire)

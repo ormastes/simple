@@ -1,5 +1,17 @@
 """Normalized evidence contract for Engine2D backend captures."""
 
+use common.renderdoc.backend_render_receipt_wire.{
+    BackendRenderReceiptWireParse,
+    backend_render_receipt_v2_source_identity_hash,
+    backend_render_receipt_v2_source_revision
+}
+use std.nogc_async_mut_noalloc.baremetal.common.backend_render_receipt.{
+    BACKEND_RENDER_OPERATION_PRESENT,
+    BACKEND_RENDER_OPERATION_INPUT_IRQ,
+    BACKEND_RENDER_OPERATION_WM_APPLY,
+    BACKEND_RENDER_OPERATION_DAMAGE_COMMIT
+}
+
 pub struct Backend2dEventReceipt:
     sequence: text
     count: i64
@@ -18,6 +30,8 @@ pub struct Backend2dEventReceipt:
     rendered_revision: i64
     monotonic_event_us: i64
     operation_code: i64
+    receipt_stage_sequence: text
+    receipt_stage_count: i64
 
 pub struct Backend2dExecutionReceipt:
     provenance: text
@@ -59,6 +73,7 @@ pub struct Backend2dCaptureComparison:
     reason: text
 
 const BACKEND_2D_EVENT_SEQUENCE = "focus,pointer_move,pointer_down,pointer_up,key_down,key_up"
+const BACKEND_2D_RECEIPT_STAGE_SEQUENCE = "INPUT_IRQ,WM_APPLY,DAMAGE_COMMIT,PRESENT"
 
 fn _backend_2d_known(name: text) -> bool:
     name == "metal" or name == "vulkan" or name == "cpu_simd" or
@@ -76,6 +91,16 @@ fn _backend_2d_hex_shape_valid(value: text, expected_len: i64) -> bool:
             return false
         i = i + 1
     true
+
+fn _backend_2d_nonzero_hex_shape_valid(value: text, expected_len: i64) -> bool:
+    if not _backend_2d_hex_shape_valid(value, expected_len):
+        return false
+    var i = 0
+    while i < value.len():
+        if value[i] != '0':
+            return true
+        i = i + 1
+    false
 
 fn _backend_2d_revision_valid(value: text) -> bool:
     _backend_2d_hex_shape_valid(value, 10) or
@@ -129,40 +154,74 @@ pub fn backend_2d_event_receipt(backend: text, injected: bool,
         frame_id: 0,
         rendered_revision: 0,
         monotonic_event_us: 0,
-        operation_code: 0
+        operation_code: 0,
+        receipt_stage_sequence: "",
+        receipt_stage_count: 0
     )
 
-pub fn backend_2d_correlated_event_receipt(
+pub fn backend_2d_event_receipt_from_brr2(
+    parsed: BackendRenderReceiptWireParse,
     backend: text,
-    delivery_source: text,
-    firmware_status_code: i64,
-    source_identity_hash: text,
-    source_revision: text,
-    boot_id: i64,
-    input_sequence: i64,
-    frame_id: i64,
-    rendered_revision: i64,
-    monotonic_event_us: i64
-) -> Backend2dEventReceipt:
-    Backend2dEventReceipt(
-        sequence: BACKEND_2D_EVENT_SEQUENCE,
-        count: 6,
-        backend: backend,
-        injected: true,
-        delivered: true,
-        ordered: true,
-        delivery_source: delivery_source,
-        schema_version: 2,
-        firmware_status_code: firmware_status_code,
-        source_identity_hash: source_identity_hash,
-        source_revision: source_revision,
-        boot_id: boot_id,
-        input_sequence: input_sequence,
-        frame_id: frame_id,
-        rendered_revision: rendered_revision,
-        monotonic_event_us: monotonic_event_us,
-        operation_code: 1
-    )
+    delivery_source: text
+) -> Result<Backend2dEventReceipt, text>:
+    if not parsed.valid or parsed.wire_version != 2:
+        return Err("invalid_brr2_receipt")
+    if (backend != "simpleos_x86_64_simd" and
+        backend != "simpleos_arm64_simd"):
+        return Err("invalid_correlated_backend")
+    if delivery_source == "" or delivery_source == "qmp":
+        return Err("invalid_event_delivery_source")
+    if parsed.events_v2.len() != 4 or parsed.trailer_v2 == nil:
+        return Err("invalid_receipt_stage_count")
+    val events = parsed.events_v2
+    if (events[0].operation_code != BACKEND_RENDER_OPERATION_INPUT_IRQ or
+        events[1].operation_code != BACKEND_RENDER_OPERATION_WM_APPLY or
+        events[2].operation_code != BACKEND_RENDER_OPERATION_DAMAGE_COMMIT or
+        events[3].operation_code != BACKEND_RENDER_OPERATION_PRESENT):
+        return Err("invalid_receipt_stage_sequence")
+    if val Some(header) = parsed.header_v2:
+        if val Some(trailer) = parsed.trailer_v2:
+            if not trailer.frame_complete:
+                return Err("incomplete_correlated_frame")
+            val source_identity =
+                backend_render_receipt_v2_source_identity_hash(header)
+            if not _backend_2d_nonzero_hex_shape_valid(source_identity, 64):
+                return Err("invalid_source_identity")
+            val present = events[3]
+            val max_i64 = 0x7fffffffffffffffu64
+            if (header.boot_id > max_i64 or
+                present.input_sequence > max_i64 or
+                present.frame_id > max_i64 or
+                present.rendered_revision > max_i64 or
+                present.monotonic_event_us > max_i64):
+                return Err("event_correlation_overflow")
+            return Ok(Backend2dEventReceipt(
+                sequence: BACKEND_2D_EVENT_SEQUENCE,
+                count: 6,
+                backend: backend,
+                injected: events[0].operation_code ==
+                    BACKEND_RENDER_OPERATION_INPUT_IRQ,
+                delivered: events[1].operation_code ==
+                    BACKEND_RENDER_OPERATION_WM_APPLY,
+                ordered: events[2].operation_code ==
+                    BACKEND_RENDER_OPERATION_DAMAGE_COMMIT and
+                    present.operation_code == BACKEND_RENDER_OPERATION_PRESENT,
+                delivery_source: delivery_source,
+                schema_version: header.version.to_i64(),
+                firmware_status_code: header.firmware_status_code.to_i64(),
+                source_identity_hash: source_identity,
+                source_revision:
+                    backend_render_receipt_v2_source_revision(header),
+                boot_id: header.boot_id.to_i64(),
+                input_sequence: present.input_sequence.to_i64(),
+                frame_id: present.frame_id.to_i64(),
+                rendered_revision: present.rendered_revision.to_i64(),
+                monotonic_event_us: present.monotonic_event_us.to_i64(),
+                operation_code: present.operation_code.to_i64(),
+                receipt_stage_sequence: BACKEND_2D_RECEIPT_STAGE_SEQUENCE,
+                receipt_stage_count: events.len().to_i64()
+            ))
+    Err("invalid_brr2_receipt")
 
 pub fn backend_2d_validate_correlated_event_receipt(
     receipt: Backend2dEventReceipt
@@ -171,16 +230,32 @@ pub fn backend_2d_validate_correlated_event_receipt(
         return "unknown_schema_version"
     if receipt.firmware_status_code != 1 and receipt.firmware_status_code != 2:
         return "unknown_firmware_status"
-    if not _backend_2d_hex_shape_valid(receipt.source_identity_hash, 64):
+    if not _backend_2d_nonzero_hex_shape_valid(receipt.source_identity_hash, 64):
         return "invalid_source_identity"
     if not _backend_2d_revision_valid(receipt.source_revision):
         return "invalid_source_revision"
-    if receipt.boot_id <= 0 or receipt.input_sequence <= 0 or
-       receipt.frame_id <= 0 or receipt.rendered_revision <= 0 or
-       receipt.monotonic_event_us <= 0:
+    if (receipt.boot_id <= 0 or receipt.input_sequence <= 0 or
+        receipt.frame_id <= 0 or receipt.rendered_revision <= 0 or
+        receipt.monotonic_event_us <= 0):
         return "missing_event_correlation"
     if receipt.operation_code != 1:
         return "unknown_operation"
+    if (receipt.receipt_stage_sequence != BACKEND_2D_RECEIPT_STAGE_SEQUENCE or
+        receipt.receipt_stage_count != 4):
+        return "invalid_receipt_stage_sequence"
+    if receipt.sequence != BACKEND_2D_EVENT_SEQUENCE or receipt.count != 6:
+        return "invalid_event_sequence"
+    if not receipt.injected:
+        return "events_not_injected"
+    if not receipt.delivered:
+        return "events_not_delivered"
+    if not receipt.ordered:
+        return "events_not_ordered"
+    if (receipt.backend != "simpleos_x86_64_simd" and
+        receipt.backend != "simpleos_arm64_simd"):
+        return "invalid_correlated_backend"
+    if receipt.delivery_source == "" or receipt.delivery_source == "qmp":
+        return "invalid_event_delivery_source"
     "pass"
 
 pub fn backend_2d_execution_receipt(
@@ -239,6 +314,15 @@ pub fn backend_2d_validate_capture(evidence: Backend2dCaptureEvidence) -> text:
         return "invalid_non_background_bounds"
     if evidence.events.backend != evidence.backend:
         return "event_backend_mismatch"
+    val simpleos_backend = evidence.backend == "simpleos_x86_64_simd" or
+        evidence.backend == "simpleos_arm64_simd"
+    if simpleos_backend:
+        val correlated_status =
+            backend_2d_validate_correlated_event_receipt(evidence.events)
+        if correlated_status != "pass":
+            return correlated_status
+        if evidence.source_revision != evidence.events.source_revision:
+            return "event_source_revision_mismatch"
     if evidence.events.sequence != BACKEND_2D_EVENT_SEQUENCE or
        evidence.events.count != 6:
         return "invalid_event_sequence"

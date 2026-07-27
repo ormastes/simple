@@ -18,9 +18,10 @@ use common.renderdoc.simpleos_simd_render_evidence.{
     validate_simpleos_simd_render_evidence
 }
 use app.wm_compare.backend_2d_capture_evidence.{
-    backend_2d_correlated_event_receipt,
+    backend_2d_event_receipt_from_brr2,
     backend_2d_validate_correlated_event_receipt
 }
+use test.helpers.simpleos_render_evidence_fixture.{simpleos_brr2_receipt}
 
 val EVIDENCE_HASH: text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 val OTHER_HASH: text = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
@@ -553,35 +554,78 @@ describe "SimpleOS target-native SIMD evidence":
 
 describe "SimpleOS normalized backend event receipts":
     it "should retain BRR2 event and source correlation":
-        step("Normalize a completed INPUT_IRQ to PRESENT chain")
-        val receipt = backend_2d_correlated_event_receipt(
-            "simpleos_arm64_simd", "virtio-input", 2, EVIDENCE_HASH,
-            "0123456789", 11, 7, 12, 19, 1004)
-        expect(backend_2d_validate_correlated_event_receipt(receipt)).to_equal("pass")
-        expect(receipt.schema_version).to_equal(2)
-        expect(receipt.input_sequence).to_equal(7)
-        expect(receipt.frame_id).to_equal(12)
-        expect(receipt.rendered_revision).to_equal(19)
-        expect(receipt.monotonic_event_us).to_equal(1004)
+        step("Derive normalized fields only from a parsed ordered BRR2 chain")
+        match backend_2d_event_receipt_from_brr2(
+            simpleos_brr2_receipt(),
+            "simpleos_arm64_simd",
+            "virtio-input"):
+            Ok(receipt):
+                expect(backend_2d_validate_correlated_event_receipt(
+                    receipt)).to_equal("pass")
+                expect(receipt.schema_version).to_equal(2)
+                expect(receipt.input_sequence).to_equal(1)
+                expect(receipt.frame_id).to_equal(12)
+                expect(receipt.rendered_revision).to_equal(13)
+                expect(receipt.monotonic_event_us).to_equal(1004)
+                expect(receipt.receipt_stage_count).to_equal(4)
+            Err(code):
+                expect(code).to_equal("pass")
 
     it "should reject unknown normalized status operation and zero identity":
-        step("Fail closed on values not admitted by BRR2")
-        var status = backend_2d_correlated_event_receipt(
-            "simpleos_arm64_simd", "virtio-input", 2, EVIDENCE_HASH,
-            "0123456789", 11, 7, 12, 19, 1004)
-        status.firmware_status_code = 9
-        expect(backend_2d_validate_correlated_event_receipt(status)).to_equal(
-            "unknown_firmware_status")
+        step("Mutate only a receipt first derived from valid BRR2")
+        match backend_2d_event_receipt_from_brr2(
+            simpleos_brr2_receipt(),
+            "simpleos_arm64_simd",
+            "virtio-input"):
+            Ok(valid_receipt):
+                var status = valid_receipt
+                status.firmware_status_code = 9
+                expect(backend_2d_validate_correlated_event_receipt(
+                    status)).to_equal("unknown_firmware_status")
 
-        var operation = backend_2d_correlated_event_receipt(
-            "simpleos_arm64_simd", "virtio-input", 2, EVIDENCE_HASH,
-            "0123456789", 11, 7, 12, 19, 1004)
-        operation.operation_code = 99
-        expect(backend_2d_validate_correlated_event_receipt(operation)).to_equal(
-            "unknown_operation")
+                var operation = valid_receipt
+                operation.operation_code = 99
+                expect(backend_2d_validate_correlated_event_receipt(
+                    operation)).to_equal("unknown_operation")
 
-        var identity = backend_2d_correlated_event_receipt(
-            "simpleos_arm64_simd", "virtio-input", 2, ZERO_HASH,
-            "0123456789", 11, 7, 12, 19, 1004)
-        expect(backend_2d_validate_correlated_event_receipt(identity)).to_equal(
-            "invalid_source_identity")
+                var identity = valid_receipt
+                identity.source_identity_hash = ZERO_HASH
+                expect(backend_2d_validate_correlated_event_receipt(
+                    identity)).to_equal("invalid_source_identity")
+
+                var stages = valid_receipt
+                stages.receipt_stage_count = 3
+                expect(backend_2d_validate_correlated_event_receipt(
+                    stages)).to_equal("invalid_receipt_stage_sequence")
+
+                var delivery = valid_receipt
+                delivery.delivered = false
+                expect(backend_2d_validate_correlated_event_receipt(
+                    delivery)).to_equal("events_not_delivered")
+
+                var injected = valid_receipt
+                injected.injected = false
+                expect(backend_2d_validate_correlated_event_receipt(
+                    injected)).to_equal("events_not_injected")
+
+                var ordered = valid_receipt
+                ordered.ordered = false
+                expect(backend_2d_validate_correlated_event_receipt(
+                    ordered)).to_equal("events_not_ordered")
+
+                var sequence = valid_receipt
+                sequence.sequence = "focus"
+                expect(backend_2d_validate_correlated_event_receipt(
+                    sequence)).to_equal("invalid_event_sequence")
+
+                var source = valid_receipt
+                source.delivery_source = "qmp"
+                expect(backend_2d_validate_correlated_event_receipt(
+                    source)).to_equal("invalid_event_delivery_source")
+
+                var backend = valid_receipt
+                backend.backend = "metal"
+                expect(backend_2d_validate_correlated_event_receipt(
+                    backend)).to_equal("invalid_correlated_backend")
+            Err(code):
+                expect(code).to_equal("pass")

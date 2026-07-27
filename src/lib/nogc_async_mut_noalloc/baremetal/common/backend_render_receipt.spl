@@ -92,6 +92,11 @@ struct BackendRenderReceiptHeaderV2:
     format_code: u32
 
 struct BackendRenderReceiptEventV2:
+    boot_id: u64
+    source_identity_hash_word0: u64
+    source_identity_hash_word1: u64
+    source_identity_hash_word2: u64
+    source_identity_hash_word3: u64
     input_sequence: u64
     operation_code: u32
     frame_id: u64
@@ -102,6 +107,38 @@ struct BackendRenderReceiptEventV2:
     state_after: u32
     value_hash: u64
 
+struct BackendRenderReceiptTrailerV2:
+    boot_id: u64
+    source_identity_hash_word0: u64
+    source_identity_hash_word1: u64
+    source_identity_hash_word2: u64
+    source_identity_hash_word3: u64
+    event_count: u32
+    frame_complete: bool
+    pixel_hash_word0: u64
+    pixel_hash_word1: u64
+    pixel_hash_word2: u64
+    pixel_hash_word3: u64
+    nonblank_pixel_count: u64
+    reason_code: u32
+
+fn _backend_render_geometry_valid(
+    width: u32,
+    height: u32,
+    stride: u32
+) -> bool:
+    if width == 0u32 or height == 0u32 or stride == 0u32:
+        return false
+    if width > 1073741823u32:
+        return false
+    val minimum_stride = width.to_u64() * 4u64
+    if stride.to_u64() < minimum_stride:
+        return false
+    val max_u64 = 0xffffffffffffffffu64
+    if height.to_u64() > max_u64 / stride.to_u64():
+        return false
+    height.to_u64() * stride.to_u64() > 0u64
+
 fn backend_render_receipt_header_valid(header: BackendRenderReceiptHeader) -> bool:
     header.version == BACKEND_RENDER_RECEIPT_VERSION and
         header.arch_code > 0 and header.runtime_code > 0 and
@@ -109,8 +146,9 @@ fn backend_render_receipt_header_valid(header: BackendRenderReceiptHeader) -> bo
         (header.firmware_hash_word0 > 0 or header.firmware_hash_word1 > 0 or
             header.firmware_hash_word2 > 0 or header.firmware_hash_word3 > 0) and
         header.frame_id > 0 and header.surface_handle > 0 and
-        header.width > 0 and header.height > 0 and
-        header.stride >= header.width * 4 and header.format_code > 0
+        _backend_render_geometry_valid(
+            header.width, header.height, header.stride) and
+        header.format_code > 0
 
 fn backend_render_receipt_event_valid(event: BackendRenderReceiptEvent, expected_sequence: u32) -> bool:
     event.sequence == expected_sequence and
@@ -133,12 +171,12 @@ fn _backend_render_hash_zero(word0: u64, word1: u64, word2: u64, word3: u64) -> 
     word0 == 0u64 and word1 == 0u64 and word2 == 0u64 and word3 == 0u64
 
 fn backend_render_receipt_v2_header_valid(header: BackendRenderReceiptHeaderV2) -> bool:
-    if header.schema_code != BACKEND_RENDER_RECEIPT_V2_SCHEMA or
-       header.version != BACKEND_RENDER_RECEIPT_V2_VERSION or
-       header.endian_code != BACKEND_RENDER_RECEIPT_ENDIAN_BIG:
+    if (header.schema_code != BACKEND_RENDER_RECEIPT_V2_SCHEMA or
+        header.version != BACKEND_RENDER_RECEIPT_V2_VERSION or
+        header.endian_code != BACKEND_RENDER_RECEIPT_ENDIAN_BIG):
         return false
-    if header.arch_code == 0u32 or header.runtime_code == 0u32 or
-       header.backend_code == 0u32:
+    if (header.arch_code == 0u32 or header.runtime_code == 0u32 or
+        header.backend_code == 0u32):
         return false
     val firmware_hashed = (
         header.firmware_status_code == BACKEND_RENDER_FIRMWARE_HASHED and
@@ -162,9 +200,9 @@ fn backend_render_receipt_v2_header_valid(header: BackendRenderReceiptHeaderV2) 
     if not revision_present:
         return false
     if header.source_revision_nibbles == 10u32:
-        if header.source_revision_word0 > 0xffffffffffu64 or
-           header.source_revision_word1 != 0u64 or
-           header.source_revision_word2 != 0u64:
+        if (header.source_revision_word0 > 0xffffffffffu64 or
+            header.source_revision_word1 != 0u64 or
+            header.source_revision_word2 != 0u64):
             return false
     elif header.source_revision_nibbles == 40u32:
         if header.source_revision_word2 > 0xffffffffu64:
@@ -172,8 +210,9 @@ fn backend_render_receipt_v2_header_valid(header: BackendRenderReceiptHeaderV2) 
     else:
         return false
     header.boot_id > 0u64 and header.surface_handle > 0u64 and
-        header.width > 0u32 and header.height > 0u32 and
-        header.stride >= header.width * 4u32 and header.format_code > 0u32
+        _backend_render_geometry_valid(
+            header.width, header.height, header.stride) and
+        header.format_code > 0u32
 
 fn backend_render_receipt_v2_event_valid(
     event: BackendRenderReceiptEventV2,
@@ -182,6 +221,12 @@ fn backend_render_receipt_v2_event_valid(
 ) -> bool:
     (expected_input_sequence == 0u64 or
         event.input_sequence == expected_input_sequence) and
+        event.boot_id > 0u64 and
+        _backend_render_hash_present(
+            event.source_identity_hash_word0,
+            event.source_identity_hash_word1,
+            event.source_identity_hash_word2,
+            event.source_identity_hash_word3) and
         event.input_sequence > 0u64 and
         event.operation_code == expected_operation_code and
         (event.operation_code == BACKEND_RENDER_OPERATION_INPUT_IRQ or
@@ -192,11 +237,21 @@ fn backend_render_receipt_v2_event_valid(
         event.monotonic_event_us > 0u64 and event.resource_id > 0u64
 
 fn backend_render_receipt_v2_trailer_valid(
-    trailer: BackendRenderReceiptTrailer,
+    trailer: BackendRenderReceiptTrailerV2,
     observed_events: u32
 ) -> bool:
-    observed_events == 4u32 and
-        backend_render_receipt_trailer_valid(trailer, observed_events)
+    observed_events == 4u32 and trailer.boot_id > 0u64 and
+        _backend_render_hash_present(
+            trailer.source_identity_hash_word0,
+            trailer.source_identity_hash_word1,
+            trailer.source_identity_hash_word2,
+            trailer.source_identity_hash_word3) and
+        trailer.event_count == observed_events and
+        trailer.frame_complete and
+        _backend_render_hash_present(
+            trailer.pixel_hash_word0, trailer.pixel_hash_word1,
+            trailer.pixel_hash_word2, trailer.pixel_hash_word3) and
+        trailer.nonblank_pixel_count > 0u64 and trailer.reason_code == 0u32
 
 # Fixed-width uppercase-free hexadecimal serial wire. Architecture entries
 # stream these bytes directly through their UART owner without allocating text.
@@ -290,15 +345,38 @@ fn _backend_receipt_v2_header_value(header: BackendRenderReceiptHeaderV2, field:
     header.format_code.to_u64()
 
 fn _backend_receipt_v2_event_value(event: BackendRenderReceiptEventV2, field: i64) -> u64:
-    if field == 0: return event.input_sequence
-    if field == 1: return event.operation_code.to_u64()
-    if field == 2: return event.frame_id
-    if field == 3: return event.rendered_revision
-    if field == 4: return event.monotonic_event_us
-    if field == 5: return event.resource_id
-    if field == 6: return event.state_before.to_u64()
-    if field == 7: return event.state_after.to_u64()
+    if field == 0: return event.boot_id
+    if field == 1: return event.source_identity_hash_word0
+    if field == 2: return event.source_identity_hash_word1
+    if field == 3: return event.source_identity_hash_word2
+    if field == 4: return event.source_identity_hash_word3
+    if field == 5: return event.input_sequence
+    if field == 6: return event.operation_code.to_u64()
+    if field == 7: return event.frame_id
+    if field == 8: return event.rendered_revision
+    if field == 9: return event.monotonic_event_us
+    if field == 10: return event.resource_id
+    if field == 11: return event.state_before.to_u64()
+    if field == 12: return event.state_after.to_u64()
     event.value_hash
+
+fn _backend_receipt_v2_trailer_value(
+    trailer: BackendRenderReceiptTrailerV2,
+    field: i64
+) -> u64:
+    if field == 0: return trailer.boot_id
+    if field == 1: return trailer.source_identity_hash_word0
+    if field == 2: return trailer.source_identity_hash_word1
+    if field == 3: return trailer.source_identity_hash_word2
+    if field == 4: return trailer.source_identity_hash_word3
+    if field == 5: return trailer.event_count.to_u64()
+    if field == 6: return if trailer.frame_complete: 1u64 else: 0u64
+    if field == 7: return trailer.pixel_hash_word0
+    if field == 8: return trailer.pixel_hash_word1
+    if field == 9: return trailer.pixel_hash_word2
+    if field == 10: return trailer.pixel_hash_word3
+    if field == 11: return trailer.nonblank_pixel_count
+    trailer.reason_code.to_u64()
 
 fn _backend_receipt_v2_checksum_u64(checksum: u64, value: u64) -> u64:
     var out = checksum
@@ -322,18 +400,20 @@ fn backend_render_receipt_v2_header_checksum(header: BackendRenderReceiptHeaderV
 fn backend_render_receipt_v2_event_checksum(event: BackendRenderReceiptEventV2) -> u64:
     var checksum = 14695981039346656037u64
     var field: i64 = 0
-    while field < 9:
+    while field < 14:
         checksum = _backend_receipt_v2_checksum_u64(
             checksum, _backend_receipt_v2_event_value(event, field))
         field = field + 1
     checksum
 
-fn backend_render_receipt_v2_trailer_checksum(trailer: BackendRenderReceiptTrailer) -> u64:
+fn backend_render_receipt_v2_trailer_checksum(
+    trailer: BackendRenderReceiptTrailerV2
+) -> u64:
     var checksum = 14695981039346656037u64
     var field: i64 = 0
-    while field < 8:
+    while field < 13:
         checksum = _backend_receipt_v2_checksum_u64(
-            checksum, _backend_receipt_trailer_value(trailer, field))
+            checksum, _backend_receipt_v2_trailer_value(trailer, field))
         field = field + 1
     checksum
 
@@ -379,8 +459,8 @@ fn backend_render_receipt_header_wire_byte_count() -> i64: 262
 fn backend_render_receipt_event_wire_byte_count() -> i64: 109
 fn backend_render_receipt_trailer_wire_byte_count() -> i64: 143
 fn backend_render_receipt_v2_header_wire_byte_count() -> i64: 466
-fn backend_render_receipt_v2_event_wire_byte_count() -> i64: 194
-fn backend_render_receipt_v2_trailer_wire_byte_count() -> i64: 177
+fn backend_render_receipt_v2_event_wire_byte_count() -> i64: 279
+fn backend_render_receipt_v2_trailer_wire_byte_count() -> i64: 262
 
 fn backend_render_receipt_header_wire_byte_at(header: BackendRenderReceiptHeader, index: i64) -> u8:
     if index < 0 or index >= backend_render_receipt_header_wire_byte_count():
@@ -427,26 +507,26 @@ fn backend_render_receipt_v2_event_wire_byte_at(
         return 0u8
     val encoded_field = if index < 7: 0 else: (index - 7) / 17
     val payload_field = encoded_field - 1
-    val payload_value = if payload_field >= 0 and payload_field < 9:
+    val payload_value = if payload_field >= 0 and payload_field < 14:
         _backend_receipt_v2_event_value(event, payload_field)
     else:
         0u64
     _backend_receipt_v2_wire_record_byte(
-        2u8, 9, 72u64, payload_value,
+        2u8, 14, 112u64, payload_value,
         backend_render_receipt_v2_event_checksum(event), index)
 
 fn backend_render_receipt_v2_trailer_wire_byte_at(
-    trailer: BackendRenderReceiptTrailer,
+    trailer: BackendRenderReceiptTrailerV2,
     index: i64
 ) -> u8:
     if index < 0 or index >= backend_render_receipt_v2_trailer_wire_byte_count():
         return 0u8
     val encoded_field = if index < 7: 0 else: (index - 7) / 17
     val payload_field = encoded_field - 1
-    val payload_value = if payload_field >= 0 and payload_field < 8:
-        _backend_receipt_trailer_value(trailer, payload_field)
+    val payload_value = if payload_field >= 0 and payload_field < 13:
+        _backend_receipt_v2_trailer_value(trailer, payload_field)
     else:
         0u64
     _backend_receipt_v2_wire_record_byte(
-        3u8, 8, 64u64, payload_value,
+        3u8, 13, 104u64, payload_value,
         backend_render_receipt_v2_trailer_checksum(trailer), index)
