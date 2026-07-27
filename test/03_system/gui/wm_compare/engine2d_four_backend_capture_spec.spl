@@ -2,27 +2,24 @@ use std.spec
 use app.wm_compare.backend_2d_capture_evidence.{
     BACKEND_2D_EVENT_SEQUENCE,
     backend_2d_event_receipt,
-    backend_2d_event_receipt_from_brr2,
+    backend_2d_no_legacy_event_receipt,
     backend_2d_execution_receipt,
     backend_2d_capture_evidence,
     backend_2d_validate_capture,
     backend_2d_compare_capture
 }
-use test.helpers.simpleos_render_evidence_fixture.{simpleos_brr2_receipt}
+use test.helpers.simpleos_render_evidence_fixture.{simpleos_brr2_serial}
 
 fn hash_a() -> text:
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 fn valid_capture(backend: text):
-    var events = backend_2d_event_receipt(
-        backend, true, true, "target_runtime")
     val simpleos_backend = backend == "simpleos_x86_64_simd" or
         backend == "simpleos_arm64_simd"
-    if simpleos_backend:
-        match backend_2d_event_receipt_from_brr2(
-            simpleos_brr2_receipt(), backend, "target_runtime"):
-            Ok(value): events = value
-            Err(_): ()
+    val events = if simpleos_backend:
+        backend_2d_no_legacy_event_receipt(backend)
+    else:
+        backend_2d_event_receipt(backend, true, true, "target_runtime")
     val gpu = backend == "metal" or backend == "vulkan"
     val source_revision = if simpleos_backend:
         "0123456789"
@@ -48,7 +45,9 @@ fn valid_capture(backend: text):
         events,
         "build/test-artifacts/engine2d/" + backend + ".ppm",
         source_revision,
-        execution
+        execution,
+        if simpleos_backend: simpleos_brr2_serial() else: "",
+        if simpleos_backend: "guest_virtio_input" else: ""
     )
 
 describe "Engine2D four-backend capture contract":
@@ -60,12 +59,27 @@ describe "Engine2D four-backend capture contract":
     it "requires parsed BRR2 correlation for SimpleOS capture acceptance":
         val correlated = valid_capture("simpleos_arm64_simd")
         expect(backend_2d_validate_capture(correlated)).to_equal("accepted")
+        expect(correlated.events.sequence).to_equal("")
+        expect(correlated.events.count).to_equal(0)
+        if val Some(lifecycle) = correlated.simpleos_lifecycle:
+            expect(lifecycle.input_irq_us).to_equal(1001)
+            expect(lifecycle.wm_apply_us).to_equal(1002)
+            expect(lifecycle.damage_commit_us).to_equal(1003)
+            expect(lifecycle.present_us).to_equal(1004)
 
         var legacy = correlated
         legacy.events = backend_2d_event_receipt(
             "simpleos_arm64_simd", true, true, "guest_virtio_input")
         expect(backend_2d_validate_capture(legacy)).to_equal(
-            "unknown_schema_version")
+            "simpleos_legacy_event_claim_forbidden")
+
+        var tampered = correlated
+        tampered.simpleos_receipt_serial =
+            tampered.simpleos_receipt_serial.replace(
+                "BRR2 E 0000000000000070 000000000000000b ",
+                "BRR2 E 0000000000000070 000000000000000c ")
+        expect(backend_2d_validate_capture(tampered)).to_equal(
+            "checksum-mismatch")
 
     it "REQ-E2D4-003 rejects injection without target delivery":
         val events = backend_2d_event_receipt("vulkan", true, false, "target_runtime")

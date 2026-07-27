@@ -4,6 +4,10 @@ This scenario verifies that Metal, Vulkan, host CPU SIMD, and SimpleOS QEMU
 SIMD captures use one honest evidence contract. SimpleOS runs on both x86_64
 and ARM64.
 
+> Manual synchronization, 2026-07-27: the admitted self-hosted doc generator
+> was unavailable. This text was updated directly from the executable scenario
+> and was not regenerated.
+
 ## Primary flow
 
 ### 1. launch backend
@@ -16,13 +20,27 @@ target and actual backend/device or SIMD execution receipt.
 Render the frozen scene at the requested dimensions. GPU work must be complete
 before readback; SIMD hit/chunk counters must be greater than zero.
 
-### 3. deliver input events
+### 3. retain truthful event or lifecycle evidence
 
-Inject and receive, in order:
+Hosted Metal, Vulkan, and CPU SIMD captures inject and receive the legacy
+six-event interaction sequence:
 
 `focus,pointer_move,pointer_down,pointer_up,key_down,key_up`
 
 Injection without a target-side delivery receipt fails.
+
+SimpleOS does not reinterpret one render lifecycle as those six event kinds.
+Its dedicated lifecycle evidence is parsed from bounded raw BRR2 serial and
+contains exactly:
+
+`INPUT_IRQ -> WM_APPLY -> DAMAGE_COMMIT -> PRESENT`
+
+The four stages retain one boot ID, source identity, input sequence, frame ID,
+rendered revision, and strictly increasing monotonic timestamps. SimpleOS
+capture validation reparses the raw receipt, verifies its fixed length,
+big-endian schema, checksums, and header/event/trailer identity binding, then
+compares the result with the retained lifecycle model. A mutable parsed object
+or caller-authored legacy event aggregate is not accepted.
 
 ### 4. capture framebuffer
 
@@ -44,6 +62,10 @@ makes the aggregate result fail.
 
 - Missing or malformed SHA-256 is rejected.
 - QMP-only or wrapper-only event success is rejected.
+- A SimpleOS record claiming the legacy six-event aggregate is rejected.
+- Raw BRR2 tampering and cross-boot/source splicing are rejected.
+- Unknown endian, mismatched input sequence or rendered revision, and
+  non-increasing lifecycle timestamps are rejected with exact reasons.
 - Dimension mismatch is rejected before pixel tolerance.
 - CPU mirrors labeled as GPU captures are rejected by the backend adapter.
 - Scalar fallback labeled as SIMD is rejected by execution-counter checks.

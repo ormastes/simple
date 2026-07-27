@@ -18,10 +18,10 @@ use common.renderdoc.simpleos_simd_render_evidence.{
     validate_simpleos_simd_render_evidence
 }
 use app.wm_compare.backend_2d_capture_evidence.{
-    backend_2d_event_receipt_from_brr2,
-    backend_2d_validate_correlated_event_receipt
+    simpleos_backend_lifecycle_from_serial,
+    simpleos_backend_lifecycle_validate
 }
-use test.helpers.simpleos_render_evidence_fixture.{simpleos_brr2_receipt}
+use test.helpers.simpleos_render_evidence_fixture.{simpleos_brr2_serial}
 
 val EVIDENCE_HASH: text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 val OTHER_HASH: text = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
@@ -552,80 +552,57 @@ describe "SimpleOS target-native SIMD evidence":
         expect(missing_result.code).to_equal("missing-required-operation")
         expect(missing_result.operation).to_equal("scroll")
 
-describe "SimpleOS normalized backend event receipts":
-    it "should retain BRR2 event and source correlation":
-        step("Derive normalized fields only from a parsed ordered BRR2 chain")
-        match backend_2d_event_receipt_from_brr2(
-            simpleos_brr2_receipt(),
+describe "SimpleOS normalized backend lifecycle evidence":
+    it "should retain four BRR2 lifecycle stages without claiming six events":
+        step("Parse bounded raw serial into a dedicated lifecycle model")
+        match simpleos_backend_lifecycle_from_serial(
+            simpleos_brr2_serial(),
             "simpleos_arm64_simd",
             "virtio-input"):
-            Ok(receipt):
-                expect(backend_2d_validate_correlated_event_receipt(
-                    receipt)).to_equal("pass")
-                expect(receipt.schema_version).to_equal(2)
-                expect(receipt.input_sequence).to_equal(1)
-                expect(receipt.frame_id).to_equal(12)
-                expect(receipt.rendered_revision).to_equal(13)
-                expect(receipt.monotonic_event_us).to_equal(1004)
-                expect(receipt.receipt_stage_count).to_equal(4)
+            Ok(lifecycle):
+                expect(simpleos_backend_lifecycle_validate(
+                    lifecycle)).to_equal("pass")
+                expect(lifecycle.schema_version).to_equal(2)
+                expect(lifecycle.input_sequence).to_equal(1)
+                expect(lifecycle.frame_id).to_equal(12)
+                expect(lifecycle.rendered_revision).to_equal(13)
+                expect(lifecycle.input_irq_us).to_equal(1001)
+                expect(lifecycle.wm_apply_us).to_equal(1002)
+                expect(lifecycle.damage_commit_us).to_equal(1003)
+                expect(lifecycle.present_us).to_equal(1004)
             Err(code):
                 expect(code).to_equal("pass")
 
-    it "should reject unknown normalized status operation and zero identity":
-        step("Mutate only a receipt first derived from valid BRR2")
-        match backend_2d_event_receipt_from_brr2(
-            simpleos_brr2_receipt(),
+    it "should reject false lifecycle identity ordering and provenance":
+        step("Mutate only lifecycle evidence first derived from raw BRR2 serial")
+        match simpleos_backend_lifecycle_from_serial(
+            simpleos_brr2_serial(),
             "simpleos_arm64_simd",
             "virtio-input"):
-            Ok(valid_receipt):
-                var status = valid_receipt
+            Ok(valid_lifecycle):
+                var status = valid_lifecycle
                 status.firmware_status_code = 9
-                expect(backend_2d_validate_correlated_event_receipt(
+                expect(simpleos_backend_lifecycle_validate(
                     status)).to_equal("unknown_firmware_status")
 
-                var operation = valid_receipt
-                operation.operation_code = 99
-                expect(backend_2d_validate_correlated_event_receipt(
-                    operation)).to_equal("unknown_operation")
-
-                var identity = valid_receipt
+                var identity = valid_lifecycle
                 identity.source_identity_hash = ZERO_HASH
-                expect(backend_2d_validate_correlated_event_receipt(
+                expect(simpleos_backend_lifecycle_validate(
                     identity)).to_equal("invalid_source_identity")
 
-                var stages = valid_receipt
-                stages.receipt_stage_count = 3
-                expect(backend_2d_validate_correlated_event_receipt(
-                    stages)).to_equal("invalid_receipt_stage_sequence")
+                var ordering = valid_lifecycle
+                ordering.wm_apply_us = ordering.input_irq_us
+                expect(simpleos_backend_lifecycle_validate(
+                    ordering)).to_equal("nonmonotonic_lifecycle_time")
 
-                var delivery = valid_receipt
-                delivery.delivered = false
-                expect(backend_2d_validate_correlated_event_receipt(
-                    delivery)).to_equal("events_not_delivered")
-
-                var injected = valid_receipt
-                injected.injected = false
-                expect(backend_2d_validate_correlated_event_receipt(
-                    injected)).to_equal("events_not_injected")
-
-                var ordered = valid_receipt
-                ordered.ordered = false
-                expect(backend_2d_validate_correlated_event_receipt(
-                    ordered)).to_equal("events_not_ordered")
-
-                var sequence = valid_receipt
-                sequence.sequence = "focus"
-                expect(backend_2d_validate_correlated_event_receipt(
-                    sequence)).to_equal("invalid_event_sequence")
-
-                var source = valid_receipt
+                var source = valid_lifecycle
                 source.delivery_source = "qmp"
-                expect(backend_2d_validate_correlated_event_receipt(
+                expect(simpleos_backend_lifecycle_validate(
                     source)).to_equal("invalid_event_delivery_source")
 
-                var backend = valid_receipt
+                var backend = valid_lifecycle
                 backend.backend = "metal"
-                expect(backend_2d_validate_correlated_event_receipt(
+                expect(simpleos_backend_lifecycle_validate(
                     backend)).to_equal("invalid_correlated_backend")
             Err(code):
                 expect(code).to_equal("pass")

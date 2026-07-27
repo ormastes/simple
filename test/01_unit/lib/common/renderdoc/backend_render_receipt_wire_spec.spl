@@ -372,6 +372,12 @@ describe "Backend render receipt serial wire":
         expect(parse_backend_render_receipt_wire(version_wire).code).to_equal(
             "unknown-version")
 
+        var endian = wire_header_v2(BACKEND_RENDER_FIRMWARE_HASHED)
+        endian.endian_code = 9u32
+        val endian_wire = backend_render_receipt_v2_header_line(endian) + "\n"
+        expect(parse_backend_render_receipt_wire(endian_wire).code).to_equal(
+            "unknown-endian")
+
         var status = wire_header_v2(BACKEND_RENDER_FIRMWARE_HASHED)
         status.firmware_status_code = 9u32
         val status_wire = backend_render_receipt_v2_header_line(status) + "\n"
@@ -437,7 +443,41 @@ describe "Backend render receipt serial wire":
                 wire_event_v2(BACKEND_RENDER_OPERATION_INPUT_IRQ, 1001u64)) + "\n" +
             backend_render_receipt_v2_event_line(mismatched_frame) + "\n"
         expect(parse_backend_render_receipt_wire(mismatch_wire).code).to_equal(
-            "event-correlation-mismatch")
+            "frame-correlation-mismatch")
+
+        step("Reject mismatched input revision and monotonic lifecycle fields")
+        var mismatched_input = wire_event_v2(
+            BACKEND_RENDER_OPERATION_WM_APPLY, 1002u64)
+        mismatched_input.input_sequence = 2u64
+        val mismatched_input_wire = backend_render_receipt_v2_header_line(
+            wire_header_v2(BACKEND_RENDER_FIRMWARE_HASHED)) + "\n" +
+            backend_render_receipt_v2_event_line(
+                wire_event_v2(BACKEND_RENDER_OPERATION_INPUT_IRQ, 1001u64)) + "\n" +
+            backend_render_receipt_v2_event_line(mismatched_input) + "\n"
+        expect(parse_backend_render_receipt_wire(
+            mismatched_input_wire).code).to_equal("input-sequence-mismatch")
+
+        var mismatched_revision = wire_event_v2(
+            BACKEND_RENDER_OPERATION_WM_APPLY, 1002u64)
+        mismatched_revision.rendered_revision = 99u64
+        val mismatched_revision_wire = backend_render_receipt_v2_header_line(
+            wire_header_v2(BACKEND_RENDER_FIRMWARE_HASHED)) + "\n" +
+            backend_render_receipt_v2_event_line(
+                wire_event_v2(BACKEND_RENDER_OPERATION_INPUT_IRQ, 1001u64)) + "\n" +
+            backend_render_receipt_v2_event_line(mismatched_revision) + "\n"
+        expect(parse_backend_render_receipt_wire(
+            mismatched_revision_wire).code).to_equal(
+                "rendered-revision-mismatch")
+
+        val non_increasing_time_wire = backend_render_receipt_v2_header_line(
+            wire_header_v2(BACKEND_RENDER_FIRMWARE_HASHED)) + "\n" +
+            backend_render_receipt_v2_event_line(
+                wire_event_v2(BACKEND_RENDER_OPERATION_INPUT_IRQ, 1001u64)) + "\n" +
+            backend_render_receipt_v2_event_line(
+                wire_event_v2(BACKEND_RENDER_OPERATION_WM_APPLY, 1001u64)) + "\n"
+        expect(parse_backend_render_receipt_wire(
+            non_increasing_time_wire).code).to_equal(
+                "nonmonotonic-event-time")
 
         step("Reject event and trailer records spliced from another boot")
         var cross_boot_event = wire_event_v2(

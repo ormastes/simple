@@ -3,7 +3,8 @@
 use common.renderdoc.backend_render_receipt_wire.{
     BackendRenderReceiptWireParse,
     backend_render_receipt_v2_source_identity_hash,
-    backend_render_receipt_v2_source_revision
+    backend_render_receipt_v2_source_revision,
+    parse_backend_render_receipt_wire
 }
 use std.nogc_async_mut_noalloc.baremetal.common.backend_render_receipt.{
     BACKEND_RENDER_OPERATION_PRESENT,
@@ -20,6 +21,10 @@ pub struct Backend2dEventReceipt:
     delivered: bool
     ordered: bool
     delivery_source: text
+
+pub struct SimpleOsBackendLifecycleEvidence:
+    backend: text
+    delivery_source: text
     schema_version: i64
     firmware_status_code: i64
     source_identity_hash: text
@@ -28,10 +33,10 @@ pub struct Backend2dEventReceipt:
     input_sequence: i64
     frame_id: i64
     rendered_revision: i64
-    monotonic_event_us: i64
-    operation_code: i64
-    receipt_stage_sequence: text
-    receipt_stage_count: i64
+    input_irq_us: i64
+    wm_apply_us: i64
+    damage_commit_us: i64
+    present_us: i64
 
 pub struct Backend2dExecutionReceipt:
     provenance: text
@@ -54,6 +59,8 @@ pub struct Backend2dCaptureEvidence:
     capture_path: text
     source_revision: text
     execution: Backend2dExecutionReceipt
+    simpleos_receipt_serial: text
+    simpleos_lifecycle: SimpleOsBackendLifecycleEvidence?
 
 pub struct Backend2dCaptureComparison:
     reference_backend: text
@@ -73,7 +80,6 @@ pub struct Backend2dCaptureComparison:
     reason: text
 
 const BACKEND_2D_EVENT_SEQUENCE = "focus,pointer_move,pointer_down,pointer_up,key_down,key_up"
-const BACKEND_2D_RECEIPT_STAGE_SEQUENCE = "INPUT_IRQ,WM_APPLY,DAMAGE_COMMIT,PRESENT"
 
 fn _backend_2d_known(name: text) -> bool:
     name == "metal" or name == "vulkan" or name == "cpu_simd" or
@@ -144,26 +150,57 @@ pub fn backend_2d_event_receipt(backend: text, injected: bool,
         injected: injected,
         delivered: delivered,
         ordered: injected and delivered,
-        delivery_source: delivery_source,
-        schema_version: 0,
-        firmware_status_code: 0,
-        source_identity_hash: "",
-        source_revision: "",
-        boot_id: 0,
-        input_sequence: 0,
-        frame_id: 0,
-        rendered_revision: 0,
-        monotonic_event_us: 0,
-        operation_code: 0,
-        receipt_stage_sequence: "",
-        receipt_stage_count: 0
+        delivery_source: delivery_source
     )
 
-pub fn backend_2d_event_receipt_from_brr2(
+pub fn backend_2d_no_legacy_event_receipt(
+    backend: text
+) -> Backend2dEventReceipt:
+    Backend2dEventReceipt(
+        sequence: "",
+        count: 0,
+        backend: backend,
+        injected: false,
+        delivered: false,
+        ordered: false,
+        delivery_source: ""
+    )
+
+pub fn simpleos_backend_lifecycle_validate(
+    lifecycle: SimpleOsBackendLifecycleEvidence
+) -> text:
+    if lifecycle.schema_version != 2:
+        return "unknown_schema_version"
+    if (lifecycle.firmware_status_code != 1 and
+        lifecycle.firmware_status_code != 2):
+        return "unknown_firmware_status"
+    if not _backend_2d_nonzero_hex_shape_valid(
+        lifecycle.source_identity_hash, 64):
+        return "invalid_source_identity"
+    if not _backend_2d_revision_valid(lifecycle.source_revision):
+        return "invalid_source_revision"
+    if (lifecycle.boot_id <= 0 or lifecycle.input_sequence <= 0 or
+        lifecycle.frame_id <= 0 or lifecycle.rendered_revision <= 0):
+        return "missing_lifecycle_correlation"
+    if (lifecycle.input_irq_us <= 0 or lifecycle.wm_apply_us <= 0 or
+        lifecycle.damage_commit_us <= 0 or lifecycle.present_us <= 0):
+        return "missing_lifecycle_time"
+    if (lifecycle.input_irq_us >= lifecycle.wm_apply_us or
+        lifecycle.wm_apply_us >= lifecycle.damage_commit_us or
+        lifecycle.damage_commit_us >= lifecycle.present_us):
+        return "nonmonotonic_lifecycle_time"
+    if (lifecycle.backend != "simpleos_x86_64_simd" and
+        lifecycle.backend != "simpleos_arm64_simd"):
+        return "invalid_correlated_backend"
+    if lifecycle.delivery_source == "" or lifecycle.delivery_source == "qmp":
+        return "invalid_event_delivery_source"
+    "pass"
+
+fn _simpleos_backend_lifecycle_from_parsed(
     parsed: BackendRenderReceiptWireParse,
     backend: text,
     delivery_source: text
-) -> Result<Backend2dEventReceipt, text>:
+) -> Result<SimpleOsBackendLifecycleEvidence, text>:
     if not parsed.valid or parsed.wire_version != 2:
         return Err("invalid_brr2_receipt")
     if (backend != "simpleos_x86_64_simd" and
@@ -193,19 +230,13 @@ pub fn backend_2d_event_receipt_from_brr2(
                 present.input_sequence > max_i64 or
                 present.frame_id > max_i64 or
                 present.rendered_revision > max_i64 or
+                events[0].monotonic_event_us > max_i64 or
+                events[1].monotonic_event_us > max_i64 or
+                events[2].monotonic_event_us > max_i64 or
                 present.monotonic_event_us > max_i64):
                 return Err("event_correlation_overflow")
-            return Ok(Backend2dEventReceipt(
-                sequence: BACKEND_2D_EVENT_SEQUENCE,
-                count: 6,
+            val lifecycle = SimpleOsBackendLifecycleEvidence(
                 backend: backend,
-                injected: events[0].operation_code ==
-                    BACKEND_RENDER_OPERATION_INPUT_IRQ,
-                delivered: events[1].operation_code ==
-                    BACKEND_RENDER_OPERATION_WM_APPLY,
-                ordered: events[2].operation_code ==
-                    BACKEND_RENDER_OPERATION_DAMAGE_COMMIT and
-                    present.operation_code == BACKEND_RENDER_OPERATION_PRESENT,
                 delivery_source: delivery_source,
                 schema_version: header.version.to_i64(),
                 firmware_status_code: header.firmware_status_code.to_i64(),
@@ -216,47 +247,43 @@ pub fn backend_2d_event_receipt_from_brr2(
                 input_sequence: present.input_sequence.to_i64(),
                 frame_id: present.frame_id.to_i64(),
                 rendered_revision: present.rendered_revision.to_i64(),
-                monotonic_event_us: present.monotonic_event_us.to_i64(),
-                operation_code: present.operation_code.to_i64(),
-                receipt_stage_sequence: BACKEND_2D_RECEIPT_STAGE_SEQUENCE,
-                receipt_stage_count: events.len().to_i64()
-            ))
+                input_irq_us: events[0].monotonic_event_us.to_i64(),
+                wm_apply_us: events[1].monotonic_event_us.to_i64(),
+                damage_commit_us: events[2].monotonic_event_us.to_i64(),
+                present_us: present.monotonic_event_us.to_i64()
+            )
+            val status = simpleos_backend_lifecycle_validate(lifecycle)
+            if status != "pass":
+                return Err(status)
+            return Ok(lifecycle)
     Err("invalid_brr2_receipt")
 
-pub fn backend_2d_validate_correlated_event_receipt(
-    receipt: Backend2dEventReceipt
-) -> text:
-    if receipt.schema_version != 2:
-        return "unknown_schema_version"
-    if receipt.firmware_status_code != 1 and receipt.firmware_status_code != 2:
-        return "unknown_firmware_status"
-    if not _backend_2d_nonzero_hex_shape_valid(receipt.source_identity_hash, 64):
-        return "invalid_source_identity"
-    if not _backend_2d_revision_valid(receipt.source_revision):
-        return "invalid_source_revision"
-    if (receipt.boot_id <= 0 or receipt.input_sequence <= 0 or
-        receipt.frame_id <= 0 or receipt.rendered_revision <= 0 or
-        receipt.monotonic_event_us <= 0):
-        return "missing_event_correlation"
-    if receipt.operation_code != 1:
-        return "unknown_operation"
-    if (receipt.receipt_stage_sequence != BACKEND_2D_RECEIPT_STAGE_SEQUENCE or
-        receipt.receipt_stage_count != 4):
-        return "invalid_receipt_stage_sequence"
-    if receipt.sequence != BACKEND_2D_EVENT_SEQUENCE or receipt.count != 6:
-        return "invalid_event_sequence"
-    if not receipt.injected:
-        return "events_not_injected"
-    if not receipt.delivered:
-        return "events_not_delivered"
-    if not receipt.ordered:
-        return "events_not_ordered"
-    if (receipt.backend != "simpleos_x86_64_simd" and
-        receipt.backend != "simpleos_arm64_simd"):
-        return "invalid_correlated_backend"
-    if receipt.delivery_source == "" or receipt.delivery_source == "qmp":
-        return "invalid_event_delivery_source"
-    "pass"
+pub fn simpleos_backend_lifecycle_from_serial(
+    serial_output: text,
+    backend: text,
+    delivery_source: text
+) -> Result<SimpleOsBackendLifecycleEvidence, text>:
+    val parsed = parse_backend_render_receipt_wire(serial_output)
+    _simpleos_backend_lifecycle_from_parsed(parsed, backend, delivery_source)
+
+fn _simpleos_lifecycle_matches(
+    left: SimpleOsBackendLifecycleEvidence,
+    right: SimpleOsBackendLifecycleEvidence
+) -> bool:
+    left.backend == right.backend and
+        left.delivery_source == right.delivery_source and
+        left.schema_version == right.schema_version and
+        left.firmware_status_code == right.firmware_status_code and
+        left.source_identity_hash == right.source_identity_hash and
+        left.source_revision == right.source_revision and
+        left.boot_id == right.boot_id and
+        left.input_sequence == right.input_sequence and
+        left.frame_id == right.frame_id and
+        left.rendered_revision == right.rendered_revision and
+        left.input_irq_us == right.input_irq_us and
+        left.wm_apply_us == right.wm_apply_us and
+        left.damage_commit_us == right.damage_commit_us and
+        left.present_us == right.present_us
 
 pub fn backend_2d_execution_receipt(
     provenance: text, identity: text, cpu_fallback_used: bool,
@@ -279,7 +306,15 @@ pub fn backend_2d_capture_evidence(backend: text, target: text, scene_id: text,
                                    events: Backend2dEventReceipt,
                                    capture_path: text,
                                    source_revision: text,
-                                   execution: Backend2dExecutionReceipt) -> Backend2dCaptureEvidence:
+                                   execution: Backend2dExecutionReceipt,
+                                   simpleos_receipt_serial: text = "",
+                                   simpleos_delivery_source: text = "") -> Backend2dCaptureEvidence:
+    var lifecycle: SimpleOsBackendLifecycleEvidence? = nil
+    if simpleos_receipt_serial != "":
+        match simpleos_backend_lifecycle_from_serial(
+            simpleos_receipt_serial, backend, simpleos_delivery_source):
+            Ok(value): lifecycle = Some(value)
+            Err(_): ()
     Backend2dCaptureEvidence(
         backend: backend,
         target: target,
@@ -292,7 +327,9 @@ pub fn backend_2d_capture_evidence(backend: text, target: text, scene_id: text,
         events: events,
         capture_path: capture_path,
         source_revision: source_revision,
-        execution: execution
+        execution: execution,
+        simpleos_receipt_serial: simpleos_receipt_serial,
+        simpleos_lifecycle: lifecycle
     )
 
 pub fn backend_2d_validate_capture(evidence: Backend2dCaptureEvidence) -> text:
@@ -317,24 +354,42 @@ pub fn backend_2d_validate_capture(evidence: Backend2dCaptureEvidence) -> text:
     val simpleos_backend = evidence.backend == "simpleos_x86_64_simd" or
         evidence.backend == "simpleos_arm64_simd"
     if simpleos_backend:
-        val correlated_status =
-            backend_2d_validate_correlated_event_receipt(evidence.events)
-        if correlated_status != "pass":
-            return correlated_status
-        if evidence.source_revision != evidence.events.source_revision:
-            return "event_source_revision_mismatch"
-    if evidence.events.sequence != BACKEND_2D_EVENT_SEQUENCE or
-       evidence.events.count != 6:
-        return "invalid_event_sequence"
-    if not evidence.events.injected:
-        return "events_not_injected"
-    if not evidence.events.delivered:
-        return "events_not_delivered"
-    if not evidence.events.ordered:
-        return "events_not_ordered"
-    if evidence.events.delivery_source == "" or
-       evidence.events.delivery_source == "qmp":
-        return "invalid_event_delivery_source"
+        if (evidence.events.sequence != "" or evidence.events.count != 0 or
+            evidence.events.injected or evidence.events.delivered or
+            evidence.events.ordered or evidence.events.delivery_source != ""):
+            return "simpleos_legacy_event_claim_forbidden"
+        var stored_delivery_source = ""
+        if val Some(stored_lifecycle) = evidence.simpleos_lifecycle:
+            stored_delivery_source = stored_lifecycle.delivery_source
+        match simpleos_backend_lifecycle_from_serial(
+            evidence.simpleos_receipt_serial,
+            evidence.backend,
+            stored_delivery_source):
+            Ok(reparsed):
+                if val Some(stored) = evidence.simpleos_lifecycle:
+                    if not _simpleos_lifecycle_matches(stored, reparsed):
+                        return "lifecycle_evidence_mismatch"
+                    if evidence.source_revision != reparsed.source_revision:
+                        return "lifecycle_source_revision_mismatch"
+                else:
+                    return "missing_simpleos_lifecycle"
+            Err(code): return code
+    else:
+        if (evidence.simpleos_receipt_serial != "" or
+            evidence.simpleos_lifecycle != nil):
+            return "unexpected_simpleos_lifecycle"
+        if evidence.events.sequence != BACKEND_2D_EVENT_SEQUENCE or
+           evidence.events.count != 6:
+            return "invalid_event_sequence"
+        if not evidence.events.injected:
+            return "events_not_injected"
+        if not evidence.events.delivered:
+            return "events_not_delivered"
+        if not evidence.events.ordered:
+            return "events_not_ordered"
+        if evidence.events.delivery_source == "" or
+           evidence.events.delivery_source == "qmp":
+            return "invalid_event_delivery_source"
     if not evidence.capture_path.ends_with(".ppm") and
        not evidence.capture_path.ends_with(".png"):
         return "invalid_capture_path"
