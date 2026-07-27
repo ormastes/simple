@@ -1217,6 +1217,31 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   team identities. Do not treat the collector self-test as live
   EndpointSecurity authorization or as GUI execution-history evidence.
 
+### 2026-07-27 standalone Vulkan v4 and native-lowering checkpoint
+
+- Standalone Vulkan 2D trust is pushed as `19d51754cc`. Manifest v4 binds the
+  executable actually launched, canonical Stage 3, source snapshot, providers,
+  transcript, and output. It no longer authenticates an unused full CLI.
+  Web/GUI retain their separate full-CLI plus EndpointSecurity admission.
+- MoltenVK evidence now pins and hashes the canonical Homebrew ICD and
+  `libMoltenVK.dylib`, rejects caller loader/provider/DYLD substitution, and
+  uses bounded process-group cleanup. Metal launch metadata remains isolated
+  from Vulkan settings.
+- An exact-`19d51754cc` LLVM Stage 3 completed and passed canonical provenance
+  admission (compiler SHA-256
+  `36c3bdfb0173b3ddf3b673174c2c69e640fdeb6b707c4245f1e84f862b793b1a`).
+  The first trusted Vulkan build reached current source and failed at a
+  multiline expression in `draw_ir_adv.spl`, not at Vulkan admission.
+- Focused native cycles fixed the two missing expression parentheses, changed
+  the Draw IR import to its native-resolvable `std.common` path, and made the
+  conditional prepared font batch explicitly `FontRenderBatch`. Each repair
+  advanced native lowering.
+- The cycle cap is exhausted. The next exact failure is
+  `_engine2d_draw_ir_adv_composition_with_images`: native lowering treats
+  `DrawIrTargetFontEvidence.batch_identity` as uninferred. Start the next
+  bounded cycle at that typed return/field boundary. Do not rerun bootstrap or
+  repeat the already-closed parser/import/font-batch probes first.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
