@@ -1,0 +1,501 @@
+# Unified SimpleArtifactManifest — ONE policy surface for ELF / SMF / script /
+# native-Simple artifacts (master plan §5.3, with the §12 startup fields
+# carried along).
+#
+# WHY: today the loader decides per-format, ad hoc — `fs_exec_resolve` /
+# `fs_exec_spawn` sniff bytes and each format path invents its own answers for
+# "which libraries", "which interpreter", "which rights". §5.3 requires a single
+# descriptor the whole pipeline can read once:
+#
+#   path/cap-relative name -> VFS open with EXECUTE right -> immutable
+#   executable handle -> VERIFY MANIFEST (this module) -> identify kind ->
+#   create process + CSpace -> map segments -> resolve allowed libraries ->
+#   W^X transition -> argv/envp/auxv -> enter userspace.
+#
+# NO SECOND MANIFEST (master plan §4). This is the kernel-side *typed
+# projection* of the ALREADY-LANDED launch metadata owned by
+# `src/app/startup/launch_metadata.spl` (`LaunchMetadata` + its `.simple_launch.sdn`
+# sidecar / SMF section-15 payload / `SIMPLE_LAUNCH_V1` native trailer).
+# `manifest_from_launch_metadata` is the one-way adapter: the host-side
+# producer and on-disk encoding stay exactly where they are, and this module
+# adds only the fields §5.3 requires that `LaunchMetadata` does not yet carry
+# (rights ceiling, resource limits, namespace template, argument schema,
+# preloads, hashes, signature, debug identity). When those fields need to be
+# persisted, they get added to the EXISTING sidecar renderer/parser in
+# `launch_metadata.spl` — not to a rival format here.
+#
+# FREESTANDING DISCIPLINE (identical rules to `fs_exec_resolve.spl`'s header —
+# this is ring-0-adjacent loader code):
+#   - module-level array / `[text]` initializers do NOT run under the
+#     freestanding native build, so every constant list is a FUNCTION and every
+#     reason string is a FUNCTION (`manifest_reason_*`), never a module `val`.
+#   - no class construction and no trait-object dynamic dispatch on this path
+#     (proven to fault-loop ring 0) — plain value structs + free functions only.
+#   - `char_at` / `starts_with` are unreliable on DYNAMICALLY built strings on
+#     the x64 freestanding path, so kind/target matching uses whole-string `==`
+#     against explicitly built components only. No ordering (`<`/`>`) on text.
+#   - call depth stays shallow: validation is one flat function over scalars.
+#
+# Everything here is PURE: the manifest is data. Reading it off a disk /
+# descriptor is a later increment (§24.8, descriptor-based exec).
+
+use os.kernel.types.capability_types.{
+    CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_EXEC, CAP_RIGHT_ADMIN,
+    CAP_RIGHT_MOUNT, CAP_RIGHT_QUEUE_SUBMIT, CAP_RIGHT_MAP,
+    CAP_RIGHT_DATASET_BUILD, CAP_RIGHT_QUEUE_RECV
+}
+use os.kernel.loader.spawn_authority.{spawn_effective_rights, spawn_rights_is_subset}
+
+# ============================================================================
+# Format version + artifact kinds (function-returning constants)
+# ============================================================================
+
+pub fn manifest_format_version() -> i64:
+    """The only `format_version` this loader accepts. A manifest from the
+    future is REJECTED, never best-effort interpreted (fail closed)."""
+    1
+
+pub fn manifest_kind_elf() -> text:
+    """ELF64 executable (native host / SimpleOS ring-3 binary)."""
+    "elf"
+
+pub fn manifest_kind_smf() -> text:
+    """Simple Module Format artifact (bytecode/module graph)."""
+    "smf"
+
+pub fn manifest_kind_script() -> text:
+    """Interpreted source (.spl/.shs/...). Requires a declared interpreter."""
+    "script"
+
+pub fn manifest_kind_native_simple() -> text:
+    """Native-Simple artifact carrying a `SIMPLE_LAUNCH_V1` trailer."""
+    "native_simple"
+
+pub fn manifest_kind_is_known(kind: text) -> bool:
+    """Whole-string equality against the four explicitly built kind names.
+    Deliberately NOT a list lookup: module-level `[text]` does not survive the
+    freestanding build, and this stays a shallow flat compare."""
+    if kind == manifest_kind_elf():
+        return true
+    if kind == manifest_kind_smf():
+        return true
+    if kind == manifest_kind_script():
+        return true
+    if kind == manifest_kind_native_simple():
+        return true
+    false
+
+# ============================================================================
+# Rejection reasons — one distinct reason per failure mode
+# ============================================================================
+
+pub fn manifest_reason_ok() -> text:
+    """The manifest passed every check."""
+    "ok"
+
+pub fn manifest_reason_bad_format_version() -> text:
+    """`format_version` is not the version this loader speaks."""
+    "unsupported_format_version"
+
+pub fn manifest_reason_unknown_kind() -> text:
+    """`artifact_kind` is not one of elf/smf/script/native_simple."""
+    "unknown_artifact_kind"
+
+pub fn manifest_reason_empty_entrypoint() -> text:
+    """`entrypoint` is empty — nothing to execute."""
+    "empty_entrypoint"
+
+pub fn manifest_reason_script_without_interpreter() -> text:
+    """A script artifact declared no interpreter. Fail closed: the loader must
+    NOT pick a default interpreter for untrusted source."""
+    "script_without_interpreter"
+
+pub fn manifest_reason_target_mismatch() -> text:
+    """The manifest's target triple is not the running target."""
+    "target_triple_mismatch"
+
+pub fn manifest_reason_signature_without_hash() -> text:
+    """A signature is present but no content hash covers the bytes it signs —
+    an unbound signature proves nothing, so it is rejected."""
+    "signature_without_content_hash"
+
+# ============================================================================
+# Value structs (no classes, no traits — plain data)
+# ============================================================================
+
+pub struct ManifestTarget:
+    """A target triple. `"any"` in a field is an explicit wildcard; an EMPTY
+    field is NOT a wildcard (fail closed — an unset target never matches)."""
+    os: text
+    arch: text
+    abi: text
+
+pub struct ManifestResourceLimits:
+    """Hard ceilings the process is created with. `0` means "no manifest
+    opinion"; the system policy ceiling still applies on top."""
+    max_memory_bytes: i64
+    max_open_handles: i64
+    max_threads: i64
+    cpu_budget_us: i64
+
+pub struct ManifestArgument:
+    """One entry of the §12 `argument_schema`. The generated minimal arg parser
+    accepts exactly these names — nothing else is parsed."""
+    name: text
+    value_kind: text
+    required: bool
+    default_value: text
+
+pub struct ManifestPreload:
+    """One entry of the §12 `startup_preloads`. Either `source_arg` (bind to a
+    declared argument) or `fixed_path` (a constant path). Only DECLARED
+    preloads are ever opened — no directory scanning."""
+    source_arg: text
+    fixed_path: text
+    mode: text
+    required: bool
+    maximum_bytes: i64
+    access: text
+    prefault: bool
+    hash_policy: text
+
+pub struct ManifestCheck:
+    """Plain outcome struct — deliberately NOT a cross-module `Result`, whose
+    `Ok`/`Err` constructors do not resolve inside imported method bodies."""
+    ok: bool
+    reason: text
+
+pub struct SimpleArtifactManifest:
+    """The single §5.3 descriptor for every artifact kind."""
+    format_version: i64
+    artifact_kind: text
+    target: ManifestTarget
+    entrypoint: text
+    required_abi_features: [text]
+    required_services: [text]
+    required_capabilities: u32
+    resource_limits: ManifestResourceLimits
+    namespace_template: text
+    native_libraries: [text]
+    smf_libraries: [text]
+    interpreter: text
+    argument_schema: [ManifestArgument]
+    startup_preloads: [ManifestPreload]
+    content_hashes: [text]
+    signature: text
+    debug_identity: text
+
+# ============================================================================
+# Running target
+# ============================================================================
+
+pub fn manifest_running_target() -> ManifestTarget:
+    """The target this loader is running as. A function-returning constant so
+    it survives the freestanding build (a module-level struct `val` would
+    not)."""
+    ManifestTarget(os: "simpleos", arch: "x86_64", abi: "simpleos")
+
+pub fn manifest_target_matches(want: ManifestTarget, running: ManifestTarget) -> bool:
+    """Field-wise whole-string match with an explicit `"any"` wildcard. Empty
+    is never a wildcard."""
+    if not _manifest_field_matches(want.os, running.os):
+        return false
+    if not _manifest_field_matches(want.arch, running.arch):
+        return false
+    _manifest_field_matches(want.abi, running.abi)
+
+fn _manifest_field_matches(want: text, running: text) -> bool:
+    if want == "any":
+        return true
+    want == running
+
+# ============================================================================
+# Per-kind skeletons
+# ============================================================================
+
+fn _manifest_default_limits() -> ManifestResourceLimits:
+    ManifestResourceLimits(
+        max_memory_bytes: 0,
+        max_open_handles: 0,
+        max_threads: 0,
+        cpu_budget_us: 0
+    )
+
+pub fn manifest_kind_base_rights(kind: text) -> u32:
+    """Rights every artifact of this kind needs just to start.
+
+    A SCRIPT gets no EXEC: the interpreter image is what executes, the script
+    bytes are only read and mapped."""
+    if kind == manifest_kind_script():
+        return CAP_RIGHT_READ | CAP_RIGHT_MAP
+    if manifest_kind_is_known(kind):
+        return CAP_RIGHT_READ | CAP_RIGHT_EXEC | CAP_RIGHT_MAP
+    0u32
+
+pub fn manifest_kind_allowed_rights(kind: text) -> u32:
+    """The absolute maximum a manifest of this kind may ever request.
+
+    CAP_RIGHT_ADMIN is absent from EVERY kind: a manifest can never request
+    admin authority — that has to come from the parent/system side, not from a
+    file on disk. A script additionally can never request EXEC or MOUNT. An
+    unknown kind is allowed nothing."""
+    if kind == manifest_kind_script():
+        return CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_MAP |
+            CAP_RIGHT_QUEUE_SUBMIT | CAP_RIGHT_QUEUE_RECV
+    if manifest_kind_is_known(kind):
+        return CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_EXEC | CAP_RIGHT_MAP |
+            CAP_RIGHT_MOUNT | CAP_RIGHT_QUEUE_SUBMIT | CAP_RIGHT_QUEUE_RECV |
+            CAP_RIGHT_DATASET_BUILD
+    0u32
+
+pub fn manifest_for_kind(kind: text) -> SimpleArtifactManifest:
+    """A typed skeleton for `kind`, carrying that kind's defaults.
+
+    The skeleton is DELIBERATELY not yet valid: `entrypoint` is empty and a
+    script's `interpreter` is empty, so `manifest_validate` rejects a skeleton
+    that was never bound to a real artifact (fail closed — an unfinished
+    descriptor must never execute)."""
+    SimpleArtifactManifest(
+        format_version: manifest_format_version(),
+        artifact_kind: kind,
+        target: manifest_running_target(),
+        entrypoint: "",
+        required_abi_features: _manifest_kind_abi_features(kind),
+        required_services: [],
+        required_capabilities: manifest_kind_base_rights(kind),
+        resource_limits: _manifest_default_limits(),
+        namespace_template: _manifest_kind_namespace(kind),
+        native_libraries: [],
+        smf_libraries: [],
+        interpreter: "",
+        argument_schema: [],
+        startup_preloads: [],
+        content_hashes: [],
+        signature: "",
+        debug_identity: ""
+    )
+
+fn _manifest_kind_abi_features(kind: text) -> [text]:
+    if kind == manifest_kind_elf():
+        return ["elf64", "w_xor_x"]
+    if kind == manifest_kind_smf():
+        return ["smf1", "module_graph"]
+    if kind == manifest_kind_script():
+        return ["script_host"]
+    if kind == manifest_kind_native_simple():
+        return ["simple_rt", "launch_meta_v1"]
+    []
+
+fn _manifest_kind_namespace(kind: text) -> text:
+    if manifest_kind_is_known(kind):
+        return "app_default"
+    ""
+
+# ============================================================================
+# Pure builders (the manifest is immutable data — never mutate through
+# two struct-field hops; always rebuild and return)
+# ============================================================================
+
+pub fn manifest_with_entrypoint(m: SimpleArtifactManifest, entrypoint: text) -> SimpleArtifactManifest:
+    """Bind the skeleton to a concrete entrypoint."""
+    var out = m
+    out.entrypoint = entrypoint
+    out
+
+pub fn manifest_with_interpreter(m: SimpleArtifactManifest, interpreter: text) -> SimpleArtifactManifest:
+    """Declare the interpreter a script artifact must be run under."""
+    var out = m
+    out.interpreter = interpreter
+    out
+
+pub fn manifest_with_target(m: SimpleArtifactManifest, target: ManifestTarget) -> SimpleArtifactManifest:
+    """Override the target triple (cross-target descriptors, test fixtures)."""
+    var out = m
+    out.target = target
+    out
+
+pub fn manifest_with_signature(
+    m: SimpleArtifactManifest,
+    signature: text,
+    content_hashes: [text]
+) -> SimpleArtifactManifest:
+    """Attach a signature together with the hashes it binds. Passing an empty
+    hash list is what `manifest_reason_signature_without_hash` catches."""
+    var out = m
+    out.signature = signature
+    out.content_hashes = content_hashes
+    out
+
+pub fn manifest_with_libraries(
+    m: SimpleArtifactManifest,
+    native_libraries: [text],
+    smf_libraries: [text]
+) -> SimpleArtifactManifest:
+    """Declare the allowed library set (the loader resolves NOTHING else)."""
+    var out = m
+    out.native_libraries = native_libraries
+    out.smf_libraries = smf_libraries
+    out
+
+pub fn manifest_with_startup(
+    m: SimpleArtifactManifest,
+    argument_schema: [ManifestArgument],
+    startup_preloads: [ManifestPreload]
+) -> SimpleArtifactManifest:
+    """Attach the §12 startup contract: the arg names the generated parser
+    accepts and the preloads `_start` may open before `main()`."""
+    var out = m
+    out.argument_schema = argument_schema
+    out.startup_preloads = startup_preloads
+    out
+
+pub fn manifest_with_requested_rights(m: SimpleArtifactManifest, rights: u32) -> SimpleArtifactManifest:
+    """Set the raw requested rights. The request is still clamped by
+    `manifest_kind_allowed_rights` in `manifest_required_rights`."""
+    var out = m
+    out.required_capabilities = rights
+    out
+
+# ============================================================================
+# Validation — fail closed, one distinct reason per failure
+# ============================================================================
+
+pub fn manifest_validate_for_target(
+    m: SimpleArtifactManifest,
+    running: ManifestTarget
+) -> ManifestCheck:
+    """Fail-closed validation against an explicit running target.
+
+    Checks are ordered so each rejection reports its OWN reason rather than
+    being masked by a later one."""
+    if m.format_version != manifest_format_version():
+        return ManifestCheck(ok: false, reason: manifest_reason_bad_format_version())
+    if not manifest_kind_is_known(m.artifact_kind):
+        return ManifestCheck(ok: false, reason: manifest_reason_unknown_kind())
+    if m.entrypoint == "":
+        return ManifestCheck(ok: false, reason: manifest_reason_empty_entrypoint())
+    if m.artifact_kind == manifest_kind_script() and m.interpreter == "":
+        return ManifestCheck(ok: false, reason: manifest_reason_script_without_interpreter())
+    if not manifest_target_matches(m.target, running):
+        return ManifestCheck(ok: false, reason: manifest_reason_target_mismatch())
+    if m.signature != "" and m.content_hashes.len() == 0:
+        return ManifestCheck(ok: false, reason: manifest_reason_signature_without_hash())
+    ManifestCheck(ok: true, reason: manifest_reason_ok())
+
+pub fn manifest_validate(m: SimpleArtifactManifest) -> ManifestCheck:
+    """Fail-closed validation against the running target."""
+    manifest_validate_for_target(m, manifest_running_target())
+
+# ============================================================================
+# Rights — the executable policy ceiling and the §5.4 intersection
+# ============================================================================
+
+pub fn manifest_required_rights(m: SimpleArtifactManifest) -> u32:
+    """The `executable_policy_ceiling` this artifact may request.
+
+    = (declared request | kind base rights | rights implied by declared
+      libraries/preloads) CLAMPED BY `manifest_kind_allowed_rights`.
+
+    The final clamp is what makes this a ceiling and not an amplifier: no
+    combination of declared fields can produce a bit the kind does not allow
+    (notably CAP_RIGHT_ADMIN, which no kind allows)."""
+    var rights: u32 = m.required_capabilities | manifest_kind_base_rights(m.artifact_kind)
+    if m.native_libraries.len() > 0 or m.smf_libraries.len() > 0:
+        rights = rights | CAP_RIGHT_MAP
+    if m.startup_preloads.len() > 0:
+        rights = rights | CAP_RIGHT_READ | CAP_RIGHT_MAP
+    rights & manifest_kind_allowed_rights(m.artifact_kind)
+
+pub fn manifest_effective_rights(
+    m: SimpleArtifactManifest,
+    parent_delegable: u32,
+    system_ceiling: u32
+) -> u32:
+    """`effective = parent_delegable & executable_ceiling & system_ceiling &
+    manifest_request` (master plan §5.4).
+
+    Composed from the LANDED `spawn_authority.spawn_effective_rights` rather
+    than re-derived, so both call sites share one intersection implementation.
+    The executable ceiling and the manifest request are both
+    `manifest_required_rights(m)` — the clamped request IS the ceiling here.
+    Explicit denials are 0 at this layer: denials are a spawn-site input
+    (`SpawnSpec`), not a property of the artifact."""
+    val ceiling = manifest_required_rights(m)
+    spawn_effective_rights(parent_delegable, ceiling, system_ceiling, ceiling, 0u32)
+
+pub fn manifest_rights_within_ceilings(
+    m: SimpleArtifactManifest,
+    parent_delegable: u32,
+    system_ceiling: u32
+) -> bool:
+    """Self-check: the computed effective rights are a subset of the artifact
+    ceiling, the parent's delegable rights, AND the system ceiling. Reuses
+    `spawn_authority.spawn_rights_is_subset` so "subset" means one thing
+    everywhere."""
+    val eff = manifest_effective_rights(m, parent_delegable, system_ceiling)
+    if not spawn_rights_is_subset(eff, manifest_required_rights(m)):
+        return false
+    if not spawn_rights_is_subset(eff, parent_delegable):
+        return false
+    spawn_rights_is_subset(eff, system_ceiling)
+
+# ============================================================================
+# Adapter from the EXISTING launch metadata (no second manifest — §4)
+# ============================================================================
+
+pub fn manifest_kind_from_launch_entry_kind(entry_kind: text) -> text:
+    """Map `launch_metadata.startup_detect_launch_kind`'s vocabulary
+    (`native` / `smf` / `script`) onto §5.3 artifact kinds. `native` becomes
+    `native_simple` because that is what the host producer emits (a
+    `SIMPLE_LAUNCH_V1` trailer); a plain foreign ELF is classified `elf` by the
+    byte sniffer instead."""
+    if entry_kind == "smf":
+        return manifest_kind_smf()
+    if entry_kind == "script":
+        return manifest_kind_script()
+    if entry_kind == "native":
+        return manifest_kind_native_simple()
+    if manifest_kind_is_known(entry_kind):
+        return entry_kind
+    ""
+
+pub fn manifest_from_launch_metadata(
+    entry_kind: text,
+    target_os: text,
+    target_arch: text,
+    target_abi: text,
+    entrypoint: text,
+    native_libraries: [text],
+    smf_libraries: [text]
+) -> SimpleArtifactManifest:
+    """Project an already-parsed `LaunchMetadata` (from
+    `src/app/startup/launch_metadata.spl` — its sidecar, its SMF section-15
+    payload, or its `SIMPLE_LAUNCH_V1` native trailer) into the unified
+    manifest.
+
+    Taken as loose fields rather than the `LaunchMetadata` struct so the
+    kernel loader does not import the host-side startup module (and so this
+    stays freestanding-safe). The FIELD NAMES are deliberately identical: this
+    is a projection of the existing descriptor, not a rival one."""
+    val kind = manifest_kind_from_launch_entry_kind(entry_kind)
+    val skeleton = manifest_for_kind(kind)
+    val targeted = manifest_with_target(
+        skeleton,
+        ManifestTarget(os: target_os, arch: target_arch, abi: target_abi)
+    )
+    manifest_with_libraries(
+        manifest_with_entrypoint(targeted, entrypoint),
+        native_libraries,
+        smf_libraries
+    )
+
+pub fn manifest_summary(m: SimpleArtifactManifest) -> text:
+    """Single-line, greppable identity for serial logs and spawn traces.
+    Mirrors `launch_metadata.startup_feature_summary`'s shape."""
+    "kind=" + m.artifact_kind +
+        "|os=" + m.target.os +
+        "|arch=" + m.target.arch +
+        "|abi=" + m.target.abi +
+        "|entry=" + m.entrypoint +
+        "|interp=" + m.interpreter +
+        "|ns=" + m.namespace_template
