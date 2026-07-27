@@ -1155,6 +1155,26 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   duplicate or absorb that builder work while continuing the font evidence
   lane.
 
+### 2026-07-27 font push and release-builder admission cap
+
+- The completed font lane is pushed on `main` as commit `bbb98e957a`.
+  This supersedes the earlier local/unpushed font checkpoint; it does not
+  establish Vulkan live evidence.
+- The isolated release-path builder/admission lane remains uncommitted and
+  unpushed. Its mechanical hardening is present locally: host binding, an
+  exact seed classifier, private compiler and provider snapshots, a
+  backend-local cache, an admission transcript, and an executable self-test.
+- Release provenance still does not attest the exact Stage 3 producer command
+  that created the release binary. The hardened builder therefore cannot yet
+  admit that binary as authoritative release evidence.
+- Two downstream static specifications remain red. Cleanup of the private
+  compiler/provider snapshots is also not bounded, so the lane is not ready
+  for merge or release use.
+- The builder lane has reached its mandatory three-cycle cap. No bootstrap and
+  no Vulkan live run were performed in that lane. Leave its changes local and
+  resume only in a fresh bounded session that first closes producer-command
+  provenance, the two static failures, and bounded snapshot cleanup.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
