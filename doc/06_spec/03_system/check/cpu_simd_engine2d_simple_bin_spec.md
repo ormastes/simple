@@ -56,6 +56,8 @@ the wrapper skips instead of falling back to `src/compiler_rust/**`.
   blend edge cases for transparent, opaque, low-alpha, and high-alpha pixels.
 - REQ-CPU-SIMD-ENGINE2D-BIN-008: An explicitly pinned binary must pass the
   runnable SIMD smoke before the full evidence program starts.
+- REQ-CPU-SIMD-ENGINE2D-BIN-009: Source-contract evidence rejects RVV helpers
+  that are present but disconnected from either public fill or copy dispatch.
 
 ## Plan
 
@@ -190,7 +192,7 @@ expect(src_code).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 61 lines folded for reproduction.
+Runnable source: 91 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -222,6 +224,9 @@ expect(script).to_contain("frame-receipt-invalid")
 expect(script).to_contain("frame_receipt_sha256")
 expect(script).to_contain("execution_environment")
 expect(script).to_contain("target-binary-builds-and-rendered-frames-pass")
+expect(script).to_contain("CPU_SIMD_ARCH_MATRIX_RUNTIME_SOURCE")
+expect(script).to_contain("missing-riscv-fill-dispatch")
+expect(script).to_contain("missing-riscv-copy-dispatch")
 
 val runtime = file_read("src/runtime/runtime_simd_dispatch.c")
 expect(runtime).to_contain("__riscv_vector")
@@ -255,6 +260,28 @@ expect(strict_code).to_equal(1)
 val strict_evidence = file_read(strict_root + "/evidence.env")
 expect(strict_evidence).to_contain("cpu_simd_engine2d_arch_matrix_status=fail")
 expect(strict_evidence).to_contain("cpu_simd_engine2d_arch_matrix_reason=strict-requires-all-arches-pass")
+
+step("Disconnect RVV copy dispatch while retaining its helper and intrinsics")
+val mutation_root = root + "-rvv-copy-disconnected"
+expect(dir_create_all(mutation_root)).to_be(true)
+val mutated_runtime = runtime.replace(
+    "engine2d_copy_u32_rvv(dst_start, src_start, n);",
+    "memmove(dst_start, src_start, (size_t)n * sizeof(int64_t));"
+)
+expect(mutated_runtime).to_contain("engine2d_copy_u32_rvv(")
+expect(mutated_runtime.contains("engine2d_copy_u32_rvv(dst_start, src_start, n);")).to_be(false)
+val mutated_path = mutation_root + "/runtime_simd_dispatch.c"
+expect(file_write(mutated_path, mutated_runtime)).to_be(true)
+
+step("Reject the disconnected public RVV copy route")
+val mutation_command = "CPU_SIMD_ARCH_MATRIX_SKIP_RUN=1 CPU_SIMD_ARCH_MATRIX_RUNTIME_SOURCE=" + mutated_path + " BUILD_DIR=" + mutation_root + "/out REPORT_PATH=" + mutation_root + "/report.md sh scripts/check/check-cpu-simd-engine2d-arch-matrix.shs > " + mutation_root + "/stdout.txt"
+val (_mutation_stdout, _mutation_stderr, mutation_code) = process_run(
+    "/bin/sh", ["-c", mutation_command]
+)
+expect(mutation_code).to_equal(1)
+val mutation_evidence = file_read(mutation_root + "/out/evidence.env")
+expect(mutation_evidence).to_contain("cpu_simd_engine2d_arch_matrix_source_contract_status=fail")
+expect(mutation_evidence).to_contain("cpu_simd_engine2d_arch_matrix_source_contract_reason=missing-riscv-copy-dispatch")
 ```
 
 </details>

@@ -36,6 +36,13 @@ whether its source shell architecture matched the executed ISA. Retained
 `native_host` receipts may be aggregated anywhere; QEMU/emulated receipts stay
 blocked.
 
+The architecture-matrix source contract also binds the public Engine2D fill
+and copy entrypoints to their RVV implementations. Merely retaining RVV helper
+functions or intrinsics is insufficient: disconnecting either call reports
+`missing-riscv-fill-dispatch` or `missing-riscv-copy-dispatch` and fails the
+matrix. Tests may point `CPU_SIMD_ARCH_MATRIX_RUNTIME_SOURCE` at a mutated copy
+to calibrate this failure; normal evidence leaves it unset.
+
 The Vulkan row accepts only the canonical readback report with an overall and
 spec status of `pass`, Vulkan availability/backend identity, exercised present
 and readback paths, positive clear/rectangle pixel counts, exact expected and

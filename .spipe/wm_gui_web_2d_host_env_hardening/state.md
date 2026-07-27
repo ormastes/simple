@@ -946,3 +946,12 @@ Tracking split:
   ABI link gaps, so TODO592 remains open for fresh Stage-4 execution/docgen.
   Its three-cycle cap is exhausted; no full bootstrap, rendering, or QEMU run
   occurred.
+- rvv-public-route-contract: A small parallel AC-1/AC-5 audit found that dead
+  RVV helpers and intrinsics could satisfy every source-only check after the
+  public Engine2D copy route was disconnected. The architecture matrix now
+  checks exact public RVV fill/copy call anchors, records the inspected runtime
+  source, and exposes a test-only source override for mutation calibration.
+  The unchanged owner reports `source_contract_status=pass`; a deliberate
+  copy-route mutation retains the helper/intrinsics but exits 1 with
+  `missing-riscv-copy-dispatch`. Cross-ISA native/QEMU performance rows remain
+  blocked and were not promoted by this source contract.
