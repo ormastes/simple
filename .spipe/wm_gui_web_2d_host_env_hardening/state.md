@@ -828,3 +828,11 @@ Tracking split:
   metadata text cannot fabricate replay evidence. Focused unit tests pass 7/7,
   the no-GPU system contract passes 5/5, and docgen produced two complete
   manuals with zero stubs. Live GPU/QEMU capture evidence was not rerun.
+- bugfix: Closed the hosted framebuffer readback identity false-green found by
+  the parallel readback audit. The shared classifier now reuses the complete
+  screen-to-WM semantic receipt and requires exact glyph hashes, changed
+  baseline/input revisions, frame checksums, and capture hashes, stable backend
+  and handle identity, and device readback for both frames. The focused unit
+  suite passes 13/13; docgen updated the unit and umbrella system manuals with
+  zero stubs. The umbrella live-host scenario was not rerun because its native
+  display/GPU receipts are environment-owned.

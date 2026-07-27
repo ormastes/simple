@@ -129,6 +129,43 @@ fn complete_simd_evidence(arch: text = "x86_64", feature: text = "avx2") -> text
         "cpu_simd_evidence_policy=exact-bitmap-no-blur-no-tolerance\n" +
         "cpu_simd_evidence_blur_or_tolerance_used=false"
 
+fn complete_display_input_evidence() -> text:
+    "linux_hosted_wm_live_window_status=pass\n" +
+        "linux_hosted_wm_live_window_input_receipt_status=pass\n" +
+        "linux_hosted_wm_live_window_semantic_status=pass\n" +
+        "linux_hosted_wm_live_window_text_status=pass\n" +
+        "linux_hosted_wm_live_window_event_origin=screen\n" +
+        "linux_hosted_wm_live_window_event_id=7\n" +
+        "linux_hosted_wm_live_window_wm_target_id=41\n" +
+        "linux_hosted_wm_live_window_semantic_target_id=host-proof\n" +
+        "linux_hosted_wm_live_window_callback_count=1\n" +
+        "linux_hosted_wm_live_window_mutation_revision=1\n" +
+        "linux_hosted_wm_live_window_replay_rejection_status=pass\n" +
+        "linux_hosted_wm_live_window_frame_marker=pass\n" +
+        "linux_hosted_wm_live_window_frame_correlation_status=pass"
+
+fn complete_readback_evidence() -> text:
+    complete_display_input_evidence() + "\n" +
+        "linux_hosted_wm_live_window_framebuffer_status=pass\n" +
+        "linux_hosted_wm_live_window_glyph_crop_status=pass\n" +
+        "linux_hosted_wm_live_window_glyph_crop_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n" +
+        "linux_hosted_wm_live_window_glyph_crop_expected_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n" +
+        "linux_hosted_wm_live_window_glyph_crop_live_match=true\n" +
+        "linux_hosted_wm_live_window_baseline_nonce=1\n" +
+        "linux_hosted_wm_live_window_input_nonce=2\n" +
+        "linux_hosted_wm_live_window_baseline_revision=7\n" +
+        "linux_hosted_wm_live_window_input_revision=8\n" +
+        "linux_hosted_wm_live_window_baseline_frame_checksum=99\n" +
+        "linux_hosted_wm_live_window_input_frame_checksum=101\n" +
+        "linux_hosted_wm_live_window_baseline_backend=vulkan\n" +
+        "linux_hosted_wm_live_window_input_backend=vulkan\n" +
+        "linux_hosted_wm_live_window_baseline_readback_source=device_readback\n" +
+        "linux_hosted_wm_live_window_input_readback_source=device_readback\n" +
+        "linux_hosted_wm_live_window_baseline_backend_handle=41\n" +
+        "linux_hosted_wm_live_window_input_backend_handle=41\n" +
+        "linux_hosted_wm_live_window_baseline_capture_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" +
+        "linux_hosted_wm_live_window_input_capture_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
 describe "host environment evidence contract":
 
     # @req REQ-001 REQ-007 REQ-008 REQ-009 REQ-010
@@ -196,13 +233,25 @@ describe "render pipeline evidence contract":
         expect(receipt(nonblank: 0).validation_reason()).to_equal("blank-frame")
 
 describe "live framebuffer evidence classification":
-    it "accepts only device readback with a real framebuffer and exact live crop":
-        val complete = "linux_hosted_wm_live_window_input_readback_source=device_readback\nlinux_hosted_wm_live_window_framebuffer_status=pass\nlinux_hosted_wm_live_window_glyph_crop_live_match=true"
+    it "accepts only a changed device frame tied to the screen event receipt":
+        val complete = complete_readback_evidence()
         expect(host_readback_evidence_passes(complete)).to_be(true)
-        expect(host_readback_evidence_passes(complete.replace("device_readback", "cpu_mirror"))).to_be(false)
+        expect(host_readback_evidence_passes(complete.replace("event_origin=screen", "event_origin=synthetic"))).to_be(false)
         expect(host_readback_evidence_passes(complete.replace("framebuffer_status=pass", "framebuffer_status=fail"))).to_be(false)
+        expect(host_readback_evidence_passes(complete.replace("glyph_crop_status=pass", "glyph_crop_status=fail"))).to_be(false)
+        expect(host_readback_evidence_passes(complete.replace("glyph_crop_expected_sha256=cccc", "glyph_crop_expected_sha256=dddd"))).to_be(false)
         expect(host_readback_evidence_passes(complete.replace("glyph_crop_live_match=true", "glyph_crop_live_match=false"))).to_be(false)
-        expect(host_readback_evidence_passes("prefixed_" + complete)).to_be(false)
+        expect(host_readback_evidence_passes(complete.replace("baseline_nonce=1", "baseline_nonce=2"))).to_be(false)
+        expect(host_readback_evidence_passes(complete.replace("input_revision=8", "input_revision=7"))).to_be(false)
+        expect(host_readback_evidence_passes(complete.replace("input_frame_checksum=101", "input_frame_checksum=99"))).to_be(false)
+        expect(host_readback_evidence_passes(complete.replace("input_backend=vulkan", "input_backend=cpu"))).to_be(false)
+        expect(host_readback_evidence_passes(complete.replace("baseline_readback_source=device_readback", "baseline_readback_source=cpu_mirror"))).to_be(false)
+        expect(host_readback_evidence_passes(complete.replace("input_backend_handle=41", "input_backend_handle=42"))).to_be(false)
+        expect(host_readback_evidence_passes(complete.replace(
+            "input_capture_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "input_capture_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ))).to_be(false)
+        expect(host_readback_evidence_passes(complete + "\nlinux_hosted_wm_live_window_input_revision=9")).to_be(false)
 
 describe "host evidence classification":
     it "requires the complete retained x86 SIMD rendering receipt":
@@ -314,7 +363,7 @@ describe "host evidence classification":
         """A screen event is evidence only when its WM, semantic callback,
         replay rejection, and rendered-frame receipts agree."""
         step("Classify one complete screen-to-WM semantic frame receipt")
-        val complete = "linux_hosted_wm_live_window_status=pass\nlinux_hosted_wm_live_window_input_receipt_status=pass\nlinux_hosted_wm_live_window_semantic_status=pass\nlinux_hosted_wm_live_window_text_status=pass\nlinux_hosted_wm_live_window_event_origin=screen\nlinux_hosted_wm_live_window_event_id=7\nlinux_hosted_wm_live_window_wm_target_id=41\nlinux_hosted_wm_live_window_semantic_target_id=host-proof\nlinux_hosted_wm_live_window_callback_count=1\nlinux_hosted_wm_live_window_mutation_revision=1\nlinux_hosted_wm_live_window_replay_rejection_status=pass\nlinux_hosted_wm_live_window_frame_marker=pass\nlinux_hosted_wm_live_window_frame_correlation_status=pass"
+        val complete = complete_display_input_evidence()
         expect(host_display_input_evidence_passes(complete)).to_be(true)
 
         step("Reject receipts with any missing or inconsistent hop")

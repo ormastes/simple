@@ -61,7 +61,7 @@ describe "production host event and render evidence":
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 57 lines folded for reproduction.
+Runnable source: 63 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -106,6 +106,12 @@ expect(live).to_contain("linux_hosted_wm_live_window_framebuffer_status=pass")
 expect(live).to_contain("linux_hosted_wm_live_window_input_readback_source=device_readback")
 expect(live).to_contain("linux_hosted_wm_live_window_input_backend_handle=")
 expect(live).to_contain("linux_hosted_wm_live_window_glyph_crop_live_match=true")
+expect(live).to_contain("linux_hosted_wm_live_window_baseline_nonce=1")
+expect(live).to_contain("linux_hosted_wm_live_window_input_nonce=2")
+expect(live).to_contain("linux_hosted_wm_live_window_baseline_frame_checksum=")
+expect(live).to_contain("linux_hosted_wm_live_window_input_frame_checksum=")
+expect(live).to_contain("linux_hosted_wm_live_window_baseline_capture_sha256=")
+expect(live).to_contain("linux_hosted_wm_live_window_input_capture_sha256=")
 expect(live).to_contain("linux_hosted_wm_live_window_compatibility_fallback_status=pass")
 
 step("Capture the Vulkan frame with RenderDoc")
@@ -131,7 +137,7 @@ expect(perf).to_contain("gui_showcase_4k_200fps_max_rss_kb=")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -149,6 +155,10 @@ expect(app).to_contain("build/linux-hosted-wm-live-window-evidence/evidence.env"
 expect(app).to_contain("HostCapabilityRow")
 expect(contract).to_contain("linux_hosted_wm_live_window_input_readback_source=device_readback")
 expect(contract).to_contain("linux_hosted_wm_live_window_glyph_crop_live_match=true")
+expect(contract).to_contain("host_display_input_evidence_passes(evidence)")
+expect(contract).to_contain("linux_hosted_wm_live_window_baseline_capture_sha256")
+expect(contract).to_contain("linux_hosted_wm_live_window_input_capture_sha256")
+expect(contract).to_contain("_host_evidence_values_differ")
 expect(app.contains("argb_mismatch_count=0")).to_be(false)
 expect(app).to_contain("blocked")
 ```

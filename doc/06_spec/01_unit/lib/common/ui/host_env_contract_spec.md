@@ -177,21 +177,33 @@ expect(receipt(nonblank: 0).validation_reason()).to_equal("blank-frame")
 
 ### live framebuffer evidence classification
 
-#### accepts only device readback with a real framebuffer and exact live crop
+#### accepts only a changed device frame tied to the screen event receipt
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val complete = "linux_hosted_wm_live_window_input_readback_source=device_readback\nlinux_hosted_wm_live_window_framebuffer_status=pass\nlinux_hosted_wm_live_window_glyph_crop_live_match=true"
+val complete = complete_readback_evidence()
 expect(host_readback_evidence_passes(complete)).to_be(true)
-expect(host_readback_evidence_passes(complete.replace("device_readback", "cpu_mirror"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("event_origin=screen", "event_origin=synthetic"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("framebuffer_status=pass", "framebuffer_status=fail"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("glyph_crop_status=pass", "glyph_crop_status=fail"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("glyph_crop_expected_sha256=cccc", "glyph_crop_expected_sha256=dddd"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("glyph_crop_live_match=true", "glyph_crop_live_match=false"))).to_be(false)
-expect(host_readback_evidence_passes("prefixed_" + complete)).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("baseline_nonce=1", "baseline_nonce=2"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("input_revision=8", "input_revision=7"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("input_frame_checksum=101", "input_frame_checksum=99"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("input_backend=vulkan", "input_backend=cpu"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("baseline_readback_source=device_readback", "baseline_readback_source=cpu_mirror"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("input_backend_handle=41", "input_backend_handle=42"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace(
+    "input_capture_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "input_capture_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+))).to_be(false)
+expect(host_readback_evidence_passes(complete + "\nlinux_hosted_wm_live_window_input_revision=9")).to_be(false)
 ```
 
 </details>
@@ -350,7 +362,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Classify one complete screen-to-WM semantic frame receipt")
-val complete = "linux_hosted_wm_live_window_status=pass\nlinux_hosted_wm_live_window_input_receipt_status=pass\nlinux_hosted_wm_live_window_semantic_status=pass\nlinux_hosted_wm_live_window_text_status=pass\nlinux_hosted_wm_live_window_event_origin=screen\nlinux_hosted_wm_live_window_event_id=7\nlinux_hosted_wm_live_window_wm_target_id=41\nlinux_hosted_wm_live_window_semantic_target_id=host-proof\nlinux_hosted_wm_live_window_callback_count=1\nlinux_hosted_wm_live_window_mutation_revision=1\nlinux_hosted_wm_live_window_replay_rejection_status=pass\nlinux_hosted_wm_live_window_frame_marker=pass\nlinux_hosted_wm_live_window_frame_correlation_status=pass"
+val complete = complete_display_input_evidence()
 expect(host_display_input_evidence_passes(complete)).to_be(true)
 
 step("Reject receipts with any missing or inconsistent hop")
