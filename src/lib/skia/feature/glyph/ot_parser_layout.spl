@@ -119,17 +119,14 @@ class GposLookup:
 class LayoutLookupActivation:
     lookup_index: i64
     feature_mask: u64
-
 class LayoutFeatureActivation:
     feature_tag: u32
     feature_mask: u64
-
 class LayoutLookupPlan:
     valid: bool
     lookup_indices: [i64]
     activations: [LayoutLookupActivation]
     features: [LayoutFeatureActivation]
-
 class _LayoutVariationSelection:
     valid: bool
     substitution: i64
@@ -140,7 +137,6 @@ fn _layout_feature_variations_header_valid(blob: [u8], base: i64, limit: i64, of
     if read_u16_be(blob, variations) != 1u32 or read_u16_be(blob, variations + 2) != 0u32: return false
     val count = read_u32_be(blob, variations + 4) as i64
     count <= (limit - variations - 8) / 8
-
 fn _layout_feature_variations_valid(blob: [u8], base: i64, limit: i64, offset: i64,
                                     feature_count: i64, lookup_count: i64) -> bool:
     if not _layout_feature_variations_header_valid(blob, base, limit, offset): return false
@@ -181,51 +177,52 @@ fn _layout_feature_variations_valid(blob: [u8], base: i64, limit: i64, offset: i
             for condition in condition_offsets:
                 val condition_table = condition_set + condition
                 val condition_table_end = _nearest_sibling_end(condition_set, condition_offsets, condition, condition_end)
-                if condition_table < condition_records_end or condition_table + 8 > condition_table_end or read_u16_be(blob, condition_table) != 1u32:
-                    return false
-                val minimum = read_f2dot14(blob, condition_table + 4)
-                val maximum = read_f2dot14(blob, condition_table + 6)
-                if minimum < -1.0 or maximum > 1.0 or minimum > maximum: return false
+                if condition_table < condition_records_end or condition_table + 2 > condition_table_end: return false
+                if read_u16_be(blob, condition_table) == 1u32:
+                    if condition_table + 8 > condition_table_end: return false
+                    val minimum = read_f2dot14(blob, condition_table + 4)
+                    val maximum = read_f2dot14(blob, condition_table + 6)
+                    if minimum < -1.0 or maximum > 1.0 or minimum > maximum: return false
         val substitution_offset = read_u32_be(blob, record + 4) as i64
         if substitution_offset != 0:
             val substitution = variations + substitution_offset
             val substitution_end = _nearest_sibling_end(variations, child_offsets, substitution_offset, limit)
-            if (substitution + 6 > substitution_end or read_u16_be(blob, substitution) != 1u32 or
-                read_u16_be(blob, substitution + 2) != 0u32): return false
-            val substitution_count = read_u16_be(blob, substitution + 4) as i64
-            val substitution_records_end = substitution + 6 + substitution_count * 6
-            if substitution_records_end > substitution_end: return false
-            var alternate_offsets: [i64] = []
-            var previous_feature_index: i64 = -1
-            var substitution_index: i64 = 0
-            while substitution_index < substitution_count:
-                val substitution_record = substitution + 6 + substitution_index * 6
-                val feature_index = read_u16_be(blob, substitution_record) as i64
-                val alternate = read_u32_be(blob, substitution_record + 2) as i64
-                if feature_index <= previous_feature_index or feature_index >= feature_count: return false
-                previous_feature_index = feature_index
-                if (alternate == 0 or alternate_offsets.contains(alternate) or
-                    substitution + alternate < substitution_records_end): return false
-                alternate_offsets.push(alternate)
-                substitution_index = substitution_index + 1
-            for alternate in alternate_offsets:
-                val alternate_table = substitution + alternate
-                val alternate_end = _nearest_sibling_end(substitution, alternate_offsets, alternate, substitution_end)
-                if alternate_table + 4 > alternate_end: return false
-                val params_offset = read_u16_be(blob, alternate_table) as i64
-                val alternate_lookup_count = read_u16_be(blob, alternate_table + 2) as i64
-                val alternate_records_end = alternate_table + 4 + alternate_lookup_count * 2
-                if alternate_records_end > alternate_end: return false
-                var lookup_index: i64 = 0
-                while lookup_index < alternate_lookup_count:
-                    if read_u16_be(blob, alternate_table + 4 + lookup_index * 2) as i64 >= lookup_count: return false
-                    lookup_index = lookup_index + 1
-                if (params_offset != 0 and
-                    (alternate_table + params_offset < alternate_records_end or alternate_table + params_offset + 2 > alternate_end)):
-                    return false
+            if substitution + 4 > substitution_end: return false
+            if read_u16_be(blob, substitution) == 1u32 and read_u16_be(blob, substitution + 2) == 0u32:
+                if substitution + 6 > substitution_end: return false
+                val substitution_count = read_u16_be(blob, substitution + 4) as i64
+                val substitution_records_end = substitution + 6 + substitution_count * 6
+                if substitution_records_end > substitution_end: return false
+                var alternate_offsets: [i64] = []
+                var previous_feature_index: i64 = -1
+                var substitution_index: i64 = 0
+                while substitution_index < substitution_count:
+                    val substitution_record = substitution + 6 + substitution_index * 6
+                    val feature_index = read_u16_be(blob, substitution_record) as i64
+                    val alternate = read_u32_be(blob, substitution_record + 2) as i64
+                    if feature_index <= previous_feature_index or feature_index >= feature_count: return false
+                    previous_feature_index = feature_index
+                    if (alternate == 0 or alternate_offsets.contains(alternate) or
+                        substitution + alternate < substitution_records_end): return false
+                    alternate_offsets.push(alternate)
+                    substitution_index = substitution_index + 1
+                for alternate in alternate_offsets:
+                    val alternate_table = substitution + alternate
+                    val alternate_end = _nearest_sibling_end(substitution, alternate_offsets, alternate, substitution_end)
+                    if alternate_table + 4 > alternate_end: return false
+                    val params_offset = read_u16_be(blob, alternate_table) as i64
+                    val alternate_lookup_count = read_u16_be(blob, alternate_table + 2) as i64
+                    val alternate_records_end = alternate_table + 4 + alternate_lookup_count * 2
+                    if alternate_records_end > alternate_end: return false
+                    var lookup_index: i64 = 0
+                    while lookup_index < alternate_lookup_count:
+                        if read_u16_be(blob, alternate_table + 4 + lookup_index * 2) as i64 >= lookup_count: return false
+                        lookup_index = lookup_index + 1
+                    if (params_offset != 0 and
+                        (alternate_table + params_offset < alternate_records_end or alternate_table + params_offset + 2 > alternate_end)):
+                        return false
         index = index + 1
     true
-
 fn _layout_feature_variation_selection(blob: [u8], base: i64, limit: i64, offset: i64,
                                        normalized_coords: [f64]) -> _LayoutVariationSelection:
     val none = _LayoutVariationSelection(valid: true, substitution: -1, substitution_end: -1)
@@ -256,22 +253,25 @@ fn _layout_feature_variation_selection(blob: [u8], base: i64, limit: i64, offset
             while condition_index < condition_count:
                 val condition_offset_in_set = read_u32_be(blob, condition_set + 2 + condition_index * 4) as i64
                 val condition = condition_set + condition_offset_in_set
-                val axis_index = read_u16_be(blob, condition + 2) as i64
-                if axis_index >= normalized_coords.len():
+                if read_u16_be(blob, condition) != 1u32:
                     matches = false
                 else:
-                    val coordinate = normalized_coords[axis_index]
-                    val minimum = read_f2dot14(blob, condition + 4)
-                    val maximum = read_f2dot14(blob, condition + 6)
-                    if coordinate < minimum or coordinate > maximum: matches = false
+                    val axis_index = read_u16_be(blob, condition + 2) as i64
+                    if axis_index >= normalized_coords.len():
+                        matches = false
+                    else:
+                        val coordinate = normalized_coords[axis_index]
+                        val minimum = read_f2dot14(blob, condition + 4)
+                        val maximum = read_f2dot14(blob, condition + 6)
+                        if coordinate < minimum or coordinate > maximum: matches = false
                 condition_index = condition_index + 1
         if matches:
             val substitution_offset = read_u32_be(blob, record + 4) as i64
             if substitution_offset == 0: return none
-            return _LayoutVariationSelection(
-                valid: true,
-                substitution: variations + substitution_offset,
-                substitution_end: _nearest_sibling_end(variations, child_offsets, substitution_offset, limit))
+            val substitution = variations + substitution_offset
+            if read_u16_be(blob, substitution) == 1u32 and read_u16_be(blob, substitution + 2) == 0u32:
+                return _LayoutVariationSelection(valid: true, substitution: substitution,
+                    substitution_end: _nearest_sibling_end(variations, child_offsets, substitution_offset, limit))
         index = index + 1
     none
 

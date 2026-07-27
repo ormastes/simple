@@ -367,6 +367,47 @@ describe "select layout lookups":
         expect(select_gpos_lookup_plan(
             gpos, 1u32, 1u32, [1667329140u32], [0.75]).lookup_indices).to_equal([2])
 
+    it "skips unsupported variation records and selects a later supported record":
+        var unknown_condition = _feature_variations_layout_font(1196643650u32)
+        unknown_condition.blob = _put_u16(unknown_condition.blob, 242, 2)
+        val after_condition = select_gsub_lookup_plan(
+            unknown_condition, 1u32, 1u32, [1667329140u32], [0.75])
+        expect(after_condition.valid).to_equal(true)
+        expect(after_condition.lookup_indices).to_equal([1])
+        var unsupported_substitution = _feature_variations_layout_font(1196643650u32)
+        unsupported_substitution.blob = _put_u16(unsupported_substitution.blob, 268, 2)
+        val after_substitution = select_gsub_lookup_plan(
+            unsupported_substitution, 1u32, 1u32, [1667329140u32], [0.75])
+        expect(after_substitution.valid).to_equal(true)
+        expect(after_substitution.lookup_indices).to_equal([1])
+
+    it "matches inclusive boundaries and conjunctive multi-axis conditions":
+        val boundary = _feature_variations_layout_font(1196643650u32)
+        expect(select_gsub_lookup_plan(
+            boundary, 1u32, 1u32, [1667329140u32], [0.5]).lookup_indices).to_equal([2])
+        expect(select_gsub_lookup_plan(
+            boundary, 1u32, 1u32, [1667329140u32], [1.0]).lookup_indices).to_equal([2])
+        var bytes = boundary.blob
+        while bytes.len() < 346: bytes.push(0)
+        bytes = _put_u32(bytes, 220, 108u32)
+        bytes = _put_u16(bytes, 320, 2)
+        bytes = _put_u32(bytes, 322, 10u32)
+        bytes = _put_u32(bytes, 326, 18u32)
+        bytes = _put_u16(bytes, 330, 1)
+        bytes = _put_u16(bytes, 332, 0)
+        bytes = _put_u16(bytes, 334, 8192)
+        bytes = _put_u16(bytes, 336, 16384)
+        bytes = _put_u16(bytes, 338, 1)
+        bytes = _put_u16(bytes, 340, 1)
+        bytes = _put_u16(bytes, 342, 57344)
+        bytes = _put_u16(bytes, 344, 8192)
+        val multi = OtFont(blob: bytes, tables: [
+            OtTable(tag: 1196643650u32, offset: 0, length: bytes.len() as u32)])
+        expect(select_gsub_lookup_plan(
+            multi, 1u32, 1u32, [1667329140u32], [0.75, 0.0]).lookup_indices).to_equal([2])
+        expect(select_gsub_lookup_plan(
+            multi, 1u32, 1u32, [1667329140u32], [0.75, 0.75]).lookup_indices).to_equal([1])
+
     it "keeps base features when conditions are false or axes are unavailable":
         var false_conditions = _feature_variations_layout_font(1196643650u32)
         false_conditions.blob = _put_u16(false_conditions.blob, 262, 8192)
@@ -388,6 +429,18 @@ describe "select layout lookups":
         malformed.blob = _put_u16(malformed.blob, 248, 0)
         expect(select_gsub_lookup_plan(
             malformed, 1u32, 1u32, [1667329140u32], [0.75]).valid).to_equal(false)
+        var short_condition = _feature_variations_layout_font(1196643650u32)
+        short_condition.blob = _put_u32(short_condition.blob, 238, 14u32)
+        short_condition.blob = _put_u16(short_condition.blob, 250, 1)
+        expect(select_gsub_lookup_plan(
+            short_condition, 1u32, 1u32, [1667329140u32], [0.75]).valid).to_equal(false)
+        var short_substitution = _feature_variations_layout_font(1196643650u32)
+        short_substitution.blob = _put_u32(short_substitution.blob, 220, 0u32)
+        short_substitution.blob = _put_u32(short_substitution.blob, 224, 36u32)
+        short_substitution.blob = _put_u16(short_substitution.blob, 248, 1)
+        short_substitution.blob = _put_u16(short_substitution.blob, 250, 0)
+        expect(select_gsub_lookup_plan(
+            short_substitution, 1u32, 1u32, [1667329140u32], [0.75]).valid).to_equal(false)
         expect(select_gsub_lookup_plan(
             _feature_variations_layout_font(1196643650u32),
             1u32, 1u32, [1667329140u32], [1.25]).valid).to_equal(false)
