@@ -1,4 +1,4 @@
-use std.skia.feature.glyph.ot_parser.{OtFont, find_table, read_u16_be, read_i16_be, read_u32_be}
+use std.skia.feature.glyph.ot_parser.{OtFont, find_table, read_u16_be, read_i16_be, read_u32_be, read_f2dot14}
 use std.skia.feature.glyph.ot_parser_layout.GposLookup
 use std.skia.feature.shaper.ot_layout_context.LayoutGlyphRecord
 
@@ -20,6 +20,26 @@ class GposDataAnchor:
     valid: bool
 class GposDataBudget:
     remaining: i64
+class GposDataContext:
+    ppem: i64
+    normalized_coords: [f64]
+class GposDataDelta:
+    delta: i64
+    valid: bool
+class _GposDataRawValue:
+    x_place: i64
+    y_place: i64
+    x_advance: i64
+    y_advance: i64
+    x_place_device: i64
+    y_place_device: i64
+    x_advance_device: i64
+    y_advance_device: i64
+    size: i64
+    valid: bool
+
+fn gpos_data_context(ppem: i64 = 0, normalized_coords: [f64] = []) -> GposDataContext:
+    GposDataContext(ppem: ppem, normalized_coords: normalized_coords)
 
 fn gpos_data_budget(records: [LayoutGlyphRecord], lookups: [GposLookup]) -> GposDataBudget:
     var limit = (records.len() + 1) * (lookups.len() + 1) * 64
@@ -154,37 +174,247 @@ fn gpos_data_class_end(blob: [u8], offset: i64, limit: i64) -> i64:
 fn gpos_data_overlap(a0: i64, a1: i64, b0: i64, b1: i64) -> bool:
     a0 < b1 and b0 < a1
 
-fn gpos_data_value(blob: [u8], offset: i64, limit: i64, format: u32) -> GposDataValue:
+fn _gpos_data_invalid_raw_value() -> _GposDataRawValue:
+    _GposDataRawValue(x_place: 0, y_place: 0, x_advance: 0, y_advance: 0,
+        x_place_device: 0, y_place_device: 0, x_advance_device: 0, y_advance_device: 0,
+        size: 0, valid: false)
+
+fn _gpos_data_raw_value(blob: [u8], offset: i64, limit: i64, format: u32) -> _GposDataRawValue:
     if (format & 65280u32) != 0u32:
-        return GposDataValue(x_place: 0, y_place: 0, x_advance: 0, y_advance: 0, size: 0, valid: false)
+        return _gpos_data_invalid_raw_value()
+    if offset < 0 or limit < offset or limit > blob.len(): return _gpos_data_invalid_raw_value()
     var cursor = offset
     var x_place: i64 = 0
     var y_place: i64 = 0
     var x_advance: i64 = 0
     var y_advance: i64 = 0
+    var x_place_device: i64 = 0
+    var y_place_device: i64 = 0
+    var x_advance_device: i64 = 0
+    var y_advance_device: i64 = 0
     var bit: u32 = 1u32
     while bit <= 128u32:
         if (format & bit) != 0u32:
             if cursor + 2 > limit:
-                return GposDataValue(x_place: 0, y_place: 0, x_advance: 0, y_advance: 0, size: 0, valid: false)
+                return _gpos_data_invalid_raw_value()
             val raw = read_u16_be(blob, cursor)
-            if bit >= 16u32 and raw != 0u32:
-                return GposDataValue(x_place: 0, y_place: 0, x_advance: 0, y_advance: 0, size: 0, valid: false)
             val value = read_i16_be(blob, cursor) as i64
             if bit == 1u32: x_place = value
             else if bit == 2u32: y_place = value
             else if bit == 4u32: x_advance = value
             else if bit == 8u32: y_advance = value
+            else if bit == 16u32: x_place_device = raw as i64
+            else if bit == 32u32: y_place_device = raw as i64
+            else if bit == 64u32: x_advance_device = raw as i64
+            else if bit == 128u32: y_advance_device = raw as i64
             cursor = cursor + 2
         bit = bit * 2u32
-    GposDataValue(x_place: x_place, y_place: y_place, x_advance: x_advance,
-        y_advance: y_advance, size: cursor - offset, valid: true)
+    _GposDataRawValue(x_place: x_place, y_place: y_place, x_advance: x_advance,
+        y_advance: y_advance, x_place_device: x_place_device, y_place_device: y_place_device,
+        x_advance_device: x_advance_device, y_advance_device: y_advance_device,
+        size: cursor - offset, valid: true)
+
+fn _gpos_data_invalid_value() -> GposDataValue:
+    GposDataValue(x_place: 0, y_place: 0, x_advance: 0, y_advance: 0, size: 0, valid: false)
+
+fn gpos_data_value(blob: [u8], offset: i64, limit: i64, format: u32) -> GposDataValue:
+    val raw = _gpos_data_raw_value(blob, offset, limit, format)
+    if (not raw.valid or raw.x_place_device != 0 or raw.y_place_device != 0 or
+        raw.x_advance_device != 0 or raw.y_advance_device != 0): return _gpos_data_invalid_value()
+    GposDataValue(x_place: raw.x_place, y_place: raw.y_place, x_advance: raw.x_advance,
+        y_advance: raw.y_advance, size: raw.size, valid: true)
+
+fn _gpos_data_read_i8(blob: [u8], offset: i64) -> i64:
+    val raw = blob[offset] as i64
+    if raw >= 128: raw - 256 else: raw
+
+fn _gpos_data_read_i32(blob: [u8], offset: i64) -> i64:
+    val raw = read_u32_be(blob, offset) as i64
+    if raw >= 2147483648: raw - 4294967296 else: raw
+
+fn _gpos_data_region_scalar(blob: [u8], region: i64, axis_count: i64,
+    coords: [f64]) -> (f64, bool):
+    if coords.len() != axis_count: return (0.0, false)
+    var scalar = 1.0
+    var axis: i64 = 0
+    while axis < axis_count:
+        val at = region + axis * 6
+        val start = read_f2dot14(blob, at)
+        val peak = read_f2dot14(blob, at + 2)
+        val end = read_f2dot14(blob, at + 4)
+        if start > peak or peak > end: return (0.0, false)
+        val coord = coords[axis]
+        if coord != coord: return (0.0, false)
+        if peak == 0.0 or (start < 0.0 and end > 0.0):
+            ()
+        else if coord == peak:
+            ()
+        else if coord <= start or coord >= end:
+            return (0.0, true)
+        else if coord < peak:
+            if peak == start: return (0.0, true)
+            scalar = scalar * ((coord - start) / (peak - start))
+        else:
+            if end == peak: return (0.0, true)
+            scalar = scalar * ((end - coord) / (end - peak))
+        axis = axis + 1
+    (scalar, true)
+
+fn gpos_data_variation_delta(font: OtFont, outer_index: i64, inner_index: i64,
+    normalized_coords: [f64]) -> GposDataDelta:
+    if outer_index < 0 or inner_index < 0:
+        return GposDataDelta(delta: 0, valid: false)
+    val table = match find_table(font, 1195656006u32):
+        Some(value): value
+        None: return GposDataDelta(delta: 0, valid: false)
+    val base = table.offset as i64
+    val limit = base + table.length as i64
+    if base < 0 or limit > font.blob.len() or base + 18 > limit or
+        read_u32_be(font.blob, base) != 65539u32:
+        return GposDataDelta(delta: 0, valid: false)
+    val store_offset = read_u32_be(font.blob, base + 14) as i64
+    val store = base + store_offset
+    if store_offset < 18 or store + 8 > limit or read_u16_be(font.blob, store) != 1u32:
+        return GposDataDelta(delta: 0, valid: false)
+    val region_offset = read_u32_be(font.blob, store + 2) as i64
+    val item_data_count = read_u16_be(font.blob, store + 6) as i64
+    val header_end = store + 8 + item_data_count * 4
+    if (item_data_count <= 0 or item_data_count > 4096 or outer_index >= item_data_count or
+        header_end > limit or region_offset < header_end - store):
+        return GposDataDelta(delta: 0, valid: false)
+    val regions = store + region_offset
+    if regions + 4 > limit: return GposDataDelta(delta: 0, valid: false)
+    val axis_count = read_u16_be(font.blob, regions) as i64
+    val region_count = read_u16_be(font.blob, regions + 2) as i64
+    if (axis_count <= 0 or axis_count > 64 or region_count <= 0 or region_count > 4096 or
+        normalized_coords.len() != axis_count or
+        region_count > (limit - regions - 4) / (axis_count * 6)):
+        return GposDataDelta(delta: 0, valid: false)
+    val regions_end = regions + 4 + region_count * axis_count * 6
+    val item_offset = read_u32_be(font.blob, store + 8 + outer_index * 4) as i64
+    val item = store + item_offset
+    if item_offset < header_end - store or item + 6 > limit:
+        return GposDataDelta(delta: 0, valid: false)
+    val item_count = read_u16_be(font.blob, item) as i64
+    val encoded_word_count = read_u16_be(font.blob, item + 2) as i64
+    val long_words = (encoded_word_count & 32768) != 0
+    val word_count = encoded_word_count & 32767
+    val item_region_count = read_u16_be(font.blob, item + 4) as i64
+    if (item_count <= 0 or inner_index >= item_count or item_region_count > 4096 or
+        word_count > item_region_count or item + 6 + item_region_count * 2 > limit):
+        return GposDataDelta(delta: 0, valid: false)
+    val wide_size = if long_words: 4 else: 2
+    val narrow_size = if long_words: 2 else: 1
+    val row_size = word_count * wide_size + (item_region_count - word_count) * narrow_size
+    val rows = item + 6 + item_region_count * 2
+    if row_size <= 0 or item_count > (limit - rows) / row_size:
+        return GposDataDelta(delta: 0, valid: false)
+    if gpos_data_overlap(item, rows + item_count * row_size, regions, regions_end):
+        return GposDataDelta(delta: 0, valid: false)
+    var total = 0.0
+    var delta_at = rows + inner_index * row_size
+    var index: i64 = 0
+    while index < item_region_count:
+        val region_index = read_u16_be(font.blob, item + 6 + index * 2) as i64
+        if region_index >= region_count: return GposDataDelta(delta: 0, valid: false)
+        val region = regions + 4 + region_index * axis_count * 6
+        val scalar_result = _gpos_data_region_scalar(font.blob, region, axis_count, normalized_coords)
+        if not scalar_result.1: return GposDataDelta(delta: 0, valid: false)
+        val delta = if index < word_count:
+            if long_words: _gpos_data_read_i32(font.blob, delta_at)
+            else: read_i16_be(font.blob, delta_at) as i64
+        else:
+            if long_words: read_i16_be(font.blob, delta_at) as i64
+            else: _gpos_data_read_i8(font.blob, delta_at)
+        total = total + delta as f64 * scalar_result.0
+        delta_at = delta_at + (if index < word_count: wide_size else: narrow_size)
+        index = index + 1
+    GposDataDelta(delta: total.round() as i64, valid: true)
+
+fn gpos_data_device_delta(font: OtFont, offset: i64, limit: i64,
+    context: GposDataContext) -> GposDataDelta:
+    if offset < 0 or limit > font.blob.len() or offset + 6 > limit:
+        return GposDataDelta(delta: 0, valid: false)
+    val start = read_u16_be(font.blob, offset) as i64
+    val end = read_u16_be(font.blob, offset + 2) as i64
+    val format = read_u16_be(font.blob, offset + 4) as i64
+    if format == 32768:
+        return gpos_data_variation_delta(font, start, end, context.normalized_coords)
+    if start > end or format < 1 or format > 3:
+        return GposDataDelta(delta: 0, valid: false)
+    val bits = if format == 1: 2 else if format == 2: 4 else: 8
+    val count = end - start + 1
+    val word_count = (count * bits + 15) / 16
+    if word_count > (limit - offset - 6) / 2:
+        return GposDataDelta(delta: 0, valid: false)
+    if context.ppem < start or context.ppem > end:
+        return GposDataDelta(delta: 0, valid: true)
+    val index = context.ppem - start
+    val bit_index = index * bits
+    val word = read_u16_be(font.blob, offset + 6 + (bit_index / 16) * 2) as i64
+    val shift = 16 - bits - bit_index % 16
+    val mask = (1 << bits) - 1
+    val raw = (word >> shift) & mask
+    val sign = 1 << (bits - 1)
+    val delta = if (raw & sign) != 0: raw - (1 << bits) else: raw
+    GposDataDelta(delta: delta, valid: true)
+
+fn _gpos_data_adjustment(font: OtFont, table_base: i64, relative: i64, limit: i64,
+    context: GposDataContext) -> GposDataDelta:
+    if relative == 0: return GposDataDelta(delta: 0, valid: true)
+    if table_base < 0 or relative < 0 or table_base + relative < table_base:
+        return GposDataDelta(delta: 0, valid: false)
+    gpos_data_device_delta(font, table_base + relative, limit, context)
+
+fn gpos_data_value_adjusted(font: OtFont, table_base: i64, offset: i64, limit: i64,
+    format: u32, context: GposDataContext) -> GposDataValue:
+    val raw = _gpos_data_raw_value(font.blob, offset, limit, format)
+    if not raw.valid: return _gpos_data_invalid_value()
+    val xp = _gpos_data_adjustment(font, table_base, raw.x_place_device, limit, context)
+    val yp = _gpos_data_adjustment(font, table_base, raw.y_place_device, limit, context)
+    val xa = _gpos_data_adjustment(font, table_base, raw.x_advance_device, limit, context)
+    val ya = _gpos_data_adjustment(font, table_base, raw.y_advance_device, limit, context)
+    if not xp.valid or not yp.valid or not xa.valid or not ya.valid:
+        return _gpos_data_invalid_value()
+    GposDataValue(x_place: raw.x_place + xp.delta, y_place: raw.y_place + yp.delta,
+        x_advance: raw.x_advance + xa.delta, y_advance: raw.y_advance + ya.delta,
+        size: raw.size, valid: true)
 
 fn gpos_data_anchor(blob: [u8], offset: i64, limit: i64, budget: GposDataBudget) -> GposDataAnchor:
-    if not gpos_data_take(budget) or offset <= 0 or offset + 6 > limit or read_u16_be(blob, offset) != 1u32:
+    if not gpos_data_take(budget) or offset <= 0 or offset + 6 > limit or limit > blob.len():
+        return GposDataAnchor(x: 0, y: 0, valid: false)
+    val format = read_u16_be(blob, offset)
+    if format == 2u32 and offset + 8 > limit:
+        return GposDataAnchor(x: 0, y: 0, valid: false)
+    if format != 1u32 and format != 2u32:
         return GposDataAnchor(x: 0, y: 0, valid: false)
     GposDataAnchor(x: read_i16_be(blob, offset + 2) as i64,
         y: read_i16_be(blob, offset + 4) as i64, valid: true)
+
+fn gpos_data_anchor_adjusted(font: OtFont, offset: i64, limit: i64,
+    budget: GposDataBudget, context: GposDataContext) -> GposDataAnchor:
+    if not gpos_data_take(budget) or offset <= 0 or offset + 6 > limit or limit > font.blob.len():
+        return GposDataAnchor(x: 0, y: 0, valid: false)
+    val format = read_u16_be(font.blob, offset)
+    if format == 1u32:
+        return GposDataAnchor(x: read_i16_be(font.blob, offset + 2) as i64,
+            y: read_i16_be(font.blob, offset + 4) as i64, valid: true)
+    if format == 2u32:
+        # Current raster state has no hinted contour-point coordinates, so the
+        # OpenType-required fallback is the design coordinate pair.
+        if offset + 8 > limit: return GposDataAnchor(x: 0, y: 0, valid: false)
+        return GposDataAnchor(x: read_i16_be(font.blob, offset + 2) as i64,
+            y: read_i16_be(font.blob, offset + 4) as i64, valid: true)
+    if format != 3u32 or offset + 10 > limit:
+        return GposDataAnchor(x: 0, y: 0, valid: false)
+    val x_delta = _gpos_data_adjustment(font, offset,
+        read_u16_be(font.blob, offset + 6) as i64, limit, context)
+    val y_delta = _gpos_data_adjustment(font, offset,
+        read_u16_be(font.blob, offset + 8) as i64, limit, context)
+    if not x_delta.valid or not y_delta.valid:
+        return GposDataAnchor(x: 0, y: 0, valid: false)
+    GposDataAnchor(x: read_i16_be(font.blob, offset + 2) as i64 + x_delta.delta,
+        y: read_i16_be(font.blob, offset + 4) as i64 + y_delta.delta, valid: true)
 
 fn gpos_data_glyph_class(font: OtFont, glyph: u32, budget: GposDataBudget) -> GposDataHit:
     val table = match find_table(font, 1195656006u32):
@@ -229,7 +459,8 @@ fn gpos_data_eligible(font: OtFont, lookup: GposLookup, glyph: u32, budget: Gpos
         return gpos_data_in_mark_set(font, lookup.mark_filtering_set, glyph, budget)
     GposDataHit(index: 0, count: 0, found: true, valid: true)
 
-export GposDataHit, GposDataValue, GposDataAnchor, GposDataBudget
-export gpos_data_budget, gpos_data_take, gpos_data_coverage, gpos_data_class, gpos_data_class_valid
+export GposDataHit, GposDataValue, GposDataAnchor, GposDataBudget, GposDataContext, GposDataDelta
+export gpos_data_context, gpos_data_budget, gpos_data_take, gpos_data_coverage, gpos_data_class, gpos_data_class_valid
 export gpos_data_coverage_end, gpos_data_class_end, gpos_data_overlap, gpos_data_value, gpos_data_anchor
+export gpos_data_variation_delta, gpos_data_device_delta, gpos_data_value_adjusted, gpos_data_anchor_adjusted
 export gpos_data_glyph_class, gpos_data_in_mark_set, gpos_data_eligible
