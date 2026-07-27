@@ -1143,7 +1143,7 @@ fn parse_match_arms_common() -> (i64, [i64]):
                 parser_advance()
 
             kind = par_kind_get()
-            while kind == 121:
+            while kind == TOK_PIPE or kind == TOK_COMMA:
                 parser_advance()
                 # Skip newlines/indents after pipe
                 for skip_idx in 0..100:
@@ -1196,6 +1196,9 @@ fn parse_match_arms_common() -> (i64, [i64]):
             # e.g. `Enum.Variant:`, `Ok(v):`, `_:`, `0:`
             var patterns: [i64] = []
             patterns.push(parse_expr())
+            while par_kind_get() == TOK_PIPE or par_kind_get() == TOK_COMMA:
+                parser_advance()
+                patterns.push(parse_expr())
 
             # Check for guard clause: pattern if guard_expr:
             var guard_expr_idx: i64 = -1
@@ -1356,10 +1359,15 @@ fn parse_if_expr() -> i64:
         parser_expect(100)  # consume =
         val init_expr = parse_expr()
         parser_expect(161)  # consume :
+        val inline_then = par_kind_get() != TOK_NEWLINE
         val then_body = parse_block()
         val then_expr = expr_block(then_body, -1, 0)
 
         parser_skip_newlines()
+        var continued_indent = false
+        if inline_then and par_kind_get() == TOK_INDENT:
+            parser_advance()
+            continued_indent = true
         var else_expr: i64 = expr_unit(0)
         if par_kind_get() == 42:
             else_expr = parse_if_expr()
@@ -1373,6 +1381,10 @@ fn parse_if_expr() -> i64:
                 else_expr = parse_if_expr()
             else:
                 else_expr = parse_expr()
+        if continued_indent:
+            parser_skip_newlines()
+            if par_kind_get() == TOK_DEDENT:
+                parser_advance()
 
         if expr_get_tag(pattern_idx) == EXPR_CALL or expr_get_tag(pattern_idx) == EXPR_METHOD_CALL:
             # Constructor-pattern binding: desugar to an expr-level match.
@@ -1444,9 +1456,14 @@ fn parse_if_expr() -> i64:
             tern_else = parse_expr()
         return expr_if_expr(cond, tern_then, tern_else, 0)
     parser_expect(161)
+    val inline_then = par_kind_get() != TOK_NEWLINE
     val then_body = parse_block()
     val then_expr = expr_block(then_body, -1, 0)
     parser_skip_newlines()
+    var continued_indent = false
+    if inline_then and par_kind_get() == TOK_INDENT:
+        parser_advance()
+        continued_indent = true
     var else_expr: i64 = expr_unit(0)
     if par_kind_get() == 42:
         else_expr = parse_if_expr()
@@ -1463,6 +1480,10 @@ fn parse_if_expr() -> i64:
             else_expr = parse_if_expr()
         else:
             else_expr = parse_expr()
+    if continued_indent:
+        parser_skip_newlines()
+        if par_kind_get() == TOK_DEDENT:
+            parser_advance()
     expr_if_expr(cond, then_expr, else_expr, 0)
 
 fn parse_for_expr() -> i64:
