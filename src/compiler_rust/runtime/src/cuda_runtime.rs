@@ -1491,6 +1491,28 @@ pub extern "C" fn rt_cuda_ctx_create(_device: i64) -> i64 {
     -3
 }
 
+/// Make a retained CUDA context current on this thread.
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_ctx_set_current(ctx: i64) -> i64 {
+    if ctx <= 0 {
+        return -1;
+    }
+    unsafe {
+        let err = cuCtxSetCurrent(ctx as CUcontext);
+        if err != 0 {
+            return -(err as i64);
+        }
+    }
+    0
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_ctx_set_current(_ctx: i64) -> i64 {
+    -3
+}
+
 /// Destroy CUDA context
 #[no_mangle]
 #[cfg(feature = "cuda")]
@@ -2683,6 +2705,12 @@ mod tests {
         assert!(device >= 0, "expected CUDA device handle, got {device}");
         let context = rt_cuda_ctx_create(device);
         assert!(context > 0, "expected CUDA context, got {context}");
+        let other_context = rt_cuda_ctx_create(device);
+        assert!(other_context > 0, "expected second CUDA context, got {other_context}");
+        assert_eq!(rt_cuda_ctx_set_current(context), 0);
+        let mut current: CUcontext = ptr::null_mut();
+        assert_eq!(unsafe { cuCtxGetCurrent(&mut current) }, 0);
+        assert_eq!(current as i64, context);
 
         let module = rt_cuda_module_load_data(ptx.as_ptr());
         assert!(module > 0, "expected PTX module to load, got {module}");
@@ -2696,6 +2724,11 @@ mod tests {
         let unload = rt_cuda_module_unload(module);
         assert_eq!(unload, 0, "expected module unload to succeed, got {unload}");
 
+        let destroy_other = rt_cuda_ctx_destroy(other_context);
+        assert_eq!(
+            destroy_other, 0,
+            "expected second context destroy to succeed, got {destroy_other}"
+        );
         let destroy = rt_cuda_ctx_destroy(context);
         assert_eq!(destroy, 0, "expected context destroy to succeed, got {destroy}");
     }

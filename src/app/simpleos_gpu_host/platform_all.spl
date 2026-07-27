@@ -26,7 +26,10 @@ use std.gc_async_mut.processing.vulkan_fill_u32.{
     processing_ir_execute_vulkan,
     processing_vulkan_device_identity
 }
-use std.gc_async_mut.processing.cuda_fill_u32.{processing_ir_execute_cuda}
+use std.gc_async_mut.processing.cuda_fill_u32.{
+    ProcessingCudaExecutor,
+    processing_ir_execute_cuda_with_executor
+}
 use std.gc_async_mut.processing.metal_fill_u32.{
     processing_ir_execute_metal,
     processing_metal_device_identity
@@ -37,6 +40,10 @@ use std.nogc_sync_mut.gpu.engine2d.sffi_directx.{
 }
 
 class SimpleOsGpuHostAllPlatform:
+    cuda_executor: ProcessingCudaExecutor
+
+    static fn create() -> SimpleOsGpuHostAllPlatform:
+        SimpleOsGpuHostAllPlatform(cuda_executor: ProcessingCudaExecutor.create())
 
 fn _processing_selector_mask(requested: i64, selector: text, auto_mask: i64) -> i64:
     if selector == "cuda":
@@ -51,9 +58,9 @@ fn _processing_result(completed: bool, reason: text, values: [u32], backend_hand
     simpleos_gpu_host_processing_result(
         completed, reason, values, backend_handle, device_identity)
 
-fn _execute_processing(ir: ProcessingIr, backend: text) -> SimpleOsGpuHostProcessingResult:
+fn _execute_processing(cuda_executor: ProcessingCudaExecutor, ir: ProcessingIr, backend: text) -> SimpleOsGpuHostProcessingResult:
     if backend == "cuda":
-        val result = processing_ir_execute_cuda(ir)
+        val result = processing_ir_execute_cuda_with_executor(cuda_executor, ir)
         return _processing_result(
             result.completed, result.reason, result.values,
             result.backend_handle, result.device_identity)
@@ -69,21 +76,21 @@ fn _execute_processing(ir: ProcessingIr, backend: text) -> SimpleOsGpuHostProces
             result.backend_handle, result.device_identity)
     simpleos_gpu_host_processing_failure("unsupported-processing-backend")
 
-fn _processing_backend_mask_supported(selected: i64) -> i64:
+fn _processing_backend_mask_supported(cuda_executor: ProcessingCudaExecutor, selected: i64) -> i64:
     val probe_ir = processing_ir_fill_u32(1, 1u32)
     val oracle = processing_ir_cpu_execute(probe_ir)
     var available: i64 = 0
     if (selected & SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN) != 0:
-        val probe = _execute_processing(probe_ir, "vulkan")
-        if probe.completed and probe.backend_handle > 0 and probe.device_identity > 0 and processing_ir_outputs_equal(probe.values, oracle):
+        val probe = _execute_processing(cuda_executor, probe_ir, "vulkan")
+        if probe.completed and probe.reason == "ok" and probe.backend_handle > 0 and probe.device_identity > 0 and processing_ir_outputs_equal(probe.values, oracle):
             available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN
     if (selected & SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0:
-        val probe = _execute_processing(probe_ir, "cuda")
-        if probe.completed and probe.backend_handle > 0 and probe.device_identity > 0 and processing_ir_outputs_equal(probe.values, oracle):
+        val probe = _execute_processing(cuda_executor, probe_ir, "cuda")
+        if probe.completed and probe.reason == "ok" and probe.backend_handle > 0 and probe.device_identity > 0 and processing_ir_outputs_equal(probe.values, oracle):
             available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA
     if (selected & SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL) != 0:
-        val probe = _execute_processing(probe_ir, "metal")
-        if probe.completed and probe.backend_handle > 0 and probe.device_identity > 0 and processing_ir_outputs_equal(probe.values, oracle):
+        val probe = _execute_processing(cuda_executor, probe_ir, "metal")
+        if probe.completed and probe.reason == "ok" and probe.backend_handle > 0 and probe.device_identity > 0 and processing_ir_outputs_equal(probe.values, oracle):
             available = available | SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
     available
 
@@ -98,16 +105,16 @@ fn _create_all_render_target(width: i32, height: i32, backend: text) -> Result<D
     Engine2D.create_requested_backend(width, height, backend)
 
 @cfg(linux)
-fn _all_processing_backend_mask(requested: i64, selector: text) -> i64:
+fn _all_processing_backend_mask(cuda_executor: ProcessingCudaExecutor, requested: i64, selector: text) -> i64:
     val selected = _processing_selector_mask(
         requested, selector,
         SIMPLEOS_HOST_GPU_BACKEND_MASK_VULKAN | SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA)
-    _processing_backend_mask_supported(selected)
+    _processing_backend_mask_supported(cuda_executor, selected)
 
 @cfg(not(linux))
-fn _all_processing_backend_mask(requested: i64, selector: text) -> i64:
+fn _all_processing_backend_mask(cuda_executor: ProcessingCudaExecutor, requested: i64, selector: text) -> i64:
     val selected = _processing_selector_mask(requested, selector, requested)
-    _processing_backend_mask_supported(selected)
+    _processing_backend_mask_supported(cuda_executor, selected)
 
 impl SimpleOsGpuHostPlatform for SimpleOsGpuHostAllPlatform:
     fn create_render_target(width: i32, height: i32, backend: text) -> Result<DrawIrRenderTarget, text>:
@@ -127,9 +134,12 @@ impl SimpleOsGpuHostPlatform for SimpleOsGpuHostAllPlatform:
         0
 
     fn processing_backend_mask(requested: i64, selector: text) -> i64:
-        _all_processing_backend_mask(requested, selector)
+        _all_processing_backend_mask(self.cuda_executor, requested, selector)
 
     fn execute_processing(ir: ProcessingIr, backend: text) -> SimpleOsGpuHostProcessingResult:
-        _execute_processing(ir, backend)
+        _execute_processing(self.cuda_executor, ir, backend)
+
+    fn shutdown():
+        self.cuda_executor.shutdown()
 
 export SimpleOsGpuHostAllPlatform

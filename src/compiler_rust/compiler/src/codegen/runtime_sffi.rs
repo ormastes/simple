@@ -1614,6 +1614,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_vulkan_draw", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_draw_indexed", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_ctx_create", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cuda_ctx_set_current", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_ctx_destroy", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_mem_alloc", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_mem_free", &[I64], &[I64]),

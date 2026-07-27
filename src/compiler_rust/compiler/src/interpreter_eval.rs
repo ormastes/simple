@@ -308,6 +308,7 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
     "rt_cuda_device_name",
     "rt_cuda_device_compute_capability",
     "rt_cuda_ctx_create",
+    "rt_cuda_ctx_set_current",
     "rt_cuda_ctx_destroy",
     "rt_cuda_ctx_synchronize",
     "rt_cuda_mem_alloc",

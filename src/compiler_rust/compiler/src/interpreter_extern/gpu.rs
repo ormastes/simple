@@ -109,6 +109,7 @@ mod cuda_dlopen {
     type CuInit = unsafe extern "C" fn(u32) -> i32;
     type CuDeviceGet = unsafe extern "C" fn(*mut i32, i32) -> i32;
     type CuCtxCreate = unsafe extern "C" fn(*mut *mut c_void, u32, i32) -> i32;
+    type CuCtxSetCurrent = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuCtxDestroy = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuCtxSynchronize = unsafe extern "C" fn() -> i32;
     type CuMemAlloc = unsafe extern "C" fn(*mut u64, usize) -> i32;
@@ -140,6 +141,7 @@ mod cuda_dlopen {
         pub device_get: CuDeviceGet,
         pub device_get_count: CuDeviceGetCount,
         pub ctx_create: CuCtxCreate,
+        pub ctx_set_current: CuCtxSetCurrent,
         pub ctx_destroy: CuCtxDestroy,
         pub ctx_synchronize: CuCtxSynchronize,
         pub mem_alloc: CuMemAlloc,
@@ -211,6 +213,7 @@ mod cuda_dlopen {
             device_get: sym!("cuDeviceGet"),
             device_get_count: sym!("cuDeviceGetCount"),
             ctx_create: sym!("cuCtxCreate_v2"),
+            ctx_set_current: sym!("cuCtxSetCurrent"),
             ctx_destroy: sym!("cuCtxDestroy_v2"),
             ctx_synchronize: sym!("cuCtxSynchronize"),
             mem_alloc: sym!("cuMemAlloc_v2"),
@@ -245,7 +248,7 @@ use simple_runtime::value::gpu_vulkan::{
 
 #[cfg(feature = "cuda")]
 use simple_runtime::cuda_runtime::{
-    rt_cuda_available, rt_cuda_ctx_create, rt_cuda_ctx_destroy, rt_cuda_ctx_synchronize,
+    rt_cuda_available, rt_cuda_ctx_create, rt_cuda_ctx_destroy, rt_cuda_ctx_set_current, rt_cuda_ctx_synchronize,
     rt_cuda_device_compute_capability, rt_cuda_device_count, rt_cuda_device_get, rt_cuda_device_identity,
     rt_cuda_device_name, rt_cuda_f64_binary_op, rt_cuda_f64_minmax, rt_cuda_f64_scalar_div, rt_cuda_f64_slice_1d,
     rt_cuda_f64_slice_2d, rt_cuda_f64_sum, rt_cuda_f64_sum_axis, rt_cuda_get_error_string, rt_cuda_init,
@@ -928,6 +931,22 @@ pub fn rt_cuda_ctx_create_fn(args: &[Value]) -> Result<Value, CompileError> {
                 return Ok(Value::Int(ctx as i64));
             }
             return Ok(Value::Int(-(r as i64)));
+        }
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_ctx_set_current_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let ctx = arg_i64(args, 0, "rt_cuda_ctx_set_current", 1)?;
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_ctx_set_current(ctx)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        if let Some(fns) = get_cuda_dl() {
+            let result = unsafe { (fns.ctx_set_current)(ctx as *mut std::os::raw::c_void) };
+            return Ok(Value::Int(if result == 0 { 0 } else { -(result as i64) }));
         }
         Ok(Value::Int(-3))
     }

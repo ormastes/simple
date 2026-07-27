@@ -37,6 +37,9 @@ threshold-`0` CUDA submit fallback now completes with reason `16`.
 - Reusing the runtime-owned `rt_u32s_from_raw` readback converter removed the
   executor's million-call `values.push` loop and reduced measured cold
   execution from `1044501 us` to `593323 us`.
+- Reusing one process-owned CUDA context/module completed the exact
+  1,048,576-element request in `861499 us` cold and `69331 us` warm (12.4x
+  faster) with the same positive device provenance and no fallback.
 - Build logs:
   `build/simpleos_gpu_host/offload_policy/native-build.out` and
   `native-build-cycle2.out`.
@@ -51,9 +54,8 @@ daemon without bootstrap.
 
 Publish the same at-threshold success through the daemon wire. The current
 direct receipt closes executor correctness, but not the daemon client path or
-its independent CPU-oracle comparison. Then retain a warm multi-sample run
-through persistent CUDA context/module ownership; the direct executor still
-pays cold setup on every call, so its `593323 us` cannot justify the lower-level
-CUDA round-trip threshold by itself.
+its independent CPU-oracle comparison. Then retain the required warm
+multi-sample medians; the single direct warm receipt does not justify the
+lower-level CUDA round-trip threshold by itself.
 
 Owner: Linux GPU host operator. Final reviewer: high-capability model.

@@ -64,8 +64,10 @@ PROCESSING_CUDA_FILL_MODE=large \
 
 Its retained candidate returns all 1,048,576 exact values with positive
 provenance and no fallback. Bulk runtime-owned readback conversion reduced its
-cold execution from 1,044,501 us to 593,323 us. Daemon-wire proof and warm
-persistent-session timing remain open.
+cold execution from 1,044,501 us to 593,323 us. A retained-session probe then
+completed the same exact request in 861,499 us cold and 69,331 us warm (12.4x
+faster). Daemon-wire proof and the required warm multi-sample medians remain
+open.
 
 ## Unavailable Protocol
 

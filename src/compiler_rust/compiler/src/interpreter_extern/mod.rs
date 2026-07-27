@@ -844,6 +844,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cstring_to_text", wsffi::rt_cstring_to_text);
     insert_simple!("rt_cuda_available", gpu::rt_cuda_available_fn);
     insert_simple!("rt_cuda_ctx_create", gpu::rt_cuda_ctx_create_fn);
+    insert_simple!("rt_cuda_ctx_set_current", gpu::rt_cuda_ctx_set_current_fn);
     insert_simple!("rt_cuda_ctx_destroy", gpu::rt_cuda_ctx_destroy_fn);
     insert_simple!("rt_cuda_ctx_synchronize", gpu::rt_cuda_ctx_synchronize_fn);
     insert_simple!(

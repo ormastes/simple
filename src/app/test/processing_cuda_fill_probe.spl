@@ -2,7 +2,10 @@
 
 use app.io.args_ops.{get_args}
 use std.common.processing.processing_ir.{processing_ir_fill_u32}
-use std.gc_async_mut.processing.cuda_fill_u32.{processing_ir_execute_cuda}
+use std.gc_async_mut.processing.cuda_fill_u32.{
+    ProcessingCudaExecutor,
+    processing_ir_execute_cuda_with_executor
+}
 use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
 
 fn _elapsed_us(started_nanos: i64) -> i64:
@@ -14,16 +17,45 @@ fn _elapsed_us(started_nanos: i64) -> i64:
 fn main() -> i64:
     val args = get_args()
     val large = args.contains("--large")
-    if (large and args.len() != 2) or (not large and args.len() != 1):
+    val warm = args.contains("--warm")
+    if ((large or warm) and args.len() != 2) or
+       (not large and not warm and args.len() != 1):
         print("PROCESSING_CUDA_NATIVE status=fail reason=invalid-argument\n")
         return 2
-    val mode = if large: "large" else: "parity"
-    val count: i64 = if large: 1048576 else: 64
+    val mode = if warm: "warm" elif large: "large" else: "parity"
+    val count: i64 = if large or warm: 1048576 else: 64
     val value = 0x01020304u32
-    val expected_checksum: u64 = if large: 17730434498560 else: 1082179840
+    val expected_checksum: u64 = if large or warm: 17730434498560 else: 1082179840
+    var executor = ProcessingCudaExecutor.create()
+    var cold_us: i64 = 0
+    var cold_handle: i64 = 0
+    var cold_identity: i64 = 0
+    if warm:
+        val cold_started = time_now_nanos()
+        val cold = processing_ir_execute_cuda_with_executor(
+            executor, processing_ir_fill_u32(count, value))
+        cold_us = _elapsed_us(cold_started)
+        var cold_checksum: u64 = 0
+        var cold_mismatches: i64 = 0
+        for actual in cold.values:
+            cold_checksum = cold_checksum + actual.to_u64()
+            if actual != value:
+                cold_mismatches = cold_mismatches + 1
+        val cold_exact = cold.values.len().to_i64() == count and
+            cold_checksum == expected_checksum and cold_mismatches == 0
+        if not cold.completed or cold.reason != "ok" or
+           not cold_exact or cold.backend_handle <= 0 or
+           cold.device_identity <= 0 or cold_us <= 0:
+            executor.shutdown()
+            print("PROCESSING_CUDA_NATIVE status=fail reason=warmup-failed cold_completed={cold.completed} cold_reason={cold.reason} cold_count={cold.values.len()} cold_us={cold_us} cold_handle={cold.backend_handle} cold_identity={cold.device_identity}\n")
+            return 1
+        cold_handle = cold.backend_handle
+        cold_identity = cold.device_identity
     val started = time_now_nanos()
-    val result = processing_ir_execute_cuda(processing_ir_fill_u32(count, value))
+    val result = processing_ir_execute_cuda_with_executor(
+        executor, processing_ir_fill_u32(count, value))
     val elapsed_us = _elapsed_us(started)
+    executor.shutdown()
     var checksum: u64 = 0
     var mismatches: i64 = 0
     for actual in result.values:
@@ -32,8 +64,12 @@ fn main() -> i64:
             mismatches = mismatches + 1
     val exact = result.values.len().to_i64() == count and
         checksum == expected_checksum and mismatches == 0
+    val warm_improved = not warm or elapsed_us < cold_us
     val valid = result.completed and result.reason == "ok" and exact and
-        result.backend_handle > 0 and result.device_identity > 0 and elapsed_us > 0
+        result.backend_handle > 0 and result.device_identity > 0 and
+        elapsed_us > 0 and warm_improved and
+        (not warm or (result.backend_handle == cold_handle and
+                      result.device_identity == cold_identity))
     val status = if valid: "pass" else: "fail"
-    print("PROCESSING_CUDA_NATIVE status={status} reason={result.reason} op=fill_u32 mode={mode} completed={result.completed} count={result.values.len()} value={value} expected_checksum={expected_checksum} actual_checksum={checksum} mismatch_count={mismatches} values_exact={exact} elapsed_us={elapsed_us} backend=cuda readback_source=device_readback handle={result.backend_handle} identity={result.device_identity} cpu_fallback=false\n")
+    print("PROCESSING_CUDA_NATIVE status={status} reason={result.reason} op=fill_u32 mode={mode} completed={result.completed} count={result.values.len()} value={value} expected_checksum={expected_checksum} actual_checksum={checksum} mismatch_count={mismatches} values_exact={exact} cold_us={cold_us} elapsed_us={elapsed_us} warm_improved={warm_improved} backend=cuda readback_source=device_readback handle={result.backend_handle} identity={result.device_identity} cpu_fallback=false\n")
     if valid: 0 else: 1

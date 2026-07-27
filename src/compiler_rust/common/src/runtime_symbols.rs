@@ -1171,6 +1171,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_cuda_init",
     "rt_cuda_device_get",
     "rt_cuda_ctx_create",
+    "rt_cuda_ctx_set_current",
     "rt_cuda_ctx_destroy",
     "rt_cuda_mem_alloc",
     "rt_cuda_mem_free",
