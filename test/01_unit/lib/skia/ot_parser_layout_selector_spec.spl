@@ -122,6 +122,48 @@ fn _selected_layout_font_v11(table_tag: u32) -> OtFont:
     blob = _put_u32(blob, 216, 0u32)
     OtFont(blob: blob, tables: [OtTable(tag: table_tag, offset: 0, length: blob.len() as u32)])
 
+fn _feature_variations_layout_font(table_tag: u32) -> OtFont:
+    val v11 = _selected_layout_font_v11(table_tag)
+    var blob = v11.blob
+    while blob.len() < 320:
+        blob.push(0)
+    # Two ordered variation records. Axis 0 >= 0.5 selects lookup 2 from the
+    # first record; the second record covers the full range and selects lookup 1.
+    blob = _put_u32(blob, 216, 2u32)
+    blob = _put_u32(blob, 220, 24u32)
+    blob = _put_u32(blob, 224, 56u32)
+    blob = _put_u32(blob, 228, 40u32)
+    blob = _put_u32(blob, 232, 80u32)
+    blob = _put_u16(blob, 236, 1)
+    blob = _put_u32(blob, 238, 6u32)
+    blob = _put_u16(blob, 242, 1)
+    blob = _put_u16(blob, 244, 0)
+    blob = _put_u16(blob, 246, 8192)
+    blob = _put_u16(blob, 248, 16384)
+    blob = _put_u16(blob, 252, 1)
+    blob = _put_u32(blob, 254, 6u32)
+    blob = _put_u16(blob, 258, 1)
+    blob = _put_u16(blob, 260, 0)
+    blob = _put_u16(blob, 262, 49152)
+    blob = _put_u16(blob, 264, 16384)
+    blob = _put_u16(blob, 268, 1)
+    blob = _put_u16(blob, 270, 0)
+    blob = _put_u16(blob, 272, 1)
+    blob = _put_u16(blob, 274, 0)
+    blob = _put_u32(blob, 276, 12u32)
+    blob = _put_u16(blob, 280, 0)
+    blob = _put_u16(blob, 282, 1)
+    blob = _put_u16(blob, 284, 2)
+    blob = _put_u16(blob, 292, 1)
+    blob = _put_u16(blob, 294, 0)
+    blob = _put_u16(blob, 296, 1)
+    blob = _put_u16(blob, 298, 0)
+    blob = _put_u32(blob, 300, 12u32)
+    blob = _put_u16(blob, 304, 0)
+    blob = _put_u16(blob, 306, 1)
+    blob = _put_u16(blob, 308, 1)
+    OtFont(blob: blob, tables: [OtTable(tag: table_tag, offset: 0, length: blob.len() as u32)])
+
 fn _empty_layout_font_v11(table_tag: u32) -> OtFont:
     var blob: [u8] = []
     var index: i64 = 0
@@ -237,6 +279,15 @@ describe "select layout lookups":
         expect(positioned[0].lookup_index).to_equal(0)
         expect(positioned[2].lookup_index).to_equal(2)
 
+    it "selects arbitrary requested Script and LangSys tags":
+        var font = _selected_layout_font(1196643650u32)
+        font.blob = _put_u32(font.blob, 18, 1634885986u32)
+        font.blob = _put_u32(font.blob, 28, 1094795585u32)
+        val plan = select_gsub_lookup_plan(
+            font, 1634885986u32, 1094795585u32, [1801810542u32, 1818847073u32])
+        expect(plan.valid).to_equal(true)
+        expect(plan.lookup_indices).to_equal([0, 1, 2])
+
     it "ignores an unadvertised optional feature":
         val plan = select_gsub_lookup_plan(
             _selected_layout_font(1196643650u32), 1818326126u32, 1162757920u32, [1u32])
@@ -291,10 +342,55 @@ describe "select layout lookups":
         expect(legal_empty.lookup_indices.len()).to_equal(0)
         var variations_active = _selected_layout_font_v11(1196643650u32)
         variations_active.blob = _put_u32(variations_active.blob, 216, 1u32)
-        expect(select_gsub_lookup_plan(variations_active, 1818326126u32, 1162757920u32, []).valid).to_equal(false)
+        val universal_noop = select_gsub_lookup_plan(
+            variations_active, 1818326126u32, 1162757920u32, [])
+        expect(universal_noop.valid).to_equal(true)
+        expect(universal_noop.lookup_indices).to_equal([0, 2])
         var malformed_variations = _empty_layout_font_v11(1196643650u32)
         malformed_variations.blob = _put_u16(malformed_variations.blob, 52, 0)
         expect(select_gsub_lookup_plan(malformed_variations, 1751215726u32, 1515870810u32, []).valid).to_equal(false)
+
+    it "uses the first matching FeatureVariation and alternate FeatureTable":
+        val gsub = _feature_variations_layout_font(1196643650u32)
+        val first = select_gsub_lookup_plan(gsub, 1u32, 1u32, [1667329140u32], [0.75])
+        expect(first.valid).to_equal(true)
+        expect(first.lookup_indices).to_equal([2])
+        val second = select_gsub_lookup_plan(gsub, 1u32, 1u32, [1667329140u32], [0.0])
+        expect(second.valid).to_equal(true)
+        expect(second.lookup_indices).to_equal([1])
+        var required = gsub
+        required.blob = _put_u16(required.blob, 274, 3)
+        required.blob = _put_u16(required.blob, 284, 1)
+        expect(select_gsub_lookup_plan(
+            required, 1818326126u32, 1162757920u32, [], [0.75]).lookup_indices).to_equal([1])
+        val gpos = _feature_variations_layout_font(1196445523u32)
+        expect(select_gpos_lookup_plan(
+            gpos, 1u32, 1u32, [1667329140u32], [0.75]).lookup_indices).to_equal([2])
+
+    it "keeps base features when conditions are false or axes are unavailable":
+        var false_conditions = _feature_variations_layout_font(1196643650u32)
+        false_conditions.blob = _put_u16(false_conditions.blob, 262, 8192)
+        val base = select_gsub_lookup_plan(
+            false_conditions, 1u32, 1u32, [1667329140u32], [0.0])
+        expect(base.valid).to_equal(true)
+        expect(base.lookup_indices).to_equal([0])
+        var missing_axis = _feature_variations_layout_font(1196643650u32)
+        missing_axis.blob = _put_u16(missing_axis.blob, 244, 1)
+        missing_axis.blob = _put_u16(missing_axis.blob, 260, 1)
+        val unavailable = select_gsub_lookup_plan(
+            missing_axis, 1u32, 1u32, [1667329140u32], [0.75])
+        expect(unavailable.valid).to_equal(true)
+        expect(unavailable.lookup_indices).to_equal([0])
+
+    it "fails closed for malformed ranges and non-normalized coordinates":
+        var malformed = _feature_variations_layout_font(1196643650u32)
+        malformed.blob = _put_u16(malformed.blob, 246, 16384)
+        malformed.blob = _put_u16(malformed.blob, 248, 0)
+        expect(select_gsub_lookup_plan(
+            malformed, 1u32, 1u32, [1667329140u32], [0.75]).valid).to_equal(false)
+        expect(select_gsub_lookup_plan(
+            _feature_variations_layout_font(1196643650u32),
+            1u32, 1u32, [1667329140u32], [1.25]).valid).to_equal(false)
 
     it "validates FeatureTableSubstitution indices and alternate FeatureTables":
         var zero_alternate = _selected_layout_font_v11(1196643650u32)

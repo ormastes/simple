@@ -1,6 +1,6 @@
 # OpenType layout table parsers: GSUB, GPOS, GDEF
 
-use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, find_table, read_u16_be, read_i16_be, read_u32_be}
+use std.skia.feature.glyph.ot_parser.{OtFont, OtTable, find_table, read_u16_be, read_i16_be, read_u32_be, read_f2dot14}
 
 # ===== GSUB / GPOS =====
 
@@ -130,6 +130,10 @@ class LayoutLookupPlan:
     activations: [LayoutLookupActivation]
     features: [LayoutFeatureActivation]
 
+class _LayoutVariationSelection:
+    valid: bool
+    substitution: i64
+    substitution_end: i64
 fn _layout_feature_variations_header_valid(blob: [u8], base: i64, limit: i64, offset: i64) -> bool:
     if offset < 14 or base + offset + 8 > limit: return false
     val variations = base + offset
@@ -179,6 +183,9 @@ fn _layout_feature_variations_valid(blob: [u8], base: i64, limit: i64, offset: i
                 val condition_table_end = _nearest_sibling_end(condition_set, condition_offsets, condition, condition_end)
                 if condition_table < condition_records_end or condition_table + 8 > condition_table_end or read_u16_be(blob, condition_table) != 1u32:
                     return false
+                val minimum = read_f2dot14(blob, condition_table + 4)
+                val maximum = read_f2dot14(blob, condition_table + 6)
+                if minimum < -1.0 or maximum > 1.0 or minimum > maximum: return false
         val substitution_offset = read_u32_be(blob, record + 4) as i64
         if substitution_offset != 0:
             val substitution = variations + substitution_offset
@@ -219,6 +226,74 @@ fn _layout_feature_variations_valid(blob: [u8], base: i64, limit: i64, offset: i
         index = index + 1
     true
 
+fn _layout_feature_variation_selection(blob: [u8], base: i64, limit: i64, offset: i64,
+                                       normalized_coords: [f64]) -> _LayoutVariationSelection:
+    val none = _LayoutVariationSelection(valid: true, substitution: -1, substitution_end: -1)
+    if offset == 0: return none
+    for coord in normalized_coords:
+        if not (coord >= -1.0 and coord <= 1.0):
+            return _LayoutVariationSelection(valid: false, substitution: -1, substitution_end: -1)
+    val variations = base + offset
+    val count = read_u32_be(blob, variations + 4) as i64
+    var child_offsets: [i64] = []
+    var index: i64 = 0
+    while index < count:
+        val record = variations + 8 + index * 8
+        val condition_offset = read_u32_be(blob, record) as i64
+        val substitution_offset = read_u32_be(blob, record + 4) as i64
+        if condition_offset != 0: child_offsets.push(condition_offset)
+        if substitution_offset != 0: child_offsets.push(substitution_offset)
+        index = index + 1
+    index = 0
+    while index < count:
+        val record = variations + 8 + index * 8
+        val condition_offset = read_u32_be(blob, record) as i64
+        var matches = true
+        if condition_offset != 0:
+            val condition_set = variations + condition_offset
+            val condition_count = read_u16_be(blob, condition_set) as i64
+            var condition_index: i64 = 0
+            while condition_index < condition_count:
+                val condition_offset_in_set = read_u32_be(blob, condition_set + 2 + condition_index * 4) as i64
+                val condition = condition_set + condition_offset_in_set
+                val axis_index = read_u16_be(blob, condition + 2) as i64
+                if axis_index >= normalized_coords.len():
+                    matches = false
+                else:
+                    val coordinate = normalized_coords[axis_index]
+                    val minimum = read_f2dot14(blob, condition + 4)
+                    val maximum = read_f2dot14(blob, condition + 6)
+                    if coordinate < minimum or coordinate > maximum: matches = false
+                condition_index = condition_index + 1
+        if matches:
+            val substitution_offset = read_u32_be(blob, record + 4) as i64
+            if substitution_offset == 0: return none
+            return _LayoutVariationSelection(
+                valid: true,
+                substitution: variations + substitution_offset,
+                substitution_end: _nearest_sibling_end(variations, child_offsets, substitution_offset, limit))
+        index = index + 1
+    none
+
+fn _layout_selected_feature_table(blob: [u8], variation: _LayoutVariationSelection,
+                                  feature_index: u32, default_start: i64,
+                                  default_end: i64) -> (i64, i64):
+    val base = (default_start, default_end)
+    if variation.substitution < 0: return base
+    val substitution_count = read_u16_be(blob, variation.substitution + 4) as i64
+    var alternate_offsets: [i64] = []
+    var selected_offset: i64 = -1
+    var index: i64 = 0
+    while index < substitution_count:
+        val record = variation.substitution + 6 + index * 6
+        val current_feature = read_u16_be(blob, record)
+        val alternate_offset = read_u32_be(blob, record + 2) as i64
+        alternate_offsets.push(alternate_offset)
+        if current_feature == feature_index: selected_offset = alternate_offset
+        index = index + 1
+    if selected_offset < 0: return base
+    (variation.substitution + selected_offset,
+     _nearest_sibling_end(variation.substitution, alternate_offsets, selected_offset, variation.substitution_end))
 fn _layout_header_size(blob: [u8], base: i64, limit: i64) -> i64:
     if base < 0 or base + 10 > limit: return -1
     val version = read_u32_be(blob, base)
@@ -333,8 +408,8 @@ fn parse_gsub_skeleton(font: OtFont) -> [GsubLookup]:
     results
 
 fn select_gsub_lookups(font: OtFont, script_tag: u32, language_tag: u32,
-                       default_feature_tags: [u32]) -> [GsubLookup]:
-    val plan = select_gsub_lookup_plan(font, script_tag, language_tag, default_feature_tags)
+                       default_feature_tags: [u32], normalized_coords: [f64] = []) -> [GsubLookup]:
+    val plan = select_gsub_lookup_plan(font, script_tag, language_tag, default_feature_tags, normalized_coords)
     if not plan.valid: return []
     val catalog = parse_gsub_skeleton(font)
     if catalog.len() == 0: return []
@@ -421,7 +496,8 @@ fn parse_gpos_skeleton(font: OtFont) -> [GposLookup]:
 
 fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
                                  script_tag: u32, language_tag: u32,
-                                 default_feature_tags: [u32]) -> LayoutLookupPlan:
+                                 default_feature_tags: [u32],
+                                 normalized_coords: [f64]) -> LayoutLookupPlan:
     val invalid = LayoutLookupPlan(valid: false, lookup_indices: [], activations: [], features: [])
     val table = match find_table(font, table_tag):
         Some(value): value
@@ -459,6 +535,10 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
         val variations_limit = _nearest_sibling_end(base, top_offsets, variations_offset, limit)
         if not _layout_feature_variations_valid(blob, base, variations_limit, variations_offset, feature_count, lookup_count):
             return invalid
+    val variation = _layout_feature_variation_selection(
+        blob, base, _nearest_sibling_end(base, top_offsets, variations_offset, limit),
+        variations_offset, normalized_coords)
+    if not variation.valid: return invalid
     val script_count = read_u16_be(blob, script_list) as i64
     val script_records_end = script_list + 2 + script_count * 6
     if script_records_end > script_limit: return invalid
@@ -571,8 +651,11 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
             active_tag_masks[active_tag_index] = active_tag_masks[active_tag_index] | feature_mask
         val record = feature_list + 2 + feature_index as i64 * 6
         val offset = read_u16_be(blob, record + 4) as i64
-        val feature = feature_list + offset
-        val feature_end = _nearest_sibling_end(feature_list, feature_offsets, offset, feature_limit)
+        val selected_feature = _layout_selected_feature_table(
+            blob, variation, feature_index, feature_list + offset,
+            _nearest_sibling_end(feature_list, feature_offsets, offset, feature_limit))
+        val feature = selected_feature.0
+        val feature_end = selected_feature.1
         val params_offset = read_u16_be(blob, feature) as i64
         val lookup_count = read_u16_be(blob, feature + 2) as i64
         val feature_lookup_end = feature + 4 + lookup_count * 2
@@ -588,10 +671,6 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
             if not result.contains(selected): result.push(selected)
             index = index + 1
         active_feature_index = active_feature_index + 1
-    # A zero-record FeatureVariations table is a no-op. Nonempty records remain
-    # unsupported for an active plan until default-instance evaluation lands.
-    if (variations_offset != 0 and read_u32_be(blob, base + variations_offset + 4) > 0u32 and
-        result.len() > 0): return invalid
     var lookup_offsets: [i64] = []
     index = 0
     while index < lookup_count:
@@ -638,16 +717,20 @@ fn _active_layout_lookup_indices(font: OtFont, table_tag: u32,
     LayoutLookupPlan(valid: true, lookup_indices: ordered, activations: activations, features: features)
 
 fn select_gsub_lookup_plan(font: OtFont, script_tag: u32, language_tag: u32,
-                           default_feature_tags: [u32]) -> LayoutLookupPlan:
-    _active_layout_lookup_indices(font, 1196643650u32, script_tag, language_tag, default_feature_tags)
+                           default_feature_tags: [u32],
+                           normalized_coords: [f64] = []) -> LayoutLookupPlan:
+    _active_layout_lookup_indices(
+        font, 1196643650u32, script_tag, language_tag, default_feature_tags, normalized_coords)
 
 fn select_gpos_lookup_plan(font: OtFont, script_tag: u32, language_tag: u32,
-                           default_feature_tags: [u32]) -> LayoutLookupPlan:
-    _active_layout_lookup_indices(font, 1196445523u32, script_tag, language_tag, default_feature_tags)
+                           default_feature_tags: [u32],
+                           normalized_coords: [f64] = []) -> LayoutLookupPlan:
+    _active_layout_lookup_indices(
+        font, 1196445523u32, script_tag, language_tag, default_feature_tags, normalized_coords)
 
 fn select_gpos_lookups(font: OtFont, script_tag: u32, language_tag: u32,
-                       default_feature_tags: [u32]) -> [GposLookup]:
-    val plan = select_gpos_lookup_plan(font, script_tag, language_tag, default_feature_tags)
+                       default_feature_tags: [u32], normalized_coords: [f64] = []) -> [GposLookup]:
+    val plan = select_gpos_lookup_plan(font, script_tag, language_tag, default_feature_tags, normalized_coords)
     if not plan.valid: return []
     val catalog = parse_gpos_skeleton(font)
     if catalog.len() == 0: return []
