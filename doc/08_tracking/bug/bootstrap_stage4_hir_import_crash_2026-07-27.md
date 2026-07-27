@@ -151,3 +151,22 @@ owns the remaining diagnosis after three cycles. The platform facade's direct
 named re-exports remove its undeclared `path` global: strict four- and 362-module
 closures link and print `42`. TODO592 now tracks the generic compiler-level
 namespace-call lowering proof. Full Stage 4 was not rerun.
+
+## Generic Namespace-Call Root
+
+A minimal two-module strict native probe (`use .provider` followed by
+`provider.answer()`) reproduces the remaining compiler symptom exactly:
+LLVM receives a `LoadGlobal` for the compile-time-only alias `provider`.
+HIR field lowering scanned `SymbolTable.symbols.values()`, but native reads of
+struct-valued dictionary values are corrupt on this lane. It now uses the
+already-proven `keys()` plus bracket-index pattern and returns an HIR error when
+a module member cannot resolve instead of falling through as a runtime field.
+
+The HIR regression includes a same-named local `answer`, and the new strict
+two-file system SSpec requires the provider result `42`, no undeclared symbol,
+and no generated fallback stub. A focused current-source closure compiled all
+117 required modules but could not link against the limited retained
+core-C-bootstrap ABI (`Dict.has`, `rt_is_debug_mode_enabled`,
+`rt_array_extend_i64`, and `rt_option_map` are absent). That is not execution
+proof; TODO592 remains open for the fresh admitted self-hosted runner. No full
+Stage 4 was rerun.

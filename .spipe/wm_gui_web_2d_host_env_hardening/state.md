@@ -934,3 +934,15 @@ Tracking split:
   four- and 362-module closures link and print 42. TODO592 retains only the generic
   compiler namespace-call proof, while TODO590 retains 70 declarations. No full
   bootstrap, rendering, or QEMU run occurred.
+- stage4-module-namespace-root: Three small read-only lanes traced the generic
+  `module.function()` leak from HIR Field lowering to MIR LoadGlobal and the
+  backend's undeclared-global failure. A strict two-module probe reproduced
+  `provider` as the leaked global. HIR now avoids the native-corrupt
+  `SymbolTable.symbols.values()` path, using keys plus bracket access and
+  failing unresolved module members before MIR. The HIR unit fixture has a
+  same-named local function, and a modern strict native system SSpec requires
+  exact provider output 42 with no stub/global escape. The final focused
+  current-source closure compiled 117 modules but hit retained core-C-bootstrap
+  ABI link gaps, so TODO592 remains open for fresh Stage-4 execution/docgen.
+  Its three-cycle cap is exhausted; no full bootstrap, rendering, or QEMU run
+  occurred.

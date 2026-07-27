@@ -352,18 +352,21 @@ impl HirLowering:
                             match fld_base_symbol.kind:
                                 case SymbolKind.Module:
                                     if val module_name = fld_base_symbol.defining_module:
-                                        var module_callable: SymbolId? = nil
-                                        for candidate in self.symbols.symbols.values():
+                                        # Dict.values() corrupts struct values
+                                        # on the native Stage-4 lane. Reuse the
+                                        # proven keys()+index access pattern.
+                                        for candidate_key in self.symbols.symbols.keys():
+                                            val candidate = self.symbols.symbols[candidate_key]
                                             if val candidate_module = candidate.defining_module:
                                                 if candidate_module == module_name:
                                                     match candidate.kind:
                                                         case SymbolKind.Function:
                                                             if candidate.name == fld_name_t or candidate.name.ends_with("." + fld_name_t):
-                                                                module_callable = candidate.id
+                                                                val callable_name = self.symbols.symbol_display_name(candidate.id, fld_name_t)
+                                                                return HirExpr(kind: HirExprKind.NamedVar(candidate.id, callable_name), type_: nil, span: e.span)
                                                         case _: ()
-                                        if val resolved_callable = module_callable:
-                                            val callable_name = self.symbols.symbol_display_name(resolved_callable, fld_name_t)
-                                            return HirExpr(kind: HirExprKind.NamedVar(resolved_callable, callable_name), type_: nil, span: e.span)
+                                    self.error("unresolved module member: {fld_name_t}", e.span)
+                                    return HirExpr(kind: HirExprKind.Error, type_: nil, span: e.span)
                                 case _: ()
                     # Numeric tuple positional access (`t.0`, `t.1`, ...):
                     # route through HirExprKind.Index (rt_array_get at

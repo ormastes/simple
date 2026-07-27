@@ -1,0 +1,46 @@
+"""Native module-namespace call lowering regression."""
+
+use std.spec.*
+use std.io_runtime.{dir_create_all, file_write, remove_file_if_exists, shell}
+
+val BUILD_DIR = "build/native_module_namespace_call_regression"
+val PROVIDER_PATH = BUILD_DIR + "/provider.spl"
+val ENTRY_PATH = BUILD_DIR + "/main.spl"
+val BINARY_PATH = BUILD_DIR + "/main"
+val CACHE_DIR = BUILD_DIR + "/cache"
+
+fn provider_source() -> text:
+    "fn answer() -> i64:\n    42\n\nexport answer\n"
+
+fn entry_source() -> text:
+    "use .provider\n\n" +
+    "fn answer() -> i64:\n    7\n\n" +
+    "fn shadow(path: text) -> text:\n    path\n\n" +
+    "fn main():\n" +
+    "    if shadow(\"ok\") == \"ok\":\n" +
+    "        print(provider.answer())\n" +
+    "    else:\n" +
+    "        print(1)\n"
+
+describe "native module namespace calls":
+    it "calls the provider directly without lowering its alias as a global":
+        step("Write provider and shadowing consumer modules")
+        expect(dir_create_all(BUILD_DIR)).to_equal(true)
+        expect(file_write(PROVIDER_PATH, provider_source())).to_equal(true)
+        expect(file_write(ENTRY_PATH, entry_source())).to_equal(true)
+        expect(remove_file_if_exists(BINARY_PATH)).to_equal(true)
+
+        step("Compile the real two-module closure without fallback stubs")
+        val compiled = shell(
+            "env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 " +
+            "bin/simple native-build --entry " + ENTRY_PATH +
+            " --entry-closure --cache-dir " + CACHE_DIR + " -o " + BINARY_PATH
+        )
+        expect(compiled.exit_code).to_equal(0)
+        expect(compiled.stderr.contains("undeclared symbol")).to_be(false)
+        expect(compiled.stderr.contains("generated stub")).to_be(false)
+
+        step("Run the native artifact and observe the provider result")
+        val result = shell(BINARY_PATH)
+        expect(result.exit_code).to_equal(0)
+        expect(result.stdout).to_equal("42")
