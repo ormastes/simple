@@ -1007,3 +1007,15 @@ implementation in progress / target evidence blocked
   lifecycle specs after source-manifest/artifact admission and records their
   statuses. No admissible current target runner/artifact pair exists, so these
   scenarios were not executed in this session and no production PASS is claimed.
+- Hosted form-control evidence now proves pointer targeting, focus, key edges,
+  text input, DOM event state, and a CSS-driven red-to-blue pixel transition.
+- Production broker evidence now rejects `file:///etc/passwd` as
+  `invalid-navigation` before issuing a renderer command and closes the worker.
+- The canonical wrapper now also runs the focused controls and scheme-denial
+  scenarios and makes all five focused-spec statuses release-blocking. Its
+  unchanged-frame receipt requires stable render revision, checksum, backend,
+  readback source, backend handle, and captured pixels.
+- TLS fixture authority remains blocked: a safe seam must be feature-gated,
+  literal-loopback-only, use a bounded DER root with normal hostname/time
+  verification, and add conditional ABI/security classification outside the
+  current two-file lane. No TLS runtime changes or weaker verifier were added.

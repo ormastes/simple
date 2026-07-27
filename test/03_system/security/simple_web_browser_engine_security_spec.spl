@@ -59,6 +59,42 @@ fn _require_platform_renderer_sandbox_evidence():
     expect(frame.composition.batches.len()).to_be_greater_than(0)
     expect(closed).to_be(true)
 
+fn _require_production_file_scheme_denial():
+    val artifact = env_get("HOSTED_WM_ARTIFACT")
+    val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+    if artifact == "":
+        fail("HOSTED_WM_ARTIFACT is required for production scheme denial")
+    if expected_artifact_sha.len() != 64 or
+        file_hash_sha256(artifact) != expected_artifact_sha:
+        fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+
+    var renderer = HostedBrowserRendererProcess.create(42, 64, 48)
+    val started = renderer.start(artifact, 2000)
+    if not started.ok:
+        val closed = renderer.close()
+        if not closed:
+            fail("production renderer cleanup failed after start denial")
+        fail("production renderer start failed: {started.reason}")
+    val initialized = renderer.render(
+        "init", "<div>scheme-denial</div>", 2000
+    )
+    if not initialized.ok:
+        val closed = renderer.close()
+        if not closed:
+            fail("production renderer cleanup failed after init denial")
+        fail("production renderer init failed: {initialized.reason}")
+    val denied = renderer.begin_navigate(
+        "file:///etc/passwd", "GET", "", "", "", 2000
+    )
+    val closed = renderer.close()
+    if not closed:
+        fail("production renderer cleanup failed after scheme denial")
+    match denied:
+        Err(reason):
+            expect(reason).to_equal("invalid-navigation")
+        Ok(_):
+            fail("file navigation was accepted by the production broker")
+
 fn _require_production_security_evidence():
     fail("REQ-WEB-BROWSER-010..019: production security evidence not implemented")
 
@@ -94,10 +130,10 @@ describe "Production Simple browser security envelope":
         _require_production_security_evidence()
 
     # @manual: folded
-    it "should deny unaudited file data javascript custom and external schemes":
+    it "should deny unaudited file navigation through the production broker":
         _hostile_page_fixture()
-        step("Exercise every supported and denied navigation scheme")
-        _require_production_security_evidence()
+        step("Reject file navigation before it reaches the sandboxed worker")
+        _require_production_file_scheme_denial()
 
     # @manual: show
     # @capture(exec)

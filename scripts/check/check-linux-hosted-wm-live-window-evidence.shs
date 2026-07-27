@@ -33,7 +33,9 @@ LOG_PATH="$BUILD_DIR/stdout.log"
 ERR_PATH="$BUILD_DIR/stderr.log"
 BUILD_LOG="$BUILD_DIR/native-build.log"
 BROWSER_ANIMATION_SPEC_LOG="$BUILD_DIR/browser-animation-spec.log"
+BROWSER_CONTROLS_SPEC_LOG="$BUILD_DIR/browser-controls-spec.log"
 BROWSER_SANDBOX_SPEC_LOG="$BUILD_DIR/browser-sandbox-spec.log"
+BROWSER_SCHEME_SPEC_LOG="$BUILD_DIR/browser-scheme-spec.log"
 BROWSER_LIFECYCLE_SPEC_LOG="$BUILD_DIR/browser-lifecycle-spec.log"
 SNAPSHOT_LIVE="$BUILD_DIR/snapshot.live.json"
 CAPTURE_LIVE="$BUILD_DIR/framebuffer.live.ppm"
@@ -58,6 +60,8 @@ MAXIMIZE_SNAPSHOT="$BUILD_DIR/maximize.snapshot.json"
 MAXIMIZE_CAPTURE="$BUILD_DIR/maximize.framebuffer.ppm"
 RESTORE_SNAPSHOT="$BUILD_DIR/restore.snapshot.json"
 RESTORE_CAPTURE="$BUILD_DIR/restore.framebuffer.ppm"
+UNCHANGED_SNAPSHOT="$BUILD_DIR/unchanged.snapshot.json"
+UNCHANGED_CAPTURE="$BUILD_DIR/unchanged.framebuffer.ppm"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 rm -f "$LOG_PATH" "$ERR_PATH" "$BUILD_LOG" "$SNAPSHOT_LIVE" "$CAPTURE_LIVE" \
@@ -67,7 +71,9 @@ rm -f "$LOG_PATH" "$ERR_PATH" "$BUILD_LOG" "$SNAPSHOT_LIVE" "$CAPTURE_LIVE" \
     "$BASELINE_SNAPSHOT" "$BASELINE_CAPTURE" "$INPUT_SNAPSHOT" "$INPUT_CAPTURE" \
     "$MOVE_SNAPSHOT" "$MOVE_CAPTURE" "$MAXIMIZE_SNAPSHOT" "$MAXIMIZE_CAPTURE" \
     "$RESTORE_SNAPSHOT" "$RESTORE_CAPTURE" "$BROWSER_ANIMATION_SPEC_LOG" \
-    "$BROWSER_SANDBOX_SPEC_LOG" "$BROWSER_LIFECYCLE_SPEC_LOG"
+    "$UNCHANGED_SNAPSHOT" "$UNCHANGED_CAPTURE" "$BROWSER_CONTROLS_SPEC_LOG" \
+    "$BROWSER_SANDBOX_SPEC_LOG" "$BROWSER_SCHEME_SPEC_LOG" \
+    "$BROWSER_LIFECYCLE_SPEC_LOG"
 
 sha256_file() {
     sha256sum "$1" | awk '{print $1}'
@@ -170,7 +176,9 @@ emit() {
         echo "linux_hosted_wm_live_window_wrapper_sha256=$wrapper_sha"
         echo "linux_hosted_wm_live_window_native_artifact_sha256=$hosted_bin_sha"
         echo "linux_hosted_wm_live_window_browser_animation_spec_status=$browser_animation_spec_status"
+        echo "linux_hosted_wm_live_window_browser_controls_spec_status=$browser_controls_spec_status"
         echo "linux_hosted_wm_live_window_browser_sandbox_spec_status=$browser_sandbox_spec_status"
+        echo "linux_hosted_wm_live_window_browser_scheme_spec_status=$browser_scheme_spec_status"
         echo "linux_hosted_wm_live_window_browser_lifecycle_spec_status=$browser_lifecycle_spec_status"
         echo "linux_hosted_wm_live_window_window_marker=$window_marker"
         echo "linux_hosted_wm_live_window_frame_marker=$frame_marker"
@@ -255,6 +263,16 @@ emit() {
         echo "linux_hosted_wm_live_window_restore_capture_sha256=$restore_capture_sha"
         echo "linux_hosted_wm_live_window_restore_snapshot=$RESTORE_SNAPSHOT"
         echo "linux_hosted_wm_live_window_restore_capture=$RESTORE_CAPTURE"
+        echo "linux_hosted_wm_live_window_unchanged_frame_status=$unchanged_frame_status"
+        echo "linux_hosted_wm_live_window_unchanged_nonce=6"
+        echo "linux_hosted_wm_live_window_unchanged_revision=$unchanged_revision"
+        echo "linux_hosted_wm_live_window_unchanged_frame_checksum=$unchanged_frame_checksum"
+        echo "linux_hosted_wm_live_window_unchanged_backend=$unchanged_backend"
+        echo "linux_hosted_wm_live_window_unchanged_readback_source=$unchanged_readback_source"
+        echo "linux_hosted_wm_live_window_unchanged_backend_handle=$unchanged_backend_handle"
+        echo "linux_hosted_wm_live_window_unchanged_capture_sha256=$unchanged_capture_sha"
+        echo "linux_hosted_wm_live_window_unchanged_snapshot=$UNCHANGED_SNAPSHOT"
+        echo "linux_hosted_wm_live_window_unchanged_capture=$UNCHANGED_CAPTURE"
         echo "linux_hosted_wm_live_window_compatibility_fallback_status=$fallback_status"
         echo "linux_hosted_wm_live_window_window_png=$(artifact_status "$WINDOW_PNG")"
         echo "linux_hosted_wm_live_window_framebuffer_ppm=$(artifact_status "$CAPTURE_LIVE")"
@@ -278,6 +296,7 @@ emit() {
         echo "- events: focus=$focus_status pointer=$pointer_status keyboard=$keyboard_status text=$text_status receipt=$input_receipt_status replay=$replay_status move=$move_status maximize=$maximize_status restore=$restore_status"
         echo "- frame correlation: $frame_status"
         echo "- retained nonce/revision/readback: baseline=1/$baseline_revision/$baseline_frame_checksum input=2/$input_revision/$input_frame_checksum move=3/$move_revision/$move_frame_checksum maximize=4/$max_revision/$maximize_frame_checksum restore=5/$restore_revision/$restore_frame_checksum"
+        echo "- unchanged-frame work avoidance: $unchanged_frame_status (nonce=6 revision=$unchanged_revision checksum=$unchanged_frame_checksum)"
         echo "- compatibility fallback: $fallback_status"
     } >"$REPORT_PATH"
     cat "$EVIDENCE_ENV"
@@ -311,6 +330,7 @@ move_status=fail
 maximize_status=fail
 restore_status=fail
 frame_status=fail
+unchanged_frame_status=fail
 fallback_status=fail
 baseline_revision=""
 baseline_frame_checksum=""
@@ -351,6 +371,12 @@ restore_backend=""
 restore_readback_source=""
 restore_backend_handle=""
 restore_capture_sha=""
+unchanged_revision=""
+unchanged_frame_checksum=""
+unchanged_backend=""
+unchanged_readback_source=""
+unchanged_backend_handle=""
+unchanged_capture_sha=""
 last_issue_ack=""
 issue_nonce=""
 issue_phase=""
@@ -367,7 +393,9 @@ simple_bin_sha=""
 wrapper_sha="$(sha256_file "$0")"
 hosted_bin_sha=""
 browser_animation_spec_status=not-run
+browser_controls_spec_status=not-run
 browser_sandbox_spec_status=not-run
+browser_scheme_spec_status=not-run
 browser_lifecycle_spec_status=not-run
 
 resolve_source_provenance || {
@@ -513,12 +541,24 @@ run_browser_spec \
     "should animate JavaScript timers requestAnimationFrame and CSS on one clock" \
     "$BROWSER_ANIMATION_SPEC_LOG" browser-animation-spec-failed
 browser_animation_spec_status=pass
+browser_controls_spec_status=fail
+run_browser_spec \
+    test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl \
+    "should route hosted pointer focus key edges and text into a form control" \
+    "$BROWSER_CONTROLS_SPEC_LOG" browser-controls-spec-failed
+browser_controls_spec_status=pass
 browser_sandbox_spec_status=fail
 run_browser_spec \
     test/03_system/security/simple_web_browser_engine_security_spec.spl \
     "should run the site renderer in the required platform sandbox" \
     "$BROWSER_SANDBOX_SPEC_LOG" browser-sandbox-spec-failed
 browser_sandbox_spec_status=pass
+browser_scheme_spec_status=fail
+run_browser_spec \
+    test/03_system/security/simple_web_browser_engine_security_spec.spl \
+    "should deny unaudited file navigation through the production broker" \
+    "$BROWSER_SCHEME_SPEC_LOG" browser-scheme-spec-failed
+browser_scheme_spec_status=pass
 browser_lifecycle_spec_status=fail
 run_browser_spec \
     test/05_perf/browser/simple_web_browser_engine_production_budget_spec.spl \
@@ -750,6 +790,14 @@ retain_phase() {
             restore_backend_handle=$backend_handle
             restore_capture_sha=$capture_sha
             ;;
+        unchanged)
+            unchanged_revision=$revision
+            unchanged_frame_checksum=$frame_checksum
+            unchanged_backend=$frame_backend
+            unchanged_readback_source=$readback_source
+            unchanged_backend_handle=$backend_handle
+            unchanged_capture_sha=$capture_sha
+            ;;
         *) return 1 ;;
     esac
 }
@@ -909,6 +957,19 @@ issue 5 restore && retain_phase restore 5 applied "$RESTORE_SNAPSHOT" "$RESTORE_
 if [ "$(jq -cS '.compositor.windows' "$SNAPSHOT_LIVE")" = "$pre_max" ]; then
     restore_status=pass
 fi
+issue 6 snapshot && retain_phase unchanged 6 snapshot-only "$UNCHANGED_SNAPSHOT" "$UNCHANGED_CAPTURE" || {
+    emit fail unchanged-frame-evidence-ack-or-capture-missing
+    exit 1
+}
+if [ "$unchanged_revision" = "$restore_revision" ] \
+    && [ "$unchanged_frame_checksum" = "$restore_frame_checksum" ] \
+    && [ "$unchanged_backend" = "$restore_backend" ] \
+    && [ "$unchanged_readback_source" = "$restore_readback_source" ] \
+    && [ "$unchanged_backend_handle" = "$restore_backend_handle" ] \
+    && [ "$unchanged_capture_sha" = "$restore_capture_sha" ] \
+    && [ "$(sha256_file "$UNCHANGED_CAPTURE")" = "$unchanged_capture_sha" ]; then
+    unchanged_frame_status=pass
+fi
 if [ "$initial_revision" -lt "$input_revision" ] \
     && [ "$input_revision" -lt "$move_revision" ] \
     && [ "$move_revision" -lt "$max_revision" ] \
@@ -943,7 +1004,14 @@ evidence_except_glyph_complete() {
         && [ "$replay_status" = pass ] \
         && [ "$move_status" = pass ] \
         && [ "$maximize_status" = pass ] && [ "$restore_status" = pass ] \
-        && [ "$frame_status" = pass ] && [ "$fallback_status" = pass ]
+        && [ "$frame_status" = pass ] \
+        && [ "$unchanged_frame_status" = pass ] \
+        && [ "$browser_animation_spec_status" = pass ] \
+        && [ "$browser_controls_spec_status" = pass ] \
+        && [ "$browser_sandbox_spec_status" = pass ] \
+        && [ "$browser_scheme_spec_status" = pass ] \
+        && [ "$browser_lifecycle_spec_status" = pass ] \
+        && [ "$fallback_status" = pass ]
 }
 
 if [ "$glyph_mode" = calibration-only ]; then

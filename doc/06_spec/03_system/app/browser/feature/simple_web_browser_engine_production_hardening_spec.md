@@ -40,3 +40,18 @@ This proves hosted HTML/CSS rendering and address, Back, and Forward routing
 through `BrowserSession` structured UI access. It does not claim real HTTP,
 the installed browser executable, Stop/Reload/Home, bookmarks, or link-click
 coverage. Those scenarios retain explicit fail-closed placeholders.
+
+## Hosted form-control event evidence
+
+The form-control scenario renders a red CSS-painted text input through
+`HostedWebContentSession`, hits it at its layout coordinates, and requires the
+same semantic target for pointer press/release, keyboard down/up, and committed
+text. Focus, key, before-input, input, and key-up handlers each publish visible
+DOM state; the committed value must be `Ada`. The input handler also activates
+a CSS attribute selector, so the final rendered control must be blue.
+
+This proves one hosted text-input flow and its rendered state. Default-action
+cancellation, form submission, other control types, and installed-browser
+event capture remain explicit fail-closed work.
+The canonical live-window wrapper executes this focused scenario with its
+admitted self-hosted runner before live-window capture.

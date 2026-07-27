@@ -39,6 +39,19 @@ assertions are not artifact-admission evidence.
 
 Evidence captures: executed binary, subprocess log, and artifact identity.
 
+## Supplemental current-host receipt
+
+The canonical Linux live-window wrapper records one unchanged-frame work-
+avoidance sample after the restore frame. It issues a snapshot-only command,
+which does not mark the production compositor dirty, and requires the retained
+render revision, frame checksum, backend, readback source, backend handle, and
+captured pixels to remain identical. The receipt is
+`linux_hosted_wm_live_window_unchanged_frame_status=pass`, bound to the same
+admitted native artifact and source manifest as the other wrapper evidence.
+
+This is a single current-host retained-frame observation. It is not an
+allocation count, frame-time percentile, RSS plateau, GC measurement, or soak.
+
 ## Explicit blockers
 
 The following scenarios intentionally fail until their named production metrics

@@ -21,10 +21,22 @@ The scenario fails closed when the artifact is missing, startup fails, the
 protocol/render fails, or the renderer cannot be closed. It does not shell out
 or use raw runtime APIs.
 
+## Production file-scheme denial
+
+The `should deny unaudited file navigation through the production broker`
+scenario uses the same admitted artifact and SHA-256 contract. It starts and
+initializes the real sandboxed `HostedBrowserRendererProcess`, asks its public
+broker API to navigate to `file:///etc/passwd`, and requires the existing
+`invalid-navigation` denial before any worker command is started. The renderer
+is closed on every start, initialization, denial, and cleanup branch.
+The canonical live-window wrapper executes this focused denial after source-
+manifest and artifact admission.
+
 ## Still unsupported
 
 All other scenarios in the executable spec intentionally remain explicit
 failure placeholders: TLS and certificate identity, origin/CORS/CSP/redirect
-and mixed-content policy, cookies/storage, hostile Node capabilities, scheme
-policy, malformed/late/duplicate/oversized renderer messages, renderer
-crash/resource/restart containment, and conformance/fuzz corpus accounting.
+and mixed-content policy, cookies/storage, hostile Node capabilities,
+data/javascript/custom/external scheme policy, malformed/late/duplicate/
+oversized renderer messages, renderer crash/resource/restart containment, and
+conformance/fuzz corpus accounting.
