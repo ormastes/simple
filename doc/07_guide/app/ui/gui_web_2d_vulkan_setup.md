@@ -110,6 +110,10 @@ sudo chmod 4755     node_modules/electron/dist/chrome-sandbox
 # Google Chrome: install google-chrome-stable from the google-chrome apt repo.
 ```
 
+Enter administrator credentials only through the OS-owned elevation prompt.
+Never embed, echo, pipe, or retain a password in shell history, an environment
+variable, a remote URL, an evidence receipt, or a repository file.
+
 ## Linux Readiness Checks
 
 ```sh
@@ -383,9 +387,9 @@ loader/tool discovery, `--browser-backing` proves Chromium GPU metadata,
 `--run` proves direct ARGB comparison, and `--renderdoc`/`--renderdoc-simple`
 are the only Linux paths that can produce native `.rdc` completion evidence.
 
-## Current Linux RenderDoc Evidence - 2026-07-02
+## Retained Linux RenderDoc Receipt - 2026-06-29 (Historical)
 
-Current combined evidence is indexed in
+The combined receipt indexed in
 `doc/09_report/linux_renderdoc_simpleos_hardening_evidence_current_2026-07-02.md`.
 For Linux it points at `doc/09_report/linux_vulkan_render_log_compare_2026-06-29.md`,
 which records:
@@ -396,8 +400,10 @@ which records:
 - Vulkan Engine2D readback and CPU SIMD Engine2D reports both pass with zero
   mismatches
 
-Treat the 2026-06-27 missing-`renderdoccmd` rows as historical host-local
-blockers, not the current Linux completion state.
+This receipt proves only that dated run. It does not override the newer
+2026-07-02 aggregate at the top of this guide, whose Chrome and Electron `.rdc`
+lanes are blocked. Re-run the exact commands below and require newly written
+receipts before making a current completion claim.
 
 ## Full Evidence
 
@@ -412,18 +418,39 @@ GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-run-current \
   scripts/setup/setup-gui-web-2d-vulkan-env.shs --run
 GUI_WEB_2D_VULKAN_BUILD_DIR=build/gui-web-2d-vulkan-env-renderdoc-simple \
   scripts/setup/setup-gui-web-2d-vulkan-env.shs --renderdoc-simple
+RDOC_SIMPLE_EVIDENCE_ENV=build/gui-web-2d-vulkan-env-renderdoc-simple/renderdoc/simple/evidence.env \
+BUILD_DIR=build/renderdoc/simple-gate \
+REPORT_PATH=doc/09_report/renderdoc_simple_gate_$(date -u +%F).md \
+  sh scripts/check/check-renderdoc-simple-gate.shs
 RDOC_OUTPUT_DIR=build/renderdoc/chrome-implicit-layer-default-autocapture \
   scripts/tool/renderdoc-evidence.shs capture-html
 RDOC_OUTPUT_DIR=build/renderdoc/electron-implicit-layer-default-autocapture \
   scripts/tool/renderdoc-evidence.shs capture-electron-html
-sh scripts/check/check-linux-vulkan-render-log-compare.shs
+GUI_WEB_2D_VULKAN_ENV=build/gui-web-2d-vulkan-env-run-current/evidence.env \
+GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/gui-web-2d-vulkan-env-browser-backing/evidence.env \
+RDOC_SIMPLE_EVIDENCE_ENV=build/renderdoc/simple-gate/evidence.env \
+RDOC_HTML_EVIDENCE_ENV=build/renderdoc/chrome-implicit-layer-default-autocapture/html/evidence.env \
+RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env \
+  sh scripts/check/check-linux-vulkan-render-log-compare.shs
 RUN_TOKEN=$(date -u +%Y%m%d%H%M%S)
 GUI_RENDERDOC_AGGREGATE_DISABLE_DEFAULT_STATIC_CACHE=1 \
 GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/gui-web-2d-final-${RUN_TOKEN}/static-cache \
+GUI_WEB_2D_VULKAN_ENV=build/gui-web-2d-vulkan-env-check-current/evidence.env \
+GUI_WEB_2D_VULKAN_RUN_EVIDENCE_ENV=build/gui-web-2d-vulkan-env-run-current/evidence.env \
+GUI_WEB_2D_VULKAN_BROWSER_BACKING_EVIDENCE_ENV=build/gui-web-2d-vulkan-env-browser-backing/evidence.env \
+RDOC_SIMPLE_EVIDENCE_ENV=build/renderdoc/simple-gate/evidence.env \
+RDOC_HTML_EVIDENCE_ENV=build/renderdoc/chrome-implicit-layer-default-autocapture/html/evidence.env \
+RDOC_ELECTRON_HTML_EVIDENCE_ENV=build/renderdoc/electron-implicit-layer-default-autocapture/electron-html/evidence.env \
+LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/linux-vulkan-render-log-compare/evidence.env \
 BUILD_DIR=build/gui-web-2d-final-${RUN_TOKEN}/out \
 REPORT_PATH=build/gui-web-2d-final-${RUN_TOKEN}/report.md \
   sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs
 ```
+
+The three direct ARGB producers must use the same `RDOC_HTML_PATH`,
+`GUI_WEB_2D_VULKAN_WIDTH`, and `GUI_WEB_2D_VULKAN_HEIGHT`. The setup wrapper
+passes that one fixture and viewport to Electron, Chrome, and Simple before
+running pairwise diffs; changing only one producer is not parity evidence.
 
 `--renderdoc-simple` is the complete focused producer path, not a capture-only
 shortcut. It captures to
