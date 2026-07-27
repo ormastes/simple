@@ -20,7 +20,7 @@ use std.spec.*
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/gui/feature/wm_gui_web_2d_host_env_hardening_spec.spl` |
-| Updated | 2026-07-26 |
+| Updated | 2026-07-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 use std.spec.*
@@ -131,7 +131,7 @@ expect(perf).to_contain("gui_showcase_4k_200fps_max_rss_kb=")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 12 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -139,7 +139,10 @@ val wrapper = file_read(WRAPPER)
 val app = file_read(HOST_ENV_APP)
 val contract = file_read(HOST_ENV_CONTRACT)
 expect(wrapper).to_contain("linux_hosted_wm_live_window")
-expect(app).to_contain("native_simd_pixel_evidence")
+expect(app).to_contain("host_simd_evidence_passes")
+expect(app).to_contain("build/cpu-simd-engine2d-arch-matrix/aarch64/out/evidence.env")
+expect(app).to_contain("build/cpu-simd-engine2d-arch-matrix/riscv64/out/evidence.env")
+expect(app.contains("native_simd_pixel_evidence")).to_be(false)
 expect(app).to_contain("build/gui-web-2d-vulkan-env/simple-vulkan-readback/evidence.env")
 expect(app).to_contain("build/renderdoc/simple-gate/evidence.env")
 expect(app).to_contain("build/linux-hosted-wm-live-window-evidence/evidence.env")

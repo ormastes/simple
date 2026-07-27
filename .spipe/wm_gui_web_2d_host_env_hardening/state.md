@@ -806,3 +806,18 @@ Tracking split:
   docgen produced one complete manual with zero stubs. The diagnostic SSpec
   runner remains unqualified: after the parser fix it failed only because its
   required `/usr/bin/simple_seed` sibling is absent.
+- bugfix: Closed the cross-architecture SIMD frame-ownership false-green. Four
+  small read-only lanes audited the producer, classifier, host rows, and docs;
+  the shared fix restores the tracked canonical evidence source, hashes that
+  source and the selected Simple compiler, recomputes an architecture/feature/
+  diagram-checksum receipt, and rejects matrix arch/path/hash splices. Target C
+  binaries can no longer override missing Simple-rendered frames. The common
+  classifier now requires positive/equal fill, copy, alpha, alpha-edge, scroll,
+  and diagram checksums plus native hits and no-middle facade evidence for x86,
+  ARM, and RISC-V. `test_host_env` consumes exact ARM/RISC-V child receipts and
+  no longer passes from `native_simd_pixel_evidence` or matrix substrings.
+  Focused contract tests pass 13/13 and app source tests pass 1/1; the producer/
+  matrix system contract reached 2/3, with only the diagnostic runner's known
+  missing `/usr/bin/simple_seed` failure in its intentional forbidden-seed
+  subprocess. Shell syntax passes and docgen produced five complete manuals
+  with zero stubs. Live native/QEMU frame evidence was not rerun.

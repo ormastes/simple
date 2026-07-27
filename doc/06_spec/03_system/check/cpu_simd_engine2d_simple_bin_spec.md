@@ -24,7 +24,7 @@ The CPU SIMD Engine2D wrapper needs a Simple binary that contains the Engine2D S
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/cpu_simd_engine2d_simple_bin_spec.spl` |
-| Updated | 2026-07-25 |
+| Updated | 2026-07-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -93,7 +93,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_engine2d_simple_bin
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 52 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -106,8 +106,6 @@ expect(script).to_contain("\"bin/release\"/*/simple")
 expect(script).to_contain("\"build/bootstrap/stage3/simple\"")
 expect(script).to_contain("repo-self-hosted-engine2d-simd")
 expect(script).to_contain("is_rust_seed_simple")
-expect(script).to_contain("binary_identifies_as_bootstrap_seed")
-expect(script).to_contain("bootstrap seed only")
 expect(script).to_contain("binary_runs_engine2d_simd_smoke")
 expect(script).to_contain("engine2d_simd_candidate_smoke.spl")
 expect(script).to_contain("engine2d_simd_fill_row_u32(4, 0xFF010203u32)")
@@ -134,8 +132,7 @@ expect(script).to_contain("cpu_simd_evidence_simple_bin_status=$SIMPLE_BIN_STATU
 expect(script).to_contain("cpu_simd_alpha_edge_expected_checksum")
 expect(script).to_contain("cpu_simd_alpha_edge_actual_checksum")
 expect(script).to_contain("cpu_simd_alpha_edge_mismatch_count")
-expect(evidence_src).to_contain("val alpha_edge_mismatches = mismatch_count(alpha_edge_expected, alpha_edge_actual)")
-expect(evidence_src).to_contain("alpha_edge_mismatches != 0")
+expect(evidence_src).to_contain("mismatch_count(alpha_edge_expected, alpha_edge_actual) != 0")
 expect(script).to_contain("\"$ALPHA_EDGE_MISMATCH\" != \"0\"")
 expect(script).to_contain("REASON=simd-output-mismatch")
 expect(evidence_src).to_contain("0x00000000u32")
@@ -146,12 +143,9 @@ expect(script).to_contain("cp \"$CANONICAL_EVIDENCE_SRC\" \"$EVIDENCE_SRC\"")
 expect(script).to_contain("cmp -s \"$CANONICAL_EVIDENCE_SRC\" \"$EVIDENCE_SRC\"")
 expect(script).to_contain("\"$COPIED_SOURCE_SHA256\" != \"$CANONICAL_SOURCE_SHA256\"")
 expect(script).to_contain("cpu_simd_evidence_compiler_sha256=")
-expect(script).to_contain("cpu_simd_evidence_native_executable_sha256=")
-expect(script).to_contain("cpu_simd_evidence_git_revision=")
-expect(script).to_contain("cpu_simd_evidence_native_build_command=")
-expect(script).to_contain("cpu_simd_evidence_native_build_exit=")
-expect(script).to_contain("cpu_simd_evidence_native_run_exit=")
-expect(script).to_contain("cpu_simd_evidence_log_bounded=")
+expect(script).to_contain("cpu_simd_evidence_frame_receipt_sha256=")
+expect(script).to_contain("REASON=simd-frame-provenance-invalid")
+expect(script).to_contain("REASON=runtime-arch-mismatch")
 expect(script.contains("cat >\"$EVIDENCE_SRC\"")).to_equal(false)
 val no_seed_candidate = not script.contains("target/debug/simple\"") and not script.contains("target/release/simple\"")
 expect(no_seed_candidate).to_be(true)
@@ -194,7 +188,7 @@ expect(src_code).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -219,6 +213,12 @@ expect(script).to_contain("qemu-aarch64 -L /usr/aarch64-linux-gnu")
 expect(script).to_contain("qemu-riscv64 -L /usr/riscv64-linux-gnu")
 expect(script).to_contain("-march=rv64gcv -mabi=lp64d")
 expect(script).to_contain("strict-requires-all-arches-pass")
+expect(script).to_contain("CPU_SIMD_EXPECTED_ARCH=\"$arch\"")
+expect(script).to_contain("runtime-arch-mismatch")
+expect(script).to_contain("simple-bin-path-mismatch")
+expect(script).to_contain("frame-receipt-invalid")
+expect(script).to_contain("frame_receipt_sha256")
+expect(script).to_contain("target-binary-builds-and-rendered-frames-pass")
 
 val runtime = file_read("src/runtime/runtime_simd_dispatch.c")
 expect(runtime).to_contain("__riscv_vector")

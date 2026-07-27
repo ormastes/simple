@@ -24,14 +24,15 @@ The command always writes the structurally valid JSON report, but exits zero
 only when every required row is `pass`. Any `blocked`, `fail`, malformed,
 missing, duplicate, or unknown row keeps the aggregate gate nonzero.
 
-The x86 row reads the complete retained CPU-SIMD receipt rather than rerunning
-a fill/copy mini-probe. It requires AVX2 or SSE4.2 native execution, bit-exact
-scalar parity, positive native and per-operation hits, zero
-fill/copy/alpha/edge/scroll/diagram mismatches, and the no-blur/no-tolerance
-policy. The SIMD matrix separately retains architecture-specific executed-path
-markers for x86 AVX/SSE, ARM NEON, and RISC-V RVV. QEMU parity is reported in
-blocker reasons and artifacts, but only a native host can turn an ARM or
-RISC-V row into `pass`.
+Every SIMD row reads one complete architecture-owned rendered-frame receipt:
+x86 uses AVX2 or SSE4.2, ARM uses NEON, and RISC-V uses RVV. Admission requires
+native execution, bit-exact scalar parity, positive frame/per-operation/diagram
+checksums and hits, equal expected/actual checksums, zero mismatches, the
+no-blur/no-tolerance policy, and lower-hex SHA-256 identities for the canonical
+evidence source, selected Simple compiler, and recomputed frame receipt. ARM
+and RISC-V consume their exact matrix child `evidence.env`; aggregate substring
+markers and capability-only probes cannot pass. QEMU parity remains an
+actionable blocker until the matching native host consumes that same receipt.
 
 The Vulkan row accepts only the canonical readback report with an overall and
 spec status of `pass`, Vulkan availability/backend identity, exercised present

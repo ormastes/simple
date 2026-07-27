@@ -207,44 +207,44 @@ Runnable source: 41 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val complete = "cpu_simd_evidence_status=pass\n" +
-    "cpu_simd_evidence_arch=x86_64\n" +
-    "cpu_simd_evidence_feature=avx2\n" +
-    "cpu_simd_evidence_native_simd_executed=true\n" +
-    "cpu_simd_evidence_native_simd_bit_exact=true\n" +
-    "cpu_simd_evidence_native_simd_hits=2\n" +
-    "cpu_simd_evidence_fill_mismatch_count=0\n" +
-    "cpu_simd_evidence_copy_mismatch_count=0\n" +
-    "cpu_simd_evidence_alpha_mismatch_count=0\n" +
-    "cpu_simd_evidence_alpha_edge_mismatch_count=0\n" +
-    "cpu_simd_evidence_scroll_mismatch_count=0\n" +
-    "cpu_simd_evidence_diagram_mismatch_count=0\n" +
-    "cpu_simd_evidence_diagram_fill_hits=5\n" +
-    "cpu_simd_evidence_diagram_copy_hits=3\n" +
-    "cpu_simd_evidence_diagram_alpha_hits=5\n" +
-    "cpu_simd_evidence_diagram_blit_hits=1\n" +
-    "cpu_simd_evidence_diagram_scroll_hits=3\n" +
-    "cpu_simd_evidence_policy=exact-bitmap-no-blur-no-tolerance\n" +
-    "cpu_simd_evidence_blur_or_tolerance_used=false"
+val complete = complete_simd_evidence()
 expect(host_x86_simd_evidence_passes(complete)).to_be(true)
 expect(host_x86_simd_evidence_passes(complete.replace("feature=avx2", "feature=sse42"))).to_be(true)
+expect(host_simd_evidence_passes(complete_simd_evidence("aarch64", "neon"), "aarch64", "neon")).to_be(true)
+expect(host_simd_evidence_passes(complete_simd_evidence("riscv64", "rvv"), "riscv64", "rvv")).to_be(true)
+expect(host_simd_evidence_passes(complete, "unknown", "avx2")).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("status=pass", "status=fail"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("simple_bin_status=pass", "simple_bin_status=fail"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("arch=x86_64", "arch=aarch64"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("feature=avx2", "feature=scalar"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("native_simd_executed=true", "native_simd_executed=false"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("native_simd_bit_exact=true", "native_simd_bit_exact=false"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("native_simd_hits=2", "native_simd_hits=0"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("canonical_source_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "canonical_source_sha256=bad"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("compiler_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "compiler_sha256=0000000000000000000000000000000000000000000000000000000000000000"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("frame_receipt_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "frame_receipt_sha256=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("evidence_checksum=99", "evidence_checksum=0"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("fill_actual_checksum=101", "fill_actual_checksum=102"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("copy_actual_checksum=202", "copy_actual_checksum=203"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("alpha_actual_checksum=303", "alpha_actual_checksum=304"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("alpha_edge_actual_checksum=404", "alpha_edge_actual_checksum=405"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("scroll_actual_checksum=505", "scroll_actual_checksum=506"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("fill_mismatch_count=0", "fill_mismatch_count=1"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("copy_mismatch_count=0", "copy_mismatch_count=1"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("alpha_mismatch_count=0", "alpha_mismatch_count=1"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("alpha_edge_mismatch_count=0", "alpha_edge_mismatch_count=1"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("scroll_mismatch_count=0", "scroll_mismatch_count=1"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("diagram_pixel_count=192", "diagram_pixel_count=0"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("diagram_actual_checksum=606", "diagram_actual_checksum=607"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("diagram_mismatch_count=0", "diagram_mismatch_count=1"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("diagram_fill_hits=5", "diagram_fill_hits=0"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("diagram_copy_hits=3", "diagram_copy_hits=0"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("diagram_alpha_hits=5", "diagram_alpha_hits=0"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("diagram_blit_hits=1", "diagram_blit_hits=0"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("diagram_scroll_hits=3", "diagram_scroll_hits=0"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("facade_draw_image_clip_mask_status=pass", "facade_draw_image_clip_mask_status=fail"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("facade_draw_image_clip_mask_examples=2", "facade_draw_image_clip_mask_examples=0"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("facade_draw_image_clip_mask_failures=0", "facade_draw_image_clip_mask_failures=1"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("policy=exact-bitmap-no-blur-no-tolerance", "policy=tolerant"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("blur_or_tolerance_used=false", "blur_or_tolerance_used=true"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete + "\ncpu_simd_evidence_status=pass")).to_be(false)

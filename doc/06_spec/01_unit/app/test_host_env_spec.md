@@ -15,39 +15,41 @@
 
 ### test host environment SIMD evidence
 
-<details>
-<summary>Advanced: keeps a missing native SIMD row bound to the matrix evidence source</summary>
-
-#### keeps a missing native SIMD row bound to the matrix evidence source
+#### binds every SIMD row to one complete architecture-owned frame receipt
 
 - "HostCapabilityRow create
+   - Expected: source does not contain `"matrix`
+   - Expected: source does not contain `native_simd_pixel_evidence`
    - Expected: source does not contain `if env.validation_reason() == "":`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = file_read("src/app/test/test_host_env.spl")
 
 expect(source).to_contain(
-    "host-or-executed-path-required\", SIMD_MATRIX_PATH")
-expect(source).to_contain(
-    "val SIMD_MATRIX_PATH = \"build/cpu-simd-engine2d-arch-matrix/evidence.env\"")
-expect(source).to_contain(
     "val CPU_SIMD_PATH = \"build/cpu-simd-engine2d-evidence/evidence.env\"")
+expect(source).to_contain(
+    "val ARM_SIMD_PATH = \"build/cpu-simd-engine2d-arch-matrix/aarch64/out/evidence.env\"")
+expect(source).to_contain(
+    "val RISCV_SIMD_PATH = \"build/cpu-simd-engine2d-arch-matrix/riscv64/out/evidence.env\"")
 expect(source).to_contain("if host_x86_simd_evidence_passes(cpu_simd):")
+expect(source).to_contain("val valid = host_simd_evidence_passes(evidence, arch, feature)")
+expect(source).to_contain("arm_simd, \"aarch64\", \"neon\", ARM_SIMD_PATH")
+expect(source).to_contain("riscv_simd, \"riscv64\", \"rvv\", RISCV_SIMD_PATH")
 expect(source).to_contain(
     "HostCapabilityRow.create(\"x86_simd\", \"pass\", \"\", CPU_SIMD_PATH, \"\")")
+expect(source).to_contain("HostCapabilityRow.create(name, \"pass\", \"\", path, \"\")")
+expect(source.contains("matrix.contains(")).to_equal(false)
+expect(source.contains("native_simd_pixel_evidence")).to_equal(false)
 expect(source).to_contain("if env.ready():")
 expect(source.contains("if env.validation_reason() == \"\":")).to_equal(false)
 ```
-
-</details>
-
 
 </details>
 

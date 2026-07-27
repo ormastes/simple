@@ -2,30 +2,6 @@
 
 > This scenario is the release gate for CPU SIMD drawing evidence in the GUI hardening lane.
 
-<!-- sdn-diagram:id=cpu_simd_engine2d_diagram_evidence_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=cpu_simd_engine2d_diagram_evidence_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-cpu_simd_engine2d_diagram_evidence_spec -> std
-cpu_simd_engine2d_diagram_evidence_spec -> app
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=cpu_simd_engine2d_diagram_evidence_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 1 | 1 | 0 | 0 |
@@ -48,7 +24,7 @@ This scenario is the release gate for CPU SIMD drawing evidence in the GUI harde
 | Design | N/A |
 | Research | N/A |
 | Source | `test/03_system/gui/cpu_simd_engine2d_diagram_evidence_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -101,11 +77,14 @@ in the folded executable block or the linked run artifacts:
 - `cpu_simd_evidence_reason=runtime-evidence-verified` for live proof.
 - `cpu_simd_evidence_native_simd_executed=true` and
   `cpu_simd_evidence_native_simd_bit_exact=true` in the evidence environment.
+- lower-hex SHA-256 fields bind the canonical evidence source, selected Simple
+  compiler, and the architecture/feature/frame checksum receipt.
 - `cpu_simd_evidence_diagram_pixel_count=192`.
 - `cpu_simd_evidence_diagram_mismatch_count=0`.
 - `cpu_simd_evidence_fill_mismatch_count=0`.
 - `cpu_simd_evidence_copy_mismatch_count=0`.
 - `cpu_simd_evidence_alpha_mismatch_count=0`.
+- `cpu_simd_evidence_alpha_edge_mismatch_count=0`.
 - `cpu_simd_evidence_scroll_mismatch_count=0`.
 - non-empty fill, copy, alpha, blit, and scroll hit fields.
 - `cpu_simd_evidence_policy=exact-bitmap-no-blur-no-tolerance`.
@@ -155,7 +134,7 @@ mismatches and records the exact-bitmap no-blur policy.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -178,6 +157,9 @@ if stdout.contains("cpu_simd_evidence_status=skip"):
 else:
     expect(stdout).to_contain("cpu_simd_evidence_status=pass")
     expect(stdout).to_contain("cpu_simd_evidence_reason=runtime-evidence-verified")
+    expect(stdout).to_contain("cpu_simd_evidence_canonical_source_sha256=")
+    expect(stdout).to_contain("cpu_simd_evidence_compiler_sha256=")
+    expect(stdout).to_contain("cpu_simd_evidence_frame_receipt_sha256=")
     expect(stdout).to_contain("cpu_simd_evidence_policy=exact-bitmap-no-blur-no-tolerance")
     expect(stdout).to_contain("cpu_simd_evidence_blur_or_tolerance_used=false")
     expect(stdout).to_contain("cpu_simd_evidence_diagram_pixel_count=192")
@@ -185,6 +167,7 @@ else:
     expect(stdout).to_contain("cpu_simd_evidence_fill_mismatch_count=0")
     expect(stdout).to_contain("cpu_simd_evidence_copy_mismatch_count=0")
     expect(stdout).to_contain("cpu_simd_evidence_alpha_mismatch_count=0")
+    expect(stdout).to_contain("cpu_simd_evidence_alpha_edge_mismatch_count=0")
     expect(stdout).to_contain("cpu_simd_evidence_scroll_mismatch_count=0")
     expect(stdout).to_contain("cpu_simd_evidence_diagram_fill_hits=")
     expect(stdout).to_contain("cpu_simd_evidence_diagram_copy_hits=")
@@ -220,8 +203,8 @@ else:
 
 ## Related Documentation
 
-- **Requirements:** [.spipe/gui-hardening-full/state.md](.spipe/gui-hardening-full/state.md)
-- **Plan:** [doc/03_plan/agent_tasks/gui_backend_perf.md](doc/03_plan/agent_tasks/gui_backend_perf.md)
+- **Requirements:** `.spipe/gui-hardening-full/state.md`
+- **Plan:** `doc/03_plan/agent_tasks/gui_backend_perf.md`
 
 
 </details>
