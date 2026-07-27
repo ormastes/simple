@@ -1,9 +1,41 @@
 # Bug: native struct-field Dict copy nil-fills nested Dicts in Map values (HirLowering.modules_by_name)
 
 **Date:** 2026-07-27
-**Status:** Open
+**Status:** invalid — not reproducible; see CORRECTION
 **Area:** native codegen (struct/aggregate deep-copy of Dict-valued fields)
 **Severity:** High — silently corrupts import resolution across the whole HIR pipeline
+
+## CORRECTION (2026-07-27, supersedes the analysis below)
+
+This doc's entire premise — that assigning a `Dict<text, Module>` into a
+struct field nil-fills the nested Dicts of its values — is WRONG and not
+reproducible. The evidence below (`idx_fns=-1` on the struct-field read) was
+an artifact of a separate, already-known defect: **`Dict.len()` returns -1 in
+native code for ANY dict**, local or struct field, copied or freshly
+constructed, empty or populated. It is not a signal of corruption at all.
+
+- A `Module` value constructed IN PLACE (never copied through any struct
+  field) with `functions: {}` already reads `fns=-1` — the same signal this
+  doc treated as proof of a copy defect appears with zero copying involved.
+- No isolated minimal repro (`struct { m: Dict<text, S> }` with `S` holding
+  both `Dict` and `[T]` fields) was ever built for this doc — the "Repro"
+  section below states as much, and no such repro has since reproduced a copy
+  defect.
+- The real, measured defect is `Dict<K, StructValue>.get()` returning a
+  corrupt non-nil Option on a HIT (index reads `d[k]` and `contains_key()` are
+  correct). See:
+  `doc/08_tracking/bug/native_dict_get_struct_value_corrupt_option_2026-07-27.md`
+  and `doc/08_tracking/bug/native_dict_len_returns_minus_one_2026-07-27.md`.
+- The `hir_stub_module_nil_dict_get_phantom_some_2026-07-27.md` doc's "Round
+  5" section, which named this doc's theory as root cause, has been corrected
+  in the same pass.
+- The module-global registry workaround
+  (`src/compiler/20.hir/hir_lowering/module_registry.spl`) built to route
+  around this non-existent defect is being reverted; the actual fix is
+  rewriting the `.get()` call sites in `module_lowering.spl` to
+  `contains_key` + index reads.
+
+## Original (incorrect) analysis
 
 ## Finding
 

@@ -1,10 +1,44 @@
 # Bug: nil Dict receiver — `.get()` returns phantom Some while `.len()` returns -1 (stub Module, stage-4 segfault lineage)
 
 **Date:** 2026-07-27
-**Status:** Open
+**Status:** superseded — see CORRECTION
 **Area:** native codegen (Dict nil-receiver methods) + Rust seed (HirLowering field-type inference)
 
-## Summary
+## CORRECTION (2026-07-27, supersedes the analysis above)
+
+Direct measurement falsifies the "header-only/partial modules carry nil decl
+dicts" framing used throughout this doc (and the "Round 5" struct-field
+map-copy theory it points to). The real defect is a `Dict<K, StructValue>.get()`
+decode bug, unrelated to partial modules or struct-field copies:
+
+- `Dict.len()` returns **-1** in native code for ANY dict — local or struct
+  field, empty or populated. The "nil decl dict" signal (`functions.len() < 0`)
+  this doc built its whole theory on was meaningless; it fired for every
+  module (35,483 times in one stage-4 run), not just partial/header-only ones.
+- A `Module` constructed IN PLACE with `functions: {}` already reads `fns=-1`,
+  proving no map copy and no partial-parse state is involved — the signal is
+  an artifact of `.len()` itself.
+- The actual defect: `Dict<K, StructValue>.get()` on a HIT returns a non-nil
+  Option whose payload is corrupt — `.unwrap()` or a field read segfaults.
+  Misses correctly return nil. `contains_key()`, `keys()`, and index reads
+  `d[k]` are all correct. `Some(d[k])` round-trips correctly (including
+  Option-param passing).
+- For `Dict<text,i64>`, `.get()` returns the still-BOXED value (7 came back as
+  56 = 7<<3) — the decode is missing/wrong specifically on the `.get` path,
+  while `d[k]` decodes correctly.
+- Stage-4 crash mechanism: `register_imported_symbol` did
+  `imported_mod.traits.get(name)` then `lower_trait(as_trait.unwrap())`; on a
+  HIT (std.io.traits' `Read`) the corrupt Option segfaulted — nothing to do
+  with the module being partial/header-only.
+- Fix landing now: all struct-valued dict lookups in
+  `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl` rewritten to
+  `contains_key` + index reads; the guard rounds and the module-global
+  registry experiment below are being reverted as unnecessary.
+- See the new primary bug docs:
+  `doc/08_tracking/bug/native_dict_get_struct_value_corrupt_option_2026-07-27.md`
+  and `doc/08_tracking/bug/native_dict_len_returns_minus_one_2026-07-27.md`.
+
+## Summary (original analysis — superseded, kept for history)
 
 During stage-4 bootstrap, `HirLowering.register_imported_symbol` operates on a
 stub `Module` whose dict fields (e.g. `imported_const_decls`) were never
