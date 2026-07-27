@@ -14,6 +14,7 @@ use std.common.ui.draw_ir.{
 pub val BROWSER_RENDERER_MAX_HEADER_BYTES: i64 = 256
 pub val BROWSER_RENDERER_MAX_PAYLOAD_BYTES: i64 = 1048576
 pub val BROWSER_RENDERER_MAX_COMMANDS: i64 = 1024
+pub val BROWSER_RENDERER_MAX_VIEWPORT: i64 = 4096
 pub val BROWSER_RENDERER_WORKER_ARG: text = "--__simple-web-renderer-worker"
 val BROWSER_RENDERER_MAX_READ_CHUNK_BYTES: i64 = 8192
 val BROWSER_RENDERER_MAX_COORDINATE: i64 = 1048576
@@ -84,6 +85,12 @@ pub struct BrowserRendererNavigationDecodeResult:
     headers: text
     body: text
     content_type: text
+
+pub struct BrowserRendererResizeDecodeResult:
+    ok: bool
+    reason: text
+    width: i32
+    height: i32
 
 pub struct BrowserRendererNetworkDecodeResult:
     ok: bool
@@ -537,6 +544,45 @@ pub fn browser_renderer_navigation_decode(
         return _browser_renderer_navigation_reject("invalid-navigation")
     _browser_renderer_navigation_result(
         action, url, method, headers, body, content_type
+    )
+
+pub fn browser_renderer_resize_encode(
+    generation: i64, request_id: i64, width: i32, height: i32
+) -> BrowserRendererEncodeResult:
+    if (width <= 0 or height <= 0 or
+        width.to_i64() > BROWSER_RENDERER_MAX_VIEWPORT or
+        height.to_i64() > BROWSER_RENDERER_MAX_VIEWPORT):
+        return _browser_renderer_reject_encode("invalid-resize")
+    browser_renderer_message_encode(
+        "resize", generation, request_id, "SBRZ1\t{width}\t{height}"
+    )
+
+pub fn browser_renderer_resize_decode(
+    message: BrowserRendererMessage
+) -> BrowserRendererResizeDecodeResult:
+    if message.kind != "resize":
+        return BrowserRendererResizeDecodeResult(
+            ok: false, reason: "wrong-kind", width: 0, height: 0
+        )
+    val fields = message.payload.split("\t")
+    if fields.len() != 3 or fields[0] != "SBRZ1":
+        return BrowserRendererResizeDecodeResult(
+            ok: false, reason: "malformed-resize", width: 0, height: 0
+        )
+    val width = fields[1].to_i64() ?? -1
+    val height = fields[2].to_i64() ?? -1
+    if (width <= 0 or height <= 0 or
+        width > BROWSER_RENDERER_MAX_VIEWPORT or
+        height > BROWSER_RENDERER_MAX_VIEWPORT or
+        str(width) != fields[1] or str(height) != fields[2]):
+        return BrowserRendererResizeDecodeResult(
+            ok: false, reason: "invalid-resize", width: 0, height: 0
+        )
+    BrowserRendererResizeDecodeResult(
+        ok: true,
+        reason: "ok",
+        width: width.to_i32(),
+        height: height.to_i32()
     )
 
 pub fn browser_renderer_action_decode(
@@ -1050,6 +1096,25 @@ pub fn browser_renderer_frame_encode(
     browser_renderer_frame_encode_with_witness(
         composition, generation, request_id, request_id, 0, "", 0, ""
     )
+
+pub fn browser_renderer_frame_reply_to_request_id(
+    message: BrowserRendererMessage
+) -> i64:
+    if message.kind != "frame":
+        return -1
+    val header_end = _browser_renderer_header_end(message.payload)
+    if header_end < 0 or header_end >= BROWSER_RENDERER_MAX_HEADER_BYTES:
+        return -1
+    val fields = _browser_renderer_byte_slice(
+        message.payload, 0, header_end
+    ).split("\t")
+    if fields.len() != 6 or fields[0] != "SBRF2":
+        return -1
+    val reply_to_request_id = fields[1].to_i64() ?? -1
+    if (reply_to_request_id <= 0 or
+        str(reply_to_request_id) != fields[1]):
+        return -1
+    reply_to_request_id
 
 pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32, height: i32) -> BrowserRendererFrameDecodeResult:
     if message.kind != "frame":

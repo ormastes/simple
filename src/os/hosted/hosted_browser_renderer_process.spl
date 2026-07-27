@@ -11,10 +11,12 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_fetch_request_decode,
     browser_renderer_frame_decode,
+    browser_renderer_frame_reply_to_request_id,
     browser_renderer_key_encode, browser_renderer_message_encode,
     browser_renderer_navigation_encode,
     browser_renderer_network_response_encode,
-    browser_renderer_pointer_encode, browser_renderer_text_encode
+    browser_renderer_pointer_encode, browser_renderer_resize_encode,
+    browser_renderer_text_encode
 }
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     FetchRequest, FetchResponse, RequestMode
@@ -153,6 +155,8 @@ pub class HostedBrowserRendererProcess:
     expected_reply_to_request_id: i64
     command_deadline_ms: i64
     pending_operation: text
+    pending_resize_width: i32
+    pending_resize_height: i32
     decoder: BrowserRendererDecoder
     network: FetchEngine
     network_job_handle: i64
@@ -189,6 +193,8 @@ pub class HostedBrowserRendererProcess:
             expected_reply_to_request_id: 0,
             command_deadline_ms: 0,
             pending_operation: "",
+            pending_resize_width: 0,
+            pending_resize_height: 0,
             decoder: browser_renderer_decoder_new(generation),
             network: FetchEngine.new(
                 Logger.new("browser-renderer-broker", LogLevel.Error)
@@ -322,6 +328,8 @@ pub class HostedBrowserRendererProcess:
         self._cancel_network_job()
         self.command_deadline_ms = 0
         self.pending_operation = ""
+        self.pending_resize_width = 0
+        self.pending_resize_height = 0
         self.pending_history_index = -1
         self.navigation_permit = hosted_browser_empty_navigation_permit()
         self.pending_history_action = ""
@@ -343,6 +351,8 @@ pub class HostedBrowserRendererProcess:
         self._cancel_network_job()
         self.command_deadline_ms = 0
         self.pending_operation = ""
+        self.pending_resize_width = 0
+        self.pending_resize_height = 0
         self.pending_history_index = -1
         self.navigation_permit = hosted_browser_empty_navigation_permit()
         self.pending_history_action = ""
@@ -735,19 +745,32 @@ pub class HostedBrowserRendererProcess:
                     if reason != "":
                         return Some(self.fail(reason))
                 return nil
-            val frame = browser_renderer_frame_decode(
-                decoded.message, self.width, self.height
+            val frame_reply_to_request_id = (
+                browser_renderer_frame_reply_to_request_id(decoded.message)
             )
-            if not frame.ok:
-                return Some(self.fail(frame.reason))
-            if frame.reply_to_request_id < (
+            if frame_reply_to_request_id <= 0:
+                return Some(self.fail("malformed-material-witness"))
+            if frame_reply_to_request_id < (
                 self.expected_reply_to_request_id
             ):
                 return nil
-            if frame.reply_to_request_id > (
+            if frame_reply_to_request_id > (
                 self.expected_reply_to_request_id
             ):
                 return Some(self.fail("stale-renderer-frame"))
+            val decode_width = if self.pending_operation == "resize":
+                self.pending_resize_width
+            else:
+                self.width
+            val decode_height = if self.pending_operation == "resize":
+                self.pending_resize_height
+            else:
+                self.height
+            val frame = browser_renderer_frame_decode(
+                decoded.message, decode_width, decode_height
+            )
+            if not frame.ok:
+                return Some(self.fail(frame.reason))
             if self.pending_document_commit_url != "":
                 self._commit_document_url(
                     self.pending_document_commit_url
@@ -762,6 +785,11 @@ pub class HostedBrowserRendererProcess:
                 )
                 self.provisional_document_origin = ""
             self.pending_history_index = -1
+            if self.pending_operation == "resize":
+                self.width = self.pending_resize_width
+                self.height = self.pending_resize_height
+            self.pending_resize_width = 0
+            self.pending_resize_height = 0
             self.command_deadline_ms = 0
             self.pending_operation = ""
             self.state = "active"
@@ -830,6 +858,29 @@ pub class HostedBrowserRendererProcess:
             self.next_request_id,
             animation_time_ms
         ), "advance", timeout_ms)
+
+    me begin_resize(
+        width: i32, height: i32, timeout_ms: i64
+    ) -> Result<bool, text>:
+        if self.state != "active":
+            return Err("invalid-renderer-state")
+        if width == self.width and height == self.height:
+            return Ok(false)
+        if not self._replace_pending_animation():
+            return Err("renderer-busy")
+        self.pending_resize_width = width
+        self.pending_resize_height = height
+        val started = self._begin_frame_request(
+            browser_renderer_resize_encode(
+                self.generation, self.next_request_id, width, height
+            ),
+            "resize",
+            timeout_ms
+        )
+        if val Err(_) = started:
+            self.pending_resize_width = 0
+            self.pending_resize_height = 0
+        started
 
     me _begin_navigation_command(
         action: text,

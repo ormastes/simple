@@ -7,7 +7,8 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_fetch_request_decode,
     browser_renderer_frame_decode,
     browser_renderer_navigation_encode,
-    browser_renderer_network_response_encode
+    browser_renderer_network_response_encode,
+    browser_renderer_resize_encode
 }
 use os.hosted.hosted_browser_renderer_worker.{
     HostedBrowserRendererWorkerSession,
@@ -104,6 +105,28 @@ describe "hosted browser renderer worker":
         expect(animated.ok).to_be(true)
         expect(first.wire == animated.wire).to_be(false)
         expect(animated.animation_time_ms).to_equal(16)
+
+    it "resizes the existing session and emits matching frame bounds":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        val initialized = worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<div style='width:100%;height:100%'></div>"
+        ))
+        expect(initialized.ok).to_be(true)
+        val encoded = browser_renderer_resize_encode(7, 3, 96, 64)
+        val decoded = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), encoded.wire
+        )
+        val resized = worker.handle(decoded.message)
+        expect(resized.ok).to_be(true)
+        val frame_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), resized.wire
+        )
+        expect(browser_renderer_frame_decode(
+            frame_message.message, 96, 64
+        ).ok).to_be(true)
+        expect(worker.width).to_equal(96)
+        expect(worker.height).to_equal(64)
 
     it "keeps DOM focus and trusted chrome state across bounded actions":
         var worker = HostedBrowserRendererWorkerSession.create(80, 40)

@@ -43,7 +43,10 @@ use os.compositor.shared_mdi_setup.{
 use common.ui.window_scene.{shared_wm_motion_background_next_due_micros, shared_wm_motion_dirty_due, shared_wm_motion_background_consume_due}
 use common.ui.window_scene_draw_ir.{WM_BROWSER_TOOLBAR_HEIGHT}
 use std.nogc_sync_mut.io.window_winit.{winit_event_text}
-use std.common.web.browser_renderer_protocol.{BROWSER_RENDERER_WORKER_ARG}
+use std.common.web.browser_renderer_protocol.{
+    BROWSER_RENDERER_MAX_VIEWPORT,
+    BROWSER_RENDERER_WORKER_ARG
+}
 use std.gc_async_mut.web.browser_session.{BrowserBookmarkSnapshot}
 use std.gc_async_mut.web.browser_session_url.{
     normalize_network_navigation_url
@@ -463,6 +466,17 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
         if browser_renderer_ready:
             if val Some(browser_result) = browser_renderer.poll():
                 if browser_result.ok:
+                    if (browser_raster.w != browser_renderer.width or
+                        browser_raster.h != browser_renderer.height):
+                        browser_raster.shutdown()
+                        browser_content_width = browser_renderer.width
+                        browser_content_height = browser_renderer.height
+                        browser_raster = (
+                            Engine2dCompositorBackend.create_from_env(
+                                browser_content_width,
+                                browser_content_height
+                            )
+                        )
                     val rendered = browser_raster.render_draw_ir_composition(
                         browser_result.composition, []
                     )
@@ -509,6 +523,30 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 else:
                     browser_renderer_ready = false
                     print "[hosted-wm] browser-renderer-failed reason={browser_result.reason}"
+            var desired_browser_width = browser_content_width
+            var desired_browser_height = browser_content_height
+            for window in comp.windows:
+                if window.id == browser_profile_window_id:
+                    desired_browser_width = window.w - 8
+                    desired_browser_height = (
+                        window.h - 36 - WM_BROWSER_TOOLBAR_HEIGHT
+                    )
+            if (desired_browser_width > 0 and desired_browser_height > 0 and
+                desired_browser_width.to_i64() <=
+                    BROWSER_RENDERER_MAX_VIEWPORT and
+                desired_browser_height.to_i64() <=
+                    BROWSER_RENDERER_MAX_VIEWPORT and
+                (desired_browser_width != browser_renderer.width or
+                 desired_browser_height != browser_renderer.height) and
+                (browser_renderer.command_deadline_ms <= 0 or
+                 browser_renderer.pending_operation == "advance")):
+                match browser_renderer.begin_resize(
+                    desired_browser_width, desired_browser_height, 2000
+                ):
+                    Ok(_):
+                        browser_last_animation_micros = now_micros
+                    Err(reason):
+                        print "[hosted-wm] browser-resize-deferred reason={reason}"
         var web_window_index = 0
         while web_window_index < comp.windows.len():
             val web_window = comp.windows[web_window_index]

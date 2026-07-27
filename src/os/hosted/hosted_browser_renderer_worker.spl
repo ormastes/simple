@@ -1,6 +1,7 @@
 """Hidden, fail-closed browser renderer worker entry."""
 
 use std.common.web.browser_renderer_protocol.{
+    BROWSER_RENDERER_MAX_VIEWPORT,
     BROWSER_RENDERER_WORKER_ARG,
     BrowserRendererEncodeResult, BrowserRendererMessage,
     browser_renderer_action_decode,
@@ -8,7 +9,8 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_fetch_request_encode,
     browser_renderer_frame_encode_with_witness, browser_renderer_message_encode,
     browser_renderer_navigation_decode,
-    browser_renderer_network_response_decode
+    browser_renderer_network_response_decode,
+    browser_renderer_resize_decode
 }
 use common.ui.access.{WinTextActionRequest}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
@@ -29,7 +31,6 @@ extern fn rt_browser_renderer_read_stdin_some(max_bytes: i64) -> text
 extern fn rt_browser_renderer_write_protocol_some(data: text, data_len: i64, offset: i64, max_bytes: i64) -> i64
 extern fn rt_stdout_flush()
 
-val _WORKER_MAX_VIEWPORT: i64 = 4096
 val _WORKER_READ_BYTES: i64 = 8192
 
 fn _worker_reject(reason: text) -> BrowserRendererEncodeResult:
@@ -341,6 +342,13 @@ pub class HostedBrowserRendererWorkerSession:
                 reason = self._dispatch_chrome(message)
             elif message.kind == "navigation":
                 reason = self._dispatch_navigation(message)
+            elif message.kind == "resize":
+                val resize = browser_renderer_resize_decode(message)
+                if not resize.ok:
+                    reason = resize.reason
+                else:
+                    self.width = resize.width
+                    self.height = resize.height
             elif message.kind == "network_response":
                 val response = browser_renderer_network_response_decode(
                     message
@@ -504,8 +512,8 @@ pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
     val width_i64 = args[marker_index + 2].to_i64() ?? -1
     val height_i64 = args[marker_index + 3].to_i64() ?? -1
     if generation <= 0 or width_i64 <= 0 or height_i64 <= 0 or
-        width_i64 > _WORKER_MAX_VIEWPORT or
-        height_i64 > _WORKER_MAX_VIEWPORT:
+        width_i64 > BROWSER_RENDERER_MAX_VIEWPORT or
+        height_i64 > BROWSER_RENDERER_MAX_VIEWPORT:
         return 64
     if not browser_renderer_sandbox_enter():
         return 70
