@@ -2,8 +2,10 @@
 
 ## Purpose
 
-Prove that `processing_ir_execute_cuda` executes the shared 64-element
-`FillU32(0x01020304)` fixture on a CUDA device without CPU fallback.
+Prove that `processing_ir_execute_cuda` executes the shared
+`FillU32(0x01020304)` fixture on a CUDA device without CPU fallback. The
+default parity mode uses 64 elements; large mode uses the calibrated
+1,048,576-element policy threshold.
 
 ## Run
 
@@ -14,19 +16,30 @@ CUDA-enabled runtime, then run:
 sh scripts/check/check-processing-cuda-fill-native.shs
 ```
 
+Run the threshold workload against the same candidate:
+
+```sh
+PROCESSING_CUDA_FILL_MODE=large \
+  sh scripts/check/check-processing-cuda-fill-native.shs
+```
+
 ## Checks
 
-1. All 64 values exactly match `0x01020304`.
-2. Expected and actual checksums equal `1082179840`.
+1. Every returned value exactly matches `0x01020304`.
+2. Expected and actual checksums equal `1082179840` in parity mode or
+   `17730434498560` in large mode.
 3. Mismatch count is zero.
 4. Device handle and identity are positive.
-5. The receipt names CUDA device readback and rejects CPU fallback.
+5. End-to-end executor time is positive.
+6. The receipt names CUDA device readback and rejects CPU fallback.
+7. Readback materialization uses the runtime-owned bulk
+   `rt_u32s_from_raw` conversion, not a per-element `push` loop.
 
 ## Current Evidence
 
-The source contract passes. The incrementally built native probe now uses
-length-tracked PTX and kernel-name ABIs, loads and launches CUDA successfully,
-and reaches device readback. Its 64-value checksum is eight times the expected
-checksum, all 64 values mismatch, and the native identity is negative despite
-the runtime's positive-identity contract. The live wrapper correctly fails. See
-`processing_ir_cuda_vulkan_fill64_parity_2026-07-26.md`.
+The retained native candidate passes both modes with exact checksums, zero
+mismatches, positive handle/identity, device readback, and no CPU fallback.
+The 1,048,576-element run improved from `1044501 us` with per-element
+materialization to `593323 us` with the canonical bulk converter. This is
+retained-candidate evidence, not source-matched compiler freshness. Persistent
+CUDA context/module ownership remains required to remove cold setup cost.

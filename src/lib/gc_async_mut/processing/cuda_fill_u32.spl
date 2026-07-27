@@ -10,7 +10,10 @@ use std.gc_async_mut.cuda.{
     CUDA_SUCCESS
 }
 use std.gc_async_mut.gpu_ffi.{cuda_device_identity}
-use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_free, raw_read_i32, raw_write_i64}
+use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_free, raw_write_i64}
+
+# Canonical runtime-owned bulk conversion shared with Metal/Processing readback.
+extern fn rt_u32s_from_raw(data_ptr: i64, count: i64) -> [u32]
 
 val PROCESSING_CUDA_BLOCK_SIZE: i64 = 256
 val PROCESSING_CUDA_ARG_BYTES: i64 = 24
@@ -89,12 +92,10 @@ fn processing_ir_execute_cuda(ir: ProcessingIr) -> ProcessingCudaResult:
         return ProcessingCudaResult(completed: false, reason: readback_fault, values: [], backend_handle: 0, device_identity: 0)
     val dispatch_ok = launched and synced
     val copied = dispatch_ok and cuda_memcpy_dtoh(host_ptr, device, byte_count) == CUDA_SUCCESS
-    var values: [u32] = []
-    if copied:
-        var i: i64 = 0
-        while i < ir.element_count:
-            values.push(raw_read_i32(host_ptr, i * 4) as u32)
-            i = i + 1
+    val values: [u32] = if copied:
+        rt_u32s_from_raw(host_ptr, ir.element_count)
+    else:
+        []
     val mismatch_fault = processing_ir_fault_reason("cuda", "mismatch")
     if copied and mismatch_fault != "":
         _processing_cuda_cleanup(ctx, module, device, values_ptr, args_ptr, host_ptr, byte_count)

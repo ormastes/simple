@@ -48,9 +48,24 @@ SIMPLE_GPU_OFFLOAD_BREAK_EVEN_RECEIPT=build/<run>/evidence.env \
   --mode=interpreter --no-daemon
 ```
 
-The retained 2026-07-26 run measured CPU decisions at 64 and 65,536 elements,
-CUDA decisions at 1,048,576 and 8,388,608 elements, and a break-even batch of
-1,048,576 with 1,832 us median communication overhead.
+The retained 2026-07-26 C harness measured CPU decisions at 64 and 65,536
+elements, generated-CUDA decisions at 1,048,576 and 8,388,608 elements, and a
+break-even batch of 1,048,576 with 1,832 us median communication overhead.
+That harness validates generated 2D PTX, device execution, transfer, and exact
+readback; it is backend calibration, not direct
+`processing_ir_execute_cuda` evidence.
+
+The direct ProcessingIR gate uses the same policy threshold:
+
+```sh
+PROCESSING_CUDA_FILL_MODE=large \
+  sh scripts/check/check-processing-cuda-fill-native.shs
+```
+
+Its retained candidate returns all 1,048,576 exact values with positive
+provenance and no fallback. Bulk runtime-owned readback conversion reduced its
+cold execution from 1,044,501 us to 593,323 us. Daemon-wire proof and warm
+persistent-session timing remain open.
 
 ## Unavailable Protocol
 

@@ -31,6 +31,12 @@ threshold-`0` CUDA submit fallback now completes with reason `16`.
   `18`, CPU source `2`, zero handle/identity, 32 bytes, and exact checksum.
 - Threshold `0` enters CUDA and completes the injected-submit fallback with
   reason `16`, CPU source `2`, zero handle/identity, and the exact checksum.
+- The retained direct ProcessingIR candidate now completes exactly at the
+  calibrated `1,048,576`-element threshold with checksum `17730434498560`,
+  zero mismatches, positive handle/identity, device readback, and no fallback.
+- Reusing the runtime-owned `rt_u32s_from_raw` readback converter removed the
+  executor's million-call `values.push` loop and reduced measured cold
+  execution from `1044501 us` to `593323 us`.
 - Build logs:
   `build/simpleos_gpu_host/offload_policy/native-build.out` and
   `native-build-cycle2.out`.
@@ -43,8 +49,11 @@ daemon without bootstrap.
 
 ## Remaining Gate
 
-Run a batch at or above `1,048,576` without fault injection to retain an exact
-successful device-path receipt. Strict fallback `none` remains covered by the
-executable source contract until then.
+Publish the same at-threshold success through the daemon wire. The current
+direct receipt closes executor correctness, but not the daemon client path or
+its independent CPU-oracle comparison. Then retain a warm multi-sample run
+through persistent CUDA context/module ownership; the direct executor still
+pays cold setup on every call, so its `593323 us` cannot justify the lower-level
+CUDA round-trip threshold by itself.
 
 Owner: Linux GPU host operator. Final reviewer: high-capability model.

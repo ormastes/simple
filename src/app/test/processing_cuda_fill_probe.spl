@@ -1,13 +1,29 @@
 """Native direct-CUDA ProcessingIR FillU32 probe."""
 
+use app.io.args_ops.{get_args}
 use std.common.processing.processing_ir.{processing_ir_fill_u32}
 use std.gc_async_mut.processing.cuda_fill_u32.{processing_ir_execute_cuda}
+use std.nogc_sync_mut.io.time_ops.{time_now_nanos}
+
+fn _elapsed_us(started_nanos: i64) -> i64:
+    if started_nanos <= 0: return 0
+    val elapsed_nanos = time_now_nanos() - started_nanos
+    if elapsed_nanos <= 0: return 0
+    (elapsed_nanos + 999) / 1000
 
 fn main() -> i64:
-    val count: i64 = 64
+    val args = get_args()
+    val large = args.contains("--large")
+    if (large and args.len() != 2) or (not large and args.len() != 1):
+        print("PROCESSING_CUDA_NATIVE status=fail reason=invalid-argument\n")
+        return 2
+    val mode = if large: "large" else: "parity"
+    val count: i64 = if large: 1048576 else: 64
     val value = 0x01020304u32
-    val expected_checksum: u64 = 1082179840
+    val expected_checksum: u64 = if large: 17730434498560 else: 1082179840
+    val started = time_now_nanos()
     val result = processing_ir_execute_cuda(processing_ir_fill_u32(count, value))
+    val elapsed_us = _elapsed_us(started)
     var checksum: u64 = 0
     var mismatches: i64 = 0
     for actual in result.values:
@@ -17,7 +33,7 @@ fn main() -> i64:
     val exact = result.values.len().to_i64() == count and
         checksum == expected_checksum and mismatches == 0
     val valid = result.completed and result.reason == "ok" and exact and
-        result.backend_handle > 0 and result.device_identity > 0
+        result.backend_handle > 0 and result.device_identity > 0 and elapsed_us > 0
     val status = if valid: "pass" else: "fail"
-    print("PROCESSING_CUDA_NATIVE status={status} reason={result.reason} op=fill_u32 completed={result.completed} count={result.values.len()} value={value} expected_checksum={expected_checksum} actual_checksum={checksum} mismatch_count={mismatches} values_exact={exact} backend=cuda readback_source=device_readback handle={result.backend_handle} identity={result.device_identity} cpu_fallback=false\n")
+    print("PROCESSING_CUDA_NATIVE status={status} reason={result.reason} op=fill_u32 mode={mode} completed={result.completed} count={result.values.len()} value={value} expected_checksum={expected_checksum} actual_checksum={checksum} mismatch_count={mismatches} values_exact={exact} elapsed_us={elapsed_us} backend=cuda readback_source=device_readback handle={result.backend_handle} identity={result.device_identity} cpu_fallback=false\n")
     if valid: 0 else: 1

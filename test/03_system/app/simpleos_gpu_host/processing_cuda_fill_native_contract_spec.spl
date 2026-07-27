@@ -13,11 +13,23 @@ describe "direct CUDA ProcessingIR native evidence contract":
         val source = file_read(PROBE)
         expect(file_exists(PROBE)).to_equal(true)
         expect(source).to_contain("processing_ir_execute_cuda(processing_ir_fill_u32(count, value))")
-        expect(source).to_contain("expected_checksum: u64 = 1082179840")
+        expect(source).to_contain("val count: i64 = if large: 1048576 else: 64")
+        expect(source).to_contain("expected_checksum: u64 = if large: 17730434498560 else: 1082179840")
         expect(source).to_contain("checksum == expected_checksum and mismatches == 0")
         expect(source).to_contain("for actual in result.values:")
         expect(source).to_contain("checksum = checksum + actual.to_u64()")
         expect(source.contains("result.values[index]")).to_equal(false)
+
+    it "keeps the policy-threshold workload on the same direct executor":
+        val source = file_read(PROBE)
+        val wrapper = file_read(WRAPPER)
+        expect(source).to_contain("(large and args.len() != 2) or (not large and args.len() != 1)")
+        expect(source).to_contain("if started_nanos <= 0: return 0")
+        expect(source).to_contain("val elapsed_us = _elapsed_us(started)")
+        expect(source).to_contain("elapsed_us > 0")
+        expect(wrapper).to_contain("large) PROBE_ARG=--large; COUNT=1048576; CHECKSUM=17730434498560")
+        expect(wrapper).to_contain("mode=$MODE completed=true count=$COUNT")
+        expect(wrapper).to_contain("elapsed_us=[1-9][0-9]*")
 
     it "requires device provenance and rejects fallback":
         val source = file_read(PROBE)
@@ -25,6 +37,8 @@ describe "direct CUDA ProcessingIR native evidence contract":
         val executor = file_read(EXECUTOR)
         expect(source).to_contain("result.backend_handle > 0 and result.device_identity > 0")
         expect(executor).to_contain("cuda_memcpy_dtoh(")
+        expect(executor).to_contain("rt_u32s_from_raw(host_ptr, ir.element_count)")
+        expect(executor.contains("values.push(raw_read_i32")).to_equal(false)
         expect(executor.contains("processing_ir_execute_cpu")).to_equal(false)
         expect(wrapper).to_contain("backend=cuda readback_source=device_readback")
         expect(wrapper).to_contain("handle=[1-9][0-9]* identity=[1-9][0-9]*")
