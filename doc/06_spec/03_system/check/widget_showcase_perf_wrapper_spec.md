@@ -214,7 +214,7 @@ preexisting hardlinked retained artifacts.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 59 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -238,6 +238,7 @@ expect(evidence).to_contain("gui_showcase_4k_200fps_target_fps=200")
 expect(evidence).to_contain("gui_showcase_4k_200fps_pixels=8294400")
 expect(evidence).to_contain("gui_showcase_4k_200fps_fps_x1000=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_frame_avg_ns=")
+expect(evidence).to_contain("gui_showcase_4k_200fps_frame_budget_ns=5000000")
 expect(evidence).to_contain("gui_showcase_4k_200fps_frame_elapsed_ns_status=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_warmup_frames=")
 expect(evidence).to_contain("gui_showcase_4k_200fps_frame_sample_count=")
@@ -291,7 +292,7 @@ expect(alias_src).to_contain("run_4k_perf_probe()")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 58 lines folded for reproduction.
+Runnable source: 59 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -315,6 +316,7 @@ expect(evidence).to_contain("gui_showcase_8k_perf_target_fps=200")
 expect(evidence).to_contain("gui_showcase_8k_perf_pixels=33177600")
 expect(evidence).to_contain("gui_showcase_8k_perf_fps_x1000=")
 expect(evidence).to_contain("gui_showcase_8k_perf_frame_avg_ns=")
+expect(evidence).to_contain("gui_showcase_8k_perf_frame_budget_ns=5000000")
 expect(evidence).to_contain("gui_showcase_8k_perf_frame_elapsed_ns_status=")
 expect(evidence).to_contain("gui_showcase_8k_perf_warmup_frames=")
 expect(evidence).to_contain("gui_showcase_8k_perf_frame_sample_count=")
@@ -364,12 +366,13 @@ expect(alias_src).to_contain("run_8k_perf_probe()")
 - Assert the wrapper consumes measured distribution fields
    - Expected: script does not contain `frame_p50_ns=$frame_avg_ns`
    - Expected: script does not contain `frame_p95_ns=$frame_avg_ns`
+- Reject measured p95 above the target-derived frame budget in both consumers
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 38 lines folded for reproduction.
+Runnable source: 43 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -393,6 +396,7 @@ step("Assert the wrapper consumes measured distribution fields")
 expect(script).to_contain("frame_elapsed_ns_status=\"$(positive_int_range_status")
 expect(script).to_contain("\"$FRAMES\" \"$elapsed_ns\"")
 expect(script).to_contain("frame_avg_ns=$((fps_elapsed_ns / FRAMES))")
+expect(script).to_contain("frame_budget_ns=$((1000000000 / TARGET_FPS))")
 expect(script).to_contain("frame_p50_ns=\"$(sed -n")
 expect(script).to_contain("frame_p95_ns=\"$(sed -n")
 expect(script).to_contain("frame_sample_count=\"$(sed -n")
@@ -407,10 +411,14 @@ expect(script).to_contain("_frame_sample_count=${frame_sample_count:-}")
 expect(script).to_contain("_frame_p50_ns=$frame_p50_ns")
 expect(script).to_contain("_frame_p95_ns=$frame_p95_ns")
 expect(script).to_contain("_frame_distribution_status=$frame_distribution_status")
+expect(script).to_contain("[ \"$frame_p95_ns\" -gt \"$frame_budget_ns\" ]")
 expect(aggregate.contains("showcase_4k_frame_p50_ns = showcase_4k_frame_avg_ns")).to_equal(false)
 expect(aggregate.contains("showcase_4k_frame_p95_ns = showcase_4k_frame_avg_ns")).to_equal(false)
 expect(aggregate.contains("showcase_8k_frame_p50_ns = showcase_8k_frame_avg_ns")).to_equal(false)
 expect(aggregate.contains("showcase_8k_frame_p95_ns = showcase_8k_frame_avg_ns")).to_equal(false)
+expect(aggregate).to_contain("def derived_frame_budget_ns(target_fps: str) -> str:")
+expect(aggregate).to_contain("to_int(showcase_4k_frame_p95_ns) > to_int(showcase_4k_frame_budget_ns)")
+expect(aggregate).to_contain("to_int(showcase_8k_frame_p95_ns) > to_int(showcase_8k_frame_budget_ns)")
 ```
 
 </details>

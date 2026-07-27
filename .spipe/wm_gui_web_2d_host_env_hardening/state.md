@@ -851,3 +851,10 @@ Tracking split:
   absent `/usr/bin/simple_seed`; no SimpleOS PASS or decision percentage is
   claimed. TODO589 records the accepted-runtime commands, separate artifact
   preservation, and >=98% per-owner decision threshold.
+- perf: Closed the retained-tail-latency false-green found by the second small
+  audit wave. The wrapper now derives a 5,000,000 ns frame budget at the
+  selected 200 fps target, emits it, and rejects measured p95 above that bound;
+  the aggregate independently derives and enforces the same 4K/8K budget.
+  Average FPS can no longer hide a slow tail. Wrapper shell syntax, aggregate
+  shell/Python syntax, and 4K plan-only budget evidence pass. The modern SSpec
+  and complete manual pin both consumers; capped live perf runs were not rerun.
