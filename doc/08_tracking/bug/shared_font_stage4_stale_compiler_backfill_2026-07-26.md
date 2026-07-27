@@ -1,8 +1,15 @@
 # Shared-font Stage 4 bootstrap admission blocker
 
 - Date: 2026-07-26
-- Status: BLOCKED at the three-check cap; fixes implemented, bootstrap unverified
-- Scope: pure-Simple Stage 4 admission and essential-tools runner calibration
+- Status: BLOCKING — no admitted current-source pure-Simple CLI/core-C artifact
+- Scope: shared-font runtime, docgen, native, surface, and release evidence
+
+The earlier policy under `f1bcd0db5be` treated the compiler work as a separate
+goal. That policy is superseded at `7e5595d98be`: shared-font completion now
+requires a current-source pure-Simple Stage 4 CLI admitted with the core-C
+runtime gate before focused runtime, docgen, native-device, performance,
+hosted-WM, or QEMU evidence can count. A repeated full bootstrap is not
+required when a bounded direct Stage 4 admission can prove the same gate.
 
 The existing deployed Linux CLI is not admissible: SHA-256
 `0d9856db5f29023ae9f06b19e68c686b791c0987842cb351d3df17363d0f7dc7`
@@ -43,9 +50,9 @@ timeout -k 30s 3600s env SIMPLE_NO_STUB_FALLBACK=1 \
   --full-bootstrap --full-cli --no-mcp --jobs=4
 ```
 
-Only an exit-0 wrapper result may publish the immutable Stage 4 CLI path and
-SHA-256. The wrapper's essential-tools smoke must then prove deliberate-red
-and zero-example refusal before any focused font command runs.
+For the current shared-font goal, only an exit-0 current-source result may
+publish the immutable Stage 4 CLI path and SHA-256. The old artifacts below are
+retained as history and cannot substitute for that blocking admission.
 
 ## Fresh full-bootstrap continuation
 
@@ -95,8 +102,9 @@ Its retained terminal log is:
 
 `build/test-artifacts/shared_multilingual_gpu_fonts/bootstrap/full-bootstrap/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`
 
-No Stage 4 CLI/core-C admission artifact exists, so essential-tools,
-deliberate-red/empty calibration, docgen, and font execution remain blocked.
+No Stage 4 CLI/core-C admission artifact was produced in this historical lane.
+That result remains useful diagnostic history, while the current admission
+gate remains blocking.
 
 Commit `dd1d266dc9e` then rewrote the GPOS block form. Cached Stage 4 cycle 2
 cleared parsing, reached HIR, and exited 132 on a nil receiver. The retained
@@ -137,27 +145,84 @@ indexed loop and an explicit `LoweringError` binding. The direct
 regression covers empty, recovered, and fatal arrays through the shared driver
 path. Both the fix and regression are implemented but bootstrap-unverified.
 
-The three-check cap is reached. No further bootstrap retry is permitted this
-session. No Stage 4 CLI/core-C admission artifact exists, so essential-tools,
-deliberate-red/empty calibration, docgen, font execution, native promotion,
-and surface evidence remain blocked.
+The historical three-check cap was reached. Its former completion policy under
+`f1bcd0db5be` is superseded: the missing Stage 4 artifact blocks the current
+focused runtime, docgen, native, and surface checks.
 
-The current docgen backlog is 32 changed/new specs since `origin/main`: 18
-mirrors are missing, 14 are stale, zero are current, and all 32 require
-post-admission regeneration with retained output and `0 stubs`.
+The current evidence scope is 32 generated manuals and 37 focused executable
+runs. All require the admitted current-source pure-Simple CLI, retained output,
+and `0 stubs`.
+
+## Superseding current admission attempt
+
+A fresh P0 owner ran exactly one bounded direct Stage 4 cycle from current
+feature checkpoint `427878810b4b2d812dba129f6dfd1eb12e282989` plus isolated
+compatibility bridge `d406b2688ed0096cc3d2758ba3753d2448261a99`. The bridge
+was not merged into the feature branch. It preserved the 1,417-object cache
+and used retained pure-Simple Stage 3:
+
+`/home/ormastes/dev/pub/simple-bootstrap/build/bootstrap-memory-lexer-fix/stage3/x86_64-unknown-linux-gnu/simple`
+
+Stage 3 SHA-256:
+
+`704f67af420bd8788dda809b46112d0a9a76cec64601ebfe2a6958a894aa380f`
+
+The exact invocation was:
+
+```sh
+env -u SIMPLE_COMPILER_PHASE_PROFILE -u SIMPLE_COMPILER_TRACE \
+  -u SIMPLE_BOOTSTRAP_DIAG \
+  RUST_LOG=error \
+  SIMPLE_BOOTSTRAP=1 \
+  SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+  SIMPLE_BOOTSTRAP_STAGE4=1 \
+  SIMPLE_NATIVE_BUILD_TARGET=x86_64-unknown-linux-gnu \
+  SIMPLE_NATIVE_BUILD_THREADS=2 \
+  SIMPLE_NATIVE_BUILD_CACHE_DIR=/tmp/simple-cli-admission-20260727-5/build/bootstrap/native_cache \
+  SIMPLE_RUNTIME_PATH=/home/ormastes/dev/pub/simple-bootstrap/src/compiler_rust/target/bootstrap \
+  LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
+  SIMPLE_NO_STUB_FALLBACK=1 \
+  SIMPLE_BINARY=/home/ormastes/dev/pub/simple-bootstrap/build/bootstrap-memory-lexer-fix/stage3/x86_64-unknown-linux-gnu/simple \
+  /home/ormastes/dev/pub/simple-bootstrap/build/bootstrap-memory-lexer-fix/stage3/x86_64-unknown-linux-gnu/simple \
+  native-build \
+  --target x86_64-unknown-linux-gnu \
+  --backend llvm \
+  --runtime-bundle core-c-bootstrap \
+  --source src/compiler --source src/app --source src/lib \
+  --source examples/10_tooling \
+  --entry-closure --low-memory --threads 2 \
+  --cache-dir /tmp/simple-cli-admission-20260727-5/build/bootstrap/native_cache \
+  --mode one-binary \
+  --entry src/app/cli/main.spl \
+  --runtime-path /home/ormastes/dev/pub/simple-bootstrap/src/compiler_rust/target/bootstrap \
+  -o /tmp/simple-cli-admission-20260727-5/build/native_probe/simple-stage4-admission-once-427878810b4
+```
+
+The command exited 132 with terminal marker:
+
+```text
+runtime error: field access on nil receiver
+```
+
+The full command and output are retained at
+`/tmp/simple-cli-admission-20260727-5/build/mini_builds/full_cli_admission_once_427878810b4.log`,
+SHA-256
+`e7dd548b18c976b9c75908029851222b90744cb3927e97de935ec83b65a10ca8`.
+The requested Stage 4 ELF is absent, so the essential-tools smoke was correctly
+not run. The one-cycle owner stopped at the first failure and performed no
+retry; an identical retry is prohibited by the cap.
 
 ## Open TODO and bounded continuation
 
 | TODO | Status | Required change and evidence |
 |---|---|---|
-| `HIR-BOOTSTRAP-NIL-001` | FAIL — fixes implemented, bootstrap unverified, three-check cap reached | In a fresh session, verify the integrated impl accumulator and current typed-index error collector. Require `compiler.spl` to retain a nonzero function count, pass error collection without a nil receiver, and produce an exit-0 full CLI. Retain the prior cycle-3 and final Stage 4 logs as starting evidence. |
+| `HIR-BOOTSTRAP-NIL-001` | BLOCKING | Produce and hash a current-source pure-Simple Stage 4 CLI/core-C artifact, then pass essential-tools smoke against that exact binary before running the 37 focused executions and generating the 32 manuals. |
 
-Only a fresh session may run the command below. Only exit 0 permits publishing
-immutable CLI/core-C paths and SHA-256 values, then running essential-tools,
-the two direct HIR regressions, and deliberate-red/empty-runner admission. All
-downstream work remains blocked until admission.
+The command below is retained only as historical full-bootstrap context. It is
+superseded by the bounded direct attempt above and must not be repeated in the
+same verification window.
 
-Future fresh-session command after that prerequisite:
+Historical full-bootstrap command:
 
 ```sh
 timeout -k 30s 3600s env SIMPLE_NO_STUB_FALLBACK=1 \
@@ -183,4 +248,5 @@ the blocker or constitute runtime evidence:
   valid reachable collection and fail-closed stale, duplicate, and orphan
   rejection.
 
-All four remain unverified until the admitted CLI runs their focused specs.
+All four remain unverified until an admitted current-source pure-Simple runtime
+runs their focused specs.
