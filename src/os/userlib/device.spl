@@ -4,6 +4,10 @@ use os.userlib.syscall_raw
 use os.kernel.types.syscall_types.{new_device_info_buf}
 use os.kernel.types.device_mem_types.{new_device_grant}
 
+# In-process address-of (see process.spl); the &x form is not accepted by the
+# self-hosted parser, only by the Rust seed.
+extern fn unsafe_addr_of(ref: any) -> u64
+
 class DeviceEntry:
     bus: u8
     device: u8
@@ -23,7 +27,7 @@ fn enumerate_devices() -> Result<[DeviceEntry], text>:
     var i: u64 = 0
     while i < count:
         var buf = new_device_info_buf()
-        val info_result = syscall(80, 1, i, &buf as u64, 0, 0)
+        val info_result = syscall(80, 1, i, unsafe_addr_of(buf), 0, 0)
         if info_result >= 0:
             devices.push(DeviceEntry(
                 bus: buf.bus,
@@ -41,7 +45,7 @@ fn enumerate_devices() -> Result<[DeviceEntry], text>:
 fn get_device_info(bus: u8, dev: u8, func: u8) -> Result<DeviceEntry, text>:
     var buf = new_device_info_buf()
     val bdf = (bus as u64) << 16 | (dev as u64) << 8 | (func as u64)
-    val result = syscall(81, bdf, &buf as u64, 0, 0, 0)
+    val result = syscall(81, bdf, unsafe_addr_of(buf), 0, 0, 0)
     if result < 0:
         return Err("get_device_info failed with code {result}")
     Ok(DeviceEntry(
@@ -208,7 +212,7 @@ fn request_device_grant(bus: u8, dev: u8, func: u8) -> Result<DeviceGrant, text>
     """
     val bdf = (bus as u64) << 16 | (dev as u64) << 8 | (func as u64)
     var grant = new_device_grant()
-    val result = syscall(82, bdf, &grant as u64, 0, 0, 0)
+    val result = syscall(82, bdf, unsafe_addr_of(grant), 0, 0, 0)
     if result < 0:
         return Err("DeviceGrant failed: error {result}")
     Ok(grant)
@@ -238,7 +242,7 @@ fn alloc_dma(size: u64) -> Result<DmaAllocResult, text>:
     (for device DMA). In a no-IOMMU system, device_addr == phys_addr.
     """
     var result_buf: [u64; 2] = [0, 0]
-    val result = syscall(84, size, &result_buf as u64, 0, 0, 0)
+    val result = syscall(84, size, unsafe_addr_of(result_buf), 0, 0, 0)
     if result <= 0:
         return Err("AllocDma failed: error {result}")
     Ok(DmaAllocResult(
@@ -272,7 +276,7 @@ fn alloc_shared_dma(size: u64) -> Result<SharedDmaBuffer, text>:
 fn alloc_device_dma(size: u64, cache_policy: u8, owner_device: u64) -> Result<DeviceDmaDescriptor, text>:
     """Allocate a canonical DMA descriptor for drivers that need metadata."""
     var result_buf: [u64; 2] = [0, 0]
-    val result = syscall(84, size, &result_buf as u64, owner_device, cache_policy as u64, 0)
+    val result = syscall(84, size, unsafe_addr_of(result_buf), owner_device, cache_policy as u64, 0)
     if result <= 0:
         return Err("AllocDeviceDma failed: error {result}")
     Ok(DeviceDmaDescriptor(
