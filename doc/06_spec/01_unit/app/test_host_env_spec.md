@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -20,9 +20,9 @@ Shared real-host symlink helper:
 ```simple
 fn create_file_symlink(target: text, link: text) -> i64:
     val (_, _, code) = if host_os() == "windows":
-        process_run("cmd", ["/c", "mklink", link, target])
+        process_run_timeout("cmd", ["/c", "mklink", link, target], 5000)
     else:
-        process_run("/bin/ln", ["-s", target, link])
+        process_run_timeout("/bin/ln", ["-s", target, link], 5000)
     code
 ```
 
@@ -37,11 +37,12 @@ fn create_file_symlink(target: text, link: text) -> i64:
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 27 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val source = file_read("src/app/test/test_host_env.spl")
+val test_source = file_read("test/01_unit/app/test_host_env_spec.spl")
 
 expect(source).to_contain(
     "val CPU_SIMD_PATH = \"build/cpu-simd-engine2d-evidence/evidence.env\"")
@@ -49,9 +50,12 @@ expect(source).to_contain(
     "val ARM_SIMD_PATH = \"build/cpu-simd-engine2d-arch-matrix/aarch64/out/evidence.env\"")
 expect(source).to_contain(
     "val RISCV_SIMD_PATH = \"build/cpu-simd-engine2d-arch-matrix/riscv64/out/evidence.env\"")
-expect(source).to_contain("if host_x86_simd_evidence_passes(cpu_simd):")
+expect(source).to_contain(
+    "if host_x86_simd_evidence_passes(cpu_simd) and host_simd_artifacts_are_current(cpu_simd):")
 expect(source).to_contain("host_renderdoc_evidence_passes(renderdoc) and host_renderdoc_artifacts_are_current(renderdoc)")
-expect(source).to_contain("host_simd_capability_row(")
+expect(source).to_contain("host_simd_capability_row_current(")
+expect(source).to_contain(
+    "if host_simd_evidence_passes(evidence, arch, feature) and host_simd_artifacts_are_current(evidence):")
 expect(source).to_contain("\"arm_simd\", arm_simd, \"aarch64\", \"neon\", ARM_SIMD_PATH")
 expect(source).to_contain("\"riscv_simd\", riscv_simd, \"riscv64\", \"rvv\", RISCV_SIMD_PATH")
 expect(source).to_contain(
@@ -61,6 +65,73 @@ expect(source.contains("native_simd_pixel_evidence")).to_equal(false)
 expect(source.contains("detect_simd_level")).to_equal(false)
 expect(source).to_contain("if env.ready():")
 expect(source.contains("if env.validation_reason() == \"\":")).to_equal(false)
+expect(test_source).to_contain("process_run_timeout(\"/bin/ln\"")
+expect(test_source).to_contain("process_run_timeout(\"cmd\"")
+expect(test_source.contains("process_run(\"/bin/ln\"")).to_be(false)
+```
+
+</details>
+
+#### rejects stale or substituted SIMD source compiler and receipt provenance
+
+- Reject changed canonical source bytes
+- Reject changed or substituted compiler bytes, including a same-byte symlink
+- Reject a receipt hash that does not bind the recorded frame fields
+
+The retained SIMD row passes only while the canonical evidence source and selected
+compiler are regular non-symlink files whose current SHA-256 hashes match the
+receipt, and the receipt SHA-256 matches the producer's exact six-line payload.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 43 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val source_path = "/tmp/simple-test-host-env-simd-source.spl"
+val source_target_path = "/tmp/simple-test-host-env-simd-source-target.spl"
+val compiler_path = "/tmp/simple-test-host-env-simd-compiler"
+val compiler_target_path = "/tmp/simple-test-host-env-simd-compiler-target"
+file_delete(source_path)
+file_delete(source_target_path)
+file_delete(compiler_path)
+file_delete(compiler_target_path)
+expect(file_write(source_path, "canonical SIMD source")).to_be(true)
+expect(file_write(compiler_path, "selected Simple compiler")).to_be(true)
+val evidence = simd_provenance_evidence(source_path, compiler_path)
+expect(host_simd_artifacts_are_current(evidence, source_path)).to_be(true)
+step("Reject changed canonical source bytes")
+expect(file_write(source_path, "changed SIMD source")).to_be(true)
+expect(host_simd_artifacts_are_current(evidence, source_path)).to_be(false)
+expect(file_write(source_path, "canonical SIMD source")).to_be(true)
+expect(file_write(source_target_path, "canonical SIMD source")).to_be(true)
+file_delete(source_path)
+expect(create_file_symlink(source_target_path, source_path)).to_equal(0)
+expect(host_simd_artifacts_are_current(evidence, source_path)).to_be(false)
+file_delete(source_path)
+expect(file_write(source_path, "canonical SIMD source")).to_be(true)
+step("Reject changed or substituted compiler bytes")
+expect(file_write(compiler_path, "changed Simple compiler")).to_be(true)
+expect(host_simd_artifacts_are_current(evidence, source_path)).to_be(false)
+file_delete(compiler_path)
+expect(host_simd_artifacts_are_current(evidence, source_path)).to_be(false)
+expect(file_write(compiler_target_path, "selected Simple compiler")).to_be(true)
+expect(create_file_symlink(compiler_target_path, compiler_path)).to_equal(0)
+expect(file_hash_sha256(compiler_path)).to_equal(file_hash_sha256(compiler_target_path))
+expect(host_simd_artifacts_are_current(evidence, source_path)).to_be(false)
+file_delete(compiler_path)
+expect(file_write(compiler_path, "selected Simple compiler")).to_be(true)
+step("Reject a receipt hash that does not bind the recorded frame fields")
+val altered_receipt = evidence.replace(
+    "cpu_simd_evidence_frame_receipt_sha256=",
+    "cpu_simd_evidence_frame_receipt_sha256=0")
+expect(host_simd_artifacts_are_current(altered_receipt, source_path)).to_be(false)
+file_delete(source_path)
+expect(host_simd_artifacts_are_current(evidence, source_path)).to_be(false)
+file_delete(compiler_path)
+file_delete(source_target_path)
+file_delete(compiler_target_path)
 ```
 
 </details>
@@ -74,7 +145,7 @@ expect(source.contains("if env.validation_reason() == \"\":")).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 39 lines folded for reproduction.
+Runnable source: 38 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -187,8 +258,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

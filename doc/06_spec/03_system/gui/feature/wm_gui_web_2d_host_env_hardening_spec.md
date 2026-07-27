@@ -74,7 +74,7 @@ describe "production host event and render evidence":
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 73 lines folded for reproduction.
+Runnable source: 74 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -82,7 +82,8 @@ step("Inspect the real host capabilities")
 expect(file_exists(HOST_ENV_APP)).to_be(true)
 val simple_bin = env_get("SIMPLE_BIN") ?? ""
 expect(simple_bin == "").to_be(false)
-val (host_stdout, _host_stderr, host_code) = process_run(simple_bin, ["run", HOST_ENV_APP, "--", "--format=json"])
+val (host_stdout, _host_stderr, host_code) = process_run_timeout(
+    simple_bin, ["run", HOST_ENV_APP, "--", "--format=json"], 120000)
 expect(host_code).to_equal(0)
 expect(host_stdout).to_contain("\"schema\":\"simple-test-host-env-v1\"")
 expect(host_stdout).to_contain("\"name\":\"x86_simd\"")
@@ -167,7 +168,7 @@ production owners. Live event and device proof belongs to the primary scenario.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 53 lines folded for reproduction.
+Runnable source: 60 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -178,6 +179,7 @@ val contract = file_read(HOST_ENV_CONTRACT)
 val setup = file_read("scripts/setup/setup-gui-web-2d-vulkan-env.shs")
 val browser_backing = file_read("scripts/check/gui-web-2d-vulkan-browser-backing-status.js")
 val diff_argb = file_read("tools/pixel_compare/diff_argb.js")
+val spec = file_read("test/03_system/gui/feature/wm_gui_web_2d_host_env_hardening_spec.spl")
 expect(wrapper).to_contain("linux_hosted_wm_live_window")
 expect(app).to_contain("host_simd_capability_row")
 expect(app).to_contain("build/cpu-simd-engine2d-arch-matrix/aarch64/out/evidence.env")
@@ -212,6 +214,9 @@ expect(contract).to_contain("pixel_count == width * height")
 expect(contract).to_contain("nonblank > 0 and nonblank <= pixel_count")
 expect(contract).to_contain("gui_web_2d_vulkan_electron_browser_backing_browser_target_gpu_info_status")
 expect(setup).to_contain("pixels.length === expectedPixelCount")
+expect(setup).to_contain("const width = payload.width;")
+expect(setup).to_contain("const height = payload.height;")
+expect(setup.contains("const width = Number(payload.width")).to_be(false)
 expect(setup).to_contain("nonblank > 0 && nonblank <= pixels.length")
 expect(setup).to_contain("Number.isInteger(value) && value >= 0 && value <= 0xffffffff")
 expect(setup).to_contain("for (let i = 0; pixelsValid && i < pixels.length; i += 1)")
@@ -222,6 +227,9 @@ expect(diff_argb).to_contain("ref.pixels.length !== total || test.pixels.length 
 expect(diff_argb).to_contain("Pixel array length mismatch")
 expect(diff_argb).to_contain("Number.isInteger(value) && value >= 0 && value <= 0xFFFFFFFF")
 expect(diff_argb).to_contain("!ref.pixels.every(validArgbPixel) || !test.pixels.every(validArgbPixel)")
+expect(spec).to_contain("process_run_timeout(")
+expect(spec).to_contain("120000")
+expect(spec.contains("process_run(simple_bin")).to_be(false)
 expect(app.contains("argb_mismatch_count=0")).to_be(false)
 expect(app).to_contain("blocked")
 ```

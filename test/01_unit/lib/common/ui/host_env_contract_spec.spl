@@ -12,8 +12,10 @@ use common.ui.host_env_contract.{
     host_renderdoc_capture_binding,
     host_renderdoc_replay_xml_binding,
     host_renderdoc_evidence_passes,
+    host_simd_artifact_bindings,
     host_simd_capability_row,
     host_simd_evidence_passes,
+    host_simd_frame_receipt_binding,
     host_vulkan_evidence_passes,
     host_x86_simd_evidence_passes
 }
@@ -103,6 +105,7 @@ fn complete_renderdoc_gate_evidence() -> text:
 fn complete_simd_evidence(arch: text = "x86_64", feature: text = "avx2") -> text:
     "cpu_simd_evidence_status=pass\n" +
         "cpu_simd_evidence_simple_bin_status=pass\n" +
+        "cpu_simd_evidence_simple_bin=/tmp/simple-simd-compiler\n" +
         "cpu_simd_evidence_canonical_source_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" +
         "cpu_simd_evidence_compiler_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n" +
         "cpu_simd_evidence_frame_receipt_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n" +
@@ -425,6 +428,33 @@ describe "host evidence classification":
         expect(host_x86_simd_evidence_passes(complete.replace("policy=exact-bitmap-no-blur-no-tolerance", "policy=tolerant"))).to_be(false)
         expect(host_x86_simd_evidence_passes(complete.replace("blur_or_tolerance_used=false", "blur_or_tolerance_used=true"))).to_be(false)
         expect(host_x86_simd_evidence_passes(complete + "\ncpu_simd_evidence_status=pass")).to_be(false)
+
+    it "binds SIMD artifacts and the exact frame receipt payload without duplicate keys":
+        val complete = complete_simd_evidence()
+        val (compiler_path, source_sha, compiler_sha) = host_simd_artifact_bindings(complete)
+        val (payload, receipt_sha) = host_simd_frame_receipt_binding(complete)
+        expect(compiler_path).to_equal("/tmp/simple-simd-compiler")
+        expect(source_sha).to_equal("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        expect(compiler_sha).to_equal("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        expect(payload).to_equal(
+            "arch=x86_64\n" +
+            "feature=avx2\n" +
+            "execution_environment=native_host\n" +
+            "diagram_actual_checksum=606\n" +
+            "canonical_source_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" +
+            "compiler_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+        )
+        expect(receipt_sha).to_equal("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        val duplicate_path = complete + "\ncpu_simd_evidence_simple_bin=/tmp/other-simple"
+        val (duplicate_compiler_path, duplicate_source_sha, duplicate_compiler_sha) =
+            host_simd_artifact_bindings(duplicate_path)
+        expect(duplicate_compiler_path).to_equal("")
+        expect(duplicate_source_sha).to_equal("")
+        expect(duplicate_compiler_sha).to_equal("")
+        val duplicate_receipt = complete + "\ncpu_simd_evidence_arch=x86_64"
+        val (duplicate_payload, duplicate_receipt_sha) = host_simd_frame_receipt_binding(duplicate_receipt)
+        expect(duplicate_payload).to_equal("")
+        expect(duplicate_receipt_sha).to_equal("")
 
     it "requires complete Vulkan device readback evidence":
         val complete = "vulkan_engine2d_readback_status=pass\n" +

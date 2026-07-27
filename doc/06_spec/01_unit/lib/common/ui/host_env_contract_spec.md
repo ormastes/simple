@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -317,6 +317,13 @@ expect(host_x86_simd_evidence_passes(complete + "\ncpu_simd_evidence_status=pass
 
 </details>
 
+#### binds SIMD artifacts and the exact frame receipt payload without duplicate keys
+
+The pure host contract returns the selected compiler path and recorded source and
+compiler hashes only when every key is present exactly once. It reconstructs the
+producer's exact six-line frame receipt payload, including its final newline, and
+fails closed when any bound receipt key is duplicated.
+
 #### requires complete Vulkan device readback evidence
 
 <details>
@@ -607,8 +614,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
