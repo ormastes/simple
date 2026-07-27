@@ -450,6 +450,22 @@ impl HirLowering:
                 return_scan_empty()
 
     me register_imported_symbol(imported_mod: Module, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span):
+        # Header-only registry entries (files outside the entry closure,
+        # parsed for name/imports/exports only) carry nil decl dicts; native
+        # `.get()` on them returns a phantom non-nil Option and the trait arm
+        # below segfaults in lower_trait. Same family as the sibling-sweep
+        # guard in resolve_package_sibling_symbols; this second site was hit
+        # via the direct-import path (src/lib/nogc_async_mut/database/test.spl,
+        # stage-4 bootstrap). A partial module declares nothing itself — only
+        # its re-export chain (which header parsing does populate) can satisfy
+        # the import, so chase that and return before any decl-dict lookup.
+        if imported_mod.functions.len() < 0:
+            val part_hop = self.find_reexport_source(imported_mod, imported_mod_name, imported_name, 0)
+            if part_hop.found:
+                val part_src: Module? = self.modules_by_name.get(part_hop.module_name)
+                if part_src != nil:
+                    self.register_imported_symbol(part_src, part_hop.module_name, part_hop.item_name, local_name, import_span)
+            return
         val as_cls: Class? = imported_mod.classes.get(imported_name)
         val as_str: Struct? = imported_mod.structs.get(imported_name)
         val as_enum: Enum? = imported_mod.enums.get(imported_name)

@@ -106,3 +106,15 @@ main ≥ d07208d1c4f without the mitigation; crash at HIR module 32.
 - `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md` (Lane H)
 - `reference_jit_option_i64_value3_none_collision` (memory)
 - Trap D note in `module_lowering.spl` `lower_parser_module_unstub`
+
+## Second site: direct-import path (2026-07-27, same day)
+
+With the sibling-sweep guard in place, the stage-4 repro cleared the original
+crash point (env_ops.spl, HIR module 32) and 69 modules, then segfaulted in
+`resolve_import_symbols` for `src/lib/nogc_async_mut/database/test.spl` — the
+same phantom-Some family via `register_imported_symbol`'s six decl-dict
+`.get()` lookups on a header-only imported module. Second guard: early-return
+at the top of `register_imported_symbol` when
+`imported_mod.functions.len() < 0`, falling through only to the re-export
+chase (header parsing does populate imports/exports). This gate covers every
+caller (direct import, glob, sibling sweep, re-export recursion).
