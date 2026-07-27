@@ -488,12 +488,12 @@ expect(_value_of(eight_k, "gui_showcase_8k_perf_reason")).to_equal("invalid-8k-s
 
 - "printf 'fn main
    - Expected: code equals `0`
-- Reject a complete-looking 4K row that only lists the old two source files
+- Reject a complete-looking 4K row that omits the Engine2D hot-path owners
    - Expected: _value_of(four_k, "gui_showcase_4k_200fps_status") equals `fail`
    - Expected: _value_of(four_k, "gui_showcase_4k_200fps_source_revision_files_status") equals `fail`
    - Expected: _value_of(four_k, "gui_showcase_4k_200fps_missing_source_revision_files") equals `missing`
    - Expected: _value_of(four_k, "gui_showcase_4k_200fps_reason") equals `"missing-4k-source-revision-files:" + missing`
-- Reject a complete-looking 8K row that only lists the old two source files
+- Reject a complete-looking 8K row that omits the Engine2D hot-path owners
    - Expected: _value_of(eight_k, "gui_showcase_8k_perf_status") equals `fail`
    - Expected: _value_of(eight_k, "gui_showcase_8k_perf_source_revision_files_status") equals `fail`
    - Expected: _value_of(eight_k, "gui_showcase_8k_perf_missing_source_revision_files") equals `missing`
@@ -517,7 +517,7 @@ val setup = "rm -rf " + root + " && mkdir -p " + root + "/4k " + root + "/8k && 
     "printf 'elapsed_ms=597\\n' > " + root + "/4k/time.log && printf 'elapsed_ms=597\\n' > " + root + "/8k/time.log && "
 val write_4k = _fixture_command(root, "4k", root + "/4k/native.bin", root + "/4k/showcase.spl", root + "/4k/build.log", root + "/4k/showcase.log", root + "/4k/time.log")
 val write_8k = _fixture_command(root, "8k", root + "/8k/native.bin", root + "/8k/showcase.spl", root + "/8k/build.log", root + "/8k/showcase.log", root + "/8k/time.log")
-val remove_suffix = "sed -i 's# examples/06_io/ui/showcase_8k_scroll_gui.spl src/lib/common/ui/scroll_surface.spl src/lib/common/ui/dirty_region.spl src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl##'"
+val remove_suffix = "sed -i 's# src/lib/gc_async_mut/gpu/engine2d/engine.spl src/lib/gc_async_mut/gpu/engine2d/backend_software.spl##'"
 val command = setup + write_4k + " && " + write_8k + " && " +
     remove_suffix + " " + root + "/4k/status.env && " +
     remove_suffix + " " + root + "/8k/status.env && " +
@@ -528,14 +528,14 @@ expect(code).to_equal(0)
 
 val four_k = file_read(root + "/out-4k/evidence.env")
 val eight_k = file_read(root + "/out-8k/evidence.env")
-val missing = "examples/06_io/ui/showcase_8k_scroll_gui.spl,src/lib/common/ui/scroll_surface.spl,src/lib/common/ui/dirty_region.spl,src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl"
-step("Reject a complete-looking 4K row that only lists the old two source files")
+val missing = "src/lib/gc_async_mut/gpu/engine2d/engine.spl,src/lib/gc_async_mut/gpu/engine2d/backend_software.spl"
+step("Reject a complete-looking 4K row that omits the Engine2D hot-path owners")
 expect(_value_of(four_k, "gui_showcase_4k_200fps_status")).to_equal("fail")
 expect(_value_of(four_k, "gui_showcase_4k_200fps_source_revision_files_status")).to_equal("fail")
 expect(_value_of(four_k, "gui_showcase_4k_200fps_missing_source_revision_files")).to_equal(missing)
 expect(_value_of(four_k, "gui_showcase_4k_200fps_reason")).to_equal("missing-4k-source-revision-files:" + missing)
 
-step("Reject a complete-looking 8K row that only lists the old two source files")
+step("Reject a complete-looking 8K row that omits the Engine2D hot-path owners")
 expect(_value_of(eight_k, "gui_showcase_8k_perf_status")).to_equal("fail")
 expect(_value_of(eight_k, "gui_showcase_8k_perf_source_revision_files_status")).to_equal("fail")
 expect(_value_of(eight_k, "gui_showcase_8k_perf_missing_source_revision_files")).to_equal(missing)
