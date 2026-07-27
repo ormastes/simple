@@ -109,8 +109,25 @@ phase=mismatch    completed=false reason=checksum-mismatch       values=0  handl
 ```
 
 This closes Linux Vulkan backend execution and fault injection. It does not
-close unified CUDA/Vulkan parity: the CUDA ProcessingIR consumer and direct
-array indexing still expose the retained compiler's tagged-value defect.
+close direct array indexing: that path still exposes the retained compiler's
+tagged-value defect.
+
+The direct CUDA ProcessingIR consumer now validates the returned values through
+language-level iteration. Its retained native candidate passes the same
+64-element request with exact checksum, zero mismatches, positive
+handle/identity, `readback_source=device_readback`, and `cpu_fallback=false`.
+The aggregate native gate runs that CUDA receipt and the six-case Vulkan wrapper
+in one fail-closed process:
+
+```text
+PROCESSING_CUDA_NATIVE status=pass count=64 actual_checksum=1082179840 mismatch_count=0 values_exact=true backend=cuda readback_source=device_readback handle=1 identity=1002905313239842438 cpu_fallback=false
+processing_vulkan_fault_native_status=pass
+processing_cuda_vulkan_native_parity_status=pass
+```
+
+This closes iterator-based Linux CUDA/Vulkan ProcessingIR parity for retained
+native candidates. It does not prove source-matched compiler freshness or
+repair direct indexed `[u32]` reads.
 
 CUDA identity was a separate three-bit tag-width overflow: the UUID hash used
 the full positive 63-bit range, so native Simple tagging could make it negative.
@@ -129,8 +146,8 @@ values as the same algorithm version.
    source-matched pure-Simple compiler; do not run a full bootstrap.
 2. Run the focused transport probe once with that compiler and require zero
    iterator and indexed mismatches for all four recorded cases.
-3. Re-run the direct CUDA 64-element probe and unified parity consumer with
-   that compiler. Preserve the passing Vulkan iterator receipt.
+3. Re-run the direct CUDA 64-element probe and aggregate native parity gate
+   with that compiler. Preserve the passing retained-candidate receipts.
 4. If direct indexing still loads raw storage, trace the lost runtime-array
    classification and repair the shared Index lowering before backend retries.
 5. Require exact count/value/checksum, zero mismatches, device readback,
@@ -143,6 +160,9 @@ Retained build logs:
 - `build/simpleos_gpu_host/vulkan_fault_native/build-parity64-cycle2.log`
 - `build/simpleos_gpu_host/vulkan_fault_native/build-parity64-cycle3.log`
 - `build/simpleos_gpu_host/cuda_fill_native/build-cycle3.log`
+- `build/simpleos_gpu_host/cuda_fill_native/build-iter64.log`
+- `build/simpleos_gpu_host/cuda_fill_native/wrapper-iter64.log`
+- `build/simpleos_gpu_host/processing_cuda_vulkan_native_parity.log`
 - `build/simpleos_gpu_host/u32_transport/processing_u32_array_transport_probe`
 - `build/simpleos_gpu_host/cuda_identity/cuda_device_identity_probe`
 - `build/gpu-goal/source-matched/logs/refresh.log`

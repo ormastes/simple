@@ -31,7 +31,7 @@ evidence.
 
 | ID | Agent | Task and file | Acceptance evidence | Host | Status |
 |---:|---|---|---|---|---|
-| 1 | McClintock | Linux CUDA/Vulkan parity: `test/03_system/app/simple_2d/native_processing_ir_cuda_vulkan_readback_parity_spec.spl` | Real device receipts, exact pixels/checksums, zero mismatches, no CPU fallback. | Linux CUDA/Vulkan GPU | PARTIAL: 2026-07-27 live generated CUDA C/PTX fill/copy/alpha/scroll device readback passes exact checksums with two positive identities. The ProcessingIR CUDA probe reaches device readback with positive provenance and no CPU fallback but still returns 64 values tagged x8. The rebuilt ProcessingIR Vulkan probe passes 64 exact iterated values with positive handle/identity and no fallback; all five Vulkan fault phases also pass. Three bounded incremental compiler cycles end with the retained generation terminating while lowering current `run_compile_bootstrap`. Current compiler deployment, direct-index transport, and unified CUDA parity remain. |
+| 1 | McClintock | Linux CUDA/Vulkan parity: `test/03_system/app/simple_2d/native_processing_ir_cuda_vulkan_readback_parity_spec.spl` | Real device receipts, exact pixels/checksums, zero mismatches, no CPU fallback. | Linux CUDA/Vulkan GPU | GREEN for retained native iterator evidence: the aggregate gate passes a 64-value CUDA ProcessingIR receipt with exact checksum, zero mismatches, positive provenance, device readback, and no fallback, then passes Vulkan's exact 64-value receipt plus all five fault phases. Current source-matched compiler deployment and direct-index transport remain separate open compiler work. |
 | 2 | McClintock | Backend selector contract: `test/03_system/app/simpleos_gpu_host/backend_selector_contract_spec.spl` | Owner accepts `auto`, `cuda`, `vulkan`, `metal`; rejects unknown selectors; explicit selectors narrow to one backend before probing. | Any host; source contract only | GREEN: focused contract passes 3/3 |
 | 3 | Confucius | Offload break-even: `test/03_system/app/simpleos_gpu_host/processing_ir_offload_break_even_spec.spl` | Native receipt records CPU/device/transfer/total/RSS medians and measured decisions. | Linux CUDA GPU | POLICY ACTIVE, NATIVE PARTIAL: measured CPU wins at 64/65,536 and CUDA wins at 1,048,576/8,388,608. The default threshold is 1,048,576 (`0` disables); source contract passes 8/8, native 8-element bypass publishes exact reason-18 CPU fallback, and threshold-0 reaches exact reason-16 CUDA submit fallback. Exact-or-larger successful device completion remains open. |
 | 4 | Confucius | Measurement plan: `doc/03_plan/sys_test/gpu_processing_ir_offload_measurement.md` | Defines samples, schema, overhead, RSS, unavailable status, and pass/fail policy. | Linux CUDA GPU; Vulkan/macOS measurement postponed | MEASURED: break-even 1,048,576 elements; median communication overhead 1,832 us at transition |
@@ -55,8 +55,9 @@ pointers:
 The array-valued Vulkan readback extern is selected by the immutable runtime
 kind intrinsic; native runs retain the raw core-C ABI. Interpreter and native
 runtime upload/readback checks pass. The retained Simple native probe candidate
-passes exact device readback and all five isolated fault phases; task 1 remains
-open only for the unified CUDA/Vulkan parity consumer.
+passes exact device readback and all five isolated fault phases. The direct
+CUDA ProcessingIR candidate and aggregate gate now pass the same iterator-based
+device receipt contract; direct indexing remains open compiler work.
 
 Retained interpreter evidence:
 `build/gpu-goal/dual-abi/vulkan-live-readback-cycle3.log`.
@@ -68,7 +69,6 @@ Retained CUDA source/toolchain/device evidence:
 
 This test/plan batch may be reviewed, committed, and pushed while evidence is
 open. Do not close the GPU goal until `CompileMode -> optimizer -> 84 ->
-Vulkan` passes in order, task 1 produces real Linux CUDA/Vulkan receipts,
-tasks 3–4 are closed for Linux CUDA, tasks 5–6 gain live injection, tasks
+Vulkan` passes in order, tasks 3–4 are closed for Linux CUDA, tasks 5–6 gain live injection, tasks
 7–8 run on a prepared Darwin host, and the integrated result receives the
 required read-only high-capability final review.
