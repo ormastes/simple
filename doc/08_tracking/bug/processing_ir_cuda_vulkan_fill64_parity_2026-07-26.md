@@ -178,9 +178,7 @@ as canonical self-hosted release evidence.
    iterator and indexed mismatches for all four recorded cases.
 2. If direct indexing still loads raw storage, trace the lost runtime-array
    classification and repair the shared Index lowering before backend retries.
-3. Add one bounded same-process Vulkan fault-then-success receipt to prove
-   cleanup recovery instead of relying only on process teardown.
-4. Preserve exact count/value/checksum, device readback, positive backend
+3. Preserve exact count/value/checksum, device readback, positive backend
    provenance, no CPU fallback, and current-source freshness in future
    aggregate receipts.
 
@@ -217,6 +215,12 @@ Retained build logs:
 - `build/simpleos_gpu_host/vulkan_fault_native/evidence-live-source-manifest.sha256`
 - `build/simpleos_gpu_host/vulkan_fault_native/evidence-integration-source-manifest.sha256`
 - `build/simpleos_gpu_host/vulkan_fault_native/compiler-ffi-registration-check.log`
+- `build/simpleos_gpu_host/vulkan_fault_native/build-recovery.log`
+- `build/simpleos_gpu_host/vulkan_fault_native/wrapper-recovery.log`
+- `build/simpleos_gpu_host/vulkan_fault_native/build-recovery-cycle2.log`
+- `build/simpleos_gpu_host/vulkan_fault_native/wrapper-recovery-cycle2.log`
+- `build/simpleos_gpu_host/vulkan_fault_native/evidence-provenance-recovery.env`
+- `build/simpleos_gpu_host/vulkan_fault_native/evidence-recovery-source-manifest.sha256`
 - `doc/09_report/cuda_generated_2d_readback_2026-07-26.md`
 
 No compiler bootstrap was run.

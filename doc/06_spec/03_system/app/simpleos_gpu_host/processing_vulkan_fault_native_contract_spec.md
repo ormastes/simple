@@ -29,15 +29,20 @@ SIMPLE_LIB=src bin/simple test \
    typed reason with empty output and zero provenance.
 3. Every native process is bounded to 30 seconds and clears inherited
    fault-skip state.
+4. One process injects a submit failure, clears the target through the
+   canonical environment facade, and then completes an exact device request.
 
 ## Current Evidence
 
 The Vulkan-enabled runtime archive rebuilds incrementally, and the strict
-current-source probe links with `3 compiled, 24 cached, 0 failed`. The
-six-process wrapper passes one exact 64-value device receipt and all five typed
-fault phases. Success reports `hash_sanity=true`, handle/identity `666008366`,
-and exact values; each fault reports its expected reason, empty output, and
-zero provenance.
+current-source recovery probe links with `1 compiled, 28 cached, 0 failed`.
+The wrapper passes one exact 64-value device receipt, all five typed fault
+phases, and one same-process submit-failure recovery sequence. Success reports
+`hash_sanity=true`, handle/identity `666008366`, and exact values; each fault
+reports its expected reason, empty output, and zero provenance. The recovery
+sequence records a successful device receipt, arms the fault, receives zero
+provenance, clears the fault through the canonical environment facade, and
+returns the same identity and values without exiting.
 
 The selected identity matches the host's NVIDIA RTX A6000 driver/device
 properties. Runtime-owned UTF-16 hashing avoids converting selected-device
@@ -47,6 +52,8 @@ together in the focused Cargo check. Retained logs, explicit source manifests,
 the selected-device property tuple, and artifact hashes are bound by
 `build/simpleos_gpu_host/vulkan_fault_native/evidence-provenance-current-source.env`.
 
-Each fault phase currently runs in a fresh bounded process. A same-process
-fault-then-success recovery receipt remains required before claiming reusable
-cleanup across failed submissions.
+Retained recovery evidence:
+`build/simpleos_gpu_host/vulkan_fault_native/build-recovery-cycle2.log` and
+`wrapper-recovery-cycle2.log`. `evidence-provenance-recovery.env` binds the
+explicit source manifest, runtime archive, probe, wrapper log, and selected
+identity.

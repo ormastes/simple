@@ -1,6 +1,7 @@
 """Native Vulkan ProcessingIR success and fault-phase probe."""
 
 use app.io.args_ops.{get_args}
+use app.io.env_ops.{env_set}
 use std.common.processing.processing_ir.{processing_ir_fill_u32}
 use std.gc_async_mut.processing.fault_injection.{processing_ir_fault_injected}
 use std.gc_async_mut.processing.vulkan_fill_u32.{
@@ -15,6 +16,7 @@ fn _phase_from_args(args: [text]) -> text:
         if arg == "--phase=submit": return "submit"
         if arg == "--phase=readback": return "readback"
         if arg == "--phase=mismatch": return "mismatch"
+        if arg == "--recover=submit": return "recover-submit"
     ""
 
 fn _expected_reason(phase: text) -> text:
@@ -25,19 +27,50 @@ fn _expected_reason(phase: text) -> text:
     if phase == "mismatch": return "checksum-mismatch"
     "ok"
 
+fn _values_exact(values: [u32], expected_count: i64, expected_value: u32) -> bool:
+    var exact = values.len() == expected_count
+    for actual in values:
+        exact = exact and actual == expected_value
+    exact
+
+fn _run_submit_recovery(value: u32) -> i64:
+    val before = processing_ir_execute_vulkan(processing_ir_fill_u32(64, value))
+    val before_exact = _values_exact(before.values, 64, value)
+    val fault_armed = env_set("SIMPLE_GPU_FAULT_INJECT", "vulkan:submit")
+    val failed = processing_ir_execute_vulkan(processing_ir_fill_u32(64, value))
+    val fault_cleared = env_set("SIMPLE_GPU_FAULT_INJECT", "")
+    val recovered = processing_ir_execute_vulkan(processing_ir_fill_u32(64, value))
+    val recovered_exact = _values_exact(recovered.values, 64, value)
+    val identity_stable =
+        recovered.backend_handle == before.backend_handle and
+        recovered.device_identity == before.device_identity
+    val valid =
+        before.completed and before.reason == "ok" and before_exact and
+        before.backend_handle > 0 and before.device_identity > 0 and fault_armed and
+        not failed.completed and failed.reason == "vulkan-submit-failed" and
+        failed.values.len() == 0 and failed.backend_handle == 0 and
+        failed.device_identity == 0 and fault_cleared and
+        recovered.completed and recovered.reason == "ok" and recovered_exact and
+        recovered.backend_handle > 0 and recovered.device_identity > 0 and
+        identity_stable
+    val status = if valid: "pass" else: "fail"
+    print("VULKAN_FAULT_RECOVERY status={status} phase=submit before_exact={before_exact} before_handle={before.backend_handle} before_identity={before.device_identity} fault_armed={fault_armed} failed_reason={failed.reason} failed_handle={failed.backend_handle} failed_identity={failed.device_identity} fault_cleared={fault_cleared} recovered={recovered.completed} recovered_exact={recovered_exact} recovered_handle={recovered.backend_handle} recovered_identity={recovered.device_identity} identity_stable={identity_stable}\n")
+    if valid: 0 else: 1
+
 fn main() -> i64:
     val phase = _phase_from_args(get_args())
     if phase != "none" and phase != "unavailable" and phase != "init" and
-       phase != "submit" and phase != "readback" and phase != "mismatch":
+       phase != "submit" and phase != "readback" and phase != "mismatch" and
+       phase != "recover-submit":
         print("VULKAN_FAULT_NATIVE status=fail reason=invalid-phase\n")
         return 2
     val value = 0x01020304u32
+    if phase == "recover-submit":
+        return _run_submit_recovery(value)
     val result = processing_ir_execute_vulkan(processing_ir_fill_u32(64, value))
     val fault_active = phase != "none" and processing_ir_fault_injected("vulkan", phase)
     val hash_sanity = processing_vulkan_device_identity("abc") == 96354
-    var values_exact = result.values.len() == 64
-    for actual in result.values:
-        values_exact = values_exact and actual == value
+    val values_exact = _values_exact(result.values, 64, value)
     val valid = if phase == "none":
         result.completed and result.reason == "ok" and values_exact and
             result.backend_handle > 0 and result.device_identity > 0 and
