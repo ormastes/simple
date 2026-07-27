@@ -858,3 +858,11 @@ Tracking split:
   Average FPS can no longer hide a slow tail. Wrapper shell syntax, aggregate
   shell/Python syntax, and 4K plan-only budget evidence pass. The modern SSpec
   and complete manual pin both consumers; capped live perf runs were not rerun.
+- coverage-infra: Restored the existing coverage lifecycle in both runner
+  entrypoints and routed all three extracted child payloads into the shared
+  aggregator. Coverage requests now bypass fork mode because its result path
+  cannot return those payloads. A focused regression merges opposite child outcomes and checks
+  both file and aggregate decision totals at 100%. Its diagnostic run timed
+  out after 90 seconds before a result, and docgen hit the unavailable seed
+  path, so manuals were synchronized directly and no PASS or percentage is
+  claimed. TODO589 retains the accepted-runtime resume commands.
