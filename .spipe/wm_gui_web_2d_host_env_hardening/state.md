@@ -769,3 +769,24 @@ Tracking split:
   the next owner fix is the existing freestanding-safe style material side
   channel, followed by its focused material/frame specs and one QEMU resume.
   Accepted-current full CLI coverage artifacts remain absent.
+- bugfix: Moved WM Web material witness construction to the existing
+  freestanding-safe loop-local style boundary. CPU-composited and solid
+  canonical entries now cross as two text slots plus proven mutable `i64`
+  counts; the two draw-IR/software consumers hash those entries after the
+  unsafe `[Style]` boundary. The byte-exact backdrop grammar is shared by
+  witness and Draw IR, and animated material fails closed until a
+  post-animation channel exists. Architecture, SimpleOS Web WM guide, focused
+  specs, and their canonical manuals were refreshed; two stale duplicate
+  manuals were removed.
+- verify-gap: The focused test runner failed before execution because the
+  diagnostic CLI lacks its required `simple_seed` sibling. Direct interpreter
+  execution then reproduced the known 10-second web budget expiry, and the one
+  budget-raised retry reached the scenario but hit the 240-second cap. The
+  three-cycle limit is exhausted: source compiles and the regression remains
+  unqualified. Do not rerun this fixture in this session; resume with the
+  accepted-current pure-Simple CLI or one post-fix QEMU run after source/build
+  ownership is clear.
+- verify-gap: The one changed-file lint attempt also delegated through the
+  missing seed sibling and then failed inside the diagnostic lint stack with
+  `method get not found on type str (receiver value: HNode)`. Direct-runtime
+  guards and diff/layout checks remain usable, but lint is not claimed.

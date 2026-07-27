@@ -2,33 +2,9 @@
 
 > This unit spec covers the pure-Simple web renderer path used by browser, web, and Engine2D-backed GUI surfaces. It checks HTML-to-scene conversion, HTML-to-pixel rendering, selector cascade behavior, text raster behavior, Chrome-parity matrix fixtures, static pixel caching, backend-name resolution, and corpus fixture rendering.
 
-<!-- sdn-diagram:id=simple_web_renderer_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=simple_web_renderer_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-simple_web_renderer_spec -> std
-simple_web_renderer_spec -> common
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=simple_web_renderer_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 65 | 65 | 0 | 0 |
+| 95 | 95 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -48,7 +24,7 @@ This unit spec covers the pure-Simple web renderer path used by browser, web, an
 | Design | doc/04_architecture/ui/simple_gui_stack.md |
 | Research | doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -226,6 +202,120 @@ expect(_count_color(pixels, 0xFFF59E0Bu32)).to_be_greater_than(0)
 
 </details>
 
+#### emits input values as Draw IR text over the input box
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body><input id='query' value='Simple'><input id='secret' type='password' value='é'></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(
+    html, 160, 40
+)
+val commands = composition.batches[0].commands
+val query_box = _draw_ir_command_by_id(commands, "query")
+val query_text = _draw_ir_command_by_id(commands, "query_value")
+val password_text = _draw_ir_command_by_id(
+    commands, "secret_value"
+)
+
+expect(query_box.kind).to_equal("box")
+expect(query_text.kind).to_equal("text")
+expect(query_text.text_value).to_equal("Simple")
+expect(password_text.kind).to_equal("text")
+expect(password_text.text_value).to_equal("*")
+```
+
+</details>
+
+#### shares transformed aligned clipped themed input text with Draw IR
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background:#fff}.clip{display:block;width:22px;height:16px;overflow:hidden}#query{display:block;width:40px;height:16px;padding:2px;border:1px solid #111827;color:#22c55e;font-size:8px;text-transform:uppercase;direction:rtl;text-align:center}#hint{display:block;width:20px;height:14px;padding:1px;border:1px solid #111827;color:#ef4444}</style></head><body><div class='clip'><input id='query' value='abcdefghijk'></div><input id='hint' placeholder='hint'></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 64, 48)
+val commands = composition.batches[0].commands
+val query = _draw_ir_command_by_id(commands, "query_value")
+val hint = _draw_ir_command_by_id(commands, "hint_value")
+val pixels = simple_web_render_html_to_pixels(html, 64, 48)
+
+expect(query.kind).to_equal("text")
+expect(query.text_value).to_equal("KJIHGFEDCBA")
+expect(query.x).to_equal(1)
+expect(query.y).to_equal(7)
+expect(query.clip_rect.present).to_be(true)
+expect(query.clip_rect.x).to_equal(3)
+expect(query.clip_rect.y).to_equal(3)
+expect(query.clip_rect.width).to_equal(19)
+expect(query.clip_rect.height).to_equal(13)
+expect(query.color).to_equal(0xFF22C55Eu32)
+expect(hint.kind).to_equal("text")
+expect(hint.color).to_equal(0xFFEF4444u32)
+expect(pixels[7 * 64 + 5]).to_equal(0xFF22C55Eu32)
+expect(pixels[7 * 64 + 25]).to_equal(0xFFFFFFFFu32)
+```
+
+</details>
+
+#### maps logical border block and inline properties to physical edges
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}#card{display:block;width:10px;height:8px;background-color:#111827;border-block:1px solid #64748b;border-inline:1px solid #64748b;border-block-width:3px 5px;border-inline-width:2px 4px;border-block-color:#94a3b8;border-inline-color:#94a3b8;border-block-style:solid;border-inline-style:solid;border-block-start:3px solid #ef4444;border-block-start-width:3px;border-block-start-color:#ef4444;border-block-start-style:solid;border-block-end:5px solid #1d4ed8;border-block-end-width:5px;border-block-end-color:#1d4ed8;border-block-end-style:solid;border-inline-start:2px solid #f59e0b;border-inline-start-width:2px;border-inline-start-color:#f59e0b;border-inline-start-style:solid;border-inline-end:4px solid #22c55e;border-inline-end-width:4px;border-inline-end-color:#22c55e;border-inline-end-style:solid}#none{display:block;width:8px;height:6px;margin-top:4px;background-color:#e5e7eb;border-block:2px solid #7c3aed;border-inline:2px solid #7c3aed;border-block-style:none;border-inline-style:none;border-block-start-style:none;border-block-end-style:none;border-inline-start-style:none;border-inline-end-style:none}</style></head><body><div id='card'></div><div id='none'></div></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 40, 40)
+val batch = composition.batches[0]
+val card = _draw_ir_command_by_id(batch.commands, "card")
+val pixels = simple_web_render_html_to_pixels(html, 40, 40)
+
+expect(_draw_ir_style_value(card, "border-left-width")).to_equal("2")
+expect(_draw_ir_style_value(card, "border-top-width")).to_equal("3")
+expect(_draw_ir_style_value(card, "border-right-width")).to_equal("4")
+expect(_draw_ir_style_value(card, "border-bottom-width")).to_equal("5")
+expect(pixels[3]).to_equal(0xFFEF4444u32)
+expect(pixels[160]).to_equal(0xFFF59E0Bu32)
+expect(pixels[175]).to_equal(0xFF22C55Eu32)
+expect(pixels[603]).to_equal(0xFF1D4ED8u32)
+expect(pixels[122]).to_equal(0xFF111827u32)
+expect(_count_color(pixels, 0xFF7C3AEDu32)).to_equal(0)
+```
+
+</details>
+
+#### maps logical border radius corners to physical Draw IR corners
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>#card{display:block;width:18px;height:12px;background-color:#1d4ed8;border-radius:1px;border-top-left-radius:2px;border-top-right-radius:3px;border-bottom-right-radius:4px;border-bottom-left-radius:5px;border-start-start-radius:6px;border-start-end-radius:7px;border-end-start-radius:8px;border-end-end-radius:9px}</style></head><body><section id='card'></section></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 48, 32)
+val batch = composition.batches[0]
+val card = _draw_ir_command_by_id(batch.commands, "card")
+
+expect(_draw_ir_style_value(card, "border-top-left-radius")).to_equal("6")
+expect(_draw_ir_style_value(card, "border-top-right-radius")).to_equal("7")
+expect(_draw_ir_style_value(card, "border-bottom-left-radius")).to_equal("8")
+expect(_draw_ir_style_value(card, "border-bottom-right-radius")).to_equal("9")
+```
+
+</details>
+
 #### emits HTML layout Draw IR with computed style and hit geometry before raster
 
 <details>
@@ -258,6 +348,354 @@ expect(_draw_ir_style_value(card, "padding-left")).to_equal("2")
 
 </details>
 
+#### fails closed to an opaque Draw IR color when the WM material mode is incomplete
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body><section id='card' data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' style='display:block;width:12px;height:8px;background:rgba(255,255,255,0.2);backdrop-filter:blur(30px) saturate(170%)'></section></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 32, 20)
+val card = _draw_ir_command_by_id(composition.batches[0].commands, "card")
+
+expect(card.color).to_equal(0xFF123456u32)
+expect(_draw_ir_style_value(card, "backdrop-filter-capability")).to_equal("unavailable")
+expect(_draw_ir_style_value(card, "backdrop-filter-realized")).to_equal("")
+expect(_draw_ir_style_value(card, "backdrop-filter-realized-blur-radius-px")).to_equal("")
+expect(_draw_ir_style_value(card, "backdrop-filter-realized-saturation-milli")).to_equal("")
+```
+
+</details>
+
+#### projects a complete WM Web material request with explicit bounded realization
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body><section id='card' data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' style='display:block;width:12px;height:8px;background:linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.025)),rgba(31,31,33,0.80);backdrop-filter:blur(30px) saturate(170%)'></section></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 32, 20)
+val card = _draw_ir_command_by_id(composition.batches[0].commands, "card")
+
+expect(card.color).to_equal(0xFF123456u32)
+expect(_draw_ir_style_value(card, "background-color")).to_equal("3424591649")
+expect(_draw_ir_style_value(card, "backdrop-filter")).to_equal("blur(30px) saturate(170%)")
+expect(_draw_ir_style_value(card, "backdrop-filter-capability")).to_equal("engine2d-cpu-composited-material-v1")
+expect(_draw_ir_style_value(card, "backdrop-filter-realized")).to_equal("blur(4px) saturate(170%)")
+expect(_draw_ir_style_value(card, "backdrop-filter-realized-blur-radius-px")).to_equal("4")
+expect(_draw_ir_style_value(card, "backdrop-filter-realized-saturation-milli")).to_equal("1700")
+expect(_draw_ir_style_value(card, "backdrop-filter-reduction-reason")).to_equal("cpu-blur-radius-bounded-to-4")
+expect(_draw_ir_style_value(card, "wm-material-surface-alpha-milli")).to_equal("200")
+expect(_draw_ir_style_value(card, "background-image-composite-mode")).to_equal("surface-then-alpha-gradient")
+expect(_draw_ir_style_value(card, "background-layers-raw")).to_equal("")
+```
+
+</details>
+
+#### claims CPU material provenance only with a matching execution receipt
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body><section id='card' data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' style='display:block;width:12px;height:8px;background:linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.025)),rgba(31,31,33,0.80);backdrop-filter:blur(30px) saturate(170%)'></section></body></html>"
+val layout = simple_web_layout_render_html_draw_ir_result(
+    html, 32, 20)
+val without_receipt =
+    simple_web_layout_material_provenance_after_execution(
+        layout.material_witness, 0, 32 * 20, 32 * 20, 0)
+val with_receipt =
+    simple_web_layout_material_provenance_after_execution(
+        layout.material_witness, 0, 32 * 20, 32 * 20, 1)
+
+expect(layout.material_fallback.kind).to_equal("none")
+expect(without_receipt.kind).to_equal("none")
+expect(with_receipt.kind).to_equal("cpu-composited-material")
+expect(with_receipt.reason).to_equal(
+    "native-device-backdrop-path-pending")
+expect(with_receipt.material_sha256.len()).to_equal(64)
+```
+
+</details>
+
+#### requires an independent Metal glass dispatch receipt
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body><section id='card' data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' style='display:block;width:12px;height:8px;background:rgba(31,31,33,0.80);backdrop-filter:blur(30px) saturate(170%)'></section></body></html>"
+val layout = simple_web_layout_render_html_draw_ir_result(
+    html, 32, 20)
+val final_device_readback_after_cpu =
+    simple_web_layout_material_provenance_after_backend_execution(
+        layout.material_witness, 0, 32 * 20, 32 * 20,
+        1, 0, "cpu-scalar-glass-v1", "device_readback", 7, 11)
+val missing_dispatch =
+    simple_web_layout_material_provenance_after_backend_execution(
+        layout.material_witness, 0, 32 * 20, 32 * 20,
+        0, 0, "unavailable", "device_readback", 7, 11)
+val mismatched_dispatch =
+    simple_web_layout_material_provenance_after_backend_execution(
+        layout.material_witness, 0, 32 * 20, 32 * 20,
+        0, 2, "metal-device-glass-v1",
+        "device_readback", 7, 11)
+val metal =
+    simple_web_layout_material_provenance_after_backend_execution(
+        layout.material_witness, 0, 32 * 20, 32 * 20,
+        0, 1, "metal-device-glass-v1",
+        "device_readback", 7, 11)
+
+expect(final_device_readback_after_cpu.kind).to_equal(
+    "cpu-composited-material")
+expect(missing_dispatch.kind).to_equal("none")
+expect(mismatched_dispatch.kind).to_equal("none")
+expect(metal.kind).to_equal("metal-device-composited-material")
+expect(metal.reason).to_equal("metal-device-glass-dispatch")
+expect(metal.material_sha256).to_equal(
+    layout.material_witness.cpu_composited_sha256)
+```
+
+</details>
+
+#### executes Aetheric shorthand through Style Draw IR and the typed CPU receipt
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# This is the closest integrated public path: the CSS shorthand is
+# cascaded into Style, lowered to Draw IR, executed by Engine2D, then
+# admitted only through the producer witness plus CPU receipt.
+val html = "<html><head><style>#aetheric{display:block;width:12px;height:8px;background:linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.025)),rgba(31,31,33,0.80);backdrop-filter:blur(30px) saturate(170%)}</style></head><body><section id='aetheric' data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456'></section></body></html>"
+val layout = simple_web_layout_render_html_draw_ir_result(html, 32, 20)
+val card = _draw_ir_command_by_id(layout.composition.batches[0].commands, "aetheric")
+val execution = simple_web_layout_render_html_readback_engine2d_result(
+    html, 32, 20, "software")
+
+expect(card.kind).to_equal("rect")
+expect(_draw_ir_style_value(card, "backdrop-filter-realized")).to_equal("blur(4px) saturate(170%)")
+expect(layout.material_witness.cpu_composited_count).to_equal(1)
+expect(layout.material_witness.cpu_composited_sha256.len()).to_equal(64)
+expect(execution.readback.pixels.len()).to_equal(32 * 20)
+expect(execution.material_fallback.kind).to_equal("cpu-composited-material")
+expect(execution.material_fallback.material_sha256).to_equal(layout.material_witness.cpu_composited_sha256)
+```
+
+</details>
+
+#### software-composites Aetheric gradient stops over its translucent base
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:2px;height:2px;background:#ffffff}#aetheric{display:block;width:2px;height:2px;background:linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.025)),rgba(31,31,33,0.80)}</style></head><body><section id='aetheric'></section></body></html>"
+val pixels = simple_web_layout_render_html_software_pixels(html, 2, 2)
+
+# The centered first-row sample interpolates alpha 20 -> 6 to 17, then
+# source-over blends that 7% white over the painted translucent base.
+expect(pixels[0]).to_equal(0xFF595959u32)
+```
+
+</details>
+
+#### rejects malformed or noncanonical exact-mode backdrop grammar
+
+-  wm material section with backdrop
+-  wm material section with backdrop
+-  wm material section with backdrop
+-  wm material section with backdrop
+   - Expected: _draw_ir_style_value(command, "backdrop-filter-capability") equals `unavailable`
+   - Expected: _draw_ir_style_value(command, "backdrop-filter-fallback") equals `none`
+   - Expected: _draw_ir_style_value(command, "backdrop-filter-realized") equals ``
+   - Expected: layout.material_witness.cpu_composited_count equals `0`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = (
+    "<html><body>" +
+    _wm_material_section_with_backdrop("space", "blur(4px)  saturate(120%)") +
+    _wm_material_section_with_backdrop("decimal", "blur(4.0px) saturate(120%)") +
+    _wm_material_section_with_backdrop("over-saturated", "blur(4px) saturate(301%)") +
+    _wm_material_section_with_backdrop("extra", "blur(4px) saturate(120%) contrast(110%)") +
+    "</body></html>"
+)
+val layout = simple_web_layout_render_html_draw_ir_result(html, 64, 48)
+for component_id in ["space", "decimal", "over-saturated", "extra"]:
+    val command = _draw_ir_command_by_id(
+        layout.composition.batches[0].commands, component_id)
+    expect(_draw_ir_style_value(command, "backdrop-filter-capability")).to_equal("unavailable")
+    expect(_draw_ir_style_value(command, "backdrop-filter-fallback")).to_equal("none")
+    expect(_draw_ir_style_value(command, "backdrop-filter-realized")).to_equal("")
+expect(layout.material_witness.cpu_composited_count).to_equal(0)
+```
+
+</details>
+
+#### rejects pre-animation material provenance
+
+- Render an exact material node with an active animation
+- "background:rgba
+- "backdrop-filter:blur
+- Reject a receipt captured before animation application
+   - Expected: layout.material_witness.cpu_composited_count equals `0`
+   - Expected: layout.material_witness.cpu_composited_sha256 equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render an exact material node with an active animation")
+val html = (
+    "<html><body>" +
+    "<section id='animated' " +
+    "data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' " +
+    "data-wm-theme-fallback='solid-material' " +
+    "data-wm-theme-bg='#123456' " +
+    "style='display:block;width:12px;height:8px;" +
+    "background:rgba(31,31,33,0.80);" +
+    "backdrop-filter:blur(4px) saturate(120%);" +
+    "animation-name:pulse;animation-duration:1s'></section>" +
+    "</body></html>"
+)
+val layout = simple_web_layout_render_html_draw_ir_result(
+    html, 32, 20)
+
+step("Reject a receipt captured before animation application")
+expect(layout.material_witness.cpu_composited_count).to_equal(0)
+expect(layout.material_witness.cpu_composited_sha256).to_equal("")
+```
+
+</details>
+
+#### fails closed for unsupported WM image layers and admits an explicit none reset
+
+-  wm material section
+-  wm material section
+-  wm material section
+-  wm material section
+-  wm material section
+-  wm material section
+-  wm material section
+   - Expected: command.color equals `0xFF123456u32`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 35 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = (
+    "<html><body>" +
+    _wm_material_section("radial", "background-image:radial-gradient(#112233,#445566);") +
+    _wm_material_section("multiple", "background-image:linear-gradient(#112233,#445566),linear-gradient(#778899,#aabbcc);") +
+    _wm_material_section("url", "background-image:url(hero.png);") +
+    _wm_material_section("unknown", "background-image:conic-gradient(#112233,#445566);") +
+    _wm_material_section("malformed", "background-image:linear-gradient(#112233);") +
+    _wm_material_section("override", "background-image:linear-gradient(#112233,#445566);background-image:radial-gradient(#778899,#aabbcc);") +
+    _wm_material_section("reset", "background-image:radial-gradient(#112233,#445566);background-image:none;") +
+    "</body></html>"
+)
+val composition = simple_web_layout_render_html_draw_ir(html, 96, 80)
+val rejected_ids = [
+    "radial", "multiple", "url", "unknown", "malformed", "override"
+]
+for rejected_id in rejected_ids:
+    val command = _draw_ir_command_by_id(
+        composition.batches[0].commands, rejected_id)
+    expect(command.color).to_equal(0xFF123456u32)
+    expect(_draw_ir_style_value(
+        command, "backdrop-filter-capability")).to_equal("unavailable")
+    expect(_draw_ir_style_value(
+        command, "backdrop-filter-realized")).to_equal("")
+    expect(_draw_ir_style_value(
+        command, "background-image-composite-mode")).to_equal("")
+
+val reset = _draw_ir_command_by_id(
+    composition.batches[0].commands, "reset")
+expect(_draw_ir_style_value(
+    reset, "background-layers-raw")).to_equal("")
+expect(_draw_ir_style_value(
+    reset, "backdrop-filter-capability")).to_equal(
+        "engine2d-cpu-composited-material-v1")
+expect(_draw_ir_style_value(
+    reset, "background-image-composite-mode")).to_equal("")
+```
+
+</details>
+
+#### applies only matching root custom-property variants with CSS last-wins precedence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html data-mode='Glass'><head><style>:root[data-mode=glass i]{--panel:#22c55e}:root{--panel:#ef4444}:root[data-mode=opaque]{--panel:#1d4ed8}:root[data-mode=glass i] .unrelated{--panel:#7c3aed}#card{display:block;width:12px;height:8px;background-color:var(--panel)}</style></head><body><section id='card'></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 32, 20)
+
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_equal(0)
+expect(_count_color(pixels, 0xFF7C3AEDu32)).to_equal(0)
+```
+
+</details>
+
+#### projects a typed first shadow layer while retaining authored CSS
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>#card{display:block;width:12px;height:8px;background-color:#ffffff;box-shadow:5px 4px 12px #dc2626}</style></head><body><section id='card'></section></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 40, 28)
+val card = _draw_ir_command_by_id(composition.batches[0].commands, "card")
+
+expect(_draw_ir_style_value(card, "box-shadow")).to_start_with("5px 4px ")
+expect(_draw_ir_style_value(card, "box-shadow")).to_end_with("4292617766")
+expect(_draw_ir_style_value(card, "box-shadow-blur-radius")).to_equal("12")
+expect(_draw_ir_style_value(card, "box-shadow-raw")).to_contain("12px")
+```
+
+</details>
+
 #### emits GUI interaction and word wrapping CSS in Draw IR computed style
 
 <details>
@@ -281,7 +719,7 @@ expect(_draw_ir_style_value(panel, "word-break")).to_equal("break-all")
 
 </details>
 
-#### emits editor text metadata CSS in Draw IR computed style
+#### expands flex-flow shorthand into computed flex direction and wrap
 
 <details>
 <summary>Executable SSpec</summary>
@@ -290,14 +728,200 @@ Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val html = "<html><head><style>#editor { caret-color:#06b6d4; tab-size:4; unicode-bidi:plaintext; }</style></head><body><pre id='editor'>A\tB</pre></body></html>"
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}#stack{display:flex;flex-flow:column wrap;width:32px;height:24px;gap:2px}.item{width:10px;height:6px;background-color:#22c55e}</style></head><body><section id='stack'><div class='item'></div><div class='item'></div></section></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 80, 48)
+val batch = composition.batches[0]
+val stack = _draw_ir_command_by_id(batch.commands, "stack")
+
+expect(_draw_ir_style_value(stack, "display")).to_equal("flex")
+expect(_draw_ir_style_value(stack, "flex-direction")).to_equal("column")
+expect(_draw_ir_style_value(stack, "flex-wrap")).to_equal("wrap")
+```
+
+<details>
+<summary>Rendered scenario source</summary>
+
+> val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}#stack{display:flex;flex-flow:column wrap;width:32px;height:24px;gap:2px}.ite$width$</style></head><body><section id='stack'><div class='item'></div><div class='item'></div></section></body></html>"<br>
+> val composition = simple_web_layout_render_html_draw_ir(html, 80, 48)<br>
+> val batch = composition.batches[0]<br>
+> val stack = _draw_ir_command_by_id(batch.commands, "stack")<br>
+> <br>
+> expect(_draw_ir_style_value(stack, "display")).to_equal("flex")<br>
+> expect(_draw_ir_style_value(stack, "flex-direction")).to_equal("column")<br>
+> expect(_draw_ir_style_value(stack, "flex-wrap")).to_equal("wrap")
+
+</details>
+
+</details>
+
+#### maps inline logical spacing to horizontal physical layout
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}#card{display:block;background-color:#1d4ed8;width:12px;height:8px;padding-inline:3px 5px;padding-inline-start:4px;margin-inline:2px 6px;margin-inline-end:7px}</style></head><body><section id='card'></section></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 48, 28)
+val batch = composition.batches[0]
+val card = _draw_ir_command_by_id(batch.commands, "card")
+val pixels = simple_web_render_html_to_pixels(html, 48, 28)
+
+expect(_draw_ir_style_value(card, "padding-left")).to_equal("4")
+expect(_draw_ir_style_value(card, "padding-right")).to_equal("5")
+expect(_draw_ir_style_value(card, "margin-left")).to_equal("2")
+expect(_draw_ir_style_value(card, "margin-right")).to_equal("7")
+expect(card.x).to_equal(2)
+expect(card.content_rect.x).to_equal(6)
+expect(card.content_rect.width).to_equal(12)
+expect(pixels[2]).to_equal(0xFF1D4ED8u32)
+expect(pixels[1]).to_equal(0xFFFFFFFFu32)
+```
+
+</details>
+
+#### maps block logical spacing to vertical physical layout
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}#card{display:block;background-color:#1d4ed8;width:12px;height:8px;padding-block:3px 5px;padding-block-start:4px;margin-block:2px 6px;margin-block-end:7px}</style></head><body><section id='card'></section></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 48, 32)
+val batch = composition.batches[0]
+val card = _draw_ir_command_by_id(batch.commands, "card")
+val pixels = simple_web_render_html_to_pixels(html, 48, 32)
+
+expect(_draw_ir_style_value(card, "padding-top")).to_equal("4")
+expect(_draw_ir_style_value(card, "padding-bottom")).to_equal("5")
+expect(_draw_ir_style_value(card, "margin-top")).to_equal("2")
+expect(_draw_ir_style_value(card, "margin-bottom")).to_equal("7")
+expect(card.y).to_equal(2)
+expect(card.content_rect.y).to_equal(6)
+expect(card.content_rect.height).to_equal(8)
+expect(pixels[96]).to_equal(0xFF1D4ED8u32)
+expect(pixels[48]).to_equal(0xFFFFFFFFu32)
+```
+
+</details>
+
+#### maps logical sizing to physical dimensions and constraints
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 16 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}#card{display:block;background-color:#1d4ed8;width:4px;height:5px;inline-size:12px;block-size:8px;min-inline-size:16px;max-inline-size:20px;min-block-size:11px;max-block-size:14px}</style></head><body><section id='card'></section></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 40, 24)
+val batch = composition.batches[0]
+val card = _draw_ir_command_by_id(batch.commands, "card")
+val pixels = simple_web_render_html_to_pixels(html, 40, 24)
+
+expect(_draw_ir_style_value(card, "width")).to_equal("12")
+expect(_draw_ir_style_value(card, "height")).to_equal("8")
+expect(_draw_ir_style_value(card, "min-width")).to_equal("16")
+expect(_draw_ir_style_value(card, "max-width")).to_equal("20")
+expect(_draw_ir_style_value(card, "min-height")).to_equal("11")
+expect(_draw_ir_style_value(card, "max-height")).to_equal("14")
+expect(card.content_rect.width).to_equal(16)
+expect(card.content_rect.height).to_equal(11)
+expect(pixels[0]).to_equal(0xFF1D4ED8u32)
+expect(pixels[16]).to_equal(0xFFFFFFFFu32)
+```
+
+</details>
+
+#### maps logical inset offsets to physical absolute positioning
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}#panel{position:relative;background-color:#e5e7eb;width:40px;height:24px}#card{position:absolute;background-color:#1d4ed8;width:8px;height:6px;inset:1px 2px 3px 4px;inset-block:5px 6px;inset-inline:7px 8px;inset-block-start:9px;inset-inline-end:10px}</style></head><body><section id='panel'><div id='card'></div></section></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 48, 32)
+val batch = composition.batches[0]
+val card = _draw_ir_command_by_id(batch.commands, "card")
+val pixels = simple_web_render_html_to_pixels(html, 48, 32)
+
+expect(_draw_ir_style_value(card, "left")).to_equal("7")
+expect(_draw_ir_style_value(card, "top")).to_equal("9")
+expect(_draw_ir_style_value(card, "right")).to_equal("10")
+expect(_draw_ir_style_value(card, "bottom")).to_equal("6")
+expect(card.x).to_equal(22)
+expect(card.y).to_equal(12)
+expect(pixels[598]).to_equal(0xFF1D4ED8u32)
+expect(pixels[597]).to_equal(0xFFE5E7EBu32)
+```
+
+</details>
+
+#### emits editor text metadata CSS in Draw IR computed style
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 47 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>#editor { caret-color:#06b6d4; font-size-adjust:0.5; font-palette:dark; font-feature-settings:'kern' 0; font-language-override:'TRK'; font-variation-settings:'wght' 700; font-variant:small-caps tabular-nums; font-variant-alternates:historical-forms; font-variant-caps:small-caps; font-variant-east-asian:ruby; font-variant-emoji:emoji; font-variant-ligatures:no-common-ligatures; font-variant-numeric:tabular-nums; font-variant-position:super; font-kerning:none; font-optical-sizing:none; font-stretch:expanded; font-width:expanded; font-synthesis:none; font-synthesis-small-caps:none; font-synthesis-position:none; font-synthesis-style:none; font-synthesis-weight:none; hyphens:auto; image-rendering:pixelated; line-break:strict; tab-size:4; table-layout:fixed; text-align-all:center; text-justify:inter-word; vertical-align:middle; unicode-bidi:plaintext; writing-mode:vertical-rl; text-orientation:upright; text-combine-upright:all; will-change:transform, opacity; color-adjust:exact; forced-color-adjust:none; print-color-adjust:exact; orphans:4; widows:5; }</style></head><body><pre id='editor'>A\tB</pre></body></html>"
 val composition = simple_web_layout_render_html_draw_ir(html, 96, 64)
 val batch = composition.batches[0]
 val editor = _draw_ir_command_by_id(batch.commands, "editor")
 
 expect(_draw_ir_style_value(editor, "caret-color")).to_equal("4278630100")
+expect(_draw_ir_style_value(editor, "font-kerning")).to_equal("none")
+expect(_draw_ir_style_value(editor, "font-optical-sizing")).to_equal("none")
+expect(_draw_ir_style_value(editor, "font-stretch")).to_equal("expanded")
+expect(_draw_ir_style_value(editor, "font-width")).to_equal("expanded")
+expect(_draw_ir_style_value(editor, "font-size-adjust")).to_equal("0.5")
+expect(_draw_ir_style_value(editor, "font-palette")).to_equal("dark")
+expect(_draw_ir_style_value(editor, "font-feature-settings")).to_equal("'kern' 0")
+expect(_draw_ir_style_value(editor, "font-language-override")).to_equal("'TRK'")
+expect(_draw_ir_style_value(editor, "font-variation-settings")).to_equal("'wght' 700")
+expect(_draw_ir_style_value(editor, "font-variant")).to_equal("small-caps tabular-nums")
+expect(_draw_ir_style_value(editor, "font-variant-alternates")).to_equal("historical-forms")
+expect(_draw_ir_style_value(editor, "font-variant-caps")).to_equal("small-caps")
+expect(_draw_ir_style_value(editor, "font-variant-east-asian")).to_equal("ruby")
+expect(_draw_ir_style_value(editor, "font-variant-emoji")).to_equal("emoji")
+expect(_draw_ir_style_value(editor, "font-variant-ligatures")).to_equal("no-common-ligatures")
+expect(_draw_ir_style_value(editor, "font-variant-numeric")).to_equal("tabular-nums")
+expect(_draw_ir_style_value(editor, "font-variant-position")).to_equal("super")
+expect(_draw_ir_style_value(editor, "font-synthesis")).to_equal("none")
+expect(_draw_ir_style_value(editor, "font-synthesis-small-caps")).to_equal("none")
+expect(_draw_ir_style_value(editor, "font-synthesis-position")).to_equal("none")
+expect(_draw_ir_style_value(editor, "font-synthesis-style")).to_equal("none")
+expect(_draw_ir_style_value(editor, "font-synthesis-weight")).to_equal("none")
+expect(_draw_ir_style_value(editor, "hyphens")).to_equal("auto")
+expect(_draw_ir_style_value(editor, "image-rendering")).to_equal("pixelated")
+expect(_draw_ir_style_value(editor, "line-break")).to_equal("strict")
 expect(_draw_ir_style_value(editor, "tab-size")).to_equal("4")
+expect(_draw_ir_style_value(editor, "table-layout")).to_equal("fixed")
+expect(_draw_ir_style_value(editor, "text-align")).to_equal("center")
+expect(_draw_ir_style_value(editor, "text-align-all")).to_equal("center")
+expect(_draw_ir_style_value(editor, "text-justify")).to_equal("inter-word")
+expect(_draw_ir_style_value(editor, "vertical-align")).to_equal("middle")
+expect(_draw_ir_style_value(editor, "will-change")).to_equal("transform, opacity")
+expect(_draw_ir_style_value(editor, "color-adjust")).to_equal("exact")
+expect(_draw_ir_style_value(editor, "forced-color-adjust")).to_equal("none")
+expect(_draw_ir_style_value(editor, "print-color-adjust")).to_equal("exact")
+expect(_draw_ir_style_value(editor, "orphans")).to_equal("4")
+expect(_draw_ir_style_value(editor, "widows")).to_equal("5")
 expect(_draw_ir_style_value(editor, "unicode-bidi")).to_equal("plaintext")
+expect(_draw_ir_style_value(editor, "writing-mode")).to_equal("vertical-rl")
+expect(_draw_ir_style_value(editor, "text-orientation")).to_equal("upright")
+expect(_draw_ir_style_value(editor, "text-combine-upright")).to_equal("all")
 ```
 
 </details>
@@ -373,6 +997,106 @@ expect(_draw_ir_style_value(label, "font-weight")).to_equal("bold")
 expect(_draw_ir_style_value(label, "line-height")).to_equal("18")
 expect(_count_color(shorthand_pixels, 0xFF111827u32)).to_be_greater_than(0)
 expect(_pixels_equal(normal_pixels, shorthand_pixels)).to_equal(false)
+```
+
+</details>
+
+#### preserves cascaded font families in text Draw IR computed style
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>.parent{font-family:\"Noto Sans Mono\",monospace}.override{font-family:Pixelify Sans,sans-serif}.short{font:italic 700 11.5px   /   20px   \"Roboto Slab\",serif}</style></head><body><div class='parent'><span>Inherited</span><span class='override'>Override</span><span class='short'>Shorthand</span></div></body></html>"
+val composition = simple_web_layout_render_html_draw_ir(html, 160, 64)
+val commands = composition.batches[0].commands
+val inherited = _draw_ir_text_command(commands, "Inherited")
+val overridden = _draw_ir_text_command(commands, "Override")
+val shorthand = _draw_ir_text_command(commands, "Shorthand")
+
+expect(composition.schema).to_equal("simple-draw-ir-v2")
+expect(_draw_ir_style_value(inherited, "font-family")).to_equal("\"Noto Sans Mono\",monospace")
+expect(_draw_ir_style_value(overridden, "font-family")).to_equal("Pixelify Sans,sans-serif")
+expect(_draw_ir_style_value(shorthand, "font-family")).to_equal("\"Roboto Slab\",serif")
+expect(_draw_ir_style_value(shorthand, "font-size")).to_equal("11")
+expect(_draw_ir_style_value(shorthand, "line-height")).to_equal("20")
+expect(_draw_ir_style_value(shorthand, "font-style")).to_equal("italic")
+expect(_draw_ir_style_value(shorthand, "font-weight")).to_equal("bold")
+val identity = _draw_ir_style_value(inherited, "font-identity")
+val advances = _draw_ir_style_value(inherited, "font-advance-widths")
+if identity != "":
+    expect(advances).to_contain(",")
+else:
+    # Font runtime absence keeps the established bitmap metrics path.
+    expect(advances).to_equal("")
+```
+
+</details>
+
+#### renders aspect-ratio boxes from a definite width
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#ffffff}.card{width:60px;aspect-ratio:2/1;background-color:#22c55e}.next{width:16px;height:6px;background-color:#f59e0b}</style></head><body><div id='card' class='card'></div><div id='next' class='next'></div></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 96, 64)
+
+expect(simple_web_layout_debug_layout_by_id(html, 96, 64, "card", "w")).to_equal("60")
+expect(simple_web_layout_debug_layout_by_id(html, 96, 64, "card", "h")).to_equal("30")
+expect(simple_web_layout_debug_layout_by_id(html, 96, 64, "next", "y")).to_equal("30")
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(60 * 30)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(16 * 6)
+```
+
+</details>
+
+#### renders object-fit contain for image placeholders
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#f8fafc}img.hero{display:block;width:48px;height:16px;object-fit:contain}</style></head><body><img class='hero widget-image' alt=''></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 64, 32)
+
+expect(pixels.len()).to_equal(64 * 32)
+expect(pixels[2 + 8 * 64]).to_equal(0xFFF8FAFCu32)
+expect(pixels[12 + 8 * 64]).to_equal(0xFF2563EBu32)
+expect(_count_color(pixels, 0xFF2563EBu32)).to_equal(280)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(56)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(48)
+```
+
+</details>
+
+#### renders object-position for contained image placeholders
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;background-color:#f8fafc}img.hero{display:block;width:48px;height:16px;object-fit:contain;object-position:left top}</style></head><body><img class='hero widget-image' alt=''></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 64, 32)
+
+expect(pixels.len()).to_equal(64 * 32)
+expect(pixels[2 + 8 * 64]).to_equal(0xFF2563EBu32)
+expect(pixels[30 + 8 * 64]).to_equal(0xFFF8FAFCu32)
+expect(_count_color(pixels, 0xFF2563EBu32)).to_equal(280)
+expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(56)
+expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(48)
 ```
 
 </details>
@@ -685,6 +1409,60 @@ expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
 
 </details>
 
+#### clips overflowing descendants for CSS paint containment
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;overflow:hidden;background-color:#ffffff}.shell{contain:paint;background-color:#1d4ed8;width:20px;height:12px}.spill{background-color:#ef4444;width:10px;height:10px;margin-left:24px}</style></head><body><section class='shell'><div class='spill'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 48, 32)
+expect(pixels.len()).to_equal(48 * 32)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
+```
+
+</details>
+
+#### suppresses rendered scrollbars for scrollbar width none
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;overflow:hidden;background-color:#ffffff}.shell{overflow-x:hidden;overflow-y:scroll;scrollbar-width:none;background-color:#1d4ed8;width:32px;height:20px}.tall{background-color:#22c55e;width:8px;height:40px}</style></head><body><section class='shell'><div class='tall'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 48, 32)
+expect(pixels.len()).to_equal(48 * 32)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFFF1F1F1u32)).to_equal(0)
+```
+
+</details>
+
+#### renders custom scrollbar colors
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;overflow:hidden;background-color:#ffffff}.shell{overflow-x:hidden;overflow-y:scroll;scrollbar-color:#9333ea #f97316;background-color:#1d4ed8;width:32px;height:20px}.tall{background-color:#22c55e;width:8px;height:40px}</style></head><body><section class='shell'><div class='tall'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 48, 32)
+expect(pixels.len()).to_equal(48 * 32)
+expect(_count_color(pixels, 0xFF9333EAu32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFFF97316u32)).to_be_greater_than(0)
+```
+
+</details>
+
 #### matches Chrome visibility hidden paint suppression while preserving layout
 
 <details>
@@ -704,6 +1482,28 @@ expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(72)
 expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
 expect(_count_color(pixels, 0xFFF59E0Bu32)).to_equal(0)
 expect(_count_color(pixels, 0xFF7F1D1Du32)).to_equal(0)
+```
+
+</details>
+
+#### renders content visibility hidden containers while suppressing descendants
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 9 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>html,body{margin:0;padding:0;width:48px;height:32px;overflow:hidden;background-color:#ffffff}#panel{display:block;content-visibility:hidden;width:24px;height:16px;background-color:#1d4ed8}#child{display:block;width:20px;height:12px;background-color:#ef4444}</style></head><body><section id='panel'><div id='child'></div></section></body></html>"
+val pixels = simple_web_render_html_to_pixels(html, 48, 32)
+val composition = simple_web_layout_render_html_draw_ir(html, 48, 32)
+val batch = composition.batches[0]
+val panel = _draw_ir_command_by_id(batch.commands, "panel")
+expect(pixels.len()).to_equal(48 * 32)
+expect(_count_color(pixels, 0xFF1D4ED8u32)).to_be_greater_than(0)
+expect(_count_color(pixels, 0xFFEF4444u32)).to_equal(0)
+expect(_draw_ir_style_value(panel, "content-visibility")).to_equal("hidden")
 ```
 
 </details>
@@ -1127,6 +1927,67 @@ expect(_pixels_equal(simple_pixels, web_pixels)).to_equal(true)
 
 </details>
 
+#### backend-isolation Gap C: WebRenderBackend can select the Engine2D backend for the core path
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# web_render_backend.spl previously hardcoded "auto" (Gap C); the
+# facade now threads an optional engine2d_backend param through to
+# simple_web_render_html_to_pixels_with_engine2d_backend, so a caller
+# can request e.g. "cpu_simd"/"software" for the pure_simple engine.
+val html = "<html><body><div style='width: 32px; height: 16px; background-color: #2563eb'></div></body></html>"
+val web = WebRenderBackend.create("pure_simple", 48, 32)
+val simple_software = SimpleWebRenderer.create_with_backend(48, 32, "software")
+
+# Default (no arg) stays "auto" -- byte-identical to prior behavior.
+val default_pixels = web.render_html_to_pixels(html)
+val explicit_auto_pixels = web.render_html_to_pixels(html, "auto")
+expect(_pixels_equal(default_pixels, explicit_auto_pixels)).to_equal(true)
+
+# Explicit "software" selection matches the software-backed renderer,
+# proving the param actually reaches the Engine2D backend selector.
+val software_pixels = web.render_html_to_pixels(html, "software")
+expect(_pixels_equal(software_pixels, simple_software.render_html_to_pixels(html))).to_equal(true)
+```
+
+</details>
+
+#### backend-isolation Gap E: WebRenderBackend exposes Draw IR and CPU-layout pixel readback
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# wm_compare probes previously called simple_web_layout_render_html_draw_ir /
+# simple_web_layout_render_html_software_pixels directly (no facade for
+# that shape existed -- Gap E). WebRenderBackend now wraps both so an
+# app-layer caller never needs the direct backend-engine import. Byte
+# (and structure)-identical to the underlying calls -- no behavior change.
+val html = "<html><body><div style='width: 40px; height: 20px; background-color: #2563eb'>Gap E</div></body></html>"
+val web = WebRenderBackend.create("pure_simple", 64, 40)
+
+val facade_ir = web.render_html_to_draw_ir(html)
+val direct_ir = simple_web_layout_render_html_draw_ir(html, 64, 40)
+expect(facade_ir.batches.len()).to_equal(direct_ir.batches.len())
+expect(facade_ir.batches.len()).to_be_greater_than(0)
+expect(facade_ir.batches[0].commands.len()).to_equal(direct_ir.batches[0].commands.len())
+
+val facade_pixels = web.render_html_software_pixels(html)
+val direct_pixels = simple_web_layout_render_html_software_pixels(html, 64, 40)
+expect(_pixels_equal(facade_pixels, direct_pixels)).to_equal(true)
+expect(facade_pixels.len()).to_equal(64 * 40)
+```
+
+</details>
+
 #### fallback facade parses rgb() background-color with the shared CSS parser
 
 <details>
@@ -1433,8 +2294,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 65 |
-| Active scenarios | 65 |
+| Total scenarios | 95 |
+| Active scenarios | 95 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -1442,9 +2303,9 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 ## Related Documentation
 
-- **Plan:** [doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md](doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md)
-- **Design:** [doc/04_architecture/ui/simple_gui_stack.md](doc/04_architecture/ui/simple_gui_stack.md)
-- **Research:** [doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md](doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md)
+- **Plan:** `doc/03_plan/ui/draw_ir/draw_io_sdn_draw_ir_plan.md`
+- **Design:** `doc/04_architecture/ui/simple_gui_stack.md`
+- **Research:** `doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md`
 
 
 </details>

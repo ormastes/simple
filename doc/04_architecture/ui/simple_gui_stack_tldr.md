@@ -51,6 +51,8 @@ Host input
 
 - Simple owns: GUI AST, state, layout policy, event ids, dirty regions, IR
   schemas, cache invalidation, and CPU oracle behavior.
+- Web material provenance is captured from loop-local computed style before
+  the freestanding `[Style]` boundary; animated material receipts fail closed.
 - Plugin owns: capability probe, cost model, batch preparation, GPU/CPU
   execution, readback, and fallback reports.
 - Backend lane split: drawing backends own framebuffer-visible draw/present/

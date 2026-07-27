@@ -154,6 +154,12 @@ bitmap behavior stays active. SimpleOS must obtain the same pinned bytes through
 a canonical immutable image-data manifest rather than a host-only path or an
 app-private font bundle.
 
+Web material provenance is owned where computed style is still loop-local.
+The freestanding renderer carries canonical CPU-composited/solid material
+entries and counts through dedicated mutable scalar/text slots, then hashes
+those entries after the unsafe `[Style]` array boundary. Animated material
+nodes fail closed until that channel describes post-animation state.
+
 Simple owns:
 
 - widget tree and GUI AST;

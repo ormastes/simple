@@ -1742,17 +1742,28 @@ fn presentational_attr_decls(node: HNode) -> text:
 # ---------------------------------------------------------------------------
 
 fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool = false, vector_fonts: bool = true) -> [Style]:
-    var material_entries_unused: [text] = [""]
-    compute_styles_with_material(nodes, rules, child_index, trace_stages, vector_fonts, material_entries_unused)
+    var material_entries_unused: [text] = ["", ""]
+    var material_counts_unused: [i64] = [0, 0]
+    compute_styles_with_material(
+        nodes, rules, child_index, trace_stages, vector_fonts,
+        material_entries_unused, material_counts_unused)
 
 # Freestanding-safe material provenance channel: the realized solid-material
 # entries are built HERE from the loop-local style (before any aggregate
 # element store, array return, or array param crossing — all of which lose
 # Style field contents on the freestanding lane) and handed out through a
-# mut one-slot [text] param (the apply_advances idiom). Consumers derive the
-# material digest from the entries text instead of re-reading [Style].
-fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool, vector_fonts: bool, mut material_entries: [text]) -> [Style]:
-    var material_entry_count = 0
+# mutable text/count slots (the apply_advances idiom). Consumers derive the
+# material digest from these canonical entries instead of re-reading [Style].
+fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool, vector_fonts: bool, mut material_entries: [text], mut material_counts: [i64]) -> [Style]:
+    var cpu_material_entry_count: i64 = 0
+    var solid_material_entry_count: i64 = 0
+    val material_channel_ready = (
+        material_entries.len() >= 2 and material_counts.len() >= 2)
+    if material_channel_ready:
+        material_entries[0] = "simple-web-realized-cpu-composited-material-v1"
+        material_entries[1] = "simple-web-realized-solid-material-v1"
+        material_counts[0] = 0
+        material_counts[1] = 0
     val rule_buckets = build_rule_buckets(rules, trace_stages)
     if trace_stages:
         print "[layout-trace] style_stage=rule-buckets-ready"
@@ -1903,40 +1914,81 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 st.resolved_font_advances = metrics.advances
                 st.resolved_font_width = metrics.width
                 st.resolved_font_line_height = metrics.line_height
-        # Realized solid-material entry, evaluated on the loop-local st (the
-        # only channel proven to hold field contents on freestanding builds).
-        # Mirrors _simple_web_realized_material_fallback's realized predicate.
-        # This side channel belongs to the legacy solid reducer only. Exact
-        # CPU material mode is witnessed after style return and must not emit
-        # a misleading legacy entry-rejected receipt.
-        val legacy_material_mode = wm_material_mode == ""
-        val mat_declared = (
-            legacy_material_mode and wm_fallback == "solid-material")
-        val mat_css = (
-            legacy_material_mode and st.backdrop_filter_raw != "")
-        if mat_declared or mat_css:
-            val mat_bg: u32 = st.bg
-            val mat_fg: u32 = st.fg
-            val mat_gf: u32 = st.background_gradient_from
-            val mat_gt: u32 = st.background_gradient_to
-            val mat_layers: text = st.bg_layers_raw
-            if ((mat_bg >> 24) & 255u32) == 255u32 and mat_gf == 0u32 and mat_gt == 0u32 and mat_layers == "":
-                material_entries[0] = material_entries[0] + "\n{material_entry_count}|kind=solid-material|bg={mat_bg}|fg={mat_fg}|backdrop=none|background-image=none"
-                material_entry_count = material_entry_count + 1
-            else:
-                # Positive-control attribution: every contract node either
-                # appends an entry or explains itself here.
-                print "[web-style-producer] entry-rejected index={i} bg={mat_bg} gf={mat_gf} gt={mat_gt} layers_len={mat_layers.len()} declared={mat_declared}"
+        # Material receipts are built from loop-local fields before the
+        # freestanding-unsafe [Style] store/return boundary.
+        val mat_bg: u32 = st.bg
+        val mat_fg: u32 = st.fg
+        val mat_gf: u32 = st.background_gradient_from
+        val mat_gt: u32 = st.background_gradient_to
+        val mat_layers: text = st.bg_layers_raw
+        val mat_backdrop: text = st.backdrop_filter_raw
+        val declared_bg_attr = attr_value(
+            nd.attrs_raw, "data-wm-theme-bg")
+        val declared_argb = parse_color_any(declared_bg_attr)
+        val declared_opaque = (
+            declared_bg_attr != "" and
+            ((declared_argb >> 24) & 255u32) == 255u32)
+        val surface_alpha = (mat_bg >> 24) & 255u32
+        val translucent_surface = (
+            surface_alpha > 0u32 and surface_alpha < 255u32)
+        val opaque_surface = surface_alpha == 255u32
+        val typed_stops_absent = mat_gf == 0u32 and mat_gt == 0u32
+        val typed_stops_present = mat_gf != 0u32 and mat_gt != 0u32
+        val typed_stops_valid = typed_stops_absent or typed_stops_present
+        val backdrop = simple_web_backdrop_admission(mat_backdrop)
+        # A pre-animation receipt cannot describe the final frame. Animated
+        # material nodes fail closed until the side channel becomes
+        # animation-aware.
+        val static_material = st.animation_name == "none"
+        val cpu_admitted = (
+            material_channel_ready and static_material and
+            wm_material_mode == "engine2d-cpu-composited-material-v1" and
+            wm_fallback == "solid-material" and declared_opaque and
+            translucent_surface and mat_layers == "" and
+            typed_stops_valid and backdrop.admitted)
+        if cpu_admitted:
+            val realized = "blur({backdrop.realized_blur_px}px) saturate({backdrop.realized_saturation_milli / 10}%)"
+            material_entries[0] = (
+                material_entries[0] +
+                "\n{cpu_material_entry_count}|kind=cpu-composited-material" +
+                "|reason=native-device-backdrop-path-pending" +
+                "|mode={wm_material_mode}|fallback={wm_fallback}" +
+                "|declared={declared_argb}|surface={mat_bg}" +
+                "|surface-alpha-milli={(surface_alpha as i64) * 1000 / 255}" +
+                "|backdrop={mat_backdrop}|realized={realized}" +
+                "|blur={backdrop.realized_blur_px}" +
+                "|saturation={backdrop.realized_saturation_milli}" +
+                "|stops={mat_gf},{mat_gt}")
+            cpu_material_entry_count = cpu_material_entry_count + 1
+        val solid_admitted = (
+            material_channel_ready and static_material and
+            wm_material_mode == "" and wm_fallback == "solid-material" and
+            declared_opaque and opaque_surface and mat_backdrop == "" and
+            mat_layers == "" and typed_stops_absent)
+        if solid_admitted:
+            material_entries[1] = (
+                material_entries[1] +
+                "\n{solid_material_entry_count}|kind=solid-material" +
+                "|reason=cpu-raster-backdrop-sampling-unavailable" +
+                "|bg={mat_bg}|fg={mat_fg}|backdrop=none" +
+                "|background-image=none")
+            solid_material_entry_count = solid_material_entry_count + 1
+        if (
+            wm_fallback == "solid-material" and
+            not cpu_admitted and not solid_admitted
+        ):
+            print "[web-style-producer] entry-rejected index={i} mode={wm_material_mode} bg={mat_bg} gf={mat_gf} gt={mat_gt} layers_len={mat_layers.len()} backdrop_len={mat_backdrop.len()} animation={st.animation_name}"
         styles[i] = st
         if trace_stages:
             print "[layout-trace] style_stage=node-complete index={i}"
         i = i + 1
-    # Callee-side slot read-back: if entries were appended but the slot reads
-    # empty here, the local element store itself is the broken channel.
-    if material_entry_count > 0 and material_entries[0] == "":
-        print "[web-style-producer] entries-slot-lost count={material_entry_count}"
-    if material_entry_count > 0:
-        print "[web-style-producer] entries-ready count={material_entry_count} len={material_entries[0].len()}"
+    if material_channel_ready:
+        material_counts[0] = cpu_material_entry_count
+        material_counts[1] = solid_material_entry_count
+    if cpu_material_entry_count > 0:
+        print "[web-style-producer] cpu-entries-ready count={cpu_material_entry_count} len={material_entries[0].len()}"
+    if solid_material_entry_count > 0:
+        print "[web-style-producer] solid-entries-ready count={solid_material_entry_count} len={material_entries[1].len()}"
     styles
 
 pub fn simple_web_layout_debug_style_by_id(html: text, id: text, field: text) -> text:

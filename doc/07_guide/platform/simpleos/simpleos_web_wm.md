@@ -91,6 +91,9 @@ Theme flow:
    `src/os/compositor/simple_web_window_renderer.spl` with the same generated CSS
 5. `src/lib/gc_async_mut/gpu/browser_engine/style_block.spl` applies embedded
    `<style>` blocks and resolves CSS variables before pixel rendering
+6. The HTML layout renderer records canonical CPU/solid material entries from
+   loop-local computed style before the freestanding `[Style]` array boundary;
+   animated material nodes remain unverified and therefore emit no receipt.
 
 For the full production theme workflow, see
 [stitch_simple_os_theme.md](../../ui/stitch_simple_os_theme.md). The legacy
