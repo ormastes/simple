@@ -1004,3 +1004,18 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   cover honest same-UID race resistance only; malicious same-UID admission
   remains unavailable without a privileged OS-immutable store. No QEMU guest,
   bootstrap, integration, or push ran; the candidate is not evidence.
+
+- continuation-2026-07-27-browser-input-caret-selection-overlay: **SOURCE
+  FIXED / STATIC REVIEW ACCEPTED / RUNTIME UNVERIFIED.** Supported single-line
+  inputs now preserve stable author-id/body-relative identity and validated
+  UTF-8 source boundaries through password masking, transform expansion, RTL,
+  alignment, horizontal reveal, click placement, selection, and 500 ms caret
+  blink. CPU and Draw IR share computed-color selection/text/caret order and
+  clipping through both Engine2D executors. Readonly remains selectable but
+  immutable; disabled emits no focus/hit/overlay; prevented defaults preserve
+  state; chrome focus clears page caret/blink. Behavioral specs cover anonymous
+  serialize/reparse mutation, malformed UTF-8, computed theme color,
+  center/right alignment, blink visibility/cancel, and view retention/reset.
+  Independent highest-capability static review accepted commit `63205f9e8f`.
+  No admitted runtime existed, so no executed PASS is inferred. Textarea
+  overlays and live pixels/events/timing/RSS remain open.

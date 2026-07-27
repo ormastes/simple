@@ -4,7 +4,8 @@
   CPU-SIMD, Vulkan, Metal, x86 QEMU, and ARM QEMU render/event comparison.
 - Aetheric package/snapshot authority, Web CSS structure, CPU material, opaque
   Metal receipt identity, canonical hosted browser event routing, UTF-8 input,
-  and clipped theme-derived input Draw IR are source-fixed and reviewed.
+  clipped theme-derived input Draw IR, and single-line caret/selection overlays
+  are source-fixed and reviewed.
 - Live host pixels/events remain open until an admitted source-matched
   pure-Simple runtime and required native capability are available.
 - The Endpoint Security collector is source-verified and fail-closed; policy
@@ -13,8 +14,8 @@
 - The aggregate SSpec intentionally remains fail-closed.
 - QEMU theme-before-first-frame wiring exists, but x86 still needs published
   frozen admission, SSE2 parity, ordered damage/frame receipts, timing, and RSS.
-- ARM still needs firmware/theme/backend identity and non-synthetic receipt
-  finalization after its correlated frame, plus timing and RSS.
+- ARM direct-`-kernel` firmware is N/A; it still needs theme/backend identity,
+  non-synthetic receipt finalization after its frame, timing, and RSS.
 - QEMU P1 details:
   `doc/08_tracking/bug/wm_glass_qemu_evidence_contract_p1_2026-07-27.md`.
 - Windows Vulkan/SIMD, Linux Vulkan/RenderDoc/SIMD, and unavailable QEMU/native

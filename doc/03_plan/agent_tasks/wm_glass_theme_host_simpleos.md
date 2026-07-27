@@ -73,8 +73,8 @@ overlapping dirty work and remains read-only for this lane.
 | Lane | Current state | First unresolved boundary |
 |---|---|---|
 | Host production WM | SOURCE FIXED; recapture blocked by Wave 0 | fresh hosted startup now installs the registry-default Stitch package through the package-owned snapshot projection (and preserves an explicit prior selection through the native-safe presence/plain-return pair), but no current Wave 0 capsule is admitted; the path must be rebuilt from an admitted capsule before one fresh host capture |
-| Host events | SOURCE FIXED; REVIEW ACCEPTED; product proof pending | canonical address/title and page pointer/key/text routes exist; address Backspace is UTF-8-safe and malformed drafts fail closed; live focus, caret/selection, frame, and post-state receipts remain open |
-| Simple Web glass | SEMANTICS IMPLEMENTED; INPUT DRAW IR SOURCE FIXED; LIVE PROOF PENDING | CPU and Draw IR share transformed/aligned/clipped theme-derived input text planning; current-source computed-style/Draw-IR/framebuffer proof has not passed, and Chromium fixture timing is not Simple Web animation evidence |
+| Host events | SOURCE FIXED; REVIEW ACCEPTED; product proof pending | canonical address/title and page pointer/key/text routes plus UTF-8 click selection and blink scheduling exist; live focus/caret pixels, frame, and post-state receipts remain open |
+| Simple Web glass | SEMANTICS IMPLEMENTED; INPUT/OVERLAY DRAW IR SOURCE FIXED; LIVE PROOF PENDING | CPU and Draw IR share transformed/aligned/clipped theme-derived input text plus selection/caret overlays; textarea remains explicitly open, and current-source computed-style/Draw-IR/framebuffer proof has not passed |
 | SimpleOS x86_64 QEMU | STATIC PREFLIGHT PASS, FRESH BOOT PENDING | legacy render/event command now delegates to canonical `gui_entry_desktop.spl` evidence; host gate, exact-current rebuild, and one OVMF capture remain |
 | SimpleOS ARM64 QEMU | SOURCE INPUT PREFLIGHT IMPLEMENTED; LIVE PROOF PENDING | generated Aetheric startup and capability-discovered VirtIO-MMIO keyboard/pointer eventq wiring are present; DMA ordering/status/shape contracts pass locally, but the self-hosted ARM payload and QMP key/pointer/frame/RAMFB evidence are not yet available |
 | Aggregate SSpec | FAIL-FAST BY DESIGN | `require_wm_glass_theme_evidence()` remains a real failure until host and required QEMU rows produce current-source evidence |
@@ -698,6 +698,21 @@ theme/layout/clip parity, clipped pixels, and clip restoration. Independent
 highest-capability source review accepted the repair. The admitted runtime was
 unavailable, so no live browser, caret/selection, framebuffer, timing, or RSS
 PASS is inferred.
+
+The follow-up single-line input overlay keeps stable author-id/body-relative
+layout keys across serialization, maps validated UTF-8 source boundaries
+through password masking, transform expansion, RTL, alignment, and horizontal
+reveal, and emits clipped selection/text/caret order through both Engine2D
+executors. Readonly controls remain selectable but immutable; disabled controls
+cannot focus or emit hit/overlay geometry. Prevented pointer defaults preserve
+selection, chrome focus clears page selection/blink, and the worker schedules
+500 ms caret edges only while appropriate. Exact behavioral specs cover
+anonymous reparse identity, multibyte click placement, computed selection
+color, center/right hit alignment, preventDefault, chrome blur, invalid UTF-8,
+blink visibility/cancellation, and view retention/reset. Independent
+highest-capability static review accepted commit `63205f9e8f`. No admitted
+runtime was available, so this is not an executed browser PASS; textarea
+caret/selection and all live pixel/event/timing/RSS evidence remain open.
 
 Independent highest-capability QEMU review rejected a source-complete claim.
 The entries install the generated theme before the first frame, and ARM already

@@ -85,7 +85,11 @@ promoting runtime evidence:
   deleting one trailing scalar and leaves malformed drafts unchanged. CPU and
   Draw IR input text share computed transform/RTL/alignment/vertical placement,
   theme foreground, and content/ancestor clipping; Engine2D restores the
-  enclosing clip through its canonical text/font routes;
+  enclosing clip through its canonical text/font routes. Supported single-line
+  inputs also lower stable UTF-8 selection boundaries into computed-color
+  selection and caret rectangles around the canonical text command; readonly,
+  disabled, prevented-default, chrome-focus, blink, reveal, and invalid-UTF-8
+  behavior remains fail-closed. Textarea overlays remain explicitly open;
 - the macOS full-CLI admission boundary uses a normalized v2 history verifier
   and tracked fail-closed trust-root gate. An Endpoint Security exec/fork/exit
   collector candidate now exists and passed bounded static review plus fresh
