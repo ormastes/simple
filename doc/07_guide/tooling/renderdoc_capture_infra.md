@@ -309,7 +309,8 @@ Retained showcase performance is also machine-gated. The aggregate consumes
 requires the 4K row to prove `3840x2160`, `8294400` pixels, nonzero readback
 pixels, `gui_showcase_4k_200fps_nonzero_pixels_status=pass`, target FPS met,
 nonempty checksum, `gui_showcase_4k_200fps_checksum_status=pass`,
-`frame_avg_ns`, `frame_p50_ns`, `frame_p95_ns`,
+`frame_avg_ns`, `frame_p50_ns`, `frame_p95_ns`, positive `warmup_frames`, and
+`frame_sample_count` exactly equal to the measured `frames`,
 `gui_showcase_4k_200fps_log_file_status=pass`,
 `gui_showcase_4k_200fps_time_log_file_status=pass`,
 `retained-static-frame`,
@@ -337,7 +338,8 @@ completion evidence. The 8K row must likewise prove
 `gui_showcase_8k_perf_nonzero_pixels_status=pass`, target FPS at least
 200, positive measured frame count, checksum,
 `gui_showcase_8k_perf_checksum_status=pass`,
-`frame_avg_ns`, `frame_p50_ns`, `frame_p95_ns`,
+`frame_avg_ns`, `frame_p50_ns`, `frame_p95_ns`, positive `warmup_frames`, and
+`frame_sample_count` exactly equal to the measured `frames`,
 `gui_showcase_8k_perf_log_file_status=pass`,
 `gui_showcase_8k_perf_time_log_file_status=pass`,
 `gui_showcase_8k_perf_retained_render_mode_status=pass`,

@@ -973,3 +973,10 @@ Tracking split:
   skipped commands, no fallback, CPU-mirror provenance, and a nonzero checksum.
   The accepted executable runner remains unavailable, so no runtime PASS is
   claimed for this new scenario.
+- retained-perf-sample-window: The AC-8 audit found that the aggregate accepted
+  p50/p95 rows without the producer's warmup and retained sample count. The
+  shared aggregate now requires positive warmup and an exact
+  `frame_sample_count == frames` contract for 4K and 8K and re-emits both rows.
+  A 199/200 mutation is rejected with `untrusted-4k-sample-window`; 200/200
+  passes this gate and reaches the later retained-log check. Shell syntax
+  passes; no live 4K/8K measurement or exhausted Simple runner was rerun.
