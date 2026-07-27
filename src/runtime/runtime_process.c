@@ -909,6 +909,25 @@ const char* rt_browser_renderer_read_stdin_some(int64_t max_bytes) {
     return win_browser_renderer_stdin_buf;
 }
 
+int64_t rt_browser_renderer_write_stdout_some(
+        const char* data, int64_t data_len, int64_t offset,
+        int64_t max_bytes) {
+    if (!data || data_len < 0 || offset < 0 || offset > data_len ||
+        max_bytes <= 0) return -1;
+    if (offset == data_len) return 0;
+    int64_t remaining = data_len - offset;
+    if (max_bytes > 1048576) max_bytes = 1048576;
+    DWORD request = (DWORD)(
+        remaining < max_bytes ? remaining : max_bytes);
+    DWORD written = 0;
+    HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (!output || output == INVALID_HANDLE_VALUE ||
+        !WriteFile(output, data + offset, request, &written, NULL)) {
+        return -1;
+    }
+    return (int64_t)written;
+}
+
 #else /* POSIX */
 
 #include "runtime_fork.h"
@@ -1552,6 +1571,23 @@ const char* rt_browser_renderer_read_stdin_some(int64_t max_bytes) {
     if (read_count <= 0) return s_browser_renderer_stdin_buf;
     s_browser_renderer_stdin_buf[read_count] = '\0';
     return s_browser_renderer_stdin_buf;
+}
+
+int64_t rt_browser_renderer_write_stdout_some(
+        const char* data, int64_t data_len, int64_t offset,
+        int64_t max_bytes) {
+    if (!data || data_len < 0 || offset < 0 || offset > data_len ||
+        max_bytes <= 0) return -1;
+    if (offset == data_len) return 0;
+    int64_t remaining = data_len - offset;
+    if (max_bytes > 1048576) max_bytes = 1048576;
+    size_t request = (size_t)(
+        remaining < max_bytes ? remaining : max_bytes);
+    ssize_t written;
+    do {
+        written = write(STDOUT_FILENO, data + offset, request);
+    } while (written < 0 && errno == EINTR);
+    return written < 0 ? -1 : (int64_t)written;
 }
 
 #ifdef __linux__

@@ -7,8 +7,11 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_frame_decode
 }
 use os.hosted.hosted_browser_renderer_worker.{
-    hosted_browser_renderer_handle_init
+    hosted_browser_renderer_handle_init,
+    hosted_browser_renderer_handle_request
 }
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
 
 val SCRIPT_ANIMATION_HTML = "<!DOCTYPE html><html><head><style>#stage { width:32px; height:24px; background-color:#ef4444; }</style></head><body><script type='text/simple'>title \"SimpleReady\"\nbody_html '<div id=\"stage\"></div>'</script><script>requestAnimationFrame(function(frameTime){ document.body.innerHTML = '<div style=\"width:32px;height:24px;background-color:#2563eb\"></div>'; });</script></body></html>"
 val CSS_ANIMATION_HTML = "<style>@keyframes pulse { from { background-color:#ef4444; } to { background-color:#2563eb; } } #stage { width:32px; height:24px; animation:pulse 1000ms linear forwards; }</style><div id='stage'></div>"
@@ -61,3 +64,104 @@ describe "hosted browser renderer worker":
         )
         expect(rejected.ok).to_be(false)
         expect(rejected.reason).to_equal("expected-init")
+
+    it "retains one browser session across animation frames":
+        var session = BrowserSession.new()
+        val first = hosted_browser_renderer_handle_request(
+            session,
+            BrowserRendererMessage(
+                kind: "init",
+                generation: 7,
+                request_id: 2,
+                payload: SCRIPT_ANIMATION_HTML
+            ),
+            64,
+            48,
+            false,
+            0,
+            2
+        )
+        val animated = hosted_browser_renderer_handle_request(
+            session,
+            BrowserRendererMessage(
+                kind: "advance",
+                generation: 7,
+                request_id: 3,
+                payload: "16"
+            ),
+            64,
+            48,
+            first.initialized,
+            first.animation_time_ms,
+            3
+        )
+
+        expect(first.ok).to_be(true)
+        expect(animated.ok).to_be(true)
+        expect(first.wire == animated.wire).to_be(false)
+        expect(animated.animation_time_ms).to_equal(16)
+
+    it "rejects skipped ids and backward animation time":
+        var session = BrowserSession.new()
+        val first = hosted_browser_renderer_handle_request(
+            session,
+            BrowserRendererMessage(
+                kind: "init",
+                generation: 7,
+                request_id: 2,
+                payload: CSS_ANIMATION_HTML
+            ),
+            64,
+            48,
+            false,
+            0,
+            2
+        )
+        val skipped = hosted_browser_renderer_handle_request(
+            session,
+            BrowserRendererMessage(
+                kind: "advance",
+                generation: 7,
+                request_id: 4,
+                payload: "500"
+            ),
+            64,
+            48,
+            first.initialized,
+            first.animation_time_ms,
+            3
+        )
+        val advanced = hosted_browser_renderer_handle_request(
+            session,
+            BrowserRendererMessage(
+                kind: "advance",
+                generation: 7,
+                request_id: 3,
+                payload: "500"
+            ),
+            64,
+            48,
+            first.initialized,
+            first.animation_time_ms,
+            3
+        )
+        val backward = hosted_browser_renderer_handle_request(
+            session,
+            BrowserRendererMessage(
+                kind: "advance",
+                generation: 7,
+                request_id: 4,
+                payload: "16"
+            ),
+            64,
+            48,
+            advanced.initialized,
+            advanced.animation_time_ms,
+            4
+        )
+
+        expect(skipped.ok).to_be(false)
+        expect(skipped.reason).to_equal("unexpected-request-id")
+        expect(advanced.ok).to_be(true)
+        expect(backward.ok).to_be(false)
+        expect(backward.reason).to_equal("invalid-animation-time")

@@ -1,6 +1,5 @@
 """Hidden, fail-closed browser renderer worker entry."""
 
-use std.common.base_encoding.utilities.{text_to_bytes}
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_WORKER_ARG,
     BrowserRendererEncodeResult, BrowserRendererMessage,
@@ -15,7 +14,7 @@ use std.gc_async_mut.web.browser_session_runtime.*
 use std.nogc_sync_mut.io.process_ops.{browser_renderer_sandbox_enter}
 
 extern fn rt_browser_renderer_read_stdin_some(max_bytes: i64) -> text
-extern fn rt_stdout_write(data: [u8]) -> i64
+extern fn rt_browser_renderer_write_stdout_some(data: text, data_len: i64, offset: i64, max_bytes: i64) -> i64
 extern fn rt_stdout_flush()
 
 val _WORKER_MAX_VIEWPORT: i64 = 4096
@@ -23,6 +22,89 @@ val _WORKER_READ_BYTES: i64 = 8192
 
 fn _worker_reject(reason: text) -> BrowserRendererEncodeResult:
     BrowserRendererEncodeResult(ok: false, reason: reason, wire: "")
+
+pub struct HostedBrowserRendererWorkerResult:
+    ok: bool
+    reason: text
+    initialized: bool
+    animation_time_ms: i64
+    wire: text
+
+fn _worker_result_reject(
+    reason: text,
+    initialized: bool,
+    animation_time_ms: i64
+) -> HostedBrowserRendererWorkerResult:
+    HostedBrowserRendererWorkerResult(
+        ok: false,
+        reason: reason,
+        initialized: initialized,
+        animation_time_ms: animation_time_ms,
+        wire: ""
+    )
+
+pub fn hosted_browser_renderer_handle_request(
+    session: BrowserSession,
+    message: BrowserRendererMessage,
+    width: i32,
+    height: i32,
+    initialized: bool,
+    animation_time_ms: i64,
+    expected_request_id: i64
+) -> HostedBrowserRendererWorkerResult:
+    if message.request_id != expected_request_id:
+        return _worker_result_reject(
+            "unexpected-request-id", initialized, animation_time_ms
+        )
+    var next_initialized = initialized
+    var next_time_ms = animation_time_ms
+    if not initialized:
+        if message.kind != "init":
+            return _worker_result_reject(
+                "expected-init", initialized, animation_time_ms
+            )
+        if val Err(reason) = session.open_html(
+            "simple-renderer://document", message.payload
+        ):
+            return _worker_result_reject(
+                reason, initialized, animation_time_ms
+            )
+        next_initialized = true
+        next_time_ms = 0
+    else:
+        if message.kind != "advance":
+            return _worker_result_reject(
+                "expected-advance", initialized, animation_time_ms
+            )
+        val requested_time_ms = message.payload.to_i64() ?? -1
+        if requested_time_ms < animation_time_ms or
+            str(requested_time_ms) != message.payload:
+            return _worker_result_reject(
+                "invalid-animation-time", initialized, animation_time_ms
+            )
+        val _ = session.advance_time(requested_time_ms)
+        next_time_ms = requested_time_ms
+
+    val layout = simple_web_layout_render_html_draw_ir_result_at_time(
+        session.current_style_html + session.current_body_html,
+        width,
+        height,
+        next_time_ms
+    )
+    val encoded = browser_renderer_frame_encode(
+        layout.composition, message.generation, message.request_id
+    )
+    if not encoded.ok:
+        return _worker_result_reject(
+            encoded.reason, next_initialized, next_time_ms
+        )
+    HostedBrowserRendererWorkerResult(
+        ok: true,
+        reason: "ok",
+        initialized: next_initialized,
+        animation_time_ms: next_time_ms,
+        wire: encoded.wire
+    )
 
 pub fn hosted_browser_renderer_handle_init(
     message: BrowserRendererMessage,
@@ -51,9 +133,14 @@ pub fn hosted_browser_renderer_handle_init(
     )
 
 fn _worker_write(wire: text) -> bool:
-    val bytes = text_to_bytes(wire)
-    if rt_stdout_write(bytes) != bytes.len():
-        return false
+    var offset: i64 = 0
+    while offset < wire.len():
+        val written = rt_browser_renderer_write_stdout_some(
+            wire, wire.len(), offset, 8192
+        )
+        if written <= 0:
+            return false
+        offset = offset + written
     rt_stdout_flush()
     true
 
@@ -66,17 +153,15 @@ pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
                 return 64
             marker_index = index
         index = index + 1
-    if marker_index < 0 or marker_index + 5 != args.len():
+    if marker_index < 0 or marker_index + 4 != args.len():
         return 64
 
     val generation = args[marker_index + 1].to_i64() ?? -1
     val width_i64 = args[marker_index + 2].to_i64() ?? -1
     val height_i64 = args[marker_index + 3].to_i64() ?? -1
-    val animation_time_ms = args[marker_index + 4].to_i64() ?? -1
     if generation <= 0 or width_i64 <= 0 or height_i64 <= 0 or
         width_i64 > _WORKER_MAX_VIEWPORT or
-        height_i64 > _WORKER_MAX_VIEWPORT or
-        animation_time_ms < 0:
+        height_i64 > _WORKER_MAX_VIEWPORT:
         return 64
     if not browser_renderer_sandbox_enter():
         return 70
@@ -86,22 +171,30 @@ pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
         return 71
 
     var decoder = browser_renderer_decoder_new(generation)
+    var session = BrowserSession.new()
+    var initialized = false
+    var animation_time_ms: i64 = 0
+    var expected_request_id: i64 = 2
     while true:
         val chunk = rt_browser_renderer_read_stdin_some(_WORKER_READ_BYTES)
         if chunk == "":
-            return 72
+            return if decoder.buffer == "": 0 else: 72
         val decoded = browser_renderer_decoder_feed(decoder, chunk)
         decoder = decoded.decoder
         if decoded.status == "violation":
             return 73
         if decoded.status == "message":
-            val frame = hosted_browser_renderer_handle_init(
+            val frame = hosted_browser_renderer_handle_request(
+                session,
                 decoded.message,
                 width_i64.to_i32(),
                 height_i64.to_i32(),
+                initialized,
                 animation_time_ms,
-                2
+                expected_request_id
             )
             if not frame.ok or not _worker_write(frame.wire):
                 return 74
-            return 0
+            initialized = frame.initialized
+            animation_time_ms = frame.animation_time_ms
+            expected_request_id = expected_request_id + 1

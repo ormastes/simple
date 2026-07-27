@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -104,7 +105,8 @@ static int sandbox_probe(int argc, char** argv) {
     const char* input = rt_browser_renderer_read_stdin_some(8192);
     if (!input || strcmp(input, "small") != 0) return 22;
     if (write(STDERR_FILENO, "stderr-leak", 11) < 0) return 23;
-    return write(STDOUT_FILENO, "sandbox-ok", 10) == 10 ? 0 : 24;
+    return rt_browser_renderer_write_stdout_some(
+        "sandbox-ok", 10, 0, 10) == 10 ? 0 : 24;
 }
 
 static int sandboxed_renderer_is_sanitized_and_contained(void) {
