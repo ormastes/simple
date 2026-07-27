@@ -1,0 +1,156 @@
+# @cover src/lib/common/web/browser_renderer_protocol.spl 80%
+
+use std.spec.*
+use std.common.web.browser_renderer_protocol.{
+    BROWSER_RENDERER_MAX_PAYLOAD_BYTES,
+    BrowserRendererMessage,
+    browser_renderer_decoder_feed, browser_renderer_decoder_new,
+    browser_renderer_frame_decode, browser_renderer_frame_encode,
+    browser_renderer_message_encode
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir
+}
+use std.common.ui.draw_ir.{
+    DRAW_IR_BACKEND_AUTO,
+    DrawIrComposition, DrawIrStyleProp,
+    draw_ir_style_prop
+}
+
+fn _renderer_protocol_fixture() -> DrawIrComposition:
+    simple_web_layout_render_html_draw_ir(
+        "<style>body{margin:0;background:#224466;color:white}button{width:32px;height:16px}</style><body><button>Go\u754c</button></body>",
+        64,
+        48
+    )
+
+describe "isolated browser renderer protocol":
+    it "round-trips canonical DrawIR and fails closed on malformed stale duplicate or oversized frames":
+        val encoded = browser_renderer_frame_encode(_renderer_protocol_fixture(), 7, 1)
+        expect(encoded.ok).to_be(true)
+
+        var decoded = browser_renderer_decoder_feed(browser_renderer_decoder_new(7), encoded.wire.slice(0, 11))
+        expect(decoded.status).to_equal("need_more")
+        decoded = browser_renderer_decoder_feed(decoded.decoder, encoded.wire.slice(11, encoded.wire.len()))
+        expect(decoded.status).to_equal("message")
+        expect(decoded.message.kind).to_equal("frame")
+        expect(decoded.message.generation).to_equal(7)
+        expect(decoded.message.request_id).to_equal(1)
+
+        val frame = browser_renderer_frame_decode(decoded.message, 64, 48)
+        expect(frame.ok).to_be(true)
+        expect(frame.composition.backend_target).to_equal(DRAW_IR_BACKEND_AUTO)
+        expect(frame.composition.batches[0].backend_target).to_equal(DRAW_IR_BACKEND_AUTO)
+
+        val unicode_first = browser_renderer_message_encode("state", 7, 1, "h\u00e9")
+        val unicode_second = browser_renderer_message_encode("state", 7, 2, "ok")
+        var unicode_decoded = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7),
+            unicode_first.wire + unicode_second.wire
+        )
+        expect(unicode_decoded.message.payload).to_equal("h\u00e9")
+        unicode_decoded = browser_renderer_decoder_feed(unicode_decoded.decoder, "")
+        expect(unicode_decoded.message.request_id).to_equal(2)
+        expect(unicode_decoded.message.payload).to_equal("ok")
+
+        val wrong_kind = browser_renderer_frame_decode(
+            BrowserRendererMessage(kind: "state", generation: 7, request_id: 1, payload: decoded.message.payload),
+            64,
+            48
+        )
+        expect(wrong_kind.ok).to_be(false)
+        expect(wrong_kind.reason).to_equal("wrong-kind")
+
+        var hostile_composition = _renderer_protocol_fixture()
+        var hostile_batches = hostile_composition.batches
+        var hostile_batch = hostile_batches[0]
+        var hostile_embedding = hostile_batch.embedding
+        hostile_embedding.x = 1
+        hostile_batch.embedding = hostile_embedding
+        hostile_batches[0] = hostile_batch
+        hostile_composition.batches = hostile_batches
+        val hostile_wire = browser_renderer_frame_encode(hostile_composition, 7, 2)
+        expect(hostile_wire.ok).to_be(true)
+        val hostile_message = browser_renderer_decoder_feed(browser_renderer_decoder_new(7), hostile_wire.wire)
+        expect(hostile_message.status).to_equal("message")
+        val hostile_frame = browser_renderer_frame_decode(hostile_message.message, 64, 48)
+        expect(hostile_frame.ok).to_be(false)
+        expect(hostile_frame.reason).to_equal("invalid-embedding")
+
+        var coordinate_composition = _renderer_protocol_fixture()
+        var coordinate_batches = coordinate_composition.batches
+        var coordinate_batch = coordinate_batches[0]
+        var coordinate_commands = coordinate_batch.commands
+        var coordinate_command = coordinate_commands[0]
+        coordinate_command.x = 2147483647
+        coordinate_commands[0] = coordinate_command
+        coordinate_batch.commands = coordinate_commands
+        coordinate_batches[0] = coordinate_batch
+        coordinate_composition.batches = coordinate_batches
+        val coordinate_wire = browser_renderer_frame_encode(coordinate_composition, 7, 2)
+        expect(coordinate_wire.ok).to_be(true)
+        val coordinate_message = browser_renderer_decoder_feed(browser_renderer_decoder_new(7), coordinate_wire.wire)
+        expect(coordinate_message.status).to_equal("message")
+        val coordinate_frame = browser_renderer_frame_decode(coordinate_message.message, 64, 48)
+        expect(coordinate_frame.ok).to_be(false)
+        expect(coordinate_frame.reason).to_equal("invalid-command-bounds")
+
+        var metadata_composition = _renderer_protocol_fixture()
+        var metadata_batches = metadata_composition.batches
+        var metadata_batch = metadata_batches[0]
+        var metadata_commands = metadata_batch.commands
+        var metadata_command = metadata_commands[0]
+        metadata_command.computed_style = [
+            draw_ir_style_prop("font-size", "999999999999999999999999")
+        ]
+        metadata_commands[0] = metadata_command
+        metadata_batch.commands = metadata_commands
+        metadata_batches[0] = metadata_batch
+        metadata_composition.batches = metadata_batches
+        val metadata_wire = browser_renderer_frame_encode(metadata_composition, 7, 2)
+        expect(metadata_wire.ok).to_be(true)
+        val metadata_message = browser_renderer_decoder_feed(browser_renderer_decoder_new(7), metadata_wire.wire)
+        val metadata_frame = browser_renderer_frame_decode(metadata_message.message, 64, 48)
+        expect(metadata_frame.ok).to_be(false)
+        expect(metadata_frame.reason).to_equal("invalid-command-metadata")
+
+        var style_count_composition = _renderer_protocol_fixture()
+        var style_count_batches = style_count_composition.batches
+        var style_count_batch = style_count_batches[0]
+        var style_count_commands = style_count_batch.commands
+        var style_count_command = style_count_commands[0]
+        var hostile_styles: [DrawIrStyleProp] = []
+        var style_index = 0
+        while style_index < 161:
+            hostile_styles.push(draw_ir_style_prop("x{style_index}", "v"))
+            style_index = style_index + 1
+        style_count_command.computed_style = hostile_styles
+        style_count_commands[0] = style_count_command
+        style_count_batch.commands = style_count_commands
+        style_count_batches[0] = style_count_batch
+        style_count_composition.batches = style_count_batches
+        val style_count_wire = browser_renderer_frame_encode(style_count_composition, 7, 2)
+        val style_count_message = browser_renderer_decoder_feed(browser_renderer_decoder_new(7), style_count_wire.wire)
+        val style_count_frame = browser_renderer_frame_decode(style_count_message.message, 64, 48)
+        expect(style_count_frame.ok).to_be(false)
+        expect(style_count_frame.reason).to_equal("invalid-command-metadata")
+
+        val duplicate = browser_renderer_decoder_feed(decoded.decoder, encoded.wire)
+        expect(duplicate.status).to_equal("violation")
+        expect(duplicate.decoder.error).to_equal("duplicate-request")
+
+        val stale_wire = browser_renderer_message_encode("state", 6, 2, "").wire
+        val stale = browser_renderer_decoder_feed(browser_renderer_decoder_new(7), stale_wire)
+        expect(stale.status).to_equal("violation")
+        expect(stale.decoder.error).to_equal("stale-generation")
+
+        val malformed = browser_renderer_decoder_feed(browser_renderer_decoder_new(7), "SBR1\tframe\t07\t2\t0\n")
+        expect(malformed.status).to_equal("violation")
+        expect(malformed.decoder.error).to_equal("malformed-header")
+
+        val oversized = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7),
+            "SBR1\tframe\t7\t2\t{BROWSER_RENDERER_MAX_PAYLOAD_BYTES + 1}\n"
+        )
+        expect(oversized.status).to_equal("violation")
+        expect(oversized.decoder.error).to_equal("payload-too-large")

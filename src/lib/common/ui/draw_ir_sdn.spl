@@ -27,6 +27,9 @@ use common.ui.draw_ir.{
     draw_ir_source_info,
     draw_ir_style_prop
 }
+use std.common.base_encoding.utilities.{bytes_to_text}
+
+val _DRAW_IR_SDN_MAX_GLYPHS: i32 = 4096
 
 fn _draw_ir_sdn_escape(value: text) -> text:
     var escaped = value.replace("%", "%25")
@@ -42,12 +45,36 @@ fn _draw_ir_sdn_unescape(value: text) -> text:
     unescaped = unescaped.replace("%09", "\t")
     unescaped.replace("%25", "%")
 
+fn _draw_ir_sdn_token_starts_with(line: text, start: i64, end: i64, prefix: text) -> bool:
+    if end - start < prefix.len():
+        return false
+    var index: i64 = 0
+    while index < prefix.len():
+        if line.byte_at(start + index) != prefix.byte_at(index):
+            return false
+        index = index + 1
+    true
+
+fn _draw_ir_sdn_byte_slice(value: text, start: i64, end: i64) -> text:
+    var bytes: [u8] = []
+    var index = start
+    while index < end:
+        bytes.push(value.byte_at(index).to_u8())
+        index = index + 1
+    bytes_to_text(bytes)
+
 fn _draw_ir_sdn_field(line: text, key: text) -> text:
     val prefix = "{key}="
-    val parts = line.split(" ")
-    for part in parts:
-        if part.starts_with(prefix):
-            return _draw_ir_sdn_unescape(part.substring(prefix.len(), part.len()))
+    var start: i64 = 0
+    while start < line.len():
+        while start < line.len() and line.byte_at(start) == 32:
+            start = start + 1
+        var end = start
+        while end < line.len() and line.byte_at(end) != 32:
+            end = end + 1
+        if _draw_ir_sdn_token_starts_with(line, start, end, prefix):
+            return _draw_ir_sdn_unescape(_draw_ir_sdn_byte_slice(line, start + prefix.len(), end))
+        start = end + 1
     ""
 
 fn _draw_ir_sdn_i32(line: text, key: text) -> i32:
@@ -88,27 +115,32 @@ fn _draw_ir_sdn_parse_i32(value: text) -> i32:
     if value[0] == "-":
         sign = -1
         i = 1
-    var parsed = 0
+    var parsed: i64 = 0
+    val limit: i64 = if sign < 0: 2147483648 else: 2147483647
     val value_len = value.len()
     while i < value_len:
         val digit = _draw_ir_sdn_digit(value[i])
         if digit < 0:
-            return parsed * sign
-        parsed = parsed * 10 + digit
+            return 0
+        if parsed > (limit - digit.to_i64()) / 10:
+            return 0
+        parsed = parsed * 10 + digit.to_i64()
         i = i + 1
-    parsed * sign
+    (parsed * sign.to_i64()) as i32
 
 fn _draw_ir_sdn_parse_u32(value: text) -> u32:
     var i = 0
-    var parsed = 0u32
+    var parsed: i64 = 0
     val value_len = value.len()
     while i < value_len:
         val digit = _draw_ir_sdn_digit(value[i])
         if digit < 0:
-            return parsed
-        parsed = parsed * 10u32 + digit.to_u32()
+            return 0u32
+        if parsed > (4294967295 - digit.to_i64()) / 10:
+            return 0u32
+        parsed = parsed * 10 + digit.to_i64()
         i = i + 1
-    parsed
+    parsed as u32
 
 fn _draw_ir_sdn_u32(line: text, key: text) -> u32:
     val value = _draw_ir_sdn_field(line, key)
@@ -248,25 +280,37 @@ fn _draw_ir_sdn_parse_glyph_run(line: text) -> DrawIrGlyphRunPayload:
     if not _draw_ir_sdn_bool(line, "glyph_valid"):
         return draw_ir_empty_glyph_run_payload()
     val count = _draw_ir_sdn_i32(line, "glyph_count")
-    if count <= 0:
+    if count <= 0 or count > _DRAW_IR_SDN_MAX_GLYPHS:
         return draw_ir_empty_glyph_run_payload()
     var glyph_ids: [u32] = []
     var xs: [i32] = []
     var ys: [i32] = []
     var clusters: [i64] = []
     var index = 0
-    while index < count:
-        val id = _draw_ir_sdn_field(line, "glyph_{index}_id")
-        val x = _draw_ir_sdn_field(line, "glyph_{index}_x")
-        val y = _draw_ir_sdn_field(line, "glyph_{index}_y")
-        val cluster = _draw_ir_sdn_field(line, "glyph_{index}_cluster")
-        if id == "" or x == "" or y == "" or cluster == "":
-            return draw_ir_empty_glyph_run_payload()
-        glyph_ids.push(_draw_ir_sdn_parse_u32(id))
-        xs.push(_draw_ir_sdn_parse_i32(x))
-        ys.push(_draw_ir_sdn_parse_i32(y))
-        clusters.push(_draw_ir_sdn_parse_i32(cluster).to_i64())
-        index = index + 1
+    var field = 0
+    for part in line.split(" "):
+        if index >= count:
+            break
+        val separator = part.find("=")
+        if separator <= 0:
+            continue
+        val key = part.substring(0, separator)
+        val value = part.substring(separator + 1, part.len())
+        if field == 0 and key == "glyph_{index}_id":
+            glyph_ids.push(_draw_ir_sdn_parse_u32(value))
+            field = 1
+        elif field == 1 and key == "glyph_{index}_x":
+            xs.push(_draw_ir_sdn_parse_i32(value))
+            field = 2
+        elif field == 2 and key == "glyph_{index}_y":
+            ys.push(_draw_ir_sdn_parse_i32(value))
+            field = 3
+        elif field == 3 and key == "glyph_{index}_cluster":
+            clusters.push(_draw_ir_sdn_parse_i32(value).to_i64())
+            field = 0
+            index = index + 1
+    if index != count or field != 0:
+        return draw_ir_empty_glyph_run_payload()
     draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, true)
 
 fn _draw_ir_sdn_parse_command(line: text) -> DrawIrCommand:

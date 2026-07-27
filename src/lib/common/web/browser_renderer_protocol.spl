@@ -1,0 +1,295 @@
+"""Bounded text framing for the isolated browser renderer process."""
+
+use std.common.base_encoding.utilities.{bytes_to_text, text_to_bytes}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    simpleos_host_gpu_draw_ir_decode, simpleos_host_gpu_draw_ir_encode
+}
+use std.common.ui.draw_ir.{
+    DRAW_IR_BACKEND_AUTO,
+    DrawIrBatch, DrawIrComposition,
+    draw_ir_batch_with_source, draw_ir_composition
+}
+
+pub val BROWSER_RENDERER_MAX_HEADER_BYTES: i64 = 256
+pub val BROWSER_RENDERER_MAX_PAYLOAD_BYTES: i64 = 1048576
+pub val BROWSER_RENDERER_MAX_COMMANDS: i64 = 1024
+val BROWSER_RENDERER_MAX_READ_CHUNK_BYTES: i64 = 8192
+val BROWSER_RENDERER_MAX_COORDINATE: i64 = 1048576
+val BROWSER_RENDERER_MAX_TEXT_BYTES: i64 = 4096
+val BROWSER_RENDERER_MAX_STYLE_PROPS: i64 = 160
+val BROWSER_RENDERER_MAX_STYLE_KEY_BYTES: i64 = 128
+val BROWSER_RENDERER_MAX_STYLE_VALUE_BYTES: i64 = 65536
+val BROWSER_RENDERER_MAX_GLYPHS: i64 = 4096
+val BROWSER_RENDERER_MAX_FONT_SIZE: i64 = 512
+
+pub struct BrowserRendererMessage:
+    kind: text
+    generation: i64
+    request_id: i64
+    payload: text
+
+pub struct BrowserRendererEncodeResult:
+    ok: bool
+    reason: text
+    wire: text
+
+pub struct BrowserRendererDecoder:
+    buffer: text
+    expected_generation: i64
+    last_request_id: i64
+    error: text
+
+pub struct BrowserRendererDecodeResult:
+    decoder: BrowserRendererDecoder
+    status: text
+    message: BrowserRendererMessage
+
+pub struct BrowserRendererFrameDecodeResult:
+    ok: bool
+    reason: text
+    composition: DrawIrComposition
+
+fn _browser_renderer_empty_message() -> BrowserRendererMessage:
+    BrowserRendererMessage(kind: "", generation: 0, request_id: 0, payload: "")
+
+fn _browser_renderer_reject_encode(reason: text) -> BrowserRendererEncodeResult:
+    BrowserRendererEncodeResult(ok: false, reason: reason, wire: "")
+
+fn _browser_renderer_kind_valid(kind: text) -> bool:
+    (kind == "init" or kind == "advance" or kind == "pointer" or kind == "text" or
+        kind == "key" or kind == "chrome" or kind == "network_response" or
+        kind == "shutdown" or kind == "ready" or kind == "fetch_request" or
+        kind == "frame" or kind == "dispatch_result" or kind == "state" or kind == "error")
+
+fn _browser_renderer_positive_i64(raw: text) -> i64:
+    val parsed = raw.to_i64() ?? -1
+    if parsed <= 0 or str(parsed) != raw:
+        return -1
+    parsed
+
+fn _browser_renderer_header_end(buffer: text) -> i64:
+    var index: i64 = 0
+    while index < buffer.len():
+        if buffer.byte_at(index) == 10:
+            return index
+        index = index + 1
+    -1
+
+fn _browser_renderer_byte_slice(value: text, start: i64, end: i64) -> text:
+    var bytes: [u8] = []
+    var index = start
+    while index < end:
+        bytes.push(value.byte_at(index).to_u8())
+        index = index + 1
+    bytes_to_text(bytes)
+
+fn _browser_renderer_violation(decoder: BrowserRendererDecoder, reason: text) -> BrowserRendererDecodeResult:
+    BrowserRendererDecodeResult(
+        decoder: BrowserRendererDecoder(
+            buffer: "",
+            expected_generation: decoder.expected_generation,
+            last_request_id: decoder.last_request_id,
+            error: reason
+        ),
+        status: "violation",
+        message: _browser_renderer_empty_message()
+    )
+
+pub fn browser_renderer_decoder_new(expected_generation: i64) -> BrowserRendererDecoder:
+    BrowserRendererDecoder(
+        buffer: "",
+        expected_generation: expected_generation,
+        last_request_id: 0,
+        error: if expected_generation > 0: "" else: "invalid-generation"
+    )
+
+pub fn browser_renderer_message_encode(kind: text, generation: i64, request_id: i64, payload: text) -> BrowserRendererEncodeResult:
+    if not _browser_renderer_kind_valid(kind):
+        return _browser_renderer_reject_encode("invalid-kind")
+    if generation <= 0:
+        return _browser_renderer_reject_encode("invalid-generation")
+    if request_id <= 0:
+        return _browser_renderer_reject_encode("invalid-request-id")
+    if payload.contains("\0"):
+        return _browser_renderer_reject_encode("nul-payload")
+    val payload_bytes = text_to_bytes(payload)
+    if payload_bytes.len().to_i64() > BROWSER_RENDERER_MAX_PAYLOAD_BYTES:
+        return _browser_renderer_reject_encode("payload-too-large")
+    val header = "SBR1\t{kind}\t{generation}\t{request_id}\t{payload_bytes.len()}\n"
+    if text_to_bytes(header).len().to_i64() > BROWSER_RENDERER_MAX_HEADER_BYTES:
+        return _browser_renderer_reject_encode("header-too-large")
+    BrowserRendererEncodeResult(ok: true, reason: "ok", wire: header + payload)
+
+pub fn browser_renderer_decoder_feed(decoder: BrowserRendererDecoder, chunk: text) -> BrowserRendererDecodeResult:
+    if decoder.error != "":
+        return _browser_renderer_violation(decoder, decoder.error)
+    val max_buffer = BROWSER_RENDERER_MAX_HEADER_BYTES + BROWSER_RENDERER_MAX_PAYLOAD_BYTES + BROWSER_RENDERER_MAX_READ_CHUNK_BYTES
+    if chunk.len() > max_buffer - decoder.buffer.len():
+        return _browser_renderer_violation(decoder, "stream-too-large")
+    val buffer = decoder.buffer + chunk
+    val header_end = _browser_renderer_header_end(buffer)
+    if header_end < 0:
+        if buffer.len() >= BROWSER_RENDERER_MAX_HEADER_BYTES:
+            return _browser_renderer_violation(decoder, "header-too-large")
+        return BrowserRendererDecodeResult(
+            decoder: BrowserRendererDecoder(
+                buffer: buffer,
+                expected_generation: decoder.expected_generation,
+                last_request_id: decoder.last_request_id,
+                error: ""
+            ),
+            status: "need_more",
+            message: _browser_renderer_empty_message()
+        )
+    if header_end >= BROWSER_RENDERER_MAX_HEADER_BYTES:
+        return _browser_renderer_violation(decoder, "header-too-large")
+    val fields = _browser_renderer_byte_slice(buffer, 0, header_end).split("\t")
+    if fields.len() != 5 or fields[0] != "SBR1" or not _browser_renderer_kind_valid(fields[1]):
+        return _browser_renderer_violation(decoder, "malformed-header")
+    val generation = _browser_renderer_positive_i64(fields[2])
+    val request_id = _browser_renderer_positive_i64(fields[3])
+    val payload_length = fields[4].to_i64() ?? -1
+    if generation < 0 or request_id < 0 or payload_length < 0 or str(payload_length) != fields[4]:
+        return _browser_renderer_violation(decoder, "malformed-header")
+    if payload_length > BROWSER_RENDERER_MAX_PAYLOAD_BYTES:
+        return _browser_renderer_violation(decoder, "payload-too-large")
+    if generation != decoder.expected_generation:
+        return _browser_renderer_violation(decoder, "stale-generation")
+    if request_id <= decoder.last_request_id:
+        return _browser_renderer_violation(decoder, "duplicate-request")
+    val payload_start = header_end + 1
+    val total = payload_start + payload_length
+    if buffer.len() < total:
+        return BrowserRendererDecodeResult(
+            decoder: BrowserRendererDecoder(
+                buffer: buffer,
+                expected_generation: decoder.expected_generation,
+                last_request_id: decoder.last_request_id,
+                error: ""
+            ),
+            status: "need_more",
+            message: _browser_renderer_empty_message()
+        )
+    val next_buffer = _browser_renderer_byte_slice(buffer, total, buffer.len())
+    BrowserRendererDecodeResult(
+        decoder: BrowserRendererDecoder(
+            buffer: next_buffer,
+            expected_generation: decoder.expected_generation,
+            last_request_id: request_id,
+            error: ""
+        ),
+        status: "message",
+        message: BrowserRendererMessage(
+            kind: fields[1],
+            generation: generation,
+            request_id: request_id,
+            payload: _browser_renderer_byte_slice(buffer, payload_start, total)
+        )
+    )
+
+fn _browser_renderer_normalize_draw_ir(composition: DrawIrComposition) -> DrawIrComposition:
+    var batches: [DrawIrBatch] = []
+    for batch in composition.batches:
+        batches.push(draw_ir_batch_with_source(
+            batch.batch_id,
+            DRAW_IR_BACKEND_AUTO,
+            batch.embedding,
+            batch.commands,
+            batch.source
+        ))
+    draw_ir_composition(
+        composition.composition_id,
+        composition.scene_key,
+        DRAW_IR_BACKEND_AUTO,
+        batches
+    )
+
+fn _browser_renderer_frame_reject(reason: text) -> BrowserRendererFrameDecodeResult:
+    BrowserRendererFrameDecodeResult(
+        ok: false,
+        reason: reason,
+        composition: draw_ir_composition("", "", "", [])
+    )
+
+fn _browser_renderer_advance_list_valid(value: text) -> bool:
+    var items: i64 = 1
+    var index: i64 = 0
+    while index < value.len():
+        if value.byte_at(index) == 44:
+            items = items + 1
+            if items > BROWSER_RENDERER_MAX_GLYPHS:
+                return false
+        index = index + 1
+    true
+
+fn _browser_renderer_frame_validation_reason(composition: DrawIrComposition, width: i32, height: i32) -> text:
+    if width <= 0 or height <= 0:
+        return "invalid-viewport"
+    if (composition.composition_id != "html-layout" or
+        composition.scene_key != "simple-web-html-layout" or
+        composition.backend_target != DRAW_IR_BACKEND_AUTO or
+        composition.batches.len() != 1):
+        return "invalid-composition"
+    val batch = composition.batches[0]
+    val embedding = batch.embedding
+    if (batch.batch_id != "html-layout" or batch.backend_target != DRAW_IR_BACKEND_AUTO or
+        embedding.surface_id != "html" or embedding.component_id != "document" or
+        embedding.x != 0 or embedding.y != 0 or
+        embedding.width != width or embedding.height != height or
+        embedding.layer != 0 or embedding.opacity_milli != 1000 or not embedding.clip):
+        return "invalid-embedding"
+    for command in batch.commands:
+        val x = command.x.to_i64()
+        val y = command.y.to_i64()
+        val right = x + command.width.to_i64()
+        val bottom = y + command.height.to_i64()
+        if (command.width < 0 or command.height < 0 or
+            x < -BROWSER_RENDERER_MAX_COORDINATE or x > BROWSER_RENDERER_MAX_COORDINATE or
+            y < -BROWSER_RENDERER_MAX_COORDINATE or y > BROWSER_RENDERER_MAX_COORDINATE or
+            right < -BROWSER_RENDERER_MAX_COORDINATE or right > BROWSER_RENDERER_MAX_COORDINATE or
+            bottom < -BROWSER_RENDERER_MAX_COORDINATE or bottom > BROWSER_RENDERER_MAX_COORDINATE):
+            return "invalid-command-bounds"
+        if (command.text_value.len() > BROWSER_RENDERER_MAX_TEXT_BYTES or
+            command.computed_style.len() > BROWSER_RENDERER_MAX_STYLE_PROPS or
+            command.glyph_run.glyph_ids.len() > BROWSER_RENDERER_MAX_GLYPHS or
+            command.glyph_run.xs.len() > BROWSER_RENDERER_MAX_GLYPHS or
+            command.glyph_run.ys.len() > BROWSER_RENDERER_MAX_GLYPHS or
+            command.glyph_run.clusters.len() > BROWSER_RENDERER_MAX_GLYPHS):
+            return "invalid-command-metadata"
+        for prop in command.computed_style:
+            if (prop.key == "" or
+                prop.key.len() > BROWSER_RENDERER_MAX_STYLE_KEY_BYTES or
+                prop.value.len() > BROWSER_RENDERER_MAX_STYLE_VALUE_BYTES):
+                return "invalid-command-metadata"
+            if prop.key == "font-size":
+                val font_size = _browser_renderer_positive_i64(prop.value)
+                if font_size < 1 or font_size > BROWSER_RENDERER_MAX_FONT_SIZE:
+                    return "invalid-command-metadata"
+            if prop.key == "font-advance-widths" and not _browser_renderer_advance_list_valid(prop.value):
+                return "invalid-command-metadata"
+    ""
+
+pub fn browser_renderer_frame_encode(composition: DrawIrComposition, generation: i64, request_id: i64) -> BrowserRendererEncodeResult:
+    val encoded = simpleos_host_gpu_draw_ir_encode(
+        _browser_renderer_normalize_draw_ir(composition),
+        BROWSER_RENDERER_MAX_PAYLOAD_BYTES,
+        BROWSER_RENDERER_MAX_COMMANDS
+    )
+    if not encoded.ok:
+        return _browser_renderer_reject_encode("draw-ir-" + encoded.reason)
+    browser_renderer_message_encode("frame", generation, request_id, bytes_to_text(encoded.bytes))
+
+pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32, height: i32) -> BrowserRendererFrameDecodeResult:
+    if message.kind != "frame":
+        return _browser_renderer_frame_reject("wrong-kind")
+    val decoded = simpleos_host_gpu_draw_ir_decode(
+        text_to_bytes(message.payload),
+        BROWSER_RENDERER_MAX_PAYLOAD_BYTES,
+        BROWSER_RENDERER_MAX_COMMANDS
+    )
+    if not decoded.ok:
+        return _browser_renderer_frame_reject(decoded.reason)
+    val reason = _browser_renderer_frame_validation_reason(decoded.composition, width, height)
+    if reason != "":
+        return _browser_renderer_frame_reject(reason)
+    BrowserRendererFrameDecodeResult(ok: true, reason: "ok", composition: decoded.composition)

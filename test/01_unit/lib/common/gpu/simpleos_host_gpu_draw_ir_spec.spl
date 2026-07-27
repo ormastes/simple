@@ -164,6 +164,38 @@ describe "SimpleOS host-GPU bounded Draw IR codec":
         expect(decoded.ok).to_be(false)
         expect(decoded.reason).to_equal("noncanonical-payload")
 
+    it "rejects an over-cap glyph count before expanding glyph fields":
+        val encoded = simpleos_host_gpu_draw_ir_encode(_host_gpu_draw_ir_fixture(), DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        val hostile = bytes_to_text(encoded.bytes)
+            .replace("glyph_valid=false", "glyph_valid=true")
+            .replace("glyph_count=0", "glyph_count=4097")
+        val decoded = simpleos_host_gpu_draw_ir_decode(text_to_bytes(hostile), DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        expect(decoded.ok).to_be(false)
+        expect(decoded.reason).to_equal("noncanonical-payload")
+
+    it "rejects excess SDN records before splitting or allocating batches":
+        val encoded = simpleos_host_gpu_draw_ir_encode(_host_gpu_draw_ir_fixture(), DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        var hostile = bytes_to_text(encoded.bytes)
+        var index = 0
+        while index < 20:
+            hostile = hostile + "\n\tbatch id=x backend=gpu"
+            index = index + 1
+        val decoded = simpleos_host_gpu_draw_ir_decode(text_to_bytes(hostile), DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        expect(decoded.ok).to_be(false)
+        expect(decoded.reason).to_equal("too-many-records")
+
+    it "rejects a junk-heavy command record without token-array amplification":
+        val encoded = simpleos_host_gpu_draw_ir_encode(_host_gpu_draw_ir_fixture(), DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        var junk = ""
+        var index = 0
+        while index < 1000:
+            junk = junk + " junk{index}=x"
+            index = index + 1
+        val hostile = bytes_to_text(encoded.bytes).replace("command kind=", "command{junk} kind=")
+        val decoded = simpleos_host_gpu_draw_ir_decode(text_to_bytes(hostile), DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        expect(decoded.ok).to_be(false)
+        expect(decoded.reason).to_equal("noncanonical-payload")
+
     it "round-trips zero and one canonical image resource":
         val empty = simpleos_host_gpu_image_resources_encode([], DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
         expect(empty.ok).to_be(true)

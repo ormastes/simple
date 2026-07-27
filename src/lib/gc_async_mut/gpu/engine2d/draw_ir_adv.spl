@@ -35,6 +35,9 @@ use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_destina
 # TEXT commands so a busy desktop frame can't flood serial.
 val _E2D_TEXT_PROBE: bool = false
 var _e2d_text_probe_count: i32 = 0
+val _E2D_DRAW_IR_MAX_TEXT_ITEMS: i64 = 4096
+val _E2D_DRAW_IR_MAX_STYLE_VALUE_BYTES: i64 = 65536
+val _E2D_DRAW_IR_MAX_FONT_SIZE: i32 = 512
 
 struct Engine2dDrawIrAdvResult:
     schema: text
@@ -182,6 +185,8 @@ fn _engine2d_draw_ir_text_font_size(style: [DrawIrStyleProp]) -> i32:
         val prop_key: text = prop.key
         if prop_key == "font-size":
             val prop_value: text = prop.value
+            if prop_value.len() == 0 or prop_value.len() > 9:
+                return 12
             var value = 0
             var idx: i64 = 0
             while idx < prop_value.len():
@@ -189,8 +194,12 @@ fn _engine2d_draw_ir_text_font_size(style: [DrawIrStyleProp]) -> i32:
                 # the erased char_code_at result misroutes into Px.to_i32
                 # (see _engine2d_draw_ir_nth_int above).
                 val ch: i64 = prop_value.char_code_at(idx)
-                if ch >= 48 and ch <= 57:
-                    value = value * 10 + ((ch - 48) as i32)
+                if ch < 48 or ch > 57:
+                    return 12
+                val digit = (ch - 48) as i32
+                if value > (_E2D_DRAW_IR_MAX_FONT_SIZE - digit) / 10:
+                    return 12
+                value = value * 10 + digit
                 idx = idx + 1
             if value > 0:
                 return value
@@ -212,7 +221,12 @@ fn _engine2d_draw_ir_text_advances(command: DrawIrCommand) -> [i32]:
     val encoded = _engine2d_draw_ir_style_value(command.computed_style, "font-advance-widths")
     if encoded == "":
         return []
+    if (encoded.len() > _E2D_DRAW_IR_MAX_STYLE_VALUE_BYTES or
+        command.text_value.len() > _E2D_DRAW_IR_MAX_TEXT_ITEMS):
+        return []
     val parts = encoded.split(",")
+    if parts.len() > _E2D_DRAW_IR_MAX_TEXT_ITEMS:
+        return []
     var advances: [i32] = []
     var width: i64 = 0
     for raw in parts:
@@ -242,6 +256,7 @@ fn _engine2d_draw_ir_shaping_requested(command: DrawIrCommand) -> bool:
 fn _engine2d_draw_ir_shaped_payload_valid(command: DrawIrCommand, advances: [i32]) -> bool:
     val payload = command.glyph_run
     if (not payload.valid or payload.glyph_ids.len() == 0 or
+        payload.glyph_ids.len() > _E2D_DRAW_IR_MAX_TEXT_ITEMS or
         payload.glyph_ids.len() != payload.xs.len() or
         payload.glyph_ids.len() != payload.ys.len() or
         payload.glyph_ids.len() != payload.clusters.len()):
@@ -258,6 +273,8 @@ fn _engine2d_draw_ir_shaped_payload_valid(command: DrawIrCommand, advances: [i32
 # Accumulate in i64 so packed u32 color words (up to 4294967295) do not overflow
 # an i32 mid-scan. Returns `fallback` when the nth token is absent.
 fn _engine2d_draw_ir_nth_int(value: text, n: i32, fallback: i64) -> i64:
+    if value.len() > _E2D_DRAW_IR_MAX_STYLE_VALUE_BYTES:
+        return fallback
     var count = 0
     var idx: i64 = 0
     val length = value.len()
@@ -281,7 +298,10 @@ fn _engine2d_draw_ir_nth_int(value: text, n: i32, fallback: i64) -> i64:
             while idx < length:
                 val ch: i64 = value.char_code_at(idx)
                 if ch >= 48 and ch <= 57:
-                    acc = acc * 10 + (ch - 48)
+                    val digit = ch - 48
+                    if acc > (9223372036854775807 - digit) / 10:
+                        return fallback
+                    acc = acc * 10 + digit
                     idx = idx + 1
                 else:
                     break
@@ -356,10 +376,13 @@ fn _engine2d_draw_ir_render_glass_material(engine: DrawIrRenderTarget, command: 
     ) as i32
     val requested_saturation_percent = _engine2d_draw_ir_nth_int(
         backdrop, 1, 100)
+    var requested_saturation_milli: i64 = 1000
+    if requested_saturation_percent >= 0 and requested_saturation_percent <= 300:
+        requested_saturation_milli = requested_saturation_percent * 10
     val realized_saturation_milli = _engine2d_draw_ir_nth_int(
         realized_saturation_text,
         0,
-        requested_saturation_percent * 10
+        requested_saturation_milli
     ) as i32
     val command_alpha: u32 = (command.color >> 24) & 0xFFu32
     val command_color_i64: i64 = command.color as i64
