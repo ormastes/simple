@@ -60,8 +60,9 @@ The compatibility batch still exposes codepoint, byte offset, rectangles,
 color, atlas generation/pixels, and dirty rectangles. The opt-in neutral
 `FontGlyphRun` carries validated glyph positions, logical codepoint clusters,
 and the exact revocable face handle/generation pair into the same renderer.
-It does not claim UTF-8 byte clusters, language, full GSUB/GPOS, or complete
-BiDi.
+It does not claim UTF-8 byte clusters, language, or complete BiDi. Full
+GSUB/GPOS is resolved before this material boundary and remains represented by
+the same glyph/position/cluster values.
 
 `DrawIrGlyphRunPayload` is the handle-free producer form: glyph IDs, x/y
 positions, logical clusters, and validity only. It round-trips through Draw IR
@@ -121,23 +122,25 @@ handle/generation. Fallback resolves the snapshot after choosing its run font;
 an attached face without an exact live binding never reuses the legacy unbound
 parser blob.
 
-GSUB decoding is staged: the parser owns table-bounded Coverage 1/2 and
-SingleSubst 1/2 primitives, while the shaper stays identity until active
-Script/LangSys/Feature lookup selection is available. Unsupported or malformed
-data returns unchanged material and cannot set completion.
+The generic layout transaction parses bounded tables once, selects the
+requested Script/LangSys (including required/default features), evaluates the
+first matching FeatureVariations record for supplied normalized coordinates,
+then applies GSUB 1–8 and GPOS 1–9 to scratch records. Extension and contextual
+records share the same depth/work budget. Any malformed offset, unsupported
+variation context, recursion exhaustion, or later lookup failure discards the
+scratch records and returns the original run.
 
-The selector and application land together. Accepted scope covers direct Latin,
-Cyrillic, Han, and the exact Hindi `हिन्दी` witness. The Hindi path selects
-`dev2` Script/LangSys records and only ordered
-default feature tags; discretionary and inactive lookups cannot set completion.
-Arabic/Urdu outside the two exact selected witnesses and other Indic sequences
-remain fail-closed.
+`ot_layout_context` owns Coverage/ClassDef matching and complete LookupFlag/GDEF
+eligibility. `ot_layout_apply` owns substitution and reverse traversal.
+`ot_layout_gpos_data` owns ValueRecord, Device/VariationIndex, anchor, GDEF, and
+ItemVariationStore decoding; `ot_layout_gpos` owns positioning and attachment.
+Only the named context/data facades cross those sibling boundaries.
 
-The bounded Arabic/Urdu path validates the selected Script/LangSys metadata,
-then executes witness-specific pinned lookup indices/forms for exactly two
-literals. The two passing HarfBuzz oracles promote only those exact tuples.
-General feature selection, joining, mark attachment, contextual substitution,
-positioning, and BiDi remain fail-closed.
+Pinned Hindi, Arabic, and Urdu HarfBuzz vectors exercise exact
+glyph/cluster/advance/offset results but never authorize input. The generic
+path accepts any bounded cmap-backed run whose selected lookup plan is valid;
+script-specific preprocessing and full Unicode BiDi remain independently
+scoped and may still fail closed.
 
 The Metal source and 20-byte vertex contract remain emission-only. The optional
 Vulkan Engine3D adapter owns dedicated HUD/world pipelines, R8 atlas upload,

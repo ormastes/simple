@@ -91,7 +91,7 @@ checking source and executable evidence.
   DrawIR and the canonical Engine2D font path.
 - G: SimpleOS guest evidence proves the pinned font bytes, glyph identity, and
   framebuffer pixels.
-- H: all REQ-001–015 and NFR-001–008 trace to authoritative current evidence;
+- H: all REQ-001–016 and NFR-001–008 trace to authoritative current evidence;
   direct-env runtime guards pass and verification reports `STATUS: PASS`.
 
 ## Serif probe sidecar record — 2026-07-14
@@ -151,3 +151,31 @@ Each handoff names exact producer/consumer symbols, existing scenarios, the
 smallest uncovered branch, its modern SSpec/manual change (or why none is
 needed), honest runtime status, and any concrete reproduction-backed defect.
 No agent may invent a numeric coverage percentage without tool evidence.
+
+## Full OpenType layout campaign — 2026-07-27
+
+The user's explicit full-GSUB/GPOS selection adds REQ-016. These names are
+frozen before parallel edits:
+
+- GSUB context facade: `LayoutContextCoverage`, `LayoutContextMatch`, and
+  `layout_context_*`.
+- GPOS data facade: `GposData*` and `gpos_data_*`.
+- Unit setup helpers retain `_font`, `_record`, `_gsub`, `_lookup`, and
+  `_active`; new focused files use the same names locally.
+- Every scenario uses exact assertions. Temporary paths fail with
+  `assert(false)` or `fail(...)`; `pass_todo` and identity assertions are
+  forbidden.
+
+| Lane | Agent | Writable implementation/test scope | Required result |
+|---|---|---|---|
+| I — GSUB | `gsub_full_impl` | `ot_layout_apply`, `ot_layout_context`, focused GSUB-full unit spec | Context format-3 repair; lookup types 3/7/8; all bounded nested dispatch |
+| J — GPOS | `gpos_full_impl` | `ot_layout_gpos`, focused GPOS-full unit spec | types 1/3; context formats 2/3; chain formats 1/2; extension to 1–8 |
+| K — flags/GDEF | `lookup_flags_gdef` | context/data owners, focused lookup-flag unit spec | all defined flag bits, MarkAttachClassDef, combinations, malformed rejection |
+| L — GPOS variation data | `gpos_variation_data` | data/variation owner, focused variation unit spec | Device, VariationIndex, anchors 2/3, ItemVariationStore |
+| M — feature selection | `runtime_rebuild` reassigned after its capped build window | parser-layout owner and selector unit spec | FeatureVariations conditions/substitution and general Script/LangSys selection |
+| N — generic shaper | next free implementation agent | `ot_layout_shaper` and focused integration spec | witness allow-list removed from generic execution; pinned vectors retained as oracles |
+
+Each lane commits only its owned files from an isolated worktree and does not
+run the capped pure-Simple build. `/root` is merge owner. A separate
+highest-capability verification agent reviews merged semantics, specs, manuals,
+and requirement evidence before any done mark.

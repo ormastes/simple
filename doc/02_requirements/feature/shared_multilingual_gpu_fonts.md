@@ -10,6 +10,8 @@ Status: selected on 2026-07-11 (`L2+C1+S1+F1+R1+P1+G1`)
   handwriting, slab, blackletter, pixel/bitmap, and emoji through an honest
   sparse matrix.
 - Harden the existing Pure Simple shaping/BiDi path.
+- Complete the generic OpenType GSUB/GPOS executor instead of limiting it to
+  the pinned witness-font lookup subset.
 - Support unchanged sfnt TrueType `glyf` faces and their default variable-font
   instance; non-default axes and unsupported tables fail closed.
 - CPU shapes/rasterizes; Simple-emitted GPU programs compose a shared alpha
@@ -95,6 +97,14 @@ Status: selected on 2026-07-11 (`L2+C1+S1+F1+R1+P1+G1`)
   concrete supported target. Unknown targets, unsupported rendering modes, and
   transforms fail
   before cache or backend mutation.
+- **REQ-016 Full OpenType layout:** The generic Pure Simple layout path supports
+  every standard GSUB lookup type 1–8 and GPOS lookup type 1–9 format, including
+  extension and nested contextual dispatch, lookup flags/GDEF filtering,
+  Device/VariationIndex adjustments, anchor formats, FeatureVariations, and
+  requested Script/LangSys selection. Processing is bounded and transactional:
+  malformed tables, unsupported variation context, recursion exhaustion, or
+  work-budget exhaustion leave the input run unchanged. Pinned HarfBuzz
+  witnesses remain acceptance oracles, not an allow-list for the generic path.
 
 ## Exclusions
 
