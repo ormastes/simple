@@ -6,23 +6,41 @@
 # execution while array fields survive — the aggregate deep-copy defect behind
 # the stage-4 phantom-Some family (see
 # doc/08_tracking/bug/hir_stub_module_nil_dict_get_phantom_some_2026-07-27.md).
-# Plain function-argument passing and dict-index reads DO preserve the nested
-# dicts (proven: lower_module compiles bodies from ctx.modules[name]), so the
-# driver mirrors the registry here at parse time and import resolution reads
-# through these accessors instead of the corrupted field copy.
+# Plain function-argument passing and array/dict-index reads DO preserve the
+# nested dicts (proven: lower_module compiles bodies from ctx.modules[name]),
+# so the driver mirrors the registry here at parse time and import resolution
+# reads through these accessors instead of the corrupted field copy.
+#
+# Storage is parallel module-global ARRAYS, mirroring bootstrap_globals.spl:
+# array-typed globals are the only kind proven to work in the bootstrap lane
+# (Dict-typed globals lower to uninitialized allocas there — a Dict-backed
+# first cut of this registry segfaulted on its first read).
+# ponytail: linear scan per lookup (~1.7k entries); switch to a side index if
+# import resolution ever shows up in stage-4 profiles.
 
 use compiler.frontend.parser_types.{Module}
 
-var _registry_modules: Dict<text, Module> = {}
+var _registry_names: [text] = []
+var _registry_mods: [Module] = []
 
 fn hir_registry_reset():
-    _registry_modules = {}
+    _registry_names = []
+    _registry_mods = []
 
 fn hir_registry_put(name: text, m: Module):
-    _registry_modules[name] = m
+    _registry_names.push(name)
+    _registry_mods.push(m)
+
+fn _hir_registry_index(name: text) -> i64:
+    var i = 0
+    while i < _registry_names.len():
+        if _registry_names[i] == name:
+            return i
+        i = i + 1
+    -1
 
 fn hir_registry_contains(name: text) -> bool:
-    _registry_modules.contains_key(name)
+    _hir_registry_index(name) >= 0
 
 fn hir_registry_get(name: text) -> Module:
-    _registry_modules[name]
+    _registry_mods[_hir_registry_index(name)]
