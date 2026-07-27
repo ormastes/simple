@@ -103,6 +103,46 @@ session, first localize and fix the aggregate/owner nil-receiver channel using
 the existing tracked aggregate-return bug evidence. Only then retry the
 focused font producer checkpoint.
 
+### 2026-07-27 direct-slot receiver-lowering checkpoint
+
+A fresh session used three bounded, no-bootstrap native cycles against the
+current direct-slot font-owner experiment. Every build compiled 184 modules
+with zero compile failures. None is Vulkan live evidence, and none of the
+associated source changes is accepted or committed.
+
+- Cycle 1 linked and ran binary SHA-256
+  `3a4ac24823af1df930add1614d94db3affb66cea32409e6ab6d4f8da593d87bd`.
+  It exited 2 with `engine2d_font_state_native_status=fail-live-face`.
+  Disassembly and scalar inspection showed that the owner slot and its
+  renderer mutation were present, but `font_owner_count()` projected the raw
+  list length `1` across the method boundary while the caller compared it with
+  tagged literal `8`. The false comparison short-circuited the TTF check.
+- Cycle 2 replaced the count receipt with an internal boolean owner predicate.
+  Binary SHA-256
+  `da4b24f203e7c626ea1b80db6b60d11914b241cde041520c568da22f4642869e`
+  exited 3. `font_owner_ready()` passed and `load_font()` returned true, but
+  `font_has_selected_ttf()` returned false. Static inspection showed the
+  renderer payload decoded into `x12`; the generated call branched through
+  `FontRenderer.has_sffi_ttf` without moving `x12` into receiver register
+  `x0`, so `x0` still held the enclosing `Engine2D`.
+- Cycle 3 bound the array element to an explicitly typed local before every
+  critical `FontRenderer` method call. Binary SHA-256
+  `6c0a0c8463428f9ba01ae1f0068db9c87ac8705f078e11b2e5010ae4bf686c29`
+  still exited 3 at the same named TTF predicate. Final static addresses show
+  the renderer payload in `x12` at `0x1003cc890`/`0x1003cc898` and the
+  indirect call at `0x1003cc8a4`, still without an `x0 <- x12` receiver
+  reload. The control comparison is `load_font`: it correctly establishes
+  `x0` at `0x1003d56f8`/`0x1003d5700` before its call at `0x1003d5710`.
+
+The three-cycle cap is exhausted. This evidence moves the essential next fix
+to compiler/backend receiver lowering, with an exact native regression that
+must prove array-element-to-typed-local method receivers populate `x0`.
+Product-source receiver workarounds and another font probe are not accepted
+substitutes. After that compiler source fix passes focused proof, rebuilding
+or bootstrapping may be essential to deploy it into the canonical
+self-hosted toolchain; no bootstrap was run or authorized by these cycles.
+Only then may the Bungee 24 pt / 300 DPI producer check resume.
+
 ## Required acceptance gate
 
 1. In a fresh session, localize and fix the aggregate/owner nil-receiver

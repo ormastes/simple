@@ -566,6 +566,41 @@ same failure.
   their commits remain in Git. Dirty and branch-attached agent worktrees were
   preserved.
 
+### 2026-07-27 native FontRenderer receiver-lowering checkpoint
+
+- Three fresh-session, no-bootstrap focused builds each compiled 184 modules
+  with zero failures. Their binaries and terminal results were:
+  `3a4ac24823af1df930add1614d94db3affb66cea32409e6ab6d4f8da593d87bd`
+  (exit 2, `fail-live-face`),
+  `da4b24f203e7c626ea1b80db6b60d11914b241cde041520c568da22f4642869e`
+  (exit 3, `fail-live-face`), and
+  `6c0a0c8463428f9ba01ae1f0068db9c87ac8705f078e11b2e5010ae4bf686c29`
+  (exit 3, `fail-live-face`).
+- Cycle 1 proved the owner slot and renderer mutation existed, but a raw
+  projected length `1` was compared with tagged literal `8`. Cycle 2 used a
+  boolean owner predicate, which passed; `load_font()` returned true and the
+  subsequent TTF predicate returned false. Static inspection found the
+  decoded renderer in `x12` but no `mov x0, x12` before
+  `FontRenderer.has_sffi_ttf`, leaving the enclosing `Engine2D` in `x0`.
+- Cycle 3 used an explicitly typed `FontRenderer` local and still reproduced
+  the same lowering defect. Final addresses are renderer payload
+  `0x1003cc890`/`0x1003cc898`, indirect call `0x1003cc8a4` without receiver
+  reload, and the correctly lowered `load_font` control at
+  `0x1003d56f8`/`0x1003d5700` before call `0x1003d5710`.
+- All product-source and probe edits from these cycles remain uncommitted and
+  unaccepted. The three-cycle cap is exhausted. There is no focused font
+  producer PASS, Vulkan live PASS, or bootstrap result.
+- Next fresh session: fix compiler/backend method-receiver lowering first and
+  add an exact native regression proving an array-element-to-typed-local
+  receiver is placed in `x0`. Only after that focused compiler proof may the
+  Bungee 100 px producer gate resume. A self-hosted rebuild or bootstrap may
+  then be essential to deploy the compiler fix; it is not pre-authorized as
+  already run.
+- Preserve the required order without exception: Vulkan 2D rendering,
+  capture, ordered events, vector font and 300-DPI evidence; then Vulkan web;
+  Vulkan GUI; host WM; Metal parity in the same order; finally x86/ARM QEMU
+  SimpleOS/WM.
+
 ## Required Evidence and Documentation
 
 - `doc/04_architecture/shared_multilingual_gpu_fonts.md`
