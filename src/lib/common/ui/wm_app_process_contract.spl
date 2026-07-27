@@ -1,6 +1,11 @@
 # Shared app-process contract for launching the same GUI app source either as a
 # native host app or as a WM-managed child process.
 
+extern fn rt_string_to_int(value: text) -> i64
+extern fn rt_value_int(value: i64) -> i64
+extern fn rt_value_as_int(value: i64) -> i64
+extern fn rt_raw_i64_to_string(value: i64) -> text
+
 struct WmFsAppBridgeRequest:
     kind: text
     source_path: text
@@ -88,14 +93,14 @@ fn wm_fs_frame_receipt_encode(receipt: WmFsFrameReceipt) -> text:
 
 fn wm_fs_frame_receipt_decode(doc: text) -> WmFsFrameReceipt:
     WmFsFrameReceipt(
-        event_seq: _wm_bridge_value(doc, "event_seq").to_i64() ?? -1,
-        frame_seq: _wm_bridge_value(doc, "frame_seq").to_i64() ?? 0,
+        event_seq: _wm_bridge_i64(doc, "event_seq", -1),
+        frame_seq: _wm_bridge_i64(doc, "frame_seq", 0),
         backend: _wm_bridge_value(doc, "backend"),
         readback_source: _wm_bridge_value(doc, "readback_source"),
-        backend_handle: _wm_bridge_value(doc, "backend_handle").to_i64() ?? 0,
-        device_identity: _wm_bridge_value(doc, "device_identity").to_i64() ?? 0,
-        pixel_count: _wm_bridge_value(doc, "pixel_count").to_i64() ?? 0,
-        checksum: _wm_bridge_value(doc, "checksum").to_i64() ?? 0
+        backend_handle: _wm_bridge_i64(doc, "backend_handle", 0),
+        device_identity: _wm_bridge_i64(doc, "device_identity", 0),
+        pixel_count: _wm_bridge_i64(doc, "pixel_count", 0),
+        checksum: _wm_bridge_i64(doc, "checksum", 0)
     )
 
 fn wm_fs_frame_receipt_valid(receipt: WmFsFrameReceipt, event_seq: i64, frame_seq: i64, requested_backend: text, expected_pixel_count: i64) -> bool:
@@ -149,15 +154,48 @@ fn _wm_bridge_value(doc: text, key: text) -> text:
         i = i + 1
     ""
 
+fn _wm_parse_i64(raw: text, fallback: i64) -> i64:
+    # Keep native WM transport independent of the zero-argument text.to_i64()
+    # receiver path. Older deployed native compilers can omit that receiver and
+    # return the text handle itself, corrupting every decoded numeric field.
+    if raw.len() == 0:
+        return fallback
+    var i = 0
+    if raw.char_at(0) == "-":
+        i = 1
+    if i >= raw.len():
+        return fallback
+    while i < raw.len():
+        val code = raw.char_code_at(i)
+        if code < 48 or code > 57:
+            return fallback
+        i = i + 1
+    # This free runtime call keeps the text receiver explicit. Some runtime
+    # lanes return a negative small integer as an unsigned 61-bit payload.
+    # Re-box/unbox negative fields to sign-extend that payload. The operation is
+    # idempotent when the runtime already returned a signed small integer, and
+    # positive values remain unchanged.
+    val parsed = rt_string_to_int(raw)
+    if raw.char_at(0) == "-":
+        return rt_value_as_int(rt_value_int(parsed))
+    parsed
+
+fn _wm_bridge_i64(doc: text, key: text, fallback: i64) -> i64:
+    _wm_parse_i64(_wm_bridge_value(doc, key), fallback)
+
+fn _wm_bridge_i32(doc: text, key: text) -> i32:
+    val parsed = _wm_bridge_i64(doc, key, 0)
+    parsed as i32
+
 fn wm_fs_bridge_decode(doc: text) -> WmFsAppBridgeRequest:
     WmFsAppBridgeRequest(
         kind: _wm_bridge_value(doc, "kind"),
         source_path: _wm_bridge_value(doc, "source_path"),
         app_id: _wm_bridge_value(doc, "app_id"),
         title: _wm_bridge_value(doc, "title"),
-        pid: _wm_bridge_value(doc, "pid").to_i64() ?? 0,
-        window_w: (_wm_bridge_value(doc, "window_w").to_i64() ?? 0).to_i32(),
-        window_h: (_wm_bridge_value(doc, "window_h").to_i64() ?? 0).to_i32(),
+        pid: _wm_bridge_i64(doc, "pid", 0),
+        window_w: _wm_bridge_i32(doc, "window_w"),
+        window_h: _wm_bridge_i32(doc, "window_h"),
         content: _wm_bridge_value(doc, "content"),
         frame_path: _wm_bridge_value(doc, "frame_path"),
         event_path: _wm_bridge_value(doc, "event_path"),
@@ -167,16 +205,21 @@ fn wm_fs_bridge_decode(doc: text) -> WmFsAppBridgeRequest:
 fn wm_fs_app_event(seq: i64, kind: text, x: i32, y: i32, button: i64, pressed: bool) -> WmFsAppEvent:
     WmFsAppEvent(seq: seq, kind: kind, x: x, y: y, button: button, pressed: pressed)
 
+fn wm_fs_key_event(seq: i64, keycode: i64, pressed: bool) -> WmFsAppEvent:
+    wm_fs_app_event(seq, "key", 0, 0, keycode, pressed)
+
 fn wm_fs_app_event_encode(ev: WmFsAppEvent) -> text:
-    "seq={ev.seq}\nkind={ev.kind}\nx={ev.x}\ny={ev.y}\nbutton={ev.button}\npressed={ev.pressed}\n"
+    val x_text = rt_raw_i64_to_string(ev.x as i64)
+    val y_text = rt_raw_i64_to_string(ev.y as i64)
+    "seq={ev.seq}\nkind={ev.kind}\nx={x_text}\ny={y_text}\nbutton={ev.button}\npressed={ev.pressed}\n"
 
 fn wm_fs_app_event_decode(doc: text) -> WmFsAppEvent:
     WmFsAppEvent(
-        seq: _wm_bridge_value(doc, "seq").to_i64() ?? 0,
+        seq: _wm_bridge_i64(doc, "seq", 0),
         kind: _wm_bridge_value(doc, "kind"),
-        x: (_wm_bridge_value(doc, "x").to_i64() ?? 0).to_i32(),
-        y: (_wm_bridge_value(doc, "y").to_i64() ?? 0).to_i32(),
-        button: _wm_bridge_value(doc, "button").to_i64() ?? 0,
+        x: _wm_bridge_i32(doc, "x"),
+        y: _wm_bridge_i32(doc, "y"),
+        button: _wm_bridge_i64(doc, "button", 0),
         pressed: _wm_bridge_value(doc, "pressed") == "true"
     )
 
