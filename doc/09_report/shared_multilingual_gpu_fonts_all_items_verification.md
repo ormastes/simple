@@ -58,9 +58,176 @@ ran. The three-check cap is reached; no further retry is permitted this
 session. A fresh session must verify the integrated accumulator and typed-index
 collector before any downstream evidence can be accepted.
 
-| Open TODO | Status | Required evidence before retry | Bounded continuation |
-|---|---|---|---|
-| `HIR-BOOTSTRAP-NIL-001` | FAIL — fixes implemented, bootstrap unverified, three-check cap reached | Verify `compiler.spl` retains its 15 impl methods and `_driver_collect_hir_errors` handles typed empty/recovered/fatal arrays without a nil receiver | No further retry this session. In a fresh session, run the exact bounded command below. Only exit 0 may unlock immutable CLI/core-C identity, essential-tools smoke, direct HIR specs, and deliberate-red/empty-runner gates; all downstream work stays blocked. |
+A separate read-only monitor observed the external compiler workspace produce
+compiler-only Stage3 SHA-256
+`704f67af420bd8788dda809b46112d0a9a76cec64601ebfe2a6958a894aa380f`,
+then fail Stage4 at `src/std/nogc_sync_mut/env/variables.spl:364`. `src/std`
+is the tracked `src/lib` symlink, so the canonical source path is
+`src/lib/nogc_sync_mut/env/variables.spl`. A clean current checkout already
+uses the safe Option form following the non-nil guard; this identifies the
+external dirty checkout as stale rather than a new parser or font-source
+defect. One fresh full-CLI build from a clean current compiler checkout still
+must be admitted before focused runtime evidence can begin; no full CLI was
+produced. The retained Stage4 log is
+`/home/ormastes/dev/pub/simple-bootstrap/build/mini_builds/bootstrap-memory-lexer-fix-stage4-cycle2.log`
+(SHA-256 `1a6e74e630d3341898cecfe9e785f9802527b96ae2372583531c8f52d17f09a9`).
+That clean-current full-CLI admission is the exact prerequisite before focused
+font test/docgen/native verification can resume.
+
+One isolated clean-current attempt was made only because this admission is
+essential. Rust seed
+`/home/ormastes/dev/pub/simple/src/compiler_rust/target/bootstrap/simple` ran
+against clean HEAD `16ebfdb6410` in `/tmp/simple-clean-cli-20260726`, but was
+terminated with SIGTERM after 2m15s before compilation/object output. No
+candidate CLI emerged. Its final meaningful log line was the pre-compilation
+memory guard warning that `SIMPLE_LIB=src` contains 600+ `.spl` files; retained
+log: `/tmp/simple-clean-cli-20260726/build/mini_builds/full_cli_seed_cycle1.log`.
+This is a separate compiler/runtime build-system blocker. The font lane must
+not restart it; its owner must resolve that admission path and deliver one
+full CLI before the queued verification can resume.
+
+A final P0 admission lane in `/tmp/simple-pure-cli-font-20260727` at
+`1d75d521b775` spent the three permitted incremental cycles with retained
+pure-Simple Stage3 compiler SHA-256
+`704f67af420bd8788dda809b46112d0a9a76cec64601ebfe2a6958a894aa380f`.
+Cycle 3 stopped in
+`src/std/nogc_sync_mut/compression/gzip/lz77.spl`: line 104 binds the reserved
+keyword in `val match = ...`, and line 105 uses it in
+`val distance = match[0]`. The retained parser reads that use as a `match`
+expression and first reports `expected :, got Newline`; the line-106
+`length` diagnostics are recovery cascades, and `length` is not reserved.
+The retained and clean-current token tables are byte-identical at SHA-256
+`cfea0c9e2063eae474913ee9cbfd585d29dfd50323c24c375d23656b884119da`,
+and all three logs retain the same parse ordering, with cycle 3 reaching 801
+of 1,309 unique physical sources. No candidate ELF and no native-cache
+object/file were produced. The retained logs and SHA-256 values
+are `build/mini_builds/full_cli_incremental_cycle1.log`
+(`82a5b6bf68efc867e7e8cf4107ebe29f14590ec422e7646a87eac10f1fdad389`),
+`full_cli_incremental_cycle2.log`
+(`c1e4e61d1cf919478793017859c09cc021938863a651ab198e48f37759f1f8dd`),
+and `full_cli_incremental_cycle3.log`
+(`4bab47a3a0ff2164508db9ada5433cfbe85b8fdeb100756328b8869450e39dc7`).
+Next session must batch-preflight the canonicalized closure, build a
+noncommitted compatibility bridge in a fresh detached worktree, then use that
+bridge to build and admit the clean font commit. Only the genuine
+current-language `class` local corrections in
+`src/lib/skia/feature/shaper/ot_layout_gpos.spl:123,602` belong in the font
+branch; the 13-file bridge overlay remains isolated, uncommitted, and
+unmerged. The three-cycle cap is reached; this blocker does not promote any
+runtime-dependent font row.
+
+A fresh compatibility-bridge continuation then ran in detached worktree
+`/tmp/simple-cli-bridge-20260727-2` at feature checkpoint `397afaaee3bb`.
+The bridge remained isolated and uncommitted. Its three bounded cycles cleared
+the reserved-keyword and multiline-boolean parser blockers and the first
+`FileTreeState` HIR type gap, but still produced no ELF and zero cached object
+files. Cycle 3 raised the per-file limit from 60 to 180 seconds and stopped on
+two terminal blockers: the 9,716-line
+`src/app/office/sheets/formula.spl` still exceeded 180 seconds, and
+`src/lib/editor/70.backend/gui_backend.spl` reached the next missing direct
+type resolution (`SettingsViewState.categories` is lowered as `ANY` in
+`gui_render_settings_html`). The three retained log SHA-256 values are
+`1a4c04ee995bb80ac55e3650e7088e773326f8b16bc25d9c8952d016b3886def`,
+`43e9dff528a8ce0f33746be503368bcbd416c6eb22c85c43867bcc06d89adc7a`,
+and `09e3e54a99ab7d76681ca2a27cd285b8ebb71932b27fed65a15ee133c0508c12`.
+No essential-tools smoke ran because no candidate existed. The session cap is
+reached; a fresh compiler/runtime owner must resume from these exact blockers,
+not rerun this bridge.
+
+The next isolated continuation used detached worktree
+`/tmp/simple-cli-bridge-20260727-3` at `fefcfe011fc0053d0ab3e01a13005bb841db5023`
+and the same retained Stage3 compiler. The bridge avoided eager Office/IDE
+entry closure, added the proven GUI type imports, and selected the complete
+Rust runtime archives. Cycle 1 retained 1,417 objects before a link-only
+failure exposed the incomplete default runtime bundle and missing GSUB
+`_sub_end`; cycle 2 cleared those blockers and stopped on one canonical CSS
+import plus the duplicate `ant-trace`/`ant_trace` module; cycle 3 cleared the
+full import/collision preflight and parsed 806 of 1,190 unique files before the
+retained parser rejected `loop.induction_var` in
+`auto_vectorize_analysis.spl`. Log SHA-256 prefixes are `b5db2444`,
+`567d1e0d`, and `7732687e`. No ELF or smoke result exists. The genuine bounded
+GSUB helper is integrated; all remaining compatibility edits stay isolated.
+The three-cycle cap is reached. A fresh runtime owner must resume the retained
+cache with the already-applied `loop` to `loop_info` bridge rename.
+
+A later fresh three-cycle bridge window reused the same Stage3 SHA-256
+`704f67af420bd8788dda809b46112d0a9a76cec64601ebfe2a6958a894aa380f`
+and all 1,417 retained objects. Cycle 1 rejected `pub mod` at
+`src/compiler/10.frontend/core/__init__.spl:111`; cycle 2 cleared that bridge
+syntax and then rejected five address-of forms, first
+`src/os/userlib/device.spl:26`; cycle 3 cleared those exact closure forms and
+stopped at the sparse ABI enum discriminants beginning with
+`src/os/kernel/types/syscall_types.spl:8`. The retained log SHA-256 values are
+`641d8754567044305afeb9abe612bd86b1fbbcbafffc40d6f57a3c168ac34fce`,
+`6559f179b3058111fc72718864d1dc9ee642cf401f93a1f684781b05aacdc48d`,
+and `f8bb267073a05f345319d36c1622d5477751be45249ff0d6b1063f3664fc8a32`.
+No ELF, Stage5, or essential-tools smoke exists. The bridge remains isolated;
+the next fresh window must preserve the sparse syscall ABI through an explicit
+numeric conversion pattern rather than stripping discriminants.
+
+Fresh admission lane `/tmp/simple-cli-admission-20260727-4` then preserved all
+106 sparse ABI values through exhaustive enum-to-number converters and reused
+the 1,417-object cache. Cycle 1 cleared three tuple-destructuring loops
+(`build/mini_builds/full_cli_admission_cycle1.log`, SHA-256
+`769acbbb1a10cc1cb825f1704a7e563118e42a3725290fcaff5a508fc6e4a7ae`);
+cycles 2 and 3 both parsed the 1,190-file closure and lowered all 28 functions
+in `src/lib/gc_async_mut/gpu/engine2d/color.spl`, then the retained pure-Simple
+Stage3 trapped on `field access on nil receiver` and exited 132. Their log
+paths are `build/mini_builds/full_cli_admission_cycle2.log` and
+`build/mini_builds/full_cli_admission_cycle3.log`; their SHA-256 values are
+`024699a05dc5ebcd6452f0539b1f361294679b9a7b3039a7f0a8eee8df5f05ad`
+and `c63e11b391f2254971bb767a12f500d2107635ad230e8774528bb138874b68a3`.
+The repeated result ended the window at its three-cycle cap. No Stage4 ELF,
+Stage5, or smoke result exists; the compatibility bridge remains isolated.
+
+The earlier read-only inference that localized the failure to
+`HirLowering.lower_module`'s final diagnostic `eprint` is retained only as
+superseded history. The authoritative kernel trap records instruction pointer
+`0x559924`. In the retained Stage3 binary this is the `ud2` immediately after
+`MethodResolver.resolve_expr` masks its incoming `expr` argument and detects
+nil or a low-tag-only value. The normal `rdi=self`, `rsi=expr` register setup
+is intact, so the evidence points to an upstream HIR value-representation
+error rather than a SysV argument-register error.
+
+`color.spl` still completed all 28 HIR functions. Its first resolution-order
+function, `color_black`, ends in `rgb(0, 0, 0)`, providing the concrete Call
+tail that reaches the bad boundary. `HirBlock` is desugared as `has: bool`
+plus a mandatory `HirExpr`, but ten sites retained the older Option contract:
+five consumers matched or unwrapped `block.value` as `Option`, and five
+synthetic constructors supplied `Some(...)` or bare `nil`. In particular,
+`resolve_block` could extract the Call tail as though it were an Option payload
+and pass the resulting nil or low-tag-only value into `resolve_expr`.
+
+Current source integrates the narrow invariant repair: all five consumers gate
+on `block.has`; all five constructors provide explicit `has` plus a typed tail
+or `NilLit` sentinel; and lowering-error collection uses an indexed loop with
+an explicit `LoweringError` binding. Focused regression sources cover the
+Call-tail/empty-tail resolution boundary and the constructor/consumer
+invariant. Those fixes remain execution-unverified: this correction ran no
+test or build, did not rebuild Stage3/Stage4, and did not retry admission. No
+Stage4 ELF, Stage5, or essential-tools smoke exists, so the pure-Simple CLI
+gate remains blocking and the overall result remains `STATUS: FAIL`.
+
+Independent static review accepted the shaping/material and surface/native
+spec stacks after requiring a nonempty selected font identity, explicit
+Arabic/Urdu/Hindi direction, and exact Web advance-width propagation through
+the proof validator. It rejected the first manifest/distribution rewrite for
+private production imports and added heavyweight fixed-`/tmp` unit staging.
+The replacement retains only frozen step vocabulary and canonical matcher
+changes; behavioral distribution evidence remains blocked on an admitted
+runtime and a sound public entrypoint. None of these source-only results
+promotes a requirement or NFR without the admitted runtime.
+
+### Deployed-runtime boundary
+
+- Retain the deployed pure-Simple runtime path and identity used for each
+  focused command.
+- Reject Rust-seed execution, zero-example results, and unauthenticated
+  summaries.
+- Do not introduce compiler, interpreter, bootstrap, or bootstrap/runtime
+  changes into this goal merely to produce a new runtime.
+- Preserve real-device, hosted-WM, performance, and QEMU gates independently
+  of focused host execution.
 
 ## Requirement matrix
 

@@ -137,13 +137,16 @@ The final cycle-3 check proved that boundary advanced:
 runtime error: field access on nil receiver
 ```
 
-The nil receiver is therefore inside `_driver_collect_hir_errors`, after the
-typed `[LoweringError]` array is read and before collection completes. The
-current working change replaces its `for err in errors` traversal with an
-indexed loop and an explicit `LoweringError` binding. The direct
+At the time, this trace suggested that the nil receiver was inside
+`_driver_collect_hir_errors`, after the typed `[LoweringError]` array was read
+and before collection completed. That historical inference motivated replacing
+its `for err in errors` traversal with an indexed loop and an explicit
+`LoweringError` binding. The direct
 `test/01_unit/compiler/bootstrap/hir_lowering_error_collection_spec.spl`
 regression covers empty, recovered, and fatal arrays through the shared driver
-path. Both the fix and regression are implemented but bootstrap-unverified.
+path. The source fix and regression are integrated but remain
+execution-unverified. This trace is not the authoritative localization of the
+later current-admission trap described below.
 
 The historical three-check cap was reached. Its former completion policy under
 `f1bcd0db5be` is superseded: the missing Stage 4 artifact blocks the current
@@ -211,6 +214,46 @@ SHA-256
 The requested Stage 4 ELF is absent, so the essential-tools smoke was correctly
 not run. The one-cycle owner stopped at the first failure and performed no
 retry; an identical retry is prohibited by the cap.
+
+## Corrected current-admission localization
+
+The earlier read-only inference that placed the repeated failure at
+`HirLowering.lower_module`'s final diagnostic `eprint` is preserved only as
+superseded history. The authoritative kernel record for the retained
+current-admission process reports invalid opcode at instruction pointer
+`0x559924`. In the exact retained Stage3 binary, that address is the `ud2`
+immediately after `MethodResolver.resolve_expr` masks its incoming `expr`
+argument and detects nil or a low-tag-only value. The call ABI itself is
+normal (`rdi=self`, `rsi=expr`); the bad value arrives from the HIR traversal.
+
+The retained trace proves that `src/lib/gc_async_mut/gpu/engine2d/color.spl`
+completed all 28 HIR functions. Resolution then begins with `color_black`,
+whose block tail is the Call `rgb(0, 0, 0)`. That trigger exposed a desugaring
+contract split: `HirBlock` stores `has: bool` plus a mandatory `HirExpr`, but
+five consumers still treated `block.value` as `Option` and five synthetic
+constructors still supplied `Some(...)` or bare `nil`. In the failing path,
+`resolve_block` interpreted the Call tail as an Option payload and could pass
+the resulting nil or low-tag-only value into `resolve_expr`.
+
+Current source integrates the ten-site repair:
+
+- five consumers—method resolution, constant evaluation, constant folding,
+  effect inference, and backend block visitation—gate the mandatory value with
+  `block.has`;
+- five synthetic-construction sites—host-GPU lane lowering, two MIR module
+  fallbacks, integer-match default construction, and enum-match default
+  construction—set `has` explicitly and provide either a typed tail or a
+  `NilLit` sentinel;
+- the typed indexed lowering-error collector remains integrated, with focused
+  regression sources for its array handling and the Call-tail/empty-tail HIR
+  invariant.
+
+These are source fixes, not admission evidence. This documentation correction
+ran no test or build, did not rebuild the retained Stage3 or produce Stage4,
+and did not retry the failed command. The fixes are therefore
+execution-unverified. No Stage4 ELF, Stage5, or essential-tools smoke exists;
+`HIR-BOOTSTRAP-NIL-001` and the pure-Simple CLI gate remain blocking, and the
+shared-font verification result remains `STATUS: FAIL`.
 
 ## Open TODO and bounded continuation
 
