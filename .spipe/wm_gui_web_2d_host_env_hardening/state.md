@@ -988,3 +988,11 @@ Tracking split:
   Focused specs cover zero-listener, compound listener, keyup-plus-default, and
   focus-adjusted revision cases. The admitted executable runner remains
   unavailable, so no runtime SSpec PASS is claimed.
+- linux-vulkan-render-log-truth: Small parallel AC-6 review found that Linux
+  omitted the existing retained ARGB checksum oracle, allowed one passing
+  Simple status row to mask the other, and let a forged zero blocker count hide
+  failed subgates. The checker now requires all three equal checksums and both
+  Simple statuses; the aggregate independently requires every structured gate.
+  Missing/mismatched checksum, explicit Simple failure, and forged aggregate
+  mutations pass their direct shell checks. The unavailable pure-Simple SSpec
+  runner and live Vulkan/RenderDoc hosts were not rerun.

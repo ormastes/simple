@@ -691,6 +691,10 @@ agents:
 instead of parsing `linux_vulkan_render_log_compare_reason` when deciding
 whether the Linux blocker is backend selection, browser Vulkan backing,
 pairwise pixels, ARGB source evidence, or RenderDoc `.rdc` capture.
+The ARGB source gate also requires present, unsigned, exactly equal Simple,
+Chrome, and Electron retained checksums. Both Simple status rows must pass;
+the aggregate independently rejects any failed gate even if a producer claims
+`blocked_gate_count=0`.
 
 Current Linux host evidence on 2026-06-25 has
 `linux_vulkan_render_log_compare_pairwise_status=pass`, Simple RenderDoc

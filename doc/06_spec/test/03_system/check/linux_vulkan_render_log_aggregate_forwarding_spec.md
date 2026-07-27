@@ -27,7 +27,7 @@ linux_vulkan_render_log_aggregate_forwarding_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -75,6 +75,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/linux_vulkan_render_log_aggr
 - The GUI RenderDoc aggregate reads and emits those same Linux fields.
 - A Linux Vulkan row that otherwise says `pass` is rejected when
   `linux_vulkan_render_log_compare_blocked_gate_count` is not `0`.
+- A forged zero blocker count cannot hide any failed per-gate status.
 
 ## Completion Criteria
 
@@ -171,11 +172,16 @@ expect(aggregate).to_contain("emit(\"linux_vulkan_render_log_compare_host_electr
 
 </details>
 
-#### normalizes a claimed Linux pass with blocked gates to aggregate failure
+#### chooses the most useful GPU autocapture summary from a restarted Chromium GPU log
+
+- Prefer the completed, useful capture summary over a later empty restart row.
+
+#### normalizes blocked or internally failed Linux pass claims to aggregate failure
 
 - Create a Linux Vulkan render-log row that passes all artifacts but still reports blocked gates
    - Expected: code equals `0`
-- Read aggregate evidence and confirm blocked gates override the claimed pass
+- Read aggregate evidence and confirm blocked gates override the claimed pass.
+- Confirm a forged zero blocker count cannot hide a failed ARGB gate.
 
 
 <details>
@@ -240,8 +246,8 @@ expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_gate_stat
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 2 |
-| Active scenarios | 2 |
+| Total scenarios | 3 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

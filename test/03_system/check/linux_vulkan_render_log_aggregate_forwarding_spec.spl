@@ -26,6 +26,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/linux_vulkan_render_log_aggr
 - The GUI RenderDoc aggregate reads and emits those same Linux fields.
 - A Linux Vulkan row that otherwise says `pass` is rejected when
   `linux_vulkan_render_log_compare_blocked_gate_count` is not `0`.
+- A forged zero blocker count cannot hide any failed per-gate status.
 
 ## Completion Criteria
 
@@ -67,6 +68,7 @@ describe "Linux Vulkan render log aggregate forwarding":
         expect(linux_compare).to_contain("render_log_append_kv \"linux_vulkan_render_log_compare_browser_backing_gate_status\" \"$browser_backing_gate_status\"")
         expect(linux_compare).to_contain("render_log_append_kv \"linux_vulkan_render_log_compare_pairwise_gate_status\" \"$pixel_gate_status\"")
         expect(linux_compare).to_contain("render_log_append_kv \"linux_vulkan_render_log_compare_argb_source_gate_status\" \"$argb_source_gate_status\"")
+        expect(linux_compare).to_contain("render_log_append_kv \"linux_vulkan_render_log_compare_argb_checksum_reason\" \"$argb_checksum_reason\"")
         expect(linux_compare).to_contain("render_log_append_kv \"linux_vulkan_render_log_compare_renderdoc_gate_status\" \"$renderdoc_gate_status\"")
         expect(linux_compare).to_contain("render_log_append_kv \"linux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status\" \"$simple_artifact_file_status\"")
         expect(linux_compare).to_contain("render_log_append_kv \"linux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status\" \"$chrome_artifact_file_status\"")
@@ -113,6 +115,12 @@ describe "Linux Vulkan render log aggregate forwarding":
         step("Assert blocked Linux rows cannot pass aggregate validation")
         expect(aggregate).to_contain("elif linux_vulkan_render_log_blocked_gate_count != \"0\":")
         expect(aggregate).to_contain("linux_vulkan_render_log_reason = \"linux-vulkan-blocked-gates-present:\"")
+        expect(aggregate).to_contain("elif linux_vulkan_render_log_simple_vulkan_gate_status != \"pass\":")
+        expect(aggregate).to_contain("elif linux_vulkan_render_log_browser_backing_gate_status != \"pass\":")
+        expect(aggregate).to_contain("elif linux_vulkan_render_log_pairwise_gate_status != \"pass\":")
+        expect(aggregate).to_contain("elif linux_vulkan_render_log_argb_source_gate_status != \"pass\":")
+        expect(aggregate).to_contain("linux_vulkan_render_log_reason = \"linux-vulkan-argb-source-gate-not-pass:\"")
+        expect(aggregate).to_contain("elif linux_vulkan_render_log_renderdoc_gate_status != \"pass\":")
 
         step("Assert the aggregate emits the Linux structured gate fields")
         expect(aggregate).to_contain("emit(\"linux_vulkan_render_log_compare_blocked_gate_count\", linux_vulkan_render_log_blocked_gate_count)")
@@ -235,7 +243,7 @@ describe "Linux Vulkan render log aggregate forwarding":
         expect(evidence).to_contain("rdoc_gpu_autocapture_vk_enum_physical_device_last_count=3")
         expect(evidence).to_contain("rdoc_gpu_autocapture_vk_get_physical_device_properties_count=3")
 
-    it "normalizes a claimed Linux pass with blocked gates to aggregate failure":
+    it "normalizes blocked or internally failed Linux pass claims to aggregate failure":
         step("Create a Linux Vulkan render-log row that passes all artifacts but still reports blocked gates")
         val command = "rm -rf build/test-linux-vulkan-render-log-aggregate-blocked && mkdir -p build/test-linux-vulkan-render-log-aggregate-blocked && cat > build/test-linux-vulkan-render-log-aggregate-blocked/linux.env <<'EOF'\n" +
             "linux_vulkan_render_log_compare_status=pass\n" +
@@ -278,7 +286,9 @@ describe "Linux Vulkan render log aggregate forwarding":
             "linux_vulkan_render_log_compare_host_electron_status=pass\n" +
             "linux_vulkan_render_log_compare_host_electron_tool=electron\n" +
             "EOF\n" +
-            "BUILD_DIR=build/test-linux-vulkan-render-log-aggregate-blocked/out REPORT_PATH=build/test-linux-vulkan-render-log-aggregate-blocked/report.md LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-linux-vulkan-render-log-aggregate-blocked/linux.env sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs >/dev/null"
+            "BUILD_DIR=build/test-linux-vulkan-render-log-aggregate-blocked/out REPORT_PATH=build/test-linux-vulkan-render-log-aggregate-blocked/report.md LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-linux-vulkan-render-log-aggregate-blocked/linux.env sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs >/dev/null && " +
+            "sed -e 's/blocked_gate_count=1/blocked_gate_count=0/' -e 's/blocked_gates=renderdoc-chrome-rdc/blocked_gates=none/' -e 's/argb_source_gate_status=pass/argb_source_gate_status=fail/' build/test-linux-vulkan-render-log-aggregate-blocked/linux.env > build/test-linux-vulkan-render-log-aggregate-blocked/forged.env && " +
+            "BUILD_DIR=build/test-linux-vulkan-render-log-aggregate-blocked/forged-out REPORT_PATH=build/test-linux-vulkan-render-log-aggregate-blocked/forged-report.md LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-linux-vulkan-render-log-aggregate-blocked/forged.env sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs >/dev/null"
         val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
         expect(code).to_equal(0)
 
@@ -303,3 +313,10 @@ describe "Linux Vulkan render log aggregate forwarding":
         expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_autocapture_finished=1")
         expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_autocapture_start_source=delay")
         expect(evidence).to_contain("linux_vulkan_render_log_compare_renderdoc_electron_autocapture_end_source=delay")
+
+        step("Confirm a forged zero blocker count cannot hide a failed ARGB gate")
+        val forged = file_read("build/test-linux-vulkan-render-log-aggregate-blocked/forged-out/evidence.env")
+        expect(forged).to_contain("linux_vulkan_render_log_compare_status=fail")
+        expect(forged).to_contain("linux_vulkan_render_log_compare_reason=linux-vulkan-argb-source-gate-not-pass:fail")
+        expect(forged).to_contain("linux_vulkan_render_log_compare_blocked_gate_count=0")
+        expect(forged).to_contain("linux_vulkan_render_log_compare_argb_source_gate_status=fail")
