@@ -170,6 +170,7 @@ class SimpleWebLayoutDrawIrResult:
     composition: DrawIrComposition
     material_fallback: WebRenderMaterialFallbackProvenance
     material_witness: SimpleWebLayoutMaterialWitness
+    animation_end_ms: i64
 
 class SimpleWebLayoutMaterialWitness:
     cpu_composited_count: i32
@@ -426,15 +427,9 @@ fn _apply_css_animations(
         style_index = style_index + 1
     animated
 
-pub fn simple_web_layout_animation_end_ms(
-    html: text, width: i32
+fn _simple_web_layout_animation_end_from_styles(
+    styles: [Style], registry: KeyframeRegistry
 ) -> i64:
-    _web_budget_begin(WEB_RENDER_BUDGET_MS)
-    val nodes = parse_html(html)
-    val rules = extract_css_vw(html, width, false)
-    val child_index = build_child_index(nodes)
-    val styles = compute_styles(nodes, rules, child_index, false, true)
-    val registry = extract_keyframes(html)
     var latest_end: i64 = -1
     for st in styles:
         if st.animation_name != "none" and st.animation_duration_ms > 0:
@@ -460,6 +455,18 @@ pub fn simple_web_layout_animation_end_ms(
                     if animation_end > latest_end:
                         latest_end = animation_end
     latest_end
+
+pub fn simple_web_layout_animation_end_ms(
+    html: text, width: i32
+) -> i64:
+    _web_budget_begin(WEB_RENDER_BUDGET_MS)
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(html, width, false)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index, false, true)
+    _simple_web_layout_animation_end_from_styles(
+        styles, extract_keyframes(html)
+    )
 
 fn _simple_web_layout_render_html_draw_ir_result_at_time(html: text, width: i32, height: i32, vector_fonts: bool, animation_time_ms: i64) -> SimpleWebLayoutDrawIrResult:
     val render_start_us = rt_time_now_unix_micros()
@@ -538,9 +545,13 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(html: text, width: i32,
     val child_index = build_child_index(nodes)
     _web_budget_rearm(render_start_us + budget_us * 7 / 10)
     var styles = compute_styles(nodes, rules, child_index, false, vector_fonts)
+    val animation_registry = extract_keyframes(html)
+    val animation_end_ms = _simple_web_layout_animation_end_from_styles(
+        styles, animation_registry
+    )
     if animation_time_ms >= 0:
         styles = _apply_css_animations(
-            styles, extract_keyframes(html), animation_time_ms
+            styles, animation_registry, animation_time_ms
         )
     _web_budget_rearm(render_start_us + budget_us * 9 / 10)
     val node_count = nodes.len() as i32
@@ -576,7 +587,8 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(html: text, width: i32,
         composition: composition,
         material_fallback: simple_web_layout_material_provenance_after_execution(
             material_witness, 0, 1, 1, 0),
-        material_witness: material_witness
+        material_witness: material_witness,
+        animation_end_ms: animation_end_ms
     )
 
 fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height: i32, vector_fonts: bool) -> SimpleWebLayoutDrawIrResult:

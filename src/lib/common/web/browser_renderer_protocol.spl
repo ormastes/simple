@@ -58,6 +58,7 @@ pub struct BrowserRendererFrameDecodeResult:
     ok: bool
     reason: text
     reply_to_request_id: i64
+    next_animation_ms: i64
     composition: DrawIrComposition
     cpu_composited_count: i32
     cpu_composited_sha256: text
@@ -928,6 +929,7 @@ fn _browser_renderer_frame_reject(reason: text) -> BrowserRendererFrameDecodeRes
         ok: false,
         reason: reason,
         reply_to_request_id: 0,
+        next_animation_ms: -1,
         composition: draw_ir_composition("", "", "", []),
         cpu_composited_count: 0,
         cpu_composited_sha256: "",
@@ -1061,12 +1063,13 @@ pub fn browser_renderer_frame_encode_with_witness(
     generation: i64,
     request_id: i64,
     reply_to_request_id: i64,
+    next_animation_ms: i64,
     cpu_composited_count: i32,
     cpu_composited_sha256: text,
     solid_material_count: i32,
     solid_material_sha256: text
 ) -> BrowserRendererEncodeResult:
-    if (reply_to_request_id <= 0 or
+    if (reply_to_request_id <= 0 or next_animation_ms < -1 or
         not _browser_renderer_material_digest_valid(
             cpu_composited_count.to_i64(), cpu_composited_sha256) or
         not _browser_renderer_material_digest_valid(
@@ -1083,7 +1086,7 @@ pub fn browser_renderer_frame_encode_with_witness(
     val solid_digest = if solid_material_sha256 == "": "-" else: solid_material_sha256
     val payload = (
         "SBRF2\t{reply_to_request_id}\t{cpu_composited_count}\t{cpu_digest}" +
-        "\t{solid_material_count}\t{solid_digest}\n" +
+        "\t{solid_material_count}\t{solid_digest}\t{next_animation_ms}\n" +
         bytes_to_text(encoded.bytes)
     )
     browser_renderer_message_encode("frame", generation, request_id, payload)
@@ -1094,7 +1097,7 @@ pub fn browser_renderer_frame_encode(
     request_id: i64
 ) -> BrowserRendererEncodeResult:
     browser_renderer_frame_encode_with_witness(
-        composition, generation, request_id, request_id, 0, "", 0, ""
+        composition, generation, request_id, request_id, -1, 0, "", 0, ""
     )
 
 pub fn browser_renderer_frame_reply_to_request_id(
@@ -1108,7 +1111,7 @@ pub fn browser_renderer_frame_reply_to_request_id(
     val fields = _browser_renderer_byte_slice(
         message.payload, 0, header_end
     ).split("\t")
-    if fields.len() != 6 or fields[0] != "SBRF2":
+    if fields.len() != 7 or fields[0] != "SBRF2":
         return -1
     val reply_to_request_id = fields[1].to_i64() ?? -1
     if (reply_to_request_id <= 0 or
@@ -1125,13 +1128,16 @@ pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32
     val fields = _browser_renderer_byte_slice(
         message.payload, 0, witness_end
     ).split("\t")
-    if fields.len() != 6 or fields[0] != "SBRF2":
+    if fields.len() != 7 or fields[0] != "SBRF2":
         return _browser_renderer_frame_reject("malformed-material-witness")
     val reply_to_request_id = _browser_renderer_positive_i64(fields[1])
     val cpu_count = fields[2].to_i64() ?? -1
     val solid_count = fields[4].to_i64() ?? -1
-    if reply_to_request_id < 0 or cpu_count < 0 or solid_count < 0 or
-        str(cpu_count) != fields[2] or str(solid_count) != fields[4]:
+    val next_animation_ms = fields[6].to_i64() ?? -2
+    if (reply_to_request_id < 0 or cpu_count < 0 or solid_count < 0 or
+        next_animation_ms < -1 or
+        str(cpu_count) != fields[2] or str(solid_count) != fields[4] or
+        str(next_animation_ms) != fields[6]):
         return _browser_renderer_frame_reject("malformed-material-witness")
     val cpu_digest = if fields[3] == "-": "" else: fields[3]
     val solid_digest = if fields[5] == "-": "" else: fields[5]
@@ -1155,6 +1161,7 @@ pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32
         ok: true,
         reason: "ok",
         reply_to_request_id: reply_to_request_id,
+        next_animation_ms: next_animation_ms,
         composition: decoded.composition,
         cpu_composited_count: cpu_count.to_i32(),
         cpu_composited_sha256: cpu_digest,

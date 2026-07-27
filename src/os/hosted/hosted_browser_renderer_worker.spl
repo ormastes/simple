@@ -56,6 +56,31 @@ fn _worker_result_reject(
         wire: ""
     )
 
+fn _worker_next_animation_ms(
+    css_animation_end_ms: i64,
+    script_timer_due_ms: i64,
+    current_time_ms: i64
+) -> i64:
+    var next: i64 = -1
+    if css_animation_end_ms == -2 or css_animation_end_ms > current_time_ms:
+        next = current_time_ms + 16
+        if css_animation_end_ms >= 0 and next > css_animation_end_ms:
+            next = css_animation_end_ms
+    if script_timer_due_ms >= 0:
+        val timer_next = if script_timer_due_ms <= current_time_ms:
+            current_time_ms + 1
+        else:
+            script_timer_due_ms
+        if next < 0 or timer_next < next:
+            next = timer_next
+    next
+
+fn _worker_document_animation_time_ms(
+    session: BrowserSession, current_time_ms: i64
+) -> i64:
+    val elapsed = current_time_ms - session.animation_start_time_ms
+    if elapsed > 0: elapsed else: 0
+
 fn _worker_frame(
     session: BrowserSession,
     message: BrowserRendererMessage,
@@ -64,17 +89,29 @@ fn _worker_frame(
     animation_time_ms: i64,
     response_request_id: i64
 ) -> HostedBrowserRendererWorkerResult:
+    val document_animation_time_ms = _worker_document_animation_time_ms(
+        session, animation_time_ms
+    )
     val layout = simple_web_layout_render_html_draw_ir_result_at_time(
         session.current_style_html + session.current_body_html,
         width,
         height,
-        animation_time_ms
+        document_animation_time_ms
     )
+    val css_animation_end_ms = if layout.animation_end_ms >= 0:
+        session.animation_start_time_ms + layout.animation_end_ms
+    else:
+        layout.animation_end_ms
     val encoded = browser_renderer_frame_encode_with_witness(
         layout.composition,
         message.generation,
         response_request_id,
         message.request_id,
+        _worker_next_animation_ms(
+            css_animation_end_ms,
+            session.next_script_timer_due_ms(),
+            animation_time_ms
+        ),
         layout.material_witness.cpu_composited_count,
         layout.material_witness.cpu_composited_sha256,
         layout.material_witness.solid_material_count,
@@ -128,7 +165,9 @@ pub class HostedBrowserRendererWorkerSession:
             self.height,
             x.to_i32(),
             y.to_i32(),
-            self.animation_time_ms
+            _worker_document_animation_time_ms(
+                self.browser, self.animation_time_ms
+            )
         )
         if target_key.starts_with("id:"):
             return target_key.slice(3, target_key.len())
@@ -467,17 +506,29 @@ pub fn hosted_browser_renderer_handle_init(
         return _worker_reject(reason)
     if animation_time_ms > 0:
         val _ = session.advance_time(animation_time_ms)
+    val document_animation_time_ms = _worker_document_animation_time_ms(
+        session, animation_time_ms
+    )
     val layout = simple_web_layout_render_html_draw_ir_result_at_time(
         session.current_style_html + session.current_body_html,
         width,
         height,
-        animation_time_ms
+        document_animation_time_ms
     )
+    val css_animation_end_ms = if layout.animation_end_ms >= 0:
+        session.animation_start_time_ms + layout.animation_end_ms
+    else:
+        layout.animation_end_ms
     browser_renderer_frame_encode_with_witness(
         layout.composition,
         message.generation,
         response_request_id,
         message.request_id,
+        _worker_next_animation_ms(
+            css_animation_end_ms,
+            session.next_script_timer_due_ms(),
+            animation_time_ms
+        ),
         layout.material_witness.cpu_composited_count,
         layout.material_witness.cpu_composited_sha256,
         layout.material_witness.solid_material_count,

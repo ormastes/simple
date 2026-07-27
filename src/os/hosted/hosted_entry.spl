@@ -320,8 +320,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
         browser_content_width, browser_content_height
     )
     var browser_renderer_ready = false
-    val browser_animation_origin_micros = rt_time_now_unix_micros()
-    var browser_last_animation_micros = browser_animation_origin_micros
+    var browser_animation_origin_micros = rt_time_now_unix_micros()
     var browser_address_draft = browser_initial_html
     var browser_address_editing = false
     var browser_address_replace_on_text = false
@@ -377,6 +376,9 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                     browser_profile_window_id, frame
                 )
                 if browser_renderer_ready:
+                    browser_animation_origin_micros = (
+                        rt_time_now_unix_micros()
+                    )
                     comp = host_compositor_update_window_title(
                         comp, browser_profile_window_id,
                         browser_address_draft
@@ -540,13 +542,10 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                  desired_browser_height != browser_renderer.height) and
                 (browser_renderer.command_deadline_ms <= 0 or
                  browser_renderer.pending_operation == "advance")):
-                match browser_renderer.begin_resize(
+                if val Err(reason) = browser_renderer.begin_resize(
                     desired_browser_width, desired_browser_height, 2000
                 ):
-                    Ok(_):
-                        browser_last_animation_micros = now_micros
-                    Err(reason):
-                        print "[hosted-wm] browser-resize-deferred reason={reason}"
+                    print "[hosted-wm] browser-resize-deferred reason={reason}"
         var web_window_index = 0
         while web_window_index < comp.windows.len():
             val web_window = comp.windows[web_window_index]
@@ -948,18 +947,20 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                     other_dirty = true
             rt_winit_event_free(ev)
             ev = rt_winit_event_loop_poll_events(el, 1)
+        val browser_animation_time_ms = (
+            now_micros - browser_animation_origin_micros
+        ) / 1000
         if (browser_renderer_ready and
             browser_renderer.command_deadline_ms <= 0 and
-            now_micros - browser_last_animation_micros >= 16000):
-            match browser_renderer.begin_advance(
-                (now_micros - browser_animation_origin_micros) / 1000,
+            browser_renderer.next_animation_ms >= 0 and
+            browser_animation_time_ms >=
+                browser_renderer.next_animation_ms):
+            if val Err(reason) = browser_renderer.begin_advance(
+                browser_animation_time_ms,
                 2000
             ):
-                Ok(_):
-                    browser_last_animation_micros = now_micros
-                Err(reason):
-                    browser_renderer_ready = false
-                    print "[hosted-wm] browser-animation-failed reason={reason}"
+                browser_renderer_ready = false
+                print "[hosted-wm] browser-animation-failed reason={reason}"
         if evidence.enabled:
             val command = host_wm_evidence_read_command(evidence.input_fifo)
             if command.valid and command.nonce > evidence_nonce:

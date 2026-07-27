@@ -56,6 +56,26 @@ describe "hosted browser renderer worker":
         val frame = browser_renderer_frame_decode(decoded.message, 64, 48)
         expect(frame.ok).to_be(true)
         expect(frame.composition.batches[0].commands.len()).to_be_greater_than(0)
+        expect(frame.next_animation_ms).to_equal(-1)
+
+        val script_initial_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), script_first.wire
+        )
+        expect(browser_renderer_frame_decode(
+            script_initial_message.message, 64, 48
+        ).next_animation_ms).to_equal(16)
+        val css_initial_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), css_first.wire
+        )
+        expect(browser_renderer_frame_decode(
+            css_initial_message.message, 64, 48
+        ).next_animation_ms).to_equal(16)
+        val css_last_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), css_last.wire
+        )
+        expect(browser_renderer_frame_decode(
+            css_last_message.message, 64, 48
+        ).next_animation_ms).to_equal(-1)
 
     it "rejects non-init input":
         val rejected = hosted_browser_renderer_handle_init(
@@ -127,6 +147,47 @@ describe "hosted browser renderer worker":
         ).ok).to_be(true)
         expect(worker.width).to_equal(96)
         expect(worker.height).to_equal(64)
+
+    it "starts navigated CSS animation on the document clock":
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<p>old</p>"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3,
+            payload: "5000"
+        )).ok).to_be(true)
+        val navigation = browser_renderer_navigation_encode(
+            7, 4, "open", "https://example.test/", "GET", "", "", ""
+        )
+        val navigation_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), navigation.wire
+        )
+        val requested = worker.handle(navigation_message.message)
+        val fetch_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), requested.wire
+        )
+        val fetch = browser_renderer_fetch_request_decode(
+            fetch_message.message
+        )
+        val response = browser_renderer_network_response_encode(
+            7, 5, fetch.request_id, fetch.kind, fetch.url,
+            200, "Content-Type: text/html", CSS_ANIMATION_HTML, ""
+        )
+        val response_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), response.wire
+        )
+        val committed = worker.handle(response_message.message)
+        val frame_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), committed.wire
+        )
+        val frame = browser_renderer_frame_decode(
+            frame_message.message, 64, 48
+        )
+        expect(frame.ok).to_be(true)
+        expect(worker.browser.animation_start_time_ms).to_equal(5000)
+        expect(frame.next_animation_ms).to_equal(5016)
 
     it "keeps DOM focus and trusted chrome state across bounded actions":
         var worker = HostedBrowserRendererWorkerSession.create(80, 40)
