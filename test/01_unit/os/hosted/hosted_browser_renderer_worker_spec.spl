@@ -9,7 +9,8 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_frame_decode,
     browser_renderer_navigation_encode,
     browser_renderer_network_response_encode,
-    browser_renderer_resize_encode
+    browser_renderer_resize_encode,
+    browser_renderer_text_encode
 }
 use os.hosted.hosted_browser_renderer_worker.{
     HostedBrowserRendererWorkerSession,
@@ -19,6 +20,8 @@ use os.hosted.hosted_browser_renderer_worker.{
 }
 use std.gc_async_mut.web.browser_session.{BrowserSession}
 use std.gc_async_mut.web.browser_session_runtime.*
+
+extern fn rt_bytes_to_text(bytes: [u8]) -> text
 
 val SCRIPT_ANIMATION_HTML = "<!DOCTYPE html><html><head><style>#stage { width:32px; height:24px; background-color:#ef4444; }</style></head><body><script type='text/simple'>title \"SimpleReady\"\nbody_html '<div id=\"stage\"></div>'</script><script>requestAnimationFrame(function(frameTime){ document.body.innerHTML = '<div style=\"width:32px;height:24px;background-color:#2563eb\"></div>'; });</script></body></html>"
 val CSS_ANIMATION_HTML = "<style>@keyframes pulse { from { background-color:#ef4444; } to { background-color:#2563eb; } } #stage { width:32px; height:24px; animation:pulse 1000ms linear forwards; }</style><div id='stage'></div>"
@@ -289,6 +292,77 @@ describe "hosted browser renderer worker":
         val committed = worker.handle(response_message.message)
         expect(committed.ok).to_be(true)
         expect(worker.browser.current_body_html).to_contain("Loaded")
+
+    it "edits the focused address draft by UTF-8 scalar through worker actions":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: "<p>ready</p>"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 3,
+            payload: "C1\t1\t1\t7\naddress"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 4,
+            payload: "C1\t2\t0\t7\naddress"
+        )).ok).to_be(true)
+
+        val korean = browser_renderer_text_encode(7, 5, 3, "한")
+        val korean_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), korean.wire
+        )
+        expect(worker.handle(korean_message.message).ok).to_be(true)
+        val accented = browser_renderer_text_encode(7, 6, 4, "é")
+        val accented_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), accented.wire
+        )
+        expect(worker.handle(accented_message.message).ok).to_be(true)
+        expect(worker.browser.address_draft).to_equal("한é")
+
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 7,
+            payload: "K1\t5\t8\t1"
+        )).ok).to_be(true)
+        expect(worker.browser.address_draft).to_equal("한")
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 8,
+            payload: "K1\t6\t8\t1"
+        )).ok).to_be(true)
+        expect(worker.browser.address_draft).to_equal("")
+
+    it "fails closed on malformed UTF-8 address drafts through Backspace actions":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2, payload: "<p>ready</p>"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 3,
+            payload: "C1\t1\t1\t7\naddress"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 4,
+            payload: "C1\t2\t0\t7\naddress"
+        )).ok).to_be(true)
+        val invalid_continuation = rt_bytes_to_text([0xE2u8, 0x28u8, 0xA1u8])
+        expect(invalid_continuation.len()).to_equal(3)
+        expect(invalid_continuation.byte_at(0)).to_equal(0xE2.to_u8())
+        expect(invalid_continuation.byte_at(1)).to_equal(0x28.to_u8())
+        expect(invalid_continuation.byte_at(2)).to_equal(0xA1.to_u8())
+        worker.browser.address_draft = invalid_continuation
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 5,
+            payload: "K1\t1\t8\t1"
+        )).ok).to_be(true)
+        expect(worker.browser.address_draft).to_equal(invalid_continuation)
+
+        val truncated = rt_bytes_to_text([0xE2u8, 0x82u8])
+        expect(truncated.len()).to_equal(2)
+        worker.browser.address_draft = truncated
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 6,
+            payload: "K1\t2\t8\t1"
+        )).ok).to_be(true)
+        expect(worker.browser.address_draft).to_equal(truncated)
 
     it "rejects skipped ids and backward animation time":
         var session = BrowserSession.new()

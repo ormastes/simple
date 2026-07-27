@@ -47,9 +47,11 @@ use common.ui.draw_ir.{
     draw_ir_empty_glyph_run_payload,
     draw_ir_glyph_run_payload,
     draw_ir_no_rect,
+    draw_ir_rect_bounds,
     draw_ir_rect,
     draw_ir_text,
     draw_ir_text_styled,
+    draw_ir_text_styled_clipped,
     draw_ir_text_shaped_font,
     draw_ir_style_prop
 }
@@ -67,6 +69,48 @@ val BLUE: u32 = 0xff0000ffu32
 val YELLOW: u32 = 0xffffff00u32
 
 describe "Engine2D advanced Draw IR executor":
+
+    it "clips Draw IR text and restores the enclosing Engine2D route":
+        var direct = Engine2D.create_with_backend(24, 16, "cpu")
+        direct.clear(BG)
+        direct.draw_text(0, 0, "A", GREEN, 12)
+        val direct_pixels = direct.read_pixels()
+        var engine = Engine2D.create_with_backend(24, 16, "cpu")
+        engine.clear(BG)
+        val clipped = draw_ir_text_styled_clipped(
+            "input", 0, 0, "A", GREEN, [],
+            draw_ir_rect_bounds(0, 0, 1, 12)
+        )
+        val batch = draw_ir_batch(
+            "clipped-input", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("surf", "win", 0, 0, 24, 16, 0, 1000, false),
+            [clipped, draw_ir_rect("after-text", 12, 0, 2, 2, RED)]
+        )
+        val result = engine2d_draw_ir_adv_batch(engine, batch, false)
+        val pixels = result.pixels
+
+        expect(clipped.clip_rect.present).to_be(true)
+        expect(clipped.clip_rect.width).to_equal(1)
+        expect(direct_pixels[1]).to_equal(GREEN)
+        expect(pixels[1]).to_equal(BG)
+        expect(pixels[12]).to_equal(RED)
+
+        var enclosed = Engine2D.create_with_backend(24, 16, "cpu")
+        enclosed.clear(BG)
+        val enclosed_batch = draw_ir_batch(
+            "enclosed-clipped-input", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("surf", "win", 4, 0, 4, 8, 0, 1000, true), [
+                draw_ir_text_styled_clipped(
+                    "input", 0, 0, "A", GREEN, [],
+                    draw_ir_rect_bounds(0, 0, 1, 7)
+                ),
+                draw_ir_rect("inside-enclosing-clip", 1, 0, 1, 1, RED),
+                draw_ir_rect("outside-enclosing-clip", 5, 0, 1, 1, RED)
+            ]
+        )
+        val enclosed_result = engine2d_draw_ir_adv_batch(enclosed, enclosed_batch, false)
+        expect(enclosed_result.pixels[5]).to_equal(RED)
+        expect(enclosed_result.pixels[9]).to_equal(BG)
 
     it "fails closed on overflowing numeric style metadata":
         var direct = Engine2D.create_with_backend(32, 24, "cpu")

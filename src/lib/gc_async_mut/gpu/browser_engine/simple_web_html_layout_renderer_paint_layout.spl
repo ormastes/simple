@@ -162,6 +162,73 @@ fn input_text_for_paint(nd: HNode, max_glyphs: i32) -> text:
         return "*".repeat(count)
     input_text_prefix(value, max_glyphs)
 
+# Shared resolved input text geometry used by the CPU pixel painter and the
+# Draw IR producer. It contains only durable layout semantics: the executor
+# receives the final text and clip, never renderer-local font/cache state.
+pub struct InputTextPaintPlan:
+    text_value: text
+    baseline_x: i32
+    baseline_y: i32
+    measured_width: i32
+    clip: ClipRect
+    color: u32
+
+fn _input_text_content_clip(ancestor_clip: ClipRect, x: i32, y: i32, w: i32, h: i32) -> ClipRect:
+    val raw_clip = clip_intersect(ancestor_clip, x, y, x + w, y + h)
+    var x1 = raw_clip.x1
+    var y1 = raw_clip.y1
+    if x1 < raw_clip.x0:
+        x1 = raw_clip.x0
+    if y1 < raw_clip.y0:
+        y1 = raw_clip.y0
+    ClipRect(x0: raw_clip.x0, y0: raw_clip.y0, x1: x1, y1: y1)
+
+pub fn input_text_paint_plan(nd: HNode, st: Style, x: i32, y: i32, w: i32, h: i32, ancestor_clip: ClipRect, max_glyphs: i32) -> InputTextPaintPlan:
+    val raw_text = input_text_for_paint(nd, max_glyphs)
+    val transformed_text = apply_text_transform_for_paint(
+        raw_text, st.text_transform
+    )
+    val text_value = if st.direction_rtl:
+        reverse_text_for_paint(transformed_text)
+    else:
+        transformed_text
+    val content_x = x + st.border_l + st.pad_l
+    val content_y = y + st.border_t + st.pad_t
+    val content_w = w - st.border_l - st.border_r - st.pad_l - st.pad_r
+    val content_h = h - st.border_t - st.border_b - st.pad_t - st.pad_b
+    val scale = glyph_scale(st.font_size)
+    val baseline_y = content_y + if content_h > 7 * scale:
+        (content_h - 7 * scale) / 2
+    else:
+        0
+    val adv = style_text_advance(st)
+    val space_adv = style_space_advance(st)
+    val measured_width = style_text_line_advance_width(
+        text_value, 0, text_value.len(), st, adv, space_adv
+    )
+    val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
+    val baseline_x = if (
+        input_type == "button" or input_type == "submit" or
+        input_type == "reset"
+    ):
+        content_x + (content_w - measured_width) / 2
+    else:
+        text_line_aligned_x(
+            content_x, content_w, measured_width, st, 0, 1
+        )
+    # There is no computed ::placeholder color in Style yet. st.fg is the
+    # canonical theme-derived fail-safe rather than a renderer-only gray.
+    InputTextPaintPlan(
+        text_value: text_value,
+        baseline_x: baseline_x,
+        baseline_y: baseline_y,
+        measured_width: measured_width,
+        clip: _input_text_content_clip(
+            ancestor_clip, content_x, content_y, content_w, content_h
+        ),
+        color: st.fg
+    )
+
 fn fb_input_accent_control_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, accent_color: u32, clip: ClipRect) -> [u32]:
     val accent = if accent_color != 0u32: accent_color else: argb(37, 99, 235)
     val control_w = if w < 14: w else: 14
@@ -493,69 +560,28 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
             val scale = glyph_scale(st.font_size)
             val adv = style_text_advance(st)
             val space_adv = style_space_advance(st)
-            val content_x = x + st.border_l + st.pad_l
-            val content_w = (
-                w - st.border_l - st.border_r - st.pad_l - st.pad_r
-            )
-            val inner_h = h - st.border_t - st.border_b
-            val text_y = (
-                y + st.border_t +
-                if inner_h > 7 * scale: (inner_h - 7 * scale) / 2 else: 0
-            )
-            if content_w > 0 and text_y < fbh:
+            val content_w = w - st.border_l - st.border_r - st.pad_l - st.pad_r
+            if content_w > 0:
                 val glyph_advance = if adv > 0: adv else: 1
                 val max_glyphs = content_w / glyph_advance + 1
-                val raw_input_text = input_text_for_paint(nd, max_glyphs)
-                val transformed_input_text = apply_text_transform_for_paint(
-                    raw_input_text, st.text_transform
+                val plan = input_text_paint_plan(
+                    nd, st, x, y, w, h, paint_clip_at(clip_cache, i),
+                    max_glyphs
                 )
-                val input_text = if st.direction_rtl:
-                    reverse_text_for_paint(transformed_input_text)
-                else:
-                    transformed_input_text
-                if input_text != "":
-                    val ancestor_clip = paint_clip_at(clip_cache, i)
-                    val input_clip = clip_intersect(
-                        ancestor_clip,
-                        x + st.border_l, y + st.border_t,
-                        x + w - st.border_r, y + h - st.border_b
-                    )
-                    val text_w = style_text_line_advance_width(
-                        input_text, 0, input_text.len(), st, adv, space_adv
-                    )
-                    val input_type = attr_value(
-                        nd.attrs_raw, "type"
-                    ).trim().lower()
-                    val text_x = if (
-                        input_type == "button" or input_type == "submit" or
-                        input_type == "reset"
-                    ):
-                        content_x + (content_w - text_w) / 2
-                    else:
-                        text_line_aligned_x(
-                            content_x, content_w, text_w, st, 0, 1
-                        )
-                    val value = attr_value(nd.attrs_raw, "value")
-                    val text_color = if (
-                        value == "" and input_type != "submit" and
-                        input_type != "reset"
-                    ):
-                        argb(107, 114, 128)
-                    else:
-                        st.fg
+                if plan.text_value != "" and plan.baseline_y < fbh:
                     if st.text_shadow_color != 0u32:
                         out = fb_text_thin_scaled_clip_range(
                             out, fbw, fbh,
-                            text_x + st.text_shadow_x_px,
-                            text_y + st.text_shadow_y_px,
-                            input_text, 0, input_text.len(),
+                            plan.baseline_x + st.text_shadow_x_px,
+                            plan.baseline_y + st.text_shadow_y_px,
+                            plan.text_value, 0, plan.text_value.len(),
                             st.text_shadow_color, scale, adv, space_adv,
-                            st.font_style_italic, input_clip
+                            st.font_style_italic, plan.clip
                         )
                     out = fb_text_thin_scaled_clip_range(
-                        out, fbw, fbh, text_x, text_y,
-                        input_text, 0, input_text.len(), text_color,
-                        scale, adv, space_adv, st.font_style_italic, input_clip
+                        out, fbw, fbh, plan.baseline_x, plan.baseline_y,
+                        plan.text_value, 0, plan.text_value.len(), plan.color,
+                        scale, adv, space_adv, st.font_style_italic, plan.clip
                     )
         if visible_node and nd.tag == "#text":
             # Match the layout measure: white-space:pre/nowrap preserves raw text
@@ -1058,33 +1084,29 @@ fn _html_draw_ir_has_input_text(
     input_text_for_paint(node, content_w / glyph_advance + 1) != ""
 
 fn _html_draw_ir_input_text_command(
-    node: HNode, st: Style, boxes: LayoutResult, i: i32
+    node: HNode, st: Style, boxes: LayoutResult, i: i32,
+    ancestor_clip: ClipRect
 ) -> DrawIrCommand:
-    val content_x = boxes.bx[i] + st.border_l + st.pad_l
-    val content_y = boxes.by[i] + st.border_t + st.pad_t
     val content_w = _html_draw_ir_non_negative(
         boxes.bw[i] - st.border_l - st.border_r - st.pad_l - st.pad_r
     )
     val adv = style_text_advance(st)
     val glyph_advance = if adv > 0: adv else: 1
-    val input_text = input_text_for_paint(
-        node, content_w / glyph_advance + 1
+    val plan = input_text_paint_plan(
+        node, st, boxes.bx[i], boxes.by[i], boxes.bw[i], boxes.bh[i],
+        ancestor_clip, content_w / glyph_advance + 1
     )
-    val input_type = attr_value(node.attrs_raw, "type").trim().lower()
-    val value = attr_value(node.attrs_raw, "value")
-    val text_color = if (
-        value == "" and input_type != "submit" and input_type != "reset"
-    ):
-        argb(107, 114, 128)
-    else:
-        st.fg
-    draw_ir_text_styled(
+    draw_ir_text_styled_clipped(
         _html_draw_ir_component_id(node, i) + "_value",
-        content_x,
-        content_y,
-        input_text,
-        text_color,
-        _html_draw_ir_style_props(node, st)
+        plan.baseline_x,
+        plan.baseline_y,
+        plan.text_value,
+        plan.color,
+        _html_draw_ir_style_props(node, st),
+        draw_ir_rect_bounds(
+            plan.clip.x0, plan.clip.y0,
+            plan.clip.x1 - plan.clip.x0, plan.clip.y1 - plan.clip.y0
+        )
     )
 
 fn _html_draw_ir_visible(nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32) -> bool:
@@ -1107,6 +1129,9 @@ fn _html_draw_ir_visible(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
     true
 
 fn _html_draw_ir_commands(nodes: [HNode], styles: [Style], boxes: LayoutResult, width: i32, height: i32, vector_fonts: bool) -> [DrawIrCommand]:
+    val clip_cache = build_ancestor_clip_cache(
+        nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height
+    )
     var command_count: i32 = 0
     var i: i32 = 0
     var first_visible: i32 = -1
@@ -1139,7 +1164,8 @@ fn _html_draw_ir_commands(nodes: [HNode], styles: [Style], boxes: LayoutResult, 
                 nodes[i], styles[i], boxes.bw[i]
             ):
                 commands[out_i] = _html_draw_ir_input_text_command(
-                    nodes[i], styles[i], boxes, i
+                    nodes[i], styles[i], boxes, i,
+                    paint_clip_at(clip_cache, i)
                 )
                 out_i = out_i + 1
         i = i + 1

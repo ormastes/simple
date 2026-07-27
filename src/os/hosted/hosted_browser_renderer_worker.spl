@@ -13,6 +13,7 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_resize_decode
 }
 use common.ui.access.{WinTextActionRequest}
+use std.common.encoding.utf8.{text_is_valid_utf8, utf8_decode_one}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_event_identity_at_element_path, be_dom_focused_id
 }
@@ -36,6 +37,23 @@ val _WORKER_READ_BYTES: i64 = 8192
 
 fn _worker_reject(reason: text) -> BrowserRendererEncodeResult:
     BrowserRendererEncodeResult(ok: false, reason: reason, wire: "")
+
+# Address editing is scalar-oriented: browser action payloads are UTF-8 and
+# Backspace must never leave a partial multibyte sequence in the chrome draft.
+fn _worker_text_without_last_codepoint(value: text) -> text:
+    if not text_is_valid_utf8(value):
+        return value
+    val bytes = value.bytes()
+    var cursor: i64 = 0
+    var last_start: i64 = 0
+    while cursor < bytes.len():
+        last_start = cursor
+        val decoded = utf8_decode_one(bytes, cursor)
+        val consumed = decoded[1]
+        if consumed <= 0:
+            return value
+        cursor = cursor + consumed
+    value[0:last_start]
 
 pub struct HostedBrowserRendererWorkerResult:
     ok: bool
@@ -259,7 +277,7 @@ pub class HostedBrowserRendererWorkerSession:
                 else:
                     self.browser.current_url
                 val shortened = if current.len() > 0:
-                    current.slice(0, current.len() - 1)
+                    _worker_text_without_last_codepoint(current)
                 else:
                     ""
                 self.address_replace_on_text = false
