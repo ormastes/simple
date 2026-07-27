@@ -70,6 +70,20 @@ class Engine3DFontReadbackEvidence:
     atlas_owner_identity: text
     atlas_generation: i64
     atlas_payload_sha256: text
+    atlas_upload_frame_sequence: i64
+    vertex_upload_frame_sequence: i64
+    atlas_upload_frame_ready: bool
+    vertex_upload_frame_ready: bool
+    atlas_upload_frame_atlas_handle: i64
+    atlas_upload_frame_texture_binding_ready: bool
+    atlas_width: i64
+    atlas_height: i64
+    atlas_upload_count: i64
+    atlas_uploaded_bytes: i64
+    hud_vertex_upload_count: i64
+    hud_vertex_uploaded_bytes: i64
+    world_vertex_upload_count: i64
+    world_vertex_uploaded_bytes: i64
     sampler_handle: i64
     hud_draws: i64
     hud_placement_verified: bool
@@ -109,7 +123,16 @@ fn _engine3d_unavailable(reason: text) -> Engine3DFontReadbackEvidence:
         device_handle: 0, device_name: "", device_type: "", driver_identity: "",
         submitted_command_handle: 0, pipeline_handle: 0, world_pipeline_handle: 0,
         texture_handle: 0, texture_binding_ready: false, atlas_owner_identity: "",
-        atlas_generation: -1, atlas_payload_sha256: "", sampler_handle: 0,
+        atlas_generation: -1, atlas_payload_sha256: "",
+        atlas_upload_frame_sequence: 0, vertex_upload_frame_sequence: 0,
+        atlas_upload_frame_ready: false, vertex_upload_frame_ready: false,
+        atlas_upload_frame_atlas_handle: 0,
+        atlas_upload_frame_texture_binding_ready: false,
+        atlas_width: 0, atlas_height: 0,
+        atlas_upload_count: 0, atlas_uploaded_bytes: 0,
+        hud_vertex_upload_count: 0, hud_vertex_uploaded_bytes: 0,
+        world_vertex_upload_count: 0, world_vertex_uploaded_bytes: 0,
+        sampler_handle: 0,
         hud_draws: 0, hud_placement_verified: false, world_draws: 0,
         world_depth_transform_verified: false, fence_handle: 0,
         fence_waited: false, fence_destroyed: false, readback_source: "none",
@@ -137,6 +160,18 @@ fn expect_engine3d_font_readback(evidence: Engine3DFontReadbackEvidence) -> bool
         evidence.texture_handle > 0 and evidence.texture_binding_ready and
         evidence.atlas_owner_identity != "" and evidence.atlas_generation >= 0 and
         evidence.atlas_payload_sha256.len() == 64 and
+        evidence.atlas_upload_frame_sequence > 0 and
+        evidence.vertex_upload_frame_sequence > evidence.atlas_upload_frame_sequence and
+        evidence.atlas_upload_frame_ready and evidence.vertex_upload_frame_ready and
+        evidence.atlas_upload_frame_atlas_handle > 0 and
+        evidence.atlas_upload_frame_texture_binding_ready and
+        evidence.atlas_width > 0 and evidence.atlas_height > 0 and
+        evidence.atlas_upload_count == 1 and
+        evidence.atlas_uploaded_bytes == evidence.atlas_width * evidence.atlas_height and
+        evidence.hud_vertex_upload_count == 1 and
+        evidence.hud_vertex_uploaded_bytes >= 20 and evidence.hud_vertex_uploaded_bytes % 20 == 0 and
+        evidence.world_vertex_upload_count == 1 and
+        evidence.world_vertex_uploaded_bytes >= 24 and evidence.world_vertex_uploaded_bytes % 24 == 0 and
         evidence.sampler_handle > 0 and evidence.hud_draws > 0 and evidence.hud_placement_verified and
         evidence.world_draws > 0 and evidence.world_depth_transform_verified and
         evidence.fence_handle > 0 and evidence.fence_waited and
@@ -267,6 +302,14 @@ fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
     engine.begin_frame()
     val near_only_drawn = engine.draw_text_world(0.5, 0.0, 0.0, "A", 0xff00ff00u32, 14)
     engine.end_frame()
+    val first_frame_sequence = engine.vulkan_font_receipt_frame_sequence()
+    val first_frame_ready = engine.vulkan_font_receipt_ready()
+    val first_atlas_handle = engine.vulkan_font_receipt_atlas_handle()
+    val first_texture_binding_ready = engine.vulkan_font_receipt_texture_binding_ready()
+    val first_atlas_width = engine.vulkan_font_receipt_atlas_width()
+    val first_atlas_height = engine.vulkan_font_receipt_atlas_height()
+    val first_atlas_upload_count = engine.vulkan_font_receipt_atlas_upload_count()
+    val first_atlas_uploaded_bytes = engine.vulkan_font_receipt_atlas_uploaded_bytes()
     val near_only = engine.read_pixels()
     engine.begin_frame()
     val far_only_drawn = engine.draw_text_world(0.5, 0.0, -1.0, "A", 0xffff0000u32, 14)
@@ -374,6 +417,12 @@ fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
     val mixed_hud_drawn = engine.draw_text_hud(4, 4, "HUD", 0xffffffffu32, 18)
     val world_drawn = engine.draw_text_world(0.5f32, 0.0f32, 0.0f32, "WORLD", 0xff40ff40u32, 14)
     engine.end_frame()
+    val final_frame_sequence = engine.vulkan_font_receipt_frame_sequence()
+    val final_frame_ready = engine.vulkan_font_receipt_ready()
+    val final_hud_vertex_upload_count = engine.vulkan_font_receipt_hud_vertex_upload_count()
+    val final_hud_vertex_uploaded_bytes = engine.vulkan_font_receipt_hud_vertex_uploaded_bytes()
+    val final_world_vertex_upload_count = engine.vulkan_font_receipt_world_vertex_upload_count()
+    val final_world_vertex_uploaded_bytes = engine.vulkan_font_receipt_world_vertex_uploaded_bytes()
     val installed = engine.vulkan_font_evidence()
     if installed == nil:
         engine.shutdown()
@@ -413,6 +462,16 @@ fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
         native.atlas_owner_identity == expected_cache_identity and
         native.atlas_generation == evidence_batch.atlas_generation and
         native.atlas_payload_sha256 == sha256_u8_hex(evidence_alpha))
+    val upload_receipts = (first_frame_ready and first_frame_sequence > 0 and
+        first_atlas_handle > 0 and first_texture_binding_ready and
+        first_atlas_width > 0 and first_atlas_height > 0 and
+        first_atlas_upload_count == 1 and
+        first_atlas_uploaded_bytes == first_atlas_width * first_atlas_height and
+        final_frame_ready and final_frame_sequence > first_frame_sequence and
+        final_hud_vertex_upload_count == 1 and
+        final_hud_vertex_uploaded_bytes >= 20 and final_hud_vertex_uploaded_bytes % 20 == 0 and
+        final_world_vertex_upload_count == 1 and
+        final_world_vertex_uploaded_bytes >= 24 and final_world_vertex_uploaded_bytes % 24 == 0)
     val device_pixels = engine.read_pixels()
     val cpu_pixels = engine.read_cpu_comparator_pixels()
     var nonblank = false
@@ -434,7 +493,8 @@ fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
                 native.pixels_rgba8[byte_index + 2] == (pixel & 255u32).to_u8() and
                 native.pixels_rgba8[byte_index + 3] == ((pixel >> 24u32) & 255u32).to_u8())
         i = i + 1
-    val passed = (native.ready and distinct_pipelines and adapter_reused and hud_placement_verified and mixed_hud_drawn and
+    val passed = (native.ready and distinct_pipelines and adapter_reused and upload_receipts and
+        hud_placement_verified and mixed_hud_drawn and
         world_drawn and world_depth_verified and translucent_destination_parity and
         matches_evidence and nonblank and parity)
     val evidence = Engine3DFontReadbackEvidence(
@@ -442,6 +502,7 @@ fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
         reason: if not native.ready: native.reason
             elif not distinct_pipelines: "native-hud-world-pipelines-not-distinct"
             elif not adapter_reused: "native-vulkan-font-reinstall-replaced-adapter"
+            elif not upload_receipts: "native-font-upload-receipts-missing"
             elif not world_depth_verified: "native-world-depth-oracle-failed"
             elif not hud_placement_verified: "native-hud-placement-oracle-failed"
             elif not translucent_destination_parity: "native-translucent-destination-parity-failed"
@@ -461,6 +522,20 @@ fn _collect_engine3d_font_readback() -> Engine3DFontReadbackEvidence:
         atlas_owner_identity: native.atlas_owner_identity,
         atlas_generation: native.atlas_generation,
         atlas_payload_sha256: native.atlas_payload_sha256,
+        atlas_upload_frame_sequence: first_frame_sequence,
+        vertex_upload_frame_sequence: final_frame_sequence,
+        atlas_upload_frame_ready: first_frame_ready,
+        vertex_upload_frame_ready: final_frame_ready,
+        atlas_upload_frame_atlas_handle: first_atlas_handle,
+        atlas_upload_frame_texture_binding_ready: first_texture_binding_ready,
+        atlas_width: first_atlas_width,
+        atlas_height: first_atlas_height,
+        atlas_upload_count: first_atlas_upload_count,
+        atlas_uploaded_bytes: first_atlas_uploaded_bytes,
+        hud_vertex_upload_count: final_hud_vertex_upload_count,
+        hud_vertex_uploaded_bytes: final_hud_vertex_uploaded_bytes,
+        world_vertex_upload_count: final_world_vertex_upload_count,
+        world_vertex_uploaded_bytes: final_world_vertex_uploaded_bytes,
         sampler_handle: native.sampler_handle,
         hud_draws: native.hud_draws, hud_placement_verified: hud_placement_verified,
         world_draws: native.world_draws,
@@ -503,6 +578,35 @@ fn _collect_simpleos_pixel_evidence() -> SimpleOsFontPixelEvidence:
         region_rgb_sha256: if valid: FONT_REGION_RGB_SHA256 else: "",
         device_origin: if valid: "qemu-pmemsave" else: "none",
         region_rgb_bytes: if valid: 8064 else: 0)
+
+fn _engine3d_receipt_fixture(atlas_frame: i64, vertex_frame: i64,
+                             atlas_handle: i64, atlas_bound: bool,
+                             atlas_count: i64, atlas_bytes: i64,
+                             hud_count: i64, hud_bytes: i64,
+                             world_count: i64, world_bytes: i64) -> Engine3DFontReadbackEvidence:
+    Engine3DFontReadbackEvidence(
+        status: "pass", reason: "", device_handle: 1,
+        device_name: "fixture-device", device_type: "virtual",
+        driver_identity: "fixture-driver", submitted_command_handle: 1,
+        pipeline_handle: 1, world_pipeline_handle: 2, texture_handle: 1,
+        texture_binding_ready: true, atlas_owner_identity: "fixture-owner",
+        atlas_generation: 1, atlas_payload_sha256: FONT_ASSET_SHA256,
+        atlas_upload_frame_sequence: atlas_frame,
+        vertex_upload_frame_sequence: vertex_frame,
+        atlas_upload_frame_ready: true, vertex_upload_frame_ready: true,
+        atlas_upload_frame_atlas_handle: atlas_handle,
+        atlas_upload_frame_texture_binding_ready: atlas_bound,
+        atlas_width: 4, atlas_height: 4,
+        atlas_upload_count: atlas_count, atlas_uploaded_bytes: atlas_bytes,
+        hud_vertex_upload_count: hud_count, hud_vertex_uploaded_bytes: hud_bytes,
+        world_vertex_upload_count: world_count, world_vertex_uploaded_bytes: world_bytes,
+        sampler_handle: 1, hud_draws: 1, hud_placement_verified: true,
+        world_draws: 1, world_depth_transform_verified: true,
+        fence_handle: 1, fence_waited: true, fence_destroyed: true,
+        readback_source: "device_image_readback", color_image_handle: 1,
+        readback_bytes: 16384, readback_matches_evidence: true,
+        nonblank_pixels: true, cpu_oracle_parity: true,
+        translucent_destination_parity: true)
 
 describe "native GPU font promotion evidence":
     # @req REQ-014
@@ -557,6 +661,14 @@ describe "native GPU font promotion evidence":
             pipeline_handle: 1, world_pipeline_handle: 2, texture_handle: 1,
             texture_binding_ready: true, atlas_owner_identity: "forged-owner",
             atlas_generation: 1, atlas_payload_sha256: FONT_ASSET_SHA256,
+            atlas_upload_frame_sequence: 1, vertex_upload_frame_sequence: 2,
+            atlas_upload_frame_ready: true, vertex_upload_frame_ready: true,
+            atlas_upload_frame_atlas_handle: 1,
+            atlas_upload_frame_texture_binding_ready: true,
+            atlas_width: 1, atlas_height: 1,
+            atlas_upload_count: 1, atlas_uploaded_bytes: 1,
+            hud_vertex_upload_count: 1, hud_vertex_uploaded_bytes: 20,
+            world_vertex_upload_count: 1, world_vertex_uploaded_bytes: 24,
             sampler_handle: 1, hud_draws: 1, hud_placement_verified: true,
             world_draws: 1, world_depth_transform_verified: true,
             fence_handle: 1, fence_waited: true, fence_destroyed: true,
@@ -568,6 +680,30 @@ describe "native GPU font promotion evidence":
         expect(expect_engine2d_font_readback(forged_2d)).to_be(false)
         expect(expect_engine3d_font_readback(forged_3d)).to_be(false)
 
+    # @req REQ-012 REQ-013 NFR-008
+    it "should reject forged stale zero partial and byte-inconsistent upload receipts":
+        step("Prove native submission and device readback")
+        expect(expect_engine3d_font_readback(
+            _engine3d_receipt_fixture(1, 2, 1, true, 1, 16, 1, 20, 1, 24))).to_be(true)
+        expect(expect_engine3d_font_readback(
+            _engine3d_receipt_fixture(2, 2, 1, true, 1, 16, 1, 20, 1, 24))).to_be(false)
+        expect(expect_engine3d_font_readback(
+            _engine3d_receipt_fixture(1, 2, 0, true, 1, 16, 1, 20, 1, 24))).to_be(false)
+        expect(expect_engine3d_font_readback(
+            _engine3d_receipt_fixture(1, 2, 1, false, 1, 16, 1, 20, 1, 24))).to_be(false)
+        expect(expect_engine3d_font_readback(
+            _engine3d_receipt_fixture(1, 2, 1, true, 0, 0, 1, 20, 1, 24))).to_be(false)
+        expect(expect_engine3d_font_readback(
+            _engine3d_receipt_fixture(1, 2, 1, true, 1, 16, 0, 0, 1, 24))).to_be(false)
+        expect(expect_engine3d_font_readback(
+            _engine3d_receipt_fixture(1, 2, 1, true, 1, 16, 1, 20, 0, 0))).to_be(false)
+        expect(expect_engine3d_font_readback(
+            _engine3d_receipt_fixture(1, 2, 1, true, 1, 15, 1, 20, 1, 24))).to_be(false)
+        expect(expect_engine3d_font_readback(
+            _engine3d_receipt_fixture(1, 2, 1, true, 1, 16, 1, 19, 1, 24))).to_be(false)
+        expect(expect_engine3d_font_readback(
+            _engine3d_receipt_fixture(1, 2, 1, true, 1, 16, 1, 20, 1, 23))).to_be(false)
+
     it "should promote Engine2D and Engine3D fonts with a consistent Vulkan device tuple":
         step("Prove native submission and device readback")
         step("Render Engine2D text on the promoted backend")
@@ -576,7 +712,7 @@ describe "native GPU font promotion evidence":
         val engine3d = _collect_engine3d_font_readback()
         val promotion = classify_native_font_promotion(engine2d, engine3d)
         print "engine2d_font status={engine2d.status} reason={engine2d.reason} device={engine2d.device_identity} pipeline={engine2d.pipeline_handle} atlas={engine2d.atlas_handle} fence={engine2d.fence_handle} readback_bytes={engine2d.readback_bytes}"
-        print "engine3d_font status={engine3d.status} reason={engine3d.reason} device={engine3d.device_handle} hud_pipeline={engine3d.pipeline_handle} world_pipeline={engine3d.world_pipeline_handle} texture={engine3d.texture_handle} atlas_owner={engine3d.atlas_owner_identity} atlas_generation={engine3d.atlas_generation} atlas_sha256={engine3d.atlas_payload_sha256} sampler={engine3d.sampler_handle} fence={engine3d.fence_handle} readback_bytes={engine3d.readback_bytes} translucent_destination_parity={engine3d.translucent_destination_parity}"
+        print "engine3d_font status={engine3d.status} reason={engine3d.reason} device={engine3d.device_handle} hud_pipeline={engine3d.pipeline_handle} world_pipeline={engine3d.world_pipeline_handle} texture={engine3d.texture_handle} atlas_owner={engine3d.atlas_owner_identity} atlas_generation={engine3d.atlas_generation} atlas_sha256={engine3d.atlas_payload_sha256} atlas_upload_frame={engine3d.atlas_upload_frame_sequence} atlas_upload_handle={engine3d.atlas_upload_frame_atlas_handle} atlas_upload_bound={engine3d.atlas_upload_frame_texture_binding_ready} atlas_uploads={engine3d.atlas_upload_count}/{engine3d.atlas_uploaded_bytes} vertex_upload_frame={engine3d.vertex_upload_frame_sequence} hud_vertex_uploads={engine3d.hud_vertex_upload_count}/{engine3d.hud_vertex_uploaded_bytes} world_vertex_uploads={engine3d.world_vertex_upload_count}/{engine3d.world_vertex_uploaded_bytes} sampler={engine3d.sampler_handle} fence={engine3d.fence_handle} readback_bytes={engine3d.readback_bytes} translucent_destination_parity={engine3d.translucent_destination_parity}"
         if promotion != "pass":
             fail_test("native font promotion " + promotion + ": Engine2D=" +
                 engine2d.reason + " Engine3D=" + engine3d.reason)

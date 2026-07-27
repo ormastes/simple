@@ -5,7 +5,11 @@ archive root and reuses the declared bootstrap runtime and launcher for fallback
 """
 
 use std.spec.*
-use std.io_runtime.{file_read}
+use std.io_runtime.{dir_create, dir_remove, file_read, file_write, is_dir}
+use std.process.{run}
+use std.common.encoding.font_registry.{validate_selected_font_bundle_root}
+use std.nogc_sync_mut.package.dist.{DistributionBuilder, DistConfig, Platform,
+    distribution_main}
 
 describe "release archive layout":
     # @req REQ-004 REQ-014
@@ -33,3 +37,65 @@ describe "release archive layout":
         expect(workflow).to_contain("cp \"$FULL_BOOTSTRAP_ROOT/bin/simple-runtime\" \"$PKG_ROOT/bin/\"")
         expect(workflow).to_contain("cp \"$FULL_BOOTSTRAP_ROOT/bin/simple\" \"$PKG_ROOT/bin/\"")
         expect(workflow).to_contain("dist/simple-full-*.tar.gz.sha256")
+
+    # @req REQ-004 REQ-014
+    # @req NFR-001 NFR-003
+    it "should execute immutable release validation and propagate archive failures":
+        step("Run the release workflow registry validation")
+        val manifest = "scripts/os/simpleos_font_bundle_companion.sha256"
+        val manifest_check = run("sha256sum", ["--check", manifest])
+        expect(manifest_check.exit_code).to_equal(0)
+
+        val work = "/tmp/simple_release_archive_layout_spec"
+        if is_dir(work):
+            expect(dir_remove(work, recursive: true)).to_be(true)
+        expect(dir_create(work, recursive: true)).to_be(true)
+        val bad_manifest = work + "/bad.sha256"
+        val corrupted = file_read(manifest).replace(
+            "337c6e14f6a0a05be187442ca816c5cc256bbc76ca7f61db766facddcb587ce2",
+            "0000000000000000000000000000000000000000000000000000000000000000")
+        expect(file_write(bad_manifest, corrupted)).to_be(true)
+        val bad_manifest_check = run("sha256sum", ["--check", bad_manifest])
+        expect(bad_manifest_check.exit_code == 0).to_be(false)
+
+        step("Create and inspect an archive through the production builder")
+        val package_root = work + "/simple-font-archive-linux-x86_64"
+        expect(dir_create(package_root, recursive: true)).to_be(true)
+        val builder = DistributionBuilder.new(DistConfig(
+            version: "font-archive",
+            output_dir: work,
+            strip_binaries: false,
+            exclude_patterns: [],
+        ))
+        expect(builder.copy_assets_and_legal(package_root)).to_be(true)
+        expect(builder.create_archive(
+            "linux-x86_64", package_root, Platform.LinuxX64)).to_be(true)
+        expect(dir_create(work + "/extract", recursive: true)).to_be(true)
+        val extract = run("tar", [
+            "-xzf", work + "/simple-font-archive-linux-x86_64.tar.gz",
+            "-C", work + "/extract",
+        ])
+        expect(extract.exit_code).to_equal(0)
+        expect(validate_selected_font_bundle_root(
+            work + "/extract/simple-font-archive-linux-x86_64")).to_be(true)
+
+        step("Propagate a production archiver failure")
+        val blocked_package = work + "/simple-font-archive-blocked"
+        expect(dir_create(blocked_package, recursive: true)).to_be(true)
+        expect(dir_create(blocked_package + ".tar.gz", recursive: true)).to_be(true)
+        expect(builder.create_archive(
+            "blocked", blocked_package, Platform.LinuxX64)).to_be(false)
+
+        step("Return a failing process exit code when any platform build fails")
+        val blocked_output = work + "/blocked-output"
+        expect(file_write(blocked_output, "not a directory")).to_be(true)
+        expect(distribution_main(DistConfig(
+            version: "font-cli-failure",
+            output_dir: blocked_output,
+            strip_binaries: false,
+            exclude_patterns: [],
+        ))).to_equal(1)
+        val dist_source = file_read("src/lib/nogc_sync_mut/package/dist.spl")
+        expect(dist_source).to_contain("fn main() -> i64:")
+        expect(dist_source).to_contain("distribution_main(DistConfig.default())")
+        expect(dir_remove(work, recursive: true)).to_be(true)

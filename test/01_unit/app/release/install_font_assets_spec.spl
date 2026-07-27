@@ -5,15 +5,17 @@ immutable font bundle, root license, and notices in canonical installed/package 
 """
 
 use std.spec.*
-use std.io_runtime.{dir_create, dir_remove, file_read, is_dir}
+use std.io_runtime.{dir_create, dir_remove, file_exists, file_read, file_write, is_dir}
 use std.process.{run}
+use std.common.encoding.font_registry.{validate_selected_font_bundle_root}
+use std.nogc_sync_mut.package.dist.{DistributionBuilder, DistConfig}
 
 describe "release installer font assets":
     # @req REQ-004 REQ-014
     it "should install only the preflighted immutable font bundle through one share root":
         step("Load the pinned multilingual font manifest")
         val source = file_read("src/app/release/install.spl")
-        val font_copy = source.slice(source.index_of("fn copy_font_tree"), source.index_of("fn copy_file_unchanged"))
+        val font_copy = source.slice(source.index_of("fn copy_font_tree"), source.index_of("fn copy_pinned_file"))
 
         expect(source).to_contain("copy_font_tree(src: script_dir + \"/assets/fonts\"")
         expect(source.index_of("copy_font_tree(src: script_dir + \"/assets/fonts\"") < source.index_of("# Install runtime binary")).to_be(true)
@@ -24,11 +26,13 @@ describe "release installer font assets":
         expect(font_copy).to_contain("pin.path == \"assets/fonts/\" + rel")
         expect(font_copy).to_contain("if not pinned: return false")
         expect(font_copy).to_contain("if not rt_file_exists(source_path): return false")
-        expect(font_copy).to_contain("sha256_u8_hex(rt_file_read_bytes(source_path)) != pin.sha256")
+        expect(font_copy).to_contain("validate_selected_font_bundle_bytes(pin.path, rt_file_read_bytes(source_path))")
         expect(font_copy).to_contain("rt_file_copy(source_path, dst_file)")
-        expect(font_copy).to_contain("sha256_u8_hex(rt_file_read_bytes(dst_file)) != pin.sha256")
+        expect(font_copy).to_contain("validate_selected_font_bundle_bytes(pin.path, rt_file_read_bytes(dst_file))")
         expect(font_copy.index_of("rt_file_read_bytes(source_path)") < font_copy.index_of("rt_dir_create(get_parent(dst_file)")).to_be(true)
         expect(font_copy.contains("rt_file_copy(f, dst_file)")).to_be(false)
+        expect(source).to_contain("copy_pinned_file(script_dir + \"/LICENSE\", prefix + \"/share/simple/LICENSE\", \"LICENSE\")")
+        expect(source).to_contain("copy_pinned_file(script_dir + \"/THIRD_PARTY_NOTICES.md\", prefix + \"/share/simple/THIRD_PARTY_NOTICES.md\", \"THIRD_PARTY_NOTICES.md\")")
         expect(source).to_contain("bundled font installation incomplete")
         expect(source).to_contain("return 1")
         expect(source).to_contain("if not rt_file_copy(runtime_src, runtime_dst)")
@@ -49,6 +53,9 @@ describe "release installer font assets":
         expect(workflow).to_contain("cp LICENSE THIRD_PARTY_NOTICES.md staging-deb/usr/local/share/simple/")
         expect(workflow).to_contain("cp -r assets/fonts staging-win/assets/")
         expect(workflow).to_contain("cp LICENSE THIRD_PARTY_NOTICES.md staging-win/")
+        expect(workflow).to_contain("sha256sum --check scripts/os/simpleos_font_bundle_companion.sha256")
+        expect(workflow.contains("cp LICENSE \"${PKG_DIR}/\" 2>/dev/null || true")).to_be(false)
+        expect(workflow.contains("cp THIRD_PARTY_NOTICES.md \"${PKG_DIR}/\" 2>/dev/null || true")).to_be(false)
         expect(workflow).to_contain("BIN_NAME=\"simple-runtime\"")
         expect(workflow).to_contain("export SIMPLE_ASSET_ROOT=\"$SCRIPT_DIR/..\"")
         expect(workflow).to_contain("set \"SIMPLE_ASSET_ROOT=%~dp0..\"")
@@ -60,8 +67,15 @@ describe "release installer font assets":
         expect(nsis).to_contain("\"SIMPLE_ASSET_ROOT\" \"$INSTDIR\"")
 
         val dist = file_read("src/lib/nogc_sync_mut/package/dist.spl")
-        expect(dist).to_contain("[\"-r\", \"assets\", \"\{pkg_dir\}/\"]")
+        expect(dist).to_contain("for pin in selected_font_bundle_asset_pins():")
+        expect(dist).to_contain("\"rm\", [\"-rf\", \"\{pkg_dir\}/assets\"]")
+        expect(dist).to_contain("\"cp\", [source, destination]")
+        expect(dist.contains("[\"-r\", \"assets\", \"\{pkg_dir\}/\"]")).to_be(false)
         expect(dist).to_contain("[\"LICENSE\", \"THIRD_PARTY_NOTICES.md\", \"\{pkg_dir\}/\"]")
+        expect(dist).to_contain("if not self.copy_assets_and_legal(pkg_dir): return false")
+        expect(dist).to_contain("if not validate_selected_font_bundle_root(pkg_dir)")
+        expect(dist).to_contain("if not self.copy_sources(pkg_dir):")
+        expect(dist).to_contain("if not self.create_archive(platform_name, pkg_dir, platform):")
         expect(dist).to_contain("else: \"simple-runtime\"")
         expect(dist).to_contain("set SIMPLE_ASSET_ROOT=%SCRIPT_DIR%..")
         expect(dist).to_contain("export SIMPLE_ASSET_ROOT=\"$SCRIPT_DIR/..\"")
@@ -93,44 +107,53 @@ describe "release installer font assets":
             val staging = file_read(path)
             expect(staging).to_contain("\{staging\}/usr/local/share/simple/assets/fonts/")
             expect(staging).to_contain("\{staging\}/usr/local/share/simple/THIRD_PARTY_NOTICES.md")
+            expect(staging).to_contain("\{staging\}/usr/local/share/doc/simple-lang/THIRD_PARTY_NOTICES.md")
             expect(staging).to_contain("\{staging\}/assets/fonts/")
             expect(staging).to_contain("\{staging\}/THIRD_PARTY_NOTICES.md")
+            expect(staging).to_contain("\{staging\}/doc/THIRD_PARTY_NOTICES.md")
             expect(staging).to_contain("export SIMPLE_ASSET_ROOT=/usr/local/share/simple")
+            expect(staging).to_contain("for pin in selected_font_bundle_asset_pins():")
+            expect(staging).to_contain("file_copy(pin.path, destination)")
+            expect(staging.contains("process_run(\"cp\", [\"-r\", \"assets/fonts/.\"")).to_be(false)
+            expect(staging).to_contain("validate_selected_font_bundle_root(")
+            expect(staging).to_contain("Staged font assets or notices failed immutable validation")
 
     # @req REQ-004 REQ-005
     # @req NFR-001 NFR-003
-    it "should preserve every font and legal byte through install package and archive layouts":
-        step("Load the pinned multilingual font manifest")
+    it "should execute production package copy validation and reject corrupt or blocked layouts":
+        step("Copy and validate through the production distribution builder")
         val work = "/tmp/simple_font_distribution_byte_identity_spec"
         if is_dir(work):
             expect(dir_remove(work, recursive: true)).to_be(true)
-        expect(dir_create(work + "/install/share/simple/assets", recursive: true)).to_be(true)
-        expect(dir_create(work + "/package/assets", recursive: true)).to_be(true)
-        expect(dir_create(work + "/extract", recursive: true)).to_be(true)
-        expect(dir_create(work + "/zip-extract", recursive: true)).to_be(true)
-        val command = "set -eu; " +
-            "cp -R assets/fonts \"{work}/install/share/simple/assets/\"; " +
-            "cp LICENSE THIRD_PARTY_NOTICES.md \"{work}/install/share/simple/\"; " +
-            "cp -R \"{work}/install/share/simple/assets/fonts\" \"{work}/package/assets/\"; " +
-            "cp \"{work}/install/share/simple/LICENSE\" \"{work}/install/share/simple/THIRD_PARTY_NOTICES.md\" \"{work}/package/\"; " +
-            "diff -qr assets/fonts \"{work}/install/share/simple/assets/fonts\" >/dev/null; " +
-            "diff -qr assets/fonts \"{work}/package/assets/fonts\" >/dev/null; " +
-            "cmp -s LICENSE \"{work}/install/share/simple/LICENSE\"; " +
-            "cmp -s THIRD_PARTY_NOTICES.md \"{work}/install/share/simple/THIRD_PARTY_NOTICES.md\"; " +
-            "cmp -s LICENSE \"{work}/package/LICENSE\"; " +
-            "cmp -s THIRD_PARTY_NOTICES.md \"{work}/package/THIRD_PARTY_NOTICES.md\"; " +
-            "tar -czf \"{work}/package.tar.gz\" -C \"{work}\" package; " +
-            "tar -xzf \"{work}/package.tar.gz\" -C \"{work}/extract\"; " +
-            "diff -qr assets/fonts \"{work}/extract/package/assets/fonts\" >/dev/null; " +
-            "cmp -s LICENSE \"{work}/extract/package/LICENSE\"; " +
-            "cmp -s THIRD_PARTY_NOTICES.md \"{work}/extract/package/THIRD_PARTY_NOTICES.md\"; " +
-            "(cd \"{work}\" && zip -0 -r -q package.zip package); " +
-            "unzip -q \"{work}/package.zip\" -d \"{work}/zip-extract\"; " +
-            "diff -qr assets/fonts \"{work}/zip-extract/package/assets/fonts\" >/dev/null; " +
-            "cmp -s LICENSE \"{work}/zip-extract/package/LICENSE\"; " +
-            "cmp -s THIRD_PARTY_NOTICES.md \"{work}/zip-extract/package/THIRD_PARTY_NOTICES.md\"; " +
-            "printf 'font_distribution_byte_identity=pass\\n'"
-        val result = run("/bin/sh", ["-c", command])
-        expect(result.exit_code).to_equal(0)
-        expect(result.stdout).to_contain("font_distribution_byte_identity=pass")
+        expect(dir_create(work, recursive: true)).to_be(true)
+        val package_root = work + "/simple-font-test-linux-x86_64"
+        expect(dir_create(package_root, recursive: true)).to_be(true)
+        expect(dir_create(package_root + "/assets/fonts", recursive: true)).to_be(true)
+        val extra_asset = package_root + "/assets/fonts/UNMANAGED.txt"
+        val extra_link = package_root + "/assets/fonts/UNMANAGED-LINK"
+        expect(file_write(extra_asset, "unmanaged")).to_be(true)
+        val link_result = run("ln", ["-s", "UNMANAGED.txt", extra_link])
+        expect(link_result.exit_code).to_equal(0)
+        expect(file_exists(extra_asset)).to_be(true)
+        expect(file_exists(extra_link)).to_be(true)
+        val builder = DistributionBuilder.new(DistConfig(
+            version: "font-test",
+            output_dir: work,
+            strip_binaries: false,
+            exclude_patterns: [],
+        ))
+        expect(builder.copy_assets_and_legal(package_root)).to_be(true)
+        expect(validate_selected_font_bundle_root(package_root)).to_be(true)
+        expect(file_exists(extra_asset)).to_be(false)
+        expect(file_exists(extra_link)).to_be(false)
+
+        step("Reject a corrupted root legal byte")
+        expect(file_write(package_root + "/LICENSE", "corrupt")).to_be(true)
+        expect(validate_selected_font_bundle_root(package_root)).to_be(false)
+        expect(builder.copy_assets_and_legal(package_root)).to_be(true)
+        expect(validate_selected_font_bundle_root(package_root)).to_be(true)
+
+        step("Propagate a production copy failure")
+        expect(file_write(work + "/blocked", "not a directory")).to_be(true)
+        expect(builder.copy_assets_and_legal(work + "/blocked/package")).to_be(false)
         expect(dir_remove(work, recursive: true)).to_be(true)

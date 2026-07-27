@@ -11,8 +11,8 @@
 
 use app.io.mod.{process_run}
 use std.io_runtime.{cwd}
-use std.common.crypto.sha256.{sha256_u8_hex}
-use std.common.encoding.font_registry.{selected_font_bundle_asset_pins}
+use std.common.encoding.font_registry.{selected_font_bundle_asset_pins,
+    validate_selected_font_bundle_bytes}
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
@@ -60,8 +60,8 @@ fn main() -> i64:
     if not copy_font_tree(src: script_dir + "/assets/fonts", dst: prefix + "/share/simple/assets/fonts"):
         print "  ERROR: bundled font installation incomplete"
         return 1
-    val license_ok = copy_file_unchanged(script_dir + "/LICENSE", prefix + "/share/simple/LICENSE")
-    val notices_ok = copy_file_unchanged(script_dir + "/THIRD_PARTY_NOTICES.md", prefix + "/share/simple/THIRD_PARTY_NOTICES.md")
+    val license_ok = copy_pinned_file(script_dir + "/LICENSE", prefix + "/share/simple/LICENSE", "LICENSE")
+    val notices_ok = copy_pinned_file(script_dir + "/THIRD_PARTY_NOTICES.md", prefix + "/share/simple/THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md")
     if not license_ok or not notices_ok:
         print "  ERROR: license or third-party notice installation failed"
         return 1
@@ -155,7 +155,7 @@ fn copy_font_tree(src: text, dst: text) -> bool:
         val rel = pin.path.slice(prefix.len(), pin.path.len())
         val source_path = src + "/" + rel
         if not rt_file_exists(source_path): return false
-        if sha256_u8_hex(rt_file_read_bytes(source_path)) != pin.sha256: return false
+        if not validate_selected_font_bundle_bytes(pin.path, rt_file_read_bytes(source_path)): return false
 
     for pin in pins:
         val prefix = "assets/fonts/"
@@ -164,13 +164,15 @@ fn copy_font_tree(src: text, dst: text) -> bool:
         val dst_file = dst + "/" + rel
         rt_dir_create(get_parent(dst_file), true)
         if not rt_file_copy(source_path, dst_file): return false
-        if sha256_u8_hex(rt_file_read_bytes(dst_file)) != pin.sha256: return false
+        if not validate_selected_font_bundle_bytes(pin.path, rt_file_read_bytes(dst_file)): return false
     print "  Copied " + pins.len().to_text() + " resource files"
     true
 
-fn copy_file_unchanged(src: text, dst: text) -> bool:
+fn copy_pinned_file(src: text, dst: text, pin_path: text) -> bool:
+    if not rt_file_exists(src): return false
+    if not validate_selected_font_bundle_bytes(pin_path, rt_file_read_bytes(src)): return false
     if not rt_file_copy(src, dst): return false
-    sha256_u8_hex(rt_file_read_bytes(src)) == sha256_u8_hex(rt_file_read_bytes(dst))
+    validate_selected_font_bundle_bytes(pin_path, rt_file_read_bytes(dst))
 
 fn get_parent(p: text) -> text:
     var i = p.len() - 1

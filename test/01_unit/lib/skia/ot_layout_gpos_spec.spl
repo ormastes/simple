@@ -24,6 +24,28 @@ fn _record(glyph: u32) -> LayoutGlyphRecord:
         x_advance_units: 0, y_advance_units: 0, x_offset_units: 0, y_offset_units: 0,
         component_clusters: [0])
 
+fn _sentinel_record(glyph: u32, seed: i64) -> LayoutGlyphRecord:
+    LayoutGlyphRecord(glyph_id: glyph, source_index: seed, cluster: seed + 1,
+        feature_mask: 1u64,
+        x_advance_units: seed + 2, y_advance_units: seed + 3,
+        x_offset_units: seed + 4, y_offset_units: seed + 5,
+        component_clusters: [seed + 6, seed + 7])
+
+fn _expect_record_identity(actual: LayoutGlyphRecord, expected: LayoutGlyphRecord):
+    expect(actual.glyph_id).to_equal(expected.glyph_id)
+    expect(actual.source_index).to_equal(expected.source_index)
+    expect(actual.cluster).to_equal(expected.cluster)
+    expect(actual.feature_mask).to_equal(expected.feature_mask)
+    expect(actual.x_advance_units).to_equal(expected.x_advance_units)
+    expect(actual.y_advance_units).to_equal(expected.y_advance_units)
+    expect(actual.x_offset_units).to_equal(expected.x_offset_units)
+    expect(actual.y_offset_units).to_equal(expected.y_offset_units)
+    expect(actual.component_clusters.len()).to_equal(expected.component_clusters.len())
+    var index: i64 = 0
+    while index < actual.component_clusters.len():
+        expect(actual.component_clusters[index]).to_equal(expected.component_clusters[index])
+        index = index + 1
+
 fn _gdef_pair_font() -> OtFont:
     # PairPos then GDEF: glyph 2 is a Mark and MarkGlyphSet 0 contains it.
     val blob: [u8] = [0,1,0,18,0,4,0,0,0,1,0,12,0,1,0,2,0,5,0,1,0,1,0,1,
@@ -304,6 +326,19 @@ describe "bounded GPOS":
             0,1,0,1,0,1])
         val recursive = _lookup(7u32, 0, font.blob.len(), 0, 0u32)
         expect(gpos_validate(font, _active(recursive), [recursive], [_record(1u32)])).to_equal(false)
+
+    it "rejects inactive duplicate lookup indices without publishing record changes":
+        val font = _font([0,1,0,18,0,4,0,0,0,1,0,12,0,1,0,2,0,5,0,1,0,1,0,1])
+        val lookup = _lookup(2u32, 0, font.blob.len(), 0, 0u32)
+        val duplicate = _lookup(2u32, 0, font.blob.len(), 1, 0u32)
+        val catalog = [lookup, duplicate, duplicate]
+        val records = [_sentinel_record(1u32, 10), _sentinel_record(2u32, 20)]
+        expect(gpos_validate(font, _active(lookup), catalog, records)).to_equal(false)
+        val result = gpos_apply(font, _active(lookup), catalog, records)
+        expect(result.complete).to_equal(false)
+        expect(result.glyphs.len()).to_equal(records.len())
+        _expect_record_identity(result.glyphs[0], records[0])
+        _expect_record_identity(result.glyphs[1], records[1])
 
     it "validates and applies ExtensionPos format 1 wrappers":
         val font = _font([0,1,0,2,0,0,0,8,

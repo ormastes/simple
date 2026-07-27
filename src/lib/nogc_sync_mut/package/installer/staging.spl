@@ -4,6 +4,7 @@
 # The staging dir mirrors the target filesystem structure.
 
 use std.io_runtime (process_run, file_exists, file_copy, file_write, is_dir, dir_create, dir_remove)
+use std.common.encoding.font_registry (selected_font_bundle_asset_pins, validate_selected_font_bundle_root)
 
 use lib.nogc_sync_mut.package.installer.types (InstallerConfig, InstallerPlatform)
 
@@ -69,17 +70,19 @@ fn create_unix_layout(config: InstallerConfig, staging: text) -> Result<text, te
     if file_exists("README.md"):
         file_copy("README.md", "{staging}/usr/local/share/doc/simple-lang/README.md")
 
-    if file_exists("LICENSE"):
-        file_copy("LICENSE", "{staging}/usr/local/share/doc/simple-lang/LICENSE")
+    if (not file_copy("LICENSE", "{staging}/usr/local/share/doc/simple-lang/LICENSE") or
+            not file_copy("THIRD_PARTY_NOTICES.md", "{staging}/usr/local/share/doc/simple-lang/THIRD_PARTY_NOTICES.md")):
+        return Err("Failed to stage license or third-party notices")
 
     if not is_dir("assets/fonts"):
         return Err("Bundled font assets not found at assets/fonts")
-    val (_, _, fonts_code) = process_run("cp", ["-r", "assets/fonts/.", "{staging}/usr/local/share/simple/assets/fonts/"])
-    if fonts_code != 0:
+    if not copy_selected_font_bundle_assets("{staging}/usr/local/share/simple"):
         return Err("Failed to stage bundled font assets")
     if (not file_copy("LICENSE", "{staging}/usr/local/share/simple/LICENSE") or
             not file_copy("THIRD_PARTY_NOTICES.md", "{staging}/usr/local/share/simple/THIRD_PARTY_NOTICES.md")):
         return Err("Failed to stage license or third-party notices")
+    if not validate_selected_font_bundle_root("{staging}/usr/local/share/simple"):
+        return Err("Staged font assets or notices failed immutable validation")
 
     Ok(staging)
 
@@ -115,19 +118,38 @@ fn create_windows_layout(config: InstallerConfig, staging: text) -> Result<text,
     if file_exists("README.md"):
         file_copy("README.md", "{staging}/doc/README.md")
 
-    if file_exists("LICENSE"):
-        file_copy("LICENSE", "{staging}/doc/LICENSE")
+    if (not file_copy("LICENSE", "{staging}/doc/LICENSE") or
+            not file_copy("THIRD_PARTY_NOTICES.md", "{staging}/doc/THIRD_PARTY_NOTICES.md")):
+        return Err("Failed to stage license or third-party notices")
 
     if not is_dir("assets/fonts"):
         return Err("Bundled font assets not found at assets/fonts")
-    val (_, _, fonts_code) = process_run("cp", ["-r", "assets/fonts/.", "{staging}/assets/fonts/"])
-    if fonts_code != 0:
+    if not copy_selected_font_bundle_assets(staging):
         return Err("Failed to stage bundled font assets")
     if (not file_copy("LICENSE", "{staging}/LICENSE") or
             not file_copy("THIRD_PARTY_NOTICES.md", "{staging}/THIRD_PARTY_NOTICES.md")):
         return Err("Failed to stage license or third-party notices")
+    if not validate_selected_font_bundle_root(staging):
+        return Err("Staged font assets or notices failed immutable validation")
 
     Ok(staging)
+
+fn copy_selected_font_bundle_assets(root: text) -> bool:
+    for pin in selected_font_bundle_asset_pins():
+        val destination = "{root}/{pin.path}"
+        if not dir_create(staging_parent_dir(destination), recursive: true):
+            return false
+        if not file_copy(pin.path, destination):
+            return false
+    true
+
+fn staging_parent_dir(path: text) -> text:
+    var index = path.len() - 1
+    while index > 0:
+        if path.slice(index, index + 1) == "/":
+            return path.slice(0, index)
+        index = index - 1
+    "."
 
 
 fn clean_staging_dir(config: InstallerConfig, platform: InstallerPlatform):

@@ -19,12 +19,11 @@ use std.io_runtime.{env_get}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]
 extern fn rt_file_exists(path: text) -> bool
-# Host-only, and ONLY ever called from load_selected_font_file() — the same
-# function that already calls rt_file_read_bytes. Freestanding/baremetal
-# consumers never reach either: they run under
+# Host-only, called from load_selected_font_file() and the distribution-root
+# validator. Freestanding/baremetal consumers never reach either: they run under
 # font_renderer_use_registered_selected_bytes_only(), which routes every load
 # through validate_selected_font_asset(path, blob) instead. Do NOT call this
-# from any other site without re-checking that gate.
+# from another site without re-checking that hosted-only gate.
 extern fn rt_file_hash_sha256(path: text) -> text
 
 # Pinned CLDR 48.2 literate-functional reach evidence. The annotated tag object
@@ -346,6 +345,13 @@ fn selected_font_bundle_asset_pins() -> [FontBundleAssetPin]:
     pins.push(FontBundleAssetPin(path: cldr_root + "RANKING.sdn", sha256: "e4279236032d02966eaaeb502af7b19edc8d371e454a3fc6beb676ef4e7c70df"))
     pins
 
+fn selected_font_bundle_pin_sha256(path: text) -> text:
+    if path == "LICENSE": return "337c6e14f6a0a05be187442ca816c5cc256bbc76ca7f61db766facddcb587ce2"
+    if path == "THIRD_PARTY_NOTICES.md": return "4cab4c058a95d5eee96e968003203641bdd181e75c2492a59f4754419d7cea65"
+    for pin in selected_font_bundle_asset_pins():
+        if pin.path == path: return pin.sha256
+    ""
+
 class FontAssetRuntimeValidation:
     selected: bool
     valid: bool
@@ -374,6 +380,20 @@ fn _font_asset_normalized_root(root: text) -> text:
 fn _font_asset_path_beneath_root(root: text, path: text) -> text:
     if root == "/": return root + path
     root + "/" + path
+
+fn validate_selected_font_bundle_bytes(path: text, data: [u8]) -> bool:
+    val expected = selected_font_bundle_pin_sha256(path)
+    expected != "" and data.len() > 0 and sha256_u8_hex(data) == expected
+
+fn validate_selected_font_bundle_root(root: text) -> bool:
+    val base = _font_asset_normalized_root(root)
+    for pin in selected_font_bundle_asset_pins():
+        val path = if base == "": pin.path else: _font_asset_path_beneath_root(base, pin.path)
+        if not rt_file_exists(path) or not validate_selected_font_bundle_bytes(pin.path, rt_file_read_bytes(path)): return false
+    for name in ["LICENSE", "THIRD_PARTY_NOTICES.md"]:
+        val path = if base == "": name else: _font_asset_path_beneath_root(base, name)
+        if not rt_file_exists(path) or not validate_selected_font_bundle_bytes(name, rt_file_read_bytes(path)): return false
+    true
 
 fn _selected_font_asset_candidate_index_for_path_with_root(path: text, root: text) -> i64:
     val base = _font_asset_normalized_root(root)
@@ -775,3 +795,5 @@ fn selected_font_asset_for_language_category(language: text, category: text) -> 
     nil
 
 export selected_font_simple_tuple_accepted, selected_font_asset_for_language_category
+export selected_font_bundle_pin_sha256, validate_selected_font_bundle_bytes
+export validate_selected_font_bundle_root

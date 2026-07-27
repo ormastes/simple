@@ -8,6 +8,9 @@
 
 # Direct extern fn declarations (bootstrap runtime compatibility)
 
+use std.common.encoding.font_registry.{selected_font_bundle_asset_pins,
+    validate_selected_font_bundle_root}
+
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_dir_create(path: text, recursive: bool) -> bool
@@ -121,7 +124,7 @@ class DistributionBuilder:
         DistributionBuilder(config: config)
 
     # Build distribution for all platforms
-    fn build_all():
+    fn build_all() -> bool:
         print "======================================"
         print "Simple Distribution Builder"
         print "======================================"
@@ -140,11 +143,13 @@ class DistributionBuilder:
 
         print ""
         print "======================================"
-        if success_count == total_count:
+        val all_succeeded = success_count == total_count
+        if all_succeeded:
             print "Success! All {total_count} distributions created"
         else:
             print "Completed: {success_count}/{total_count} distributions"
         print "======================================"
+        all_succeeded
 
     # Build distribution for a single platform
     fn build_platform(platform: Platform) -> bool:
@@ -165,7 +170,8 @@ class DistributionBuilder:
 
         # Copy Simple sources
         print "  Copying Simple sources..."
-        self.copy_sources(pkg_dir)
+        if not self.copy_sources(pkg_dir):
+            return false
 
         # Create wrapper script
         print "  Creating wrapper script..."
@@ -173,7 +179,8 @@ class DistributionBuilder:
 
         # Create archive
         print "  Creating archive..."
-        self.create_archive(platform_name, pkg_dir, platform)
+        if not self.create_archive(platform_name, pkg_dir, platform):
+            return false
 
         true
 
@@ -211,7 +218,7 @@ class DistributionBuilder:
         print "    ERROR: No runtime binary found for {platform.to_string()}"
         false
 
-    fn copy_sources(pkg_dir: text):
+    fn copy_sources(pkg_dir: text) -> bool:
         # Copy Simple source files only (not Rust!)
         # Use rsync for better control over exclusions
 
@@ -220,11 +227,44 @@ class DistributionBuilder:
         rt_process_run("cp", ["-r", "src/app", "{pkg_dir}/src/"])
         rt_process_run("cp", ["-r", "src/lib", "{pkg_dir}/src/"])
         rt_process_run("cp", ["-r", "lib", "{pkg_dir}/"])
-        rt_process_run("cp", ["-r", "assets", "{pkg_dir}/"])
-        rt_process_run("cp", ["LICENSE", "THIRD_PARTY_NOTICES.md", "{pkg_dir}/"])
+        if not self.copy_assets_and_legal(pkg_dir): return false
 
         # Copy examples with exclusions
         self.copy_with_exclusions("examples", "{pkg_dir}/examples")
+        true
+
+    fn copy_assets_and_legal(pkg_dir: text) -> bool:
+        if pkg_dir == "" or pkg_dir == "/" or not rt_file_exists(pkg_dir):
+            print "    ERROR: Package directory missing or unsafe"
+            return false
+        val (_, cleanup_error, cleanup_exit) = rt_process_run(
+            "rm", ["-rf", "{pkg_dir}/assets"])
+        if cleanup_exit != 0:
+            print "    ERROR: Font asset cleanup failed: {cleanup_error}"
+            return false
+        for pin in selected_font_bundle_asset_pins():
+            val source = pin.path
+            val destination = "{pkg_dir}/{pin.path}"
+            if not rt_file_exists(source):
+                print "    ERROR: Pinned font asset missing: {source}"
+                return false
+            if not rt_dir_create(_distribution_parent_dir(destination), true):
+                print "    ERROR: Font asset directory creation failed"
+                return false
+            val (_, asset_error, asset_exit) = rt_process_run(
+                "cp", [source, destination])
+            if asset_exit != 0:
+                print "    ERROR: Font asset copy failed: {asset_error}"
+                return false
+        val (_, legal_error, legal_exit) = rt_process_run(
+            "cp", ["LICENSE", "THIRD_PARTY_NOTICES.md", "{pkg_dir}/"])
+        if legal_exit != 0:
+            print "    ERROR: License or notice copy failed: {legal_error}"
+            return false
+        if not validate_selected_font_bundle_root(pkg_dir):
+            print "    ERROR: Font distribution immutable validation failed"
+            return false
+        true
 
     fn copy_with_exclusions(src: text, dst: text):
         # Build rsync command with exclusions
@@ -264,8 +304,12 @@ class DistributionBuilder:
             rt_file_write_text("{pkg_dir}/bin/simple", script)
             rt_process_run("chmod", ["+x", "{pkg_dir}/bin/simple"])
 
-    fn create_archive(name: text, pkg_dir: text, platform: Platform):
+    fn create_archive(name: text, pkg_dir: text, platform: Platform) -> bool:
         val pkg_name = "simple-{self.config.version}-{name}"
+        val expected_pkg_dir = "{self.config.output_dir}/{pkg_name}"
+        if pkg_dir != expected_pkg_dir or not rt_file_exists(pkg_dir):
+            print "  Archive failed: package directory missing or unexpected"
+            return false
 
         if platform.is_windows():
             # Create .zip archive for Windows
@@ -275,19 +319,36 @@ class DistributionBuilder:
             val (stdout, stderr, exit) = rt_process_run("sh", ["-c", "cd {self.config.output_dir} && zip -0 -r -q --symlinks {archive} {pkg_name}"])
             if exit == 0:
                 print "  Archive: {self.config.output_dir}/{archive}"
+                return true
             else:
                 print "  Archive failed: {stderr}"
+                return false
         else:
             # Create .tar.gz archive for Unix
             val archive = "{self.config.output_dir}/{pkg_name}.tar.gz"
-            rt_process_run("tar", ["-czf", archive, "-C", self.config.output_dir, pkg_name])
+            val (_, stderr, exit) = rt_process_run(
+                "tar", ["-czf", archive, "-C", self.config.output_dir, pkg_name])
+            if exit != 0:
+                print "  Archive failed: {stderr}"
+                return false
             print "  Archive: {archive}"
+            true
 
 # ===========================================================================
 # Main Entry Point
 # ===========================================================================
 
-fn main():
-    val config = DistConfig.default()
+fn _distribution_parent_dir(path: text) -> text:
+    var index = path.len() - 1
+    while index > 0:
+        if path.slice(index, index + 1) == "/":
+            return path.slice(0, index)
+        index = index - 1
+    "."
+
+fn distribution_main(config: DistConfig) -> i64:
     val builder = DistributionBuilder.new(config)
-    builder.build_all()
+    if builder.build_all(): 0 else: 1
+
+fn main() -> i64:
+    distribution_main(DistConfig.default())
