@@ -335,10 +335,13 @@ or native TLS behavior.
   HTTP job while the renderer sandbox remains socketless. Renderer protocol
   traffic now uses a full-duplex inherited fd 0 while ordinary stdout/stderr
   are discarded, and seccomp denies direct System V shared-memory, message,
-  and semaphore IPC. A fail-closed external-frame compositor seam exists, but
-  the hosted entry is not switched to it: the broker transaction is still
-  blocking (so Stop cannot preempt an active fetch), the broker still trusts
-  renderer-supplied request kind/origin authority, and resize/scroll plus
+  and semaphore IPC. Fetch now rejects `SameOrigin` mode before cache or
+  transport when the request target differs from the committed requester
+  origin, and every cache hit is revalidated against the current CORS response
+  policy. A fail-closed external-frame compositor seam exists, but the hosted
+  entry is not switched to it: the broker transaction is still blocking (so
+  Stop cannot preempt an active fetch), the broker still trusts
+  renderer-supplied `Navigate`/`NoCors` kind authority, and resize/scroll plus
   parent-owned trusted chrome state remain incomplete. Windows AppContainer
   and the signed macOS helper also remain open.
 - no current GC/RSS/soak or crash-containment evidence exists;

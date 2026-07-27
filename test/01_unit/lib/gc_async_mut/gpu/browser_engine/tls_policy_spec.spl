@@ -72,3 +72,52 @@ describe "Browser TLS negotiated protocol policy":
             "Location: https://secure.test/final"
         )
         set_mock_registry(MockResponseRegistry.create())
+
+    it "denies cross-origin requests labeled same-origin before transport":
+        var registry = MockResponseRegistry.create()
+        registry.register("https://other.test/private", 200, "secret")
+        set_mock_registry(registry)
+        val logger = Logger.new("same-origin-policy", BrowserLogLevel.Error)
+        var fetch = FetchEngine.new_for_origin(
+            logger, "https://secure.test"
+        )
+        val request = FetchRequest(
+            url: Url.parse("https://other.test/private"),
+            method: "GET",
+            headers: "",
+            body: [],
+            mode: RequestMode.SameOrigin,
+            credentials: "omit"
+        )
+
+        expect(fetch.fetch_single_hop(request).is_err()).to_be(true)
+        set_mock_registry(MockResponseRegistry.create())
+
+    it "does not let a no-cors cache entry bypass cors response policy":
+        var registry = MockResponseRegistry.create()
+        registry.register("https://other.test/data", 200, "private")
+        set_mock_registry(registry)
+        val logger = Logger.new("cors-cache-policy", BrowserLogLevel.Error)
+        var fetch = FetchEngine.new_for_origin(
+            logger, "https://secure.test"
+        )
+        val no_cors_request = FetchRequest(
+            url: Url.parse("https://other.test/data"),
+            method: "GET",
+            headers: "",
+            body: [],
+            mode: RequestMode.NoCors,
+            credentials: "omit"
+        )
+        expect(fetch.fetch_single_hop(no_cors_request).is_ok()).to_be(true)
+        val cors_request = FetchRequest(
+            url: Url.parse("https://other.test/data"),
+            method: "GET",
+            headers: "",
+            body: [],
+            mode: RequestMode.Cors,
+            credentials: "omit"
+        )
+
+        expect(fetch.fetch_single_hop(cors_request).is_err()).to_be(true)
+        set_mock_registry(MockResponseRegistry.create())

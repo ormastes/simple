@@ -796,3 +796,13 @@ implementation in progress / target evidence blocked
   denied access to parent-created shared memory, message queue, and semaphore
   objects, writes stdout/stderr noise, and exchanges only the bounded protocol
   response over inherited fd 0. No bootstrap or Simple compiler command ran.
+- network origin hardening: FetchEngine now enforces `SameOrigin` before cache
+  or transport and validates cached responses against the active CORS policy,
+  preventing a prior `NoCors` cache entry from satisfying a later cross-origin
+  `Cors` request without matching response authorization. The legacy hosted
+  adapter binds the retained FetchEngine to BrowserSession's committed
+  document origin before each request.
+- evidence: Focused regressions cover forged cross-origin `SameOrigin` and
+  `NoCors`-prime/`Cors`-read cache bypasses. LSP diagnostics remain unavailable
+  because source-mode diagnostics deadlock on the known `simple check` spawn;
+  no compiler/bootstrap command was retried and no executable PASS is claimed.

@@ -63,6 +63,9 @@ class FetchEngine:
             max_redirects: DEFAULT_MAX_REDIRECTS
         )
 
+    me set_requester_origin(requester_origin: text):
+        self.cors.set_origin(requester_origin)
+
     # The main fetch function. Implements the Fetch specification request lifecycle.
     # Steps: CORS check -> cache -> DNS -> HTTP -> redirects -> cookies -> cache store.
     me fetch(request: FetchRequest) -> Result<FetchResponse>:
@@ -82,6 +85,13 @@ class FetchEngine:
     ) -> Result<FetchSingleHopPreparation>:
         self.logger.info("fetch: {request.method.to_upper()} {request.url.to_text()}")
 
+        match request.mode:
+            RequestMode.SameOrigin:
+                if not self.cors.is_same_origin(request.url):
+                    return Err(network_error("Same-origin request denied"))
+            _:
+                pass_do_nothing
+
         # Step 1: CORS preflight if the request mode is Cors
         match request.mode:
             RequestMode.Cors:
@@ -96,11 +106,17 @@ class FetchEngine:
             val cached = self.cache.lookup(request.url.to_text())
             if val entry = cached:
                 self.logger.debug("fetch: cache hit for {request.url.to_text()}")
-                return Ok(FetchSingleHopPreparation.complete(
+                val response = self.validate_response_policy(
                     request,
                     FetchResponse(
-                        status: 200, headers: entry.headers, body: entry.body
+                        status: 200,
+                        headers: entry.headers,
+                        body: entry.body
                     )
+                )?
+                return Ok(FetchSingleHopPreparation.complete(
+                    request,
+                    response
                 ))
 
         # Step 3: Attach cookies to the request
@@ -108,6 +124,28 @@ class FetchEngine:
         Ok(FetchSingleHopPreparation.pending(request_with_cookies))
 
     me finalize_single_hop(
+        request: FetchRequest, response: FetchResponse
+    ) -> Result<FetchResponse>:
+        val validated = self.validate_response_policy(request, response)?
+
+        # Step 6: Store cookies from Set-Cookie response headers
+        for line in validated.headers.split("\r\n"):
+            val lower_line = line.to_lower()
+            if lower_line.starts_with("set-cookie:"):
+                val cookie_value = line.slice(11, line.len()).trim()
+                val cookie = parse_set_cookie(cookie_value)
+                self.cookie_store.store(cookie)
+
+        # Step 7: Cache the response if eligible
+        if request_cache_eligible(request) and is_cacheable(validated):
+            self.logger.debug("fetch: caching response for {request.url.to_text()}")
+            val _ = self.cache.store(
+                request.url.to_text(), validated.body, validated.headers
+            )
+
+        Ok(validated)
+
+    fn validate_response_policy(
         request: FetchRequest, response: FetchResponse
     ) -> Result<FetchResponse>:
         # Step 5: CORS response validation (for Cors mode)
@@ -122,19 +160,6 @@ class FetchEngine:
                             pass_do_nothing
             _:
                 pass_do_nothing
-
-        # Step 6: Store cookies from Set-Cookie response headers
-        for line in response.headers.split("\r\n"):
-            val lower_line = line.to_lower()
-            if lower_line.starts_with("set-cookie:"):
-                val cookie_value = line.slice(11, line.len()).trim()
-                val cookie = parse_set_cookie(cookie_value)
-                self.cookie_store.store(cookie)
-
-        # Step 7: Cache the response if eligible
-        if request_cache_eligible(request) and is_cacheable(response):
-            self.logger.debug("fetch: caching response for {request.url.to_text()}")
-            val _ = self.cache.store(request.url.to_text(), response.body, response.headers)
 
         Ok(response)
 
