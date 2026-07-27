@@ -642,6 +642,8 @@ class BrowserSession:
     current_index: i32
     is_loading: bool
     pending_url: text
+    pending_navigation_target_index: i32
+    pending_navigation_push_history: bool
     stop_requested: bool
     warnings: [text]
     session_storage: [Pair<text, text>]
@@ -690,6 +692,8 @@ class BrowserSession:
             current_index: -1,
             is_loading: false,
             pending_url: "",
+            pending_navigation_target_index: -1,
+            pending_navigation_push_history: true,
             stop_requested: false,
             warnings: [],
             session_storage: [],
@@ -758,6 +762,8 @@ impl BrowserSession:
         self.subresource_request_count = 0
         self.pending_content_security_policy = ""
         self.pending_url = normalize_browser_url(url)
+        self.pending_navigation_target_index = -1
+        self.pending_navigation_push_history = true
         self.is_loading = true
         self.stop_requested = false
         self.warnings = []
@@ -774,6 +780,8 @@ impl BrowserSession:
         self.stop_requested = true
         self.is_loading = false
         self.pending_url = ""
+        self.pending_navigation_target_index = -1
+        self.pending_navigation_push_history = true
         self.pending_requests = []
         self.inflight_requests = []
         self.active_load = nil
@@ -795,6 +803,20 @@ impl BrowserSession:
             return self.open_html(normalized, override_body)
         self.begin_navigation(normalized)
         self.pending_requests.push(self._build_request("document", normalized, method, headers, body, content_type))
+        Ok(true)
+
+    me begin_network_reload() -> Result<bool, text>:
+        if self.current_index < 0 or self.current_index >= self.history.len():
+            return Err("no page to reload")
+        val entry = self.history[self.current_index]
+        val normalized_input = normalize_network_navigation_url(entry.url)?
+        val normalized = self._hsts_upgrade_url(normalized_input)
+        self.begin_navigation(normalized)
+        self.pending_navigation_target_index = self.current_index
+        self.pending_navigation_push_history = false
+        self.pending_requests.push(self._build_request(
+            "document", normalized, "GET", "", "", ""
+        ))
         Ok(true)
 
     me take_pending_request() -> BrowserRequest?:
@@ -1228,6 +1250,8 @@ impl BrowserSession:
                 return Err("stale document response")
             if response.error != "":
                 self.pending_url = ""
+                self.pending_navigation_target_index = -1
+                self.pending_navigation_push_history = true
                 self.is_loading = false
                 return Err(response.error)
             if browser_status_is_redirect(response.status):
@@ -1453,20 +1477,31 @@ impl BrowserSession:
             return Err("no pending navigation")
         if self.stop_requested:
             self.pending_url = ""
+            self.pending_navigation_target_index = -1
+            self.pending_navigation_push_history = true
             self.is_loading = false
             return Err("navigation stopped")
         val pending = self.pending_url
+        val target_index = self.pending_navigation_target_index
+        val push_history = self.pending_navigation_push_history
         if pending.starts_with("https://guest.runtime/"):
             print "[BRS] commit html start"
         self.pending_url = ""
+        self.pending_navigation_target_index = -1
+        self.pending_navigation_push_history = true
         self.is_loading = false
         self.address_draft = ""
-        self._load_page_source(pending, html, -1, true)
+        self._load_page_source(
+            pending, html, target_index, push_history
+        )
 
     me reload() -> Result<bool, text>:
         if self.current_index < 0 or self.current_index >= self.history.len():
             return Err("no page to reload")
         val entry = self.history[self.current_index]
+        if entry.url.starts_with("http://") or
+            entry.url.starts_with("https://"):
+            return self.begin_network_reload()
         self.begin_navigation(entry.url)
         self.pending_content_security_policy = entry.content_security_policy
         self.pending_url = ""

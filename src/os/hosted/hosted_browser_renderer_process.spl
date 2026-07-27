@@ -335,6 +335,10 @@ pub class HostedBrowserRendererProcess:
                 next_history = bounded
             self.history_urls = next_history
             self.history_index = self.history_urls.len() - 1
+        elif (self.pending_history_action == "replace" and
+            self.history_index >= 0 and
+            self.history_index < self.history_urls.len()):
+            self.history_urls[self.history_index] = url
         self.pending_history_action = ""
 
     me _cancel_network_job():
@@ -1145,10 +1149,19 @@ pub class HostedBrowserRendererProcess:
             return Err("cannot-reload")
         if not self._replace_pending_navigation():
             return Err("renderer-busy")
-        self._begin_navigation_command(
-            "reload", self.document_url, "GET", "", "", "",
+        if not self.authorize_navigation(
+            self.document_url, "GET", "", "", ""
+        ):
+            return Err("invalid-navigation")
+        self.pending_history_action = "replace"
+        val started = self._begin_navigation_command(
+            "reload", self.navigation_permit.url, "GET", "", "", "",
             "history", timeout_ms
         )
+        if val Err(_) = started:
+            self.navigation_permit = hosted_browser_empty_navigation_permit()
+            self.pending_history_action = ""
+        started
 
     me begin_stop(timeout_ms: i64) -> Result<bool, text>:
         if self.state != "active":
