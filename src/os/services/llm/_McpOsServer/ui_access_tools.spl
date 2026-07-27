@@ -26,7 +26,7 @@ use os.services.llm.tool_registry.{register_os_tools}
 use nogc_sync_mut.ui.session.{UISession}
 use common.ui.widget.{UITree, WidgetNode, UIEvent}
 use common.ui.builder.{build_tree}
-use common.ui.access.{UiAccessNode, UiAccessSnapshot, UiAccessSurface, ui_access_find_nodes, ui_access_find_node, ui_access_resolve_action_name, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_snapshot_to_text, ui_access_query_to_json, ui_access_ensure_result, ui_access_ensure_to_json, ui_access_node_value, ui_access_supports_value, ui_access_value_to_json}
+use common.ui.access.{UiAccessNode, UiAccessSnapshot, UiAccessSurface, ui_access_find_nodes, ui_access_find_nodes_filtered, ui_access_find_node, ui_access_resolve_action_name, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_surface_scope_to_json, ui_access_events_to_json, ui_access_snapshot_to_text, ui_access_query_snapshot_to_json, ui_access_ensure_result, ui_access_ensure_to_json, ui_access_node_value, ui_access_supports_value, ui_access_value_to_json}
 use common.ui.access_source.{ui_access_snapshot_envelope_to_json}
 use common.ui.access_adapter.{ui_access_default_adapter_registry}
 use common.ui.access_vision.{ui_access_vision_capture_to_json}
@@ -42,7 +42,7 @@ impl OsMcpServer:
     fn tool_ui_access_find(surface_id: text, kind: text, text_query: text, focused_only: text) -> text:
         """Find nodes within the canonical access snapshot."""
         val snapshot = self.bridge.session.access_snapshot()
-        val focused = focused_only == "true" or focused_only == "1" or focused_only == "yes"
+        val focused = _is_truthy(focused_only)
         val persisted = self.bridge.session.access_search_nodes(surface_id, kind, text_query, 200)
         val matches = match persisted:
             Ok(nodes):
@@ -55,16 +55,17 @@ impl OsMcpServer:
                             focused_nodes = focused_nodes.push(node)
                     focused_nodes
             Err(_):
-                ui_access_find_nodes(snapshot, surface_id, kind, text_query, focused)
+                ui_access_find_nodes_filtered(snapshot, surface_id, kind, text_query, focused, 200)
         val filtered = UiAccessSnapshot(
             protocol_version: snapshot.protocol_version,
+            snapshot_revision: snapshot.snapshot_revision,
             mode: snapshot.mode,
             active_surface: snapshot.active_surface,
             surfaces: snapshot.surfaces,
             nodes: matches,
             recent_events: []
         )
-        return ui_access_snapshot_to_text(filtered)
+        return ui_access_snapshot_to_json(filtered)
 
     me tool_ui_access_act(surface_id: text, canonical_id: text, action: text) -> text:
         """Dispatch a UI action against a canonical node reference."""
@@ -82,14 +83,14 @@ impl OsMcpServer:
             return "error: missing surface_id"
         if not self.bridge.session.has_surface(resolved_surface_id):
             return "error: surface {resolved_surface_id} not found"
-        self.bridge.session.set_active_surface(resolved_surface_id)
+        self.bridge.set_active_surface(resolved_surface_id)
         val action_name = if canonical_id != "":
             ui_access_resolve_action_name(self.bridge.session.access_snapshot(), canonical_id, action)
         elif widget_id == "":
             action
         else:
             "{action}_{widget_id}"
-        self.bridge.session.dispatch(UIEvent.Action(name: action_name))
+        self.bridge.dispatch_ui_event(UIEvent.Action(name: action_name))
         self.bridge.render()
         return "ok: dispatched {action_name}"
 
@@ -122,6 +123,7 @@ impl OsMcpServer:
                     surfaces = surfaces.push(surface)
             val filtered = UiAccessSnapshot(
                 protocol_version: snapshot.protocol_version,
+                snapshot_revision: snapshot.snapshot_revision,
                 mode: snapshot.mode,
                 active_surface: snapshot.active_surface,
                 surfaces: surfaces,
@@ -145,9 +147,9 @@ impl OsMcpServer:
                     return "error: canonical node {canonical_id} not found"
                 if state_key == "":
                     return self.tool_ui_access_observe(surface_id, canonical_id, "", "", "")
-                val node_value = _node_state_value(node, state_key)
-                if node_value == nil:
+                if not _node_state_supported(state_key):
                     return "error: unsupported state key {state_key}"
+                val node_value = _node_state_text(node, state_key)
                 return "{\"canonical_id\":\"{canonical_id}\",\"state_key\":\"{state_key}\",\"state_value\":\"{node_value}\"}"
             if surface_id != "":
                 val surface = _find_surface(snapshot, surface_id)
@@ -155,9 +157,9 @@ impl OsMcpServer:
                     return "error: surface {surface_id} not found"
                 if state_key == "":
                     return self.tool_ui_access_surface(surface_id)
-                val surface_value = _surface_state_value(surface, state_key)
-                if surface_value == nil:
+                if not _surface_state_supported(state_key):
                     return "error: unsupported state key {state_key}"
+                val surface_value = _surface_state_text(surface, state_key)
                 return "{\"surface_id\":\"{surface_id}\",\"state_key\":\"{state_key}\",\"state_value\":\"{surface_value}\"}"
             return "error: missing target"
 
@@ -174,7 +176,7 @@ impl OsMcpServer:
                 return "error: unsupported state transition active={state_value}"
             if not self.bridge.session.has_surface(resolved_surface_id):
                 return "error: surface {resolved_surface_id} not found"
-            self.bridge.session.set_active_surface(resolved_surface_id)
+            self.bridge.set_active_surface(resolved_surface_id)
             self.bridge.render()
             return "ok: state active=true on {resolved_surface_id}"
 
@@ -226,9 +228,9 @@ impl OsMcpServer:
         else:
             return "error: unsupported state key {state_key}"
 
-        self.bridge.session.set_active_surface(resolved_surface_id)
+        self.bridge.set_active_surface(resolved_surface_id)
         val action_name = ui_access_resolve_action_name(snapshot, canonical_id, action)
-        self.bridge.session.dispatch(UIEvent.Action(name: action_name))
+        self.bridge.dispatch_ui_event(UIEvent.Action(name: action_name))
         self.bridge.render()
         return "ok: state {state_key}={state_value} -> {action_name}"
 
@@ -243,7 +245,7 @@ impl OsMcpServer:
         if limit_str != "":
             limit = limit_str.to_i32()
         val focused = _is_truthy(focused_only)
-        return ui_access_query_to_json(snapshot, surface_id, canonical_id, kind, text_query, focused, limit)
+        return ui_access_query_snapshot_to_json(snapshot, surface_id, canonical_id, kind, text_query, focused, limit)
 
     fn tool_ui_access_ensure(surface_id: text, canonical_id: text, kind: text, text_query: text, focused_only: text, expectation: text, expected_value: text, limit_str: text, timeout_str: text, poll_str: text) -> text:
         """Semantic ensure layer over the canonical UI access snapshot."""
@@ -289,10 +291,10 @@ impl OsMcpServer:
             return "error: missing surface_id"
         if not self.bridge.session.has_surface(resolved_surface_id):
             return "error: surface {resolved_surface_id} not found"
-        val ok = self.bridge.session.set_surface_widget_value(resolved_surface_id, node.widget_id, value)
+        val ok = self.bridge.set_surface_widget_value(resolved_surface_id, node.widget_id, value)
         if not ok:
             return "error: failed to set value on {canonical_id}"
-        self.bridge.session.set_active_surface(resolved_surface_id)
+        self.bridge.set_active_surface(resolved_surface_id)
         self.bridge.render()
         val updated_snapshot = self.bridge.session.access_snapshot()
         val payload = ui_access_value_to_json(updated_snapshot, canonical_id)

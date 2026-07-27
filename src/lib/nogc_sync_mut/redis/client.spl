@@ -17,6 +17,7 @@ client.close()?
 """
 
 use std.io.types.{IoError, IoErrorKind}
+use std.convert (try_parse_int)
 
 # ============================================================================
 # RedisClient
@@ -389,7 +390,11 @@ fn try_parse_resp(buf: [u8], start: i64) -> Option<ParseResult>:
                 parsed_line
             nil:
                 return nil
-        val length = l.content.to_int() ?? -1
+        # Fail-CLOSED: a non-numeric RESP length is a protocol error, not 0.
+        # `.to_int() ?? -1` never fired (the intrinsic cannot yield nil), so
+        # `$abc\r\n` was read as a valid zero-length bulk and desynced the stream.
+        val parsed_length = try_parse_int(l.content)
+        val length: i64 = parsed_length ?? -1
         if length < 0:
             return Some(ParseResult(reply: RedisReply.Nil, offset: l.end))
         val data_start = l.end
@@ -412,7 +417,9 @@ fn try_parse_resp(buf: [u8], start: i64) -> Option<ParseResult>:
                 parsed_line
             nil:
                 return nil
-        val count = l.content.to_int() ?? -1
+        # Fail-CLOSED: a non-numeric RESP array count is a protocol error, not 0.
+        val parsed_count = try_parse_int(l.content)
+        val count: i64 = parsed_count ?? -1
         if count < 0:
             return Some(ParseResult(reply: RedisReply.Nil, offset: l.end))
         var elements: [RedisReply] = []

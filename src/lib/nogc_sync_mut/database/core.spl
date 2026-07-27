@@ -20,6 +20,7 @@
 #   file_write("doc/08_tracking/bug/bug_db.sdn", content)  // ❌ Race condition!
 
 use nogc_sync_mut.database.atomic (atomic_write, atomic_read)
+use std.convert (try_parse_int, try_parse_i32)
 
 extern fn rt_crc32_text(content: text) -> i64
 use nogc_sync_mut.database.wal (WriteAheadLog, WalEntry, WalEntryType, wal_payload_to_row)
@@ -134,20 +135,29 @@ struct SdnRow:
             nil
 
     # Get as i32
+    #
+    # FAIL-CLOSED. Was `value.to_int()` + `if parsed == nil` -- a dead guard:
+    # `.to_int()` is typed `i64?` but its runtime (rt_string_to_int) returns a
+    # plain int64_t and can never produce nil, so "abc" was admitted as 0.
+    # `try_parse_i32` genuinely returns nil (and range-checks). The value is
+    # returned bare, never `Some(...)`: wrapping an i64 in an explicit Some
+    # multiplies the payload by 8 on the JIT backend.
     fn get_i32(column: text) -> i32?:
         val value = self.get(column)?
-        val parsed = value.to_int()
+        val parsed = try_parse_i32(value)
         if parsed == nil:
             return nil
-        Some(parsed)
+        val n: i64 = parsed ?? 0
+        n.to_i32()
 
-    # Get as i64
+    # Get as i64 -- fail-closed, see get_i32 above.
     fn get_i64(column: text) -> i64?:
         val value = self.get(column)?
-        val parsed = value.to_int()
+        val parsed = try_parse_int(value)
         if parsed == nil:
             return nil
-        Some(parsed)
+        val n: i64 = parsed ?? 0
+        n
 
     # Get as f64
     fn get_f64(column: text) -> f64?:
@@ -388,7 +398,14 @@ class SdnDatabase:
             if newline_idx > 0:
                 val header = content.slice(0, newline_idx)
                 val stored_crc_str = header.slice(11, header.len())
-                val stored_crc = stored_crc_str.to_int() ?? -1
+                # Fail-CLOSED: a malformed CRC header must reject the file.
+                # `.to_int() ?? -1` could not do that -- `.to_int()` never
+                # yields nil, so "#sdn-crc32:garbage" parsed as 0 and would
+                # have matched any body whose crc32 is 0.
+                val parsed_crc = try_parse_int(stored_crc_str)
+                if parsed_crc == nil:
+                    return nil
+                val stored_crc: i64 = parsed_crc ?? -1
                 val body = content.slice(newline_idx + 1, content.len())
                 val computed_crc = rt_crc32_text(body)
                 if stored_crc != computed_crc:

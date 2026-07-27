@@ -3,6 +3,7 @@
 
 use nogc_sync_mut.database.atomic (atomic_write, atomic_read, atomic_append, get_timestamp)
 use nogc_sync_mut.database.core (SdnRow, split_sdn_row)
+use std.convert (try_parse_int)
 
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_crc32_text(content: text) -> i64
@@ -56,7 +57,15 @@ fn wal_entry_from_line(line: text) -> WalEntry?:
             return wal_entry_from_line_v1(parts)
         return nil
     val stored_crc_str = parts[parts.len() - 1].trim()
-    val stored_crc = stored_crc_str.to_int() ?? -1
+    # Fail-CLOSED: a non-numeric CRC field must reject the WAL line.
+    # `.to_int() ?? -1` never fired -- `.to_int()` is typed `i64?` but its
+    # runtime (rt_string_to_int) returns a plain int64_t and cannot produce
+    # nil, so a corrupt trailer parsed as 0 and matched any payload whose
+    # crc32 is 0.
+    val parsed_crc = try_parse_int(stored_crc_str)
+    if parsed_crc == nil:
+        return nil
+    val stored_crc: i64 = parsed_crc ?? -1
     var payload_parts: [text] = []
     var j = 0
     while j < parts.len() - 1:

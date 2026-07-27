@@ -26,7 +26,7 @@ use os.services.llm.tool_registry.{register_os_tools}
 use nogc_sync_mut.ui.session.{UISession}
 use common.ui.widget.{UITree, WidgetNode, UIEvent}
 use common.ui.builder.{build_tree}
-use common.ui.access.{UiAccessNode, UiAccessSnapshot, UiAccessSurface, ui_access_find_nodes, ui_access_find_node, ui_access_resolve_action_name, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_events_to_json, ui_access_snapshot_to_text, ui_access_query_to_json, ui_access_ensure_result, ui_access_ensure_to_json, ui_access_node_value, ui_access_supports_value, ui_access_value_to_json}
+use common.ui.access.{UiAccessNode, UiAccessSnapshot, UiAccessSurface, ui_access_find_nodes, ui_access_find_node, ui_access_resolve_action_name, ui_access_snapshot_to_json, ui_access_surface_to_json, ui_access_surface_scope_to_json, ui_access_events_to_json, ui_access_snapshot_to_text, ui_access_query_snapshot_to_json, ui_access_ensure_result, ui_access_ensure_to_json, ui_access_node_value, ui_access_supports_value, ui_access_value_to_json}
 use common.ui.access_source.{ui_access_snapshot_envelope_to_json}
 use common.ui.access_adapter.{ui_access_default_adapter_registry}
 use common.ui.access_vision.{ui_access_vision_capture_to_json}
@@ -46,14 +46,24 @@ fn _extract_arg(args_json: text, key: text) -> text:
     # pattern-binding forms currently bind the payload as nil on the
     # interpreter, which silently turned every extracted argument into "".
     # Compare against nil and use the value directly instead.
+    #
+    # AND: index_of signals "not found" with -1, NOT with nil (verified on both
+    # the JIT and the interpreter). A nil-only guard therefore fell through on a
+    # missing key and read from `args_json[-1 + len(key)+2 :]`, which for
+    # {"surface_id":"popup",...} handed back "popup" as the *canonical_id*. Every
+    # absent argument silently became a neighbouring value. Guard on `< 0` too.
     val search = "\"" + key + "\""
     val idx = args_json.index_of(search)
     if idx == nil:
+        return ""
+    if idx < 0:
         return ""
     # Find the colon after the key
     val after_key = args_json[idx + search.len():]
     val colon_idx = after_key.index_of(":")
     if colon_idx == nil:
+        return ""
+    if colon_idx < 0:
         return ""
     val after_colon = after_key[colon_idx + 1:].strip()
     if after_colon.starts_with("\""):
@@ -62,14 +72,16 @@ fn _extract_arg(args_json: text, key: text) -> text:
         val end_quote = rest.index_of("\"")
         if end_quote == nil:
             return rest
+        if end_quote < 0:
+            return rest
         return rest[0:end_quote]
     # Number or other: read until comma or }
     var end_idx = after_colon.len()
     val comma = after_colon.index_of(",")
-    if comma != nil:
+    if comma != nil and comma >= 0:
         end_idx = comma
     val brace = after_colon.index_of("}")
-    if brace != nil and brace < end_idx:
+    if brace != nil and brace >= 0 and brace < end_idx:
         end_idx = brace
     return after_colon[0:end_idx].strip()
 
@@ -94,6 +106,73 @@ fn _find_surface(snapshot: UiAccessSnapshot, surface_id: text) -> UiAccessSurfac
             return surface
     return nil
 
+# NOTE: these return plain `text` plus a separate `_supported` predicate rather
+# than `text?`. Interpolating a non-nil Option renders the wrapper
+# ("Option::Some(true)") into the JSON payload, and the Option-payload
+# destructuring forms all bind nil in this tree — so an optional return cannot
+# be unwrapped safely here. "" is a legitimate value (window_id, app_id), which
+# rules out using it as the unsupported sentinel.
+
+fn _node_state_supported(state_key: text) -> bool:
+    val lower_key = state_key.lower()
+    if lower_key == "canonical_id" or lower_key == "surface_id" or lower_key == "widget_id":
+        return true
+    if lower_key == "kind" or lower_key == "visible" or lower_key == "focused":
+        return true
+    if lower_key == "enabled" or lower_key == "selected" or lower_key == "checked" or lower_key == "expanded":
+        return true
+    if lower_key == "text" or lower_key == "value" or lower_key == "actions" or lower_key == "action_names":
+        return true
+    return false
+
+fn _node_state_text(node: UiAccessNode, state_key: text) -> text:
+    val lower_key = state_key.lower()
+    if lower_key == "canonical_id":
+        return node.canonical_id
+    if lower_key == "surface_id":
+        return node.surface_id
+    if lower_key == "widget_id":
+        return node.widget_id
+    if lower_key == "kind":
+        return node.kind
+    if lower_key == "visible":
+        return if node.visible: "true" else: "false"
+    if lower_key == "focused":
+        return if node.focused: "true" else: "false"
+    if lower_key == "enabled":
+        return if node.enabled: "true" else: "false"
+    if lower_key == "selected" or lower_key == "checked" or lower_key == "expanded":
+        return if node.selected: "true" else: "false"
+    if lower_key == "text" or lower_key == "value":
+        return ui_access_node_value(node)
+    if lower_key == "actions" or lower_key == "action_names":
+        return _join_text(node.action_names, ",")
+    return ""
+
+fn _surface_state_supported(state_key: text) -> bool:
+    val lower_key = state_key.lower()
+    if lower_key == "surface_id" or lower_key == "title" or lower_key == "active":
+        return true
+    if lower_key == "window_id" or lower_key == "app_id" or lower_key == "root_canonical_id":
+        return true
+    return false
+
+fn _surface_state_text(surface: UiAccessSurface, state_key: text) -> text:
+    val lower_key = state_key.lower()
+    if lower_key == "surface_id":
+        return surface.surface_id
+    if lower_key == "title":
+        return surface.title
+    if lower_key == "active":
+        return if surface.active: "true" else: "false"
+    if lower_key == "window_id":
+        return surface.window_id
+    if lower_key == "app_id":
+        return surface.app_id
+    if lower_key == "root_canonical_id":
+        return surface.root_canonical_id
+    return ""
+
 fn _node_state_value(node: UiAccessNode, state_key: text) -> text?:
     val lower_key = state_key.lower()
     if lower_key == "canonical_id":
@@ -112,8 +191,8 @@ fn _node_state_value(node: UiAccessNode, state_key: text) -> text?:
         return if node.enabled: "true" else: "false"
     if lower_key == "selected" or lower_key == "checked" or lower_key == "expanded":
         return if node.selected: "true" else: "false"
-    if lower_key == "text":
-        return node.text
+    if lower_key == "text" or lower_key == "value":
+        return ui_access_node_value(node)
     if lower_key == "actions" or lower_key == "action_names":
         return _join_text(node.action_names, ",")
     return nil
@@ -171,8 +250,11 @@ fn _snapshot_with_window_metadata(snapshot: UiAccessSnapshot, windows: [WindowIn
             app_id: surface.app_id,
             root_canonical_id: surface.root_canonical_id
         ))
+    # Every field is written explicitly: an omitted struct field nil-fills to 3
+    # on the JIT, which would silently corrupt snapshot_revision.
     return UiAccessSnapshot(
         protocol_version: snapshot.protocol_version,
+        snapshot_revision: snapshot.snapshot_revision,
         mode: snapshot.mode,
         active_surface: snapshot.active_surface,
         surfaces: enriched,
