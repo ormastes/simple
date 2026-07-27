@@ -62,6 +62,42 @@ Vulkan or Metal device execution, host capture, QEMU capture, device-origin
 readback, input-event delivery, timing, or RSS. Those rows require their own
 retained immutable artifacts and independent review.
 
+## Current accepted source and open evidence
+
+The 2026-07-27 source checkpoint repairs the two later review findings without
+promoting runtime evidence:
+
+- canonical package CSS emits real newlines and complete traffic-control,
+  window-state, resize/hot-corner, dialog/form, tooltip/tree, taskbar, and
+  responsive structure while the Aetheric package remains the paint/material
+  authority;
+- the retained Metal session device is the single material/readback identity,
+  and the host validates one ordered receipt for every independently derived
+  Draw IR material request; missing, duplicate, extra, reordered, unfulfilled,
+  mixed, or tuple-mismatched receipts fail closed;
+- sub-opaque selected Metal fails before dispatch until a true GPU-only
+  parent-seeded delta path exists; it cannot claim success through a CPU mirror;
+- the hosted browser binds its trusted renderer inside the production WM route,
+  keeps address/title commands on the compositor, routes page pointer/key/text
+  and active-animation work through that renderer, and re-submits the resulting
+  external frame; a scoped, comment-filtered source contract rejects private
+  or direct update routes;
+- the macOS full-CLI admission boundary uses a normalized v2 history verifier
+  and tracked fail-closed trust-root gate. The real Endpoint Security collector,
+  admitted authentication branch, signing team, entitlement, reproducible
+  provenance, pinned admitted policy, and source-matched full CLI are still
+  absent, so live admission deliberately exits 125.
+
+These are accepted source contracts, not pixels or events. The native macOS
+row still needs the provisioned collector and exact admitted runtime. The
+x86_64 QEMU row still needs an admitted kernel/disk/frozen manifest plus
+`grub-mkstandalone`; ARM64 still needs an admitted ELF/FAT/frozen manifest and
+fresh guest receipts. Windows Vulkan/SIMD and Linux
+Vulkan/RenderDoc/SIMD remain prepared-host rows. Every unavailable row remains
+open and fail-closed. The current QEMU contract review and exact repair gates
+are tracked in
+`doc/08_tracking/bug/wm_glass_qemu_evidence_contract_p1_2026-07-27.md`.
+
 ## Evidence and failure handling
 
 Successful production admission must retain exact source/binary revision,
@@ -73,11 +109,11 @@ QEMU requires the canonical entry, independent framebuffer capture, and
 ordered guest input evidence.
 
 Until those artifacts exist, `require_wm_glass_theme_evidence()` intentionally
-fails the executable system scenario. The 2026-07-26 CPU/Web material
-checkpoint is **SOURCE PREPARED / UNVERIFIED**: the focused runner exhausted
-its three-cycle cap with only `0 passed, 1 failed` and no child diagnostic.
-The harness defect is tracked in
+fails the executable system scenario. The focused source repairs above have
+independent review acceptance, but the available repository launcher is not an
+admitted source-matched pure-Simple runtime and no bootstrap was authorized.
+The earlier suppressed-runner diagnostic remains tracked in
 `doc/08_tracking/bug/sspec_runner_suppresses_child_failure_diagnostic_2026-07-26.md`.
-The available repository launcher identifies as a Rust bootstrap seed, and no
-bootstrap was authorized. A fresh pure-Simple focused PASS plus host/device/QEMU
-artifacts are still required; this cannot be treated as a system PASS.
+A fresh admitted pure-Simple focused PASS plus native host/device/QEMU artifacts
+is still required; this manual and the source reviews cannot be treated as a
+system PASS.

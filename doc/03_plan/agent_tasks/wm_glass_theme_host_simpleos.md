@@ -667,3 +667,25 @@ the provenance-bound collector, and produce and admit the exact-current
 canonical full CLI GUI driver and manifest v3. No admissible current
 pure-Simple GUI runtime exists; the native harness and every seed/delegating
 driver remain inadmissible.
+
+## 2026-07-27 Hosted Event and QEMU Contract Review
+
+The committed hosted browser route now keeps address/title commands on the
+canonical compositor owner and page pointer, key, text, and active-animation
+commands on `HostedBrowserRendererProcess`. A scoped source contract binds
+those branches, semantic targets, external-frame re-submission, and private-
+route exclusions. Independent highest-capability review accepted that static
+contract. It does not close live AC-7 focus, pointer, move/maximize, key/text,
+timing, animation-frame, or post-state evidence.
+
+Independent highest-capability QEMU review rejected a source-complete claim.
+The entries install the generated theme before the first frame, and ARM already
+has strong frozen-source/NEON/QMP/VirtIO/RAMFB checks, but remaining P1 gates
+are recorded in
+`doc/08_tracking/bug/wm_glass_qemu_evidence_contract_p1_2026-07-27.md`.
+In particular, x86 must publish and consume frozen admission with no external-
+ELF bypass, prove SSE2/scalar parity and ordered damage/frame receipts, while
+ARM must bind firmware/theme/material/backend/fallback identity and finalize
+events only after the correlated frame. Both rows still require timing/RSS.
+Active sibling changes in those files remain separately owned and must be
+re-reviewed only after their owner commits them.

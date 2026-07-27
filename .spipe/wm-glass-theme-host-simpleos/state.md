@@ -913,3 +913,25 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   source-matched canonical full-CLI GUI artifact. The production branch
   deliberately exits 125 until the implementation is reviewed, pinned policy
   hashes/status are updated, and those capabilities are provisioned.
+
+- continuation-2026-07-27-hosted-browser-event-routing: **SOURCE ROUTE FIXED /
+  STATIC CONTRACT ACCEPTED / LIVE EVIDENCE OPEN.** The production hosted
+  browser keeps address/title commands on the canonical compositor and sends
+  page pointer, key, text, and active-animation commands through the retained
+  `HostedBrowserRendererProcess`, followed by external-frame re-submission. A
+  scoped executable-source contract strips comment-only lines, binds the
+  canonical process construction, separates address/page branches, validates
+  ordering and semantic targets, and rejects private/direct routes.
+  Independent highest-capability review accepted that contract. AC-7 still
+  requires live focus, pointer, move/maximize, key/text, timing, animation
+  frames, and post-state evidence from an admitted runtime.
+
+- continuation-2026-07-27-qemu-contract-review: **P1 GAPS / LIVE ROWS
+  BLOCKED.** Independent highest-capability review confirmed theme-before-
+  first-frame wiring but rejected a source-complete claim. x86 still needs
+  published frozen admission with no external-ELF bypass, SSE2/scalar parity,
+  strict damage/frame ordering, timing, and RSS. ARM still needs firmware and
+  theme/material/backend/fallback identity plus a receipt finalized after the
+  correlated WM frame. Exact repair gates are tracked in
+  `doc/08_tracking/bug/wm_glass_qemu_evidence_contract_p1_2026-07-27.md`.
+  Active sibling changes remain separately owned and are not absorbed.
