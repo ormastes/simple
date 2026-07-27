@@ -431,6 +431,23 @@ links. Quality bar: `doc/07_guide/app/spipe/scenario_manual_example.md` and
 `doc/02_requirements/feature/sspec_scenario_manual.md`; capture extension
 design: `doc/05_design/sspec_capture_extension.md`.
 
+## Simple RenderDoc
+
+Shorthand for **Simple 2D RenderDoc Backend Equivalence**, the repo-native
+counterpart for versioned backend render records, validation, canonical
+serialization, field-level diff, exact pixel equivalence, QEMU/board receipts,
+and pure-Simple inspection of external RenderDoc captures. It is not a
+RenderDoc fork and is not synonymous with the `capture-simple` wrapper.
+
+The record/diff/equivalence and RDC-inspection cores exist; production backend,
+QEMU, aggregate, and manual-contract lanes remain incomplete while their specs
+contain explicit fail placeholders.
+
+- Architecture: `doc/04_architecture/simple_2d_renderdoc_backend_equivalence.md`
+- Core: `src/lib/common/renderdoc/backend_render_record.spl`
+- Guide: `doc/07_guide/tooling/renderdoc_capture_infra.md`
+- SPipe/LLM wiki: `doc/00_llm_process/feature_expert/simple_renderdoc/skill.md`
+
 ## Cooperative Workflow
 Multi-LLM pipeline integrated into SStack. Phases 2-3 can use Codex (`/research_codex`) and Gemini (`/gemini_ui_design`) for richer output.
 Pipeline never blocks on missing providers — every phase is self-sufficient with Claude alone.

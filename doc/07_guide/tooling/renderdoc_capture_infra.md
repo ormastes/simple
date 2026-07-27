@@ -13,8 +13,13 @@ Implemented core:
 
 - `src/lib/common/renderdoc/backend_render_record.spl`
 - `src/app/test/renderdoc_replay_inspect.spl`
+- `src/lib/common/renderdoc/backend_render_receipt_wire.spl`
 - `src/lib/common/renderdoc/simpleos_render_target_evidence.spl`
 - `src/lib/common/renderdoc/simpleos_simd_render_evidence.spl`
+
+The BRR1 host join validates the target and SIMD records independently, then
+requires one architecture, boot, frame, surface handle, and pixel identity.
+Never combine a valid QMP/target receipt with SIMD evidence from another run.
 
 The external RenderDoc bridge remains corroborating evidence:
 

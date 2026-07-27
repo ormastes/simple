@@ -7,7 +7,8 @@ use common.ui.host_env_contract.{
     host_display_input_evidence_passes,
     host_readback_evidence_passes,
     host_renderdoc_evidence_passes,
-    host_vulkan_evidence_passes
+    host_vulkan_evidence_passes,
+    host_x86_simd_evidence_passes
 }
 use std.gpu.engine2d.simd_kernels.{
     SimdLevel,
@@ -20,6 +21,7 @@ val OUT_PATH = "build/test-artifacts/test_host_env/evidence.json"
 val VULKAN_PATH = "build/gui-web-2d-vulkan-env/simple-vulkan-readback/evidence.env"
 val RENDERDOC_PATH = "build/renderdoc/simple-gate/evidence.env"
 val LIVE_WM_PATH = "build/linux-hosted-wm-live-window-evidence/evidence.env"
+val CPU_SIMD_PATH = "build/cpu-simd-engine2d-evidence/evidence.env"
 val SIMD_MATRIX_PATH = "build/cpu-simd-engine2d-arch-matrix/evidence.env"
 
 fn retained(path: text) -> text:
@@ -56,16 +58,16 @@ fn main() -> i64:
     val vulkan = retained(VULKAN_PATH)
     val renderdoc = retained(RENDERDOC_PATH)
     val live = retained(LIVE_WM_PATH)
+    val cpu_simd = retained(CPU_SIMD_PATH)
     val simd_matrix = retained(SIMD_MATRIX_PATH)
 
-    val x86 = native_simd_row(
-        "x86_simd",
-        level == SimdLevel.Avx2 or level == SimdLevel.Sse42,
-        native.executed,
-        native.bit_exact,
-        simd_matrix,
-        "x86_64"
-    )
+    val x86 = if host_x86_simd_evidence_passes(cpu_simd):
+        HostCapabilityRow.create("x86_simd", "pass", "", CPU_SIMD_PATH, "")
+    else:
+        blocked(
+            "x86_simd", "complete-retained-x86-simd-evidence-required", CPU_SIMD_PATH,
+            "sh scripts/check/check-cpu-simd-engine2d-evidence.shs"
+        )
     val arm = native_simd_row(
         "arm_simd", level == SimdLevel.Neon,
         native.executed, native.bit_exact,
@@ -116,6 +118,6 @@ fn main() -> i64:
     dir_create_all(OUT_DIR)
     file_write(OUT_PATH, json)
     print json
-    if env.validation_reason() == "":
+    if env.ready():
         return 0
     1

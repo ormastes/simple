@@ -1,0 +1,371 @@
+# Host Env Contract Specification
+
+> <details>
+
+| Tests | Active | Skipped | Pending |
+|-------|--------|---------|--------:|
+| 13 | 13 | 0 | 0 |
+
+<details>
+<summary>Full Scenario Manual</summary>
+
+# Host Env Contract Specification
+
+## Scenarios
+
+### host environment evidence contract
+
+#### accepts exactly the required capability rows and explicit cross-host blockers
+
+- row
+- row
+- row
+- row
+- row
+- row
+- row
+   - Expected: ready.ready() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(complete_env().validation_reason()).to_equal("")
+expect(complete_env().ready()).to_equal(false)
+expect(TestHostEnv.create([]).ready()).to_equal(false)
+val ready = TestHostEnv.create([
+    row("x86_simd", "pass"),
+    row("arm_simd", "pass"),
+    row("riscv_simd", "pass"),
+    row("vulkan", "pass"),
+    row("renderdoc", "pass"),
+    row("display_input", "pass"),
+    row("framebuffer_readback", "pass")
+])
+expect(ready.ready()).to_equal(true)
+```
+
+</details>
+
+#### rejects missing, duplicate, and unknown capability rows
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(TestHostEnv.create([]).validation_reason()).to_equal("missing-x86_simd")
+val duplicated = complete_env().with_row(row("vulkan", "pass"))
+expect(duplicated.validation_reason()).to_equal("duplicate-vulkan")
+val unknown = complete_env().with_row(row("cuda", "pass"))
+expect(unknown.validation_reason()).to_equal("unknown-cuda")
+```
+
+</details>
+
+#### requires actionable evidence for every capability status
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(row("vulkan", "maybe").validation_reason()).to_equal("invalid-status")
+expect(row("vulkan", "pass", "unexpected").validation_reason()).to_equal("pass-has-reason")
+expect(HostCapabilityRow.create("vulkan", "pass", "", "", "").validation_reason()).to_equal("missing-evidence-path")
+expect(row("arm_simd", "blocked").validation_reason()).to_equal("blocked-without-reason")
+expect(row("x86_simd", "fail").validation_reason()).to_equal("fail-without-reason")
+expect(row("arm_simd", "blocked", "arm-host-required").validation_reason()).to_equal("blocked-without-resume-command")
+```
+
+</details>
+
+#### covers accepted fail rows, nested row errors, and aggregate serialization
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(row("x86_simd", "fail", "probe-failed").validation_reason()).to_equal("")
+expect(TestHostEnv.create([row("x86_simd", "maybe")]).validation_reason()).to_equal("x86_simd-invalid-status")
+val json = complete_env().to_json()
+expect(json).to_contain("\"schema\":\"simple-test-host-env-v1\"")
+expect(json).to_contain("\"name\":\"framebuffer_readback\"")
+```
+
+</details>
+
+### render pipeline evidence contract
+
+#### accepts a correlated completed device readback
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 1 line folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(receipt().validation_reason()).to_equal("")
+```
+
+</details>
+
+#### fails closed on disconnected event, frame, and mutation identities
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(receipt(event_id: 0).validation_reason()).to_equal("missing-event-id")
+expect(receipt(frame_id: 8).validation_reason()).to_equal("event-frame-mismatch")
+expect(RenderPipelineReceipt.create(7, 7, 0, "vulkan", 41, true, "device_readback", 64, 48, 256, "argb8888", 99, 12, false).validation_reason()).to_equal("missing-mutation-revision")
+```
+
+</details>
+
+#### rejects fallback, synthetic, incomplete, and CPU-mirror backend proof
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(receipt(fallback: true).validation_reason()).to_equal("fallback-used")
+expect(receipt(backend: "cpu").validation_reason()).to_equal("not-vulkan-backend")
+expect(receipt(handle: 0).validation_reason()).to_equal("missing-backend-handle")
+expect(receipt(completed: false).validation_reason()).to_equal("submission-incomplete")
+expect(receipt(source: "cpu_mirror").validation_reason()).to_equal("not-device-readback")
+```
+
+</details>
+
+#### rejects malformed or blank framebuffer proof
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(receipt(width: 0).validation_reason()).to_equal("invalid-dimensions")
+expect(receipt(height: 0).validation_reason()).to_equal("invalid-dimensions")
+expect(receipt(stride: 64).validation_reason()).to_equal("invalid-stride")
+expect(RenderPipelineReceipt.create(7, 7, 3, "vulkan", 41, true, "device_readback", 64, 48, 256, "rgba8888", 99, 12, false).validation_reason()).to_equal("invalid-format")
+expect(receipt(checksum: 0).validation_reason()).to_equal("missing-checksum")
+expect(receipt(nonblank: 0).validation_reason()).to_equal("blank-frame")
+```
+
+</details>
+
+### live framebuffer evidence classification
+
+#### accepts only device readback with a real framebuffer and exact live crop
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val complete = "linux_hosted_wm_live_window_input_readback_source=device_readback\nlinux_hosted_wm_live_window_framebuffer_status=pass\nlinux_hosted_wm_live_window_glyph_crop_live_match=true"
+expect(host_readback_evidence_passes(complete)).to_be(true)
+expect(host_readback_evidence_passes(complete.replace("device_readback", "cpu_mirror"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("framebuffer_status=pass", "framebuffer_status=fail"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("glyph_crop_live_match=true", "glyph_crop_live_match=false"))).to_be(false)
+expect(host_readback_evidence_passes("prefixed_" + complete)).to_be(false)
+```
+
+</details>
+
+### host evidence classification
+
+#### requires the complete retained x86 SIMD rendering receipt
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 41 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val complete = "cpu_simd_evidence_status=pass\n" +
+    "cpu_simd_evidence_arch=x86_64\n" +
+    "cpu_simd_evidence_feature=avx2\n" +
+    "cpu_simd_evidence_native_simd_executed=true\n" +
+    "cpu_simd_evidence_native_simd_bit_exact=true\n" +
+    "cpu_simd_evidence_native_simd_hits=2\n" +
+    "cpu_simd_evidence_fill_mismatch_count=0\n" +
+    "cpu_simd_evidence_copy_mismatch_count=0\n" +
+    "cpu_simd_evidence_alpha_mismatch_count=0\n" +
+    "cpu_simd_evidence_alpha_edge_mismatch_count=0\n" +
+    "cpu_simd_evidence_scroll_mismatch_count=0\n" +
+    "cpu_simd_evidence_diagram_mismatch_count=0\n" +
+    "cpu_simd_evidence_diagram_fill_hits=5\n" +
+    "cpu_simd_evidence_diagram_copy_hits=3\n" +
+    "cpu_simd_evidence_diagram_alpha_hits=5\n" +
+    "cpu_simd_evidence_diagram_blit_hits=1\n" +
+    "cpu_simd_evidence_diagram_scroll_hits=3\n" +
+    "cpu_simd_evidence_policy=exact-bitmap-no-blur-no-tolerance\n" +
+    "cpu_simd_evidence_blur_or_tolerance_used=false"
+expect(host_x86_simd_evidence_passes(complete)).to_be(true)
+expect(host_x86_simd_evidence_passes(complete.replace("feature=avx2", "feature=sse42"))).to_be(true)
+expect(host_x86_simd_evidence_passes(complete.replace("status=pass", "status=fail"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("arch=x86_64", "arch=aarch64"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("feature=avx2", "feature=scalar"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("native_simd_executed=true", "native_simd_executed=false"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("native_simd_bit_exact=true", "native_simd_bit_exact=false"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("native_simd_hits=2", "native_simd_hits=0"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("fill_mismatch_count=0", "fill_mismatch_count=1"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("copy_mismatch_count=0", "copy_mismatch_count=1"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("alpha_mismatch_count=0", "alpha_mismatch_count=1"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("alpha_edge_mismatch_count=0", "alpha_edge_mismatch_count=1"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("scroll_mismatch_count=0", "scroll_mismatch_count=1"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("diagram_mismatch_count=0", "diagram_mismatch_count=1"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("diagram_fill_hits=5", "diagram_fill_hits=0"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("diagram_copy_hits=3", "diagram_copy_hits=0"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("diagram_alpha_hits=5", "diagram_alpha_hits=0"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("diagram_blit_hits=1", "diagram_blit_hits=0"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("diagram_scroll_hits=3", "diagram_scroll_hits=0"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("policy=exact-bitmap-no-blur-no-tolerance", "policy=tolerant"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("blur_or_tolerance_used=false", "blur_or_tolerance_used=true"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete + "\ncpu_simd_evidence_status=pass")).to_be(false)
+```
+
+</details>
+
+#### requires complete Vulkan device readback evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 36 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val complete = "vulkan_engine2d_readback_status=pass\n" +
+    "vulkan_engine2d_readback_spec_status=pass\n" +
+    "vulkan_engine2d_readback_available=true\n" +
+    "vulkan_engine2d_readback_backend_name=vulkan\n" +
+    "vulkan_engine2d_readback_present_exercised=true\n" +
+    "vulkan_engine2d_readback_readback_exercised=true\n" +
+    "vulkan_engine2d_readback_clear_status=pass\n" +
+    "vulkan_engine2d_readback_rect_status=pass\n" +
+    "vulkan_engine2d_readback_clear_source=device_readback\n" +
+    "vulkan_engine2d_readback_rect_source=device_readback\n" +
+    "vulkan_engine2d_readback_clear_backend_handle=41\n" +
+    "vulkan_engine2d_readback_rect_backend_handle=42\n" +
+    "vulkan_engine2d_readback_clear_device_identity=7\n" +
+    "vulkan_engine2d_readback_rect_device_identity=7\n" +
+    "vulkan_engine2d_readback_vulkan_strict_exit_code=0"
+expect(host_vulkan_evidence_passes(complete)).to_be(true)
+expect(host_vulkan_evidence_passes(complete.replace("readback_status=pass", "readback_status=fail"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("spec_status=pass", "spec_status=fail"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("available=true", "available=false"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("backend_name=vulkan", "backend_name=cpu"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("present_exercised=true", "present_exercised=false"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("readback_exercised=true", "readback_exercised=false"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("clear_status=pass", "clear_status=fail"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("rect_status=pass", "rect_status=fail"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("clear_source=device_readback", "clear_source=cpu_mirror"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("rect_source=device_readback", "rect_source=cpu_mirror"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("clear_backend_handle=41", "clear_backend_handle=0"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("clear_backend_handle=41", "clear_backend_handle=-1"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("clear_backend_handle=41", "clear_backend_handle=41x"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("clear_backend_handle=41", "clear_backend_handle="))).to_be(false)
+expect(host_vulkan_evidence_passes(complete + "\nvulkan_engine2d_readback_clear_backend_handle=43")).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("rect_backend_handle=42", "rect_backend_handle=0"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("clear_device_identity=7", "clear_device_identity=0"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("rect_device_identity=7", "rect_device_identity=0"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("vulkan_strict_exit_code=0", "vulkan_strict_exit_code=1"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete + "\nvulkan_engine2d_readback_status=fail")).to_be(false)
+```
+
+</details>
+
+#### requires a successful RenderDoc capture
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val complete = "rdoc_simple_gate_status=pass\nrdoc_simple_gate_capture_file_magic=RDOC"
+expect(host_renderdoc_evidence_passes(complete)).to_be(true)
+expect(host_renderdoc_evidence_passes(complete.replace("\n", "\r\n"))).to_be(true)
+expect(host_renderdoc_evidence_passes(complete.replace("status=pass", "status=fail"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("magic=RDOC", "magic=bad"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_file_magic", "prefixed_rdoc_simple_gate_capture_file_magic"))).to_be(false)
+```
+
+</details>
+
+#### requires screen-origin semantic mutation evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val complete = "linux_hosted_wm_live_window_event_origin=screen\nlinux_hosted_wm_live_window_semantic_target_id=field\nlinux_hosted_wm_live_window_mutation_revision=1"
+expect(host_display_input_evidence_passes(complete)).to_be(true)
+expect(host_display_input_evidence_passes(complete.replace("origin=screen", "origin=synthetic"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("semantic_target_id=field", "other_target=field"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("mutation_revision=1", "mutation_revision=0"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("semantic_target_id=field", "semantic_target_id="))).to_be(false)
+```
+
+</details>
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Standard Library |
+| Status | Active |
+| Source | `test/01_unit/lib/common/ui/host_env_contract_spec.spl` |
+| Updated | 2026-07-27 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Tests covering:
+- host environment evidence contract
+- render pipeline evidence contract
+- live framebuffer evidence classification
+- host evidence classification
+
+## Scenario Summary
+
+| Metric | Count |
+|--------|------:|
+| Total scenarios | 13 |
+| Active scenarios | 13 |
+| Slow scenarios | 0 |
+| Skipped scenarios | 0 |
+| Pending scenarios | 0 |
+
+
+</details>

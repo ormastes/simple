@@ -88,6 +88,15 @@
 
 ## Current local blockers
 
+- The aggregate host classifier currently accepts only
+  `rdoc_simple_gate_status=pass` plus four-byte `RDOC` magic, and the gate's
+  nominal pass fixture is a synthetic magic-prefixed file. Before host
+  promotion, retain and join the existing replay inspector's Vulkan driver,
+  successful open/convert, capture-path identity, XML hash/size, relevant
+  action, pipeline, shader, and resource counts with the producer's device,
+  capture lifecycle, semantic/record/pixel hashes, and owner agreement.
+  Duplicate, empty, malformed, mixed-case/all-zero hash, path-alias, and
+  synthetic-only evidence must fail closed under REQ-009.
 - Full execution needs a fresh admitted pure-Simple Stage-4 binary. The current
   diagnostic runner has a stale interpreter extern table and its native SSpec
   path delegates incorrectly to the Rust seed.

@@ -8,7 +8,8 @@ use common.ui.host_env_contract.{
     host_display_input_evidence_passes,
     host_readback_evidence_passes,
     host_renderdoc_evidence_passes,
-    host_vulkan_evidence_passes
+    host_vulkan_evidence_passes,
+    host_x86_simd_evidence_passes
 }
 
 fn row(name: text, status: text, reason: text = "", resume: text = "") -> HostCapabilityRow:
@@ -44,11 +45,64 @@ fn receipt(
         width, height, stride, "argb8888", checksum, nonblank, fallback
     )
 
+fn complete_renderdoc_gate_evidence() -> text:
+    "rdoc_simple_gate_status=pass\n" +
+        "rdoc_simple_gate_backend=simple\n" +
+        "rdoc_simple_gate_scene=vulkan-engine2d\n" +
+        "rdoc_simple_gate_capture_status=pass\n" +
+        "rdoc_simple_gate_capture_file=/tmp/frame.rdc\n" +
+        "rdoc_simple_gate_capture_file_status=pass\n" +
+        "rdoc_simple_gate_capture_magic=RDOC\n" +
+        "rdoc_simple_gate_capture_file_magic=RDOC\n" +
+        "rdoc_simple_gate_runtime_backend=vulkan\n" +
+        "rdoc_simple_gate_renderdoc_available=1\n" +
+        "rdoc_simple_gate_renderdoc_start=1\n" +
+        "rdoc_simple_gate_renderdoc_capturing_before_end=1\n" +
+        "rdoc_simple_gate_renderdoc_end=1\n" +
+        "rdoc_simple_gate_renderdoc_num_captures=1\n" +
+        "rdoc_simple_gate_pixel_count=3072\n" +
+        "rdoc_simple_gate_renderdoc_device=41\n" +
+        "rdoc_simple_gate_record_valid=1\n" +
+        "rdoc_simple_gate_semantic_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" +
+        "rdoc_simple_gate_record_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n" +
+        "rdoc_simple_gate_pixel_hash=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n" +
+        "rdoc_simple_gate_owner_frame_id=frame-7\n" +
+        "rdoc_simple_gate_capture_frame_id=frame-7\n" +
+        "rdoc_simple_gate_replay_status=pass\n" +
+        "rdoc_simple_gate_replay_reason=pass\n" +
+        "rdoc_simple_gate_replay_driver=vulkan\n" +
+        "rdoc_simple_gate_replay_capture_path=/tmp/frame.rdc\n" +
+        "rdoc_simple_gate_replay_xml_path=/tmp/frame.xml\n" +
+        "rdoc_simple_gate_replay_xml_hash=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\n" +
+        "rdoc_simple_gate_replay_xml_bytes=4096\n" +
+        "rdoc_simple_gate_replay_chunk_count=9\n" +
+        "rdoc_simple_gate_replay_relevant_action_count=1\n" +
+        "rdoc_simple_gate_replay_pipeline_count=1\n" +
+        "rdoc_simple_gate_replay_shader_count=1\n" +
+        "rdoc_simple_gate_replay_resource_count=1\n" +
+        "rdoc_simple_gate_replay_convert_exit_code=0\n" +
+        "rdoc_simple_gate_owner_agreement_status=pass\n" +
+        "rdoc_simple_gate_owner_api=vulkan\n" +
+        "rdoc_simple_gate_replay_command_exit=0\n" +
+        "rdoc_simple_gate_runtime_metadata_status=pass"
+
 describe "host environment evidence contract":
 
     # @req REQ-001 REQ-007 REQ-008 REQ-009 REQ-010
     it "accepts exactly the required capability rows and explicit cross-host blockers":
         expect(complete_env().validation_reason()).to_equal("")
+        expect(complete_env().ready()).to_equal(false)
+        expect(TestHostEnv.create([]).ready()).to_equal(false)
+        val ready = TestHostEnv.create([
+            row("x86_simd", "pass"),
+            row("arm_simd", "pass"),
+            row("riscv_simd", "pass"),
+            row("vulkan", "pass"),
+            row("renderdoc", "pass"),
+            row("display_input", "pass"),
+            row("framebuffer_readback", "pass")
+        ])
+        expect(ready.ready()).to_equal(true)
 
     it "rejects missing, duplicate, and unknown capability rows":
         expect(TestHostEnv.create([]).validation_reason()).to_equal("missing-x86_simd")
@@ -108,21 +162,110 @@ describe "live framebuffer evidence classification":
         expect(host_readback_evidence_passes("prefixed_" + complete)).to_be(false)
 
 describe "host evidence classification":
+    it "requires the complete retained x86 SIMD rendering receipt":
+        val complete = "cpu_simd_evidence_status=pass\n" +
+            "cpu_simd_evidence_arch=x86_64\n" +
+            "cpu_simd_evidence_feature=avx2\n" +
+            "cpu_simd_evidence_native_simd_executed=true\n" +
+            "cpu_simd_evidence_native_simd_bit_exact=true\n" +
+            "cpu_simd_evidence_native_simd_hits=2\n" +
+            "cpu_simd_evidence_fill_mismatch_count=0\n" +
+            "cpu_simd_evidence_copy_mismatch_count=0\n" +
+            "cpu_simd_evidence_alpha_mismatch_count=0\n" +
+            "cpu_simd_evidence_alpha_edge_mismatch_count=0\n" +
+            "cpu_simd_evidence_scroll_mismatch_count=0\n" +
+            "cpu_simd_evidence_diagram_mismatch_count=0\n" +
+            "cpu_simd_evidence_diagram_fill_hits=5\n" +
+            "cpu_simd_evidence_diagram_copy_hits=3\n" +
+            "cpu_simd_evidence_diagram_alpha_hits=5\n" +
+            "cpu_simd_evidence_diagram_blit_hits=1\n" +
+            "cpu_simd_evidence_diagram_scroll_hits=3\n" +
+            "cpu_simd_evidence_policy=exact-bitmap-no-blur-no-tolerance\n" +
+            "cpu_simd_evidence_blur_or_tolerance_used=false"
+        expect(host_x86_simd_evidence_passes(complete)).to_be(true)
+        expect(host_x86_simd_evidence_passes(complete.replace("feature=avx2", "feature=sse42"))).to_be(true)
+        expect(host_x86_simd_evidence_passes(complete.replace("status=pass", "status=fail"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("arch=x86_64", "arch=aarch64"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("feature=avx2", "feature=scalar"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("native_simd_executed=true", "native_simd_executed=false"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("native_simd_bit_exact=true", "native_simd_bit_exact=false"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("native_simd_hits=2", "native_simd_hits=0"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("fill_mismatch_count=0", "fill_mismatch_count=1"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("copy_mismatch_count=0", "copy_mismatch_count=1"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("alpha_mismatch_count=0", "alpha_mismatch_count=1"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("alpha_edge_mismatch_count=0", "alpha_edge_mismatch_count=1"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("scroll_mismatch_count=0", "scroll_mismatch_count=1"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("diagram_mismatch_count=0", "diagram_mismatch_count=1"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("diagram_fill_hits=5", "diagram_fill_hits=0"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("diagram_copy_hits=3", "diagram_copy_hits=0"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("diagram_alpha_hits=5", "diagram_alpha_hits=0"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("diagram_blit_hits=1", "diagram_blit_hits=0"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("diagram_scroll_hits=3", "diagram_scroll_hits=0"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("policy=exact-bitmap-no-blur-no-tolerance", "policy=tolerant"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("blur_or_tolerance_used=false", "blur_or_tolerance_used=true"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete + "\ncpu_simd_evidence_status=pass")).to_be(false)
+
     it "requires complete Vulkan device readback evidence":
-        val complete = "vulkan_engine2d_readback_status=pass\nvulkan_engine2d_readback_clear_source=device_readback\nvulkan_engine2d_readback_rect_source=device_readback"
+        val complete = "vulkan_engine2d_readback_status=pass\n" +
+            "vulkan_engine2d_readback_spec_status=pass\n" +
+            "vulkan_engine2d_readback_available=true\n" +
+            "vulkan_engine2d_readback_backend_name=vulkan\n" +
+            "vulkan_engine2d_readback_present_exercised=true\n" +
+            "vulkan_engine2d_readback_readback_exercised=true\n" +
+            "vulkan_engine2d_readback_clear_status=pass\n" +
+            "vulkan_engine2d_readback_rect_status=pass\n" +
+            "vulkan_engine2d_readback_clear_source=device_readback\n" +
+            "vulkan_engine2d_readback_rect_source=device_readback\n" +
+            "vulkan_engine2d_readback_clear_backend_handle=41\n" +
+            "vulkan_engine2d_readback_rect_backend_handle=42\n" +
+            "vulkan_engine2d_readback_clear_device_identity=7\n" +
+            "vulkan_engine2d_readback_rect_device_identity=7\n" +
+            "vulkan_engine2d_readback_vulkan_strict_exit_code=0"
         expect(host_vulkan_evidence_passes(complete)).to_be(true)
         expect(host_vulkan_evidence_passes(complete.replace("readback_status=pass", "readback_status=fail"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("spec_status=pass", "spec_status=fail"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("available=true", "available=false"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("backend_name=vulkan", "backend_name=cpu"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("present_exercised=true", "present_exercised=false"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("readback_exercised=true", "readback_exercised=false"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("clear_status=pass", "clear_status=fail"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("rect_status=pass", "rect_status=fail"))).to_be(false)
         expect(host_vulkan_evidence_passes(complete.replace("clear_source=device_readback", "clear_source=cpu_mirror"))).to_be(false)
         expect(host_vulkan_evidence_passes(complete.replace("rect_source=device_readback", "rect_source=cpu_mirror"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("clear_backend_handle=41", "clear_backend_handle=0"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("clear_backend_handle=41", "clear_backend_handle=-1"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("clear_backend_handle=41", "clear_backend_handle=41x"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("clear_backend_handle=41", "clear_backend_handle="))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete + "\nvulkan_engine2d_readback_clear_backend_handle=43")).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("rect_backend_handle=42", "rect_backend_handle=0"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("clear_device_identity=7", "clear_device_identity=0"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("rect_device_identity=7", "rect_device_identity=0"))).to_be(false)
+        expect(host_vulkan_evidence_passes(complete.replace("vulkan_strict_exit_code=0", "vulkan_strict_exit_code=1"))).to_be(false)
         expect(host_vulkan_evidence_passes(complete + "\nvulkan_engine2d_readback_status=fail")).to_be(false)
 
-    it "requires a successful RenderDoc capture":
-        val complete = "rdoc_simple_gate_status=pass\nrdoc_simple_gate_capture_file_magic=RDOC"
+    it "requires genuine correlated RenderDoc replay evidence":
+        val complete = complete_renderdoc_gate_evidence()
         expect(host_renderdoc_evidence_passes(complete)).to_be(true)
         expect(host_renderdoc_evidence_passes(complete.replace("\n", "\r\n"))).to_be(true)
-        expect(host_renderdoc_evidence_passes(complete.replace("status=pass", "status=fail"))).to_be(false)
-        expect(host_renderdoc_evidence_passes(complete.replace("magic=RDOC", "magic=bad"))).to_be(false)
-        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_file_magic", "prefixed_rdoc_simple_gate_capture_file_magic"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_status=pass", "rdoc_simple_gate_status=fail"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_file_magic=RDOC", "rdoc_simple_gate_capture_file_magic=bad"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_renderdoc_capturing_before_end=1", "rdoc_simple_gate_renderdoc_capturing_before_end=0"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_renderdoc_device=41", "rdoc_simple_gate_renderdoc_device=0"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_record_valid=1", "rdoc_simple_gate_record_valid=0"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_semantic_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "rdoc_simple_gate_semantic_hash=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_record_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "rdoc_simple_gate_record_hash=0000000000000000000000000000000000000000000000000000000000000000"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete + "\nrdoc_simple_gate_pixel_hash=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_frame_id=frame-7", "rdoc_simple_gate_capture_frame_id=frame-8"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_status=pass", "rdoc_simple_gate_replay_status=fail"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_driver=vulkan", "rdoc_simple_gate_replay_driver=d3d12"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_capture_path=/tmp/frame.rdc", "rdoc_simple_gate_replay_capture_path=/tmp/other.rdc"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_xml_path=/tmp/frame.xml", "rdoc_simple_gate_replay_xml_path="))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_xml_hash=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "rdoc_simple_gate_replay_xml_hash=bad"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_relevant_action_count=1", "rdoc_simple_gate_replay_relevant_action_count=0"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_pipeline_count=1", "rdoc_simple_gate_replay_pipeline_count=0"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_shader_count=1", "rdoc_simple_gate_replay_shader_count=0"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_resource_count=1", "rdoc_simple_gate_replay_resource_count=0"))).to_be(false)
+        expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_owner_agreement_status=pass", "rdoc_simple_gate_owner_agreement_status=fail"))).to_be(false)
 
     it "requires screen-origin semantic mutation evidence":
         val complete = "linux_hosted_wm_live_window_event_origin=screen\nlinux_hosted_wm_live_window_semantic_target_id=field\nlinux_hosted_wm_live_window_mutation_revision=1"
