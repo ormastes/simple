@@ -223,7 +223,7 @@ pipeline exit code (`cmd | tail` reports the exit of `tail`).
 |---|---|---|
 | A `protected-core-parse` | **filed** — seed parser defect, not a source bug; one construct rewritten as a seed workaround | `doc/08_tracking/bug/seed_parser_rejects_multiline_if_expression_chain_2026-07-27.md`; pure-Simple `lint` accepts the original with 0 errors |
 | C `formal-dual-track` | **blocked** on Lane H redeploy; no source patched; working tree restored clean | bisect: commenting `^@hardware` across `rv32i_rtl/**` turns the probe green; self-test still `STATUS: PASS` |
-| H `selfhost-redeploy` | **blocked** (P0-CRITICAL) — needs quiescent host for a T3 bootstrap | seed banner confirmed; resume command in the bug file |
+| H `selfhost-redeploy` | **blocked** (P0-CRITICAL) — needs quiescent host for a T3 bootstrap | seed banner confirmed; resume command in the bug file — **SUPERSEDED 2026-07-27, see §6: root cause was a native Dict.get/len defect, not the nil-dict/header-only-module theory; guards reverted, real fix landed `9b612a11418c`** |
 | H2 `antiseed-guard` | **filed** | `doc/08_tracking/bug/riscv_sidecar_contract_antiseed_guard_ineffective_2026-07-27.md` |
 | G `truth-audit` | **done — 3 verdicts, 2 of them overturn prior claims** | `doc/09_report/riscv_truth_audit_2026-07-27.md` |
 | B `lsu64-lowering` | **root-caused + fixed at the seed — gates 12/22 → 21/22** (verified with `SIMPLE_BIN=src/compiler_rust/target/bootstrap/simple`; needs redeploy to be the default) | see §1.1d |
@@ -427,6 +427,14 @@ re-attributes every row above.
       to work there). Seed-builds 14, 17, 18 all verified.
     - Stage-4 runtime verification with the array-backed registry (repro19)
       in flight; incremental bootstrap `--deploy` queued on its success.
+
+    > **SUPERSEDED 2026-07-27 (Lane H final) — see §6.** The "header-only/partial
+    > module with nil decl dict" theory and this guard, plus rounds 1-5 and the
+    > module-global registry that followed it (commits `ea697e4c2a85`,
+    > `8fb1d047f9f3`, `c62b2c72c659`, `9f8d5a7a1945`, `797497d757bd`,
+    > `dd64ffbddb69`), were all reverted by `9b612a11418c`. The real defect is a
+    > native `Dict<K, StructValue>.get()` corrupt-Option-on-hit bug, not a nil
+    > dict. Entry retained for the record; do not resume from it.
 10. **Pre-deploy four-gate baseline (2026-07-27, CURRENT deployed binary).**
     Binary identity: `readlink -f bin/simple` →
     `bin/release/x86_64-unknown-linux-gnu/simple`; `bin/simple --version` prints
@@ -462,3 +470,77 @@ re-attributes every row above.
 - Five ISA blockers each have a spec observed RED before any fix.
 - The payload-address, mask, and profile-string audits each have a written verdict.
 - Every lane records `pass` / `blocked` / `filed`. Postponement is not completion.
+
+## 6. CORRECTION (2026-07-27, Lane H final) — supersedes §Lane H execution log items 9-10 and the H row in §4a
+
+**Everything above attributing the stage-4 segfault to "header-only/partial
+modules with nil decl dicts" or a "struct-field map-copy aggregate deep-copy
+defect", and the guard-based mitigation (commits `ea697e4c2a85`,
+`8fb1d047f9f3`, `c62b2c72c659`, `9f8d5a7a1945`, `797497d757bd`,
+`dd64ffbddb69`, and the module-global registry experiment they built toward),
+is SUPERSEDED.** Those six commits have been reverted. The earlier entries
+are retained above for the record; do not resume work from them.
+
+**Real root cause**, reproduced in a 20-line isolated probe:
+`Dict<K, StructValue>.get()` on a HIT returns a non-nil Option whose payload
+is CORRUPT — `.unwrap()` or any field read segfaults. Misses correctly
+return nil. `contains_key()`, `keys()`, and index reads `d[k]` are all
+correct, and `Some(d[k])` round-trips correctly (verified including
+Option-parameter passing).
+
+**Second native defect:** `Dict.len()` returns **-1 for every dict** —
+local or struct field, empty or populated. This invalidated the
+`functions.len() < 0` "partial module" signal the earlier theories rested
+on; it fired on all 35,483 imports in one stage-4 run and silently
+suppressed symbol registration, which is where the 11,826 "unresolved name"
+errors came from (not a separate defect).
+
+**Stage-4 crash mechanism:** `register_imported_symbol` did
+`imported_mod.traits.get(name)` then `lower_trait(as_trait.unwrap())`; a HIT
+on std.io.traits' `Read` produced the corrupt Option and killed HIR module 32
+on every run.
+
+**Traced compiler-side divergence:** `d[k]` lowering registers
+`struct_value_syms[decoded.id]` after decode (`expr_dispatch.spl`, "Bug
+#189"); `.get()` lowering (`method_calls_literals.spl` ~1244-1262) has no
+equivalent step and uses a narrower value-type fallback.
+
+**Fix landed:** commit `9b612a11418c` — all 14 struct-valued dict lookups in
+`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl` rewritten to
+contains_key + index reads; `resolve_import_symbols` now tracks the registry
+KEY instead of an `Option<Module>`; and this same commit REVERTS all six
+earlier commits listed above (guards + registry experiment).
+
+**Verification:** seed probe-build 20 PASS; stage-4 runtime repro reached
+1,219 of 1,738 HIR modules with **zero unresolved names and zero
+segfaults** (run stopped deliberately to free the worktree), versus a
+deterministic segfault at module 32 before the campaign and 11,826 errors
+under the guards.
+
+**New bug docs:**
+`doc/08_tracking/bug/native_dict_get_struct_value_corrupt_option_2026-07-27.md`
+and `doc/08_tracking/bug/native_dict_len_returns_minus_one_2026-07-27.md`
+(commit `8c16c85ced9a`, with red spec test
+`test/01_unit/compiler/native/dict_get_struct_value_spec.spl`). Corrections
+to the three superseded bug docs: commit `b6c72a9f829e`.
+
+**Bootstrap status:** `scripts/bootstrap/bootstrap-from-scratch.sh
+--full-bootstrap --deploy` is RUNNING from a worktree rebased to current
+origin main. `--full-bootstrap` was required (not preferred): 159 commits
+landed since the worktree base and 12 touch `src/compiler_rust`, so the
+script's stale-backfill guard (`bootstrap-from-scratch.sh:899-902`) refuses a
+full-CLI bootstrap on the existing seed; the incremental path is only
+sufficient when solely pure-Simple sources changed.
+
+**Known environment blocker for the post-deploy test pass:**
+`scripts/resource/kill_simple_monitor.shs` kills any `bin/simple test`/`run`
+at ~60s of high CPU regardless of `nice` (proved 3x today), and caps
+`simple` processes at 24GB RSS / any process at 64GB — it must be stopped
+for the intensive test run. See
+`doc/09_report/intensive_test_seed_baseline_2026-07-27.md`.
+
+**Pre-deploy four-gate baseline (SEED binary), re-confirmed:** rtl-truth
+PASS; hardware-gates 13/22; formal-dual-track FAIL; product-level-evidence
+FAIL — the last three all from the seed's `variable `hardware` not found`
+decorator gap, predicted seed-only. See
+`doc/09_report/riscv_gate_seed_gap_analysis_2026-07-27.md`.

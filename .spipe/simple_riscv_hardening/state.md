@@ -112,7 +112,7 @@ release claim. This is itself a blocker row, not a footnote.
 | C `formal-dual-track` | **blocked** on redeploy (same seed cause, confirmed by independent bisect); tree restored clean | plan §1.1b |
 | F `isa-red-specs` | **done** — all 5 blockers RED (`6 total, 0 passed, 6 failed`); found NO-trap-machinery + variant-lane scope gap | `rv32_trap_completeness_spec.spl`, plan §1.1e |
 | G `truth-audit` | **done** — payload addresses = unreachable dead code (downgraded); mask = latent confirmed; 2 false capability claims found | `doc/09_report/riscv_truth_audit_2026-07-27.md` |
-| H `selfhost-redeploy` | **ACTIVE / in progress** (P0-CRITICAL) — isolated-worktree bootstrap (pinned `4eb553c`) passed Stage 2+3 + provenance gate; stage-4 blockers found+fixed: 3 parser-compat issues (`val match` identifiers, `&x as u64`, explicit-value ABI enum extraction) pushed and content-verified on remote main; then deterministic stage-4 SIGSEGV in `HirLowering.lower_trait` root-caused to header-only sibling registry entries + nil-dict phantom `.get()` (bug `hir_stub_module_nil_dict_get_phantom_some_2026-07-27.md`); mitigation gate in `resolve_package_sibling_symbols` under verification. Final bootstrap + deploy + gate re-verify PENDING | plan §Lane H execution log |
+| H `selfhost-redeploy` | **ACTIVE / in progress** (P0-CRITICAL) — isolated-worktree bootstrap (pinned `4eb553c`) passed Stage 2+3 + provenance gate; stage-4 blockers found+fixed: 3 parser-compat issues (`val match` identifiers, `&x as u64`, explicit-value ABI enum extraction) pushed and content-verified on remote main; then deterministic stage-4 SIGSEGV in `HirLowering.lower_trait` root-caused to header-only sibling registry entries + nil-dict phantom `.get()` (bug `hir_stub_module_nil_dict_get_phantom_some_2026-07-27.md`); mitigation gate in `resolve_package_sibling_symbols` under verification. Final bootstrap + deploy + gate re-verify PENDING — **SUPERSEDED 2026-07-27, see "CORRECTION" section below: the nil-dict/header-only-module theory and its guards were wrong and reverted; real defect is native `Dict.get`/`Dict.len` corruption, fix landed `9b612a11418c`** | plan §Lane H execution log |
 | H2 `antiseed-guard` | **filed** | `riscv_sidecar_contract_antiseed_guard_ineffective_2026-07-27.md` |
 | D `product-level-evidence` | **done with a verification DISPUTE open** — classified (a): two real compiler defects, not spec/runner artifacts. Defect 1 = same seed `@hardware` gap (independently reproduced with a no-import minimal repro; `asm volatile` forces the interpreter path). Defect 2 = NEW seed defect, found AND fixed: `.ok()`/`.err()` unsupported in nested static-method call dispatch (`method_dispatch.rs`, +23 lines, mirrors `special/types.rs:556-577`) — verified present by orchestrator diff. Lane D reported the spec at `9 total, 9 passed` under its rebuilt binary (`build/laneD_bin/simple`), **DISPUTE RESOLVED 2026-07-27 — D's 9/9 was genuine but conditional, and the
 orchestrator's "second interpreter" theory was WRONG (retracted).** `simple test`
@@ -188,6 +188,84 @@ as commit `9f8d5a7a1945` and the registry storage hotfix as commit
   14, 17, 18 all verified.
 - Stage-4 runtime verification with the array-backed registry (repro19) in
   flight; incremental bootstrap `--deploy` queued on its success.
+
+> **SUPERSEDED 2026-07-27 (Lane H final) — see "CORRECTION" section below.**
+> The guards referenced above (`ea697e4c2a85`, `8fb1d047f9f3`) and everything
+> built on the "header-only/partial module, nil decl dict" theory (rounds 1-5,
+> the module-global registry) are reverted; they were not the real fix.
+
+## CORRECTION (2026-07-27, Lane H final)
+
+**Superseded:** the stage-4 segfault theories of "header-only/partial modules
+with nil decl dicts" and a "struct-field map-copy aggregate deep-copy
+defect", and the guard-based mitigations built on them — commits
+`ea697e4c2a85`, `8fb1d047f9f3`, `c62b2c72c659`, `9f8d5a7a1945`,
+`797497d757bd`, `dd64ffbddb69` — are all **reverted**. Earlier entries above
+are retained for the record; do not resume work from them.
+
+**Real root cause**, reproduced in a 20-line isolated probe:
+`Dict<K, StructValue>.get()` on a HIT returns a non-nil Option whose payload
+is CORRUPT — `.unwrap()` or any field read segfaults. Misses correctly
+return nil. `contains_key()`, `keys()`, and index reads `d[k]` are all
+correct, and `Some(d[k])` round-trips correctly (verified including
+Option-parameter passing).
+
+**Second native defect:** `Dict.len()` returns **-1 for every dict** —
+local or struct field, empty or populated. This invalidated the
+`functions.len() < 0` "partial module" signal the earlier theories rested
+on; it fired on all 35,483 imports in one stage-4 run and silently
+suppressed symbol registration — the source of the 11,826 "unresolved name"
+errors (not a separate defect).
+
+**Stage-4 crash mechanism:** `register_imported_symbol` did
+`imported_mod.traits.get(name)` then `lower_trait(as_trait.unwrap())`; a HIT
+on std.io.traits' `Read` produced the corrupt Option and killed HIR module 32
+on every run.
+
+**Traced compiler-side divergence:** `d[k]` lowering registers
+`struct_value_syms[decoded.id]` after decode (`expr_dispatch.spl`, "Bug
+#189"); `.get()` lowering (`method_calls_literals.spl` ~1244-1262) has no
+equivalent step and uses a narrower value-type fallback.
+
+**Fix landed:** commit `9b612a11418c` — all 14 struct-valued dict lookups in
+`src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl` rewritten to
+contains_key + index reads; `resolve_import_symbols` now tracks the registry
+KEY instead of an `Option<Module>`; this same commit REVERTS all six earlier
+commits listed above.
+
+**Verification:** seed probe-build 20 PASS; stage-4 runtime repro reached
+1,219 of 1,738 HIR modules with **zero unresolved names and zero
+segfaults** (run stopped deliberately to free the worktree), versus a
+deterministic segfault at module 32 before the campaign and 11,826 errors
+under the guards.
+
+**New bug docs:**
+`doc/08_tracking/bug/native_dict_get_struct_value_corrupt_option_2026-07-27.md`
+and `doc/08_tracking/bug/native_dict_len_returns_minus_one_2026-07-27.md`
+(commit `8c16c85ced9a`, with red spec test
+`test/01_unit/compiler/native/dict_get_struct_value_spec.spl`). Corrections
+to the three superseded bug docs: commit `b6c72a9f829e`.
+
+**Bootstrap status:** `scripts/bootstrap/bootstrap-from-scratch.sh
+--full-bootstrap --deploy` is RUNNING from a worktree rebased to current
+origin main. `--full-bootstrap` was required (not preferred): 159 commits
+landed since the worktree base and 12 touch `src/compiler_rust`, so the
+script's stale-backfill guard (`bootstrap-from-scratch.sh:899-902`) refuses a
+full-CLI bootstrap on the existing seed; the incremental path is only
+sufficient when solely pure-Simple sources changed.
+
+**Known environment blocker for the post-deploy test pass:**
+`scripts/resource/kill_simple_monitor.shs` kills any `bin/simple test`/`run`
+at ~60s of high CPU regardless of `nice` (proved 3x today), and caps
+`simple` processes at 24GB RSS / any process at 64GB — it must be stopped
+for the intensive test run. See
+`doc/09_report/intensive_test_seed_baseline_2026-07-27.md`.
+
+**Pre-deploy four-gate baseline (SEED binary), re-confirmed:** rtl-truth
+PASS; hardware-gates 13/22; formal-dual-track FAIL; product-level-evidence
+FAIL — the last three all from the seed's `variable `hardware` not found`
+decorator gap, predicted seed-only. See
+`doc/09_report/riscv_gate_seed_gap_analysis_2026-07-27.md`.
 
 ## Phase Checklist
 - [x] 1-dev
