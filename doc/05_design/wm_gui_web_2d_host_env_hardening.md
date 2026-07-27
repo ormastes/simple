@@ -171,7 +171,8 @@ three pairwise statuses must be `pass`, all mismatch counts must be `0`, and the
 aggregate must be `pass` in `pairwise-argb-diff` mode. The existing row passes
 only when this classifier and `host_vulkan_evidence_passes` both pass.
 
-Current-file hash revalidation is outside this bounded classifier because the
-setup producer does not emit ARGB/diff SHA-256 bindings. That provenance
-follow-up remains explicit in the external-host TODO; nonempty artifact paths
-alone must not be described as cryptographic freshness proof.
+The setup producer binds all three ARGB JSON files and all three pairwise PPM
+diffs to lowercase SHA-256 values. The pure classifier requires unique valid
+hash fields, and the app boundary re-hashes each current regular/no-follow path
+before admitting the Vulkan row. Atomic open-and-hash remains the separately
+documented local-artifact TOCTOU ceiling.

@@ -168,7 +168,7 @@ production owners. Live event and device proof belongs to the primary scenario.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 60 lines folded for reproduction.
+Runnable source: 68 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -194,7 +194,7 @@ expect(app).to_contain("HostCapabilityRow")
 expect(app).to_contain("host_capability_row_from_evidence")
 expect(app).to_contain("file_exists(VULKAN_PATH) and file_exists(VULKAN_RUN_PATH) and file_exists(VULKAN_BROWSER_PATH)")
 expect(app).to_contain("host_renderdoc_evidence_passes(renderdoc) and host_renderdoc_artifacts_are_current(renderdoc)")
-expect(app).to_contain("host_vulkan_evidence_passes(vulkan) and host_browser_vulkan_parity_evidence_passes(vulkan_browser, vulkan_run)")
+expect(app).to_contain("host_browser_vulkan_parity_artifacts_are_current(vulkan_run)")
 expect(app).to_contain("host_readback_evidence_passes(live) and host_readback_captures_are_current(live)")
 expect(contract).to_contain("linux_hosted_wm_live_window_input_readback_source=device_readback")
 expect(contract).to_contain("linux_hosted_wm_live_window_glyph_crop_live_match=true")
@@ -206,6 +206,7 @@ expect(contract).to_contain(
 expect(contract).to_contain(
     "_host_evidence_value_matches(evidence, \"linux_hosted_wm_live_window_baseline_backend\", \"vulkan\")")
 expect(contract).to_contain("fn host_browser_vulkan_parity_evidence_passes")
+expect(contract).to_contain("fn host_browser_vulkan_parity_artifact_bindings")
 expect(contract).to_contain("gui_web_2d_vulkan_electron_browser_backing_source_file_status")
 expect(contract).to_contain("gui_web_2d_vulkan_chrome_browser_backing_source_file_status")
 expect(contract).to_contain("gui_web_2d_vulkan_electron_chrome_pairwise_diff_status")
@@ -222,6 +223,12 @@ expect(setup.contains("const width = Number(payload.width")).to_be(false)
 expect(setup).to_contain("nonblank > 0 && nonblank <= pixels.length")
 expect(setup).to_contain("Number.isInteger(value) && value >= 0 && value <= 0xffffffff")
 expect(setup).to_contain("for (let i = 0; pixelsValid && i < pixels.length; i += 1)")
+expect(setup).to_contain("append_artifact_sha256 \"gui_web_2d_vulkan_electron_argb_sha256\"")
+expect(setup).to_contain("append_artifact_sha256 \"gui_web_2d_vulkan_chrome_argb_sha256\"")
+expect(setup).to_contain("append_artifact_sha256 \"gui_web_2d_vulkan_simple_argb_sha256\"")
+expect(setup).to_contain("append_artifact_sha256 \"gui_web_2d_vulkan_electron_chrome_diff_sha256\"")
+expect(setup).to_contain("append_artifact_sha256 \"gui_web_2d_vulkan_electron_simple_diff_sha256\"")
+expect(setup).to_contain("append_artifact_sha256 \"gui_web_2d_vulkan_chrome_simple_diff_sha256\"")
 expect(browser_backing).to_contain("electronBrowserGpuInfoStatus === \"pass\"")
 expect(browser_backing).to_contain("const electronHardware = Boolean(electronAux.hardwareSupportsVulkan);")
 expect(browser_backing.contains("electronAux.hardwareSupportsVulkan || electronAppAux.hardwareSupportsVulkan")).to_be(false)

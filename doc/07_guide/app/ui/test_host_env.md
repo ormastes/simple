@@ -51,6 +51,12 @@ device identity, no blur/tolerance, and zero strict/parity exit codes.
 Missing, duplicate, synthetic, CPU-mirror, unsigned-zero, signed, or malformed
 fields fail closed.
 
+Browser parity additionally binds the Electron, Chrome, and Simple ARGB JSON
+files and all three pairwise PPM diff files to producer-emitted lowercase
+SHA-256 values. The aggregate reopens each current path only after a
+regular-file, no-follow check and rejects missing, changed, malformed,
+duplicate, or symlink-substituted artifacts before the Vulkan row can pass.
+
 The Linux live-window gate injects the event at X11, records WM targeting,
 dispatches the content-local point through the hosted BrowserSession, applies
 the application mutation, updates authoritative window content, and captures

@@ -25,14 +25,12 @@ to `build/renderdoc/simple-gate/evidence.env`. Capture or gate failure is
 reported through typed setup status/reason rows and a nonzero exit. This closes
 the local resume-path gap only; no external-host RenderDoc row is promoted.
 
-Browser parity artifact-freshness follow-up: the pure host classifier now
-requires producer-admitted source files, nonempty ARGB/diff paths, exact
-viewport bindings, and zero-mismatch pairwise receipts. The setup producer does
-not yet emit SHA-256 bindings for all three ARGB and diff artifacts, so
-`test_host_env` cannot independently re-hash those current files as it does for
-RenderDoc and live-WM captures. Add those hashes and regular/no-follow
-revalidation before claiming cryptographic freshness; this does not weaken the
-new scalar/provenance gate.
+Browser parity artifact-freshness follow-up is implemented locally: the setup
+producer emits SHA-256 bindings for all three ARGB and all three diff artifacts,
+the pure contract rejects missing, malformed, or duplicate bindings, and
+`test_host_env` re-hashes six current regular/no-follow files before admitting
+the Vulkan row. External-host qualification remains postponed and still needs
+fresh browser/Vulkan evidence from the prepared host.
 
 ## Concrete external-host handoff
 

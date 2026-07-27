@@ -434,13 +434,14 @@ and requires all three pairwise comparisons to pass.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 69 lines folded for reproduction.
+Runnable source: 79 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val browser = complete_browser_vulkan_evidence()
 val run = complete_browser_vulkan_parity_run_evidence()
 expect(host_browser_vulkan_parity_evidence_passes(browser, run)).to_be(true)
+expect(host_browser_vulkan_parity_artifact_bindings(run).len()).to_equal(12)
 
 step("Reject incomplete or non-Vulkan browser receipts")
 expect(host_browser_vulkan_parity_evidence_passes(browser.replace("browser_backing_mode=gpu-feature-status", "browser_backing_mode=unknown"), run)).to_be(false)
@@ -492,6 +493,16 @@ expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("simple_a
 expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("simple_argb_nonblank_pixel_count=900000", "simple_argb_nonblank_pixel_count=0"))).to_be(false)
 expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("simple_argb_nonblank_pixel_count=900000", "simple_argb_nonblank_pixel_count=921601"))).to_be(false)
 expect(host_browser_vulkan_parity_evidence_passes(browser, run + "\ngui_web_2d_vulkan_electron_argb_pixel_count=921600")).to_be(false)
+
+step("Reject missing malformed or duplicate artifact SHA-256 bindings")
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("gui_web_2d_vulkan_electron_argb_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "gui_web_2d_vulkan_electron_argb_sha256="))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("gui_web_2d_vulkan_chrome_argb_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "gui_web_2d_vulkan_chrome_argb_sha256="))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("gui_web_2d_vulkan_simple_argb_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", "gui_web_2d_vulkan_simple_argb_sha256="))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("gui_web_2d_vulkan_electron_chrome_diff_sha256=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "gui_web_2d_vulkan_electron_chrome_diff_sha256="))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("gui_web_2d_vulkan_electron_simple_diff_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "gui_web_2d_vulkan_electron_simple_diff_sha256="))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("gui_web_2d_vulkan_chrome_simple_diff_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "gui_web_2d_vulkan_chrome_simple_diff_sha256="))).to_be(false)
+expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("gui_web_2d_vulkan_electron_argb_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "gui_web_2d_vulkan_electron_argb_sha256=ABC"))).to_be(false)
+expect(host_browser_vulkan_parity_artifact_bindings(run + "\ngui_web_2d_vulkan_electron_argb_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").len()).to_equal(0)
 
 step("Reject any missing or nonzero pairwise result and aggregate failure")
 expect(host_browser_vulkan_parity_evidence_passes(browser, run.replace("electron_chrome_diff_path=/tmp/electron-chrome.ppm", "electron_chrome_diff_path="))).to_be(false)

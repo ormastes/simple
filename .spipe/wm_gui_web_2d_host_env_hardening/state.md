@@ -1171,5 +1171,10 @@ Tracking split:
   aggregate pairwise pass are mandatory. Complete and focused mutation fixtures
   plus structural source checks cover the pure classifier; no
   browser/Simple/QEMU run is claimed.
-  ARGB/diff SHA-256 current-file revalidation remains an explicit producer
-  follow-up because those hash bindings do not exist yet.
+- browser-parity-artifact-freshness: The Vulkan setup producer now binds all
+  three ARGB JSON files and all three pairwise PPM diff files to portable
+  lowercase SHA-256 values. The pure contract rejects absent, malformed, or
+  duplicate bindings, and `test_host_env` requires every current path to remain
+  a regular no-follow file with matching bytes. Focused fixtures cover all six
+  changed, deleted, and same-byte symlink substitutions; external live browser
+  qualification remains postponed.

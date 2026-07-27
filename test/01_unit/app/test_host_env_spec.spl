@@ -3,6 +3,7 @@ use std.io_runtime.{file_delete, file_hash_sha256, file_read, file_write, host_o
 use std.nogc_sync_mut.io.crypto_sffi.{hash_sha256}
 use app.io.mod.{process_run_timeout}
 use app.test.test_host_env.{
+    host_browser_vulkan_parity_artifacts_are_current,
     host_readback_captures_are_current,
     host_renderdoc_artifacts_are_current,
     host_simd_artifacts_are_current
@@ -32,6 +33,20 @@ fn simd_provenance_evidence(source_path: text, compiler_path: text) -> text:
         "cpu_simd_evidence_execution_environment=native_host\n" +
         "cpu_simd_evidence_diagram_actual_checksum=606\n" +
         "cpu_simd_evidence_frame_receipt_sha256=" + hash_sha256(payload)
+
+fn browser_parity_artifact_evidence(paths: [text]) -> text:
+    "gui_web_2d_vulkan_electron_argb_path=" + paths[0] + "\n" +
+        "gui_web_2d_vulkan_electron_argb_sha256=" + file_hash_sha256(paths[0]) + "\n" +
+        "gui_web_2d_vulkan_chrome_argb_path=" + paths[1] + "\n" +
+        "gui_web_2d_vulkan_chrome_argb_sha256=" + file_hash_sha256(paths[1]) + "\n" +
+        "gui_web_2d_vulkan_simple_argb_path=" + paths[2] + "\n" +
+        "gui_web_2d_vulkan_simple_argb_sha256=" + file_hash_sha256(paths[2]) + "\n" +
+        "gui_web_2d_vulkan_electron_chrome_diff_path=" + paths[3] + "\n" +
+        "gui_web_2d_vulkan_electron_chrome_diff_sha256=" + file_hash_sha256(paths[3]) + "\n" +
+        "gui_web_2d_vulkan_electron_simple_diff_path=" + paths[4] + "\n" +
+        "gui_web_2d_vulkan_electron_simple_diff_sha256=" + file_hash_sha256(paths[4]) + "\n" +
+        "gui_web_2d_vulkan_chrome_simple_diff_path=" + paths[5] + "\n" +
+        "gui_web_2d_vulkan_chrome_simple_diff_sha256=" + file_hash_sha256(paths[5])
 
 describe "test host environment SIMD evidence":
 
@@ -79,6 +94,62 @@ describe "test host environment SIMD evidence":
         file_delete(source_target_path)
         file_delete(compiler_path)
         file_delete(compiler_target_path)
+
+    # @req REQ-002 REQ-005 REQ-011
+    it "rejects stale or substituted browser parity artifacts":
+        val paths = [
+            "/tmp/simple-test-host-env-electron-argb.json",
+            "/tmp/simple-test-host-env-chrome-argb.json",
+            "/tmp/simple-test-host-env-simple-argb.json",
+            "/tmp/simple-test-host-env-electron-chrome.ppm",
+            "/tmp/simple-test-host-env-electron-simple.ppm",
+            "/tmp/simple-test-host-env-chrome-simple.ppm"
+        ]
+        val targets = [
+            "/tmp/simple-test-host-env-electron-argb-target.json",
+            "/tmp/simple-test-host-env-chrome-argb-target.json",
+            "/tmp/simple-test-host-env-simple-argb-target.json",
+            "/tmp/simple-test-host-env-electron-chrome-target.ppm",
+            "/tmp/simple-test-host-env-electron-simple-target.ppm",
+            "/tmp/simple-test-host-env-chrome-simple-target.ppm"
+        ]
+        val contents = ["electron", "chrome", "simple", "ec-diff", "es-diff", "cs-diff"]
+        var i = 0
+        while i < paths.len():
+            file_delete(paths[i])
+            file_delete(targets[i])
+            expect(file_write(paths[i], contents[i])).to_be(true)
+            i += 1
+        val evidence = browser_parity_artifact_evidence(paths)
+        expect(host_browser_vulkan_parity_artifacts_are_current(evidence)).to_be(true)
+
+        step("Reject changed or deleted bytes for each ARGB and diff artifact")
+        i = 0
+        while i < paths.len():
+            expect(file_write(paths[i], "changed")).to_be(true)
+            expect(host_browser_vulkan_parity_artifacts_are_current(evidence)).to_be(false)
+            expect(file_write(paths[i], contents[i])).to_be(true)
+            file_delete(paths[i])
+            expect(host_browser_vulkan_parity_artifacts_are_current(evidence)).to_be(false)
+            expect(file_write(paths[i], contents[i])).to_be(true)
+            i += 1
+
+        step("Reject same-byte symlink substitution for every retained artifact")
+        i = 0
+        while i < paths.len():
+            expect(file_write(targets[i], contents[i])).to_be(true)
+            file_delete(paths[i])
+            expect(create_file_symlink(targets[i], paths[i])).to_equal(0)
+            expect(file_hash_sha256(paths[i])).to_equal(file_hash_sha256(targets[i]))
+            expect(host_browser_vulkan_parity_artifacts_are_current(evidence)).to_be(false)
+            file_delete(paths[i])
+            expect(file_write(paths[i], contents[i])).to_be(true)
+            i += 1
+
+        for path in paths:
+            file_delete(path)
+        for target in targets:
+            file_delete(target)
         expect(file_write(source_path, "canonical SIMD source")).to_be(true)
         expect(file_write(compiler_path, "selected Simple compiler")).to_be(true)
         val evidence = simd_provenance_evidence(source_path, compiler_path)
