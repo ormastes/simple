@@ -403,6 +403,8 @@ RuntimeValue rt_u32_alloc_filled(uint64_t len, uint32_t fill)
     RuntimeArray *a = (RuntimeArray *)malloc(bytes);
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
+    a->hdr.gc_flags = 0;   /* was uninitialised; garbage BYTE_PACKED misreads */
+    a->hdr.reserved = 0;
     a->hdr.size = (uint32_t)bytes;
     a->len = len;
     a->cap = len;
@@ -7623,6 +7625,10 @@ RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
         RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray));
         if (!a) return NIL_VALUE;
         a->hdr.type = HEAP_ARRAY;
+        /* [u8] result: must be BYTE_PACKED like the _rt_bytes_new success path,
+         * or a later push takes the wrong stride. gc_flags was uninitialised. */
+        a->hdr.gc_flags = BYTE_PACKED;
+        a->hdr.reserved = 0;
         a->hdr.size = sizeof(RuntimeArray);
         a->len = 0;
         a->cap = 0;
@@ -7637,6 +7643,10 @@ RuntimeValue rt_ipc_recv_bytes(uint64_t port, int64_t max_len)
         RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray));
         if (!a) return NIL_VALUE;
         a->hdr.type = HEAP_ARRAY;
+        /* [u8] result: must be BYTE_PACKED like the _rt_bytes_new success path,
+         * or a later push takes the wrong stride. gc_flags was uninitialised. */
+        a->hdr.gc_flags = BYTE_PACKED;
+        a->hdr.reserved = 0;
         a->hdr.size = sizeof(RuntimeArray);
         a->len = 0;
         a->cap = 0;
@@ -8033,6 +8043,8 @@ RuntimeValue rt_net_recv_ssh_plain_packet_payload(int64_t sock_fd)
         RuntimeArray *empty = (RuntimeArray *)malloc(sizeof(RuntimeArray));
         if (!empty) return NIL_VALUE;
         empty->hdr.type = HEAP_ARRAY;
+        empty->hdr.gc_flags = BYTE_PACKED;  /* [u8]; was uninitialised */
+        empty->hdr.reserved = 0;
         empty->hdr.size = sizeof(RuntimeArray);
         empty->len = 0;
         empty->cap = 0;
@@ -8840,7 +8852,78 @@ RuntimeValue rt_string_rfind(RuntimeValue s, RuntimeValue sub)
     }
     return (RuntimeValue)(-1);
 }
-RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep) { (void)a; (void)sep; return NIL_VALUE; }
+/* rt_string_join: concatenate `[text]` elements with a separator.
+ *
+ * This was a STRONG nil fake, so every joined path, log line, argv and HTTP
+ * header in the guest came back nil -- with no link error and no runtime
+ * diagnostic, the exact fail-open class d1f87b4a1a7 is working through.
+ *
+ * Hosted reference: src/runtime/runtime_native.c:2678.
+ * SFFI signature: runtime_sffi.rs:408, (I64 array, I64 sep) -> I64, i.e.
+ * both args TAGGED handles and the result a TAGGED string handle.
+ *
+ * Semantics reproduced from hosted exactly:
+ *   - nil/non-array `array` or nil/non-string `separator` yields nil;
+ *   - a non-string ELEMENT contributes no characters but still consumes its
+ *     separator slot (hosted's rt_core_as_string returns NULL for it and
+ *     simply appends nothing);
+ *   - the separator goes between elements only, never trailing;
+ *   - an empty array yields an empty string, not nil.
+ *
+ * NIL-SAFETY: runtime_array_from_abi casts a non-heap word straight to a
+ * pointer and dereferences hdr.type, so it is screened with IS_HEAP first --
+ * the hazard hot-fixed in 603e586ad5b. decode_string screens IS_HEAP itself.
+ * The malloc result is checked (the allocator returns NULL on OOM).
+ * A BYTE_PACKED array is refused: its stride-1 payload holds raw bytes, not
+ * string handles, so decoding those slots as handles would dereference
+ * arbitrary addresses. */
+RuntimeValue rt_string_join(RuntimeValue a, RuntimeValue sep)
+{
+    if (!IS_HEAP(a)) return NIL_VALUE;
+    RuntimeArray *arr = runtime_array_from_abi(a);
+    RuntimeString *s = decode_string(sep);
+    if (!arr || !s) return NIL_VALUE;
+    if (arr->hdr.gc_flags & BYTE_PACKED) return NIL_VALUE;
+    RuntimeValue *items = runtime_array_items(arr);
+    if (arr->len != 0 && !items) return NIL_VALUE;
+
+    uint64_t total = 0;
+    for (uint64_t i = 0; i < arr->len; i++) {
+        RuntimeString *it = decode_string(items[i]);
+        if (it) {
+            if (it->len > (uint64_t)0x7FFFFFFF - total) return NIL_VALUE;
+            total += it->len;
+        }
+        if (i + 1 < arr->len) {
+            if (s->len > (uint64_t)0x7FFFFFFF - total) return NIL_VALUE;
+            total += s->len;
+        }
+    }
+
+    RuntimeString *out =
+        (RuntimeString *)malloc(sizeof(RuntimeString) + (size_t)total + 1);
+    if (!out) return NIL_VALUE;
+    out->hdr.type = HEAP_STRING;
+    out->hdr.gc_flags = 0;
+    out->hdr.reserved = 0;
+    out->hdr.size = (uint32_t)(sizeof(RuntimeString) + (size_t)total + 1);
+    out->len = total;
+
+    uint64_t pos = 0;
+    for (uint64_t i = 0; i < arr->len; i++) {
+        RuntimeString *it = decode_string(items[i]);
+        if (it && it->len > 0) {
+            __builtin_memcpy(out->data + pos, it->data, (size_t)it->len);
+            pos += it->len;
+        }
+        if (i + 1 < arr->len && s->len > 0) {
+            __builtin_memcpy(out->data + pos, s->data, (size_t)s->len);
+            pos += s->len;
+        }
+    }
+    out->data[total] = '\0';
+    return ENCODE_PTR(out);
+}
 RuntimeValue rt_string_to_int(RuntimeValue s) {
     RuntimeString *str = decode_string(s);
     if (!str) return ENCODE_INT(0);
@@ -10397,6 +10480,8 @@ RuntimeValue rt_array_new(RuntimeValue cap_val)
     RuntimeArray *a = (RuntimeArray *)malloc(alloc_size);
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
+    a->hdr.gc_flags = 0;   /* was uninitialised; garbage BYTE_PACKED misreads */
+    a->hdr.reserved = 0;
     a->hdr.size = (uint32_t)alloc_size;
     a->len = 0;
     a->cap = (uint32_t)cap;
@@ -10719,6 +10804,8 @@ RuntimeValue rt_tls13_serverhello_x25519_pub(RuntimeValue body_rv)
     RuntimeArray *empty = (RuntimeArray *)malloc(sizeof(RuntimeArray));
     if (!empty) return NIL_VALUE;
     empty->hdr.type = HEAP_ARRAY;
+    empty->hdr.gc_flags = BYTE_PACKED;  /* [u8]; was uninitialised */
+    empty->hdr.reserved = 0;
     empty->hdr.size = (uint32_t)sizeof(RuntimeArray);
     empty->len = 0;
     empty->cap = 0;
@@ -13780,7 +13867,8 @@ RuntimeValue rt_array_copy(RuntimeValue arr)
     RuntimeValue out = rt_array_new_with_cap((int64_t)src->len);
     RuntimeArray *dst = runtime_array_from_abi(out);
     if (!dst) return out;
-    dst->hdr.gc_flags = 0;  /* rt_array_new_with_cap leaves this uninitialised */
+    dst->hdr.gc_flags = 0;  /* belt-and-braces: rt_array_new_with_cap now zeroes
+                             * this too, but a copy is never byte-packed here. */
     RuntimeValue *si = runtime_array_items(src);
     RuntimeValue *di = runtime_array_items(dst);
     for (uint64_t i = 0; i < src->len; i++) di[i] = si[i];
@@ -13854,6 +13942,8 @@ RuntimeValue rt_tuple_new(RuntimeValue len_rv)
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
+    a->hdr.gc_flags = 0;   /* was uninitialised; garbage BYTE_PACKED misreads */
+    a->hdr.reserved = 0;
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)len * sizeof(RuntimeValue));
     a->len = (uint32_t)len;
     a->cap = (uint32_t)len;
@@ -14735,7 +14825,9 @@ TRAP_STUB_RET(rt_thread_join, 1)
 /* Safe no-ops on single-threaded bare metal */
 RuntimeValue rt_thread_yield(void)          { return NIL_VALUE; }  /* yield: no-op */
 RuntimeValue rt_thread_current(void)        { return ENCODE_INT(0); }  /* thread ID 0 */
-RuntimeValue rt_thread_sleep(RuntimeValue a) { (void)a; return NIL_VALUE; }  /* sleep: return immediately */
+/* rt_thread_sleep: real TSC-paced implementation near rt_time_now_monotonic_ms
+ * at the end of this file (it needs the calibrated clock defined there).
+ * It used to be a no-op fake here that returned immediately. */
 /* Safe single-slot mutex on single-core cooperative bare metal.
  * There is no preemption or SMP in the kernel's render/service paths, so an
  * uncontended mutex reduces to a value-guarding cell: new() boxes the initial
@@ -15917,13 +16009,22 @@ RuntimeValue rt_build_byte_range(RuntimeValue count_rv)
 }
 
 /* rt_array_new_with_cap: create empty array with specified capacity (raw int).
- * Workaround for push growth bug — pre-allocate capacity so push never reallocs. */
+ * Workaround for push growth bug — pre-allocate capacity so push never reallocs.
+ *
+ * gc_flags/reserved were NOT initialised here, so they inherited whatever
+ * malloc handed back. If the garbage byte happened to carry BYTE_PACKED (0x08)
+ * — one chance in two on random heap contents — every later reader of the
+ * array (rt_array_copy, rt_array_push, rt_write_u32s_to_raw, the helper TUs)
+ * took the stride-1 packed branch and silently misread 8-byte tagged slots as
+ * bytes. Found by differential testing against a 0xAA-poisoned allocator. */
 RuntimeValue rt_array_new_with_cap(int64_t cap)
 {
     if (cap < 0) cap = 16;
     RuntimeArray *a = (RuntimeArray *)malloc(sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue));
     if (!a) return NIL_VALUE;
     a->hdr.type = HEAP_ARRAY;
+    a->hdr.gc_flags = 0;   /* tagged 8-byte slots, NOT byte-packed */
+    a->hdr.reserved = 0;
     a->hdr.size = (uint32_t)(sizeof(RuntimeArray) + (size_t)cap * sizeof(RuntimeValue));
     a->len = 0;
     a->cap = (uint32_t)cap;
@@ -17873,7 +17974,10 @@ RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
 /* Forward decls: these live in sibling TUs / later in this file. Without
  * them the implicit declaration returns `int` and TRUNCATES the value. */
 extern RuntimeValue rt_value_float(RuntimeValue f_raw);  /* rt_extras.c */
-extern RuntimeValue rt_time_now(void);                   /* rt_extras.c */
+/* rt_time_now() used to be declared extern here as living in rt_extras.c,
+ * but that file is never linked for x86_64 (llvm_native_link.spl:1980-2029),
+ * so it bound to auto_stubs.c's weak nil stub. Replaced by the local
+ * calibrated TSC clock (_bm_uptime_ms) below. */
 
 /* Local string view helper. Matches rt_string_len / rt_string_eq above:
  * IS_HEAP + non-null only, deliberately NOT hdr.type == HEAP_STRING, since
@@ -18207,6 +18311,325 @@ RuntimeValue rt_ptr_write_u8(RuntimeValue addr, RuntimeValue offset, RuntimeValu
     return 0;
 }
 
+/* ===================================================================
+ * Calibrated TSC clock -- LOCAL to this translation unit.
+ *
+ * WHY THIS EXISTS HERE: rt_time_now_monotonic_ms below used to call
+ * rt_time_now(), declared extern here and annotated as living in
+ * rt_extras.c. But rt_extras.c is NEVER compiled or linked for the x86_64
+ * guest: link_simpleos_x86_64
+ * (src/compiler/70.backend/backend/llvm_native_link.spl:1980-2029) builds
+ * exactly crt0.s, baremetal_stubs.c, type_stubs.c, auto_stubs.c and the
+ * generated module_init.c. So `rt_time_now` resolved to auto_stubs.c:3487,
+ * a WEAK nil stub -- confirmed with `nm -u` on this file's object, which
+ * reports rt_time_now as undefined. rt_time_now_monotonic_ms was therefore
+ * computing DECODE_INT(NIL_VALUE) == 3 >> 3 == 0 and had been returning a
+ * CONSTANT ZERO ever since it landed, despite its comment claiming
+ * otherwise. Same fail-open class, one level down: the fix depended on a
+ * symbol that itself silently bound to a fake.
+ *
+ * The clock is ported from the proven rt_extras.c implementation
+ * (_rdtsc / _cpuid / _pit_tsc_frequency_hz / _tsc_frequency_hz): TSC delta
+ * since first use, divided by a CPUID-leaf-0x15/0x16 frequency with a PIT
+ * channel-2 gate calibration as fallback. A frequency of 0 means
+ * calibration failed and is reported as such rather than papered over.
+ * =================================================================== */
+
+#if defined(__x86_64__) || defined(__i386__)
+
+static inline uint64_t _bm_rdtsc(void)
+{
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+static inline void _bm_cpuid(uint32_t leaf, uint32_t *a, uint32_t *b,
+                             uint32_t *c, uint32_t *d)
+{
+    __asm__ volatile("cpuid"
+                     : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d)
+                     : "a"(leaf), "c"(0));
+}
+
+#ifndef SIMPLEOS_BM_TSC_PIT_MAX_POLLS
+#define SIMPLEOS_BM_TSC_PIT_MAX_POLLS 10000000ULL
+#endif
+
+/* PIT channel-2 gate calibration: time a known 10ms countdown with the TSC.
+ * Bounded by SIMPLEOS_BM_TSC_PIT_MAX_POLLS so a wedged/absent PIT (some
+ * virtual platforms) returns 0 instead of hanging the kernel. */
+static uint64_t _bm_pit_tsc_frequency_hz(void)
+{
+    const uint16_t pit_count = 11932U;          /* 1193182 Hz / 100 = 10 ms */
+    uint8_t original_control = inb(0x61);
+    uint8_t stopped_control = (uint8_t)(original_control & 0xFEU);
+    outb(0x61, stopped_control);
+    outb(0x43, 0xB0);                            /* ch2, lobyte/hibyte, mode 0 */
+    outb(0x42, (uint8_t)(pit_count & 0xFFU));
+    outb(0x42, (uint8_t)(pit_count >> 8));
+    uint64_t start = _bm_rdtsc();
+    outb(0x61, (uint8_t)(stopped_control | 0x01U));   /* open the gate */
+    uint64_t polls = 0;
+    uint8_t saw_low = 0;
+    uint8_t saw_transition = 0;
+    while (polls < SIMPLEOS_BM_TSC_PIT_MAX_POLLS) {
+        uint8_t output_high = (uint8_t)(inb(0x61) & 0x20U);
+        if (output_high == 0) saw_low = 1;
+        if (saw_low != 0 && output_high != 0) { saw_transition = 1; break; }
+        polls++;
+    }
+    uint64_t end = _bm_rdtsc();
+    outb(0x61, original_control);
+    if (saw_transition == 0 || end <= start) return 0;
+    return ((end - start) * 1193182ULL) / pit_count;
+}
+
+static uint64_t _bm_tsc_frequency_hz(void)
+{
+    static uint64_t cached;
+    static uint8_t initialized;
+    uint32_t a, b, c, d;
+    if (initialized != 0) return cached;
+    initialized = 1;
+    _bm_cpuid(0, &a, &b, &c, &d);
+    if (a >= 0x15) {
+        uint32_t max_leaf = a;
+        _bm_cpuid(0x15, &a, &b, &c, &d);
+        if (a != 0 && b != 0 && c != 0) {
+            cached = ((uint64_t)c * b) / a;       /* crystal Hz * ratio */
+            if (cached != 0) return cached;
+        }
+        if (max_leaf >= 0x16) {
+            _bm_cpuid(0x16, &a, &b, &c, &d);
+            if (a != 0) cached = (uint64_t)a * 1000000ULL;   /* base MHz */
+        }
+    }
+    if (cached == 0) cached = _bm_pit_tsc_frequency_hz();
+    return cached;
+}
+
+#else
+static inline uint64_t _bm_rdtsc(void) { return 0; }
+static uint64_t _bm_tsc_frequency_hz(void) { return 0; }
+#endif
+
+static uint64_t _bm_boot_tsc;
+
+/* Milliseconds since first use of the clock. 0 when calibration failed. */
+static uint64_t _bm_uptime_ms(void)
+{
+    if (_bm_boot_tsc == 0) _bm_boot_tsc = _bm_rdtsc();
+    uint64_t frequency = _bm_tsc_frequency_hz();
+    if (frequency == 0) return 0;
+    uint64_t elapsed = _bm_rdtsc() - _bm_boot_tsc;
+    return (elapsed / frequency) * 1000ULL
+         + ((elapsed % frequency) * 1000ULL) / frequency;
+}
+
+/* rt_thread_sleep: block the caller for `millis` milliseconds.
+ *
+ * This was a no-op fake that returned INSTANTLY, so every poll loop paced
+ * with it became a hot spin and every driver that used it to honour a
+ * device timing window (reset settle, link training, controller-ready)
+ * proceeded before the device was ready.
+ *
+ * Signature: runtime_sffi.rs:778,
+ * RuntimeFuncSpec::new("rt_thread_sleep", &[I64], &[]) -- ONE param, NO
+ * result, hence `void f(int64_t)`. Simple decl `extern fn
+ * rt_thread_sleep(millis: i64)` at src/lib/nogc_sync_mut/concurrent/
+ * thread.spl:94 and six other sites. Hosted: runtime_thread.c:441.
+ *
+ * The arg is RAW (untagged): SFFI I64 params are not boxed, the convention
+ * established by the landed rt_u32s_from_raw above. NOTE that rt_wait /
+ * rt_sleep_secs in rt_extras.c DECODE_INT their argument -- they are not
+ * SFFI-declared and are reached by a different path; copying them here
+ * would divide every delay by 8.
+ *
+ * This is an HONEST BUSY-WAIT and is deliberately not dressed up as a
+ * scheduler yield. There is no preemptive scheduler in the kernel's driver
+ * and service paths, so there is nothing to yield to; spinning to the
+ * deadline is both the only available implementation and exactly what a
+ * device timing window needs. It is real elapsed time, not a fake.
+ *
+ * HANG-SAFETY: if calibration failed, _bm_tsc_frequency_hz() returns 0 and
+ * a deadline loop against the clock would spin FOREVER and wedge the
+ * kernel. That case falls back to a bounded iteration count instead --
+ * approximate, but guaranteed to terminate. `millis` is clamped to one hour
+ * so the tick arithmetic cannot overflow. */
+void rt_thread_sleep(int64_t millis)
+{
+    if (millis <= 0) return;
+    if (millis > 3600000LL) millis = 3600000LL;      /* clamp: 1 hour */
+
+    uint64_t frequency = _bm_tsc_frequency_hz();
+    if (frequency == 0) {
+        for (int64_t i = 0; i < millis * 100000LL; i++) {
+#if defined(__x86_64__) || defined(__i386__)
+            __asm__ volatile("pause" ::: "memory");
+#else
+            __asm__ volatile("" ::: "memory");
+#endif
+        }
+        return;
+    }
+
+    /* freq <= ~1e10 and millis <= 3.6e6 => product <= ~3.6e16: no overflow. */
+    uint64_t ticks = (frequency * (uint64_t)millis) / 1000ULL;
+    uint64_t start = _bm_rdtsc();
+    while ((_bm_rdtsc() - start) < ticks) {
+#if defined(__x86_64__) || defined(__i386__)
+        __asm__ volatile("pause" ::: "memory");
+#else
+        __asm__ volatile("" ::: "memory");
+#endif
+    }
+}
+
+/* ---- rt_load_barrier / rt_store_barrier (half fences) ----
+ *
+ * Neither had a freestanding definition, so both bound to auto_stubs.c's
+ * WEAK stub (auto_stubs.c:2988 for rt_load_barrier) -- an eight-parameter
+ * function returning NIL_VALUE, i.e. not even a compiler barrier. Every
+ * driver that ordered an MMIO/DMA access with them got nothing, so the
+ * compiler was free to sink a descriptor store past a doorbell write and to
+ * cache a device-status load across a poll loop. These strong definitions
+ * override the weak stubs outright.
+ *
+ * Signature evidence -- three independent sources agree on `void f(void)`:
+ *   - SFFI spec: runtime_sffi.rs:652-653,
+ *     RuntimeFuncSpec::new("rt_load_barrier", &[], &[]) -- no params, no
+ *     results. (The weak auto-stub's 8 args are boilerplate from the stub
+ *     generator, NOT the real prototype.)
+ *   - Simple decl: src/lib/nogc_sync_mut/io/volatile_ops.spl:59-60,
+ *     `extern fn rt_load_barrier()` / `extern fn rt_store_barrier()`.
+ *   - Hosted header: src/runtime/runtime.h:231-232,
+ *     `void rt_load_barrier(void); void rt_store_barrier(void);`
+ *
+ * Fence choice: `__asm__ volatile("" ::: "memory")` is only a COMPILER
+ * barrier -- it stops GCC reordering but emits no instruction, so it does
+ * not constrain the CPU or drain the store buffer. That is precisely the
+ * "looks fixed but is not" failure this file is fighting. x86-64 is TSO for
+ * ordinary WB memory, but MMIO/DMA buffers are routinely mapped WC/UC where
+ * stores are write-combined and loads may be speculated, so the real
+ * instructions are required. These mirror Linux asm/barrier.h on x86_64:
+ *   rmb() -> lfence   (no later load hoisted above an earlier load)
+ *   wmb() -> sfence   (drains write-combining buffers, which is what makes
+ *                      a descriptor ring visible before the doorbell store)
+ * Both keep the "memory" clobber so the compiler is fenced too -- the
+ * instruction alone would not stop GCC moving the access across it.
+ * lfence/sfence are SSE/SSE2 and unconditionally present on x86-64. */
+
+void rt_load_barrier(void)
+{
+#if defined(__x86_64__)
+    __asm__ volatile("lfence" ::: "memory");
+#elif defined(__i386__)
+    /* lfence needs SSE2, not guaranteed on i386; a locked op is the
+     * portable x86 full fence. */
+    __asm__ volatile("lock; addl $0, 0(%%esp)" ::: "memory", "cc");
+#else
+    __asm__ volatile("" ::: "memory");
+#endif
+}
+
+void rt_store_barrier(void)
+{
+#if defined(__x86_64__)
+    __asm__ volatile("sfence" ::: "memory");
+#elif defined(__i386__)
+    __asm__ volatile("lock; addl $0, 0(%%esp)" ::: "memory", "cc");
+#else
+    __asm__ volatile("" ::: "memory");
+#endif
+}
+
+/* rt_typed_words_u32_at: read element `idx` of a typed `[u32]` array.
+ *
+ * No freestanding definition existed, so any out-of-line call bound to a
+ * weak nil stub and every u32 element read as 0 while the array handle
+ * still looked healthy: pixel buffers, glyph rows and register shadows all
+ * silently zero.
+ *
+ * Signature evidence -- arity 2, `(array, idx)`:
+ *   - SFFI spec: runtime_sffi.rs:631,
+ *     RuntimeFuncSpec::new("rt_typed_words_u32_at", &[I64, I64], &[I64]).
+ *   - Hosted: src/runtime/runtime_native.c:4225,
+ *     `int64_t rt_typed_words_u32_at(SplArray* a, int64_t idx)`.
+ *   - Compiler inliner: codegen/instr/calls.rs:1481
+ *     compile_inline_typed_words_at, reached for this name at calls.rs:2949
+ *     with width=4; it bails out unless `args.len() == 2`.
+ * There is no Simple `extern fn` -- it is a compiler-lowered builtin, so
+ * the inliner IS the specification, and this out-of-line body is the
+ * fallback taken whenever that inliner declines. It must agree bit for bit.
+ *
+ * ARGS: `array` is a TAGGED handle (the inliner masks it with !7 before
+ * touching the header); `idx` is RAW (coerce_vreg_to_i64, used directly as
+ * an index with no untag), as it is hosted.
+ *
+ * RETURN: RAW (untagged). The inliner writes the loaded word straight into
+ * `dest` with no BoxInt, and hosted returns a bare `value & 0xffffffff`.
+ * Returning ENCODE_INT would make the inlined and called paths disagree by
+ * a factor of 8 -- undetectable at runtime.
+ *
+ * ELEMENTS: `[u32]` is NOT byte-packed. The inliner loads an 8-byte slot at
+ * items + idx*8 and evaluates `(raw >> 3) & 0xFFFFFFFF`
+ * (maybe_packed_u64_load_word, calls.rs:1557). The u64-packed flag 0x10 is
+ * consulted ONLY for width 8 -- the width-4 path returns before reaching it
+ * -- so a u32 array is always tagged slots. This matches the landed
+ * rt_u32s_from_raw / rt_write_u32s_to_raw pair above.
+ *
+ * BOUNDS: a negative index is normalised as len + idx; anything still out
+ * of range yields 0 (the `zero` block param at calls.rs:1527). Hosted does
+ * the same.
+ *
+ * NIL-SAFETY: IS_HEAP is screened before runtime_array_from_abi, which
+ * would otherwise cast a non-heap word to a pointer and dereference
+ * hdr.type -- the hazard hot-fixed in 603e586ad5b. A BYTE_PACKED array is
+ * REFUSED rather than reinterpreted: stride 1 vs stride 8 would emit silent
+ * garbage. */
+RuntimeValue rt_typed_words_u32_at(RuntimeValue array, RuntimeValue idx)
+{
+    if (!IS_HEAP(array)) return 0;
+    RuntimeArray *a = runtime_array_from_abi(array);
+    if (!a) return 0;
+    if (a->hdr.gc_flags & BYTE_PACKED) return 0;
+    RuntimeValue *items = runtime_array_items(a);
+    if (!items) return 0;
+    int64_t len = (int64_t)a->len;
+    int64_t i = (int64_t)idx;
+    if (i < 0) i = len + i;
+    if (i < 0 || i >= len) return 0;
+    return (RuntimeValue)((((int64_t)items[i]) >> 3) & 0xFFFFFFFFLL);
+}
+
+/* rt_interp_call: the guest has no tree-walking interpreter, and it does
+ * not need one -- the HOSTED implementation does not interpret either.
+ * src/runtime/runtime_native.c:1635 ignores argc/argv entirely and tail
+ * calls rt_function_not_found(name, len), which prints
+ * "Simple runtime error: function not found: <name>" and returns nil.
+ * So the correct freestanding behaviour is that LOUD diagnostic; the weak
+ * auto-stub it used to bind to returned a SILENT nil, which is the bug.
+ *
+ * Signature from hosted: (const uint8_t* name, uint64_t len, int64_t argc,
+ * int64_t argv) -> int64_t. name/len are a raw pointer+length pair, not a
+ * tagged string handle. Returns NIL_VALUE, matching hosted's rt_core_nil().
+ *
+ * The diagnostic is delegated to this file's existing rt_function_not_found
+ * (defined above, near line 14762), which already prints
+ * "[WARN] unresolved fn: <name>" to serial and bounds the name at 128 chars
+ * so a corrupt length cannot walk off the end of memory. Its parameters are
+ * RuntimeValue (int64_t), which is ABI-identical to the pointer/length pair
+ * on x86-64 SysV, so the raw pointer is passed straight through. */
+RuntimeValue rt_interp_call(const uint8_t *name, uint64_t len,
+                            int64_t argc, int64_t argv)
+{
+    (void)argc;
+    (void)argv;
+    return rt_function_not_found((RuntimeValue)(uintptr_t)name,
+                                 (RuntimeValue)len);
+}
+
 /* rt_time_now_monotonic_ms: milliseconds since boot, monotonic.
  * Hosted reference: src/runtime/runtime_native.c:6490
  * (rt_time_now_micros() / 1000). SFFI signature: runtime_sffi.rs:1667,
@@ -18220,14 +18643,230 @@ RuntimeValue rt_ptr_write_u8(RuntimeValue addr, RuntimeValue offset, RuntimeValu
  * return is a machine integer -- the same reason rt_string_len and
  * rt_array_len above return raw.
  *
- * Time source: reuses the existing calibrated baremetal clock,
- * rt_time_now() in rt_extras.c (TSC delta since boot / CPUID-or-PIT
- * calibrated frequency, already converted to ms). It returns ENCODE_INT, so
- * we decode it here rather than re-deriving a second, drifting TSC base.
- * This is NOT a constant. */
+ * Time source: the LOCAL calibrated TSC clock above. It previously called
+ * rt_time_now() in rt_extras.c, which is never linked into this guest, so
+ * it silently read a constant 0 -- see the clock block's header comment. */
 RuntimeValue rt_time_now_monotonic_ms(void)
 {
-    return (RuntimeValue)DECODE_INT(rt_time_now());
+    return (RuntimeValue)_bm_uptime_ms();
+}
+
+/* ===================================================================
+ * Engine2D pixel span blitters.
+ *
+ * These three are the framebuffer span writers: every fill, every scroll
+ * / row copy and every alpha composite in the 2D engine funnels through
+ * them (src/lib/nogc_sync_mut/gpu/engine2d/simd_native_rows.spl). None
+ * had a freestanding definition, so all three bound to the weak
+ * nil-returning stubs in auto_stubs.c -- fill wrote nothing, copy wrote
+ * nothing, and blend handed back nil instead of a row. That is a BLANK
+ * framebuffer with no diagnostic anywhere.
+ *
+ * SCALAR implementations only. The hosted versions in
+ * src/runtime/runtime_simd_dispatch.c dispatch to SSE2/AVX2/NEON/RVV and
+ * spawn worker threads; neither is available (or wanted) in the kernel,
+ * and there is no correctness difference -- the hosted SIMD paths are
+ * bit-exact with their own scalar fallbacks. Correctness over speed.
+ *
+ * ELEMENT CONVENTION: [u32] is *not* byte-packed. The compiler's inline
+ * width-4 reader loads an 8-byte slot at items + idx*8 and evaluates
+ * `(raw >> 3) & 0xFFFFFFFF`, i.e. TAGGED ints in 8-byte slots with
+ * gc_flags = 0. That is exactly what engine2d_box_pixel/unbox_pixel do
+ * hosted (`<< 3` / `>> 3`), so the two agree. A BYTE_PACKED array is
+ * REFUSED rather than reinterpreted: stride 1 vs stride 8 would emit
+ * garbage silently. (rt_u32_alloc_filled near the top of this file
+ * stores *raw* words instead; it is inconsistent with the inline reader
+ * and a system spec already asserts it is unused -- do NOT copy it.)
+ *
+ * ARG CONVENTION: array params arrive as TAGGED handles; offset / count /
+ * color arrive RAW (extern i64/u32 params are not boxed).
+ *
+ * NIL-SAFETY: runtime_array_from_abi casts a non-heap word straight to a
+ * pointer and dereferences hdr.type, so nil (3) or any tagged int would
+ * fault before its own !a guard could run -- the exact hazard hot-fixed
+ * in 603e586ad5b. Every entry point below screens with IS_HEAP first.
+ * =================================================================== */
+
+/* Allocate a fresh [u32] row: tagged 8-byte slots, gc_flags = 0, len = n.
+ * Mirrors engine2d_new_pixel_array (runtime_simd_dispatch.c:864). */
+static RuntimeValue _bm_pixel_array_new(int64_t n)
+{
+    if (n < 0) n = 0;
+    RuntimeValue v = rt_array_new_with_cap(n);
+    /* rt_array_new_with_cap returns NIL (3) on OOM, and
+     * runtime_array_from_abi would then deref address 3. */
+    if (!IS_HEAP(v)) return v;
+    RuntimeArray *a = runtime_array_from_abi(v);
+    if (!a) return v;
+    a->hdr.gc_flags = 0;          /* never byte-packed */
+    a->len = (uint64_t)n;
+    return v;
+}
+
+/* Screen a [u32] argument: heap-tagged, really an array, and not packed.
+ * NULL means "refuse this operation", never "dereference anyway". */
+static RuntimeArray *_bm_pixel_array_from_abi(RuntimeValue v)
+{
+    if (!IS_HEAP(v)) return NULL;
+    RuntimeArray *a = runtime_array_from_abi(v);
+    if (!a) return NULL;
+    if (a->hdr.gc_flags & BYTE_PACKED) return NULL;   /* wrong element stride */
+    return a;
+}
+
+/* Clamp a span to the array. Mirrors engine2d_span_bounds
+ * (runtime_simd_dispatch.c:583) exactly: negative offset, non-positive
+ * count and offset >= len all reject; an over-long count is clamped. */
+static int _bm_span_bounds(RuntimeArray *a, int64_t offset, int64_t count,
+                           int64_t *out_offset, int64_t *out_count)
+{
+    if (!a) return 0;
+    int64_t len = (int64_t)a->len;
+    if (len < 0) return 0;
+    if (offset < 0 || count <= 0 || offset >= len) return 0;
+    if (count > len - offset) count = len - offset;
+    *out_offset = offset;
+    *out_count = count;
+    return count > 0;
+}
+
+/* Tag/untag a pixel. Identical to engine2d_box_pixel /
+ * engine2d_unbox_pixel (runtime_simd_dispatch.c:604, :608), which are the
+ * same `<< 3` / `>> 3` the compiler's inline [u32] reader uses. */
+static inline RuntimeValue _bm_box_pixel(uint32_t pixel)
+{
+    return (RuntimeValue)((uint64_t)pixel << 3);
+}
+
+static inline uint32_t _bm_unbox_pixel(RuntimeValue slot)
+{
+    return (uint32_t)(((uint64_t)slot >> 3) & 0xFFFFFFFFULL);
+}
+
+/* Source-over alpha composite, mirroring engine2d_blend_pixel
+ * (runtime_simd_dispatch.c:697) operation for operation, including the
+ * two early exits -- which are also what keeps out_a >= 1, so the three
+ * divisions below can never divide by zero. */
+static uint32_t _bm_blend_pixel(uint32_t sp, uint32_t dp)
+{
+    uint32_t sa = (sp >> 24) & 0xFFu;
+    if (sa == 255u) return sp;
+    if (sa == 0u) return dp;
+    uint32_t da = (dp >> 24) & 0xFFu;
+    uint32_t inv = 255u - sa;
+    uint32_t dst_weight = (da * inv) / 255u;
+    uint32_t out_a = sa + dst_weight;          /* >= sa >= 1 */
+    uint32_t r = (((sp >> 16) & 0xFFu) * sa + ((dp >> 16) & 0xFFu) * dst_weight) / out_a;
+    uint32_t g = (((sp >> 8) & 0xFFu) * sa + ((dp >> 8) & 0xFFu) * dst_weight) / out_a;
+    uint32_t b = ((sp & 0xFFu) * sa + (dp & 0xFFu) * dst_weight) / out_a;
+    return (out_a << 24) | (r << 16) | (g << 8) | b;
+}
+
+/* rt_engine2d_simd_fill_span_u32: fill dst[offset .. offset+count) with a
+ * single colour, in place. Hosted reference:
+ * src/runtime/runtime_simd_dispatch.c:1115 (which delegates to
+ * rt_engine2d_simd_fill_u32 at :1085 and returns dst unchanged).
+ * Simple decl: simd_native_rows.spl:5
+ *   `rt_engine2d_simd_fill_span_u32(dst: [u32], offset: i64, count: i64,
+ *                                   color: u32) -> [u32]`.
+ * Returns the SAME handle it was given, on every path including refusal --
+ * the Simple side rebinds `dst` from the result, so returning anything
+ * else (nil, a fresh array) would drop the caller's framebuffer. */
+RuntimeValue rt_engine2d_simd_fill_span_u32(RuntimeValue dst, int64_t offset,
+                                            int64_t count, int64_t color)
+{
+    RuntimeArray *a = _bm_pixel_array_from_abi(dst);
+    if (!a) return dst;
+    int64_t off = 0, n = 0;
+    if (!_bm_span_bounds(a, offset, count, &off, &n)) return dst;
+    RuntimeValue *items = runtime_array_items(a);
+    if (!items) return dst;
+    RuntimeValue word = _bm_box_pixel((uint32_t)(uint64_t)color);
+    for (int64_t i = 0; i < n; i++) items[off + i] = word;
+    return dst;
+}
+
+/* rt_engine2d_simd_copy_span_u32: copy count pixels src[src_offset ..] into
+ * dst[dst_offset ..], in place. Hosted reference:
+ * src/runtime/runtime_simd_dispatch.c:1158 (delegating to
+ * rt_engine2d_simd_copy_u32 at :1119), including its double clamp: the
+ * span is bounded against dst first, then the result re-bounded against
+ * src, and the smaller of the two wins.
+ * Simple decl: simd_native_rows.spl:6.
+ * Returns the SAME dst handle on every path, as above.
+ *
+ * Overlap: hosted uses memmove. Rather than assume a freestanding memmove,
+ * the copy is a directional loop -- ascending when dst starts below src,
+ * descending otherwise -- which is memmove-equivalent for these operands.
+ * This matters: scrolling a framebuffer by N rows is precisely a
+ * same-array overlapping copy. */
+RuntimeValue rt_engine2d_simd_copy_span_u32(RuntimeValue dst, int64_t dst_offset,
+                                            RuntimeValue src, int64_t src_offset,
+                                            int64_t count)
+{
+    RuntimeArray *d = _bm_pixel_array_from_abi(dst);
+    RuntimeArray *s = _bm_pixel_array_from_abi(src);
+    if (!d || !s) return dst;
+
+    int64_t d_off = 0, n = 0;
+    if (!_bm_span_bounds(d, dst_offset, count, &d_off, &n)) return dst;
+    int64_t s_off = 0, s_n = 0;
+    if (!_bm_span_bounds(s, src_offset, n, &s_off, &s_n)) return dst;
+    if (s_n < n) n = s_n;
+
+    RuntimeValue *di = runtime_array_items(d);
+    RuntimeValue *si = runtime_array_items(s);
+    if (!di || !si || n <= 0) return dst;
+
+    RuntimeValue *dp = di + d_off;
+    RuntimeValue *sp = si + s_off;
+    if (dp == sp) return dst;
+    if (dp < sp) {
+        for (int64_t i = 0; i < n; i++) dp[i] = sp[i];
+    } else {
+        for (int64_t i = n - 1; i >= 0; i--) dp[i] = sp[i];
+    }
+    return dst;
+}
+
+/* rt_engine2d_simd_blend_row_u32: source-over composite of src_row onto
+ * dst_row, returning a NEW row of length min(len(dst), len(src)).
+ * Hosted reference: src/runtime/runtime_simd_dispatch.c:995 -- note its
+ * malloc'd raw-pixel scratch path and its scalar tail are the same
+ * arithmetic; only the scalar tail is mirrored here.
+ * Simple decl: simd_native_rows.spl:8
+ *   `rt_engine2d_simd_blend_row_u32(dst_row: [u32], src_row: [u32]) -> [u32]`.
+ * Unlike the two span writers this one does NOT mutate its inputs.
+ *
+ * Degenerate inputs (nil, non-array, byte-packed, empty) yield an EMPTY
+ * [u32] array, never nil: hosted returns engine2d_new_pixel_array(n) with
+ * n clamped at 0, and a nil here would re-create the very failure this
+ * function is being written to fix. */
+RuntimeValue rt_engine2d_simd_blend_row_u32(RuntimeValue dst_row, RuntimeValue src_row)
+{
+    RuntimeArray *d = _bm_pixel_array_from_abi(dst_row);
+    RuntimeArray *s = _bm_pixel_array_from_abi(src_row);
+    int64_t dn = d ? (int64_t)d->len : 0;
+    int64_t sn = s ? (int64_t)s->len : 0;
+    int64_t n = dn < sn ? dn : sn;
+    if (n < 0) n = 0;
+
+    RuntimeValue out = _bm_pixel_array_new(n);
+    /* out is NIL on OOM; screen before the abi cast derefs it. */
+    RuntimeArray *o = IS_HEAP(out) ? runtime_array_from_abi(out) : NULL;
+    if (!o || n == 0) return out;
+
+    RuntimeValue *oi = runtime_array_items(o);
+    RuntimeValue *di = runtime_array_items(d);
+    RuntimeValue *si = runtime_array_items(s);
+    if (!oi || !di || !si) return out;
+
+    for (int64_t i = 0; i < n; i++) {
+        uint32_t dp = _bm_unbox_pixel(di[i]);
+        uint32_t sp = _bm_unbox_pixel(si[i]);
+        oi[i] = _bm_box_pixel(_bm_blend_pixel(sp, dp));
+    }
+    return out;
 }
 
 /* rt_font_glyph_index is NOT implemented here -- see the report. The
@@ -18235,4 +18874,21 @@ RuntimeValue rt_time_now_monotonic_ms(void)
  * FontSlot registry stores the raw font bytes but never parses them:
  * "Future: stbtt_fontinfo would go here"), so there is no faithful way to
  * resolve a codepoint to a glyph id. A wrong glyph mapping would be worse
- * than the current honest zero. */
+ * than the current honest zero.
+ *
+ * RE-CHECKED 2026-07-27, conclusion unchanged and in fact stronger: the
+ * handle this function would receive does not exist either. Callers take
+ * it from FontHandle.handle (src/lib/nogc_sync_mut/io/font_sffi.spl:176),
+ * which is produced by rt_font_load_bytes -- and freestanding that is
+ * NOP2(rt_font_load_bytes) in rt_extras.c:2272, i.e. it always returns
+ * NIL_VALUE. The whole rt_font_* family (load / free / glyph_bitmap /
+ * glyph_advance / line_height / bitmap_*) is NOP or weak-stubbed in this
+ * build; guest text comes from glass_render.c's built-in vector font
+ * instead. glass_render.c's own rt_font_load_from_memory returns a slot
+ * INDEX (0..15), not the FontData* the hosted signature
+ * (src/runtime/runtime_font.c:138, stbtt_FindGlyphIndex) expects, so
+ * there are two incompatible handle spaces and no way to tell them apart
+ * at this boundary. Implementing a cmap parser alone would therefore
+ * change nothing without also replacing rt_font_load_bytes with a real
+ * TrueType loader -- a separate, much larger piece of work. Leaving it
+ * unimplemented. */
