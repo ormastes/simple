@@ -621,3 +621,60 @@ Trajectory: unresolved 11,826 → 5,950 → 4,008 → 2,224; all 1,752 HIR modul
 lower, zero segfaults throughout; stage 4 still **FAILS**, no deploy has
 occurred, `bin/simple` remains the 2026-07-25 seed. Full detail in
 `doc/08_tracking/bug/stage4_focused_subbuild_star_import_unresolved_2026-07-27.md`.
+
+## Lane H update (2026-07-27, stage-4 error-reduction campaign continued)
+
+Trajectory extended with two more real, reproducible full-CLI builds:
+11,826 → 5,950 → 4,008 → 2,224 → **1,681 → 1,077**. Zero segfaults
+throughout; ~1,752-1,802 HIR modules lower every run. Stage 4 still
+**FAILS** — no deploy has occurred, `bin/simple` remains the 2026-07-25 Rust
+seed, and all four RISC-V gates keep their seed baseline (rtl-truth PASS,
+hardware-gates 13/22, formal-dual-track FAIL, product-level FAIL).
+
+**Fixes landed this pass:**
+- `8af2dc555960` — `me`/`self` receiver aliasing added to
+  `lower_unresolved_ident`. "unresolved name: me" 543 → 20.
+- `3eea09c67960` — symlink module-spelling normalization in
+  `_driver_module_aliases`. 1,681 → 1,077; whole `lex_*` family cleared.
+- (in flight, uncommitted) explicit
+  `use compiler.frontend.lexer_types.{TokenKind}` added to five
+  `src/compiler/10.frontend/treesitter/` files that used `TokenKind` 188
+  times with no import.
+
+**Root causes established this pass (isolated measurement, not inference):**
+1. Prefix-form `me foo():` methods synthesize a receiver parameter named
+   "self" while `me` itself is never parsed as an expression token — it
+   becomes `Ident("me")` and fails to resolve. Bug doc:
+   `stage4_me_receiver_unresolved_in_class_methods_2026-07-27.md`.
+2. Symlinked tier directories (`frontend` → `10.frontend`, etc.) give files
+   in the same physical directory different dotted package prefixes, so
+   `resolve_package_sibling_symbols` stops treating them as siblings and
+   directory-package semantics silently stop applying. Bug doc:
+   `module_spelling_symlink_breaks_package_siblings_2026-07-27.md`.
+
+Also confirmed (already filed, re-verified in isolation this pass):
+`Dict<K,StructValue>.get()` returns a corrupt `Option` on a HIT (misses are
+correctly nil; `contains_key`/`keys()`/`d[k]` are correct) — bug doc
+`native_dict_get_struct_value_corrupt_option_2026-07-27.md`; and
+`Dict.len()` returns `-1` for every dict, local or field, empty or
+populated — bug doc `native_dict_len_returns_minus_one_2026-07-27.md`. The
+`9b612a11418c` commit (contains_key + index reads replacing struct-valued
+`Dict.get()`) that eliminated the deterministic segfault at HIR module 32
+also **reverts six earlier commits** that had been built on a false
+"partial module" signal.
+
+**Critical methodology note (costly, worth repeating):** these HIR errors
+are visible **only** under `SIMPLE_BOOTSTRAP_STAGE4=1`. Without that flag
+the driver builds MIR from the flat-AST accumulator and never surfaces HIR
+lowering errors — the identical full build minus the flag reaches codegen
+with **zero** unresolved names. Isolated probes therefore cannot detect
+this defect class, and the flag is rejected with any entry point other than
+`src/app/cli/main.spl`. Only a real stage-4 build reproduces it.
+
+**Open items:** residual `me` (20) and `text` (48) unresolved-name classes
+under investigation; 166 "untyped function returns a value" errors being
+annotated; the symlink fix (`3eea09c67960`) is per-package and needs a
+general canonicalization; the transitive star-import broadening
+(`67024e9c0a51`, see §8 above) still needs a semantics decision — it may be
+papering over files that should carry explicit imports rather than relying
+on glob visibility.

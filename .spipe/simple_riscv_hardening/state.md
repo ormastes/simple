@@ -322,6 +322,51 @@ lower, zero segfaults throughout; stage 4 still **FAILS**, no deploy has
 occurred, `bin/simple` remains the 2026-07-25 seed. Full detail in
 `doc/08_tracking/bug/stage4_focused_subbuild_star_import_unresolved_2026-07-27.md`.
 
+## Lane H update (2026-07-27, stage-4 error-reduction campaign continued)
+
+Trajectory extended, each number from a real full-CLI build, deterministic
+and reproducible: 11,826 → 5,950 → 4,008 → 2,224 → **1,681 → 1,077**. Zero
+segfaults throughout; ~1,752-1,802 HIR modules lower every run. Stage 4
+still **FAILS** — no deploy, `bin/simple` remains the 2026-07-25 Rust seed,
+four RISC-V gates keep seed baseline (rtl-truth PASS, hardware-gates 13/22,
+formal-dual-track FAIL, product-level FAIL).
+
+Fixes landed: `8af2dc555960` (`me`/`self` receiver aliasing in
+`lower_unresolved_ident`, "unresolved name: me" 543 → 20);
+`3eea09c67960` (symlink module-spelling normalization in
+`_driver_module_aliases`, 1,681 → 1,077, whole `lex_*` family cleared);
+in-flight uncommitted explicit `use
+compiler.frontend.lexer_types.{TokenKind}` added to five
+`src/compiler/10.frontend/treesitter/` files (188 uses, no prior import).
+
+Root causes established (isolated measurement): (1) prefix-form `me
+foo():` methods synthesize a "self" receiver but `me` is never parsed as an
+expression token → `Ident("me")` unresolved — bug doc
+`stage4_me_receiver_unresolved_in_class_methods_2026-07-27.md`; (2)
+symlinked tier dirs (`frontend` → `10.frontend`) give same-directory files
+different dotted package prefixes, breaking
+`resolve_package_sibling_symbols` — bug doc
+`module_spelling_symlink_breaks_package_siblings_2026-07-27.md`. Also
+re-confirmed: `Dict<K,StructValue>.get()` corrupt `Option` on HIT (bug doc
+`native_dict_get_struct_value_corrupt_option_2026-07-27.md`) and
+`Dict.len()` always `-1` (bug doc
+`native_dict_len_returns_minus_one_2026-07-27.md`). Commit `9b612a11418c`
+(contains_key + index reads replacing struct-valued `Dict.get()`, which
+killed the deterministic segfault at HIR module 32) also **reverts six
+earlier commits** built on a false "partial module" signal.
+
+**Methodology note:** these HIR errors surface **only** under
+`SIMPLE_BOOTSTRAP_STAGE4=1` — without it the driver builds MIR from the
+flat-AST accumulator and reaches codegen with zero unresolved names, so
+isolated probes cannot detect this class, and the flag requires entry point
+`src/app/cli/main.spl`. Only a real stage-4 build reproduces it.
+
+Open items: residual `me` (20) and `text` (48) unresolved classes under
+investigation; 166 "untyped function returns a value" errors being
+annotated; symlink fix is per-package, needs general canonicalization;
+transitive star-import broadening (`67024e9c0a51`) still needs a semantics
+decision.
+
 ## Phase Checklist
 - [x] 1-dev
 - [x] 2-research (parallel lanes A–G ran; findings folded into plan §1.1b–§1.1e)
