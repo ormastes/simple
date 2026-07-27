@@ -100,6 +100,24 @@ fn config_int_field(key: text, default_value: text, min_value: i64) -> ConfigFie
         has_max: false
     )
 
+# Float descriptor (no bounds). Added for the test-runner consumer (CFG3):
+# cpu_threshold / memory_threshold are percentages expressed as f64 text.
+fn config_f64_field(key: text, default_value: text) -> ConfigFieldDescriptor:
+    ConfigFieldDescriptor(
+        key: key,
+        label: key,
+        description: "",
+        category: "",
+        value_type: "f64",
+        default_value: default_value,
+        enum_options: [],
+        platform: "all",
+        min_value: 0,
+        max_value: 0,
+        has_min: false,
+        has_max: false
+    )
+
 # ---------------------------------------------------------------------------
 # Type conversion (ported from _ec_parse_int / _ec_int_to_text / _ec_bool_to_text)
 # ---------------------------------------------------------------------------
@@ -127,6 +145,31 @@ fn config_is_int_text(s: text) -> bool:
             return false
         i = i + 1
     true
+
+# Strict check: decimal float text — optional leading '-', digits with at most
+# one '.', at least one digit ("70", "80.5", "-1.25"; not ".", "nope", "").
+fn config_is_f64_text(s: text) -> bool:
+    if s.len() == 0:
+        return false
+    var i = 0
+    if s.char_at(0) == "-":
+        i = 1
+        if s.len() == 1:
+            return false
+    var seen_digit = false
+    var seen_dot = false
+    while i < s.len():
+        if s.char_at(i) == ".":
+            if seen_dot:
+                return false
+            seen_dot = true
+        else:
+            val code = s.char_code_at(i)
+            if code < 48 or code > 57:
+                return false
+            seen_digit = true
+        i = i + 1
+    seen_digit
 
 fn config_is_bool_text(s: text) -> bool:
     s == "true" or s == "false"
@@ -188,6 +231,10 @@ fn config_validate_value(desc: ConfigFieldDescriptor, raw: text) -> ConfigValida
             return config_invalid(code: "below_min", message: desc.key + ": " + raw + " below minimum " + config_int_to_text(desc.min_value))
         if desc.has_max and n > desc.max_value:
             return config_invalid(code: "above_max", message: desc.key + ": " + raw + " above maximum " + config_int_to_text(desc.max_value))
+        return config_ok()
+    if desc.value_type == "f64":
+        if not config_is_f64_text(raw):
+            return config_invalid(code: "type_mismatch", message: desc.key + ": expected f64, got '" + raw + "'")
         return config_ok()
     if desc.value_type == "enum":
         if not config_contains_text(desc.enum_options, raw):
