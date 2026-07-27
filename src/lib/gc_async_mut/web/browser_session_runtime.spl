@@ -44,6 +44,18 @@ use std.gc_async_mut.web.browser_session_context.{
     browser_session_is_secure_context
 }
 
+extern fn rt_text_to_bytes(value: text) -> [u8]
+extern fn rt_bytes_to_text(value: [u8]) -> text
+
+fn _browser_session_drop_last_utf8_scalar(value: text) -> text:
+    val bytes = rt_text_to_bytes(value)
+    if bytes.len() == 0:
+        return ""
+    var start = bytes.len() - 1
+    while start > 0 and (bytes[start] & 0xC0u8) == 0x80u8:
+        start = start - 1
+    rt_bytes_to_text(bytes.slice(0, start))
+
 fn browser_storage_origin_key(url: text) -> text:
     val origin = url_origin(url)
     if origin != "":
@@ -361,8 +373,25 @@ impl BrowserSession:
         val current_path = be_dom_find_path_to_id(self.current_dom, target_id)
         if current_path.len() == 0:
             return Err("DOM keyboard target was removed")
+        val target = current_path[current_path.len() - 1]
+        val normalized_key = key.trim().lower()
+        if normalized_key == "backspace" or key == "8":
+            if (
+                (target.tag_name == "input" or target.tag_name == "textarea") and
+                not be_dom_has_attr(target, "disabled") and
+                not be_dom_has_attr(target, "readonly")
+            ):
+                val value = if target.tag_name == "input":
+                    be_dom_get_attr(target, "value")
+                else:
+                    html_to_text(be_dom_serialize_children(target))
+                if value != "":
+                    return self.set_dom_text_input(
+                        target_id, _browser_session_drop_last_utf8_scalar(value)
+                    )
+            return Ok(key_dispatch)
         val activation_event = be_dom_keyboard_activation_event_for_target(
-            current_path[current_path.len() - 1], key
+            target, key
         )
         if activation_event == "":
             return Ok(key_dispatch)
