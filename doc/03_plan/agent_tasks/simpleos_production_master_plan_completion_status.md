@@ -131,3 +131,70 @@ physical-hardware/secure-boot/installer/SBOM are genuinely host-blocked and
 remain honest resume-planned rows, per the SPipe forced-PASS ban. The full
 8-phase program is a multi-session effort; this document is its precise resume
 map.
+
+## Wave 3 (2026-07-27) — board bring-up + convergence, all lanes landed
+
+### BOARD: SimpleOS boots on Arduino UNO Q — **PASS** (first board boot of this stack)
+Host board: Qualcomm QRB2210, quad Cortex-A53, aarch64 Debian 13, adb `3655308719`.
+- **Guest boot:** SimpleOS x86_64 under QEMU 10.0.11 TCG **on the board**, real-firmware
+  semantics — OVMF pflash pair (code ro + writable vars copy), virtio-blk ESP, FAT32
+  font image as NVMe. **No `-kernel`, no `isa-debug-exit`, no KVM** (board-runnable rule).
+- **Evidence chain:** `BdsDxe: starting Boot0001` → `[grub-uefi] multiboot loading /boot/kernel.elf`
+  → `[scanout-evidence] 3840x2160 argb8888 generation=1 pci_decode=1` → `[font-evidence]
+  Noto Sans Mono raster=pure-sfnt-glyf` → `[production-readiness] wm=live simple_gui=object-tree
+  simple_web=content-frame renderer=engine2d process_owned_surfaces=3` → `[wm-loop] polling-active`.
+  Launch→production-readiness = **100 s**; reproduced 3× (twice by the lane, byte-identical
+  189437-byte logs; once independently by the coordinator).
+- **Delivery was rootless** — the board has no usable sudo and `adb root` is refused. Route:
+  `adb reverse tcp:3128` to a host proxy → private `[trusted=yes]` sources list + private apt
+  state (the board clock is ~2.5 months slow, so every InRelease failed `Not live until`;
+  solved with `Acquire::Check-Date=false` rather than touching the clock or `/etc`) → 99 debs
+  unpacked with `dpkg-deb -x` into `/home/arduino/qemu_root`. Nothing installed system-wide;
+  deleting three `/home/arduino` dirs fully reverts.
+- **Memory floor:** `-m 512` fails (`grub: out of memory`) — the kernel ELF carries a 574 MB
+  BSS at 0x08892000, so the multiboot image needs ~745 MB. `-m 1024` works and fits the
+  board's 1.3 GB free; the repo gates' `-m 2G` would NOT fit.
+- **Feature checks on real silicon:** the hardening harness cross-built to aarch64 and run
+  natively on the QRB2210 → **13/13 GREEN, RC=0** (spawn meet-point, single-use ledger,
+  TUF rollback/snapshot guards). 11 TERM checks excluded by an explicit, printed
+  EXCLUDED/EXCLUDED-REASON/EXCLUDED-COVERAGE banner — never silently dropped; all 24 remain
+  green under the interpreter.
+- **Still blocked:** aarch64-guest SimpleOS (no `/dev/kvm`, no aarch64 EFI image in-repo);
+  bare-metal on this board stays barred (it would destroy the board's Debian).
+
+### Root causes found (two compiler defects, both filed)
+- **Two-hop mutation loss is the INTERPRETER's place model**, not module boundaries. The place
+  model is hand-written for 2 levels and variable-rooted; assignment through a too-deep place
+  fails LOUD (`node_exec.rs:944-947`) but the method-call receiver path has no equivalent
+  guard, so the same unsupported place silently becomes a value copy with no write-back.
+  Two- AND three-hop lose the write in a single file; JIT is correct at every depth. It looked
+  cross-module-only because `nogc_sync_mut/ecs/**` uses mutating `fn X(self)` — a hard HIR
+  error that silently bails JIT for the whole program and falls back to the interpreter.
+  **`simple test` runs specs on the interpreter, so the whole suite executes on the defective
+  engine.** Corollary for anyone applying the workaround: extraction ALONE is a no-op fix
+  (`val s = self.a.b` is itself a depth-2 read yielding a copy) — the write-back is load-bearing.
+- **cranelift AOT mis-tags cross-module method scalar returns.** A struct method defined in a
+  different module from its call site returning `i32`/`i64`/`u32` returns the right payload with
+  the wrong tag: `as i64` silently yields 0, so an array index goes nil. Cross-module *free*
+  functions and *same-module* methods are fine. Decisive control: a same-module method with the
+  same NAME rescues the call; renaming breaks it again → resolution by flat method name in
+  `MirLowering.resolved_call_hir_return_type` (Task #145). Real victim: `ComponentStore.get_slot()`.
+
+### Convergence landed
+- **VFS2** — deleted the shadowed `nogc_sync_mut` FAT32 tier: **−3,165 lines**, copies 4→3.
+  `use std.X` resolves `nogc_async_mut` first in all three resolvers, so the sync copy was
+  unreachable — yet git history shows both were patched in lockstep by identical commits, i.e.
+  every FAT32 fix was paid for twice with one copy never executing.
+- **SVC2** — container-manager and tty declare real `service_v1` manifests and prove the §21
+  restart-drops-stale-grants invariant on live state. Also repaired a real integrity gap:
+  `ContainerNamespaceView`/`container_view_*` had NO provider anywhere in the repo — at origin
+  the names appeared only in the importer, so three container specs were red at HEAD.
+- **ECS3** — swept 9 ECS service worlds; unmasked three adjacent defects (struct worlds passed
+  by value into free-function systems discarded every write; `Entity(id:0)` used as a not-found
+  sentinel made the first registered task unreachable; two dangling `extern fn`s aborted at
+  runtime the moment an alarm fired or a driver demoted).
+
+### Known-red, deliberately
+`test/01_unit/compiler/two_hop_field_method_mutation_spec.spl` lands RED (5 examples,
+4 failures — one-hop green, every two-hop red). It is a correct test of a real open defect and
+goes green when the interpreter place model is fixed; not skipped, per the no-cover-up rule.
