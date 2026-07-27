@@ -37,3 +37,5 @@ Engine2D -> Readback
 - SimpleOS content hits now reach WM IPC; a running nonzero-port guest client
   is still required for no-mock QEMU system proof.
 - Linux x86 is first; unavailable native rows remain blockers.
+- Compiler-owned zero-count inventories plus Stage4 core-C outcomes prevent
+  untouched decisions from disappearing behind a false 100% coverage report.

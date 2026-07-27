@@ -349,6 +349,18 @@ completion evidence. The 8K row must likewise prove
 `gui_showcase_8k_perf_retained_redraw_status=pass`, RSS budget status, and the
 same native binary provenance fields. Interpreter or fallback rows remain useful
 diagnostics, but they are not 4K/8K completion evidence.
+Real runs require `GUI_SHOWCASE_PERF_BASELINE_ENV`, its expected SHA-256, and
+explicit producer-owned OS/architecture/CPU/GPU/driver/compiler/runtime and
+executable-SHA fields. The producer derives the bucket with fixed
+warmup/sample/timing fields. The immutable manual input uses schema
+`widget-showcase-perf-v2`; it also records resolution, source revision, capture
+timestamp, evidence artifact path/content SHA, p50/p95, FPS, and max RSS.
+Create or update it only as an explicit reviewed change;
+neither producer nor aggregate has an update mode. Median and p95 must remain
+within +10%, max RSS within +5%, and all existing absolute gates still apply.
+The producer re-stats and rehashes the baseline and artifact just before PASS.
+The aggregate reopens both, derives the bucket from exact fields, and recomputes
+limits/deltas so forged producer PASS rows fail closed.
 The aggregate validates producer-side native artifact proof for completion rows:
 missing alias source, native binary, native executable bit, recognized native
 binary format, or native build log status turns an otherwise passing retained
@@ -1185,7 +1197,10 @@ Important keys:
   `renderdoccmd`.
 - `gui_web_2d_vulkan_renderdoc_install_hint`: platform-specific install or
   `RDOC_HOME` hint when `renderdoccmd` is missing.
-- `rdoc_log`: capture log path.
+- `rdoc_log`: capture log path. Simple capture evidence also records
+  `rdoc_log_sha256`; the Simple gate requires the path exactly once, rejects
+  symlinks/non-regular files, recomputes the lowercase SHA-256, and publishes
+  `rdoc_simple_gate_capture_log_*` bindings for host-aggregate revalidation.
 - `rdoc_capture_status`: `pass`, `fail`, or `unavailable`.
 - `rdoc_capture_reason`: concrete pass/fail/unavailable reason.
 - `rdoc_capture_file`: `.rdc` path when one exists.

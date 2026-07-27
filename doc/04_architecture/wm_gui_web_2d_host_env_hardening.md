@@ -118,14 +118,20 @@ classification. Vulkan evidence is present only when its readback, direct-run,
 and browser-backing env files all exist.
 Browser Vulkan and RenderDoc-native rows use their existing retained evidence.
 Before admitting a retained RenderDoc row, `test_host_env` resolves its unique
-capture-file/hash and replay-XML/hash bindings, then recomputes both current
-digests. Each path must still be a regular file under a no-follow metadata
+capture-file/hash, capture-log/hash, and replay-XML/hash bindings, then
+recomputes all three current digests. Each path must still be a regular file under a no-follow metadata
 query, so deleted, changed, or symlink-substituted artifacts cannot inherit an
 earlier passing gate receipt.
 Framebuffer admission applies the same app-boundary rule to both retained PPM
 paths and hashes, including the no-follow regular-file check; the pure contract
 remains filesystem-independent.
 Emulation and source inspection alone are correctness support only.
+
+Coverage inventory follows the same producer/consumer boundary: MIR lowering
+owns stable user-source decision/condition sites, Stage4 LLVM owns probe calls,
+the core-C runtime owns counts and SDN serialization, and the test runner alone
+merges the zero-count compiler manifest with executed outcomes. Unsupported
+backends fail closed rather than silently dropping probes.
 
 ## SimpleOS Remote-Client Admission
 

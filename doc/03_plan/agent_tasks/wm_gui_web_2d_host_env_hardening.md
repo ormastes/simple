@@ -19,9 +19,9 @@
 | Domain research sidecar | Khronos, RenderDoc, CDP primary sources | complete |
 | Design API sidecar | Minimal types, placement, dependency direction | complete |
 | SSpec matrix sidecar | Unit/component/system/manual mapping | complete |
-| Merge implementation | Root Codex; preserve unrelated dirty files | pending |
-| Generated-manual review | Root Codex normal/highest-capability review | pending |
-| Final verification | Root Codex normal/highest-capability review | pending |
+| Merge implementation | Root Codex; preserve unrelated dirty files | complete for retained RenderDoc/perf/compiler-coverage increment |
+| Generated-manual review | Root Codex normal/highest-capability review | complete for changed scenarios |
+| Final verification | Independent small-agent reviews plus bounded local checks | partial: static/C/shell PASS; admitted pure-Simple and external hosts pending |
 
 Target-correlation state: wrapper and pure-contract enforcement are implemented;
 a fresh live host evidence run is pending because older evidence lacks the

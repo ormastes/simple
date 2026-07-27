@@ -53,17 +53,20 @@ LinuxLiveSystem -> RenderDocArtifact
 | REQ-002–006 | validators | yes | yes |
 | REQ-007 | classifier | native SIMD parity | host matrix |
 | REQ-008 | validator | strict Vulkan | host matrix |
-| REQ-009 | validator | capture outcome | real `.rdc`/blocked |
+| REQ-009 | validator | capture/log/replay freshness | real `.rdc`/blocked |
 | REQ-010–012 | yes | yes | manual/audits |
 
 ## Coverage and Performance
 
 Run the existing Simple coverage engine for the owned contract/bridge modules;
 require 100% classifier/validator branches and at least 98% overall. Performance
-is a separate bounded run: 5 warm-up plus at least 20 samples, median/p95/max
+is a separate bounded run: 12 warm-up plus at least 20 samples, median/p95/max
 RSS, exact output first, compared only to the matching retained device bucket.
 Coverage evidence must contain stable decision rows with both true and false
 counts; line/function-only output cannot satisfy the branch threshold.
+Compiler inventory tests also require untouched zero/zero sites, branchless
+header-only manifests, generated-CFG exclusion, authored wrapper paths, and
+matching runtime counts through the Stage4 LLVM/core-C route.
 
 ## External Host Rows
 

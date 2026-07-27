@@ -89,9 +89,11 @@ The live wrapper resolves the input receipt's WM target against the same
 snapshot's compositor window list, requires exactly one match, and retains the
 matched ID separately. The pure aggregate requires both retained IDs to be
 positive and equal.
-The host aggregate also re-hashes the retained RenderDoc capture path and
-replay XML path, failing when either current artifact no longer matches its
-exact-one gate binding or is a symlink/non-regular path.
+The host aggregate also re-hashes the retained RenderDoc capture, capture-log,
+and replay XML paths, failing when any current artifact no longer matches its
+exact-one gate binding or is a symlink/non-regular path. The Simple producer
+records `rdoc_log` plus its lowercase SHA-256 after capture; the gate recomputes
+that digest before publishing its duplicate-safe log binding.
 Framebuffer admission requires both correlated backend values to be `vulkan`;
 matching CPU fallback values in retained evidence fail validation.
 The input frame must also retain `composition_id=wm-composite` and a positive
@@ -144,13 +146,29 @@ it is not WM damage, dirty-region redraw, or full-frame repaint throughput.
 The content revision binds this measurement to the direct Engine2D owners
 `engine.spl` and `backend_software.spl` as well as the probe sources, so changes
 to the measured present path invalidate retained rows before aggregation.
+Every real 4K/8K run also consumes an explicit immutable baseline env plus its
+expected SHA-256 and producer-owned OS, architecture, CPU, GPU, driver,
+compiler, runtime, executable-SHA, warmup, sample-count, and timing-scope
+fields. The canonical bucket is derived from those exact values. The v2
+baseline records them plus resolution, source revision, capture timestamp,
+artifact path/content SHA, p50/p95, FPS, and max RSS. The
+producer fails before launch for missing, linked, malformed, hash-stale, or
+bucket-mismatched input and never writes or refreshes that file. NFR-006 keeps
+the absolute gates and additionally caps both median and p95 at 110% of the
+baseline and max RSS at 105%. The producer re-stats and rehashes the baseline
+and artifact immediately before PASS. The aggregate independently repeats
+artifact freshness, bucket derivation, and limit calculation.
 
 ## Coverage Collection
 
-The evaluator uses each AST expression ID as the stable decision ID. Existing
-interpreter externs forward decision/condition probes to the runtime collector,
-and the existing coverage dump appends that decision SDN to line/function SDN.
-The test runner remains the sole merger, reporter, and threshold owner.
+The MIR lowerer inventories user-authored `if`, `while`, and short-circuit
+decision/condition sites with deterministic path/span IDs. Generated match and
+coverage-wrapper control flow is explicitly excluded; wrapper preprocessing
+preserves the authored path. The compiler emits one strict zero-count SDN
+manifest, including a header-only form for branchless sources. Stage4 text LLVM
+lowers reserved probes to the core-C coverage owner, whose deterministic dump
+is merged by the test runner before it applies the 98/100% thresholds. Coverage
+requests fail closed for unsupported/automatic backend selection.
 
 ## Browser Vulkan And Pixel-Parity Admission
 
