@@ -16,7 +16,13 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcess, PROCESS_
 /// This uses Windows Job Objects for resource control and process containment.
 /// AppContainer isolation requires Windows 8+ and is not applied to already-running processes.
 pub fn apply_sandbox(config: &SandboxConfig) -> SandboxResult<()> {
-    // Apply basic resource limits
+    // Validate AppContainer-only policies before mutating the current process.
+    apply_network_isolation(&config.network.mode)?;
+    apply_filesystem_isolation(
+        &config.filesystem.mode,
+        &config.filesystem.read_paths,
+        &config.filesystem.write_paths,
+    )?;
     limits::apply_resource_limits(&config.limits)?;
 
     // Create and configure a Job Object
@@ -27,16 +33,6 @@ pub fn apply_sandbox(config: &SandboxConfig) -> SandboxResult<()> {
 
     // Assign current process to the Job Object
     assign_to_job(&job)?;
-
-    // Apply network isolation (limited without AppContainer)
-    apply_network_isolation(&config.network.mode)?;
-
-    // Apply filesystem isolation (limited without AppContainer)
-    apply_filesystem_isolation(
-        &config.filesystem.mode,
-        &config.filesystem.read_paths,
-        &config.filesystem.write_paths,
-    )?;
 
     tracing::info!("Applied Windows sandboxing using Job Objects");
 
@@ -126,13 +122,14 @@ fn apply_network_isolation(mode: &NetworkMode) -> SandboxResult<()> {
             Ok(())
         }
         NetworkMode::None => {
-            tracing::warn!("Network isolation on Windows requires AppContainer or Windows Firewall rules");
-            tracing::info!("Consider using: simple run --sandbox=docker script.spl or configure Windows Firewall");
-            Ok(())
+            Err(SandboxError::NetworkIsolation(
+                "Windows network isolation requires an AppContainer child".to_string(),
+            ))
         }
         NetworkMode::AllowList | NetworkMode::BlockList => {
-            tracing::warn!("Domain filtering on Windows requires AppContainer or Windows Firewall rules");
-            Ok(())
+            Err(SandboxError::NetworkIsolation(
+                "Windows domain filtering requires an AppContainer child".to_string(),
+            ))
         }
     }
 }
@@ -152,8 +149,9 @@ fn apply_filesystem_isolation(
         }
         FilesystemMode::ReadOnly => {
             tracing::debug!("Filesystem: Read-only with {} paths", read_paths.len());
-            tracing::warn!("Filesystem isolation on Windows requires AppContainer or NTFS permissions");
-            Ok(())
+            Err(SandboxError::FilesystemIsolation(
+                "Windows filesystem isolation requires an AppContainer child".to_string(),
+            ))
         }
         FilesystemMode::Restricted => {
             tracing::debug!(
@@ -161,12 +159,14 @@ fn apply_filesystem_isolation(
                 read_paths.len(),
                 write_paths.len()
             );
-            tracing::warn!("Filesystem isolation on Windows requires AppContainer or NTFS permissions");
-            Ok(())
+            Err(SandboxError::FilesystemIsolation(
+                "Windows filesystem isolation requires an AppContainer child".to_string(),
+            ))
         }
         FilesystemMode::Overlay => {
-            tracing::warn!("Overlay filesystem not supported on Windows - use Docker");
-            Ok(())
+            Err(SandboxError::FilesystemIsolation(
+                "overlay filesystem isolation is unsupported on Windows".to_string(),
+            ))
         }
     }
 }

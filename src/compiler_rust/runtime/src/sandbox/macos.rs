@@ -13,22 +13,17 @@ use std::collections::HashSet;
 /// This uses macOS sandbox-exec and BSD-style controls.
 /// Note: Full sandbox-exec requires the process to be re-executed with
 /// the sandbox profile, which is not possible for an already running process.
-/// We apply what we can: resource limits and filesystem checks.
+/// Unsupported current-process policies fail closed.
 pub fn apply_sandbox(config: &SandboxConfig) -> SandboxResult<()> {
-    // Apply basic resource limits (BSD-style rlimit)
-    limits::apply_resource_limits(&config.limits)?;
-
-    // Apply network isolation (limited on macOS without re-exec)
+    // Validate unsupported policies before applying irreversible limits.
     apply_network_isolation(&config.network.mode)?;
-
-    // Apply filesystem isolation (limited on macOS without re-exec)
     apply_filesystem_isolation(
         &config.filesystem.mode,
         &config.filesystem.read_paths,
         &config.filesystem.write_paths,
     )?;
 
-    tracing::info!("Applied macOS sandboxing (limited - consider using Docker for full isolation)");
+    limits::apply_resource_limits(&config.limits)?;
 
     Ok(())
 }
@@ -44,13 +39,14 @@ fn apply_network_isolation(mode: &NetworkMode) -> SandboxResult<()> {
             Ok(())
         }
         NetworkMode::None => {
-            tracing::warn!("Network isolation on macOS requires sandbox-exec re-execution or Docker");
-            tracing::info!("Consider using: simple run --sandbox=docker script.spl");
-            Ok(())
+            Err(SandboxError::NetworkIsolation(
+                "macOS network isolation requires a sandboxed child re-exec".to_string(),
+            ))
         }
         NetworkMode::AllowList | NetworkMode::BlockList => {
-            tracing::warn!("Domain filtering on macOS requires sandbox-exec re-execution or Docker");
-            Ok(())
+            Err(SandboxError::NetworkIsolation(
+                "macOS domain filtering requires a sandboxed child re-exec".to_string(),
+            ))
         }
     }
 }
@@ -68,8 +64,9 @@ fn apply_filesystem_isolation(
         }
         FilesystemMode::ReadOnly => {
             tracing::debug!("Filesystem: Read-only with {} paths", read_paths.len());
-            tracing::warn!("Filesystem isolation on macOS requires sandbox-exec re-execution or Docker");
-            Ok(())
+            Err(SandboxError::FilesystemIsolation(
+                "macOS filesystem isolation requires a sandboxed child re-exec".to_string(),
+            ))
         }
         FilesystemMode::Restricted => {
             tracing::debug!(
@@ -77,12 +74,14 @@ fn apply_filesystem_isolation(
                 read_paths.len(),
                 write_paths.len()
             );
-            tracing::warn!("Filesystem isolation on macOS requires sandbox-exec re-execution or Docker");
-            Ok(())
+            Err(SandboxError::FilesystemIsolation(
+                "macOS filesystem isolation requires a sandboxed child re-exec".to_string(),
+            ))
         }
         FilesystemMode::Overlay => {
-            tracing::warn!("Overlay filesystem not supported on macOS - use Docker");
-            Ok(())
+            Err(SandboxError::FilesystemIsolation(
+                "overlay filesystem isolation is unsupported on macOS".to_string(),
+            ))
         }
     }
 }
@@ -188,9 +187,8 @@ mod tests {
             SandboxConfig::new().with_network_allowlist(vec!["example.com".to_string()]),
         ];
 
-        for config in configs {
-            let result = apply_sandbox(&config);
-            assert!(result.is_ok());
-        }
+        assert!(apply_sandbox(&configs[0]).is_ok());
+        assert!(apply_sandbox(&configs[1]).is_err());
+        assert!(apply_sandbox(&configs[2]).is_err());
     }
 }

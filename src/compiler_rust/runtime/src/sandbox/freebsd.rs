@@ -6,28 +6,23 @@
 //!
 //! Note: Capsicum (capability mode) could be added later for stronger isolation.
 
-use super::{limits, FilesystemMode, NetworkMode, SandboxConfig, SandboxResult};
+use super::{limits, FilesystemMode, NetworkMode, SandboxConfig, SandboxError, SandboxResult};
 use std::collections::HashSet;
 
 /// Apply sandbox configuration to the current process (FreeBSD).
 ///
-/// Uses BSD-style rlimit controls. Full capsicum isolation would require
-/// process re-entry with capability mode, which is not done here.
+/// Uses BSD-style rlimit controls. Capsicum-only policies fail closed until a
+/// child capability-mode entrypoint owns them.
 pub fn apply_sandbox(config: &SandboxConfig) -> SandboxResult<()> {
-    // Apply basic resource limits (BSD-style rlimit — same as macOS/Linux)
-    limits::apply_resource_limits(&config.limits)?;
-
-    // Apply network isolation (limited without capsicum)
+    // Validate Capsicum-only policies before applying irreversible limits.
     apply_network_isolation(&config.network.mode)?;
-
-    // Apply filesystem isolation (limited without capsicum)
     apply_filesystem_isolation(
         &config.filesystem.mode,
         &config.filesystem.read_paths,
         &config.filesystem.write_paths,
     )?;
 
-    tracing::info!("Applied FreeBSD sandboxing (rlimit-based)");
+    limits::apply_resource_limits(&config.limits)?;
 
     Ok(())
 }
@@ -43,12 +38,14 @@ fn apply_network_isolation(mode: &NetworkMode) -> SandboxResult<()> {
             Ok(())
         }
         NetworkMode::None => {
-            tracing::warn!("Network isolation on FreeBSD requires capsicum or jail");
-            Ok(())
+            Err(SandboxError::NetworkIsolation(
+                "FreeBSD network isolation requires a Capsicum child".to_string(),
+            ))
         }
         NetworkMode::AllowList | NetworkMode::BlockList => {
-            tracing::warn!("Domain filtering on FreeBSD requires capsicum or jail");
-            Ok(())
+            Err(SandboxError::NetworkIsolation(
+                "FreeBSD domain filtering requires a Capsicum child".to_string(),
+            ))
         }
     }
 }
@@ -66,8 +63,9 @@ fn apply_filesystem_isolation(
         }
         FilesystemMode::ReadOnly => {
             tracing::debug!("Filesystem: Read-only with {} paths", read_paths.len());
-            tracing::warn!("Filesystem isolation on FreeBSD requires capsicum or jail");
-            Ok(())
+            Err(SandboxError::FilesystemIsolation(
+                "FreeBSD filesystem isolation requires a Capsicum child".to_string(),
+            ))
         }
         FilesystemMode::Restricted => {
             tracing::debug!(
@@ -75,12 +73,14 @@ fn apply_filesystem_isolation(
                 read_paths.len(),
                 write_paths.len()
             );
-            tracing::warn!("Filesystem isolation on FreeBSD requires capsicum or jail");
-            Ok(())
+            Err(SandboxError::FilesystemIsolation(
+                "FreeBSD filesystem isolation requires a Capsicum child".to_string(),
+            ))
         }
         FilesystemMode::Overlay => {
-            tracing::warn!("Overlay filesystem not supported on FreeBSD");
-            Ok(())
+            Err(SandboxError::FilesystemIsolation(
+                "overlay filesystem isolation is unsupported on FreeBSD".to_string(),
+            ))
         }
     }
 }
@@ -106,9 +106,8 @@ mod tests {
             SandboxConfig::new().with_network_allowlist(vec!["example.com".to_string()]),
         ];
 
-        for config in configs {
-            let result = apply_sandbox(&config);
-            assert!(result.is_ok());
-        }
+        assert!(apply_sandbox(&configs[0]).is_ok());
+        assert!(apply_sandbox(&configs[1]).is_err());
+        assert!(apply_sandbox(&configs[2]).is_err());
     }
 }

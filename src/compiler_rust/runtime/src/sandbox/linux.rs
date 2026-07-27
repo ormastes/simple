@@ -65,30 +65,40 @@ const LANDLOCK_ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
 
 /// Apply sandbox configuration to the current process (Linux).
 ///
-/// This uses Linux namespaces, cgroups, and seccomp for comprehensive isolation.
-/// Falls back to basic rlimit controls if advanced features are unavailable.
+/// Enforced policies either install their kernel controls or return an error.
 pub fn apply_sandbox(config: &SandboxConfig) -> SandboxResult<()> {
-    // Apply basic resource limits (always available)
+    apply_network_isolation(&config.network.mode)?;
     limits::apply_resource_limits(&config.limits)?;
 
-    // Apply network isolation
-    apply_network_isolation(&config.network.mode, &config.network)?;
-
-    // Apply filesystem isolation
-    let landlock_applied = install_landlock_filesystem_rules(config)?;
-    if !landlock_applied {
-        apply_filesystem_isolation(
-            &config.filesystem.mode,
-            &config.filesystem.read_paths,
-            &config.filesystem.write_paths,
-        )?;
+    // Namespaces add containment when the host permits them, but the policies
+    // below must still enforce or fail closed without namespace privileges.
+    if let Err(e) = apply_namespaces(config) {
+        tracing::debug!("Linux namespaces unavailable: {}", e);
     }
 
-    // Try to apply advanced Linux features (namespaces, seccomp)
-    // These may fail if running without CAP_SYS_ADMIN or in restricted environments
-    if let Err(e) = apply_namespaces(config) {
-        tracing::warn!("Failed to apply Linux namespaces: {}", e);
-        tracing::info!("Falling back to basic sandboxing");
+    let landlock_applied = install_landlock_filesystem_rules(config)?;
+    match config.filesystem.mode {
+        FilesystemMode::Full => {}
+        FilesystemMode::ReadOnly | FilesystemMode::Restricted if !landlock_applied => {
+            return Err(SandboxError::FilesystemIsolation(
+                "Landlock is unavailable; refusing an unenforced filesystem sandbox".to_string(),
+            ));
+        }
+        FilesystemMode::ReadOnly | FilesystemMode::Restricted => {}
+        FilesystemMode::Overlay => {
+            apply_filesystem_isolation(
+                &config.filesystem.mode,
+                &config.filesystem.read_paths,
+                &config.filesystem.write_paths,
+            )?;
+        }
+    }
+
+    if config.network.mode == NetworkMode::None {
+        install_seccomp_profile(LinuxSeccompProfile {
+            deny_network: true,
+            deny_process_spawn: false,
+        })?;
     }
 
     Ok(())
@@ -104,8 +114,38 @@ pub fn install_seccomp_profile(profile: LinuxSeccompProfile) -> SandboxResult<()
         return Ok(());
     }
 
+    let audit_arch = current_linux_audit_arch().ok_or_else(|| {
+        SandboxError::Config("seccomp audit architecture is unsupported".to_string())
+    })?;
     let mut filter = Vec::new();
+    filter.push(bpf_stmt(
+        (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+        4,
+    ));
+    filter.push(bpf_jump(
+        (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+        audit_arch,
+        1,
+        0,
+    ));
+    filter.push(bpf_stmt(
+        (libc::BPF_RET | libc::BPF_K) as u16,
+        libc::SECCOMP_RET_KILL_PROCESS,
+    ));
     filter.push(bpf_stmt((libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16, 0));
+    #[cfg(target_arch = "x86_64")]
+    {
+        filter.push(bpf_jump(
+            (libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K) as u16,
+            0x4000_0000,
+            0,
+            1,
+        ));
+        filter.push(bpf_stmt(
+            (libc::BPF_RET | libc::BPF_K) as u16,
+            libc::SECCOMP_RET_KILL_PROCESS,
+        ));
+    }
 
     if profile.deny_network {
         deny_syscalls(
@@ -150,22 +190,42 @@ pub fn install_seccomp_profile(profile: LinuxSeccompProfile) -> SandboxResult<()
     }
 
     let seccomp = unsafe {
-        libc::prctl(
-            libc::PR_SET_SECCOMP,
-            libc::SECCOMP_MODE_FILTER,
+        libc::syscall(
+            libc::SYS_seccomp,
+            libc::SECCOMP_SET_MODE_FILTER,
+            libc::SECCOMP_FILTER_FLAG_TSYNC,
             &mut program as *mut libc::sock_fprog,
-            0,
-            0,
         )
     };
-    if seccomp != 0 {
+    if seccomp < 0 {
         return Err(SandboxError::Config(format!(
-            "Failed to install seccomp filter: {}",
+            "Failed to install process-wide seccomp filter: {}",
             std::io::Error::last_os_error()
         )));
     }
 
     Ok(())
+}
+
+fn current_linux_audit_arch() -> Option<u32> {
+    #[cfg(target_arch = "x86_64")]
+    return Some(0xC000_003E);
+    #[cfg(target_arch = "x86")]
+    return Some(0x4000_0003);
+    #[cfg(target_arch = "aarch64")]
+    return Some(0xC000_00B7);
+    #[cfg(target_arch = "arm")]
+    return Some(0x4000_0028);
+    #[cfg(target_arch = "riscv64")]
+    return Some(0xC000_00F3);
+    #[cfg(all(target_arch = "powerpc64", target_endian = "little"))]
+    return Some(0xC000_0015);
+    #[cfg(all(target_arch = "powerpc64", target_endian = "big"))]
+    return Some(0x8000_0015);
+    #[cfg(target_arch = "s390x")]
+    return Some(0x8000_0016);
+    #[allow(unreachable_code)]
+    None
 }
 
 /// Install Linux Landlock filesystem rules for this process.
@@ -221,7 +281,10 @@ pub fn install_landlock_filesystem_rules(config: &SandboxConfig) -> SandboxResul
             added_rules += 1;
         }
     }
-    if added_rules == 0 {
+    if added_rules == 0
+        && (!config.filesystem.read_paths.is_empty()
+            || !config.filesystem.write_paths.is_empty())
+    {
         return Err(SandboxError::FilesystemIsolation(
             "Landlock filesystem isolation requires at least one existing allowed path".to_string(),
         ));
@@ -418,7 +481,7 @@ fn bpf_jump(code: u16, k: u32, jt: u8, jf: u8) -> libc::sock_filter {
 }
 
 /// Apply network isolation using Linux network namespaces.
-fn apply_network_isolation(mode: &NetworkMode, config: &super::NetworkIsolation) -> SandboxResult<()> {
+fn apply_network_isolation(mode: &NetworkMode) -> SandboxResult<()> {
     match mode {
         NetworkMode::Full => {
             // No restrictions
@@ -426,22 +489,15 @@ fn apply_network_isolation(mode: &NetworkMode, config: &super::NetworkIsolation)
             Ok(())
         }
         NetworkMode::None => {
-            // Try to create a new network namespace (requires CAP_SYS_ADMIN)
-            tracing::debug!("Network: Blocking all access");
-            if let Err(e) = create_empty_network_namespace() {
-                tracing::warn!("Failed to create network namespace: {}", e);
-                tracing::info!("Network isolation requires CAP_SYS_ADMIN or unprivileged user namespaces");
-            }
+            tracing::debug!("Network: blocking socket operations with seccomp");
             Ok(())
         }
-        NetworkMode::AllowList => {
-            tracing::debug!("Network: Allowlist mode with {} domains", config.allowed_domains.len());
-            apply_network_allowlist(&config.allowed_domains)
-        }
-        NetworkMode::BlockList => {
-            tracing::debug!("Network: Blocklist mode with {} domains", config.blocked_domains.len());
-            apply_network_blocklist(&config.blocked_domains)
-        }
+        NetworkMode::AllowList | NetworkMode::BlockList => Err(
+            SandboxError::NetworkIsolation(
+                "process-local domain filtering is unavailable; refusing an unenforced policy"
+                    .to_string(),
+            ),
+        ),
     }
 }
 
@@ -1324,6 +1380,28 @@ mod tests {
         fd == -1 && *libc::__errno_location() == libc::EPERM
     }
 
+    fn seccomp_tsync_denies_existing_thread_socket() -> bool {
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = ready_tx.send(());
+            let _ = go_rx.recv();
+            let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+            fd == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        });
+        if ready_rx.recv().is_err()
+            || install_seccomp_profile(LinuxSeccompProfile {
+                deny_network: true,
+                deny_process_spawn: false,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        let _ = go_tx.send(());
+        worker.join().unwrap_or(false)
+    }
+
     unsafe fn seccomp_denies_process_exec_in_child() -> bool {
         if install_seccomp_profile(LinuxSeccompProfile {
             deny_network: false,
@@ -1342,9 +1420,52 @@ mod tests {
         result == -1 && *libc::__errno_location() == libc::EPERM
     }
 
+    unsafe fn configured_sandbox_denies_network_in_child() -> bool {
+        if apply_sandbox(&SandboxConfig::new().with_no_network()).is_err() {
+            return false;
+        }
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+        fd == -1 && *libc::__errno_location() == libc::EPERM
+    }
+
+    fn configured_sandbox_denies_all_files_or_fails_closed() -> bool {
+        let config = SandboxConfig::new().with_read_paths(Vec::new());
+        match apply_sandbox(&config) {
+            Ok(()) => std::fs::read_to_string("/etc/passwd").is_err(),
+            Err(_) => true,
+        }
+    }
+
     #[test]
     fn linux_seccomp_filter_denies_network_socket_in_child() {
         run_irreversible_sandbox_child(|| unsafe { seccomp_denies_network_socket_in_child() });
+    }
+
+    #[test]
+    fn linux_seccomp_filter_applies_to_existing_threads() {
+        run_irreversible_sandbox_child(seccomp_tsync_denies_existing_thread_socket);
+    }
+
+    #[test]
+    fn configured_sandbox_denies_network_socket_in_child() {
+        run_irreversible_sandbox_child(|| unsafe {
+            configured_sandbox_denies_network_in_child()
+        });
+    }
+
+    #[test]
+    fn configured_domain_filter_fails_before_applying_partial_sandbox() {
+        let config =
+            SandboxConfig::new().with_network_allowlist(vec!["example.com".to_string()]);
+        assert!(matches!(
+            apply_sandbox(&config),
+            Err(SandboxError::NetworkIsolation(_))
+        ));
+    }
+
+    #[test]
+    fn configured_empty_filesystem_policy_never_grants_host_reads() {
+        run_irreversible_sandbox_child(configured_sandbox_denies_all_files_or_fails_closed);
     }
 
     #[test]
