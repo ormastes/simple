@@ -896,3 +896,13 @@ Tracking split:
   their manuals. Existing live x86/RV64/ARM64 owners remain canonical; missing
   strict x86 VirtIO and complete 3-arch SIMD receipt producers are now explicit
   fail-closed aggregate external rows with bounded TODO acceptance evidence.
+- stage4-runtime: Parallel read-only traces proved the deployed CLI's crash is
+  a stale raw-text environment ABI, not rendering code. Ported the focused
+  native Dict regressions and the shared HIR `contains_key`/index fix from the
+  sibling lane, resolving its one delete/modify conflict without touching the
+  conflicted `main` bookmark. One isolated strict bootstrap passed Stages 2 and
+  3, then Stage 4 stopped without a segfault on 6,144 deterministic facade/
+  glob/module-key import errors. The known sibling glob patch is incomplete
+  and semantics-questionable, so it was not copied and the build was not
+  retried. Rendering verification remains postponed until an admitted Stage-4
+  binary exists.

@@ -2,10 +2,11 @@
 
 ## Status
 
-OPEN. The pure-Simple Stage 3 compiler clears the prior address-of parser
-failure and HIR null dereference. The unchanged-tree strict follow-up reaches
-the end of HIR lowering, then fails because partial/header-only import facades
-do not register required glob-exported names.
+PARTIALLY FIXED. The native `Dict.get()` crash is fixed by using
+`contains_key` plus index reads for struct-valued module entries. A fresh
+strict bootstrap now passes Stages 2 and 3 and lowers all Stage-4 modules
+without a segfault, but the full CLI remains blocked by deterministic import
+resolution errors.
 
 ## Evidence
 
@@ -71,10 +72,32 @@ timeout 60 release/x86_64-unknown-linux-gnu/simple test --no-session-daemon test
 
 That command was also not retried.
 
+## 2026-07-27 Fresh Bootstrap Result
+
+The isolated strict command ran once:
+
+```text
+SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh \
+  --full-bootstrap --mode=one-binary \
+  --output=build/bootstrap/codex-perf-stage4 --jobs=half --no-mcp
+```
+
+Stages 2 and 3 passed. Stage 4 exited 1 with 6,144 HIR lowering errors,
+starting with unresolved facade-imported CLI symbols and ending with unresolved
+types and untyped-return diagnostics. The retained log is
+`build/bootstrap/codex-perf-stage4/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`.
+No retry was made.
+
+The installed `release/x86_64-unknown-linux-gnu/simple` is independently stale:
+its linked `rt_env_set` has the obsolete two-argument raw-C-string ABI while
+current generated callers pass pointer/length pairs. GDB observed libc
+`strlen` dereferencing `0x1b`. Current runtime source already has the four-
+argument ABI, so the stale executable must not be used as verification evidence.
+
 ## Required Fix
 
-Preserve the nil-dictionary regression as RED until native reference semantics
-are corrected. Independently fix partial/header-only facade resolution so
-plain and dotted glob re-exports register their symbols, including aliased
-traits and re-exported enums. Add focused regressions, then run one strict
-bootstrap from an unchanged tracked tree.
+Finish canonical facade re-export, transitive-star, receiver-keyword, and
+numbered/unnumbered module-key resolution without restoring opaque-symbol
+fallbacks. Preserve cross-module default-method lowering from issue #190.
+Then run one strict bootstrap from an unchanged tracked tree and replace the
+stale deployed executable only after the Stage-4 admission gates pass.
