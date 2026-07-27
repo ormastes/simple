@@ -88,6 +88,56 @@ describe "BrowserSession script CSS animation rendering":
         expect(_count_color(third.pixel_data, 0xFF16A34Au32)).to_be_greater_than(0)
         expect(_pixels_equal(third.pixel_data, second.pixel_data)).to_equal(false)
 
+    it "publishes body replacements to selectors within the same animation callback":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.test/same-callback-dom",
+            "<!DOCTYPE html><html><body><div style='width:32px;height:24px;background-color:#ef4444'></div><script>var saved = null; requestAnimationFrame(function(){ document.body.innerHTML = '<div id=\"next\" style=\"width:32px;height:24px;background-color:#ef4444\"></div>'; saved = document.getElementById('next'); saved.style.backgroundColor = '#16a34a'; document.title = document.querySelector('#next') === saved ? 'same-turn' : 'stale'; requestAnimationFrame(function(){ var same = document.getElementById('next') === saved; document.body['innerHTML'] = '<div id=\"last\" style=\"width:32px;height:24px;background-color:#ef4444\"></div>'; var last = document.querySelector('#last'); last.style.setProperty('background-color', '#2563eb'); document.title = (same && document.getElementById('last') === last) ? 'same-next:computed' : 'lost'; }); });</script></body></html>"
+        ).is_ok()).to_equal(true)
+
+        val first = session.render_to_pixels(64, 48)
+        expect(_count_color(
+            first.pixel_data, 0xFFEF4444u32
+        )).to_be_greater_than(0)
+
+        expect(session.advance_time(16)).to_equal(1)
+        expect(session.current_title).to_equal("same-turn")
+        val second = session.render_to_pixels(64, 48)
+        expect(_count_color(
+            second.pixel_data, 0xFF16A34Au32
+        )).to_be_greater_than(0)
+        expect(_pixels_equal(
+            second.pixel_data, first.pixel_data
+        )).to_equal(false)
+
+        expect(session.advance_time(32)).to_equal(1)
+        expect(session.current_title).to_equal("same-next:computed")
+        val third = session.render_to_pixels(64, 48)
+        expect(_count_color(
+            third.pixel_data, 0xFF2563EBu32
+        )).to_be_greater_than(0)
+        expect(_pixels_equal(
+            third.pixel_data, second.pixel_data
+        )).to_equal(false)
+
+    it "keeps the prior body when a synchronous mutation plan exceeds its element bound":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.test/bounded-dom",
+            "<html><body><div id='kept'>safe</div></body></html>"
+        ).is_ok()).to_equal(true)
+        var oversized = ""
+        var element_count = 0
+        while element_count < 4096:
+            oversized = oversized + "<i></i>"
+            element_count = element_count + 1
+        expect(session.eval_script(
+            "document.body.innerHTML = '" + oversized +
+            "'; document.title = document.getElementById('kept') !== null ? 'bounded' : 'replaced';"
+        ).is_ok()).to_equal(true)
+        expect(session.current_title).to_equal("bounded")
+        expect(session.current_body_html).to_contain("id='kept'")
+
     it "renders start midpoint and end frames from CSS keyframes":
         var session = BrowserSession.new()
         val opened = session.open_html(

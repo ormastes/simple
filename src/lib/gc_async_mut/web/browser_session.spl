@@ -34,6 +34,9 @@ use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     browser_resource_size_allowed, BROWSER_MAX_DOCUMENT_SUBRESOURCES
 }
 use std.js.engine.runtime.{JsRuntime, NATIVE_ARRAY_BUFFER_CONSTRUCTOR, NATIVE_DATA_VIEW_CONSTRUCTOR, NATIVE_FETCH, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_TEXT_DECODER_CONSTRUCTOR, NATIVE_TEXT_ENCODER_CONSTRUCTOR, NATIVE_UINT8_ARRAY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_COMPILE, NATIVE_WEBASSEMBLY_COMPILE_STREAMING, NATIVE_WEBASSEMBLY_GLOBAL_CONSTRUCTOR, NATIVE_WEBASSEMBLY_INSTANTIATE, NATIVE_WEBASSEMBLY_INSTANTIATE_STREAMING, NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MEMORY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_EXPORTS, NATIVE_WEBASSEMBLY_MODULE_IMPORTS, NATIVE_WEBASSEMBLY_TABLE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_VALIDATE, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
+use std.js.engine.interpreter.{
+    JsHostDomElementPlan, JsHostBodyMutationPlan
+}
 use std.js.engine.js_error.{Logger, LogLevel}
 use std.js.types.js_types.{JsValue}
 use std.js.types.pair.{Pair}
@@ -56,7 +59,8 @@ use std.gc_async_mut.web.browser_session_cookies.{
     cookie_text_for_url, document_cookie_text_for_url, merge_cookie_text_for_url, parse_cookie_line_for_url, upsert_cookie
 }
 use std.gc_async_mut.web.browser_session_html.{
-    html_to_text, expand_stylesheet_text, insert_stylesheet_sources,
+    html_to_text, escape_html_text,
+    expand_stylesheet_text, insert_stylesheet_sources,
     _guest_runtime_probe_url, _extract_simple_js_assignment
 }
 use std.gc_async_mut.web.browser_session_context.{
@@ -66,6 +70,7 @@ use std.gc_async_mut.web.browser_session_context.{
 
 val BROWSER_RUNTIME_FLUSH_ROUND_LIMIT: i32 = 8
 val BROWSER_DOM_BRIDGE_MAX_ELEMENTS: i32 = 4096
+val BROWSER_DOM_BRIDGE_MAX_PLAN_BYTES: i64 = 64 * 1024 * 1024
 val BROWSER_DOM_BRIDGE_OVERSIZE = "\u0000simple-dom-oversize"
 
 class BrowserHistoryEntry:
@@ -297,6 +302,7 @@ class BrowserRuntimeState:
     dom_class_snapshots: [text]
     dom_value_snapshots: [text]
     dom_style_snapshots: [text]
+    dom_bridge_generation: i64
 
     static fn create(
         url: text,
@@ -510,6 +516,7 @@ class BrowserRuntimeState:
         interpreter.host_body_inner_html_value = JsValue.String(v: body_html)
         val host_body_text_value = if is_guest_runtime: JsValue.String(v: "") else: JsValue.String(v: html_to_text(body_html))
         interpreter.host_body_text_content_value = host_body_text_value
+        interpreter.host_body_mutation_hook = _browser_host_body_mutation_plan
         runtime.interpreter = interpreter
         if is_guest_runtime:
             print "[BRS] runtime create stage=after-define-globals"
@@ -554,7 +561,8 @@ class BrowserRuntimeState:
             dom_id_snapshots: [],
             dom_class_snapshots: [],
             dom_value_snapshots: [],
-            dom_style_snapshots: []
+            dom_style_snapshots: [],
+            dom_bridge_generation: 0
         )
         state.bind_dom(html_tree_builder_build(
             "<html><body>" + body_html + "</body></html>"
@@ -596,6 +604,136 @@ fn _browser_dom_css_js_name(name: text) -> text:
         else:
             out = out + ch
     out
+
+fn _browser_host_body_mutation_plan(
+    property: text, value: text
+) -> JsHostBodyMutationPlan:
+    if property != "innerHTML" and property != "textContent":
+        return JsHostBodyMutationPlan(
+            handled: true,
+            ok: false,
+            canonical_body_html: "",
+            canonical_body_text: "",
+            elements: []
+        )
+    val body_html = if property == "textContent":
+        escape_html_text(value)
+    else:
+        value
+    if not browser_resource_size_allowed(body_html.len()):
+        return JsHostBodyMutationPlan(
+            handled: true,
+            ok: false,
+            canonical_body_html: "",
+            canonical_body_text: "",
+            elements: []
+        )
+    val root = html_tree_builder_build(
+        "<html><body>" + body_html + "</body></html>"
+    )
+    var stack: [BeDomNode] = [root]
+    var elements: [JsHostDomElementPlan] = []
+    var plan_bytes = body_html.len()
+    while stack.len() > 0:
+        val node = stack.pop()
+        if node.tag_name != "#document" and node.tag_name != "#text":
+            if elements.len() >= BROWSER_DOM_BRIDGE_MAX_ELEMENTS:
+                return JsHostBodyMutationPlan(
+                    handled: true,
+                    ok: false,
+                    canonical_body_html: "",
+                    canonical_body_text: "",
+                    elements: []
+                )
+            var style_names: [text] = []
+            var style_values: [text] = []
+            var style_snapshot = ""
+            val author_id = be_dom_get_attr(node, "id")
+            val class_name = be_dom_get_attr(node, "class")
+            val element_value = be_dom_get_attr(node, "value")
+            val text_content = be_dom_get_text_content(node)
+            plan_bytes = (
+                plan_bytes + node.tag_name.len() + author_id.len() +
+                class_name.len() + element_value.len() + text_content.len()
+            )
+            if plan_bytes > BROWSER_DOM_BRIDGE_MAX_PLAN_BYTES:
+                return JsHostBodyMutationPlan(
+                    handled: true,
+                    ok: false,
+                    canonical_body_html: "",
+                    canonical_body_text: "",
+                    elements: []
+                )
+            val inner_html = be_dom_serialize_children(node)
+            plan_bytes = plan_bytes + inner_html.len()
+            if plan_bytes > BROWSER_DOM_BRIDGE_MAX_PLAN_BYTES:
+                return JsHostBodyMutationPlan(
+                    handled: true,
+                    ok: false,
+                    canonical_body_html: "",
+                    canonical_body_text: "",
+                    elements: []
+                )
+            val style_text = be_dom_get_attr(node, "style")
+            for declaration in style_text.split(";"):
+                val separator = declaration.index_of(":")
+                if separator > 0:
+                    val property_name = declaration.substring(
+                        0, separator
+                    ).trim()
+                    val property_value = declaration.substring(
+                        separator + 1, declaration.len()
+                    ).trim()
+                    if property_name != "" and property_value != "":
+                        val js_name = _browser_dom_css_js_name(property_name)
+                        style_names.push(js_name)
+                        style_values.push(property_value)
+                        plan_bytes = (
+                            plan_bytes + js_name.len() +
+                            property_value.len() * 2 + 2
+                        )
+                        if style_snapshot != "" and
+                           not style_snapshot.ends_with(";"):
+                            style_snapshot = style_snapshot + ";"
+                        style_snapshot = (
+                            style_snapshot +
+                            _browser_dom_css_name(js_name) + ":" +
+                            property_value + ";"
+                        )
+            if plan_bytes > BROWSER_DOM_BRIDGE_MAX_PLAN_BYTES:
+                return JsHostBodyMutationPlan(
+                    handled: true,
+                    ok: false,
+                    canonical_body_html: "",
+                    canonical_body_text: "",
+                    elements: []
+                )
+            elements.push(JsHostDomElementPlan(
+                is_body: node.tag_name == "body",
+                tag_name: node.tag_name.upper(),
+                author_id: author_id,
+                class_name: class_name,
+                value: element_value,
+                text_content: text_content,
+                inner_html: inner_html,
+                style_names: style_names,
+                style_values: style_values,
+                style_snapshot: style_snapshot
+            ))
+        var child_index = node.children.len() - 1
+        while child_index >= 0:
+            stack.push(node.children[child_index])
+            child_index = child_index - 1
+    JsHostBodyMutationPlan(
+        handled: true,
+        ok: true,
+        canonical_body_html: body_html,
+        canonical_body_text: if property == "textContent":
+            value
+        else:
+            html_to_text(body_html),
+        elements: elements
+    )
 
 fn _browser_dom_style_snapshot(runtime: JsRuntime, object_id: i64) -> text:
     val object = runtime.get_host_object(object_id)
@@ -720,6 +858,44 @@ impl BrowserRuntimeState:
             "function __simple_dom_matches(el, selector) { if (el === null || el === undefined || selector === '') { return false; } var first = selector.slice(0, 1); if (first === '#') { return el.id === selector.slice(1); } if (first === '.') { return (' ' + el.className + ' ').indexOf(' ' + selector.slice(1) + ' ') >= 0; } return el.tagName.toLowerCase() === selector.toLowerCase(); } function __simple_css_key(name) { name = String(name); if (name.slice(0, 2) === '--') { return name; } var out = ''; var upper = false; for (var i = 0; i < name.length; i = i + 1) { var ch = name.slice(i, i + 1); if (ch === '-') { upper = true; } else { out = out + (upper ? ch.toUpperCase() : ch); upper = false; } } return out; } document.getElementById = function(id) { var all = document.__simple_elements; for (var i = 0; i < all.length; i = i + 1) { if (all[i].id === String(id)) { return all[i]; } } return null; }; document.querySelector = function(selector) { var all = document.__simple_elements; for (var i = 0; i < all.length; i = i + 1) { if (__simple_dom_matches(all[i], String(selector))) { return all[i]; } } return null; }; document.querySelectorAll = function(selector) { var all = document.__simple_elements; var out = []; for (var i = 0; i < all.length; i = i + 1) { if (__simple_dom_matches(all[i], String(selector))) { out.push(all[i]); } } return out; }; function __simple_dom_install(el) { el.style.setProperty = function(name, value) { this[__simple_css_key(name)] = String(value); }; el.style.getPropertyValue = function(name) { var value = this[__simple_css_key(name)]; return value === undefined || value === null ? '' : String(value); }; el.style.removeProperty = function(name) { var key = __simple_css_key(name); var old = this.getPropertyValue(name); this[key] = ''; return old; }; } for (var __simple_i = 0; __simple_i < document.__simple_elements.length; __simple_i = __simple_i + 1) { __simple_dom_install(document.__simple_elements[__simple_i]); }"
         )
         self.runtime = runtime
+        self.dom_bridge_generation = (
+            runtime.interpreter.host_dom_bridge_generation
+        )
+
+    me adopt_dom_bridge(root: BeDomNode) -> bool:
+        val interpreter = self.runtime.interpreter
+        if interpreter.host_dom_bridge_generation <= self.dom_bridge_generation:
+            return false
+        var stack: [BeDomNode] = [root]
+        var node_ids: [i64] = []
+        while stack.len() > 0:
+            val node = stack.pop()
+            if node.tag_name != "#document" and node.tag_name != "#text":
+                node_ids.push(node.node_id)
+            var child_index = node.children.len() - 1
+            while child_index >= 0:
+                stack.push(node.children[child_index])
+                child_index = child_index - 1
+        val element_count = interpreter.host_dom_element_ids.len()
+        if (
+            node_ids.len() != element_count or
+            interpreter.host_dom_style_ids.len() != element_count or
+            interpreter.host_dom_id_snapshots.len() != element_count or
+            interpreter.host_dom_class_snapshots.len() != element_count or
+            interpreter.host_dom_value_snapshots.len() != element_count or
+            interpreter.host_dom_style_snapshots.len() != element_count
+        ):
+            return false
+        self.dom_node_ids = node_ids
+        self.dom_element_ids = interpreter.host_dom_element_ids
+        self.dom_element_list_id = interpreter.host_dom_element_list_id
+        self.dom_style_ids = interpreter.host_dom_style_ids
+        self.dom_id_snapshots = interpreter.host_dom_id_snapshots
+        self.dom_class_snapshots = interpreter.host_dom_class_snapshots
+        self.dom_value_snapshots = interpreter.host_dom_value_snapshots
+        self.dom_style_snapshots = interpreter.host_dom_style_snapshots
+        self.dom_bridge_generation = interpreter.host_dom_bridge_generation
+        true
 
     me _apply_dom_element(node: BeDomNode, index: i32) -> BeDomNode:
         var next = node

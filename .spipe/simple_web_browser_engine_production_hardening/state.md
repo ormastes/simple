@@ -919,11 +919,20 @@ implementation in progress / target evidence blocked
   select and style the exact element created by Simple Script, producing
   distinct red and blue Engine2D pixels. Executable Simple evidence remains
   compiler-blocked and was not rerun.
-- Remaining JavaScript DOM timing blocker: A single callback that assigns
-  `document.body.innerHTML` and immediately queries a newly inserted node still
-  runs before the host can rebuild the canonical DOM bridge. Production parity
-  requires a synchronous DOM mutation hook in the JS host-property assignment
-  path plus same-callback pixel evidence; no false completion is claimed.
+- JavaScript same-callback DOM synchronization: Body `innerHTML`/`textContent`
+  assignment now calls a browser-installed, bounded mutation-plan hook from one
+  shared dot/computed property writer. The executing interpreter atomically
+  publishes the replacement element bridge before assignment returns; the
+  browser later adopts that exact bridge receipt instead of rebinding away
+  object identity, then applies same-callback style deltas to canonical DOM.
+  Rejected element-count/resource/aggregate-snapshot plans are deterministic
+  no-ops that retain the prior body and bridge rather than falling through to
+  deferred unbounded parsing.
+  Focused animation evidence replaces/query/styles green in one rAF, preserves
+  identity into the next rAF, exercises computed `body['innerHTML']`, and
+  requires distinct green/blue Engine2D pixels. Executable Simple evidence
+  remains compiler-blocked and was not rerun, so runtime confirmation is still
+  pending.
 - Secondary browser chrome routing: Hosted pointer, address text/key, Back,
   Forward, Stop, Reload, and Home events now route by toolbar `window_id`
   through that window's `HostedWebContentSession`; only the primary external

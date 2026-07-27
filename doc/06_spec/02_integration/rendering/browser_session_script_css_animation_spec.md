@@ -2,13 +2,19 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|---------|
-| 5 | 5 | 0 | 0 |
+| 7 | 7 | 0 | 0 |
 
 ## Scenarios
 
 - Simple Script creates the initial DOM/CSS frame, then JavaScript selects that
   same newly created element in `requestAnimationFrame`, mutates its style, and
   Engine2D renders a distinct frame.
+- A JavaScript animation callback replaces `body.innerHTML`, immediately
+  selects and styles the new element, preserves its object identity into the
+  next frame, and repeats the replacement through computed-member syntax;
+  Engine2D must render distinct green and blue frames.
+- A replacement exceeding the synchronous bridge element bound is a
+  deterministic no-op: the prior body and its selector identity remain live.
 - A runtime created after the browser clock advances keeps relative
   `setTimeout` deadlines instead of firing on the next tick.
 - CSS `@keyframes` alone renders distinct start, midpoint, and forwards-filled
