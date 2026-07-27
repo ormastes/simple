@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -119,6 +119,29 @@ expect(parsed.reason).to_equal("invalid-renderdoc-xml")
 
 </details>
 
+#### should reject action names that appear only in capture metadata
+
+- Parse structured XML with no action chunk
+   - Expected: parsed.reason equals `missing-relevant-actions`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Parse structured XML with no action chunk")
+val xml = "<?xml version=\"1.0\"?><rdc><header><driver id=\"8\">Vulkan</driver></header><chunks version=\"32\">" +
+    "<chunk name=\"marker\"><metadata name=\"vkCmdDispatch\">vkCreateComputePipelines vkCreateShaderModule vkCreateBuffer</metadata></chunk>" +
+    "</chunks></rdc>"
+val parsed = parse_renderdoc_capture_xml(xml, "metadata.rdc", "metadata.xml", 0, "")
+expect(parsed.reason).to_equal("missing-relevant-actions")
+```
+
+</details>
+
 <details>
 <summary>Advanced: should reject capture and owner-record disagreement</summary>
 
@@ -168,8 +191,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

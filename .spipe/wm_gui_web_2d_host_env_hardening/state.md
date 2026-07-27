@@ -821,3 +821,10 @@ Tracking split:
   missing `/usr/bin/simple_seed` failure in its intentional forbidden-seed
   subprocess. Shell syntax passes and docgen produced five complete manuals
   with zero stubs. Live native/QEMU frame evidence was not rerun.
+- bugfix: Closed the Simple RenderDoc metadata false-green. Four small
+  read-only audit lanes reviewed replay identity, rendering performance,
+  coverage, and live-capture gaps; the selected root fix now counts Vulkan
+  actions and resources only from RenderDoc `<chunk name=...>` records, so
+  metadata text cannot fabricate replay evidence. Focused unit tests pass 7/7,
+  the no-GPU system contract passes 5/5, and docgen produced two complete
+  manuals with zero stubs. Live GPU/QEMU capture evidence was not rerun.
