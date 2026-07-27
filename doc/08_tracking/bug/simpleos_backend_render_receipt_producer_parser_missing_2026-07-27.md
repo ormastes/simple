@@ -31,10 +31,12 @@ tracks retained PPM artifact SHA-256 and decoded raw-pixel SHA-256.
 
 - `simpleos_render_evidence_protocol_spec.spl` passes 4/4 on a fresh admitted
   Stage-4 binary and retains the serial log plus QMP PPM.
-- `simpleos_engine2d_guest_backend_equivalence_spec.spl` passes all required
-  guest targets with zero pixel mismatches.
-- `simpleos_engine2d_simd_matrix_spec.spl` reports positive native vector chunks
-  and zero required fallbacks for every operation and target.
+- Aggregate row `simpleos_guest` promotes only after all required guest targets
+  retain correlated receipts with zero pixel mismatches, including strict x86
+  VirtIO evidence.
+- Aggregate row `simpleos_simd` promotes only after every target retains
+  positive native vector chunks and zero required fallbacks for fill, copy,
+  alpha, and scroll across ten fresh boots.
 - Reordered/truncated receipts and capture identity disagreement remain red.
 
 ## Current verification state

@@ -21,7 +21,7 @@
    - Exec capture: after_step
    - Evidence: execution result verified by 2 expected checks
    - Expected: SPECS.len() equals `MANUALS.len()`
-   - Expected: SPECS.len() equals `15`
+   - Expected: SPECS.len() equals `13`
 
 
 <details>
@@ -33,7 +33,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 step("Inspect all backend-equivalence spec and manual pairs")
 expect(SPECS.len()).to_equal(MANUALS.len())
-expect(SPECS.len()).to_equal(15)
+expect(SPECS.len()).to_equal(13)
 var index = 0
 while index < SPECS.len():
     expect(file_exists(SPECS[index])).to_be(true)

@@ -892,3 +892,7 @@ Tracking split:
   CPU Engine2D present/readback frames. Separate physical/software Vulkan ICD
   qualification remains in the external-host TODO rather than being fabricated
   inside one process.
+- qemu-placeholders: Removed two duplicate unconditional-fail QEMU specs and
+  their manuals. Existing live x86/RV64/ARM64 owners remain canonical; missing
+  strict x86 VirtIO and complete 3-arch SIMD receipt producers are now explicit
+  fail-closed aggregate external rows with bounded TODO acceptance evidence.

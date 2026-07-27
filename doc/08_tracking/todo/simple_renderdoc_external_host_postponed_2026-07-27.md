@@ -19,8 +19,8 @@ Status: postponed until local implementation and aggregate checks are green.
 | Spec | Diagnostic result | Missing prerequisite |
 |---|---:|---|
 | `test/03_system/os/qemu/simpleos_render_evidence_protocol_spec.spl` | 3/4 | Guest ordered-receipt emitter/parser and fresh Stage-4 QEMU capture |
-| `test/03_system/os/simpleos_engine2d_guest_backend_equivalence_spec.spl` | 1/5 | Per-target live receipt and QMP identity correlation |
-| `test/03_system/os/qemu/simpleos_engine2d_simd_matrix_spec.spl` | 2/6 | Complete per-operation guest SIMD receipts and exact QMP pixels |
+| Aggregate `simpleos_guest` external row | blocked | Strict x86 VirtIO plus per-target live receipt and QMP identity correlation |
+| Aggregate `simpleos_simd` external row | blocked | Three-architecture, ten-boot fill/copy/alpha/scroll SIMD receipts and exact QMP pixels |
 | `test/03_system/os/simpleos_physical_board_render_evidence_spec.spl` | 3/4 | Real board identity, firmware, boot transcript, and capture |
 
 Resume QEMU rows with the exact fresh Stage-4 binary and the canonical QEMU
