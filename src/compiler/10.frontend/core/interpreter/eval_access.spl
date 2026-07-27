@@ -392,6 +392,90 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
         env_assign(name, new_val)
         return new_val
 
+    # Field place: base.f op= rhs. The base sub-expression is evaluated ONCE and
+    # yields the value_id of the struct that actually stores the field (struct
+    # field reads alias — val_struct_get_field_idx returns the stored value_id,
+    # it does not rebuild a copy), so this works at ARBITRARY hop depth:
+    # `root.mid.inner.n += 1` resolves `root.mid.inner` to the real inner struct
+    # and writes through it. Same place model as eval_assign_expr.
+    if target_tag == EXPR_FIELD_ACCESS:
+        val fa_base_eid = target_node.left
+        val fa_field = target_node.s_val
+        val fa_base = eval_expr(fa_base_eid)
+        if eval_had_error: return -1
+        if val_is_struct(fa_base) == false:
+            eval_set_error("cannot compound-assign field on " + val_kind_name(val_get_kind(fa_base)))
+            return -1
+        val fa_idx = val_struct_find_field_idx(fa_base, fa_field)
+        if fa_idx < 0:
+            eval_set_error("no field '" + fa_field + "' on struct " + val_get_struct_name(fa_base))
+            return -1
+        val fa_old = val_struct_get_field_idx(fa_base, fa_idx)
+        val fa_rhs = eval_expr(value_eid)
+        if eval_had_error: return -1
+        val fa_new = val_compound_op(op, fa_old, fa_rhs)
+        if fa_new < 0:
+            val fa_err = ops_get_error()
+            if fa_err != "":
+                eval_set_error(fa_err)
+            return -1
+        val_struct_set_field_idx(fa_base, fa_idx, fa_new)
+        return fa_new
+
+    # Index place: base[k] op= rhs. Mirrors the index branch of eval_assign_expr —
+    # the element is updated through the base handle, so array value semantics are
+    # unchanged (the base is whatever place the sub-expression already resolved to).
+    if target_tag == EXPR_INDEX:
+        val ix_base = eval_expr(target_node.left)
+        if eval_had_error: return -1
+        val ix_key = eval_expr(target_node.right)
+        if eval_had_error: return -1
+
+        if val_is_array(ix_base):
+            if val_is_int(ix_key):
+                var ix_elems = val_get_array(ix_base)
+                val ix_i = val_get_int(ix_key)
+                var ix_in_range = false
+                if ix_i >= 0:
+                    if ix_i < ix_elems.len():
+                        ix_in_range = true
+                if ix_in_range == false:
+                    eval_set_error("array index out of bounds: " + "{ix_i}")
+                    return -1
+                val ix_old = ix_elems[ix_i]
+                val ix_rhs = eval_expr(value_eid)
+                if eval_had_error: return -1
+                val ix_new = val_compound_op(op, ix_old, ix_rhs)
+                if ix_new < 0:
+                    val ix_err = ops_get_error()
+                    if ix_err != "":
+                        eval_set_error(ix_err)
+                    return -1
+                ix_elems[ix_i] = ix_new
+                val_arrays[ix_base] = ix_elems
+                return ix_new
+
+        if val_is_struct(ix_base):
+            val ix_name = val_to_text(ix_key)
+            val ix_fi = val_struct_find_field_idx(ix_base, ix_name)
+            if ix_fi < 0:
+                eval_set_error("no key '" + ix_name + "' on " + val_get_struct_name(ix_base))
+                return -1
+            val ix_sold = val_struct_get_field_idx(ix_base, ix_fi)
+            val ix_srhs = eval_expr(value_eid)
+            if eval_had_error: return -1
+            val ix_snew = val_compound_op(op, ix_sold, ix_srhs)
+            if ix_snew < 0:
+                val ix_serr = ops_get_error()
+                if ix_serr != "":
+                    eval_set_error(ix_serr)
+                return -1
+            val_struct_set_field_idx(ix_base, ix_fi, ix_snew)
+            return ix_snew
+
+        eval_set_error("cannot compound index-assign " + val_kind_name(val_get_kind(ix_base)))
+        return -1
+
     eval_set_error("invalid compound assignment target")
     -1
 

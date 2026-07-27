@@ -197,6 +197,18 @@ fn eval_method_with_args(decl_id: i64, arg_values: [i64]) -> i64:
     val param_names = d_node.param_names
     val body_stmts = d_node.body_stmts
 
+    # LOAD_FAST frame isolation. Method bodies are DECL_FN decls, so
+    # resolve_module_locals() gives their idents (including `self`) local slot
+    # indices, while eval_ident's fast path is gated only on env_has_frame().
+    # Without our own frame, `self` resolved against the CALLER's frame and the
+    # receiver place pointed at the wrong object. Slots are pushed reset to -1
+    # and deliberately left unset here (this legacy binder does not bind params
+    # in slot order), so eval_ident falls back to the correct scope lookup.
+    val local_count = resolve_cached_local_count(decl_id)
+    val prev_decl_id = eval_current_decl_id
+    eval_current_decl_id = decl_id
+    if local_count > 0:
+        env_push_frame(local_count)
     env_push_scope()
     # Always bind 'self' to the receiver (first arg_value)
     if arg_values.len() > 0:
@@ -226,6 +238,9 @@ fn eval_method_with_args(decl_id: i64, arg_values: [i64]) -> i64:
         eval_return_value = -1
 
     env_pop_scope()
+    if local_count > 0:
+        env_pop_frame()
+    eval_current_decl_id = prev_decl_id
     last_val
 
 # ===== Array Methods =====

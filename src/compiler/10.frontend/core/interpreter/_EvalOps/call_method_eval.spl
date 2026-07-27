@@ -720,14 +720,31 @@ fn eval_method_with_args(decl_id: i64, arg_values: [i64], arg_eids: [i64], arg_n
     var write_back_names: [text] = []
     var write_back_values: [i64] = []
 
+    # LOAD_FAST frame. resolve_module_locals() walks EVERY DECL_FN in the arena,
+    # including method bodies, so a method's idents (starting with `self`) carry
+    # pre-resolved local slot indices. eval_ident's fast path is gated only on
+    # env_has_frame(), NOT on the frame belonging to this call — so if a method
+    # ran without pushing its own frame while a caller frame was live, `self`
+    # resolved to the CALLER's slot. The receiver place then pointed at the wrong
+    # object and every mutation through it was lost or misdirected. Push our own
+    # frame (and own eval_current_decl_id) exactly like eval_function_call does.
+    val local_count = resolve_cached_local_count(decl_id)
+    val prev_decl_id = eval_current_decl_id
+    eval_current_decl_id = decl_id
+    if local_count > 0:
+        env_push_frame(local_count)
     env_push_scope()
     # Bind self + params
     var pi: i64 = 0
     for pname in param_names:
+        var bval = val_make_nil()
         if pi < bound_values.len():
-            env_define(pname, bound_values[pi])
-        else:
-            env_define(pname, val_make_nil())
+            bval = bound_values[pi]
+        env_define(pname, bval)
+        if local_count > 0:
+            val is_shadowed = resolve_is_slot_shadowed(decl_id, pi)
+            if is_shadowed == false:
+                env_set_local(pi, bval)
         pi = pi + 1
 
     var last_val = val_make_nil()
@@ -755,6 +772,9 @@ fn eval_method_with_args(decl_id: i64, arg_values: [i64], arg_eids: [i64], arg_n
         arg_i = arg_i + 1
 
     env_pop_scope()
+    if local_count > 0:
+        env_pop_frame()
+    eval_current_decl_id = prev_decl_id
 
     var wb_i: i64 = 0
     while wb_i < write_back_names.len():
