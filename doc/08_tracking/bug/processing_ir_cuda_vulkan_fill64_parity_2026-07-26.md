@@ -74,7 +74,21 @@ device readback with positive handle/identity and `cpu_fallback=false`, but
 still reports 64 mismatches and checksum `8657438720`. The retained
 source-matched Vulkan evidence reaches `backend_name=vulkan` and strict
 creation before crashing; the later ProcessingIR Vulkan probe also crashes
-before publishing a receipt.
+before publishing a receipt. A canonical `--phase=none` GDB run of the later
+probe places that crash in `common.string_core.str_starts_with`; disassembly
+shows the generated helper recursively calls itself instead of
+`rt_string_starts_with`. The probe accepts only six fixed phase tokens, so its
+argument parser now matches those complete tokens directly and no longer
+depends on `starts_with` or slicing. The native probe still needs rebuilding
+before Vulkan parity can be measured.
+
+Three bounded probe rebuild attempts then stopped before producing a candidate:
+the first found unrelated full-app module-name collisions; the second used an
+archive-only runtime overlay; the third passed the Cargo target parent rather
+than the directory containing the hosted runtime rlib. Resume with the same
+scoped command and
+`--runtime-path build/vulkan-engine2d-readback/cargo-target/bootstrap`; that
+directory contains both `libsimple_runtime.a` and `libsimple_runtime.rlib`.
 
 CUDA identity was a separate three-bit tag-width overflow: the UUID hash used
 the full positive 63-bit range, so native Simple tagging could make it negative.
@@ -91,12 +105,13 @@ values as the same algorithm version.
 1. Repair or bypass the retained generation's HIR crash while lowering current
    `run_compile_bootstrap`, or regenerate on a prepared host with a current
    source-matched pure-Simple compiler; do not run a full bootstrap.
-2. Run the focused transport probe once with that compiler and require zero
+2. Rebuild the Vulkan probe and require exact-token phase parsing to complete.
+3. Run the focused transport probe once with that compiler and require zero
    iterator and indexed mismatches for all four recorded cases.
-3. Re-run the direct CUDA and Vulkan 64-element probes with that compiler.
-4. If direct indexing still loads raw storage, trace the lost runtime-array
+4. Re-run the direct CUDA and Vulkan 64-element probes with that compiler.
+5. If direct indexing still loads raw storage, trace the lost runtime-array
    classification and repair the shared Index lowering before backend retries.
-5. Require exact count/value/checksum, zero mismatches, device readback,
+6. Require exact count/value/checksum, zero mismatches, device readback,
    positive backend provenance, no CPU fallback, and source-matched freshness
    from both probes before publishing a unified parity receipt.
 
@@ -115,6 +130,11 @@ Retained build logs:
 - `build/gpu-goal/final-checks/cuda-processing-live.log`
 - `build/gpu-goal/final-checks/vulkan-source-matched-live.log`
 - `build/gpu-goal/final-checks/vulkan-processing-live.log`
+- `build/gpu-goal/final-checks/vulkan-processing-phase-none-live.log`
+- `build/gpu-goal/final-checks/vulkan-processing-phase-none-gdb.log`
+- `build/simpleos_gpu_host/vulkan_fault_native/build-fixed-phase-parser.log`
+- `build/simpleos_gpu_host/vulkan_fault_native/build-fixed-phase-parser-entry-closure.log`
+- `build/simpleos_gpu_host/vulkan_fault_native/build-fixed-phase-parser-host-gpu.log`
 - `doc/09_report/cuda_generated_2d_readback_2026-07-26.md`
 
 No compiler bootstrap was run.
