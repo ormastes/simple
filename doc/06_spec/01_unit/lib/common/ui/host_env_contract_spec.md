@@ -182,7 +182,7 @@ expect(receipt(nonblank: 0).validation_reason()).to_equal("blank-frame")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -199,6 +199,8 @@ expect(host_readback_evidence_passes(complete.replace("input_frame_checksum=101"
 expect(host_readback_evidence_passes(complete.replace("input_backend=vulkan", "input_backend=cpu"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("baseline_readback_source=device_readback", "baseline_readback_source=cpu_mirror"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("input_backend_handle=41", "input_backend_handle=42"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("input_render_event_id=7", "input_render_event_id=8"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("input_render_mutation_revision=1", "input_render_mutation_revision=2"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace(
     "input_capture_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "input_capture_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

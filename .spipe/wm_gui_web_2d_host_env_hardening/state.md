@@ -866,3 +866,8 @@ Tracking split:
   out after 90 seconds before a result, and docgen hit the unavailable seed
   path, so manuals were synchronized directly and no PASS or percentage is
   claimed. TODO589 retains the accepted-runtime resume commands.
+- readback-identity: Bound the latest semantic event and mutation revision to
+  the successful full-frame presentation, serialized both under `render`, and
+  required the retained input snapshot, acknowledgment, emitted environment,
+  and host classifier to agree with the screen receipt. Two mismatch negatives
+  and the modern system contract fail closed on a bridged unrelated receipt.

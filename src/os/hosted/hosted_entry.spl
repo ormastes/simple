@@ -505,6 +505,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     var evidence_nonce: i64 = 0
     var evidence_phase = "presented"
     var input_receipt = host_wm_input_receipt()
+    var presented_event_id: i64 = 0
+    var presented_mutation_revision: i64 = 0
     if evidence.enabled:
         val initial_pixels = comp.pure_simple_pixel_buffer()
         val backend_name = HostedWinitBufferBackend.implementation_name()
@@ -512,7 +514,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
         val initial_snapshot = host_wm_evidence_snapshot(
             comp.evidence_compositor_json(), surface, backend_name, false, readback,
             raster.last_backend, raster.last_readback_source, raster.last_backend_handle,
-            raster.last_readback_checksum, evidence_nonce, evidence_phase,
+            raster.last_readback_checksum, 0, 0, evidence_nonce, evidence_phase,
             host_wm_input_receipt_json(input_receipt)
         )
         if not host_wm_evidence_write_snapshot(evidence.snapshot_path, initial_snapshot) or not host_wm_evidence_write_capture(evidence.capture_path, comp.width, comp.height, initial_pixels):
@@ -1336,6 +1338,9 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 print "ERROR: hosted WM live pure-Simple frame presentation failed"
                 running = false
                 continue
+            if input_receipt.event_id > presented_event_id:
+                presented_event_id = input_receipt.event_id
+                presented_mutation_revision = input_receipt.mutation_revision
             if warmup_frames < 12:
                 warmup_frames = warmup_frames + 1
                 if warmup_frames == 12:
@@ -1361,14 +1366,15 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
             val snapshot = host_wm_evidence_snapshot(
                 comp.evidence_compositor_json(), surface, evidence_backend, false, evidence_readback,
                 raster.last_backend, raster.last_readback_source, raster.last_backend_handle,
-                raster.last_readback_checksum, evidence_nonce, evidence_phase,
+                raster.last_readback_checksum, presented_event_id,
+                presented_mutation_revision, evidence_nonce, evidence_phase,
                 host_wm_input_receipt_json(input_receipt)
             )
             if not host_wm_evidence_write_snapshot(evidence.snapshot_path, snapshot) or not host_wm_evidence_write_capture(evidence.capture_path, comp.width, comp.height, evidence_pixels):
                 print "ERROR: hosted WM evidence write failed nonce={evidence_nonce}"
                 running = false
             else:
-                print "[hosted-wm] evidence-ack nonce={evidence_nonce} phase={evidence_phase} surface_phase={surface.phase} revision={comp.render_revision} {raster.frame_provenance()} {raster.font_provenance()}"
+                print "[hosted-wm] evidence-ack nonce={evidence_nonce} phase={evidence_phase} surface_phase={surface.phase} revision={comp.render_revision} semantic_event_id={presented_event_id} mutation_revision={presented_mutation_revision} {raster.frame_provenance()} {raster.font_provenance()}"
     val profile_closed = web_sessions.close()
     val browser_close = _close_hosted_browser_resources(
         browser_renderer, browser_raster,

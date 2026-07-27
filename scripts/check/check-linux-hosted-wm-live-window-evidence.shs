@@ -208,6 +208,8 @@ emit() {
         echo "linux_hosted_wm_live_window_input_backend=$input_backend"
         echo "linux_hosted_wm_live_window_input_readback_source=$input_readback_source"
         echo "linux_hosted_wm_live_window_input_backend_handle=$input_backend_handle"
+        echo "linux_hosted_wm_live_window_input_render_event_id=$input_render_event_id"
+        echo "linux_hosted_wm_live_window_input_render_mutation_revision=$input_render_mutation_revision"
         echo "linux_hosted_wm_live_window_input_capture_sha256=$input_capture_sha"
         echo "linux_hosted_wm_live_window_input_snapshot=$INPUT_SNAPSHOT"
         echo "linux_hosted_wm_live_window_input_capture=$INPUT_CAPTURE"
@@ -305,6 +307,8 @@ input_frame_checksum=""
 input_backend=""
 input_readback_source=""
 input_backend_handle=""
+input_render_event_id=""
+input_render_mutation_revision=""
 input_capture_sha=""
 move_revision=""
 move_frame_checksum=""
@@ -570,13 +574,15 @@ retain_phase() {
     readback_source="$(jq -r '.render.readback_source' "$SNAPSHOT_LIVE")"
     backend_handle="$(jq -r '.render.backend_handle' "$SNAPSHOT_LIVE")"
     frame_checksum="$(jq -r '.render.checksum' "$SNAPSHOT_LIVE")"
+    render_event_id="$(jq -r '.render.semantic_event_id' "$SNAPSHOT_LIVE")"
+    render_mutation_revision="$(jq -r '.render.mutation_revision' "$SNAPSHOT_LIVE")"
     [ "$frame_backend" != "" ] && [ "$frame_backend" != null ] || return 1
     [ "$readback_source" != "" ] && [ "$readback_source" != unavailable ] && [ "$readback_source" != null ] || return 1
-    case "$backend_handle:$frame_checksum" in
+    case "$backend_handle:$frame_checksum:$render_event_id:$render_mutation_revision" in
         *[!0-9:]*|:|*:) return 1 ;;
     esac
     case "$last_issue_ack" in
-        *" revision=$revision "*"backend=$frame_backend;source=$readback_source;handle=$backend_handle;checksum=$frame_checksum identity="*) ;;
+        *" revision=$revision semantic_event_id=$render_event_id mutation_revision=$render_mutation_revision "*"backend=$frame_backend;source=$readback_source;handle=$backend_handle;checksum=$frame_checksum identity="*) ;;
         *) return 1 ;;
     esac
     jq -e --argjson nonce "$nonce" --argjson revision "$revision" \
@@ -592,6 +598,12 @@ retain_phase() {
          .render.backend_handle == $handle and
          .render.checksum == $checksum' \
         "$SNAPSHOT_LIVE" >/dev/null || return 1
+    if [ "$label" = input ]; then
+        [ "$render_event_id" -gt 0 ] && [ "$render_mutation_revision" -gt 0 ] || return 1
+        jq -e '.render.semantic_event_id == .input.receipt.event_id and
+               .render.mutation_revision == .input.receipt.mutation_revision' \
+            "$SNAPSHOT_LIVE" >/dev/null || return 1
+    fi
     [ -s "$CAPTURE_LIVE" ] || return 1
     [ "$(convert "$CAPTURE_LIVE" -format '%w %h' info:)" = "1024 720" ] || return 1
     [ "$(capture_argb_checksum "$CAPTURE_LIVE")" = "$frame_checksum" ] || return 1
@@ -613,6 +625,8 @@ retain_phase() {
             input_backend=$frame_backend
             input_readback_source=$readback_source
             input_backend_handle=$backend_handle
+            input_render_event_id=$render_event_id
+            input_render_mutation_revision=$render_mutation_revision
             input_capture_sha=$capture_sha
             ;;
         move)
