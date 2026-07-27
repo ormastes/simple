@@ -911,3 +911,16 @@ implementation in progress / target evidence blocked
   request-wire coverage proves the trusted value is serialized and a forged
   value is denied; executable Simple evidence remains compiler-blocked and was
   not rerun.
+- Simple Script/JavaScript DOM interop: Replacing body text or HTML from Simple
+  Script now rebinds the JavaScript element bridge to the new canonical DOM;
+  JavaScript body replacement also refreshes the bridge for later callbacks.
+  The focused
+  BrowserSession, hosted-session, and five-frame fixture now require rAF to
+  select and style the exact element created by Simple Script, producing
+  distinct red and blue Engine2D pixels. Executable Simple evidence remains
+  compiler-blocked and was not rerun.
+- Remaining JavaScript DOM timing blocker: A single callback that assigns
+  `document.body.innerHTML` and immediately queries a newly inserted node still
+  runs before the host can rebuild the canonical DOM bridge. Production parity
+  requires a synchronous DOM mutation hook in the JS host-property assignment
+  path plus same-callback pixel evidence; no false completion is claimed.

@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 11 | 11 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -19,8 +19,8 @@
 
 - Simple Script creates the CSS-targeted red first frame.
 - The host monotonic clock keeps requestAnimationFrame pending through 15 ms.
-- At 16 ms JavaScript mutates the live DOM and Engine2D renders a distinct
-  blue frame.
+- At 16 ms JavaScript selects the element created by Simple Script, mutates its
+  live style, and Engine2D renders a distinct blue frame.
 
 #### commits one HTTPS redirect hop per host tick through browser policy
 
