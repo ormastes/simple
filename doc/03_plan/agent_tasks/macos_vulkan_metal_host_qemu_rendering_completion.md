@@ -1002,6 +1002,30 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
 - Continue without bootstrap unless a later goal criterion cannot be reached
   with an already-built, provenance-admitted pure-Simple artifact.
 
+### 2026-07-27 Bungee caller-owned raster cycle 34
+
+- No bootstrap was run. A durable focused native probe now locks exact Bungee
+  `B` at 100 px to 62x72, 4,464 pixels, nonzero alpha, and a completion cookie.
+  The unchanged aggregate/Option path reproduces `fail-raster` with a strict
+  zero-stub Cranelift build.
+- A first caller-owned measure/render implementation removed the
+  `Option<SfntGlyfBitmap>`, tuple, and returned-pixel-array channels. Its strict
+  native build compiled two modules with zero failures and zero stubs, but the
+  run stopped at `fail-measure`: metadata written by the nested private
+  `_sfnt_measure_glyph_into` helper did not survive through the public
+  `sfnt_measure_codepoint_into` caller.
+- The three-cycle cap is reached. Do not rerun this shape. In a fresh session,
+  inline the measure publication directly in the public owner function (one
+  mutable-array boundary), keep the exact preallocated render buffer, and run
+  the focused probe once. If measure passes but render fails, replace the
+  returned `_outline_edges`/recursive `_quad_edges` arrays with owner-local
+  indexed edge storage; do not redesign the font pipeline or bootstrap.
+- The Vulkan provider/ICD hardening remains local and unpushed: its launcher,
+  ICD fixture, and GUI contracts pass, while the web contract reports 11
+  passing and four opaque pre-existing HTML-fixture failures after its own
+  three-cycle cap. It must not be merged until that contract is isolated in a
+  fresh session.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
