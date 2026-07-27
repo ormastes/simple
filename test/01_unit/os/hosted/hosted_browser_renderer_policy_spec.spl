@@ -9,6 +9,9 @@ use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
 }
 use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
 use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
+    build_request_bytes
+}
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{
     BrowserLogLevel, Logger
 }
@@ -405,6 +408,32 @@ describe "hosted browser renderer broker policy":
         )
         expect(policy.ok).to_be(true)
         expect(policy.mode == RequestMode.Cors).to_be(true)
+        expect(policy.sanitized_headers).to_equal(
+            "Origin: https://example.test"
+        )
+        val wire = build_request_bytes(FetchRequest(
+            method: "GET",
+            url: Url.parse(policy.canonical_url),
+            headers: policy.sanitized_headers,
+            body: [],
+            mode: policy.mode,
+            credentials: "omit"
+        ))
+        expect(wire).to_contain(
+            "\r\nOrigin: https://example.test\r\n"
+        )
+
+        val forged = hosted_browser_renderer_request_policy(
+            "https://example.test",
+            permit(false, ""),
+            request(
+                "style", "https://cdn.test/app.css", "GET",
+                "Origin: https://evil.test"
+            )
+        )
+        expect(forged.ok).to_be(false)
+        expect(forged.reason).to_equal("forbidden-request-header")
+        expect(wire.contains("evil.test")).to_be(false)
 
     it "blocks active and passive mixed content at the trusted broker":
         for kind in ["script", "style", "image", "fetch"]:

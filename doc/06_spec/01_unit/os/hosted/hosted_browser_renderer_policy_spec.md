@@ -18,6 +18,8 @@
   retry, but clear handles already reaped by a liveness check.
 - Derive same-origin, CORS, mixed-content, and preflight policy from trusted
   broker state rather than renderer-supplied request kinds.
+- Reject renderer-supplied `Origin` and serialize exactly one broker-owned
+  document origin on simple cross-origin request bytes.
 - Convert persisted HSTS subresource upgrades into broker-owned internal
   redirects, accept only exact HTTP-to-HTTPS transport transforms, and strip
   STS before renderer delivery so unauthenticated responses cannot seed policy.
@@ -27,8 +29,8 @@
 - Keep credential-free CORS responses from storing cookies or exposing
   non-safelisted, non-explicitly-exposed response headers to page code.
 
-Requirement trace: REQ-WEB-BROWSER-011, REQ-WEB-BROWSER-017,
-REQ-WEB-BROWSER-018.
+Requirement trace: REQ-WEB-BROWSER-010, REQ-WEB-BROWSER-011,
+REQ-WEB-BROWSER-012, REQ-WEB-BROWSER-017, REQ-WEB-BROWSER-018.
 
 Source:
 `test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl`

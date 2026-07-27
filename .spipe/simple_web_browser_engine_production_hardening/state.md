@@ -905,3 +905,9 @@ implementation in progress / target evidence blocked
   child attempts chmod, truncate, and utimensat against a parent-created owned
   file; the focused harness passes and proves its mode, size, and timestamp
   remain unchanged. No bootstrap or Simple compiler command ran.
+- CORS request provenance: The trusted renderer broker now rejects a
+  renderer-supplied `Origin` header and adds exactly one canonical committed
+  document origin to every admitted simple cross-origin request. Focused
+  request-wire coverage proves the trusted value is serialized and a forged
+  value is denied; executable Simple evidence remains compiler-blocked and was
+  not rerun.
