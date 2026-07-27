@@ -1,0 +1,411 @@
+"""
+# Kernel Reply Object Specification (IPC call/reply/notify — master plan Phase 1)
+
+**Feature IDs:** #OS-IPC-REPLY
+**Category:** Runtime / Kernel IPC
+**Difficulty:** 4/5
+**Status:** Implemented (mechanism); syscall wiring + QEMU two-process gate BLOCKED
+**Plan:** doc/01_research/domain/simpleos_production_host_master_plan.md (Phase 1, `ipc:` row)
+**Design:** src/os/kernel/ipc/reply_object.spl
+
+## Overview
+
+seL4/L4 reply-object semantics, proven at the Simple level with ABSOLUTE oracles
+(exact status codes and exact cap-set contents, never "not an error"):
+
+  1. SINGLE USE      — a Call mints exactly one reply capability; one reply spends it.
+  2. SECOND REPLY    — the replay is DENIED with REPLY_ERR_ALREADY_REPLIED (-2).
+  3. NOTIFICATION    — non-blocking, mints NO reply cap; replying to it is REFUSED
+                       with REPLY_ERR_NOT_A_CALL (-3), and an unknown id is a
+                       DISTINCT error (-1) so the refusal is not an accident.
+  4. CALLER DEATH    — the reply capability is INVALIDATED (burnt), not dangling:
+                       a later reply gets REPLY_ERR_CALLER_DEAD (-4).
+  5. ATTENUATION     — a handle riding on a reply can only NARROW: the receiver
+                       never gains a right the replier lacked (deny-wins, -6).
+  6. ATOMICITY       — a rejected transfer leaves NEITHER side mutated: receiver
+                       cap-set unchanged, reply capability still spendable, caller
+                       still blocked.
+
+The one-shot guard is the SHARED `SingleUseLedger` from `cspace_spawn`, and the
+attenuation guard is the shared `spawn_with_cspace_tracked` — no second
+mechanism (§4 no-second-envelope). This spec therefore also re-proves that the
+reused guards behave correctly in the reply role.
+
+NOT covered here (documented blocked row): live `_handle_ipc_send`/`_handle_ipc_recv`
+wiring and the two-process QEMU call/reply evidence run. See
+`.spipe/ipc_reply_object/state.md` for the exact gate.
+"""
+
+use std.spec.{describe, it, expect}
+use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet, CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_ADMIN}
+use os.kernel.ipc.cspace_spawn.{AttenuationSpec, atten_identity, atten_rights, atten_single_use}
+use os.kernel.ipc.reply_object.{ReplyTable, ReplyTransfer, ReplyOutcome, CallHandle, NotifyHandle, IpcInvocationKind, reply_no_handles, reply_with_handle, reply_with_handles, REPLY_OK, REPLY_ERR_NO_SUCH, REPLY_ERR_ALREADY_REPLIED, REPLY_ERR_NOT_A_CALL, REPLY_ERR_CALLER_DEAD, REPLY_ERR_WRONG_RECEIVER, REPLY_ERR_RIGHTS_ESCALATION, REPLY_ERR_BAD_TRANSFER}
+
+# ============================================================================
+# Fixtures — two isolated tasks: CALLER 10, SERVER 20
+# ============================================================================
+
+val CALLER: u64 = 10u64
+val SERVER: u64 = 20u64
+val STRANGER: u64 = 99u64
+
+val DS_OBJ: u64 = 77u64
+val DS_GEN: u64 = 3u64
+
+fn ds(rights: u32) -> CapabilityKind:
+    CapabilityKind.SharedDataset(object_id: DS_OBJ, generation: DS_GEN, rights: rights)
+
+fn other_ds(rights: u32) -> CapabilityKind:
+    CapabilityKind.SharedDataset(object_id: 4141u64, generation: DS_GEN, rights: rights)
+
+fn _tok(kind: CapabilityKind, tid: u64, depth: i64) -> CapabilityToken:
+    CapabilityToken(kind: kind, generation: DS_GEN, owner: SERVER, token_id: tid, parent_token_id: 0u64, depth: depth)
+
+fn server_rw() -> CapabilitySet:
+    """The SERVER holds the dataset read+write, delegable (depth 2)."""
+    CapabilitySet(caps: [_tok(ds(CAP_RIGHT_READ + CAP_RIGHT_WRITE), 5u64, 2)], is_pledged: true)
+
+fn server_ro() -> CapabilitySet:
+    """The SERVER holds the dataset READ ONLY — it cannot hand out write."""
+    CapabilitySet(caps: [_tok(ds(CAP_RIGHT_READ), 5u64, 2)], is_pledged: true)
+
+fn caller_empty() -> CapabilitySet:
+    """The CALLER starts deny-all (pledged, zero tokens)."""
+    CapabilitySet.empty()
+
+# ============================================================================
+# Group 1 — Single-use reply capability
+# ============================================================================
+
+describe "reply object: a Call mints exactly one single-use reply capability":
+
+    it "a Call blocks the caller and mints a live reply capability":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        expect(c.status).to_equal(REPLY_OK)
+        expect(c.caller_blocked).to_equal(true)
+        expect(t.has_reply_cap(c.reply_id)).to_equal(true)
+        expect(t.live_reply_cap_count()).to_equal(1)
+
+    it "the FIRST reply succeeds, unblocks the caller, and SPENDS the cap":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        val r = t.reply(c.reply_id, SERVER, server_rw(), caller_empty(), reply_no_handles())
+        expect(r.status).to_equal(REPLY_OK)
+        expect(r.replied).to_equal(true)
+        expect(r.caller_unblocked).to_equal(true)
+        expect(t.is_caller_blocked(c.reply_id)).to_equal(false)
+        expect(t.reply_cap_spent(c.reply_id)).to_equal(true)
+        expect(t.has_reply_cap(c.reply_id)).to_equal(false)
+        expect(t.live_reply_cap_count()).to_equal(0)
+
+    it "the SECOND reply is DENIED with REPLY_ERR_ALREADY_REPLIED":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        val r1 = t.reply(c.reply_id, SERVER, server_rw(), caller_empty(), reply_no_handles())
+        expect(r1.status).to_equal(REPLY_OK)
+        val r2 = t.reply(c.reply_id, SERVER, server_rw(), caller_empty(), reply_no_handles())
+        expect(r2.status).to_equal(REPLY_ERR_ALREADY_REPLIED)
+        expect(r2.replied).to_equal(false)
+        expect(r2.caller_unblocked).to_equal(false)
+
+    it "a THIRD reply is still denied (no refresh of the one-shot budget)":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        t.reply(c.reply_id, SERVER, server_rw(), caller_empty(), reply_no_handles())
+        t.reply(c.reply_id, SERVER, server_rw(), caller_empty(), reply_no_handles())
+        val r3 = t.reply(c.reply_id, SERVER, server_rw(), caller_empty(), reply_no_handles())
+        expect(r3.status).to_equal(REPLY_ERR_ALREADY_REPLIED)
+
+    it "each Call mints a DISTINCT reply capability (no id reuse)":
+        var t = ReplyTable.new()
+        val a = t.call(CALLER, SERVER)
+        val b = t.call(CALLER, SERVER)
+        expect(a.reply_id == b.reply_id).to_equal(false)
+        expect(t.live_reply_cap_count()).to_equal(2)
+        t.reply(a.reply_id, SERVER, server_rw(), caller_empty(), reply_no_handles())
+        expect(t.has_reply_cap(a.reply_id)).to_equal(false)
+        expect(t.has_reply_cap(b.reply_id)).to_equal(true)
+        expect(t.live_reply_cap_count()).to_equal(1)
+
+    it "a reply from a task that is NOT the designated receiver is refused":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        val r = t.reply(c.reply_id, STRANGER, server_rw(), caller_empty(), reply_no_handles())
+        expect(r.status).to_equal(REPLY_ERR_WRONG_RECEIVER)
+        expect(t.has_reply_cap(c.reply_id)).to_equal(true)
+
+# ============================================================================
+# Group 2 — Call / reply / notification distinction
+# ============================================================================
+
+describe "reply object: notification is non-blocking and cannot be replied to":
+
+    it "a Call is kind Call; a Notification is kind Notification":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        val n = t.notify(CALLER, SERVER)
+        expect(t.kind_of(c.reply_id) == IpcInvocationKind.Call).to_equal(true)
+        expect(t.kind_of(n.invocation_id) == IpcInvocationKind.Notification).to_equal(true)
+
+    it "a Notification does NOT block the caller":
+        var t = ReplyTable.new()
+        val n = t.notify(CALLER, SERVER)
+        expect(n.status).to_equal(REPLY_OK)
+        expect(n.caller_blocked).to_equal(false)
+        expect(t.is_caller_blocked(n.invocation_id)).to_equal(false)
+
+    it "a Notification mints NO reply capability":
+        var t = ReplyTable.new()
+        val n = t.notify(CALLER, SERVER)
+        expect(t.has_reply_cap(n.invocation_id)).to_equal(false)
+        expect(t.live_reply_cap_count()).to_equal(0)
+
+    it "replying to a Notification is REFUSED with REPLY_ERR_NOT_A_CALL":
+        var t = ReplyTable.new()
+        val n = t.notify(CALLER, SERVER)
+        val r = t.reply(n.invocation_id, SERVER, server_rw(), caller_empty(), reply_no_handles())
+        expect(r.status).to_equal(REPLY_ERR_NOT_A_CALL)
+        expect(r.replied).to_equal(false)
+        expect(r.transferred).to_equal(0)
+
+    it "a reply carrying a handle to a Notification transfers NOTHING":
+        var t = ReplyTable.new()
+        val n = t.notify(CALLER, SERVER)
+        val r = t.reply(n.invocation_id, SERVER, server_rw(), caller_empty(),
+                        reply_with_handle(ds(CAP_RIGHT_READ), atten_identity()))
+        expect(r.status).to_equal(REPLY_ERR_NOT_A_CALL)
+        expect(r.receiver_caps.caps.len()).to_equal(0)
+        expect(r.receiver_caps.has(ds(CAP_RIGHT_READ))).to_equal(false)
+
+    it "an UNKNOWN invocation id is a DISTINCT error from the notification refusal":
+        var t = ReplyTable.new()
+        val n = t.notify(CALLER, SERVER)
+        val unknown = t.reply(424242u64, SERVER, server_rw(), caller_empty(), reply_no_handles())
+        val notcall = t.reply(n.invocation_id, SERVER, server_rw(), caller_empty(), reply_no_handles())
+        expect(unknown.status).to_equal(REPLY_ERR_NO_SUCH)
+        expect(notcall.status).to_equal(REPLY_ERR_NOT_A_CALL)
+        expect(unknown.status == notcall.status).to_equal(false)
+
+# ============================================================================
+# Group 3 — Caller death invalidates the reply capability
+# ============================================================================
+
+describe "reply object: caller death invalidates, never dangles":
+
+    it "marking the caller dead BURNS its live reply capability":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        expect(t.has_reply_cap(c.reply_id)).to_equal(true)
+        val burnt = t.mark_task_dead(CALLER)
+        expect(burnt).to_equal(1)
+        expect(t.has_reply_cap(c.reply_id)).to_equal(false)
+        expect(t.live_reply_cap_count()).to_equal(0)
+
+    it "a reply after caller death is REFUSED with REPLY_ERR_CALLER_DEAD":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        t.mark_task_dead(CALLER)
+        val r = t.reply(c.reply_id, SERVER, server_rw(), caller_empty(), reply_no_handles())
+        expect(r.status).to_equal(REPLY_ERR_CALLER_DEAD)
+        expect(r.replied).to_equal(false)
+        expect(r.transferred).to_equal(0)
+
+    it "death burns ALL of that caller's reply caps but no other task's":
+        var t = ReplyTable.new()
+        val a = t.call(CALLER, SERVER)
+        val b = t.call(CALLER, SERVER)
+        val other = t.call(11u64, SERVER)
+        expect(t.live_reply_cap_count()).to_equal(3)
+        val burnt = t.mark_task_dead(CALLER)
+        expect(burnt).to_equal(2)
+        expect(t.has_reply_cap(a.reply_id)).to_equal(false)
+        expect(t.has_reply_cap(b.reply_id)).to_equal(false)
+        expect(t.has_reply_cap(other.reply_id)).to_equal(true)
+        expect(t.live_reply_cap_count()).to_equal(1)
+
+    it "death is idempotent — a second death burns nothing more":
+        var t = ReplyTable.new()
+        t.call(CALLER, SERVER)
+        expect(t.mark_task_dead(CALLER)).to_equal(1)
+        expect(t.mark_task_dead(CALLER)).to_equal(0)
+
+    it "an ALREADY-REPLIED cap is not re-burnt by later caller death":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        t.reply(c.reply_id, SERVER, server_rw(), caller_empty(), reply_no_handles())
+        expect(t.mark_task_dead(CALLER)).to_equal(0)
+
+    it "a dead caller's reply cap cannot transfer capabilities":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        t.mark_task_dead(CALLER)
+        val r = t.reply(c.reply_id, SERVER, server_rw(), caller_empty(),
+                        reply_with_handle(ds(CAP_RIGHT_READ), atten_identity()))
+        expect(r.status).to_equal(REPLY_ERR_CALLER_DEAD)
+        expect(r.receiver_caps.caps.len()).to_equal(0)
+
+# ============================================================================
+# Group 4 — Handle transfer on reply: attenuation, deny-wins
+# ============================================================================
+
+describe "reply object: handle transfer is attenuated and deny-wins":
+
+    it "a reply CAN carry a capability the replier holds":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        val r = t.reply(c.reply_id, SERVER, server_rw(), caller_empty(),
+                        reply_with_handle(ds(CAP_RIGHT_READ + CAP_RIGHT_WRITE), atten_identity()))
+        expect(r.status).to_equal(REPLY_OK)
+        expect(r.transferred).to_equal(1)
+        expect(r.receiver_caps.caps.len()).to_equal(1)
+        expect(r.receiver_caps.has(ds(CAP_RIGHT_READ))).to_equal(true)
+        expect(r.receiver_caps.has(ds(CAP_RIGHT_WRITE))).to_equal(true)
+
+    it "attenuation NARROWS: an rw sender may hand out read-only":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        val r = t.reply(c.reply_id, SERVER, server_rw(), caller_empty(),
+                        reply_with_handle(ds(CAP_RIGHT_READ + CAP_RIGHT_WRITE), atten_rights(CAP_RIGHT_READ)))
+        expect(r.status).to_equal(REPLY_OK)
+        expect(r.transferred).to_equal(1)
+        expect(r.receiver_caps.has(ds(CAP_RIGHT_READ))).to_equal(true)
+        expect(r.receiver_caps.has(ds(CAP_RIGHT_WRITE))).to_equal(false)
+
+    it "DENY-WINS: a read-only sender CANNOT hand out write":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        val r = t.reply(c.reply_id, SERVER, server_ro(), caller_empty(),
+                        reply_with_handle(ds(CAP_RIGHT_READ + CAP_RIGHT_WRITE), atten_identity()))
+        expect(r.status).to_equal(REPLY_ERR_RIGHTS_ESCALATION)
+        expect(r.transferred).to_equal(0)
+        expect(r.receiver_caps.caps.len()).to_equal(0)
+        expect(r.receiver_caps.has(ds(CAP_RIGHT_WRITE))).to_equal(false)
+
+    it "DENY-WINS: a sender cannot hand out an authority it does not hold at all":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        val r = t.reply(c.reply_id, SERVER, server_rw(), caller_empty(),
+                        reply_with_handle(other_ds(CAP_RIGHT_READ), atten_identity()))
+        expect(r.status).to_equal(REPLY_ERR_RIGHTS_ESCALATION)
+        expect(r.receiver_caps.caps.len()).to_equal(0)
+
+    it "DENY-WINS: an ADMIN right is never conjured from a read+write sender":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        val r = t.reply(c.reply_id, SERVER, server_rw(), caller_empty(),
+                        reply_with_handle(ds(CAP_RIGHT_ADMIN), atten_identity()))
+        expect(r.status).to_equal(REPLY_ERR_RIGHTS_ESCALATION)
+        expect(r.receiver_caps.has(ds(CAP_RIGHT_ADMIN))).to_equal(false)
+
+    it "a transferred handle loses a delegation hop (depth strictly decreases)":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        val r = t.reply(c.reply_id, SERVER, server_rw(), caller_empty(),
+                        reply_with_handle(ds(CAP_RIGHT_READ), atten_identity()))
+        expect(r.status).to_equal(REPLY_OK)
+        expect(r.receiver_caps.caps[0].depth).to_equal(1)
+        expect(r.receiver_caps.caps[0].owner).to_equal(CALLER)
+        expect(r.receiver_caps.caps[0].parent_token_id).to_equal(5u64)
+
+    it "a transferred handle ADDS to, never replaces, what the caller already held":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        val pre = CapabilitySet(caps: [_tok(other_ds(CAP_RIGHT_READ), 700u64, 1)], is_pledged: true)
+        val r = t.reply(c.reply_id, SERVER, server_rw(), pre,
+                        reply_with_handle(ds(CAP_RIGHT_READ), atten_identity()))
+        expect(r.status).to_equal(REPLY_OK)
+        expect(r.receiver_caps.caps.len()).to_equal(2)
+        expect(r.receiver_caps.has(other_ds(CAP_RIGHT_READ))).to_equal(true)
+        expect(r.receiver_caps.has(ds(CAP_RIGHT_READ))).to_equal(true)
+
+    it "a single_use transferred handle is armed one-shot in the shared ledger":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        val r = t.reply(c.reply_id, SERVER, server_rw(), caller_empty(),
+                        reply_with_handle(ds(CAP_RIGHT_READ), atten_single_use()))
+        expect(r.status).to_equal(REPLY_OK)
+        expect(r.transferred).to_equal(1)
+        expect(t.mint_ledger.is_armed(r.first_token_id)).to_equal(true)
+        expect(t.mint_ledger.is_consumed(r.first_token_id)).to_equal(false)
+
+# ============================================================================
+# Group 5 — Atomicity: a failed transfer mutates NEITHER side
+# ============================================================================
+
+describe "reply object: handle transfer is atomic (all-or-nothing)":
+
+    it "a batch with ONE unauthorized handle transfers NOTHING":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        val r = t.reply(c.reply_id, SERVER, server_ro(), caller_empty(),
+                        reply_with_handles([ds(CAP_RIGHT_READ), ds(CAP_RIGHT_WRITE)],
+                                           [atten_identity(), atten_identity()]))
+        expect(r.status).to_equal(REPLY_ERR_RIGHTS_ESCALATION)
+        expect(r.transferred).to_equal(0)
+        expect(r.receiver_caps.caps.len()).to_equal(0)
+        expect(r.receiver_caps.has(ds(CAP_RIGHT_READ))).to_equal(false)
+
+    it "a fully authorized batch transfers ALL of its handles":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        val r = t.reply(c.reply_id, SERVER, server_rw(), caller_empty(),
+                        reply_with_handles([ds(CAP_RIGHT_READ), ds(CAP_RIGHT_WRITE)],
+                                           [atten_identity(), atten_identity()]))
+        expect(r.status).to_equal(REPLY_OK)
+        expect(r.transferred).to_equal(2)
+        expect(r.receiver_caps.caps.len()).to_equal(2)
+
+    it "a failed transfer leaves the reply capability UNSPENT and the caller BLOCKED":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        val bad = t.reply(c.reply_id, SERVER, server_ro(), caller_empty(),
+                          reply_with_handle(ds(CAP_RIGHT_WRITE), atten_identity()))
+        expect(bad.status).to_equal(REPLY_ERR_RIGHTS_ESCALATION)
+        expect(t.reply_cap_spent(c.reply_id)).to_equal(false)
+        expect(t.has_reply_cap(c.reply_id)).to_equal(true)
+        expect(t.is_caller_blocked(c.reply_id)).to_equal(true)
+        expect(t.live_reply_cap_count()).to_equal(1)
+
+    it "after a failed transfer a legitimate reply STILL succeeds exactly once":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        t.reply(c.reply_id, SERVER, server_ro(), caller_empty(),
+                reply_with_handle(ds(CAP_RIGHT_WRITE), atten_identity()))
+        val good = t.reply(c.reply_id, SERVER, server_ro(), caller_empty(),
+                           reply_with_handle(ds(CAP_RIGHT_READ), atten_identity()))
+        expect(good.status).to_equal(REPLY_OK)
+        expect(good.transferred).to_equal(1)
+        val again = t.reply(c.reply_id, SERVER, server_ro(), caller_empty(), reply_no_handles())
+        expect(again.status).to_equal(REPLY_ERR_ALREADY_REPLIED)
+
+    it "a failed transfer arms NO one-shot in the shared mint ledger":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        expect(t.mint_ledger.armed_count()).to_equal(0)
+        val r = t.reply(c.reply_id, SERVER, server_ro(), caller_empty(),
+                        reply_with_handles([ds(CAP_RIGHT_READ), ds(CAP_RIGHT_WRITE)],
+                                           [atten_single_use(), atten_single_use()]))
+        expect(r.status).to_equal(REPLY_ERR_RIGHTS_ESCALATION)
+        expect(t.mint_ledger.armed_count()).to_equal(0)
+
+    it "a malformed transfer descriptor is refused and mutates nothing":
+        var t = ReplyTable.new()
+        val c = t.call(CALLER, SERVER)
+        val r = t.reply(c.reply_id, SERVER, server_rw(), caller_empty(),
+                        ReplyTransfer(kinds: [ds(CAP_RIGHT_READ), ds(CAP_RIGHT_WRITE)],
+                                      attens: [atten_identity()]))
+        expect(r.status).to_equal(REPLY_ERR_BAD_TRANSFER)
+        expect(t.has_reply_cap(c.reply_id)).to_equal(true)
+        expect(r.receiver_caps.caps.len()).to_equal(0)
+
+    it "a rejected transfer does not advance the token-id counter":
+        var t = ReplyTable.new()
+        val a = t.call(CALLER, SERVER)
+        t.reply(a.reply_id, SERVER, server_ro(), caller_empty(),
+                reply_with_handle(ds(CAP_RIGHT_WRITE), atten_identity()))
+        val b = t.call(CALLER, SERVER)
+        val ok = t.reply(b.reply_id, SERVER, server_rw(), caller_empty(),
+                         reply_with_handle(ds(CAP_RIGHT_READ), atten_identity()))
+        expect(ok.status).to_equal(REPLY_OK)
+        expect(ok.first_token_id).to_equal(9000u64)
