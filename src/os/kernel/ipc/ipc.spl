@@ -7,7 +7,7 @@
 # Consumes: IpcInputPort (scheduler for blocking, memory for buffers)
 # Produces: IpcOutputPort (message passing, capability management)
 
-use os.kernel.types.ipc_types.{IpcPort, IpcMessage, OwnedIpcMessage, IpcEndpoint, IpcFlags}
+use os.kernel.types.ipc_types.{IpcPort, IpcMessage, IpcEndpoint, IpcFlags, OwnedIpcReceiveStatus, OwnedIpcReceiveResult}
 use os.kernel.types.task_types.{TaskId, BlockReason}
 use os.kernel.types.capability_types.{CapabilityToken, CapabilityKind, CapabilitySet}
 use os.kernel.ipc.capability.{CapabilityManager}
@@ -22,20 +22,33 @@ val MAX_MESSAGES: i32 = 64         # Per-port queue depth
 val MAX_OWNED_PAYLOAD_BYTES: i64 = 4096
 val MAX_OWNED_QUEUE_BYTES: u64 = 65536u64
 
-# Authenticated owned-delivery status values. Legacy send()/recv() retain their
-# historical status contract and do not imply source authentication.
-val IPC_OWNED_SOURCE_DENIED: i64 = -3
+# Owner-checked copied-delivery status values. The caller-provided TaskId is
+# consistency data only; K2 must supply dispatcher current-task context before
+# this path may claim source authentication.
+val IPC_OWNED_SOURCE_OWNER_MISMATCH: i64 = -3
 val IPC_OWNED_PAYLOAD_TOO_LARGE: i64 = -4
 val IPC_OWNED_PAYLOAD_MISMATCH: i64 = -5
 val IPC_OWNED_QUEUE_BUDGET_EXHAUSTED: i64 = -6
+val IPC_OWNED_CAPABILITY_UNSUPPORTED: i64 = -7
 
 # ============================================================================
 # Message Queue — Bounded FIFO per Port
 # ============================================================================
 
+enum QueuedIpcDeliveryKind:
+    """Owner-local queue discriminator; it carries no authentication claim."""
+    CopiedPayload
+    LegacyMetadata
+
+struct QueuedIpcMessage:
+    """Owner-local queue slot. No caller address or provenance token is kept."""
+    header: IpcMessage
+    payload: [u8]
+    delivery_kind: QueuedIpcDeliveryKind
+
 struct MessageQueue:
     """Bounded FIFO queue of IPC messages for a single port."""
-    messages: [OwnedIpcMessage?]
+    messages: [QueuedIpcMessage?]
     head: i32
     tail: i32
     count: i32
@@ -45,7 +58,7 @@ struct MessageQueue:
 impl MessageQueue:
     static fn new(capacity: i32) -> MessageQueue:
         """Create an empty message queue with given capacity."""
-        var messages: [OwnedIpcMessage?] = []
+        var messages: [QueuedIpcMessage?] = []
         var i = 0
         while i < capacity:
             messages.push(nil)
@@ -59,7 +72,7 @@ impl MessageQueue:
             owned_payload_bytes: 0u64
         )
 
-    me push(msg: OwnedIpcMessage) -> bool:
+    me push(msg: QueuedIpcMessage) -> bool:
         """Enqueue a message. Returns false if queue is full."""
         if self.count >= self.capacity:
             return false
@@ -72,7 +85,7 @@ impl MessageQueue:
         self.owned_payload_bytes = self.owned_payload_bytes + payload_bytes
         true
 
-    me pop() -> OwnedIpcMessage?:
+    me pop() -> QueuedIpcMessage?:
         """Dequeue the next message. Returns nil if empty."""
         if self.count == 0:
             return nil
@@ -132,6 +145,9 @@ fn _copy_owned_payload(payload: [u8]) -> [u8]:
         copied.push(byte)
     copied
 
+fn _owned_receive_without_message(status: OwnedIpcReceiveStatus) -> OwnedIpcReceiveResult:
+    OwnedIpcReceiveResult(status: status, header: nil, payload: [])
+
 # ============================================================================
 # IPC Manager
 # ============================================================================
@@ -157,6 +173,9 @@ class IpcManager:
       this class does not provide an internal lock. Each port admits at most
       MAX_MESSAGES queue slots and MAX_OWNED_QUEUE_BYTES copied payload bytes.
       Payload ownership is transferred only through send_owned/recv_owned.
+      K1 checks a claimed TaskId against the port table but cannot authenticate
+      that claim. K2 must bind the sender/receiver TaskId to dispatcher-owned
+      current-task state before exposing authenticated delivery.
     """
     ports: [IpcPortState?]          # Port table (nil = unused slot)
     next_port_id: u64               # Monotonic port ID allocator
@@ -223,33 +242,40 @@ impl IpcManager:
         header: IpcMessage,
         payload: [u8]
     ) -> i64:
-        """Queue an authenticated, kernel-owned payload copy.
+        """Queue a bounded payload copy after claimed-owner consistency checks.
+
+        `sender_task` is not authenticated here because this manager API has no
+        dispatcher current-task context. K2 must make it dispatcher-only before
+        treating the source identity as authenticated.
 
         Returns:
           0  = success
           -1 = destination port not found
           -2 = destination queue full
-          -3 = source port is absent, mismatched, or not sender-owned
+          -3 = source port is absent, mismatched, or not claimed-sender-owned
           -4 = payload exceeds the per-message cap
           -5 = header payload_len does not match the supplied bytes
           -6 = destination payload-byte budget exhausted
+          -7 = capability count/transfer is unsupported on this path
         """
         if payload.len() > MAX_OWNED_PAYLOAD_BYTES:
             return IPC_OWNED_PAYLOAD_TOO_LARGE
         if header.payload_len.to_u64() != payload.len().to_u64():
             return IPC_OWNED_PAYLOAD_MISMATCH
+        if header.cap_count != 0u32 or header.flags == (IpcFlags.CapTransfer as u32):
+            return IPC_OWNED_CAPABILITY_UNSUPPORTED
         if claimed_source_port == 0u64 or header.src_port != claimed_source_port:
-            return IPC_OWNED_SOURCE_DENIED
+            return IPC_OWNED_SOURCE_OWNER_MISMATCH
 
         val source_slot = self._find_port_by_id(claimed_source_port)
         if source_slot < 0:
-            return IPC_OWNED_SOURCE_DENIED
+            return IPC_OWNED_SOURCE_OWNER_MISMATCH
         val source_state = self.ports[source_slot]
         if source_state == nil:
-            return IPC_OWNED_SOURCE_DENIED
-        val authenticated_source = source_state
-        if authenticated_source.port.owner != sender_task.id:
-            return IPC_OWNED_SOURCE_DENIED
+            return IPC_OWNED_SOURCE_OWNER_MISMATCH
+        val claimed_source = source_state
+        if claimed_source.port.owner != sender_task.id:
+            return IPC_OWNED_SOURCE_OWNER_MISMATCH
 
         val destination_slot = self._find_port_by_id(header.dst_port)
         if destination_slot < 0:
@@ -265,40 +291,60 @@ impl IpcManager:
         if payload_bytes > MAX_OWNED_QUEUE_BYTES - port_state.queue.owned_payload_bytes:
             return IPC_OWNED_QUEUE_BUDGET_EXHAUSTED
 
-        val owned = OwnedIpcMessage(
+        val owned = QueuedIpcMessage(
             header: header,
             payload: _copy_owned_payload(payload),
-            source_authenticated: true
+            delivery_kind: QueuedIpcDeliveryKind.CopiedPayload
         )
         if not port_state.queue.push(owned):
             return IPC_OWNED_QUEUE_BUDGET_EXHAUSTED
-        replay_hook_ipc_send(sender_task.id as i64, header.dst_port as i64, header.payload_len as i64)
+        # K1 has no dispatcher-authenticated sender identity; record zero until
+        # K2 supplies the actual current task.
+        replay_hook_ipc_send(0, header.dst_port as i64, header.payload_len as i64)
         self.ports[destination_slot] = port_state
         0
 
-    me recv_owned(receiver_task: TaskId, port: IpcPort) -> OwnedIpcMessage?:
-        """Receive one owned queue value only when the kernel port owner matches.
+    me recv_owned(receiver_task: TaskId, port: IpcPort) -> OwnedIpcReceiveResult:
+        """Return a typed copied-payload receive outcome.
 
         A wrong receiver does not consume the FIFO head. Legacy send() entries
-        may be observed here only with `source_authenticated == false` and an
-        empty payload; they cannot prove authenticated payload delivery.
+        return MetadataOnly and no payload. Delivered proves queue ownership of
+        the byte copy, not dispatcher authentication of either TaskId.
         """
         val slot = self._find_port_by_id(port.id)
         if slot < 0:
-            return nil
+            return _owned_receive_without_message(OwnedIpcReceiveStatus.MissingPort)
         val state = self.ports[slot]
         if state == nil:
-            return nil
+            return _owned_receive_without_message(OwnedIpcReceiveStatus.MissingPort)
         var port_state = state
         if port_state.port.owner != receiver_task.id:
-            return nil
+            return _owned_receive_without_message(OwnedIpcReceiveStatus.Unauthorized)
 
         val msg = port_state.queue.pop()
         self.ports[slot] = port_state
         if msg != nil:
-            val owned = msg
-            replay_hook_ipc_recv(receiver_task.id as i64, port.id as i64, owned.header.payload_len as i64)
-        msg
+            val queued = msg
+            if queued.delivery_kind == QueuedIpcDeliveryKind.LegacyMetadata:
+                return OwnedIpcReceiveResult(
+                    status: OwnedIpcReceiveStatus.MetadataOnly,
+                    header: Some(queued.header),
+                    payload: []
+                )
+            if queued.header.payload_len.to_u64() != queued.payload.len().to_u64():
+                return _owned_receive_without_message(OwnedIpcReceiveStatus.InvalidState)
+            if queued.header.cap_count != 0u32 or queued.header.flags == (IpcFlags.CapTransfer as u32):
+                return _owned_receive_without_message(OwnedIpcReceiveStatus.InvalidState)
+
+            # The receiver TaskId is caller-provided in K1; do not emit it as
+            # authenticated replay provenance.
+            replay_hook_ipc_recv(0, port.id as i64, queued.header.payload_len as i64)
+            return OwnedIpcReceiveResult(
+                status: OwnedIpcReceiveStatus.Delivered,
+                header: Some(queued.header),
+                payload: queued.payload
+            )
+        _owned_receive_without_message(OwnedIpcReceiveStatus.Empty)
 
     me send(msg: IpcMessage) -> i64:
         """Send a message to the destination port.
@@ -324,13 +370,11 @@ impl IpcManager:
 
         var port_state = ps
 
-        # Legacy metadata-only delivery is explicitly unauthenticated. Preserve
-        # the header exactly, including its historical payload_len field, but
-        # never synthesize or retain payload storage for it.
-        val queued = OwnedIpcMessage(
+        # Legacy metadata-only delivery remains distinct from copied payload.
+        val queued = QueuedIpcMessage(
             header: msg,
             payload: [],
-            source_authenticated: false
+            delivery_kind: QueuedIpcDeliveryKind.LegacyMetadata
         )
         val ok = port_state.queue.push(queued)
         if not ok:
