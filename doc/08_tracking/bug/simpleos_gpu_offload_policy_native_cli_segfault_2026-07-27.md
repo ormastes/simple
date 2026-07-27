@@ -84,10 +84,21 @@ rebuild (`4 compiled, 15 cached, 0 failed`) fixed that expectation. The
 preserved third-cycle receipt proves status `1`, reason `0`, device source `1`,
 handle `1`, positive identity, `4,194,304` output bytes, and exact correlation,
 but every readback word is `135272480` instead of `16909060`. The payload word
-is correct on the wire; `words[5].to_u32()` applies tagged-integer conversion
-to an already-raw MMIO scalar and multiplies it by eight. Source now uses
-`words[5] as u32`. The cap is exhausted before rebuilding this final boundary
-fix, so no exact device-wire receipt or warm timing is claimed.
+is correct on the wire. A strict retained-cache build of `words[5] as u32`
+completed at `3 compiled, 214 cached`, but preserved the same 8x result. A
+second build read the scalar through the existing ABI-exact `raw_read_i32`
+facade (`2 compiled, 215 cached`) and again preserved the same result.
+
+Generated daemon-runner code for the second build passes the exact raw `u32`
+unchanged into `processing_ir_fill_u32`; the runtime archive's
+`rt_ptr_read_i32` is a direct 32-bit load. The retained cache nevertheless
+contains older flattened entry-module copies, consistent with TODO 562's
+missing transitive dependency hashes. A one-module entry refresh (`1 compiled,
+216 cached`) still stopped at request 1, but the wrapper deleted that final
+receipt. The probe now reports status, reason, source, checksum, bytes, timing,
+first output word, receipt validity, and output parity on failure. That source
+is unbuilt after the third cycle, so no exact device-wire receipt or warm timing
+is claimed.
 
 ## Remaining Gate
 
@@ -99,7 +110,10 @@ lower-level CUDA round-trip threshold by itself. Resume with one strict
 incremental daemon build from the retained cache, verify its `string_core`
 object has no self-relocations or `jmp`-to-self primitive bodies, then run the
 documented device-warm wrapper command with explicit daemon/probe paths. The
-next build must contain the raw `words[5] as u32` boundary and retain the
-platform-owned render probe.
+next bounded session must first build the diagnostic probe, then either repair
+TODO 562's transitive object-cache invalidation or use one isolated fresh
+daemon cache to distinguish stale flattened code from a remaining ABI defect.
+Retain the ABI-exact `raw_read_i32` payload boundary and platform-owned render
+probe.
 
 Owner: Linux GPU host operator. Final reviewer: high-capability model.

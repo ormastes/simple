@@ -114,6 +114,16 @@ fn _device_warm(base: u64) -> i64:
     var non_device2: i64 = 0
     var non_device3: i64 = 0
     var non_device4: i64 = 0
+    var last_status: i64 = 0
+    var last_reason: i64 = 0
+    var last_source: i64 = 0
+    var last_checksum: i64 = 0
+    var last_bytes: i64 = 0
+    var last_elapsed_us: i64 = 0
+    var last_roundtrip_us: i64 = 0
+    var last_output0: u32 = 0u32
+    var last_receipt_valid = false
+    var last_output_exact = false
     var request_index: i64 = 0
     while valid and request_index < warmups + samples:
         val generation = request_index + 2
@@ -127,9 +137,21 @@ fn _device_warm(base: u64) -> i64:
         val receipt_valid = host_gpu_ivshmem_device_receipt_valid(
             receipt, generation, 7001, frame_id,
             SIMPLEOS_HOST_GPU_BACKEND_CUDA, count * 4)
+        val output_exact = _output_exact(receipt, count, value)
+        last_status = receipt.status
+        last_reason = receipt.reason
+        last_source = receipt.readback_source
+        last_checksum = receipt.output_checksum
+        last_bytes = receipt.output_bytes
+        last_elapsed_us = receipt.elapsed_us
+        last_roundtrip_us = roundtrip_us
+        if receipt.output_addr > 0u64 and receipt.output_bytes >= 4:
+            last_output0 = mmio_read32(receipt.output_addr)
+        last_receipt_valid = receipt_valid
+        last_output_exact = output_exact
         valid = receipt_valid and receipt.readback_source == SIMPLEOS_HOST_GPU_READBACK_DEVICE and
             receipt.output_checksum == expected_checksum and
-            _output_exact(receipt, count, value) and roundtrip_us >= receipt.elapsed_us
+            output_exact and roundtrip_us >= receipt.elapsed_us
         if request_index == 0:
             handle = receipt.native_handle
             identity = receipt.device_identity
@@ -168,7 +190,7 @@ fn _device_warm(base: u64) -> i64:
         median_device_us > 0 and median_roundtrip_us >= median_device_us and
         median_non_device_us >= 0 and handle > 0 and identity > 0
     val status = if valid: "pass" else: "fail"
-    print("GPU_DEVICE_WARM_WIRE status={status} warmups={warmups} samples={samples} requests={request_index} count={count} checksum={expected_checksum} median_device_us={median_device_us} median_roundtrip_us={median_roundtrip_us} median_non_device_us={median_non_device_us} handle={handle} identity={identity} exact={valid} stable_provenance={valid}\n")
+    print("GPU_DEVICE_WARM_WIRE status={status} warmups={warmups} samples={samples} requests={request_index} count={count} checksum={expected_checksum} median_device_us={median_device_us} median_roundtrip_us={median_roundtrip_us} median_non_device_us={median_non_device_us} handle={handle} identity={identity} exact={valid} stable_provenance={valid} last_status={last_status} last_reason={last_reason} last_source={last_source} last_checksum={last_checksum} last_bytes={last_bytes} last_elapsed_us={last_elapsed_us} last_roundtrip_us={last_roundtrip_us} last_output0={last_output0} last_receipt_valid={last_receipt_valid} last_output_exact={last_output_exact}\n")
     if valid: 0 else: 1
 
 fn main() -> i64:

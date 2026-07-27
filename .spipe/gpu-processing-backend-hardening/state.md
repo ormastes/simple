@@ -30,4 +30,4 @@ dev-done
 ## Log
 - dev: Refined the persistent processing-backend hardening goal into seven acceptance criteria.
 - impl: Added a strict daemon-wire CUDA mode with three warmups, five measured exact requests, stable provenance, and median device/round-trip/non-device-overhead timing.
-- verify: Strict probe/runtime/daemon builds, generated-object recursion audit, CLI validation, and the first correlated CUDA PASS receipt succeed. Exact readback remains open because raw wire value conversion produced an 8x word; the `as u32` boundary fix is source-ready but unbuilt after the three-cycle cap.
+- verify: Strict probe/runtime/daemon builds, generated-object recursion audit, CLI validation, and the first correlated CUDA PASS receipt succeed. Three retained-cache rebuild/live cycles still stop on request 1: `as u32` and ABI-exact `raw_read_i32` builds preserved the 8x readback, while an entry-only refresh still failed without preserving the final receipt. The probe now reports every decisive last-receipt field, but that diagnostic source is unbuilt after the cap.

@@ -82,7 +82,11 @@ trait-erased shutdown fault and rebuilt strictly with `4 compiled, 213 cached,
 0 failed`. The checksum-corrected probe also rebuilt with `4 compiled, 15
 cached, 0 failed`. Its preserved first CUDA receipt has PASS status, zero
 reason, device readback, positive handle/identity, exact correlation, and
-`4,194,304` bytes, but the output value is 8x the payload because
-`words[5].to_u32()` treated a raw MMIO scalar as tagged. Source now uses
-`words[5] as u32`; the three-cycle cap was reached before rebuilding it.
-Therefore no exact daemon device receipt or warm median is claimed yet.
+`4,194,304` bytes, but the output value is 8x the payload. Retained-cache
+rebuilds using `words[5] as u32` (`3 compiled, 214 cached`) and an ABI-exact
+`raw_read_i32` payload read (`2 compiled, 215 cached`) both preserved that
+result. An entry-only refresh (`1 compiled, 216 cached`) still stopped at
+request 1, but the wrapper removed the final receipt before its failed field
+could be inspected. The probe now prints every decisive last-receipt field on
+failure; that diagnostic source is not yet rebuilt. Therefore no exact daemon
+device receipt or warm median is claimed.
