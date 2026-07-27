@@ -11,6 +11,10 @@
  *   .stack    — kernel stack (8 MB — Simple code uses large stack frames)
  *   .heap     — kernel heap (64 MB)
  *
+ * The canonical QEMU runners provide at least 384 MiB. Keep 16 MiB outside
+ * the linker-owned region for machine/transport headroom; the macOS host-GPU
+ * lane reserves a separate final 8 MiB tail in its 512 MiB RAM backing file.
+ *
  * Entry point: _start (in .text.entry section)
  * Exception vectors: .text.vectors (must be 2KB aligned for VBAR_EL1)
  */
@@ -20,7 +24,7 @@ OUTPUT_FORMAT("elf64-littleaarch64")
 ENTRY(_start)
 
 MEMORY {
-    RAM (rwx) : ORIGIN = 0x40000000, LENGTH = 256M
+    RAM (rwx) : ORIGIN = 0x40000000, LENGTH = 368M
 }
 
 SECTIONS {

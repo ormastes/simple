@@ -191,6 +191,30 @@ a positive framebuffer handle, and the same stable identity. ProcessingIR and
 all three QEMU ISA rows still need prepared macOS receipts before they can be
 marked verified.
 
+### Metal-only daemon dependency seam
+
+The current source cannot yet produce the supported host daemon from a narrow
+Metal closure. `draw_ir_adv.spl` takes concrete `Engine2D`; importing it pulls
+the monolithic engine and all backend/SFFI families even when a cfg-local
+factory directly creates Metal. A real core-C build attempt produced no daemon
+artifact, so the existing source and cached binaries are not completion
+evidence.
+
+Refactor the executor around an internal `DrawIrRenderTarget`-shaped contract
+with only:
+
+- dimensions and strict backend/device identity;
+- clear and existing primitive/image/text draw operations;
+- present plus checked `Engine2DReadback`;
+- shutdown and poisoned/unknown-completion state.
+
+The normal `Engine2D` path and a Metal-only host adapter implement this same
+contract. The adapter must call the existing `MetalBackend`/`MetalSession`
+owners and canonical `draw_text`/`FontRenderer` material; it must not reimplement
+rasterization, maintain a second framebuffer policy, or change
+`DrawIrComposition`. A dependency check must prove that the macOS daemon closure
+does not retain non-Metal backend providers before native-build admission.
+
 ## Checked DirectX D3D11 source
 
 On Windows, `DirectXBackend` keeps the CPU mirror for fallback semantics but
@@ -435,16 +459,20 @@ Before merging any adapter:
 7. 96-DPI and 300-DPI existing fixtures retain identical logical output;
 8. unavailable transport selects the existing fallback without changing
    backend priority or claiming acceleration.
+9. the macOS host-daemon dependency closure contains the shared Draw IR owner
+   and Metal adapter but no unused Vulkan/OpenGL/Intel/WebGPU provider symbols.
 
 ### Extension implementation order
 
 1. Freeze the compatibility tests and add the common artifact/receipt validator.
 2. Extend the existing Linux QEMU ivshmem row to the full bit-level fixture.
-3. Complete native macOS Metal and Windows DirectX host rows on prepared hosts.
-4. Add one shared native-board wrapper and capability schema.
-5. Add UNO Q Debian readiness, then SimpleOS-native Adreno bring-up.
-6. Add UP Squared Linux/Windows readiness, then SimpleOS-native Intel bring-up.
-7. Add VisionFive 2 vendor readiness; start native BXE work only after the
+3. Extract the internal Draw IR render/readback target and prove a supported
+   Metal-only daemon native build without changing public Simple 2D interfaces.
+4. Complete native macOS Metal and Windows DirectX host rows on prepared hosts.
+5. Add one shared native-board wrapper and capability schema.
+6. Add UNO Q Debian readiness, then SimpleOS-native Adreno bring-up.
+7. Add UP Squared Linux/Windows readiness, then SimpleOS-native Intel bring-up.
+8. Add VisionFive 2 vendor readiness; start native BXE work only after the
    upstream/vendor driver and firmware contract is explicit.
-8. Run the same exact artifact and operator-manual gate for every row; retain
+9. Run the same exact artifact and operator-manual gate for every row; retain
    unavailable rows as blocked.

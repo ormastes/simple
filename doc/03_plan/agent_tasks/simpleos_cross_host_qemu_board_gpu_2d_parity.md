@@ -36,7 +36,7 @@ of the artifact producer.
 | 0 | compatibility freeze | unchanged Draw IR, RenderBackend, Metal/Vulkan, font, event, SIMD/software gates | current owned diffs reconciled |
 | 1 | shared artifact | canonical ARGB metadata, SHA-256, mismatch diagnostics, capability cache/invalidation | lane 0 |
 | 2 | Linux QEMU | existing ivshmem Vulkan row upgraded to full fixture; Venus/virgl/rutabaga kept separate | prepared Linux KVM/Vulkan host |
-| 3 | macOS QEMU | native Metal host-offload row; UTM Venus experiment remains compatibility-only | current macOS owner lane |
+| 3 | macOS QEMU | extract the shared internal Draw IR render/readback target, build a Metal-only host daemon, then run native Metal host-offload; UTM Venus remains compatibility-only | current macOS owner lane; narrow closure before live evidence |
 | 4 | Windows QEMU | native DirectX host-offload row; upstream virtio acceleration remains blocked | prepared WHPX/DirectX host |
 | 5 | board wrapper | one board identity/boot/driver/fence/readback schema and wrapper | lane 1 |
 | 6 | UNO Q | Debian Adreno readiness, then SimpleOS-native driver row | physical UNO Q |
@@ -62,9 +62,18 @@ Windows, CUDA, TODO 563, TODO 566, TODO 569, and TODO 570 resumption. Planned
 board commands must fail closed until their wrapper exists; a missing wrapper
 is not an unsupported hardware result.
 
+The 2026-07-27 macOS audit found a current-host implementation blocker rather
+than an unavailable environment: Draw IR is typed to monolithic `Engine2D`, so
+the daemon retains all backend providers and cannot produce the supported
+Metal-only artifact. Resume the macOS row by implementing the internal
+render/readback target in FR-GPU-QEMU-0001, proving its dependency closure, and
+then running the canonical HVF command. macOS is not postponed and cached
+receipts cannot close it.
+
 ## Merge gates
 
-1. No changes to public Simple 2D/Draw IR/backend/event/font interfaces.
+1. No changes to public Simple 2D/Draw IR/backend/event/font interfaces; the
+   internal executor target is dependency inversion only.
 2. No duplicated renderer, atlas, cache, event router, or CPU oracle.
 3. Exact device-origin artifact with `mismatch_count=0`.
 4. Board Linux readiness cannot satisfy SimpleOS-native.

@@ -723,8 +723,12 @@ The forced lane must negotiate processing mask `1`, emit a single
 `HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan` receipt, and retain exact
 device readback before TODO 550 can close. TODO 570 retains the
 correlated preference classification; refreshed cross-ISA CUDA receipts are
-also still required. macOS Metal Draw IR execution is implemented but remains
-`unsupported` evidence until a prepared native host produces a fresh receipt.
+also still required. macOS Metal Draw IR backend execution is implemented, but
+the 2026-07-27 prepared-host audit found that the QEMU daemon still cannot be
+built through the supported narrow native lane: importing Draw IR pulls the
+monolithic `Engine2D` closure and every backend provider. It therefore remains
+`blocked`, not accelerated, until the shared internal render/readback target
+described below produces a Metal-only daemon and a fresh receipt.
 Metal ProcessingIR FillU32 is implemented through a dedicated checked MSL
 kernel and device readback, but likewise needs a prepared-host receipt. Windows
 DirectX/CUDA rows remain `unsupported` evidence until a prepared host produces
@@ -876,6 +880,21 @@ Linux, macOS, and Windows QEMU reuse the existing host-GPU protocol, fixture,
 receipt, and CPU SIMD oracle. Physical boards reuse the same artifact and
 evidence ladder through a board adapter; they do not create another Simple 2D
 or Draw IR interface.
+
+For macOS, resume in this order:
+
+1. implement the internal Draw IR render/readback target from
+   FR-GPU-QEMU-0001, with normal Engine2D and Metal-only host adapters;
+2. run the dependency check and reject any daemon closure retaining unused
+   Vulkan/OpenGL/Intel/WebGPU provider symbols;
+3. native-build the daemon with the supported pure-Simple/core-C lane;
+4. run `sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs` with the admitted
+   compiler and retain its exact HVF argv;
+5. accept only positive Metal identity/handle, same-frame device readback,
+   twenty warm samples, and zero CPU/SIMD pixel mismatches.
+
+Do not use a cached daemon, the Rust bootstrap seed, a CPU mirror, a synthetic
+handle, Cocoa presentation, or a Metal API name as native evidence.
 
 Default VirtIO-GPU 2D is presentation-only. Current upstream accelerated
 virgl/Venus/rutabaga host requirements are Linux-scoped. macOS Venus remains

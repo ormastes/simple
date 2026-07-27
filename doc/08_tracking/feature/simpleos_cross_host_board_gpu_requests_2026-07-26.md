@@ -19,7 +19,8 @@ artifact, receipt, and CPU SIMD oracle contract.
 
 - Filed-on: 2026-07-26
 - Priority: P0
-- Status: Open; Linux and Windows native execution postponed to prepared hosts
+- Status: Open; macOS blocked on the Metal-only daemon closure, while Linux and
+  Windows native execution is postponed to prepared hosts
 - Requested semantics: retain the current ivshmem host-service architecture for
   Linux Vulkan, macOS Metal, and Windows DirectX while keeping upstream
   virgl/Venus/rutabaga capability rows honest and separate.
@@ -28,6 +29,22 @@ artifact, receipt, and CPU SIMD oracle contract.
   - Every native pass has correlated submission/fence/device-origin readback.
   - Exact Simple 2D bytes match the CPU SIMD oracle with zero mismatches.
   - Default VirtIO-GPU 2D remains presentation-only.
+  - Draw IR executes through one internal render/readback target implemented by
+    normal `Engine2D` and the Metal-only host adapter; public Draw IR,
+    `RenderBackend`, `Engine2DReadback`, font, and event interfaces do not fork.
+  - The supported macOS daemon dependency closure retains no unused
+    Vulkan/OpenGL/Intel/WebGPU providers and needs no unresolved-symbol stubs.
+  - Native macOS completion requires a fresh HVF receipt with a positive Metal
+    handle, device-origin readback, and zero CPU/SIMD pixel mismatches.
+
+### Current macOS blocker (2026-07-27)
+
+`draw_ir_adv.spl` accepts concrete `Engine2D`, whose module imports and typed
+fields retain every backend family. Dependency inspection found a 100-file
+shared closure between the Draw IR and host backend owners. A cfg-local Metal
+factory therefore did not produce a supported native daemon. The requested
+implementation is the narrow internal executor target above, not a duplicate
+renderer, link stub, cached receipt, or CPU-mirror promotion.
 
 ## FR-GPU-BOARD-0001 — Add UNO Q Adreno 702 native GPU adapter
 

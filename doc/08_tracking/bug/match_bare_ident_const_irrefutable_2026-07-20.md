@@ -55,6 +55,28 @@ equality test on that constant's value; only fall back to a capture binding when
 the name is genuinely unbound. A capture in a non-final arm that makes every
 later arm unreachable should also be a lint/warning in its own right.
 
+### Compiler trace and blocked verification (2026-07-27)
+
+The flat frontend currently converts every bare identifier pattern to
+`PatternKind.Binding` in `_FlatAstBridge.convert_flat_pattern`. HIR then creates
+a fresh variable for that binding. MIR treats it as the irrefutable/default arm.
+MIR also builds `norm_arms`, but the scalar dispatch loop iterates the original
+`arms`, so even successful normalization is discarded outside the enum path.
+
+The scoped repair is:
+
+1. resolve immutable current-module scalar constants before enum/capture
+   classification;
+2. dispatch the normalized arms rather than the original arms;
+3. add a strict native regression where the second constant arm returns `29`
+   and the wildcard remains reachable.
+
+Integer constant normalization was prototyped but not accepted: the available
+source-driver build failed on missing `rt_transient_array_scope_begin` after
+JIT fallback, so no green compiler artifact exists. Text and boolean constants
+also require their own non-integer literal lowering rather than being inferred
+from the integer candidate.
+
 ## Workaround (in use today)
 
 Compare explicitly with `==` in an `if`/`elif` chain. See `exit_code()` in

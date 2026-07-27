@@ -160,6 +160,26 @@ Guest/daemon/wrapper negotiation keeps the DirectX render mask independent
 from CUDA/Vulkan processing masks. Prepared-Windows receipt evidence remains
 open, so the Windows QEMU row is not yet classified as accelerated.
 
+### Host-daemon entry-closure boundary
+
+The macOS host daemon must not import the monolithic `Engine2D` owner merely to
+execute Draw IR. Current dependency evidence shows that
+`draw_ir_adv.spl` and the daemon backend owner share a 100-file closure because
+the Draw IR executor accepts concrete `Engine2D`, while `engine.spl`
+unconditionally imports and stores every backend family. Consequently a
+platform factory or cfg-gated Metal constructor alone still retains Vulkan,
+OpenGL, Intel, WebGPU, and their SFFI providers. That design does not satisfy a
+supported Metal-only native build and must not be hidden with link stubs.
+
+The required seam is one narrow internal Draw IR render/readback target. It
+owns create/clear/draw/present/read-pixels/shutdown plus strict backend identity
+and checked device provenance. Existing `Engine2D` implements the target for
+normal applications; a Metal-only host adapter implements it for the macOS
+daemon. The Draw IR composition, command semantics, font lowering, readback
+record, protocol, CPU/SIMD oracle, and public Engine2D API remain unchanged.
+This is dependency inversion at the existing renderer boundary, not a private
+renderer or a platform-specific Draw IR fork.
+
 Vulkan ProcessingIR hashes the runtime-selected driver identity, which includes
 device name, vendor/device IDs, driver version, and API version. Storage-buffer handles remain per-request resource handles and
 must never be reused as device provenance. Vulkan processing is negotiated only
@@ -180,7 +200,7 @@ while Vulkan and Metal's existing 31-bit hashes already satisfy it.
 | Host | Rendering | Processing | Classification rule |
 |---|---|---|---|
 | Linux | Vulkan | Vulkan; CUDA on prepared NVIDIA host | pass only with device receipt |
-| macOS | Metal implementation, native receipt still required | dedicated Metal ProcessingIR FillU32, native receipt still required | never infer processing from an Engine2D clear |
+| macOS | Metal implementation; Metal-only daemon closure and native receipt still required | dedicated Metal ProcessingIR FillU32, native receipt still required | never infer processing from an Engine2D clear; no accelerated classification until the supported daemon links and HVF returns device-origin parity |
 | Windows | bounded native D3D11 owner and QEMU negotiation implemented; receipt pending | CUDA preferred, Vulkan fallback | require independent masks, positive hardware identity/target handle, and exact readback; ivshmem mapping permits concurrent QEMU/daemon writes |
 | Any missing prerequisite | CPU/software | CPU | `unsupported` or `blocked`, never accelerated |
 
@@ -349,7 +369,9 @@ regression prerequisite.
 
 ### Shared capsule and private adapters
 
-`SimpleOsHostGpuSession` remains the QEMU capsule. A new common target
+`SimpleOsHostGpuSession` remains the QEMU capsule. The internal narrow Draw IR
+render/readback target described above is the only permitted host-daemon
+dependency seam; it preserves the existing public compatibility boundary. A new common target
 capability layer composes private adapters:
 
 ```text
