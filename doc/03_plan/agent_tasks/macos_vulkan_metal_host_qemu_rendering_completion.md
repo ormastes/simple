@@ -866,11 +866,11 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   native/Cranelift slice-descriptor preservation across calls, not Bungee
   parsing or the Engine2D return. Fix the compiler seam rather than adding
   concurrency-unsafe global font scratch state.
-- High review also required and the current source now includes zero-height
-  divide protection, zero-area EMPTY classification, render metadata bounds,
-  measure/render input parity, current-face checks for EMPTY, and canonical
-  magic/version comparisons. These changes are not accepted until the focused
-  producer passes.
+- Final review rejected the unproven two-pass integration, FontRenderer blob
+  retention, and associated protocol hardening for mainline; those edits were
+  reverted. The independently definite `_add_edge` dropped-value repair was
+  retained: it rebinds the value-returning `push`, compiled in all three
+  cycles, and does not introduce a new transport surface.
 - The mandatory three-cycle cap is exhausted. No bootstrap was run. Do not
   push the current source as a fixed implementation and do not rerun the same
   probe unchanged.
