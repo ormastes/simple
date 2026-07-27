@@ -26,8 +26,9 @@
   other explicit ports and leaving malformed/non-HTTP inputs unchanged.
 - Ignore malformed signed HSTS `max-age` directives without clearing an
   already valid policy while retaining `max-age=0` as explicit removal.
-- Restore only valid, unexpired, unique HSTS policies from wall-clock profile
-  state, rejecting public suffixes and IP literals.
+- Restore only strict DNS-host, unexpired, unique HSTS policies from wall-clock
+  profile state, rejecting whitespace, userinfo, ports, malformed labels,
+  public suffixes, and IP literals.
 - Bound recursive Promise microtask work to eight 1000-callback batches per
   browser flush so hostile chains yield to the host.
 

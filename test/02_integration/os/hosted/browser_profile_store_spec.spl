@@ -89,8 +89,58 @@ describe "hosted browser profile store":
                 DbValue.Integer(value: 1)
             ]
         )?
+        reopened.db.exec(
+            "INSERT INTO browser_hsts (" +
+            "host, received_at_unix_ms, expires_at_unix_ms, include_subdomains" +
+            ") VALUES (?, ?, ?, ?)",
+            [
+                DbValue.Text(value: "user@simple.test"),
+                DbValue.Integer(value: 99500),
+                DbValue.Integer(value: 101000),
+                DbValue.Integer(value: 1)
+            ]
+        )?
+        for duplicate_host in ["Dupe.Test", "other.test"]:
+            reopened.db.exec(
+                "INSERT INTO browser_hsts (" +
+                "host, received_at_unix_ms, expires_at_unix_ms, " +
+                "include_subdomains) VALUES (?, ?, ?, ?)",
+                [
+                    DbValue.Text(value: duplicate_host),
+                    DbValue.Integer(value: 99500),
+                    DbValue.Integer(value: 101000),
+                    DbValue.Integer(value: 1)
+                ]
+            )?
+        for duplicate_host in ["dupe.test", "Other.Test"]:
+            reopened.db.exec(
+                "INSERT INTO browser_hsts (" +
+                "host, received_at_unix_ms, expires_at_unix_ms, " +
+                "include_subdomains) VALUES (?, ?, ?, ?)",
+                [
+                    DbValue.Text(value: duplicate_host),
+                    DbValue.Integer(value: 99500),
+                    DbValue.Integer(value: 99000),
+                    DbValue.Integer(value: 1)
+                ]
+            )?
         expect(reopened.load_bookmarks()?.entries.len()).to_equal(1)
         expect(reopened.load_hsts(100000)?.entries.len()).to_equal(1)
+
+        var invalid_hsts: [BrowserHstsSnapshotEntry] = []
+        invalid_hsts.push(BrowserHstsSnapshotEntry(
+            host: "simple.test:443",
+            received_at_unix_ms: 99500,
+            expires_at_unix_ms: 101000,
+            include_subdomains: true
+        ))
+        match reopened.save_hsts(
+            BrowserHstsSnapshot.create(invalid_hsts), 100000
+        ):
+            Ok(_):
+                fail("Expected malformed HSTS host rejection")
+            Err(_):
+                expect(reopened.load_hsts(100000)?.entries.len()).to_equal(1)
 
         var registry = HostedWebContentRegistry.create_with_profile(
             reopened, 100000

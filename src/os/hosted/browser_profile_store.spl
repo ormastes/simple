@@ -5,7 +5,9 @@ use std.database.sql.types.{DbValue, DbError}
 use std.gc_async_mut.web.browser_session.{
     BrowserBookmarkSnapshot, BrowserHstsSnapshot, BrowserHstsSnapshotEntry
 }
-use std.gc_async_mut.web.browser_session_url.{normalize_network_navigation_url}
+use std.gc_async_mut.web.browser_session_url.{
+    network_navigation_hostname_valid, normalize_network_navigation_url
+}
 use std.js.types.pair.{Pair}
 use common.web.host_policy.{is_ip_host_literal}
 use common.web.public_suffix.{is_public_suffix}
@@ -156,11 +158,12 @@ impl BrowserProfileStore:
         if snapshot.entries.len() > BROWSER_PROFILE_MAX_HSTS:
             return Err(DbError.ConstraintViolation("too many HSTS policies"))
         for entry in snapshot.entries:
-            val host = entry.host.trim().lower()
+            val host = entry.host.lower()
             val remaining = entry.expires_at_unix_ms - wall_clock_ms
             val lifetime = entry.expires_at_unix_ms - entry.received_at_unix_ms
             if (
-                host.len() == 0 or host.len() > 253 or host.contains("/") or
+                entry.host != entry.host.trim() or
+                not network_navigation_hostname_valid(host) or
                 is_ip_host_literal(host) or is_public_suffix(host) or
                 remaining <= 0 or
                 remaining > BROWSER_PROFILE_MAX_HSTS_LIFETIME_MS or
@@ -179,7 +182,7 @@ impl BrowserProfileStore:
                 "host, received_at_unix_ms, expires_at_unix_ms, include_subdomains" +
                 ") VALUES (?, ?, ?, ?)",
                 [
-                    DbValue.Text(value: entry.host.trim().lower()),
+                    DbValue.Text(value: entry.host.lower()),
                     DbValue.Integer(value: entry.received_at_unix_ms),
                     DbValue.Integer(value: entry.expires_at_unix_ms),
                     DbValue.Integer(value: if entry.include_subdomains: 1 else: 0)
@@ -198,6 +201,27 @@ impl BrowserProfileStore:
         )?
         if rows.len() > BROWSER_PROFILE_MAX_HSTS:
             return Err(DbError.ConstraintViolation("HSTS store exceeds limit"))
+        var seen_hosts: [text] = []
+        var duplicate_hosts: [text] = []
+        for row in rows:
+            val host = row.get_text("host")
+            if host != nil:
+                val raw_host = host.unwrap()
+                val normalized = raw_host.lower()
+                if (
+                    raw_host == raw_host.trim() and
+                    network_navigation_hostname_valid(normalized) and
+                    not is_ip_host_literal(normalized) and
+                    not is_public_suffix(normalized)
+                ):
+                    var seen = false
+                    for seen_host in seen_hosts:
+                        if seen_host == normalized:
+                            seen = true
+                    if seen:
+                        duplicate_hosts.push(normalized)
+                    else:
+                        seen_hosts.push(normalized)
         var entries: [BrowserHstsSnapshotEntry] = []
         for row in rows:
             val host = row.get_text("host")
@@ -208,12 +232,18 @@ impl BrowserProfileStore:
                 host != nil and received != nil and expires != nil and
                 include_subdomains != nil
             ):
-                val normalized = host.unwrap().trim().lower()
+                val raw_host = host.unwrap()
+                val normalized = raw_host.lower()
                 val remaining = expires.unwrap() - wall_clock_ms
                 val lifetime = expires.unwrap() - received.unwrap()
+                var duplicate = false
+                for duplicate_host in duplicate_hosts:
+                    if duplicate_host == normalized:
+                        duplicate = true
                 if (
-                    normalized.len() > 0 and normalized.len() <= 253 and
-                    not normalized.contains("/") and
+                    not duplicate and
+                    raw_host == raw_host.trim() and
+                    network_navigation_hostname_valid(normalized) and
                     not is_ip_host_literal(normalized) and
                     not is_public_suffix(normalized) and
                     remaining > 0 and

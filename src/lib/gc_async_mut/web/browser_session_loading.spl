@@ -14,7 +14,8 @@ use std.js.types.js_types.{JsValue}
 use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserLoadState, BrowserPendingModuleEval, BrowserScriptBlock, BrowserHistoryEntry, BrowserResponse, BrowserWasmModuleRecord, BrowserHstsPolicy, BrowserHstsSnapshot, BrowserHstsSnapshotEntry}
 use std.gc_async_mut.web.browser_session_storage.{pair_value, upsert_pair}
 use std.gc_async_mut.web.browser_session_url.{
-    normalize_network_navigation_url, resolve_relative_url, url_hostname
+    network_navigation_hostname_valid, normalize_network_navigation_url,
+    resolve_relative_url, url_hostname
 }
 use common.web.public_suffix.{is_public_suffix}
 use common.web.host_policy.{is_ip_host_literal}
@@ -822,7 +823,8 @@ impl BrowserSession:
         if max_age == nil:
             return false
         val host = url_hostname(response_url).lower()
-        if host == "" or is_ip_host_literal(host) or is_public_suffix(host):
+        if (not network_navigation_hostname_valid(host) or
+            is_ip_host_literal(host) or is_public_suffix(host)):
             return false
         var retained: [BrowserHstsPolicy] = []
         for policy in self.hsts_policies:
@@ -862,14 +864,15 @@ impl BrowserSession:
         var index = 0
         while index < snapshot.entries.len() and accepted < 1024:
             val entry = snapshot.entries[index]
-            val host = entry.host.trim().lower()
+            val host = entry.host.lower()
             var remaining = entry.expires_at_unix_ms - wall_clock_ms
             val max_lifetime_ms: i64 = 315360000000
             if remaining > max_lifetime_ms:
                 remaining = max_lifetime_ms
             if (
-                host.len() > 0 and host.len() <= 253 and
-                not host.contains("/") and not is_ip_host_literal(host) and
+                entry.host == entry.host.trim() and
+                network_navigation_hostname_valid(host) and
+                not is_ip_host_literal(host) and
                 not is_public_suffix(host) and remaining > 0
             ):
                 var duplicate = false

@@ -892,3 +892,10 @@ implementation in progress / target evidence blocked
   Set-Cookie/Set-Cookie2 and filters cross-origin response headers to the CORS
   safelist plus valid explicitly exposed names before renderer IPC, retaining
   Location only for an internal redirect hop.
+- Persisted HSTS host hardening: BrowserSession and BrowserProfileStore now
+  reuse the strict navigation DNS-label validator for header admission,
+  snapshot restore, database load, and transactional save. Whitespace,
+  userinfo, ports, empty/overlong labels, and leading/trailing hyphens are
+  rejected alongside public suffixes and IP literals. Profile load also drops
+  every case-folded duplicate host so corrupt SQLite rows cannot choose policy
+  metadata by collation order.
