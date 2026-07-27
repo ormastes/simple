@@ -32,6 +32,9 @@ esac
 LOG_PATH="$BUILD_DIR/stdout.log"
 ERR_PATH="$BUILD_DIR/stderr.log"
 BUILD_LOG="$BUILD_DIR/native-build.log"
+BROWSER_ANIMATION_SPEC_LOG="$BUILD_DIR/browser-animation-spec.log"
+BROWSER_SANDBOX_SPEC_LOG="$BUILD_DIR/browser-sandbox-spec.log"
+BROWSER_LIFECYCLE_SPEC_LOG="$BUILD_DIR/browser-lifecycle-spec.log"
 SNAPSHOT_LIVE="$BUILD_DIR/snapshot.live.json"
 CAPTURE_LIVE="$BUILD_DIR/framebuffer.live.ppm"
 COMMAND_PATH="$BUILD_DIR/evidence.commands"
@@ -63,7 +66,8 @@ rm -f "$LOG_PATH" "$ERR_PATH" "$BUILD_LOG" "$SNAPSHOT_LIVE" "$CAPTURE_LIVE" \
     "$SOURCE_MANIFEST_AFTER" "$CALIBRATION_RGB" "$REPORT_PATH" \
     "$BASELINE_SNAPSHOT" "$BASELINE_CAPTURE" "$INPUT_SNAPSHOT" "$INPUT_CAPTURE" \
     "$MOVE_SNAPSHOT" "$MOVE_CAPTURE" "$MAXIMIZE_SNAPSHOT" "$MAXIMIZE_CAPTURE" \
-    "$RESTORE_SNAPSHOT" "$RESTORE_CAPTURE"
+    "$RESTORE_SNAPSHOT" "$RESTORE_CAPTURE" "$BROWSER_ANIMATION_SPEC_LOG" \
+    "$BROWSER_SANDBOX_SPEC_LOG" "$BROWSER_LIFECYCLE_SPEC_LOG"
 
 sha256_file() {
     sha256sum "$1" | awk '{print $1}'
@@ -165,6 +169,9 @@ emit() {
         echo "linux_hosted_wm_live_window_engine2d_sha256=$engine_sha"
         echo "linux_hosted_wm_live_window_wrapper_sha256=$wrapper_sha"
         echo "linux_hosted_wm_live_window_native_artifact_sha256=$hosted_bin_sha"
+        echo "linux_hosted_wm_live_window_browser_animation_spec_status=$browser_animation_spec_status"
+        echo "linux_hosted_wm_live_window_browser_sandbox_spec_status=$browser_sandbox_spec_status"
+        echo "linux_hosted_wm_live_window_browser_lifecycle_spec_status=$browser_lifecycle_spec_status"
         echo "linux_hosted_wm_live_window_window_marker=$window_marker"
         echo "linux_hosted_wm_live_window_frame_marker=$frame_marker"
         echo "linux_hosted_wm_live_window_font_identity=$font_identity"
@@ -359,6 +366,9 @@ engine_sha="$(sha256_file src/os/compositor/compositor_engine2d.spl)"
 simple_bin_sha=""
 wrapper_sha="$(sha256_file "$0")"
 hosted_bin_sha=""
+browser_animation_spec_status=not-run
+browser_sandbox_spec_status=not-run
+browser_lifecycle_spec_status=not-run
 
 resolve_source_provenance || {
     emit fail source-provenance-unavailable
@@ -486,6 +496,35 @@ source_manifest_status=pass
 hosted_bin_sha="$(sha256_file "$HOSTED_BIN")"
 export HOSTED_WM_ARTIFACT="$HOSTED_BIN"
 export HOSTED_WM_ARTIFACT_SHA256="$hosted_bin_sha"
+
+run_browser_spec() {
+    spec_path=$1 filter=$2 log_path=$3 failure_reason=$4
+    SIMPLE_LIB=src timeout -k 5 "$TIMEOUT_SECS" "$SIMPLE_BIN" test \
+        "$spec_path" --mode=interpreter --filter "$filter" \
+        >"$log_path" 2>&1 || {
+            emit fail "$failure_reason"
+            exit 1
+        }
+}
+
+browser_animation_spec_status=fail
+run_browser_spec \
+    test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl \
+    "should animate JavaScript timers requestAnimationFrame and CSS on one clock" \
+    "$BROWSER_ANIMATION_SPEC_LOG" browser-animation-spec-failed
+browser_animation_spec_status=pass
+browser_sandbox_spec_status=fail
+run_browser_spec \
+    test/03_system/security/simple_web_browser_engine_security_spec.spl \
+    "should run the site renderer in the required platform sandbox" \
+    "$BROWSER_SANDBOX_SPEC_LOG" browser-sandbox-spec-failed
+browser_sandbox_spec_status=pass
+browser_lifecycle_spec_status=fail
+run_browser_spec \
+    test/05_perf/browser/simple_web_browser_engine_production_budget_spec.spl \
+    "should close the admitted renderer subprocess within a bounded interval" \
+    "$BROWSER_LIFECYCLE_SPEC_LOG" browser-lifecycle-spec-failed
+browser_lifecycle_spec_status=pass
 
 x_display=""
 for display_number in 91 92 93 94 95 96 97 98 99; do

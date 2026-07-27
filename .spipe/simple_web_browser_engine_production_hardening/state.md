@@ -996,3 +996,14 @@ implementation in progress / target evidence blocked
 - TLS certificate identity remains blocked by the absence of a fixture-CA and
   loopback seam in the production broker. GC/RSS/soak budgets remain explicit
   failures; unchanged-frame counters alone are not production budget evidence.
+- Hosted structured UI evidence now drives address entry, Enter navigation,
+  Back, and Forward through `HostedWebContentSession` and proves red/blue
+  HTML/CSS raster transitions. It is hosted-owner evidence, not an installed
+  production-binary claim.
+- Renderer lifecycle evidence now starts the admitted sandbox worker, renders
+  a real frame, closes it under a monotonic bound, and proves its PID is dead.
+  RSS, GC, soak, and Engine2D/font lifecycle budgets remain explicit failures.
+- The hosted live-window wrapper now runs the focused animation, sandbox, and
+  lifecycle specs after source-manifest/artifact admission and records their
+  statuses. No admissible current target runner/artifact pair exists, so these
+  scenarios were not executed in this session and no production PASS is claimed.

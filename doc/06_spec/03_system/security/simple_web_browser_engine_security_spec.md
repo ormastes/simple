@@ -8,6 +8,9 @@ The `should run the site renderer in the required platform sandbox` scenario is
 executable on a Linux host when `HOSTED_WM_ARTIFACT` and its admitted
 `HOSTED_WM_ARTIFACT_SHA256` name the current exact native artifact for
 `src/os/hosted/hosted_entry.spl`.
+The canonical live-window evidence wrapper runs this focused scenario after
+source-manifest and artifact admission; a standalone environment assertion is
+not artifact-admission evidence.
 
 It creates `HostedBrowserRendererProcess` with generation `41` and a `64x48`
 viewport, starts that artifact through the production sandbox launcher, waits

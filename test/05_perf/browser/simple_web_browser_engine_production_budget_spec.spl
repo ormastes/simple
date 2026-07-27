@@ -8,6 +8,15 @@ cancellation, RSS, GC/lifecycle, and 10,000-cycle stability without per-frame
 Engine2D/font recreation or unconditional readback.
 """
 use std.spec.*
+use std.env.variables.{env_get}
+use std.io_runtime.{file_hash_sha256}
+use std.nogc_sync_mut.io.process_ops.{process_is_piped_alive}
+use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+use os.hosted.hosted_browser_renderer_process.{HostedBrowserRendererProcess}
+
+val PRODUCTION_BUDGET_HTML = (
+    "<div style='width:16px;height:16px;background:#224466'>budget</div>"
+)
 
 # @inline
 fn _browser_budget_fixture():
@@ -20,6 +29,50 @@ fn _check_resource_reclaimed():
 # @inline
 fn _check_budget_row():
     step("Measure production browser budgets")
+
+# @inline
+fn _check_renderer_process_reclaimed():
+    step("Close the admitted renderer subprocess and verify its PID is dead")
+
+fn _require_bounded_renderer_lifecycle_evidence():
+    val artifact = env_get("HOSTED_WM_ARTIFACT")
+    val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+    if artifact == "":
+        fail("HOSTED_WM_ARTIFACT must name the hosted_entry native binary")
+    if expected_artifact_sha.len() != 64 or
+        file_hash_sha256(artifact) != expected_artifact_sha:
+        fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+
+    var renderer = HostedBrowserRendererProcess.create(61, 64, 48)
+    val started = renderer.start(artifact, 2000)
+    if not started.ok:
+        val _ = renderer.close()
+        fail("production renderer launch failed: {started.reason}")
+
+    val frame = renderer.render(
+        "init", PRODUCTION_BUDGET_HTML, 2000
+    )
+    if not frame.ok:
+        val _ = renderer.close()
+        fail("production renderer frame failed: {frame.reason}")
+
+    val renderer_pid = renderer.pid
+    val alive_before_close = process_is_piped_alive(renderer_pid)
+    val close_started_us = time_now_micros()
+    val closed = renderer.close()
+    val close_elapsed_us = time_now_micros() - close_started_us
+    if not closed:
+        val _ = renderer.close()
+        fail("production renderer close failed")
+
+    expect(renderer_pid).to_be_greater_than(0)
+    expect(alive_before_close).to_be(true)
+    expect(frame.composition.batches.len()).to_be_greater_than(0)
+    expect(close_elapsed_us).to_be_greater_than(-1)
+    expect(close_elapsed_us).to_be_less_than(10_000_000)
+    expect(renderer.pid).to_equal(0)
+    expect(renderer.state).to_equal("closed")
+    expect(process_is_piped_alive(renderer_pid)).to_be(false)
 
 fn _require_production_budget_evidence():
     fail("NFR-WEB-BROWSER-001..017: production budget evidence not implemented")
@@ -59,6 +112,15 @@ describe "Production Simple browser performance and GC budgets":
         step("Measure GC pauses callback queues and post-cancel activity")
         _check_resource_reclaimed()
         _require_production_budget_evidence()
+
+    # @manual: show
+    # @capture(exec)
+    # @capture(log)
+    # @capture(binary)
+    it "should close the admitted renderer subprocess within a bounded interval":
+        _browser_budget_fixture()
+        _check_renderer_process_reclaimed()
+        _require_bounded_renderer_lifecycle_evidence()
 
     # @manual: folded
     it "should create Engine2D device and font state once and release it once":

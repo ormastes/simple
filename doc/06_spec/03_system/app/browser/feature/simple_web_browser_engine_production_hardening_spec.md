@@ -8,7 +8,8 @@ The animation scenario requires `HOSTED_WM_ARTIFACT` and its admitted
 `HOSTED_WM_ARTIFACT_SHA256` from the hosted live-window evidence wrapper. It
 hashes the exact native artifact built from `src/os/hosted/hosted_entry.spl`
 before launch and never falls back to `bin/simple`, source execution, or
-another renderer.
+another renderer. The canonical evidence wrapper runs this focused scenario;
+a standalone environment assertion is not artifact-admission evidence.
 
 1. Start `HostedBrowserRendererProcess` and require its sandboxed worker-ready
    reply within 2,000 ms.
@@ -16,7 +17,8 @@ another renderer.
    JavaScript `requestAnimationFrame` callback that changes red to blue.
 3. Render both returned `DrawIrComposition` frames through one persistent
    software `Engine2dCompositorBackend`.
-4. Advance to 16 ms and poll at most 250 times with a 1 ms interval.
+4. Require the initial frame to schedule 16 ms, advance to that deadline, and
+   poll at most 250 times with a 1 ms interval.
 5. Require nonempty Draw IR, red initial pixels, blue advanced pixels,
    different 64x48 buffers, rendered commands, and no next animation deadline.
 
@@ -24,3 +26,17 @@ Missing artifact, launch, frame, poll, or cleanup evidence fails the scenario.
 This is subprocess integration evidence; native artifact admission and
 installed-production proof remain separate release checks. Other scenarios in
 the executable spec retain their explicit fail-closed placeholders.
+
+## Hosted structured navigation evidence
+
+The navigation scenario uses the production `HostedWebContentSession` owner
+with two deterministic in-process documents. It renders a red start page,
+focuses and edits the address through hosted chrome dispatch, submits with
+Enter, and requires the blue target page to render. It then drives Back and
+Forward through the same structured browser-session controls and requires the
+corresponding red and blue pages after each transition.
+
+This proves hosted HTML/CSS rendering and address, Back, and Forward routing
+through `BrowserSession` structured UI access. It does not claim real HTTP,
+the installed browser executable, Stop/Reload/Home, bookmarks, or link-click
+coverage. Those scenarios retain explicit fail-closed placeholders.
