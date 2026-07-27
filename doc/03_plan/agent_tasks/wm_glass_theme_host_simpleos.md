@@ -80,7 +80,7 @@ overlapping dirty work and remains read-only for this lane.
 | Aggregate SSpec | FAIL-FAST BY DESIGN | `require_wm_glass_theme_evidence()` remains a real failure until host and required QEMU rows produce current-source evidence |
 | Simple GUI theme handoff | SOURCE FIXED; product proof pending | resolved snapshot now reaches canonical widget Draw IR; 2 bootstrap-driver scenarios pass diagnostically |
 | Simple Web theme authority | SOURCE FIXED; REVIEW ACCEPTED; RUNTIME UNVERIFIED | canonical package output keeps the complete structural/event adapter while Aetheric package CSS owns every paint/material token; live parser/Draw-IR/pixel/event proof still requires an admitted runtime |
-| WM glass material projection | REVIEW REJECTED; fail-closed | CPU parent sampling/opacity is prepared, but inactive Metal uses a non-GPU-only offscreen, material identity aggregation is last-wins, and one capability assertion disagrees with production; see the dated blocker record |
+| WM glass material projection | SOURCE FIXED; REVIEW ACCEPTED; RUNTIME UNVERIFIED | CPU preserves parent sampling/500/930 opacity; opaque Metal uses session-owned identity and exact per-request receipts; sub-opaque Metal fails before dispatch until a GPU-only delta path exists |
 | Runtime theme switching | ABI BLOCKED; fail-fast system contract | numeric subscriber ports have no `IpcOutputPort`/send adapter, message schema, source identity, or delivery-failure policy |
 
 ### Historical parallel ownership — completed

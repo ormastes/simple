@@ -884,3 +884,15 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   Aetheric package. Focused static/token/producer contracts and independent
   highest-capability review passed. No admitted self-hosted runtime exists, so
   live Simple Web parsing, Draw IR, pixels, events, and timing remain open.
+
+- continuation-2026-07-27-metal-per-material-repair-accepted: **SOURCE FIXED /
+  REVIEW ACCEPTED / RUNTIME UNVERIFIED.** A fresh origin-based lane made the
+  retained Metal session device the single identity for material execution and
+  device readback, then validated one ordered receipt per independently derived
+  Draw IR material request against the presented framebuffer. Behavioral
+  contracts reject missing, duplicate, extra, reordered, unfulfilled, mixed,
+  or tuple-mismatched receipts. CPU parent-seeded delta preserves 500/930
+  opacity. Sub-opaque selected Metal now fails before dispatch rather than
+  creating a mirror-backed offscreen or claiming a device frame. Independent
+  highest-capability review accepted the source; admitted macOS opaque-Metal
+  readback/capture evidence remains open.
