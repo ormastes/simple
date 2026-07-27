@@ -343,3 +343,25 @@ the aggregate-return chain end-to-end, using a live-receiver result owner
 (scalar metrics plus owned pixel field) if source pixels are valid. A source
 FAIL selects the inner rasterizer or its `SfntGlyfBitmap` Option return.
 Vulkan live evidence remains blocked.
+
+## 2026-07-27 bounded producer cycles 13–15
+
+The attempted end-to-end live-owner path removes the four known pixel-bearing
+return hops from selected-font production. Cycle 13 nevertheless exits at the
+new first receipt, `fail-glyph-source-local-pixels`. Cycle 14 replaces the
+coverage loop's rebound pushes with exact-size allocation and indexed writes;
+the result is identical. Both builds compile 184 modules with zero failures.
+
+Cycle 15 returns a scalar phase code from the SFNT receiver and transports it
+through typed `FontRasterizer`, `FontRenderer`, and `Engine2D` receipts. The
+probe prints `fail-glyph-source-status-` with no scalar interpolation and exits
+43. This means the receiver/status transport is not authoritative on this
+compiler; it does not prove the raster loop itself failed. No bootstrap was
+run, and the three-cycle cap is exhausted.
+
+The next design must keep ownership in one module and cross boundaries only
+through a raw scalar handle/address plus scalar accessors. A module-local raw
+descriptor can hold width, height, advance, bearings, byte count, and owned
+coverage. The SFFI owner should copy the bytes once, release the descriptor,
+and construct `CachedGlyph` locally. Do not wrap the descriptor in Option,
+tuple, or an aggregate receiver.

@@ -777,6 +777,29 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   remove the aggregate-return chain end-to-end, preferably with a
   live-receiver raster result owner holding scalar metrics and owned pixels.
 
+### 2026-07-27 Bungee producer cycles 13–15
+
+- A selected-font experiment removed `Option<SfntGlyfBitmap>`, both pixel
+  tuple returns, and `GlyphBitmap?` from the active path by staging through
+  mutable SFNT and `FontRasterizer` owners. Source-local/source-stored boolean
+  receipts precede the prior bitmap receipts.
+- Cycles 13 and 14 each compiled 184 modules with zero failures and exited
+  exactly at `fail-glyph-source-local-pixels`. Cycle 14 used an exact-size
+  preallocated coverage buffer with indexed writes, so repeated array growth
+  is not the direct cause.
+- Cycle 15 added a scalar phase status to distinguish pre-raster failure from
+  local pixel mismatch. It compiled 184 modules with zero failures, but the
+  status reached the probe as an empty value
+  (`fail-glyph-source-status-`, exit 43). This is direct evidence that the
+  cross-module result receiver/scalar-field chain is itself unreliable on the
+  retained compiler.
+- The three-cycle cap is exhausted and no bootstrap was run. Do not push or
+  treat the current live-owner experiment as a fix until high review accepts
+  a safe subset. The next production design should use a module-local raw
+  scalar-owned buffer or scalar handle/descriptor, copy pixels once at the
+  SFFI boundary, and avoid aggregate receivers, aggregate returns, and
+  receiver-field status transport across modules.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
