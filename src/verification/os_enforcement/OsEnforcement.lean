@@ -1,3 +1,5 @@
 import OsEnforcement.ContainerIsolation
 import OsEnforcement.DeviceGrant
 import OsEnforcement.ProfileAttenuation
+import OsEnforcement.ServiceRestart
+import OsEnforcement.VfsRouting
