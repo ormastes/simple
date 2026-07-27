@@ -800,6 +800,25 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   SFFI boundary, and avoid aggregate receivers, aggregate returns, and
   receiver-field status transport across modules.
 
+### 2026-07-27 Bungee producer cycles 16–18
+
+- Cycle 16 added a fixed-size imported unit-return sentinel over preallocated
+  caller-owned `[i64]` and `[u8]` arrays. It compiled 184 modules with zero
+  failures, passed every exact sentinel check, and continued to the known
+  `fail-glyph-bitmap-pixels`. Indexed mutation across the common-to-SFFI
+  boundary is therefore proven on this artifact.
+- Cycle 17 applied the same shape to two selected-glyph calls: measure writes
+  fixed metadata slots and render fills an exact-size caller pixel plane.
+  It compiled 184 modules with zero failures but stopped at
+  `fail-glyph-bitmap-return`.
+- Cycle 18 added boolean-only measure/render completion receipts, compiled
+  184 modules with zero failures, and exits exactly at
+  `fail-glyph-void-measure`; rendering is never reached.
+- The three-cycle cap is exhausted and no bootstrap was run. High review must
+  remove the unproven production integration before push. The next probe must
+  write monotonic fixed metadata stamps after input validation, font parsing,
+  cmap mapping, table validation, outline parsing, metrics, and bounds.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |

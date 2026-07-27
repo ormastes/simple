@@ -365,3 +365,23 @@ descriptor can hold width, height, advance, bearings, byte count, and owned
 coverage. The SFFI owner should copy the bytes once, release the descriptor,
 and construct `CachedGlyph` locally. Do not wrap the descriptor in Option,
 tuple, or an aggregate receiver.
+
+## 2026-07-27 bounded producer cycles 16–18
+
+Cycle 16 provides authoritative AOT evidence that an imported omitted-return
+free function can mutate fixed indexed elements in caller-owned `[i64]` and
+`[u8]` arrays across the common-to-SFFI boundary. Exact metadata and byte
+sentinels survive; execution then reaches the pre-existing
+`fail-glyph-bitmap-pixels`.
+
+Cycles 17–18 apply that shape to selected-glyph measurement and rendering.
+Both compile 184 modules with zero failures. Cycle 17 fails before publishing
+a bitmap; Cycle 18's boolean-only gates localize this to
+`fail-glyph-void-measure`. The render call is never reached, so this does not
+invalidate caller-owned pixel-plane mutation.
+
+The next bounded diagnostic belongs inside
+`sfnt_glyf_measure_codepoint_into`. It must stamp fixed metadata slots
+monotonically after input validation, `parse_offset_table`, cmap mapping, table
+validation, outline parsing, horizontal metrics, and bounds/dimensions, with
+the completion cookie written last. No bootstrap was run.
