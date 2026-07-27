@@ -113,6 +113,19 @@ ownership per lane.
   multi-session body; several host-blocked (physical boards, multi-week ports).
   Tracked in production_status.sdn with owners.
 
+## Tranche T2 + T3 results (2026-07-27)
+- T2-A container isolation (kernel MDSOC-only): 6/0. ContainerNamespaceView,
+  rootless deny-by-default; component-prefix containment. Commit 9d45f8d.
+- T2-B driver DeviceGrant (Phase 3): 6/0. Revocable rights bitmask + 10-step
+  crash-revocation ordering; no-IOMMU-no-DMA proven. Commit 9d45f8d.
+- T2-C flock honest (Phase 4): 7/0. Real advisory lock table, EWOULDBLOCK on
+  conflict. gcc -fsyntax-only clean. Commit 9d45f8d.
+- T3-CTR container manager (USER DIRECTIVE: Podman design on MDSOC+): 7/0.
+  MDSOC+ capsule + ECS ContainerWorld; sys_create/pod_wire/start/stop;
+  enforcement delegated to kernel primitive. Commit e47089d. Design docs:
+  doc/04_architecture/os/container/podman_mdsoc_container_arch.md(+tldr).
+  Stubbed next: sys_oci_import (Podman OCI-at-edge), sys_monitor, sys_gc.
+
 ## Cross-lane hand-offs for next tranche
 - P2 boot seal must be armed by the boot owner (not a P2 path).
 - P2's 3 remaining ambient sites live in P1's syscall_process.spl.
