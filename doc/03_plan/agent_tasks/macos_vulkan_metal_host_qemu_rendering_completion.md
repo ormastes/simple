@@ -1344,6 +1344,33 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   run the third and final Vulkan 2D live cycle. If it does not pass, retain the
   exact receipt and stop this session rather than starting a fourth cycle.
 
+### 2026-07-27 final Vulkan 2D cycle checkpoint
+
+- The loader-alias repair was reviewed, rebased over current `origin/main`, and
+  pushed as `a15386a9b3`. The exact pushed revision completed the incremental
+  `--pure-simple` refresh without Cargo/full bootstrap: Stage 2 SHA-256 is
+  `7c1741d1436b69ece2f4187b5c3ca2402bfaf794e00cb829b95b7581d1a8e1b4`
+  and Stage 3 SHA-256 is
+  `eaabd9743415e12d7de32d18a18eb2d4e415833792b96abfd7e37f03c6ad26a5`.
+  Stage 3 sanity/provenance and trusted-build manifest admission passed.
+- The third and final live cycle verified the Apple M4 MoltenVK device/driver
+  and advanced beyond ProcessingIR to Stage 5, then stopped with
+  `runtime-font-validation-failed`. No fourth live attempt is permitted in this
+  session.
+- Read-only diagnosis found the pinned Bungee asset is tracked at
+  `assets/fonts/google-fonts/ofl/bungee/Bungee-Regular.ttf` with the expected
+  118,996-byte size and SHA-256
+  `c4f5361ce120af3e6b9156d0bf379fa19cda2ea0cd18ac01fd99596c6bf66e3f`,
+  but that path was not materialized in the isolated sparse worktree used by
+  the live run. The harness sets `SIMPLE_ASSET_ROOT` to that sparse root, so
+  `engine.load_font` receives a missing physical path and the Stage 5 guard
+  fails before rendering/capture/events.
+- Next session, materialize the tracked Bungee asset directory in the isolated
+  authority (or add an equivalent fail-fast prepared-host asset preflight),
+  verify the exact file hash there, rebuild only if source changes, and start a
+  fresh bounded Vulkan 2D live cycle. Do not claim vector-font/300-DPI or later
+  web/GUI/WM lanes complete from this failed receipt.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
