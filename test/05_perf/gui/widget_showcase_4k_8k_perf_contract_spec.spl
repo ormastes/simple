@@ -36,6 +36,9 @@ SIMPLE_LIB=src bin/simple test test/05_perf/gui/widget_showcase_4k_8k_perf_contr
 - Real retained perf runs fail before native-build when the Simple binary is a
   repo launcher or other non-release source; plan-only remains available for
   headless alias checks.
+- Real runs require a hash-pinned, resolution- and environment-bucket-matched
+  historical baseline; median/p95 may rise at most 10% and RSS at most 5%.
+- The aggregate independently re-hashes and recomputes baseline comparisons.
 
 ## Evidence Inputs
 
@@ -93,6 +96,10 @@ Reviewers should inspect these rows for both `gui_showcase_4k_200fps_*` and
 - `alias_raw_rt_count`
 - `native_build_mode`
 - `fallback_state`
+- `baseline_path`, `baseline_sha256`, `baseline_source_revision`, and
+  `baseline_bucket`
+- baseline/current p50, p95, FPS, RSS, integer limits, basis-point deltas,
+  `baseline_status`, and `baseline_reason`
 
 ## Failure Semantics
 
@@ -103,6 +110,10 @@ Reviewers should inspect these rows for both `gui_showcase_4k_200fps_*` and
   calls and must be fixed in Simple code instead.
 - `native-bin-artifact-invalid`: native build did not produce a regular
   executable ELF/Mach-O/PE artifact.
+- `missing-baseline-path`, `stale-baseline-sha256-mismatch`, and
+  `baseline-bucket-mismatch`: immutable baseline admission failed.
+- `median-regression-exceeded`, `p95-regression-exceeded`, and
+  `rss-regression-exceeded`: selected NFR-006 relative limits failed.
 
 ## Completion Boundary
 
@@ -185,6 +196,93 @@ describe "GUI widget showcase 4K and 8K retained perf contract":
         expect(script).to_contain("[ ! -f \"$1\" ] || [ ! -s \"$1\" ]")
         expect(script).to_contain("[ ! -f \"$1\" ] || [ ! -x \"$1\" ]")
         expect(script).to_contain("validate_native_binary || exit 1")
+
+        step("Assert immutable historical-baseline evidence and fixed NFR-006 limits")
+        expect(script).to_contain("GUI_SHOWCASE_PERF_BASELINE_ENV")
+        expect(script).to_contain("GUI_SHOWCASE_PERF_BASELINE_SHA256")
+        expect(script).to_contain("GUI_SHOWCASE_PERF_EXECUTABLE_SHA256")
+        expect(script).to_contain("canonical_bucket()")
+        expect(script).to_contain("PERF_TIMING_PROTOCOL=retained-static-present-monotonic-ns-v1")
+        expect(script).to_contain("revalidate_perf_baseline()")
+        expect(script).to_contain("baseline-artifact-changed-before-pass")
+        expect(script).to_contain("[ -L \"$1\" ]")
+        expect(script).to_contain("[ \"$link_count\" -gt 1 ]")
+        expect(script).to_contain("baseline_capture_timestamp")
+        expect(script).to_contain("baseline_artifact_sha256")
+        expect(script).to_contain("BASELINE_FRAME_DELTA_PERCENT=10")
+        expect(script).to_contain("BASELINE_RSS_DELTA_PERCENT=5")
+        expect(script).to_contain("stale-baseline-sha256-mismatch")
+        expect(script).to_contain("baseline-bucket-mismatch")
+        expect(script).to_contain("p95-regression-exceeded")
+        expect(script).to_contain("rss-regression-exceeded")
+        expect(script).to_contain("_baseline_source_revision=")
+        expect(script).to_contain("_baseline_frame_p95_delta_bp=")
+
+    it "fails closed for missing, mismatched, and regressed historical baselines":
+        step("Create one immutable 4K baseline fixture and validate an in-budget comparison")
+        val root = "build/test-widget-showcase-historical-baseline"
+        val create = "rm -rf " + root + " && mkdir -p " + root + " && cp test/fixtures/gui/widget_showcase_perf_baseline_4k.env " + root + "/baseline.env && sha256sum " + root + "/baseline.env | awk '{print $1}'"
+        val (sha_out, _sha_err, sha_code) = process_run("/bin/sh", ["-c", create])
+        expect(sha_code).to_equal(0)
+        val sha = sha_out.trim()
+        val identity = " GUI_SHOWCASE_PERF_OS=linux GUI_SHOWCASE_PERF_ARCH=x86_64 GUI_SHOWCASE_PERF_CPU=test-cpu GUI_SHOWCASE_PERF_GPU=test-gpu GUI_SHOWCASE_PERF_DRIVER=test-driver GUI_SHOWCASE_PERF_COMPILER=simple-test GUI_SHOWCASE_PERF_RUNTIME=software-retained GUI_SHOWCASE_PERF_EXECUTABLE_SHA256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val base_env = "PERF_BASELINE_VALIDATE_ONLY=1 RESOLUTION=4k SIMPLE_BIN=release/x86_64-unknown-linux-gnu/simple SIMPLE_BIN_SOURCE=self-hosted-release BUILD_DIR=" + root + "/out GUI_SHOWCASE_PERF_BASELINE_ENV=" + root + "/baseline.env GUI_SHOWCASE_PERF_BASELINE_SHA256=" + sha + identity + " CURRENT_FPS_X1000=220000"
+        val (pass_out, _pass_err, pass_code) = process_run("/bin/sh", ["-c", base_env + " CURRENT_FRAME_P50_NS=2700000 CURRENT_FRAME_P95_NS=3200000 CURRENT_MAX_RSS_KB=104000 sh scripts/check/check-widget-showcase-4k-200fps.shs"])
+        expect(pass_code).to_equal(0)
+        expect(pass_out).to_contain("gui_showcase_4k_200fps_baseline_status=pass")
+        expect(pass_out).to_contain("gui_showcase_4k_200fps_baseline_frame_p95_limit_ns=3300000")
+
+        step("Reject the 3ms to 4.8ms false-green even though 4.8ms remains below the absolute 5ms budget")
+        val (p95_out, _p95_err, p95_code) = process_run("/bin/sh", ["-c", base_env + " BUILD_DIR=" + root + "/p95 CURRENT_FRAME_P50_NS=2700000 CURRENT_FRAME_P95_NS=4800000 CURRENT_MAX_RSS_KB=104000 sh scripts/check/check-widget-showcase-4k-200fps.shs || true"])
+        expect(p95_code).to_equal(0)
+        expect(p95_out).to_contain("gui_showcase_4k_200fps_status=fail")
+        expect(p95_out).to_contain("gui_showcase_4k_200fps_reason=p95-regression-exceeded")
+
+        step("Reject median or RSS beyond tolerance and a mismatched canonical producer identity")
+        val (median_out, _median_err, median_code) = process_run("/bin/sh", ["-c", base_env + " BUILD_DIR=" + root + "/median CURRENT_FRAME_P50_NS=2800000 CURRENT_FRAME_P95_NS=3200000 CURRENT_MAX_RSS_KB=104000 sh scripts/check/check-widget-showcase-4k-200fps.shs || true"])
+        expect(median_code).to_equal(0)
+        expect(median_out).to_contain("gui_showcase_4k_200fps_reason=median-regression-exceeded")
+        val (rss_out, _rss_err, rss_code) = process_run("/bin/sh", ["-c", base_env + " BUILD_DIR=" + root + "/rss CURRENT_FRAME_P50_NS=2700000 CURRENT_FRAME_P95_NS=3200000 CURRENT_MAX_RSS_KB=106000 sh scripts/check/check-widget-showcase-4k-200fps.shs || true"])
+        expect(rss_code).to_equal(0)
+        expect(rss_out).to_contain("gui_showcase_4k_200fps_reason=rss-regression-exceeded")
+        val (bucket_out, _bucket_err, bucket_code) = process_run("/bin/sh", ["-c", base_env + " BUILD_DIR=" + root + "/bucket GUI_SHOWCASE_PERF_GPU=other-gpu CURRENT_FRAME_P50_NS=2700000 CURRENT_FRAME_P95_NS=3200000 CURRENT_MAX_RSS_KB=104000 sh scripts/check/check-widget-showcase-4k-200fps.shs || true"])
+        expect(bucket_code).to_equal(0)
+        expect(bucket_out).to_contain("gui_showcase_4k_200fps_reason=baseline-bucket-mismatch")
+
+        step("Reject missing baseline input before any benchmark is launched")
+        val (missing_out, _missing_err, missing_code) = process_run("/bin/sh", ["-c", "PERF_BASELINE_VALIDATE_ONLY=1 RESOLUTION=4k SIMPLE_BIN=release/x86_64-unknown-linux-gnu/simple SIMPLE_BIN_SOURCE=self-hosted-release BUILD_DIR=" + root + "/missing" + identity + " CURRENT_FRAME_P50_NS=2700000 CURRENT_FRAME_P95_NS=3200000 CURRENT_FPS_X1000=220000 CURRENT_MAX_RSS_KB=104000 sh scripts/check/check-widget-showcase-4k-200fps.shs || true"])
+        expect(missing_code).to_equal(0)
+        expect(missing_out).to_contain("gui_showcase_4k_200fps_reason=missing-baseline-path")
+
+        step("Reject stale SHA, duplicate schema, and wrong resolution; admit the matching 8K fixture")
+        val (stale_out, _stale_err, stale_code) = process_run("/bin/sh", ["-c", base_env + " BUILD_DIR=" + root + "/stale GUI_SHOWCASE_PERF_BASELINE_SHA256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc CURRENT_FRAME_P50_NS=2700000 CURRENT_FRAME_P95_NS=3200000 CURRENT_MAX_RSS_KB=104000 sh scripts/check/check-widget-showcase-4k-200fps.shs || true"])
+        expect(stale_code).to_equal(0)
+        expect(stale_out).to_contain("gui_showcase_4k_200fps_reason=stale-baseline-sha256-mismatch")
+        val duplicate = "test/fixtures/gui/widget_showcase_perf_baseline_duplicate_4k.env"
+        val (dup_sha_out, _dup_sha_err, dup_sha_code) = process_run("/bin/sh", ["-c", "sha256sum " + duplicate + " | awk '{print $1}'"])
+        expect(dup_sha_code).to_equal(0)
+        val (dup_out, _dup_err, dup_code) = process_run("/bin/sh", ["-c", base_env + " BUILD_DIR=" + root + "/duplicate GUI_SHOWCASE_PERF_BASELINE_ENV=" + duplicate + " GUI_SHOWCASE_PERF_BASELINE_SHA256=" + dup_sha_out.trim() + " CURRENT_FRAME_P50_NS=2700000 CURRENT_FRAME_P95_NS=3200000 CURRENT_MAX_RSS_KB=104000 sh scripts/check/check-widget-showcase-4k-200fps.shs || true"])
+        expect(dup_code).to_equal(0)
+        expect(dup_out).to_contain("gui_showcase_4k_200fps_reason=invalid-baseline-schema")
+        val (resolution_out, _resolution_err, resolution_code) = process_run("/bin/sh", ["-c", base_env + " RESOLUTION=8k BUILD_DIR=" + root + "/resolution CURRENT_FRAME_P50_NS=5200000 CURRENT_FRAME_P95_NS=6200000 CURRENT_MAX_RSS_KB=410000 sh scripts/check/check-widget-showcase-4k-200fps.shs || true"])
+        expect(resolution_code).to_equal(0)
+        expect(resolution_out).to_contain("gui_showcase_8k_perf_reason=baseline-resolution-mismatch")
+        val (sha8_out, _sha8_err, sha8_code) = process_run("/bin/sh", ["-c", "sha256sum test/fixtures/gui/widget_showcase_perf_baseline_8k.env | awk '{print $1}'"])
+        expect(sha8_code).to_equal(0)
+        val identity8 = " GUI_SHOWCASE_PERF_OS=linux GUI_SHOWCASE_PERF_ARCH=x86_64 GUI_SHOWCASE_PERF_CPU=test-cpu GUI_SHOWCASE_PERF_GPU=test-gpu GUI_SHOWCASE_PERF_DRIVER=test-driver GUI_SHOWCASE_PERF_COMPILER=simple-test GUI_SHOWCASE_PERF_RUNTIME=software-retained GUI_SHOWCASE_PERF_EXECUTABLE_SHA256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        val validate8 = "PERF_BASELINE_VALIDATE_ONLY=1 RESOLUTION=8k SIMPLE_BIN=release/x86_64-unknown-linux-gnu/simple SIMPLE_BIN_SOURCE=self-hosted-release BUILD_DIR=" + root + "/8k GUI_SHOWCASE_PERF_BASELINE_ENV=test/fixtures/gui/widget_showcase_perf_baseline_8k.env GUI_SHOWCASE_PERF_BASELINE_SHA256=" + sha8_out.trim() + identity8 + " CURRENT_FRAME_P50_NS=5200000 CURRENT_FRAME_P95_NS=6200000 CURRENT_FPS_X1000=202000 CURRENT_MAX_RSS_KB=410000 sh scripts/check/check-widget-showcase-4k-200fps.shs"
+        val (eight_out, _eight_err, eight_code) = process_run("/bin/sh", ["-c", validate8])
+        expect(eight_code).to_equal(0)
+        expect(eight_out).to_contain("gui_showcase_8k_perf_baseline_status=pass")
+
+        step("Reject forged producer PASS by independently recomputing the aggregate baseline comparison")
+        val forged = "GUI_SHOWCASE_4K_PERF_ENV=test/fixtures/gui/widget_showcase_perf_forged_pass_4k.env GUI_RENDERDOC_AGGREGATE_DISABLE_DEFAULT_STATIC_CACHE=1 BUILD_DIR=" + root + "/aggregate REPORT_PATH=" + root + "/aggregate.md sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs || true"
+        val (_forged_out, _forged_err, forged_code) = process_run("/bin/sh", ["-c", forged])
+        expect(forged_code).to_equal(0)
+        val aggregate = file_read(root + "/aggregate/evidence.env")
+        expect(aggregate).to_contain("gui_showcase_4k_200fps_status=fail")
+        expect(aggregate).to_contain("gui_showcase_4k_200fps_reason=p95-regression-exceeded")
+        expect(aggregate).to_contain("gui_showcase_4k_200fps_baseline_aggregate_status=fail")
 
     it "proves the generated retained alias has no raw runtime calls in plan-only mode":
         step("Run the checker in 4K plan-only mode without native build or GUI execution")

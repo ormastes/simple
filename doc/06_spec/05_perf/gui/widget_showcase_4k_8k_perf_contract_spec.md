@@ -27,7 +27,7 @@ widget_showcase_4k_8k_perf_contract_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -82,6 +82,10 @@ SIMPLE_LIB=src bin/simple test test/05_perf/gui/widget_showcase_4k_8k_perf_contr
   calls enter the alias source.
 - Native-build output must be a regular executable native binary before the
   checker runs it.
+- Real rows require an explicit SHA-pinned v2 baseline with matching resolution,
+  timestamped artifact SHA, and a bucket derived from exact producer-owned
+  machine/runtime/executable/protocol fields. Median/p95 may regress by at most 10% and RSS by at
+  most 5%; the aggregate recomputes these limits independently.
 
 ## Scenarios
 
@@ -286,12 +290,20 @@ expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin_status=forbidden
 
 </details>
 
+#### fails closed for missing, mismatched, and regressed historical baselines
+
+- Admit a hash-pinned 4K fixture within the selected NFR-006 limits.
+- Reject the 3 ms to 4.8 ms p95 false-green despite the 5 ms absolute budget.
+- Reject median/RSS regressions, stale or duplicate baseline input, and
+  canonical identity or resolution mismatch; admit a matching 8K fixture.
+- Require the aggregate to reject a forged producer PASS independently.
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

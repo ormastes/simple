@@ -244,6 +244,122 @@ def evidence_native_bin_format_status(value: str, explicit_status: str, fmt: str
         return explicit_status
     return native_bin_format_status_from_format(fmt)
 
+def unique_env_value(key: str, text: str):
+    values = [line[len(key) + 1:] for line in text.splitlines() if line.startswith(key + "=")]
+    return values[0] if len(values) == 1 else ""
+
+def showcase_baseline_comparison(prefix: str, evidence: str, resolution: str,
+                                 current_p50: str, current_p95: str,
+                                 current_fps: str, current_rss: str):
+    identity_names = ["os", "arch", "cpu", "gpu", "driver", "compiler", "runtime",
+                      "executable_sha256", "warmup_frames", "sample_frames", "timing_protocol"]
+    result = {
+        "status": "fail", "reason": "missing-baseline-path", "path": "",
+        "sha256": "", "revision": "", "bucket": "", "current_bucket": "",
+        "capture_timestamp": "", "artifact_path": "", "artifact_sha256": "",
+        "p50": "", "p95": "", "fps": "", "rss": "",
+        "p50_limit": "", "p95_limit": "", "rss_limit": "",
+        "p50_delta_bp": "", "p95_delta_bp": "", "fps_delta_bp": "", "rss_delta_bp": "",
+    }
+    path_text = value_of(prefix + "_baseline_path", evidence)
+    expected_sha = value_of(prefix + "_baseline_expected_sha256", evidence)
+    current_bucket = value_of(prefix + "_current_bucket", evidence)
+    current_identity = {name: value_of(prefix + "_current_" + name, evidence) for name in identity_names}
+    result.update({"current_" + name: value for name, value in current_identity.items()})
+    result["path"] = path_text
+    result["current_bucket"] = current_bucket
+    if regular_file_status(path_text) != "pass":
+        result["reason"] = "baseline-not-regular-immutable-file"
+        return result
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha or ""):
+        result["reason"] = "missing-or-malformed-baseline-sha256"
+        return result
+    path = path_from_text(path_text)
+    try:
+        raw = path.read_bytes()
+        baseline_text = raw.decode("utf-8")
+    except Exception:
+        result["reason"] = "unreadable-baseline"
+        return result
+    actual_sha = hashlib.sha256(raw).hexdigest()
+    result["sha256"] = actual_sha
+    if actual_sha != expected_sha or value_of(prefix + "_baseline_sha256", evidence) != actual_sha:
+        result["reason"] = "stale-baseline-sha256-mismatch"
+        return result
+    schema = unique_env_value("baseline_schema", baseline_text)
+    baseline_resolution = unique_env_value("baseline_resolution", baseline_text)
+    revision = unique_env_value("baseline_source_revision", baseline_text)
+    capture_timestamp = unique_env_value("baseline_capture_timestamp", baseline_text)
+    artifact_path_text = unique_env_value("baseline_artifact_path", baseline_text)
+    artifact_sha = unique_env_value("baseline_artifact_sha256", baseline_text)
+    bucket = unique_env_value("baseline_bucket", baseline_text)
+    baseline_identity = {name: unique_env_value("baseline_" + name, baseline_text) for name in identity_names}
+    result.update({"baseline_" + name: value for name, value in baseline_identity.items()})
+    values = {
+        "p50": unique_env_value("baseline_frame_p50_ns", baseline_text),
+        "p95": unique_env_value("baseline_frame_p95_ns", baseline_text),
+        "fps": unique_env_value("baseline_fps_x1000", baseline_text),
+        "rss": unique_env_value("baseline_max_rss_kb", baseline_text),
+    }
+    result.update(values)
+    result["revision"] = revision
+    result["capture_timestamp"] = capture_timestamp
+    result["artifact_path"] = artifact_path_text
+    result["artifact_sha256"] = artifact_sha
+    result["bucket"] = bucket
+    if schema != "widget-showcase-perf-v2": result["reason"] = "invalid-baseline-schema"; return result
+    if baseline_resolution != resolution: result["reason"] = "baseline-resolution-mismatch"; return result
+    if not revision: result["reason"] = "missing-baseline-source-revision"; return result
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", capture_timestamp or ""):
+        result["reason"] = "malformed-baseline-capture-timestamp"; return result
+    if regular_file_status(artifact_path_text) != "pass" or not re.fullmatch(r"[0-9a-f]{64}", artifact_sha or ""):
+        result["reason"] = "invalid-baseline-artifact"; return result
+    try:
+        artifact_actual_sha = hashlib.sha256(path_from_text(artifact_path_text).read_bytes()).hexdigest()
+    except Exception:
+        result["reason"] = "invalid-baseline-artifact"; return result
+    if artifact_actual_sha != artifact_sha or value_of(prefix + "_baseline_artifact_current_sha256", evidence) != artifact_sha:
+        result["reason"] = "stale-baseline-artifact-sha256-mismatch"; return result
+    if any(not value or re.search(r"[|=\x00-\x1f\x7f]", value) for name, value in current_identity.items()
+           if name not in ("executable_sha256", "warmup_frames", "sample_frames")):
+        result["reason"] = "missing-or-malformed-current-machine-field"; return result
+    if not re.fullmatch(r"[0-9a-f]{64}", current_identity["executable_sha256"] or ""):
+        result["reason"] = "missing-or-malformed-executable-sha256"; return result
+    ordered = ["os", "arch", "cpu", "gpu", "driver", "compiler", "runtime"]
+    def canonical(identity):
+        return "|".join([f"{name}={identity[name]}" for name in ordered] + [
+            "exe_sha256=" + identity["executable_sha256"],
+            "warmup=" + identity["warmup_frames"], "samples=" + identity["sample_frames"],
+            "timing=" + identity["timing_protocol"],
+        ])
+    if baseline_identity["warmup_frames"] != "12" or current_identity["warmup_frames"] != "12" \
+            or baseline_identity["sample_frames"] != current_identity["sample_frames"] \
+            or baseline_identity["timing_protocol"] != "retained-static-present-monotonic-ns-v1" \
+            or current_identity["timing_protocol"] != "retained-static-present-monotonic-ns-v1":
+        result["reason"] = "baseline-protocol-mismatch"; return result
+    if bucket != canonical(baseline_identity): result["reason"] = "malformed-baseline-bucket"; return result
+    if current_bucket != canonical(current_identity) or current_bucket != bucket:
+        result["reason"] = "baseline-bucket-mismatch"; return result
+    if positive_numeric_fields_status(list(values.values()) + [current_p50, current_p95, current_fps, current_rss]) != "pass":
+        result["reason"] = "malformed-baseline-metrics"
+        return result
+    base_p50, base_p95, base_fps, base_rss = map(to_int, [values["p50"], values["p95"], values["fps"], values["rss"]])
+    cur_p50, cur_p95, cur_fps, cur_rss = map(to_int, [current_p50, current_p95, current_fps, current_rss])
+    if base_p95 < base_p50: result["reason"] = "malformed-baseline-distribution"; return result
+    result["p50_limit"] = str(base_p50 * 110 // 100)
+    result["p95_limit"] = str(base_p95 * 110 // 100)
+    result["rss_limit"] = str(base_rss * 105 // 100)
+    result["p50_delta_bp"] = str((cur_p50 - base_p50) * 10000 // base_p50)
+    result["p95_delta_bp"] = str((cur_p95 - base_p95) * 10000 // base_p95)
+    result["fps_delta_bp"] = str((cur_fps - base_fps) * 10000 // base_fps)
+    result["rss_delta_bp"] = str((cur_rss - base_rss) * 10000 // base_rss)
+    if cur_p50 > base_p50 * 110 // 100: result["reason"] = "median-regression-exceeded"; return result
+    if cur_p95 > base_p95 * 110 // 100: result["reason"] = "p95-regression-exceeded"; return result
+    if cur_rss > base_rss * 105 // 100: result["reason"] = "rss-regression-exceeded"; return result
+    result["status"] = "pass"
+    result["reason"] = "pass"
+    return result
+
 SHOWCASE_SOURCE_REVISION_FILES = [
     "scripts/check/check-widget-showcase-4k-200fps.shs",
     "examples/06_io/ui/widget_showcase_gui.spl",
@@ -1593,6 +1709,11 @@ showcase_4k_log = value_of("gui_showcase_4k_200fps_log", showcase_4k_env)
 showcase_4k_time_log = value_of("gui_showcase_4k_200fps_time_log", showcase_4k_env)
 showcase_4k_log_file_status = regular_file_status(showcase_4k_log)
 showcase_4k_time_log_file_status = regular_file_status(showcase_4k_time_log)
+showcase_4k_baseline = showcase_baseline_comparison(
+    "gui_showcase_4k_200fps", showcase_4k_env, "4k",
+    showcase_4k_frame_p50_ns, showcase_4k_frame_p95_ns,
+    showcase_4k_fps_x1000, showcase_4k_max_rss_kb,
+)
 if showcase_4k_status == "pass":
     missing_4k_fields = [
         name
@@ -1619,7 +1740,10 @@ if showcase_4k_status == "pass":
         ]
         if not value
     ]
-    if missing_4k_fields:
+    if showcase_4k_baseline["status"] != "pass":
+        showcase_4k_status = "fail"
+        showcase_4k_reason = showcase_4k_baseline["reason"]
+    elif missing_4k_fields:
         showcase_4k_status = "fail"
         showcase_4k_reason = "missing-required-4k-200fps-evidence:" + ",".join(missing_4k_fields)
     elif to_int(showcase_4k_warmup_frames) <= 0 or showcase_4k_frame_sample_count != showcase_4k_frames:
@@ -1787,6 +1911,11 @@ showcase_8k_log = value_of("gui_showcase_8k_perf_log", showcase_8k_env)
 showcase_8k_time_log = value_of("gui_showcase_8k_perf_time_log", showcase_8k_env)
 showcase_8k_log_file_status = regular_file_status(showcase_8k_log)
 showcase_8k_time_log_file_status = regular_file_status(showcase_8k_time_log)
+showcase_8k_baseline = showcase_baseline_comparison(
+    "gui_showcase_8k_perf", showcase_8k_env, "8k",
+    showcase_8k_frame_p50_ns, showcase_8k_frame_p95_ns,
+    showcase_8k_fps_x1000, showcase_8k_max_rss_kb,
+)
 if showcase_8k_status == "pass":
     missing_8k_fields = [
         name
@@ -1813,7 +1942,10 @@ if showcase_8k_status == "pass":
         ]
         if not value
     ]
-    if missing_8k_fields:
+    if showcase_8k_baseline["status"] != "pass":
+        showcase_8k_status = "fail"
+        showcase_8k_reason = showcase_8k_baseline["reason"]
+    elif missing_8k_fields:
         showcase_8k_status = "fail"
         showcase_8k_reason = "missing-required-8k-perf-evidence:" + ",".join(missing_8k_fields)
     elif to_int(showcase_8k_warmup_frames) <= 0 or showcase_8k_frame_sample_count != showcase_8k_frames:
@@ -4094,6 +4226,8 @@ emit("gui_showcase_4k_200fps_log", rel_text_path(showcase_4k_log))
 emit("gui_showcase_4k_200fps_log_file_status", showcase_4k_log_file_status)
 emit("gui_showcase_4k_200fps_time_log", rel_text_path(showcase_4k_time_log))
 emit("gui_showcase_4k_200fps_time_log_file_status", showcase_4k_time_log_file_status)
+for key, value in showcase_4k_baseline.items():
+    emit("gui_showcase_4k_200fps_baseline_aggregate_" + key, value)
 emit("gui_showcase_8k_perf_env", rel(showcase_8k_env_path) if showcase_8k_env_path.exists() else "")
 emit("gui_showcase_8k_perf_status", showcase_8k_status)
 emit("gui_showcase_8k_perf_reason", showcase_8k_reason)
@@ -4123,6 +4257,8 @@ emit("gui_showcase_8k_perf_checksum_status", showcase_8k_checksum_status)
 emit("gui_showcase_8k_perf_readback_mode", showcase_8k_readback_mode)
 emit("gui_showcase_8k_perf_render_mode", showcase_8k_render_mode)
 emit("gui_showcase_8k_perf_retained_render_mode_status", showcase_8k_retained_render_mode_status)
+for key, value in showcase_8k_baseline.items():
+    emit("gui_showcase_8k_perf_baseline_aggregate_" + key, value)
 emit("gui_showcase_8k_perf_redraw_frames", showcase_8k_redraw_frames)
 emit("gui_showcase_8k_perf_retained_redraw_status", showcase_8k_retained_redraw_status)
 emit("gui_showcase_8k_perf_source_revision", showcase_8k_source_revision)
