@@ -43,4 +43,8 @@ fields fail closed.
 The Linux live-window gate injects the event at X11, records WM targeting,
 dispatches the content-local point through the hosted BrowserSession, applies
 the application mutation, updates authoritative window content, and captures
-the resulting canonical Engine2D frame.
+the resulting canonical Engine2D frame. The `display_input` row passes only
+when the overall, input-receipt, semantic, text, replay-rejection, frame-marker,
+and frame-correlation statuses pass; the origin is `screen`; event and WM target
+IDs are positive; the semantic target is exactly `host-proof`; and callback and
+mutation counts are exactly one. A partial three-field receipt no longer passes.

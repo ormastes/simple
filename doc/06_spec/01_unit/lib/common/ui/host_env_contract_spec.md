@@ -301,40 +301,74 @@ expect(host_vulkan_evidence_passes(complete + "\nvulkan_engine2d_readback_status
 
 </details>
 
-#### requires a successful RenderDoc capture
+#### requires genuine correlated RenderDoc replay evidence
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val complete = "rdoc_simple_gate_status=pass\nrdoc_simple_gate_capture_file_magic=RDOC"
+val complete = complete_renderdoc_gate_evidence()
 expect(host_renderdoc_evidence_passes(complete)).to_be(true)
 expect(host_renderdoc_evidence_passes(complete.replace("\n", "\r\n"))).to_be(true)
-expect(host_renderdoc_evidence_passes(complete.replace("status=pass", "status=fail"))).to_be(false)
-expect(host_renderdoc_evidence_passes(complete.replace("magic=RDOC", "magic=bad"))).to_be(false)
-expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_file_magic", "prefixed_rdoc_simple_gate_capture_file_magic"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_status=pass", "rdoc_simple_gate_status=fail"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_file_magic=RDOC", "rdoc_simple_gate_capture_file_magic=bad"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_renderdoc_capturing_before_end=1", "rdoc_simple_gate_renderdoc_capturing_before_end=0"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_renderdoc_device=41", "rdoc_simple_gate_renderdoc_device=0"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_record_valid=1", "rdoc_simple_gate_record_valid=0"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_semantic_hash=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "rdoc_simple_gate_semantic_hash=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_record_hash=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "rdoc_simple_gate_record_hash=0000000000000000000000000000000000000000000000000000000000000000"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete + "\nrdoc_simple_gate_pixel_hash=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_frame_id=frame-7", "rdoc_simple_gate_capture_frame_id=frame-8"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_status=pass", "rdoc_simple_gate_replay_status=fail"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_driver=vulkan", "rdoc_simple_gate_replay_driver=d3d12"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_capture_path=/tmp/frame.rdc", "rdoc_simple_gate_replay_capture_path=/tmp/other.rdc"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_xml_path=/tmp/frame.xml", "rdoc_simple_gate_replay_xml_path="))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_xml_hash=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "rdoc_simple_gate_replay_xml_hash=bad"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_relevant_action_count=1", "rdoc_simple_gate_replay_relevant_action_count=0"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_pipeline_count=1", "rdoc_simple_gate_replay_pipeline_count=0"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_shader_count=1", "rdoc_simple_gate_replay_shader_count=0"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_replay_resource_count=1", "rdoc_simple_gate_replay_resource_count=0"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_owner_agreement_status=pass", "rdoc_simple_gate_owner_agreement_status=fail"))).to_be(false)
 ```
 
 </details>
 
-#### requires screen-origin semantic mutation evidence
+#### accepts only a complete screen-to-WM semantic frame receipt
+
+- Classify one complete screen-to-WM semantic frame receipt
+- Reject receipts with any missing or inconsistent hop
+
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-val complete = "linux_hosted_wm_live_window_event_origin=screen\nlinux_hosted_wm_live_window_semantic_target_id=field\nlinux_hosted_wm_live_window_mutation_revision=1"
+step("Classify one complete screen-to-WM semantic frame receipt")
+val complete = "linux_hosted_wm_live_window_status=pass\nlinux_hosted_wm_live_window_input_receipt_status=pass\nlinux_hosted_wm_live_window_semantic_status=pass\nlinux_hosted_wm_live_window_text_status=pass\nlinux_hosted_wm_live_window_event_origin=screen\nlinux_hosted_wm_live_window_event_id=7\nlinux_hosted_wm_live_window_wm_target_id=41\nlinux_hosted_wm_live_window_semantic_target_id=host-proof\nlinux_hosted_wm_live_window_callback_count=1\nlinux_hosted_wm_live_window_mutation_revision=1\nlinux_hosted_wm_live_window_replay_rejection_status=pass\nlinux_hosted_wm_live_window_frame_marker=pass\nlinux_hosted_wm_live_window_frame_correlation_status=pass"
 expect(host_display_input_evidence_passes(complete)).to_be(true)
+
+step("Reject receipts with any missing or inconsistent hop")
+val legacy_partial = "linux_hosted_wm_live_window_event_origin=screen\nlinux_hosted_wm_live_window_semantic_target_id=host-proof\nlinux_hosted_wm_live_window_mutation_revision=1"
+expect(host_display_input_evidence_passes(legacy_partial)).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("linux_hosted_wm_live_window_status=pass", "linux_hosted_wm_live_window_status=fail"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("input_receipt_status=pass", "input_receipt_status=fail"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("semantic_status=pass", "semantic_status=fail"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("text_status=pass", "text_status=fail"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("origin=screen", "origin=synthetic"))).to_be(false)
-expect(host_display_input_evidence_passes(complete.replace("semantic_target_id=field", "other_target=field"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("event_id=7", "event_id=0"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("wm_target_id=41", "wm_target_id=-1"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("semantic_target_id=host-proof", "semantic_target_id=other"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("callback_count=1", "callback_count=0"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("mutation_revision=1", "mutation_revision=0"))).to_be(false)
-expect(host_display_input_evidence_passes(complete.replace("semantic_target_id=field", "semantic_target_id="))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("replay_rejection_status=pass", "replay_rejection_status=fail"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("frame_marker=pass", "frame_marker=fail"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("frame_correlation_status=pass", "frame_correlation_status=fail"))).to_be(false)
 ```
 
 </details>

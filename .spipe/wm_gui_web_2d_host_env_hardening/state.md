@@ -724,3 +724,20 @@ Tracking split:
   and the live SSpec requires both statuses. Shell syntax and the runnable
   staging contract pass 1/1; both refreshed manuals are complete with zero
   stubs. Live QEMU remains capped and unclaimed.
+- bugfix: Closed the shared `display_input` classifier's partial-receipt
+  admission. It now requires all 13 live-wrapper receipts: overall/input/
+  semantic/text pass, screen origin, positive event and WM target IDs, exact
+  `host-proof`, one callback and mutation, replay rejection, frame marker, and
+  frame correlation. The reproduce-first diagnostic run failed 12/13 before
+  the owner fix and passed 13/13 afterward. Docgen produced one complete
+  operator manual with zero stubs. The runner was the diagnostic repair CLI,
+  so accepted pure-Simple qualification and fresh live screen/QEMU evidence
+  remain open.
+- bugfix: Closed the Linux Vulkan aggregate's Simple RenderDoc magic-only
+  admission. A claimed Simple capture now also requires replay PASS and owner/
+  capture-frame agreement; the aggregate exposes both rows and blocks
+  `renderdoc-simple-rdc` when either is absent. The final allowed focused run
+  passed 14/14 after adding the missing ARGB viewport rows only to the valid
+  main-browser fixture. Docgen produced one complete manual with zero stubs.
+  This is diagnostic-runner contract evidence; a fresh native `.rdc` remains
+  required for live completion.

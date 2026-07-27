@@ -560,7 +560,11 @@ rows is rejected. Missing RenderDoc `.rdc` evidence is reported through
 `linux_vulkan_render_log_compare_renderdoc_*_artifact_file_status`, and
 `linux_vulkan_render_log_compare_renderdoc_*_artifact_magic`; by default Simple,
 Chrome, and Electron RenderDoc rows must pass with real `.rdc` files and `RDOC`
-magic in the first four artifact bytes. Env metadata that merely claims
+magic in the first four artifact bytes. The Simple row additionally requires
+`rdoc_simple_gate_replay_status=pass` and
+`rdoc_simple_gate_owner_agreement_status=pass`; a magic-valid file without
+replay-open and exact owner/capture-frame agreement is rejected as
+`renderdoc-simple-rdc`. Env metadata that merely claims
 `rdoc_capture_magic=RDOC` is not completion proof; `env_file_status=pass` plus
 `artifact_file_status=missing` means the diagnostic env exists but the native
 capture artifact still has not been produced. If the Linux compare env is
