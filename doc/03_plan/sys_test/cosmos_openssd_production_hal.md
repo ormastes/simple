@@ -30,7 +30,7 @@
 | ST-015 | NVMe admin runner covers bounded Identify/SMART, queue lifecycle, Number-of-Queues NSID/max, Abort result bits, CQ IEN/IV, SQ QPRIO, SMART NSID/RAE, AER, publication retry/latching, and unsupported format/firmware rejection. | H1 corrected host/ARM PASS |
 | ST-016 | FTL/NFC runners check PPA geometry, append-before-map ordering, dual checkpoints, replay validation, torn tails, retirement, reserve/GC, explicit media formats, journal reclamation, DMA isolation, tag validation, startup binding, and host/ARM composition. | H1 PASS |
 | ST-017 | Dispatcher runner proves one destructive FIFO fetch per entry, queue-zero admin routing, nonzero IO routing, reserved-field rejection, and completion retry/terminal blocking. | H1 host/ARM PASS before final compile-only cleanup |
-| ST-018 | A current pure-Simple runner executes the fourteen-scenario SSpec and generates its manual. | **Blocked:** no current runner; low-memory Stage 2/3 now pass, and the Stage-4 phase-1 import blocker is fixed/probe-tested, but the full rerun is deferred by the three-cycle guard. |
+| ST-018 | A current pure-Simple runner executes the fourteen-scenario SSpec and generates its manual. | **Blocked:** no current runner; strict Stage 2/3 pass, but the final allowed Stage-4 attempt stops at `pptx_export.spl:515` on a bootstrap parser defect. |
 | ST-019 | Focused host composition injects corrected ECC, returns intact data, relocates and rereads the page, rejects a stale PPA, preserves L2P on injected copy failure, remounts/replays the destination, and passes strict ARM compile plus relocatable link. | H1 PASS |
 
 The host MMIO, ARM abort, and SMP/cache runners are executable H1 evidence. Static source
@@ -115,10 +115,16 @@ Detailed execution and evidence retention are in
 Scoped H0/H1 runners pass through persistent FTL/NFC composition, UART startup,
 dispatcher routing, ECC refresh relocation, and strict ARM linkage. External
 provenance in `ST-012` remains partial. `ST-018` is blocked because no current
-pure-Simple runner exists. A one-worker build passed Stage 2/3 sanity and
-provenance without the prior memory growth, then stopped in Stage-4 phase 1 on
-a removed browser CSS-type import. Commit `8c7eb97d3592` fixes that import; a
-fresh Stage-3 native probe compiled and exited zero. The full rerun, final SSpec,
-and doc generation remain pending. Installed Bootgen and all `BT-*` evidence
-are pending. Production is **BLOCKED/FAIL**;
+pure-Simple runner exists. Commit `a50016fa75e2` removes every executable
+labeled-tuple return found across owned source and passed frontier review. The
+strict one-worker full bootstrap rebuilt Rust authority and passed Stage 2/3
+sanity and provenance. Stage 2 was
+`5ede8b5598902007ef9d9916e3e8ab427beb6d1f4f319da0810a1a6fee49863a`;
+Stage 3 was
+`b92db12414a1d7e433f5da580579ed3c59d5c4719db07f6f7e45403ccea0a0b0`.
+Stage 4 parsed through the prior Office blockers, then failed at
+`src/app/office/pptx_export.spl:515` when the bootstrap parser rejected
+`if ce < 0:`. The final allowed build cycle is consumed, so no fourth retry was
+run. Final SSpec/doc generation, installed Bootgen, and all `BT-*` evidence
+remain pending. Production is **BLOCKED/FAIL**;
 REQ-012/NFR-011 remain excluded from passing executable `@req` declarations.

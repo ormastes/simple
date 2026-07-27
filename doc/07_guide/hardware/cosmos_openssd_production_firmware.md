@@ -153,10 +153,11 @@ realpath --version
 Use `bin/release/simple` rebuilt and deployed from the current tree. A stale
 release binary that links the obsolete two-argument `rt_env_set` ABI can crash
 before an SSpec runs and is not evidence. There is currently no accepted
-deployed runner. The latest one-worker bootstrap passed Stage 2/3 sanity and
-provenance at low RSS, then stopped in Stage-4 phase 1 on a stale browser import.
-That import is fixed and passes a fresh Stage-3 native probe; run the full
-Stage-4 build in a fresh session before using `bin/release/simple`.
+deployed runner. The strict one-worker bootstrap at `a50016fa75e2` passed
+Stage 2/3 sanity and provenance, then Stage 4 stopped at
+`src/app/office/pptx_export.spl:515` because the bootstrap parser rejected the
+valid nested condition `if ce < 0:`. Fix the tracked parser defect and complete
+a new full Stage-4 build before using `bin/release/simple`.
 
 ## Host Build and QEMU Gate
 
@@ -280,8 +281,8 @@ Do not execute the fourteen-scenario SSpec with a stale binary. The source/manua
 now describe the current runners, but final execution and generated-manual
 evidence are blocked until a current pure-Simple `bin/release/simple` is
 available. The latest bootstrap consumed the third/final allowed cycle after
-proving low-memory Stage 2/3 and exposing the now-fixed Stage-4 phase-1 import,
-so the full build must resume in a fresh session rather than being retried here.
+proving Stage 2/3 sanity and provenance and exposing the Stage-4 parser defect
+at `pptx_export.spl:515`. Do not retry this session.
 
 Before production can move from **BLOCKED/FAIL**, complete:
 

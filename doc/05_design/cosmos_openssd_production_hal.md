@@ -230,10 +230,12 @@ W^X is implemented with firmware small pages. H1 proves the vector/handler
 contract; physical-board abort behavior remains H2.
 Focused host/ARM ECC relocation, destination reread, stale-source rejection,
 failure preservation, remount/replay, and relocatable-link checks pass. Final
-SSpec/doc generation remains blocked pending one fresh-session Stage-4 rerun.
-The latest one-worker build passed Stage 2/3, sanity, and provenance at low RSS;
-its Stage-4 phase-1 stale browser import is fixed and passes a fresh Stage-3
-native probe. Real Bootgen/board evidence remains pending.
+SSpec/doc generation remains blocked. The strict one-worker build at
+`a50016fa75e2` passed Stage 2/3 sanity and provenance and parsed
+through the prior browser and Office tuple blockers. Stage 4 then stopped at
+`src/app/office/pptx_export.spl:515`, where the bootstrap parser rejected
+`if ce < 0:` in a nested `else` branch. The three-cycle guard prevents another
+retry in this session. Real Bootgen/board evidence remains pending.
 
 ## Error and Evidence Rules
 

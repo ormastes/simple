@@ -182,10 +182,12 @@ H1 runtime, MMIO, PCIe, IO, corrected bridge/admin, QEMU/silicon, package, and
 MMU small-page W^X contracts passed in scoped runs. Corrective bridge/admin
 evidence covers Abort/queue/SMART fields, zero-write-only completion retry,
 post-start non-retry, and PRP edges. Real Bootgen is unavailable. Strict bootstrap
-Stage 2/3 and provenance now pass with one worker and low RSS. Stage 4 reached
-phase 1, exposed a stale browser custom-property import, and stopped before
-producing a runner. The import fix and a fresh Stage-3 native probe pass and
-are pushed; the full Stage-4 rerun is deferred to a fresh session by the
-three-cycle guard. No current pure-Simple runner exists for final SSpec/doc
-generation. Production status is **BLOCKED/FAIL**.
+Stage 2/3 and provenance pass with one worker at source commit
+`a50016fa75e2`. Stage 4 parses through the prior browser and Office tuple
+blockers, then the bootstrap parser rejects the valid nested condition
+`if ce < 0:` at `src/app/office/pptx_export.spl:515`. The final allowed build
+cycle stopped there; no runner was produced or deployed. The defect is tracked
+in `doc/08_tracking/bug/bootstrap_parser_nested_else_comparison_2026-07-27.md`.
+No current pure-Simple runner exists for final SSpec/doc generation.
+Production status is **BLOCKED/FAIL**.
 Fresh SSpec/docgen, real Bootgen, and H2 board proof remain required.
