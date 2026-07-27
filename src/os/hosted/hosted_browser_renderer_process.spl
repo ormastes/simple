@@ -150,6 +150,7 @@ pub class HostedBrowserRendererProcess:
     width: i32
     height: i32
     next_request_id: i64
+    expected_reply_to_request_id: i64
     decoder: BrowserRendererDecoder
     network: FetchEngine
     document_url: text
@@ -173,6 +174,7 @@ pub class HostedBrowserRendererProcess:
             width: width,
             height: height,
             next_request_id: 2,
+            expected_reply_to_request_id: 0,
             decoder: browser_renderer_decoder_new(generation),
             network: FetchEngine.new(
                 Logger.new("browser-renderer-broker", LogLevel.Error)
@@ -479,6 +481,7 @@ pub class HostedBrowserRendererProcess:
         val deadline = _deadline_ms(timeout_ms)
         if not _write_before(self.pid, request.wire, deadline):
             return self.fail("renderer-write-failed")
+        self.expected_reply_to_request_id = self.next_request_id
         self.next_request_id = self.next_request_id + 1
         while rt_time_now_unix_micros() / 1000 < deadline:
             val chunk = process_read_stdout(self.pid)
@@ -491,6 +494,12 @@ pub class HostedBrowserRendererProcess:
                     val fetch = browser_renderer_fetch_request_decode(
                         decoded.message
                     )
+                    if not fetch.ok:
+                        return self.fail(fetch.reason)
+                    if fetch.reply_to_request_id != (
+                        self.expected_reply_to_request_id
+                    ):
+                        return self.fail("stale-renderer-request")
                     val policy = hosted_browser_renderer_request_policy(
                         self.document_origin,
                         self.navigation_permit,
@@ -536,6 +545,7 @@ pub class HostedBrowserRendererProcess:
                         self.pid, response_wire.wire, deadline
                     ):
                         return self.fail("renderer-write-failed")
+                    self.expected_reply_to_request_id = self.next_request_id
                     self.next_request_id = self.next_request_id + 1
                     continue
                 val frame = browser_renderer_frame_decode(
@@ -543,6 +553,10 @@ pub class HostedBrowserRendererProcess:
                 )
                 if not frame.ok:
                     return self.fail(frame.reason)
+                if frame.reply_to_request_id != (
+                    self.expected_reply_to_request_id
+                ):
+                    return self.fail("stale-renderer-frame")
                 if self.pending_document_commit_url != "":
                     self._commit_document_url(
                         self.pending_document_commit_url

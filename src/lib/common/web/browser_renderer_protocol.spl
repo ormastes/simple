@@ -56,6 +56,7 @@ pub struct BrowserRendererDecodeResult:
 pub struct BrowserRendererFrameDecodeResult:
     ok: bool
     reason: text
+    reply_to_request_id: i64
     composition: DrawIrComposition
     cpu_composited_count: i32
     cpu_composited_sha256: text
@@ -87,6 +88,7 @@ pub struct BrowserRendererNavigationDecodeResult:
 pub struct BrowserRendererNetworkDecodeResult:
     ok: bool
     reason: text
+    reply_to_request_id: i64
     request_id: text
     kind: text
     url: text
@@ -616,6 +618,7 @@ fn _browser_renderer_network_reject(
     BrowserRendererNetworkDecodeResult(
         ok: false,
         reason: reason,
+        reply_to_request_id: 0,
         request_id: "",
         kind: "",
         url: "",
@@ -628,6 +631,7 @@ fn _browser_renderer_network_reject(
     )
 
 fn _browser_renderer_network_result(
+    reply_to_request_id: i64,
     request_id: text,
     kind: text,
     url: text,
@@ -641,6 +645,7 @@ fn _browser_renderer_network_result(
     BrowserRendererNetworkDecodeResult(
         ok: true,
         reason: "ok",
+        reply_to_request_id: reply_to_request_id,
         request_id: request_id,
         kind: kind,
         url: url,
@@ -674,6 +679,7 @@ fn _browser_renderer_network_piece(
 pub fn browser_renderer_fetch_request_encode(
     generation: i64,
     wire_request_id: i64,
+    reply_to_request_id: i64,
     request_id: text,
     kind: text,
     url: text,
@@ -682,7 +688,8 @@ pub fn browser_renderer_fetch_request_encode(
     body: text,
     content_type: text
 ) -> BrowserRendererEncodeResult:
-    if (not _browser_renderer_network_common_valid(request_id, kind, url) or
+    if (reply_to_request_id <= 0 or
+        not _browser_renderer_network_common_valid(request_id, kind, url) or
         not _browser_renderer_network_method_valid(method) or
         not _browser_renderer_network_field_valid(headers, BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES) or
         not _browser_renderer_network_field_valid(body, BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES) or
@@ -697,7 +704,7 @@ pub fn browser_renderer_fetch_request_encode(
     val content_type_len = text_to_bytes(content_type).len()
     browser_renderer_message_encode(
         "fetch_request", generation, wire_request_id,
-        "SBRQ1\t{id_len}\t{kind_len}\t{url_len}\t{method_len}\t{headers_len}\t{body_len}\t{content_type_len}\n" +
+        "SBRQ2\t{reply_to_request_id}\t{id_len}\t{kind_len}\t{url_len}\t{method_len}\t{headers_len}\t{body_len}\t{content_type_len}\n" +
         request_id + kind + url + method + headers + body + content_type
     )
 
@@ -712,10 +719,13 @@ pub fn browser_renderer_fetch_request_decode(
     val fields = _browser_renderer_byte_slice(
         message.payload, 0, header_end
     ).split("\t")
-    if fields.len() != 8 or fields[0] != "SBRQ1":
+    if fields.len() != 9 or fields[0] != "SBRQ2":
+        return _browser_renderer_network_reject("malformed-network-request")
+    val reply_to_request_id = _browser_renderer_positive_i64(fields[1])
+    if reply_to_request_id < 0:
         return _browser_renderer_network_reject("malformed-network-request")
     var lengths: [i64] = []
-    var field_index: i64 = 1
+    var field_index: i64 = 2
     while field_index < fields.len():
         val length = fields[field_index].to_i64() ?? -1
         if length < 0 or str(length) != fields[field_index]:
@@ -756,6 +766,7 @@ pub fn browser_renderer_fetch_request_decode(
         not _browser_renderer_network_field_valid(content_type, 256)):
         return _browser_renderer_network_reject("invalid-network-request")
     _browser_renderer_network_result(
+        reply_to_request_id,
         request_id, kind, url, method, headers, body, content_type, 0, ""
     )
 
@@ -845,7 +856,8 @@ pub fn browser_renderer_network_response_decode(
         (status > 0 and (status < 100 or error != "")):
         return _browser_renderer_network_reject("invalid-network-response")
     _browser_renderer_network_result(
-        request_id, kind, url, "", headers, body, "", status.to_i32(), error
+        0, request_id, kind, url, "", headers, body, "",
+        status.to_i32(), error
     )
 
 fn _browser_renderer_normalize_draw_ir(composition: DrawIrComposition) -> DrawIrComposition:
@@ -869,6 +881,7 @@ fn _browser_renderer_frame_reject(reason: text) -> BrowserRendererFrameDecodeRes
     BrowserRendererFrameDecodeResult(
         ok: false,
         reason: reason,
+        reply_to_request_id: 0,
         composition: draw_ir_composition("", "", "", []),
         cpu_composited_count: 0,
         cpu_composited_sha256: "",
@@ -1001,12 +1014,14 @@ pub fn browser_renderer_frame_encode_with_witness(
     composition: DrawIrComposition,
     generation: i64,
     request_id: i64,
+    reply_to_request_id: i64,
     cpu_composited_count: i32,
     cpu_composited_sha256: text,
     solid_material_count: i32,
     solid_material_sha256: text
 ) -> BrowserRendererEncodeResult:
-    if (not _browser_renderer_material_digest_valid(
+    if (reply_to_request_id <= 0 or
+        not _browser_renderer_material_digest_valid(
             cpu_composited_count.to_i64(), cpu_composited_sha256) or
         not _browser_renderer_material_digest_valid(
             solid_material_count.to_i64(), solid_material_sha256)):
@@ -1021,7 +1036,7 @@ pub fn browser_renderer_frame_encode_with_witness(
     val cpu_digest = if cpu_composited_sha256 == "": "-" else: cpu_composited_sha256
     val solid_digest = if solid_material_sha256 == "": "-" else: solid_material_sha256
     val payload = (
-        "SBRF1\t{cpu_composited_count}\t{cpu_digest}" +
+        "SBRF2\t{reply_to_request_id}\t{cpu_composited_count}\t{cpu_digest}" +
         "\t{solid_material_count}\t{solid_digest}\n" +
         bytes_to_text(encoded.bytes)
     )
@@ -1033,7 +1048,7 @@ pub fn browser_renderer_frame_encode(
     request_id: i64
 ) -> BrowserRendererEncodeResult:
     browser_renderer_frame_encode_with_witness(
-        composition, generation, request_id, 0, "", 0, ""
+        composition, generation, request_id, request_id, 0, "", 0, ""
     )
 
 pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32, height: i32) -> BrowserRendererFrameDecodeResult:
@@ -1045,15 +1060,16 @@ pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32
     val fields = _browser_renderer_byte_slice(
         message.payload, 0, witness_end
     ).split("\t")
-    if fields.len() != 5 or fields[0] != "SBRF1":
+    if fields.len() != 6 or fields[0] != "SBRF2":
         return _browser_renderer_frame_reject("malformed-material-witness")
-    val cpu_count = fields[1].to_i64() ?? -1
-    val solid_count = fields[3].to_i64() ?? -1
-    if cpu_count < 0 or solid_count < 0 or
-        str(cpu_count) != fields[1] or str(solid_count) != fields[3]:
+    val reply_to_request_id = _browser_renderer_positive_i64(fields[1])
+    val cpu_count = fields[2].to_i64() ?? -1
+    val solid_count = fields[4].to_i64() ?? -1
+    if reply_to_request_id < 0 or cpu_count < 0 or solid_count < 0 or
+        str(cpu_count) != fields[2] or str(solid_count) != fields[4]:
         return _browser_renderer_frame_reject("malformed-material-witness")
-    val cpu_digest = if fields[2] == "-": "" else: fields[2]
-    val solid_digest = if fields[4] == "-": "" else: fields[4]
+    val cpu_digest = if fields[3] == "-": "" else: fields[3]
+    val solid_digest = if fields[5] == "-": "" else: fields[5]
     if (not _browser_renderer_material_digest_valid(cpu_count, cpu_digest) or
         not _browser_renderer_material_digest_valid(
             solid_count, solid_digest)):
@@ -1073,6 +1089,7 @@ pub fn browser_renderer_frame_decode(message: BrowserRendererMessage, width: i32
     BrowserRendererFrameDecodeResult(
         ok: true,
         reason: "ok",
+        reply_to_request_id: reply_to_request_id,
         composition: decoded.composition,
         cpu_composited_count: cpu_count.to_i32(),
         cpu_composited_sha256: cpu_digest,

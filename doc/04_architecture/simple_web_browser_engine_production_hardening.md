@@ -328,8 +328,9 @@ or native TLS behavior.
 - Linux now has a fail-closed sanitized renderer launcher, deny-all Landlock,
   seccomp process/network denial, and a persistent BrowserSession/Draw IR
   worker. The broker permits one request in flight, requires exact monotonic
-  IDs independently in each direction, preserves absolute animation time, and
-  closes the contained process on any timeout or protocol failure. Renderer
+  IDs independently in each direction, requires every renderer fetch/frame to
+  name the exact parent request it answers, preserves absolute animation time,
+  and closes the contained process on any timeout or protocol failure. Renderer
   network requests and broker responses now use bounded length-prefixed fields;
   the parent alone owns Fetch/TLS and uses a public-address-only, response-capped
   HTTP job while the renderer sandbox remains socketless. Renderer protocol
