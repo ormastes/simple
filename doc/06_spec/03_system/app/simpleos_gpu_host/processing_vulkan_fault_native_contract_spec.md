@@ -31,6 +31,9 @@ SIMPLE_LIB=src bin/simple test \
    fault-skip state.
 4. One process injects a submit failure, clears the target through the
    canonical environment facade, and then completes an exact device request.
+5. Each process merges stdout and stderr and emits exactly one anchored native
+   or recovery receipt; an otherwise valid receipt cannot hide a contradictory
+   second receipt on either stream.
 
 ## Current Evidence
 
@@ -43,6 +46,11 @@ reports its expected reason, empty output, and zero provenance. The recovery
 sequence records a successful device receipt, arms the fault, receives zero
 provenance, clears the fault through the canonical environment facade, and
 returns the same identity and values without exiting.
+
+The checker now requires exactly one fully anchored receipt from every child.
+The focused source contract passes 3/3, and the current recovery artifact
+passes the stricter live wrapper when selected through
+`PROCESSING_VULKAN_FAULT_PROBE_BIN`.
 
 The selected identity matches the host's NVIDIA RTX A6000 driver/device
 properties. Runtime-owned UTF-16 hashing avoids converting selected-device

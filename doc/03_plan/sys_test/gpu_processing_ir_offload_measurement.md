@@ -80,6 +80,37 @@ harness passes `--processing-verify-cpu`, or lazily when CPU fallback is
 actually selected. Default strict GPU requests validate FillU32 output directly
 and no longer duplicate the full processing workload on the CPU.
 
+Use the retained-session wrapper in two distinct modes:
+
+```sh
+SIMPLEOS_GPU_FALLBACK_WIRE_MODE=device-warm \
+  SIMPLEOS_GPU_HOST_BIN=build/simpleos_gpu_host/device_warm_wire/simpleos_gpu_host-source-matched \
+  SIMPLEOS_GPU_FALLBACK_WIRE_PROBE_BIN=build/simpleos_gpu_host/device_warm_wire/fallback_wire_probe \
+  sh scripts/check/check-simpleos-gpu-fallback-wire.shs
+
+SIMPLEOS_GPU_FALLBACK_WIRE_MODE=device-warm-production \
+  SIMPLEOS_GPU_HOST_BIN=build/simpleos_gpu_host/device_warm_wire/simpleos_gpu_host-source-matched \
+  SIMPLEOS_GPU_FALLBACK_WIRE_PROBE_BIN=build/simpleos_gpu_host/device_warm_wire/fallback_wire_probe \
+  sh scripts/check/check-simpleos-gpu-fallback-wire.shs
+```
+
+Evidence mode requires an explicit verifier-enabled startup receipt and eight
+CPU/device comparison records with positive timings. Production mode requires
+an explicit verifier-disabled receipt and no comparison records. Under the
+prior checker, the retained pre-optimization daemon passed evidence mode with
+medians `116663 us` device, `236498 us` round trip, and `119835 us` non-device
+overhead, then production mode rejected its comparison records with
+`unexpected-cpu-verification`. It predates the startup receipt, so the
+strengthened checker rejects it with `daemon-verifier-mode-mismatch`; those
+numbers are historical baseline only.
+
+Fresh optimized medians remain open. The retained pure-Simple compiler rejects
+the valid multiline initializer at
+`src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl:847`, so it cannot build the
+current daemon closure. Resume with an admitted current-source compiler and the
+second command; do not treat the retained-daemon rejection as performance
+evidence.
+
 ## Unavailable Protocol
 
 If the requested native device, driver, or runtime is unavailable, the

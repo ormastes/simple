@@ -18,17 +18,18 @@ run_case() {
     phase=$1
     if [ "$phase" = none ]; then
         set +e
-        output=$(timeout -k 5 "$TIMEOUT_SECONDS" env -u SIMPLE_GPU_TEST -u SIMPLE_GPU_FAULT_INJECT -u SIMPLE_GPU_FAULT_INJECT_SKIP_MATCHES "$PROBE_BIN" --phase=none)
+        output=$(timeout -k 5 "$TIMEOUT_SECONDS" env -u SIMPLE_GPU_TEST -u SIMPLE_GPU_FAULT_INJECT -u SIMPLE_GPU_FAULT_INJECT_SKIP_MATCHES "$PROBE_BIN" --phase=none 2>&1)
         code=$?
         set -e
         printf '%s\n' "$output"
         [ "$code" -eq 0 ] || return "$code"
-        printf '%s\n' "$output" | grep -q 'status=pass phase=none fault_active=false completed=true reason=ok values=64 values_exact=true hash_sanity=true'
-        printf '%s\n' "$output" | grep -Eq 'handle=[1-9][0-9]* identity=[1-9][0-9]*'
+        total=$(printf '%s\n' "$output" | grep -Ec '^VULKAN_FAULT_NATIVE ' || true)
+        valid=$(printf '%s\n' "$output" | grep -Ec '^VULKAN_FAULT_NATIVE status=pass phase=none fault_active=false completed=true reason=ok values=64 values_exact=true hash_sanity=true handle=[1-9][0-9]* identity=[1-9][0-9]*$' || true)
+        [ "$total" -eq 1 ] && [ "$valid" -eq 1 ]
         return
     fi
     set +e
-    output=$(timeout -k 5 "$TIMEOUT_SECONDS" env -u SIMPLE_GPU_FAULT_INJECT_SKIP_MATCHES SIMPLE_GPU_TEST=1 SIMPLE_GPU_FAULT_INJECT="vulkan:$phase" "$PROBE_BIN" --phase="$phase")
+    output=$(timeout -k 5 "$TIMEOUT_SECONDS" env -u SIMPLE_GPU_FAULT_INJECT_SKIP_MATCHES SIMPLE_GPU_TEST=1 SIMPLE_GPU_FAULT_INJECT="vulkan:$phase" "$PROBE_BIN" --phase="$phase" 2>&1)
     code=$?
     set -e
     printf '%s\n' "$output"
@@ -36,8 +37,9 @@ run_case() {
     expected_reason="vulkan-$phase-failed"
     [ "$phase" != unavailable ] || expected_reason=vulkan-unavailable
     [ "$phase" != mismatch ] || expected_reason=checksum-mismatch
-    printf '%s\n' "$output" | grep -q "status=pass phase=$phase fault_active=true completed=false reason=$expected_reason values=0 values_exact=false hash_sanity=true"
-    printf '%s\n' "$output" | grep -q 'handle=0 identity=0'
+    total=$(printf '%s\n' "$output" | grep -Ec '^VULKAN_FAULT_NATIVE ' || true)
+    valid=$(printf '%s\n' "$output" | grep -Ec "^VULKAN_FAULT_NATIVE status=pass phase=$phase fault_active=true completed=false reason=$expected_reason values=0 values_exact=false hash_sanity=true handle=0 identity=0$" || true)
+    [ "$total" -eq 1 ] && [ "$valid" -eq 1 ]
 }
 
 run_case none
@@ -49,15 +51,13 @@ set +e
 recovery_output=$(timeout -k 5 "$TIMEOUT_SECONDS" env \
     -u SIMPLE_GPU_FAULT_INJECT -u SIMPLE_GPU_FAULT_INJECT_SKIP_MATCHES \
     SIMPLE_GPU_TEST=1 \
-    "$PROBE_BIN" --recover=submit)
+    "$PROBE_BIN" --recover=submit 2>&1)
 recovery_code=$?
 set -e
 printf '%s\n' "$recovery_output"
 [ "$recovery_code" -eq 0 ]
-printf '%s\n' "$recovery_output" | grep -q 'VULKAN_FAULT_RECOVERY status=pass phase=submit before_exact=true'
-printf '%s\n' "$recovery_output" | grep -q 'fault_armed=true failed_reason=vulkan-submit-failed failed_handle=0 failed_identity=0 fault_cleared=true recovered=true recovered_exact=true'
-printf '%s\n' "$recovery_output" | grep -q 'identity_stable=true'
-printf '%s\n' "$recovery_output" | grep -Eq 'before_handle=[1-9][0-9]* before_identity=[1-9][0-9]*'
-printf '%s\n' "$recovery_output" | grep -Eq 'recovered_handle=[1-9][0-9]* recovered_identity=[1-9][0-9]*'
+recovery_total=$(printf '%s\n' "$recovery_output" | grep -Ec '^VULKAN_FAULT_RECOVERY ' || true)
+recovery_valid=$(printf '%s\n' "$recovery_output" | grep -Ec '^VULKAN_FAULT_RECOVERY status=pass phase=submit before_exact=true before_handle=[1-9][0-9]* before_identity=[1-9][0-9]* fault_armed=true failed_reason=vulkan-submit-failed failed_handle=0 failed_identity=0 fault_cleared=true recovered=true recovered_exact=true recovered_handle=[1-9][0-9]* recovered_identity=[1-9][0-9]* identity_stable=true$' || true)
+[ "$recovery_total" -eq 1 ] && [ "$recovery_valid" -eq 1 ]
 
 echo "processing_vulkan_fault_native_status=pass"

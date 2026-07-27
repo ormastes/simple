@@ -18,14 +18,29 @@ Build the host and
 sh scripts/check/check-simpleos-gpu-fallback-wire.shs
 ```
 
-Run retained-session device evidence:
+Run source-matched retained-session device evidence:
 
 ```sh
 SIMPLEOS_GPU_FALLBACK_WIRE_MODE=device-warm \
-  SIMPLEOS_GPU_HOST_BIN=build/simpleos_gpu_host/device_warm_wire/simpleos_gpu_host \
+  SIMPLEOS_GPU_HOST_BIN=build/simpleos_gpu_host/device_warm_wire/simpleos_gpu_host-source-matched \
   SIMPLEOS_GPU_FALLBACK_WIRE_PROBE_BIN=build/simpleos_gpu_host/device_warm_wire/fallback_wire_probe \
   sh scripts/check/check-simpleos-gpu-fallback-wire.shs
 ```
+
+`device-warm` explicitly enables `--processing-verify-cpu` and requires eight
+CPU/device comparison records. To measure the production path without the
+duplicate CPU workload, use:
+
+```sh
+SIMPLEOS_GPU_FALLBACK_WIRE_MODE=device-warm-production \
+  SIMPLEOS_GPU_HOST_BIN=build/simpleos_gpu_host/device_warm_wire/simpleos_gpu_host-source-matched \
+  SIMPLEOS_GPU_FALLBACK_WIRE_PROBE_BIN=build/simpleos_gpu_host/device_warm_wire/fallback_wire_probe \
+  sh scripts/check/check-simpleos-gpu-fallback-wire.shs
+```
+
+Production mode requires the daemon's explicit
+`HOST_GPU_DAEMON_VERIFY processing_verify_cpu=false` startup receipt and fails
+if the daemon emits any `HOST_GPU_PROCESS_PERF` record.
 
 ## Checks
 
@@ -54,14 +69,17 @@ SIMPLEOS_GPU_FALLBACK_WIRE_MODE=device-warm \
     warmups and five measured 1,048,576-element requests.
 11. Every device readback value and checksum is exact, handle and identity stay
     stable, and the five measured samples produce median device, round-trip,
-    and non-device-overhead timings. Non-device overhead includes the daemon's
-    CPU oracle, validation, comparison, wire wait, and shared-memory write.
+    and non-device-overhead timings. Evidence mode includes the daemon's CPU
+    oracle and comparison; production mode excludes both.
+12. Evidence mode requires exactly eight `HOST_GPU_PROCESS_PERF` records.
+    Every record must contain positive CPU and device times. Production mode
+    requires an explicit verifier-disabled startup receipt and zero comparison
+    records.
 
 ## Current Evidence
 
-The six-example source contract is retained but was not executed because the
-available staged pure-Simple compiler has no `test` command. Fallback receipt
-validation previously passed 13/13. The source-matched daemon (`1 compiled, 212 cached`)
+The six-example source contract passes 6/6. Fallback receipt validation
+previously passed 13/13. The source-matched daemon (`1 compiled, 212 cached`)
 and final probe (`1 compiled, 18 cached`) complete both native rows: calibrated
 small-request reason `18`, and threshold-`0` CUDA submit-failure reason `16`.
 Both receipts have CPU source `2`, zero handle/identity, 32 bytes, and checksum
@@ -101,3 +119,17 @@ positive stable handle/identity, exact correlation, and no fallback. Medians
 are `155110 us` device, `312012 us` round trip, and `156902 us` non-device
 overhead. The measured-request CPU median is `82097 us`, and all receipts are
 correctly classified `available-not-preferred`.
+
+Before the startup-mode receipt became mandatory, the retained bulk-readback
+daemon passed evidence mode with medians `116663 us` device, `236498 us` round
+trip, and `119835 us` non-device overhead, then production mode rejected its
+CPU comparison records with `unexpected-cpu-verification`. That daemon predates
+both the optimization and `HOST_GPU_DAEMON_VERIFY`, so the strengthened wrapper
+now rejects it earlier with `daemon-verifier-mode-mismatch`. These values are
+historical repeat baseline evidence, not current-checker or optimized evidence.
+
+A fresh source-matched production daemon remains blocked because the retained
+pure-Simple compiler rejects the valid multiline initializer at
+`src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl:847`. Resume with a compiler
+that admits current source, build the daemon incrementally, and rerun
+`device-warm-production`; no bootstrap is required by this measurement plan.

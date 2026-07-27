@@ -7,6 +7,7 @@ val FAULT_HELPER = "src/lib/gc_async_mut/processing/fault_injection.spl"
 val CUDA_EXECUTOR = "src/lib/gc_async_mut/processing/cuda_fill_u32.spl"
 val VULKAN_EXECUTOR = "src/lib/gc_async_mut/processing/vulkan_fill_u32.spl"
 val METAL_EXECUTOR = "src/lib/gc_async_mut/processing/metal_fill_u32.spl"
+val METAL_LIVE_SPEC = "test/03_system/app/simpleos_gpu_host/macos_metal_processing_ir_failure_injection_spec.spl"
 
 val BACKENDS = [
     ["cuda", CUDA_EXECUTOR],
@@ -69,6 +70,18 @@ describe "ProcessingIR GPU executor fault source contract":
         expect(source).to_contain(
             "env_get(\"SIMPLE_GPU_FAULT_INJECT_SKIP_MATCHES\") != \"1\" or\n        _processing_ir_fault_match_count > 1")
 
+    it "requires exact Metal success output and checksum":
+        val source = _assert_exists_and_read(METAL_LIVE_SPEC)
+        expect(source).to_contain(
+            "processing_ir_fill_u32, processing_ir_output_matches")
+        expect(source).to_contain(
+            "val values_exact = processing_ir_output_matches(ir, result.values)")
+        expect(source).to_contain("val checksum = _checksum(result.values)")
+        expect(source).to_contain(
+            "values=8 values_exact=true checksum=135272480")
+        expect(source).to_contain(
+            "values=0 values_exact=false checksum=0 handle=0 identity=0")
+
     it "returns non-owning provenance after resource cleanup":
         val vulkan = file_read(VULKAN_EXECUTOR)
         val metal = file_read(METAL_EXECUTOR)
@@ -96,14 +109,11 @@ describe "ProcessingIR GPU executor fault source contract":
     it "releases CUDA allocations before every post-context return":
         val cuda = file_read(CUDA_EXECUTOR)
         expect(cuda).to_contain("fn _processing_cuda_cleanup")
-        expect(cuda).to_contain("if device > 0:\n        cuda_mem_free(device)")
-        expect(cuda).to_contain("if module > 0:\n        cuda_module_unload(module)")
+        expect(cuda).to_contain("if device > 0:\n        session.free(device)")
         expect(cuda).to_contain("if values_ptr != 0:\n        raw_free(values_ptr, PROCESSING_CUDA_ARG_BYTES)")
         expect(cuda).to_contain("if args_ptr != 0:\n        raw_free(args_ptr, PROCESSING_CUDA_ARG_BYTES)")
         expect(cuda).to_contain("if host_ptr != 0:\n        raw_free(host_ptr, byte_count)")
-        expect(cuda).to_contain("if ctx > 0:\n        cuda_ctx_destroy(ctx)")
-        _assert_cleanup_before_boundary(cuda, "if module <= 0:", "cuda_ctx_destroy(ctx)", "return ProcessingCudaResult(completed: false")
-        val full = "_processing_cuda_cleanup(ctx, module, device, values_ptr, args_ptr, host_ptr, byte_count)"
+        val full = "_processing_cuda_cleanup(executor.session, device, values_ptr, args_ptr, host_ptr, byte_count)"
         _assert_cleanup_before_boundary(cuda, "if device <= 0 or values_ptr == 0 or args_ptr == 0 or host_ptr == 0:", full, "return ProcessingCudaResult(completed: false")
         _assert_cleanup_before_boundary(cuda, "if submit_fault != \"\":", full, "return ProcessingCudaResult(completed: false")
         _assert_cleanup_before_boundary(cuda, "if synced and readback_fault != \"\":", full, "return ProcessingCudaResult(completed: false")

@@ -86,6 +86,16 @@ if [ "$ready" -ne 1 ]; then
     exit 1
 fi
 
+expected_verify=false
+[ "$MODE" != device-warm ] || expected_verify=true
+verify_total=$(grep -Ec '^HOST_GPU_DAEMON_VERIFY ' "$DAEMON_LOG" || true)
+verify_valid=$(grep -Ec "^HOST_GPU_DAEMON_VERIFY processing_verify_cpu=$expected_verify$" "$DAEMON_LOG" || true)
+if [ "$verify_total" -ne 1 ] || [ "$verify_valid" -ne 1 ]; then
+    echo "simpleos_gpu_fallback_wire_status=fail"
+    echo "simpleos_gpu_fallback_wire_reason=daemon-verifier-mode-mismatch"
+    exit 1
+fi
+
 set +e
 if [ "$MODE" = fallback ]; then
     output=$(timeout -k 5 "$TEST_TIMEOUT_SECONDS" "$PROBE_BIN" --shm "$SHM" "--expected-reason=$EXPECTED_REASON" 2>&1)
@@ -128,7 +138,8 @@ else
             expected = (cpu > 0 && device > 0 && cpu >= device &&
                         cpu - device >= int(device / 2) + (device % 2)) \
                 ? "preferred" : "available-not-preferred"
-            if (backend != "cuda" || generation != seen + 2 || run != 7001 ||
+            if (cpu <= 0 || device <= 0 || backend != "cuda" ||
+                generation != seen + 2 || run != 7001 ||
                 frame != seen + 91 || preference != expected) exit 1
             seen++
         }

@@ -24,10 +24,12 @@ SIMPLE_LIB=src bin/simple test \
 
 ## Checks
 
-1. With both fault variables absent, Metal completes eight output elements
-   with `reason=ok`, a nonzero handle, and a nonzero device identity.
+1. With both fault variables absent, Metal completes eight exact
+   `0x01020304` output elements with checksum `135272480`, `reason=ok`, a
+   nonzero handle, and a nonzero device identity.
 2. Each injected phase returns its exact typed reason.
-3. Every injected failure returns empty output, handle `0`, and identity `0`.
+3. Every injected failure returns empty output, `values_exact=false`, checksum
+   `0`, handle `0`, and identity `0`.
 4. Setting only one fault variable leaves injection disabled.
 5. Each probe runs in an isolated child environment without re-entering tests.
 6. Every child is bounded to 30 seconds and 4 MiB per output stream. A timeout
