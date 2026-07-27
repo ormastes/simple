@@ -987,3 +987,20 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   evidence. Resume requires a reviewed descriptor-exec helper plus a
   builder-owned raw immutable x86 ESP image, then the still-open SIMD parity,
   ordered input/damage/frame, backend identity, timing, and RSS gates.
+
+- continuation-2026-07-27-qemu-host-launch-helper-hard-stop: **THREE-CYCLE
+  CAP / NOT INTEGRATED.** Darwin SDK research found no `fexecve`/`execveat`, so
+  a fresh lane attempted a host C `posix_spawn` launcher with fixed inherited
+  media descriptors and an opt-in raw ESP profile. Independent review rejected
+  cycle 1; cycle 2 fixed descriptor roles, canonical argv/environment framing,
+  and catalog compatibility, but P0 supervision/provenance/wiring/profile/test
+  gaps remained. The final cycle stopped without changes rather than weaken
+  them. Candidate `e98275fca0` lacks pre-spawn validation/receipt reservation,
+  no-orphan kill-and-wait cleanup, supervised wait/signal/post-exit receipt,
+  truthful exact source/compiler/SDK/argv/environment build provenance and
+  concurrency-safe publication, QEMU signature+dylib/resource closure
+  admission, exact wrapper fdset wiring, an isolated BOOTX64/kernel-only raw
+  producer, and executable fake-QEMU behavior tests. Its threat claim could
+  cover honest same-UID race resistance only; malicious same-UID admission
+  remains unavailable without a privileged OS-immutable store. No QEMU guest,
+  bootstrap, integration, or push ran; the candidate is not evidence.

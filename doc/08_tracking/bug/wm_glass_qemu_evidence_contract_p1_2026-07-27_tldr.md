@@ -10,8 +10,15 @@
 - A three-cycle isolated repair stopped at macOS `/dev/fd/7` executable
   permission denial; rejected/uncommitted candidates are not evidence.
 - No fourth attempt, live QEMU, bootstrap, integration, or push ran.
-- Resume frozen admission only after a reviewed descriptor-exec helper and raw
-  immutable x86 ESP-image builder exist.
+- Darwin has no reviewed `fexecve`; resume only after a supervised,
+  provenance-bound `posix_spawn`/fdset helper and raw immutable ESP builder.
+- The helper can claim honest same-UID race resistance only; malicious same-UID
+  admission stays unavailable without a privileged OS-immutable store.
+- Helper candidate `e98275fca0` hit its three-cycle cap with supervision,
+  closure admission, wrapper wiring, raw-profile isolation, and behavior tests
+  still missing; it is unintegrated and not evidence.
+- It also lacks truthful exact helper-build provenance and pre-spawn
+  validation/receipt reservation with no-orphan kill-and-wait cleanup.
 - Resume only with admitted source-matched artifacts through the canonical
   x86 and ARM evidence wrappers.
 

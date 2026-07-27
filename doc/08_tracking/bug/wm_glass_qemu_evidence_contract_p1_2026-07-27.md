@@ -67,20 +67,53 @@ edits remain uncommitted in
 `6108a099f5`; they are not source evidence and must not be absorbed. No fourth
 attempt, live QEMU, bootstrap, integration, or push ran. A fresh lane requires:
 
-1. a reviewed `fexecve`/equivalent helper that executes an already-open
-   authenticated tool descriptor without reopening a mutable pathname;
+1. a reviewed host C launcher that executes a verified private QEMU path
+   snapshot with `posix_spawn`, preserves only fixed media descriptors through
+   QEMU fdsets, supervises the process to exit, and truthfully limits its
+   threat claim to race resistance for honest same-UID concurrency;
 2. a builder that emits one raw immutable x86 ESP image rather than a mutable
    vvfat directory;
 3. production-wrapper fake-builder/fake-QEMU behavior tests proving exact
    descriptor-backed launch and negative launch absence after every tamper;
 4. hashed, inode/size/hash-revalidated run manifests before and after execution.
 
+Darwin SDK research found no `fexecve` or `execveat`. A subsequent isolated
+host-C helper lane therefore used the `posix_spawn` direction. Cycle 1 was
+independently rejected for a broken public export, caller-controlled descriptor
+collisions, noncanonical pre-spawn receipts, inaccurate build provenance, an
+unwired/dead raw profile, and source-string-only tests. Cycle 2 repaired fixed
+roles/FDs, canonical argv/environment framing, and normal catalog
+compatibility, but retained P0 gaps. The final cycle stopped without weakening
+those gates. Candidate `e98275fca0` remains unintegrated because it lacks:
+
+- supervised process-group lifecycle, signal relay, wait/status policy, and
+  post-exit atomic receipts;
+- pre-spawn environment validation and exclusive receipt reservation, with
+  kill-and-wait cleanup on every post-spawn failure so no child is orphaned;
+- QEMU code-signature plus recursive dylib/resource closure admission;
+- truthful helper-build provenance: no-follow source snapshot, exact compiled
+  snapshot/argv/sanitized environment, compiler+SDK closure, verified
+  compiler/helper signatures, helper dylib/resource closure, and unique
+  concurrency-safe output/receipt publication;
+- supported evidence-wrapper construction and validation of exact
+  `-add-fd`/`/dev/fdset` roles;
+- a structurally isolated BOOTX64/kernel-only `wm-uefi-boot-v1` producer; and
+- executable fake-QEMU behavior tests rather than source-substring inspection.
+
+No QEMU guest, bootstrap, integration, or push ran in that helper lane. The
+candidate and its known unstaged Gradle EOL checkout noise are not evidence.
+Future snapshots and receipts must also be reopened and rehashed after `fsync`,
+then atomically published with their containing directories synced.
+
 ## Required repair and resume
 
 - Publish and consume the x86 frozen manifest; reject every external kernel or
   disk that is not bound to it.
-- Provide the reviewed descriptor-exec helper and raw immutable x86 ESP-image
-  builder required by the bounded hard stop above.
+- Provide the reviewed supervised `posix_spawn`/fdset helper and raw immutable
+  x86 ESP-image builder required by the bounded hard stops above.
+- Bind the helper build to the exact no-follow source snapshot, actual
+  compiler/SDK closure, canonical argv/sanitized environment, verified
+  signatures/dependencies, and concurrency-safe output/receipt publication.
 - Require x86 SSE2 execution and bit-exact scalar parity.
 - Require strict QMP input -> guest IRQ/VirtIO -> WM state -> damage -> frame
   commit order, with the event receipt finalized only after the correlated

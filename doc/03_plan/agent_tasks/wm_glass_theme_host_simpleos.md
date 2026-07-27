@@ -710,10 +710,20 @@ was not integrated. Its final behavior gate stopped before launch because the
 attempted unlinked fake-QEMU snapshot execution through macOS `/dev/fd/7` was
 denied. No fourth attempt, live QEMU, bootstrap, integration, or push ran.
 The x86 route also correctly identified that mutable vvfat cannot satisfy the
-required final-byte contract. Resume only with a reviewed
-`fexecve`/descriptor-exec helper and a builder-owned raw immutable ESP image;
-the rejected commit `6108a099f5` and uncommitted final-cycle worktree are not
-source evidence.
+required final-byte contract. Resume only with a supervised, provenance-bound
+host C `posix_spawn`/fdset helper and a builder-owned raw immutable ESP image;
+Darwin exposes no usable `fexecve`. Rejected commit `6108a099f5`, uncommitted
+final-cycle work, and the later incomplete helper candidate `e98275fca0` are
+not source evidence. The helper candidate exhausted its own three-cycle cap
+without process supervision, QEMU closure admission, wrapper wiring,
+raw-profile isolation, or executable fake-QEMU behavior tests. No QEMU guest,
+bootstrap, integration, or push ran. A future helper may claim honest same-UID
+race resistance only; malicious same-UID admission remains unavailable without
+a privileged OS-immutable store. It must validate environment and exclusively
+reserve the receipt before spawn, kill-and-wait every post-spawn failure, and
+bind its exact no-follow source snapshot, actual compiler/SDK/argv/sanitized
+environment, verified signatures/dependency closure, and concurrency-safe
+output/receipt publication.
 In particular, x86 must publish and consume frozen admission with no external-
 ELF bypass, prove SSE2/scalar parity and ordered damage/frame receipts, while
 ARM direct-`-kernel` firmware is N/A; it must bind theme/material/backend/
