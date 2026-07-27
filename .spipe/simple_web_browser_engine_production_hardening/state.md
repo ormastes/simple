@@ -861,3 +861,14 @@ implementation in progress / target evidence blocked
   close returns zeroed renderer/raster owners. Runnable policy coverage and
   the source contract were updated; executable Simple evidence remains
   compiler-blocked.
+- HSTS URL canonicalization: BrowserSession now validates and normalizes
+  explicit HTTP candidates before navigation-permit policy matching, so
+  mixed-case schemes/hosts are covered without repairing bare or malformed
+  inputs. Upgrade maps port 80 to HTTPS 443 and preserves other explicit
+  ports. Existing HSTS security coverage now asserts positive and negative
+  cases.
+- Remaining HSTS subresource blocker: A broker-only URL rewrite was rejected
+  in review because the worker still correlates the original HTTP request.
+  Production completion requires carrying both original and effective URLs
+  (or synchronized HSTS state) across the renderer protocol, with strict
+  same-host/path and port-transition validation.

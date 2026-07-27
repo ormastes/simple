@@ -13,7 +13,9 @@ use std.js.types.pair.{Pair}
 use std.js.types.js_types.{JsValue}
 use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserLoadState, BrowserPendingModuleEval, BrowserScriptBlock, BrowserHistoryEntry, BrowserResponse, BrowserWasmModuleRecord, BrowserHstsPolicy, BrowserHstsSnapshot, BrowserHstsSnapshotEntry}
 use std.gc_async_mut.web.browser_session_storage.{pair_value, upsert_pair}
-use std.gc_async_mut.web.browser_session_url.{resolve_relative_url, url_hostname}
+use std.gc_async_mut.web.browser_session_url.{
+    normalize_network_navigation_url, resolve_relative_url, url_hostname
+}
 use common.web.public_suffix.{is_public_suffix}
 use common.web.host_policy.{is_ip_host_literal}
 use std.gc_async_mut.web.browser_session_html.{
@@ -32,6 +34,7 @@ use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_bui
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     BROWSER_MAX_DOCUMENT_SUBRESOURCES
 }
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
 
 fn _append_script_compat_warnings(warnings: [text], block: BrowserScriptBlock) -> [text]:
     warnings
@@ -891,16 +894,26 @@ impl BrowserSession:
         accepted
 
     me _hsts_upgrade_url(url: text) -> text:
-        if not url.starts_with("http://"):
+        val normalized = match normalize_network_navigation_url(url):
+            Err(_):
+                return url
+            Ok(value):
+                value
+        if not normalized.starts_with("http://"):
             return url
-        val host = url_hostname(url).lower()
+        val parsed = Url.parse(normalized)
+        val host = parsed.host
         for policy in self.hsts_policies:
             val subdomain_match = (
                 policy.include_subdomains and host.ends_with("." + policy.host)
             )
             if policy.expires_at_ms > self.monotonic_time_ms and
                (host == policy.host or subdomain_match):
-                return "https://" + url.substring(7)
+                var upgraded = parsed
+                upgraded.scheme = "https"
+                if upgraded.port == 80:
+                    upgraded.port = 443
+                return upgraded.to_text()
         url
 
     me _update_history(url: text, html: text, target_index: i32, push_history: bool):

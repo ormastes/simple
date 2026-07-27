@@ -21,8 +21,9 @@
   module/Wasm, and fetch dispatch.
 - Recheck CSP on every normalized/HSTS-upgraded style, script, module, Wasm,
   and fetch redirect target before queuing another request.
-- Upgrade HSTS hosts and included subdomains until deterministic max-age
-  expiry.
+- Normalize validated explicit HTTP HSTS hosts and included subdomains until
+  deterministic max-age expiry, mapping port 80 to HTTPS 443 while preserving
+  other explicit ports and leaving malformed/non-HTTP inputs unchanged.
 - Ignore malformed signed HSTS `max-age` directives without clearing an
   already valid policy while retaining `max-age=0` as explicit removal.
 - Restore only valid, unexpired, unique HSTS policies from wall-clock profile
