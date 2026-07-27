@@ -197,9 +197,16 @@ impl VfsService:
             truncate: (flags_raw & 0x10) != 0,
             directory: false
         )
-        match self.vfs.open(path, flags):
+        var mgr = self.vfs
+        val opened = mgr.open(path, flags)
+        self.vfs = mgr
+        match opened:
             Result.Ok(fd):
-                self.send_u64_reply(src_port, STATUS_OK, fd.fd.to_u64())
+                # Reply with the VFS handle (fd.node), which is what READ/
+                # WRITE/CLOSE/SEEK resolve through the handle table. fd.fd is
+                # only the per-process descriptor number and never identified
+                # a mount.
+                self.send_u64_reply(src_port, STATUS_OK, fd.node)
             Result.Err(e):
                 self.send_error_reply(src_port, STATUS_NOT_FOUND, e)
 
@@ -207,10 +214,12 @@ impl VfsService:
         """Parse READ request: fd(u64) | size(u64)."""
         val fd = _read_u64(payload_addr)
         val size = _read_u64(payload_addr + 8)
-        # Find the mount for this fd and read
-        # For now use the fd's underlying handle directly
-        val mount = self.vfs.mounts[0]  # Simplified: use first mount
-        match mount.fs.read(fd, size):
+        # Routed by VfsManager via the handle table (converged owner:
+        # os.kernel.fs.vfs_handle_table); the mounts[0] bypass is deleted.
+        var mgr = self.vfs
+        val result = mgr.read(fd, size)
+        self.vfs = mgr
+        match result:
             Result.Ok(data):
                 self.send_bytes_reply(src_port, STATUS_OK, data)
             Result.Err(e):
@@ -225,8 +234,10 @@ impl VfsService:
         while i < data_len:
             data.push(_read_u8(payload_addr + 8 + i.to_u64()))
             i = i + 1
-        val mount = self.vfs.mounts[0]
-        match mount.fs.write(fd, data):
+        var mgr = self.vfs
+        val result = mgr.write(fd, data)
+        self.vfs = mgr
+        match result:
             Result.Ok(written):
                 self.send_u64_reply(src_port, STATUS_OK, written)
             Result.Err(e):
@@ -235,8 +246,10 @@ impl VfsService:
     me dispatch_close(src_port: u64, payload_addr: u64, payload_len: u32):
         """Parse CLOSE request: fd(u64)."""
         val fd = _read_u64(payload_addr)
-        val mount = self.vfs.mounts[0]
-        match mount.fs.close(fd):
+        var mgr = self.vfs
+        val result = mgr.close(fd)
+        self.vfs = mgr
+        match result:
             Result.Ok(v):
                 self.send_u64_reply(src_port, STATUS_OK, 1)
             Result.Err(e):
@@ -403,8 +416,10 @@ impl VfsService:
             1: SeekWhence.Cur
             2: SeekWhence.End
             _: SeekWhence.Set
-        val mount = self.vfs.mounts[0]
-        match mount.fs.seek(fd, offset, whence):
+        var mgr = self.vfs
+        val result = mgr.seek(fd, offset, whence)
+        self.vfs = mgr
+        match result:
             Result.Ok(pos):
                 self.send_u64_reply(src_port, STATUS_OK, pos)
             Result.Err(e):

@@ -7,7 +7,10 @@
 
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
 use os.kernel.types.task_types.{TaskId, TaskPriority, BlockReason}
-use os.kernel.ipc.cspace_spawn.{spawn_full}
+# NOTE: `spawn_full()` is no longer called directly here — every ambient grant
+# now goes through `spawn_authority_ambient_caps()`, which returns `spawn_full()`
+# for authorized callers and the pledged deny-all set for everyone else.
+use os.kernel.loader.spawn_authority.{spawn_authority_check_ambient, spawn_authority_ambient_caps, spawn_authority_bootstrap_sealed}
 use os.kernel.types.vmspace_types.{ProcessVmSpace}
 use os.kernel.scheduler.scheduler.{Scheduler, wait_collect_result_pid, wait_collect_result_status, wait_collect_result_error}
 use os.kernel.ipc.ipc.{IpcManager}
@@ -88,6 +91,40 @@ fn _process_grant_errno_for_path(path: text, klog: KernelLog) -> i64:
     klog_write(log, 3, 1, 0, "process grant denied path={path} reason={reason}")
     0 - EACCES as i64
 
+# ============================================================================
+# Ambient-spawn authority gate (master plan 5.4 — loader/spawn_authority.spl)
+# ============================================================================
+#
+# FREESTANDING DISCIPLINE: these are plain `fn`s over scalar values, no classes
+# and no trait-object dispatch, and they add at most one extra frame in front of
+# an already-deep spawn call chain (the kernel stack is tight — see
+# fs_exec_resolve.spl's header).
+
+fn _ambient_spawn_caller(scheduler: Scheduler) -> i64:
+    """Task id of the caller about to take the ambient `spawn_full()` path.
+
+    `Scheduler.get_current()` is the same source `_handle_getpid` uses, so the
+    id here is exactly the pid the caller sees. During boot no user task is
+    current, which yields 0 — the kernel-origin/root sentinel the guard and
+    `cap_exec_gate` both use, so the boot path stays allowed."""
+    scheduler.get_current().id.to_i64()
+
+fn _ambient_spawn_denied(caller: i64) -> bool:
+    """True when the ambient full-authority spawn path is refused for `caller`.
+
+    Refusal is only possible after `spawn_authority_seal_bootstrap()`; while the
+    bootstrap window is open every caller is allowed (fail-open boot, fail-closed
+    afterwards). The redundant `bootstrap_sealed()` re-check keeps that invariant
+    explicit at the call site rather than implicit in the guard."""
+    if spawn_authority_check_ambient(caller) == 0:
+        return false
+    if not spawn_authority_bootstrap_sealed():
+        return false
+    # `spawn_authority_ambient_caps` is what keeps the guard's audit counter, so
+    # take (and drop) the powerless set it hands back on the refusal path.
+    val _refused_caps = spawn_authority_ambient_caps(caller)
+    true
+
 fn _handle_exit(args: SyscallArgs, scheduler: Scheduler, ipc: IpcManager) -> SyscallResult:
     """Exit the current task with the given exit code.
 
@@ -140,7 +177,11 @@ fn _handle_spawn(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     # until the AT_SIMPLE_CSPACE injection ABI lands (P3). Route through the
     # named spawn_full() wrapper so the ambient grant stays auditable — the
     # least-authority default lives in spawn_with_cspace (cspace_spawn.spl).
-    val caps = spawn_full()
+    # Gate 1/3: once bootstrap is sealed only the root task keeps that wrapper.
+    val caller = _ambient_spawn_caller(scheduler)
+    if _ambient_spawn_denied(caller):
+        return SyscallResult(value: 0 - EACCES as i64)
+    val caps = spawn_authority_ambient_caps(caller)
 
     var sched = scheduler
     val task_id = sched.create_task(entry, priority, caps)
@@ -657,7 +698,11 @@ fn _handle_spawn_binary(args: SyscallArgs, scheduler: Scheduler, klog: KernelLog
         val priority = _u64_to_priority(priority_raw)
         # Boot/init compat wrapper (see spawn_full); migrates to a per-image
         # SpawnSpec pouch once the injection ABI is wired at boot.
-        val caps = spawn_full()
+        # Gate 2/3: sealed bootstrap -> non-root callers get EACCES, not caps.
+        val caller = _ambient_spawn_caller(scheduler)
+        if _ambient_spawn_denied(caller):
+            return SyscallResult(value: 0 - EACCES as i64)
+        val caps = spawn_authority_ambient_caps(caller)
         var sched = scheduler
         val before_next_task_id = g_scheduler_next_task_id
         val raw_pid = sched.create_user_task_pid(image_result.unwrap(), priority, caps)
@@ -726,7 +771,11 @@ fn _spawn_from_resolved_bytes_for_arch_state(path: text, path_bytes: [u8], bytes
     val priority = _u64_to_priority(priority_raw)
     # Boot/init compat wrapper (see spawn_full); migrates to a per-image
     # SpawnSpec pouch once the injection ABI is wired at boot.
-    val caps = spawn_full()
+    # Gate 3/3: sealed bootstrap -> non-root callers get EACCES, not caps.
+    val caller = _ambient_spawn_caller(scheduler)
+    if _ambient_spawn_denied(caller):
+        return SpawnBinaryDirectState(pid: 0 - EACCES as i64, scheduler: scheduler)
+    val caps = spawn_authority_ambient_caps(caller)
     var sched = scheduler
     log_raw_println("[syscall13] staged create_user_task begin")
     val pid = sched.create_user_task_from_bytes_pid(path, bytes, arch, priority, caps)

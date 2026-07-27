@@ -16,6 +16,7 @@ use os.kernel.privilege.privilege_bridge.{bridge_deposit_boot_mirrors}
 use os.kernel.memory.memory_leveling_manager.{simpleos_memory_leveling_config_default, simpleos_memory_leveling_config_for_physical_capacity}
 use os.kernel.memory.memory_leveling_runtime.{memory_leveling_runtime_init}
 use os.kernel.memory.pmm.{pmm_total_memory}
+use os.kernel.loader.spawn_authority.{spawn_authority_set_root_task, spawn_authority_seal_bootstrap, spawn_authority_bootstrap_sealed}
 
 use os.kernel.log.klog_api.{log_raw_println}
 
@@ -30,6 +31,21 @@ use os.kernel.log.klog_api.{log_raw_println}
 # "unregistered" sentinel, so we pick a high non-zero constant that cannot
 # collide with a real TaskId.
 val SPM_WELL_KNOWN_TASK_ID: u64 = 0xfffffff0 as u64
+
+# Task id that keeps ambient (`spawn_full`) authority after the bootstrap window
+# closes. There is no distinct "init task id" constant in the kernel: both
+# `spawn_authority.spl` and `cap_exec_gate.spl` use `caller == 0` as the
+# kernel-origin/root sentinel, and `Scheduler.get_current()` reports 0 while no
+# user task is current, so 0 is the root identity for this gate.
+val BOOT_ROOT_TASK_ID: i64 = 0
+
+# Whether init_all_services() arms the ambient-spawn seal at boot. Default off:
+# the guard mechanism and syscall-site enforcement ship and are spec-proven, but
+# arming waits on the userland SpawnSpec migration + a QEMU boot+launch
+# transcript (see Step 6). A function, not a `val` — freestanding module-global
+# scalar init is reliable but a fn keeps the flip explicit and greppable.
+fn _seal_ambient_spawn_on_boot() -> bool:
+    return false
 
 # ============================================================================
 # Service Status Tracking
@@ -108,6 +124,27 @@ fn init_all_services():
     if svc_storage_ok:
         log_raw_println("[init] VFS service ready (call vfs_service_start to enter IPC loop)")
 
+    # Step 6: Seal the ambient-spawn window (master plan 5.4).
+    # Every essential service above was spawned with bootstrap authority. From
+    # here on, only the root task may take the ambient `spawn_full()` path in
+    # syscall_process; every other caller must present a SpawnSpec recipe or is
+    # refused EACCES. Must be the LAST step of boot service init — anything
+    # sealed too early loses its ambient grant mid-bringup.
+    #
+    # GATED OFF by default: arming the seal makes every userland syscall-spawn
+    # (pid != 0) return EACCES, which regresses in-guest shell/WM/fs-exec launch
+    # until those callers are migrated to SpawnSpec recipes. There is no QEMU
+    # boot evidence yet that the sealed path preserves in-guest launch. The root
+    # task is always registered (harmless); actual sealing waits on the userland
+    # SpawnSpec migration follow-up. Flip _seal_ambient_spawn_on_boot()->true and
+    # capture a QEMU boot+launch transcript to promote.
+    spawn_authority_set_root_task(BOOT_ROOT_TASK_ID)
+    if _seal_ambient_spawn_on_boot():
+        spawn_authority_seal_bootstrap()
+        log_raw_println("[init] Spawn authority: bootstrap window SEALED (root={BOOT_ROOT_TASK_ID})")
+    else:
+        log_raw_println("[init] Spawn authority: root registered, seal DEFERRED (SpawnSpec migration pending)")
+
     log_raw_println("========================================")
     log_raw_println("[init] Service initialization complete")
     log_raw_println("[init]   storage: {if svc_storage_ok: "OK" else: "UNAVAILABLE"}")
@@ -176,6 +213,10 @@ fn spm_well_known_task_id() -> u64:
     """Return the placeholder TaskId used by the kernel boot path to claim
     the SPM port slot before the real SPM service has spawned."""
     SPM_WELL_KNOWN_TASK_ID
+
+fn services_spawn_authority_sealed() -> bool:
+    """True once boot service init has closed the ambient-spawn window."""
+    spawn_authority_bootstrap_sealed()
 
 fn services_all_ready() -> bool:
     """Check if all essential services are available."""

@@ -195,12 +195,11 @@ impl OsMcpServer:
         val open_result = self.vfs.open(path, flags)
         match open_result:
             Ok(fd):
-                val mount = self.vfs.resolve_mount(path)
-                if mount == nil:
-                    return "error: no filesystem for {path}"
-                val entry = mount
-                val read_result = entry.fs.read(fd.node, 65536)
-                entry.fs.close(fd.node)
+                # Route through the VfsManager handle table (INT-2): the fd is a
+                # global handle, so read/close must go through self.vfs, not a
+                # per-mount driver keyed by the handle directly.
+                val read_result = self.vfs.read(fd.node, 65536)
+                self.vfs.close(fd.node)
                 match read_result:
                     Ok(bytes):
                         # Convert bytes to text (simplified)
@@ -223,18 +222,16 @@ impl OsMcpServer:
         val open_result = self.vfs.open(path, flags)
         match open_result:
             Ok(fd):
-                val mount = self.vfs.resolve_mount(path)
-                if mount == nil:
-                    return "error: no filesystem for {path}"
-                val entry = mount
+                # Route through the VfsManager handle table (INT-2), not a
+                # per-mount driver keyed by the global handle.
                 # Convert text to bytes (simplified)
                 var data: [u8] = []
                 var i = 0
                 while i < content.len():
                     data = data + [content[i]]
                     i = i + 1
-                val write_result = entry.fs.write(fd.node, data)
-                entry.fs.close(fd.node)
+                val write_result = self.vfs.write(fd.node, data)
+                self.vfs.close(fd.node)
                 match write_result:
                     Ok(bytes_written):
                         return "ok: wrote {bytes_written} bytes to {path}"

@@ -47,6 +47,30 @@ browser process split (§24.20).
 - P1 IPC ↔ P4 service RPC · P2 loader ↔ P6 executables · P3 VFS ↔ P6 tool
   files · P8 policy ↔ P2 spawn. Contract specs live in the producer's test dir.
 
+## Stage INT — Integration/enforcement wiring (after Stage P; the "delete every bypass" step)
+
+Connects the Stage-P lane deliverables into live enforcement. Disjoint files.
+
+| Lane | Task | Exclusive files | Gate |
+|---|---|---|---|
+| INT-1 spawn enforce | Arm boot seal in `init_all_services()`; route the 3 ambient `spawn_full()` sites through `spawn_authority_check_ambient` | `src/os/kernel/ipc/syscall_process.spl`, `src/os/kernel/boot/init_services.spl`, `test/01_unit/os/kernel/loader/spawn_enforcement_wiring_spec.spl` | sealed window denies non-root ambient spawn (state-machine spec); QEMU boot evidence deferred |
+| INT-2 VFS wire | Wire `VfsHandleTable` into `src/os/services/vfs` open/read/write/close; delete mounts[0] routing | `src/os/services/vfs/**`, `test/01_unit/os/kernel/fs/vfs_service_handle_routing_spec.spl` | ops route to opening mount, not mount[0] |
+| INT-3 LLM→spawn | Pure adapter mapping LlmProfile rights → spawn effective-rights (triple attenuation, fail-closed) | `src/os/security/llm_profiles/profile_spawn_adapter.spl`, `test/01_unit/os/security/llm_profile_spawn_adapter_spec.spl` | final rights ⊆ profile ∩ parent ∩ executable |
+
+## Phase 3-8 status (honest)
+
+Later phases are large bodies of work, several host-blocked; they remain as
+recorded blocked rows with resume plans (SPipe rule: forced PASS forbidden,
+postponement-with-TODO is valid). Not startable/completable this session:
+- P6 QEMU lld gate — blocked on `lld_static` not built (multi-hour LLVM cross
+  build) + no multi-payload guest-image stager. Resume: `sh scripts/os/ssh_lld_link_uefi.shs`.
+- SQLite-over-VFS port, OpenSSH port, native web server, container enforcement,
+  browser renderer/network/GPU split — each a multi-session port/build.
+- Hardware qualification, secure boot, installer, soak, SBOM — need physical
+  boards / release infra.
+These are Phase 3-8 of the master plan §22 and stay open with owners in the
+production status ledger.
+
 ## Execution rules
 
 1. One jj commit stream per lane; commit only lane-owned paths (anti-clobber).
