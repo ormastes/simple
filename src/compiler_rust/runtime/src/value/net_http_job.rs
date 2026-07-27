@@ -108,7 +108,9 @@ fn browser_http_tls(
 ) -> std::io::Result<Vec<u8>> {
     let server_name = rustls::pki_types::ServerName::try_from(host.to_owned())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid TLS server name"))?;
-    let connection = rustls::ClientConnection::new(TLS_CLIENT_CONFIG.clone(), server_name)
+    let config = platform_tls_client_config()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+    let connection = rustls::ClientConnection::new(config, server_name)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
     let mut tls = rustls::StreamOwned::new(connection, stream);
     browser_http_canceled(job)?;

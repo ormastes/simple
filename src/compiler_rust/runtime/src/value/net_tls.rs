@@ -13,7 +13,7 @@
 // parallel.
 //
 // Client: `rt_tls_client_connect/read/write/close`.
-// Uses a lazily-initialized `ClientConfig` with Mozilla CA roots (webpki-roots).
+// Uses a lazily-initialized `ClientConfig` with the platform verifier.
 // Per-connection state is a `(ClientConnection, TcpStream)` pair in a separate
 // handle table (`TLS_CLIENT_CONNS`).
 //
@@ -90,17 +90,20 @@ struct TlsClientConnEntry {
 lazy_static::lazy_static! {
     static ref TLS_CLIENT_CONNS: std::sync::Mutex<HashMap<i64, std::sync::Arc<std::sync::Mutex<TlsClientConnEntry>>>> =
         std::sync::Mutex::new(HashMap::new());
-    static ref TLS_CLIENT_CONFIG: std::sync::Arc<rustls::ClientConfig> = {
-        let mut root_store = rustls::RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    static ref TLS_CLIENT_CONFIG: Result<std::sync::Arc<rustls::ClientConfig>, String> = {
+        use rustls_platform_verifier::BuilderVerifierExt;
         let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
-        let config = rustls::ClientConfig::builder_with_provider(provider)
+        rustls::ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-        std::sync::Arc::new(config)
+            .map_err(|error| format!("TLS protocol configuration failed: {error}"))?
+            .with_platform_verifier()
+            .map(|builder| std::sync::Arc::new(builder.with_no_client_auth()))
+            .map_err(|error| format!("platform TLS verifier unavailable: {error}"))
     };
+}
+
+fn platform_tls_client_config() -> Result<std::sync::Arc<rustls::ClientConfig>, String> {
+    TLS_CLIENT_CONFIG.as_ref().cloned().map_err(Clone::clone)
 }
 
 const TLS_HANDLE_BIT: i64 = 0x4000_0000_0000_0000;
@@ -174,6 +177,13 @@ fn write_bytes_to_stream(handle: i64, data: crate::value::RuntimeValue) -> i64 {
 }
 
 fn tls_client_connect_impl(host_str: &str, port: i64, sni_name: &str) -> i64 {
+    let config = match platform_tls_client_config() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("rt_tls_client_connect: {error}");
+            return -1;
+        }
+    };
     let server_name = match rustls::pki_types::ServerName::try_from(sni_name.to_string()) {
         Ok(sn) => sn,
         Err(e) => {
@@ -181,7 +191,7 @@ fn tls_client_connect_impl(host_str: &str, port: i64, sni_name: &str) -> i64 {
             return -1;
         }
     };
-    let conn = match rustls::ClientConnection::new(TLS_CLIENT_CONFIG.clone(), server_name) {
+    let conn = match rustls::ClientConnection::new(config, server_name) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("rt_tls_client_connect: ClientConnection::new: {}", e);
@@ -739,4 +749,14 @@ pub extern "C" fn rt_tls_generate_self_signed_cert(
 #[no_mangle]
 pub extern "C" fn rt_tls_hash_cert(_cert_path: crate::value::RuntimeValue) -> crate::value::RuntimeValue {
     empty_text()
+}
+
+#[cfg(test)]
+mod platform_trust_tests {
+    use super::TLS_CLIENT_CONFIG;
+
+    #[test]
+    fn platform_verifier_initializes() {
+        assert!(TLS_CLIENT_CONFIG.is_ok(), "{:?}", TLS_CLIENT_CONFIG.as_ref().err());
+    }
 }
