@@ -14,6 +14,8 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_fetch_request_encode,
     browser_renderer_key_encode,
     browser_renderer_message_encode,
+    browser_renderer_navigation_decode,
+    browser_renderer_navigation_encode,
     browser_renderer_network_response_decode,
     browser_renderer_network_response_encode,
     browser_renderer_pointer_encode,
@@ -140,6 +142,45 @@ describe "isolated browser renderer protocol":
         expect(browser_renderer_action_decode(BrowserRendererMessage(
             kind: "advance", generation: 7, request_id: 1,
             payload: "A1\t1\ttrailing"
+        )).ok).to_be(false)
+
+    it "round-trips typed navigation and rejects noncanonical shapes":
+        val open_wire = browser_renderer_navigation_encode(
+            7, 1, "open", "https://example.test/form", "POST",
+            "X-Test: one", "name=value",
+            "application/x-www-form-urlencoded"
+        )
+        expect(open_wire.ok).to_be(true)
+        val open_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), open_wire.wire
+        )
+        val opened = browser_renderer_navigation_decode(
+            open_message.message
+        )
+        expect(opened.ok).to_be(true)
+        expect(opened.action).to_equal("open")
+        expect(opened.url).to_equal("https://example.test/form")
+        expect(opened.method).to_equal("POST")
+        expect(opened.body).to_equal("name=value")
+
+        val stop_wire = browser_renderer_navigation_encode(
+            7, 1, "stop", "", "", "", "", ""
+        )
+        expect(stop_wire.ok).to_be(true)
+        val stop_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), stop_wire.wire
+        )
+        expect(browser_renderer_navigation_decode(
+            stop_message.message
+        ).action).to_equal("stop")
+
+        expect(browser_renderer_navigation_encode(
+            7, 1, "back", "https://example.test/old", "POST",
+            "", "", ""
+        ).ok).to_be(false)
+        expect(browser_renderer_navigation_decode(BrowserRendererMessage(
+            kind: "navigation", generation: 7, request_id: 1,
+            payload: "SBN1\t4\t1\t3\t0\t0\t0\nopenxGETtrailing"
         )).ok).to_be(false)
 
     it "round-trips canonical DrawIR and fails closed on malformed stale duplicate or oversized frames":

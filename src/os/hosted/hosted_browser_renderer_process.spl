@@ -12,13 +12,14 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_fetch_request_decode,
     browser_renderer_frame_decode,
     browser_renderer_key_encode, browser_renderer_message_encode,
+    browser_renderer_navigation_encode,
     browser_renderer_network_response_encode,
     browser_renderer_pointer_encode, browser_renderer_text_encode
 }
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     FetchRequest, FetchResponse, RequestMode
 }
-use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin, Url}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
 use std.gc_async_mut.gpu.browser_engine.net.fetch.{
     FetchEngine, resolve_fetch_redirect_url
 }
@@ -30,6 +31,17 @@ use std.nogc_sync_mut.io.process_ops.{
     browser_renderer_spawn_sandboxed,
     process_close_piped, process_is_piped_alive, process_read_stdout,
     process_write_stdin_some
+}
+use os.hosted.hosted_browser_renderer_policy.{
+    HostedBrowserNavigationPermit,
+    HostedBrowserRequestPolicy,
+    hosted_browser_canonical_http_url,
+    hosted_browser_empty_navigation_permit,
+    hosted_browser_network_origin,
+    hosted_browser_redirect_status,
+    hosted_browser_renderer_request_policy,
+    hosted_browser_response_header_value,
+    hosted_browser_sanitize_fetch_headers
 }
 
 extern fn rt_sleep_ms(milliseconds: i64)
@@ -64,23 +76,6 @@ struct HostedBrowserNetworkResult:
     body: text
     error: text
 
-pub struct HostedBrowserNavigationPermit:
-    active: bool
-    url: text
-    method: text
-    headers: text
-    body: text
-    content_type: text
-    redirect_count: i64
-
-pub struct HostedBrowserRequestPolicy:
-    ok: bool
-    reason: text
-    mode: RequestMode
-    canonical_url: text
-    sanitized_headers: text
-    consumes_navigation: bool
-
 fn _network_result(
     status: i32, headers: text, body: text, error: text
 ) -> HostedBrowserNetworkResult:
@@ -89,167 +84,6 @@ fn _network_result(
         headers: headers,
         body: body,
         error: error
-    )
-
-fn _renderer_header_name_valid(name: text) -> bool:
-    if name == "":
-        return false
-    for ch in name:
-        val code = ch.char_code_at(0)
-        if not ((code >= 48 and code <= 57) or
-            (code >= 65 and code <= 90) or
-            (code >= 97 and code <= 122) or ch == "-"):
-            return false
-    true
-
-fn _renderer_fetch_headers(headers: text, content_type: text) -> Result<text, text>:
-    if headers.contains("\r") or content_type.contains("\r") or
-        content_type.contains("\n"):
-        return Err("invalid-request-headers")
-    var lines: [text] = []
-    var has_content_type = false
-    for raw_line in headers.split("\n"):
-        val line = raw_line.trim()
-        if line == "":
-            continue
-        val colon = line.index_of(":")
-        if colon <= 0:
-            return Err("invalid-request-headers")
-        val name = line.slice(0, colon).trim()
-        val lowered = name.lower()
-        if (not _renderer_header_name_valid(name) or lowered == "host" or
-            lowered == "connection" or lowered == "content-length" or
-            lowered == "transfer-encoding" or lowered == "proxy-connection" or
-            lowered == "upgrade"):
-            return Err("forbidden-request-header")
-        val value = line.slice(colon + 1, line.len()).trim()
-        for ch in value:
-            val code = ch.char_code_at(0)
-            if code < 32 and code != 9:
-                return Err("invalid-request-headers")
-        if lowered == "content-type":
-            has_content_type = true
-        lines.push("{name}: {value}")
-    if content_type != "" and not has_content_type:
-        for ch in content_type:
-            if ch.char_code_at(0) < 32:
-                return Err("invalid-request-headers")
-        lines.push("Content-Type: {content_type}")
-    Ok(lines.join("\r\n"))
-
-fn _empty_navigation_permit() -> HostedBrowserNavigationPermit:
-    HostedBrowserNavigationPermit(
-        active: false,
-        url: "",
-        method: "",
-        headers: "",
-        body: "",
-        content_type: "",
-        redirect_count: 0
-    )
-
-fn _request_policy_reject(reason: text) -> HostedBrowserRequestPolicy:
-    HostedBrowserRequestPolicy(
-        ok: false,
-        reason: reason,
-        mode: RequestMode.SameOrigin,
-        canonical_url: "",
-        sanitized_headers: "",
-        consumes_navigation: false
-    )
-
-fn _canonical_http_url(raw: text) -> text:
-    if (raw == "" or raw.contains("\0") or raw.contains("\r") or
-        raw.contains("\n") or rt_text_to_bytes(raw).len() > 8192):
-        return ""
-    val parsed = Url.parse(raw)
-    if ((parsed.scheme != "http" and parsed.scheme != "https") or
-        parsed.host == ""):
-        return ""
-    val rendered = parsed.to_text()
-    val fragment_at = rendered.index_of("#")
-    if fragment_at >= 0:
-        return rendered.slice(0, fragment_at)
-    rendered
-
-fn _network_origin(url: text) -> text:
-    Origin.from_url(Url.parse(url)).to_text()
-
-fn _response_header_value(headers: text, expected_name: text) -> text:
-    val expected = expected_name.to_lower()
-    for raw_line in headers.split("\n"):
-        val line = raw_line.trim()
-        val colon = line.index_of(":")
-        if (colon > 0 and
-            line.slice(0, colon).trim().to_lower() == expected):
-            return line.slice(colon + 1, line.len()).trim()
-    ""
-
-fn _redirect_status(status: i32) -> bool:
-    status == 301 or status == 302 or status == 303 or
-        status == 307 or status == 308
-
-pub fn hosted_browser_renderer_request_policy(
-    document_origin: text,
-    permit: HostedBrowserNavigationPermit,
-    request: BrowserRendererNetworkDecodeResult
-) -> HostedBrowserRequestPolicy:
-    if not request.ok:
-        return _request_policy_reject(request.reason)
-    val canonical_url = _canonical_http_url(request.url)
-    if canonical_url == "":
-        return _request_policy_reject("invalid-request-url")
-    val sanitized_headers = match _renderer_fetch_headers(
-        request.headers, request.content_type
-    ):
-        Err(reason):
-            return _request_policy_reject(reason)
-        Ok(value):
-            value
-    val method = request.method.to_upper()
-    if request.kind == "document":
-        if (not permit.active or canonical_url != permit.url or
-            method != permit.method or sanitized_headers != permit.headers or
-            request.body != permit.body or
-            request.content_type != permit.content_type):
-            return _request_policy_reject(
-                "unauthorized-document-request"
-            )
-        return HostedBrowserRequestPolicy(
-            ok: true,
-            reason: "ok",
-            mode: RequestMode.Navigate,
-            canonical_url: canonical_url,
-            sanitized_headers: sanitized_headers,
-            consumes_navigation: true
-        )
-    if document_origin == "":
-        return _request_policy_reject("missing-document-origin")
-    if (request.kind != "fetch" and method != "GET" and method != "HEAD"):
-        return _request_policy_reject("invalid-resource-method")
-    val request_origin = _network_origin(canonical_url)
-    if request_origin == document_origin:
-        return HostedBrowserRequestPolicy(
-            ok: true,
-            reason: "ok",
-            mode: RequestMode.SameOrigin,
-            canonical_url: canonical_url,
-            sanitized_headers: sanitized_headers,
-            consumes_navigation: false
-        )
-    # Cross-origin preflight still uses FetchEngine's direct transport. Until
-    # that hop is brokered, admit only requests that cannot require preflight.
-    if ((method != "GET" and method != "HEAD") or
-        sanitized_headers != "" or request.body != "" or
-        request.content_type != ""):
-        return _request_policy_reject("cross-origin-preflight-unavailable")
-    HostedBrowserRequestPolicy(
-        ok: true,
-        reason: "ok",
-        mode: RequestMode.Cors,
-        canonical_url: canonical_url,
-        sanitized_headers: sanitized_headers,
-        consumes_navigation: false
     )
 
 fn _renderer_wasm_hex(data: [u8]) -> text:
@@ -321,6 +155,11 @@ pub class HostedBrowserRendererProcess:
     document_url: text
     document_origin: text
     navigation_permit: HostedBrowserNavigationPermit
+    history_urls: [text]
+    history_index: i64
+    home_url: text
+    pending_history_action: text
+    pending_document_commit_url: text
     state: text
 
     static fn create(
@@ -340,7 +179,12 @@ pub class HostedBrowserRendererProcess:
             ),
             document_url: "",
             document_origin: "",
-            navigation_permit: _empty_navigation_permit(),
+            navigation_permit: hosted_browser_empty_navigation_permit(),
+            history_urls: [],
+            history_index: -1,
+            home_url: "",
+            pending_history_action: "",
+            pending_document_commit_url: "",
             state: "new"
         )
 
@@ -351,18 +195,22 @@ pub class HostedBrowserRendererProcess:
         body: text,
         content_type: text
     ) -> bool:
-        val canonical_url = _canonical_http_url(url)
+        val canonical_url = hosted_browser_canonical_http_url(url)
         val canonical_method = method.to_upper()
         if (canonical_url == "" or
             (canonical_method != "GET" and canonical_method != "POST") or
             rt_text_to_bytes(body).len() > 524288):
-            self.navigation_permit = _empty_navigation_permit()
+            self.navigation_permit = hosted_browser_empty_navigation_permit()
+            self.pending_history_action = ""
+            self.pending_document_commit_url = ""
             return false
-        val sanitized_headers = match _renderer_fetch_headers(
+        val sanitized_headers = match hosted_browser_sanitize_fetch_headers(
             headers, content_type
         ):
             Err(_):
-                self.navigation_permit = _empty_navigation_permit()
+                self.navigation_permit = hosted_browser_empty_navigation_permit()
+                self.pending_history_action = ""
+                self.pending_document_commit_url = ""
                 return false
             Ok(value):
                 value
@@ -375,7 +223,38 @@ pub class HostedBrowserRendererProcess:
             content_type: content_type,
             redirect_count: 0
         )
+        self.pending_history_action = "push"
+        self.pending_document_commit_url = ""
         true
+
+    me set_home_url(url: text) -> bool:
+        val canonical_url = hosted_browser_canonical_http_url(url)
+        if canonical_url == "":
+            return false
+        self.home_url = canonical_url
+        true
+
+    me _commit_document_url(url: text):
+        self.document_url = url
+        self.document_origin = hosted_browser_network_origin(url)
+        if self.pending_history_action == "push":
+            var next_history: [text] = []
+            var index: i64 = 0
+            while (index <= self.history_index and
+                index < self.history_urls.len()):
+                next_history.push(self.history_urls[index])
+                index = index + 1
+            next_history.push(url)
+            if next_history.len() > 256:
+                var bounded: [text] = []
+                index = next_history.len() - 256
+                while index < next_history.len():
+                    bounded.push(next_history[index])
+                    index = index + 1
+                next_history = bounded
+            self.history_urls = next_history
+            self.history_index = self.history_urls.len() - 1
+        self.pending_history_action = ""
 
     me close():
         if self.pid > 0:
@@ -543,16 +422,19 @@ pub class HostedBrowserRendererProcess:
     ) -> bool:
         if response.status <= 0:
             return true
-        if not _redirect_status(response.status):
-            self.document_url = policy.canonical_url
-            self.document_origin = _network_origin(policy.canonical_url)
+        if not hosted_browser_redirect_status(response.status):
+            self.pending_document_commit_url = policy.canonical_url
             return true
-        val location = _response_header_value(response.headers, "location")
+        val location = hosted_browser_response_header_value(
+            response.headers, "location"
+        )
         if location == "" or redirect_count >= 20:
             return false
         val base = Url.parse(policy.canonical_url)
         val redirected = resolve_fetch_redirect_url(base, location)
-        val redirected_url = _canonical_http_url(redirected.to_text())
+        val redirected_url = hosted_browser_canonical_http_url(
+            redirected.to_text()
+        )
         if (redirected_url == "" or
             (base.scheme == "https" and redirected.scheme != "https")):
             return false
@@ -564,8 +446,9 @@ pub class HostedBrowserRendererProcess:
         else:
             prior_method
         val preserve_body = next_method != "GET" and next_method != "HEAD"
-        val same_origin = _network_origin(policy.canonical_url) ==
-            _network_origin(redirected_url)
+        val same_origin = hosted_browser_network_origin(
+            policy.canonical_url
+        ) == hosted_browser_network_origin(redirected_url)
         val next_content_type = if preserve_body:
             request.content_type
         else:
@@ -620,7 +503,9 @@ pub class HostedBrowserRendererProcess:
                         navigation_redirect_count = (
                             self.navigation_permit.redirect_count
                         )
-                        self.navigation_permit = _empty_navigation_permit()
+                        self.navigation_permit = (
+                            hosted_browser_empty_navigation_permit()
+                        )
                     val response = self._fetch_network(
                         fetch.kind,
                         policy,
@@ -658,6 +543,11 @@ pub class HostedBrowserRendererProcess:
                 )
                 if not frame.ok:
                     return self.fail(frame.reason)
+                if self.pending_document_commit_url != "":
+                    self._commit_document_url(
+                        self.pending_document_commit_url
+                    )
+                    self.pending_document_commit_url = ""
                 self.state = "active"
                 return _renderer_frame_result(
                     frame.composition,
@@ -692,6 +582,118 @@ pub class HostedBrowserRendererProcess:
                 kind, self.generation, self.next_request_id, payload
             )
         self._await_frame(request, timeout_ms)
+
+    me _navigation_command(
+        action: text,
+        url: text,
+        method: text,
+        headers: text,
+        body: text,
+        content_type: text,
+        timeout_ms: i64
+    ) -> HostedBrowserRendererResult:
+        if self.state != "active":
+            return self.fail("invalid-renderer-state")
+        self._await_frame(browser_renderer_navigation_encode(
+            self.generation,
+            self.next_request_id,
+            action,
+            url,
+            method,
+            headers,
+            body,
+            content_type
+        ), timeout_ms)
+
+    me navigate(
+        url: text,
+        method: text,
+        headers: text,
+        body: text,
+        content_type: text,
+        timeout_ms: i64
+    ) -> HostedBrowserRendererResult:
+        if not self.authorize_navigation(
+            url, method, headers, body, content_type
+        ):
+            return _renderer_result(
+                false, "invalid-navigation", _empty_composition()
+            )
+        self._navigation_command(
+            "open",
+            self.navigation_permit.url,
+            self.navigation_permit.method,
+            headers,
+            body,
+            content_type,
+            timeout_ms
+        )
+
+    me go_home(timeout_ms: i64) -> HostedBrowserRendererResult:
+        if self.home_url == "":
+            return _renderer_result(
+                false, "home-unconfigured", _empty_composition()
+            )
+        if not self.authorize_navigation(
+            self.home_url, "GET", "", "", ""
+        ):
+            return _renderer_result(
+                false, "invalid-navigation", _empty_composition()
+            )
+        self._navigation_command(
+            "home", self.navigation_permit.url, "GET", "", "", "",
+            timeout_ms
+        )
+
+    me go_back(timeout_ms: i64) -> HostedBrowserRendererResult:
+        if self.history_index <= 0:
+            return _renderer_result(
+                false, "cannot-go-back", _empty_composition()
+            )
+        val target_index = self.history_index - 1
+        val target = self.history_urls[target_index]
+        val result = self._navigation_command(
+            "back", target, "GET", "", "", "", timeout_ms
+        )
+        if result.ok:
+            self.history_index = target_index
+            self.document_url = target
+            self.document_origin = hosted_browser_network_origin(target)
+        result
+
+    me go_forward(timeout_ms: i64) -> HostedBrowserRendererResult:
+        if (self.history_index < 0 or
+            self.history_index >= self.history_urls.len() - 1):
+            return _renderer_result(
+                false, "cannot-go-forward", _empty_composition()
+            )
+        val target_index = self.history_index + 1
+        val target = self.history_urls[target_index]
+        val result = self._navigation_command(
+            "forward", target, "GET", "", "", "", timeout_ms
+        )
+        if result.ok:
+            self.history_index = target_index
+            self.document_url = target
+            self.document_origin = hosted_browser_network_origin(target)
+        result
+
+    me reload(timeout_ms: i64) -> HostedBrowserRendererResult:
+        if self.document_url == "":
+            return _renderer_result(
+                false, "cannot-reload", _empty_composition()
+            )
+        self._navigation_command(
+            "reload", self.document_url, "GET", "", "", "", timeout_ms
+        )
+
+    me stop(timeout_ms: i64) -> HostedBrowserRendererResult:
+        self.navigation_permit = hosted_browser_empty_navigation_permit()
+        self.pending_history_action = ""
+        self.pending_document_commit_url = ""
+        self._navigation_command(
+            "stop", "", "", "", "", "", timeout_ms
+        )
 
     me pointer(
         event_id: i64, x: i64, y: i64, pressed: bool, timeout_ms: i64

@@ -343,11 +343,13 @@ or native TLS behavior.
   derives resource mode from the broker's committed origin instead of the
   renderer's kind, and authorizes only bounded simple CORS requests until
   preflight uses the public-only broker transport. Redirects receive one exact
-  derived successor permit with downgrade and hop-limit enforcement. A
-  fail-closed external-frame compositor seam exists, but the hosted entry is
-  not switched to it: no trusted navigation command issues the first permit,
-  the broker transaction is still blocking (so Stop cannot preempt an active
-  fetch), and resize/scroll plus parent-owned history/bookmark/cookie state
+  derived successor permit with downgrade and hop-limit enforcement. Typed
+  parent-issued open/back/forward/home/reload/stop commands now cross the
+  bounded protocol; the broker owns committed URL/origin plus a 256-entry
+  history and commits only after a validated renderer frame. A fail-closed
+  external-frame compositor seam exists, but the hosted entry is not switched
+  to it: the broker transaction is still blocking (so Stop cannot preempt an
+  active fetch), and resize/scroll plus parent-owned bookmark/cookie state
   remain incomplete. Windows AppContainer and the signed macOS helper also
   remain open.
 - no current GC/RSS/soak or crash-containment evidence exists;

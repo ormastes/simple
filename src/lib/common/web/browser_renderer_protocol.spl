@@ -69,6 +69,16 @@ pub struct BrowserRendererActionDecodeResult:
     pressed: bool
     value: text
 
+pub struct BrowserRendererNavigationDecodeResult:
+    ok: bool
+    reason: text
+    action: text
+    url: text
+    method: text
+    headers: text
+    body: text
+    content_type: text
+
 pub struct BrowserRendererNetworkDecodeResult:
     ok: bool
     reason: text
@@ -90,7 +100,8 @@ fn _browser_renderer_reject_encode(reason: text) -> BrowserRendererEncodeResult:
 
 fn _browser_renderer_kind_valid(kind: text) -> bool:
     (kind == "init" or kind == "advance" or kind == "pointer" or kind == "text" or
-        kind == "key" or kind == "chrome" or kind == "network_response" or
+        kind == "key" or kind == "chrome" or kind == "navigation" or
+        kind == "network_response" or
         kind == "shutdown" or kind == "ready" or kind == "fetch_request" or
         kind == "frame" or kind == "dispatch_result" or kind == "state" or kind == "error")
 
@@ -362,6 +373,163 @@ pub fn browser_renderer_chrome_encode(
     browser_renderer_message_encode(
         "chrome", generation, request_id,
         "C1\t{event_id}\t{flag}\t{byte_length}\n{control}"
+    )
+
+fn _browser_renderer_navigation_action_valid(action: text) -> bool:
+    action == "open" or action == "back" or action == "forward" or
+        action == "home" or action == "reload" or action == "stop"
+
+fn _browser_renderer_navigation_reject(
+    reason: text
+) -> BrowserRendererNavigationDecodeResult:
+    BrowserRendererNavigationDecodeResult(
+        ok: false,
+        reason: reason,
+        action: "",
+        url: "",
+        method: "",
+        headers: "",
+        body: "",
+        content_type: ""
+    )
+
+fn _browser_renderer_navigation_result(
+    action: text,
+    url: text,
+    method: text,
+    headers: text,
+    body: text,
+    content_type: text
+) -> BrowserRendererNavigationDecodeResult:
+    BrowserRendererNavigationDecodeResult(
+        ok: true,
+        reason: "ok",
+        action: action,
+        url: url,
+        method: method,
+        headers: headers,
+        body: body,
+        content_type: content_type
+    )
+
+fn _browser_renderer_navigation_fields_valid(
+    action: text,
+    url: text,
+    method: text,
+    headers: text,
+    body: text,
+    content_type: text
+) -> bool:
+    if (not _browser_renderer_navigation_action_valid(action) or
+        not _browser_renderer_network_field_valid(url, BROWSER_RENDERER_MAX_URL_BYTES) or
+        not _browser_renderer_network_field_valid(headers, BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES) or
+        not _browser_renderer_network_field_valid(body, BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES) or
+        not _browser_renderer_network_field_valid(content_type, 256) or
+        url.contains("\r") or url.contains("\n")):
+        return false
+    if action == "stop":
+        return url == "" and method == "" and headers == "" and
+            body == "" and content_type == ""
+    if url == "":
+        return false
+    if action == "open":
+        return (method == "GET" or method == "POST")
+    method == "GET" and headers == "" and body == "" and content_type == ""
+
+pub fn browser_renderer_navigation_encode(
+    generation: i64,
+    request_id: i64,
+    action: text,
+    url: text,
+    method: text,
+    headers: text,
+    body: text,
+    content_type: text
+) -> BrowserRendererEncodeResult:
+    if not _browser_renderer_navigation_fields_valid(
+        action, url, method, headers, body, content_type
+    ):
+        return _browser_renderer_reject_encode("invalid-navigation")
+    val action_len = text_to_bytes(action).len()
+    val url_len = text_to_bytes(url).len()
+    val method_len = text_to_bytes(method).len()
+    val headers_len = text_to_bytes(headers).len()
+    val body_len = text_to_bytes(body).len()
+    val content_type_len = text_to_bytes(content_type).len()
+    browser_renderer_message_encode(
+        "navigation", generation, request_id,
+        "SBN1\t{action_len}\t{url_len}\t{method_len}\t{headers_len}\t{body_len}\t{content_type_len}\n" +
+        action + url + method + headers + body + content_type
+    )
+
+pub fn browser_renderer_navigation_decode(
+    message: BrowserRendererMessage
+) -> BrowserRendererNavigationDecodeResult:
+    if message.kind != "navigation":
+        return _browser_renderer_navigation_reject("wrong-kind")
+    val header_end = _browser_renderer_header_end(message.payload)
+    if header_end < 0 or header_end >= BROWSER_RENDERER_MAX_HEADER_BYTES:
+        return _browser_renderer_navigation_reject("malformed-navigation")
+    val fields = _browser_renderer_byte_slice(
+        message.payload, 0, header_end
+    ).split("\t")
+    if fields.len() != 7 or fields[0] != "SBN1":
+        return _browser_renderer_navigation_reject("malformed-navigation")
+    var lengths: [i64] = []
+    var field_index: i64 = 1
+    while field_index < fields.len():
+        val length = fields[field_index].to_i64() ?? -1
+        if length < 0 or str(length) != fields[field_index]:
+            return _browser_renderer_navigation_reject(
+                "malformed-navigation"
+            )
+        lengths.push(length)
+        field_index = field_index + 1
+    if (lengths[0] > 16 or lengths[1] > BROWSER_RENDERER_MAX_URL_BYTES or
+        lengths[2] > 16 or
+        lengths[3] > BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES or
+        lengths[4] > BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES or
+        lengths[5] > 256):
+        return _browser_renderer_navigation_reject(
+            "navigation-too-large"
+        )
+    var total_length = header_end + 1
+    for length in lengths:
+        total_length = total_length + length
+    if total_length != message.payload.len():
+        return _browser_renderer_navigation_reject("malformed-navigation")
+    var offset = header_end + 1
+    val action = _browser_renderer_network_piece(
+        message.payload, offset, lengths[0]
+    )
+    offset = offset + lengths[0]
+    val url = _browser_renderer_network_piece(
+        message.payload, offset, lengths[1]
+    )
+    offset = offset + lengths[1]
+    val method = _browser_renderer_network_piece(
+        message.payload, offset, lengths[2]
+    )
+    offset = offset + lengths[2]
+    val headers = _browser_renderer_network_piece(
+        message.payload, offset, lengths[3]
+    )
+    offset = offset + lengths[3]
+    val body = _browser_renderer_network_piece(
+        message.payload, offset, lengths[4]
+    )
+    offset = offset + lengths[4]
+    val content_type = _browser_renderer_network_piece(
+        message.payload, offset, lengths[5]
+    )
+    offset = offset + lengths[5]
+    if (offset != message.payload.len() or
+        not _browser_renderer_navigation_fields_valid(
+            action, url, method, headers, body, content_type
+        )):
+        return _browser_renderer_navigation_reject("invalid-navigation")
+    _browser_renderer_navigation_result(
+        action, url, method, headers, body, content_type
     )
 
 pub fn browser_renderer_action_decode(
