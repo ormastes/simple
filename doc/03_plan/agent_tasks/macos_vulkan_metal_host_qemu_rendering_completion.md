@@ -1259,6 +1259,25 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   HEAD Stage 3 pair, pass canonical admission, and run the trusted v4 Vulkan
   evidence builder. Do not claim live Vulkan, font, or 300-DPI PASS yet.
 
+### 2026-07-27 exact-HEAD bootstrap disk checkpoint
+
+- The clean rendering lane was synchronized to `origin/main` revision
+  `4a12f533c9`. The v4 native-builder contract self-test passed at that
+  revision, and the required MoltenVK/runtime providers remain present.
+- One essential, jobs=1 LLVM full-bootstrap attempt rebuilt the Rust seed and
+  native-all archive, then stopped before Stage 2 while copying
+  `libsimple_native_all.a`: macOS reported `No space left on device`.
+  This is a storage-capacity failure, not a Simple source/lowering failure.
+- No second bootstrap was attempted. The first-attempt logs remain under
+  `build/wm-to-i64-bootstrap/logs/aarch64-apple-darwin/`, and the reusable
+  Cargo target was preserved. Resume only after establishing at least 5 GiB
+  free so the native archive, immutable authority snapshot, and Stage 2/3
+  outputs have bounded headroom.
+- Canonical Stage 3 and its v3 provenance are still absent. Consequently the
+  trusted v4 Vulkan executable and live rendering/capture/event/font/300-DPI
+  evidence remain pending; do not run or attest them from partial bootstrap
+  material.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
