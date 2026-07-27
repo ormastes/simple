@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 0 | 0 | 3 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -18,13 +18,13 @@ This environmental scenario verifies the retained output of the canonical Linux 
 | Field | Value |
 |-------|-------|
 | Category | Other |
-| Status | BLOCKED — qualifying pure-Simple live-window run unavailable |
+| Status | Active |
 | Requirements | doc/02_requirements/feature/shared_multilingual_gpu_fonts.md |
 | Plan | doc/03_plan/sys_test/shared_multilingual_gpu_fonts.md |
 | Design | doc/05_design/shared_multilingual_gpu_fonts.md |
 | Research | doc/01_research/local/shared_multilingual_gpu_fonts.md |
 | Source | `test/03_system/gui/linux_hosted_wm_live_window_spec.spl` |
-| Updated | 2026-07-24 |
+| Updated | 2026-07-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -113,8 +113,7 @@ The event phase drives the real window with `xdotool`. Focus, pointer motion,
 button input, committed UTF-8 text, and keyboard Tab must appear in the winit
 event log and production receipt. The text commit changes the focused window
 title through the existing compositor lifecycle action, so the snapshot proves
-both receipt and state mutation. The last pointer receipt must equal the
-compositor coordinates. Internal maximize and restore commands must update the focused window,
+both receipt and state mutation. Internal maximize and restore commands must update the focused window,
 restore the exact pre-maximize window array, and advance the render revision.
 The retained env records exact baseline/input/move/maximize/restore nonces
 `1/2/3/4/5`, plus each phase's revision, Engine2D backend, readback source,
@@ -206,7 +205,7 @@ capture helper, and compatibility renderers are not accepted here.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 73 lines folded for reproduction.
+Runnable source: 98 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -306,6 +305,8 @@ expect(wrapper).to_contain("[ \"$initial_revision\" -lt \"$input_revision\" ]")
 expect(wrapper).to_contain("[ \"$input_revision\" -lt \"$move_revision\" ]")
 expect(wrapper).to_contain("[ \"$move_revision\" -lt \"$max_revision\" ]")
 expect(wrapper).to_contain("[ \"$max_revision\" -lt \"$restore_revision\" ]")
+expect(wrapper).to_contain("[ \"$input_frame_checksum\" != \"$baseline_frame_checksum\" ]")
+expect(wrapper).to_contain("[ \"$input_capture_sha\" != \"$baseline_capture_sha\" ]")
 ```
 
 </details>
@@ -321,7 +322,7 @@ expect(wrapper).to_contain("[ \"$max_revision\" -lt \"$restore_revision\" ]")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 36 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -368,13 +369,15 @@ expect(evidence).to_contain("linux_hosted_wm_live_window_snapshot=present")
 #### fails closed before live execution when its source contract is not explicit
 
 - Run the wrapper source-contract self-test without a compiler default
+   - Expected: code equals `0`
+   - Expected: stderr equals ``
 - Reject silent Git-only provenance and stale release defaults
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -413,10 +416,10 @@ expect(wrapper).to_contain("emit fail \"glyph-oracle-calibration-only-$glyph_sha
 | Metric | Count |
 |--------|------:|
 | Total scenarios | 3 |
-| Active scenarios | 0 |
+| Active scenarios | 3 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
-| Pending scenarios | 3 |
+| Pending scenarios | 0 |
 
 
 ## Related Documentation

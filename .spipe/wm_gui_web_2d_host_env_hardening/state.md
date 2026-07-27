@@ -797,3 +797,12 @@ Tracking split:
   manual is complete with zero stubs. The one diagnostic interpreter run
   reached the test loop but timed out at 120 seconds before any scenario
   result, so accepted pure-Simple qualification remains open.
+- bugfix: Bound screen-input admission to an actual framebuffer mutation. The
+  Linux live wrapper now requires the input Engine2D checksum and retained
+  capture SHA to both differ from baseline before frame correlation can pass.
+  The existing SSpec pins both inequalities and no middle mock was added. Its
+  stale interpolating source needle was also corrected so `comp` is no longer
+  parsed as a test variable. Shell syntax and the wrapper self-test pass, and
+  docgen produced one complete manual with zero stubs. The diagnostic SSpec
+  runner remains unqualified: after the parser fix it failed only because its
+  required `/usr/bin/simple_seed` sibling is absent.
