@@ -19,6 +19,10 @@
   still missing; it is unintegrated and not evidence.
 - It also lacks truthful exact helper-build provenance and pre-spawn
   validation/receipt reservation with no-orphan kill-and-wait cleanup.
+- BRR2 source cycles `a2e949d838`/`2edbe367ed`/`c10eff40a9` also hit the
+  three-cycle cap and remain unintegrated: public capture collapses exact parser
+  failures, while selected requirements/design still misapply the legacy
+  six-event contract to the distinct SimpleOS four-stage lifecycle.
 - Resume only with admitted source-matched artifacts through the canonical
   x86 and ARM evidence wrappers.
 

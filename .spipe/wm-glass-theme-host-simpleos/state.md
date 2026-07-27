@@ -1025,3 +1025,20 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   inferred. Kernel-owned payload queuing/authenticated source identity,
   transactional package refresh, ThemeService delivery, monotonic consumers,
   and the intentional fail-fast system contract remain open.
+
+- continuation-2026-07-27-brr2-foundation-hard-stop: **THREE-CYCLE CAP /
+  REJECTED / NOT INTEGRATED.** An isolated source-only lane produced commits
+  `a2e949d838`, `2edbe367ed`, and `c10eff40a9` for a numeric no-allocation BRR2
+  guest owner, host parser, normalized lifecycle evidence, fixtures, and
+  focused specs. Review cycles repaired receipt splicing, caller-forged parsed
+  state, BRR1 event-count behavior, geometry overflow, and the false promotion
+  of one four-stage SimpleOS lifecycle into six native input events. Final
+  high-capability review still rejected the series because the public capture
+  boundary collapses exact parser failures to `invalid_brr2_receipt`, making
+  its checksum/endian/correlation expectations impossible, and because the
+  selected four-backend requirement/design still applies the legacy six-event
+  contract to the distinct SimpleOS lifecycle. Runtime tests/docgen were
+  unavailable; no QEMU, bootstrap, Rust seed, integration, or push ran. Per the
+  hard cap there is no fourth cycle. Resume in a fresh lane only after resolving
+  the requirement/design contract and preserving exact parser reasons through
+  public capture validation.

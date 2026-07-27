@@ -105,6 +105,40 @@ candidate and its known unstaged Gradle EOL checkout noise are not evidence.
 Future snapshots and receipts must also be reopened and rehashed after `fsync`,
 then atomically published with their containing directories synced.
 
+## 2026-07-27 BRR2 foundation review hard stop
+
+A separate clean lane attempted three bounded source-only cycles for a canonical
+BRR2 guest receipt, host parser, normalized SimpleOS lifecycle model, and
+focused specifications. Commits `a2e949d838`, `2edbe367ed`, and `c10eff40a9`
+remain isolated and unintegrated. No runtime test, QEMU launch, bootstrap, Rust
+seed, or push ran.
+
+The final review confirmed that the numeric no-allocation guest owner, fixed
+big-endian lengths, boot/source splice binding, nonzero source identity, BRR1
+compatibility, bounded geometry, raw-wire parsing, and separation of the
+four-stage SimpleOS lifecycle from the legacy six-native-event aggregate were
+statically sound. It still rejected the series at the mandatory third-cycle
+cap:
+
+1. the public lifecycle normalizer collapses exact parser failures to
+   `invalid_brr2_receipt`, so capture validation cannot surface
+   `checksum-mismatch`, `unknown-endian`, input-sequence mismatch,
+   rendered-revision mismatch, or nonmonotonic-event-time as its changed system
+   scenario requires; and
+2. the selected four-backend requirement and detail design still require the
+   legacy six-event sequence for every target, contradicting the truthful
+   SimpleOS four-stage lifecycle contract and leaving requirement coverage
+   stale.
+
+A fresh lane must first resolve the product contract: either amend the selected
+requirement/design so SimpleOS proves its distinct IRQ -> WM -> damage ->
+present lifecycle without claiming six native event kinds, or extend the wire
+protocol with independently correlated event-kind receipts. It must then
+preserve exact parser reasons through the public capture boundary, update the
+system scenario/manual together, and obtain independent high-capability review.
+The rejected three-commit series is not a base to cherry-pick piecemeal and is
+not live evidence.
+
 ## Required repair and resume
 
 - Publish and consume the x86 frozen manifest; reject every external kernel or
@@ -114,6 +148,9 @@ then atomically published with their containing directories synced.
 - Bind the helper build to the exact no-follow source snapshot, actual
   compiler/SDK closure, canonical argv/sanitized environment, verified
   signatures/dependencies, and concurrency-safe output/receipt publication.
+- Resolve the BRR2 requirement/design mismatch and preserve exact parser
+  failure reasons through the public SimpleOS capture boundary before using
+  BRR2 as event/order evidence.
 - Require x86 SSE2 execution and bit-exact scalar parity.
 - Require strict QMP input -> guest IRQ/VirtIO -> WM state -> damage -> frame
   commit order, with the event receipt finalized only after the correlated
