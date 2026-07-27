@@ -294,6 +294,47 @@ describe "isolated browser renderer protocol":
         expect(unicode_decoded.message.request_id).to_equal(2)
         expect(unicode_decoded.message.payload).to_equal("ok")
 
+        var payload_piece = "x"
+        var doubling = 0
+        while doubling < 13:
+            payload_piece = payload_piece + payload_piece
+            doubling = doubling + 1
+        var payload_parts: [text] = []
+        while payload_parts.len() < 128:
+            payload_parts.push(payload_piece)
+        val maximum_payload = payload_parts.join("")
+        expect(maximum_payload.len()).to_equal(
+            BROWSER_RENDERER_MAX_PAYLOAD_BYTES
+        )
+        val maximum_wire = browser_renderer_message_encode(
+            "state", 7, 1, maximum_payload
+        )
+        val trailing_wire = browser_renderer_message_encode(
+            "state", 7, 2, "tail"
+        )
+        val fragmented_wire = maximum_wire.wire + trailing_wire.wire
+        var fragmented = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7),
+            fragmented_wire.slice(0, 8191)
+        )
+        var fragment_start: i64 = 8191
+        while fragment_start < fragmented_wire.len():
+            var fragment_end = fragment_start + 8191
+            if fragment_end > fragmented_wire.len():
+                fragment_end = fragmented_wire.len()
+            fragmented = browser_renderer_decoder_feed(
+                fragmented.decoder,
+                fragmented_wire.slice(fragment_start, fragment_end)
+            )
+            fragment_start = fragment_end
+        expect(fragmented.status).to_equal("message")
+        expect(fragmented.message.request_id).to_equal(1)
+        expect(fragmented.message.payload).to_equal(maximum_payload)
+        fragmented = browser_renderer_decoder_feed(fragmented.decoder, "")
+        expect(fragmented.status).to_equal("message")
+        expect(fragmented.message.request_id).to_equal(2)
+        expect(fragmented.message.payload).to_equal("tail")
+
         val wrong_kind = browser_renderer_frame_decode(
             BrowserRendererMessage(kind: "state", generation: 7, request_id: 1, payload: decoded.message.payload),
             64,

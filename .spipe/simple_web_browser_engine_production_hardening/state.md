@@ -951,3 +951,11 @@ implementation in progress / target evidence blocked
   losing the unrelated row; a closed-profile failure retains no in-memory
   favorite. Executable Simple evidence remains compiler-blocked and was not
   rerun.
+- Renderer IPC assembly performance: The shared bounded decoder now retains
+  incoming protocol fragments and joins them only after the declared frame is
+  complete. Parent startup, hot frame/network polling, and sandboxed worker
+  input therefore avoid the former growing `buffer + chunk` copy on every
+  8 KiB read (about 64 MiB of transient copying for a legal 1 MiB frame).
+  Maximum-payload fragmentation evidence also preserves a trailing second
+  frame and request ordering. Executable Simple evidence remains
+  compiler-blocked and was not rerun.
