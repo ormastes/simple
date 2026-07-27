@@ -77,3 +77,66 @@ pub fn text_to_bytes(data: text) -> [u8]:
         result = result.push(raw[i] as u8)
         i = i + 1
     result
+
+fn _utf8_is_continuation(byte: i64) -> bool:
+    byte >= 0x80 and byte <= 0xBF
+
+pub fn validated_utf8_bytes_to_text_linear(data: [u8]) -> Result<text, text>:
+    """Strictly validate UTF-8, then convert the complete byte buffer once.
+
+    Unlike `bytes_to_text`, this owner-level path is lossless and linear: it
+    neither substitutes malformed input nor appends one code point at a time.
+    """
+    var i = 0
+    while i < data.len():
+        val first = data[i].to_i64()
+        if first <= 0x7F:
+            i = i + 1
+        elif first >= 0xC2 and first <= 0xDF:
+            if i + 1 >= data.len():
+                return Err("utf8: truncated two-byte sequence")
+            if not _utf8_is_continuation(data[i + 1].to_i64()):
+                return Err("utf8: malformed two-byte sequence")
+            i = i + 2
+        elif first >= 0xE0 and first <= 0xEF:
+            if i + 2 >= data.len():
+                return Err("utf8: truncated three-byte sequence")
+            val second = data[i + 1].to_i64()
+            val third = data[i + 2].to_i64()
+            if not _utf8_is_continuation(second) or not _utf8_is_continuation(third):
+                return Err("utf8: malformed three-byte sequence")
+            if first == 0xE0:
+                if second < 0xA0:
+                    return Err("utf8: overlong three-byte sequence")
+            elif first == 0xED:
+                if second > 0x9F:
+                    return Err("utf8: surrogate code point")
+            i = i + 3
+        elif first >= 0xF0 and first <= 0xF4:
+            if i + 3 >= data.len():
+                return Err("utf8: truncated four-byte sequence")
+            val second = data[i + 1].to_i64()
+            val third = data[i + 2].to_i64()
+            val fourth = data[i + 3].to_i64()
+            if not _utf8_is_continuation(second) or not _utf8_is_continuation(third) or not _utf8_is_continuation(fourth):
+                return Err("utf8: malformed four-byte sequence")
+            if first == 0xF0:
+                if second < 0x90:
+                    return Err("utf8: overlong four-byte sequence")
+            elif first == 0xF4:
+                if second > 0x8F:
+                    return Err("utf8: code point exceeds U+10FFFF")
+            i = i + 4
+        else:
+            return Err("utf8: invalid leading byte")
+    Ok(rt_bytes_to_text(data))
+
+pub fn text_to_bytes_linear(data: text) -> [u8]:
+    """Copy UTF-8 bytes into one pre-sized buffer."""
+    val raw = data.bytes()
+    var result: [u8] = [0u8; raw.len()]
+    var i = 0
+    while i < raw.len():
+        result[i] = raw[i].to_u8()
+        i = i + 1
+    result

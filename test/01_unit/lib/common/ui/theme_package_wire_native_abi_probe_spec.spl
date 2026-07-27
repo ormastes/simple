@@ -1,0 +1,56 @@
+# Native-only incremental ABI admission prerequisite.
+#
+# Transaction consumers must not use the exported aggregate decoder until this
+# exact spec passes with the admitted self-hosted runtime in incremental native
+# mode with stub fallback disabled. The production candidate remains `text`.
+#
+# @cover src/lib/common/ui/theme_package_wire.spl
+# @tag: unit, ui, theme, wire, native, abi
+
+use std.spec.*
+use common.ui.generated.aetheric_dark_theme_snapshot.{aetheric_dark_theme_render_snapshot}
+use common.ui.theme_package_wire.{theme_render_snapshot_wire_v1_encode, theme_render_snapshot_wire_v1_decode, theme_package_install_wire_v1_encode, theme_package_install_wire_v1_decode}
+
+describe "theme package wire native aggregate ABI admission":
+
+    it "returns a complete snapshot aggregate across the module boundary":
+        val source = aetheric_dark_theme_render_snapshot()
+        match theme_render_snapshot_wire_v1_encode(source):
+            Err(_error):
+                expect(false).to_equal(true)
+            Ok(wire):
+                match theme_render_snapshot_wire_v1_decode(wire):
+                    Err(_error):
+                        expect(false).to_equal(true)
+                    Ok(decoded):
+                        expect(decoded.id).to_equal(source.id)
+                        expect(decoded.material_sha256).to_equal(source.material_sha256)
+                        expect(decoded.material.active_shadows.len()).to_equal(source.material.active_shadows.len())
+                        expect(decoded.material.inactive_shadows.len()).to_equal(source.material.inactive_shadows.len())
+                        expect(decoded.material.window_gradient_source_css).to_equal(source.material.window_gradient_source_css)
+                        match theme_render_snapshot_wire_v1_encode(decoded):
+                            Err(_error):
+                                expect(false).to_equal(true)
+                            Ok(reencoded):
+                                expect(reencoded).to_equal(wire)
+
+    it "returns install metadata and nested snapshot aggregates across the module boundary":
+        val source = aetheric_dark_theme_render_snapshot()
+        match theme_package_install_wire_v1_encode("aetheric_dark", "aetheric_dark", "config/themes/theme.sdn", source):
+            Err(_error):
+                expect(false).to_equal(true)
+            Ok(wire):
+                match theme_package_install_wire_v1_decode(wire):
+                    Err(_error):
+                        expect(false).to_equal(true)
+                    Ok(projection):
+                        expect(projection.requested_id).to_equal("aetheric_dark")
+                        expect(projection.default_id).to_equal("aetheric_dark")
+                        expect(projection.registry_path).to_equal("config/themes/theme.sdn")
+                        expect(projection.snapshot.id).to_equal(source.id)
+                        expect(projection.snapshot.material_sha256).to_equal(source.material_sha256)
+                        match theme_package_install_wire_v1_encode(projection.requested_id, projection.default_id, projection.registry_path, projection.snapshot):
+                            Err(_error):
+                                expect(false).to_equal(true)
+                            Ok(reencoded):
+                                expect(reencoded).to_equal(wire)
