@@ -667,6 +667,22 @@ mod tests {
         client.join().unwrap();
     }
 
+    #[cfg(feature = "runtime-tls")]
+    #[test]
+    // REQ-WEB-BROWSER-011, REQ-WEB-BROWSER-017
+    fn test_tls_client_socket_has_bounded_io_deadlines() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let acceptor = std::thread::spawn(move || listener.accept().unwrap());
+
+        let stream = connect_tls_client_socket(&addr.to_string()).unwrap();
+        assert_eq!(stream.read_timeout().unwrap(), Some(TLS_CLIENT_IO_TIMEOUT));
+        assert_eq!(stream.write_timeout().unwrap(), Some(TLS_CLIENT_IO_TIMEOUT));
+
+        drop(stream);
+        let _ = acceptor.join().unwrap();
+    }
+
     #[test]
     fn test_tcp_drain_line_consumes_without_allocating_text() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

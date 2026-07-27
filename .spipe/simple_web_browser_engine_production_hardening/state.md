@@ -777,3 +777,15 @@ implementation in progress / target evidence blocked
   Engine2D presentation, and a real white address-field pixel. Its mirrored
   six-scenario manual was refreshed by hand. Runtime evidence remains
   target-compiler-blocked and was not rerun.
+- HTTPS timeout hardening: The rustls client now shares a five-second deadline
+  across resolved connect attempts and installs five-second read/write socket
+  deadlines before the eager authenticated handshake. Read errors/timeouts
+  invalidate the TLS handle, and H1 treats the failed close as a transport
+  error so partial EOF-framed bytes cannot be committed as a successful
+  response.
+- evidence: A deterministic loopback runtime unit test checks the actual client
+  socket read/write deadlines. Scoped whitespace, conflict-marker, direct
+  runtime-access, and spec-layout gates pass. Whole-file rustfmt remains WARN
+  because `net_tls.rs` has pre-existing formatting drift; the test was not
+  executed because target runtime/compiler execution remains blocked and no
+  bootstrap was run.

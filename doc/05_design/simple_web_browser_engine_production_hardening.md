@@ -103,6 +103,11 @@ ID. Duplicate, unknown, or late replies are rejected.
 9. Update broker cookie jar.
 10. Send only permitted response fields to renderer.
 
+Hosted TLS applies one five-second budget across resolved connect attempts and
+five-second socket read/write deadlines. A TLS read error or timeout invalidates
+the runtime handle; H1 rejects the response instead of parsing or committing
+partial bytes as an EOF-framed body.
+
 `file:` content is never read by BrowserSession. A user-selected exact root may
 be read by the broker through an explicit capability; page-originated file
 access remains denied.

@@ -21,9 +21,35 @@
 // `is_valid_handle(h)` only checks `h != 0` so the two namespaces coexist.
 
 static NEXT_TLS_FAKE_HANDLE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+const TLS_CLIENT_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn next_tls_fake_handle() -> i64 {
     NEXT_TLS_FAKE_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn connect_tls_client_socket(addr: &str) -> std::io::Result<std::net::TcpStream> {
+    let started = std::time::Instant::now();
+    let mut last_error = None;
+    for socket_addr in addr.to_socket_addrs()? {
+        let remaining = TLS_CLIENT_IO_TIMEOUT
+            .checked_sub(started.elapsed())
+            .ok_or_else(|| std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "TLS connect deadline exceeded",
+            ))?;
+        match std::net::TcpStream::connect_timeout(&socket_addr, remaining) {
+            Ok(stream) => {
+                stream.set_read_timeout(Some(TLS_CLIENT_IO_TIMEOUT))?;
+                stream.set_write_timeout(Some(TLS_CLIENT_IO_TIMEOUT))?;
+                return Ok(stream);
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| std::io::Error::new(
+        std::io::ErrorKind::AddrNotAvailable,
+        "TLS target resolved to no addresses",
+    )))
 }
 
 fn empty_text() -> crate::value::RuntimeValue {
@@ -158,7 +184,7 @@ fn tls_client_connect_impl(host_str: &str, port: i64, sni_name: &str) -> i64 {
         }
     };
     let addr = format!("{}:{}", host_str, port);
-    let tcp_stream = match std::net::TcpStream::connect(&addr) {
+    let tcp_stream = match connect_tls_client_socket(&addr) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("rt_tls_client_connect: TCP connect {}: {}", addr, e);
@@ -237,11 +263,19 @@ pub extern "C" fn rt_tls_client_read(conn: i64, max_bytes: i64) -> crate::value:
     };
     let size = max_bytes.min(65_536) as usize;
     let mut buf = vec![0u8; size];
-    let n = {
+    let read_result = {
         let mut entry_guard = entry_arc.lock().unwrap();
         let entry = &mut *entry_guard;
         let mut tls_stream = rustls::Stream::new(&mut entry.conn, &mut entry.stream);
-        match tls_stream.read(&mut buf) { Ok(n) => n, Err(_) => return empty_text() }
+        tls_stream.read(&mut buf)
+    };
+    let n = match read_result {
+        Ok(n) => n,
+        Err(error) => {
+            eprintln!("rt_tls_client_read: {}", error);
+            TLS_CLIENT_CONNS.lock().unwrap().remove(&conn);
+            return empty_text();
+        }
     };
     if n == 0 { return empty_text(); }
     unsafe { crate::value::collections::rt_string_new(buf.as_ptr(), n as u64) }
