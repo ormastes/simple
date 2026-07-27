@@ -1,3 +1,4 @@
+use std.common.encoding.utf8.{text_codepoint_len, utf8_seq_len}
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout.*
 
 fn has_visible_overflow_clip(styles: [Style]) -> bool:
@@ -117,6 +118,49 @@ fn fb_widget_image_placeholder_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i3
 fn input_uses_accent_color(nd: HNode) -> bool:
     val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
     input_type == "checkbox" or input_type == "radio"
+
+fn input_paints_text(nd: HNode) -> bool:
+    val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
+    input_type == "" or input_type == "text" or input_type == "search" or
+        input_type == "url" or input_type == "tel" or
+        input_type == "email" or input_type == "password" or
+        input_type == "number" or input_type == "button" or
+        input_type == "submit" or input_type == "reset"
+
+fn input_text_prefix(value: text, max_glyphs: i32) -> text:
+    if max_glyphs <= 0:
+        return ""
+    if text_codepoint_len(value) <= max_glyphs:
+        return value
+    val bytes = value.bytes()
+    var byte_index: i64 = 0
+    var glyph_index: i32 = 0
+    while byte_index < bytes.len() and glyph_index < max_glyphs:
+        val sequence_length = utf8_seq_len(bytes[byte_index])
+        if sequence_length > 0:
+            byte_index = byte_index + sequence_length
+        else:
+            byte_index = byte_index + 1
+        glyph_index = glyph_index + 1
+    value[0:byte_index]
+
+fn input_text_for_paint(nd: HNode, max_glyphs: i32) -> text:
+    val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
+    val declared_value = attr_value(nd.attrs_raw, "value")
+    var value = declared_value
+    if value == "":
+        if input_type == "submit":
+            value = "Submit"
+        elif input_type == "reset":
+            value = "Reset"
+        else:
+            value = attr_value(nd.attrs_raw, "placeholder")
+    if input_type == "password" and declared_value != "":
+        var count = text_codepoint_len(declared_value)
+        if count > max_glyphs:
+            count = max_glyphs
+        return "*".repeat(count)
+    input_text_prefix(value, max_glyphs)
 
 fn fb_input_accent_control_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, accent_color: u32, clip: ClipRect) -> [u32]:
     val accent = if accent_color != 0u32: accent_color else: argb(37, 99, 235)
@@ -442,6 +486,77 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
             val clip = paint_clip_at(clip_cache, i)
             val icon_color = if st.bg != 0u32: st.bg else: argb(37, 99, 235)
             out = fb_rect_clip(out, fbw, fbh, x, y, 6, 6, icon_color, clip)
+        if (
+            non_widget_mode and visible_node and nd.tag == "input" and
+            not input_uses_accent_color(nd) and input_paints_text(nd)
+        ):
+            val scale = glyph_scale(st.font_size)
+            val adv = style_text_advance(st)
+            val space_adv = style_space_advance(st)
+            val content_x = x + st.border_l + st.pad_l
+            val content_w = (
+                w - st.border_l - st.border_r - st.pad_l - st.pad_r
+            )
+            val inner_h = h - st.border_t - st.border_b
+            val text_y = (
+                y + st.border_t +
+                if inner_h > 7 * scale: (inner_h - 7 * scale) / 2 else: 0
+            )
+            if content_w > 0 and text_y < fbh:
+                val glyph_advance = if adv > 0: adv else: 1
+                val max_glyphs = content_w / glyph_advance + 1
+                val raw_input_text = input_text_for_paint(nd, max_glyphs)
+                val transformed_input_text = apply_text_transform_for_paint(
+                    raw_input_text, st.text_transform
+                )
+                val input_text = if st.direction_rtl:
+                    reverse_text_for_paint(transformed_input_text)
+                else:
+                    transformed_input_text
+                if input_text != "":
+                    val ancestor_clip = paint_clip_at(clip_cache, i)
+                    val input_clip = clip_intersect(
+                        ancestor_clip,
+                        x + st.border_l, y + st.border_t,
+                        x + w - st.border_r, y + h - st.border_b
+                    )
+                    val text_w = style_text_line_advance_width(
+                        input_text, 0, input_text.len(), st, adv, space_adv
+                    )
+                    val input_type = attr_value(
+                        nd.attrs_raw, "type"
+                    ).trim().lower()
+                    val text_x = if (
+                        input_type == "button" or input_type == "submit" or
+                        input_type == "reset"
+                    ):
+                        content_x + (content_w - text_w) / 2
+                    else:
+                        text_line_aligned_x(
+                            content_x, content_w, text_w, st, 0, 1
+                        )
+                    val value = attr_value(nd.attrs_raw, "value")
+                    val text_color = if (
+                        value == "" and input_type != "submit" and
+                        input_type != "reset"
+                    ):
+                        argb(107, 114, 128)
+                    else:
+                        st.fg
+                    if st.text_shadow_color != 0u32:
+                        out = fb_text_thin_scaled_clip_range(
+                            out, fbw, fbh,
+                            text_x + st.text_shadow_x_px,
+                            text_y + st.text_shadow_y_px,
+                            input_text, 0, input_text.len(),
+                            st.text_shadow_color, scale, adv, space_adv,
+                            st.font_style_italic, input_clip
+                        )
+                    out = fb_text_thin_scaled_clip_range(
+                        out, fbw, fbh, text_x, text_y,
+                        input_text, 0, input_text.len(), text_color,
+                        scale, adv, space_adv, st.font_style_italic, input_clip
+                    )
         if visible_node and nd.tag == "#text":
             # Match the layout measure: white-space:pre/nowrap preserves raw text
             # (leading indentation), normal flow uses trimmed text.
@@ -925,6 +1040,53 @@ fn _html_draw_ir_command(nodes: [HNode], styles: [Style], boxes: LayoutResult, i
     )
     command
 
+fn _html_draw_ir_has_input_text(
+    node: HNode, st: Style, box_width: i32
+) -> bool:
+    if (
+        node.tag != "input" or input_uses_accent_color(node) or
+        not input_paints_text(node)
+    ):
+        return false
+    val content_w = (
+        box_width - st.border_l - st.border_r - st.pad_l - st.pad_r
+    )
+    if content_w <= 0:
+        return false
+    val adv = style_text_advance(st)
+    val glyph_advance = if adv > 0: adv else: 1
+    input_text_for_paint(node, content_w / glyph_advance + 1) != ""
+
+fn _html_draw_ir_input_text_command(
+    node: HNode, st: Style, boxes: LayoutResult, i: i32
+) -> DrawIrCommand:
+    val content_x = boxes.bx[i] + st.border_l + st.pad_l
+    val content_y = boxes.by[i] + st.border_t + st.pad_t
+    val content_w = _html_draw_ir_non_negative(
+        boxes.bw[i] - st.border_l - st.border_r - st.pad_l - st.pad_r
+    )
+    val adv = style_text_advance(st)
+    val glyph_advance = if adv > 0: adv else: 1
+    val input_text = input_text_for_paint(
+        node, content_w / glyph_advance + 1
+    )
+    val input_type = attr_value(node.attrs_raw, "type").trim().lower()
+    val value = attr_value(node.attrs_raw, "value")
+    val text_color = if (
+        value == "" and input_type != "submit" and input_type != "reset"
+    ):
+        argb(107, 114, 128)
+    else:
+        st.fg
+    draw_ir_text_styled(
+        _html_draw_ir_component_id(node, i) + "_value",
+        content_x,
+        content_y,
+        input_text,
+        text_color,
+        _html_draw_ir_style_props(node, st)
+    )
+
 fn _html_draw_ir_visible(nodes: [HNode], styles: [Style], boxes: LayoutResult, i: i32) -> bool:
     if i <= 0:
         return false
@@ -954,17 +1116,32 @@ fn _html_draw_ir_commands(nodes: [HNode], styles: [Style], boxes: LayoutResult, 
             if first_visible < 0:
                 first_visible = i
             command_count = command_count + 1
+            if _html_draw_ir_has_input_text(
+                nodes[i], styles[i], boxes.bw[i]
+            ):
+                command_count = command_count + 1
         i = i + 1
     if command_count <= 0:
         return []
-    val first_command = _html_draw_ir_command(nodes, styles, boxes, first_visible, width, height, vector_fonts)
+    val first_command = _html_draw_ir_command(
+        nodes, styles, boxes, first_visible, width, height, vector_fonts
+    )
     var commands: [DrawIrCommand] = [first_command; command_count]
-    var out_i = 1
-    i = first_visible + 1
+    var out_i = 0
+    i = first_visible
     while i < node_count:
         if _html_draw_ir_visible(nodes, styles, boxes, i):
-            commands[out_i] = _html_draw_ir_command(nodes, styles, boxes, i, width, height, vector_fonts)
+            commands[out_i] = _html_draw_ir_command(
+                nodes, styles, boxes, i, width, height, vector_fonts
+            )
             out_i = out_i + 1
+            if _html_draw_ir_has_input_text(
+                nodes[i], styles[i], boxes.bw[i]
+            ):
+                commands[out_i] = _html_draw_ir_input_text_command(
+                    nodes[i], styles[i], boxes, i
+                )
+                out_i = out_i + 1
         i = i + 1
     commands
 
