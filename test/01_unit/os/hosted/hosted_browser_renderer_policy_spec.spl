@@ -1,0 +1,144 @@
+use std.spec.*
+use std.common.web.browser_renderer_protocol.{
+    BrowserRendererNetworkDecodeResult
+}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
+    RequestMode
+}
+use os.hosted.hosted_browser_renderer_process.{
+    HostedBrowserNavigationPermit,
+    HostedBrowserRendererProcess,
+    hosted_browser_renderer_request_policy
+}
+
+fn permit(
+    active: bool,
+    url: text,
+    method: text = "GET",
+    headers: text = "",
+    body: text = "",
+    content_type: text = ""
+) -> HostedBrowserNavigationPermit:
+    HostedBrowserNavigationPermit(
+        active: active,
+        url: url,
+        method: method,
+        headers: headers,
+        body: body,
+        content_type: content_type,
+        redirect_count: 0
+    )
+
+fn request(
+    kind: text,
+    url: text,
+    method: text = "GET",
+    headers: text = "",
+    body: text = "",
+    content_type: text = ""
+) -> BrowserRendererNetworkDecodeResult:
+    BrowserRendererNetworkDecodeResult(
+        ok: true,
+        reason: "ok",
+        request_id: "request-1",
+        kind: kind,
+        url: url,
+        method: method,
+        headers: headers,
+        body: body,
+        content_type: content_type,
+        status: 0,
+        error: ""
+    )
+
+describe "hosted browser renderer broker policy":
+
+    it "issues only bounded canonical http navigation permits":
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        expect(broker.authorize_navigation(
+            "file:///etc/passwd", "GET", "", "", ""
+        )).to_be(false)
+        expect(broker.authorize_navigation(
+            "https://Example.Test/path#section", "GET", "", "", ""
+        )).to_be(true)
+        expect(broker.navigation_permit.url).to_equal(
+            "https://example.test/path"
+        )
+
+    it "denies a renderer document request without a parent permit":
+        val policy = hosted_browser_renderer_request_policy(
+            "",
+            permit(false, ""),
+            request("document", "https://example.test/")
+        )
+        expect(policy.ok).to_be(false)
+        expect(policy.reason).to_equal("unauthorized-document-request")
+
+    it "accepts exactly one matching parent navigation shape":
+        val policy = hosted_browser_renderer_request_policy(
+            "",
+            permit(
+                true,
+                "https://example.test/form",
+                "POST",
+                "Content-Type: application/x-www-form-urlencoded",
+                "name=value",
+                "application/x-www-form-urlencoded"
+            ),
+            request(
+                "document",
+                "https://example.test/form",
+                "POST",
+                "",
+                "name=value",
+                "application/x-www-form-urlencoded"
+            )
+        )
+        expect(policy.ok).to_be(true)
+        expect(policy.mode == RequestMode.Navigate).to_be(true)
+        expect(policy.consumes_navigation).to_be(true)
+
+    it "rejects a document request that changes the permitted target":
+        val policy = hosted_browser_renderer_request_policy(
+            "",
+            permit(true, "https://example.test/allowed"),
+            request("document", "https://example.test/other")
+        )
+        expect(policy.ok).to_be(false)
+        expect(policy.reason).to_equal("unauthorized-document-request")
+
+    it "derives same-origin mode from broker committed state":
+        val policy = hosted_browser_renderer_request_policy(
+            "https://example.test",
+            permit(false, ""),
+            request("script", "https://example.test/app.js")
+        )
+        expect(policy.ok).to_be(true)
+        expect(policy.mode == RequestMode.SameOrigin).to_be(true)
+
+    it "requires cors for simple cross-origin resources":
+        val policy = hosted_browser_renderer_request_policy(
+            "https://example.test",
+            permit(false, ""),
+            request("style", "https://cdn.test/app.css")
+        )
+        expect(policy.ok).to_be(true)
+        expect(policy.mode == RequestMode.Cors).to_be(true)
+
+    it "denies cross-origin requests that need an unbrokered preflight":
+        val policy = hosted_browser_renderer_request_policy(
+            "https://example.test",
+            permit(false, ""),
+            request(
+                "fetch",
+                "https://api.test/update",
+                "POST",
+                "",
+                "value",
+                "text/plain"
+            )
+        )
+        expect(policy.ok).to_be(false)
+        expect(policy.reason).to_equal(
+            "cross-origin-preflight-unavailable"
+        )

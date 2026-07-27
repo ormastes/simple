@@ -338,11 +338,17 @@ or native TLS behavior.
   and semaphore IPC. Fetch now rejects `SameOrigin` mode before cache or
   transport when the request target differs from the committed requester
   origin, and every cache hit is revalidated against the current CORS response
-  policy. A fail-closed external-frame compositor seam exists, but the hosted
-  entry is not switched to it: the broker transaction is still blocking (so
-  Stop cannot preempt an active fetch), the broker still trusts
-  renderer-supplied `Navigate`/`NoCors` kind authority, and resize/scroll plus
-  parent-owned trusted chrome state remain incomplete. Windows AppContainer
-  and the signed macOS helper also remain open.
+  policy. The renderer broker now rejects every document request unless it
+  exactly consumes one parent-issued canonical URL/method/header/body permit,
+  derives resource mode from the broker's committed origin instead of the
+  renderer's kind, and authorizes only bounded simple CORS requests until
+  preflight uses the public-only broker transport. Redirects receive one exact
+  derived successor permit with downgrade and hop-limit enforcement. A
+  fail-closed external-frame compositor seam exists, but the hosted entry is
+  not switched to it: no trusted navigation command issues the first permit,
+  the broker transaction is still blocking (so Stop cannot preempt an active
+  fetch), and resize/scroll plus parent-owned history/bookmark/cookie state
+  remain incomplete. Windows AppContainer and the signed macOS helper also
+  remain open.
 - no current GC/RSS/soak or crash-containment evidence exists;
 - existing browser interaction evidence can pass when its artifact is absent.

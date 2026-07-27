@@ -5,6 +5,7 @@ use common.string_builder.{StringBuilder}
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_WORKER_ARG,
     BrowserRendererDecoder, BrowserRendererEncodeResult,
+    BrowserRendererNetworkDecodeResult,
     browser_renderer_advance_encode,
     browser_renderer_chrome_encode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
@@ -17,8 +18,10 @@ use std.common.web.browser_renderer_protocol.{
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     FetchRequest, FetchResponse, RequestMode
 }
-use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
-use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin, Url}
+use std.gc_async_mut.gpu.browser_engine.net.fetch.{
+    FetchEngine, resolve_fetch_redirect_url
+}
 use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
     build_request_bytes, h1_mock_response, parse_http_response_bytes
 }
@@ -61,6 +64,23 @@ struct HostedBrowserNetworkResult:
     body: text
     error: text
 
+pub struct HostedBrowserNavigationPermit:
+    active: bool
+    url: text
+    method: text
+    headers: text
+    body: text
+    content_type: text
+    redirect_count: i64
+
+pub struct HostedBrowserRequestPolicy:
+    ok: bool
+    reason: text
+    mode: RequestMode
+    canonical_url: text
+    sanitized_headers: text
+    consumes_navigation: bool
+
 fn _network_result(
     status: i32, headers: text, body: text, error: text
 ) -> HostedBrowserNetworkResult:
@@ -70,13 +90,6 @@ fn _network_result(
         body: body,
         error: error
     )
-
-fn _renderer_fetch_mode(kind: text) -> RequestMode:
-    if kind == "document":
-        return RequestMode.Navigate
-    if kind == "style" or kind == "script":
-        return RequestMode.NoCors
-    RequestMode.SameOrigin
 
 fn _renderer_header_name_valid(name: text) -> bool:
     if name == "":
@@ -123,6 +136,121 @@ fn _renderer_fetch_headers(headers: text, content_type: text) -> Result<text, te
                 return Err("invalid-request-headers")
         lines.push("Content-Type: {content_type}")
     Ok(lines.join("\r\n"))
+
+fn _empty_navigation_permit() -> HostedBrowserNavigationPermit:
+    HostedBrowserNavigationPermit(
+        active: false,
+        url: "",
+        method: "",
+        headers: "",
+        body: "",
+        content_type: "",
+        redirect_count: 0
+    )
+
+fn _request_policy_reject(reason: text) -> HostedBrowserRequestPolicy:
+    HostedBrowserRequestPolicy(
+        ok: false,
+        reason: reason,
+        mode: RequestMode.SameOrigin,
+        canonical_url: "",
+        sanitized_headers: "",
+        consumes_navigation: false
+    )
+
+fn _canonical_http_url(raw: text) -> text:
+    if (raw == "" or raw.contains("\0") or raw.contains("\r") or
+        raw.contains("\n") or rt_text_to_bytes(raw).len() > 8192):
+        return ""
+    val parsed = Url.parse(raw)
+    if ((parsed.scheme != "http" and parsed.scheme != "https") or
+        parsed.host == ""):
+        return ""
+    val rendered = parsed.to_text()
+    val fragment_at = rendered.index_of("#")
+    if fragment_at >= 0:
+        return rendered.slice(0, fragment_at)
+    rendered
+
+fn _network_origin(url: text) -> text:
+    Origin.from_url(Url.parse(url)).to_text()
+
+fn _response_header_value(headers: text, expected_name: text) -> text:
+    val expected = expected_name.to_lower()
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        val colon = line.index_of(":")
+        if (colon > 0 and
+            line.slice(0, colon).trim().to_lower() == expected):
+            return line.slice(colon + 1, line.len()).trim()
+    ""
+
+fn _redirect_status(status: i32) -> bool:
+    status == 301 or status == 302 or status == 303 or
+        status == 307 or status == 308
+
+pub fn hosted_browser_renderer_request_policy(
+    document_origin: text,
+    permit: HostedBrowserNavigationPermit,
+    request: BrowserRendererNetworkDecodeResult
+) -> HostedBrowserRequestPolicy:
+    if not request.ok:
+        return _request_policy_reject(request.reason)
+    val canonical_url = _canonical_http_url(request.url)
+    if canonical_url == "":
+        return _request_policy_reject("invalid-request-url")
+    val sanitized_headers = match _renderer_fetch_headers(
+        request.headers, request.content_type
+    ):
+        Err(reason):
+            return _request_policy_reject(reason)
+        Ok(value):
+            value
+    val method = request.method.to_upper()
+    if request.kind == "document":
+        if (not permit.active or canonical_url != permit.url or
+            method != permit.method or sanitized_headers != permit.headers or
+            request.body != permit.body or
+            request.content_type != permit.content_type):
+            return _request_policy_reject(
+                "unauthorized-document-request"
+            )
+        return HostedBrowserRequestPolicy(
+            ok: true,
+            reason: "ok",
+            mode: RequestMode.Navigate,
+            canonical_url: canonical_url,
+            sanitized_headers: sanitized_headers,
+            consumes_navigation: true
+        )
+    if document_origin == "":
+        return _request_policy_reject("missing-document-origin")
+    if (request.kind != "fetch" and method != "GET" and method != "HEAD"):
+        return _request_policy_reject("invalid-resource-method")
+    val request_origin = _network_origin(canonical_url)
+    if request_origin == document_origin:
+        return HostedBrowserRequestPolicy(
+            ok: true,
+            reason: "ok",
+            mode: RequestMode.SameOrigin,
+            canonical_url: canonical_url,
+            sanitized_headers: sanitized_headers,
+            consumes_navigation: false
+        )
+    # Cross-origin preflight still uses FetchEngine's direct transport. Until
+    # that hop is brokered, admit only requests that cannot require preflight.
+    if ((method != "GET" and method != "HEAD") or
+        sanitized_headers != "" or request.body != "" or
+        request.content_type != ""):
+        return _request_policy_reject("cross-origin-preflight-unavailable")
+    HostedBrowserRequestPolicy(
+        ok: true,
+        reason: "ok",
+        mode: RequestMode.Cors,
+        canonical_url: canonical_url,
+        sanitized_headers: sanitized_headers,
+        consumes_navigation: false
+    )
 
 fn _renderer_wasm_hex(data: [u8]) -> text:
     var out = StringBuilder.new()
@@ -190,6 +318,9 @@ pub class HostedBrowserRendererProcess:
     next_request_id: i64
     decoder: BrowserRendererDecoder
     network: FetchEngine
+    document_url: text
+    document_origin: text
+    navigation_permit: HostedBrowserNavigationPermit
     state: text
 
     static fn create(
@@ -207,8 +338,44 @@ pub class HostedBrowserRendererProcess:
             network: FetchEngine.new(
                 Logger.new("browser-renderer-broker", LogLevel.Error)
             ),
+            document_url: "",
+            document_origin: "",
+            navigation_permit: _empty_navigation_permit(),
             state: "new"
         )
+
+    me authorize_navigation(
+        url: text,
+        method: text,
+        headers: text,
+        body: text,
+        content_type: text
+    ) -> bool:
+        val canonical_url = _canonical_http_url(url)
+        val canonical_method = method.to_upper()
+        if (canonical_url == "" or
+            (canonical_method != "GET" and canonical_method != "POST") or
+            rt_text_to_bytes(body).len() > 524288):
+            self.navigation_permit = _empty_navigation_permit()
+            return false
+        val sanitized_headers = match _renderer_fetch_headers(
+            headers, content_type
+        ):
+            Err(_):
+                self.navigation_permit = _empty_navigation_permit()
+                return false
+            Ok(value):
+                value
+        self.navigation_permit = HostedBrowserNavigationPermit(
+            active: true,
+            url: canonical_url,
+            method: canonical_method,
+            headers: sanitized_headers,
+            body: body,
+            content_type: content_type,
+            redirect_count: 0
+        )
+        true
 
     me close():
         if self.pid > 0:
@@ -282,28 +449,20 @@ pub class HostedBrowserRendererProcess:
 
     me _fetch_network(
         kind: text,
-        url_text: text,
+        policy: HostedBrowserRequestPolicy,
         method: text,
-        headers: text,
         body: text,
-        content_type: text,
         deadline_ms: i64
     ) -> HostedBrowserNetworkResult:
-        val sanitized_headers = match _renderer_fetch_headers(
-            headers, content_type
-        ):
-            Err(reason):
-                return _network_result(0, "", "", reason)
-            Ok(value):
-                value
         val request = FetchRequest(
-            url: Url.parse(url_text),
+            url: Url.parse(policy.canonical_url),
             method: method,
-            headers: sanitized_headers,
+            headers: policy.sanitized_headers,
             body: rt_text_to_bytes(body),
-            mode: _renderer_fetch_mode(kind),
+            mode: policy.mode,
             credentials: "omit"
         )
+        self.network.set_requester_origin(self.document_origin)
         match self.network.prepare_single_hop(request):
             Err(error):
                 return _network_result(0, "", "", error.message)
@@ -376,6 +535,58 @@ pub class HostedBrowserRendererProcess:
                 val _ = rt_browser_http_job_free(handle)
                 _network_result(0, "", "", "renderer-network-timeout")
 
+    me _record_document_response(
+        request: BrowserRendererNetworkDecodeResult,
+        policy: HostedBrowserRequestPolicy,
+        response: HostedBrowserNetworkResult,
+        redirect_count: i64
+    ) -> bool:
+        if response.status <= 0:
+            return true
+        if not _redirect_status(response.status):
+            self.document_url = policy.canonical_url
+            self.document_origin = _network_origin(policy.canonical_url)
+            return true
+        val location = _response_header_value(response.headers, "location")
+        if location == "" or redirect_count >= 20:
+            return false
+        val base = Url.parse(policy.canonical_url)
+        val redirected = resolve_fetch_redirect_url(base, location)
+        val redirected_url = _canonical_http_url(redirected.to_text())
+        if (redirected_url == "" or
+            (base.scheme == "https" and redirected.scheme != "https")):
+            return false
+        val prior_method = request.method.to_upper()
+        val next_method = if response.status == 303 or
+            ((response.status == 301 or response.status == 302) and
+                prior_method == "POST"):
+            "GET"
+        else:
+            prior_method
+        val preserve_body = next_method != "GET" and next_method != "HEAD"
+        val same_origin = _network_origin(policy.canonical_url) ==
+            _network_origin(redirected_url)
+        val next_content_type = if preserve_body:
+            request.content_type
+        else:
+            ""
+        val next_headers = if same_origin:
+            policy.sanitized_headers
+        elif next_content_type != "":
+            "Content-Type: {next_content_type}"
+        else:
+            ""
+        self.navigation_permit = HostedBrowserNavigationPermit(
+            active: true,
+            url: redirected_url,
+            method: next_method,
+            headers: next_headers,
+            body: if preserve_body: request.body else: "",
+            content_type: next_content_type,
+            redirect_count: redirect_count + 1
+        )
+        true
+
     me _await_frame(
         request: BrowserRendererEncodeResult,
         timeout_ms: i64
@@ -397,17 +608,32 @@ pub class HostedBrowserRendererProcess:
                     val fetch = browser_renderer_fetch_request_decode(
                         decoded.message
                     )
-                    if not fetch.ok:
-                        return self.fail(fetch.reason)
+                    val policy = hosted_browser_renderer_request_policy(
+                        self.document_origin,
+                        self.navigation_permit,
+                        fetch
+                    )
+                    if not policy.ok:
+                        return self.fail(policy.reason)
+                    var navigation_redirect_count: i64 = 0
+                    if policy.consumes_navigation:
+                        navigation_redirect_count = (
+                            self.navigation_permit.redirect_count
+                        )
+                        self.navigation_permit = _empty_navigation_permit()
                     val response = self._fetch_network(
                         fetch.kind,
-                        fetch.url,
+                        policy,
                         fetch.method,
-                        fetch.headers,
                         fetch.body,
-                        fetch.content_type,
                         deadline
                     )
+                    if policy.consumes_navigation and
+                        not self._record_document_response(
+                            fetch, policy, response,
+                            navigation_redirect_count
+                        ):
+                        return self.fail("invalid-navigation-redirect")
                     val response_wire = browser_renderer_network_response_encode(
                         self.generation,
                         self.next_request_id,

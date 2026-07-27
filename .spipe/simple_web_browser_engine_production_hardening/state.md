@@ -806,3 +806,13 @@ implementation in progress / target evidence blocked
   `NoCors`-prime/`Cors`-read cache bypasses. LSP diagnostics remain unavailable
   because source-mode diagnostics deadlock on the known `simple check` spawn;
   no compiler/bootstrap command was retried and no executable PASS is claimed.
+- broker navigation authority: Document fetches now fail closed unless their
+  canonical URL, method, sanitized headers, body, and content type consume one
+  exact parent-issued permit. Resource mode is derived from the broker's
+  committed origin; renderer-supplied kind can no longer select `Navigate` or
+  `NoCors`. Redirect permits apply method rewrite, cross-origin header
+  stripping, HTTPS-downgrade denial, and the 20-hop cap.
+- evidence: Added focused broker-policy scenarios for missing/mismatched
+  navigation permits, canonical HTTP(S) permit issuance, same-origin resource
+  mode, simple CORS mode, and preflight-required denial. Executable evidence
+  remains target-compiler-blocked; no bootstrap or compiler retry ran.
