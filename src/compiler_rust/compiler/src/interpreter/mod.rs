@@ -93,6 +93,10 @@ pub(crate) use coverage_helpers::{
     decision_id_from_span, is_coverage_enabled,
 };
 
+// Place (lvalue) model: identifier root + arbitrary field/index projections.
+// Backs both deep field assignment and mutating-method receivers.
+mod place;
+
 // Node execution
 mod node_exec;
 pub(crate) use node_exec::{exec_assignment, exec_augmented_assignment, exec_node};

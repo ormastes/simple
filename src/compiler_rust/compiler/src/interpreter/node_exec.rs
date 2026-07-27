@@ -940,20 +940,47 @@ pub(crate) fn exec_assignment(
                     ))
                 }
             } else {
+                // Deeper than the hand-written two-level cases (e.g.
+                // `a.b.c.d = v`, `a[i].b.c = v`). Resolve the general place and
+                // write through it. This is what used to be rejected with
+                // "deeply nested field access requires intermediate variables".
+                if let Some(place) = super::place::resolve_place(
+                    &assign.target,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    if super::place::write_place(env, &place, value) {
+                        return Ok(Control::Next);
+                    }
+                }
                 let ctx = ErrorContext::new().with_code(codes::INVALID_ASSIGNMENT).with_help(
-                    "deeply nested field assignment (more than 2 levels) is not supported; use intermediate variables",
+                    "the assignment target is not a writable place; check that every field and index on the path exists",
                 );
                 Err(CompileError::semantic_with_context(
-                    "invalid assignment: deeply nested field access requires intermediate variables",
+                    "invalid assignment: nested field assignment target is not a writable place",
                     ctx,
                 ))
             }
         } else {
+            // The object of the field access is neither an identifier nor a
+            // simple nested field/index access. It may still be a place
+            // (arbitrary projection chains are supported); only genuine
+            // temporaries fall through to the error.
+            if let Some(place) =
+                super::place::resolve_place(&assign.target, env, functions, classes, enums, impl_methods)?
+            {
+                if super::place::write_place(env, &place, value) {
+                    return Ok(Control::Next);
+                }
+            }
             let ctx = ErrorContext::new()
                 .with_code(codes::INVALID_ASSIGNMENT)
-                .with_help("field assignment requires an identifier or simple nested field access as the object");
+                .with_help("field assignment requires a place: a variable followed by field/index projections");
             Err(CompileError::semantic_with_context(
-                "invalid assignment: field assignment requires identifier or simple nested field access as object",
+                "invalid assignment: field assignment target is not a place",
                 ctx,
             ))
         }

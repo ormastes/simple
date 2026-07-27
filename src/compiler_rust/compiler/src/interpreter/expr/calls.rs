@@ -12,6 +12,64 @@ use super::super::{
     FunctionDef, ImplMethods, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, MODULE_GLOBALS,
 };
 
+/// Call a method whose receiver is a *place* — a variable followed by an
+/// arbitrary chain of field/index projections (`a.b.c`, `a.b[i].c`, `self.w.s`)
+/// — and persist any `me`-method mutation back to the rooted storage.
+///
+/// The hand-written receiver branches above cover exactly the one- and two-level
+/// shapes (`a.m()`, `a.b.m()`, `a[i].m()`). Anything deeper used to fall through
+/// to `evaluate_method_call`, which evaluates the receiver to a **copy**: the
+/// method ran, mutated the copy, and the write was silently dropped. That is the
+/// same place the assignment path rejected loudly as "deeply nested field
+/// access requires intermediate variables" — one spelling erred, the other lost
+/// data.
+///
+/// Returns `Ok(None)` when the receiver is not a place (a temporary, a call
+/// result), leaving the caller on its previous copy-based path — a temporary has
+/// no storage to write back to, so copying it is correct.
+#[allow(clippy::too_many_arguments)]
+fn try_place_receiver_method_call(
+    receiver: &Expr,
+    method: &str,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    let place = match super::super::place::resolve_place(receiver, env, functions, classes, enums, impl_methods)? {
+        Some(place) => place,
+        None => return Ok(None),
+    };
+    // A bare identifier is handled by its own branch (which also syncs
+    // MODULE_GLOBALS); don't duplicate it here.
+    if place.projections.is_empty() {
+        return Ok(None);
+    }
+    // The path must actually resolve to storage right now, otherwise this is
+    // not a write-back-able receiver and the old behavior is the right one.
+    if !super::super::place::place_is_live(env, &place) {
+        return Ok(None);
+    }
+
+    let boxed = Box::new(receiver.clone());
+    let (result, updated_self) = super::super::evaluate_method_call_with_self_update(
+        &boxed,
+        method,
+        args,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    )?;
+    if let Some(new_self) = updated_self {
+        super::super::place::write_place(env, &place, new_self);
+    }
+    Ok(Some(result))
+}
+
 pub(super) fn eval_call_expr(
     expr: &Expr,
     env: &mut Env,
@@ -109,6 +167,20 @@ pub(super) fn eval_call_expr(
                         }
                     }
                 }
+                // Deeper than two levels (`a.b.c.m()`, `a[i].b.m()`): resolve the
+                // receiver as a general place and write the mutation back.
+                if let Some(result) = try_place_receiver_method_call(
+                    receiver,
+                    method,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    return Ok(Some(result));
+                }
                 // Fall through to regular method call if nested update doesn't apply
                 Ok(Some(evaluate_method_call(
                     receiver,
@@ -181,6 +253,21 @@ pub(super) fn eval_call_expr(
                         }
                     }
                 }
+                // Indexed receiver that the array fast path above did not cover
+                // (nested container, dict, non-object element): try the general
+                // place model before giving up on write-back.
+                if let Some(result) = try_place_receiver_method_call(
+                    receiver,
+                    method,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    return Ok(Some(result));
+                }
                 // Fall through to regular method call
                 Ok(Some(evaluate_method_call(
                     receiver,
@@ -193,7 +280,21 @@ pub(super) fn eval_call_expr(
                     impl_methods,
                 )?))
             } else {
-                // For other expressions (like temporaries), use regular method call
+                // For other expressions (like temporaries), use regular method call.
+                // `try_place_receiver_method_call` returns None for anything that
+                // is not a place, so a genuine temporary keeps the copy behavior.
+                if let Some(result) = try_place_receiver_method_call(
+                    receiver,
+                    method,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )? {
+                    return Ok(Some(result));
+                }
                 Ok(Some(evaluate_method_call(
                     receiver,
                     method,

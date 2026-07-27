@@ -419,6 +419,48 @@ pub(crate) fn handle_method_call_with_self_update(
             }
         }
 
+        // General PLACE receiver: a variable followed by an arbitrary chain of
+        // field/index projections (`a.b.c.m()`, `self.world.store.insert(..)`).
+        //
+        // The hand-written branches above stop at two levels: a FieldAccess whose
+        // parent is an identifier, or an Index on an identifier. Anything deeper
+        // used to fall through to plain evaluation, which evaluates the receiver
+        // to a COPY — the mutating method ran against the copy and the write was
+        // silently dropped (the "two-hop mutation lost" defect). Assignment
+        // rejected the very same place loudly; this path lost data quietly.
+        //
+        // Resolve the receiver as a place, run the method with self-update
+        // tracking, then rebuild the ROOT value with the mutated receiver stored
+        // back at its projection and hand that to the caller as the update.
+        if let Some(place) = super::super::place::resolve_place(receiver, env, functions, classes, enums, impl_methods)?
+        {
+            if !place.projections.is_empty() && super::super::place::place_is_live(env, &place) {
+                let (result, updated_self) = evaluate_method_call_with_self_update(
+                    receiver,
+                    method,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                if let Some(new_self) = updated_self {
+                    if let Some(new_root) = super::super::place::updated_root(env, &place, new_self) {
+                        // Keep MODULE_GLOBALS in step, as the sibling paths do.
+                        MODULE_GLOBALS.with(|cell| {
+                            let mut globals = cell.borrow_mut();
+                            if globals.contains_key(&place.root) {
+                                globals.insert(place.root.clone(), new_root.clone());
+                            }
+                        });
+                        return Ok((result, Some((place.root.clone(), new_root))));
+                    }
+                }
+                return Ok((result, None));
+            }
+        }
+
         if let Expr::Identifier(obj_name) = receiver.as_ref() {
             // Handle Object mutations — fast path with zero-copy field mutations
             if let Some(Value::Object { ref class, .. }) = env.get(obj_name) {
