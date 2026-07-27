@@ -79,16 +79,38 @@ probe places that crash in `common.string_core.str_starts_with`; disassembly
 shows the generated helper recursively calls itself instead of
 `rt_string_starts_with`. The probe accepts only six fixed phase tokens, so its
 argument parser now matches those complete tokens directly and no longer
-depends on `starts_with` or slicing. The native probe still needs rebuilding
-before Vulkan parity can be measured.
+depends on `starts_with` or slicing. At that point the native probe still
+needed rebuilding before Vulkan parity could be measured.
 
 Three bounded probe rebuild attempts then stopped before producing a candidate:
 the first found unrelated full-app module-name collisions; the second used an
 archive-only runtime overlay; the third passed the Cargo target parent rather
-than the directory containing the hosted runtime rlib. Resume with the same
-scoped command and
-`--runtime-path build/vulkan-engine2d-readback/cargo-target/bootstrap`; that
-directory contains both `libsimple_runtime.a` and `libsimple_runtime.rlib`.
+than its `bootstrap` output directory. The latter contains
+`libsimple_runtime.a` and `libsimple_runtime.rlib`, but the linker diagnostic
+persisted because its hosted owner is a different crate.
+
+The retained backend actually requires the Vulkan `libsimple_runtime.a` and
+the separate `libspl_hosted_runtime-*.rlib`. A two-symlink build projection
+provided those existing artifacts without rebuilding either runtime. The
+fixed-token probe then rebuilt incrementally (`1 compiled, 31 cached`) and
+reached a truthful backend result: Vulkan completed with positive
+handle/identity, while stale direct indexing alone reported values in tagged
+form. Raising the request from 8 to 64 values and changing the evidence
+consumer to language-level iteration produced an exact 64-value receipt, and
+the canonical wrapper passed all six isolated processes:
+
+```text
+phase=none        completed=true  reason=ok                      values=64 values_exact=true handle=1 identity=1
+phase=unavailable completed=false reason=vulkan-unavailable      values=0  handle=0 identity=0
+phase=init        completed=false reason=vulkan-init-failed      values=0  handle=0 identity=0
+phase=submit      completed=false reason=vulkan-submit-failed    values=0  handle=0 identity=0
+phase=readback    completed=false reason=vulkan-readback-failed  values=0  handle=0 identity=0
+phase=mismatch    completed=false reason=checksum-mismatch       values=0  handle=0 identity=0
+```
+
+This closes Linux Vulkan backend execution and fault injection. It does not
+close unified CUDA/Vulkan parity: the CUDA ProcessingIR consumer and direct
+array indexing still expose the retained compiler's tagged-value defect.
 
 CUDA identity was a separate three-bit tag-width overflow: the UUID hash used
 the full positive 63-bit range, so native Simple tagging could make it negative.
@@ -105,13 +127,13 @@ values as the same algorithm version.
 1. Repair or bypass the retained generation's HIR crash while lowering current
    `run_compile_bootstrap`, or regenerate on a prepared host with a current
    source-matched pure-Simple compiler; do not run a full bootstrap.
-2. Rebuild the Vulkan probe and require exact-token phase parsing to complete.
-3. Run the focused transport probe once with that compiler and require zero
+2. Run the focused transport probe once with that compiler and require zero
    iterator and indexed mismatches for all four recorded cases.
-4. Re-run the direct CUDA and Vulkan 64-element probes with that compiler.
-5. If direct indexing still loads raw storage, trace the lost runtime-array
+3. Re-run the direct CUDA 64-element probe and unified parity consumer with
+   that compiler. Preserve the passing Vulkan iterator receipt.
+4. If direct indexing still loads raw storage, trace the lost runtime-array
    classification and repair the shared Index lowering before backend retries.
-6. Require exact count/value/checksum, zero mismatches, device readback,
+5. Require exact count/value/checksum, zero mismatches, device readback,
    positive backend provenance, no CPU fallback, and source-matched freshness
    from both probes before publishing a unified parity receipt.
 
@@ -135,6 +157,9 @@ Retained build logs:
 - `build/simpleos_gpu_host/vulkan_fault_native/build-fixed-phase-parser.log`
 - `build/simpleos_gpu_host/vulkan_fault_native/build-fixed-phase-parser-entry-closure.log`
 - `build/simpleos_gpu_host/vulkan_fault_native/build-fixed-phase-parser-host-gpu.log`
+- `build/simpleos_gpu_host/vulkan_fault_native/build-fixed-phase-parser-runtime-complete.log`
+- `build/simpleos_gpu_host/vulkan_fault_native/build-iter64.log`
+- `build/simpleos_gpu_host/vulkan_fault_native/wrapper-iter64.log`
 - `doc/09_report/cuda_generated_2d_readback_2026-07-26.md`
 
 No compiler bootstrap was run.
