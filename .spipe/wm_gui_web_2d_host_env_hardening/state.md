@@ -1035,6 +1035,11 @@ Tracking split:
   mutations reject both one-sided and correlated CPU fallback. The structural
   system scenario now checks the exact forward-revision and Vulkan call sites
   under a visible manual step; no live host PASS is claimed.
+- retained-perf-probe-exit: The 4K/8K producer previously continued after a
+  timeout/crash whenever partial output already contained a width row, allowing
+  later fields to overwrite process failure with `met-200fps`. Every nonzero
+  probe exit now fails before row parsing; the focused zero/nonzero/124
+  classifier self-test passes without launching the renderer.
 - coverage-denominator-gap: Review confirmed the runtime aggregate contains
   only decision sites that emitted rows; completely untouched functions can be
   absent while the report says 100%. TODO594 requires a compiler-owned

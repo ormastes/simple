@@ -2,6 +2,10 @@
 
 ## Test Layers
 
+- `test/03_system/check/gui_showcase_perf_probe_exit_contract_spec.spl` proves
+  a crash or timeout cannot be overwritten by complete-looking partial perf
+  rows; its self-test is renderer-free and does not promote the 200 FPS row.
+
 | Layer | Spec | Primary proof |
 |---|---|---|
 | Unit | `test/01_unit/lib/common/ui/host_env_contract_spec.spl` | Every capability/receipt validator branch |

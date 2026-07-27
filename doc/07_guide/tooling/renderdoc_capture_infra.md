@@ -363,6 +363,11 @@ Producer-side wrapper rows include
 `*_native_build_log_file_status` so a reviewer can distinguish a planned probe
 route from a completed native binary measurement with a runnable ELF, Mach-O,
 or PE binary and retained build log.
+The producer rejects every nonzero probe exit before parsing performance rows;
+a timed-out or crashed process cannot inherit `pass` from complete-looking
+partial output. Run
+`sh scripts/check/check-widget-showcase-4k-200fps.shs --self-test` to verify the
+zero/nonzero/timeout exit classifier without launching a renderer.
 Use `PLAN_ONLY=1 RESOLUTION=4k|8k
 scripts/check/check-widget-showcase-4k-200fps.shs` to verify wrapper routing
 without launching the expensive native perf run. Plan-only evidence is not
