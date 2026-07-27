@@ -156,21 +156,6 @@ fn _deadline_ms(timeout_ms: i64) -> i64:
         if timeout_ms > 0: timeout_ms else: 2000
     )
 
-fn _write_before(pid: i64, wire: text, deadline_ms: i64) -> bool:
-    var offset: i64 = 0
-    while offset < wire.len() and
-        rt_time_now_monotonic_ms() < deadline_ms:
-        val written = process_write_stdin_some(pid, wire, offset, 8192)
-        if written < 0:
-            return false
-        if written > 0:
-            offset = offset + written
-        else:
-            if not process_is_piped_alive(pid):
-                return false
-            rt_sleep_ms(1)
-    offset == wire.len()
-
 pub class HostedBrowserRendererProcess:
     pid: i64
     generation: i64
@@ -758,12 +743,9 @@ pub class HostedBrowserRendererProcess:
         if not request.ok:
             return Err(request.reason)
         val deadline = _deadline_ms(timeout_ms)
-        if not _write_before(self.pid, request.wire, deadline):
-            self.state = "failed"
-            self.close()
-            return Err("renderer-write-failed")
-        self.expected_reply_to_request_id = self.next_request_id
-        self.next_request_id = self.next_request_id + 1
+        self.pending_wire = request.wire
+        self.pending_wire_offset = 0
+        self.pending_wire_reply_to_request_id = self.next_request_id
         self.command_deadline_ms = deadline
         self.pending_operation = operation
         Ok(true)
