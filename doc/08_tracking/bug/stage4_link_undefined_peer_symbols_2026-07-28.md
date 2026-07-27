@@ -1,0 +1,36 @@
+# Stage4 full-CLI link: undefined peer-code symbols (link stage reached)
+
+- **Date:** 2026-07-28
+- **Lane:** stage4 one-binary link (core-c-bootstrap), after all compile + archive blockers cleared
+- **Status:** open — link-stage; peer app-code symbol bugs
+
+## Progress
+Every earlier blocker is fixed and at origin: compile 1584/1584 green (closefrom,
+gui_backend import, formula split), archive fingerprint (runtime_contracts.c added,
+a7ac45b7), archive symbol audit (duplicate simple_contract_check removed, f3c4b9d6).
+The build now reaches the final LINK and fails on 2 undefined symbols:
+
+```
+"_resolved_theme_fingerprint", referenced from
+    _ui_dot_web__html_css__generate_css (mod_251.o)
+"_run_test_api_server_with_inject", referenced from
+    _office__sheets__access_server__run_calc_access_server (mod_165.o)
+```
+
+## Root (genuine missing/renamed defs, NOT compiler)
+1. **resolved_theme_fingerprint** — `src/app/ui.web/html_css.spl:8` imports it from
+   `nogc_sync_mut.ui.theme_package`, but that module defines/exports
+   `theme_package_fingerprint` (theme_package.spl:113,1088), NOT
+   `resolved_theme_fingerprint`. Stale caller from the glass-theme work — likely a
+   rename the caller didn't follow (html_css.spl:26 calls it). Fix owner: theme/UI.
+2. **run_test_api_server_with_inject** — defined `src/app/ui.standalone/bootstrap.spl:36`,
+   imported+called by `src/app/office/sheets/access_server.spl:7,23`. A test-api
+   server referenced from the office/sheets production closure; either the definition
+   isn't reaching the linked set (module not in closure / not exported from the
+   package mod) or the office→ui.standalone dependency shouldn't be in the prod lane.
+
+## Note
+These are the last-known link errors; there may be more behind them. The stage4
+full-CLI closure has an open tail of peer app-code linkage issues across sessions.
+The autonomous deploy loop will produce a clean build + deploy the O(1) runtime
+perf fix once the tip links cleanly.
