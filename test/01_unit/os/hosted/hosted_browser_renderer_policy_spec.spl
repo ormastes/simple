@@ -58,6 +58,7 @@ describe "hosted browser renderer broker policy":
 
     it "issues only bounded canonical http navigation permits":
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        expect(broker.poll()).to_be_nil()
         expect(broker.authorize_navigation(
             "file:///etc/passwd", "GET", "", "", ""
         )).to_be(false)
@@ -67,6 +68,53 @@ describe "hosted browser renderer broker policy":
         expect(broker.navigation_permit.url).to_equal(
             "https://example.test/path"
         )
+
+    it "does not start asynchronous navigation before renderer readiness":
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.command_deadline_ms = 100
+        broker.pending_operation = "navigation"
+        broker.pending_history_action = "push"
+        broker.pending_document_commit_url = "https://stale.test/"
+        broker.provisional_document_origin = "https://stale.test"
+        broker.pending_wire = "queued-response"
+        broker.pending_wire_reply_to_request_id = 2
+        match broker.begin_navigate(
+            "https://example.test/", "GET", "", "", "", 1000
+        ):
+            Err(reason):
+                expect(reason).to_equal("invalid-renderer-state")
+            Ok(_):
+                expect(false).to_be(true)
+        expect(broker.command_deadline_ms).to_equal(0)
+        expect(broker.pending_operation).to_equal("")
+        expect(broker.pending_document_commit_url).to_equal("")
+        expect(broker.provisional_document_origin).to_equal("")
+        expect(broker.network_job_handle).to_equal(0)
+        expect(broker.pending_wire).to_equal("")
+        expect(broker.next_request_id).to_equal(2)
+        expect(broker.navigation_permit.active).to_be(false)
+
+    it "treats repeated asynchronous Stop as idempotent":
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.state = "active"
+        broker.command_deadline_ms = 100
+        broker.pending_operation = "stop"
+        match broker.begin_stop(1000):
+            Err(_):
+                expect(false).to_be(true)
+            Ok(started):
+                expect(started).to_be(false)
+
+    it "does not let page input replace a pending navigation":
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.state = "active"
+        broker.command_deadline_ms = 100
+        broker.pending_operation = "navigation"
+        val result = broker.pointer(1, 4, 5, true, 1000)
+        expect(result.ok).to_be(false)
+        expect(result.reason).to_equal("renderer-busy")
+        expect(broker.state).to_equal("active")
+        expect(broker.pending_operation).to_equal("navigation")
 
     it "denies a renderer document request without a parent permit":
         val policy = hosted_browser_renderer_request_policy(

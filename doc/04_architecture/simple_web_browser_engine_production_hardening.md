@@ -351,10 +351,17 @@ or native TLS behavior.
   parent-issued open/back/forward/home/reload/stop commands now cross the
   bounded protocol; the broker owns committed URL/origin plus a 256-entry
   history and commits only after a validated renderer frame. A fail-closed
-  external-frame compositor seam exists, but the hosted entry is not switched
-  to it: the broker transaction is still blocking (so Stop cannot preempt an
-  active fetch), and resize/scroll plus parent-owned bookmark/cookie state
-  remain incomplete. Windows AppContainer and the signed macOS helper also
-  remain open.
+  external-frame compositor seam exists. The broker now also exposes a
+  per-tick transaction pump, owns at most one parent HTTP job, and writes each
+  queued response with one bounded nonblocking pipe operation per poll. Stop
+  clears trusted pending state before cancel/free and issuing its correlated
+  renderer command. A broker-derived provisional document origin is shared by
+  request policy and FetchEngine to authorize CSS/script/module requests after
+  the document response, while committed chrome URL/history still wait for a
+  validated frame; legacy synchronous calls wrap that same pump.
+  The hosted entry is not switched to this path yet, so production chrome does
+  not exercise preemptive Stop; resize/scroll plus parent-owned bookmark/cookie
+  state remain incomplete. Windows AppContainer and the signed macOS helper
+  also remain open.
 - no current GC/RSS/soak or crash-containment evidence exists;
 - existing browser interaction evidence can pass when its artifact is absent.
