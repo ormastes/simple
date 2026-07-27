@@ -2,8 +2,9 @@
 
 ## Status
 
-OPEN. This blocks the full Stage 4 CLI build and therefore blocks deployment of
-a current pure-Simple runner.
+FIXED IN SOURCE; FULL BOOTSTRAP PENDING. The focused parser executable passes,
+but deployment of a current pure-Simple runner still requires a fresh Stage 4
+bootstrap.
 
 ## Reproduction
 
@@ -32,9 +33,10 @@ The first diagnostic is:
 expected Ident, got < '<'
 ```
 
-The same function contains earlier nested `if ge < 0:` and `if pe < 0:`
-conditions that parse, so this is a context-sensitive bootstrap parser defect,
-not unsupported comparison syntax.
+The lexer classifies `ce` as the computation-expression keyword. The primary
+expression parser therefore entered the `ce NAME:` branch unconditionally,
+advanced to `<`, and expected a builder identifier. Comparison parsing itself
+was not defective.
 
 ## Evidence
 
@@ -45,9 +47,18 @@ not unsupported comparison syntax.
   `b92db12414a1d7e433f5da580579ed3c59d5c4719db07f6f7e45403ccea0a0b0`
 - Stage 4 log:
   `build/bootstrap/cosmos-production-20260727/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`
+- Focused parser executable SHA-256:
+  `9a9b97f7c5361280671f6dae100f599229271283868e91478894c620a2b77cc7`
+- Focused parser executable result:
+  `STATUS: PASS ce-keyword-parser`
 
-## Required Fix
+## Fix
 
-Minimize the nested branch into a parser regression fixture, fix the shared
-parser path, and verify that fixture before another full bootstrap. Do not
-replace the valid source condition with a silent workaround.
+The shared primary-expression parser now treats `ce` as the computation
+expression form only when a builder identifier follows. Otherwise it returns
+the existing identifier AST node and lets normal postfix and comparison
+parsing continue. A mirrored parser regression covers both `if ce < 0:` and a
+valid `ce result:` expression block.
+
+The next verification step is one fresh strict full bootstrap. Do not replace
+the valid source condition with a workaround.
