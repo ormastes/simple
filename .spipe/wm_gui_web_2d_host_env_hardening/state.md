@@ -980,3 +980,11 @@ Tracking split:
   A 199/200 mutation is rejected with `untrusted-4k-sample-window`; 200/200
   passes this gate and reaches the later retained-log check. Shell syntax
   passes; no live 4K/8K measurement or exhausted Simple runner was rerun.
+- hosted-event-callback-truth: Small parallel AC-3 review found that default DOM
+  mutations manufactured callback evidence. Pointer, key, and text receipts now
+  use deltas from BrowserSession's shared listener-action counter, preserving
+  nested focus/before-input/input/change/submit dispatches while default text
+  edits and checkbox toggles advance mutation revision with zero callbacks.
+  Focused specs cover zero-listener, compound listener, keyup-plus-default, and
+  focus-adjusted revision cases. The admitted executable runner remains
+  unavailable, so no runtime SSpec PASS is claimed.

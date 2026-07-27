@@ -15,6 +15,12 @@
 
 ### hosted Web content session
 
+#### uses a required external web frame and rejects a missing one
+
+- A matching Simple Web frame reaches the canonical Engine2D composition and
+  remains present after unrelated window metadata changes.
+- Wrong-origin and missing required frames fail closed.
+
 #### applies CSS and advances Simple Script and JavaScript animation on the host clock
 
 - Simple Script creates the CSS-targeted red first frame.
@@ -30,6 +36,11 @@
   request is emitted.
 - A second host tick commits the HTTPS document while preserving the previous
   page until that final response arrives.
+
+#### cancels the native job immediately when browser chrome stops loading
+
+- A trusted Stop click cancels the retained native network job, preserves the
+  previous document, and reports one chrome callback.
 
 #### fails closed when no semantic element is hit or focused
 
@@ -53,18 +64,31 @@ expect(unfocused.mutation_revision).to_equal(0)
 
 </details>
 
+#### targets a control at its CSS-painted geometry
+
+- Pointer hit testing uses final CSS layout coordinates, and the executed
+  button listener reports one callback.
+
 #### appends committed text only to the actually focused hosted input
 
 - Press and release the input to establish DOM focus.
 - Commit `"A"` and then `"da"` as separate host text events.
 - The focused input ends with `value="Ada"`; no pointer-position lookup is
   involved in text routing.
+- Default input editing advances `mutation_revision` but leaves
+  `callback_count` at zero because no application listener ran.
+
+#### counts only an executed input listener as an application callback
+
+- Nested focus, before-input, and input listeners are all counted; default
+  editing itself adds no callback.
 
 #### clicks only after a matching hosted pointer press and release
 
 - A release without a preceding press must not check the checkbox.
 - A press followed by a release outside the semantic surface must not click.
 - Only a same-target press/release emits the click default action.
+- The checkbox default action mutates checked state with `callback_count=0`.
 - The resulting checked state must change the hosted pixels and survive the
   canonical compositor-to-Engine2D frame.
 
@@ -74,6 +98,8 @@ expect(unfocused.mutation_revision).to_equal(0)
 - Deliver W keydown, committed text, and W keyup to that DOM focus.
 - Verify both key listeners run and the input value becomes `w`, preventing
   the bare W edge from becoming a window-close shortcut.
+- Key listeners report one callback; committed text and the Space default
+  toggle report zero callbacks.
 - Focus a checkbox and verify Space keydown reuses the canonical click/default
   path while Space keyup reaches its listener.
 
@@ -93,6 +119,10 @@ expect(unfocused.mutation_revision).to_equal(0)
 - The sibling browser window remains unchanged.
 - Registry shutdown closes bookmark ownership without touching HSTS.
 
+#### carries one compositor-local pointer release through BrowserSession and the canonical Engine2D frame
+
+- A checkbox default action crosses compositor-local coordinates, mutates the
+  hosted pixels with zero callbacks, and reaches a nonblank Engine2D frame.
 - The WM-owned toolbar and address field occupy a reserved region above the
   hostile page frame.
 - A toolbar coordinate resolves only to `browser:session#address`, never to
@@ -123,8 +153,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

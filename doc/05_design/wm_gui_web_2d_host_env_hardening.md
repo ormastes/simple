@@ -59,7 +59,11 @@ class HostedWebContentSessionRegistry:
 
 `HostedWebDispatchResult` returns target/callback/mutation/body HTML but never
 pixels. The compositor remains the only owner that turns mutated content into a
-frame.
+frame. `callback_count` is the number of executed DOM listener/author actions;
+default focus, text edits, checkbox toggles, and other browser mutations advance
+`mutation_revision` without manufacturing a callback. BrowserSession's shared
+DOM dispatch counter includes nested focus, blur, input, change, and submit
+dispatches; each hosted receipt reports the operation-local counter delta.
 
 ## Pointer and Text Algorithm
 
@@ -67,8 +71,9 @@ Pointer coordinates are translated to the top non-minimized window’s content
 rect. The registry opens or refreshes a `BrowserSession`, runs the existing
 layout tree and deepest-node hit-test, derives the stable DOM event identity,
 dispatches pointer/click semantics, and records editable focus. Text updates the
-focused input through `set_dom_text_input`. A successful mutation replaces
-authoritative window content and marks damage.
+focused input through `set_dom_text_input`. Dispatch-result actions supply the
+callback count. A successful mutation replaces authoritative window content and
+marks damage.
 
 ## Receipt Validation
 
