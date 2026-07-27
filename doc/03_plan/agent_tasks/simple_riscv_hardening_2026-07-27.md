@@ -544,3 +544,33 @@ PASS; hardware-gates 13/22; formal-dual-track FAIL; product-level-evidence
 FAIL — the last three all from the seed's `variable `hardware` not found`
 decorator gap, predicted seed-only. See
 `doc/09_report/riscv_gate_seed_gap_analysis_2026-07-27.md`.
+
+## 7. Bootstrap deploy attempt (2026-07-27, later) — Stage 4 focused-build blocker, deploy did not occur
+
+`--full-bootstrap --deploy` was attempted from a worktree at current origin
+main. **Stages 2 and 3 PASSED** with sanity checks green. **Stage 4 FAILED.**
+
+The segfault class from the earlier campaign is now confirmed eliminated: all
+1,752 HIR modules lowered with **zero segfaults** (previously a deterministic
+segfault at HIR module 32). Stage 4 then failed inside `focused native-build`
+sub-builds with 6,144 errors (5,950 `unresolved name`, 166 `untyped function
+returns a value`) — **roughly half** the 11,826 errors measured earlier today
+on a 159-commits-older tree/build, with the `me`-unresolved count staying
+byte-identical (543) across both measurements, indicating a pre-existing,
+independent defect in focused-build star-import closure resolution, not a
+regression from today's HIR fix.
+
+**Deploy did NOT occur.** `bin/simple` still resolves to the 2026-07-25 Rust
+seed (`bin/release/x86_64-unknown-linux-gnu/simple`, mtime 2026-07-25
+05:30:43, size 145290352). Consequently the four RISC-V gates keep their seed
+baseline from §"Pre-deploy four-gate baseline" above: rtl-truth PASS,
+hardware-gates 13/22, formal-dual-track FAIL, product-level-evidence FAIL.
+
+**Next blocker:** filed as
+`doc/08_tracking/bug/stage4_focused_subbuild_star_import_unresolved_2026-07-27.md`
+— hypothesis is that focused sub-builds compute a module closure that omits
+star-imported (`use X.*`) modules, so `modules_by_name` lacks entries like
+`compiler.mir.mir_data` and `compiler.lex.token`, making every name imported
+through them "unresolved". A control probe (small entry-closure build using
+the same star import) compiled and ran cleanly, implicating the focused-build
+closure computation specifically rather than star-import handling in general.

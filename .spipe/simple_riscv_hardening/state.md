@@ -267,6 +267,21 @@ FAIL — the last three all from the seed's `variable `hardware` not found`
 decorator gap, predicted seed-only. See
 `doc/09_report/riscv_gate_seed_gap_analysis_2026-07-27.md`.
 
+## Lane H — bootstrap deploy attempt (2026-07-27, later): Stage 4 focused-build blocker, deploy did not occur
+
+`--full-bootstrap --deploy` attempted from current origin main. Stages 2 and 3
+**PASSED** with sanity checks green. Stage 4 **FAILED**: segfault class
+confirmed eliminated (all 1,752 HIR modules lowered, **zero segfaults**, vs the
+prior deterministic segfault at module 32); error count **halved** vs the
+pre-fix measurement (6,144 vs 11,826), with the `me`-unresolved count
+byte-identical (543) both times — pre-existing, independent defect, not a
+regression. **DEPLOY DID NOT OCCUR** — `bin/simple` remains the 2026-07-25
+seed. The four RISC-V gates keep their seed baseline: rtl-truth PASS,
+hardware-gates 13/22, formal-dual-track FAIL, product-level-evidence FAIL.
+Next blocker filed:
+`doc/08_tracking/bug/stage4_focused_subbuild_star_import_unresolved_2026-07-27.md`
+(focused sub-build closure likely omits star-imported modules).
+
 ## Phase Checklist
 - [x] 1-dev
 - [x] 2-research (parallel lanes A–G ran; findings folded into plan §1.1b–§1.1e)
@@ -274,5 +289,5 @@ decorator gap, predicted seed-only. See
 - [x] 4-spec (Lane F red specs landed RED — reproduce-first satisfied)
 - [ ] 5-implement (in progress: B done; D/E/I/J running; trap machinery NOT started — reordered as prerequisite per §1.1e)
 - [ ] 6-refactor
-- [ ] 7-verify (Lane H redeploy ACTIVE: stage 2+3 + provenance green in isolated worktree; stage-4 parse blockers fixed+pushed; HIR lower_trait SIGSEGV root-caused, mitigation under verification; final bootstrap+deploy+gate-reverify pending)
+- [ ] 7-verify (Lane H redeploy ACTIVE: stage 2+3 PASS again 2026-07-27; stage-4 now blocked on focused-build star-import resolution, see bug doc above; final bootstrap+deploy+gate-reverify pending)
 - [ ] 8-ship
