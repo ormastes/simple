@@ -35,6 +35,7 @@ extern fn rt_file_delete(path: text) -> bool
 extern fn rt_env_set(key: text, value: text) -> bool
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_getpid() -> i64
+extern fn rt_path_absolute(path: text) -> text
 
 # --- Legacy word-infix matcher preprocessing (self-contained; this file is kept
 # independent of std.test_runner.* so child runs stay lightweight). Mirrors
@@ -157,6 +158,16 @@ fn find_simple_binary() -> text:
     val configured = env_get("SIMPLE_BINARY")
     if configured != nil and configured != "" and rt_file_exists(configured):
         return configured
+    # Resolve the invoking binary IN-PROCESS via /proc/self/exe
+    # (std::fs::canonicalize). Never shell out to `readlink`: a spawned
+    # helper's /proc/self describes the HELPER, which is how the CLI's guard
+    # became a fork bomb on 2026-07-25. cli_get_args()[0] below is the
+    # SUBCOMMAND ("test"), not argv0, so without this step the resolver always
+    # fell through to a possibly-stale bin/simple — see
+    # doc/08_tracking/bug/test_runner_child_binary_ignores_invoking_binary_2026-07-27.md.
+    val self_path = rt_path_absolute("/proc/self/exe") ?? ""
+    if self_path.len() > 0 and self_path != "/proc/self/exe" and rt_file_exists(self_path):
+        return self_path
     val raw = cli_get_args()
     # Source-mode argv can begin with test_runner_single.spl itself. It exists,
     # but it is not executable; passing it to process_run_timeout produces a
@@ -327,6 +338,8 @@ fn main() -> i64:
         rt_env_set("SIMPLE_DI_TEST", "0")
 
     val binary = find_simple_binary()
+    # Evidence must be self-describing: name the binary that executes the spec.
+    print "child binary: {binary}"
     val timeout_ms = run.timeout_secs * 1000
     # Rewrite legacy word-infix `expect X to_equal Y` to method form so the
     # interpreter `run` path evaluates the matcher (else it drops it → false-red

@@ -1,6 +1,12 @@
 # `X test <spec>` never runs the spec under X — child resolver falls back to stale `bin/simple`
 
-**Status:** open
+**Status:** fixed (pending deploy) — `find_simple_binary()` in
+`src/app/test_runner_new/test_runner_single.spl` now resolves the invoking
+binary in-process via `rt_path_absolute("/proc/self/exe")` (same primitive as
+the CLI's fork-bomb fix, 0531ca8ce266) between the `SIMPLE_BINARY` env check
+and the `bin/simple` fallback, and the run header logs `child binary: <path>`.
+Note: this doc's Area path said `src/app/test/`; the actual file lives in
+`src/app/test_runner_new/`.
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane D reconciliation)
 **Area:** `src/app/test/test_runner_single.spl` — `find_simple_binary()` (line ~156),
 child spawn at lines ~329/363
