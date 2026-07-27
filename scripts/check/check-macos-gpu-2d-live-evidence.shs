@@ -32,9 +32,21 @@ BUILD_HELPER="$ROOT_DIR/scripts/check/build-macos-gpu-2d-live-native.shs"
 TRUSTED_BUILD_MANIFEST="$ROOT_DIR/build/macos_gpu_2d_live_native/$BACKEND/trusted-build.env"
 SELECTED_DRIVER_PATH=""
 SELECTED_DRIVER_KIND="trusted-self-hosted-native-output"
-SPL_WINIT_LIB="${GPU_2D_LIVE_WINIT_LIB:-$ROOT_DIR/build/sffi/libspl_winit.dylib}"
-SIMPLE_RUNTIME_DYLIB="${GPU_2D_LIVE_RUNTIME_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_wm.dylib}"
-SIMPLE_RUNTIME_C_DYLIB="${GPU_2D_LIVE_RUNTIME_C_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_c_wm.dylib}"
+SPL_WINIT_LIB="$ROOT_DIR/build/sffi/libspl_winit.dylib"
+SIMPLE_RUNTIME_DYLIB="$ROOT_DIR/build/sffi/libsimple_runtime_wm.dylib"
+SIMPLE_RUNTIME_C_DYLIB="$ROOT_DIR/build/sffi/libsimple_runtime_c_wm.dylib"
+MOLTENVK_ICD_PATH=""
+MOLTENVK_ICD_SHA256=""
+MOLTENVK_LIBRARY_PATH=""
+MOLTENVK_LIBRARY_SHA256=""
+MOLTENVK_PREFLIGHT_STATUS="not-applicable"
+MOLTENVK_VULKANINFO_PATH=""
+MOLTENVK_VULKANINFO_SHA256=""
+MOLTENVK_VULKANINFO_OUTPUT_SHA256=""
+MOLTENVK_DEVICE_NAME=""
+MOLTENVK_DRIVER_NAME=""
+VULKAN_PLIST_ENV=""
+LAUNCH_DYLD_LIBRARY_PATH="$ROOT_DIR/build/sffi:${DYLD_LIBRARY_PATH:-/opt/homebrew/lib}"
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
 BUILD_DIR_ABS="$(CDPATH= cd -- "$BUILD_DIR" && pwd)"
@@ -120,6 +132,17 @@ write_report() {
         echo "- selected driver: \`$SELECTED_DRIVER_PATH\`"
         echo "- selected driver kind: $SELECTED_DRIVER_KIND"
         echo "- trusted build manifest: \`$TRUSTED_BUILD_MANIFEST\`"
+        if [ "$BACKEND" = vulkan ]; then
+            echo "- MoltenVK ICD: \`$MOLTENVK_ICD_PATH\`"
+            echo "- MoltenVK ICD SHA-256: \`$MOLTENVK_ICD_SHA256\`"
+            echo "- MoltenVK library: \`$MOLTENVK_LIBRARY_PATH\`"
+            echo "- MoltenVK library SHA-256: \`$MOLTENVK_LIBRARY_SHA256\`"
+            echo "- MoltenVK preflight: $MOLTENVK_PREFLIGHT_STATUS"
+            if [ "$MOLTENVK_PREFLIGHT_STATUS" = device-driver-verified ]; then
+                echo "- Vulkan device: $MOLTENVK_DEVICE_NAME"
+                echo "- Vulkan driver: $MOLTENVK_DRIVER_NAME"
+            fi
+        fi
         echo "- runtime receipt: \`$RECEIPT\`"
         echo "- 4K/300-DPI framebuffer: \`$CAPTURE_PNG\`"
         echo "- exact window before input: \`$WINDOW_BEFORE_PNG\`"
@@ -153,6 +176,13 @@ fail() {
         echo "${PREFIX}_driver_kind=$SELECTED_DRIVER_KIND"
         echo "${PREFIX}_driver_path=$SELECTED_DRIVER_PATH"
         echo "${PREFIX}_trusted_build_manifest=$TRUSTED_BUILD_MANIFEST"
+        if [ "$BACKEND" = vulkan ]; then
+            echo "${PREFIX}_moltenvk_icd_path=$MOLTENVK_ICD_PATH"
+            echo "${PREFIX}_moltenvk_icd_sha256=$MOLTENVK_ICD_SHA256"
+            echo "${PREFIX}_moltenvk_library_path=$MOLTENVK_LIBRARY_PATH"
+            echo "${PREFIX}_moltenvk_library_sha256=$MOLTENVK_LIBRARY_SHA256"
+            echo "${PREFIX}_moltenvk_preflight_status=$MOLTENVK_PREFLIGHT_STATUS"
+        fi
     } >"$EVIDENCE"
     write_report fail "$reason"
     echo "macOS $BACKEND_TITLE 2D live evidence: FAIL ($reason)" >&2
@@ -206,6 +236,67 @@ file_cksum() {
     if [ -f "$1" ]; then cksum "$1" | awk '{print $1}'; else echo 0; fi
 }
 
+run_bounded_vulkaninfo() {
+    vulkaninfo_out="$1"
+    vulkaninfo_err="$2"
+    vulkaninfo_timeout="$3"
+    vulkaninfo_grace="$4"
+    vulkaninfo_tool="$5"
+    vulkaninfo_icd="$6"
+
+    # Job control makes the probe leader a process-group leader on macOS. Both
+    # timeout signals target the whole group so helper/driver descendants
+    # cannot outlive the evidence command.
+    set -m
+    /usr/bin/env \
+        -u VK_ICD_FILENAMES -u VK_DRIVER_FILES -u VK_ADD_DRIVER_FILES \
+        -u VK_LAYER_PATH -u VK_ADD_LAYER_PATH -u VK_INSTANCE_LAYERS \
+        -u VK_LOADER_DRIVERS_SELECT -u VK_LOADER_DRIVERS_DISABLE \
+        -u VK_LOADER_LAYERS_ENABLE -u VK_LOADER_LAYERS_DISABLE \
+        -u VK_LOADER_LAYERS_ALLOW \
+        LC_ALL=C VK_ICD_FILENAMES="$vulkaninfo_icd" \
+        "$vulkaninfo_tool" --summary \
+        >"$vulkaninfo_out" 2>"$vulkaninfo_err" &
+    vulkaninfo_pid=$!
+    set +m
+    vulkaninfo_deadline=$(($(date +%s) + vulkaninfo_timeout))
+    vulkaninfo_timed_out=0
+
+    while kill -0 "-$vulkaninfo_pid" 2>/dev/null; do
+        [ "$(date +%s)" -lt "$vulkaninfo_deadline" ] || {
+            vulkaninfo_timed_out=1
+            break
+        }
+        sleep 0.1
+    done
+    if [ "$vulkaninfo_timed_out" = 1 ]; then
+        kill -TERM "-$vulkaninfo_pid" 2>/dev/null || true
+        vulkaninfo_grace_deadline=$(($(date +%s) + vulkaninfo_grace))
+        while kill -0 "-$vulkaninfo_pid" 2>/dev/null &&
+                [ "$(date +%s)" -lt "$vulkaninfo_grace_deadline" ]; do
+            sleep 0.1
+        done
+        if kill -0 "-$vulkaninfo_pid" 2>/dev/null; then
+            kill -KILL "-$vulkaninfo_pid" 2>/dev/null || true
+        fi
+    fi
+
+    set +e
+    wait "$vulkaninfo_pid" 2>>"$vulkaninfo_err"
+    vulkaninfo_wait_status=$?
+    set -e
+    vulkaninfo_cleanup_deadline=$(($(date +%s) + 2))
+    while kill -0 "-$vulkaninfo_pid" 2>/dev/null &&
+            [ "$(date +%s)" -lt "$vulkaninfo_cleanup_deadline" ]; do
+        kill -KILL "-$vulkaninfo_pid" 2>/dev/null || true
+        sleep 0.1
+    done
+    kill -0 "-$vulkaninfo_pid" 2>/dev/null &&
+        fail "canonical-moltenvk-vulkaninfo-descendant-survived"
+    [ "$vulkaninfo_timed_out" = 0 ] || return 124
+    return "$vulkaninfo_wait_status"
+}
+
 [ "$(uname -s)" = "Darwin" ] || fail "requires-macos"
 [ -f "$HARNESS" ] || fail "harness-missing"
 [ -f "$SHARED_HARNESS" ] || fail "shared-harness-missing"
@@ -213,18 +304,148 @@ file_cksum() {
 [ -f "$BACKEND_SOURCE" ] || fail "backend-source-missing"
 [ -x "$BUILD_HELPER" ] || fail "trusted-native-build-helper-missing"
 [ -z "${GPU_2D_LIVE_NATIVE_BIN:-}" ] || fail "arbitrary-native-driver-supplied"
+[ -z "${GPU_2D_LIVE_WINIT_LIB:-}" ] ||
+    fail "arbitrary-winit-provider-supplied"
+[ -z "${GPU_2D_LIVE_RUNTIME_DYLIB:-}" ] ||
+    fail "arbitrary-runtime-provider-supplied"
+[ -z "${GPU_2D_LIVE_RUNTIME_C_DYLIB:-}" ] ||
+    fail "arbitrary-runtime-c-provider-supplied"
 command -v osascript >/dev/null 2>&1 || fail "osascript-missing"
 command -v screencapture >/dev/null 2>&1 || fail "screencapture-missing"
 command -v cliclick >/dev/null 2>&1 || fail "cliclick-missing"
 command -v sips >/dev/null 2>&1 || fail "sips-missing"
 
+if [ "$BACKEND" = vulkan ]; then
+    [ -z "${VK_ICD_FILENAMES:-}" ] || fail "arbitrary-vulkan-icd-supplied"
+    [ -z "${VK_DRIVER_FILES:-}" ] || fail "arbitrary-vulkan-driver-files-supplied"
+    [ -z "${VK_ADD_DRIVER_FILES:-}" ] ||
+        fail "arbitrary-vulkan-add-driver-files-supplied"
+    [ -z "${VK_LAYER_PATH:-}" ] || fail "arbitrary-vulkan-layer-path-supplied"
+    [ -z "${VK_ADD_LAYER_PATH:-}" ] ||
+        fail "arbitrary-vulkan-add-layer-path-supplied"
+    [ -z "${VK_INSTANCE_LAYERS:-}" ] ||
+        fail "arbitrary-vulkan-instance-layers-supplied"
+    [ -z "${VK_LOADER_DRIVERS_SELECT:-}" ] ||
+        fail "arbitrary-vulkan-loader-driver-select-supplied"
+    [ -z "${VK_LOADER_DRIVERS_DISABLE:-}" ] ||
+        fail "arbitrary-vulkan-loader-driver-disable-supplied"
+    [ -z "${VK_LOADER_LAYERS_ENABLE:-}" ] ||
+        fail "arbitrary-vulkan-loader-layer-enable-supplied"
+    [ -z "${VK_LOADER_LAYERS_DISABLE:-}" ] ||
+        fail "arbitrary-vulkan-loader-layer-disable-supplied"
+    [ -z "${VK_LOADER_LAYERS_ALLOW:-}" ] ||
+        fail "arbitrary-vulkan-loader-layer-allow-supplied"
+    [ -z "${DYLD_INSERT_LIBRARIES:-}" ] ||
+        fail "arbitrary-dyld-insert-libraries-supplied"
+    [ -z "${DYLD_FRAMEWORK_PATH:-}" ] ||
+        fail "arbitrary-dyld-framework-path-supplied"
+    [ -z "${DYLD_FALLBACK_LIBRARY_PATH:-}" ] ||
+        fail "arbitrary-dyld-fallback-library-path-supplied"
+    MOLTENVK_ICD_PATH="/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json"
+    [ -f "$MOLTENVK_ICD_PATH" ] || fail "canonical-moltenvk-icd-missing"
+    MOLTENVK_ICD_PATH="$(
+        MOLTENVK_ICD_DIR="$(dirname -- "$MOLTENVK_ICD_PATH")"
+        CDPATH= cd -- "$MOLTENVK_ICD_DIR" &&
+            printf '%s/%s\n' "$(pwd -P)" "$(basename -- "$MOLTENVK_ICD_PATH")"
+    )" || fail "canonical-moltenvk-icd-unresolvable"
+    [ "$MOLTENVK_ICD_PATH" = \
+        "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json" ] ||
+        fail "canonical-moltenvk-icd-path-mismatch"
+    MOLTENVK_ICD_SHA256="$(shasum -a 256 "$MOLTENVK_ICD_PATH" |
+        awk '{print $1}')"
+    sha256_valid "$MOLTENVK_ICD_SHA256" ||
+        fail "canonical-moltenvk-icd-sha256-invalid"
+    moltenvk_library_reference="$(
+        /usr/bin/plutil -extract ICD.library_path raw -o - \
+            "$MOLTENVK_ICD_PATH" 2>/dev/null
+    )" || fail "canonical-moltenvk-icd-library-reference-invalid"
+    [ -n "$moltenvk_library_reference" ] ||
+        fail "canonical-moltenvk-icd-library-reference-missing"
+    case "$moltenvk_library_reference" in
+        /*)
+            moltenvk_library_dir="$(dirname -- "$moltenvk_library_reference")"
+            ;;
+        *)
+            moltenvk_library_dir="$(dirname -- "$MOLTENVK_ICD_PATH")/$(dirname -- "$moltenvk_library_reference")"
+            ;;
+    esac
+    MOLTENVK_LIBRARY_PATH="$(
+        CDPATH= cd -- "$moltenvk_library_dir" &&
+            printf '%s/%s\n' "$(pwd -P)" \
+                "$(basename -- "$moltenvk_library_reference")"
+    )" || fail "canonical-moltenvk-library-unresolvable"
+    [ "$(basename -- "$MOLTENVK_LIBRARY_PATH")" = "libMoltenVK.dylib" ] ||
+        fail "canonical-moltenvk-library-name-mismatch"
+    [ -f "$MOLTENVK_LIBRARY_PATH" ] ||
+        fail "canonical-moltenvk-library-missing"
+    MOLTENVK_LIBRARY_SHA256="$(shasum -a 256 "$MOLTENVK_LIBRARY_PATH" |
+        awk '{print $1}')"
+    sha256_valid "$MOLTENVK_LIBRARY_SHA256" ||
+        fail "canonical-moltenvk-library-sha256-invalid"
+    LAUNCH_DYLD_LIBRARY_PATH="$ROOT_DIR/build/sffi:/opt/homebrew/lib"
+    VULKAN_PLIST_ENV="    <key>VK_ICD_FILENAMES</key><string>$MOLTENVK_ICD_PATH</string>
+    <key>VK_DRIVER_FILES</key><string></string>
+    <key>VK_ADD_DRIVER_FILES</key><string></string>
+    <key>VK_LAYER_PATH</key><string></string>
+    <key>VK_ADD_LAYER_PATH</key><string></string>
+    <key>VK_INSTANCE_LAYERS</key><string></string>
+    <key>VK_LOADER_DRIVERS_SELECT</key><string></string>
+    <key>VK_LOADER_DRIVERS_DISABLE</key><string></string>
+    <key>VK_LOADER_LAYERS_ENABLE</key><string></string>
+    <key>VK_LOADER_LAYERS_DISABLE</key><string></string>
+    <key>VK_LOADER_LAYERS_ALLOW</key><string></string>
+    <key>DYLD_INSERT_LIBRARIES</key><string></string>
+    <key>DYLD_FRAMEWORK_PATH</key><string></string>
+    <key>DYLD_FALLBACK_LIBRARY_PATH</key><string></string>"
+
+    # Probe only the canonical Homebrew tool and pin it to the exact ICD above.
+    # The loader/library hashes remain the authoritative identity when the
+    # optional bounded summary cannot publish both device and driver names.
+    MOLTENVK_PREFLIGHT_STATUS="loader-only"
+    MOLTENVK_VULKANINFO_PATH="/opt/homebrew/bin/vulkaninfo"
+    if [ -x "$MOLTENVK_VULKANINFO_PATH" ]; then
+        MOLTENVK_VULKANINFO_SHA256="$(
+            shasum -a 256 "$MOLTENVK_VULKANINFO_PATH" | awk '{print $1}'
+        )"
+        vulkaninfo_out="$BUILD_DIR_ABS/moltenvk-vulkaninfo-summary.out"
+        vulkaninfo_err="$BUILD_DIR_ABS/moltenvk-vulkaninfo-summary.err"
+        rm -f "$vulkaninfo_out" "$vulkaninfo_err"
+        if run_bounded_vulkaninfo "$vulkaninfo_out" "$vulkaninfo_err" \
+                15 2 "$MOLTENVK_VULKANINFO_PATH" "$MOLTENVK_ICD_PATH" &&
+                [ -s "$vulkaninfo_out" ]; then
+            MOLTENVK_VULKANINFO_OUTPUT_SHA256="$(
+                shasum -a 256 "$vulkaninfo_out" | awk '{print $1}'
+            )"
+            MOLTENVK_DEVICE_NAME="$(awk -F= '
+                /^[[:space:]]*deviceName[[:space:]]*=/ {
+                    sub(/^[^=]*=[[:space:]]*/, "")
+                    print
+                    exit
+                }
+            ' "$vulkaninfo_out")"
+            MOLTENVK_DRIVER_NAME="$(awk -F= '
+                /^[[:space:]]*driverName[[:space:]]*=/ {
+                    sub(/^[^=]*=[[:space:]]*/, "")
+                    print
+                    exit
+                }
+            ' "$vulkaninfo_out")"
+            if [ -n "$MOLTENVK_DEVICE_NAME" ] &&
+                    [ -n "$MOLTENVK_DRIVER_NAME" ]; then
+                case "$MOLTENVK_DRIVER_NAME" in
+                    *MoltenVK*) ;;
+                    *) fail "canonical-moltenvk-vulkaninfo-driver-mismatch" ;;
+                esac
+                MOLTENVK_PREFLIGHT_STATUS="device-driver-verified"
+            fi
+        fi
+    fi
+fi
+
 # Do not admit an executable from the caller.  The verifier re-derives every
 # source/provider/compiler/output binding from the canonical self-hosted build
 # manifest and prints the sole output path that may be launched.
 trusted_manifest_result="$(
-    GPU_2D_LIVE_WINIT_LIB="$SPL_WINIT_LIB" \
-    GPU_2D_LIVE_RUNTIME_DYLIB="$SIMPLE_RUNTIME_DYLIB" \
-    GPU_2D_LIVE_RUNTIME_C_DYLIB="$SIMPLE_RUNTIME_C_DYLIB" \
     sh "$BUILD_HELPER" --verify "$BACKEND" "$TRUSTED_BUILD_MANIFEST"
 )" || fail "trusted-build-manifest-invalid"
 [ "$(printf '%s\n' "$trusted_manifest_result" | sed -n 's/^trusted_build_manifest_status=//p')" = pass ] ||
@@ -304,8 +525,8 @@ cat >"$app/Contents/Info.plist" <<PLIST
     <key>SIMPLE_ONE_CALL_UPLOAD</key><string>1</string>
     <key>SIMPLE_ONE_CALL_READBACK</key><string>1</string>
     <key>SIMPLE_NO_DEPRECATED_WARNINGS</key><string>1</string>
-    <key>VK_ICD_FILENAMES</key><string>${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}</string>
-    <key>DYLD_LIBRARY_PATH</key><string>$ROOT_DIR/build/sffi:${DYLD_LIBRARY_PATH:-/opt/homebrew/lib}</string>
+$VULKAN_PLIST_ENV
+    <key>DYLD_LIBRARY_PATH</key><string>$LAUNCH_DYLD_LIBRARY_PATH</string>
     <key>GPU_2D_LIVE_CAPTURE_PATH</key><string>$CAPTURE_PPM</string>
     <key>GPU_2D_LIVE_RECEIPT_PATH</key><string>$RECEIPT</string>
     <key>GPU_2D_LIVE_READY_PATH</key><string>$READY</string>
@@ -694,6 +915,18 @@ png_dpi_height="$(sips -g dpiHeight "$CAPTURE_PNG" |
     echo "${PREFIX}_winit_provider_sha256=$winit_provider_sha256"
     echo "${PREFIX}_simple_runtime_provider_sha256=$simple_runtime_provider_sha256"
     echo "${PREFIX}_simple_runtime_c_provider_sha256=$simple_runtime_c_provider_sha256"
+    if [ "$BACKEND" = vulkan ]; then
+        echo "${PREFIX}_moltenvk_icd_path=$MOLTENVK_ICD_PATH"
+        echo "${PREFIX}_moltenvk_icd_sha256=$MOLTENVK_ICD_SHA256"
+        echo "${PREFIX}_moltenvk_library_path=$MOLTENVK_LIBRARY_PATH"
+        echo "${PREFIX}_moltenvk_library_sha256=$MOLTENVK_LIBRARY_SHA256"
+        echo "${PREFIX}_moltenvk_preflight_status=$MOLTENVK_PREFLIGHT_STATUS"
+        echo "${PREFIX}_moltenvk_vulkaninfo_path=$MOLTENVK_VULKANINFO_PATH"
+        echo "${PREFIX}_moltenvk_vulkaninfo_sha256=$MOLTENVK_VULKANINFO_SHA256"
+        echo "${PREFIX}_moltenvk_vulkaninfo_output_sha256=$MOLTENVK_VULKANINFO_OUTPUT_SHA256"
+        echo "${PREFIX}_moltenvk_device_name=$MOLTENVK_DEVICE_NAME"
+        echo "${PREFIX}_moltenvk_driver_name=$MOLTENVK_DRIVER_NAME"
+    fi
     echo "${PREFIX}_backend=$BACKEND"
     echo "${PREFIX}_repo_revision=$repo_revision"
     echo "${PREFIX}_shared_scene_fingerprint=$shared_scene_fingerprint"
@@ -776,6 +1009,18 @@ png_dpi_height="$(sips -g dpiHeight "$CAPTURE_PNG" |
     echo "winit_provider_sha256=$winit_provider_sha256"
     echo "simple_runtime_provider_sha256=$simple_runtime_provider_sha256"
     echo "simple_runtime_c_provider_sha256=$simple_runtime_c_provider_sha256"
+    if [ "$BACKEND" = vulkan ]; then
+        echo "moltenvk_icd_path=$MOLTENVK_ICD_PATH"
+        echo "moltenvk_icd_sha256=$MOLTENVK_ICD_SHA256"
+        echo "moltenvk_library_path=$MOLTENVK_LIBRARY_PATH"
+        echo "moltenvk_library_sha256=$MOLTENVK_LIBRARY_SHA256"
+        echo "moltenvk_preflight_status=$MOLTENVK_PREFLIGHT_STATUS"
+        echo "moltenvk_vulkaninfo_path=$MOLTENVK_VULKANINFO_PATH"
+        echo "moltenvk_vulkaninfo_sha256=$MOLTENVK_VULKANINFO_SHA256"
+        echo "moltenvk_vulkaninfo_output_sha256=$MOLTENVK_VULKANINFO_OUTPUT_SHA256"
+        echo "moltenvk_device_name=$MOLTENVK_DEVICE_NAME"
+        echo "moltenvk_driver_name=$MOLTENVK_DRIVER_NAME"
+    fi
     echo "trusted_build_manifest=$TRUSTED_BUILD_MANIFEST"
     echo "trusted_build_manifest_sha256=$driver_manifest_sha256"
     echo "pixel_sha256=$pixel_sha256"

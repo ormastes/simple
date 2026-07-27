@@ -13,15 +13,9 @@ export BOOTSTRAP_STAGE3_FACADE_PATH
 
 BUILD_ROOT="$ROOT_DIR/build/macos_gpu_2d_live_native"
 COMPILER_IDENTITY="canonical-pure-simple-stage3-with-bound-backfill-v1"
-MANIFEST_SCHEMA="macos-gpu-2d-live-native-manifest-v3"
+MANIFEST_SCHEMA="macos-gpu-2d-live-native-manifest-v4"
 SOURCE_INPUT_ROOT_LIB="src/lib"
 SOURCE_INPUT_ROOT_RENDERING="test/02_integration/rendering"
-EVIDENCE_WIDGET_SOURCE=\
-"$ROOT_DIR/examples/06_io/ui/widget_showcase_gui.spl"
-EVIDENCE_WEB_SOURCE=\
-"$ROOT_DIR/examples/06_io/ui/web_standards_showcase_gui.spl"
-EVIDENCE_WEB_HTML=\
-"$ROOT_DIR/examples/06_io/ui/browser_common_elements_showcase.html"
 BUILD_WATCHDOG_TIMEOUT_SECS="${GPU_2D_NATIVE_BUILD_TIMEOUT_SECS:-240}"
 BUILD_WATCHDOG_TERM_GRACE_SECS="${GPU_2D_NATIVE_BUILD_TERM_GRACE_SECS:-10}"
 
@@ -29,6 +23,13 @@ fail() {
     echo "macOS GPU 2D native build: FAIL ($1)" >&2
     exit 1
 }
+
+[ -z "${GPU_2D_LIVE_WINIT_LIB:-}" ] ||
+    fail "arbitrary-winit-provider-supplied"
+[ -z "${GPU_2D_LIVE_RUNTIME_DYLIB:-}" ] ||
+    fail "arbitrary-runtime-provider-supplied"
+[ -z "${GPU_2D_LIVE_RUNTIME_C_DYLIB:-}" ] ||
+    fail "arbitrary-runtime-c-provider-supplied"
 
 sha256_file() {
     [ -f "$1" ] || fail "hashed-file-missing"
@@ -40,24 +41,6 @@ canonical_file() {
     [ ! -L "$1" ] || fail "symlinked-file-not-trusted"
     dir="$(CDPATH= cd -- "$(dirname -- "$1")" && pwd -P)"
     printf '%s/%s\n' "$dir" "$(basename -- "$1")"
-}
-
-has_winit_marker() {
-    LC_ALL=C grep -aq -e "rt_winit_event_loop_new" \
-        -e "window_winitmodule.smf" "$1"
-}
-
-reject_gui_driver_substitution() {
-    case "$1" in
-        "$ROOT_DIR"/build/bootstrap/full/*/simple)
-            return 0
-            ;;
-        */simple_seed|*/simple_seed/*|*/compiler_rust/*|*/bootstrap/*|\
-        */stage3/*|*/target/debug/*|*/debug/*|\
-        */test/02_integration/rendering/*live_harness*)
-            return 1
-            ;;
-    esac
 }
 
 digest_args() {
@@ -319,131 +302,6 @@ assert_frozen_compiler() {
         fail "admitted-provenance-mutated"
 }
 
-resolve_gui_driver() {
-    gui_platform="$(bootstrap_stage3_host_platform)" ||
-        fail "gui-driver-platform-unsupported"
-    GUI_DRIVER_ORIGIN_PATH=\
-"$ROOT_DIR/build/bootstrap/full/$gui_platform/simple"
-    GUI_DRIVER_PROVENANCE_ORIGIN_PATH=\
-"$ROOT_DIR/build/bootstrap/full/$gui_platform/provenance/gui-driver.env"
-    GUI_DRIVER_PRODUCER=\
-"$ROOT_DIR/scripts/check/build-macos-full-cli-gui-provenance.shs"
-    [ "$(canonical_file "$GUI_DRIVER_ORIGIN_PATH")" = \
-        "$GUI_DRIVER_ORIGIN_PATH" ] && [ -x "$GUI_DRIVER_ORIGIN_PATH" ] ||
-        fail "canonical-full-cli-gui-driver-missing"
-    [ "$(canonical_file "$GUI_DRIVER_PROVENANCE_ORIGIN_PATH")" = \
-        "$GUI_DRIVER_PROVENANCE_ORIGIN_PATH" ] ||
-        fail "canonical-full-cli-gui-provenance-missing"
-    [ "$(canonical_file "$GUI_DRIVER_PRODUCER")" = \
-        "$GUI_DRIVER_PRODUCER" ] || fail "gui-provenance-producer-missing"
-    gui_origin_sha_before="$(sha256_file "$GUI_DRIVER_ORIGIN_PATH")"
-    gui_provenance_sha_before="$(sha256_file \
-        "$GUI_DRIVER_PROVENANCE_ORIGIN_PATH")"
-    gui_snapshot_dir="$(mktemp -d \
-        "$BUILD_ROOT/$BACKEND/gui-driver-admission.XXXXXX")" ||
-        fail "gui-driver-private-snapshot-create-failed"
-    GUI_DRIVER_PATH="$gui_snapshot_dir/simple"
-    GUI_DRIVER_PROVENANCE_PATH="$gui_snapshot_dir/provenance.env"
-    cp -p "$GUI_DRIVER_ORIGIN_PATH" "$GUI_DRIVER_PATH" ||
-        fail "gui-driver-private-snapshot-copy-failed"
-    cp -p "$GUI_DRIVER_PROVENANCE_ORIGIN_PATH" \
-        "$GUI_DRIVER_PROVENANCE_PATH" ||
-        fail "gui-provenance-private-snapshot-copy-failed"
-    [ ! -L "$GUI_DRIVER_PATH" ] && [ ! -L "$GUI_DRIVER_PROVENANCE_PATH" ] ||
-        fail "gui-driver-private-snapshot-symlinked"
-    gui_origin_sha_after="$(sha256_file "$GUI_DRIVER_ORIGIN_PATH")"
-    gui_provenance_sha_after="$(sha256_file \
-        "$GUI_DRIVER_PROVENANCE_ORIGIN_PATH")"
-    [ "$gui_origin_sha_before" = "$gui_origin_sha_after" ] &&
-        [ "$gui_origin_sha_before" = "$(sha256_file "$GUI_DRIVER_PATH")" ] ||
-        fail "gui-driver-changed-during-private-snapshot"
-    [ "$gui_provenance_sha_before" = "$gui_provenance_sha_after" ] &&
-        [ "$gui_provenance_sha_before" = \
-            "$(sha256_file "$GUI_DRIVER_PROVENANCE_PATH")" ] ||
-        fail "gui-provenance-changed-during-private-snapshot"
-    chmod 500 "$gui_snapshot_dir" "$GUI_DRIVER_PATH" ||
-        fail "gui-driver-private-snapshot-permission-failed"
-    chmod 400 "$GUI_DRIVER_PROVENANCE_PATH" ||
-        fail "gui-provenance-private-snapshot-permission-failed"
-    sh "$GUI_DRIVER_PRODUCER" --verify "$GUI_DRIVER_PROVENANCE_PATH" \
-        "$GUI_DRIVER_PROVENANCE_ORIGIN_PATH" >/dev/null ||
-        fail "canonical-full-cli-gui-provenance-invalid"
-    [ "$(sha256_file "$GUI_DRIVER_ORIGIN_PATH")" = \
-        "$gui_origin_sha_before" ] &&
-        [ "$(sha256_file "$GUI_DRIVER_PROVENANCE_ORIGIN_PATH")" = \
-            "$gui_provenance_sha_before" ] ||
-        fail "gui-origin-changed-during-verification"
-    GUI_DRIVER_SHA256="$gui_origin_sha_before"
-    GUI_DRIVER_PROVENANCE_SHA256="$gui_provenance_sha_before"
-}
-
-verify_manifest_gui_driver() {
-    gui_driver_path="$(manifest_value gui_driver_abs_path "$1")"
-    gui_driver_provenance_path="$(manifest_value gui_driver_provenance_path "$1")"
-    gui_driver_origin_path="$(manifest_value gui_driver_origin_path "$1")"
-    gui_driver_provenance_origin_path="$(
-        manifest_value gui_driver_provenance_origin_path "$1"
-    )"
-    gui_platform="$(bootstrap_stage3_host_platform)" ||
-        fail "manifest-gui-driver-platform-unsupported"
-    [ "$gui_driver_origin_path" = \
-        "$ROOT_DIR/build/bootstrap/full/$gui_platform/simple" ] ||
-        fail "manifest-gui-driver-origin-not-canonical-full-cli"
-    [ "$gui_driver_provenance_origin_path" = \
-        "$ROOT_DIR/build/bootstrap/full/$gui_platform/provenance/gui-driver.env" ] ||
-        fail "manifest-gui-provenance-origin-not-canonical"
-    case "$gui_driver_path:$gui_driver_provenance_path" in
-        "$BUILD_ROOT/$BACKEND"/gui-driver-admission.*/simple:\
-"$BUILD_ROOT/$BACKEND"/gui-driver-admission.*/provenance.env) ;;
-        *) fail "manifest-gui-driver-private-snapshot-path-invalid" ;;
-    esac
-    [ "$(dirname -- "$gui_driver_path")" = \
-        "$(dirname -- "$gui_driver_provenance_path")" ] ||
-        fail "manifest-gui-driver-private-snapshot-directory-mismatch"
-    [ "$(canonical_file "$gui_driver_provenance_path")" = \
-        "$gui_driver_provenance_path" ] ||
-        fail "manifest-gui-driver-provenance-path-not-canonical"
-    [ -x "$gui_driver_path" ] && [ ! -L "$gui_driver_path" ] ||
-        fail "manifest-gui-driver-not-executable"
-    reject_gui_driver_substitution "$gui_driver_path" ||
-        fail "manifest-gui-driver-seed-or-harness-substitution"
-    has_winit_marker "$gui_driver_path" ||
-        fail "manifest-gui-driver-winit-marker-missing"
-    [ "$(manifest_value gui_driver_sha256 "$1")" = \
-        "$(sha256_file "$gui_driver_path")" ] ||
-        fail "manifest-gui-driver-sha256-mismatch"
-    [ "$(manifest_value gui_driver_origin_sha256 "$1")" = \
-        "$(sha256_file "$gui_driver_origin_path")" ] &&
-        [ "$(manifest_value gui_driver_origin_sha256 "$1")" = \
-            "$(manifest_value gui_driver_sha256 "$1")" ] ||
-        fail "manifest-gui-driver-origin-sha256-mismatch"
-    [ "$(manifest_value gui_driver_provenance_sha256 "$1")" = \
-        "$(sha256_file "$gui_driver_provenance_path")" ] ||
-        fail "manifest-gui-driver-provenance-sha256-mismatch"
-    [ "$(manifest_value gui_driver_provenance_origin_sha256 "$1")" = \
-        "$(sha256_file "$gui_driver_provenance_origin_path")" ] &&
-        [ "$(manifest_value gui_driver_provenance_origin_sha256 "$1")" = \
-            "$(manifest_value gui_driver_provenance_sha256 "$1")" ] ||
-        fail "manifest-gui-provenance-origin-sha256-mismatch"
-    [ "$(manifest_value gui_driver_source_revision "$1")" = \
-        "$(manifest_value git_head "$gui_driver_provenance_path")" ] ||
-        fail "manifest-gui-driver-source-revision-mismatch"
-    [ "$(manifest_value gui_driver_source_kind "$1")" = \
-        canonical-pure-simple-full-cli ] ||
-        fail "manifest-gui-driver-source-kind-mismatch"
-    [ "$(manifest_value gui_driver_full_cli_status "$1")" = pass ] ||
-        fail "manifest-gui-driver-full-cli-status-mismatch"
-    [ "$(manifest_value gui_driver_winit_marker "$1")" = \
-        rt_winit_event_loop_new ] || fail "manifest-gui-driver-winit-marker-mismatch"
-    [ "$(manifest_value gui_driver_no_bootstrap_delegate_support "$1")" = \
-        b7 ] || fail "manifest-gui-driver-no-bootstrap-delegate-mismatch"
-    GUI_DRIVER_PRODUCER=\
-"$ROOT_DIR/scripts/check/build-macos-full-cli-gui-provenance.shs"
-    sh "$GUI_DRIVER_PRODUCER" --verify "$gui_driver_provenance_path" \
-        "$gui_driver_provenance_origin_path" >/dev/null ||
-        fail "manifest-canonical-full-cli-gui-provenance-invalid"
-}
-
 configure_backend() {
     BACKEND="$1"
     case "$BACKEND" in
@@ -463,9 +321,9 @@ configure_backend() {
     BUILD_HOME="$BUILD_ROOT/$BACKEND/build-home"
     BUILD_TMP="$BUILD_ROOT/$BACKEND/build-tmp"
     BUILD_CACHE="$BUILD_ROOT/$BACKEND/native-cache"
-    WINIT_PROVIDER="${GPU_2D_LIVE_WINIT_LIB:-$ROOT_DIR/build/sffi/libspl_winit.dylib}"
-    SIMPLE_RUNTIME_PROVIDER="${GPU_2D_LIVE_RUNTIME_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_wm.dylib}"
-    SIMPLE_RUNTIME_C_PROVIDER="${GPU_2D_LIVE_RUNTIME_C_DYLIB:-$ROOT_DIR/build/sffi/libsimple_runtime_c_wm.dylib}"
+    WINIT_PROVIDER="$ROOT_DIR/build/sffi/libspl_winit.dylib"
+    SIMPLE_RUNTIME_PROVIDER="$ROOT_DIR/build/sffi/libsimple_runtime_wm.dylib"
+    SIMPLE_RUNTIME_C_PROVIDER="$ROOT_DIR/build/sffi/libsimple_runtime_c_wm.dylib"
     BUILD_ARGS_SHA256="$(digest_args native-build --backend cranelift --threads 4 --cache-dir "$BUILD_CACHE" --runtime-bundle core-c-bootstrap --source src/lib --source test/02_integration/rendering --entry-closure --entry "test/02_integration/rendering/macos_${BACKEND}_2d_live_harness.spl" --strip --verbose --output "build/macos_gpu_2d_live_native/${BACKEND}/macos_${BACKEND}_2d_live_native")"
 }
 
@@ -495,12 +353,6 @@ write_manifest() {
         echo "fixture_sha256=$(sha256_file "$FIXTURE_SOURCE")"
         echo "backend_source_path=$BACKEND_SOURCE"
         echo "backend_source_sha256=$(sha256_file "$BACKEND_SOURCE")"
-        echo "evidence_widget_source_path=$EVIDENCE_WIDGET_SOURCE"
-        echo "evidence_widget_source_sha256=$(sha256_file "$EVIDENCE_WIDGET_SOURCE")"
-        echo "evidence_web_source_path=$EVIDENCE_WEB_SOURCE"
-        echo "evidence_web_source_sha256=$(sha256_file "$EVIDENCE_WEB_SOURCE")"
-        echo "evidence_web_html_path=$EVIDENCE_WEB_HTML"
-        echo "evidence_web_html_sha256=$(sha256_file "$EVIDENCE_WEB_HTML")"
         echo "source_input_file_count=$SOURCE_INPUT_FILE_COUNT"
         echo "source_input_fingerprint=$SOURCE_INPUT_FINGERPRINT"
         echo "repo_revision=$(git rev-parse HEAD)"
@@ -517,19 +369,6 @@ write_manifest() {
         echo "build_compiler_provenance_manifest_sha256=$(sha256_file "$COMPILER_PROVENANCE_MANIFEST_PATH")"
         echo "build_compiler_provenance_origin_path=$COMPILER_PROVENANCE_ORIGIN_PATH"
         echo "build_compiler_provenance_origin_sha256=$COMPILER_PROVENANCE_ORIGIN_SHA256"
-        echo "gui_driver_abs_path=$GUI_DRIVER_PATH"
-        echo "gui_driver_sha256=$GUI_DRIVER_SHA256"
-        echo "gui_driver_origin_path=$GUI_DRIVER_ORIGIN_PATH"
-        echo "gui_driver_origin_sha256=$GUI_DRIVER_SHA256"
-        echo "gui_driver_provenance_path=$GUI_DRIVER_PROVENANCE_PATH"
-        echo "gui_driver_provenance_sha256=$GUI_DRIVER_PROVENANCE_SHA256"
-        echo "gui_driver_provenance_origin_path=$GUI_DRIVER_PROVENANCE_ORIGIN_PATH"
-        echo "gui_driver_provenance_origin_sha256=$GUI_DRIVER_PROVENANCE_SHA256"
-        echo "gui_driver_source_revision=$(manifest_value git_head "$GUI_DRIVER_PROVENANCE_PATH")"
-        echo "gui_driver_source_kind=canonical-pure-simple-full-cli"
-        echo "gui_driver_full_cli_status=pass"
-        echo "gui_driver_winit_marker=rt_winit_event_loop_new"
-        echo "gui_driver_no_bootstrap_delegate_support=b7"
         echo "build_environment_sha256=$(build_environment_sha256)"
         echo "build_transcript_path=$BUILD_TRANSCRIPT_PATH"
         echo "build_transcript_sha256=$(sha256_file "$BUILD_TRANSCRIPT_PATH")"
@@ -554,22 +393,13 @@ verify_manifest() {
 
     for key in schema status built_at_utc backend entry_path entry_sha256 shared_harness_path \
         shared_harness_sha256 fixture_path fixture_sha256 backend_source_path \
-        backend_source_sha256 evidence_widget_source_path \
-        evidence_widget_source_sha256 evidence_web_source_path \
-        evidence_web_source_sha256 evidence_web_html_path \
-        evidence_web_html_sha256 source_input_file_count source_input_fingerprint \
+        backend_source_sha256 source_input_file_count source_input_fingerprint \
         repo_revision repo_fingerprint shared_scene_fingerprint \
         build_compiler_abs_path build_compiler_sha256 build_compiler_origin_path \
         build_compiler_origin_sha256 build_compiler_identity build_compiler_source_kind \
         build_compiler_native_build_backfill_status \
         build_compiler_provenance_manifest_path build_compiler_provenance_manifest_sha256 \
         build_compiler_provenance_origin_path build_compiler_provenance_origin_sha256 \
-        gui_driver_abs_path gui_driver_sha256 gui_driver_origin_path \
-        gui_driver_origin_sha256 gui_driver_provenance_path \
-        gui_driver_provenance_sha256 gui_driver_provenance_origin_path \
-        gui_driver_provenance_origin_sha256 gui_driver_source_revision \
-        gui_driver_source_kind gui_driver_winit_marker \
-        gui_driver_no_bootstrap_delegate_support \
         build_environment_sha256 build_transcript_path \
         build_transcript_sha256 \
         build_args_sha256 winit_provider_path winit_provider_sha256 \
@@ -594,24 +424,6 @@ verify_manifest() {
     [ "$(manifest_value fixture_sha256 "$manifest")" = "$(sha256_file "$FIXTURE_SOURCE")" ] || fail "manifest-fixture-sha256-mismatch"
     [ "$(manifest_value backend_source_path "$manifest")" = "$BACKEND_SOURCE" ] || fail "manifest-backend-source-path-mismatch"
     [ "$(manifest_value backend_source_sha256 "$manifest")" = "$(sha256_file "$BACKEND_SOURCE")" ] || fail "manifest-backend-source-sha256-mismatch"
-    [ "$(manifest_value evidence_widget_source_path "$manifest")" = \
-        "$EVIDENCE_WIDGET_SOURCE" ] ||
-        fail "manifest-evidence-widget-source-path-mismatch"
-    [ "$(manifest_value evidence_widget_source_sha256 "$manifest")" = \
-        "$(sha256_file "$EVIDENCE_WIDGET_SOURCE")" ] ||
-        fail "manifest-evidence-widget-source-sha256-mismatch"
-    [ "$(manifest_value evidence_web_source_path "$manifest")" = \
-        "$EVIDENCE_WEB_SOURCE" ] ||
-        fail "manifest-evidence-web-source-path-mismatch"
-    [ "$(manifest_value evidence_web_source_sha256 "$manifest")" = \
-        "$(sha256_file "$EVIDENCE_WEB_SOURCE")" ] ||
-        fail "manifest-evidence-web-source-sha256-mismatch"
-    [ "$(manifest_value evidence_web_html_path "$manifest")" = \
-        "$EVIDENCE_WEB_HTML" ] ||
-        fail "manifest-evidence-web-html-path-mismatch"
-    [ "$(manifest_value evidence_web_html_sha256 "$manifest")" = \
-        "$(sha256_file "$EVIDENCE_WEB_HTML")" ] ||
-        fail "manifest-evidence-web-html-sha256-mismatch"
     verify_snapshot="$BUILD_ROOT/$BACKEND/source-inputs-verify.$$"
     source_inputs_snapshot "$verify_snapshot" "$ROOT_DIR" \
         "$SOURCE_INPUT_ROOT_LIB" "$SOURCE_INPUT_ROOT_RENDERING"
@@ -712,7 +524,6 @@ verify_manifest() {
     [ "$(manifest_value build_compiler_source_kind "$manifest")" = \
         canonical-pure-simple-bootstrap-stage3 ] ||
         fail "manifest-build-compiler-source-kind-mismatch"
-    verify_manifest_gui_driver "$manifest"
     [ "$(manifest_value build_environment_sha256 "$manifest")" = "$(build_environment_sha256)" ] || fail "manifest-build-environment-sha256-mismatch"
     [ "$(manifest_value build_transcript_path "$manifest")" = \
         "$BUILD_TRANSCRIPT_PATH" ] ||
@@ -790,18 +601,6 @@ if [ "${1:-}" = "--self-test-contract" ]; then
         "$BUILD_ROOT/$BACKEND"/compiler-admission.*/simple:"$BUILD_ROOT/$BACKEND"/compiler-admission.*/provenance.env) ;;
         *) fail "self-test-private-freeze-path-invalid" ;;
     esac
-    reject_gui_driver_substitution \
-        "$ROOT_DIR/build/bootstrap/full/test-platform/simple" ||
-        fail "self-test-canonical-full-cli-path-rejected"
-    for self_test_rejected_gui_path in \
-        "$ROOT_DIR/build/bootstrap/full/test-platform/simple_seed" \
-        "$ROOT_DIR/build/wm-to-i64-bootstrap/stage3/test-platform/simple" \
-        "$ROOT_DIR/src/compiler_rust/target/debug/simple" \
-        "$ROOT_DIR/test/02_integration/rendering/macos_vulkan_2d_live_harness"; do
-        if reject_gui_driver_substitution "$self_test_rejected_gui_path"; then
-            fail "self-test-gui-driver-substitution-not-rejected"
-        fi
-    done
     chmod 700 "$(dirname -- "$COMPILER_PATH")" "$COMPILER_PATH"
     printf 'tampered\n' >>"$COMPILER_PATH"
     if (assert_frozen_compiler >/dev/null 2>&1); then
@@ -939,7 +738,6 @@ case "$mode" in
         [ -f "$ENTRY" ] && [ -f "$SHARED_HARNESS" ] && [ -f "$FIXTURE_SOURCE" ] && [ -f "$BACKEND_SOURCE" ] || fail "build-input-missing"
         resolve_compiler
         freeze_verified_compiler
-        resolve_gui_driver
         WINIT_PROVIDER_PATH="$(canonical_file "$WINIT_PROVIDER")"
         SIMPLE_RUNTIME_PROVIDER_PATH="$(canonical_file "$SIMPLE_RUNTIME_PROVIDER")"
         SIMPLE_RUNTIME_C_PROVIDER_PATH="$(canonical_file "$SIMPLE_RUNTIME_C_PROVIDER")"

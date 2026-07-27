@@ -12,8 +12,11 @@ TIMEOUT_SECS="${MACOS_VULKAN_GUI_WIDGET_TIMEOUT_SECS:-180}"
 MAX_RSS_KB="${MACOS_VULKAN_GUI_WIDGET_MAX_RSS_KB:-1048576}"
 REQUESTED_RESOLUTION="${SHOWCASE_RESOLUTION:-1200x900}"
 REQUESTED_DPI="${SHOWCASE_DPI:-300}"
-ICD_PATH="${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}"
-TRUSTED_MANIFEST="$ROOT_DIR/build/macos_gpu_2d_live_native/vulkan/trusted-build.env"
+ICD_PATH="/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json"
+LAUNCH_DYLD_LIBRARY_PATH="$ROOT_DIR/build/sffi:/opt/homebrew/lib"
+STANDALONE_2D_MANIFEST=\
+"$ROOT_DIR/build/macos_gpu_2d_live_native/vulkan/trusted-build.env"
+TRUSTED_MANIFEST=""
 EVENTS="$BUILD_DIR/events.env"
 VALIDATED_EVENTS="$BUILD_DIR/events.validated.env"
 LAUNCHER_LOG="$BUILD_DIR/launcher.log"
@@ -148,6 +151,25 @@ canonical_existing_path() {
     [ -e "$target_path" ] && [ ! -L "$target_path" ] || return 1
     target_dir=$(CDPATH= cd -P "$(dirname "$target_path")" && pwd) || return 1
     printf '%s/%s\n' "$target_dir" "$(basename "$target_path")"
+}
+
+admit_full_cli_source() {
+    admitted_relative=$1
+    admitted_candidate=$2
+    admitted_expected="$ROOT_DIR/$admitted_relative"
+    [ "$admitted_candidate" = "$admitted_expected" ] || return 1
+    admitted_canonical="$(canonical_existing_path "$admitted_candidate")" ||
+        return 1
+    [ "$admitted_canonical" = "$admitted_expected" ] || return 1
+    admitted_expected_blob="$(
+        git -C "$ROOT_DIR" rev-parse \
+            "$MACOS_GPU_ADMISSION_GUI_DRIVER_SOURCE_REVISION:$admitted_relative"
+    )" || return 1
+    admitted_current_blob="$(
+        git -C "$ROOT_DIR" hash-object "$admitted_canonical"
+    )" || return 1
+    [ "$admitted_current_blob" = "$admitted_expected_blob" ] || return 1
+    macos_gpu_admission_sha256_file "$admitted_canonical"
 }
 
 sha256_digest() {
@@ -440,8 +462,32 @@ end run
 OSA
 }
 
+reject_vulkan_environment_overrides() {
+    [ -z "${VK_ICD_FILENAMES:-}" ] &&
+        [ -z "${VK_DRIVER_FILES:-}" ] &&
+        [ -z "${VK_ADD_DRIVER_FILES:-}" ] &&
+        [ -z "${VK_LAYER_PATH:-}" ] &&
+        [ -z "${VK_ADD_LAYER_PATH:-}" ] &&
+        [ -z "${VK_INSTANCE_LAYERS:-}" ] &&
+        [ -z "${VK_LOADER_DRIVERS_SELECT:-}" ] &&
+        [ -z "${VK_LOADER_DRIVERS_DISABLE:-}" ] &&
+        [ -z "${VK_LOADER_LAYERS_ENABLE:-}" ] &&
+        [ -z "${VK_LOADER_LAYERS_DISABLE:-}" ] &&
+        [ -z "${VK_LOADER_LAYERS_ALLOW:-}" ] &&
+        [ -z "${DYLD_LIBRARY_PATH:-}" ] &&
+        [ -z "${DYLD_INSERT_LIBRARIES:-}" ] &&
+        [ -z "${DYLD_FRAMEWORK_PATH:-}" ] &&
+        [ -z "${DYLD_FALLBACK_LIBRARY_PATH:-}" ] &&
+        [ -z "${GPU_2D_LIVE_WINIT_LIB:-}" ] &&
+        [ -z "${GPU_2D_LIVE_RUNTIME_DYLIB:-}" ] &&
+        [ -z "${GPU_2D_LIVE_RUNTIME_C_DYLIB:-}" ]
+}
+
 if [ -n "${MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE:-}" ]; then
     case "$MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE" in
+        environment)
+            reject_vulkan_environment_overrides
+            ;;
         checksum)
             validate_checksum_pair \
                 "${MACOS_VULKAN_GUI_WIDGET_RENDERER_CHECKSUM:-}" \
@@ -480,16 +526,35 @@ if [ -n "${MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE:-}" ]; then
     exit $?
 fi
 
+reject_vulkan_environment_overrides ||
+    fail "caller-vulkan-or-provider-environment-supplied"
+
 [ "$(uname -s)" = "Darwin" ] || fail "requires-macos"
 [ -f "$SAMPLE" ] || fail "sample-missing"
 macos_gpu_trusted_manifest_admit \
-    "$TRUSTED_MANIFEST" \
+    "$STANDALONE_2D_MANIFEST" \
     vulkan "$ROOT_DIR" || fail "trusted-manifest-admission-failed"
+case "$(uname -m)" in
+    arm64|aarch64) full_cli_platform=aarch64-apple-darwin ;;
+    x86_64) full_cli_platform=x86_64-apple-darwin ;;
+    *) fail "unsupported-macos-platform" ;;
+esac
+TRUSTED_MANIFEST=\
+"$ROOT_DIR/build/bootstrap/full/$full_cli_platform/provenance/gui-driver.env"
+macos_gpu_full_cli_gui_admit "$TRUSTED_MANIFEST" "$ROOT_DIR" ||
+    fail "trusted-full-cli-gui-admission-failed"
 sample_canonical="$(canonical_existing_path "$SAMPLE")" || fail "sample-not-canonical"
-[ "$sample_canonical" = "$MACOS_GPU_ADMISSION_WIDGET_SOURCE" ] ||
-    fail "trusted-widget-source-mismatch"
+MACOS_GPU_ADMISSION_WIDGET_SOURCE="$ROOT_DIR/examples/06_io/ui/widget_showcase_gui.spl"
+MACOS_GPU_ADMISSION_WIDGET_SOURCE_SHA256="$(
+    admit_full_cli_source examples/06_io/ui/widget_showcase_gui.spl \
+        "$sample_canonical"
+)" || fail "trusted-widget-source-revision-mismatch"
 assert_admitted_widget_source_unchanged
-[ -f "$ICD_PATH" ] || fail "moltenvk-icd-missing"
+[ -f "$ICD_PATH" ] || fail "canonical-moltenvk-icd-missing"
+canonical_icd_path="$(canonical_existing_path "$ICD_PATH")" ||
+    fail "canonical-moltenvk-icd-unresolvable"
+[ "$canonical_icd_path" = "$ICD_PATH" ] ||
+    fail "canonical-moltenvk-icd-path-mismatch"
 command -v osascript >/dev/null 2>&1 || fail "osascript-missing"
 command -v screencapture >/dev/null 2>&1 || fail "screencapture-missing"
 command -v cliclick >/dev/null 2>&1 || fail "cliclick-missing"
@@ -507,7 +572,20 @@ SIMPLE_GUI_EVENT_EVIDENCE_PATH="$(absolute_path "$EVENTS")" \
 SHOWCASE_RESOLUTION="$REQUESTED_RESOLUTION" \
 SHOWCASE_DPI="$REQUESTED_DPI" \
 VK_ICD_FILENAMES="$ICD_PATH" \
-DYLD_LIBRARY_PATH="${DYLD_LIBRARY_PATH:-/opt/homebrew/lib}" \
+VK_DRIVER_FILES= \
+VK_ADD_DRIVER_FILES= \
+VK_LAYER_PATH= \
+VK_ADD_LAYER_PATH= \
+VK_INSTANCE_LAYERS= \
+VK_LOADER_DRIVERS_SELECT= \
+VK_LOADER_DRIVERS_DISABLE= \
+VK_LOADER_LAYERS_ENABLE= \
+VK_LOADER_LAYERS_DISABLE= \
+VK_LOADER_LAYERS_ALLOW= \
+DYLD_LIBRARY_PATH="$LAUNCH_DYLD_LIBRARY_PATH" \
+DYLD_INSERT_LIBRARIES= \
+DYLD_FRAMEWORK_PATH= \
+DYLD_FALLBACK_LIBRARY_PATH= \
     scripts/gui/macos-gui-run.shs "$SAMPLE" >"$LAUNCHER_LOG" 2>&1 ||
     fail "launcher-failed"
 

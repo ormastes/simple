@@ -79,7 +79,28 @@ write_public_manifest_fixture() {
     mkdir -p "$artifact_root" "$manifest_dir" "$(dirname "$fake_builder")" ||
         return 1
 
-    printf '%s\n' '#!/bin/sh' 'exit 0' >"$fake_builder" || return 1
+    {
+        echo '#!/bin/sh'
+        echo 'set -eu'
+        echo '[ "$#" = 4 ] && [ "$1" = --verify ] && [ "$2" = vulkan ]'
+        echo 'manifest=$3'
+        echo 'origin=$4'
+        echo '[ -f "$manifest" ] && [ -f "$origin" ]'
+        echo '[ "$(sed -n "s/^schema=//p" "$manifest")" = macos-gpu-2d-live-native-manifest-v4 ]'
+        echo 'for key in build_compiler_abs_path build_compiler_sha256 build_compiler_identity build_compiler_source_kind simple_runtime_provider_path simple_runtime_provider_sha256 winit_provider_path winit_provider_sha256 simple_runtime_c_provider_path simple_runtime_c_provider_sha256 repo_revision source_input_file_count source_input_fingerprint build_transcript_path build_transcript_sha256 output_path output_sha256; do'
+        echo '    [ "$(grep -c "^${key}=" "$manifest")" = 1 ]'
+        echo 'done'
+        echo '! grep -Eq "^(gui_driver_|evidence_(widget|web))" "$manifest"'
+        echo 'case "${MACOS_GPU_FIXTURE_MUTATE_AFTER_VERIFY:-}" in'
+        echo '    provider) key=simple_runtime_provider_path ;;'
+        echo '    output) key=output_path ;;'
+        echo '    "") exit 0 ;;'
+        echo '    *) exit 2 ;;'
+        echo 'esac'
+        echo 'target="$(sed -n "s/^${key}=//p" "$manifest")"'
+        echo 'printf "mutated-after-verifier\\n" >"$target"'
+        echo 'exit 0'
+    } >"$fake_builder" || return 1
     chmod 700 "$fake_builder"
 
     compiler_origin="$artifact_root/compiler-origin"
@@ -104,40 +125,27 @@ write_public_manifest_fixture() {
             ;;
     esac
 
-    gui_driver="$artifact_root/gui-driver"
-    gui_driver_origin="$artifact_root/gui-driver-origin"
-    gui_driver_provenance="$artifact_root/gui-driver-provenance.env"
     provider="$artifact_root/simple-runtime-provider"
     winit_provider="$artifact_root/winit-provider"
     runtime_c_provider="$artifact_root/runtime-c-provider"
-    widget_source="$artifact_root/widget.spl"
-    web_source="$artifact_root/web.spl"
-    web_html="$artifact_root/web.html"
+    source_snapshot="$artifact_root/source-inputs.txt"
+    build_transcript="$artifact_root/native-build.transcript"
     output="$artifact_root/live-output"
     for artifact in \
-        "$gui_driver" "$gui_driver_origin" "$gui_driver_provenance" \
         "$provider" "$winit_provider" "$runtime_c_provider" \
-        "$widget_source" "$web_source" "$web_html" "$output"; do
+        "$source_snapshot" "$build_transcript" "$output"; do
         printf 'fixture:%s\n' "$(basename "$artifact")" >"$artifact" ||
             return 1
     done
-    chmod 700 "$gui_driver" "$gui_driver_origin" "$output"
+    chmod 700 "$output"
 
     public_manifest="$manifest_dir/trusted-build.env"
     {
-        echo "schema=macos-gpu-2d-live-native-manifest-v3"
+        echo "schema=macos-gpu-2d-live-native-manifest-v4"
         echo "build_compiler_abs_path=$public_compiler"
         echo "build_compiler_sha256=$(sha256_file "$public_compiler")"
         echo "build_compiler_identity=canonical-pure-simple-stage3-with-bound-backfill-v1"
         echo "build_compiler_source_kind=canonical-pure-simple-bootstrap-stage3"
-        echo "gui_driver_abs_path=$gui_driver"
-        echo "gui_driver_sha256=$(sha256_file "$gui_driver")"
-        echo "gui_driver_origin_path=$gui_driver_origin"
-        echo "gui_driver_origin_sha256=$(sha256_file "$gui_driver_origin")"
-        echo "gui_driver_provenance_path=$gui_driver_provenance"
-        echo "gui_driver_provenance_sha256=$(sha256_file "$gui_driver_provenance")"
-        echo "gui_driver_source_kind=release-attested"
-        echo "gui_driver_source_revision=fixture-revision"
         echo "simple_runtime_provider_path=$provider"
         echo "simple_runtime_provider_sha256=$(sha256_file "$provider")"
         echo "winit_provider_path=$winit_provider"
@@ -145,13 +153,10 @@ write_public_manifest_fixture() {
         echo "simple_runtime_c_provider_path=$runtime_c_provider"
         echo "simple_runtime_c_provider_sha256=$(sha256_file "$runtime_c_provider")"
         echo "repo_revision=fixture-revision"
-        echo "source_input_fingerprint=$(sha256_file "$widget_source")"
-        echo "evidence_widget_source_path=$widget_source"
-        echo "evidence_widget_source_sha256=$(sha256_file "$widget_source")"
-        echo "evidence_web_source_path=$web_source"
-        echo "evidence_web_source_sha256=$(sha256_file "$web_source")"
-        echo "evidence_web_html_path=$web_html"
-        echo "evidence_web_html_sha256=$(sha256_file "$web_html")"
+        echo "source_input_file_count=1"
+        echo "source_input_fingerprint=$(sha256_file "$source_snapshot")"
+        echo "build_transcript_path=$build_transcript"
+        echo "build_transcript_sha256=$(sha256_file "$build_transcript")"
         echo "output_path=$output"
         echo "output_sha256=$(sha256_file "$output")"
     } >"$public_manifest" || return 1
@@ -182,7 +187,15 @@ expect_public_reject() {
         "$public_manifest" vulkan "$public_root"; then
         fixture_fail "public-admission-accepted-invalid-manifest"
     fi
+    assert_manifest_snapshot_cleaned
     fixture_pass
+}
+
+assert_manifest_snapshot_cleaned() {
+    for snapshot_path in "$manifest_dir"/manifest-admission.*; do
+        [ ! -e "$snapshot_path" ] ||
+            fixture_fail "immutable-manifest-snapshot-not-cleaned"
+    done
 }
 
 case "$case_name" in
@@ -235,10 +248,15 @@ case "$case_name" in
         write_public_manifest_fixture regular ||
             fixture_fail "public-fixture-write-failed"
         unset MACOS_GPU_ADMISSION_COMPILER_IDENTITY
+        unset MACOS_GPU_ADMISSION_GUI_DRIVER
+        unset MACOS_GPU_ADMISSION_WIDGET_SOURCE
+        unset MACOS_GPU_ADMISSION_WEB_SOURCE
+        unset MACOS_GPU_ADMISSION_WEB_HTML
         if ! macos_gpu_trusted_manifest_admit \
             "$public_manifest" vulkan "$public_root"; then
             fixture_fail "public-admission-rejected-regular-compiler"
         fi
+        assert_manifest_snapshot_cleaned
         identity_count="$(
             grep -c '^build_compiler_identity=' "$public_manifest"
         )"
@@ -247,7 +265,26 @@ case "$case_name" in
         [ "${MACOS_GPU_ADMISSION_COMPILER_IDENTITY:-}" = \
             canonical-pure-simple-stage3-with-bound-backfill-v1 ] ||
             fixture_fail "compiler-identity-not-populated"
+        [ -z "${MACOS_GPU_ADMISSION_GUI_DRIVER:-}" ] &&
+            [ -z "${MACOS_GPU_ADMISSION_WIDGET_SOURCE:-}" ] &&
+            [ -z "${MACOS_GPU_ADMISSION_WEB_SOURCE:-}" ] &&
+            [ -z "${MACOS_GPU_ADMISSION_WEB_HTML:-}" ] ||
+            fixture_fail "standalone-admission-populated-unrelated-gui-web-output"
         fixture_pass
+        ;;
+    public-provider-mutation-after-verifier)
+        write_public_manifest_fixture regular ||
+            fixture_fail "public-fixture-write-failed"
+        MACOS_GPU_FIXTURE_MUTATE_AFTER_VERIFY=provider
+        export MACOS_GPU_FIXTURE_MUTATE_AFTER_VERIFY
+        expect_public_reject
+        ;;
+    public-output-mutation-after-verifier)
+        write_public_manifest_fixture regular ||
+            fixture_fail "public-fixture-write-failed"
+        MACOS_GPU_FIXTURE_MUTATE_AFTER_VERIFY=output
+        export MACOS_GPU_FIXTURE_MUTATE_AFTER_VERIFY
+        expect_public_reject
         ;;
     public-symlink)
         write_public_manifest_fixture symlink ||
@@ -256,6 +293,7 @@ case "$case_name" in
             "$public_manifest" vulkan "$public_root"; then
             fixture_fail "public-admission-accepted-symlink"
         fi
+        assert_manifest_snapshot_cleaned
         fixture_pass
         ;;
     public-non-executable)
