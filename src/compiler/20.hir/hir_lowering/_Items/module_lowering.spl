@@ -71,6 +71,12 @@ fn hir_module_declares_item(m: Module, name: text) -> bool:
     kind register_imported_symbol knows how to register (functions covers
     `extern fn` too — the parser stores externs in Module.functions with
     is_extern=true)."""
+    # Header-only registry entries carry nil decl dicts; .contains_key on them
+    # is the same phantom family as .get (see the bug doc referenced in
+    # register_imported_symbol). A partial module declares nothing locally —
+    # answering false keeps the re-export chase walking its exports instead.
+    if m.functions.len() < 0:
+        return false
     if m.functions.contains_key(name):
         return true
     if m.classes.contains_key(name):
@@ -464,7 +470,13 @@ impl HirLowering:
             if part_hop.found:
                 val part_src: Module? = self.modules_by_name.get(part_hop.module_name)
                 if part_src != nil:
-                    self.register_imported_symbol(part_src, part_hop.module_name, part_hop.item_name, local_name, import_span)
+                    # Only recurse into a REAL module: a partial hop target
+                    # would re-enter this guard and a facade export cycle
+                    # (partial A <-> partial B) then recurses forever. A
+                    # partial terminal hop registers nothing — the use site
+                    # fails loud later instead of segfaulting/spinning here.
+                    if (part_src ?? imported_mod).functions.len() >= 0:
+                        self.register_imported_symbol(part_src, part_hop.module_name, part_hop.item_name, local_name, import_span)
             return
         val as_cls: Class? = imported_mod.classes.get(imported_name)
         val as_str: Struct? = imported_mod.structs.get(imported_name)
@@ -684,6 +696,24 @@ impl HirLowering:
             self.symbols.rename_symbol(sym_id, "{imported_mod_name}.{imported_name}")
 
     me register_glob_imported_symbols(imported_mod: any, imported_mod_name: text, import_span: Span):
+        # Header-only registry entries carry nil decl dicts; .keys() on them
+        # yields a phantom garbage-length array and the sweeps below spin or
+        # crash (observed: silent 100%-CPU hang resolving src/app/cli/main.spl
+        # module-only imports, stage-4 bootstrap). A partial module has no own
+        # decls — only its facade re-export items (header parsing populates
+        # imports) can contribute, so run just that sweep and return.
+        if imported_mod.functions.len() < 0:
+            var part_imp_idx = 0
+            while part_imp_idx < imported_mod.imports.len():
+                val part_imp = imported_mod.imports[part_imp_idx]
+                var part_it = 0
+                while part_it < part_imp.items.len():
+                    val part_item = part_imp.items[part_it]
+                    val part_local = if part_item.has_alias: part_item.alias else: part_item.name
+                    self.register_imported_symbol(imported_mod, imported_mod_name, part_local, part_local, import_span)
+                    part_it = part_it + 1
+                part_imp_idx = part_imp_idx + 1
+            return
         var keys = imported_mod.classes.keys()
         var idx = 0
         while idx < keys.len():
@@ -1296,7 +1326,8 @@ impl HirLowering:
         while enum_import_idx < module.imports.len():
             val imp = module.imports[enum_import_idx]
             val imported_mod: Module? = self.modules_by_name.get(imp.module)
-            if imported_mod != nil:
+            # Partial-module gate: same phantom family as register_imported_symbol.
+            if imported_mod != nil and (imported_mod ?? module).functions.len() >= 0:
                 if imp.items.len() == 0:
                     val imported_enum_keys = imported_mod.enums.keys()
                     import_enum_idx = 0
