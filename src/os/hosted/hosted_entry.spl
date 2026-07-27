@@ -26,7 +26,13 @@ use os.compositor.host_compositor_core.{
 }
 use os.compositor.hosted_backend_winit.{HostedWinitBufferBackend, hosted_winit_present_pure_simple_pixels}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.simple_web_window_renderer.{
+    simple_web_content_revision_with_theme,
+    simple_web_external_content_frame
+}
 use os.compositor.host_wm_theme_bootstrap.{install_default_host_wm_theme}
+use common.ui.theme_package.{default_theme_id}
+use common.ui.wm_chrome_theme.{active_wm_theme_id}
 use os.compositor.shared_mdi_setup.{
     shared_mdi_surface_count, shared_mdi_surface_title,
     shared_mdi_surface_app_id, shared_mdi_surface_content,
@@ -39,6 +45,7 @@ use common.ui.window_scene_draw_ir.{WM_BROWSER_TOOLBAR_HEIGHT}
 use std.nogc_sync_mut.io.window_winit.{winit_event_text}
 use std.common.web.browser_renderer_protocol.{BROWSER_RENDERER_WORKER_ARG}
 use os.hosted.hosted_browser_renderer_worker.{hosted_browser_renderer_worker_main}
+use os.hosted.hosted_browser_renderer_process.{HostedBrowserRendererProcess}
 use os.hosted.hosted_web_content_session.{HostedWebContentRegistry}
 use os.hosted.hosted_wm_evidence.{
     host_wm_evidence_config_from_env,
@@ -223,11 +230,11 @@ fn main() -> i64:
     print "[hosted-wm] raster-backend=simple-2d-winit-buffer source=pure-simple-pixel-mirror"
     val comp = HostCompositor.new_headless(Size(width: WINDOW_WIDTH as u64, height: WINDOW_HEIGHT as u64))
     val raster = Engine2dCompositorBackend.create_from_env(WINDOW_WIDTH, WINDOW_HEIGHT)
-    _run_hosted_wm(comp, raster, backend, el, win)
+    _run_hosted_wm(comp, raster, backend, el, win, args[0])
 
 # Dependency-light production event loop. Pure Simple owns scene, Web/GUI/2D
 # raster, and the pixel mirror; winit only presents that final buffer.
-fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend, presenter: HostedWinitBufferBackend, el: i64, win: i64) -> i64:
+fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend, presenter: HostedWinitBufferBackend, el: i64, win: i64, executable: text) -> i64:
     var comp = comp_in
     var raster = raster_in
     var surface = host_surface_state(_physical_surface_geometry(win))
@@ -248,6 +255,67 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
         for window in comp.windows:
             if window.app_id == "browser":
                 browser_profile_window_id = window.id
+    var browser_content_width: i32 = 1
+    var browser_content_height: i32 = 1
+    var browser_initial_html = ""
+    var browser_initial_title = ""
+    if browser_profile_window_id > 0:
+        for window in comp.windows:
+            if window.id == browser_profile_window_id:
+                browser_content_width = window.w - 8
+                browser_content_height = (
+                    window.h - 36 - WM_BROWSER_TOOLBAR_HEIGHT
+                )
+                browser_initial_html = window.content
+                browser_initial_title = window.title
+    var browser_renderer = HostedBrowserRendererProcess.create(
+        1, browser_content_width, browser_content_height
+    )
+    var browser_raster = Engine2dCompositorBackend.create_from_env(
+        browser_content_width, browser_content_height
+    )
+    var browser_renderer_ready = false
+    val browser_animation_origin_micros = rt_time_now_unix_micros()
+    var browser_last_animation_micros = browser_animation_origin_micros
+    if browser_profile_window_id > 0:
+        comp.require_external_web_frame(browser_profile_window_id)
+        val started = browser_renderer.start(executable, 2000)
+        if started.ok:
+            val initial = browser_renderer.render(
+                "init", browser_initial_html, 2000
+            )
+            if initial.ok:
+                val rendered = browser_raster.render_draw_ir_composition(
+                    initial.composition, []
+                )
+                val active_theme = active_wm_theme_id()
+                val theme = if active_theme != "":
+                    active_theme
+                else:
+                    default_theme_id()
+                val revision = simple_web_content_revision_with_theme(
+                    theme, browser_initial_title, browser_initial_html,
+                    browser_content_width, browser_content_height, 0
+                )
+                val frame = simple_web_external_content_frame(
+                    browser_profile_window_id.to_text(),
+                    revision,
+                    theme,
+                    browser_content_width,
+                    browser_content_height,
+                    rendered,
+                    initial.cpu_composited_count,
+                    initial.cpu_composited_sha256,
+                    initial.solid_material_count,
+                    initial.solid_material_sha256
+                )
+                browser_renderer_ready = comp.set_external_web_frame(
+                    browser_profile_window_id, frame
+                )
+            else:
+                print "[hosted-wm] browser-renderer-init-failed reason={initial.reason}"
+        else:
+            print "[hosted-wm] browser-renderer-start-failed reason={started.reason}"
     print "[hosted-wm] windows-ready count={comp.windows.len()}"
     if not comp.render_frame_engine2d(raster):
         if live_proof or evidence.enabled:
@@ -332,10 +400,62 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
         var motion_dirty = false
         var evidence_capture_requested = false
         val now_micros = rt_time_now_unix_micros()
+        if browser_renderer_ready:
+            if val Some(browser_result) = browser_renderer.poll():
+                if browser_result.ok:
+                    val rendered = browser_raster.render_draw_ir_composition(
+                        browser_result.composition, []
+                    )
+                    var current_title = browser_initial_title
+                    var current_html = browser_initial_html
+                    for window in comp.windows:
+                        if window.id == browser_profile_window_id:
+                            current_title = window.title
+                            current_html = window.content
+                    val active_theme = active_wm_theme_id()
+                    val theme = if active_theme != "":
+                        active_theme
+                    else:
+                        default_theme_id()
+                    val revision = simple_web_content_revision_with_theme(
+                        theme, current_title, current_html,
+                        browser_content_width, browser_content_height, 0
+                    )
+                    val frame = simple_web_external_content_frame(
+                        browser_profile_window_id.to_text(),
+                        revision,
+                        theme,
+                        browser_content_width,
+                        browser_content_height,
+                        rendered,
+                        browser_result.cpu_composited_count,
+                        browser_result.cpu_composited_sha256,
+                        browser_result.solid_material_count,
+                        browser_result.solid_material_sha256
+                    )
+                    if comp.set_external_web_frame(
+                        browser_profile_window_id, frame
+                    ):
+                        other_dirty = true
+                else:
+                    browser_renderer_ready = false
+                    print "[hosted-wm] browser-renderer-failed reason={browser_result.reason}"
+            if (browser_renderer.command_deadline_ms <= 0 and
+                now_micros - browser_last_animation_micros >= 16000):
+                match browser_renderer.begin_advance(
+                    (now_micros - browser_animation_origin_micros) / 1000,
+                    2000
+                ):
+                    Ok(_):
+                        browser_last_animation_micros = now_micros
+                    Err(reason):
+                        browser_renderer_ready = false
+                        print "[hosted-wm] browser-animation-failed reason={reason}"
         var web_window_index = 0
         while web_window_index < comp.windows.len():
             val web_window = comp.windows[web_window_index]
-            if not web_window.minimized:
+            if (not web_window.minimized and
+                web_window.id != browser_profile_window_id):
                 val web_content_height = web_window.h - 36 - (
                     if web_window.app_id == "browser":
                         WM_BROWSER_TOOLBAR_HEIGHT
@@ -671,6 +791,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     val profile_closed = web_sessions.close(
         rt_time_now_unix_micros() / 1000
     )
+    browser_renderer.close()
+    browser_raster.shutdown()
     raster.shutdown()
     rt_winit_window_free(win)
     rt_winit_event_loop_free(el)
