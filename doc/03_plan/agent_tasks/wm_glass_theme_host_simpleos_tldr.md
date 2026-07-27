@@ -29,6 +29,14 @@
 - The three-cycle textarea overlay series is also unintegrated: its functional
   multiline repairs ended with a DrawIR-to-CPU-painter owner inversion and two
   forbidden feature-local `rt_*` text externs. See the linked hard-stop bug.
+- The generated snapshot-catalog series exhausted three cycles unintegrated:
+  active non-default snapshots and external-frame registrations can outlive
+  current catalog/theme authority.
+- Theme-package transactions remain unintegrated until hosted bootstrap can
+  inject one race-safe transaction store; cycle 3 is intentionally unused.
+- K2 also exhausted three cycles unintegrated: x86 compatibility IDs/entry
+  state are incomplete, direct-x86 copyout stability is not universal, the ABI
+  audit misses C paths, and RV32 compat wrappers regress to `ENOSYS`.
 - Windows Vulkan/SIMD, Linux Vulkan/RenderDoc/SIMD, and unavailable QEMU/native
   rows remain explicit prepared-host requests; postponement is not PASS.
 - Electron remains a noncritical postponed wrapper under TODO 583.

@@ -1072,3 +1072,37 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   no executed spec, live pixel/event, timing, or RSS PASS exists. No fourth
   cycle, integration, or push ran. Resume only in a fresh lane following
   `doc/08_tracking/bug/simple_web_textarea_overlay_review_hard_stop_2026-07-27.md`.
+
+- continuation-2026-07-27-theme-catalog-hard-stop: **THREE-CYCLE CAP /
+  REJECTED / NOT INTEGRATED.** Catalog candidates `9f9a921689`, `d404042bc4`,
+  and `7ed0ae0a1a` added registry-derived aliases/defaults, deterministic
+  generation, full tuple cache/provenance identity, generated-default boot,
+  and resolver-derived freestanding closure checks. Final review rejected the
+  series because pre-existing non-default active snapshots could bypass
+  catalog/hosted parity and external-frame registrations were not revalidated
+  after an active-theme change. No fourth cycle or runtime PASS exists. Resume
+  through
+  `doc/08_tracking/bug/theme_snapshot_catalog_review_hard_stop_2026-07-27.md`.
+
+- continuation-2026-07-27-theme-package-transaction-blocker: **CANDIDATE
+  REJECTED / CYCLE 2 STOPPED READ-ONLY / CYCLE 3 UNUSED.** Commit `4f84131c55`
+  was rejected for multi-read prepare drift, reachable mutable maps, unlocked
+  partial publication, legacy commit bypass, and false-green overflow coverage.
+  A safe single-read immutable candidate is viable, but the package module has
+  no race-safe once-initialized hosted mutex/CAS owner. Unsafe lazy/eager module
+  locks, stub atomics, and unlocked swaps were rejected. Resume only after
+  single-threaded hosted bootstrap injects one transaction store, as specified
+  in
+  `doc/08_tracking/bug/theme_package_transaction_sync_owner_blocker_2026-07-27.md`.
+
+- continuation-2026-07-27-theme-ipc-k2-hard-stop: **THREE-CYCLE CAP /
+  REJECTED / NOT INTEGRATED.** K2 candidates `235ef0250b`, `41eedf1bf5`, and
+  `d9554f91af` attempted versioned dispatcher-bound IPC copy-in/out,
+  reservation/rollback, fail-closed SMP admission, mapping-stable copyout,
+  nonreusable tokens, and broad caller migration on top of landed K1. Final
+  review rejected the series because x86 compatibility IDs were not registered
+  or state-threaded, kernel-internal direct x86 syscalls bypassed the assumed
+  interrupt mask, the ABI audit missed old-layout C paths, and RV32 six-register
+  compatibility returned `ENOSYS`. No runtime, SimpleOS, QEMU, bootstrap, or
+  fourth cycle exists. Resume through
+  `doc/08_tracking/bug/theme_ipc_k2_review_hard_stop_2026-07-27.md`.
