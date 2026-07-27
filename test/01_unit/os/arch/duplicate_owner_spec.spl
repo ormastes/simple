@@ -22,8 +22,9 @@ production status ledger, and when a parallel duplicate tree (`*_v2.spl`,
 """
 
 use std.spec
-use app.io.mod.{file_exists, file_read_text, shell_lines}
+use app.io.mod.{file_exists, file_read_text, file_modified_time, shell_lines}
 use os.kernel.abi.abi_v1.{abi_v1_major, abi_v1_canonical_owners}
+use std.spec.evidence_receipt.{receipt_new, receipt_verify, verify_verdict}
 
 val LEDGER_PATH = "doc/08_tracking/os/production_status.sdn"
 
@@ -83,3 +84,28 @@ describe "Duplicate-owner guard fail-closed calibration":
             if line != "":
                 hits = hits + 1
         expect(hits).to_equal(1)
+
+describe "Ledger parity emits a fail-closed evidence receipt":
+    # First real consumer of std.spec.evidence_receipt (§21.4): the guard's
+    # ledger check is now backed by a machine-checked receipt instead of a
+    # bare file_exists assertion. The spec does the IO (exists + mtime) and
+    # feeds the pure receipt rules.
+    it "the production status ledger receipt verdict is PASS":
+        step("Observe ledger existence and mtime via app.io facades")
+        val ledger_exists = file_exists(LEDGER_PATH)
+        val ledger_mtime = file_modified_time(LEDGER_PATH)
+        step("Build a receipt claiming the ledger as its artifact and verify fail-closed")
+        val receipt = receipt_new("duplicate_owner_ledger_parity", "generic", "hosted", "PASS", LEDGER_PATH)
+        val outcome = receipt_verify(receipt, ledger_exists, ledger_mtime, 0)
+        if not outcome.passed:
+            print("ledger receipt failed rule " + outcome.rule + ": " + outcome.reason)
+        expect(verify_verdict(outcome)).to_equal("PASS")
+
+    it "a receipt for a nonexistent artifact fails closed":
+        step("Build a receipt whose declared artifact does not exist on disk")
+        val ghost = "doc/08_tracking/os/__no_such_ledger__.sdn"
+        val receipt = receipt_new("duplicate_owner_ledger_parity_red", "generic", "hosted", "PASS", ghost)
+        val outcome = receipt_verify(receipt, file_exists(ghost), 0, 0)
+        step("Missing artifact must yield FAIL, never a silent pass")
+        expect(verify_verdict(outcome)).to_equal("FAIL")
+        expect(outcome.rule).to_equal("artifact_present")
