@@ -560,9 +560,20 @@ class FontRenderer:
     quad_phase_inbound_nonempty: bool = false
     quad_phase_stored_nonempty: bool = false
     text_phase_layout_nonempty: bool = false
+    text_phase_fallback_glyph_positive: bool = false
     text_phase_glyph_positive: bool = false
     text_phase_atlas_index_valid: bool = false
     text_phase_quad_appended: bool = false
+    glyph_phase_cache_hit: bool = false
+    glyph_phase_cache_hit_positive: bool = false
+    glyph_phase_rasterizer_maps: bool = false
+    glyph_phase_bitmap_non_nil: bool = false
+    glyph_phase_bitmap_positive: bool = false
+    glyph_phase_bitmap_pixels_match: bool = false
+    glyph_phase_adapter_positive: bool = false
+    glyph_phase_adapter_pixels_match: bool = false
+    glyph_phase_reconstructed_positive: bool = false
+    glyph_phase_return_positive: bool = false
 
     static fn new() -> FontRenderer:
         val cache = GlyphCache.new(512)
@@ -764,12 +775,34 @@ class FontRenderer:
         token and self.quad_phase_stored_nonempty
     me receipt_text_phase_layout_nonempty(token: bool) -> bool:
         token and self.text_phase_layout_nonempty
+    me receipt_text_phase_fallback_glyph_positive(token: bool) -> bool:
+        token and self.text_phase_fallback_glyph_positive
     me receipt_text_phase_glyph_positive(token: bool) -> bool:
         token and self.text_phase_glyph_positive
     me receipt_text_phase_atlas_index_valid(token: bool) -> bool:
         token and self.text_phase_atlas_index_valid
     me receipt_text_phase_quad_appended(token: bool) -> bool:
         token and self.text_phase_quad_appended
+    me receipt_glyph_phase_cache_hit(token: bool) -> bool:
+        token and self.glyph_phase_cache_hit
+    me receipt_glyph_phase_cache_hit_positive(token: bool) -> bool:
+        token and self.glyph_phase_cache_hit_positive
+    me receipt_glyph_phase_rasterizer_maps(token: bool) -> bool:
+        token and self.glyph_phase_rasterizer_maps
+    me receipt_glyph_phase_bitmap_non_nil(token: bool) -> bool:
+        token and self.glyph_phase_bitmap_non_nil
+    me receipt_glyph_phase_bitmap_positive(token: bool) -> bool:
+        token and self.glyph_phase_bitmap_positive
+    me receipt_glyph_phase_bitmap_pixels_match(token: bool) -> bool:
+        token and self.glyph_phase_bitmap_pixels_match
+    me receipt_glyph_phase_adapter_positive(token: bool) -> bool:
+        token and self.glyph_phase_adapter_positive
+    me receipt_glyph_phase_adapter_pixels_match(token: bool) -> bool:
+        token and self.glyph_phase_adapter_pixels_match
+    me receipt_glyph_phase_reconstructed_positive(token: bool) -> bool:
+        token and self.glyph_phase_reconstructed_positive
+    me receipt_glyph_phase_return_positive(token: bool) -> bool:
+        token and self.glyph_phase_return_positive
     me receipt_staged_atlas_nonempty() -> bool:
         if self.staged_atlas_empty:
             return false
@@ -953,6 +986,10 @@ class FontRenderer:
         # Check cache first
         val cached = cache.lookup(codepoint, font_size)
         if cached != nil:
+            self.glyph_phase_cache_hit = true
+            if cached.width > 0 and cached.height > 0:
+                self.glyph_phase_cache_hit_positive = true
+                self.glyph_phase_return_positive = true
             self.cache = cache
             return cached
 
@@ -968,6 +1005,8 @@ class FontRenderer:
         var handled = false
         val rast = active_rasterizer
         val rast_has_glyph = rast != nil and rast.has_glyph(codepoint.to_i64())
+        if rast_has_glyph:
+            self.glyph_phase_rasterizer_maps = true
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
             print("[vec-glyph-probe] gwc-pre-rasterize cp={codepoint} rast_nil={rast == nil} has_glyph={rast_has_glyph}")
@@ -978,6 +1017,14 @@ class FontRenderer:
                 _vec_glyph_probe_count = _vec_glyph_probe_count + 1
                 print("[vec-glyph-probe] gwc-post-rasterize cp={codepoint} gb_nil={gb_is_nil}")
             if not gb_is_nil:
+                self.glyph_phase_bitmap_non_nil = true
+                val gbw = gb.gbm_width
+                val gbh = gb.gbm_height
+                val gbplen = gb.gbm_pixels.len()
+                if gbw > 0 and gbh > 0:
+                    self.glyph_phase_bitmap_positive = true
+                if gbw > 0 and gbh > 0 and gbplen == gbw * gbh:
+                    self.glyph_phase_bitmap_pixels_match = true
                 val raw_glyph = _sffi_glyph_to_cached(gb, codepoint, font_size)
                 # ROOT CAUSE (GLYPH-FIX-4, 2026-07-19): raw_glyph was built in
                 # font_rasterizer.spl (a different module) and crosses back
@@ -1005,6 +1052,10 @@ class FontRenderer:
                 val gpixels = raw_glyph.pixels
                 val gplen = gpixels.len()
                 val gadv = if gadv_raw > 0: gadv_raw else: gw + 1
+                if gw > 0 and gh > 0:
+                    self.glyph_phase_adapter_positive = true
+                if gw > 0 and gh > 0 and gplen == gw.to_i64() * gh.to_i64():
+                    self.glyph_phase_adapter_pixels_match = true
                 if gw <= 0 or gh <= 0:
                     # Degenerate (0x0) glyph: cache an advance-only entry.
                     # Use a fresh empty literal (not gpixels) so no
@@ -1015,6 +1066,8 @@ class FontRenderer:
                     glyph = CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: font_size, width: gw, height: gh, advance: gadv, bearing_x: gbx, bearing_y: gby, pixels: gpixels)
                 else:
                     glyph = CachedGlyph.empty(codepoint, font_size)
+                if glyph.width > 0 and glyph.height > 0:
+                    self.glyph_phase_reconstructed_positive = true
                 if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
                     _vec_glyph_probe_count = _vec_glyph_probe_count + 1
                     print("[vec-glyph-probe] gwc-post-to_cached cp={codepoint} w={gw} h={gh} pixels_len={gplen}")
@@ -1045,6 +1098,8 @@ class FontRenderer:
         val expected_pixels = glyph.width.to_i64() * glyph.height.to_i64()
         if glyph.advance > 0 and expected_pixels == glyph.pixels.len().to_i64():
             cache.insert(glyph)
+        if glyph.width > 0 and glyph.height > 0:
+            self.glyph_phase_return_positive = true
         self.cache = cache
         glyph
 
@@ -1320,9 +1375,20 @@ class FontRenderer:
         self.quad_phase_inbound_nonempty = false
         self.quad_phase_stored_nonempty = false
         self.text_phase_layout_nonempty = false
+        self.text_phase_fallback_glyph_positive = false
         self.text_phase_glyph_positive = false
         self.text_phase_atlas_index_valid = false
         self.text_phase_quad_appended = false
+        self.glyph_phase_cache_hit = false
+        self.glyph_phase_cache_hit_positive = false
+        self.glyph_phase_rasterizer_maps = false
+        self.glyph_phase_bitmap_non_nil = false
+        self.glyph_phase_bitmap_positive = false
+        self.glyph_phase_bitmap_pixels_match = false
+        self.glyph_phase_adapter_positive = false
+        self.glyph_phase_adapter_pixels_match = false
+        self.glyph_phase_reconstructed_positive = false
+        self.glyph_phase_return_positive = false
         if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
             return self._stage_invalid_config(config)
         self._activate_render_config(config)
@@ -1392,6 +1458,8 @@ class FontRenderer:
                     _vec_glyph_probe_count = _vec_glyph_probe_count + 1
                     print("[vec-glyph-probe] active-before-get_glyph cp={codepoint} font_size={font_size}")
                 val glyph = self.get_glyph(codepoint, font_size)
+                if glyph.width > 0 and glyph.height > 0:
+                    self.text_phase_fallback_glyph_positive = true
                 if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
                     _vec_glyph_probe_count = _vec_glyph_probe_count + 1
                     print("[vec-glyph-probe] active-after-get_glyph cp={codepoint} w={glyph.width} h={glyph.height} adv={glyph.advance} pixels_len={glyph.pixels.len()}")

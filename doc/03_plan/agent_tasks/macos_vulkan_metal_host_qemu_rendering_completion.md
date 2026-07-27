@@ -751,6 +751,32 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   reconstructed `CachedGlyph` is positive, and the returned glyph remains
   positive. Do not retry the current probe unchanged.
 
+### 2026-07-27 Bungee producer cycles 10–12
+
+- Boolean-only receipts now cover the selected-face mapping, non-nil bitmap,
+  bitmap dimensions/pixels, adapter, same-module reconstruction, local return,
+  first caller, and cache-hit boundaries. A parallel read-only audit confirmed
+  the active macOS path is the built-in selected-outline rasterizer, not WFFI.
+- Cycle 10 compiled 184 modules with zero failures and exited exactly at
+  `fail-glyph-bitmap-pixels`. The selected face maps the codepoint and returns
+  a non-nil bitmap with positive dimensions, but the pixel count is already
+  inconsistent before `_sffi_glyph_to_cached`.
+- Cycle 11 rebound every value-returning `push` in `sfnt_glyf`, including the
+  coverage pixel loop. The binary changed, but the exact
+  `fail-glyph-bitmap-pixels` result remained. Local push loss is therefore not
+  sufficient to explain this boundary.
+- Cycle 12 experimentally wrapped the selected-outline tuple with boolean
+  status plus mutable pixel/metric outputs. It compiled 184 modules with zero
+  failures but regressed to `fail-glyph-bitmap-return`. High review found that
+  two array-bearing tuple returns still remained underneath the wrapper, so
+  the call-site experiment was reverted before commit.
+- The three-cycle cap is exhausted. Do not bootstrap and do not rerun this
+  producer unchanged. In the next bounded session, add source-module boolean
+  receipts around `_sfnt_rasterize_glyph_parts` and the mutable-output copy to
+  distinguish an empty source bitmap from tuple-return loss. The fix must
+  remove the aggregate-return chain end-to-end, preferably with a
+  live-receiver raster result owner holding scalar metrics and owned pixels.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |

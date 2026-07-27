@@ -312,3 +312,34 @@ product; same-module reconstructed `CachedGlyph` is positive; caller receives
 positive dimensions. This will distinguish SFFI call/bitmap transport,
 cross-module adapter construction, and `CachedGlyph` return transport without
 printing or returning the suspect aggregate.
+
+## 2026-07-27 bounded producer cycles 10–12
+
+Cycle 10 localizes the first invalid material to the selected-outline bitmap
+boundary. Exact receipts pass for face mapping, non-nil bitmap, and positive
+bitmap dimensions, then fail at
+`engine2d_font_state_native_status=fail-glyph-bitmap-pixels`. The adapter,
+cache, and second `get_glyph` call are downstream and are not the current first
+failure.
+
+A read-only path audit establishes that no `libspl_fonts.so` candidate is
+active on this macOS lane. The path is
+`load_selected -> _rasterize_selected_outline ->
+sfnt_rasterize_codepoint_parts -> GlyphBitmap?`. Cycle 11 rebinding of all
+remaining `sfnt_glyf` array pushes changed the binary but retained the exact
+pixel mismatch.
+
+Cycle 12 experimentally wrapped the tuple with mutable outputs and a boolean
+result, but it regressed to `fail-glyph-bitmap-return`. High review identified
+two tuple-return hops still underneath the wrapper
+(`_sfnt_rasterize_glyph_parts -> sfnt_rasterize_codepoint_parts -> wrapper`).
+The regressing call-site experiment was reverted before commit. All three
+cycles compiled 184 modules with zero failures using the retained pure-Simple
+Stage3 diagnostic compiler; no bootstrap was run.
+
+The next session must instrument, once, the source bitmap pixel consistency and
+the tuple handoff inside the common `sfnt_glyf` module. The fix must eliminate
+the aggregate-return chain end-to-end, using a live-receiver result owner
+(scalar metrics plus owned pixel field) if source pixels are valid. A source
+FAIL selects the inner rasterizer or its `SfntGlyfBitmap` Option return.
+Vulkan live evidence remains blocked.
