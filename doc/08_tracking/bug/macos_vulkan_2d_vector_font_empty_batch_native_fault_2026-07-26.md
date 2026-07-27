@@ -385,3 +385,22 @@ The next bounded diagnostic belongs inside
 monotonically after input validation, `parse_offset_table`, cmap mapping, table
 validation, outline parsing, horizontal metrics, and bounds/dimensions, with
 the completion cookie written last. No bootstrap was run.
+
+## 2026-07-27 bounded producer cycles 19–21
+
+Cycle 19 proves the authoritative owner-local Bungee blob and the blob
+extracted into `FontRenderer` have identical fixed fingerprints: exact
+118996-byte length, SFNT header, sampled bytes, weighted sample, and completion
+cookie. It then reproduces `fail-glyph-bitmap-pixels`.
+
+Cycle 20 passes monotonic stamps through parse, cmap, table validation, metric
+bounds, outline parsing, and horizontal metrics. Cycle 21 further passes
+drawable-command, bounds, and dimension stamps, then returns to the exact
+bitmap-pixel mismatch. Each cycle compiles 185 modules with zero failures.
+
+Therefore the selected blob, outline parser, metrics, and geometry are sound at
+the diagnostic boundary. The active first loss remains after raster coverage
+is produced and before/while pixel-bearing `SfntGlyfBitmap`, tuple, and
+`GlyphBitmap?` results are published. The next fix should preserve the
+owner-local parsing path and publish coverage through a raw scalar descriptor
+or owner-local void copy, without duplicating parse work in `get_glyph`.

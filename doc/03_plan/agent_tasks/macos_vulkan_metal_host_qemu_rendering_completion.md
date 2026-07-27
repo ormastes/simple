@@ -819,6 +819,26 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   write monotonic fixed metadata stamps after input validation, font parsing,
   cmap mapping, table validation, outline parsing, metrics, and bounds.
 
+### 2026-07-27 Bungee producer cycles 19–21
+
+- Cycle 19 compares an owner-local Bungee blob fingerprint with a separate
+  common-module void fingerprint of the extracted blob. Both pass exact
+  length/header/sample/cookie checks; the run then reaches the established
+  `fail-glyph-bitmap-pixels`. Selected-blob extraction is not the active loss.
+- Cycle 20 adds diagnostic-only monotonic measure stamps. Parsing, cmap, table
+  bounds, metric bounds, outline parsing, and horizontal metrics all pass; the
+  coarse final geometry receipt fails.
+- Cycle 21 splits geometry into drawable commands, bounds availability, and
+  dimensions. Every phase passes, then the run again exits at
+  `fail-glyph-bitmap-pixels`. All three builds compile 185 modules with zero
+  failures.
+- The prior cycle-18 measure failure belongs to final metadata
+  publication/validation, not font parsing or geometry. The next production
+  fix must keep parsing owner-local and replace only the post-raster pixel
+  publication with a raw scalar descriptor/pixel pointer or an owner-local
+  void copy. Remove diagnostic double parsing from the glyph hot path before
+  push unless high review explicitly accepts a bounded test-only form.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
