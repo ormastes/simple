@@ -720,3 +720,22 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   event evidence. Added a fail-closed system contract and manual that keep all
   four rows required while preventing their postponement from being counted as
   PASS. The macOS Metal/NEON/current-source lane remains active.
+
+- continuation-2026-07-27-wm-web-adapter-glass: **SOURCE REPAIRED / RUNTIME
+  UNVERIFIED.** Parallel read-only audits found no host-independent SimpleOS
+  theme/event wiring defect, but found the current-host Web producer had
+  removed `engine2d-cpu-composited-material-v1` from every WM content wrapper.
+  That forced the legacy opaque reducer even though the generated Aetheric
+  `.widget-panel` CSS owns a translucent surface and admissible backdrop.
+  The producer now restores the exact mode without duplicating theme values,
+  retains the opaque named fallback for fail-closed admission, and exposes a
+  stable computed-style probe id. The committed conflict text in the existing
+  adapter spec is resolved, and a focused production-request-to-Draw-IR
+  regression pins surface `3424591649`, backdrop
+  `blur(30px) saturate(170%)`, one CPU material witness, and a 64-character
+  digest. Both the broad adapter spec and the reduced one-case spec timed out
+  under the deployed interpreter's 120-second resource limit before any
+  assertion (`0 passed, 1 failed`); no bootstrap or retry follows. Independent
+  highest-capability review then accepted the strengthened command-level Draw
+  IR assertions with no remaining P0/P1 source issue. Native Metal/NEON and
+  postponed external-host/QEMU evidence remain open.

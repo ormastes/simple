@@ -75,6 +75,7 @@ HTML, GUI, binary, log and artifact. The generated manual uses linked evidence.
 | `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl` | Existing Draw IR styled-RECT lowering preserves the opaque fallback when capability is absent and routes a supported request through the canonical material helper | CPU-SIMD or GPU execution |
 | `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_glass_material_spec.spl` | Rounded corner/center alpha, bounded backdrop blur, gradient endpoints, and saturation arithmetic are pinned as CPU pixel semantics | Vulkan/Metal device readback, events, timing, RSS |
 | `test/01_unit/os/compositor/simple_web_window_renderer_spec.spl` | WM provenance admits only exact solid/CPU reason pairs with lowercase SHA-256 formatting | Semantic digest recomputation at the frame boundary |
+| `test/01_unit/os/compositor/wm_aetheric_web_material_spec.spl` | Production Aetheric WM request resolves package surface `0xCC1F1F21`, `blur(30px) saturate(170%)`, and one typed CPU-composited Draw IR witness | Successful runtime execution, native Metal/Vulkan/SIMD, host/QEMU capture |
 
 The source slice is deliberately not a system-spec PASS. The aggregate
 `wm_glass_theme_host_simpleos_spec.spl` remains fail-closed until retained,
@@ -87,6 +88,14 @@ The session retry cap forbids a post-fix run. Requested blur `30px` is
 explicitly realized as blur `4px`, with realized blur/saturation and reduction
 witnesses. A fresh pure-Simple PASS is still required before this checkpoint
 can be promoted beyond SOURCE PREPARED / UNVERIFIED.
+
+The 2026-07-27 current-host adapter repair restored the exact material mode
+that had been removed from the production WM wrapper and resolved committed
+conflict text in `simple_web_window_renderer_spec.spl`. The new focused
+adapter-to-Draw-IR spec was attempted twice with the deployed macOS
+interpreter; both runs timed out at 120 seconds during setup/source work
+before an assertion executed. These are not semantic failures, but they are
+also not PASS evidence; no retry or bootstrap is authorized for this session.
 
 The planned Web repair adds paired evidence:
 

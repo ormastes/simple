@@ -224,6 +224,20 @@ readback, input-event, timing, or RSS evidence.
 | W4 provenance | Source prepared | Web artifact and shared WM owners: `simple_web_html_layout_renderer.spl`, `simple_web_layout_engine2d_fast.spl`, `simple_web_window_renderer.spl`, `window_scene.spl` | CPU-composited and solid fallback kinds/hashes are distinct and validated end to end |
 | W5 evidence | Open | Evidence owner, then independent highest-capability reviewer | CSS/computed-style/Draw IR/pixel receipts pass; no backend/device claim is inferred |
 
+On 2026-07-27 the current-host adapter audit found that W1-W4 existed below
+the producer, but `simple_web_content_render_request_with_theme` had removed the
+exact mode from every WM content wrapper. That omission selected the legacy
+opaque reducer before the package-owned `.widget-panel` surface could be
+admitted. The adapter now restores the exact mode and gives the wrapper a
+stable probe id; the generated Aetheric CSS remains the sole owner of the
+translucent base, gradient, and `blur(30px) saturate(170%)`. The focused
+`wm_aetheric_web_material_spec.spl` follows the production request through
+computed Style and Draw IR. Two interpreter attempts reached the 120-second
+resource timeout before any assertion (`0 passed, 1 failed`), so W5 remains
+open and this checkpoint must not be described as a runtime PASS. A
+highest-capability read-only review accepted the strengthened command-level
+Draw IR assertions with no remaining P0/P1 source issue.
+
 Lower-capability sidecars may own W1, W2, and test fixture preparation only
 after the merge owner freezes the exact style keys:
 `wm-material-request`, `background-color`,

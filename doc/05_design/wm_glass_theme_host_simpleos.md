@@ -93,6 +93,14 @@ opaque fallback. Unsupported/multiple image syntax stays visible as a raw
 rejection witness instead of being silently projected into the supported typed
 gradient.
 
+The canonical WM Web producer places that exact opt-in on the
+`.wm-app-content.widget-panel` wrapper. It does not restate Aetheric colors or
+effects: the generated theme package remains authoritative for
+`rgba(31,31,33,0.80)`, the two alpha-gradient stops, and
+`blur(30px) saturate(170%)`. The wrapper retains a named opaque color only as
+fail-closed metadata. A stable `wm-app-content` id exists for computed-style
+evidence and is not a second theme selector.
+
 ### Simple Web CSS-to-material source implementation
 
 The implementation order is fixed:
