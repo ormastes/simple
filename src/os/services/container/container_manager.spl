@@ -23,6 +23,7 @@
 
 use os.kernel.loader.container_namespace.{ContainerNamespaceView, container_view_rootless, container_view_create, container_view_allows_path, container_view_allows_pid, container_view_path_decision, container_view_pid_decision}
 use os.services.container.container_storage.{LayerStore, ImageLayer, CowSnapshot, Volume}
+use os.services.service_manifest.{ServiceManifest, can_start, mark_starting, mark_ready, mark_stopping, mark_stopped, record_health, record_heartbeat, check_watchdog, should_restart, on_restart, holds_grants}
 
 # ============================================================================
 # Shared-namespace mask bits (which namespaces a pod member shares with its pod)
@@ -153,6 +154,33 @@ fn caps_is_subset(child: [text], parent: [text]) -> bool:
     true
 
 # ============================================================================
+# service_v1 MANIFEST DECLARATION — the container-manager *service* itself.
+#
+# Distinct from the per-CONTAINER lifecycle above: this is what the manager
+# publishes about ITSELF to a supervisor (master plan §4 service_v1, §20
+# health/watchdog, §21 restart-drops-stale-grants). The declaration is pure
+# data; the lifecycle hooks below map it onto the manager's EXISTING
+# start/stop/monitor machinery — no second mechanism is introduced.
+# ============================================================================
+
+fn container_manager_manifest() -> ServiceManifest:
+    """Declared service_v1 manifest for the container-manager service.
+
+    readiness_deps mirror what sys_create/sys_start actually need before they
+    can do anything: a filesystem to resolve container roots through (vfs) and
+    a process manager to hand SpawnRequests to (pm). required_capabilities are
+    the grants the manager must hold to broker container authority at all.
+    """
+    var m = ServiceManifest.create("container-manager", "service_v1")
+    m.required_capabilities = ["cap.spawn", "cap.fs_mount", "cap.resource_domain"]
+    m.readiness_deps = ["vfs", "pm"]
+    m.health_check_kind = "heartbeat"
+    m.restart_policy = "on_failure"
+    m.max_restarts = 3
+    m.watchdog_timeout_ms = 5000
+    m
+
+# ============================================================================
 # ContainerWorld — the ECS business layer inside the capsule.
 # Parallel component arrays; entity == index. Held DIRECTLY (single field hop).
 # ============================================================================
@@ -178,6 +206,10 @@ class ContainerWorld:
     # explicit volumes + ref-tracked GC. Held DIRECTLY (single field hop);
     # every mutation goes through extract-mutate-writeback.
     store: LayerStore
+    # service_v1 manifest for the container-manager SERVICE (not a container).
+    # Held DIRECTLY (single field hop) and mutated only through
+    # extract-mutate-writeback, same as every other component column.
+    manifest: ServiceManifest
     next_id: u64
 
 impl ContainerWorld:
@@ -195,6 +227,7 @@ impl ContainerWorld:
             granted_caps: [],
             pods: [],
             store: LayerStore.new(),
+            manifest: container_manager_manifest(),
             next_id: 1u64
         )
 
@@ -667,3 +700,143 @@ impl ContainerWorld:
         val reclaimed = st.gc_run(false)
         self.store = st
         reclaimed
+
+    # ------------------------------------------------------------------------
+    # service_v1 LIFECYCLE HOOKS — the manager as a supervised service.
+    #
+    # Every hook is extract-mutate-writeback on `self.manifest` (bug
+    # selfhost_two_hop_field_method_mutation_lost_2026-07-27: a
+    # `self.manifest.<mutate>()` chain crossing the imported ServiceManifest
+    # struct silently mutates a discarded copy). service_manifest.spl's
+    # functions are pure — they RETURN a new manifest — so the write-back is
+    # what actually commits the transition.
+    # ------------------------------------------------------------------------
+
+    fn svc_manifest(self) -> ServiceManifest:
+        self.manifest
+
+    fn svc_name(self) -> text:
+        self.manifest.name
+
+    fn svc_state(self) -> text:
+        self.manifest.state
+
+    fn svc_grants(self) -> [text]:
+        self.manifest.granted_handles
+
+    fn svc_restart_count(self) -> i64:
+        self.manifest.restart_count
+
+    fn svc_holds_grants(self) -> bool:
+        holds_grants(self.manifest)
+
+    # Lifecycle hook: start. Refuses (returns false, state unchanged) until
+    # every declared readiness dependency is up — the manager must not create
+    # containers before vfs/pm exist.
+    me svc_start(ready_set: [text]) -> bool:
+        if not can_start(self.manifest, ready_set):
+            return false
+        var m = self.manifest
+        m = mark_starting(m)
+        self.manifest = m
+        true
+
+    # Grant acquisition, modelled after grant_broker issuance: a started
+    # service takes the device/secret handles it was authorized to hold.
+    me svc_acquire_grant(handle: text):
+        var m = self.manifest
+        var g = m.granted_handles
+        g = g.push(handle)
+        m.granted_handles = g
+        self.manifest = m
+
+    me svc_ready():
+        var m = self.manifest
+        m = mark_ready(m)
+        self.manifest = m
+
+    me svc_heartbeat(now_ms: i64):
+        var m = self.manifest
+        m = record_heartbeat(m, now_ms)
+        self.manifest = m
+
+    me svc_watchdog(now_ms: i64) -> text:
+        var m = self.manifest
+        m = check_watchdog(m, now_ms)
+        self.manifest = m
+        self.manifest.state
+
+    # Health from the manager's OWN world invariants, not a synthetic probe:
+    # the manager is healthy exactly while §21 holds across every container it
+    # supervises — a container that is stopped or exited must hold NO granted
+    # capabilities and must resolve NOTHING (its view was collapsed to
+    # rootless). Any dead container still carrying authority is a §21 breach
+    # and degrades, then fails, the service.
+    fn svc_world_invariant(self) -> bool:
+        var i = 0
+        while i < self.ids.len():
+            val state = self.lifecycles[i].state
+            if state == "stopped" or state == "exited":
+                if self.granted_caps[i].len() > 0:
+                    return false
+                if container_view_allows_path(self.views[i].view, self.views[i].view.root):
+                    return false
+            i = i + 1
+        true
+
+    me svc_health_check() -> text:
+        val ok = self.svc_world_invariant()
+        var m = self.manifest
+        m = record_health(m, ok)
+        self.manifest = m
+        self.manifest.state
+
+    fn svc_restart_allowed(self) -> bool:
+        should_restart(self.manifest.restart_policy, self.manifest.restart_count, self.manifest.max_restarts)
+
+    # ------------------------------------------------------------------------
+    # Lifecycle hook: RESTART — the §21 invariant at SERVICE granularity.
+    #
+    # Returns false (nothing changes) once the restart-limit is spent. On a
+    # permitted restart:
+    #   * on_restart() clears the manifest's granted_handles outright — the
+    #     respawned manager re-acquires every device/secret grant from the
+    #     broker, never inherits one;
+    #   * and the authority the manager had BROKERED OUT to every container it
+    #     supervised is torn down the same way (pouch emptied, kernel view
+    #     collapsed to rootless), because a manager that died cannot vouch for
+    #     grants it can no longer supervise.
+    # ------------------------------------------------------------------------
+    me svc_restart() -> bool:
+        if not self.svc_restart_allowed():
+            return false
+
+        # 1. Manifest-level §21: drop every grant the SERVICE held.
+        var m = self.manifest
+        m = on_restart(m)
+        self.manifest = m
+
+        # 2. World-level §21: drop every grant the service had brokered out.
+        var a_grant = self.granted_caps
+        var a_views = self.views
+        var i = 0
+        while i < self.ids.len():
+            a_grant[i] = []
+            a_views[i] = NamespaceView(view: container_view_rootless(), net_handle: 0u64, ipc_handle: 0u64)
+            i = i + 1
+        self.granted_caps = a_grant
+        self.views = a_views
+
+        # 3. Re-enter Starting — grants must be re-acquired before Ready.
+        var m2 = self.manifest
+        m2 = mark_starting(m2)
+        self.manifest = m2
+        true
+
+    me svc_stop():
+        var m = self.manifest
+        m = mark_stopping(m)
+        self.manifest = m
+        var m2 = self.manifest
+        m2 = mark_stopped(m2)
+        self.manifest = m2

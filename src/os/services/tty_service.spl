@@ -10,6 +10,7 @@
 use std.ecs.entity.{Entity, EntityAllocator}
 use std.ecs.component_store.{ComponentStore}
 use std.ecs.world.{WorldBase}
+use os.services.service_manifest.{ServiceManifest, can_start, mark_starting, mark_ready, mark_stopping, mark_stopped, record_health, record_heartbeat, check_watchdog, should_restart, on_restart, holds_grants}
 
 # ============================================================================
 # TTY kind constants
@@ -149,6 +150,30 @@ struct TtyWorld:
 # TtyService — public API
 # ============================================================================
 
+# ============================================================================
+# service_v1 MANIFEST DECLARATION — the TTY service itself.
+#
+# Master plan §4 (service_v1 ABI), §20 (health/watchdog), §21 (a restart
+# retains NO stale grant). The declaration is pure data; the lifecycle hooks
+# on TtyService below map it onto the service's existing world.
+# ============================================================================
+
+fn tty_service_manifest() -> ServiceManifest:
+    """Declared service_v1 manifest for the TTY/PTY service.
+
+    The TTY service is a leaf console provider: it needs the device grants for
+    its input source and output sink, and it must not come up before the
+    device-server that hands those endpoints out.
+    """
+    var m = ServiceManifest.create("tty", "service_v1")
+    m.required_capabilities = ["dev.console", "dev.serial"]
+    m.readiness_deps = ["ds"]
+    m.health_check_kind = "heartbeat"
+    m.restart_policy = "always"
+    m.max_restarts = 5
+    m.watchdog_timeout_ms = 2000
+    m
+
 class TtyService:
     """POSIX TTY/PTY service for SimpleOS.
 
@@ -159,6 +184,9 @@ class TtyService:
     world: TtyWorld
     initialized: bool
     default_cc: [u8]
+    # service_v1 manifest for the TTY service. Held DIRECTLY (single field
+    # hop) and mutated only via extract-mutate-writeback.
+    manifest: ServiceManifest
 
 impl TtyService:
     static fn new() -> TtyService:
@@ -180,7 +208,8 @@ impl TtyService:
                 term_ctls:      ComponentStore.new()
             ),
             initialized: true,
-            default_cc: cc
+            default_cc: cc,
+            manifest: tty_service_manifest()
         )
 
     me tty_create(kind: u32, input_ep: u64, output_ep: u64) -> Entity:
@@ -765,3 +794,160 @@ impl TtyService:
     fn tty_count(self) -> i32:
         """Return the number of live TTY entities (tracked via kinds store)."""
         self.world.kinds.len()
+
+    # ------------------------------------------------------------------
+    # service_v1 lifecycle hooks (SVC lane)
+    #
+    # Every hook is extract-mutate-writeback on `self.manifest`: a
+    # `self.manifest.<mutate>()` chain crosses into the imported
+    # ServiceManifest struct and is silently lost (bug
+    # selfhost_two_hop_field_method_mutation_lost_2026-07-27). The
+    # service_manifest.spl functions are pure and RETURN a new manifest, so
+    # the write-back is what commits the transition.
+    # ------------------------------------------------------------------
+
+    fn svc_manifest(self) -> ServiceManifest:
+        self.manifest
+
+    fn svc_name(self) -> text:
+        self.manifest.name
+
+    fn svc_state(self) -> text:
+        self.manifest.state
+
+    fn svc_grants(self) -> [text]:
+        self.manifest.granted_handles
+
+    fn svc_restart_count(self) -> i64:
+        self.manifest.restart_count
+
+    fn svc_holds_grants(self) -> bool:
+        holds_grants(self.manifest)
+
+    me svc_start(ready_set: [text]) -> bool:
+        """Lifecycle hook: start. Refuses while a readiness dep is missing."""
+        if not can_start(self.manifest, ready_set):
+            return false
+        var m = self.manifest
+        m = mark_starting(m)
+        self.manifest = m
+        true
+
+    me svc_acquire_grant(handle: text):
+        """Take a device grant (console/serial endpoint) from the broker."""
+        var m = self.manifest
+        var g = m.granted_handles
+        g = g.push(handle)
+        m.granted_handles = g
+        self.manifest = m
+
+    me svc_ready():
+        var m = self.manifest
+        m = mark_ready(m)
+        self.manifest = m
+
+    me svc_heartbeat(now_ms: i64):
+        var m = self.manifest
+        m = record_heartbeat(m, now_ms)
+        self.manifest = m
+
+    me svc_watchdog(now_ms: i64) -> text:
+        var m = self.manifest
+        m = check_watchdog(m, now_ms)
+        self.manifest = m
+        self.manifest.state
+
+    fn svc_world_invariant(self) -> bool:
+        """Health from the service's OWN state: no TTY may carry a pending
+        signal whose target pgrp is stale (a recorded signal with no pgrp, or
+        a targeted pgrp with no signal, means the ISIG path tore).
+        """
+        var i = 0
+        val n = self.world.term_ctls.dense.len()
+        while i < n:
+            val c = self.world.term_ctls.dense[i]
+            if c.pending_signal != 0 and c.pending_signal_pgrp == 0:
+                return false
+            if c.pending_signal == 0 and c.pending_signal_pgrp != 0:
+                return false
+            i = i + 1
+        true
+
+    me svc_health_check() -> text:
+        val ok = self.svc_world_invariant()
+        var m = self.manifest
+        m = record_health(m, ok)
+        self.manifest = m
+        self.manifest.state
+
+    fn svc_restart_allowed(self) -> bool:
+        should_restart(self.manifest.restart_policy, self.manifest.restart_count, self.manifest.max_restarts)
+
+    fn svc_pending_signal_total(self) -> i64:
+        """How many TTYs still carry a pending signal (0 after a restart)."""
+        var total = 0
+        var i = 0
+        val n = self.world.term_ctls.dense.len()
+        while i < n:
+            if self.world.term_ctls.dense[i].pending_signal != 0:
+                total = total + 1
+            i = i + 1
+        total
+
+    # ------------------------------------------------------------------
+    # Lifecycle hook: RESTART — the §21 invariant for the TTY service.
+    #
+    # Returns false (nothing changes) once the restart limit is spent. On a
+    # permitted restart:
+    #   * on_restart() clears the manifest's granted_handles — the respawned
+    #     service re-acquires its console/serial device grants from the
+    #     broker and inherits none;
+    #   * and EVERY TTY's pending_signal / pending_signal_pgrp is cleared.
+    #     A pending signal is authority aimed at a process group that was
+    #     resolved by the PRE-restart service; letting it survive would
+    #     deliver a SIGINT chosen by a dead instance to whatever process
+    #     group now happens to own that pgrp number. Session ownership and
+    #     the current foreground pgrp are DELIBERATELY preserved — those are
+    #     the controlling-terminal binding, not pending authority.
+    # ------------------------------------------------------------------
+    me svc_restart() -> bool:
+        if not self.svc_restart_allowed():
+            return false
+
+        # 1. Manifest-level §21: drop every device grant the service held.
+        var m = self.manifest
+        m = on_restart(m)
+        self.manifest = m
+
+        # 2. Per-TTY §21: no pending-signal targeting survives the restart.
+        #    Extract-mutate-writeback through the ComponentStore column — a
+        #    bare self.world.term_ctls.dense[i] = ... is a two-hop mutation
+        #    into an imported struct and is silently discarded.
+        var ctl_store = self.world.term_ctls
+        var d = ctl_store.dense
+        var i = 0
+        val n = d.len()
+        while i < n:
+            val old = d[i]
+            d[i] = TermCtl(
+                session_id: old.session_id,
+                foreground_pgrp: old.foreground_pgrp,
+                pending_signal: 0,
+                pending_signal_pgrp: 0)
+            i = i + 1
+        ctl_store.dense = d
+        self.world.term_ctls = ctl_store
+
+        # 3. Re-enter Starting — grants must be re-acquired before Ready.
+        var m2 = self.manifest
+        m2 = mark_starting(m2)
+        self.manifest = m2
+        true
+
+    me svc_stop():
+        var m = self.manifest
+        m = mark_stopping(m)
+        self.manifest = m
+        var m2 = self.manifest
+        m2 = mark_stopped(m2)
+        self.manifest = m2

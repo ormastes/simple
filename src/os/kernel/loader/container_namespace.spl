@@ -50,6 +50,74 @@ pub fn simpleos_container_rootfs_gate(rootfs: text, app_path: text) -> text:
         return "rootfs-escape"
     "ready"
 
+# ============================================================================
+# ContainerNamespaceView — the KERNEL enforcement primitive for the
+# container-manager capsule (src/os/services/container/container_manager.spl).
+#
+# RESTORED by lane SVC2b 2026-07-27: container_manager.spl and its spec both
+# import these symbols from this module, but the module carried only the
+# desktop-e2e wine-container contract above (same file name, different
+# module) — so container_manager_spec failed 5/5 blocks with
+# "function `container_view_rootless` not found". Appended, never replacing
+# any existing symbol.
+#
+# Semantics (the absolute oracles in
+# test/01_unit/os/services/container/container_manager_spec.spl):
+#   * rootless view (root == "") DENIES every path and every pid;
+#   * a view rooted at R allows exactly R and paths at/below R/;
+#   * any path containing ".." is DENIED without normalization (an escape
+#     attempt is never resolved, it is refused);
+#   * a view sees only the pids explicitly declared at create time.
+# Pure model: no syscalls, no extern rt_*. Freestanding-safe.
+# ============================================================================
+
+class ContainerNamespaceView:
+    """Confined mount(root) + pid view a container resolves through."""
+    root: text
+    pids: [u64]
+
+pub fn container_view_rootless() -> ContainerNamespaceView:
+    """Deny-everything view: the base every container is built up from."""
+    ContainerNamespaceView(root: "", pids: [])
+
+pub fn container_view_create(root: text, pids: [u64]) -> ContainerNamespaceView:
+    """View confined to `root` that sees exactly the declared `pids`."""
+    ContainerNamespaceView(root: root, pids: pids)
+
+pub fn container_view_allows_path(view: ContainerNamespaceView, path: text) -> bool:
+    """True only for paths at/below the view's root; rootless denies all."""
+    if view.root == "":
+        return false
+    # An escape attempt is refused, never normalized away.
+    if path.contains(".."):
+        return false
+    if view.root == "/":
+        return true
+    if path == view.root:
+        return true
+    path.starts_with(view.root + "/")
+
+pub fn container_view_allows_pid(view: ContainerNamespaceView, pid: u64) -> bool:
+    """True only for pids explicitly declared in the view; rootless denies all."""
+    if view.root == "":
+        return false
+    for p in view.pids:
+        if p == pid:
+            return true
+    false
+
+pub fn container_view_path_decision(view: ContainerNamespaceView, path: text) -> text:
+    """Human-readable decision oracle: "allow" | "deny"."""
+    if container_view_allows_path(view, path):
+        return "allow"
+    "deny"
+
+pub fn container_view_pid_decision(view: ContainerNamespaceView, pid: u64) -> text:
+    """Human-readable decision oracle: "allow" | "deny"."""
+    if container_view_allows_pid(view, pid):
+        return "allow"
+    "deny"
+
 pub fn simpleos_wine_container_contract(pid: u64, rootfs: text, app_path: text, rootfs_backend: text) -> SimpleOsContainerContract:
     val evidence = simpleos_container_namespace_evidence(pid, rootfs, true, true, true, true)
     val namespace_state = simpleos_container_namespace_gate(evidence)
