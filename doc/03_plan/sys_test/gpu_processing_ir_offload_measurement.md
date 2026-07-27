@@ -75,6 +75,11 @@ independent CPU oracle. Every receipt has exact output/checksum and stable
 positive CUDA provenance. Because device time is slower than the CPU oracle,
 the policy correctly reports `available-not-preferred`.
 
+The daemon now runs that independent CPU allocation only when the evidence
+harness passes `--processing-verify-cpu`, or lazily when CPU fallback is
+actually selected. Default strict GPU requests validate FillU32 output directly
+and no longer duplicate the full processing workload on the CPU.
+
 ## Unavailable Protocol
 
 If the requested native device, driver, or runtime is unavailable, the

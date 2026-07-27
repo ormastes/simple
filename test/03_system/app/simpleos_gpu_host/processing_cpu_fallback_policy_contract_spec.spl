@@ -18,6 +18,7 @@ use os.lib.gpu_bridge.host_gpu_ivshmem.{
 val HOST = "src/app/simpleos_gpu_host/daemon_runner.spl"
 val PROTOCOL = "src/lib/common/gpu/simpleos_host_gpu_protocol.spl"
 val GUEST_BRIDGE = "src/os/lib/gpu_bridge/host_gpu_ivshmem.spl"
+val QEMU_WRAPPER = "scripts/check/check-simpleos-qemu-host-gpu-2d.shs"
 
 fn fallback_receipt(status: i64, reason: i64, handle: i64, identity: i64, source: i64, run_id_hash: i64, frame_id: i64) -> HostGpuIvshmemReceipt:
     HostGpuIvshmemReceipt(
@@ -48,9 +49,9 @@ describe "SimpleOS processing CPU fallback policy contract":
 
     it "passes the fallback boolean into both processing requests":
         val source = file_read(HOST)
-        expect(source).to_contain("_process_request(platform, base, processing_selector, processing_fallback_cpu, processing_min_offload_elements, [])")
-        expect(source).to_contain("_process_request(platform, base, processing_selector, processing_fallback_cpu, processing_min_offload_elements, retained)")
-        expect(source).to_contain("fn _process_request(platform: SimpleOsGpuHostPlatform, base: i64, processing_selector: text, processing_fallback_cpu: bool, processing_min_offload_elements: i64")
+        expect(source).to_contain("_process_request(platform, base, processing_selector, processing_fallback_cpu, processing_verify_cpu, processing_min_offload_elements, [])")
+        expect(source).to_contain("_process_request(platform, base, processing_selector, processing_fallback_cpu, processing_verify_cpu, processing_min_offload_elements, retained)")
+        expect(source).to_contain("fn _process_request(platform: SimpleOsGpuHostPlatform, base: i64, processing_selector: text, processing_fallback_cpu: bool, processing_verify_cpu: bool, processing_min_offload_elements: i64")
 
     it "validates the calibrated offload threshold and allows zero to disable":
         val source = file_read(HOST)
@@ -77,10 +78,11 @@ describe "SimpleOS processing CPU fallback policy contract":
 
     it "writes the CPU oracle with zero native provenance and fallback status":
         val source = file_read(HOST)
-        expect(source).to_contain("val checksum = _write_pixels(base, oracle, count)")
+        expect(source).to_contain("val checksum = _write_pixels(base, oracle, ir.element_count)")
         expect(source).to_contain("_finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FALLBACK, reason, 0,")
         expect(source).to_contain("SIMPLEOS_HOST_GPU_READBACK_CPU, 0)")
-        expect(source).to_contain("fn _processing_cpu_fallback(base: i64, generation: i64, reason: i64, oracle: [u32]")
+        expect(source).to_contain("fn _processing_cpu_fallback(base: i64, generation: i64, reason: i64, ir: ProcessingIr)")
+        expect(source).to_contain("val oracle = processing_ir_cpu_execute(ir)")
 
     it "bypasses device work only for calibrated CPU fallback":
         val source = file_read(HOST)
@@ -95,9 +97,27 @@ describe "SimpleOS processing CPU fallback policy contract":
     it "keeps executor failure and mismatch fallback behavior":
         val source = file_read(HOST)
         expect(source).to_contain("if not completed or backend_handle <= 0 or device_identity <= 0:\n            val failure_reason = simpleos_host_gpu_processing_reason(executor_reason)\n            if processing_fallback_cpu:\n                return _loop_state(if _processing_cpu_fallback")
-        expect(source).to_contain("if not processing_ir_outputs_equal(values, oracle):\n            if processing_fallback_cpu:\n                return _loop_state(if _processing_cpu_fallback")
+        expect(source).to_contain("if not processing_ir_output_matches(ir, values) or (processing_verify_cpu and not processing_ir_outputs_equal(values, oracle)):\n            if processing_fallback_cpu:\n                return _loop_state(if _processing_cpu_fallback")
         expect(source).to_contain("_finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, failure_reason, 0, 0, 0, 1, 0, 0)")
         expect(source).to_contain("_finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_CHECKSUM_MISMATCH, 0, 0, 0, 1, 0, 0)")
+
+    it "runs the CPU oracle only for fallback or explicit verification":
+        val source = file_read(HOST)
+        val wrapper = file_read(QEMU_WRAPPER)
+        val request = source.slice(
+            source.index_of("fn _process_request("),
+            source.index_of("fn _arg_value("))
+        val verify = request.index_of("if processing_verify_cpu:")
+        val cpu = request.index_of("processing_ir_cpu_execute(ir)")
+        expect(source).to_contain("val processing_verify_cpu = args.contains(\"--processing-verify-cpu\")")
+        expect(source).to_contain("if processing_verify_cpu:\n            val cpu_started = time_now_nanos()")
+        expect(source).to_contain("if processing_verify_cpu:\n            val preference = _processing_preference")
+        expect(source).to_contain("processing_ir_output_matches(ir, values)")
+        expect(wrapper).to_contain("set -- \"$@\" --processing-verify-cpu")
+        expect(verify).to_be_greater_than(0)
+        expect(cpu).to_be_greater_than(verify)
+        expect(request.slice(cpu + 1, request.len()).contains(
+            "processing_ir_cpu_execute(ir)")).to_equal(false)
 
     it "exports a correlated fallback validator and rejects forged provenance":
         val source = file_read(GUEST_BRIDGE)

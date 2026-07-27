@@ -249,8 +249,10 @@ uses the synchronous checked Metal compute owner, performs pointer-based device
 readback through the canonical Metal I/O facade, and returns a positive
 historical resource handle plus stable device metadata identity only after
 exact output recovery. The shared runtime accepts completion only when the
-command reaches `MTLCommandBufferStatus::Completed` with no error. A separate
-CPU oracle remains the daemon's final parity gate.
+command reaches `MTLCommandBufferStatus::Completed` with no error. Production
+requests validate the bounded FillU32 result directly without allocating a
+duplicate CPU output. Evidence runs pass `--processing-verify-cpu` to retain
+the independent CPU-oracle parity gate and timing comparison.
 
 Each row records host OS, guest ISA, QEMU version/arguments, selected QEMU
 accelerator, protocol/backend, device identity, IDs, timing, concurrently
@@ -284,8 +286,9 @@ not the NFR-006 interval. TODO 566 remains open until fresh matching-native-ISA
 execution proves the complete guest-observed interval within the budget. The
 clock owner reports two valid equal microsecond samples as 1 us, keeping zero
 reserved for invalid or backward samples.
-The daemon measures the current FillU32(256, 7) CPU oracle and device executor
-independently with the canonical time facade. Its single-request,
+The evidence daemon measures the current FillU32(256, 7) CPU oracle and device
+executor independently with the canonical time facade when launched with
+`--processing-verify-cpu`. Its single-request,
 post-HELLO-probe, setup-inclusive receipt is correlated by ISA, backend,
 generation, run, and frame. Cached validation recomputes the overflow-safe
 1.5x boundary; positive correct-but-slower evidence remains
