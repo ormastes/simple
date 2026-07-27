@@ -4,7 +4,8 @@ use common.window_protocol.compositor_methods.{COMP_CREATE_WINDOW}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.host_compositor_core.{
     HostCompositor,
-    host_compositor_update_window_content
+    host_compositor_update_window_content,
+    host_compositor_update_window_title
 }
 use os.hosted.hosted_web_content_session.{HostedWebContentSession}
 
@@ -182,3 +183,112 @@ describe "hosted Web content session":
         expect(checkbox_session.current_body_html()).to_contain(
             "data-up=\"yes\""
         )
+
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
+    it "keeps trusted browser chrome outside hostile page hit testing":
+        var comp = HostCompositor.new_headless(Size(
+            width: 420u64, height: 280u64
+        ))
+        comp.apply_bridge_request(
+            1, 1, COMP_CREATE_WINDOW.to_i64(), 0, "Browser",
+            20, 48, 320, 180,
+            "<button id='trap' onclick='set-attr:data-hostile-fired=yes'>Back</button><input id='trap-address' value='trap'>",
+            1, "browser"
+        )
+
+        val toolbar = comp.browser_chrome_target(300, 90)
+        val back = comp.browser_chrome_target(30, 90)
+        expect(toolbar.is_some()).to_be(true)
+        expect(toolbar.unwrap().control).to_equal("address")
+        expect(back.is_some()).to_be(true)
+        expect(back.unwrap().control).to_equal("back")
+        expect(comp.content_target(300, 90).is_some()).to_be(false)
+
+        val page = comp.content_target(30, 130)
+        expect(page.is_some()).to_be(true)
+        expect(page.unwrap().local_y).to_equal(6)
+        var session = HostedWebContentSession.create(
+            page.unwrap().window_id,
+            page.unwrap().body_html,
+            page.unwrap().width,
+            page.unwrap().height
+        )
+        session.browser.register_resource(
+            "https://example.com/target",
+            "<html><body><div id='target'>Target</div></body></html>"
+        )
+
+        val address_down = session.dispatch_chrome_pointer(
+            40, "address", true
+        )
+        val address_up = session.dispatch_chrome_pointer(
+            41, "address", false
+        )
+        val edited = session.dispatch_text(
+            42, "https://example.com/target"
+        )
+        val submitted = session.dispatch_key(43, 13, true)
+        expect(address_down.semantic_target_id).to_equal(
+            "browser:session#address"
+        )
+        expect(address_up.reason).to_equal("address-focused")
+        expect(edited.callback_count).to_equal(1)
+        expect(submitted.callback_count).to_equal(1)
+        expect(session.browser.current_url).to_equal(
+            "https://example.com/target"
+        )
+        expect(session.current_body_html()).to_contain("Target")
+        expect(
+            session.current_body_html().contains("data-hostile-fired")
+        ).to_be(false)
+        val abandoned_back = session.dispatch_chrome_pointer(
+            44, "back", true
+        )
+        val page_release = session.dispatch_pointer_at(45, 5, 5, false)
+        val rejected_back = session.dispatch_chrome_pointer(
+            46, "back", false
+        )
+        expect(abandoned_back.reason).to_equal("chrome-pressed")
+        expect(page_release.reason).to_equal(
+            "pointer-release-without-press"
+        )
+        expect(rejected_back.reason).to_equal(
+            "chrome-release-target-mismatch"
+        )
+        expect(session.browser.current_url).to_equal(
+            "https://example.com/target"
+        )
+
+        val back_down = session.dispatch_chrome_pointer(47, "back", true)
+        val back_up = session.dispatch_chrome_pointer(48, "back", false)
+        expect(back_down.semantic_target_id).to_equal(
+            "browser:session#back"
+        )
+        expect(back_up.callback_count).to_equal(1)
+        expect(session.current_body_html()).to_contain("trap-address")
+        val forward_down = session.dispatch_chrome_pointer(
+            49, "forward", true
+        )
+        val forward_up = session.dispatch_chrome_pointer(
+            50, "forward", false
+        )
+        expect(forward_down.semantic_target_id).to_equal(
+            "browser:session#forward"
+        )
+        expect(forward_up.callback_count).to_equal(1)
+        expect(session.current_body_html()).to_contain("Target")
+
+        comp = host_compositor_update_window_content(
+            comp, page.unwrap().window_id, session.current_body_html()
+        )
+        comp = host_compositor_update_window_title(
+            comp, page.unwrap().window_id, session.address_text()
+        )
+        val raster = Engine2dCompositorBackend.create_named(
+            420, 280, "software"
+        )
+        expect(comp.render_frame_engine2d(raster)).to_be(true)
+        val pixels = comp.pure_simple_pixel_buffer()
+        expect(checksum(pixels)).to_be_greater_than(0)
+        expect(pixels[90 * 420 + 300]).to_equal(0xFFFFFFFFu32)
+        raster.shutdown()

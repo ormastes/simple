@@ -764,3 +764,16 @@ implementation in progress / target evidence blocked
   + rlimits, and no in-host hostile parser/render path. This necessarily
   touches the native runtime/build lane, so it was not started under the
   no-bootstrap constraint.
+- trusted hosted browser chrome: The production WM now paints Back, Forward,
+  Stop, Reload, Home, Favorite, and Address in its own Draw IR/window-chrome
+  batch, reserves a separate page rectangle below it, and routes toolbar
+  coordinates before hostile DOM hit testing. Address text and Enter/Backspace
+  use the existing BrowserSession UI-access actions; matching press/release is
+  required, and favorite mutations persist immediately through the profile
+  owner. Page CSS and script pixels remain a single provenance-checked web
+  frame and cannot overlap the trusted toolbar.
+- evidence: The hosted integration spec now checks exact toolbar/page geometry,
+  hostile-control non-interference, address edit/submit behavior, canonical
+  Engine2D presentation, and a real white address-field pixel. Its mirrored
+  six-scenario manual was refreshed by hand. Runtime evidence remains
+  target-compiler-blocked and was not rerun.

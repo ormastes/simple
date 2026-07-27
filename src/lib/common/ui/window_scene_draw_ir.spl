@@ -65,6 +65,33 @@ val WM_DRAW_IR_DESKTOP_SURFACE: text = "wm-desktop"
 val WM_DRAW_IR_CHROME_SURFACE: text = "wm-chrome"
 val WM_WINDOW_SHADOW_OFFSET_X: i32 = 5
 val WM_WINDOW_SHADOW_OFFSET_Y: i32 = 6
+val WM_BROWSER_TOOLBAR_HEIGHT: i32 = 44
+val WM_BROWSER_CONTROL_SLOT_WIDTH: i32 = 44
+val WM_BROWSER_CONTROL_DRAW_WIDTH: i32 = 40
+val WM_BROWSER_ADDRESS_X: i32 = 268
+
+fn shared_wm_browser_content_extra_height(app_id: text) -> i32:
+    if app_id == "browser": WM_BROWSER_TOOLBAR_HEIGHT else: 0
+
+fn shared_wm_browser_toolbar_control_at(
+    local_x: i32, local_y: i32, width: i32
+) -> text:
+    if local_y < 0 or local_y >= WM_BROWSER_TOOLBAR_HEIGHT or local_x < 4 or local_x >= width - 4:
+        return ""
+    var index = 0
+    while index < 6:
+        val left = 4 + index * WM_BROWSER_CONTROL_SLOT_WIDTH
+        if local_x >= left and local_x < left + WM_BROWSER_CONTROL_SLOT_WIDTH:
+            if index == 0: return "back"
+            if index == 1: return "forward"
+            if index == 2: return "stop"
+            if index == 3: return "reload"
+            if index == 4: return "home"
+            return "favorite"
+        index = index + 1
+    if local_x >= WM_BROWSER_ADDRESS_X:
+        return "address"
+    ""
 
 # --- Aqua titlebar gloss (scout prototype) ------------------------------
 # Classic Aqua titlebars are a vertical gradient (light top -> darker
@@ -318,6 +345,21 @@ class SharedWmPixelBufferBackend:
         self._px_text_fit(window.x + 66, window.y + 6, window.title, theme.text_primary, title_color, if window.width > 92: (window.width - 92) / 8 else: 0)
         self._px_fill_rect(window.x + window.width - 24, window.y + 2, 20, 20, theme.close_button)
         self._px_text_fit(window.x + window.width - 18, window.y + 4, "X", theme.text_primary, theme.close_button, 1)
+        if window.app_id == "browser":
+            val toolbar_y = window.y + 28
+            self._px_fill_rect(window.x + 4, toolbar_y, window.width - 8, WM_BROWSER_TOOLBAR_HEIGHT, theme.host_window_body)
+            val labels = ["<", ">", "X", "R", "H", "*"]
+            var control_index = 0
+            while control_index < labels.len():
+                val control_x = window.x + 4 + control_index * WM_BROWSER_CONTROL_SLOT_WIDTH
+                self._px_fill_rect(control_x, toolbar_y + 4, WM_BROWSER_CONTROL_DRAW_WIDTH, 36, theme.title_unfocused)
+                self._px_text_fit(control_x + 16, toolbar_y + 14, labels[control_index], theme.text_primary, theme.title_unfocused, 1)
+                control_index = control_index + 1
+            val address_x = window.x + WM_BROWSER_ADDRESS_X
+            val address_w = window.width - WM_BROWSER_ADDRESS_X - 4
+            if address_w > 0:
+                self._px_fill_rect(address_x, toolbar_y + 4, address_w, 36, 0xFFFFFFFFu32)
+                self._px_text_fit(address_x + 4, toolbar_y + 14, window.title, 0xFF111111u32, 0xFFFFFFFFu32, if address_w > 8: (address_w - 8) / 8 else: 0)
 
     me _px_render_taskbar_model(taskbar: TaskbarModel, width: i32, height: i32, theme: WmChromeColors, metrics: WmRenderMetrics, clock_label: text):
         val taskbar_h = if metrics.taskbar_height > 0: metrics.taskbar_height else: 56
@@ -950,6 +992,19 @@ fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backen
         commands.push(_wm_draw_ir_text("{window.window_id}-title", 66, 19, 0, 28, window.title, theme.text_primary, window.language))
         commands.push(draw_ir_rect("{window.window_id}-close", window.width - 24, 2, 20, 20, theme.close_button))
         commands.push(_wm_draw_ir_text("{window.window_id}-close-label", window.width - 18, 17, 2, 20, "X", theme.text_primary, "und"))
+    if window.app_id == "browser":
+        commands.push(draw_ir_rect("{window.window_id}-browser-toolbar", 4, 28, window.width - 8, WM_BROWSER_TOOLBAR_HEIGHT, theme.host_window_body))
+        val toolbar_labels = ["<", ">", "X", "R", "H", "*"]
+        var toolbar_index = 0
+        while toolbar_index < toolbar_labels.len():
+            val toolbar_x = 4 + toolbar_index * WM_BROWSER_CONTROL_SLOT_WIDTH
+            commands.push(draw_ir_rect("{window.window_id}-browser-control-{toolbar_index}", toolbar_x, 32, WM_BROWSER_CONTROL_DRAW_WIDTH, 36, theme.title_unfocused))
+            commands.push(_wm_draw_ir_text("{window.window_id}-browser-control-label-{toolbar_index}", toolbar_x + 16, 55, 32, 36, toolbar_labels[toolbar_index], theme.text_primary, "und"))
+            toolbar_index = toolbar_index + 1
+        val address_width = window.width - WM_BROWSER_ADDRESS_X - 4
+        if address_width > 0:
+            commands.push(draw_ir_rect("{window.window_id}-browser-address", WM_BROWSER_ADDRESS_X, 32, address_width, 36, 0xFFFFFFFFu32))
+            commands.push(_wm_draw_ir_text("{window.window_id}-browser-address-label", WM_BROWSER_ADDRESS_X + 4, 55, 32, 36, window.title, 0xFF111111u32, "und"))
     draw_ir_batch_with_source(
         "window-{window.window_id}",
         backend_target,
@@ -1184,6 +1239,21 @@ fn shared_wm_scene_draw_window_chrome(backend: CompositorBackend, window: Shared
     _draw_shared_wm_backend_text_fit(backend, window.x + 66, window.y + 6, window.title, theme.text_primary, title_color, if window.width > 92: (window.width - 92) / 8 else: 0)
     backend.fill_rect(window.x + window.width - 24, window.y + 2, 20, 20, theme.close_button)
     _draw_shared_wm_backend_text_fit(backend, window.x + window.width - 18, window.y + 4, "X", theme.text_primary, theme.close_button, 1)
+    if window.app_id == "browser":
+        val toolbar_y = window.y + 28
+        backend.fill_rect(window.x + 4, toolbar_y, window.width - 8, WM_BROWSER_TOOLBAR_HEIGHT, theme.host_window_body)
+        val labels = ["<", ">", "X", "R", "H", "*"]
+        var control_index = 0
+        while control_index < labels.len():
+            val control_x = window.x + 4 + control_index * WM_BROWSER_CONTROL_SLOT_WIDTH
+            backend.fill_rect(control_x, toolbar_y + 4, WM_BROWSER_CONTROL_DRAW_WIDTH, 36, theme.title_unfocused)
+            _draw_shared_wm_backend_text_fit(backend, control_x + 16, toolbar_y + 14, labels[control_index], theme.text_primary, theme.title_unfocused, 1)
+            control_index = control_index + 1
+        val address_x = window.x + WM_BROWSER_ADDRESS_X
+        val address_w = window.width - WM_BROWSER_ADDRESS_X - 4
+        if address_w > 0:
+            backend.fill_rect(address_x, toolbar_y + 4, address_w, 36, 0xFFFFFFFFu32)
+            _draw_shared_wm_backend_text_fit(backend, address_x + 4, toolbar_y + 14, window.title, 0xFF111111u32, 0xFFFFFFFFu32, if address_w > 8: (address_w - 8) / 8 else: 0)
 
 fn shared_wm_scene_render_taskbar(backend: CompositorBackend, windows: [SharedWmWindow], width: i32, height: i32, theme: WmChromeColors):
     val count = windows.len()
@@ -1451,7 +1521,8 @@ fn shared_wm_scene_window_content_rect_with_titlebar(window: SharedWmWindow, tit
     if window.chrome_kind == WM_CHROME_KIND_BORDERLESS:
         return SharedWmRect(x: window.x, y: window.y, width: window.width, height: window.height)
     val title_h = if titlebar_height > 0: titlebar_height else: 28
-    SharedWmRect(x: window.x + 4, y: window.y + title_h + 4, width: window.width - 8, height: window.height - title_h - 8)
+    val extra_h = shared_wm_browser_content_extra_height(window.app_id)
+    SharedWmRect(x: window.x + 4, y: window.y + title_h + 4 + extra_h, width: window.width - 8, height: window.height - title_h - 8 - extra_h)
 
 # Rich content-frame executor. Unlike the compatibility API below, this path
 # never substitutes canned title-based content for a missing or stale frame.

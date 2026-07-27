@@ -21,7 +21,8 @@ use os.compositor.host_compositor_core.{
     host_compositor_minimize_focused,
     host_compositor_maximize_focused,
     host_compositor_restore_all,
-    host_compositor_update_window_content
+    host_compositor_update_window_content,
+    host_compositor_update_window_title
 }
 use os.compositor.hosted_backend_winit.{HostedWinitBufferBackend, hosted_winit_present_pure_simple_pixels}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
@@ -34,6 +35,7 @@ use os.compositor.shared_mdi_setup.{
     shared_mdi_surface_process_id
 }
 use common.ui.window_scene.{shared_wm_motion_background_next_due_micros, shared_wm_motion_dirty_due, shared_wm_motion_background_consume_due}
+use common.ui.window_scene_draw_ir.{WM_BROWSER_TOOLBAR_HEIGHT}
 use std.nogc_sync_mut.io.window_winit.{winit_event_text}
 use os.hosted.hosted_web_content_session.{HostedWebContentRegistry}
 use os.hosted.hosted_wm_evidence.{
@@ -328,9 +330,15 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
         while web_window_index < comp.windows.len():
             val web_window = comp.windows[web_window_index]
             if not web_window.minimized:
+                val web_content_height = web_window.h - 36 - (
+                    if web_window.app_id == "browser":
+                        WM_BROWSER_TOOLBAR_HEIGHT
+                    else:
+                        0
+                )
                 val changed = web_sessions.advance_window(
                     web_window.id, web_window.content,
-                    web_window.w - 8, web_window.h - 36,
+                    web_window.w - 8, web_content_height,
                     now_micros / 1000,
                     web_window.id == browser_profile_window_id
                 )
@@ -340,6 +348,15 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         web_sessions.body_html(web_window.id)
                     )
                     other_dirty = true
+                if web_window.id == browser_profile_window_id:
+                    val address = web_sessions.address_text(web_window.id)
+                    if address != "":
+                        val previous_title = web_window.title
+                        comp = host_compositor_update_window_title(
+                            comp, web_window.id, address
+                        )
+                        if previous_title != address:
+                            other_dirty = true
             web_window_index = web_window_index + 1
         if comp.web_animation_dirty_due(now_micros):
             other_dirty = true
@@ -407,6 +424,9 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 val button = rt_winit_event_mouse_button(ev)
                 val pressed = rt_winit_event_mouse_pressed(ev) != 0
                 val content_target = comp.content_target(comp.pointer_x, comp.pointer_y)
+                val chrome_target = comp.browser_chrome_target(
+                    comp.pointer_x, comp.pointer_y
+                )
                 # Route all buttons (0=left, 1=middle, 2=right) to the compositor,
                 # not just left. Left keeps its full chrome semantics; middle/right
                 # are recorded on the compositor (last_button/last_button_down) so
@@ -414,7 +434,28 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 # them yet (parity with ui.browser/app.spl's unconditional forward).
                 comp.handle_mouse_button(button, pressed)
                 input_receipt = host_wm_input_record_pointer_button(input_receipt, button, pressed)
-                if button == 0 and content_target != nil:
+                if button == 0 and chrome_target != nil:
+                    val target = chrome_target.unwrap()
+                    semantic_event_id = semantic_event_id + 1
+                    val dispatch = web_sessions.dispatch_chrome_pointer(
+                        semantic_event_id, target.window_id, target.control,
+                        pressed, now_micros / 1000
+                    )
+                    input_receipt = host_wm_input_record_semantic(
+                        input_receipt, dispatch.event_id, dispatch.wm_target_id,
+                        dispatch.semantic_target_id, dispatch.callback_count,
+                        dispatch.mutation_revision, dispatch.reason
+                    )
+                    comp = host_compositor_update_window_content(
+                        comp, target.window_id,
+                        web_sessions.body_html(target.window_id)
+                    )
+                    comp = host_compositor_update_window_title(
+                        comp, target.window_id,
+                        web_sessions.address_text(target.window_id)
+                    )
+                    print "[hosted-wm] semantic event_origin=browser-chrome event_id={dispatch.event_id} wm_target_id={dispatch.wm_target_id} semantic_target_id={dispatch.semantic_target_id} callback_count={dispatch.callback_count} mutation_revision={dispatch.mutation_revision} reason={dispatch.reason}"
+                elif button == 0 and content_target != nil:
                     val target = content_target.unwrap()
                     semantic_event_id = semantic_event_id + 1
                     val dispatch = web_sessions.dispatch_pointer(
@@ -432,7 +473,14 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                             comp, target.window_id,
                             web_sessions.body_html(target.window_id)
                         )
+                    if target.window_id == browser_profile_window_id:
+                        comp = host_compositor_update_window_title(
+                            comp, target.window_id,
+                            web_sessions.address_text(target.window_id)
+                        )
                     print "[hosted-wm] semantic event_origin=screen event_id={dispatch.event_id} wm_target_id={dispatch.wm_target_id} semantic_target_id={dispatch.semantic_target_id} callback_count={dispatch.callback_count} mutation_revision={dispatch.mutation_revision} reason={dispatch.reason}"
+                elif button == 0:
+                    web_sessions.cancel_pointer_state()
                 mouse_button_events = mouse_button_events + 1
                 print "[hosted-wm] event mouse_button count={mouse_button_events} button={button} pressed={pressed}"
                 other_dirty = true
@@ -466,6 +514,11 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         comp = host_compositor_update_window_content(
                             comp, focused,
                             web_sessions.body_html(focused)
+                        )
+                    if focused == browser_profile_window_id:
+                        comp = host_compositor_update_window_title(
+                            comp, focused,
+                            web_sessions.address_text(focused)
                         )
                     print "[hosted-wm] semantic event_origin=screen event_id={dispatch.event_id} wm_target_id={dispatch.wm_target_id} semantic_target_id={dispatch.semantic_target_id} callback_count={dispatch.callback_count} mutation_revision={dispatch.mutation_revision} reason={dispatch.reason}"
                 if pressed_key and keycode == KEY_F11:
@@ -514,6 +567,11 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                             comp = host_compositor_update_window_content(
                                 comp, focused,
                                 web_sessions.body_html(focused)
+                            )
+                        if focused == browser_profile_window_id:
+                            comp = host_compositor_update_window_title(
+                                comp, focused,
+                                web_sessions.address_text(focused)
                             )
                         print "[hosted-wm] semantic event_origin=screen event_id={dispatch.event_id} wm_target_id={dispatch.wm_target_id} semantic_target_id={dispatch.semantic_target_id} callback_count={dispatch.callback_count} mutation_revision={dispatch.mutation_revision} reason={dispatch.reason}"
                     print "[hosted-wm] event text count={text_events} committed={committed_text}"

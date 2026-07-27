@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -68,6 +68,19 @@ expect(unfocused.mutation_revision).to_equal(0)
 - Focus a checkbox and verify Space keydown reuses the canonical click/default
   path while Space keyup reaches its listener.
 
+#### keeps trusted browser chrome outside hostile page hit testing
+
+- The WM-owned toolbar and address field occupy a reserved region above the
+  hostile page frame.
+- A toolbar coordinate resolves only to `browser:session#address`, never to
+  page DOM hit testing.
+- Committed text edits the trusted address draft and Enter submits it through
+  BrowserSession; a hostile page control with the same label remains untouched.
+- Matching trusted Back and Forward press/release pairs traverse the real
+  BrowserSession history without firing the hostile page's `Back` button.
+- The canonical Engine2D frame keeps the address field white at its real screen
+  coordinate, proving page pixels do not overwrite trusted chrome.
+
 ## At a Glance
 
 | Field | Value |
@@ -87,8 +100,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

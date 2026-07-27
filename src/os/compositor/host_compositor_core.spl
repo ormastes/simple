@@ -24,7 +24,9 @@ use common.ui.window_scene_draw_ir.{
     shared_wm_scene_render_taskbar_context_to_pixel_buffer,
     shared_wm_scene_render_desktop_chrome,
     shared_wm_top_content_frame_index,
-    shared_wm_scene_window_content_rect_with_titlebar
+    shared_wm_scene_window_content_rect_with_titlebar,
+    shared_wm_browser_content_extra_height,
+    shared_wm_browser_toolbar_control_at
 }
 use common.ui.taskbar_model.{WindowRef, TrayItem, TaskbarModel}
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
@@ -247,6 +249,10 @@ struct HostedWebContentTarget:
     local_y: i32
     width: i32
     height: i32
+
+struct HostedBrowserChromeTarget:
+    window_id: i64
+    control: text
 
 fn host_taskbar_clock_label(now_micros: i64) -> text:
     """Return a stable UTC HH:MM label from the host wall clock."""
@@ -658,21 +664,42 @@ class HostCompositor:
         var i = 0
         while i < self.windows.len():
             val window = self.windows[i]
-            val content_y = window.y + 28
-            val content_height = window.h - 28
+            val content_x = window.x + 4
+            val content_y = window.y + 32 + shared_wm_browser_content_extra_height(
+                window.app_id
+            )
+            val content_width = window.w - 8
+            val content_height = window.h - 36 - shared_wm_browser_content_extra_height(window.app_id)
             if (
                 not window.minimized and
-                x >= window.x and x < window.x + window.w and
+                x >= content_x and x < content_x + content_width and
                 y >= content_y and y < content_y + content_height
             ):
                 hit = Some(HostedWebContentTarget(
                     window_id: window.id,
                     body_html: window.content,
-                    local_x: x - window.x,
+                    local_x: x - content_x,
                     local_y: y - content_y,
-                    width: window.w,
+                    width: content_width,
                     height: content_height
                 ))
+            i = i + 1
+        hit
+
+    fn browser_chrome_target(x: i32, y: i32) -> HostedBrowserChromeTarget?:
+        var hit: HostedBrowserChromeTarget? = nil
+        var i = 0
+        while i < self.windows.len():
+            val window = self.windows[i]
+            if not window.minimized and window.app_id == "browser":
+                val control = shared_wm_browser_toolbar_control_at(
+                    x - window.x, y - window.y - 28, window.w
+                )
+                if control != "":
+                    hit = Some(HostedBrowserChromeTarget(
+                        window_id: window.id,
+                        control: control
+                    ))
             i = i + 1
         hit
 
@@ -684,6 +711,20 @@ class HostCompositor:
                 if window.content == body_html:
                     return false
                 window.content = body_html
+                self.windows[i] = window
+                self.dirty.add_rect(window.x, window.y, window.w, window.h)
+                return true
+            i = i + 1
+        false
+
+    me update_window_title(window_id: i64, title: text) -> bool:
+        var i = 0
+        while i < self.windows.len():
+            if self.windows[i].id == window_id:
+                var window = self.windows[i]
+                if window.title == title:
+                    return false
+                window.title = title
                 self.windows[i] = window
                 self.dirty.add_rect(window.x, window.y, window.w, window.h)
                 return true
@@ -824,7 +865,7 @@ class HostCompositor:
             val win = self.windows[i]
             if not win.minimized:
                 val cw = win.w - 8
-                val ch = win.h - 36
+                val ch = win.h - 36 - shared_wm_browser_content_extra_height(win.app_id)
                 val scroll = self.scroll_offset_for(win.id) as i32
                 val full_h = content_paint_full_height(ch, scroll)
                 val cache = self._content_cache_for(win.id, cw, full_h, "auto")
@@ -1410,6 +1451,13 @@ fn host_compositor_find_window_index(comp: HostCompositor, window_id: i64) -> i3
 fn host_compositor_update_window_content(comp: HostCompositor, window_id: i64, body_html: text) -> HostCompositor:
     var out = comp
     out.update_window_content(window_id, body_html)
+    out
+
+fn host_compositor_update_window_title(
+    comp: HostCompositor, window_id: i64, title: text
+) -> HostCompositor:
+    var out = comp
+    out.update_window_title(window_id, title)
     out
 
 fn host_window_to_lifecycle_state(win: HostedWindow) -> WmLifecycleWindowState:

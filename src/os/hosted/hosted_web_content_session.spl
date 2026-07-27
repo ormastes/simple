@@ -5,12 +5,14 @@ use std.gc_async_mut.web.browser_session.{
 }
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_ui_access.*
 use std.gc_async_mut.gpu.browser_engine.layout.{hit_test, layout_tree}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_event_identity, be_dom_focused_id
 }
 use std.database.sql.types.{DbError}
 use os.hosted.browser_profile_store.{BrowserProfileStore}
+use common.ui.access.{WinTextActionRequest}
 
 struct HostedWebContentDispatch:
     event_id: i64
@@ -32,11 +34,18 @@ class HostedWebContentSession:
     published_body_html: text
     started_at_ms: i64
     profile_enabled: bool
+    chrome_focus: text
+    pressed_chrome_control: text
+    address_replace_on_text: bool
 
     static fn create(window_id: i64, body_html: text, width: i32, height: i32) -> HostedWebContentSession:
         var browser = BrowserSession.new()
+        val initial_url = if body_html.starts_with("about:"):
+            body_html
+        else:
+            "simple-wm://window/{window_id}"
         val opened = browser.open_html(
-            "simple-wm://window/{window_id}",
+            initial_url,
             "<html><body>{body_html}</body></html>"
         )
         var failure_reason = ""
@@ -53,8 +62,84 @@ class HostedWebContentSession:
             pressed_target_id: "",
             published_body_html: body_html,
             started_at_ms: -1,
-            profile_enabled: false
+            profile_enabled: false,
+            chrome_focus: "",
+            pressed_chrome_control: "",
+            address_replace_on_text: false
         )
+
+    fn address_text() -> text:
+        if self.browser.address_draft != "":
+            return self.browser.address_draft
+        if self.browser.pending_url != "":
+            return self.browser.pending_url
+        self.browser.current_url
+
+    me _chrome_action(
+        event_id: i64, control: text, action: text, value: text
+    ) -> HostedWebContentDispatch:
+        val before_body = self.browser.current_body_html
+        val result = self.browser.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#{control}",
+            action: action,
+            text_value: value,
+            x: 0,
+            y: 0
+        ))
+        if result.ok:
+            if self.browser.current_body_html != before_body:
+                self.published_body_html = self.browser.current_body_html
+            self.mutation_revision = self.mutation_revision + 1
+        HostedWebContentDispatch(
+            event_id: event_id,
+            wm_target_id: self.window_id,
+            semantic_target_id: "browser:session#{control}",
+            callback_count: if result.ok: 1 else: 0,
+            mutation_revision: self.mutation_revision,
+            reason: if result.ok: "" else: result.message
+        )
+
+    me dispatch_chrome_pointer(
+        event_id: i64, control: text, down: bool
+    ) -> HostedWebContentDispatch:
+        self.pressed_target_id = ""
+        if down:
+            self.pressed_chrome_control = control
+            if control == "address":
+                self.chrome_focus = "address"
+                self.address_replace_on_text = true
+            else:
+                self.chrome_focus = ""
+                self.address_replace_on_text = false
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "browser:session#{control}",
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: "chrome-pressed"
+            )
+        val pressed = self.pressed_chrome_control
+        self.pressed_chrome_control = ""
+        if pressed != control:
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "browser:session#{control}",
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: "chrome-release-target-mismatch"
+            )
+        if control == "address":
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "browser:session#address",
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: "address-focused"
+            )
+        self._chrome_action(event_id, control, "click", "")
 
     me advance_at(now_ms: i64) -> bool:
         if self.failure_reason != "" or now_ms < 0:
@@ -70,6 +155,9 @@ class HostedWebContentSession:
         true
 
     me dispatch_pointer_at(event_id: i64, x: i32, y: i32, down: bool) -> HostedWebContentDispatch:
+        self.chrome_focus = ""
+        self.address_replace_on_text = false
+        self.pressed_chrome_control = ""
         if self.failure_reason != "":
             return HostedWebContentDispatch(
                 event_id: event_id,
@@ -148,6 +236,16 @@ class HostedWebContentSession:
         )
 
     me dispatch_text(event_id: i64, value: text) -> HostedWebContentDispatch:
+        if self.chrome_focus == "address":
+            val current = self.address_text()
+            val updated = if self.address_replace_on_text:
+                value
+            else:
+                current + value
+            self.address_replace_on_text = false
+            return self._chrome_action(
+                event_id, "address", "set_value", updated
+            )
         if self.last_target_id == "":
             return HostedWebContentDispatch(
                 event_id: event_id,
@@ -186,6 +284,38 @@ class HostedWebContentSession:
     me dispatch_key(
         event_id: i64, keycode: i64, pressed: bool
     ) -> HostedWebContentDispatch:
+        if self.chrome_focus == "address":
+            if not pressed:
+                return HostedWebContentDispatch(
+                    event_id: event_id,
+                    wm_target_id: self.window_id,
+                    semantic_target_id: "browser:session#address",
+                    callback_count: 0,
+                    mutation_revision: self.mutation_revision,
+                    reason: "key-up"
+                )
+            if keycode == 13:
+                return self._chrome_action(
+                    event_id, "address", "submit", ""
+                )
+            if keycode == 8:
+                val current = self.address_text()
+                val shortened = if current.len() > 0:
+                    current.slice(0, current.len() - 1)
+                else:
+                    ""
+                self.address_replace_on_text = false
+                return self._chrome_action(
+                    event_id, "address", "set_value", shortened
+                )
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "browser:session#address",
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: "key-down"
+            )
         val focused_id = be_dom_focused_id(self.browser.dom_root())
         self.last_target_id = focused_id
         if focused_id == "":
@@ -303,6 +433,19 @@ class HostedWebContentRegistry:
             i = i + 1
         -1
 
+    me _clear_pointer_state_except(retained_index: i32):
+        var i = 0
+        while i < self.sessions.len():
+            if i != retained_index:
+                var session = self.sessions[i]
+                session.pressed_target_id = ""
+                session.pressed_chrome_control = ""
+                self.sessions[i] = session
+            i = i + 1
+
+    me cancel_pointer_state():
+        self._clear_pointer_state_except(-1)
+
     me _ensure(
         window_id: i64, body_html: text, width: i32, height: i32,
         profile_enabled: bool, wall_clock_ms: i64
@@ -401,6 +544,46 @@ class HostedWebContentRegistry:
                 return self.sessions[i].current_body_html()
             i = i + 1
         ""
+
+    fn address_text(window_id: i64) -> text:
+        var i = 0
+        while i < self.sessions.len():
+            if self.sessions[i].window_id == window_id:
+                return self.sessions[i].address_text()
+            i = i + 1
+        ""
+
+    me dispatch_chrome_pointer(
+        event_id: i64, window_id: i64, control: text, down: bool,
+        wall_clock_ms: i64
+    ) -> HostedWebContentDispatch:
+        val index = self._session_index(window_id)
+        if index < 0:
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: window_id,
+                semantic_target_id: "",
+                callback_count: 0,
+                mutation_revision: 0,
+                reason: "no-hosted-web-session"
+            )
+        self._clear_pointer_state_except(index)
+        var session = self.sessions[index]
+        val receipt = session.dispatch_chrome_pointer(
+            event_id, control, down
+        )
+        self.sessions[index] = session
+        if not down and control == "favorite" and receipt.callback_count > 0:
+            if not self._persist_session(index, wall_clock_ms):
+                return HostedWebContentDispatch(
+                    event_id: receipt.event_id,
+                    wm_target_id: receipt.wm_target_id,
+                    semantic_target_id: receipt.semantic_target_id,
+                    callback_count: 0,
+                    mutation_revision: receipt.mutation_revision,
+                    reason: self.profile_failure_reason
+                )
+        receipt
 
     me _persist_session(index: i32, wall_clock_ms: i64) -> bool:
         if index < 0 or index >= self.sessions.len():
