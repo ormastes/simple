@@ -71,6 +71,10 @@ TestHostEnv -> ExistingCapabilityProbes
    Vulkan backend; equality alone cannot promote a correlated CPU fallback.
    The executor-owned receipt also carries completed, width, height, stride,
    and `argb8888` format fields from the same successful composition.
+   Vulkan byte decoding rejects any device download not exactly
+   `width * height * 4`; the fixed 16x16 probe admits exactly 256 pixels.
+   A short read is a retryable cache/readback failure, not evidence that GPU
+   submission completion is unknown.
    The executor also retains the submitted `wm-composite` identity, scene key,
    and positive `wm.content` image count so a sibling composition without Web
    content cannot inherit the frame receipt.

@@ -322,7 +322,7 @@ expect(host_x86_simd_evidence_passes(complete + "\ncpu_simd_evidence_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 55 lines folded for reproduction.
+Runnable source: 59 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -336,10 +336,10 @@ val complete = "vulkan_engine2d_readback_status=pass\n" +
     "vulkan_engine2d_readback_rect_status=pass\n" +
     "vulkan_engine2d_readback_clear_pixels=256\n" +
     "vulkan_engine2d_readback_rect_pixels=256\n" +
-    "vulkan_engine2d_readback_clear_expected_checksum=101\n" +
-    "vulkan_engine2d_readback_clear_actual_checksum=101\n" +
-    "vulkan_engine2d_readback_rect_expected_checksum=202\n" +
-    "vulkan_engine2d_readback_rect_actual_checksum=202\n" +
+    "vulkan_engine2d_readback_clear_expected_checksum=140735349260160\n" +
+    "vulkan_engine2d_readback_clear_actual_checksum=140735349260160\n" +
+    "vulkan_engine2d_readback_rect_expected_checksum=140781974135910\n" +
+    "vulkan_engine2d_readback_rect_actual_checksum=140781974135910\n" +
     "vulkan_engine2d_readback_clear_mismatches=0\n" +
     "vulkan_engine2d_readback_rect_mismatches=0\n" +
     "vulkan_engine2d_readback_clear_source=device_readback\n" +
@@ -360,10 +360,14 @@ expect(host_vulkan_evidence_passes(complete.replace("present_exercised=true", "p
 expect(host_vulkan_evidence_passes(complete.replace("readback_exercised=true", "readback_exercised=false"))).to_be(false)
 expect(host_vulkan_evidence_passes(complete.replace("clear_status=pass", "clear_status=fail"))).to_be(false)
 expect(host_vulkan_evidence_passes(complete.replace("rect_status=pass", "rect_status=fail"))).to_be(false)
-expect(host_vulkan_evidence_passes(complete.replace("clear_pixels=256", "clear_pixels=0"))).to_be(false)
-expect(host_vulkan_evidence_passes(complete.replace("rect_pixels=256", "rect_pixels=0"))).to_be(false)
-expect(host_vulkan_evidence_passes(complete.replace("clear_actual_checksum=101", "clear_actual_checksum=102"))).to_be(false)
-expect(host_vulkan_evidence_passes(complete.replace("rect_actual_checksum=202", "rect_actual_checksum=203"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("clear_pixels=256", "clear_pixels=255"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("clear_pixels=256", "clear_pixels=257"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("rect_pixels=256", "rect_pixels=255"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("rect_pixels=256", "rect_pixels=257"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("clear_actual_checksum=140735349260160", "clear_actual_checksum=140735349260161"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("rect_actual_checksum=140781974135910", "rect_actual_checksum=140781974135911"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("clear_expected_checksum=140735349260160", "clear_expected_checksum=140735349260161").replace("clear_actual_checksum=140735349260160", "clear_actual_checksum=140735349260161"))).to_be(false)
+expect(host_vulkan_evidence_passes(complete.replace("rect_expected_checksum=140781974135910", "rect_expected_checksum=140781974135911").replace("rect_actual_checksum=140781974135910", "rect_actual_checksum=140781974135911"))).to_be(false)
 expect(host_vulkan_evidence_passes(complete.replace("clear_mismatches=0", "clear_mismatches=1"))).to_be(false)
 expect(host_vulkan_evidence_passes(complete.replace("rect_mismatches=0", "rect_mismatches=1"))).to_be(false)
 expect(host_vulkan_evidence_passes(complete.replace("clear_source=device_readback", "clear_source=cpu_mirror"))).to_be(false)

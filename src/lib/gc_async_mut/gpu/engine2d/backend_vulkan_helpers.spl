@@ -148,7 +148,6 @@ impl VulkanBackend:
         and sampled by a compute shader. This fallback is acceptable
         for low-frequency text draws (UI labels, debug overlays).
         """
-        self.mark_cpu_fallback("legacy-text-host-framebuffer-fallback")
         if not self.initialized:
             return
         # Ensure host buffer is current
@@ -156,8 +155,13 @@ impl VulkanBackend:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
             val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)
             vulkan_sffi_wait_idle()
-            self.host_buf = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
+            val refreshed = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
+            if refreshed.len() != self.w * self.h:
+                self._mark_readback_length_failed()
+                return
+            self.host_buf = refreshed
 
+        self.mark_cpu_fallback("legacy-text-host-framebuffer-fallback")
         # Render glyphs into host buffer using shared glyph module
         render_text_to_buffer(self.host_buf, self.w, self.h, x, y, text_val, color, font_size)
 
@@ -369,20 +373,10 @@ fn _pixels_to_bytes(pixels: [u32], count: i64) -> [u8]:
         i = i + 1
     bytes
 
-fn _bytes_to_pixels(bytes: [u8], mut pixels: [u32], count: i32):
-    """Convert a [u8] little-endian byte array back to [u32] pixel array."""
-    var i = 0
-    while i < count:
-        val off = i * 4
-        val b0 = _u8_to_u32(bytes[off])
-        val b1 = _u8_to_u32(bytes[off + 1])
-        val b2 = _u8_to_u32(bytes[off + 2])
-        val b3 = _u8_to_u32(bytes[off + 3])
-        pixels[i] = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-        i = i + 1
-
 fn _bytes_to_pixel_array(bytes: [u8], count: i32) -> [u32]:
     """Convert little-endian bytes into a new [u32] pixel array."""
+    if count <= 0 or bytes.len().to_i64() != _i64(count) * 4:
+        return []
     var pixels: [u32] = [0u32; count]
     var i = 0
     while i < count:

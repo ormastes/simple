@@ -33,6 +33,11 @@ function Value-Or([hashtable]$map, [string]$key, [string]$fallback = "") {
     return $fallback
 }
 
+function Test-PositiveDecimal([string]$value) {
+    [long]$parsed = 0
+    return $value -match '^[0-9]+$' -and [long]::TryParse($value, [ref]$parsed) -and $parsed -gt 0
+}
+
 function Write-Env([string]$status, [string]$reason, [string]$specStatus) {
     $e = Read-KeyValueFile $EvidenceLog
     $rows = @(
@@ -54,11 +59,17 @@ function Write-Env([string]$status, [string]$reason, [string]$specStatus) {
         "vulkan_engine2d_readback_clear_expected_checksum=$(Value-Or $e 'clear_expected_checksum')",
         "vulkan_engine2d_readback_clear_actual_checksum=$(Value-Or $e 'clear_actual_checksum')",
         "vulkan_engine2d_readback_clear_mismatches=$(Value-Or $e 'clear_mismatches')",
+        "vulkan_engine2d_readback_clear_source=$(Value-Or $e 'clear_readback_source')",
+        "vulkan_engine2d_readback_clear_backend_handle=$(Value-Or $e 'clear_backend_handle')",
+        "vulkan_engine2d_readback_clear_device_identity=$(Value-Or $e 'clear_device_identity')",
         "vulkan_engine2d_readback_rect_status=$(Value-Or $e 'rect_status')",
         "vulkan_engine2d_readback_rect_pixels=$(Value-Or $e 'rect_readback_pixels')",
         "vulkan_engine2d_readback_rect_expected_checksum=$(Value-Or $e 'rect_expected_checksum')",
         "vulkan_engine2d_readback_rect_actual_checksum=$(Value-Or $e 'rect_actual_checksum')",
         "vulkan_engine2d_readback_rect_mismatches=$(Value-Or $e 'rect_mismatches')",
+        "vulkan_engine2d_readback_rect_source=$(Value-Or $e 'rect_readback_source')",
+        "vulkan_engine2d_readback_rect_backend_handle=$(Value-Or $e 'rect_backend_handle')",
+        "vulkan_engine2d_readback_rect_device_identity=$(Value-Or $e 'rect_device_identity')",
         "vulkan_engine2d_readback_blur_or_tolerance_used=false",
         "vulkan_engine2d_readback_vulkan_strict_exit_code=$script:StrictCode",
         "vulkan_engine2d_readback_cpu_vulkan_parity_exit_code=$script:ParityCode",
@@ -77,6 +88,7 @@ function Write-Env([string]$status, [string]$reason, [string]$specStatus) {
         "gui_web_2d_vulkan_simple_backend_name=$(Value-Or $e 'backend_name')",
         "gui_web_2d_vulkan_simple_argb_width=16",
         "gui_web_2d_vulkan_simple_argb_height=16",
+        "gui_web_2d_vulkan_simple_argb_pixel_count=$(Value-Or $e 'rect_readback_pixels')",
         "gui_web_2d_vulkan_simple_argb_checksum=$(Value-Or $e 'rect_actual_checksum')"
     )
     $rows | Set-Content -Encoding ASCII -Path $EvidencePath
@@ -190,6 +202,40 @@ if ($evidenceCode -ne 0) {
 $evidence = Read-KeyValueFile $EvidenceLog
 if ((Value-Or $evidence "overall") -ne "pass") {
     Write-Env "fail" "evidence-status-not-pass" "not_run"
+    exit 1
+}
+if ((Value-Or $evidence "backend_name") -ne "vulkan" -or
+    (Value-Or $evidence "present_exercised") -ne "true" -or
+    (Value-Or $evidence "readback_exercised") -ne "true" -or
+    (Value-Or $evidence "clear_status") -ne "pass" -or
+    (Value-Or $evidence "rect_status") -ne "pass" -or
+    (Value-Or $evidence "clear_present_source") -ne "host_cache_after_device_present" -or
+    (Value-Or $evidence "rect_present_source") -ne "host_cache_after_device_present" -or
+    (Value-Or $evidence "clear_mismatches") -ne "0" -or
+    (Value-Or $evidence "rect_mismatches") -ne "0") {
+    Write-Env "fail" "readback-evidence-invalid" "not_run"
+    exit 1
+}
+if ((Value-Or $evidence "clear_readback_pixels") -ne "256" -or
+    (Value-Or $evidence "rect_readback_pixels") -ne "256") {
+    Write-Env "fail" "readback-pixels-not-256" "not_run"
+    exit 1
+}
+if ((Value-Or $evidence "clear_expected_checksum") -ne "140735349260160" -or
+    (Value-Or $evidence "clear_actual_checksum") -ne "140735349260160" -or
+    (Value-Or $evidence "rect_expected_checksum") -ne "140781974135910" -or
+    (Value-Or $evidence "rect_actual_checksum") -ne "140781974135910") {
+    Write-Env "fail" "readback-checksum-not-canonical" "not_run"
+    exit 1
+}
+if ((Value-Or $evidence "clear_readback_source") -ne "device_readback" -or
+    (Value-Or $evidence "rect_readback_source") -ne "device_readback" -or
+    -not (Test-PositiveDecimal (Value-Or $evidence "clear_backend_handle")) -or
+    -not (Test-PositiveDecimal (Value-Or $evidence "rect_backend_handle")) -or
+    -not (Test-PositiveDecimal (Value-Or $evidence "clear_device_identity")) -or
+    -not (Test-PositiveDecimal (Value-Or $evidence "rect_device_identity")) -or
+    (Value-Or $evidence "clear_device_identity") -ne (Value-Or $evidence "rect_device_identity")) {
+    Write-Env "fail" "readback-device-provenance-invalid" "not_run"
     exit 1
 }
 

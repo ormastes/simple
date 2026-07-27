@@ -91,6 +91,8 @@ The input frame must also retain `composition_id=wm-composite` and a positive
 count of executed `wm.content` image commands from the same executor snapshot.
 That snapshot must report completed `1024x720` ARGB8888 readback with stride
 `4096`; the host gate rejects missing or inconsistent receipt geometry.
+The strict Vulkan probe requires 256 pixels and the canonical clear/rectangle
+checksums; empty, short, overlong, or correlated forged checksums fail closed.
 The host aggregate resolves duplicate-safe baseline/input capture bindings and
 requires regular no-follow paths before re-hashing both current PPMs and
 admitting `framebuffer_readback`.

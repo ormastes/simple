@@ -1107,3 +1107,19 @@ Tracking split:
   direct pixel mutations invalidate the checksum, shape, and composition
   receipt before changing the readable framebuffer, the sole test bypass now
   uses the facade, and shutdown invalidates any completed receipt.
+- vulkan-readback-length: The shared decoder previously indexed empty/short
+  device downloads as if they contained `width * height * 4` bytes, and both
+  platform producers sized the clear oracle from the observed result. The
+  decoder now rejects non-exact lengths before allocation/indexing; mutating
+  callers preserve dirty/cache state and record a retryable readback error
+  without marking submitted Vulkan work completion-unknown, while direct
+  reads return an empty `readback_failed` receipt without device identity.
+  Linux and Windows 16x16 producers plus the host classifier require exactly
+  256 pixels, the two deterministic clear/rectangle checksums, direct device
+  provenance, and one shared device identity. Both wrappers independently
+  reject invalid evidence fields; producer PASS also requires the post-present
+  host cache to equal the pre-present device receipt, and Windows relays the
+  validated 256-pixel count expected by its downstream strict gate. Linux
+  shell syntax/self-test passed;
+  PowerShell is unavailable on this host, so no Windows execution PASS is
+  claimed.

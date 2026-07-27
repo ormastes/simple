@@ -32,7 +32,7 @@ backend_vulkan_drawing_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 30 | 30 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -310,6 +310,118 @@ expect(s.rect_count).to_equal(0)
 
 ### Vulkan 2D drawing lane — VulkanBackend raster
 
+#### exact framebuffer byte decoding
+
+#### rejects empty, short, and overlong device buffers before indexing
+
+- Decode only one exact little-endian ARGB pixel
+   - Expected: empty, short, and overlong buffers are rejected
+   - Expected: four exact little-endian bytes decode to `0x11223344`
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Decode only one exact little-endian ARGB pixel")
+expect(_bytes_to_pixel_array([], 0)).to_equal([])
+expect(_bytes_to_pixel_array([], 1)).to_equal([])
+expect(_bytes_to_pixel_array([0x44u8, 0x33u8, 0x22u8], 1)).to_equal([])
+expect(_bytes_to_pixel_array([0x44u8, 0x33u8, 0x22u8, 0x11u8, 0x00u8], 1)).to_equal([])
+expect(_bytes_to_pixel_array([0x44u8, 0x33u8, 0x22u8, 0x11u8], 1)).to_equal([0x11223344u32])
+```
+
+</details>
+
+#### preserves the host cache and dirty state after a failed present readback
+
+- Present a dirty one-pixel framebuffer through an invalid device handle
+   - Expected: completion remains known and the byte-count error is retained
+   - Expected: dirty state and cached host pixels remain intact
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var b = VulkanBackend.create()
+b.w = 1
+b.h = 1
+b.d_framebuffer = 999999
+b.dirty = true
+b.host_buf = [0x11223344u32]
+b.present()
+expect(b.completion_unknown).to_equal(false)
+expect(b.last_error).to_equal("Vulkan framebuffer readback byte count mismatch")
+expect(b.dirty).to_equal(true)
+expect(b.host_buf).to_equal([0x11223344u32])
+```
+
+</details>
+
+#### preserves the host cache and dirty state after a failed image fallback readback
+
+- Draw an image through an invalid one-pixel device framebuffer
+   - Expected: completion remains known and the byte-count error is retained
+   - Expected: dirty state and cached host pixels remain intact
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 12 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var b = VulkanBackend.create()
+b.w = 1
+b.h = 1
+b.d_framebuffer = 999999
+b.dirty = true
+b.host_buf = [0x11223344u32]
+b.draw_image(0, 0, 1, 1, [0xFFFFFFFFu32])
+expect(b.completion_unknown).to_equal(false)
+expect(b.cpu_fallback_used).to_equal(false)
+expect(b.last_error).to_equal("Vulkan framebuffer readback byte count mismatch")
+expect(b.dirty).to_equal(true)
+expect(b.host_buf).to_equal([0x11223344u32])
+```
+
+</details>
+
+#### returns no device receipt after a failed dirty readback
+
+- Read a dirty one-pixel framebuffer through an invalid device handle
+   - Expected: the result is `readback_failed` with no pixels or device identity
+   - Expected: dirty state and cached host pixels remain intact
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var b = VulkanBackend.create()
+b.w = 1
+b.h = 1
+b.d_framebuffer = 999999
+b.dirty = true
+b.host_buf = [0x11223344u32]
+val readback = b.read_pixels_with_source()
+expect(readback.source).to_equal("readback_failed")
+expect(readback.pixels).to_equal([])
+expect(readback.backend_handle).to_equal(0)
+expect(readback.device_identity).to_equal(0)
+expect(b.dirty).to_equal(true)
+expect(b.host_buf).to_equal([0x11223344u32])
+```
+
+</details>
+
 #### 2D primitive rendering with lavapipe or real device
 
 #### Scaled IMAGE clipping keeps device provenance and CPU-oracle pixels
@@ -536,6 +648,87 @@ else:
 
 ### Vulkan 2D drawing lane — error path hardening
 
+#### completion-unknown quarantine
+
+#### preserves failed-idle state and makes successful release idempotent
+
+- Preserve all quarantined handles when device idle fails
+- Release the dependency only after successful device idle
+   - Expected: repeated successful release remains empty
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val retained = VulkanSffiDependencyQuarantine(descriptor: 11, buffer: 12, pipeline: 13, shader: 14)
+val failed_idle = vulkan_sffi_dependency_after_release(retained, false, true, true, true, true)
+expect(failed_idle.descriptor).to_equal(11)
+expect(failed_idle.buffer).to_equal(12)
+val released = vulkan_sffi_dependency_after_release(retained, true, true, true, true, true)
+expect(vulkan_sffi_dependency_quarantine_empty(released)).to_equal(true)
+val released_again = vulkan_sffi_dependency_after_release(released, true, true, true, true, true)
+expect(vulkan_sffi_dependency_quarantine_empty(released_again)).to_equal(true)
+```
+
+</details>
+
+#### deduplicates already-owned typed handles
+
+- Remove dependency handles that are already owned by another quarantine
+   - Expected: the duplicate dependency becomes empty
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val retained = VulkanSffiDependencyQuarantine(descriptor: 21, buffer: 22, pipeline: 23, shader: 24)
+val duplicate = vulkan_sffi_dependency_without_duplicates(retained, [retained])
+expect(vulkan_sffi_dependency_quarantine_empty(duplicate)).to_equal(true)
+```
+
+</details>
+
+#### freezes public drawing state until owner recovery
+
+- Freeze clear, rectangle, image, blend, present, and readback while completion is unknown
+   - Expected: dirty state, host cache, and clip state remain unchanged
+   - Expected: readback reports `completion_unknown` without pixels or a backend handle
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var b = VulkanBackend.create()
+b.initialized = true
+b.completion_unknown = true
+b.dirty = true
+b.host_buf = [0x11223344u32]
+b.clip_x = 7
+b.clear(0xFFFFFFFFu32)
+b.draw_rect(0, 0, 1, 1, 0xFFFFFFFFu32)
+b.draw_image(0, 0, 1, 1, [0xFFFFFFFFu32])
+expect(b.draw_image_blend_checked(0, 0, 1, 1, [0xFFFFFFFFu32], 1000)).to_equal(false)
+b.present()
+val readback = b.read_pixels_with_source()
+expect(b.dirty).to_equal(true)
+expect(b.host_buf).to_equal([0x11223344u32])
+expect(b.clip_x).to_equal(7)
+expect(readback.source).to_equal("completion_unknown")
+expect(readback.pixels.len()).to_equal(0)
+expect(readback.backend_handle).to_equal(0)
+```
+
+</details>
+
 #### structured error on missing device
 
 #### init on host with no Vulkan sets classifiable last_error
@@ -639,7 +832,7 @@ else:
 | Category | Standard Library |
 | Status | Active; candidate run exited 139, no scaled-image PASS |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_vulkan_drawing_spec.spl` |
-| Updated | 2026-07-14 (manual) |
+| Updated | 2026-07-27 (manual) |
 | Generator | Manual SPipe refresh; rerun `simple spipe-docgen` after TODO 548 |
 
 ## Overview
@@ -654,8 +847,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 30 |
+| Active scenarios | 30 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

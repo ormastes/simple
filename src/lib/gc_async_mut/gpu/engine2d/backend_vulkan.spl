@@ -25,7 +25,7 @@ use std.gpu.engine2d.helpers_text.{text_blit_buffer}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{
     _pack_clear_pc, _pack_rect_pc, _pack_circle_pc,
     _pack_triangle_pc, _pack_gradient_pc, _pack_image_composite_pc,
-    _pixels_to_bytes, _bytes_to_pixels, _bytes_to_pixel_array, _i64, _i32_to_u32, _u32_to_u8,
+    _pixels_to_bytes, _bytes_to_pixel_array, _i64, _i32_to_u32, _u32_to_u8,
     _u8_to_u32, _bool_to_i32, vulkan_dispatch_framebuffer_compute_checked,
     vulkan_dispatch_image_composite_checked,
     VK_DISPATCH_COMPLETED_INELIGIBLE,
@@ -386,6 +386,9 @@ impl RenderBackend for VulkanBackend:
     me mark_completion_unknown():
         self.completion_unknown = true
 
+    me _mark_readback_length_failed():
+        self.last_error = "Vulkan framebuffer readback byte count mismatch"
+
     me shutdown():
         if self.completion_unknown:
             if not vulkan_sffi_recover_dependency_quarantine():
@@ -671,13 +674,17 @@ impl RenderBackend for VulkanBackend:
             self.mark_cpu_fallback("image-copy-completion-unknown")
             self.completion_unknown = true
             return
-        self.mark_cpu_fallback("image-copy-host-fallback")
         if self.dirty:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
             val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)
             vulkan_sffi_wait_idle()
-            self.host_buf = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
+            val refreshed = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
+            if refreshed.len() != self.w * self.h:
+                self._mark_readback_length_failed()
+                return
+            self.host_buf = refreshed
 
+        self.mark_cpu_fallback("image-copy-host-fallback")
         val clip_end_x = self.clip_x + self.clip_w
         val clip_end_y = self.clip_y + self.clip_h
         val mask_active = self.mask_buf.len() > 0
@@ -735,7 +742,11 @@ impl RenderBackend for VulkanBackend:
             val fb_size = _i64(self.w) * _i64(self.h) * 4
             val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)
             vulkan_sffi_wait_idle()
-            self.host_buf = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
+            val refreshed = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
+            if refreshed.len() != self.w * self.h:
+                self._mark_readback_length_failed()
+                return
+            self.host_buf = refreshed
             self.dirty = false
 
     me read_pixels() -> [u32]:
@@ -751,6 +762,8 @@ impl RenderBackend for VulkanBackend:
             val fb_bytes = vulkan_sffi_read_buffer_bytes(self.d_framebuffer, fb_size, 0)
             vulkan_sffi_wait_idle()
             val pixels = _bytes_to_pixel_array(fb_bytes, self.w * self.h)
+            if pixels.len() != self.w * self.h:
+                return engine2d_readback([], "readback_failed")
             if self.cpu_fallback_used:
                 return engine2d_readback(pixels, "cpu_fallback")
             return engine2d_readback_with_identity(

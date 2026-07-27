@@ -86,17 +86,20 @@ pass_failure_reason() {
     [ "$(value_of backend_name)" = "vulkan" ] || { echo "backend-not-vulkan"; return; }
     for op in clear rect; do
         [ "$(value_of "${op}_status")" = "pass" ] || { echo "${op}-not-pass"; return; }
+        if [ "$op" = clear ]; then canonical_checksum=140735349260160; else canonical_checksum=140781974135910; fi
         expected="$(value_of "${op}_expected_checksum")"
         actual="$(value_of "${op}_actual_checksum")"
         mismatches="$(value_of "${op}_mismatches")"
-        is_positive_decimal "$(value_of "${op}_readback_pixels")" || { echo "${op}-pixels-missing"; return; }
+        [ "$(value_of "${op}_readback_pixels")" = "256" ] || { echo "${op}-pixels-not-256"; return; }
         is_unsigned_decimal "$expected" && is_unsigned_decimal "$actual" || { echo "${op}-checksum-missing"; return; }
+        [ "$expected" = "$canonical_checksum" ] && [ "$actual" = "$canonical_checksum" ] || { echo "${op}-checksum-not-canonical"; return; }
         [ "$expected" = "$actual" ] || { echo "${op}-checksum-mismatch"; return; }
         [ "$mismatches" = "0" ] || { echo "${op}-mismatch-count"; return; }
         [ "$(value_of "${op}_readback_source")" = "device_readback" ] || { echo "${op}-not-device-readback"; return; }
         is_positive_decimal "$(value_of "${op}_backend_handle")" || { echo "${op}-backend-handle-missing"; return; }
         is_positive_decimal "$(value_of "${op}_device_identity")" || { echo "${op}-device-identity-missing"; return; }
     done
+    [ "$(value_of clear_device_identity)" = "$(value_of rect_device_identity)" ] || { echo "device-identity-mismatch"; return; }
 }
 
 write_report() {
@@ -211,13 +214,13 @@ backend_name=vulkan
 readback_exercised=true
 clear_status=pass
 clear_readback_pixels=256
-clear_expected_checksum=0
-clear_actual_checksum=0
+clear_expected_checksum=140735349260160
+clear_actual_checksum=140735349260160
 clear_mismatches=0
 rect_status=pass
 rect_readback_pixels=256
-rect_expected_checksum=1
-rect_actual_checksum=1
+rect_expected_checksum=140781974135910
+rect_actual_checksum=140781974135910
 rect_mismatches=0
 EOF
     write_report pass pass pass
@@ -233,13 +236,13 @@ present_exercised=true
 backend_name=vulkan
 clear_status=pass
 clear_readback_pixels=256
-clear_expected_checksum=0
-clear_actual_checksum=0
+clear_expected_checksum=140735349260160
+clear_actual_checksum=140735349260160
 clear_mismatches=0
 rect_status=pass
 rect_readback_pixels=256
-rect_expected_checksum=1
-rect_actual_checksum=1
+rect_expected_checksum=140781974135910
+rect_actual_checksum=140781974135910
 rect_mismatches=0
 EOF
     write_report pass pass pass
@@ -256,13 +259,13 @@ readback_exercised=true
 backend_name=vulkan
 clear_status=pass
 clear_readback_pixels=256
-clear_expected_checksum=0
-clear_actual_checksum=0
+clear_expected_checksum=140735349260160
+clear_actual_checksum=140735349260160
 clear_mismatches=0
 rect_status=pass
 rect_readback_pixels=256
-rect_expected_checksum=1
-rect_actual_checksum=2
+rect_expected_checksum=140781974135910
+rect_actual_checksum=140781974135911
 rect_mismatches=0
 clear_readback_source=device_readback
 clear_backend_handle=1
@@ -273,7 +276,7 @@ rect_device_identity=1
 EOF
     write_report pass pass pass
     if ! grep -q '^vulkan_engine2d_readback_status=fail$' "$ENV_PATH" \
-        || ! grep -q '^vulkan_engine2d_readback_reason=rect-checksum-mismatch$' "$ENV_PATH"; then
+        || ! grep -q '^vulkan_engine2d_readback_reason=rect-checksum-not-canonical$' "$ENV_PATH"; then
         echo "self_test_status=fail"
         echo "self_test_reason=checksum-mismatch-accepted"
         exit 1
@@ -285,13 +288,13 @@ readback_exercised=true
 backend_name=vulkan
 clear_status=pass
 clear_readback_pixels=256
-clear_expected_checksum=0
-clear_actual_checksum=0
+clear_expected_checksum=140735349260160
+clear_actual_checksum=140735349260160
 clear_mismatches=0
 rect_status=pass
 rect_readback_pixels=256
-rect_expected_checksum=1
-rect_actual_checksum=1
+rect_expected_checksum=140781974135910
+rect_actual_checksum=140781974135910
 rect_mismatches=0
 clear_readback_source=cpu_fallback
 clear_backend_handle=1
@@ -314,13 +317,13 @@ readback_exercised=true
 backend_name=vulkan
 clear_status=pass
 clear_readback_pixels=256
-clear_expected_checksum=0
-clear_actual_checksum=0
+clear_expected_checksum=140735349260160
+clear_actual_checksum=140735349260160
 clear_mismatches=0
 rect_status=pass
 rect_readback_pixels=256
-rect_expected_checksum=1
-rect_actual_checksum=1
+rect_expected_checksum=140781974135910
+rect_actual_checksum=140781974135910
 rect_mismatches=0
 clear_readback_source=device_readback
 clear_backend_handle=1
@@ -333,6 +336,28 @@ EOF
     if ! grep -q '^vulkan_engine2d_readback_status=pass$' "$ENV_PATH"; then
         echo "self_test_status=fail"
         echo "self_test_reason=valid-readback-rejected"
+        exit 1
+    fi
+
+    sed 's/^rect_device_identity=1$/rect_device_identity=2/' "$EVIDENCE_LOG" >"$EVIDENCE_LOG.mutated"
+    mv "$EVIDENCE_LOG.mutated" "$EVIDENCE_LOG"
+    write_report pass pass pass
+    if ! grep -q '^vulkan_engine2d_readback_status=fail$' "$ENV_PATH" \
+        || ! grep -q '^vulkan_engine2d_readback_reason=device-identity-mismatch$' "$ENV_PATH"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=device-identity-mismatch-accepted"
+        exit 1
+    fi
+    sed 's/^rect_device_identity=2$/rect_device_identity=1/' "$EVIDENCE_LOG" >"$EVIDENCE_LOG.mutated"
+    mv "$EVIDENCE_LOG.mutated" "$EVIDENCE_LOG"
+
+    sed 's/^clear_readback_pixels=256$/clear_readback_pixels=255/' "$EVIDENCE_LOG" >"$EVIDENCE_LOG.mutated"
+    mv "$EVIDENCE_LOG.mutated" "$EVIDENCE_LOG"
+    write_report pass pass pass
+    if ! grep -q '^vulkan_engine2d_readback_status=fail$' "$ENV_PATH" \
+        || ! grep -q '^vulkan_engine2d_readback_reason=clear-pixels-not-256$' "$ENV_PATH"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=short-readback-accepted"
         exit 1
     fi
 
@@ -488,12 +513,22 @@ fn main() -> i64:
     engine.clear(bg)
     val clear_readback = engine.read_pixels_with_source()
     engine.present()
+    val clear_present_readback = engine.read_pixels_with_source()
     val clear_pixels = clear_readback.pixels
-    val clear_expected_pixels = expected_clear_pixels(clear_pixels.len(), bg)
+    print("clear_readback_pixels=" + clear_pixels.len().to_text())
+    if clear_pixels.len() != 256:
+        engine.shutdown()
+        print("present_exercised=true")
+        print("readback_exercised=true")
+        print("clear_status=fail")
+        print("rect_status=not_run")
+        print("evidence_status=fail")
+        print("overall=fail")
+        return 1
+    val clear_expected_pixels = expected_clear_pixels(256, bg)
     val clear_expected_written = write_u32_pixels(CLEAR_EXPECTED_PIXELS_PATH, "vulkan-clear-expected", clear_expected_pixels)
     val clear_actual_written = write_u32_pixels(CLEAR_ACTUAL_PIXELS_PATH, "vulkan-clear-readback", clear_pixels)
-    print("clear_readback_pixels=" + clear_pixels.len().to_text())
-    print("clear_expected_checksum=" + checksum_expected_clear(clear_pixels.len(), bg).to_text())
+    print("clear_expected_checksum=" + checksum_expected_clear(256, bg).to_text())
     print("clear_actual_checksum=" + checksum_pixels(clear_pixels).to_text())
     print("clear_expected_pixels_path=" + CLEAR_EXPECTED_PIXELS_PATH)
     print("clear_actual_pixels_path=" + CLEAR_ACTUAL_PIXELS_PATH)
@@ -509,7 +544,8 @@ fn main() -> i64:
     print("clear_readback_source=" + clear_readback.source)
     print("clear_backend_handle=" + clear_readback.backend_handle.to_text())
     print("clear_device_identity=" + clear_readback.device_identity.to_text())
-    if clear_mismatches != 0 or not clear_expected_written or not clear_actual_written:
+    print("clear_present_source=" + clear_present_readback.source)
+    if clear_mismatches != 0 or not clear_expected_written or not clear_actual_written or clear_readback.source != "device_readback" or clear_readback.backend_handle <= 0 or clear_readback.device_identity <= 0 or clear_present_readback.source != "host_cache_after_device_present" or clear_present_readback.pixels != clear_pixels:
         engine.shutdown()
         print("present_exercised=true")
         print("readback_exercised=true")
@@ -523,18 +559,29 @@ fn main() -> i64:
     engine.draw_rect_filled(2, 2, 6, 6, fg)
     val rect_readback = engine.read_pixels_with_source()
     engine.present()
+    val rect_present_readback = engine.read_pixels_with_source()
     val rect_pixels = rect_readback.pixels
+    print("rect_readback_pixels=" + rect_pixels.len().to_text())
+    if rect_pixels.len() != 256:
+        engine.shutdown()
+        print("present_exercised=true")
+        print("readback_exercised=true")
+        print("clear_status=pass")
+        print("rect_status=fail")
+        print("evidence_status=fail")
+        print("overall=fail")
+        return 1
     val rect_expected_pixels = expected_rect_pixels(bg, fg)
     val rect_expected_written = write_u32_pixels(RECT_EXPECTED_PIXELS_PATH, "vulkan-rect-expected", rect_expected_pixels)
     val rect_actual_written = write_u32_pixels(RECT_ACTUAL_PIXELS_PATH, "vulkan-rect-readback", rect_pixels)
     val rect_mismatches = count_rect_mismatches(rect_pixels, bg, fg)
-    print("rect_readback_pixels=" + rect_pixels.len().to_text())
     print("rect_expected_checksum=" + checksum_expected_rect(bg, fg).to_text())
     print("rect_actual_checksum=" + checksum_pixels(rect_pixels).to_text())
     print("rect_mismatches=" + rect_mismatches.to_text())
     print("rect_readback_source=" + rect_readback.source)
     print("rect_backend_handle=" + rect_readback.backend_handle.to_text())
     print("rect_device_identity=" + rect_readback.device_identity.to_text())
+    print("rect_present_source=" + rect_present_readback.source)
     print("rect_expected_pixels_path=" + RECT_EXPECTED_PIXELS_PATH)
     print("rect_actual_pixels_path=" + RECT_ACTUAL_PIXELS_PATH)
     print("rect_expected_pixels_written=" + rect_expected_written.to_text())
@@ -544,7 +591,7 @@ fn main() -> i64:
     print("present_exercised=true")
     print("readback_exercised=true")
     print("clear_status=pass")
-    if rect_mismatches != 0 or not rect_expected_written or not rect_actual_written:
+    if rect_mismatches != 0 or not rect_expected_written or not rect_actual_written or rect_readback.source != "device_readback" or rect_readback.backend_handle <= 0 or rect_readback.device_identity <= 0 or rect_readback.device_identity != clear_readback.device_identity or rect_present_readback.source != "host_cache_after_device_present" or rect_present_readback.pixels != rect_pixels:
         print("rect_status=fail")
         print("evidence_status=fail")
         print("overall=fail")

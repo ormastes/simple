@@ -20,6 +20,7 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan_session.{
     VulkanShaderMode, VulkanSessionBackend
 }
 use std.gc_async_mut.gpu.engine2d.backend_vulkan_spirv.{vulkan_spirv_probe}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_helpers.{_bytes_to_pixel_array}
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     VulkanSffiDependencyQuarantine, vulkan_sffi_is_available,
     vulkan_sffi_dependency_quarantine_empty,
@@ -120,6 +121,59 @@ describe "Vulkan 2D drawing lane — VulkanSessionBackend lifecycle":
             expect(s.rect_count).to_equal(0)
 
 describe "Vulkan 2D drawing lane — VulkanBackend raster":
+
+    context "exact framebuffer byte decoding":
+
+        # @req REQ-004 REQ-006
+        it "rejects empty, short, and overlong device buffers before indexing":
+            step("Decode only one exact little-endian ARGB pixel")
+            expect(_bytes_to_pixel_array([], 0)).to_equal([])
+            expect(_bytes_to_pixel_array([], 1)).to_equal([])
+            expect(_bytes_to_pixel_array([0x44u8, 0x33u8, 0x22u8], 1)).to_equal([])
+            expect(_bytes_to_pixel_array([0x44u8, 0x33u8, 0x22u8, 0x11u8, 0x00u8], 1)).to_equal([])
+            expect(_bytes_to_pixel_array([0x44u8, 0x33u8, 0x22u8, 0x11u8], 1)).to_equal([0x11223344u32])
+
+        it "preserves the host cache and dirty state after a failed present readback":
+            var b = VulkanBackend.create()
+            b.w = 1
+            b.h = 1
+            b.d_framebuffer = 999999
+            b.dirty = true
+            b.host_buf = [0x11223344u32]
+            b.present()
+            expect(b.completion_unknown).to_equal(false)
+            expect(b.last_error).to_equal("Vulkan framebuffer readback byte count mismatch")
+            expect(b.dirty).to_equal(true)
+            expect(b.host_buf).to_equal([0x11223344u32])
+
+        it "preserves the host cache and dirty state after a failed image fallback readback":
+            var b = VulkanBackend.create()
+            b.w = 1
+            b.h = 1
+            b.d_framebuffer = 999999
+            b.dirty = true
+            b.host_buf = [0x11223344u32]
+            b.draw_image(0, 0, 1, 1, [0xFFFFFFFFu32])
+            expect(b.completion_unknown).to_equal(false)
+            expect(b.cpu_fallback_used).to_equal(false)
+            expect(b.last_error).to_equal("Vulkan framebuffer readback byte count mismatch")
+            expect(b.dirty).to_equal(true)
+            expect(b.host_buf).to_equal([0x11223344u32])
+
+        it "returns no device receipt after a failed dirty readback":
+            var b = VulkanBackend.create()
+            b.w = 1
+            b.h = 1
+            b.d_framebuffer = 999999
+            b.dirty = true
+            b.host_buf = [0x11223344u32]
+            val readback = b.read_pixels_with_source()
+            expect(readback.source).to_equal("readback_failed")
+            expect(readback.pixels).to_equal([])
+            expect(readback.backend_handle).to_equal(0)
+            expect(readback.device_identity).to_equal(0)
+            expect(b.dirty).to_equal(true)
+            expect(b.host_buf).to_equal([0x11223344u32])
 
     context "2D primitive rendering with lavapipe or real device":
 
