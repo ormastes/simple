@@ -12,15 +12,27 @@ peer reports.
 
 ### Verified current state
 
-- GitHub `main` contains four focused, semantics-preserving parser repairs in
-  `draw_ir_adv.spl`: grouped multiline gradient comparison and three intact
-  multiline count assignments. The fourth split assignment near line 1064
-  (`result.cpu_composited_material_count`) was independently repaired by
-  `fcfa6be98e`.
-- The focused current-source font producer was not rerun after the fourth repair
-  because the mandatory three-cycle cap was already exhausted. Therefore it has
-  **not compiled in the bounded checkpoint**, no runtime probe ran, and no
-  Vulkan render/readback/font/300-DPI evidence was produced.
+- Source parser, runtime-owned ordered-event correlation, and 300-DPI receipt
+  hardening are done and integrated. These source/contract results are not a
+  Vulkan live PASS.
+- Two bounded current-source native diagnostics ran without bootstrapping.
+  Cycle 1 compiled 185 modules with zero compile failures in approximately
+  9.9 seconds, but its standard output was empty. Cycle 2 compiled 184 modules
+  in 10.2 seconds; its entry and receipt sentinels succeeded and it selected
+  the exact Bungee face at 100 px.
+- Cycle 2 could not produce trustworthy producer-state evidence: layout,
+  raster, local, inbound, staged, stage-return, and alpha scalar checkpoints
+  serialized as empty, while `post_engine_fonts` and
+  `post_install_retrieve` reported the nil sentinel
+  `2305843009213693951` (`0x1fffffffffffffff`).
+- The zero-quad cause therefore remains unproven. The leading suspected seam is
+  `local quads -> FontRenderBatch.quads -> _stage_batch`, but a layout or
+  raster failure remains possible. Native scalar diagnostic corruption is the
+  active blocker; no renderer fix or live evidence resulted.
+- The diagnostic path
+  `/private/tmp/simple-font-zero-quads-evidence-448d2a5` is ephemeral. This
+  tracked summary records the observations without claiming retained artifact
+  provenance.
 - A retained pure-Simple Stage3 artifact can diagnose source, but its provenance
   is bound to an older revision. It cannot authenticate the current `main`.
   A canonical bootstrap may be run later only if essential or required by the
@@ -41,38 +53,43 @@ peer reports.
 
 ### Ordered remaining tasks
 
-1. In a fresh session, run the focused current-source font producer once with
-   all four parser repairs present and require a clean compile before any
-   bootstrap or live launch.
-2. After that focused PASS, produce one canonical, manifest-attested
+1. Establish one typed scalar checkpoint through a trustworthy mechanism that
+   cannot serialize a present scalar as empty or confuse it with the nil
+   sentinel. Use that checkpoint to distinguish layout/raster production from
+   the `local quads -> FontRenderBatch.quads -> _stage_batch` transfer seam.
+2. Run one focused current-source producer check and require exact Bungee at
+   100 px, positive quads, consistent atlas/alpha state, and non-nil renderer
+   retrieval.
+3. After that focused producer PASS, produce one canonical, manifest-attested
    pure-Simple Stage3 only if required by the production builder. Do not use
    the Rust seed as normal tooling and do not synthesize or reuse stale
    provenance.
-3. Build and run the manifest-bound Vulkan 2D gate. Require MoltenVK identity,
+4. Build and run the manifest-bound Vulkan 2D gate. Require MoltenVK identity,
    positive backend/device handles, same-frame device readback, semantic
    pixels, durable capture, canonical `FontRenderer` vector text at 300 DPI,
    cold/warm font-cache receipts, and ordered focus/pointer/key/text events.
-4. Validate the accepted runtime-owned key/text origin correlation from
+5. Validate the accepted runtime-owned key/text origin correlation from
    `d00e71c11d` in the live gate and prove ordered delivery without a synthetic
    shortcut.
-5. Run Vulkan web, then Vulkan widget GUI, then host-WM live gates. Each must
+6. Run Vulkan web, then Vulkan widget GUI, then host-WM live gates. Each must
    preserve Draw IR ownership, use real device output, and retain capture and
    event receipts; GUI must repeat the vector-font proof at 300 DPI.
-6. Only after all Vulkan host lanes pass, run like-for-like Metal
+7. Only after all Vulkan host lanes pass, run like-for-like Metal
    2D/web/GUI/host-WM gates and require pixel/event/font parity without a CPU
    mirror.
-7. Only after host-WM passes, run x86 QEMU SimpleOS 2D/SIMD, ARM QEMU
+8. Only after host-WM passes, run x86 QEMU SimpleOS 2D/SIMD, ARM QEMU
    SimpleOS 2D/SIMD, and QEMU WM. Retain canonical artifact hashes, guest
    framebuffer dimensions/bounds, input receipts, runtime SIMD receipts, and
    captures. Correct any unsupported PASS documentation before acceptance.
-8. Run the scoped verification/audit gates once, obtain `STATUS: PASS`, then
+9. Run the scoped verification/audit gates once, obtain `STATUS: PASS`, then
    linearly sync and push the isolated verified changes.
 
 ### Agent lanes and acceptance ownership
 
 | Lane | Sidecar task | Merge owner | Final reviewer |
 |---|---|---|---|
-| Focused Draw IR/font producer | Run one bounded compile with all four parser repairs and report the result | Primary rendering agent | Highest-capability primary reviewer |
+| Typed scalar diagnostic | Establish a trustworthy typed checkpoint and localize producer vs staging failure | Primary rendering agent | Highest-capability primary reviewer |
+| Focused Draw IR/font producer | After typed diagnostics are trustworthy, prove positive quads and non-nil renderer state | Primary rendering agent | Highest-capability primary reviewer |
 | Vulkan 2D + ordered events | Produce manifest-bound live render/readback/font/event evidence | Primary rendering agent | Highest-capability primary reviewer |
 | Vulkan web/GUI/host-WM | Run sequentially after Vulkan 2D PASS; parallel source-only preparation is allowed | Primary rendering agent | Highest-capability primary reviewer |
 | Metal parity | Prepare source/contracts only until Vulkan host PASS, then run parity gates | Existing local comparison agent; primary integrates only committed isolated work | Highest-capability primary reviewer |

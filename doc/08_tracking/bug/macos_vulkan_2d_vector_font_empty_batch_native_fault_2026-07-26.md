@@ -38,6 +38,24 @@ publishing its ready or runtime receipt.
 
   The retained output did not reach the post-cold-draw marker.
 
+### 2026-07-27 bounded no-bootstrap diagnostics
+
+Two focused current-source native-build cycles were run without bootstrapping:
+
+- Cycle 1 compiled 185 modules with zero compile failures in approximately
+  9.9 seconds, but the diagnostic process produced empty standard output.
+- Cycle 2 compiled 184 modules in 10.2 seconds. Its entry and receipt sentinels
+  succeeded and it selected the exact Bungee face at a computed 100 px size.
+  However, the layout, raster, local, inbound, staged, stage-return, and alpha
+  scalar checkpoints all serialized as empty values.
+- In the same cycle, `post_engine_fonts` and `post_install_retrieve` serialized
+  as the nil sentinel `2305843009213693951` (`0x1fffffffffffffff`).
+
+These facts are summarized here because the diagnostic directory
+`/private/tmp/simple-font-zero-quads-evidence-448d2a5` is ephemeral. It is not
+a retained, manifest-bound evidence artifact and must not be cited as live
+acceptance provenance.
+
 ## Interpretation
 
 The diagnostic selected backend name `vulkan`, but it does not independently
@@ -53,26 +71,38 @@ accepted implementation evidence because the final native probe still faults
 and does not reach the post-cold-draw marker. They must not be merged as a
 completed fix.
 
+The 2026-07-27 diagnostics also do not prove where the zero-quad state is
+introduced. The leading seam remains the transfer from locally produced quads
+through `FontRenderBatch.quads` into `_stage_batch`, but a layout or raster
+producer failure is still a viable alternative. Empty scalar serialization and
+nil-sentinel renderer retrieval make the diagnostic transport itself
+untrustworthy. No renderer fix, live PASS, or bootstrap resulted from these
+cycles.
+
 ## Required acceptance gate
 
-1. A focused native producer probe must use an exact non-empty Bungee string
+1. Establish at least one typed scalar checkpoint through a trustworthy
+   mechanism that cannot serialize a present value as empty or confuse it with
+   the nil sentinel. Use it to distinguish layout/raster production from the
+   `local quads -> FontRenderBatch.quads -> _stage_batch` transfer seam.
+2. A focused native producer probe must use an exact non-empty Bungee string
    at 24 pt / 300 DPI and prove computed font size 100 px, `valid=true`,
    positive quad count, consistent atlas dimensions/pixel count, in-bounds
    nontransparent quad coverage, and matching renderer identity/generation.
-2. An empty or inconsistent `FontRenderBatch` must return a named failure
+3. An empty or inconsistent `FontRenderBatch` must return a named failure
    propagated to the caller, without dereferencing a nil aggregate, with
    evidence that no backend batch method was entered.
-3. `Engine2D.draw_text` must retain the selected renderer and record ordered
+4. `Engine2D.draw_text` must retain the selected renderer and record ordered
    Vulkan execution attempts plus target, prove Vulkan success with no CPU
    fallback, and avoid a native receiver fault while retrieving the selected
    renderer.
-4. Cold draw must increment rasterizations; warm draw must keep
+5. Cold draw must increment rasterizations; warm draw must keep
    rasterizations stable and increment warm hits.
-5. Vulkan device readback after text must prove source `device_readback`, a
+6. Vulkan device readback after text must prove source `device_readback`, a
    positive backend handle, exact framebuffer pixel count, and a text-only
    region-of-interest pre/post delta.
-6. Only after those focused native checks pass may the immutable trusted
+7. Only after those focused native checks pass may the immutable trusted
    harness be rebuilt and the full live capture/event gate retried.
 
-No additional bootstrap is justified until an accepted source fix requires a
-new immutable trusted binary.
+Bootstrap is permitted only if it is essential after the focused producer
+passes and a new immutable trusted binary is required.
