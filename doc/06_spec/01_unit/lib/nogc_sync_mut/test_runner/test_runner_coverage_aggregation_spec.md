@@ -2,13 +2,13 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|---------|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 ## Purpose
 
 Proves that decision outcomes emitted by separate test children are retained by
-the parent coverage collector. One child covers the true branch and another
-covers the false branch; their shared decision must aggregate to 100%.
+the parent coverage collector and that an aggregate percentage cannot hide a
+file below its declared `# @cover` threshold.
 
 ## Scenario
 
@@ -59,6 +59,17 @@ describe "cross-process coverage aggregation":
 ```
 
 </details>
+
+### rejects an owner below its annotated threshold despite 99 percent aggregate coverage
+
+1. Record 100 decisions: 99 covered overall, but only one of two covered for
+   `src/owned/frame.spl`.
+2. Require the owner's `50%` annotation to pass and its `100%` annotation to
+   fail.
+3. Require missing targets and malformed percentages to fail closed.
+
+The executable assertions are in
+`test/01_unit/lib/nogc_sync_mut/test_runner/test_runner_coverage_aggregation_spec.spl`.
 
 ## Evidence Status
 

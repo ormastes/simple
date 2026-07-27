@@ -1010,3 +1010,9 @@ Tracking split:
   replay seam passes; missing, malformed, and byte-tampered hash mutations fail
   with typed reasons. Live RenderDoc and the unavailable pure-Simple SSpec
   runner were not rerun.
+- per-owner-coverage-gate: The runner previously parsed `# @cover path N%` but
+  enforced only aggregate coverage, and its system-test detector missed the
+  canonical `test/03_system/` tree. The shared collector now fails malformed,
+  missing-target, or below-threshold owner annotations in both entrypoints;
+  a 99% aggregate/50% owner mutation is pinned in the unit spec. The admitted
+  pure-Simple runner remains unavailable, so no measured percentage is claimed.

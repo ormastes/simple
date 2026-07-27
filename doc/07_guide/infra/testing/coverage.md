@@ -326,6 +326,16 @@ Each function needs its own separate SDoctest example.
 
 ## CI/CD Integration
 
+### Per-owner thresholds
+
+An executable spec may declare `# @cover src/path/to/owner.spl 100%` in its
+first 30 lines. During `--coverage`, both test-runner entrypoints resolve every
+executed spec annotation against the per-file decision report. Missing paths,
+malformed percentages, zero/over-100 thresholds, and measured values below the
+annotation fail the run even when aggregate coverage passes. Canonical
+`test/03_system/**` specs require at least one annotation unless
+`--no-cover-check` is explicitly selected.
+
 ### Source Coverage in CI
 
 ```bash

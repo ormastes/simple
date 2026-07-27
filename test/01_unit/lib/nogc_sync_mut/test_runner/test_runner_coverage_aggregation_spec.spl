@@ -3,6 +3,7 @@
 use std.spec.*
 use std.test_runner.test_runner_coverage.{
     collect_coverage,
+    check_cover_annotation_threshold,
     record_coverage_sdn,
     reset_coverage_state
 }
@@ -27,4 +28,24 @@ describe "cross-process coverage aggregation":
         expect(coverage.total_decisions).to_equal(1)
         expect(coverage.total_decisions_covered).to_equal(1)
         expect(coverage.decision_pct).to_equal(100)
+        reset_coverage_state()
+
+    it "rejects an owner below its annotated threshold despite 99 percent aggregate coverage":
+        reset_coverage_state()
+        var sdn = "decisions |id, file, line, column, true_count, false_count|\n"
+        var i = 0
+        while i < 100:
+            val path = if i < 2: "src/owned/frame.spl" else: "src/other/frame.spl"
+            val false_count = if i == 0: 0 else: 1
+            sdn = sdn + "    branch-{i}, {path}, {i + 1}, 4, 1, {false_count}\n"
+            i = i + 1
+        sdn = sdn + "conditions |decision_id, condition_id, file, line, column, true_count, false_count|"
+        record_coverage_sdn(sdn)
+
+        val coverage = collect_coverage()
+        expect(coverage.decision_pct).to_equal(99)
+        expect(check_cover_annotation_threshold(coverage, "src/owned/frame.spl 50%")).to_be(true)
+        expect(check_cover_annotation_threshold(coverage, "src/owned/frame.spl 100%")).to_be(false)
+        expect(check_cover_annotation_threshold(coverage, "src/missing/frame.spl 100%")).to_be(false)
+        expect(check_cover_annotation_threshold(coverage, "src/owned/frame.spl nope")).to_be(false)
         reset_coverage_state()
