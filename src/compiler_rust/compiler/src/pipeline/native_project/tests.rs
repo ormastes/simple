@@ -821,6 +821,35 @@ fn test_native_build_rejects_module_prefix_collision_before_codegen() {
 }
 
 #[test]
+fn test_explicit_source_files_do_not_become_empty_module_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src = project_root.join("src");
+    let draw_ir = src.join("lib/common/ui/draw_ir.spl");
+    let main = src.join("app/simpleos_gpu_host/main.spl");
+    std::fs::create_dir_all(draw_ir.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+    std::fs::write(&draw_ir, "struct DrawIr:\n    batch_id: text\n").unwrap();
+    std::fs::write(&main, "fn main():\n    pass\n").unwrap();
+
+    let source_files = vec![draw_ir.clone(), main.clone()];
+    let builder = NativeProjectBuilder::new(project_root, temp.path().join("out"))
+        .source_dir(draw_ir.clone())
+        .source_dir(main.clone());
+
+    assert_eq!(builder.effective_source_root_for(&draw_ir), src);
+    assert_eq!(builder.effective_source_root_for(&main), src);
+    assert_eq!(source_root_for_file(&draw_ir, &source_files, &src), src);
+    assert_eq!(source_root_for_file(&main, &source_files, &src), src);
+
+    let draw_prefix = module_prefix_from_path(&draw_ir, &src);
+    let main_prefix = module_prefix_from_path(&main, &src);
+    assert_eq!(draw_prefix, "lib__common__ui__draw_ir");
+    assert_eq!(main_prefix, "app__simpleos_gpu_host__main");
+    assert_ne!(draw_prefix, main_prefix);
+}
+
+#[test]
 fn test_dotted_module_init_symbol_matches_portable_c_reference() {
     assert_eq!(
         module_init_symbol(Some("app__ui.render__ansi")),

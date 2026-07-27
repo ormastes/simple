@@ -536,6 +536,9 @@ impl NativeProjectBuilder {
         let mut best_depth = 0usize;
         for dir in &self.source_dirs {
             let canonical_dir = safe_canonicalize(dir);
+            if !canonical_dir.is_dir() {
+                continue;
+            }
             if canonical_path.starts_with(&canonical_dir) {
                 let depth = canonical_dir.components().count();
                 if depth > best_depth {
@@ -1552,6 +1555,9 @@ pub(crate) fn source_root_for_file(file_path: &Path, source_dirs: &[PathBuf], fa
     let mut best_depth = 0usize;
     for dir in source_dirs {
         let canonical_dir = safe_canonicalize(dir);
+        if !canonical_dir.is_dir() {
+            continue;
+        }
         if canonical_path.starts_with(&canonical_dir) {
             let depth = canonical_dir.components().count();
             if depth > best_depth {
