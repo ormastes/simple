@@ -123,6 +123,25 @@ fallbacks. Preserve cross-module default-method lowering from issue #190.
 Then run one strict bootstrap from an unchanged tracked tree and replace the
 stale deployed executable only after the Stage-4 admission gates pass.
 
+## Current Strict Attempt
+
+The one unchanged-tree strict run for commit `124b8845d6a0` rebuilt the Rust
+seed/runtime and passed Stage 2 sanity. Stage 3 then stopped before Stage 4
+because compiling
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` exceeded the
+per-file 60-second timeout. Strict mode refused seed fallback as required; the
+run was not retried.
+
+- Output: `build/bootstrap/hir-facade-strict-20260727`
+- Stage 3 log:
+  `build/bootstrap/hir-facade-strict-20260727/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`
+- Elapsed time: 49:33.77
+- Peak RSS: 2,543,296 KiB
+
+This result does not invalidate the focused 691-module HIR closure evidence,
+but it prevents the fresh deployed runner, focused HIR spec, full CLI checks,
+and Stage 4 admission from being claimed in this session.
+
 ## 2026-07-27 Final Bounded Attempt
 
 Small read-only classifier lanes separated the 6,144 diagnostics into facade
