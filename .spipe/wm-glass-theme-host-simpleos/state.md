@@ -778,3 +778,16 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   retained as diagnostic-only because no revision-bound current pure-Simple
   executable is available; active host GUI processes delegate to
   `simple_seed`. No runtime PASS, native capture, or QEMU claim is made.
+
+- continuation-2026-07-27-pure-gui-no-seed-delegate: **SOURCE PREPARED /
+  RUNTIME UNVERIFIED.** Parallel launcher/history audits found that selecting a
+  self-hosted `SimpleGui` is insufficient: `_cli_driver_binary()` delegates
+  `.spl` execution to its deployed `simple_seed` sibling. The CLI now supports
+  the exact opt-in `SIMPLE_NO_BOOTSTRAP_DELEGATE=1`, which returns no external
+  driver so `cli_run_file` stays in the admitted self-hosted process.
+  Ordinary CLI/bootstrap behavior is unchanged when the flag is absent, and a
+  focused unit spec saves/restores the environment while pinning the opt-in.
+  An active sibling session owns the macOS launcher/evidence wrappers, so this
+  checkpoint deliberately does not race those files. The launcher must still
+  set the flag and prove equal launcher/window-owner identities before host
+  pixels or events become admissible.

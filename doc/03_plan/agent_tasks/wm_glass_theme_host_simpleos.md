@@ -262,6 +262,14 @@ translucent base. The mode is restored at source, and the production package
 spec now also requires Engine2D software execution plus a matching material
 receipt. A source-matched pure-Simple run is still required for M4.
 
+The current-host launcher audit separates binary selection from execution
+ownership. A deployed self-hosted CLI normally delegates `.spl` execution to
+its bootstrap seed sibling. `_cli_driver_binary()` now recognizes the exact
+`SIMPLE_NO_BOOTSTRAP_DELEGATE=1` opt-in and keeps execution in-process; absent
+the flag, bootstrap/ordinary CLI behavior is unchanged. Launcher and evidence
+wrapper integration remains assigned to the active sibling owner and must
+require launcher PID == window-owner PID plus source/runtime manifest binding.
+
 Lower-capability sidecars may own W1, W2, and test fixture preparation only
 after the merge owner freezes the exact style keys:
 `wm-material-request`, `background-color`,
