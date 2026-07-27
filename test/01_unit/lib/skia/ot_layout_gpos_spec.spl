@@ -222,13 +222,33 @@ describe "bounded GPOS":
         val set_result = gpos_apply(filtered_font, _active(set_lookup), [set_lookup], [_record(1u32), _record(2u32)])
         expect(set_result.glyphs[0].x_advance_units).to_equal(5)
 
+    it "applies lookup flags to the glyph at the GPOS cursor":
+        val blob: [u8] = [
+            0,1,0,8,0,1,0,7, 0,1,0,1,0,2,
+            0,1,0,2,0,14,0,0,0,0,0,0,0,22,
+            0,1,0,2,0,1,0,3,
+            0,1,0,1,0,0,0,8, 0,1,0,1,0,2
+        ]
+        val font = OtFont(blob: blob,
+            tables: [OtTable(tag: 1195656006u32, offset: 14u32, length: 36u32)])
+        val ignored = _lookup(1u32, 0, 14, 0, 8u32)
+        val skipped = gpos_apply(font, _active(ignored), [ignored], [_record(2u32)])
+        expect(skipped.complete).to_equal(true)
+        expect(skipped.glyphs[0].x_offset_units).to_equal(0)
+        val filtered = GposLookup(lookup_index: 0, lookup_type: 1u32, flag: 16u32,
+            lookup_offset: 0u32, table_start: 0u32, table_end: 14u32,
+            subtable_offsets: [0u32], subtable_ends: [14u32], mark_filtering_set: 0)
+        val included = gpos_apply(font, _active(filtered), [filtered], [_record(2u32)])
+        expect(included.complete).to_equal(true)
+        expect(included.glyphs[0].x_offset_units).to_equal(7)
+
     it "fails closed and rolls back malformed late data, unsupported flags, and device values":
         val valid = _font([0,1,0,18,0,4,0,0,0,1,0,12,0,1,0,2,0,5,0,1,0,1,0,1])
         val broken = _lookup(2u32, 0, valid.blob.len() - 1, 0, 0u32)
         val result = gpos_apply(valid, _active(broken), [broken], [_record(1u32), _record(2u32)])
         expect(result.complete).to_equal(false)
         expect(result.glyphs[0].x_advance_units).to_equal(0)
-        val bad_flag = _lookup(2u32, 0, valid.blob.len(), 0, 1u32)
+        val bad_flag = _lookup(2u32, 0, valid.blob.len(), 0, 32u32)
         expect(gpos_validate(valid, _active(bad_flag), [bad_flag], [_record(1u32), _record(2u32)])).to_equal(false)
         val needs_gdef = _lookup(2u32, 0, valid.blob.len(), 0, 8u32)
         expect(gpos_validate(valid, _active(needs_gdef), [needs_gdef], [])).to_equal(false)
