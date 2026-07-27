@@ -29,10 +29,14 @@ SIMPLE_LIB=src bin/simple test \
 5. Branch-local ordering checks prove Metal cleanup precedes each queue,
    shader, pipeline, allocation, submit, dispatch, readback, size-mismatch,
    mismatch-injection, and success return.
-6. CUDA keeps real dispatch and readback failures distinct.
+6. CUDA cleanup owns device memory, module, argument/host allocations, and
+   context; branch-bounded checks place cleanup before every post-context exit.
+7. Vulkan branch-bounded checks require complete release sequences for known
+   completion and dependency quarantine for completion-unknown dispatch.
+8. CUDA keeps real dispatch and readback failures distinct.
 
 This is a host-independent source contract. It does not replace live device
 execution.
 
-Execution status: Linux Rust-seed interpreter pass, 6/6. Prepared-host Metal
+Execution status: Linux Rust-seed interpreter pass, 8/8. Prepared-host Metal
 failure injection remains pending on macOS.

@@ -2,7 +2,7 @@
 
 | Tests | Active | Skipped | Pending |
 |---|---:|---:|---:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 ## Scenarios
 
@@ -25,8 +25,30 @@ expect(first).to_be_greater_than(0)
 expect(repeated).to_equal(first)
 assert_not_equal(other_driver, first)
 expect(processing_vulkan_device_identity("")).to_equal(0)
+expect(first).to_be_less_than(2147483648)
 ```
 
 </details>
 
-Execution status: not run; TODO 548 blocks the deployed pure-Simple compiler.
+#### rejects invalid IR before Vulkan initialization
+
+Zero-sized, overflowing, and unsupported requests return exact validation
+reasons, empty output, and zero backend provenance without requiring a Vulkan
+host.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val zero = processing_ir_execute_vulkan(processing_ir_fill_u32(0, 7u32))
+expect(zero.reason).to_equal("invalid-element-count")
+_expect_rejected(zero, "invalid-element-count")
+_expect_rejected(processing_ir_execute_vulkan(processing_ir_fill_u32(536870912, 7u32)), "output-size-overflow")
+_expect_rejected(processing_ir_execute_vulkan(ProcessingIr(op: 99, element_count: 1, value: 7u32)), "unsupported-op")
+```
+
+</details>
+
+Execution status: Linux Rust-seed interpreter pass, 2/2. This proves only
+host-independent validation and identity behavior; live Vulkan execution
+evidence remains separate.
