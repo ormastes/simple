@@ -34,3 +34,17 @@ These are the last-known link errors; there may be more behind them. The stage4
 full-CLI closure has an open tail of peer app-code linkage issues across sessions.
 The autonomous deploy loop will produce a clean build + deploy the O(1) runtime
 perf fix once the tip links cleanly.
+
+## Update 2026-07-28 (triaged)
+1. **resolved_theme_fingerprint — FIXED (this session).** Genuine missing symbol:
+   `theme_package` exports `theme_package_fingerprint(theme_id) -> text` (loads +
+   resolves the package internally), not `resolved_theme_fingerprint`. Repointed
+   `html_css.spl` import + call to `theme_package_fingerprint` (signature-identical,
+   semantically the resolved fingerprint).
+2. **run_test_api_server_with_inject — MANGLER BUG, not a source issue.** Defined
+   (bootstrap.spl:36), exported (__init__.spl:2), explicitly imported
+   (access_server.spl:7), NO competing wildcard, NO other def/extern — yet emitted as
+   a BARE extern. The function takes a `fn(UIEvent)` closure parameter; the mangler
+   appears to bare-extern calls to functions with fn-type params (same family as the
+   _text_index_len bare-extern, mangle.rs). Needs the compiler-side mangler fix
+   (Codex), not a per-site source change — the call site is already correct.
