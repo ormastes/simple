@@ -3,6 +3,7 @@
 use std.nogc_sync_mut.sffi.cli (cli_get_args)
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.test_runner.test_result_wrapper.{preprocess_spipe_native_result_file}
+use app.io.mod.{env_get}
 use app.io.process_ops.{process_run}
 
 extern fn rt_string_bytes(value: text) -> [i64]
@@ -18,6 +19,12 @@ fn delete_artifact(path: text) -> bool:
         return true
     val (_, _, code) = run_bounded("15s", "/usr/bin/unlink", [path])
     code == 0 and not file_exists(path)
+
+fn append_forwarded_env(target: [text], names: [text]):
+    for name in names:
+        val value = env_get(name) ?? ""
+        if value != "":
+            target.push(name + "=" + value)
 
 fn file_sha256(path: text) -> text:
     val (stdout, _, code) = run_bounded("15s", "/usr/bin/sha256sum", [path])
@@ -266,8 +273,7 @@ fn main() -> i64:
         print "font-evidence-runner: invalid native spec artifact"
         return 1
     print "font-evidence-runner: native-sha256={native_sha}"
-    print "font-evidence-runner: run-command=timeout --kill-after=5s 120s env SIMPLE_RUNTIME_MODE=native {native}"
-    val (stdout, stderr, code) = run_bounded("120s", "/usr/bin/env", [
+    var run_env_args = [
         "-i",
         "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "HOME=/tmp",
@@ -276,9 +282,21 @@ fn main() -> i64:
         "LC_ALL=C",
         "SIMPLE_BINARY=" + compiler,
         "SIMPLE_BIN=" + compiler,
-        "SIMPLE_RUNTIME_MODE=native",
-        native
+        "SIMPLE_RUNTIME_MODE=native"
+    ]
+    append_forwarded_env(run_env_args, [
+        "SIMPLE_WEB_FONT_RUN_ID",
+        "AETHERIC_HOST_WEB_GUI_SIMPLE_BIN",
+        "AETHERIC_HOST_WEB_GUI_PROOF",
+        "BUILD_DIR",
+        "REPORT_PATH",
+        "RV64_DISPLAY_SMOKE_ELF",
+        "RV64_WM_FONT_DISK",
+        "RV64_WM_FONT_REGION_EXPECTED_SHA256"
     ])
+    run_env_args.push(native)
+    print "font-evidence-runner: run-command=timeout --kill-after=5s 120s env <pinned-evidence-env> {native}"
+    val (stdout, stderr, code) = run_bounded("120s", "/usr/bin/env", run_env_args)
     if stdout != "":
         print stdout
     if stderr != "":
