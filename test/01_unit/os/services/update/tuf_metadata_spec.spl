@@ -1,0 +1,214 @@
+# @cover src/os/services/update/tuf_metadata.spl 80%
+"""
+# TUF Metadata Trust Model Specification (Phase 5 — updates/recovery)
+
+**Category:** Update security
+**Status:** Model
+
+## Overview
+
+Models the four TUF roles (root, targets, snapshot, timestamp) and the trust
+structure that keeps the update system secure under repository or single-key
+compromise: signing thresholds, metadata freshness (freeze defense), version
+rollback defense, and snapshot consistency. Signatures are modeled as an
+already-verified key-id list — no real crypto, network, or install here.
+
+Absolute oracles: a well-formed update is ACCEPTED; each of five attacks is
+REJECTED with its own distinct reason code.
+"""
+
+use std.spec
+use os.services.update.tuf_metadata.{
+    RoleMetadata,
+    CurrentVersions,
+    verify_update,
+    verify_threshold,
+    check_freshness,
+    rollback_guard,
+    verify_snapshot_consistency,
+    TUF_ACCEPTED,
+    TUF_UNTRUSTED_KEY,
+    TUF_BAD_THRESHOLD,
+    TUF_EXPIRED,
+    TUF_ROLLBACK,
+    TUF_SNAPSHOT_MISMATCH
+}
+
+# ----------------------------------------------------------------------------
+# Builders — return fresh, well-formed metadata for each role.
+# ----------------------------------------------------------------------------
+
+fn mk_root() -> RoleMetadata:
+    return RoleMetadata(
+        role: "root",
+        version: 1,
+        expires_at: 2000,
+        threshold: 2,
+        signer_key_ids: ["root_k1", "root_k2"],
+        signatures_present: ["root_k1", "root_k2"],
+        delegated_key_ids: ["ts_k1", "snap_k1", "tgt_k1"],
+        recorded_targets_version: 0)
+
+fn mk_timestamp() -> RoleMetadata:
+    return RoleMetadata(
+        role: "timestamp",
+        version: 6,
+        expires_at: 2000,
+        threshold: 1,
+        signer_key_ids: ["ts_k1"],
+        signatures_present: ["ts_k1"],
+        delegated_key_ids: [],
+        recorded_targets_version: 0)
+
+fn mk_snapshot(targets_ver: u64) -> RoleMetadata:
+    return RoleMetadata(
+        role: "snapshot",
+        version: 4,
+        expires_at: 2000,
+        threshold: 1,
+        signer_key_ids: ["snap_k1"],
+        signatures_present: ["snap_k1"],
+        delegated_key_ids: [],
+        recorded_targets_version: targets_ver)
+
+fn mk_targets(ver: u64) -> RoleMetadata:
+    return RoleMetadata(
+        role: "targets",
+        version: ver,
+        expires_at: 2000,
+        threshold: 1,
+        signer_key_ids: ["tgt_k1"],
+        signatures_present: ["tgt_k1"],
+        delegated_key_ids: [],
+        recorded_targets_version: 0)
+
+fn mk_current() -> CurrentVersions:
+    return CurrentVersions(root: 1, timestamp: 5, snapshot: 3, targets: 10)
+
+# ----------------------------------------------------------------------------
+# Per-role verifier primitives
+# ----------------------------------------------------------------------------
+
+describe "TUF verifier primitives":
+    """The pure per-role checks each enforce one TUF defense."""
+
+    it "rollback_guard accepts a higher incoming version":
+        """incoming >= current is allowed."""
+        assert_true(rollback_guard(10, 11))
+
+    it "rollback_guard rejects a lower incoming version":
+        """incoming < current is the rollback attack — denied."""
+        assert_false(rollback_guard(10, 9))
+
+    it "check_freshness accepts metadata before expiry":
+        """now <= expires_at stays fresh."""
+        val meta = mk_timestamp()
+        assert_true(check_freshness(meta, 1000))
+
+    it "check_freshness rejects expired metadata":
+        """now past expires_at is a freeze/expiry failure."""
+        val meta = mk_timestamp()
+        assert_false(check_freshness(meta, 3000))
+
+    it "verify_threshold accepts when enough distinct valid signers signed":
+        """root has 2 valid signatures and threshold 2."""
+        assert_true(verify_threshold(mk_root()))
+
+    it "verify_threshold rejects when signers fall below threshold":
+        """A threshold-2 role with a single valid signer is denied."""
+        val weak = RoleMetadata(
+            role: "targets", version: 11, expires_at: 2000, threshold: 2,
+            signer_key_ids: ["tgt_k1", "tgt_k2"],
+            signatures_present: ["tgt_k1"],
+            delegated_key_ids: [], recorded_targets_version: 0)
+        assert_false(verify_threshold(weak))
+
+    it "verify_snapshot_consistency accepts matching targets versions":
+        """snapshot vouches for exactly the presented targets version."""
+        assert_true(verify_snapshot_consistency(11, 11))
+
+    it "verify_snapshot_consistency rejects a version mismatch":
+        """Mix-and-match of snapshot and targets is denied."""
+        assert_false(verify_snapshot_consistency(10, 11))
+
+# ----------------------------------------------------------------------------
+# Full pipeline — acceptance
+# ----------------------------------------------------------------------------
+
+describe "TUF full verification — well-formed update":
+    """A threshold-signed, fresh, forward-versioned, consistent update passes."""
+
+    it "accepts a well-formed update":
+        """All four roles verify; outcome is accepted with reason code 0."""
+        val root = mk_root()
+        val ts = mk_timestamp()
+        val snap = mk_snapshot(11)
+        val tgt = mk_targets(11)
+        val outcome = verify_update(root, ts, snap, tgt, mk_current(), 1000)
+        expect(outcome.accepted).to_equal(true)
+        expect(outcome.reason_code).to_equal(TUF_ACCEPTED)
+
+# ----------------------------------------------------------------------------
+# Full pipeline — each attack rejected with its distinct reason
+# ----------------------------------------------------------------------------
+
+describe "TUF full verification — attacks rejected":
+    """Every compromise scenario fails closed with a distinct reason code."""
+
+    it "rejects below-threshold signatures":
+        """A targets role signed under threshold yields TUF_BAD_THRESHOLD."""
+        val root = mk_root()
+        val ts = mk_timestamp()
+        val snap = mk_snapshot(11)
+        val tgt = RoleMetadata(
+            role: "targets", version: 11, expires_at: 2000, threshold: 2,
+            signer_key_ids: ["tgt_k1", "tgt_k2"],
+            signatures_present: ["tgt_k1"],
+            delegated_key_ids: [], recorded_targets_version: 0)
+        val outcome = verify_update(root, ts, snap, tgt, mk_current(), 1000)
+        expect(outcome.accepted).to_equal(false)
+        expect(outcome.reason_code).to_equal(TUF_BAD_THRESHOLD)
+
+    it "rejects an expired timestamp (freeze defense)":
+        """now past every role's expiry yields TUF_EXPIRED."""
+        val root = mk_root()
+        val ts = mk_timestamp()
+        val snap = mk_snapshot(11)
+        val tgt = mk_targets(11)
+        val outcome = verify_update(root, ts, snap, tgt, mk_current(), 3000)
+        expect(outcome.accepted).to_equal(false)
+        expect(outcome.reason_code).to_equal(TUF_EXPIRED)
+
+    it "rejects a rollback to a lower targets version":
+        """A targets version below the current one yields TUF_ROLLBACK."""
+        val root = mk_root()
+        val ts = mk_timestamp()
+        val snap = mk_snapshot(9)
+        val tgt = mk_targets(9)
+        val outcome = verify_update(root, ts, snap, tgt, mk_current(), 1000)
+        expect(outcome.accepted).to_equal(false)
+        expect(outcome.reason_code).to_equal(TUF_ROLLBACK)
+
+    it "rejects a snapshot / targets version mismatch":
+        """Snapshot pinning a different targets version yields TUF_SNAPSHOT_MISMATCH."""
+        val root = mk_root()
+        val ts = mk_timestamp()
+        val snap = mk_snapshot(10)
+        val tgt = mk_targets(11)
+        val outcome = verify_update(root, ts, snap, tgt, mk_current(), 1000)
+        expect(outcome.accepted).to_equal(false)
+        expect(outcome.reason_code).to_equal(TUF_SNAPSHOT_MISMATCH)
+
+    it "rejects a signer key not in root's trusted set":
+        """An untrusted signing key yields TUF_UNTRUSTED_KEY."""
+        val root = mk_root()
+        val ts = mk_timestamp()
+        val snap = mk_snapshot(11)
+        val tgt = RoleMetadata(
+            role: "targets", version: 11, expires_at: 2000, threshold: 1,
+            signer_key_ids: ["attacker_k"],
+            signatures_present: ["attacker_k"],
+            delegated_key_ids: [], recorded_targets_version: 0)
+        val outcome = verify_update(root, ts, snap, tgt, mk_current(), 1000)
+        expect(outcome.accepted).to_equal(false)
+        expect(outcome.reason_code).to_equal(TUF_UNTRUSTED_KEY)
