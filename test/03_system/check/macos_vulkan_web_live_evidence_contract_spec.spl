@@ -215,7 +215,9 @@ describe "macOS Vulkan web live evidence wrapper contract":
         step("Inspect child discovery, early-exit detection, and bounded diagnostics")
         val source = file_read(WRAPPER)
         expect(source).to_contain("app_pid=\"\"")
-        expect(source).to_contain("find_launched_pid()")
+        expect(source).to_contain("LAUNCHED_PID_ENV=")
+        expect(source).to_contain("value_of launched_pid")
+        expect(source).to_contain("require_launched_process")
         expect(source).to_contain("capture_child_exit_cause()")
         expect(source).to_contain("child_logs_have_terminal_failure()")
         expect(source).to_contain("! kill -0 \"$app_pid\" 2>/dev/null")
@@ -245,16 +247,101 @@ describe "macOS Vulkan web live evidence wrapper contract":
         val source = file_read(WRAPPER)
         expect(source).to_contain("launch_app_bundle=")
         expect(source).to_contain("launch_app_executable=")
-        expect(source).to_contain("$2 == executable")
-        expect(source).to_contain("assert_launched_process()")
-        expect(source).to_contain("fail \"launched-pid-executable-mismatch\"")
+        expect(source).to_contain("pid_matches_executable")
+        expect(source).to_contain("validate_strict_receipt")
+        expect(source).to_contain("fail \"launched-process-identity-mismatch\"")
         expect(source).to_contain("cleanup()")
         expect(source).to_contain("trap cleanup EXIT HUP INT TERM")
         expect(source).to_contain("set targetPid to (item 1 of argv) as integer")
         expect(source).to_contain("processes whose unix id is targetPid")
         expect(source).to_contain("osascript - \"$app_pid\" >/dev/null")
-        expect(source).to_contain("app_pid=\"" + SHELL_OPEN + "1:-}\"")
+        expect(source).to_contain("window_pid=\"" + SHELL_OPEN + "1:-}\"")
+        expect(source).to_contain("[ \"$window_pid\" = \"$app_pid\" ]")
         expect(source).to_contain("fail \"invalid-window-pid\"")
         expect(source).to_contain("if kill -0 \"$app_pid\" 2>/dev/null; then")
         expect(source).to_contain("kill -TERM \"$app_pid\" 2>/dev/null || true")
         expect(source).to_contain("cleanup\napp_pid=\"\"")
+
+    it "should admit only trusted web inputs and a strict bundled runtime":
+        step("Inspect trusted manifest admission and strict launcher configuration")
+        val source = file_read(WRAPPER)
+        expect(source).to_contain(". scripts/check/lib/macos-gpu-trusted-build-admission.shs")
+        expect(source).to_contain("macos_gpu_trusted_manifest_admit \\")
+        expect(source).to_contain("build/macos_gpu_2d_live_native/vulkan/trusted-build.env")
+        expect(source).to_contain("MACOS_GPU_ADMISSION_WEB_SOURCE")
+        expect(source).to_contain("MACOS_GPU_ADMISSION_WEB_HTML")
+        expect(source).to_contain("SIMPLE_GUI_STRICT_EVIDENCE=1")
+        expect(source).to_contain("SIMPLE_NO_BOOTSTRAP_DELEGATE=1")
+        expect(source).to_contain("SIMPLE_GUI_BINARY=\"$MACOS_GPU_ADMISSION_COMPILER\"")
+        expect(source).to_contain("SIMPLE_GUI_TRUSTED_MANIFEST_PATH=")
+        expect(source).to_contain("SIMPLE_GUI_LAUNCHED_PID_PATH=")
+
+    it "should fail closed on a missing strict receipt before Darwin checks":
+        step("Run the POSIX strict-record probe without a launcher receipt")
+        val command = "MACOS_VULKAN_WEB_CONTRACT_PROBE=strict-record " +
+            "MACOS_VULKAN_WEB_STRICT_RECEIPT_PATH=/definitely/missing/receipt.env " +
+            "MACOS_VULKAN_WEB_APP_PID=44 " +
+            "MACOS_VULKAN_WEB_LAUNCHED_EXECUTABLE=/tmp/SimpleGui.app/Contents/MacOS/SimpleGui sh " + WRAPPER
+        val (_out, _err, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+        val source = file_read(WRAPPER)
+        expect(source).to_contain("macos_gui_run_pid_receipt_v2")
+        expect(source).to_contain("value_of strict_evidence")
+        expect(source).to_contain("value_of selected_binary_hash")
+        expect(source).to_contain("value_of bundled_binary_hash")
+        expect(source).to_contain("value_of launched_high_resolution_capable")
+        expect(source).to_contain("strict-selected-source-sha256-mismatch")
+        expect(source).to_contain("strict-bundled-executable-sha256-mismatch")
+        expect(source).to_contain("strict-trusted-manifest-sha256-mismatch")
+        expect(source).to_contain("strict-pid-mismatch")
+        expect(source).to_contain("strict-executable-identity-mismatch")
+        expect(source).to_contain("assert_admitted_web_inputs_unchanged")
+        expect(source).to_contain("trusted-web-source-sha256-drift")
+        expect(source).to_contain("trusted-web-html-sha256-drift")
+
+    it "should capture the PID-owned AX window by its window number":
+        step("Inspect AXWindowNumber capture and window-scoped screenshot commands")
+        val source = file_read(WRAPPER)
+        expect(source).to_contain("processes whose unix id is targetPid")
+        expect(source).to_contain("set windowNumber to value of attribute \"AXWindowNumber\" of win")
+        expect(source).to_contain("screencapture -x -o -l\"$window_id\" \"$BEFORE_PNG\"")
+        expect(source).to_contain("screencapture -x -o -l\"$window_id\" \"$AFTER_PNG\"")
+        expect(source.contains("screencapture -x -R\"$window_rect\"")).to_equal(false)
+        expect(source).to_contain("focus_exact_ax_window")
+        expect(source).to_contain(
+            "(candidateWindowId as integer) = targetWindowId"
+        )
+        expect(source).to_contain("exact-window-pointer-focus-failed")
+        expect(source).to_contain("exact-window-keyboard-focus-failed")
+
+    it "should recursively reject simple_seed descendants before live operations":
+        step("Run the POSIX seed-tree probe with and without a seed descendant")
+        val seed_tree = "tree=$(mktemp); printf '40 1 /tmp/SimpleGui.app/Contents/MacOS/SimpleGui\\n41 40 /tmp/simple_seed child\\n' >\"$tree\"; " +
+            "MACOS_VULKAN_WEB_CONTRACT_PROBE=seed-tree MACOS_VULKAN_WEB_ROOT_PID=40 MACOS_VULKAN_WEB_PROCESS_TREE=\"$tree\" sh " + WRAPPER + "; code=$?; rm -f \"$tree\"; exit $code"
+        val (_seed_out, _seed_err, seed_code) = process_run("/bin/sh", ["-c", seed_tree])
+        expect(seed_code).to_equal(0)
+        val clean_tree = "tree=$(mktemp); printf '40 1 /tmp/SimpleGui.app/Contents/MacOS/SimpleGui\\n41 40 helper\\n' >\"$tree\"; " +
+            "MACOS_VULKAN_WEB_CONTRACT_PROBE=seed-tree MACOS_VULKAN_WEB_ROOT_PID=40 MACOS_VULKAN_WEB_PROCESS_TREE=\"$tree\" sh " + WRAPPER + "; code=$?; rm -f \"$tree\"; exit $code"
+        val (_clean_out, _clean_err, clean_code) = process_run("/bin/sh", ["-c", clean_tree])
+        expect(clean_code).to_equal(1)
+        val reject_clean_tree = "tree=$(mktemp); printf '40 1 /tmp/SimpleGui.app/Contents/MacOS/SimpleGui\\n41 40 helper\\n' >\"$tree\"; " +
+            "MACOS_VULKAN_WEB_CONTRACT_PROBE=reject-seed-tree " +
+            "MACOS_VULKAN_WEB_ROOT_PID=40 MACOS_VULKAN_WEB_PROCESS_TREE=\"$tree\" sh " +
+            WRAPPER + "; code=$?; rm -f \"$tree\"; exit $code"
+        val (_reject_clean_out, _reject_clean_err, reject_clean_code) =
+            process_run("/bin/sh", ["-c", reject_clean_tree])
+        expect(reject_clean_code).to_equal(0)
+        val reject_seed_tree = "tree=$(mktemp); printf '40 1 /tmp/SimpleGui.app/Contents/MacOS/SimpleGui\\n41 40 /tmp/simple_seed child\\n' >\"$tree\"; " +
+            "MACOS_VULKAN_WEB_CONTRACT_PROBE=reject-seed-tree " +
+            "MACOS_VULKAN_WEB_ROOT_PID=40 MACOS_VULKAN_WEB_PROCESS_TREE=\"$tree\" sh " +
+            WRAPPER + "; code=$?; rm -f \"$tree\"; exit $code"
+        val (_reject_seed_out, _reject_seed_err, reject_seed_code) =
+            process_run("/bin/sh", ["-c", reject_seed_tree])
+        expect(reject_seed_code).to_equal(1)
+        val source = file_read(WRAPPER)
+        expect(source).to_contain("reject_simple_seed_records")
+        expect(source).to_contain("reject_simple_seed_descendants")
+        expect(source).to_contain("simple-seed-descendant-detected")
+        expect(source).to_contain("refusing cleanup with simple_seed descendant")
+
+}

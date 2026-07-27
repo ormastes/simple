@@ -3,6 +3,7 @@ set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
+. scripts/check/lib/macos-gpu-trusted-build-admission.shs
 
 BUILD_DIR="${BUILD_DIR:-build/tmp/macos_vulkan_gui_widget_live_evidence}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/macos_vulkan_gui_widget_live_evidence_$(date -u +%F).md}"
@@ -12,6 +13,7 @@ MAX_RSS_KB="${MACOS_VULKAN_GUI_WIDGET_MAX_RSS_KB:-1048576}"
 REQUESTED_RESOLUTION="${SHOWCASE_RESOLUTION:-1200x900}"
 REQUESTED_DPI="${SHOWCASE_DPI:-300}"
 ICD_PATH="${VK_ICD_FILENAMES:-/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json}"
+TRUSTED_MANIFEST="$ROOT_DIR/build/macos_gpu_2d_live_native/vulkan/trusted-build.env"
 EVENTS="$BUILD_DIR/events.env"
 VALIDATED_EVENTS="$BUILD_DIR/events.validated.env"
 LAUNCHER_LOG="$BUILD_DIR/launcher.log"
@@ -34,8 +36,23 @@ app_pid=""
 launched_executable=""
 observed_rss_kb=0
 cleanup() {
+    [ -z "${MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE:-}" ] || return 0
     [ -n "$app_pid" ] || return 0
     [ -n "$launched_executable" ] || return 0
+    [ "${strict_launcher_pid:-}" = "$app_pid" ] &&
+        [ "${strict_window_owner_pid:-}" = "$app_pid" ] &&
+        [ "${strict_bundled_executable:-}" = "$launched_executable" ] &&
+        [ "$(macos_gpu_admission_sha256_file "$launched_executable" \
+            2>/dev/null || true)" = "${strict_bundled_sha256:-}" ] || {
+            echo "macOS Vulkan GUI widget live evidence: refusing cleanup after strict identity/hash drift" >&2
+            return 0
+        }
+    # A seed descendant makes the process tree untrusted; do not inject quit input.
+    if ps -axo pid=,ppid=,command= >"$BUILD_DIR/process-tree.env" 2>/dev/null &&
+            process_tree_has_simple_seed_records "$BUILD_DIR/process-tree.env" "$app_pid"; then
+        echo "macOS Vulkan GUI widget live evidence: refusing cleanup with simple_seed descendant" >&2
+        return 0
+    fi
     pid_matches_executable "$app_pid" "$launched_executable" || return 0
     osascript - "$app_pid" >/dev/null 2>&1 <<'OSA' || true
 on run argv
@@ -51,7 +68,25 @@ on run argv
 end run
 OSA
     if kill -0 "$app_pid" 2>/dev/null; then
-        kill -TERM "$app_pid" 2>/dev/null || true
+        cleanup_launcher_pid="$(
+            value_of launcher_pid "$LAUNCHED_PID_ENV" 2>/dev/null || true
+        )"
+        cleanup_owner_pid="$(
+            value_of window_owner_pid "$LAUNCHED_PID_ENV" 2>/dev/null || true
+        )"
+        cleanup_bundled_hash="$(
+            value_of bundled_binary_hash "$LAUNCHED_PID_ENV" \
+                2>/dev/null || true
+        )"
+        if [ "$cleanup_launcher_pid" = "$app_pid" ] &&
+                [ "$cleanup_owner_pid" = "$app_pid" ] &&
+                pid_matches_executable "$app_pid" "$launched_executable" &&
+                [ "$(macos_gpu_admission_sha256_file "$launched_executable" \
+                    2>/dev/null || true)" = "$cleanup_bundled_hash" ]; then
+            kill -TERM "$app_pid" 2>/dev/null || true
+        else
+            echo "macOS Vulkan GUI widget live evidence: refusing TERM after strict identity/hash drift" >&2
+        fi
     fi
 }
 trap cleanup EXIT HUP INT TERM
@@ -66,7 +101,9 @@ absolute_path() {
 value_of() {
     key="$1"
     file="$2"
-    sed -n "s/^${key}=//p" "$file" | tail -n 1
+    count="$(grep -c "^${key}=" "$file" 2>/dev/null || true)"
+    [ "$count" = 1 ] || return 1
+    sed -n "s/^${key}=//p" "$file"
 }
 
 file_bytes() {
@@ -106,6 +143,153 @@ validate_executable_command() {
         [ "${1#"$executable "}" != "$1" ]
 }
 
+canonical_existing_path() {
+    target_path="${1:-}"
+    [ -e "$target_path" ] && [ ! -L "$target_path" ] || return 1
+    target_dir=$(CDPATH= cd -P "$(dirname "$target_path")" && pwd) || return 1
+    printf '%s/%s\n' "$target_dir" "$(basename "$target_path")"
+}
+
+sha256_digest() {
+    printf '%s\n' "${1:-}" | grep -Eq '^[0123456789abcdefABCDEF]{64}$'
+}
+
+process_tree_has_simple_seed_records() {
+    process_records="$1"
+    root_pid="$2"
+    positive_integer "$root_pid" || return 1
+    queue="$root_pid"
+    seen=" $root_pid "
+    while [ -n "$queue" ]; do
+        current_pid=${queue%% *}
+        if [ "$queue" = "$current_pid" ]; then queue=""; else queue=${queue#* }; fi
+        current_command=$(awk -v pid="$current_pid" '
+            $1 == pid { $1 = ""; $2 = ""; sub(/^[[:space:]]+/, ""); print; exit }
+        ' "$process_records")
+        case "$current_command" in *simple_seed*) return 0 ;; esac
+        child_pids=$(awk -v ppid="$current_pid" '$2 == ppid { print $1 }' "$process_records")
+        for child_pid in $child_pids; do
+            case "$seen" in *" $child_pid "*) ;; *)
+                seen="$seen$child_pid "
+                queue="${queue:+$queue }$child_pid"
+                ;;
+            esac
+        done
+    done
+    return 1
+}
+
+reject_simple_seed_records() {
+    if process_tree_has_simple_seed_records "$1" "$2"; then
+        return 1
+    fi
+    return 0
+}
+
+reject_simple_seed_descendants() {
+    process_records="$BUILD_DIR/process-tree.env"
+    ps -axo pid=,ppid=,command= >"$process_records" 2>/dev/null ||
+        fail "process-tree-inspection-failed"
+    if ! reject_simple_seed_records "$process_records" "$app_pid"; then
+        fail "simple-seed-descendant-detected"
+    fi
+    return 0
+}
+
+assert_admitted_widget_source_unchanged() {
+    [ -n "${sample_canonical:-}" ] || fail "trusted-widget-source-unset"
+    [ "$sample_canonical" = "$MACOS_GPU_ADMISSION_WIDGET_SOURCE" ] ||
+        fail "trusted-widget-source-path-drift"
+    [ "$(macos_gpu_admission_sha256_file "$sample_canonical")" = \
+        "$MACOS_GPU_ADMISSION_WIDGET_SOURCE_SHA256" ] ||
+        fail "trusted-widget-source-sha256-drift"
+}
+
+validate_strict_receipt() {
+    [ -s "$LAUNCHED_PID_ENV" ] || fail "strict-evidence-receipt-missing"
+    [ "$(value_of schema "$LAUNCHED_PID_ENV")" = \
+        "macos_gui_run_pid_receipt_v2" ] ||
+        fail "strict-evidence-receipt-schema-invalid"
+    [ "$(value_of strict_evidence "$LAUNCHED_PID_ENV")" = "1" ] ||
+        fail "strict-evidence-flag-missing"
+    strict_selected_source="$(value_of selected_source "$LAUNCHED_PID_ENV")"
+    strict_bundled_executable="$(value_of bundled_executable "$LAUNCHED_PID_ENV")"
+    strict_selected_sha256="$(value_of selected_binary_hash "$LAUNCHED_PID_ENV")"
+    strict_bundled_sha256="$(value_of bundled_binary_hash "$LAUNCHED_PID_ENV")"
+    strict_trusted_manifest="$(value_of trusted_manifest "$LAUNCHED_PID_ENV")"
+    strict_trusted_manifest_hash="$(
+        value_of trusted_manifest_hash "$LAUNCHED_PID_ENV"
+    )"
+    strict_compiler_source_kind="$(
+        value_of trusted_compiler_source_kind "$LAUNCHED_PID_ENV"
+    )"
+    strict_launched_pid="$(value_of launched_pid "$LAUNCHED_PID_ENV")"
+    strict_launcher_pid="$(value_of launcher_pid "$LAUNCHED_PID_ENV")"
+    strict_window_owner_pid="$(value_of window_owner_pid "$LAUNCHED_PID_ENV")"
+    strict_launched_executable="$(value_of launched_executable "$LAUNCHED_PID_ENV")"
+    strict_launcher_executable="$(value_of launcher_executable "$LAUNCHED_PID_ENV")"
+    strict_window_owner_executable="$(value_of window_owner_executable "$LAUNCHED_PID_ENV")"
+    strict_bundle="$(value_of launched_bundle "$LAUNCHED_PID_ENV")"
+    strict_selected_source_canonical="$(
+        canonical_existing_path "$strict_selected_source"
+    )" || fail "strict-selected-source-not-canonical"
+    strict_bundled_executable_canonical="$(
+        canonical_existing_path "$strict_bundled_executable"
+    )" || fail "strict-bundled-executable-not-canonical"
+    strict_bundle_canonical="$(
+        canonical_existing_path "$strict_bundle"
+    )" || fail "strict-bundle-not-canonical"
+    [ "$strict_selected_source" = "$strict_selected_source_canonical" ] ||
+        fail "strict-selected-source-not-canonical"
+    [ "$strict_bundled_executable" = \
+        "$strict_bundled_executable_canonical" ] ||
+        fail "strict-bundled-executable-not-canonical"
+    [ "$strict_bundle" = "$strict_bundle_canonical" ] ||
+        fail "strict-bundle-not-canonical"
+    [ "$strict_trusted_manifest" = "$(
+        canonical_existing_path "$strict_trusted_manifest"
+    )" ] || fail "strict-trusted-manifest-not-canonical"
+    sha256_digest "$strict_trusted_manifest_hash" ||
+        fail "strict-trusted-manifest-sha256-invalid"
+    [ "$(macos_gpu_admission_sha256_file "$strict_trusted_manifest")" = \
+        "$strict_trusted_manifest_hash" ] ||
+        fail "strict-trusted-manifest-sha256-mismatch"
+    case "$strict_compiler_source_kind" in
+        canonical-pure-simple-bootstrap-stage3|canonical-repo-release-path) ;;
+        *) fail "strict-compiler-source-kind-mismatch" ;;
+    esac
+    if [ -n "${MACOS_GPU_ADMISSION_COMPILER:-}" ]; then
+        [ "$strict_selected_source" = "$MACOS_GPU_ADMISSION_COMPILER" ] ||
+            fail "strict-selected-source-not-admitted-compiler"
+        [ "$strict_trusted_manifest" = "$TRUSTED_MANIFEST" ] ||
+            fail "strict-trusted-manifest-path-mismatch"
+        [ "$strict_compiler_source_kind" = \
+            "$MACOS_GPU_ADMISSION_COMPILER_SOURCE_KIND" ] ||
+            fail "strict-admission-source-kind-mismatch"
+    fi
+    case "$strict_bundled_executable" in */SimpleGui.app/Contents/MacOS/SimpleGui) ;; *) fail "strict-bundled-executable-invalid" ;; esac
+    [ "$strict_bundled_executable" = \
+        "$strict_bundle/Contents/MacOS/SimpleGui" ] ||
+        fail "strict-bundle-executable-layout-mismatch"
+    sha256_digest "$strict_selected_sha256" || fail "strict-selected-sha256-invalid"
+    sha256_digest "$strict_bundled_sha256" || fail "strict-bundled-sha256-invalid"
+    [ "$strict_selected_sha256" = "$strict_bundled_sha256" ] || fail "strict-sha256-mismatch"
+    [ "$(macos_gpu_admission_sha256_file "$strict_selected_source")" = \
+        "$strict_selected_sha256" ] ||
+        fail "strict-selected-source-sha256-mismatch"
+    [ "$(macos_gpu_admission_sha256_file "$strict_bundled_executable")" = \
+        "$strict_bundled_sha256" ] ||
+        fail "strict-bundled-executable-sha256-mismatch"
+    for strict_pid in "$strict_launched_pid" "$strict_launcher_pid" "$strict_window_owner_pid"; do
+        positive_integer "$strict_pid" || fail "strict-pid-invalid"
+        [ "$strict_pid" = "$app_pid" ] || fail "strict-pid-mismatch"
+    done
+    for strict_executable in "$strict_launched_executable" "$strict_launcher_executable" "$strict_window_owner_executable"; do
+        [ "$strict_executable" = "$strict_bundled_executable" ] || fail "strict-executable-identity-mismatch"
+    done
+    [ "$launched_executable" = "$strict_bundled_executable" ] || fail "strict-launch-record-executable-mismatch"
+}
+
 validate_hidpi_geometry() {
     logical_width="${1:-}"
     logical_height="${2:-}"
@@ -120,30 +304,6 @@ validate_hidpi_geometry() {
     scale_y=$((pixel_height / logical_height))
     [ "$scale_x" -gt 1 ] && [ "$scale_x" -eq "$scale_y" ]
 }
-
-if [ -n "${MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE:-}" ]; then
-    case "$MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE" in
-        checksum)
-            validate_checksum_pair \
-                "${MACOS_VULKAN_GUI_WIDGET_RENDERER_CHECKSUM:-}" \
-                "${MACOS_VULKAN_GUI_WIDGET_EVENT_INITIAL_CHECKSUM:-}"
-            ;;
-        pid)
-            validate_executable_command \
-                "${MACOS_VULKAN_GUI_WIDGET_PROCESS_COMMAND:-}" \
-                "${MACOS_VULKAN_GUI_WIDGET_LAUNCHED_EXECUTABLE:-}"
-            ;;
-        hidpi)
-            validate_hidpi_geometry \
-                "${MACOS_VULKAN_GUI_WIDGET_LOGICAL_WIDTH:-}" \
-                "${MACOS_VULKAN_GUI_WIDGET_LOGICAL_HEIGHT:-}" \
-                "${MACOS_VULKAN_GUI_WIDGET_PIXEL_WIDTH:-}" \
-                "${MACOS_VULKAN_GUI_WIDGET_PIXEL_HEIGHT:-}"
-            ;;
-        *) exit 2 ;;
-    esac
-    exit $?
-fi
 
 capture_child_exit_cause() {
     child_exit_cause=""
@@ -234,13 +394,95 @@ pid_matches_executable() {
 }
 
 require_launched_process() {
+    assert_admitted_widget_source_unchanged
+    validate_strict_receipt
     kill -0 "$app_pid" 2>/dev/null || fail "launched-process-missing"
     pid_matches_executable "$app_pid" "$launched_executable" ||
         fail "launched-process-identity-mismatch"
+    reject_simple_seed_descendants
 }
+
+focus_exact_ax_window() {
+    focus_x="$1"
+    focus_y="$2"
+    focus_action="${3:-focus}"
+    osascript - "$app_pid" "$window_id" "$focus_x" "$focus_y" \
+        "$focus_action" >/dev/null <<'OSA'
+on run argv
+set targetPid to (item 1 of argv) as integer
+set targetWindowId to (item 2 of argv) as integer
+set targetX to (item 3 of argv) as integer
+set targetY to (item 4 of argv) as integer
+set targetAction to item 5 of argv
+tell application "System Events"
+  repeat with proc in (processes whose unix id is targetPid)
+    tell proc
+      repeat with targetWindow in windows
+        set candidateWindowId to value of attribute "AXWindowNumber" of targetWindow
+        if (candidateWindowId as integer) = targetWindowId then
+          set position of targetWindow to {targetX, targetY}
+          set frontmost to true
+          if targetAction is "key-g" then keystroke "g"
+          return true
+        end if
+      end repeat
+    end tell
+  end repeat
+end tell
+error "SimpleGui exact AX window missing"
+end run
+OSA
+}
+
+if [ -n "${MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE:-}" ]; then
+    case "$MACOS_VULKAN_GUI_WIDGET_CONTRACT_PROBE" in
+        checksum)
+            validate_checksum_pair \
+                "${MACOS_VULKAN_GUI_WIDGET_RENDERER_CHECKSUM:-}" \
+                "${MACOS_VULKAN_GUI_WIDGET_EVENT_INITIAL_CHECKSUM:-}"
+            ;;
+        pid)
+            validate_executable_command \
+                "${MACOS_VULKAN_GUI_WIDGET_PROCESS_COMMAND:-}" \
+                "${MACOS_VULKAN_GUI_WIDGET_LAUNCHED_EXECUTABLE:-}"
+            ;;
+        hidpi)
+            validate_hidpi_geometry \
+                "${MACOS_VULKAN_GUI_WIDGET_LOGICAL_WIDTH:-}" \
+                "${MACOS_VULKAN_GUI_WIDGET_LOGICAL_HEIGHT:-}" \
+                "${MACOS_VULKAN_GUI_WIDGET_PIXEL_WIDTH:-}" \
+                "${MACOS_VULKAN_GUI_WIDGET_PIXEL_HEIGHT:-}"
+            ;;
+        strict-record)
+            LAUNCHED_PID_ENV="${MACOS_VULKAN_GUI_WIDGET_STRICT_RECEIPT_PATH:-}"
+            app_pid="${MACOS_VULKAN_GUI_WIDGET_APP_PID:-}"
+            launched_executable="${MACOS_VULKAN_GUI_WIDGET_LAUNCHED_EXECUTABLE:-}"
+            validate_strict_receipt
+            ;;
+        seed-tree)
+            process_tree_has_simple_seed_records \
+                "${MACOS_VULKAN_GUI_WIDGET_PROCESS_TREE:-}" \
+                "${MACOS_VULKAN_GUI_WIDGET_ROOT_PID:-}"
+            ;;
+        reject-seed-tree)
+            reject_simple_seed_records \
+                "${MACOS_VULKAN_GUI_WIDGET_PROCESS_TREE:-}" \
+                "${MACOS_VULKAN_GUI_WIDGET_ROOT_PID:-}"
+            ;;
+        *) exit 2 ;;
+    esac
+    exit $?
+fi
 
 [ "$(uname -s)" = "Darwin" ] || fail "requires-macos"
 [ -f "$SAMPLE" ] || fail "sample-missing"
+macos_gpu_trusted_manifest_admit \
+    "$TRUSTED_MANIFEST" \
+    vulkan "$ROOT_DIR" || fail "trusted-manifest-admission-failed"
+sample_canonical="$(canonical_existing_path "$SAMPLE")" || fail "sample-not-canonical"
+[ "$sample_canonical" = "$MACOS_GPU_ADMISSION_WIDGET_SOURCE" ] ||
+    fail "trusted-widget-source-mismatch"
+assert_admitted_widget_source_unchanged
 [ -f "$ICD_PATH" ] || fail "moltenvk-icd-missing"
 command -v osascript >/dev/null 2>&1 || fail "osascript-missing"
 command -v screencapture >/dev/null 2>&1 || fail "screencapture-missing"
@@ -248,6 +490,10 @@ command -v cliclick >/dev/null 2>&1 || fail "cliclick-missing"
 command -v sips >/dev/null 2>&1 || fail "sips-missing"
 
 SIMPLE_GUI_RUN_SKIP_NUDGE=1 \
+SIMPLE_GUI_STRICT_EVIDENCE=1 \
+SIMPLE_NO_BOOTSTRAP_DELEGATE=1 \
+SIMPLE_GUI_BINARY="$MACOS_GPU_ADMISSION_COMPILER" \
+SIMPLE_GUI_TRUSTED_MANIFEST_PATH="$TRUSTED_MANIFEST" \
 SIMPLE_GUI_LAUNCHED_PID_PATH="$(absolute_path "$LAUNCHED_PID_ENV")" \
 SIMPLE_GUI_BACKEND=vulkan \
 SIMPLE_GUI_EXIT_AFTER_INTERACTION=0 \
@@ -277,6 +523,7 @@ case "$launched_executable" in /*/SimpleGui.app/Contents/MacOS/SimpleGui) ;; *)
 esac
 case "$launched_bundle" in /*/SimpleGui.app) ;; *) fail "invalid-launched-bundle" ;; esac
 [ "$high_resolution_capable" = "true" ] || fail "high-resolution-bundle-disabled"
+validate_strict_receipt
 require_launched_process
 
 deadline=$(($(date +%s) + TIMEOUT_SECS))
@@ -287,6 +534,7 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     if [ "$observed_rss_kb" -gt "$MAX_RSS_KB" ]; then
         fail "resource-limit-exceeded"
     fi
+    reject_simple_seed_descendants
     if osascript - "$app_pid" >"$WINDOW_ENV" 2>/dev/null <<'OSA'; then
 on run argv
 set targetPid to (item 1 of argv) as integer
@@ -299,13 +547,15 @@ tell application "System Events"
   end repeat
   if selectedProc is missing value then error "SimpleGui window not ready"
   tell selectedProc
-    set position of window 1 to {40, 50}
+    if (count of windows) is not 1 then error "SimpleGui window identity ambiguous"
+    set selectedWindow to window 1
+    set windowNumber to value of attribute "AXWindowNumber" of selectedWindow
+    if windowNumber is missing value then error "SimpleGui window id missing"
+    set position of selectedWindow to {40, 50}
     set frontmost to true
     delay 0.3
-    set p to position of window 1
-    set s to size of window 1
-    set windowNumber to value of attribute "AXWindowNumber" of window 1
-    if windowNumber is missing value then error "SimpleGui window id missing"
+    set p to position of selectedWindow
+    set s to size of selectedWindow
     set AppleScript's text item delimiters to ","
     return (targetPid as text) & "," & (item 1 of p as text) & "," & \
       (item 2 of p as text) & "," & (item 1 of s as text) & "," & \
@@ -338,6 +588,7 @@ window_h="${5:-0}"
 window_id="${6:-}"
 case "$window_pid" in ""|*[!0-9]*) fail "invalid-window-pid" ;; esac
 [ "$window_pid" = "$app_pid" ] || fail "window-pid-mismatch"
+[ "$strict_window_owner_pid" = "$window_pid" ] || fail "strict-window-owner-pid-mismatch"
 positive_integer "$window_w" || fail "invalid-window-width"
 positive_integer "$window_h" || fail "invalid-window-height"
 positive_integer "$window_id" || fail "invalid-window-id"
@@ -356,22 +607,12 @@ backing_scale=$((before_pixel_width / window_w))
 click_x=$((window_x + 150))
 click_y=$((window_y + 140))
 require_launched_process
+focus_exact_ax_window 40 50 focus ||
+    fail "exact-window-pointer-focus-failed"
 cliclick "m:${click_x},${click_y}" "c:."
-osascript - "$app_pid" >/dev/null <<'OSA'
-on run argv
-set targetPid to (item 1 of argv) as integer
-tell application "System Events"
-  repeat with proc in (processes whose unix id is targetPid)
-    tell proc
-      set frontmost to true
-      keystroke "g"
-      return true
-    end tell
-  end repeat
-end tell
-error "SimpleGui input target missing"
-end run
-OSA
+require_launched_process
+focus_exact_ax_window 40 50 key-g ||
+    fail "exact-window-keyboard-focus-failed"
 
 event_deadline=$(($(date +%s) + 20))
 while [ "$(date +%s)" -lt "$event_deadline" ]; do
@@ -409,27 +650,8 @@ positive_integer "$interaction_checksum" || fail "interaction-checksum-missing"
     fail "interaction-frame-unchanged"
 
 require_launched_process
-osascript - "$app_pid" "$window_id" >/dev/null <<'OSA'
-on run argv
-set targetPid to (item 1 of argv) as integer
-set targetWindowId to (item 2 of argv) as integer
-tell application "System Events"
-  repeat with proc in (processes whose unix id is targetPid)
-    tell proc
-      repeat with targetWindow in windows
-        set candidateWindowId to value of attribute "AXWindowNumber" of targetWindow
-        if candidateWindowId = targetWindowId then
-          set position of targetWindow to {40, 50}
-          set frontmost to true
-          return true
-        end if
-      end repeat
-    end tell
-  end repeat
-end tell
-error "SimpleGui post-input window missing"
-end run
-OSA
+focus_exact_ax_window 40 50 focus ||
+    fail "exact-window-post-input-focus-failed"
 sleep 1
 require_launched_process
 screencapture -x -o -l"$window_id" "$AFTER_PNG" ||
@@ -490,6 +712,7 @@ font_succeeded="$(value_of showcase_font_backend_attempt_succeeded "$launch_stdo
 [ "$font_succeeded" = "true" ] || fail "vector-font-backend-attempt-failed"
 
 cp "$EVENTS" "$VALIDATED_EVENTS"
+assert_admitted_widget_source_unchanged
 {
     echo "macos_vulkan_gui_widget_live_status=pass"
     echo "macos_vulkan_gui_widget_live_reason=pass"
@@ -499,6 +722,8 @@ cp "$EVENTS" "$VALIDATED_EVENTS"
     echo "macos_vulkan_gui_widget_live_bundle=$launched_bundle"
     echo "macos_vulkan_gui_widget_live_high_resolution_capable=$high_resolution_capable"
     echo "macos_vulkan_gui_widget_live_source=$source"
+    echo "macos_vulkan_gui_widget_live_admitted_source=$sample_canonical"
+    echo "macos_vulkan_gui_widget_live_admitted_source_sha256=$MACOS_GPU_ADMISSION_WIDGET_SOURCE_SHA256"
     echo "macos_vulkan_gui_widget_live_backend_handle=$handle"
     echo "macos_vulkan_gui_widget_live_dimensions=$renderer_dimensions"
     echo "macos_vulkan_gui_widget_live_dpi=$renderer_dpi"

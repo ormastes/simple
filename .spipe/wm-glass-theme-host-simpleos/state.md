@@ -791,3 +791,32 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   checkpoint deliberately does not race those files. The launcher must still
   set the flag and prove equal launcher/window-owner identities before host
   pixels or events become admissible.
+
+- current-state-2026-07-27: **MACOS IMPLEMENTATION ACTIVE / RUNTIME
+  UNVERIFIED.** The authoritative Aetheric Stitch glass source contract is
+  restored: the production wrapper carries the resolved material mode, and
+  the renderer material plus Engine2D software-receipt path is tested. The
+  Metal device sample/translucent-CPU-oracle checkpoint also exists, including
+  straight-alpha handling for translucent destinations. Commit `b7b4c241dc`
+  supplies the opt-in `SIMPLE_NO_BOOTSTRAP_DELEGATE=1` path so an admitted
+  launcher can keep source execution in-process.
+
+  This is not live macOS GUI evidence. It remains **RUNTIME UNVERIFIED** until
+  a trusted, source-matched self-hosted runtime is admitted and proves the
+  launcher/window-owner identity plus the required native receipts. No
+  seed/bootstrap run is admissible for this proof, and orphan `SimpleGui ->
+  simple_seed` processes are explicitly inadmissible diagnostic residue.
+  Linux/Windows, x86/ARM QEMU, and native-board execution remain fail-closed
+  and postponed to their prepared hosts; use the existing cross-host handoff
+  commands and path references rather than treating postponed rows as PASS.
+
+- source-checkpoint-2026-07-27: the macOS widget/web live-evidence path is now
+  fail-closed on `macos-gpu-2d-live-native-manifest-v2`. The manifest binds
+  the exact widget source, web source, and web HTML path/hash. Strict
+  `SimpleGui` launch records bind the admitted compiler, copied executable
+  hashes, launcher/window-owner PID identity, and absence of `simple_seed`
+  descendants. Both wrappers consume that record, recheck identity/hash before
+  input and window-ID-scoped captures, and have host-neutral contract probes.
+  Shell/static and positive/negative contract probes pass; no live GUI,
+  bootstrap, seed, or QEMU execution was used, so runtime status remains
+  **UNVERIFIED**.

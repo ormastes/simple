@@ -583,9 +583,10 @@ four explicit P0 feature requests:
 
 `doc/08_tracking/feature/wm_glass_cross_host_evidence_requests_2026-07-27.md`.
 
-The fail-closed handoff contract is:
+The fail-closed external-host handoff, including its exact prepared-host
+commands and receipt requirements, is recorded in:
 
-`test/03_system/check/wm_glass_cross_host_evidence_request_spec.spl`.
+`doc/08_tracking/feature/wm_glass_cross_host_evidence_requests_2026-07-27.md`.
 
 External rows remain required and must not be counted as exclusions or PASS.
 
@@ -595,3 +596,37 @@ straight-alpha parity for translucent destinations and sampled live-device
 comparison with the scalar CPU oracle. Runtime admission remains open because
 the available local executable identifies as the forbidden Rust bootstrap
 seed; no bootstrap was started.
+
+## 2026-07-27 Current Implementation and Runtime Handoff
+
+Current macOS implementation work is active; this does not mean macOS runtime
+evidence is available. The authoritative Aetheric Stitch glass source contract
+is restored, and the renderer material/Engine2D software-receipt path is
+tested. The Metal device sample/translucent CPU-oracle checkpoint exists,
+including straight-alpha parity for translucent destinations. Commit
+`b7b4c241dc` adds opt-in `SIMPLE_NO_BOOTSTRAP_DELEGATE=1`, allowing the
+admitted launcher path to avoid delegating source execution to a bootstrap
+driver.
+
+Live macOS GUI evidence remains **RUNTIME UNVERIFIED** until a trusted,
+source-matched self-hosted runtime is admitted and demonstrates matching
+launcher/window-owner identity with the required native receipts. No
+seed/bootstrap execution may satisfy that gate; old orphan
+`SimpleGui -> simple_seed` processes are inadmissible diagnostic residue.
+
+Linux/Windows, x86/ARM QEMU, and native-board runs remain postponed to prepared
+hosts and fail closed. They are still required, never PASS by postponement;
+retain and use the exact commands and path references in the existing
+cross-host request and handoff contract above.
+
+The current source-prepared macOS gate uses
+`macos-gpu-2d-live-native-manifest-v2`: it binds the exact widget `.spl`, web
+`.spl`, and showcase HTML path/hash, then admits the same compiler as the
+strict `SimpleGui` source. The launcher publishes a versioned receipt with
+selected/bundled hashes and equal launcher/window-owner identities. Widget and
+web evidence wrappers revalidate that receipt, reject recursive
+`simple_seed` descendants, and capture only the PID-owned `AXWindowNumber`.
+Host-neutral positive/negative probes cover the strict record and seed tree.
+These are source/static gates, not replacement pixels or event receipts; the
+live macOS row remains runtime-unverified until the manifest is rebuilt and
+admitted on the prepared host.
