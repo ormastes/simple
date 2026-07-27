@@ -286,3 +286,29 @@ inbound `batch.quads` nonempty on entry to `_stage_batch`, and stored
 array-bearing aggregate transport, and staged-field assignment without relying
 on untrusted numeric or aggregate returns. The allocated atlas length alone
 does **not** prove glyph insertion or alpha coverage.
+
+## 2026-07-27 bounded producer cycles 7–9
+
+Cycle 7 establishes `local quads = false`; therefore the array-bearing
+`FontRenderBatch` boundary is not the active first failure. Cycle 8 refines
+this to `layout = true` and `positive glyph dimensions = false`. Atlas index,
+quad append, inbound batch, stored quads, ROI alpha, and cache evidence are not
+reached.
+
+All three cycles compiled 184 modules with zero failures. The canonical font
+modules now rebind value-returning pushes for rasterizer pixels, WFFI argument
+arrays, SFFI layout/pixel arrays, cache entries, fallback/quads/atlas metadata,
+shaped identities, and advance-layout arrays. Cycle 9 nevertheless repeats
+the exact `engine2d_font_state_native_status=fail-text-glyph` receipt. Cycles
+8 and 9 also have an identical binary SHA-256,
+`7db8cc35eeab4fd6e406711c043cfa64f16a437ae3ecf858e0d1926990c284dc`,
+showing those source corrections did not alter this compiled closure.
+
+The next fresh-session diagnostic belongs inside `FontRenderer.get_glyph`.
+Use boolean-only fields reset for each configured stage and set at these
+causal boundaries: selected rasterizer maps the codepoint; `rasterize` returns
+non-nil; raw glyph width/height are positive; raw pixel length matches their
+product; same-module reconstructed `CachedGlyph` is positive; caller receives
+positive dimensions. This will distinguish SFFI call/bitmap transport,
+cross-module adapter construction, and `CachedGlyph` return transport without
+printing or returning the suspect aggregate.

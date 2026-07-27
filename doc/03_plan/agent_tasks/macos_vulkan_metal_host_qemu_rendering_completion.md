@@ -725,6 +725,32 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
 - Vulkan 2D/web/GUI/WM live gates remain blocked by the red producer gate and
   the absent current manifest-attested GUI-capable pure-Simple artifact.
 
+### 2026-07-27 Bungee producer cycles 7–9
+
+- Three boolean-only receipts now distinguish local quad production, inbound
+  `FontRenderBatch.quads`, and stored `FontRenderer.staged_quads`. Required
+  boolean arguments and mutable receiver methods avoid the known zero-argument
+  immutable receiver ABI fault.
+- Cycle 7 compiled 184 modules with zero failures and exited exactly at
+  `fail-local-quads`. This proves the aggregate batch boundary was not yet
+  reached with a nonempty local quad array.
+- Second-level receipts distinguish layout, positive glyph dimensions, atlas
+  index, and append reachability. Cycle 8 compiled 184 modules with zero
+  failures and exited exactly at `fail-text-glyph`: layout is nonempty, but
+  the glyph returned to `_stage_text_active` has no positive width/height.
+- Rasterizer pixel arrays, WFFI argument arrays, SFFI layout arrays, glyph
+  cache arrays, shaped identity arrays, and advance-layout arrays now preserve
+  value-returning `push` results. Cycle 9 still exits exactly at
+  `fail-text-glyph`. Cycle 8 and Cycle 9 binaries have the identical SHA-256
+  `7db8cc35eeab4fd6e406711c043cfa64f16a437ae3ecf858e0d1926990c284dc`;
+  on this closure those source corrections did not change emitted code and are
+  not the remaining direct Bungee cause.
+- The three-cycle cap is exhausted. The next session must add boolean-only
+  checkpoints inside `get_glyph`: selected face maps the codepoint, rasterizer
+  bitmap is non-nil, raw dimensions are positive, pixel count matches,
+  reconstructed `CachedGlyph` is positive, and the returned glyph remains
+  positive. Do not retry the current probe unchanged.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |

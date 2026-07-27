@@ -552,6 +552,17 @@ class FontRenderer:
     staged_render_config_identity: text = "coverage8;hint=none;subpixel=none"
     staged_execution_target: text = "auto"
     staged_execution_policy: FontExecutionPolicy = FontExecutionPolicy.Suggested
+    # Boolean-only native diagnostic receipts for the array-bearing batch
+    # boundary. They distinguish local quad production, inbound aggregate
+    # transport, and final staged-field storage without returning an aggregate
+    # or comparing cross-boundary numeric counts.
+    quad_phase_local_nonempty: bool = false
+    quad_phase_inbound_nonempty: bool = false
+    quad_phase_stored_nonempty: bool = false
+    text_phase_layout_nonempty: bool = false
+    text_phase_glyph_positive: bool = false
+    text_phase_atlas_index_valid: bool = false
+    text_phase_quad_appended: bool = false
 
     static fn new() -> FontRenderer:
         val cache = GlyphCache.new(512)
@@ -720,6 +731,7 @@ class FontRenderer:
     # leaves as a scalar, so the returned-aggregate channel that dropped
     # `quads` on the host WM lane is never used.
     me _stage_batch(batch: FontRenderBatch) -> i64:
+        self.quad_phase_inbound_nonempty = batch.quads.len() > 0
         self.staged_valid = batch.valid
         self.staged_program_version = batch.program_version
         self.staged_transform_identity = batch.transform_identity
@@ -731,6 +743,7 @@ class FontRenderer:
         self.staged_atlas_owner_generation = batch.atlas_owner_generation
         self.staged_atlas_empty = batch.atlas_pixels.len() == 0
         self.staged_quads = batch.quads
+        self.quad_phase_stored_nonempty = self.staged_quads.len() > 0
         self.staged_dirty_rects = batch.dirty_rects
         self.staged_render_config_identity = batch.render_config_identity
         self.staged_execution_target = batch.execution_target
@@ -743,6 +756,20 @@ class FontRenderer:
 
     me receipt_staged_valid() -> bool: self.staged_valid
     me receipt_staged_quads_nonempty() -> bool: self.staged_quads.len() > 0
+    me receipt_quad_phase_local_nonempty(token: bool) -> bool:
+        token and self.quad_phase_local_nonempty
+    me receipt_quad_phase_inbound_nonempty(token: bool) -> bool:
+        token and self.quad_phase_inbound_nonempty
+    me receipt_quad_phase_stored_nonempty(token: bool) -> bool:
+        token and self.quad_phase_stored_nonempty
+    me receipt_text_phase_layout_nonempty(token: bool) -> bool:
+        token and self.text_phase_layout_nonempty
+    me receipt_text_phase_glyph_positive(token: bool) -> bool:
+        token and self.text_phase_glyph_positive
+    me receipt_text_phase_atlas_index_valid(token: bool) -> bool:
+        token and self.text_phase_atlas_index_valid
+    me receipt_text_phase_quad_appended(token: bool) -> bool:
+        token and self.text_phase_quad_appended
     me receipt_staged_atlas_nonempty() -> bool:
         if self.staged_atlas_empty:
             return false
@@ -1208,11 +1235,13 @@ class FontRenderer:
         while i < self.atlas_face_ids.len():
             val identity = font_face_identity(self.atlas_face_ids[i], self.atlas_face_generations[i])
             if identity == "": return ""
-            if not identities.contains(identity): identities.push(identity)
+            if not identities.contains(identity):
+                identities = identities.push(identity)
             i = i + 1
         val pending = font_face_identity(face_id, face_generation)
         if pending == "": return ""
-        if not identities.contains(pending): identities.push(pending)
+        if not identities.contains(pending):
+            identities = identities.push(pending)
         if identities.len() == 1: return identities[0]
         var combined = "font-faces-v1"
         for identity in identities:
@@ -1287,6 +1316,13 @@ class FontRenderer:
     # Answers with the staged quad count; the payload itself is read from the
     # staged_* fields on this renderer.
     me stage_text_configured(content: text, color: u32, config: FontRenderConfig) -> i64:
+        self.quad_phase_local_nonempty = false
+        self.quad_phase_inbound_nonempty = false
+        self.quad_phase_stored_nonempty = false
+        self.text_phase_layout_nonempty = false
+        self.text_phase_glyph_positive = false
+        self.text_phase_atlas_index_valid = false
+        self.text_phase_quad_appended = false
         if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
             return self._stage_invalid_config(config)
         self._activate_render_config(config)
@@ -1369,6 +1405,7 @@ class FontRenderer:
                 fallback_x = fallback_x + glyph.advance.to_i64()
                 fallback_byte_offset = fallback_byte_offset + 1
                 ci = ci + 1
+        self.text_phase_layout_nonempty = layout.len() > 0
         if layout.len() == 0:
             return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
         var attempt = 0
@@ -1398,6 +1435,7 @@ class FontRenderer:
                     _vec_glyph_probe_count = _vec_glyph_probe_count + 1
                     print("[vec-glyph-probe] quadloop-after-reget i={i} cp={positioned.codepoint} w={glyph.width} h={glyph.height} face_id={glyph.face_id} face_gen={glyph.face_generation} glyph_index={glyph.glyph_index}")
                 if glyph.width > 0 and glyph.height > 0:
+                    self.text_phase_glyph_positive = true
                     var atlas_index = self._font_atlas_entry_index(glyph.face_id, glyph.face_generation, glyph.glyph_index, glyph.codepoint, font_size)
                     if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
                         _vec_glyph_probe_count = _vec_glyph_probe_count + 1
@@ -1412,6 +1450,7 @@ class FontRenderer:
                     if atlas_index < 0:
                         overflow = true
                     else:
+                        self.text_phase_atlas_index_valid = true
                         val quad = FontRenderQuad(
                             codepoint: glyph.codepoint,
                             byte_offset: quad_byte_offset,
@@ -1421,6 +1460,7 @@ class FontRenderer:
                             color: color
                         )
                         quads = quads.push(quad)
+                        self.text_phase_quad_appended = true
                         if inserted:
                             dirty = dirty.push(quad)
                 i = i + 1
@@ -1477,6 +1517,7 @@ class FontRenderer:
                         print("[vec-atlas-probe] producer n_quads={quads.len()} atlas_len={self.atlas_pixels.len()} first_w={fq.width} first_h={fq.height} first_ax={fq.atlas_x} first_ay={fq.atlas_y} first_cov_nz={nz} color_a={(fq.color >> 24) & 0xFFu32}")
                     else:
                         print("[vec-atlas-probe] producer-empty n_quads=0 overflow={overflow} content_len={content.len()}")
+                self.quad_phase_local_nonempty = quads.len() > 0
                 return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: font_identity, face_generation: face_generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty))
             self._reset_font_atlas(face_generation, font_identity)
             attempt = attempt + 1
