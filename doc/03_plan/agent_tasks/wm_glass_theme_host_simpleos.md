@@ -238,6 +238,22 @@ open and this checkpoint must not be described as a runtime PASS. A
 highest-capability read-only review accepted the strengthened command-level
 Draw IR assertions with no remaining P0/P1 source issue.
 
+### Current-macOS Metal material lane
+
+| Phase | Status | Owner and file range | Exit condition |
+|---|---|---|---|
+| M1 narrow operation contract | Source prepared | Draw IR target and glass execution result owners | Non-Metal targets return unavailable; final readback cannot manufacture a device-material receipt |
+| M2 ordered Metal dispatch | Source prepared | `metal_session.spl`, `backend_metal_msl.spl`, `backend_metal.spl` | Optional snapshot/material pipelines compile; snapshot and material run in ordered encoders; completion alone admits `metal-device-glass-v1` |
+| M3 Web/WM provenance | Source prepared | Draw IR result, Web material provenance, WM frame validator | Witness/count/target/readback/handle/identity all match; CPU/device kinds cannot be swapped |
+| M4 native proof | Open | macOS evidence owner and highest-capability reviewer | Current-source Metal init, device dispatch, device readback, exact pixels/capture, events, timing, and RSS pass |
+
+The embedded MSL source compiles with the installed macOS Metal compiler
+(`xcrun -sdk macosx metal`) on 2026-07-27. Simple source checking is not
+admissible on this checkout: the deployed architecture binary identifies
+itself as the forbidden Rust bootstrap seed, and no bootstrap was started.
+M1-M3 therefore remain SOURCE PREPARED / RUNTIME UNVERIFIED until independent
+review and an admitted pure-Simple runtime execute the focused specs.
+
 Lower-capability sidecars may own W1, W2, and test fixture preparation only
 after the merge owner freezes the exact style keys:
 `wm-material-request`, `background-color`,
@@ -556,3 +572,10 @@ The fail-closed handoff contract is:
 `test/03_system/check/wm_glass_cross_host_evidence_request_spec.spl`.
 
 External rows remain required and must not be counted as exclusions or PASS.
+
+The 2026-07-27 Metal device-glass source checkpoint has completed independent
+highest-capability review with no P0/P1 findings. The reviewer required exact
+straight-alpha parity for translucent destinations and sampled live-device
+comparison with the scalar CPU oracle. Runtime admission remains open because
+the available local executable identifies as the forbidden Rust bootstrap
+seed; no bootstrap was started.

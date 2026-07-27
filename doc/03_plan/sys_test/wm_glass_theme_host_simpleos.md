@@ -76,6 +76,9 @@ HTML, GUI, binary, log and artifact. The generated manual uses linked evidence.
 | `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_glass_material_spec.spl` | Rounded corner/center alpha, bounded backdrop blur, gradient endpoints, and saturation arithmetic are pinned as CPU pixel semantics | Vulkan/Metal device readback, events, timing, RSS |
 | `test/01_unit/os/compositor/simple_web_window_renderer_spec.spl` | WM provenance admits only exact solid/CPU reason pairs with lowercase SHA-256 formatting | Semantic digest recomputation at the frame boundary |
 | `test/01_unit/os/compositor/wm_aetheric_web_material_spec.spl` | Production Aetheric WM request resolves package surface `0xCC1F1F21`, `blur(30px) saturate(170%)`, and one typed CPU-composited Draw IR witness | Successful runtime execution, native Metal/Vulkan/SIMD, host/QEMU capture |
+| `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl` | A final device readback after CPU glass stays CPU; missing/mismatched dispatch stays none; only exact Metal operation receipt promotes device material | Live Metal dispatch and framebuffer parity |
+| `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl` | Software glass records `cpu-scalar-glass-v1` and zero Metal count/handle/identity | Native Metal operation |
+| `test/02_integration/rendering/metal_msl_pipeline_spec.spl` | Optional snapshot/material pipelines and completed device operation produce device readback with no pending command ownership; outside/corner/center samples over a translucent backdrop must exactly match the CPU scalar oracle | Admitted pure-Simple execution plus host screenshot/event/timing evidence |
 
 The source slice is deliberately not a system-spec PASS. The aggregate
 `wm_glass_theme_host_simpleos_spec.spl` remains fail-closed until retained,
@@ -96,6 +99,17 @@ adapter-to-Draw-IR spec was attempted twice with the deployed macOS
 interpreter; both runs timed out at 120 seconds during setup/source work
 before an assertion executed. These are not semantic failures, but they are
 also not PASS evidence; no retry or bootstrap is authorized for this session.
+
+The Metal source lane adds a stronger, independent operation receipt. A valid
+device result requires the exact Metal glass target, matching producer/device
+counts, zero CPU executions, positive device framebuffer handle and identity,
+and a final device readback. The final readback cannot promote CPU glass by
+itself. Its shared source-over helper uses the same straight-alpha
+destination weighting and output unpremultiplication as the CPU oracle, and
+the live spec samples device parity over a translucent backdrop. The embedded
+MSL compiles with the installed macOS Metal compiler, but the live integration
+spec has not run on an admitted pure-Simple runtime and therefore remains
+SOURCE PREPARED / RUNTIME UNVERIFIED.
 
 The planned Web repair adds paired evidence:
 

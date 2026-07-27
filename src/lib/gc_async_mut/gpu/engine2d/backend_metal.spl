@@ -11,6 +11,10 @@ use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, glyph_atlas_dense_value
 use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_download_ptr, metal_buffer_upload_ptr, metal_set_bytes_ptr, metal_u32s_from_ptr, metal_write_u32s_to_ptr, gpu_lut_pack_dense, gpu_lut_free, gpu_lut_dense_byte_len}
 use std.gpu.engine2d.backend_capability.{BackendCapability, Engine2dBackendKind, backend_capability_default, OP_INDEXED_FILL, OP_GLYPH_ATLAS_BLIT, OP_DRAW_GRADIENT_RECT, OP_DRAW_ROUNDED_RECT, OP_DRAW_IMAGE}
 use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
+use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
+    Engine2dGlassMaterialConfig,
+    engine2d_draw_ir_glass_material_pixels
+}
 use std.gpu.engine2d.backend_metal_font.{MetalFontBackendState}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
 use std.gc_async_mut.env.platform.{is_macos}
@@ -1042,6 +1046,198 @@ impl MetalBackend:
         # Keep full-sized fallback storage so device readback remains ABI-stable;
         # draw methods use gpu_only to skip CPU mirror rasterization entirely.
         self.gpu_only = true
+
+    # Apply the canonical Draw IR glass material entirely on the Metal device.
+    # One command buffer first snapshots the framebuffer into an immutable
+    # device buffer, then dispatches the glass kernel against that snapshot.
+    # The boolean is an operation receipt: callers may claim Metal glass only
+    # when this exact dispatch completed.
+    me draw_ir_apply_glass_material_device(
+        config: Engine2dGlassMaterialConfig
+    ) -> bool:
+        val pixel_count = self.w.to_i64() * self.h.to_i64()
+        val output_count = config.width.to_i64() * config.height.to_i64()
+        if (not self.initialized or not self.session.is_valid() or
+            not self.gpu_frame_complete or self.pending_composite_command != 0 or
+            self.d_framebuffer <= 0 or self.command_queue <= 0 or
+            self.session.pipe_glass_snapshot <= 0 or
+            self.session.pipe_glass_material <= 0):
+            self.last_error = "Metal device glass unavailable"
+            return false
+        if (config.framebuffer_width != self.w or
+            config.framebuffer_height != self.h or
+            config.x < 0 or config.y < 0 or
+            config.width <= 0 or config.height <= 0 or
+            config.x.to_i64() + config.width.to_i64() > self.w.to_i64() or
+            config.y.to_i64() + config.height.to_i64() > self.h.to_i64() or
+            pixel_count <= 0 or pixel_count > 67108864 or
+            output_count <= 0 or output_count > 67108864):
+            self.last_error = "Metal device glass config invalid"
+            return false
+
+        val snapshot = metal_sffi_alloc_buffer(
+            self.session.device, pixel_count * 4)
+        if snapshot == 0:
+            self.last_error = "Metal device glass snapshot allocation failed"
+            return false
+        val snapshot_params = metal_host_alloc(4)
+        val glass_params = metal_host_alloc(60)
+        if snapshot_params == 0 or glass_params == 0:
+            if snapshot_params != 0:
+                metal_host_free(snapshot_params)
+            if glass_params != 0:
+                metal_host_free(glass_params)
+            metal_sffi_free_buffer(snapshot)
+            self.last_error = "Metal device glass parameter allocation failed"
+            return false
+
+        metal_host_write_i32(snapshot_params, 0, pixel_count)
+        metal_host_write_i32(glass_params, 0, config.x.to_i64())
+        metal_host_write_i32(glass_params, 4, config.y.to_i64())
+        metal_host_write_i32(glass_params, 8, config.width.to_i64())
+        metal_host_write_i32(glass_params, 12, config.height.to_i64())
+        metal_host_write_i32(glass_params, 16, config.radius.to_i64())
+        metal_host_write_i32(glass_params, 20, config.blur_radius.to_i64())
+        metal_host_write_i32(
+            glass_params, 24, config.saturation_milli.to_i64())
+        metal_host_write_i32(
+            glass_params, 28, config.surface_alpha_milli.to_i64())
+        metal_host_write_i32(
+            glass_params, 32, config.surface_color.to_i64())
+        metal_host_write_i32(
+            glass_params, 36, config.gradient_from.to_i64())
+        metal_host_write_i32(
+            glass_params, 40, config.gradient_to.to_i64())
+        metal_host_write_i32(
+            glass_params, 44, if config.gradient_enabled: 1 else: 0)
+        metal_host_write_i32(
+            glass_params, 48,
+            if config.gradient_layered_over_surface: 1 else: 0)
+        metal_host_write_i32(glass_params, 52, self.w.to_i64())
+        metal_host_write_i32(glass_params, 56, self.h.to_i64())
+
+        val cmd = metal_sffi_create_command_buffer(self.command_queue)
+        if cmd == 0:
+            metal_host_free(snapshot_params)
+            metal_host_free(glass_params)
+            metal_sffi_free_buffer(snapshot)
+            self.last_error = "Metal device glass command allocation failed"
+            return false
+        val snapshot_encoder = metal_sffi_create_compute_encoder(cmd)
+        if snapshot_encoder == 0:
+            metal_host_free(snapshot_params)
+            metal_host_free(glass_params)
+            metal_sffi_free_buffer(snapshot)
+            metal_sffi_destroy_command_buffer(cmd)
+            self.last_error = "Metal device glass snapshot encoder allocation failed"
+            return false
+
+        var snapshot_encoded = metal_sffi_set_buffer(
+            snapshot_encoder, snapshot, 0, 0)
+        snapshot_encoded = snapshot_encoded and (
+            metal_set_bytes_ptr(
+                snapshot_encoder, snapshot_params, 4, 1) != 0)
+        snapshot_encoded = snapshot_encoded and metal_sffi_set_buffer(
+            snapshot_encoder, self.d_framebuffer, 0, 2)
+        val snapshot_block = 256
+        val snapshot_grid = (
+            (pixel_count + snapshot_block - 1) / snapshot_block
+        ) * snapshot_block
+        if snapshot_encoded:
+            snapshot_encoded = metal_sffi_dispatch_compute(
+                snapshot_encoder, self.session.pipe_glass_snapshot,
+                snapshot_grid, 1, 1, snapshot_block, 1, 1)
+        snapshot_encoded = snapshot_encoded and metal_sffi_end_compute_encoder(
+            snapshot_encoder)
+        metal_sffi_destroy_compute_encoder(snapshot_encoder)
+        if not snapshot_encoded:
+            metal_host_free(snapshot_params)
+            metal_host_free(glass_params)
+            metal_sffi_free_buffer(snapshot)
+            metal_sffi_destroy_command_buffer(cmd)
+            self.last_error = "Metal device glass snapshot encoding failed"
+            return false
+
+        # A second encoder creates an explicit command-buffer ordering boundary
+        # between snapshot writes and material reads.
+        val encoder = metal_sffi_create_compute_encoder(cmd)
+        if encoder == 0:
+            metal_host_free(snapshot_params)
+            metal_host_free(glass_params)
+            metal_sffi_free_buffer(snapshot)
+            metal_sffi_destroy_command_buffer(cmd)
+            self.last_error = "Metal device glass material encoder allocation failed"
+            return false
+        var encoded = metal_sffi_set_buffer(
+            encoder, self.d_framebuffer, 0, 0)
+        encoded = encoded and (
+            metal_set_bytes_ptr(encoder, glass_params, 60, 1) != 0)
+        encoded = encoded and metal_sffi_set_buffer(encoder, snapshot, 0, 2)
+        encoded = encoded and self._bind_metal_clip(encoder)
+        val block_x = 16
+        val block_y = 16
+        val grid_x = (
+            (config.width.to_i64() + block_x - 1) / block_x
+        ) * block_x
+        val grid_y = (
+            (config.height.to_i64() + block_y - 1) / block_y
+        ) * block_y
+        if encoded:
+            encoded = metal_sffi_dispatch_compute(
+                encoder, self.session.pipe_glass_material,
+                grid_x, grid_y, 1, block_x, block_y, 1)
+        encoded = encoded and metal_sffi_end_compute_encoder(encoder)
+        metal_host_free(snapshot_params)
+        metal_host_free(glass_params)
+        if not encoded:
+            metal_sffi_free_buffer(snapshot)
+            metal_sffi_destroy_compute_encoder(encoder)
+            metal_sffi_destroy_command_buffer(cmd)
+            self.last_error = "Metal device glass encoding failed"
+            return false
+
+        self.pending_composite_command = cmd
+        self.pending_composite_encoder = encoder
+        self.pending_composite_source = snapshot
+        val committed = metal_sffi_commit_command_buffer(cmd)
+        if not committed:
+            metal_sffi_release_uncommitted_submission(
+                cmd, encoder, snapshot)
+            self.pending_composite_command = 0
+            self.pending_composite_encoder = 0
+            self.pending_composite_source = 0
+            self.initialized = false
+            self.gpu_frame_complete = false
+            self.last_error = "Metal device glass commit failed"
+            return false
+        if not metal_sffi_wait_completed(cmd):
+            self.initialized = false
+            self.gpu_frame_complete = false
+            self.last_error = "Metal device glass completion unknown"
+            return false
+
+        metal_sffi_free_buffer(snapshot)
+        metal_sffi_destroy_compute_encoder(encoder)
+        metal_sffi_destroy_command_buffer(cmd)
+        self.pending_composite_command = 0
+        self.pending_composite_encoder = 0
+        self.pending_composite_source = 0
+        self.dirty = true
+        self.gpu_frame_complete = true
+        self.last_error = ""
+
+        # Normal (non-fast) Metal keeps a CPU mirror as a future fallback.
+        # Update that mirror from its own already-mirrored backdrop; this is not
+        # a device readback and cannot create the device receipt above.
+        if (not self.gpu_only and
+            self.mirror.buf.len() == pixel_count):
+            val mirror_pixels = engine2d_draw_ir_glass_material_pixels(
+                self.mirror.buf, config)
+            if mirror_pixels.len() == output_count:
+                self.mirror.draw_image(
+                    config.x, config.y, config.width, config.height,
+                    mirror_pixels)
+        true
 
     fn _gpu_only_mask_emulation_active() -> bool:
         self.gpu_only and self.mirror.mask_buf.len() > 0

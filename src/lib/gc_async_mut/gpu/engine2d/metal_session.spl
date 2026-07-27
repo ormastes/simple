@@ -68,6 +68,9 @@ class MetalSession:
     generation: i64           # Stale-resource detection; incremented on init and cleanup
     last_error: i64            # Last init failure code; 0 means success
     last_runtime_error: text   # Native Metal diagnostic captured before cleanup
+    # Appended so existing cross-module/native field offsets remain stable.
+    pipe_glass_snapshot: i64  # Optional: immutable device framebuffer snapshot
+    pipe_glass_material: i64  # Optional: device glass material compositor
 
     static fn create(mode: text) -> MetalSession:
         """Return a zero-initialised, uninitialised session. Call init() before use."""
@@ -88,6 +91,8 @@ class MetalSession:
             pipe_gradient: 0,
             pipe_blit: 0,
             pipe_image_composite: 0,
+            pipe_glass_snapshot: 0,
+            pipe_glass_material: 0,
             pipe_indexed_fill: 0,
             pipe_glyph_atlas_blit: 0,
             pipe_font_atlas_composite: 0,
@@ -147,6 +152,13 @@ class MetalSession:
             self.last_runtime_error = metal_last_error()
             self._cleanup()
             return false
+        # Device glass is optional. A missing pipeline leaves ordinary Metal
+        # rendering available and forces the Draw IR owner to its CPU/solid
+        # fallback without claiming a device material receipt.
+        self.pipe_glass_snapshot = metal_sffi_create_compute_pipeline(
+            self.device, self.shader_lib, "kernel_glass_snapshot")
+        self.pipe_glass_material = metal_sffi_create_compute_pipeline(
+            self.device, self.shader_lib, "kernel_glass_material")
         # GPU-dict pilot pipeline: deliberately NOT part of the gate above.
         # A compile/pipeline-creation failure here must not take down the rest
         # of Metal rendering (loud fall-through, design §3.4) — MetalBackend's
@@ -248,6 +260,10 @@ class MetalSession:
             metal_sffi_destroy_pipeline(self.pipe_blit)
         if self.pipe_image_composite != 0:
             metal_sffi_destroy_pipeline(self.pipe_image_composite)
+        if self.pipe_glass_snapshot != 0:
+            metal_sffi_destroy_pipeline(self.pipe_glass_snapshot)
+        if self.pipe_glass_material != 0:
+            metal_sffi_destroy_pipeline(self.pipe_glass_material)
         if self.pipe_indexed_fill != 0:
             metal_sffi_destroy_pipeline(self.pipe_indexed_fill)
         if self.pipe_glyph_atlas_blit != 0:
@@ -274,6 +290,8 @@ class MetalSession:
         self.pipe_gradient = 0
         self.pipe_blit = 0
         self.pipe_image_composite = 0
+        self.pipe_glass_snapshot = 0
+        self.pipe_glass_material = 0
         self.pipe_indexed_fill = 0
         self.pipe_glyph_atlas_blit = 0
         self.pipe_font_atlas_composite = 0

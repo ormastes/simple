@@ -739,3 +739,27 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   highest-capability review then accepted the strengthened command-level Draw
   IR assertions with no remaining P0/P1 source issue. Native Metal/NEON and
   postponed external-host/QEMU evidence remain open.
+
+- continuation-2026-07-27-metal-device-glass: **SOURCE PREPARED / RUNTIME
+  UNVERIFIED.** Three parallel read-only audits agreed that the existing final
+  `device_readback` proves only framebuffer origin: the glass operation still
+  ran through `read_pixels -> cpu scalar -> draw_image`. The current source
+  adds one narrow Draw IR target operation and two optional Metal pipelines.
+  An ordered device snapshot encoder precedes the material encoder, avoiding
+  in-place blur races while keeping transient buffers outside Draw IR. Only a
+  completed dispatch yields `metal-device-glass-v1`; counts, target, positive
+  framebuffer handle/device identity, and final device readback must all match
+  before Web/WM accepts `metal-device-composited-material`. CPU execution and
+  device execution remain distinct and fail closed on mismatch.
+
+  The extracted embedded MSL compiled successfully with the installed macOS
+  Metal compiler. The repository source check refused because the deployed
+  architecture runtime identifies as the forbidden Rust bootstrap seed; no
+  bootstrap was started. Focused Simple unit/integration specs were added but
+  not executed. Highest-capability review found and corrected a translucent-
+  destination alpha mismatch in the shared MSL blend helper, then accepted
+  the final source with no P0/P1 findings. The live Metal spec now compares
+  sampled device pixels against the CPU oracle over a translucent backdrop.
+  The existing row SIMD ABI can use real NEON for blend rows but lacks
+  operation-specific proof and does not accelerate blur/saturation, so no NEON
+  glass claim was added. Vulkan and external-host/QEMU rows remain postponed.

@@ -21,7 +21,10 @@ use common.ui.draw_ir.{
 use std.gc_async_mut.gpu.engine2d.draw_ir_target.{DrawIrRenderTarget}
 use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
 use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
+    Engine2dGlassExecutionResult,
     Engine2dGlassMaterialConfig,
+    engine2d_glass_execution_cpu,
+    engine2d_glass_execution_unavailable,
     engine2d_draw_ir_glass_material_pixels
 }
 use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels, font_destination_origin}
@@ -63,6 +66,11 @@ struct Engine2dDrawIrAdvResult:
     font_atlas_upload_count: i64 = 0
     font_atlas_upload_bytes: i64 = 0
     font_atlas_payload_sha256: text = ""
+    # Appended to preserve all existing result-field offsets.
+    metal_device_glass_material_count: i32 = 0
+    glass_execution_target: text = ""
+    glass_backend_handle: i64 = 0
+    glass_device_identity: i64 = 0
 
 struct Engine2dResolvedDrawIrImage:
     image_uri: text
@@ -79,22 +87,42 @@ struct Engine2dDrawIrRenderOutcome:
     skipped: i32
     unsupported_kinds: text
     cpu_composited_material_count: i32
+    metal_device_glass_material_count: i32
+    glass_execution_target: text
+    glass_backend_handle: i64
+    glass_device_identity: i64
 
 struct Engine2dDrawIrBoxOutcome:
     engine: DrawIrRenderTarget
-    cpu_composited_material: bool
+    glass_execution: Engine2dGlassExecutionResult
 
 struct Engine2dDrawIrGlassOutcome:
     engine: DrawIrRenderTarget
     composited: bool
+    execution: Engine2dGlassExecutionResult
 
-fn _engine2d_draw_ir_render_outcome(engine: DrawIrRenderTarget, rendered: i32, skipped: i32, unsupported_kinds: text, cpu_composited_material_count: i32) -> Engine2dDrawIrRenderOutcome:
+fn _engine2d_draw_ir_render_outcome(
+    engine: DrawIrRenderTarget,
+    rendered: i32,
+    skipped: i32,
+    unsupported_kinds: text,
+    cpu_composited_material_count: i32,
+    metal_device_glass_material_count: i32 = 0,
+    glass_execution_target: text = "",
+    glass_backend_handle: i64 = 0,
+    glass_device_identity: i64 = 0
+) -> Engine2dDrawIrRenderOutcome:
     Engine2dDrawIrRenderOutcome(
         engine: engine,
         rendered: rendered,
         skipped: skipped,
         unsupported_kinds: unsupported_kinds,
-        cpu_composited_material_count: cpu_composited_material_count
+        cpu_composited_material_count: cpu_composited_material_count,
+        metal_device_glass_material_count:
+            metal_device_glass_material_count,
+        glass_execution_target: glass_execution_target,
+        glass_backend_handle: glass_backend_handle,
+        glass_device_identity: glass_device_identity
     )
 
 fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, skipped: i32, readback: Engine2DReadback) -> Engine2dDrawIrAdvResult:
@@ -110,7 +138,12 @@ fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, s
         readback_source: readback.source,
         backend_handle: readback.backend_handle,
         device_identity: readback.device_identity,
-        readback_checksum: readback.checksum
+        readback_checksum: readback.checksum,
+        cpu_composited_material_count: 0,
+        metal_device_glass_material_count: 0,
+        glass_execution_target: "",
+        glass_backend_handle: 0,
+        glass_device_identity: 0
     )
 
 fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositionPlan, rendered: i32, skipped: i32, readback: Engine2DReadback) -> Engine2dDrawIrAdvResult:
@@ -126,7 +159,12 @@ fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositio
         readback_source: readback.source,
         backend_handle: readback.backend_handle,
         device_identity: readback.device_identity,
-        readback_checksum: readback.checksum
+        readback_checksum: readback.checksum,
+        cpu_composited_material_count: 0,
+        metal_device_glass_material_count: 0,
+        glass_execution_target: "",
+        glass_backend_handle: 0,
+        glass_device_identity: 0
     )
 
 fn _engine2d_draw_ir_supported_command(kind: text) -> bool:
@@ -287,17 +325,21 @@ fn _engine2d_draw_ir_render_borders(engine: DrawIrRenderTarget, style: [DrawIrSt
 
 fn _engine2d_draw_ir_render_glass_material(engine: DrawIrRenderTarget, command: DrawIrCommand, x: i32, y: i32, w: i32, h: i32, radius: i32) -> Engine2dDrawIrGlassOutcome:
     var eng = engine
+    val unavailable = engine2d_glass_execution_unavailable(
+        "glass-material-not-composited")
     val style: [DrawIrStyleProp] = command.computed_style
     val capability = _engine2d_draw_ir_style_value(
         style, "backdrop-filter-capability")
     if capability != "engine2d-cpu-composited-material-v1":
-        return Engine2dDrawIrGlassOutcome(engine: eng, composited: false)
+        return Engine2dDrawIrGlassOutcome(
+            engine: eng, composited: false, execution: unavailable)
     val framebuffer_width = eng.width()
     val framebuffer_height = eng.height()
     if (x < 0 or y < 0 or w <= 0 or h <= 0 or
         x.to_i64() + w.to_i64() > framebuffer_width.to_i64() or
         y.to_i64() + h.to_i64() > framebuffer_height.to_i64()):
-        return Engine2dDrawIrGlassOutcome(engine: eng, composited: false)
+        return Engine2dDrawIrGlassOutcome(
+            engine: eng, composited: false, execution: unavailable)
     val backdrop = _engine2d_draw_ir_style_value(style, "backdrop-filter")
     val requested_blur = _engine2d_draw_ir_nth_int(backdrop, 0, 0)
     val realized_blur_text = _engine2d_draw_ir_style_value(
@@ -305,7 +347,8 @@ fn _engine2d_draw_ir_render_glass_material(engine: DrawIrRenderTarget, command: 
     val realized_saturation_text = _engine2d_draw_ir_style_value(
         style, "backdrop-filter-realized-saturation-milli")
     if realized_blur_text == "" or realized_saturation_text == "":
-        return Engine2dDrawIrGlassOutcome(engine: eng, composited: false)
+        return Engine2dDrawIrGlassOutcome(
+            engine: eng, composited: false, execution: unavailable)
     val realized_blur = _engine2d_draw_ir_nth_int(
         realized_blur_text,
         0,
@@ -359,12 +402,24 @@ fn _engine2d_draw_ir_render_glass_material(engine: DrawIrRenderTarget, command: 
         gradient_enabled: gradient_enabled,
         gradient_layered_over_surface: gradient_layered_over_surface
     )
+    val device_execution = eng.draw_ir_apply_glass_material(config)
+    if device_execution.applied:
+        return Engine2dDrawIrGlassOutcome(
+            engine: eng, composited: true, execution: device_execution)
+    if device_execution.failure_reason == "device-glass-state-unknown":
+        return Engine2dDrawIrGlassOutcome(
+            engine: eng, composited: false, execution: device_execution)
     val pixels = engine2d_draw_ir_glass_material_pixels(
         eng.read_pixels(), config)
     if pixels.len() != w.to_i64() * h.to_i64():
-        return Engine2dDrawIrGlassOutcome(engine: eng, composited: false)
+        return Engine2dDrawIrGlassOutcome(
+            engine: eng, composited: false, execution: unavailable)
     eng.draw_image(x, y, w, h, pixels)
-    Engine2dDrawIrGlassOutcome(engine: eng, composited: true)
+    Engine2dDrawIrGlassOutcome(
+        engine: eng,
+        composited: true,
+        execution: engine2d_glass_execution_cpu()
+    )
 
 # Render a single HTML/CSS box honestly instead of collapsing it to one flat
 # fill: box-shadow first (behind), then background (linear-gradient beats a solid
@@ -392,7 +447,7 @@ fn _engine2d_draw_ir_render_box(engine: DrawIrRenderTarget, command: DrawIrComma
         eng = _engine2d_draw_ir_render_borders(
             eng, style, x, y, w, h, radius)
         return Engine2dDrawIrBoxOutcome(
-            engine: eng, cpu_composited_material: true)
+            engine: eng, glass_execution: glass.execution)
     val bg_image = _engine2d_draw_ir_style_value(style, "background-image")
     if bg_image.starts_with("linear-gradient(") and radius <= 0:
         val g_from = _engine2d_draw_ir_nth_int(bg_image, 0, 0) as u32
@@ -410,7 +465,10 @@ fn _engine2d_draw_ir_render_box(engine: DrawIrRenderTarget, command: DrawIrComma
             eng.draw_rect_filled(x, y, w, h, command.color)
     eng = _engine2d_draw_ir_render_borders(eng, style, x, y, w, h, radius)
     Engine2dDrawIrBoxOutcome(
-        engine: eng, cpu_composited_material: false)
+        engine: eng,
+        glass_execution: engine2d_glass_execution_unavailable(
+            "glass-material-fallback-painted")
+    )
 
 fn engine2d_resolved_draw_ir_image(image_uri: text, width: i32, height: i32, pixels: [u32]) -> Engine2dResolvedDrawIrImage:
     Engine2dResolvedDrawIrImage(image_uri: image_uri, width: width, height: height, pixels: pixels)
@@ -604,7 +662,12 @@ fn _engine2d_draw_ir_result_from_plan_with_unsupported(plan: Simple2dDrawIrPlan,
         readback_source: readback.source,
         backend_handle: readback.backend_handle,
         device_identity: readback.device_identity,
-        readback_checksum: readback.checksum
+        readback_checksum: readback.checksum,
+        cpu_composited_material_count: 0,
+        metal_device_glass_material_count: 0,
+        glass_execution_target: "",
+        glass_backend_handle: 0,
+        glass_device_identity: 0
     )
 
 fn _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan: Simple2dDrawIrCompositionPlan, rendered: i32, skipped: i32, unsupported_kinds: text, readback: Engine2DReadback) -> Engine2dDrawIrAdvResult:
@@ -621,7 +684,12 @@ fn _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan: Simple2
         readback_source: readback.source,
         backend_handle: readback.backend_handle,
         device_identity: readback.device_identity,
-        readback_checksum: readback.checksum
+        readback_checksum: readback.checksum,
+        cpu_composited_material_count: 0,
+        metal_device_glass_material_count: 0,
+        glass_execution_target: "",
+        glass_backend_handle: 0,
+        glass_device_identity: 0
     )
 
 # Maximum embedded-surface nesting depth for _engine2d_draw_ir_render_batch_embedded.
@@ -689,6 +757,10 @@ fn _engine2d_draw_ir_render_commands(engine: DrawIrRenderTarget, commands: [Draw
     var skipped = 0
     var unsupported_kinds = ""
     var cpu_composited_material_count = 0
+    var metal_device_glass_material_count = 0
+    var glass_execution_target = ""
+    var glass_backend_handle: i64 = 0
+    var glass_device_identity: i64 = 0
     for command in commands:
         # A nil display-list element must be skipped before any field access.
         # Keep the explicit comparison: freestanding codegen has miscompiled
@@ -703,8 +775,15 @@ fn _engine2d_draw_ir_render_commands(engine: DrawIrRenderTarget, commands: [Draw
             val box = _engine2d_draw_ir_render_box(
                 eng, command, x, y, command.width, command.height)
             eng = box.engine
-            if box.cpu_composited_material:
+            if box.glass_execution.execution_target == "cpu-scalar-glass-v1":
                 cpu_composited_material_count = cpu_composited_material_count + 1
+                glass_execution_target = box.glass_execution.execution_target
+            elif box.glass_execution.execution_target == "metal-device-glass-v1":
+                metal_device_glass_material_count = (
+                    metal_device_glass_material_count + 1)
+                glass_execution_target = box.glass_execution.execution_target
+                glass_backend_handle = box.glass_execution.backend_handle
+                glass_device_identity = box.glass_execution.device_identity
             rendered = rendered + 1
         elif command_kind == DRAW_IR_COMMAND_TEXT:
             val font_identity = _engine2d_draw_ir_style_value(command.computed_style, "font-identity")
@@ -790,7 +869,11 @@ fn _engine2d_draw_ir_render_commands(engine: DrawIrRenderTarget, commands: [Draw
         rendered,
         skipped,
         unsupported_kinds,
-        cpu_composited_material_count
+        cpu_composited_material_count,
+        metal_device_glass_material_count,
+        glass_execution_target,
+        glass_backend_handle,
+        glass_device_identity
     )
 
 # Render one batch onto `engine`, honoring a real embedded render target when
@@ -878,7 +961,11 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
             direct.rendered,
             direct.skipped,
             direct.unsupported_kinds,
-            direct.cpu_composited_material_count
+            direct.cpu_composited_material_count,
+            direct.metal_device_glass_material_count,
+            direct.glass_execution_target,
+            direct.glass_backend_handle,
+            direct.glass_device_identity
         )
 
     # Seed-JIT compatibility (hot path): a mutable `DrawIrRenderTarget? = nil` binding
@@ -979,6 +1066,11 @@ fn engine2d_draw_ir_adv_batch_with_images(engine: DrawIrRenderTarget, batch: Dra
         eng.read_pixels_with_source()
     )
     result.cpu_composited_material_count = outcome.cpu_composited_material_count
+    result.metal_device_glass_material_count = (
+        outcome.metal_device_glass_material_count)
+    result.glass_execution_target = outcome.glass_execution_target
+    result.glass_backend_handle = outcome.glass_backend_handle
+    result.glass_device_identity = outcome.glass_device_identity
     result
 
 fn engine2d_draw_ir_adv_composition(engine: DrawIrRenderTarget, composition: DrawIrComposition, gpu_available: bool) -> Engine2dDrawIrAdvResult:
@@ -1024,6 +1116,10 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: DrawIrRenderTarget, com
     var skipped = 0
     var unsupported_kinds = ""
     var cpu_composited_material_count = 0
+    var metal_device_glass_material_count = 0
+    var glass_execution_target = ""
+    var glass_backend_handle: i64 = 0
+    var glass_device_identity: i64 = 0
     # NOTE(layer ordering): batches composite in array order, not re-sorted by
     # embedding.layer. Every real producer (e.g. window_scene_draw_ir.spl)
     # already emits batches desktop-first/chrome-next/windows-by-ascending-
@@ -1041,6 +1137,16 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: DrawIrRenderTarget, com
             cpu_composited_material_count +
             outcome.cpu_composited_material_count
         )
+        metal_device_glass_material_count = (
+            metal_device_glass_material_count +
+            outcome.metal_device_glass_material_count
+        )
+        if outcome.glass_execution_target != "":
+            glass_execution_target = outcome.glass_execution_target
+        if outcome.glass_backend_handle > 0:
+            glass_backend_handle = outcome.glass_backend_handle
+        if outcome.glass_device_identity > 0:
+            glass_device_identity = outcome.glass_device_identity
         if outcome.unsupported_kinds != "" and outcome.unsupported_kinds != "none":
             if unsupported_kinds != "":
                 unsupported_kinds = unsupported_kinds + ","
@@ -1057,6 +1163,11 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: DrawIrRenderTarget, com
     # Single line: the parser needs the expression on the same line as `=`;
     # a newline straight after the assignment operator does not continue.
     result.cpu_composited_material_count = cpu_composited_material_count
+    result.metal_device_glass_material_count = (
+        metal_device_glass_material_count)
+    result.glass_execution_target = glass_execution_target
+    result.glass_backend_handle = glass_backend_handle
+    result.glass_device_identity = glass_device_identity
     val rendered_fonts = eng.fonts()
     result.font_identity = rendered_fonts.current_font_identity()
     eng.install_font_renderer(rendered_fonts)

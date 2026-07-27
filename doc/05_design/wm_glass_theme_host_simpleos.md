@@ -136,6 +136,46 @@ gradient alpha, rounded corner, backdrop sample, and opaque fallback from the
 same request. Native Vulkan/Metal, SIMD, event, host, and QEMU evidence remain
 separate later phases.
 
+### Metal device glass operation
+
+Metal material execution is an operation receipt, not an inference from the
+final framebuffer. `DrawIrRenderTarget.draw_ir_apply_glass_material` is the
+single narrow backend hook; the generic `RenderBackend` interface remains
+unchanged. A Metal target admits `metal-device-glass-v1` only after one command
+buffer completes two ordered compute encoders:
+
+1. `kernel_glass_snapshot` copies the current device framebuffer into a
+   transient immutable device buffer;
+2. `kernel_glass_material` reads that snapshot, performs the bounded
+   blur/saturation/surface/gradient operation, and writes the existing device
+   framebuffer.
+
+Separate encoders establish snapshot-before-material ordering and prevent
+in-place blur races. The snapshot never enters Draw IR or a Web artifact.
+Missing optional pipelines, invalid configuration, or pre-submit failures fall
+back to the existing CPU/solid policy without a device claim. A submitted
+operation whose completion is unknown poisons the device material state and
+must not run the CPU compositor over a possibly mutated framebuffer.
+
+The MSL compositor is required to match the CPU oracle for straight-alpha
+source-over, including translucent destinations: destination RGB is weighted
+by destination alpha, and output RGB is unpremultiplied by output alpha. The
+live Metal contract samples outside, rounded-corner, and center pixels over a
+translucent backdrop against the scalar CPU result.
+
+`Engine2dDrawIrAdvResult` carries device-glass count, execution target,
+framebuffer handle, and device identity separately from final
+`readback_source`. Web promotion requires the producer witness count, completed
+Metal operation count, exact execution target, positive handle/identity, zero
+CPU count, and final `device_readback`. Only then may the artifact use
+`metal-device-composited-material`; a device readback after CPU composition
+remains `cpu-composited-material`.
+
+The existing macOS ARM64 row-blend ABI can accelerate only the final blend
+passes with real NEON. It does not prove NEON blur/saturation and its global hit
+counter is not operation-specific, so no `glass-neon` receipt is admitted in
+this phase.
+
 ## Evidence Model
 
 `wm-glass-theme-evidence-v1` separates requested semantics from realized

@@ -38,6 +38,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     SimpleWebRenderer, simple_web_render_html_to_scene, simple_web_render_html_to_pixels,
     simple_web_render_url_to_pixels, simple_web_resolved_engine2d_backend_name}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_material_provenance_after_backend_execution,
     simple_web_layout_material_provenance_after_execution,
     simple_web_layout_render_html_draw_ir,
     simple_web_layout_render_html_draw_ir_result,
@@ -285,6 +286,38 @@ describe "SimpleWebRenderer":
         expect(with_receipt.reason).to_equal(
             "native-device-backdrop-path-pending")
         expect(with_receipt.material_sha256.len()).to_equal(64)
+
+    it "requires an independent Metal glass dispatch receipt":
+        val html = "<html><body><section id='card' data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' style='display:block;width:12px;height:8px;background:rgba(31,31,33,0.80);backdrop-filter:blur(30px) saturate(170%)'></section></body></html>"
+        val layout = simple_web_layout_render_html_draw_ir_result(
+            html, 32, 20)
+        val final_device_readback_after_cpu =
+            simple_web_layout_material_provenance_after_backend_execution(
+                layout.material_witness, 0, 32 * 20, 32 * 20,
+                1, 0, "cpu-scalar-glass-v1", "device_readback", 7, 11)
+        val missing_dispatch =
+            simple_web_layout_material_provenance_after_backend_execution(
+                layout.material_witness, 0, 32 * 20, 32 * 20,
+                0, 0, "unavailable", "device_readback", 7, 11)
+        val mismatched_dispatch =
+            simple_web_layout_material_provenance_after_backend_execution(
+                layout.material_witness, 0, 32 * 20, 32 * 20,
+                0, 2, "metal-device-glass-v1",
+                "device_readback", 7, 11)
+        val metal =
+            simple_web_layout_material_provenance_after_backend_execution(
+                layout.material_witness, 0, 32 * 20, 32 * 20,
+                0, 1, "metal-device-glass-v1",
+                "device_readback", 7, 11)
+
+        expect(final_device_readback_after_cpu.kind).to_equal(
+            "cpu-composited-material")
+        expect(missing_dispatch.kind).to_equal("none")
+        expect(mismatched_dispatch.kind).to_equal("none")
+        expect(metal.kind).to_equal("metal-device-composited-material")
+        expect(metal.reason).to_equal("metal-device-glass-dispatch")
+        expect(metal.material_sha256).to_equal(
+            layout.material_witness.cpu_composited_sha256)
 
     it "executes Aetheric shorthand through Style Draw IR and the typed CPU receipt":
         # This is the closest integrated public path: the CSS shorthand is

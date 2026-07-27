@@ -80,6 +80,16 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_target.{
     DrawIrRenderTarget,
     DrawIrTargetFontEvidence
 }
+use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
+    Engine2dGlassExecutionResult,
+    Engine2dGlassMaterialConfig,
+    engine2d_glass_execution_metal,
+    engine2d_glass_execution_unavailable
+}
+use std.gc_async_mut.io.metal_sffi.{metal_device_info}
+use std.gc_async_mut.processing.metal_fill_u32.{
+    processing_metal_device_identity
+}
 
 # ============================================================================
 # Config / environment backend selection
@@ -929,6 +939,30 @@ class Engine2D with DrawIrRenderTarget:
 
     me height() -> i32:
         self.h
+
+    me draw_ir_apply_glass_material(
+        config: Engine2dGlassMaterialConfig
+    ) -> Engine2dGlassExecutionResult:
+        if val Some(metal) = self.metal_backend:
+            val info = metal_device_info(0)
+            val identity = processing_metal_device_identity(
+                info.name, info.total_memory)
+            if identity <= 0 or metal.d_framebuffer <= 0:
+                return engine2d_glass_execution_unavailable(
+                    "metal-device-identity-unavailable")
+            val applied = metal.draw_ir_apply_glass_material_device(config)
+            val handle = metal.d_framebuffer
+            val reason = metal.last_error
+            self.metal_backend = Some(metal)
+            self.backend = metal
+            if applied:
+                return engine2d_glass_execution_metal(handle, identity)
+            if not metal.initialized:
+                return engine2d_glass_execution_unavailable(
+                    "device-glass-state-unknown")
+            return engine2d_glass_execution_unavailable(reason)
+        engine2d_glass_execution_unavailable(
+            "device-glass-dispatch-not-supported")
 
     # ========================================================================
     # Drawing Operations (delegate to backend)
