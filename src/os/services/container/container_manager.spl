@@ -1,0 +1,385 @@
+# container-manager — Podman design on MDSOC+ (userland service capsule).
+#
+# MDSOC+ shape: this is a USERLAND service, so it is one MDSOC capsule (outer:
+# manifest + ports + capabilities + lifecycle) wrapping an ECS `World` business
+# layer (inner). Kernel-side namespace/capability ENFORCEMENT stays MDSOC-only
+# in src/os/kernel/loader/container_namespace.spl — this capsule only builds the
+# handles the kernel then enforces; it is orchestration, not the security
+# boundary.
+#
+# Design: doc/04_architecture/os/container/podman_mdsoc_container_arch.md
+#
+# ECS uses plain component structs + a `ContainerWorld` holding parallel
+# component arrays keyed by entity index (one Container entity == one index).
+# Pod/Image/Monitor are components on that entity or a side Pod table.
+#
+# Self-hosted-defect discipline (see lane notes):
+#  - the World holds its component arrays DIRECTLY (single field hop); mutations
+#    go through extract-mutate-writeback (var s = self.x; s[i] = ...; self.x = s)
+#    so a write is never lost through a two-hop method call.
+#  - imported method bodies use bare Ok/Err (never Result.Ok) — N/A here, no
+#    Result crossing a module boundary.
+#  - no `{`/`}` literals in strings.
+
+use os.kernel.loader.container_namespace.{ContainerNamespaceView, container_view_rootless, container_view_create, container_view_allows_path, container_view_allows_pid, container_view_path_decision, container_view_pid_decision}
+
+# ============================================================================
+# Shared-namespace mask bits (which namespaces a pod member shares with its pod)
+# ============================================================================
+val NS_NET: u32 = 1u32
+val NS_IPC: u32 = 2u32
+val NS_MOUNT: u32 = 4u32
+val NS_PID: u32 = 8u32
+val NS_UTS: u32 = 16u32
+
+fn mask_has(mask: u32, bit: u32) -> bool:
+    (mask & bit) != 0u32
+
+# ============================================================================
+# ECS components (data-only structs)
+# ============================================================================
+
+struct ContainerId:
+    """Stable identity of a Container entity."""
+    id: u64
+    name: text
+
+struct PodMembership:
+    """Pod the container belongs to + which namespaces it shares with the pod.
+    pod_id == 0 means "not in a pod". shared_ns_mask uses the NS_* bits."""
+    pod_id: u64
+    shared_ns_mask: u32
+
+struct NamespaceView:
+    """Wraps the kernel ContainerNamespaceView (the ENFORCED VFS/pid boundary)
+    plus the manager-held net/ipc endpoint handles. handle == 0 means "no
+    endpoint" (rootless default holds none until sys_pod_wire / sys_start)."""
+    view: ContainerNamespaceView
+    net_handle: u64
+    ipc_handle: u64
+
+struct ResourceDomain:
+    """cgroup-shaped quotas: cpu shares, mem bytes, io weight, pids cap."""
+    cpu: u64
+    mem: u64
+    io: u64
+    pids: u64
+
+struct ImageSnapshot:
+    """Content-addressed RO base + COW writable layer id + per-container quota."""
+    base_digest: text
+    cow_layer: text
+    quota: u64
+
+struct Lifecycle:
+    """created | running | paused | stopped | exited. exit_code is meaningful
+    only when state == "exited" (else -1)."""
+    state: text
+    exit_code: i64
+
+struct MonitorHandle:
+    """Per-container monitor capsule handle + its last-known state (daemonless:
+    one monitor per container, no central root daemon)."""
+    handle: u64
+    last_state: text
+
+# ============================================================================
+# Pod side table (a Pod entity owns the shared net/ipc endpoints)
+# ============================================================================
+
+struct Pod:
+    """A pod: an id + the net/ipc endpoints its members may share."""
+    id: u64
+    net_handle: u64
+    ipc_handle: u64
+
+# ============================================================================
+# ContainerSpec / SpawnRequest — the MODEL of a kernel SpawnSpec.
+#
+# We do NOT call the live spawn syscall. sys_start builds a ContainerSpec from
+# the NamespaceView + ResourceDomain and maps it to a SpawnRequest whose caps
+# are a SUBSET of what was granted at create time (never amplified).
+# ============================================================================
+
+struct ContainerSpec:
+    """Assembled from a container's view + resource domain at start time."""
+    image_digest: text
+    root: text
+    caps: [text]
+    budget: u64
+
+struct SpawnRequest:
+    """The model of a kernel SpawnSpec submission (image + attenuated pouch)."""
+    image_digest: text
+    isolation: text
+    caps: [text]
+    budget: u64
+
+# Subset check: is every element of `child` present in `parent`?
+# Used to prove the daemonless / no-ambient property: a spawn request's caps
+# can only be a subset of the granted authority, never amplified.
+fn caps_is_subset(child: [text], parent: [text]) -> bool:
+    var i = 0
+    while i < child.len():
+        val needle = child[i]
+        var found = false
+        var j = 0
+        while j < parent.len():
+            if parent[j] == needle:
+                found = true
+            j = j + 1
+        if not found:
+            return false
+        i = i + 1
+    true
+
+# ============================================================================
+# ContainerWorld — the ECS business layer inside the capsule.
+# Parallel component arrays; entity == index. Held DIRECTLY (single field hop).
+# ============================================================================
+
+class ContainerWorld:
+    ids: [ContainerId]
+    pods_of: [PodMembership]
+    views: [NamespaceView]
+    domains: [ResourceDomain]
+    images: [ImageSnapshot]
+    lifecycles: [Lifecycle]
+    monitors: [MonitorHandle]
+    # Authority granted to each container at create time — the parent set the
+    # sys_start spawn request must stay a subset of.
+    granted_caps: [[text]]
+    # Side table of pods.
+    pods: [Pod]
+    next_id: u64
+
+impl ContainerWorld:
+    static fn new() -> ContainerWorld:
+        ContainerWorld(
+            ids: [],
+            pods_of: [],
+            views: [],
+            domains: [],
+            images: [],
+            lifecycles: [],
+            monitors: [],
+            granted_caps: [],
+            pods: [],
+            next_id: 1u64
+        )
+
+    fn count(self) -> i64:
+        self.ids.len()
+
+    # --- accessors (spec asserts through returned values, not module vars) ---
+
+    fn view_of(self, idx: i64) -> NamespaceView:
+        self.views[idx]
+
+    fn lifecycle_state(self, idx: i64) -> text:
+        self.lifecycles[idx].state
+
+    fn lifecycle_exit(self, idx: i64) -> i64:
+        self.lifecycles[idx].exit_code
+
+    fn monitor_state(self, idx: i64) -> text:
+        self.monitors[idx].last_state
+
+    fn granted_of(self, idx: i64) -> [text]:
+        self.granted_caps[idx]
+
+    # Delegate path/pid decisions to the KERNEL primitive — the kernel view is
+    # the oracle; the manager never re-implements namespace lookup.
+    fn allows_path(self, idx: i64, path: text) -> bool:
+        container_view_allows_path(self.views[idx].view, path)
+
+    fn allows_pid(self, idx: i64, pid: u64) -> bool:
+        container_view_allows_pid(self.views[idx].view, pid)
+
+    fn path_decision(self, idx: i64, path: text) -> text:
+        container_view_path_decision(self.views[idx].view, path)
+
+    fn pid_decision(self, idx: i64, pid: u64) -> text:
+        container_view_pid_decision(self.views[idx].view, pid)
+
+    # ------------------------------------------------------------------------
+    # sys_create — allocate a container. Build a ROOTLESS view first (denies
+    # everything), then add ONLY the declared root + pids. NO start.
+    # `seed_global_root` exists solely so the spec can prove it can FAIL: seed a
+    # "/" root instead of rootless and the deny oracles break. Production callers
+    # pass false.
+    # ------------------------------------------------------------------------
+    me sys_create(name: text, root: text, pids: [u64], image_digest: text, cpu: u64, mem: u64, io: u64, pid_quota: u64, granted: [text], seed_global_root: bool) -> i64:
+        # Rootless by construction: begin from the deny-everything view.
+        var view = container_view_rootless()
+        # Add ONLY the explicitly declared handles. A rootless container never
+        # holds a global root it must shed.
+        if seed_global_root:
+            # DEFECT-INJECTION path (spec fail-once proof): a global "/" root.
+            view = container_view_create("/", pids)
+        else:
+            view = container_view_create(root, pids)
+
+        val cid = self.next_id
+        val cow = image_digest + ":cow"
+
+        var a_ids = self.ids
+        a_ids = a_ids.push(ContainerId(id: cid, name: name))
+        self.ids = a_ids
+
+        var a_pods = self.pods_of
+        a_pods = a_pods.push(PodMembership(pod_id: 0u64, shared_ns_mask: 0u32))
+        self.pods_of = a_pods
+
+        var a_views = self.views
+        a_views = a_views.push(NamespaceView(view: view, net_handle: 0u64, ipc_handle: 0u64))
+        self.views = a_views
+
+        var a_dom = self.domains
+        a_dom = a_dom.push(ResourceDomain(cpu: cpu, mem: mem, io: io, pids: pid_quota))
+        self.domains = a_dom
+
+        var a_img = self.images
+        a_img = a_img.push(ImageSnapshot(base_digest: image_digest, cow_layer: cow, quota: mem))
+        self.images = a_img
+
+        var a_life = self.lifecycles
+        a_life = a_life.push(Lifecycle(state: "created", exit_code: -1))
+        self.lifecycles = a_life
+
+        var a_mon = self.monitors
+        a_mon = a_mon.push(MonitorHandle(handle: 0u64, last_state: "none"))
+        self.monitors = a_mon
+
+        var a_grant = self.granted_caps
+        a_grant = a_grant.push(granted)
+        self.granted_caps = a_grant
+
+        self.next_id = cid + 1u64
+        self.ids.len() - 1
+
+    # ------------------------------------------------------------------------
+    # Pod registration + sys_pod_wire.
+    # ------------------------------------------------------------------------
+    me create_pod(net_handle: u64, ipc_handle: u64) -> u64:
+        val pid = self.next_id
+        var a = self.pods
+        a = a.push(Pod(id: pid, net_handle: net_handle, ipc_handle: ipc_handle))
+        self.pods = a
+        self.next_id = pid + 1u64
+        pid
+
+    fn find_pod(self, pod_id: u64) -> Pod:
+        var i = 0
+        while i < self.pods.len():
+            if self.pods[i].id == pod_id:
+                return self.pods[i]
+            i = i + 1
+        Pod(id: 0u64, net_handle: 0u64, ipc_handle: 0u64)
+
+    # For a pod member, share the pod's net/ipc namespace (component reference by
+    # endpoint handle). NEVER share mount(root) or pid unless explicitly declared
+    # in shared_ns_mask — mount/pid stay the container's own confined view.
+    me sys_pod_wire(idx: i64, pod_id: u64, shared_ns_mask: u32):
+        val pod = self.find_pod(pod_id)
+
+        var a_pods = self.pods_of
+        a_pods[idx] = PodMembership(pod_id: pod_id, shared_ns_mask: shared_ns_mask)
+        self.pods_of = a_pods
+
+        val cur = self.views[idx]
+        var net = cur.net_handle
+        var ipc = cur.ipc_handle
+        if mask_has(shared_ns_mask, NS_NET):
+            net = pod.net_handle
+        if mask_has(shared_ns_mask, NS_IPC):
+            ipc = pod.ipc_handle
+        # cur.view (mount/pid boundary) is passed through UNCHANGED: sharing net
+        # or ipc never widens the filesystem/pid view. Mount/pid sharing is out
+        # of scope for this increment (would require a merged kernel view).
+        var a_views = self.views
+        a_views[idx] = NamespaceView(view: cur.view, net_handle: net, ipc_handle: ipc)
+        self.views = a_views
+
+    # ------------------------------------------------------------------------
+    # sys_start — assemble a ContainerSpec from view+domain, map to a
+    # SpawnRequest whose caps are a SUBSET of granted, set Lifecycle=running,
+    # attach a MonitorHandle. Does NOT call the live spawn syscall.
+    # ------------------------------------------------------------------------
+    fn build_spec(self, idx: i64) -> ContainerSpec:
+        val img = self.images[idx]
+        val dom = self.domains[idx]
+        val view = self.views[idx]
+        # The spawn request asks for exactly the granted authority (attenuation
+        # could narrow further; it can NEVER add). Model: request caps = granted.
+        ContainerSpec(
+            image_digest: img.base_digest,
+            root: view.view.root,
+            caps: self.granted_caps[idx],
+            budget: dom.mem
+        )
+
+    fn to_spawn_request(self, spec: ContainerSpec) -> SpawnRequest:
+        SpawnRequest(
+            image_digest: spec.image_digest,
+            isolation: "container",
+            caps: spec.caps,
+            budget: spec.budget
+        )
+
+    me sys_start(idx: i64) -> SpawnRequest:
+        val spec = self.build_spec(idx)
+        val req = self.to_spawn_request(spec)
+
+        var a_life = self.lifecycles
+        a_life[idx] = Lifecycle(state: "running", exit_code: -1)
+        self.lifecycles = a_life
+
+        var a_mon = self.monitors
+        val h = self.ids[idx].id
+        a_mon[idx] = MonitorHandle(handle: h, last_state: "running")
+        self.monitors = a_mon
+        req
+
+    # ------------------------------------------------------------------------
+    # sys_stop — ordered stop/crash revocation (driver §7.3 order, at container
+    # granularity):
+    #   1. stop scheduling
+    #   2. revoke net/ipc endpoints
+    #   3. release device grants
+    #   4. unmap volumes
+    #   5. collect exit
+    #   6. free resource domain
+    # §21 invariant: a stopped container's NamespaceView resolves NOTHING — it
+    # retains no stale root/pid/endpoint/secret grant. We collapse the view back
+    # to rootless (deny-everything) so every previously-allowed path/pid denies.
+    # ------------------------------------------------------------------------
+    me sys_stop(idx: i64) -> Lifecycle:
+        # 1. stop scheduling.
+        var a_life = self.lifecycles
+        a_life[idx] = Lifecycle(state: "stopped", exit_code: 0)
+        self.lifecycles = a_life
+
+        # 2. revoke net/ipc endpoints + collapse the kernel view to rootless so
+        #    it resolves nothing (device grants (3) / volumes (4) are folded into
+        #    the same deny-everything collapse for this model increment).
+        var a_views = self.views
+        a_views[idx] = NamespaceView(view: container_view_rootless(), net_handle: 0u64, ipc_handle: 0u64)
+        self.views = a_views
+
+        # 5. collect exit — reflected in Lifecycle.exit_code above; monitor reaped.
+        var a_mon = self.monitors
+        a_mon[idx] = MonitorHandle(handle: 0u64, last_state: "stopped")
+        self.monitors = a_mon
+
+        # 6. free resource domain — quotas returned to the pool.
+        var a_dom = self.domains
+        a_dom[idx] = ResourceDomain(cpu: 0u64, mem: 0u64, io: 0u64, pids: 0u64)
+        self.domains = a_dom
+
+        # Drop granted authority — no lingering pouch.
+        var a_grant = self.granted_caps
+        a_grant[idx] = []
+        self.granted_caps = a_grant
+
+        self.lifecycles[idx]
