@@ -2,9 +2,18 @@ use std.spec.*
 
 extern fn rt_file_read_text(path: text) -> text
 
+fn executable_source_lines(source: text) -> text:
+    var out = ""
+    for line in source.split("\n"):
+        if not line.trim().starts_with("#"):
+            out = out + line + "\n"
+    out
+
 describe "hosted browser renderer entry isolation":
     it "dispatches the hidden worker before host UI initialization":
-        val entry = rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
+        val entry = executable_source_lines(
+            rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
+        )
         val main_start = entry.find("fn main() -> i64:")
         val args_pos = entry.find("val args = sys_get_args() ?? []")
         val worker_pos = entry.find("return hosted_browser_renderer_worker_main(args)")
@@ -81,9 +90,9 @@ describe "hosted browser renderer entry isolation":
         expect(broker.contains("fn _renderer_fetch_mode")).to_be(false)
 
     it "routes the production browser through the external worker frame gate":
-        val entry = rt_file_read_text(
-            "src/os/hosted/hosted_entry.spl"
-        ) ?? ""
+        val entry = executable_source_lines(
+            rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
+        )
         expect(entry).to_contain(
             "comp.require_external_web_frame(browser_profile_window_id)"
         )
@@ -146,3 +155,213 @@ describe "hosted browser renderer entry isolation":
         expect(entry).to_contain(
             "profile.save_bookmarks("
         )
+
+    it "keeps title commands and page input on their production owner routes":
+        val entry = executable_source_lines(
+            rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
+        )
+        val run_start = entry.find("fn _run_hosted_wm(")
+        val run_end = entry.find(
+            "    print \"SimpleOS shared hosted WM closed\""
+        )
+        expect(run_start).to_be_greater_than(-1)
+        expect(run_end).to_be_greater_than(run_start)
+        val run_body = entry.slice(run_start, run_end)
+        val renderer_owner = run_body.find(
+            "var browser_renderer = HostedBrowserRendererProcess.create("
+        )
+        expect(renderer_owner).to_be_greater_than(-1)
+
+        val poll_start = run_body.find(
+            "if val Some(browser_result) = browser_renderer.poll():"
+        )
+        val poll_end = run_body.find("        var web_window_index = 0")
+        expect(poll_start).to_be_greater_than(-1)
+        expect(poll_start).to_be_greater_than(renderer_owner)
+        expect(poll_end).to_be_greater_than(poll_start)
+        val poll_body = run_body.slice(poll_start, poll_end)
+        val poll_frame = poll_body.find("comp.set_external_web_frame(")
+        val poll_title = poll_body.find(
+            "host_compositor_update_window_title("
+        )
+        expect(poll_frame).to_be_greater_than(-1)
+        expect(poll_title).to_be_greater_than(poll_frame)
+
+        val pointer_start = run_body.find("elif kind == EVT_MOUSE_BUTTON:")
+        val pointer_end = run_body.find("elif kind == EVT_MOUSE_WHEEL:")
+        expect(pointer_start).to_be_greater_than(-1)
+        expect(pointer_start).to_be_greater_than(renderer_owner)
+        expect(pointer_end).to_be_greater_than(pointer_start)
+        val pointer_body = run_body.slice(pointer_start, pointer_end)
+        val page_pointer_start = pointer_body.find(
+            "if target.window_id == browser_profile_window_id:"
+        )
+        val page_pointer_end = pointer_body.find(
+            "                    else:\n" +
+            "                        val dispatch = web_sessions.dispatch_pointer("
+        )
+        expect(page_pointer_start).to_be_greater_than(-1)
+        expect(page_pointer_end).to_be_greater_than(page_pointer_start)
+        val page_pointer = pointer_body.slice(
+            page_pointer_start, page_pointer_end
+        )
+        val pointer_call = page_pointer.find(
+            "browser_renderer.begin_pointer("
+        )
+        val pointer_target = page_pointer.find("\"browser:page\"")
+        expect(pointer_call).to_be_greater_than(-1)
+        expect(pointer_target).to_be_greater_than(pointer_call)
+        expect(page_pointer.contains(
+            "web_sessions.dispatch_pointer("
+        )).to_be(false)
+        expect(page_pointer.contains(
+            "host_compositor_update_window_content("
+        )).to_be(false)
+
+        val key_start = run_body.find("elif kind == EVT_KEY:")
+        val key_end = run_body.find("elif kind == EVT_TEXT:")
+        expect(key_start).to_be_greater_than(-1)
+        expect(key_start).to_be_greater_than(renderer_owner)
+        expect(key_end).to_be_greater_than(key_start)
+        val key_body = run_body.slice(key_start, key_end)
+        val browser_key_start = key_body.find(
+            "if focused == browser_profile_window_id:"
+        )
+        val browser_key_end = key_body.find("                elif focused > 0:")
+        expect(browser_key_start).to_be_greater_than(-1)
+        expect(browser_key_end).to_be_greater_than(browser_key_start)
+        val browser_key = key_body.slice(browser_key_start, browser_key_end)
+        val address_key_start = browser_key.find(
+            "if browser_address_editing:"
+        )
+        val non_address_key_start = browser_key.find(
+            "elif keycode != KEY_ESCAPE:"
+        )
+        val key_targets_start = browser_key.find(
+            "input_receipt = host_wm_input_record_semantic("
+        )
+        expect(address_key_start).to_be_greater_than(-1)
+        expect(non_address_key_start).to_be_greater_than(address_key_start)
+        expect(key_targets_start).to_be_greater_than(non_address_key_start)
+        val address_key = browser_key.slice(
+            address_key_start, non_address_key_start
+        )
+        val non_address_key = browser_key.slice(
+            non_address_key_start, key_targets_start
+        )
+        val key_targets = browser_key.slice(
+            key_targets_start, browser_key.len()
+        )
+        val navigate_call = address_key.find(
+            "browser_renderer.begin_navigate("
+        )
+        val title_update = address_key.find(
+            "host_compositor_update_window_title("
+        )
+        val page_key_call = non_address_key.find(
+            "browser_renderer.begin_key("
+        )
+        val address_target = key_targets.find("\"browser:parent#address\"")
+        val page_key_target = key_targets.find("\"browser:page\"")
+        expect(navigate_call).to_be_greater_than(-1)
+        expect(title_update).to_be_greater_than(navigate_call)
+        expect(address_key.contains(
+            "browser_renderer.begin_key("
+        )).to_be(false)
+        expect(page_key_call).to_be_greater_than(-1)
+        expect(non_address_key.contains(
+            "browser_renderer.begin_navigate("
+        )).to_be(false)
+        expect(non_address_key.contains(
+            "host_compositor_update_window_title("
+        )).to_be(false)
+        expect(address_target).to_be_greater_than(-1)
+        expect(page_key_target).to_be_greater_than(address_target)
+        expect(browser_key.contains("web_sessions.dispatch_key(")).to_be(false)
+
+        val text_start = run_body.find("elif kind == EVT_TEXT:")
+        val text_end = run_body.find("            rt_winit_event_free(ev)")
+        expect(text_start).to_be_greater_than(-1)
+        expect(text_start).to_be_greater_than(renderer_owner)
+        expect(text_end).to_be_greater_than(text_start)
+        val text_body = run_body.slice(text_start, text_end)
+        val browser_text_start = text_body.find(
+            "if focused == browser_profile_window_id:"
+        )
+        val browser_text_end = text_body.find("                    elif focused > 0:")
+        expect(browser_text_start).to_be_greater_than(-1)
+        expect(browser_text_end).to_be_greater_than(browser_text_start)
+        val browser_text = text_body.slice(
+            browser_text_start, browser_text_end
+        )
+        val address_text_start = browser_text.find(
+            "if browser_address_editing:"
+        )
+        val non_address_text_start = browser_text.find(
+            "                        else:\n" +
+            "                            match browser_renderer.begin_text_input("
+        )
+        val text_targets_start = browser_text.find(
+            "input_receipt = host_wm_input_record_semantic("
+        )
+        expect(address_text_start).to_be_greater_than(-1)
+        expect(non_address_text_start).to_be_greater_than(address_text_start)
+        expect(text_targets_start).to_be_greater_than(non_address_text_start)
+        val address_text = browser_text.slice(
+            address_text_start, non_address_text_start
+        )
+        val non_address_text = browser_text.slice(
+            non_address_text_start, text_targets_start
+        )
+        val text_targets = browser_text.slice(
+            text_targets_start, browser_text.len()
+        )
+        val text_title_update = address_text.find(
+            "host_compositor_update_window_title("
+        )
+        val page_text_call = non_address_text.find(
+            "browser_renderer.begin_text_input("
+        )
+        val text_address_target = text_targets.find(
+            "\"browser:parent#address\""
+        )
+        val text_page_target = text_targets.find("\"browser:page\"")
+        expect(text_title_update).to_be_greater_than(-1)
+        expect(address_text.contains(
+            "browser_renderer.begin_text_input("
+        )).to_be(false)
+        expect(page_text_call).to_be_greater_than(-1)
+        expect(non_address_text.contains(
+            "host_compositor_update_window_title("
+        )).to_be(false)
+        expect(text_address_target).to_be_greater_than(-1)
+        expect(text_page_target).to_be_greater_than(text_address_target)
+        expect(browser_text.contains(
+            "web_sessions.dispatch_text("
+        )).to_be(false)
+        expect(browser_text.contains(
+            "host_compositor_update_window_content("
+        )).to_be(false)
+
+        val post_text = run_body.slice(text_end, run_body.len())
+        val animation_start = post_text.find(
+            "if (browser_renderer_ready and\n" +
+            "            browser_renderer.command_deadline_ms <= 0"
+        )
+        val animation_end = post_text.find("        if evidence.enabled:")
+        expect(animation_start).to_be_greater_than(-1)
+        expect(text_end + animation_start).to_be_greater_than(renderer_owner)
+        expect(animation_end).to_be_greater_than(animation_start)
+        val animation_body = post_text.slice(animation_start, animation_end)
+        val active_animation = animation_body.find(
+            "browser_renderer.next_animation_ms >= 0"
+        )
+        val advance_call = animation_body.find(
+            "browser_renderer.begin_advance("
+        )
+        val advance_failure = animation_body.find(
+            "browser_renderer_ready = false"
+        )
+        expect(active_animation).to_be_greater_than(-1)
+        expect(advance_call).to_be_greater_than(active_animation)
+        expect(advance_failure).to_be_greater_than(advance_call)
