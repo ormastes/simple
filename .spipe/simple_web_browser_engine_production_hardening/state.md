@@ -746,6 +746,16 @@ implementation in progress / target evidence blocked
   canonical Engine2D frame, and appends `"A"` plus `"da"` to focused input.
   Its mirrored four-scenario manual was refreshed by hand because docgen and
   runtime remain target-compiler-blocked.
+- hosted keyboard events: Native key press/release edges now route to the
+  actually focused DOM target before bare WM actions. The canonical
+  BrowserSession dispatch emits keydown/keyup and reuses Enter/Space
+  activation defaults; F11 remains host-reserved. Text commits no longer
+  overwrite the trusted WM window title.
+- evidence: The hosted integration scenario delivers W down/text/up to a
+  focused input and Space down/up to a focused checkbox, requiring listener,
+  value, focus, and click-default mutations. The mirrored five-scenario manual
+  was refreshed by hand; runtime remains target-compiler-blocked and was not
+  rerun.
 - sandbox audit: AC-7 remains open. Hosted WM still constructs BrowserSession
   and reparses hostile HTML/CSS in-process. Existing piped-process and Rust
   sandbox helpers are not fail-closed production isolation. The retained

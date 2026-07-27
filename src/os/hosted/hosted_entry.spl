@@ -34,7 +34,6 @@ use os.compositor.shared_mdi_setup.{
     shared_mdi_surface_process_id
 }
 use common.ui.window_scene.{shared_wm_motion_background_next_due_micros, shared_wm_motion_dirty_due, shared_wm_motion_background_consume_due}
-use std.common.window_protocol.compositor_methods.{COMP_SET_TITLE}
 use std.nogc_sync_mut.io.window_winit.{winit_event_text}
 use os.hosted.hosted_web_content_session.{HostedWebContentRegistry}
 use os.hosted.hosted_wm_evidence.{
@@ -450,7 +449,33 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 key_events = key_events + 1
                 val key_state = if pressed_key: "down" else: "up"
                 print "[hosted-wm] event key count={key_events} state={key_state} scancode={scan_code} keycode={keycode}"
-                if pressed_key:
+                var semantic_consumed = false
+                val focused = host_compositor_focused_window_id(comp)
+                if focused > 0:
+                    semantic_event_id = semantic_event_id + 1
+                    val dispatch = web_sessions.dispatch_key(
+                        semantic_event_id, focused, keycode, pressed_key
+                    )
+                    semantic_consumed = dispatch.semantic_target_id != ""
+                    input_receipt = host_wm_input_record_semantic(
+                        input_receipt, dispatch.event_id, dispatch.wm_target_id,
+                        dispatch.semantic_target_id, dispatch.callback_count,
+                        dispatch.mutation_revision, dispatch.reason
+                    )
+                    if dispatch.mutation_revision > 0:
+                        comp = host_compositor_update_window_content(
+                            comp, focused,
+                            web_sessions.body_html(focused)
+                        )
+                    print "[hosted-wm] semantic event_origin=screen event_id={dispatch.event_id} wm_target_id={dispatch.wm_target_id} semantic_target_id={dispatch.semantic_target_id} callback_count={dispatch.callback_count} mutation_revision={dispatch.mutation_revision} reason={dispatch.reason}"
+                if pressed_key and keycode == KEY_F11:
+                    display_nonce = display_nonce + 1
+                    surface = _request_host_fullscreen(
+                        surface, win, display_nonce, now_micros
+                    )
+                    print "[hosted-wm] display-request nonce={display_nonce} phase={surface.phase} requested_mode={surface.requested_mode}"
+                    other_dirty = true
+                elif pressed_key and not semantic_consumed:
                     if keycode == KEY_ESCAPE:
                         running = false
                     elif keycode == KEY_TAB:
@@ -468,10 +493,6 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         comp = host_compositor_minimize_focused(comp)
                     elif keycode == KEY_R:
                         comp = host_compositor_restore_all(comp)
-                    elif keycode == KEY_F11:
-                        display_nonce = display_nonce + 1
-                        surface = _request_host_fullscreen(surface, win, display_nonce, now_micros)
-                        print "[hosted-wm] display-request nonce={display_nonce} phase={surface.phase} requested_mode={surface.requested_mode}"
                     other_dirty = true
             elif kind == EVT_TEXT:
                 val committed_text = winit_event_text(ev)
@@ -495,10 +516,6 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                                 web_sessions.body_html(focused)
                             )
                         print "[hosted-wm] semantic event_origin=screen event_id={dispatch.event_id} wm_target_id={dispatch.wm_target_id} semantic_target_id={dispatch.semantic_target_id} callback_count={dispatch.callback_count} mutation_revision={dispatch.mutation_revision} reason={dispatch.reason}"
-                        comp.apply_bridge_request(
-                            0, 0, COMP_SET_TITLE.to_i64(), focused,
-                            "Typed: {committed_text}", 0, 0, 0, 0, "", 0, ""
-                        )
                     print "[hosted-wm] event text count={text_events} committed={committed_text}"
                     other_dirty = true
             rt_winit_event_free(ev)

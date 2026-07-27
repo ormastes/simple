@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 4 | 4 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -59,6 +59,15 @@ expect(unfocused.mutation_revision).to_equal(0)
 - The resulting checked state must change the hosted pixels and survive the
   canonical compositor-to-Engine2D frame.
 
+#### routes hosted key edges to DOM focus before window shortcuts
+
+- Focus a hosted text input through the production pointer route.
+- Deliver W keydown, committed text, and W keyup to that DOM focus.
+- Verify both key listeners run and the input value becomes `w`, preventing
+  the bare W edge from becoming a window-close shortcut.
+- Focus a checkbox and verify Space keydown reuses the canonical click/default
+  path while Space keyup reaches its listener.
+
 ## At a Glance
 
 | Field | Value |
@@ -78,8 +87,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 4 |
-| Active scenarios | 4 |
+| Total scenarios | 5 |
+| Active scenarios | 5 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
