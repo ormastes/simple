@@ -843,3 +843,11 @@ Tracking split:
   syntax and plan-only evidence pass; the existing modern SSpec pins the real
   producer/wrapper/aggregate flow and docgen reports one complete manual with
   zero stubs. The capped live 4K/8K environment suite was not rerun.
+- coverage: Restored the lost host-evidence coverage blocker as collision-free
+  TODO589 after auditing recent `todo_db.sdn` heads through TODO588, and mapped
+  the existing SimpleOS evidence spec to the SIMD evidence owner at 100% intent.
+  Host classification remains behaviorally green at 13/13. The isolated
+  SimpleOS spec did not execute because the diagnostic runtime attempted the
+  absent `/usr/bin/simple_seed`; no SimpleOS PASS or decision percentage is
+  claimed. TODO589 records the accepted-runtime commands, separate artifact
+  preservation, and >=98% per-owner decision threshold.
