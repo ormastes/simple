@@ -180,10 +180,12 @@ run the capped pure-Simple build. `/root` is merge owner. A separate
 highest-capability verification agent reviews merged semantics, specs, manuals,
 and requirement evidence before any done mark.
 
-Independent review returned no P0 and six P1s. The active corrective lanes are:
-GPOS context/unit/budget wiring (`gpos_full_impl`), forward-compatible
-FeatureVariations selection (`runtime_rebuild`, merged), selected-shaper
-preprocessing policy (`/root`), and merged GSUB/GPOS semantic review
-(`lookup_flags_gdef`). Packed Device deltas remain post-scale pixels;
+Independent review returned no P0 and six P1s; the source fixes are merged.
+GPOS context/unit/budget and public ppem/coordinate/LangSys wiring are complete,
+FeatureVariations skips unsupported formats safely, selected high-level
+preprocessing fails closed, nested GSUB edits compose position maps, PairPos
+uses the owning-subtable offset base, and all record-copy paths preserve
+post-scale pixels. Packed Device deltas remain post-scale pixels;
 VariationIndex deltas remain design units. GDEF ItemVariationStore rejects the
-reserved `LONG_WORDS` bit.
+reserved `LONG_WORDS` bit. Runtime execution and manual regeneration remain
+open until a pure-Simple full CLI passes admission.

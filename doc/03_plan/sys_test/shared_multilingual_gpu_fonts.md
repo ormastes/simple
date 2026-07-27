@@ -157,8 +157,8 @@ Each listed case count is a minimum and includes happy, boundary, and failure
 behavior.
 
 The current all-items classification is 32 changed/new specs since
-`origin/main`: 18 mirrors are missing, 14 are stale, zero are current, and all
-32 require post-admission docgen. The exact paths, owner commands, and
+`origin/main`: 13 mirrors are missing, 19 are stale, zero are current, and all
+32 require focused docgen through the deployed pure-Simple runtime. The exact paths, owner commands, and
 runtime/native blockers are authoritative in
 `doc/09_report/shared_multilingual_gpu_fonts_all_items_verification.md`.
 Historical rows below remain useful evidence history, but do not override that

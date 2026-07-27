@@ -51,7 +51,9 @@ exited 0. The refreshed scenario with pending serif probes has no admitted
 runner PASS: pinned release SHA `04a38e21…` exits 139 before assertions, while
 the latest retained candidate reaches a separate recursion guard.
 Other complex scripts and emoji sequences/color remain policy exclusions.
-REQ-016 moves general GSUB/GPOS into the existing parser/layout owners while
+REQ-016 moves general GSUB/GPOS into the existing parser/layout owners with
+composed contextual remaps and one pixel/design-unit-aware variation context;
+the selected high-level complex-script preprocessor still fails closed while
 full BiDi, Engine3D native execution, executed Web/GUI/WM glyph-pixel parity, retained SimpleOS guest
 pixel evidence, retained native v5 stage/promotion evidence, and performance targets remain gated. Transient Vulkan evidence owns fused queue/device, fence observation, readback, and CPU-oracle timings; durable records never make captured handles reusable authority. Atlas and face generations invalidate cached material; unavailable
 hardware or stale handles fail closed.

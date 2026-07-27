@@ -71,24 +71,25 @@ Current count: `0 pass`, `14 active`, `9 blocked`.
 
 | Row | Status | Owner / writable scope | Current executable and manual evidence | Dependency and exact completion command | Final reviewer |
 |---|---|---|---|---|---|
-| REQ-001 | active | B manifest/distribution | `shared_font_manifest_spec.spl` and mirror cover pins, order, totals, boundary | admitted CLI; run B command set below | `/root` |
-| REQ-002 | active | B manifest/distribution | same pair covers decimal contribution, alias policy, deterministic regeneration | admitted CLI; run B command set | `/root` |
-| REQ-003 | active | B+C manifest/shaping | manifest and shaping acceptance pairs cover sparse states and fail-closed cells | admitted CLI; run B and C command sets | `/root` |
-| REQ-004 | active | B manifest/distribution | manifest, asset-manifest, installer, archive, SimpleOS bundle/staging specs exist; mirrors exist for the acceptance pairs | admitted CLI; run B command set and zero-stub docgen | `/root` |
-| REQ-005 | active | B manifest/distribution | manifest and SimpleOS bundle specs cover the pinned candidate catalog and unchanged bytes | admitted CLI; run B command set | `/root` |
-| REQ-006 | active | C+D shaping/surfaces | `shared_font_surfaces_spec.spl` and legacy Web/GUI/WM route pair cover the shared owner/material seam | admitted CLI; run aggregate and D command sets | `/root` |
-| REQ-007 | active | C shaping/material | shaping acceptance plus selected Arabic/Devanagari and six integrated GSUB/GPOS unit specs exist; selected-memory binding rejects unregistered paths and selected-path/hash mismatches | source-present but runtime-unverified; admitted CLI; run C command set; generate six missing unit mirrors | `/root` |
-| REQ-008 | active | B+C manifest/shaping | manifest and parser/loader specs cover `glyf`, default instance, bitmap, and rejection policy | admitted CLI; run B/C command sets | `/root` |
-| REQ-009 | active | C+E material/native | renderer, aggregate surface, emission, backend and perf specs contain cache identity/lifecycle oracles | admitted CLI and native record; run C/E sets | `/root` |
-| REQ-010 | active | E native/emission | GPU emission and CUDA handoff executable/manual pairs cover source/artifact contracts; emission is not execution | admitted CLI; run E source commands; retained native artifact required for promotion | `/root` |
-| REQ-011 | active | D+E surfaces/native | aggregate surfaces/route plus canonical Web, GUI, hosted WM, SimpleOS and RV64 pairs exist; working changes add fail-closed degenerate Web status, ancestor-clipped nested IMAGE projection, and shared nested-collector cases for valid collection plus stale/duplicate/orphan rejection | changes are source-present but runtime-unverified; admitted CLI, hosted frame and QEMU pixels required; run D/E sets | `/root` |
-| REQ-012 | blocked | E native 2D/3D/perf | native readback spec contains HUD/world, handles, submit, fence, depth/transform and readback gates | admitted CLI plus real graphics device; run E native command | `/root` |
-| REQ-013 | blocked | E native 2D/3D/perf | native readback spec rejects unavailable and forged promotion | one real backend must pass both 2D and 3D through E native command | `/root` |
-| REQ-014 | blocked | A–E generation / F audit | among 32 changed/new specs, 18 mirrors are missing, 14 are stale, zero are current, and no retained log proves `0 stubs` | admitted CLI; run all 32 docgen commands below; review manuals | `/root` |
-| REQ-015 | active | C shaping/material/config | aggregate surfaces and focused config specs cover identity, policies, target order and pre-mutation rejection; working changes canonicalize HIP to ROCm on the prepared batch | batch change is unverified; admitted CLI required; run aggregate/C commands | `/root` |
-| NFR-001 | active | B manifest/distribution | manifest and SimpleOS bundle source gates cover immutable hashes, deterministic generation and corruption rejection | admitted CLI; run B command set | `/root` |
-| NFR-002 | blocked | E native/perf | native readback and perf specs define exact packed-ARGB comparator and provenance fields | admitted CLI plus real device; run E native/perf commands | `/root` |
-| NFR-003 | active | B manifest/distribution | manifest/bundle gates encode the 80 MiB and SimpleOS projection limits | admitted CLI; run B command set | `/root` |
+| REQ-001 | active | B manifest/distribution | `shared_font_manifest_spec.spl` and mirror cover pins, order, totals, boundary | deployed pure-Simple runtime; run B command set below | `/root` |
+| REQ-002 | active | B manifest/distribution | same pair covers decimal contribution, alias policy, deterministic regeneration | deployed pure-Simple runtime; run B command set | `/root` |
+| REQ-003 | active | B+C manifest/shaping | manifest and shaping acceptance pairs cover sparse states and fail-closed cells | deployed pure-Simple runtime; run B and C command sets | `/root` |
+| REQ-004 | active | B manifest/distribution | manifest, asset-manifest, installer, archive, SimpleOS bundle/staging specs exist; mirrors exist for the acceptance pairs | deployed pure-Simple runtime; run B command set and zero-stub docgen | `/root` |
+| REQ-005 | active | B manifest/distribution | manifest and SimpleOS bundle specs cover the pinned candidate catalog and unchanged bytes | deployed pure-Simple runtime; run B command set | `/root` |
+| REQ-006 | active | C+D shaping/surfaces | `shared_font_surfaces_spec.spl` and legacy Web/GUI/WM route pair cover the shared owner/material seam | deployed pure-Simple runtime; run aggregate and D command sets | `/root` |
+| REQ-007 | active | C shaping/material | shaping acceptance plus selected Arabic/Devanagari and six integrated GSUB/GPOS unit specs exist; selected-memory binding rejects unregistered paths and path/hash mismatches, and GPOS catalog lookup now rejects duplicate indices without publishing partial adjustments | source is present but runtime-unverified; run the C command set on the deployed pure-Simple runtime and generate six missing unit mirrors | `/root` |
+| REQ-008 | active | B+C manifest/shaping | manifest and parser/loader specs cover `glyf`, default instance, bitmap, and rejection policy | deployed pure-Simple runtime; run B/C command sets | `/root` |
+| REQ-009 | active | C+E material/native | renderer, aggregate surface, emission, backend and perf specs contain cache identity/lifecycle oracles | deployed pure-Simple runtime and native record; run C/E sets | `/root` |
+| REQ-010 | active | E native/emission | GPU emission and CUDA handoff executable/manual pairs cover source/artifact contracts; emission is not execution | deployed pure-Simple runtime; run E source commands; retained native artifact required for promotion | `/root` |
+| REQ-011 | active | D+E surfaces/native | aggregate surfaces/route plus the six production capability rows below exist; working changes add fail-closed degenerate Web status, ancestor-clipped nested IMAGE projection, trait/concrete-pixel-buffer and Draw IR/Engine2D clip parity, full-buffer no-nesting parity, and shared nested-collector cases for valid collection plus stale/duplicate/orphan rejection | changes are source-present but runtime-unverified; deployed pure-Simple runtime, hosted frame and QEMU pixels required; complete all six rows below | `/root` |
+| REQ-012 | blocked | E native 2D/3D/perf | native readback source contains HUD/world, handles, submit, fence, depth/transform and readback gates; working source also records durable successful atlas/vertex upload counts and byte totals and requires all four receipts for 3D promotion | source changes are runtime-unverified; deployed pure-Simple runtime plus real graphics device required; run E native command | `/root` |
+| REQ-013 | blocked | E native 2D/3D/perf | native readback source rejects unavailable and forged promotion and now fails promotion closed when durable 3D upload receipts are missing | one real backend must pass both 2D and 3D through E native command | `/root` |
+| REQ-014 | blocked | B–E generation / F audit | among 32 changed/new specs, 13 mirrors are missing, 19 are stale, zero are current, and no retained log proves `0 stubs` | deployed pure-Simple runtime; run all 32 docgen commands below; review manuals | `/root` |
+| REQ-015 | active | C shaping/material/config | aggregate surfaces and focused config specs cover identity, policies, target order and pre-mutation rejection; working changes canonicalize HIP to ROCm on the prepared batch | batch change is unverified; deployed pure-Simple runtime required; run aggregate/C commands | `/root` |
+| REQ-016 | active | I–N full OpenType layout | source integration covers GSUB 1–8, GPOS 1–9, LookupFlag/GDEF filtering, FeatureVariations, Device/VariationIndex and anchors, named context/data facades, nested contextual remaps, ppem/coordinates/LangSys, pixel/design-unit separation, and fail-closed selected preprocessing; focused regressions cover the reviewed P1s | execute all focused specs on an admitted pure-Simple CLI and regenerate/review all affected manuals | `/root` |
+| NFR-001 | active | B manifest/distribution | manifest and SimpleOS bundle source gates cover immutable hashes, deterministic generation and corruption rejection | deployed pure-Simple runtime; run B command set | `/root` |
+| NFR-002 | blocked | E native/perf | native readback and perf specs define exact packed-ARGB comparator and provenance fields | deployed pure-Simple runtime plus real device; run E native/perf commands | `/root` |
+| NFR-003 | active | B manifest/distribution | manifest/bundle gates encode the 80 MiB and SimpleOS projection limits | deployed pure-Simple runtime; run B command set | `/root` |
 | NFR-004 | blocked | E native/perf | performance spec and manual define warm hit and 1080p/4K p95 thresholds | real device must create a valid `build/shared_multilingual_gpu_fonts_perf/evidence.env` | `/root` |
 | NFR-005 | blocked | E native/perf | performance spec defines equal-semantics 4,096-glyph CPU/GPU comparison | real promoted backend must prove at least 1.25x using E perf command | `/root` |
 | NFR-006 | blocked | E native/perf | performance spec defines unchanged upload, RSS delta and GPU high-water checks | real device plus isolated RSS probe; run E perf command | `/root` |
@@ -180,10 +181,11 @@ the behavioral cases have not run on an admitted CLI.
 
 ### Lane F static source/manual-quality audit
 
-The 23-source audit found 282 `it` blocks and 2,150 source lines containing
-`expect`. Every scenario contains a direct assertion or calls a reviewed
-assertion helper. No `pass_todo`, tautological
-`expect(true).to_equal(true)`, `to_raise`, or empty scenario body was found.
+The retained pre-REQ-016 audit found no `pass_todo`, tautological
+`expect(true).to_equal(true)`, `to_raise`, or empty scenario body. Its
+scenario/expect counts predate the four REQ-016 specs and the changed
+selected-Devanagari policy spec, so they are not current 32-source evidence;
+lane F must audit all 32 sources after an admitted runtime is available.
 The four `pass_do_nothing` calls in
 `wm_nested_content_frame_spec.spl` are explicitly justified no-op methods on
 the pixel-only fixture (`draw_text`, `draw_char_8x16`, `present`, and
@@ -208,9 +210,22 @@ source-present but runtime-unverified.
 
 The pinned GSUB/GPOS support map is deliberately narrow:
 
-- Noto Sans SC and Noto Serif SC: `latn`, `hani`, and `cyrl`, default language;
-- Noto Sans Devanagari and Noto Serif Devanagari: `dev2` / `HIN `;
-- Noto Sans Arabic and Noto Naskh Arabic: `arab` / default and `arab` / `URD `.
+The full REQ-016 audit rejects the former pinned-map completion claim. The
+merged baseline implements GSUB 1–8 and GPOS 1–9 with split subtable owners,
+fixes the context-format-3 input increment, admits all defined LookupFlag/GDEF
+filters, evaluates supported FeatureVariations, and decodes
+Device/VariationIndex plus anchor formats 2/3. ExtensionSubst rejects a nested
+type-7 target, as required by the OpenType extension contract. The selected
+high-level complex-script boundary remains fail-closed outside explicitly
+supported preprocessing; the complete lower-level GSUB/GPOS executor does not
+turn that boundary into a claim of general Indic preprocessing. Source review
+then closed the production gaps: one shared GPOS data context/budget reaches
+validation, nested dispatch, and application; PairPos resolves Device offsets
+from its owning subtable; packed Device pixels remain post-scale while
+VariationIndex stays in design units; public shaping forwards normalized
+coordinates and LangSys; GSUB preserves device fields; and contextual edits
+compose old-to-new position maps. Focused source regressions exist, but no
+full-layout claim is valid until they execute on the admitted runtime.
 
 Each row selects both GSUB and GPOS plans. Acceptance remains limited to the
 exact pinned Hindi, Arabic, and Urdu witnesses and the recorded simple-script

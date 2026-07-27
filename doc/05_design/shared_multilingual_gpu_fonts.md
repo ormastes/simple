@@ -131,6 +131,13 @@ records share the same depth/work budget. Any malformed offset, unsupported
 variation context, recursion exhaustion, or later lookup failure discards the
 scratch records and returns the original run.
 
+The public shaper forwards optional normalized coordinates and an explicit
+LangSys tag into that transaction. Contextual GSUB carries a composed
+old-to-new position map when nested substitutions change length. GPOS threads
+one `GposDataContext` through validation and application: VariationIndex
+results stay in design units, packed Device results stay in separate
+post-scale pixel fields, and record copies/replacements preserve both.
+
 `ot_layout_context` owns Coverage/ClassDef matching and complete LookupFlag/GDEF
 eligibility. `ot_layout_apply` owns substitution and reverse traversal.
 `ot_layout_gpos_data` owns ValueRecord, Device/VariationIndex, anchor, GDEF, and
@@ -138,10 +145,11 @@ ItemVariationStore decoding; `ot_layout_gpos` owns positioning and attachment.
 Only the named context/data facades cross those sibling boundaries.
 
 Pinned Hindi, Arabic, and Urdu HarfBuzz vectors exercise exact
-glyph/cluster/advance/offset results but never authorize input. The generic
-path accepts any bounded cmap-backed run whose selected lookup plan is valid;
-script-specific preprocessing and full Unicode BiDi remain independently
-scoped and may still fail closed.
+glyph/cluster/advance/offset results but never gate the lower GSUB/GPOS
+executor. The selected high-level complex-script preprocessor accepts only
+inputs it can preprocess correctly; arbitrary already-preprocessed glyph
+records still use the generic executor. Full Unicode preprocessing and BiDi
+remain independently scoped and fail closed when unavailable.
 
 The Metal source and 20-byte vertex contract remain emission-only. The optional
 Vulkan Engine3D adapter owns dedicated HUD/world pipelines, R8 atlas upload,

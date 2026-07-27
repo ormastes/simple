@@ -253,6 +253,17 @@ shaping. The identity subset is the 54-native/1-fallback evidence above; exact
 Hindi and the exact pinned Arabic/Urdu lookup-vector cases are separately
 bounded to their proven witnesses.
 
+The lower Pure Simple OpenType executor is broader than that selected
+preprocessor: it transactionally supports GSUB 1–8 and GPOS 1–9 over
+already-preprocessed glyph records, including contextual remapping,
+LookupFlag/GDEF filtering, FeatureVariations, Device/VariationIndex data, and
+explicit Script/LangSys selection. `shaper_shape_with_language` accepts
+optional normalized coordinates and a LangSys tag; PPEM is derived from the
+font size. Packed Device deltas are post-scale pixels, while VariationIndex
+deltas remain design units. This does not authorize unsupported Unicode
+preprocessing: high-level complex-script inputs still fail closed unless their
+preprocessor is complete.
+
 REQ-009 source cases are complete: selected checksum/default-axis identity now fences the
 glyph cache, atlas, and resolved-metrics cache; stats expose that identity, and
 generation-bound wrappers over the process-global face are revocable so stale
