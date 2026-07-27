@@ -920,6 +920,31 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   unproven font integration before push. The next session must phase-stamp the
   isolated measure function once rather than redesign another transport.
 
+### 2026-07-27 Bungee measure cycles 28–30
+
+- Cycle 28 recovered the exact 17-slot caller-owned contract and a seven-slot
+  monotonic measure trace from the prior rollout. The installed pure-Simple
+  release compiler stopped before compilation with its existing
+  `field access on nil receiver` (exit 132), so it produced no font evidence.
+- A preserved, provenance-passing Stage3 compiler was then reused; no bootstrap
+  command was run. Cycle 29 compiled the isolated Bungee `B`/100 px measure
+  probe (11 modules, zero failures). Its single run published entry, input
+  validation, offset-table parse, and cmap/glyph selection, then returned
+  before the intra-module `rasterize_sfnt_glyf` result, scalar metadata, or
+  completion cookie.
+- Cycle 30 replaced only that aggregate bitmap-return seam with the recovered
+  scalar-only table/outline/metrics/bounds measure pass. It compiled two
+  changed modules with nine cached and zero failures, but the single run
+  stopped at the same coarse boundary: parse and glyph selection pass; no
+  completed scalar geometry or metadata is published.
+- The three-cycle cap is exhausted. All unproven diagnostic source and the
+  temporary fixture were reverted before push. The next fresh session must
+  place fixed tail stamps within the scalar measure body after table lookup,
+  table bounds, units/metric bounds, outline parse, horizontal metrics,
+  drawable detection, bounds, and dimensions. Run one isolated Bungee measure
+  probe and fix only the first missing phase. Do not bootstrap merely to repeat
+  this diagnostic; reuse a current provenance-passing pure-Simple artifact.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
