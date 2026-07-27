@@ -169,14 +169,15 @@ fn record_compiler_decision_manifest_sdn(sdn: text) -> bool:
     """Pre-register compiler-owned decision/condition rows with zero counts.
 
     This accepts only the existing SDN table format and rejects runtime
-    outcomes, event rows, malformed rows, and manifests without a decision.
+    outcomes, event rows, malformed rows, and incomplete inventory headers.
     TODO594 remains open until the compiler emits this manifest.
     """
     if sdn == "":
         return false
 
     var section = ""
-    var decision_rows = 0
+    var saw_decisions = false
+    var saw_conditions = false
     for raw_line in sdn.split("\n"):
         val trimmed = raw_line.trim()
         if trimmed == "" or trimmed.starts_with("#"):
@@ -186,9 +187,15 @@ fn record_compiler_decision_manifest_sdn(sdn: text) -> bool:
                 return false
             continue
         if trimmed == "decisions |id, file, line, column, true_count, false_count|":
+            if saw_decisions or saw_conditions:
+                return false
+            saw_decisions = true
             section = "decisions"
             continue
         if trimmed == "conditions |decision_id, condition_id, file, line, column, true_count, false_count|":
+            if not saw_decisions or saw_conditions:
+                return false
+            saw_conditions = true
             section = "conditions"
             continue
 
@@ -202,7 +209,6 @@ fn record_compiler_decision_manifest_sdn(sdn: text) -> bool:
                 return false
             if parts[4].trim() != "0" or parts[5].trim() != "0":
                 return false
-            decision_rows = decision_rows + 1
             continue
         if section == "conditions":
             if parts.len() != 7:
@@ -216,7 +222,7 @@ fn record_compiler_decision_manifest_sdn(sdn: text) -> bool:
             continue
         return false
 
-    if decision_rows == 0:
+    if not saw_decisions or not saw_conditions:
         return false
     coverage_parts.push(sdn)
     accumulate_coverage_sdn(sdn)
