@@ -116,18 +116,20 @@ fn _record(font: OtFont, codepoints: [u32], source: i64, cluster: i64, mask: u64
         x_offset_units: 0, y_offset_units: 0))
 
 fn _nominal(font: OtFont, plan: LayoutLookupPlan, script: u32, codepoints: [u32],
-            start: i64, end_idx: i64) -> Option<[LayoutGlyphRecord]>:
+            start: i64, end_idx: i64, preprocess_selected: bool) -> Option<[LayoutGlyphRecord]>:
     var result: [LayoutGlyphRecord] = []
     var source = start
     while source < end_idx:
-        val mask = if script == layout_tag("arab"): _arabic_mask(plan, _joining_form(codepoints, source)) else: _plan_mask(plan)
-        val devanagari_mark = (script == layout_tag("dev2") and result.len() > 0 and
+        val mask = if preprocess_selected and script == layout_tag("arab"):
+            _arabic_mask(plan, _joining_form(codepoints, source))
+        else: _plan_mask(plan)
+        val devanagari_mark = (preprocess_selected and script == layout_tag("dev2") and result.len() > 0 and
             codepoints[source] >= 2366u32 and codepoints[source] <= 2380u32)
         val cluster = if devanagari_mark: result[result.len() - 1].cluster else: source
         val record = match _record(font, codepoints, source, cluster, mask):
             Some(value): value
             None: return None
-        if script == layout_tag("dev2") and codepoints[source] == 2367u32 and result.len() > 0:
+        if preprocess_selected and script == layout_tag("dev2") and codepoints[source] == 2367u32 and result.len() > 0:
             val base = result[result.len() - 1]
             result[result.len() - 1] = record
             result.push(base)
@@ -136,7 +138,9 @@ fn _nominal(font: OtFont, plan: LayoutLookupPlan, script: u32, codepoints: [u32]
         source = source + 1
     Some(result)
 
-fn _gpos_mask(plan: LayoutLookupPlan, script: u32, codepoint: u32) -> u64:
+fn _gpos_mask(plan: LayoutLookupPlan, script: u32, codepoint: u32,
+              preprocess_selected: bool) -> u64:
+    if not preprocess_selected: return _plan_mask(plan)
     val positional = (_feature_mask(plan, "abvm") | _feature_mask(plan, "blwm") |
         _feature_mask(plan, "mark") | _feature_mask(plan, "mkmk"))
     var mask = _plan_mask(plan) & ~positional
@@ -147,7 +151,7 @@ fn _gpos_mask(plan: LayoutLookupPlan, script: u32, codepoint: u32) -> u64:
     mask
 
 fn _recompute(font: OtFont, records: [LayoutGlyphRecord], plan: LayoutLookupPlan,
-              script: u32, codepoints: [u32]) -> Option<[LayoutGlyphRecord]>:
+              script: u32, codepoints: [u32], preprocess_selected: bool) -> Option<[LayoutGlyphRecord]>:
     var result: [LayoutGlyphRecord] = []
     for record in records:
         val metrics = match selected_bounded_hmtx(font, record.glyph_id):
@@ -155,7 +159,7 @@ fn _recompute(font: OtFont, records: [LayoutGlyphRecord], plan: LayoutLookupPlan
             None: return None
         result.push(LayoutGlyphRecord(glyph_id: record.glyph_id, source_index: record.source_index,
             cluster: record.cluster, component_clusters: record.component_clusters,
-            feature_mask: _gpos_mask(plan, script, codepoints[record.source_index]),
+            feature_mask: _gpos_mask(plan, script, codepoints[record.source_index], preprocess_selected),
             x_advance_units: metrics.advance_width as i64, y_advance_units: 0,
             x_offset_units: 0, y_offset_units: 0,
             x_advance_device_pixels: record.x_advance_device_pixels,
@@ -168,9 +172,11 @@ fn resolve_canonical_layout_run(font: OtFont, script: u32, language: text, codep
                                 start: i64, end_idx: i64, explicit_features: [u32],
                                 normalized_coords: [f64] = [], ppem: i64 = 0,
                                 language_system_tag: u32 = 0u32) -> Option<CanonicalLayoutRun>:
-    if (start < 0 or end_idx > codepoints.len() or start >= end_idx or
-        not _selected_text(script, language, codepoints, start, end_idx)):
+    if start < 0 or end_idx > codepoints.len() or start >= end_idx:
         return None
+    # Exact witnesses opt into the bounded high-level preprocessing. All other
+    # valid runs still enter the generic GSUB/GPOS executor unchanged.
+    val preprocess_selected = _selected_text(script, language, codepoints, start, end_idx)
     val defaults = _selected_defaults(script, language)
     var gsub_tags = defaults.0
     var gpos_tags = defaults.1
@@ -184,7 +190,7 @@ fn resolve_canonical_layout_run(font: OtFont, script: u32, language: text, codep
     val gpos_plan = select_gpos_lookup_plan(font, script, selected_language_system,
         gpos_tags, normalized_coords)
     val data_context = gpos_data_context(ppem, normalized_coords)
-    val nominal = match _nominal(font, gsub_plan, script, codepoints, start, end_idx):
+    val nominal = match _nominal(font, gsub_plan, script, codepoints, start, end_idx, preprocess_selected):
         Some(value): value
         None: return None
     val units = match selected_units_per_em(font):
@@ -193,7 +199,7 @@ fn resolve_canonical_layout_run(font: OtFont, script: u32, language: text, codep
     val gsub_catalog = parse_gsub_skeleton(font)
     val gpos_catalog = parse_gpos_skeleton(font)
     val gsub_valid = gsub_plan.valid and layout_validate_gsub_with_catalog(font, gsub_plan.activations, gsub_catalog)
-    val gpos_nominal = match _recompute(font, nominal, gpos_plan, script, codepoints):
+    val gpos_nominal = match _recompute(font, nominal, gpos_plan, script, codepoints, preprocess_selected):
         Some(value): value
         None: return None
     val gpos_valid = gpos_plan.valid and gpos_validate(font, gpos_plan.activations,
@@ -202,7 +208,7 @@ fn resolve_canonical_layout_run(font: OtFont, script: u32, language: text, codep
         layout_apply_gsub_with_catalog(font, gsub_plan.activations, gsub_catalog, nominal)
     else:
         LayoutApplyResult(glyphs: nominal, complete: false)
-    val advanced = match _recompute(font, substituted.glyphs, gpos_plan, script, codepoints):
+    val advanced = match _recompute(font, substituted.glyphs, gpos_plan, script, codepoints, preprocess_selected):
         Some(value): value
         None: return None
     val positioned = if gpos_valid:

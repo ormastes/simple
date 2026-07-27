@@ -273,7 +273,7 @@ fn gpos_data_variation_delta(font: OtFont, outer_index: i64, inner_index: i64,
     if not gpos_data_take(work): return GposDataDelta(delta: 0, valid: false)
     if outer_index < 0 or inner_index < 0:
         return GposDataDelta(delta: 0, valid: false)
-    val table = match find_table(font, 1195656006u32):
+    val table = match find_table(font, 1195656518u32):
         Some(value): value
         None: return GposDataDelta(delta: 0, valid: false)
     val base = table.offset as i64
@@ -309,11 +309,11 @@ fn gpos_data_variation_delta(font: OtFont, outer_index: i64, inner_index: i64,
     val long_words = (encoded_word_count & 32768) != 0
     val word_count = encoded_word_count & 32767
     val item_region_count = read_u16_be(font.blob, item + 4) as i64
-    if (long_words or item_count <= 0 or inner_index >= item_count or item_region_count > 4096 or
+    if (item_count <= 0 or inner_index >= item_count or item_region_count > 4096 or
         word_count > item_region_count or item + 6 + item_region_count * 2 > limit):
         return GposDataDelta(delta: 0, valid: false)
-    val wide_size = 2
-    val narrow_size = 1
+    val wide_size = if long_words: 4 else: 2
+    val narrow_size = if long_words: 2 else: 1
     val row_size = word_count * wide_size + (item_region_count - word_count) * narrow_size
     val rows = item + 6 + item_region_count * 2
     if row_size <= 0 or item_count > (limit - rows) / row_size:
@@ -332,9 +332,14 @@ fn gpos_data_variation_delta(font: OtFont, outer_index: i64, inner_index: i64,
             font.blob, region, axis_count, normalized_coords, work)
         if not scalar_result.1: return GposDataDelta(delta: 0, valid: false)
         val delta = if index < word_count:
-            read_i16_be(font.blob, delta_at) as i64
+            if long_words:
+                val raw = read_u32_be(font.blob, delta_at) as i64
+                if raw >= 2147483648: raw - 4294967296 else: raw
+            else:
+                read_i16_be(font.blob, delta_at) as i64
         else:
-            _gpos_data_read_i8(font.blob, delta_at)
+            if long_words: read_i16_be(font.blob, delta_at) as i64
+            else: _gpos_data_read_i8(font.blob, delta_at)
         total = total + delta as f64 * scalar_result.0
         delta_at = delta_at + (if index < word_count: wide_size else: narrow_size)
         index = index + 1
@@ -443,7 +448,7 @@ fn gpos_data_anchor_adjusted(font: OtFont, offset: i64, limit: i64,
         y_device_pixels: if y_delta.device_pixels: y_delta.delta else: 0)
 
 fn _gpos_data_gdef_bounds(font: OtFont) -> Option<(i64, i64, i64)>:
-    val table = match find_table(font, 1195656006u32):
+    val table = match find_table(font, 1195656518u32):
         Some(value): value
         None: return None
     val base = table.offset as i64
