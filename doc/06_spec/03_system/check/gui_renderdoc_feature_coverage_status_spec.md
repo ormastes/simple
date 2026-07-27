@@ -2,29 +2,6 @@
 
 > Validates the restart audit for GUI item rendering coverage, HTML/CSS traceability, Electron layout-manifest scope, production GUI/web parity evidence, and RenderDoc completion gates. The audit is intentionally non-launching: it reports current evidence and references the heavy capture commands without starting Electron, Chrome, or RenderDoc.
 
-<!-- sdn-diagram:id=gui_renderdoc_feature_coverage_status_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=gui_renderdoc_feature_coverage_status_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-gui_renderdoc_feature_coverage_status_spec -> std
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=gui_renderdoc_feature_coverage_status_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
 | 33 | 33 | 0 | 0 |
@@ -47,7 +24,7 @@ Validates the restart audit for GUI item rendering coverage, HTML/CSS traceabili
 | Design | doc/07_guide/tooling/renderdoc_capture_infra.md |
 | Research | doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-21.md |
 | Source | `test/03_system/check/gui_renderdoc_feature_coverage_status_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -390,7 +367,7 @@ checksum, and exact geometry is downgraded to `fail`.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 966 lines folded for reproduction.
+Runnable source: 1006 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -543,6 +520,29 @@ expect(evidence).to_contain("navigation_bar:widget-navigation-bar")
 expect(evidence).to_contain("segmented_control:widget-segmented-control")
 expect(evidence).to_contain("empty_state:widget-empty-state")
 expect(evidence).to_contain("production_gui_web_renderer_parity_command=ELECTRON_BITMAP_TIMEOUT_SECS=20 sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_existing_env=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_existing_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_existing_reason=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_reason=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_tauri_backend=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_expected_gpu_backend=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_validation_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_validation_reason=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_marker_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_marker_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_tauri_context_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_metal_context_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_fallback_marker_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_failure_marker_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_source_coherence_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_file_reason=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_render_log_coherent_source_artifact_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_metal_log_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_file_status=")
+expect(evidence).to_contain("tauri_mobile_renderer_parity_ios_screenshot_artifact_status=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_command=PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/production_gui_web_renderer_parity_evidence/evidence.env sh scripts/check/check-production-gui-web-renderer-parity-gate.shs")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=")
@@ -583,6 +583,15 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_readb
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_readback_reason=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_readback_timed_out=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_readback_timeout_secs=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_reason=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_backend_resolved=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_metal_readback_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_browser_backing_gate_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_pairwise_gate_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_argb_source_gate_status=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_blocked_gate_count=")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_metal_render_log_blocked_gates=")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_source_status=pass")
 expect(evidence).to_contain("simple_renderdoc_gate_runtime_metadata_status=")
 expect(evidence).to_contain("simple_renderdoc_gate_missing_runtime_metadata=")
@@ -611,6 +620,13 @@ expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_su
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_backend_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_font_offload_status=pass")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_readback_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_render_log_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_render_log_required_api=metal")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_render_log_metal_readback_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_render_log_browser_backing_gate_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_render_log_pairwise_gate_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_render_log_argb_source_gate_status=pass")
+expect(evidence).to_contain("production_gui_web_renderer_parity_gate_required_metal_render_log_blocked_gate_count=0")
 expect(evidence).to_contain("gui_showcase_8k_perf_status=missing")
 expect(evidence).to_contain("gui_showcase_8k_perf_reason=missing-8k-perf-evidence")
 expect(evidence).to_contain("gui_showcase_8k_perf_max_rss_kb=")
@@ -1353,6 +1369,7 @@ expect(report).to_contain("- Production GUI/web parity source env: build/product
 expect(report).to_contain("- GUI/web/2D 8K retained perf:")
 expect(report).to_contain("- Production surface host:")
 expect(report).to_contain("- Production Tauri surface capture:")
+expect(report).to_contain("- Tauri iOS WKWebView Metal render-log:")
 expect(report).to_contain("- Production Chrome surface capture:")
 expect(report).to_contain("- blocked completion gates:")
 expect(report).to_contain("- blocked gate list:")
@@ -2333,36 +2350,37 @@ expect(evidence).to_contain("production GUI/web parity evidence with live Tauri 
 
 </details>
 
-#### requires Electron Vulkan RenderDoc evidence after Simple and external gates pass
+#### rejects magic-only Simple RenderDoc evidence before checking Electron
 
-- Create controlled Simple and original external RenderDoc evidence but no Electron evidence
+- Create magic-only Simple evidence beside valid external evidence
    - Expected: code equals `0`
-- Assert the aggregate audit stays incomplete until Electron Vulkan RDOC passes
+- Assert the aggregate rejects Simple evidence before the Electron gap
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 62 lines folded for reproduction.
+Runnable source: 63 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Create controlled Simple and original external RenderDoc evidence but no Electron evidence")
+step("Create magic-only Simple evidence beside valid external evidence")
 val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-electron-required && mkdir -p build/test-gui-renderdoc-feature-coverage-status-electron-required/simple build/test-gui-renderdoc-feature-coverage-status-electron-required/widget-simple build/test-gui-renderdoc-feature-coverage-status-electron-required/external/capture/html && printf 'RDOCsynthetic simple capture\\n' > build/test-gui-renderdoc-feature-coverage-status-electron-required/simple/simple.rdc && printf 'RDOCsynthetic external capture\\n' > build/test-gui-renderdoc-feature-coverage-status-electron-required/external/capture/html/html.rdc && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-renderdoc-feature-coverage-status-electron-required/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\n' > build/test-gui-renderdoc-feature-coverage-status-electron-required/simple/evidence.env && printf 'rdoc_backend=simple\nrdoc_scene=vulkan-engine2d\nrdoc_program=src/app/test/renderdoc_vulkan_widget_capture.spl\nrdoc_capture_status=pass\nrdoc_capture_reason=pass\nrdoc_capture_file=build/test-gui-renderdoc-feature-coverage-status-electron-required/simple/simple.rdc\nrdoc_capture_magic=RDOC\nrdoc_simple_runtime_backend=vulkan\nrdoc_simple_renderdoc_available=1\nrdoc_simple_renderdoc_start=1\nrdoc_simple_renderdoc_end=1\nrdoc_simple_renderdoc_num_captures=1\nrdoc_simple_pixel_count=3072\nvulkan_engine2d_readback_status=pass\nvulkan_engine2d_readback_reason=pass\nvulkan_engine2d_readback_spec_status=pass\nvulkan_engine2d_readback_clear_status=pass\nvulkan_engine2d_readback_clear_mismatches=0\nvulkan_engine2d_readback_rect_status=pass\nvulkan_engine2d_readback_rect_mismatches=0\nvulkan_engine2d_readback_blur_or_tolerance_used=false\nvulkan_engine2d_readback_vulkan_strict_exit_code=0\nvulkan_engine2d_readback_cpu_vulkan_parity_exit_code=0\nvulkan_engine2d_readback_status=pass\nvulkan_engine2d_readback_reason=pass\nvulkan_engine2d_readback_spec_status=pass\nvulkan_engine2d_readback_clear_status=pass\nvulkan_engine2d_readback_clear_mismatches=0\nvulkan_engine2d_readback_rect_status=pass\nvulkan_engine2d_readback_rect_mismatches=0\nvulkan_engine2d_readback_blur_or_tolerance_used=false\nvulkan_engine2d_readback_vulkan_strict_exit_code=0\nvulkan_engine2d_readback_cpu_vulkan_parity_exit_code=0\nrdoc_simple_widget_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\nrdoc_simple_widget_html_bytes=4096\n' > build/test-gui-renderdoc-feature-coverage-status-electron-required/widget-simple/evidence.env && printf 'rdoc_external_host_capture_status=pass\\nrdoc_external_host_capture_reason=pass\\nrdoc_external_host_capture_env=build/test-gui-renderdoc-feature-coverage-status-electron-required/external/capture/html/evidence.env\\nrdoc_external_host_capture_status_raw=pass\\nrdoc_external_host_capture_reason_raw=pass\\nrdoc_external_host_capture_file=build/test-gui-renderdoc-feature-coverage-status-electron-required/external/capture/html/html.rdc\\nrdoc_external_host_capture_magic=RDOC\\nrdoc_external_host_capture_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_gate_status=pass\\nrdoc_external_host_gate_reason=pass\\nrdoc_external_host_gate_scene=html-css-chrome\\nrdoc_external_host_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_gate_requested_api=vulkan\\nrdoc_external_host_gate_requested_angle=vulkan\\nrdoc_external_host_gate_requested_features=Vulkan\\nrdoc_external_host_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan\\nrdoc_external_host_required_backend=original\\nrdoc_external_host_required_scene=html-css-chrome\\nrdoc_external_host_required_status=pass\\nrdoc_external_host_required_magic=RDOC\\nrdoc_external_host_required_api=vulkan\\nrdoc_external_host_required_angle=vulkan\\nrdoc_external_host_required_features=Vulkan\\nrdoc_external_host_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_required_launch_flag_enable_features=--enable-features=Vulkan\\nrdoc_external_host_required_launch_flag_use_angle=--use-angle=vulkan\\n' > build/test-gui-renderdoc-feature-coverage-status-electron-required/external/evidence.env && RDOC_WIDGET_SIMPLE_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-electron-required/widget-simple/evidence.env RDOC_SIMPLE_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-electron-required/simple/evidence.env RDOC_EXTERNAL_CAPTURE_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-electron-required/external/evidence.env RDOC_ELECTRON_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-electron-required/missing-electron/evidence.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-electron-required/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-electron-required/report.md GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
 expect(code).to_equal(0)
 
-step("Assert the aggregate audit stays incomplete until Electron Vulkan RDOC passes")
+step("Assert the aggregate rejects Simple evidence before the Electron gap")
 val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-electron-required/out/evidence.env")
 expect(evidence).to_contain("renderdoc_goal_status=fail")
-expect(evidence).to_contain("renderdoc_goal_blocked_gate=Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof")
-expect(evidence).to_contain("renderdoc_goal_blocked_gate_count=1")
-expect(evidence).to_contain("renderdoc_goal_blocked_gates=Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof")
-expect(evidence).to_contain("simple_renderdoc_status=pass")
+expect(evidence).to_contain("renderdoc_goal_blocked_gate=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic")
+expect(evidence).to_contain("renderdoc_goal_blocked_gate_count=2")
+expect(evidence).to_contain("renderdoc_goal_blocked_gates=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic|Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof")
+expect(evidence).to_contain("simple_renderdoc_status=fail")
 expect(evidence).to_contain("simple_renderdoc_capture_status=pass")
 expect(evidence).to_contain("simple_renderdoc_capture_magic=RDOC")
 expect(evidence).to_contain("simple_renderdoc_capture_file_magic=RDOC")
-expect(evidence).to_contain("simple_renderdoc_gate_status=pass")
+expect(evidence).to_contain("simple_renderdoc_gate_status=fail")
+expect(evidence).to_contain("simple_renderdoc_gate_reason=capture-not-active-before-end")
 expect(evidence).to_contain("simple_renderdoc_gate_capture_file_magic=RDOC")
 expect(evidence).to_contain("simple_renderdoc_gate_runtime_backend=vulkan")
 expect(evidence).to_contain("simple_renderdoc_gate_renderdoc_available=1")
@@ -2403,22 +2421,22 @@ expect(evidence).to_contain("external_renderdoc_required_features=Vulkan")
 expect(evidence).to_contain("external_renderdoc_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html")
 expect(evidence).to_contain("electron_renderdoc_gate_status=unavailable")
 expect(evidence).to_contain("electron_renderdoc_gate_reason=missing-source-evidence")
-expect(evidence).to_contain("blocked_completion_gate=Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof")
+expect(evidence).to_contain("blocked_completion_gate=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic")
 val electron_required_blocked_gates = _value_of(evidence, "blocked_completion_gates")
 expect(electron_required_blocked_gates).to_contain("Electron Chromium-on-Vulkan RenderDoc .rdc with nonblank ARGB render proof")
 expect(electron_required_blocked_gates).to_contain("Electron Chromium-on-Vulkan widget RenderDoc .rdc")
 expect(evidence).to_contain("gui_renderdoc_feature_coverage_status=incomplete")
-expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-electron-widget-renderdoc")
+expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-simple-widget-renderdoc")
 ```
 
 </details>
 
 <details>
-<summary>Advanced: requires production GUI/web parity evidence after all RenderDoc gates pass</summary>
+<summary>Advanced: rejects synthetic RenderDoc evidence before production parity</summary>
 
-#### requires production GUI/web parity evidence after all RenderDoc gates pass _(slow)_
+#### rejects synthetic RenderDoc evidence before production parity _(slow)_
 
-- Create controlled RenderDoc evidence but point production parity at a missing env
+- Create synthetic RenderDoc evidence and leave production parity unavailable
 - Assert browser-backing setup producer requires Chrome hardware and Vulkan details
    - Expected: symlink_macos_code equals `0`
 - Reject symlinked macOS Metal render-log aggregate env
@@ -2437,17 +2455,17 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-elect
    - Expected: symlink_argb_code equals `0`
 - Reject symlinked GUI/web/2D ARGB proof and pairwise diff artifacts
    - Expected: code equals `0`
-- Assert the aggregate audit stays incomplete until production parity evidence passes
+- Assert the aggregate rejects the synthetic Simple capture
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 327 lines folded for reproduction.
+Runnable source: 328 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Create controlled RenderDoc evidence but point production parity at a missing env")
+step("Create synthetic RenderDoc evidence and leave production parity unavailable")
 val command = "rm -rf build/test-gui-renderdoc-feature-coverage-status-production-required && mkdir -p build/test-gui-renderdoc-feature-coverage-status-production-required/simple build/test-gui-renderdoc-feature-coverage-status-production-required/widget-simple build/test-gui-renderdoc-feature-coverage-status-production-required/external/capture/html build/test-gui-renderdoc-feature-coverage-status-production-required/electron build/test-gui-renderdoc-feature-coverage-status-production-required/gui build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs build/test-gui-renderdoc-feature-coverage-status-production-required/webwm && printf 'web_wm_modern_shell_evidence_status=pass\nweb_wm_modern_shell_evidence_reason=pass\nweb_wm_modern_shell_evidence_width=1360\nweb_wm_modern_shell_evidence_height=840\nweb_wm_modern_shell_evidence_html_path=build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/preview.html\nweb_wm_modern_shell_evidence_argb_path=build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/capture.argb.json\nweb_wm_modern_shell_evidence_png_path=build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/capture.png\nweb_wm_modern_shell_evidence_audit_path=build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/audit.json\nweb_wm_modern_shell_evidence_interaction_path=build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/interaction.json\nweb_wm_modern_shell_evidence_interaction_png_path=build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/interaction.png\nweb_wm_modern_shell_evidence_interaction_log_path=build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/interaction.log\nweb_wm_modern_shell_evidence_log_path=build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/shell.log\nweb_wm_modern_shell_evidence_bitmap_nonblank_status=pass\nweb_wm_modern_shell_evidence_audit_pass=pass\nweb_wm_modern_shell_evidence_unexpected_overlap_count=0\nweb_wm_modern_shell_evidence_clipped_count=0\nweb_wm_modern_shell_evidence_contrast_failures=0\nweb_wm_modern_shell_evidence_touch_failures=0\nweb_wm_modern_shell_evidence_interaction_pass=pass\nweb_wm_modern_shell_evidence_interaction_focus=pass\nweb_wm_modern_shell_evidence_interaction_keyboard=pass\nweb_wm_modern_shell_evidence_interaction_input=pass\nweb_wm_modern_shell_evidence_interaction_pointer=pass\nweb_wm_modern_shell_evidence_interaction_clicks=3\nweb_wm_modern_shell_evidence_interaction_event_count=8\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/evidence.env && printf 'html\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/preview.html && printf 'argb\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/capture.argb.json && printf 'png\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/capture.png && printf '{}\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/audit.json && printf '{}\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/interaction.json && printf 'png\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/interaction.png && printf 'log\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/interaction.log && printf 'shell log\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/shell.log && printf 'linux_vulkan_render_log_compare_status=pass\\nlinux_vulkan_render_log_compare_reason=pass\\nlinux_vulkan_render_log_compare_required_api=vulkan\\nlinux_vulkan_render_log_compare_pairwise_status=pass\\nlinux_vulkan_render_log_compare_blocked_gate_count=0\\nlinux_vulkan_render_log_compare_blocked_gates=\\nlinux_vulkan_render_log_compare_simple_vulkan_gate_status=pass\\nlinux_vulkan_render_log_compare_browser_backing_gate_status=pass\\nlinux_vulkan_render_log_compare_pairwise_gate_status=pass\\nlinux_vulkan_render_log_compare_argb_source_gate_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_gate_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_simple_artifact_magic=RDOC\\nlinux_vulkan_render_log_compare_renderdoc_chrome_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_chrome_artifact_magic=RDOC\\nlinux_vulkan_render_log_compare_renderdoc_electron_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_env_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_artifact_file_status=pass\\nlinux_vulkan_render_log_compare_renderdoc_electron_artifact_magic=RDOC\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/linux.env && printf 'macos_metal_render_log_compare_status=pass\\nmacos_metal_render_log_compare_reason=pass\\nmacos_metal_render_log_compare_required_api=metal\\nmacos_metal_render_log_compare_pairwise_status=pass\\nmacos_metal_render_log_compare_blocked_gate_count=0\\nmacos_metal_render_log_compare_blocked_gates=\\nmacos_metal_render_log_compare_generated_readback_gate_status=pass\\nmacos_metal_render_log_compare_framebuffer_readback_gate_status=pass\\nmacos_metal_render_log_compare_browser_backing_gate_status=pass\\nmacos_metal_render_log_compare_pairwise_gate_status=pass\\nmacos_metal_render_log_compare_argb_source_gate_status=pass\\nmacos_metal_render_log_compare_gpu_capture_gate_status=pass\\nmacos_metal_render_log_compare_gpu_capture_status=pass\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/macos.env && printf 'windows_d3d12_render_log_compare_status=pass\\nwindows_d3d12_render_log_compare_reason=pass\\nwindows_d3d12_render_log_compare_required_api=d3d12\\nwindows_d3d12_render_log_compare_pairwise_status=pass\\nwindows_d3d12_render_log_compare_blocked_gate_count=0\\nwindows_d3d12_render_log_compare_blocked_gates=\\nwindows_d3d12_render_log_compare_native_readback_gate_status=pass\\nwindows_d3d12_render_log_compare_browser_backing_gate_status=pass\\nwindows_d3d12_render_log_compare_pairwise_gate_status=pass\\nwindows_d3d12_render_log_compare_argb_source_gate_status=pass\\nwindows_d3d12_render_log_compare_pix_gpu_debugger_gate_status=pass\\nwindows_d3d12_render_log_compare_pix_status=pass\\nwindows_d3d12_render_log_compare_pix_artifact=build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/frame.wpix\\nwindows_d3d12_render_log_compare_pix_artifact_magic=PIX\\nwindows_d3d12_render_log_compare_pix_artifact_file_magic=PIX\\nwindows_d3d12_render_log_compare_gpu_debugger_status=pass\\nwindows_d3d12_render_log_compare_gpu_debugger_artifact=build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/gpu-debugger.log\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/windows.env && printf 'PIX synthetic artifact\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/frame.wpix && printf 'GPU debugger log\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/gpu-debugger.log && printf 'gui_web_2d_vulkan_mode=--check\\ngui_web_2d_vulkan_loader_status=present\\ngui_web_2d_vulkan_device=synthetic-vulkan-device\\ngui_web_2d_vulkan_driver=MoltenVK\\ngui_web_2d_vulkan_renderdoc_status=pass\\ngui_web_2d_vulkan_renderdoc_reason=pass\\ngui_web_2d_vulkan_renderdoc_cmd=/Applications/RenderDoc.app/Contents/MacOS/renderdoccmd\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env && printf 'gui_web_2d_vulkan_mode=--run\\ngui_web_2d_vulkan_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\ngui_web_2d_vulkan_width=1024\\ngui_web_2d_vulkan_height=768\\ngui_web_2d_vulkan_electron_argb_status=pass\\ngui_web_2d_vulkan_electron_argb_path=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron_argb.json\\ngui_web_2d_vulkan_electron_argb_width=1024\\ngui_web_2d_vulkan_electron_argb_height=768\\ngui_web_2d_vulkan_electron_argb_nonblank_pixel_count=1\\ngui_web_2d_vulkan_electron_vulkan_status=pass\\ngui_web_2d_vulkan_electron_vulkan_reason=pass\\ngui_web_2d_vulkan_chrome_bitmap_status=pass\\ngui_web_2d_vulkan_chrome_screenshot=doc/09_report/simpleos_gui_hello_world_2026-04-03.png\\ngui_web_2d_vulkan_chrome_vulkan_status=pass\\ngui_web_2d_vulkan_chrome_vulkan_reason=pass\\ngui_web_2d_vulkan_simple_status=pass\\ngui_web_2d_vulkan_simple_reason=pass\\ngui_web_2d_vulkan_simple_evidence_env=build/test-gui-renderdoc-feature-coverage-status-production-required/widget-simple/evidence.env\\ngui_web_2d_vulkan_simple_probe_status=Initialized\\ngui_web_2d_vulkan_simple_backend_name=vulkan\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/run.env && printf 'rdoc_macos_probe_status=pass\\nrdoc_macos_probe_reason=pass\\nrdoc_macos_uname_s=Darwin\\nrdoc_macos_uname_m=arm64\\nrdoc_macos_vulkan_status=present\\nrdoc_macos_vulkan_device=synthetic-vulkan-device\\nrdoc_macos_vulkan_driver=MoltenVK\\nrdoc_macos_renderdoc_status=pass\\nrdoc_macos_run_captures=3\\nrdoc_macos_capture_simple_status=pass\\nrdoc_macos_capture_html_status=pass\\nrdoc_macos_html_gate_status=pass\\nrdoc_macos_capture_electron_status=pass\\nrdoc_macos_electron_gate_status=pass\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/gui/macos.env && printf 'RDOCsynthetic simple capture\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/simple/simple.rdc && printf 'RDOCsynthetic external capture\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/external/capture/html/html.rdc && printf 'RDOCsynthetic electron capture\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron.rdc && printf '{\"width\":2,\"height\":2,\"format\":\"argb-u32\",\"producer\":\"electron-chromium-capture\",\"nativeWidth\":2,\"nativeHeight\":2,\"pixels\":[4294967295,4278190335,4294967295,4294967295]}\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron_argb.json && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-renderdoc-feature-coverage-status-production-required/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/simple/evidence.env && printf 'rdoc_backend=simple\\nrdoc_scene=vulkan-engine2d\\nrdoc_program=src/app/test/renderdoc_vulkan_widget_capture.spl\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-renderdoc-feature-coverage-status-production-required/simple/simple.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_simple_runtime_backend=vulkan\\nrdoc_simple_renderdoc_available=1\\nrdoc_simple_renderdoc_start=1\\nrdoc_simple_renderdoc_end=1\\nrdoc_simple_renderdoc_num_captures=1\\nrdoc_simple_pixel_count=3072\\nvulkan_engine2d_readback_status=pass\nvulkan_engine2d_readback_reason=pass\nvulkan_engine2d_readback_spec_status=pass\nvulkan_engine2d_readback_clear_status=pass\nvulkan_engine2d_readback_clear_mismatches=0\nvulkan_engine2d_readback_rect_status=pass\nvulkan_engine2d_readback_rect_mismatches=0\nvulkan_engine2d_readback_blur_or_tolerance_used=false\nvulkan_engine2d_readback_vulkan_strict_exit_code=0\nvulkan_engine2d_readback_cpu_vulkan_parity_exit_code=0\nrdoc_simple_widget_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_simple_widget_html_bytes=4096\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/widget-simple/evidence.env && printf 'rdoc_external_host_capture_status=pass\\nrdoc_external_host_capture_reason=pass\\nrdoc_external_host_capture_env=build/test-gui-renderdoc-feature-coverage-status-production-required/external/capture/html/evidence.env\\nrdoc_external_host_capture_status_raw=pass\\nrdoc_external_host_capture_reason_raw=pass\\nrdoc_external_host_capture_file=build/test-gui-renderdoc-feature-coverage-status-production-required/external/capture/html/html.rdc\\nrdoc_external_host_capture_magic=RDOC\\nrdoc_external_host_capture_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_gate_status=pass\\nrdoc_external_host_gate_reason=pass\\nrdoc_external_host_gate_scene=html-css-chrome\\nrdoc_external_host_gate_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_gate_requested_api=vulkan\\nrdoc_external_host_gate_requested_angle=vulkan\\nrdoc_external_host_gate_requested_features=Vulkan\\nrdoc_external_host_gate_launch_flags=--no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --enable-features=Vulkan --use-angle=vulkan\\nrdoc_external_host_required_backend=original\\nrdoc_external_host_required_scene=html-css-chrome\\nrdoc_external_host_required_status=pass\\nrdoc_external_host_required_magic=RDOC\\nrdoc_external_host_required_api=vulkan\\nrdoc_external_host_required_angle=vulkan\\nrdoc_external_host_required_features=Vulkan\\nrdoc_external_host_required_html_path_suffix=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_external_host_required_launch_flag_enable_features=--enable-features=Vulkan\\nrdoc_external_host_required_launch_flag_use_angle=--use-angle=vulkan\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/external/evidence.env && printf 'rdoc_backend=electron\\nrdoc_scene=html-css-electron\\nrdoc_capture_status=pass\\nrdoc_capture_reason=pass\\nrdoc_capture_file=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron.rdc\\nrdoc_capture_magic=RDOC\\nrdoc_html_path=test/fixtures/html_css/generated_gui_vulkan_renderdoc_fixture.html\\nrdoc_electron=tools/electron-shell/node_modules/.bin/electron\\nrdoc_electron_capture_script=tools/electron-live-bitmap/capture_html_argb.js\\nrdoc_electron_argb=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/electron_argb.json\\nrdoc_electron_width=2\\nrdoc_electron_height=2\\nrdoc_chromium_requested_api=vulkan\\nrdoc_chromium_requested_angle=vulkan\\nrdoc_chromium_requested_features=Vulkan\\nrdoc_chromium_launch_flags=--enable-features=Vulkan --use-angle=vulkan\\n' > build/test-gui-renderdoc-feature-coverage-status-production-required/electron/evidence.env && WEB_WM_MODERN_SHELL_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/webwm/evidence.env LINUX_VULKAN_RENDER_LOG_COMPARE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/linux.env MACOS_METAL_RENDER_LOG_COMPARE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/macos.env WINDOWS_D3D12_RENDER_LOG_COMPARE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/renderlogs/windows.env GUI_WEB_2D_VULKAN_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/setup.env GUI_WEB_2D_VULKAN_RUN_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/run.env RDOC_MACOS_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/gui/macos.env RDOC_SIMPLE_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/simple/evidence.env RDOC_WIDGET_SIMPLE_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/widget-simple/evidence.env RDOC_EXTERNAL_CAPTURE_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/external/evidence.env RDOC_ELECTRON_EVIDENCE_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/electron/evidence.env PRODUCTION_GUI_WEB_RENDERER_PARITY_ENV=build/test-gui-renderdoc-feature-coverage-status-production-required/missing-production/evidence.env GUI_RENDERDOC_AGGREGATE_STATIC_CACHE_DIR=build/test-gui-renderdoc-feature-coverage-static-cache BUILD_DIR=build/test-gui-renderdoc-feature-coverage-status-production-required/out REPORT_PATH=build/test-gui-renderdoc-feature-coverage-status-production-required/report.md GUI_RENDERDOC_AGGREGATE_PRINT_ENV=0 sh scripts/check/check-gui-renderdoc-feature-coverage-status.shs"
 step("Assert browser-backing setup producer requires Chrome hardware and Vulkan details")
 val setup_script = file_read("scripts/setup/setup-gui-web-2d-vulkan-env.shs")
@@ -2601,12 +2619,12 @@ expect(symlink_argb_evidence).to_contain("chrome-argb-proof-fail")
 val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command_with_pixel_files])
 expect(code).to_equal(0)
 
-step("Assert the aggregate audit stays incomplete until production parity evidence passes")
+step("Assert the aggregate rejects the synthetic Simple capture")
 val evidence = file_read("build/test-gui-renderdoc-feature-coverage-status-production-required/out/evidence.env")
-expect(evidence).to_contain("renderdoc_goal_status=pass")
-expect(evidence).to_contain("renderdoc_goal_blocked_gate=")
-expect(evidence).to_contain("renderdoc_goal_blocked_gate_count=0")
-expect(evidence).to_contain("renderdoc_goal_blocked_gates=")
+expect(evidence).to_contain("renderdoc_goal_status=fail")
+expect(evidence).to_contain("renderdoc_goal_blocked_gate=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic")
+expect(evidence).to_contain("renderdoc_goal_blocked_gate_count=1")
+expect(evidence).to_contain("renderdoc_goal_blocked_gates=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic")
 expect(evidence).to_contain("native_render_log_platform_matrix_status=pass")
 expect(evidence).to_contain("native_render_log_platform_matrix_reason=pass")
 expect(evidence).to_contain("native_render_log_platform_matrix_missing_platforms=")
@@ -2629,11 +2647,12 @@ expect(evidence).to_contain("macos_metal_render_log_compare_chrome_argb_artifact
 expect(evidence).to_contain("macos_metal_render_log_compare_electron_argb_artifact_reason=pass")
 expect(evidence).to_contain("macos_metal_render_log_compare_argb_viewport_reason=pass")
 expect(evidence).to_contain("windows_d3d12_render_log_compare_status=pass")
-expect(evidence).to_contain("simple_renderdoc_status=pass")
+expect(evidence).to_contain("simple_renderdoc_status=fail")
 expect(evidence).to_contain("simple_renderdoc_capture_status=pass")
 expect(evidence).to_contain("simple_renderdoc_capture_magic=RDOC")
 expect(evidence).to_contain("simple_renderdoc_capture_file_magic=RDOC")
-expect(evidence).to_contain("simple_renderdoc_gate_status=pass")
+expect(evidence).to_contain("simple_renderdoc_gate_status=fail")
+expect(evidence).to_contain("simple_renderdoc_gate_reason=capture-not-active-before-end")
 expect(evidence).to_contain("simple_renderdoc_gate_capture_file_magic=RDOC")
 expect(evidence).to_contain("simple_renderdoc_gate_runtime_backend=vulkan")
 expect(evidence).to_contain("simple_renderdoc_gate_renderdoc_available=1")
@@ -2761,19 +2780,19 @@ expect(evidence).to_contain("web_wm_modern_shell_evidence_interaction_focus=pass
 expect(evidence).to_contain("web_wm_modern_shell_evidence_interaction_keyboard=pass")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_interaction_input=pass")
 expect(evidence).to_contain("web_wm_modern_shell_evidence_interaction_pointer=pass")
-expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_status=pass")
-expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_reason=pass")
-expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_gate_count=0")
-expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_gates=")
+expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_status=blocked")
+expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_reason=simple-renderdoc-gate-fail-capture-not-active-before-end")
+expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_gate_count=1")
+expect(evidence).to_contain("gui_web_2d_vulkan_renderdoc_blocker_gates=simple-renderdoc-gate-fail-capture-not-active-before-end")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_status=unavailable")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_reason=missing-production-parity-evidence")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env=build/test-gui-renderdoc-feature-coverage-status-production-required/missing-production/evidence.env")
 expect(evidence).to_contain("production_gui_web_renderer_parity_gate_source_env_status=missing")
-expect(evidence).to_contain("blocked_completion_gate=production GUI/web font offload readback evidence")
-expect(evidence).to_contain("blocked_completion_gate_count=6")
-expect(evidence).to_contain("blocked_completion_gates=production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|retained 4K GUI/web/2D 200fps performance evidence with FPS and checksum|retained 8K GUI/web/2D performance evidence with FPS, checksum, and RSS|full CSS specification rendering coverage beyond implemented Simple Web subset")
+expect(evidence).to_contain("blocked_completion_gate=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic")
+expect(evidence).to_contain("blocked_completion_gate_count=8")
+expect(evidence).to_contain("blocked_completion_gates=Simple Vulkan Engine2D RenderDoc .rdc with RDOC magic|Simple GUI widget RenderDoc .rdc on Vulkan Engine2D|production GUI/web font offload readback evidence|production GUI/web raw Metal readback evidence|production GUI/web parity evidence with live Tauri and Chrome captures|retained 4K GUI/web/2D 200fps performance evidence with FPS and checksum|retained 8K GUI/web/2D performance evidence with FPS, checksum, and RSS|full CSS specification rendering coverage beyond implemented Simple Web subset")
 expect(evidence).to_contain("gui_renderdoc_feature_coverage_status=incomplete")
-expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-production-parity-evidence")
+expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-simple-widget-renderdoc")
 ```
 
 </details>
@@ -2794,9 +2813,9 @@ expect(evidence).to_contain("gui_renderdoc_feature_coverage_reason=missing-produ
 
 ## Related Documentation
 
-- **Plan:** [doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md](doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md)
-- **Design:** [doc/07_guide/tooling/renderdoc_capture_infra.md](doc/07_guide/tooling/renderdoc_capture_infra.md)
-- **Research:** [doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-21.md](doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-21.md)
+- **Plan:** `doc/03_plan/ui/gpu_full_render_offload_mdsoc_plus_plan.md`
+- **Design:** `doc/07_guide/tooling/renderdoc_capture_infra.md`
+- **Research:** `doc/09_report/gui_renderdoc_feature_coverage_status_2026-06-21.md`
 
 
 </details>

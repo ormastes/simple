@@ -752,3 +752,20 @@ Tracking split:
   accepted pure-Simple full CLI or measured coverage artifact; the broader GUI
   feature-coverage spec also retains synthetic-completion scenarios for a
   later uncapped environment.
+- bugfix: Closed the broader GUI aggregate's stale nested-gate cache and
+  synthetic-completion expectations. HTML and widget RenderDoc admission now
+  rerun instead of reusing an older pass after gate/replay/capture changes; the
+  focused fixture confirms `capture-not-active-before-end`, two HTML blockers,
+  and final `missing-simple-widget-renderdoc`. The full broad spec reached its
+  120-second resource ceiling at 0/1, so no suite PASS is claimed. Docgen
+  produced one 184-line manual with zero stubs; the contradictory legacy
+  duplicate manual was removed.
+- verify-gap: The completed fullscreen QEMU artifact reached 3840x2160 but
+  failed `guest-render-fault`: three CPU-material witnesses retained the
+  contract attributes while returned `Style` entries lost background/backdrop
+  fields, yielding `fallback=none material=` and rejecting every WM frame.
+  The source-matched artifact was already stale, and a new foreign wrapper run
+  now owns the VM/build. Do not rerun or edit that source lane concurrently;
+  the next owner fix is the existing freestanding-safe style material side
+  channel, followed by its focused material/frame specs and one QEMU resume.
+  Accepted-current full CLI coverage artifacts remain absent.

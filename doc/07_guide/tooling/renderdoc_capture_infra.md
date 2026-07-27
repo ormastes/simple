@@ -1888,6 +1888,8 @@ Chromium/Vulkan widget evidence both pass, all 43 widget feature witnesses are
 covered, and `gui_widget_renderdoc_goal_blocked_gate_count=0`.
 The higher-level HTML and widget aggregates reject magic-only Simple `.rdc`
 fixtures even when their Chrome or Electron fixture rows pass.
+Their nested admission gates run uncached so gate-code, replay, and capture
+changes cannot reuse an older passing result.
 
 Linux browser diagnostics:
 
