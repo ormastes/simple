@@ -1065,6 +1065,11 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   provenance-acceptable `host-gpu` runtime artifact if one is found; do not
   bootstrap merely to manufacture it. Require the broader Bungee/Engine2D
   producer receipts before returning to Vulkan device-readback evidence.
+- Independent review also requires four source corrections before that run:
+  preserve selected-asset physical/root resolution instead of raw local-path
+  reads; clear measure/render cookies before every possible failure; preserve
+  the legacy positive advance fallback; and trim `sfnt_glyf.spl` below 800
+  lines. Add stale-cookie, whitespace, asset-root, and renderer cache coverage.
 
 ## Ownership and Stop Conditions
 
