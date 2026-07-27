@@ -19,37 +19,37 @@ class LayoutApplyResult:
     glyphs: [LayoutGlyphRecord]
     complete: bool
 
-class _Coverage:
+class LayoutContextCoverage:
     index: i64
     count: i64
     found: bool
     valid: bool
 
-class _ContextMatch:
+class LayoutContextMatch:
     matched: bool
     positions: [i64]
     records_offset: i64
     record_count: i64
     work: i64
 
-fn _coverage(blob: [u8], offset: i64, limit: i64, glyph: u32) -> _Coverage:
-    if offset < 0 or offset + 4 > limit: return _Coverage(index: 0, count: 0, found: false, valid: false)
+fn layout_context_coverage(blob: [u8], offset: i64, limit: i64, glyph: u32) -> LayoutContextCoverage:
+    if offset < 0 or offset + 4 > limit: return LayoutContextCoverage(index: 0, count: 0, found: false, valid: false)
     val format = read_u16_be(blob, offset)
     val count = read_u16_be(blob, offset + 2) as i64
     if format == 1u32:
-        if offset + 4 + count * 2 > limit: return _Coverage(index: 0, count: 0, found: false, valid: false)
+        if offset + 4 + count * 2 > limit: return LayoutContextCoverage(index: 0, count: 0, found: false, valid: false)
         var previous: i64 = -1
         var found: i64 = -1
         var index: i64 = 0
         while index < count:
             val current = read_u16_be(blob, offset + 4 + index * 2) as i64
-            if current <= previous: return _Coverage(index: 0, count: 0, found: false, valid: false)
+            if current <= previous: return LayoutContextCoverage(index: 0, count: 0, found: false, valid: false)
             if current == glyph as i64: found = index
             previous = current
             index = index + 1
-        return _Coverage(index: found, count: count, found: found >= 0, valid: true)
+        return LayoutContextCoverage(index: found, count: count, found: found >= 0, valid: true)
     if format == 2u32:
-        if offset + 4 + count * 6 > limit: return _Coverage(index: 0, count: 0, found: false, valid: false)
+        if offset + 4 + count * 6 > limit: return LayoutContextCoverage(index: 0, count: 0, found: false, valid: false)
         var previous_end: i64 = -1
         var expected: i64 = 0
         var found: i64 = -1
@@ -60,16 +60,16 @@ fn _coverage(blob: [u8], offset: i64, limit: i64, glyph: u32) -> _Coverage:
             val last = read_u16_be(blob, record + 2) as i64
             val first_index = read_u16_be(blob, record + 4) as i64
             if first > last or first <= previous_end or first_index != expected:
-                return _Coverage(index: 0, count: 0, found: false, valid: false)
+                return LayoutContextCoverage(index: 0, count: 0, found: false, valid: false)
             expected = first_index + last - first + 1
-            if expected > 65536: return _Coverage(index: 0, count: 0, found: false, valid: false)
+            if expected > 65536: return LayoutContextCoverage(index: 0, count: 0, found: false, valid: false)
             if glyph as i64 >= first and glyph as i64 <= last: found = first_index + glyph as i64 - first
             previous_end = last
             index = index + 1
-        return _Coverage(index: found, count: expected, found: found >= 0, valid: true)
-    _Coverage(index: 0, count: 0, found: false, valid: false)
+        return LayoutContextCoverage(index: found, count: expected, found: found >= 0, valid: true)
+    LayoutContextCoverage(index: 0, count: 0, found: false, valid: false)
 
-fn _gdef_limit(font: OtFont) -> Option<(i64, i64)>:
+fn layout_context_gdef_limit(font: OtFont) -> Option<(i64, i64)>:
     val table = match find_table(font, 1195656006u32):
         Some(value): value
         None: return None
@@ -78,7 +78,7 @@ fn _gdef_limit(font: OtFont) -> Option<(i64, i64)>:
     if start < 0 or limit < start or limit > font.blob.len() or start + 12 > limit: return None
     Some((start, limit))
 
-fn _class_def(font: OtFont, offset: i64, limit: i64, glyph: u32) -> Option<i64>:
+fn layout_context_class_def(font: OtFont, offset: i64, limit: i64, glyph: u32) -> Option<i64>:
     if offset <= 0 or offset + 4 > limit: return None
     val format = read_u16_be(font.blob, offset)
     if format == 1u32:
@@ -105,16 +105,16 @@ fn _class_def(font: OtFont, offset: i64, limit: i64, glyph: u32) -> Option<i64>:
         return Some(0)
     None
 
-fn _gdef_glyph_class(font: OtFont, glyph: u32) -> Option<i64>:
-    val bounds = match _gdef_limit(font):
+fn layout_context_gdef_glyph_class(font: OtFont, glyph: u32) -> Option<i64>:
+    val bounds = match layout_context_gdef_limit(font):
         Some(value): value
         None: return None
     val class_offset = read_u16_be(font.blob, bounds.0 + 4) as i64
     if class_offset == 0: return Some(0)
-    _class_def(font, bounds.0 + class_offset, bounds.1, glyph)
+    layout_context_class_def(font, bounds.0 + class_offset, bounds.1, glyph)
 
-fn _mark_filter_contains(font: OtFont, set_index: i64, glyph: u32) -> Option<bool>:
-    val bounds = match _gdef_limit(font):
+fn layout_context_mark_filter_contains(font: OtFont, set_index: i64, glyph: u32) -> Option<bool>:
+    val bounds = match layout_context_gdef_limit(font):
         Some(value): value
         None: return None
     val version = read_u32_be(font.blob, bounds.0)
@@ -126,23 +126,23 @@ fn _mark_filter_contains(font: OtFont, set_index: i64, glyph: u32) -> Option<boo
     if set_index < 0 or set_index >= count or definition + 4 + count * 4 > bounds.1: return None
     val coverage_offset = read_u32_be(font.blob, definition + 4 + set_index * 4) as i64
     if coverage_offset == 0: return None
-    val covered = _coverage(font.blob, definition + coverage_offset, bounds.1, glyph)
+    val covered = layout_context_coverage(font.blob, definition + coverage_offset, bounds.1, glyph)
     if not covered.valid: return None
     Some(covered.found)
 
-fn _lookup_accepts(font: OtFont, lookup: GsubLookup, record: LayoutGlyphRecord) -> Option<bool>:
+fn layout_context_lookup_accepts(font: OtFont, lookup: GsubLookup, record: LayoutGlyphRecord) -> Option<bool>:
     if lookup.flag == 0u32: return Some(true)
-    val glyph_class = match _gdef_glyph_class(font, record.glyph_id):
+    val glyph_class = match layout_context_gdef_glyph_class(font, record.glyph_id):
         Some(value): value
         None: return None
     if glyph_class != 3: return Some(true)
     if lookup.flag == 8u32: return Some(false)
-    _mark_filter_contains(font, lookup.mark_filtering_set, record.glyph_id)
+    layout_context_mark_filter_contains(font, lookup.mark_filtering_set, record.glyph_id)
 
-fn _next_layout_input(font: OtFont, lookup: GsubLookup, records: [LayoutGlyphRecord], index: i64) -> Option<i64>:
+fn layout_context_next_input(font: OtFont, lookup: GsubLookup, records: [LayoutGlyphRecord], index: i64) -> Option<i64>:
     var cursor = index
     while cursor < records.len():
-        val accepted = match _lookup_accepts(font, lookup, records[cursor]):
+        val accepted = match layout_context_lookup_accepts(font, lookup, records[cursor]):
             Some(value): value
             None: return None
         if accepted: return Some(cursor)
@@ -152,14 +152,14 @@ fn _next_layout_input(font: OtFont, lookup: GsubLookup, records: [LayoutGlyphRec
 fn _previous_layout_input(font: OtFont, lookup: GsubLookup, records: [LayoutGlyphRecord], index: i64) -> Option<i64>:
     var cursor = index
     while cursor >= 0:
-        val accepted = match _lookup_accepts(font, lookup, records[cursor]):
+        val accepted = match layout_context_lookup_accepts(font, lookup, records[cursor]):
             Some(value): value
             None: return None
         if accepted: return Some(cursor)
         cursor = cursor - 1
     Some(-1)
 
-fn _context3_positions(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
+fn layout_context3_positions(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
                        records: [LayoutGlyphRecord], start: i64, maximum_work: i64) -> Option<[i64]>:
     val input_count = read_u16_be(font.blob, subtable + 2) as i64
     if input_count > maximum_work: return None
@@ -167,12 +167,12 @@ fn _context3_positions(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i
     var cursor = start
     var input_index: i64 = 0
     while input_index < input_count:
-        val position = match _next_layout_input(font, lookup, records, cursor):
+        val position = match layout_context_next_input(font, lookup, records, cursor):
             Some(value): value
             None: return None
         if position < 0: return Some([])
         val coverage = read_u16_be(font.blob, subtable + 6 + input_index * 2) as i64
-        val matched = _coverage(font.blob, subtable + coverage, limit, records[position].glyph_id)
+        val matched = layout_context_coverage(font.blob, subtable + coverage, limit, records[position].glyph_id)
         if not matched.valid: return None
         if not matched.found: return Some([])
         positions.push(position)
@@ -180,17 +180,17 @@ fn _context3_positions(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i
         input_index = input_index + 1
     Some(positions)
 
-fn _no_context_match(work: i64) -> _ContextMatch:
-    _ContextMatch(matched: false, positions: [], records_offset: 0, record_count: 0, work: work)
+fn _no_context_match(work: i64) -> LayoutContextMatch:
+    LayoutContextMatch(matched: false, positions: [], records_offset: 0, record_count: 0, work: work)
 
-fn _context2_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
-                   records: [LayoutGlyphRecord], start: i64, maximum_work: i64) -> Option<_ContextMatch>:
+fn layout_context2_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
+                         records: [LayoutGlyphRecord], start: i64, maximum_work: i64) -> Option<LayoutContextMatch>:
     var work: i64 = 1
-    val covered = _coverage(font.blob, subtable + read_u16_be(font.blob, subtable + 2) as i64,
+    val covered = layout_context_coverage(font.blob, subtable + read_u16_be(font.blob, subtable + 2) as i64,
         limit, records[start].glyph_id)
     if not covered.valid: return None
     if not covered.found: return Some(_no_context_match(work))
-    val first_class = match _class_def(font, subtable + read_u16_be(font.blob, subtable + 4) as i64,
+    val first_class = match layout_context_class_def(font, subtable + read_u16_be(font.blob, subtable + 4) as i64,
         limit, records[start].glyph_id):
         Some(value): value
         None: return None
@@ -214,14 +214,14 @@ fn _context2_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
         while input_index < glyph_count:
             work = work + 1
             if work > maximum_work: return None
-            val position = match _next_layout_input(font, lookup, records, cursor):
+            val position = match layout_context_next_input(font, lookup, records, cursor):
                 Some(value): value
                 None: return None
             if position < 0:
                 matched = false
             else:
                 val wanted = read_u16_be(font.blob, rule + 4 + (input_index - 1) * 2) as i64
-                val actual = match _class_def(font, subtable + read_u16_be(font.blob, subtable + 4) as i64,
+                val actual = match layout_context_class_def(font, subtable + read_u16_be(font.blob, subtable + 4) as i64,
                     limit, records[position].glyph_id):
                     Some(value): value
                     None: return None
@@ -230,14 +230,14 @@ fn _context2_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
                 cursor = position + 1
             input_index = input_index + 1
         if matched:
-            return Some(_ContextMatch(matched: true, positions: positions,
+            return Some(LayoutContextMatch(matched: true, positions: positions,
                 records_offset: rule + 4 + (glyph_count - 1) * 2,
                 record_count: record_count, work: work))
         rule_index = rule_index + 1
     Some(_no_context_match(work))
 
-fn _chain3_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
-                 records: [LayoutGlyphRecord], start: i64, maximum_work: i64) -> Option<_ContextMatch>:
+fn layout_chain3_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
+                       records: [LayoutGlyphRecord], start: i64, maximum_work: i64) -> Option<LayoutContextMatch>:
     var cursor = subtable + 2
     val backtrack_count = read_u16_be(font.blob, cursor) as i64
     var work = backtrack_count
@@ -253,7 +253,7 @@ fn _chain3_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
         if position < 0:
             matched = false
         else:
-            val covered = _coverage(font.blob, subtable + read_u16_be(font.blob, cursor + backtrack_index * 2) as i64,
+            val covered = layout_context_coverage(font.blob, subtable + read_u16_be(font.blob, cursor + backtrack_index * 2) as i64,
                 limit, records[position].glyph_id)
             if not covered.valid: return None
             if not covered.found: matched = false
@@ -268,13 +268,13 @@ fn _chain3_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
     var next = start
     var input_index: i64 = 0
     while input_index < input_count:
-        val position = match _next_layout_input(font, lookup, records, next):
+        val position = match layout_context_next_input(font, lookup, records, next):
             Some(value): value
             None: return None
         if position < 0:
             matched = false
         else:
-            val covered = _coverage(font.blob, subtable + read_u16_be(font.blob, cursor + input_index * 2) as i64,
+            val covered = layout_context_coverage(font.blob, subtable + read_u16_be(font.blob, cursor + input_index * 2) as i64,
                 limit, records[position].glyph_id)
             if not covered.valid: return None
             if not covered.found: matched = false
@@ -288,13 +288,13 @@ fn _chain3_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
     cursor = cursor + 2
     var lookahead_index: i64 = 0
     while lookahead_index < lookahead_count:
-        val position = match _next_layout_input(font, lookup, records, next):
+        val position = match layout_context_next_input(font, lookup, records, next):
             Some(value): value
             None: return None
         if position < 0:
             matched = false
         else:
-            val covered = _coverage(font.blob, subtable + read_u16_be(font.blob, cursor + lookahead_index * 2) as i64,
+            val covered = layout_context_coverage(font.blob, subtable + read_u16_be(font.blob, cursor + lookahead_index * 2) as i64,
                 limit, records[position].glyph_id)
             if not covered.valid: return None
             if not covered.found: matched = false
@@ -302,19 +302,19 @@ fn _chain3_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
         lookahead_index = lookahead_index + 1
     cursor = cursor + lookahead_count * 2
     val record_count = read_u16_be(font.blob, cursor) as i64
-    Some(_ContextMatch(matched: matched and positions.len() == input_count,
+    Some(LayoutContextMatch(matched: matched and positions.len() == input_count,
         positions: positions, records_offset: cursor + 2, record_count: record_count, work: work))
 
-fn _chain12_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
-                  records: [LayoutGlyphRecord], start: i64, classes: bool,
-                  maximum_work: i64) -> Option<_ContextMatch>:
+fn layout_chain12_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
+                        records: [LayoutGlyphRecord], start: i64, classes: bool,
+                        maximum_work: i64) -> Option<LayoutContextMatch>:
     var work: i64 = 1
-    val covered = _coverage(font.blob, subtable + read_u16_be(font.blob, subtable + 2) as i64,
+    val covered = layout_context_coverage(font.blob, subtable + read_u16_be(font.blob, subtable + 2) as i64,
         limit, records[start].glyph_id)
     if not covered.valid: return None
     if not covered.found: return Some(_no_context_match(work))
     val set_index = if classes:
-        match _class_def(font, subtable + read_u16_be(font.blob, subtable + 6) as i64,
+        match layout_context_class_def(font, subtable + read_u16_be(font.blob, subtable + 6) as i64,
             limit, records[start].glyph_id):
             Some(value): value
             None: return None
@@ -349,7 +349,7 @@ fn _chain12_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
             else:
                 val wanted = read_u16_be(font.blob, cursor + item * 2) as i64
                 val actual = if classes:
-                    match _class_def(font, subtable + read_u16_be(font.blob, subtable + 4) as i64,
+                    match layout_context_class_def(font, subtable + read_u16_be(font.blob, subtable + 4) as i64,
                         limit, records[position].glyph_id):
                         Some(value): value
                         None: return None
@@ -367,7 +367,7 @@ fn _chain12_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
         while item < input_count:
             work = work + 1
             if work > maximum_work: return None
-            val position = match _next_layout_input(font, lookup, records, next):
+            val position = match layout_context_next_input(font, lookup, records, next):
                 Some(value): value
                 None: return None
             if position < 0:
@@ -375,7 +375,7 @@ fn _chain12_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
             else:
                 val wanted = read_u16_be(font.blob, cursor + (item - 1) * 2) as i64
                 val actual = if classes:
-                    match _class_def(font, subtable + read_u16_be(font.blob, subtable + 6) as i64,
+                    match layout_context_class_def(font, subtable + read_u16_be(font.blob, subtable + 6) as i64,
                         limit, records[position].glyph_id):
                         Some(value): value
                         None: return None
@@ -392,7 +392,7 @@ fn _chain12_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
         while item < lookahead_count:
             work = work + 1
             if work > maximum_work: return None
-            val position = match _next_layout_input(font, lookup, records, next):
+            val position = match layout_context_next_input(font, lookup, records, next):
                 Some(value): value
                 None: return None
             if position < 0:
@@ -400,7 +400,7 @@ fn _chain12_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
             else:
                 val wanted = read_u16_be(font.blob, cursor + item * 2) as i64
                 val actual = if classes:
-                    match _class_def(font, subtable + read_u16_be(font.blob, subtable + 8) as i64,
+                    match layout_context_class_def(font, subtable + read_u16_be(font.blob, subtable + 8) as i64,
                         limit, records[position].glyph_id):
                         Some(value): value
                         None: return None
@@ -412,13 +412,13 @@ fn _chain12_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
         cursor = cursor + lookahead_count * 2
         val record_count = read_u16_be(font.blob, cursor) as i64
         if matched and positions.len() == input_count:
-            return Some(_ContextMatch(matched: true, positions: positions,
+            return Some(LayoutContextMatch(matched: true, positions: positions,
                 records_offset: cursor + 2, record_count: record_count, work: work))
         rule_index = rule_index + 1
     Some(_no_context_match(work))
 
 export LayoutGlyphRecord, LayoutApplyResult
-export _Coverage, _ContextMatch, _coverage, _gdef_limit, _class_def
-export _gdef_glyph_class, _mark_filter_contains, _lookup_accepts
-export _next_layout_input, _previous_layout_input
-export _context3_positions, _context2_match, _chain3_match, _chain12_match
+export LayoutContextCoverage, LayoutContextMatch, layout_context_coverage
+export layout_context_gdef_limit, layout_context_class_def, layout_context_gdef_glyph_class
+export layout_context_mark_filter_contains, layout_context_lookup_accepts, layout_context_next_input
+export layout_context3_positions, layout_context2_match, layout_chain3_match, layout_chain12_match
