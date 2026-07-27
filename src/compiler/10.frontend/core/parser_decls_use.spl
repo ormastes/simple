@@ -233,6 +233,49 @@ fn parse_export_decl() -> i64:
             names.push(loop_name + ":" + loop_alias)
         else:
             names.push(loop_name)
+    # Re-export with an explicit source module: `export NAME[, NAME2] from MODULE`
+    #
+    # DEFECT (fixed here): this form was never parsed. After reading the name
+    # list the code checked for '.', 'as' and ',' — `from` is a plain
+    # identifier (it is NOT a keyword token; there is no TOK_KW_FROM in
+    # tokens.spl), so the loop simply exited and the declaration fell through
+    # to decl_export_names(names, 0). The SOURCE MODULE WAS SILENTLY DROPPED,
+    # so find_reexport_source (20.hir/hir_lowering/_Items/module_lowering.spl)
+    # could never chase the re-export. Measured impact: 223 such lines across
+    # 14 files — e.g. src/lib/nogc_sync_mut/tooling/easy_fix/__init__.spl
+    # lines 5-9 (`export FixConfidence from types`), which made
+    # `use std.tooling.easy_fix.{FixConfidence}` unresolvable while
+    # `use std.tooling.easy_fix.types.{FixConfidence}` worked; the stage-4
+    # full-CLI build showed ~110 "unresolved name" errors in the
+    # FixConfidence/Replacement/EasyFix family alone.
+    #
+    # Semantics: identical to `export use MODULE.{NAME, ...}`, i.e. a
+    # decl_use_import carrying the module and the (possibly aliased,
+    # "name:alias"-encoded) name list.
+    #
+    # Module path: in every real use the module is a BARE SIBLING name
+    # (`from types`) meaning "the sibling module inside this package". A bare
+    # name would not resolve as an absolute module key, so it is emitted as a
+    # RELATIVE path ("." + name) — resolve_import_symbols in module_lowering
+    # normalizes a leading-dot module against the importing module's own name.
+    # A path that already contains a '.' is passed through untouched (it is
+    # either already relative or already absolute).
+    val at_from: bool = par_kind_get() == TOK_IDENT and par_text_get() == "from"
+    if at_from:
+        parser_advance()  # consume 'from'
+        var from_module: text = par_text_get()
+        parser_expect(TOK_IDENT)
+        var saw_dot: bool = false
+        for i in 0..100:
+            if par_kind_get() != TOK_DOT:
+                break
+            parser_advance()  # consume '.'
+            from_module = from_module + "." + par_text_get()
+            parser_expect(TOK_IDENT)
+            saw_dot = true
+        if not saw_dot:
+            from_module = "." + from_module
+        return decl_use_import(from_module, names, 0)
     decl_export_names(names, 0)
 
 fn parse_val_decl() -> i64:
