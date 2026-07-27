@@ -26,13 +26,10 @@ The checker must:
 
 1. Admit only the canonical self-hosted compiler and Metal runtime providers
    whose paths and SHA-256 values are bound by the trusted macOS Metal build
-   manifest. The compiler is selected from `compiler_abs_path`; no caller path
-   override is allowed. Admission accepts only the producer-issued
-   identity/source-kind pairs for the current frozen Stage-3 compiler or the
-   legacy canonical repository release compiler. Current Stage-3 manifests are
-   reverified through the canonical trusted-build producer. Legacy manifests
-   must independently match current repository and complete source-input
-   fingerprints.
+   manifest. The compiler is selected from `build_compiler_abs_path`; no caller
+   path override is allowed. Admission accepts only the producer-issued
+   identity/source-kind pair for the current frozen Stage-3 compiler. The
+   Stage-3 manifest is reverified through the canonical trusted-build producer.
 2. Require an executable, non-symlinked compiler with the exact manifest hash,
    reject Rust seed/bootstrap-seed/debug identities, and require the canonical
    default runtime and C-runtime provider paths and hashes.

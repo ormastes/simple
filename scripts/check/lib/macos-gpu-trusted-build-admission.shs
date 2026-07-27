@@ -309,18 +309,34 @@ macos_gpu_admission_verify_legacy_manifest() {
         )" ] || return 1
 }
 
-macos_gpu_admission_reject_seed_or_debug() {
+macos_gpu_admission_reject_seed_or_debug_impl() {
     macos_gpu_admission_compiler="$1"
     case "$macos_gpu_admission_compiler" in
         *"/compiler_rust/"*|*"/target/debug/"*|*"/debug/simple")
             return 1
             ;;
     esac
-    command -v strings >/dev/null 2>&1 || return 1
-    if strings "$macos_gpu_admission_compiler" 2>/dev/null |
-            grep -Eiq 'Rust-built|bootstrap seed only|debug build'; then
+    [ -x /usr/bin/strings ] || return 1
+    macos_gpu_admission_strings="$(
+        mktemp "${TMPDIR:-/tmp}/macos-gpu-compiler-strings.XXXXXX"
+    )" || return 1
+    /usr/bin/strings "$macos_gpu_admission_compiler" \
+        >"$macos_gpu_admission_strings" 2>/dev/null || {
+        rm -f "$macos_gpu_admission_strings"
+        return 1
+    }
+    if grep -Fqx \
+        -e 'WARNING: this Rust-built Simple binary is a bootstrap seed only' \
+        "$macos_gpu_admission_strings"; then
+        rm -f "$macos_gpu_admission_strings"
         return 1
     fi
+    rm -f "$macos_gpu_admission_strings" || return 1
+    return 0
+}
+
+macos_gpu_admission_reject_seed_or_debug() {
+    macos_gpu_admission_reject_seed_or_debug_impl "$@"
 }
 
 # Populate the schema-independent evidence surface from a manifest that has
@@ -465,12 +481,18 @@ macos_gpu_trusted_manifest_admit() {
     MACOS_GPU_ADMISSION_MANIFEST="$macos_gpu_admission_manifest"
     MACOS_GPU_ADMISSION_MANIFEST_SHA256=\
 "$macos_gpu_admission_manifest_sha_before"
-    MACOS_GPU_ADMISSION_BUILD_COMPILER="$(
-        macos_gpu_admission_canonical_file "$(
-            macos_gpu_admission_manifest_value build_compiler_abs_path \
-                "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
-        )"
+    macos_gpu_admission_build_compiler_recorded="$(
+        macos_gpu_admission_manifest_value build_compiler_abs_path \
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
     )" || return 1
+    [ -x "$macos_gpu_admission_build_compiler_recorded" ] &&
+        [ ! -L "$macos_gpu_admission_build_compiler_recorded" ] || return 1
+    MACOS_GPU_ADMISSION_BUILD_COMPILER="$(
+        macos_gpu_admission_canonical_file \
+            "$macos_gpu_admission_build_compiler_recorded"
+    )" || return 1
+    [ "$MACOS_GPU_ADMISSION_BUILD_COMPILER" = \
+        "$macos_gpu_admission_build_compiler_recorded" ] || return 1
     MACOS_GPU_ADMISSION_BUILD_COMPILER_SHA256="$(
         macos_gpu_admission_manifest_value build_compiler_sha256 \
             "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
@@ -479,10 +501,25 @@ macos_gpu_trusted_manifest_admit() {
         "$MACOS_GPU_ADMISSION_BUILD_COMPILER")" = \
         "$MACOS_GPU_ADMISSION_BUILD_COMPILER_SHA256" ] || return 1
     MACOS_GPU_ADMISSION_COMPILER="$MACOS_GPU_ADMISSION_BUILD_COMPILER"
+    [ -x "$MACOS_GPU_ADMISSION_COMPILER" ] &&
+        [ ! -L "$MACOS_GPU_ADMISSION_COMPILER" ] || return 1
+    macos_gpu_admission_reject_seed_or_debug \
+        "$MACOS_GPU_ADMISSION_COMPILER" || return 1
+    [ "$(macos_gpu_admission_sha256_file \
+        "$MACOS_GPU_ADMISSION_COMPILER")" = \
+        "$MACOS_GPU_ADMISSION_BUILD_COMPILER_SHA256" ] || return 1
+    MACOS_GPU_ADMISSION_COMPILER_IDENTITY="$(
+        macos_gpu_admission_manifest_value build_compiler_identity \
+            "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
+    )" || return 1
     MACOS_GPU_ADMISSION_COMPILER_SOURCE_KIND="$(
         macos_gpu_admission_manifest_value build_compiler_source_kind \
             "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT"
     )" || return 1
+    [ "$MACOS_GPU_ADMISSION_COMPILER_IDENTITY" = \
+        canonical-pure-simple-stage3-with-bound-backfill-v1 ] &&
+        [ "$MACOS_GPU_ADMISSION_COMPILER_SOURCE_KIND" = \
+            canonical-pure-simple-bootstrap-stage3 ] || return 1
     MACOS_GPU_ADMISSION_GUI_DRIVER="$(
         macos_gpu_admission_canonical_file "$(
             macos_gpu_admission_manifest_value gui_driver_abs_path \
@@ -615,5 +652,13 @@ macos_gpu_trusted_manifest_admit() {
     )" || return 1
     macos_gpu_admission_populate_common_outputs \
         "$MACOS_GPU_ADMISSION_MANIFEST_SNAPSHOT" || return 1
+    [ -x "$MACOS_GPU_ADMISSION_COMPILER" ] &&
+        [ ! -L "$MACOS_GPU_ADMISSION_COMPILER" ] &&
+        [ "$(macos_gpu_admission_canonical_file \
+            "$MACOS_GPU_ADMISSION_COMPILER")" = \
+            "$MACOS_GPU_ADMISSION_COMPILER" ] &&
+        [ "$(macos_gpu_admission_sha256_file \
+            "$MACOS_GPU_ADMISSION_COMPILER")" = \
+            "$MACOS_GPU_ADMISSION_BUILD_COMPILER_SHA256" ] || return 1
     return 0
 }

@@ -24,11 +24,9 @@ The checker must:
 1. Select the exact compiler and provider recorded by the canonical trusted
    build manifest; caller compiler, provider, and manifest overrides are
    forbidden.
-2. Accept only producer-issued identity/source-kind pairs: the current frozen
-   Stage-3 admission or the legacy canonical repository release admission.
-   Current Stage-3 manifests are reverified by the canonical producer; legacy
-   manifests must match current repository and complete source-input
-   fingerprints.
+2. Accept only the producer-issued identity/source-kind pair for the current
+   frozen Stage-3 compiler. The Stage-3 manifest is reverified by the canonical
+   trusted-build producer.
 3. Require an executable, non-symlinked compiler with its exact manifest SHA-256,
    reject Rust seed/bootstrap-seed/debug identities, and require the canonical
    default provider paths and hashes.

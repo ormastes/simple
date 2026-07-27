@@ -1,0 +1,317 @@
+#!/bin/sh
+set -u
+
+case_name="${1:-}"
+repo_root="${2:-$(pwd -P)}"
+admission_lib="$repo_root/scripts/check/lib/macos-gpu-trusted-build-admission.shs"
+
+[ -f "$admission_lib" ] || {
+    echo "macos_gpu_compiler_admission_fixture_status=fail"
+    echo "macos_gpu_compiler_admission_fixture_reason=admission-library-missing"
+    exit 1
+}
+
+# shellcheck source=/dev/null
+. "$admission_lib"
+
+fixture_tmp_root="$(
+    CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P
+)" || exit 1
+work_dir="$(mktemp -d "$fixture_tmp_root/macos-gpu-admission-behavior.XXXXXX")" ||
+    exit 1
+cleanup_fixture() {
+    case "$work_dir" in
+        "$fixture_tmp_root"/macos-gpu-admission-behavior.*)
+            chmod -R u+w "$work_dir" 2>/dev/null || true
+            rm -rf -- "$work_dir"
+            ;;
+    esac
+}
+trap cleanup_fixture EXIT HUP INT TERM
+
+fixture_pass() {
+    echo "macos_gpu_compiler_admission_fixture_case=$case_name"
+    echo "macos_gpu_compiler_admission_fixture_status=pass"
+    exit 0
+}
+
+fixture_fail() {
+    echo "macos_gpu_compiler_admission_fixture_case=$case_name"
+    echo "macos_gpu_compiler_admission_fixture_status=fail"
+    echo "macos_gpu_compiler_admission_fixture_reason=$1"
+    exit 1
+}
+
+write_candidate() {
+    candidate_path="$1"
+    candidate_text="$2"
+    mkdir -p "$(dirname "$candidate_path")" || return 1
+    printf '%s\n' "$candidate_text" >"$candidate_path" || return 1
+    chmod 700 "$candidate_path"
+}
+
+expect_classifier_accept() {
+    candidate_path="$1"
+    if macos_gpu_admission_reject_seed_or_debug "$candidate_path"; then
+        fixture_pass
+    fi
+    fixture_fail "classifier-rejected-safe-candidate"
+}
+
+expect_classifier_reject() {
+    candidate_path="$1"
+    if macos_gpu_admission_reject_seed_or_debug "$candidate_path"; then
+        fixture_fail "classifier-accepted-forbidden-candidate"
+    fi
+    fixture_pass
+}
+
+sha256_file() {
+    shasum -a 256 "$1" | awk '{print $1}'
+}
+
+write_public_manifest_fixture() {
+    compiler_shape="$1"
+    public_root="$work_dir/public-root"
+    artifact_root="$public_root/artifacts"
+    manifest_dir="$public_root/build/macos_gpu_2d_live_native/vulkan"
+    fake_builder="$public_root/scripts/check/build-macos-gpu-2d-live-native.shs"
+    mkdir -p "$artifact_root" "$manifest_dir" "$(dirname "$fake_builder")" ||
+        return 1
+
+    printf '%s\n' '#!/bin/sh' 'exit 0' >"$fake_builder" || return 1
+    chmod 700 "$fake_builder"
+
+    compiler_origin="$artifact_root/compiler-origin"
+    printf '%s\n' 'ordinary self-hosted compiler fixture' >"$compiler_origin" ||
+        return 1
+    chmod 700 "$compiler_origin"
+    public_compiler="$artifact_root/simple"
+    case "$compiler_shape" in
+        regular)
+            cp "$compiler_origin" "$public_compiler" || return 1
+            chmod 700 "$public_compiler"
+            ;;
+        symlink)
+            ln -s "$compiler_origin" "$public_compiler" || return 1
+            ;;
+        non-executable)
+            cp "$compiler_origin" "$public_compiler" || return 1
+            chmod 600 "$public_compiler"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    gui_driver="$artifact_root/gui-driver"
+    gui_driver_origin="$artifact_root/gui-driver-origin"
+    gui_driver_provenance="$artifact_root/gui-driver-provenance.env"
+    provider="$artifact_root/simple-runtime-provider"
+    winit_provider="$artifact_root/winit-provider"
+    runtime_c_provider="$artifact_root/runtime-c-provider"
+    widget_source="$artifact_root/widget.spl"
+    web_source="$artifact_root/web.spl"
+    web_html="$artifact_root/web.html"
+    output="$artifact_root/live-output"
+    for artifact in \
+        "$gui_driver" "$gui_driver_origin" "$gui_driver_provenance" \
+        "$provider" "$winit_provider" "$runtime_c_provider" \
+        "$widget_source" "$web_source" "$web_html" "$output"; do
+        printf 'fixture:%s\n' "$(basename "$artifact")" >"$artifact" ||
+            return 1
+    done
+    chmod 700 "$gui_driver" "$gui_driver_origin" "$output"
+
+    public_manifest="$manifest_dir/trusted-build.env"
+    {
+        echo "schema=macos-gpu-2d-live-native-manifest-v3"
+        echo "build_compiler_abs_path=$public_compiler"
+        echo "build_compiler_sha256=$(sha256_file "$public_compiler")"
+        echo "build_compiler_identity=canonical-pure-simple-stage3-with-bound-backfill-v1"
+        echo "build_compiler_source_kind=canonical-pure-simple-bootstrap-stage3"
+        echo "gui_driver_abs_path=$gui_driver"
+        echo "gui_driver_sha256=$(sha256_file "$gui_driver")"
+        echo "gui_driver_origin_path=$gui_driver_origin"
+        echo "gui_driver_origin_sha256=$(sha256_file "$gui_driver_origin")"
+        echo "gui_driver_provenance_path=$gui_driver_provenance"
+        echo "gui_driver_provenance_sha256=$(sha256_file "$gui_driver_provenance")"
+        echo "gui_driver_source_kind=release-attested"
+        echo "gui_driver_source_revision=fixture-revision"
+        echo "simple_runtime_provider_path=$provider"
+        echo "simple_runtime_provider_sha256=$(sha256_file "$provider")"
+        echo "winit_provider_path=$winit_provider"
+        echo "winit_provider_sha256=$(sha256_file "$winit_provider")"
+        echo "simple_runtime_c_provider_path=$runtime_c_provider"
+        echo "simple_runtime_c_provider_sha256=$(sha256_file "$runtime_c_provider")"
+        echo "repo_revision=fixture-revision"
+        echo "source_input_fingerprint=$(sha256_file "$widget_source")"
+        echo "evidence_widget_source_path=$widget_source"
+        echo "evidence_widget_source_sha256=$(sha256_file "$widget_source")"
+        echo "evidence_web_source_path=$web_source"
+        echo "evidence_web_source_sha256=$(sha256_file "$web_source")"
+        echo "evidence_web_html_path=$web_html"
+        echo "evidence_web_html_sha256=$(sha256_file "$web_html")"
+        echo "output_path=$output"
+        echo "output_sha256=$(sha256_file "$output")"
+    } >"$public_manifest" || return 1
+}
+
+replace_manifest_field() {
+    field_name="$1"
+    field_value="$2"
+    field_tmp="$public_manifest.field.$$"
+    awk -F= -v key="$field_name" -v value="$field_value" '
+        $1 == key { print key "=" value; next }
+        { print }
+    ' "$public_manifest" >"$field_tmp" || return 1
+    mv "$field_tmp" "$public_manifest"
+}
+
+remove_manifest_field() {
+    field_name="$1"
+    field_tmp="$public_manifest.field.$$"
+    awk -F= -v key="$field_name" '
+        $1 != key { print }
+    ' "$public_manifest" >"$field_tmp" || return 1
+    mv "$field_tmp" "$public_manifest"
+}
+
+expect_public_reject() {
+    if macos_gpu_trusted_manifest_admit \
+        "$public_manifest" vulkan "$public_root"; then
+        fixture_fail "public-admission-accepted-invalid-manifest"
+    fi
+    fixture_pass
+}
+
+case "$case_name" in
+    classifier-ordinary)
+        candidate="$work_dir/simple"
+        write_candidate "$candidate" "ordinary self-hosted compiler" ||
+            fixture_fail "candidate-write-failed"
+        expect_classifier_accept "$candidate"
+        ;;
+    classifier-debug-prose)
+        candidate="$work_dir/simple"
+        write_candidate "$candidate" "debug build" ||
+            fixture_fail "candidate-write-failed"
+        expect_classifier_accept "$candidate"
+        ;;
+    classifier-rust-seed-banner)
+        candidate="$work_dir/simple"
+        write_candidate "$candidate" \
+            "WARNING: this Rust-built Simple binary is a bootstrap seed only" ||
+            fixture_fail "candidate-write-failed"
+        expect_classifier_reject "$candidate"
+        ;;
+    classifier-compiler-rust-path)
+        candidate="$work_dir/compiler_rust/target/release/simple"
+        write_candidate "$candidate" "ordinary compiler" ||
+            fixture_fail "candidate-write-failed"
+        expect_classifier_reject "$candidate"
+        ;;
+    classifier-target-debug-path)
+        candidate="$work_dir/target/debug/simple"
+        write_candidate "$candidate" "ordinary compiler" ||
+            fixture_fail "candidate-write-failed"
+        expect_classifier_reject "$candidate"
+        ;;
+    classifier-debug-simple-path)
+        candidate="$work_dir/debug/simple"
+        write_candidate "$candidate" "ordinary compiler" ||
+            fixture_fail "candidate-write-failed"
+        expect_classifier_reject "$candidate"
+        ;;
+    classifier-strings-failure)
+        candidate="$work_dir/simple"
+        write_candidate "$candidate" "ordinary compiler" ||
+            fixture_fail "candidate-write-failed"
+        chmod 100 "$candidate" ||
+            fixture_fail "candidate-permissions-failed"
+        expect_classifier_reject "$candidate"
+        ;;
+    public-regular-identity)
+        write_public_manifest_fixture regular ||
+            fixture_fail "public-fixture-write-failed"
+        unset MACOS_GPU_ADMISSION_COMPILER_IDENTITY
+        if ! macos_gpu_trusted_manifest_admit \
+            "$public_manifest" vulkan "$public_root"; then
+            fixture_fail "public-admission-rejected-regular-compiler"
+        fi
+        identity_count="$(
+            grep -c '^build_compiler_identity=' "$public_manifest"
+        )"
+        [ "$identity_count" = 1 ] ||
+            fixture_fail "compiler-identity-not-singular"
+        [ "${MACOS_GPU_ADMISSION_COMPILER_IDENTITY:-}" = \
+            canonical-pure-simple-stage3-with-bound-backfill-v1 ] ||
+            fixture_fail "compiler-identity-not-populated"
+        fixture_pass
+        ;;
+    public-symlink)
+        write_public_manifest_fixture symlink ||
+            fixture_fail "public-fixture-write-failed"
+        if macos_gpu_trusted_manifest_admit \
+            "$public_manifest" vulkan "$public_root"; then
+            fixture_fail "public-admission-accepted-symlink"
+        fi
+        fixture_pass
+        ;;
+    public-non-executable)
+        write_public_manifest_fixture non-executable ||
+            fixture_fail "public-fixture-write-failed"
+        expect_public_reject
+        ;;
+    public-wrong-identity)
+        write_public_manifest_fixture regular ||
+            fixture_fail "public-fixture-write-failed"
+        replace_manifest_field build_compiler_identity wrong-identity ||
+            fixture_fail "manifest-rewrite-failed"
+        expect_public_reject
+        ;;
+    public-wrong-source-kind)
+        write_public_manifest_fixture regular ||
+            fixture_fail "public-fixture-write-failed"
+        replace_manifest_field build_compiler_source_kind wrong-source-kind ||
+            fixture_fail "manifest-rewrite-failed"
+        expect_public_reject
+        ;;
+    public-missing-identity)
+        write_public_manifest_fixture regular ||
+            fixture_fail "public-fixture-write-failed"
+        remove_manifest_field build_compiler_identity ||
+            fixture_fail "manifest-rewrite-failed"
+        expect_public_reject
+        ;;
+    public-duplicate-identity)
+        write_public_manifest_fixture regular ||
+            fixture_fail "public-fixture-write-failed"
+        echo "build_compiler_identity=canonical-pure-simple-stage3-with-bound-backfill-v1" \
+            >>"$public_manifest" ||
+            fixture_fail "manifest-append-failed"
+        expect_public_reject
+        ;;
+    public-mutation-during-classifier)
+        write_public_manifest_fixture regular ||
+            fixture_fail "public-fixture-write-failed"
+        mutation_marker="$work_dir/compiler-mutated"
+        macos_gpu_admission_reject_seed_or_debug() {
+            macos_gpu_admission_reject_seed_or_debug_impl "$@" || return 1
+            printf '%s\n' "mutated compiler bytes" >"$1" &&
+                chmod 700 "$1" &&
+                : >"$mutation_marker"
+        }
+        public_status=0
+        macos_gpu_trusted_manifest_admit \
+            "$public_manifest" vulkan "$public_root" || public_status=$?
+        [ -f "$mutation_marker" ] ||
+            fixture_fail "compiler-mutation-not-observed"
+        [ "$public_status" -ne 0 ] ||
+            fixture_fail "public-admission-accepted-mutated-compiler"
+        fixture_pass
+        ;;
+    *)
+        fixture_fail "unknown-case"
+        ;;
+esac
