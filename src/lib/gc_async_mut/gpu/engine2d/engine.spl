@@ -76,6 +76,10 @@ use std.gc_async_mut.gpu.engine2d.font_owner.{
 }
 use std.common.encoding.font_registry.{selected_font_asset_local_path_for_identity}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload}
+use std.gc_async_mut.gpu.engine2d.draw_ir_target.{
+    DrawIrRenderTarget,
+    DrawIrTargetFontEvidence
+}
 
 # ============================================================================
 # Config / environment backend selection
@@ -168,7 +172,7 @@ var _font_batch_receipt_count: i32 = 0
 # Engine2D
 # ============================================================================
 
-class Engine2D:
+class Engine2D with DrawIrRenderTarget:
     """2D rendering engine with automatic backend selection.
 
     Creates the best available backend at initialization time. All drawing
@@ -1735,6 +1739,25 @@ class Engine2D:
     fn vulkan_font_performance_evidence() -> VulkanFontCompositeEvidence?:
         self.last_vulkan_font_evidence
 
+    fn draw_ir_font_evidence() -> DrawIrTargetFontEvidence?:
+        val vulkan = self.last_vulkan_font_evidence
+        if vulkan == nil:
+            return nil
+        val evidence = vulkan
+        Some(DrawIrTargetFontEvidence(
+            batch_identity: evidence.batch_identity,
+            readback_source: evidence.readback_source,
+            device_checksum: evidence.device_checksum,
+            oracle_checksum: evidence.oracle_checksum,
+            readback_nonblank_pixels: evidence.readback_nonblank_pixels,
+            parity: evidence.parity,
+            device_executed: evidence.device_executed,
+            promotion_ready: evidence.promotion_ready,
+            atlas_upload_count: evidence.atlas_upload_count,
+            atlas_upload_bytes: evidence.atlas_upload_bytes,
+            atlas_payload_sha256: evidence.atlas_payload_sha256
+        ))
+
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):
         """Draw text with an explicit background colour per glyph cell.
 
@@ -1985,6 +2008,41 @@ class Engine2D:
         val completed = metal.draw_image_blend_checked(dst_x, dst_y, width, height, pixels, opacity_milli)
         self.metal_backend = Some(metal)
         completed
+
+    me draw_ir_create_offscreen(width: i32, height: i32) -> Result<DrawIrRenderTarget, text>:
+        if self.backend_name() == "vulkan":
+            val created = self.create_shared_vulkan_offscreen(width, height)
+            match created:
+                Err(reason): Err(reason)
+                Ok(target): Ok(target)
+        elif self.backend_name() == "metal":
+            val created = self.create_shared_metal_offscreen(width, height)
+            match created:
+                Err(reason): Err(reason)
+                Ok(target): Ok(target)
+        else:
+            Ok(Engine2D.create_offscreen(width, height))
+
+    me draw_ir_composite_readback(dst_x: i32, dst_y: i32, width: i32, height: i32, readback: Engine2DReadback, opacity_milli: i32) -> bool:
+        if width <= 0 or height <= 0 or opacity_milli <= 0 or opacity_milli > 1000:
+            return false
+        if readback.pixels.len() != width.to_i64() * height.to_i64():
+            return false
+        if self.backend_name() == "vulkan":
+            if readback.source != "device_readback" or readback.backend_handle <= 0:
+                return false
+            return self.draw_vulkan_image_blend_checked(
+                dst_x, dst_y, width, height, readback.pixels, opacity_milli)
+        if self.backend_name() == "metal":
+            if readback.source != "device_readback" or readback.backend_handle <= 0:
+                return false
+            return self.draw_metal_image_blend_checked(
+                dst_x, dst_y, width, height, readback.pixels, opacity_milli)
+        var pixels = readback.pixels
+        if opacity_milli < 1000:
+            pixels = engine2d_scale_pixel_alpha(pixels, opacity_milli)
+        self.draw_image_blend(dst_x, dst_y, width, height, pixels)
+        true
 
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
         if dst_w == src_w and dst_h == src_h:

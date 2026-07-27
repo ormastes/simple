@@ -1,0 +1,70 @@
+# @tag: unit, gpu, engine2d, draw_ir
+
+use std.spec
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU,
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect
+}
+use std.gc_async_mut.gpu.engine2d.backend.{engine2d_readback}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    engine2d_draw_ir_adv_composition
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+describe "Draw IR render target seam":
+
+    it "keeps Engine2D source-compatible while executing through the target contract":
+        var engine = Engine2D.create_with_backend(8, 6, "cpu")
+        engine.clear(0xff000000u32)
+        val batch = draw_ir_batch(
+            "target-seam",
+            DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("surface", "window", 0, 0, 8, 6, 0, 1000, false),
+            [draw_ir_rect("body", 2, 1, 3, 2, 0xff123456u32)]
+        )
+        val composition = draw_ir_composition(
+            "target-seam", "scene", DRAW_IR_BACKEND_CPU, [batch])
+
+        val result = engine2d_draw_ir_adv_composition(
+            engine, composition, false)
+
+        expect(result.rendered_command_count).to_equal(1)
+        expect(result.skipped_command_count).to_equal(0)
+        expect(result.pixels[1 * 8 + 2]).to_equal(0xff123456u32)
+        expect(result.pixels[0]).to_equal(0xff000000u32)
+        engine.shutdown()
+
+    it "composites an offscreen readback through the same target owner":
+        var engine = Engine2D.create_with_backend(6, 4, "cpu")
+        engine.clear(0xff000000u32)
+        val child = engine.draw_ir_create_offscreen(2, 2)
+
+        match child:
+            Err(reason):
+                expect(reason).to_equal("")
+            Ok(target):
+                target.clear(0xffff0000u32)
+                val readback = target.read_pixels_with_source()
+                val composited = engine.draw_ir_composite_readback(
+                    1, 1, 2, 2, readback, 1000)
+
+                expect(composited).to_be(true)
+                expect(engine.read_pixels()[1 * 6 + 1]).to_equal(0xffff0000u32)
+                target.shutdown()
+        engine.shutdown()
+
+    it "rejects malformed child readback before mutating the destination":
+        var engine = Engine2D.create_with_backend(4, 4, "cpu")
+        engine.clear(0xff010203u32)
+        val malformed = engine2d_readback(
+            [0xffffffffu32], "software")
+
+        val composited = engine.draw_ir_composite_readback(
+            0, 0, 2, 2, malformed, 1000)
+
+        expect(composited).to_be(false)
+        expect(engine.read_pixels()[0]).to_equal(0xff010203u32)
+        engine.shutdown()
