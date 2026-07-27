@@ -191,6 +191,8 @@ expect(app).to_contain("build/gui-web-2d-vulkan-env-browser-backing/evidence.env
 expect(app).to_contain("build/renderdoc/simple-gate/evidence.env")
 expect(app).to_contain("build/linux-hosted-wm-live-window-evidence/evidence.env")
 expect(app).to_contain("HostCapabilityRow")
+expect(app).to_contain("host_capability_row_from_evidence")
+expect(app).to_contain("file_exists(VULKAN_PATH) and file_exists(VULKAN_RUN_PATH) and file_exists(VULKAN_BROWSER_PATH)")
 expect(app).to_contain("host_renderdoc_evidence_passes(renderdoc) and host_renderdoc_artifacts_are_current(renderdoc)")
 expect(app).to_contain("host_vulkan_evidence_passes(vulkan) and host_browser_vulkan_parity_evidence_passes(vulkan_browser, vulkan_run)")
 expect(app).to_contain("host_readback_evidence_passes(live) and host_readback_captures_are_current(live)")
@@ -231,7 +233,7 @@ expect(spec).to_contain("process_run_timeout(")
 expect(spec).to_contain("120000")
 expect(spec.contains("process_run(simple_bin")).to_be(false)
 expect(app.contains("argb_mismatch_count=0")).to_be(false)
-expect(app).to_contain("blocked")
+expect(contract).to_contain("val status = if evidence_present: \"fail\" else: \"blocked\"")
 ```
 
 </details>

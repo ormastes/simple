@@ -30,7 +30,7 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 16 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -102,6 +102,35 @@ expect(TestHostEnv.create([row("x86_simd", "maybe")]).validation_reason()).to_eq
 val json = complete_env().to_json()
 expect(json).to_contain("\"schema\":\"simple-test-host-env-v1\"")
 expect(json).to_contain("\"name\":\"framebuffer_readback\"")
+```
+
+</details>
+
+#### distinguishes valid invalid and absent retained evidence
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val passed = host_capability_row_from_evidence(
+    "renderdoc", true, true, "invalid-renderdoc", "build/renderdoc/evidence.env", "rerun-renderdoc")
+val failed = host_capability_row_from_evidence(
+    "renderdoc", false, true, "invalid-renderdoc", "build/renderdoc/evidence.env", "rerun-renderdoc")
+val blocked = host_capability_row_from_evidence(
+    "renderdoc", false, false, "missing-renderdoc", "build/renderdoc/evidence.env", "rerun-renderdoc")
+val missing_despite_valid = host_capability_row_from_evidence(
+    "renderdoc", true, false, "missing-renderdoc", "build/renderdoc/evidence.env", "rerun-renderdoc")
+expect(passed.status).to_equal("pass")
+expect(passed.reason).to_equal("")
+expect(passed.resume_command).to_equal("")
+expect(failed.status).to_equal("fail")
+expect(failed.validation_reason()).to_equal("")
+expect(blocked.status).to_equal("blocked")
+expect(blocked.validation_reason()).to_equal("")
+expect(missing_despite_valid.status).to_equal("blocked")
 ```
 
 </details>
@@ -614,8 +643,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 17 |
+| Active scenarios | 17 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

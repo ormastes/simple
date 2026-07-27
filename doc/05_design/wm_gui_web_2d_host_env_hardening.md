@@ -90,10 +90,10 @@ snapshot's compositor window list, requires exactly one match, and retains the
 matched ID separately. The pure aggregate requires both retained IDs to be
 positive and equal.
 The host aggregate also re-hashes the retained RenderDoc capture path and
-replay XML path, blocking when either current artifact no longer matches its
+replay XML path, failing when either current artifact no longer matches its
 exact-one gate binding or is a symlink/non-regular path.
 Framebuffer admission requires both correlated backend values to be `vulkan`;
-matching CPU fallback values remain blocked.
+matching CPU fallback values in retained evidence fail validation.
 The input frame must also retain `composition_id=wm-composite` and a positive
 count of executed `wm.content` image commands from the same executor snapshot.
 That snapshot must report completed `1024x720` ARGB8888 readback with stride
@@ -106,6 +106,15 @@ mandatory only for browser, correlated framebuffer, and RenderDoc rows.
 The host aggregate resolves duplicate-safe baseline/input capture bindings and
 requires regular no-follow paths before re-hashing both current PPMs and
 admitting `framebuffer_readback`.
+
+Capability-row classification is uniform: valid and present evidence is `pass`; an existing
+required evidence file set that is malformed, stale, or otherwise invalid is
+`fail`; and an absent required evidence file set is `blocked` with its resume
+command. The Vulkan set is present only when the readback, direct-run, and
+browser-backing env files all exist. RenderDoc, SIMD, and framebuffer artifacts
+referenced by an existing env file are validation inputs, so missing, changed,
+or substituted referenced artifacts make that retained row `fail`, not
+`blocked`.
 
 For the SimpleOS remote-client row, validation also rejects owner port `0`,
 resident placeholder apps, missing focus/input IPC sends, missing

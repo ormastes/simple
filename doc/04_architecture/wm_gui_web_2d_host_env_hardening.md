@@ -108,7 +108,14 @@ the same fast memory operations.
 
 Linux x86 is the first mandatory live slice. ARM NEON and RISC-V RVV accept
 complete retained `native_host` receipts on any coordinator; absent or
-emulated receipts remain active blocked rows with exact resume commands.
+emulated receipts remain active rows with exact resume commands. Absent
+receipts are blocked; retained emulated receipts fail validation.
+Across all seven host rows, absent required evidence remains `blocked`, while a
+complete retained evidence-file set that fails validation is `fail`. A valid
+classifier result never promotes an absent file set. The app
+owns filesystem presence checks; the shared contract owns this pure three-way
+classification. Vulkan evidence is present only when its readback, direct-run,
+and browser-backing env files all exist.
 Browser Vulkan and RenderDoc-native rows use their existing retained evidence.
 Before admitting a retained RenderDoc row, `test_host_env` resolves its unique
 capture-file/hash and replay-XML/hash bindings, then recomputes both current
