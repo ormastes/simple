@@ -717,6 +717,78 @@ impl HirLowering:
         # doesn't declare route through find_reexport_source inside
         # register_imported_symbol and land on the defining module's
         # canonical name.
+        # Facade RE-EXPORTS: a glob-imported facade may declare nothing of its
+        # own and re-export names it star-imported — src/compiler/50.mir/
+        # mir_data.spl does `use compiler.mir.mir_types.*` plus bare
+        # `export MirType, MirTypeKind, ...` lines. Those names live in
+        # `exports`, which neither the six decl sweeps above nor the import
+        # sweep below can see (a star import has zero items, so that loop body
+        # never runs), so `use compiler.mir.mir_data.*` registered NOTHING and
+        # every use site died with "unresolved name: MirType" — 5,950 of them
+        # in the stage-4 full-CLI build. Named imports already work because
+        # they fall through to the re-export chase; route each exported name
+        # through the same path so glob imports behave identically.
+        var glob_exp_idx = 0
+        while glob_exp_idx < imported_mod.exports.len():
+            val glob_exp = imported_mod.exports[glob_exp_idx]
+            var glob_exp_it = 0
+            while glob_exp_it < glob_exp.items.len():
+                val glob_exp_item = glob_exp.items[glob_exp_it]
+                if not glob_exp_item.ends_with(".*"):
+                    self.register_imported_symbol(imported_mod, imported_mod_name, glob_exp_item, glob_exp_item, import_span)
+                glob_exp_it = glob_exp_it + 1
+            glob_exp_idx = glob_exp_idx + 1
+
+        # Transitive star imports: `use A.*` where A itself does `use B.*`
+        # must also surface B's decls. src/compiler/50.mir/mir_data.spl
+        # star-imports mir_instructions and never re-exports
+        # `mir_operand_copy`, yet every consumer of `use compiler.mir.mir_data.*`
+        # calls it — 393 "unresolved name: mir_operand_copy" errors in the
+        # stage-4 full-CLI build (same shape for the lexer and cranelift
+        # helpers). One level deep, deliberately NOT recursive: that covers the
+        # facade-over-implementation pattern this tree uses without risking a
+        # blow-up through the whole import graph.
+        var glob_star_keys: [text] = []
+        var glob_star_k = 0
+        var glob_star_idx = 0
+        while glob_star_idx < imported_mod.imports.len():
+            val glob_star_imp = imported_mod.imports[glob_star_idx]
+            if glob_star_imp.items.len() == 0:
+                val glob_star_key = self.resolve_module_key(glob_star_imp.module)
+                if glob_star_key != "" and self.modules_by_name.contains_key(glob_star_key):
+                    val glob_star_mod = self.modules_by_name[glob_star_key]
+                    glob_star_keys = glob_star_mod.functions.keys()
+                    glob_star_k = 0
+                    while glob_star_k < glob_star_keys.len():
+                        self.register_imported_symbol(glob_star_mod, glob_star_key, glob_star_keys[glob_star_k], glob_star_keys[glob_star_k], import_span)
+                        glob_star_k = glob_star_k + 1
+                    glob_star_keys = glob_star_mod.classes.keys()
+                    glob_star_k = 0
+                    while glob_star_k < glob_star_keys.len():
+                        self.register_imported_symbol(glob_star_mod, glob_star_key, glob_star_keys[glob_star_k], glob_star_keys[glob_star_k], import_span)
+                        glob_star_k = glob_star_k + 1
+                    glob_star_keys = glob_star_mod.structs.keys()
+                    glob_star_k = 0
+                    while glob_star_k < glob_star_keys.len():
+                        self.register_imported_symbol(glob_star_mod, glob_star_key, glob_star_keys[glob_star_k], glob_star_keys[glob_star_k], import_span)
+                        glob_star_k = glob_star_k + 1
+                    glob_star_keys = glob_star_mod.enums.keys()
+                    glob_star_k = 0
+                    while glob_star_k < glob_star_keys.len():
+                        self.register_imported_symbol(glob_star_mod, glob_star_key, glob_star_keys[glob_star_k], glob_star_keys[glob_star_k], import_span)
+                        glob_star_k = glob_star_k + 1
+                    glob_star_keys = glob_star_mod.traits.keys()
+                    glob_star_k = 0
+                    while glob_star_k < glob_star_keys.len():
+                        self.register_imported_symbol(glob_star_mod, glob_star_key, glob_star_keys[glob_star_k], glob_star_keys[glob_star_k], import_span)
+                        glob_star_k = glob_star_k + 1
+                    glob_star_keys = glob_star_mod.constants.keys()
+                    glob_star_k = 0
+                    while glob_star_k < glob_star_keys.len():
+                        self.register_imported_symbol(glob_star_mod, glob_star_key, glob_star_keys[glob_star_k], glob_star_keys[glob_star_k], import_span)
+                        glob_star_k = glob_star_k + 1
+            glob_star_idx = glob_star_idx + 1
+
         var glob_imp_idx = 0
         while glob_imp_idx < imported_mod.imports.len():
             val glob_imp = imported_mod.imports[glob_imp_idx]
