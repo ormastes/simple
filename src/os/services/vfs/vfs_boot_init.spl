@@ -863,8 +863,20 @@ fn _vfs_boot_read_short_name_from_dir_raw(start_cluster: u32, short_name: text) 
         dir_cluster = _vfs_boot_fat32_next_cluster(dir_cluster)
     []
 
+# Per-cluster read tracing. Default OFF: the 1.7MB font read walks ~1674
+# clusters and these two lines were 93% of all guest serial output, and
+# serial I/O is slow enough that the spam alone pushed the first frame
+# past the evidence harness budget. Kept (not deleted) per the log
+# retention policy; flip to true when debugging cluster reads.
+# NOTE: a module-level `val` gate does NOT work here -- freestanding guest
+# builds never run module initialisers, so the global reads uninitialised
+# and every gated line printed anyway. A function is the reliable form.
+fn _vfs_boot_trace_enabled() -> bool:
+    false
+
 fn _vfs_boot_read_cluster_to_scratch(cluster: u32) -> bool:
-    serial_println("[vfs-init] scalar scratch read begin cluster={cluster}")
+    if _vfs_boot_trace_enabled():
+        serial_println("[vfs-init] scalar scratch read begin cluster={cluster}")
     val byte_len = g_boot_fat32_sectors_per_cluster.to_u64() * g_boot_fat32_bytes_per_sector.to_u64()
     if g_boot_fat32_scratch_cpu_addr == 0u64 or g_boot_fat32_scratch_phys_addr == 0u64 or g_boot_fat32_scratch_byte_len < byte_len:
         serial_println("[vfs-init] cluster scratch invalid")
@@ -882,7 +894,8 @@ fn _vfs_boot_read_cluster_to_scratch(cluster: u32) -> bool:
     if read.is_err():
         serial_println("[vfs-init] scalar scratch read failed")
         return false
-    serial_println("[vfs-init] scalar scratch read ok cluster={cluster}")
+    if _vfs_boot_trace_enabled():
+        serial_println("[vfs-init] scalar scratch read ok cluster={cluster}")
     true
 
 fn _vfs_boot_read_file_chain_raw(first_cluster: u32, size: u32) -> [u8]:
