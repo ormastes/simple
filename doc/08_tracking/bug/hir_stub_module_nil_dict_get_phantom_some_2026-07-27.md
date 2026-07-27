@@ -134,3 +134,32 @@ caller (direct import, glob, sibling sweep, re-export recursion).
 Root cause + one-site decode fix proposal:
 `native_nil_dict_get_phantom_option_rootcause_2026-07-27.md` (nil sentinel 3
 shifted to phantom 0 by decode_runtime_value's integer arm).
+
+## Focused sub-builds relied on the phantom (round 4, 2026-07-27)
+
+With all six guards in, stage-4 completes HIR for all 1738 files with no
+segfault/spin, but focused template-specialization sub-builds
+(compiler.driver.pipeline_fn / compile_specialized_template) fail loud:
+`unresolved name: OptimizationConfig / CompiledUnit`. DIAG shows their import
+targets are header-only in the focused registry BY DESIGN (`fns=-1`), and the
+wanted names are DECLARED there (not re-exported), so the chase finds nothing.
+Pre-guard, the phantom Option always hit the class arm first, so every
+partial-module import accidentally registered as an opaque Class symbol —
+load-bearing behavior for focused builds. Round-4 fix: when the partial-module
+chase fails, deliberately register an opaque Class-kind symbol (define +
+rename only, no decl deref, no type-method registration).
+
+## Round 5: the registry itself was corrupted (root of the whole family)
+
+get-vs-index instrumentation proved the corruption is NOT in `.get()`: index
+reads from `HirLowering.modules_by_name` see the same nil dicts
+(`idx_fns=-1 idx_forder=9`). The driver's `ctx.modules` map is intact
+(`ctx.modules[name]` at lowering time has real dicts — bodies compile), but
+the copy of that map into the HirLowering struct FIELD nil-fills every Module
+value's nested Dict fields while array fields survive (native aggregate
+deep-copy defect). Import resolution only ever read the corrupted field, so
+every import resolved through the phantom-decode accident. Fix: module-global
+registry (`module_registry.spl`, accessor-fn pattern) mirrored by the driver
+at parse time via plain arg-pass + dict-insert (both preserve nested dicts);
+seven lookup sites refetch through it. Guards from rounds 1-4 remain as the
+safety net for genuinely-absent entries.

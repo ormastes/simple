@@ -12,6 +12,7 @@ use compiler.frontend.parser_types_expr.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.module_registry.{hir_registry_contains, hir_registry_get}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
@@ -467,16 +468,30 @@ impl HirLowering:
         # the import, so chase that and return before any decl-dict lookup.
         if imported_mod.functions.len() < 0:
             val part_hop = self.find_reexport_source(imported_mod, imported_mod_name, imported_name, 0)
+            var part_registered = false
             if part_hop.found:
-                val part_src: Module? = self.modules_by_name.get(part_hop.module_name)
+                var part_src: Module? = self.modules_by_name.get(part_hop.module_name)
+                if hir_registry_contains(part_hop.module_name):
+                    part_src = Some(hir_registry_get(part_hop.module_name))
                 if part_src != nil:
                     # Only recurse into a REAL module: a partial hop target
                     # would re-enter this guard and a facade export cycle
-                    # (partial A <-> partial B) then recurses forever. A
-                    # partial terminal hop registers nothing — the use site
-                    # fails loud later instead of segfaulting/spinning here.
+                    # (partial A <-> partial B) then recurses forever.
                     if (part_src ?? imported_mod).functions.len() >= 0:
                         self.register_imported_symbol(part_src, part_hop.module_name, part_hop.item_name, local_name, import_span)
+                        part_registered = true
+            if not part_registered:
+                # Focused sub-builds import DECLARATIONS from modules that are
+                # header-only in their registry (only the focus file's closure
+                # is fully parsed): compiler.driver.pipeline_fn's
+                # {OptimizationConfig, CompiledUnit} in stage-4 template
+                # specialization. The decl dicts are nil so the kind is
+                # unknowable here — register an opaque Class-kind symbol so
+                # name resolution binds, matching the accidental pre-guard
+                # behavior (the phantom Option always hit the class arm
+                # first), without dereferencing any phantom decl.
+                val part_opaque = self.symbols.define(local_name, SymbolKind.Class, nil, import_span, Visibility.Public, false, Some(imported_mod_name))
+                self.symbols.rename_symbol(part_opaque, imported_name)
             return
         val as_cls: Class? = imported_mod.classes.get(imported_name)
         val as_str: Struct? = imported_mod.structs.get(imported_name)
@@ -541,7 +556,9 @@ impl HirLowering:
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
                 eprint("[reexport-chase] mod={imported_mod_name} wanted={imported_name} imports={imported_mod.imports.len()} exports={imported_mod.exports.len()} found={hop.found} mname={imported_mod.name} fns={imported_mod.functions.len()}")
             if hop.found:
-                val src_mod: Module? = self.modules_by_name.get(hop.module_name)
+                var src_mod: Module? = self.modules_by_name.get(hop.module_name)
+                if hir_registry_contains(hop.module_name):
+                    src_mod = Some(hir_registry_get(hop.module_name))
                 if src_mod != nil:
                     self.register_imported_symbol(src_mod, hop.module_name, hop.item_name, local_name, import_span)
 
@@ -611,7 +628,9 @@ impl HirLowering:
                 # inside src/lib/io_runtime.spl names a module registered as
                 # lib.nogc_sync_mut.io_runtime — the literal key always misses.
                 val next_key = self.resolve_module_key(imp.module)
-                val next_mod: Module? = if next_key != "": self.modules_by_name.get(next_key) else: nil
+                var next_mod: Module? = if next_key != "": self.modules_by_name.get(next_key) else: nil
+                if next_key != "" and hir_registry_contains(next_key):
+                    next_mod = Some(hir_registry_get(next_key))
                 if next_mod != nil:
                     if hir_module_declares_item(next_mod, source_item):
                         return HirReexportSource(found: true, module_name: next_key, item_name: source_item)
@@ -639,7 +658,9 @@ impl HirLowering:
                         if facade_pkg.ends_with(".__init__"):
                             facade_pkg = facade_pkg[0:facade_pkg.len() - 9]
                         var exp_sib_name = self.resolve_module_key(facade_pkg + "." + exp_base)
-                        val exp_sib: Module? = if exp_sib_name != "": self.modules_by_name.get(exp_sib_name) else: nil
+                        var exp_sib: Module? = if exp_sib_name != "": self.modules_by_name.get(exp_sib_name) else: nil
+                        if exp_sib_name != "" and hir_registry_contains(exp_sib_name):
+                            exp_sib = Some(hir_registry_get(exp_sib_name))
                         if exp_sib != nil:
                             if hir_module_declares_item(exp_sib, wanted):
                                 return HirReexportSource(found: true, module_name: exp_sib_name, item_name: wanted)
@@ -825,6 +846,13 @@ impl HirLowering:
                         resolved_module_name = fb_key
             if imported_mod == nil and (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
                 eprint("[import-miss] importer={module.name} module={imp.module}")
+            # Registry-fresh refetch: the modules_by_name FIELD copy nil-fills
+            # every Module value's nested decl dicts (aggregate deep-copy
+            # defect — see module_registry.spl); the module-global registry
+            # preserves them, so re-read the winning key through it before
+            # registering symbols.
+            if imported_mod != nil and hir_registry_contains(resolved_module_name):
+                imported_mod = Some(hir_registry_get(resolved_module_name))
             if imported_mod != nil:
                 if imp.items.len() == 0:
                     self.register_glob_imported_symbols(imported_mod, resolved_module_name, imp.span)
@@ -878,7 +906,9 @@ impl HirLowering:
             # DIRECT siblings only: exactly one segment past the package.
             if sibling_name.substring(pkg_prefix.len()).contains("."):
                 continue
-            val sibling_mod: Module? = self.modules_by_name.get(sibling_name)
+            var sibling_mod: Module? = self.modules_by_name.get(sibling_name)
+            if hir_registry_contains(sibling_name):
+                sibling_mod = Some(hir_registry_get(sibling_name))
             if sibling_mod != nil:
                 # Header-only registry entries (files outside the entry
                 # closure, parsed for name/imports/exports only) carry nil
