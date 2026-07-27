@@ -213,3 +213,9 @@ failures followed by the runtime result). The next fresh session must inspect
 the cold-draw seam without repeating this command, add trustworthy scalar
 batch/cache evidence, and only then require exact Bungee 100 px positive
 quads/atlas alpha. Vulkan device execution and readback remain unproven.
+
+The Stage 4 full-CLI import blocker is repaired in source by routing custom
+properties to the compatible browser-style CSS types in `style.animation`.
+The incompatible common render-scene CSS types are not used. A new source
+contract pins the required `Initial` variant and `important` declaration
+field. Bootstrap/deploy has not been rerun after this repair.

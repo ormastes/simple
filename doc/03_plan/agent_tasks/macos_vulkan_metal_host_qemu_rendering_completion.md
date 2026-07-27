@@ -652,6 +652,11 @@ same failure.
   session. A fresh session must distinguish draw/staging failure from
   cache-state write-back loss, then extend the focused receipt to Bungee
   100 px and positive batch/atlas evidence.
+- The unrelated Stage 4 import blocker is source-fixed: browser custom
+  properties now import the exact compatible `CSSValue`/`CSSDeclaration`
+  owner from `style.animation`, not the deleted loose example module. A
+  focused source contract pins `Initial` and `important` compatibility.
+  Re-running bootstrap/deploy is deferred to a fresh bounded cycle.
 
 ## Required Evidence and Documentation
 
