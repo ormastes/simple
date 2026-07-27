@@ -1194,6 +1194,29 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   resume only in a fresh bounded session that first closes producer-command
   provenance, the two static failures, and bounded snapshot cleanup.
 
+### 2026-07-27 current-origin Stage 3 and ES self-test checkpoint
+
+- One technically essential, bounded LLVM bootstrap at Git revision
+  `d51ed3ec8b` completed successfully. Stage 2 and Stage 3 sanity passed, and
+  the canonical provenance facade admitted Stage 3 SHA-256
+  `e04c2ec7bbea06bea2d1aa43334216f27ad87813e8439d6bac826ffaaf54e76f`
+  with adjacent v3 provenance.
+- The standalone winit and Vulkan-enabled runtime providers built and staged
+  successfully. They remain local build artifacts and do not by themselves
+  establish trusted Vulkan execution.
+- The EndpointSecurity collector self-test exposed an interactive overwrite
+  prompt while replacing its frozen tamper fixture. The fix makes the fixture
+  temporarily writable and updates the policy's builder digest. The committed
+  non-interactive self-test passed; the fix is pushed as `a2fe118b69`.
+- The pushed fix advances Git HEAD, so the otherwise intact Stage 3 pair is
+  now correctly rejected by exact-HEAD provenance admission. Do not synthesize
+  or edit its manifest. In a fresh bounded session, produce one Stage 3 pair
+  from the then-current `origin/main` before retrying the Vulkan builder.
+- Full CLI GUI provenance also remains fail-closed while the tracked
+  EndpointSecurity policy is `status=unavailable` with unassigned signing and
+  team identities. Do not treat the collector self-test as live
+  EndpointSecurity authorization or as GUI execution-history evidence.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
