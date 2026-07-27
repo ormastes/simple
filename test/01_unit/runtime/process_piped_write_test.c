@@ -14,6 +14,7 @@
 #include <sys/msg.h>
 #include <sys/sem.h>
 #include <sys/shm.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <sys/types.h>
@@ -107,6 +108,24 @@ static int sandbox_probe(int argc, char** argv) {
     if (setpriority(PRIO_PROCESS, getppid(), 1) >= 0 || errno != EPERM) {
         return 20;
     }
+    struct stat path_state;
+    errno = 0;
+    if (syscall(SYS_newfstatat, AT_FDCWD, "/etc/passwd", &path_state, 0) >= 0 ||
+        errno != EPERM) {
+        return 29;
+    }
+    char path_target[32];
+    errno = 0;
+    if (syscall(SYS_readlink, "/proc/self/exe", path_target,
+            sizeof(path_target)) >= 0 || errno != EPERM) {
+        return 30;
+    }
+    errno = 0;
+    if (syscall(SYS_inotify_init1, O_CLOEXEC) >= 0 || errno != EPERM) {
+        return 31;
+    }
+    errno = 0;
+    if (syscall(SYS_membarrier, 0, 0) >= 0 || errno != EPERM) return 32;
     unsigned long affinity = 1;
     errno = 0;
     if (syscall(

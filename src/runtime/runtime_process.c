@@ -1783,6 +1783,54 @@ static bool browser_renderer_apply_seccomp(void) {
 #ifdef __NR_recvmsg
         BROWSER_RENDERER_DENY_SYSCALL(__NR_recvmsg),
 #endif
+#ifdef __NR_statx
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_statx),
+#endif
+#ifdef __NR_newfstatat
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_newfstatat),
+#endif
+#ifdef __NR_access
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_access),
+#endif
+#ifdef __NR_faccessat
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_faccessat),
+#endif
+#ifdef __NR_faccessat2
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_faccessat2),
+#endif
+#ifdef __NR_readlink
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_readlink),
+#endif
+#ifdef __NR_readlinkat
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_readlinkat),
+#endif
+#ifdef __NR_getdents
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_getdents),
+#endif
+#ifdef __NR_getdents64
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_getdents64),
+#endif
+#ifdef __NR_inotify_init
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_inotify_init),
+#endif
+#ifdef __NR_inotify_init1
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_inotify_init1),
+#endif
+#ifdef __NR_inotify_add_watch
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_inotify_add_watch),
+#endif
+#ifdef __NR_inotify_rm_watch
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_inotify_rm_watch),
+#endif
+#ifdef __NR_fanotify_init
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fanotify_init),
+#endif
+#ifdef __NR_fanotify_mark
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_fanotify_mark),
+#endif
+#ifdef __NR_membarrier
+        BROWSER_RENDERER_DENY_SYSCALL(__NR_membarrier),
+#endif
 #ifdef __NR_ipc
         BROWSER_RENDERER_DENY_SYSCALL(__NR_ipc),
 #endif
