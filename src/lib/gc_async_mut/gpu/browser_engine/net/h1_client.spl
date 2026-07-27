@@ -97,6 +97,27 @@ fn get_mock_registry() -> MockResponseRegistry:
 fn set_mock_registry(registry: MockResponseRegistry):
     _global_mock_registry = registry
 
+fn h1_mock_response(req: FetchRequest) -> Result<FetchResponse>?:
+    if val Some(mock) = get_mock_registry().lookup(req.url.to_text()):
+        if not h1_response_size_allowed(0, mock.body.len()):
+            return Some(Err(network_error(
+                "h1: response exceeds 50 MiB limit"
+            )))
+        var headers: [Pair<text, text>] = []
+        for header in mock.headers:
+            headers.push(header)
+        if find_header(headers, "content-type").? == false:
+            headers.push(Pair("Content-Type", "text/html; charset=utf-8"))
+        headers.push(Pair("Content-Length", "{mock.body.len()}"))
+        headers.push(Pair("Connection", "close"))
+        headers.push(Pair("X-Simple-Browser", "mock-response"))
+        return Some(Ok(FetchResponse(
+            status: mock.status,
+            headers: serialize_headers(headers),
+            body: rt_text_to_bytes(mock.body)
+        )))
+    nil
+
 # --- H1Connection ---
 
 class H1Connection:
@@ -146,25 +167,9 @@ class H1Client:
         self.logger.info("h1: {req.method.to_upper()} {req.url.to_text()}")
 
         # Canned responses must not touch DNS, TCP, or TLS.
-        val mock_reg = get_mock_registry()
-        val url_text = req.url.to_text()
-        if val entry = mock_reg.lookup(url_text):
-            self.logger.debug("h1: mock response for {url_text} -> {entry.status}")
-            if not h1_response_size_allowed(0, entry.body.len()):
-                return Err(network_error("h1: response exceeds 50 MiB limit"))
-            var mock_headers: [Pair<text, text>] = []
-            for mh in entry.headers:
-                mock_headers.push(mh)
-            if find_header(mock_headers, "content-type").? == false:
-                mock_headers.push(Pair("Content-Type", "text/html; charset=utf-8"))
-            mock_headers.push(Pair("Content-Length", "{entry.body.len()}"))
-            mock_headers.push(Pair("Connection", "close"))
-            mock_headers.push(Pair("X-Simple-Browser", "mock-response"))
-            return Ok(FetchResponse(
-                status: entry.status,
-                headers: serialize_headers(mock_headers),
-                body: rt_text_to_bytes(entry.body)
-            ))
+        if val Some(mock_result) = h1_mock_response(req):
+            self.logger.debug("h1: mock response for {req.url.to_text()}")
+            return mock_result
 
         # ponytail: one-shot connections until response framing can preserve a
         # live socket; both response readers currently consume-to-EOF and close.

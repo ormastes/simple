@@ -391,6 +391,9 @@ include!("net_tls.rs");
 #[cfg(not(feature = "runtime-tls"))]
 include!("net_tls_stub.rs");
 
+// Runtime-owned browser HTTP worker jobs.
+include!("net_http_job.rs");
+
 // ============================================================================
 // UDP SFFI functions (extracted to net_udp.rs)
 // ============================================================================
@@ -623,6 +626,38 @@ mod tests {
             Ok(Vec::new())
         });
         assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn browser_http_job_reads_one_raw_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 256];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .unwrap();
+        });
+        let job = BrowserHttpJob {
+            canceled: std::sync::atomic::AtomicBool::new(false),
+            socket: std::sync::Mutex::new(None),
+            outcome: std::sync::Mutex::new(None),
+        };
+
+        let response = browser_http_perform(
+            "http",
+            "127.0.0.1",
+            addr.port() as i64,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            1000,
+            &job,
+        )
+        .unwrap();
+
+        assert!(response.ends_with(b"\r\n\r\nok"));
+        server.join().unwrap();
     }
 
     unsafe fn runtime_string(value: crate::value::RuntimeValue) -> String {

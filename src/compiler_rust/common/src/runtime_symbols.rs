@@ -17,7 +17,7 @@ pub struct AbiVersion {
 
 impl AbiVersion {
     /// Current ABI version of the runtime.
-    pub const CURRENT: Self = Self { major: 1, minor: 5 };
+    pub const CURRENT: Self = Self { major: 1, minor: 6 };
 
     /// Create a new ABI version.
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -262,6 +262,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_current_dir")
         || name.starts_with("rt_set_current_dir")
         || name.starts_with("rt_process_")
+        || name.starts_with("rt_browser_http_job_")
         || name.starts_with("rt_pty_")
         || name.starts_with("rt_exec")
         || name.starts_with("rt_write_file")
@@ -708,6 +709,12 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_io_tcp_connect",
     "rt_io_tcp_connect_timeout",
     "rt_dns_lookup",
+    "rt_browser_http_job_start",
+    "rt_browser_http_job_poll",
+    "rt_browser_http_job_take_response",
+    "rt_browser_http_job_take_error",
+    "rt_browser_http_job_cancel",
+    "rt_browser_http_job_free",
     "rt_io_tcp_read",
     "rt_io_tcp_read_exact",
     "rt_io_tcp_read_exact_len",

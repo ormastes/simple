@@ -12,16 +12,27 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_event_identity, be_dom_focused_id
 }
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
-    FetchRequest, RequestMode
+    FetchRequest, FetchResponse, RequestMode
 }
 use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
 use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
+    build_request_bytes, h1_mock_response, parse_http_response_bytes
+}
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
 use std.database.sql.types.{DbError}
 use os.hosted.browser_profile_store.{BrowserProfileStore}
 use common.ui.access.{WinTextActionRequest}
 
 extern fn rt_text_to_bytes(value: text) -> [u8]
+extern fn rt_browser_http_job_start(
+    scheme: text, host: text, port: i64, request: [u8], timeout_ms: i64
+) -> i64
+extern fn rt_browser_http_job_poll(handle: i64) -> i64
+extern fn rt_browser_http_job_take_response(handle: i64) -> [u8]
+extern fn rt_browser_http_job_take_error(handle: i64) -> text
+extern fn rt_browser_http_job_cancel(handle: i64) -> bool
+extern fn rt_browser_http_job_free(handle: i64) -> bool
 
 fn _hosted_fetch_mode(kind: text) -> RequestMode:
     if kind == "document":
@@ -76,6 +87,9 @@ class HostedWebContentSession:
     chrome_focus: text
     pressed_chrome_control: text
     address_replace_on_text: bool
+    network_job_handle: i64
+    network_job_request: BrowserRequest?
+    network_job_fetch_request: FetchRequest?
 
     static fn create(window_id: i64, body_html: text, width: i32, height: i32) -> HostedWebContentSession:
         var browser = BrowserSession.new()
@@ -107,10 +121,100 @@ class HostedWebContentSession:
             profile_enabled: false,
             chrome_focus: "",
             pressed_chrome_control: "",
-            address_replace_on_text: false
+            address_replace_on_text: false,
+            network_job_handle: 0,
+            network_job_request: nil,
+            network_job_fetch_request: nil
         )
 
+    me _commit_network_error(request: BrowserRequest, message: text):
+        val _ = self.browser.commit_network_response(
+            BrowserResponse.create(
+                request_id: request.id,
+                kind: request.kind,
+                url: request.url,
+                status: 0,
+                headers: "",
+                body: "",
+                error: message
+            )
+        )
+
+    me _commit_network_response(
+        request: BrowserRequest, response: FetchResponse
+    ):
+        val body = if request.kind == "wasm":
+            _hosted_wasm_hex(response.body)
+        else:
+            response.body_text()
+        val _ = self.browser.commit_network_response(
+            BrowserResponse.create(
+                request_id: request.id,
+                kind: request.kind,
+                url: request.url,
+                status: response.status.to_i32(),
+                headers: response.headers,
+                body: body,
+                error: ""
+            )
+        )
+
+    me _finalize_network_response(
+        request: BrowserRequest, fetch_request: FetchRequest,
+        response: FetchResponse
+    ):
+        match self.network.finalize_single_hop(fetch_request, response):
+            Ok(finalized):
+                self._commit_network_response(request, finalized)
+            Err(error):
+                self._commit_network_error(request, error.message)
+
+    me cancel_network():
+        if self.network_job_handle > 0:
+            val _ = rt_browser_http_job_cancel(self.network_job_handle)
+            val _ = rt_browser_http_job_free(self.network_job_handle)
+        self.network_job_handle = 0
+        self.network_job_request = nil
+        self.network_job_fetch_request = nil
+
+    me _poll_network_job():
+        if self.network_job_request == nil or self.network_job_fetch_request == nil:
+            self.cancel_network()
+            return
+        val request = self.network_job_request.unwrap()
+        val fetch_request = self.network_job_fetch_request.unwrap()
+        if not self.browser.has_inflight_request(request):
+            self.cancel_network()
+            return
+        val state = rt_browser_http_job_poll(self.network_job_handle)
+        if state == 0:
+            return
+        val handle = self.network_job_handle
+        self.network_job_handle = 0
+        self.network_job_request = nil
+        self.network_job_fetch_request = nil
+        if state < 0:
+            val _ = rt_browser_http_job_free(handle)
+            self._commit_network_error(request, "browser HTTP job unavailable")
+            return
+        val error = rt_browser_http_job_take_error(handle)
+        val raw_response = rt_browser_http_job_take_response(handle)
+        val _ = rt_browser_http_job_free(handle)
+        if error != "":
+            self._commit_network_error(request, error)
+            return
+        match parse_http_response_bytes(raw_response):
+            Ok(response):
+                self._finalize_network_response(
+                    request, fetch_request, response
+                )
+            Err(parse_error):
+                self._commit_network_error(request, parse_error.message)
+
     me _pump_network_once():
+        if self.network_job_handle > 0:
+            self._poll_network_job()
+            return
         if val Some(request) = self.browser.take_pending_request():
             val fetch_request = FetchRequest(
                 url: Url.parse(request.url),
@@ -122,35 +226,44 @@ class HostedWebContentSession:
                 # sanitized Cookie header for this exact request URL.
                 credentials: "omit"
             )
-            match self.network.fetch_single_hop(fetch_request):
-                Ok(response):
-                    val body = if request.kind == "wasm":
-                        _hosted_wasm_hex(response.body)
-                    else:
-                        response.body_text()
-                    val _ = self.browser.commit_network_response(
-                        BrowserResponse.create(
-                            request_id: request.id,
-                            kind: request.kind,
-                            url: request.url,
-                            status: response.status.to_i32(),
-                            headers: response.headers,
-                            body: body,
-                            error: ""
-                        )
-                    )
+            match self.network.prepare_single_hop(fetch_request):
                 Err(error):
-                    val _ = self.browser.commit_network_response(
-                        BrowserResponse.create(
-                            request_id: request.id,
-                            kind: request.kind,
-                            url: request.url,
-                            status: 0,
-                            headers: "",
-                            body: "",
-                            error: error.message
-                        )
+                    self._commit_network_error(request, error.message)
+                Ok(prepared):
+                    if val Some(response) = prepared.response:
+                        self._commit_network_response(request, response)
+                        return
+                    if val Some(mock_result) = h1_mock_response(prepared.request):
+                        match mock_result:
+                            Ok(response):
+                                self._finalize_network_response(
+                                    request, prepared.request, response
+                                )
+                            Err(error):
+                                self._commit_network_error(
+                                    request, error.message
+                                )
+                        return
+                    val url = prepared.request.url
+                    val port = if url.port > 0:
+                        url.port
+                    elif url.scheme == "https":
+                        443
+                    else:
+                        80
+                    val handle = rt_browser_http_job_start(
+                        url.scheme, url.host, port,
+                        rt_text_to_bytes(build_request_bytes(prepared.request)),
+                        5000
                     )
+                    if handle < 0:
+                        self._commit_network_error(
+                            request, "browser HTTP job unavailable"
+                        )
+                        return
+                    self.network_job_handle = handle
+                    self.network_job_request = Some(request)
+                    self.network_job_fetch_request = Some(prepared.request)
 
     fn address_text() -> text:
         if self.browser.address_draft != "":
@@ -705,6 +818,8 @@ class HostedWebContentRegistry:
             return true
         if not self._persist_session(index, wall_clock_ms):
             return false
+        var closed = self.sessions[index]
+        closed.cancel_network()
         var retained: [HostedWebContentSession] = []
         var i = 0
         while i < self.sessions.len():
@@ -731,4 +846,10 @@ class HostedWebContentRegistry:
                     return false
                 Ok(_):
                     self.profile = nil
+        i = 0
+        while i < self.sessions.len():
+            var session = self.sessions[i]
+            session.cancel_network()
+            self.sessions[i] = session
+            i = i + 1
         true

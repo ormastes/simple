@@ -211,6 +211,26 @@ fn rt_tls_get_protocol_version_stub(_args: &[Value]) -> Result<Value, CompileErr
     Ok(Value::text(String::new()))
 }
 
+fn rt_browser_http_job_start_stub(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(-1))
+}
+
+fn rt_browser_http_job_poll_stub(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(-1))
+}
+
+fn rt_browser_http_job_take_response_stub(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Array(std::sync::Arc::new(Vec::new())))
+}
+
+fn rt_browser_http_job_take_error_stub(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::text(String::new()))
+}
+
+fn rt_browser_http_job_bool_stub(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Bool(false))
+}
+
 /// Build the dispatch table mapping extern function names to their implementations.
 /// Only includes "simple" functions that take `&[Value]` and return `Result<Value, CompileError>`.
 /// Complex functions (needing env, functions, classes, etc.) remain in the match fallback.
@@ -2206,6 +2226,18 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_tls_client_read", rt_tls_client_read_stub);
     insert_simple!("rt_tls_client_close", rt_tls_client_close_stub);
     insert_simple!("rt_tls_get_protocol_version", rt_tls_get_protocol_version_stub);
+    insert_simple!("rt_browser_http_job_start", rt_browser_http_job_start_stub);
+    insert_simple!("rt_browser_http_job_poll", rt_browser_http_job_poll_stub);
+    insert_simple!(
+        "rt_browser_http_job_take_response",
+        rt_browser_http_job_take_response_stub
+    );
+    insert_simple!(
+        "rt_browser_http_job_take_error",
+        rt_browser_http_job_take_error_stub
+    );
+    insert_simple!("rt_browser_http_job_cancel", rt_browser_http_job_bool_stub);
+    insert_simple!("rt_browser_http_job_free", rt_browser_http_job_bool_stub);
     // PTY (pseudo-terminal) operations
     insert_simple!("rt_pty_open", pty::rt_pty_open);
     insert_simple!("rt_pty_spawn", pty::rt_pty_spawn);
