@@ -142,20 +142,17 @@ fn browser_status_is_success(status: i32) -> bool:
     status >= 200 and status < 300
 
 fn browser_header_location(headers: text) -> text:
-    var found = ""
+    browser_header_value(headers, "location")
+
+fn browser_header_value(headers: text, expected_name: text) -> text:
+    val expected = expected_name.lower()
     for raw_line in headers.split("\n"):
         val line = raw_line.trim()
-        val parts = line.split(":")
-        if parts.len() >= 2 and found == "":
-            val key = parts[0].trim().lower()
-            if key == "location":
-                var value = parts[1]
-                var i = 2
-                while i < parts.len():
-                    value = value + ":" + parts[i]
-                    i = i + 1
-                found = value.trim()
-    found
+        val colon = line.index_of(":")
+        if (colon > 0 and
+            line.slice(0, colon).trim().lower() == expected):
+            return line.slice(colon + 1, line.len()).trim()
+    ""
 
 fn browser_header_content_security_policy(headers: text) -> text:
     var policies = ""
@@ -990,6 +987,7 @@ class BrowserSession:
     monotonic_time_ms: i64
     animation_start_time_ms: i64
     hsts_policies: [BrowserHstsPolicy]
+    broker_network_policy: bool
 
     static fn new() -> BrowserSession:
         BrowserSession._create(true)
@@ -1043,10 +1041,31 @@ class BrowserSession:
             text_selection_focus_byte: 0,
             monotonic_time_ms: 0,
             animation_start_time_ms: 0,
-            hsts_policies: []
+            hsts_policies: [],
+            broker_network_policy: false
         )
 
 impl BrowserSession:
+
+    me _broker_hsts_candidate(url: text) -> bool:
+        self.broker_network_policy and
+            self.document_url.starts_with("https://") and
+            url.starts_with("http://")
+
+    me _headers_with_session_cookie(headers: text, url: text) -> text:
+        var sanitized_lines: [text] = []
+        for header_line in headers.split("\n"):
+            val trimmed = header_line.trim()
+            if (trimmed != "" and
+                not trimmed.lower().starts_with("cookie:")):
+                sanitized_lines.push(trimmed)
+        var request_headers = sanitized_lines.join("\n")
+        val session_cookie = self.cookie_header_for_request(url)
+        if session_cookie != "":
+            if request_headers != "":
+                request_headers = request_headers + "\n"
+            request_headers = request_headers + "Cookie: " + session_cookie
+        request_headers
 
     me _trace_guest(msg: text):
         val target = if self.pending_url != "": self.pending_url else: self.current_url
@@ -1235,7 +1254,8 @@ impl BrowserSession:
                     )
                 else:
                     self.stop_loading()
-            elif is_mixed_content or is_cors_required_resource:
+            elif ((is_mixed_content or is_cors_required_resource) and
+                not self.broker_network_policy):
                 val reason = if is_mixed_content:
                     "mixed-content:{req.url}"
                 else:
@@ -1251,7 +1271,9 @@ impl BrowserSession:
                     body: "",
                     error: reason
                 ))
-            elif req.kind == "fetch" and url_origin(req.url) != url_origin(self.document_url):
+            elif (req.kind == "fetch" and
+                url_origin(req.url) != url_origin(self.document_url) and
+                not self.broker_network_policy):
                 # ponytail: same-origin fetch only until BrowserRequest carries
                 # request mode and response CORS metadata.
                 self.warnings.push("cross-origin fetch blocked: {req.url}")
@@ -1342,14 +1364,18 @@ impl BrowserSession:
                         for seen_id in seen_request_ids:
                             if seen_id == request_id:
                                 already_emitted = true
-                        if is_mixed_content and not already_emitted:
+                        if (is_mixed_content and
+                            not self.broker_network_policy and
+                            not already_emitted):
                             seen_request_ids = seen_request_ids + [request_id]
                             val _ = interpreter.resolve_async_fetch_response(
                                 request_id, url, 0, "", "", "mixed-content:{url}"
                             )
                             runtime.interpreter = interpreter
                             drained = true
-                        elif is_csp_blocked and not already_emitted:
+                        elif (is_csp_blocked and
+                            not self._broker_hsts_candidate(url) and
+                            not already_emitted):
                             seen_request_ids = seen_request_ids + [request_id]
                             self.warnings.push("CSP blocked fetch: {url}")
                             val _ = interpreter.resolve_async_fetch_response(
@@ -1357,7 +1383,9 @@ impl BrowserSession:
                             )
                             runtime.interpreter = interpreter
                             drained = true
-                        elif is_cross_origin_fetch and not already_emitted:
+                        elif (is_cross_origin_fetch and
+                            not self.broker_network_policy and
+                            not already_emitted):
                             # ponytail: same-origin fetch only until BrowserRequest
                             # carries request mode and validated CORS response metadata.
                             seen_request_ids = seen_request_ids + [request_id]
@@ -1388,17 +1416,9 @@ impl BrowserSession:
                                 _: pass_dn("no document cookie to merge before draining request")
                             # Strip any caller-supplied or raw Cookie lines, then attach
                             # only the sanitized session cookie for this request URL.
-                            var sanitized_lines: [text] = []
-                            for header_line in headers.split("\n"):
-                                val trimmed_header = header_line.trim()
-                                if trimmed_header != "" and not trimmed_header.lower().starts_with("cookie:"):
-                                    sanitized_lines.push(trimmed_header)
-                            var request_headers = sanitized_lines.join("\n")
-                            val session_cookie = self.cookie_header_for_request(url)
-                            if session_cookie != "":
-                                if request_headers != "":
-                                    request_headers = request_headers + "\n"
-                                request_headers = request_headers + "Cookie: " + session_cookie
+                            val request_headers = (
+                                self._headers_with_session_cookie(headers, url)
+                            )
                             val drained_req = BrowserRequest.create(
                                 id: request_id,
                                 kind: kind,
@@ -1548,10 +1568,15 @@ impl BrowserSession:
                 )
             var redirect_count = 0
             var redirect_origin_url = response.url
+            val transport_upgrade = (
+                self.broker_network_policy and browser_header_value(
+                    response.headers, "x-simple-broker-transport-upgrade"
+                ) == "1"
+            )
             if val Some(original) = inflight:
                 redirect_count = original.redirect_count
                 redirect_origin_url = original.redirect_origin_url
-            if redirect_count >= 20:
+            if redirect_count >= 20 and not transport_upgrade:
                 return self._commit_subresource_error(
                     response, "redirect limit exceeded"
                 )
@@ -1559,7 +1584,9 @@ impl BrowserSession:
                 response.kind, next_url, "GET", "", "",
                 if response.kind == "wasm": "application/wasm" else: ""
             )
-            next_request.redirect_count = redirect_count + 1
+            next_request.redirect_count = redirect_count + (
+                if transport_upgrade: 0 else: 1
+            )
             next_request.redirect_origin_url = redirect_origin_url
             self.pending_requests.push(next_request)
             return Ok(true)
@@ -1663,19 +1690,27 @@ impl BrowserSession:
             return self._commit_module_response(response)
         if response.kind == "fetch":
             var orig_method = "GET"
+            var orig_headers = ""
             var orig_body = ""
             var orig_content_type = ""
             var orig_redirect_count = 0
             if val Some(orig) = inflight:
                 orig_method = orig.method
+                orig_headers = orig.headers
                 orig_body = orig.body
                 orig_content_type = orig.content_type
                 orig_redirect_count = orig.redirect_count
             if response.error == "" and browser_status_is_redirect(response.status):
                 val location = browser_header_location(response.headers)
                 if location != "":
+                    val transport_upgrade = (
+                        self.broker_network_policy and browser_header_value(
+                            response.headers,
+                            "x-simple-broker-transport-upgrade"
+                        ) == "1"
+                    )
                     val target = normalize_runtime_request_url(response.url, location)
-                    if orig_redirect_count >= 20:
+                    if orig_redirect_count >= 20 and not transport_upgrade:
                         self._reject_runtime_fetch(
                             response.request_id, response.url,
                             "redirect-limit"
@@ -1699,7 +1734,9 @@ impl BrowserSession:
                             "redirect-blocked:https-downgrade"
                         )
                         return Ok(true)
-                    if url_origin(next_url) != url_origin(self.document_url):
+                    if (url_origin(next_url) !=
+                        url_origin(self.document_url) and
+                        not self.broker_network_policy):
                         self._reject_runtime_fetch(
                             response.request_id, next_url,
                             "cross-origin:{next_url}"
@@ -1729,11 +1766,18 @@ impl BrowserSession:
                         kind: "fetch",
                         url: next_url,
                         method: next_method,
-                        headers: "",
+                        headers: if transport_upgrade:
+                            self._headers_with_session_cookie(
+                                orig_headers, next_url
+                            )
+                        else:
+                            "",
                         body: next_body,
                         content_type: next_content_type
                     )
-                    redirect_req.redirect_count = orig_redirect_count + 1
+                    redirect_req.redirect_count = orig_redirect_count + (
+                        if transport_upgrade: 0 else: 1
+                    )
                     if val Some(original) = inflight:
                         redirect_req.redirect_origin_url = original.redirect_origin_url
                     self.pending_requests.push(redirect_req)

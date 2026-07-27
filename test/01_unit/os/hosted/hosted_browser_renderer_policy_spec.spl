@@ -1,16 +1,26 @@
 use std.spec.*
 use std.common.web.browser_renderer_protocol.{
-    BrowserRendererNetworkDecodeResult
+    BrowserRendererNetworkDecodeResult,
+    browser_renderer_decoder_feed, browser_renderer_decoder_new,
+    browser_renderer_network_response_decode
 }
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     FetchRequest, FetchResponse, RequestMode
 }
 use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{
+    BrowserLogLevel, Logger
+}
 use std.gc_async_mut.web.browser_session.{
-    BrowserHstsSnapshot, BrowserHstsSnapshotEntry
+    BrowserHstsSnapshot, BrowserHstsSnapshotEntry,
+    BrowserRequest, BrowserResponse, BrowserSession
 }
 use os.hosted.hosted_browser_renderer_policy.{
     HostedBrowserNavigationPermit,
+    hosted_browser_cors_response_headers,
+    hosted_browser_hsts_upgrade_valid,
+    hosted_browser_remove_response_header,
     hosted_browser_renderer_request_policy,
     hosted_browser_replace_response_header
 }
@@ -367,6 +377,16 @@ describe "hosted browser renderer broker policy":
         )
         expect(policy.ok).to_be(false)
         expect(policy.reason).to_equal("unauthorized-document-request")
+        val split_transport = hosted_browser_renderer_request_policy(
+            "",
+            permit(true, "https://example.test/allowed"),
+            request("document", "http://example.test/allowed"),
+            "https://example.test/allowed"
+        )
+        expect(split_transport.ok).to_be(false)
+        expect(split_transport.reason).to_equal(
+            "unauthorized-document-request"
+        )
 
     it "derives same-origin mode from broker committed state":
         val policy = hosted_browser_renderer_request_policy(
@@ -395,6 +415,230 @@ describe "hosted browser renderer broker policy":
             )
             expect(policy.ok).to_be(false)
             expect(policy.reason).to_equal("mixed-content-blocked")
+
+    it "accepts only exact broker-owned HSTS transport upgrades":
+        expect(hosted_browser_hsts_upgrade_valid(
+            "http://secure.test/app.js",
+            "https://secure.test/app.js"
+        )).to_be(true)
+        expect(hosted_browser_hsts_upgrade_valid(
+            "http://secure.test:80/app.js",
+            "https://secure.test:443/app.js"
+        )).to_be(true)
+        expect(hosted_browser_hsts_upgrade_valid(
+            "http://secure.test:8080/app.js?x=1",
+            "https://secure.test:8080/app.js?x=1"
+        )).to_be(true)
+        for forged in [
+            "https://other.test/app.js",
+            "https://secure.test/other.js",
+            "https://secure.test/app.js?x=2",
+            "https://secure.test:444/app.js"
+        ]:
+            expect(hosted_browser_hsts_upgrade_valid(
+                "http://secure.test/app.js?x=1", forged
+            )).to_be(false)
+
+        val upgraded = hosted_browser_renderer_request_policy(
+            "https://secure.test",
+            permit(false, ""),
+            request("script", "http://secure.test/app.js"),
+            "https://secure.test/app.js"
+        )
+        expect(upgraded.ok).to_be(true)
+        expect(upgraded.mode == RequestMode.SameOrigin).to_be(true)
+        expect(upgraded.canonical_url).to_equal(
+            "https://secure.test/app.js"
+        )
+        val forged_policy = hosted_browser_renderer_request_policy(
+            "https://secure.test",
+            permit(false, ""),
+            request("script", "http://secure.test/app.js"),
+            "https://other.test/app.js"
+        )
+        expect(forged_policy.ok).to_be(false)
+        expect(forged_policy.reason).to_equal("invalid-request-url")
+        expect(hosted_browser_remove_response_header(
+            "Content-Type: text/css\r\n" +
+            "Strict-Transport-Security: max-age=60\r\n" +
+            "Cache-Control: no-store",
+            "strict-transport-security"
+        )).to_equal(
+            "Content-Type: text/css\r\nCache-Control: no-store"
+        )
+        expect(hosted_browser_cors_response_headers(
+            "Content-Type: text/plain\r\n" +
+            "Set-Cookie: stolen=yes\r\n" +
+            "X-Visible: yes\r\nX-Secret: no\r\n" +
+            "Location: https://secure.test/next\r\n" +
+            "Access-Control-Expose-Headers: X-Visible",
+            false
+        )).to_equal(
+            "Content-Type: text/plain\r\nX-Visible: yes"
+        )
+        expect(hosted_browser_cors_response_headers(
+            "Set-Cookie2: stolen=yes\r\n" +
+            "Location: https://secure.test/next",
+            true
+        )).to_equal("Location: https://secure.test/next")
+        var credential_free = FetchEngine.new_for_origin(
+            Logger.new("cors-cookie-test", BrowserLogLevel.Error),
+            "https://secure.test"
+        )
+        match credential_free.finalize_single_hop(
+            fetch_request(
+                "https://secure.test/data", RequestMode.SameOrigin
+            ),
+            FetchResponse(
+                status: 200,
+                headers: "Set-Cookie: stolen=yes; Path=/",
+                body: []
+            )
+        ):
+            Err(error):
+                fail(error.message)
+            Ok(_):
+                expect(credential_free.cookie_store.get_header(
+                    "secure.test", "/"
+                )).to_equal("")
+
+    it "round trips broker HSTS upgrades without spending redirect state":
+        val now_ms = rt_time_now_unix_micros() / 1000
+        var entries: [BrowserHstsSnapshotEntry] = []
+        entries.push(BrowserHstsSnapshotEntry(
+            host: "secure.test",
+            received_at_unix_ms: now_ms - 1000,
+            expires_at_unix_ms: now_ms + 60000,
+            include_subdomains: true
+        ))
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        expect(broker.load_hsts_snapshot(
+            BrowserHstsSnapshot.create(entries), now_ms
+        )).to_equal(1)
+        val fetch = request("script", "http://secure.test/app.js")
+        val effective_url = broker._hsts_upgrade_url(fetch.url)
+        val policy = hosted_browser_renderer_request_policy(
+            "https://secure.test",
+            permit(false, ""),
+            fetch,
+            effective_url
+        )
+        expect(policy.ok).to_be(true)
+        expect(broker._queue_hsts_transport_upgrade(
+            fetch, policy, 20
+        )).to_equal("")
+        expect(broker.network_job_handle).to_equal(0)
+        val decoded = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(1), broker.pending_wire
+        )
+        val response = browser_renderer_network_response_decode(
+            decoded.message
+        )
+        expect(response.ok).to_be(true)
+        expect(response.url).to_equal("http://secure.test/app.js")
+        expect(response.status).to_equal(307)
+        expect(response.headers).to_contain(
+            "Location: https://secure.test/app.js"
+        )
+        expect(response.headers).to_contain(
+            "X-Simple-Broker-Transport-Upgrade: 1"
+        )
+
+        for kind in ["style", "script", "module", "wasm", "fetch"]:
+            var session = BrowserSession.new()
+            session.broker_network_policy = true
+            session.document_url = "https://secure.test/"
+            session.content_security_policy = (
+                "style-src 'self'; script-src 'self'; connect-src 'self'"
+            )
+            if kind == "fetch":
+                session.apply_set_cookie_header(
+                    "secure_token=secret; Secure; Path=/",
+                    "https://secure.test/"
+                )
+            val method = if kind == "fetch": "POST" else: "GET"
+            val headers = if kind == "fetch":
+                "X-Test: retained"
+            else:
+                ""
+            val body = if kind == "fetch": "payload" else: ""
+            var pending = BrowserRequest.create(
+                "request-{kind}", kind,
+                "http://secure.test/resource", method, headers, body,
+                if kind == "fetch": "text/plain" else: ""
+            )
+            pending.redirect_count = 20
+            session.pending_requests.push(pending)
+            val emitted = session.take_pending_request()
+            match emitted:
+                nil:
+                    fail("Expected broker-bound HTTP candidate")
+                Some(original):
+                    val committed = session.commit_network_response(
+                        BrowserResponse.create(
+                            original.id, kind, original.url, 307,
+                            "Location: https://secure.test/resource\r\n" +
+                            "X-Simple-Broker-Transport-Upgrade: 1",
+                            "", ""
+                        )
+                    )
+                    match committed:
+                        Err(reason):
+                            fail(reason)
+                        Ok(done):
+                            expect(done).to_be(true)
+            val redirected = session.take_pending_request()
+            match redirected:
+                nil:
+                    fail("Expected correlated HTTPS request")
+                Some(next):
+                    expect(next.url).to_equal(
+                        "https://secure.test/resource"
+                    )
+                    expect(next.redirect_count).to_equal(20)
+                    expect(next.method).to_equal(method)
+                    expect(next.body).to_equal(body)
+                    if kind == "fetch":
+                        expect(next.headers).to_contain("X-Test: retained")
+                        expect(next.headers).to_contain(
+                            "Cookie: secure_token=secret"
+                        )
+                    else:
+                        expect(next.headers).to_equal("")
+
+        var blocked = BrowserSession.new()
+        blocked.broker_network_policy = true
+        match blocked.begin_network_navigation(
+            "http://plain.test/", "GET", "", "", ""
+        ):
+            Err(reason):
+                fail(reason)
+            Ok(done):
+                expect(done).to_be(true)
+        val document_request = blocked.take_pending_request()
+        match document_request:
+            nil:
+                fail("Expected document request")
+            Some(document):
+                match blocked.commit_network_response(
+                    BrowserResponse.create(
+                        document.id, "document", document.url, 200,
+                        "Content-Security-Policy: script-src 'none'",
+                        "<script src='http://plain.test/blocked.js'></script>",
+                        ""
+                    )
+                ):
+                    Err(reason):
+                        fail(reason)
+                    Ok(done):
+                        expect(done).to_be(true)
+        match blocked.take_pending_request():
+            nil:
+                expect(blocked.warnings.join("\n")).to_contain(
+                    "CSP blocked script"
+                )
+            Some(unexpected):
+                fail("CSP bypassed for {unexpected.url}")
 
     it "denies cross-origin requests that need an unbrokered preflight":
         val policy = hosted_browser_renderer_request_policy(

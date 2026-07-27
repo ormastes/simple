@@ -2,7 +2,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|---------|
-| 21 | 21 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 ## Covered boundaries
 
@@ -18,6 +18,14 @@
   retry, but clear handles already reaped by a liveness check.
 - Derive same-origin, CORS, mixed-content, and preflight policy from trusted
   broker state rather than renderer-supplied request kinds.
+- Convert persisted HSTS subresource upgrades into broker-owned internal
+  redirects, accept only exact HTTP-to-HTTPS transport transforms, and strip
+  STS before renderer delivery so unauthenticated responses cannot seed policy.
+- Preserve request correlation, fetch method/body/headers, and the HTTP redirect
+  budget across internal style, script, module, Wasm, and fetch upgrades;
+  recompute Secure cookies for HTTPS and retain CSP denial on plain HTTP pages.
+- Keep credential-free CORS responses from storing cookies or exposing
+  non-safelisted, non-explicitly-exposed response headers to page code.
 
 Requirement trace: REQ-WEB-BROWSER-011, REQ-WEB-BROWSER-017,
 REQ-WEB-BROWSER-018.

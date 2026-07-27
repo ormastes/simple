@@ -872,3 +872,23 @@ implementation in progress / target evidence blocked
   Production completion requires carrying both original and effective URLs
   (or synchronized HSTS state) across the renderer protocol, with strict
   same-host/path and port-transition validation.
+- HSTS subresource broker fix: The trusted broker now applies persisted HSTS
+  before mixed-content/origin policy and represents a changed transport URL as
+  an internal 307 response. The worker's existing redirect path correlates a
+  fresh HTTPS request and reruns CSP/CORS policy, avoiding silent URL
+  substitution and a wider IPC schema. Exact host/path/query and port
+  transition checks reject forged effective targets. Redirect `Location`
+  headers are HSTS-upgraded before renderer delivery, and STS is stripped
+  after authenticated broker learning so mock/cache responses cannot create
+  worker-only policy. Isolated workers defer broker-owned network admission
+  only for HTTP candidates under a secure document; a missing policy is
+  rejected as mixed content, while an effective HTTPS redirect is rechecked
+  against CSP before the correlated request is emitted. The internal upgrade
+  marker is stripped from remote responses, preserves fetch method/body/headers
+  without consuming the HTTP redirect budget, and recomputes Secure cookies for
+  the HTTPS target. Plain HTTP documents retain normal local CSP enforcement.
+- Credential-free CORS response hardening: FetchEngine no longer stores
+  Set-Cookie when request credentials are `omit`. The hosted broker strips
+  Set-Cookie/Set-Cookie2 and filters cross-origin response headers to the CORS
+  safelist plus valid explicitly exposed names before renderer IPC, retaining
+  Location only for an internal redirect hop.

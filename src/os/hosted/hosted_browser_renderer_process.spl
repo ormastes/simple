@@ -44,8 +44,11 @@ use os.hosted.hosted_browser_renderer_policy.{
     HostedBrowserNavigationPermit,
     HostedBrowserRequestPolicy,
     hosted_browser_canonical_http_url,
+    hosted_browser_cors_response_headers,
     hosted_browser_empty_navigation_permit,
+    hosted_browser_hsts_upgrade_valid,
     hosted_browser_network_origin,
+    hosted_browser_remove_response_header,
     hosted_browser_redirect_status,
     hosted_browser_renderer_request_policy,
     hosted_browser_replace_response_header,
@@ -665,7 +668,8 @@ pub class HostedBrowserRendererProcess:
         fetch: BrowserRendererNetworkDecodeResult,
         policy: HostedBrowserRequestPolicy,
         response: HostedBrowserNetworkResult,
-        redirect_count: i64
+        redirect_count: i64,
+        transport_upgrade: bool = false
     ) -> text:
         var response_headers = response.headers
         if policy.consumes_navigation:
@@ -676,6 +680,45 @@ pub class HostedBrowserRendererProcess:
                     return reason
                 Ok(headers):
                     response_headers = headers
+        if hosted_browser_redirect_status(response.status):
+            val location = hosted_browser_response_header_value(
+                response_headers, "location"
+            )
+            if location != "":
+                val redirected = resolve_fetch_redirect_url(
+                    Url.parse(policy.canonical_url), location
+                )
+                val redirect_url = hosted_browser_canonical_http_url(
+                    redirected.to_text()
+                )
+                val effective_redirect_url = self._hsts_upgrade_url(
+                    redirect_url
+                )
+                if (redirect_url != "" and
+                    effective_redirect_url != redirect_url and
+                    hosted_browser_hsts_upgrade_valid(
+                        redirect_url, effective_redirect_url
+                    )):
+                    response_headers = hosted_browser_replace_response_header(
+                        response_headers, "Location",
+                        effective_redirect_url
+                    )
+        response_headers = hosted_browser_remove_response_header(
+            response_headers, "strict-transport-security"
+        )
+        response_headers = hosted_browser_remove_response_header(
+            response_headers, "x-simple-broker-transport-upgrade"
+        )
+        if policy.mode == RequestMode.Cors:
+            response_headers = hosted_browser_cors_response_headers(
+                response_headers,
+                hosted_browser_redirect_status(response.status)
+            )
+        if transport_upgrade:
+            if response_headers != "":
+                response_headers = response_headers + "\r\n"
+            response_headers = response_headers +
+                "X-Simple-Broker-Transport-Upgrade: 1"
         val wire = browser_renderer_network_response_encode(
             self.generation,
             self.next_request_id,
@@ -696,6 +739,24 @@ pub class HostedBrowserRendererProcess:
         self.pending_wire_reply_to_request_id = self.next_request_id
         self.pending_wire_is_command = false
         ""
+
+    me _queue_hsts_transport_upgrade(
+        fetch: BrowserRendererNetworkDecodeResult,
+        policy: HostedBrowserRequestPolicy,
+        redirect_count: i64
+    ) -> text:
+        self._write_network_response(
+            fetch,
+            policy,
+            _network_result(
+                307,
+                "Location: {policy.canonical_url}",
+                "",
+                ""
+            ),
+            redirect_count,
+            true
+        )
 
     me _flush_pending_wire_once() -> text:
         if self.pending_wire == "":
@@ -884,12 +945,28 @@ pub class HostedBrowserRendererProcess:
                     self.expected_reply_to_request_id
                 ):
                     return Some(self.fail("stale-renderer-request"))
+                val effective_url = self._hsts_upgrade_url(fetch.url)
                 val policy = hosted_browser_renderer_request_policy(
                     self._requester_origin(),
                     self.navigation_permit,
-                    fetch
+                    fetch,
+                    effective_url
                 )
                 if not policy.ok:
+                    if (policy.reason == "mixed-content-blocked" or
+                        policy.reason ==
+                            "cross-origin-preflight-unavailable"):
+                        val reason = self._write_network_response(
+                            fetch,
+                            policy,
+                            _network_result(
+                                0, "", "", policy.reason
+                            ),
+                            0
+                        )
+                        if reason != "":
+                            return Some(self.fail(reason))
+                        return nil
                     return Some(self.fail(policy.reason))
                 var redirect_count: i64 = 0
                 if policy.consumes_navigation:
@@ -897,6 +974,15 @@ pub class HostedBrowserRendererProcess:
                     self.navigation_permit = (
                         hosted_browser_empty_navigation_permit()
                     )
+                val request_url = hosted_browser_canonical_http_url(fetch.url)
+                if (fetch.kind != "document" and
+                    policy.canonical_url != request_url):
+                    val reason = self._queue_hsts_transport_upgrade(
+                        fetch, policy, redirect_count
+                    )
+                    if reason != "":
+                        return Some(self.fail(reason))
+                    return nil
                 if val Some(response) = self._start_network_job(
                     fetch, policy, redirect_count
                 ):
