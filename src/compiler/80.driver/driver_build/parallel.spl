@@ -249,12 +249,17 @@ impl ParallelBuilder:
         ParallelBuilder(config: config, graph: BuildGraph.empty(),
                         stats: BuildStats.empty())
 
-    fn wait_for_finished_process(in_flight_pid: {i64: i64}) -> (i64, i64):
+    fn wait_for_finished_process(in_flight_pid: {i64: i64}, in_flight_count: i64) -> (i64, i64):
         """Wait for any in-flight process to finish using bounded polling.
 
         Returns: (pid, exit_code), or (-1, -1) if no process is available.
+
+        `in_flight_count` is the caller-maintained entry count for
+        `in_flight_pid`. Dict `.len()` must NOT be used here: it returns -1 in
+        natively-compiled code, so the empty-check would never fire and this
+        function would spin forever over an empty `keys()`.
         """
-        if in_flight_pid.len() == 0:
+        if in_flight_count == 0:
             return (-1, -1)
 
         var poll_iteration = 0
@@ -284,7 +289,9 @@ impl ParallelBuilder:
         In deterministic mode, processes units in topological order.
         Otherwise, processes ready units in parallel batches.
         """
-        val total = self.graph.units.len()
+        # `graph.units` is a Dict; Dict.len() returns -1 natively. Units are only
+        # ever added (never removed), so `next_id` is the exact unit count.
+        val total = self.graph.next_id
         self.stats = BuildStats(total_units: total, completed: 0, failed: 0,
                                 skipped: 0, parallel_batches: 0)
         var errors: [(text, text)] = []
@@ -407,7 +414,9 @@ impl ParallelBuilder:
         finishes, newly ready units are spawned immediately, keeping
         the worker pool saturated.
         """
-        val total = self.graph.units.len()
+        # `graph.units` is a Dict; Dict.len() returns -1 natively. Units are only
+        # ever added (never removed), so `next_id` is the exact unit count.
+        val total = self.graph.next_id
         val max_workers = self.config.effective_threads()
         self.stats = BuildStats(total_units: total, completed: 0, failed: 0,
                                 skipped: 0, parallel_batches: 0)
@@ -420,12 +429,22 @@ impl ParallelBuilder:
         # pid -> unit_id mapping for in-flight processes
         var in_flight_pid: {i64: i64} = {}
         var in_flight_path: {i64: text} = {}
+        # Explicit entry count for `in_flight_pid`. Dict.len() returns -1 in
+        # natively-compiled code, so `in_flight_pid.len() < max_workers` was
+        # `-1 < max_workers` -- always true -- and every ready unit spawned at
+        # once (fork storm). keys().len() would be correct but allocates on
+        # every iteration of this hot spawn loop, so we maintain a counter.
+        # Invariant: incremented at the single insert site below, decremented at
+        # the single remove site; the two `continue` paths above it insert
+        # nothing, and the post-loop drain does not re-read the counter, so it
+        # cannot drift.
+        var in_flight_count = 0
 
         while not self.graph.is_complete():
             # Fill worker slots with ready units
             val ready = self.graph.ready_units()
             var ready_idx = 0
-            while in_flight_pid.len() < max_workers and ready_idx < ready.len():
+            while in_flight_count < max_workers and ready_idx < ready.len():
                 val build_unit = ready[ready_idx]
                 ready_idx = ready_idx + 1
 
@@ -459,15 +478,16 @@ impl ParallelBuilder:
 
                 in_flight_pid[pid] = build_unit.id
                 in_flight_path[pid] = build_unit.path
+                in_flight_count = in_flight_count + 1
                 if self.config.verbose:
                     print "[PARALLEL] spawned pid={pid} for {build_unit.path}"
 
             # If nothing in-flight and nothing ready, we're stuck
-            if in_flight_pid.len() == 0:
+            if in_flight_count == 0:
                 break
 
             # Wait for one process to finish before recomputing ready work.
-            val (finished_pid, finished_exit_code) = self.wait_for_finished_process(in_flight_pid)
+            val (finished_pid, finished_exit_code) = self.wait_for_finished_process(in_flight_pid, in_flight_count)
             if finished_pid < 0:
                 break
 
@@ -476,6 +496,7 @@ impl ParallelBuilder:
             val unit_path = in_flight_path[finished_pid]
             in_flight_pid.remove(finished_pid)
             in_flight_path.remove(finished_pid)
+            in_flight_count = in_flight_count - 1
 
             val result = collect_fn(finished_exit_code, unit_path)
             match result:
