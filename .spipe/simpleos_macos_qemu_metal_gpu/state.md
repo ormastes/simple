@@ -96,16 +96,23 @@ dev-blocked
 - dev: Audited guest artifacts and found neither the ARM64 probe nor production
   desktop ELF. Existing logs retain `arm64-wm-target-did-not-build` and
   `canonical-kernel-missing`.
-- dev: Prepared an ARM64-only wrapper selector to avoid unrelated x86/RISC-V
-  work. Shell syntax passed, but the focused sparse-checkout spec was
-  inconclusive (1/12 with unresolved existing modules), so it was not merged.
+- dev: Added the verified ARM64-only wrapper selector. Shell self-test, scoped
+  dry execution, and focused integration spec passed 2/2; default three-ISA
+  behavior remains unchanged and invalid values fail before artifact work.
+- dev: The current fast bootstrap reached core-C and exposed unavailable Darwin
+  `closefrom`. The FreeBSD-only guard fix compiles directly on Darwin, but the
+  final bounded bootstrap cycle stopped during provenance fingerprinting when
+  the disk filled; no pure-Simple candidate or daemon was produced.
+- dev: A real device-seeded Metal font oracle prototype was reviewed but not
+  merged. Its focused suite never executed in the sparse lane, and per-batch
+  full-frame readbacks are not acceptable in the production hot path.
 - blocked: The Metal adapter's font-evidence hook remains fail-closed (`nil`).
   It uses the canonical font renderer/Metal batch, but cannot promote a
   vector-font or 300-DPI receipt until real device/oracle evidence is recorded.
 - dev: Candidate-admission timeout hardening exhausted the three-cycle cap
   without a passing self-test; no unproven patch was accepted.
-- blocked: AC-1, AC-3, AC-4, AC-5, AC-7, and AC-10 remain open. The shared
+- blocked: AC-1, AC-3, AC-4, AC-5, and AC-7 remain open. The shared
   render-target and Metal-only source closure are complete; the macOS row now
   requires an admitted pure-Simple compiler, a supported daemon binary,
   current ARM64 guest artifacts, and fresh HVF device-origin parity evidence
-  before push.
+  before final completion or acceleration promotion.

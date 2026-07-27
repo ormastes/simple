@@ -174,3 +174,20 @@ not return placeholder PASS.
 Linux, Windows, UNO Q, VisionFive 2, and UP Squared remain visible in the
 cross-host plan. They resume only in prepared environments and cannot satisfy
 or block the current-host macOS evidence row.
+
+## Execution checkpoint
+
+- Compiler/admission: blocked after cycle 3. The fast bootstrap fixed the
+  Darwin `closefrom` compile defect, then stopped during provenance
+  fingerprinting because the disk filled. No admitted compiler exists.
+- ARM64/QEMU: selector implementation complete and green; guest producers were
+  correctly not started without an admitted compiler.
+- Metal evidence: honest device-seeded oracle design identified, but the
+  prototype is unmerged because focused tests did not execute and per-batch
+  full-frame readback is not an acceptable hot-path design.
+- Live HVF/parity: not applicable until compiler, daemon, guest, and bounded
+  font-evidence gates are complete.
+
+Next fresh run must begin with more than 5 GiB available, use the committed
+Darwin runtime fix, and perform exactly one fast bootstrap attempt. It must not
+re-run the exhausted attempts from this session.

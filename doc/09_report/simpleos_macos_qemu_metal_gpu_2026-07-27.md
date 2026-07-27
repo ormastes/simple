@@ -21,6 +21,10 @@ current-source host daemon artifact produced a fresh device-origin receipt.
   DirectX, OpenGL, WebGPU, or other non-Metal provider.
 - Focused source checks and contracts passed for the shared target, selector,
   CPU fallback, reason mapping, and protocol behavior.
+- The canonical wrapper now accepts exact
+  `SIMPLEOS_HOST_GPU_GUEST_ISAS=aarch64`; its shell self-test, scoped dry run,
+  and focused integration spec passed. Empty, reordered, aliased, and unknown
+  values fail before daemon or guest work.
 - The canonical 512 MiB backing layout reserves the final 8 MiB host-GPU region
   at guest GPA `0x5f800000`.
 - The former 256 MiB ARM64 link region overflowed the production desktop ELF by
@@ -31,9 +35,11 @@ current-source host daemon artifact produced a fresh device-origin receipt.
 
 ## Blocking evidence
 
-1. The entry-closure blocker is fixed, but the only bounded provisional
-   bootstrap-seed native build timed out after 90 seconds before producing a
-   daemon binary. No supported pure-Simple compiler candidate is admitted.
+1. The entry-closure blocker is fixed, but no supported pure-Simple compiler
+   candidate is admitted. The latest fast bootstrap reached the core-C runtime,
+   exposed and fixed unavailable Darwin `closefrom`, then its final bounded
+   cycle stopped during provenance fingerprinting with `No space left on
+   device` before Stage 2. No daemon binary was produced.
 2. No current ARM64 probe or production guest ELF exists. Existing evidence
    records `arm64-wm-target-did-not-build` and `canonical-kernel-missing`.
 3. Without the daemon and guest artifacts, no fresh Metal device receipt,
@@ -44,14 +50,13 @@ current-source host daemon artifact produced a fresh device-origin receipt.
    provider symbols, so the unverified patch was not merged.
 5. Candidate-admission timeout changes did not pass the wrapper self-test
    within the three-cycle cap.
-6. The canonical wrapper still defaults to all three guest ISAs. A bounded
-   ARM64-only selector patch passed shell syntax but its focused SPipe run was
-   inconclusive because the sparse test checkout could resolve only one of
-   twelve examples; the patch was not merged.
-7. The Metal target renders through the canonical `FontRenderer` and Metal
+6. The Metal target renders through the canonical `FontRenderer` and Metal
    atlas batch, but its `draw_ir_font_evidence()` currently returns `nil`.
    Vector-font device parity therefore remains fail-closed and cannot satisfy
    the existing 300-DPI/font promotion gate.
+7. A device-seeded Metal font-oracle prototype parsed but was not merged: its
+   focused suite never executed in the sparse lane, and full-frame readback
+   around every font batch would violate the hot-path/performance design.
 
 ## Required completion evidence
 
