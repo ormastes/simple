@@ -974,3 +974,16 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   source review accepted commit `b51e27442f`. The admitted runtime was
   unavailable; live caret/selection, pixels, events, timing, and RSS remain
   open.
+
+- continuation-2026-07-27-qemu-frozen-admission-hard-stop: **THREE-CYCLE CAP /
+  NOT INTEGRATED / LIVE ROWS BLOCKED.** Two isolated frozen-receipt candidates
+  were independently rejected for forgeable lineage, mutable-path TOCTOU,
+  unbound final boot bytes/manifests, and helper-only false-green tests. The
+  final cycle moved regular inputs toward no-follow snapshots and unlinked
+  inherited descriptors, but its sole final behavior gate stopped before
+  launch when macOS denied execution of the unlinked fake-QEMU snapshot through
+  `/dev/fd/7`. No fourth attempt, QEMU, bootstrap, integration, or push ran.
+  Rejected commit `6108a099f5` and the dirty final-cycle worktree are not
+  evidence. Resume requires a reviewed descriptor-exec helper plus a
+  builder-owned raw immutable x86 ESP image, then the still-open SIMD parity,
+  ordered input/damage/frame, backend identity, timing, and RSS gates.

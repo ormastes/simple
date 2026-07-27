@@ -704,9 +704,20 @@ The entries install the generated theme before the first frame, and ARM already
 has strong frozen-source/NEON/QMP/VirtIO/RAMFB checks, but remaining P1 gates
 are recorded in
 `doc/08_tracking/bug/wm_glass_qemu_evidence_contract_p1_2026-07-27.md`.
+
+A subsequent isolated frozen-admission lane exhausted its three-cycle cap and
+was not integrated. Its final behavior gate stopped before launch because the
+attempted unlinked fake-QEMU snapshot execution through macOS `/dev/fd/7` was
+denied. No fourth attempt, live QEMU, bootstrap, integration, or push ran.
+The x86 route also correctly identified that mutable vvfat cannot satisfy the
+required final-byte contract. Resume only with a reviewed
+`fexecve`/descriptor-exec helper and a builder-owned raw immutable ESP image;
+the rejected commit `6108a099f5` and uncommitted final-cycle worktree are not
+source evidence.
 In particular, x86 must publish and consume frozen admission with no external-
 ELF bypass, prove SSE2/scalar parity and ordered damage/frame receipts, while
-ARM must bind firmware/theme/material/backend/fallback identity and finalize
+ARM direct-`-kernel` firmware is N/A; it must bind theme/material/backend/
+fallback identity and finalize
 events only after the correlated frame. Both rows still require timing/RSS.
 Active sibling changes in those files remain separately owned and must be
 re-reviewed only after their owner commits them.
