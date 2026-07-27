@@ -320,6 +320,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
     var browser_raster = Engine2dCompositorBackend.create_from_env(
         browser_content_width, browser_content_height
     )
+    var browser_raster_active = true
     var browser_renderer_ready = false
     var browser_animation_origin_micros = rt_time_now_micros()
     var browser_address_draft = browser_initial_html
@@ -400,6 +401,10 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 print "[hosted-wm] browser-renderer-init-failed reason={initial.reason}"
         else:
             print "[hosted-wm] browser-renderer-start-failed reason={started.reason}"
+    if browser_profile_window_id <= 0 or not browser_renderer_ready:
+        browser_renderer.close()
+        browser_raster.shutdown()
+        browser_raster_active = false
     print "[hosted-wm] windows-ready count={comp.windows.len()}"
     if not comp.render_frame_engine2d(raster):
         if live_proof or evidence.enabled:
@@ -538,6 +543,9 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         other_dirty = true
                 else:
                     browser_renderer_ready = false
+                    if browser_raster_active:
+                        browser_raster.shutdown()
+                        browser_raster_active = false
                     print "[hosted-wm] browser-renderer-failed reason={browser_result.reason}"
             var desired_browser_width = browser_content_width
             var desired_browser_height = browser_content_height
@@ -885,6 +893,9 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                             if focused == browser_profile_window_id:
                                 browser_renderer.close()
                                 browser_renderer_ready = false
+                                if browser_raster_active:
+                                    browser_raster.shutdown()
+                                    browser_raster_active = false
                                 comp.require_external_web_frame(0)
                                 comp.destroy_window(focused)
                                 browser_profile_window_id = 0
@@ -1083,7 +1094,8 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                 browser_profile_closed = false
                 print "ERROR: hosted browser profile close failed reason={error.message()}"
     browser_renderer.close()
-    browser_raster.shutdown()
+    if browser_raster_active:
+        browser_raster.shutdown()
     raster.shutdown()
     rt_winit_window_free(win)
     rt_winit_event_loop_free(el)
