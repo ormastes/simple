@@ -13741,6 +13741,49 @@ int8_t rt_array_set_text(RuntimeValue arr, RuntimeValue idx, RuntimeValue val)
     return rt_array_set_raw(arr, idx, val);
 }
 
+RuntimeValue rt_array_new_with_cap(int64_t cap);  /* defined below */
+
+/* rt_byte_array_new_len: zero-filled packed [u8] of `len` (raw i64 arg, per
+ * `extern fn rt_byte_array_new_len(len: i64) -> [u8]`). Had no freestanding
+ * definition, so the kernel link bound it to the weak nil-returning stub in
+ * auto_stubs.c and every [u8] allocated through it came back nil -- surfacing
+ * as "field access on nil receiver" in ByteSpan once real data reached it. */
+RuntimeValue rt_byte_array_new_len(int64_t len)
+{
+    if (len < 0) len = 0;
+    return _rt_bytes_new(NULL, (uint32_t)len);
+}
+
+/* rt_array_copy: value-semantics copy for array-typed place reads.
+ * MIR lowers every `var x = <array place read>` through this
+ * (src/compiler/50.mir/mir_lowering_stmts.spl). There was NO freestanding
+ * definition, so the kernel link bound it to the weak nil-returning stub in
+ * auto_stubs.c: every copied array came back as 0, which the inline element
+ * reader sees as un-tagged and yields nil(3), so `.len()` read 0 while the
+ * outer handle still looked healthy. Hosted builds were unaffected because
+ * runtime_native.c defines the real one. */
+RuntimeValue rt_array_copy(RuntimeValue arr)
+{
+    RuntimeArray *src = runtime_array_from_abi(arr);
+    if (!src) return arr;
+    /* [u8] arrays are BYTE_PACKED (stride 1, not 8-byte tagged slots). Copying
+     * them as RuntimeValues over-reads the source and yields an unpacked array,
+     * which the compiler's stride-1 inline [u8] reader then misreads. */
+    if (src->hdr.gc_flags & BYTE_PACKED) {
+        const uint8_t *sb = (const uint8_t *)(void *)runtime_array_items(src);
+        return _rt_bytes_new(sb, (uint32_t)src->len);
+    }
+    RuntimeValue out = rt_array_new_with_cap((int64_t)src->len);
+    RuntimeArray *dst = runtime_array_from_abi(out);
+    if (!dst) return out;
+    dst->hdr.gc_flags = 0;  /* rt_array_new_with_cap leaves this uninitialised */
+    RuntimeValue *si = runtime_array_items(src);
+    RuntimeValue *di = runtime_array_items(dst);
+    for (uint64_t i = 0; i < src->len; i++) di[i] = si[i];
+    dst->len = src->len;
+    return out;
+}
+
 /* rt_array_len: return RAW (untagged) integer.
  * The Cranelift backend's call_len_method does NOT unbox the result,
  * and the MIR for-loop lowering compares directly with raw index counters.
@@ -14025,6 +14068,39 @@ RuntimeValue rt_enum_discriminant(RuntimeValue value)
     RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
     if (!e || e->hdr.type != HEAP_ENUM) return -1;
     return (RuntimeValue)(int64_t)e->discriminant;
+}
+
+/* rt_enum_id: enum type id, -1 for a non-enum (hosted: runtime_native.c:4401).
+ * Had no freestanding definition, so it bound to the weak nil stub in
+ * auto_stubs.c and answered 0 for EVERY value. The Option/Result decode path
+ * gates on `rt_enum_id(v) == <id>`, so a real Some read as not-an-enum and the
+ * payload access downstream faulted as a nil receiver. */
+RuntimeValue rt_enum_id(RuntimeValue value)
+{
+    if (!IS_HEAP(value)) return -1;
+    RuntimeEnum *e = (RuntimeEnum *)DECODE_PTR(value);
+    if (!e || e->hdr.type != HEAP_ENUM) return -1;
+    return (RuntimeValue)(int64_t)e->enum_id;
+}
+
+/* rt_text_cmp_any: strcmp-style ordering over text (hosted:
+ * runtime_native.c:2396). The weak stub returned 0 -- "equal" -- for every
+ * pair, so every ordering/dedup comparison silently collapsed. */
+RuntimeValue rt_text_cmp_any(RuntimeValue left, RuntimeValue right)
+{
+    if (!IS_HEAP(left) || !IS_HEAP(right))
+        return (RuntimeValue)(left == right ? 0 : (left < right ? -1 : 1));
+    RuntimeString *a = (RuntimeString *)DECODE_PTR(left);
+    RuntimeString *b = (RuntimeString *)DECODE_PTR(right);
+    if (!a || !b) return (RuntimeValue)(a == b ? 0 : (a ? 1 : -1));
+    uint32_t n = a->len < b->len ? a->len : b->len;
+    for (uint32_t i = 0; i < n; i++) {
+        unsigned char ca = (unsigned char)a->data[i];
+        unsigned char cb = (unsigned char)b->data[i];
+        if (ca != cb) return (RuntimeValue)(ca < cb ? -1 : 1);
+    }
+    if (a->len == b->len) return (RuntimeValue)0;
+    return (RuntimeValue)(a->len < b->len ? -1 : 1);
 }
 
 /* rt_enum_payload(value) → payload RuntimeValue */
@@ -17779,3 +17855,378 @@ RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
 {
     return rt_string_new(data, len_val);
 }
+
+/* ===================================================================
+ * Fail-open stub rescues: rt_* symbols the WM guest actually calls that
+ * had NO freestanding definition and therefore bound SILENTLY to the weak
+ * NIL/0-returning stubs in auto_stubs.c (nm shows `W`, body is
+ * `xor %eax,%eax; ret`). No link error, no runtime diagnostic -- just
+ * zeros flowing through the compositor. Reference semantics come from the
+ * hosted implementations; see the per-function notes for the exact source
+ * and for the raw-vs-tagged return convention chosen.
+ * =================================================================== */
+
+/* Forward decls: these live in sibling TUs / later in this file. Without
+ * them the implicit declaration returns `int` and TRUNCATES the value. */
+extern RuntimeValue rt_value_float(RuntimeValue f_raw);  /* rt_extras.c */
+extern RuntimeValue rt_time_now(void);                   /* rt_extras.c */
+
+/* Local string view helper. Matches rt_string_len / rt_string_eq above:
+ * IS_HEAP + non-null only, deliberately NOT hdr.type == HEAP_STRING, since
+ * statically-emitted literal headers are not guaranteed to carry the tag. */
+static inline RuntimeString *_bm_as_string(RuntimeValue v)
+{
+    if (!IS_HEAP(v)) return NULL;
+    return (RuntimeString *)DECODE_PTR(v);
+}
+
+static inline int _bm_is_space(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' ||
+           c == '\r' || c == '\f' || c == '\v';
+}
+
+/* rt_text_count_codepoints_cached: UTF-8 codepoint count of a text.
+ * Hosted reference: src/runtime/runtime_simd_utf8.c:602 (dispatches to
+ * scalar_utf8_count_codepoints at :54 when no SIMD slot is upgraded).
+ * There was NO freestanding definition, so the kernel link bound it to the
+ * weak 0-returning stub in auto_stubs.c: EVERY string reported length 0, so
+ * the compositor laid out and measured empty text everywhere.
+ *
+ * Convention: returns a RAW (untagged) integer, exactly like rt_string_len
+ * and rt_array_len above -- the Cranelift backend does not unbox length
+ * results, and `extern fn rt_text_count_codepoints_cached(s: text) -> i64`
+ * (src/lib/common/encoding/simd_text_ffi.spl:8) consumes a machine i64.
+ *
+ * Divergence from hosted, deliberate: hosted memoises the count in the
+ * string header's `reserved` field. Freestanding string constructors here
+ * (e.g. rt_string_slice) do not initialise `reserved`, so a cache read
+ * would return malloc garbage. We recompute -- the caching in the hosted
+ * version is a pure optimisation, not a semantic. */
+RuntimeValue rt_text_count_codepoints_cached(RuntimeValue value)
+{
+    RuntimeString *s = _bm_as_string(value);
+    if (!s) return 0;
+    const uint8_t *d = (const uint8_t *)s->data;
+    uint64_t count = 0;
+    /* Lead bytes are every byte that is not a 10xxxxxx continuation byte. */
+    for (uint64_t i = 0; i < s->len; i++) {
+        if ((d[i] & 0xC0) != 0x80) count++;
+    }
+    return (RuntimeValue)count;
+}
+
+/* rt_text_validate_utf8: strict UTF-8 well-formedness check.
+ * Hosted reference: src/runtime/runtime_simd_utf8.c:629, whose scalar
+ * implementation is scalar_utf8_validate at :185 -- mirrored byte for byte
+ * below (overlong, surrogate and > U+10FFFF rejection included).
+ * There was NO freestanding definition, so it bound to the weak 0-returning
+ * stub: every string was reported INVALID, which is the opposite of the
+ * hosted answer for well-formed text and silently poisons any
+ * validate-then-decode path.
+ *
+ * Convention: RAW (untagged) 0/1, matching rt_string_eq above ("Cranelift
+ * uses raw convention") and the hosted int64_t 1/0. The Simple decl is
+ * `-> bool` (simd_text_ffi.spl:10); raw 0/1 and ENCODE_INT(0/1) agree on
+ * truthiness, so raw is safe and matches hosted exactly.
+ * Hosted returns 1 for nil/non-string ("vacuously valid"); mirrored. */
+RuntimeValue rt_text_validate_utf8(RuntimeValue value)
+{
+    RuntimeString *s = _bm_as_string(value);
+    if (!s) return 1;
+    const uint8_t *data = (const uint8_t *)s->data;
+    uint64_t len = s->len;
+    uint64_t i = 0;
+    while (i < len) {
+        uint8_t b = data[i];
+        uint64_t need;
+        uint32_t cp;
+        if (b < 0x80) {
+            i++;
+            continue;
+        } else if ((b & 0xE0) == 0xC0) {
+            need = 2; cp = (uint32_t)(b & 0x1F);
+            if (cp < 2) return 0;              /* overlong 0xC0/0xC1 */
+        } else if ((b & 0xF0) == 0xE0) {
+            need = 3; cp = (uint32_t)(b & 0x0F);
+        } else if ((b & 0xF8) == 0xF0) {
+            need = 4; cp = (uint32_t)(b & 0x07);
+        } else {
+            return 0;                          /* stray continuation / 0xF5+ */
+        }
+        if (i + need > len) return 0;          /* truncated sequence */
+        for (uint64_t j = 1; j < need; j++) {
+            if ((data[i + j] & 0xC0) != 0x80) return 0;
+            cp = (cp << 6) | (uint32_t)(data[i + j] & 0x3F);
+        }
+        if (need == 3 && cp < 0x800) return 0;    /* overlong */
+        if (need == 4 && cp < 0x10000) return 0;  /* overlong */
+        if (cp >= 0xD800 && cp <= 0xDFFF) return 0; /* surrogate */
+        if (cp > 0x10FFFF) return 0;              /* out of range */
+        i += need;
+    }
+    return 1;
+}
+
+/* rt_string_to_float: parse a text as f64, nil when the whole string is not
+ * a single number.
+ * Hosted reference: src/runtime/runtime_native.c:2624 (strtod + "must have
+ * consumed everything but trailing whitespace" + rt_value_float(bits)).
+ * There was NO freestanding definition, so it bound to the weak
+ * nil-returning stub -- every CSS/layout float parse yielded nil, which the
+ * Simple-side `?: 0.0` fallbacks turned into 0, so all parsed lengths,
+ * opacities and colours collapsed to zero.
+ *
+ * Convention: returns a TAGGED value -- a tagged float on success (via the
+ * freestanding rt_value_float in rt_extras.c, which is the local authority
+ * on the TAG_FLOAT layout: `(bits & ~TAG_MASK) | TAG_FLOAT`) and NIL_VALUE
+ * on failure. Do NOT hand-roll the tagging here: primitives.c uses a
+ * *different* (`bits << 3`) float encoding, so delegating to rt_value_float
+ * is the only way to stay in lock-step with whatever the linked provider
+ * does.
+ *
+ * Divergences from hosted strtod, both conservative (they return nil rather
+ * than a wrong number, so they cannot corrupt data silently):
+ *   - hex-float ("0x1p3"), "inf" and "nan" spellings are NOT accepted;
+ *   - the decimal->binary conversion is scale-by-power-of-ten rather than
+ *     correctly-rounded, so results may differ from strtod by a few ULP for
+ *     inputs with large exponents or >19 significant digits. */
+RuntimeValue rt_string_to_float(RuntimeValue value)
+{
+    RuntimeString *s = _bm_as_string(value);
+    if (!s || s->len == 0) return NIL_VALUE;
+
+    const char *p = s->data;
+    const char *finish = s->data + s->len;
+
+    while (p < finish && _bm_is_space(*p)) p++;   /* strtod skips leading ws */
+
+    int neg = 0;
+    if (p < finish && (*p == '+' || *p == '-')) {
+        neg = (*p == '-');
+        p++;
+    }
+
+    uint64_t mant = 0;
+    int      exp10 = 0;
+    int      any_digit = 0;
+    const uint64_t mant_limit = (0xFFFFFFFFFFFFFFFFULL - 9ULL) / 10ULL;
+
+    while (p < finish && *p >= '0' && *p <= '9') {
+        any_digit = 1;
+        if (mant <= mant_limit) mant = mant * 10ULL + (uint64_t)(*p - '0');
+        else                    exp10++;   /* digit dropped: keep magnitude */
+        p++;
+    }
+    if (p < finish && *p == '.') {
+        p++;
+        while (p < finish && *p >= '0' && *p <= '9') {
+            any_digit = 1;
+            if (mant <= mant_limit) {
+                mant = mant * 10ULL + (uint64_t)(*p - '0');
+                exp10--;
+            }
+            p++;
+        }
+    }
+    /* strtod's "end == s->data" failure case: no digits at all. */
+    if (!any_digit) return NIL_VALUE;
+
+    if (p < finish && (*p == 'e' || *p == 'E')) {
+        const char *save = p;
+        p++;
+        int eneg = 0;
+        if (p < finish && (*p == '+' || *p == '-')) {
+            eneg = (*p == '-');
+            p++;
+        }
+        if (p < finish && *p >= '0' && *p <= '9') {
+            int e = 0;
+            while (p < finish && *p >= '0' && *p <= '9') {
+                if (e < 100000) e = e * 10 + (int)(*p - '0');
+                p++;
+            }
+            exp10 += eneg ? -e : e;
+        } else {
+            p = save;   /* bare 'e' is not part of the number; strtod backtracks */
+        }
+    }
+
+    while (p < finish && _bm_is_space(*p)) p++;
+    if (p != finish) return NIL_VALUE;   /* trailing garbage -> nil, as hosted */
+
+    double result = (double)mant;
+    int exp_neg = exp10 < 0;
+    unsigned ue = (unsigned)(exp_neg ? -exp10 : exp10);
+    if (ue > 800u) ue = 800u;   /* saturates to inf / 0, same as strtod */
+    /* Apply the decimal exponent in chunks of at most 300. A single
+     * 10^ue factor would itself overflow to +inf for ue > 308, and
+     * `x / inf` is 0 -- that silently flushed legitimate denormal-range
+     * values such as 2.2250738585072014e-308 to zero. Chunking keeps every
+     * intermediate factor finite so under/overflow happens in the result,
+     * where it belongs. */
+    while (ue != 0u) {
+        unsigned step = (ue > 300u) ? 300u : ue;
+        unsigned bits10 = step;
+        double scale = 1.0;
+        /* 10^(2^k) ladder; index 8 covers 10^256, so steps up to 511. */
+        static const double _pow10[9] = {
+            1e1, 1e2, 1e4, 1e8, 1e16, 1e32, 1e64, 1e128, 1e256
+        };
+        for (unsigned k = 0; k < 9u && bits10 != 0u; k++, bits10 >>= 1) {
+            if (bits10 & 1u) scale *= _pow10[k];
+        }
+        if (exp_neg) result /= scale;
+        else         result *= scale;
+        ue -= step;
+    }
+    if (neg) result = -result;
+
+    int64_t bits = 0;
+    __builtin_memcpy(&bits, &result, sizeof(bits));
+    return rt_value_float((RuntimeValue)bits);
+}
+
+/* rt_u32s_from_raw: build a [u32] from `count` little-endian u32 words at a
+ * raw address, in one call.
+ * Hosted reference: the runtime owner is src/runtime/simple_core/
+ * core_array_ops.spl:420 (and the tree-walking interpreter's mirror at
+ * src/compiler_rust/compiler/src/interpreter_extern/file_io.rs:763).
+ * SFFI signature: runtime_sffi.rs:1718, (I64 ptr, I64 count) -> I64 handle.
+ * There was NO freestanding definition, so it bound to the weak
+ * nil-returning stub and every readback produced a nil array.
+ *
+ * Conventions -- these are the ones that silently corrupt data if guessed:
+ *   - ARGS are RAW machine i64 (SFFI I64 params are not boxed).
+ *   - RETURN is a TAGGED heap handle (ENCODE_PTR), like _rt_bytes_new.
+ *   - ELEMENTS: [u32] is *not* byte-packed. The compiler's inline reader
+ *     (codegen/instr/calls.rs compile_inline_typed_words_at with width=4,
+ *     via maybe_packed_u64_load_word) loads an 8-byte slot at items+idx*8
+ *     and evaluates `(raw >> 3) & 0xFFFFFFFF` -- i.e. TAGGED ints in
+ *     8-byte slots, with the 0x10 "raw words" flag NOT consulted for
+ *     width 4. So we store ENCODE_INT(word) and leave gc_flags = 0.
+ *     (Note: the older rt_u32_alloc_filled above stores *raw* words and
+ *     leaves gc_flags uninitialised; it is inconsistent with the inline
+ *     reader and a system spec already asserts it is unused. Left untouched.) */
+RuntimeValue rt_u32s_from_raw(RuntimeValue data_ptr, RuntimeValue count_val)
+{
+    int64_t ptr = (int64_t)data_ptr;
+    int64_t count = (int64_t)count_val;
+    if (ptr <= 0 || count <= 0 || count > 0x400000) {
+        /* Owner returns an empty array (not nil) on every rejected input. */
+        count = 0;
+    }
+    size_t bytes = sizeof(RuntimeArray) + (size_t)count * sizeof(RuntimeValue);
+    RuntimeArray *a = (RuntimeArray *)malloc(bytes);
+    if (!a) return NIL_VALUE;
+    a->hdr.type = HEAP_ARRAY;
+    a->hdr.gc_flags = 0;         /* tagged 8-byte slots, NOT byte-packed */
+    a->hdr.reserved = 0;
+    a->hdr.size = (uint32_t)bytes;
+    a->len = (uint64_t)count;
+    a->cap = (uint64_t)count;
+    a->items = runtime_array_inline_items(a);
+    const uint8_t *src = (const uint8_t *)(uintptr_t)ptr;
+    for (int64_t i = 0; i < count; i++) {
+        size_t o = (size_t)i * 4u;
+        uint32_t w = (uint32_t)src[o]
+                   | ((uint32_t)src[o + 1] << 8)
+                   | ((uint32_t)src[o + 2] << 16)
+                   | ((uint32_t)src[o + 3] << 24);
+        a->items[i] = ENCODE_INT((int64_t)(uint64_t)w);
+    }
+    return ENCODE_PTR(a);
+}
+
+/* rt_write_u32s_to_raw: copy a [u32] out to a raw address as little-endian
+ * u32 words, in one call. Exact inverse of rt_u32s_from_raw.
+ * Hosted reference: src/compiler_rust/compiler/src/interpreter_extern/
+ * file_io.rs:794 -- each element masked to its low 32 bits, stored LE,
+ * returns the number of words written (0 on null ptr / non-array).
+ * There was NO freestanding definition, so it bound to the weak 0-returning
+ * stub: nothing was ever written to the destination and the caller's
+ * `!= pixels.len()` check made the whole upload look like a failure.
+ *
+ * Conventions: ARGS raw ptr + tagged array handle; RETURN is a RAW count
+ * (`extern fn rt_write_u32s_to_raw(ptr: i64, pixels: [u32]) -> i64` is
+ * compared straight against a raw `.len()` in window_winit.spl:112).
+ * Elements are decoded with the same rule the compiler's inline width=4
+ * reader uses: `(slot >> 3) & 0xFFFFFFFF`.
+ * A BYTE_PACKED array is REFUSED (returns 0) rather than reinterpreted: a
+ * packed [u8] has stride 1, so decoding it as 8-byte slots would emit
+ * garbage silently -- exactly the failure mode this file is fighting. */
+RuntimeValue rt_write_u32s_to_raw(RuntimeValue ptr_val, RuntimeValue arr)
+{
+    int64_t ptr = (int64_t)ptr_val;
+    if (ptr == 0) return 0;
+    RuntimeArray *a = runtime_array_from_abi(arr);
+    if (!a) return 0;
+    if (a->hdr.gc_flags & BYTE_PACKED) return 0;   /* wrong element stride */
+    RuntimeValue *items = runtime_array_items(a);
+    if (!items) return 0;
+    uint8_t *dst = (uint8_t *)(uintptr_t)ptr;
+    uint64_t written = 0;
+    for (uint64_t i = 0; i < a->len; i++) {
+        uint32_t w = (uint32_t)(((int64_t)items[i] >> 3) & 0xFFFFFFFFLL);
+        size_t o = (size_t)i * 4u;
+        dst[o]     = (uint8_t)(w & 0xFF);
+        dst[o + 1] = (uint8_t)((w >> 8) & 0xFF);
+        dst[o + 2] = (uint8_t)((w >> 16) & 0xFF);
+        dst[o + 3] = (uint8_t)((w >> 24) & 0xFF);
+        written++;
+    }
+    return (RuntimeValue)written;
+}
+
+/* rt_ptr_write_u8: store one byte at addr+offset.
+ * Hosted reference: src/runtime/runtime_native.c:6516 (and the identical
+ * src/runtime/runtime_memory.c:30) -- all three params are RAW int64.
+ * There was NO freestanding definition, so it bound to the weak no-op stub:
+ * every byte store through this path was silently DISCARDED (callers
+ * include src/lib/log.spl, the SMF mmap loader and the compositor's
+ * launch-arg packing, none of which read back what they wrote).
+ *
+ * Convention: all three args RAW, matching the hosted prototype, the
+ * `extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64)` decls,
+ * and the freestanding native ABI as used throughout glass_render.c (i64
+ * extern params arrive un-tagged). NOTE the divergence from the
+ * rt_ptr_write_i16/i32/i64 siblings in rt_extras.c, which DECODE_INT their
+ * value argument -- that would turn a byte 'A' (65) into 8 here, so it is
+ * deliberately not copied. Returns 0 so the call is safe for both the
+ * `-> i64` and the no-return Simple declarations of this symbol. */
+RuntimeValue rt_ptr_write_u8(RuntimeValue addr, RuntimeValue offset, RuntimeValue value)
+{
+    uint8_t *p = (uint8_t *)((uintptr_t)addr + (uintptr_t)offset);
+    *p = (uint8_t)(uint64_t)value;
+    return 0;
+}
+
+/* rt_time_now_monotonic_ms: milliseconds since boot, monotonic.
+ * Hosted reference: src/runtime/runtime_native.c:6490
+ * (rt_time_now_micros() / 1000). SFFI signature: runtime_sffi.rs:1667,
+ * () -> I64.
+ * There was NO freestanding definition, so it bound to the weak 0-returning
+ * stub: every elapsed-time measurement in the guest read 0, so frame pacing
+ * (src/os/compositor/frame_pacer.spl), perf counters and every timeout in
+ * the guest saw time standing still.
+ *
+ * Convention: returns a RAW (untagged) millisecond count. The SFFI I64
+ * return is a machine integer -- the same reason rt_string_len and
+ * rt_array_len above return raw.
+ *
+ * Time source: reuses the existing calibrated baremetal clock,
+ * rt_time_now() in rt_extras.c (TSC delta since boot / CPUID-or-PIT
+ * calibrated frequency, already converted to ms). It returns ENCODE_INT, so
+ * we decode it here rather than re-deriving a second, drifting TSC base.
+ * This is NOT a constant. */
+RuntimeValue rt_time_now_monotonic_ms(void)
+{
+    return (RuntimeValue)DECODE_INT(rt_time_now());
+}
+
+/* rt_font_glyph_index is NOT implemented here -- see the report. The
+ * freestanding build has no TrueType table parser (glass_render.c's
+ * FontSlot registry stores the raw font bytes but never parses them:
+ * "Future: stbtt_fontinfo would go here"), so there is no faithful way to
+ * resolve a codepoint to a glyph id. A wrong glyph mapping would be worse
+ * than the current honest zero. */
