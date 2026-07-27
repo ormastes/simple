@@ -10,6 +10,16 @@ returns before touching SFFI.
 use std.spec.{describe, it, expect}
 use std.io_runtime.{file_read}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB}
+use common.ui.draw_ir.{
+    DrawIrCommand,
+    DrawIrComposition,
+    draw_ir_batch,
+    draw_ir_box_with_style,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_no_rect,
+    draw_ir_style_prop
+}
 use common.window_protocol.geometry.{Size}
 use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.host_compositor_entry.{
@@ -39,6 +49,7 @@ use os.compositor.host_compositor_entry.{
     host_wm_content_renderer_name,
     host_wm_force_direct_chrome,
     host_wm_chrome_force_direct,
+    host_metal_glass_receipts_valid,
     host_chrome_scene_html,
     host_chrome_scene_fingerprint,
     host_compositor_taskbar_model,
@@ -50,11 +61,129 @@ use os.compositor.host_compositor_entry.{
 }
 use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_DESTROY_WINDOW, COMP_UPDATE_TREE, COMP_FOCUS, COMP_RESIZE, COMP_MOVE, COMP_SET_TITLE, COMP_MINIMIZE, COMP_MAXIMIZE, COMP_RESTORE}
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    Engine2dDrawIrAdvResult,
+    Engine2dMetalGlassReceipt,
+    engine2d_draw_ir_adv_composition
+}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
 use common.color.convert.{int_to_hex}
 
 val HOST_COMPOSITOR_CORE_SRC = "src/os/compositor/host_compositor_core.spl"
 val COMPOSITOR_ENGINE2D_SRC = "src/os/compositor/compositor_engine2d.spl"
+
+fn _metal_material_command(material_id: text) -> DrawIrCommand:
+    draw_ir_box_with_style(
+        material_id, 0, 0, 4, 4, 0xFFFFFFFFu32,
+        draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
+        draw_ir_no_rect(),
+        [draw_ir_style_prop(
+            "wm-material-request", "window-surface-glass")]
+    )
+
+fn _metal_material_composition(material_ids: [text]) -> DrawIrComposition:
+    var commands: [DrawIrCommand] = []
+    for material_id in material_ids:
+        commands.push(_metal_material_command(material_id))
+    val batch = draw_ir_batch(
+        "metal-window", "metal",
+        draw_ir_embedding_config(
+            "window-surface", "window", 0, 0, 4, 4, 1, 1000, true),
+        commands
+    )
+    draw_ir_composition("metal-frame", "scene", "metal", [batch])
+
+fn _inactive_metal_material_composition() -> DrawIrComposition:
+    val body = _inactive_metal_material_command("inactive-body-glass", 0)
+    val title = _inactive_metal_material_command("inactive-title-glass", 1)
+    val batch = draw_ir_batch(
+        "inactive-metal-window", "metal",
+        draw_ir_embedding_config(
+            "inactive-window-surface", "window", 4, 4, 4, 4,
+            1, 930, true),
+        [body, title]
+    )
+    draw_ir_composition(
+        "inactive-metal-frame", "scene", "metal", [batch])
+
+fn _inactive_metal_material_command(
+    material_id: text, y: i32
+) -> DrawIrCommand:
+    draw_ir_box_with_style(
+        material_id, 0, y, 4, 2, 0xFF1F1F21u32,
+        draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
+        draw_ir_no_rect(),
+        [
+            draw_ir_style_prop(
+                "wm-material-request", "window-surface-glass"),
+            draw_ir_style_prop(
+                "wm-material-surface-alpha-milli", "500"),
+            draw_ir_style_prop("background-color", "4294967295"),
+            draw_ir_style_prop("background-image", "none"),
+            draw_ir_style_prop("border-radius", "1"),
+            draw_ir_style_prop(
+                "backdrop-filter", "blur(0px) saturate(100%)"),
+            draw_ir_style_prop(
+                "backdrop-filter-realized-blur-radius-px", "0"),
+            draw_ir_style_prop(
+                "backdrop-filter-realized-saturation-milli", "1000"),
+            draw_ir_style_prop(
+                "backdrop-filter-capability",
+                "engine2d-composited-glass-material-v1")
+        ]
+    )
+
+fn _metal_material_receipt(
+    material_id: text, handle: i64 = 77, identity: i64 = 88
+) -> Engine2dMetalGlassReceipt:
+    Engine2dMetalGlassReceipt(
+        material_id: material_id,
+        fulfilled: true,
+        execution_target: "metal-device-glass-v1",
+        backend_handle: handle,
+        device_identity: identity,
+        readback_source: "device_readback",
+        readback_checksum: 99
+    )
+
+fn _unfulfilled_metal_material_receipt(
+    material_id: text
+) -> Engine2dMetalGlassReceipt:
+    Engine2dMetalGlassReceipt(
+        material_id: material_id,
+        fulfilled: false,
+        execution_target: "unavailable",
+        backend_handle: 0,
+        device_identity: 0,
+        readback_source: "device_readback",
+        readback_checksum: 99
+    )
+
+fn _metal_material_result(
+    receipts: [Engine2dMetalGlassReceipt],
+    requested: i32,
+    executed: i32,
+    unfulfilled: i32 = 0
+) -> Engine2dDrawIrAdvResult:
+    Engine2dDrawIrAdvResult(
+        schema: "simple-draw-ir-v2",
+        unit_id: "metal-frame",
+        selected_backend: "gpu",
+        fallback_required: false,
+        fallback_reason: "",
+        rendered_command_count: 2,
+        skipped_command_count: 0,
+        pixels: [0u32; 16],
+        readback_source: "device_readback",
+        backend_handle: 77,
+        device_identity: 88,
+        readback_checksum: 99,
+        metal_device_glass_material_count: executed,
+        metal_device_glass_requested_count: requested,
+        metal_device_glass_unfulfilled_count: unfulfilled,
+        metal_device_glass_receipts: receipts
+    )
 
 var _fake_present_count: i64 = 0
 var _capture_present_count: i64 = 0
@@ -472,9 +601,99 @@ describe "host compositor native-lowering regression contracts":
         expect(core.contains("executor.w != self.width")).to_be(false)
         expect(core.contains("executor.h != self.height")).to_be(false)
 
+    it "accepts an exact ordered pair of active Metal material receipts":
+        val composition = _metal_material_composition(["body", "title"])
+        val result = _metal_material_result(
+            [_metal_material_receipt("body"),
+             _metal_material_receipt("title")],
+            2, 2
+        )
+        expect(host_metal_glass_receipts_valid(composition, result)).to_equal(true)
+
+    it "rejects a first-of-two Metal tuple mismatch even when the final receipt matches":
+        val composition = _metal_material_composition(["body", "title"])
+        val result = _metal_material_result(
+            [_metal_material_receipt("body", 66, 88),
+             _metal_material_receipt("title")],
+            2, 2
+        )
+        expect(host_metal_glass_receipts_valid(composition, result)).to_equal(false)
+
+    it "rejects a missing Metal receipt independently of executor counts":
+        val composition = _metal_material_composition(["body", "title"])
+        val result = _metal_material_result(
+            [_metal_material_receipt("body")], 2, 2)
+        expect(host_metal_glass_receipts_valid(composition, result)).to_equal(false)
+
+    it "rejects an ordered unfulfilled Metal receipt and count":
+        val composition = _metal_material_composition(["body", "title"])
+        val result = _metal_material_result(
+            [_metal_material_receipt("body"),
+             _unfulfilled_metal_material_receipt("title")],
+            2, 1, 1
+        )
+        expect(host_metal_glass_receipts_valid(composition, result)).to_equal(false)
+
+    it "rejects the real inactive Metal fail-closed render result":
+        var engine = Engine2D.create_with_backend(12, 12, "cpu")
+        engine.selected_backend_name = "metal"
+        engine.clear(0xFF0000FFu32)
+        val composition = _inactive_metal_material_composition()
+        val result = engine2d_draw_ir_adv_composition(
+            engine, composition, true)
+
+        expect(result.rendered_command_count).to_equal(0)
+        expect(result.skipped_command_count).to_equal(2)
+        expect(result.metal_device_glass_material_count).to_equal(0)
+        expect(result.metal_device_glass_requested_count).to_equal(2)
+        expect(result.metal_device_glass_unfulfilled_count).to_equal(2)
+        expect(result.metal_device_glass_receipts.len()).to_equal(2)
+        val body_receipt = result.metal_device_glass_receipts[0]
+        val title_receipt = result.metal_device_glass_receipts[1]
+        expect(body_receipt.material_id).to_equal("inactive-body-glass")
+        expect(title_receipt.material_id).to_equal("inactive-title-glass")
+        expect(body_receipt.fulfilled).to_equal(false)
+        expect(title_receipt.fulfilled).to_equal(false)
+        expect(body_receipt.execution_target).to_equal("unavailable")
+        expect(title_receipt.execution_target).to_equal("unavailable")
+        expect(body_receipt.backend_handle).to_equal(0)
+        expect(title_receipt.backend_handle).to_equal(0)
+        expect(body_receipt.device_identity).to_equal(0)
+        expect(title_receipt.device_identity).to_equal(0)
+        expect(result.fallback_required).to_equal(true)
+        expect(result.fallback_reason).to_contain(
+            "metal glass material device receipt missing")
+        expect(host_metal_glass_receipts_valid(
+            composition, result)).to_equal(false)
+        engine.shutdown()
+
+    it "rejects duplicate reordered and extra Metal receipts":
+        val composition = _metal_material_composition(["body", "title"])
+        val duplicate = _metal_material_result(
+            [_metal_material_receipt("body"),
+             _metal_material_receipt("body")],
+            2, 2
+        )
+        val reordered = _metal_material_result(
+            [_metal_material_receipt("title"),
+             _metal_material_receipt("body")],
+            2, 2
+        )
+        val extra = _metal_material_result(
+            [_metal_material_receipt("body"),
+             _metal_material_receipt("title"),
+             _metal_material_receipt("extra")],
+            3, 3
+        )
+        expect(host_metal_glass_receipts_valid(composition, duplicate)).to_equal(false)
+        expect(host_metal_glass_receipts_valid(composition, reordered)).to_equal(false)
+        expect(host_metal_glass_receipts_valid(composition, extra)).to_equal(false)
+
     it "projects every hosted window inside the compositor receiver before rendering":
         val core = file_read(HOST_COMPOSITOR_CORE_SRC)
-        expect(core).to_contain("me _taskbar_render_input(theme: WmChromeColors, frame_time: i64)")
+        expect(core).to_contain(
+            "me _taskbar_render_input(theme: WmChromeColors, frame_time: i64, web_backend_name: text)"
+        )
         expect(core).to_contain("val win = self.windows[i]")
         expect(core).to_contain("shared_windows.push(shared_mdi_render_window(")
         expect(core.contains("shared_windows.push(host_window_to_shared_mdi_render_window")).to_be(false)

@@ -378,9 +378,9 @@ describe "Engine2D advanced Draw IR executor":
         expect(result.pixels[5 * 12 + 5]).to_equal(0xFF7F7F7Fu32)
         engine.shutdown()
 
-    it "does not receipt glass rendered through a translucent embedded subregion":
+    it "samples the painted parent backdrop and receipts an embedded material batch":
         var engine = Engine2D.create_with_backend(12, 12, "cpu")
-        engine.clear(BG)
+        engine.clear(BLUE)
         val command = draw_ir_box_with_style(
             "embedded-glass", 0, 0, 4, 4, 0xFF1F1F21u32,
             draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
@@ -393,20 +393,59 @@ describe "Engine2D advanced Draw IR executor":
                 draw_ir_style_prop("backdrop-filter", "blur(0px) saturate(100%)"),
                 draw_ir_style_prop("backdrop-filter-realized-blur-radius-px", "0"),
                 draw_ir_style_prop("backdrop-filter-realized-saturation-milli", "1000"),
-                draw_ir_style_prop("backdrop-filter-capability", "engine2d-cpu-composited-material-v1")
+                draw_ir_style_prop("backdrop-filter-capability", "engine2d-composited-glass-material-v1")
             ]
         )
-        val batch = draw_ir_batch("embedded-glass", DRAW_IR_BACKEND_CPU, draw_ir_embedding_config("surf", "win", 4, 4, 4, 4, 1, 500, true), [command])
+        val batch = draw_ir_batch("embedded-glass", DRAW_IR_BACKEND_CPU, draw_ir_embedding_config("surf", "win", 4, 4, 4, 4, 1, 1000, true), [command])
 
         val result = engine2d_draw_ir_adv_batch(engine, batch, false)
 
         expect(result.rendered_command_count).to_equal(1)
         expect(result.skipped_command_count).to_equal(0)
-        expect(result.cpu_composited_material_count).to_equal(0)
-        expect(result.pixels[5 * 12 + 5]).to_be_greater_than(BG)
+        expect(result.cpu_composited_material_count).to_equal(1)
+        expect(result.glass_execution_target).to_equal("cpu-scalar-glass-v1")
+        expect(result.readback_source).to_equal("cpu_mirror")
+        expect(result.glass_backend_handle).to_equal(0)
+        expect(result.glass_device_identity).to_equal(0)
+        expect(result.pixels[4 * 12 + 4]).to_equal(BLUE)
+        expect(result.pixels[5 * 12 + 5]).to_equal(0xFF7F7FFFu32)
         engine.shutdown()
 
-    it "aggregates glass receipts from direct batches only":
+    it "preserves 500 and inactive 930 embedding opacity while sampling the painted parent":
+        var engine = Engine2D.create_with_backend(12, 12, "cpu")
+        val command = draw_ir_box_with_style(
+            "alpha-parent-glass", 0, 0, 4, 4, 0xFF1F1F21u32,
+            draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
+            [
+                draw_ir_style_prop("wm-material-request", "window-surface-glass"),
+                draw_ir_style_prop("wm-material-surface-alpha-milli", "500"),
+                draw_ir_style_prop("background-color", "4294967295"),
+                draw_ir_style_prop("background-image", "none"),
+                draw_ir_style_prop("border-radius", "1"),
+                draw_ir_style_prop("backdrop-filter", "blur(0px) saturate(100%)"),
+                draw_ir_style_prop("backdrop-filter-realized-blur-radius-px", "0"),
+                draw_ir_style_prop("backdrop-filter-realized-saturation-milli", "1000"),
+                draw_ir_style_prop("backdrop-filter-capability", "engine2d-composited-glass-material-v1")
+            ]
+        )
+
+        engine.clear(BLUE)
+        val half = draw_ir_batch("alpha-parent-half", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("surf", "win", 4, 4, 4, 4, 1, 500, true), [command])
+        val half_result = engine2d_draw_ir_adv_batch(engine, half, false)
+        expect(half_result.cpu_composited_material_count).to_equal(1)
+        expect(half_result.pixels[5 * 12 + 5]).to_equal(0xFF3F3FFFu32)
+
+        engine.clear(BLUE)
+        val inactive = draw_ir_batch("alpha-parent-inactive", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config("surf", "win", 4, 4, 4, 4, 1, 930, true), [command])
+        val inactive_result = engine2d_draw_ir_adv_batch(engine, inactive, false)
+        expect(inactive_result.cpu_composited_material_count).to_equal(1)
+        expect(inactive_result.pixels[5 * 12 + 5]).to_equal(0xFF7575FFu32)
+
+        engine.shutdown()
+
+    it "aggregates glass receipts from direct and parent-sampling embedded batches":
         var engine = Engine2D.create_with_backend(12, 12, "cpu")
         engine.clear(BG)
         val direct_glass = draw_ir_box_with_style(
@@ -440,16 +479,90 @@ describe "Engine2D advanced Draw IR executor":
             ]
         )
         val direct = draw_ir_batch("direct-glass", DRAW_IR_BACKEND_CPU, draw_ir_embedding_config("desktop", "root", 0, 0, 12, 12, 0, 1000, false), [direct_glass])
-        val embedded = draw_ir_batch("embedded-glass", DRAW_IR_BACKEND_CPU, draw_ir_embedding_config("surf", "win", 6, 6, 4, 4, 1, 500, true), [embedded_glass])
+        val embedded = draw_ir_batch("embedded-glass", DRAW_IR_BACKEND_CPU, draw_ir_embedding_config("surf", "win", 6, 6, 4, 4, 1, 1000, true), [embedded_glass])
         val composition = draw_ir_composition("glass-receipts", "scene", DRAW_IR_BACKEND_CPU, [direct, embedded])
 
         val result = engine2d_draw_ir_adv_composition(engine, composition, false)
 
         expect(result.rendered_command_count).to_equal(2)
         expect(result.skipped_command_count).to_equal(0)
-        expect(result.cpu_composited_material_count).to_equal(1)
+        expect(result.cpu_composited_material_count).to_equal(2)
+        expect(result.glass_execution_target).to_equal("cpu-scalar-glass-v1")
         expect(result.pixels[1 * 12 + 1]).to_equal(0xFF7F7F7Fu32)
-        expect(result.pixels[7 * 12 + 7]).to_be_greater_than(BG)
+        expect(result.pixels[7 * 12 + 7]).to_equal(0xFF7F7F7Fu32)
+        engine.shutdown()
+
+    it "executes ordered body and title materials for a concrete Metal request and classifies CPU fallback":
+        var engine = Engine2D.create_with_backend(12, 12, "cpu")
+        engine.clear(BG)
+        val body = draw_ir_box_with_style(
+            "metal-body", 0, 0, 6, 6, GREEN,
+            draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
+            [
+                draw_ir_style_prop("wm-material-request", "window-surface-glass"),
+                draw_ir_style_prop("wm-material-surface-alpha-milli", "1000"),
+                draw_ir_style_prop("background-color", GREEN.to_string()),
+                draw_ir_style_prop("background-image", "none"),
+                draw_ir_style_prop("border-radius", "0"),
+                draw_ir_style_prop("backdrop-filter", "blur(0px) saturate(100%)"),
+                draw_ir_style_prop("backdrop-filter-realized-blur-radius-px", "0"),
+                draw_ir_style_prop("backdrop-filter-realized-saturation-milli", "1000"),
+                draw_ir_style_prop("backdrop-filter-capability", "engine2d-composited-glass-material-v1"),
+                draw_ir_style_prop("backdrop-filter-requested-target", "metal-device-glass-v1"),
+                draw_ir_style_prop("backdrop-filter-fallback-target", "cpu-scalar-glass-v1")
+            ]
+        )
+        val title = draw_ir_box_with_style(
+            "metal-title", 0, 0, 6, 2, RED,
+            draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
+            [
+                draw_ir_style_prop("wm-material-request", "window-surface-glass"),
+                draw_ir_style_prop("wm-material-surface-alpha-milli", "1000"),
+                draw_ir_style_prop("background-color", RED.to_string()),
+                draw_ir_style_prop("background-image", "none"),
+                draw_ir_style_prop("border-radius", "0"),
+                draw_ir_style_prop("backdrop-filter", "blur(0px) saturate(100%)"),
+                draw_ir_style_prop("backdrop-filter-realized-blur-radius-px", "0"),
+                draw_ir_style_prop("backdrop-filter-realized-saturation-milli", "1000"),
+                draw_ir_style_prop("backdrop-filter-capability", "engine2d-composited-glass-material-v1"),
+                draw_ir_style_prop("backdrop-filter-requested-target", "metal-device-glass-v1"),
+                draw_ir_style_prop("backdrop-filter-fallback-target", "cpu-scalar-glass-v1")
+            ]
+        )
+        val batch = draw_ir_batch(
+            "metal-window", "metal",
+            draw_ir_embedding_config("surface", "window", 2, 2, 6, 6, 1, 1000, true),
+            [body, title]
+        )
+        val composition = draw_ir_composition(
+            "metal-window", "scene", "metal", [batch])
+
+        val result = engine2d_draw_ir_adv_composition(
+            engine, composition, true)
+
+        expect(result.rendered_command_count).to_equal(2)
+        expect(result.cpu_composited_material_count).to_equal(2)
+        expect(result.metal_device_glass_material_count).to_equal(0)
+        expect(result.metal_device_glass_requested_count).to_equal(2)
+        expect(result.metal_device_glass_unfulfilled_count).to_equal(2)
+        # Per-material receipts preserve z-order.  This prevents a later
+        # receipt from overwriting the first failed/mismatched material.
+        expect(result.metal_device_glass_receipts.len()).to_equal(2)
+        expect(result.metal_device_glass_receipts[0].material_id).to_equal("metal-body")
+        expect(result.metal_device_glass_receipts[0].fulfilled).to_equal(false)
+        expect(result.metal_device_glass_receipts[0].readback_source).to_equal("cpu_mirror")
+        expect(result.metal_device_glass_receipts[0].readback_checksum).to_equal(result.readback_checksum)
+        expect(result.metal_device_glass_receipts[1].material_id).to_equal("metal-title")
+        expect(result.metal_device_glass_receipts[1].fulfilled).to_equal(false)
+        expect(result.glass_execution_target).to_equal("cpu-scalar-glass-v1")
+        expect(result.selected_backend).to_equal(DRAW_IR_BACKEND_CPU)
+        expect(result.fallback_required).to_be(true)
+        expect(result.fallback_reason).to_equal("metal glass material used cpu fallback")
+        expect(result.readback_source).to_equal("cpu_mirror")
+        expect(result.glass_backend_handle).to_equal(0)
+        expect(result.glass_device_identity).to_equal(0)
+        expect(result.pixels[2 * 12 + 2]).to_equal(RED)
+        expect(result.pixels[5 * 12 + 2]).to_equal(GREEN)
         engine.shutdown()
 
     it "does not receipt a malformed glass command that uses its solid fallback":
@@ -476,6 +589,40 @@ describe "Engine2D advanced Draw IR executor":
         expect(result.skipped_command_count).to_equal(0)
         expect(result.cpu_composited_material_count).to_equal(0)
         expect(result.pixels[5 * 12 + 5]).to_equal(fallback)
+        engine.shutdown()
+
+    it "fails closed when an explicit Metal glass request has malformed metadata":
+        var engine = Engine2D.create_with_backend(12, 12, "cpu")
+        engine.clear(BG)
+        val command = draw_ir_box_with_style(
+            "metal-metadata-missing", 2, 2, 4, 4, GREEN,
+            draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(),
+            [
+                draw_ir_style_prop("wm-material-request", "window-surface-glass"),
+                draw_ir_style_prop("background-color", GREEN.to_string()),
+                draw_ir_style_prop("border-radius", "0"),
+                # Deliberately no exact composited capability or realized
+                # metadata: a solid fallback must not masquerade as Metal.
+                draw_ir_style_prop("backdrop-filter", "blur(30px) saturate(170%)"),
+                draw_ir_style_prop("backdrop-filter-requested-target", "metal-device-glass-v1")
+            ]
+        )
+        val batch = draw_ir_batch("metal-metadata-missing", "metal",
+            draw_ir_embedding_config("surface", "window", 2, 2, 4, 4, 1, 1000, true), [command])
+        val composition = draw_ir_composition(
+            "metal-metadata-missing", "scene", "metal", [batch])
+
+        val result = engine2d_draw_ir_adv_composition(engine, composition, true)
+
+        expect(result.rendered_command_count).to_equal(1)
+        expect(result.metal_device_glass_requested_count).to_equal(1)
+        expect(result.metal_device_glass_material_count).to_equal(0)
+        expect(result.metal_device_glass_unfulfilled_count).to_equal(1)
+        expect(result.metal_device_glass_receipts.len()).to_equal(1)
+        expect(result.metal_device_glass_receipts[0].material_id).to_equal("metal-metadata-missing")
+        expect(result.metal_device_glass_receipts[0].fulfilled).to_equal(false)
+        expect(result.fallback_required).to_be(true)
+        expect(result.fallback_reason).to_equal("metal glass material device receipt missing")
         engine.shutdown()
 
     it "requires an exact glass capability token for execution receipts":

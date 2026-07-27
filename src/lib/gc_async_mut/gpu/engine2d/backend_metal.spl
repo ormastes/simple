@@ -4,7 +4,7 @@
 # current Simple-level readback path keeps a CPU mirror for deterministic parity;
 # native command encoding lives behind the MetalSession facade.
 
-use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_handle, ReadbackSource, readback_source_label}
+use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback, engine2d_readback_with_identity, ReadbackSource, readback_source_label}
 use std.gpu.engine2d.backend_software.{SoftwareBackend}
 use std.gpu.engine2d.backend_probe.{BackendProbeResult}
 use std.gpu.engine2d.glyph.{glyph_height, glyph_advance, glyph_atlas_dense_values, glyph_atlas_index_for_char_code}
@@ -341,6 +341,9 @@ class MetalBackend:
     font: MetalFontBackendState
     # Appended to preserve the native field offsets of the existing backend ABI.
     gpu_only: bool
+    # Persistent identity of the retained MTLDevice for this backend lifetime.
+    # Device readbacks and material receipts must both use this owner field.
+    device_identity: i64
 
     static fn create() -> MetalBackend:
         val backend = make_metal_backend()
@@ -364,6 +367,7 @@ fn make_metal_backend() -> MetalBackend:
         clip_h: 0,
         clip_enabled: false,
         gpu_only: false,
+        device_identity: 0,
         dirty: false,
         initialized: false,
         gpu_frame_complete: false,
@@ -433,6 +437,11 @@ impl RenderBackend for MetalBackend:
             self.last_error = "Metal mirror surface allocation failed"
             return false
         self.command_queue = self.session.command_queue
+        self.device_identity = self.session.device
+        if self.device_identity <= 0:
+            self.last_error = "Metal device identity unavailable"
+            self.shutdown()
+            return false
         self.w = width
         self.h = height
         self.clip_x = 0
@@ -484,6 +493,12 @@ impl RenderBackend for MetalBackend:
 
         self.session = session.retain()
         self.command_queue = self.session.command_queue
+        self.device_identity = self.session.device
+        if self.device_identity <= 0:
+            self.session.release()
+            self.command_queue = 0
+            self.last_error = "Metal shared device identity unavailable"
+            return false
         self.w = width
         self.h = height
         self.gpu_only = false
@@ -492,6 +507,7 @@ impl RenderBackend for MetalBackend:
         if self.d_framebuffer == 0:
             self.session.release()
             self.command_queue = 0
+            self.device_identity = 0
             self.w = 0
             self.h = 0
             self.last_error = "Metal framebuffer allocation failed"
@@ -501,6 +517,7 @@ impl RenderBackend for MetalBackend:
             self.d_framebuffer = 0
             self.session.release()
             self.command_queue = 0
+            self.device_identity = 0
             self.w = 0
             self.h = 0
             self.last_error = "Metal mirror surface allocation failed"
@@ -568,6 +585,7 @@ impl RenderBackend for MetalBackend:
             self.glyph_lut_buffer = 0
         self.session.release()
         self.command_queue = 0
+        self.device_identity = 0
         self.w = 0
         self.h = 0
         self.gpu_only = false
@@ -727,7 +745,7 @@ impl RenderBackend for MetalBackend:
             self.mirror.present()
     fn read_pixels() -> [u32]:
         # Checksum-free: read_pixels_with_source() runs an O(n) interpreted
-        # checksum loop (engine2d_readback_with_handle) — ~8.8s at 1024x768 and
+        # checksum loop (engine2d_readback_with_identity) — ~8.8s at 1024x768 and
         # ~80s at Retina physical. Pixel-only callers skip it; evidence rows
         # that need the checksum call read_pixels_with_source() explicitly.
         if self.gpu_frame_complete:
@@ -744,12 +762,15 @@ impl RenderBackend for MetalBackend:
             val gpu_pixels = self.read_pixels_gpu_only()
             if gpu_pixels.len() == (self.w * self.h):
                 val source = readback_source_label(ReadbackSource.DeviceReadback)
-                val readback = engine2d_readback_with_handle(gpu_pixels, source, self.d_framebuffer)
+                val readback = engine2d_readback_with_identity(
+                    gpu_pixels, source, self.d_framebuffer,
+                    self.device_identity)
                 return readback
         if self.gpu_only:
             var empty: [u32] = []
             val source = readback_source_label(ReadbackSource.DeviceReadback)
-            return engine2d_readback_with_handle(empty, source, self.d_framebuffer)
+            return engine2d_readback_with_identity(
+                empty, source, self.d_framebuffer, self.device_identity)
         val mirror_pixels = self.mirror.read_pixels()
         val source = readback_source_label(ReadbackSource.CpuMirror)
         val readback = engine2d_readback(mirror_pixels, source)

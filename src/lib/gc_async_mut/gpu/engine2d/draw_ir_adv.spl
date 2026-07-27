@@ -19,7 +19,7 @@ use common.ui.draw_ir.{
     simple_2d_draw_ir_adv_plan
 }
 use std.gc_async_mut.gpu.engine2d.draw_ir_target.{DrawIrRenderTarget}
-use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback}
+use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback, engine2d_readback_with_identity}
 use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     Engine2dGlassExecutionResult,
     Engine2dGlassMaterialConfig,
@@ -38,6 +38,19 @@ var _e2d_text_probe_count: i32 = 0
 val _E2D_DRAW_IR_MAX_TEXT_ITEMS: i64 = 4096
 val _E2D_DRAW_IR_MAX_STYLE_VALUE_BYTES: i64 = 65536
 val _E2D_DRAW_IR_MAX_FONT_SIZE: i32 = 512
+
+# A concrete Metal WM material request is not fulfilled by an aggregate
+# counter. Each material owns the device framebuffer tuple that executed it so
+# the compositor can reject a frame whose first (or any later) receipt was
+# produced on a different surface.
+struct Engine2dMetalGlassReceipt:
+    material_id: text
+    fulfilled: bool
+    execution_target: text
+    backend_handle: i64
+    device_identity: i64
+    readback_source: text
+    readback_checksum: i64
 
 struct Engine2dDrawIrAdvResult:
     schema: text
@@ -71,6 +84,13 @@ struct Engine2dDrawIrAdvResult:
     font_atlas_payload_sha256: text = ""
     # Appended to preserve all existing result-field offsets.
     metal_device_glass_material_count: i32 = 0
+    # A concrete Metal WM composition may not silently lose a requested
+    # material dispatch. Keep requested and unfulfilled receipts distinct so
+    # the hosted compositor can reject a frame instead of inferring success
+    # from the planner's target alone.
+    metal_device_glass_requested_count: i32 = 0
+    metal_device_glass_unfulfilled_count: i32 = 0
+    metal_device_glass_receipts: [Engine2dMetalGlassReceipt] = []
     glass_execution_target: text = ""
     glass_backend_handle: i64 = 0
     glass_device_identity: i64 = 0
@@ -91,6 +111,9 @@ struct Engine2dDrawIrRenderOutcome:
     unsupported_kinds: text
     cpu_composited_material_count: i32
     metal_device_glass_material_count: i32
+    metal_device_glass_requested_count: i32
+    metal_device_glass_unfulfilled_count: i32
+    metal_device_glass_receipts: [Engine2dMetalGlassReceipt]
     glass_execution_target: text
     glass_backend_handle: i64
     glass_device_identity: i64
@@ -111,6 +134,9 @@ fn _engine2d_draw_ir_render_outcome(
     unsupported_kinds: text,
     cpu_composited_material_count: i32,
     metal_device_glass_material_count: i32 = 0,
+    metal_device_glass_requested_count: i32 = 0,
+    metal_device_glass_unfulfilled_count: i32 = 0,
+    metal_device_glass_receipts: [Engine2dMetalGlassReceipt] = [],
     glass_execution_target: text = "",
     glass_backend_handle: i64 = 0,
     glass_device_identity: i64 = 0
@@ -123,6 +149,11 @@ fn _engine2d_draw_ir_render_outcome(
         cpu_composited_material_count: cpu_composited_material_count,
         metal_device_glass_material_count:
             metal_device_glass_material_count,
+        metal_device_glass_requested_count:
+            metal_device_glass_requested_count,
+        metal_device_glass_unfulfilled_count:
+            metal_device_glass_unfulfilled_count,
+        metal_device_glass_receipts: metal_device_glass_receipts,
         glass_execution_target: glass_execution_target,
         glass_backend_handle: glass_backend_handle,
         glass_device_identity: glass_device_identity
@@ -144,6 +175,8 @@ fn _engine2d_draw_ir_result_from_plan(plan: Simple2dDrawIrPlan, rendered: i32, s
         readback_checksum: readback.checksum,
         cpu_composited_material_count: 0,
         metal_device_glass_material_count: 0,
+        metal_device_glass_requested_count: 0,
+        metal_device_glass_unfulfilled_count: 0,
         glass_execution_target: "",
         glass_backend_handle: 0,
         glass_device_identity: 0
@@ -165,6 +198,8 @@ fn _engine2d_draw_ir_result_from_composition_plan(plan: Simple2dDrawIrCompositio
         readback_checksum: readback.checksum,
         cpu_composited_material_count: 0,
         metal_device_glass_material_count: 0,
+        metal_device_glass_requested_count: 0,
+        metal_device_glass_unfulfilled_count: 0,
         glass_execution_target: "",
         glass_backend_handle: 0,
         glass_device_identity: 0
@@ -350,7 +385,8 @@ fn _engine2d_draw_ir_render_glass_material(engine: DrawIrRenderTarget, command: 
     val style: [DrawIrStyleProp] = command.computed_style
     val capability = _engine2d_draw_ir_style_value(
         style, "backdrop-filter-capability")
-    if capability != "engine2d-cpu-composited-material-v1":
+    if (capability != "engine2d-composited-glass-material-v1" and
+        capability != "engine2d-cpu-composited-material-v1"):
         return Engine2dDrawIrGlassOutcome(
             engine: eng, composited: false, execution: unavailable)
     val framebuffer_width = eng.width()
@@ -517,10 +553,10 @@ fn _engine2d_draw_ir_fresh_device_rect_style_supported(style: [DrawIrStyleProp])
     for prop in style:
         val key = prop.key
         val identity = key == "source" or key == "part" or key == "z-index" or key == "focused"
-        val background = key == "background-color" or key == "background-image" or key == "background-image-source-css" or key == "background-image-capability" or key == "background-image-fallback" or key == "background-image-fallback-reason"
+        val background = key == "background-color" or key == "background-image" or key == "background-image-source-css" or key == "background-image-capability" or key == "background-image-composite-mode" or key == "background-image-fallback" or key == "background-image-fallback-reason"
         val border = key == "border-radius" or key == "border-top-width" or key == "border-right-width" or key == "border-bottom-width" or key == "border-left-width" or key == "border-top-color" or key == "border-right-color" or key == "border-bottom-color" or key == "border-left-color"
         val shadow = key == "box-shadow" or key == "box-shadow-raw" or key == "box-shadow-layer-count" or key == "box-shadow-blur-radius"
-        val backdrop = key == "backdrop-filter" or key == "backdrop-filter-capability" or key == "backdrop-filter-fallback" or key == "backdrop-filter-fallback-reason"
+        val backdrop = key == "backdrop-filter" or key == "backdrop-filter-capability" or key == "backdrop-filter-requested-target" or key == "backdrop-filter-realized" or key == "backdrop-filter-realized-blur-radius-px" or key == "backdrop-filter-realized-saturation-milli" or key == "backdrop-filter-reduction-reason" or key == "backdrop-filter-fallback" or key == "backdrop-filter-fallback-target" or key == "backdrop-filter-fallback-reason"
         val typography = key == "color" or key == "font-family" or key == "font-size" or key == "font-weight"
         val wm_metadata = key == "wm-theme-schema" or key == "wm-theme-id" or key == "wm-theme-family-id" or key == "wm-theme-source-reference" or key == "wm-theme-source-manifest-sha256" or key == "wm-theme-material-sha256" or key == "wm-material-request" or key == "wm-material-surface-alpha-milli"
         if not (identity or background or border or shadow or backdrop or typography or wm_metadata):
@@ -688,6 +724,8 @@ fn _engine2d_draw_ir_result_from_plan_with_unsupported(plan: Simple2dDrawIrPlan,
         readback_checksum: readback.checksum,
         cpu_composited_material_count: 0,
         metal_device_glass_material_count: 0,
+        metal_device_glass_requested_count: 0,
+        metal_device_glass_unfulfilled_count: 0,
         glass_execution_target: "",
         glass_backend_handle: 0,
         glass_device_identity: 0
@@ -710,6 +748,8 @@ fn _engine2d_draw_ir_result_from_composition_plan_with_unsupported(plan: Simple2
         readback_checksum: readback.checksum,
         cpu_composited_material_count: 0,
         metal_device_glass_material_count: 0,
+        metal_device_glass_requested_count: 0,
+        metal_device_glass_unfulfilled_count: 0,
         glass_execution_target: "",
         glass_backend_handle: 0,
         glass_device_identity: 0
@@ -774,13 +814,16 @@ fn _engine2d_embed_offscreen_acquire(owner: DrawIrRenderTarget, w: i32, h: i32) 
 # offset_x/offset_y are 0 since the surface origin IS the batch origin).
 # DrawIrRenderTarget is value-copied across this free-function boundary (see
 # _engine2d_draw_ir_render_box), so callers reassign the typed outcome engine.
-fn _engine2d_draw_ir_render_commands(engine: DrawIrRenderTarget, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool) -> Engine2dDrawIrRenderOutcome:
+fn _engine2d_draw_ir_render_commands(engine: DrawIrRenderTarget, commands: [DrawIrCommand], offset_x: i32, offset_y: i32, images: [Engine2dResolvedDrawIrImage], blend_images: bool, metal_device_glass_required: bool) -> Engine2dDrawIrRenderOutcome:
     var eng = engine
     var rendered = 0
     var skipped = 0
     var unsupported_kinds = ""
     var cpu_composited_material_count = 0
     var metal_device_glass_material_count = 0
+    var metal_device_glass_requested_count = 0
+    var metal_device_glass_unfulfilled_count = 0
+    var metal_device_glass_receipts: [Engine2dMetalGlassReceipt] = []
     var glass_execution_target = ""
     var glass_backend_handle: i64 = 0
     var glass_device_identity: i64 = 0
@@ -795,6 +838,17 @@ fn _engine2d_draw_ir_render_commands(engine: DrawIrRenderTarget, commands: [Draw
         val x = offset_x + command.x
         val y = offset_y + command.y
         if command_kind == DRAW_IR_COMMAND_RECT:
+            # A concrete Metal composition requests a device receipt for every
+            # canonical WM glass surface, even when its metadata or bounds are
+            # malformed. Counting before execution makes that loss visible to
+            # the composition/host fail-closed gate.
+            val metal_requested = metal_device_glass_required and
+                _engine2d_draw_ir_style_value(
+                    command.computed_style, "wm-material-request") ==
+                "window-surface-glass"
+            if metal_requested:
+                metal_device_glass_requested_count = (
+                    metal_device_glass_requested_count + 1)
             val box = _engine2d_draw_ir_render_box(
                 eng, command, x, y, command.width, command.height)
             eng = box.engine
@@ -802,11 +856,36 @@ fn _engine2d_draw_ir_render_commands(engine: DrawIrRenderTarget, commands: [Draw
                 cpu_composited_material_count = cpu_composited_material_count + 1
                 glass_execution_target = box.glass_execution.execution_target
             elif box.glass_execution.execution_target == "metal-device-glass-v1":
-                metal_device_glass_material_count = (
-                    metal_device_glass_material_count + 1)
-                glass_execution_target = box.glass_execution.execution_target
-                glass_backend_handle = box.glass_execution.backend_handle
-                glass_device_identity = box.glass_execution.device_identity
+                if (box.glass_execution.backend_handle > 0 and
+                    box.glass_execution.device_identity > 0):
+                    metal_device_glass_material_count = (
+                        metal_device_glass_material_count + 1)
+                    glass_execution_target = box.glass_execution.execution_target
+                    glass_backend_handle = box.glass_execution.backend_handle
+                    glass_device_identity = box.glass_execution.device_identity
+            if metal_requested and not (
+                box.glass_execution.execution_target ==
+                    "metal-device-glass-v1" and
+                box.glass_execution.backend_handle > 0 and
+                box.glass_execution.device_identity > 0):
+                metal_device_glass_unfulfilled_count = (
+                    metal_device_glass_unfulfilled_count + 1)
+            if metal_requested:
+                val fulfilled = box.glass_execution.execution_target ==
+                    "metal-device-glass-v1" and
+                    box.glass_execution.backend_handle > 0 and
+                    box.glass_execution.device_identity > 0
+                metal_device_glass_receipts.push(
+                    Engine2dMetalGlassReceipt(
+                        material_id: command.component_id,
+                        fulfilled: fulfilled,
+                        execution_target: box.glass_execution.execution_target,
+                        backend_handle: box.glass_execution.backend_handle,
+                        device_identity: box.glass_execution.device_identity,
+                        readback_source: "",
+                        readback_checksum: 0
+                    )
+                )
             rendered = rendered + 1
         elif command_kind == DRAW_IR_COMMAND_TEXT:
             val font_identity = _engine2d_draw_ir_style_value(command.computed_style, "font-identity")
@@ -894,10 +973,114 @@ fn _engine2d_draw_ir_render_commands(engine: DrawIrRenderTarget, commands: [Draw
         unsupported_kinds,
         cpu_composited_material_count,
         metal_device_glass_material_count,
+        metal_device_glass_requested_count,
+        metal_device_glass_unfulfilled_count,
+        metal_device_glass_receipts,
         glass_execution_target,
         glass_backend_handle,
         glass_device_identity
     )
+
+fn _engine2d_draw_ir_command_samples_parent(command: DrawIrCommand) -> bool:
+    if command.? == false or command.kind != DRAW_IR_COMMAND_RECT:
+        return false
+    if (_engine2d_draw_ir_style_value(
+        command.computed_style, "wm-material-request") !=
+        "window-surface-glass"):
+        return false
+    val capability = _engine2d_draw_ir_style_value(
+        command.computed_style, "backdrop-filter-capability")
+    capability == "engine2d-composited-glass-material-v1" or capability == "engine2d-cpu-composited-material-v1"
+
+fn _engine2d_draw_ir_batch_samples_parent(batch: DrawIrBatch) -> bool:
+    for command in batch.commands:
+        if _engine2d_draw_ir_command_samples_parent(command):
+            return true
+    false
+
+fn _engine2d_draw_ir_parent_material_request_count(batch: DrawIrBatch) -> i32:
+    var count = 0
+    for command in batch.commands:
+        if _engine2d_draw_ir_command_samples_parent(command):
+            count = count + 1
+    count
+
+fn _engine2d_draw_ir_unfulfilled_metal_receipts(batch: DrawIrBatch) -> [Engine2dMetalGlassReceipt]:
+    var receipts: [Engine2dMetalGlassReceipt] = []
+    for command in batch.commands:
+        if _engine2d_draw_ir_command_samples_parent(command):
+            receipts.push(Engine2dMetalGlassReceipt(
+                material_id: command.component_id,
+                fulfilled: false,
+                execution_target: "unavailable",
+                backend_handle: 0,
+                device_identity: 0,
+                readback_source: "",
+                readback_checksum: 0
+            ))
+    receipts
+
+fn _engine2d_draw_ir_receipts_with_readback(receipts: [Engine2dMetalGlassReceipt], readback: Engine2DReadback) -> [Engine2dMetalGlassReceipt]:
+    var completed: [Engine2dMetalGlassReceipt] = []
+    for receipt in receipts:
+        completed.push(Engine2dMetalGlassReceipt(
+            material_id: receipt.material_id,
+            fulfilled: receipt.fulfilled,
+            execution_target: receipt.execution_target,
+            backend_handle: receipt.backend_handle,
+            device_identity: receipt.device_identity,
+            readback_source: readback.source,
+            readback_checksum: readback.checksum
+        ))
+    completed
+
+# Return exactly the already-painted parent region that a translucent WM
+# material is allowed to sample. An empty result is an invalid request, never
+# a transparent substitute: transparent seeding would make the material lie
+# about its backdrop while still returning a receipt.
+fn _engine2d_draw_ir_parent_region_pixels(
+    readback: Engine2DReadback, parent_width: i32, parent_height: i32,
+    x: i32, y: i32, width: i32, height: i32
+) -> [u32]:
+    if (parent_width <= 0 or parent_height <= 0 or width <= 0 or height <= 0 or
+        readback.pixels.len() != parent_width.to_i64() * parent_height.to_i64()):
+        return []
+    var region: [u32] = []
+    var row = 0
+    while row < height:
+        var column = 0
+        while column < width:
+            val source_x = x + column
+            val source_y = y + row
+            if (source_x >= 0 and source_y >= 0 and
+                source_x < parent_width and source_y < parent_height):
+                val source_index = source_y.to_i64() * parent_width.to_i64() +
+                    source_x.to_i64()
+                region.push(readback.pixels[source_index])
+            else:
+                # Match the glass helper's actual framebuffer edge semantics.
+                region.push(0u32)
+            column = column + 1
+        row = row + 1
+    region
+
+fn _engine2d_draw_ir_parent_material_padding(batch: DrawIrBatch) -> i32:
+    var padding = 0
+    for command in batch.commands:
+        if _engine2d_draw_ir_command_samples_parent(command):
+            var blur = _engine2d_draw_ir_nth_int(
+                _engine2d_draw_ir_style_value(
+                    command.computed_style,
+                    "backdrop-filter-realized-blur-radius-px"), 0, 0) as i32
+            if blur < 0:
+                blur = 0
+            # Material producers currently realize at 4px. Cap hostile input
+            # so a malformed style cannot force an unbounded parent snapshot.
+            if blur > 64:
+                blur = 64
+            if blur > padding:
+                padding = blur
+    padding
 
 # Render one batch onto `engine`, honoring a real embedded render target when
 # the batch declares a non-empty embedding.surface_id: the batch's commands
@@ -950,6 +1133,12 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
     val size_matches = embedding_width == target_width and embedding_height == target_height
     val fully_opaque = embedding_opacity >= 1000
     val fills_target_exactly = origin_matches and size_matches and fully_opaque
+    # Backdrop material is defined against pixels already painted by earlier
+    # composition batches. Rendering such a window into a fresh transparent
+    # child changes its input and invalidates both pixels and receipts. Keep
+    # ordinary embedded content isolated, but execute the canonical material
+    # batch directly and in-order on the parent under the embedding clip.
+    val samples_parent = _engine2d_draw_ir_batch_samples_parent(batch)
     # A sub-region batch only NEEDS a real offscreen surface when it either
     # (a) requires alpha compositing (opacity < 100%), or (b) has its own
     # dedicated device-shared-offscreen path (vulkan/metal, wired below).
@@ -969,13 +1158,90 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
     # or device-shared target is needed. This avoids one full-frame software
     # allocation per desktop/chrome/taskbar batch on the bump-only OS heap.
     val baremetal_direct = eng.backend_name() == "baremetal" and embedding.opacity_milli >= 1000
-    val use_embedded_surface = embedding.surface_id != "" and depth < ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH and embedding.width > 0 and embedding.height > 0 and not fills_target_exactly and (needs_real_offscreen or (not embedding.clip and not baremetal_direct))
+    val use_embedded_surface = embedding.surface_id != "" and depth < ENGINE2D_DRAW_IR_EMBED_MAX_DEPTH and embedding.width > 0 and embedding.height > 0 and not fills_target_exactly and not samples_parent and (needs_real_offscreen or (not embedding.clip and not baremetal_direct))
+    # A translucent parent-sampling batch needs both facts at once: the source
+    # image must be the already-painted parent framebuffer, while its final
+    # contribution must still respect embedding.opacity_milli. Seed an
+    # offscreen delta with the exact parent region, render material in the
+    # batch's local coordinates, then blend that delta back at the embedding
+    # opacity. Direct parent execution gets sampling right but silently drops
+    # 500/930 alpha; a transparent child gets alpha right but samples wrong.
+    if samples_parent and embedding_opacity < 1000:
+        # Metal's device glass helper rejects non-gpu-only targets.  Do not
+        # manufacture a mirror-backed child merely to make this branch appear
+        # to work: that would turn an inactive (930) surface into a CPU
+        # fallback while the selected backend still says Metal.  A future
+        # device-only delta target may replace this explicit fail-closed gate.
+        if batch.backend_target == "metal" and eng.backend_name() == "metal":
+            val requested = _engine2d_draw_ir_parent_material_request_count(batch)
+            return _engine2d_draw_ir_render_outcome(
+                eng, 0, batch.commands.len().to_i32(),
+                "metal-parent-material-subopaque-requires-gpu-only-delta", 0,
+                0, requested, requested,
+                _engine2d_draw_ir_unfulfilled_metal_receipts(batch)
+            )
+        val parent = eng.read_pixels_with_source()
+        val parent_padding = _engine2d_draw_ir_parent_material_padding(batch)
+        val delta_width = embedding.width + parent_padding * 2
+        val delta_height = embedding.height + parent_padding * 2
+        val seed = _engine2d_draw_ir_parent_region_pixels(
+            parent, target_width, target_height,
+            embedding.x - parent_padding, embedding.y - parent_padding,
+            delta_width, delta_height)
+        if seed.len() != delta_width.to_i64() * delta_height.to_i64():
+            return _engine2d_draw_ir_render_outcome(
+                eng, 0, batch.commands.len().to_i32(),
+                "parent-material-seed-unavailable", 0)
+        val seeded_surface = eng.draw_ir_create_offscreen(
+            delta_width, delta_height)
+        match seeded_surface:
+            Err(reason):
+                return _engine2d_draw_ir_render_outcome(
+                    eng, 0, batch.commands.len().to_i32(),
+                    "parent-material-offscreen-unavailable:{reason}", 0)
+            Ok(child):
+                var delta = child
+                delta.draw_image(0, 0, delta_width, delta_height, seed)
+                val inner = _engine2d_draw_ir_render_commands(
+                    delta, batch.commands, parent_padding, parent_padding, images, true,
+                    batch.backend_target == "metal")
+                delta = inner.engine
+                val child_readback = delta.read_pixels_with_source()
+                val child_core = _engine2d_draw_ir_parent_region_pixels(
+                    child_readback, delta_width, delta_height,
+                    parent_padding, parent_padding,
+                    embedding.width, embedding.height)
+                val child_core_readback = engine2d_readback_with_identity(
+                    child_core, child_readback.source,
+                    child_readback.backend_handle,
+                    child_readback.device_identity)
+                val composited = eng.draw_ir_composite_readback(
+                    embedding.x, embedding.y, embedding.width,
+                    embedding.height, child_core_readback, embedding_opacity)
+                delta.shutdown()
+                if not composited:
+                    return _engine2d_draw_ir_render_outcome(
+                        eng, 0, batch.commands.len().to_i32(),
+                        "parent-material-delta-composite-not-proven", 0)
+                return _engine2d_draw_ir_render_outcome(
+                    eng, inner.rendered, inner.skipped,
+                    inner.unsupported_kinds,
+                    inner.cpu_composited_material_count,
+                    inner.metal_device_glass_material_count,
+                    inner.metal_device_glass_requested_count,
+                    inner.metal_device_glass_unfulfilled_count,
+                    inner.metal_device_glass_receipts,
+                    inner.glass_execution_target,
+                    inner.glass_backend_handle,
+                    inner.glass_device_identity)
     if not use_embedded_surface:
         val apply_clip = embedding.clip and not fills_target_exactly
         if apply_clip:
             eng.set_clip(embedding.x, embedding.y, embedding.width, embedding.height)
         val blend_images = allow_parent_image or (embedding.surface_id != "" and fills_target_exactly)
-        val direct = _engine2d_draw_ir_render_commands(eng, batch.commands, embedding.x, embedding.y, images, blend_images)
+        val direct = _engine2d_draw_ir_render_commands(
+            eng, batch.commands, embedding.x, embedding.y, images,
+            blend_images, batch.backend_target == "metal")
         eng = direct.engine
         if apply_clip:
             eng.clear_clip()
@@ -986,6 +1252,9 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
             direct.unsupported_kinds,
             direct.cpu_composited_material_count,
             direct.metal_device_glass_material_count,
+            direct.metal_device_glass_requested_count,
+            direct.metal_device_glass_unfulfilled_count,
+            direct.metal_device_glass_receipts,
             direct.glass_execution_target,
             direct.glass_backend_handle,
             direct.glass_device_identity
@@ -1034,7 +1303,9 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
             "embedded-offscreen-not-created",
             0
         )
-    val inner = _engine2d_draw_ir_render_commands(offscreen, batch.commands, 0, 0, images, true)
+    val inner = _engine2d_draw_ir_render_commands(
+        offscreen, batch.commands, 0, 0, images, true,
+        batch.backend_target == "metal")
     offscreen = inner.engine
     val child = offscreen.read_pixels_with_source()
     val composited = eng.draw_ir_composite_readback(
@@ -1067,7 +1338,11 @@ fn _engine2d_draw_ir_render_batch_embedded(engine: DrawIrRenderTarget, batch: Dr
         # transparent and does not sample its already-painted parent backdrop,
         # so its inner helper result is deliberately not a parent receipt.
         # Keep rendering/accounting intact but fail closed on this evidence.
-        0
+        0,
+        0,
+        inner.metal_device_glass_requested_count,
+        inner.metal_device_glass_requested_count,
+        _engine2d_draw_ir_unfulfilled_metal_receipts(batch)
     )
 
 fn engine2d_draw_ir_adv_batch(engine: DrawIrRenderTarget, batch: DrawIrBatch, gpu_available: bool) -> Engine2dDrawIrAdvResult:
@@ -1081,16 +1356,23 @@ fn engine2d_draw_ir_adv_batch_with_images(engine: DrawIrRenderTarget, batch: Dra
     var unsupported_kinds = outcome.unsupported_kinds
     if unsupported_kinds == "":
         unsupported_kinds = "none"
+    val readback = eng.read_pixels_with_source()
     var result = _engine2d_draw_ir_result_from_plan_with_unsupported(
         plan,
         outcome.rendered,
         outcome.skipped,
         unsupported_kinds,
-        eng.read_pixels_with_source()
+        readback
     )
     result.cpu_composited_material_count = outcome.cpu_composited_material_count
     result.metal_device_glass_material_count = (
         outcome.metal_device_glass_material_count)
+    result.metal_device_glass_requested_count = (
+        outcome.metal_device_glass_requested_count)
+    result.metal_device_glass_unfulfilled_count = (
+        outcome.metal_device_glass_unfulfilled_count)
+    result.metal_device_glass_receipts = _engine2d_draw_ir_receipts_with_readback(
+        outcome.metal_device_glass_receipts, readback)
     result.glass_execution_target = outcome.glass_execution_target
     result.glass_backend_handle = outcome.glass_backend_handle
     result.glass_device_identity = outcome.glass_device_identity
@@ -1140,6 +1422,9 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: DrawIrRenderTarget, com
     var unsupported_kinds = ""
     var cpu_composited_material_count = 0
     var metal_device_glass_material_count = 0
+    var metal_device_glass_requested_count = 0
+    var metal_device_glass_unfulfilled_count = 0
+    var metal_device_glass_receipts: [Engine2dMetalGlassReceipt] = []
     var glass_execution_target = ""
     var glass_backend_handle: i64 = 0
     var glass_device_identity: i64 = 0
@@ -1164,6 +1449,16 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: DrawIrRenderTarget, com
             metal_device_glass_material_count +
             outcome.metal_device_glass_material_count
         )
+        metal_device_glass_requested_count = (
+            metal_device_glass_requested_count +
+            outcome.metal_device_glass_requested_count
+        )
+        metal_device_glass_unfulfilled_count = (
+            metal_device_glass_unfulfilled_count +
+            outcome.metal_device_glass_unfulfilled_count
+        )
+        for receipt in outcome.metal_device_glass_receipts:
+            metal_device_glass_receipts.push(receipt)
         if outcome.glass_execution_target != "":
             glass_execution_target = outcome.glass_execution_target
         if outcome.glass_backend_handle > 0:
@@ -1188,9 +1483,30 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: DrawIrRenderTarget, com
     result.cpu_composited_material_count = cpu_composited_material_count
     result.metal_device_glass_material_count = (
         metal_device_glass_material_count)
+    result.metal_device_glass_requested_count = (
+        metal_device_glass_requested_count)
+    result.metal_device_glass_unfulfilled_count = (
+        metal_device_glass_unfulfilled_count)
+    result.metal_device_glass_receipts = _engine2d_draw_ir_receipts_with_readback(
+        metal_device_glass_receipts, readback)
     result.glass_execution_target = glass_execution_target
     result.glass_backend_handle = glass_backend_handle
     result.glass_device_identity = glass_device_identity
+    # A concrete Metal request is a device request, but a CPU material
+    # execution is still a valid, explicitly classified fallback. Do not let
+    # the planner's requested GPU classification masquerade as the actual
+    # material execution target.
+    if (composition.backend_target == "metal" and
+        (cpu_composited_material_count > 0 or
+            metal_device_glass_unfulfilled_count > 0 or
+            metal_device_glass_material_count !=
+                metal_device_glass_requested_count)):
+        result.selected_backend = "cpu"
+        result.fallback_required = true
+        if cpu_composited_material_count > 0:
+            result.fallback_reason = "metal glass material used cpu fallback"
+        else:
+            result.fallback_reason = "metal glass material device receipt missing"
     val rendered_fonts = eng.fonts()
     result.font_identity = rendered_fonts.current_font_identity()
     eng.install_font_renderer(rendered_fonts)
@@ -1215,6 +1531,7 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: DrawIrRenderTarget, com
     result
 
 export Engine2dDrawIrAdvResult
+export Engine2dMetalGlassReceipt
 export Engine2dResolvedDrawIrImage
 export engine2d_draw_ir_adv_batch
 export engine2d_draw_ir_adv_batch_with_images

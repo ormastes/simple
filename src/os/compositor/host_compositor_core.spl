@@ -13,7 +13,7 @@ use common.ui.window_scene.{
     shared_wm_scene_resolve_background
 }
 use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput, wm_content_frame_checksum, wm_content_frame_web_provenance_valid}
-use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO, DrawIrComposition}
 use common.ui.window_scene_draw_ir.{
     SharedWmPixelBufferBackend,
     shared_wm_content_frame_image_uri,
@@ -35,7 +35,7 @@ use os.compositor.dirty_rect.{DirtyRegion}
 use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached_at_time, simple_web_content_revision_with_theme, content_paint_full_height}
 use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, shared_mdi_scene_from_render_windows}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache}
-use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, engine2d_resolved_draw_ir_image}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dDrawIrAdvResult, Engine2dResolvedDrawIrImage, engine2d_resolved_draw_ir_image}
 use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
 use common.ui.wm_chrome_theme.{wm_chrome_theme, active_wm_theme_render_snapshot, active_wm_theme_id, WmChromeColors}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
@@ -61,6 +61,61 @@ fn host_wm_force_direct_chrome(enabled: bool):
 fn host_wm_chrome_force_direct() -> bool:
     """True when render_frame() is pinned to the direct-draw chrome path."""
     _host_chrome_force_direct
+
+# Validate Metal material evidence against the submitted Draw IR itself.
+# Executor counters are cross-checks only: this owner independently derives the
+# exact ordered material IDs and rejects duplicate producer IDs or any receipt
+# insertion, omission, duplication, or reorder.
+fn host_metal_glass_receipts_valid(
+    composition: DrawIrComposition, result: Engine2dDrawIrAdvResult
+) -> bool:
+    if composition.backend_target != "metal":
+        return true
+    var expected_ids: [text] = []
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.? == false:
+                continue
+            var requested = false
+            for prop in command.computed_style:
+                if (prop.key == "wm-material-request" and
+                    prop.value == "window-surface-glass"):
+                    requested = true
+            if requested:
+                if command.component_id == "":
+                    return false
+                for expected_id in expected_ids:
+                    if expected_id == command.component_id:
+                        return false
+                expected_ids.push(command.component_id)
+
+    val expected_count = expected_ids.len().to_i32()
+    if (result.metal_device_glass_requested_count != expected_count or
+        result.metal_device_glass_material_count != expected_count or
+        result.metal_device_glass_unfulfilled_count != 0 or
+        result.metal_device_glass_receipts.len() != expected_ids.len()):
+        return false
+    if expected_ids.len() == 0:
+        return true
+    if (result.readback_source != "device_readback" or
+        result.backend_handle <= 0 or result.device_identity <= 0):
+        return false
+
+    var index = 0
+    while index < expected_ids.len():
+        val receipt = result.metal_device_glass_receipts[index]
+        if (receipt.material_id != expected_ids[index] or
+            not receipt.fulfilled or
+            receipt.execution_target != "metal-device-glass-v1" or
+            receipt.backend_handle <= 0 or
+            receipt.device_identity <= 0 or
+            receipt.backend_handle != result.backend_handle or
+            receipt.device_identity != result.device_identity or
+            receipt.readback_source != result.readback_source or
+            receipt.readback_checksum != result.readback_checksum):
+            return false
+        index = index + 1
+    true
 
 enum HostBackendKind:
     Browser
@@ -885,7 +940,11 @@ class HostCompositor:
             self.backend.present_rect(bounds.x, bounds.y, bounds.width, bounds.height)
         true
 
-    me _taskbar_render_input(theme: WmChromeColors, frame_time: i64) -> SharedWmTaskbarRenderInput:
+    # `web_backend_name` is selected by the owning Engine2D compositor before
+    # any Web cache is constructed. It is deliberately an explicit argument:
+    # leaf HTML/WebIR rendering must neither read SIMPLE_GUI_BACKEND nor turn a
+    # hosted GPU selection back into an independent `auto` choice.
+    me _taskbar_render_input(theme: WmChromeColors, frame_time: i64, web_backend_name: text) -> SharedWmTaskbarRenderInput:
         var shared_windows: [SharedMdiRenderWindow] = []
         val window_count = self.windows.len()
         # Identity accessor, not the Option pattern binding: under the
@@ -937,7 +996,7 @@ class HostCompositor:
                 else:
                     val full_h = content_paint_full_height(ch, scroll)
                     val cache = self._content_cache_for(
-                        win.id, cw, full_h, "auto"
+                        win.id, cw, full_h, web_backend_name
                     )
                     content_frames.push(simple_web_content_frame_cached_at_time(
                         cache, win.id.to_text(), self.render_revision,
@@ -967,7 +1026,14 @@ class HostCompositor:
             return false
         self.render_revision = self.render_revision + 1
         val had_damage = not self.dirty.is_empty()
-        val taskbar_input = self._taskbar_render_input(wm_chrome_theme(), rt_time_now_unix_micros())
+        val selected_backend = executor.selected_backend()
+        # The same persistent Engine2D session that will execute the parent
+        # Draw IR selects the backend for every child Web cache. This preserves
+        # actual Metal/Vulkan selection, or its honest software fallback.
+        val taskbar_input = self._taskbar_render_input(
+            wm_chrome_theme(), rt_time_now_unix_micros(),
+            selected_backend
+        )
         if not had_damage:
             self.skipped_frame_count = self.skipped_frame_count + 1
             return true
@@ -1007,8 +1073,16 @@ class HostCompositor:
             print "[hosted-wm] draw-ir-reject-detail reason=content-image-count images={images.len()} frames={frames.len()} expected={expected_images}"
             return self._reject_engine2d_frame()
 
-        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar_input.taskbar, frames, DRAW_IR_BACKEND_AUTO, 1000, taskbar_input.clock_label, 0)
+        val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar_input.taskbar, frames, selected_backend, 1000, taskbar_input.clock_label, 0)
         val result = executor.render_draw_ir_composition(composition, images)
+        # A concrete Metal WM frame is device-only. The executor must return
+        # one valid receipt for every requested glass surface, and that receipt
+        # must describe the same completed readback device/handle the host is
+        # about to present. Never infer success from a Metal plan or a CPU
+        # fallback after malformed bounds/metadata/state.
+        if not host_metal_glass_receipts_valid(composition, result):
+            print "[hosted-wm] draw-ir-reject-detail reason=metal-glass-receipt requested={result.metal_device_glass_requested_count} executed={result.metal_device_glass_material_count} receipts={result.metal_device_glass_receipts.len()} unfulfilled={result.metal_device_glass_unfulfilled_count} readback_handle={result.backend_handle} readback_device={result.device_identity} source={result.readback_source}"
+            return self._reject_engine2d_frame()
         if result.fallback_required or result.skipped_command_count != 0 or result.rendered_command_count <= 0 or result.pixels.len() != self.width * self.height:
             print "[hosted-wm] draw-ir-reject-detail reason=render-result fallback_required={result.fallback_required} fallback_reason={result.fallback_reason} skipped={result.skipped_command_count} rendered={result.rendered_command_count} pixels={result.pixels.len()} expected_pixels={self.width * self.height}"
             return self._reject_engine2d_frame()
@@ -1037,7 +1111,9 @@ class HostCompositor:
         if had_damage and not self.native_pixel_lane:
             shared_wm_scene_render_desktop_chrome(self.backend, self.width, self.height, theme, resolved_bg.color, resolved_bg.surface)
         val frame_time = rt_time_now_unix_micros()
-        val taskbar_input = self._taskbar_render_input(theme, frame_time)
+        # Direct compatibility rendering has no Engine2D owner; retain its
+        # historical independent auto selection outside the hosted Draw IR lane.
+        val taskbar_input = self._taskbar_render_input(theme, frame_time, "auto")
         if had_damage:
             if self.native_pixel_lane:
                 shared_wm_scene_render_taskbar_context_to_pixel_buffer(self.pixel_backend, taskbar_input)

@@ -5,8 +5,7 @@ use std.common.encoding.font_registry.{
 }
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload}
 use std.gc_async_mut.gpu.engine2d.backend.{
-    Engine2DReadback,
-    engine2d_readback_with_identity
+    Engine2DReadback
 }
 use std.gc_async_mut.gpu.engine2d.backend_emu.{
     emu_draw_image_scaled_blend
@@ -22,10 +21,6 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     engine2d_glass_execution_metal,
     engine2d_glass_execution_unavailable
 }
-use std.gc_async_mut.io.metal_sffi.{metal_device_info}
-use std.gc_async_mut.processing.metal_fill_u32.{
-    processing_metal_device_identity
-}
 use std.gc_async_mut.text_layout.font_renderer.{
     FontRenderBatch,
     FontRenderer
@@ -37,7 +32,6 @@ use std.nogc_sync_mut.text_layout.font_types.{
 class MetalDrawIrRenderTarget with DrawIrRenderTarget:
     backend: MetalBackend
     font_renderer: FontRenderer
-    device_identity: i64
     last_font_target: text
 
     me _draw_staged_font(x: i32, y: i32) -> bool:
@@ -84,7 +78,7 @@ class MetalDrawIrRenderTarget with DrawIrRenderTarget:
         val applied = self.backend.draw_ir_apply_glass_material_device(config)
         if applied:
             return engine2d_glass_execution_metal(
-                self.backend.d_framebuffer, self.device_identity)
+                self.backend.d_framebuffer, self.backend.device_identity)
         if not self.backend.initialized:
             return engine2d_glass_execution_unavailable(
                 "device-glass-state-unknown")
@@ -201,7 +195,6 @@ class MetalDrawIrRenderTarget with DrawIrRenderTarget:
         Ok(MetalDrawIrRenderTarget(
             backend: child_backend,
             font_renderer: FontRenderer.new(),
-            device_identity: self.device_identity,
             last_font_target: ""
         ))
 
@@ -212,7 +205,7 @@ class MetalDrawIrRenderTarget with DrawIrRenderTarget:
         if (readback.source != "device_readback" or
             readback.backend_handle <= 0 or
             readback.device_identity <= 0 or
-            readback.device_identity != self.device_identity):
+            readback.device_identity != self.backend.device_identity):
             return false
         if readback.pixels.len() != width.to_i64() * height.to_i64():
             return false
@@ -226,21 +219,12 @@ class MetalDrawIrRenderTarget with DrawIrRenderTarget:
         self.backend.read_pixels()
 
     me read_pixels_with_source() -> Engine2DReadback:
-        val readback = self.backend.read_pixels_with_source()
-        if (readback.source == "device_readback" and
-            readback.backend_handle > 0 and
-            self.device_identity > 0):
-            return engine2d_readback_with_identity(
-                readback.pixels,
-                readback.source,
-                readback.backend_handle,
-                self.device_identity
-            )
-        readback
+        # BackendMetal owns both framebuffer and device identity. Forward its
+        # receipt unchanged so this adapter cannot mask an owner-level mismatch.
+        self.backend.read_pixels_with_source()
 
     me shutdown():
         self.backend.shutdown()
-        self.device_identity = 0
         self.last_font_target = ""
 
 fn _metal_draw_ir_render_target_create(width: i32, height: i32) -> Result<MetalDrawIrRenderTarget, text>:
@@ -255,16 +239,13 @@ fn _metal_draw_ir_render_target_create(width: i32, height: i32) -> Result<MetalD
         else:
             backend.last_error
         return Err(reason)
-    val info = metal_device_info(0)
-    val identity = processing_metal_device_identity(
-        info.name, info.total_memory)
+    val identity = backend.device_identity
     if identity <= 0:
         backend.shutdown()
         return Err("metal-device-identity-unavailable")
     Ok(MetalDrawIrRenderTarget(
         backend: backend,
         font_renderer: FontRenderer.new(),
-        device_identity: identity,
         last_font_target: ""
     ))
 
@@ -277,7 +258,9 @@ fn metal_draw_ir_render_target_probe() -> Result<bool, text>:
     match _metal_draw_ir_render_target_create(1, 1):
         Err(reason): Err(reason)
         Ok(target):
-            val available = target.backend_name() == "metal" and target.device_identity > 0
+            val available = (
+                target.backend_name() == "metal" and
+                target.backend.device_identity > 0)
             target.shutdown()
             Ok(available)
 

@@ -3,7 +3,7 @@
 
 use std.spec
 use common.ui.builder.{column, label, build_tree_with_title}
-use common.ui.draw_ir.{DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DRAW_IR_SOURCE_WM_SCENE, DrawIrCommand, draw_ir_event_target_context, draw_ir_text, simple_2d_draw_ir_adv_composition_plan}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO, DRAW_IR_BACKEND_CPU, DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DRAW_IR_SOURCE_WM_SCENE, DrawIrCommand, draw_ir_event_target_context, draw_ir_text, simple_2d_draw_ir_adv_composition_plan}
 use common.ui.generated.aetheric_dark_theme_snapshot.{aetheric_dark_theme_render_snapshot}
 use common.ui.theme_render_snapshot.{ThemeMaterialSemantics, ThemeRenderSnapshot, ThemeShadowLayer, theme_material_sha256}
 use common.ui.taskbar_model.{AppRef, TaskbarModel, TrayItem, WindowRef}
@@ -204,17 +204,20 @@ describe "window scene Draw IR projection":
         expect(window_batch.commands[8].component_id).to_equal("win2-close-label")
         expect(window_batch.commands[8].text_value).to_equal("X")
 
-    it "projects Aetheric window material through canonical Engine2D-visible DrawIR properties":
+    it "requests Metal device glass with canonical body and title material semantics":
         val snapshot = aetheric_dark_theme_render_snapshot()
         apply_theme_render_snapshot_to_wm_chrome(snapshot)
-        val composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_GPU, 1000, "09:41", 2)
+        val composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), "metal", 1000, "09:41", 2)
+        val inactive_body = composition.batches[2].commands[0]
+        val inactive_title = composition.batches[2].commands[1]
         val focused_body = composition.batches[3].commands[0]
         val focused_title = composition.batches[3].commands[1]
         val title_text = composition.batches[3].commands[5]
 
         expect(composition.batches[3].commands.len()).to_equal(8)
+        expect(composition.backend_target).to_equal("metal")
         expect(focused_body.component_id).to_equal("win2-body")
-        expect(focused_body.color).to_equal(snapshot.material.solid_fallback_rgba)
+        expect(focused_body.color).to_equal(snapshot.material.window_fill_rgba)
         expect(_style_value(focused_body, "background-color")).to_equal(snapshot.material.window_fill_rgba.to_string())
         expect(_style_value(focused_body, "wm-theme-id")).to_equal(snapshot.id)
         expect(_style_value(focused_body, "wm-theme-family-id")).to_equal(snapshot.family_id)
@@ -225,7 +228,7 @@ describe "window scene Draw IR projection":
         expect(snapshot.material.window_gradient_start_rgba).to_equal(352321535u32)
         expect(snapshot.material.window_gradient_end_rgba).to_equal(117440511u32)
         expect(_style_value(focused_body, "background-image")).to_equal("linear-gradient(352321535,117440511)")
-        expect(_style_value(focused_body, "background-image-capability")).to_equal("engine2d-cpu-rounded-material-v1")
+        expect(_style_value(focused_body, "background-image-capability")).to_equal("engine2d-rounded-material-v1")
         expect(_style_value(focused_body, "background-image-source-css")).to_equal(snapshot.material.window_gradient_source_css)
         expect(_style_value(focused_body, "background-image-composite-mode")).to_equal("surface-then-alpha-gradient")
         expect(_style_value(focused_body, "background-image-fallback")).to_equal("")
@@ -234,20 +237,29 @@ describe "window scene Draw IR projection":
         expect(_style_value(focused_body, "box-shadow-raw")).to_equal("0px 28px 76px 0px 1962934272")
         expect(_style_value(focused_body, "box-shadow")).to_equal("0px 28px 1962934272")
         expect(_style_value(focused_body, "backdrop-filter")).to_equal("blur(30px) saturate(170%)")
-        expect(_style_value(focused_body, "backdrop-filter-capability")).to_equal("engine2d-cpu-composited-material-v1")
+        expect(_style_value(focused_body, "backdrop-filter-capability")).to_equal("engine2d-composited-glass-material-v1")
+        expect(_style_value(focused_body, "backdrop-filter-requested-target")).to_equal("metal-device-glass-v1")
         expect(_style_value(focused_body, "backdrop-filter-realized")).to_equal("blur(4px) saturate(170%)")
         expect(_style_value(focused_body, "backdrop-filter-realized-blur-radius-px")).to_equal("4")
         expect(_style_value(focused_body, "backdrop-filter-realized-saturation-milli")).to_equal("1700")
         expect(_style_value(focused_body, "backdrop-filter-reduction-reason")).to_equal("cpu-blur-radius-bounded-to-4")
         expect(_style_value(focused_body, "backdrop-filter-fallback")).to_equal("cpu-composited-material")
-        expect(_style_value(focused_body, "backdrop-filter-fallback-reason")).to_equal("native-device-backdrop-path-pending")
+        expect(_style_value(focused_body, "backdrop-filter-fallback-target")).to_equal("cpu-scalar-glass-v1")
+        expect(_style_value(focused_body, "backdrop-filter-fallback-reason")).to_equal("metal-device-dispatch-unavailable-at-execution")
+        expect(_style_value(focused_body, "wm-material-surface-alpha-milli")).to_equal("800")
+        expect(focused_title.color).to_equal(snapshot.material.active_title_fill_rgba)
+        expect(_style_value(focused_title, "background-color")).to_equal(snapshot.material.active_title_fill_rgba.to_string())
         expect(_style_value(focused_title, "background-image")).to_equal("none")
         expect(_style_value(focused_title, "background-image-capability")).to_equal("not-requested")
         expect(_style_value(focused_title, "background-image-fallback")).to_equal("")
-        expect(_style_value(focused_title, "backdrop-filter")).to_equal("none")
-        expect(_style_value(focused_title, "backdrop-filter-capability")).to_equal("not-requested")
-        expect(_style_value(focused_title, "backdrop-filter-realized")).to_equal("")
-        expect(_style_value(focused_title, "backdrop-filter-fallback")).to_equal("")
+        expect(_style_value(focused_title, "backdrop-filter")).to_equal("blur(30px) saturate(170%)")
+        expect(_style_value(focused_title, "backdrop-filter-capability")).to_equal("engine2d-composited-glass-material-v1")
+        expect(_style_value(focused_title, "backdrop-filter-realized")).to_equal("blur(4px) saturate(170%)")
+        expect(_style_value(focused_title, "wm-material-surface-alpha-milli")).to_equal("878")
+        expect(inactive_body.color).to_equal(snapshot.material.window_fill_rgba)
+        expect(inactive_title.color).to_equal(snapshot.material.inactive_title_fill_rgba)
+        expect(_style_value(inactive_title, "wm-material-surface-alpha-milli")).to_equal("800")
+        expect(_style_value(inactive_body, "box-shadow-raw")).to_equal("0px 18px 46px 0px 1459617792")
         expect(_style_value(focused_title, "font-family")).to_equal(snapshot.material.font_family)
         expect(_style_value(title_text, "font-size")).to_equal("14")
         expect(_style_value(title_text, "font-family-requested")).to_equal(snapshot.material.font_family)
@@ -255,6 +267,42 @@ describe "window scene Draw IR projection":
         expect(_style_value(title_text, "color")).to_equal(snapshot.material.text_rgba.to_string())
         expect(composition.batches[3].source.style_revision).to_contain(snapshot.material_sha256)
         reset_wm_chrome_theme()
+
+    it "keeps AUTO, CPU, software, and Vulkan WM targets on explicit solid material fallback":
+        val snapshot = aetheric_dark_theme_render_snapshot()
+        apply_theme_render_snapshot_to_wm_chrome(snapshot)
+        val auto_composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_AUTO, 1000, "09:41", 2)
+        val cpu_composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), DRAW_IR_BACKEND_CPU, 1000, "09:41", 2)
+        val software_composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), "software", 1000, "09:41", 2)
+        val vulkan_composition = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), "vulkan", 1000, "09:41", 2)
+
+        for composition in [auto_composition, cpu_composition, software_composition, vulkan_composition]:
+            val body = composition.batches[3].commands[0]
+            val title = composition.batches[3].commands[1]
+            expect(body.color).to_equal(snapshot.material.solid_fallback_rgba)
+            expect(_style_value(body, "background-color")).to_equal(snapshot.material.solid_fallback_rgba.to_string())
+            expect(_style_value(body, "backdrop-filter-capability")).to_equal("unavailable")
+            expect(_style_value(body, "backdrop-filter-fallback")).to_equal("solid-material")
+            expect(_style_value(body, "backdrop-filter-fallback-reason")).to_equal("cpu-raster-backdrop-sampling-unavailable")
+            expect(_style_value(body, "backdrop-filter-realized")).to_equal("")
+            expect(title.color).to_equal(0xFF000000u32 | (snapshot.material.active_title_fill_rgba & 0x00FFFFFFu32))
+            expect(_style_value(title, "wm-material-surface-alpha-milli")).to_equal("1000")
+            expect(_style_value(title, "backdrop-filter-capability")).to_equal("unavailable")
+        reset_wm_chrome_theme()
+
+    it "classifies concrete Metal as GPU while preserving Vulkan CPU planner semantics":
+        val metal = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), "metal", 1000, "09:41", 2)
+        val vulkan = shared_wm_scene_draw_ir_composition(_scene(), _taskbar(), "vulkan", 1000, "09:41", 2)
+        val metal_plan = simple_2d_draw_ir_adv_composition_plan(metal, true)
+        val metal_unavailable = simple_2d_draw_ir_adv_composition_plan(metal, false)
+        val vulkan_plan = simple_2d_draw_ir_adv_composition_plan(vulkan, true)
+
+        expect(metal_plan.selected_backend).to_equal(DRAW_IR_BACKEND_GPU)
+        expect(metal_plan.fallback_required).to_be(false)
+        expect(metal_unavailable.selected_backend).to_equal(DRAW_IR_BACKEND_CPU)
+        expect(metal_unavailable.fallback_required).to_be(true)
+        expect(vulkan_plan.selected_backend).to_equal(DRAW_IR_BACKEND_CPU)
+        expect(vulkan_plan.fallback_required).to_be(false)
 
     it "keeps active and inactive ordered mixed shadows in canonical DrawIR CSS":
         val snapshot = _mixed_shadow_snapshot()
