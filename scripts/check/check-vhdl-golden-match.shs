@@ -36,6 +36,10 @@
 #   vhdl_golden_match_rv64_flat=pass|fail|not-generated
 #   vhdl_golden_match_rv32_axi=pass|fail|not-generated
 #   vhdl_golden_match_rv64_axi=pass|fail|not-generated
+#   vhdl_golden_match_rest_total=23      (the non-exec-core RTL files)
+#   vhdl_golden_match_rest_pass=<n>
+#   vhdl_golden_match_rest_fail=<n>
+#   vhdl_golden_match_rest_missing=<n>
 #   vhdl_golden_match_ok=true|false
 #
 # Exit 0 = all good, 1 = any fail (drift, byte mismatch, or missing under
@@ -48,6 +52,18 @@ MANIFEST="$ROOT/doc/08_tracking/hardware/golden_vhdl_manifest_2026-07-26.txt"
 GOLDEN_DIR="$ROOT/examples/09_embedded/fpga_riscv/rtl"
 GEN_DIR="${VHDL_GEN_DIR:-$ROOT/build/os/rtl}"
 CORES="rv32_exec_core.vhd rv64_exec_core.vhd rv32_exec_core_flat.vhd rv64_exec_core_flat.vhd rv32_exec_core_axi.vhd rv64_exec_core_axi.vhd"
+
+# The remaining 23 pinned RTL files, also emitted by src/lib/hardware/vhdl_gen/.
+# Kept as a separate list from CORES so the six per-core keys above stay stable
+# for lanes that already cite them; these are reported in aggregate below.
+RTL_REST="rv32_axi4_mem_adapter.vhd rv64_axi4_mem_adapter.vhd rv32_ctrl_obs_slave.vhd rv32_bram_soc.vhd \
+soc_top_rv32.vhd soc_top_rv64.vhd soc_top_rv32_k26_ddr.vhd soc_top_rv64_k26_ddr.vhd \
+soc_top_rv32_sim.vhd soc_top_rv64_sim.vhd soc_top_rv32_tiny_bram.vhd \
+tb_rv32_k26_ddr_boot.vhd tb_rv64_k26_ddr_boot.vhd \
+tb_rv32_simpleos_boot_axi.vhd tb_rv64_simpleos_boot_axi.vhd \
+tb_rv32_simpleos_boot.vhd tb_rv64_simpleos_boot.vhd \
+tb_rv32_wb_soc_smoke.vhd tb_rv64_wb_soc_smoke.vhd \
+tb_rv32_nvme_fw_smoke.vhd tb_rv32_simpleos_boot_tiny.vhd tb_rv32_tiny_bram_soc.vhd tb_rv64_soak.vhd"
 
 REQUIRE_GENERATED=0
 SELFTEST=0
@@ -246,6 +262,39 @@ for core in $CORES; do
 done
 
 # ---------------------------------------------------------------------------
+# Layer 3: the remaining 23 generated RTL files vs goldens (byte-identical).
+# Same fail-closed rules as Layer 2; reported in aggregate.
+# ---------------------------------------------------------------------------
+rest_pass=0
+rest_fail=0
+rest_missing=0
+
+for rtl in $RTL_REST; do
+    gen="$GEN_DIR/$rtl"
+    golden="$GOLDEN_DIR/$rtl"
+    if [ ! -f "$golden" ]; then
+        echo "check-vhdl-golden-match: golden missing: $golden" >&2
+        exit 2
+    fi
+    if [ -f "$gen" ]; then
+        if cmp -s "$golden" "$gen"; then
+            rest_pass=$((rest_pass + 1))
+        else
+            rest_fail=$((rest_fail + 1))
+            overall_fail=1
+            echo "MISMATCH: $gen differs from golden $golden"
+            cmp "$golden" "$gen" 2>&1 | head -1 | sed 's/^/  /'
+        fi
+    else
+        rest_missing=$((rest_missing + 1))
+        if [ "$REQUIRE_GENERATED" = "1" ]; then
+            overall_fail=1
+            echo "MISSING: $gen not present and --require-generated was passed"
+        fi
+    fi
+done
+
+# ---------------------------------------------------------------------------
 # Summary (stable keys, one per line).
 # ---------------------------------------------------------------------------
 echo "vhdl_golden_match_manifest=$manifest_status"
@@ -255,6 +304,10 @@ echo "vhdl_golden_match_rv32_flat=$core_status_rv32_flat"
 echo "vhdl_golden_match_rv64_flat=$core_status_rv64_flat"
 echo "vhdl_golden_match_rv32_axi=$core_status_rv32_axi"
 echo "vhdl_golden_match_rv64_axi=$core_status_rv64_axi"
+echo "vhdl_golden_match_rest_total=23"
+echo "vhdl_golden_match_rest_pass=$rest_pass"
+echo "vhdl_golden_match_rest_fail=$rest_fail"
+echo "vhdl_golden_match_rest_missing=$rest_missing"
 if [ "$overall_fail" = "1" ]; then
     echo "vhdl_golden_match_ok=false"
     exit 1
