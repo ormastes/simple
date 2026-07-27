@@ -62,6 +62,28 @@ fn try_const_eval(expr: &Expr) -> Option<i64> {
     }
 }
 
+/// Static initializer bytes for a module-global `bool` literal.
+///
+/// Module-global slots are baked as **raw/native** values by both backends, not
+/// as tag-boxed RuntimeValues: `val x = 7` lands as `07`, and a runtime
+/// `GlobalStore` of a comparison result stores the icmp's 0/1. Bools must match
+/// that convention or a consumer's plain `load`+`test` reads the tag bits.
+///
+/// This previously emitted the tag-boxed encoding
+/// (`TAG_SPECIAL 0b011 | payload<<3` => `false=19`, `true=11`). Only the
+/// cranelift backend untagged it, and only when the declaration carried an
+/// explicit `: bool` annotation — so an un-annotated `val x = false` (TypeId::ANY)
+/// kept the tag box and read back as 19, i.e. **truthy**, silently taking the
+/// wrong branch. The LLVM backend never untagged at all, so it was wrong for the
+/// annotated shape too. Emitting raw 0/1 here fixes every backend at once and
+/// cannot be confused with an integer initializer the way a value-sniffing untag
+/// in the backend would be (`val x = 11` is indistinguishable from tagged `true`).
+///
+/// See doc/08_tracking/bug/cranelift_unannotated_module_bool_global_tagbox_truthy_2026-07-27.md
+fn bool_global_init(val: bool) -> i64 {
+    i64::from(val)
+}
+
 /// Const-eval a float initializer. Globals are stored as i64 RuntimeValues and
 /// floats travel as f64 bits in i64 (see codegen instr/body.rs f32/f64 ABI), so
 /// callers store `result.to_bits()`. Int literals are accepted (`val x: f64 = 3`).
@@ -553,9 +575,7 @@ impl Lowerer {
                         }
                     }
                 } else if let Expr::Bool(val) = &s.value {
-                    // Store tagged boolean value: TAG_SPECIAL(0b011) | (payload << 3)
-                    let tagged = 0b011 | ((if *val { 1 } else { 2 }) << 3);
-                    self.global_init_values.insert(s.name.clone(), tagged);
+                    self.global_init_values.insert(s.name.clone(), bool_global_init(*val));
                 }
                 record_const_array_init(
                     &mut self.global_init_arrays,
@@ -613,8 +633,7 @@ impl Lowerer {
                         }
                     }
                 } else if let Expr::Bool(val) = &c.value {
-                    let tagged = 0b011 | ((if *val { 1 } else { 2 }) << 3);
-                    self.global_init_values.insert(c.name.clone(), tagged);
+                    self.global_init_values.insert(c.name.clone(), bool_global_init(*val));
                 }
                 record_const_array_init(
                     &mut self.global_init_arrays,
@@ -677,8 +696,7 @@ impl Lowerer {
                             }
                         }
                     } else if let Some(Expr::Bool(val)) = &l.value {
-                        let tagged = 0b011 | ((if *val { 1 } else { 2 }) << 3);
-                        self.global_init_values.insert(n.clone(), tagged);
+                        self.global_init_values.insert(n.clone(), bool_global_init(*val));
                     }
                     record_const_array_init(
                         &mut self.global_init_arrays,
