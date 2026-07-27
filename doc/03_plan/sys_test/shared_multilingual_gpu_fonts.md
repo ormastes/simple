@@ -3,7 +3,7 @@
 
 ## Scope
 
-Eleven executable/manual pairs comprise seven system SSpecs for manifest/assets,
+Eleven baseline executable/manual pairs comprise seven system SSpecs for manifest/assets,
 exact-face shaping, shared 2D/3D batch, Web/GUI/WM routing, portable emission,
 generated CUDA handoff, and native graphics readback, plus four focused unit
 gates for selected Arabic/Devanagari faces and release asset layout. Among the
@@ -13,6 +13,9 @@ whose three independent live evidence rows remain unavailable.
 Unit/integration suites for the
 existing shaper, Engine2D, Engine3D texture path, emitter, and backend readback
 remain supporting evidence; they do not replace these end-to-end scenarios.
+REQ-016 adds four focused executor/manual pairs and extends the existing parser
+selector and Devanagari pairs; these are release-blocking full-layout evidence,
+not substitutes for the selected-face system scenario.
 The focused Vulkan integration/manual pair exercises the frozen native-proof
 step for Engine2D only; it does not satisfy the Engine3D promotion gate.
 The route spec's synthetic compositions are supporting contract evidence. A
@@ -46,6 +49,16 @@ Focused exact-face unit gates (execution pending; per-row manual status):
 | `test/01_unit/lib/skia/selected_arabic_spec.spl` | `doc/06_spec/01_unit/lib/skia/selected_arabic_spec.md` |
 | `test/01_unit/app/release/install_font_assets_spec.spl` | `doc/06_spec/01_unit/app/release/install_font_assets_spec.md` (manual present; current zero-stub generation proof pending) |
 | `test/01_unit/app/release/release_archive_layout_spec.spl` | `doc/06_spec/01_unit/app/release/release_archive_layout_spec.md` (manual present; current zero-stub generation proof pending) |
+
+REQ-016 focused full-layout gates:
+
+| Executable SSpec | Generated manual |
+|---|---|
+| `test/01_unit/lib/skia/ot_layout_gsub_full_spec.spl` | `doc/06_spec/01_unit/lib/skia/ot_layout_gsub_full_spec.md` |
+| `test/01_unit/lib/skia/ot_layout_gpos_full_spec.spl` | `doc/06_spec/01_unit/lib/skia/ot_layout_gpos_full_spec.md` |
+| `test/01_unit/lib/skia/ot_layout_lookup_flags_spec.spl` | `doc/06_spec/01_unit/lib/skia/ot_layout_lookup_flags_spec.md` |
+| `test/01_unit/lib/skia/ot_layout_gpos_variation_spec.spl` | `doc/06_spec/01_unit/lib/skia/ot_layout_gpos_variation_spec.md` |
+| `test/01_unit/lib/skia/ot_parser_layout_selector_spec.spl` | `doc/06_spec/01_unit/lib/skia/ot_parser_layout_selector_spec.md` |
 
 Supporting conditional pair: `test/02_integration/rendering/vulkan_font_composite_classification_spec.spl`
 and `doc/06_spec/02_integration/rendering/vulkan_font_composite_classification_spec.md`.
@@ -168,6 +181,7 @@ current report or promote a row from static evidence.
 | REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 3/3 source gate: live tuple promotion, controlled unavailable classification, and forged-proof rejection are wired; retained native PASS is pending |
 | REQ-014 | eleven executable/manual pairs | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 11/11 canonical manuals now regenerate with zero stubs and preserve module scope prose, but their executable specs remain unadmitted, so 0/11 pairs are accepted |
 | REQ-015 | `font_render_config_spec.spl`, `shared_font_surfaces_spec.spl`, and focused Engine2D/Engine3D font specs | validation and length-delimited identity; canonical `rocm` target with `hip` alias; bitmap/vector/shaped propagation; Suggested/Preferred/Required behavior; unsupported mode/CTM rejects before cache/backend mutation; legacy default equivalence | source includes ROCm/HIP identity and policy-plan cases; the reduced 2D spec links and the mutex receiver fault is fixed, but all three cycles still exit 132 before results |
+| REQ-016 | four focused full-layout specs plus `ot_parser_layout_selector_spec.spl`, `selected_devanagari_spec.spl`, and generated manuals | GSUB 1–8; GPOS 1–9; all context/extension formats; LookupFlag/GDEF combinations; Device/VariationIndex and anchors; true/false FeatureVariations; non-witness generic input; malformed transactional rollback | exact implementation lanes are active; no merged or executed PASS exists |
 
 | NFR | Evidence | Pass condition | Current evidence |
 |---|---|---|---|
