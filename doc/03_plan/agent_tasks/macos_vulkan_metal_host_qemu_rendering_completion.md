@@ -1270,10 +1270,19 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   This is a storage-capacity failure, not a Simple source/lowering failure.
 - No second bootstrap was attempted. The first-attempt logs remain under
   `build/wm-to-i64-bootstrap/logs/aarch64-apple-darwin/`, and the reusable
-  Cargo target was preserved. Safe cleanup raised free space to 5.2 GiB,
-  above the measured 5 GiB launch floor. Recheck that floor immediately before
-  the next single bounded attempt so the native archive, immutable authority
-  snapshot, and Stage 2/3 outputs retain headroom.
+  Cargo target was preserved.
+- A later single bounded attempt at `f4689e6955` started with 5.0 GiB free.
+  Seed and native-all completed, but runtime-nolto stopped while creating Cargo
+  metadata with the same `No space left on device` cause. Compiler backfill and
+  Stage 2 did not start; no source/compiler failure was observed.
+- The current attempt allocated 2.44 GiB in its isolated authority. A concurrent
+  root-repository bootstrap grew by about 3.35 GiB during the same interval,
+  explaining why the prior 5 GiB floor was insufficient. That other agent's
+  authority was preserved. Safe removal of an empty merged jj workspace and
+  inactive regenerable caches raised free space to 7.7 GiB.
+- Recheck for at least 7 GiB free and no concurrent bootstrap immediately
+  before the next single bounded attempt. Preserve the first-attempt logs,
+  canonical SFFI providers, and other agents' bootstrap/GUI authorities.
 - macOS preflight reports both Accessibility UI scripting and Screen Recording
   access enabled. The trusted live run must still prove actual ordered input
   and exact-window capture; these permission probes only remove likely external
