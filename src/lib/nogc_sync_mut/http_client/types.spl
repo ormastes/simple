@@ -47,49 +47,241 @@ fn url_encode_component(component: text) -> text:
 fn url_decode_component(component: text) -> text:
     url_decode(text: component)
 
-fn parse_url(url: text) -> (text, text, i64, text, text, text):
-    var scheme = ""
-    var host = ""
-    var port = 80
-    var path = "/"
-    var query = ""
+pub class UrlParts:
+    """A successfully parsed absolute URL.
+
+    `scheme` and `host` are lowercase-normalized. `port` is the *effective*
+    port: the explicit port when one was given, otherwise the scheme's default
+    port, or `0` when the scheme has no default port (`file:` and every
+    non-special scheme). `opaque` is true for schemes parsed without an
+    authority (`data:`, `about:`, `javascript:`, `mailto:`); for those, `host`
+    is always `""` and `path` holds the opaque remainder verbatim.
+    """
+    scheme: text
+    host: text
+    port: i64
+    path: text
+    query: text
+    fragment: text
+    opaque: bool
+
+fn url_default_port(scheme: text) -> i64:
+    """Default port for a special scheme, or 0 when it has none."""
+    if scheme == "http": return 80
+    if scheme == "ws": return 80
+    if scheme == "https": return 443
+    if scheme == "wss": return 443
+    if scheme == "ftp": return 21
+    0
+
+fn url_is_special(scheme: text) -> bool:
+    """WHATWG "special scheme" set -- the schemes that require an authority."""
+    (scheme == "http" or scheme == "https" or scheme == "ws"
+        or scheme == "wss" or scheme == "ftp" or scheme == "file")
+
+fn _url_is_alpha(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z")
+
+fn _url_is_digit(c: text) -> bool:
+    c >= "0" and c <= "9"
+
+fn _url_trim(raw: text) -> text:
+    var start = 0
+    var stop = raw.length()
+    while start < stop:
+        val c = raw.substring(start, start + 1)
+        if c == " " or c == "\t" or c == "\n" or c == "\r":
+            start = start + 1
+        else:
+            break
+    while stop > start:
+        val c = raw.substring(stop - 1, stop)
+        if c == " " or c == "\t" or c == "\n" or c == "\r":
+            stop = stop - 1
+        else:
+            break
+    raw.substring(start, stop)
+
+fn _url_strip_tabs(raw: text) -> text:
+    """Remove tab/newline/CR anywhere in the input, per the WHATWG URL parser."""
+    var out = raw
+    if out.index_of("\t") >= 0:
+        out = out.split("\t").join("")
+    if out.index_of("\n") >= 0:
+        out = out.split("\n").join("")
+    if out.index_of("\r") >= 0:
+        out = out.split("\r").join("")
+    out
+
+fn _url_parse_port(s: text) -> i64:
+    """Parse a port. Returns -1 when `s` is not a valid 1..65535 port.
+
+    Port 0 is rejected deliberately: it is never connectable and would be
+    indistinguishable from the "no port" sentinel used by `UrlParts.port`.
+    """
+    if s.length() == 0: return -1
+    if s.length() > 5: return -1
+    var acc = 0
+    var i = 0
+    while i < s.length():
+        val c = s.substring(i, i + 1)
+        val d = "0123456789".index_of(c)
+        if d < 0:
+            return -1
+        acc = acc * 10 + d
+        i = i + 1
+    if acc < 1 or acc > 65535:
+        return -1
+    acc
+
+fn _url_valid_host(host: text) -> bool:
+    """Reject the WHATWG forbidden-host code points."""
+    if host.length() == 0:
+        return false
+    var i = 0
+    while i < host.length():
+        val c = host.substring(i, i + 1)
+        if (c == " " or c == "\t" or c == "\n" or c == "\r" or c == "#"
+                or c == "/" or c == ":" or c == "?" or c == "@" or c == "["
+                or c == "]" or c == "^" or c == "<" or c == ">" or c == "|"
+                or c == "%" or c == "\\"):
+            return false
+        i = i + 1
+    true
+
+fn _url_valid_ipv6(inner: text) -> bool:
+    if inner.length() == 0:
+        return false
+    var i = 0
+    while i < inner.length():
+        val c = inner.substring(i, i + 1)
+        if not (_url_is_digit(c) or c == ":" or c == "."
+                or (c >= "a" and c <= "f") or (c >= "A" and c <= "F")):
+            return false
+        i = i + 1
+    true
+
+fn parse_url(url: text) -> Option<UrlParts>:
+    """Parse an absolute URL, fail-closed.
+
+    Returns `None` for anything that is not an absolute URL. This parser never
+    guesses a scheme and never invents a host: a missing or malformed scheme, a
+    malformed authority, or a bad port all yield `None` rather than a
+    plausible-looking default. Callers making security decisions (origin
+    comparison, CORS, cookies) must treat `None` as "untrusted / opaque".
+    """
+    val trimmed = _url_strip_tabs(_url_trim(url))
+    if trimmed.length() == 0:
+        return None
+
+    # --- scheme ---------------------------------------------------------
+    if not _url_is_alpha(trimmed.substring(0, 1)):
+        return None
+    var si = 0
+    while si < trimmed.length():
+        val c = trimmed.substring(si, si + 1)
+        if c == ":":
+            break
+        if not (_url_is_alpha(c) or _url_is_digit(c) or c == "+" or c == "-" or c == "."):
+            return None
+        si = si + 1
+    if si >= trimmed.length():
+        return None
+    val scheme = trimmed.substring(0, si).to_lower()
+    var rest = trimmed.substring(si + 1, trimmed.length())
+    val special = url_is_special(scheme)
+
+    # --- fragment then query (both split before the authority) ----------
     var fragment = ""
-    var remaining = url
-    var scheme_end = remaining.index_of("://")
-    if scheme_end >= 0:
-        scheme = remaining.substring(0, scheme_end)
-        remaining = remaining.substring(scheme_end + 3, remaining.length())
-        if scheme == "https":
-            port = 443
+    val frag_at = rest.index_of("#")
+    if frag_at >= 0:
+        fragment = rest.substring(frag_at + 1, rest.length())
+        rest = rest.substring(0, frag_at)
+    var query = ""
+    val q_at = rest.index_of("?")
+    if q_at >= 0:
+        query = rest.substring(q_at + 1, rest.length())
+        rest = rest.substring(0, q_at)
+
+    # --- opaque path (data:, about:, javascript:, mailto:) --------------
+    if not rest.starts_with("//"):
+        if special:
+            # A special scheme without "//" is malformed (e.g. "http:example.com").
+            return None
+        return Some(UrlParts(
+            scheme: scheme, host: "", port: 0, path: rest,
+            query: query, fragment: fragment, opaque: true))
+
+    val after = rest.substring(2, rest.length())
+
+    # --- authority ------------------------------------------------------
+    var authority = after
+    var path = ""
+    val slash_at = after.index_of("/")
+    if slash_at >= 0:
+        authority = after.substring(0, slash_at)
+        path = after.substring(slash_at, after.length())
+
+    # Everything up to the LAST "@" is userinfo, not the host. Splitting on the
+    # first "@" is the classic "http://evil.com@good.com" host-spoof.
+    val at_pos = authority.last_index_of("@")
+    if at_pos >= 0:
+        authority = authority.substring(at_pos + 1, authority.length())
+
+    var host = ""
+    var port = 0
+    if authority.starts_with("["):
+        val close = authority.index_of("]")
+        if close < 0:
+            return None
+        val inner = authority.substring(1, close)
+        if not _url_valid_ipv6(inner):
+            return None
+        host = "[" + inner.to_lower() + "]"
+        val tail = authority.substring(close + 1, authority.length())
+        if tail.length() > 0:
+            if not tail.starts_with(":"):
+                return None
+            val ptxt = tail.substring(1, tail.length())
+            if ptxt.length() > 0:
+                val p = _url_parse_port(ptxt)
+                if p < 0:
+                    return None
+                port = p
     else:
-        scheme = "http"
-    var fragment_start = remaining.index_of("#")
-    if fragment_start >= 0:
-        fragment = remaining.substring(fragment_start + 1, remaining.length())
-        remaining = remaining.substring(0, fragment_start)
-    var query_start = remaining.index_of("?")
-    if query_start >= 0:
-        query = remaining.substring(query_start + 1, remaining.length())
-        remaining = remaining.substring(0, query_start)
-    var path_start = remaining.index_of("/")
-    if path_start >= 0:
-        path = remaining.substring(path_start, remaining.length())
-        remaining = remaining.substring(0, path_start)
-    var port_start = remaining.index_of(":")
-    if port_start >= 0:
-        host = remaining.substring(0, port_start)
-        var port_str = remaining.substring(port_start + 1, remaining.length())
-        port = port_str.parse_int()
-    else:
-        host = remaining
-    (scheme, host, port, path, query, fragment)
+        val colon = authority.index_of(":")
+        if colon >= 0:
+            host = authority.substring(0, colon).to_lower()
+            val ptxt = authority.substring(colon + 1, authority.length())
+            if ptxt.length() > 0:
+                val p = _url_parse_port(ptxt)
+                if p < 0:
+                    return None
+                port = p
+        else:
+            host = authority.to_lower()
+        if host.length() == 0:
+            # "file://" legitimately has an empty host; nothing else may.
+            if scheme != "file":
+                return None
+        else:
+            if not _url_valid_host(host):
+                return None
+
+    if scheme == "file" and port != 0:
+        return None
+    if port == 0:
+        port = url_default_port(scheme)
+    if path.length() == 0 and special:
+        path = "/"
+    Some(UrlParts(
+        scheme: scheme, host: host, port: port, path: path,
+        query: query, fragment: fragment, opaque: false))
 
 fn build_url(scheme: text, host: text, port: i64, path: text, query: text, fragment: text) -> text:
     var url = scheme + "://" + host
-    var default_port = 80
-    if scheme == "https":
-        default_port = 443
-    if port != default_port:
+    val default_port = url_default_port(scheme)
+    if port != default_port and port != 0:
         url = url + ":" + port.to_string()
     url = url + path
     if query.length() > 0:
@@ -98,26 +290,25 @@ fn build_url(scheme: text, host: text, port: i64, path: text, query: text, fragm
         url = url + "#" + fragment
     url
 
-fn url_join(base: text, relative: text) -> text:
-    if relative.starts_with("http://") or relative.starts_with("https://"):
-        relative
-    else:
-        var parsed = parse_url(url: base)
-        var scheme = parsed.0
-        var host = parsed.1
-        var port = parsed.2
-        var base_path = parsed.3
-        var new_path = relative
-        if relative.starts_with("/"):
-            new_path = relative
+fn url_join(base: text, relative: text) -> Option<text>:
+    """Resolve `relative` against `base`. `None` when `base` is unparseable."""
+    val rel_abs = parse_url(relative)
+    if rel_abs.?:
+        return Some(relative)
+    val parsed = parse_url(base)
+    if not parsed.?:
+        return None
+    val b = parsed!
+    if b.opaque:
+        return None
+    var new_path = relative
+    if not relative.starts_with("/"):
+        val last_slash = b.path.last_index_of("/")
+        if last_slash >= 0:
+            new_path = b.path.substring(0, last_slash + 1) + relative
         else:
-            var last_slash = base_path.last_index_of("/")
-            if last_slash >= 0:
-                var dir = base_path.substring(0, last_slash + 1)
-                new_path = dir + relative
-            else:
-                new_path = "/" + relative
-        build_url(scheme: scheme, host: host, port: port, path: new_path, query: "", fragment: "")
+            new_path = "/" + relative
+    Some(build_url(scheme: b.scheme, host: b.host, port: b.port, path: new_path, query: "", fragment: ""))
 
 fn parse_query_string(query: text) -> list:
     var params = []
@@ -154,28 +345,29 @@ fn build_query_string(params: list) -> text:
         i = i + 1
     parts.join("&")
 
-fn add_query_param(url: text, key: text, value: text) -> text:
-    var parsed = parse_url(url: url)
-    var scheme = parsed.0
-    var host = parsed.1
-    var port = parsed.2
-    var path = parsed.3
-    var query = parsed.4
-    var fragment = parsed.5
-    var params = parse_query_string(query)
+fn add_query_param(url: text, key: text, value: text) -> Option<text>:
+    """Append a query parameter. `None` when `url` is not a parseable URL."""
+    val parsed = parse_url(url)
+    if not parsed.?:
+        return None
+    val u = parsed!
+    if u.opaque:
+        return None
+    var params = parse_query_string(u.query)
     params.append((key, value))
-    var new_query = build_query_string(params)
-    build_url(scheme: scheme, host: host, port: port, path: path, query: new_query, fragment: fragment)
+    val new_query = build_query_string(params)
+    Some(build_url(scheme: u.scheme, host: u.host, port: u.port, path: u.path,
+                   query: new_query, fragment: u.fragment))
 
-fn remove_query_param(url: text, key: text) -> text:
-    var parsed = parse_url(url: url)
-    var scheme = parsed.0
-    var host = parsed.1
-    var port = parsed.2
-    var path = parsed.3
-    var query = parsed.4
-    var fragment = parsed.5
-    var params = parse_query_string(query)
+fn remove_query_param(url: text, key: text) -> Option<text>:
+    """Drop a query parameter. `None` when `url` is not a parseable URL."""
+    val parsed = parse_url(url)
+    if not parsed.?:
+        return None
+    val u = parsed!
+    if u.opaque:
+        return None
+    var params = parse_query_string(u.query)
     var filtered = []
     var i = 0
     while i < params.length():
@@ -183,5 +375,6 @@ fn remove_query_param(url: text, key: text) -> text:
         if param.0 != key:
             filtered.append(param)
         i = i + 1
-    var new_query = build_query_string(filtered)
-    build_url(scheme: scheme, host: host, port: port, path: path, query: new_query, fragment: fragment)
+    val new_query = build_query_string(filtered)
+    Some(build_url(scheme: u.scheme, host: u.host, port: u.port, path: u.path,
+                   query: new_query, fragment: u.fragment))

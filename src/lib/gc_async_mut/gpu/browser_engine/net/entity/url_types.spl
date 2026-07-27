@@ -4,39 +4,81 @@
 Entity types for URL and Origin — pure value types with no externs.
 """
 
-use std.gc_async_mut.http_client.types.{parse_url}
+use std.gc_async_mut.http_client.types.{parse_url, url_default_port}
 
 pub class Url:
-    """A parsed URL with scheme, host, port, path, query, and fragment."""
+    """A parsed URL with scheme, host, port, path, query, and fragment.
+
+    `opaque` marks URLs parsed without an authority (`data:`, `about:`,
+    `javascript:`, `mailto:`); those have an empty `host` and must never be
+    treated as same-origin with a network URL.
+    """
     scheme: text
     host: text
     port: i64
     path: text
     query: text
     fragment: text
+    opaque: bool
 
     static fn create(scheme: text, host: text, port: i64, path: text) -> Url:
-        Url(scheme: scheme, host: host, port: port, path: path, query: "", fragment: "")
+        Url(scheme: scheme, host: host, port: port, path: path, query: "", fragment: "", opaque: false)
 
-    static fn parse(raw: text) -> Url:
+    static fn parse(raw: text) -> Option<Url>:
+        """Parse an absolute URL. `None` when `raw` is not a parseable URL.
+
+        This never falls back to a guessed `http` scheme or an empty host, so
+        two unparseable inputs are no longer mutually same-origin.
+        """
         val parsed = parse_url(raw)
-        Url(
-            scheme: parsed.0.to_lower(),
-            host: parsed.1.to_lower(),
-            port: parsed.2,
-            path: parsed.3,
-            query: parsed.4,
-            fragment: parsed.5
-        )
+        if not parsed.?:
+            return None
+        val p = parsed!
+        Some(Url(
+            scheme: p.scheme,
+            host: p.host,
+            port: p.port,
+            path: p.path,
+            query: p.query,
+            fragment: p.fragment,
+            opaque: p.opaque
+        ))
+
+    static fn opaque_invalid(raw: text) -> Url:
+        """The fail-closed stand-in for an unparseable URL.
+
+        Empty scheme and host, so it is same-origin with nothing and cannot be
+        confused for a real site. Use only where the caller has no failure
+        channel; prefer `Url.parse` and propagate the `None`.
+        """
+        Url(scheme: "", host: "", port: 0, path: raw, query: "", fragment: "", opaque: true)
+
+    static fn parse_or_opaque(raw: text) -> Url:
+        """`Url.parse`, falling back to `Url.opaque_invalid` instead of a
+        guessed `http` origin."""
+        val parsed = Url.parse(raw)
+        if parsed.?:
+            return parsed!
+        Url.opaque_invalid(raw)
+
+    fn valid() -> bool:
+        """False for the fail-closed stand-in produced by `parse_or_opaque`."""
+        self.scheme != ""
 
     fn authority() -> text:
         var out = self.host
-        val default_port = (self.scheme == "http" and self.port == 80) or (self.scheme == "https" and self.port == 443)
-        if self.port > 0 and not default_port:
+        if self.port > 0 and self.port != url_default_port(self.scheme):
             out = out + ":{self.port}"
         out
 
     fn to_text() -> text:
+        if self.opaque:
+            var opq = "{self.scheme}:{self.path}"
+            if self.query != "":
+                opq = opq + "?{self.query}"
+            if self.fragment != "":
+                opq = opq + "#{self.fragment}"
+            return opq
         var out = "{self.scheme}://{self.authority()}"
         out = out + self.path
         if self.query != "":
@@ -56,7 +98,6 @@ pub class Origin:
 
     fn to_text() -> text:
         var out = "{self.scheme}://{self.host}"
-        val default_port = (self.scheme == "http" and self.port == 80) or (self.scheme == "https" and self.port == 443)
-        if self.port > 0 and not default_port:
+        if self.port > 0 and self.port != url_default_port(self.scheme):
             out = out + ":{self.port}"
         out
