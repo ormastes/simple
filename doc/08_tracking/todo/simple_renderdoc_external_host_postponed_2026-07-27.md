@@ -14,6 +14,14 @@ Status: postponed until local implementation and aggregate checks are green.
 | Physical boards | Identity, firmware, boot, receipt, external capture, and oracle evidence | Board-specific lane |
 | Chrome/Electron | Vulkan backing, interaction, RDC capture, and exact ARGB | Prepared browser host |
 
+## Concrete external-host handoff
+
+| Row | Owner | Prerequisites | Retained artifacts | Exact resume command |
+|---|---|---|---|---|
+| Windows Vulkan/PowerShell | prepared Windows Vulkan host operator | `pwsh`, Vulkan driver/ICD, admitted pure-Simple `simple.exe`, writable build directory | evidence env/log, strict/parity logs, backend/device identity, exact 256-pixel checksums | `pwsh -File scripts/check/check-vulkan-engine2d-readback.ps1 -SimpleBinary <admitted-simple.exe>` |
+| ARM64 QEMU | `/root/arm_qemu_owner` | QEMU AArch64, firmware, admitted ELF/FAT disk/manifest | frozen manifest, ELF/FAT hashes, serial/QMP/RAMFB captures, VirtIO/NEON receipts, timing/RSS | `sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs && sh scripts/check/check-simpleos-arm64-qmp-input-evidence.shs` |
+| RV64 QEMU | prepared RV64 host operator | QEMU RV64, admitted ELF, PCI VirtIO input, QMP, parity oracle | frozen manifest, ELF hash, serial/QMP/RAMFB captures, PCI/ISR/input receipts, parity, timing/RSS | `bin/simple os build --scenario=riscv64-display-smoke && scripts/check/check-rv64-display-smoke-qmp-evidence.shs --wm-font-input` |
+
 ## Active fail-closed system rows
 
 | Spec | Diagnostic result | Missing prerequisite |

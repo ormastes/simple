@@ -21,7 +21,49 @@ rm -f "$OUT_ENV" "$REPORT_PATH"
 value_of() {
     key="$1"
     file="$2"
-    sed -n "s/^${key}=//p" "$file" 2>/dev/null | tail -n 1
+    awk -v prefix="$key=" '
+        index($0, prefix) == 1 {
+            count += 1
+            value = substr($0, length(prefix) + 1)
+        }
+        END {
+            if (count == 1 && value != "") print value
+        }
+    ' "$file" 2>/dev/null || true
+}
+
+duplicate_key_of() {
+    file="$1"
+    awk '
+        {
+            separator = index($0, "=")
+            if (separator > 1) {
+                key = substr($0, 1, separator - 1)
+                seen[key] += 1
+                if (seen[key] == 2) {
+                    print key
+                    exit
+                }
+            }
+        }
+    ' "$file" 2>/dev/null || true
+}
+
+parser_self_test() {
+    parser_test_file="$(mktemp "${TMPDIR:-/tmp}/renderdoc-simple-gate-parser.XXXXXX")"
+    trap 'rm -f "$parser_test_file"' EXIT HUP INT TERM
+    printf '%s\n' 'status=pass' >"$parser_test_file"
+    [ "$(value_of status "$parser_test_file")" = "pass" ] || return 1
+    [ "$(duplicate_key_of "$parser_test_file")" = "" ] || return 1
+    printf '%s\n' 'status=fail' 'status=pass' >"$parser_test_file"
+    [ "$(value_of status "$parser_test_file")" = "" ] || return 1
+    [ "$(duplicate_key_of "$parser_test_file")" = "status" ] || return 1
+    echo "rdoc_simple_gate_parser_self_test_status=pass"
+}
+
+if [ "${RDOC_SIMPLE_GATE_PARSER_SELF_TEST:-0}" = "1" ]; then
+    parser_self_test
+    exit $?
 }
 
 file_exists_status() {
@@ -105,6 +147,7 @@ write_evidence() {
         echo "rdoc_simple_gate_status=$status"
         echo "rdoc_simple_gate_reason=$reason"
         echo "rdoc_simple_gate_source_env=$SOURCE_ENV"
+        echo "rdoc_simple_gate_source_duplicate_key=${source_duplicate_key:-}"
         echo "rdoc_simple_gate_backend=${backend:-}"
         echo "rdoc_simple_gate_scene=${scene:-}"
         echo "rdoc_simple_gate_program=${program:-}"
@@ -136,6 +179,7 @@ write_evidence() {
         echo "rdoc_simple_gate_capture_identity_status=${capture_identity_status:-fail}"
         echo "rdoc_simple_gate_replay_status=${replay_status:-fail}"
         echo "rdoc_simple_gate_replay_reason=${replay_reason:-missing}"
+        echo "rdoc_simple_gate_replay_duplicate_key=${replay_duplicate_key:-}"
         echo "rdoc_simple_gate_replay_driver=${replay_driver:-}"
         echo "rdoc_simple_gate_replay_capture_path=${replay_capture_path:-}"
         echo "rdoc_simple_gate_replay_xml_path=${replay_xml_path:-}"
@@ -238,6 +282,7 @@ if [ ! -s "$SOURCE_ENV" ]; then
     exit 1
 fi
 
+source_duplicate_key="$(duplicate_key_of "$SOURCE_ENV")"
 backend="$(value_of rdoc_backend "$SOURCE_ENV")"
 scene="$(value_of rdoc_scene "$SOURCE_ENV")"
 program="$(value_of rdoc_program "$SOURCE_ENV")"
@@ -312,6 +357,7 @@ replay_convert_exit_code=-1
 owner_agreement_status="fail"
 owner_api="vulkan"
 replay_command_exit=-1
+replay_duplicate_key=""
 
 if [ "$capture_file_status" = "pass" ] \
     && [ "$capture_file_magic" = "RDOC" ] \
@@ -335,6 +381,7 @@ if [ "$capture_file_status" = "pass" ] \
             "vulkan" "$owner_frame_id" "$capture_frame_id" >"$REPLAY_ENV"
         replay_command_exit=$?
         set -e
+        replay_duplicate_key="$(duplicate_key_of "$REPLAY_ENV")"
         replay_status="$(value_of rdoc_simple_replay_status "$REPLAY_ENV")"
         replay_reason="$(value_of rdoc_simple_replay_reason "$REPLAY_ENV")"
         replay_driver="$(value_of rdoc_simple_replay_driver "$REPLAY_ENV")"
@@ -374,7 +421,9 @@ case "$program" in
         ;;
 esac
 
-if [ "$backend" = "simple" ] \
+if [ "$source_duplicate_key" = "" ] \
+    && [ "$replay_duplicate_key" = "" ] \
+    && [ "$backend" = "simple" ] \
     && [ "$scene" = "$REQUIRED_SCENE" ] \
     && [ "$program_matches" = "1" ] \
     && [ "$capture_status" = "pass" ] \
@@ -422,7 +471,11 @@ fi
 
 classify_runtime_metadata
 
-if [ "$capture_status" = "" ]; then
+if [ "$source_duplicate_key" != "" ]; then
+    write_evidence "fail" "duplicate-source-evidence-key"
+elif [ "$replay_duplicate_key" != "" ]; then
+    write_evidence "fail" "duplicate-replay-evidence-key"
+elif [ "$capture_status" = "" ]; then
     write_evidence "unavailable" "missing-capture-status"
 elif [ "$backend" != "simple" ]; then
     write_evidence "fail" "unexpected-backend"

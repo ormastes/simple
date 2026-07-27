@@ -1092,6 +1092,11 @@ Tracking split:
   `status=fail` could be hidden by a later pass row. Both receipts now reuse one
   strict parser that rejects malformed/empty/duplicate keys. The focused Node
   mutation requires the normalized composition-artifact failure.
+- simple-renderdoc-duplicate-keys: The Simple RenderDoc gate previously selected
+  the last producer/replay value, so a leading failure could be hidden by a
+  later pass row. Its shared extractor now accepts exactly one nonempty value,
+  rejects duplicate source or replay keys with typed reasons, and has a bounded
+  host-independent parser self-test. Live RenderDoc was not run.
 - readback-revision-order: The host classifier previously required baseline and
   input revisions only to differ, so a backwards revision could qualify as a
   screen-driven render. It now compares validated arbitrary-width decimal

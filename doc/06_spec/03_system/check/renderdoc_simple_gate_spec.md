@@ -88,6 +88,14 @@ sh scripts/check/check-renderdoc-simple-gate.shs || true
 
 ### RenderDoc Simple gate
 
+#### rejects duplicate source and replay evidence keys at the shared parser boundary
+
+The gate's host-independent parser self-test requires one nonempty value for a
+key and rejects conflicting duplicate rows. The source contract also requires
+typed `duplicate-source-evidence-key` and `duplicate-replay-evidence-key`
+failures; last-write-wins `tail -n 1` parsing is forbidden. Runnable source:
+`test/03_system/check/renderdoc_simple_gate_spec.spl`.
+
 #### writes typed non-pass evidence for missing or failed Simple capture
 
 <details>
@@ -322,8 +330,8 @@ malformed text, or appending a byte to the `.rdc` produces
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
