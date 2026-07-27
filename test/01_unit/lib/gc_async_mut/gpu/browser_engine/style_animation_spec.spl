@@ -1,0 +1,134 @@
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
+use std.gc_async_mut.gpu.browser_engine.style.animation.{
+    Animation, AnimationEngine, CSSDeclaration, CSSValue, Keyframe, Transition,
+    sample_keyframes, style_animation_capacity_available
+}
+use std.gc_async_mut.gpu.browser_engine.style_block_parse.{extract_keyframes}
+use std.common.animation.timing.{TimingFunction}
+
+describe "Browser CSS animation target identity":
+
+    it "bounds active style animation state":
+        expect(style_animation_capacity_available(1023)).to_equal(true)
+        expect(style_animation_capacity_available(1024)).to_equal(false)
+
+    it "emits interpolated updates for the animated DOM node":
+        val start = Keyframe.create(
+            0.0, [CSSDeclaration.create("opacity", CSSValue.Number(v: 0.0))]
+        )
+        val finish = Keyframe.create(
+            1.0, [CSSDeclaration.create("opacity", CSSValue.Number(v: 1.0))]
+        )
+        val logger = Logger.new("style-animation-spec", LogLevel.Error)
+        val engine = AnimationEngine.new(logger)
+        engine.add_animation(
+            Animation.create_for_node(42, "fade", [start, finish], 100.0)
+        )
+
+        expect(engine.tick(0.0).len()).to_equal(0)
+        val updates = engine.tick(50.0)
+        expect(updates.len()).to_equal(1)
+        expect(updates[0].node_id).to_equal(42)
+        expect(updates[0].property).to_equal("opacity")
+
+    it "emits transition updates for the transitioned DOM node":
+        val logger = Logger.new("style-transition-spec", LogLevel.Error)
+        val engine = AnimationEngine.new(logger)
+        engine.add_transition(Transition.create_for_node(
+            77, "width", CSSValue.Number(v: 10.0),
+            CSSValue.Number(v: 20.0), 100.0
+        ))
+
+        expect(engine.tick(0.0).len()).to_equal(0)
+        val updates = engine.tick(50.0)
+        expect(updates.len()).to_equal(1)
+        expect(updates[0].node_id).to_equal(77)
+        expect(updates[0].property).to_equal("width")
+
+    it "starts the next iteration at the first keyframe":
+        val start = Keyframe.create(
+            0.0, [CSSDeclaration.create("opacity", CSSValue.Number(v: 0.0))]
+        )
+        val finish = Keyframe.create(
+            1.0, [CSSDeclaration.create("opacity", CSSValue.Number(v: 1.0))]
+        )
+        val logger = Logger.new("style-animation-boundary", LogLevel.Error)
+        val engine = AnimationEngine.new(logger)
+        var animation = Animation.create_for_node(
+            42, "repeat", [start, finish], 100.0
+        )
+        animation.iteration_count = 2.0
+        animation.timing = TimingFunction.Linear
+        engine.add_animation(animation)
+
+        expect(engine.tick(0.0).len()).to_equal(0)
+        val updates = engine.tick(100.0)
+        match updates[0].value:
+            CSSValue.Number(v):
+                expect(v).to_equal(0.0)
+            _:
+                fail("Expected repeated animation boundary value")
+
+    it "parses typed keyframe values before interpolating them":
+        val registry = extract_keyframes("""
+            @keyframes fade {
+                from { background-color: #ff0000; width: 10px; opacity: 0; }
+                to { background-color: #0000ff; width: 20px; opacity: 1; }
+            }
+        """)
+        expect(registry.entries.len()).to_equal(1)
+
+        val updates = sample_keyframes(42, registry.entries[0].frames, 0.5)
+        expect(updates.len()).to_equal(3)
+        match updates[0].value:
+            CSSValue.Color(color):
+                expect(color.r).to_equal(127)
+                expect(color.g).to_equal(0)
+                expect(color.b).to_equal(127)
+            _:
+                expect(false).to_equal(true)
+        match updates[1].value:
+            CSSValue.Length(v, unit):
+                expect(v).to_equal(15.0)
+                expect(unit).to_equal("px")
+            _:
+                expect(false).to_equal(true)
+        match updates[2].value:
+            CSSValue.Number(v):
+                expect(v).to_equal(0.5)
+            _:
+                expect(false).to_equal(true)
+
+    it "sorts reversed keyframes and caps hostile frame counts":
+        val reversed = extract_keyframes("""
+            @keyframes reverse {
+                to { opacity: 1; }
+                from { opacity: 0; }
+            }
+        """)
+        val updates = sample_keyframes(
+            42, reversed.entries[0].frames, 0.25
+        )
+        match updates[0].value:
+            CSSValue.Number(v):
+                expect(v).to_equal(0.25)
+            _:
+                fail("Expected sorted keyframe interpolation")
+
+        var hostile = "@keyframes bounded {"
+        var index = 0
+        while index < 300:
+            hostile = hostile + "{index}% { opacity: {index}; }"
+            index = index + 1
+        hostile = hostile + "}"
+        val bounded = extract_keyframes(hostile)
+        expect(bounded.entries[0].frames.len()).to_equal(256)
+
+        var hostile_rules = ""
+        index = 0
+        while index < 1030:
+            hostile_rules = hostile_rules + "@keyframes k{index} { from { opacity: 0; } to { opacity: 1; } }"
+            index = index + 1
+        expect(extract_keyframes(hostile_rules).entries.len()).to_equal(1024)

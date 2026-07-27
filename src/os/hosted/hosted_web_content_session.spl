@@ -1,0 +1,202 @@
+# Hosted-only semantic Web adapter. BrowserSession stays out of compositor core.
+
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.gpu.browser_engine.layout.{hit_test, layout_tree}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_event_identity}
+
+struct HostedWebContentDispatch:
+    event_id: i64
+    wm_target_id: i64
+    semantic_target_id: text
+    callback_count: i64
+    mutation_revision: i64
+    reason: text
+
+class HostedWebContentSession:
+    window_id: i64
+    width: i32
+    height: i32
+    browser: BrowserSession
+    mutation_revision: i64
+    failure_reason: text
+    last_target_id: text
+    published_body_html: text
+    started_at_ms: i64
+
+    static fn create(window_id: i64, body_html: text, width: i32, height: i32) -> HostedWebContentSession:
+        var browser = BrowserSession.new()
+        val opened = browser.open_html(
+            "simple-wm://window/{window_id}",
+            "<html><body>{body_html}</body></html>"
+        )
+        var failure_reason = ""
+        if val Err(reason) = opened:
+            failure_reason = reason
+        HostedWebContentSession(
+            window_id: window_id,
+            width: width,
+            height: height,
+            browser: browser,
+            mutation_revision: 0,
+            failure_reason: failure_reason,
+            last_target_id: "",
+            published_body_html: body_html,
+            started_at_ms: -1
+        )
+
+    me advance_at(now_ms: i64) -> bool:
+        if self.failure_reason != "" or now_ms < 0:
+            return false
+        if self.started_at_ms < 0:
+            self.started_at_ms = now_ms
+        val _ = self.browser.advance_time(now_ms - self.started_at_ms)
+        val body_html = self.browser.current_body_html
+        if body_html == self.published_body_html:
+            return false
+        self.published_body_html = body_html
+        self.mutation_revision = self.mutation_revision + 1
+        true
+
+    me dispatch_pointer_at(event_id: i64, x: i32, y: i32, down: bool) -> HostedWebContentDispatch:
+        if self.failure_reason != "":
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "",
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: self.failure_reason
+            )
+        val root = self.browser.dom_root()
+        val layout = layout_tree(root, self.width.to_f64(), self.height.to_f64())
+        val target = hit_test(layout, root, x.to_f64(), y.to_f64())
+        if target == nil:
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "",
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: "no-semantic-target"
+            )
+        val target_id = be_dom_event_identity(target.unwrap())
+        self.last_target_id = target_id
+        if down:
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: target_id,
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: ""
+            )
+        val before = self.browser.current_body_html
+        self.browser.dispatch_dom_event(target_id, "click", true, true)
+        val changed = self.browser.current_body_html != before
+        if changed:
+            self.published_body_html = self.browser.current_body_html
+            self.mutation_revision = self.mutation_revision + 1
+        HostedWebContentDispatch(
+            event_id: event_id,
+            wm_target_id: self.window_id,
+            semantic_target_id: target_id,
+            callback_count: if changed: 1 else: 0,
+            mutation_revision: self.mutation_revision,
+            reason: if changed: "" else: "no-application-mutation"
+        )
+
+    me dispatch_text(event_id: i64, value: text) -> HostedWebContentDispatch:
+        if self.last_target_id == "":
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: "",
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: "no-focused-semantic-target"
+            )
+        val before = self.browser.current_body_html
+        val updated = self.browser.set_dom_text_input(self.last_target_id, value)
+        if val Err(reason) = updated:
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: self.window_id,
+                semantic_target_id: self.last_target_id,
+                callback_count: 0,
+                mutation_revision: self.mutation_revision,
+                reason: reason
+            )
+        val changed = self.browser.current_body_html != before
+        if changed:
+            self.published_body_html = self.browser.current_body_html
+            self.mutation_revision = self.mutation_revision + 1
+        HostedWebContentDispatch(
+            event_id: event_id,
+            wm_target_id: self.window_id,
+            semantic_target_id: self.last_target_id,
+            callback_count: if changed: 1 else: 0,
+            mutation_revision: self.mutation_revision,
+            reason: if changed: "" else: "no-application-mutation"
+        )
+
+    fn current_body_html() -> text:
+        self.browser.current_body_html
+
+    fn render_to_pixels() -> [u32]:
+        self.browser.render_to_pixels(self.width, self.height).pixel_data
+
+class HostedWebContentRegistry:
+    sessions: [HostedWebContentSession]
+
+    static fn create() -> HostedWebContentRegistry:
+        HostedWebContentRegistry(sessions: [])
+
+    me _session_index(window_id: i64) -> i32:
+        var i = 0
+        while i < self.sessions.len():
+            if self.sessions[i].window_id == window_id:
+                return i
+            i = i + 1
+        -1
+
+    me _ensure(window_id: i64, body_html: text, width: i32, height: i32) -> i32:
+        val existing = self._session_index(window_id)
+        if existing >= 0:
+            var session = self.sessions[existing]
+            session.width = width
+            session.height = height
+            self.sessions[existing] = session
+            return existing
+        self.sessions.push(HostedWebContentSession.create(window_id, body_html, width, height))
+        self.sessions.len() - 1
+
+    me advance_window(window_id: i64, body_html: text, width: i32, height: i32, now_ms: i64) -> bool:
+        val index = self._ensure(window_id, body_html, width, height)
+        var session = self.sessions[index]
+        val changed = session.advance_at(now_ms)
+        self.sessions[index] = session
+        changed
+
+    me dispatch_pointer(event_id: i64, window_id: i64, body_html: text, width: i32, height: i32, x: i32, y: i32, down: bool) -> HostedWebContentDispatch:
+        val index = self._ensure(window_id, body_html, width, height)
+        var session = self.sessions[index]
+        val receipt = session.dispatch_pointer_at(event_id, x, y, down)
+        self.sessions[index] = session
+        receipt
+
+    me dispatch_text(event_id: i64, window_id: i64, body_html: text, width: i32, height: i32, value: text) -> HostedWebContentDispatch:
+        val index = self._ensure(window_id, body_html, width, height)
+        var session = self.sessions[index]
+        val receipt = session.dispatch_text(event_id, value)
+        self.sessions[index] = session
+        receipt
+
+    fn body_html(window_id: i64) -> text:
+        var i = 0
+        while i < self.sessions.len():
+            if self.sessions[i].window_id == window_id:
+                return self.sessions[i].current_body_html()
+            i = i + 1
+        ""

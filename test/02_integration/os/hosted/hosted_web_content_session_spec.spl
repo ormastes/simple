@@ -1,0 +1,88 @@
+use std.spec.*
+use common.window_protocol.geometry.{Size}
+use common.window_protocol.compositor_methods.{COMP_CREATE_WINDOW}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.host_compositor_core.{
+    HostCompositor,
+    host_compositor_update_window_content
+}
+use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+
+fn checksum(pixels: [u32]) -> i64:
+    var out: i64 = 0
+    for pixel in pixels:
+        out = (out + pixel.to_i64()) % 2147483647
+    out
+
+fn count_color(pixels: [u32], color: u32) -> i64:
+    var count: i64 = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
+
+describe "hosted Web content session":
+
+    it "applies CSS and advances Simple Script and JavaScript animation on the host clock":
+        var session = HostedWebContentSession.create(
+            7,
+            "<style>#stage{width:32px;height:24px;background-color:#ef4444}</style><script type='text/simple'>title \"SimpleReady\"\nbody_html '<div id=\"stage\"></div>'</script><script>requestAnimationFrame(function(frameTime){document.title='Animated';document.body.innerHTML='<div style=\"width:32px;height:24px;background-color:#2563eb\"></div>';});</script>",
+            64, 48
+        )
+        expect(session.advance_at(1000)).to_be(true)
+        val first = session.render_to_pixels()
+        expect(session.browser.current_title).to_equal("SimpleReady")
+        expect(count_color(first, 0xFFEF4444u32)).to_be_greater_than(0)
+        expect(session.advance_at(1015)).to_be(false)
+        expect(session.advance_at(1016)).to_be(true)
+        val second = session.render_to_pixels()
+        expect(session.browser.current_title).to_equal("Animated")
+        expect(count_color(second, 0xFF2563EBu32)).to_be_greater_than(0)
+        expect(checksum(second) == checksum(first)).to_be(false)
+
+    it "fails closed when no semantic element is hit or focused":
+        var session = HostedWebContentSession.create(
+            9, "<input id='name' value='ready'>", 80, 40
+        )
+        val miss = session.dispatch_pointer_at(1, 100, 100, false)
+        expect(miss.reason).to_equal("no-semantic-target")
+        expect(miss.callback_count).to_equal(0)
+        val unfocused = session.dispatch_text(2, "Ada")
+        expect(unfocused.reason).to_equal("no-focused-semantic-target")
+        expect(unfocused.mutation_revision).to_equal(0)
+
+    # @req REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
+    it "carries one compositor-local pointer release through BrowserSession and the canonical Engine2D frame":
+        var comp = HostCompositor.new_headless(Size(width: 240u64, height: 180u64))
+        comp.apply_bridge_request(
+            1, 1, COMP_CREATE_WINDOW.to_i64(), 0, "Form", 20, 48, 180, 100,
+            "<style>input{display:block;width:40px;height:28px;background-color:#ef4444}input[checked]{background-color:#2563eb}</style><input id='accept' type='checkbox'>",
+            1, "hosted-web-event"
+        )
+        val target = comp.content_target(40, 90)
+        expect(target.is_some()).to_be(true)
+
+        var session = HostedWebContentSession.create(
+            target.unwrap().window_id,
+            target.unwrap().body_html,
+            target.unwrap().width,
+            target.unwrap().height
+        )
+        val before = session.render_to_pixels()
+        val receipt = session.dispatch_pointer_at(17, target.unwrap().local_x, target.unwrap().local_y, false)
+
+        expect(receipt.event_id).to_equal(17)
+        expect(receipt.wm_target_id).to_equal(target.unwrap().window_id)
+        expect(receipt.semantic_target_id).to_equal("accept")
+        expect(receipt.callback_count).to_equal(1)
+        expect(receipt.mutation_revision).to_equal(1)
+        expect(session.current_body_html()).to_contain("checked=\"checked\"")
+        expect(checksum(session.render_to_pixels()) == checksum(before)).to_be(false)
+
+        comp = host_compositor_update_window_content(comp, target.unwrap().window_id, session.current_body_html())
+        val raster = Engine2dCompositorBackend.create_named(240, 180, "software")
+        expect(comp.render_frame_engine2d(raster)).to_be(true)
+        val frame = comp.pure_simple_pixel_buffer()
+        expect(frame.len()).to_equal(240 * 180)
+        expect(checksum(frame)).to_be_greater_than(0)
+        raster.shutdown()

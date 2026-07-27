@@ -6,7 +6,7 @@
 # Implements the Fetch specification's request lifecycle: CORS check, cache lookup,
 # DNS resolution, HTTP request, redirect handling, cookie storage, and response caching.
 
-use std.gc_async_mut.gpu.browser_engine.net.entity.request_types {FetchRequest, FetchResponse, HttpMethod, RequestMode, RequestCredentials}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types {FetchRequest, FetchResponse, RequestMode}
 use std.gc_async_mut.gpu.browser_engine.net.entity.url_types {Url, Origin}
 use std.gc_async_mut.gpu.browser_engine.net.entity.cors_types {PreflightResult}
 use std.gc_async_mut.gpu.browser_engine.shared.error {BrowserError, BrowserResult, network_error}
@@ -39,11 +39,14 @@ class FetchEngine:
     max_redirects: i64
 
     static fn new(logger: Logger) -> FetchEngine:
+        FetchEngine.new_for_origin(logger, "")
+
+    static fn new_for_origin(logger: Logger, requester_origin: text) -> FetchEngine:
         FetchEngine(
             dns: DnsResolver.new(logger, DEFAULT_DNS_TTL),
             cache: HttpCache.new(logger, 50),
             cookie_store: CookieStore.new(),
-            cors: CorsChecker.new(""),
+            cors: CorsChecker.new(requester_origin),
             logger: logger,
             max_redirects: DEFAULT_MAX_REDIRECTS
         )
@@ -51,7 +54,7 @@ class FetchEngine:
     # The main fetch function. Implements the Fetch specification request lifecycle.
     # Steps: CORS check -> cache -> DNS -> HTTP -> redirects -> cookies -> cache store.
     me fetch(request: FetchRequest) -> Result<FetchResponse>:
-        self.logger.info("fetch: {method_text(request.method)} {request.url.to_text()}")
+        self.logger.info("fetch: {request.method.to_upper()} {request.url.to_text()}")
 
         # Step 1: CORS preflight if the request mode is Cors
         match request.mode:
@@ -63,10 +66,11 @@ class FetchEngine:
                 pass_do_nothing
 
         # Step 2: Check the HTTP cache
-        val cached = self.cache.lookup(request.url.to_text())
-        if val entry = cached:
-            self.logger.debug("fetch: cache hit for {request.url.to_text()}")
-            return Ok(FetchResponse(status: 200, headers: entry.headers, body: entry.body))
+        if request_cache_eligible(request):
+            val cached = self.cache.lookup(request.url.to_text())
+            if val entry = cached:
+                self.logger.debug("fetch: cache hit for {request.url.to_text()}")
+                return Ok(FetchResponse(status: 200, headers: entry.headers, body: entry.body))
 
         # Step 3: Execute the request with redirect support
         self.fetch_with_redirect(request, 0)
@@ -79,31 +83,23 @@ class FetchEngine:
             self.logger.error("fetch: exceeded maximum redirects ({self.max_redirects})")
             return Err(network_error("Too many redirects (max: {self.max_redirects})"))
 
-        # Step 3a: Resolve DNS for the target host
-        val url = request.url
-        val addresses = self.dns.resolve(url.host)?
-
-        if addresses.is_empty():
-            return Err(network_error("DNS resolution returned no addresses for {url.host}"))
-
-        val target_addr = addresses.get(0).unwrap_or("127.0.0.1")
-        self.logger.debug("fetch: resolved {url.host} -> {target_addr}")
-
-        # Step 3b: Attach cookies to the request
+        # Step 3a: Attach cookies to the request
         val request_with_cookies = self.attach_cookies(request)
 
-        # Step 3c: Perform the actual HTTP request
-        val response = self.execute_http(request_with_cookies, target_addr)?
+        # Step 3b: Perform the actual HTTP request. H1 owns the single DNS
+        # lookup so Fetch does not resolve every URL twice.
+        val response = self.execute_http(request_with_cookies)?
 
         # Step 3d: CORS response validation (for Cors mode)
         match request.mode:
             RequestMode.Cors:
-                val preflight_result = self.cors.validate_preflight(response.headers)
-                match preflight_result:
-                    PreflightResult.Denied(_):
-                        return Err(network_error("CORS response validation failed"))
-                    _:
-                        pass_do_nothing
+                if not self.cors.is_same_origin(request.url):
+                    val preflight_result = self.cors.validate_response(response.headers, request.credentials)
+                    match preflight_result:
+                        PreflightResult.Denied:
+                            return Err(network_error("CORS response validation failed"))
+                        _:
+                            pass_do_nothing
             _:
                 pass_do_nothing
 
@@ -121,13 +117,17 @@ class FetchEngine:
             if val loc = location:
                 self.logger.info("fetch: redirect {response.status} -> {loc}")
                 val redirect_url = self.resolve_redirect_url(request.url, loc)
+                if request.url.scheme == "https" and redirect_url.scheme != "https":
+                    return Err(network_error(
+                        "Blocked insecure redirect from {request.url.to_text()} to {redirect_url.to_text()}"
+                    ))
                 val redirect_request = self.create_redirect_request(request, redirect_url, response.status)
                 return self.fetch_with_redirect(redirect_request, redirect_count + 1)
             else:
                 self.logger.warn("fetch: redirect status {response.status} but no Location header")
 
         # Step 3g: Cache the response if eligible
-        if is_cacheable(response):
+        if request_cache_eligible(request) and is_cacheable(response):
             self.logger.debug("fetch: caching response for {request.url.to_text()}")
             val _ = self.cache.store(request.url.to_text(), response.body, response.headers)
 
@@ -143,15 +143,18 @@ class FetchEngine:
         self.logger.info("fetch: sending CORS preflight for {request.url.to_text()}")
         val preflight_req = self.cors.create_preflight(request)
 
-        # Resolve DNS for preflight (same host)
-        val addresses = self.dns.resolve(request.url.host)?
-        val target_addr = addresses.get(0).unwrap_or("127.0.0.1")
-
         # Send the OPTIONS preflight
-        val preflight_response = self.execute_http(preflight_req, target_addr)?
+        val preflight_response = self.execute_http(preflight_req)?
+        if preflight_response.status < 200 or preflight_response.status >= 300:
+            self.logger.warn("fetch: CORS preflight returned HTTP {preflight_response.status}")
+            return Ok(false)
 
         # Validate the preflight response headers (declared raw-text form)
-        val result = self.cors.validate_preflight(preflight_response.headers)
+        val result = self.cors.validate_preflight_method_with_credentials(
+            preflight_response.headers,
+            request.method,
+            request.credentials
+        )
         match result:
             PreflightResult.Allowed:
                 self.logger.debug("fetch: CORS preflight allowed")
@@ -166,7 +169,10 @@ class FetchEngine:
     # text-in, text-out or it corrupts the header block on redirects.
     fn attach_cookies(request: FetchRequest) -> FetchRequest:
         # Only attach cookies if credentials mode allows it
-        if not credentials_allows_cookies(request.credentials):
+        if not credentials_allow_request_cookies(
+            request.credentials,
+            self.cors.is_same_origin(request.url)
+        ):
             return request
 
         # CookieStore exposes the already-formatted "name=value; name2=value2"
@@ -195,8 +201,8 @@ class FetchEngine:
 
     # Perform the actual HTTP request over the network.
     # Routes through the H1 client which supports mock registry and plain HTTP TCP.
-    me execute_http(request: FetchRequest, target_addr: text) -> Result<FetchResponse>:
-        self.logger.debug("fetch: HTTP {method_text(request.method)} to {target_addr} for {request.url.to_text()}")
+    me execute_http(request: FetchRequest) -> Result<FetchResponse>:
+        self.logger.debug("fetch: HTTP {request.method.to_upper()} for {request.url.to_text()}")
 
         # Build a temporary H1 client to handle the request.
         # The H1 client checks the mock registry first, then uses real plain HTTP TCP.
@@ -306,6 +312,26 @@ fn credentials_allows_cookies(value: text) -> bool:
         v = v.slice(idx + 1, v.len())
     v.to_lower() != "omit"
 
+fn credentials_allow_request_cookies(value: text, same_origin: bool) -> bool:
+    var mode = "{value}".to_lower()
+    if mode.contains("::"):
+        val idx = mode.last_index_of(":")
+        mode = mode.slice(idx + 1, mode.len())
+    if mode == "include":
+        return true
+    if mode == "same-origin":
+        return same_origin
+    false
+
+fn request_cache_eligible(request: FetchRequest) -> bool:
+    val method = request.method.to_upper()
+    if method != "GET" and method != "HEAD":
+        return false
+    if credentials_allows_cookies(request.credentials):
+        return false
+    val headers = request.headers.to_lower()
+    not headers.contains("authorization:") and not headers.contains("cookie:")
+
 # Determine whether an HTTP status code indicates a redirect.
 fn should_redirect(status: i64) -> bool:
     status == 301 or status == 302 or status == 303 or status == 307 or status == 308
@@ -334,17 +360,6 @@ fn is_cacheable(response: FetchResponse) -> bool:
     # successful responses and let the cache layer handle method matching)
     true
 
-# Convert an HttpMethod to its text representation.
 # Create a default TLS configuration for use by the fetch transport.
 fn default_tls_config() -> TlsConfig:
-    TlsConfig(min_version: TlsVersion.Tls12)
-
-fn method_text(method: HttpMethod) -> text:
-    match method:
-        HttpMethod.Get: "GET"
-        HttpMethod.Post: "POST"
-        HttpMethod.Put: "PUT"
-        HttpMethod.Delete: "DELETE"
-        HttpMethod.Head: "HEAD"
-        HttpMethod.Options: "OPTIONS"
-        HttpMethod.Patch: "PATCH"
+    TlsConfig(min_version: TlsVersion.Tls12, verify_peer: true, sni_hostname: "")

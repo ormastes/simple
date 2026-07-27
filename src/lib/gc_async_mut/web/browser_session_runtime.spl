@@ -11,13 +11,26 @@
 # - _build_request: build a BrowserRequest with cookie header attached
 
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
-use std.gc_async_mut.gpu.browser_engine.html_string_parser.{browser_renderer_html_string_to_dom}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEventDispatch}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
+    browser_resource_size_allowed, BROWSER_MAX_DOCUMENT_SUBRESOURCES
+}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_dispatch_event_to_id, be_dom_find_by_tag, be_dom_find_path_to_id,
+    be_dom_focused_id, be_dom_get_attr, be_dom_has_attr, be_dom_serialize_children,
+    be_dom_submit_form_owner_id, be_dom_keyboard_activation_event_for_target,
+    be_dom_checked_radio_id_for_target
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
+use std.gc_async_mut.gpu.browser_engine.script.script_host.{
+    script_host_apply_action_to_id
+}
 use std.js.types.js_types.{JsValue}
-use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRuntimeState, BrowserLoadState, BrowserRequest, BrowserHistoryEntry}
-use std.gc_async_mut.web.browser_session_storage.{sync_storage_runtime_state, sync_browser_runtime_state, pair_value, upsert_pair, is_storage_api_property, is_storage_internal_property, storage_public_key_from_internal, js_value_to_storage_text}
+use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRuntimeState, BrowserLoadState, BrowserRequest, BrowserHistoryEntry, BrowserOriginStorage}
+use std.gc_async_mut.web.browser_session_storage.{sync_storage_runtime_state, pair_value, upsert_pair, is_storage_api_property, is_storage_internal_property, storage_public_key_from_internal, js_value_to_storage_text}
 use std.js.types.pair.{Pair}
 use std.gc_async_mut.web.browser_session_url.{resolve_relative_url, url_protocol, url_pathname, url_origin, url_host, url_search, url_hash}
-use std.gc_async_mut.web.browser_session_cookies.{cookie_text_for_url, merge_cookie_text, parse_cookie_line, upsert_cookie}
+use std.gc_async_mut.web.browser_session_cookies.{document_cookie_text_for_url, merge_cookie_text_for_url, parse_cookie_line_for_url, upsert_cookie}
 use std.gc_async_mut.web.browser_session_html.{
     extract_title_text, extract_body_inner_html, own_text,
     html_to_text, escape_html_text,
@@ -25,6 +38,77 @@ use std.gc_async_mut.web.browser_session_html.{
     extract_stylesheet_sources, _guest_runtime_probe_url
 }
 use std.gc_async_mut.web.browser_session_modules.{extract_script_blocks}
+use std.gc_async_mut.web.browser_session_form.{browser_form_submission}
+use std.gc_async_mut.web.browser_session_context.{
+    browser_csp_allows, browser_session_is_loopback_http,
+    browser_session_is_secure_context
+}
+
+fn browser_storage_origin_key(url: text) -> text:
+    val origin = url_origin(url)
+    if origin != "":
+        return origin
+    url
+
+fn browser_storage_entries_for_origin(
+    buckets: [BrowserOriginStorage], origin: text
+) -> [Pair<text, text>]:
+    for bucket in buckets:
+        if bucket.origin == origin:
+            return bucket.entries
+    []
+
+fn browser_storage_replace_origin(
+    buckets: [BrowserOriginStorage],
+    origin: text,
+    entries: [Pair<text, text>]
+) -> [BrowserOriginStorage]:
+    var next: [BrowserOriginStorage] = []
+    var replaced = false
+    for bucket in buckets:
+        if bucket.origin == origin:
+            next.push(BrowserOriginStorage(origin: origin, entries: entries))
+            replaced = true
+        else:
+            next.push(bucket)
+    if not replaced:
+        next.push(BrowserOriginStorage(origin: origin, entries: entries))
+    next
+
+fn _browser_session_dom_node_count(node: BeDomNode) -> i32:
+    var count = 1
+    for child in node.children:
+        count = count + _browser_session_dom_node_count(child)
+    count
+
+fn _browser_session_dom_action(action: text) -> bool:
+    action.starts_with("set-text:") or action.starts_with("set-attr:") or
+        action.starts_with("remove-attr:") or action.starts_with("add-class:") or
+        action.starts_with("remove-class:") or action.starts_with("toggle-class:")
+
+fn _browser_session_event_control(action: text) -> bool:
+    action == "prevent-default" or action == "stop-propagation" or
+        action == "stop-immediate-propagation"
+
+fn _browser_session_focus_default(action: text) -> bool:
+    action == "focus-element" or action == "button-activate" or
+        action == "input-checkbox-toggle" or action == "input-radio-select"
+
+fn _browser_session_checkable_click_action(
+    root: BeDomNode, target_id: text, event_type: text
+) -> text:
+    if event_type != "click":
+        return ""
+    val path = be_dom_find_path_to_id(root, target_id)
+    if path.len() == 0:
+        return ""
+    val target = path[path.len() - 1]
+    if target.tag_name != "input" or be_dom_has_attr(target, "disabled"):
+        return ""
+    match be_dom_get_attr(target, "type").lower():
+        "checkbox": "input-checkbox-toggle"
+        "radio": "input-radio-select"
+        _: ""
 
 fn storage_pairs_from_object(state: BrowserRuntimeState, object_id: i64) -> [Pair<text, text>]:
     val obj = state.runtime.get_host_object(object_id)
@@ -37,6 +121,26 @@ fn storage_pairs_from_object(state: BrowserRuntimeState, object_id: i64) -> [Pai
     out
 
 impl BrowserSession:
+
+    me _persist_storage_for_url(url: text):
+        if url == "":
+            return
+        val origin = browser_storage_origin_key(url)
+        self.session_storage_by_origin = browser_storage_replace_origin(
+            self.session_storage_by_origin, origin, self.session_storage
+        )
+        self.local_storage_by_origin = browser_storage_replace_origin(
+            self.local_storage_by_origin, origin, self.local_storage
+        )
+
+    me _activate_storage_for_url(url: text):
+        val origin = browser_storage_origin_key(url)
+        self.session_storage = browser_storage_entries_for_origin(
+            self.session_storage_by_origin, origin
+        )
+        self.local_storage = browser_storage_entries_for_origin(
+            self.local_storage_by_origin, origin
+        )
 
     me eval_script(script: text) -> Result<JsValue, text>:
         if self.runtime_state == nil:
@@ -54,35 +158,264 @@ impl BrowserSession:
                     return Err(e.message)
         Err("no active page runtime")
 
+    me advance_time(current_time_ms: i64) -> i64:
+        """Run page timers due at a deterministic monotonic timestamp."""
+        if current_time_ms < 0:
+            return 0
+        if current_time_ms > self.monotonic_time_ms:
+            self.monotonic_time_ms = current_time_ms
+        if val Some(state) = self.runtime_state:
+            var runtime = state.runtime
+            val ran = runtime.drain_due_timers(self.monotonic_time_ms)
+            state.runtime = runtime
+            self.runtime_state = Some(state)
+            if ran > 0:
+                self._flush_runtime_side_effects()
+            return ran
+        0
+
+    me dom_root() -> BeDomNode:
+        self.current_dom
+
+    me _sync_body_html_from_dom():
+        val bodies = be_dom_find_by_tag(self.current_dom, "body")
+        if bodies.len() > 0:
+            self.current_body_html = be_dom_serialize_children(bodies[0])
+
+    me _sync_runtime_body_from_dom():
+        self._sync_body_html_from_dom()
+        if val Some(state) = self.runtime_state:
+            var runtime = state.runtime
+            val body_text = html_to_text(self.current_body_html)
+            runtime.set_host_property(
+                state.body_id, "innerHTML",
+                JsValue.String(v: self.current_body_html)
+            )
+            runtime.set_host_property(
+                state.body_id, "textContent",
+                JsValue.String(v: body_text)
+            )
+            var interpreter = runtime.interpreter
+            interpreter.host_body_inner_html_value = JsValue.String(v: self.current_body_html)
+            interpreter.host_body_text_content_value = JsValue.String(v: body_text)
+            interpreter.host_body_inner_html_dirty = false
+            interpreter.host_body_text_content_dirty = false
+            runtime.interpreter = interpreter
+            state.runtime = runtime
+            self.runtime_state = Some(state)
+
+    me dispatch_dom_event(target_id: text, event_type: text, bubbles: bool, cancelable: bool) -> BeDomEventDispatch:
+        val checkable_action = _browser_session_checkable_click_action(
+            self.current_dom, target_id, event_type
+        )
+        var checked_before = false
+        var checked_radio_before = ""
+        if checkable_action != "":
+            val focused_id = be_dom_focused_id(self.current_dom)
+            if focused_id != "" and focused_id != target_id:
+                val _ = self._blur_dom_focus(focused_id)
+            val path = be_dom_find_path_to_id(self.current_dom, target_id)
+            if path.len() > 0:
+                checked_before = be_dom_has_attr(
+                    path[path.len() - 1], "checked"
+                )
+            if checkable_action == "input-radio-select":
+                checked_radio_before = be_dom_checked_radio_id_for_target(
+                    self.current_dom, target_id
+                )
+            self.current_dom = script_host_apply_action_to_id(
+                self.current_dom, target_id, checkable_action, true
+            )
+            self._sync_runtime_body_from_dom()
+        val dispatch = be_dom_dispatch_event_to_id(
+            self.current_dom, target_id, event_type, bubbles, cancelable
+        )
+        var action_index = 0
+        while action_index < dispatch.actions.len():
+            val action = dispatch.actions[action_index]
+            if _browser_session_dom_action(action):
+                self.current_dom = script_host_apply_action_to_id(
+                    self.current_dom,
+                    dispatch.current_target_ids[action_index],
+                    action,
+                    false
+                )
+            elif _browser_session_event_control(action) == false:
+                self._sync_runtime_body_from_dom()
+                val _ = self.eval_script(action)
+            action_index = action_index + 1
+        if checkable_action != "" and not dispatch.default_action_allowed:
+            val restore_action = if checked_before:
+                "set-attr:checked:checked"
+            else:
+                "remove-attr:checked"
+            self.current_dom = script_host_apply_action_to_id(
+                self.current_dom, target_id, restore_action, false
+            )
+            if (
+                checkable_action == "input-radio-select" and
+                checked_radio_before != "" and checked_radio_before != target_id
+            ):
+                self.current_dom = script_host_apply_action_to_id(
+                    self.current_dom, checked_radio_before,
+                    "set-attr:checked:checked", false
+                )
+        if dispatch.default_action_allowed:
+            if _browser_session_focus_default(dispatch.default_action):
+                val focused_id = be_dom_focused_id(self.current_dom)
+                if focused_id != "" and
+                   focused_id != dispatch.event.target_id:
+                    val _ = self._blur_dom_focus(focused_id)
+            if dispatch.default_action.starts_with("navigate:"):
+                val href = dispatch.default_action.substring(9, dispatch.default_action.len())
+                val target = resolve_relative_url(self.current_url, href)
+                val started = self.begin_network_navigation(target, "GET", "", "", "")
+                if val Err(e) = started:
+                    self.warnings.push("default navigation blocked: {e}")
+                return dispatch
+            if checkable_action == "":
+                self.current_dom = script_host_apply_action_to_id(
+                    self.current_dom, dispatch.event.target_id,
+                    dispatch.default_action, true
+                )
+            else:
+                self._sync_body_html_from_dom()
+                val _ = self.dispatch_dom_event(
+                    dispatch.event.target_id, "input", true, false
+                )
+                val _ = self.dispatch_dom_event(
+                    dispatch.event.target_id, "change", true, false
+                )
+            if event_type == "click" and dispatch.default_action == "button-activate":
+                val form_id = be_dom_submit_form_owner_id(
+                    self.current_dom, dispatch.event.target_id
+                )
+                if form_id != "":
+                    val submit_dispatch = self.dispatch_dom_event(
+                        form_id, "submit", true, true
+                    )
+                    if submit_dispatch.default_action_allowed:
+                        val submission = browser_form_submission(
+                            self.current_dom, form_id,
+                            dispatch.event.target_id, self.current_url
+                        )
+                        if submission.error != "":
+                            self.warnings.push(submission.error)
+                        else:
+                            val started = self.begin_network_navigation(
+                                submission.url, submission.method, "",
+                                submission.body, submission.content_type
+                            )
+                            if val Err(e) = started:
+                                self.warnings.push(
+                                    "form navigation blocked: {e}"
+                                )
+        self._sync_body_html_from_dom()
+        dispatch
+
+    me dispatch_dom_keyboard_activation(
+        target_id: text, key: text
+    ) -> Result<BeDomEventDispatch, text>:
+        val path = be_dom_find_path_to_id(self.current_dom, target_id)
+        if path.len() == 0:
+            return Err("DOM keyboard target not found")
+        val key_dispatch = self.dispatch_dom_event(
+            target_id, "keydown", true, true
+        )
+        if key_dispatch.event.default_prevented:
+            return Ok(key_dispatch)
+        val current_path = be_dom_find_path_to_id(self.current_dom, target_id)
+        if current_path.len() == 0:
+            return Err("DOM keyboard target was removed")
+        val event_type = be_dom_keyboard_activation_event_for_target(
+            current_path[current_path.len() - 1], key
+        )
+        if event_type == "":
+            return Err("key does not activate target")
+        Ok(self.dispatch_dom_event(target_id, event_type, true, true))
+
+    me set_dom_text_input(target_id: text, value: text) -> Result<BeDomEventDispatch, text>:
+        val path = be_dom_find_path_to_id(self.current_dom, target_id)
+        if path.len() == 0:
+            return Err("DOM input target not found")
+        val target = path[path.len() - 1]
+        if target.tag_name != "input" and target.tag_name != "textarea":
+            return Err("DOM input target is not text-editable")
+        if be_dom_has_attr(target, "disabled") or be_dom_has_attr(target, "readonly"):
+            return Err("DOM input target is not editable")
+        val _ = self.dispatch_dom_event(target_id, "focus", false, false)
+        val before_input = self.dispatch_dom_event(
+            target_id, "beforeinput", true, true
+        )
+        if before_input.event.default_prevented:
+            return Ok(before_input)
+        if target.tag_name == "input":
+            val input_type = be_dom_get_attr(target, "type").lower()
+            if (
+                input_type == "checkbox" or input_type == "radio" or
+                input_type == "button" or input_type == "submit"
+            ):
+                return Err("DOM input target is not text-editable")
+            self.current_dom = script_host_apply_action_to_id(
+                self.current_dom, target_id, "set-attr:value=" + value, false
+            )
+        else:
+            self.current_dom = script_host_apply_action_to_id(
+                self.current_dom, target_id, "set-text:" + value, false
+            )
+        self.current_dom = script_host_apply_action_to_id(
+            self.current_dom, target_id,
+            "set-attr:data-input-dirty=true", false
+        )
+        Ok(self.dispatch_dom_event(target_id, "input", true, false))
+
+    me _blur_dom_focus(target_id: text) -> Result<BeDomEventDispatch, text>:
+        val path = be_dom_find_path_to_id(self.current_dom, target_id)
+        if path.len() == 0:
+            return Err("DOM focus target not found")
+        val target = path[path.len() - 1]
+        if (target.tag_name == "input" or target.tag_name == "textarea") and
+           be_dom_has_attr(target, "data-input-dirty"):
+            val _ = self.dispatch_dom_event(target_id, "change", true, false)
+            self.current_dom = script_host_apply_action_to_id(
+                self.current_dom, target_id,
+                "remove-attr:data-input-dirty", false
+            )
+        self.current_dom = script_host_apply_action_to_id(
+            self.current_dom, target_id, "remove-attr:data-focused", false
+        )
+        Ok(self.dispatch_dom_event(target_id, "blur", false, false))
+
+    me blur_dom_text_input(target_id: text) -> Result<BeDomEventDispatch, text>:
+        val path = be_dom_find_path_to_id(self.current_dom, target_id)
+        if path.len() == 0:
+            return Err("DOM input target not found")
+        val target = path[path.len() - 1]
+        if target.tag_name != "input" and target.tag_name != "textarea":
+            return Err("DOM input target is not text-editable")
+        self._blur_dom_focus(target_id)
+
     me render(width: i32, height: i32) -> BeRenderResult:
         var renderer = BrowserRenderer.create(width, height)
         val html = self.render_html_document()
-        var result = renderer.render_html(html)
-        result.node_count = self._render_dom_node_count(renderer, html)
+        val animation_time_ms = self.monotonic_time_ms - self.animation_start_time_ms
+        var result = renderer.render_html_to_pixels_at_time(html, animation_time_ms)
+        result.node_count = _browser_session_dom_node_count(self.current_dom)
         result
 
     me render_to_pixels(width: i32, height: i32) -> BeRenderResult:
         var renderer = BrowserRenderer.create(width, height)
         val html = self.render_html_document()
-        var result = renderer.render_html_to_pixels(html)
-        result.node_count = self._render_dom_node_count(renderer, html)
+        val animation_time_ms = self.monotonic_time_ms - self.animation_start_time_ms
+        var result = renderer.render_html_to_pixels_at_time(html, animation_time_ms)
+        result.node_count = _browser_session_dom_node_count(self.current_dom)
         result
-
-    # Run the canonical DOM layout/paint pass (BrowserRenderer.render_dom) over the
-    # current document and report how many positively-sized boxes were painted.
-    me _render_dom_node_count(renderer: BrowserRenderer, html: text) -> i32:
-        val dom = browser_renderer_html_string_to_dom(html)
-        val scene = renderer.render_dom(dom)
-        val painted = scene.commands.len() - 1
-        if painted < 0:
-            return 0
-        painted
 
     me render_html_document() -> text:
         val title = if self.current_title != "": self.current_title else: self.current_url
         val body_html = if self.current_body_html.len() > 0: self.current_body_html else: ""
         val style_html = self.current_style_html
-        "<!DOCTYPE html><html><head><title>{title}</title>{style_html}</head><body>{body_html}</body></html>"
+        "<!DOCTYPE html><html><head><title>{escape_html_text(title)}</title>{style_html}</head><body>{body_html}</body></html>"
 
     me current_entry() -> BrowserHistoryEntry?:
         if self.current_index >= 0 and self.current_index < self.history.len():
@@ -95,6 +428,23 @@ impl BrowserSession:
         target_index: i32,
         push_history: bool
     ) -> Result<bool, text>:
+        if not browser_resource_size_allowed(html.len()):
+            self.stop_loading()
+            return Err("document exceeds 50 MiB resource limit")
+        # Atomic document replacement: the previous page survives until all
+        # response-level validation above has succeeded.
+        self.runtime_state = nil
+        self.active_load = nil
+        self.pending_requests = []
+        self.inflight_requests = []
+        self.subresource_request_count = 0
+        self.module_source_cache = []
+        self.module_redirect_urls = []
+        self.loaded_module_urls = []
+        self.module_eval_stack = []
+        self.wasm_modules = []
+        self.content_security_policy = self.pending_content_security_policy
+        self.pending_content_security_policy = ""
         if url.starts_with("https://guest.runtime/"):
             print "[BRS] load page source start"
         val script_blocks = extract_script_blocks(html)
@@ -121,8 +471,10 @@ impl BrowserSession:
         if url.starts_with("https://guest.runtime/"):
             print "[BRS] style sources={style_sources.len()}"
 
+        self._persist_storage_for_url(self.current_url)
+        self._activate_storage_for_url(url)
         if self.runtime_enabled and script_blocks.len() > 0:
-            val cookie_text = cookie_text_for_url(self.cookies, url)
+            val cookie_text = document_cookie_text_for_url(self.cookies, url)
             var state = BrowserRuntimeState.create(
                 own_text(url),
                 initial_title,
@@ -131,32 +483,52 @@ impl BrowserSession:
                 self.local_storage,
                 own_text(cookie_text)
             )
+            state.runtime.interpreter.timer_current_time_ms = self.monotonic_time_ms
             self.runtime_state = Some(state)
             if url.starts_with("https://guest.runtime/"):
                 print "[BRS] runtime state created"
         else:
             self.runtime_state = nil
         self.current_url = own_text(url)
+        self.animation_start_time_ms = self.monotonic_time_ms
         self.current_title = if initial_title.len() > 0: initial_title else: own_text(url)
         self.current_body_html = body_html
         self.current_style_html = ""
         self.source_html = own_text(html)
+        self.current_dom = html_tree_builder_build(
+            "<html><body>" + body_html + "</body></html>"
+        )
 
-        self.active_load = Some(BrowserLoadState.create(
+        var load = BrowserLoadState.create(
             document_url: url,
             source_html: html,
             target_index: target_index,
             push_history: push_history,
             script_blocks: script_blocks,
             style_sources: style_sources
-        ))
+        )
+        if script_blocks.len() >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
+            load.warnings.push(
+                "script resource limit reached; additional scripts ignored"
+            )
+        if style_sources.len() >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
+            load.warnings.push(
+                "stylesheet resource limit reached; additional styles ignored"
+            )
+        self.active_load = Some(load)
         if not has_runtime_scripts:
             if val Some(fetch_url) = _browser_session_inline_fetch_url(html):
-                val resolved_fetch_url = resolve_relative_url(url, fetch_url)
+                val resolved_fetch_url = self._hsts_upgrade_url(
+                    resolve_relative_url(url, fetch_url)
+                )
                 val is_mixed_content = (browser_session_is_secure_context(url) and
                     resolved_fetch_url.starts_with("http://") and
-                    not (resolved_fetch_url.starts_with("http://localhost") or resolved_fetch_url.starts_with("http://127.0.0.1")))
-                if not is_mixed_content:
+                    not browser_session_is_loopback_http(resolved_fetch_url))
+                val is_csp_blocked = not browser_csp_allows(
+                    self.content_security_policy, "connect-src",
+                    url, resolved_fetch_url, false
+                )
+                if not is_mixed_content and not is_csp_blocked:
                     val inline_method_raw = _browser_session_inline_fetch_option(html, "method")
                     val inline_method = if inline_method_raw != "": inline_method_raw.upper() else: "GET"
                     val inline_body = _browser_session_inline_fetch_option(html, "body")
@@ -170,7 +542,7 @@ impl BrowserSession:
             return nil
         if val Some(state) = self.runtime_state:
             return Some(state)
-        val cookie_text = cookie_text_for_url(self.cookies, self.current_url)
+        val cookie_text = document_cookie_text_for_url(self.cookies, self.current_url)
         val state = BrowserRuntimeState.create(
             self.current_url,
             self.current_title,
@@ -179,6 +551,7 @@ impl BrowserSession:
             self.local_storage,
             cookie_text
         )
+        state.runtime.interpreter.timer_current_time_ms = self.monotonic_time_ms
         self.runtime_state = Some(state)
         Some(state)
 
@@ -189,9 +562,12 @@ impl BrowserSession:
                 state.document_id,
                 "title"
             )
-        if val JsValue.String(title) = title_val:
-            if title.len() > 0:
-                self.current_title = title
+        match title_val:
+            JsValue.String(title):
+                if title.len() > 0:
+                    self.current_title = title
+            _:
+                pass_dn
 
         val old_url = self.current_url
         var navigation_mode = ""
@@ -199,72 +575,84 @@ impl BrowserSession:
             state.location_id,
             "__simple_navigation_mode"
         )
-        if val JsValue.String(mode) = navigation_mode_val:
-            navigation_mode = mode
-            state.runtime.set_host_property(
-                state.location_id,
-                "__simple_navigation_mode",
-                JsValue.String(v: "")
-            )
+        match navigation_mode_val:
+            JsValue.String(mode):
+                navigation_mode = mode
+                state.runtime.set_host_property(
+                    state.location_id,
+                    "__simple_navigation_mode",
+                    JsValue.String(v: "")
+                )
+            _:
+                pass_dn
         val history_mode_val = state.runtime.get_host_property(
             state.history_id,
             "__simple_navigation_mode"
         )
-        if val JsValue.String(mode) = history_mode_val:
-            if mode != "":
-                navigation_mode = mode
-            state.runtime.set_host_property(
-                state.history_id,
-                "__simple_navigation_mode",
-                JsValue.String(v: "")
-            )
+        match history_mode_val:
+            JsValue.String(mode):
+                if mode != "":
+                    navigation_mode = mode
+                state.runtime.set_host_property(
+                    state.history_id,
+                    "__simple_navigation_mode",
+                    JsValue.String(v: "")
+                )
+            _:
+                pass_dn
 
         val href_val = state.runtime.get_host_property(
             state.location_id,
             "href"
         )
-        if val JsValue.String(href) = href_val:
-            if href.len() > 0:
-                var next_href = href
-                if navigation_mode == "pushState" or navigation_mode == "replaceState":
-                    var history_url_val = state.runtime.get_host_property(
-                        state.location_id,
-                        "__simple_history_url"
-                    )
-                    if strict_equals(history_url_val, JsValue.Undefined):
-                        history_url_val = state.runtime.get_host_property(
-                            state.history_id,
-                            "__simple_url"
+        match href_val:
+            JsValue.String(href):
+                if href.len() > 0:
+                    var next_href = href
+                    if navigation_mode == "pushState" or navigation_mode == "replaceState":
+                        var history_url_val = state.runtime.get_host_property(
+                            state.location_id,
+                            "__simple_history_url"
                         )
-                    if val JsValue.String(history_url) = history_url_val:
-                        if history_url.len() > 0:
-                            next_href = resolve_relative_url(old_url, history_url)
-                    val history_state_val = state.runtime.get_host_property(
-                        state.location_id,
-                        "__simple_history_state"
-                    )
-                    if not strict_equals(history_state_val, JsValue.Undefined):
+                        if strict_equals(history_url_val, JsValue.Undefined):
+                            history_url_val = state.runtime.get_host_property(
+                                state.history_id,
+                                "__simple_url"
+                            )
+                        match history_url_val:
+                            JsValue.String(history_url):
+                                if history_url.len() > 0:
+                                    next_href = resolve_relative_url(old_url, history_url)
+                            _:
+                                pass_dn
+                        val history_state_val = state.runtime.get_host_property(
+                            state.location_id,
+                            "__simple_history_state"
+                        )
+                        if not strict_equals(history_state_val, JsValue.Undefined):
+                            state.runtime.set_host_property(
+                                state.history_id,
+                                "state",
+                                history_state_val
+                            )
                         state.runtime.set_host_property(
-                            state.history_id,
-                            "state",
-                            history_state_val
+                            state.location_id,
+                            "__simple_history_url",
+                            JsValue.String(v: "")
                         )
+                    self.current_url = next_href
+                    browser_session_sync_location_object(state, next_href)
                     state.runtime.set_host_property(
-                        state.location_id,
-                        "__simple_history_url",
-                        JsValue.String(v: "")
+                        state.document_id,
+                        "URL",
+                        JsValue.String(v: next_href)
                     )
-                self.current_url = next_href
-                browser_session_sync_location_object(state, next_href)
-                state.runtime.set_host_property(
-                    state.document_id,
-                    "URL",
-                    JsValue.String(v: next_href)
-                )
-                if navigation_mode == "assign" and next_href != old_url:
-                    self._push_runtime_history_entry()
-                else if navigation_mode == "pushState":
-                    self._push_runtime_history_entry()
+                    if navigation_mode == "assign" and next_href != old_url:
+                        self._push_runtime_history_entry()
+                    else if navigation_mode == "pushState":
+                        self._push_runtime_history_entry()
+            _:
+                pass_dn
 
         # Track whether the latest body mutation came from script setting innerHTML or
         # textContent. Page load primes both host_body_*_value fields directly (not via
@@ -287,22 +675,34 @@ impl BrowserSession:
             )
 
         var next_body_html = self.current_body_html
-        if val JsValue.String(body_html) = inner_html_val:
-            next_body_html = body_html
+        match inner_html_val:
+            JsValue.String(body_html):
+                next_body_html = body_html
+            _:
+                pass_dn
 
         # textContent overrides the resolved innerHTML only when a script explicitly set
         # textContent more recently than innerHTML, or when neither was script-set (the
         # page-load values are mutually consistent). This stops a stale page-load
         # textContent from clobbering a freshly script-assigned innerHTML.
         if text_content_dirty or not inner_html_dirty:
-            if val JsValue.String(body_text) = text_content_val:
-                val rendered_text = escape_html_text(body_text)
-                if rendered_text != escape_html_text(html_to_text(next_body_html)):
-                    next_body_html = rendered_text
+            match text_content_val:
+                JsValue.String(body_text):
+                    val rendered_text = escape_html_text(body_text)
+                    if rendered_text != escape_html_text(html_to_text(next_body_html)):
+                        next_body_html = rendered_text
+                _:
+                    pass_dn
 
+        val body_changed = next_body_html != self.current_body_html
         self.current_body_html = next_body_html
+        if body_changed:
+            self.current_dom = html_tree_builder_build(
+                "<html><body>" + next_body_html + "</body></html>"
+            )
         self.session_storage = storage_pairs_from_object(state, state.session_storage_id)
         self.local_storage = storage_pairs_from_object(state, state.local_storage_id)
+        self._persist_storage_for_url(self.current_url)
         state.runtime = sync_storage_runtime_state(state.runtime, state.session_storage_id, self.session_storage)
         state.runtime = sync_storage_runtime_state(state.runtime, state.local_storage_id, self.local_storage)
 
@@ -312,18 +712,20 @@ impl BrowserSession:
                 state.document_id,
                 "cookie"
             )
-        if val JsValue.String(cookie_text) = cookie_val:
-            val visible_cookie_before_sync = cookie_text_for_url(self.cookies, self.current_url)
-            if cookie_text != visible_cookie_before_sync:
-                self.cookies = merge_cookie_text(self.cookies, cookie_text)
+        match cookie_val:
+            JsValue.String(cookie_text):
+                val visible_cookie_before_sync = document_cookie_text_for_url(self.cookies, self.current_url)
+                if cookie_text != visible_cookie_before_sync:
+                    self.cookies = merge_cookie_text_for_url(self.cookies, cookie_text, self.current_url, false)
+            _:
+                pass_dn
 
-        val visible_cookie_text = cookie_text_for_url(self.cookies, self.current_url)
+        val visible_cookie_text = document_cookie_text_for_url(self.cookies, self.current_url)
         var runtime = state.runtime
         var interpreter = runtime.interpreter
         interpreter.host_document_cookie_value = JsValue.String(v: visible_cookie_text)
         runtime.interpreter = interpreter
         state.runtime = runtime
-        state.runtime = sync_browser_runtime_state(state.runtime, state.window_id, state.chrome_id, self.current_url, visible_cookie_text)
         state.runtime.set_host_property(
             state.document_id,
             "readyState",
@@ -345,16 +747,17 @@ impl BrowserSession:
                     trimmed[i] = self.history[i]
                     i = i + 1
                 self.history = trimmed
-        self.history.push(BrowserHistoryEntry.create(
+        self.history.push(BrowserHistoryEntry.create_with_policy(
             url: self.current_url,
             title: self.current_title,
-            source_html: source_html
+            source_html: source_html,
+            policy: self.content_security_policy
         ))
         self.current_index = self.history.len() - 1
 
     me _sync_runtime_cookie_string():
         if val Some(state) = self.runtime_state:
-            val visible_cookie_text = cookie_text_for_url(self.cookies, self.current_url)
+            val visible_cookie_text = document_cookie_text_for_url(self.cookies, self.current_url)
             var runtime = state.runtime
             var interpreter = runtime.interpreter
             interpreter.host_document_cookie_value = JsValue.String(v: visible_cookie_text)
@@ -362,15 +765,16 @@ impl BrowserSession:
             runtime.set_host_property(
                 state.document_id,
                 "cookie",
-            JsValue.String(v: visible_cookie_text)
-        )
+                JsValue.String(v: visible_cookie_text)
+            )
             state.runtime = runtime
             self.runtime_state = Some(state)
 
     me _build_request(kind: text, url: text, method: text, headers: text, body: text, content_type: text) -> BrowserRequest:
+        val request_url = self._hsts_upgrade_url(url)
         val normalized_method = if method.trim() != "": method.upper() else: "GET"
         var request_headers = headers
-        val cookie_header = self.cookie_header_for_request(url)
+        val cookie_header = self.cookie_header_for_request(request_url)
         if cookie_header != "":
             if request_headers != "":
                 request_headers = request_headers + "\n"
@@ -380,7 +784,7 @@ impl BrowserSession:
         BrowserRequest.create(
             id: request_id,
             kind: kind,
-            url: url,
+            url: request_url,
             method: normalized_method,
             headers: request_headers,
             body: body,

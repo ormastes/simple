@@ -28,7 +28,7 @@ browser_session_ui_access_controls_spec -> common
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 10 | 10 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -44,7 +44,7 @@ BrowserSession textual UI access control system specification.
 | Category | Application |
 | Status | Active |
 | Source | `test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 BrowserSession textual UI access control system specification.
@@ -74,18 +74,43 @@ mode: browser_session
 active-surface: browser:session
 surfaces: 1
 surface: browser:session title=Start app=simple-browser active=true
-nodes: 8
+nodes: 9
 node: back kind=button text=Back enabled=false selected=false actions=click
 node: forward kind=button text=Forward enabled=false selected=false actions=click
 node: stop kind=button text=Stop enabled=false selected=false actions=click
+node: reload kind=button text=Reload enabled=true selected=false actions=click
 node: home kind=button text=Home enabled=true selected=false actions=click
 node: favorite kind=button text=Favorite enabled=true selected=false actions=click
-node: address kind=textfield text=https://example.com/start/index.html enabled=true selected=false actions=set_value
+node: address kind=textfield text=https://example.com/start/index.html enabled=true selected=false actions=set_value,submit
 node: title kind=label text=Start enabled=true selected=false actions=
 node: link_0 kind=link text=Read docs enabled=true selected=false actions=click
 ```
 
 </details>
+
+#### routes accessible link clicks through DOM cancellation
+
+An anchor with `onclick='prevent-default'` reports a canceled link event,
+retains the current URL, and emits no network request.
+
+#### edits and activates page controls through the DOM-backed UI surface
+
+Text editing dispatches focus, cancelable `beforeinput`, then `input` only
+after mutation. A canceled `beforeinput` preserves the old value and skips
+`input`. Focus transfer first dispatches `change`/`blur` for the prior dirty
+control and maintains exactly one focused node. Editable fields advertise
+explicit `blur`, which clears the last focus without a duplicate `change`.
+Button, checkbox, and radio clicks continue through the same DOM-backed route;
+radio selection clears only its named/form-owned peers and retains focus on
+the newly selected control. The same nodes advertise `key`: Enter activates
+buttons/links and Space activates checkbox/radio controls through the identical
+click/default-action path. A cancelable bubbling `keydown` runs first; its
+mutation is visible to activation and `prevent-default` suppresses the click.
+
+#### hides secret form state and edits textarea through one focused route
+
+Hidden controls are absent, password values are redacted, and textarea edits
+use the same focus/beforeinput/input/blur lifecycle.
 
 ## Scenarios
 
@@ -278,8 +303,8 @@ expect(session.current_body_html).to_contain("Docs page")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 10 |
+| Active scenarios | 10 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -161,6 +161,110 @@ describe "ScriptHost":
             expect(host.dom_root().classes).to_contain("clicked")
             expect(host.dom_dirty()).to_equal(true)
 
+        it "AC-1: inject_dom_event targets a child and applies its default action":
+            var host = _make_host()
+            var checkbox = BeDomNode.element("input")
+            checkbox.set_attr("id", "accept")
+            checkbox.set_attr("type", "checkbox")
+            checkbox.add_event_listener("click", "set-attr:data-clicked=yes")
+            var root = _make_div_root()
+            root.set_attr("id", "root")
+            root.add_child(checkbox)
+            host.execute("", root)
+
+            val event = BeDomEvent.create("click", "", "accept", "accept", "", true, true)
+            host.inject_dom_event(event)
+
+            val updated = host.dom_root().children[0]
+            expect(updated.get_attr("data-clicked")).to_equal("yes")
+            expect(updated.has_attr("checked")).to_equal(true)
+            expect(host.dom_dirty()).to_equal(true)
+
+        it "AC-1: selecting a radio clears only same-form named peers":
+            var first = BeDomNode.element(11, "input")
+            first.set_attr("id", "first")
+            first.set_attr("type", "radio")
+            first.set_attr("name", "choice")
+            first.set_attr("checked", "checked")
+            var second = BeDomNode.element(12, "input")
+            second.set_attr("id", "second")
+            second.set_attr("type", "radio")
+            second.set_attr("name", "choice")
+            var other = BeDomNode.element(13, "input")
+            other.set_attr("id", "other")
+            other.set_attr("type", "radio")
+            other.set_attr("name", "choice")
+            other.set_attr("checked", "checked")
+            var form = BeDomNode.element(10, "form")
+            form.set_attr("id", "primary")
+            form.add_child(first)
+            form.add_child(second)
+            var other_form = BeDomNode.element(20, "form")
+            other_form.set_attr("id", "secondary")
+            other_form.add_child(other)
+            var root = _make_div_root()
+            root.add_child(form)
+            root.add_child(other_form)
+            var host = _make_host()
+            host.execute("", root)
+
+            host.inject_dom_event(BeDomEvent.create(
+                "click", "", "second", "second", "", true, true
+            ))
+
+            val updated = host.dom_root()
+            expect(updated.children[0].children[0].has_attr("checked")).to_be(false)
+            expect(updated.children[0].children[0].has_attr("data-focused")).to_be(false)
+            expect(updated.children[0].children[1].has_attr("checked")).to_be(true)
+            expect(updated.children[0].children[1].has_attr("data-focused")).to_be(true)
+            expect(updated.children[1].children[0].has_attr("checked")).to_be(true)
+
+        it "AC-1: submit controls dispatch a cancelable event to their owning form":
+            var blocked_form = BeDomNode.element(10, "form")
+            blocked_form.set_attr("id", "blocked-form")
+            blocked_form.add_event_listener("submit", "prevent-default")
+            var blocked_button = BeDomNode.element(11, "button")
+            blocked_button.set_attr("id", "blocked-submit")
+            blocked_form.add_child(blocked_button)
+            var allowed_form = BeDomNode.element(20, "form")
+            allowed_form.set_attr("id", "allowed-form")
+            var allowed_button = BeDomNode.element(21, "button")
+            allowed_button.set_attr("id", "allowed-submit")
+            allowed_form.add_child(allowed_button)
+            var root = _make_div_root()
+            root.add_child(blocked_form)
+            root.add_child(allowed_form)
+            var host = _make_host()
+            host.execute("", root)
+
+            host.inject_dom_event(BeDomEvent.create(
+                "click", "", "blocked-submit", "blocked-submit", "", true, true
+            ))
+            host.inject_dom_event(BeDomEvent.create(
+                "click", "", "allowed-submit", "allowed-submit", "", true, true
+            ))
+
+            val updated = host.dom_root()
+            expect(updated.children[0].has_attr("data-submitted")).to_be(false)
+            expect(updated.children[1].get_attr("data-submitted")).to_equal("true")
+
+        it "AC-1: capture actions mutate currentTarget rather than the event target":
+            var host = _make_host()
+            var checkbox = BeDomNode.element("input")
+            checkbox.set_attr("id", "accept")
+            checkbox.set_attr("type", "checkbox")
+            var root = _make_div_root()
+            root.set_attr("id", "root")
+            root.add_event_listener_with_capture("click", "set-attr:data-captured=yes", true)
+            root.add_child(checkbox)
+            host.execute("", root)
+
+            val event = BeDomEvent.create("click", "", "accept", "accept", "", true, true)
+            host.inject_dom_event(event)
+
+            expect(host.dom_root().get_attr("data-captured")).to_equal("yes")
+            expect(host.dom_root().children[0].get_attr("data-captured")).to_equal("")
+
     describe "AC-1: dom_root — returns current root":
         it "AC-1: dom_root after execute returns a BeDomNode":
             var host = _make_host()

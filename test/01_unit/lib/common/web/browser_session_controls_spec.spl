@@ -1,8 +1,12 @@
 use std.spec.*
 
-use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session.{
+    BrowserSession, BrowserResponse, BrowserBookmarkSnapshot
+}
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
+use std.js.types.js_types.{JsValue}
+use std.js.types.pair.{Pair}
 
 describe "BrowserSession primitive browser controls":
 
@@ -21,6 +25,40 @@ describe "BrowserSession primitive browser controls":
             Err(e) =>
                 expect("unexpected go_home error: {e}").to_equal("")
 
+    it "queues a real HTTPS request for an unregistered home page":
+        var session = BrowserSession.new()
+        session.open_html("about:start", "<html><body>Start</body></html>")
+        session.set_home_url("https://example.com/home")
+
+        match session.go_home():
+            Ok(_) =>
+                match session.take_pending_request():
+                    Some(request) =>
+                        expect(request.kind).to_equal("document")
+                        expect(request.url).to_equal("https://example.com/home")
+                        expect(request.method).to_equal("GET")
+                    nil =>
+                        fail("Expected home navigation request")
+            Err(e) =>
+                fail("Expected HTTPS home navigation to start: {e}")
+
+    it "normalizes a bare address to HTTPS and rejects explicit unsafe schemes":
+        var session = BrowserSession.new()
+        val started = session.begin_network_navigation(
+            "  Example.COM/path  ", "GET", "", "", ""
+        )
+        expect(started.is_ok()).to_equal(true)
+        if val Some(request) = session.take_pending_request():
+            expect(request.url).to_equal("https://Example.COM/path")
+        else:
+            fail("Expected normalized HTTPS address request")
+        expect(session.begin_network_navigation(
+            "javascript:alert(1)", "GET", "", "", ""
+        ).is_err()).to_equal(true)
+        expect(session.begin_network_navigation(
+            "ftp://example.com/file", "GET", "", "", ""
+        ).is_err()).to_equal(true)
+
     it "stores normalizes updates and removes favorite links":
         var session = BrowserSession.new()
         session.open_html("https://example.com/app", "<html><head><title>App</title></head><body>App</body></html>")
@@ -37,7 +75,27 @@ describe "BrowserSession primitive browser controls":
         expect(session.is_favorite("https://example.com/app")).to_equal(false)
         expect(session.favorite_links.len()).to_equal(1)
 
-    it "dequeues pending network requests in insertion order":
+    it "loads only bounded network bookmarks through a typed snapshot":
+        var source = BrowserSession.new()
+        source.add_favorite("https://example.com/docs", " Docs ")
+        val snapshot = source.bookmark_snapshot()
+        source.remove_favorite("https://example.com/docs")
+
+        var restored = BrowserSession.new()
+        val accepted = restored.load_bookmark_snapshot(snapshot)
+        expect(accepted).to_equal(1)
+        expect(restored.favorite_title("https://example.com/docs") ?? "").to_equal("Docs")
+
+        val hostile = BrowserBookmarkSnapshot.create([
+            Pair(first: "javascript:alert(1)", second: "unsafe"),
+            Pair(first: "file:///etc/passwd", second: "local"),
+            Pair(first: "https://safe.example/path", second: "Safe")
+        ])
+        expect(restored.load_bookmark_snapshot(hostile)).to_equal(1)
+        expect(restored.favorite_links.len()).to_equal(1)
+        expect(restored.is_favorite("https://safe.example/path")).to_equal(true)
+
+    it "replaces an older pending navigation":
         var session = BrowserSession.new()
 
         val first_result = session.begin_network_navigation("https://example.com/one", "GET", "", "", "")
@@ -56,16 +114,81 @@ describe "BrowserSession primitive browser controls":
 
         match session.take_pending_request():
             Some(request) =>
-                expect(request.url).to_equal("https://example.com/one")
-                expect(request.method).to_equal("GET")
-            nil =>
-                fail("Expected first pending request")
-        match session.take_pending_request():
-            Some(request) =>
                 expect(request.url).to_equal("https://example.com/two")
                 expect(request.method).to_equal("POST")
                 expect(request.body).to_equal("body")
             nil =>
-                fail("Expected second pending request")
+                fail("Expected replacement pending request")
 
         expect(session.has_pending_requests()).to_equal(false)
+
+    it "stops a pending subresource while preserving the committed document":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/page",
+            "<html><head><title>Page</title><link rel='stylesheet' href='/slow.css'></head><body>Visible</body></html>"
+        )
+        expect(session.is_loading).to_equal(false)
+        expect(session.can_stop_loading()).to_equal(true)
+        val request = session.take_pending_request()
+
+        session.stop_loading()
+
+        expect(session.can_stop_loading()).to_equal(false)
+        expect(session.current_url).to_equal("https://example.com/page")
+        expect(session.current_body_html).to_contain("Visible")
+        expect(session.history.len()).to_equal(1)
+        if val Some(pending) = request:
+            val late = session.commit_network_response(BrowserResponse.create(
+                request_id: pending.id,
+                kind: pending.kind,
+                url: pending.url,
+                status: 200,
+                headers: "",
+                body: "body { color: red; }",
+                error: ""
+            ))
+            expect(late.is_err()).to_equal(true)
+
+    it "stops a pending document without destroying the active page":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/old",
+            "<html><head><title>Old</title><style>#old { color: red; }</style></head><body><div id='old'>Visible</div></body></html>"
+        )
+        expect(session.eval_script("var alive = 7; alive").is_ok()).to_equal(true)
+        val old_body = session.current_body_html
+        val old_style = session.current_style_html
+        val old_history_count = session.history.len()
+
+        val started = session.begin_network_navigation(
+            "https://example.com/slow", "GET", "", "", ""
+        )
+        expect(started.is_ok()).to_equal(true)
+        val request = session.take_pending_request()
+        session.stop_loading()
+
+        expect(session.current_url).to_equal("https://example.com/old")
+        expect(session.current_title).to_equal("Old")
+        expect(session.current_body_html).to_equal(old_body)
+        expect(session.current_style_html).to_equal(old_style)
+        expect(session.history.len()).to_equal(old_history_count)
+        match session.eval_script("alive"):
+            Ok(JsValue.Number(value)):
+                expect(value).to_equal(7.0)
+            _:
+                fail("Expected stopped navigation to preserve page runtime")
+
+        if val Some(pending) = request:
+            val late = session.commit_network_response(BrowserResponse.create(
+                request_id: pending.id,
+                kind: pending.kind,
+                url: pending.url,
+                status: 200,
+                headers: "",
+                body: "<html><body>Late</body></html>",
+                error: ""
+            ))
+            expect(late.is_err()).to_equal(true)
+        else:
+            fail("Expected pending stylesheet request")

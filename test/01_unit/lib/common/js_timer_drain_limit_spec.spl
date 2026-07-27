@@ -1,0 +1,68 @@
+use std.spec.*
+
+use std.js.engine.runtime.{JsRuntime}
+use std.js.engine.js_error.{Logger, LogLevel}
+use std.js.types.js_types.{JsValue}
+
+describe "JavaScript timer drain limit":
+
+    it "coalesces an overdue interval to one callback per clock advance":
+        var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
+        val scheduled = runtime.eval(
+            "var ticks = 0; setInterval(function() { ticks = ticks + 1; }, 1);"
+        )
+        expect(scheduled.is_ok()).to_equal(true)
+
+        expect(runtime.drain_due_timers(1000000000)).to_equal(1)
+
+    it "yields after one thousand nested zero-delay callbacks":
+        var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
+        val scheduled = runtime.eval(
+            "var ticks = 0; function again() { ticks = ticks + 1; setTimeout(again, 0); } setTimeout(again, 0);"
+        )
+        expect(scheduled.is_ok()).to_equal(true)
+
+        expect(runtime.drain_due_timers(0)).to_equal(1000)
+
+    it "lets an interval cancel its queued continuation":
+        var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
+        val scheduled = runtime.eval(
+            "var ticks = 0; var timer = setInterval(function() { ticks = ticks + 1; clearInterval(timer); }, 1);"
+        )
+        expect(scheduled.is_ok()).to_equal(true)
+
+        expect(runtime.drain_due_timers(100)).to_equal(1)
+        expect(runtime.drain_due_timers(200)).to_equal(0)
+        match runtime.eval("ticks"):
+            Ok(JsValue.Number(ticks)):
+                expect(ticks).to_equal(1.0)
+            _:
+                fail("Expected one self-canceled interval callback")
+
+    it "bounds pending timer tasks per document":
+        var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
+        val result = runtime.eval(
+            "var denied = 0; for (var i = 0; i < 4100; i = i + 1) { if (setTimeout(function() {}, 1000) === undefined) { denied = denied + 1; } } denied"
+        )
+        match result:
+            Ok(JsValue.Number(denied)):
+                expect(denied).to_equal(4.0)
+            _:
+                fail("Expected numeric timer-limit result")
+
+    it "keeps a single requestAnimationFrame chain alive past handle history":
+        var runtime = JsRuntime.new(Logger.new("timer-limit", LogLevel.Error))
+        val scheduled = runtime.eval(
+            "var frames = 0; function frame() { frames = frames + 1; requestAnimationFrame(frame); } requestAnimationFrame(frame);"
+        )
+        expect(scheduled.is_ok()).to_equal(true)
+
+        var frame_time = 16
+        while frame_time <= 4097 * 16:
+            val _ = runtime.drain_due_timers(frame_time)
+            frame_time = frame_time + 16
+        match runtime.eval("frames"):
+            Ok(JsValue.Number(frames)):
+                expect(frames).to_equal(4097.0)
+            _:
+                fail("Expected requestAnimationFrame chain past 4096 handles")

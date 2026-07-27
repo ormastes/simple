@@ -1,6 +1,6 @@
 # browser_engine: `vh` viewport-height units unresolved in margins/lengths
 
-- Status: open
+- Status: implementation fixed; executable regression is compiler-blocked
 - Area: `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
 - Found: 2026-07-11 (example.com render comparison vs Chrome headless)
 
@@ -36,6 +36,15 @@ margin/length resolution the same way width `%`/`vw` uses a negative sentinel
 resolved at layout time — e.g. store `vh` margins as a sentinel and resolve
 against `viewport_h` in `layout()` where it is in scope. Mirror the existing
 `resolve_horizontal_margin_px` percentage path.
+
+## Resolution (2026-07-26)
+
+Vertical `vh` margins use a distinct parse-time sentinel and resolve through
+`resolve_vertical_margin_px()` against the viewport height during layout.
+`browser_renderer_spec.spl` now checks the exact 80px top edge and 20px height
+of a `margin-top:40vh` block in a 200px viewport. The focused scenario has not
+been executed because the tracked target compiler failure exhausted its three
+allowed repair cycles.
 
 ## Related, already fixed this session
 - `width: Nvw` was treated as `Npx`; now resolves as a viewport/parent-width

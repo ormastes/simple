@@ -14,7 +14,11 @@ use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEvent}
 use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
 use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
 use std.gc_async_mut.gpu.browser_engine.script.script_runner.{ScriptRunner, run_script, run_script_file, script_runner_dom_dirty, script_runner_clear_dirty}
-use std.gc_async_mut.gpu.browser_engine.script.event_api.{event_dispatch}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_apply_default_action_to_id, be_dom_dispatch_event_to_id,
+    be_dom_event_identity, be_dom_get_children, be_dom_set_children,
+    be_dom_submit_form_owner_id
+}
 use std.gc_async_mut.gpu.browser_engine.net.fetch_dispatch.{FetchDispatch}
 use std.gc_async_mut.gpu.browser_engine.script.network_api.{ScriptFetchRequest,
     ScriptFetchResponse, fetch_send, script_fetch_to_net_request,
@@ -48,6 +52,17 @@ pub fn script_host_apply_event_action(node: BeDomNode, action: text) -> BeDomNod
             return node_class_list_remove(node, cls)
         return node_class_list_add(node, cls)
     node
+
+pub fn script_host_apply_action_to_id(root: BeDomNode, target_id: text, action: text, default_action: bool) -> BeDomNode:
+    if default_action:
+        return be_dom_apply_default_action_to_id(root, target_id, action)
+    if be_dom_event_identity(root) == target_id:
+        return script_host_apply_event_action(root, action)
+    val children = be_dom_get_children(root)
+    var next_children: [BeDomNode] = []
+    for child in children:
+        next_children.push(script_host_apply_action_to_id(child, target_id, action, default_action))
+    be_dom_set_children(root, next_children)
 
 pub class ScriptHost:
     """Host that manages Simple-script execution, event loop, and console buffer.
@@ -121,12 +136,46 @@ pub class ScriptHost:
     me inject_dom_event(event: BeDomEvent):
         """Dispatch a DOM event into registered event listeners.
 
-        Collects triggered action strings from target-phase dispatch.
+        Runs capture, target, and bubble listeners, then applies listener and
+        allowed default actions to the original target node.
         """
-        val actions = event_dispatch(self._dom_root, event)
-        for action in actions:
-            self._dom_root = script_host_apply_event_action(self._dom_root, action)
-        if actions.len() == 0:
+        val dispatch = be_dom_dispatch_event_to_id(
+            self._dom_root, event.target_id, event.event_type,
+            event.bubbles, event.cancelable
+        )
+        var action_index = 0
+        while action_index < dispatch.actions.len():
+            self._dom_root = script_host_apply_action_to_id(
+                self._dom_root,
+                dispatch.current_target_ids[action_index],
+                dispatch.actions[action_index],
+                false
+            )
+            action_index = action_index + 1
+        if dispatch.default_action_allowed:
+            self._dom_root = script_host_apply_action_to_id(
+                self._dom_root, event.target_id, dispatch.default_action, true
+            )
+            if (
+                event.event_type == "click" and
+                (dispatch.default_action == "input-checkbox-toggle" or
+                 dispatch.default_action == "input-radio-select")
+            ):
+                self.inject_dom_event(BeDomEvent.create(
+                    "input", "input", event.target_id, event.target_id,
+                    "", true, false
+                ))
+                self.inject_dom_event(BeDomEvent.create(
+                    "change", "input", event.target_id, event.target_id,
+                    "", true, false
+                ))
+            if event.event_type == "click" and dispatch.default_action == "button-activate":
+                val form_id = be_dom_submit_form_owner_id(self._dom_root, event.target_id)
+                if form_id != "":
+                    self.inject_dom_event(BeDomEvent.create(
+                        "submit", "form", form_id, form_id, "", true, true
+                    ))
+        if dispatch.actions.len() == 0 and dispatch.default_action_allowed == false:
             return
         self._dom_dirty = true
 

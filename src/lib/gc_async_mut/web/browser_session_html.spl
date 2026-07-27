@@ -13,6 +13,9 @@
 use common.web.html_escape.{html_escape_core}
 use std.gc_async_mut.web.browser_session.{BrowserStylesheetSource, BrowserStylesheetExpansion}
 use std.gc_async_mut.web.browser_session_url.{find_text, resolve_relative_url, collapse_url_dot_segments}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
+    BROWSER_MAX_DOCUMENT_SUBRESOURCES
+}
 
 fn extract_title_text(html: text) -> text:
     val start = find_text(html, "<title>", 0)
@@ -305,7 +308,7 @@ fn extract_stylesheet_sources(html: text) -> [BrowserStylesheetSource]:
     var write_idx = 0
     var style_pos = 0
     val html_len = html.len()
-    while style_pos < html_len:
+    while style_pos < html_len and write_idx < source_count:
         val start = find_text(html, "<style", style_pos)
         if start < 0:
             break
@@ -321,7 +324,7 @@ fn extract_stylesheet_sources(html: text) -> [BrowserStylesheetSource]:
             write_idx = write_idx + 1
         style_pos = close + 8
     var link_pos = 0
-    while link_pos < html_len:
+    while link_pos < html_len and write_idx < source_count:
         val start = find_text(html, "<link", link_pos)
         if start < 0:
             break
@@ -354,6 +357,8 @@ fn stylesheet_source_count(html: text) -> i32:
         val content = html[tag_end + 1:close].trim()
         if content != "":
             count = count + 1
+            if count >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
+                return count
         style_pos = close + 8
     var link_pos = 0
     while link_pos < html_len:
@@ -368,6 +373,8 @@ fn stylesheet_source_count(html: text) -> i32:
         val href_value = extract_attr_value(tag_content, "href")
         if href_value != "" and rel_contains_stylesheet(rel_value):
             count = count + 1
+            if count >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
+                return count
         link_pos = tag_end + 1
     count
 
@@ -391,7 +398,7 @@ fn extract_css_import_sources(base_url: text, css_text: text) -> [BrowserStylesh
     var write_idx = 0
     var pos = 0
     val css_len = css_text.len()
-    while pos < css_len:
+    while pos < css_len and write_idx < source_count:
         val at = find_text(css_text, "@import", pos)
         if at < 0:
             return sources
@@ -421,6 +428,8 @@ fn css_import_source_count(css_text: text) -> i32:
         val href = extract_css_import_href(stmt)
         if href != "":
             count = count + 1
+            if count >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
+                return count
         pos = semi + 1
     count
 
@@ -466,7 +475,11 @@ fn trim_css_import_url(value: text) -> text:
     trimmed
 
 fn insert_stylesheet_sources(existing: [BrowserStylesheetSource], index: i32, additions: [BrowserStylesheetSource]) -> [BrowserStylesheetSource]:
-    val additions_count = additions.len()
+    val remaining = BROWSER_MAX_DOCUMENT_SUBRESOURCES - existing.len()
+    val additions_count = if additions.len() < remaining:
+        additions.len()
+    else:
+        if remaining > 0: remaining else: 0
     if additions_count == 0:
         return existing
     val existing_count = existing.len()

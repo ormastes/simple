@@ -67,6 +67,38 @@ pub class CorsChecker:
         """Create a CorsChecker for the given origin string."""
         return CorsChecker { _origin: origin }
 
+    me fn is_same_origin(url: Url) -> bool:
+        if self._origin == "":
+            return false
+        self._origin == cors_url_origin(url)
+
+    me fn needs_preflight(request: FetchRequest) -> bool:
+        if self.is_same_origin(request.url):
+            return false
+        if not is_simple_method(request.method.to_upper()):
+            return true
+        request.headers.to_lower().contains("content-type: application/json")
+
+    me fn create_preflight(request: FetchRequest) -> FetchRequest:
+        var preflight = create_preflight(request)
+        if self._origin != "":
+            preflight.headers = "Origin: {self._origin}\r\n" + preflight.headers
+        preflight
+
+    me fn validate_response(response_headers: text, credentials: text) -> PreflightResult:
+        val allowed_origin = cors_header_value(response_headers, "access-control-allow-origin")
+        if self._origin == "":
+            return PreflightResult.Denied
+        if allowed_origin == "":
+            return PreflightResult.Denied
+        if allowed_origin == "*":
+            if cors_credentials_include(credentials):
+                return PreflightResult.Denied
+            return PreflightResult.Allowed
+        if allowed_origin == self._origin:
+            return PreflightResult.Allowed
+        PreflightResult.Denied
+
     me fn validate_preflight(response_headers: text) -> PreflightResult:
         """Check whether the server's preflight response permits the request.
 
@@ -75,27 +107,70 @@ pub class CorsChecker:
         - Access-Control-Allow-Methods contains a non-simple method (PUT/DELETE/PATCH/etc.)
         Returns Denied otherwise.
         """
-        # Check origin
-        val origin_ok = (
-            response_headers.contains("Access-Control-Allow-Origin: *") or
-            response_headers.contains("Access-Control-Allow-Origin: " + self._origin)
-        )
-        if not origin_ok:
+        if self.validate_response(response_headers, "omit") == PreflightResult.Denied:
             return PreflightResult.Denied
 
-        # Check that allowed methods include a non-simple method
-        val has_non_simple = (
-            response_headers.contains("Access-Control-Allow-Methods: PUT") or
-            response_headers.contains("Access-Control-Allow-Methods: DELETE") or
-            response_headers.contains("Access-Control-Allow-Methods: PATCH") or
-            response_headers.contains("Access-Control-Allow-Methods: OPTIONS") or
-            response_headers.contains("Access-Control-Allow-Methods: CONNECT") or
-            response_headers.contains("Access-Control-Allow-Methods: TRACE") or
-            response_headers.contains(", PUT") or
-            response_headers.contains(", DELETE") or
-            response_headers.contains(", PATCH")
-        )
-        if not has_non_simple:
-            return PreflightResult.Denied
+        val methods = cors_header_value(response_headers, "access-control-allow-methods")
+        for method in ["PUT", "DELETE", "PATCH", "OPTIONS", "CONNECT", "TRACE"]:
+            if cors_token_list_contains(methods, method):
+                return PreflightResult.Allowed
+        PreflightResult.Denied
 
-        return PreflightResult.Allowed
+    me fn validate_preflight_method(response_headers: text, requested_method: text) -> PreflightResult:
+        self.validate_preflight_method_with_credentials(response_headers, requested_method, "omit")
+
+    me fn validate_preflight_method_with_credentials(response_headers: text, requested_method: text, credentials: text) -> PreflightResult:
+        if self.validate_response(response_headers, credentials) == PreflightResult.Denied:
+            return PreflightResult.Denied
+        val methods = cors_header_value(response_headers, "access-control-allow-methods")
+        if cors_token_list_contains(methods, requested_method):
+            return PreflightResult.Allowed
+        PreflightResult.Denied
+
+    me fn validate_preflight_headers(response_headers: text, requested_headers: text) -> PreflightResult:
+        if self.validate_response(response_headers, "omit") == PreflightResult.Denied:
+            return PreflightResult.Denied
+        val allowed = cors_header_value(response_headers, "access-control-allow-headers")
+        if allowed == "*":
+            return PreflightResult.Allowed
+        for requested in requested_headers.split(","):
+            val name = requested.trim()
+            if name != "":
+                if not cors_token_list_contains(allowed, name):
+                    return PreflightResult.Denied
+        PreflightResult.Allowed
+
+fn cors_header_value(headers: text, name: text) -> text:
+    val expected = name.to_lower()
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        val colon = line.index_of(":")
+        if colon > 0:
+            if line.slice(0, colon).trim().to_lower() == expected:
+                return line.slice(colon + 1, line.len()).trim()
+    ""
+
+fn cors_token_list_contains(values: text, expected: text) -> bool:
+    val target = expected.trim().to_upper()
+    for value in values.split(","):
+        if value.trim().to_upper() == target:
+            return true
+    false
+
+fn cors_credentials_include(credentials: text) -> bool:
+    val value = credentials.to_lower()
+    if value == "include":
+        return true
+    value.ends_with("::include")
+
+fn cors_url_origin(url: Url) -> text:
+    var default_port = false
+    if url.scheme == "http":
+        default_port = url.port == 80
+    if url.scheme == "https":
+        default_port = url.port == 443
+    if url.port <= 0:
+        return "{url.scheme}://{url.host}"
+    if default_port:
+        return "{url.scheme}://{url.host}"
+    "{url.scheme}://{url.host}:{url.port}"

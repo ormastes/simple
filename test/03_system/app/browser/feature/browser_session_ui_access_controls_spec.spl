@@ -71,6 +71,7 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(ui_access_find_nodes(snapshot, "browser:session", "button", "Back", 1).len()).to_equal(1)
         expect(ui_access_find_nodes(snapshot, "browser:session", "button", "Forward", 1).len()).to_equal(1)
         expect(ui_access_find_nodes(snapshot, "browser:session", "button", "Stop", 1).len()).to_equal(1)
+        expect(ui_access_find_nodes(snapshot, "browser:session", "button", "Reload", 1).len()).to_equal(1)
         expect(ui_access_find_nodes(snapshot, "browser:session", "button", "Home", 1).len()).to_equal(1)
         expect(ui_access_find_nodes(snapshot, "browser:session", "button", "Favorite", 1).len()).to_equal(1)
         expect(ui_access_find_nodes(snapshot, "browser:session", "textfield", "https://example.com/two", 1).len()).to_equal(1)
@@ -83,6 +84,7 @@ describe "BrowserSession primitive controls through textual UI access":
 
         expect(capture).to_contain("BrowserSession UI Access Snapshot")
         expect(capture).to_contain("node: back kind=button text=Back")
+        expect(capture).to_contain("node: reload kind=button text=Reload")
         expect(capture).to_contain("node: favorite kind=button text=Favorite")
         expect(capture).to_contain("node: address kind=textfield text=https://example.com/start/index.html")
         expect(capture).to_contain("node: link_0 kind=link text=Read docs")
@@ -106,15 +108,69 @@ describe "BrowserSession primitive controls through textual UI access":
         val favorite_nodes = ui_access_find_nodes(session.ui_access_snapshot(), "browser:session", "button", "Favorite", 1)
         expect(favorite_nodes.len()).to_equal(1)
         expect(favorite_nodes[0].selected).to_equal(true)
+        val unfavorite = session.ui_access_act(WinTextActionRequest(target_id: "browser:session#favorite", action: "click", text_value: "", x: 0, y: 0))
+        expect(unfavorite.ok).to_equal(true)
+        expect(session.is_favorite("https://example.com/two")).to_equal(false)
 
-        session.begin_navigation("https://example.com/pending")
+        session.open_html(
+            "https://example.com/pending",
+            "<html><head><link rel='stylesheet' href='/slow.css'></head><body>Visible</body></html>"
+        )
+        val stop_nodes = ui_access_find_nodes(
+            session.ui_access_snapshot(), "browser:session", "button", "Stop", 1
+        )
+        expect(stop_nodes.len()).to_equal(1)
+        expect(stop_nodes[0].enabled).to_equal(true)
         val stop = session.ui_access_act(WinTextActionRequest(target_id: "browser:session#stop", action: "click", text_value: "", x: 0, y: 0))
         expect(stop.ok).to_equal(true)
-        expect(session.is_loading).to_equal(false)
+        expect(session.can_stop_loading()).to_equal(false)
+        expect(session.current_body_html).to_contain("Visible")
 
         val home = session.ui_access_act(WinTextActionRequest(target_id: "browser:session#home", action: "click", text_value: "", x: 0, y: 0))
         expect(home.ok).to_equal(true)
         expect(session.current_url).to_equal("https://example.com/home")
+
+        val reload = session.ui_access_act(WinTextActionRequest(target_id: "browser:session#reload", action: "click", text_value: "", x: 0, y: 0))
+        expect(reload.ok).to_equal(true)
+        expect(session.current_url).to_equal("https://example.com/home")
+
+    it "edits and submits the address through textual UI access":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.com/target", "<html><head><title>Target</title></head><body>Target</body></html>")
+        session.open_html("https://example.com/start", "<html><head><title>Start</title></head><body>Start</body></html>")
+
+        val edit = session.ui_access_act(WinTextActionRequest(target_id: "browser:session#address", action: "set_value", text_value: "https://example.com/target", x: 0, y: 0))
+        expect(edit.ok).to_equal(true)
+        expect(session.ui_access_snapshot().nodes[6].text_value).to_equal("https://example.com/target")
+        expect(session.current_url).to_equal("https://example.com/start")
+
+        val submit = session.ui_access_act(WinTextActionRequest(target_id: "browser:session#address", action: "submit", text_value: "", x: 0, y: 0))
+        expect(submit.ok).to_equal(true)
+        expect(session.current_url).to_equal("https://example.com/target")
+
+    it "lists and opens a saved bookmark through textual UI access":
+        var session = BrowserSession.new()
+        session.register_resource(
+            "https://example.com/saved",
+            "<html><head><title>Saved</title></head><body>Saved page</body></html>"
+        )
+        session.open_html(
+            "https://example.com/start", "<html><body>Start</body></html>"
+        )
+        session.add_favorite("https://example.com/saved", "Saved bookmark")
+
+        val bookmarks = ui_access_find_nodes(
+            session.ui_access_snapshot(), "browser:session", "link", "Saved bookmark", 1
+        )
+        expect(bookmarks.len()).to_equal(1)
+        val opened = session.ui_access_act(WinTextActionRequest(
+            target_id: bookmarks[0].canonical_id, action: "click",
+            text_value: "", x: 0, y: 0
+        ))
+
+        expect(opened.ok).to_equal(true)
+        expect(session.current_url).to_equal("https://example.com/saved")
+        expect(session.current_body_html).to_contain("Saved page")
 
     it "rejects unsupported browser UI actions through the textual route":
         var session = BrowserSession.new()
@@ -136,3 +192,141 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(result.ok).to_equal(true)
         expect(session.current_url).to_equal("https://example.com/docs/page.html")
         expect(session.current_body_html).to_contain("Docs page")
+
+    it "routes accessible link clicks through DOM cancellation":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/start",
+            "<html><body><a href='/blocked' onclick='prevent-default'>Blocked</a></body></html>"
+        )
+        val links = ui_access_find_nodes(
+            session.ui_access_snapshot(), "browser:session", "link", "Blocked", 1
+        )
+        expect(links.len()).to_equal(1)
+
+        val result = session.ui_access_act(WinTextActionRequest(
+            target_id: links[0].canonical_id, action: "click",
+            text_value: "", x: 0, y: 0
+        ))
+
+        expect(result.ok).to_equal(true)
+        expect(result.message).to_equal("link event canceled")
+        expect(session.current_url).to_equal("https://example.com/start")
+        expect(session.has_pending_requests()).to_equal(false)
+
+    it "edits and activates page controls through the DOM-backed UI surface":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/form",
+            "<html><body><button onkeydown='set-attr:data-keydown=yes' onclick=\"document.title='Saved'\">Save</button><button onkeydown='prevent-default' onclick=\"document.title='ShouldNotRun'\">Blocked key</button><input value='old' oninput=\"document.title='Typing'\" onchange=\"document.title='Changed'\"><input value='kept' onbeforeinput='prevent-default' oninput=\"document.title='ShouldNotRun'\"><input type='checkbox'><input type='radio' name='choice' checked><input type='radio' name='choice'></body></html>"
+        )
+
+        val edited = session.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#page_input_0", action: "set_value",
+            text_value: "Ada", x: 0, y: 0
+        ))
+        expect(edited.ok).to_equal(true)
+        expect(session.current_title).to_equal("Typing")
+        expect(session.current_body_html).to_contain("value=\"Ada\"")
+
+        val canceled = session.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#page_input_1", action: "set_value",
+            text_value: "blocked", x: 0, y: 0
+        ))
+        expect(canceled.ok).to_equal(true)
+        expect(canceled.message).to_equal("input edit canceled")
+        expect(session.current_title).to_equal("Changed")
+        expect(session.current_body_html).to_contain("value=\"kept\"")
+        expect(session.current_body_html.contains("value=\"blocked\"")).to_equal(false)
+        var focused_count = 0
+        for node in session.ui_access_snapshot().nodes:
+            if node.focused:
+                focused_count = focused_count + 1
+        expect(focused_count).to_equal(1)
+
+        val blurred = session.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#page_input_1", action: "blur",
+            text_value: "", x: 0, y: 0
+        ))
+        expect(blurred.ok).to_equal(true)
+        expect(session.current_title).to_equal("Changed")
+        focused_count = 0
+        for node in session.ui_access_snapshot().nodes:
+            if node.focused:
+                focused_count = focused_count + 1
+        expect(focused_count).to_equal(0)
+
+        val clicked = session.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#page_button_0", action: "key",
+            text_value: "Enter", x: 0, y: 0
+        ))
+        expect(clicked.ok).to_equal(true)
+        expect(clicked.message).to_equal("control key activated")
+        expect(session.current_title).to_equal("Saved")
+        expect(session.current_body_html).to_contain("data-keydown=\"yes\"")
+
+        val blocked_key = session.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#page_button_1", action: "key",
+            text_value: "Enter", x: 0, y: 0
+        ))
+        expect(blocked_key.ok).to_equal(true)
+        expect(blocked_key.message).to_equal("control key event canceled")
+        expect(session.current_title).to_equal("Saved")
+
+        val checked = session.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#page_input_2", action: "click",
+            text_value: "", x: 0, y: 0
+        ))
+        expect(checked.ok).to_equal(true)
+        val checkboxes = ui_access_find_nodes(
+            session.ui_access_snapshot(), "browser:session", "checkbox", "", 1
+        )
+        expect(checkboxes.len()).to_equal(1)
+        expect(checkboxes[0].selected).to_equal(true)
+
+        val selected_radio = session.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#page_input_4", action: "key",
+            text_value: "Space", x: 0, y: 0
+        ))
+        expect(selected_radio.ok).to_equal(true)
+        val radios = ui_access_find_nodes(
+            session.ui_access_snapshot(), "browser:session", "radio", "", 2
+        )
+        expect(radios.len()).to_equal(2)
+        expect(radios[0].selected).to_equal(false)
+        expect(radios[1].selected).to_equal(true)
+        expect(radios[1].focused).to_equal(true)
+
+    it "hides secret form state and edits textarea through one focused route":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/form",
+            "<html><body><input type='hidden' value='csrf-secret'><input type='password' value='password-secret'><textarea>old</textarea></body></html>"
+        )
+
+        val before = session.ui_access_snapshot()
+        var hidden_nodes = 0
+        var password_value = "missing"
+        var textarea_value = "missing"
+        for node in before.nodes:
+            if node.widget_id == "page_input_0":
+                hidden_nodes = hidden_nodes + 1
+            elif node.widget_id == "page_input_1":
+                password_value = node.text_value
+            elif node.widget_id == "page_textarea_0":
+                textarea_value = node.text_value
+        expect(hidden_nodes).to_equal(0)
+        expect(password_value).to_equal("")
+        expect(textarea_value).to_equal("old")
+
+        val edited = session.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#page_textarea_0", action: "set_value",
+            text_value: "Ada & Bob", x: 0, y: 0
+        ))
+        expect(edited.ok).to_equal(true)
+        expect(session.current_body_html).to_contain("Ada &amp; Bob")
+        var textarea_focused = false
+        for node in session.ui_access_snapshot().nodes:
+            if node.widget_id == "page_textarea_0":
+                textarea_focused = node.focused
+        expect(textarea_focused).to_equal(true)

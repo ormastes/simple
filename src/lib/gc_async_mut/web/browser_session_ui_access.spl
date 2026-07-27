@@ -12,7 +12,13 @@ use common.ui.access.{
     ui_access_find_node
 }
 use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_url.{resolve_relative_url}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_event_identity, be_dom_find_by_tag, be_dom_get_attr,
+    be_dom_get_text_content, be_dom_has_attr
+}
 
 val BROWSER_SESSION_SURFACE_ID = "browser:session"
 val BROWSER_SESSION_SOURCE_ID = "browser_session"
@@ -47,11 +53,26 @@ fn _browser_control_props(control: text) -> [UiAccessProp]:
         UiAccessProp(key: "control", value: control)
     ]
 
-fn _browser_link_props(href: text) -> [UiAccessProp]:
+fn _browser_link_props(href: text, target_id: text) -> [UiAccessProp]:
     [
         UiAccessProp(key: "source", value: BROWSER_SESSION_SOURCE_ID),
         UiAccessProp(key: "control", value: "link"),
+        UiAccessProp(key: "href", value: href),
+        UiAccessProp(key: "dom_target", value: target_id)
+    ]
+
+fn _browser_bookmark_props(href: text) -> [UiAccessProp]:
+    [
+        UiAccessProp(key: "source", value: BROWSER_SESSION_SOURCE_ID),
+        UiAccessProp(key: "control", value: "bookmark"),
         UiAccessProp(key: "href", value: href)
+    ]
+
+fn _browser_dom_control_props(control: text, target_id: text) -> [UiAccessProp]:
+    [
+        UiAccessProp(key: "source", value: BROWSER_SESSION_SOURCE_ID),
+        UiAccessProp(key: "control", value: control),
+        UiAccessProp(key: "dom_target", value: target_id)
     ]
 
 fn _browser_node_prop(node: UiAccessNode, key: text) -> text:
@@ -59,39 +80,6 @@ fn _browser_node_prop(node: UiAccessNode, key: text) -> text:
         if prop.key == key:
             return prop.value
     ""
-
-fn _browser_extract_attr(tag: text, attr: text) -> text:
-    val double_marker = attr + "=\""
-    var start = tag.index_of(double_marker)
-    if start >= 0:
-        val rest = tag.slice(start + double_marker.len(), tag.len())
-        val end = rest.index_of("\"")
-        if end >= 0:
-            return rest.slice(0, end)
-    val single_marker = attr + "='"
-    start = tag.index_of(single_marker)
-    if start >= 0:
-        val rest = tag.slice(start + single_marker.len(), tag.len())
-        val end = rest.index_of("'")
-        if end >= 0:
-            return rest.slice(0, end)
-    ""
-
-fn _browser_strip_inline_tags(html: text) -> text:
-    var out = ""
-    var in_tag = false
-    var i = 0
-    val html_len = html.len()
-    while i < html_len:
-        val ch = html.slice(i, i + 1)
-        if ch == "<":
-            in_tag = true
-        else if ch == ">":
-            in_tag = false
-        else if not in_tag:
-            out = out + ch
-        i = i + 1
-    out
 
 fn _browser_collapse_parent_segments(url: text) -> text:
     var out = url
@@ -106,56 +94,107 @@ fn _browser_collapse_parent_segments(url: text) -> text:
         out = out.slice(0, previous_slash) + out.slice(marker + 3, out.len())
     out
 
-fn _browser_count_link_nodes(body_html: text) -> i32:
-    var count = 0
-    var rest = body_html
-    while true:
-        val start = rest.index_of("<a")
-        if start < 0:
-            return count
-        val after_start = rest.slice(start, rest.len())
-        val tag_end = after_start.index_of(">")
-        if tag_end < 0:
-            return count
-        val tag = after_start.slice(0, tag_end + 1)
-        val after_tag = after_start.slice(tag_end + 1, after_start.len())
-        val close = after_tag.index_of("</a>")
-        if close < 0:
-            return count
-        val href = _browser_extract_attr(tag, "href")
-        val label = _browser_strip_inline_tags(after_tag.slice(0, close))
-        if href != "" and label != "":
-            count = count + 1
-        rest = after_tag.slice(close + 4, after_tag.len())
-    count
-
-fn _browser_link_nodes(body_html: text, base_url: text) -> [UiAccessNode]:
-    val link_count = _browser_count_link_nodes(body_html)
-    if link_count == 0:
-        return []
-    var nodes: [UiAccessNode] = [_browser_node("link_0", "link", "", true, false, ["click"], _browser_link_props("")); link_count]
-    var rest = body_html
+fn _browser_link_nodes(dom: BeDomNode, base_url: text) -> [UiAccessNode]:
+    val links = be_dom_find_by_tag(dom, "a")
+    var nodes: [UiAccessNode] = []
     var index = 0
-    while true:
-        val start = rest.index_of("<a")
-        if start < 0:
-            return nodes
-        val after_start = rest.slice(start, rest.len())
-        val tag_end = after_start.index_of(">")
-        if tag_end < 0:
-            return nodes
-        val tag = after_start.slice(0, tag_end + 1)
-        val after_tag = after_start.slice(tag_end + 1, after_start.len())
-        val close = after_tag.index_of("</a>")
-        if close < 0:
-            return nodes
-        val href = _browser_extract_attr(tag, "href")
-        val label = _browser_strip_inline_tags(after_tag.slice(0, close))
+    while index < links.len():
+        val link = links[index]
+        val href = be_dom_get_attr(link, "href")
+        val label = be_dom_get_text_content(link).trim()
         if href != "" and label != "":
             val resolved = _browser_collapse_parent_segments(resolve_relative_url(base_url, href))
-            nodes[index] = _browser_node("link_{index}", "link", label, true, false, ["click"], _browser_link_props(resolved))
-            index = index + 1
-        rest = after_tag.slice(close + 4, after_tag.len())
+            nodes.push(_browser_node(
+                "link_{index}", "link", label, true, false, ["click", "key"],
+                _browser_link_props(resolved, be_dom_event_identity(link))
+            ))
+        index = index + 1
+    nodes
+
+fn _browser_bookmark_nodes(session: BrowserSession) -> [UiAccessNode]:
+    var nodes: [UiAccessNode] = []
+    var index = 0
+    while index < session.favorite_links.len():
+        val favorite = session.favorite_links[index]
+        nodes.push(_browser_node(
+            "bookmark_{index}", "link", favorite.second, true, false, ["click"],
+            _browser_bookmark_props(favorite.first)
+        ))
+        index = index + 1
+    nodes
+
+fn _browser_page_control_nodes(dom: BeDomNode) -> [UiAccessNode]:
+    var nodes: [UiAccessNode] = []
+    val buttons = be_dom_find_by_tag(dom, "button")
+    var button_index = 0
+    while button_index < buttons.len():
+        val button = buttons[button_index]
+        var label = be_dom_get_text_content(button).trim()
+        if label == "":
+            label = "Button"
+        var access_node = _browser_node(
+            "page_button_{button_index}", "button", label,
+            be_dom_has_attr(button, "disabled") == false, false, ["click", "key"],
+            _browser_dom_control_props("page_button", be_dom_event_identity(button))
+        )
+        access_node.focused = be_dom_has_attr(button, "data-focused")
+        nodes.push(access_node)
+        button_index = button_index + 1
+
+    val inputs = be_dom_find_by_tag(dom, "input")
+    var input_index = 0
+    while input_index < inputs.len():
+        val input = inputs[input_index]
+        val declared_type = be_dom_get_attr(input, "type").lower()
+        val input_type = if declared_type == "": "text" else: declared_type
+        val enabled = be_dom_has_attr(input, "disabled") == false
+        if input_type == "hidden":
+            pass_dn("hidden form state is not an interactive UI node")
+        elif input_type == "checkbox" or input_type == "radio":
+            var access_node = _browser_node(
+                "page_input_{input_index}", input_type, be_dom_get_attr(input, "value"),
+                enabled, be_dom_has_attr(input, "checked"), ["click", "key"],
+                _browser_dom_control_props("page_input", be_dom_event_identity(input))
+            )
+            access_node.focused = be_dom_has_attr(input, "data-focused")
+            nodes.push(access_node)
+        elif input_type == "button" or input_type == "submit":
+            var access_node = _browser_node(
+                "page_input_{input_index}", "button", be_dom_get_attr(input, "value"),
+                enabled, false, ["click", "key"],
+                _browser_dom_control_props("page_button", be_dom_event_identity(input))
+            )
+            access_node.focused = be_dom_has_attr(input, "data-focused")
+            nodes.push(access_node)
+        else:
+            val editable = enabled and not be_dom_has_attr(input, "readonly")
+            val visible_value = if input_type == "password": "" else: be_dom_get_attr(input, "value")
+            var access_node = _browser_node(
+                "page_input_{input_index}", "textfield", visible_value,
+                editable, false, if editable: ["set_value", "blur"] else: [],
+                _browser_dom_control_props("page_input", be_dom_event_identity(input))
+            )
+            access_node.focused = be_dom_has_attr(input, "data-focused")
+            nodes.push(access_node)
+        input_index = input_index + 1
+
+    val textareas = be_dom_find_by_tag(dom, "textarea")
+    var textarea_index = 0
+    while textarea_index < textareas.len():
+        val textarea = textareas[textarea_index]
+        val editable = not be_dom_has_attr(textarea, "disabled") and
+            not be_dom_has_attr(textarea, "readonly")
+        var access_node = _browser_node(
+            "page_textarea_{textarea_index}", "textfield",
+            be_dom_get_text_content(textarea), editable, false,
+            if editable: ["set_value", "blur"] else: [],
+            _browser_dom_control_props(
+                "page_input", be_dom_event_identity(textarea)
+            )
+        )
+        access_node.focused = be_dom_has_attr(textarea, "data-focused")
+        nodes.push(access_node)
+        textarea_index = textarea_index + 1
     nodes
 
 fn _browser_action_result(ok: bool, code: text, message: text, target_id: text, action: text) -> WinTextActionResult:
@@ -179,21 +218,33 @@ impl BrowserSession:
             app_id: "simple-browser",
             root_canonical_id: ui_access_canonical_id(BROWSER_SESSION_SURFACE_ID, "root")
         )
-        val link_nodes = _browser_link_nodes(self.current_body_html, self.current_url)
-        val fixed_count = 7
-        val node_count = fixed_count + link_nodes.len()
+        val link_nodes = _browser_link_nodes(self.current_dom, self.current_url)
+        val bookmark_nodes = _browser_bookmark_nodes(self)
+        val page_control_nodes = _browser_page_control_nodes(self.current_dom)
+        val fixed_count = 8
+        val node_count = fixed_count + bookmark_nodes.len() + link_nodes.len() + page_control_nodes.len()
         var nodes: [UiAccessNode] = [_browser_node("back", "button", "Back", self.can_go_back(), false, ["click"], _browser_control_props("back")); node_count]
         nodes[1] = _browser_node("forward", "button", "Forward", self.can_go_forward(), false, ["click"], _browser_control_props("forward"))
-        nodes[2] = _browser_node("stop", "button", "Stop", self.is_loading, false, ["click"], _browser_control_props("stop"))
-        nodes[3] = _browser_node("home", "button", "Home", true, false, ["click"], _browser_control_props("home"))
-        nodes[4] = _browser_node("favorite", "button", "Favorite", true, self.is_favorite(self.current_url), ["click"], _browser_control_props("favorite"))
-        nodes[5] = _browser_node("address", "textfield", self.current_url, true, false, ["set_value"], _browser_control_props("address"))
-        nodes[6] = _browser_node("title", "label", self.current_title, true, false, [], _browser_control_props("title"))
+        nodes[2] = _browser_node("stop", "button", "Stop", self.can_stop_loading(), false, ["click"], _browser_control_props("stop"))
+        nodes[3] = _browser_node("reload", "button", "Reload", self.current_index >= 0 and not self.is_loading, false, ["click"], _browser_control_props("reload"))
+        nodes[4] = _browser_node("home", "button", "Home", true, false, ["click"], _browser_control_props("home"))
+        nodes[5] = _browser_node("favorite", "button", "Favorite", true, self.is_favorite(self.current_url), ["click"], _browser_control_props("favorite"))
+        val address_text = if self.address_draft != "": self.address_draft else: self.current_url
+        nodes[6] = _browser_node("address", "textfield", address_text, true, false, ["set_value", "submit"], _browser_control_props("address"))
+        nodes[7] = _browser_node("title", "label", self.current_title, true, false, [], _browser_control_props("title"))
+        var bookmark_idx = 0
+        while bookmark_idx < bookmark_nodes.len():
+            nodes[fixed_count + bookmark_idx] = bookmark_nodes[bookmark_idx]
+            bookmark_idx = bookmark_idx + 1
         var link_idx = 0
         val link_count = link_nodes.len()
         while link_idx < link_count:
-            nodes[fixed_count + link_idx] = link_nodes[link_idx]
+            nodes[fixed_count + bookmark_nodes.len() + link_idx] = link_nodes[link_idx]
             link_idx = link_idx + 1
+        var control_idx = 0
+        while control_idx < page_control_nodes.len():
+            nodes[fixed_count + bookmark_nodes.len() + link_count + control_idx] = page_control_nodes[control_idx]
+            control_idx = control_idx + 1
         UiAccessSnapshot(
             protocol_version: 1,
             snapshot_revision: 0,
@@ -209,10 +260,68 @@ impl BrowserSession:
         val node = ui_access_find_node(snapshot, request.target_id)
         if node == nil:
             return _browser_action_result(false, "target_not_found", "target not found", request.target_id, request.action)
-        if request.action != "click":
-            return _browser_action_result(false, "unsupported_operation", "unsupported action '{request.action}'", request.target_id, request.action)
+        if node.widget_id == "address":
+            if request.action == "set_value":
+                self.address_draft = request.text_value
+                return _browser_action_result(true, "ok", "address updated", request.target_id, request.action)
+            if request.action == "submit":
+                val address = if request.text_value != "": request.text_value else: self.address_draft
+                match self.begin_network_navigation(address, "GET", "", "", ""):
+                    Ok(_): return _browser_action_result(true, "ok", "address submitted", request.target_id, request.action)
+                    Err(e): return _browser_action_result(false, "action_failed", e, request.target_id, request.action)
+            return _browser_action_result(false, "unsupported_operation", "unsupported address action '{request.action}'", request.target_id, request.action)
+        val control = _browser_node_prop(node, "control")
+        if control == "page_input" and node.kind == "textfield":
+            val dom_target = _browser_node_prop(node, "dom_target")
+            if request.action == "blur":
+                match self.blur_dom_text_input(dom_target):
+                    Ok(_):
+                        return _browser_action_result(
+                            true, "ok", "input blurred",
+                            request.target_id, request.action
+                        )
+                    Err(e):
+                        return _browser_action_result(
+                            false, "action_failed", e,
+                            request.target_id, request.action
+                        )
+            if request.action != "set_value":
+                return _browser_action_result(false, "unsupported_operation", "unsupported input action '{request.action}'", request.target_id, request.action)
+            match self.set_dom_text_input(dom_target, request.text_value):
+                Ok(dispatch):
+                    if dispatch.event.default_prevented:
+                        return _browser_action_result(
+                            true, "ok", "input edit canceled",
+                            request.target_id, request.action
+                        )
+                    return _browser_action_result(true, "ok", "input updated", request.target_id, request.action)
+                Err(e): return _browser_action_result(false, "action_failed", e, request.target_id, request.action)
         if not node.enabled:
             return _browser_action_result(false, "disabled", "control disabled", request.target_id, request.action)
+        if request.action != "click":
+            if request.action == "key" and (
+                node.kind == "link" or node.kind == "button" or
+                node.kind == "checkbox" or node.kind == "radio"
+            ):
+                val dom_target = _browser_node_prop(node, "dom_target")
+                match self.dispatch_dom_keyboard_activation(
+                    dom_target, request.text_value
+                ):
+                    Ok(dispatch):
+                        val message = if dispatch.default_action_allowed:
+                            "control key activated"
+                        else:
+                            "control key event canceled"
+                        return _browser_action_result(
+                            true, "ok", message,
+                            request.target_id, request.action
+                        )
+                    Err(e):
+                        return _browser_action_result(
+                            false, "action_failed", e,
+                            request.target_id, request.action
+                        )
+            return _browser_action_result(false, "unsupported_operation", "unsupported action '{request.action}'", request.target_id, request.action)
         if node.widget_id == "back":
             match self.go_back():
                 Ok(_): return _browser_action_result(true, "ok", "went back", request.target_id, request.action)
@@ -224,18 +333,39 @@ impl BrowserSession:
         if node.widget_id == "stop":
             self.stop_loading()
             return _browser_action_result(true, "ok", "stopped loading", request.target_id, request.action)
+        if node.widget_id == "reload":
+            match self.reload():
+                Ok(_): return _browser_action_result(true, "ok", "reloaded page", request.target_id, request.action)
+                Err(e): return _browser_action_result(false, "action_failed", e, request.target_id, request.action)
         if node.widget_id == "home":
             match self.go_home():
                 Ok(_): return _browser_action_result(true, "ok", "went home", request.target_id, request.action)
                 Err(e): return _browser_action_result(false, "action_failed", e, request.target_id, request.action)
         if node.widget_id == "favorite":
+            if self.is_favorite(self.current_url):
+                self.remove_favorite(self.current_url)
+                return _browser_action_result(true, "ok", "favorite removed", request.target_id, request.action)
             self.add_current_favorite()
             return _browser_action_result(true, "ok", "favorite added", request.target_id, request.action)
-        if node.kind == "link":
+        if control == "bookmark":
             val href = _browser_node_prop(node, "href")
-            if href == "":
-                return _browser_action_result(false, "action_failed", "link missing href", request.target_id, request.action)
             match self.begin_network_navigation(href, "GET", "", "", ""):
-                Ok(_): return _browser_action_result(true, "ok", "opened link", request.target_id, request.action)
+                Ok(_): return _browser_action_result(true, "ok", "opened bookmark", request.target_id, request.action)
                 Err(e): return _browser_action_result(false, "action_failed", e, request.target_id, request.action)
+        if node.kind == "link":
+            val dom_target = _browser_node_prop(node, "dom_target")
+            if dom_target == "":
+                return _browser_action_result(false, "action_failed", "link missing DOM target", request.target_id, request.action)
+            val dispatch = self.dispatch_dom_event(dom_target, "click", true, true)
+            if dispatch.default_action_allowed:
+                return _browser_action_result(true, "ok", "opened link", request.target_id, request.action)
+            return _browser_action_result(true, "ok", "link event canceled", request.target_id, request.action)
+        if control == "page_button" or control == "page_input":
+            val dom_target = _browser_node_prop(node, "dom_target")
+            if dom_target == "":
+                return _browser_action_result(false, "action_failed", "control missing DOM target", request.target_id, request.action)
+            val dispatch = self.dispatch_dom_event(dom_target, "click", true, true)
+            if dispatch.default_action_allowed or dispatch.actions.len() > 0:
+                return _browser_action_result(true, "ok", "control activated", request.target_id, request.action)
+            return _browser_action_result(true, "ok", "control event dispatched", request.target_id, request.action)
         _browser_action_result(false, "unsupported_operation", "unsupported browser control", request.target_id, request.action)

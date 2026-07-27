@@ -70,3 +70,49 @@ describe "BrowserSession storage API":
                 expect(session.session_storage_item("getItem")).to_be_nil()
             Err(e) =>
                 fail("Expected storage removeItem script to evaluate successfully: {e}")
+
+    it "partitions Web Storage by origin":
+        var session = BrowserSession.new()
+        val bank = session.open_html(
+            "https://bank.example/app",
+            "<html><body><script>localStorage.token = 'secret'; sessionStorage.tab = 'bank';</script></body></html>"
+        )
+        expect(bank.is_ok()).to_equal(true)
+
+        val evil = session.open_html(
+            "https://evil.example/app",
+            "<html><body><script>document.body.textContent = localStorage.getItem('token') + ':' + sessionStorage.getItem('tab');</script></body></html>"
+        )
+        expect(evil.is_ok()).to_equal(true)
+        expect(session.current_body_html).to_equal("null:null")
+
+        val bank_again = session.open_html(
+            "https://bank.example/next",
+            "<html><body><script>document.body.textContent = localStorage.getItem('token') + ':' + sessionStorage.getItem('tab');</script></body></html>"
+        )
+        expect(bank_again.is_ok()).to_equal(true)
+        expect(session.current_body_html).to_equal("secret:bank")
+
+    it "bounds Web Storage entries across method and property writes":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://quota.example/app", "<html><body>Storage</body></html>"
+        )
+
+        val filled = session.eval_script(
+            "for (var i = 0; i < 1030; i = i + 1) { localStorage.setItem('k' + i, 'v'); } localStorage.length"
+        )
+        match filled:
+            Ok(JsValue.Number(length)):
+                expect(length).to_equal(1024.0)
+            _:
+                fail("Expected bounded Web Storage length")
+
+        val property_write = session.eval_script(
+            "localStorage.k0 = 'updated'; localStorage.extra = 'denied'; localStorage.getItem('k0') + ':' + localStorage.getItem('extra') + ':' + localStorage.length"
+        )
+        match property_write:
+            Ok(value):
+                expect(_display_js(value)).to_equal("updated:null:1024")
+            Err(e):
+                fail("Expected bounded direct storage property write: {e}")

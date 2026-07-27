@@ -181,6 +181,7 @@ describe "BrowserSession HTTP status semantics":
                                 expect(second_request.url).to_equal("https://example.com/submitted")
                                 expect(second_request.method).to_equal("GET")
                                 expect(second_request.body).to_equal("")
+                                expect(second_request.content_type).to_equal("")
                                 val final_result = session.commit_network_response(BrowserResponse.create(
                                     request_id: second_request.id,
                                     kind: "fetch",
@@ -235,6 +236,7 @@ describe "BrowserSession HTTP status semantics":
                                 expect(second_request.url).to_equal("https://example.com/upload-target")
                                 expect(second_request.method).to_equal("POST")
                                 expect(second_request.body).to_equal("payload")
+                                expect(second_request.content_type).to_equal("text/plain")
                                 val final_result = session.commit_network_response(BrowserResponse.create(
                                     request_id: second_request.id,
                                     kind: "fetch",
@@ -332,3 +334,167 @@ describe "BrowserSession HTTP status semantics":
                         expect(_display_js(value)).to_equal("true:blocked:mixed-content:http://example.com/insecure.txt:blocked:mixed-content:http://example.com/insecure.txt")
                     Err(e):
                         fail("Expected mixed-content rejection output to evaluate: {e}")
+
+    it "does not grant loopback trust to a hostname prefix spoof":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.com/app",
+            "<html><body><script>var meta = 'start'; window.fetch('http://localhost.evil/insecure.txt').then(function(r) { return r.text(); }).then(function(t) { meta = 'unexpected:' + t; }).catch(function(err) { meta = 'blocked:' + err; });</script></body></html>"
+        )
+
+        expect(session.has_pending_requests()).to_equal(false)
+        val result = session.eval_script("window.isSecureContext + ':' + meta")
+        match result:
+            Ok(value):
+                expect(_display_js(value)).to_equal(
+                    "true:blocked:mixed-content:http://localhost.evil/insecure.txt"
+                )
+            Err(e):
+                fail("Expected spoofed loopback fetch rejection: {e}")
+
+    it "follows stylesheet redirects and never executes an HTTP error as script":
+        var styles = BrowserSession.new_without_runtime()
+        expect(styles.open_html(
+            "https://example.com/app",
+            "<html><head><link rel='stylesheet' href='/old.css'></head><body><div>ok</div></body></html>"
+        ).is_ok()).to_equal(true)
+        match styles.take_pending_request():
+            Some(first):
+                expect(styles.commit_network_response(BrowserResponse.create(
+                    request_id: first.id,
+                    kind: "style",
+                    url: first.url,
+                    status: 302,
+                    headers: "Location: /new.css\n",
+                    body: "ignored",
+                    error: ""
+                )).is_ok()).to_equal(true)
+                match styles.take_pending_request():
+                    Some(next):
+                        expect(next.url).to_equal("https://example.com/new.css")
+                    nil:
+                        fail("Expected redirected stylesheet request")
+            nil:
+                fail("Expected initial stylesheet request")
+
+        var scripts = BrowserSession.new()
+        expect(scripts.open_html(
+            "https://example.com/app",
+            "<html><body><script>var marker = 'safe';</script><script src='/missing.js'></script></body></html>"
+        ).is_ok()).to_equal(true)
+        match scripts.take_pending_request():
+            Some(request):
+                expect(scripts.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "script",
+                    url: request.url,
+                    status: 404,
+                    headers: "",
+                    body: "marker = 'executed-error-body';",
+                    error: ""
+                )).is_ok()).to_equal(true)
+            nil:
+                fail("Expected external script request")
+        match scripts.eval_script("marker"):
+            Ok(value):
+                expect(_display_js(value)).to_equal("safe")
+            Err(e):
+                fail("Expected marker after rejected HTTP error body: {e}")
+
+    it "uses the final module URL for redirected relative imports":
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.com/app",
+            "<html><body><script type='module' src='/old.js'></script></body></html>"
+        ).is_ok()).to_equal(true)
+        match session.take_pending_request():
+            Some(first):
+                expect(session.commit_network_response(BrowserResponse.create(
+                    request_id: first.id,
+                    kind: "module",
+                    url: first.url,
+                    status: 302,
+                    headers: "Location: /dir/main.js\n",
+                    body: "",
+                    error: ""
+                )).is_ok()).to_equal(true)
+            nil:
+                fail("Expected initial module request")
+        match session.take_pending_request():
+            Some(main_request):
+                expect(main_request.url).to_equal("https://example.com/dir/main.js")
+                expect(session.commit_network_response(BrowserResponse.create(
+                    request_id: main_request.id,
+                    kind: "module",
+                    url: main_request.url,
+                    status: 200,
+                    headers: "",
+                    body: "import \{ label \} from './dep.js'; document.title = label;",
+                    error: ""
+                )).is_ok()).to_equal(true)
+            nil:
+                fail("Expected redirected module request")
+        match session.take_pending_request():
+            Some(dep_request):
+                expect(dep_request.url).to_equal("https://example.com/dir/./dep.js")
+                expect(session.commit_network_response(BrowserResponse.create(
+                    request_id: dep_request.id,
+                    kind: "module",
+                    url: dep_request.url,
+                    status: 200,
+                    headers: "",
+                    body: "export const label = 'RedirectedModule';",
+                    error: ""
+                )).is_ok()).to_equal(true)
+            nil:
+                fail("Expected final-URL-relative module dependency")
+        expect(session.current_title).to_equal("RedirectedModule")
+
+    it "follows safe document redirects and blocks HTTPS downgrade":
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://example.com/submit", "POST", "", "payload", "text/plain"
+        ).is_ok()).to_equal(true)
+        match session.take_pending_request():
+            Some(first):
+                val redirected = session.commit_network_response(BrowserResponse.create(
+                    request_id: first.id,
+                    kind: "document",
+                    url: first.url,
+                    status: 303,
+                    headers: "Location: /done\n",
+                    body: "ignored",
+                    error: ""
+                ))
+                expect(redirected.is_ok()).to_equal(true)
+                match session.take_pending_request():
+                    Some(next):
+                        expect(next.url).to_equal("https://example.com/done")
+                        expect(next.method).to_equal("GET")
+                        expect(next.body).to_equal("")
+                        expect(next.content_type).to_equal("")
+                    nil:
+                        fail("Expected redirected document request")
+            nil:
+                fail("Expected initial document request")
+
+        var downgrade = BrowserSession.new()
+        expect(downgrade.begin_network_navigation(
+            "https://example.com/start", "GET", "", "", ""
+        ).is_ok()).to_equal(true)
+        match downgrade.take_pending_request():
+            Some(first):
+                val blocked = downgrade.commit_network_response(BrowserResponse.create(
+                    request_id: first.id,
+                    kind: "document",
+                    url: first.url,
+                    status: 302,
+                    headers: "Location: http://example.com/insecure\n",
+                    body: "",
+                    error: ""
+                ))
+                expect(blocked.is_err()).to_equal(true)
+                expect(downgrade.can_stop_loading()).to_equal(false)
+                expect(downgrade.has_pending_requests()).to_equal(false)
+            nil:
+                fail("Expected initial secure document request")

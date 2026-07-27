@@ -92,6 +92,19 @@ Float context is threaded through all layout functions as a parameter (reference
 - BFC detection inlined to avoid per-block function call overhead
 - Flex children reuse parent FloatContext instead of allocating fresh empty contexts
 
+## BrowserSession JavaScript Boundary
+
+Browser-profile JavaScript `fetch()` only queues a request. `BrowserSession`
+resolves the URL against the committed page, enforces scheme/origin and
+mixed-content policy, strips page-supplied `Cookie`, and attaches cookies from
+the session jar. The JS interpreter does not perform direct file or HTTP I/O.
+The shared fetch transport rejects redirects from HTTPS to plaintext before
+creating the redirected request.
+
+`document.cookie` receives only origin-visible, non-HttpOnly cookies.
+Transport cookies and internal module/fetch state are not installed as
+page-visible `window`, `chrome`, or global properties.
+
 ## CSS Quick Wins (M13)
 
 | Feature | Status | Location |

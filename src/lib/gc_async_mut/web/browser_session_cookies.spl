@@ -13,7 +13,13 @@
 
 use common.string_builder.{StringBuilder}
 use std.gc_async_mut.web.browser_session.{BrowserCookie}
-use std.gc_async_mut.web.browser_session_url.{find_text, url_pathname, url_host}
+use std.gc_async_mut.web.browser_session_url.{find_text, url_pathname, url_hostname}
+use common.web.public_suffix.{is_public_suffix}
+use common.web.host_policy.{is_ip_host_literal}
+
+val BROWSER_COOKIE_BYTES_LIMIT = 4096
+val BROWSER_COOKIES_PER_DOMAIN_LIMIT = 50
+val BROWSER_COOKIE_JAR_LIMIT = 3000
 
 fn split_text(input: text, delimiter: text) -> [text]:
     val delimiter_len = delimiter.len()
@@ -64,6 +70,17 @@ fn merge_cookie_text(existing: [BrowserCookie], cookie_text: text) -> [BrowserCo
     val cookie_lines = split_cookie_assignments(cookie_text)
     for line in cookie_lines:
         if val Some(cookie) = parse_cookie_line(line):
+            jar = upsert_cookie(jar, cookie)
+    jar
+
+fn merge_cookie_text_for_url(existing: [BrowserCookie], cookie_text: text, url: text, from_http: bool) -> [BrowserCookie]:
+    var jar = existing
+    if cookie_text_has_attributes(cookie_text):
+        if val Some(cookie) = parse_cookie_line_for_url(cookie_text, url, from_http):
+            return upsert_cookie(jar, cookie)
+        return jar
+    for line in split_cookie_assignments(cookie_text):
+        if val Some(cookie) = parse_cookie_line_for_url(line, url, from_http):
             jar = upsert_cookie(jar, cookie)
     jar
 
@@ -121,7 +138,8 @@ fn count_cookie_assignments(cookie_text: text) -> i32:
 
 fn parse_cookie_line(cookie_line: text) -> BrowserCookie?:
     val trimmed = cookie_line.trim()
-    if trimmed.len() == 0:
+    if trimmed.len() == 0 or trimmed.len() > BROWSER_COOKIE_BYTES_LIMIT or
+       cookie_line.contains("\r") or cookie_line.contains("\n"):
         return nil
     val segments = split_text(trimmed, ";")
     if segments.len() == 0:
@@ -164,9 +182,91 @@ fn parse_cookie_line(cookie_line: text) -> BrowserCookie?:
         i = i + 1
     Some(BrowserCookie.create(name: name, value: value, path: path, domain: domain, expired: expired))
 
+fn parse_cookie_line_for_url(cookie_line: text, url: text, from_http: bool) -> BrowserCookie?:
+    val parsed = parse_cookie_line(cookie_line)
+    if parsed == nil:
+        return nil
+    if val Some(cookie) = parsed:
+        val host = normalize_cookie_domain(url_hostname(url))
+        if host == "":
+            return nil
+        val secure = cookie_has_flag(cookie_line, "secure")
+        val http_only = from_http and cookie_has_flag(cookie_line, "httponly")
+        val https = url.starts_with("https://")
+        val has_domain_attribute = cookie_has_attribute(cookie_line, "domain")
+        val partitioned = cookie_has_attribute(cookie_line, "partitioned")
+        if partitioned:
+            return nil
+        if val Some(same_site) = cookie_attribute_value(cookie_line, "samesite"):
+            if same_site.lower() == "none" and not secure:
+                return nil
+        if cookie.name.starts_with("__Secure-") and (not secure or not https):
+            return nil
+        if cookie.name.starts_with("__Host-"):
+            if not secure or not https or has_domain_attribute:
+                return nil
+            if cookie_attribute_value(cookie_line, "path") != Some("/"):
+                return nil
+        val host_only = cookie.domain == ""
+        if has_domain_attribute:
+            if cookie.domain == "" or is_ip_host_literal(host):
+                return nil
+            if is_public_suffix(cookie.domain):
+                return nil
+        val domain = if host_only: host else: cookie.domain
+        if not host_only and host != domain and not host.ends_with(".{domain}"):
+            return nil
+        if secure and not https:
+            return nil
+        val path = if cookie.path == "": "/" else: cookie.path
+        return Some(BrowserCookie.create_scoped(cookie.name, cookie.value, path, domain, cookie.expired, secure, http_only, host_only))
+    nil
+
+fn cookie_has_flag(cookie_line: text, name: text) -> bool:
+    val segments = split_text(cookie_line, ";")
+    var index = 1
+    while index < segments.len():
+        if segments[index].trim().lower() == name:
+            return true
+        index = index + 1
+    false
+
+fn cookie_has_attribute(cookie_line: text, name: text) -> bool:
+    val segments = split_text(cookie_line, ";")
+    var index = 1
+    while index < segments.len():
+        val segment = segments[index].trim()
+        val eq = find_text(segment, "=", 0)
+        val key = if eq < 0: segment else: segment.slice(0, eq).trim()
+        if key.lower() == name:
+            return true
+        index = index + 1
+    false
+
+fn cookie_attribute_value(cookie_line: text, name: text) -> text?:
+    val segments = split_text(cookie_line, ";")
+    var index = 1
+    while index < segments.len():
+        val segment = segments[index].trim()
+        val eq = find_text(segment, "=", 0)
+        if eq > 0 and segment.slice(0, eq).trim().lower() == name:
+            return Some(segment.slice(eq + 1, segment.len()).trim())
+        index = index + 1
+    nil
+
+
 fn upsert_cookie(existing: [BrowserCookie], cookie: BrowserCookie) -> [BrowserCookie]:
     val existing_count = existing.len()
     val found_index = cookie_index(existing, cookie)
+    if found_index < 0 and not cookie.expired:
+        if existing_count >= BROWSER_COOKIE_JAR_LIMIT:
+            return existing
+        var domain_count = 0
+        for current in existing:
+            if current.domain == cookie.domain:
+                domain_count = domain_count + 1
+        if domain_count >= BROWSER_COOKIES_PER_DOMAIN_LIMIT:
+            return existing
     val output_count = if found_index >= 0:
         if cookie.expired: existing_count - 1 else: existing_count
     else:
@@ -216,6 +316,13 @@ fn cookie_text_for_url(cookies: [BrowserCookie], url: text) -> text:
         idx = idx + 1
     join_text(parts, "; ")
 
+fn document_cookie_text_for_url(cookies: [BrowserCookie], url: text) -> text:
+    var visible: [BrowserCookie] = []
+    for cookie in cookies:
+        if not cookie.http_only:
+            visible.push(cookie)
+    cookie_text_for_url(visible, url)
+
 fn count_cookies_for_url(cookies: [BrowserCookie], url: text) -> i32:
     var count = 0
     var idx = 0
@@ -227,9 +334,13 @@ fn count_cookies_for_url(cookies: [BrowserCookie], url: text) -> i32:
     count
 
 fn cookie_matches_url(cookie: BrowserCookie, url: text) -> bool:
+    if cookie.secure and not url.starts_with("https://"):
+        return false
     if cookie.domain.len() > 0:
-        val host = normalize_cookie_domain(url_host(url))
-        if host != cookie.domain and not host.ends_with(".{cookie.domain}"):
+        val host = normalize_cookie_domain(url_hostname(url))
+        if cookie.host_only and host != cookie.domain:
+            return false
+        if not cookie.host_only and host != cookie.domain and not host.ends_with(".{cookie.domain}"):
             return false
     if cookie.path.len() > 0:
         val pathname = url_pathname(url)

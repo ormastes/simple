@@ -14,11 +14,6 @@ use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATI
 use std.js.engine.parser.{JsParser}
 use std.js.builtins.json.{json_parse}
 use std.js.builtins.array.{array_map, array_filter, array_reduce, array_forEach, array_find, array_findIndex, array_some, array_every, array_sort_with, array_isArray, array_from_values}
-use std.nogc_sync_mut.http.types.{status_text}
-
-extern fn rt_file_read_text(path: text) -> text
-use std.nogc_sync_mut.io.http_sffi.{http_request_raw}
-
 # ── Types, helpers, coercion (extracted to interpreter_types.spl) ────────
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, NativeIdMapping, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 
@@ -105,24 +100,6 @@ fn text_equals_exact(left: text, right: text) -> bool:
         i = i + 1
     true
 
-fn _simple_fetch_marker(obj_id: i64, store: ObjectStore) -> bool:
-    match store.get_property(obj_id, "__simple_fetch_host"):
-        JsValue.Boolean(v): v
-        _:
-            false
-
-fn _simple_fetch_base_url(obj_id: i64, store: ObjectStore) -> text:
-    match store.get_property(obj_id, "__simple_base_url"):
-        JsValue.String(v): v
-        _:
-            ""
-
-fn _simple_fetch_cookie_header(obj_id: i64, store: ObjectStore) -> text:
-    match store.get_property(obj_id, "__simple_cookie_header"):
-        JsValue.String(v): v
-        _:
-            ""
-
 fn _simple_fetch_state(obj_id: i64, store: ObjectStore) -> text:
     var i = store.prop_obj_ids.len() - 1
     while i >= 0:
@@ -156,118 +133,6 @@ fn _simple_fetch_handlers(obj_id: i64, store: ObjectStore) -> i64:
         JsValue.Array(id): id
         _:
             -1
-
-fn _scheme(url: text) -> text:
-    match url.index_of("://"):
-        Some(idx): url.substring(0, idx)
-        nil: "https"
-
-fn _origin(url: text) -> text:
-    val scheme_end_opt = url.index_of("://")
-    match scheme_end_opt:
-        Some(scheme_end):
-            val after_scheme = scheme_end + 3
-            match url.substring(after_scheme).index_of("/"):
-                Some(rel_idx): url.substring(0, after_scheme + rel_idx)
-                nil: url
-        nil:
-            ""
-
-fn _without_fragment(url: text) -> text:
-    match url.index_of("#"):
-        Some(idx): url.substring(0, idx)
-        nil: url
-
-fn _without_query(url: text) -> text:
-    val clean = _without_fragment(url)
-    match clean.index_of("?"):
-        Some(idx): clean.substring(0, idx)
-        nil: clean
-
-fn _base_dir(url: text) -> text:
-    val clean = _without_query(url)
-    val origin = _origin(clean)
-    if origin == "":
-        return ""
-    if clean == origin:
-        return origin + "/"
-    val after_origin = clean.substring(origin.len())
-    match after_origin.last_index_of("/"):
-        Some(rel_idx): origin + after_origin.substring(0, rel_idx + 1)
-        nil: origin + "/"
-
-fn _resolve_fetch_url(base_url: text, href: text) -> text:
-    if href == "":
-        return base_url
-    if href.starts_with("http://") or href.starts_with("https://") or href.starts_with("file://") or href.starts_with("about:"):
-        return href
-    if href.starts_with("//"):
-        return _scheme(base_url) + ":" + href
-    if href.starts_with("#"):
-        return _without_fragment(base_url) + href
-    if href.starts_with("?"):
-        return _without_query(base_url) + href
-    if href.starts_with("/"):
-        val origin = _origin(base_url)
-        if origin != "":
-            return origin + href
-        return href
-    _base_dir(base_url) + href
-
-fn _simple_fetch_sync(store: ObjectStore, obj_id: i64, args: [JsValue]) -> JsValue:
-    var request_url = _simple_fetch_base_url(obj_id, store)
-    if args.len() > 0:
-        request_url = _resolve_fetch_url(request_url, js_to_string(args.get(0)))
-    var method = "GET"
-    if args.len() > 1:
-        val maybe_method = js_to_string(args.get(1)).trim().upper()
-        if maybe_method != "":
-            method = maybe_method
-    var headers_text = ""
-    if args.len() > 2:
-        headers_text = js_to_string(args.get(2))
-    val cookie_header = _simple_fetch_cookie_header(obj_id, store)
-    if cookie_header != "":
-        if headers_text != "":
-            headers_text = headers_text + "\n"
-        headers_text = headers_text + "Cookie: " + cookie_header
-    var body = ""
-    if args.len() > 3:
-        body = js_to_string(args.get(3))
-    var content_type = ""
-    if args.len() > 4:
-        content_type = js_to_string(args.get(4))
-    if content_type != "":
-        if headers_text != "":
-            headers_text = headers_text + "\n"
-        headers_text = headers_text + "Content-Type: " + content_type
-
-    var status: i64 = 0
-    var response_body = ""
-    var error_text = ""
-    if request_url.starts_with("file://"):
-        val path = request_url.slice(7, request_url.len())
-        val content = rt_file_read_text(path) ?? ""
-        if content != "":
-            status = 200
-            response_body = content
-        else:
-            status = 404
-            error_text = "file not found"
-    else:
-        val result = http_request_raw(method, request_url, headers_text, body)
-        status = result.0
-        response_body = result.1
-        error_text = result.2
-
-    val response_id = store.create_object()
-    store.set_property(response_id, "url", JsValue.String(v: request_url))
-    store.set_property(response_id, "status", JsValue.Number(v: status.to_f64()))
-    store.set_property(response_id, "ok", JsValue.Boolean(v: status >= 200 and status < 300 and error_text == ""))
-    store.set_property(response_id, "headersText", JsValue.String(v: ""))
-    store.set_property(response_id, "body", JsValue.String(v: response_body))
-    store.set_property(response_id, "error", JsValue.String(v: error_text))
-    JsValue.Object(id: response_id)
 
 class PendingAsyncRequest:
     request_obj_id: i64
@@ -405,6 +270,7 @@ class JsInterpreter:
     canceled_timer_ids: [i64]
     timer_handle_ids: [i64]
     timer_handle_object_ids: [i64]
+    timer_current_time_ms: i64
     global_var_names: [text]
     global_var_values: [JsValue]
     host_window_id: i64
@@ -422,6 +288,7 @@ class JsInterpreter:
     host_body_text_content_value: JsValue
     host_body_inner_html_dirty: bool
     host_body_text_content_dirty: bool
+    node_compat_enabled: bool
 
     static fn new(logger: Logger) -> JsInterpreter:
         JsInterpreter.create(logger)
@@ -485,6 +352,7 @@ class JsInterpreter:
             canceled_timer_ids: [],
             timer_handle_ids: [],
             timer_handle_object_ids: [],
+            timer_current_time_ms: 0,
             global_var_names: [],
             global_var_values: [],
             host_window_id: -1,
@@ -502,6 +370,7 @@ class JsInterpreter:
             host_body_text_content_value: JsValue.Undefined,
             host_body_inner_html_dirty: false,
             host_body_text_content_dirty: false,
+            node_compat_enabled: true,
         )
 
 # ── impl extensions (split files) ────────────────────────────────────────

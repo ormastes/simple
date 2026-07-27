@@ -29,7 +29,7 @@ simple_web_window_renderer_spec -> os
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -145,6 +145,12 @@ expect(_count_changed(pixels, 0xFFFFFFFFu32)).to_be_greater_than(0)
 ```
 
 </details>
+
+#### renders bounded CSS animation frames then becomes quiescent
+
+Confirms a production cached content frame renders distinct start, midpoint,
+and final CSS-only animation pixels, requests frames at a bounded 16ms cadence,
+and stops requesting dirty frames after the finite animation ends.
 
 ## At a Glance
 

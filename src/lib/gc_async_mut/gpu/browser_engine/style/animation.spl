@@ -2,9 +2,15 @@
 #![allow(REQC004)]
 #![allow(unnamed_duplicate_typed_args)]
 
-use std.common.color.types.{from_rgb}
+use std.common.color.types.{from_rgba}
 use std.common.animation.timing.{TimingFunction, evaluate_timing, cubic_bezier_at}
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
+
+val MAX_ACTIVE_STYLE_ANIMATIONS: i32 = 1024
+val MAX_STYLE_UPDATES_PER_TICK: i32 = 4096
+
+fn style_animation_capacity_available(count: i32) -> bool:
+    count >= 0 and count < MAX_ACTIVE_STYLE_ANIMATIONS
 
 # ---------------------------------------------------------------------------
 # CSS value type — enum matching the examples/browser css_types definition.
@@ -79,6 +85,7 @@ class Keyframe:
 # ---------------------------------------------------------------------------
 
 class Animation:
+    node_id: i64
     name: text
     keyframes: [Keyframe]
     duration_ms: f64
@@ -91,7 +98,11 @@ class Animation:
     current_time: f64
 
     static fn create(name: text, keyframes: [Keyframe], duration_ms: f64) -> Animation:
+        Animation.create_for_node(0, name, keyframes, duration_ms)
+
+    static fn create_for_node(node_id: i64, name: text, keyframes: [Keyframe], duration_ms: f64) -> Animation:
         Animation(
+            node_id: node_id,
             name: name,
             keyframes: keyframes,
             duration_ms: duration_ms,
@@ -109,6 +120,7 @@ class Animation:
 # ---------------------------------------------------------------------------
 
 class Transition:
+    node_id: i64
     property: text
     from_value: CSSValue
     to_value: CSSValue
@@ -119,7 +131,11 @@ class Transition:
     state: AnimationState
 
     static fn create(property: text, from_value: CSSValue, to_value: CSSValue, duration_ms: f64) -> Transition:
+        Transition.create_for_node(0, property, from_value, to_value, duration_ms)
+
+    static fn create_for_node(node_id: i64, property: text, from_value: CSSValue, to_value: CSSValue, duration_ms: f64) -> Transition:
         Transition(
+            node_id: node_id,
             property: property,
             from_value: from_value,
             to_value: to_value,
@@ -161,10 +177,16 @@ class AnimationEngine:
         )
 
     me add_animation(anim: Animation):
+        if not style_animation_capacity_available(self.animations.len()):
+            self.logger.warn("active animation limit reached")
+            return
         self.animations.push(anim)
         self.logger.debug("animation added: '{anim.name}', duration={anim.duration_ms}ms")
 
     me add_transition(trans: Transition):
+        if not style_animation_capacity_available(self.transitions.len()):
+            self.logger.warn("active transition limit reached")
+            return
         self.transitions.push(trans)
         self.logger.debug("transition added: property='{trans.property}', duration={trans.duration_ms}ms")
 
@@ -177,6 +199,7 @@ class AnimationEngine:
             match anim.state:
                 AnimationState.Idle:
                     next_anim = Animation(
+                        node_id: anim.node_id,
                         name: anim.name,
                         keyframes: anim.keyframes,
                         duration_ms: anim.duration_ms,
@@ -196,6 +219,7 @@ class AnimationEngine:
                         val total_duration = anim.duration_ms * anim.iteration_count
                         if elapsed >= total_duration:
                             next_anim = Animation(
+                                node_id: anim.node_id,
                                 name: anim.name,
                                 keyframes: anim.keyframes,
                                 duration_ms: anim.duration_ms,
@@ -209,16 +233,18 @@ class AnimationEngine:
                             )
                         else:
                             val iteration_progress = elapsed / anim.duration_ms
-                            var local_progress = iteration_progress - iteration_progress.floor()
-                            if local_progress == 0.0 and elapsed > 0.0:
-                                local_progress = 1.0
+                            val local_progress = iteration_progress - iteration_progress.floor()
 
                             val current_iteration = iteration_progress.floor().to_i64()
                             val effective_progress = apply_direction(local_progress, anim.direction, current_iteration)
                             val eased = ease_value(effective_progress, anim.timing)
-                            val kf_updates = interpolate_keyframes(anim.keyframes, eased)
-                            for u in kf_updates:
-                                updates.push(u)
+                            if updates.len() < MAX_STYLE_UPDATES_PER_TICK:
+                                val kf_updates = sample_keyframes(
+                                    anim.node_id, anim.keyframes, eased
+                                )
+                                for u in kf_updates:
+                                    if updates.len() < MAX_STYLE_UPDATES_PER_TICK:
+                                        updates.push(u)
                 AnimationState.Paused:
                     pass_dn
                 AnimationState.Finished:
@@ -233,6 +259,7 @@ class AnimationEngine:
             match trans.state:
                 AnimationState.Idle:
                     next_trans = Transition(
+                        node_id: trans.node_id,
                         property: trans.property,
                         from_value: trans.from_value,
                         to_value: trans.to_value,
@@ -247,8 +274,12 @@ class AnimationEngine:
                     if elapsed < 0.0:
                         pass_dn
                     else if elapsed >= trans.duration_ms:
-                        updates.push(StyleUpdate.create(0, trans.property, trans.to_value))
+                        if updates.len() < MAX_STYLE_UPDATES_PER_TICK:
+                            updates.push(StyleUpdate.create(
+                                trans.node_id, trans.property, trans.to_value
+                            ))
                         next_trans = Transition(
+                            node_id: trans.node_id,
                             property: trans.property,
                             from_value: trans.from_value,
                             to_value: trans.to_value,
@@ -262,7 +293,10 @@ class AnimationEngine:
                         val raw_progress = elapsed / trans.duration_ms
                         val eased = ease_value(raw_progress, trans.timing)
                         val interp = interpolate(trans.from_value, trans.to_value, eased)
-                        updates.push(StyleUpdate.create(0, trans.property, interp))
+                        if updates.len() < MAX_STYLE_UPDATES_PER_TICK:
+                            updates.push(StyleUpdate.create(
+                                trans.node_id, trans.property, interp
+                            ))
                 AnimationState.Paused:
                     pass_dn
                 AnimationState.Finished:
@@ -295,7 +329,11 @@ fn interpolate(from: CSSValue, to: CSSValue, progress: f64) -> CSSValue:
         CSSValue.Color(color):
             match to:
                 CSSValue.Color(to_color):
-                    interpolate_color(color.r, color.g, color.b, to_color.r, to_color.g, to_color.b, progress)
+                    interpolate_color(
+                        color.r, color.g, color.b, color.a,
+                        to_color.r, to_color.g, to_color.b, to_color.a,
+                        progress
+                    )
                 _: to
         CSSValue.Percentage(fv):
             match to:
@@ -309,11 +347,12 @@ fn interpolate(from: CSSValue, to: CSSValue, progress: f64) -> CSSValue:
             else:
                 to
 
-fn interpolate_color(from_r: i64, from_g: i64, from_b: i64, to_r: i64, to_g: i64, to_b: i64, t: f64) -> CSSValue:
+fn interpolate_color(from_r: i64, from_g: i64, from_b: i64, from_a: i64, to_r: i64, to_g: i64, to_b: i64, to_a: i64, t: f64) -> CSSValue:
     val r = (from_r.to_f64() + (to_r.to_f64() - from_r.to_f64()) * t).to_i64()
     val g = (from_g.to_f64() + (to_g.to_f64() - from_g.to_f64()) * t).to_i64()
     val b = (from_b.to_f64() + (to_b.to_f64() - from_b.to_f64()) * t).to_i64()
-    CSSValue.Color(color: from_rgb(r, g, b))
+    val a = (from_a.to_f64() + (to_a.to_f64() - from_a.to_f64()) * t).to_i64()
+    CSSValue.Color(color: from_rgba(r, g, b, a))
 
 fn interpolate_length(from: f64, to: f64, t: f64) -> f64:
     from + (to - from) * t
@@ -332,7 +371,7 @@ fn cubic_bezier(t: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64:
 # Direction helpers.
 # ---------------------------------------------------------------------------
 
-fn apply_direction(progress: f64, direction: PlayDirection, iteration: i64) -> f64:
+pub fn apply_direction(progress: f64, direction: PlayDirection, iteration: i64) -> f64:
     match direction:
         PlayDirection.Normal:
             progress
@@ -351,7 +390,7 @@ fn apply_direction(progress: f64, direction: PlayDirection, iteration: i64) -> f
 
 # Interpolate between keyframes at a given progress [0.0, 1.0].
 # Finds the two surrounding keyframes and interpolates their properties.
-fn interpolate_keyframes(keyframes: [Keyframe], progress: f64) -> [StyleUpdate]:
+pub fn sample_keyframes(node_id: i64, keyframes: [Keyframe], progress: f64) -> [StyleUpdate]:
     var updates: [StyleUpdate] = []
 
     if keyframes.len() == 0:
@@ -360,7 +399,9 @@ fn interpolate_keyframes(keyframes: [Keyframe], progress: f64) -> [StyleUpdate]:
     if keyframes.len() == 1:
         for kf in keyframes:
             for decl in kf.properties:
-                updates.push(StyleUpdate.create(0, decl.property, decl.value))
+                if updates.len() >= MAX_STYLE_UPDATES_PER_TICK:
+                    return updates
+                updates.push(StyleUpdate.create(node_id, decl.property, decl.value))
         return updates
 
     var kf_list: [Keyframe] = []
@@ -405,7 +446,29 @@ fn interpolate_keyframes(keyframes: [Keyframe], progress: f64) -> [StyleUpdate]:
     for from_decl in from_props:
         for to_decl in to_props:
             if from_decl.property == to_decl.property:
+                if updates.len() >= MAX_STYLE_UPDATES_PER_TICK:
+                    return updates
                 val interp = interpolate(from_decl.value, to_decl.value, local_t)
-                updates.push(StyleUpdate.create(0, from_decl.property, interp))
+                updates.push(StyleUpdate.create(node_id, from_decl.property, interp))
 
     updates
+
+pub fn animation_css_value_text(value: CSSValue) -> text:
+    match value:
+        CSSValue.Keyword(v): v
+        CSSValue.Length(v, unit): "{v}{unit}"
+        CSSValue.Percentage(v): "{v}%"
+        CSSValue.Color(color):
+            if color.a >= 255:
+                "rgb({color.r},{color.g},{color.b})"
+            else:
+                val alpha = color.a.to_f64() / 255.0
+                "rgba({color.r},{color.g},{color.b},{alpha})"
+        CSSValue.Number(v): "{v}"
+        CSSValue.Url(v): "url(\"{v}\")"
+        CSSValue.Function(name, _): name
+        CSSValue.List(_): ""
+        CSSValue.Var(name, _): "var({name})"
+        CSSValue.Inherit: "inherit"
+        CSSValue.Initial: "initial"
+        CSSValue.Unset: "unset"

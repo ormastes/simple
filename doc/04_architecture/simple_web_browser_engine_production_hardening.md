@@ -1,0 +1,319 @@
+<!-- codex-architecture -->
+# Simple Web Browser Engine Production Hardening Architecture
+
+Status: Proposed
+
+Date: 2026-07-26
+
+Requirements:
+
+- `doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md`
+- `doc/02_requirements/nfr/simple_web_browser_engine_production_hardening.md`
+
+## Decision
+
+Production browsing uses two trust domains:
+
+1. a browser broker owns chrome, navigation commits, history/bookmarks,
+   URL/origin policy, network/TLS, cookies/storage, resource budgets, renderer
+   lifecycle, and host capabilities;
+2. a site-locked OS-sandboxed renderer owns hostile HTML/CSS/JavaScript,
+   canonical DOM/event state, style/layout/paint, and emits a bounded
+   `DrawIrComposition`.
+
+The broker validates renderer messages and submits accepted compositions to the
+existing persistent Engine2D compositor. Production startup fails if the
+platform sandbox cannot be established; it never falls back to executing
+hostile pages in-process.
+
+## Existing decisions preserved
+
+- ADR-002 keeps `src/lib/gc_async_mut/gpu/browser_engine/` canonical.
+- `BrowserSession` remains navigation/profile state owner.
+- Browser/Web semantic/layout producers emit `DrawIrComposition`.
+- Engine2D owns device/session execution, text, `FontRenderer`, transient
+  `FontRenderBatch`, atlases, and caches.
+- Engine3D is not a browser rendering path.
+- `examples/11_advanced/browser/**` remains research/fixture code.
+
+## Production flow
+
+```text
+Hosted input / UI access
+        |
+        v
+Browser broker (src/app/ui.browser)
+  chrome + history + policy + network/TLS + sandbox lifecycle
+        |
+        | bounded typed IPC: generation, request_id, kind
+        v
+Site renderer child
+  BrowserSession document state
+  canonical HTML tree + live DOM + browser-only JS
+  events + one clock + style/layout/paint
+        |
+        | bounded DrawIrComposition
+        v
+Broker validation -> persistent Engine2dCompositorBackend -> pixels
+```
+
+## Component ownership
+
+### Browser broker
+
+Composition root: `src/app/ui.browser/`.
+
+It owns:
+
+- production browser process lifecycle;
+- sandboxed renderer spawn/restart and generation numbers;
+- committed top-level URL/origin and navigation generation;
+- Fetch/CORS/CSP/mixed-content/redirect decisions;
+- TLS, HSTS, DNS, response limits, cookie/storage authority;
+- bookmarks/home configuration;
+- renderer IPC validation, resource budgets, crash handling;
+- production Engine2D compositor submission and presentation.
+
+Minimal new runtime state:
+
+```text
+BrowserRendererProcess
+  pid
+  generation
+  receive_endpoint
+  send_endpoint
+  restart_window
+```
+
+No browser-controller factory, navigation facade, or parallel history owner is
+introduced.
+
+### BrowserSession
+
+`src/lib/gc_async_mut/web/browser_session*.spl` remains the profile/document
+state machine. Existing `begin_network_navigation`, `stop_loading`, `reload`,
+`go_back`, `go_forward`, `go_home`, and favorite methods remain canonical.
+
+Required changes:
+
+- replace raw text URL policy with canonical `Url`/`Origin`;
+- stamp requests and responses with navigation generation;
+- reject late responses after stop/replacement;
+- separate address draft from `pending_url`;
+- hold the current canonical DOM/render session;
+- expose one DOM event dispatch path;
+- release document-owned state on navigation/close.
+
+### Canonical URL, origin, network, cookies, and TLS
+
+Reuse `src/lib/gc_async_mut/gpu/browser_engine/net/`:
+
+- `Url` and `Origin` become the only policy identity;
+- the broker derives initiator origin from committed state, never renderer IPC;
+- Fetch owns redirect/CORS/credentials/abort;
+- CSP is enforced before queuing or executing script/style/connect/image work;
+- cookies use the existing network cookie owner extended with host-only,
+  expiry, `Secure`, `HttpOnly`, and `SameSite`;
+- TLS delegates to the maintained platform runtime with SNI and platform trust.
+
+The permissive BrowserSession cookie authority is retired after migration.
+Production TLS does not use string/CN test verifiers or HTTP fallback.
+
+### Browser-only JavaScript profile
+
+Add one mode to the existing JS runtime:
+
+```text
+JsRuntimeProfile.Browser
+JsRuntimeProfile.Node
+```
+
+`Browser` installs selected web globals only. It never installs `require`,
+`process`, `Buffer`, generic FFI/IPC, filesystem, listener, environment, or
+process execution. Existing Node consumers opt into `Node`.
+
+BrowserSession is the only production script host. The predictable temporary
+file subprocess runner and literal fake-success scanners are disconnected from
+production; they are removed when no fixture depends on them.
+
+### Canonical DOM and events
+
+The existing HTML tree builder assigns monotonically increasing,
+document-local node IDs. IDs remain stable for the committed document and are
+invalid after navigation or structural replacement.
+
+`common.web.event_types.DomEvent` is the event type. BrowserSession adds:
+
+```text
+dispatch_dom_event(event: DomEvent) -> BrowserDomDispatchResult
+dispatch_pointer_event(kind, x, y, button) -> BrowserDomDispatchResult
+dispatch_key_event(kind, key, key_code, modifiers) -> BrowserDomDispatchResult
+set_focused_node(node_id) -> Result<bool, text>
+```
+
+Dispatch order is root-to-parent capture, target capture, target bubble, then
+parent-to-root bubble. Default actions run once after propagation unless
+canceled. Links, inputs, buttons, forms, focus, UI access, JavaScript, and
+Simple Script use this path.
+
+The string-based UI link parser and target-only event path are retired.
+
+### Persistent render session
+
+Add one `SimpleWebRenderSession` beside the existing release-measured Simple Web
+HTML renderer so it can reuse current private stage functions and types.
+
+State:
+
+- source/document revision and viewport;
+- canonical nodes, rule buckets, child index, computed styles, layout;
+- current `DrawIrComposition`;
+- one event loop, animation controller, render state, and monotonic clock;
+- dirty stage and parse/style/layout/paint counters/timings.
+
+Invalidation:
+
+| Change | Work |
+|---|---|
+| navigation/source | parse, CSS, style, layout, paint |
+| structural DOM | child index, style, layout, paint |
+| class/id/style/pseudo | style, then layout only for geometry/font metrics |
+| color/opacity/transform | paint |
+| viewport/media | style, layout, paint |
+| scroll | paint |
+| unchanged frame | reuse composition/pixels |
+
+Initial production scope may repaint the full dirty frame. Partial damage is
+deferred until profiling proves it necessary.
+
+The render session emits Draw IR only. The existing persistent
+`Engine2dCompositorBackend` creates device/font state once, clears/submits on
+dirty frames, and shuts down once. The per-call helper that creates and shuts
+down Engine2D remains diagnostic and is forbidden in production hot paths.
+
+### One browser clock
+
+The app reads a monotonic timestamp once per loop and supplies it to the render
+session. The same timestamp drives:
+
+1. due timers and microtasks;
+2. one rAF callback batch;
+3. DOM/script mutations;
+4. CSS transition/animation updates;
+5. invalidation and one render/present.
+
+Resume deltas are clamped to 100 ms. A deterministic test clock supplies exact
+timestamps. Timer/animation modules do not read wall time independently.
+
+### GC and lifecycle
+
+Ownership is split deliberately:
+
+- profile lifetime: history, bookmarks, cookie/storage partitions;
+- document lifetime: DOM, listeners, timers, JS objects, styles, layout,
+  composition, images, requests;
+- app lifetime: sandbox broker, Engine2D device/font owners.
+
+Navigation/close cancels document work and clears listener, timer, promise,
+request, DOM, layout, image, and composition references before installing the
+next document. Detached-node animations and completed/canceled timers are
+compacted. Engine/device/font state survives same-size navigation and is
+released exactly once on app close.
+
+Evidence uses real `mem_tracker` live counts/bytes, heap-registry count when
+available, RSS, node/listener/timer/layout/command counts, and lifecycle
+create/shutdown counters. No synthetic collection or pause counter is added.
+The known interpreter GC root-scan blowup remains a separate root-cause fix and
+must be included when browser evidence reproduces it.
+
+## Security boundary
+
+Renderer privileges:
+
+- no direct filesystem, environment, process, listener, device, DNS, TLS,
+  cookie jar, bookmark, or host UI access;
+- inherited typed IPC handles only;
+- bounded messages and Draw IR;
+- one site per renderer for selected Option B.
+
+Broker rules:
+
+- allow `http`, `https`, and audited internal pages;
+- `file` requires a user-selected broker capability limited to an exact root;
+- deny `data`, `javascript`, custom, and external handler schemes unless a
+  separately audited exact operation is granted;
+- reject credential-bearing/control-character URLs and HTTPS downgrade
+  redirects;
+- validate generation/request IDs, header/body sizes, redirect counts, Draw IR
+  commands/strings/images, and late/duplicate replies.
+
+Platform enforcement:
+
+- Linux: `no_new_privs`, Landlock, seccomp, no socket/exec/fork;
+- macOS: signed App Sandbox helper/XPC profile;
+- Windows: AppContainer plus kill-on-close Job Object and explicit handles.
+
+A warning-only or job-only sandbox does not satisfy production acceptance.
+
+## Failure behavior
+
+- Invalid URL/scheme: no state mutation; `invalid_url`/`unsupported_scheme`.
+- TLS/CORS/CSP/mixed-content denial: keep last committed page; show a typed
+  error/interstitial without HTTP fallback.
+- Stop: cancel pending document/resource/script work and reject late commits.
+- Renderer crash/OOM/timeout: discard its generation and in-flight document,
+  preserve chrome/profile state, show internal error, and allow at most three
+  restarts per minute.
+- IPC violation: reject message; repeated violation terminates the renderer.
+- Budget violation: terminate only the offending renderer/page.
+
+## Performance and observability
+
+Counters:
+
+- startup and navigation timestamps;
+- parse/style/layout/paint counts and microseconds;
+- dirty-stage transitions and unchanged-frame reuse;
+- timer/rAF/event queue depths;
+- input-to-present and frame p50/p95/max;
+- nodes, rules, styles, layout boxes, Draw IR commands/images;
+- renderer restarts and security denials;
+- Engine2D/device/font create/shutdown counts;
+- memtrack live count/bytes, heap registry, RSS.
+
+Sensitive values, cookies, tokens, page source, and host paths are not logged.
+
+## Pattern evaluation
+
+- In-process hardening is rejected because it cannot contain renderer
+  compromise.
+- A new browser framework/factory is rejected; existing BrowserSession,
+  network, IPC, runtime sandbox, and Engine2D owners suffice.
+- Embedding a mature engine is not selected by Feature Option B.
+- No MDSOC weaving is required. Runtime composition at the existing app root
+  plus a browser-only JS profile and platform sandbox adapters is smaller and
+  easier to audit than a new virtual capsule.
+
+## Verification consequences
+
+Existing parser, CSS, JS, control, and Draw IR tests are supporting evidence.
+Production acceptance additionally requires:
+
+- one end-to-end user/render/event/navigation spec;
+- one security/TLS/sandbox spec;
+- one native performance/GC/lifecycle spec;
+- pinned WPT/Test262/fuzz dependencies;
+- live Linux proof and separate macOS/Windows rows before platform claims.
+
+SimpleOS QEMU is supporting smoke evidence and cannot prove hosted OS sandbox
+or native TLS behavior.
+
+## Open blockers
+
+- duplicate production HTML semantic paths need one measured authority;
+- animation code imports research/example style types;
+- BrowserSession page code currently receives Node globals and unrestricted
+  `file://`;
+- live browser TLS/HSTS and renderer sandbox paths are missing;
+- no current GC/RSS/soak or crash-containment evidence exists;
+- existing browser interaction evidence can pass when its artifact is absent.

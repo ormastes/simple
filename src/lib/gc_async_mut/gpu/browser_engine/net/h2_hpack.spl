@@ -5,7 +5,9 @@
 # Implements simplified literal-without-indexing header block encoding.
 # Reference: RFC 7540 Section 8, RFC 7541
 
-use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, FetchResponse, HttpMethod}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
+    FetchRequest, FetchResponse, request_header_is_transport_owned
+}
 use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.Url
 use std.gc_async_mut.gpu.browser_engine.net.h2_frame.{
     H2Frame, H2FrameType, FLAG_END_STREAM, FLAG_END_HEADERS,
@@ -24,18 +26,28 @@ fn build_h2_headers(req: FetchRequest) -> [Pair<text, text>]:
     var headers: [Pair<text, text>] = []
 
     # Pseudo-headers (RFC 7540 Section 8.1.2.3)
-    val method = method_to_text(req.method)
+    val method = req.method.to_upper()
     headers.push(Pair(first: ":method", second: method))
     headers.push(Pair(first: ":scheme", second: req.url.scheme))
-    headers.push(Pair(first: ":authority", second: req.url.host))
+    headers.push(Pair(first: ":authority", second: req.url.authority()))
     val path = if req.url.path.len() > 0: req.url.path else: "/"
     val query_str = if req.url.query.len() > 0: "?{req.url.query}" else: ""
     headers.push(Pair(first: ":path", second: "{path}{query_str}"))
 
     # Regular headers from the request
-    for h in req.headers:
-        # HTTP/2 requires lowercase header names
-        headers.push(Pair(first: h.first.to_lower(), second: h.second))
+    for raw_header in req.headers.split("\r\n"):
+        val header = raw_header.trim()
+        val colon = header.index_of(":")
+        if colon <= 0:
+            continue
+        # HTTP/2 requires lowercase header names.
+        val name = header.slice(0, colon).trim().to_lower()
+        if request_header_is_transport_owned(name):
+            continue
+        headers.push(Pair(
+            first: name,
+            second: header.slice(colon + 1, header.len()).trim()
+        ))
 
     # Add default headers if not already present
     if not has_header(req.headers, "user-agent"):
@@ -176,10 +188,12 @@ fn filter_pseudo_headers(headers: [Pair<text, text>]) -> [Pair<text, text>]:
             result.push(h)
     result
 
-fn has_header(headers: [Pair<text, text>], name: text) -> bool:
+fn has_header(headers: text, name: text) -> bool:
     val name_lower = name.to_lower()
-    for h in headers:
-        if h.first.to_lower() == name_lower:
+    for raw_header in headers.split("\r\n"):
+        val header = raw_header.trim()
+        val colon = header.index_of(":")
+        if colon > 0 and header.slice(0, colon).trim().to_lower() == name_lower:
             return true
     false
 
@@ -209,16 +223,3 @@ fn split_into_data_frames(body: text, stream_id: i64, max_frame_size: i64) -> [H
         frames.push(frame)
 
     frames
-
-# --- Utility helpers ---
-
-fn method_to_text(method: HttpMethod) -> text:
-    match method:
-        HttpMethod.Get: "GET"
-        HttpMethod.Post: "POST"
-        HttpMethod.Put: "PUT"
-        HttpMethod.Delete: "DELETE"
-        HttpMethod.Head: "HEAD"
-        HttpMethod.Options: "OPTIONS"
-        HttpMethod.Patch: "PATCH"
-

@@ -27,7 +27,7 @@ browser_renderer_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 123 | 123 | 0 | 0 |
+| 124 | 124 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2014,6 +2014,26 @@ expect(pixels.len()).to_equal(40 * 95)
 expect(pixels[14 + 14 * 40]).to_equal(0xFFDBEAFEu32)
 expect(pixels[22 + 52 * 40]).to_equal(0xFFBFDBFEu32)
 expect(pixels[22 + 82 * 40]).to_equal(0xFF93C5FDu32)
+```
+
+</details>
+
+#### resolves vertical viewport margins against viewport height
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><body style='margin:0'><div style='width:100px;height:20px;margin-top:40vh;background-color:#3050a0'></div></body></html>"
+val pixels = render_html_to_pixels_with_viewport(html, 200, 200).pixel_data
+
+expect(pixels[10 + 79 * 200]).to_equal(WHITE_BG)
+expect(pixels[10 + 80 * 200]).to_equal(0xFF3050A0u32)
+expect(pixels[10 + 99 * 200]).to_equal(0xFF3050A0u32)
+expect(pixels[10 + 100 * 200]).to_equal(WHITE_BG)
 ```
 
 </details>

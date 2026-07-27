@@ -1,0 +1,138 @@
+use std.spec.*
+
+use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserResponse}
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.web.browser_session_runtime.*
+
+fn _count_color(pixels: [u32], color: u32) -> i64:
+    var count: i64 = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
+
+fn _pixels_equal(left: [u32], right: [u32]) -> bool:
+    if left.len() != right.len():
+        return false
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]:
+            return false
+        index = index + 1
+    true
+
+describe "BrowserSession script CSS animation rendering":
+
+    it "seeds a new JavaScript runtime from the browser clock":
+        var session = BrowserSession.new()
+        expect(session.advance_time(1000)).to_equal(0)
+        expect(session.open_html(
+            "https://example.test/later-runtime",
+            "<html><head><title>Waiting</title></head><body><script>setTimeout(function(){ document.title = 'Due'; }, 500);</script></body></html>"
+        ).is_ok()).to_equal(true)
+
+        expect(session.current_title).to_equal("Waiting")
+        expect(session.advance_time(1001)).to_equal(0)
+        expect(session.advance_time(1499)).to_equal(0)
+        expect(session.current_title).to_equal("Waiting")
+        expect(session.advance_time(1500)).to_equal(1)
+        expect(session.current_title).to_equal("Due")
+
+    it "applies CSS then renders a later JavaScript frame through Engine2D":
+        var session = BrowserSession.new()
+        val opened = session.open_html(
+            "https://example.test/animation",
+            "<!DOCTYPE html><html><head><style>#stage { width: 32px; height: 24px; background-color: #ef4444; }</style></head><body><script type='text/simple'>title \"SimpleReady\"\nbody_html '<div id=\"stage\"></div>'</script><script>requestAnimationFrame(function(frameTime){ document.title = 'Animated'; document.body.innerHTML = '<div style=\"width:32px;height:24px;background-color:#2563eb\"></div>'; });</script></body></html>"
+        )
+        match opened:
+            Err(e):
+                fail("Expected scripted page to open: {e}")
+            Ok(_):
+                expect(session.current_title).to_equal("SimpleReady")
+                expect(session.current_body_html).to_contain("id=\"stage\"")
+
+        val first = session.render_to_pixels(64, 48)
+        expect(first.ok).to_equal(true)
+        expect(first.pixel_data.len()).to_equal(64 * 48)
+        expect(_count_color(first.pixel_data, 0xFFEF4444u32)).to_be_greater_than(0)
+        expect(_count_color(first.pixel_data, 0xFF2563EBu32)).to_equal(0)
+
+        expect(session.advance_time(15)).to_equal(0)
+        expect(session.current_title).to_equal("SimpleReady")
+        expect(session.advance_time(16)).to_equal(1)
+        expect(session.current_title).to_equal("Animated")
+
+        val second = session.render_to_pixels(64, 48)
+        expect(second.ok).to_equal(true)
+        expect(_count_color(second.pixel_data, 0xFF2563EBu32)).to_be_greater_than(0)
+        expect(_pixels_equal(second.pixel_data, first.pixel_data)).to_equal(false)
+
+    it "renders start midpoint and end frames from CSS keyframes":
+        var session = BrowserSession.new()
+        val opened = session.open_html(
+            "https://example.test/css-animation",
+            "<!DOCTYPE html><html><head><style>@keyframes Pulse { from { background-color: #ef4444; } to { background-color: #2563eb; } } #stage { width: 32px; height: 24px; animation-name: Pulse; animation-duration: 1000ms; animation-timing-function: linear; animation-fill-mode: forwards; }</style></head><body><div id='stage'></div></body></html>"
+        )
+        expect(opened.is_ok()).to_equal(true)
+
+        val first = session.render_to_pixels(64, 48)
+        expect(first.ok).to_equal(true)
+        expect(_count_color(first.pixel_data, 0xFFEF4444u32)).to_be_greater_than(0)
+
+        expect(session.advance_time(500)).to_equal(0)
+        val middle = session.render_to_pixels(64, 48)
+        expect(middle.ok).to_equal(true)
+        expect(_pixels_equal(middle.pixel_data, first.pixel_data)).to_equal(false)
+
+        expect(session.advance_time(1000)).to_equal(0)
+        val last = session.render_to_pixels(64, 48)
+        expect(last.ok).to_equal(true)
+        expect(_count_color(last.pixel_data, 0xFF2563EBu32)).to_be_greater_than(0)
+        expect(_pixels_equal(last.pixel_data, middle.pixel_data)).to_equal(false)
+
+    it "starts external stylesheet animation when the stylesheet applies":
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://example.test/external-animation", "GET", "", "", ""
+        ).is_ok()).to_equal(true)
+        match session.take_pending_request():
+            Some(document_request):
+                expect(session.commit_network_response(BrowserResponse.create(
+                    request_id: document_request.id,
+                    kind: "document",
+                    url: document_request.url,
+                    status: 200,
+                    headers: "",
+                    body: "<html><head><link rel='stylesheet' href='/animation.css'></head><body><div id='stage'></div></body></html>",
+                    error: ""
+                )).is_ok()).to_equal(true)
+            nil:
+                fail("Expected animation document request")
+
+        val style_request = session.take_pending_request()
+        val before_style_timers = session.advance_time(500)
+        match style_request:
+            Some(request):
+                expect(session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "style",
+                    url: request.url,
+                    status: 200,
+                    headers: "",
+                    body: "@keyframes Pulse { from { background-color: #ef4444; } to { background-color: #2563eb; } } #stage { width: 32px; height: 24px; animation-name: Pulse; animation-duration: 1000ms; animation-timing-function: linear; animation-fill-mode: forwards; }",
+                    error: ""
+                )).is_ok()).to_equal(true)
+            nil:
+                fail("Expected external animation stylesheet request")
+
+        val first = session.render_to_pixels(64, 48)
+        expect(before_style_timers).to_equal(0)
+        expect(_count_color(first.pixel_data, 0xFFEF4444u32)).to_be_greater_than(0)
+        val middle_timers = session.advance_time(1000)
+        val middle = session.render_to_pixels(64, 48)
+        expect(middle_timers).to_equal(0)
+        expect(_pixels_equal(middle.pixel_data, first.pixel_data)).to_equal(false)
+        val end_timers = session.advance_time(1500)
+        val last = session.render_to_pixels(64, 48)
+        expect(end_timers).to_equal(0)
+        expect(_count_color(last.pixel_data, 0xFF2563EBu32)).to_be_greater_than(0)

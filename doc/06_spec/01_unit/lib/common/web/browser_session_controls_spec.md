@@ -27,7 +27,7 @@ browser_session_controls_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -180,6 +180,12 @@ expect(session.has_pending_requests()).to_equal(false)
 ```
 
 </details>
+
+#### preserves the active document when pending navigation is stopped
+
+- A pending document request does not replace the visible URL, title, body,
+  styles, history, or JavaScript runtime.
+- Stop cancels the request, and a late response cannot commit.
 
 ## At a Glance
 

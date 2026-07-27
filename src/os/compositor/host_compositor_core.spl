@@ -30,7 +30,7 @@ use common.ui.taskbar_model.{WindowRef, TrayItem, TaskbarModel}
 use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.compositor.dirty_rect.{DirtyRegion}
-use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_revision_with_theme, content_paint_full_height}
+use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached_at_time, simple_web_content_revision_with_theme, content_paint_full_height}
 use os.compositor.shared_mdi_framebuffer_scene.{SharedMdiRenderWindow, shared_mdi_render_window, shared_mdi_scene_from_render_windows}
 use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache, web_render_pixel_artifact_cache}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{Engine2dResolvedDrawIrImage, engine2d_resolved_draw_ir_image}
@@ -239,6 +239,14 @@ class HostedWindow:
     restore_y: i32 = 0
     restore_w: i32 = 0
     restore_h: i32 = 0
+
+struct HostedWebContentTarget:
+    window_id: i64
+    body_html: text
+    local_x: i32
+    local_y: i32
+    width: i32
+    height: i32
 
 fn host_taskbar_clock_label(now_micros: i64) -> text:
     """Return a stable UTC HH:MM label from the host wall clock."""
@@ -645,6 +653,43 @@ class HostCompositor:
             i = i + 1
         "{\"width\":{self.width},\"height\":{self.height},\"render_revision\":{self.render_revision},\"pointer_x\":{self.pointer_x},\"pointer_y\":{self.pointer_y},\"dragging\":{self.dragging},\"resizing\":{self.resizing},\"windows\":[{windows}],\"taskbar\":{\"running\":[{running}],\"tray_count\":{model.tray.len()}}}"
 
+    fn content_target(x: i32, y: i32) -> HostedWebContentTarget?:
+        var hit: HostedWebContentTarget? = nil
+        var i = 0
+        while i < self.windows.len():
+            val window = self.windows[i]
+            val content_y = window.y + 28
+            val content_height = window.h - 28
+            if (
+                not window.minimized and
+                x >= window.x and x < window.x + window.w and
+                y >= content_y and y < content_y + content_height
+            ):
+                hit = Some(HostedWebContentTarget(
+                    window_id: window.id,
+                    body_html: window.content,
+                    local_x: x - window.x,
+                    local_y: y - content_y,
+                    width: window.w,
+                    height: content_height
+                ))
+            i = i + 1
+        hit
+
+    me update_window_content(window_id: i64, body_html: text) -> bool:
+        var i = 0
+        while i < self.windows.len():
+            if self.windows[i].id == window_id:
+                var window = self.windows[i]
+                if window.content == body_html:
+                    return false
+                window.content = body_html
+                self.windows[i] = window
+                self.dirty.add_rect(window.x, window.y, window.w, window.h)
+                return true
+            i = i + 1
+        false
+
     me resize(width: i32, height: i32):
         self.width = width
         self.height = height
@@ -664,6 +709,32 @@ class HostCompositor:
         if self.headless_backend == nil:
             return []
         headless_host_compositor_pixels(self.headless_backend.unwrap())
+
+    me web_animation_dirty_due(now_micros: i64) -> bool:
+        val now_ms = now_micros / 1000
+        var any_due = false
+        var window_index = 0
+        while window_index < self.windows.len():
+            val window = self.windows[window_index]
+            var window_due = false
+            if not window.minimized:
+                if self.native_pixel_lane:
+                    var cache_index = 0
+                    while cache_index < self.native_cache_window_ids.len():
+                        if self.native_cache_window_ids[cache_index] == window.id:
+                            window_due = self.native_content_caches[
+                                cache_index
+                            ].animation_frame_due(now_ms)
+                        cache_index = cache_index + 1
+                else:
+                    val cache = self.content_caches.get(window.id)
+                    if cache != nil:
+                        window_due = cache.animation_frame_due(now_ms)
+            if window_due:
+                self.dirty.add_rect(window.x, window.y, window.w, window.h)
+                any_due = true
+            window_index = window_index + 1
+        any_due
 
     me set_background(spec: BackgroundSpec):
         """Configure the scene background (color/image/motion) this
@@ -758,7 +829,11 @@ class HostCompositor:
                 val full_h = content_paint_full_height(ch, scroll)
                 val cache = self._content_cache_for(win.id, cw, full_h, "auto")
                 val content_revision = simple_web_content_revision_with_theme(content_theme_id, win.title, win.content, cw, ch, scroll)
-                content_frames.push(simple_web_content_frame_cached(cache, win.id.to_text(), self.render_revision, content_revision, content_theme_id, win.title, win.content, cw, ch, scroll))
+                content_frames.push(simple_web_content_frame_cached_at_time(
+                    cache, win.id.to_text(), self.render_revision,
+                    content_revision, content_theme_id, win.title, win.content,
+                    cw, ch, scroll, frame_time / 1000
+                ))
                 if not self.native_pixel_lane:
                     self.content_caches.set(win.id, cache)
             i = i + 1
@@ -1321,6 +1396,11 @@ fn host_compositor_find_window_index(comp: HostCompositor, window_id: i64) -> i3
             return i
         i = i + 1
     -1
+
+fn host_compositor_update_window_content(comp: HostCompositor, window_id: i64, body_html: text) -> HostCompositor:
+    var out = comp
+    out.update_window_content(window_id, body_html)
+    out
 
 fn host_window_to_lifecycle_state(win: HostedWindow) -> WmLifecycleWindowState:
     WmLifecycleWindowState(id: win.id, owner_port: win.owner_port, title: win.title, x: win.x, y: win.y, w: win.w, h: win.h, content: win.content, process_id: win.process_id, app_id: win.app_id, minimized: win.minimized, focused: win.focused)

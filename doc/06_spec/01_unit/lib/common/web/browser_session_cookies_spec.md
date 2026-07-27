@@ -27,7 +27,7 @@ browser_session_cookies_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 12 | 12 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -158,6 +158,40 @@ expect(scoped.len()).to_equal(2)
 
 </details>
 
+#### enforces host-only Secure and HttpOnly cookie boundaries
+
+Confirms host-only cookies do not reach subdomains, Secure cookies do not
+cross to HTTP, and HttpOnly cookies are omitted from `document.cookie`.
+
+#### scopes cookies by hostname rather than network port
+
+Confirms a host cookie crosses HTTPS ports but never crosses hostnames.
+
+#### rejects foreign Domain and insecure Secure cookie updates
+
+Confirms foreign-domain cookies and Secure cookies received over HTTP fail
+closed.
+
+#### rejects public suffix and IP Domain cookies
+
+Confirms single-label, multi-label, private, IDNA, and IP-literal Domain
+attributes fail closed while a registrable parent domain remains accepted.
+
+#### enforces cookie prefixes SameSite None and partition isolation
+
+Confirms `__Secure-` and `__Host-` invariants, rejects insecure
+`SameSite=None`, and fails closed on unsupported partitioned cookies.
+
+#### rejects cookie header injection
+
+Confirms CR/LF in cookie input is rejected before storage and cannot become an
+outbound request header.
+
+#### bounds cookie size and per-domain retention
+
+Confirms cookies over 4096 bytes are rejected and a domain retains at most 50
+cookies.
+
 ## At a Glance
 
 | Field | Value |
@@ -165,7 +199,7 @@ expect(scoped.len()).to_equal(2)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/web/browser_session_cookies_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -177,8 +211,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 12 |
+| Active scenarios | 12 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

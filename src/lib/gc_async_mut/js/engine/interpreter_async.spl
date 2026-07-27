@@ -14,6 +14,10 @@ use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATI
 use std.gc_async_mut.js.engine.interpreter_object.{JsInterpreter}
 use std.gc_async_mut.js.engine.interpreter_string_methods.{JsInterpreter}
 
+val MAX_TIMER_CALLBACKS_PER_DRAIN: i64 = 1000
+val MAX_PROMISE_CALLBACKS_PER_DRAIN: i64 = 1000
+val MAX_PENDING_PROMISE_HANDLERS: i64 = 4096
+
 impl JsInterpreter:
     me take_pending_async_request() -> i64?:
         if self.pending_async_requests.len() == 0:
@@ -31,11 +35,10 @@ impl JsInterpreter:
         var ran = false
         var drain_count = 0
         while self.pending_promise_tasks.len() > 0:
-            drain_count = drain_count + 1
-            if drain_count > 1000:
+            if drain_count >= MAX_PROMISE_CALLBACKS_PER_DRAIN:
                 self.logger.warn("Promise microtask drain limit reached")
-                self.pending_promise_tasks = []
                 return ran
+            drain_count = drain_count + 1
             val task = self.pending_promise_tasks[0]
             var rest: [PendingPromiseTask] = []
             var i = 1
@@ -49,27 +52,37 @@ impl JsInterpreter:
 
     me drain_due_timers(current_time_ms: i64) -> i64:
         var ran_count = 0
-        var keep_scanning = true
-        while keep_scanning:
-            keep_scanning = false
-            var rest: [PendingTimerTask] = []
-            var handled = false
+        while ran_count < MAX_TIMER_CALLBACKS_PER_DRAIN:
+            var due_index = -1
             var i = 0
             while i < self.pending_timer_tasks.len():
                 val task = self.pending_timer_tasks[i]
                 val due_at = task.scheduled_at_ms + task.delay_ms
-                if not handled and due_at <= current_time_ms:
-                    handled = true
-                    keep_scanning = true
-                    if task.callback_id >= 0:
-                        val ignored = self._invoke_function(task.callback_id, [], self.global_env)
-                        ran_count = ran_count + 1
-                    if task.is_interval:
-                        rest = rest + [PendingTimerTask.create(task.id, task.callback_id, task.delay_ms, due_at, true)]
-                else:
-                    rest = rest + [task]
+                if due_index < 0 and due_at <= current_time_ms:
+                    due_index = i
                 i = i + 1
+            if due_index < 0:
+                return ran_count
+            val due_task = self.pending_timer_tasks[due_index]
+            var rest: [PendingTimerTask] = []
+            i = 0
+            while i < self.pending_timer_tasks.len():
+                if i != due_index:
+                    rest = rest + [self.pending_timer_tasks[i]]
+                i = i + 1
+            if due_task.is_interval:
+                rest = rest + [PendingTimerTask.create(
+                    due_task.id, due_task.callback_id,
+                    due_task.delay_ms, current_time_ms, true
+                )]
             self.pending_timer_tasks = rest
+            if due_task.callback_id >= 0:
+                val ignored = self._invoke_function(
+                    due_task.callback_id, [], self.global_env
+                )
+                ran_count = ran_count + 1
+        if self.pending_timer_tasks.len() > 0:
+            self.logger.warn("Timer callback drain limit reached")
         ran_count
 
     me resolve_async_fetch_response(
@@ -163,12 +176,21 @@ impl JsInterpreter:
         response_id
 
     me _create_promise_handler(on_fulfilled: i64, on_rejected: i64, next_promise_id: i64, kind: text) -> i64:
+        if self.promise_handlers.len() >= MAX_PENDING_PROMISE_HANDLERS:
+            self._settle_promise(
+                next_promise_id,
+                JsValue.String(v: "Promise handler limit reached"),
+                true
+            )
+            return -1
         val handler_id = self.next_promise_handler_id
         self.next_promise_handler_id = self.next_promise_handler_id + 1
         self.promise_handlers = self.promise_handlers + [PromiseHandlerRecord.create(handler_id, on_fulfilled, on_rejected, next_promise_id, kind)]
         handler_id
 
     me _append_handler(promise_id: i64, handler_id: i64):
+        if handler_id < 0:
+            return
         var on_fulfilled = -1
         var on_rejected = -1
         var next_promise_id = -1
@@ -203,6 +225,24 @@ impl JsInterpreter:
 
     me _enqueue_promise_task(promise_id: i64, handler_id: i64):
         self.pending_promise_tasks = self.pending_promise_tasks + [PendingPromiseTask.create(promise_id, handler_id)]
+
+    me _remove_promise_handler(promise_id: i64, handler_id: i64):
+        var handlers: [PromiseHandlerRecord] = []
+        var i = 0
+        while i < self.promise_handlers.len():
+            if self.promise_handlers[i].id != handler_id:
+                handlers = handlers + [self.promise_handlers[i]]
+            i = i + 1
+        self.promise_handlers = handlers
+
+        var registrations: [PromiseHandlerRegistration] = []
+        i = 0
+        while i < self.promise_handler_registrations.len():
+            val registration = self.promise_handler_registrations[i]
+            if registration.promise_id != promise_id or registration.handler_id != handler_id:
+                registrations = registrations + [registration]
+            i = i + 1
+        self.promise_handler_registrations = registrations
 
     me _invoke_promise_callback(fn_id: i64, arg_vals: [JsValue]) -> BrowserResult<JsValue>:
         if fn_id < 0 or fn_id >= self.functions.len():
@@ -337,6 +377,7 @@ impl JsInterpreter:
                                     next_promise_id = registration.next_promise_id
                                 hi = self.promise_handler_registrations.len()
                             hi = hi + 1
+                        self._remove_promise_handler(promise_id, handler_id)
 
                         var callback_id = -1
                         var propagate_rejection = false

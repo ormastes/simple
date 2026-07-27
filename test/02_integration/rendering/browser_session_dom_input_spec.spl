@@ -1,0 +1,165 @@
+use std.spec.*
+
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_event_identity, be_dom_find_by_tag, be_dom_get_attr
+}
+
+fn _count_dom_input_color(pixels: [u32], color: u32) -> i64:
+    var count: i64 = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
+
+describe "BrowserSession live DOM input":
+
+    it "runs an inline click handler and renders the checkbox default state":
+        var session = BrowserSession.new()
+        val opened = session.open_html(
+            "https://example.test/form",
+            "<html><head><style>input { display:block; width:32px; height:24px; background-color:#ef4444; } input[checked] { background-color:#2563eb; }</style></head><body><input id='accept' type='checkbox' onclick=\"document.title=document.body.innerHTML\" oninput=\"document.title=document.title+':input'\" onchange=\"document.title=document.title+':change'\"></body></html>"
+        )
+        expect(opened.is_ok()).to_equal(true)
+
+        val before = session.render_to_pixels(64, 48)
+        expect(_count_dom_input_color(before.pixel_data, 0xFFEF4444u32)).to_be_greater_than(0)
+
+        val dispatch = session.dispatch_dom_event("accept", "click", true, true)
+        expect(dispatch.default_action).to_equal("input-checkbox-toggle")
+        expect(dispatch.default_action_allowed).to_equal(true)
+        expect(session.current_title).to_contain("checked=\"checked\"")
+        expect(session.current_title).to_end_with(":input:change")
+        expect(session.current_body_html).to_contain("checked=\"checked\"")
+
+        val after = session.render_to_pixels(64, 48)
+        expect(_count_dom_input_color(after.pixel_data, 0xFF2563EBu32)).to_be_greater_than(0)
+
+    it "honors prevent-default before link navigation enters the request pump":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.test/start",
+            "<html><body><a id='blocked' href='/next' onclick='prevent-default'>Next</a></body></html>"
+        )
+
+        val dispatch = session.dispatch_dom_event("blocked", "click", true, true)
+
+        expect(dispatch.event.default_prevented).to_equal(true)
+        expect(dispatch.default_action_allowed).to_equal(false)
+        expect(session.current_url).to_equal("https://example.test/start")
+        expect(session.has_pending_requests()).to_equal(false)
+
+    it "rolls back canceled checkbox pre-activation":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.test/form",
+            "<html><head><title>Initial</title></head><body><input id='accept' type='checkbox' onclick='prevent-default' oninput=\"document.title='input'\" onchange=\"document.title='change'\"></body></html>"
+        )
+
+        val dispatch = session.dispatch_dom_event(
+            "accept", "click", true, true
+        )
+
+        expect(dispatch.event.default_prevented).to_equal(true)
+        expect(session.current_body_html.contains("checked=")).to_equal(false)
+        expect(session.current_title).to_equal("Initial")
+
+    it "routes an uncanceled link default through session navigation":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.test/start",
+            "<html><body><a id='next' href='/next'>Next</a></body></html>"
+        )
+
+        val dispatch = session.dispatch_dom_event("next", "click", true, true)
+
+        expect(dispatch.default_action_allowed).to_equal(true)
+        match session.take_pending_request():
+            Some(request):
+                expect(request.kind).to_equal("document")
+                expect(request.url).to_equal("https://example.test/next")
+            nil:
+                fail("Expected uncanceled link navigation request")
+
+    it "dispatches controls without author-supplied ids by stable node identity":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.test/controls",
+            "<html><body><button>Save</button></body></html>"
+        )
+        val buttons = be_dom_find_by_tag(session.dom_root(), "button")
+        expect(buttons.len()).to_equal(1)
+
+        val dispatch = session.dispatch_dom_event(
+            be_dom_event_identity(buttons[0]), "click", true, true
+        )
+
+        expect(dispatch.default_action).to_equal("button-activate")
+        expect(session.current_body_html).to_contain("data-activated=\"true\"")
+
+    it "dispatches submit and honors preventDefault on the owning form":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.test/form",
+            "<html><body><form id='profile' onsubmit='prevent-default'><button id='save'>Save</button></form></body></html>"
+        )
+
+        val dispatch = session.dispatch_dom_event("save", "click", true, true)
+
+        expect(dispatch.default_action_allowed).to_equal(true)
+        expect(session.current_body_html).to_contain("data-activated=\"true\"")
+        expect(session.current_body_html.contains(
+            "data-submitted=\"true\""
+        )).to_equal(false)
+        expect(session.has_pending_requests()).to_equal(false)
+
+    it "queues an uncanceled POST form with live DOM values":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.test/form",
+            "<html><body><form id='profile' action='/save' method='post'><input id='name' name='name' value='old'><button id='save' name='commit' value='yes'>Save</button></form></body></html>"
+        )
+        expect(session.set_dom_text_input("name", "Ada & Bob").is_ok()).to_equal(true)
+
+        val dispatch = session.dispatch_dom_event("save", "click", true, true)
+
+        expect(dispatch.default_action_allowed).to_equal(true)
+        match session.take_pending_request():
+            Some(request):
+                expect(request.kind).to_equal("document")
+                expect(request.method).to_equal("POST")
+                expect(request.url).to_equal("https://example.test/save")
+                expect(request.body).to_equal("name=Ada+%26+Bob&commit=yes")
+                expect(request.content_type).to_equal(
+                    "application/x-www-form-urlencoded"
+                )
+            nil:
+                fail("Expected form navigation request")
+
+    it "updates text input value and emits its inline input handler":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.test/input",
+            "<html><body><input id='name' oninput=\"document.title='Typing'\"></body></html>"
+        )
+
+        val updated = session.set_dom_text_input("name", "Ada & Bob")
+
+        expect(updated.is_ok()).to_equal(true)
+        expect(session.current_title).to_equal("Typing")
+        expect(session.current_body_html).to_contain("value=\"Ada &amp; Bob\"")
+
+    it "dispatches focus before text input and keeps one focused control":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://example.test/input",
+            "<html><body><input id='first' onfocus=\"document.title='Focused'\"><input id='second'></body></html>"
+        )
+
+        expect(session.set_dom_text_input("first", "Ada").is_ok()).to_equal(true)
+        expect(session.current_title).to_equal("Focused")
+        expect(session.set_dom_text_input("second", "Bob").is_ok()).to_equal(true)
+        val inputs = be_dom_find_by_tag(session.dom_root(), "input")
+        expect(be_dom_get_attr(inputs[0], "data-focused")).to_equal("")
+        expect(be_dom_get_attr(inputs[1], "data-focused")).to_equal("true")

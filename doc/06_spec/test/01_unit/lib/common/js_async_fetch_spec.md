@@ -28,7 +28,7 @@ js_async_fetch_spec -> lib
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -64,6 +64,12 @@ match result:
 
 </details>
 
+#### bounds unresolved fetch requests before host dispatch
+
+- The canonical runtime retains at most 1024 unresolved requests.
+- Excess `fetch()` calls return an already-rejected Promise without allocating
+  a host request record.
+
 ## At a Glance
 
 | Field | Value |
@@ -71,7 +77,7 @@ match result:
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/js_async_fetch_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-07-26 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -83,8 +89,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 1 |
-| Active scenarios | 1 |
+| Total scenarios | 2 |
+| Active scenarios | 2 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

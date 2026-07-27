@@ -1,0 +1,162 @@
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_event_identity, be_dom_find_path_to_id, be_dom_get_attr,
+    be_dom_get_text_content, be_dom_has_attr
+}
+use std.gc_async_mut.web.browser_session_url.{
+    browser_url_form_encode, resolve_relative_url, without_fragment
+}
+
+class BrowserFormSubmission:
+    method: text
+    url: text
+    body: text
+    content_type: text
+    error: text
+
+fn browser_form_encode(value: text) -> text:
+    browser_url_form_encode(value)
+
+fn _browser_form_pair(name: text, value: text) -> text:
+    browser_form_encode(name) + "=" + browser_form_encode(value)
+
+fn _browser_option_values(node: BeDomNode, selected_only: bool) -> [text]:
+    var values: [text] = []
+    if node.tag_name == "option" and not be_dom_has_attr(node, "disabled"):
+        if not selected_only or be_dom_has_attr(node, "selected"):
+            val declared = be_dom_get_attr(node, "value")
+            values.push(
+                if be_dom_has_attr(node, "value"):
+                    declared
+                else:
+                    be_dom_get_text_content(node)
+            )
+        return values
+    for child in node.children:
+        for value in _browser_option_values(child, selected_only):
+            values.push(value)
+    values
+
+fn _browser_control_pairs(node: BeDomNode, submitter_id: text) -> [text]:
+    var pairs: [text] = []
+    if be_dom_has_attr(node, "disabled"):
+        return pairs
+    val name = be_dom_get_attr(node, "name")
+    if node.tag_name == "input":
+        val declared_type = be_dom_get_attr(node, "type").lower()
+        val input_type = if declared_type == "": "text" else: declared_type
+        if (
+            name == "" or input_type == "button" or input_type == "reset" or
+            input_type == "file" or input_type == "image"
+        ):
+            return pairs
+        if (
+            (input_type == "checkbox" or input_type == "radio") and
+            not be_dom_has_attr(node, "checked")
+        ):
+            return pairs
+        if input_type == "submit" and be_dom_event_identity(node) != submitter_id:
+            return pairs
+        var value = be_dom_get_attr(node, "value")
+        if (input_type == "checkbox" or input_type == "radio") and value == "":
+            value = "on"
+        pairs.push(_browser_form_pair(name, value))
+        return pairs
+    if node.tag_name == "button":
+        val declared_type = be_dom_get_attr(node, "type").lower()
+        val button_type = if declared_type == "": "submit" else: declared_type
+        if (
+            name != "" and button_type == "submit" and
+            be_dom_event_identity(node) == submitter_id
+        ):
+            val declared = be_dom_get_attr(node, "value")
+            pairs.push(_browser_form_pair(
+                name,
+                if be_dom_has_attr(node, "value"):
+                    declared
+                else:
+                    be_dom_get_text_content(node)
+            ))
+        return pairs
+    if node.tag_name == "textarea":
+        if name != "":
+            pairs.push(_browser_form_pair(name, be_dom_get_text_content(node)))
+        return pairs
+    if node.tag_name == "select":
+        if name == "":
+            return pairs
+        var values = _browser_option_values(node, true)
+        if values.len() == 0 and not be_dom_has_attr(node, "multiple"):
+            val all_values = _browser_option_values(node, false)
+            if all_values.len() > 0:
+                values.push(all_values[0])
+        for value in values:
+            pairs.push(_browser_form_pair(name, value))
+        return pairs
+    for child in node.children:
+        for pair in _browser_control_pairs(child, submitter_id):
+            pairs.push(pair)
+    pairs
+
+fn browser_form_submission(
+    root: BeDomNode,
+    form_id: text,
+    submitter_id: text,
+    current_url: text
+) -> BrowserFormSubmission:
+    val form_path = be_dom_find_path_to_id(root, form_id)
+    val submitter_path = be_dom_find_path_to_id(root, submitter_id)
+    if form_path.len() == 0 or submitter_path.len() == 0:
+        return BrowserFormSubmission(
+            method: "", url: "", body: "", content_type: "",
+            error: "form or submitter not found"
+        )
+    val form = form_path[form_path.len() - 1]
+    val submitter = submitter_path[submitter_path.len() - 1]
+    val submitter_action = be_dom_get_attr(submitter, "formaction")
+    val form_action = be_dom_get_attr(form, "action")
+    val raw_action = if submitter_action != "":
+        submitter_action
+    elif form_action != "":
+        form_action
+    else:
+        current_url
+    val action = without_fragment(resolve_relative_url(current_url, raw_action))
+    val submitter_method = be_dom_get_attr(submitter, "formmethod")
+    val form_method = be_dom_get_attr(form, "method")
+    val method = (if submitter_method != "":
+        submitter_method
+    elif form_method != "":
+        form_method
+    else:
+        "get").lower()
+    val submitter_enctype = be_dom_get_attr(submitter, "formenctype")
+    val form_enctype = be_dom_get_attr(form, "enctype")
+    val enctype = if submitter_enctype != "":
+        submitter_enctype.lower()
+    elif form_enctype != "":
+        form_enctype.lower()
+    else:
+        "application/x-www-form-urlencoded"
+    if method != "get" and method != "post":
+        return BrowserFormSubmission(
+            method: "", url: "", body: "", content_type: "",
+            error: "unsupported form method: {method}"
+        )
+    if method == "post" and enctype != "application/x-www-form-urlencoded":
+        return BrowserFormSubmission(
+            method: "", url: "", body: "", content_type: "",
+            error: "unsupported form encoding: {enctype}"
+        )
+    val body = _browser_control_pairs(form, submitter_id).join("&")
+    if method == "post":
+        return BrowserFormSubmission(
+            method: "POST", url: action, body: body,
+            content_type: "application/x-www-form-urlencoded", error: ""
+        )
+    val joiner = if action.contains("?"): "&" else: "?"
+    BrowserFormSubmission(
+        method: "GET",
+        url: if body == "": action else: action + joiner + body,
+        body: "", content_type: "", error: ""
+    )

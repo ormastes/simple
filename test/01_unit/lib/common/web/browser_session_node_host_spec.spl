@@ -2,7 +2,6 @@ use std.spec.*
 
 use std.js.engine.js_error.{Logger, LogLevel}
 use std.gc_async_mut.web.browser_session.{BrowserRuntimeState}
-use std.js.engine.runtime.{NATIVE_NODE_PROCESS_EXIT}
 use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_native.*
 use std.nogc_sync_mut.js.engine.interpreter_object.*
@@ -101,24 +100,20 @@ describe "BrowserSession deterministic Node host surface":
             _:
                 expect("missing fs module").to_equal("object")
 
-    it "installs deterministic process argv on BrowserSession runtime globals":
+    it "does not install Node globals on BrowserSession page runtimes":
         val state = BrowserRuntimeState.create("https://example.test/", "T", "", [], [], "")
-        val process = state.runtime.get_host_property(state.window_id, "process")
-        expect(_object_child_property_text(state.runtime.interpreter, process, "argv", "length")).to_equal("2")
-        expect(_object_child_property_text(state.runtime.interpreter, process, "argv", "0")).to_equal("simple")
-        expect(_object_property_text(state.runtime.interpreter, process, "exit")).to_equal("[Function]")
-        expect(_display_js(state.runtime.interpreter._dispatch_native_with_receiver(NATIVE_NODE_PROCESS_EXIT, JsValue.Undefined, [JsValue.Number(v: 7.0)], 0))).to_equal("7")
-
-    it "executes embedded process exit intent in BrowserSession runtime scripts":
-        var state = BrowserRuntimeState.create("about:node-process", "Node", "", [], [], "")
-
-        match state.runtime.eval("process.exit(7)"):
+        expect(_display_js(state.runtime.get_host_property(state.window_id, "require"))).to_equal("undefined")
+        expect(_display_js(state.runtime.get_host_property(state.window_id, "process"))).to_equal("undefined")
+        expect(_display_js(state.runtime.get_host_property(state.window_id, "Buffer"))).to_equal("undefined")
+        var runtime = state.runtime
+        match runtime.eval("typeof require + ':' + typeof process + ':' + typeof Buffer"):
             Ok(value):
-                expect(_display_js(value)).to_equal("7")
-            Err(err):
-                expect(err.message).to_equal("ok")
-        match state.runtime.eval("require('process').exit(7)"):
-            Ok(value):
-                expect(_display_js(value)).to_equal("7")
-            Err(err):
-                expect(err.message).to_equal("ok")
+                expect(_display_js(value)).to_equal("undefined:undefined:undefined")
+            Err(e):
+                fail("Expected browser Node globals to be absent: {e.message}")
+
+    it "keeps Node support available only through explicit JS engine APIs":
+        var interp = _new_interpreter()
+        expect(_display_js(interp._native_node_require_function())).to_equal("[Function]")
+        val process = interp._native_node_require([JsValue.String(v: "process")])
+        expect(_object_property_text(interp, process, "exit")).to_equal("[Function]")

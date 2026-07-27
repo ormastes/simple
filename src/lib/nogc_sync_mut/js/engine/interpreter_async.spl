@@ -14,6 +14,9 @@ use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATI
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_string_methods.{JsInterpreter}
 
+val MAX_PROMISE_CALLBACKS_PER_DRAIN: i64 = 1000
+val MAX_PENDING_PROMISE_HANDLERS: i64 = 4096
+
 impl JsInterpreter:
     me take_pending_async_request() -> i64?:
         if self.pending_async_requests.len() == 0:
@@ -31,11 +34,10 @@ impl JsInterpreter:
         var ran = false
         var drain_count = 0
         while self.pending_promise_tasks.len() > 0:
-            drain_count = drain_count + 1
-            if drain_count > 1000:
+            if drain_count >= MAX_PROMISE_CALLBACKS_PER_DRAIN:
                 self.logger.warn("Promise microtask drain limit reached")
-                self.pending_promise_tasks = []
                 return ran
+            drain_count = drain_count + 1
             val task = self.pending_promise_tasks[0]
             var rest: [PendingPromiseTask] = []
             var i = 1
@@ -48,9 +50,15 @@ impl JsInterpreter:
         ran
 
     me drain_due_timers(current_time_ms: i64) -> i64:
+        if current_time_ms > self.timer_current_time_ms:
+            self.timer_current_time_ms = current_time_ms
         var ran_count = 0
+        var drained_count = 0
         var keep_scanning = true
         while keep_scanning:
+            if drained_count >= 1000:
+                self.logger.warn("Timer task drain limit reached")
+                return ran_count
             keep_scanning = false
             var selected_id = -1
             var selected_callback_id = -1
@@ -103,6 +111,7 @@ impl JsInterpreter:
                         selected_is_interval = task.is_interval
                     i = i + 1
             if selected_id >= 0:
+                drained_count = drained_count + 1
                 keep_scanning = true
                 if selected_callback_id >= 0:
                     val ignored = self._invoke_promise_callback(selected_callback_id, selected_callback_args)
@@ -240,12 +249,21 @@ impl JsInterpreter:
         response_id
 
     me _create_promise_handler(on_fulfilled: i64, on_rejected: i64, next_promise_id: i64, kind: text) -> i64:
+        if self.promise_handlers.len() >= MAX_PENDING_PROMISE_HANDLERS:
+            self._settle_promise(
+                next_promise_id,
+                JsValue.String(v: "Promise handler limit reached"),
+                true
+            )
+            return -1
         val handler_id = self.next_promise_handler_id
         self.next_promise_handler_id = self.next_promise_handler_id + 1
         self.promise_handlers.push(PromiseHandlerRecord.create(handler_id, on_fulfilled, on_rejected, next_promise_id, kind))
         handler_id
 
     me _append_handler(promise_id: i64, handler_id: i64):
+        if handler_id < 0:
+            return
         var on_fulfilled = -1
         var on_rejected = -1
         var next_promise_id = -1
@@ -279,7 +297,37 @@ impl JsInterpreter:
         -1
 
     me _enqueue_promise_task(promise_id: i64, handler_id: i64):
+        if handler_id < 0:
+            return
         self.pending_promise_tasks.push(PendingPromiseTask.create(promise_id, handler_id))
+
+    me _remove_promise_handler(promise_id: i64, handler_id: i64):
+        var handlers: [PromiseHandlerRecord] = []
+        for handler in self.promise_handlers:
+            if handler.id != handler_id:
+                handlers.push(handler)
+        self.promise_handlers = handlers
+
+        var registrations: [PromiseHandlerRegistration] = []
+        for registration in self.promise_handler_registrations:
+            if (
+                registration.promise_id != promise_id or
+                registration.handler_id != handler_id
+            ):
+                registrations.push(registration)
+        self.promise_handler_registrations = registrations
+        self.object_store.remove_property(
+            promise_id, "__simple_handler_on_fulfilled:{handler_id}"
+        )
+        self.object_store.remove_property(
+            promise_id, "__simple_handler_on_rejected:{handler_id}"
+        )
+        self.object_store.remove_property(
+            promise_id, "__simple_handler_next:{handler_id}"
+        )
+        self.object_store.remove_property(
+            promise_id, "__simple_handler_kind:{handler_id}"
+        )
 
     me _invoke_promise_callback(fn_id: i64, arg_vals: [JsValue]) -> BrowserResult<JsValue>:
         if fn_id < 0 or fn_id >= self.functions.len():
@@ -415,6 +463,7 @@ impl JsInterpreter:
                                     next_promise_id = registration.next_promise_id
                                 hi = self.promise_handler_registrations.len()
                             hi = hi + 1
+                        self._remove_promise_handler(promise_id, handler_id)
 
                         var callback_id = -1
                         var propagate_rejection = false

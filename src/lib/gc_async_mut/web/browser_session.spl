@@ -24,41 +24,65 @@
 
 use common.string_builder.{StringBuilder}
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
-use std.js.engine.runtime.{JsRuntime, NATIVE_ARRAY_BUFFER_CONSTRUCTOR, NATIVE_DATA_VIEW_CONSTRUCTOR, NATIVE_FETCH, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_TEXT_DECODER_CONSTRUCTOR, NATIVE_TEXT_ENCODER_CONSTRUCTOR, NATIVE_UINT8_ARRAY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_COMPILE, NATIVE_WEBASSEMBLY_COMPILE_STREAMING, NATIVE_WEBASSEMBLY_GLOBAL_CONSTRUCTOR, NATIVE_WEBASSEMBLY_INSTANTIATE, NATIVE_WEBASSEMBLY_INSTANTIATE_STREAMING, NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MEMORY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_EXPORTS, NATIVE_WEBASSEMBLY_MODULE_IMPORTS, NATIVE_WEBASSEMBLY_TABLE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_VALIDATE, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER, NATIVE_NODE_REQUIRE, NATIVE_NODE_BUFFER_BYTE_LENGTH, NATIVE_NODE_BUFFER_CONCAT, NATIVE_NODE_BUFFER_FROM, NATIVE_NODE_PROCESS_CWD, NATIVE_NODE_PROCESS_EXIT, NATIVE_NODE_PROCESS_NEXT_TICK}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
+    browser_resource_size_allowed, BROWSER_MAX_DOCUMENT_SUBRESOURCES
+}
+use std.js.engine.runtime.{JsRuntime, NATIVE_ARRAY_BUFFER_CONSTRUCTOR, NATIVE_DATA_VIEW_CONSTRUCTOR, NATIVE_FETCH, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY, NATIVE_TEXT_DECODER_CONSTRUCTOR, NATIVE_TEXT_ENCODER_CONSTRUCTOR, NATIVE_UINT8_ARRAY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_COMPILE, NATIVE_WEBASSEMBLY_COMPILE_STREAMING, NATIVE_WEBASSEMBLY_GLOBAL_CONSTRUCTOR, NATIVE_WEBASSEMBLY_INSTANTIATE, NATIVE_WEBASSEMBLY_INSTANTIATE_STREAMING, NATIVE_WEBASSEMBLY_INSTANCE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MEMORY_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_MODULE_EXPORTS, NATIVE_WEBASSEMBLY_MODULE_IMPORTS, NATIVE_WEBASSEMBLY_TABLE_CONSTRUCTOR, NATIVE_WEBASSEMBLY_VALIDATE, NATIVE_NAVIGATOR_GPU_REQUEST_ADAPTER}
 use std.js.engine.js_error.{Logger, LogLevel}
 use std.js.types.js_types.{JsValue}
 use std.js.types.pair.{Pair}
 use std.platform.{get_host_os}
-use std.nogc_sync_mut.io.file_ops.{file_read_text}
 use std.gc_async_mut.web.browser_session_url.{
-    normalize_browser_url, url_protocol, url_pathname,
+    normalize_browser_url, normalize_network_navigation_url,
+    url_protocol, url_pathname,
     url_origin, url_host, url_search, url_hash,
     normalize_runtime_request_url, find_text
 }
 use std.gc_async_mut.web.browser_session_storage.{
     storage_object_from_pairs, install_storage_api,
-    sync_storage_runtime_state, sync_browser_runtime_state,
+    sync_storage_runtime_state,
     pair_value, upsert_pair,
     chrome_user_agent, guest_runtime_user_agent,
     navigator_platform, guest_runtime_platform,
     blank_page_html
 }
 use std.gc_async_mut.web.browser_session_cookies.{
-    cookie_text_for_url, merge_cookie_text, parse_cookie_line, upsert_cookie
+    cookie_text_for_url, document_cookie_text_for_url, merge_cookie_text_for_url, parse_cookie_line_for_url, upsert_cookie
 }
 use std.gc_async_mut.web.browser_session_html.{
     html_to_text, expand_stylesheet_text, insert_stylesheet_sources,
     _guest_runtime_probe_url, _extract_simple_js_assignment
 }
-use std.gc_async_mut.web.browser_session_context.{browser_session_is_secure_context}
+use std.gc_async_mut.web.browser_session_context.{
+    browser_csp_allows, browser_session_is_loopback_http,
+    browser_session_is_secure_context
+}
+
+val BROWSER_RUNTIME_FLUSH_ROUND_LIMIT: i32 = 8
 
 class BrowserHistoryEntry:
     url: text
     title: text
     source_html: text
+    content_security_policy: text
 
     static fn create(url: text, title: text, source_html: text) -> BrowserHistoryEntry:
-        BrowserHistoryEntry(url: url, title: title, source_html: source_html)
+        BrowserHistoryEntry.create_with_policy(url, title, source_html, "")
+
+    static fn create_with_policy(url: text, title: text, source_html: text, policy: text) -> BrowserHistoryEntry:
+        BrowserHistoryEntry(
+            url: url,
+            title: title,
+            source_html: source_html,
+            content_security_policy: policy
+        )
+
+class BrowserBookmarkSnapshot:
+    entries: [Pair<text, text>]
+
+    static fn create(entries: [Pair<text, text>]) -> BrowserBookmarkSnapshot:
+        BrowserBookmarkSnapshot(entries: entries)
 
 class BrowserRequest:
     id: text
@@ -68,6 +92,8 @@ class BrowserRequest:
     headers: text
     body: text
     content_type: text
+    redirect_count: i32
+    redirect_origin_url: text
 
     static fn create(id: text, kind: text, url: text, method: text, headers: text, body: text, content_type: text) -> BrowserRequest:
         BrowserRequest(
@@ -77,7 +103,9 @@ class BrowserRequest:
             method: method,
             headers: headers,
             body: body,
-            content_type: content_type
+            content_type: content_type,
+            redirect_count: 0,
+            redirect_origin_url: url
         )
 
 class BrowserResponse:
@@ -103,6 +131,9 @@ class BrowserResponse:
 fn browser_status_is_redirect(status: i32) -> bool:
     status == 301 or status == 302 or status == 303 or status == 307 or status == 308
 
+fn browser_status_is_success(status: i32) -> bool:
+    status >= 200 and status < 300
+
 fn browser_header_location(headers: text) -> text:
     var found = ""
     for raw_line in headers.split("\n"):
@@ -118,6 +149,18 @@ fn browser_header_location(headers: text) -> text:
                     i = i + 1
                 found = value.trim()
     found
+
+fn browser_header_content_security_policy(headers: text) -> text:
+    var policies = ""
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        val colon = line.index_of(":")
+        if colon > 0 and
+           line.substring(0, colon).trim().lower() == "content-security-policy":
+            if policies != "":
+                policies = policies + "\n"
+            policies = policies + line.substring(colon + 1).trim()
+    policies
 
 class BrowserPendingModuleEval:
     root_url: text
@@ -252,7 +295,7 @@ class BrowserRuntimeState:
         cookie_text: text
     ) -> BrowserRuntimeState:
         val logger = Logger.new("browser-session", LogLevel.Error)
-        var runtime = JsRuntime.new(logger)
+        var runtime = JsRuntime.new_browser(logger)
         val global_env = runtime.interpreter.global_env
         val is_guest_runtime = url.starts_with("https://guest.runtime/")
         if is_guest_runtime:
@@ -264,9 +307,7 @@ class BrowserRuntimeState:
         runtime.set_host_property(body_id, "innerHTML", JsValue.String(v: body_html))
         if is_guest_runtime:
             print "[BRS] runtime create stage=body-innerHTML"
-        val body_text =
-            if is_guest_runtime: ""
-            else: html_to_text(body_html)
+        val body_text = if is_guest_runtime: "" else: html_to_text(body_html)
         if is_guest_runtime:
             print "[BRS] runtime create stage=body-text-ready"
         runtime.set_host_property(body_id, "textContent", JsValue.String(v: body_text))
@@ -342,18 +383,15 @@ class BrowserRuntimeState:
             print "[BRS] runtime create stage=chrome-object"
         val chrome_runtime_id = runtime.create_host_object()
         runtime.set_host_property(chrome_id, "runtime", JsValue.Object(id: chrome_runtime_id))
-        runtime.set_host_property(chrome_id, "__simple_fetch_host", JsValue.Boolean(v: true))
-        runtime.set_host_property(chrome_id, "__simple_base_url", JsValue.String(v: url))
-        runtime.set_host_property(chrome_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
-        val modules_id = runtime.create_host_object()
-        runtime.set_host_property(chrome_id, "__simple_modules", JsValue.Object(id: modules_id))
         if is_guest_runtime:
             print "[BRS] runtime create stage=chrome-props"
 
-        val (runtime_after_session_storage, session_storage_id) = storage_object_from_pairs(runtime, session_storage)
-        runtime = runtime_after_session_storage
-        val (runtime_after_local_storage, local_storage_id) = storage_object_from_pairs(runtime, local_storage)
-        runtime = runtime_after_local_storage
+        val session_storage_result = storage_object_from_pairs(runtime, session_storage)
+        runtime = session_storage_result.0
+        val session_storage_id = session_storage_result.1
+        val local_storage_result = storage_object_from_pairs(runtime, local_storage)
+        runtime = local_storage_result.0
+        val local_storage_id = local_storage_result.1
         if is_guest_runtime:
             print "[BRS] runtime create stage=after-storage-objects"
 
@@ -380,10 +418,6 @@ class BrowserRuntimeState:
         runtime.set_host_property(window_id, "sessionStorage", JsValue.Object(id: session_storage_id))
         runtime.set_host_property(window_id, "localStorage", JsValue.Object(id: local_storage_id))
         runtime.set_host_property(window_id, "isSecureContext", JsValue.Boolean(v: is_secure_context))
-        runtime.set_host_property(window_id, "__simple_fetch_host", JsValue.Boolean(v: true))
-        runtime.set_host_property(window_id, "__simple_base_url", JsValue.String(v: url))
-        runtime.set_host_property(window_id, "__simple_cookie_header", JsValue.String(v: cookie_text))
-        runtime.set_host_property(window_id, "__simple_modules", JsValue.Object(id: modules_id))
         runtime._define_method_on(window_id, "fetch", NATIVE_FETCH)
         runtime._define_global_native("fetch", NATIVE_FETCH)
         runtime._define_global_native("ArrayBuffer", NATIVE_ARRAY_BUFFER_CONSTRUCTOR)
@@ -391,7 +425,6 @@ class BrowserRuntimeState:
         runtime._define_global_native("DataView", NATIVE_DATA_VIEW_CONSTRUCTOR)
         runtime._define_global_native("TextEncoder", NATIVE_TEXT_ENCODER_CONSTRUCTOR)
         runtime._define_global_native("TextDecoder", NATIVE_TEXT_DECODER_CONSTRUCTOR)
-        runtime._define_global_native("require", NATIVE_NODE_REQUIRE)
         match runtime.interpreter.lookup_global_value("ArrayBuffer"):
             Some(v):
                 runtime.set_host_property(window_id, "ArrayBuffer", v)
@@ -417,42 +450,6 @@ class BrowserRuntimeState:
                 runtime.set_host_property(window_id, "TextDecoder", v)
             _:
                 pass_dn("optional TextDecoder mirror is absent after native registration")
-        match runtime.interpreter.lookup_global_value("require"):
-            Some(v):
-                runtime.set_host_property(window_id, "require", v)
-            _:
-                pass_dn("optional require mirror is absent after native registration")
-        val node_process_id = runtime.create_host_object()
-        val node_versions_id = runtime.create_host_object()
-        val node_release_id = runtime.create_host_object()
-        val node_argv_id = runtime.create_host_object()
-        runtime.set_host_property(node_process_id, "platform", JsValue.String(v: "linux"))
-        runtime.set_host_property(node_process_id, "arch", JsValue.String(v: "x64"))
-        runtime.set_host_property(node_process_id, "version", JsValue.String(v: "v0.0.0-simple"))
-        runtime._define_method_on(node_process_id, "cwd", NATIVE_NODE_PROCESS_CWD)
-        runtime._define_method_on(node_process_id, "exit", NATIVE_NODE_PROCESS_EXIT)
-        runtime._define_method_on(node_process_id, "nextTick", NATIVE_NODE_PROCESS_NEXT_TICK)
-        val node_env_id = runtime.create_host_object()
-        runtime.set_host_property(node_process_id, "env", JsValue.Object(id: node_env_id))
-        runtime.set_host_property(node_argv_id, "0", JsValue.String(v: "simple"))
-        runtime.set_host_property(node_argv_id, "1", JsValue.String(v: ""))
-        runtime.set_host_property(node_argv_id, "0.0", JsValue.String(v: "simple"))
-        runtime.set_host_property(node_argv_id, "1.0", JsValue.String(v: ""))
-        runtime.set_host_property(node_argv_id, "length", JsValue.Number(v: 2.0))
-        runtime.set_host_property(node_process_id, "argv", JsValue.Array(id: node_argv_id))
-        runtime.set_host_property(node_versions_id, "node", JsValue.String(v: "0.0.0-simple"))
-        runtime.set_host_property(node_versions_id, "v8", JsValue.String(v: "simple-js"))
-        runtime.set_host_property(node_versions_id, "uv", JsValue.String(v: "unavailable"))
-        runtime.set_host_property(node_process_id, "versions", JsValue.Object(id: node_versions_id))
-        runtime.set_host_property(node_release_id, "name", JsValue.String(v: "node"))
-        runtime.set_host_property(node_release_id, "lts", JsValue.Boolean(v: false))
-        runtime.set_host_property(node_process_id, "release", JsValue.Object(id: node_release_id))
-        val node_buffer_id = runtime.create_host_object()
-        runtime._define_method_on(node_buffer_id, "byteLength", NATIVE_NODE_BUFFER_BYTE_LENGTH)
-        runtime._define_method_on(node_buffer_id, "from", NATIVE_NODE_BUFFER_FROM)
-        runtime._define_method_on(node_buffer_id, "concat", NATIVE_NODE_BUFFER_CONCAT)
-        runtime.set_host_property(window_id, "process", JsValue.Object(id: node_process_id))
-        runtime.set_host_property(window_id, "Buffer", JsValue.Object(id: node_buffer_id))
 
         val webassembly_id = runtime.create_host_object()
         runtime.set_host_property(webassembly_id, "__simple_wasm_host", JsValue.Boolean(v: true))
@@ -487,9 +484,6 @@ class BrowserRuntimeState:
         runtime.interpreter.define_global_value("sessionStorage", JsValue.Object(id: session_storage_id))
         runtime.interpreter.define_global_value("localStorage", JsValue.Object(id: local_storage_id))
         runtime.interpreter.define_global_value("WebAssembly", JsValue.Object(id: webassembly_id))
-        runtime.interpreter.define_global_value("process", JsValue.Object(id: node_process_id))
-        runtime.interpreter.define_global_value("Buffer", JsValue.Object(id: node_buffer_id))
-        runtime.interpreter.define_global_value("__simple_modules", JsValue.Object(id: modules_id))
         var interpreter = runtime.interpreter
         interpreter.host_window_id = window_id
         interpreter.host_document_id = document_id
@@ -502,9 +496,7 @@ class BrowserRuntimeState:
         interpreter.host_document_title_value = JsValue.String(v: title)
         interpreter.host_document_cookie_value = JsValue.String(v: cookie_text)
         interpreter.host_body_inner_html_value = JsValue.String(v: body_html)
-        val host_body_text_value =
-            if is_guest_runtime: JsValue.String(v: "")
-            else: JsValue.String(v: html_to_text(body_html))
+        val host_body_text_value = if is_guest_runtime: JsValue.String(v: "") else: JsValue.String(v: html_to_text(body_html))
         interpreter.host_body_text_content_value = host_body_text_value
         runtime.interpreter = interpreter
         if is_guest_runtime:
@@ -514,7 +506,6 @@ class BrowserRuntimeState:
         runtime = install_storage_api(runtime, local_storage_id)
         runtime = sync_storage_runtime_state(runtime, session_storage_id, session_storage)
         runtime = sync_storage_runtime_state(runtime, local_storage_id, local_storage)
-        runtime = sync_browser_runtime_state(runtime, window_id, chrome_id, url, cookie_text)
         var runtime_after_url_search_params_api = runtime
         val _url_search_params_api_result = runtime_after_url_search_params_api.eval(
             "function __usp_sp(v) { var out = ''; for (var i = 0; i < v.length; i = i + 1) { var ch = v.slice(i, i + 1); out = out + (ch === ' ' ? '+' : ch); } return out; } function __usp_ps(v) { var out = ''; for (var i = 0; i < v.length; i = i + 1) { var ch = v.slice(i, i + 1); out = out + (ch === '+' ? ' ' : ch); } return out; } function __usp_k(pair) { var eq = pair.indexOf('='); return __usp_ps(eq >= 0 ? pair.slice(0, eq) : pair); } function __usp_v(pair) { var eq = pair.indexOf('='); return __usp_ps(eq >= 0 ? pair.slice(eq + 1) : ''); } function __usp_get(q, name) { var pos = 0; while (pos <= q.length) { var rest = q.slice(pos); var amp = rest.indexOf('&'); var pair = amp >= 0 ? rest.slice(0, amp) : rest; if (pair !== '' && __usp_k(pair) === name) { return __usp_v(pair); } if (amp < 0) { break; } pos = pos + amp + 1; } return null; } function __usp_has(q, name) { var pos = 0; while (pos <= q.length) { var rest = q.slice(pos); var amp = rest.indexOf('&'); var pair = amp >= 0 ? rest.slice(0, amp) : rest; if (pair !== '' && __usp_k(pair) === name) { return true; } if (amp < 0) { break; } pos = pos + amp + 1; } return false; } function __usp_set(q, name, value) { var out = ''; var found = false; var pos = 0; while (pos <= q.length) { var rest = q.slice(pos); var amp = rest.indexOf('&'); var pair = amp >= 0 ? rest.slice(0, amp) : rest; if (pair !== '') { if (__usp_k(pair) === name) { if (!found) { out = out + (out === '' ? '' : '&') + __usp_sp(name) + '=' + __usp_sp(value); found = true; } } else { out = out + (out === '' ? '' : '&') + pair; } } if (amp < 0) { break; } pos = pos + amp + 1; } if (!found) { out = out + (out === '' ? '' : '&') + __usp_sp(name) + '=' + __usp_sp(value); } return out; } class URLSearchParams { constructor(init) { var text = (init === undefined || init === null) ? '' : String(init); if (text.slice(0, 1) === '?') { text = text.slice(1); } this._query = text; } get(name) { return __usp_get(this._query, String(name)); } has(name) { return __usp_has(this._query, String(name)); } set(name, value) { this._query = __usp_set(this._query, String(name), String(value)); } append(name, value) { this._query = this._query + (this._query === '' ? '' : '&') + __usp_sp(String(name)) + '=' + __usp_sp(String(value)); } toString() { return this._query; } } window.URLSearchParams = URLSearchParams;"
@@ -606,9 +597,37 @@ class BrowserCookie:
     path: text
     domain: text
     expired: bool
+    secure: bool
+    http_only: bool
+    host_only: bool
 
     static fn create(name: text, value: text, path: text, domain: text, expired: bool) -> BrowserCookie:
-        BrowserCookie(name: name, value: value, path: path, domain: domain, expired: expired)
+        BrowserCookie(name: name, value: value, path: path, domain: domain, expired: expired, secure: false, http_only: false, host_only: false)
+
+    static fn create_scoped(name: text, value: text, path: text, domain: text, expired: bool, secure: bool, http_only: bool, host_only: bool) -> BrowserCookie:
+        BrowserCookie(name: name, value: value, path: path, domain: domain, expired: expired, secure: secure, http_only: http_only, host_only: host_only)
+
+class BrowserHstsPolicy:
+    host: text
+    received_at_ms: i64
+    expires_at_ms: i64
+    include_subdomains: bool
+
+class BrowserHstsSnapshotEntry:
+    host: text
+    received_at_unix_ms: i64
+    expires_at_unix_ms: i64
+    include_subdomains: bool
+
+class BrowserHstsSnapshot:
+    entries: [BrowserHstsSnapshotEntry]
+
+    static fn create(entries: [BrowserHstsSnapshotEntry]) -> BrowserHstsSnapshot:
+        BrowserHstsSnapshot(entries: entries)
+
+class BrowserOriginStorage:
+    origin: text
+    entries: [Pair<text, text>]
 
 class BrowserSession:
     current_url: text
@@ -616,6 +635,7 @@ class BrowserSession:
     current_body_html: text
     current_style_html: text
     source_html: text
+    current_dom: BeDomNode
     runtime_enabled: bool
     history: [BrowserHistoryEntry]
     current_index: i32
@@ -625,19 +645,29 @@ class BrowserSession:
     warnings: [text]
     session_storage: [Pair<text, text>]
     local_storage: [Pair<text, text>]
+    session_storage_by_origin: [BrowserOriginStorage]
+    local_storage_by_origin: [BrowserOriginStorage]
     cookies: [BrowserCookie]
     runtime_state: BrowserRuntimeState?
     pending_requests: [BrowserRequest]
     inflight_requests: [BrowserRequest]
     next_request_seq: i32
+    subresource_request_count: i32
     active_load: BrowserLoadState?
     resource_overrides: [Pair<text, text>]
     module_source_cache: [Pair<text, text>]
+    module_redirect_urls: [Pair<text, text>]
     loaded_module_urls: [text]
     module_eval_stack: [text]
     wasm_modules: [BrowserWasmModuleRecord]
     home_url: text
     favorite_links: [Pair<text, text>]
+    address_draft: text
+    content_security_policy: text
+    pending_content_security_policy: text
+    monotonic_time_ms: i64
+    animation_start_time_ms: i64
+    hsts_policies: [BrowserHstsPolicy]
 
     static fn new() -> BrowserSession:
         BrowserSession._create(true)
@@ -652,6 +682,7 @@ class BrowserSession:
             current_body_html: "",
             current_style_html: "",
             source_html: blank_page_html(),
+            current_dom: BeDomNode.document(),
             runtime_enabled: runtime_enabled,
             history: [],
             current_index: -1,
@@ -661,19 +692,29 @@ class BrowserSession:
             warnings: [],
             session_storage: [],
             local_storage: [],
+            session_storage_by_origin: [],
+            local_storage_by_origin: [],
             cookies: [],
             runtime_state: nil,
             pending_requests: [],
             inflight_requests: [],
             next_request_seq: 1,
+            subresource_request_count: 0,
             active_load: nil,
             resource_overrides: [],
             module_source_cache: [],
+            module_redirect_urls: [],
             loaded_module_urls: [],
             module_eval_stack: [],
             wasm_modules: [],
             home_url: "about:blank",
-            favorite_links: []
+            favorite_links: [],
+            address_draft: "",
+            content_security_policy: "",
+            pending_content_security_policy: "",
+            monotonic_time_ms: 0,
+            animation_start_time_ms: 0,
+            hsts_policies: []
         )
 
 impl BrowserSession:
@@ -706,16 +747,35 @@ impl BrowserSession:
         applied
 
     me begin_navigation(url: text):
+        # Keep the active document alive until a replacement commits. Starting
+        # a navigation cancels only work, never the visible/runtime state that
+        # Stop or a failed response must preserve.
+        self.active_load = nil
+        self.pending_requests = []
+        self.inflight_requests = []
+        self.subresource_request_count = 0
+        self.pending_content_security_policy = ""
         self.pending_url = normalize_browser_url(url)
         self.is_loading = true
         self.stop_requested = false
         self.warnings = []
 
+    me can_stop_loading() -> bool:
+        self.is_loading or self.active_load != nil or
+            self.pending_requests.len() > 0 or self.inflight_requests.len() > 0
+
     me stop_loading():
-        if self.is_loading:
-            self.stop_requested = true
-            self.is_loading = false
-            self.pending_url = ""
+        if not self.can_stop_loading():
+            return
+        if val Some(load) = self.active_load:
+            self._finalize_stopped_load(load)
+        self.stop_requested = true
+        self.is_loading = false
+        self.pending_url = ""
+        self.pending_requests = []
+        self.inflight_requests = []
+        self.active_load = nil
+        self.pending_content_security_policy = ""
 
     me open_html(url: text, html: text) -> Result<bool, text>:
         self.begin_navigation(url)
@@ -725,13 +785,10 @@ impl BrowserSession:
         self.resource_overrides = upsert_pair(self.resource_overrides, normalize_browser_url(url), body)
 
     me begin_network_navigation(url: text, method: text, headers: text, body: text, content_type: text) -> Result<bool, text>:
-        val normalized = normalize_browser_url(url)
+        val normalized_input = normalize_network_navigation_url(url)?
+        val normalized = self._hsts_upgrade_url(normalized_input)
         if normalized == "about:blank":
             return self.open_html(normalized, blank_page_html())
-        if normalized.starts_with("file://"):
-            val path = normalized.slice(7, normalized.len())
-            val html = file_read_text(path)
-            return self.open_html(normalized, html)
         if val Some(override_body) = pair_value(self.resource_overrides, normalized):
             return self.open_html(normalized, override_body)
         self.begin_navigation(normalized)
@@ -739,24 +796,135 @@ impl BrowserSession:
         Ok(true)
 
     me take_pending_request() -> BrowserRequest?:
-        val pending_count = self.pending_requests.len()
-        if pending_count == 0:
-            return nil
-        val req = self.pending_requests[0]
-        self.inflight_requests.push(req)
-        val rest_count = pending_count - 1
-        if rest_count == 0:
-            self.pending_requests = []
-            return Some(req)
-        var rest: [BrowserRequest] = [self.pending_requests[1]; rest_count]
-        var idx = 1
-        var out_idx = 0
-        while idx < pending_count:
-            rest[out_idx] = self.pending_requests[idx]
-            out_idx = out_idx + 1
-            idx = idx + 1
-        self.pending_requests = rest
-        Some(req)
+        while self.pending_requests.len() > 0:
+            val pending_count = self.pending_requests.len()
+            val req = self.pending_requests[0]
+            val rest_count = pending_count - 1
+            if rest_count == 0:
+                self.pending_requests = []
+            else:
+                var rest: [BrowserRequest] = [self.pending_requests[1]; rest_count]
+                var idx = 1
+                var out_idx = 0
+                while idx < pending_count:
+                    rest[out_idx] = self.pending_requests[idx]
+                    out_idx = out_idx + 1
+                    idx = idx + 1
+                self.pending_requests = rest
+
+            val is_network_url = req.url.starts_with("http://") or req.url.starts_with("https://")
+            val invalid_network_url = (
+                is_network_url and
+                normalize_network_navigation_url(req.url).is_err()
+            )
+            val is_active_subresource = (
+                req.kind == "style" or req.kind == "script" or
+                req.kind == "module" or req.kind == "wasm"
+            )
+            val is_subresource = req.kind != "document"
+            val resource_limit_reached = (
+                is_subresource and
+                self.subresource_request_count >= BROWSER_MAX_DOCUMENT_SUBRESOURCES
+            )
+            val is_mixed_content = (
+                is_active_subresource and self.current_url.starts_with("https://") and
+                req.url.starts_with("http://") and
+                not browser_session_is_loopback_http(req.url)
+            )
+            val is_cors_required_resource = (
+                (req.kind == "module" or req.kind == "wasm") and
+                url_origin(req.url) != url_origin(self.current_url)
+            )
+            if is_subresource and not resource_limit_reached:
+                self.subresource_request_count = self.subresource_request_count + 1
+            if resource_limit_reached:
+                val reason = "resource-limit:too-many-subresource-requests"
+                self.warnings.push("blocked {req.kind} browser request: {reason}")
+                if req.kind == "fetch":
+                    self._reject_runtime_fetch(req.id, req.url, reason)
+                elif is_active_subresource:
+                    self.inflight_requests.push(req)
+                    val _ = self.commit_network_response(BrowserResponse.create(
+                        request_id: req.id,
+                        kind: req.kind,
+                        url: req.url,
+                        status: 0,
+                        headers: "",
+                        body: "",
+                        error: reason
+                    ))
+            elif is_network_url == false:
+                self.warnings.push("blocked non-network browser request: {req.url}")
+                if req.kind == "fetch":
+                    self._reject_runtime_fetch(req.id, req.url, "unsupported-scheme:{req.url}")
+                elif is_active_subresource:
+                    self.inflight_requests.push(req)
+                    val _ = self.commit_network_response(BrowserResponse.create(
+                        request_id: req.id,
+                        kind: req.kind,
+                        url: req.url,
+                        status: 0,
+                        headers: "",
+                        body: "",
+                        error: "unsupported-scheme:{req.url}"
+                    ))
+            elif invalid_network_url:
+                val reason = "invalid-url"
+                self.warnings.push("blocked invalid browser request")
+                if req.kind == "fetch":
+                    self._reject_runtime_fetch(req.id, req.url, reason)
+                elif is_active_subresource:
+                    self.inflight_requests.push(req)
+                    val _ = self.commit_network_response(
+                        BrowserResponse.create(
+                            request_id: req.id,
+                            kind: req.kind,
+                            url: req.url,
+                            status: 0,
+                            headers: "",
+                            body: "",
+                            error: reason
+                        )
+                    )
+                else:
+                    self.stop_loading()
+            elif is_mixed_content or is_cors_required_resource:
+                val reason = if is_mixed_content:
+                    "mixed-content:{req.url}"
+                else:
+                    "cross-origin:{req.url}"
+                self.warnings.push("blocked {req.kind} browser request: {reason}")
+                self.inflight_requests.push(req)
+                val _ = self.commit_network_response(BrowserResponse.create(
+                    request_id: req.id,
+                    kind: req.kind,
+                    url: req.url,
+                    status: 0,
+                    headers: "",
+                    body: "",
+                    error: reason
+                ))
+            elif req.kind == "fetch" and url_origin(req.url) != url_origin(self.current_url):
+                # ponytail: same-origin fetch only until BrowserRequest carries
+                # request mode and response CORS metadata.
+                self.warnings.push("cross-origin fetch blocked: {req.url}")
+                self._reject_runtime_fetch(req.id, req.url, "cross-origin:{req.url}")
+            else:
+                self.inflight_requests.push(req)
+                return Some(req)
+        nil
+
+    me _reject_runtime_fetch(request_id: text, url: text, error: text):
+        if val Some(state) = self.runtime_state:
+            var runtime = state.runtime
+            var interpreter = runtime.interpreter
+            val _ = interpreter.resolve_async_fetch_response(
+                request_id, url, 0, "", "", error
+            )
+            runtime.interpreter = interpreter
+            state.runtime = runtime
+            self.runtime_state = Some(state)
+            self._flush_runtime_side_effects()
 
     me has_pending_requests() -> bool:
         self.pending_requests.len() > 0
@@ -788,6 +956,7 @@ impl BrowserSession:
                             JsValue.String(v): url = v
                             _: pass_dn("async request keeps empty url when absent")
                         url = normalize_runtime_request_url(self.current_url, url)
+                        url = self._hsts_upgrade_url(url)
                         match runtime.get_host_property(req_obj_id, "method"):
                             JsValue.String(v): method = v
                             _: pass_dn("async request defaults method to GET when absent")
@@ -803,7 +972,22 @@ impl BrowserSession:
                         val is_mixed_content = (kind == "fetch" and
                             browser_session_is_secure_context(self.current_url) and
                             url.starts_with("http://") and
-                            not (url.starts_with("http://localhost") or url.starts_with("http://127.0.0.1")))
+                            not browser_session_is_loopback_http(url))
+                        val is_cross_origin_fetch = (
+                            kind == "fetch" and
+                            url_origin(url) != url_origin(self.current_url)
+                        )
+                        val is_csp_blocked = (
+                            kind == "fetch" and not browser_csp_allows(
+                                self.content_security_policy, "connect-src",
+                                self.current_url, url, false
+                            )
+                        )
+                        val request_capacity_reached = (
+                            self.subresource_request_count +
+                            self.pending_requests.len() >=
+                            BROWSER_MAX_DOCUMENT_SUBRESOURCES
+                        )
                         var already_emitted = false
                         for existing in self.pending_requests:
                             if existing.id == request_id:
@@ -818,6 +1002,32 @@ impl BrowserSession:
                             )
                             runtime.interpreter = interpreter
                             drained = true
+                        elif is_csp_blocked and not already_emitted:
+                            seen_request_ids = seen_request_ids + [request_id]
+                            self.warnings.push("CSP blocked fetch: {url}")
+                            val _ = interpreter.resolve_async_fetch_response(
+                                request_id, url, 0, "", "", "csp-blocked:{url}"
+                            )
+                            runtime.interpreter = interpreter
+                            drained = true
+                        elif is_cross_origin_fetch and not already_emitted:
+                            # ponytail: same-origin fetch only until BrowserRequest
+                            # carries request mode and validated CORS response metadata.
+                            seen_request_ids = seen_request_ids + [request_id]
+                            self.warnings.push("cross-origin fetch blocked: {url}")
+                            val _ = interpreter.resolve_async_fetch_response(
+                                request_id, url, 0, "", "", "cross-origin:{url}"
+                            )
+                            runtime.interpreter = interpreter
+                            drained = true
+                        elif request_capacity_reached and not already_emitted:
+                            seen_request_ids = seen_request_ids + [request_id]
+                            val _ = interpreter.resolve_async_fetch_response(
+                                request_id, url, 0, "", "",
+                                "resource-limit:too-many-subresource-requests"
+                            )
+                            runtime.interpreter = interpreter
+                            drained = true
                         elif not already_emitted:
                             seen_request_ids = seen_request_ids + [request_id]
                             # Merge any document.cookie set by the running script into
@@ -827,7 +1037,7 @@ impl BrowserSession:
                                     if doc_cookie != "":
                                         val visible_before = cookie_text_for_url(self.cookies, self.current_url)
                                         if doc_cookie != visible_before:
-                                            self.cookies = merge_cookie_text(self.cookies, doc_cookie)
+                                            self.cookies = merge_cookie_text_for_url(self.cookies, doc_cookie, self.current_url, false)
                                 _: pass_dn("no document cookie to merge before draining request")
                             # Strip any caller-supplied or raw Cookie lines, then attach
                             # only the sanitized session cookie for this request URL.
@@ -863,10 +1073,11 @@ impl BrowserSession:
         if val Some(state) = self.runtime_state:
             var progress = true
             var drain_rounds = 0
-            while progress:
+            while (
+                progress and
+                drain_rounds < BROWSER_RUNTIME_FLUSH_ROUND_LIMIT
+            ):
                 drain_rounds = drain_rounds + 1
-                if drain_rounds > 1000:
-                    break
                 progress = false
                 if self._drain_runtime_async_requests():
                     progress = true
@@ -889,21 +1100,167 @@ impl BrowserSession:
                 self.runtime_state = Some(final_state)
                 self._refresh_current_history()
 
-    me _inflight_for(request_id: text) -> BrowserRequest?:
+    me _take_inflight(request_id: text) -> BrowserRequest?:
         var found: BrowserRequest? = nil
+        var remaining: [BrowserRequest] = []
         for existing in self.inflight_requests:
             if existing.id == request_id:
                 found = Some(existing)
+            else:
+                remaining.push(existing)
+        self.inflight_requests = remaining
         found
+
+    me _commit_subresource_error(
+        response: BrowserResponse, message: text
+    ) -> Result<bool, text>:
+        val failed = BrowserResponse.create(
+            request_id: response.request_id,
+            kind: response.kind,
+            url: response.url,
+            status: response.status,
+            headers: response.headers,
+            body: "",
+            error: message
+        )
+        if response.kind == "style":
+            return self._commit_style_response(failed)
+        if response.kind == "script":
+            return self._commit_script_response(failed)
+        if response.kind == "module":
+            return self._commit_module_response(failed)
+        if response.kind == "wasm":
+            return self._commit_wasm_response(failed)
+        Err("not a subresource response: {response.kind}")
 
     me commit_network_response(response: BrowserResponse) -> Result<bool, text>:
         self._trace_guest("commit response kind={response.kind}")
+        val inflight = self._take_inflight(response.request_id)
+        if inflight == nil:
+            return Err("unknown or canceled request: {response.request_id}")
+        if val Some(request) = inflight:
+            if request.kind != response.kind:
+                return Err("response kind mismatch: expected {request.kind}, got {response.kind}")
+            if normalize_browser_url(request.url) != normalize_browser_url(response.url):
+                return Err("response URL mismatch")
+        if not browser_resource_size_allowed(response.body.len()):
+            val limit_error = "response body exceeds 50 MiB resource limit"
+            if response.kind == "fetch":
+                self._reject_runtime_fetch(
+                    response.request_id, response.url, limit_error
+                )
+            else:
+                self.stop_loading()
+            return Err(limit_error)
+        val is_active_subresource = (
+            response.kind == "style" or response.kind == "script" or
+            response.kind == "module" or response.kind == "wasm"
+        )
+        if is_active_subresource and response.error == "" and
+           browser_status_is_redirect(response.status):
+            self._apply_response_headers(response.headers, response.url)
+            val location = browser_header_location(response.headers)
+            if location == "":
+                return self._commit_subresource_error(
+                    response, "HTTP {response.status} redirect missing Location"
+                )
+            val target = normalize_runtime_request_url(response.url, location)
+            val normalized_target = normalize_network_navigation_url(target)
+            if val Err(e) = normalized_target:
+                return self._commit_subresource_error(
+                    response, "redirect blocked: {e}"
+                )
+            var next_url = target
+            if val Ok(valid_url) = normalized_target:
+                next_url = valid_url
+            next_url = self._hsts_upgrade_url(next_url)
+            if response.url.starts_with("https://") and
+               next_url.starts_with("http://") and
+               not browser_session_is_loopback_http(next_url):
+                return self._commit_subresource_error(
+                    response, "redirect blocked HTTPS downgrade"
+                )
+            var redirect_count = 0
+            var redirect_origin_url = response.url
+            if val Some(original) = inflight:
+                redirect_count = original.redirect_count
+                redirect_origin_url = original.redirect_origin_url
+            if redirect_count >= 20:
+                return self._commit_subresource_error(
+                    response, "redirect limit exceeded"
+                )
+            var next_request = self._build_request(
+                response.kind, next_url, "GET", "", "",
+                if response.kind == "wasm": "application/wasm" else: ""
+            )
+            next_request.redirect_count = redirect_count + 1
+            next_request.redirect_origin_url = redirect_origin_url
+            self.pending_requests.push(next_request)
+            return Ok(true)
+        if is_active_subresource and response.error == "" and
+           not browser_status_is_success(response.status):
+            return self._commit_subresource_error(
+                response, "HTTP {response.status}"
+            )
         if response.kind == "document":
+            if not self.is_loading or normalize_browser_url(response.url) != self.pending_url:
+                return Err("stale document response")
             if response.error != "":
                 self.pending_url = ""
                 self.is_loading = false
                 return Err(response.error)
-            self._apply_response_headers(response.headers)
+            if browser_status_is_redirect(response.status):
+                self._apply_response_headers(response.headers, response.url)
+                val location = browser_header_location(response.headers)
+                if location == "":
+                    self.stop_loading()
+                    return Err("document redirect missing Location")
+                val target = normalize_runtime_request_url(
+                    response.url, location
+                )
+                match normalize_network_navigation_url(target):
+                    Err(e):
+                        self.stop_loading()
+                        return Err("document redirect blocked: {e}")
+                    Ok(next_url):
+                        val upgraded_url = self._hsts_upgrade_url(next_url)
+                        if response.url.starts_with("https://") and
+                           upgraded_url.starts_with("http://"):
+                            self.stop_loading()
+                            return Err("document redirect blocked HTTPS downgrade")
+                        var original_method = "GET"
+                        var original_body = ""
+                        var original_content_type = ""
+                        var redirect_count = 0
+                        if val Some(original) = inflight:
+                            original_method = original.method
+                            original_body = original.body
+                            original_content_type = original.content_type
+                            redirect_count = original.redirect_count
+                        if redirect_count >= 20:
+                            self.stop_loading()
+                            return Err("document redirect limit exceeded")
+                        if response.status == 303 or (
+                            (response.status == 301 or response.status == 302) and
+                            original_method.upper() == "POST"
+                        ):
+                            original_method = "GET"
+                            original_body = ""
+                            original_content_type = ""
+                        self.pending_url = upgraded_url
+                        var next_request = self._build_request(
+                            "document", upgraded_url, original_method, "",
+                            original_body, original_content_type
+                        )
+                        next_request.redirect_count = redirect_count + 1
+                        if val Some(original) = inflight:
+                            next_request.redirect_origin_url = original.redirect_origin_url
+                        self.pending_requests.push(next_request)
+                        return Ok(true)
+            self.pending_content_security_policy = browser_header_content_security_policy(
+                response.headers
+            )
+            self._apply_response_headers(response.headers, response.url)
             self._trace_guest("document headers applied")
             return self.commit_navigation_html(response.body)
         if response.kind == "style":
@@ -913,35 +1270,99 @@ impl BrowserSession:
         if response.kind == "wasm":
             return self._commit_wasm_response(response)
         if response.kind == "module":
+            if val Some(request) = inflight:
+                if request.redirect_origin_url != response.url:
+                    self.module_redirect_urls = upsert_pair(
+                        self.module_redirect_urls,
+                        request.redirect_origin_url,
+                        response.url
+                    )
+                    self.module_source_cache = upsert_pair(
+                        self.module_source_cache,
+                        request.redirect_origin_url,
+                        response.body
+                    )
+                    if val Some(load) = self.active_load:
+                        if val Some(pending) = load.pending_module:
+                            if pending.source == "" and
+                               pending.root_url == request.redirect_origin_url:
+                                load.pending_module = Some(
+                                    BrowserPendingModuleEval.create(
+                                        response.url, ""
+                                    )
+                                )
+                                self.active_load = Some(load)
             return self._commit_module_response(response)
         if response.kind == "fetch":
             var orig_method = "GET"
             var orig_body = ""
-            if val Some(orig) = self._inflight_for(response.request_id):
+            var orig_content_type = ""
+            var orig_redirect_count = 0
+            if val Some(orig) = inflight:
                 orig_method = orig.method
                 orig_body = orig.body
+                orig_content_type = orig.content_type
+                orig_redirect_count = orig.redirect_count
             if response.error == "" and browser_status_is_redirect(response.status):
                 val location = browser_header_location(response.headers)
                 if location != "":
                     val target = normalize_runtime_request_url(response.url, location)
+                    if orig_redirect_count >= 20:
+                        self._reject_runtime_fetch(
+                            response.request_id, response.url,
+                            "redirect-limit"
+                        )
+                        return Ok(true)
+                    val normalized_target = normalize_network_navigation_url(target)
+                    if val Err(e) = normalized_target:
+                        self._reject_runtime_fetch(
+                            response.request_id, target,
+                            "redirect-blocked:{e}"
+                        )
+                        return Ok(true)
+                    var next_url = target
+                    if val Ok(valid_url) = normalized_target:
+                        next_url = valid_url
+                    next_url = self._hsts_upgrade_url(next_url)
+                    if response.url.starts_with("https://") and
+                       next_url.starts_with("http://"):
+                        self._reject_runtime_fetch(
+                            response.request_id, next_url,
+                            "redirect-blocked:https-downgrade"
+                        )
+                        return Ok(true)
+                    if url_origin(next_url) != url_origin(self.current_url):
+                        self._reject_runtime_fetch(
+                            response.request_id, next_url,
+                            "cross-origin:{next_url}"
+                        )
+                        return Ok(true)
                     var next_method = orig_method
                     var next_body = orig_body
-                    if response.status == 303:
+                    var next_content_type = orig_content_type
+                    if response.status == 303 or (
+                        (response.status == 301 or response.status == 302) and
+                        orig_method.upper() == "POST"
+                    ):
                         next_method = "GET"
                         next_body = ""
-                    val redirect_req = BrowserRequest.create(
+                        next_content_type = ""
+                    var redirect_req = BrowserRequest.create(
                         id: response.request_id,
                         kind: "fetch",
-                        url: target,
+                        url: next_url,
                         method: next_method,
                         headers: "",
                         body: next_body,
-                        content_type: ""
+                        content_type: next_content_type
                     )
+                    redirect_req.redirect_count = orig_redirect_count + 1
+                    if val Some(original) = inflight:
+                        redirect_req.redirect_origin_url = original.redirect_origin_url
                     self.pending_requests.push(redirect_req)
                     return Ok(true)
             if val Some(state) = self.runtime_state:
-                self._apply_response_headers(response.headers)
+                self._apply_response_headers(response.headers, response.url)
                 var runtime = state.runtime
                 if val Some(updated_state) = self.runtime_state:
                     runtime = updated_state.runtime
@@ -971,11 +1392,15 @@ impl BrowserSession:
             if response.error != "":
                 load.warnings.push("stylesheet load error: {response.error}")
             else:
-                self._apply_response_headers(response.headers)
+                self._apply_response_headers(response.headers, response.url)
                 val expanded = expand_stylesheet_text(load.document_url, response.url, response.body)
                 load.current_style_html = load.current_style_html + expanded.html
                 if expanded.sources.len() > 0:
                     load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+                    if load.style_sources.len() >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
+                        load.warnings.push(
+                            "stylesheet resource limit reached; additional styles ignored"
+                        )
             # Persist the fetched stylesheet body (and any newly inserted @import
             # sources) back into the active load before re-entering the loader.
             # _advance_stylesheet_loading re-unwraps self.active_load, and a
@@ -986,13 +1411,9 @@ impl BrowserSession:
         Err("no active stylesheet load")
 
     me open_url(url: text) -> Result<bool, text>:
-        val normalized = normalize_browser_url(url)
+        val normalized = normalize_network_navigation_url(url)?
         if normalized == "about:blank":
             return self.open_html(normalized, blank_page_html())
-        if normalized.starts_with("file://"):
-            val path = normalized.slice(7, normalized.len())
-            val html = file_read_text(path)
-            return self.open_html(normalized, html)
         if val Some(override_body) = pair_value(self.resource_overrides, normalized):
             return self.open_html(normalized, override_body)
         return Err("network navigation is not implemented; use begin_network_navigation for '{normalized}'")
@@ -1009,6 +1430,7 @@ impl BrowserSession:
             print "[BRS] commit html start"
         self.pending_url = ""
         self.is_loading = false
+        self.address_draft = ""
         self._load_page_source(pending, html, -1, true)
 
     me reload() -> Result<bool, text>:
@@ -1016,6 +1438,7 @@ impl BrowserSession:
             return Err("no page to reload")
         val entry = self.history[self.current_index]
         self.begin_navigation(entry.url)
+        self.pending_content_security_policy = entry.content_security_policy
         self.pending_url = ""
         self.is_loading = false
         self.stop_requested = false
@@ -1026,6 +1449,11 @@ impl BrowserSession:
             return Err("cannot go back")
         val target = self.current_index - 1
         val entry = self.history[target]
+        self.begin_navigation(entry.url)
+        self.pending_content_security_policy = entry.content_security_policy
+        self.pending_url = ""
+        self.is_loading = false
+        self.stop_requested = false
         self._load_page_source(entry.url, entry.source_html, target, false)
 
     me go_forward() -> Result<bool, text>:
@@ -1033,6 +1461,11 @@ impl BrowserSession:
             return Err("cannot go forward")
         val target = self.current_index + 1
         val entry = self.history[target]
+        self.begin_navigation(entry.url)
+        self.pending_content_security_policy = entry.content_security_policy
+        self.pending_url = ""
+        self.is_loading = false
+        self.stop_requested = false
         self._load_page_source(entry.url, entry.source_html, target, false)
 
     me can_go_back() -> bool:
@@ -1042,29 +1475,64 @@ impl BrowserSession:
         self.current_index >= 0 and self.current_index < self.history.len() - 1
 
     me set_home_url(url: text):
-        self.home_url = normalize_browser_url(url)
+        val _ = self.try_set_home_url(url)
+
+    me try_set_home_url(url: text) -> bool:
+        if url.len() > 2048:
+            return false
+        match normalize_network_navigation_url(url):
+            Err(_):
+                false
+            Ok(normalized):
+                self.home_url = normalized
+                true
 
     me go_home() -> Result<bool, text>:
-        val target = self.home_url
-        if target == "about:blank":
-            return self.open_html(target, blank_page_html())
-        if target.starts_with("file://"):
-            val path = target.slice(7, target.len())
-            val html = file_read_text(path)
-            return self.open_html(target, html)
-        if val Some(override_body) = pair_value(self.resource_overrides, target):
-            return self.open_html(target, override_body)
-        Err("network navigation is not implemented; use begin_network_navigation for '{target}'")
+        self.begin_network_navigation(self.home_url, "GET", "", "", "")
 
     me add_favorite(url: text, title: text):
-        val normalized = normalize_browser_url(url)
-        val stored_title = if title != "": title else: normalized
-        self.favorite_links = upsert_pair(self.favorite_links, normalized, stored_title)
+        val _ = self.try_add_favorite(url, title)
+
+    me try_add_favorite(url: text, title: text) -> bool:
+        if url.len() > 2048 or title.len() > 512:
+            return false
+        match normalize_network_navigation_url(url):
+            Err(_):
+                return false
+            Ok(normalized):
+                if normalized.len() > 2048:
+                    return false
+                if self.favorite_links.len() >= 256 and
+                   pair_value(self.favorite_links, normalized) == nil:
+                    return false
+                val stored_title = if title.trim() != "": title.trim() else: normalized
+                self.favorite_links = upsert_pair(
+                    self.favorite_links, normalized, stored_title
+                )
+                true
 
     me add_current_favorite():
-        val normalized = normalize_browser_url(self.current_url)
-        val stored_title = if self.current_title != "": self.current_title else: normalized
-        self.favorite_links = upsert_pair(self.favorite_links, normalized, stored_title)
+        val _ = self.try_add_favorite(self.current_url, self.current_title)
+
+    me bookmark_snapshot() -> BrowserBookmarkSnapshot:
+        var copied: [Pair<text, text>] = []
+        for entry in self.favorite_links:
+            copied.push(Pair(first: entry.first, second: entry.second))
+        BrowserBookmarkSnapshot.create(copied)
+
+    me load_bookmark_snapshot(snapshot: BrowserBookmarkSnapshot) -> i32:
+        var incoming: [Pair<text, text>] = []
+        for entry in snapshot.entries:
+            incoming.push(Pair(first: entry.first, second: entry.second))
+        self.favorite_links = []
+        var accepted = 0
+        var index = 0
+        while index < incoming.len() and accepted < 256:
+            val entry = incoming[index]
+            if self.try_add_favorite(entry.first, entry.second):
+                accepted = accepted + 1
+            index = index + 1
+        accepted
 
     me remove_favorite(url: text):
         val normalized = normalize_browser_url(url)
@@ -1111,16 +1579,20 @@ impl BrowserSession:
     me document_cookie() -> text:
         if _guest_runtime_probe_url(self.current_url):
             if val Some(state) = self.runtime_state:
-                if val JsValue.String(cookie_text) = state.runtime.interpreter.host_document_cookie_value:
-                    if cookie_text != "":
-                        return cookie_text
+                match state.runtime.interpreter.host_document_cookie_value:
+                    JsValue.String(cookie_text):
+                        if cookie_text != "":
+                            return cookie_text
+                    _:
+                        pass_dn
             return "runtime=ok"
-        cookie_text_for_url(self.cookies, self.current_url)
+        document_cookie_text_for_url(self.cookies, self.current_url)
 
     me cookie_header_for_request(url: text) -> text:
         cookie_text_for_url(self.cookies, url)
 
-    me apply_set_cookie_header(header_value: text):
-        if val Some(cookie) = parse_cookie_line(header_value):
+    me apply_set_cookie_header(header_value: text, response_url: text = ""):
+        val source_url = if response_url != "": response_url else: self.current_url
+        if val Some(cookie) = parse_cookie_line_for_url(header_value, source_url, true):
             self.cookies = upsert_cookie(self.cookies, cookie)
             self._sync_runtime_cookie_string()

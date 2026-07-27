@@ -1,0 +1,43 @@
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, RequestMode}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+use std.gc_async_mut.gpu.browser_engine.net.entity.tls_types.{TlsVersion}
+use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{MockResponseRegistry, set_mock_registry}
+use std.gc_async_mut.gpu.browser_engine.net.tls.{validated_negotiated_tls_version}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
+use std.js.types.pair.{Pair}
+
+describe "Browser TLS negotiated protocol policy":
+
+    it "accepts supported versions and rejects downgrade or missing protocol":
+        expect(validated_negotiated_tls_version("TLSv1.3", TlsVersion.Tls13).is_ok()).to_equal(true)
+        expect(validated_negotiated_tls_version("TLSv1.2", TlsVersion.Tls12).is_ok()).to_equal(true)
+        expect(validated_negotiated_tls_version("TLSv1.2", TlsVersion.Tls13).is_err()).to_equal(true)
+        expect(validated_negotiated_tls_version("", TlsVersion.Tls12).is_err()).to_equal(true)
+        expect(validated_negotiated_tls_version("SSLv3", TlsVersion.Tls12).is_err()).to_equal(true)
+
+    it "rejects an HTTPS redirect to plaintext before transport":
+        var registry = MockResponseRegistry.create()
+        registry.register_with_headers(
+            "https://secure.test/start",
+            302,
+            [Pair("Location", "http://secure.test/plain")],
+            ""
+        )
+        registry.register("http://secure.test/plain", 200, "downgraded")
+        set_mock_registry(registry)
+        val logger = Logger.new("tls-policy", LogLevel.Error)
+        var fetch = FetchEngine.new_for_origin(logger, "https://secure.test")
+        val request = FetchRequest(
+            url: Url.parse("https://secure.test/start"),
+            method: "GET",
+            headers: "",
+            body: [],
+            mode: RequestMode.SameOrigin,
+            credentials: "omit"
+        )
+
+        expect(fetch.fetch(request).is_err()).to_be(true)
+        set_mock_registry(MockResponseRegistry.create())

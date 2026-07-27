@@ -11,12 +11,14 @@
 
 use std.js.types.pair.{Pair}
 use std.js.types.js_types.{JsValue}
-use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserLoadState, BrowserPendingModuleEval, BrowserScriptBlock, BrowserHistoryEntry, BrowserResponse, BrowserWasmModuleRecord}
+use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserLoadState, BrowserPendingModuleEval, BrowserScriptBlock, BrowserHistoryEntry, BrowserResponse, BrowserWasmModuleRecord, BrowserHstsPolicy, BrowserHstsSnapshot, BrowserHstsSnapshotEntry}
 use std.gc_async_mut.web.browser_session_storage.{pair_value, upsert_pair}
-use std.gc_async_mut.web.browser_session_url.{resolve_relative_url}
-use std.gc_async_mut.web.browser_session_cookies.{parse_cookie_line, upsert_cookie}
+use std.gc_async_mut.web.browser_session_url.{resolve_relative_url, url_hostname}
+use common.web.public_suffix.{is_public_suffix}
+use common.web.host_policy.{is_ip_host_literal}
 use std.gc_async_mut.web.browser_session_html.{
-    expand_stylesheet_text, insert_stylesheet_sources, _guest_runtime_probe_url, html_to_text
+    expand_stylesheet_text, insert_stylesheet_sources, _guest_runtime_probe_url,
+    html_to_text, escape_html_text
 }
 use std.gc_async_mut.web.browser_session_modules.{
     extract_module_dependency_urls, transform_module_source
@@ -24,8 +26,12 @@ use std.gc_async_mut.web.browser_session_modules.{
 use std.gc_async_mut.web.browser_session_modules_helpers.{
     text_in_list, append_unique_text, remove_text_once
 }
+use std.gc_async_mut.web.browser_session_context.{browser_csp_allows}
 use std.gc_async_mut.gpu.browser_engine.script.canvas_api.{canvas_get_context_simple2d, canvas_get_context_simple3d}
-use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
+    BROWSER_MAX_DOCUMENT_SUBRESOURCES
+}
 
 fn _append_script_compat_warnings(warnings: [text], block: BrowserScriptBlock) -> [text]:
     warnings
@@ -255,13 +261,16 @@ impl BrowserSession:
             if response.error != "":
                 load.warnings.push("wasm module load error: {response.error}")
             else:
-                self._apply_response_headers(response.headers)
+                self._apply_response_headers(response.headers, response.url)
                 self._record_wasm_module(response.url, response.body, load)
             return self._advance_script_loading()
         Err("no active wasm load")
 
     me _set_simple_script_body_text(value: text):
-        self.current_body_html = value
+        self.current_body_html = escape_html_text(value)
+        self.current_dom = html_tree_builder_build(
+            "<html><body>" + self.current_body_html + "</body></html>"
+        )
         if val Some(state) = self.runtime_state:
             var runtime = state.runtime
             runtime.set_host_property(state.body_id, "textContent", JsValue.String(v: value))
@@ -273,6 +282,9 @@ impl BrowserSession:
 
     me _set_simple_script_body_html(value: text):
         self.current_body_html = value
+        self.current_dom = html_tree_builder_build(
+            "<html><body>" + value + "</body></html>"
+        )
         if val Some(state) = self.runtime_state:
             var runtime = state.runtime
             runtime.set_host_property(state.body_id, "innerHTML", JsValue.String(v: value))
@@ -407,10 +419,10 @@ impl BrowserSession:
             else:
                 val current_idx = load.next_script_idx - 1
                 if current_idx >= 0 and current_idx < load.script_blocks.len() and load.script_blocks[current_idx].script_type == "text/simple":
-                    self._apply_response_headers(response.headers)
+                    self._apply_response_headers(response.headers, response.url)
                     self._execute_simple_script(response.body, load)
                 else if val Some(state) = self.runtime_state:
-                    self._apply_response_headers(response.headers)
+                    self._apply_response_headers(response.headers, response.url)
                     val eval_result = state.runtime.eval(response.body)
                     match eval_result:
                         Ok(_):
@@ -427,7 +439,7 @@ impl BrowserSession:
                 load.warnings.push("module load error: {response.error}")
                 load.pending_module = nil
                 return self._advance_script_loading()
-            self._apply_response_headers(response.headers)
+            self._apply_response_headers(response.headers, response.url)
             self.module_source_cache = upsert_pair(self.module_source_cache, response.url, response.body)
             return self._resume_pending_module_eval(load)
         Err("no active module load")
@@ -435,7 +447,13 @@ impl BrowserSession:
     me _resume_pending_module_eval(load: BrowserLoadState) -> Result<bool, text>:
         if val Some(pending) = load.pending_module:
             load.pending_module = nil
-            return self._execute_module_source(pending.root_url, pending.source, load)
+            var source = pending.source
+            if source == "":
+                if val Some(cached) = self._module_source_for_url(pending.root_url):
+                    source = cached
+            if source == "":
+                return Err("module source missing after network response: {pending.root_url}")
+            return self._execute_module_source(pending.root_url, source, load)
         self._advance_script_loading()
 
     me _advance_stylesheet_loading() -> Result<bool, text>:
@@ -446,19 +464,45 @@ impl BrowserSession:
                 val source = load.style_sources[load.next_style_idx]
                 load.next_style_idx = load.next_style_idx + 1
                 if source.kind == "inline":
+                    if not browser_csp_allows(
+                        self.content_security_policy, "style-src",
+                        load.document_url, load.document_url, true
+                    ):
+                        load.warnings = _append_unique_warning(
+                            load.warnings, "CSP blocked inline style"
+                        )
+                        continue
                     val expanded = expand_stylesheet_text(load.document_url, load.document_url, source.source)
                     load.current_style_html = load.current_style_html + expanded.html
                     if expanded.sources.len() > 0:
                         load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+                        if load.style_sources.len() >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
+                            load.warnings = _append_unique_warning(
+                                load.warnings,
+                                "stylesheet resource limit reached; additional styles ignored"
+                            )
                         style_source_count = load.style_sources.len()
                     continue
                 if source.kind == "external":
                     val resolved = resolve_relative_url(load.document_url, source.source)
+                    if not browser_csp_allows(
+                        self.content_security_policy, "style-src",
+                        load.document_url, resolved, false
+                    ):
+                        load.warnings = _append_unique_warning(
+                            load.warnings, "CSP blocked style: {resolved}"
+                        )
+                        continue
                     if val Some(override_body) = pair_value(self.resource_overrides, resolved):
                         val expanded = expand_stylesheet_text(load.document_url, resolved, override_body)
                         load.current_style_html = load.current_style_html + expanded.html
                         if expanded.sources.len() > 0:
                             load.style_sources = insert_stylesheet_sources(load.style_sources, load.next_style_idx, expanded.sources)
+                            if load.style_sources.len() >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
+                                load.warnings = _append_unique_warning(
+                                    load.warnings,
+                                    "stylesheet resource limit reached; additional styles ignored"
+                                )
                             style_source_count = load.style_sources.len()
                         continue
                     # Persist the advanced cursor before suspending on the network
@@ -498,6 +542,14 @@ impl BrowserSession:
                     script_block_count = load.script_blocks.len()
                     continue
                 if block.kind == "inline":
+                    if not browser_csp_allows(
+                        self.content_security_policy, "script-src",
+                        load.document_url, load.document_url, true
+                    ):
+                        load.warnings = _append_unique_warning(
+                            load.warnings, "CSP blocked inline script"
+                        )
+                        continue
                     if block.script_type == "module":
                         val result = self._execute_module_source(load.document_url, block.content, load)
                         match result:
@@ -514,9 +566,7 @@ impl BrowserSession:
                         self._trace_guest("eval inline script start")
                         val script_source = block.content
                         self._trace_guest("eval inline script source-len={script_source.len()}")
-                        val head_len =
-                            if script_source.len() > 32: 32
-                            else: script_source.len()
+                        val head_len = if script_source.len() > 32: 32 else: script_source.len()
                         self._trace_guest("eval inline script head={script_source[0:head_len]}")
                         if _guest_runtime_probe_url(load.document_url):
                             self._trace_guest("eval inline script fast-path begin")
@@ -542,6 +592,14 @@ impl BrowserSession:
                     continue
                 if block.kind == "external":
                     val resolved = resolve_relative_url(load.document_url, block.src)
+                    if not browser_csp_allows(
+                        self.content_security_policy, "script-src",
+                        load.document_url, resolved, false
+                    ):
+                        load.warnings = _append_unique_warning(
+                            load.warnings, "CSP blocked script: {resolved}"
+                        )
+                        continue
                     if block.script_type == "module":
                         val result = self._execute_external_module(resolved, load)
                         match result:
@@ -606,10 +664,13 @@ impl BrowserSession:
         true
 
     me _execute_external_module(module_url: text, load: BrowserLoadState) -> Result<bool, text>:
-        if self._module_is_loaded(module_url):
+        val final_url = pair_value(
+            self.module_redirect_urls, module_url
+        ) ?? module_url
+        if self._module_is_loaded(final_url):
             return Ok(true)
         if val Some(source) = self._module_source_for_url(module_url):
-            return self._execute_module_source(module_url, source, load)
+            return self._execute_module_source(final_url, source, load)
         load.pending_module = Some(BrowserPendingModuleEval.create(module_url, ""))
         self.pending_requests.push(self._build_request("module", module_url, "GET", "", "", ""))
         Ok(false)
@@ -623,12 +684,33 @@ impl BrowserSession:
             load.warnings = _append_unique_warning(load.warnings, "module cycle handling is limited for '{module_url}'")
             return Ok(true)
         val dependencies = extract_module_dependency_urls(module_url, source)
+        if dependencies.len() >= BROWSER_MAX_DOCUMENT_SUBRESOURCES:
+            load.warnings = _append_unique_warning(
+                load.warnings,
+                "module dependency limit reached for '{module_url}'"
+            )
         self.module_eval_stack.push(module_url)
         for dep_url in dependencies:
-            if self._module_is_loaded(dep_url):
+            if not browser_csp_allows(
+                self.content_security_policy, "script-src",
+                load.document_url, dep_url, false
+            ):
+                self.module_eval_stack = remove_text_once(
+                    self.module_eval_stack, module_url
+                )
+                return Err("CSP blocked module: {dep_url}")
+            val dep_final_url = pair_value(
+                self.module_redirect_urls, dep_url
+            ) ?? dep_url
+            if self._module_is_loaded(dep_final_url):
                 continue
+            if dep_url.starts_with("file://"):
+                self.module_eval_stack = remove_text_once(self.module_eval_stack, module_url)
+                return Err("unsupported scheme: file")
             if val Some(dep_source) = self._module_source_for_url(dep_url):
-                val dep_result = self._execute_module_source(dep_url, dep_source, load)
+                val dep_result = self._execute_module_source(
+                    dep_final_url, dep_source, load
+                )
                 match dep_result:
                     Ok(done):
                         if not done:
@@ -666,9 +748,6 @@ impl BrowserSession:
             return Some(cached)
         if val Some(override_body) = pair_value(self.resource_overrides, module_url):
             return Some(override_body)
-        if module_url.starts_with("file://"):
-            val path = module_url.slice(7, module_url.len())
-            return Some(file_read_text(path))
         nil
 
     me _module_is_loaded(module_url: text) -> bool:
@@ -679,6 +758,7 @@ impl BrowserSession:
         if _guest_runtime_probe_url(load.document_url):
             self.current_url = load.document_url
             self.current_style_html = load.current_style_html
+            self.animation_start_time_ms = self.monotonic_time_ms
             self.warnings = load.warnings
             self._trace_guest("finalize load done")
             return
@@ -691,21 +771,134 @@ impl BrowserSession:
             val _ = self.begin_network_navigation(redirected_url, "GET", "", "", "")
             return
         self.current_style_html = load.current_style_html
+        self.animation_start_time_ms = self.monotonic_time_ms
         self._update_history(load.document_url, load.source_html, load.target_index, load.push_history)
         self.warnings = load.warnings
         self._trace_guest("finalize load done")
 
-    me _apply_response_headers(headers: text):
+    me _finalize_stopped_load(load: BrowserLoadState):
+        """Keep the document and resources completed before Stop was pressed."""
+        if self.current_url != load.document_url:
+            return
+        self.current_style_html = load.current_style_html
+        self.animation_start_time_ms = self.monotonic_time_ms
+        self._update_history(load.document_url, load.source_html, load.target_index, load.push_history)
+        self.warnings = load.warnings
+
+    me _apply_response_headers(headers: text, response_url: text):
         for line in headers.split("\n"):
             val trimmed = line.trim()
             if trimmed.lower().starts_with("set-cookie:"):
-                self.apply_set_cookie_header(trimmed.substring(11).trim())
+                self.apply_set_cookie_header(trimmed.substring(11).trim(), response_url)
+            elif trimmed.lower().starts_with("strict-transport-security:"):
+                self._apply_hsts_header(
+                    trimmed.substring(26).trim(), response_url
+                )
+
+    me _apply_hsts_header(header: text, response_url: text):
+        if not response_url.starts_with("https://"):
+            return
+        var max_age: i64? = nil
+        var include_subdomains = false
+        for raw_part in header.split(";"):
+            val part = raw_part.trim()
+            val lower = part.lower()
+            if lower.starts_with("max-age="):
+                max_age = part.substring(8).trim().parse_i64()
+            elif lower == "includesubdomains":
+                include_subdomains = true
+        if max_age == nil:
+            return
+        val host = url_hostname(response_url).lower()
+        if host == "" or is_ip_host_literal(host) or is_public_suffix(host):
+            return
+        var retained: [BrowserHstsPolicy] = []
+        for policy in self.hsts_policies:
+            if policy.host != host and policy.expires_at_ms > self.monotonic_time_ms:
+                retained.push(policy)
+        val seconds = max_age ?? -1
+        if seconds > 0 and retained.len() < 1024:
+            val capped_seconds = if seconds > 315360000: 315360000 else: seconds
+            retained.push(BrowserHstsPolicy(
+                host: host,
+                received_at_ms: self.monotonic_time_ms,
+                expires_at_ms: self.monotonic_time_ms + capped_seconds * 1000,
+                include_subdomains: include_subdomains
+            ))
+        self.hsts_policies = retained
+
+    me hsts_snapshot(wall_clock_ms: i64) -> BrowserHstsSnapshot:
+        var entries: [BrowserHstsSnapshotEntry] = []
+        for policy in self.hsts_policies:
+            if policy.expires_at_ms > self.monotonic_time_ms:
+                val received_age = self.monotonic_time_ms - policy.received_at_ms
+                val remaining = policy.expires_at_ms - self.monotonic_time_ms
+                entries.push(BrowserHstsSnapshotEntry(
+                    host: policy.host,
+                    received_at_unix_ms: wall_clock_ms - received_age,
+                    expires_at_unix_ms: wall_clock_ms + remaining,
+                    include_subdomains: policy.include_subdomains
+                ))
+        BrowserHstsSnapshot.create(entries)
+
+    me load_hsts_snapshot(
+        snapshot: BrowserHstsSnapshot, wall_clock_ms: i64
+    ) -> i32:
+        self.hsts_policies = []
+        var accepted = 0
+        var index = 0
+        while index < snapshot.entries.len() and accepted < 1024:
+            val entry = snapshot.entries[index]
+            val host = entry.host.trim().lower()
+            var remaining = entry.expires_at_unix_ms - wall_clock_ms
+            val max_lifetime_ms: i64 = 315360000000
+            if remaining > max_lifetime_ms:
+                remaining = max_lifetime_ms
+            if (
+                host.len() > 0 and host.len() <= 253 and
+                not host.contains("/") and not is_ip_host_literal(host) and
+                not is_public_suffix(host) and remaining > 0
+            ):
+                var duplicate = false
+                # ponytail: bounded startup scan; index by host if the 1024 cap grows
+                for policy in self.hsts_policies:
+                    if policy.host == host:
+                        duplicate = true
+                var received_age = wall_clock_ms - entry.received_at_unix_ms
+                if received_age < 0:
+                    received_age = 0
+                if received_age > max_lifetime_ms:
+                    received_age = max_lifetime_ms
+                if not duplicate:
+                    self.hsts_policies.push(BrowserHstsPolicy(
+                        host: host,
+                        received_at_ms: self.monotonic_time_ms - received_age,
+                        expires_at_ms: self.monotonic_time_ms + remaining,
+                        include_subdomains: entry.include_subdomains
+                    ))
+                    accepted = accepted + 1
+            index = index + 1
+        accepted
+
+    me _hsts_upgrade_url(url: text) -> text:
+        if not url.starts_with("http://"):
+            return url
+        val host = url_hostname(url).lower()
+        for policy in self.hsts_policies:
+            val subdomain_match = (
+                policy.include_subdomains and host.ends_with("." + policy.host)
+            )
+            if policy.expires_at_ms > self.monotonic_time_ms and
+               (host == policy.host or subdomain_match):
+                return "https://" + url.substring(7)
+        url
 
     me _update_history(url: text, html: text, target_index: i32, push_history: bool):
-        val entry = BrowserHistoryEntry.create(
+        val entry = BrowserHistoryEntry.create_with_policy(
             url: self.current_url,
             title: self.current_title,
-            source_html: html
+            source_html: html,
+            policy: self.content_security_policy
         )
 
         if target_index >= 0 and target_index < self.history.len():
@@ -730,8 +923,9 @@ impl BrowserSession:
 
     me _refresh_current_history():
         if self.current_index >= 0 and self.current_index < self.history.len():
-            self.history[self.current_index] = BrowserHistoryEntry.create(
+            self.history[self.current_index] = BrowserHistoryEntry.create_with_policy(
                 url: self.current_url,
                 title: self.current_title,
-                source_html: self.history[self.current_index].source_html
+                source_html: self.history[self.current_index].source_html,
+                policy: self.content_security_policy
             )

@@ -11,6 +11,7 @@ use std.gc_async_mut.gpu.browser_engine.dom_color.{parse_color_value}
 use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
 use std.gc_async_mut.gpu.browser_engine.style.custom_properties.{has_var_reference, parse_var_function}
 use std.gc_async_mut.gpu.browser_engine.style.animation.{Keyframe, CSSValue, CSSDeclaration}
+use std.common.color.types.{from_rgba}
 use std.gc_async_mut.gpu.browser_engine.style_block.{
     CssRule, CssDecl,
     sb_find, sb_split_char, sb_split_selector_list, sb_split_ws, sb_skip_ws_comments,
@@ -19,6 +20,9 @@ use std.gc_async_mut.gpu.browser_engine.style_block.{
 # =========================================================================
 # @keyframes registry
 # =========================================================================
+
+val MAX_KEYFRAMES_PER_RULE: i32 = 256
+val MAX_KEYFRAME_RULES: i32 = 1024
 
 pub class KeyframeEntry:
     name: text
@@ -38,7 +42,7 @@ pub fn extract_keyframes(css: text) -> KeyframeRegistry:
     val registry = KeyframeRegistry.new()
     val lower = css.lower()
     var pos = 0
-    while pos < css.len():
+    while pos < css.len() and registry.entries.len() < MAX_KEYFRAME_RULES:
         val kf_pos = sb_find(lower, "@keyframes", pos)
         if kf_pos >= 999999999:
             break
@@ -57,10 +61,26 @@ pub fn extract_keyframes(css: text) -> KeyframeRegistry:
         pos = close + 1
     registry
 
+fn _insert_keyframe_by_offset(
+    frames: [Keyframe], frame: Keyframe
+) -> [Keyframe]:
+    # ponytail: bounded insertion sort keeps this parser compiler-safe; replace
+    # only if 256-frame stylesheets show measurable parse cost.
+    var sorted: [Keyframe] = []
+    var inserted = false
+    for existing in frames:
+        if not inserted and frame.offset < existing.offset:
+            sorted.push(frame)
+            inserted = true
+        sorted.push(existing)
+    if not inserted:
+        sorted.push(frame)
+    sorted
+
 fn _parse_keyframe_body(body: text) -> [Keyframe]:
     var frames: [Keyframe] = []
     var pos = 0
-    while pos < body.len():
+    while pos < body.len() and frames.len() < MAX_KEYFRAMES_PER_RULE:
         val open = sb_find(body, "{", pos)
         if open >= 999999999:
             break
@@ -75,17 +95,50 @@ fn _parse_keyframe_body(body: text) -> [Keyframe]:
         while di < raw_decls.len():
             val d = raw_decls[di]
             di = di + 1
-            css_decls.push(CSSDeclaration(property: d.property, value: CSSValue.Keyword(v: d.value), important: false))
+            css_decls.push(CSSDeclaration(
+                property: d.property,
+                value: keyframe_css_value(d.property, d.value),
+                important: false
+            ))
         val offsets = sb_split_selector_list(offset_text)
         var oi = 0
-        while oi < offsets.len():
+        while oi < offsets.len() and frames.len() < MAX_KEYFRAMES_PER_RULE:
             val off_raw = offsets[oi]
             oi = oi + 1
             val off = off_raw.trim()
             val offset_val = _parse_keyframe_offset(off)
-            frames.push(Keyframe.create(offset_val, css_decls))
+            frames = _insert_keyframe_by_offset(
+                frames, Keyframe.create(offset_val, css_decls)
+            )
         pos = close + 1
     frames
+
+fn keyframe_css_value(property: text, raw: text) -> CSSValue:
+    val value = raw.trim()
+    val lower_property = property.trim().lower()
+    if lower_property.contains("color"):
+        val rgba = parse_color_value(value)
+        return CSSValue.Color(color: from_rgba(
+            ((rgba >> 24) & 255u32).to_i64(),
+            ((rgba >> 16) & 255u32).to_i64(),
+            ((rgba >> 8) & 255u32).to_i64(),
+            (rgba & 255u32).to_i64()
+        ))
+    if value.ends_with("%"):
+        return CSSValue.Percentage(
+            v: value.slice(0, value.len() - 1).trim().to_f64()
+        )
+    if value.ends_with("px"):
+        return CSSValue.Length(
+            v: value.slice(0, value.len() - 2).trim().to_f64(),
+            unit: "px"
+        )
+    if (
+        lower_property == "opacity" or lower_property == "z-index" or
+        lower_property == "flex-grow" or lower_property == "flex-shrink"
+    ):
+        return CSSValue.Number(v: value.to_f64())
+    CSSValue.Keyword(v: value)
 
 fn _parse_keyframe_offset(off: text) -> f64:
     if off == "from":

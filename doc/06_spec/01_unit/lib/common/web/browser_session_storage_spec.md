@@ -27,7 +27,7 @@ browser_session_storage_spec -> std
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 5 | 5 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -130,6 +130,20 @@ match remove_result:
 ```
 
 </details>
+
+#### partitions Web Storage by origin
+
+- Values written by `https://bank.example` are unavailable to
+  `https://evil.example`.
+- Returning to the bank origin restores both its `localStorage` and
+  `sessionStorage` values.
+
+#### bounds Web Storage writes
+
+- Each origin/storage area retains at most 1024 entries and 5 MiB of key/value
+  text.
+- `setItem` and direct property assignment share the same quota path;
+  replacement of an existing entry remains allowed at the entry limit.
 
 ## At a Glance
 

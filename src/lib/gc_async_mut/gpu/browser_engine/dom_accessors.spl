@@ -1,4 +1,8 @@
-use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, StyleProps}
+use std.gc_async_mut.gpu.browser_engine.dom.{
+    BeDomNode, BeDomEvent, BeDomEventDispatch, StyleProps,
+    normalize_dom_event_type
+}
+use common.web.html_escape.{html_escape_core}
 
 fn be_dom_add_child(mut parent: BeDomNode, child: BeDomNode):
     """Append a child node to parent.children and set child.parent_id."""
@@ -67,6 +71,43 @@ fn be_dom_set_attr(mut node: BeDomNode, name: text, value: text):
 fn be_dom_get_attr(node: BeDomNode, name: text) -> text:
     """Get an attribute value, returning "" if absent."""
     node.attributes.get(name) ?? ""
+
+fn be_dom_event_identity(node: BeDomNode) -> text:
+    val author_id = be_dom_get_attr(node, "id")
+    if author_id != "":
+        return author_id
+    "node:{node.node_id}"
+
+fn _be_dom_void_tag(tag: text) -> bool:
+    (
+        tag == "area" or tag == "base" or tag == "br" or tag == "col" or
+        tag == "embed" or tag == "hr" or tag == "img" or tag == "input" or
+        tag == "link" or tag == "meta" or tag == "param" or tag == "source" or
+        tag == "track" or tag == "wbr"
+    )
+
+fn be_dom_serialize_html(node: BeDomNode) -> text:
+    if node.tag_name == "#text":
+        return html_escape_core(node.data)
+    var children_html = ""
+    for child in node.children:
+        children_html = children_html + be_dom_serialize_html(child)
+    if node.tag_name == "#document":
+        return children_html
+    var attributes_html = ""
+    for name in node.attributes.keys():
+        attributes_html = attributes_html + " " + name + "=\"" +
+            html_escape_core(be_dom_get_attr(node, name)) + "\""
+    val open = "<" + node.tag_name + attributes_html + ">"
+    if _be_dom_void_tag(node.tag_name):
+        return open
+    open + children_html + "</" + node.tag_name + ">"
+
+fn be_dom_serialize_children(node: BeDomNode) -> text:
+    var out = ""
+    for child in node.children:
+        out = out + be_dom_serialize_html(child)
+    out
 
 fn be_dom_set_style(mut node: BeDomNode, style: StyleProps):
     """Replace the node's inline style."""
@@ -231,14 +272,370 @@ fn be_dom_query_selector(node: BeDomNode, selector: text) -> BeDomNode?:
     nil
 
 fn be_dom_dispatch_event_actions(node: BeDomNode, event_type: text) -> [text]:
-    val normalized = event_type.trim().lower()
+    val normalized = normalize_dom_event_type(event_type)
     var actions: [text] = []
+    val inline_action = be_dom_get_attr(node, "on" + normalized)
+    if inline_action != "":
+        actions.push(inline_action)
     var i = 0
     while i < node.event_listener_types.len():
         if node.event_listener_types[i] == normalized:
             actions.push(node.event_listener_actions[i])
         i = i + 1
     actions
+
+fn be_dom_get_event_listener_count(node: BeDomNode, event_type: text) -> i32:
+    val normalized = normalize_dom_event_type(event_type)
+    var count = 0
+    var i = 0
+    while i < node.event_listener_types.len():
+        if node.event_listener_types[i] == normalized:
+            count = count + 1
+        i = i + 1
+    count
+
+fn be_dom_create_event(node: BeDomNode, event_type: text, bubbles: bool, cancelable: bool) -> BeDomEvent:
+    val target_id = be_dom_event_identity(node)
+    var event = BeDomEvent.create(
+        normalize_dom_event_type(event_type), "", target_id, target_id, "",
+        bubbles, cancelable
+    )
+    event.target_tag = node.tag_name
+    event.current_target_tag = node.tag_name
+    event
+
+fn be_dom_create_pointer_event(node: BeDomNode, event_type: text, bubbles: bool, cancelable: bool, client_x: i32, client_y: i32, button: i32, buttons: i32, pointer_id: i32) -> BeDomEvent:
+    be_dom_create_pointer_event_with_modifiers(
+        node, event_type, bubbles, cancelable, client_x, client_y,
+        button, buttons, pointer_id, false, false, false, false
+    )
+
+fn be_dom_create_pointer_event_with_modifiers(node: BeDomNode, event_type: text, bubbles: bool, cancelable: bool, client_x: i32, client_y: i32, button: i32, buttons: i32, pointer_id: i32, alt_key: bool, ctrl_key: bool, meta_key: bool, shift_key: bool) -> BeDomEvent:
+    var event = be_dom_create_event(node, event_type, bubbles, cancelable)
+    event.client_x = client_x
+    event.client_y = client_y
+    event.screen_x = client_x
+    event.screen_y = client_y
+    event.button = button
+    event.buttons = buttons
+    event.pointer_id = pointer_id
+    event.pointer_type = "mouse"
+    event.is_primary = true
+    event.alt_key = alt_key
+    event.ctrl_key = ctrl_key
+    event.meta_key = meta_key
+    event.shift_key = shift_key
+    event
+
+fn _be_dom_empty_dispatch(event: BeDomEvent) -> BeDomEventDispatch:
+    BeDomEventDispatch(
+        event: event,
+        actions: [],
+        phases: [],
+        current_target_ids: [],
+        default_action: "",
+        default_action_allowed: false
+    )
+
+fn _be_dom_apply_listener_control(event: BeDomEvent, action: text) -> BeDomEvent:
+    var next = event
+    if action == "prevent-default":
+        next.prevent_default()
+    elif action == "stop-propagation":
+        next.stop_propagation()
+    elif action == "stop-immediate-propagation":
+        next.stop_immediate_propagation()
+    next
+
+fn _be_dom_append_action(dispatch: BeDomEventDispatch, node: BeDomNode, action: text, phase: text) -> BeDomEventDispatch:
+    var next = dispatch
+    next.actions.push(action)
+    next.phases.push(phase)
+    next.current_target_ids.push(be_dom_event_identity(node))
+    next.event.current_target_id = be_dom_event_identity(node)
+    next.event.current_target_tag = node.tag_name
+    next.event = _be_dom_apply_listener_control(next.event, action)
+    next
+
+fn _be_dom_dispatch_node(dispatch: BeDomEventDispatch, node: BeDomNode, phase: text, listener_mode: text, include_inline: bool) -> BeDomEventDispatch:
+    var next = dispatch
+    val normalized = next.event.event_type
+    if include_inline:
+        val inline_action = be_dom_get_attr(node, "on" + normalized)
+        if inline_action != "":
+            next = _be_dom_append_action(next, node, inline_action, phase)
+            if next.event.immediate_propagation_stopped:
+                return next
+    var i = 0
+    while i < node.event_listener_types.len():
+        val type_matches = node.event_listener_types[i] == normalized
+        var phase_matches = listener_mode == "all"
+        if listener_mode == "capture":
+            phase_matches = node.event_listener_capture[i]
+        elif listener_mode == "bubble":
+            phase_matches = node.event_listener_capture[i] == false
+        if type_matches and phase_matches:
+            next = _be_dom_append_action(next, node, node.event_listener_actions[i], phase)
+            if next.event.immediate_propagation_stopped:
+                return next
+        i = i + 1
+    next
+
+fn _be_dom_default_action(node: BeDomNode, event_type: text) -> text:
+    if be_dom_has_attr(node, "disabled"):
+        return ""
+    val normalized = normalize_dom_event_type(event_type)
+    if normalized == "submit" and node.tag_name == "form":
+        return "form-submit"
+    if normalized == "focus":
+        return "focus-element"
+    if normalized != "click":
+        return ""
+    if node.tag_name == "a":
+        val href = be_dom_get_attr(node, "href")
+        if href != "":
+            return "navigate:" + href
+    if node.tag_name == "input":
+        val input_type = be_dom_get_attr(node, "type").lower()
+        if input_type == "checkbox":
+            return "input-checkbox-toggle"
+        if input_type == "radio":
+            return "input-radio-select"
+        if input_type == "submit":
+            return "button-activate"
+        return "focus-element"
+    if node.tag_name == "button":
+        return "button-activate"
+    ""
+
+fn _be_dom_finish_default_action(dispatch: BeDomEventDispatch, target: BeDomNode, event_type: text) -> BeDomEventDispatch:
+    var next = dispatch
+    next.default_action = _be_dom_default_action(target, event_type)
+    next.default_action_allowed = next.default_action != "" and next.event.default_prevented == false
+    next
+
+fn be_dom_dispatch_event(node: BeDomNode, event_type: text, bubbles: bool, cancelable: bool) -> BeDomEventDispatch:
+    var dispatch = _be_dom_empty_dispatch(be_dom_create_event(node, event_type, bubbles, cancelable))
+    dispatch = _be_dom_dispatch_node(dispatch, node, "target", "all", true)
+    _be_dom_finish_default_action(dispatch, node, event_type)
+
+fn be_dom_dispatch_event_path(path: [BeDomNode], event_type: text, bubbles: bool, cancelable: bool) -> BeDomEventDispatch:
+    if path.len() == 0:
+        val event = BeDomEvent.create(normalize_dom_event_type(event_type), "", "", "", "", bubbles, cancelable)
+        return _be_dom_empty_dispatch(event)
+    val target = path[path.len() - 1]
+    var dispatch = _be_dom_empty_dispatch(be_dom_create_event(target, event_type, bubbles, cancelable))
+    var i = 0
+    while i + 1 < path.len():
+        dispatch = _be_dom_dispatch_node(dispatch, path[i], "capture", "capture", false)
+        if dispatch.event.propagation_stopped:
+            return _be_dom_finish_default_action(dispatch, target, event_type)
+        i = i + 1
+    dispatch = _be_dom_dispatch_node(dispatch, target, "target", "all", true)
+    if dispatch.event.propagation_stopped:
+        return _be_dom_finish_default_action(dispatch, target, event_type)
+    if bubbles:
+        var ancestor = path.len() - 2
+        while ancestor >= 0:
+            dispatch = _be_dom_dispatch_node(dispatch, path[ancestor], "bubble", "bubble", false)
+            if dispatch.event.propagation_stopped:
+                return _be_dom_finish_default_action(dispatch, target, event_type)
+            ancestor = ancestor - 1
+    _be_dom_finish_default_action(dispatch, target, event_type)
+
+fn be_dom_find_path_to_id(root: BeDomNode, target_id: text) -> [BeDomNode]:
+    if be_dom_event_identity(root) == target_id:
+        return [root]
+    for child in root.children:
+        val child_path = be_dom_find_path_to_id(child, target_id)
+        if child_path.len() > 0:
+            var path: [BeDomNode] = [root]
+            for item in child_path:
+                path.push(item)
+            return path
+    []
+
+fn be_dom_focused_id(root: BeDomNode) -> text:
+    if be_dom_has_attr(root, "data-focused"):
+        return be_dom_event_identity(root)
+    for child in root.children:
+        val focused_id = be_dom_focused_id(child)
+        if focused_id != "":
+            return focused_id
+    ""
+
+fn be_dom_submit_form_owner_id(root: BeDomNode, target_id: text) -> text:
+    val path = be_dom_find_path_to_id(root, target_id)
+    if path.len() == 0:
+        return ""
+    val target = path[path.len() - 1]
+    if target.tag_name == "input":
+        if be_dom_get_attr(target, "type").lower() != "submit":
+            return ""
+    elif target.tag_name == "button":
+        val button_type = be_dom_get_attr(target, "type").lower()
+        if button_type != "" and button_type != "submit":
+            return ""
+    else:
+        return ""
+    val explicit_owner = be_dom_get_attr(target, "form")
+    if explicit_owner != "":
+        val owner_path = be_dom_find_path_to_id(root, explicit_owner)
+        if owner_path.len() > 0 and owner_path[owner_path.len() - 1].tag_name == "form":
+            return explicit_owner
+        return ""
+    var ancestor = path.len() - 2
+    while ancestor >= 0:
+        if path[ancestor].tag_name == "form":
+            return be_dom_event_identity(path[ancestor])
+        ancestor = ancestor - 1
+    ""
+
+fn be_dom_dispatch_event_to_id(root: BeDomNode, target_id: text, event_type: text, bubbles: bool, cancelable: bool) -> BeDomEventDispatch:
+    val path = be_dom_find_path_to_id(root, target_id)
+    if path.len() == 0:
+        val event = BeDomEvent.create(normalize_dom_event_type(event_type), "", "", "", "", bubbles, cancelable)
+        return _be_dom_empty_dispatch(event)
+    be_dom_dispatch_event_path(path, event_type, bubbles, cancelable)
+
+fn be_dom_apply_default_action(node: BeDomNode, action: text) -> BeDomNode:
+    var next = node
+    if action == "input-checkbox-toggle":
+        if be_dom_has_attr(next, "checked"):
+            next.remove_attr("checked")
+        else:
+            next.set_attr("checked", "checked")
+    elif action == "input-radio-select":
+        next.set_attr("checked", "checked")
+    elif action == "focus-element":
+        next.set_attr("data-focused", "true")
+    elif action == "button-activate":
+        next.set_attr("data-activated", "true")
+    elif action == "form-submit":
+        next.set_attr("data-submitted", "true")
+    elif action.starts_with("navigate:"):
+        next.set_attr("data-navigation", action.substring(9, action.len()))
+    next
+
+fn _be_dom_radio_form_id(path: [BeDomNode]) -> i64:
+    var form_id: i64 = -1
+    for node in path:
+        if node.tag_name == "form":
+            form_id = node.node_id
+    form_id
+
+fn be_dom_checked_radio_id_for_target(root: BeDomNode, target_id: text) -> text:
+    val target_path = be_dom_find_path_to_id(root, target_id)
+    if target_path.len() == 0:
+        return ""
+    val target = target_path[target_path.len() - 1]
+    val name = be_dom_get_attr(target, "name")
+    if name == "":
+        return ""
+    val form_id = _be_dom_radio_form_id(target_path)
+    val inputs = be_dom_find_by_tag(root, "input")
+    for input in inputs:
+        if (
+            be_dom_get_attr(input, "type").lower() == "radio" and
+            be_dom_get_attr(input, "name") == name and
+            be_dom_has_attr(input, "checked")
+        ):
+            val candidate_id = be_dom_event_identity(input)
+            val candidate_path = be_dom_find_path_to_id(root, candidate_id)
+            if _be_dom_radio_form_id(candidate_path) == form_id:
+                return candidate_id
+    ""
+
+fn _be_dom_uncheck_radio_group(node: BeDomNode, name: text, form_id: i64, current_form_id: i64, target_id: text) -> BeDomNode:
+    var next = node
+    var owner_id = current_form_id
+    if next.tag_name == "form":
+        owner_id = next.node_id
+    if (
+        next.tag_name == "input" and
+        be_dom_get_attr(next, "type").lower() == "radio" and
+        be_dom_get_attr(next, "name") == name and owner_id == form_id and
+        be_dom_event_identity(next) != target_id
+    ):
+        next.remove_attr("checked")
+    var children: [BeDomNode] = []
+    for child in next.children:
+        children.push(_be_dom_uncheck_radio_group(
+            child, name, form_id, owner_id, target_id
+        ))
+    be_dom_set_children(next, children)
+
+fn _be_dom_apply_default_action_to_id(node: BeDomNode, target_id: text, action: text) -> BeDomNode:
+    if be_dom_event_identity(node) == target_id:
+        return be_dom_apply_default_action(node, action)
+    var children: [BeDomNode] = []
+    for child in node.children:
+        children.push(_be_dom_apply_default_action_to_id(child, target_id, action))
+    be_dom_set_children(node, children)
+
+fn _be_dom_clear_focus(node: BeDomNode) -> BeDomNode:
+    var next = node
+    next.remove_attr("data-focused")
+    var children: [BeDomNode] = []
+    for child in next.children:
+        children.push(_be_dom_clear_focus(child))
+    be_dom_set_children(next, children)
+
+fn be_dom_apply_default_action_to_id(root: BeDomNode, target_id: text, action: text) -> BeDomNode:
+    var next = root
+    if (
+        action == "focus-element" or action == "button-activate" or
+        action == "input-checkbox-toggle" or action == "input-radio-select"
+    ):
+        next = _be_dom_clear_focus(next)
+        if action != "focus-element":
+            next = _be_dom_apply_default_action_to_id(
+                next, target_id, "focus-element"
+            )
+    if action == "input-radio-select":
+        val path = be_dom_find_path_to_id(root, target_id)
+        if path.len() > 0:
+            val name = be_dom_get_attr(path[path.len() - 1], "name")
+            if name != "":
+                next = _be_dom_uncheck_radio_group(
+                    next, name, _be_dom_radio_form_id(path), -1, target_id
+                )
+    _be_dom_apply_default_action_to_id(next, target_id, action)
+
+fn be_dom_dispatch_event_apply_default(node: BeDomNode, event_type: text, bubbles: bool, cancelable: bool) -> BeDomNode:
+    val dispatch = be_dom_dispatch_event(node, event_type, bubbles, cancelable)
+    if dispatch.default_action_allowed:
+        return be_dom_apply_default_action(node, dispatch.default_action)
+    node
+
+fn be_dom_keyboard_activation_event_for_target(node: BeDomNode, key: text) -> text:
+    if be_dom_has_attr(node, "disabled"):
+        return ""
+    val normalized = key.trim().lower()
+    val is_enter = normalized == "enter" or normalized == "return"
+    val is_space = normalized == "space" or normalized == "spacebar" or key == " "
+    if node.tag_name == "a":
+        if is_enter:
+            return "click"
+        return ""
+    if node.tag_name == "button":
+        if is_enter or is_space:
+            return "click"
+        return ""
+    if node.tag_name == "input":
+        val input_type = be_dom_get_attr(node, "type").lower()
+        if input_type == "checkbox" or input_type == "radio":
+            if is_space:
+                return "click"
+        if input_type == "submit" and is_enter:
+            return "click"
+    ""
+
+fn be_dom_dispatch_keyboard_activation_apply_default(node: BeDomNode, key: text) -> BeDomNode:
+    val event_type = be_dom_keyboard_activation_event_for_target(node, key)
+    if event_type == "":
+        return node
+    be_dom_dispatch_event_apply_default(node, event_type, true, true)
 
 fn be_dom_get_is_text(node: BeDomNode) -> bool:
     node.tag_name == "#text"
@@ -261,6 +658,7 @@ fn be_dom_set_children(node: BeDomNode, children: [BeDomNode]) -> BeDomNode:
 
 export be_dom_add_child, be_dom_get_children, be_dom_remove_child, be_dom_insert_before
 export be_dom_set_attr, be_dom_get_attr, be_dom_set_style, be_dom_get_style
+export be_dom_event_identity, be_dom_serialize_html, be_dom_serialize_children
 export be_dom_set_text_content, be_dom_get_text_content
 export be_dom_find_by_id, be_dom_find_by_tag
 export be_dom_get_tag, be_dom_get_is_text, be_dom_get_text, be_dom_set_children
@@ -275,3 +673,12 @@ export be_dom_get_has_gradient, be_dom_get_gradient_c1, be_dom_get_gradient_c2
 export be_dom_get_border_width, be_dom_get_border_color, be_dom_get_border_style
 export be_dom_get_color, be_dom_get_font_size, be_dom_get_text_decoration
 export be_dom_query_selector, be_dom_dispatch_event_actions
+export be_dom_get_event_listener_count
+export be_dom_create_event, be_dom_create_pointer_event, be_dom_create_pointer_event_with_modifiers
+export be_dom_dispatch_event, be_dom_dispatch_event_path, be_dom_dispatch_event_to_id
+export be_dom_find_path_to_id, be_dom_focused_id, be_dom_submit_form_owner_id
+export be_dom_checked_radio_id_for_target
+export be_dom_apply_default_action, be_dom_apply_default_action_to_id
+export be_dom_dispatch_event_apply_default
+export be_dom_keyboard_activation_event_for_target
+export be_dom_dispatch_keyboard_activation_apply_default

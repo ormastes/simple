@@ -17,6 +17,9 @@ use std.gc_async_mut.js.engine.interpreter.{filter_response_headers_for_script, 
 use std.gc_async_mut.js.engine.interpreter_string_methods.{JsInterpreter}
 use std.gc_async_mut.js.engine.interpreter_object.{JsInterpreter}
 
+val MAX_PENDING_BROWSER_FETCHES: i32 = 1024
+val MAX_PENDING_TIMER_TASKS: i32 = 4096
+
 impl JsInterpreter:
     me _dispatch_native_with_receiver(native_id: i64, this_val: JsValue, arg_vals: [JsValue], env: i64) -> JsValue:
         if native_id == NATIVE_SET_TIMEOUT:
@@ -1056,13 +1059,16 @@ impl JsInterpreter:
         -1
 
     me _native_set_timer(arg_vals: [JsValue], is_interval: bool) -> JsValue:
-        val timer_id = self.next_timer_id
-        self.next_timer_id = self.next_timer_id + 1
         var callback_id = -1
         if arg_vals.len() > 0:
             match arg_vals[0]:
                 JsValue.Function(id): callback_id = id
                 _: pass_dn
+        if callback_id < 0 or
+           self.pending_timer_tasks.len() >= MAX_PENDING_TIMER_TASKS:
+            return JsValue.Undefined
+        val timer_id = self.next_timer_id
+        self.next_timer_id = self.next_timer_id + 1
         var delay_ms = 0
         if arg_vals.len() > 1:
             delay_ms = f64_to_i64(to_number(arg_vals[1]))
@@ -1145,6 +1151,13 @@ impl JsInterpreter:
             headers_text = headers_text + "Content-Type: " + content_type
 
         val promise_id = self._create_pending_promise_object()
+        if self.pending_async_request_registry.len() >= MAX_PENDING_BROWSER_FETCHES:
+            self._settle_promise(
+                promise_id,
+                JsValue.String(v: "resource-limit:too-many-pending-fetches"),
+                true
+            )
+            return JsValue.Object(id: promise_id)
         val request_obj_id = self.create_object()
         val request_id = "fetch-{self.next_async_request_seq}"
         self.next_async_request_seq = self.next_async_request_seq + 1
@@ -1178,35 +1191,8 @@ impl JsInterpreter:
         match _simple_fetch_state(promise_id, self.object_store):
             "pending": JsValue.Object(id: next_promise_id)
             _:
-                self._settle_already_settled_promise_then(promise_id, on_fulfilled, on_rejected, next_promise_id)
+                self._run_promise_task(promise_id, handler_id)
                 JsValue.Object(id: next_promise_id)
-
-    me _settle_already_settled_promise_then(promise_id: i64, on_fulfilled: i64, on_rejected: i64, next_promise_id: i64):
-        val state = _simple_fetch_state(promise_id, self.object_store)
-        var settled_value = _simple_fetch_value(promise_id, self.object_store)
-        match settled_value:
-            JsValue.Object(id: settled_obj_id):
-                match self.get_object_property(settled_obj_id, "__simple_promise_host"):
-                    JsValue.Boolean(is_host):
-                        if is_host and _simple_fetch_state(settled_obj_id, self.object_store) == "fulfilled":
-                            settled_value = _simple_fetch_value(settled_obj_id, self.object_store)
-                    _:
-                        pass_dn
-            _:
-                pass_dn
-        var callback_id = if state == "fulfilled": on_fulfilled else: on_rejected
-        var propagate_rejection = state == "rejected"
-        var next_value = settled_value
-        if callback_id >= 0:
-            val result = self._invoke_promise_callback(callback_id, [settled_value])
-            match result:
-                Ok(callback_result):
-                    next_value = callback_result
-                    propagate_rejection = state == "rejected" and on_rejected < 0
-                Err(e):
-                    next_value = JsValue.String(v: e.message)
-                    propagate_rejection = true
-        val _ = self._resolve_promise_from_callback_result(next_promise_id, next_value, propagate_rejection)
 
     me _native_promise_catch(this_val: JsValue, arg_vals: [JsValue]) -> JsValue:
         val promise_id = _get_obj_id(this_val)

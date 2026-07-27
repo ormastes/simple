@@ -59,6 +59,9 @@ pub class TlsManager:
     me handshake(host: text, port: i64) -> Result<TlsConnection, BrowserError>:
         self.logger.info("TLS handshake starting with {host}:{port}")
 
+        if not self.config.verify_peer:
+            return Err(network_error("TLS peer verification cannot be disabled for browser connections"))
+
         if host.len() == 0:
             return Err(network_error("TLS handshake: empty hostname"))
 
@@ -73,9 +76,22 @@ pub class TlsManager:
             return Err(network_error("TLS handshake failed for {host}:{port}: runtime TLS transport unavailable or certificate verification failed"))
 
         val negotiated = rt_tls_get_protocol_version(handle)
-        val actual_version = if negotiated == "TLSv1.2": TlsVersion.Tls12 else: TlsVersion.Tls13
-        self.logger.info("TLS handshake complete for {host}:{port} ({negotiated})")
-        Ok(TlsConnection.create(host, port, actual_version, cipher, handle))
+        match validated_negotiated_tls_version(negotiated, self.config.min_version):
+            Ok(actual_version):
+                self.logger.info("TLS handshake complete for {host}:{port} ({negotiated})")
+                Ok(TlsConnection.create(host, port, actual_version, cipher, handle))
+            Err(error):
+                val _ = rt_tls_client_close(handle)
+                Err(error)
+
+pub fn validated_negotiated_tls_version(protocol: text, min_version: TlsVersion) -> Result<TlsVersion, BrowserError>:
+    if protocol == "TLSv1.3":
+        return Ok(TlsVersion.Tls13)
+    if protocol == "TLSv1.2":
+        match min_version:
+            TlsVersion.Tls12: return Ok(TlsVersion.Tls12)
+            TlsVersion.Tls13: return Err(network_error("TLS 1.2 is below the configured TLS 1.3 minimum"))
+    Err(network_error("Unsupported or missing negotiated TLS protocol: {protocol}"))
 
 pub fn verify_certificate(chain: CertChain, hostname: text) -> Result<(), BrowserError>:
     if chain.certs.len() == 0:

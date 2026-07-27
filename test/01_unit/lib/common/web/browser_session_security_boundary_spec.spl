@@ -1,0 +1,396 @@
+use std.spec.*
+
+use std.gc_async_mut.web.browser_session.{
+    BrowserSession, BrowserRequest, BrowserResponse,
+    BrowserHstsSnapshot, BrowserHstsSnapshotEntry
+}
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.js.types.js_types.{JsValue}
+
+describe "BrowserSession production security boundary":
+    it "rejects direct file navigation before reading the host filesystem":
+        var session = BrowserSession.new()
+        val result = session.begin_network_navigation("file:///etc/passwd", "GET", "", "", "")
+        expect(result.is_err()).to_equal(true)
+        expect(session.current_url).to_equal("about:blank")
+        expect(session.has_pending_requests()).to_equal(false)
+
+    it "rejects request-line injection in the central subresource pump":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://safe.test/app", "<html><body>safe</body></html>"
+        )
+        session.pending_requests.push(BrowserRequest.create(
+            "script-injection", "script",
+            "https://safe.test/app.js\r\nX-Injected: yes",
+            "GET", "", "", ""
+        ))
+
+        expect(session.take_pending_request().is_none()).to_equal(true)
+        expect(session.has_pending_requests()).to_equal(false)
+        expect(session.warnings).to_contain(
+            "blocked invalid browser request"
+        )
+
+    it "rejects direct file open and file home navigation":
+        var session = BrowserSession.new()
+        expect(session.open_url("file:///etc/hosts").is_err()).to_equal(true)
+        expect(session.try_set_home_url("file:///etc/hosts")).to_equal(false)
+        expect(session.home_url).to_equal("about:blank")
+        expect(session.current_url).to_equal("about:blank")
+
+    it "rejects executable and unknown top-level navigation schemes":
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation("javascript:alert(1)", "GET", "", "", "").is_err()).to_equal(true)
+        expect(session.begin_network_navigation("data:text/html,<script>alert(1)</script>", "GET", "", "", "").is_err()).to_equal(true)
+        expect(session.has_pending_requests()).to_equal(false)
+
+    it "blocks mixed-content and unvalidated cross-origin executable resources":
+        var session = BrowserSession.new()
+        val opened = session.open_html(
+            "https://safe.test/app",
+            "<html><head><link rel='stylesheet' href='http://cdn.test/theme.css'></head><body><script src='http://cdn.test/app.js'></script><script type='module' src='https://other.test/module.js'></script></body></html>"
+        )
+        expect(opened.is_ok()).to_equal(true)
+        expect(session.take_pending_request().is_none()).to_equal(true)
+        expect(session.has_pending_requests()).to_equal(false)
+        val warnings = session.warnings.join("|")
+        expect(warnings).to_contain("stylesheet load error: mixed-content:")
+        expect(warnings).to_contain("external script error: mixed-content:")
+        expect(warnings).to_contain("module load error: cross-origin:")
+
+    it "allows registered HTTPS resources without host filesystem access":
+        var session = BrowserSession.new()
+        session.register_resource("https://example.test/page", "<html><body>safe</body></html>")
+        val result = session.begin_network_navigation("https://example.test/page", "GET", "", "", "")
+        expect(result.is_ok()).to_equal(true)
+        expect(session.current_url).to_equal("https://example.test/page")
+
+    it "escapes page-controlled title text before rebuilding render HTML":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://safe.test/app", "<html><head><title>Safe</title></head><body>Body</body></html>"
+        )
+        session.current_title = "</title><style>body{display:none}</style>"
+
+        val rendered = session.render_html_document()
+
+        expect(rendered.contains("</title><style>")).to_equal(false)
+        expect(rendered).to_contain("&lt;/title&gt;&lt;style&gt;body{display:none}&lt;/style&gt;")
+
+    it "rejects a response whose URL differs from its inflight request":
+        var session = BrowserSession.new()
+        val started = session.begin_network_navigation("https://example.test/page", "GET", "", "", "")
+        expect(started.is_ok()).to_equal(true)
+        match session.take_pending_request():
+            Some(request):
+                val committed = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: request.kind,
+                    url: "https://attacker.test/page",
+                    status: 200,
+                    headers: "Set-Cookie: stolen=yes; Secure; HttpOnly",
+                    body: "<html><body>attacker</body></html>",
+                    error: ""
+                ))
+                match committed:
+                    Ok(_): fail("Expected mismatched response URL to be rejected")
+                    Err(e): expect(e).to_contain("response URL mismatch")
+                expect(session.current_url).to_equal("about:blank")
+                expect(session.cookies.len()).to_equal(0)
+            nil:
+                fail("Expected pending HTTPS document request")
+
+    it "blocks cross-origin page fetches before they reach the host network":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://safe.test/app",
+            "<html><body><script>var outcome = 'pending'; fetch('https://evil.test/private').catch(function(e) { outcome = e; })</script></body></html>"
+        )
+
+        expect(session.take_pending_request().is_none()).to_equal(true)
+        expect(session.warnings).to_contain("cross-origin fetch blocked: https://evil.test/private")
+        match session.eval_script("outcome"):
+            Ok(value):
+                match value:
+                    JsValue.String(message):
+                        expect(message).to_contain("cross-origin:https://evil.test/private")
+                    _:
+                        fail("Expected blocked fetch rejection text")
+            Err(e):
+                fail("Expected blocked cross-origin fetch to reject: {e}")
+
+    it "still exports same-origin page fetches":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://safe.test/app",
+            "<html><body><script>fetch('/ok')</script></body></html>"
+        )
+
+        match session.take_pending_request():
+            Some(request):
+                expect(request.kind).to_equal("fetch")
+                expect(request.url).to_equal("https://safe.test/ok")
+            nil:
+                fail("Expected same-origin fetch request")
+
+    it "enforces document CSP before style script and fetch dispatch":
+        var session = BrowserSession.new()
+        val started = session.begin_network_navigation(
+            "https://safe.test/app", "GET", "", "", ""
+        )
+        expect(started.is_ok()).to_equal(true)
+        match session.take_pending_request():
+            Some(request):
+                val committed = session.commit_network_response(
+                    BrowserResponse.create(
+                        request_id: request.id,
+                        kind: request.kind,
+                        url: request.url,
+                        status: 200,
+                        headers: "Content-Security-Policy: style-src 'none'; style-src *; script-src 'unsafe-inline'; connect-src *\nContent-Security-Policy: connect-src 'none'",
+                        body: "<html><head><style>body{background:#f00}</style><link rel='stylesheet' href='/theme.css'></head><body><script>document.title='inline allowed'; fetch('/private')</script><script src='/app.js'></script></body></html>",
+                        error: ""
+                    )
+                )
+                expect(committed.is_ok()).to_equal(true)
+            nil:
+                fail("Expected CSP document request")
+
+        expect(session.take_pending_request().is_none()).to_equal(true)
+        expect(session.current_title).to_equal("inline allowed")
+        expect(session.current_style_html).to_equal("")
+        val warnings = session.warnings.join("|")
+        expect(warnings).to_contain("CSP blocked inline style")
+        expect(warnings).to_contain("CSP blocked style: https://safe.test/theme.css")
+        expect(warnings).to_contain("CSP blocked script: https://safe.test/app.js")
+        expect(warnings).to_contain("CSP blocked fetch: https://safe.test/private")
+
+    it "upgrades HSTS hosts and subdomains until max-age expires":
+        var session = BrowserSession.new()
+        val started = session.begin_network_navigation(
+            "https://secure.test/start", "GET", "", "", ""
+        )
+        expect(started.is_ok()).to_equal(true)
+        match session.take_pending_request():
+            Some(request):
+                val committed = session.commit_network_response(
+                    BrowserResponse.create(
+                        request_id: request.id,
+                        kind: request.kind,
+                        url: request.url,
+                        status: 200,
+                        headers: "Strict-Transport-Security: max-age=1; includeSubDomains",
+                        body: "<html><body>secure</body></html>",
+                        error: ""
+                    )
+                )
+                expect(committed.is_ok()).to_equal(true)
+            nil:
+                fail("Expected HTTPS document request")
+
+        val upgraded = session.begin_network_navigation(
+            "http://sub.secure.test/next", "GET", "", "", ""
+        )
+        expect(upgraded.is_ok()).to_equal(true)
+        match session.take_pending_request():
+            Some(request):
+                expect(request.url).to_equal("https://sub.secure.test/next")
+            nil:
+                fail("Expected HSTS-upgraded request")
+
+        val _ = session.advance_time(1001)
+        val expired = session.begin_network_navigation(
+            "http://secure.test/after-expiry", "GET", "", "", ""
+        )
+        expect(expired.is_ok()).to_equal(true)
+        match session.take_pending_request():
+            Some(request):
+                expect(request.url).to_equal("http://secure.test/after-expiry")
+            nil:
+                fail("Expected request after HSTS expiry")
+
+    it "restores only valid unexpired HSTS state across sessions":
+        var entries: [BrowserHstsSnapshotEntry] = []
+        entries.push(BrowserHstsSnapshotEntry(
+            host: "secure.test",
+            received_at_unix_ms: 99500,
+            expires_at_unix_ms: 101000,
+            include_subdomains: true
+        ))
+        entries.push(BrowserHstsSnapshotEntry(
+            host: "secure.test",
+            received_at_unix_ms: 99500,
+            expires_at_unix_ms: 102000,
+            include_subdomains: false
+        ))
+        entries.push(BrowserHstsSnapshotEntry(
+            host: "com",
+            received_at_unix_ms: 99500,
+            expires_at_unix_ms: 101000,
+            include_subdomains: true
+        ))
+        entries.push(BrowserHstsSnapshotEntry(
+            host: "127.0.0.1",
+            received_at_unix_ms: 99500,
+            expires_at_unix_ms: 101000,
+            include_subdomains: true
+        ))
+        entries.push(BrowserHstsSnapshotEntry(
+            host: "expired.test",
+            received_at_unix_ms: 98000,
+            expires_at_unix_ms: 99000,
+            include_subdomains: true
+        ))
+
+        var session = BrowserSession.new()
+        val accepted = session.load_hsts_snapshot(
+            BrowserHstsSnapshot.create(entries), 100000
+        )
+        expect(accepted).to_equal(1)
+        val saved = session.hsts_snapshot(100000)
+        expect(saved.entries.len()).to_equal(1)
+        expect(saved.entries[0].host).to_equal("secure.test")
+        expect(saved.entries[0].expires_at_unix_ms).to_equal(101000)
+
+        val upgraded = session.begin_network_navigation(
+            "http://sub.secure.test/next", "GET", "", "", ""
+        )
+        expect(upgraded.is_ok()).to_equal(true)
+        match session.take_pending_request():
+            Some(request):
+                expect(request.url).to_equal("https://sub.secure.test/next")
+            nil:
+                fail("Expected restored HSTS-upgraded request")
+
+        val _ = session.advance_time(1001)
+        val expired = session.begin_network_navigation(
+            "http://secure.test/after-expiry", "GET", "", "", ""
+        )
+        expect(expired.is_ok()).to_equal(true)
+        match session.take_pending_request():
+            Some(request):
+                expect(request.url).to_equal("http://secure.test/after-expiry")
+            nil:
+                fail("Expected request after restored HSTS expiry")
+
+    it "rejects JavaScript fetches after the document request budget is spent":
+        var session = BrowserSession.new()
+        session.open_html("https://safe.test/app", "<html><body>safe</body></html>")
+        session.subresource_request_count = 1024
+        val queued = session.eval_script(
+            "var outcome = 'pending'; fetch('/overflow').catch(function(e) { outcome = e; });"
+        )
+        expect(queued.is_ok()).to_equal(true)
+        expect(session.take_pending_request().is_none()).to_equal(true)
+        match session.eval_script("outcome"):
+            Ok(value):
+                match value:
+                    JsValue.String(message):
+                        expect(message).to_contain(
+                            "resource-limit:too-many-subresource-requests"
+                        )
+                    _:
+                        fail("Expected request-budget rejection text")
+            Err(e):
+                fail("Expected request-budget rejection to settle: {e}")
+
+    it "keeps HttpOnly and transport cookie state outside page-visible JS":
+        var session = BrowserSession.new()
+        val started = session.begin_network_navigation(
+            "https://safe.test/app", "GET", "", "", ""
+        )
+        expect(started.is_ok()).to_be(true)
+        match session.take_pending_request():
+            Some(request):
+                val committed = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: request.kind,
+                    url: request.url,
+                    status: 200,
+                    headers: "Set-Cookie: secret=token; Path=/; Secure; HttpOnly\nSet-Cookie: public=yes; Path=/; Secure",
+                    body: "<html><body>safe</body></html>",
+                    error: ""
+                ))
+                expect(committed.is_ok()).to_be(true)
+            nil:
+                fail("Expected document request")
+
+        expect(session.document_cookie()).to_equal("public=yes")
+        match session.eval_script("document.cookie"):
+            Ok(value):
+                match value:
+                    JsValue.String(cookie_text):
+                        expect(cookie_text).to_equal("public=yes")
+                    _:
+                        fail("Expected document.cookie text")
+            Err(e):
+                fail("Expected document.cookie read: {e}")
+        match session.eval_script("typeof __simple_modules"):
+            Ok(value):
+                match value:
+                    JsValue.String(kind):
+                        expect(kind).to_equal("undefined")
+                    _:
+                        fail("Expected typeof result")
+            Err(e):
+                fail("Expected internal-module visibility check: {e}")
+
+        val forged = session.eval_script("window.__simple_cookie_header = 'forged=yes'")
+        expect(forged.is_ok()).to_be(true)
+        val fetched = session.eval_script("fetch('/next')")
+        expect(fetched.is_ok()).to_be(true)
+        match session.take_pending_request():
+            Some(request):
+                expect(request.url).to_equal("https://safe.test/next")
+                expect(request.headers).to_contain("Cookie: secret=token; public=yes")
+                expect(request.headers.contains("forged=yes")).to_be(false)
+            nil:
+                fail("Expected sanitized same-origin fetch")
+
+    it "rejects a fetch redirect that crosses the page origin":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://safe.test/app",
+            "<html><body><script>var outcome = 'pending'; fetch('/start').catch(function(e) { outcome = e; })</script></body></html>"
+        )
+        match session.take_pending_request():
+            Some(request):
+                val redirected = session.commit_network_response(BrowserResponse.create(
+                    request_id: request.id,
+                    kind: "fetch",
+                    url: request.url,
+                    status: 302,
+                    headers: "Location: https://evil.test/private",
+                    body: "",
+                    error: ""
+                ))
+                expect(redirected.is_ok()).to_equal(true)
+            nil:
+                fail("Expected initial same-origin fetch")
+
+        expect(session.take_pending_request().is_none()).to_equal(true)
+        match session.eval_script("outcome"):
+            Ok(value):
+                match value:
+                    JsValue.String(message):
+                        expect(message).to_contain("cross-origin:https://evil.test/private")
+                    _:
+                        fail("Expected redirected fetch rejection text")
+            Err(e):
+                fail("Expected redirected fetch to reject: {e}")
+
+    it "bounds recursive microtask work in one browser flush":
+        var session = BrowserSession.new()
+        session.open_html(
+            "https://safe.test/app",
+            "<html><head><title>Initial</title></head><body>Ready</body></html>"
+        )
+
+        val result = session.eval_script(
+            "var hits = 0; function again() { hits = hits + 1; document.title = '' + hits; Promise.resolve().then(again); } Promise.resolve().then(again);"
+        )
+
+        expect(result.is_ok()).to_equal(true)
+        expect(session.current_title).to_equal("8000")

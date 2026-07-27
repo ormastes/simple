@@ -14,6 +14,20 @@ related: src/compiler_rust/compiler/src/interpreter_extern/network/mod.rs
 
 # Browser net stack: real-site gaps that need Rust-seed changes (not fixed here)
 
+## Current status update (2026-07-26)
+
+The old host-HTTPS fallback described below no longer exists in `H1Client`.
+HTTPS now uses `rt_tls_client_*` exclusively and fails closed when that runtime
+capability is unavailable. The Rust runtime has a rustls-backed implementation
+when runtime TLS is enabled and `net_tls_stub.rs` otherwise; a production claim
+therefore requires a genuine pure-Simple binary linked to the enabled runtime,
+not source inspection or an HTTPS mock.
+
+The pure-Simple fetch layer now also rejects HTTPS-to-plaintext redirects
+before creating or dispatching the redirected request. H1 skips its own DNS
+lookup for TLS because the authenticated TLS runtime owns resolution and socket
+creation; this removes a discarded duplicate lookup.
+
 This session hardened `src/lib/gc_async_mut/gpu/browser_engine/net/**` against
 real sites and fixed several real defects in pure Simple (see the "Fixed this
 session" note at the bottom). The three items below need a Rust seed change
