@@ -23,9 +23,30 @@ SIMPLE_LIB=src bin/simple test \
 
 ## Checks
 
-1. Default execution returns eight exact values with positive native handle and
-   device identity.
+1. Default execution returns 64 exact values with positive native handle and
+   device identity, and the native text hash passes the known `"abc"` vector.
 2. Unavailable, init, submit, readback, and mismatch faults return the exact
    typed reason with empty output and zero provenance.
 3. Every native process is bounded to 30 seconds and clears inherited
    fault-skip state.
+
+## Current Evidence
+
+The Vulkan-enabled runtime archive rebuilds incrementally, and the strict
+current-source probe links with `3 compiled, 24 cached, 0 failed`. The
+six-process wrapper passes one exact 64-value device receipt and all five typed
+fault phases. Success reports `hash_sanity=true`, handle/identity `666008366`,
+and exact values; each fault reports its expected reason, empty output, and
+zero provenance.
+
+The selected identity matches the host's NVIDIA RTX A6000 driver/device
+properties. Runtime-owned UTF-16 hashing avoids converting selected-device
+metadata through tagged native text arrays. The compatibility facade, runtime
+symbol registry, codegen declaration, and interpreter registration compile
+together in the focused Cargo check. Retained logs, explicit source manifests,
+the selected-device property tuple, and artifact hashes are bound by
+`build/simpleos_gpu_host/vulkan_fault_native/evidence-provenance-current-source.env`.
+
+Each fault phase currently runs in a fresh bounded process. A same-process
+fault-then-success recovery receipt remains required before claiming reusable
+cleanup across failed submissions.

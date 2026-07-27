@@ -139,20 +139,50 @@ This width change intentionally changes previously recorded 63-bit identities;
 cross-version receipts and identity-keyed caches must not compare old and new
 values as the same algorithm version.
 
-## Required repair
+## Current-source Vulkan result
 
-1. Repair or bypass the retained generation's HIR crash while lowering current
-   `run_compile_bootstrap`, or regenerate on a prepared host with a current
-   source-matched pure-Simple compiler; do not run a full bootstrap.
-2. Run the focused transport probe once with that compiler and require zero
+The Vulkan-enabled runtime archive and strict 32-module probe were rebuilt from
+the current source tree without bootstrap or generated-stub fallback. The
+first current-source gate passed exact 64-value readback and all five fault
+phases but retained identity `1`. A known `"abc"` hash vector proved the shared
+Simple hash itself after replacing tagged direct indexing with character
+iteration; the remaining sentinel came from hashing runtime-returned device
+text across the native ABI.
+
+Selected-device fingerprinting now stays in the Rust Vulkan runtime that owns
+the physical-device properties and returns one numeric token through SFFI. Its
+focused ASCII/surrogate test passes. The final canonical gate passes:
+
+```text
+phase=none        completed=true  values=64 values_exact=true hash_sanity=true handle=666008366 identity=666008366
+phase=unavailable completed=false reason=vulkan-unavailable      values=0 handle=0 identity=0
+phase=init        completed=false reason=vulkan-init-failed      values=0 handle=0 identity=0
+phase=submit      completed=false reason=vulkan-submit-failed    values=0 handle=0 identity=0
+phase=readback    completed=false reason=vulkan-readback-failed  values=0 handle=0 identity=0
+phase=mismatch    completed=false reason=checksum-mismatch       values=0 handle=0 identity=0
+```
+
+Identity `666008366` matches the enumerated NVIDIA RTX A6000 device/driver
+property tuple retained in `evidence-provenance-current-source.env`. That file
+also names explicit live and integration source manifests and binds their
+SHA-256 digests to the runtime archive, probe, and wrapper log. The runtime
+hash unit and compiler/common Cargo check pass. Supplemental bootstrap-seed
+interpreter runs pass the source contract 3/3, shared hash vectors 4/4, Vulkan
+metadata contract 1/1, and Metal identity contract 2/2; they are not treated
+as canonical self-hosted release evidence.
+
+## Remaining repair
+
+1. Run the focused transport probe with a compiler containing the current
+   direct-index lowering and require zero
    iterator and indexed mismatches for all four recorded cases.
-3. Re-run the direct CUDA 64-element probe and aggregate native parity gate
-   with that compiler. Preserve the passing retained-candidate receipts.
-4. If direct indexing still loads raw storage, trace the lost runtime-array
+2. If direct indexing still loads raw storage, trace the lost runtime-array
    classification and repair the shared Index lowering before backend retries.
-5. Require exact count/value/checksum, zero mismatches, device readback,
-   positive backend provenance, no CPU fallback, and source-matched freshness
-   from both probes before publishing a unified parity receipt.
+3. Add one bounded same-process Vulkan fault-then-success receipt to prove
+   cleanup recovery instead of relying only on process teardown.
+4. Preserve exact count/value/checksum, device readback, positive backend
+   provenance, no CPU fallback, and current-source freshness in future
+   aggregate receipts.
 
 Retained build logs:
 
@@ -180,6 +210,13 @@ Retained build logs:
 - `build/simpleos_gpu_host/vulkan_fault_native/build-fixed-phase-parser-runtime-complete.log`
 - `build/simpleos_gpu_host/vulkan_fault_native/build-iter64.log`
 - `build/simpleos_gpu_host/vulkan_fault_native/wrapper-iter64.log`
+- `build/simpleos_gpu_host/vulkan_fault_native/runtime-build-identity-hash.log`
+- `build/simpleos_gpu_host/vulkan_fault_native/build-current-source-runtime-identity.log`
+- `build/simpleos_gpu_host/vulkan_fault_native/wrapper-current-source-runtime-identity.log`
+- `build/simpleos_gpu_host/vulkan_fault_native/evidence-provenance-current-source.env`
+- `build/simpleos_gpu_host/vulkan_fault_native/evidence-live-source-manifest.sha256`
+- `build/simpleos_gpu_host/vulkan_fault_native/evidence-integration-source-manifest.sha256`
+- `build/simpleos_gpu_host/vulkan_fault_native/compiler-ffi-registration-check.log`
 - `doc/09_report/cuda_generated_2d_readback_2026-07-26.md`
 
 No compiler bootstrap was run.

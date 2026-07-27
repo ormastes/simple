@@ -9,6 +9,18 @@ fn driver_identity(name: &str, vendor_id: u32, device_id: u32, driver_version: u
     format!("{name}|vendor={vendor_id:08x}|device={device_id:08x}|driver={driver_version:08x}|api={api_version:08x}")
 }
 
+fn driver_identity_hash(identity: &str) -> i64 {
+    let hash = identity
+        .encode_utf16()
+        .fold(0i32, |hash, unit| hash.wrapping_mul(31).wrapping_add(i32::from(unit)));
+    let positive = i64::from(hash) & 0x7fff_ffff;
+    if positive == 0 {
+        1
+    } else {
+        positive
+    }
+}
+
 // ============================================================================
 // Device Enumeration & Selection
 // ============================================================================
@@ -191,9 +203,31 @@ pub extern "C" fn rt_vulkan_selected_device_driver_identity() -> *const c_char {
     empty_cstr()
 }
 
+#[no_mangle]
+#[cfg(feature = "vulkan")]
+pub extern "C" fn rt_vulkan_selected_device_driver_identity_hash() -> i64 {
+    let state = STATE.lock();
+    state.device.as_ref().map_or(0, |device| {
+        let pd = device.physical_device();
+        driver_identity_hash(&driver_identity(
+            &pd.name(),
+            pd.properties.vendor_id,
+            pd.properties.device_id,
+            pd.properties.driver_version,
+            pd.properties.api_version,
+        ))
+    })
+}
+
+#[no_mangle]
+#[cfg(not(feature = "vulkan"))]
+pub extern "C" fn rt_vulkan_selected_device_driver_identity_hash() -> i64 {
+    0
+}
+
 #[cfg(test)]
 mod tests {
-    use super::driver_identity;
+    use super::{driver_identity, driver_identity_hash};
 
     #[test]
     fn driver_identity_is_stable_and_unambiguous() {
@@ -201,6 +235,8 @@ mod tests {
             driver_identity("GPU", 0x10de, 0x2684, 0x123, 0x0040_3000),
             "GPU|vendor=000010de|device=00002684|driver=00000123|api=00403000"
         );
+        assert_eq!(driver_identity_hash("abc"), 96_354);
+        assert_eq!(driver_identity_hash("😀"), 1_772_899);
     }
 }
 

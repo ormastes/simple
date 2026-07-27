@@ -3195,6 +3195,35 @@ pub fn rt_vulkan_selected_device_driver_identity_fn(_args: &[Value]) -> Result<V
     ))
 }
 
+pub fn rt_vulkan_selected_device_driver_identity_hash_fn(_args: &[Value]) -> Result<Value, CompileError> {
+    let index = vulkan_dlopen::VK_STATE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|s| s.physical_devices.iter().position(|&pd| pd == s.device_physical_device));
+    let identity = index.and_then(vulkan_device_properties).map(|p| {
+        format!(
+            "{}|vendor={:08x}|device={:08x}|driver={:08x}|api={:08x}",
+            vulkan_properties_name(&p),
+            p.vendor_id,
+            p.device_id,
+            p.driver_version,
+            p.api_version
+        )
+    });
+    Ok(Value::Int(identity.map_or(0, |identity| {
+        let hash = identity
+            .encode_utf16()
+            .fold(0i32, |hash, unit| hash.wrapping_mul(31).wrapping_add(i32::from(unit)));
+        let positive = i64::from(hash) & 0x7fff_ffff;
+        if positive == 0 {
+            1
+        } else {
+            positive
+        }
+    })))
+}
+
 fn vulkan_device_type_name(kind: u32) -> &'static str {
     match kind {
         1 => "integrated",
