@@ -9,6 +9,9 @@ state, closes it, reopens the same profile, rejects corrupt file-scheme,
 public-suffix, userinfo, port-bearing, and malformed DNS-host records, and
 case-folded duplicate HSTS records, and proves removal remains durable after
 another reopen. Restored state is revalidated by BrowserSession before use.
+Favorite writes use one transactional URL-key mutation: two concurrent profile
+handles preserve unrelated bookmarks, and a failed write restores the prior
+in-memory favorite state and callback revision.
 
 Requirement trace: REQ-WEB-BROWSER-009, REQ-WEB-BROWSER-011.
 

@@ -154,8 +154,8 @@ fn _drop_last_utf8_scalar(value: text) -> text:
         index = index + 1
     rt_bytes_to_text(shortened)
 
-fn _toggle_browser_bookmark(
-    snapshot: BrowserBookmarkSnapshot, url: text, title: text
+fn _browser_bookmark_snapshot_set(
+    snapshot: BrowserBookmarkSnapshot, url: text, title: text, enabled: bool
 ) -> BrowserBookmarkSnapshot:
     val normalized = match normalize_network_navigation_url(url):
         Err(_):
@@ -165,13 +165,10 @@ fn _toggle_browser_bookmark(
     if normalized.len() > 2048 or title.len() > 512:
         return snapshot
     var entries: [Pair<text, text>] = []
-    var found = false
     for entry in snapshot.entries:
-        if entry.first == normalized:
-            found = true
-        else:
+        if entry.first != normalized:
             entries.push(Pair(first: entry.first, second: entry.second))
-    if not found and entries.len() < 256:
+    if enabled and entries.len() < 256:
         entries.push(Pair(first: normalized, second: title))
     BrowserBookmarkSnapshot.create(entries)
 
@@ -834,7 +831,7 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         val dispatch = (
                             web_sessions.dispatch_chrome_pointer(
                                 semantic_event_id, target.window_id,
-                                target.control, pressed, wall_clock_ms
+                                target.control, pressed
                             )
                         )
                         action_reason = dispatch.reason
@@ -871,27 +868,35 @@ fn _run_hosted_wm(comp_in: HostCompositor, raster_in: Engine2dCompositorBackend,
                         elif target.control == "favorite":
                             if browser_renderer.document_url == "":
                                 action_reason = "no-network-document"
+                            elif browser_profile == nil:
+                                action_reason = "profile-unavailable"
                             else:
-                                val updated_bookmarks = _toggle_browser_bookmark(
-                                    browser_bookmarks,
-                                    browser_renderer.document_url,
-                                    browser_renderer.document_url
-                                )
-                                if browser_profile == nil:
-                                    action_reason = "profile-unavailable"
-                                else:
-                                    var profile = browser_profile.unwrap()
-                                    match profile.save_bookmarks(
-                                        updated_bookmarks
-                                    ):
-                                        Ok(_):
-                                            browser_bookmarks = (
-                                                updated_bookmarks
-                                            )
-                                            callback_count = 1
-                                        Err(error):
-                                            action_reason = error.message()
-                                    browser_profile = Some(profile)
+                                var profile = browser_profile.unwrap()
+                                match profile.load_bookmarks():
+                                    Err(error):
+                                        action_reason = error.message()
+                                    Ok(latest):
+                                        browser_bookmarks = latest
+                                        match profile.toggle_bookmark(
+                                            browser_renderer.document_url,
+                                            browser_renderer.document_url
+                                        ):
+                                            Ok(enabled):
+                                                val updated = (
+                                                    _browser_bookmark_snapshot_set(
+                                                        latest,
+                                                        browser_renderer.document_url,
+                                                        browser_renderer.document_url,
+                                                        enabled
+                                                    )
+                                                )
+                                                browser_bookmarks = updated
+                                                callback_count = 1
+                                            Err(error):
+                                                action_reason = (
+                                                    error.message()
+                                                )
+                                browser_profile = Some(profile)
                         else:
                             browser_address_editing = false
                             browser_address_replace_on_text = false

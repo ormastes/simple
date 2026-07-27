@@ -31,8 +31,23 @@ describe "hosted browser profile store":
         registry.profile = Some(closed_profile)
 
         var session = registry.sessions[0]
+        expect(session.browser.open_html(
+            "https://rollback.test/",
+            "<html><body>rollback</body></html>"
+        ).is_ok()).to_equal(true)
         session.network_job_handle = 424242
         registry.sessions[0] = session
+        val favorite_down = registry.dispatch_chrome_pointer(
+            1, 45, "favorite", true
+        )
+        val favorite_up = registry.dispatch_chrome_pointer(
+            2, 45, "favorite", false
+        )
+        expect(favorite_down.reason).to_equal("chrome-pressed")
+        expect(favorite_up.callback_count).to_equal(0)
+        expect(registry.sessions[0].browser.is_favorite(
+            "https://rollback.test/"
+        )).to_equal(false)
         expect(registry.close(100001)).to_equal(false)
         expect(registry.sessions[0].network_job_handle).to_equal(0)
 
@@ -162,10 +177,14 @@ describe "hosted browser profile store":
             nil:
                 fail("Expected restored HSTS-upgraded request")
 
-        session.remove_favorite("https://simple.test/docs")
         var hosted_session = registry.sessions[0]
         hosted_session.browser = session
         registry.sessions[0] = hosted_session
+        var profile_owner = registry.profile.unwrap()
+        profile_owner.set_bookmark(
+            "https://simple.test/docs", "Simple docs", false
+        )?
+        registry.profile = Some(profile_owner)
         val _ = registry.advance_window(
             44, registry.sessions[0].current_body_html(),
             64, 48, 101001, true
@@ -177,4 +196,28 @@ describe "hosted browser profile store":
         expect(after_removal.load_bookmarks()?.entries.len()).to_equal(0)
         expect(after_removal.load_hsts(101001)?.entries.len()).to_equal(0)
         after_removal.close()?
+        remove_profile_files()
+
+        var writer_one = BrowserProfileStore.open(PROFILE_PATH)?
+        var writer_two = BrowserProfileStore.open(PROFILE_PATH)?
+        writer_one.set_bookmark(
+            "https://one.test/", "One", true
+        )?
+        writer_two.set_bookmark(
+            "https://two.test/", "Two", true
+        )?
+        writer_one.set_bookmark(
+            "https://one.test/", "One", false
+        )?
+        expect(writer_one.toggle_bookmark(
+            "https://shared.test/", "Shared"
+        )?).to_equal(true)
+        expect(writer_two.toggle_bookmark(
+            "https://shared.test/", "Shared"
+        )?).to_equal(false)
+        val merged = writer_two.load_bookmarks()?
+        expect(merged.entries.len()).to_equal(1)
+        expect(merged.entries[0].first).to_equal("https://two.test/")
+        writer_one.close()?
+        writer_two.close()?
         remove_profile_files()

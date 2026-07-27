@@ -827,8 +827,7 @@ class HostedWebContentRegistry:
         ""
 
     me dispatch_chrome_pointer(
-        event_id: i64, window_id: i64, control: text, down: bool,
-        wall_clock_ms: i64
+        event_id: i64, window_id: i64, control: text, down: bool
     ) -> HostedWebContentDispatch:
         val index = self._session_index(window_id)
         if index < 0:
@@ -842,20 +841,78 @@ class HostedWebContentRegistry:
             )
         self._clear_pointer_state_except(index)
         var session = self.sessions[index]
+        var bookmarks_before = session.browser.bookmark_snapshot()
+        val revision_before = session.mutation_revision
+        if (not down and control == "favorite" and
+            session.profile_enabled):
+            if self.profile == nil:
+                session.pressed_chrome_control = ""
+                self.sessions[index] = session
+                return HostedWebContentDispatch(
+                    event_id: event_id,
+                    wm_target_id: window_id,
+                    semantic_target_id: "browser:session#favorite",
+                    callback_count: 0,
+                    mutation_revision: revision_before,
+                    reason: "profile-unavailable"
+                )
+            var profile = self.profile.unwrap()
+            match profile.load_bookmarks():
+                Err(e):
+                    session.pressed_chrome_control = ""
+                    self.sessions[index] = session
+                    self.profile = Some(profile)
+                    self.profile_failure_reason = e.message()
+                    return HostedWebContentDispatch(
+                        event_id: event_id,
+                        wm_target_id: window_id,
+                        semantic_target_id: "browser:session#favorite",
+                        callback_count: 0,
+                        mutation_revision: revision_before,
+                        reason: self.profile_failure_reason
+                    )
+                Ok(latest):
+                    bookmarks_before = latest
+                    val _ = session.browser.load_bookmark_snapshot(latest)
+                    self.profile = Some(profile)
         val receipt = session.dispatch_chrome_pointer(
             event_id, control, down
         )
         self.sessions[index] = session
         if not down and control == "favorite" and receipt.callback_count > 0:
-            if not self._persist_session(index, wall_clock_ms):
-                return HostedWebContentDispatch(
-                    event_id: receipt.event_id,
-                    wm_target_id: receipt.wm_target_id,
-                    semantic_target_id: receipt.semantic_target_id,
-                    callback_count: 0,
-                    mutation_revision: receipt.mutation_revision,
-                    reason: self.profile_failure_reason
-                )
+            var profile = self.profile.unwrap()
+            val url = session.browser.document_url
+            match profile.toggle_bookmark(url, url):
+                Err(e):
+                    val _ = session.browser.load_bookmark_snapshot(
+                        bookmarks_before
+                    )
+                    session.mutation_revision = revision_before
+                    self.sessions[index] = session
+                    self.profile = Some(profile)
+                    self.profile_failure_reason = e.message()
+                    return HostedWebContentDispatch(
+                        event_id: receipt.event_id,
+                        wm_target_id: receipt.wm_target_id,
+                        semantic_target_id: receipt.semantic_target_id,
+                        callback_count: 0,
+                        mutation_revision: revision_before,
+                        reason: self.profile_failure_reason
+                    )
+                Ok(enabled):
+                    val _ = session.browser.load_bookmark_snapshot(
+                        bookmarks_before
+                    )
+                    if enabled:
+                        session.browser.add_favorite(url, url)
+                    else:
+                        session.browser.remove_favorite(url)
+                    self.sessions[index] = session
+                    self.profile_bookmarks = (
+                        session.browser.bookmark_snapshot()
+                    )
+                    self.profile_failure_reason = ""
+                    self.profile = Some(profile)
         receipt
 
     me _persist_session(index: i32, wall_clock_ms: i64) -> bool:
@@ -865,27 +922,20 @@ class HostedWebContentRegistry:
         if not session.profile_enabled or self.profile == nil:
             return true
         var profile = self.profile.unwrap()
-        match profile.save_bookmarks(session.browser.bookmark_snapshot()):
+        match profile.save_hsts(
+            session.browser.hsts_snapshot(wall_clock_ms), wall_clock_ms
+        ):
             Err(e):
                 self.profile = Some(profile)
                 self.profile_failure_reason = e.message()
                 return false
             Ok(_):
-                match profile.save_hsts(
-                    session.browser.hsts_snapshot(wall_clock_ms), wall_clock_ms
-                ):
-                    Err(e):
-                        self.profile = Some(profile)
-                        self.profile_failure_reason = e.message()
-                        return false
-                    Ok(_):
-                        self.profile = Some(profile)
-                        self.profile_bookmarks = session.browser.bookmark_snapshot()
-                        self.profile_hsts = session.browser.hsts_snapshot(
-                            wall_clock_ms
-                        )
-                        self.profile_failure_reason = ""
-                        true
+                self.profile = Some(profile)
+                self.profile_hsts = session.browser.hsts_snapshot(
+                    wall_clock_ms
+                )
+                self.profile_failure_reason = ""
+                true
 
     me close_window(window_id: i64, wall_clock_ms: i64) -> bool:
         val index = self._session_index(window_id)

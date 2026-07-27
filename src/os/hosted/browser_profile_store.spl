@@ -129,6 +129,139 @@ impl BrowserProfileStore:
         tx.commit()?
         Ok(())
 
+    me _change_bookmark(
+        raw_url: text, title: text, toggle: bool, requested_enabled: bool
+    ) -> Result<bool, DbError>:
+        if raw_url.len() > 2048 or title.len() > 512:
+            return Err(DbError.ConstraintViolation(
+                "oversized browser bookmark"
+            ))
+        val url = match normalize_network_navigation_url(raw_url):
+            Err(_):
+                return Err(DbError.ConstraintViolation(
+                    "invalid browser bookmark URL"
+                ))
+            Ok(value):
+                value
+        var tx = self.db.begin()?
+        if val Err(e) = self.db.exec(
+            "UPDATE browser_profile_meta SET schema_version = " +
+            "schema_version WHERE id = 1",
+            []
+        ):
+            tx.rollback()?
+            return Err(e)
+        val existing = match self.db.query_one(
+            "SELECT position FROM browser_bookmarks WHERE url = ?",
+            [DbValue.Text(value: url)]
+        ):
+            Err(e):
+                tx.rollback()?
+                return Err(e)
+            Ok(value):
+                value
+        val enabled = if toggle:
+            existing == nil
+        else:
+            requested_enabled
+        if not enabled:
+            if val Err(e) = self.db.exec(
+                "DELETE FROM browser_bookmarks WHERE url = ?",
+                [DbValue.Text(value: url)]
+            ):
+                tx.rollback()?
+                return Err(e)
+        elif existing != nil:
+            if val Err(e) = self.db.exec(
+                "INSERT INTO browser_bookmarks (position, url, title) " +
+                "VALUES (?, ?, ?) ON CONFLICT(url) DO UPDATE SET " +
+                "title = excluded.title",
+                [
+                    DbValue.Integer(
+                        value: existing.unwrap().get_int(
+                            "position"
+                        ).unwrap()
+                    ),
+                    DbValue.Text(value: url),
+                    DbValue.Text(value: title),
+                ]
+            ):
+                tx.rollback()?
+                return Err(e)
+        else:
+            val count = match self.db.query_one(
+                "SELECT COUNT(*) AS bookmark_count " +
+                "FROM browser_bookmarks",
+                []
+            ):
+                Err(e):
+                    tx.rollback()?
+                    return Err(e)
+                Ok(value):
+                    value
+            if (count == nil or
+                count.unwrap().get_int("bookmark_count") == nil):
+                tx.rollback()?
+                return Err(DbError.ConstraintViolation(
+                    "browser bookmark count unavailable"
+                ))
+            if count.unwrap().get_int("bookmark_count").unwrap() >= (
+                BROWSER_PROFILE_MAX_BOOKMARKS
+            ):
+                tx.rollback()?
+                return Err(DbError.ConstraintViolation(
+                    "too many browser bookmarks"
+                ))
+            val last = match self.db.query_one(
+                "SELECT COALESCE(MAX(position), -1) AS max_position " +
+                "FROM browser_bookmarks",
+                []
+            ):
+                Err(e):
+                    tx.rollback()?
+                    return Err(e)
+                Ok(value):
+                    value
+            if last == nil or last.unwrap().get_int("max_position") == nil:
+                tx.rollback()?
+                return Err(DbError.ConstraintViolation(
+                    "browser bookmark position unavailable"
+                ))
+            if val Err(e) = self.db.exec(
+                "INSERT INTO browser_bookmarks (position, url, title) " +
+                "VALUES (?, ?, ?)",
+                [
+                    DbValue.Integer(
+                        value: last.unwrap().get_int(
+                            "max_position"
+                        ).unwrap() + 1
+                    ),
+                    DbValue.Text(value: url),
+                    DbValue.Text(value: title)
+                ]
+            ):
+                tx.rollback()?
+                return Err(e)
+        match tx.commit():
+            Err(e):
+                val _ = tx.rollback()
+                Err(e)
+            Ok(_):
+                Ok(enabled)
+
+    me set_bookmark(
+        raw_url: text, title: text, enabled: bool
+    ) -> Result<(), DbError>:
+        val _ = self._change_bookmark(
+            raw_url, title, false, enabled
+        )?
+        Ok(())
+
+    me toggle_bookmark(
+        raw_url: text, title: text
+    ) -> Result<bool, DbError>:
+        self._change_bookmark(raw_url, title, true, false)
+
     fn load_bookmarks() -> Result<BrowserBookmarkSnapshot, DbError>:
         val rows = self.db.query(
             "SELECT position, url, title FROM browser_bookmarks " +

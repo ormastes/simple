@@ -933,9 +933,21 @@ implementation in progress / target evidence blocked
   evidence preserves the first window while address navigation and Back mutate
   the second; executable Simple evidence remains compiler-blocked and was not
   rerun.
-- Remaining multi-window bookmark blocker: Giving the secondary registry a
-  second long-lived default-profile handle would permit stale whole-snapshot
-  saves to overwrite primary bookmark/HSTS changes. Secondary Favorite remains
-  fail-closed with `profile-unavailable` and no in-memory mutation until
-  profile persistence has one shared broker or transactional per-key merge
-  semantics; no false persistence claim is made.
+- Remaining secondary profile blocker: Bookmark toggles now have safe per-key
+  transactions, but the registry's full profile mode also owns whole-snapshot
+  HSTS persistence. Secondary Favorite remains fail-closed with
+  `profile-unavailable` and no in-memory mutation until the entry uses a
+  bookmark-only handle or HSTS gains shared per-host/tombstone coordination;
+  no false persistence claim is made.
+- Atomic Favorite persistence: BrowserProfileStore now applies one validated
+  URL-key toggle transaction instead of replacing the bookmark table. The
+  transaction acquires the SQLite write lock before reading current state and
+  returns the committed enabled value, so separate handles cannot decide from
+  stale snapshots. Primary and hosted-session owners render that returned
+  state; the hosted owner restores its prior snapshot and mutation revision
+  when persistence fails. Favorite no longer couples a bookmark commit to an
+  unrelated HSTS snapshot write. File-backed evidence uses two handles to add
+  distinct URLs, remove one, and alternately toggle one shared URL without
+  losing the unrelated row; a closed-profile failure retains no in-memory
+  favorite. Executable Simple evidence remains compiler-blocked and was not
+  rerun.
