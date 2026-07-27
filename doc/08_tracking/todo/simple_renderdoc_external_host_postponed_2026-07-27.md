@@ -2,6 +2,9 @@
 
 Status: postponed until local implementation and aggregate checks are green.
 
+Historical 4K/8K performance-regression baseline policy is tracked separately
+in `doc/08_tracking/todo/rendering_performance_historical_regression_baseline_2026-07-27.md`.
+
 | Environment | Required evidence | Resume entrypoint |
 |---|---|---|
 | Fresh pure-Simple Stage-4 toolchain | Essential-tools admission, native SSpec compile, coverage/docgen identity | Rebuild Stage 4, then `scripts/check/check-bootstrap-essential-tools-smoke.shs` with that exact binary |
