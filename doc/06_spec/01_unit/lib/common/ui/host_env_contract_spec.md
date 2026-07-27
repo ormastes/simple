@@ -394,7 +394,7 @@ expect(host_vulkan_evidence_passes(complete + "\nvulkan_engine2d_readback_status
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 44 lines folded for reproduction.
+Runnable source: 46 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -421,6 +421,8 @@ expect(host_renderdoc_evidence_passes(complete)).to_be(true)
 expect(host_renderdoc_evidence_passes(complete.replace("\n", "\r\n"))).to_be(true)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_status=pass", "rdoc_simple_gate_status=fail"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_file_magic=RDOC", "rdoc_simple_gate_capture_file_magic=bad"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_sha256=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "rdoc_simple_gate_capture_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"))).to_be(false)
+expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_capture_hash_status=pass", "rdoc_simple_gate_capture_hash_status=fail"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_renderdoc_capturing_before_end=1", "rdoc_simple_gate_renderdoc_capturing_before_end=0"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_renderdoc_device=41", "rdoc_simple_gate_renderdoc_device=0"))).to_be(false)
 expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_record_valid=1", "rdoc_simple_gate_record_valid=0"))).to_be(false)
@@ -449,7 +451,8 @@ expect(host_renderdoc_evidence_passes(complete.replace("rdoc_simple_gate_owner_a
 #### accepts only a complete screen-to-WM semantic frame receipt
 
 A screen event is evidence only when its WM target names the retained
-compositor window and all later receipts agree.
+compositor window and all later receipts agree. Focus, pointer, keyboard,
+move, maximize, and restore status must each be exactly `pass`.
 
 - Classify one complete screen-to-WM semantic frame receipt
 - Reject receipts with any missing or inconsistent hop
@@ -458,7 +461,7 @@ compositor window and all later receipts agree.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 24 lines folded for reproduction.
+Runnable source: 30 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -473,6 +476,12 @@ expect(host_display_input_evidence_passes(complete.replace("linux_hosted_wm_live
 expect(host_display_input_evidence_passes(complete.replace("input_receipt_status=pass", "input_receipt_status=fail"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("semantic_status=pass", "semantic_status=fail"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("text_status=pass", "text_status=fail"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("focus_status=pass", "focus_status=fail"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("pointer_status=pass", "pointer_status=fail"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("keyboard_status=pass", "keyboard_status=fail"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("move_status=pass", "move_status=fail"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("maximize_status=pass", "maximize_status=fail"))).to_be(false)
+expect(host_display_input_evidence_passes(complete.replace("restore_status=pass", "restore_status=fail"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("origin=screen", "origin=synthetic"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("event_id=7", "event_id=0"))).to_be(false)
 expect(host_display_input_evidence_passes(complete.replace("wm_target_id=41", "wm_target_id=-1"))).to_be(false)
