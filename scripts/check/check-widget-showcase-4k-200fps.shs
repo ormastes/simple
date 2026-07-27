@@ -58,7 +58,20 @@ if [ "${SIMPLE_BIN_STATUS:-}" = "" ]; then
 fi
 APP="examples/06_io/ui/widget_showcase_gui.spl"
 BENCHMARK_BACKEND="${BENCHMARK_BACKEND:-simple-retained-widget-showcase}"
-SOURCE_REVISION_FILES="${SOURCE_REVISION_FILES:-scripts/check/check-widget-showcase-4k-200fps.shs $APP examples/06_io/ui/showcase_8k_scroll_gui.spl src/lib/common/ui/scroll_surface.spl src/lib/common/ui/dirty_region.spl src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl src/lib/gc_async_mut/gpu/engine2d/engine.spl src/lib/gc_async_mut/gpu/engine2d/backend_software.spl}"
+PERF_BASELINE_VALIDATE_ONLY="${PERF_BASELINE_VALIDATE_ONLY:-0}"
+CANONICAL_SOURCE_REVISION_FILES="scripts/check/check-widget-showcase-4k-200fps.shs $APP examples/06_io/ui/showcase_8k_scroll_gui.spl src/lib/common/ui/scroll_surface.spl src/lib/common/ui/dirty_region.spl src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl src/lib/gc_async_mut/gpu/engine2d/engine.spl src/lib/gc_async_mut/gpu/engine2d/backend_software.spl"
+SOURCE_REVISION_OVERRIDE_STATUS=none
+if [ "$PERF_BASELINE_VALIDATE_ONLY" = "1" ]; then
+    if [ -n "${SOURCE_REVISION_FILES:-}" ] || [ -n "${SOURCE_REVISION:-}" ]; then
+        SOURCE_REVISION_OVERRIDE_STATUS=fixture
+    fi
+    SOURCE_REVISION_FILES="${SOURCE_REVISION_FILES:-$CANONICAL_SOURCE_REVISION_FILES}"
+else
+    if [ -n "${SOURCE_REVISION_FILES:-}" ] || [ -n "${SOURCE_REVISION:-}" ]; then
+        SOURCE_REVISION_OVERRIDE_STATUS=forbidden
+    fi
+    SOURCE_REVISION_FILES="$CANONICAL_SOURCE_REVISION_FILES"
+fi
 compute_source_revision() {
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum $SOURCE_REVISION_FILES 2>/dev/null | sha256sum | awk '{ print substr($1, 1, 12) }'
@@ -66,7 +79,11 @@ compute_source_revision() {
         git rev-parse --short=12 HEAD 2>/dev/null || echo unknown
     fi
 }
-SOURCE_REVISION="${SOURCE_REVISION:-$(compute_source_revision)}"
+if [ "$PERF_BASELINE_VALIDATE_ONLY" = "1" ]; then
+    SOURCE_REVISION="${SOURCE_REVISION:-$(compute_source_revision)}"
+else
+    SOURCE_REVISION="$(compute_source_revision)"
+fi
 RESOLUTION="${RESOLUTION:-4k}"
 case "$RESOLUTION" in
     4k)
@@ -114,7 +131,6 @@ TIMEOUT_SECS="${TIMEOUT_SECS:-20}"
 USE_NATIVE="${USE_NATIVE:-1}"
 MAX_RSS_KB="${MAX_RSS_KB:-0}"
 PLAN_ONLY="${PLAN_ONLY:-0}"
-PERF_BASELINE_VALIDATE_ONLY="${PERF_BASELINE_VALIDATE_ONLY:-0}"
 GUI_SHOWCASE_PERF_BASELINE_ENV="${GUI_SHOWCASE_PERF_BASELINE_ENV:-}"
 GUI_SHOWCASE_PERF_BASELINE_SHA256="${GUI_SHOWCASE_PERF_BASELINE_SHA256:-}"
 GUI_SHOWCASE_PERF_OS="${GUI_SHOWCASE_PERF_OS:-}"
@@ -367,6 +383,7 @@ load_perf_baseline() {
     if [ "$baseline_schema" != "widget-showcase-perf-v2" ]; then baseline_reason=invalid-baseline-schema; return 1; fi
     if [ "$baseline_resolution" != "$RESOLUTION" ]; then baseline_reason=baseline-resolution-mismatch; return 1; fi
     if [ -z "$baseline_source_revision" ]; then baseline_reason=missing-baseline-source-revision; return 1; fi
+    if [ -z "$SOURCE_REVISION" ] || [ "$SOURCE_REVISION" = unknown ] || [ "$baseline_source_revision" != "$SOURCE_REVISION" ]; then baseline_reason=baseline-source-revision-mismatch; return 1; fi
     if [ "$(timestamp_status "$baseline_capture_timestamp")" != pass ]; then baseline_reason=malformed-baseline-capture-timestamp; return 1; fi
     case "$baseline_artifact_sha256" in ""|*[!0-9a-f]*) baseline_reason=malformed-baseline-artifact-sha256; return 1 ;; esac
     if [ "${#baseline_artifact_sha256}" -ne 64 ] || [ "$(file_status "$baseline_artifact_path")" != pass ]; then baseline_reason=invalid-baseline-artifact; return 1; fi
@@ -469,6 +486,7 @@ emit_common_fields() {
     echo "${STATUS_PREFIX}_source_revision=$SOURCE_REVISION"
     echo "${STATUS_PREFIX}_source_revision_kind=content-sha256"
     echo "${STATUS_PREFIX}_source_revision_files=$SOURCE_REVISION_FILES"
+    echo "${STATUS_PREFIX}_source_revision_override_status=$SOURCE_REVISION_OVERRIDE_STATUS"
     echo "${STATUS_PREFIX}_simple_bin=$SIMPLE_BIN"
     echo "${STATUS_PREFIX}_simple_bin_source=$SIMPLE_BIN_SOURCE"
     echo "${STATUS_PREFIX}_simple_bin_status=$SIMPLE_BIN_STATUS"
@@ -660,6 +678,19 @@ validate_native_binary() {
     fi
     return 0
 }
+
+if [ "$SOURCE_REVISION_OVERRIDE_STATUS" = forbidden ]; then
+    {
+        echo "${STATUS_PREFIX}_status=fail"
+        echo "${STATUS_PREFIX}_reason=source-revision-override-forbidden"
+        emit_common_fields
+        emit_unmeasured_perf_fields
+        echo "${STATUS_PREFIX}_max_rss_budget_kb=$MAX_RSS_KB"
+        emit_log_fields
+    } >"$STATUS_ENV"
+    cat "$STATUS_ENV"
+    exit 1
+fi
 
 case "$SIMPLE_BIN" in
     src/compiler_rust/*|*/src/compiler_rust/*)

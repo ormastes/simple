@@ -73,6 +73,8 @@ policy without an automatic baseline-create or update path.
 
 - Absolute 200 FPS, 5 ms p95, RSS, output, and provenance gates remain active.
 - Every 4K/8K PASS is bound to an immutable, matching environment baseline.
+- Baseline source revision equals the producer's measured-source revision, and
+  aggregate recomputation enforces the same equality.
 - Relative regression status is independently reproducible from retained data.
 - Baseline updates are explicit/manual and visible in review.
 - The false-green example above is a failing fixture.

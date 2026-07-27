@@ -310,6 +310,8 @@ def showcase_baseline_comparison(prefix: str, evidence: str, resolution: str,
     if schema != "widget-showcase-perf-v2": result["reason"] = "invalid-baseline-schema"; return result
     if baseline_resolution != resolution: result["reason"] = "baseline-resolution-mismatch"; return result
     if not revision: result["reason"] = "missing-baseline-source-revision"; return result
+    if revision != value_of(prefix + "_source_revision", evidence):
+        result["reason"] = "baseline-source-revision-mismatch"; return result
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", capture_timestamp or ""):
         result["reason"] = "malformed-baseline-capture-timestamp"; return result
     if regular_file_status(artifact_path_text) != "pass" or not re.fullmatch(r"[0-9a-f]{64}", artifact_sha or ""):
@@ -367,6 +369,8 @@ SHOWCASE_SOURCE_REVISION_FILES = [
     "src/lib/common/ui/scroll_surface.spl",
     "src/lib/common/ui/dirty_region.spl",
     "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl",
+    "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl",
+    "src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl",
     "src/lib/gc_async_mut/gpu/engine2d/engine.spl",
     "src/lib/gc_async_mut/gpu/engine2d/backend_software.spl",
 ]
@@ -383,7 +387,8 @@ def source_revision_files_status(missing_files) -> str:
 
 def current_source_revision() -> str:
     override = os.environ.get("GUI_SHOWCASE_CURRENT_SOURCE_REVISION")
-    if override:
+    fixture_mode = os.environ.get("GUI_RENDERDOC_AGGREGATE_FIXTURE_MODE", "0") == "1"
+    if override and fixture_mode:
         return override
     files_text = os.environ.get(
         "GUI_SHOWCASE_SOURCE_REVISION_FILES",
@@ -407,6 +412,13 @@ def current_source_revision() -> str:
         ).strip()
     except Exception:
         return "unknown"
+
+def current_source_revision_override_status() -> str:
+    if not os.environ.get("GUI_SHOWCASE_CURRENT_SOURCE_REVISION"):
+        return "none"
+    if os.environ.get("GUI_RENDERDOC_AGGREGATE_FIXTURE_MODE", "0") == "1":
+        return "fixture"
+    return "ignored"
 
 def vcs_source_revision() -> str:
     override = os.environ.get("GUI_WEB_2D_SOURCE_REVISION", "")
@@ -1844,6 +1856,9 @@ if showcase_4k_status == "pass":
         elif showcase_require_current_source_revision == "1" and showcase_4k_source_revision_status != "current":
             showcase_4k_status = "fail"
             showcase_4k_reason = "stale-4k-source-revision:" + showcase_4k_source_revision_status + ";source=" + (showcase_4k_source_revision or "<missing>") + ";current=" + showcase_current_source_revision
+        elif current_source_revision_override_status() == "fixture":
+            showcase_4k_status = "fail"
+            showcase_4k_reason = "fixture-current-source-revision-forbidden-for-completion"
         else:
             showcase_4k_reason = "met-200fps"
 
@@ -2046,6 +2061,9 @@ if showcase_8k_status == "pass":
         elif showcase_require_current_source_revision == "1" and showcase_8k_source_revision_status != "current":
             showcase_8k_status = "fail"
             showcase_8k_reason = "stale-8k-source-revision:" + showcase_8k_source_revision_status + ";source=" + (showcase_8k_source_revision or "<missing>") + ";current=" + showcase_current_source_revision
+        elif current_source_revision_override_status() == "fixture":
+            showcase_8k_status = "fail"
+            showcase_8k_reason = "fixture-current-source-revision-forbidden-for-completion"
         else:
             showcase_8k_reason = "met-target-fps"
 
@@ -4203,6 +4221,7 @@ emit("gui_showcase_4k_200fps_source_revision_files", showcase_4k_source_revision
 emit("gui_showcase_4k_200fps_source_revision_files_status", showcase_4k_source_revision_files_status)
 emit("gui_showcase_4k_200fps_missing_source_revision_files", ",".join(showcase_4k_missing_source_revision_files))
 emit("gui_showcase_4k_200fps_current_source_revision", showcase_current_source_revision)
+emit("gui_showcase_current_source_revision_override_status", current_source_revision_override_status())
 emit("gui_showcase_4k_200fps_source_revision_status", showcase_4k_source_revision_status)
 emit("gui_showcase_4k_200fps_require_current_source_revision", showcase_require_current_source_revision)
 emit("gui_showcase_4k_200fps_simple_bin", showcase_4k_simple_bin)

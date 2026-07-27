@@ -374,6 +374,8 @@ expect(evidence_8k).to_contain("gui_showcase_8k_perf_simple_bin_status=forbidden
 - Reject median/RSS regressions, stale or duplicate baseline input, and
   canonical identity or resolution mismatch; admit a matching 8K fixture.
 - Require the aggregate to reject a forged producer PASS independently.
+- Reject producer revision overrides on real paths; aggregate overrides are
+  ignored unless explicit fixture mode is active, which cannot complete a row.
 
 ## Scenario Summary
 
