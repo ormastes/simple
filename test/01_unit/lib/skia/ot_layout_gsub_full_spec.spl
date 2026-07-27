@@ -1,0 +1,250 @@
+"""Full GSUB executor formats omitted by the original bounded layout path."""
+
+use std.spipe.*
+use std.skia.feature.glyph.ot_parser.OtFont
+use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, LayoutLookupActivation}
+use std.skia.feature.shaper.ot_layout_apply.{LayoutGlyphRecord,
+    layout_apply_gsub, layout_apply_gsub_with_catalog, layout_validate_gsub}
+
+fn _font(blob: [u8]) -> OtFont:
+    OtFont(blob: blob, tables: [])
+
+fn _lookup(index: i64, kind: u32, start: i64, limit: i64) -> GsubLookup:
+    GsubLookup(lookup_index: index, lookup_type: kind, flag: 0u32,
+        lookup_offset: start as u32, table_start: 0u32, table_end: limit as u32,
+        subtable_offsets: [start as u32], subtable_ends: [limit as u32],
+        mark_filtering_set: -1)
+
+fn _record(glyph: u32, source: i64, cluster: i64, mask: u64) -> LayoutGlyphRecord:
+    LayoutGlyphRecord(glyph_id: glyph, source_index: source, cluster: cluster,
+        component_clusters: [cluster], feature_mask: mask,
+        x_advance_units: 0, y_advance_units: 0,
+        x_offset_units: 0, y_offset_units: 0)
+
+fn _active(index: i64, mask: u64) -> LayoutLookupActivation:
+    LayoutLookupActivation(lookup_index: index, feature_mask: mask)
+
+# @req REQ-007
+describe "complete bounded GSUB executor":
+    it "selects the first AlternateSubst format 1 glyph and preserves provenance":
+        # set=[9,10], coverage=[7]
+        val font = _font([
+            0, 1, 0, 14, 0, 1, 0, 8,
+            0, 2, 0, 9, 0, 10,
+            0, 1, 0, 1, 0, 7
+        ])
+        val result = layout_apply_gsub_with_catalog(font, [_active(0, 1u64)],
+            [_lookup(0, 3u32, 0, font.blob.len())], [_record(7u32, 4, 5, 3u64)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[0].glyph_id).to_equal(9u32)
+        expect(result.glyphs[0].source_index).to_equal(4)
+        expect(result.glyphs[0].cluster).to_equal(5)
+        expect(result.glyphs[0].feature_mask).to_equal(3u64)
+
+    it "matches all three ContextSubst format 3 inputs before nested dispatch":
+        val blob = [
+            0, 3, 0, 3, 0, 1, 0, 16, 0, 22, 0, 28, 0, 2, 0, 1,
+            0, 1, 0, 1, 0, 7,
+            0, 1, 0, 1, 0, 8,
+            0, 1, 0, 1, 0, 9,
+            0, 2, 0, 8, 0, 1, 0, 11, 0, 1, 0, 1, 0, 9
+        ]
+        val font = _font(blob)
+        val context = _lookup(0, 5u32, 0, 34)
+        val nested = _lookup(1, 1u32, 34, blob.len())
+        val result = layout_apply_gsub_with_catalog(font, [_active(0, 1u64)],
+            [context, nested], [
+                _record(7u32, 0, 0, 1u64),
+                _record(8u32, 1, 1, 1u64),
+                _record(9u32, 2, 2, 1u64)
+            ])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[0].glyph_id).to_equal(7u32)
+        expect(result.glyphs[1].glyph_id).to_equal(8u32)
+        expect(result.glyphs[2].glyph_id).to_equal(11u32)
+
+    it "executes ExtensionSubst targets 1, 2, 3, 7, and 8":
+        val target1 = _font([
+            0, 1, 0, 1, 0, 0, 0, 8,
+            0, 1, 0, 6, 0, 1, 0, 1, 0, 1, 0, 7
+        ])
+        val one = layout_apply_gsub(target1, [_lookup(0, 7u32, 0, target1.blob.len())],
+            [_record(7u32, 0, 0, 1u64)])
+        expect(one.complete).to_equal(true)
+        expect(one.glyphs[0].glyph_id).to_equal(8u32)
+
+        val target2 = _font([
+            0, 1, 0, 2, 0, 0, 0, 8,
+            0, 1, 0, 8, 0, 1, 0, 14,
+            0, 1, 0, 1, 0, 7, 0, 2, 0, 9, 0, 7
+        ])
+        val two = layout_apply_gsub(target2, [_lookup(0, 7u32, 0, target2.blob.len())],
+            [_record(7u32, 0, 0, 1u64)])
+        expect(two.complete).to_equal(true)
+        expect(two.glyphs.len()).to_equal(2)
+        expect(two.glyphs[0].glyph_id).to_equal(9u32)
+        expect(two.glyphs[1].glyph_id).to_equal(7u32)
+
+        val target3 = _font([
+            0, 1, 0, 3, 0, 0, 0, 8,
+            0, 1, 0, 14, 0, 1, 0, 8,
+            0, 1, 0, 9,
+            0, 1, 0, 1, 0, 7
+        ])
+        val three = layout_apply_gsub(target3, [_lookup(0, 7u32, 0, target3.blob.len())],
+            [_record(7u32, 0, 0, 1u64)])
+        expect(three.complete).to_equal(true)
+        expect(three.glyphs[0].glyph_id).to_equal(9u32)
+
+        val target7 = _font([
+            0, 1, 0, 7, 0, 0, 0, 8,
+            0, 1, 0, 1, 0, 0, 0, 8,
+            0, 1, 0, 6, 0, 1, 0, 1, 0, 1, 0, 7
+        ])
+        val seven = layout_apply_gsub(target7, [_lookup(0, 7u32, 0, target7.blob.len())],
+            [_record(7u32, 0, 0, 1u64)])
+        expect(seven.complete).to_equal(true)
+        expect(seven.glyphs[0].glyph_id).to_equal(8u32)
+
+        val target8 = _font([
+            0, 1, 0, 8, 0, 0, 0, 8,
+            0, 1, 0, 12, 0, 0, 0, 0, 0, 1, 0, 9,
+            0, 1, 0, 1, 0, 7
+        ])
+        val eight = layout_apply_gsub(target8, [_lookup(0, 7u32, 0, target8.blob.len())],
+            [_record(7u32, 0, 0, 1u64)])
+        expect(eight.complete).to_equal(true)
+        expect(eight.glyphs[0].glyph_id).to_equal(9u32)
+
+    it "executes an ExtensionSubst target 4 ligature":
+        val font = _font([
+            0, 1, 0, 4, 0, 0, 0, 8,
+            0, 1, 0, 8, 0, 1, 0, 14,
+            0, 1, 0, 1, 0, 7,
+            0, 1, 0, 4, 0, 12, 0, 2, 0, 8
+        ])
+        val result = layout_apply_gsub(font, [_lookup(0, 7u32, 0, font.blob.len())], [
+            _record(7u32, 3, 4, 3u64), _record(8u32, 5, 2, 1u64)
+        ])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs.len()).to_equal(1)
+        expect(result.glyphs[0].glyph_id).to_equal(12u32)
+        expect(result.glyphs[0].feature_mask).to_equal(1u64)
+
+    it "rejects ExtensionSubst nesting beyond the shared recursion cap":
+        var blob: [u8] = []
+        var depth: i64 = 0
+        while depth < 17:
+            for byte in [0u8, 1u8, 0u8, 7u8, 0u8, 0u8, 0u8, 8u8]:
+                blob.push(byte)
+            depth = depth + 1
+        for byte in [0u8, 1u8, 0u8, 6u8, 0u8, 1u8,
+                     0u8, 1u8, 0u8, 1u8, 0u8, 7u8]:
+            blob.push(byte)
+        val font = _font(blob)
+        expect(layout_validate_gsub(font,
+            [_lookup(0, 7u32, 0, blob.len())])).to_equal(false)
+
+    it "executes ExtensionSubst target 5 contextual dispatch":
+        val blob = [
+            0, 1, 0, 5, 0, 0, 0, 8,
+            0, 3, 0, 1, 0, 1, 0, 12, 0, 0, 0, 1,
+            0, 1, 0, 1, 0, 7,
+            0, 2, 0, 8, 0, 1, 0, 9, 0, 1, 0, 1, 0, 7
+        ]
+        val font = _font(blob)
+        val result = layout_apply_gsub_with_catalog(font, [_active(0, 1u64)],
+            [_lookup(0, 7u32, 0, 26), _lookup(1, 1u32, 26, blob.len())],
+            [_record(7u32, 0, 0, 1u64)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[0].glyph_id).to_equal(9u32)
+
+    it "executes ExtensionSubst target 6 chained contextual dispatch":
+        val blob = [
+            0, 1, 0, 6, 0, 0, 0, 8,
+            0, 3, 0, 0, 0, 1, 0, 16, 0, 0, 0, 1, 0, 0, 0, 1,
+            0, 1, 0, 1, 0, 7,
+            0, 2, 0, 8, 0, 1, 0, 9, 0, 1, 0, 1, 0, 7
+        ]
+        val font = _font(blob)
+        val result = layout_apply_gsub_with_catalog(font, [_active(0, 1u64)],
+            [_lookup(0, 7u32, 0, 30), _lookup(1, 1u32, 30, blob.len())],
+            [_record(7u32, 0, 0, 1u64)])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[0].glyph_id).to_equal(9u32)
+
+    it "applies ReverseChainSingleSubst format 1 from the end":
+        # current=[1], immediate backtrack=[2], replacement=2
+        val font = _font([
+            0, 1, 0, 14, 0, 1, 0, 20, 0, 0, 0, 1, 0, 2,
+            0, 1, 0, 1, 0, 1,
+            0, 1, 0, 1, 0, 2
+        ])
+        val result = layout_apply_gsub(font, [_lookup(0, 8u32, 0, font.blob.len())], [
+            _record(2u32, 0, 0, 1u64),
+            _record(1u32, 1, 1, 1u64),
+            _record(1u32, 2, 2, 1u64)
+        ])
+        expect(result.complete).to_equal(true)
+        expect(result.glyphs[0].glyph_id).to_equal(2u32)
+        expect(result.glyphs[1].glyph_id).to_equal(2u32)
+        expect(result.glyphs[2].glyph_id).to_equal(1u32)
+
+    it "honors ReverseChain lookahead and activation masks without changing provenance":
+        # current=[7], lookahead=[8], replacement=9
+        val font = _font([
+            0, 1, 0, 14, 0, 0, 0, 1, 0, 20, 0, 1, 0, 9,
+            0, 1, 0, 1, 0, 7,
+            0, 1, 0, 1, 0, 8
+        ])
+        val lookup = _lookup(0, 8u32, 0, font.blob.len())
+        val skipped = layout_apply_gsub_with_catalog(font, [_active(0, 1u64)], [lookup], [
+            _record(7u32, 4, 5, 2u64), _record(8u32, 6, 7, 1u64)
+        ])
+        expect(skipped.complete).to_equal(true)
+        expect(skipped.glyphs[0].glyph_id).to_equal(7u32)
+        val applied = layout_apply_gsub_with_catalog(font, [_active(0, 1u64)], [lookup], [
+            _record(7u32, 4, 5, 3u64), _record(8u32, 6, 7, 1u64)
+        ])
+        expect(applied.complete).to_equal(true)
+        expect(applied.glyphs[0].glyph_id).to_equal(9u32)
+        expect(applied.glyphs[0].source_index).to_equal(4)
+        expect(applied.glyphs[0].cluster).to_equal(5)
+        expect(applied.glyphs[0].feature_mask).to_equal(3u64)
+
+    it "rejects malformed new formats before publishing any earlier mutation":
+        val blob = [
+            0, 2, 0, 8, 0, 1, 0, 9, 0, 1, 0, 1, 0, 7,
+            0, 1, 0, 1, 0, 0, 0, 4
+        ]
+        val font = _font(blob)
+        val result = layout_apply_gsub_with_catalog(font,
+            [_active(0, 1u64), _active(1, 1u64)],
+            [_lookup(0, 1u32, 0, 14), _lookup(1, 7u32, 14, blob.len())],
+            [_record(7u32, 4, 5, 1u64)])
+        expect(result.complete).to_equal(false)
+        expect(result.glyphs[0].glyph_id).to_equal(7u32)
+        expect(result.glyphs[0].source_index).to_equal(4)
+        expect(result.glyphs[0].cluster).to_equal(5)
+
+        val bad_alternate = _font([
+            0, 1, 0, 10, 0, 1, 0, 8, 0, 0,
+            0, 1, 0, 1, 0, 7
+        ])
+        val alternated = layout_apply_gsub(bad_alternate,
+            [_lookup(0, 3u32, 0, bad_alternate.blob.len())],
+            [_record(7u32, 4, 5, 1u64)])
+        expect(alternated.complete).to_equal(false)
+        expect(alternated.glyphs[0].glyph_id).to_equal(7u32)
+
+        val bad_reverse = _font([
+            0, 1, 0, 12, 0, 0, 0, 0, 0, 2, 0, 9,
+            0, 1, 0, 1, 0, 7
+        ])
+        expect(layout_validate_gsub(bad_reverse,
+            [_lookup(0, 8u32, 0, bad_reverse.blob.len())])).to_equal(false)
+        val reversed = layout_apply_gsub(bad_reverse,
+            [_lookup(0, 8u32, 0, bad_reverse.blob.len())],
+            [_record(7u32, 4, 5, 1u64)])
+        expect(reversed.complete).to_equal(false)
+        expect(reversed.glyphs[0].glyph_id).to_equal(7u32)

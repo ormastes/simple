@@ -1,0 +1,513 @@
+# Bounded direct GSUB subtable parsing and application.
+
+use std.skia.feature.glyph.ot_parser.{OtFont, read_u16_be}
+use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, apply_gsub_single}
+use std.skia.feature.shaper.ot_layout_context.{LayoutGlyphRecord,
+    layout_context_coverage, layout_context_lookup_accepts,
+    layout_context_previous_input, layout_context_next_input}
+
+class GsubSubtableBudget:
+    remaining: i64
+    depth: i64
+    maximum_depth: i64
+
+class GsubSubtableApply:
+    glyphs: [LayoutGlyphRecord]
+    applied: bool
+    start: i64
+    consumed: i64
+    emitted: i64
+    consumed_positions: [i64]
+
+class _LigatureMatch:
+    matched: bool
+    glyph_id: u32
+    positions: [i64]
+
+fn _end(lookup: GsubLookup, subtable: i64) -> i64:
+    if subtable < 0 or subtable >= lookup.subtable_ends.len(): return -1
+    lookup.subtable_ends[subtable] as i64
+
+fn gsub_subtable_budget(records: i64, lookup_count: i64,
+                        subtable_count: i64) -> GsubSubtableBudget:
+    var maximum = (if records < 1: 1 else: records) * (lookup_count + 1) * (subtable_count + 1)
+    if maximum > 65536: maximum = 65536
+    GsubSubtableBudget(remaining: maximum, depth: 0,
+        maximum_depth: if lookup_count + 1 < 16: lookup_count + 1 else: 16)
+
+fn gsub_subtable_take(budget: GsubSubtableBudget, amount: i64) -> bool:
+    if amount < 0 or budget.remaining < amount: return false
+    budget.remaining = budget.remaining - amount
+    true
+
+fn gsub_subtable_copy_records(records: [LayoutGlyphRecord]) -> [LayoutGlyphRecord]:
+    var result: [LayoutGlyphRecord] = []
+    for record in records:
+        result.push(LayoutGlyphRecord(glyph_id: record.glyph_id, source_index: record.source_index,
+            cluster: record.cluster, component_clusters: record.component_clusters,
+            feature_mask: record.feature_mask,
+            x_advance_units: record.x_advance_units,
+            y_advance_units: record.y_advance_units, x_offset_units: record.x_offset_units,
+            y_offset_units: record.y_offset_units))
+    result
+
+fn gsub_subtable_position_present(positions: [i64], wanted: i64) -> bool:
+    for position in positions:
+        if position == wanted: return true
+    false
+
+fn gsub_subtable_validate(font: OtFont, lookup: GsubLookup, index: i64,
+                          budget: GsubSubtableBudget) -> bool:
+    if index < 0 or index >= lookup.subtable_offsets.len(): return false
+    val subtable = lookup.subtable_offsets[index] as i64
+    val limit = _end(lookup, index)
+    if (subtable < lookup.lookup_offset as i64 or subtable + 6 > limit or
+        limit > font.blob.len()): return false
+    val kind = lookup.lookup_type
+    if kind != 1u32 and kind != 2u32 and kind != 3u32 and kind != 4u32 and kind != 8u32:
+        return false
+    val format = read_u16_be(font.blob, subtable)
+    val coverage_offset = read_u16_be(font.blob, subtable + 2) as i64
+    if coverage_offset <= 0 or subtable + coverage_offset < subtable: return false
+    if kind == 1u32:
+        if format == 1u32:
+            val covered = layout_context_coverage(font.blob,
+                subtable + coverage_offset, limit, 0u32)
+            return covered.valid and gsub_subtable_take(budget, covered.count)
+        if format == 2u32:
+            val count = read_u16_be(font.blob, subtable + 4) as i64
+            if subtable + 6 + count * 2 > limit: return false
+            val covered = layout_context_coverage(font.blob,
+                subtable + coverage_offset, limit, 0u32)
+            return (covered.valid and covered.count == count and
+                gsub_subtable_take(budget, covered.count))
+        return false
+    if kind == 2u32:
+        if format != 1u32: return false
+        val count = read_u16_be(font.blob, subtable + 4) as i64
+        if subtable + 6 + count * 2 > limit: return false
+        val covered = layout_context_coverage(font.blob,
+            subtable + coverage_offset, limit, 0u32)
+        if (not covered.valid or covered.count != count or
+            not gsub_subtable_take(budget, covered.count)): return false
+        var item: i64 = 0
+        while item < count:
+            val sequence_offset = read_u16_be(font.blob,
+                subtable + 6 + item * 2) as i64
+            val sequence = subtable + sequence_offset
+            if sequence_offset == 0 or sequence < subtable or sequence + 2 > limit:
+                return false
+            val glyph_count = read_u16_be(font.blob, sequence) as i64
+            if sequence + 2 + glyph_count * 2 > limit: return false
+            item = item + 1
+        return true
+    if kind == 3u32:
+        if format != 1u32: return false
+        val set_count = read_u16_be(font.blob, subtable + 4) as i64
+        val header_end = subtable + 6 + set_count * 2
+        if set_count <= 0 or header_end > limit or subtable + coverage_offset < header_end:
+            return false
+        val covered = layout_context_coverage(font.blob,
+            subtable + coverage_offset, limit, 0u32)
+        if (not covered.valid or covered.count != set_count or
+            not gsub_subtable_take(budget, covered.count)): return false
+        var seen_sets: [i64] = []
+        var set_index: i64 = 0
+        while set_index < set_count:
+            val set_offset = read_u16_be(font.blob,
+                subtable + 6 + set_index * 2) as i64
+            val set = subtable + set_offset
+            if (set_offset == 0 or set < header_end or set + 2 > limit or
+                seen_sets.contains(set)): return false
+            val glyph_count = read_u16_be(font.blob, set) as i64
+            if (glyph_count <= 0 or set + 2 + glyph_count * 2 > limit or
+                not gsub_subtable_take(budget, glyph_count)): return false
+            seen_sets.push(set)
+            set_index = set_index + 1
+        return true
+    if kind == 4u32:
+        if format != 1u32: return false
+        val set_count = read_u16_be(font.blob, subtable + 4) as i64
+        if subtable + 6 + set_count * 2 > limit: return false
+        val covered = layout_context_coverage(font.blob,
+            subtable + coverage_offset, limit, 0u32)
+        if (not covered.valid or covered.count != set_count or
+            not gsub_subtable_take(budget, covered.count)): return false
+        var set_index: i64 = 0
+        while set_index < set_count:
+            val set_offset = read_u16_be(font.blob,
+                subtable + 6 + set_index * 2) as i64
+            val set = subtable + set_offset
+            if set_offset == 0 or set < subtable or set + 2 > limit: return false
+            val ligature_count = read_u16_be(font.blob, set) as i64
+            if set + 2 + ligature_count * 2 > limit: return false
+            var ligature_index: i64 = 0
+            while ligature_index < ligature_count:
+                val ligature_offset = read_u16_be(font.blob,
+                    set + 2 + ligature_index * 2) as i64
+                val ligature = set + ligature_offset
+                if ligature_offset == 0 or ligature < set or ligature + 6 > limit:
+                    return false
+                val component_count = read_u16_be(font.blob, ligature + 2) as i64
+                if component_count < 2 or ligature + 2 + component_count * 2 > limit:
+                    return false
+                ligature_index = ligature_index + 1
+            set_index = set_index + 1
+        return true
+    if format != 1u32 or subtable + 8 > limit: return false
+    val backtrack_count = read_u16_be(font.blob, subtable + 4) as i64
+    val backtrack_offsets = subtable + 6
+    var cursor = backtrack_offsets + backtrack_count * 2
+    if cursor + 2 > limit: return false
+    val lookahead_count = read_u16_be(font.blob, cursor) as i64
+    val lookahead_offsets = cursor + 2
+    cursor = lookahead_offsets + lookahead_count * 2
+    if cursor + 2 > limit: return false
+    val glyph_count = read_u16_be(font.blob, cursor) as i64
+    val substitutes = cursor + 2
+    val header_end = substitutes + glyph_count * 2
+    if glyph_count <= 0 or header_end > limit or subtable + coverage_offset < header_end:
+        return false
+    val covered = layout_context_coverage(font.blob,
+        subtable + coverage_offset, limit, 0u32)
+    if (not covered.valid or covered.count != glyph_count or
+        not gsub_subtable_take(budget, covered.count + backtrack_count + lookahead_count)):
+        return false
+    var item: i64 = 0
+    while item < backtrack_count:
+        val offset = read_u16_be(font.blob, backtrack_offsets + item * 2) as i64
+        if offset < header_end - subtable: return false
+        val context = layout_context_coverage(font.blob,
+            subtable + offset, limit, 0u32)
+        if not context.valid or not gsub_subtable_take(budget, context.count): return false
+        item = item + 1
+    item = 0
+    while item < lookahead_count:
+        val offset = read_u16_be(font.blob, lookahead_offsets + item * 2) as i64
+        if offset < header_end - subtable: return false
+        val context = layout_context_coverage(font.blob,
+            subtable + offset, limit, 0u32)
+        if not context.valid or not gsub_subtable_take(budget, context.count): return false
+        item = item + 1
+    true
+
+fn _unchanged(records: [LayoutGlyphRecord], index: i64) -> GsubSubtableApply:
+    GsubSubtableApply(glyphs: gsub_subtable_copy_records(records), applied: false,
+        start: index, consumed: 0, emitted: 0, consumed_positions: [])
+
+fn _splice(records: [LayoutGlyphRecord], start: i64, consumed: i64,
+           replacement: [LayoutGlyphRecord]) -> [LayoutGlyphRecord]:
+    var result: [LayoutGlyphRecord] = []
+    var index: i64 = 0
+    while index < start:
+        result.push(records[index])
+        index = index + 1
+    for record in replacement: result.push(record)
+    index = start + consumed
+    while index < records.len():
+        result.push(records[index])
+        index = index + 1
+    result
+
+fn _single_at(font: OtFont, lookup: GsubLookup, records: [LayoutGlyphRecord],
+              index: i64, feature_mask: u64,
+              budget: GsubSubtableBudget) -> Option<GsubSubtableApply>:
+    var result = gsub_subtable_copy_records(records)
+    var subtable_index: i64 = 0
+    while subtable_index < lookup.subtable_offsets.len():
+        if not gsub_subtable_take(budget, 1): return None
+        val subtable = lookup.subtable_offsets[subtable_index] as i64
+        val limit = _end(lookup, subtable_index)
+        val changed = apply_gsub_single(font.blob, lookup.table_start as i64,
+            limit, subtable, result[index].glyph_id)
+        if not changed.valid: return None
+        if changed.applied:
+            val applied = changed.glyph_id != result[index].glyph_id
+            result[index].glyph_id = changed.glyph_id
+            return Some(GsubSubtableApply(glyphs: result, applied: applied, start: index,
+                consumed: if applied: 1 else: 0, emitted: if applied: 1 else: 0,
+                consumed_positions: if applied: [index] else: []))
+        subtable_index = subtable_index + 1
+    Some(_unchanged(records, index))
+
+fn _multiple_at(font: OtFont, lookup: GsubLookup, records: [LayoutGlyphRecord],
+                index: i64, feature_mask: u64,
+                budget: GsubSubtableBudget) -> Option<GsubSubtableApply>:
+    val record = records[index]
+    var subtable_index: i64 = 0
+    while subtable_index < lookup.subtable_offsets.len():
+        if not gsub_subtable_take(budget, 1): return None
+        val subtable = lookup.subtable_offsets[subtable_index] as i64
+        val limit = _end(lookup, subtable_index)
+        val covered = layout_context_coverage(font.blob,
+            subtable + read_u16_be(font.blob, subtable + 2) as i64,
+            limit, record.glyph_id)
+        if not covered.valid: return None
+        if covered.found:
+            val sequence = subtable + read_u16_be(font.blob,
+                subtable + 6 + covered.index * 2) as i64
+            val glyph_count = read_u16_be(font.blob, sequence) as i64
+            if not gsub_subtable_take(budget, glyph_count): return None
+            var replacement: [LayoutGlyphRecord] = []
+            var glyph_index: i64 = 0
+            while glyph_index < glyph_count:
+                replacement.push(LayoutGlyphRecord(
+                    glyph_id: read_u16_be(font.blob, sequence + 2 + glyph_index * 2),
+                    source_index: record.source_index, cluster: record.cluster,
+                    component_clusters: record.component_clusters,
+                    feature_mask: record.feature_mask,
+                    x_advance_units: record.x_advance_units,
+                    y_advance_units: record.y_advance_units,
+                    x_offset_units: record.x_offset_units,
+                    y_offset_units: record.y_offset_units))
+                glyph_index = glyph_index + 1
+            var applied = glyph_count != 1
+            if glyph_count == 1:
+                applied = replacement[0].glyph_id != record.glyph_id
+            if not applied: return Some(_unchanged(records, index))
+            return Some(GsubSubtableApply(glyphs: _splice(records, index, 1, replacement),
+                applied: true, start: index, consumed: 1, emitted: glyph_count,
+                consumed_positions: [index]))
+        subtable_index = subtable_index + 1
+    Some(_unchanged(records, index))
+
+fn _alternate_at(font: OtFont, lookup: GsubLookup, records: [LayoutGlyphRecord],
+                 index: i64, feature_mask: u64,
+                 budget: GsubSubtableBudget) -> Option<GsubSubtableApply>:
+    var result = gsub_subtable_copy_records(records)
+    var subtable_index: i64 = 0
+    while subtable_index < lookup.subtable_offsets.len():
+        if not gsub_subtable_take(budget, 1): return None
+        val subtable = lookup.subtable_offsets[subtable_index] as i64
+        val covered = layout_context_coverage(font.blob,
+            subtable + read_u16_be(font.blob, subtable + 2) as i64,
+            _end(lookup, subtable_index), result[index].glyph_id)
+        if not covered.valid: return None
+        if covered.found:
+            val set = subtable + read_u16_be(font.blob,
+                subtable + 6 + covered.index * 2) as i64
+            if not gsub_subtable_take(budget, 1): return None
+            # Deterministic engine policy: select the first listed alternate.
+            val glyph = read_u16_be(font.blob, set + 2)
+            val applied = glyph != result[index].glyph_id
+            result[index].glyph_id = glyph
+            return Some(GsubSubtableApply(glyphs: result, applied: applied, start: index,
+                consumed: if applied: 1 else: 0, emitted: if applied: 1 else: 0,
+                consumed_positions: if applied: [index] else: []))
+        subtable_index = subtable_index + 1
+    Some(_unchanged(records, index))
+
+fn _ligature_match(font: OtFont, lookup: GsubLookup, subtable_index: i64,
+                   records: [LayoutGlyphRecord], start: i64,
+                   budget: GsubSubtableBudget) -> Option<_LigatureMatch>:
+    val subtable = lookup.subtable_offsets[subtable_index] as i64
+    val limit = _end(lookup, subtable_index)
+    val covered = layout_context_coverage(font.blob,
+        subtable + read_u16_be(font.blob, subtable + 2) as i64,
+        limit, records[start].glyph_id)
+    if not covered.valid: return None
+    if not covered.found:
+        return Some(_LigatureMatch(matched: false, glyph_id: 0u32, positions: []))
+    val set = subtable + read_u16_be(font.blob,
+        subtable + 6 + covered.index * 2) as i64
+    val count = read_u16_be(font.blob, set) as i64
+    var ligature_index: i64 = 0
+    while ligature_index < count:
+        if not gsub_subtable_take(budget, 1): return None
+        val ligature = set + read_u16_be(font.blob,
+            set + 2 + ligature_index * 2) as i64
+        val component_count = read_u16_be(font.blob, ligature + 2) as i64
+        var positions: [i64] = [start]
+        var matches = true
+        var component: i64 = 1
+        var cursor = start + 1
+        while component < component_count:
+            if not gsub_subtable_take(budget, 1): return None
+            val position = match layout_context_next_input(font, lookup, records, cursor):
+                Some(value): value
+                None: return None
+            if position < 0:
+                matches = false
+            else:
+                if records[position].glyph_id !=
+                    read_u16_be(font.blob, ligature + 4 + (component - 1) * 2):
+                    matches = false
+                positions.push(position)
+                cursor = position + 1
+            component = component + 1
+        if matches:
+            return Some(_LigatureMatch(matched: true,
+                glyph_id: read_u16_be(font.blob, ligature), positions: positions))
+        ligature_index = ligature_index + 1
+    Some(_LigatureMatch(matched: false, glyph_id: 0u32, positions: []))
+
+fn _replace_ligature(records: [LayoutGlyphRecord],
+                     matched: _LigatureMatch) -> [LayoutGlyphRecord]:
+    val start = matched.positions[0]
+    val first = records[start]
+    var cluster = first.cluster
+    var feature_mask = first.feature_mask
+    var component_clusters: [i64] = []
+    for position in matched.positions:
+        val item = records[position]
+        feature_mask = feature_mask & item.feature_mask
+        if item.component_clusters.len() == 0:
+            component_clusters.push(item.cluster)
+        else:
+            for component_cluster in item.component_clusters:
+                component_clusters.push(component_cluster)
+        if item.cluster < cluster: cluster = item.cluster
+    val replacement = LayoutGlyphRecord(glyph_id: matched.glyph_id,
+        source_index: first.source_index, cluster: cluster,
+        component_clusters: component_clusters, feature_mask: feature_mask,
+        x_advance_units: first.x_advance_units,
+        y_advance_units: first.y_advance_units,
+        x_offset_units: first.x_offset_units,
+        y_offset_units: first.y_offset_units)
+    var result: [LayoutGlyphRecord] = []
+    var index: i64 = 0
+    while index < records.len():
+        if index == start:
+            result.push(replacement)
+        else if not gsub_subtable_position_present(matched.positions, index):
+            result.push(records[index])
+        index = index + 1
+    result
+
+fn _ligature_at(font: OtFont, lookup: GsubLookup, records: [LayoutGlyphRecord],
+                index: i64, feature_mask: u64,
+                budget: GsubSubtableBudget) -> Option<GsubSubtableApply>:
+    if not gsub_subtable_take(budget, lookup.subtable_offsets.len()): return None
+    var subtable_index: i64 = 0
+    while subtable_index < lookup.subtable_offsets.len():
+        val matched = match _ligature_match(font, lookup, subtable_index,
+            records, index, budget):
+            Some(value): value
+            None: return None
+        if matched.matched:
+            return Some(GsubSubtableApply(glyphs: _replace_ligature(records, matched),
+                applied: true, start: index, consumed: matched.positions.len(),
+                emitted: 1, consumed_positions: matched.positions))
+        subtable_index = subtable_index + 1
+    Some(_unchanged(records, index))
+
+fn _reverse_at(font: OtFont, lookup: GsubLookup, records: [LayoutGlyphRecord],
+               index: i64, feature_mask: u64,
+               budget: GsubSubtableBudget) -> Option<GsubSubtableApply>:
+    var subtable_index: i64 = 0
+    while subtable_index < lookup.subtable_offsets.len():
+        if not gsub_subtable_take(budget, 1): return None
+        val subtable = lookup.subtable_offsets[subtable_index] as i64
+        val limit = _end(lookup, subtable_index)
+        val covered = layout_context_coverage(font.blob,
+            subtable + read_u16_be(font.blob, subtable + 2) as i64,
+            limit, records[index].glyph_id)
+        if not covered.valid: return None
+        if not covered.found:
+            subtable_index = subtable_index + 1
+            continue
+        val backtrack_count = read_u16_be(font.blob, subtable + 4) as i64
+        val backtrack_offsets = subtable + 6
+        var cursor = backtrack_offsets + backtrack_count * 2
+        val lookahead_count = read_u16_be(font.blob, cursor) as i64
+        val lookahead_offsets = cursor + 2
+        cursor = lookahead_offsets + lookahead_count * 2
+        val glyph_count = read_u16_be(font.blob, cursor) as i64
+        val substitutes = cursor + 2
+        if (covered.index < 0 or covered.index >= glyph_count or
+            not gsub_subtable_take(budget, backtrack_count + lookahead_count)):
+            return None
+        var matched = true
+        var previous = index - 1
+        var item: i64 = 0
+        while item < backtrack_count:
+            val position = match layout_context_previous_input(font, lookup, records, previous):
+                Some(value): value
+                None: return None
+            if position < 0:
+                matched = false
+            else:
+                val context = layout_context_coverage(font.blob,
+                    subtable + read_u16_be(font.blob,
+                        backtrack_offsets + item * 2) as i64,
+                    limit, records[position].glyph_id)
+                if not context.valid: return None
+                if not context.found: matched = false
+                previous = position - 1
+            item = item + 1
+        var next = index + 1
+        item = 0
+        while item < lookahead_count:
+            val position = match layout_context_next_input(font, lookup, records, next):
+                Some(value): value
+                None: return None
+            if position < 0:
+                matched = false
+            else:
+                val context = layout_context_coverage(font.blob,
+                    subtable + read_u16_be(font.blob,
+                        lookahead_offsets + item * 2) as i64,
+                    limit, records[position].glyph_id)
+                if not context.valid: return None
+                if not context.found: matched = false
+                next = position + 1
+            item = item + 1
+        if matched:
+            var result = gsub_subtable_copy_records(records)
+            val glyph = read_u16_be(font.blob, substitutes + covered.index * 2)
+            val applied = glyph != result[index].glyph_id
+            result[index].glyph_id = glyph
+            return Some(GsubSubtableApply(glyphs: result, applied: applied,
+                start: index, consumed: if applied: 1 else: 0,
+                emitted: if applied: 1 else: 0,
+                consumed_positions: if applied: [index] else: []))
+        subtable_index = subtable_index + 1
+    Some(_unchanged(records, index))
+
+fn gsub_subtable_apply_at(font: OtFont, lookup: GsubLookup,
+                          records: [LayoutGlyphRecord], index: i64,
+                          feature_mask: u64,
+                          budget: GsubSubtableBudget) -> Option<GsubSubtableApply>:
+    if index < 0 or index >= records.len(): return None
+    if records[index].feature_mask & feature_mask == 0u64:
+        return Some(_unchanged(records, index))
+    val accepted = match layout_context_lookup_accepts(font, lookup, records[index]):
+        Some(value): value
+        None: return None
+    if not accepted: return Some(_unchanged(records, index))
+    if lookup.lookup_type == 1u32:
+        return _single_at(font, lookup, records, index, feature_mask, budget)
+    if lookup.lookup_type == 2u32:
+        return _multiple_at(font, lookup, records, index, feature_mask, budget)
+    if lookup.lookup_type == 3u32:
+        return _alternate_at(font, lookup, records, index, feature_mask, budget)
+    if lookup.lookup_type == 4u32:
+        return _ligature_at(font, lookup, records, index, feature_mask, budget)
+    if lookup.lookup_type == 8u32:
+        return _reverse_at(font, lookup, records, index, feature_mask, budget)
+    None
+
+fn gsub_subtable_apply(font: OtFont, lookup: GsubLookup,
+                       records: [LayoutGlyphRecord], feature_mask: u64,
+                       budget: GsubSubtableBudget) -> Option<[LayoutGlyphRecord]>:
+    var result = gsub_subtable_copy_records(records)
+    val reverse = lookup.lookup_type == 8u32
+    var index = if reverse: result.len() - 1 else: 0
+    while index >= 0 and index < result.len():
+        val changed = match gsub_subtable_apply_at(font, lookup, result,
+            index, feature_mask, budget):
+            Some(value): value
+            None: return None
+        result = changed.glyphs
+        if reverse:
+            index = index - 1
+        else if lookup.lookup_type == 2u32 and changed.applied:
+            index = index + changed.emitted
+        else:
+            index = index + 1
+    Some(result)
+
+export GsubSubtableBudget, GsubSubtableApply
+export gsub_subtable_budget, gsub_subtable_take, gsub_subtable_copy_records
+export gsub_subtable_position_present, gsub_subtable_validate
+export gsub_subtable_apply_at, gsub_subtable_apply
