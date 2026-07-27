@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -87,6 +87,12 @@ expect(unfocused.mutation_revision).to_equal(0)
 - Favorite rejects without mutating memory when durable profile ownership is
   unavailable.
 
+#### persists Favorite only for the selected secondary browser window
+
+- A bookmark-only profile handle commits the selected window's URL.
+- The sibling browser window remains unchanged.
+- Registry shutdown closes bookmark ownership without touching HSTS.
+
 - The WM-owned toolbar and address field occupy a reserved region above the
   hostile page frame.
 - A toolbar coordinate resolves only to `browser:session#address`, never to
@@ -117,8 +123,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 7 |
-| Active scenarios | 7 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

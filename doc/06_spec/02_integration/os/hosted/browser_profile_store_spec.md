@@ -11,7 +11,9 @@ case-folded duplicate HSTS records, and proves removal remains durable after
 another reopen. Restored state is revalidated by BrowserSession before use.
 Favorite writes use one transactional URL-key mutation: two concurrent profile
 handles preserve unrelated bookmarks, and a failed write restores the prior
-in-memory favorite state and callback revision.
+in-memory favorite state and callback revision. The secondary-window registry
+owns only a bookmark handle, so its shutdown cannot overwrite HSTS concurrently
+saved by the primary browser.
 
 Requirement trace: REQ-WEB-BROWSER-009, REQ-WEB-BROWSER-011.
 

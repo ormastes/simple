@@ -16,6 +16,7 @@ use os.compositor.host_compositor_core.{
 use os.hosted.hosted_web_content_session.{
     HostedWebContentRegistry, HostedWebContentSession
 }
+use os.hosted.browser_profile_store.{BrowserBookmarkStore}
 use os.compositor.simple_web_window_renderer.{
     simple_web_content_revision_with_theme
 }
@@ -544,6 +545,41 @@ describe "hosted Web content session":
         expect(registry.sessions[1].browser.is_favorite(
             registry.address_text(72)
         )).to_be(false)
+
+    # @req REQ-WEB-BROWSER-009
+    it "persists Favorite only for the selected secondary browser window":
+        var registry = HostedWebContentRegistry.create_with_bookmark_store(
+            BrowserBookmarkStore.memory()?
+        )
+        val _ = registry.advance_window(
+            81, "<div>First</div>", 120, 60, 1000, true
+        )
+        val _ = registry.advance_window(
+            82, "<div>Second</div>", 120, 60, 1000, true
+        )
+        var second = registry.sessions[1]
+        expect(second.browser.open_html(
+            "https://second.test/page",
+            "<html><body>Second</body></html>"
+        ).is_ok()).to_equal(true)
+        registry.sessions[1] = second
+
+        val favorite_down = registry.dispatch_chrome_pointer(
+            83, 82, "favorite", true
+        )
+        val favorite_up = registry.dispatch_chrome_pointer(
+            84, 82, "favorite", false
+        )
+        expect(favorite_down.reason).to_equal("chrome-pressed")
+        expect(favorite_up.callback_count).to_equal(1)
+        expect(registry.sessions[1].browser.is_favorite(
+            "https://second.test/page"
+        )).to_equal(true)
+        expect(registry.sessions[0].browser.is_favorite(
+            "https://second.test/page"
+        )).to_equal(false)
+        expect(registry.profile_bookmarks.entries.len()).to_equal(1)
+        expect(registry.close()).to_equal(true)
 
     # @req REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
     it "carries one compositor-local pointer release through BrowserSession and the canonical Engine2D frame":

@@ -6,7 +6,9 @@ use std.gc_async_mut.web.browser_session.{
 }
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
-use os.hosted.browser_profile_store.{BrowserProfileStore}
+use os.hosted.browser_profile_store.{
+    BrowserBookmarkStore, BrowserProfileStore
+}
 use os.hosted.hosted_web_content_session.{HostedWebContentRegistry}
 
 extern fn rt_file_delete(path: text) -> bool
@@ -20,16 +22,15 @@ fn remove_profile_files():
 
 describe "hosted browser profile store":
     it "cancels network jobs before fallible profile shutdown":
-        var registry = HostedWebContentRegistry.create_with_profile(
-            BrowserProfileStore.memory()?, 100000
+        var closed_store = BrowserBookmarkStore.memory()?
+        closed_store.close()?
+        var registry = HostedWebContentRegistry.create_with_bookmark_store(
+            closed_store
         )
+        expect(registry.profile_failure_reason).to_contain("close:")
         val _ = registry.advance_window(
             45, "<div>browser</div>", 64, 48, 100000, true
         )
-        var closed_profile = registry.profile.unwrap()
-        closed_profile.close()?
-        registry.profile = Some(closed_profile)
-
         var session = registry.sessions[0]
         expect(session.browser.open_html(
             "https://rollback.test/",
@@ -48,7 +49,7 @@ describe "hosted browser profile store":
         expect(registry.sessions[0].browser.is_favorite(
             "https://rollback.test/"
         )).to_equal(false)
-        expect(registry.close(100001)).to_equal(false)
+        expect(registry.close()).to_equal(false)
         expect(registry.sessions[0].network_job_handle).to_equal(0)
 
     it "releases hosted sessions after successful registry shutdown":
@@ -57,7 +58,7 @@ describe "hosted browser profile store":
             46, "<div>browser</div>", 64, 48, 100000, false
         )
         expect(registry.sessions.len()).to_equal(1)
-        expect(registry.close(100001)).to_equal(true)
+        expect(registry.close()).to_equal(true)
         expect(registry.sessions.len()).to_equal(0)
 
     it "persists validated bookmarks and HSTS across reopen and removal":
@@ -157,44 +158,42 @@ describe "hosted browser profile store":
             Err(_):
                 expect(reopened.load_hsts(100000)?.entries.len()).to_equal(1)
 
-        var registry = HostedWebContentRegistry.create_with_profile(
-            reopened, 100000
+        var registry = HostedWebContentRegistry.create_with_bookmark_store(
+            BrowserBookmarkStore.from_profile(reopened)
         )
         val changed = registry.advance_window(
             44, "<div>browser</div>", 64, 48, 100000, true
         )
         expect(changed).to_equal(false)
         expect(registry.sessions.len()).to_equal(1)
-        var session = registry.sessions[0].browser
-        expect(session.is_favorite("https://simple.test/docs")).to_equal(true)
-        val upgraded = session.begin_network_navigation(
-            "http://sub.simple.test/start", "GET", "", "", ""
-        )
-        expect(upgraded.is_ok()).to_equal(true)
-        match session.take_pending_request():
-            Some(request):
-                expect(request.url).to_equal("https://sub.simple.test/start")
-            nil:
-                fail("Expected restored HSTS-upgraded request")
+        expect(registry.sessions[0].browser.is_favorite(
+            "https://simple.test/docs"
+        )).to_equal(true)
+        var bookmark_owner = registry.bookmark_store.unwrap()
+        expect(bookmark_owner.toggle_bookmark(
+            "https://simple.test/docs", "Simple docs"
+        )?).to_equal(false)
+        registry.bookmark_store = Some(bookmark_owner)
 
-        var hosted_session = registry.sessions[0]
-        hosted_session.browser = session
-        registry.sessions[0] = hosted_session
-        var profile_owner = registry.profile.unwrap()
-        profile_owner.set_bookmark(
-            "https://simple.test/docs", "Simple docs", false
+        var primary_owner = BrowserProfileStore.open(PROFILE_PATH)?
+        var current_hsts: [BrowserHstsSnapshotEntry] = []
+        current_hsts.push(BrowserHstsSnapshotEntry(
+            host: "simple.test",
+            received_at_unix_ms: 100500,
+            expires_at_unix_ms: 200000,
+            include_subdomains: true
+        ))
+        primary_owner.save_hsts(
+            BrowserHstsSnapshot.create(current_hsts), 100500
         )?
-        registry.profile = Some(profile_owner)
-        val _ = registry.advance_window(
-            44, registry.sessions[0].current_body_html(),
-            64, 48, 101001, true
-        )
-        expect(registry.close_window(44, 101001)).to_equal(true)
-        expect(registry.close(101001)).to_equal(true)
+        primary_owner.close()?
+
+        expect(registry.close_window(44)).to_equal(true)
+        expect(registry.close()).to_equal(true)
 
         var after_removal = BrowserProfileStore.open(PROFILE_PATH)?
         expect(after_removal.load_bookmarks()?.entries.len()).to_equal(0)
-        expect(after_removal.load_hsts(101001)?.entries.len()).to_equal(0)
+        expect(after_removal.load_hsts(101001)?.entries.len()).to_equal(1)
         after_removal.close()?
         remove_profile_files()
 

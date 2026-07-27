@@ -1,8 +1,7 @@
 # Hosted-only semantic Web adapter. BrowserSession stays out of compositor core.
 
 use std.gc_async_mut.web.browser_session.{
-    BrowserSession, BrowserBookmarkSnapshot, BrowserHstsSnapshot,
-    BrowserRequest, BrowserResponse
+    BrowserSession, BrowserBookmarkSnapshot, BrowserRequest, BrowserResponse
 }
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
@@ -23,7 +22,7 @@ use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
 }
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
 use std.database.sql.types.{DbError}
-use os.hosted.browser_profile_store.{BrowserProfileStore}
+use os.hosted.browser_profile_store.{BrowserBookmarkStore}
 use common.ui.access.{WinTextActionRequest}
 use common.string_builder.{StringBuilder}
 
@@ -631,58 +630,49 @@ class HostedWebContentSession:
 
 class HostedWebContentRegistry:
     sessions: [HostedWebContentSession]
-    profile: BrowserProfileStore?
+    bookmark_store: BrowserBookmarkStore?
     profile_bookmarks: BrowserBookmarkSnapshot
-    profile_hsts: BrowserHstsSnapshot
-    profile_loaded_at_ms: i64
     profile_failure_reason: text
 
     static fn create() -> HostedWebContentRegistry:
         HostedWebContentRegistry(
             sessions: [],
-            profile: nil,
+            bookmark_store: nil,
             profile_bookmarks: BrowserBookmarkSnapshot.create([]),
-            profile_hsts: BrowserHstsSnapshot.create([]),
-            profile_loaded_at_ms: 0,
             profile_failure_reason: ""
         )
 
-    static fn create_with_default_profile(
-        wall_clock_ms: i64
-    ) -> HostedWebContentRegistry:
-        match BrowserProfileStore.open_default():
+    static fn create_with_default_bookmark_store() -> HostedWebContentRegistry:
+        match BrowserBookmarkStore.open_default():
             Err(e):
                 var registry = HostedWebContentRegistry.create()
                 registry.profile_failure_reason = e.message()
                 registry
-            Ok(profile):
-                HostedWebContentRegistry.create_with_profile(
-                    profile, wall_clock_ms
+            Ok(bookmark_store):
+                HostedWebContentRegistry.create_with_bookmark_store(
+                    bookmark_store
                 )
 
-    static fn create_with_profile(
-        profile: BrowserProfileStore, wall_clock_ms: i64
+    static fn create_with_bookmark_store(
+        bookmark_store: BrowserBookmarkStore
     ) -> HostedWebContentRegistry:
         var registry = HostedWebContentRegistry.create()
-        match profile.load_bookmarks():
+        match bookmark_store.load_bookmarks():
             Err(e):
-                var opened = profile
-                val _ = opened.close()
-                registry.profile_failure_reason = e.message()
+                var opened = bookmark_store
+                match opened.close():
+                    Err(close_error):
+                        registry.bookmark_store = Some(opened)
+                        registry.profile_failure_reason = (
+                            e.message() + "; close: " + close_error.message()
+                        )
+                    Ok(_):
+                        registry.profile_failure_reason = e.message()
                 registry
             Ok(bookmarks):
-                match profile.load_hsts(wall_clock_ms):
-                    Err(e):
-                        var opened = profile
-                        val _ = opened.close()
-                        registry.profile_failure_reason = e.message()
-                        registry
-                    Ok(hsts):
-                        registry.profile = Some(profile)
-                        registry.profile_bookmarks = bookmarks
-                        registry.profile_hsts = hsts
-                        registry.profile_loaded_at_ms = wall_clock_ms
-                        registry
+                registry.bookmark_store = Some(bookmark_store)
+                registry.profile_bookmarks = bookmarks
+                registry
 
     me _session_index(window_id: i64) -> i32:
         var i = 0
@@ -707,9 +697,12 @@ class HostedWebContentRegistry:
 
     me _ensure(
         window_id: i64, body_html: text, width: i32, height: i32,
-        profile_enabled: bool, wall_clock_ms: i64
+        profile_enabled: bool
     ) -> i32:
-        val use_profile = profile_enabled and self.profile != nil
+        val use_profile = (
+            profile_enabled and self.bookmark_store != nil and
+            self.profile_failure_reason == ""
+        )
         val existing = self._session_index(window_id)
         if existing >= 0:
             var session = self.sessions[existing]
@@ -719,9 +712,6 @@ class HostedWebContentRegistry:
                 session.profile_enabled = true
                 val _ = session.browser.load_bookmark_snapshot(
                     self.profile_bookmarks
-                )
-                val _ = session.browser.load_hsts_snapshot(
-                    self.profile_hsts, wall_clock_ms
                 )
             self.sessions[existing] = session
             return existing
@@ -733,9 +723,6 @@ class HostedWebContentRegistry:
             val _ = session.browser.load_bookmark_snapshot(
                 self.profile_bookmarks
             )
-            val _ = session.browser.load_hsts_snapshot(
-                self.profile_hsts, wall_clock_ms
-            )
         self.sessions.push(session)
         self.sessions.len() - 1
 
@@ -744,7 +731,7 @@ class HostedWebContentRegistry:
         now_ms: i64, profile_enabled: bool
     ) -> bool:
         val index = self._ensure(
-            window_id, body_html, width, height, profile_enabled, now_ms
+            window_id, body_html, width, height, profile_enabled
         )
         var session = self.sessions[index]
         val changed = session.advance_at(now_ms)
@@ -753,8 +740,7 @@ class HostedWebContentRegistry:
 
     me dispatch_pointer(event_id: i64, window_id: i64, body_html: text, width: i32, height: i32, x: i32, y: i32, down: bool) -> HostedWebContentDispatch:
         val index = self._ensure(
-            window_id, body_html, width, height, false,
-            self.profile_loaded_at_ms
+            window_id, body_html, width, height, false
         )
         var session = self.sessions[index]
         val receipt = session.dispatch_pointer_at(event_id, x, y, down)
@@ -845,7 +831,7 @@ class HostedWebContentRegistry:
         val revision_before = session.mutation_revision
         if (not down and control == "favorite" and
             session.profile_enabled):
-            if self.profile == nil:
+            if self.bookmark_store == nil:
                 session.pressed_chrome_control = ""
                 self.sessions[index] = session
                 return HostedWebContentDispatch(
@@ -856,12 +842,12 @@ class HostedWebContentRegistry:
                     mutation_revision: revision_before,
                     reason: "profile-unavailable"
                 )
-            var profile = self.profile.unwrap()
-            match profile.load_bookmarks():
+            var bookmark_store = self.bookmark_store.unwrap()
+            match bookmark_store.load_bookmarks():
                 Err(e):
                     session.pressed_chrome_control = ""
                     self.sessions[index] = session
-                    self.profile = Some(profile)
+                    self.bookmark_store = Some(bookmark_store)
                     self.profile_failure_reason = e.message()
                     return HostedWebContentDispatch(
                         event_id: event_id,
@@ -874,22 +860,22 @@ class HostedWebContentRegistry:
                 Ok(latest):
                     bookmarks_before = latest
                     val _ = session.browser.load_bookmark_snapshot(latest)
-                    self.profile = Some(profile)
+                    self.bookmark_store = Some(bookmark_store)
         val receipt = session.dispatch_chrome_pointer(
             event_id, control, down
         )
         self.sessions[index] = session
         if not down and control == "favorite" and receipt.callback_count > 0:
-            var profile = self.profile.unwrap()
+            var bookmark_store = self.bookmark_store.unwrap()
             val url = session.browser.document_url
-            match profile.toggle_bookmark(url, url):
+            match bookmark_store.toggle_bookmark(url, url):
                 Err(e):
                     val _ = session.browser.load_bookmark_snapshot(
                         bookmarks_before
                     )
                     session.mutation_revision = revision_before
                     self.sessions[index] = session
-                    self.profile = Some(profile)
+                    self.bookmark_store = Some(bookmark_store)
                     self.profile_failure_reason = e.message()
                     return HostedWebContentDispatch(
                         event_id: receipt.event_id,
@@ -912,37 +898,13 @@ class HostedWebContentRegistry:
                         session.browser.bookmark_snapshot()
                     )
                     self.profile_failure_reason = ""
-                    self.profile = Some(profile)
+                    self.bookmark_store = Some(bookmark_store)
         receipt
 
-    me _persist_session(index: i32, wall_clock_ms: i64) -> bool:
-        if index < 0 or index >= self.sessions.len():
-            return true
-        val session = self.sessions[index]
-        if not session.profile_enabled or self.profile == nil:
-            return true
-        var profile = self.profile.unwrap()
-        match profile.save_hsts(
-            session.browser.hsts_snapshot(wall_clock_ms), wall_clock_ms
-        ):
-            Err(e):
-                self.profile = Some(profile)
-                self.profile_failure_reason = e.message()
-                return false
-            Ok(_):
-                self.profile = Some(profile)
-                self.profile_hsts = session.browser.hsts_snapshot(
-                    wall_clock_ms
-                )
-                self.profile_failure_reason = ""
-                true
-
-    me close_window(window_id: i64, wall_clock_ms: i64) -> bool:
+    me close_window(window_id: i64) -> bool:
         val index = self._session_index(window_id)
         if index < 0:
             return true
-        if not self._persist_session(index, wall_clock_ms):
-            return false
         var closed = self.sessions[index]
         closed.cancel_network()
         var retained: [HostedWebContentSession] = []
@@ -954,28 +916,21 @@ class HostedWebContentRegistry:
         self.sessions = retained
         true
 
-    me close(wall_clock_ms: i64) -> bool:
+    me close() -> bool:
         var i = 0
         while i < self.sessions.len():
             var session = self.sessions[i]
             session.cancel_network()
             self.sessions[i] = session
             i = i + 1
-        i = 0
-        while i < self.sessions.len():
-            if self.sessions[i].profile_enabled:
-                if not self._persist_session(i, wall_clock_ms):
-                    return false
-                break
-            i = i + 1
-        if self.profile != nil:
-            var profile = self.profile.unwrap()
-            match profile.close():
+        if self.bookmark_store != nil:
+            var bookmark_store = self.bookmark_store.unwrap()
+            match bookmark_store.close():
                 Err(e):
-                    self.profile = Some(profile)
+                    self.bookmark_store = Some(bookmark_store)
                     self.profile_failure_reason = e.message()
                     return false
                 Ok(_):
-                    self.profile = nil
+                    self.bookmark_store = nil
         self.sessions = []
         true
