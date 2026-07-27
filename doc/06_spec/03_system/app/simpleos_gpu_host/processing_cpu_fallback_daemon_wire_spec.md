@@ -130,18 +130,24 @@ both the optimization and `HOST_GPU_DAEMON_VERIFY`, so the strengthened wrapper
 now rejects it earlier with `daemon-verifier-mode-mismatch`. These values are
 historical repeat baseline evidence, not current-checker or optimized evidence.
 
-A fresh source-matched production daemon remains blocked because the retained
-pure-Simple compiler rejects the valid multiline initializer at
-`src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl:847`. Resume with a compiler
-that admits current source, build the daemon incrementally, and rerun
-`device-warm-production`; no bootstrap is required by this measurement plan.
+A fresh source-matched production daemon remains blocked. Stable-input,
+non-admitted Stage3 candidate
+`c2a638a51df632e27352543a458289e857c16bfefd79e020bcce39c608f6870a`
+clears the prior multiline parser failure. Its retained daemon logs report
+relative resolution of `common.ui.draw_ir`, degradation of
+`Simple2dDrawIrPlan` to `ANY`, and, in another retained log, an empty native
+module-name collision. Diagnose
+`native_entry_closure_common_import_type_loss_2026-07-27.md`, build the daemon
+incrementally, and rerun `device-warm-production`; no bootstrap is required by
+this measurement plan.
 
 The fused copy/validation runtime unit passes 1/1 and the policy source
 contract passes 10/10. Runtime ABI manifest/generated symbol-table tests pass,
-and refreshed capsule SHA-256
-`0efd7e3f0f8e2aeda7eb5720df5c67717348772b56bc29ba4f6efaa174591658`
-exports both checksum helpers. Its pure-Simple native smoke passes exact
-copy/checksum, mismatch, and extra-length rejection. Provenance-bound Stage3
+and strict-probe capsule SHA-256
+`6eadbb64103830416faea595cf6c1df328f9a46ac48e5e764d0a1e7512b8a0b0`
+exports both checksum helpers. Its strict no-stub, entry-closure-pruned
+pure-Simple native smoke passes exact copy/checksum, mismatch, and extra-length
+rejection. Provenance-bound Stage3
 `af6a3e1b19156793bba13f7294ba60319cca1c31abdfffed68a7f49472f862e9`
 still fails at the same `draw_ir_adv.spl:847` parser boundary. The macOS host
 provider's formerly empty class body now has the canonical explicit

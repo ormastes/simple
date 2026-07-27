@@ -107,21 +107,26 @@ overhead, then production mode rejected its comparison records with
 strengthened checker rejects it with `daemon-verifier-mode-mismatch`; those
 numbers are historical baseline only.
 
-Fresh optimized medians remain open. The retained pure-Simple compiler rejects
-the valid multiline initializer at
-`src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl:847`, so it cannot build the
-current daemon closure. Resume with an admitted current-source compiler and the
-second command; do not treat the retained-daemon rejection as performance
-evidence.
+Fresh optimized medians remain open. Stable-input, non-admitted pure-Simple
+Stage3 candidate
+`c2a638a51df632e27352543a458289e857c16bfefd79e020bcce39c608f6870a`
+passes sanity and clears the prior multiline parser failure. Its retained
+daemon logs report relative resolution of `common.ui.draw_ir`, degradation of
+`Simple2dDrawIrPlan` to `ANY`, and, in another retained log, an empty native
+module-name collision. Diagnose
+`native_entry_closure_common_import_type_loss_2026-07-27.md`, rebuild
+incrementally, and run the second command; do not treat retained-daemon output
+as current performance evidence.
 
 The fused runtime helper passes its focused unit 1/1 and the policy contract
 passes 10/10. A newer provenance-bound pure-Simple Stage3 with SHA-256
 `af6a3e1b19156793bba13f7294ba60319cca1c31abdfffed68a7f49472f862e9`
 reproduces the same parser failure, so it is not an admitted daemon producer.
-The refreshed runtime capsule SHA-256 is
-`0efd7e3f0f8e2aeda7eb5720df5c67717348772b56bc29ba4f6efaa174591658`;
-its symbol table includes both checksum helpers, and a two-module pure-Simple
-native probe passes exact copy/checksum, mismatch, and extra-length rejection.
+The strict probe's linked runtime capsule SHA-256 is
+`6eadbb64103830416faea595cf6c1df328f9a46ac48e5e764d0a1e7512b8a0b0`;
+its symbol table includes both checksum helpers, and a strict no-stub,
+entry-closure-pruned two-module pure-Simple native probe passes exact
+copy/checksum, mismatch, and extra-length rejection.
 
 ## Unavailable Protocol
 
