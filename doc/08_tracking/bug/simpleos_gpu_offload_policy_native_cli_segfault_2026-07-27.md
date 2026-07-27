@@ -116,22 +116,27 @@ u32. Source now replaces the million-iteration Simple copy/checksum loop with
 `rt_write_u32s_to_raw_checksum`, which decodes each runtime element once,
 writes exact raw u32 words, and computes the protocol checksum in the same
 pass. Its focused Rust test passes bit-exact, count-bounded, null, and
-out-of-range cases. Runtime archive and daemon live proof remain unbuilt after
-the third cycle, so no exact device-wire receipt or warm timing is claimed.
+out-of-range cases.
 
-## Remaining Gate
+## Result
 
-Publish the same at-threshold success through the daemon wire. The current
-direct receipt closes executor correctness, but not the daemon client path or
-its independent CPU-oracle comparison. Then retain the required warm
-multi-sample medians; the single direct warm receipt does not justify the
-lower-level CUDA round-trip threshold by itself. Resume with one strict
-incremental daemon build from the retained cache, verify its `string_core`
-object has no self-relocations or `jmp`-to-self primitive bodies, then run the
-documented device-warm wrapper command with explicit daemon/probe paths. The
-next bounded session must rebuild the specialized runtime archive with
-`rt_write_u32s_to_raw_checksum`, incrementally relink the isolated daemon, and
-run the exact eight-request gate. Retain the ABI-exact `raw_read_i32` payload
-boundary, concrete Engine2D lifecycle dispatch, and platform-owned render probe.
+The incrementally rebuilt CUDA/Vulkan runtime archive exports
+`rt_write_u32s_to_raw_checksum`, and the isolated daemon relinks with `4
+compiled, 213 cached, 0 failed`. The documented device-warm wrapper passes all
+eight requests: three warmups and five measured exact 1,048,576-element CUDA
+requests with checksum `809508928`, first word `16909060`, positive stable
+handle/identity, and no fallback.
+
+Measured medians are `155110 us` device, `312012 us` round trip, `156902 us`
+non-device overhead, and `82097 us` for the independent CPU oracle. Every
+receipt is correctly classified `available-not-preferred`; correctness and
+device provenance do not override the measured offload policy.
+
+Evidence was built from source revision `1948920dadc4`. Retained logs:
+`build/simpleos_gpu_host/device_warm_wire/runtime-build-bulk-readback.log`,
+`daemon-build-bulk-readback.log`, `wrapper-device-warm-bulk-readback.log`, and
+`daemon-live-bulk-readback.log`. The adjacent
+`evidence-provenance-bulk-readback.env` binds that full revision to SHA-256
+hashes for the runtime archive, daemon, and probe.
 
 Owner: Linux GPU host operator. Final reviewer: high-capability model.

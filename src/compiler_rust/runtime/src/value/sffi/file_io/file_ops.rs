@@ -1711,9 +1711,22 @@ sandbox_lowering:
         assert_eq!(checksum, 16_909_060);
         assert_eq!(unsafe { rt_write_u32s_to_raw_checksum(0, values, 3) }, 0);
         assert_eq!(
+            unsafe { rt_write_u32s_to_raw_checksum(output.as_mut_ptr() as i64, values, -1) },
+            0
+        );
+        assert_eq!(
             unsafe { rt_write_u32s_to_raw_checksum(output.as_mut_ptr() as i64, values, 5) },
             0
         );
+
+        let zero_values = rt_array_new(1);
+        rt_array_push(zero_values, RuntimeValue::from_int(0));
+        let mut zero_output = [7u32];
+        assert_eq!(
+            unsafe { rt_write_u32s_to_raw_checksum(zero_output.as_mut_ptr() as i64, zero_values, 1) },
+            1
+        );
+        assert_eq!(zero_output, [0]);
     }
 
     #[test]

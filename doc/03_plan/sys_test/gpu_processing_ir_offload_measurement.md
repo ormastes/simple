@@ -66,8 +66,14 @@ Its retained candidate returns all 1,048,576 exact values with positive
 provenance and no fallback. Bulk runtime-owned readback conversion reduced its
 cold execution from 1,044,501 us to 593,323 us. A retained-session probe then
 completed the same exact request in 861,499 us cold and 69,331 us warm (12.4x
-faster). Daemon-wire proof and the required warm multi-sample medians remain
-open.
+faster).
+
+The source-matched daemon-wire gate now passes three warmups plus five measured
+1,048,576-element requests. Its measured medians are 155,110 us device,
+312,012 us round trip, 156,902 us non-device overhead, and 82,097 us for the
+independent CPU oracle. Every receipt has exact output/checksum and stable
+positive CUDA provenance. Because device time is slower than the CPU oracle,
+the policy correctly reports `available-not-preferred`.
 
 ## Unavailable Protocol
 

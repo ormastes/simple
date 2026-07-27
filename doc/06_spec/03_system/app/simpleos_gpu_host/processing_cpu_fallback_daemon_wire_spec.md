@@ -92,5 +92,12 @@ shutdown rebuilt at `2 compiled, 215 cached` and restored the valid CUDA
 receipt. Fresh-cache disassembly shows tagged `[u32]` slots being loaded as
 unboxed values in the old per-pixel wire loop. Source now uses one
 runtime-owned bulk copy+checksum call, whose focused Rust unit passes. The
-updated runtime archive and daemon are not rebuilt after the three-cycle cap,
-so no exact daemon device receipt or warm median is claimed.
+specialized CUDA/Vulkan runtime exports that helper, and the isolated daemon
+relinks with `4 compiled, 213 cached, 0 failed`.
+
+The exact device-warm wrapper passes all three warmups plus five measured
+1,048,576-element requests: checksum `809508928`, first output word `16909060`,
+positive stable handle/identity, exact correlation, and no fallback. Medians
+are `155110 us` device, `312012 us` round trip, and `156902 us` non-device
+overhead. The measured-request CPU median is `82097 us`, and all receipts are
+correctly classified `available-not-preferred`.
