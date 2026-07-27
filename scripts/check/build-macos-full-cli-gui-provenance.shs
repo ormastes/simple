@@ -94,6 +94,12 @@ configure_paths() {
     EXECUTION_HISTORY_FACADE_PATH="$EXECUTION_HISTORY_FACADE"
     ES_HISTORY_POLICY_PATH=\
 "$ROOT_DIR/config/security/macos_gui_es_collector_policy.env"
+    ES_HISTORY_COLLECTOR_PATH=\
+"$ROOT_DIR/build/sffi/simple_es_history_collector"
+    ES_HISTORY_COLLECTOR_BUILDER_PATH=\
+"$ROOT_DIR/scripts/check/build-macos-es-history-collector.shs"
+    ES_HISTORY_COLLECTOR_PROVENANCE_PATH=\
+"$ROOT_DIR/build/sffi/simple_es_history_collector.provenance.env"
     BUILD_OUTPUT_REL="build/bootstrap/full/$PLATFORM/simple"
     BUILD_CACHE_REL="build/bootstrap/full/$PLATFORM/provenance/native-cache"
 }
@@ -160,7 +166,11 @@ build_environment_sha256() {
 }
 
 behavior_args_sha256() {
-    hash_args run "$PROBE_PATH" --no-daemon
+    hash_args /bin/sh "$ES_HISTORY_COLLECTOR_BUILDER_PATH" \
+        --exec-verified -- --driver "$DRIVER_PATH" \
+        --events "$BEHAVIOR_TREE_PATH" --receipt "$BEHAVIOR_HANDSHAKE_PATH" \
+        --provenance "$ES_HISTORY_COLLECTOR_PROVENANCE_PATH" \
+        --policy "$ES_HISTORY_POLICY_PATH" -- run "$PROBE_PATH" --no-daemon
 }
 
 behavior_environment_sha256() {
@@ -175,6 +185,7 @@ verify_common_inputs() {
         fail "stage3-facade-not-canonical"
     for input in "$ENTRY_PATH" "$PROBE_PATH" "$NO_DELEGATE_SOURCE_PATH" \
         "$PRODUCER_PATH" "$EXECUTION_HISTORY_FACADE_PATH" "$ES_HISTORY_POLICY_PATH" \
+        "$ES_HISTORY_COLLECTOR_BUILDER_PATH" \
         "$WINIT_PROVIDER" "$RUNTIME_PROVIDER" "$RUNTIME_C_PROVIDER"; do
         [ "$(canonical_file "$input")" = "$input" ] ||
             fail "canonical-input-missing"
@@ -190,7 +201,26 @@ verify_common_inputs() {
 }
 
 run_behavior_probe() {
+    behavior_driver=$1
+    behavior_log=$2
+    behavior_transcript=$3
+    behavior_home=$4
+    behavior_tmp=$5
+    behavior_receipt=$6
+    behavior_events=$7
+    behavior_handshake=$8
     macos_gui_history_require_trust_root "$ROOT_DIR"
+    bootstrap_stage3_run_transcribed "$behavior_transcript" "$ROOT_DIR" \
+        "$behavior_log" "$behavior_home" "$behavior_tmp" "$PATH" \
+        SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_GUI=1 \
+        "SIMPLE_LIB=$ROOT_DIR/src" \
+        "MACOS_GUI_ES_HISTORY_POLICY=$ES_HISTORY_POLICY_PATH" \
+        "MACOS_GUI_ES_HISTORY_POLICY_SHA256=$(hash_file "$ES_HISTORY_POLICY_PATH")" -- \
+        /bin/sh "$ES_HISTORY_COLLECTOR_BUILDER_PATH" \
+        --exec-verified -- --driver "$behavior_driver" \
+        --events "$behavior_events" --receipt "$behavior_handshake" \
+        --provenance "$ES_HISTORY_COLLECTOR_PROVENANCE_PATH" \
+        --policy "$ES_HISTORY_POLICY_PATH" -- run "$PROBE_PATH" --no-daemon
 }
 
 write_manifest() {
@@ -248,8 +278,8 @@ write_manifest() {
         echo "behavior_args_sha256=$(behavior_args_sha256)"
         echo "behavior_environment_sha256=$(behavior_environment_sha256)"
         echo "execution_history_status=pass"
-        echo "execution_history_observer=endpointsecurity-eslogger-v1"
-        echo "execution_history_coverage=root-and-descendants-through-exit"
+        echo "execution_history_observer=endpointsecurity-es-v2"
+        echo "execution_history_coverage=root-and-descendants-through-exit-gap-checked"
         echo "no_bootstrap_delegate_support=b7"
         echo "winit_marker=rt_winit_event_loop_new"
         echo "output_path=$DRIVER_PATH"
@@ -369,9 +399,9 @@ verify_manifest() {
         fail "build-transcript-invalid"
     [ "$(value_of execution_history_status "$receipt")" = pass ] &&
         [ "$(value_of execution_history_observer "$receipt")" = \
-            endpointsecurity-eslogger-v1 ] &&
+        endpointsecurity-es-v2 ] &&
         [ "$(value_of execution_history_coverage "$receipt")" = \
-            root-and-descendants-through-exit ] &&
+            root-and-descendants-through-exit-gap-checked ] &&
         [ "$(value_of no_bootstrap_delegate_support "$receipt")" = b7 ] &&
         [ "$(value_of winit_marker "$receipt")" = rt_winit_event_loop_new ] &&
         [ "$(value_of output_status "$receipt")" = pass ] ||
@@ -403,13 +433,28 @@ verify_manifest() {
         "$verify_behavior_tmp" "$verify_behavior_receipt" \
         "$verify_behavior_tree" "$verify_behavior_handshake" ||
         fail "driver-execution-history-probe-failed"
-    bootstrap_stage3_verify_command_transcript "$BEHAVIOR_TRANSCRIPT_PATH" \
+    macos_gui_history_verify_normalized "$verify_behavior_handshake" \
+        "$DRIVER_PATH" "$(hash_file "$DRIVER_PATH")" ||
+        fail "fresh-execution-history-invalid"
+    macos_gui_history_verify_admitted_binding "$verify_behavior_handshake" \
+        "$ROOT_DIR" || fail "fresh-execution-history-binding-invalid"
+    bootstrap_stage3_verify_command_transcript "$verify_behavior_transcript" \
         "$ROOT_DIR" SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_GUI=1 \
         "SIMPLE_LIB=$ROOT_DIR/src" \
         "MACOS_GUI_ES_HISTORY_POLICY=$ES_HISTORY_POLICY_PATH" \
         "MACOS_GUI_ES_HISTORY_POLICY_SHA256=$(hash_file "$ES_HISTORY_POLICY_PATH")" -- \
-        "$DRIVER_PATH" run "$PROBE_PATH" --no-daemon ||
-        fail "behavior-transcript-invalid"
+        /bin/sh "$ES_HISTORY_COLLECTOR_BUILDER_PATH" \
+        --exec-verified -- --driver "$DRIVER_PATH" \
+        --events "$verify_behavior_tree" --receipt "$verify_behavior_handshake" \
+        --provenance "$ES_HISTORY_COLLECTOR_PROVENANCE_PATH" \
+        --policy "$ES_HISTORY_POLICY_PATH" -- run "$PROBE_PATH" --no-daemon ||
+        fail "fresh-behavior-transcript-invalid"
+    macos_gui_history_remove_executed_snapshot "$verify_behavior_handshake" \
+        "$verify_behavior_handshake.driver-snapshot" ||
+        fail "fresh-executed-snapshot-cleanup-failed"
+    macos_gui_history_remove_collector_private_snapshot \
+        "$verify_behavior_handshake" ||
+        fail "fresh-collector-snapshot-cleanup-failed"
     rm -f "$verify_behavior_log" "$verify_behavior_transcript" \
         "$verify_behavior_receipt" "$verify_behavior_tree" \
         "$verify_behavior_handshake"

@@ -4,7 +4,7 @@
 # There is deliberately no ps/polling or caller-selected collector fallback.
 # Live acceptance remains unavailable until the checked-in policy names a
 # tracked collector source, reproducible manifest, signing team/identifier, and
-# EndpointSecurity entitlement that this verifier knows how to authenticate.
+# EndpointSecurity entitlement that this verifier can authenticate itself.
 
 macos_gui_history_sha256_file() {
     [ -f "$1" ] || return 1
@@ -32,6 +32,33 @@ macos_gui_history_positive_integer() {
         ""|0|*[!0-9]*) return 1 ;;
         *) return 0 ;;
     esac
+}
+
+macos_gui_history_nonnegative_integer() {
+    case "$1" in
+        ""|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+macos_gui_history_file_device() {
+    stat -f %d "$1" 2>/dev/null
+}
+
+macos_gui_history_file_inode() {
+    stat -f %i "$1" 2>/dev/null
+}
+
+macos_gui_history_file_mode() {
+    stat -f %Lp "$1" 2>/dev/null
+}
+
+macos_gui_history_file_flags() {
+    stat -f %f "$1" 2>/dev/null
+}
+
+macos_gui_history_file_owner() {
+    stat -f %u "$1" 2>/dev/null
 }
 
 macos_gui_history_forbidden_role() {
@@ -72,10 +99,11 @@ macos_gui_history_tracked_clean_file() {
     )" ]
 }
 
-# This is the only production trust root.  The policy is itself tracked and
-# equal to HEAD, so an environment variable or generated build/sffi file cannot
-# authorize a collector.  Current status is unavailable because no signing
-# team/entitlement identity is provisioned in this repository.
+# This is the only production trust root. Candidate construction and live
+# admission are deliberately separate: the tracked policy must first be
+# `prepared` to build a candidate, and a later reviewed tracked update must be
+# `admitted` with exact output/manifest pins. The canonical build wrapper owns
+# the non-circular candidate digest and all compiler/SDK/argv/environment checks.
 macos_gui_history_require_trust_root() {
     macos_gui_history_root="$1"
     macos_gui_history_policy_relative=\
@@ -88,7 +116,7 @@ macos_gui_history_require_trust_root() {
         return 125
     }
     [ "$(macos_gui_history_value schema "$macos_gui_history_policy")" = \
-        simple-macos-es-collector-policy-v1 ] || return 125
+        simple-macos-es-collector-policy-v3 ] || return 125
     [ "$(macos_gui_history_value required_events \
         "$macos_gui_history_policy")" = exec,fork,exit ] || return 125
     [ "$(macos_gui_history_value required_entitlement \
@@ -110,23 +138,121 @@ macos_gui_history_require_trust_root() {
             macos_gui_history_sha256_file \
                 "$macos_gui_history_root/$macos_gui_history_source_relative"
         )" ] || return 125
+    macos_gui_history_build_relative="$(macos_gui_history_value \
+        collector_build_script_path "$macos_gui_history_policy")" || return 125
+    macos_gui_history_entitlements_relative="$(macos_gui_history_value \
+        collector_entitlements_path "$macos_gui_history_policy")" || return 125
+    [ "$macos_gui_history_build_relative" = \
+        scripts/check/build-macos-es-history-collector.shs ] || return 125
+    [ "$macos_gui_history_entitlements_relative" = \
+        config/security/macos_gui_es_collector.entitlements.xml ] || return 125
+    macos_gui_history_tracked_clean_file "$macos_gui_history_root" \
+        "$macos_gui_history_build_relative" || return 125
+    macos_gui_history_tracked_clean_file "$macos_gui_history_root" \
+        "$macos_gui_history_entitlements_relative" || return 125
+    [ "$(macos_gui_history_value collector_build_script_sha256 \
+        "$macos_gui_history_policy")" = "$(macos_gui_history_sha256_file \
+        "$macos_gui_history_root/$macos_gui_history_build_relative")" ] || return 125
+    [ "$(macos_gui_history_value collector_entitlements_sha256 \
+        "$macos_gui_history_policy")" = "$(macos_gui_history_sha256_file \
+        "$macos_gui_history_root/$macos_gui_history_entitlements_relative")" ] || return 125
     [ "$(macos_gui_history_value collector_build_manifest_path \
         "$macos_gui_history_policy")" = \
         build/sffi/simple_es_history_collector.provenance.env ] || return 125
     [ "$(macos_gui_history_value collector_output_path \
         "$macos_gui_history_policy")" = \
         build/sffi/simple_es_history_collector ] || return 125
-    [ "$(macos_gui_history_value team_identifier \
-        "$macos_gui_history_policy")" = unassigned ] || return 125
     if [ "$(macos_gui_history_value status "$macos_gui_history_policy")" != \
             admitted ]; then
         echo "macOS GUI execution history: FAIL (tracked policy keeps EndpointSecurity collector unavailable until source, reproducible provenance, team signing identity, and entitlement are admitted)" >&2
         return 125
     fi
-    # No admitted policy exists yet.  When status becomes admitted, this branch
-    # must be extended to authenticate every pinned source/build/signing field.
-    echo "macOS GUI execution history: FAIL (admitted collector policy verifier is not implemented)" >&2
-    return 125
+    [ "$(uname -s)" = Darwin ] || return 125
+    command -v codesign >/dev/null 2>&1 || return 125
+    macos_gui_history_team="$(macos_gui_history_value team_identifier \
+        "$macos_gui_history_policy")" || return 125
+    macos_gui_history_signing_identity="$(macos_gui_history_value signing_identity \
+        "$macos_gui_history_policy")" || return 125
+    case "$macos_gui_history_team" in
+        ""|*[!A-Z0-9]*) return 125 ;;
+    esac
+    [ "${#macos_gui_history_team}" = 10 ] || return 125
+    [ -n "$macos_gui_history_signing_identity" ] && \
+        [ "$macos_gui_history_signing_identity" != unassigned ] || return 125
+    macos_gui_history_manifest="$macos_gui_history_root/$(macos_gui_history_value \
+        collector_build_manifest_path "$macos_gui_history_policy")" ||
+        return 125
+    macos_gui_history_collector="$macos_gui_history_root/$(macos_gui_history_value \
+        collector_output_path "$macos_gui_history_policy")" ||
+        return 125
+    [ "$(macos_gui_history_canonical_file "$macos_gui_history_manifest")" = \
+        "$macos_gui_history_manifest" ] || return 125
+    [ "$(macos_gui_history_canonical_file "$macos_gui_history_collector")" = \
+        "$macos_gui_history_collector" ] || return 125
+    # The wrapper verifies the admitted artifact pins, candidate-policy digest,
+    # exact compiler/codesign binaries, SDK identity, target, argv/environment,
+    # signature, team, and entitlement. A prepared candidate cannot pass this.
+    sh "$macos_gui_history_root/$macos_gui_history_build_relative" --verify \
+        >/dev/null 2>&1 || return 125
+}
+
+# Receipt fields are never a trust root.  Once the policy is admitted they must
+# bind exactly to the policy-pinned collector and generated provenance records.
+macos_gui_history_verify_admitted_binding() {
+    macos_gui_history_receipt="$1"
+    macos_gui_history_root="$2"
+    macos_gui_history_policy=\
+"$macos_gui_history_root/config/security/macos_gui_es_collector_policy.env"
+    macos_gui_history_manifest=\
+"$macos_gui_history_root/build/sffi/simple_es_history_collector.provenance.env"
+    macos_gui_history_collector_snapshot="$(
+        macos_gui_history_value collector_path "$macos_gui_history_receipt"
+    )" || return 1
+    macos_gui_history_collector_private="$(
+        CDPATH= cd -- "$(dirname -- "$macos_gui_history_collector_snapshot")" &&
+            pwd -P
+    )" || return 1
+    case "$(basename -- "$macos_gui_history_collector_private")" in
+        simple-macos-es-builder.*) ;;
+        *) return 1 ;;
+    esac
+    [ "$(basename -- "$macos_gui_history_collector_snapshot")" = \
+        admitted-collector ] &&
+        [ "$(macos_gui_history_canonical_file \
+            "$macos_gui_history_collector_snapshot")" = \
+            "$macos_gui_history_collector_snapshot" ] &&
+        [ "$(macos_gui_history_file_owner \
+            "$macos_gui_history_collector_private")" = "$(id -u)" ] &&
+        [ "$(macos_gui_history_file_mode \
+            "$macos_gui_history_collector_private")" = 700 ] &&
+        [ "$(macos_gui_history_file_mode \
+            "$macos_gui_history_collector_snapshot")" = 500 ] &&
+        [ $(( $(macos_gui_history_file_flags \
+            "$macos_gui_history_collector_snapshot") & 2 )) -eq 2 ] &&
+        [ "$(macos_gui_history_value collector_sha256 \
+            "$macos_gui_history_receipt")" = "$(
+                macos_gui_history_sha256_file \
+                    "$macos_gui_history_collector_snapshot"
+            )" ] &&
+        [ "$(macos_gui_history_value collector_sha256 \
+            "$macos_gui_history_receipt")" = "$(
+                macos_gui_history_value collector_output_sha256 \
+                    "$macos_gui_history_policy"
+            )" ] &&
+        [ "$(macos_gui_history_value collector_provenance_path "$macos_gui_history_receipt")" = \
+        "$macos_gui_history_manifest" ] &&
+        [ "$(macos_gui_history_value collector_provenance_sha256 "$macos_gui_history_receipt")" = \
+        "$(macos_gui_history_sha256_file "$macos_gui_history_manifest")" ] &&
+        [ "$(macos_gui_history_value collector_policy_path "$macos_gui_history_receipt")" = \
+        "$macos_gui_history_policy" ] &&
+        [ "$(macos_gui_history_value collector_policy_sha256 "$macos_gui_history_receipt")" = \
+        "$(macos_gui_history_sha256_file "$macos_gui_history_policy")" ] &&
+        [ "$(macos_gui_history_value collector_signing_identifier "$macos_gui_history_receipt")" = \
+        org.simplelang.gui-es-history ] &&
+        [ "$(macos_gui_history_value collector_team_identifier "$macos_gui_history_receipt")" = \
+        "$(macos_gui_history_value team_identifier "$macos_gui_history_policy")" ] &&
+        [ "$(macos_gui_history_value collector_entitlement_status "$macos_gui_history_receipt")" = pass ] &&
+        [ "$(macos_gui_history_value collector_code_signature_status "$macos_gui_history_receipt")" = pass ]
 }
 
 macos_gui_history_state_read() {
@@ -168,16 +294,18 @@ macos_gui_history_verify_normalized() {
     [ -f "$macos_gui_history_receipt" ] &&
         [ ! -L "$macos_gui_history_receipt" ] || return 1
     [ "$(macos_gui_history_value schema "$macos_gui_history_receipt")" = \
-        macos-es-execution-history-v2 ] || return 1
+        macos-es-execution-history-v3 ] || return 1
     [ "$(macos_gui_history_value observer_kind \
-        "$macos_gui_history_receipt")" = endpointsecurity-eslogger-v1 ] ||
+        "$macos_gui_history_receipt")" = endpointsecurity-es-v2 ] ||
         return 1
     [ "$(macos_gui_history_value coverage "$macos_gui_history_receipt")" = \
-        root-and-descendants-through-exit ] || return 1
+        root-and-descendants-through-exit-gap-checked ] || return 1
     [ "$(macos_gui_history_value finalized "$macos_gui_history_receipt")" = \
         complete ] || return 1
     [ "$(macos_gui_history_value status "$macos_gui_history_receipt")" = pass ] ||
         return 1
+    [ "$(macos_gui_history_value event_sequence_status \
+        "$macos_gui_history_receipt")" = gap-free ] || return 1
     macos_gui_history_root_pid="$(
         macos_gui_history_value root_pid "$macos_gui_history_receipt"
     )" || return 1
@@ -188,6 +316,47 @@ macos_gui_history_verify_normalized() {
     [ "$(macos_gui_history_value root_executable_sha256 \
         "$macos_gui_history_receipt")" = "$macos_gui_history_driver_sha" ] ||
         return 1
+    [ "$(macos_gui_history_value root_executable_device \
+        "$macos_gui_history_receipt")" = "$(
+            macos_gui_history_file_device "$macos_gui_history_driver"
+        )" ] || return 1
+    [ "$(macos_gui_history_value root_executable_inode \
+        "$macos_gui_history_receipt")" = "$(
+            macos_gui_history_file_inode "$macos_gui_history_driver"
+        )" ] || return 1
+    macos_gui_history_executed="$(
+        macos_gui_history_value executed_executable_path \
+            "$macos_gui_history_receipt"
+    )" || return 1
+    [ "$(macos_gui_history_canonical_file "$macos_gui_history_executed")" = \
+        "$macos_gui_history_executed" ] || return 1
+    [ "$(macos_gui_history_value executed_executable_sha256 \
+        "$macos_gui_history_receipt")" = "$(
+            macos_gui_history_sha256_file "$macos_gui_history_executed"
+        )" ] || return 1
+    [ "$(macos_gui_history_value executed_executable_sha256 \
+        "$macos_gui_history_receipt")" = "$macos_gui_history_driver_sha" ] ||
+        return 1
+    [ "$(macos_gui_history_value executed_executable_device \
+        "$macos_gui_history_receipt")" = "$(
+            macos_gui_history_file_device "$macos_gui_history_executed"
+        )" ] || return 1
+    [ "$(macos_gui_history_value executed_executable_inode \
+        "$macos_gui_history_receipt")" = "$(
+            macos_gui_history_file_inode "$macos_gui_history_executed"
+        )" ] || return 1
+    [ "$(macos_gui_history_value executed_executable_mode \
+        "$macos_gui_history_receipt")" = 500 ] &&
+        [ "$(macos_gui_history_file_mode "$macos_gui_history_executed")" = \
+            500 ] || return 1
+    [ "$(macos_gui_history_value executed_executable_immutable_status \
+        "$macos_gui_history_receipt")" = pass ] || return 1
+    macos_gui_history_executed_flags="$(
+        macos_gui_history_file_flags "$macos_gui_history_executed"
+    )" || return 1
+    macos_gui_history_nonnegative_integer \
+        "$macos_gui_history_executed_flags" || return 1
+    [ $((macos_gui_history_executed_flags & 2)) -eq 2 ] || return 1
     macos_gui_history_expected_count="$(
         macos_gui_history_value event_count "$macos_gui_history_receipt"
     )" || return 1
@@ -289,7 +458,7 @@ macos_gui_history_verify_normalized() {
                     [ "$macos_gui_history_pid" = \
                         "$macos_gui_history_root_pid" ] &&
                         [ "$macos_gui_history_path" = \
-                            "$macos_gui_history_driver" ] || {
+                            "$macos_gui_history_executed" ] || {
                             macos_gui_history_result=1
                             break
                         }
@@ -417,6 +586,46 @@ macos_gui_history_verify_normalized() {
     return "$macos_gui_history_result"
 }
 
+macos_gui_history_remove_executed_snapshot() {
+    macos_gui_history_cleanup_receipt="$1"
+    macos_gui_history_cleanup_expected="$2"
+    macos_gui_history_cleanup_path="$(
+        macos_gui_history_value executed_executable_path \
+            "$macos_gui_history_cleanup_receipt"
+    )" || return 1
+    [ "$macos_gui_history_cleanup_path" = \
+        "$macos_gui_history_cleanup_expected" ] || return 1
+    [ "$(macos_gui_history_canonical_file \
+        "$macos_gui_history_cleanup_path")" = \
+        "$macos_gui_history_cleanup_path" ] || return 1
+    chflags nouchg "$macos_gui_history_cleanup_path" || return 1
+    rm -f "$macos_gui_history_cleanup_path"
+}
+
+macos_gui_history_remove_collector_private_snapshot() {
+    macos_gui_history_cleanup_receipt="$1"
+    macos_gui_history_cleanup_collector="$(
+        macos_gui_history_value collector_path \
+            "$macos_gui_history_cleanup_receipt"
+    )" || return 1
+    [ "$(basename -- "$macos_gui_history_cleanup_collector")" = \
+        admitted-collector ] || return 1
+    macos_gui_history_cleanup_private="$(
+        CDPATH= cd -- "$(dirname -- "$macos_gui_history_cleanup_collector")" &&
+            pwd -P
+    )" || return 1
+    case "$(basename -- "$macos_gui_history_cleanup_private")" in
+        simple-macos-es-builder.*) ;;
+        *) return 1 ;;
+    esac
+    [ "$(macos_gui_history_file_owner \
+        "$macos_gui_history_cleanup_private")" = "$(id -u)" ] &&
+        [ "$(macos_gui_history_file_mode \
+            "$macos_gui_history_cleanup_private")" = 700 ] || return 1
+    chflags -R nouchg "$macos_gui_history_cleanup_private" || return 1
+    rm -rf "$macos_gui_history_cleanup_private"
+}
+
 macos_gui_history_verify() {
     macos_gui_history_receipt="$1"
     macos_gui_history_driver="$2"
@@ -424,5 +633,7 @@ macos_gui_history_verify() {
     macos_gui_history_root="$4"
     macos_gui_history_require_trust_root "$macos_gui_history_root" || return $?
     macos_gui_history_verify_normalized "$macos_gui_history_receipt" \
-        "$macos_gui_history_driver" "$macos_gui_history_driver_sha"
+        "$macos_gui_history_driver" "$macos_gui_history_driver_sha" || return 1
+    macos_gui_history_verify_admitted_binding "$macos_gui_history_receipt" \
+        "$macos_gui_history_root"
 }
