@@ -43,6 +43,11 @@ Current preparation: cross-ISA owner compilation and QEMU x86/NEON/RVV target
 binaries pass. RenderDoc v1.44 source and rootless Linux dependencies are
 prepared, but no external-host row is promoted.
 
+Full-system QEMU remains postponed: guest-local `uname` cannot distinguish a
+VM from physical hardware. Promotion from such guests needs an external native
+producer attestation bound into the SIMD frame receipt. User-mode QEMU/binfmt
+is already classified as `emulated` and cannot promote a host row.
+
 The current diagnostic runner cannot replace the Stage-4 row: interpreter
 execution stops at its stale `rt_is_interpreter_runtime` extern table, while
 native SSpec mode delegates to the forbidden Rust seed and omits the source

@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -212,12 +212,42 @@ expect(host_readback_evidence_passes(complete + "\nlinux_hosted_wm_live_window_i
 
 ### host evidence classification
 
+#### admits only retained native SIMD receipts across coordinator architectures
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val arm = host_simd_capability_row(
+    "arm_simd", complete_simd_evidence("aarch64", "neon"),
+    "aarch64", "neon", "build/evidence/arm.env"
+)
+val riscv = host_simd_capability_row(
+    "riscv_simd", complete_simd_evidence("riscv64", "rvv"),
+    "riscv64", "rvv", "build/evidence/riscv.env"
+)
+val emulated = host_simd_capability_row(
+    "arm_simd",
+    complete_simd_evidence("aarch64", "neon").replace("execution_environment=native_host", "execution_environment=emulated"),
+    "aarch64", "neon", "build/evidence/arm.env"
+)
+expect(arm.status).to_equal("pass")
+expect(riscv.status).to_equal("pass")
+expect(emulated.status).to_equal("blocked")
+expect(emulated.reason).to_equal("complete-retained-native-aarch64-simd-frame-evidence-required")
+```
+
+</details>
+
 #### requires the complete retained x86 SIMD rendering receipt
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 41 lines folded for reproduction.
+Runnable source: 42 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -231,6 +261,7 @@ expect(host_x86_simd_evidence_passes(complete.replace("status=pass", "status=fai
 expect(host_x86_simd_evidence_passes(complete.replace("simple_bin_status=pass", "simple_bin_status=fail"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("arch=x86_64", "arch=aarch64"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("feature=avx2", "feature=scalar"))).to_be(false)
+expect(host_x86_simd_evidence_passes(complete.replace("execution_environment=native_host", "execution_environment=emulated"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("native_simd_executed=true", "native_simd_executed=false"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("native_simd_bit_exact=true", "native_simd_bit_exact=false"))).to_be(false)
 expect(host_x86_simd_evidence_passes(complete.replace("native_simd_hits=2", "native_simd_hits=0"))).to_be(false)
@@ -429,8 +460,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

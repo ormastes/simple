@@ -8,6 +8,7 @@ use common.ui.host_env_contract.{
     host_display_input_evidence_passes,
     host_readback_evidence_passes,
     host_renderdoc_evidence_passes,
+    host_simd_capability_row,
     host_simd_evidence_passes,
     host_vulkan_evidence_passes,
     host_x86_simd_evidence_passes
@@ -96,6 +97,7 @@ fn complete_simd_evidence(arch: text = "x86_64", feature: text = "avx2") -> text
         "cpu_simd_evidence_frame_receipt_sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n" +
         "cpu_simd_evidence_arch=" + arch + "\n" +
         "cpu_simd_evidence_feature=" + feature + "\n" +
+        "cpu_simd_evidence_execution_environment=native_host\n" +
         "cpu_simd_evidence_checksum=99\n" +
         "cpu_simd_evidence_native_simd_executed=true\n" +
         "cpu_simd_evidence_native_simd_bit_exact=true\n" +
@@ -259,6 +261,25 @@ describe "live framebuffer evidence classification":
         expect(host_readback_evidence_passes(complete + "\nlinux_hosted_wm_live_window_input_revision=9")).to_be(false)
 
 describe "host evidence classification":
+    it "admits only retained native SIMD receipts across coordinator architectures":
+        val arm = host_simd_capability_row(
+            "arm_simd", complete_simd_evidence("aarch64", "neon"),
+            "aarch64", "neon", "build/evidence/arm.env"
+        )
+        val riscv = host_simd_capability_row(
+            "riscv_simd", complete_simd_evidence("riscv64", "rvv"),
+            "riscv64", "rvv", "build/evidence/riscv.env"
+        )
+        val emulated = host_simd_capability_row(
+            "arm_simd",
+            complete_simd_evidence("aarch64", "neon").replace("execution_environment=native_host", "execution_environment=emulated"),
+            "aarch64", "neon", "build/evidence/arm.env"
+        )
+        expect(arm.status).to_equal("pass")
+        expect(riscv.status).to_equal("pass")
+        expect(emulated.status).to_equal("blocked")
+        expect(emulated.reason).to_equal("complete-retained-native-aarch64-simd-frame-evidence-required")
+
     it "requires the complete retained x86 SIMD rendering receipt":
         val complete = complete_simd_evidence()
         expect(host_x86_simd_evidence_passes(complete)).to_be(true)
@@ -270,6 +291,7 @@ describe "host evidence classification":
         expect(host_x86_simd_evidence_passes(complete.replace("simple_bin_status=pass", "simple_bin_status=fail"))).to_be(false)
         expect(host_x86_simd_evidence_passes(complete.replace("arch=x86_64", "arch=aarch64"))).to_be(false)
         expect(host_x86_simd_evidence_passes(complete.replace("feature=avx2", "feature=scalar"))).to_be(false)
+        expect(host_x86_simd_evidence_passes(complete.replace("execution_environment=native_host", "execution_environment=emulated"))).to_be(false)
         expect(host_x86_simd_evidence_passes(complete.replace("native_simd_executed=true", "native_simd_executed=false"))).to_be(false)
         expect(host_x86_simd_evidence_passes(complete.replace("native_simd_bit_exact=true", "native_simd_bit_exact=false"))).to_be(false)
         expect(host_x86_simd_evidence_passes(complete.replace("native_simd_hits=2", "native_simd_hits=0"))).to_be(false)

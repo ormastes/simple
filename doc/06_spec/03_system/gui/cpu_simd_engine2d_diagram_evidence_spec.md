@@ -134,7 +134,7 @@ mismatches and records the exact-bitmap no-blur policy.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 49 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -160,6 +160,7 @@ else:
     expect(stdout).to_contain("cpu_simd_evidence_canonical_source_sha256=")
     expect(stdout).to_contain("cpu_simd_evidence_compiler_sha256=")
     expect(stdout).to_contain("cpu_simd_evidence_frame_receipt_sha256=")
+    expect(stdout).to_contain("cpu_simd_evidence_execution_environment=native_host")
     expect(stdout).to_contain("cpu_simd_evidence_policy=exact-bitmap-no-blur-no-tolerance")
     expect(stdout).to_contain("cpu_simd_evidence_blur_or_tolerance_used=false")
     expect(stdout).to_contain("cpu_simd_evidence_diagram_pixel_count=192")

@@ -31,8 +31,10 @@ checksums and hits, equal expected/actual checksums, zero mismatches, the
 no-blur/no-tolerance policy, and lower-hex SHA-256 identities for the canonical
 evidence source, selected Simple compiler, and recomputed frame receipt. ARM
 and RISC-V consume their exact matrix child `evidence.env`; aggregate substring
-markers and capability-only probes cannot pass. QEMU parity remains an
-actionable blocker until the matching native host consumes that same receipt.
+markers and capability-only probes cannot pass. The receipt records and hashes
+whether its source shell architecture matched the executed ISA. Retained
+`native_host` receipts may be aggregated anywhere; QEMU/emulated receipts stay
+blocked.
 
 The Vulkan row accepts only the canonical readback report with an overall and
 spec status of `pass`, Vulkan availability/backend identity, exercised present

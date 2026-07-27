@@ -39,14 +39,14 @@ expect(source).to_contain(
 expect(source).to_contain(
     "val RISCV_SIMD_PATH = \"build/cpu-simd-engine2d-arch-matrix/riscv64/out/evidence.env\"")
 expect(source).to_contain("if host_x86_simd_evidence_passes(cpu_simd):")
-expect(source).to_contain("val valid = host_simd_evidence_passes(evidence, arch, feature)")
-expect(source).to_contain("arm_simd, \"aarch64\", \"neon\", ARM_SIMD_PATH")
-expect(source).to_contain("riscv_simd, \"riscv64\", \"rvv\", RISCV_SIMD_PATH")
+expect(source).to_contain("host_simd_capability_row(")
+expect(source).to_contain("\"arm_simd\", arm_simd, \"aarch64\", \"neon\", ARM_SIMD_PATH")
+expect(source).to_contain("\"riscv_simd\", riscv_simd, \"riscv64\", \"rvv\", RISCV_SIMD_PATH")
 expect(source).to_contain(
     "HostCapabilityRow.create(\"x86_simd\", \"pass\", \"\", CPU_SIMD_PATH, \"\")")
-expect(source).to_contain("HostCapabilityRow.create(name, \"pass\", \"\", path, \"\")")
 expect(source.contains("matrix.contains(")).to_equal(false)
 expect(source.contains("native_simd_pixel_evidence")).to_equal(false)
+expect(source.contains("detect_simd_level")).to_equal(false)
 expect(source).to_contain("if env.ready():")
 expect(source.contains("if env.validation_reason() == \"\":")).to_equal(false)
 ```

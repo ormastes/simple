@@ -881,3 +881,8 @@ Tracking split:
   now requires positive clear/rect pixel counts, exact expected/actual
   checksums, zero mismatches, stable device identity, no tolerance, and the
   CPU/Vulkan parity exit in addition to strict device-origin provenance.
+- simd-origin: Replaced the coordinator-architecture proxy with receipt-owned
+  execution provenance. The producer compares shell and executed architectures,
+  binds `native_host` or `emulated` into the frame hash, and the aggregate
+  accepts retained native ARM/RISC-V receipts from any coordinator while
+  keeping emulated receipts blocked.

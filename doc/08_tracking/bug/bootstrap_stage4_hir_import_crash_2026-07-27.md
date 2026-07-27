@@ -49,6 +49,19 @@ through partial/header-only import facades.
 - Follow-up log:
   `build/bootstrap/cosmos-production-20260727-current/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`
 
+An additional focused reproducer on 2026-07-27 was:
+
+```text
+release/x86_64-unknown-linux-gnu/simple check src/lib/common/ui/host_env_contract.spl src/app/test/test_host_env.spl
+Checking src/lib/common/ui/host_env_contract.spl...
+exit 139
+```
+
+It was not retried; shell/static validation covered the pending host-evidence
+change instead. An earlier strict-wrapper attempt did not reach Stage 4 because
+a tracked documentation edit changed the dirty-state fingerprint during
+provenance measurement; Stage 2 and Stage 3 had already passed sanity.
+
 ## Required Fix
 
 Preserve the nil-dictionary regression as RED until native reference semantics

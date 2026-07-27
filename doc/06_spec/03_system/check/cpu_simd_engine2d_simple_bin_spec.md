@@ -93,7 +93,7 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/cpu_simd_engine2d_simple_bin
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 52 lines folded for reproduction.
+Runnable source: 54 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -144,6 +144,8 @@ expect(script).to_contain("cmp -s \"$CANONICAL_EVIDENCE_SRC\" \"$EVIDENCE_SRC\""
 expect(script).to_contain("\"$COPIED_SOURCE_SHA256\" != \"$CANONICAL_SOURCE_SHA256\"")
 expect(script).to_contain("cpu_simd_evidence_compiler_sha256=")
 expect(script).to_contain("cpu_simd_evidence_frame_receipt_sha256=")
+expect(script).to_contain("cpu_simd_evidence_execution_environment=")
+expect(script).to_contain("EXECUTION_ENVIRONMENT=native_host")
 expect(script).to_contain("REASON=simd-frame-provenance-invalid")
 expect(script).to_contain("REASON=runtime-arch-mismatch")
 expect(script.contains("cat >\"$EVIDENCE_SRC\"")).to_equal(false)
@@ -188,7 +190,7 @@ expect(src_code).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 60 lines folded for reproduction.
+Runnable source: 61 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -218,6 +220,7 @@ expect(script).to_contain("runtime-arch-mismatch")
 expect(script).to_contain("simple-bin-path-mismatch")
 expect(script).to_contain("frame-receipt-invalid")
 expect(script).to_contain("frame_receipt_sha256")
+expect(script).to_contain("execution_environment")
 expect(script).to_contain("target-binary-builds-and-rendered-frames-pass")
 
 val runtime = file_read("src/runtime/runtime_simd_dispatch.c")

@@ -91,9 +91,11 @@ the same fast memory operations.
 
 ## Host Rows
 
-Linux x86 is the first mandatory live slice. ARM NEON, RISC-V RVV, browser
-Vulkan, and RenderDoc-native rows remain active blocked rows with exact resume
-commands; emulation and source inspection are correctness support only.
+Linux x86 is the first mandatory live slice. ARM NEON and RISC-V RVV accept
+complete retained `native_host` receipts on any coordinator; absent or
+emulated receipts remain active blocked rows with exact resume commands.
+Browser Vulkan and RenderDoc-native rows use their existing retained evidence.
+Emulation and source inspection alone are correctness support only.
 
 ## SimpleOS Remote-Client Admission
 
