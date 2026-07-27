@@ -34,6 +34,8 @@ SIMPLE_LIB=src bin/simple test \
 5. Each process merges stdout and stderr and emits exactly one anchored native
    or recovery receipt; an otherwise valid receipt cannot hide a contradictory
    second receipt on either stream.
+6. Storage-buffer download inserts a compute-shader-write/transfer-write to
+   transfer-read buffer barrier before the staging copy.
 
 ## Current Evidence
 
@@ -51,6 +53,15 @@ The checker now requires exactly one fully anchored receipt from every child.
 The focused source contract passes 3/3, and the current recovery artifact
 passes the stricter live wrapper when selected through
 `PROCESSING_VULKAN_FAULT_PROBE_BIN`.
+
+After adding the explicit storage readback barrier, the focused runtime mask
+unit passes 1/1. A strict no-stub, entry-closure probe relink against runtime
+archive SHA-256
+`5c7c5cf5eda02bf5e81816f80e135c257da5aecd1392fcc596beeb54e797d3b5`
+passes the canonical live wrapper: one exact 64-value receipt, all five typed
+faults, and submit-failure recovery retain RTX A6000 identity `666008366`.
+Compute and transfer submissions use the same mutex for their intentionally
+shared `VkQueue`, preserving Vulkan's external-synchronization requirement.
 
 The selected identity matches the host's NVIDIA RTX A6000 driver/device
 properties. Runtime-owned UTF-16 hashing avoids converting selected-device

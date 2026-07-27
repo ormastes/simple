@@ -38,10 +38,16 @@ status `0` is safe to tear down but ineligible for a receipt, and status `-1`
 transfers its uniquely owned buffer, pipeline, and shader to the canonical
 Vulkan dependency quarantine while the native runtime retains command/fence
 ownership. The owner reaps only after device-idle and gates shutdown until all
-releases succeed. The SimpleOS host service accepts the existing bounded
+releases succeed. Storage-buffer transfer work shares the compute queue and its
+single submission mutex, and
+readback inserts a buffer memory barrier from compute shader writes (and prior
+transfer writes) to transfer reads before copying into host-visible staging
+memory. This ordering is part of the portable readback contract; a completed
+fence without the access dependency is insufficient. The SimpleOS host service accepts the existing bounded
 wire command only after Vulkan negotiation, compares device readback with the
-CPU oracle, and reports device provenance. This is not yet the compiler MIR
-bridge, public `std.processing` API, CUDA/Metal backend, or `simplegpu64`.
+CPU oracle, and reports device provenance. Native CUDA and Metal FillU32
+adapters also exist; the compiler MIR bridge, public `std.processing` API, and
+`simplegpu64` remain open.
 
 | Area | Existing repo evidence | Design consequence |
 |------|------------------------|--------------------|

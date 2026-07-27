@@ -24,22 +24,25 @@ SIMPLE_LIB=src bin/simple test \
    `SIMPLE_GPU_FAULT_INJECT_SKIP_MATCHES=1` skips only the first matching
    invocation, allowing HELLO admission before an injected request failure;
    changing the exact backend/phase target resets that delay.
-4. Vulkan and Metal return non-owning device provenance rather than freed
+4. Metal reports an unavailable runtime as `metal-unavailable` before
+   attempting initialization; initialization or zero-device failure remains
+   `metal-init-failed`.
+5. Vulkan and Metal return non-owning device provenance rather than freed
    resource identifiers.
-5. The prepared Metal success probe requires exact FillU32 output and checksum
+6. The prepared Metal success probe requires exact FillU32 output and checksum
    `135272480`; equal-length corrupt readback cannot pass.
-6. Branch-local ordering checks prove Metal cleanup precedes each queue,
+7. Branch-local ordering checks prove Metal cleanup precedes each queue,
    shader, pipeline, allocation, submit, dispatch, readback, size-mismatch,
    mismatch-injection, and success return.
-7. CUDA request cleanup frees session-owned device memory and argument/host
+8. CUDA request cleanup frees session-owned device memory and argument/host
    allocations before every post-context exit; the persistent executor owns
    module and context lifetime.
-8. Vulkan branch-bounded checks require complete release sequences for known
+9. Vulkan branch-bounded checks require complete release sequences for known
    completion and dependency quarantine for completion-unknown dispatch.
-9. CUDA keeps real dispatch and readback failures distinct.
+10. CUDA keeps real dispatch and readback failures distinct.
 
 This is a host-independent source contract. It does not replace live device
 execution.
 
-Execution status: Linux Rust-seed interpreter pass, 9/9. Prepared-host Metal
+Execution status: Linux Rust-seed interpreter pass, 10/10. Prepared-host Metal
 failure injection remains pending on macOS.

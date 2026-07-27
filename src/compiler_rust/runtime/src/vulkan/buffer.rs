@@ -81,9 +81,39 @@ fn checked_upload_end(buffer_size: u64, data_len: usize, offset: u64) -> VulkanR
     Ok(end)
 }
 
+fn download_barrier_masks(
+    usage: BufferUsage,
+) -> (
+    vk::PipelineStageFlags,
+    vk::AccessFlags,
+    vk::PipelineStageFlags,
+    vk::AccessFlags,
+) {
+    let mut src_stage = vk::PipelineStageFlags::empty();
+    let mut src_access = vk::AccessFlags::empty();
+    if usage.storage {
+        src_stage |= vk::PipelineStageFlags::COMPUTE_SHADER;
+        src_access |= vk::AccessFlags::SHADER_WRITE;
+    }
+    if usage.transfer_dst {
+        src_stage |= vk::PipelineStageFlags::TRANSFER;
+        src_access |= vk::AccessFlags::TRANSFER_WRITE;
+    }
+    if src_stage.is_empty() {
+        src_stage = vk::PipelineStageFlags::ALL_COMMANDS;
+        src_access = vk::AccessFlags::MEMORY_WRITE;
+    }
+    (
+        src_stage,
+        src_access,
+        vk::PipelineStageFlags::TRANSFER,
+        vk::AccessFlags::TRANSFER_READ,
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{checked_upload_end, BufferUsage};
+    use super::{checked_upload_end, download_barrier_masks, BufferUsage};
     use ash::vk;
 
     #[test]
@@ -109,6 +139,18 @@ mod tests {
         assert_eq!(checked_upload_end(16, 0, 16).unwrap(), 16);
         assert!(checked_upload_end(16, 2, 15).is_err());
         assert!(checked_upload_end(16, 1, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn storage_download_barrier_makes_compute_writes_visible_to_transfer() {
+        let (src_stage, src_access, dst_stage, dst_access) = download_barrier_masks(BufferUsage::storage());
+
+        assert!(src_stage.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
+        assert!(src_stage.contains(vk::PipelineStageFlags::TRANSFER));
+        assert!(src_access.contains(vk::AccessFlags::SHADER_WRITE));
+        assert!(src_access.contains(vk::AccessFlags::TRANSFER_WRITE));
+        assert_eq!(dst_stage, vk::PipelineStageFlags::TRANSFER);
+        assert_eq!(dst_access, vk::AccessFlags::TRANSFER_READ);
     }
 }
 
@@ -260,8 +302,26 @@ impl VulkanBuffer {
         let cmd = self.device.begin_transfer_command()?;
 
         let region = vk::BufferCopy::default().size(size);
+        let (src_stage, src_access, dst_stage, dst_access) = download_barrier_masks(self.usage);
 
         unsafe {
+            let barrier = vk::BufferMemoryBarrier::default()
+                .src_access_mask(src_access)
+                .dst_access_mask(dst_access)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(self.buffer)
+                .offset(0)
+                .size(size);
+            self.device.handle().cmd_pipeline_barrier(
+                cmd,
+                src_stage,
+                dst_stage,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[barrier],
+                &[],
+            );
             self.device
                 .handle()
                 .cmd_copy_buffer(cmd, self.buffer, staging.handle(), &[region]);

@@ -25,7 +25,6 @@ pub struct VulkanDevice {
 
     // Queues
     compute_queue: Mutex<vk::Queue>,
-    transfer_queue: Mutex<vk::Queue>,
     #[cfg(feature = "vulkan")]
     graphics_queue: Option<Mutex<vk::Queue>>,
     #[cfg(feature = "vulkan")]
@@ -150,8 +149,6 @@ impl VulkanDevice {
 
         // Get queues
         let compute_queue = unsafe { device.get_device_queue(compute_family, 0) };
-        let transfer_queue = unsafe { device.get_device_queue(transfer_family, 0) };
-
         #[cfg(feature = "vulkan")]
         let graphics_queue = graphics_family.map(|family| unsafe { device.get_device_queue(family, 0) });
 
@@ -229,7 +226,6 @@ impl VulkanDevice {
             #[cfg(feature = "vulkan")]
             present_queue_family: present_family,
             compute_queue: Mutex::new(compute_queue),
-            transfer_queue: Mutex::new(transfer_queue),
             #[cfg(feature = "vulkan")]
             graphics_queue: graphics_queue.map(Mutex::new),
             #[cfg(feature = "vulkan")]
@@ -384,7 +380,8 @@ impl VulkanDevice {
         let cmd_buffers = [cmd];
         let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
-        let queue = self.transfer_queue.lock();
+        // Both command roles use the same VkQueue, which requires one shared lock.
+        let queue = self.compute_queue.lock();
 
         unsafe {
             self.device

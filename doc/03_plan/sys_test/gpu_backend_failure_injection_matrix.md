@@ -78,7 +78,7 @@ future adapter hook cannot silently cover only one implementation.
 |---|---|---|---|---|
 | Unavailable | Guarded `unavailable` phase before `vulkan_init`; render admission also reaches `_create_render_backend` `Err` | `unsupported`; `backend=unavailable`; handle `0`; no device readback | Do not promote an unavailable request to pass or silently rewrite `batch.backend` | Source-matched native phase passes with exact reason and zero provenance |
 | Init/submit | Init: `vulkan_alloc_storage`, `vulkan_compile_spirv`, `vulkan_create_pipeline_with_push`; submit: `vulkan_sffi_dispatch_buffer_compute_checked` | `fail`; `backend=vulkan`; wire reason `16` for submit/dispatch; handle `0`; no device readback | Assert no positive provenance/identity, no device readback, and no pass status | Source-matched native init and submit phases pass |
-| Readback | `vulkan_sffi_read_buffer_bytes` and `bytes.len() == byte_count`; render path `engine.read_pixels_with_source` | `fail`; wire reason `17`; handle `0`; no output checksum | Reject short/empty bytes and every pass whose source is not device readback | Source-matched native readback phase passes |
+| Readback | `VulkanBuffer::copy_to_staging` inserts compute-shader-write/transfer-write -> transfer-read synchronization before `vulkan_sffi_read_buffer_bytes`; compute and transfer submissions share one mutex for their common queue; then require `bytes.len() == byte_count`; render path `engine.read_pixels_with_source` | `fail`; wire reason `17`; handle `0`; no output checksum | Reject unsynchronized, short, or empty bytes and every pass whose source is not device readback | Barrier mask unit passes 1/1; strict relinked native exact readback and fault phase pass on RTX A6000 |
 | Mismatch | Processing `processing_ir_output_matches(ir, values)`; Draw IR canonical checksum check before render | `fail`; wire reason `11`; handle `0`; no device-backed pass | Assert mismatch is non-pass and forged output is rejected | Source-matched native mismatch phase passes |
 | Explicit fallback | `_process_request` calls `_processing_cpu_fallback` after executor failure or mismatch only when `--processing-fallback=cpu` | `fallback`; CPU readback; original GPU reason; zero native handle/identity; correlated generation/run/frame/backend | Reject a CPU-backed `pass`; accept fallback only when policy explicitly requests it and correlation fields match | Policy and guest wire validator implemented; end-to-end daemon wire run pending |
 
@@ -86,7 +86,7 @@ future adapter hook cannot silently cover only one implementation.
 
 | Fault | Concrete injection point | Status and receipt fields | Fail-closed assertion | State |
 |---|---|---|---|---|
-| Unavailable | Guarded `unavailable` phase before Metal availability/init; render creation is the platform Engine2D owner | `unsupported`; `backend=unavailable`; handle `0`; no device readback | Linux/unavailable output is not a Metal pass; reject any pass without Metal provenance, identity, and device readback | Guarded seam implemented; prepared-macOS live run pending |
+| Unavailable | Guarded `unavailable` phase before Metal availability/init; actual `metal_sffi_is_available() == false` returns `metal-unavailable`; render creation is the platform Engine2D owner | `unsupported`; `backend=unavailable`; handle `0`; no device readback | Linux/unavailable output is not a Metal pass; reject any pass without Metal provenance, identity, and device readback | Guarded seam and runtime-unavailable distinction implemented; prepared-macOS live run pending |
 | Init/submit | Init: `metal_sffi_create_device`, queue, shader, pipeline, or allocation; submit: `metal_sffi_run_compute_frame` | `fail`; `backend=metal`; non-empty init/submit reason; handle `0`; no device readback | Accept only as failed; assert no pass, positive provenance, or device readback is emitted after the injected error | Guarded init/submit seams implemented; prepared-macOS live run pending |
 | Readback | `metal_buffer_download_ptr`, exact `processing_ir_output_matches`, and checksum `135272480`; render `read_pixels_with_source` | Success requires eight exact values, fixed checksum, and positive provenance; failure has `reason=readback-failed` or `readback-size-mismatch`, handle `0`, and zero output | Reject short or equal-length corrupt readback, absent checksum, absent identity, or any source other than `device_readback` | Host-independent exact-output contract passes; prepared-macOS live run pending |
 | Mismatch | Host `processing_ir_output_matches(ir, values)` / Draw IR canonical checksum; synthetic checker `mismatch` receipt | `fail`; `backend=metal`; `reason=checksum-mismatch`; handle `0`; no device-backed pass | Assert failed status and exact reason; reject CPU masquerading and altered output checksum | Guarded mismatch seam implemented after valid readback size; prepared-macOS live run pending |
@@ -178,6 +178,8 @@ reason `16`, CPU source `2`, zero handle/identity, 32 bytes, and checksum
 success/readback-failure/recovery sequence with stable device identity. Linux
 Vulkan passes unavailable, init, submit, readback, and mismatch injection
 through the retained native transport, plus its same-process
-success/failure/recovery sequence. The remaining evidence gap is the Metal live
-row on prepared macOS. Linux may run the
+success/failure/recovery sequence. Its storage-buffer readback now carries an
+explicit shader-write/transfer-write to transfer-read barrier, and the strict
+relinked probe passes on the RTX A6000. The remaining evidence gap is the Metal
+live row on prepared macOS. Linux may run the
 validator and source-contract cases, but cannot close Metal runtime evidence.
