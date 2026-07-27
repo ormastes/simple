@@ -1111,7 +1111,7 @@ impl NativeProjectBuilder {
         if !effective_target().is_host() {
             return Ok(None);
         }
-        let Some(registry_sdn) = security_registry_sdn_from_sources(file_sources)? else {
+        let Some(registry_sdn) = security_registry_sdn_from_sources(file_sources, Some(&self.project_root))? else {
             return Ok(None);
         };
 
@@ -1162,7 +1162,10 @@ extern "C" void __module_init_security_registry(void) {{
     }
 }
 
-fn security_registry_sdn_from_sources(file_sources: &[(PathBuf, String)]) -> Result<Option<String>, String> {
+fn security_registry_sdn_from_sources(
+    file_sources: &[(PathBuf, String)],
+    project_hint: Option<&Path>,
+) -> Result<Option<String>, String> {
     let mut registry_sdn = String::new();
     for (path, source) in file_sources {
         if !source_may_declare_security(source) {
@@ -1175,7 +1178,7 @@ fn security_registry_sdn_from_sources(file_sources: &[(PathBuf, String)]) -> Res
             .parse()
             .map_err(|err| format!("parse security registry source {}: {}", path.display(), err))?;
         crate::pipeline::cfg_strip::strip_inactive_cfg_arch_fns(&mut ast, effective_target().arch);
-        let module = crate::hir::lower_with_context_lenient(&ast, path)
+        let module = crate::hir::lower_with_context_lenient_and_project_hint(&ast, path, project_hint)
             .map_err(|err| format!("lower security registry source {}: {}", path.display(), err))?;
         let inventory = build_security_inventory(&module);
         if inventory.security_aop_sdn.contains("require_policy:")
@@ -1216,7 +1219,25 @@ fn source_may_emit_inline_asm_sidecar(source: &str) -> bool {
 fn source_may_declare_security(source: &str) -> bool {
     source.lines().any(|line| {
         let trimmed = line.trim_start();
-        trimmed.starts_with("security ") || trimmed.starts_with("sandbox ") || trimmed.starts_with("capability ")
+        ["security", "sandbox", "capability"].iter().any(|keyword| {
+            let Some(rest) = trimmed.strip_prefix(keyword) else {
+                return false;
+            };
+            if rest.starts_with(':') {
+                return true;
+            }
+            if !rest.chars().next().is_some_and(|ch| ch.is_ascii_whitespace()) {
+                return false;
+            }
+            let rest = rest.trim_start();
+            let Some((head, _)) = rest.split_once(':') else {
+                return false;
+            };
+            !head.is_empty()
+                && head
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch.is_ascii_whitespace())
+        })
     })
 }
 

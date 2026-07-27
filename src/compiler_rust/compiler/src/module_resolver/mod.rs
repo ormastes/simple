@@ -63,6 +63,21 @@ mod tests {
     }
 
     #[test]
+    fn test_project_hint_overrides_nested_source_package_root() {
+        let dir = create_test_project();
+        let family = dir.path().join("src/lib/gc_async_mut");
+        let consumer = family.join("gpu/engine2d/draw_ir_adv.spl");
+        fs::create_dir_all(family.join("src")).unwrap();
+        fs::create_dir_all(consumer.parent().unwrap()).unwrap();
+        fs::write(&consumer, "fn draw():\n    pass\n").unwrap();
+
+        let resolver = ModuleResolver::single_file_with_project_hint(&consumer, Some(dir.path()));
+
+        assert_eq!(resolver.project_root(), dir.path());
+        assert_eq!(resolver.source_root(), dir.path().join("src"));
+    }
+
+    #[test]
     fn test_resolve_file_module() {
         let dir = create_test_project();
         let src = dir.path().join("src");

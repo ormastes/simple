@@ -898,6 +898,7 @@ fn test_security_registry_init_source_filters_and_escapes() {
     assert!(source_may_declare_security(
         "security gate UserAdminGate:\n    from feature user\n"
     ));
+    assert!(source_may_declare_security("security:\n    default deny\n"));
     assert!(source_may_declare_security("security AppSecurity:\n    default deny\n"));
     assert!(source_may_declare_security(
         "capability ReadReports:\n    resource Dir\n"
@@ -906,6 +907,12 @@ fn test_security_registry_init_source_filters_and_escapes() {
         "# security note\nclass UserService:\n    pass\n"
     ));
     assert!(!source_may_declare_security("class UserService:\n    pass\n"));
+    assert!(!source_may_declare_security(
+        "if capability != \"engine2d-cpu-composited-material-v1\":\n    pass\n"
+    ));
+    assert!(!source_may_declare_security(
+        "capability == \"engine2d-composited-glass-material-v1\" or ready\n"
+    ));
 
     let escaped = cxx_raw_string_literal("before )SECURITY_SDN\" after");
     assert!(!escaped.contains(")SECURITY_SDN\""));
@@ -923,7 +930,7 @@ sandbox plugin_sandbox:
     net deny all
 "#;
     let file_sources = vec![(PathBuf::from("src/security/gate/plugin_gate.spl"), source.to_string())];
-    let registry = security_registry_sdn_from_sources(&file_sources)
+    let registry = security_registry_sdn_from_sources(&file_sources, None)
         .expect("security registry generation should parse")
         .expect("security source should produce a registry");
     assert!(registry.contains("security_aop_lowering:"));
@@ -1185,6 +1192,45 @@ fn test_native_hir_resolver_roots_include_project_src_for_narrow_sources() {
     assert!(roots
         .iter()
         .any(|root| root == &safe_canonicalize(&project_root.join("examples/simple_os"))));
+}
+
+#[test]
+fn test_native_hir_loads_common_imported_struct_fields_from_lib_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let lib_root = src_root.join("lib");
+    let owner = lib_root.join("common/ui/draw_ir.spl");
+    let consumer = lib_root.join("gc_async_mut/gpu/engine2d/draw_ir_adv.spl");
+    std::fs::create_dir_all(owner.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(consumer.parent().unwrap()).unwrap();
+    std::fs::write(
+        &owner,
+        "pub struct Simple2dDrawIrPlan:\n    batch_id: text\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &consumer,
+        "use common.ui.draw_ir.{Simple2dDrawIrPlan}\n\nfn batch_id(plan: Simple2dDrawIrPlan) -> text:\n    plan.batch_id\n",
+    )
+    .unwrap();
+
+    let source = std::fs::read_to_string(&consumer).unwrap();
+    let ast = simple_parser::Parser::new(&source).parse().unwrap();
+    let resolver = crate::module_resolver::ModuleResolver::new(project_root, lib_root.clone())
+        .with_extra_source_roots(vec![src_root, lib_root]);
+    let mut lowerer = crate::hir::Lowerer::with_module_resolver(resolver, consumer);
+    lowerer.set_lenient_types(true);
+
+    let lowered = lowerer
+        .lower_module(&ast)
+        .expect("common imported struct field must retain its concrete type");
+    let function = lowered
+        .functions
+        .iter()
+        .find(|function| function.name == "batch_id")
+        .unwrap();
+    assert_eq!(function.return_type, crate::hir::TypeId::STRING);
 }
 
 #[test]

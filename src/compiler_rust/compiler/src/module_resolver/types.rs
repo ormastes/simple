@@ -307,8 +307,9 @@ impl ModuleResolver {
     pub fn single_file_with_project_hint(file_path: &Path, project_hint: Option<&Path>) -> Self {
         let normalized_file_path = normalize_input_path(file_path);
         let parent = normalized_file_path.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let project_root = find_project_root(&normalized_file_path)
-            .or_else(|| project_hint.and_then(find_project_root))
+        let project_root = project_hint
+            .and_then(find_project_root)
+            .or_else(|| find_project_root(&normalized_file_path))
             .unwrap_or_else(|| parent.clone());
         let source_root = if project_root.join("src").is_dir() {
             project_root.join("src")
