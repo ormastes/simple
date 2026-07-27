@@ -19,6 +19,32 @@ fn remove_profile_files():
     rt_file_delete(PROFILE_PATH + "-shm")
 
 describe "hosted browser profile store":
+    it "cancels network jobs before fallible profile shutdown":
+        var registry = HostedWebContentRegistry.create_with_profile(
+            BrowserProfileStore.memory()?, 100000
+        )
+        val _ = registry.advance_window(
+            45, "<div>browser</div>", 64, 48, 100000, true
+        )
+        var closed_profile = registry.profile.unwrap()
+        closed_profile.close()?
+        registry.profile = Some(closed_profile)
+
+        var session = registry.sessions[0]
+        session.network_job_handle = 424242
+        registry.sessions[0] = session
+        expect(registry.close(100001)).to_equal(false)
+        expect(registry.sessions[0].network_job_handle).to_equal(0)
+
+    it "releases hosted sessions after successful registry shutdown":
+        var registry = HostedWebContentRegistry.create()
+        val _ = registry.advance_window(
+            46, "<div>browser</div>", 64, 48, 100000, false
+        )
+        expect(registry.sessions.len()).to_equal(1)
+        expect(registry.close(100001)).to_equal(true)
+        expect(registry.sessions.len()).to_equal(0)
+
     it "persists validated bookmarks and HSTS across reopen and removal":
         remove_profile_files()
         var bookmarks: [Pair<text, text>] = []
