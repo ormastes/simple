@@ -725,3 +725,19 @@ git diff --check
 The first command must print nothing. Final verification remains `STATUS: FAIL`
 until every blocked row has authoritative evidence; unavailable hardware stays
 a blocker rather than a synthetic or static PASS.
+
+## 2026-07-27 final compiler-enablement cycle
+
+The minimal native-arena fix and its two regressions passed independent static
+review with no P0/P1 finding. The final allowed retained-Stage3 generation
+cycle exported `SIMPLE_NATIVE_ARENA_DECLS=1`, eliminating the earlier NUL
+environment panic, but stopped during HIR lowering with exit 132 and
+`runtime error: field access on nil receiver`. Its private cache still contains
+675 objects and no candidate ELF was created. Evidence is retained at
+`/tmp/simple-cli-admission-20260727-6.isfZoU/build/mini_builds/minimal_repaired_compiler_final_fb09.log`
+(SHA-256
+`5cd89facfb881ee5a5f5003941e9bdf486f87b90dc0fe36573ec6e7482b5e034`).
+The hard three-cycle cap prevents another build in this verification window;
+the 37 focused runs, 32 docgens, and essential-tools smoke remain blocked.
+
+`STATUS: FAIL`

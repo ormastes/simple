@@ -293,3 +293,26 @@ the blocker or constitute runtime evidence:
 
 All four remain unverified until an admitted current-source pure-Simple runtime
 runs their focused specs.
+
+## Final bounded repaired-compiler result
+
+The direct bootstrap compiler paths now save, enable, and restore
+`SIMPLE_NATIVE_ARENA_DECLS=1`, reusing the established focused-build pattern.
+The focused regression keeps `left\0right` byte-exact in the native expression
+arena. Independent static review found no P0/P1 issue.
+
+The third and final bounded generation cycle also exported
+`SIMPLE_NATIVE_ARENA_DECLS=1` to the retained pure-Simple Stage3 producer. This
+cleared the prior Rust environment panic on `SIMPLE_BOOTSTRAP_EXPR_404_S` and
+reached HIR lowering, then stopped with exit 132:
+
+```text
+runtime error: field access on nil receiver
+```
+
+No candidate ELF or essential-tools smoke exists. The exclusive cache remained
+at 675 objects. The retained log is
+`/tmp/simple-cli-admission-20260727-6.isfZoU/build/mini_builds/minimal_repaired_compiler_final_fb09.log`
+with SHA-256
+`5cd89facfb881ee5a5f5003941e9bdf486f87b90dc0fe36573ec6e7482b5e034`.
+The three-cycle cap is reached; do not retry this command unchanged.
