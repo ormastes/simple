@@ -70,6 +70,14 @@ tb_rv32_wb_soc_smoke.vhd tb_rv64_wb_soc_smoke.vhd \
 tb_rv32_nvme_fw_smoke.vhd tb_rv32_simpleos_boot_tiny.vhd tb_rv32_tiny_bram_soc.vhd tb_rv64_soak.vhd \
 tb_rv32_nvme_bram_soc.vhd"
 
+# Generated RTL whose golden lives OUTSIDE $GOLDEN_DIR, so it needs an explicit
+# basename:golden-path mapping (paths are repo-relative).
+RTL_EXTERNAL="tb_rv32_payload.vhd:examples/09_embedded/fpga_riscv/payload/tb_rv32_payload.vhd \
+tb_gate.vhd:test/riscv_isa_gate/tb_gate.vhd \
+tb_rv32_product_sv32_pmp.vhd:test/01_unit/lib/hardware/fpga_linux/rv32_product_sv32_pmp_ghdl/tb_rv32_product_sv32_pmp.vhd \
+tb_rv64_product_sv39_pmp.vhd:test/01_unit/lib/hardware/fpga_linux/rv64_product_sv39_pmp_ghdl/tb_rv64_product_sv39_pmp.vhd \
+tb_rv64_product_wb_axi.vhd:test/01_unit/lib/hardware/fpga_linux/rv64_product_wb_axi_ghdl/tb_rv64_product_wb_axi.vhd"
+
 # Generation is the DEFAULT expectation: all 30 pinned RTL files are emitted by
 # src/lib/hardware/vhdl_gen/, so a missing build/os/rtl/<file>.vhd is a failure
 # unless the caller explicitly opts out with --allow-missing. --require-generated
@@ -306,6 +314,40 @@ for rtl in $RTL_REST; do
 done
 
 # ---------------------------------------------------------------------------
+# Layer 3b: generated RTL whose golden lives outside $GOLDEN_DIR.
+# ---------------------------------------------------------------------------
+ext_pass=0
+ext_fail=0
+ext_missing=0
+
+for pair in $RTL_EXTERNAL; do
+    ename=${pair%%:*}
+    epath=${pair#*:}
+    gen="$GEN_DIR/$ename"
+    golden="$ROOT/$epath"
+    if [ ! -f "$golden" ]; then
+        echo "check-vhdl-golden-match: golden missing: $golden" >&2
+        exit 2
+    fi
+    if [ -f "$gen" ]; then
+        if cmp -s "$golden" "$gen"; then
+            ext_pass=$((ext_pass + 1))
+        else
+            ext_fail=$((ext_fail + 1))
+            overall_fail=1
+            echo "MISMATCH: $gen differs from golden $golden"
+            cmp "$golden" "$gen" 2>&1 | head -1 | sed 's/^/  /'
+        fi
+    else
+        ext_missing=$((ext_missing + 1))
+        if [ "$REQUIRE_GENERATED" = "1" ]; then
+            overall_fail=1
+            echo "MISSING: $gen not generated (run scripts/fpga/generate_exec_core_vhdl.shs; --allow-missing to opt out)"
+        fi
+    fi
+done
+
+# ---------------------------------------------------------------------------
 # Layer 4: coverage audit. Every .vhd in the golden dir MUST appear in CORES or
 # RTL_REST. Without this, a new (or restored) golden is simply invisible to the
 # gate: on 2026-07-27 tb_rv32_nvme_bram_soc.vhd was live at origin, unpinned and
@@ -330,6 +372,10 @@ done
 # ---------------------------------------------------------------------------
 # Summary (stable keys, one per line).
 # ---------------------------------------------------------------------------
+echo "vhdl_golden_match_external_total=5"
+echo "vhdl_golden_match_external_pass=$ext_pass"
+echo "vhdl_golden_match_external_fail=$ext_fail"
+echo "vhdl_golden_match_external_missing=$ext_missing"
 echo "vhdl_golden_match_uncovered=$uncovered"
 echo "vhdl_golden_match_manifest=$manifest_status"
 echo "vhdl_golden_match_rv32=$core_status_rv32"
