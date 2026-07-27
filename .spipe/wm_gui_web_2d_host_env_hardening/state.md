@@ -1108,6 +1108,11 @@ Tracking split:
   later pass row. Its shared extractor now accepts exactly one nonempty value,
   rejects duplicate source or replay keys with typed reasons, and has a bounded
   host-independent parser self-test. Live RenderDoc was not run.
+- simple-renderdoc-replay-timeout: The replay inspector process now requires a
+  portable `timeout`/`gtimeout` command and runs under a configurable 120-second
+  bound. Exit 124/137 is retained, emits a timed-out field, and fails with the
+  typed `simple-replay-inspector-timeout` reason. Its host-independent
+  classifier self-test passed; live Simple and RenderDoc were not run.
 - readback-revision-order: The host classifier previously required baseline and
   input revisions only to differ, so a backwards revision could qualify as a
   screen-driven render. It now compares validated arbitrary-width decimal
@@ -1158,3 +1163,13 @@ Tracking split:
   gate, writes the canonical `build/renderdoc/simple-gate/evidence.env`, relays
   typed status/reason fields, and exits nonzero on capture or gate failure. The
   host-independent shell/source contract is covered; no live capture is claimed.
+- browser-vulkan-parity-admission: The existing Vulkan host row now requires
+  duplicate-safe browser-backing and direct-run setup receipts in addition to
+  Simple device readback. Electron/Chrome Vulkan source proofs, three bound
+  nonblank ARGB artifacts with exact viewport cardinality and validated u32
+  elements, all three bound pairwise diffs at `pass`/zero mismatch, and
+  aggregate pairwise pass are mandatory. Complete and focused mutation fixtures
+  plus structural source checks cover the pure classifier; no
+  browser/Simple/QEMU run is claimed.
+  ARGB/diff SHA-256 current-file revalidation remains an explicit producer
+  follow-up because those hash bindings do not exist yet.

@@ -142,3 +142,27 @@ The evaluator uses each AST expression ID as the stable decision ID. Existing
 interpreter externs forward decision/condition probes to the runtime collector,
 and the existing coverage dump appends that decision SDN to line/function SDN.
 The test runner remains the sole merger, reporter, and threshold owner.
+
+## Browser Vulkan And Pixel-Parity Admission
+
+The existing `vulkan` capability row has two independent evidence inputs. The
+Simple readback receipt proves direct Vulkan device pixels. The setup receipts
+prove Electron and Chrome Vulkan backing plus three-way Electron/Chrome/Simple
+ARGB parity. `host_browser_vulkan_parity_evidence_passes` accepts the browser
+backing and direct-run envs separately because the setup producer intentionally
+writes them in different modes and both contain common viewport metadata.
+
+Every admitted scalar is duplicate-safe. Browser source proofs must be regular,
+nonempty producer artifacts; direct-run ARGB paths must be nonempty and their
+width/height must equal the requested viewport, format must be `argb-u32`, and
+pixel count must equal width times height with `0 < nonblank <= pixel_count`.
+The producer and comparator reject coerced dimensions and any pixel outside the
+integer u32 range before comparison. All three diff paths must be bound, all
+three pairwise statuses must be `pass`, all mismatch counts must be `0`, and the
+aggregate must be `pass` in `pairwise-argb-diff` mode. The existing row passes
+only when this classifier and `host_vulkan_evidence_passes` both pass.
+
+Current-file hash revalidation is outside this bounded classifier because the
+setup producer does not emit ARGB/diff SHA-256 bindings. That provenance
+follow-up remains explicit in the external-host TODO; nonempty artifact paths
+alone must not be described as cryptographic freshness proof.
