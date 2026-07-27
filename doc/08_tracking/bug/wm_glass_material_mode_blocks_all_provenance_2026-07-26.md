@@ -106,5 +106,28 @@ style loop starts; no node gets a style, so the witness is empty regardless of
 which tree is under test. The guest serial log has **zero** budget-break lines,
 so the guest failure is the mode-attribute contradiction above, not starvation.
 
+Raising the budget does not rescue the probe: with
+`SIMPLE_WEB_RENDER_BUDGET_MS=900000` both trees still break, together, at
+`at=2 of=7` (the stage re-arm in `_web_budget_rearm` partitions the total across
+style/layout/paint, so a bigger total only buys the style stage a longer slice —
+the interpreter still overruns it). Pre- and post-glass outputs stayed identical
+field for field in both configurations.
+
 An A/B against a pre-regression tree is what caught this. A single-tree repro of
 a symptom that the pre-regression tree also produces attributes nothing.
+
+## What DOES attribute it
+
+Guest lane, same harness, two trees:
+
+- rerun56 — current main: `status=fail reason=guest-render-fault`, no PPMs,
+  3x `content-provenance-rejected`.
+- rerun57 — `6b18dcd874f^` plus this session's five level-gated files:
+  `status=pass reason=pass`, all three PPMs (24,883,217 B each),
+  `restored_sha256 == baseline_sha256` (`68adc6e8...`),
+  `changed_bytes=23054033`, font region `addf76ed...`, corrupt-copy rejection
+  pass, zero production faults, zero gated probe lines.
+
+The delta between those two runs is the regressing commit, and rerun57 also
+clears the level-gating landed alongside it (the WM file set is layout-sensitive,
+so that had to be shown, not argued).
