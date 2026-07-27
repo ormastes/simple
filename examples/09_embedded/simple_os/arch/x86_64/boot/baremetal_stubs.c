@@ -584,6 +584,24 @@ static inline size_t simpleos_heap_align(size_t sz)
     return (sz + 15U) & ~(size_t)15U;
 }
 
+/*
+ * The scalar direct-boot PMM reserves one physical prefix. Publish the exact
+ * page-aligned end of this link-resident heap so that prefix includes every
+ * byte malloc() may touch. A stale hard-coded PMM boundary previously made
+ * the VMM allocate its PML4/PDPT inside _heap; once the bump allocator reached
+ * those pages it corrupted CR3's tables and the guest triple-faulted.
+ */
+uint64_t rt_baremetal_heap_start(void)
+{
+    return (uint64_t)(uintptr_t)_heap;
+}
+
+uint64_t rt_baremetal_heap_reserved_end(void)
+{
+    const uintptr_t heap_end = (uintptr_t)&_heap[sizeof(_heap)];
+    return (uint64_t)((heap_end + 4095U) & ~(uintptr_t)4095U);
+}
+
 static void *simpleos_heap_realloc_last(void *p, size_t old_sz, size_t new_sz)
 {
     size_t old_aligned = simpleos_heap_align(old_sz);
