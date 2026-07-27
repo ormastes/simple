@@ -230,8 +230,10 @@ W^X is implemented with firmware small pages. H1 proves the vector/handler
 contract; physical-board abort behavior remains H2.
 Focused host/ARM ECC relocation, destination reread, stale-source rejection,
 failure preservation, remount/replay, and relocatable-link checks pass. Final
-SSpec/doc generation is blocked by the Stage-4 bootstrap termination at about
-64 GiB RSS, and real Bootgen/board evidence are pending.
+SSpec/doc generation remains blocked pending one fresh-session Stage-4 rerun.
+The latest one-worker build passed Stage 2/3, sanity, and provenance at low RSS;
+its Stage-4 phase-1 stale browser import is fixed and passes a fresh Stage-3
+native probe. Real Bootgen/board evidence remains pending.
 
 ## Error and Evidence Rules
 

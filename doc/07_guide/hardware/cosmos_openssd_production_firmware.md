@@ -153,8 +153,10 @@ realpath --version
 Use `bin/release/simple` rebuilt and deployed from the current tree. A stale
 release binary that links the obsolete two-argument `rt_env_set` ABI can crash
 before an SSpec runs and is not evidence. There is currently no accepted
-deployed runner: strict bootstrap reached Stage 3, but the third/final Stage 4
-attempt reached about 64 GiB RSS and was terminated by signal 15.
+deployed runner. The latest one-worker bootstrap passed Stage 2/3 sanity and
+provenance at low RSS, then stopped in Stage-4 phase 1 on a stale browser import.
+That import is fixed and passes a fresh Stage-3 native probe; run the full
+Stage-4 build in a fresh session before using `bin/release/simple`.
 
 ## Host Build and QEMU Gate
 
@@ -277,8 +279,9 @@ Do not represent these host/ARM results as physical persistence or board proof.
 Do not execute the fourteen-scenario SSpec with a stale binary. The source/manual
 now describe the current runners, but final execution and generated-manual
 evidence are blocked until a current pure-Simple `bin/release/simple` is
-available. The prior Stage-4 bootstrap attempt consumed the third/final allowed
-cycle and was signal-15 terminated at about 64 GiB RSS.
+available. The latest bootstrap consumed the third/final allowed cycle after
+proving low-memory Stage 2/3 and exposing the now-fixed Stage-4 phase-1 import,
+so the full build must resume in a fresh session rather than being retried here.
 
 Before production can move from **BLOCKED/FAIL**, complete:
 

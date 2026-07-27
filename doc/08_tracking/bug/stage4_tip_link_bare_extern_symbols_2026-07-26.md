@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-26 (evening)
 - **Lane:** stage4 one-binary rebuild (seed → libspl_objects.a → clang link, aarch64-apple-darwin)
-- **Status:** fixed in source; one full Stage-4 rebuild remains pending
+- **Status:** original blockers fixed; Stage 2/3 proven, one full Stage-4 rerun remains
 
 ## Symptom
 Link fails with undefined symbols that are BARE (unmangled) references, while the
@@ -80,6 +80,23 @@ crashing in `rt_env_set`; the wrapper integration test passes.
 
 These are source-level and focused-test results. A current Stage-4 binary,
 full SSpec/docgen, Bootgen output, and board evidence are not implied.
+
+## Linux Rebuild Evidence, 2026-07-27
+
+The guarded one-worker Linux rebuild passed Stage 2/3 native builds, both
+compiler sanity gates, source/tool/git provenance, and Stage-2 capability.
+Admitted hashes were:
+
+- Stage 2: `492d62e38946efb6f1af11bd4be97c47b34153f1384c8b1944a3a97e8df94875`
+- Stage 3: `257e522ceecbc3bac8366066748e544a71007e029f591c3d81c653cab688dec8`
+
+The prior 64 GiB growth did not recur: observed Stage-2 RSS was about 388 MiB
+and Stage-3 RSS about 211 MiB. Stage 4 then stopped in phase 1 on an unrelated
+stale import in browser custom properties. `8c7eb97d3592` restores the
+animation module as the exact `CSSValue`/`CSSDeclaration` owner. A fresh
+Stage-3 native probe compiled six modules and exited zero. The repository
+three-cycle guard prohibits another full rerun in this session, so deployment
+and firmware SSpec/docgen remain pending rather than inferred.
 
 ## Impact
 

@@ -182,7 +182,10 @@ H1 runtime, MMIO, PCIe, IO, corrected bridge/admin, QEMU/silicon, package, and
 MMU small-page W^X contracts passed in scoped runs. Corrective bridge/admin
 evidence covers Abort/queue/SMART fields, zero-write-only completion retry,
 post-start non-retry, and PRP edges. Real Bootgen is unavailable. Strict bootstrap
-Stage 3 passed, but the third/final Stage 4 attempt grew to about 64 GiB RSS and
-was signal-15 terminated; no current pure-Simple runner exists for final
-SSpec/doc generation. Production status is **BLOCKED/FAIL**.
+Stage 2/3 and provenance now pass with one worker and low RSS. Stage 4 reached
+phase 1, exposed a stale browser custom-property import, and stopped before
+producing a runner. The import fix and a fresh Stage-3 native probe pass and
+are pushed; the full Stage-4 rerun is deferred to a fresh session by the
+three-cycle guard. No current pure-Simple runner exists for final SSpec/doc
+generation. Production status is **BLOCKED/FAIL**.
 Fresh SSpec/docgen, real Bootgen, and H2 board proof remain required.
