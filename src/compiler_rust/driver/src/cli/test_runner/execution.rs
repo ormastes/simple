@@ -298,16 +298,21 @@ pub fn parse_individual_results(output: &str) -> Vec<IndividualTestResult> {
                 passed: true,
                 skipped: false,
             });
-        } else if trimmed.starts_with("✗ ") {
-            let name = trimmed[5..].to_string(); // "✗ " is 5 bytes
+        } else if let Some(stripped) = trimmed.strip_prefix("✗ ") {
+            if stripped == "Some tests failed" {
+                // Final run-summary banner (test_output.rs print_summary_text),
+                // not an individual test result.
+                continue;
+            }
+            let name = stripped.to_string();
             results.push(IndividualTestResult {
                 name,
                 group: current_group.join(" > "),
                 passed: false,
                 skipped: false,
             });
-        } else if trimmed.starts_with("○ ") {
-            let name = trimmed[5..].trim_end_matches(" (skipped)").to_string(); // "○ " is 5 bytes
+        } else if let Some(stripped) = trimmed.strip_prefix("○ ") {
+            let name = stripped.trim_end_matches(" (skipped)").to_string();
             results.push(IndividualTestResult {
                 name,
                 group: current_group.join(" > "),
