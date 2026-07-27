@@ -945,6 +945,31 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   probe and fix only the first missing phase. Do not bootstrap merely to repeat
   this diagnostic; reuse a current provenance-passing pure-Simple artifact.
 
+### 2026-07-27 Bungee measure cycles 31–33
+
+- Cycle 31 used a 15-phase caller-owned scalar trace over exact Bungee `B` at
+  100 px. Tables, table bounds, units/metric headers, metric extent, outline,
+  hmtx, drawable commands, and bounds all pass; the combined dimensions guard
+  returns before publication.
+- Cycle 32 split that dimensions guard into ordered scalar checks and published
+  the computed values. The probe passes completely with raw dimensions
+  approximately 61x72, rounded dimensions 62x72, and exact pixel count 4,464.
+  This proves the scalar two-pass measure contract can publish valid Bungee
+  geometry and completion state on the retained Stage3 diagnostic compiler.
+- Cycle 33 applied the same ordered guards to the real
+  `rasterize_sfnt_glyf` path and added an owner-local receipt for bitmap
+  dimensions, pixel count, nonzero alpha, and completion cookie. Scalar measure
+  still passes, but the real raster receipt remains entirely zero:
+  `rasterize_sfnt_glyf` returns `None` after valid dimensions and before a
+  bitmap can be accepted.
+- The three-cycle cap is exhausted. Diagnostic source, temporary fixture, and
+  the unproven production guard edit were reverted. The next fresh session must
+  stamp only the post-dimension raster body: edge-list completion/count,
+  pixel-plane allocation, per-row progress, final pixel count/nonzero alpha,
+  `SfntGlyfBitmap` construction, and caller-side `Some` discrimination. Fix the
+  first missing phase, then retain a focused native Bungee regression. No
+  bootstrap was run.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
