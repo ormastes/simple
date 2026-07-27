@@ -94,7 +94,39 @@ Current count: `0 pass`, `14 active`, `9 blocked`.
 | NFR-005 | blocked | E native/perf | performance spec defines equal-semantics 4,096-glyph CPU/GPU comparison | real promoted backend must prove at least 1.25x using E perf command | `/root` |
 | NFR-006 | blocked | E native/perf | performance spec defines unchanged upload, RSS delta and GPU high-water checks | real device plus isolated RSS probe; run E perf command | `/root` |
 | NFR-007 | blocked | E native/perf | native/perf specs define corrupt/device-loss fallback and unchanged identity/p95 checks | retained native fault-injection execution required | `/root` |
-| NFR-008 | blocked | E native/perf | native/perf records require shaping through readback/resource stages | retained nonzero handles, fence and device-origin readback required | `/root` |
+| NFR-008 | blocked | E native/perf | native/perf records require shaping through readback/resource stages; working 3D source adds successful atlas/vertex upload count and byte receipts | retained nonzero upload receipts, handles, fence and device-origin readback required | `/root` |
+
+### REQ-011 production capability rows
+
+The Engine2D row is the shared prerequisite; the other five rows are independent
+after it passes. The synced checkout contains no retained current runtime
+artifacts at the paths below, so source inspection cannot promote any row.
+`run_focused_spec` is the hash-bound helper defined under
+[Exact owner commands](#exact-owner-commands); every command waits for Lane A
+to admit the exact pure-Simple CLI and core-C identities.
+
+Wave-0 D host readiness is positive but non-promoting. The host has x86_64 and
+RV64 QEMU, writable KVM, OVMF/GRUB, clang/llvm-objcopy, hosted-WM capture tools,
+mtools/python, and the pinned 1,708,408-byte font with SHA-256
+`2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081`.
+The static-only x86 preflight
+`sh scripts/check/check-simpleos-x86-64-wm-qemu-preflight.shs`, hosted-WM
+wrapper `--self-test`, and RV64 wrapper `--self-test-wm-font-input` each
+reported PASS. They deliberately did not run QEMU or produce acceptance
+pixels. A July-27 x86 QEMU PASS under the dirty shared root is rejected: its
+source hash is not bound to this feature checkout and 65 of 108 scoped source
+files differ. The feature worktree still lacks the hosted binary/current
+runtime evidence, x86 feature-bound evidence, RV64 ELF, admitted full CLI, and
+reviewed crop pins, so all six rows retain their existing status.
+
+| Capability | Status | Current blocker and retained-artifact state | Exact resume command | Owner / reviewer |
+|---|---|---|---|---|
+| Engine2D CPU/SIMD plus Vulkan selected-font draw | blocked | No current capture exists under `build/test-artifacts/03_system/app/simple_2d/feature/engine2d_font_surface_verification/`; the tracked native-lane report records hardware discovery only, not a hash-bound device PASS | `run_focused_spec test/03_system/app/simple_2d/feature/engine2d_font_surface_verification_spec.spl` after Lane A admission on a real Vulkan device | E native / `/root` |
+| HTML/WebIR font and browser events | blocked | `build/test-artifacts/simple-web-font-composition/receipt.env` and `build/test-artifacts/simple-web-font-rendering-events/evidence.env` are absent; no current submitted-frame/browser-event correlation exists | export `SIMPLE_WEB_FONT_RUN_ID="font-${CHECKPOINT_SHA}-${CLI_SHA}"`, `AETHERIC_HOST_WEB_GUI_SIMPLE_BIN="$CLI"`, and an absolute retained `AETHERIC_HOST_WEB_GUI_PROOF`, then `run_focused_spec test/03_system/app/simple_web/feature/web_font_rendering_surface_spec.spl` | D surfaces / `/root` |
+| GUI widget-tree font and events | blocked | `build/test-artifacts/03_system/gui/feature/gui_font_event_surface/gui_font_event.txt` is absent; source assertions and a CPU mirror are not production evidence | `run_focused_spec test/03_system/gui/feature/gui_font_event_surface_spec.spl` after Lane A admission | D surfaces / `/root` |
+| Linux hosted WM live window | blocked | `build/linux-hosted-wm-font-event-current/evidence.env` and `report.md` are absent; a current X11/winit frame and reviewed glyph pin are required | `BUILD_DIR=build/linux-hosted-wm-font-event-current REPORT_PATH=build/linux-hosted-wm-font-event-current/report.md SIMPLE_BIN="$CLI" sh scripts/check/check-linux-hosted-wm-live-window-evidence.shs`, then `run_focused_spec test/03_system/gui/linux_hosted_wm_live_window_spec.spl` | D surfaces / `/root` |
+| x86_64 SimpleOS QEMU WM | blocked | `build/test-simpleos-wm-fullscreen-live/evidence.env`, report, framebuffer captures, and font crop are absent. `/home/ormastes/dev/pub/simple/build/simpleos_wm_fullscreen_evidence/evidence.env` is explicitly rejected because its dirty-root source snapshot differs from this feature checkout in 65/108 scoped files | `export SIMPLE_BIN="$CLI"; run_focused_spec test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl`; the spec runs the live wrapper exactly once | D SimpleOS / `/root` |
+| RV64 SimpleOS QEMU WM | blocked | the 128 MiB font disk exists, but the retained report is `status: fail`, `reason: missing-elf`; RV64 ELF, QMP scanout, input transcript, and reviewed RV64-only crop pin are absent | export the exact `BUILD_DIR`, `REPORT_PATH`, `RV64_DISPLAY_SMOKE_ELF`, `RV64_WM_FONT_DISK`, and reviewed `RV64_WM_FONT_REGION_EXPECTED_SHA256`, then `run_focused_spec test/03_system/os/wm/rv64_simpleos_wm_font_input_spec.spl`; the spec runs the live wrapper exactly once | D SimpleOS / `/root` |
 
 No row is classified `pass`: static source, an existing Markdown file, emitted
 source, CPU mirror, simulation, or a crashed command cannot prove the selected
@@ -275,21 +307,90 @@ and `libsimple_runtime.a` SHA-256. A Rust seed or exit `2`, `124`, `132`, or
 After lane A publishes those immutable values, set:
 
 ```bash
-CLI=/absolute/path/to/admitted/pure-simple
-CLI_SHA=<published-cli-sha256>
-CORE_C_DIR=/absolute/path/to/admitted/core-c
-CORE_C_SHA=<published-libsimple_runtime.a-sha256>
+CLI=/absolute/path/to/deployed/pure-simple
+CLI_SHA=<deployed-cli-sha256>
+CORE_C_DIR=/absolute/path/to/deployed/core-c
+CORE_C_SHA=<deployed-libsimple_runtime.a-sha256>
+CHECKPOINT_SHA=$(git rev-parse HEAD)
 ```
+
+Lane A first runs the shared essential-tools admission gate against that exact
+binary and retains both streams:
+
+```bash
+ESSENTIAL_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/essential-tools
+mkdir -p "$ESSENTIAL_ROOT"
+CLI_ACTUAL_SHA=$(sha256sum "$CLI" | awk '{print $1}')
+[ "$CLI_ACTUAL_SHA" = "$CLI_SHA" ]
+SIMPLE_BINARY="$CLI" sh scripts/check/check-bootstrap-essential-tools-smoke.shs \
+  >"$ESSENTIAL_ROOT/smoke.out" 2>"$ESSENTIAL_ROOT/smoke.err"
+```
+
+The command must exit zero and its retained stdout must contain
+`essential_test_runner_smoke=true`, `essential_lint_smoke=true`,
+`essential_duplicate_checker_smoke=true`, and
+`bootstrap_essential_tools_smoke=true`. A wrapper, Rust seed, stale hash, or
+missing marker is not admission.
+
+The essential-tools gate already executes the clean lint and duplicate-check
+probes and validates their exact success markers. Do not run those unchanged
+commands a second time; the retained gate streams are the one admission record.
 
 Lane A calibrates the runner once globally before any focused result:
 
 ```bash
 CAL_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/runner-calibration
 mkdir -p "$CAL_ROOT"
-"$CLI" run src/app/test/font_evidence_runner.spl -- "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" scripts/check/fixtures/font_evidence_runner_fail_spec.spl >"$CAL_ROOT/fail.out" 2>"$CAL_ROOT/fail.err"
-printf '%s\n' "$?" >"$CAL_ROOT/fail.exit"
-"$CLI" run src/app/test/font_evidence_runner.spl -- "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" scripts/check/fixtures/font_evidence_runner_empty_spec.spl >"$CAL_ROOT/empty.out" 2>"$CAL_ROOT/empty.err"
-printf '%s\n' "$?" >"$CAL_ROOT/empty.exit"
+CORE_C_ACTUAL_SHA=$(sha256sum "$CORE_C_DIR/libsimple_runtime.a" | awk '{print $1}')
+[ "$CORE_C_ACTUAL_SHA" = "$CORE_C_SHA" ]
+{
+  printf 'checkpoint_sha=%s\n' "$CHECKPOINT_SHA"
+  printf 'cli=%s\ncli_sha256=%s\n' "$CLI" "$CLI_SHA"
+  printf 'core_c_dir=%s\ncore_c_sha256=%s\n' "$CORE_C_DIR" "$CORE_C_SHA"
+} >"$CAL_ROOT/identity.env"
+
+record_command() {
+  output=$1
+  shift
+  {
+    printf 'command'
+    printf ' %q' "$@"
+    printf '\n'
+  } >"$output"
+}
+
+record_command "$CAL_ROOT/fail.command" \
+  "$CLI" run src/app/test/font_evidence_runner.spl -- \
+  "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" \
+  scripts/check/fixtures/font_evidence_runner_fail_spec.spl
+if "$CLI" run src/app/test/font_evidence_runner.spl -- \
+    "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" \
+    scripts/check/fixtures/font_evidence_runner_fail_spec.spl \
+    >"$CAL_ROOT/fail.out" 2>"$CAL_ROOT/fail.err"; then
+  fail_rc=0
+else
+  fail_rc=$?
+fi
+printf '%s\n' "$fail_rc" >"$CAL_ROOT/fail.exit"
+
+record_command "$CAL_ROOT/empty.command" \
+  "$CLI" run src/app/test/font_evidence_runner.spl -- \
+  "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" \
+  scripts/check/fixtures/font_evidence_runner_empty_spec.spl
+if "$CLI" run src/app/test/font_evidence_runner.spl -- \
+    "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" \
+    scripts/check/fixtures/font_evidence_runner_empty_spec.spl \
+    >"$CAL_ROOT/empty.out" 2>"$CAL_ROOT/empty.err"; then
+  empty_rc=0
+else
+  empty_rc=$?
+fi
+printf '%s\n' "$empty_rc" >"$CAL_ROOT/empty.exit"
+
+[ "$fail_rc" -eq 1 ]
+[ "$empty_rc" -eq 1 ]
+grep -Fq 'test-runner: spec failed' "$CAL_ROOT/fail.out"
+grep -Fq 'test-runner: no examples executed' "$CAL_ROOT/empty.out"
 ```
 
 The first command must exit 1 with `test-runner: spec failed`; the second must
@@ -299,13 +400,68 @@ command lines under
 Lanes B–E reference that one immutable calibration set; they do not rerun it.
 
 Every focused spec uses the same hash-bound runner:
+`src/app/test/font_evidence_runner.spl` forwards only the ten reviewed native
+variables: `SIMPLE_BIN`, `SIMPLE_BINARY`, `SIMPLE_WEB_FONT_RUN_ID`,
+`AETHERIC_HOST_WEB_GUI_SIMPLE_BIN`, `AETHERIC_HOST_WEB_GUI_PROOF`, `BUILD_DIR`,
+`REPORT_PATH`, `RV64_DISPLAY_SMOKE_ELF`, `RV64_WM_FONT_DISK`, and
+`RV64_WM_FONT_REGION_EXPECTED_SHA256`. It does not forward arbitrary ambient
+host state.
 
 ```bash
+FOCUSED_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/focused
+FOCUSED_ATTEMPT=${FOCUSED_ATTEMPT:-1}
+case "$FOCUSED_ATTEMPT" in
+  1|2|3) ;;
+  *) echo "invalid focused attempt: $FOCUSED_ATTEMPT" >&2; exit 2 ;;
+esac
+
 run_focused_spec() {
-  "$CLI" run src/app/test/font_evidence_runner.spl -- \
-    "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" "$1"
+  spec=$1
+  name=${spec#test/}
+  name=${name//\//_}
+  root="$FOCUSED_ROOT/attempt-$FOCUSED_ATTEMPT"
+  mkdir -p "$root"
+  [ ! -e "$root/$name.command" ] || {
+    echo "refusing duplicate focused execution: $spec" >&2
+    return 125
+  }
+  {
+    printf 'checkpoint_sha=%s\nattempt=%s\nspec=%s\n' \
+      "$CHECKPOINT_SHA" "$FOCUSED_ATTEMPT" "$spec"
+    printf 'SIMPLE_BIN=%s\nSIMPLE_WEB_FONT_RUN_ID=%s\n' \
+      "${SIMPLE_BIN:-}" "${SIMPLE_WEB_FONT_RUN_ID:-}"
+    printf 'SIMPLE_BINARY=%s\nAETHERIC_HOST_WEB_GUI_SIMPLE_BIN=%s\n' \
+      "${SIMPLE_BINARY:-}" "${AETHERIC_HOST_WEB_GUI_SIMPLE_BIN:-}"
+    printf 'AETHERIC_HOST_WEB_GUI_PROOF=%s\n' \
+      "${AETHERIC_HOST_WEB_GUI_PROOF:-}"
+    printf 'BUILD_DIR=%s\nREPORT_PATH=%s\n' \
+      "${BUILD_DIR:-}" "${REPORT_PATH:-}"
+    printf 'RV64_DISPLAY_SMOKE_ELF=%s\nRV64_WM_FONT_DISK=%s\n' \
+      "${RV64_DISPLAY_SMOKE_ELF:-}" "${RV64_WM_FONT_DISK:-}"
+    printf 'RV64_WM_FONT_REGION_EXPECTED_SHA256=%s\n' \
+      "${RV64_WM_FONT_REGION_EXPECTED_SHA256:-}"
+    printf 'command'
+    printf ' %q' "$CLI" run src/app/test/font_evidence_runner.spl -- \
+      "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" "$spec"
+    printf '\n'
+  } >"$root/$name.command"
+  if "$CLI" run src/app/test/font_evidence_runner.spl -- \
+      "$CLI" "$CLI_SHA" "$CORE_C_DIR" "$CORE_C_SHA" "$spec" \
+      >"$root/$name.out" 2>"$root/$name.err"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  printf '%s\n' "$rc" >"$root/$name.exit"
+  [ "$rc" -eq 0 ]
+  grep -Fq 'test-runner: native result wrapper complete' "$root/$name.out"
 }
 ```
+
+Attempt 1 is the only initial execution. Attempts 2 and 3 are reserved for an
+owner repair that changes the failing source; an unchanged green or unchanged
+failure is never rerun. The command, both streams, and exit code remain
+immutable under the attempt directory.
 
 Lane B executes once each:
 
@@ -336,13 +492,38 @@ run_focused_spec test/01_unit/lib/common/text_layout/font_render_config_spec.spl
 run_focused_spec test/01_unit/lib/gpu/engine3d/font_compat_spec.spl
 ```
 
-Lane D executes its independent producer rows once each:
+Lane D first executes its shared Engine2D prerequisite once:
 
 ```bash
+run_focused_spec test/03_system/app/simple_2d/feature/engine2d_font_surface_verification_spec.spl
+```
+
+After that passes, Lane D executes the independent producer rows once each.
+The Web row receives a nonempty immutable run ID. The x86 and RV64 specs run
+their live wrappers internally, so no separate live-wrapper command precedes
+them. Export the wrapper inputs so those child processes use the admitted CLI
+and exact retained artifacts:
+
+```bash
+run_focused_spec test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_result_spec.spl
+run_focused_spec test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl
+run_focused_spec test/02_integration/rendering/wm_nested_content_frame_spec.spl
+run_focused_spec test/03_system/app/simple_2d/feature/legacy_web_gui_wm_font_route_spec.spl
+export SIMPLE_WEB_FONT_RUN_ID="font-${CHECKPOINT_SHA}-${CLI_SHA}"
+export AETHERIC_HOST_WEB_GUI_SIMPLE_BIN="$CLI"
+export AETHERIC_HOST_WEB_GUI_PROOF=/absolute/path/to/retained/aetheric-host-web-gui.env
 run_focused_spec test/03_system/app/simple_web/feature/web_font_rendering_surface_spec.spl
 run_focused_spec test/03_system/gui/feature/gui_font_event_surface_spec.spl
+# Generate the hosted live bundle once with the capability-row command above;
+# this focused spec consumes and validates that retained bundle.
 run_focused_spec test/03_system/gui/linux_hosted_wm_live_window_spec.spl
+export SIMPLE_BIN="$CLI"
 run_focused_spec test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl
+export BUILD_DIR=build/test-artifacts/shared_multilingual_gpu_fonts/req011/rv64-live
+export REPORT_PATH="$BUILD_DIR/report.md"
+export RV64_DISPLAY_SMOKE_ELF=build/os/simpleos_riscv64_display_smoke.elf
+export RV64_WM_FONT_DISK=build/os/fat32-riscv64-desktop.img
+export RV64_WM_FONT_REGION_EXPECTED_SHA256="<reviewed-rv64-crop-sha256>"
 run_focused_spec test/03_system/os/wm/rv64_simpleos_wm_font_input_spec.spl
 ```
 
@@ -354,6 +535,10 @@ run_focused_spec test/03_system/app/simple_2d/feature/cuda_generated_font_handof
 run_focused_spec test/03_system/app/simple_2d/feature/native_gpu_font_readback_spec.spl
 run_focused_spec test/05_perf/graphics_2d/shared_multilingual_gpu_fonts_perf_spec.spl
 ```
+
+The B–E command graph contains 37 unique focused executions: 6 in B, 17 in C,
+10 in D including its Engine2D prerequisite, and 4 in E. No path appears in
+more than one group.
 
 Each of the 32 docgen commands must exit zero and report the affected spec
 complete with `0 stubs`. The owner retains both output streams; lane F reviews
