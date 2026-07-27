@@ -59,7 +59,7 @@ SIMPLEOS_GPU_FALLBACK_WIRE_MODE=device-warm \
 
 ## Current Evidence
 
-The five-example source contract is retained but was not executed because the
+The six-example source contract is retained but was not executed because the
 available staged pure-Simple compiler has no `test` command. Fallback receipt
 validation previously passed 13/13. The source-matched daemon (`1 compiled, 212 cached`)
 and final probe (`1 compiled, 18 cached`) complete both native rows: calibrated
@@ -68,12 +68,14 @@ Both receipts have CPU source `2`, zero handle/identity, 32 bytes, and checksum
 `135272480`.
 
 The device-warm probe builds strictly with `1 compiled, 18 cached, 0 failed`,
-no generated stubs, and its three-case median self-test passes. A refreshed
-CUDA/Vulkan runtime archive and strict daemon build also complete with
-`2 compiled, 215 cached, 0 failed`. The first device-warm execution stopped
-before transport readiness because importing `common.string_core` for byte
-decoding admitted a self-recursive native `str_starts_with`; object relocation
-inspection identified the recursion. The decoder now calls the existing
-`rt_char_from_code` ABI directly, but the three-cycle daemon build cap was
-reached before that final source fix could be rebuilt. Therefore no daemon
-device receipt or warm median is claimed yet.
+no generated stubs, and its three-case median self-test passes. Reusing
+`rt_bytes_to_text` and byte snapshots removed unavailable scalar/byte method
+dependencies, and strict daemon cycle 2 linked with `4 compiled, 213 cached, 0
+failed`. A focused Rust runtime test for the missing string predicate passes;
+the refreshed CUDA/Vulkan archive exports it, and cycle 3 links with `2
+compiled, 215 cached, 0 failed`. The retained generated `string_core` object
+still contained same-named primitive self-dispatch, leaving startup in an
+infinite `str_len` loop before transport readiness. Source now routes all
+affected primitives directly to runtime externs, but the three-cycle cap was
+reached before rebuilding that complete fix. Therefore no daemon device
+receipt or warm median is claimed yet.

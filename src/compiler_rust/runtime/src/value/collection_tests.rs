@@ -58,6 +58,7 @@ use super::{
     rt_array_sort_desc,
     // String functions
     rt_string_concat,
+    rt_string_contains,
     rt_string_data,
     rt_string_len,
     rt_string_new,
@@ -1319,6 +1320,8 @@ fn test_string_find_and_rfind_match_byte_indices() {
     let missing = rt_string_new("zzz".as_ptr(), 3);
     assert_eq!(rt_string_find(haystack, missing), -1);
     assert_eq!(rt_string_rfind(haystack, missing), -1);
+    assert_eq!(rt_string_contains(haystack, needle), 1);
+    assert_eq!(rt_string_contains(haystack, missing), 0);
 }
 
 #[test]

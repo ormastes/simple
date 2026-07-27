@@ -2482,6 +2482,11 @@ pub extern "C" fn rt_string_find(string: RuntimeValue, needle: RuntimeValue) -> 
     }
 }
 
+#[no_mangle]
+pub extern "C" fn rt_string_contains(string: RuntimeValue, needle: RuntimeValue) -> i64 {
+    (rt_string_find(string, needle) >= 0) as i64
+}
+
 /// Find last occurrence of needle in string
 /// Returns the byte index, or -1 if not found
 #[no_mangle]

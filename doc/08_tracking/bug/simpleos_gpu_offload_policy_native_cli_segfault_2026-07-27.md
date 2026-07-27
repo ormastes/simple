@@ -53,14 +53,23 @@ daemon without bootstrap.
 The retained-session daemon-wire continuation added a strict probe for three
 warmups plus five measured exact 1,048,576-element CUDA requests. The probe
 build passes with `1 compiled, 18 cached, 0 failed`, no generated stubs, and a
-passing median self-test. A refreshed CUDA/Vulkan runtime archive and strict
-daemon link pass with `2 compiled, 215 cached, 0 failed`, but the first live
-device-warm attempt crashed before transport readiness. Read-only object
-relocation inspection found a self-recursive `str_starts_with` pulled in by a
-new `common.string_core` dependency in byte decoding. The final source removes
-that dependency and calls `rt_char_from_code` directly. The three daemon build
-cycles are exhausted, so that final source state remains unbuilt and no new
-device-wire timing is claimed.
+passing median self-test. The resumed first strict daemon link exposed the
+retained runtime's missing `rt_char_from_code` and accidental `str.byte_at`
+closure. Reusing exported `rt_bytes_to_text` on already-validated byte
+sequences and snapshotting `.bytes()` removed both dependencies; cycle 2 linked
+with `4 compiled, 213 cached, 0 failed`.
+
+That binary still failed before readiness. Its generated `common.string_core`
+object compiled same-named method wrappers into self-calls or infinite loops.
+The source now follows the canonical compiler-core pattern and routes length,
+slice, character access, contains, prefix/suffix, and find/rfind directly to
+runtime externs. Rust runtime gained the missing `rt_string_contains` wrapper
+over byte-correct `rt_string_find`; its focused test passes, and the refreshed
+CUDA/Vulkan runtime archive exports both string predicates. Cycle 3 linked with
+`2 compiled, 215 cached, 0 failed`, but retained-cache object disassembly still
+showed the prior `str_len` infinite loop and the live daemon again missed
+transport readiness. The three-cycle cap is exhausted. The complete source fix
+remains unbuilt, and no device-wire timing is claimed.
 
 ## Remaining Gate
 
@@ -69,8 +78,8 @@ direct receipt closes executor correctness, but not the daemon client path or
 its independent CPU-oracle comparison. Then retain the required warm
 multi-sample medians; the single direct warm receipt does not justify the
 lower-level CUDA round-trip threshold by itself. Resume with one strict
-incremental daemon build from the retained cache, then run
-`SIMPLEOS_GPU_FALLBACK_WIRE_MODE=device-warm sh
-scripts/check/check-simpleos-gpu-fallback-wire.shs`.
+incremental daemon build from the retained cache, verify its `string_core`
+object has no self-relocations or `jmp`-to-self primitive bodies, then run the
+documented device-warm wrapper command with explicit daemon/probe paths.
 
 Owner: Linux GPU host operator. Final reviewer: high-capability model.

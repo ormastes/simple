@@ -379,6 +379,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_builder_finish", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_builder_len", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_builder_free", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_string_contains", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_starts_with", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_ends_with", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_hash_text", &[I64], &[I64]),

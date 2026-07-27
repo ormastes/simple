@@ -30,4 +30,4 @@ dev-done
 ## Log
 - dev: Refined the persistent processing-backend hardening goal into seven acceptance criteria.
 - impl: Added a strict daemon-wire CUDA mode with three warmups, five measured exact requests, stable provenance, and median device/round-trip/non-device-overhead timing.
-- verify: Strict probe/runtime/daemon builds pass and median self-test passes; live device evidence remains open because the final startup-recursion source fix was not rebuilt after the three-cycle cap.
+- verify: Strict probe/runtime/daemon builds and the median/runtime predicate tests pass; live device evidence remains open because retained generated `string_core` primitives self-dispatch during startup. Complete direct-runtime wrapper source is ready but unbuilt after the three-cycle cap.
