@@ -536,6 +536,7 @@ bool rt_process_is_alive(int64_t pid) {
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <pthread.h>
 
 /* ===== Process table ===== */
 
@@ -574,6 +575,45 @@ static void proc_free(struct RtProcSlot* slot) {
     if (slot->stdin_fd >= 0)  { close(slot->stdin_fd);  slot->stdin_fd  = -1; }
     if (slot->stdout_fd >= 0) { close(slot->stdout_fd); slot->stdout_fd = -1; }
     slot->pid = 0;
+}
+
+static bool proc_write_all_no_sigpipe(int fd, const char* data, size_t len) {
+    sigset_t blocked;
+    sigset_t old_mask;
+    sigset_t pending;
+    struct sigaction action;
+    bool sigpipe_was_pending = false;
+    bool sigpipe_is_ignored = false;
+    bool broken_pipe = false;
+    size_t offset = 0;
+
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGPIPE);
+    if (pthread_sigmask(SIG_BLOCK, &blocked, &old_mask) != 0) return false;
+    if (sigpending(&pending) == 0) {
+        sigpipe_was_pending = sigismember(&pending, SIGPIPE) == 1;
+    }
+    if (sigaction(SIGPIPE, NULL, &action) == 0) {
+        sigpipe_is_ignored = action.sa_handler == SIG_IGN;
+    }
+
+    while (offset < len) {
+        ssize_t written = write(fd, data + offset, len - offset);
+        if (written > 0) {
+            offset += (size_t)written;
+            continue;
+        }
+        if (written < 0 && errno == EINTR) continue;
+        broken_pipe = written < 0 && errno == EPIPE;
+        break;
+    }
+
+    if (broken_pipe && !sigpipe_was_pending && !sigpipe_is_ignored) {
+        int signal_number = 0;
+        (void)sigwait(&blocked, &signal_number);
+    }
+    (void)pthread_sigmask(SIG_SETMASK, &old_mask, NULL);
+    return offset == len;
 }
 
 /* ===== Public API ===== */
@@ -777,8 +817,7 @@ bool rt_process_write_stdin(int64_t pid, const char* data) {
     size_t len = strlen(data);
     if (len == 0) return true;
 
-    ssize_t written = write(slot->stdin_fd, data, len);
-    return written == (ssize_t)len;
+    return proc_write_all_no_sigpipe(slot->stdin_fd, data, len);
 }
 
 /*
