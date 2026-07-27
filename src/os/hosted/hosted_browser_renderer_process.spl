@@ -4,6 +4,8 @@ use std.common.ui.draw_ir.{DrawIrComposition, draw_ir_composition}
 use common.string_builder.{StringBuilder}
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_WORKER_ARG,
+    BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES,
+    BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES,
     BrowserRendererDecoder, BrowserRendererEncodeResult,
     BrowserRendererNetworkDecodeResult,
     browser_renderer_advance_encode,
@@ -52,7 +54,6 @@ use os.hosted.hosted_browser_renderer_policy.{
 
 extern fn rt_sleep_ms(milliseconds: i64)
 extern fn rt_time_now_monotonic_ms() -> i64
-extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_text_to_bytes(value: text) -> [u8]
 extern fn rt_browser_http_job_start_public_limited(
     scheme: text,
@@ -101,6 +102,21 @@ fn _renderer_wasm_hex(data: [u8]) -> text:
         out.push(if piece.len() == 1: "0{piece}" else: piece)
     out.build()
 
+pub fn hosted_browser_network_response_limit_reason(
+    kind: text, headers: text, body: [u8]
+) -> text:
+    if rt_text_to_bytes(headers).len() > (
+        BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES
+    ):
+        return "renderer-network-headers-too-large"
+    val body_limit = if kind == "wasm":
+        BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES / 2
+    else:
+        BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES
+    if body.len() > body_limit:
+        return "renderer-network-body-too-large"
+    ""
+
 fn _empty_composition() -> DrawIrComposition:
     draw_ir_composition("", "", "", [])
 
@@ -136,14 +152,14 @@ fn _renderer_frame_result(
     )
 
 fn _deadline_ms(timeout_ms: i64) -> i64:
-    rt_time_now_unix_micros() / 1000 + (
+    rt_time_now_monotonic_ms() + (
         if timeout_ms > 0: timeout_ms else: 2000
     )
 
 fn _write_before(pid: i64, wire: text, deadline_ms: i64) -> bool:
     var offset: i64 = 0
     while offset < wire.len() and
-        rt_time_now_unix_micros() / 1000 < deadline_ms:
+        rt_time_now_monotonic_ms() < deadline_ms:
         val written = process_write_stdin_some(pid, wire, offset, 8192)
         if written < 0:
             return false
@@ -420,7 +436,7 @@ pub class HostedBrowserRendererProcess:
             return self.fail("sandbox-unavailable")
         self.state = "starting"
         val deadline = _deadline_ms(timeout_ms)
-        while rt_time_now_unix_micros() / 1000 < deadline:
+        while rt_time_now_monotonic_ms() < deadline:
             val chunk = process_read_stdout(self.pid)
             val decoded = browser_renderer_decoder_feed(self.decoder, chunk)
             self.decoder = decoded.decoder
@@ -462,10 +478,21 @@ pub class HostedBrowserRendererProcess:
     fn _network_response(
         kind: text, response: FetchResponse
     ) -> HostedBrowserNetworkResult:
+        val limit_reason = hosted_browser_network_response_limit_reason(
+            kind, response.headers, response.body
+        )
+        if limit_reason != "":
+            return _network_result(0, "", "", limit_reason)
         val body = if kind == "wasm":
             _renderer_wasm_hex(response.body)
         else:
             response.body_text()
+        if rt_text_to_bytes(body).len() > (
+            BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES
+        ):
+            return _network_result(
+                0, "", "", "renderer-network-body-too-large"
+            )
         _network_result(
             response.status.to_i32(),
             response.headers,
@@ -516,7 +543,7 @@ pub class HostedBrowserRendererProcess:
                     80
                 val remaining_ms = (
                     self.command_deadline_ms -
-                    rt_time_now_unix_micros() / 1000
+                    rt_time_now_monotonic_ms()
                 )
                 if remaining_ms <= 0:
                     return Some(_network_result(
@@ -744,7 +771,7 @@ pub class HostedBrowserRendererProcess:
     me poll() -> HostedBrowserRendererResult?:
         if self.command_deadline_ms <= 0:
             return nil
-        if rt_time_now_unix_micros() / 1000 >= (
+        if rt_time_now_monotonic_ms() >= (
             self.command_deadline_ms
         ):
             return Some(self.fail("renderer-timeout"))
