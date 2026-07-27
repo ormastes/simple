@@ -1283,6 +1283,18 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
 - Recheck for at least 7 GiB free and no concurrent bootstrap immediately
   before the next single bounded attempt. Preserve the first-attempt logs,
   canonical SFFI providers, and other agents' bootstrap/GUI authorities.
+- A subsequent full attempt at `7b54ad6a79` completed the Rust seed,
+  native-all, runtime, compiler backfill, and stamped tuple. Stage 2 compiled
+  and passed bootstrap-compiler sanity. Stage 3 compiled but its final link
+  stopped with `errno=28`; no source/compiler error was reported.
+- The stamped tuple passes the canonical seed verifier, so another full
+  bootstrap is neither necessary nor allowed for this lane. Remove no tuple
+  files. The next bounded attempt must be incremental:
+  `--pure-simple --backend=llvm --mode=dynload --jobs=1 --no-mcp`.
+- The incomplete Stage 3 and now-unreferenced isolated Rust authority were
+  removed after their processes exited; Stage 2, logs, providers, and the
+  verified tuple remain. Start the incremental retry only with at least 2 GiB
+  free and no concurrent bootstrap/native-build writer.
 - macOS preflight reports both Accessibility UI scripting and Screen Recording
   access enabled. The trusted live run must still prove actual ordered input
   and exact-window capture; these permission probes only remove likely external
