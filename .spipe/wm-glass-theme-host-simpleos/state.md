@@ -820,3 +820,19 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   Shell/static and positive/negative contract probes pass; no live GUI,
   bootstrap, seed, or QEMU execution was used, so runtime status remains
   **UNVERIFIED**.
+
+- metal-receipt-checkpoint-2026-07-27: a successful Metal device-glass
+  receipt now requires `gpu_only`; normal mirror mode fails closed and uses
+  the explicit CPU fallback lane. The successful device path no longer calls
+  the CPU glass oracle or mutates the CPU mirror, so zero-CPU device
+  provenance cannot hide CPU work. Focused source and macOS behavioral
+  regressions cover the boundary. Runtime evidence remains **UNVERIFIED**.
+
+- live-driver-admission-blocker-2026-07-27: the v2 manifest admits a Stage-3
+  compiler, while the strict launcher additionally requires that same binary
+  to contain the native Winit GUI marker. The current builder proves Winit
+  only on its native harness output, not on the admitted compiler. No local
+  exact-current pure-Simple GUI driver with matching provenance exists.
+  Before live widget/web evidence, admit a separately provenance-bound
+  GUI-capable full CLI driver (or explicitly build and prove the full CLI);
+  never substitute the harness or seed.

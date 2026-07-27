@@ -630,3 +630,19 @@ Host-neutral positive/negative probes cover the strict record and seed tree.
 These are source/static gates, not replacement pixels or event receipts; the
 live macOS row remains runtime-unverified until the manifest is rebuilt and
 admitted on the prepared host.
+
+## 2026-07-27 Metal Receipt and GUI Driver Follow-up
+
+The Metal device-material receipt is now GPU-only. Normal mirror mode rejects
+the device-only operation before dispatch, leaves its CPU mirror unchanged,
+and must take the explicit CPU fallback path. A successful device receipt no
+longer invokes the CPU glass oracle behind the provenance boundary.
+
+The next local implementation lane is GUI-driver admission, not another
+capture retry. Manifest v2 currently binds a Stage-3 compiler but the strict
+launcher also requires that binary to carry the Winit GUI marker; the builder
+only proves Winit on the separate native harness. Extend admission to bind an
+exact-current, provenance-matched full CLI GUI driver (or make and prove that
+full CLI explicitly). The native harness and every seed/delegating driver
+remain inadmissible. Only after that contract is source-complete may the
+widget/web capture and event rows run.

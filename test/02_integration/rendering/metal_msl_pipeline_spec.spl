@@ -18,8 +18,32 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     engine2d_draw_ir_glass_material_pixels
 }
 use std.nogc_sync_mut.env.platform.{is_macos}
+use std.io_runtime.{file_read}
 
 describe "Metal MSL compile + GPU dispatch":
+
+    it "keeps a successful device-glass receipt separate from CPU mirror execution":
+        # This is deliberately host-neutral: the receipt may only describe the
+        # completed Metal snapshot/material dispatch. CPU mirror rasterization
+        # is a distinct fallback lane, not hidden work behind that receipt.
+        val backend = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl"
+        )
+        expect(backend.contains(
+            "engine2d_draw_ir_glass_material_pixels"
+        )).to_equal(false)
+        expect(backend.contains(
+            "self.mirror.draw_image(\n                    config.x, config.y, config.width, config.height,\n                    mirror_pixels)"
+        )).to_equal(false)
+        expect(backend).to_contain(
+            "Metal device glass requires GPU-only source of truth"
+        )
+        expect(backend).to_contain(
+            "if not self.gpu_only:"
+        )
+        expect(backend).to_contain(
+            "readback_source_label(ReadbackSource.DeviceReadback)"
+        )
 
     context "on macOS":
 
@@ -84,6 +108,40 @@ describe "Metal MSL compile + GPU dispatch":
                 expect(readback.pixels[8 * 16 + 8]).to_equal(oracle[4 * 8 + 4])
                 expect(b.pending_composite_command).to_equal(0)
                 expect(b.pending_composite_encoder).to_equal(0)
+                b.shutdown()
+            else:
+                expect(is_macos()).to_equal(false)
+
+        it "normal mirror mode rejects a device-only glass receipt":
+            if is_macos():
+                var b = MetalBackend.create()
+                expect(b.init(16, 16)).to_equal(true)
+                val seed = rgba(12, 24, 48, 63)
+                b.clear(seed)
+                val config = Engine2dGlassMaterialConfig(
+                    framebuffer_width: 16,
+                    framebuffer_height: 16,
+                    x: 4,
+                    y: 4,
+                    width: 8,
+                    height: 8,
+                    radius: 2,
+                    blur_radius: 4,
+                    saturation_milli: 1700,
+                    surface_alpha_milli: 800,
+                    surface_color: 0xCC1F1F21u32,
+                    gradient_from: 0x14FFFFFFu32,
+                    gradient_to: 0x06FFFFFFu32,
+                    gradient_enabled: true,
+                    gradient_layered_over_surface: true
+                )
+                val applied = b.draw_ir_apply_glass_material_device(config)
+                val mirror_pixels = b.mirror.read_pixels()
+                expect(applied).to_equal(false)
+                expect(b.last_error).to_equal(
+                    "Metal device glass requires GPU-only source of truth"
+                )
+                expect(mirror_pixels[4 * 16 + 4]).to_equal(seed)
                 b.shutdown()
             else:
                 expect(is_macos()).to_equal(false)

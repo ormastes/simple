@@ -12,8 +12,7 @@ use std.gpu.engine2d.backend_metal_runtime_ops.{metal_buffer_download_ptr, metal
 use std.gpu.engine2d.backend_capability.{BackendCapability, Engine2dBackendKind, backend_capability_default, OP_INDEXED_FILL, OP_GLYPH_ATLAS_BLIT, OP_DRAW_GRADIENT_RECT, OP_DRAW_ROUNDED_RECT, OP_DRAW_IMAGE}
 use std.gc_async_mut.gpu.engine2d.metal_session.{MetalSession}
 use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
-    Engine2dGlassMaterialConfig,
-    engine2d_draw_ir_glass_material_pixels
+    Engine2dGlassMaterialConfig
 }
 use std.gpu.engine2d.backend_metal_font.{MetalFontBackendState}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
@@ -1055,6 +1054,13 @@ impl MetalBackend:
     me draw_ir_apply_glass_material_device(
         config: Engine2dGlassMaterialConfig
     ) -> bool:
+        # The receipt below is device-only. Normal Metal mode keeps a CPU
+        # mirror that cannot be updated without executing the CPU material
+        # oracle, so it must use the explicit CPU fallback lane instead of
+        # claiming a zero-CPU Metal material execution.
+        if not self.gpu_only:
+            self.last_error = "Metal device glass requires GPU-only source of truth"
+            return false
         val pixel_count = self.w.to_i64() * self.h.to_i64()
         val output_count = config.width.to_i64() * config.height.to_i64()
         if (not self.initialized or not self.session.is_valid() or
@@ -1226,17 +1232,9 @@ impl MetalBackend:
         self.gpu_frame_complete = true
         self.last_error = ""
 
-        # Normal (non-fast) Metal keeps a CPU mirror as a future fallback.
-        # Update that mirror from its own already-mirrored backdrop; this is not
-        # a device readback and cannot create the device receipt above.
-        if (not self.gpu_only and
-            self.mirror.buf.len() == pixel_count):
-            val mirror_pixels = engine2d_draw_ir_glass_material_pixels(
-                self.mirror.buf, config)
-            if mirror_pixels.len() == output_count:
-                self.mirror.draw_image(
-                    config.x, config.y, config.width, config.height,
-                    mirror_pixels)
+        # GPU-only mode makes the device framebuffer the sole source of truth.
+        # The mirror is intentionally untouched; any future fallback must first
+        # cross an explicit typed device-readback/synchronization boundary.
         true
 
     fn _gpu_only_mask_emulation_active() -> bool:
