@@ -392,6 +392,41 @@ re-attributes every row above.
    changes — commit-immediately rule re-confirmed; **(2)** `jj squash --into @-`
    landed in a parallel session's commit because `@-` had moved — always squash
    into an **explicit commit id**.
+9. **(2026-07-27, later)** Stage-4 HIR phantom-Some segfault **mitigated with TWO
+   guards, both landed on origin main**:
+   - `ea697e4c2a85` — sibling-sweep guard in `resolve_package_sibling_symbols`
+     (skip header-only partial siblings).
+   - `8fb1d047f9f3` — `register_imported_symbol` header-only early-return.
+   Seed probe-builds **11 and 12 verified** clean. The stage-4 runtime repro
+   **cleared the original crash point** (`env_ops.spl` module 32; 69 modules
+   lowered) before revealing a **second site**; repro under guard2 is in flight.
+   Next queued: incremental bootstrap `--deploy`. Bug doc
+   `doc/08_tracking/bug/hir_stub_module_nil_dict_get_phantom_some_2026-07-27.md`
+   updated with both sites.
+10. **Pre-deploy four-gate baseline (2026-07-27, CURRENT deployed binary).**
+    Binary identity: `readlink -f bin/simple` →
+    `bin/release/x86_64-unknown-linux-gnu/simple`; `bin/simple --version` prints
+    verbatim: *"WARNING: this Rust-built Simple binary is a bootstrap seed only;
+    do not use it as the normal tool. Build and use the pure-Simple bin/simple
+    instead."* then `Simple Language v1.0.0-beta` — **the current deployed
+    binary is the seed.**
+    - `check-riscv-rtl-truth.shs` — **PASS** (exit 0): `riscv_rtl_truth_ok=true`,
+      `unknown=0` (reference_handwritten=17, fixture=26, generated_contract=9,
+      generated_real=8).
+    - `check-riscv-hardware-gates.shs` — **13/22 PASS** (exit 1; expected 21/22,
+      addr4g gap filed). All 9 probe FAILs (soc_top_64_probe, boot64_probe,
+      core64_probe, core_fpu_integration, csr_machine_id, rv32_uart_console,
+      addr4g_probe, hart_debug_probe_rv32, link_mux_jtag_debug) share one root
+      cause: the seed's ``error: semantic: variable `hardware` not found`` —
+      the known seed `@hardware` gap, not new regressions. 1 optional-gate WARN
+      (jtag tb_openocd_bitbang, not counted).
+    - `check-riscv-formal-dual-track.shs` — **FAIL** (exit 1), same seed
+      ``variable `hardware` not found`` error.
+    - `check-riscv-product-level-evidence.shs` — **FAIL** (exit 1):
+      `FAIL test/03_system/app/hardware/feature/riscv_fpga_linux_spec.spl`
+      under the seed binary.
+    This is the *pre-deploy* baseline the post-redeploy run must be compared
+    against for re-attribution.
 
 ## 5. Exit criteria for the whole lane
 

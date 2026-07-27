@@ -136,6 +136,31 @@ seed-attributed evidence (redeploy blocker); rv64 DTB overlay not materialized;
 SPIPE005 rejects assert_true family. (Plus COLL006 integer-accumulator false
 positive, filed earlier the same day.)
 
+## Lane H update + pre-deploy gate baseline (2026-07-27, later)
+
+Stage-4 HIR phantom-Some segfault **mitigated with TWO guards, both landed on
+origin main**: `ea697e4c2a85` (sibling-sweep guard in
+`resolve_package_sibling_symbols`) and `8fb1d047f9f3`
+(`register_imported_symbol` header-only early-return). Seed probe-builds 11 and
+12 verified. Stage-4 runtime repro cleared the original crash point
+(`env_ops.spl` module 32; 69 modules lowered) before revealing a second site;
+repro under guard2 in flight. Incremental bootstrap `--deploy` queued next. Bug
+doc `doc/08_tracking/bug/hir_stub_module_nil_dict_get_phantom_some_2026-07-27.md`
+updated with both sites.
+
+**Pre-deploy four-gate baseline on the CURRENT deployed binary** (`bin/simple`
+→ `bin/release/x86_64-unknown-linux-gnu/simple`, which prints the seed warning
+banner — the deployed binary IS the seed, v1.0.0-beta):
+
+| Gate | Verdict |
+|---|---|
+| `check-riscv-rtl-truth.shs` | PASS (exit 0) — `riscv_rtl_truth_ok=true`, `unknown=0` |
+| `check-riscv-hardware-gates.shs` | 13/22 PASS (exit 1; expected 21/22) — all 9 probe FAILs are the seed ``variable `hardware` not found`` gap, not new regressions |
+| `check-riscv-formal-dual-track.shs` | FAIL (exit 1) — same seed `hardware` semantic error |
+| `check-riscv-product-level-evidence.shs` | FAIL (exit 1) — `FAIL .../riscv_fpga_linux_spec.spl` under the seed |
+
+Post-redeploy runs re-attribute against this baseline.
+
 ## Phase Checklist
 - [x] 1-dev
 - [x] 2-research (parallel lanes A–G ran; findings folded into plan §1.1b–§1.1e)
