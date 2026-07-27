@@ -7,6 +7,7 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_frame_decode
 }
 use os.hosted.hosted_browser_renderer_worker.{
+    HostedBrowserRendererWorkerSession,
     hosted_browser_renderer_handle_init,
     hosted_browser_renderer_handle_request
 }
@@ -100,6 +101,54 @@ describe "hosted browser renderer worker":
         expect(animated.ok).to_be(true)
         expect(first.wire == animated.wire).to_be(false)
         expect(animated.animation_time_ms).to_equal(16)
+
+    it "keeps DOM focus and trusted chrome state across bounded actions":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        val initialized = worker.handle(BrowserRendererMessage(
+            kind: "init",
+            generation: 7,
+            request_id: 2,
+            payload: "<input id='name' value='' onkeydown='set-attr:data-down=yes' onkeyup='set-attr:data-up=yes'>"
+        ))
+        expect(initialized.ok).to_be(true)
+
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 3,
+            payload: "P1\t1\t5\t5\t1"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 4,
+            payload: "P1\t2\t5\t5\t0"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 5,
+            payload: "K1\t3\t87\t1"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "text", generation: 7, request_id: 6,
+            payload: "T1\t4\t1\nw"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 7,
+            payload: "K1\t5\t87\t0"
+        )).ok).to_be(true)
+        expect(worker.browser.current_body_html).to_contain("value=\"w\"")
+        expect(worker.browser.current_body_html).to_contain("data-down=\"yes\"")
+        expect(worker.browser.current_body_html).to_contain("data-up=\"yes\"")
+
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 8,
+            payload: "C1\t6\t1\t7\naddress"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 9,
+            payload: "C1\t7\t0\t7\naddress"
+        )).ok).to_be(true)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "text", generation: 7, request_id: 10,
+            payload: "T1\t8\t20\nhttps://example.test"
+        )).ok).to_be(true)
+        expect(worker.browser.address_draft).to_equal("https://example.test")
 
     it "rejects skipped ids and backward animation time":
         var session = BrowserSession.new()

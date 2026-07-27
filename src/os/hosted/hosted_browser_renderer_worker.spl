@@ -3,14 +3,21 @@
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_WORKER_ARG,
     BrowserRendererEncodeResult, BrowserRendererMessage,
+    browser_renderer_action_decode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_frame_encode_with_witness, browser_renderer_message_encode
 }
+use common.ui.access.{WinTextActionRequest}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_event_identity_at_element_path, be_dom_focused_id
+}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_hit_test_target_at_time,
     simple_web_layout_render_html_draw_ir_result_at_time
 }
 use std.gc_async_mut.web.browser_session.{BrowserSession}
 use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_ui_access.*
 use std.nogc_sync_mut.io.process_ops.{browser_renderer_sandbox_enter}
 
 extern fn rt_browser_renderer_read_stdin_some(max_bytes: i64) -> text
@@ -43,6 +50,260 @@ fn _worker_result_reject(
         wire: ""
     )
 
+fn _worker_frame(
+    session: BrowserSession,
+    message: BrowserRendererMessage,
+    width: i32,
+    height: i32,
+    animation_time_ms: i64
+) -> HostedBrowserRendererWorkerResult:
+    val layout = simple_web_layout_render_html_draw_ir_result_at_time(
+        session.current_style_html + session.current_body_html,
+        width,
+        height,
+        animation_time_ms
+    )
+    val encoded = browser_renderer_frame_encode_with_witness(
+        layout.composition,
+        message.generation,
+        message.request_id,
+        layout.material_witness.cpu_composited_count,
+        layout.material_witness.cpu_composited_sha256,
+        layout.material_witness.solid_material_count,
+        layout.material_witness.solid_material_sha256
+    )
+    if not encoded.ok:
+        return _worker_result_reject(
+            encoded.reason, true, animation_time_ms
+        )
+    HostedBrowserRendererWorkerResult(
+        ok: true,
+        reason: "ok",
+        initialized: true,
+        animation_time_ms: animation_time_ms,
+        wire: encoded.wire
+    )
+
+pub class HostedBrowserRendererWorkerSession:
+    browser: BrowserSession
+    width: i32
+    height: i32
+    initialized: bool
+    animation_time_ms: i64
+    expected_request_id: i64
+    pressed_target_id: text
+    pressed_chrome_control: text
+    chrome_focus: text
+    address_replace_on_text: bool
+
+    static fn create(width: i32, height: i32) -> HostedBrowserRendererWorkerSession:
+        HostedBrowserRendererWorkerSession(
+            browser: BrowserSession.new(),
+            width: width,
+            height: height,
+            initialized: false,
+            animation_time_ms: 0,
+            expected_request_id: 2,
+            pressed_target_id: "",
+            pressed_chrome_control: "",
+            chrome_focus: "",
+            address_replace_on_text: false
+        )
+
+    me _target_at(x: i64, y: i64) -> text:
+        val root = self.browser.dom_root()
+        val target_key = simple_web_layout_hit_test_target_at_time(
+            self.browser.render_html_document(),
+            self.width,
+            self.height,
+            x.to_i32(),
+            y.to_i32(),
+            self.animation_time_ms
+        )
+        if target_key.starts_with("id:"):
+            return target_key.slice(3, target_key.len())
+        if target_key.starts_with("path:"):
+            return be_dom_event_identity_at_element_path(
+                root, target_key.slice(5, target_key.len())
+            )
+        ""
+
+    me _chrome_action(control: text, action: text, value: text):
+        val _ = self.browser.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#{control}",
+            action: action,
+            text_value: value,
+            x: 0,
+            y: 0
+        ))
+
+    me _dispatch_pointer(message: BrowserRendererMessage) -> text:
+        val action = browser_renderer_action_decode(message)
+        if not action.ok:
+            return action.reason
+        self.chrome_focus = ""
+        self.address_replace_on_text = false
+        self.pressed_chrome_control = ""
+        val target_id = self._target_at(action.x, action.y)
+        if target_id == "":
+            self.pressed_target_id = ""
+            return ""
+        if action.pressed:
+            self.pressed_target_id = target_id
+            val _ = self.browser.dispatch_dom_event(
+                target_id, "pointerdown", true, true
+            )
+            val _ = self.browser.dispatch_dom_event(
+                target_id, "mousedown", true, true
+            )
+            return ""
+        val pressed_target_id = self.pressed_target_id
+        self.pressed_target_id = ""
+        val _ = self.browser.dispatch_dom_event(
+            target_id, "pointerup", true, true
+        )
+        val _ = self.browser.dispatch_dom_event(
+            target_id, "mouseup", true, true
+        )
+        if pressed_target_id == target_id:
+            val _ = self.browser.dispatch_dom_event(
+                target_id, "click", true, true
+            )
+        ""
+
+    me _dispatch_text(message: BrowserRendererMessage) -> text:
+        val action = browser_renderer_action_decode(message)
+        if not action.ok:
+            return action.reason
+        if self.chrome_focus == "address":
+            val current = if self.browser.address_draft != "":
+                self.browser.address_draft
+            else:
+                self.browser.current_url
+            val updated = if self.address_replace_on_text:
+                action.value
+            else:
+                current + action.value
+            self.address_replace_on_text = false
+            self._chrome_action("address", "set_value", updated)
+            return ""
+        val target_id = be_dom_focused_id(self.browser.dom_root())
+        if target_id != "":
+            val _ = self.browser.append_dom_text_input(
+                target_id, action.value
+            )
+        ""
+
+    me _dispatch_key(message: BrowserRendererMessage) -> text:
+        val action = browser_renderer_action_decode(message)
+        if not action.ok:
+            return action.reason
+        if self.chrome_focus == "address":
+            if not action.pressed:
+                return ""
+            if action.key_code == 13:
+                self._chrome_action("address", "submit", "")
+            elif action.key_code == 8:
+                val current = if self.browser.address_draft != "":
+                    self.browser.address_draft
+                else:
+                    self.browser.current_url
+                val shortened = if current.len() > 0:
+                    current.slice(0, current.len() - 1)
+                else:
+                    ""
+                self.address_replace_on_text = false
+                self._chrome_action("address", "set_value", shortened)
+            return ""
+        val target_id = be_dom_focused_id(self.browser.dom_root())
+        if target_id == "":
+            return ""
+        val key = if action.key_code == 13:
+            "Enter"
+        elif action.key_code == 32:
+            " "
+        else:
+            action.key_code.to_text()
+        val _ = self.browser.dispatch_dom_keyboard_event(
+            target_id, key, action.pressed
+        )
+        ""
+
+    me _dispatch_chrome(message: BrowserRendererMessage) -> text:
+        val action = browser_renderer_action_decode(message)
+        if not action.ok:
+            return action.reason
+        self.pressed_target_id = ""
+        if action.pressed:
+            self.pressed_chrome_control = action.value
+            if action.value == "address":
+                self.chrome_focus = "address"
+                self.address_replace_on_text = true
+            else:
+                self.chrome_focus = ""
+                self.address_replace_on_text = false
+            return ""
+        val pressed = self.pressed_chrome_control
+        self.pressed_chrome_control = ""
+        if pressed != action.value:
+            return ""
+        if action.value != "address":
+            self._chrome_action(action.value, "click", "")
+        ""
+
+    me handle(message: BrowserRendererMessage) -> HostedBrowserRendererWorkerResult:
+        if message.request_id != self.expected_request_id:
+            return _worker_result_reject(
+                "unexpected-request-id",
+                self.initialized,
+                self.animation_time_ms
+            )
+        if not self.initialized:
+            if message.kind != "init":
+                return _worker_result_reject(
+                    "expected-init", false, self.animation_time_ms
+                )
+            if val Err(reason) = self.browser.open_html(
+                "simple-renderer://document", message.payload
+            ):
+                return _worker_result_reject(
+                    reason, false, self.animation_time_ms
+                )
+            self.initialized = true
+            self.animation_time_ms = 0
+        else:
+            var reason = ""
+            if message.kind == "advance":
+                val action = browser_renderer_action_decode(message)
+                if not action.ok:
+                    reason = action.reason
+                elif action.now_ms < self.animation_time_ms:
+                    reason = "invalid-animation-time"
+                else:
+                    val _ = self.browser.advance_time(action.now_ms)
+                    self.animation_time_ms = action.now_ms
+            elif message.kind == "pointer":
+                reason = self._dispatch_pointer(message)
+            elif message.kind == "text":
+                reason = self._dispatch_text(message)
+            elif message.kind == "key":
+                reason = self._dispatch_key(message)
+            elif message.kind == "chrome":
+                reason = self._dispatch_chrome(message)
+            else:
+                reason = "unexpected-action"
+            if reason != "":
+                return _worker_result_reject(
+                    reason, true, self.animation_time_ms
+                )
+        val frame = _worker_frame(
+            self.browser, message, self.width, self.height,
+            self.animation_time_ms
+        )
+        if frame.ok:
+            self.expected_request_id = self.expected_request_id + 1
+        frame
+
 pub fn hosted_browser_renderer_handle_request(
     session: BrowserSession,
     message: BrowserRendererMessage,
@@ -56,7 +317,6 @@ pub fn hosted_browser_renderer_handle_request(
         return _worker_result_reject(
             "unexpected-request-id", initialized, animation_time_ms
         )
-    var next_initialized = initialized
     var next_time_ms = animation_time_ms
     if not initialized:
         if message.kind != "init":
@@ -69,7 +329,6 @@ pub fn hosted_browser_renderer_handle_request(
             return _worker_result_reject(
                 reason, initialized, animation_time_ms
             )
-        next_initialized = true
         next_time_ms = 0
     else:
         if message.kind != "advance":
@@ -85,32 +344,7 @@ pub fn hosted_browser_renderer_handle_request(
         val _ = session.advance_time(requested_time_ms)
         next_time_ms = requested_time_ms
 
-    val layout = simple_web_layout_render_html_draw_ir_result_at_time(
-        session.current_style_html + session.current_body_html,
-        width,
-        height,
-        next_time_ms
-    )
-    val encoded = browser_renderer_frame_encode_with_witness(
-        layout.composition,
-        message.generation,
-        message.request_id,
-        layout.material_witness.cpu_composited_count,
-        layout.material_witness.cpu_composited_sha256,
-        layout.material_witness.solid_material_count,
-        layout.material_witness.solid_material_sha256
-    )
-    if not encoded.ok:
-        return _worker_result_reject(
-            encoded.reason, next_initialized, next_time_ms
-        )
-    HostedBrowserRendererWorkerResult(
-        ok: true,
-        reason: "ok",
-        initialized: next_initialized,
-        animation_time_ms: next_time_ms,
-        wire: encoded.wire
-    )
+    _worker_frame(session, message, width, height, next_time_ms)
 
 pub fn hosted_browser_renderer_handle_init(
     message: BrowserRendererMessage,
@@ -183,10 +417,9 @@ pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
         return 71
 
     var decoder = browser_renderer_decoder_new(generation)
-    var session = BrowserSession.new()
-    var initialized = false
-    var animation_time_ms: i64 = 0
-    var expected_request_id: i64 = 2
+    var session = HostedBrowserRendererWorkerSession.create(
+        width_i64.to_i32(), height_i64.to_i32()
+    )
     while true:
         val chunk = rt_browser_renderer_read_stdin_some(_WORKER_READ_BYTES)
         if chunk == "":
@@ -196,17 +429,6 @@ pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
         if decoded.status == "violation":
             return 73
         if decoded.status == "message":
-            val frame = hosted_browser_renderer_handle_request(
-                session,
-                decoded.message,
-                width_i64.to_i32(),
-                height_i64.to_i32(),
-                initialized,
-                animation_time_ms,
-                expected_request_id
-            )
+            val frame = session.handle(decoded.message)
             if not frame.ok or not _worker_write(frame.wire):
                 return 74
-            initialized = frame.initialized
-            animation_time_ms = frame.animation_time_ms
-            expected_request_id = expected_request_id + 1

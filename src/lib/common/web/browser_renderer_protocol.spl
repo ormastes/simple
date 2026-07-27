@@ -325,16 +325,18 @@ pub fn browser_renderer_text_encode(
     )
 
 pub fn browser_renderer_chrome_encode(
-    generation: i64, request_id: i64, event_id: i64, control: text
+    generation: i64, request_id: i64, event_id: i64, control: text,
+    pressed: bool
 ) -> BrowserRendererEncodeResult:
     if (event_id <= 0 or
         (control != "back" and control != "forward" and control != "stop" and
         control != "home" and control != "favorite" and control != "address")):
         return _browser_renderer_reject_encode("invalid-action")
     val byte_length = text_to_bytes(control).len()
+    val flag = if pressed: 1 else: 0
     browser_renderer_message_encode(
         "chrome", generation, request_id,
-        "C1\t{event_id}\t{byte_length}\n{control}"
+        "C1\t{event_id}\t{flag}\t{byte_length}\n{control}"
     )
 
 pub fn browser_renderer_action_decode(
@@ -345,13 +347,32 @@ pub fn browser_renderer_action_decode(
             message, "T1", "text", BROWSER_RENDERER_MAX_TEXT_BYTES
         )
     if message.kind == "chrome":
-        val decoded = _browser_renderer_length_payload(message, "C1", "chrome", 16)
-        if (not decoded.ok or
-            (decoded.value != "back" and decoded.value != "forward" and
-             decoded.value != "stop" and decoded.value != "home" and
-             decoded.value != "favorite" and decoded.value != "address")):
+        val header_end = _browser_renderer_header_end(message.payload)
+        if header_end < 0 or header_end >= BROWSER_RENDERER_MAX_HEADER_BYTES:
+            return _browser_renderer_action_reject("malformed-action")
+        val fields = _browser_renderer_byte_slice(
+            message.payload, 0, header_end
+        ).split("\t")
+        if (fields.len() != 4 or fields[0] != "C1" or
+            _browser_renderer_positive_i64(fields[1]) < 0 or
+            _browser_renderer_flag(fields[2]) < 0):
+            return _browser_renderer_action_reject("malformed-action")
+        val byte_length = fields[3].to_i64() ?? -1
+        if (byte_length < 0 or byte_length > 16 or
+            str(byte_length) != fields[3] or
+            message.payload.len() != header_end + 1 + byte_length):
+            return _browser_renderer_action_reject("malformed-action")
+        val control = _browser_renderer_byte_slice(
+            message.payload, header_end + 1, message.payload.len()
+        )
+        if (control != "back" and control != "forward" and
+            control != "stop" and control != "home" and
+            control != "favorite" and control != "address"):
             return _browser_renderer_action_reject("invalid-control")
-        return decoded
+        return _browser_renderer_action(
+            "chrome", 0, fields[1].to_i64() ?? 0, 0, 0, 0,
+            _browser_renderer_flag(fields[2]) == 1, control
+        )
     val fields = message.payload.split("\t")
     if message.kind == "advance":
         if fields.len() != 2 or fields[0] != "A1" or not _browser_renderer_canonical_i64(fields[1]):
