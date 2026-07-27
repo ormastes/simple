@@ -474,21 +474,21 @@ pub class HostedBrowserRendererProcess:
     me _finalize_network(
         kind: text,
         request: FetchRequest,
-        response: FetchResponse
+        response: FetchResponse,
+        authenticated_https: bool
     ) -> HostedBrowserNetworkResult:
+        if authenticated_https and request.url.scheme == "https":
+            val hsts_header = hosted_browser_response_header_value(
+                response.headers, "strict-transport-security"
+            )
+            if (hsts_header != "" and self.hsts._apply_hsts_header(
+                hsts_header, request.url.to_text()
+            )):
+                self.hsts_dirty = true
         match self.network.finalize_single_hop(request, response):
             Err(error):
                 _network_result(0, "", "", error.message)
             Ok(finalized):
-                if (finalized.status >= 200 and finalized.status < 400 and
-                    request.url.scheme == "https"):
-                    val hsts_header = hosted_browser_response_header_value(
-                        finalized.headers, "strict-transport-security"
-                    )
-                    if (hsts_header != "" and self.hsts._apply_hsts_header(
-                        hsts_header, request.url.to_text()
-                    )):
-                        self.hsts_dirty = true
                 self._network_response(kind, finalized)
 
     fn _network_response(
@@ -548,7 +548,7 @@ pub class HostedBrowserRendererProcess:
                             ))
                         Ok(response):
                             return Some(self._finalize_network(
-                                fetch.kind, prepared.request, response
+                                fetch.kind, prepared.request, response, false
                             ))
                 val url = prepared.request.url
                 val port = if url.port > 0:
@@ -760,7 +760,8 @@ pub class HostedBrowserRendererProcess:
                         )
                     Ok(parsed):
                         response = self._finalize_network(
-                            fetch.kind, request, parsed
+                            fetch.kind, request, parsed,
+                            request.url.scheme == "https"
                         )
         self._write_network_response(
             fetch, policy, response, redirect_count

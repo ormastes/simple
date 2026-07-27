@@ -833,3 +833,10 @@ implementation in progress / target evidence blocked
   valid policy while valid `max-age=0` still clears it. The focused
   BrowserSession scenario and mirrored manual cover both outcomes; executable
   Simple evidence remains compiler-blocked and was not rerun.
+- HSTS response ordering: The trusted broker now learns STS from every
+  successfully authenticated HTTPS response before CORS exposure filtering,
+  including 4xx/5xx responses. Only the completed rustls job supplies
+  authentication provenance; plaintext and synthetic/mock responses cannot
+  install policy. Focused broker scenarios and a mirrored manual cover CORS
+  denial, 404, HTTP, and untrusted HTTPS; executable Simple evidence remains
+  compiler-blocked and was not rerun.
