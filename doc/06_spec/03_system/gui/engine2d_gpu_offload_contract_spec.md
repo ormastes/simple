@@ -248,13 +248,15 @@ expect(src).to_contain(guard + "\"ERROR: hosted WM motion pure-Simple frame pres
    - Expected: raster.last_composition_id equals `"wm-composite"`
    - Expected: raster.last_scene_key is not blank
    - Expected: raster.last_web_content_image_count is greater than `0`
+   - Expected: readback completed at `240x180`, stride `960`, format `argb8888`
+   - Expected: a later direct pixel mutation invalidates the correlated receipt
 - raster shutdown
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -270,8 +272,24 @@ expect(pixels[90 * 240 + 30] == wm_chrome_theme().command_lane).to_be(false)
 expect(raster.last_composition_id).to_equal("wm-composite")
 expect(raster.last_scene_key == "").to_be(false)
 expect(raster.last_web_content_image_count).to_be_greater_than(0)
+expect(raster.last_readback_completed).to_be(true)
+expect(raster.last_readback_width).to_equal(240)
+expect(raster.last_readback_height).to_equal(180)
+expect(raster.last_readback_stride).to_equal(960)
+expect(raster.last_readback_format).to_equal("argb8888")
 expect(raster.frame_provenance()).to_contain("composition_id=wm-composite;scene_key=")
 expect(raster.frame_provenance()).to_contain(";web_content_image_count=1")
+expect(raster.frame_provenance()).to_contain(";completed=true;width=240;height=180;stride=960;format=argb8888")
+raster.fill_rect(0, 0, 1, 1, 0xFFFFFFFFu32)
+expect(raster.last_readback_completed).to_be(false)
+expect(raster.last_readback_width).to_equal(0)
+expect(raster.last_readback_height).to_equal(0)
+expect(raster.last_readback_stride).to_equal(0)
+expect(raster.last_readback_format).to_equal("")
+expect(raster.last_readback_checksum).to_equal(0)
+expect(raster.last_composition_id).to_equal("")
+expect(raster.last_scene_key).to_equal("")
+expect(raster.last_web_content_image_count).to_equal(0)
 raster.shutdown()
 ```
 

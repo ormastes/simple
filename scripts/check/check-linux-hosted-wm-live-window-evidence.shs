@@ -212,6 +212,11 @@ emit() {
         echo "linux_hosted_wm_live_window_input_render_mutation_revision=$input_render_mutation_revision"
         echo "linux_hosted_wm_live_window_input_composition_id=$input_composition_id"
         echo "linux_hosted_wm_live_window_input_web_content_image_count=$input_web_content_image_count"
+        echo "linux_hosted_wm_live_window_input_readback_completed=$input_readback_completed"
+        echo "linux_hosted_wm_live_window_input_readback_width=$input_readback_width"
+        echo "linux_hosted_wm_live_window_input_readback_height=$input_readback_height"
+        echo "linux_hosted_wm_live_window_input_readback_stride=$input_readback_stride"
+        echo "linux_hosted_wm_live_window_input_readback_format=$input_readback_format"
         echo "linux_hosted_wm_live_window_input_capture_sha256=$input_capture_sha"
         echo "linux_hosted_wm_live_window_input_snapshot=$INPUT_SNAPSHOT"
         echo "linux_hosted_wm_live_window_input_capture=$INPUT_CAPTURE"
@@ -313,6 +318,11 @@ input_render_event_id=""
 input_render_mutation_revision=""
 input_composition_id=""
 input_web_content_image_count=""
+input_readback_completed=""
+input_readback_width=""
+input_readback_height=""
+input_readback_stride=""
+input_readback_format=""
 input_capture_sha=""
 move_revision=""
 move_frame_checksum=""
@@ -581,18 +591,26 @@ retain_phase() {
     composition_id="$(jq -r '.render.composition_id' "$SNAPSHOT_LIVE")"
     scene_key="$(jq -r '.render.scene_key' "$SNAPSHOT_LIVE")"
     web_content_image_count="$(jq -r '.render.web_content_image_count' "$SNAPSHOT_LIVE")"
+    readback_completed="$(jq -r '.render.readback_completed' "$SNAPSHOT_LIVE")"
+    readback_width="$(jq -r '.render.readback_width' "$SNAPSHOT_LIVE")"
+    readback_height="$(jq -r '.render.readback_height' "$SNAPSHOT_LIVE")"
+    readback_stride="$(jq -r '.render.readback_stride' "$SNAPSHOT_LIVE")"
+    readback_format="$(jq -r '.render.readback_format' "$SNAPSHOT_LIVE")"
     render_event_id="$(jq -r '.render.semantic_event_id' "$SNAPSHOT_LIVE")"
     render_mutation_revision="$(jq -r '.render.mutation_revision' "$SNAPSHOT_LIVE")"
     [ "$frame_backend" != "" ] && [ "$frame_backend" != null ] || return 1
     [ "$readback_source" != "" ] && [ "$readback_source" != unavailable ] && [ "$readback_source" != null ] || return 1
     [ "$composition_id" = wm-composite ] || return 1
     [ "$scene_key" != "" ] && [ "$scene_key" != null ] || return 1
-    case "$backend_handle:$frame_checksum:$web_content_image_count:$render_event_id:$render_mutation_revision" in
+    [ "$readback_completed" = true ] || return 1
+    [ "$readback_width" = 1024 ] && [ "$readback_height" = 720 ] || return 1
+    [ "$readback_stride" = 4096 ] && [ "$readback_format" = argb8888 ] || return 1
+    case "$backend_handle:$frame_checksum:$web_content_image_count:$readback_width:$readback_height:$readback_stride:$render_event_id:$render_mutation_revision" in
         *[!0-9:]*|:|*:) return 1 ;;
     esac
     [ "$web_content_image_count" -gt 0 ] || return 1
     case "$last_issue_ack" in
-        *" revision=$revision semantic_event_id=$render_event_id mutation_revision=$render_mutation_revision "*"backend=$frame_backend;source=$readback_source;handle=$backend_handle;checksum=$frame_checksum;composition_id=$composition_id;scene_key=$scene_key;web_content_image_count=$web_content_image_count identity="*) ;;
+        *" revision=$revision semantic_event_id=$render_event_id mutation_revision=$render_mutation_revision "*"backend=$frame_backend;source=$readback_source;handle=$backend_handle;checksum=$frame_checksum;composition_id=$composition_id;scene_key=$scene_key;web_content_image_count=$web_content_image_count;completed=$readback_completed;width=$readback_width;height=$readback_height;stride=$readback_stride;format=$readback_format identity="*) ;;
         *) return 1 ;;
     esac
     jq -e --argjson nonce "$nonce" --argjson revision "$revision" \
@@ -600,6 +618,9 @@ retain_phase() {
         --arg source "$readback_source" --argjson handle "$backend_handle" \
         --argjson checksum "$frame_checksum" --arg composition "$composition_id" \
         --arg scene "$scene_key" --argjson web_images "$web_content_image_count" \
+        --argjson completed "$readback_completed" --argjson width "$readback_width" \
+        --argjson height "$readback_height" --argjson stride "$readback_stride" \
+        --arg format "$readback_format" \
         '.input.nonce == $nonce and .input.phase == $phase and
          .compositor.render_revision == $revision and
          .render.fallback_used == false and
@@ -610,7 +631,12 @@ retain_phase() {
          .render.checksum == $checksum and
          .render.composition_id == $composition and
          .render.scene_key == $scene and
-         .render.web_content_image_count == $web_images' \
+         .render.web_content_image_count == $web_images and
+         .render.readback_completed == $completed and
+         .render.readback_width == $width and
+         .render.readback_height == $height and
+         .render.readback_stride == $stride and
+         .render.readback_format == $format' \
         "$SNAPSHOT_LIVE" >/dev/null || return 1
     if [ "$label" = input ]; then
         [ "$render_event_id" -gt 0 ] && [ "$render_mutation_revision" -gt 0 ] || return 1
@@ -643,6 +669,11 @@ retain_phase() {
             input_render_mutation_revision=$render_mutation_revision
             input_composition_id=$composition_id
             input_web_content_image_count=$web_content_image_count
+            input_readback_completed=$readback_completed
+            input_readback_width=$readback_width
+            input_readback_height=$readback_height
+            input_readback_stride=$readback_stride
+            input_readback_format=$readback_format
             input_capture_sha=$capture_sha
             ;;
         move)

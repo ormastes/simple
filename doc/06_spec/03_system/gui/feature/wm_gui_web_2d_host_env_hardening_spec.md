@@ -74,7 +74,7 @@ describe "production host event and render evidence":
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 65 lines folded for reproduction.
+Runnable source: 72 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -122,6 +122,11 @@ expect(live).to_contain("linux_hosted_wm_live_window_input_readback_source=devic
 expect(live).to_contain("linux_hosted_wm_live_window_input_backend_handle=")
 expect(live).to_contain("linux_hosted_wm_live_window_input_render_event_id=")
 expect(live).to_contain("linux_hosted_wm_live_window_input_render_mutation_revision=")
+expect(live).to_contain("linux_hosted_wm_live_window_input_readback_completed=true")
+expect(live).to_contain("linux_hosted_wm_live_window_input_readback_width=1024")
+expect(live).to_contain("linux_hosted_wm_live_window_input_readback_height=720")
+expect(live).to_contain("linux_hosted_wm_live_window_input_readback_stride=4096")
+expect(live).to_contain("linux_hosted_wm_live_window_input_readback_format=argb8888")
 expect(live).to_contain("linux_hosted_wm_live_window_glyph_crop_live_match=true")
 expect(live).to_contain("linux_hosted_wm_live_window_baseline_nonce=1")
 expect(live).to_contain("linux_hosted_wm_live_window_input_nonce=2")
@@ -161,7 +166,7 @@ production owners. Live event and device proof belongs to the primary scenario.
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 25 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

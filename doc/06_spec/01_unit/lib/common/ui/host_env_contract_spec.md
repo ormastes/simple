@@ -182,7 +182,7 @@ expect(receipt(nonblank: 0).validation_reason()).to_equal("blank-frame")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 34 lines folded for reproduction.
+Runnable source: 40 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -214,6 +214,11 @@ expect(host_readback_evidence_passes(complete.replace("input_render_event_id=7",
 expect(host_readback_evidence_passes(complete.replace("input_render_mutation_revision=1", "input_render_mutation_revision=2"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("input_composition_id=wm-composite", "input_composition_id=other"))).to_be(false)
 expect(host_readback_evidence_passes(complete.replace("input_web_content_image_count=1", "input_web_content_image_count=0"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("input_readback_completed=true", "input_readback_completed="))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("input_readback_width=1024", "input_readback_width=1023"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("input_readback_height=720", "input_readback_height=719"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("input_readback_stride=4096", "input_readback_stride=4092"))).to_be(false)
+expect(host_readback_evidence_passes(complete.replace("input_readback_format=argb8888", "input_readback_format=rgba8888"))).to_be(false)
 expect(host_readback_evidence_passes(complete + "\nlinux_hosted_wm_live_window_input_composition_id=wm-composite")).to_be(false)
 expect(host_readback_evidence_passes(complete + "\nlinux_hosted_wm_live_window_input_web_content_image_count=1")).to_be(false)
 expect(host_readback_evidence_passes(complete.replace(
@@ -317,7 +322,7 @@ expect(host_x86_simd_evidence_passes(complete + "\ncpu_simd_evidence_status=pass
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 54 lines folded for reproduction.
+Runnable source: 55 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -385,7 +390,7 @@ expect(host_vulkan_evidence_passes(complete + "\nvulkan_engine2d_readback_status
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 45 lines folded for reproduction.
+Runnable source: 44 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple

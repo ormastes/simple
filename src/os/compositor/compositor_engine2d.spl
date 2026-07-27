@@ -28,6 +28,8 @@ fn host_wm_render_backend_key() -> text:
 
 class Engine2dCompositorBackend:
     id: i32
+    # ponytail: retained for read-only evidence callers; make private when
+    # Simple field visibility can prevent mutation bypasses.
     engine: Engine2D
     w: i32
     h: i32
@@ -35,6 +37,11 @@ class Engine2dCompositorBackend:
     last_readback_source: text
     last_backend_handle: i64
     last_readback_checksum: i64
+    last_readback_completed: bool
+    last_readback_width: i32
+    last_readback_height: i32
+    last_readback_stride: i32
+    last_readback_format: text
     last_composition_id: text
     last_scene_key: text
     last_web_content_image_count: i32
@@ -51,6 +58,11 @@ class Engine2dCompositorBackend:
             last_readback_source: "unavailable",
             last_backend_handle: 0,
             last_readback_checksum: 0,
+            last_readback_completed: false,
+            last_readback_width: 0,
+            last_readback_height: 0,
+            last_readback_stride: 0,
+            last_readback_format: "",
             last_composition_id: "",
             last_scene_key: "",
             last_web_content_image_count: 0
@@ -80,7 +92,19 @@ class Engine2dCompositorBackend:
             return _engine2d_compositor_override_pixels
         self.engine.read_pixels()
 
+    fn invalidate_frame_receipt():
+        self.last_readback_checksum = 0
+        self.last_readback_completed = false
+        self.last_readback_width = 0
+        self.last_readback_height = 0
+        self.last_readback_stride = 0
+        self.last_readback_format = ""
+        self.last_composition_id = ""
+        self.last_scene_key = ""
+        self.last_web_content_image_count = 0
+
     fn set_pixel_buffer_override(pixels: [u32]):
+        self.invalidate_frame_receipt()
         _engine2d_compositor_override_id = self.id
         _engine2d_compositor_override_width = self.w
         _engine2d_compositor_override_height = self.h
@@ -91,9 +115,7 @@ class Engine2dCompositorBackend:
         """Execute one canonical Draw IR frame on this persistent session and
         return its validated readback candidate to the hosted presenter."""
         _engine2d_compositor_override_enabled = false
-        self.last_composition_id = ""
-        self.last_scene_key = ""
-        self.last_web_content_image_count = 0
+        self.invalidate_frame_receipt()
         var web_content_image_count = 0
         var batch_index = 0
         while batch_index < composition.batches.len():
@@ -113,6 +135,11 @@ class Engine2dCompositorBackend:
         self.last_backend_handle = result.backend_handle
         self.last_readback_checksum = result.readback_checksum
         if not result.fallback_required and result.skipped_command_count == 0 and result.rendered_command_count > 0 and result.pixels.len() == self.w * self.h:
+            self.last_readback_completed = true
+            self.last_readback_width = self.w
+            self.last_readback_height = self.h
+            self.last_readback_stride = self.w * 4
+            self.last_readback_format = "argb8888"
             self.last_composition_id = result.unit_id
             self.last_scene_key = composition.scene_key
             self.last_web_content_image_count = web_content_image_count
@@ -122,7 +149,7 @@ class Engine2dCompositorBackend:
     # source=device_readback — a cpu_mirror source means the GPU lane silently
     # fell back and must never be presented as GPU rendering.
     fn frame_provenance() -> text:
-        "backend={self.last_backend};source={self.last_readback_source};handle={self.last_backend_handle};checksum={self.last_readback_checksum};composition_id={self.last_composition_id};scene_key={self.last_scene_key};web_content_image_count={self.last_web_content_image_count}"
+        "backend={self.last_backend};source={self.last_readback_source};handle={self.last_backend_handle};checksum={self.last_readback_checksum};composition_id={self.last_composition_id};scene_key={self.last_scene_key};web_content_image_count={self.last_web_content_image_count};completed={self.last_readback_completed};width={self.last_readback_width};height={self.last_readback_height};stride={self.last_readback_stride};format={self.last_readback_format}"
 
     fn font_provenance() -> text:
         val identity = self.engine.selected_font_identity()
@@ -131,6 +158,7 @@ class Engine2dCompositorBackend:
         "identity={identity};target={self.engine.font_execution_target()}"
 
     me shutdown():
+        self.invalidate_frame_receipt()
         self.engine.shutdown()
 
 impl CompositorBackend for Engine2dCompositorBackend:
@@ -141,16 +169,19 @@ impl CompositorBackend for Engine2dCompositorBackend:
         self.h
 
     me clear(color: u32):
+        self.invalidate_frame_receipt()
         _engine2d_compositor_override_enabled = false
         self.engine.clear(color)
         self.engine.present()
 
     me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.invalidate_frame_receipt()
         _engine2d_compositor_override_enabled = false
         self.engine.draw_rect_filled(x, y, w, h, color)
         self.engine.present()
 
     me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        self.invalidate_frame_receipt()
         _engine2d_compositor_override_enabled = false
         self.engine.draw_text_bg(x, y, text_str, fg, bg, 16)
         self.engine.present()
@@ -162,6 +193,7 @@ impl CompositorBackend for Engine2dCompositorBackend:
         self.fill_rect(x, y, 1, 1, color)
 
     me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        self.invalidate_frame_receipt()
         _engine2d_compositor_override_enabled = false
         self.engine.draw_image(x, y, w, h, pixels)
         self.engine.present()

@@ -1097,3 +1097,13 @@ Tracking split:
   screen-driven render. It now compares validated arbitrary-width decimal
   values and requires `input_revision > baseline_revision`; equal, backwards,
   malformed, duplicate, and overflow-sized backwards mutations fail closed.
+- correlated-readback-shape: The production executor previously retained only
+  backend/source/handle/checksum/composition identity, so the live host row
+  could omit completion, dimensions, stride, and pixel format. The same
+  successful executor gate now retains all five fields; hosted snapshots and
+  the wrapper preserve them, and host admission requires completed 1024x720
+  ARGB8888 with stride 4096. The canonical software route pins 240x180/960
+  through the real HostCompositor-to-Engine2D path without a middle mock;
+  direct pixel mutations invalidate the checksum, shape, and composition
+  receipt before changing the readable framebuffer, the sole test bypass now
+  uses the facade, and shutdown invalidates any completed receipt.

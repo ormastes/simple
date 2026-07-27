@@ -145,15 +145,14 @@ expect(top_r < bot_r).to_equal(true)
 #### averages neighbouring pixels (smooths a hard edge)
 
 1. backend engine draw rect filled
-2. backend engine present
-3. cap blur region
+2. cap blur region
    - Expected: seam_r > 0u32 and seam_r < 255u32 is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -162,8 +161,7 @@ Reproduction: this block contains the complete executable scenario source.
 # in-between grey pixel — the proof that the impl is reading
 # AND writing through Engine2D, not just no-oping.
 val backend = _make_backend(4, 4, 0xFF000000)
-backend.engine.draw_rect_filled(2, 0, 2, 4, 0xFFFFFFFF)
-backend.engine.present()
+backend.fill_rect(2, 0, 2, 4, 0xFFFFFFFF)
 cap_blur_region(backend, 0, 0, 4, 4, 1u32)
 val seam = cap_read_pixel(backend, 1, 1)
 val seam_r = (seam >> 16) & 0xFFu32

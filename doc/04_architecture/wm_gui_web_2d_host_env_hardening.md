@@ -69,6 +69,8 @@ TestHostEnv -> ExistingCapabilityProbes
    same event ID to the resulting frame and require its arbitrary-width decimal
    revision to advance beyond the baseline. Both retained frames must name the
    Vulkan backend; equality alone cannot promote a correlated CPU fallback.
+   The executor-owned receipt also carries completed, width, height, stride,
+   and `argb8888` format fields from the same successful composition.
    The executor also retains the submitted `wm-composite` identity, scene key,
    and positive `wm.content` image count so a sibling composition without Web
    content cannot inherit the frame receipt.
