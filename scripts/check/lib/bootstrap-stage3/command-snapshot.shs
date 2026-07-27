@@ -256,7 +256,7 @@ bootstrap_stage3_source_snapshot_once() {
     bootstrap_stage3_snapshot=$1
     bootstrap_stage3_root=$2
     bootstrap_stage3_tmp="${bootstrap_stage3_snapshot}.tmp.$$"
-    perl -MDigest::SHA=sha256_hex -MFile::Find -e '
+    perl -MDigest::SHA=sha256_hex -MFile::Find -MFcntl=O_RDONLY -e '
         use strict;
         use warnings;
         my ($root, @roots) = @ARGV;
@@ -275,7 +275,62 @@ bootstrap_stage3_source_snapshot_once() {
             }
             return "/" . join("/", @normalized);
         }
+        sub pruned_path {
+            return $_[0] =~ m{/src/app/vscode_extension/(?:[.]vscode-test|node_modules)(?:/|$)};
+        }
+        sub canonical_missing {
+            my ($path) = @_;
+            my @suffix;
+            my $cursor = $path;
+            while (!lstat($cursor)) {
+                $cursor =~ m{^(.*)/([^/]+)$} or die "missing target path\n";
+                unshift @suffix, $2;
+                $cursor = $1 eq "" ? "/" : $1;
+            }
+            grep { $_ eq "." || $_ eq ".." } @suffix and
+                die "ambiguous missing target path\n";
+            my $base = Cwd::abs_path($cursor);
+            defined($base) && (!@suffix || -d $base)
+                or die "invalid missing target parent\n";
+            return lexical_absolute($base, join("/", @suffix));
+        }
+        sub identity {
+            my (@stat) = @_;
+            return join(":", @stat[0, 1, 2, 7, 9, 10]);
+        }
+        sub read_regular {
+            my ($path) = @_;
+            my @path_before = lstat($path);
+            @path_before && !-l _ && -f _
+                or die "source file type changed\n";
+            my $flags = O_RDONLY;
+            my $no_follow = eval { Fcntl::O_NOFOLLOW() } || 0;
+            $flags |= $no_follow;
+            sysopen(my $fh, $path, $flags) or die "open\n";
+            binmode($fh, ":raw") or die "binmode\n";
+            my @fd_before = stat($fh);
+            @fd_before && -f $fh &&
+                $path_before[0] == $fd_before[0] &&
+                $path_before[1] == $fd_before[1]
+                or die "source file identity changed\n";
+            local $/;
+            my $bytes = <$fh>;
+            defined($bytes) or die "read\n";
+            my @fd_after = stat($fh);
+            identity(@fd_before) eq identity(@fd_after)
+                or die "source file changed while reading\n";
+            close $fh or die "close\n";
+            my @path_after = lstat($path);
+            @path_after &&
+                identity(@path_before) eq identity(@path_after)
+                or die "source path changed while reading\n";
+            return ($bytes, identity(@path_after));
+        }
         my @records;
+        my @links;
+        my @missing_links;
+        my %direct_hash;
+        my %direct_identity;
         my @owned = map { "$root/$_" } @roots;
         for my $relative_root (@roots) {
             my $authority = "$root/$relative_root";
@@ -285,7 +340,7 @@ bootstrap_stage3_source_snapshot_once() {
                     no_chdir => 1,
                     wanted => sub {
                         my $absolute = $File::Find::name;
-                        if ($absolute =~ m{/src/app/vscode_extension/(?:[.]vscode-test|node_modules)(?:/|$)}) {
+                        if (pruned_path($absolute)) {
                             $File::Find::prune = 1 if -d $absolute;
                             return;
                         }
@@ -293,14 +348,15 @@ bootstrap_stage3_source_snapshot_once() {
                             my $link_text = readlink($absolute);
                             defined($link_text) or die "readlink\n";
                             require Cwd;
-                            my $resolved = Cwd::abs_path($absolute);
-                            if (!defined($resolved)) {
-                                my $parent = $absolute;
-                                $parent =~ s{/[^/]+$}{};
-                                my $missing = lexical_absolute(
-                                    $parent, $link_text
-                                );
-                                index($missing, "$root/") == 0
+                            my $parent = $absolute;
+                            $parent =~ s{/[^/]+$}{};
+                            my $target_path = $link_text =~ m{^/}
+                                ? $link_text : "$parent/$link_text";
+                            if (!lstat($target_path)) {
+                                my $missing =
+                                    canonical_missing($target_path);
+                                index($missing, "$root/") == 0 &&
+                                    !pruned_path($missing)
                                     or die "external missing authority symlink\n";
                                 my $relative = substr(
                                     $absolute, length($root) + 1
@@ -308,69 +364,108 @@ bootstrap_stage3_source_snapshot_once() {
                                 my $missing_relative = substr(
                                     $missing, length($root) + 1
                                 );
-                                push @records, join(
-                                    ":", "link-missing-hex",
-                                    unpack("H*", $relative),
-                                    unpack("H*", $link_text),
-                                    unpack("H*", $missing_relative)
-                                );
+                                push @missing_links, [
+                                    $absolute, $link_text, $target_path,
+                                    $missing, $relative, $missing_relative
+                                ];
                                 return;
                             }
+                            my $resolved = Cwd::abs_path($target_path);
                             defined($resolved) &&
                                 (-f $resolved || -d $resolved) &&
                                 !-l $resolved
                                 or die "invalid authority symlink\n";
                             my $inside = 0;
                             for my $owned_root (@owned) {
-                                if (index($resolved, "$owned_root/") == 0) {
+                                if ($resolved eq $owned_root ||
+                                    index($resolved, "$owned_root/") == 0) {
                                     $inside = 1;
                                     last;
                                 }
                             }
                             $inside or die "external authority symlink\n";
-                            open my $target_fh, "<:raw", $resolved
-                                or die "open target\n";
-                            local $/;
-                            my $target_bytes = <$target_fh>;
-                            close $target_fh or die "close target\n";
+                            pruned_path($resolved) and
+                                die "pruned authority symlink target\n";
                             my $relative = substr(
                                 $absolute, length($root) + 1
                             );
                             my $resolved_relative = substr(
                                 $resolved, length($root) + 1
                             );
-                            if (-d $resolved) {
-                                push @records, join(
-                                    ":", "link-dir-hex",
-                                    unpack("H*", $relative),
-                                    unpack("H*", $link_text),
-                                    unpack("H*", $resolved_relative)
-                                );
-                                return;
-                            }
-                            push @records, join(
-                                ":", "link-hex", unpack("H*", $relative),
-                                unpack("H*", $link_text),
-                                unpack("H*", $resolved_relative),
-                                sha256_hex($target_bytes)
-                            );
+                            push @links, [
+                                $absolute, $link_text, $target_path, $resolved,
+                                $relative, $resolved_relative,
+                                -d $resolved ? "dir" : "file"
+                            ];
                             return;
                         }
                         return unless -f $absolute;
-                        open my $fh, "<:raw", $absolute or die "open\n";
-                        local $/;
-                        my $bytes = <$fh>;
-                        close $fh or die "close\n";
+                        my ($bytes, $file_identity) =
+                            read_regular($absolute);
                         my $relative = substr($absolute, length($root) + 1);
                         my $path_hex = unpack("H*", $relative);
                         my $executable = -x $absolute ? 1 : 0;
+                        my $content_hash = sha256_hex($bytes);
+                        $direct_hash{$absolute} = $content_hash;
+                        $direct_identity{$absolute} = $file_identity;
                         push @records, join(
                             ":", "file-hex", length($relative),
-                            $path_hex, $executable, sha256_hex($bytes)
+                            $path_hex, $executable, $content_hash
                         );
                     },
                 },
                 $authority
+            );
+        }
+        for my $missing (@missing_links) {
+            my ($absolute, $link_text, $target_path, $resolved_missing,
+                $relative,
+                $missing_relative) = @$missing;
+            -l $absolute or die "missing authority symlink changed\n";
+            my $current_text = readlink($absolute);
+            defined($current_text) && $current_text eq $link_text
+                or die "missing authority symlink changed\n";
+            !lstat($target_path)
+                or die "missing authority symlink target appeared\n";
+            canonical_missing($target_path) eq $resolved_missing
+                or die "missing authority symlink target changed\n";
+            push @records, join(
+                ":", "link-missing-hex", unpack("H*", $relative),
+                unpack("H*", $link_text),
+                unpack("H*", $missing_relative)
+            );
+        }
+        for my $path (keys %direct_identity) {
+            my @current = lstat($path);
+            @current && !-l _ && -f _ &&
+                identity(@current) eq $direct_identity{$path}
+                or die "source file changed after reading\n";
+        }
+        for my $link (@links) {
+            my ($absolute, $link_text, $target_path, $resolved, $relative,
+                $resolved_relative, $kind) = @$link;
+            -l $absolute or die "authority symlink changed\n";
+            my $current_text = readlink($absolute);
+            defined($current_text) && $current_text eq $link_text
+                or die "authority symlink changed\n";
+            my $current_resolved = Cwd::abs_path($target_path);
+            defined($current_resolved) && $current_resolved eq $resolved
+                or die "authority symlink target changed\n";
+            if ($kind eq "dir") {
+                -d $resolved or die "authority symlink type changed\n";
+                push @records, join(
+                    ":", "link-dir-hex", unpack("H*", $relative),
+                    unpack("H*", $link_text),
+                    unpack("H*", $resolved_relative)
+                );
+                next;
+            }
+            -f $resolved && exists($direct_hash{$resolved})
+                or die "unbound authority symlink target\n";
+            push @records, join(
+                ":", "link-hex", unpack("H*", $relative),
+                unpack("H*", $link_text),
+                unpack("H*", $resolved_relative), $direct_hash{$resolved}
             );
         }
         @records or die "empty authority\n";
