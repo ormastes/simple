@@ -837,6 +837,30 @@ fn _engine2d_draw_ir_render_commands(engine: DrawIrRenderTarget, commands: [Draw
         val command_kind: text = command.kind
         val x = offset_x + command.x
         val y = offset_y + command.y
+        val command_clip = command.clip_rect
+        if command_clip.present:
+            var clip_x = offset_x + command_clip.x
+            var clip_y = offset_y + command_clip.y
+            var clip_right = clip_x + command_clip.width
+            var clip_bottom = clip_y + command_clip.height
+            if active_clip.present:
+                val active_right = active_clip.x + active_clip.width
+                val active_bottom = active_clip.y + active_clip.height
+                if active_clip.x > clip_x:
+                    clip_x = active_clip.x
+                if active_clip.y > clip_y:
+                    clip_y = active_clip.y
+                if active_right < clip_right:
+                    clip_right = active_right
+                if active_bottom < clip_bottom:
+                    clip_bottom = active_bottom
+            if clip_right < clip_x:
+                clip_right = clip_x
+            if clip_bottom < clip_y:
+                clip_bottom = clip_y
+            eng.set_clip(
+                clip_x, clip_y, clip_right - clip_x, clip_bottom - clip_y
+            )
         if command_kind == DRAW_IR_COMMAND_RECT:
             # A concrete Metal composition requests a device receipt for every
             # canonical WM glass surface, even when its metadata or bounds are
@@ -888,32 +912,8 @@ fn _engine2d_draw_ir_render_commands(engine: DrawIrRenderTarget, commands: [Draw
                 )
             rendered = rendered + 1
         elif command_kind == DRAW_IR_COMMAND_TEXT:
-            # Text commands can carry a producer-resolved content/ancestor
-            # clip. Apply it around the canonical Engine2D text/font-batch
-            # route only, then restore the enclosing batch clip for following
-            # commands. No renderer-local glyph path is introduced here.
-            val text_clip = command.clip_rect
-            if text_clip.present:
-                var clip_x = offset_x + text_clip.x
-                var clip_y = offset_y + text_clip.y
-                var clip_right = clip_x + text_clip.width
-                var clip_bottom = clip_y + text_clip.height
-                if active_clip.present:
-                    val active_right = active_clip.x + active_clip.width
-                    val active_bottom = active_clip.y + active_clip.height
-                    if active_clip.x > clip_x:
-                        clip_x = active_clip.x
-                    if active_clip.y > clip_y:
-                        clip_y = active_clip.y
-                    if active_right < clip_right:
-                        clip_right = active_right
-                    if active_bottom < clip_bottom:
-                        clip_bottom = active_bottom
-                if clip_right < clip_x:
-                    clip_right = clip_x
-                if clip_bottom < clip_y:
-                    clip_bottom = clip_y
-                eng.set_clip(clip_x, clip_y, clip_right - clip_x, clip_bottom - clip_y)
+            # Text remains on the canonical Engine2D font/batch route. The
+            # generic command clip also covers selection/caret rectangles.
             val font_identity = _engine2d_draw_ir_style_value(command.computed_style, "font-identity")
             var font_ready = true
             val shaped = _engine2d_draw_ir_shaping_requested(command)
@@ -974,14 +974,6 @@ fn _engine2d_draw_ir_render_commands(engine: DrawIrRenderTarget, commands: [Draw
             if not font_ready:
                 skipped = skipped + 1
                 unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, font_failure_kind)
-            if text_clip.present:
-                if active_clip.present:
-                    eng.set_clip(
-                        active_clip.x, active_clip.y,
-                        active_clip.width, active_clip.height
-                    )
-                else:
-                    eng.clear_clip()
         elif command_kind == DRAW_IR_COMMAND_IMAGE:
             val image_index = _engine2d_draw_ir_resolved_image_index(images, command.image_uri)
             if image_index >= 0 and _engine2d_draw_ir_valid_resolved_image(images[image_index]):
@@ -1000,6 +992,14 @@ fn _engine2d_draw_ir_render_commands(engine: DrawIrRenderTarget, commands: [Draw
         else:
             skipped = skipped + 1
             unsupported_kinds = _engine2d_draw_ir_note_unsupported_kind(unsupported_kinds, command_kind)
+        if command_clip.present:
+            if active_clip.present:
+                eng.set_clip(
+                    active_clip.x, active_clip.y,
+                    active_clip.width, active_clip.height
+                )
+            else:
+                eng.clear_clip()
     _engine2d_draw_ir_render_outcome(
         eng,
         rendered,

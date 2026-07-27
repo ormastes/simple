@@ -1,6 +1,7 @@
 # @cover src/os/hosted/hosted_browser_renderer_worker.spl 80%
 
 use std.spec.*
+use std.common.ui.draw_ir.{DrawIrCommand}
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_WORKER_ARG,
     BrowserRendererMessage,
@@ -18,6 +19,7 @@ use os.hosted.hosted_browser_renderer_worker.{
     hosted_browser_renderer_handle_request,
     hosted_browser_renderer_worker_main
 }
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_focused_id}
 use std.gc_async_mut.web.browser_session.{BrowserSession}
 use std.gc_async_mut.web.browser_session_runtime.*
 
@@ -36,6 +38,16 @@ fn _render(html: text, time_ms: i64):
         time_ms,
         2
     )
+
+fn _worker_command_index(
+    commands: [DrawIrCommand], component_id: text
+) -> i32:
+    var i = 0
+    while i < commands.len():
+        if commands[i].component_id == component_id:
+            return i
+        i = i + 1
+    -1
 
 describe "hosted browser renderer worker":
     it "rejects hidden worker markers outside the exact spawn shape":
@@ -363,6 +375,264 @@ describe "hosted browser renderer worker":
             payload: "K1\t2\t8\t1"
         )).ok).to_be(true)
         expect(worker.browser.address_draft).to_equal(truncated)
+
+    it "maps pointer x through UTF-8 source boundaries before insertion":
+        var worker = HostedBrowserRendererWorkerSession.create(120, 40)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{margin:0}#q{width:100px;height:20px}</style><input id='q' value='aéz'>"
+        )).ok).to_be(true)
+        val hit = worker.last_hit_index.unwrap().input_text_hits[0]
+        val x = hit.boundary_x_px[2]
+        val y = hit.y + 1
+        val down = worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 3,
+            payload: "P1\t1\t{x}\t{y}\t1"
+        ))
+        val up = worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 4,
+            payload: "P1\t2\t{x}\t{y}\t0"
+        ))
+        val typed = worker.handle(BrowserRendererMessage(
+            kind: "text", generation: 7, request_id: 5,
+            payload: "T1\t3\t1\nX"
+        ))
+        expect(down.ok).to_be(true)
+        expect(up.ok).to_be(true)
+        expect(typed.ok).to_be(true)
+        expect(down.wire).not.to_equal("")
+        expect(up.wire).not.to_equal("")
+        expect(typed.wire).not.to_equal("")
+        expect(worker.browser.current_body_html).to_contain(
+            "value=\"aéXz\""
+        )
+
+    it "uses initial centered and right-aligned paint baselines for click x":
+        var centered = HostedBrowserRendererWorkerSession.create(140, 40)
+        val centered_init = centered.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{margin:0}#q{width:120px;height:20px;text-align:center}</style><input id='q' value='abc'>"
+        ))
+        val centered_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), centered_init.wire
+            ).message,
+            140, 40
+        )
+        val centered_commands = (
+            centered_frame.composition.batches[0].commands
+        )
+        val centered_text_x = centered_commands[_worker_command_index(
+            centered_commands, "q_value"
+        )].x
+        val centered_hit = centered.last_hit_index.unwrap().input_text_hits[0]
+        expect(centered_hit.boundary_x_px[0]).to_equal(centered_text_x)
+        expect(centered.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 3,
+            payload: "P1\t1\t{centered_hit.boundary_x_px[1]}\t{centered_hit.y + 1}\t1"
+        )).ok).to_be(true)
+        expect(centered.handle(BrowserRendererMessage(
+            kind: "text", generation: 7, request_id: 4,
+            payload: "T1\t2\t1\nX"
+        )).ok).to_be(true)
+        expect(centered.browser.current_body_html).to_contain(
+            "value=\"aXbc\""
+        )
+
+        var right = HostedBrowserRendererWorkerSession.create(140, 40)
+        val right_init = right.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{margin:0}#q{width:120px;height:20px;text-align:right}</style><input id='q' value='abc'>"
+        ))
+        val right_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), right_init.wire
+            ).message,
+            140, 40
+        )
+        val right_commands = right_frame.composition.batches[0].commands
+        val right_text_x = right_commands[_worker_command_index(
+            right_commands, "q_value"
+        )].x
+        val right_hit = right.last_hit_index.unwrap().input_text_hits[0]
+        expect(right_hit.boundary_x_px[0]).to_equal(right_text_x)
+        expect(right.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 3,
+            payload: "P1\t1\t{right_hit.boundary_x_px[1]}\t{right_hit.y + 1}\t1"
+        )).ok).to_be(true)
+        expect(right.handle(BrowserRendererMessage(
+            kind: "text", generation: 7, request_id: 4,
+            payload: "T1\t2\t1\nX"
+        )).ok).to_be(true)
+        expect(right.browser.current_body_html).to_contain(
+            "value=\"aXbc\""
+        )
+
+    it "schedules 500ms caret edges and cancels after blank blur":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        val initialized = worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{margin:0}#q{width:40px;height:18px}</style><input id='q' value='a' data-focused>"
+        ))
+        val initialized_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), initialized.wire
+        )
+        val initialized_frame = browser_renderer_frame_decode(
+            initialized_message.message, 80, 40
+        )
+        expect(initialized_frame.next_animation_ms).to_equal(500)
+        expect(_worker_command_index(
+            initialized_frame.composition.batches[0].commands,
+            "q_caret"
+        )).to_be_greater_than(-1)
+
+        val advanced = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3,
+            payload: "500"
+        ))
+        val advanced_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), advanced.wire
+        )
+        val advanced_frame = browser_renderer_frame_decode(
+            advanced_message.message, 80, 40
+        )
+        expect(advanced_frame.next_animation_ms).to_equal(1000)
+        expect(_worker_command_index(
+            advanced_frame.composition.batches[0].commands,
+            "q_caret"
+        )).to_equal(-1)
+
+        val visible_again = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 4,
+            payload: "1000"
+        ))
+        val visible_again_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), visible_again.wire
+            ).message,
+            80, 40
+        )
+        expect(_worker_command_index(
+            visible_again_frame.composition.batches[0].commands,
+            "q_caret"
+        )).to_be_greater_than(-1)
+
+        val blurred = worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 5,
+            payload: "P1\t1\t79\t39\t1"
+        ))
+        val blurred_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), blurred.wire
+        )
+        val blurred_frame = browser_renderer_frame_decode(
+            blurred_message.message, 80, 40
+        )
+        expect(blurred_frame.next_animation_ms).to_equal(-1)
+        expect(_worker_command_index(
+            blurred_frame.composition.batches[0].commands,
+            "q_caret"
+        )).to_equal(-1)
+        expect(worker.browser.text_selection_target_id).to_equal("")
+
+    it "preserves focused selection view and blink when pointer default is prevented":
+        var worker = HostedBrowserRendererWorkerSession.create(60, 40)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{margin:0}#q{width:24px;height:18px}</style><input id='q' value='abcdefghij' data-focused onpointerdown='prevent-default' onmousedown='prevent-default'>"
+        )).ok).to_be(true)
+        val retained_view = worker.input_view_start_byte
+        val retained_anchor = worker.browser.text_selection_anchor_byte
+        val retained_focus = worker.browser.text_selection_focus_byte
+        val retained_epoch = worker.caret_blink_epoch_ms
+        val hit = worker.last_hit_index.unwrap().input_text_hits[0]
+        val kept = worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 3,
+            payload: "P1\t1\t{hit.boundary_x_px[hit.boundary_x_px.len() - 1]}\t{hit.y + 1}\t1"
+        ))
+        expect(kept.ok).to_be(true)
+        expect(be_dom_focused_id(
+            worker.browser.dom_root()
+        )).to_equal("q")
+        expect(worker.browser.text_selection_target_id).to_equal("q")
+        expect(worker.browser.text_selection_anchor_byte).to_equal(
+            retained_anchor
+        )
+        expect(worker.browser.text_selection_focus_byte).to_equal(
+            retained_focus
+        )
+        expect(worker.input_view_start_byte).to_equal(retained_view)
+        expect(worker.caret_blink_epoch_ms).to_equal(retained_epoch)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 4,
+            payload: "P1\t2\t{hit.boundary_x_px[hit.boundary_x_px.len() - 1]}\t{hit.y + 1}\t0"
+        )).ok).to_be(true)
+        expect(worker.browser.text_selection_anchor_byte).to_equal(
+            retained_anchor
+        )
+        expect(worker.browser.text_selection_focus_byte).to_equal(
+            retained_focus
+        )
+        expect(worker.input_view_start_byte).to_equal(retained_view)
+        expect(worker.caret_blink_epoch_ms).to_equal(retained_epoch)
+
+    it "clears page caret state and scheduling when chrome takes focus":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 40)
+        val initialized = worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{margin:0}#q{width:40px;height:18px}</style><input id='q' value='abc' data-focused>"
+        ))
+        val initialized_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), initialized.wire
+            ).message,
+            80, 40
+        )
+        expect(_worker_command_index(
+            initialized_frame.composition.batches[0].commands,
+            "q_caret"
+        )).to_be_greater_than(-1)
+        val chrome = worker.handle(BrowserRendererMessage(
+            kind: "chrome", generation: 7, request_id: 3,
+            payload: "C1\t1\t1\t7\naddress"
+        ))
+        val chrome_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), chrome.wire
+            ).message,
+            80, 40
+        )
+        expect(_worker_command_index(
+            chrome_frame.composition.batches[0].commands,
+            "q_caret"
+        )).to_equal(-1)
+        expect(chrome_frame.next_animation_ms).to_equal(-1)
+        expect(be_dom_focused_id(worker.browser.dom_root())).to_equal("")
+        expect(worker.browser.text_selection_target_id).to_equal("")
+        expect(worker.input_view_target_key).to_equal("")
+        expect(worker.input_view_start_byte).to_equal(0)
+        expect(worker.caret_blink_epoch_ms).to_equal(0)
+
+    it "retains focused view across frames and resets it for a new target":
+        var worker = HostedBrowserRendererWorkerSession.create(80, 50)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: "<style>html,body{margin:0}input{display:block;width:24px;height:18px}</style><input id='first' value='abcdefghij' data-focused><input id='second' value='xy'>"
+        )).ok).to_be(true)
+        val first_view = worker.input_view_start_byte
+        expect(first_view).to_be_greater_than(0)
+        expect(worker.input_view_target_key).to_equal("id:first")
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3,
+            payload: "100"
+        )).ok).to_be(true)
+        expect(worker.input_view_start_byte).to_equal(first_view)
+        val second_hit = worker.last_hit_index.unwrap().input_text_hits[1]
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "pointer", generation: 7, request_id: 4,
+            payload: "P1\t1\t{second_hit.boundary_x_px[0]}\t{second_hit.y + 1}\t1"
+        )).ok).to_be(true)
+        expect(worker.input_view_target_key).to_equal("id:second")
+        expect(worker.input_view_start_byte).to_equal(0)
 
     it "rejects skipped ids and backward animation time":
         var session = BrowserSession.new()

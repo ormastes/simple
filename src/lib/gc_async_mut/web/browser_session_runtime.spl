@@ -45,6 +45,7 @@ use std.gc_async_mut.web.browser_session_context.{
     browser_csp_allows, browser_session_is_loopback_http,
     browser_session_is_secure_context
 }
+use std.common.encoding.utf8.{text_is_valid_utf8}
 
 extern fn rt_text_to_bytes(value: text) -> [u8]
 extern fn rt_bytes_to_text(value: [u8]) -> text
@@ -79,6 +80,8 @@ fn _browser_session_next_utf8_boundary(value: text, index: i64) -> i64:
     next
 
 fn _browser_session_is_utf8_boundary(value: text, index: i64) -> bool:
+    if not text_is_valid_utf8(value):
+        return false
     val bytes = rt_text_to_bytes(value)
     index == bytes.len() or (
         index >= 0 and index < bytes.len() and
@@ -92,19 +95,22 @@ fn _browser_session_text_control_value(target: BeDomNode) -> text:
         return html_to_text(be_dom_serialize_children(target))
     ""
 
-fn _browser_session_text_editable(target: BeDomNode) -> bool:
-    if be_dom_has_attr(target, "disabled") or
-       be_dom_has_attr(target, "readonly"):
+pub fn dom_text_control_selectable(target: BeDomNode) -> bool:
+    if be_dom_has_attr(target, "disabled"):
         return false
-    if target.tag_name == "textarea":
-        return true
     if target.tag_name != "input":
+        return false
+    if not text_is_valid_utf8(_browser_session_text_control_value(target)):
         return false
     val input_type = be_dom_get_attr(target, "type").lower()
     input_type == "" or input_type == "text" or input_type == "search" or
         input_type == "url" or input_type == "tel" or
         input_type == "email" or input_type == "password" or
         input_type == "number"
+
+pub fn dom_text_control_mutable(target: BeDomNode) -> bool:
+    dom_text_control_selectable(target) and
+        not be_dom_has_attr(target, "readonly")
 
 fn browser_storage_origin_key(url: text) -> text:
     val origin = url_origin(url)
@@ -228,10 +234,47 @@ impl BrowserSession:
                 value, self.text_selection_focus_byte
             )
         ):
-            self.text_selection_target_id = target_id
-            self.text_selection_anchor_byte = value.len()
-            self.text_selection_focus_byte = value.len()
+            val _ = self.set_dom_text_selection(
+                target_id, value.len(), value.len()
+            )
         value
+
+    me set_dom_text_selection(
+        target_id: text, anchor_byte: i64, focus_byte: i64
+    ) -> bool:
+        val path = be_dom_find_path_to_id(self.current_dom, target_id)
+        if path.len() == 0:
+            return false
+        val target = path[path.len() - 1]
+        if not dom_text_control_selectable(target):
+            return false
+        val value = _browser_session_text_control_value(target)
+        if (
+            anchor_byte < 0 or focus_byte < 0 or
+            anchor_byte > value.len() or focus_byte > value.len() or
+            not _browser_session_is_utf8_boundary(value, anchor_byte) or
+            not _browser_session_is_utf8_boundary(value, focus_byte)
+        ):
+            return false
+        self.text_selection_target_id = target_id
+        self.text_selection_anchor_byte = anchor_byte
+        self.text_selection_focus_byte = focus_byte
+        true
+
+    me clear_dom_text_selection():
+        self.text_selection_target_id = ""
+        self.text_selection_anchor_byte = 0
+        self.text_selection_focus_byte = 0
+
+    me ensure_dom_text_selection(target_id: text) -> bool:
+        val path = be_dom_find_path_to_id(self.current_dom, target_id)
+        if path.len() == 0:
+            return false
+        val target = path[path.len() - 1]
+        if not dom_text_control_selectable(target):
+            return false
+        val _ = self._ensure_dom_text_selection(target_id, target)
+        true
 
     me _persist_storage_for_url(url: text):
         if url == "":
@@ -544,7 +587,7 @@ impl BrowserSession:
             val path = be_dom_find_path_to_id(self.current_dom, target_id)
             if path.len() > 0:
                 val target = path[path.len() - 1]
-                if _browser_session_text_editable(target):
+                if dom_text_control_selectable(target):
                     val key_dispatch = self.dispatch_dom_event(
                         target_id, "keydown", true, true
                     )
@@ -582,6 +625,8 @@ impl BrowserSession:
                         self.text_selection_focus_byte = next_focus
                         if not shift_key:
                             self.text_selection_anchor_byte = next_focus
+                        return Ok(key_dispatch)
+                    if not dom_text_control_mutable(target):
                         return Ok(key_dispatch)
                     var start = self.text_selection_anchor_byte
                     var end = self.text_selection_focus_byte
@@ -636,8 +681,10 @@ impl BrowserSession:
         if path.len() == 0:
             return Err("DOM input target not found")
         val target = path[path.len() - 1]
-        if not _browser_session_text_editable(target):
+        if not dom_text_control_mutable(target):
             return Err("DOM input target is not editable")
+        if not text_is_valid_utf8(value):
+            return Err("DOM input value is not valid UTF-8")
         val _ = self.dispatch_dom_event(target_id, "focus", false, false)
         val before_input = self.dispatch_dom_event(
             target_id, "beforeinput", true, true
@@ -671,7 +718,7 @@ impl BrowserSession:
         if path.len() == 0:
             return Err("DOM input target not found")
         val target = path[path.len() - 1]
-        if not _browser_session_text_editable(target):
+        if not dom_text_control_mutable(target):
             return Err("DOM input target is not editable")
         val current_value = self._ensure_dom_text_selection(
             target_id, target
@@ -716,9 +763,7 @@ impl BrowserSession:
             target_id, "focusout", true, false
         )
         if self.text_selection_target_id == target_id:
-            self.text_selection_target_id = ""
-            self.text_selection_anchor_byte = 0
-            self.text_selection_focus_byte = 0
+            self.clear_dom_text_selection()
         Ok(blur_dispatch)
 
     me blur_dom_text_input(target_id: text) -> Result<BeDomEventDispatch, text>:
@@ -729,6 +774,12 @@ impl BrowserSession:
         if target.tag_name != "input" and target.tag_name != "textarea":
             return Err("DOM input target is not text-editable")
         self._blur_dom_focus(target_id)
+
+    me clear_dom_focus():
+        val focused_id = be_dom_focused_id(self.current_dom)
+        if focused_id != "":
+            val _ = self._blur_dom_focus(focused_id)
+        self.clear_dom_text_selection()
 
     me render(width: i32, height: i32) -> BeRenderResult:
         var renderer = BrowserRenderer.create(width, height)
