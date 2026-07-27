@@ -5,7 +5,9 @@ use std.common.web.browser_renderer_protocol.{
     BrowserRendererEncodeResult, BrowserRendererMessage,
     browser_renderer_action_decode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
-    browser_renderer_frame_encode_with_witness, browser_renderer_message_encode
+    browser_renderer_fetch_request_encode,
+    browser_renderer_frame_encode_with_witness, browser_renderer_message_encode,
+    browser_renderer_network_response_decode
 }
 use common.ui.access.{WinTextActionRequest}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
@@ -15,7 +17,9 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_hit_test_target_at_time,
     simple_web_layout_render_html_draw_ir_result_at_time
 }
-use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session.{
+    BrowserResponse, BrowserSession
+}
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_ui_access.*
 use std.nogc_sync_mut.io.process_ops.{browser_renderer_sandbox_enter}
@@ -55,7 +59,8 @@ fn _worker_frame(
     message: BrowserRendererMessage,
     width: i32,
     height: i32,
-    animation_time_ms: i64
+    animation_time_ms: i64,
+    response_request_id: i64
 ) -> HostedBrowserRendererWorkerResult:
     val layout = simple_web_layout_render_html_draw_ir_result_at_time(
         session.current_style_html + session.current_body_html,
@@ -66,7 +71,7 @@ fn _worker_frame(
     val encoded = browser_renderer_frame_encode_with_witness(
         layout.composition,
         message.generation,
-        message.request_id,
+        response_request_id,
         layout.material_witness.cpu_composited_count,
         layout.material_witness.cpu_composited_sha256,
         layout.material_witness.solid_material_count,
@@ -91,6 +96,7 @@ pub class HostedBrowserRendererWorkerSession:
     initialized: bool
     animation_time_ms: i64
     expected_request_id: i64
+    next_outbound_id: i64
     pressed_target_id: text
     pressed_chrome_control: text
     chrome_focus: text
@@ -104,6 +110,7 @@ pub class HostedBrowserRendererWorkerSession:
             initialized: false,
             animation_time_ms: 0,
             expected_request_id: 2,
+            next_outbound_id: 2,
             pressed_target_id: "",
             pressed_chrome_control: "",
             chrome_focus: "",
@@ -290,19 +297,62 @@ pub class HostedBrowserRendererWorkerSession:
                 reason = self._dispatch_key(message)
             elif message.kind == "chrome":
                 reason = self._dispatch_chrome(message)
+            elif message.kind == "network_response":
+                val response = browser_renderer_network_response_decode(
+                    message
+                )
+                if not response.ok:
+                    reason = response.reason
+                else:
+                    val committed = self.browser.commit_network_response(
+                        BrowserResponse.create(
+                        request_id: response.request_id,
+                        kind: response.kind,
+                        url: response.url,
+                        status: response.status,
+                        headers: response.headers,
+                        body: response.body,
+                        error: response.error
+                    )
+                    )
+                    if val Err(commit_reason) = committed:
+                        reason = commit_reason
             else:
                 reason = "unexpected-action"
             if reason != "":
                 return _worker_result_reject(
                     reason, true, self.animation_time_ms
                 )
-        val frame = _worker_frame(
+        self.expected_request_id = self.expected_request_id + 1
+        val response_id = self.next_outbound_id
+        self.next_outbound_id = self.next_outbound_id + 1
+        if val Some(request) = self.browser.take_pending_request():
+            val encoded = browser_renderer_fetch_request_encode(
+                message.generation,
+                response_id,
+                request.id,
+                request.kind,
+                request.url,
+                request.method,
+                request.headers,
+                request.body,
+                request.content_type
+            )
+            if not encoded.ok:
+                return _worker_result_reject(
+                    encoded.reason, true, self.animation_time_ms
+                )
+            return HostedBrowserRendererWorkerResult(
+                ok: true,
+                reason: "ok",
+                initialized: true,
+                animation_time_ms: self.animation_time_ms,
+                wire: encoded.wire
+            )
+        _worker_frame(
             self.browser, message, self.width, self.height,
-            self.animation_time_ms
+            self.animation_time_ms, response_id
         )
-        if frame.ok:
-            self.expected_request_id = self.expected_request_id + 1
-        frame
 
 pub fn hosted_browser_renderer_handle_request(
     session: BrowserSession,
@@ -344,7 +394,9 @@ pub fn hosted_browser_renderer_handle_request(
         val _ = session.advance_time(requested_time_ms)
         next_time_ms = requested_time_ms
 
-    _worker_frame(session, message, width, height, next_time_ms)
+    _worker_frame(
+        session, message, width, height, next_time_ms, message.request_id
+    )
 
 pub fn hosted_browser_renderer_handle_init(
     message: BrowserRendererMessage,

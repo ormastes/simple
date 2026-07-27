@@ -10,8 +10,12 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_frame_decode, browser_renderer_frame_encode,
     browser_renderer_frame_encode_with_witness,
+    browser_renderer_fetch_request_decode,
+    browser_renderer_fetch_request_encode,
     browser_renderer_key_encode,
     browser_renderer_message_encode,
+    browser_renderer_network_response_decode,
+    browser_renderer_network_response_encode,
     browser_renderer_pointer_encode,
     browser_renderer_text_encode
 }
@@ -32,6 +36,54 @@ fn _renderer_protocol_fixture() -> DrawIrComposition:
     )
 
 describe "isolated browser renderer protocol":
+    it "round-trips bounded network messages without delimiter ambiguity":
+        val request_wire = browser_renderer_fetch_request_encode(
+            7, 1, "fetch-1", "fetch", "https://example.test/a",
+            "POST", "X-Test: a\tb", "h\u00e9llo\nbody", "text/plain"
+        )
+        expect(request_wire.ok).to_be(true)
+        val request_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), request_wire.wire
+        )
+        val request = browser_renderer_fetch_request_decode(
+            request_message.message
+        )
+        expect(request.ok).to_be(true)
+        expect(request.request_id).to_equal("fetch-1")
+        expect(request.method).to_equal("POST")
+        expect(request.headers).to_equal("X-Test: a\tb")
+        expect(request.body).to_equal("h\u00e9llo\nbody")
+
+        val response_wire = browser_renderer_network_response_encode(
+            7, 1, "fetch-1", "fetch", "https://example.test/a",
+            200, "Content-Type: text/plain", "ok\n\u754c", ""
+        )
+        expect(response_wire.ok).to_be(true)
+        val response_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), response_wire.wire
+        )
+        val response = browser_renderer_network_response_decode(
+            response_message.message
+        )
+        expect(response.ok).to_be(true)
+        expect(response.status).to_equal(200)
+        expect(response.body).to_equal("ok\n\u754c")
+
+        expect(browser_renderer_fetch_request_decode(
+            BrowserRendererMessage(
+                kind: "fetch_request", generation: 7, request_id: 1,
+                payload: "SBRQ1\t1\t5\t1\t3\t0\t0\t0\nxfetchuGETextra"
+            )
+        ).ok).to_be(false)
+        expect(browser_renderer_fetch_request_encode(
+            7, 1, "fetch-1", "fetch", "https://example.test/",
+            "TRACE", "", "", ""
+        ).ok).to_be(false)
+        expect(browser_renderer_network_response_encode(
+            7, 1, "fetch-1", "fetch", "https://example.test/",
+            0, "", "", ""
+        ).ok).to_be(false)
+
     it "round-trips bounded actions and rejects ambiguous payloads":
         val pointer_wire = browser_renderer_pointer_encode(7, 1, 9, -3, 4, true)
         expect(pointer_wire.ok).to_be(true)

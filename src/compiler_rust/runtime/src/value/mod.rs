@@ -827,6 +827,7 @@ pub use net::{
     rt_browser_http_job_free,
     rt_browser_http_job_poll,
     rt_browser_http_job_start,
+    rt_browser_http_job_start_public_limited,
     rt_browser_http_job_take_error,
     rt_browser_http_job_take_response,
     rt_dns_lookup,

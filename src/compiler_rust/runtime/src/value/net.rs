@@ -653,6 +653,8 @@ mod tests {
             b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
             1000,
             &job,
+            BROWSER_HTTP_RAW_LIMIT,
+            false,
         )
         .unwrap();
 

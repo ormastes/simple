@@ -2229,6 +2229,10 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_tls_client_close", rt_tls_client_close_stub);
     insert_simple!("rt_tls_get_protocol_version", rt_tls_get_protocol_version_stub);
     insert_simple!("rt_browser_http_job_start", rt_browser_http_job_start_stub);
+    insert_simple!(
+        "rt_browser_http_job_start_public_limited",
+        rt_browser_http_job_start_stub
+    );
     insert_simple!("rt_browser_http_job_poll", rt_browser_http_job_poll_stub);
     insert_simple!(
         "rt_browser_http_job_take_response",

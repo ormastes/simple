@@ -17,6 +17,9 @@ pub val BROWSER_RENDERER_WORKER_ARG: text = "--__simple-web-renderer-worker"
 val BROWSER_RENDERER_MAX_READ_CHUNK_BYTES: i64 = 8192
 val BROWSER_RENDERER_MAX_COORDINATE: i64 = 1048576
 val BROWSER_RENDERER_MAX_TEXT_BYTES: i64 = 4096
+val BROWSER_RENDERER_MAX_URL_BYTES: i64 = 8192
+val BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES: i64 = 65536
+val BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES: i64 = 524288
 val BROWSER_RENDERER_MAX_STYLE_PROPS: i64 = 160
 val BROWSER_RENDERER_MAX_STYLE_KEY_BYTES: i64 = 128
 val BROWSER_RENDERER_MAX_STYLE_VALUE_BYTES: i64 = 65536
@@ -66,6 +69,19 @@ pub struct BrowserRendererActionDecodeResult:
     pressed: bool
     value: text
 
+pub struct BrowserRendererNetworkDecodeResult:
+    ok: bool
+    reason: text
+    request_id: text
+    kind: text
+    url: text
+    method: text
+    headers: text
+    body: text
+    content_type: text
+    status: i32
+    error: text
+
 fn _browser_renderer_empty_message() -> BrowserRendererMessage:
     BrowserRendererMessage(kind: "", generation: 0, request_id: 0, payload: "")
 
@@ -94,6 +110,15 @@ fn _browser_renderer_flag(raw: text) -> i64:
     if raw == "1":
         return 1
     -1
+
+fn _browser_renderer_network_kind_valid(kind: text) -> bool:
+    (kind == "document" or kind == "style" or kind == "script" or
+        kind == "module" or kind == "wasm" or kind == "fetch")
+
+fn _browser_renderer_network_method_valid(method: text) -> bool:
+    (method == "GET" or method == "HEAD" or method == "POST" or
+        method == "PUT" or method == "PATCH" or method == "DELETE" or
+        method == "OPTIONS")
 
 fn _browser_renderer_header_end(buffer: text) -> i64:
     var index: i64 = 0
@@ -411,6 +436,244 @@ pub fn browser_renderer_action_decode(
             _browser_renderer_flag(fields[3]) == 1, ""
         )
     _browser_renderer_action_reject("wrong-kind")
+
+fn _browser_renderer_network_reject(
+    reason: text
+) -> BrowserRendererNetworkDecodeResult:
+    BrowserRendererNetworkDecodeResult(
+        ok: false,
+        reason: reason,
+        request_id: "",
+        kind: "",
+        url: "",
+        method: "",
+        headers: "",
+        body: "",
+        content_type: "",
+        status: 0,
+        error: ""
+    )
+
+fn _browser_renderer_network_result(
+    request_id: text,
+    kind: text,
+    url: text,
+    method: text,
+    headers: text,
+    body: text,
+    content_type: text,
+    status: i32,
+    error: text
+) -> BrowserRendererNetworkDecodeResult:
+    BrowserRendererNetworkDecodeResult(
+        ok: true,
+        reason: "ok",
+        request_id: request_id,
+        kind: kind,
+        url: url,
+        method: method,
+        headers: headers,
+        body: body,
+        content_type: content_type,
+        status: status,
+        error: error
+    )
+
+fn _browser_renderer_network_field_valid(
+    value: text, max_bytes: i64
+) -> bool:
+    not value.contains("\0") and text_to_bytes(value).len().to_i64() <= max_bytes
+
+fn _browser_renderer_network_common_valid(
+    request_id: text, kind: text, url: text
+) -> bool:
+    (request_id != "" and
+        _browser_renderer_network_field_valid(request_id, 128) and
+        _browser_renderer_network_kind_valid(kind) and
+        _browser_renderer_network_field_valid(url, BROWSER_RENDERER_MAX_URL_BYTES) and
+        not url.contains("\n") and not url.contains("\r"))
+
+fn _browser_renderer_network_piece(
+    payload: text, offset: i64, byte_length: i64
+) -> text:
+    _browser_renderer_byte_slice(payload, offset, offset + byte_length)
+
+pub fn browser_renderer_fetch_request_encode(
+    generation: i64,
+    wire_request_id: i64,
+    request_id: text,
+    kind: text,
+    url: text,
+    method: text,
+    headers: text,
+    body: text,
+    content_type: text
+) -> BrowserRendererEncodeResult:
+    if (not _browser_renderer_network_common_valid(request_id, kind, url) or
+        not _browser_renderer_network_method_valid(method) or
+        not _browser_renderer_network_field_valid(headers, BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES) or
+        not _browser_renderer_network_field_valid(body, BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES) or
+        not _browser_renderer_network_field_valid(content_type, 256)):
+        return _browser_renderer_reject_encode("invalid-network-request")
+    val id_len = text_to_bytes(request_id).len()
+    val kind_len = text_to_bytes(kind).len()
+    val url_len = text_to_bytes(url).len()
+    val method_len = text_to_bytes(method).len()
+    val headers_len = text_to_bytes(headers).len()
+    val body_len = text_to_bytes(body).len()
+    val content_type_len = text_to_bytes(content_type).len()
+    browser_renderer_message_encode(
+        "fetch_request", generation, wire_request_id,
+        "SBRQ1\t{id_len}\t{kind_len}\t{url_len}\t{method_len}\t{headers_len}\t{body_len}\t{content_type_len}\n" +
+        request_id + kind + url + method + headers + body + content_type
+    )
+
+pub fn browser_renderer_fetch_request_decode(
+    message: BrowserRendererMessage
+) -> BrowserRendererNetworkDecodeResult:
+    if message.kind != "fetch_request":
+        return _browser_renderer_network_reject("wrong-kind")
+    val header_end = _browser_renderer_header_end(message.payload)
+    if header_end < 0 or header_end >= BROWSER_RENDERER_MAX_HEADER_BYTES:
+        return _browser_renderer_network_reject("malformed-network-request")
+    val fields = _browser_renderer_byte_slice(
+        message.payload, 0, header_end
+    ).split("\t")
+    if fields.len() != 8 or fields[0] != "SBRQ1":
+        return _browser_renderer_network_reject("malformed-network-request")
+    var lengths: [i64] = []
+    var field_index: i64 = 1
+    while field_index < fields.len():
+        val length = fields[field_index].to_i64() ?? -1
+        if length < 0 or str(length) != fields[field_index]:
+            return _browser_renderer_network_reject("malformed-network-request")
+        lengths.push(length)
+        field_index = field_index + 1
+    if (lengths[0] <= 0 or lengths[0] > 128 or lengths[1] > 16 or
+        lengths[2] > BROWSER_RENDERER_MAX_URL_BYTES or lengths[3] > 16 or
+        lengths[4] > BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES or
+        lengths[5] > BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES or
+        lengths[6] > 256):
+        return _browser_renderer_network_reject("network-request-too-large")
+    var total_length = header_end + 1
+    for length in lengths:
+        total_length = total_length + length
+    if total_length != message.payload.len():
+        return _browser_renderer_network_reject("malformed-network-request")
+    var offset = header_end + 1
+    val request_id = _browser_renderer_network_piece(message.payload, offset, lengths[0])
+    offset = offset + lengths[0]
+    val kind = _browser_renderer_network_piece(message.payload, offset, lengths[1])
+    offset = offset + lengths[1]
+    val url = _browser_renderer_network_piece(message.payload, offset, lengths[2])
+    offset = offset + lengths[2]
+    val method = _browser_renderer_network_piece(message.payload, offset, lengths[3])
+    offset = offset + lengths[3]
+    val headers = _browser_renderer_network_piece(message.payload, offset, lengths[4])
+    offset = offset + lengths[4]
+    val body = _browser_renderer_network_piece(message.payload, offset, lengths[5])
+    offset = offset + lengths[5]
+    val content_type = _browser_renderer_network_piece(message.payload, offset, lengths[6])
+    offset = offset + lengths[6]
+    if (offset != message.payload.len() or
+        not _browser_renderer_network_common_valid(request_id, kind, url) or
+        not _browser_renderer_network_method_valid(method) or
+        not _browser_renderer_network_field_valid(headers, BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES) or
+        not _browser_renderer_network_field_valid(body, BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES) or
+        not _browser_renderer_network_field_valid(content_type, 256)):
+        return _browser_renderer_network_reject("invalid-network-request")
+    _browser_renderer_network_result(
+        request_id, kind, url, method, headers, body, content_type, 0, ""
+    )
+
+pub fn browser_renderer_network_response_encode(
+    generation: i64,
+    wire_request_id: i64,
+    request_id: text,
+    kind: text,
+    url: text,
+    status: i32,
+    headers: text,
+    body: text,
+    error: text
+) -> BrowserRendererEncodeResult:
+    if (not _browser_renderer_network_common_valid(request_id, kind, url) or
+        status < 0 or status > 999 or
+        (status == 0 and (error == "" or headers != "" or body != "")) or
+        (status > 0 and (status < 100 or error != "")) or
+        not _browser_renderer_network_field_valid(headers, BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES) or
+        not _browser_renderer_network_field_valid(body, BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES) or
+        not _browser_renderer_network_field_valid(error, BROWSER_RENDERER_MAX_TEXT_BYTES)):
+        return _browser_renderer_reject_encode("invalid-network-response")
+    val id_len = text_to_bytes(request_id).len()
+    val kind_len = text_to_bytes(kind).len()
+    val url_len = text_to_bytes(url).len()
+    val headers_len = text_to_bytes(headers).len()
+    val body_len = text_to_bytes(body).len()
+    val error_len = text_to_bytes(error).len()
+    browser_renderer_message_encode(
+        "network_response", generation, wire_request_id,
+        "SBRN1\t{id_len}\t{kind_len}\t{url_len}\t{status}\t{headers_len}\t{body_len}\t{error_len}\n" +
+        request_id + kind + url + headers + body + error
+    )
+
+pub fn browser_renderer_network_response_decode(
+    message: BrowserRendererMessage
+) -> BrowserRendererNetworkDecodeResult:
+    if message.kind != "network_response":
+        return _browser_renderer_network_reject("wrong-kind")
+    val header_end = _browser_renderer_header_end(message.payload)
+    if header_end < 0 or header_end >= BROWSER_RENDERER_MAX_HEADER_BYTES:
+        return _browser_renderer_network_reject("malformed-network-response")
+    val fields = _browser_renderer_byte_slice(
+        message.payload, 0, header_end
+    ).split("\t")
+    if fields.len() != 8 or fields[0] != "SBRN1":
+        return _browser_renderer_network_reject("malformed-network-response")
+    val status = fields[4].to_i64() ?? -1
+    if status < 0 or status > 999 or str(status) != fields[4]:
+        return _browser_renderer_network_reject("malformed-network-response")
+    var lengths: [i64] = []
+    for field_index in [1, 2, 3, 5, 6, 7]:
+        val length = fields[field_index].to_i64() ?? -1
+        if length < 0 or str(length) != fields[field_index]:
+            return _browser_renderer_network_reject("malformed-network-response")
+        lengths.push(length)
+    if (lengths[0] <= 0 or lengths[0] > 128 or lengths[1] > 16 or
+        lengths[2] > BROWSER_RENDERER_MAX_URL_BYTES or
+        lengths[3] > BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES or
+        lengths[4] > BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES or
+        lengths[5] > BROWSER_RENDERER_MAX_TEXT_BYTES):
+        return _browser_renderer_network_reject("network-response-too-large")
+    var total_length = header_end + 1
+    for length in lengths:
+        total_length = total_length + length
+    if total_length != message.payload.len():
+        return _browser_renderer_network_reject("malformed-network-response")
+    var offset = header_end + 1
+    val request_id = _browser_renderer_network_piece(message.payload, offset, lengths[0])
+    offset = offset + lengths[0]
+    val kind = _browser_renderer_network_piece(message.payload, offset, lengths[1])
+    offset = offset + lengths[1]
+    val url = _browser_renderer_network_piece(message.payload, offset, lengths[2])
+    offset = offset + lengths[2]
+    val headers = _browser_renderer_network_piece(message.payload, offset, lengths[3])
+    offset = offset + lengths[3]
+    val body = _browser_renderer_network_piece(message.payload, offset, lengths[4])
+    offset = offset + lengths[4]
+    val error = _browser_renderer_network_piece(message.payload, offset, lengths[5])
+    offset = offset + lengths[5]
+    if offset != message.payload.len() or
+        not _browser_renderer_network_common_valid(request_id, kind, url) or
+        not _browser_renderer_network_field_valid(headers, BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES) or
+        not _browser_renderer_network_field_valid(body, BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES) or
+        not _browser_renderer_network_field_valid(error, BROWSER_RENDERER_MAX_TEXT_BYTES) or
+        (status == 0 and (error == "" or headers != "" or body != "")) or
+        (status > 0 and (status < 100 or error != "")):
+        return _browser_renderer_network_reject("invalid-network-response")
+    _browser_renderer_network_result(
+        request_id, kind, url, "", headers, body, "", status.to_i32(), error
+    )
 
 fn _browser_renderer_normalize_draw_ir(composition: DrawIrComposition) -> DrawIrComposition:
     var batches: [DrawIrBatch] = []

@@ -328,9 +328,14 @@ or native TLS behavior.
 - Linux now has a fail-closed sanitized renderer launcher, deny-all Landlock,
   seccomp process/network denial, and a persistent BrowserSession/Draw IR
   worker. The broker permits one request in flight, requires exact monotonic
-  IDs, preserves absolute animation time, and closes the contained process on
-  any timeout or protocol failure. A fail-closed external-frame compositor seam
-  now exists, but the hosted entry is not switched to it: ordinary renderer
+  IDs independently in each direction, preserves absolute animation time, and
+  closes the contained process on any timeout or protocol failure. Renderer
+  network requests and broker responses now use bounded length-prefixed fields;
+  the parent alone owns Fetch/TLS and uses a public-address-only, response-capped
+  HTTP job while the renderer sandbox remains socketless. A fail-closed
+  external-frame compositor seam now exists, but the hosted entry is not
+  switched to it: the broker transaction is still blocking (so Stop cannot
+  preempt an active fetch), ordinary renderer
   diagnostics still share stdout with SBR1, and
   `browser_renderer_protocol_stdout_collision_2026-07-27.md` is a release
   blocker. Windows AppContainer and the signed macOS helper also remain open.

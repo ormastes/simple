@@ -46,6 +46,7 @@ fn browser_http_connect(
     port: i64,
     deadline: std::time::Instant,
     job: &BrowserHttpJob,
+    public_only: bool,
 ) -> std::io::Result<TcpStream> {
     let authority = if host.contains(':') {
         format!("[{host}]:{port}")
@@ -53,6 +54,16 @@ fn browser_http_connect(
         format!("{host}:{port}")
     };
     let addresses = resolve_socket_addrs_with_timeout(authority, browser_http_remaining(deadline)?)?;
+    if public_only
+        && addresses
+            .iter()
+            .any(|address| !browser_http_address_is_public(address.ip()))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "browser HTTP target resolved to a non-public address",
+        ));
+    }
     let mut last_error = None;
     for address in addresses {
         browser_http_canceled(job)?;
@@ -72,10 +83,80 @@ fn browser_http_connect(
     }))
 }
 
+fn browser_http_ipv4_in(address: Ipv4Addr, network: [u8; 4], prefix: u32) -> bool {
+    let address = u32::from(address);
+    let network = u32::from_be_bytes(network);
+    let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+    address & mask == network & mask
+}
+
+fn browser_http_ipv6_in(address: Ipv6Addr, network: [u16; 8], prefix: u32) -> bool {
+    let address = u128::from(address);
+    let network = network
+        .iter()
+        .fold(0u128, |value, segment| (value << 16) | u128::from(*segment));
+    let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
+    address & mask == network & mask
+}
+
+fn browser_http_address_is_public(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(address) => ![
+            ([0, 0, 0, 0], 8),
+            ([10, 0, 0, 0], 8),
+            ([100, 64, 0, 0], 10),
+            ([127, 0, 0, 0], 8),
+            ([169, 254, 0, 0], 16),
+            ([172, 16, 0, 0], 12),
+            ([192, 0, 0, 0], 24),
+            ([192, 0, 2, 0], 24),
+            ([192, 88, 99, 0], 24),
+            ([192, 168, 0, 0], 16),
+            ([198, 18, 0, 0], 15),
+            ([198, 51, 100, 0], 24),
+            ([203, 0, 113, 0], 24),
+            ([224, 0, 0, 0], 4),
+            ([240, 0, 0, 0], 4),
+        ]
+        .iter()
+        .any(|(network, prefix)| browser_http_ipv4_in(address, *network, *prefix)),
+        std::net::IpAddr::V6(address) => {
+            if address.to_ipv4_mapped().is_some() || !browser_http_ipv6_in(address, [0x2000, 0, 0, 0, 0, 0, 0, 0], 3) {
+                return false;
+            }
+            ![
+                ([0x2001, 0, 0, 0, 0, 0, 0, 0], 23),
+                ([0x2001, 0x0db8, 0, 0, 0, 0, 0, 0], 32),
+                ([0x2002, 0, 0, 0, 0, 0, 0, 0], 16),
+                ([0x3fff, 0, 0, 0, 0, 0, 0, 0], 20),
+            ]
+            .iter()
+            .any(|(network, prefix)| browser_http_ipv6_in(address, *network, *prefix))
+        }
+    }
+}
+
+fn browser_http_extend_response(
+    response: &mut Vec<u8>,
+    chunk: &[u8],
+    max_response_bytes: usize,
+    scheme: &str,
+) -> std::io::Result<()> {
+    if response.len() > max_response_bytes.saturating_sub(chunk.len()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::OutOfMemory,
+            format!("browser {scheme} response exceeds limit"),
+        ));
+    }
+    response.extend_from_slice(chunk);
+    Ok(())
+}
+
 fn browser_http_read_plain(
     stream: &mut TcpStream,
     deadline: std::time::Instant,
     job: &BrowserHttpJob,
+    max_response_bytes: usize,
 ) -> std::io::Result<Vec<u8>> {
     let mut response = Vec::new();
     let mut chunk = [0u8; 8192];
@@ -85,13 +166,7 @@ fn browser_http_read_plain(
         match stream.read(&mut chunk) {
             Ok(0) => return Ok(response),
             Ok(count) => {
-                if response.len() > BROWSER_HTTP_RAW_LIMIT - count {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::OutOfMemory,
-                        "browser HTTP response exceeds limit",
-                    ));
-                }
-                response.extend_from_slice(&chunk[..count]);
+                browser_http_extend_response(&mut response, &chunk[..count], max_response_bytes, "HTTP")?;
             }
             Err(error) => return Err(error),
         }
@@ -105,11 +180,11 @@ fn browser_http_tls(
     request: &[u8],
     deadline: std::time::Instant,
     job: &BrowserHttpJob,
+    max_response_bytes: usize,
 ) -> std::io::Result<Vec<u8>> {
     let server_name = rustls::pki_types::ServerName::try_from(host.to_owned())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid TLS server name"))?;
-    let config = platform_tls_client_config()
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+    let config = platform_tls_client_config().map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
     let connection = rustls::ClientConnection::new(config, server_name)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
     let mut tls = rustls::StreamOwned::new(connection, stream);
@@ -126,13 +201,7 @@ fn browser_http_tls(
         match tls.read(&mut chunk) {
             Ok(0) => return Ok(response),
             Ok(count) => {
-                if response.len() > BROWSER_HTTP_RAW_LIMIT - count {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::OutOfMemory,
-                        "browser HTTPS response exceeds limit",
-                    ));
-                }
-                response.extend_from_slice(&chunk[..count]);
+                browser_http_extend_response(&mut response, &chunk[..count], max_response_bytes, "HTTPS")?;
             }
             Err(error) => return Err(error),
         }
@@ -146,6 +215,7 @@ fn browser_http_tls(
     _request: &[u8],
     _deadline: std::time::Instant,
     _job: &BrowserHttpJob,
+    _max_response_bytes: usize,
 ) -> std::io::Result<Vec<u8>> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -160,19 +230,25 @@ fn browser_http_perform(
     request: &[u8],
     timeout_ms: i64,
     job: &BrowserHttpJob,
+    max_response_bytes: usize,
+    public_only: bool,
 ) -> Result<Vec<u8>, String> {
     if (scheme != "http" && scheme != "https") || host.is_empty() || !(1..=65535).contains(&port) {
         return Err("invalid browser HTTP target".to_owned());
     }
-    if request.len() > BROWSER_HTTP_RAW_LIMIT || timeout_ms <= 0 {
+    if request.len() > BROWSER_HTTP_RAW_LIMIT
+        || timeout_ms <= 0
+        || max_response_bytes == 0
+        || max_response_bytes > BROWSER_HTTP_RAW_LIMIT
+    {
         return Err("invalid browser HTTP request limit".to_owned());
     }
     let deadline = std::time::Instant::now()
         .checked_add(Duration::from_millis(timeout_ms as u64))
         .ok_or_else(|| "invalid browser HTTP deadline".to_owned())?;
-    let mut stream = browser_http_connect(host, port, deadline, job).map_err(|e| e.to_string())?;
+    let mut stream = browser_http_connect(host, port, deadline, job, public_only).map_err(|e| e.to_string())?;
     if scheme == "https" {
-        return browser_http_tls(host, stream, request, deadline, job).map_err(|e| e.to_string());
+        return browser_http_tls(host, stream, request, deadline, job, max_response_bytes).map_err(|e| e.to_string());
     }
     browser_http_canceled(job).map_err(|e| e.to_string())?;
     stream
@@ -180,16 +256,17 @@ fn browser_http_perform(
         .map_err(|e| e.to_string())?;
     stream.write_all(request).map_err(|e| e.to_string())?;
     stream.flush().map_err(|e| e.to_string())?;
-    browser_http_read_plain(&mut stream, deadline, job).map_err(|e| e.to_string())
+    browser_http_read_plain(&mut stream, deadline, job, max_response_bytes).map_err(|e| e.to_string())
 }
 
-#[no_mangle]
-pub extern "C" fn rt_browser_http_job_start(
+fn browser_http_job_start(
     scheme: crate::value::RuntimeValue,
     host: crate::value::RuntimeValue,
     port: i64,
     request: crate::value::RuntimeValue,
     timeout_ms: i64,
+    max_response_bytes: i64,
+    public_only: bool,
 ) -> i64 {
     let Some(scheme) = browser_http_text(scheme) else {
         return -1;
@@ -198,6 +275,9 @@ pub extern "C" fn rt_browser_http_job_start(
         return -1;
     };
     let Some(request) = runtime_byte_array_to_vec(request) else {
+        return -1;
+    };
+    let Ok(max_response_bytes) = usize::try_from(max_response_bytes) else {
         return -1;
     };
     if LIVE_BROWSER_HTTP_JOBS.fetch_add(1, Ordering::AcqRel) >= BROWSER_HTTP_JOB_LIMIT {
@@ -217,7 +297,16 @@ pub extern "C" fn rt_browser_http_job_start(
     let spawned = std::thread::Builder::new()
         .name("simple-browser-http".to_owned())
         .spawn(move || {
-            let outcome = browser_http_perform(&scheme, &host, port, &request, timeout_ms, &job);
+            let outcome = browser_http_perform(
+                &scheme,
+                &host,
+                port,
+                &request,
+                timeout_ms,
+                &job,
+                max_response_bytes,
+                public_only,
+            );
             *job.socket.lock().unwrap() = None;
             *job.outcome.lock().unwrap() = Some(outcome);
             LIVE_BROWSER_HTTP_JOBS.fetch_sub(1, Ordering::AcqRel);
@@ -228,6 +317,37 @@ pub extern "C" fn rt_browser_http_job_start(
         return -1;
     }
     handle
+}
+
+#[no_mangle]
+pub extern "C" fn rt_browser_http_job_start(
+    scheme: crate::value::RuntimeValue,
+    host: crate::value::RuntimeValue,
+    port: i64,
+    request: crate::value::RuntimeValue,
+    timeout_ms: i64,
+) -> i64 {
+    browser_http_job_start(
+        scheme,
+        host,
+        port,
+        request,
+        timeout_ms,
+        BROWSER_HTTP_RAW_LIMIT as i64,
+        false,
+    )
+}
+
+#[no_mangle]
+pub extern "C" fn rt_browser_http_job_start_public_limited(
+    scheme: crate::value::RuntimeValue,
+    host: crate::value::RuntimeValue,
+    port: i64,
+    request: crate::value::RuntimeValue,
+    timeout_ms: i64,
+    max_response_bytes: i64,
+) -> i64 {
+    browser_http_job_start(scheme, host, port, request, timeout_ms, max_response_bytes, true)
 }
 
 #[no_mangle]
@@ -292,4 +412,58 @@ pub extern "C" fn rt_browser_http_job_free(handle: i64) -> bool {
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod browser_http_job_tests {
+    use super::*;
+
+    #[test]
+    fn public_address_policy_rejects_non_public_ipv4_and_ipv6() {
+        for address in [
+            "0.0.0.0",
+            "10.0.0.1",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.1.1",
+            "172.16.0.1",
+            "192.0.2.1",
+            "192.168.1.1",
+            "198.18.0.1",
+            "198.51.100.1",
+            "203.0.113.1",
+            "224.0.0.1",
+            "240.0.0.1",
+            "::",
+            "::1",
+            "::ffff:127.0.0.1",
+            "::ffff:8.8.8.8",
+            "64:ff9b:1::1",
+            "5f00::1",
+            "100::1",
+            "2001:db8::1",
+            "2002::1",
+            "3fff::1",
+            "fc00::1",
+            "fe80::1",
+            "fec0::1",
+            "ff00::1",
+        ] {
+            assert!(!browser_http_address_is_public(address.parse().unwrap()), "{address}");
+        }
+        for address in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111", "2001:4860:4860::8888"] {
+            assert!(browser_http_address_is_public(address.parse().unwrap()), "{address}");
+        }
+    }
+
+    #[test]
+    fn requested_response_cap_is_exact() {
+        let mut response = Vec::new();
+        browser_http_extend_response(&mut response, b"1234", 5, "HTTP").unwrap();
+        browser_http_extend_response(&mut response, b"5", 5, "HTTPS").unwrap();
+        assert_eq!(response, b"12345");
+        let error = browser_http_extend_response(&mut response, b"6", 5, "HTTP").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::OutOfMemory);
+        assert_eq!(response, b"12345");
+    }
 }

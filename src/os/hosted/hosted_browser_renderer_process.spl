@@ -1,16 +1,28 @@
 """Persistent broker for a sandboxed browser renderer session."""
 
 use std.common.ui.draw_ir.{DrawIrComposition, draw_ir_composition}
+use common.string_builder.{StringBuilder}
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_WORKER_ARG,
     BrowserRendererDecoder, BrowserRendererEncodeResult,
     browser_renderer_advance_encode,
     browser_renderer_chrome_encode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
+    browser_renderer_fetch_request_decode,
     browser_renderer_frame_decode,
     browser_renderer_key_encode, browser_renderer_message_encode,
+    browser_renderer_network_response_encode,
     browser_renderer_pointer_encode, browser_renderer_text_encode
 }
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
+    FetchRequest, FetchResponse, RequestMode
+}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
+    build_request_bytes, h1_mock_response, parse_http_response_bytes
+}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
 use std.nogc_sync_mut.io.process_ops.{
     browser_renderer_spawn_sandboxed,
     process_close_piped, process_is_piped_alive, process_read_stdout,
@@ -19,6 +31,20 @@ use std.nogc_sync_mut.io.process_ops.{
 
 extern fn rt_sleep_ms(milliseconds: i64)
 extern fn rt_time_now_unix_micros() -> i64
+extern fn rt_text_to_bytes(value: text) -> [u8]
+extern fn rt_browser_http_job_start_public_limited(
+    scheme: text,
+    host: text,
+    port: i64,
+    request: [u8],
+    timeout_ms: i64,
+    max_response_bytes: i64
+) -> i64
+extern fn rt_browser_http_job_poll(handle: i64) -> i64
+extern fn rt_browser_http_job_take_response(handle: i64) -> [u8]
+extern fn rt_browser_http_job_take_error(handle: i64) -> text
+extern fn rt_browser_http_job_cancel(handle: i64) -> bool
+extern fn rt_browser_http_job_free(handle: i64) -> bool
 
 pub struct HostedBrowserRendererResult:
     ok: bool
@@ -28,6 +54,82 @@ pub struct HostedBrowserRendererResult:
     cpu_composited_sha256: text
     solid_material_count: i32
     solid_material_sha256: text
+
+struct HostedBrowserNetworkResult:
+    status: i32
+    headers: text
+    body: text
+    error: text
+
+fn _network_result(
+    status: i32, headers: text, body: text, error: text
+) -> HostedBrowserNetworkResult:
+    HostedBrowserNetworkResult(
+        status: status,
+        headers: headers,
+        body: body,
+        error: error
+    )
+
+fn _renderer_fetch_mode(kind: text) -> RequestMode:
+    if kind == "document":
+        return RequestMode.Navigate
+    if kind == "style" or kind == "script":
+        return RequestMode.NoCors
+    RequestMode.SameOrigin
+
+fn _renderer_header_name_valid(name: text) -> bool:
+    if name == "":
+        return false
+    for ch in name:
+        val code = ch.char_code_at(0)
+        if not ((code >= 48 and code <= 57) or
+            (code >= 65 and code <= 90) or
+            (code >= 97 and code <= 122) or ch == "-"):
+            return false
+    true
+
+fn _renderer_fetch_headers(headers: text, content_type: text) -> Result<text, text>:
+    if headers.contains("\r") or content_type.contains("\r") or
+        content_type.contains("\n"):
+        return Err("invalid-request-headers")
+    var lines: [text] = []
+    var has_content_type = false
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        if line == "":
+            continue
+        val colon = line.index_of(":")
+        if colon <= 0:
+            return Err("invalid-request-headers")
+        val name = line.slice(0, colon).trim()
+        val lowered = name.lower()
+        if (not _renderer_header_name_valid(name) or lowered == "host" or
+            lowered == "connection" or lowered == "content-length" or
+            lowered == "transfer-encoding" or lowered == "proxy-connection" or
+            lowered == "upgrade"):
+            return Err("forbidden-request-header")
+        val value = line.slice(colon + 1, line.len()).trim()
+        for ch in value:
+            val code = ch.char_code_at(0)
+            if code < 32 and code != 9:
+                return Err("invalid-request-headers")
+        if lowered == "content-type":
+            has_content_type = true
+        lines.push("{name}: {value}")
+    if content_type != "" and not has_content_type:
+        for ch in content_type:
+            if ch.char_code_at(0) < 32:
+                return Err("invalid-request-headers")
+        lines.push("Content-Type: {content_type}")
+    Ok(lines.join("\r\n"))
+
+fn _renderer_wasm_hex(data: [u8]) -> text:
+    var out = StringBuilder.new()
+    for byte in data:
+        val piece = byte.to_i64().to_hex()
+        out.push(if piece.len() == 1: "0{piece}" else: piece)
+    out.build()
 
 fn _empty_composition() -> DrawIrComposition:
     draw_ir_composition("", "", "", [])
@@ -87,6 +189,7 @@ pub class HostedBrowserRendererProcess:
     height: i32
     next_request_id: i64
     decoder: BrowserRendererDecoder
+    network: FetchEngine
     state: text
 
     static fn create(
@@ -101,6 +204,9 @@ pub class HostedBrowserRendererProcess:
             height: height,
             next_request_id: 2,
             decoder: browser_renderer_decoder_new(generation),
+            network: FetchEngine.new(
+                Logger.new("browser-renderer-broker", LogLevel.Error)
+            ),
             state: "new"
         )
 
@@ -149,16 +255,134 @@ pub class HostedBrowserRendererProcess:
                 rt_sleep_ms(1)
         self.fail("renderer-timeout")
 
+    me _finalize_network(
+        kind: text,
+        request: FetchRequest,
+        response: FetchResponse
+    ) -> HostedBrowserNetworkResult:
+        match self.network.finalize_single_hop(request, response):
+            Err(error):
+                _network_result(0, "", "", error.message)
+            Ok(finalized):
+                val body = if kind == "wasm":
+                    _renderer_wasm_hex(finalized.body)
+                else:
+                    finalized.body_text()
+                _network_result(
+                    finalized.status.to_i32(),
+                    finalized.headers,
+                    body,
+                    ""
+                )
+
+    me _fetch_network(
+        kind: text,
+        url_text: text,
+        method: text,
+        headers: text,
+        body: text,
+        content_type: text,
+        deadline_ms: i64
+    ) -> HostedBrowserNetworkResult:
+        val sanitized_headers = match _renderer_fetch_headers(
+            headers, content_type
+        ):
+            Err(reason):
+                return _network_result(0, "", "", reason)
+            Ok(value):
+                value
+        val request = FetchRequest(
+            url: Url.parse(url_text),
+            method: method,
+            headers: sanitized_headers,
+            body: rt_text_to_bytes(body),
+            mode: _renderer_fetch_mode(kind),
+            credentials: "omit"
+        )
+        match self.network.prepare_single_hop(request):
+            Err(error):
+                return _network_result(0, "", "", error.message)
+            Ok(prepared):
+                if val Some(response) = prepared.response:
+                    return self._finalize_network(
+                        kind, prepared.request, response
+                    )
+                if val Some(mock_result) = h1_mock_response(prepared.request):
+                    match mock_result:
+                        Err(error):
+                            return _network_result(
+                                0, "", "", error.message
+                            )
+                        Ok(response):
+                            return self._finalize_network(
+                                kind, prepared.request, response
+                            )
+                val url = prepared.request.url
+                val port = if url.port > 0:
+                    url.port
+                elif url.scheme == "https":
+                    443
+                else:
+                    80
+                val remaining_ms = (
+                    deadline_ms - rt_time_now_unix_micros() / 1000
+                )
+                if remaining_ms <= 0:
+                    return _network_result(
+                        0, "", "", "renderer-network-timeout"
+                    )
+                val raw_limit = if kind == "wasm": 327680 else: 589824
+                val handle = rt_browser_http_job_start_public_limited(
+                    url.scheme,
+                    url.host,
+                    port,
+                    rt_text_to_bytes(build_request_bytes(prepared.request)),
+                    remaining_ms,
+                    raw_limit
+                )
+                if handle < 0:
+                    return _network_result(
+                        0, "", "", "renderer-network-unavailable"
+                    )
+                while rt_time_now_unix_micros() / 1000 < deadline_ms:
+                    val state = rt_browser_http_job_poll(handle)
+                    if state < 0:
+                        val _ = rt_browser_http_job_free(handle)
+                        return _network_result(
+                            0, "", "", "renderer-network-unavailable"
+                        )
+                    if state > 0:
+                        val error = rt_browser_http_job_take_error(handle)
+                        val raw_response = rt_browser_http_job_take_response(
+                            handle
+                        )
+                        val _ = rt_browser_http_job_free(handle)
+                        if error != "":
+                            return _network_result(0, "", "", error)
+                        match parse_http_response_bytes(raw_response):
+                            Err(parse_error):
+                                return _network_result(
+                                    0, "", "", parse_error.message
+                                )
+                            Ok(response):
+                                return self._finalize_network(
+                                    kind, prepared.request, response
+                                )
+                    rt_sleep_ms(1)
+                val _ = rt_browser_http_job_cancel(handle)
+                val _ = rt_browser_http_job_free(handle)
+                _network_result(0, "", "", "renderer-network-timeout")
+
     me _await_frame(
         request: BrowserRendererEncodeResult,
         timeout_ms: i64
     ) -> HostedBrowserRendererResult:
-        val request_id = self.next_request_id
         if not request.ok:
             return self.fail(request.reason)
         val deadline = _deadline_ms(timeout_ms)
         if not _write_before(self.pid, request.wire, deadline):
             return self.fail("renderer-write-failed")
+        self.next_request_id = self.next_request_id + 1
         while rt_time_now_unix_micros() / 1000 < deadline:
             val chunk = process_read_stdout(self.pid)
             val decoded = browser_renderer_decoder_feed(self.decoder, chunk)
@@ -166,14 +390,45 @@ pub class HostedBrowserRendererProcess:
             if decoded.status == "violation":
                 return self.fail(decoded.decoder.error)
             if decoded.status == "message":
-                if decoded.message.request_id != request_id:
-                    return self.fail("unexpected-response-id")
+                if decoded.message.kind == "fetch_request":
+                    val fetch = browser_renderer_fetch_request_decode(
+                        decoded.message
+                    )
+                    if not fetch.ok:
+                        return self.fail(fetch.reason)
+                    val response = self._fetch_network(
+                        fetch.kind,
+                        fetch.url,
+                        fetch.method,
+                        fetch.headers,
+                        fetch.body,
+                        fetch.content_type,
+                        deadline
+                    )
+                    val response_wire = browser_renderer_network_response_encode(
+                        self.generation,
+                        self.next_request_id,
+                        fetch.request_id,
+                        fetch.kind,
+                        fetch.url,
+                        response.status,
+                        response.headers,
+                        response.body,
+                        response.error
+                    )
+                    if not response_wire.ok:
+                        return self.fail(response_wire.reason)
+                    if not _write_before(
+                        self.pid, response_wire.wire, deadline
+                    ):
+                        return self.fail("renderer-write-failed")
+                    self.next_request_id = self.next_request_id + 1
+                    continue
                 val frame = browser_renderer_frame_decode(
                     decoded.message, self.width, self.height
                 )
                 if not frame.ok:
                     return self.fail(frame.reason)
-                self.next_request_id = request_id + 1
                 self.state = "active"
                 return _renderer_frame_result(
                     frame.composition,

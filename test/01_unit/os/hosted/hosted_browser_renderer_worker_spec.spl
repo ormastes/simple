@@ -4,7 +4,9 @@ use std.spec.*
 use std.common.web.browser_renderer_protocol.{
     BrowserRendererMessage,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
-    browser_renderer_frame_decode
+    browser_renderer_fetch_request_decode,
+    browser_renderer_frame_decode,
+    browser_renderer_network_response_encode
 }
 use os.hosted.hosted_browser_renderer_worker.{
     HostedBrowserRendererWorkerSession,
@@ -149,6 +151,35 @@ describe "hosted browser renderer worker":
             payload: "T1\t8\t20\nhttps://example.test"
         )).ok).to_be(true)
         expect(worker.browser.address_draft).to_equal("https://example.test")
+
+        val submitted = worker.handle(BrowserRendererMessage(
+            kind: "key", generation: 7, request_id: 11,
+            payload: "K1\t9\t13\t1"
+        ))
+        expect(submitted.ok).to_be(true)
+        val fetch_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), submitted.wire
+        )
+        expect(fetch_message.message.kind).to_equal("fetch_request")
+        val fetch = browser_renderer_fetch_request_decode(
+            fetch_message.message
+        )
+        expect(fetch.ok).to_be(true)
+        expect(fetch.kind).to_equal("document")
+        expect(fetch.url.starts_with("https://example.test")).to_be(true)
+
+        val response_wire = browser_renderer_network_response_encode(
+            7, 12, fetch.request_id, fetch.kind, fetch.url,
+            200, "Content-Type: text/html",
+            "<style>body{color:#2563eb}</style><button id='loaded'>Loaded</button>",
+            ""
+        )
+        val response_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), response_wire.wire
+        )
+        val committed = worker.handle(response_message.message)
+        expect(committed.ok).to_be(true)
+        expect(worker.browser.current_body_html).to_contain("Loaded")
 
     it "rejects skipped ids and backward animation time":
         var session = BrowserSession.new()
