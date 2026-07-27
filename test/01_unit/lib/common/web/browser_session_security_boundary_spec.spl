@@ -17,13 +17,57 @@ describe "BrowserSession production security boundary":
         )
         expect(opened.is_ok()).to_be(true)
 
-        match session.eval_script(
-            "var iterations = 0; do { iterations = iterations + 1; } while (true); iterations"
-        ):
+        val exhausted = session.eval_script(
+            "var iterations = 0; do { iterations = iterations + 1; } while (true);"
+        )
+        expect(exhausted.is_ok()).to_be(true)
+        match session.eval_script("iterations"):
             Ok(JsValue.Number(iterations)):
-                expect(iterations).to_equal(100000.0)
+                expect(iterations).to_be_greater_than(0.0)
+                expect(iterations).to_be_less_than(100000.0)
             _:
                 fail("Expected the do-while execution limit to terminate the script")
+
+    # @req REQ-WEB-BROWSER-017
+    it "bounds hostile recursive script execution":
+        var session = BrowserSession.new()
+        val opened = session.open_html(
+            "https://safe.test/app", "<html><body>safe</body></html>"
+        )
+        expect(opened.is_ok()).to_be(true)
+
+        match session.eval_script(
+            "var depth = 0; function recurse() { depth = depth + 1; recurse(); } recurse(); depth"
+        ):
+            Ok(JsValue.Number(depth)):
+                expect(depth).to_equal(256.0)
+            _:
+                fail("Expected the recursion limit to terminate the script")
+
+    # @req REQ-WEB-BROWSER-017
+    it "shares one execution budget across nested script loops":
+        var session = BrowserSession.new()
+        val opened = session.open_html(
+            "https://safe.test/app", "<html><body>safe</body></html>"
+        )
+        expect(opened.is_ok()).to_be(true)
+
+        val exhausted = session.eval_script(
+            "var timerRan = 0; setTimeout(function() { timerRan = 1; }, 0); var iterations = 0; for (var outer = 0; outer < 100000; outer = outer + 1) { for (var inner = 0; inner < 100000; inner = inner + 1) { iterations = iterations + 1; } }"
+        )
+        expect(exhausted.is_ok()).to_be(true)
+        expect(session.advance_time(0)).to_equal(1)
+        match session.eval_script("timerRan"):
+            Ok(JsValue.Number(timer_ran)):
+                expect(timer_ran).to_equal(1.0)
+            _:
+                fail("Expected timer execution to receive a fresh task budget")
+        match session.eval_script("iterations"):
+            Ok(JsValue.Number(iterations)):
+                expect(iterations).to_be_greater_than(0.0)
+                expect(iterations).to_be_less_than(100000.0)
+            _:
+                fail("Expected the shared execution budget to preserve runtime state")
 
     it "rejects direct file navigation before reading the host filesystem":
         var session = BrowserSession.new()
