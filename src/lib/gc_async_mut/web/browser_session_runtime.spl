@@ -19,7 +19,8 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_dispatch_event_to_id, be_dom_find_by_tag, be_dom_find_path_to_id,
     be_dom_focused_id, be_dom_get_attr, be_dom_has_attr, be_dom_serialize_children,
     be_dom_submit_form_owner_id, be_dom_keyboard_activation_event_for_target,
-    be_dom_checked_radio_id_for_target
+    be_dom_checked_radio_id_for_target, be_dom_form_owner_id,
+    be_dom_default_submitter_id
 }
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
 use std.gc_async_mut.gpu.browser_engine.script.script_host.{
@@ -121,6 +122,19 @@ fn _browser_session_checkable_click_action(
         "checkbox": "input-checkbox-toggle"
         "radio": "input-radio-select"
         _: ""
+
+fn _browser_session_accepts_implicit_submit(target: BeDomNode) -> bool:
+    if target.tag_name != "input" or be_dom_has_attr(target, "disabled") or
+       be_dom_has_attr(target, "readonly"):
+        return false
+    val input_type = be_dom_get_attr(target, "type").lower()
+    (
+        input_type != "button" and input_type != "checkbox" and
+        input_type != "color" and input_type != "file" and
+        input_type != "hidden" and input_type != "image" and
+        input_type != "radio" and input_type != "range" and
+        input_type != "reset" and input_type != "submit"
+    )
 
 fn storage_pairs_from_object(state: BrowserRuntimeState, object_id: i64) -> [Pair<text, text>]:
     val obj = state.runtime.get_host_object(object_id)
@@ -397,6 +411,17 @@ impl BrowserSession:
                         target_id, _browser_session_drop_last_utf8_scalar(value)
                     )
             return Ok(key_dispatch)
+        if pressed and (
+            normalized_key == "enter" or normalized_key == "return"
+        ) and _browser_session_accepts_implicit_submit(target):
+            val form_id = be_dom_form_owner_id(self.current_dom, target_id)
+            val submitter_id = be_dom_default_submitter_id(
+                self.current_dom, form_id
+            )
+            if submitter_id != "":
+                return Ok(self.dispatch_dom_event(
+                    submitter_id, "click", true, true
+                ))
         val activation_event = be_dom_keyboard_activation_event_for_target(
             target, key
         )

@@ -501,6 +501,30 @@ fn be_dom_focused_id(root: BeDomNode) -> text:
             return focused_id
     ""
 
+fn be_dom_form_owner_id(root: BeDomNode, target_id: text) -> text:
+    val path = be_dom_find_path_to_id(root, target_id)
+    if path.len() == 0:
+        return ""
+    val target = path[path.len() - 1]
+    if (
+        target.tag_name != "input" and target.tag_name != "button" and
+        target.tag_name != "select" and target.tag_name != "textarea"
+    ):
+        return ""
+    val explicit_owner = be_dom_get_attr(target, "form")
+    if explicit_owner != "":
+        val owner_path = be_dom_find_path_to_id(root, explicit_owner)
+        if owner_path.len() > 0 and
+           owner_path[owner_path.len() - 1].tag_name == "form":
+            return explicit_owner
+        return ""
+    var ancestor = path.len() - 2
+    while ancestor >= 0:
+        if path[ancestor].tag_name == "form":
+            return be_dom_event_identity(path[ancestor])
+        ancestor = ancestor - 1
+    ""
+
 fn be_dom_submit_form_owner_id(root: BeDomNode, target_id: text) -> text:
     val path = be_dom_find_path_to_id(root, target_id)
     if path.len() == 0:
@@ -515,18 +539,34 @@ fn be_dom_submit_form_owner_id(root: BeDomNode, target_id: text) -> text:
             return ""
     else:
         return ""
-    val explicit_owner = be_dom_get_attr(target, "form")
-    if explicit_owner != "":
-        val owner_path = be_dom_find_path_to_id(root, explicit_owner)
-        if owner_path.len() > 0 and owner_path[owner_path.len() - 1].tag_name == "form":
-            return explicit_owner
-        return ""
-    var ancestor = path.len() - 2
-    while ancestor >= 0:
-        if path[ancestor].tag_name == "form":
-            return be_dom_event_identity(path[ancestor])
-        ancestor = ancestor - 1
+    be_dom_form_owner_id(root, target_id)
+
+fn _be_dom_default_submitter_id(
+    root: BeDomNode, node: BeDomNode, form_id: text
+) -> text:
+    if not be_dom_has_attr(node, "disabled"):
+        var is_submitter = false
+        if node.tag_name == "button":
+            val button_type = be_dom_get_attr(node, "type").lower()
+            is_submitter = button_type == "" or button_type == "submit"
+        elif node.tag_name == "input":
+            is_submitter = be_dom_get_attr(node, "type").lower() == "submit"
+        if is_submitter:
+            val target_id = be_dom_event_identity(node)
+            if be_dom_form_owner_id(root, target_id) == form_id:
+                return target_id
+    for child in node.children:
+        val found = _be_dom_default_submitter_id(root, child, form_id)
+        if found != "":
+            return found
     ""
+
+fn be_dom_default_submitter_id(root: BeDomNode, form_id: text) -> text:
+    val form_path = be_dom_find_path_to_id(root, form_id)
+    if form_path.len() == 0 or
+       form_path[form_path.len() - 1].tag_name != "form":
+        return ""
+    _be_dom_default_submitter_id(root, root, form_id)
 
 fn be_dom_dispatch_event_to_id(root: BeDomNode, target_id: text, event_type: text, bubbles: bool, cancelable: bool) -> BeDomEventDispatch:
     val path = be_dom_find_path_to_id(root, target_id)
@@ -714,7 +754,9 @@ export be_dom_query_selector, be_dom_dispatch_event_actions
 export be_dom_get_event_listener_count
 export be_dom_create_event, be_dom_create_pointer_event, be_dom_create_pointer_event_with_modifiers
 export be_dom_dispatch_event, be_dom_dispatch_event_path, be_dom_dispatch_event_to_id
-export be_dom_find_path_to_id, be_dom_focused_id, be_dom_submit_form_owner_id
+export be_dom_find_path_to_id, be_dom_focused_id
+export be_dom_form_owner_id, be_dom_submit_form_owner_id
+export be_dom_default_submitter_id
 export be_dom_checked_radio_id_for_target
 export be_dom_apply_default_action, be_dom_apply_default_action_to_id
 export be_dom_dispatch_event_apply_default
