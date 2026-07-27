@@ -34,6 +34,18 @@ use nogc_sync_mut.ui.theme_package.{theme_package_render_snapshot}
 pub val WEB_RENDER_ENGINE_PURE_SIMPLE: text = "pure_simple"
 pub val WEB_RENDER_ENGINE_CHROMIUM: text = "chromium"
 
+pub fn browser_theme_cache_identity(canonical_theme_id: text, source_manifest_sha256: text, material_sha256: text) -> text:
+    """Canonical theme identity shared by every BrowserBackend render cache.
+
+    Source and material hashes are intentionally independent: replacing a
+    manifest with equivalent material still invalidates source-derived HTML,
+    while a material-only change invalidates Draw IR/pixels.
+    """
+    "theme-id:{canonical_theme_id.len()}:{canonical_theme_id}|source:{source_manifest_sha256}|material:{material_sha256}"
+
+pub fn browser_theme_cache_key(base_key: text, canonical_theme_id: text, source_manifest_sha256: text, material_sha256: text) -> text:
+    "{base_key}|{browser_theme_cache_identity(canonical_theme_id, source_manifest_sha256, material_sha256)}"
+
 pub fn web_render_engine_is_known(name: text) -> bool:
     """Loud-fail gate for `--web-engine`: only the two real WebRenderBackend
     engines are accepted here (no silent alias-to-default normalization like
@@ -164,6 +176,7 @@ class BrowserBackend:
     framebuffer: Framebuffer
     event_queue: [UIEvent]
     layout_cache: [LayoutEntry]
+    layout_cache_theme_identity: text
     initialized: bool
     web_render_engine: text
     web_render_target: text
@@ -226,12 +239,15 @@ class BrowserBackend:
     static_frame_width: i32
     static_frame_height: i32
     static_frame_revision: i64
+    static_frame_theme_identity: text
     static_frame_fast_hits: i32
     static_frame_fast_stores: i32
     static_frame_hits: i32
     static_frame_stores: i32
     present_pixels_cache: [i64]
     present_pixels_cache_valid: bool
+    present_pixels_cache_theme_identity: text
+    last_render_theme_identity: text
     present_pixels_cache_hits: i32
     present_pixels_cache_stores: i32
     last_render_dom_layout_us: i64
@@ -263,6 +279,7 @@ class BrowserBackend:
             framebuffer: fb,
             event_queue: [],
             layout_cache: [],
+            layout_cache_theme_identity: "",
             initialized: true,
             web_render_engine: web_engine,
             web_render_target: WEB_RENDER_TARGET_PURE_SIMPLE,
@@ -325,12 +342,15 @@ class BrowserBackend:
             static_frame_width: 0,
             static_frame_height: 0,
             static_frame_revision: -1,
+            static_frame_theme_identity: "",
             static_frame_fast_hits: 0,
             static_frame_fast_stores: 0,
             static_frame_hits: 0,
             static_frame_stores: 0,
             present_pixels_cache: [],
             present_pixels_cache_valid: false,
+            present_pixels_cache_theme_identity: "",
+            last_render_theme_identity: "",
             present_pixels_cache_hits: 0,
             present_pixels_cache_stores: 0,
             last_render_dom_layout_us: 0,
@@ -388,7 +408,7 @@ class BrowserBackend:
             self.last_input_event_to_render_us = if elapsed >= 0: elapsed else: 0
             self.last_input_event_roundtrip_status = "rendered"
 
-    fn static_frame_matches(tree: UITree, state: UIState, revision: i64) -> bool:
+    fn static_frame_matches(tree: UITree, state: UIState, revision: i64, theme_identity: text) -> bool:
         (self.static_frame_state_valid
             and self.static_frame_root_id == tree.root_id
             and self.static_frame_mode == state.mode
@@ -396,9 +416,10 @@ class BrowserBackend:
             and self.static_frame_command_buffer == state.command_buffer
             and self.static_frame_width == self.width
             and self.static_frame_height == self.height
-            and self.static_frame_revision == revision)
+            and self.static_frame_revision == revision
+            and self.static_frame_theme_identity == theme_identity)
 
-    me store_static_frame_state(tree: UITree, state: UIState, revision: i64):
+    me store_static_frame_state(tree: UITree, state: UIState, revision: i64, theme_identity: text):
         self.static_frame_state_valid = true
         self.static_frame_root_id = tree.root_id
         self.static_frame_mode = state.mode
@@ -407,6 +428,7 @@ class BrowserBackend:
         self.static_frame_width = self.width
         self.static_frame_height = self.height
         self.static_frame_revision = revision
+        self.static_frame_theme_identity = theme_identity
 
     fn widget_draw_ir_composition(state: UIState) -> DrawIrComposition:
         val theme_snapshot = theme_package_render_snapshot(state.tree.theme_name())
@@ -418,8 +440,14 @@ class BrowserBackend:
     me render_frame_with_composition(tree: UITree, state: UIState, composition: DrawIrComposition):
         """Convert widget tree to DOM, layout, and paint to framebuffer."""
         val revision = widget_store_revision()
+        val theme_snapshot = theme_package_render_snapshot(state.tree.theme_name())
+        val theme_identity = browser_theme_cache_identity(
+            theme_snapshot.id,
+            theme_snapshot.source_manifest_sha256,
+            theme_snapshot.material_sha256
+        )
         val exact_composition = composition.composition_id.starts_with("ui-session-")
-        if not exact_composition and self.static_frame_matches(tree, state, revision) and self.render_cached_static_frame():
+        if not exact_composition and self.static_frame_matches(tree, state, revision, theme_identity) and self.render_cached_static_frame():
             self.static_frame_fast_hits = self.static_frame_fast_hits + 1
             self.reset_runtime_queue_diagnostics()
             self.finish_event_render_roundtrip()
@@ -430,7 +458,13 @@ class BrowserBackend:
         val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "", "", body, generate_css(theme), "", self.width, self.height).with_root_attrs(wm_root_data_attrs(theme))
         self.last_semantic_snapshot_json = semantic_ui_snapshot_to_json(browser_semantic_snapshot(state))
         val profile = web_render_optimization_profile(req)
-        if not exact_composition and profile.cacheable_static_shell and self.static_shell_cache_key == profile.cache_key and self.render_cached_static_frame():
+        val themed_cache_key = browser_theme_cache_key(
+            profile.cache_key,
+            theme_snapshot.id,
+            theme_snapshot.source_manifest_sha256,
+            theme_snapshot.material_sha256
+        )
+        if not exact_composition and profile.cacheable_static_shell and self.static_shell_cache_key == themed_cache_key and self.render_cached_static_frame():
             self.reset_runtime_queue_diagnostics()
             self.finish_event_render_roundtrip()
             return
@@ -445,6 +479,7 @@ class BrowserBackend:
 
         # Step 3: Cache layout for hit testing
         self.layout_cache = collect_layout_entries(layout, [])
+        self.layout_cache_theme_identity = theme_identity
         self.last_render_dom_layout_us = browser_backend_time_us() - dom_layout_start_us
 
         # Step 4: Render canonical widget Draw IR through Engine2D for the
@@ -452,13 +487,13 @@ class BrowserBackend:
         # renderer. Mirror the selected pixels into the legacy host framebuffer.
         val html_start_us = browser_backend_time_us()
         var full_html = ""
-        if profile.cacheable_static_shell and self.static_shell_cache_key == profile.cache_key and self.static_shell_full_html != "":
+        if profile.cacheable_static_shell and self.static_shell_cache_key == themed_cache_key and self.static_shell_full_html != "":
             self.static_shell_html_hits = self.static_shell_html_hits + 1
             full_html = self.static_shell_full_html
         else:
             full_html = web_render_full_html(req)
             if profile.cacheable_static_shell:
-                self.static_shell_cache_key = profile.cache_key
+                self.static_shell_cache_key = themed_cache_key
                 self.static_shell_full_html = full_html
                 self.static_shell_html_stores = self.static_shell_html_stores + 1
         self.last_render_html_us = browser_backend_time_us() - html_start_us
@@ -478,7 +513,9 @@ class BrowserBackend:
         self.last_render_draw_ir_dispatch_us = 0
         val framebuffer_start_us = browser_backend_time_us()
         self.framebuffer = framebuffer_from_argb_pixels(self.width, self.height, artifact.pixels)
+        self.last_render_theme_identity = theme_identity
         self.present_pixels_cache_valid = false
+        self.present_pixels_cache_theme_identity = ""
         self.last_render_framebuffer_copy_us = browser_backend_time_us() - framebuffer_start_us
         self.web_render_target = artifact.target
         self.last_artifact_html = artifact.html
@@ -523,7 +560,7 @@ class BrowserBackend:
             self.last_artifact_event_correlation_summary = "event=" + self.last_artifact_event_correlation_id + ";frame_packet=" + artifact.queue_packet_id.to_text() + ";readback_source=" + artifact.gpu_readback_source + ";checksum=" + artifact.readback_checksum.to_text()
         val state_store_start_us = browser_backend_time_us()
         if profile.cacheable_static_shell:
-            self.store_static_frame_state(tree, state, revision)
+            self.store_static_frame_state(tree, state, revision, theme_identity)
             self.static_frame_fast_stores = self.static_frame_fast_stores + 1
             self.static_frame_stores = self.static_frame_stores + 1
         self.last_render_state_store_us = browser_backend_time_us() - state_store_start_us
@@ -597,14 +634,19 @@ class BrowserBackend:
         self.height = h
         self.framebuffer = Framebuffer.create(w, h)
         self.static_frame_state_valid = false
+        self.static_frame_theme_identity = ""
+        self.layout_cache_theme_identity = ""
+        self.last_render_theme_identity = ""
         self.present_pixels_cache = []
         self.present_pixels_cache_valid = false
+        self.present_pixels_cache_theme_identity = ""
 
     me shutdown():
         """Release resources."""
         self.initialized = false
         self.event_queue = []
         self.layout_cache = []
+        self.layout_cache_theme_identity = ""
 
     fn backend_name() -> text:
         return "browser"
@@ -624,7 +666,9 @@ class BrowserBackend:
 
     me pixels_rgba_i64() -> [i64]:
         """Expose the current framebuffer in the host window present format."""
-        if self.present_pixels_cache_valid and self.present_pixels_cache.len() == self.framebuffer.pixels.len():
+        if (self.present_pixels_cache_valid
+            and self.present_pixels_cache_theme_identity == self.last_render_theme_identity
+            and self.present_pixels_cache.len() == self.framebuffer.pixels.len()):
             self.present_pixels_cache_hits = self.present_pixels_cache_hits + 1
             return self.present_pixels_cache
 
@@ -636,6 +680,7 @@ class BrowserBackend:
             i = i + 1
         self.present_pixels_cache = out
         self.present_pixels_cache_valid = true
+        self.present_pixels_cache_theme_identity = self.last_render_theme_identity
         self.present_pixels_cache_stores = self.present_pixels_cache_stores + 1
         return self.present_pixels_cache
 
