@@ -23,12 +23,14 @@
 #  include <sys/auxv.h>
 #endif
 
-#if defined(__x86_64__) || defined(_M_X64)
-#  include <immintrin.h>
-#endif
-
 #if !defined(_WIN32)
 #  include <dlfcn.h>
+#endif
+
+#if !defined(SIMPLE_RUNTIME_OPENCL_ONLY)
+
+#if defined(__x86_64__) || defined(_M_X64)
+#  include <immintrin.h>
 #endif
 
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
@@ -93,6 +95,8 @@ bool rt_simd_has_rvv(void) {
     return false;
 #endif
 }
+
+#endif
 
 typedef intptr_t rt_opencl_context_property;
 typedef uint64_t rt_opencl_device_type;
@@ -573,6 +577,8 @@ bool rt_opencl_release_context(int64_t context) {
     free(wrapped_context);
     return status == RT_OPENCL_SUCCESS;
 }
+
+#if !defined(SIMPLE_RUNTIME_OPENCL_ONLY)
 
 static int engine2d_span_bounds(SplArray* array, int64_t offset, int64_t count,
                                 int64_t* out_offset, int64_t* out_count) {
@@ -1201,3 +1207,5 @@ void simd_crypto_init(void) {
        separate TUs (runtime_simd_aesni.c, runtime_simd_shani.c, etc.)
        and wired in here when available. */
 }
+
+#endif

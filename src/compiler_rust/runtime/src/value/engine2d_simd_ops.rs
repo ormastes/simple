@@ -49,6 +49,17 @@ pub fn engine2d_simd_row_reset() {
     SIMD_ROW_HITS.store(0, Ordering::Relaxed);
 }
 
+#[no_mangle]
+pub extern "C" fn rt_simd_engine2d_neon_hits() -> i64 {
+    engine2d_simd_row_hits() as i64
+}
+
+#[no_mangle]
+pub extern "C" fn rt_simd_engine2d_neon_reset() -> i64 {
+    engine2d_simd_row_reset();
+    0
+}
+
 fn pixel_array(values: &[u32]) -> RuntimeValue {
     let array = collections::rt_array_new_with_cap(values.len() as i64);
     for &value in values {
@@ -378,6 +389,14 @@ mod tests {
             let blended = rt_engine2d_simd_blend_row_u32(pixel_array(&dst_values), pixel_array(&src_values));
             assert_eq!(pixel_vec(blended), src_values, "count={count}");
         }
+    }
+
+    #[test]
+    fn native_hit_counter_abi_uses_shared_state() {
+        assert_eq!(rt_simd_engine2d_neon_reset(), 0);
+        assert_eq!(rt_simd_engine2d_neon_hits(), 0);
+        record_simd_row_hit();
+        assert_eq!(rt_simd_engine2d_neon_hits(), 1);
     }
 
     #[cfg(target_arch = "aarch64")]

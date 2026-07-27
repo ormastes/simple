@@ -2,9 +2,8 @@
 
 ## Status
 
-Open, with the mmap SIGSEGV resolved. The native writable-map path is proven,
-but deterministic HELLO/request completion still needs a separately bounded
-wait repair.
+Resolved on Linux. The writable-map path, separately bounded HELLO/request
+waits, and exact CUDA submit-fallback receipt are proven natively.
 
 ## Evidence
 
@@ -13,12 +12,21 @@ wait repair.
 - Compiler:
   `build/gpu-goal/source-matched/simple`
   (`sha256=21fa592e16191e2b741176d1391d6e7c8e0fb2f38956537016ff62b2904ef348`).
+- Source-matched daemon candidate: `1 compiled, 212 cached, 0 failed`.
+- Final source-matched probe candidate: `1 compiled, 18 cached, 0 failed`
+  after the initial request-wait build compiled `5` and reused `14`.
+- The complete-provider runtime archive exports 20 OpenCL ABI symbols and both
+  shared SIMD hit-counter symbols.
+- Final threshold-`0` receipt:
+  `hello_completed=true hello_status=1 hello_mask=8
+  receipt_completed=true receipt_status=4 reason=16 source=2 handle=0
+  identity=0 bytes=32 checksum=135272480 backend=4`.
 - Interpreter execution remains inapplicable: `unknown extern function:
   rt_mmap`.
 - The old runtime lacked `rt_is_interpreter_runtime`; its probes exited `139`.
 - The incrementally rebuilt runtime archive exports the symbol and has SHA-256
   `2e760130f98d14e7498c29903f9bd2605d55e0e3d7d9224282c1661c107ff704`.
-- Current cycle 3 receipt:
+- Historical cycle 3 receipt before the repair:
   `hello_completed=true hello_status=1 hello_mask=8
   receipt_completed=false receipt_status=3 reason=3`.
 - Cycle 3 used a 35-second daemon guard with a 60-second probe guard. The
@@ -26,7 +34,7 @@ wait repair.
   the live row was not rerun after reaching the three-cycle session cap.
 - A fresh focused run confirmed the retained request loop exhausts
   `50000000` polls in about one second, before CUDA setup/fallback completion.
-- A shared-loop repair used the existing monotonic clock to preserve the poll
+- An earlier shared-loop repair used the existing monotonic clock to preserve the poll
   floor while enforcing the same numeric microsecond budget. It compiled
   incrementally, but both the compiler runtime overlay and the current
   Vulkan/CUDA runtime link produced a probe that SIGSEGVs in
@@ -39,7 +47,7 @@ wait repair.
   `probe-build-shell-owned.log`, `daemon-live.log`, and
   `wrapper-current-runtime-cycle3.log`.
 
-No compiler bootstrap was run. One essential incremental runtime-only Cargo
+No compiler bootstrap was run. The essential incremental runtime-only Cargo
 build used the repository's `bootstrap` optimization profile.
 
 ## Mmap Resolution
@@ -69,10 +77,9 @@ The broad QEMU source contract remains independently red at 6/12 due stale
 assertions outside this mmap/fallback lane; it is not evidence against the
 focused writable-mmap PASS above.
 
-## Resume
+## Remaining Platform Evidence
 
-In a fresh bounded session, give HELLO and request publication separate
-measured wall-time budgets with hard poll ceilings, then run the daemon-wire
-gate once. Do not reintroduce a 50-second synchronous compositor wait.
+Prepared-host Metal/Vulkan failure rows remain separate macOS tasks. Do not
+reintroduce a synchronous compositor wait derived from poll count.
 
 Owner: Linux GPU host operator. Final reviewer: high-capability model.

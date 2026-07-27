@@ -4,9 +4,8 @@
 
 Resolved for policy admission and calibrated small-batch bypass. Linux CUDA
 measurement now drives a default `1,048,576`-element threshold; CPU fallback
-requests below it publish reason `18` before device execution. Exact native
-threshold-`0` fallback completion remains part of the separate request-wait
-tracker.
+requests below it publish reason `18` before device execution. Native
+threshold-`0` CUDA submit fallback now completes with reason `16`.
 
 ## Evidence
 
@@ -30,23 +29,22 @@ tracker.
 - Policy source contract passes 8/8.
 - Native 8-element calibrated request passes with fallback status `4`, reason
   `18`, CPU source `2`, zero handle/identity, 32 bytes, and exact checksum.
-- Threshold `0` does not return reason `18`; HELLO succeeds, but the request
-  times out before retained evidence can identify the admitted backend.
+- Threshold `0` enters CUDA and completes the injected-submit fallback with
+  reason `16`, CPU source `2`, zero handle/identity, and the exact checksum.
 - Build logs:
   `build/simpleos_gpu_host/offload_policy/native-build.out` and
   `native-build-cycle2.out`.
 
 No bootstrap was run. The policy source, protocol reason, tests, and manuals
 retain only the verified small-request bypass claim. Three focused native
-build/run cycles are exhausted. The post-review incremental rebuild stopped in
-the existing runtime closure at unknown extern `rt_transient_array_scope_begin`;
-it did not produce additional policy evidence.
+build/run cycles are exhausted. A source-matched pure-Simple compiler plus the
+complete-provider runtime archive subsequently rebuilt and verified the current
+daemon without bootstrap.
 
 ## Remaining Gate
 
-After the shared HELLO/request wait is repaired in a fresh bounded session, run
-the threshold-`0` injected-submit row and a batch at or above `1,048,576` to
-retain an exact device-path receipt. Strict fallback `none` remains covered by
-the executable source contract until then.
+Run a batch at or above `1,048,576` without fault injection to retain an exact
+successful device-path receipt. Strict fallback `none` remains covered by the
+executable source contract until then.
 
 Owner: Linux GPU host operator. Final reviewer: high-capability model.

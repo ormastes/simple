@@ -14,9 +14,11 @@ use common.gpu.simpleos_host_gpu_draw_ir.{
 }
 use common.ui.draw_ir.{DrawIrComposition}
 use os.kernel.boot.mmio_hardware.{mmio_read64, mmio_write64, mmio_write8, mmio_memory_barrier}
-use os.kernel.boot.monotonic_hardware.{boot_monotonic_now_us}
+use os.kernel.boot.monotonic_hardware.{boot_monotonic_deadline_us, boot_monotonic_now_us}
 
 val HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS: i64 = 50000000
+val HOST_GPU_IVSHMEM_MAX_TIMEOUT_POLLS: i64 = 250000000
+val HOST_GPU_IVSHMEM_REQUEST_BUDGET_US: i64 = 5000000
 val _HOST_GPU_IVSHMEM_MAX_GENERATION: i64 = 9223372036854775807
 
 struct HostGpuIvshmemReceipt:
@@ -120,6 +122,14 @@ fn _host_gpu_write_bytes_at(base: u64, wire_offset: i64, bytes: [u8]):
         i = i + 1
 
 fn _host_gpu_publish_payload(base: u64, generation: i64, completion: i64, run_id_hash: i64, frame_id: i64, kind: i64, backend_code: i64, width: i64, height: i64, element_count: i64, payload_bytes: i64, checksum: i64, image_resource_count: i64, image_resource_bytes: i64, image_resource_checksum: i64, timeout_polls: i64) -> HostGpuIvshmemReceipt:
+    val started_now = boot_monotonic_now_us()
+    val deadline_us = boot_monotonic_deadline_us(started_now, HOST_GPU_IVSHMEM_REQUEST_BUDGET_US)
+    if timeout_polls <= 0 or deadline_us <= 0:
+        return _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_FAIL, SIMPLEOS_HOST_GPU_REASON_TIMEOUT, generation)
+    val bounded_timeout_polls = if timeout_polls < HOST_GPU_IVSHMEM_MAX_TIMEOUT_POLLS:
+        timeout_polls
+    else:
+        HOST_GPU_IVSHMEM_MAX_TIMEOUT_POLLS
     _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_MAGIC, SIMPLEOS_HOST_GPU_PROTOCOL_MAGIC)
     _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_VERSION, SIMPLEOS_HOST_GPU_PROTOCOL_VERSION)
     _host_gpu_write(base, SIMPLEOS_HOST_GPU_WIRE_KIND, kind)
@@ -140,10 +150,12 @@ fn _host_gpu_publish_payload(base: u64, generation: i64, completion: i64, run_id
 
     var polls: i64 = 0
     var observed = completion
-    while polls < timeout_polls and observed < generation:
+    var now_us = started_now
+    while polls < bounded_timeout_polls and observed < generation and now_us > 0 and now_us <= deadline_us:
         polls = polls + 1
         observed = _host_gpu_read(base, SIMPLEOS_HOST_GPU_WIRE_COMPLETION_GENERATION)
-    if observed != generation:
+        now_us = boot_monotonic_now_us()
+    if observed != generation or now_us <= 0 or now_us > deadline_us:
         return _host_gpu_error_receipt(SIMPLEOS_HOST_GPU_STATUS_FAIL, if observed > generation: SIMPLEOS_HOST_GPU_REASON_STALE_GENERATION else: SIMPLEOS_HOST_GPU_REASON_TIMEOUT, generation)
     mmio_memory_barrier()
     val receipt = HostGpuIvshmemReceipt(
@@ -350,6 +362,6 @@ fn host_gpu_ivshmem_fill_u32(base: u64, generation: i64, run_id_hash: i64, frame
 
 export HostGpuIvshmemReceipt, HostGpuIvshmemHelloReceipt, HostGpuIvshmemDrawIrResult
 export host_gpu_ivshmem_device_receipt_valid, host_gpu_ivshmem_fallback_receipt_valid
-export HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS, host_gpu_ivshmem_next_generation
+export HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS, HOST_GPU_IVSHMEM_MAX_TIMEOUT_POLLS, HOST_GPU_IVSHMEM_REQUEST_BUDGET_US, host_gpu_ivshmem_next_generation
 export host_gpu_ivshmem_negotiate, host_gpu_ivshmem_submit, host_gpu_ivshmem_submit_draw_ir, host_gpu_ivshmem_fill_u32
 export host_gpu_ivshmem_submit_draw_ir_retained

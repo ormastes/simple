@@ -19,6 +19,7 @@ fn main() {
     println!("cargo:rerun-if-changed=../../runtime/runtime_value.h");
     println!("cargo:rerun-if-changed=../../runtime/runtime_db.c");
     println!("cargo:rerun-if-changed=../../runtime/runtime_memtrack.c");
+    println!("cargo:rerun-if-changed=../../runtime/runtime_simd_dispatch.c");
     println!("cargo:rerun-if-changed=../../runtime/hosted_win32.c");
     println!("cargo:rerun-if-changed=../../runtime/hosted_cocoa.c");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DRIVER_HOOKS");
@@ -129,6 +130,7 @@ fn compile_c_runtime_sources() {
         "runtime_hosted_fs.c",
         "runtime_font.c",
         "runtime_memtrack.c",
+        "runtime_simd_dispatch.c",
     ];
     if target_os != "windows" && !native_all_provider {
         c_sources.push("hosted_win32.c");
@@ -136,6 +138,7 @@ fn compile_c_runtime_sources() {
 
     let mut build = cc::Build::new();
     build.opt_level(2).warnings(false).cargo_metadata(false);
+    build.define("SIMPLE_RUNTIME_OPENCL_ONLY", None);
     if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() != "msvc" {
         build.flag_if_supported("-std=gnu11");
     }
@@ -245,6 +248,7 @@ fn collect_c_runtime_exports(
         "runtime_hosted_fs.c",
         "runtime_font.c",
         "runtime_memtrack.c",
+        "runtime_simd_dispatch.c",
         "hosted_win32.c",
     ];
     for source in LINKED_C_SOURCES {
@@ -255,7 +259,17 @@ fn collect_c_runtime_exports(
         let Ok(file) = fs::read_to_string(path) else {
             continue;
         };
-        collect_c_file_exports(&file, exported);
+        if *source == "runtime_simd_dispatch.c" {
+            let mut dispatch_exports = HashSet::new();
+            collect_c_file_exports(&file, &mut dispatch_exports);
+            exported.extend(
+                dispatch_exports
+                    .into_iter()
+                    .filter(|symbol| symbol.starts_with("rt_opencl_")),
+            );
+        } else {
+            collect_c_file_exports(&file, exported);
+        }
     }
 }
 

@@ -170,13 +170,13 @@ The policy implementation and guest validator are covered by
 `processing_cpu_fallback_policy_contract_spec.spl` and
 `host_gpu_ivshmem_fallback_receipt_spec.spl`. The native daemon-wire harness is
 implemented by `processing_cpu_fallback_daemon_wire_spec.spl` and
-`simpleos_gpu_fallback_wire_probe.spl`. Writable mmap ABI normalization and the
-native mmap smoke pass incrementally. Two uncommitted request-wait variants
-published the exact Linux CUDA fallback receipt, but the final bounded cycle
-exhausted HELLO before admission and the wait edits were withdrawn. The exact
-remaining evidence gaps are:
+`simpleos_gpu_fallback_wire_probe.spl`. Writable mmap ABI normalization, the
+native mmap smoke, and separately bounded HELLO/request waits pass
+incrementally. The Linux CUDA submit-injection row publishes exact fallback
+reason `16`, CPU source `2`, zero handle/identity, 32 bytes, and checksum
+`135272480`. The remaining evidence gaps are:
 
-1. Implement separately measured, hard-bounded HELLO/request waits and rerun
-   the Linux daemon-wire gate in a fresh bounded session.
+1. Run the Linux Vulkan live injection rows through the same retained native
+   transport.
 2. Run Metal live rows only on prepared macOS. Linux may run the validator and
    synthetic receipt cases, but cannot close Metal runtime evidence.

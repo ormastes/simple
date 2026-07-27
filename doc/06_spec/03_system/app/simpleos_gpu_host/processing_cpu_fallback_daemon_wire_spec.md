@@ -32,12 +32,19 @@ sh scripts/check/check-simpleos-gpu-fallback-wire.shs
 7. `SIMPLEOS_GPU_FALLBACK_WIRE_MIN_OFFLOAD_ELEMENTS` and
    `SIMPLEOS_GPU_FALLBACK_WIRE_EXPECT_REASON` reuse the same wire harness for
    reason `16` failure injection and reason `18` calibrated policy evidence.
+8. The Linux GPU runtime retains the canonical OpenCL provider and shared SIMD
+   hit counters through the supported runtime symbol table.
+9. HELLO and request publication use separate monotonic budgets. Production
+   rendering keeps the 50-million-poll default; diagnostics may request the
+   250-million-poll absolute cap, while every request also has a five-second
+   deadline.
 
 ## Current Evidence
 
-Linux host-independent source contract passes 2/2, fallback receipt validation
-passes 13/13, and the incrementally rebuilt native mmap smoke writes and reads
-the exact protocol word. Two intermediate uncommitted wait variants completed
-the expected daemon-wire fallback receipt, but the final bounded cycle exhausted
-HELLO before admission. Those wait edits were withdrawn; deterministic native
-daemon-wire completion remains open.
+The four-example source contract is retained but was not executed because the
+available staged pure-Simple compiler has no `test` command. Fallback receipt
+validation previously passed 13/13. The source-matched daemon (`1 compiled, 212 cached`)
+and final probe (`1 compiled, 18 cached`) complete both native rows: calibrated
+small-request reason `18`, and threshold-`0` CUDA submit-failure reason `16`.
+Both receipts have CPU source `2`, zero handle/identity, 32 bytes, and checksum
+`135272480`.
