@@ -320,6 +320,7 @@ class Engine2D with DrawIrRenderTarget:
             software.buf = fallback_pixels
         self.capability = software.capability()
         self.backend = software
+        self.software_backend = Some(software)
         self.selected_backend_name = "vulkan-poisoned-software"
         self.vulkan_font_state_unknown = true
 
@@ -372,7 +373,7 @@ class Engine2D with DrawIrRenderTarget:
                 var sw = SoftwareBackend.create()
                 sw.init(width, height)
                 val capability = sw.capability()
-                Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
+                Engine2D(backend: sw, capability: capability, software_backend: Some(sw), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software")
 
     static fn create_with_backend_fast(width: i32, height: i32, backend_name: text) -> Engine2D:
         """Create an engine in native-only ("no mirror") fast mode.
@@ -614,7 +615,7 @@ class Engine2D with DrawIrRenderTarget:
             var sw = SoftwareBackend.create()
             if sw.init(width, height):
                 val capability = sw.capability()
-                return Ok(Engine2D(backend: sw, capability: capability, baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software"))
+                return Ok(Engine2D(backend: sw, capability: capability, software_backend: Some(sw), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "software"))
 
         # Note: "baremetal" is NOT auto-detected. It requires a pre-initialized
         # FramebufferDriver and must be created via create_with_baremetal_backend().
@@ -2279,13 +2280,44 @@ class Engine2D with DrawIrRenderTarget:
     me shutdown():
         """Shut down the backend and release all resources."""
         self.unload_font()
-        if self.vulkan_font_state_unknown:
+        if self.selected_backend_name == "vulkan-poisoned-software":
             if val Some(vulkan) = self.vulkan_backend:
                 vulkan.shutdown()
                 if vulkan.completion_unknown:
                     self.vulkan_backend = Some(vulkan)
                 else:
                     self.vulkan_backend = nil
+            if val Some(software) = self.software_backend:
+                software.shutdown()
+            return
+        if self.selected_backend_name == "vulkan":
+            if val Some(vulkan) = self.vulkan_backend:
+                vulkan.shutdown()
+                if vulkan.completion_unknown:
+                    self.vulkan_backend = Some(vulkan)
+                else:
+                    self.vulkan_backend = nil
+                return
+        if self.selected_backend_name == "cuda":
+            if val Some(cuda) = self.cuda_backend:
+                cuda.shutdown()
+                return
+        if self.selected_backend_name == "metal":
+            if val Some(metal) = self.metal_backend:
+                metal.shutdown()
+                return
+        if self.selected_backend_name == "opencl":
+            if val Some(opencl) = self.opencl_backend:
+                opencl.shutdown()
+                return
+        if self.selected_backend_name == "rocm":
+            if val Some(rocm) = self.rocm_backend:
+                rocm.shutdown()
+                return
+        if self.selected_backend_name == "software":
+            if val Some(software) = self.software_backend:
+                software.shutdown()
+                return
         if val Some(vg) = self.virtio_gpu_backend:
             vg.shutdown()
         elif val Some(bm) = self.baremetal_backend:

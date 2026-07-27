@@ -85,8 +85,12 @@ reason, device readback, positive handle/identity, exact correlation, and
 `4,194,304` bytes, but the output value is 8x the payload. Retained-cache
 rebuilds using `words[5] as u32` (`3 compiled, 214 cached`) and an ABI-exact
 `raw_read_i32` payload read (`2 compiled, 215 cached`) both preserved that
-result. An entry-only refresh (`1 compiled, 216 cached`) still stopped at
-request 1, but the wrapper removed the final receipt before its failed field
-could be inspected. The probe now prints every decisive last-receipt field on
-failure; that diagnostic source is not yet rebuilt. Therefore no exact daemon
-device receipt or warm median is claimed.
+result. The rebuilt diagnostic probe proves the receipt itself is valid and
+only checksum/output parity fail. A fresh 217-module daemon then exposed a
+trait-erased `Engine2D.shutdown()` crash during HELLO; concrete retained-backend
+shutdown rebuilt at `2 compiled, 215 cached` and restored the valid CUDA
+receipt. Fresh-cache disassembly shows tagged `[u32]` slots being loaded as
+unboxed values in the old per-pixel wire loop. Source now uses one
+runtime-owned bulk copy+checksum call, whose focused Rust unit passes. The
+updated runtime archive and daemon are not rebuilt after the three-cycle cap,
+so no exact daemon device receipt or warm median is claimed.

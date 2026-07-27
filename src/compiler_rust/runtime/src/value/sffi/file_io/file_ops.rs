@@ -1048,6 +1048,26 @@ pub unsafe extern "C" fn rt_write_u32s_to_raw(ptr: i64, values: RuntimeValue) ->
     len
 }
 
+/// Copy the first `count` u32 values and return their wire checksum.
+#[no_mangle]
+pub unsafe extern "C" fn rt_write_u32s_to_raw_checksum(ptr: i64, values: RuntimeValue, count: i64) -> i64 {
+    if ptr == 0 || count < 0 || count > rt_array_len(values) {
+        return 0;
+    }
+    let dst = ptr as usize as *mut u32;
+    let mut checksum = 0i64;
+    for index in 0..count {
+        let value = rt_array_get(values, index).as_int() as u32;
+        dst.add(index as usize).write(value);
+        checksum = (checksum + i64::from(value & 0x7fff_ffff)) % 2_147_483_647;
+    }
+    if checksum == 0 {
+        1
+    } else {
+        checksum
+    }
+}
+
 /// Convert a text RuntimeValue to a byte array ([u8]).
 #[no_mangle]
 pub extern "C" fn rt_text_to_bytes(text: RuntimeValue) -> RuntimeValue {
@@ -1675,6 +1695,25 @@ sandbox_lowering:
         for (index, expected) in input.iter().enumerate() {
             assert_eq!(rt_array_get(values, index as i64).as_int() as u32, *expected);
         }
+    }
+
+    #[test]
+    fn test_write_u32s_to_raw_checksum_is_bit_exact_and_count_bounded() {
+        let values = rt_array_new(4);
+        for value in [0x0102_0304, 0x8000_0000, 0xffff_ffff, 7] {
+            rt_array_push(values, RuntimeValue::from_int(value));
+        }
+        let mut output = [0u32; 4];
+
+        let checksum = unsafe { rt_write_u32s_to_raw_checksum(output.as_mut_ptr() as i64, values, 3) };
+
+        assert_eq!(output, [0x0102_0304, 0x8000_0000, 0xffff_ffff, 0]);
+        assert_eq!(checksum, 16_909_060);
+        assert_eq!(unsafe { rt_write_u32s_to_raw_checksum(0, values, 3) }, 0);
+        assert_eq!(
+            unsafe { rt_write_u32s_to_raw_checksum(output.as_mut_ptr() as i64, values, 5) },
+            0
+        );
     }
 
     #[test]

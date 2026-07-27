@@ -96,9 +96,28 @@ contains older flattened entry-module copies, consistent with TODO 562's
 missing transitive dependency hashes. A one-module entry refresh (`1 compiled,
 216 cached`) still stopped at request 1, but the wrapper deleted that final
 receipt. The probe now reports status, reason, source, checksum, bytes, timing,
-first output word, receipt validity, and output parity on failure. That source
-is unbuilt after the third cycle, so no exact device-wire receipt or warm timing
-is claimed.
+first output word, receipt validity, and output parity on failure.
+
+The rebuilt diagnostic probe proved the sole failure was parity:
+`last_receipt_valid=true`, status `1`, reason `0`, source `1`, positive
+handle/identity, checksum `33620483`, and first word `135272480`. A clean
+217-module isolated-cache daemon then crashed during HELLO. Its captured
+addresses map through `Engine2D.shutdown()` into
+`SimpleOsGpuHostAllPlatform.shutdown()` and CUDA teardown, proving trait-vtable
+misdispatch. Engine2D now shuts retained CUDA, Vulkan, Metal, OpenCL, ROCm, and
+software backends through concrete fields before its trait fallback. The
+strict rebuild (`2 compiled, 215 cached`) restores a valid correlated CUDA
+receipt.
+
+That fresh receipt remains 8x, ruling out stale cache as the value cause.
+Disassembly shows `rt_u32s_from_raw` stores tagged `RuntimeValue::from_int`
+elements while the native readback/checksum loop loads each slot as an unboxed
+u32. Source now replaces the million-iteration Simple copy/checksum loop with
+`rt_write_u32s_to_raw_checksum`, which decodes each runtime element once,
+writes exact raw u32 words, and computes the protocol checksum in the same
+pass. Its focused Rust test passes bit-exact, count-bounded, null, and
+out-of-range cases. Runtime archive and daemon live proof remain unbuilt after
+the third cycle, so no exact device-wire receipt or warm timing is claimed.
 
 ## Remaining Gate
 
@@ -110,10 +129,9 @@ lower-level CUDA round-trip threshold by itself. Resume with one strict
 incremental daemon build from the retained cache, verify its `string_core`
 object has no self-relocations or `jmp`-to-self primitive bodies, then run the
 documented device-warm wrapper command with explicit daemon/probe paths. The
-next bounded session must first build the diagnostic probe, then either repair
-TODO 562's transitive object-cache invalidation or use one isolated fresh
-daemon cache to distinguish stale flattened code from a remaining ABI defect.
-Retain the ABI-exact `raw_read_i32` payload boundary and platform-owned render
-probe.
+next bounded session must rebuild the specialized runtime archive with
+`rt_write_u32s_to_raw_checksum`, incrementally relink the isolated daemon, and
+run the exact eight-request gate. Retain the ABI-exact `raw_read_i32` payload
+boundary, concrete Engine2D lifecycle dispatch, and platform-owned render probe.
 
 Owner: Linux GPU host operator. Final reviewer: high-capability model.
