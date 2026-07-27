@@ -982,3 +982,17 @@ implementation in progress / target evidence blocked
   allocation and lowering. Focused session-path counter coverage and its
   manual were updated; no runtime/performance PASS is claimed because the
   compiler retry cap remains exhausted.
+- Production subprocess animation evidence now starts the exact native
+  `HOSTED_WM_ARTIFACT`, renders an initial CSS/Script/JavaScript frame, advances
+  the renderer clock, and compares both Engine2D pixel buffers through one
+  persistent raster backend. It was not executed because the compiler retry
+  cap remains exhausted.
+- Platform-sandbox evidence now requires the same exact hosted-entry artifact,
+  completes the renderer ready/frame protocol, and closes fail-closed. It was
+  not executed because the compiler retry cap remains exhausted.
+- Both subprocess scenarios verify the artifact against the SHA-256 admitted
+  by the existing hosted live-window evidence wrapper before launch, and the
+  animation timeout closes both the renderer and persistent raster backend.
+- TLS certificate identity remains blocked by the absence of a fixture-CA and
+  loopback seam in the production broker. GC/RSS/soak budgets remain explicit
+  failures; unchanged-frame counters alone are not production budget evidence.

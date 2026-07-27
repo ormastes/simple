@@ -9,6 +9,64 @@ through structured UI access. Helpers fail closed until production evidence
 exists.
 """
 use std.spec.*
+use std.env.variables.{env_get}
+use std.io_runtime.{file_hash_sha256}
+use app.io.mod.{thread_sleep_ms}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.hosted.hosted_browser_renderer_process.{
+    HostedBrowserRendererProcess, HostedBrowserRendererResult
+}
+
+val SUBPROCESS_ANIMATION_HTML = (
+    "<style>@keyframes Pulse{from{background-color:#ef4444}" +
+    "to{background-color:#2563eb}}#stage{width:32px;height:24px;" +
+    "animation:Pulse 16ms linear forwards}</style>" +
+    "<script type='text/simple'>title \"SimpleReady\"\n" +
+    "body_html '<div id=\"stage\"></div>'</script>" +
+    "<script>requestAnimationFrame(function(){" +
+    "var stage=document.getElementById('stage');" +
+    "stage.style.backgroundColor='#2563eb';" +
+    "document.title='Animated';});</script>"
+)
+
+fn _count_color(pixels: [u32], color: u32) -> i64:
+    var count: i64 = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
+
+fn _pixels_equal(left: [u32], right: [u32]) -> bool:
+    if left.len() != right.len():
+        return false
+    var index: i64 = 0
+    while index < left.len():
+        if left[index] != right[index]:
+            return false
+        index = index + 1
+    true
+
+fn _await_browser_animation(
+    renderer: HostedBrowserRendererProcess
+) -> HostedBrowserRendererResult?:
+    var attempts: i64 = 0
+    while attempts < 250:
+        match renderer.poll():
+            Some(frame):
+                return Some(frame)
+            nil:
+                thread_sleep_ms(1)
+        attempts = attempts + 1
+    nil
+
+fn _close_browser_animation_evidence(
+    renderer: HostedBrowserRendererProcess,
+    raster: Engine2dCompositorBackend
+):
+    val closed = renderer.close()
+    raster.shutdown()
+    if not closed:
+        fail("browser renderer cleanup failed")
 
 # @inline
 fn _production_browser_fixture():
@@ -57,7 +115,66 @@ describe "Production Simple browser user flow":
         _production_browser_fixture()
         _advance_browser_clock()
         _check_canonical_draw_ir()
-        _require_production_browser_evidence()
+        val artifact = env_get("HOSTED_WM_ARTIFACT")
+        val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+        if artifact == "":
+            fail("HOSTED_WM_ARTIFACT must name the hosted_entry native binary")
+        if expected_artifact_sha.len() != 64 or
+            file_hash_sha256(artifact) != expected_artifact_sha:
+            fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+        var renderer = HostedBrowserRendererProcess.create(1, 64, 48)
+        val raster = Engine2dCompositorBackend.create_named(
+            64, 48, "software"
+        )
+        val started = renderer.start(artifact, 2000)
+        if not started.ok:
+            raster.shutdown()
+            fail("browser renderer launch failed: {started.reason}")
+        val initial = renderer.render(
+            "init", SUBPROCESS_ANIMATION_HTML, 2000
+        )
+        if not initial.ok:
+            _close_browser_animation_evidence(renderer, raster)
+            fail("browser renderer initial frame failed: {initial.reason}")
+        val first = raster.render_draw_ir_composition(
+            initial.composition, []
+        )
+        match renderer.begin_advance(16, 2000):
+            Err(reason):
+                _close_browser_animation_evidence(renderer, raster)
+                fail("browser renderer animation start failed: {reason}")
+            Ok(started_advance):
+                if not started_advance:
+                    _close_browser_animation_evidence(renderer, raster)
+                    fail("browser renderer animation did not start")
+        val advanced = match _await_browser_animation(renderer):
+            Some(frame):
+                frame
+            nil:
+                _close_browser_animation_evidence(renderer, raster)
+                fail("browser renderer animation poll exhausted")
+        if not advanced.ok:
+            _close_browser_animation_evidence(renderer, raster)
+            fail("browser renderer animation frame failed: {advanced.reason}")
+        val second = raster.render_draw_ir_composition(
+            advanced.composition, []
+        )
+        val initial_red = _count_color(first.pixels, 0xFFEF4444u32)
+        val advanced_blue = _count_color(second.pixels, 0xFF2563EBu32)
+        val changed = not _pixels_equal(first.pixels, second.pixels)
+        _close_browser_animation_evidence(renderer, raster)
+        expect(initial.composition.batches.len()).to_be_greater_than(0)
+        expect(
+            initial.composition.batches[0].commands.len()
+        ).to_be_greater_than(0)
+        expect(first.rendered_command_count).to_be_greater_than(0)
+        expect(first.pixels.len()).to_equal(64 * 48)
+        expect(initial_red).to_be_greater_than(0)
+        expect(second.rendered_command_count).to_be_greater_than(0)
+        expect(second.pixels.len()).to_equal(64 * 48)
+        expect(advanced_blue).to_be_greater_than(0)
+        expect(changed).to_equal(true)
+        expect(advanced.next_animation_ms).to_equal(-1)
 
     # @manual: show
     # @capture(text)

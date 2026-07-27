@@ -8,6 +8,9 @@ hostile. Proves HTTPS, origin/storage policy, bounded IPC, and an OS-sandboxed
 renderer without ambient host capabilities.
 """
 use std.spec.*
+use std.env.variables.{env_get}
+use std.io_runtime.{file_hash_sha256}
+use os.hosted.hosted_browser_renderer_process.{HostedBrowserRendererProcess}
 
 # @inline
 fn _two_origin_https_fixture():
@@ -24,6 +27,37 @@ fn _check_security_denial():
 # @inline
 fn _platform_evidence_row():
     step("Bind platform sandbox evidence to the production renderer binary")
+
+fn _require_platform_renderer_sandbox_evidence():
+    val artifact = env_get("HOSTED_WM_ARTIFACT")
+    val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
+    if artifact == "":
+        fail("HOSTED_WM_ARTIFACT is required for platform renderer sandbox evidence")
+    if expected_artifact_sha.len() != 64 or
+        file_hash_sha256(artifact) != expected_artifact_sha:
+        fail("HOSTED_WM_ARTIFACT does not match its admitted SHA-256")
+
+    var renderer = HostedBrowserRendererProcess.create(41, 64, 48)
+    val started = renderer.start(artifact, 2000)
+    if not started.ok:
+        fail("production renderer sandbox start failed: {started.reason}")
+    expect(started.ok).to_be(true)
+    expect(started.reason).to_equal("ok")
+
+    val frame = renderer.render(
+        "init",
+        "<div style='width:16px;height:16px;background:#224466'>sandbox</div>",
+        2000
+    )
+    if not frame.ok:
+        fail("production renderer sandbox protocol failed: {frame.reason}")
+    val closed = renderer.close()
+    if not closed:
+        fail("production renderer sandbox close failed")
+    expect(frame.ok).to_be(true)
+    expect(frame.reason).to_equal("ok")
+    expect(frame.composition.batches.len()).to_be_greater_than(0)
+    expect(closed).to_be(true)
 
 fn _require_production_security_evidence():
     fail("REQ-WEB-BROWSER-010..019: production security evidence not implemented")
@@ -72,7 +106,7 @@ describe "Production Simple browser security envelope":
     it "should run the site renderer in the required platform sandbox":
         _platform_evidence_row()
         _check_security_denial()
-        _require_production_security_evidence()
+        _require_platform_renderer_sandbox_evidence()
 
     # @manual: folded
     it "should reject malformed late duplicate and oversized renderer messages":

@@ -109,6 +109,11 @@ structured interaction are not production browser evidence.
 
 ## Evidence paths
 
+- Renderer-process scenarios require `HOSTED_WM_ARTIFACT` and its admitted
+  `HOSTED_WM_ARTIFACT_SHA256` from
+  `scripts/check/check-linux-hosted-wm-live-window-evidence.shs`. The spec
+  hashes the exact native `src/os/hosted/hosted_entry.spl` artifact before
+  launch; it does not accept `bin/simple` or silently substitute a worker.
 - text/HTML/protocol/exec/log/artifact:
   `build/test-artifacts/<spec-relative-path>/`
 - GUI images:
