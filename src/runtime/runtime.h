@@ -562,6 +562,7 @@ int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
 bool        rt_process_write_stdin(int64_t pid, const char* data);
 const char* rt_process_read_stdout(int64_t pid);
 bool        rt_process_is_alive(int64_t pid);
+bool        rt_process_close_piped(int64_t pid);
 int64_t     rt_editor_spawn_simple_dap(void);
 bool        rt_editor_start_simple_dap(int64_t pid);
 bool        rt_editor_poll_simple_dap_stopped(int64_t pid);

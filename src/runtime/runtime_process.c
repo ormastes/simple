@@ -526,6 +526,10 @@ bool rt_process_is_alive(int64_t pid) {
     (void)pid;
     return false;
 }
+bool rt_process_close_piped(int64_t pid) {
+    (void)pid;
+    return false;
+}
 
 #else /* POSIX */
 
@@ -537,6 +541,10 @@ bool rt_process_is_alive(int64_t pid) {
 #include <fcntl.h>
 #include <errno.h>
 #include <pthread.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#endif
 
 /* ===== Process table ===== */
 
@@ -616,6 +624,32 @@ static bool proc_write_all_no_sigpipe(int fd, const char* data, size_t len) {
     return offset == len;
 }
 
+static bool proc_pipe_cloexec(int fds[2]) {
+    if (pipe(fds) != 0) return false;
+    int first_flags = fcntl(fds[0], F_GETFD);
+    int second_flags = fcntl(fds[1], F_GETFD);
+    if (first_flags < 0 || second_flags < 0 ||
+        fcntl(fds[0], F_SETFD, first_flags | FD_CLOEXEC) != 0 ||
+        fcntl(fds[1], F_SETFD, second_flags | FD_CLOEXEC) != 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return false;
+    }
+    return true;
+}
+
+static void proc_close_inherited_fds(void) {
+#if defined(__linux__) && defined(SYS_close_range)
+    if (syscall(SYS_close_range, 3U, ~0U, 0U) == 0) return;
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+    closefrom(3);
+    return;
+#endif
+    long max_fd = sysconf(_SC_OPEN_MAX);
+    if (max_fd < 0 || max_fd > 1048576) max_fd = 1048576;
+    for (int fd = 3; fd < max_fd; fd++) close(fd);
+}
+
 /* ===== Public API ===== */
 
 static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv) {
@@ -629,8 +663,8 @@ static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv) {
     /* stdout_pipe[0] = parent reads, stdout_pipe[1] = child writes */
     int stdout_pipe[2];
 
-    if (pipe(stdin_pipe) < 0) return -1;
-    if (pipe(stdout_pipe) < 0) {
+    if (!proc_pipe_cloexec(stdin_pipe)) return -1;
+    if (!proc_pipe_cloexec(stdout_pipe)) {
         close(stdin_pipe[0]); close(stdin_pipe[1]);
         return -1;
     }
@@ -638,6 +672,7 @@ static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv) {
     fflush(stdout);
     fflush(stderr);
 
+    pid_t expected_parent = getpid();
     pid_t pid = fork();
     if (pid < 0) {
         close(stdin_pipe[0]); close(stdin_pipe[1]);
@@ -647,13 +682,21 @@ static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv) {
 
     if (pid == 0) {
         /* === CHILD === */
+        if (setpgid(0, 0) != 0) _exit(127);
+#ifdef __linux__
+        if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 ||
+            getppid() != expected_parent) {
+            _exit(127);
+        }
+#endif
         /* Wire pipes to stdio */
-        dup2(stdin_pipe[0],  STDIN_FILENO);
-        dup2(stdout_pipe[1], STDOUT_FILENO);
+        if (dup2(stdin_pipe[0], STDIN_FILENO) < 0 ||
+            dup2(stdout_pipe[1], STDOUT_FILENO) < 0) {
+            _exit(127);
+        }
 
         /* Close all parent-side fds */
-        close(stdin_pipe[0]); close(stdin_pipe[1]);
-        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        proc_close_inherited_fds();
 
         /* Reset signal handlers */
         signal(SIGINT,  SIG_DFL);
@@ -665,6 +708,13 @@ static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv) {
     }
 
     /* === PARENT === */
+    if (setpgid(pid, pid) != 0 && errno != EACCES && errno != ESRCH) {
+        kill(pid, SIGKILL);
+        while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
+        close(stdin_pipe[0]); close(stdin_pipe[1]);
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        return -1;
+    }
     /* Close child-side ends */
     close(stdin_pipe[0]);
     close(stdout_pipe[1]);
@@ -857,6 +907,46 @@ bool rt_process_is_alive(int64_t pid) {
     /* Process exited or error — clean up */
     proc_free(slot);
     return false;
+}
+
+bool rt_process_close_piped(int64_t pid) {
+    if (pid <= 0) return false;
+    struct RtProcSlot* slot = proc_find((pid_t)pid);
+    if (!slot) return false;
+
+    if (slot->stdin_fd >= 0) {
+        close(slot->stdin_fd);
+        slot->stdin_fd = -1;
+    }
+    if (kill(-slot->pid, SIGTERM) != 0 &&
+        errno != ESRCH &&
+        kill(slot->pid, SIGTERM) != 0 &&
+        errno != ESRCH) {
+        proc_free(slot);
+        return false;
+    }
+
+    int status = 0;
+    for (int waited_ms = 0; waited_ms < 100; waited_ms++) {
+        pid_t result = waitpid(slot->pid, &status, WNOHANG);
+        if (result == slot->pid || (result < 0 && errno == ECHILD)) {
+            proc_free(slot);
+            return true;
+        }
+        if (result < 0 && errno != EINTR) break;
+        usleep(1000);
+    }
+
+    (void)kill(-slot->pid, SIGKILL);
+    (void)kill(slot->pid, SIGKILL);
+    while (waitpid(slot->pid, &status, 0) < 0) {
+        if (errno == EINTR) continue;
+        if (errno == ECHILD) break;
+        proc_free(slot);
+        return false;
+    }
+    proc_free(slot);
+    return true;
 }
 
 #endif /* POSIX */
