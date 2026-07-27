@@ -30,7 +30,7 @@
 | ST-015 | NVMe admin runner covers bounded Identify/SMART, queue lifecycle, Number-of-Queues NSID/max, Abort result bits, CQ IEN/IV, SQ QPRIO, SMART NSID/RAE, AER, publication retry/latching, and unsupported format/firmware rejection. | H1 corrected host/ARM PASS |
 | ST-016 | FTL/NFC runners check PPA geometry, append-before-map ordering, dual checkpoints, replay validation, torn tails, retirement, reserve/GC, explicit media formats, journal reclamation, DMA isolation, tag validation, startup binding, and host/ARM composition. | H1 PASS |
 | ST-017 | Dispatcher runner proves one destructive FIFO fetch per entry, queue-zero admin routing, nonzero IO routing, reserved-field rejection, and completion retry/terminal blocking. | H1 host/ARM PASS before final compile-only cleanup |
-| ST-018 | A current pure-Simple runner executes the fourteen-scenario SSpec and generates its manual. | **Blocked:** no current runner; strict Stage 2/3 pass, but the final allowed Stage-4 attempt stops at `pptx_export.spl:515` on a bootstrap parser defect. |
+| ST-018 | A current pure-Simple runner executes the fourteen-scenario SSpec and generates its manual. | **Blocked:** no current runner; strict Stage 2/3 pass, but the bounded Stage-4 retry stops at `md_renderer.spl:233` on the mixed-ternary parser defect. |
 | ST-019 | Focused host composition injects corrected ECC, returns intact data, relocates and rereads the page, rejects a stale PPA, preserves L2P on injected copy failure, remounts/replays the destination, and passes strict ARM compile plus relocatable link. | H1 PASS |
 
 The host MMIO, ARM abort, and SMP/cache runners are executable H1 evidence. Static source
@@ -115,16 +115,15 @@ Detailed execution and evidence retention are in
 Scoped H0/H1 runners pass through persistent FTL/NFC composition, UART startup,
 dispatcher routing, ECC refresh relocation, and strict ARM linkage. External
 provenance in `ST-012` remains partial. `ST-018` is blocked because no current
-pure-Simple runner exists. Commit `a50016fa75e2` removes every executable
-labeled-tuple return found across owned source and passed frontier review. The
-strict one-worker full bootstrap rebuilt Rust authority and passed Stage 2/3
-sanity and provenance. Stage 2 was
-`5ede8b5598902007ef9d9916e3e8ab427beb6d1f4f319da0810a1a6fee49863a`;
+pure-Simple runner exists. Commit `69c7c0fb7b0a` includes the reviewed parser
+fixes. The strict one-worker full bootstrap rebuilt Rust authority and passed
+Stage 2/3 sanity, capability, and provenance. Stage 2 was
+`352fbc3e0792040eac66537dffe5ebf32c67020c3875285bfb87d58bb8201c0e`;
 Stage 3 was
-`b92db12414a1d7e433f5da580579ed3c59d5c4719db07f6f7e45403ccea0a0b0`.
-Stage 4 parsed through the prior Office blockers, then failed at
-`src/app/office/pptx_export.spl:515` when the bootstrap parser rejected
-`if ce < 0:`. The final allowed build cycle is consumed, so no fourth retry was
-run. Final SSpec/doc generation, installed Bootgen, and all `BT-*` evidence
-remain pending. Production is **BLOCKED/FAIL**;
+`a4981e84304111d6aa65140a6f59401ff2f9e652c3b12020f7a869cd9c54e42b`.
+Stage 4 cleared the prior Office and parser blockers, then failed at
+`src/std/editor/render/md_renderer.spl:233` on an
+`if ... then ... elif ... then ... else:` expression. The bounded retry is
+consumed. Final SSpec/doc generation, installed Bootgen, and all `BT-*`
+evidence remain pending. Production is **BLOCKED/FAIL**;
 REQ-012/NFR-011 remain excluded from passing executable `@req` declarations.

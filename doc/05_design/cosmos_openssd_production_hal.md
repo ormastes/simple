@@ -231,11 +231,12 @@ contract; physical-board abort behavior remains H2.
 Focused host/ARM ECC relocation, destination reread, stale-source rejection,
 failure preservation, remount/replay, and relocatable-link checks pass. Final
 SSpec/doc generation remains blocked. The strict one-worker build at
-`a50016fa75e2` passed Stage 2/3 sanity and provenance and parsed
-through the prior browser and Office tuple blockers. Stage 4 then stopped at
-`src/app/office/pptx_export.spl:515`, where the bootstrap parser rejected
-`if ce < 0:` in a nested `else` branch. The three-cycle guard prevents another
-retry in this session. Real Bootgen/board evidence remains pending.
+`69c7c0fb7b0a` passed Stage 2/3 sanity, capability, and provenance and parsed
+through the prior browser, Office tuple, `ce`, multiline inline-if, and
+comma-grouped match blockers. Stage 4 then stopped at
+`src/std/editor/render/md_renderer.spl:233`, where the bootstrap parser rejected
+an `if ... then ... elif ... then ... else:` expression. The bounded retry is
+consumed. Real Bootgen/board evidence remains pending.
 
 ## Error and Evidence Rules
 

@@ -153,11 +153,13 @@ realpath --version
 Use `bin/release/simple` rebuilt and deployed from the current tree. A stale
 release binary that links the obsolete two-argument `rt_env_set` ABI can crash
 before an SSpec runs and is not evidence. There is currently no accepted
-deployed runner. The strict one-worker bootstrap at `a50016fa75e2` passed
-Stage 2/3 sanity and provenance, then Stage 4 stopped at
-`src/app/office/pptx_export.spl:515` because the bootstrap parser rejected the
-valid nested condition `if ce < 0:`. Fix the tracked parser defect and complete
-a new full Stage-4 build before using `bin/release/simple`.
+deployed runner. The strict one-worker bootstrap at `69c7c0fb7b0a` passed
+Stage 2/3 sanity, capability, and provenance and cleared the prior Office and
+parser blockers. Stage 4 stopped later at
+`src/std/editor/render/md_renderer.spl:233` because the bootstrap parser rejects
+an `if ... then ... elif ... then ... else:` expression. Fix the tracked parser
+defect and complete a new full Stage-4 build before using
+`bin/release/simple`.
 
 ## Host Build and QEMU Gate
 
@@ -280,9 +282,9 @@ Do not represent these host/ARM results as physical persistence or board proof.
 Do not execute the fourteen-scenario SSpec with a stale binary. The source/manual
 now describe the current runners, but final execution and generated-manual
 evidence are blocked until a current pure-Simple `bin/release/simple` is
-available. The latest bootstrap consumed the third/final allowed cycle after
-proving Stage 2/3 sanity and provenance and exposing the Stage-4 parser defect
-at `pptx_export.spl:515`. Do not retry this session.
+available. The latest bounded bootstrap proved Stage 2/3 sanity, capability,
+and provenance, cleared the prior parser blockers, and exposed the next Stage-4
+parser defect at `md_renderer.spl:233`. Do not retry this session.
 
 Before production can move from **BLOCKED/FAIL**, complete:
 
