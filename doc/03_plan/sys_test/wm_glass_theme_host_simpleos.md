@@ -117,3 +117,15 @@ must call `fail("wm glass theme evidence not implemented")` until implemented.
 
 No row may be promoted by rebuilding through the Rust seed. W5 resumes only
 with an admitted existing runtime/artifact set or on the appropriate host.
+
+### 2026-07-27 cross-host request contract
+
+The executable request contract at
+`test/03_system/check/wm_glass_cross_host_evidence_request_spec.spl` keeps the
+current macOS lane active and registers fail-closed Windows Vulkan, Linux
+Vulkan/RenderDoc, x86 QEMU, and ARM QEMU evidence requests. Its companion
+manual is
+`doc/06_spec/03_system/check/wm_glass_cross_host_evidence_request_spec.md`.
+
+These tests verify routing and admission requirements only. They do not turn a
+postponed external-host row into rendering or event evidence.

@@ -528,3 +528,17 @@ is historical.
   device readback, and native event sequence into one proof.
 - Resume W5 on a host with an admitted deployed pure-Simple runtime and current
   guest artifacts. Do not substitute the Rust seed or stale diagnostic images.
+
+## 2026-07-27 Environment Routing
+
+Current macOS work remains active as `MAC-WM-GLASS-LOCAL-001`. Windows, Linux,
+x86 QEMU, and ARM QEMU execution are postponed to their required hosts through
+four explicit P0 feature requests:
+
+`doc/08_tracking/feature/wm_glass_cross_host_evidence_requests_2026-07-27.md`.
+
+The fail-closed handoff contract is:
+
+`test/03_system/check/wm_glass_cross_host_evidence_request_spec.spl`.
+
+External rows remain required and must not be counted as exclusions or PASS.

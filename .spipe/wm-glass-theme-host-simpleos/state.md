@@ -713,3 +713,10 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   captures and stale binaries remain diagnostic only. The reviewed source is
   remotely preserved on `codex/wm-glass-theme-host-simpleos-20260726`; no
   backend, native event, or QEMU PASS is claimed.
+
+- continuation-2026-07-27-cross-host-routing: **CURRENT HOST ACTIVE; EXTERNAL
+  HOSTS POSTPONED.** Added P0 requests for Windows Vulkan/SIMD, Linux
+  Vulkan/RenderDoc/SIMD, x86 QEMU/SSE2, and ARM QEMU/NEON rendering plus native
+  event evidence. Added a fail-closed system contract and manual that keep all
+  four rows required while preventing their postponement from being counted as
+  PASS. The macOS Metal/NEON/current-source lane remains active.
