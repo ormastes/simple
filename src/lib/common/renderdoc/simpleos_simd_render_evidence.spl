@@ -21,6 +21,10 @@ struct SimpleOsSimdRenderEvidence:
     qemu_machine: text
     qemu_cpu: text
     guest_image_hash: text
+    firmware_status_code: i64
+    firmware_hash: text
+    source_identity_hash: text
+    source_revision: text
     boot_id: text
     frame_id: text
     surface_handle: i64
@@ -58,6 +62,22 @@ fn _simd_sha256(value: text) -> bool:
         i = i + 1
     true
 
+fn _simd_nonzero_sha256(value: text) -> bool:
+    _simd_sha256(value) and
+        value != "0000000000000000000000000000000000000000000000000000000000000000"
+
+fn _simd_source_revision(value: text) -> bool:
+    if value.len() != 10 and value.len() != 40:
+        return false
+    val allowed = "0123456789abcdef"
+    var i = 0
+    while i < value.len():
+        if not allowed.contains(value[i].to_text()):
+            return false
+        i = i + 1
+    value != "0000000000" and
+        value != "0000000000000000000000000000000000000000"
+
 fn validate_simpleos_simd_render_evidence(evidence: SimpleOsSimdRenderEvidence) -> SimpleOsSimdRenderValidation:
     if evidence.requested_arch != evidence.actual_arch:
         return _simd_invalid("architecture-mismatch", "")
@@ -67,8 +87,23 @@ fn validate_simpleos_simd_render_evidence(evidence: SimpleOsSimdRenderEvidence) 
         return _simd_invalid("isa-mismatch", "actual_arch.detected_isa")
     if evidence.execution_host != "native-host" and evidence.execution_host != "simpleos-qemu-tcg" and evidence.execution_host != "simpleos-qemu-kvm":
         return _simd_invalid("invalid-execution-host", "")
-    if not _simd_sha256(evidence.guest_image_hash):
+    if not _simd_nonzero_sha256(evidence.guest_image_hash):
         return _simd_invalid("missing-guest-identity", "guest_image_hash")
+    if evidence.firmware_status_code == 1:
+        if not _simd_nonzero_sha256(evidence.firmware_hash):
+            return _simd_invalid("invalid-firmware-hash", "firmware_hash")
+    elif evidence.firmware_status_code == 2:
+        if evidence.firmware_hash !=
+           "0000000000000000000000000000000000000000000000000000000000000000":
+            return _simd_invalid(
+                "firmware-status-hash-mismatch", "firmware_hash")
+    else:
+        return _simd_invalid(
+            "unknown-firmware-status", "firmware_status_code")
+    if not _simd_nonzero_sha256(evidence.source_identity_hash):
+        return _simd_invalid("invalid-source-identity", "source_identity_hash")
+    if not _simd_source_revision(evidence.source_revision):
+        return _simd_invalid("invalid-source-revision", "source_revision")
     if evidence.boot_id == "":
         return _simd_invalid("missing-guest-identity", "boot_id")
     if evidence.frame_id == "":

@@ -17,16 +17,23 @@ use common.renderdoc.simpleos_simd_render_evidence.{
     SimpleOsSimdRenderEvidence,
     validate_simpleos_simd_render_evidence
 }
+use app.wm_compare.backend_2d_capture_evidence.{
+    backend_2d_correlated_event_receipt,
+    backend_2d_validate_correlated_event_receipt
+}
 
 val EVIDENCE_HASH: text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 val OTHER_HASH: text = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+val ZERO_HASH: text = "0000000000000000000000000000000000000000000000000000000000000000"
 
 fn target_evidence(runtime_kind: text, board_id: text, board_hash: text, capture_hash: text, boot_id: text) -> SimpleOsRenderTargetEvidence:
     SimpleOsRenderTargetEvidence(
         runtime_kind: runtime_kind, architecture: "x86_64", board_id: board_id,
         board_model: if runtime_kind == "physical-board": "xck26" else: "qemu-virt",
         board_revision: if runtime_kind == "physical-board": "1" else: "virtual",
-        board_serial_hash: board_hash, firmware_hash: EVIDENCE_HASH,
+        board_serial_hash: board_hash, firmware_status_code: 1,
+        firmware_hash: EVIDENCE_HASH, source_identity_hash: EVIDENCE_HASH,
+        source_revision: "0123456789",
         boot_transport: "qemu-or-flash", display_controller: "virtio-gpu",
         driver_id: "simpleos-virtio-gpu", scanout_id: 1, resource_id: 2,
         dma_mode: "coherent", cache_mode: "write-combined", iommu_mode: "identity",
@@ -49,6 +56,8 @@ fn simd_evidence(arch: text, isa: text, kernels: [CpuSimdKernelEvidence], simd_h
         requested_arch: arch, actual_arch: arch, requested_isa: isa, detected_isa: isa,
         execution_host: "simpleos-qemu-tcg", feature_detection_source: "guest-cpuid",
         qemu_machine: "virt", qemu_cpu: "max", guest_image_hash: EVIDENCE_HASH,
+        firmware_status_code: 1, firmware_hash: EVIDENCE_HASH,
+        source_identity_hash: EVIDENCE_HASH, source_revision: "0123456789",
         boot_id: "boot-1", frame_id: "frame-1", surface_handle: 42, kernels: kernels,
         scalar_oracle_hash: EVIDENCE_HASH, simd_output_hash: simd_hash,
         qmp_capture_hash: EVIDENCE_HASH, mismatch_count: 0
@@ -63,6 +72,45 @@ describe "SimpleOS portable rendering evidence":
         val evidence = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
         expect(validate_simpleos_render_target_evidence(evidence).code).to_equal("pass")
         expect(simpleos_render_target_status(evidence)).to_equal("qemu-verified")
+
+    it "should distinguish hashed firmware from direct-kernel N/A":
+        step("Accept a direct-kernel target only with an all-zero firmware hash")
+        var direct = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
+        direct.firmware_status_code = 2
+        direct.firmware_hash = ZERO_HASH
+        direct.boot_transport = "direct-kernel"
+        expect(validate_simpleos_render_target_evidence(direct).code).to_equal("pass")
+
+        step("Reject hash and status combinations that misrepresent firmware")
+        var not_applicable_with_hash = direct
+        not_applicable_with_hash.firmware_hash = EVIDENCE_HASH
+        expect(validate_simpleos_render_target_evidence(
+            not_applicable_with_hash).code).to_equal(
+                "firmware-status-hash-mismatch")
+
+        var hashed_without_hash = target_evidence(
+            "qemu", "", "", EVIDENCE_HASH, "boot-1")
+        hashed_without_hash.firmware_hash = ZERO_HASH
+        expect(validate_simpleos_render_target_evidence(
+            hashed_without_hash).code).to_equal("invalid-firmware-hash")
+
+        var unknown_status = target_evidence(
+            "qemu", "", "", EVIDENCE_HASH, "boot-1")
+        unknown_status.firmware_status_code = 9
+        expect(validate_simpleos_render_target_evidence(
+            unknown_status).code).to_equal("unknown-firmware-status")
+
+    it "should require source identity and revision":
+        step("Reject zero source identity and malformed revisions")
+        var identity = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
+        identity.source_identity_hash = ZERO_HASH
+        expect(validate_simpleos_render_target_evidence(identity).code).to_equal(
+            "invalid-source-identity")
+
+        var revision = target_evidence("qemu", "", "", EVIDENCE_HASH, "boot-1")
+        revision.source_revision = "not-a-rev"
+        expect(validate_simpleos_render_target_evidence(revision).code).to_equal(
+            "invalid-source-revision")
 
     it "should validate a complete physical-board record":
         step("Prepare identified board boot capture and transcript evidence")
@@ -348,6 +396,24 @@ describe "SimpleOS target-native SIMD evidence":
         step("Prepare x86 AVX2 runtime-owner counters and exact pixels")
         expect(validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", required_kernels(), EVIDENCE_HASH)).code).to_equal("pass")
 
+    it "should retain direct-kernel firmware and source identity":
+        step("Accept N/A firmware only with a zero hash")
+        var direct = simd_evidence(
+            "aarch64", "neon", required_kernels(), EVIDENCE_HASH)
+        direct.firmware_status_code = 2
+        direct.firmware_hash = ZERO_HASH
+        expect(validate_simpleos_simd_render_evidence(direct).code).to_equal("pass")
+
+        step("Reject status mismatch and missing source provenance")
+        direct.firmware_hash = EVIDENCE_HASH
+        expect(validate_simpleos_simd_render_evidence(direct).code).to_equal(
+            "firmware-status-hash-mismatch")
+        var source = simd_evidence(
+            "aarch64", "neon", required_kernels(), EVIDENCE_HASH)
+        source.source_revision = ""
+        expect(validate_simpleos_simd_render_evidence(source).code).to_equal(
+            "invalid-source-revision")
+
     it "should report the exact missing guest identity field":
         step("Invalidate each guest identity field independently")
         var image = simd_evidence("x86_64", "avx2", required_kernels(), EVIDENCE_HASH)
@@ -484,3 +550,38 @@ describe "SimpleOS target-native SIMD evidence":
         val missing_result = validate_simpleos_simd_render_evidence(simd_evidence("x86_64", "avx2", no_scroll, EVIDENCE_HASH))
         expect(missing_result.code).to_equal("missing-required-operation")
         expect(missing_result.operation).to_equal("scroll")
+
+describe "SimpleOS normalized backend event receipts":
+    it "should retain BRR2 event and source correlation":
+        step("Normalize a completed INPUT_IRQ to PRESENT chain")
+        val receipt = backend_2d_correlated_event_receipt(
+            "simpleos_arm64_simd", "virtio-input", 2, EVIDENCE_HASH,
+            "0123456789", 11, 7, 12, 19, 1004)
+        expect(backend_2d_validate_correlated_event_receipt(receipt)).to_equal("pass")
+        expect(receipt.schema_version).to_equal(2)
+        expect(receipt.input_sequence).to_equal(7)
+        expect(receipt.frame_id).to_equal(12)
+        expect(receipt.rendered_revision).to_equal(19)
+        expect(receipt.monotonic_event_us).to_equal(1004)
+
+    it "should reject unknown normalized status operation and zero identity":
+        step("Fail closed on values not admitted by BRR2")
+        var status = backend_2d_correlated_event_receipt(
+            "simpleos_arm64_simd", "virtio-input", 2, EVIDENCE_HASH,
+            "0123456789", 11, 7, 12, 19, 1004)
+        status.firmware_status_code = 9
+        expect(backend_2d_validate_correlated_event_receipt(status)).to_equal(
+            "unknown_firmware_status")
+
+        var operation = backend_2d_correlated_event_receipt(
+            "simpleos_arm64_simd", "virtio-input", 2, EVIDENCE_HASH,
+            "0123456789", 11, 7, 12, 19, 1004)
+        operation.operation_code = 99
+        expect(backend_2d_validate_correlated_event_receipt(operation)).to_equal(
+            "unknown_operation")
+
+        var identity = backend_2d_correlated_event_receipt(
+            "simpleos_arm64_simd", "virtio-input", 2, ZERO_HASH,
+            "0123456789", 11, 7, 12, 19, 1004)
+        expect(backend_2d_validate_correlated_event_receipt(identity)).to_equal(
+            "invalid_source_identity")

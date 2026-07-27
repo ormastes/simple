@@ -8,7 +8,10 @@ struct SimpleOsRenderTargetEvidence:
     board_model: text
     board_revision: text
     board_serial_hash: text
+    firmware_status_code: i64
     firmware_hash: text
+    source_identity_hash: text
+    source_revision: text
     boot_transport: text
     display_controller: text
     driver_id: text
@@ -59,6 +62,22 @@ fn _simpleos_sha256(value: text) -> bool:
         i = i + 1
     true
 
+fn _simpleos_nonzero_sha256(value: text) -> bool:
+    _simpleos_sha256(value) and
+        value != "0000000000000000000000000000000000000000000000000000000000000000"
+
+fn _simpleos_source_revision(value: text) -> bool:
+    if value.len() != 10 and value.len() != 40:
+        return false
+    val allowed = "0123456789abcdef"
+    var i = 0
+    while i < value.len():
+        if not allowed.contains(value[i].to_text()):
+            return false
+        i = i + 1
+    value != "0000000000" and
+        value != "0000000000000000000000000000000000000000"
+
 fn validate_simpleos_render_target_evidence(evidence: SimpleOsRenderTargetEvidence) -> SimpleOsRenderTargetValidation:
     if evidence.runtime_kind != "qemu" and evidence.runtime_kind != "physical-board":
         return _simpleos_target_invalid("invalid-runtime", "runtime_kind")
@@ -68,8 +87,26 @@ fn validate_simpleos_render_target_evidence(evidence: SimpleOsRenderTargetEviden
         return _simpleos_target_invalid("missing-platform-identity", "board_model")
     if evidence.board_revision == "":
         return _simpleos_target_invalid("missing-platform-identity", "board_revision")
-    if not _simpleos_sha256(evidence.firmware_hash):
-        return _simpleos_target_invalid("invalid-firmware-hash", "firmware_hash")
+    if evidence.firmware_status_code == 1:
+        if not _simpleos_nonzero_sha256(evidence.firmware_hash):
+            return _simpleos_target_invalid("invalid-firmware-hash", "firmware_hash")
+    elif evidence.firmware_status_code == 2:
+        if evidence.firmware_hash !=
+           "0000000000000000000000000000000000000000000000000000000000000000":
+            return _simpleos_target_invalid(
+                "firmware-status-hash-mismatch", "firmware_hash")
+        if evidence.boot_transport != "direct-kernel":
+            return _simpleos_target_invalid(
+                "firmware-status-transport-mismatch", "boot_transport")
+    else:
+        return _simpleos_target_invalid(
+            "unknown-firmware-status", "firmware_status_code")
+    if not _simpleos_nonzero_sha256(evidence.source_identity_hash):
+        return _simpleos_target_invalid(
+            "invalid-source-identity", "source_identity_hash")
+    if not _simpleos_source_revision(evidence.source_revision):
+        return _simpleos_target_invalid(
+            "invalid-source-revision", "source_revision")
     if evidence.boot_transport == "":
         return _simpleos_target_invalid("missing-boot-transport", "boot_transport")
     if evidence.display_controller == "":
