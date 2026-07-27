@@ -4,6 +4,12 @@ use std.test_runner.test_executor_parsing.{
     extract_compiler_coverage_manifest_sdn,
     strip_compiler_coverage_manifest_blocks
 }
+use std.test_runner.test_runner_execute.{preprocess_spipe_file}
+use compiler.common.driver_core_types.{source_file_coverage_identity}
+
+extern fn rt_file_write_text(path: text, content: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_delete(path: text) -> bool
 
 fn manifest() -> text:
     "decisions |id, file, line, column, true_count, false_count|\n" +
@@ -34,3 +40,17 @@ describe "compiler coverage manifest output parsing":
         val block = "{COMPILER_COVERAGE_BEGIN}\n{manifest()}\n{COMPILER_COVERAGE_END}"
         val (_, duplicate_valid) = extract_compiler_coverage_manifest_sdn("{block}\n{block}")
         expect(duplicate_valid).to_be(false)
+
+    it "preserves authored identity through the native SPipe preprocessing route":
+        val coverage_path = "/tmp/simple_cov_compiler_manifest_route_spec.spl"
+        val wrapped_source = "# simple-coverage-source: test/authored_route_spec.spl\ndescribe \"route\":\n    it \"runs\":\n        expect(true).to_equal(true)\n"
+        expect(rt_file_write_text(coverage_path, wrapped_source)).to_be(true)
+        val spipe_path = preprocess_spipe_file(coverage_path)
+        val spipe_source = rt_file_read_text(spipe_path) ?? ""
+        expect(spipe_source).to_start_with("# simple-coverage-source: test/authored_route_spec.spl\n")
+        val (authored_path, compiler_source) = source_file_coverage_identity(spipe_path, spipe_source)
+        expect(authored_path).to_equal("test/authored_route_spec.spl")
+        expect(compiler_source.contains("simple-coverage-source")).to_be(false)
+        expect(compiler_source).to_contain("fn main():")
+        val _ = rt_file_delete(coverage_path)
+        val _ = rt_file_delete(spipe_path)

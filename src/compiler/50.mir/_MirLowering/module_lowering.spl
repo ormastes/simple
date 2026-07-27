@@ -93,6 +93,16 @@ fn runtime_module_initializers_in_declaration_order(consts: [HirConst]) -> [HirC
         else: 0
     )
 
+fn coverage_row_compare(a: text, b: text) -> i64:
+    if a < b: -1
+    elif a > b: 1
+    else: 0
+
+fn coverage_user_source(path: text, function_name: text) -> bool:
+    """The reserved runner dump function is generated, never authored coverage."""
+    val _ = path
+    function_name != "__simple_cov_dump"
+
 impl MirLowering:
     static fn new(symbols: SymbolTable) -> MirLowering:
         val target_context = mir_target_context_from("", "unknown", "unknown", "llvm", -1)
@@ -150,11 +160,181 @@ impl MirLowering:
             next_canonical_type_symbol: 1000000000,
             global_symbol_ids: {},
             global_const_exprs: {},
+            coverage_enabled: false,
+            coverage_current_file: "",
+            coverage_current_function_name: "",
+            coverage_decision_stack: [],
+            coverage_decision_ids: [],
+            coverage_decision_keys: [],
+            coverage_decision_files: [],
+            coverage_decision_lines: [],
+            coverage_decision_columns: [],
+            coverage_condition_decision_ids: [],
+            coverage_condition_ids: [],
+            coverage_condition_keys: [],
+            coverage_condition_files: [],
+            coverage_condition_lines: [],
+            coverage_condition_columns: [],
             target_context: target_context
         )
 
     fn symbol_id_value(symbol: SymbolId) -> i64:
         symbol.id
+
+    me enable_coverage_inventory(enabled: bool):
+        self.coverage_enabled = enabled
+
+    fn coverage_file() -> text:
+        var file = self.coverage_current_file.replace("\\", "/")
+        if file == "":
+            file = "<unknown>"
+        # The existing coverage table reader is deliberately strict CSV.
+        file.replace(",", "%2C")
+
+    fn coverage_location(value: i64) -> i64:
+        if value < 0: 0
+        elif value > 2147483647: 2147483647
+        else: value
+
+    me coverage_register_decision(span: Span, kind: text, excluded: bool) -> i64:
+        if not self.coverage_enabled:
+            return -1
+        if excluded or not coverage_user_source(self.coverage_current_file, self.coverage_current_function_name):
+            return -2
+        val file = self.coverage_file()
+        val key = "{file}|{span.start}|{span.end}|{span.line}|{span.col}|{kind}"
+        val id = (hm_hash_text(key) % 2147483646) + 2
+        var i = 0
+        while i < self.coverage_decision_ids.len():
+            if self.coverage_decision_ids[i] == id:
+                if self.coverage_decision_keys[i] != key:
+                    self.error("coverage decision ID collision", Some(span))
+                    return -2
+                return id
+            i = i + 1
+        var ids = self.coverage_decision_ids
+        var keys = self.coverage_decision_keys
+        var files = self.coverage_decision_files
+        var lines = self.coverage_decision_lines
+        var columns = self.coverage_decision_columns
+        ids.push(id)
+        keys.push(key)
+        files.push(file)
+        lines.push(self.coverage_location(span.line))
+        columns.push(self.coverage_location(span.col))
+        self.coverage_decision_ids = ids
+        self.coverage_decision_keys = keys
+        self.coverage_decision_files = files
+        self.coverage_decision_lines = lines
+        self.coverage_decision_columns = columns
+        id
+
+    me coverage_register_condition(decision_id: i64, span: Span, index: i64) -> i64:
+        if not self.coverage_enabled or decision_id < 0:
+            return -1
+        val file = self.coverage_file()
+        val key = "{decision_id}|{file}|{span.start}|{span.end}|{span.line}|{span.col}|condition|{index}"
+        val id = (hm_hash_text(key) % 2147483646) + 2
+        var i = 0
+        while i < self.coverage_condition_ids.len():
+            if self.coverage_condition_decision_ids[i] == decision_id and self.coverage_condition_ids[i] == id:
+                if self.coverage_condition_keys[i] != key:
+                    self.error("coverage condition ID collision", Some(span))
+                    return -1
+                return id
+            i = i + 1
+        var decision_ids = self.coverage_condition_decision_ids
+        var ids = self.coverage_condition_ids
+        var keys = self.coverage_condition_keys
+        var files = self.coverage_condition_files
+        var lines = self.coverage_condition_lines
+        var columns = self.coverage_condition_columns
+        decision_ids.push(decision_id)
+        ids.push(id)
+        keys.push(key)
+        files.push(file)
+        lines.push(self.coverage_location(span.line))
+        columns.push(self.coverage_location(span.col))
+        self.coverage_condition_decision_ids = decision_ids
+        self.coverage_condition_ids = ids
+        self.coverage_condition_keys = keys
+        self.coverage_condition_files = files
+        self.coverage_condition_lines = lines
+        self.coverage_condition_columns = columns
+        id
+
+    me coverage_push_decision(id: i64):
+        if id != -1:
+            var stack = self.coverage_decision_stack
+            stack.push(id)
+            self.coverage_decision_stack = stack
+
+    me coverage_pop_decision(id: i64):
+        if id != -1 and self.coverage_decision_stack.len() > 0:
+            self.coverage_decision_stack = self.coverage_decision_stack[0:self.coverage_decision_stack.len() - 1]
+
+    fn coverage_current_decision() -> i64:
+        if self.coverage_decision_stack.len() == 0:
+            return -1
+        self.coverage_decision_stack[self.coverage_decision_stack.len() - 1]
+
+    me coverage_emit_probe(name: text, decision_id: i64, condition_id: i64, result: LocalId, span: Span):
+        if not self.coverage_enabled or decision_id < 0:
+            return
+        val str_type = MirType(kind: MirTypeKind.Opaque("str"))
+        var args: [MirOperand] = [
+            mir_operand_const_int(decision_id)
+        ]
+        if condition_id >= 0:
+            args.push(mir_operand_const_int(condition_id))
+        args.push(mir_operand_copy(result))
+        args.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(self.coverage_file()), str_type)))
+        args.push(mir_operand_const_int(self.coverage_location(span.line)))
+        args.push(mir_operand_const_int(self.coverage_location(span.col)))
+        var b = self.builder
+        b.emit(MirInst(kind: MirInstKind.Intrinsic(nil, name, args), span: Some(span)))
+        self.builder = b
+
+    me coverage_emit_decision_probe(decision_id: i64, result: LocalId, span: Span):
+        self.coverage_emit_probe("__simple_coverage_decision_probe", decision_id, -1, result, span)
+
+    me coverage_emit_condition_probe(decision_id: i64, condition_id: i64, result: LocalId, span: Span):
+        self.coverage_emit_probe("__simple_coverage_condition_probe", decision_id, condition_id, result, span)
+
+    fn coverage_manifest_sdn() -> text:
+        if not self.coverage_enabled:
+            return ""
+        var decisions: [text] = []
+        var i = 0
+        while i < self.coverage_decision_ids.len():
+            decisions.push("{self.coverage_decision_ids[i]}, {self.coverage_decision_files[i]}, {self.coverage_decision_lines[i]}, {self.coverage_decision_columns[i]}, 0, 0")
+            i = i + 1
+        decisions = array_sort_by(decisions, coverage_row_compare)
+        var conditions: [text] = []
+        i = 0
+        while i < self.coverage_condition_ids.len():
+            conditions.push("{self.coverage_condition_decision_ids[i]}, {self.coverage_condition_ids[i]}, {self.coverage_condition_files[i]}, {self.coverage_condition_lines[i]}, {self.coverage_condition_columns[i]}, 0, 0")
+            i = i + 1
+        conditions = array_sort_by(conditions, coverage_row_compare)
+        var lines: [text] = [
+            "version: 1.0",
+            "decisions |id, file, line, column, true_count, false_count|"
+        ]
+        for row in decisions:
+            lines.push(row)
+        lines.push("conditions |decision_id, condition_id, file, line, column, true_count, false_count|")
+        for row in conditions:
+            lines.push(row)
+        lines.join("\n")
+
+    fn emit_coverage_manifest():
+        val payload = self.coverage_manifest_sdn()
+        if payload == "":
+            return
+        # Protocol output must be byte-exact; process_ops.eprint adds a prefix.
+        print "__SIMPLE_COMPILER_COVERAGE_MANIFEST_BEGIN__"
+        print payload
+        print "__SIMPLE_COMPILER_COVERAGE_MANIFEST_END__"
 
     fn composite_layout_key(symbol: Symbol) -> text:
         val defining_module = symbol.defining_module ?? ""
@@ -540,6 +720,7 @@ impl MirLowering:
     me lower_module(module: HirModule) -> MirModule:
         """Lower HIR module to MIR."""
         self.symbols = module.symbols
+        self.coverage_current_file = if module.path != "": module.path else: module.name
         var function_names: [text] = []
         for func in module.functions.values():
             function_names.push(func.name)

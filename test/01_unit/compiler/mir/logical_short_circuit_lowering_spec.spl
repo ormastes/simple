@@ -3,6 +3,10 @@ use compiler.common.config.{Logger}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.mir.mir.*
+use compiler.common.driver_core_types.{source_file_coverage_identity}
+use compiler.semantics.resolve.{resolve_methods}
+
+extern fn rt_file_read_text(path: text) -> text
 
 fn lower_source_function(src: text, target_name: text) -> text:
     val module = parse_full_frontend(src, "logic.spl", "logic.spl", Logger(level: 0))
@@ -82,3 +86,82 @@ describe "MIR block terminator lowering", tag: ["only-compiled"]:
         expect(mir.contains("Map.values")).to_equal(false)
         expect(mir.contains("Dict.values")).to_equal(false)
         expect(mir.contains("MethodCallStatic")).to_equal(false)
+
+describe "compiler decision inventory", tag: ["only-compiled"]:
+    it "keeps the source path and inventories only source decisions and conditions":
+        val source = "fn check(left: bool, right: bool) -> bool:\n    if left and right:\n        true\n    else:\n        false\n\nfn choose(value: i64) -> bool:\n    match value:\n        case 1 | 2: true\n        case _: false\n"
+        val module = parse_full_frontend(source, "coverage_logic.spl", "coverage_logic.spl", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("coverage_logic.spl")
+        val hir = hir_lowering.lower_module(module)
+        expect(hir.path).to_equal("coverage_logic.spl")
+        val (resolved_hir, resolve_errors) = resolve_methods(hir)
+        expect(resolve_errors.len()).to_equal(0)
+
+        var mir_lowering = MirLowering.new(resolved_hir.symbols)
+        mir_lowering.enable_coverage_inventory(true)
+        val mir = mir_lowering.lower_module(resolved_hir)
+        var rendered = ""
+        var generated_match = ""
+        for function in mir.functions.values():
+            if function.name == "check" or function.name.ends_with(".check"):
+                rendered = serialize_mir_function(function)
+            if function.name == "choose" or function.name.ends_with(".choose"):
+                generated_match = serialize_mir_function(function)
+        val manifest = mir_lowering.coverage_manifest_sdn()
+
+        expect(rendered.split("__simple_coverage_decision_probe").len()).to_equal(2)
+        expect(rendered.split("__simple_coverage_condition_probe").len()).to_equal(3)
+        expect(generated_match.contains("__simple_coverage_decision_probe")).to_equal(false)
+        expect(generated_match.contains("__simple_coverage_condition_probe")).to_equal(false)
+        expect(manifest).to_start_with("version: 1.0\ndecisions |id, file, line, column, true_count, false_count|")
+        expect(manifest).to_contain("coverage_logic.spl")
+        expect(manifest).to_contain("conditions |decision_id, condition_id, file, line, column, true_count, false_count|")
+        expect(manifest.split(", 0, 0").len()).to_equal(4)
+
+        val lowering_source = rt_file_read_text("src/compiler/50.mir/_MirLowering/module_lowering.spl") ?? ""
+        expect(lowering_source).to_contain("print \"__SIMPLE_COMPILER_COVERAGE_MANIFEST_BEGIN__\"")
+        expect(lowering_source).to_contain("print \"__SIMPLE_COMPILER_COVERAGE_MANIFEST_END__\"")
+        expect(lowering_source.contains("eprint(\"__SIMPLE_COMPILER_COVERAGE_MANIFEST_BEGIN__\")")).to_equal(false)
+
+        val wrapper_builder_source = rt_file_read_text("src/lib/nogc_sync_mut/test_runner/test_executor_parsing.spl") ?? ""
+        expect(wrapper_builder_source).to_contain("lines.push(\"# simple-coverage-source: \" + file_path)")
+        expect(wrapper_builder_source.contains("lines.push(\"    if not rt_coverage_enabled():\")")).to_equal(false)
+
+    it "emits a valid empty inventory and excludes the reserved runner wrapper":
+        val branchless_module = parse_full_frontend("fn answer() -> i64:\n    42\n", "branchless.spl", "branchless.spl", Logger(level: 0))
+        var branchless_hir_lowering = HirLowering.with_filename("branchless.spl")
+        val branchless_hir = branchless_hir_lowering.lower_module(branchless_module)
+        var branchless_mir_lowering = MirLowering.new(branchless_hir.symbols)
+        branchless_mir_lowering.enable_coverage_inventory(true)
+        branchless_mir_lowering.lower_module(branchless_hir)
+        val branchless_manifest = branchless_mir_lowering.coverage_manifest_sdn()
+        expect(branchless_manifest).to_equal("version: 1.0\ndecisions |id, file, line, column, true_count, false_count|\nconditions |decision_id, condition_id, file, line, column, true_count, false_count|")
+
+        val wrapper_source = "fn authored(flag: bool) -> bool:\n    if flag:\n        true\n    else:\n        false\n\nfn __simple_cov_dump(flag: bool):\n    if not flag:\n        return\n"
+        val (authored_path, recovered_source) = source_file_coverage_identity(
+            "/tmp/simple_cov_branchless.spl",
+            "# simple-coverage-source: src/authored_branchless.spl\n{wrapper_source}"
+        )
+        expect(authored_path).to_equal("src/authored_branchless.spl")
+        expect(recovered_source).to_equal(wrapper_source)
+        val wrapper_module = parse_full_frontend(recovered_source, authored_path, authored_path, Logger(level: 0))
+        var wrapper_hir_lowering = HirLowering.with_filename(authored_path)
+        val wrapper_hir = wrapper_hir_lowering.lower_module(wrapper_module)
+        var wrapper_mir_lowering = MirLowering.new(wrapper_hir.symbols)
+        wrapper_mir_lowering.enable_coverage_inventory(true)
+        val wrapper_mir = wrapper_mir_lowering.lower_module(wrapper_hir)
+        var authored_rendered = ""
+        var wrapper_rendered = ""
+        for function in wrapper_mir.functions.values():
+            if function.name == "authored" or function.name.ends_with(".authored"):
+                authored_rendered = serialize_mir_function(function)
+            if function.name == "__simple_cov_dump" or function.name.ends_with(".__simple_cov_dump"):
+                wrapper_rendered = serialize_mir_function(function)
+        expect(authored_rendered.contains("__simple_coverage_decision_probe")).to_equal(true)
+        expect(authored_rendered.contains("__simple_coverage_condition_probe")).to_equal(true)
+        expect(wrapper_rendered.contains("__simple_coverage_decision_probe")).to_equal(false)
+        expect(wrapper_rendered.contains("__simple_coverage_condition_probe")).to_equal(false)
+        val wrapper_manifest = wrapper_mir_lowering.coverage_manifest_sdn()
+        expect(wrapper_manifest.split(", 0, 0").len()).to_equal(3)
+        expect(wrapper_manifest).to_contain("src/authored_branchless.spl")
+        expect(wrapper_manifest.contains("/tmp/simple_cov_branchless.spl")).to_equal(false)

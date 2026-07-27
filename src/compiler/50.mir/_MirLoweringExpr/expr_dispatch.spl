@@ -1604,7 +1604,17 @@ impl MirLowering:
                             self.builder = b_special
                             temp
                     case And | Or:
+                        var coverage_decision_id = self.coverage_current_decision()
+                        val coverage_owns_decision = coverage_decision_id == -1
+                        if coverage_owns_decision:
+                            coverage_decision_id = self.coverage_register_decision(expr_value.span, "logical", expr_value.coverage_excluded)
+                            self.coverage_push_decision(coverage_decision_id)
                         val left_local = self.lower_expr(left)
+                        match left.kind:
+                            case HirExprKind.Binary(HirBinOp.And, _, _) | HirExprKind.Binary(HirBinOp.Or, _, _): ()
+                            case _:
+                                val left_condition_id = self.coverage_register_condition(coverage_decision_id, left.span, 0)
+                                self.coverage_emit_condition_probe(coverage_decision_id, left_condition_id, left_local, left.span)
                         var b_logic = self.builder
                         val rhs_block = b_logic.new_block(Some("logic_rhs"))
                         val short_block = b_logic.new_block(Some("logic_short"))
@@ -1632,6 +1642,11 @@ impl MirLowering:
                         b_rhs.switch_to_block(rhs_block)
                         self.builder = b_rhs
                         val right_local = self.lower_expr(right)
+                        match right.kind:
+                            case HirExprKind.Binary(HirBinOp.And, _, _) | HirExprKind.Binary(HirBinOp.Or, _, _): ()
+                            case _:
+                                val right_condition_id = self.coverage_register_condition(coverage_decision_id, right.span, 1)
+                                self.coverage_emit_condition_probe(coverage_decision_id, right_condition_id, right_local, right.span)
                         var right_value = right_local
                         var b_rhs_done = self.builder
                         if val right_type = self.local_mir_type_of(right_local):
@@ -1660,6 +1675,9 @@ impl MirLowering:
                         val logic_zero = b_rhs_done.emit_const_int(0)
                         val logic_result = b_rhs_done.emit_binop(MirBinOp.Ne, mir_operand_copy(merged_int), mir_operand_copy(logic_zero), MirType.bool())
                         self.builder = b_rhs_done
+                        if coverage_owns_decision:
+                            self.coverage_emit_decision_probe(coverage_decision_id, logic_result, expr_value.span)
+                            self.coverage_pop_decision(coverage_decision_id)
                         logic_result
                     case _:
                         val left_local = self.lower_expr(left)
