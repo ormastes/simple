@@ -794,6 +794,44 @@ bootstrap_stage3_git_state() {
     bootstrap_stage3_git_untracked="${bootstrap_stage3_git_output}.untracked.$$"
     bootstrap_stage3_git_untracked_sorted="${bootstrap_stage3_git_output}.untracked.sorted.$$"
     bootstrap_stage3_git_records="${bootstrap_stage3_git_output}.records.$$"
+    bootstrap_stage3_jj_stderr="${bootstrap_stage3_git_output}.jj-stderr.$$"
+    if ! (
+        cd "$bootstrap_stage3_git_root" &&
+            git rev-parse --verify HEAD >/dev/null 2>&1
+    ); then
+        command -v jj >/dev/null 2>&1 || return 1
+        (
+            cd "$bootstrap_stage3_git_root" || exit 1
+            bootstrap_stage3_git_head=$(
+                jj --no-pager --color=never log -r @ --no-graph \
+                    -T 'commit_id ++ "\n"' 2>"$bootstrap_stage3_jj_stderr"
+            ) || exit 1
+            [ ! -s "$bootstrap_stage3_jj_stderr" ] || exit 1
+            jj --ignore-working-copy --no-pager --color=never diff \
+                --git -r "$bootstrap_stage3_git_head" \
+                >"$bootstrap_stage3_git_diff" \
+                2>"$bootstrap_stage3_jj_stderr" || exit 1
+            [ ! -s "$bootstrap_stage3_jj_stderr" ] || exit 1
+            printf 'jj-working-copy-diff-sha256=%s\n' \
+                "$(bootstrap_stage3_hash_file "$bootstrap_stage3_git_diff")" \
+                >"$bootstrap_stage3_git_records" || exit 1
+            bootstrap_stage3_git_dirty=$(
+                bootstrap_stage3_hash_file "$bootstrap_stage3_git_records"
+            ) || exit 1
+            printf 'head=%s\n' "$bootstrap_stage3_git_head"
+            printf 'dirty_fingerprint=%s\n' "$bootstrap_stage3_git_dirty"
+        ) >"${bootstrap_stage3_git_output}.tmp.$$" || {
+            rm -f "${bootstrap_stage3_git_output}.tmp.$$" \
+                "$bootstrap_stage3_git_diff" "$bootstrap_stage3_git_records" \
+                "$bootstrap_stage3_jj_stderr"
+            return 1
+        }
+        rm -f "$bootstrap_stage3_git_diff" "$bootstrap_stage3_git_records" \
+            "$bootstrap_stage3_jj_stderr"
+        mv "${bootstrap_stage3_git_output}.tmp.$$" \
+            "$bootstrap_stage3_git_output"
+        return
+    fi
     (
         cd "$bootstrap_stage3_git_root" || exit 1
         bootstrap_stage3_git_head=$(git rev-parse --verify HEAD) || exit 1
