@@ -1886,6 +1886,8 @@ runtime metadata, and `.rdc` `RDOC` magic.
 The widget goal passes only when the Simple widget capture and Electron
 Chromium/Vulkan widget evidence both pass, all 43 widget feature witnesses are
 covered, and `gui_widget_renderdoc_goal_blocked_gate_count=0`.
+The higher-level HTML and widget aggregates reject magic-only Simple `.rdc`
+fixtures even when their Chrome or Electron fixture rows pass.
 
 Linux browser diagnostics:
 

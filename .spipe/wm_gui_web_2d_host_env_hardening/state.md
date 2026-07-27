@@ -741,3 +741,14 @@ Tracking split:
   main-browser fixture. Docgen produced one complete manual with zero stubs.
   This is diagnostic-runner contract evidence; a fresh native `.rdc` remains
   required for live completion.
+- bugfix: Reframed the HTML and widget goal specs so magic-only Simple `.rdc`
+  fixtures remain blockers even when Chrome/Electron fixture rows pass. The
+  capped diagnostic runs ended at HTML 3/4 and widget 4/6; retained-output
+  comparison aligned the remaining expected property count and blocker text,
+  but those edits were not rerun and no green qualification is claimed. Both
+  manuals were regenerated with zero stubs.
+- verify-gap: A foreign session still owns the active fullscreen/QEMU rebuild,
+  so no competing VM/build was launched. There is still no source-matched
+  accepted pure-Simple full CLI or measured coverage artifact; the broader GUI
+  feature-coverage spec also retains synthetic-completion scenarios for a
+  later uncapped environment.
