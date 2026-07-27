@@ -183,7 +183,127 @@ pub fn _driver_module_name_collision(sources: [SourceFile]) -> text:
             first_paths[source.module_name] = path
     ""
 
+fn _driver_entry_closure_mode() -> bool:
+    (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+
+fn _driver_module_name_segment_is_tier(seg: text) -> bool:
+    """True for an all-digit dotted segment — the `10` in
+    `compiler.10.frontend.core.lexer`, produced by the `src/compiler/NN.name`
+    tier directories. An empty segment is NOT a tier (out-of-tree entries can
+    produce a leading empty segment and must keep it)."""
+    if seg.len() == 0:
+        return false
+    var i = 0
+    while i < seg.len():
+        val code = seg.char_code_at(i)
+        if code < 48 or code > 57:
+            return false
+        i = i + 1
+    true
+
+pub fn _driver_canonical_module_name(module_name: text) -> text:
+    """Fold every dotted spelling of ONE physical file onto a single name.
+    Two rules, both derived from the symlink inventory in
+    doc/09_report/symlink_module_spelling_sibling_audit_2026-07-27.md:
+      1. drop all-digit (tier) segments — `compiler.10.frontend.core.x` and the
+         `src/compiler/frontend -> 10.frontend` symlink spelling
+         `compiler.frontend.core.x` both canonicalize to the latter;
+      2. fold a leading `std.` to `lib.` — `src/std` is a symlink to `src/lib`.
+    Verified collision-free: every physical `src/**/*.spl` canonicalizes to a
+    distinct name (no two files share one canonical spelling)."""
+    var segs: [text] = []
+    for seg in module_name.split("."):
+        if _driver_module_name_segment_is_tier(seg):
+            continue
+        segs = segs.push(seg)
+    val canonical = segs.join(".")
+    if canonical == "std":
+        return "lib"
+    if canonical.starts_with("std."):
+        return "lib." + canonical.substring(4)
+    canonical
+
+fn _driver_physical_module_name(path: text, fallback: text) -> text:
+    """Module name derived from the SYMLINK-RESOLVED path.
+    `_driver_module_name_from_path` is lexical, so a file reached through
+    `src/compiler/frontend` and the same file reached through
+    `src/compiler/10.frontend` get different names. `rt_path_absolute` is
+    `realpath`, so it collapses the symlink; the result is re-relativized
+    against the working directory (never by searching for `/src/`, which would
+    mis-split when the checkout itself lives under a `.../src/...` directory).
+    Falls back to the lexical name whenever the file cannot be proven to be a
+    repo-relative `src/` or `examples/` source — out-of-tree entries keep their
+    existing names."""
+    val resolved = rt_path_absolute(path) ?? ""
+    if resolved == "":
+        return fallback
+    val root = rt_path_absolute(".") ?? ""
+    if root == "":
+        return fallback
+    if not resolved.starts_with(root + "/"):
+        return fallback
+    val rel = resolved.substring(root.len() + 1)
+    if not rel.starts_with("src/") and not rel.starts_with("examples/"):
+        return fallback
+    _driver_module_name_from_path(rel)
+
+fn _driver_push_unique_module_name(names: [text], name: text) -> [text]:
+    """Append a spelling once. Alias lists are a handful of entries, so a linear
+    scan is cheaper than a Dict (and `Dict.len()` returns -1 natively)."""
+    if name == "":
+        return names
+    var i = 0
+    while i < names.len():
+        if names[i] == name:
+            return names
+        i = i + 1
+    names.push(name)
+
 pub fn _driver_module_aliases(path: text, content: text, module_name: text) -> [SourceFile]:
+    """One physical file, one canonical module name, every other spelling an alias.
+    ENTRY-CLOSURE ONLY. Symlinks (`src/compiler/frontend -> 10.frontend`,
+    `src/std -> lib`, `src/app/lsp -> lib/nogc_sync_mut/lsp`, ...) mean the
+    dotted name depends on which path the resolver walked — and that varies PER
+    FILE, so two files in one directory could land under different package
+    prefixes. `resolve_package_sibling_symbols`
+    (20.hir/hir_lowering/_Items/module_lowering.spl) takes the *self* prefix
+    from the walked path and looks siblings up by registry key, so a mismatch
+    silently switches off directory-package semantics and every bare
+    cross-file call in the package dies with "unresolved name" (~530 stage-4
+    errors from `10.frontend/core` alone). Registering all spellings makes the
+    lookup succeed whichever path either file was walked through.
+    Additive only: the walked spelling is always kept, so existing `use` lines
+    keep resolving; the canonical spelling is listed FIRST so
+    `_driver_unique_physical_sources` (and therefore Phase 3 lowering) picks a
+    name that no longer depends on discovery order.
+    The bulk collector is deliberately left on the narrow legacy branches:
+    `_driver_collect_sources` walks with `find` (no `-L`), so it never traverses
+    a symlink and already produces one uniform spelling — and unlike the closure
+    path (driver.spl: `entry_ctx.sources = unique_entry_sources`) it feeds every
+    alias entry into Phase 3, where an extra spelling would lower the file twice."""
+    if _driver_entry_closure_mode():
+        val physical = _driver_physical_module_name(path, module_name)
+        val canonical = _driver_canonical_module_name(physical)
+        var names: [text] = []
+        names = _driver_push_unique_module_name(names, canonical)
+        names = _driver_push_unique_module_name(names, module_name)
+        names = _driver_push_unique_module_name(names, physical)
+        names = _driver_push_unique_module_name(names, _driver_canonical_module_name(module_name))
+        # `src/std -> lib`: files walked through the symlink derive `std.*`, so
+        # both twins must exist for sibling lookup to cross the two spellings.
+        if canonical.starts_with("lib."):
+            names = _driver_push_unique_module_name(names, "std." + canonical.substring(4))
+        # `compiler.core.*` is not a symlink spelling but a rewrite-table import
+        # spelling (_driver_resolve_numbered_compiler_import maps it to
+        # compiler/10.frontend/core), so the general rule cannot derive it.
+        # This subsumes the former hand-written `compiler.10.frontend.core.*`
+        # and `compiler.frontend.core.*` branches: both canonicalize here.
+        if canonical.starts_with("compiler.frontend.core."):
+            names = _driver_push_unique_module_name(names, "compiler.core." + canonical.substring("compiler.frontend.core.".len()))
+        var closure_aliases: [SourceFile] = []
+        for name in names:
+            closure_aliases = closure_aliases.push(SourceFile(path: path, content: content, module_name: name))
+        return closure_aliases
     # Entry-closure loading adds the requested import name after resolution.
     # Do not invent lib.* -> std.* aliases here: real src/std mirrors may own them.
     var aliases: [SourceFile] = [SourceFile(path: path, content: content, module_name: module_name)]
