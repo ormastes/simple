@@ -21,10 +21,43 @@ use super::interpreter_native_io::extract_bytes;
 // Socket Handle Pool
 //==============================================================================
 
-use std::sync::atomic::{AtomicI64 as NetAtomicI64, Ordering as NetOrdering};
+use std::sync::atomic::{AtomicI64 as NetAtomicI64, AtomicUsize as NetAtomicUsize, Ordering as NetOrdering};
 use std::sync::Arc;
 
 static NEXT_SOCKET_HANDLE_ID: NetAtomicI64 = NetAtomicI64::new(1000); // Start at 1000 to avoid conflicts
+const DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+const DNS_MAX_IN_FLIGHT: usize = 8;
+static DNS_IN_FLIGHT: NetAtomicUsize = NetAtomicUsize::new(0);
+
+fn resolve_socket_addrs_with_timeout(address: String, timeout: Duration) -> std::io::Result<Vec<SocketAddr>> {
+    if DNS_IN_FLIGHT.fetch_add(1, NetOrdering::AcqRel) >= DNS_MAX_IN_FLIGHT {
+        DNS_IN_FLIGHT.fetch_sub(1, NetOrdering::AcqRel);
+        return Err(std::io::Error::new(
+            ErrorKind::WouldBlock,
+            "too many DNS lookups in flight",
+        ));
+    }
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let spawned = std::thread::Builder::new()
+        .name("simple-interpreter-dns".to_owned())
+        .spawn(move || {
+            let result = address.to_socket_addrs().map(|iter| iter.collect::<Vec<SocketAddr>>());
+            DNS_IN_FLIGHT.fetch_sub(1, NetOrdering::AcqRel);
+            let _ = sender.send(result);
+        });
+    if let Err(error) = spawned {
+        DNS_IN_FLIGHT.fetch_sub(1, NetOrdering::AcqRel);
+        return Err(error);
+    }
+    receiver.recv_timeout(timeout).map_err(|error| match error {
+        std::sync::mpsc::RecvTimeoutError::Timeout => {
+            std::io::Error::new(ErrorKind::TimedOut, "DNS lookup deadline exceeded")
+        }
+        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+            std::io::Error::new(ErrorKind::Other, "DNS lookup worker disconnected")
+        }
+    })?
+}
 
 enum SocketHandle {
     TcpListener(TcpListener),
@@ -599,7 +632,7 @@ pub fn rt_dns_lookup_interp(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::Str(s)) => s.as_str(),
         _ => return Ok(Value::text(String::new())),
     };
-    let iter = match (host, 0).to_socket_addrs() {
+    let iter = match resolve_socket_addrs_with_timeout(format!("{host}:0"), DNS_LOOKUP_TIMEOUT) {
         Ok(iter) => iter,
         Err(_) => return Ok(Value::text(String::new())),
     };

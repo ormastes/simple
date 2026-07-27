@@ -13,9 +13,58 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, ToSocketA
 use std::os::unix::io::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
+
+const NET_DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+const NET_DNS_MAX_IN_FLIGHT: usize = 8;
+static NET_DNS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+fn run_bounded_net_lookup<F>(timeout: Duration, lookup: F) -> std::io::Result<Vec<SocketAddr>>
+where
+    F: FnOnce() -> std::io::Result<Vec<SocketAddr>> + Send + 'static,
+{
+    if timeout.is_zero() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "DNS lookup deadline exceeded",
+        ));
+    }
+    if NET_DNS_IN_FLIGHT.fetch_add(1, Ordering::AcqRel) >= NET_DNS_MAX_IN_FLIGHT {
+        NET_DNS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "too many DNS lookups in flight",
+        ));
+    }
+
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let spawned = std::thread::Builder::new()
+        .name("simple-dns".to_owned())
+        .spawn(move || {
+            let result = lookup();
+            NET_DNS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+            let _ = sender.send(result);
+        });
+    if let Err(error) = spawned {
+        NET_DNS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+        return Err(error);
+    }
+
+    receiver.recv_timeout(timeout).map_err(|error| match error {
+        std::sync::mpsc::RecvTimeoutError::Timeout => {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "DNS lookup deadline exceeded")
+        }
+        std::sync::mpsc::RecvTimeoutError::Disconnected => {
+            std::io::Error::new(std::io::ErrorKind::Other, "DNS lookup worker disconnected")
+        }
+    })?
+}
+
+fn resolve_socket_addrs_with_timeout(address: String, timeout: Duration) -> std::io::Result<Vec<SocketAddr>> {
+    run_bounded_net_lookup(timeout, move || address.to_socket_addrs().map(|iter| iter.collect()))
+}
 
 // ============================================================================
 // Error codes
@@ -567,6 +616,15 @@ mod tests {
     use super::*;
     use crate::value::collections::{rt_string_data, rt_string_len};
 
+    #[test]
+    fn bounded_dns_lookup_returns_at_its_deadline() {
+        let result = run_bounded_net_lookup(Duration::from_millis(1), || {
+            std::thread::sleep(Duration::from_millis(20));
+            Ok(Vec::new())
+        });
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    }
+
     unsafe fn runtime_string(value: crate::value::RuntimeValue) -> String {
         assert!(!value.is_nil());
         let len = rt_string_len(value);
@@ -676,8 +734,12 @@ mod tests {
         let acceptor = std::thread::spawn(move || listener.accept().unwrap());
 
         let stream = connect_tls_client_socket(&addr.to_string()).unwrap();
-        assert_eq!(stream.read_timeout().unwrap(), Some(TLS_CLIENT_IO_TIMEOUT));
-        assert_eq!(stream.write_timeout().unwrap(), Some(TLS_CLIENT_IO_TIMEOUT));
+        let read_timeout = stream.read_timeout().unwrap().unwrap();
+        let write_timeout = stream.write_timeout().unwrap().unwrap();
+        assert!(read_timeout > Duration::ZERO);
+        assert!(read_timeout <= TLS_CLIENT_IO_TIMEOUT);
+        assert!(write_timeout > Duration::ZERO);
+        assert!(write_timeout <= TLS_CLIENT_IO_TIMEOUT);
 
         drop(stream);
         let _ = acceptor.join().unwrap();

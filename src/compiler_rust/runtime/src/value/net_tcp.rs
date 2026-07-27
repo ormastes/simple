@@ -475,7 +475,7 @@ pub extern "C" fn rt_dns_lookup(hostname: crate::value::RuntimeValue) -> crate::
     let Ok(host) = std::str::from_utf8(bytes) else {
         return crate::value::collections::rt_string_new(std::ptr::null(), 0);
     };
-    let Ok(iter) = (host, 0).to_socket_addrs() else {
+    let Ok(iter) = resolve_socket_addrs_with_timeout(format!("{host}:0"), NET_DNS_LOOKUP_TIMEOUT) else {
         return crate::value::collections::rt_string_new(std::ptr::null(), 0);
     };
 

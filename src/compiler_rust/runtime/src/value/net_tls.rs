@@ -30,26 +30,31 @@ fn next_tls_fake_handle() -> i64 {
 fn connect_tls_client_socket(addr: &str) -> std::io::Result<std::net::TcpStream> {
     let started = std::time::Instant::now();
     let mut last_error = None;
-    for socket_addr in addr.to_socket_addrs()? {
+    let resolve_budget = TLS_CLIENT_IO_TIMEOUT
+        .checked_sub(started.elapsed())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "TLS DNS deadline exceeded"))?;
+    for socket_addr in resolve_socket_addrs_with_timeout(addr.to_owned(), resolve_budget)? {
         let remaining = TLS_CLIENT_IO_TIMEOUT
             .checked_sub(started.elapsed())
-            .ok_or_else(|| std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "TLS connect deadline exceeded",
-            ))?;
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, "TLS connect deadline exceeded"))?;
         match std::net::TcpStream::connect_timeout(&socket_addr, remaining) {
             Ok(stream) => {
-                stream.set_read_timeout(Some(TLS_CLIENT_IO_TIMEOUT))?;
-                stream.set_write_timeout(Some(TLS_CLIENT_IO_TIMEOUT))?;
+                let io_budget = TLS_CLIENT_IO_TIMEOUT.checked_sub(started.elapsed()).ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "TLS connect deadline exceeded")
+                })?;
+                stream.set_read_timeout(Some(io_budget))?;
+                stream.set_write_timeout(Some(io_budget))?;
                 return Ok(stream);
             }
             Err(error) => last_error = Some(error),
         }
     }
-    Err(last_error.unwrap_or_else(|| std::io::Error::new(
-        std::io::ErrorKind::AddrNotAvailable,
-        "TLS target resolved to no addresses",
-    )))
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "TLS target resolved to no addresses",
+        )
+    }))
 }
 
 fn empty_text() -> crate::value::RuntimeValue {
