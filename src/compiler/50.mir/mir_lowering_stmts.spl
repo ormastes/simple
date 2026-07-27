@@ -940,15 +940,45 @@ impl MirLowering:
 
             case Field(base, field, resolved):
                 # Field assignment: obj.field = value
+                #
+                # Bug jit_struct_field_compound_assign_loads_zero (2026-07-27):
+                # this arm used to ignore `op` entirely and hand the bare RHS
+                # local to emit_set_field, so `obj.f += v` stored `v` -- the
+                # field's CURRENT value never entered the computation and the
+                # observable result was `0 <op> v` on the JIT/native path
+                # (`s.n += 2` with n == 5 printed 2, not 7). The read side is
+                # restored below and it deliberately reuses the SAME already-
+                # lowered `receiver` and the SAME `field_index` the store uses:
+                # the place is resolved exactly once, so a receiver expression
+                # with side effects still runs exactly once.
                 val receiver = self.lower_expr(base)
-                val bitfield_value = self.try_lower_bitfield_set(base, receiver, field, value_local)
+                var rhs_value = value_local
+                # Bitfield-ness is probed with the pure predicate pair (no MIR
+                # emitted) so the compound read can be routed to the packed
+                # get/set helpers instead of a raw GetField on a packed word.
+                val bitfield_sym = self.bitfield_type_sym_for(base, receiver)
+                val is_bitfield = bitfield_sym >= 0 and self.bitfield_map.contains(bitfield_sym)
+                if op.? and is_bitfield:
+                    val bf_current = self.try_lower_bitfield_get(base, receiver, field)
+                    if val bf_current_local = bf_current:
+                        val bf_type = self.local_mir_type_of(bf_current_local) ?? MirType.i64()
+                        rhs_value = self.lower_compound_combine(bf_current_local, op.unwrap(), value_local, bf_type)
+                val bitfield_value = self.try_lower_bitfield_set(base, receiver, field, rhs_value)
                 if val bitfield_local = bitfield_value:
                     var bitfield_b = self.builder
                     bitfield_b.emit_copy(receiver, bitfield_local)
                     self.builder = bitfield_b
                     return
                 val field_index = self.resolve_field_index(base, receiver, field, resolved)
-                var assigned_field_value = value_local
+                if op.? and not is_bitfield:
+                    # Read-modify-write through the same (receiver, field_index)
+                    # place the emit_set_field below writes to.
+                    val current_type = self.compound_field_mir_type(base, receiver, field_index, value_local)
+                    var b_load = self.builder
+                    val current_local = b_load.emit_get_field(mir_operand_copy(receiver), field_index, current_type)
+                    self.builder = b_load
+                    rhs_value = self.lower_compound_combine(current_local, op.unwrap(), value_local, current_type)
+                var assigned_field_value = rhs_value
                 val field_owner = self.resolve_base_struct_name(base, receiver)
                 if val owner_name = field_owner:
                     if self.struct_field_hir_type.contains(owner_name):
@@ -957,7 +987,7 @@ impl MirLowering:
                             val declared_field_type = field_types[field_index]
                             match declared_field_type.kind:
                                 case HirTypeKind.Optional(_):
-                                    assigned_field_value = self.ensure_option_handle(value_local, declared_field_type)
+                                    assigned_field_value = self.ensure_option_handle(rhs_value, declared_field_type)
                                 case _:
                                     ()
                 var b = self.builder
@@ -972,9 +1002,31 @@ impl MirLowering:
                 # raw rt_array_set/GEP path below (which treats the string key as
                 # an element offset). Mirrors the dict getter in expr_dispatch.
                 if self.local_is_runtime_dict(receiver):
+                    # `d[k]` is lowered ONCE and reused by both the compound
+                    # read and the write, so a side-effecting key expression
+                    # runs exactly once (same rule as the array arm below).
                     val dict_key = self.lower_dict_key(index)
-                    self.note_container_elem_type(receiver, value_local)
-                    val boxed_value = self.box_runtime_value(value_local)
+                    var dict_value = value_local
+                    if op.?:
+                        # Bug jit_struct_field_compound_assign_loads_zero: the
+                        # read side was missing here too, so `d[k] += v` stored
+                        # `v`. rt_dict_get is the exact inverse of the
+                        # rt_dict_set below (same handle, same tagged key), and
+                        # decode_runtime_value is the inverse of the
+                        # box_runtime_value applied to the stored operand.
+                        val dict_elem_type = self.compound_elem_mir_type(base, receiver, value_local)
+                        val dict_get_op = MirOperand(kind: MirOperandKind.Const(
+                            MirConstValue.Str("rt_dict_get"),
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                        ))
+                        var b_dget = self.builder
+                        val dict_get_res = b_dget.emit_call(dict_get_op, [mir_operand_copy(receiver), mir_operand_copy(dict_key)], MirType.i64())
+                        self.builder = b_dget
+                        if val dict_raw = dict_get_res:
+                            val dict_current = self.decode_runtime_value(dict_raw, dict_elem_type)
+                            dict_value = self.lower_compound_combine(dict_current, op.unwrap(), value_local, dict_elem_type)
+                    self.note_container_elem_type(receiver, dict_value)
+                    val boxed_value = self.box_runtime_value(dict_value)
                     val dict_set_op = MirOperand(kind: MirOperandKind.Const(
                         MirConstValue.Str("rt_dict_set"),
                         MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
@@ -985,8 +1037,31 @@ impl MirLowering:
                     return
                 val index_local = self.lower_expr(index)
                 self.emit_bounds_check_for_index(base.type_, receiver, index_local)
-                self.note_container_elem_type(receiver, value_local)
-                val boxed_value = self.box_runtime_value(value_local)
+                var elem_value = value_local
+                if op.?:
+                    # Bug jit_struct_field_compound_assign_loads_zero: `arr[i]
+                    # += v` stored `v` (probe: [1,2,3] then `arr[1] += 10`
+                    # printed 10, not 12). rt_array_get is the exact inverse of
+                    # the rt_array_set emitted below, and `index_local` /
+                    # `receiver` are the SAME locals the store uses -- the index
+                    # subexpression is lowered once, never twice.
+                    #
+                    # Arrays stay value types: this only restores the READ of
+                    # the element, it does not alias or share the backing
+                    # buffer, and the write below is the unchanged rt_array_set.
+                    val elem_type = self.compound_elem_mir_type(base, receiver, value_local)
+                    val array_get_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("rt_array_get"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.ptr(elem_type, false), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                    ))
+                    var b_aget = self.builder
+                    val array_get_res = b_aget.emit_call(array_get_op, [mir_operand_copy(receiver), mir_operand_copy(index_local)], MirType.i64())
+                    self.builder = b_aget
+                    if val array_raw = array_get_res:
+                        val elem_current = self.decode_runtime_value(array_raw, elem_type)
+                        elem_value = self.lower_compound_combine(elem_current, op.unwrap(), value_local, elem_type)
+                self.note_container_elem_type(receiver, elem_value)
+                val boxed_value = self.box_runtime_value(elem_value)
 
                 # Create function operand for rt_array_set(ptr, i64, i64) -> void.
                 # Mirror the rt_array_get callee shape (see expr_dispatch.spl
@@ -1017,6 +1092,92 @@ impl MirLowering:
             val arg_local = self.lower_expr(arg.value)
             arg_operands = arg_operands.push(mir_operand_copy(arg_local))
         arg_operands
+
+    me lower_compound_combine(current: LocalId, op: HirAssignOp, rhs: LocalId, type_: MirType) -> LocalId:
+        """Read-modify-write core of `place <op>= rhs`.
+
+        `current` MUST already be a load from the very same place the caller is
+        about to store to (see the Field/Index arms of lower_assign, which pass
+        the receiver/field_index/index_local they then reuse for the store).
+        Keeping the combine in one helper is what guarantees the load and the
+        store agree on the place and that the place is resolved exactly once."""
+        val mir_op = self.lower_assign_op(op)
+        var b = self.builder
+        val result = b.emit_binop(mir_op, mir_operand_copy(current), mir_operand_copy(rhs), type_)
+        self.builder = b
+        result
+
+    me compound_field_mir_type(base: HirExpr, receiver: LocalId, field_index: i64, value_local: LocalId) -> MirType:
+        """MIR type for the read side of `obj.f <op>= v`.
+
+        Prefers the OWNER struct's declared field type (the same
+        struct_field_hir_type table the store side consults for the
+        Optional-handle fix-up), so an f64 field is not read back through the
+        i64 default and shredded. Falls back to the RHS local's own MIR type,
+        then to i64."""
+        var result = MirType.i64()
+        var resolved_type = false
+        val field_owner = self.resolve_base_struct_name(base, receiver)
+        if val owner_name = field_owner:
+            if self.struct_field_hir_type.contains(owner_name):
+                val field_types = self.struct_field_hir_type[owner_name]
+                if field_index >= 0 and field_index < field_types.len():
+                    val declared_field_type = field_types[field_index]
+                    match declared_field_type.kind:
+                        case HirTypeKind.Error:
+                            ()
+                        case _:
+                            result = self.lower_type(declared_field_type)
+                            resolved_type = true
+        if not resolved_type:
+            val rhs_type = self.local_mir_type_of(value_local)
+            if val rhs_mir_type = rhs_type:
+                result = rhs_mir_type
+        result
+
+    me compound_elem_mir_type(base: HirExpr, receiver: LocalId, value_local: LocalId) -> MirType:
+        """MIR element type for the read side of `container[k] <op>= v`.
+
+        Mirrors the getter's type resolution in expr_dispatch's `case Index`:
+        the store-observed element type wins (an empty `[]`/`{}` literal pins
+        the declared type at the i64 default, which would decode a heap-boxed
+        f64 as an integer and leak the box pointer), then the container's own
+        MIR/HIR element type, then the RHS local's type, then i64."""
+        var result = MirType.i64()
+        var resolved_type = false
+        if self.runtime_elem_value_type.contains(receiver.id):
+            result = self.runtime_elem_value_type[receiver.id]
+            resolved_type = true
+        if not resolved_type:
+            val container_type = self.local_mir_type_of(receiver)
+            if val container_mir_type = container_type:
+                match container_mir_type.kind:
+                    case MirTypeKind.Array(element_type, _):
+                        result = element_type
+                        resolved_type = true
+                    case MirTypeKind.Slice(element_type):
+                        result = element_type
+                        resolved_type = true
+                    case MirTypeKind.Dict(_, value_type):
+                        result = value_type
+                        resolved_type = true
+                    case _:
+                        ()
+        if not resolved_type and base.has_type_ == true and base.type_ != nil:
+            match base.type_.kind:
+                case HirTypeKind.Array(element_type, _) | HirTypeKind.Slice(element_type):
+                    result = self.lower_type(element_type)
+                    resolved_type = true
+                case HirTypeKind.Dict(_, value_type):
+                    result = self.lower_type(value_type)
+                    resolved_type = true
+                case _:
+                    ()
+        if not resolved_type:
+            val rhs_type = self.local_mir_type_of(value_local)
+            if val rhs_mir_type = rhs_type:
+                result = rhs_mir_type
+        result
 
     me lower_assign_op(op: HirAssignOp) -> MirBinOp:
         """Convert assignment op to binary op."""
