@@ -450,6 +450,8 @@ impl MirToLlvm:
             case "__simple_ssa_phi":
                 if not self.emit_ssa_phi_intrinsic(dest, args):
                     eprint("[mir-to-llvm] ERROR: malformed __simple_ssa_phi intrinsic")
+            case "__simple_coverage_decision_probe" | "__simple_coverage_condition_probe":
+                self.emit_coverage_probe_intrinsic(dest, name, args)
             case "crypto_aes_round":
                 self.emit_aes2_intrinsic(dest, "llvm.x86.aesni.aesenc", args)
             case "crypto_aes_round_last":
@@ -492,6 +494,34 @@ impl MirToLlvm:
                     self.builder.emit("  {dest_name} = call {ret_ty} @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
                 else:
                     self.builder.emit("  call void @__simple_intrinsic_{name}({args_str})  ; intrinsic: {name}")
+
+    me emit_coverage_probe_intrinsic(dest: LocalId?, name: text, args: [MirOperand]):
+        val is_decision = name == "__simple_coverage_decision_probe"
+        val expected = if is_decision: 5 else: 6
+        val result_index = if is_decision: 1 else: 2
+        val file_index = if is_decision: 2 else: 3
+        if dest != nil or args.len() != expected:
+            panic("compile error: malformed coverage probe intrinsic {name}")
+
+        var rendered: [text] = []
+        for i in 0..args.len():
+            val raw = self.translate_operand(args[i])
+            val source_ty = self.valid_llvm_type(self.get_operand_type(args[i]))
+            var target_ty = "i32"
+            if i == result_index:
+                if source_ty != "i1":
+                    panic("compile error: coverage probe result must be bool")
+                target_ty = "i1"
+            elif i == file_index:
+                if source_ty != "ptr":
+                    panic("compile error: coverage probe filename must be text")
+                target_ty = "ptr"
+            elif not is_integer_type(source_ty):
+                panic("compile error: coverage probe IDs and locations must be integers")
+            rendered.push("{target_ty} {self.value_as_type(raw, source_ty, target_ty)}")
+
+        val runtime_name = if is_decision: "rt_coverage_decision_probe" else: "rt_coverage_condition_probe"
+        self.builder.emit("  call void @{runtime_name}({rendered.join(", ")})  ; intrinsic: {name}")
 
     me translate_inline_asm(asm_template: text, is_volatile: bool, inputs: [MirAsmOperand], outputs: [MirAsmOperand], clobbers: [text]):
         """Translate inline assembly to LLVM inline asm call."""

@@ -84,6 +84,7 @@ RUNTIME_STATUS=$(git status --porcelain --untracked-files=all -- "$RUNTIME_DIR")
 
 SOURCE_FILES="
 runtime_native.c
+runtime_coverage_core.c
 runtime_framebuffer.c
 runtime_directx_core.c
 runtime_legacy_core.c
@@ -187,6 +188,7 @@ for declared_input in $SOURCE_FILES $HEADER_FILES; do
     printf '%s\n' "$RUNTIME_DIR/$declared_input" >>"$LOCAL_INPUTS_FILE"
 done
 printf '%s\n' "$RUNTIME_DIR/test/rt_string_free_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
+printf '%s\n' "$RUNTIME_DIR/test/runtime_coverage_core_selfcheck.c" >>"$LOCAL_INPUTS_FILE"
 sort -u -o "$LOCAL_INPUTS_FILE" "$LOCAL_INPUTS_FILE"
 
 ARCHIVE="$TMP_DIR/libsimple_runtime.a"
@@ -245,6 +247,8 @@ REPEAT_ARCHIVE_SHA256=$(hash_file "$REPEAT_ARCHIVE")
     die "archive-nm-failed"
 "$NM_PATH" -g "$OBJECT_DIR/runtime_native.o" >"$TMP_DIR/runtime_native.nm.txt" 2>&1 ||
     die "runtime-native-nm-failed"
+"$NM_PATH" -g "$OBJECT_DIR/runtime_coverage_core.o" >"$TMP_DIR/runtime_coverage_core.nm.txt" 2>&1 ||
+    die "runtime-coverage-core-nm-failed"
 
 nm_has_text_symbol() {
     awk -v expected="$2" '
@@ -267,6 +271,12 @@ for symbol in simple_contract_check simple_contract_check_msg; do
         die "archive-$symbol-provider-missing"
     nm_has_text_symbol "$TMP_DIR/runtime_native.nm.txt" "$symbol" ||
         die "runtime-native-$symbol-provider-missing"
+done
+for symbol in rt_coverage_enabled rt_coverage_clear rt_coverage_dump_sdn rt_coverage_free_sdn rt_coverage_decision_probe rt_coverage_condition_probe; do
+    nm_has_text_symbol "$TMP_DIR/archive.nm.txt" "$symbol" ||
+        die "archive-$symbol-provider-missing"
+    nm_has_text_symbol "$TMP_DIR/runtime_coverage_core.nm.txt" "$symbol" ||
+        die "runtime-coverage-core-$symbol-provider-missing"
 done
 
 PROVIDER_FILE="$TMP_DIR/rt_string_free.providers.txt"
@@ -300,6 +310,20 @@ SELF_CHECK_LIBS="-lm -lpthread"
     die "rt-string-free-selfcheck-failed"
 grep -q '^SELFCHECK PASSED (0 failures)$' "$SELF_CHECK_LOG" ||
     die "rt-string-free-selfcheck-receipt-missing"
+
+COVERAGE_SELF_CHECK_BIN="$TMP_DIR/runtime_coverage_core_selfcheck"
+COVERAGE_SELF_CHECK_LOG="$TMP_DIR/runtime_coverage_core_selfcheck.out"
+# shellcheck disable=SC2086
+"$CC_PATH" -std=gnu11 -O1 \
+    "$RUNTIME_DIR/test/runtime_coverage_core_selfcheck.c" \
+    "$OBJECT_DIR/runtime_coverage_core.o" $SELF_CHECK_LIBS -o "$COVERAGE_SELF_CHECK_BIN" ||
+    die "runtime-coverage-core-selfcheck-link-failed"
+"$COVERAGE_SELF_CHECK_BIN" >"$COVERAGE_SELF_CHECK_LOG" 2>&1 ||
+    die "runtime-coverage-core-selfcheck-failed"
+{
+    echo "runtime_coverage_core_selfcheck=pass"
+    echo "runtime_coverage_core_selfcheck_output_sha256=$(hash_file "$COVERAGE_SELF_CHECK_LOG")"
+} >"$TMP_DIR/runtime-coverage-core-selfcheck.receipt"
 
 HEAD_REVISION=$(git rev-parse HEAD)
 RUNTIME_TREE=$(git rev-parse HEAD:src/runtime)
@@ -339,6 +363,9 @@ MANIFEST="$TMP_DIR/capsule.manifest"
     echo "rt_string_free_provider=runtime_native.o"
     echo "rt_string_free_selfcheck=pass"
     echo "rt_string_free_selfcheck_output_sha256=$(hash_file "$SELF_CHECK_LOG")"
+    echo "runtime_coverage_core_selfcheck=pass"
+    echo "runtime_coverage_core_selfcheck_receipt_sha256=$(hash_file "$TMP_DIR/runtime-coverage-core-selfcheck.receipt")"
+    echo "runtime_coverage_core_selfcheck_output_sha256=$(hash_file "$COVERAGE_SELF_CHECK_LOG")"
     echo "simple_contract_check_archive_symbol=T"
     echo "simple_contract_check_provider=runtime_native.o"
     echo "simple_contract_check_msg_archive_symbol=T"

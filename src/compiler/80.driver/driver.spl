@@ -32,6 +32,7 @@ use compiler.mono.monomorphize_integration.*
 use compiler.semantics.const_fold.{run_const_fold_pass}
 use compiler.semantics.resolve.{resolve_methods}
 use compiler.common.config.*
+use compiler.common.driver_core_types.{source_file_authored_path}
 use compiler.common.attributes.{VhdlHardwareMetadataFlatRow,
     VhdlResetPolarity, VhdlResetSynchrony, parse_vhdl_hardware_attrs}
 use compiler.types.type_system.effect_pass.{run_effect_pass}
@@ -536,7 +537,7 @@ pub class CompilerDriver:
                     closure_idx = closure_idx + 1
                     continue
                 closure_scanned_paths = _driver_text_bucket_set_add(closure_scanned_paths, closure_physical_key)
-                val closure_dir = _driver_entry_import_dirname(closure_src.path)
+                val closure_dir = _driver_entry_import_dirname(source_file_authored_path(closure_src))
                 val closure_imports = _driver_entry_import_module_paths(closure_src.content)
                 if source_trace:
                     print "[load_sources] entry-closure scan {closure_src.path} imports {closure_imports.len()}"
@@ -579,7 +580,7 @@ pub class CompilerDriver:
                         val closure_alias_key = closure_file + "::" + closure_mp
                         if not _driver_text_bucket_set_has(seen_sources, closure_alias_key):
                             seen_sources = _driver_text_bucket_set_add(seen_sources, closure_alias_key)
-                            all_sources = all_sources.push(SourceFile(path: closure_file, content: closure_content, module_name: closure_mp))
+                            all_sources = all_sources.push(SourceFile(path: closure_file, authored_path: closure_file, content: closure_content, module_name: closure_mp))
                             closure_loaded_mods = _driver_text_bucket_set_add(closure_loaded_mods, closure_mp)
                 closure_idx = closure_idx + 1
             if self.ctx.errors.len() == 0:
@@ -662,7 +663,7 @@ pub class CompilerDriver:
                 if (rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
                     dtrace("[BOOTSTRAP-PHASE] phase2:parse:entry {source.path} module={source.module_name}")
                 log_phase("phase2:parse:file:start {source.path} chars={source.content.len()}")
-                val entry_module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
+                val entry_module = parse_full_frontend(source.content, source_file_authored_path(source), source.module_name, self.ctx.logger)
                 log_phase("phase2:parse:file:done {source.path}")
                 # parser_error() only sets the par_had_error flag (par_errors
                 # is a dead list and parser_error_count() a stub returning 0);
@@ -704,7 +705,7 @@ pub class CompilerDriver:
             while boot_idx < sources.len():
                 val source = sources[boot_idx]
                 if _driver_is_bootstrap_entry_source(source.path, source.module_name):
-                    val entry_module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
+                    val entry_module = parse_full_frontend(source.content, source_file_authored_path(source), source.module_name, self.ctx.logger)
                     bootstrap_modules[source.module_name] = entry_module
                 boot_idx = boot_idx + 1
             boot_idx = 0
@@ -743,7 +744,7 @@ pub class CompilerDriver:
         var src_idx = 0
         while src_idx < sources.len():
             val source = sources[src_idx]
-            val module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
+            val module = parse_full_frontend(source.content, source_file_authored_path(source), source.module_name, self.ctx.logger)
             parsed_modules[source.module_name] = module
             src_idx = src_idx + 1
 
@@ -754,7 +755,7 @@ pub class CompilerDriver:
 
     fn parse_source(source: SourceFile) -> Module:
         print "[parse_source] start {source.path} module {source.module_name} len {source.content.len()}"
-        val module = parse_full_frontend(source.content, source.path, source.module_name, self.ctx.logger)
+        val module = parse_full_frontend(source.content, source_file_authored_path(source), source.module_name, self.ctx.logger)
         print "[parse_source] done {source.path}"
         module
 
@@ -775,7 +776,7 @@ pub class CompilerDriver:
         var map_src_idx = 0
         while map_src_idx < self.ctx.sources.len():
             val src = self.ctx.sources[map_src_idx]
-            source_path_map[src.module_name] = src.path
+            source_path_map[src.module_name] = source_file_authored_path(src)
             map_src_idx = map_src_idx + 1
 
         log_debug("lowering modules to HIR")
@@ -858,7 +859,7 @@ pub class CompilerDriver:
                 if entry_module_for_hir != nil:
                     lowering.lower_parser_module_unstub(entry_module_for_hir)
                 else:
-                    val reparsed_entry_module = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
+                    val reparsed_entry_module = parse_full_frontend(src.content, source_file_authored_path(src), name, self.ctx.logger)
                     lowering.lower_parser_module_unstub(reparsed_entry_module)
             elif unstub_hir and (src.content != "") and (not self.ctx.options.low_memory):
                 # Opt-in real lowering via a fresh frontend re-parse (see caveat above).
@@ -867,7 +868,7 @@ pub class CompilerDriver:
                 # (same-name sibling on MirLowering; iteration 17) and the real
                 # HIR lowering body never runs.
                 dtrace("[DRV] branch=unstub_reparse")
-                val entry_module_for_hir = parse_full_frontend(src.content, src.path, name, self.ctx.logger)
+                val entry_module_for_hir = parse_full_frontend(src.content, source_file_authored_path(src), name, self.ctx.logger)
                 val lowered_hm: HirModule = lowering.lower_parser_module_unstub(entry_module_for_hir)
                 dtrace("[DRV] lowered funcs={lowered_hm.functions.len()} name={lowered_hm.name}")
                 lowered_hm
@@ -987,7 +988,7 @@ pub class CompilerDriver:
         # Build module_name -> source_path map for per-module filename tracking.
         var source_path_map2: Dict<text, text> = {}
         for src in ctx.sources:
-            source_path_map2[src.module_name] = src.path
+            source_path_map2[src.module_name] = source_file_authored_path(src)
 
         for src2 in ctx.sources:
             val name = src2.module_name
@@ -1083,6 +1084,9 @@ pub class CompilerDriver:
         val log = self.ctx.logger
         var last_result: Any = BackendResult.Unit
         var has_result = false
+
+        if (self.ctx.config.get("coverage") ?? "") == "1":
+            return CompileResult.RuntimeError("coverage instrumentation requires LLVM native execution; the HIR interpreter does not execute MIR probes")
 
         if self.ctx.sources.len() == 0:
             return CompileResult.RuntimeError("No source file specified for interpret mode")
@@ -1201,6 +1205,11 @@ pub class CompilerDriver:
         log_phase("aot:backend_name:start")
         val backend_name = self.ctx.options.backend
         log_phase("aot:backend_name:done")
+        val coverage_enabled = (self.ctx.config.get("coverage") ?? "") == "1"
+        if coverage_enabled and (backend_name == "" or backend_name == "auto"):
+            return CompileResult.CodegenError("coverage instrumentation requires an explicit LLVM backend; auto backend selection is unsupported")
+        if coverage_enabled and backend_name != "" and backend_name != "auto" and backend_name != "llvm" and backend_name != "llvm-lib" and backend_name != "llvmlib":
+            return CompileResult.CodegenError("coverage instrumentation requires the LLVM backend; unsupported backend: {backend_name}")
         if backend_name == "c" or backend_name == "cpp" or backend_name == "ccodegen":
             return self.compile_to_c(output)
 

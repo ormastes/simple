@@ -60,6 +60,10 @@ fn limit_exceeded_message(result: ProcessResult, options: TestOptions) -> text:
 # =========================================================================
 
 fn run_test_file_interpreter(file_path: text, options: TestOptions) -> TestFileResult:
+    # Coverage probes are MIR-owned. The HIR tree interpreter never executes
+    # them, so route coverage runs through the real LLVM native path.
+    if options.coverage:
+        return run_test_file_native(file_path, options)
     # Fork mode: use fork() + COW instead of subprocess spawn (Linux only)
     # Fork output does not yet carry child coverage payloads back to the parent.
     if options.fork_mode and not options.coverage:
@@ -537,9 +541,23 @@ fn preprocess_spipe_file(file_path: text) -> text:
     if not file_path.ends_with("_spec.spl"):
         return file_path
 
-    val content = read_file_content(file_path)
+    var content = read_file_content(file_path)
     if content == "":
         return file_path
+
+    # Coverage wraps before SPipe preprocessing. Preserve its authenticated
+    # source marker at byte zero instead of indenting it into generated main.
+    var coverage_source_marker = ""
+    val normalized_path = file_path.replace("\\", "/")
+    val marker_slash = normalized_path.last_index_of("/") ?? -1
+    val marker_basename = if marker_slash >= 0: normalized_path[marker_slash + 1:] else: normalized_path
+    if marker_basename.starts_with("simple_cov_"):
+        val marker_newline = content.index_of("\n") ?? -1
+        if marker_newline > 0:
+            val first_line = content[0:marker_newline]
+            if first_line.starts_with("# simple-coverage-source: "):
+                coverage_source_marker = first_line
+                content = content[marker_newline + 1:]
 
     # Split into imports/top-level-defs and body, wrap body in fn main():
     val lines = content.split("\n")
@@ -650,18 +668,30 @@ fn preprocess_spipe_file(file_path: text) -> text:
     val top_level = top_level_parts.join("\n")
     val body = body_parts.join("\n")
     val helpers = if spipe_helpers_used(body, top_level): spipe_inline_helpers() else: ""
-    val wrapped = imports + "\n" + helpers + "\n" + top_level + "\nfn main():\n" + body
+    var wrapped = imports + "\n" + helpers + "\n" + top_level + "\nfn main():\n" + body
+    if coverage_source_marker != "":
+        wrapped = coverage_source_marker + "\n" + wrapped
     val safe_name = file_path.replace("/", "_").replace("\\", "_").replace(":", "_")
     val tmp_path = get_temp_dir() + "/spipe_wrapped_" + safe_name
     file_write(tmp_path, wrapped)
     tmp_path
+
+fn cleanup_native_generated_file(path: text, original_path: text, preserved_path: text, keep_artifacts: bool):
+    if not keep_artifacts and path != "" and path != original_path and path != preserved_path and file_exists(path):
+        file_delete(path)
+
+fn cleanup_native_generated_files(smf_path: text, source_path: text, wrapped_path: text, cleanup_path: text, original_path: text, keep_artifacts: bool):
+    cleanup_native_generated_file(smf_path, original_path, "", keep_artifacts)
+    cleanup_native_generated_file(source_path, original_path, wrapped_path, keep_artifacts)
+    cleanup_native_generated_file(cleanup_path, original_path, "", keep_artifacts)
 
 fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult:
     val binary = find_simple_binary()
     val start = time_now_unix_micros()
     val timeout_ms = options.timeout * 1000
 
-    # Native mode: Compile test file to .smf, then run the .smf
+    # Native mode normally compiles SMF. Coverage must execute the MIR probes,
+    # so it uses the LLVM AOT path and the core-C coverage owner instead.
     # Step 1: Preprocess SPipe files (wrap in fn main())
     val (wrapped_path, cleanup_path) = build_coverage_wrapper(file_path, options)
     val source_path = preprocess_spipe_file(wrapped_path)
@@ -671,8 +701,13 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     # cleanup below used to orphan a stub .smf next to the .spl, which then
     # shadowed the module and poisoned the smf cache (bug doc
     # smf_stub_shadowing_unresolved_describe_2026-07-24.md).
-    val smf_path = get_temp_dir() + "/" + file_path.replace("/", "_").replace("\\", "_").replace(":", "_").replace(".spl", ".smf")
-    var compile_args: [text] = ["compile", source_path, "-o", smf_path]
+    val artifact_suffix = if options.coverage: ".coverage-native" else: ".smf"
+    val smf_path = get_temp_dir() + "/" + file_path.replace("/", "_").replace("\\", "_").replace(":", "_").replace(".spl", artifact_suffix)
+    var compile_args: [text] = []
+    if options.coverage:
+        compile_args = ["native-build", "--backend", "llvm", "--source", "src/lib", "--entry-closure", "--entry", source_path, "--runtime-bundle", "core-c-bootstrap", "--output", smf_path]
+    else:
+        compile_args = ["compile", source_path, "-o", smf_path]
     if options.verbose:
         compile_args.push("--verbose")
         print "[native] Compiling {file_path} to {smf_path}"
@@ -686,9 +721,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         val end = time_now_unix_micros()
         val duration_ms = (end - start) / 1000
         val error_msg = "Compilation failed: {compile_stderr}"
-        if cleanup_path != "" and not options.keep_artifacts:
-            if file_exists(cleanup_path):
-                file_delete(cleanup_path)
+        cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
         return TestFileResult(
             path: file_path,
             passed: 0,
@@ -708,11 +741,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
         if not compiler_manifest_valid or not record_compiler_decision_manifest_sdn(compiler_manifest):
             val end = time_now_unix_micros()
             val duration_ms = (end - start) / 1000
-            if not options.keep_artifacts:
-                if file_exists(smf_path):
-                    file_delete(smf_path)
-                if cleanup_path != "" and file_exists(cleanup_path):
-                    file_delete(cleanup_path)
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
             return TestFileResult(
                 path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: duration_ms, setup_ms: 0,
@@ -724,10 +753,11 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     if options.verbose:
         print "[native] Running {smf_path}"
 
-    var run_args: [text] = [smf_path]
-    if options.gc_log:
+    val run_binary = if options.coverage: smf_path else: binary
+    var run_args: [text] = if options.coverage: [] else: [smf_path]
+    if options.gc_log and not options.coverage:
         run_args.push("--gc-log")
-    if options.gc_off:
+    if options.gc_off and not options.coverage:
         run_args.push("--gc=off")
 
     var stdout = ""
@@ -735,22 +765,18 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     var exit_code = 0
     if (options.max_mem_gb > 0 or options.max_procs > 0) and not options.no_limits:
         val memory_bytes = if options.max_mem_gb > 0: options.max_mem_gb * 1024 * 1024 * 1024 else: 0
-        val result = process_run_with_limits_bounded(binary, run_args, timeout_ms, memory_bytes, 0, 0, options.max_procs, TEST_OUTPUT_CAPTURE_BYTES)
+        val result = process_run_with_limits_bounded(run_binary, run_args, timeout_ms, memory_bytes, 0, 0, options.max_procs, TEST_OUTPUT_CAPTURE_BYTES)
         stdout = result.stdout
         stderr = result.stderr
         exit_code = result.exit_code
         if result.limit_exceeded:
             val end2 = time_now_unix_micros()
             val dur = (end2 - start) / 1000
-            if not options.keep_artifacts:
-                if file_exists(smf_path):
-                    file_delete(smf_path)
-                if cleanup_path != "" and file_exists(cleanup_path):
-                    file_delete(cleanup_path)
+            cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
             return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: 0, pending: 0,
                 duration_ms: dur, setup_ms: 0, error: limit_exceeded_message(result, options), timed_out: false, cached: false)
     else:
-        val (out, err, code) = process_run_bounded(binary, run_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+        val (out, err, code) = process_run_bounded(run_binary, run_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
         stdout = out
         stderr = err
         exit_code = code
@@ -758,11 +784,7 @@ fn run_test_file_native(file_path: text, options: TestOptions) -> TestFileResult
     val duration_ms = (end - start) / 1000
 
     # Clean up .smf artifact unless keeping
-    if not options.keep_artifacts:
-        if file_exists(smf_path):
-            file_delete(smf_path)
-        if cleanup_path != "" and file_exists(cleanup_path):
-            file_delete(cleanup_path)
+    cleanup_native_generated_files(smf_path, source_path, wrapped_path, cleanup_path, file_path, options.keep_artifacts)
 
     if options.coverage:
         val combined = stdout + "\n" + stderr
@@ -830,4 +852,4 @@ export use std.test_runner.test_executor_parsing.{find_simple_binary, find_simpl
 export use std.test_runner.test_executor_composite.{run_test_file_composite, extract_base_runtime, extract_platform_layer, extract_arch_from_spec, run_test_file_baremetal, run_test_file_remote, run_test_file_baremetal_via_interpreter, run_test_file_baremetal_qemu, find_baremetal_elf, qemu_binary_for_arch, qemu_machine_for_arch}
 
 # Exports from this file
-export run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe
+export run_test_file_interpreter, run_test_file_smf, run_test_file_native, run_test_file_safe, preprocess_spipe_file
