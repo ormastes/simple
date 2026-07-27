@@ -352,34 +352,35 @@ fn expand_var(text: text) -> text:
     var pos = 0
 
     while pos < result.len():
-        val dollar_pos = result.substring(pos).find("$")
-        if not dollar_pos.?:
+        # find returns a plain i64 (-1 == not found), not an Option — see the
+        # matching guard below at `close_offset >= 0`. The previous `.?` guard
+        # was wrong in BOTH directions (on the JIT `.?` on an i64 is a
+        # zero-test: it fired for a valid match at index 0, breaking expansion
+        # of a leading "$VAR", and did not fire for the -1 sentinel), and the
+        # `Some(offset)/nil` match below destructured a non-Option.
+        val dollar_idx = result.substring(pos).find("$")
+        if dollar_idx < 0:
             break
 
-        val start = match dollar_pos:
-            Some(offset):
-                pos + offset
-            nil:
-                break
+        val start = pos + dollar_idx
         if start + 1 >= result.len():
             break
 
         if result[start + 1] == "{":
             # Find closing brace
-            val close_pos = result.substring(start + 2).find("}")
-            match close_pos:
-                Some(close_offset):
-                    val close_idx = start + 2 + close_offset
-                    val var_expr = result.substring(start + 2, close_idx)
-                    val expanded = expand_var_expr(var_expr)
+            val close_offset = result.substring(start + 2).find("}")
+            if close_offset >= 0:
+                val close_idx = start + 2 + close_offset
+                val var_expr = result.substring(start + 2, close_idx)
+                val expanded = expand_var_expr(var_expr)
 
-                    # Replace ${...} with expanded value
-                    val before = result.substring(0, start)
-                    val after = result.substring(close_idx + 1)
-                    result = before + expanded + after
-                    pos = start + expanded.len()
-                nil:
-                    pos = start + 2
+                # Replace ${...} with expanded value
+                val before = result.substring(0, start)
+                val after = result.substring(close_idx + 1)
+                result = before + expanded + after
+                pos = start + expanded.len()
+            else:
+                pos = start + 2
         else:
             pos = start + 1
 
@@ -391,29 +392,27 @@ fn expand_var_expr(expr: text) -> text:
     Internal helper for expand_var.
     """
     # Check for :- (use default)
-    val default_pos = expr.find(":-")
-    match default_pos:
-        Some(sep_idx):
-            val var_name = expr.substring(0, sep_idx)
-            val default_val = expr.substring(sep_idx + 2)
-            return env_get_or(key: var_name, default: default_val)
-        nil:
-            pass_do_nothing("no default separator")
+    val sep_idx = expr.find(":-")
+    if sep_idx >= 0:
+        val var_name = expr.substring(0, sep_idx)
+        val default_val = expr.substring(sep_idx + 2)
+        return env_get_or(key: var_name, default: default_val)
+    else:
+        pass_do_nothing("no default separator")
 
     # Check for := (set default)
-    val set_pos = expr.find(":=")
-    match set_pos:
-        Some(sep_idx):
-            val var_name = expr.substring(0, sep_idx)
-            val default_val = expr.substring(sep_idx + 2)
+    val sep_idx = expr.find(":=")
+    if sep_idx >= 0:
+        val var_name = expr.substring(0, sep_idx)
+        val default_val = expr.substring(sep_idx + 2)
 
-            if not env_has(var_name):
-                env_set(key: var_name, value: default_val)
-                return default_val
-            else:
-                return env_get(var_name)
-        nil:
-            pass_do_nothing("no set-default separator")
+        if not env_has(var_name):
+            env_set(key: var_name, value: default_val)
+            return default_val
+        else:
+            return env_get(var_name)
+    else:
+        pass_do_nothing("no set-default separator")
 
     # Simple variable
     env_get(expr)

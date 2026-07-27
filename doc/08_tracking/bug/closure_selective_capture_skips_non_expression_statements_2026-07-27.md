@@ -5,8 +5,54 @@
   symptom is "sspec `describe`-level fixtures are not visible inside `it`", which pushes every
   spec author to module-level state.
 - **Component:** compiler — closure free-variable analysis. **NOT** the spec library.
-- **Status:** OPEN, not fixed. Lane FIXTURE is forbidden from patching `src/compiler_rust/**`
-  (parallel lanes live in both compiler trees).
+- **Status:** **FIXED 2026-07-27 (lane CAPFIX)** in the Rust compiler tree. Both walkers now
+  descend into every statement form and into match arms, with sequential shadowing. Regression
+  spec: `test/01_unit/compiler/closure_capture_statements_spec.spl` (30 examples; 22 of them fail
+  on the pre-fix binary, 0 after). See "Fix" below. Not yet ported to the pure-Simple
+  `src/compiler` tree — see "Remaining".
+
+## Fix (2026-07-27, lane CAPFIX)
+
+Both free-variable walkers were rewritten as proper scope-aware walkers:
+
+- `src/compiler_rust/compiler/src/interpreter/expr/control.rs` — `collect_free_vars`
+- `src/compiler_rust/compiler/src/hir/lower/expr/control.rs` — `collect_used_identifiers`
+
+Each now has a statement walker (`Node::Let`/`Const`/`Static`/`Assignment`/`Return`/`If` incl.
+`elif`/`else`/`if let`, `Match`, `For`, `While` incl. `while let`, `Loop`, `Break`, `Defer`,
+`ErrDefer`, `Guard`, `Assert`/`Assume`/`Admit`, `Calc`, `Context`, `With`, nested `Function`)
+plus a block walker that treats a statement list as a lexical scope, and match arms are walked
+through their bodies rather than only their `Node::Expression` statements. The expression walker
+also gained the arms it silently dropped (`Range`, `Await`, `Try`, `ForceUnwrap`, `ExistsCheck`,
+`Unwrap*`/`Cast*`/`Coalesce`, `OptionalChain`/`OptionalMethodCall`, `Slice`, `Dict`,
+comprehensions, `Spread`, `ArrayRepeat`, `LabeledTuple`, `TupleIndex`, `StructInit` spread,
+`Go`, `KernelLaunch`, `Forall`/`Exists`) — and, in the HIR/JIT twin, an `Expr::DoBlock` arm,
+which did not exist at all: that is why a `fn(): ...` block body captured *nothing* under the
+JIT, including the direct read (row KA).
+
+Shadowing is honoured **sequentially**: a `val`/`var`, `for` binder, `if let`/`while let`
+pattern, match-arm pattern, `with ... as` name, or nested lambda parameter removes the name from
+the free set for the statements it covers, but a binder's own initializer is walked *before* the
+binder exists, so `val fx = fx + 1` still captures the outer `fx`. Bindings introduced inside a
+nested block are dropped at the end of that block, so a later read is captured again (an
+over-capture, which is the safe direction — the filter is only an optimisation).
+
+### Verified truth table (both engines, fixed binary)
+
+`h_matrix.spl` H1-H10, `h2_same_it.spl` P1/P3/P4/P5, and `k2_plain.spl` KA-KF: every row that
+failed above now passes, and every previously passing row still passes. `k2_plain` prints
+`KA_DIRECT=10 KB_LET=10 KC_LETADD=11 KD_ASSIGN=10 KE_FOR=10 KF_IF=10` under both the JIT and the
+interpreter — the silent-`0` substitution is gone.
+
+### Remaining
+
+- The pure-Simple self-hosted compiler (`src/compiler`) has not been checked for the same hole;
+  lanes were live there and it is out of this lane's scope.
+- Separate, pre-existing, NOT a capture defect: block-local binder lifetime. `val fx = 55` inside
+  an `if` body and a `for fx in ...` binder both leak into the enclosing scope, identically inside
+  and outside closures, and the JIT and interpreter disagree about the `if` case (55 vs 10;
+  probe `build/capfix/scope_probe.spl`, same result on the pre-fix binary). The regression spec
+  deliberately does not pin that behaviour.
 
 ## Summary
 

@@ -1072,108 +1072,451 @@ impl Lowerer {
 
 /// Collect all identifiers used in an expression tree.
 ///
-/// This function walks the expression tree and collects all variable
-/// identifiers that are referenced. Used for lambda capture optimization.
+/// Walks the expression tree **and every statement form inside blocks**, and
+/// collects the variable identifiers that are *free*: referenced without being
+/// bound earlier inside the walked body by a `val`/`var`, a `for` binder, an
+/// `if let`/`while let` pattern, a match-arm pattern, a `with ... as` name, or a
+/// nested lambda parameter. Used for lambda capture optimization.
+///
+/// History: this walker used to descend only into `Node::Expression` statements
+/// and had no `Expr::DoBlock` arm at all, so a `fn(): ...` block body captured
+/// nothing and outer locals silently lowered to `0` under the JIT. See
+/// `doc/08_tracking/bug/closure_selective_capture_skips_non_expression_statements_2026-07-27.md`.
+///
+/// Over-capturing is harmless (the filter is only an optimisation);
+/// under-capturing is a correctness bug. Shadowing is honoured *sequentially*,
+/// so `val x = x` still counts the outer `x` as used by its own initializer.
 fn collect_used_identifiers(expr: &Expr) -> HashSet<String> {
     let mut identifiers = HashSet::new();
-    collect_identifiers_recursive(expr, &mut identifiers);
+    let mut bound: Vec<String> = Vec::new();
+    collect_identifiers_recursive(expr, &mut bound, &mut identifiers);
     identifiers
 }
 
-/// Recursively walk the expression tree and collect identifiers.
-fn collect_identifiers_recursive(expr: &Expr, identifiers: &mut HashSet<String>) {
+/// Record `name` as used unless a binder inside the walked body owns it.
+fn note_used_identifier(name: &str, bound: &[String], identifiers: &mut HashSet<String>) {
+    if !bound.iter().any(|b| b == name) {
+        identifiers.insert(name.to_string());
+    }
+}
+
+/// Add every name a pattern binds to `bound`; literal/range patterns instead
+/// *read* their sub-expressions.
+fn bind_pattern_identifiers(pattern: &Pattern, bound: &mut Vec<String>, identifiers: &mut HashSet<String>) {
+    match pattern {
+        Pattern::Identifier(name) | Pattern::MutIdentifier(name) | Pattern::MoveIdentifier(name) => {
+            bound.push(name.clone());
+        }
+        Pattern::Tuple(pats) | Pattern::Array(pats) | Pattern::Or(pats) => {
+            for p in pats {
+                bind_pattern_identifiers(p, bound, identifiers);
+            }
+        }
+        Pattern::Struct { fields, .. } => {
+            for (_, p) in fields {
+                bind_pattern_identifiers(p, bound, identifiers);
+            }
+        }
+        Pattern::Enum { payload: Some(pats), .. } => {
+            for p in pats {
+                bind_pattern_identifiers(p, bound, identifiers);
+            }
+        }
+        Pattern::Typed { pattern, .. } => bind_pattern_identifiers(pattern, bound, identifiers),
+        Pattern::Literal(e) => collect_identifiers_recursive(e, bound, identifiers),
+        Pattern::Range { start, end, .. } => {
+            collect_identifiers_recursive(start, bound, identifiers);
+            collect_identifiers_recursive(end, bound, identifiers);
+        }
+        Pattern::Wildcard | Pattern::Rest | Pattern::Enum { payload: None, .. } => {}
+    }
+}
+
+/// Walk a statement list as a lexical scope: binders introduced inside it are
+/// visible to the statements that follow, and dropped at the end of the block.
+fn collect_identifiers_block(
+    stmts: &[simple_parser::ast::Node],
+    bound: &mut Vec<String>,
+    identifiers: &mut HashSet<String>,
+) {
+    let mark = bound.len();
+    for stmt in stmts {
+        collect_identifiers_stmt(stmt, bound, identifiers);
+    }
+    bound.truncate(mark);
+}
+
+fn collect_identifiers_arms(arms: &[MatchArm], bound: &mut Vec<String>, identifiers: &mut HashSet<String>) {
+    for arm in arms {
+        let mark = bound.len();
+        bind_pattern_identifiers(&arm.pattern, bound, identifiers);
+        if let Some(guard) = &arm.guard {
+            collect_identifiers_recursive(guard, bound, identifiers);
+        }
+        collect_identifiers_block(&arm.body.statements, bound, identifiers);
+        bound.truncate(mark);
+    }
+}
+
+fn collect_identifiers_defer(
+    body: &simple_parser::ast::DeferBody,
+    bound: &mut Vec<String>,
+    identifiers: &mut HashSet<String>,
+) {
+    match body {
+        simple_parser::ast::DeferBody::Expr(e) => collect_identifiers_recursive(e, bound, identifiers),
+        simple_parser::ast::DeferBody::Block(b) => collect_identifiers_block(&b.statements, bound, identifiers),
+    }
+}
+
+/// Walk a single statement, collecting free reads and registering its binders.
+fn collect_identifiers_stmt(
+    stmt: &simple_parser::ast::Node,
+    bound: &mut Vec<String>,
+    identifiers: &mut HashSet<String>,
+) {
+    use simple_parser::ast::Node;
+    match stmt {
+        Node::Expression(e) => collect_identifiers_recursive(e, bound, identifiers),
+        Node::Let(l) => {
+            // Initializer is evaluated BEFORE the binder exists: `val x = x`
+            // reads the outer `x`.
+            if let Some(v) = &l.value {
+                collect_identifiers_recursive(v, bound, identifiers);
+            }
+            bind_pattern_identifiers(&l.pattern, bound, identifiers);
+        }
+        Node::Const(c) => {
+            collect_identifiers_recursive(&c.value, bound, identifiers);
+            bound.push(c.name.clone());
+        }
+        Node::Static(s) => {
+            collect_identifiers_recursive(&s.value, bound, identifiers);
+            bound.push(s.name.clone());
+        }
+        Node::Assignment(a) => {
+            // The target counts as a read: compound ops (`x += 1`) read it, and
+            // `x.f = v` / `x[i] = v` need the receiver present either way.
+            collect_identifiers_recursive(&a.target, bound, identifiers);
+            collect_identifiers_recursive(&a.value, bound, identifiers);
+        }
+        Node::Return(r) => {
+            if let Some(v) = &r.value {
+                collect_identifiers_recursive(v, bound, identifiers);
+            }
+        }
+        Node::If(i) => {
+            let mark = bound.len();
+            collect_identifiers_recursive(&i.condition, bound, identifiers);
+            if let Some(p) = &i.let_pattern {
+                bind_pattern_identifiers(p, bound, identifiers);
+            }
+            collect_identifiers_block(&i.then_block.statements, bound, identifiers);
+            bound.truncate(mark);
+            for (pat, cond, blk) in &i.elif_branches {
+                let elif_mark = bound.len();
+                collect_identifiers_recursive(cond, bound, identifiers);
+                if let Some(p) = pat {
+                    bind_pattern_identifiers(p, bound, identifiers);
+                }
+                collect_identifiers_block(&blk.statements, bound, identifiers);
+                bound.truncate(elif_mark);
+            }
+            if let Some(eb) = &i.else_block {
+                collect_identifiers_block(&eb.statements, bound, identifiers);
+            }
+        }
+        Node::Match(m) => {
+            collect_identifiers_recursive(&m.subject, bound, identifiers);
+            collect_identifiers_arms(&m.arms, bound, identifiers);
+        }
+        Node::For(f) => {
+            collect_identifiers_recursive(&f.iterable, bound, identifiers);
+            let mark = bound.len();
+            bind_pattern_identifiers(&f.pattern, bound, identifiers);
+            collect_identifiers_block(&f.body.statements, bound, identifiers);
+            bound.truncate(mark);
+        }
+        Node::While(w) => {
+            let mark = bound.len();
+            collect_identifiers_recursive(&w.condition, bound, identifiers);
+            if let Some(p) = &w.let_pattern {
+                bind_pattern_identifiers(p, bound, identifiers);
+            }
+            collect_identifiers_block(&w.body.statements, bound, identifiers);
+            bound.truncate(mark);
+        }
+        Node::Loop(l) => collect_identifiers_block(&l.body.statements, bound, identifiers),
+        Node::Break(b) => {
+            if let Some(v) = &b.value {
+                collect_identifiers_recursive(v, bound, identifiers);
+            }
+        }
+        Node::Defer(d) => collect_identifiers_defer(&d.body, bound, identifiers),
+        Node::ErrDefer(d) => collect_identifiers_defer(&d.body, bound, identifiers),
+        Node::Guard(g) => {
+            if let Some(c) = &g.condition {
+                collect_identifiers_recursive(c, bound, identifiers);
+            }
+            collect_identifiers_recursive(&g.result, bound, identifiers);
+        }
+        Node::Assert(a) => collect_identifiers_recursive(&a.condition, bound, identifiers),
+        Node::Assume(a) => collect_identifiers_recursive(&a.condition, bound, identifiers),
+        Node::Admit(a) => collect_identifiers_recursive(&a.condition, bound, identifiers),
+        Node::Calc(c) => {
+            for step in &c.steps {
+                collect_identifiers_recursive(&step.expr, bound, identifiers);
+            }
+        }
+        Node::Context(c) => {
+            collect_identifiers_recursive(&c.context, bound, identifiers);
+            collect_identifiers_block(&c.body.statements, bound, identifiers);
+        }
+        Node::With(w) => {
+            collect_identifiers_recursive(&w.resource, bound, identifiers);
+            let mark = bound.len();
+            if let Some(n) = &w.name {
+                bound.push(n.clone());
+            }
+            collect_identifiers_block(&w.body.statements, bound, identifiers);
+            bound.truncate(mark);
+        }
+        Node::Function(f) => {
+            let mark = bound.len();
+            for p in &f.params {
+                if let Some(default) = &p.default {
+                    collect_identifiers_recursive(default, bound, identifiers);
+                }
+            }
+            for p in &f.params {
+                bound.push(p.name.clone());
+            }
+            collect_identifiers_block(&f.body.statements, bound, identifiers);
+            bound.truncate(mark);
+        }
+        // Type/module declarations and no-op statements contribute no reads.
+        _ => {}
+    }
+}
+
+/// Recursively walk the expression tree and collect free identifiers.
+fn collect_identifiers_recursive(expr: &Expr, bound: &mut Vec<String>, identifiers: &mut HashSet<String>) {
     match expr {
         Expr::Identifier(name) => {
-            identifiers.insert(name.clone());
+            note_used_identifier(name, bound, identifiers);
         }
         Expr::Binary { left, right, .. } => {
-            collect_identifiers_recursive(left, identifiers);
-            collect_identifiers_recursive(right, identifiers);
+            collect_identifiers_recursive(left, bound, identifiers);
+            collect_identifiers_recursive(right, bound, identifiers);
         }
         Expr::Unary { operand, .. } => {
-            collect_identifiers_recursive(operand, identifiers);
+            collect_identifiers_recursive(operand, bound, identifiers);
         }
         Expr::Call { callee, args } => {
-            collect_identifiers_recursive(callee, identifiers);
+            collect_identifiers_recursive(callee, bound, identifiers);
             for arg in args {
-                collect_identifiers_recursive(&arg.value, identifiers);
+                collect_identifiers_recursive(&arg.value, bound, identifiers);
             }
         }
-        Expr::MethodCall { receiver, args, .. } => {
-            collect_identifiers_recursive(receiver, identifiers);
+        Expr::KernelLaunch {
+            kernel,
+            grid,
+            block,
+            args,
+        } => {
+            collect_identifiers_recursive(kernel, bound, identifiers);
+            collect_identifiers_recursive(grid, bound, identifiers);
+            collect_identifiers_recursive(block, bound, identifiers);
             for arg in args {
-                collect_identifiers_recursive(&arg.value, identifiers);
+                collect_identifiers_recursive(&arg.value, bound, identifiers);
             }
         }
-        Expr::FieldAccess { receiver, .. } => {
-            collect_identifiers_recursive(receiver, identifiers);
+        Expr::MethodCall { receiver, args, .. } | Expr::OptionalMethodCall { receiver, args, .. } => {
+            collect_identifiers_recursive(receiver, bound, identifiers);
+            for arg in args {
+                collect_identifiers_recursive(&arg.value, bound, identifiers);
+            }
+        }
+        Expr::FieldAccess { receiver, .. } | Expr::TupleIndex { receiver, .. } => {
+            collect_identifiers_recursive(receiver, bound, identifiers);
         }
         Expr::Index { receiver, index } => {
-            collect_identifiers_recursive(receiver, identifiers);
-            collect_identifiers_recursive(index, identifiers);
+            collect_identifiers_recursive(receiver, bound, identifiers);
+            collect_identifiers_recursive(index, bound, identifiers);
+        }
+        Expr::Slice {
+            receiver,
+            start,
+            end,
+            step,
+        } => {
+            collect_identifiers_recursive(receiver, bound, identifiers);
+            for part in [start, end, step].into_iter().flatten() {
+                collect_identifiers_recursive(part, bound, identifiers);
+            }
         }
         Expr::Tuple(exprs) | Expr::Array(exprs) | Expr::VecLiteral(exprs) => {
             for e in exprs {
-                collect_identifiers_recursive(e, identifiers);
+                collect_identifiers_recursive(e, bound, identifiers);
             }
         }
+        Expr::LabeledTuple(fields) => {
+            for field in fields {
+                collect_identifiers_recursive(&field.value, bound, identifiers);
+            }
+        }
+        Expr::ArrayRepeat { value, count } => {
+            collect_identifiers_recursive(value, bound, identifiers);
+            collect_identifiers_recursive(count, bound, identifiers);
+        }
+        Expr::Dict(entries) => {
+            for (k, v) in entries {
+                collect_identifiers_recursive(k, bound, identifiers);
+                collect_identifiers_recursive(v, bound, identifiers);
+            }
+        }
+        Expr::ListComprehension {
+            expr,
+            pattern,
+            iterable,
+            condition,
+        } => {
+            collect_identifiers_recursive(iterable, bound, identifiers);
+            let mark = bound.len();
+            bind_pattern_identifiers(pattern, bound, identifiers);
+            collect_identifiers_recursive(expr, bound, identifiers);
+            if let Some(c) = condition {
+                collect_identifiers_recursive(c, bound, identifiers);
+            }
+            bound.truncate(mark);
+        }
+        Expr::DictComprehension {
+            key,
+            value,
+            pattern,
+            iterable,
+            condition,
+        } => {
+            collect_identifiers_recursive(iterable, bound, identifiers);
+            let mark = bound.len();
+            bind_pattern_identifiers(pattern, bound, identifiers);
+            collect_identifiers_recursive(key, bound, identifiers);
+            collect_identifiers_recursive(value, bound, identifiers);
+            if let Some(c) = condition {
+                collect_identifiers_recursive(c, bound, identifiers);
+            }
+            bound.truncate(mark);
+        }
         Expr::If {
+            let_pattern,
             condition,
             then_branch,
             else_branch,
-            ..
         } => {
-            collect_identifiers_recursive(condition, identifiers);
-            collect_identifiers_recursive(then_branch, identifiers);
+            let mark = bound.len();
+            collect_identifiers_recursive(condition, bound, identifiers);
+            if let Some(p) = let_pattern {
+                bind_pattern_identifiers(p, bound, identifiers);
+            }
+            collect_identifiers_recursive(then_branch, bound, identifiers);
+            bound.truncate(mark);
             if let Some(eb) = else_branch {
-                collect_identifiers_recursive(eb, identifiers);
+                collect_identifiers_recursive(eb, bound, identifiers);
             }
         }
-        Expr::Lambda { body, .. } => {
-            // Note: We don't exclude lambda params here since they shadow outer scope
-            // The actual capture filtering happens when we compare against ctx.locals
-            collect_identifiers_recursive(body, identifiers);
+        Expr::Lambda { params, body, .. } => {
+            // Nested lambda params shadow the outer scope, so they are not free.
+            let mark = bound.len();
+            for p in params {
+                bound.push(p.name.clone());
+            }
+            collect_identifiers_recursive(body, bound, identifiers);
+            bound.truncate(mark);
         }
-        Expr::Cast { expr, .. } => {
-            collect_identifiers_recursive(expr, identifiers);
+        Expr::Go { args, params, body } => {
+            for a in args {
+                collect_identifiers_recursive(a, bound, identifiers);
+            }
+            let mark = bound.len();
+            for p in params {
+                bound.push(p.clone());
+            }
+            collect_identifiers_recursive(body, bound, identifiers);
+            bound.truncate(mark);
+        }
+        Expr::Cast { expr, .. }
+        | Expr::CastOrReturn { expr, .. }
+        | Expr::New { expr, .. }
+        | Expr::ContractOld(expr)
+        | Expr::Await(expr)
+        | Expr::Try(expr)
+        | Expr::ForceUnwrap(expr)
+        | Expr::ExistsCheck(expr)
+        | Expr::UnwrapOrReturn(expr)
+        | Expr::Spread(expr)
+        | Expr::DictSpread(expr)
+        | Expr::OptionalChain { expr, .. } => {
+            collect_identifiers_recursive(expr, bound, identifiers);
+        }
+        Expr::UnwrapOr { expr, default }
+        | Expr::CastOr { expr, default, .. }
+        | Expr::Coalesce { expr, default } => {
+            collect_identifiers_recursive(expr, bound, identifiers);
+            collect_identifiers_recursive(default, bound, identifiers);
+        }
+        Expr::UnwrapElse { expr, fallback_fn } | Expr::CastElse { expr, fallback_fn, .. } => {
+            collect_identifiers_recursive(expr, bound, identifiers);
+            collect_identifiers_recursive(fallback_fn, bound, identifiers);
+        }
+        Expr::Range { start, end, .. } => {
+            for part in [start, end].into_iter().flatten() {
+                collect_identifiers_recursive(part, bound, identifiers);
+            }
+        }
+        Expr::FunctionalUpdate { target, args, .. } => {
+            collect_identifiers_recursive(target, bound, identifiers);
+            for arg in args {
+                collect_identifiers_recursive(&arg.value, bound, identifiers);
+            }
         }
         Expr::FString { parts, .. } => {
             for part in parts {
                 match part {
                     simple_parser::FStringPart::Expr(e) | simple_parser::FStringPart::ExprWithFormat(e, _) => {
-                        collect_identifiers_recursive(e, identifiers);
+                        collect_identifiers_recursive(e, bound, identifiers);
                     }
                     _ => {}
                 }
             }
         }
-        Expr::StructInit { fields, .. } => {
+        Expr::StructInit { fields, spread, .. } => {
             for (_, value) in fields {
-                collect_identifiers_recursive(value, identifiers);
+                collect_identifiers_recursive(value, bound, identifiers);
+            }
+            if let Some(s) = spread {
+                collect_identifiers_recursive(s, bound, identifiers);
             }
         }
-        Expr::New { expr, .. } => {
-            collect_identifiers_recursive(expr, identifiers);
-        }
         Expr::Yield(Some(v)) => {
-            collect_identifiers_recursive(v, identifiers);
+            collect_identifiers_recursive(v, bound, identifiers);
         }
         Expr::Yield(None) => {}
         Expr::Spawn(inner) => {
-            collect_identifiers_recursive(inner, identifiers);
+            collect_identifiers_recursive(inner, bound, identifiers);
+        }
+        Expr::Forall { pattern, range, predicate } | Expr::Exists { pattern, range, predicate } => {
+            collect_identifiers_recursive(range, bound, identifiers);
+            let mark = bound.len();
+            bind_pattern_identifiers(pattern, bound, identifiers);
+            collect_identifiers_recursive(predicate, bound, identifiers);
+            bound.truncate(mark);
         }
         Expr::Match { subject, arms } => {
-            collect_identifiers_recursive(subject, identifiers);
-            for arm in arms {
-                if let Some(guard) = &arm.guard {
-                    collect_identifiers_recursive(guard, identifiers);
-                }
-                for stmt in &arm.body.statements {
-                    if let simple_parser::ast::Node::Expression(e) = stmt {
-                        collect_identifiers_recursive(e, identifiers);
-                    }
-                }
-            }
+            collect_identifiers_recursive(subject, bound, identifiers);
+            collect_identifiers_arms(arms, bound, identifiers);
+        }
+        Expr::DoBlock(nodes) | Expr::UnsafeBlock(nodes) => {
+            collect_identifiers_block(nodes, bound, identifiers);
         }
         // Literals and other expressions that don't contain identifiers
         _ => {}
