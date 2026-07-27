@@ -1,6 +1,7 @@
 use std.skia.feature.glyph.ot_parser.{OtFont, find_table, read_u16_be, read_i16_be, read_u32_be, read_f2dot14}
 use std.skia.feature.glyph.ot_parser_layout.GposLookup
-use std.skia.feature.shaper.ot_layout_context.LayoutGlyphRecord
+use std.skia.feature.shaper.ot_layout_context.{LayoutGlyphRecord,
+    layout_context_lookup_flag_syntax_valid, layout_context_lookup_class_accepts}
 
 class GposDataHit:
     index: i64
@@ -416,27 +417,64 @@ fn gpos_data_anchor_adjusted(font: OtFont, offset: i64, limit: i64,
     GposDataAnchor(x: read_i16_be(font.blob, offset + 2) as i64 + x_delta.delta,
         y: read_i16_be(font.blob, offset + 4) as i64 + y_delta.delta, valid: true)
 
-fn gpos_data_glyph_class(font: OtFont, glyph: u32, budget: GposDataBudget) -> GposDataHit:
+fn _gpos_data_gdef_bounds(font: OtFont) -> Option<(i64, i64, i64)>:
     val table = match find_table(font, 1195656006u32):
         Some(value): value
-        None: return GposDataHit(index: 0, count: 0, found: false, valid: false)
+        None: return None
     val base = table.offset as i64
     val limit = base + table.length as i64
-    if base + 12 > limit: return GposDataHit(index: 0, count: 0, found: false, valid: false)
-    val offset = read_u16_be(font.blob, base + 4) as i64
-    if offset == 0: return GposDataHit(index: 0, count: 0, found: false, valid: false)
-    gpos_data_class(font.blob, base + offset, limit, glyph, budget)
-fn gpos_data_in_mark_set(font: OtFont, set: i64, glyph: u32, budget: GposDataBudget) -> GposDataHit:
-    val table = match find_table(font, 1195656006u32):
-        Some(value): value
-        None: return GposDataHit(index: 0, count: 0, found: false, valid: false)
-    val base = table.offset as i64
-    val limit = base + table.length as i64
-    if base + 14 > limit: return GposDataHit(index: 0, count: 0, found: false, valid: false)
+    if base < 0 or limit < base or limit > font.blob.len() or base + 12 > limit: return None
     val version = read_u32_be(font.blob, base)
-    if version < 65538u32: return GposDataHit(index: 0, count: 0, found: false, valid: false)
+    val header_size = if version == 65536u32:
+        12
+    else if version == 65538u32:
+        14
+    else if version == 65539u32:
+        18
+    else:
+        return None
+    if base + header_size > limit: return None
+    Some((base, limit, header_size))
+
+fn gpos_data_glyph_class(font: OtFont, glyph: u32, budget: GposDataBudget) -> GposDataHit:
+    val bounds = match _gpos_data_gdef_bounds(font):
+        Some(value): value
+        None: return GposDataHit(index: 0, count: 0, found: false, valid: false)
+    val base = bounds.0
+    val limit = bounds.1
+    val offset = read_u16_be(font.blob, base + 4) as i64
+    if offset < bounds.2 or base + offset + 4 > limit:
+        return GposDataHit(index: 0, count: 0, found: false, valid: false)
+    val hit = gpos_data_class(font.blob, base + offset, limit, glyph, budget)
+    if not hit.valid or hit.index > 4:
+        return GposDataHit(index: 0, count: 0, found: false, valid: false)
+    hit
+
+fn gpos_data_mark_attach_class(font: OtFont, glyph: u32, budget: GposDataBudget) -> GposDataHit:
+    val bounds = match _gpos_data_gdef_bounds(font):
+        Some(value): value
+        None: return GposDataHit(index: 0, count: 0, found: false, valid: false)
+    val base = bounds.0
+    val limit = bounds.1
+    val offset = read_u16_be(font.blob, base + 10) as i64
+    if offset < bounds.2 or base + offset + 4 > limit:
+        return GposDataHit(index: 0, count: 0, found: false, valid: false)
+    val hit = gpos_data_class(font.blob, base + offset, limit, glyph, budget)
+    if not hit.valid or hit.index > 255:
+        return GposDataHit(index: 0, count: 0, found: false, valid: false)
+    hit
+
+fn gpos_data_in_mark_set(font: OtFont, set: i64, glyph: u32, budget: GposDataBudget) -> GposDataHit:
+    val bounds = match _gpos_data_gdef_bounds(font):
+        Some(value): value
+        None: return GposDataHit(index: 0, count: 0, found: false, valid: false)
+    val base = bounds.0
+    val limit = bounds.1
+    val version = read_u32_be(font.blob, base)
+    if version != 65538u32 and version != 65539u32:
+        return GposDataHit(index: 0, count: 0, found: false, valid: false)
     val offset = read_u16_be(font.blob, base + 12) as i64
-    if offset == 0 or base + offset + 4 > limit:
+    if offset < bounds.2 or base + offset + 4 > limit:
         return GposDataHit(index: 0, count: 0, found: false, valid: false)
     val defs = base + offset
     if read_u16_be(font.blob, defs) != 1u32:
@@ -445,22 +483,43 @@ fn gpos_data_in_mark_set(font: OtFont, set: i64, glyph: u32, budget: GposDataBud
     if set < 0 or set >= count or defs + 4 + count * 4 > limit:
         return GposDataHit(index: 0, count: 0, found: false, valid: false)
     val coverage_offset = read_u32_be(font.blob, defs + 4 + set * 4) as i64
-    if coverage_offset == 0: return GposDataHit(index: 0, count: 0, found: false, valid: false)
+    if coverage_offset < 4 + count * 4:
+        return GposDataHit(index: 0, count: 0, found: false, valid: false)
     gpos_data_coverage(font.blob, defs + coverage_offset, limit, glyph, budget)
 fn gpos_data_eligible(font: OtFont, lookup: GposLookup, glyph: u32, budget: GposDataBudget) -> GposDataHit:
-    if lookup.flag != 0u32 and lookup.flag != 8u32 and lookup.flag != 16u32 and lookup.flag != 24u32:
+    if not gpos_data_take(budget):
         return GposDataHit(index: 0, count: 0, found: false, valid: false)
-    if lookup.flag == 0u32: return GposDataHit(index: 0, count: 0, found: true, valid: true)
+    if not layout_context_lookup_flag_syntax_valid(lookup.flag):
+        return GposDataHit(index: 0, count: 0, found: false, valid: false)
+    val class_filters = lookup.flag & 65310u32
+    if class_filters == 0u32:
+        return GposDataHit(index: 0, count: 0, found: true, valid: true)
+    if (lookup.flag & 16u32) != 0u32 and lookup.mark_filtering_set < 0:
+        return GposDataHit(index: 0, count: 0, found: false, valid: false)
     val glyph_class = gpos_data_glyph_class(font, glyph, budget)
-    if not glyph_class.valid: return glyph_class
-    if (lookup.flag & 8u32) != 0u32 and glyph_class.index == 3:
-        return GposDataHit(index: 0, count: 0, found: false, valid: true)
-    if (lookup.flag & 16u32) != 0u32 and glyph_class.index == 3:
-        return gpos_data_in_mark_set(font, lookup.mark_filtering_set, glyph, budget)
-    GposDataHit(index: 0, count: 0, found: true, valid: true)
+    if not glyph_class.valid:
+        return GposDataHit(index: 0, count: 0, found: false, valid: false)
+    var mark_in_filter: Option<bool> = None
+    var mark_attach_class: Option<i64> = None
+    if glyph_class.index == 3 and (lookup.flag & 8u32) == 0u32:
+        if (lookup.flag & 16u32) != 0u32:
+            val membership = gpos_data_in_mark_set(font, lookup.mark_filtering_set, glyph, budget)
+            if not membership.valid:
+                return GposDataHit(index: 0, count: 0, found: false, valid: false)
+            mark_in_filter = Some(membership.found)
+        else if (lookup.flag & 65280u32) != 0u32:
+            val attachment = gpos_data_mark_attach_class(font, glyph, budget)
+            if not attachment.valid:
+                return GposDataHit(index: 0, count: 0, found: false, valid: false)
+            mark_attach_class = Some(attachment.index)
+    val accepted = match layout_context_lookup_class_accepts(
+        lookup.flag, glyph_class.index, mark_in_filter, mark_attach_class):
+        Some(value): value
+        None: return GposDataHit(index: 0, count: 0, found: false, valid: false)
+    GposDataHit(index: 0, count: 0, found: accepted, valid: true)
 
 export GposDataHit, GposDataValue, GposDataAnchor, GposDataBudget, GposDataContext, GposDataDelta
 export gpos_data_context, gpos_data_budget, gpos_data_take, gpos_data_coverage, gpos_data_class, gpos_data_class_valid
 export gpos_data_coverage_end, gpos_data_class_end, gpos_data_overlap, gpos_data_value, gpos_data_anchor
 export gpos_data_variation_delta, gpos_data_device_delta, gpos_data_value_adjusted, gpos_data_anchor_adjusted
-export gpos_data_glyph_class, gpos_data_in_mark_set, gpos_data_eligible
+export gpos_data_glyph_class, gpos_data_mark_attach_class, gpos_data_in_mark_set, gpos_data_eligible

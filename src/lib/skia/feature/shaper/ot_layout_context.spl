@@ -76,7 +76,68 @@ fn layout_context_gdef_limit(font: OtFont) -> Option<(i64, i64)>:
     val start = table.offset as i64
     val limit = start + table.length as i64
     if start < 0 or limit < start or limit > font.blob.len() or start + 12 > limit: return None
+    val version = read_u32_be(font.blob, start)
+    val header_size = if version == 65536u32:
+        12
+    else if version == 65538u32:
+        14
+    else if version == 65539u32:
+        18
+    else:
+        return None
+    if start + header_size > limit: return None
     Some((start, limit))
+
+fn _layout_context_gdef_header_size(font: OtFont, start: i64) -> i64:
+    val version = read_u32_be(font.blob, start)
+    if version == 65536u32: return 12
+    if version == 65538u32: return 14
+    if version == 65539u32: return 18
+    -1
+
+fn _layout_context_gdef_child(font: OtFont, bounds: (i64, i64), field: i64) -> Option<i64>:
+    val header_size = _layout_context_gdef_header_size(font, bounds.0)
+    if header_size < 0 or bounds.0 + field + 2 > bounds.0 + header_size: return None
+    val relative = read_u16_be(font.blob, bounds.0 + field) as i64
+    if relative < header_size or bounds.0 + relative + 4 > bounds.1: return None
+    Some(bounds.0 + relative)
+
+fn _layout_context_class_def_valid(font: OtFont, offset: i64, limit: i64, maximum_class: i64) -> bool:
+    if offset <= 0 or offset + 4 > limit: return false
+    val format = read_u16_be(font.blob, offset)
+    val count = if format == 1u32:
+        if offset + 6 > limit: return false
+        read_u16_be(font.blob, offset + 4) as i64
+    else if format == 2u32:
+        read_u16_be(font.blob, offset + 2) as i64
+    else:
+        return false
+    val stride = if format == 1u32: 2 else: 6
+    val values = if format == 1u32: offset + 6 else: offset + 4
+    if count <= 0 or values + count * stride > limit: return false
+    if format == 1u32 and (read_u16_be(font.blob, offset + 2) as i64) + count > 65536: return false
+    var previous: i64 = -1
+    var index: i64 = 0
+    while index < count:
+        val item = values + index * stride
+        if format == 2u32:
+            val first = read_u16_be(font.blob, item) as i64
+            val last = read_u16_be(font.blob, item + 2) as i64
+            if first > last or first <= previous: return false
+            previous = last
+        val class_offset = if format == 1u32: item else: item + 4
+        if read_u16_be(font.blob, class_offset) as i64 > maximum_class: return false
+        index = index + 1
+    true
+
+fn _layout_context_gdef_class_valid(font: OtFont, field: i64, maximum_class: i64) -> bool:
+    val bounds = match layout_context_gdef_limit(font):
+        Some(value): value
+        None: return false
+    val class_def = match _layout_context_gdef_child(font, bounds, field):
+        Some(value): value
+        None: return false
+    _layout_context_class_def_valid(font, class_def, bounds.1, maximum_class)
 
 fn layout_context_class_def(font: OtFont, offset: i64, limit: i64, glyph: u32) -> Option<i64>:
     if offset <= 0 or offset + 4 > limit: return None
@@ -109,35 +170,97 @@ fn layout_context_gdef_glyph_class(font: OtFont, glyph: u32) -> Option<i64>:
     val bounds = match layout_context_gdef_limit(font):
         Some(value): value
         None: return None
-    val class_offset = read_u16_be(font.blob, bounds.0 + 4) as i64
-    if class_offset == 0: return Some(0)
-    layout_context_class_def(font, bounds.0 + class_offset, bounds.1, glyph)
+    val class_def = match _layout_context_gdef_child(font, bounds, 4):
+        Some(value): value
+        None: return None
+    val glyph_class = match layout_context_class_def(font, class_def, bounds.1, glyph):
+        Some(value): value
+        None: return None
+    if glyph_class > 4: return None
+    Some(glyph_class)
+
+fn layout_context_gdef_mark_attach_class(font: OtFont, glyph: u32) -> Option<i64>:
+    val bounds = match layout_context_gdef_limit(font):
+        Some(value): value
+        None: return None
+    val class_def = match _layout_context_gdef_child(font, bounds, 10):
+        Some(value): value
+        None: return None
+    val mark_class = match layout_context_class_def(font, class_def, bounds.1, glyph):
+        Some(value): value
+        None: return None
+    if mark_class > 255: return None
+    Some(mark_class)
 
 fn layout_context_mark_filter_contains(font: OtFont, set_index: i64, glyph: u32) -> Option<bool>:
     val bounds = match layout_context_gdef_limit(font):
         Some(value): value
         None: return None
     val version = read_u32_be(font.blob, bounds.0)
-    if version < 65538u32 or bounds.0 + 14 > bounds.1: return None
-    val definition_offset = read_u16_be(font.blob, bounds.0 + 12) as i64
-    val definition = bounds.0 + definition_offset
-    if definition_offset == 0 or definition + 4 > bounds.1 or read_u16_be(font.blob, definition) != 1u32: return None
+    if version != 65538u32 and version != 65539u32: return None
+    val definition = match _layout_context_gdef_child(font, bounds, 12):
+        Some(value): value
+        None: return None
+    if read_u16_be(font.blob, definition) != 1u32: return None
     val count = read_u16_be(font.blob, definition + 2) as i64
     if set_index < 0 or set_index >= count or definition + 4 + count * 4 > bounds.1: return None
     val coverage_offset = read_u32_be(font.blob, definition + 4 + set_index * 4) as i64
-    if coverage_offset == 0: return None
+    if coverage_offset < 4 + count * 4: return None
     val covered = layout_context_coverage(font.blob, definition + coverage_offset, bounds.1, glyph)
     if not covered.valid: return None
     Some(covered.found)
 
-fn layout_context_lookup_accepts(font: OtFont, lookup: GsubLookup, record: LayoutGlyphRecord) -> Option<bool>:
-    if lookup.flag == 0u32: return Some(true)
-    val glyph_class = match layout_context_gdef_glyph_class(font, record.glyph_id):
+fn layout_context_lookup_flag_syntax_valid(flag: u32) -> bool:
+    flag <= 65535u32 and (flag & 224u32) == 0u32
+
+fn layout_context_lookup_flag_valid(font: OtFont, flag: u32, mark_filtering_set: i64) -> bool:
+    if not layout_context_lookup_flag_syntax_valid(flag): return false
+    val class_filters = flag & 65310u32
+    if class_filters == 0u32: return true
+    if not _layout_context_gdef_class_valid(font, 4, 4): return false
+    if (flag & 16u32) != 0u32:
+        return mark_filtering_set >= 0 and
+            layout_context_mark_filter_contains(font, mark_filtering_set, 0u32) != None
+    if (flag & 65280u32) != 0u32:
+        return _layout_context_gdef_class_valid(font, 10, 255)
+    true
+
+fn layout_context_lookup_class_accepts(flag: u32, glyph_class: i64,
+                                       mark_in_filter: Option<bool>,
+                                       mark_attach_class: Option<i64>) -> Option<bool>:
+    if not layout_context_lookup_flag_syntax_valid(flag) or glyph_class < 0 or glyph_class > 4: return None
+    if glyph_class == 1 and (flag & 2u32) != 0u32: return Some(false)
+    if glyph_class == 2 and (flag & 4u32) != 0u32: return Some(false)
+    if glyph_class != 3: return Some(true)
+    if (flag & 8u32) != 0u32: return Some(false)
+    if (flag & 16u32) != 0u32: return mark_in_filter
+    val attachment_type = (flag & 65280u32) / 256u32
+    if attachment_type == 0u32: return Some(true)
+    val mark_class = match mark_attach_class:
         Some(value): value
         None: return None
-    if glyph_class != 3: return Some(true)
-    if lookup.flag == 8u32: return Some(false)
-    layout_context_mark_filter_contains(font, lookup.mark_filtering_set, record.glyph_id)
+    Some(mark_class == attachment_type as i64)
+
+fn layout_context_lookup_flag_accepts(font: OtFont, flag: u32,
+                                      mark_filtering_set: i64, glyph: u32) -> Option<bool>:
+    if not layout_context_lookup_flag_syntax_valid(flag): return None
+    val class_filters = flag & 65310u32
+    if class_filters == 0u32: return Some(true)
+    if (flag & 16u32) != 0u32 and mark_filtering_set < 0: return None
+    val glyph_class = match layout_context_gdef_glyph_class(font, glyph):
+        Some(value): value
+        None: return None
+    var mark_in_filter: Option<bool> = None
+    var mark_attach_class: Option<i64> = None
+    if glyph_class == 3 and (flag & 8u32) == 0u32:
+        if (flag & 16u32) != 0u32:
+            mark_in_filter = layout_context_mark_filter_contains(font, mark_filtering_set, glyph)
+        else if (flag & 65280u32) != 0u32:
+            mark_attach_class = layout_context_gdef_mark_attach_class(font, glyph)
+    layout_context_lookup_class_accepts(flag, glyph_class, mark_in_filter, mark_attach_class)
+
+fn layout_context_lookup_accepts(font: OtFont, lookup: GsubLookup, record: LayoutGlyphRecord) -> Option<bool>:
+    layout_context_lookup_flag_accepts(font, lookup.flag, lookup.mark_filtering_set, record.glyph_id)
 
 fn layout_context_next_input(font: OtFont, lookup: GsubLookup, records: [LayoutGlyphRecord], index: i64) -> Option<i64>:
     var cursor = index
@@ -420,5 +543,8 @@ fn layout_chain12_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: 
 export LayoutGlyphRecord, LayoutApplyResult
 export LayoutContextCoverage, LayoutContextMatch, layout_context_coverage
 export layout_context_gdef_limit, layout_context_class_def, layout_context_gdef_glyph_class
-export layout_context_mark_filter_contains, layout_context_lookup_accepts, layout_context_next_input
+export layout_context_gdef_mark_attach_class, layout_context_mark_filter_contains
+export layout_context_lookup_flag_syntax_valid, layout_context_lookup_flag_valid
+export layout_context_lookup_class_accepts, layout_context_lookup_flag_accepts
+export layout_context_lookup_accepts, layout_context_next_input
 export layout_context3_positions, layout_context2_match, layout_chain3_match, layout_chain12_match

@@ -1,0 +1,155 @@
+"""OpenType LookupFlag and GDEF eligibility checks shared by GSUB and GPOS."""
+
+use std.spipe.*
+use std.skia.feature.glyph.ot_parser.{OtFont, OtTable}
+use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, GposLookup}
+use std.skia.feature.shaper.ot_layout_context.{LayoutGlyphRecord,
+    layout_context_lookup_flag_valid, layout_context_lookup_accepts}
+use std.skia.feature.shaper.ot_layout_gpos_data.{GposDataBudget, gpos_data_eligible}
+
+fn _record(glyph: u32, seed: i64) -> LayoutGlyphRecord:
+    LayoutGlyphRecord(glyph_id: glyph, source_index: seed, cluster: seed + 1,
+        component_clusters: [seed + 2, seed + 3], feature_mask: 7u64,
+        x_advance_units: seed + 4, y_advance_units: seed + 5,
+        x_offset_units: seed + 6, y_offset_units: seed + 7)
+
+fn _gsub(flag: u32, mark_set: i64) -> GsubLookup:
+    GsubLookup(lookup_index: 0, lookup_type: 1u32, flag: flag,
+        lookup_offset: 0u32, table_start: 0u32, table_end: 0u32,
+        subtable_offsets: [], subtable_ends: [], mark_filtering_set: mark_set)
+
+fn _gpos(flag: u32, mark_set: i64) -> GposLookup:
+    GposLookup(lookup_index: 0, lookup_type: 1u32, flag: flag,
+        lookup_offset: 0u32, table_start: 0u32, table_end: 0u32,
+        subtable_offsets: [], subtable_ends: [], mark_filtering_set: mark_set)
+
+fn _accepted(font: OtFont, flag: u32, mark_set: i64, glyph: u32) -> i64:
+    match layout_context_lookup_accepts(font, _gsub(flag, mark_set), _record(glyph, 10)):
+        Some(true): 1
+        Some(false): 0
+        None: -1
+
+fn _gpos_accepted(font: OtFont, flag: u32, mark_set: i64, glyph: u32) -> (bool, bool):
+    val hit = gpos_data_eligible(font, _gpos(flag, mark_set), glyph,
+        GposDataBudget(remaining: 128))
+    (hit.valid, hit.found)
+
+fn _gdef_font() -> OtFont:
+    # GDEF 1.2. Glyphs 10/20/30..32/40 are Base/Ligature/Mark/Component.
+    # Marks 30/31/32 have attachment classes 1/2/1; set zero contains 30 and 32.
+    val blob: [u8] = [
+        0,1,0,2, 0,14, 0,0, 0,0, 0,42, 0,64,
+        0,2,0,4,
+        0,10,0,10,0,1, 0,20,0,20,0,2,
+        0,30,0,32,0,3, 0,40,0,40,0,4,
+        0,2,0,3,
+        0,30,0,30,0,1, 0,31,0,31,0,2, 0,32,0,32,0,1,
+        0,1,0,1, 0,0,0,8,
+        0,1,0,2, 0,30,0,32
+    ]
+    OtFont(blob: blob, tables: [
+        OtTable(tag: 1195656006u32, offset: 0u32, length: blob.len() as u32)
+    ])
+
+fn _font_with_byte(index: i64, value: u8) -> OtFont:
+    val source = _gdef_font()
+    var blob: [u8] = []
+    for byte in source.blob: blob.push(byte)
+    blob[index] = value
+    OtFont(blob: blob, tables: [
+        OtTable(tag: 1195656006u32, offset: 0u32, length: blob.len() as u32)
+    ])
+
+fn _expect_shared(font: OtFont, flag: u32, mark_set: i64, glyph: u32, accepted: bool):
+    expect(_accepted(font, flag, mark_set, glyph)).to_equal(if accepted: 1 else: 0)
+    val gpos = _gpos_accepted(font, flag, mark_set, glyph)
+    expect(gpos.0).to_equal(true)
+    expect(gpos.1).to_equal(accepted)
+
+describe "OpenType LookupFlag eligibility":
+    it "preserves RightToLeft as non-filtering positioning state without GDEF":
+        val font = OtFont(blob: [], tables: [])
+        val record = _record(77u32, 20)
+        expect(_accepted(font, 1u32, -1, record.glyph_id)).to_equal(1)
+        expect(_gpos_accepted(font, 1u32, -1, record.glyph_id)).to_equal((true, true))
+        expect(record.glyph_id).to_equal(77u32)
+        expect(record.source_index).to_equal(20)
+        expect(record.cluster).to_equal(21)
+        expect(record.component_clusters).to_equal([22, 23])
+        expect(record.x_advance_units).to_equal(24)
+        expect(record.y_advance_units).to_equal(25)
+        expect(record.x_offset_units).to_equal(26)
+        expect(record.y_offset_units).to_equal(27)
+
+    it "filters every GDEF glyph class selected by the independent ignore bits":
+        val font = _gdef_font()
+        _expect_shared(font, 2u32, -1, 10u32, false)
+        _expect_shared(font, 2u32, -1, 20u32, true)
+        _expect_shared(font, 4u32, -1, 20u32, false)
+        _expect_shared(font, 4u32, -1, 30u32, true)
+        _expect_shared(font, 8u32, -1, 30u32, false)
+        _expect_shared(font, 8u32, -1, 40u32, true)
+        _expect_shared(font, 6u32, -1, 10u32, false)
+        _expect_shared(font, 6u32, -1, 20u32, false)
+        _expect_shared(font, 6u32, -1, 30u32, true)
+
+    it "uses MarkFilteringSet membership and gives it precedence over attachment type":
+        val font = _gdef_font()
+        _expect_shared(font, 16u32, 0, 30u32, true)
+        _expect_shared(font, 16u32, 0, 31u32, false)
+        # Set zero wins: glyph 30 is accepted despite attachment class 1 != 2.
+        _expect_shared(font, 528u32, 0, 30u32, true)
+        # Set zero wins: glyph 31 is rejected despite attachment class 2.
+        _expect_shared(font, 528u32, 0, 31u32, false)
+        _expect_shared(font, 528u32, 0, 10u32, true)
+        val no_attachment_classes = _font_with_byte(11, 0u8)
+        expect(layout_context_lookup_flag_valid(no_attachment_classes, 528u32, 0)).to_equal(true)
+        _expect_shared(no_attachment_classes, 528u32, 0, 30u32, true)
+
+    it "filters marks by MarkAttachmentType when no filtering set is selected":
+        val font = _gdef_font()
+        _expect_shared(font, 256u32, -1, 30u32, true)
+        _expect_shared(font, 256u32, -1, 31u32, false)
+        _expect_shared(font, 512u32, -1, 30u32, false)
+        _expect_shared(font, 512u32, -1, 31u32, true)
+        _expect_shared(font, 512u32, -1, 10u32, true)
+
+    it "gives IgnoreMarks precedence over mark sets and attachment classes":
+        val font = _gdef_font()
+        _expect_shared(font, 280u32, 0, 30u32, false)
+        _expect_shared(font, 280u32, 0, 10u32, true)
+
+    it "rejects reserved bits, missing GDEF data, and malformed referenced offsets":
+        val empty = OtFont(blob: [], tables: [])
+        expect(layout_context_lookup_flag_valid(empty, 32u32, -1)).to_equal(false)
+        expect(layout_context_lookup_flag_valid(empty, 65536u32, -1)).to_equal(false)
+        expect(layout_context_lookup_flag_valid(empty, 2u32, -1)).to_equal(false)
+        expect(layout_context_lookup_flag_valid(empty, 1u32, -1)).to_equal(true)
+        expect(_gpos_accepted(empty, 2u32, -1, 10u32)).to_equal((false, false))
+        val exhausted = gpos_data_eligible(_gdef_font(), _gpos(2u32, -1), 10u32,
+            GposDataBudget(remaining: 0))
+        expect(exhausted.valid).to_equal(false)
+        # GlyphClassDef offset 79 cannot hold a ClassDef in the 80-byte table.
+        val bad_class_offset = _font_with_byte(5, 79u8)
+        expect(layout_context_lookup_flag_valid(bad_class_offset, 2u32, -1)).to_equal(false)
+        expect(_gpos_accepted(bad_class_offset, 2u32, -1, 10u32)).to_equal((false, false))
+        # MarkAttachClassDef and MarkGlyphSetsDef NULL offsets reject their flags.
+        expect(layout_context_lookup_flag_valid(_font_with_byte(11, 0u8), 256u32, -1)).to_equal(false)
+        expect(layout_context_lookup_flag_valid(_font_with_byte(13, 0u8), 16u32, 0)).to_equal(false)
+        expect(layout_context_lookup_flag_valid(_font_with_byte(71, 0u8), 16u32, 0)).to_equal(false)
+        expect(layout_context_lookup_flag_valid(_font_with_byte(3, 1u8), 2u32, -1)).to_equal(false)
+        # Glyph class 5 is outside GDEF's Base/Ligature/Mark/Component classes.
+        expect(layout_context_lookup_flag_valid(_font_with_byte(23, 5u8), 2u32, -1)).to_equal(false)
+
+    it "fails closed without changing the rejected input record":
+        val font = OtFont(blob: [], tables: [])
+        val record = _record(30u32, 40)
+        expect(layout_context_lookup_accepts(font, _gsub(8u32, -1), record)).to_be_nil()
+        expect(record.glyph_id).to_equal(30u32)
+        expect(record.source_index).to_equal(40)
+        expect(record.cluster).to_equal(41)
+        expect(record.component_clusters).to_equal([42, 43])
+        expect(record.x_advance_units).to_equal(44)
+        expect(record.y_advance_units).to_equal(45)
+        expect(record.x_offset_units).to_equal(46)
+        expect(record.y_offset_units).to_equal(47)
