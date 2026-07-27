@@ -13764,6 +13764,10 @@ RuntimeValue rt_byte_array_new_len(int64_t len)
  * runtime_native.c defines the real one. */
 RuntimeValue rt_array_copy(RuntimeValue arr)
 {
+    /* runtime_array_from_abi casts a non-heap word straight to a pointer and
+     * dereferences hdr.type, so nil (3) or any tagged int would fault here
+     * before the !src guard below could run. Hosted is nil-safe; match it. */
+    if (!IS_HEAP(arr)) return arr;
     RuntimeArray *src = runtime_array_from_abi(arr);
     if (!src) return arr;
     /* [u8] arrays are BYTE_PACKED (stride 1, not 8-byte tagged slots). Copying
@@ -18157,6 +18161,8 @@ RuntimeValue rt_u32s_from_raw(RuntimeValue data_ptr, RuntimeValue count_val)
  * garbage silently -- exactly the failure mode this file is fighting. */
 RuntimeValue rt_write_u32s_to_raw(RuntimeValue ptr_val, RuntimeValue arr)
 {
+    /* same non-heap deref hazard as rt_array_copy; hosted returns 0. */
+    if (!IS_HEAP(arr)) return 0;
     int64_t ptr = (int64_t)ptr_val;
     if (ptr == 0) return 0;
     RuntimeArray *a = runtime_array_from_abi(arr);
