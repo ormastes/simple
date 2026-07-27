@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 3 | 3 | 0 | 0 |
+| 4 | 4 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -44,67 +44,20 @@ expect(unfocused.mutation_revision).to_equal(0)
 
 </details>
 
-#### carries one compositor-local pointer release through BrowserSession and the canonical Engine2D frame
+#### appends committed text only to the actually focused hosted input
 
-- var comp = HostCompositor new headless
-- 1, 1, COMP CREATE WINDOW to i64
-- target unwrap
-- target unwrap
-- target unwrap
-- target unwrap
-   - Expected: receipt.event_id equals `17`
-   - Expected: receipt.wm_target_id equals `target.unwrap().window_id`
-   - Expected: receipt.semantic_target_id equals `accept`
-   - Expected: receipt.callback_count equals `1`
-   - Expected: receipt.mutation_revision equals `1`
-- comp = host compositor update window content
-   - Expected: frame.len() equals `240 * 180`
-- raster shutdown
+- Press and release the input to establish DOM focus.
+- Commit `"A"` and then `"da"` as separate host text events.
+- The focused input ends with `value="Ada"`; no pointer-position lookup is
+  involved in text routing.
 
+#### clicks only after a matching hosted pointer press and release
 
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 33 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-var comp = HostCompositor.new_headless(Size(width: 240u64, height: 180u64))
-comp.apply_bridge_request(
-    1, 1, COMP_CREATE_WINDOW.to_i64(), 0, "Form", 20, 48, 180, 100,
-    "<style>input{display:block;width:40px;height:28px;background-color:#ef4444}input[checked]{background-color:#2563eb}</style><input id='accept' type='checkbox'>",
-    1, "hosted-web-event"
-)
-val target = comp.content_target(40, 90)
-expect(target.is_some()).to_be(true)
-
-var session = HostedWebContentSession.create(
-    target.unwrap().window_id,
-    target.unwrap().body_html,
-    target.unwrap().width,
-    target.unwrap().height
-)
-val before = session.render_to_pixels()
-val receipt = session.dispatch_pointer_at(17, target.unwrap().local_x, target.unwrap().local_y, false)
-
-expect(receipt.event_id).to_equal(17)
-expect(receipt.wm_target_id).to_equal(target.unwrap().window_id)
-expect(receipt.semantic_target_id).to_equal("accept")
-expect(receipt.callback_count).to_equal(1)
-expect(receipt.mutation_revision).to_equal(1)
-expect(session.current_body_html()).to_contain("checked=\"checked\"")
-expect(checksum(session.render_to_pixels()) == checksum(before)).to_be(false)
-
-comp = host_compositor_update_window_content(comp, target.unwrap().window_id, session.current_body_html())
-val raster = Engine2dCompositorBackend.create_named(240, 180, "software")
-expect(comp.render_frame_engine2d(raster)).to_be(true)
-val frame = comp.pure_simple_pixel_buffer()
-expect(frame.len()).to_equal(240 * 180)
-expect(checksum(frame)).to_be_greater_than(0)
-raster.shutdown()
-```
-
-</details>
+- A release without a preceding press must not check the checkbox.
+- A press followed by a release outside the semantic surface must not click.
+- Only a same-target press/release emits the click default action.
+- The resulting checked state must change the hosted pixels and survive the
+  canonical compositor-to-Engine2D frame.
 
 ## At a Glance
 
@@ -113,7 +66,7 @@ raster.shutdown()
 | Category | Hardware & OS |
 | Status | Active |
 | Source | `test/02_integration/os/hosted/hosted_web_content_session_spec.spl` |
-| Updated | 2026-07-26 |
+| Updated | 2026-07-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -125,8 +78,8 @@ Tests covering:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 3 |
-| Active scenarios | 3 |
+| Total scenarios | 4 |
+| Active scenarios | 4 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

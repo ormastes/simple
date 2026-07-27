@@ -51,8 +51,25 @@ describe "hosted Web content session":
         expect(unfocused.reason).to_equal("no-focused-semantic-target")
         expect(unfocused.mutation_revision).to_equal(0)
 
-    # @req REQ-002 REQ-003 REQ-005 REQ-006 REQ-010
-    it "carries one compositor-local pointer release through BrowserSession and the canonical Engine2D frame":
+    # @req REQ-WEB-BROWSER-008
+    it "appends committed text only to the actually focused hosted input":
+        var session = HostedWebContentSession.create(
+            10, "<input id='name' value=''>", 80, 40
+        )
+        val press = session.dispatch_pointer_at(3, 5, 5, true)
+        val release = session.dispatch_pointer_at(4, 5, 5, false)
+        expect(press.semantic_target_id).to_equal("name")
+        expect(release.semantic_target_id).to_equal("name")
+        expect(session.last_target_id).to_equal("name")
+
+        val first = session.dispatch_text(5, "A")
+        val second = session.dispatch_text(6, "da")
+        expect(first.reason).to_equal("")
+        expect(second.reason).to_equal("")
+        expect(session.current_body_html()).to_contain("value=\"Ada\"")
+
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
+    it "clicks only after a matching hosted pointer press and release":
         var comp = HostCompositor.new_headless(Size(width: 240u64, height: 180u64))
         comp.apply_bridge_request(
             1, 1, COMP_CREATE_WINDOW.to_i64(), 0, "Form", 20, 48, 180, 100,
@@ -69,9 +86,34 @@ describe "hosted Web content session":
             target.unwrap().height
         )
         val before = session.render_to_pixels()
-        val receipt = session.dispatch_pointer_at(17, target.unwrap().local_x, target.unwrap().local_y, false)
+        val release_only = session.dispatch_pointer_at(
+            17, target.unwrap().local_x, target.unwrap().local_y, false
+        )
+        expect(release_only.reason).to_equal("pointer-release-without-press")
+        expect(release_only.mutation_revision).to_equal(0)
+        expect(
+            session.current_body_html().contains("checked=\"checked\"")
+        ).to_be(false)
 
-        expect(receipt.event_id).to_equal(17)
+        val abandoned_press = session.dispatch_pointer_at(
+            18, target.unwrap().local_x, target.unwrap().local_y, true
+        )
+        expect(abandoned_press.reason).to_equal("pointer-pressed")
+        val missed_release = session.dispatch_pointer_at(19, 1000, 1000, false)
+        expect(missed_release.reason).to_equal("no-semantic-target")
+        expect(
+            session.current_body_html().contains("checked=\"checked\"")
+        ).to_be(false)
+
+        val press = session.dispatch_pointer_at(
+            20, target.unwrap().local_x, target.unwrap().local_y, true
+        )
+        expect(press.reason).to_equal("pointer-pressed")
+        val receipt = session.dispatch_pointer_at(
+            21, target.unwrap().local_x, target.unwrap().local_y, false
+        )
+
+        expect(receipt.event_id).to_equal(21)
         expect(receipt.wm_target_id).to_equal(target.unwrap().window_id)
         expect(receipt.semantic_target_id).to_equal("accept")
         expect(receipt.callback_count).to_equal(1)

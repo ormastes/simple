@@ -6,7 +6,9 @@ use std.gc_async_mut.web.browser_session.{
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.gpu.browser_engine.layout.{hit_test, layout_tree}
-use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_event_identity}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_event_identity, be_dom_focused_id
+}
 use std.database.sql.types.{DbError}
 use os.hosted.browser_profile_store.{BrowserProfileStore}
 
@@ -26,6 +28,7 @@ class HostedWebContentSession:
     mutation_revision: i64
     failure_reason: text
     last_target_id: text
+    pressed_target_id: text
     published_body_html: text
     started_at_ms: i64
     profile_enabled: bool
@@ -47,6 +50,7 @@ class HostedWebContentSession:
             mutation_revision: 0,
             failure_reason: failure_reason,
             last_target_id: "",
+            pressed_target_id: "",
             published_body_html: body_html,
             started_at_ms: -1,
             profile_enabled: false
@@ -79,6 +83,7 @@ class HostedWebContentSession:
         val layout = layout_tree(root, self.width.to_f64(), self.height.to_f64())
         val target = hit_test(layout, root, x.to_f64(), y.to_f64())
         if target == nil:
+            self.pressed_target_id = ""
             return HostedWebContentDispatch(
                 event_id: event_id,
                 wm_target_id: self.window_id,
@@ -88,18 +93,40 @@ class HostedWebContentSession:
                 reason: "no-semantic-target"
             )
         val target_id = be_dom_event_identity(target.unwrap())
-        self.last_target_id = target_id
+        val before = self.browser.current_body_html
         if down:
+            self.pressed_target_id = target_id
+            val _ = self.browser.dispatch_dom_event(
+                target_id, "pointerdown", true, true
+            )
+            val _ = self.browser.dispatch_dom_event(
+                target_id, "mousedown", true, true
+            )
+            val changed = self.browser.current_body_html != before
+            if changed:
+                self.published_body_html = self.browser.current_body_html
+                self.mutation_revision = self.mutation_revision + 1
             return HostedWebContentDispatch(
                 event_id: event_id,
                 wm_target_id: self.window_id,
                 semantic_target_id: target_id,
-                callback_count: 0,
+                callback_count: if changed: 1 else: 0,
                 mutation_revision: self.mutation_revision,
-                reason: ""
+                reason: if changed: "" else: "pointer-pressed"
             )
-        val before = self.browser.current_body_html
-        self.browser.dispatch_dom_event(target_id, "click", true, true)
+        val pressed_target_id = self.pressed_target_id
+        self.pressed_target_id = ""
+        val _ = self.browser.dispatch_dom_event(
+            target_id, "pointerup", true, true
+        )
+        val _ = self.browser.dispatch_dom_event(
+            target_id, "mouseup", true, true
+        )
+        if pressed_target_id == target_id and pressed_target_id != "":
+            val _ = self.browser.dispatch_dom_event(
+                target_id, "click", true, true
+            )
+        self.last_target_id = be_dom_focused_id(self.browser.dom_root())
         val changed = self.browser.current_body_html != before
         if changed:
             self.published_body_html = self.browser.current_body_html
@@ -110,7 +137,14 @@ class HostedWebContentSession:
             semantic_target_id: target_id,
             callback_count: if changed: 1 else: 0,
             mutation_revision: self.mutation_revision,
-            reason: if changed: "" else: "no-application-mutation"
+            reason: if changed:
+                ""
+            elif pressed_target_id == "":
+                "pointer-release-without-press"
+            elif pressed_target_id != target_id:
+                "pointer-release-target-mismatch"
+            else:
+                "no-application-mutation"
         )
 
     me dispatch_text(event_id: i64, value: text) -> HostedWebContentDispatch:
@@ -124,7 +158,9 @@ class HostedWebContentSession:
                 reason: "no-focused-semantic-target"
             )
         val before = self.browser.current_body_html
-        val updated = self.browser.set_dom_text_input(self.last_target_id, value)
+        val updated = self.browser.append_dom_text_input(
+            self.last_target_id, value
+        )
         if val Err(reason) = updated:
             return HostedWebContentDispatch(
                 event_id: event_id,
@@ -271,11 +307,19 @@ class HostedWebContentRegistry:
         self.sessions[index] = session
         receipt
 
-    me dispatch_text(event_id: i64, window_id: i64, body_html: text, width: i32, height: i32, value: text) -> HostedWebContentDispatch:
-        val index = self._ensure(
-            window_id, body_html, width, height, false,
-            self.profile_loaded_at_ms
-        )
+    me dispatch_text(
+        event_id: i64, window_id: i64, value: text
+    ) -> HostedWebContentDispatch:
+        val index = self._session_index(window_id)
+        if index < 0:
+            return HostedWebContentDispatch(
+                event_id: event_id,
+                wm_target_id: window_id,
+                semantic_target_id: "",
+                callback_count: 0,
+                mutation_revision: 0,
+                reason: "no-hosted-web-session"
+            )
         var session = self.sessions[index]
         val receipt = session.dispatch_text(event_id, value)
         self.sessions[index] = session

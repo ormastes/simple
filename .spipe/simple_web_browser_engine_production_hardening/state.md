@@ -735,3 +735,22 @@ implementation in progress / target evidence blocked
   origin, and requires zero redirected requests plus explicit CSP errors. The
   mirrored security manual now covers all 20 scenarios. Runtime evidence
   remains target-compiler-blocked and was not rerun.
+- hosted pointer/text events: The production hosted session now owns one
+  pressed semantic target, emits pointerdown/mousedown and pointerup/mouseup,
+  and clicks only when press and release resolve to the same target. DOM text
+  input follows the actually focused element in the focused WM window and
+  appends committed text chunks instead of replacing the value or following
+  the current pointer.
+- evidence: The hosted integration scenario now rejects release-only and
+  abandoned presses, accepts one matching checkbox press/release through the
+  canonical Engine2D frame, and appends `"A"` plus `"da"` to focused input.
+  Its mirrored four-scenario manual was refreshed by hand because docgen and
+  runtime remain target-compiler-blocked.
+- sandbox audit: AC-7 remains open. Hosted WM still constructs BrowserSession
+  and reparses hostile HTML/CSS in-process. Existing piped-process and Rust
+  sandbox helpers are not fail-closed production isolation. The retained
+  implementation plan requires a cached native renderer, READY-after-sandbox
+  handshake, bounded typed IPC/Draw IR, Linux no-new-privs + Landlock + seccomp
+  + rlimits, and no in-host hostile parser/render path. This necessarily
+  touches the native runtime/build lane, so it was not started under the
+  no-bootstrap constraint.
