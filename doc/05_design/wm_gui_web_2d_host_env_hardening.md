@@ -84,13 +84,14 @@ handle, incomplete submission, CPU mirror/cache readback, invalid dimensions or
 stride, blank output, checksum zero, and absent/invalid RenderDoc artifacts.
 The host aggregate also re-hashes the retained RenderDoc capture path and
 replay XML path, blocking when either current artifact no longer matches its
-exact-one gate binding.
+exact-one gate binding or is a symlink/non-regular path.
 Framebuffer admission requires both correlated backend values to be `vulkan`;
 matching CPU fallback values remain blocked.
 The input frame must also retain `composition_id=wm-composite` and a positive
 count of executed `wm.content` image commands from the same executor snapshot.
 The host aggregate resolves duplicate-safe baseline/input capture bindings and
-re-hashes both current PPMs before admitting `framebuffer_readback`.
+requires regular no-follow paths before re-hashing both current PPMs and
+admitting `framebuffer_readback`.
 
 For the SimpleOS remote-client row, validation also rejects owner port `0`,
 resident placeholder apps, missing focus/input IPC sends, missing

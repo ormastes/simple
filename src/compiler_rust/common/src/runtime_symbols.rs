@@ -901,6 +901,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_is_interpreter_runtime",
     // File I/O operations - metadata
     "rt_file_exists",
+    "rt_file_is_regular_no_follow",
     "rt_file_stat",
     // File I/O operations - file ops
     "rt_file_canonicalize",

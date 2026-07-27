@@ -55,6 +55,22 @@ plans and do not become PASS.
 - facade_checked: `std.io_runtime`, app IO/process facades, canonical WM/Draw IR/Engine2D owners, existing SIMD/backend probes, and shared RenderDoc helpers.
 - chosen_path: reuse-facade; add-smallest-owner-facade only when research proves a real gap.
 - rejected_shortcuts: raw `rt_*` aliases in specs/apps, fixture-only render branches, direct backend pokes, synthetic handles, CPU mirrors labeled as device readback, screenshot-only RenderDoc claims, mock filesystem/process/input layers, and compatibility renderers presented as the canonical route.
+- runtime_need (retained-artifact-no-follow): Host metadata must distinguish a
+  regular file from a symlink before re-hashing retained evidence artifacts.
+- facade_checked: Existing `file_exists`, `rt_file_stat`, stat-handle helpers,
+  and `file_system.metadata.file_is_symlink` either follow links, are absent on
+  a runtime lane, or are explicitly mocked.
+- chosen_path: `add-smallest-owner-facade` named
+  `file_is_regular_no_follow(path)` in the canonical file-ops owner, backed by
+  one cross-runtime primitive.
+- rejected_shortcuts: shell `test -L`, the mock metadata helper, app-local raw
+  externs, and a fixture-only path branch. The predicate-plus-hash sequence has
+  a local-test TOCTOU ceiling; use no-follow open/fstat/hash-on-fd if hostile
+  concurrent path replacement enters scope.
+- runtime-lane parity: `runtime.c` and `runtime_native.c` intentionally carry
+  byte-identical POSIX/Windows implementations for their disjoint native
+  source bundles; the runtime symbol-divergence baseline records this reviewed
+  pair.
 
 ## Research Summary
 
@@ -1053,11 +1069,12 @@ Tracking split:
   `.rdc` and replay XML. Focused SSpec mutations cover missing, symlinked, and
   changed XML; the pure-Simple runner remains unavailable, so only shell syntax
   evidence is claimed this session.
-- retained-artifact-symlink-gap: Current post-producer rehashing follows
-  symlinks. A real app-I/O no-follow regular-file facade is required before
-  retained RenderDoc/framebuffer paths can claim path-integrity revalidation;
-  tracked in
-  `doc/08_tracking/bug/test_host_env_artifact_symlink_revalidation_2026-07-27.md`.
+- retained-artifact-symlink-gap: Hosted POSIX/Windows, Rust-native, and
+  interpreter paths now share the canonical `file_is_regular_no_follow`
+  facade. RenderDoc `.rdc`/XML and framebuffer baseline/input PPM revalidation
+  reject same-byte symlink substitution. Windows execution and a stable
+  pure-Simple `simple_core` file-type ABI are postponed explicitly; hostile
+  concurrent replacement remains the documented no-follow-fd hashing ceiling.
 - submitted-composition-provenance: The Engine2D compositor now retains the
   successful composition ID, scene key, and executed `wm.content` IMAGE count.
   Hosted snapshots and the live wrapper correlate those values; shared host

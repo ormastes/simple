@@ -104,10 +104,12 @@ emulated receipts remain active blocked rows with exact resume commands.
 Browser Vulkan and RenderDoc-native rows use their existing retained evidence.
 Before admitting a retained RenderDoc row, `test_host_env` resolves its unique
 capture-file/hash and replay-XML/hash bindings, then recomputes both current
-digests. Deleted or changed artifacts therefore cannot inherit an earlier
-passing gate receipt.
+digests. Each path must still be a regular file under a no-follow metadata
+query, so deleted, changed, or symlink-substituted artifacts cannot inherit an
+earlier passing gate receipt.
 Framebuffer admission applies the same app-boundary rule to both retained PPM
-paths and hashes; the pure contract remains filesystem-independent.
+paths and hashes, including the no-follow regular-file check; the pure contract
+remains filesystem-independent.
 Emulation and source inspection alone are correctness support only.
 
 ## SimpleOS Remote-Client Admission

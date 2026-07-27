@@ -174,9 +174,8 @@ The helper validates `.rdc` files by checking the `RDOC` magic header and emits
 before and after replay, and passes only when both values remain equal. It also
 requires a regular replay XML file, recomputes its SHA-256 and byte size, and
 matches both against the inspector receipt. Missing, linked, or changed replay
-XML cannot satisfy the producer gate; the later `test_host_env` aggregate
-re-hashes current bytes but still follows links (tracked in
-`doc/08_tracking/bug/test_host_env_artifact_symlink_revalidation_2026-07-27.md`). If a
+XML cannot satisfy the producer gate; the later `test_host_env` aggregate also
+requires regular no-follow artifact paths before re-hashing current bytes. If a
 host cannot provide Chrome Vulkan or a non-CPU Vulkan device, record the
 concrete reason in `doc/09_report/` instead of duplicating ad hoc commands.
 Chrome and Electron capture producers additionally require exactly one regular

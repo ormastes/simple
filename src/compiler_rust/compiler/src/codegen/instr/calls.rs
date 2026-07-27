@@ -2398,6 +2398,7 @@ pub fn text_arg_indices(func_name: &str) -> Option<&'static [usize]> {
         // File I/O (single path)
         "rt_crc32_text"
         | "rt_file_exists"
+        | "rt_file_is_regular_no_follow"
         | "rt_file_canonicalize"
         | "rt_file_read_text"
         | "rt_file_size"

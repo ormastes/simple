@@ -138,6 +138,8 @@ Host input
   Its Readback Matrix exposes submit/readback columns, and its Spark/normal-LLM
   table exposes a compact `linux_gui_web` event id / queue packet / readback
   source / checksum row plus DirectX native verdict and gate fields.
+  Retained RenderDoc and framebuffer artifacts must remain regular no-follow
+  paths with current receipt-matching hashes.
   Linux Metal and ROCm/HIP remain typed unavailable without matching host
   runtimes.
 - SimpleOS RV64 desktop uses the same backend-readback bar:

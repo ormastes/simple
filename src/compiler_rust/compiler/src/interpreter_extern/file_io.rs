@@ -1252,6 +1252,27 @@ mod tests {
             other => panic!("rt_current_dir must return a bare Value::Str, not {other:?}"),
         }
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_no_follow_rejects_symlink_directory_and_missing_path() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target.txt");
+        let link = dir.path().join("link.txt");
+        std::fs::write(&target, b"same-bytes").expect("target");
+        symlink(&target, &link).expect("symlink");
+
+        let classify = |path: &Path| {
+            rt_file_is_regular_no_follow(&[Value::text(path.to_string_lossy().to_string())])
+                .expect("classify")
+        };
+        assert_eq!(classify(&target), Value::Bool(true));
+        assert_eq!(classify(&link), Value::Bool(false));
+        assert_eq!(classify(dir.path()), Value::Bool(false));
+        assert_eq!(classify(&dir.path().join("missing")), Value::Bool(false));
+    }
 }
 
 // ============================================================================
@@ -1925,6 +1946,14 @@ pub fn rt_file_stat_is_symlink(args: &[Value]) -> Result<Value, CompileError> {
             .map(|s| s.is_symlink)
             .unwrap_or(false),
     ))
+}
+
+pub fn rt_file_is_regular_no_follow(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let regular = fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false);
+    Ok(Value::Bool(regular))
 }
 
 pub fn rt_file_stat_readonly(args: &[Value]) -> Result<Value, CompileError> {

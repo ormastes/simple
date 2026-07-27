@@ -15,6 +15,17 @@
 
 ### test host environment SIMD evidence
 
+Shared real-host symlink helper:
+
+```simple
+fn create_file_symlink(target: text, link: text) -> i64:
+    val (_, _, code) = if host_os() == "windows":
+        process_run("cmd", ["/c", "mklink", link, target])
+    else:
+        process_run("/bin/ln", ["-s", target, link])
+    code
+```
+
 #### binds every SIMD row to one complete architecture-owned frame receipt
 
 - "HostCapabilityRow create
@@ -57,27 +68,40 @@ expect(source.contains("if env.validation_reason() == \"\":")).to_equal(false)
 #### rejects deleted or changed retained RenderDoc artifacts
 
 - Bind the retained receipt to current capture and replay XML bytes
+- Reject a same-byte replay XML symlink
 - Change and remove either retained RenderDoc artifact
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 39 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Bind the retained receipt to current capture and replay XML bytes")
 val capture_path = "/tmp/simple-test-host-env-renderdoc-current.rdc"
 val xml_path = "/tmp/simple-test-host-env-renderdoc-current.xml"
+val xml_target_path = "/tmp/simple-test-host-env-renderdoc-target.xml"
 file_delete(capture_path)
 file_delete(xml_path)
+file_delete(xml_target_path)
 expect(file_write(capture_path, "RDOC-original")).to_be(true)
 expect(file_write(xml_path, "replay-original")).to_be(true)
+val xml_sha = file_hash_sha256(xml_path)
 val evidence = "rdoc_simple_gate_capture_file=" + capture_path + "\n" +
     "rdoc_simple_gate_capture_file_sha256=" + file_hash_sha256(capture_path) + "\n" +
     "rdoc_simple_gate_replay_xml_path=" + xml_path + "\n" +
-    "rdoc_simple_gate_replay_xml_file_sha256=" + file_hash_sha256(xml_path)
+    "rdoc_simple_gate_replay_xml_file_sha256=" + xml_sha
 expect(host_renderdoc_artifacts_are_current(evidence)).to_be(true)
+step("Reject a same-byte replay XML symlink")
+expect(file_write(xml_target_path, "replay-original")).to_be(true)
+file_delete(xml_path)
+val xml_link_code = create_file_symlink(xml_target_path, xml_path)
+expect(xml_link_code).to_equal(0)
+expect(file_hash_sha256(xml_path)).to_equal(xml_sha)
+expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
+file_delete(xml_path)
+expect(file_write(xml_path, "replay-original")).to_be(true)
 step("Change and remove either retained RenderDoc artifact")
 expect(file_write(xml_path, "replay-changed")).to_be(true)
 expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
@@ -91,6 +115,7 @@ expect(file_write(xml_path, "replay-original")).to_be(true)
 file_delete(capture_path)
 expect(host_renderdoc_artifacts_are_current(evidence)).to_be(false)
 file_delete(xml_path)
+file_delete(xml_target_path)
 ```
 
 </details>
@@ -98,33 +123,47 @@ file_delete(xml_path)
 #### rejects deleted or changed retained framebuffer captures
 
 - Bind baseline and input receipts to current PPM bytes
+- Reject a same-byte input framebuffer symlink
 - Change and remove the retained framebuffer captures
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 31 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 step("Bind baseline and input receipts to current PPM bytes")
 val baseline_path = "/tmp/simple-test-host-env-baseline.ppm"
 val input_path = "/tmp/simple-test-host-env-input.ppm"
+val input_target_path = "/tmp/simple-test-host-env-input-target.ppm"
 file_delete(baseline_path)
 file_delete(input_path)
+file_delete(input_target_path)
 expect(file_write(baseline_path, "P6-baseline")).to_be(true)
 expect(file_write(input_path, "P6-input")).to_be(true)
+val input_sha = file_hash_sha256(input_path)
 val evidence = "linux_hosted_wm_live_window_baseline_capture=" + baseline_path + "\n" +
     "linux_hosted_wm_live_window_baseline_capture_sha256=" + file_hash_sha256(baseline_path) + "\n" +
     "linux_hosted_wm_live_window_input_capture=" + input_path + "\n" +
-    "linux_hosted_wm_live_window_input_capture_sha256=" + file_hash_sha256(input_path)
+    "linux_hosted_wm_live_window_input_capture_sha256=" + input_sha
 expect(host_readback_captures_are_current(evidence)).to_be(true)
+step("Reject a same-byte input framebuffer symlink")
+expect(file_write(input_target_path, "P6-input")).to_be(true)
+file_delete(input_path)
+val input_link_code = create_file_symlink(input_target_path, input_path)
+expect(input_link_code).to_equal(0)
+expect(file_hash_sha256(input_path)).to_equal(input_sha)
+expect(host_readback_captures_are_current(evidence)).to_be(false)
+file_delete(input_path)
+expect(file_write(input_path, "P6-input")).to_be(true)
 step("Change and remove the retained framebuffer captures")
 expect(file_write(input_path, "P6-tampered")).to_be(true)
 expect(host_readback_captures_are_current(evidence)).to_be(false)
 file_delete(baseline_path)
 expect(host_readback_captures_are_current(evidence)).to_be(false)
 file_delete(input_path)
+file_delete(input_target_path)
 ```
 
 </details>

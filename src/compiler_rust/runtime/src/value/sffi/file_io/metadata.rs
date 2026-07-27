@@ -20,6 +20,21 @@ pub unsafe extern "C" fn rt_file_exists(path_ptr: *const u8, path_len: u64) -> b
     }
 }
 
+/// Check that a path names a regular file without following a final symlink.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_is_regular_no_follow(path_ptr: *const u8, path_len: u64) -> bool {
+    if path_ptr.is_null() {
+        return false;
+    }
+
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    std::str::from_utf8(path_bytes)
+        .ok()
+        .and_then(|path| std::fs::symlink_metadata(path).ok())
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false)
+}
+
 /// Check if a path exists and is a directory.
 #[no_mangle]
 pub unsafe extern "C" fn rt_dir_exists(path_ptr: *const u8, path_len: u64) -> bool {
@@ -163,6 +178,41 @@ mod tests {
         unsafe {
             assert_eq!(rt_file_stat(std::ptr::null(), 0), 0);
         }
+    }
+
+    #[test]
+    fn test_file_is_regular_no_follow() {
+        let root = std::env::temp_dir().join(format!("simple_regular_no_follow_{}", std::process::id()));
+        let file = root.join("file");
+        let missing = root.join("missing");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&file, b"ok").unwrap();
+
+        unsafe {
+            let file = file.to_string_lossy();
+            assert!(rt_file_is_regular_no_follow(file.as_ptr(), file.len() as u64));
+            let root_path = root.to_string_lossy();
+            assert!(!rt_file_is_regular_no_follow(
+                root_path.as_ptr(),
+                root_path.len() as u64
+            ));
+            let missing = missing.to_string_lossy();
+            assert!(!rt_file_is_regular_no_follow(missing.as_ptr(), missing.len() as u64));
+            assert!(!rt_file_is_regular_no_follow(std::ptr::null(), 0));
+        }
+
+        #[cfg(unix)]
+        {
+            let link = root.join("link");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            let link = link.to_string_lossy();
+            unsafe {
+                assert!(!rt_file_is_regular_no_follow(link.as_ptr(), link.len() as u64));
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

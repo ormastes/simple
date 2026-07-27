@@ -4912,6 +4912,27 @@ int rt_file_exists(const char* path) {
     return 0;
 }
 
+int rt_file_is_regular_no_follow(const char* path) {
+#if defined(_WIN32)
+    if (!path) return 0;
+    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
+    if (wide_len <= 0) return 0;
+    wchar_t* wide_path = (wchar_t*)malloc((size_t)wide_len * sizeof(wchar_t));
+    if (!wide_path) return 0;
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide_path, wide_len)) {
+        free(wide_path);
+        return 0;
+    }
+    DWORD attributes = GetFileAttributesW(wide_path);
+    free(wide_path);
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+           (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
+#else
+    struct stat st;
+    return path && lstat(path, &st) == 0 && S_ISREG(st.st_mode);
+#endif
+}
+
 int rt_file_delete(const char* path) {
     if (!path) return 0;
     return remove(path) == 0 ? 1 : 0;

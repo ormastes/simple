@@ -85,6 +85,7 @@ fn host_import_capability_id(name: &str) -> Option<u64> {
         | "rt_file_read_text_rv"
         | "rt_file_canonicalize"
         | "rt_file_exists"
+        | "rt_file_is_regular_no_follow"
         | "rt_file_size"
         | "rt_file_mtime"
         | "rt_file_read_bytes"

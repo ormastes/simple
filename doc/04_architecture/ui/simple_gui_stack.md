@@ -398,6 +398,10 @@ Readback Matrix includes submit/readback availability for generated 2D child
 backends, and the Platform Spark/Normal-LLM table includes a `linux_gui_web`
 event/readback row plus a DirectX native verdict/gate row.
 
+Retained hosted-WM evidence is admitted only while its RenderDoc `.rdc`/XML
+and baseline/input framebuffer PPM paths remain regular files under the shared
+no-follow file-ops query and their current hashes match the receipt.
+
 Known runtime/production gaps:
 
 - Compiler/interpreter GPU lane queue packets now consume
