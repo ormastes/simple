@@ -14,6 +14,9 @@ class LayoutSequencePlan:
     valid: bool
     gsub: [GsubLookup]
     gpos: [GposLookup]
+class _LookupRecordsApply:
+    glyphs: [LayoutGlyphRecord]
+    position_remap: [i64]
 fn _sub_end(lookup: GsubLookup, subtable: i64) -> i64:
     if subtable < 0 or subtable >= lookup.subtable_ends.len(): return -1
     lookup.subtable_ends[subtable] as i64
@@ -328,7 +331,7 @@ fn _apply_extension_at(font: OtFont, lookup: GsubLookup, catalog: [GsubLookup],
             case None: return None
         subtable_index = subtable_index + 1
     Some(GsubSubtableApply(glyphs: gsub_subtable_copy_records(records), applied: false, start: index,
-        consumed: 0, emitted: 0, consumed_positions: []))
+        consumed: 0, emitted: 0, consumed_positions: [], position_remap: []))
 fn _apply_extension(font: OtFont, lookup: GsubLookup, catalog: [GsubLookup],
                     records: [LayoutGlyphRecord], feature_mask: u64,
                     budget: GsubSubtableBudget) -> Option<[LayoutGlyphRecord]>:
@@ -356,7 +359,7 @@ fn _apply_lookup_at(font: OtFont, lookup: GsubLookup, catalog: [GsubLookup],
     if index < 0 or index >= records.len(): return None
     if records[index].feature_mask & feature_mask == 0u64:
         return Some(GsubSubtableApply(glyphs: gsub_subtable_copy_records(records), applied: false, start: index,
-            consumed: 0, emitted: 0, consumed_positions: []))
+            consumed: 0, emitted: 0, consumed_positions: [], position_remap: []))
     if (lookup.lookup_type == 1u32 or lookup.lookup_type == 2u32 or
         lookup.lookup_type == 3u32 or lookup.lookup_type == 4u32 or
         lookup.lookup_type == 8u32):
@@ -368,10 +371,43 @@ fn _apply_lookup_at(font: OtFont, lookup: GsubLookup, catalog: [GsubLookup],
     if lookup.lookup_type == 7u32:
         return _apply_extension_at(font, lookup, catalog, records, index, feature_mask, budget)
     None
+fn _remap_positions(positions: [i64], value: GsubSubtableApply,
+                    input_length: i64) -> bool:
+    if value.position_remap.len() > 0:
+        if value.position_remap.len() != input_length: return false
+        var index: i64 = 0
+        while index < positions.len():
+            val position = positions[index]
+            if position < -1 or position >= input_length: return false
+            if position >= 0:
+                val mapped = value.position_remap[position]
+                if mapped < -1 or mapped >= value.glyphs.len(): return false
+                positions[index] = mapped
+            index = index + 1
+        return true
+    val delta = value.emitted - value.consumed
+    var last_consumed = value.start
+    for consumed_position in value.consumed_positions:
+        if consumed_position > last_consumed: last_consumed = consumed_position
+    var index: i64 = 0
+    while index < positions.len():
+        if (gsub_subtable_position_present(value.consumed_positions, positions[index]) and
+            (positions[index] != value.start or value.emitted == 0)):
+            positions[index] = -1
+        else if positions[index] > last_consumed:
+            positions[index] = positions[index] + delta
+        index = index + 1
+    true
 fn _apply_lookup_records(font: OtFont, records: [LayoutGlyphRecord], positions: [i64],
                          cursor: i64, count: i64, limit: i64, catalog: [GsubLookup],
-                         feature_mask: u64, budget: GsubSubtableBudget) -> Option<[LayoutGlyphRecord]>:
+                         feature_mask: u64,
+                         budget: GsubSubtableBudget) -> Option<_LookupRecordsApply>:
     var result = gsub_subtable_copy_records(records)
+    var position_remap: [i64] = []
+    var original_position: i64 = 0
+    while original_position < records.len():
+        position_remap.push(original_position)
+        original_position = original_position + 1
     var record_index: i64 = 0
     while record_index < count:
         if not gsub_subtable_take(budget, 1): return None
@@ -387,23 +423,14 @@ fn _apply_lookup_records(font: OtFont, records: [LayoutGlyphRecord], positions: 
         budget.depth = budget.depth - 1
         match nested:
             case Some(value):
+                val input_length = result.len()
                 result = value.glyphs
                 if value.applied:
-                    val delta = value.emitted - value.consumed
-                    var last_consumed = value.start
-                    for consumed_position in value.consumed_positions:
-                        if consumed_position > last_consumed: last_consumed = consumed_position
-                    var position_index: i64 = 0
-                    while position_index < positions.len():
-                        if (gsub_subtable_position_present(value.consumed_positions, positions[position_index]) and
-                            (positions[position_index] != value.start or value.emitted == 0)):
-                            positions[position_index] = -1
-                        else if positions[position_index] > last_consumed:
-                            positions[position_index] = positions[position_index] + delta
-                        position_index = position_index + 1
+                    if (not _remap_positions(positions, value, input_length) or
+                        not _remap_positions(position_remap, value, input_length)): return None
             None: return None
         record_index = record_index + 1
-    Some(result)
+    Some(_LookupRecordsApply(glyphs: result, position_remap: position_remap))
 fn _context1_match(font: OtFont, lookup: GsubLookup, subtable: i64, limit: i64,
                    records: [LayoutGlyphRecord], start: i64,
                    maximum_work: i64) -> Option<LayoutContextMatch>:
@@ -459,12 +486,12 @@ fn _apply_context_at(font: OtFont, lookup: GsubLookup, catalog: [GsubLookup],
     if start < 0 or start >= records.len(): return None
     if records[start].feature_mask & feature_mask == 0u64:
         return Some(GsubSubtableApply(glyphs: gsub_subtable_copy_records(records), applied: false, start: start,
-            consumed: 0, emitted: 0, consumed_positions: []))
+            consumed: 0, emitted: 0, consumed_positions: [], position_remap: []))
     val accepted = match layout_context_lookup_accepts(font, lookup, records[start]):
         Some(value): value
         None: return None
     if not accepted: return Some(GsubSubtableApply(glyphs: gsub_subtable_copy_records(records), applied: false, start: start,
-        consumed: 0, emitted: 0, consumed_positions: []))
+        consumed: 0, emitted: 0, consumed_positions: [], position_remap: []))
     var subtable_index: i64 = 0
     while subtable_index < lookup.subtable_offsets.len():
         if not gsub_subtable_take(budget, 1): return None
@@ -499,22 +526,23 @@ fn _apply_context_at(font: OtFont, lookup: GsubLookup, catalog: [GsubLookup],
                 item.records_offset, item.record_count, limit, catalog, feature_mask, budget):
                 Some(value): value
                 None: return None
-            val changed = _records_changed(records, applied)
+            val changed = _records_changed(records, applied.glyphs)
             var consumed_positions: [i64] = []
-            if changed and records.len() != applied.len():
+            if changed and records.len() != applied.glyphs.len():
                 var record_index: i64 = 0
                 while record_index < records.len():
                     consumed_positions.push(record_index)
                     record_index = record_index + 1
             else if changed:
                 consumed_positions.push(start)
-            return Some(GsubSubtableApply(glyphs: applied, applied: changed, start: start,
-                consumed: if changed and records.len() != applied.len(): records.len() else if changed: 1 else: 0,
-                emitted: if changed and records.len() != applied.len(): applied.len() else if changed: 1 else: 0,
-                consumed_positions: consumed_positions))
+            return Some(GsubSubtableApply(glyphs: applied.glyphs, applied: changed, start: start,
+                consumed: if changed and records.len() != applied.glyphs.len(): records.len() else if changed: 1 else: 0,
+                emitted: if changed and records.len() != applied.glyphs.len(): applied.glyphs.len() else if changed: 1 else: 0,
+                consumed_positions: consumed_positions,
+                position_remap: if changed: applied.position_remap else: []))
         subtable_index = subtable_index + 1
     Some(GsubSubtableApply(glyphs: gsub_subtable_copy_records(records), applied: false, start: start,
-        consumed: 0, emitted: 0, consumed_positions: []))
+        consumed: 0, emitted: 0, consumed_positions: [], position_remap: []))
 fn _apply_context3(font: OtFont, lookup: GsubLookup, catalog: [GsubLookup],
                    records: [LayoutGlyphRecord], feature_mask: u64,
                    budget: GsubSubtableBudget) -> Option<[LayoutGlyphRecord]>:
