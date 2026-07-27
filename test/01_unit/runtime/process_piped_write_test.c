@@ -123,6 +123,29 @@ static int interrupted_large_write_completes(void) {
     return wrote && alarm_count > 0 && saw_ok;
 }
 
+static int bounded_write_reports_backpressure(void) {
+    int64_t pid = spawn_shell("sleep 1");
+    if (pid <= 0) return 0;
+    char payload[4096];
+    memset(payload, 'z', sizeof(payload));
+    int saw_would_block = 0;
+    for (int64_t offset = 0; offset < 1048576; offset += sizeof(payload)) {
+        int64_t written = rt_process_write_stdin_some(
+            pid, payload, sizeof(payload), 0, sizeof(payload));
+        if (written < 0) {
+            rt_process_close_piped(pid);
+            return 0;
+        }
+        if (written == 0) {
+            saw_would_block = 1;
+            break;
+        }
+    }
+    int closed = rt_process_close_piped(pid);
+    return saw_would_block && closed &&
+        rt_process_write_stdin_some(pid, payload, sizeof(payload), 0, sizeof(payload)) == -1;
+}
+
 static int inherited_descriptor_is_closed(void) {
 #ifndef __linux__
     return 1;
@@ -156,6 +179,16 @@ static int exact_close_kills_and_reaps_group(void) {
     if (!rt_process_close_piped(pid)) return 0;
     for (int i = 0; i < 1000 && !stopped(grandchild); i++) usleep(1000);
     return stopped((pid_t)pid) && stopped(grandchild);
+}
+
+static int reaped_leader_still_kills_group(void) {
+    int64_t pid = spawn_shell("trap '' TERM; sleep 30 & echo $!; exit 0");
+    pid_t grandchild = -1;
+    if (pid <= 0 || !read_pid_from_child(pid, &grandchild)) return 0;
+    usleep(20000);
+    if (!rt_process_close_piped(pid)) return 0;
+    for (int i = 0; i < 1000 && !stopped(grandchild); i++) usleep(1000);
+    return stopped(grandchild);
 }
 
 static int close_recycles_slots_and_rejects_unknown_handles(void) {
@@ -208,9 +241,11 @@ static int parent_death_stops_child(void) {
 int main(void) {
     if (!closed_child_write_is_nonfatal()) return 1;
     if (!interrupted_large_write_completes()) return 2;
-    if (!inherited_descriptor_is_closed()) return 3;
-    if (!exact_close_kills_and_reaps_group()) return 4;
-    if (!close_recycles_slots_and_rejects_unknown_handles()) return 5;
-    if (!parent_death_stops_child()) return 6;
+    if (!bounded_write_reports_backpressure()) return 3;
+    if (!inherited_descriptor_is_closed()) return 4;
+    if (!exact_close_kills_and_reaps_group()) return 5;
+    if (!reaped_leader_still_kills_group()) return 6;
+    if (!close_recycles_slots_and_rejects_unknown_handles()) return 7;
+    if (!parent_death_stops_child()) return 8;
     return 0;
 }
