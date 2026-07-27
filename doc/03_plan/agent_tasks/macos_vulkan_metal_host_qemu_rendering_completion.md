@@ -1106,6 +1106,32 @@ proven; do not preserve obsolete SPIR-V hash/size or rejected semantic claims.
   PASS. Keep the implementation local until a fresh bounded session repairs
   the probe and produces honest native evidence.
 
+### 2026-07-27 honest FontRenderer proof and final unit-spec blocker
+
+- No bootstrap was run. The strengthened native renderer probe now forces
+  selected Bungee bytes, requires every direct raster/adapter/reconstruction
+  receipt unconditionally, proves asset-root rejection and positive loading,
+  positive staged quads/atlas alpha, cold/warm cache behavior, and U+0300
+  normalization from raw 42x22/advance-0 to advance 43. It passes a strict
+  zero-stub native build.
+- The zero-extent outline regression was corrected without reopening the
+  divide-by-zero path: raw dimensions reject only negative values, while the
+  ordered rounded width/height guards remain positive before division. The
+  deployed pure-Simple interpreter now passes `sfnt_glyf_spec.spl` 4/4.
+- `font_ffi_spec.spl` is the last font merge blocker. Its removed
+  `font_ffi` import was corrected to `font_sffi`, and two stale interpolated
+  candidate literals were escaped. The third bounded run reaches 12/14 but
+  still parses two import-source assertion strings as interpolation
+  (`sfnt_cmap_glyph_id` and the matching SFNT glyf import). Escape those
+  literal braces and rerun once in a fresh session before pushing the font
+  implementation.
+- The canonical non-bootstrap Vulkan app builder remains unable to start
+  because its required current pure-Simple Stage 3 compiler/provenance pair is
+  absent. The deployed release compiler is too old for trusted host-GPU
+  provider admission. A compiler deployment/bootstrap is now technically
+  essential for authoritative Vulkan evidence unless another active lane
+  supplies that exact admitted pair; do not substitute the Rust seed.
+
 ## Ownership and Stop Conditions
 
 | Lane | Owner | Merge rule |
