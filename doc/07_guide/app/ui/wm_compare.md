@@ -127,7 +127,8 @@ The harness works, but not every comparison is meaningful.
 Important current limitation:
 
 - B and D are not yet a true parity pair for the same runtime scene
-- B is the live obsidian-themed Web WM
+- B is the live Web WM; its canonical package theme is `aetheric_dark` (old
+  Obsidian/Glass identifiers are compatibility aliases)
 - D is still tied to a different guest capture path
 
 So a B-vs-D mismatch is often reporting a real structural difference, not a
@@ -322,8 +323,8 @@ evidence under `doc/06_spec/image/<spec-relative-path>/` and list it in the
 spec docblock with `**Screenshots:**` or `**TUI Captures:**`. Keep structured
 reports and logs under `build/test-artifacts/<spec-relative-path>/`.
 
-For phase-by-phase history and current blockers, see
-[doc/08_tracking/wm_compare/README.md](../../08_tracking/wm_compare/README.md).
+For current WM glass phases and blockers, see the
+[agent plan](../../../03_plan/agent_tasks/wm_glass_theme_host_simpleos.md).
 
 ---
 
@@ -334,4 +335,8 @@ For phase-by-phase history and current blockers, see
 - Keep phase reports honest: note when a comparison is structural rather than a
   regression signal.
 - If a run depends on the live Web WM, verify the browser runtime first with
-  [platform/simpleos_web_wm.md](../platform/simpleos_web_wm.md).
+  [platform/simpleos_web_wm.md](../../platform/simpleos/simpleos_web_wm.md).
+- Interpret visual source drift against the package/snapshot authority, not
+  against legacy `GlassConfig`, token-twin, or Obsidian preset values. See the
+  [theme operator guide](../../ui/stitch_simple_os_theme.md) and the active
+  [WM glass design](../../../05_design/wm_glass_theme_host_simpleos.md).

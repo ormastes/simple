@@ -14,7 +14,8 @@ Old `.simple-theme` files are compatibility/import inputs only. Runtime GUI, Web
 - Family/theme package resolution.
 - Validation for missing files, broken references, widget coverage, icon coverage, token layer rules, and unresolved `var(--token)` references.
 - Process cache and startup/load-time fingerprints.
-- Shared structs for resolved CSS, token maps, widget CSS maps, icons, numeric colors, `UITheme`, `GlassDesignTokens`, and compositor glass config values.
+- The immutable `ThemeRenderSnapshot`, including package/material identity and
+  the CSS/scalar projections required by render adapters.
 
 GUI, Web, WM, and Engine2D modules are adapters. They must not parse theme files or copy visual constants when a resolved package field exists.
 
@@ -25,8 +26,9 @@ theme.sdn registry
   -> family package
   -> concrete theme package
   -> ResolvedThemePackage
+  -> immutable ThemeRenderSnapshot
   -> GUI CSS, Chromium/Electron CSS, Simple Web CSS, BrowserBackend colors,
-     hosted WM glass config, Engine2D WM numeric colors, icon defaults
+     hosted WM, generated SimpleOS WM, Engine2D WM, icon defaults
 ```
 
 CSS composition order is:
@@ -52,7 +54,21 @@ host-native WM appearance.
 
 `os.compositor.browser_backend.BrowserBackend` resolves numeric colors and package CSS at backend construction. Rendering uses cached fields, sets theme metadata on the DOM root, and does not reread theme files on the hot path.
 
-Hosted WM and Engine2D WM entrypoints load the registry default and pass resolved numeric/glass values into compositor, splash, taskbar, dock, and window chrome drawing paths.
+Hosted startup installs the default snapshot through
+`install_default_host_wm_theme` before the first frame. Generated SimpleOS
+startup installs its generated snapshot through
+`install_generated_simpleos_wm_theme` before the first frame. Those installers,
+not legacy `GlassConfig`/`GlassPortConfig` defaults or runtime key switching,
+are the production WM authority.
+
+The numeric/text Glass token twins and Obsidian presets remain compatibility or
+standalone APIs. They do not replace the registry/package/snapshot path for
+hosted or SimpleOS production rendering. See
+[WM glass theme design](../../05_design/wm_glass_theme_host_simpleos.md) and
+[system-test plan](../../03_plan/sys_test/wm_glass_theme_host_simpleos.md) for
+active implementation and evidence constraints; the
+[agent plan](../../03_plan/agent_tasks/wm_glass_theme_host_simpleos.md) records
+current ownership.
 
 ## Cache Policy
 

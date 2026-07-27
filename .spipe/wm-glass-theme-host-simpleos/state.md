@@ -836,3 +836,31 @@ implementation-source-prepared-web-cpu-material-verification-blocked
   Before live widget/web evidence, admit a separately provenance-bound
   GUI-capable full CLI driver (or explicitly build and prove the full CLI);
   never substitute the harness or seed.
+
+- continuation-2026-07-27-v3-render-authority: **SOURCE REVIEW REJECTED /
+  RUNTIME UNVERIFIED.** The manifest-v3 candidate introduces a
+  canonical full-CLI producer and immutable admission copies, binds the
+  complete source/build transcript, and uses PID/executable/descendant-tree
+  evidence to reject seed/bootstrap delegation. The launcher keeps the
+  admission-exported driver and manifest hashes authoritative across launch.
+  Final review rejected its process proof: it rejects the canonical
+  `build/bootstrap/full` root by substring and polling can miss same-PID exec
+  or short-lived descendants. The bounded review cap is reached; no canonical
+  full-CLI artifact or generated manifest-v3 exists locally.
+
+  The hosted Web cache now receives the selected Engine2D backend instead of
+  the old `auto` software default. The canonical package-aware Web CSS branch
+  uses package-owned variables for fills, material, and traffic controls;
+  literal palettes remain only in the explicit package-less compatibility
+  branch. WM chrome carries the Aetheric material through Draw IR, samples the
+  already-painted parent in z-order and preserves inactive embedding opacity.
+  Final review rejected the Metal path because the inactive offscreen is not
+  GPU-only, receipt target/handle/device aggregation is last-wins, and one
+  capability assertion is inconsistent. That uncommitted candidate is not a
+  source checkpoint. Both exact blockers are recorded under
+  `doc/08_tracking/bug/`.
+
+  x86_64, ARM64, and RV64 canonical desktop entries now install the generated
+  Aetheric snapshot before compositor/first-frame construction. External
+  QEMU/Windows/Linux evidence remains fail-closed under the prepared-host
+  handoff. The current session did not bootstrap or substitute the Rust seed.

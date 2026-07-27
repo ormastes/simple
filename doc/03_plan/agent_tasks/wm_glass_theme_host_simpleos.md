@@ -13,7 +13,8 @@ helpers use `fail("wm glass theme evidence not implemented")` or `assert(false)`
 ## Implementation Lanes
 
 1. Package/snapshot lane: typed parsing, SHA-256 manifest/material identity,
-   generator and drift checks.
+   `theme-sync compile-to-spl` generation, and generated-source diff review
+   (`theme-sync diff` is SDN-only).
 2. WM/bootstrap lane: full projection, hosted startup and canonical SimpleOS
    generated-snapshot installation.
 3. Web/Draw IR lane: package CSS wiring, computed-style/accessor repair,
@@ -78,8 +79,8 @@ overlapping dirty work and remains read-only for this lane.
 | SimpleOS ARM64 QEMU | SOURCE INPUT PREFLIGHT IMPLEMENTED; LIVE PROOF PENDING | generated Aetheric startup and capability-discovered VirtIO-MMIO keyboard/pointer eventq wiring are present; DMA ordering/status/shape contracts pass locally, but the self-hosted ARM payload and QMP key/pointer/frame/RAMFB evidence are not yet available |
 | Aggregate SSpec | FAIL-FAST BY DESIGN | `require_wm_glass_theme_evidence()` remains a real failure until host and required QEMU rows produce current-source evidence |
 | Simple GUI theme handoff | SOURCE FIXED; product proof pending | resolved snapshot now reaches canonical widget Draw IR; 2 bootstrap-driver scenarios pass diagnostically |
-| Simple Web theme authority | SOURCE FIXED; product proof pending | package CSS is now the final authority; 3 bootstrap-driver scenarios pass diagnostically |
-| WM glass material projection | SOURCE FIXED; focused spec timed out | Draw IR retains durable identity/radius/border/shadows/backdrop request and named fallback; broad focused spec timed out at 120 seconds without assertions |
+| Simple Web theme authority | SOURCE REPAIR ACTIVE; product proof pending | package-aware palette variables are wired, but final review still found adapter-owned blur/overlay/shadow material recipes; package ownership must cover those values and its focused contract |
+| WM glass material projection | REVIEW REJECTED; fail-closed | CPU parent sampling/opacity is prepared, but inactive Metal uses a non-GPU-only offscreen, material identity aggregation is last-wins, and one capability assertion disagrees with production; see the dated blocker record |
 | Runtime theme switching | ABI BLOCKED; fail-fast system contract | numeric subscriber ports have no `IpcOutputPort`/send adapter, message schema, source identity, or delivery-failure policy |
 
 ### Historical parallel ownership — completed
@@ -614,22 +615,32 @@ launcher/window-owner identity with the required native receipts. No
 seed/bootstrap execution may satisfy that gate; old orphan
 `SimpleGui -> simple_seed` processes are inadmissible diagnostic residue.
 
+The manifest-v3 candidate separates the canonical full CLI GUI driver from
+Stage 3 and keeps admitted hashes authoritative, but independent review
+rejected its process-history proof. It both rejects the canonical
+`build/bootstrap/full` root by substring and can miss same-PID exec or
+short-lived descendants. The exact fresh-session repair is recorded in
+`doc/08_tracking/bug/macos_full_cli_gui_admission_process_proof_2026-07-27.md`;
+the candidate scripts are not an admitted source checkpoint.
+
+The canonical SimpleOS desktop entries for x86_64, ARM64, and RV64 call
+`install_generated_simpleos_wm_theme()` before compositor and first-frame
+construction. Their live framebuffer/input evidence remains assigned to the
+prepared-host rows; source ordering is not a QEMU PASS.
+
 Linux/Windows, x86/ARM QEMU, and native-board runs remain postponed to prepared
 hosts and fail closed. They are still required, never PASS by postponement;
 retain and use the exact commands and path references in the existing
 cross-host request and handoff contract above.
 
-The current source-prepared macOS gate uses
-`macos-gpu-2d-live-native-manifest-v2`: it binds the exact widget `.spl`, web
-`.spl`, and showcase HTML path/hash, then admits the same compiler as the
-strict `SimpleGui` source. The launcher publishes a versioned receipt with
-selected/bundled hashes and equal launcher/window-owner identities. Widget and
-web evidence wrappers revalidate that receipt, reject recursive
-`simple_seed` descendants, and capture only the PID-owned `AXWindowNumber`.
-Host-neutral positive/negative probes cover the strict record and seed tree.
-These are source/static gates, not replacement pixels or event receipts; the
-live macOS row remains runtime-unverified until the manifest is rebuilt and
-admitted on the prepared host.
+The superseded manifest-v2 gate bound the widget/Web inputs but admitted its
+Stage-3 compiler as the strict GUI driver. The manifest-v3 candidate attempts
+to replace that mismatch with a separately provenance-bound canonical full CLI
+GUI driver. Its launcher-side immutable hashes are sound, but its live process
+proof is review-rejected and must not admit a driver. The live macOS row
+remains runtime-unverified until the process-proof bug is repaired, the source
+is independently accepted, and the canonical driver/manifest are produced on
+the prepared host.
 
 ## 2026-07-27 Metal Receipt and GUI Driver Follow-up
 
@@ -638,11 +649,12 @@ the device-only operation before dispatch, leaves its CPU mirror unchanged,
 and must take the explicit CPU fallback path. A successful device receipt no
 longer invokes the CPU glass oracle behind the provenance boundary.
 
-The next local implementation lane is GUI-driver admission, not another
-capture retry. Manifest v2 currently binds a Stage-3 compiler but the strict
-launcher also requires that binary to carry the Winit GUI marker; the builder
-only proves Winit on the separate native harness. Extend admission to bind an
-exact-current, provenance-matched full CLI GUI driver (or make and prove that
-full CLI explicitly). The native harness and every seed/delegating driver
-remain inadmissible. Only after that contract is source-complete may the
-widget/web capture and event rows run.
+Receipt `801caf` is therefore retained solely as a GPU-only Metal
+device-operation checkpoint. It is not a native widget/web capture, event
+receipt, GUI admission, or product PASS, and it cannot promote any other row.
+
+GUI-driver admission remains source-blocked, so artifact production and capture
+must not begin. Repair and independently accept the process-proof bug first,
+then produce and admit the exact-current canonical full CLI GUI driver and
+manifest v3. No admissible current pure-Simple GUI runtime exists; the native
+harness and every seed/delegating driver remain inadmissible.

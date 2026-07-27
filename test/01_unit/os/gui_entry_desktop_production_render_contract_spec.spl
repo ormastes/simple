@@ -1,7 +1,36 @@
 use std.spec.*
 use app.io.mod.{file_read}
 
+fn _desktop_theme_installer_occurrences(src: text) -> i64:
+    # Count every call spelling, not only the canonical assignment, so a second
+    # differently assigned invocation cannot escape the exactly-once contract.
+    val installer_call = "install_generated_simpleos_wm_theme("
+    val first = src.index_of(installer_call)
+    if first < 0:
+        return 0
+    val remaining = src.substring(first + installer_call.len(), src.len())
+    if remaining.contains(installer_call):
+        return 2
+    1
+
 describe "SimpleOS production desktop render entry":
+    it "installs the exact generated WM snapshot once before every canonical desktop compositor and frame":
+        val x86 = file_read("examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl")
+        val arm64 = file_read("examples/09_embedded/simple_os/arch/arm64/gui_entry_desktop.spl")
+        val riscv64 = file_read("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl")
+
+        for src in [x86, arm64, riscv64]:
+            val install = src.index_of("install_generated_simpleos_wm_theme(")
+            val compositor = src.index_of("Compositor.with_backends(")
+            val frame_executor = src.index_of("Engine2dWmFrameExecutor.")
+            val first_frame = src.index_of("shell.render_baremetal_first_frame(")
+            expect(src).to_contain("use os.compositor.simpleos_wm_theme_bootstrap.{install_generated_simpleos_wm_theme}")
+            expect(_desktop_theme_installer_occurrences(src)).to_equal(1)
+            expect(install).to_be_greater_than(0)
+            expect(install).to_be_less_than(compositor)
+            expect(install).to_be_less_than(frame_executor)
+            expect(install).to_be_less_than(first_frame)
+
     it "should keep registered-only shaping independent of the stubbed host font ABI":
         val renderer = file_read("src/lib/nogc_sync_mut/text_layout/font_renderer.spl")
         val shaper = file_read("src/lib/skia/feature/shaper/shaper.spl")

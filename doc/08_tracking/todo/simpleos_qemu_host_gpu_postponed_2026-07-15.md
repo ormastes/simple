@@ -21,10 +21,11 @@ Linux QEMU, Windows QEMU, UNO Q, VisionFive 2, and UP Squared native execution
 are postponed from the current macOS research/design session. They remain
 required rows, not exclusions or PASS.
 
-The authoritative extension matrix, prerequisites, exact resume commands,
-retained artifact paths, owners, and final reviewer are in:
-
-`doc/03_plan/agent_tasks/simpleos_cross_host_qemu_board_gpu_2d_parity.md`.
+The former extension-matrix path is not present in this checkout. The active,
+fail-closed host handoffs are maintained in
+`doc/08_tracking/feature/wm_glass_cross_host_evidence_requests_2026-07-27.md`
+for the WM rows and in this ledger for the host-GPU rows. Postponement never
+marks Windows, Linux, native Metal/Vulkan, x86_64, ARM64, or RV64 as PASS.
 
 Open feature requests are recorded in:
 
@@ -79,3 +80,17 @@ CPU-SIMD evidence lane before running one fresh capped live guest gate.
 Required promotion evidence remains: HVF in the executed AArch64 argv, guest
 negotiation, Metal device identity, device-origin readback, and bit-exact
 parity with the CPU-SIMD oracle.
+
+## Active host-GPU resumption rows
+
+All rows are active/fail-closed. Commands are resume commands only; they must
+not be run with a bootstrap/seed executable or used to infer a pass.
+
+| Row | Host/capability and missing prerequisite | Exact resume command | Retained artifacts | Owner | Final reviewer |
+|---|---|---|---|---|---|
+| macOS Metal host-GPU | macOS, HVF AArch64 QEMU, completed Metal-only daemon closure, admitted pure-Simple compiler/runtime; current blocker is the missing supported daemon closure and no admissible GUI runtime. | `sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --preflight` (classification only); live gate resumes only after the missing transport/daemon and admission are independently approved. | executed argv/HVF receipt, guest negotiation, immutable Metal device/provider identity, device readback, CPU-SIMD parity, QMP/serial logs, timing/RSS. | prepared macOS host operator | independent highest-capability reviewer |
+| Linux Vulkan host-GPU | physical Linux host, supported shared-memory transport, Vulkan daemon/provider closure, admitted compiler/runtime; no prepared host receipt. | `sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --preflight` followed by the approved Linux host-gate command recorded with the admitted manifest. | manifest, daemon/QEMU logs, submission/fence, device readback, CPU-SIMD parity, timing/RSS. | prepared Linux host operator | independent highest-capability reviewer |
+| Windows DirectX host-GPU | physical Windows host, supported transport and DirectX daemon/provider, admitted compiler/runtime; no prepared host receipt. | `sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --preflight` followed by the approved Windows host-gate command recorded with the admitted manifest. | manifest, daemon/QEMU logs, submission/fence, device readback, CPU-SIMD parity, timing/RSS. | prepared Windows host operator | independent highest-capability reviewer |
+| x86_64 QEMU | QEMU x86_64, firmware, current admitted kernel/disk and `grub-mkstandalone`; guest media is not admitted. | `BUILD_DIR=build/simpleos_wm_fullscreen_evidence SIMPLE_BIN=<admitted-simple> sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs` | frozen manifest, kernel/disk hashes, serial/QMP/`pmemsave` captures, SSE2 parity, timing/RSS. | `/root/x86_qemu_owner` | independent highest-capability reviewer |
+| ARM64 QEMU | QEMU AArch64, firmware, admitted ELF/FAT disk/manifest; live guest proof is missing. | `sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs` then `sh scripts/check/check-simpleos-arm64-qmp-input-evidence.shs` | frozen manifest, ELF/FAT hashes, serial/QMP/RAMFB captures, VirtIO/NEON receipts, timing/RSS. | `/root/arm_qemu_owner` | independent highest-capability reviewer |
+| RV64 QEMU | QEMU RV64, current admitted ELF, modern PCI VirtIO input, QMP, and parity oracle; none has a current live receipt. | `bin/simple os build --scenario=riscv64-display-smoke` then `scripts/check/check-rv64-display-smoke-qmp-evidence.shs --wm-font-input` | frozen manifest, ELF hash, serial/QMP/RAMFB captures, PCI/ISR/input receipts, parity, timing/RSS. | prepared RV64 host operator | independent highest-capability reviewer |

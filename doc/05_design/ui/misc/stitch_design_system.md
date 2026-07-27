@@ -1,7 +1,9 @@
 # SimpleOS Stitch Design System Reference
 
 > Extracted from Stitch MCP projects (2026-04-09).
-> Source of truth for consistent theme/UI creation across GUI lib and window manager.
+> Historical Stitch/Glass reference for compatible standalone consumers. The
+> production hosted/SimpleOS authority is the package/snapshot system described
+> in [simple_theme_system.md](simple_theme_system.md).
 
 ---
 
@@ -358,9 +360,14 @@ When creating a new theme, generate these screens to cover all UI patterns:
 | `src/lib/common/ui/ios_theme.spl` | iOS theme presets |
 | `src/lib/common/ui/ios_css.spl` | iOS CSS generation |
 
-### Token Sync Rule
+### Historical token sync rule (legacy/standalone)
 
-The Stitch `designMd` and local `glass/tokens.spl` / `glass/numeric_tokens.spl` must stay in sync:
+This describes the legacy/standalone Glass and Stitch integration. It is not the
+source of truth for hosted/SimpleOS production themes. Those use
+`config/themes/theme.sdn`, family/package folders,
+`nogc_sync_mut.ui.theme_package`, an immutable `ThemeRenderSnapshot`, and the
+`theme-sync compile-to-spl` generator. The generated Simple source is reviewed
+as a source diff; `theme-sync diff` is only an SDN-to-SDN comparison.
 
 | Stitch designMd | glass/tokens.spl | glass/numeric_tokens.spl |
 |-----------------|-------------------|--------------------------|
@@ -380,18 +387,23 @@ use common.ui.glass.numeric_tokens.{GLASS_DARK_BG_TOP, GLASS_DARK_SURFACE, ...}
 
 ---
 
-## 11. Theme Sharing: GUI Lib + Window Manager
+## 11. Historical Theme Sharing: GUI Lib + Window Manager
 
-Both the GUI widget library and the window manager compositor consume the same tokens:
+The following is retained for compatibility/standalone Glass consumers. It does
+not describe the canonical hosted/SimpleOS package authority:
 
 - **GUI lib** uses `glass/tokens.spl` (CSS text values) via `glass/css.spl` to generate stylesheets
 - **Window manager** uses `glass/numeric_tokens.spl` (u64 hex values) for direct framebuffer/compositor rendering
 - **Web WM and Simple Web app windows** use `app.ui.web.html.generate_css()` and embedded `<style>` blocks; the Simple Web renderer applies those style blocks and resolves CSS variables before painting
 - **Stitch** uses `designMd` (markdown) to teach Gemini the visual language
 
-To add a new theme variant:
-1. Define new color values in both `glass/tokens.spl` (CSS) and `glass/numeric_tokens.spl` (u64)
-2. Create a new `UITheme` factory in `glass/theme.spl`
-3. Update `designMd` in the Stitch skill or create a new design system via API
-4. Generate screens in Stitch to validate visual consistency
-5. Apply design system to screens and generate light/dark variants
+To add a production theme, register its family/package in `theme.sdn`, author
+the family shape/icons and package manifest/base/widget CSS, then run the
+`theme-sync compile-to-spl` snapshot generator and review its source diff. Do
+not create a token twin,
+`GlassConfig`/`GlassPortConfig` factory, Obsidian preset, or `T`-key switch as
+part of the canonical workflow. For the current WM work, see
+[WM glass theme detail design](../../wm_glass_theme_host_simpleos.md) and its
+[system-test plan](../../../03_plan/sys_test/wm_glass_theme_host_simpleos.md);
+current ownership is in the
+[agent plan](../../../03_plan/agent_tasks/wm_glass_theme_host_simpleos.md).

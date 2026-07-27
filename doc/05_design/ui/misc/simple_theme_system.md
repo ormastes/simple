@@ -48,7 +48,8 @@ Icon package sections are `apps`, `system`, `navigation`, `content`, `status`, `
 - Identity: `id`, `display_name`, `family_id`, `registry_path`, `theme_path`, `family_path`.
 - CSS chunks: `shape_css`, `family_widget_css`, `base_css`, `theme_widget_css`, `icon_css`.
 - Maps: `token_map`, `widget_css_by_name`, `icons`.
-- Renderer values: numeric colors, `UITheme`, `GlassDesignTokens`, and `ResolvedThemeGlassConfig`.
+- Snapshot: immutable `ThemeRenderSnapshot` with canonical identity, composed
+  CSS, semantic scalar values, and material/source hashes.
 - Cache data: `source_paths`, `fingerprint`, `mtime_key`.
 
 Public helpers:
@@ -62,6 +63,7 @@ Public helpers:
 - `theme_numeric_colors(id)`
 - `theme_glass_config(id)`
 - `theme_icon_defaults(id)`
+- `theme_package_render_snapshot(id)`
 
 ## CSS Composition
 
@@ -81,7 +83,17 @@ Renderer-generated CSS may add layout, reset, DOM, and interaction rules, but pa
 
 `BrowserBackend` resolves package colors and CSS at construction, stores them on the backend, and applies cached values to the DOM root during render.
 
-Hosted WM uses `theme_glass_config` for compositor and boot splash glass settings. Engine2D WM uses `theme_numeric_colors` and themed Simple Web HTML for its browser demo content.
+Hosted WM installs the default package snapshot through
+`install_default_host_wm_theme` before its first frame. Generated SimpleOS
+installs the generated snapshot through `install_generated_simpleos_wm_theme`
+before its first frame. Engine2D WM and Web adapters consume snapshot
+projections and themed Simple Web HTML.
+
+`GlassConfig`, `GlassPortConfig`, and numeric/text Glass tokens are retained
+compatibility or standalone APIs; they are not the production authoring path
+for a new hosted/SimpleOS theme. New packages use registry + family/package
+folders, then `theme-sync compile-to-spl`; review the resulting source diff
+because `theme-sync diff` compares SDN snapshots rather than package output.
 
 ## Validation
 
@@ -96,3 +108,8 @@ Hosted WM uses `theme_glass_config` for compositor and boot splash glass setting
 - Local widget CSS defining new tokens instead of consuming existing ones.
 
 Invalid default themes must fail verify with exact file/key/path diagnostics.
+
+The active WM glass change has additional material/provenance boundaries in
+[the detail design](../../wm_glass_theme_host_simpleos.md),
+[system-test plan](../../../03_plan/sys_test/wm_glass_theme_host_simpleos.md),
+and [agent plan](../../../03_plan/agent_tasks/wm_glass_theme_host_simpleos.md).

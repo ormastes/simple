@@ -40,6 +40,31 @@ Each external host must retain one `evidence.env` with:
 Any absent, stale, malformed, synthetic, or mismatched field is `fail`, never
 `skip` or an inferred PASS.
 
+## Active fail-closed handoff matrix
+
+Every row below remains required and open.  A listed command is a resume
+command, not evidence that it has run; a missing checker is an implementation
+prerequisite and must fail closed until it exists.  No bootstrap or Rust-seed
+binary is permitted at any point in these rows.
+
+| Row | Required prepared host/capability and first missing prerequisite | Exact resume command | Retain before review | Owner | Final reviewer |
+|---|---|---|---|---|---|
+| `MAC-WM-GLASS-LOCAL-001` (native CPU/NEON/Metal) | macOS with a source-matched, provenance-matched canonical full CLI GUI driver carrying the Winit marker. The manifest-v3 candidate is review-rejected on incomplete OS process-history proof; no generated manifest-v3 artifact or admissible current pure-Simple GUI driver exists locally. | Repair and independently accept `doc/08_tracking/bug/macos_full_cli_gui_admission_process_proof_2026-07-27.md`, produce the canonical driver/provenance, then run the widget and Web live-evidence wrappers. | manifest-v3/launcher receipt, OS-backed admitted driver/execution-tree proof, source/runtime/provider hashes, native PID/window-owner and event receipts, CPU/NEON oracle, per-material GPU-only Metal receipts, device readback, captures, timing, RSS. Receipt `801caf` is device-operation evidence only, not widget/web/live-product proof. | `/root` / prepared macOS host operator | independent highest-capability reviewer |
+| `FR-WM-GLASS-WIN-0001` | physical Windows x86_64 with a Vulkan-capable driver, native event path, and admitted self-hosted `simple.exe`; the checker and admitted runtime are missing. | `sh scripts/check/check-wm-glass-windows-vulkan-evidence.shs` after creating the checker and admitting the exact runtime. | `build/evidence/wm-glass/windows-vulkan/evidence.env`, Vulkan readback/captures, x86 SIMD oracle, device/library identity, ordered native events, timing/RSS. | prepared Windows host operator | independent highest-capability reviewer |
+| `FR-WM-GLASS-LINUX-0001` | physical Linux x86_64 with Vulkan, RenderDoc, native display server, and admitted self-hosted runtime; the checker, runtime, and current `RDOC` capture are missing. | `sh scripts/check/check-wm-glass-linux-vulkan-evidence.shs` after creating the checker and admitting the exact runtime. | `build/evidence/wm-glass/linux-vulkan/evidence.env`, regular-file `RDOC`, device readback/captures, x86 SIMD oracle, ordered native events, timing/RSS. | prepared Linux host operator | independent highest-capability reviewer |
+| `FR-WM-GLASS-X86-QEMU-0001` | host with `grub-mkstandalone`, x86_64 QEMU, OVMF/firmware, and an admitted source-matched kernel/disk/manifest; the current canonical guest artifacts and host tool are missing. | `BUILD_DIR=build/simpleos_wm_fullscreen_evidence SIMPLE_BIN=<admitted-simple> sh scripts/check/check-simpleos-wm-fullscreen-evidence.shs` | frozen source/build manifest, kernel/disk/runtime hashes, serial and QMP logs, `pmemsave` baseline/maximized/restored PPMs and hashes, SSE2 oracle, ordered IRQ/WM/frame/damage receipts, timing/RSS. | `/root/x86_qemu_owner` | independent highest-capability reviewer |
+| `FR-WM-GLASS-ARM-QEMU-0001` | host with QEMU AArch64 and firmware plus admitted source-matched ARM64 ELF, FAT disk, and manifest; all live guest artifacts/receipts are missing. | `sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs` then `sh scripts/check/check-simpleos-arm64-qmp-input-evidence.shs` | frozen source/build manifest, ELF/FAT/runtime hashes, serial/QMP logs, baseline/post-input RAMFB captures and hashes, NEON oracle, VirtIO order/WM/frame/damage receipts, timing/RSS. | `/root/arm_qemu_owner` | independent highest-capability reviewer |
+
+The RV64 QEMU input/render row is also active and fail-closed under the
+SimpleOS host-GPU handoff: it requires a current admitted RV64 ELF, modern PCI
+VirtIO keyboard/mouse, QMP, and an RV64 CPU parity oracle; resume with
+`bin/simple os build --scenario=riscv64-display-smoke` then
+`scripts/check/check-rv64-display-smoke-qmp-evidence.shs --wm-font-input`.
+Retain its frozen manifest, ELF hashes, serial/QMP logs, RAMFB captures,
+PCI/ISR/event receipts, parity result, timing, and RSS.  The prepared RV64
+host operator owns the row; an independent highest-capability reviewer must
+approve it.  It is not a substitute for either ARM64 or x86_64 evidence.
+
 ## FR-WM-GLASS-WIN-0001 — Windows Vulkan and SIMD proof
 
 **Status:** postponed-external-host
