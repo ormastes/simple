@@ -153,12 +153,12 @@ realpath --version
 Use `bin/release/simple` rebuilt and deployed from the current tree. A stale
 release binary that links the obsolete two-argument `rt_env_set` ABI can crash
 before an SSpec runs and is not evidence. There is currently no accepted
-deployed runner. The strict one-worker bootstrap at `1f27b9be2cb7` passed
+deployed runner. The strict one-worker bootstrap at `3e68805fb09f` passed
 Stage 2/3 sanity, capability, and provenance and cleared the prior Office and
 parser blockers. Stage 4 stopped later at
-`src/std/nogc_sync_mut/compression/gzip/lz77.spl:105` because the bootstrap
-parser treats `match[0]` as a match expression. Fix the tracked parser defect
-and complete a new full Stage-4 build before using `bin/release/simple`.
+`src/os/userlib/device.spl:26` because the bootstrap parser rejects
+`&buf as u64` in a syscall argument. Fix the tracked parser defect and complete
+a new full Stage-4 build before using `bin/release/simple`.
 
 ## Host Build and QEMU Gate
 
@@ -283,7 +283,7 @@ now describe the current runners, but final execution and generated-manual
 evidence are blocked until a current pure-Simple `bin/release/simple` is
 available. The latest bounded bootstrap proved Stage 2/3 sanity, capability,
 and provenance, cleared the prior parser blockers, and exposed the next Stage-4
-parser defect at `lz77.spl:105`. Do not retry this session.
+parser defect at `device.spl:26`. Do not retry this session.
 
 Before production can move from **BLOCKED/FAIL**, complete:
 

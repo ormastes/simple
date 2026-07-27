@@ -2,8 +2,9 @@
 
 ## Status
 
-OPEN. This blocks the full Stage 4 CLI build and deployment of a current
-pure-Simple runner.
+FIXED AND CLEARED IN FULL BOOTSTRAP. The focused AST regression covers both
+expression and statement indexing plus spaced array-scrutinee match syntax, and
+the strict Stage 4 retry parsed beyond `lz77.spl`.
 
 ## Reproduction
 
@@ -43,14 +44,17 @@ match-expression parsing and expects a match-arm colon.
   `0a7542e6edad3924a8c91f90718768e7be072efe0f98d4b96043931f99208775`
 - Stage 3 SHA-256:
   `8503a25336aaa906e0edc91f91dea440a4e122402ac8d34853378c052d49242e`
-- Stage 4 log:
+- Original Stage 4 log path, later reused by the successful-progress retry:
   `build/bootstrap/cosmos-production-20260727/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`
 - First failed source:
   `src/std/nogc_sync_mut/compression/gzip/lz77.spl:105`
 
-## Required Fix
+## Fix
 
-Extend the shared keyword-identifier follow predicate to admit indexing,
-add one focused AST regression for `match[0]` while preserving value-level
-`match`, then run one bounded strict bootstrap. Do not rename the valid source
-variable as a bootstrap workaround.
+The statement and primary-expression parsers now use token adjacency to
+distinguish `match[0]` from whitespace-separated `match [array]:`. This
+preserves real match syntax while allowing the keyword-named local.
+
+The strict retry at source commit `3e68805fb09f` cleared this source and later
+stopped at the unrelated prefix address-of defect tracked in
+`bootstrap_parser_address_of_cast_2026-07-27.md`.

@@ -231,12 +231,11 @@ contract; physical-board abort behavior remains H2.
 Focused host/ARM ECC relocation, destination reread, stale-source rejection,
 failure preservation, remount/replay, and relocatable-link checks pass. Final
 SSpec/doc generation remains blocked. The strict one-worker build at
-`1f27b9be2cb7` passed Stage 2/3 sanity, capability, and provenance and parsed
+`3e68805fb09f` passed Stage 2/3 sanity, capability, and provenance and parsed
 through the prior browser, Office, and parser blockers. Stage 4 then stopped at
-`src/std/nogc_sync_mut/compression/gzip/lz77.spl:105`, where the bootstrap
-parser misclassified indexed use of the local identifier `match` as a match
-expression. The bounded attempt is consumed. Real Bootgen/board evidence
-remains pending.
+`src/os/userlib/device.spl:26`, where the bootstrap parser rejected
+`&buf as u64` in a syscall argument. The bounded attempt is consumed. Real
+Bootgen/board evidence remains pending.
 
 ## Error and Evidence Rules
 

@@ -30,7 +30,7 @@
 | ST-015 | NVMe admin runner covers bounded Identify/SMART, queue lifecycle, Number-of-Queues NSID/max, Abort result bits, CQ IEN/IV, SQ QPRIO, SMART NSID/RAE, AER, publication retry/latching, and unsupported format/firmware rejection. | H1 corrected host/ARM PASS |
 | ST-016 | FTL/NFC runners check PPA geometry, append-before-map ordering, dual checkpoints, replay validation, torn tails, retirement, reserve/GC, explicit media formats, journal reclamation, DMA isolation, tag validation, startup binding, and host/ARM composition. | H1 PASS |
 | ST-017 | Dispatcher runner proves one destructive FIFO fetch per entry, queue-zero admin routing, nonzero IO routing, reserved-field rejection, and completion retry/terminal blocking. | H1 host/ARM PASS before final compile-only cleanup |
-| ST-018 | A current pure-Simple runner executes the fourteen-scenario SSpec and generates its manual. | **Blocked:** no current runner; strict Stage 2/3 pass, but Stage 4 stops at `lz77.spl:105` on indexed use of the keyword-named local `match`. |
+| ST-018 | A current pure-Simple runner executes the fourteen-scenario SSpec and generates its manual. | **Blocked:** no current runner; strict Stage 2/3 pass, but Stage 4 stops at `device.spl:26` on a prefix address-of cast argument. |
 | ST-019 | Focused host composition injects corrected ECC, returns intact data, relocates and rereads the page, rejects a stale PPA, preserves L2P on injected copy failure, remounts/replays the destination, and passes strict ARM compile plus relocatable link. | H1 PASS |
 
 The host MMIO, ARM abort, and SMP/cache runners are executable H1 evidence. Static source
@@ -115,15 +115,15 @@ Detailed execution and evidence retention are in
 Scoped H0/H1 runners pass through persistent FTL/NFC composition, UART startup,
 dispatcher routing, ECC refresh relocation, and strict ARM linkage. External
 provenance in `ST-012` remains partial. `ST-018` is blocked because no current
-pure-Simple runner exists. Commit `1f27b9be2cb7` includes the reviewed parser
+pure-Simple runner exists. Commit `3e68805fb09f` includes the reviewed parser
 fix. The strict one-worker full bootstrap rebuilt Rust authority and passed
 Stage 2/3 sanity, capability, and provenance. Stage 2 was
-`0a7542e6edad3924a8c91f90718768e7be072efe0f98d4b96043931f99208775`;
+`1e6cd28941fe12c9ff0ed2097e0ccad24e0fa5af83cf8e9aa78c26b7d438f711`;
 Stage 3 was
-`8503a25336aaa906e0edc91f91dea440a4e122402ac8d34853378c052d49242e`.
+`fae8d61541d7c5b4d71a63f78cd0984922e9bc5d5576e20773296d4aac8e2558`.
 Stage 4 cleared the prior Office and parser blockers, then failed at
-`src/std/nogc_sync_mut/compression/gzip/lz77.spl:105` when `match[0]` was
-misclassified as a match expression. The bounded attempt is consumed. Final
-SSpec/doc generation, installed Bootgen, and all `BT-*`
+`src/os/userlib/device.spl:26` when `&buf as u64` was rejected in a syscall
+argument. The bounded attempt is consumed. Final SSpec/doc generation,
+installed Bootgen, and all `BT-*`
 evidence remain pending. Production is **BLOCKED/FAIL**;
 REQ-012/NFR-011 remain excluded from passing executable `@req` declarations.
