@@ -75,6 +75,7 @@ pub struct BrowserRendererActionDecodeResult:
     y: i64
     key_code: i64
     pressed: bool
+    shift_key: bool
     value: text
 
 pub struct BrowserRendererNavigationDecodeResult:
@@ -277,6 +278,7 @@ fn _browser_renderer_action_reject(reason: text) -> BrowserRendererActionDecodeR
         y: 0,
         key_code: 0,
         pressed: false,
+        shift_key: false,
         value: ""
     )
 
@@ -288,6 +290,7 @@ fn _browser_renderer_action(
     y: i64,
     key_code: i64,
     pressed: bool,
+    shift_key: bool,
     value: text
 ) -> BrowserRendererActionDecodeResult:
     BrowserRendererActionDecodeResult(
@@ -300,6 +303,7 @@ fn _browser_renderer_action(
         y: y,
         key_code: key_code,
         pressed: pressed,
+        shift_key: shift_key,
         value: value
     )
 
@@ -321,7 +325,7 @@ fn _browser_renderer_length_payload(
         str(byte_length) != fields[2] or message.payload.len() != header_end + 1 + byte_length):
         return _browser_renderer_action_reject("malformed-action")
     _browser_renderer_action(
-        kind, 0, event_id, 0, 0, 0, false,
+        kind, 0, event_id, 0, 0, 0, false, false,
         _browser_renderer_byte_slice(message.payload, header_end + 1, message.payload.len())
     )
 
@@ -363,6 +367,23 @@ pub fn browser_renderer_key_encode(
     browser_renderer_message_encode(
         "key", generation, request_id,
         "K1\t{event_id}\t{key_code}\t{flag}"
+    )
+
+pub fn browser_renderer_key_with_shift_encode(
+    generation: i64,
+    request_id: i64,
+    event_id: i64,
+    key_code: i64,
+    pressed: bool,
+    shift_key: bool
+) -> BrowserRendererEncodeResult:
+    if event_id <= 0 or key_code < 0 or key_code > 1114111:
+        return _browser_renderer_reject_encode("invalid-action")
+    val pressed_flag = if pressed: 1 else: 0
+    val shift_flag = if shift_key: 1 else: 0
+    browser_renderer_message_encode(
+        "key", generation, request_id,
+        "K2\t{event_id}\t{key_code}\t{pressed_flag}\t{shift_flag}"
     )
 
 pub fn browser_renderer_text_encode(
@@ -618,7 +639,7 @@ pub fn browser_renderer_action_decode(
             return _browser_renderer_action_reject("invalid-control")
         return _browser_renderer_action(
             "chrome", 0, fields[1].to_i64() ?? 0, 0, 0, 0,
-            _browser_renderer_flag(fields[2]) == 1, control
+            _browser_renderer_flag(fields[2]) == 1, false, control
         )
     val fields = message.payload.split("\t")
     if message.kind == "advance":
@@ -627,7 +648,9 @@ pub fn browser_renderer_action_decode(
         val now_ms = fields[1].to_i64() ?? -1
         if now_ms < 0:
             return _browser_renderer_action_reject("invalid-time")
-        return _browser_renderer_action("advance", now_ms, 0, 0, 0, 0, false, "")
+        return _browser_renderer_action(
+            "advance", now_ms, 0, 0, 0, 0, false, false, ""
+        )
     if message.kind == "pointer":
         if (fields.len() != 5 or fields[0] != "P1" or
             _browser_renderer_positive_i64(fields[1]) < 0 or
@@ -642,20 +665,24 @@ pub fn browser_renderer_action_decode(
             return _browser_renderer_action_reject("invalid-coordinate")
         return _browser_renderer_action(
             "pointer", 0, fields[1].to_i64() ?? 0, x, y, 0,
-            _browser_renderer_flag(fields[4]) == 1, ""
+            _browser_renderer_flag(fields[4]) == 1, false, ""
         )
     if message.kind == "key":
-        if (fields.len() != 4 or fields[0] != "K1" or
+        val is_v1 = fields.len() == 4 and fields[0] == "K1"
+        val is_v2 = fields.len() == 5 and fields[0] == "K2"
+        if ((not is_v1 and not is_v2) or
             _browser_renderer_positive_i64(fields[1]) < 0 or
             not _browser_renderer_canonical_i64(fields[2]) or
-            _browser_renderer_flag(fields[3]) < 0):
+            _browser_renderer_flag(fields[3]) < 0 or
+            (is_v2 and _browser_renderer_flag(fields[4]) < 0)):
             return _browser_renderer_action_reject("malformed-action")
         val key_code = fields[2].to_i64() ?? -1
         if key_code < 0 or key_code > 1114111:
             return _browser_renderer_action_reject("invalid-key-code")
         return _browser_renderer_action(
             "key", 0, fields[1].to_i64() ?? 0, 0, 0, key_code,
-            _browser_renderer_flag(fields[3]) == 1, ""
+            _browser_renderer_flag(fields[3]) == 1,
+            is_v2 and _browser_renderer_flag(fields[4]) == 1, ""
         )
     _browser_renderer_action_reject("wrong-kind")
 

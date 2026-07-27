@@ -59,7 +59,13 @@ enum StoredEvent {
     Close { window_id: i64 },
     Focused { window_id: i64, focused: bool },
     ScaleFactor { window_id: i64, scale_factor: f64 },
-    Keyboard { window_id: i64, scancode: i64, keycode: i64, pressed: bool },
+    Keyboard {
+        window_id: i64,
+        scancode: i64,
+        keycode: i64,
+        pressed: bool,
+        shift_key: bool,
+    },
     Text {
         window_id: i64,
         text: String,
@@ -132,6 +138,7 @@ struct Inner {
     create_requests: Vec<CreateReq>,
     create_results: HashMap<i64, i64>,
     activated: bool,
+    shift_key: bool,
 }
 
 struct PumpState {
@@ -239,6 +246,10 @@ impl Inner {
                 window_id: wid,
                 scale_factor,
             }),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.shift_key = modifiers.state().shift_key();
+                None
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 let origin_keycode = match event.physical_key {
                     PhysicalKey::Code(code) => keycode_to_simple(code).unwrap_or(0),
@@ -251,6 +262,7 @@ impl Inner {
                         scancode: origin_keycode,
                         keycode: origin_keycode,
                         pressed: origin_pressed,
+                        shift_key: self.shift_key,
                     });
                 }
                 if origin_pressed {
@@ -812,6 +824,15 @@ pub extern "C" fn rt_winit_event_key_pressed(ev: i64) -> i64 {
     with_event(ev, |e| match e {
         StoredEvent::Keyboard { pressed, .. } => *pressed as i64,
         StoredEvent::Text { origin_pressed, .. } => *origin_pressed as i64,
+        _ => 0,
+    })
+    .unwrap_or(0)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_winit_event_key_shifted(ev: i64) -> i64 {
+    with_event(ev, |e| match e {
+        StoredEvent::Keyboard { shift_key, .. } => *shift_key as i64,
         _ => 0,
     })
     .unwrap_or(0)
