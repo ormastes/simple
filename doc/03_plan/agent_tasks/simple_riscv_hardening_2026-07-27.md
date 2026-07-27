@@ -574,3 +574,50 @@ star-imported (`use X.*`) modules, so `modules_by_name` lacks entries like
 through them "unresolved". A control probe (small entry-closure build using
 the same star import) compiled and ran cleanly, implicating the focused-build
 closure computation specifically rather than star-import handling in general.
+
+## 8. Stage-4 bug doc update (2026-07-27, later still) — closure hypothesis disproven, two real root causes found and fixed
+
+Follow-up measurement with `SIMPLE_BOOTSTRAP_DIAG=1` **disproved** the §7
+closure hypothesis: `compiler.mir.mir_data` reports `found=true`, is parsed
+and lowered normally, and only 127 import-misses exist in the whole run
+(none of them `mir_data`). The modules are present — the defect is in symbol
+**registration**, not closure computation.
+
+Also disproven in the same pass: an earlier "struct-field map copy nil-fills
+nested dicts" theory. A probe built a `Dict<text,i64>` inside a struct, put
+the struct in a map, passed the map through a function argument into another
+struct's field, and read `keys().len() == 2` back at every step — nested
+dicts survive the copy path intact. That theory was an artifact of the
+broken `Dict.len()` (always `-1`), now falsified using the working `keys()`
+primitive.
+
+**Two real root causes found and fixed, commit `67024e9c0a51`:**
+
+1. Facade export lists (bare `export X, Y, Z` re-exporting a star-imported
+   name) were never swept for glob imports — `register_glob_imported_symbols`
+   only handled explicit import items, and a star import has `items.len() ==
+   0`. Fixed by routing exported names through `register_imported_symbol` for
+   both import paths. Unresolved-name count 5,950 → 4,008; `MirType` 760 →
+   37.
+2. Transitive star imports one level deep (`use A.*` where `A` does `use
+   B.*`) were not surfaced to `A`'s consumers. Fixed with a deliberately
+   non-recursive one-level sweep. Unresolved-name count 4,008 → 2,224;
+   `mir_operand_copy`/`cranelift_*` fully cleared.
+
+**Open caveat:** fix 2 broadens glob visibility beyond what existed before;
+today's call sites depend on it, but they may have been relying on a
+pre-fix accident (corrupt `Dict.get()` registering every looked-up name as
+an opaque `Class` symbol) rather than a correct semantic. Measured to reduce
+errors, not proven to preserve resolution targets — needs a design decision.
+
+**Remaining, independent of import resolution:** `me` unresolved 543 times
+(byte-identical across trees/builds, unaffected by both fixes — needs its
+own bug doc) and module-key canonicalization for the lexer family's named
+imports (`TokenKind`, `lex_make_token`, etc. still fail under
+`compiler.10.frontend.core.lexer` / `compiler.frontend.core.lexer` /
+`compiler.core.lexer` spelling variants).
+
+Trajectory: unresolved 11,826 → 5,950 → 4,008 → 2,224; all 1,752 HIR modules
+lower, zero segfaults throughout; stage 4 still **FAILS**, no deploy has
+occurred, `bin/simple` remains the 2026-07-25 seed. Full detail in
+`doc/08_tracking/bug/stage4_focused_subbuild_star_import_unresolved_2026-07-27.md`.

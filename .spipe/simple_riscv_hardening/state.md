@@ -282,6 +282,46 @@ Next blocker filed:
 `doc/08_tracking/bug/stage4_focused_subbuild_star_import_unresolved_2026-07-27.md`
 (focused sub-build closure likely omits star-imported modules).
 
+## Lane H update (2026-07-27, later still) — closure hypothesis disproven, two root causes fixed
+
+Follow-up `SIMPLE_BOOTSTRAP_DIAG=1` measurement **disproved** the closure
+hypothesis above: `compiler.mir.mir_data` is `found=true`, parsed, and
+lowered; only 127 import-misses total, none of them `mir_data`. Modules are
+present — the defect is symbol **registration**, not closure computation.
+Also disproven: the "struct-field map copy nil-fills nested dicts" theory —
+a probe threading a `Dict<text,i64>`-holding struct through a map, a
+function-argument pass, and another struct's field kept `keys().len() == 2`
+throughout; that theory was an artifact of the broken `Dict.len()` (`-1`),
+falsified via `keys()`.
+
+**Two real root causes found and fixed, commit `67024e9c0a51`:** (1) facade
+`export X, Y, Z` lists re-exporting star-imported names were never swept for
+glob imports (`register_glob_imported_symbols` only handled explicit import
+items, and star imports have `items.len() == 0`) — fixed by routing exported
+names through `register_imported_symbol` for both paths; unresolved 5,950 →
+4,008, `MirType` 760 → 37. (2) transitive star imports one level deep (`use
+A.*` where `A` does `use B.*`) were not surfaced to `A`'s consumers — fixed
+with a deliberately non-recursive one-level sweep; unresolved 4,008 → 2,224,
+`mir_operand_copy`/`cranelift_*` cleared.
+
+**Open caveat:** fix (2) broadens glob visibility beyond prior behavior;
+current call sites depend on it, but may have relied on a pre-fix accident
+(corrupt `Dict.get()` registering every lookup as an opaque `Class` symbol)
+rather than correct semantics — measured to reduce errors, not proven to
+preserve resolution targets; needs a design decision.
+
+**Remaining, independent of import resolution:** `me` unresolved 543 times
+(byte-identical across trees/builds, unaffected by both fixes) and
+module-key canonicalization for the lexer family's named imports
+(`TokenKind`, `lex_make_token`, etc. under
+`compiler.10.frontend.core.lexer` / `compiler.frontend.core.lexer` /
+`compiler.core.lexer` spelling variants).
+
+Trajectory: unresolved 11,826 → 5,950 → 4,008 → 2,224; all 1,752 HIR modules
+lower, zero segfaults throughout; stage 4 still **FAILS**, no deploy has
+occurred, `bin/simple` remains the 2026-07-25 seed. Full detail in
+`doc/08_tracking/bug/stage4_focused_subbuild_star_import_unresolved_2026-07-27.md`.
+
 ## Phase Checklist
 - [x] 1-dev
 - [x] 2-research (parallel lanes A–G ran; findings folded into plan §1.1b–§1.1e)

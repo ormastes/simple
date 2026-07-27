@@ -5,30 +5,30 @@ severity: high
 discovered: 2026-07-27
 discovered_by: full-bootstrap --deploy run from current origin main (Stage 4, full-CLI focused sub-builds)
 related: src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+related: src/compiler/50.mir/mir_data.spl
 related: scripts/bootstrap/bootstrap-from-scratch.sh
+fixed_by: 67024e9c0a51
 ---
 
 # Stage 4 focused sub-builds fail star-import resolution; bootstrap deploy blocked
 
 **Status:** open — bootstrap deploy did not occur; `bin/simple` still resolves to
 the 2026-07-25 Rust seed (`bin/release/x86_64-unknown-linux-gnu/simple`, mtime
-2026-07-25 05:30:43, size 145290352).
+2026-07-25 05:30:43, size 145290352). Two root causes have since been found and
+fixed in commit `67024e9c0a51`, cutting unresolved-name errors from 5,950 to
+2,224, but stage 4 still fails overall (see "Remaining stage-4 blockers"
+below), so no deploy has occurred yet.
 
 ## Summary
 
 Stage 4 of `--full-bootstrap --deploy` now lowers all 1,752 HIR modules with
 **zero segfaults** (the prior deterministic segfault at HIR module 32 is fixed —
 see `doc/03_plan/agent_tasks/simple_riscv_hardening_2026-07-27.md` §6, commit
-`9b612a11418c`). It then fails with **6,144 errors**, all inside `focused
-native-build` sub-builds:
+`9b612a11418c`). It then fails inside `focused native-build` sub-builds with
+unresolved-name and untyped-return errors. Deploy never happens because the
+focused-build phase does not reach a green state.
 
-- 5,950 `unresolved name: X`
-- 166 `untyped function returns a value`
-
-Deploy never happens because the focused-build phase does not reach a green
-state.
-
-## Symbol histogram (top offenders)
+## Symbol histogram (top offenders, original measurement)
 
 | Symbol | Count |
 |---|---|
@@ -45,56 +45,130 @@ These are overwhelmingly symbols reached through **star imports**, e.g. `use
 compiler.mir.mir_data.*` in
 `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`.
 
-## Proof this is pre-existing, independent of today's HIR-segfault fix
+## Original hypothesis — DISPROVEN
 
-The same failure class was measured earlier today (2026-07-27) on a **different
-tree** (159 commits older) with a **different compiler build**:
+> Each `focused native-build` sub-build computes its own module closure (files
+> it will parse/lower/codegen for that focus). The hypothesis was that this
+> closure computation does not follow star imports (`use X.*`) the same way
+> the whole-source / entry-closure build does, so modules like
+> `compiler.mir.mir_data` (providing `MirType`, `MirTypeKind`,
+> `MirConstValue`, `MirOperand`, …) and `compiler.lex.token` (`TokenKind`,
+> `lex_make_token`) never get added to `modules_by_name` for the affected
+> focus, and every star-imported name from them resolves as unknown.
 
-| Run | Tree | Total errors | `MirType` | `me` | `mir_operand_copy` |
-|---|---|---|---|---|---|
-| Earlier (pre-HIR-fix) | 159 commits older | 11,826 | 913 | 543 | 490 |
-| Today (post-HIR-fix) | current origin main | 5,950 (+166 untyped-return = 6,144) | 760 | 543 | 393 |
+**DISPROVEN by direct measurement.** Running with `SIMPLE_BOOTSTRAP_DIAG=1`
+shows `compiler.mir.mir_data` reports `found=true` for its importers — it
+**is** parsed and lowered as part of the focused build. There are only 127
+total import-misses in the whole run, and `mir_data` is not among them. So the
+module is present in the closure; the closure-computation theory does not
+explain the failure. The real defect is downstream, in symbol
+**registration**, not module discovery — see "Root causes found" below.
 
-The `me` count is **byte-identical (543) across both runs** — strong evidence
-this class of failure has a fixed, deterministic cause unrelated to the HIR
-segfault fix that landed between the two runs. The other counts roughly halved,
-consistent with the HIR fix removing one contributing factor (likely a
-subset of modules that previously never reached this phase) without touching
-the star-import resolution defect itself.
+## Disproven hypotheses
 
-## Control probe (PASSED) — implicates focused-build closure, not star-import handling in general
+1. **Per-focus closure omits star-imported modules** (the original hypothesis
+   above). Disproven: `mir_data` is `found=true`, parsed, and lowered; only
+   127 import-misses total, none of them `mir_data`.
+2. **Struct-field map copy nil-fills nested dicts** (an earlier theory raised
+   while investigating this failure class, tracked informally alongside
+   `doc/08_tracking/bug/native_dict_get_struct_value_corrupt_option_2026-07-27.md`
+   and
+   `doc/08_tracking/bug/native_dict_len_returns_minus_one_2026-07-27.md`).
+   Disproven by a direct probe: build a `Dict<text,i64>` inside a struct, put
+   that struct into a map, pass the map through a function argument into
+   another struct's field, and read `keys().len()` back at every step — it
+   stayed `== 2` throughout, i.e. the nested dict survives the copy path
+   intact. The earlier theory was an artifact of the broken `Dict.len()`
+   (which always returned `-1`) and is falsified now that the working
+   primitive (`keys()`) is used instead.
 
-A small entry-closure build (`--source src/compiler --entry-closure`) of a file
-containing `use compiler.mir.mir_data.*` and using `MirType` **compiled and ran
-cleanly** earlier today. So star imports resolve correctly when the imported
-module is inside the build closure. This points at the **focused sub-build's
-closure computation** — imported modules reachable only via a star import are
-apparently missing from the per-focus closure — rather than at star-import
-resolution itself being broken.
+## Root causes found + fixes (commit `67024e9c0a51`)
 
-## Hypothesis
+Two distinct mechanisms, both in symbol registration for glob (`use X.*`)
+imports, not in closure computation:
 
-Each `focused native-build` sub-build computes its own module closure (files it
-will parse/lower/codegen for that focus). The hypothesis is that this closure
-computation does not follow star imports (`use X.*`) the same way the
-whole-source / entry-closure build does, so modules like `compiler.mir.mir_data`
-(providing `MirType`, `MirTypeKind`, `MirConstValue`, `MirOperand`, …) and
-`compiler.lex.token` (`TokenKind`, `lex_make_token`) never get added to
-`modules_by_name` for the affected focus, and every star-imported name from
-them resolves as unknown.
+### 1. Facade export lists not swept for star imports
 
-## Sub-defect: `me` as an unresolved name (543 occurrences, both runs)
+`src/compiler/50.mir/mir_data.spl` declares no `MirType` itself (verified: 0
+matches for `struct MirType` in that file). Instead it does `use
+compiler.mir.mir_types.*` / `use compiler.mir.mir_instructions.*` (lines
+19-20) and re-exports via bare `export MirTypeKind, MirType, MirSignature,
+MirConstValue` lines (line 630 and similar).
 
-`me` is the method-receiver keyword, not an importable symbol — it should never
-appear as an "unresolved name" target at all. Its count is **byte-identical
-(543)** across two different trees/builds, which suggests a single
-deterministic site (or small fixed set of sites) that misidentifies `me` as a
-name lookup instead of the receiver keyword, most likely inside method bodies
-that live in files affected by the star-import closure gap above (once the
-containing method's imports fail to resolve, something in error recovery or a
-downstream check may re-report `me` itself as unresolved). This is called out
-separately because it does not obviously reduce with the star-import fix and
-should be verified independently once the closure gap is fixed.
+`register_glob_imported_symbols` only swept the six decl dicts plus the
+facade's IMPORT ITEMS — but a star import has `items.len() == 0`, so that loop
+body never executed for these names. Named imports already resolved
+correctly through `find_reexport_source`; the glob path never did.
+
+**Fix:** route each exported name through `register_imported_symbol` so both
+the named-import and glob-import paths behave identically.
+
+**Measured effect:** unresolved-name count 5,950 → 4,008; `MirType` alone
+760 → 37.
+
+### 2. Transitive star imports (one level) not surfaced
+
+`use A.*` where `A` itself does `use B.*` must surface `B`'s decls to `A`'s
+consumers. `mir_data` star-imports `mir_instructions` and never re-exports
+`mir_operand_copy` (verified: 0 mentions of `mir_operand_copy` in
+`mir_data.spl`; it is defined in `mir_instructions.spl`), yet consumers of
+`use compiler.mir.mir_data.*` call it directly — 393 errors, same shape for
+the `cranelift_*` helpers.
+
+**Fix:** sweep one level deep, deliberately non-recursive.
+
+**Measured effect:** unresolved-name count 4,008 → 2,224; `mir_operand_copy`
+and `cranelift_*` fully cleared.
+
+### Measurement table (unresolved-name error count)
+
+| Stage | Unresolved names | Note |
+|---|---|---|
+| Earlier run, 159-commits-older tree | 11,826 | pre-HIR-segfault-fix baseline |
+| Post-HIR-segfault-fix, pre this fix | 5,950 (+166 untyped-return) | this bug's original filing |
+| After fix 1 (facade export sweep) | 4,008 | `MirType` 760 → 37 |
+| After fix 2 (one-level transitive star) | 2,224 | `mir_operand_copy`/`cranelift_*` cleared |
+
+## OPEN CAVEAT — needs a decision, not yet resolved
+
+Fix 2 **broadens** glob visibility: names from a star-imported module's own
+star imports are now visible one level up, which they were not before.
+Current call sites depend on this today, but they may only have been relying
+on a **pre-fix accident**: before the recent native `Dict` fixes, a corrupt
+`Dict.get()` registered every looked-up name as an opaque `Class` symbol (see
+`doc/08_tracking/bug/native_dict_get_struct_value_corrupt_option_2026-07-27.md`),
+which could have been masking missing-import errors in a different way.
+
+The alternative reading is that these call sites should carry **explicit
+imports** instead of relying on transitive glob visibility, and that widening
+glob semantics papers over that. This is **measured to reduce errors**, it is
+**not proven to preserve the intended resolution targets** (i.e., that the
+name each call site binds to is the same symbol it would bind to with an
+explicit import). Flag for a design decision before this is considered fully
+resolved.
+
+## Remaining stage-4 blockers (independent of import resolution, both pre-existing)
+
+1. **`me` unresolved (543 occurrences).** `me`, the method-receiver keyword,
+   is reported as an unresolved NAME 543 times — byte-identical across two
+   different trees (159 commits apart) and two different compiler builds,
+   and unchanged by both import-resolution fixes above. This is not a
+   star-import symptom; it needs its own bug doc and root-cause pass.
+2. **Module-key canonicalization.** The same physical file is registered
+   under multiple spellings of its module key (numbered/unnumbered/dotted),
+   e.g. `compiler.10.frontend.core.lexer`, `compiler.frontend.core.lexer`,
+   `compiler.core.lexer`. The lexer family (`TokenKind` 185,
+   `lex_make_token` 160, `lex_advance` 116, `lex_peek` 70) still fails on
+   this. These are **named** imports (`use
+   compiler.frontend.core.lexer.{...}`), not globs, so they are outside the
+   scope of fixes 1 and 2 above.
+
+## Overall trajectory
+
+Unresolved-name error count: 11,826 → 5,950 → 4,008 → 2,224. All 1,752 HIR
+modules lower with zero segfaults throughout. Stage 4 still **FAILS** overall
+(the two remaining blockers above), so no deploy has occurred and `bin/simple`
+remains the 2026-07-25 seed.
 
 ## Reproduce
 
@@ -106,30 +180,28 @@ Run from a worktree at current `main`. Stage 4 log:
 `build/bootstrap/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`
 (evidence for this run; job path
 `/home/ormastes/.claude/jobs/4403a7d8/tmp/wt-bootstrap/build/bootstrap/logs/x86_64-unknown-linux-gnu/stage4-native-build.log`).
+For the registration-vs-closure diagnostics used to disprove the original
+hypothesis, re-run with `SIMPLE_BOOTSTRAP_DIAG=1` and grep the log for
+`found=true`/import-miss markers for `compiler.mir.mir_data`.
 
 ## Impact
 
 Bootstrap deploy is blocked at Stage 4 for the full-CLI focused-build path.
 `bin/simple` remains the 2026-07-25 Rust seed. Every gate that requires the
 redeployed self-hosted binary (RISC-V hardening campaign gates, and any other
-consumer of `bin/simple`) stays seed-attributed until this is fixed.
+consumer of `bin/simple`) stays seed-attributed until this is fully fixed
+(both remaining blockers above cleared, and the open caveat resolved).
 
-## Suggested next diagnostics
+## Next diagnostics
 
-1. Re-run Stage 4 with `SIMPLE_BOOTSTRAP_DIAG=1` and grep the log for
-   `[import-miss]` (or the closest equivalent diagnostic marker emitted by the
-   focused-build closure/import-resolution path) to confirm directly whether
-   star-imported modules such as `compiler.mir.mir_data` and
-   `compiler.lex.token` are **absent** from the focused sub-build's
-   `modules_by_name` (closure-computation bug) versus **present but
-   unregistered** (a registration/lookup bug closer to the recently-fixed
-   `Dict.get()`/`Dict.len()` native defects — see
-   `doc/08_tracking/bug/native_dict_get_struct_value_corrupt_option_2026-07-27.md`
-   and `doc/08_tracking/bug/native_dict_len_returns_minus_one_2026-07-27.md`).
-2. Compare the focused-build closure-computation code path against the
-   entry-closure path that the control probe used successfully, specifically
-   for how each follows `use X.*` star imports when building the module set.
-3. Once the closure gap is understood, separately verify whether the `me`
-   sub-defect (543, both runs) persists — if it drops to zero once star-import
-   resolution is fixed, it was a downstream symptom; if not, it needs its own
-   fix.
+1. File a dedicated bug doc for the `me`-as-unresolved-name defect (543,
+   deterministic) and bisect the site(s) that misreport it — likely inside
+   method-body name resolution or error recovery, not star-import handling.
+2. Fix module-key canonicalization so the lexer family's named imports
+   resolve regardless of which spelling (`compiler.10.frontend.core.lexer`
+   vs `compiler.frontend.core.lexer` vs `compiler.core.lexer`) a given
+   `use` statement uses.
+3. Resolve the open caveat above: decide whether one-level transitive glob
+   visibility is the intended semantic, or whether call sites relying on it
+   should get explicit imports instead — verify against pre-`Dict`-fix
+   behavior to rule out the masking-accident explanation.
